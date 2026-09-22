@@ -11,8 +11,10 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/hanahmily/graphloom/internal/controller"
@@ -76,23 +78,56 @@ func (s *Store) withLock(runID string, fn func() error) error {
 	if err := os.MkdirAll(s.dir(runID), 0o755); err != nil {
 		return err
 	}
+	unlock, err := s.acquireDirLock(runID)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	return fn()
+}
+
+func (s *Store) acquireDirLock(runID string) (func(), error) {
 	lockDir := filepath.Join(s.dir(runID), ".lock")
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		err := os.Mkdir(lockDir, 0o700)
 		if err == nil {
-			break
+			pidPath := filepath.Join(lockDir, "pid")
+			if err := os.WriteFile(pidPath, []byte(strconv.Itoa(os.Getpid())), 0o644); err != nil {
+				_ = os.RemoveAll(lockDir)
+				return nil, err
+			}
+			return func() { _ = os.RemoveAll(lockDir) }, nil
 		}
 		if !errors.Is(err, os.ErrExist) {
-			return err
+			return nil, err
+		}
+		if lockHolderGone(lockDir) {
+			_ = os.RemoveAll(lockDir)
+			continue
 		}
 		if time.Now().After(deadline) {
-			return errors.New("store/fs: timed out waiting for run lock")
+			return nil, errors.New("store/fs: timed out waiting for run lock")
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	defer os.Remove(lockDir)
-	return fn()
+}
+
+func lockHolderGone(lockDir string) bool {
+	b, err := os.ReadFile(filepath.Join(lockDir, "pid"))
+	if err != nil {
+		return true
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil || pid <= 0 {
+		return true
+	}
+	p, err := os.FindProcess(pid)
+	if err != nil {
+		return true
+	}
+	// Signal 0 probes whether the process exists without killing it.
+	return p.Signal(syscall.Signal(0)) != nil
 }
 
 func (s *Store) dir(runID string) string {
@@ -127,11 +162,36 @@ func (s *Store) write(runID string, doc *controller.Document) error {
 	if _, err := rand.Read(suffix[:]); err != nil {
 		return err
 	}
-	tmp := filepath.Join(s.dir(runID), "state."+hex.EncodeToString(suffix[:])+".tmp")
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+	dir := s.dir(runID)
+	tmp := filepath.Join(dir, "state."+hex.EncodeToString(suffix[:])+".tmp")
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, s.statePath(runID))
+	if _, err := f.Write(b); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, s.statePath(runID)); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	// Best-effort directory sync so the rename itself is durable.
+	if df, err := os.Open(dir); err == nil {
+		_ = df.Sync()
+		_ = df.Close()
+	}
+	return nil
 }
 
 func validateRunID(runID string) error {

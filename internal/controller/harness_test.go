@@ -131,6 +131,59 @@ func TestCommandNonzeroExitIsNotOK(t *testing.T) {
 	}
 }
 
+func TestRejectUnsafeAppendNodeID(t *testing.T) {
+	ctx := context.Background()
+	runRoot := t.TempDir()
+	fixture := writeHarnessFixture(t)
+	appendDecision, _ := json.Marshal(map[string]any{
+		"action": "append", "decision_id": "d-append",
+		"nodes": []map[string]any{{
+			"id": "../escape", "stage": "write", "kind": "command", "purpose": "check", "argv": []string{"true"},
+		}},
+	})
+	r := scripted.New([]scripted.Step{
+		{Role: controller.RoleSupervisor, Observation: controller.Observation{Status: controller.StatusCompleted, ResultRaw: appendDecision}},
+	})
+	st := storefs.New(runRoot)
+	out, err := controller.Run(ctx, filepath.Join(fixture, "task.yaml"),
+		controller.WithRunner(r), controller.WithStore(st), controller.WithRunRoot(runRoot))
+	if err == nil {
+		t.Fatal("expected unsafe node id to fail")
+	}
+	if out != nil {
+		t.Fatal("expected nil outcome on failure")
+	}
+	// Document should be marked interrupted, not left active.
+	// RunID is unknown on failure before return... actually Run returns nil, err and markInterrupted uses runID internally.
+	// We can't inspect without runID. That's ok - error path is enough for this test.
+}
+
+func TestStoreReclaimsStaleLock(t *testing.T) {
+	root := t.TempDir()
+	st := storefs.New(root)
+	runID := "run-stale"
+	if err := st.Transact(context.Background(), runID, func(doc *controller.Document) error {
+		doc.Status = "active"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	lockDir := filepath.Join(root, "runs", runID, ".lock")
+	if err := os.MkdirAll(lockDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(lockDir, "pid"), []byte("999999"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	doc, err := st.Get(context.Background(), runID)
+	if err != nil {
+		t.Fatalf("expected stale lock reclaim: %v", err)
+	}
+	if doc.Status != "active" {
+		t.Fatalf("Status = %q", doc.Status)
+	}
+}
+
 func writeHarnessFixture(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()

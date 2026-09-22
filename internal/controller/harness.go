@@ -202,6 +202,9 @@ func dispatchReady(ctx context.Context, cfg *config, runID string, nodeID graph.
 	if n == nil {
 		return fmt.Errorf("controller: missing ready node %s", nodeID)
 	}
+	if err := validatePathComponent(string(nodeID), "node id"); err != nil {
+		return err
+	}
 	role := RoleCommand
 	switch n.Kind {
 	case graph.KindAgent:
@@ -350,6 +353,9 @@ func consultSupervisor(ctx context.Context, cfg *config, runID string) error {
 		case supervisor.ActionAppend:
 			nodes := make([]graph.Node, 0, len(dec.Nodes))
 			for _, dn := range dec.Nodes {
+				if err := validatePathComponent(dn.ID, "node id"); err != nil {
+					return err
+				}
 				n := graph.Node{
 					ID:        graph.NodeID(dn.ID),
 					Stage:     graph.StageID(dn.Stage),

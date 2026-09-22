@@ -70,6 +70,9 @@ func injectFence(packet, decision []byte) ([]byte, error) {
 	if err := json.Unmarshal(decision, &dec); err != nil {
 		return nil, fmt.Errorf("scripted: decision: %w", err)
 	}
+	if dec == nil {
+		return nil, fmt.Errorf("scripted: decision must be a JSON object")
+	}
 	dec["run_id"] = view.RunID
 	dec["generation"] = view.Generation
 	dec["expected_revision"] = view.Revision
