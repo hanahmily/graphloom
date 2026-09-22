@@ -45,42 +45,43 @@ const (
 
 // State is the in-memory intent graph, execution nodes, and current receipts.
 type State struct {
-	Stages         Stages
-	Active         bool
-	Epoch          uint64 // bumps on reenter; evidence from older epochs cannot accept
-	Nodes          []Node
-	Receipts       map[StageID]Receipt // current receipt per stage (may be invalid)
-	ReceiptHistory []Receipt           // all receipts ever issued, including invalidated
+	Stages         Stages               `json:"stages"`
+	Active         bool                 `json:"active"`
+	Epoch          uint64               `json:"epoch"`
+	Nodes          []Node               `json:"nodes"`
+	Receipts       map[StageID]Receipt  `json:"receipts"`
+	ReceiptHistory []Receipt            `json:"receipt_history"`
 }
 
 // Node is one append-only execution operation.
 type Node struct {
-	ID        NodeID
-	Stage     StageID // empty only for bootstrap plan review
-	Kind      Kind
-	Purpose   Purpose
-	After     []NodeID
-	Requires  []ReceiptID
-	Status    NodeStatus
-	Bootstrap bool   // plan-review exception: eligible before any stage receipt
-	Epoch     uint64 // epoch at append time
-	Outcome   *Outcome
+	ID        NodeID     `json:"id"`
+	Stage     StageID    `json:"stage,omitempty"` // empty only for bootstrap plan review
+	Kind      Kind       `json:"kind"`
+	Purpose   Purpose    `json:"purpose"`
+	After     []NodeID   `json:"after,omitempty"`
+	Requires  []ReceiptID `json:"requires,omitempty"`
+	Status    NodeStatus `json:"status"`
+	Bootstrap bool       `json:"bootstrap,omitempty"` // plan-review exception
+	Epoch     uint64     `json:"epoch"`
+	Argv      []string   `json:"argv,omitempty"` // command nodes
+	Outcome   *Outcome   `json:"outcome,omitempty"`
 }
 
 // Outcome is recorded when a node is observed (including failures).
 type Outcome struct {
-	OK             bool
-	Fingerprint    Fingerprint
-	CheckPassed    bool
-	ReviewApproved bool
+	OK             bool        `json:"ok"`
+	Fingerprint    Fingerprint `json:"fingerprint,omitempty"`
+	CheckPassed    bool        `json:"check_passed,omitempty"`
+	ReviewApproved bool        `json:"review_approved,omitempty"`
 }
 
 // Receipt is accepted stage evidence. Invalid receipts stay in history.
 type Receipt struct {
-	ID          ReceiptID
-	Stage       StageID
-	Fingerprint Fingerprint
-	Valid       bool
+	ID          ReceiptID   `json:"id"`
+	Stage       StageID     `json:"stage"`
+	Fingerprint Fingerprint `json:"fingerprint"`
+	Valid       bool        `json:"valid"`
 }
 
 // Transition is exactly one admitted graph effect.
@@ -276,6 +277,9 @@ func applyAppend(s State, spec AppendSpec) (State, error) {
 		}
 		nn.Outcome = nil
 		nn.Epoch = s.Epoch
+		if nn.Argv != nil {
+			nn.Argv = append([]string(nil), nn.Argv...)
+		}
 		out.Nodes = append(out.Nodes, nn)
 		batch[n.ID] = struct{}{}
 	}
@@ -586,6 +590,9 @@ func copyNode(n Node) Node {
 	}
 	if n.Requires != nil {
 		out.Requires = append([]ReceiptID(nil), n.Requires...)
+	}
+	if n.Argv != nil {
+		out.Argv = append([]string(nil), n.Argv...)
 	}
 	return out
 }
