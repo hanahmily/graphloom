@@ -1,35 +1,36 @@
 # Working on GraphLoom
 
-GraphLoom is a graph-native harness for multi-agent execution. Read README.md and
-docs/core-design.md before making architectural changes. The core design controls
-the first runnable release; docs/codebase.md owns Go package layout and seams;
-docs/architecture.md provides broader context.
+Read [README.md](README.md) and the current
+[TypeScript core design](docs/design-typescript-core.md) before architectural work.
+Use [CONTEXT.md](CONTEXT.md) for terminology. The core design owns behavior, public
+interfaces, package seams, verification, and migration. Native Go plugin documents
+are superseded; existing Go code remains a partial earlier implementation.
 
 ## Principles
 
-- Keep graph authoring minimal: required happy-path stages only.
-- One logical supervisor session owns a run's planning, agent selection,
-  validation strategy, and recovery decisions.
-- The controller owns admission, permissions, durability, evidence receipts,
-  ownership, cancellation, and finite budgets.
-- Domain-specific failure routing belongs to supervisor reasoning and pinned
-  semantic context, not a growing engine classification table.
-- Preserve required outcomes when adding graph nodes, reentry, or repair work.
-- Distinguish proposals, executed observations, and accepted progress.
-- Reconcile ambiguous external effects before retrying them.
-- Keep private model reasoning out of user-facing activity; show concise decision
-  summaries and evidence references.
+- Graphs are executable TypeScript plugins. Task YAML selects a graph; plugin code
+  owns normal task construction and routing. The controller owns accepted receipts.
+- One logical supervisor session owns exceptional recovery. The controller can
+  invoke it without a plugin repair branch and admits its decisions without veto.
+- The supervisor may repair any failing plugin implementation, but the complete
+  step set, identities, names, order, and required outcomes are fixed for a run.
+  Repair jobs and retries are executions within existing steps, not new steps.
+  Code and validator changes use the qualified repair procedure in the core design.
+- Source repair needs available source, build inputs, tests, and operator authority.
+  Opaque dependencies retain explicit limits; TypeScript alone is not repairability.
+- Run plugins outside the controller process. Process separation does not replace
+  enforced filesystem, credential, network, and process scopes.
+- The controller owns persistence, evidence, permissions, finite budgets, and
+  version transitions. Reconcile ambiguous effects before retrying.
+- Show concise decision reasons and evidence, not private model reasoning.
 
 ## Scope and verification
 
-The repository currently contains design documentation and an example only.
-Choose the implementation language and build tooling explicitly when starting
-implementation; no runtime stack is established by this scaffold.
+This design is not evidence that the TypeScript runtime already exists. Preserve
+existing source and user work during migration; port still-valid behavioral tests.
+Implement the requested scope and verify affected behavior. Documentation-only
+edits need consistency, link, and formatting checks; runtime changes need meaningful
+behavior tests. Do not commit, push, publish, deploy, or alter external resources
+unless the user authorizes those actions.
 
-Implement the requested scope and verify affected behavior. Preserve unrelated
-work. Do not commit, push, publish, deploy, or create remote resources unless the
-user authorizes those actions. Documentation-only edits need reference and
-formatting checks; runtime changes need meaningful behavior tests.
-
-Treat docs/research as historical input, not evidence that GraphLoom already
-implements the referenced Vajra or Loopx capabilities.
+Historical research is context, not proof of implemented GraphLoom capability.

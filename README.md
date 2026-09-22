@@ -2,32 +2,24 @@
 
 **A graph-native harness for multi-agent execution.**
 
-Declare the happy path. Let the supervisor build the execution graph.
+Write a graph in TypeScript. Let the loom run its agents.
 
-GraphLoom is a new project for coordinating multiple agents through a durable
-execution graph. Authors declare required stages; one run-wide supervisor plans
-workers, validation, supporting work, and recovery. A controller enforces
-permissions, evidence, ordering, ownership, and resource limits.
+Graph plugins define required outcomes and normal execution. A run-wide supervisor
+handles exceptional recovery, including tested repairs to readable plugin source.
+The controller executes admitted actions, owns accepted evidence, and preserves
+permissions, history, and finite budgets. Required outcomes remain unchanged when
+a validator implementation is repaired.
 
 ## Status
 
-Design and Go package scaffold. The CLI entry and seams compile; runtime
-behaviour is not implemented yet. See [codebase design](docs/codebase.md).
+The [TypeScript core design](docs/design-typescript-core.md) is the current target.
+The repository contains a partial Go implementation of an earlier design; the
+TypeScript runtime and plugin repair protocol are not implemented yet. Existing
+source is retained during migration. The native Go plugin design is superseded.
 
-## Graph authoring
+## Select a graph
 
-```yaml
-happy_path: [write, review]
-```
-
-Stage meanings come from versioned semantic context bound to the graph and
-repository. The supervisor expands that intent into bounded executable operations.
-Failed validation can introduce repair work or another attempt at an earlier stage
-without removing the required outcomes.
-
-## Task input
-
-The proposed minimal interface is `graphloom run task.yaml`:
+The proposed operator interface is `graphloom run task.yaml`:
 
 ```yaml
 graph: hello
@@ -37,34 +29,31 @@ request: |
   one newline. Do not modify other files.
 ```
 
-The controller creates an isolated Git worktree from the repository's current
-`HEAD`. It preserves the source checkout and retains the run worktree for inspection
-or resume. Agents exchange typed results and artifact references through the
-controller; validation runs as explicit graph nodes.
+`hello` selects the operator-installed `plugins/hello/` bundle beside the task.
+It implements Write → Review in code. The controller creates an isolated Git
+worktree and preserves the source checkout. Successful runs deliver a local diff
+without automatic commit, push, or publication.
 
-These are proposed interfaces, not runnable commands yet. See the
-[hello example](examples/README.md) for definitions and the fixture setup.
+## Extend and repair
 
-## Graph model
-
-- The **intent graph** records required milestones and their ordering.
-- The **execution graph** records concrete agent jobs, checks, dependencies, and repairs.
-- Evidence and durable events explain why operations were admitted and milestones accepted.
-
-The supervisor proposes graph changes. The controller validates and records them
-before dispatch. Agents cannot mark their own work accepted or rewrite required
-outcomes.
+Plugins implement the public TypeScript SDK and run in separate processes.
+Repairable bundles include source, readable acceptance requirements, locked build
+dependencies, and tests. The supervisor coordinates isolated patches, regression
+checks, independent review, and recorded version transitions within the same run.
+Opaque dependencies retain explicit repair limits. Process separation contains
+crashes; filesystem and execution scopes require host enforcement.
 
 ## Documentation
 
-- [Minimal core design](docs/core-design.md): graph advancer, supervisor, and controller; the first runnable release.
-- [Codebase design](docs/codebase.md): Go module layout, seams, and import rules.
-- [Architecture](docs/architecture.md): broader graph model and background.
-- [Roadmap](docs/roadmap.md): implementation sequence and acceptance scenarios.
-- [Hello graph](examples/graphs/hello.yaml) and [stage definitions](examples/graphs/hello.md): the two-step minimal example.
-- [Task example](examples/task.yaml): graph selection, repository, and request.
-- [Graph design research](docs/research/graph-design.md): original Loopx study and detailed proposal.
-- [Earlier supervisor design](docs/research/design-supervisor-run-repair.md): historical context.
+- [Current core design](docs/design-typescript-core.md): all decisions, contracts,
+  repair lifecycle, minimal example, verification, and implementation milestones.
+- [Architecture](docs/architecture.md): runtime interaction overview.
+- [Domain glossary](CONTEXT.md): project vocabulary.
+- [Roadmap](docs/roadmap.md): entry point to the implementation sequence.
+- [TypeScript decision](docs/adr/0002-typescript-repairable-plugins.md).
+- [Example task](examples/task.yaml) and [example guide](examples/README.md).
+- [Loopx gate-repair study](docs/research/loopx-gate-defect-handling.md) and
+  [issue-fix study](docs/research/loopx-issue-fix-example.md).
 
-The research documents adapt earlier Vajra proposals to GraphLoom terminology.
-References to Vajra describe the predecessor project, not existing GraphLoom code.
+Earlier native-plugin and file-described designs are historical references, not
+authority for the TypeScript implementation.

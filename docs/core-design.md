@@ -1,42 +1,61 @@
-# GraphLoom minimal core
+# GraphLoom core: executable graph plugins
 
-Status: proposed for review, 2026-09-22. No runtime is implemented yet.
+> Superseded by the [TypeScript design](design-typescript-core.md). The content below
+> records the earlier native Go direction and is retained for historical context.
 
-This document defines the first runnable GraphLoom release. It takes precedence
-over the broader initial architecture and research proposals for implementation
-scope. “Graph advancement” means determining which node may run and which required
-stage may complete.
+Status: revised design, 2026-09-22. The repository contains a partial Go
+implementation of the earlier file-described model. Native plugin loading and the
+public interface below are proposed, not implemented.
 
-## 1. Goal and scope
+This revision replaces graph YAML and supervisor-authored normal execution with
+user-authored Go graph plugins. Task configuration, isolated worktrees, durable
+observations, and bounded correction remain part of the minimal release.
 
-An operator supplies a task, a target repository, and a happy path. GraphLoom uses
-multiple agents to produce the required result, validates their output, and lets
-one supervisor decide how to recover when execution deviates from that path.
+## 1. Three core modules
 
-The core has exactly three components:
+1. **Graph:** an executable harness supplied as a native Go `.so` plugin. It owns
+   domain-specific agent tasks, validation, normal routes, and known corrections.
+2. **Supervisor:** one logical agent session per run that owns exceptional recovery
+   routing. Its decisions go directly to controller admission, without plugin veto.
+3. **Controller:** the host that loads the graph, executes admitted operations,
+   records evidence, and enforces lifecycle, permissions, and finite limits.
 
-1. **Graph advancer:** pure rules for readiness, accepted progress, and completion.
-2. **Supervisor:** the LLM session that plans work and makes semantic decisions.
-3. **Controller:** the process that owns state, runs agents and checks, and applies
-   admitted decisions.
+The graph advancer remains a pure internal helper for dependency readiness,
+receipt freshness, stage ordering, and reentry invalidation. It is not the domain
+harness: that behavior lives in the plugin.
 
-The first release runs on one host, through a CLI, with one active job per run.
-Multiple agents means separate worker and reviewer sessions with distinct tasks;
-it does not initially mean concurrent workers. One agent backend is sufficient.
-The same backend may supply the supervisor, implementation agent, and independent
-reviewer, using separate sessions and scopes.
+The first release targets Linux on one host, one active job per run, and one
+agent backend. Different roles use separate worker/reviewer sessions. The required
+example is `write → review`, ending in a verified local file change. Automatic
+publication, a portal, distributed scheduling, and parallel jobs are later work.
 
-The first release includes local execution, verification, bounded correction,
-inspection, stop, and resume. A web portal, distributed scheduling, remote context
-services, automatic publication, and arbitrary milestone DAG authoring are outside
-this release.
+## 2. What changes in ownership
 
-## 2. Task inputs and an isolated checkout
+| Concern | Graph plugin | Supervisor | Controller |
+|---|---|---|---|
+| Happy path and required outcomes | Declares in Go | Reads | Pins and enforces order |
+| Normal worker prompts and input/output contracts | Constructs | Can revise execution instructions during recovery while preserving required evidence contracts | Supplies inputs and launches |
+| Deterministic validation | Implements predicates or requests checks | Diagnoses failures | Collects observations and executes commands |
+| Semantic judgment | Requests an agent task and interprets its typed result | Handles escalated ambiguity | Records the actual result |
+| Normal routes and known corrections | Chooses in code | Takes over when requested or when progress stalls | Applies transitions and detects repeated lack of progress |
+| Reentry | Selects targets for known corrections during normal execution | Selects targets during recovery | Admits and atomically applies either route |
+| Unfamiliar failure | Supplies domain context and optional suggestions | Investigates and directs repair within run authority | Starts recovery and executes admitted jobs without requiring a plugin handler |
+| Acceptance | Evaluates domain evidence and requests acceptance | Cannot directly mark a stage accepted | Checks provenance/freshness and issues receipts |
+| Worktrees, budgets, ownership, stop/resume | Requests operations within policy | Cannot override | Owns and enforces |
 
-### 2.1 One task file
+A plugin can deliberately ask an LLM to classify an issue and then route on its
+structured observations, as Loopx does. Graph code supplies the harness around
+that judgment. There is no requirement to encode every semantic question as a
+Go conditional, and there is no domain-specific route table in the shared host.
 
-The operator supplies `task.yaml`. It owns the graph selection, target repository,
-and request; they are not separate required CLI flags:
+No mandatory LLM plan-review job precedes every run. The graph author supplies
+the validation policy as tested code. A graph may request independent semantic
+review where its domain needs it; the hello graph includes Review as a required
+stage. This supersedes the earlier supervisor-generated acceptance plan.
+
+## 3. Task selection and plugin discovery
+
+The operator still runs a task file:
 
 ```yaml
 graph: hello
@@ -46,19 +65,6 @@ request: |
   one newline. Do not modify other files.
 ```
 
-The graph declaration in `graphs/hello.yaml` contains only the required happy path:
-
-```yaml
-happy_path: [write, review]
-```
-
-A matching `graphs/hello.md` explains each stage's purpose, outcomes, and evidence
-expectations. Stage names alone cannot define success. Definitions describe what
-must be established; the supervisor chooses concrete checks and supporting jobs.
-No hooks, failure routes, or reentry declarations are required in the graph file.
-
-Proposed CLI, not an existing executable:
-
 ```sh
 graphloom run task.yaml
 graphloom inspect <run-id>
@@ -66,567 +72,511 @@ graphloom stop <run-id>
 graphloom resume <run-id>
 ```
 
-Paths resolve relative to the task file, not the shell's current directory:
+These are proposed interfaces; the current partial implementation is not a native
+plugin runner. Relative paths resolve from the task file. A simple graph ID
+`hello` resolves to the operator-installed `plugins/hello.so` and its generated
+build manifest in the task directory. Path traversal and arbitrary graph paths
+are rejected. The MVP needs no remote registry or automatic download.
 
-- `graph: hello` resolves to `graphs/hello.yaml` and `graphs/hello.md` beside the
-  task file. Graph IDs must be simple names, not arbitrary paths.
-- A relative `repo` resolves from that same directory; an absolute local path is
-  also accepted. The controller resolves the actual Git worktree root.
-- `request` is required nonempty text. Unknown task keys, missing definitions,
-  invalid graphs, and repositories without a commit prevent execution.
+There is no `graphs/hello.yaml` to interpret. Stage definitions, prompts, result
+schemas, checks, and routes are Go code or resources embedded in the plugin.
+The happy path belongs to the plugin's definition; tasks select a graph instead
+of implementing one. Additional graph-specific task options can wait until a real
+second graph needs them.
 
-The MVP accepts local Git repositories with a working checkout. It does not clone
-URLs or fetch remote changes. Project-level settings select the installed agent
-backend and finite limits. Intake snapshots the task, graph, stage definitions,
-and resolved settings. Editing `task.yaml` later does not change a running or
-resumed run. Changing the requested goal requires a new run.
+Intake resolves the local repository and pins the task, graph definition, plugin
+binary digest, build identity, and project limits. The plugin validates whether
+the task fits its supported domain. An incompatible request stops with a reason;
+the hello plugin must not silently solve some other task as a greeting exercise.
 
-The supervisor derives an acceptance plan from these pinned sources. A separate,
-read-only reviewer checks that plan before the writer starts. Omitted requirements
-or contradictions are returned to the supervisor. Routine accepted plans proceed
-automatically; an unresolved source conflict stops the run with a precise reason.
-Plan review is a supporting node, not a third required stage.
+## 4. Public plugin interface
 
-### 2.2 One controller-created Git worktree per run
+External plugin authors import a small public package:
+`github.com/hanahmily/graphloom/loom`. They cannot depend on host `internal/`
+packages. This public seam is now justified by independent plugin modules.
 
-The controller never executes jobs in the supplied checkout. It:
+The proposed interface has two methods:
 
-1. Resolves the source checkout and pins its current `HEAD` commit as `base_commit`.
-2. Records creation intent, a unique run ID, branch `graphloom/<run-id>`, and a
-   destination under the configured local run directory.
-3. Creates an isolated worktree at that exact commit, equivalent to:
-
-   ```sh
-   git -C <source-repo> worktree add -b graphloom/<run-id> <run-root>/work <base-commit>
-   ```
-
-4. Records the actual worktree identity before allowing an agent to run.
-5. Runs the writer, command checks, and read-only reviewer in that run worktree.
-
-The source checkout's tracked modifications, staged changes, and untracked files
-are not copied. The run begins from the pinned commit even when the source
-checkout is dirty. The source working files, index, and current branch stay
-unchanged. Git necessarily registers the new worktree and branch in the shared
-repository metadata; the controller serializes those operations per repository.
-Agents cannot write that shared metadata or operate on the source checkout.
-
-The branch initially points to `base_commit`; the MVP preserves the result as
-worktree changes without automatic commits, merges, or pushes. It retains the
-worktree on success, stop, or failure. `inspect` reports the source repository,
-base commit, run branch, worktree path, and current workspace fingerprint so the
-operator can inspect the exact result.
-
-Resume reuses the recorded worktree. It verifies ownership, identity, and current
-content before dispatch. Unexpected content changes invalidate affected evidence
-and require supervisor assessment. A missing or mismatched worktree stops resume;
-it is never silently recreated or reset. No automatic cleanup is included.
-
-Persist worktree creation intent before Git mutations. On an interrupted creation,
-reconcile the branch and worktree registration against that intent. Adopt only an
-exact matching run worktree; an unrelated path or branch collision is a blocker.
-Never discard a pre-existing checkout to make creation succeed.
-
-## 3. Component boundary
-
-```mermaid
-flowchart TD
-    I[Task + happy path + stage definitions] --> C[Controller]
-    C -->|Current state and observations| S[Supervisor]
-    S -->|Typed decision| C
-    C -->|Proposed transition| G[Graph advancer]
-    G -->|Admit or reject; ready node; completion| C
-    C -->|Bounded job| A[Worker / reviewer / command]
-    A -->|Observed output| C
-    C --> D[Durable run state and artifacts]
+```go
+type Graph interface {
+    Describe() Definition
+    Advance(View) (Decision, error)
+}
 ```
 
-| Concern | Graph advancer | Supervisor | Controller |
-|---|---|---|---|
-| Required stage order | Enforces | Reads | Persists |
-| Agent selection and prompts | Checks references and scope | Chooses | Launches |
-| Checks and evidence strategy | Checks coverage and receipt references | Proposes | Executes and records |
-| Interpretation of a failure | No domain classification | Decides | Supplies original observations |
-| Supporting work and reentry | Validates graph changes | Proposes | Applies atomically |
-| Accepted stage progress | Checks prerequisites and evidence validity | Requests acceptance | Issues receipt |
-| Limits, process ownership, cancellation | Reads admission facts | Cannot override | Enforces |
-| Run completion | Computes from current receipts | Explains result | Finalizes |
+- `Describe` returns the graph ID, graph version, protocol and private-state schema
+  versions, ordered required stages, required check/review IDs, and requested
+  capabilities. The controller freezes that definition at intake. Requested
+  capabilities do not grant permission. This declaration does not define a
+  supervisor repair allowlist; operator-authorized host capabilities govern recovery.
+- `Advance` receives a detached view of current run facts and returns one typed
+  decision plus the next private graph state. For identical inputs it must return
+  an equivalent result. It does not spawn processes, call a model, mutate files,
+  read clocks, or keep authoritative state in globals.
 
-There is no separate classifier, recovery daemon, or domain-specific routing
-table. The controller's process runner and state store are implementation helpers,
-not additional decision-making components.
+The controller passes task inputs, accepted stage receipts, observed job results,
+artifact metadata or bounded requested content, outstanding jobs, recovery history
+and active execution overrides, remaining limits, and a versioned private-state
+blob in `View`. Canonical stage, attempt, receipts, and observations are authoritative;
+the plugin must reconcile its private state with them after recovery. Private state
+cannot veto a controller-admitted reentry or act as a second stage cursor.
+The controller binds each call to a generation and expected state revision and
+assigns stable decision/operation IDs. A repeated decision returns its prior
+settlement; stale results cannot mutate newer state. Private state is bounded
+serialized data; it cannot contain live clients,
+goroutines, closures, or file descriptors.
 
-## 4. Graph model
-
-### 4.1 Required stages
-
-The happy-path list produces an immutable ordered stage graph:
-
-```text
-write → review
-```
-
-Each stage has an ID, source-bound obligations, and a current accepted receipt or
-no receipt. Stage definitions can describe different domains; no shared rule
-requires an assignment document, source code, or a PR.
-
-The controller can advance the stage cursor only when the current stage and all
-predecessors have valid receipts. Successful completion requires every declared
-stage. A blocked task or a justified no-op does not fabricate stage completion.
-The MVP records it as a stopped run with a reason.
-
-### 4.2 Execution nodes
-
-The supervisor expands the required stages into concrete attempts and checks.
-The execution graph is append-only: completed nodes are never reset or rewritten.
-
-| Field | Meaning |
-|---|---|
-| `id` | Stable operation ID, reused when reconciling an interrupted operation |
-| `stage` | Required stage this job supports; omitted only for initial plan review |
-| `kind` | `agent` or `command` |
-| `purpose` | `work`, `check`, or `review`; descriptive, not routing authority |
-| `after` | Earlier nodes whose observations must exist |
-| `requires` | Accepted stage receipt IDs required before dispatch |
-| `spec` | Agent role and prompt, or command argv; input artifact references |
-| `scope` | Read/write roots and allowed effects |
-| `bounds` | Timeout and available call reservation |
-| `repair_attempt` | Controller-owned association with a correction, if applicable |
-
-Dependencies reference existing nodes only. This makes appended dependency edges
-acyclic by construction. Each dependency means “its observation is available,”
-not “it succeeded.” Thus a diagnostic job can depend on a failed command without
-being permanently blocked. Required successful outcomes use the separate
-`requires` receipt references.
-
-Retries and corrections create new node IDs with a `supersedes` or `repairs`
-lineage reference. Those references are explanatory links, not readiness edges.
-An interrupted operation keeps its ID during reconciliation; an intentional
-second execution is a new attempt and spends the appropriate allowance.
-
-### 4.3 States and readiness
-
-```text
-pending → running → observed
-                 → interrupted
-pending/running → cancelled
-```
-
-`observed` means the controller captured a result, including nonzero exits,
-timeouts, malformed agent responses, and reported blockers. It does not mean the
-job was successful or its stage was accepted. `interrupted` means the operation's
-outcome could not be established after process loss.
-
-A node is ready only if:
-
-- The run is active and the node is pending.
-- Every `after` dependency has an observed result.
-- Every required receipt is valid for the node's input revisions.
-- Its stage is the earliest unaccepted stage, or it is authorized supporting work
-  for that stage; initial plan review is the bootstrap exception.
-- Scope and budget admission succeeded, and no other job is active.
-
-Independent read-only checks are still serialized in the MVP. The supervisor
-appends work in intended order; the advancer selects the earliest ready node.
-It never invents a repair when no node is ready. The controller sends the blocked
-state back to the supervisor, subject to the same finite decision budget.
-
-### 4.4 Reentry
-
-`reenter(write)` invalidates write's receipt and every later stage receipt in
-one transition. Pending nodes that rely on those receipts are cancelled. A
-reentry decision is admitted only between jobs. New attempts are appended:
-
-```text
-write#1 → check#1 → diagnose#1 → write#2 → check#2 → review#1
-```
-
-Historical receipts and outputs remain inspectable. They are no longer usable
-as current completion evidence. The graph advancer enforces this rule regardless
-of the supervisor's explanation.
-
-## 5. Supervisor
-
-### 5.1 One logical session per run
-
-The supervisor sees the pinned task and stage definitions, current stage,
-execution graph summary, observations, evidence references, and remaining limits.
-It can request bounded inspection jobs when more information is needed.
-
-Its decisions cover the entire run: initial planning, agent selection, validation,
-diagnosis, correction, reentry, and the final delivery explanation. Workers and
-reviewers are child sessions. No new supervisor is created for each failure.
-
-Store session identity and concise decision summaries in run state. If native
-session resume is unavailable, reconstruct the logical session from those durable
-facts and pinned artifacts. Changing the backend session never resets limits.
-
-### 5.2 Minimal decision protocol
-
-Every decision includes `run_id`, `generation`, `expected_revision`, a unique
-`decision_id`, an `action`, and a concise `reason` with evidence references.
+`Decision` contains exactly one action, a concise reason, evidence references,
+and the proposed next private state. The controller commits admitted graph state
+and operation intent together. If admission fails, neither advances; a rejection
+observation is fed back to the graph under the same limits.
 
 | Action | Meaning |
 |---|---|
-| `plan` | Propose or revise the derived acceptance plan; independent review required |
-| `append` | Add bounded agent or command nodes with their dependencies |
-| `accept` | Request acceptance of the current stage, citing evidence |
-| `reenter` | Return to a named required stage and invalidate dependent evidence |
-| `stop` | Leave the run resumable with the blocker and next required input |
+| `Dispatch` | Run an agent task or bounded command with declared inputs and scope |
+| `Observe` | Read specified files/artifacts or produce a workspace change manifest |
+| `Accept` | Submit a domain verdict for the current stage with its required evidence |
+| `Reenter` | Revisit a required stage and invalidate affected downstream receipts |
+| `Supervise` | Yield to the run supervisor with evidence and optional repair suggestions |
+| `Stop` | Preserve the run and explain what prevents further progress |
 
-The protocol has no unrestricted state patch, “mark successful,” or arbitrary
-code execution in the controller process. Commands are execution nodes, use argv
-without implicit shell expansion, and remain subject to scope and time limits.
+Completion is computed from valid required stage receipts, not a plugin-returned
+terminal boolean. Supporting operations use the same small action vocabulary.
+Supervisor recovery uses the shared execution actions under controller admission;
+its protocol and return of control are defined in section 6. It does not return
+plugin private state or call `Advance` to get permission for each repair.
 
-Checks, setup operations, and helper agents all use `append`. A repair supplies a
-replacement node or acceptance-plan revision, not an edit to historical evidence.
-The next normal stage follows from accepted receipts; the supervisor plans its
-jobs but does not choose an alternative happy-path order.
+### Export and load
 
-Malformed or rejected decisions return structured reasons and current facts to
-the same supervisor session. They consume decision-call allowance. No hard-coded
-domain error family is required before the supervisor may investigate a failure.
+Each plugin is a Go `main` package exporting exactly this entry function:
 
-### 5.3 Agent handoff: typed results and artifact references
-
-Agents do not communicate through a shared chat. They have two controller-mediated
-channels:
-
-| Channel | Content | Owner |
-|---|---|---|
-| Data | Immutable artifact references and the run worktree at a recorded revision | Controller snapshots and supplies inputs |
-| Control | Typed job result, review verdict, blocker, and concise explanation | Agent reports; controller records; supervisor interprets |
-
-Before launch, the controller supplies a versioned task packet. For example:
-
-```json
-{
-  "version": 1,
-  "run_id": "hello-001",
-  "node_id": "review-1",
-  "generation": 1,
-  "stage": "review",
-  "role": "reviewer",
-  "workspace_revision": "ws:17",
-  "inputs": ["artifact:task", "artifact:write-result-1", "artifact:check-1"],
-  "instruction": "Review the exact requested greeting and the complete change scope."
+```go
+// Package main in the user's plugin module.
+func NewGraph() (loom.Graph, error) {
+    return &HelloGraph{}, nil
 }
 ```
 
-`ws:17` is an illustrative controller-issued identifier for a content fingerprint,
-not just a Git commit. It covers the pinned base and current tracked, untracked,
-and ignored workspace contents outside Git metadata. The packet also resolves the worktree, read-only input mounts,
-private output directory, and admitted bounds through the runner interface.
-Agents cannot supply substitute paths that expand these scopes.
+The controller calls `plugin.Open` on the pinned artifact, looks up `NewGraph`,
+checks its concrete function type, creates an instance, and validates `Describe`.
+The Go SDK types must be identical in the host and plugin. A protocol version
+field supplements those checks; it cannot make incompatible Go binaries load.
 
-Every agent invocation returns a single structured result through a dedicated
-`result.json` file in its private output directory. Logs and streaming activity use
-separate stdout/stderr channels; they are not parsed as the final result. A first
-backend must support this result-file contract directly or through its adapter.
+`NewGraph` and `Describe` must be side-effect-free by author contract. The same
+applies to package initialization. These contracts are tested conventions for
+trusted native extensions, not an OS sandbox around plugin code.
+
+## 5. Concrete hello graph
+
+The plugin declares required stages `write` and `review`, a content/scope check
+for Write, and an independent reviewer verdict for Review. Its implementation
+follows this sequence:
+
+```text
+Go: validate task compatibility
+  → Go: construct a writer task
+  → Agent: create GREETING.txt
+  → Controller: collect file bytes and workspace change manifest
+  → Go: check exact bytes and that only GREETING.txt changed
+  → Controller: accept Write against current evidence
+  → Go: construct an independent reviewer task
+  → Agent: approve or request changes with evidence
+  → Go: interpret the review for the exact same workspace revision
+  → Controller: accept Review and finish
+```
+
+The central check is ordinary Go logic in the plugin, conceptually:
+
+```go
+contentOK := bytes.Equal(observedContent, []byte("Hello, GraphLoom!\n"))
+scopeOK := len(changedPaths) == 1 && changedPaths[0] == "GREETING.txt"
+```
+
+The controller supplies the observed bytes and complete change manifest; the
+worker's report is not used as a substitute for either. The predicate result is
+bound to its check ID, pinned plugin digest, and observation references. A generic
+controller records that qualified verdict without containing greeting-specific
+code. A different plugin can run tests through a command job instead.
+
+If the writer omits the newline, Go detects the defect and can dispatch one
+corrected Write attempt with the failed check details. If the reviewer requests
+changes, Go routes back to Write with the review report. The plugin escalates
+unrecognized or repeated failures through `Supervise`. Both coded corrections and
+supervisor-assisted corrections consume the same run allowance.
+
+The reviewer is read-only on the worktree and writes its report into a separate
+output directory. Write acceptance uses the deterministic check and does not
+depend on the later Review stage. Both receipts are needed for final success.
+
+The retained file-described examples document the prior design only. The new
+[plugin example](../examples/plugins/hello/README.md) specifies the implementation
+contract for this sequence.
+
+## 6. Supervisor recovery authority
+
+**Plugins own normal routing; supervisors own exceptional recovery routing;
+controllers enforce and apply both.** A plugin defines required outcomes and their
+evidence contracts. It need not anticipate every failure or implement a handler
+for every repair. Plugin repair suggestions are context, not a capability allowlist.
+
+There is one logical supervisor session per run, created lazily and continued for
+later recovery episodes. It receives pinned task requirements, stage/check
+contracts, observed errors, job specifications, artifacts, prior corrections,
+remaining budgets, and the host's available authorized capabilities. Happy-path
+worker calls do not require a supervisor round trip.
+
+### Entering recovery
+
+The controller starts recovery when the plugin returns `Supervise`, when a normal
+operation has an unhandled failure, or when normal execution cannot progress. The
+host supplies the fallback even for a plugin with no recovery branches:
+
+- Launch failures, timeouts, and missing/malformed agent results enter recovery
+  after the controller has reconciled the child outcome.
+- A well-formed negative domain result can use a known plugin correction. After
+  two consecutive failed correction trials for the same unresolved stage, the
+  controller transfers control to the supervisor before dispatching another.
+  Correction decisions identify the source trial and unmet check/result contract;
+  the host counts these generic reservations and outcomes without interpreting
+  domain-specific error strings. Successful acceptance of the repaired evidence
+  resets this failed-trial streak.
+- An `Advance` error, invalid decision, or plugin-requested failure stop enters
+  recovery. Repeated decisions that neither schedule new work nor advance current
+  evidence also trigger recovery after two occurrences. Operation IDs alone do
+  not count as progress. Successful current evidence or stage acceptance resets
+  this local repetition count; global budgets never reset.
+
+Operator cancellation and exhausted global limits produce a resumable stopped
+run. A denied optional action returns a rejection so the supervisor can choose
+an authorized alternative. A required effect with no authorized alternative stops
+with a reason; recovery cannot grant itself permission.
+An unsupported task or contradictory required outcome can be explained by the
+supervisor, but changing the pinned request requires operator input and a new run
+in the MVP. Failure to load a valid plugin definition stops intake. Native crashes
+and hangs have the separate limitation described below.
+
+### Executing recovery
+
+The controller durably records an execution mode (`normal` or `recovery`), episode
+ID, initiating evidence, and decision revision. Exactly one decision source is
+active: the plugin in normal mode, the supervisor in recovery mode. The controller
+quiesces or reconciles any outstanding child before admitting replacement work;
+late results and stale decisions cannot advance either mode.
+
+Supervisor decisions go directly to controller admission. They can:
+
+- `Observe` files, artifacts, logs, and workspace state.
+- `Dispatch` diagnostic commands, independent investigation, or repair agents.
+- Retry a failed job with corrected instructions or available launch/model settings.
+- `Reenter` a declared current or earlier stage with a repair explanation.
+- `Return` control to normal graph execution, or `Stop` with an unresolved blocker.
+
+Retry is a `Dispatch` referencing its source job and correction reservation. It
+preserves the required result schema, input provenance, and authorized write scope.
+A repair that revisits an already accepted stage must first reenter that stage;
+subsequent validation and review require fresh evidence. Independent reviewers
+retain their read-only role and cannot become the writers they review.
+Execution overrides contain the changed prompt or launch settings, target
+stage/job, reason, and evidence. The controller validates and persists them before
+use. They apply to the named repair trial and are consumed or explicitly cleared;
+they cannot silently change later stages. Installed models under the configured
+backend and permitted commands are available without a plugin-specific handler.
+Unavailable capabilities yield observations; they do not grant new permissions.
+
+Diagnostics and repair results return to the same supervisor session. Admission
+rejections do too, with a reason and remaining limits. A supervisor decision
+cannot issue `Accept`, weaken pinned checks, remove required stages, rewrite a
+result schema to manufacture success, mutate plugin private state, or expand user
+authorization. The controller enforces structural and authority rules; it cannot
+prove every prompt semantically preserves intent. Original requirements remain in
+repair inputs, and unchanged checks and independent review still gate acceptance.
+
+### Returning to the happy path
+
+`Return` is a supervisor-only control action, admitted when no child or ambiguous
+operation remains outstanding. It records the repair summary, new observations,
+execution overrides, and current stage/attempt, then atomically changes mode to
+normal. It does not accept a stage or advance the required-stage cursor. Both modes
+and all episode/correction reservations survive stop/resume.
+
+The next `Advance` receives these canonical facts and reconciles its private state.
+It must evaluate relevant fresh repair results before dispatching another normal
+job; a repaired result that satisfies the original job contract must not be
+ignored merely because the supervisor dispatched it. Required validation still
+runs, and only ordinary evidence-backed acceptance resumes the happy path. If the
+plugin again cannot progress, the controller returns the resulting observation to
+the same supervisor session under the remaining shared limits. A no-op `Return`
+cycle spends decision/invocation limits and is not successful recovery.
+
+For example, an incompatible writer launch enters recovery automatically. The
+supervisor chooses a supported configuration and retries Write through the host.
+After a valid result, it returns control; the plugin checks exact bytes and scope
+and continues to Review. No provider-error branch or repair handler is needed in
+the hello plugin.
+
+### What recovery cannot guarantee
+
+The supervisor can repair execution around a functioning plugin; it cannot replace
+native code or redefine success. A broken native predicate, irreconcilable private
+state, or contradictory pinned requirement may still prevent acceptance. A plugin
+defect needing changed code requires a rebuilt bundle and a new run in the MVP;
+live replacement and state migration remain outside scope.
+
+Native `.so` code runs in the controller process. A panic or hang may prevent the
+supervisor from running at all. Reliable automatic recovery from native crashes
+requires process isolation, which is outside the minimal release. Broad recovery
+authority improves failure handling but is not a promise that every graph can
+always finish.
+
+## 7. Controller, evidence, and communication
+
+The controller serially asks the active decision source (plugin or supervisor)
+for the next action, admits it, records intent, executes the operation, and feeds
+back a durable observation. It owns the only canonical run state. No agent or
+plugin callback receives a mutable store handle or a runner handle through the
+public interface.
+
+This narrows accidental coupling; native plugin code is still trusted code in the
+host process. It can technically import OS libraries and bypass its interface.
+The controller's permission enforcement protects agent jobs and correct plugin
+use; it is not a containment guarantee against a malicious installed `.so`.
+
+### Agent and data channels
+
+The plugin or recovery supervisor constructs an agent task with a versioned result
+schema; recovery preserves required evidence contracts. The controller
+injects run ID, node ID, generation, actual workspace revision, resolved input
+artifact references, output path, and execution limits. Agent prompts cannot
+override this identity or scope.
+
+Agents return one `result.json` in their private output directory. Logs use
+stdout/stderr separately. The shared envelope contains identity, input revision,
+`status` (`completed`, `blocked`, or `failed`), summary, declared outputs, and
+evidence references. A graph-specific payload carries fields such as the review
+verdict. The plugin validates that payload and interprets its meaning.
+
+The controller rejects missing/malformed envelopes, stale identities, unknown
+input references, escaping output paths, symlinks, and oversized artifacts. After
+the child stops, it snapshots outputs and hashes them. Agents exchange those
+explicit artifacts and the admitted worktree revision through the controller;
+direct agent-to-agent chat is not required.
+
+### Check and receipt rules
+
+Command exits, bounded file reads, and workspace manifests are controller-owned
+observations. Native predicates are trusted plugin judgments over those
+observations; reviewer verdicts are agent judgments. Their provenance is recorded
+separately. A passing native predicate is only as correct as the installed plugin;
+the controller cannot prove arbitrary domain logic semantically sound.
+
+For `Accept`, the controller checks the current stage, predecessor receipts,
+declared required check IDs, observation provenance, scope, plugin identity, and
+freshness. It rechecks applicable workspace fingerprints before accepting or
+finishing. Content changes invalidate dependent checks and reviews. Reports stored
+outside the worktree do not change its fingerprint.
+
+Required checks are pinned in the plugin definition. A plugin cannot omit a
+declared check through its typed decision, and a worker cannot mint a receipt.
+There is no universal requirement that every stage has both a command check and
+an agent review: the hello plugin requires its content/scope predicate for Write
+and its independent verdict for Review. The generic host enforces that declaration.
+
+### Execution graph and reentry
+
+Required stages remain ordered. Executed jobs and observations form an append-only
+attempt graph with dependencies on prior observations and required receipts.
+Dependencies on observations may refer to failed jobs, enabling diagnostics.
+Successful stage prerequisites are separate receipt references.
+
+**The plugin selects known reentry routes in normal mode; the supervisor selects
+recovery routes. The controller owns application of both.**
+Workers and reviewers report results or conflicts through their typed artifacts.
+They cannot change the current stage, issue receipts, or directly trigger reentry.
+
+There are two paths to the same `Reenter` decision:
+
+1. **Known condition:** `Advance` interprets an observed result and selects the
+   target in Go. For example, Review returning `request_changes` selects Write
+   with the review report. No supervisor call is required.
+2. **Ambiguous failure:** the plugin yields or the controller starts recovery.
+   The supervisor selects a target and remedy and submits `Reenter` directly to
+   controller admission. The plugin need not recognize or approve this repair.
+
+An illustrative supervisor decision payload is:
 
 ```json
 {
-  "version": 1,
-  "run_id": "hello-001",
-  "node_id": "review-1",
-  "generation": 1,
-  "input_revision": "ws:17",
-  "status": "completed",
-  "verdict": "approve",
-  "summary": "The greeting bytes and changed-file scope match the task.",
-  "outputs": [{"name": "review-report", "path": "review.md"}],
-  "evidence_refs": ["artifact:check-1"]
+  "action": "reenter",
+  "stage": "write",
+  "reason": "The implementation contradicts the pinned request.",
+  "evidence_refs": ["artifact:review-2"]
 }
 ```
 
-`status` is `completed`, `blocked`, or `failed`. Review jobs additionally require
-`verdict: approve` or `request_changes` when completed. A completed review may
-request changes; that is an unmet acceptance condition, not a successful stage.
-A writer omits `verdict`. A blocker can include `conflict`, containing its concise
-explanation and source references; it cannot command a route itself.
+The controller binds this payload to the active recovery episode, owner,
+generation, and expected state revision. It becomes a transition only after
+admission. A rejection returns to the supervisor, without plugin veto or partially
+applied state. Normal-mode plugin decisions use the same admission rules.
 
-The controller validates the result schema and invocation identity, resolves each
-output path within that job's output directory, and rejects escaping paths,
-symlinks, and missing or oversized outputs. After the child has stopped, it copies
-outputs into immutable artifact storage, hashes them, and issues artifact IDs.
-It records command exits and workspace changes from execution directly. Artifact
-references in agent output must refer to inputs actually supplied to that job.
-The controller derives a change manifest for code/file outputs in the worktree.
+For an emitted `Reenter`, the controller checks:
 
-A JSON result claiming tests passed is not a controller-issued check receipt.
-Missing or malformed result files remain observations of failure even if the
-process exits zero. Each accepted observation binds the actual invocation, inputs,
-workspace fingerprint, and output digests; agent-supplied identity never overrides
-controller state.
+- The decision belongs to the current owner, generation, and expected state
+  revision; cited evidence exists and is applicable to the current attempt.
+- The target is a declared required stage at or before the current stage.
+  Reentry cannot skip required stages or rewrite their checks.
+- No child remains active or has an unresolved outcome. Cancellation and reaping
+  must finish before reentry can be admitted.
+- A corrective attempt is available under the run's persistent limits.
 
-The next agent receives only explicit referenced artifacts and the current
-admitted workspace revision. Handoffs are therefore reproducible and inspectable:
+Under the run lock, one durable transition reserves that corrective attempt,
+commits the decision source's state (plugin private state only for a plugin
+decision, episode state for a supervisor decision), moves the active stage to the
+target, invalidates its receipt and all downstream receipts, and cancels dependent
+pending work. It also invalidates checks and reviews that depend on the superseded
+attempt. The transition records the reason, evidence, and stable operation ID.
+An admission failure leaves these changes unapplied and feeds a rejection back to
+the active decision source; applicable rejection counters still advance.
 
-```text
-writer → result + file changes → controller snapshots artifacts
-       → supervisor selects checks and review
-       → controller supplies checked inputs → reviewer
-```
+The active decision source dispatches the repair using the reserved attempt.
+Reentry and that repair's first trial count as one corrective attempt; another failed trial
+requires another reservation. A duplicate decision returns its recorded outcome
+without a second reservation or invalidation. Stop/resume preserves the reservation
+and counters.
 
-On disagreement, the supervisor receives the review report and chooses a new
-write attempt or further inspection. Review does not directly call the writer.
-Supporting jobs and revised task packets remain visible as execution graph nodes.
+Retries append new nodes; they never reset or replay historical jobs. Reentry
+preserves prior artifacts and history, while requiring fresh acceptance for the
+target and downstream stages. It does not reset the worktree or discard operator
+changes. The graph stays acyclic because new nodes only depend on existing nodes.
 
-## 6. Controller
+## 8. Worktree, durability, and limits
 
-The controller is the sole state writer and job launcher. Its main loop is:
+Intake pins the supplied local repository's `HEAD`, creates branch
+`graphloom/<run-id>`, and creates an isolated worktree at that commit. Dirty source
+files, its index, and its current branch remain unchanged; uncommitted changes
+are not copied. Git registrations and the new branch are shared metadata managed
+only by the controller under a per-repository lock.
 
-```text
-load state and acquire exclusive run ownership
-reconcile any unfinished operation
-while run is active:
-    if the graph has a ready node:
-        reserve limits and persist dispatch intent
-        launch the bounded job
-        capture observation and persist settlement
-        if the result reports failure or a blocker:
-            require a supervisor decision before further dispatch
-    elif every stage has a valid accepted receipt:
-        persist succeeded and return
-    else:
-        reserve a supervisor call
-        obtain a typed decision
-        validate it against current generation, revision, and policy
-        apply the admitted transition, or record its rejection
-```
+Writer jobs can write the run worktree and their own outputs. Reviewers, native
+observation requests, and check jobs receive read-only source access and separate
+scratch/output directories. The host runner must enforce those scopes and exclude
+controller state and shared Git metadata. The MVP grants no external publication
+effects to jobs. The result remains a local worktree diff without automatic
+commit, push, or merge.
 
-Commands, workers, reviewers, and the supervisor use a narrow runner interface.
-The first implementation supports one backend and a scripted fake for tests.
-It must provide bounded launch, output capture, cancellation, process identity,
-and enforceable writable roots. Agent output is data parsed by the controller;
-it cannot invoke state mutation directly.
+One private `state.json` records pinned inputs, plugin identity/private state,
+graph nodes, receipts, operation intents, reservations, decision-source mode,
+recovery episodes, execution overrides, and supervisor continuity.
+Transitions use a cross-process run lock and synced atomic replacement. Artifact
+files are immutable and referenced by digest. Missing referenced data stops
+progress; unreferenced crash remnants do not become evidence.
 
-The supervisor and reviewers have read-only task/context access. Writer jobs can
-write only the run worktree and their own output directory.
-Reviewers can write reports only in their own output directory. Command checks
-receive a read-only worktree and separate scratch/output directories. Control
-state is outside those write roots. The adapter must enforce these boundaries
-using its host sandbox; directory separation alone is insufficient. A backend
-without the required isolation cannot be enabled. This adapter boundary must be
-proven before using real agents. The MVP grants no external-write capability;
-the selected runner must enforce that scope as well as filesystem write roots.
+Persist worktree creation and dispatch intent before effects. On recovery,
+reconcile existing Git registrations and child-process outcomes instead of
+blindly replaying. Resume uses the same retained worktree and exact plugin bundle.
+Missing or mismatched inputs stop the run; they are never silently recreated.
+Unexpected external edits stop dispatch for assessment and invalidate affected
+evidence; a coded repair must not silently discard operator changes.
 
-### 6.1 Evidence and acceptance without configured hooks
-
-Validation is explicit graph work. The supervisor adds `command` nodes for
-machine-checkable obligations and `agent` review nodes for semantic judgments.
-The controller executes these jobs and records their actual outcomes. Removing
-hook declarations from graph YAML does not remove independent checks.
-
-The `hello` plan must establish both exact file bytes and complete change scope.
-A passing content check alone cannot satisfy the task if another file changed.
-Both obligations can be checked by one bounded command node. Its actual argv or
-script and digest are persisted in the node specification and reviewed before
-use; they are not hidden pre/post-stage callbacks.
-
-The acceptance plan maps each source requirement to a check, an independent
-review, or both. Plan review is a fixed controller-required procedure and cannot
-be removed by a plan revision. It has a fixed bounded invocation, not a recursive
-reviewer tree.
-
-A new or changed check requires independent review of its connection to the
-unchanged obligation. Defect-sensitive negative cases are required where the
-obligation is machine-checkable. This prevents replacing a failed check with an
-always-passing command. Unresolved semantic disagreement stops bounded progress.
-
-For each executed check the controller records its argv or tool identity,
-workspace fingerprint, source/plan revision, exit status, and artifact digests.
-Reviewer output is recorded as independent judgment, not a deterministic proof.
-An `accept` decision succeeds only when:
-
-1. The acceptance plan has passed independent review.
-2. Required checks actually ran and passed on the relevant inputs.
-3. Required independent reviews accepted the exact applicable revision.
-4. No referenced evidence is missing or stale, and predecessor receipts are valid.
-
-Use evidence-input fingerprints rather than invalidating everything on every
-write. Plan-review evidence binds the task, definitions, and acceptance plan;
-write evidence binds the target file and complete workspace change manifest;
-review evidence binds that same workspace revision and the executed checks.
-File changes invalidate content-dependent evidence. Reports stored outside the
-worktree do not change its fingerprint. For the MVP, fingerprint the full workspace
-change set, including untracked and ignored file changes outside Git metadata,
-instead of guessing fine file-level dependencies. Check scratch files live outside
-the worktree so scope checks do not mistake their own outputs for deliverables.
-
-The source requirements are immutable within a run. Derived interpretation and
-check recipes may be corrected after review. Changing the actual requested goal
-requires a new run in this version.
-
-### 6.2 Durable state and stop/resume
-
-Use a private host directory containing one versioned `state.json`, append-only
-output artifacts, pinned sources, the isolated `work/` checkout, and a per-run lock.
-Only the controller can write the state and immutable artifact directories. The
-state document contains the graph, receipts, operation journal, decisions, and
-counters. Commit transitions
-by synced temporary write and atomic replacement under a cross-process lock.
-Unreferenced artifacts after a crash are harmless; missing referenced artifacts
-stop the run. Do not create multiple independent authoritative ledgers.
-
-Persist `dispatching` intent before spawning and process identity afterward. The
-runner must give child jobs a bounded lifetime if their controller disappears.
-On restart, confirm the old job has stopped before launching anything else.
-An ambiguous spawn or partially modified workspace produces an interrupted node;
-the supervisor inspects the current workspace before proposing another attempt.
-Never infer that a missing result means the operation never ran.
-
-The CLI stops a run through a durable stop request that the active controller
-polls while supervising a job. Requests enter a small atomic command inbox without
-requiring the active controller's ownership lock; only the controller applies them
-to canonical state. Request IDs make repeated stop commands idempotent.
-The controller increments generation, stops dispatch,
-cancels/reaps its child, and records `stopped`. A forceful controller termination
-is handled by the same interrupted-operation reconciliation. Late outputs from an
-old generation cannot advance the graph.
-
-Run states are `active`, `stopped`, and `succeeded`; active operations additionally
-expose `stopping` while cancellation finishes. Resume obtains the run lock,
-reconciles interrupted work, checks remaining limits, and starts another generation
-of the same run. It never restores obsolete receipts or replenishes usage.
-
-### 6.3 Minimal finite limits
-
-Project settings carry these proposed defaults; graph YAML does not:
+Stop uses an atomic request inbox. The controller fences the old generation,
+cancels/reaps the active child, and records a resumable stopped state. Late results
+cannot advance it. Run status is `active`, `stopped`, or `succeeded`; stopping an
+active operation is visible during cancellation. Worktrees are retained.
 
 | Limit | Initial default |
 |---|---:|
-| Supervisor and child agent invocations combined | 64 per run |
-| Executed nodes, including commands | 128 per run |
-| Corrective attempts | 8 per run |
-| Duration of one agent or command invocation | 20 minutes |
+| Agent invocations, including supervisor | 64 per run |
+| Executed jobs and observation requests | 128 per run |
+| Admitted or rejected decisions from either source, including mode changes | 512 per run |
+| Corrective attempts, coded or supervised | 8 per run |
+| Individual job/agent invocation duration | 20 minutes |
 | Active run execution time | 4 hours |
 
-These are implementation starting points, not measured performance guarantees.
-The controller reserves an invocation/node before launch. Failures, invalid
-decisions, and rejected candidate plans consume their applicable allowance.
-There are no free automatic invocation retries in the MVP.
+Reserve before dispatch. Invalid outputs and rejected decisions spend applicable
+allowance. Correction begins with retry/reentry after unmet evidence; one repair
+and its trial form an attempt. Repeating failed trials spends further attempts.
+Global decision/job/time limits also prevent inspection or replanning loops.
+Resume, mode changes, and session replacement preserve all counters. The eight
+corrective attempts are shared by plugin and supervisor; entering recovery does
+not create a fresh allowance. Exhaustion stops the run with evidence, attempted
+remedies, and the remaining blocker.
 
-A corrective attempt opens when the supervisor starts changing work after a
-failed check, rejected review, reported conflict, or invalidated accepted result.
-It contains one replacement plan/recipe and its trial. Internal inspection jobs
-consume global call/node/time limits. A failed trial ends that attempt; another
-correction consumes the next one. Successful correction closes only with accepted
-evidence resolving the blocker. Reentry is corrective even if described as
-ordinary planning. This uses observed execution state, not a domain error taxonomy.
+`Advance` is a short, terminating pure callback by plugin contract. An in-process
+Go plugin cannot be forcibly cancelled safely if it hangs, and a native crash can
+terminate the host. Panic handling can record some failures but is not crash
+containment. An operator can terminate a stuck host; restart must reconcile its
+journal and bounded child jobs. Automatic retries of crashing plugins are excluded.
 
-Active time includes supervisor and job execution and is durably accumulated;
-it pauses only when the run is stopped. Every individual invocation also has its
-wall-clock deadline. Limits survive process death and resume. Exhaustion stops
-the run with usage and the unresolved blocker. No budget-extension API is needed
-for the first version.
+## 9. Native Go build and loading contract
 
-## 7. Minimal end-to-end example: write and review
+A native Go plugin is built with `go build -buildmode=plugin`; loading executes
+new package initializers, and loaded plugins cannot be unloaded. The host and
+plugin need matching toolchain versions, relevant build flags/tags, and identical
+sources for shared dependencies. Platform support is limited; GraphLoom initially
+targets Linux. Go also documents limitations in plugin race detection.
+[Official Go plugin documentation](https://pkg.go.dev/plugin).
 
-The fixture repository has a committed baseline without `GREETING.txt`. A single
-writer creates that file. A separate reviewer evaluates the result. The required
-path remains `write → review`; plan review and command checks are supporting nodes.
+Accordingly, GraphLoom must ship a reproducible host build profile. Plugin authors
+build against that exact SDK source and profile, not merely a compatible-looking
+semantic version. The profile records the Go toolchain, OS/architecture, relevant
+environment/build settings, and dependency identities. CI builds the host and
+sample plugin together and performs an actual load test.
 
-### 7.1 Successful run
+A generated sidecar records graph ID/version, SDK/state schema, build profile ID,
+and binary digest. The loader verifies compatibility metadata and the digest
+before loading, then validates the exported function and definition. The sidecar
+is diagnostic compatibility metadata, not authentication or a replacement for
+the Go loader's own compatibility checks.
 
-1. `graphloom run task.yaml` pins the inputs and source `HEAD`, then creates the
-   run worktree and branch.
-2. The supervisor proposes an acceptance plan and a bounded content/scope check;
-   a separate plan-review job qualifies them.
-3. The writer creates `GREETING.txt` and returns a structured result. The controller
-   snapshots its report and records the workspace change manifest.
-4. The controller executes the proposed check. It establishes exact bytes
-   `Hello, GraphLoom!\n` (UTF-8, one newline) and that the only changed path versus
-   the pinned baseline is `GREETING.txt`. It includes staged, unstaged, untracked,
-   and ignored workspace changes in scope accounting.
-5. With a valid check receipt, the supervisor requests acceptance of write. The
-   controller accepts it, making review eligible.
-6. A separate read-only reviewer receives the task, writer result, check receipt,
-   and exact workspace revision. It returns `approve` or `request_changes` with
-   evidence. It does not change the file or rerun the writer itself.
-7. Approval and fresh prerequisite evidence allow review acceptance. The graph
-   advancer finds both receipts valid, and the controller marks the run succeeded.
-8. The CLI reports the result, evidence references, and retained worktree path.
-   The source checkout is unchanged; there is no automatic commit, push, or merge.
+Copy verified plugin bytes and their manifest into the private run directory;
+verify the copied bytes again and load that immutable copy so a changing source
+path cannot substitute another binary between verification and execution. Resume pins both plugin and compatible host build identity. Installing
+a new plugin version affects new runs only. One controller process owns a run;
+inspect/stop read state without loading native extensions.
 
-```text
-plan review → write#1 → content/scope check#1 → accept Write → review#1 → accept Review → succeeded
+Illustrative build sequence once the SDK and sample implementation exist:
+
+```sh
+# Use the release's exact build profile for both commands.
+go build -o bin/graphloom ./cmd/graphloom
+go build -buildmode=plugin -o examples/plugins/hello.so ./examples/plugins/hello
 ```
 
-Write acceptance requires the deterministic check; it does not depend on the
-later required Review stage. This avoids a circular dependency. Final success
-still requires that independent Review stage.
+A future packaging command can generate the sidecar from actual build information.
+Its schema and compatibility checks must exist before the runnable milestone;
+users should not hand-write claims that a mismatched binary is compatible.
 
-### 7.2 Corrective run
+## 10. Implementation sequence and release gate
 
-For the negative fixture, the first writer deliberately omits the newline or
-modifies another file. The actual check fails; the supervisor receives its output
-and appends diagnosis and another write attempt. The required Write stage remains
-unaccepted until a corrected check passes.
+1. **Public seam and loader:** add `loom` types, native export/load validation,
+   pinned build manifests, and a separately compiled hello plugin. Test the real
+   `.so` load path plus a malformed plugin in disposable host processes.
+2. **Deterministic graph execution:** call `Advance` from the controller; execute
+   writer, observed content/scope check, and independent review. Keep generic
+   readiness and receipt rules in `internal/graph`.
+3. **Supervisor recovery:** retain the run-wide session and add durable normal /
+   recovery modes, controller-triggered fallback, direct supervisor admission,
+   scoped overrides, and canonical-state reconciliation on Return. Verify an
+   unfamiliar launch failure recovers with no plugin repair handler, known
+   correction loops transfer to the supervisor, and both routes share limits.
+   Test reentry, rejected future targets, forbidden acceptance/check weakening,
+   stale/duplicate decisions, receipt invalidation, and mode/override/reservation
+   preservation across stop/resume. A repaired job must resume normal checks and
+   Review without a duplicate Write or plugin-specific approval.
+4. **Runnable local CLI:** complete isolated worktree setup, artifact handoffs,
+   stop/resume, build-compatible replay, and a real-backend hello run.
 
-If the review stage finds a defect after Write was accepted, the supervisor uses
-`reenter(write)`. The controller invalidates the Write receipt and any dependent
-review evidence, then admits a new correction under the remaining allowance.
+The release gate is `graphloom run task.yaml` loading `hello.so`, completing Write
+and Review with actual evidence, and preserving the original checkout. A missing
+newline, unrelated edit, review rejection, and unexpected agent failure must take
+the intended coded or supervised correction path without weakening the check.
 
-```text
-write#1 → check#1 → review#1 requests changes
-  → supervisor reenters Write
-  → write#2 → check#2 → review#2 → succeeded
-```
+Also test plugin identity/type/build mismatches, private-state restart, stale
+receipts, duplicate dispatch recovery, plugin panic, budget exhaustion, output
+path escape, and missing worktrees. Domain logic tests import the implementation
+as ordinary Go code and test the public interface; subprocess integration tests
+exercise native loading. A second independently built plugin must work without
+editing the controller, demonstrating that the extension seam is real.
 
-Both cases preserve the two-stage declaration, use the same supervisor session,
-and spend corrective allowance. The supervisor may repair a defective check only
-after independent qualification against the unchanged task requirements.
-
-## 8. Implementation shape and acceptance
-
-Proposed stack: one Go CLI executable. Use standard-library process and file
-operations plus a strict YAML parser. Keep the graph rules free of subprocess,
-provider, and storage dependencies. Package layout, seams, and import rules are
-in [codebase.md](codebase.md).
-
-```text
-cmd/graphloom/                 CLI: run, inspect, stop, resume
-internal/graph/                pure advancer
-internal/supervisor/           view assembly and decision decoding
-internal/controller/           harness, loop, seams (Runner, Store, Worktree, Clock)
-internal/adapter/              process/scripted runner, fs store, git/fake worktree, clocks
-examples/graphs/               happy-path declarations and matching stage definitions
-test/scenarios/                scripted agents and subprocess regression fixtures
-```
-
-Implementation sequence:
-
-1. **Graph + fake execution:** parse the happy path, define states and receipts,
-   implement pure advancement, and complete the scripted two-stage hello graph.
-2. **Supervisor + real runner:** wire one backend, plan review, independent checks,
-   adaptive reentry, finite limits, and enforceable write scopes.
-3. **Runnable CLI:** add `task.yaml` intake, isolated worktree creation, persistence,
-   ownership, crash reconciliation, stop/resume, and a real hello demonstration.
-
-The release gate is `graphloom run task.yaml` completing the hello task through
-Write and Review in an isolated worktree, plus a failing-first-attempt fixture
-that recovers without editing the graph declaration.
-Regression tests must also establish:
-
-- A failed node can feed a diagnostic node; acceptance still requires passing evidence.
-- A worker cannot write controller state or mint its own accepted receipt.
-- Skipped stages, stale evidence, reordered progress, and weakened checks are rejected.
-- Reentry appends attempts and invalidates downstream evidence without deleting history.
-- Duplicate decisions and stale generations cannot apply a transition twice.
-- Crashes before/after spawn and settlement do not duplicate work or reset limits.
-- Stop reaps work; resume reconciles before dispatch; exhausted runs stay stopped.
-- Unknown failures can reach the supervisor without a new domain classifier.
-- Result schema failures, unknown artifact references, escaping output paths, and
-  stale packet revisions cannot become accepted evidence.
-- Content and scope checks detect a missing newline and an unrelated file edit.
-- A dirty source checkout stays unchanged; its uncommitted changes are absent from
-  the run worktree, which starts at the pinned commit.
-- Starting from another shell directory resolves the same task-relative paths.
-- Worktree creation crashes reconcile safely; unrelated branch/path collisions stop.
-- Resume uses the original worktree and base even after the source branch advances;
-  missing worktrees stop instead of silently losing work.
-- No backend can mutate shared Git metadata or bypass its admitted write roots.
-
-Review focus: the three component boundaries, append-only attempt graph, serial
-execution scope, source-bound acceptance, and finite correction model. Later
-features should build on this runnable core rather than become prerequisites.
+See [codebase design](codebase.md) for package ownership and migration from the
+current partial implementation. The prior research remains historical context;
+it does not override this native plugin design.
