@@ -17,15 +17,22 @@
     "src",
     "test",
     "graphloom.manifest.json",
+    "package-lock.json",
     "tsconfig.json"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "tsc -p tsconfig.json && vitest run"
+    "test": "tsc -p tsconfig.json && vitest run",
+    "manifest": "node ./scripts/generate-manifest.mjs"
   },
   "dependencies": {
-    "@graphloom/sdk": "0.0.0"
+    "@graphloom/sdk": "file:../../../packages/sdk"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.10",
+    "typescript": "^5.8.2",
+    "vitest": "^3.0.9"
   },
   "engines": {
     "node": ">=22"

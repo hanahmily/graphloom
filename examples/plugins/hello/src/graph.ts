@@ -20,8 +20,12 @@ import {
   WRITE_STAGE,
 } from "./constants.js";
 import {
+  asFileBytesPayload,
+  asReviewVerdictPayload,
+  asWorkspaceManifestPayload,
   exactGreetingValidator,
   independentReviewValidator,
+  latestEvidencePayload,
   type FileBytesPayload,
   type ReviewVerdictPayload,
   type WorkspaceManifestPayload,
@@ -32,6 +36,8 @@ export interface HelloPrivateState {
   writerDispatched: boolean;
   observedWrite: boolean;
   reviewerDispatched: boolean;
+  /** Evidence length at last Write reentry — older review verdicts are ignored. */
+  reviewEvidenceFromIndex: number;
 }
 
 const definition: GraphDefinition = {
@@ -126,8 +132,12 @@ export function advanceHello(view: RunView): GraphDecision {
 }
 
 function advanceWrite(view: RunView, state: HelloPrivateState): GraphDecision {
-  const file = latestPayload<FileBytesPayload>(view, "file");
-  const manifest = latestPayload<WorkspaceManifestPayload>(view, "workspace");
+  const file = typedLatest<FileBytesPayload>(view, "file", asFileBytesPayload);
+  const manifest = typedLatest<WorkspaceManifestPayload>(
+    view,
+    "workspace",
+    asWorkspaceManifestPayload,
+  );
 
   if (!state.writerDispatched) {
     return withPrivate(
@@ -173,7 +183,9 @@ function advanceWrite(view: RunView, state: HelloPrivateState): GraphDecision {
   }
 
   if (check.status === "failed") {
-    if (state.writeCorrections < MAX_KNOWN_WRITE_CORRECTIONS) {
+    const underPluginCap = state.writeCorrections < MAX_KNOWN_WRITE_CORRECTIONS;
+    const hasCorrectionBudget = view.budgets.corrections > 0;
+    if (underPluginCap && hasCorrectionBudget) {
       return withPrivate(
         dispatch(
           {
@@ -187,6 +199,7 @@ function advanceWrite(view: RunView, state: HelloPrivateState): GraphDecision {
           "known content/scope defect — dispatch correction",
         ),
         {
+          ...state,
           writeCorrections: state.writeCorrections + 1,
           writerDispatched: true,
           observedWrite: false,
@@ -196,10 +209,12 @@ function advanceWrite(view: RunView, state: HelloPrivateState): GraphDecision {
     }
     return supervise(
       {
-        reason: `write defect after ${state.writeCorrections} corrections: ${check.reason}`,
+        reason: !hasCorrectionBudget
+          ? `write defect with exhausted correction budget: ${check.reason}`
+          : `write defect after ${state.writeCorrections} corrections: ${check.reason}`,
         evidenceRefs: view.evidence.map((e) => e.ref),
       },
-      "escalate repeated write failure",
+      "escalate write failure",
       serializePrivate(state),
     );
   }
@@ -215,7 +230,7 @@ function advanceWrite(view: RunView, state: HelloPrivateState): GraphDecision {
 }
 
 function advanceReview(view: RunView, state: HelloPrivateState): GraphDecision {
-  const review = latestPayload<ReviewVerdictPayload>(view, "review");
+  const review = latestReviewSinceCutoff(view, state);
 
   if (!state.reviewerDispatched && !review) {
     return withPrivate(
@@ -236,16 +251,17 @@ function advanceReview(view: RunView, state: HelloPrivateState): GraphDecision {
 
   if (!review) {
     return supervise(
-      { reason: "reviewer dispatched but no verdict evidence" },
+      { reason: "reviewer dispatched but no fresh verdict evidence" },
       "unfamiliar review-stage state",
       serializePrivate(state),
     );
   }
 
+  const freshEvidence = view.evidence.slice(state.reviewEvidenceFromIndex);
   const check = independentReviewValidator.evaluate({
     requirementId: REQUIREMENT_REVIEW,
     statement: definition.requirements[1]!.statement,
-    evidence: view.evidence,
+    evidence: freshEvidence,
   });
 
   if (check.status === "passed") {
@@ -264,7 +280,7 @@ function advanceReview(view: RunView, state: HelloPrivateState): GraphDecision {
         {
           stageId: WRITE_STAGE,
           reason: check.reason,
-          evidenceRefs: view.evidence.filter((e) => e.kind === "review").map((e) => e.ref),
+          evidenceRefs: freshEvidence.filter((e) => e.kind === "review").map((e) => e.ref),
         },
         "review request_changes — reenter Write",
       ),
@@ -273,6 +289,8 @@ function advanceReview(view: RunView, state: HelloPrivateState): GraphDecision {
         writerDispatched: false,
         observedWrite: false,
         reviewerDispatched: false,
+        // Ignore all evidence through the current review when Write restarts.
+        reviewEvidenceFromIndex: view.evidence.length,
       },
     );
   }
@@ -322,14 +340,28 @@ function validReceipt(view: RunView, stageId: string): boolean {
   return view.receipts.some((r) => r.stageId === stageId && r.valid);
 }
 
-function latestPayload<T>(view: RunView, kind: string): T | undefined {
-  for (let i = view.evidence.length - 1; i >= 0; i -= 1) {
-    const ev = view.evidence[i];
-    if (ev && ev.kind === kind && ev.payload !== undefined) {
-      return ev.payload as T;
-    }
+function typedLatest<T>(
+  view: RunView,
+  kind: string,
+  guard: (value: unknown) => T | undefined,
+): T | undefined {
+  const raw = latestEvidencePayload(view.evidence, kind);
+  if (raw === undefined) {
+    return undefined;
   }
-  return undefined;
+  return guard(raw);
+}
+
+function latestReviewSinceCutoff(
+  view: RunView,
+  state: HelloPrivateState,
+): ReviewVerdictPayload | undefined {
+  const slice = view.evidence.slice(state.reviewEvidenceFromIndex);
+  const raw = latestEvidencePayload(slice, "review");
+  if (raw === undefined) {
+    return undefined;
+  }
+  return asReviewVerdictPayload(raw);
 }
 
 function readPrivate(view: RunView): HelloPrivateState {
@@ -343,6 +375,7 @@ function readPrivate(view: RunView): HelloPrivateState {
       writerDispatched: parsed.writerDispatched ?? false,
       observedWrite: parsed.observedWrite ?? false,
       reviewerDispatched: parsed.reviewerDispatched ?? false,
+      reviewEvidenceFromIndex: parsed.reviewEvidenceFromIndex ?? 0,
     };
   } catch {
     return blankPrivate();
@@ -355,6 +388,7 @@ function blankPrivate(): HelloPrivateState {
     writerDispatched: false,
     observedWrite: false,
     reviewerDispatched: false,
+    reviewEvidenceFromIndex: 0,
   };
 }
 

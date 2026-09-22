@@ -1,4 +1,4 @@
-import type { ValidationInput, ValidationResult, Validator } from "@graphloom/sdk";
+import type { EvidenceRecord, ValidationInput, ValidationResult, Validator } from "@graphloom/sdk";
 import { GREETING_BYTES, GREETING_PATH } from "./constants.js";
 
 export interface FileBytesPayload {
@@ -18,12 +18,20 @@ export interface ReviewVerdictPayload {
 /** Exact greeting bytes and sole-path scope from controller observations. */
 export const exactGreetingValidator: Validator = {
   evaluate(input: ValidationInput): ValidationResult {
-    const file = findPayload<FileBytesPayload>(input, "file");
-    const manifest = findPayload<WorkspaceManifestPayload>(input, "workspace");
-    if (!file || !manifest) {
+    const fileRaw = latestEvidencePayload(input.evidence, "file");
+    const manifestRaw = latestEvidencePayload(input.evidence, "workspace");
+    if (fileRaw === undefined || manifestRaw === undefined) {
       return {
         status: "inconclusive",
         reason: "missing file bytes and/or workspace change manifest",
+      };
+    }
+    const file = asFileBytesPayload(fileRaw);
+    const manifest = asWorkspaceManifestPayload(manifestRaw);
+    if (!file || !manifest) {
+      return {
+        status: "inconclusive",
+        reason: "malformed file bytes and/or workspace change manifest",
       };
     }
     if (file.path !== GREETING_PATH) {
@@ -58,9 +66,13 @@ export const exactGreetingValidator: Validator = {
 /** Independent reviewer verdict — does not trust the writer. */
 export const independentReviewValidator: Validator = {
   evaluate(input: ValidationInput): ValidationResult {
-    const review = findPayload<ReviewVerdictPayload>(input, "review");
-    if (!review) {
+    const reviewRaw = latestEvidencePayload(input.evidence, "review");
+    if (reviewRaw === undefined) {
       return { status: "inconclusive", reason: "missing review verdict evidence" };
+    }
+    const review = asReviewVerdictPayload(reviewRaw);
+    if (!review) {
+      return { status: "inconclusive", reason: "malformed review verdict evidence" };
     }
     if (review.verdict === "approved") {
       return { status: "passed", reason: review.summary ?? "reviewer approved" };
@@ -86,11 +98,61 @@ export function validatorById(id: string): Validator | undefined {
   }
 }
 
-function findPayload<T>(input: ValidationInput, kind: string): T | undefined {
-  for (const ev of input.evidence) {
-    if (ev.kind === kind && ev.payload !== undefined) {
-      return ev.payload as T;
+/** Newest matching evidence first. */
+export function latestEvidencePayload(
+  evidence: EvidenceRecord[],
+  kind: string,
+): unknown | undefined {
+  for (let i = evidence.length - 1; i >= 0; i -= 1) {
+    const ev = evidence[i];
+    if (ev && ev.kind === kind && ev.payload !== undefined) {
+      return ev.payload;
     }
   }
   return undefined;
+}
+
+export function asFileBytesPayload(value: unknown): FileBytesPayload | undefined {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  const obj = value as Record<string, unknown>;
+  if (typeof obj.path !== "string" || typeof obj.bytes !== "string") {
+    return undefined;
+  }
+  return { path: obj.path, bytes: obj.bytes };
+}
+
+export function asWorkspaceManifestPayload(
+  value: unknown,
+): WorkspaceManifestPayload | undefined {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  const obj = value as Record<string, unknown>;
+  if (!Array.isArray(obj.changedPaths)) {
+    return undefined;
+  }
+  if (!obj.changedPaths.every((p) => typeof p === "string")) {
+    return undefined;
+  }
+  return { changedPaths: obj.changedPaths as string[] };
+}
+
+export function asReviewVerdictPayload(value: unknown): ReviewVerdictPayload | undefined {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  const obj = value as Record<string, unknown>;
+  if (obj.verdict !== "approved" && obj.verdict !== "request_changes") {
+    return undefined;
+  }
+  const out: ReviewVerdictPayload = { verdict: obj.verdict };
+  if (obj.summary !== undefined) {
+    if (typeof obj.summary !== "string") {
+      return undefined;
+    }
+    out.summary = obj.summary;
+  }
+  return out;
 }

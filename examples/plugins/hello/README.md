@@ -39,7 +39,13 @@ Required bytes: `Hello, GraphLoom!\n` at `GREETING.txt` only.
 ```sh
 npm run build -w @graphloom/plugin-hello
 npm test -w @graphloom/plugin-hello
+npm run manifest -w @graphloom/plugin-hello   # refresh digests after source/lock changes
 ```
+
+The bundle ships `package-lock.json`, pinned toolchain (`typescript`/`vitest` as
+devDependencies), and `graphloom.manifest.json` digests for source/lock inputs.
+`@graphloom/sdk` is linked via a relative `file:` dependency for isolated rebuild
+inside this monorepo.
 
 Authoritative contracts: [design §3](../../../docs/design-typescript-core.md#3-plugin-package-and-trust)
 and [§11](../../../docs/design-typescript-core.md#11-minimal-example-and-verification).

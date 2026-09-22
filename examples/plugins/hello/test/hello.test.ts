@@ -214,6 +214,72 @@ describe("known corrections", () => {
     expect(d.action.reenter.stageId).toBe("write");
   });
 
+  it("supervises when correction budget is exhausted", () => {
+    const view = baseView({
+      budgets: { agentInvocations: 64, jobs: 128, decisions: 512, corrections: 0 },
+      privateState: JSON.stringify({
+        writeCorrections: 0,
+        writerDispatched: true,
+        observedWrite: true,
+        reviewerDispatched: false,
+        reviewEvidenceFromIndex: 0,
+      }),
+      evidence: [
+        {
+          ref: "file-1",
+          kind: "file",
+          payload: { path: GREETING_PATH, bytes: "wrong" },
+        },
+        {
+          ref: "ws-1",
+          kind: "workspace",
+          payload: { changedPaths: [GREETING_PATH] },
+        },
+      ],
+    });
+    const d = advanceHello(view);
+    expect(d.action.type).toBe("supervise");
+  });
+
+  it("ignores stale request_changes after Write reentry", () => {
+    const staleReview = {
+      ref: "rev-old",
+      kind: "review" as const,
+      payload: { verdict: "request_changes" as const, summary: "old" },
+    };
+    const evidence = [staleReview];
+    const view = baseView({
+      current: { stageId: "review", attempt: 2 },
+      privateState: JSON.stringify({
+        writeCorrections: 0,
+        writerDispatched: true,
+        observedWrite: true,
+        reviewerDispatched: false,
+        reviewEvidenceFromIndex: evidence.length,
+      }),
+      receipts: [
+        {
+          id: "r-write",
+          stageId: "write",
+          requirementId: "greeting-bytes",
+          validatorBinding: {
+            requirementId: "greeting-bytes",
+            validatorId: "exact-greeting",
+            version: "1",
+          },
+          candidateFingerprint: "fp2",
+          evidenceRefs: ["file-2"],
+          valid: true,
+        },
+      ],
+      evidence,
+    });
+    const d = advanceHello(view);
+    expect(d.action.type).toBe("dispatch");
+    if (d.action.type !== "dispatch") throw new Error("expected dispatch");
+    expect(d.action.job.purpose).toBe("review");
+  });
+
   it("supervises after repeated write corrections", () => {
     const view = baseView({
       privateState: JSON.stringify({
@@ -309,6 +375,51 @@ describe("validators", () => {
       ],
     });
     expect(result.status).toBe("failed");
+  });
+
+  it("returns inconclusive for malformed workspace payloads", () => {
+    const result = exactGreetingValidator.evaluate({
+      requirementId: "greeting-bytes",
+      statement: "x",
+      evidence: [
+        {
+          ref: "f",
+          kind: "file",
+          payload: { path: GREETING_PATH, bytes: GREETING_BYTES },
+        },
+        {
+          ref: "w",
+          kind: "workspace",
+          payload: { changedPaths: null },
+        },
+      ],
+    });
+    expect(result.status).toBe("inconclusive");
+  });
+
+  it("evaluates the newest file evidence", () => {
+    const result = exactGreetingValidator.evaluate({
+      requirementId: "greeting-bytes",
+      statement: "x",
+      evidence: [
+        {
+          ref: "old",
+          kind: "file",
+          payload: { path: GREETING_PATH, bytes: "stale" },
+        },
+        {
+          ref: "new",
+          kind: "file",
+          payload: { path: GREETING_PATH, bytes: GREETING_BYTES },
+        },
+        {
+          ref: "w",
+          kind: "workspace",
+          payload: { changedPaths: [GREETING_PATH] },
+        },
+      ],
+    });
+    expect(result.status).toBe("passed");
   });
 
   it("passes approved review and fails request_changes", () => {

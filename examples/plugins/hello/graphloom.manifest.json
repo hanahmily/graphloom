@@ -9,7 +9,23 @@
   "repairContract": "source-repairable",
   "runtimeProfile": {
     "node": ">=22",
-    "module": "nodenext"
+    "module": "nodenext",
+    "typescript": "^5.8.2",
+    "vitest": "^3.0.9"
+  },
+  "digests": {
+    "sourceTree": "8e35c7fd8b391e46658801aeea4eec343f973e680b33f91890df150485c705b1",
+    "packageLock": "b8602594cf71784eff3f42f6a35e1716f8d1697dea86a7eda497d71ed97e5b87",
+    "files": {
+      "package.json": "a039a941f2974866dda84d9048bd414e354f5139fbf4659990f1cd417694e438",
+      "package-lock.json": "b8602594cf71784eff3f42f6a35e1716f8d1697dea86a7eda497d71ed97e5b87",
+      "tsconfig.json": "6c095d082835cbe84c047862b0f6d42fb292b310be8e5f2b58c009def9407d69",
+      "src/constants.ts": "be9ca3e1047f5613f4c3a580d73bbe9aadf7a7eb8c3f0fff56a31ffc3267a98b",
+      "src/graph.ts": "44bf7622b36fc2b1a2ef9315c8dd3cad7b44b5f36980b51ff0056ee6d7db0fdd",
+      "src/index.ts": "73323338d0a5be46de553f5bbd0bd9aa902b4599e4cc911138994e00af68038a",
+      "src/validators.ts": "df8b28fd37cfd5efc322cdcc9aebacac153d26cb0cee3668604d7a301841b571",
+      "test/hello.test.ts": "e981cceced8cca13db663f40a32597093262a6e55ca6f3964eb52c39be6a6137"
+    }
   },
   "requirements": [
     {
@@ -24,8 +40,19 @@
     }
   ],
   "stages": [
-    { "id": "write", "name": "Write", "requirementIds": ["greeting-bytes"] },
-    { "id": "review", "name": "Review", "requirementIds": ["independent-review"] }
-  ],
-  "notes": "Digests for source/lockfile/build artifacts are filled by the controller/builder at pin time."
+    {
+      "id": "write",
+      "name": "Write",
+      "requirementIds": [
+        "greeting-bytes"
+      ]
+    },
+    {
+      "id": "review",
+      "name": "Review",
+      "requirementIds": [
+        "independent-review"
+      ]
+    }
+  ]
 }
