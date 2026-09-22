@@ -37,6 +37,9 @@ npm run build
   step set, identities, names, order, and required outcomes are fixed for a run.
   Repair jobs and retries are executions within existing steps, not new steps.
   Code and validator changes use the qualified repair procedure in the core design.
+  Each qualification forks an immutable snapshot of the base plugin version into
+  its own candidate tree so concurrent repairs cannot clobber each other or the
+  live pin; activation admits one candidate under the run lock.
 - Source repair needs available source, build inputs, tests, and operator authority.
   Opaque dependencies retain explicit limits; TypeScript alone is not repairability.
 - Run plugins outside the controller process. Process separation does not replace

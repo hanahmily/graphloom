@@ -314,6 +314,17 @@ and an independent reviewer evaluates it. The original bundle and failure eviden
 remain immutable. Repair source lives outside the target repository, so it cannot
 accidentally enter the user's deliverable diff.
 
+**Snapshot base for every qualification.** `QualifyRepair` always starts from an
+immutable snapshot of a specific plugin version (normally the run's active pinned
+bundle: source, lockfile, build inputs, and digests). The controller materializes
+that snapshot into an isolated candidate tree before any patch agent runs. Concurrent
+or overlapping repair attempts each get their own snapshot and tree; they never share
+a writable working copy, and they never mutate the live installed bundle or another
+candidate. A revised patch forks again from the recorded base snapshot (or from an
+explicit prior candidate digest), not from a half-edited tree. Qualification receipts
+bind the base snapshot digest and the candidate digest together so activation cannot
+admit a patch whose parent is no longer the intended version.
+
 | Defect | Response |
 |---|---|
 | Product output is wrong | Repair output and rerun existing validation |
@@ -326,7 +337,11 @@ A source repair or validator substitution follows the same bounded procedure:
 
 1. **Diagnose and reserve.** Identify the disputed requirement or route, faulty
    version, candidate revision, failure evidence, repair authority, and one shared
-   correction reservation. A patch cannot change the repair policy that admits it.
+   correction reservation. Snapshot the faulty plugin version into an isolated
+   candidate tree before editing. A patch cannot change the repair policy that
+   admits it. Only one activation may proceed at a time under the run lock; other
+   in-flight candidates remain durable artifacts until activated, rejected, or
+   superseded.
 2. **Reproduce.** Add a focused regression case showing the defect in the original
    implementation. Include valid and invalid cases derived from the requirement.
    For an exact-byte gate, include missing newline, wrong content, and extra files.
@@ -390,11 +405,14 @@ qualified candidate → activation intent → fresh child preflight
 Quiesce jobs first and persist intent before starting a candidate process. Preflight
 checks protocol, metadata, unchanged requirement definitions, qualified validator
 binding changes, and bounded callback behavior.
-Under the cross-process lock, compare generation/state revision, commit active
-version and validator bindings together with receipt invalidation, and fence old
-messages. Resume reconciles that journal: before the switch, the old version stays
-active; after it, the new version stays active. Never execute both as decision
-owners. Candidate preflight cannot perform target-repository effects.
+Under the cross-process lock, compare generation/state revision, verify the
+candidate still descends from the recorded base snapshot (reject if the active
+version moved under a concurrent activation), commit active version and validator
+bindings together with receipt invalidation, and fence old messages. Resume
+reconciles that journal: before the switch, the old version stays active; after it,
+the new version stays active. Never execute both as decision owners. Never merge
+two candidate trees; activate exactly one qualified artifact or keep the previous
+pin. Candidate preflight cannot perform target-repository effects.
 
 A routing-only change preserves already-qualified outcomes if their validator
 bindings and evidence remain unchanged. A validator change invalidates its affected

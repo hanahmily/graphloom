@@ -63,3 +63,5 @@ creates new attempts while preserving prior history.
 **Qualified repair**:
 A proposed implementation change with reproduced defect evidence, regression
 checks, and independent review, eligible for an authorized version transition.
+Each attempt patches an isolated snapshot of a specific base plugin version so
+concurrent candidates cannot share or mutate one another's trees.
