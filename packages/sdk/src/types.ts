@@ -65,6 +65,8 @@ export interface EvidenceRecord {
   kind: "file" | "command" | "workspace" | "review" | "other";
   fingerprint?: Fingerprint;
   payload?: unknown;
+  /** Controller generation that produced this evidence; used for freshness admission. */
+  generation?: number;
 }
 
 export interface OutstandingOperation {

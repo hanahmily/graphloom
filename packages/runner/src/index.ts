@@ -1,2 +1,6 @@
-/** Runner scaffold — scoped job execution lands in later tickets. */
-export {};
+export type { JobContext, JobResult, Runner } from "./types.js";
+export {
+  createScriptedRunner,
+  type ScriptedJobHandler,
+  type ScriptedRunnerOptions,
+} from "./scripted.js";

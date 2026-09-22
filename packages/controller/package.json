@@ -12,9 +12,10 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node -e \"process.exit(0)\""
+    "test": "tsc -p tsconfig.json && vitest run"
   },
   "dependencies": {
+    "@graphloom/runner": "0.0.0",
     "@graphloom/sdk": "0.0.0"
   }
 }
