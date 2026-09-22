@@ -12,14 +12,31 @@ type Store interface {
 
 // Document is the versioned run state held by Store.
 type Document struct {
-	RunID            string         `json:"run_id"`
-	Status           string         `json:"status"` // active | stopped | succeeded
-	Generation       uint64         `json:"generation"`
-	Revision         uint64         `json:"revision"`
-	Pinned           PinnedIntake   `json:"pinned"`
-	Graph            GraphState     `json:"graph"`
-	ObservedNodeIDs  []string       `json:"observed_node_ids"`
-	LastDecisionID   string         `json:"last_decision_id,omitempty"`
+	RunID           string                `json:"run_id"`
+	Status          string                `json:"status"` // active | stopped | succeeded | interrupted
+	Generation      uint64                `json:"generation"`
+	Revision        uint64                `json:"revision"`
+	Pinned          PinnedIntake          `json:"pinned"`
+	Graph           GraphState            `json:"graph"`
+	Dispatching     *DispatchIntent       `json:"dispatching,omitempty"`
+	Observations    []ObservationRecord   `json:"observations"`
+	LastDecisionID  string                `json:"last_decision_id,omitempty"`
+	FailureReason   string                `json:"failure_reason,omitempty"`
+}
+
+// DispatchIntent is persisted before Runner.Invoke so crashes can reconcile.
+type DispatchIntent struct {
+	NodeID string `json:"node_id"`
+	Role   string `json:"role"`
+}
+
+// ObservationRecord is durable evidence for an observed execution node.
+type ObservationRecord struct {
+	NodeID      string `json:"node_id"`
+	Status      string `json:"status"`
+	ExitCode    *int   `json:"exit_code,omitempty"`
+	OK          bool   `json:"ok"`
+	EvidenceRef string `json:"evidence_ref"`
 }
 
 // PinnedIntake is the immutable task snapshot for a run.
@@ -33,7 +50,6 @@ type PinnedIntake struct {
 }
 
 // GraphState is the JSON-stable projection of graph.State used in Document.
-// The harness converts to/from graph.State at Apply/Ready boundaries.
 type GraphState struct {
 	Raw []byte `json:"raw"`
 }

@@ -3,6 +3,7 @@ package scripted
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sync"
 
@@ -19,14 +20,15 @@ type Step struct {
 
 // Runner maps sequential steps to Invoke calls.
 type Runner struct {
-	mu    sync.Mutex
-	steps []Step
-	i     int
+	mu        sync.Mutex
+	steps     []Step
+	i         int
+	autoFence bool
 }
 
 func New(steps []Step) *Runner {
 	cp := append([]Step(nil), steps...)
-	return &Runner{steps: cp}
+	return &Runner{steps: cp, autoFence: true}
 }
 
 func (r *Runner) Invoke(ctx context.Context, job controller.Job) (controller.Observation, error) {
@@ -44,7 +46,34 @@ func (r *Runner) Invoke(ctx context.Context, job controller.Job) (controller.Obs
 	if step.Err != nil {
 		return controller.Observation{}, step.Err
 	}
-	return step.Observation, nil
+	obs := step.Observation
+	if r.autoFence && job.Role == controller.RoleSupervisor && len(job.Packet) > 0 && len(obs.ResultRaw) > 0 {
+		patched, err := injectFence(job.Packet, obs.ResultRaw)
+		if err != nil {
+			return controller.Observation{}, err
+		}
+		obs.ResultRaw = patched
+	}
+	return obs, nil
+}
+
+func injectFence(packet, decision []byte) ([]byte, error) {
+	var view struct {
+		RunID      string `json:"run_id"`
+		Generation uint64 `json:"generation"`
+		Revision   uint64 `json:"revision"`
+	}
+	if err := json.Unmarshal(packet, &view); err != nil {
+		return nil, fmt.Errorf("scripted: packet: %w", err)
+	}
+	var dec map[string]any
+	if err := json.Unmarshal(decision, &dec); err != nil {
+		return nil, fmt.Errorf("scripted: decision: %w", err)
+	}
+	dec["run_id"] = view.RunID
+	dec["generation"] = view.Generation
+	dec["expected_revision"] = view.Revision
+	return json.Marshal(dec)
 }
 
 var _ controller.Runner = (*Runner)(nil)

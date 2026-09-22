@@ -6,12 +6,21 @@ import (
 	"fmt"
 )
 
-var errNotImplemented = errors.New("supervisor: not implemented")
-
 // Input is the durable facts needed to build a supervisor view.
 type Input struct {
-	RunID    string
-	GraphJSON []byte
+	RunID      string
+	Generation uint64
+	Revision   uint64
+	Pinned     Pinned
+	GraphJSON  []byte
+}
+
+// Pinned is the immutable intake snapshot visible to the supervisor.
+type Pinned struct {
+	GraphID     string   `json:"graph_id"`
+	Request     string   `json:"request"`
+	Stages      []string `json:"stages"`
+	Definitions string   `json:"definitions"`
 }
 
 // Prompt is the assembled view passed to a supervisor Runner turn.
@@ -56,10 +65,18 @@ const (
 // BuildView packs pinned sources and current graph facts into a Prompt. Pure.
 func BuildView(in Input) (Prompt, error) {
 	type view struct {
-		RunID string `json:"run_id"`
-		Graph json.RawMessage `json:"graph"`
+		RunID      string          `json:"run_id"`
+		Generation uint64          `json:"generation"`
+		Revision   uint64          `json:"revision"`
+		Pinned     Pinned          `json:"pinned"`
+		Graph      json.RawMessage `json:"graph"`
 	}
-	v := view{RunID: in.RunID}
+	v := view{
+		RunID:      in.RunID,
+		Generation: in.Generation,
+		Revision:   in.Revision,
+		Pinned:     in.Pinned,
+	}
 	if len(in.GraphJSON) > 0 {
 		v.Graph = append(json.RawMessage(nil), in.GraphJSON...)
 	} else {

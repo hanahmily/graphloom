@@ -27,10 +27,12 @@ type Report struct {
 	Status            string
 	Worktree          string
 	ObservedNodes     []string
+	Observations      []ObservationRecord
 	PinnedGraph       string
 	PinnedRequest     string
 	PinnedStages      []string
 	PinnedDefinitions string
+	FailureReason     string
 }
 
 // Option configures harness wiring. Defaults select production adapters.
@@ -91,7 +93,8 @@ func Run(ctx context.Context, taskPath string, opts ...Option) (*Outcome, error)
 		doc.Status = "active"
 		doc.Pinned = pinned
 		doc.Graph = GraphState{Raw: raw}
-		doc.ObservedNodeIDs = nil
+		doc.Observations = nil
+		doc.Dispatching = nil
 		doc.Generation = 1
 		doc.Revision = 1
 		return nil
@@ -100,6 +103,7 @@ func Run(ctx context.Context, taskPath string, opts ...Option) (*Outcome, error)
 		return nil, err
 	}
 	if err := runLoop(ctx, cfg, runID); err != nil {
+		_ = markInterrupted(ctx, cfg.Store, runID, err.Error())
 		return nil, err
 	}
 	doc, err := cfg.Store.Get(ctx, runID)
@@ -119,14 +123,20 @@ func Inspect(ctx context.Context, runID string, opts ...Option) (*Report, error)
 	if err != nil {
 		return nil, err
 	}
+	nodes := make([]string, 0, len(doc.Observations))
+	for _, o := range doc.Observations {
+		nodes = append(nodes, o.NodeID)
+	}
 	return &Report{
 		RunID:             doc.RunID,
 		Status:            doc.Status,
-		ObservedNodes:     append([]string(nil), doc.ObservedNodeIDs...),
+		ObservedNodes:     nodes,
+		Observations:      append([]ObservationRecord(nil), doc.Observations...),
 		PinnedGraph:       doc.Pinned.GraphID,
 		PinnedRequest:     doc.Pinned.Request,
 		PinnedStages:      append([]string(nil), doc.Pinned.Stages...),
 		PinnedDefinitions: doc.Pinned.Definitions,
+		FailureReason:     doc.FailureReason,
 	}, nil
 }
 
@@ -203,6 +213,16 @@ func dispatchReady(ctx context.Context, cfg *config, runID string, nodeID graph.
 	case graph.KindCommand:
 		role = RoleCommand
 	}
+
+	err = cfg.Store.Transact(ctx, runID, func(d *Document) error {
+		d.Dispatching = &DispatchIntent{NodeID: string(nodeID), Role: string(role)}
+		d.Revision++
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+
 	outDir := filepath.Join(cfg.RunRoot, "runs", runID, "out", string(nodeID))
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		return err
@@ -217,14 +237,20 @@ func dispatchReady(ctx context.Context, cfg *config, runID string, nodeID graph.
 	if err != nil {
 		return err
 	}
+
+	evidenceRef := filepath.Join("out", string(nodeID), "result.json")
+	if err := os.WriteFile(filepath.Join(outDir, "result.json"), obs.ResultRaw, 0o644); err != nil {
+		return err
+	}
+
 	return cfg.Store.Transact(ctx, runID, func(d *Document) error {
 		g, err := decodeGraph(d.Graph)
 		if err != nil {
 			return err
 		}
-		ok := obs.Status == StatusCompleted
+		ok := observationOK(role, obs)
 		checkPassed := false
-		if n.Purpose == graph.PurposeCheck && obs.ExitCode != nil && *obs.ExitCode == 0 && ok {
+		if n.Purpose == graph.PurposeCheck && ok {
 			checkPassed = true
 		}
 		g, err = graph.Apply(g, graph.Transition{Observe: &graph.ObserveSpec{
@@ -241,10 +267,27 @@ func dispatchReady(ctx context.Context, cfg *config, runID string, nodeID graph.
 			return err
 		}
 		d.Graph = GraphState{Raw: raw}
-		d.ObservedNodeIDs = append(d.ObservedNodeIDs, string(nodeID))
+		d.Dispatching = nil
+		d.Observations = append(d.Observations, ObservationRecord{
+			NodeID:      string(nodeID),
+			Status:      string(obs.Status),
+			ExitCode:    obs.ExitCode,
+			OK:          ok,
+			EvidenceRef: evidenceRef,
+		})
 		d.Revision++
 		return nil
 	})
+}
+
+func observationOK(role Role, obs Observation) bool {
+	if obs.Status != StatusCompleted {
+		return false
+	}
+	if role == RoleCommand {
+		return obs.ExitCode != nil && *obs.ExitCode == 0
+	}
+	return true
 }
 
 func consultSupervisor(ctx context.Context, cfg *config, runID string) error {
@@ -252,7 +295,18 @@ func consultSupervisor(ctx context.Context, cfg *config, runID string) error {
 	if err != nil {
 		return err
 	}
-	view, err := supervisor.BuildView(supervisor.Input{RunID: runID, GraphJSON: doc.Graph.Raw})
+	view, err := supervisor.BuildView(supervisor.Input{
+		RunID:      runID,
+		Generation: doc.Generation,
+		Revision:   doc.Revision,
+		Pinned: supervisor.Pinned{
+			GraphID:     doc.Pinned.GraphID,
+			Request:     doc.Pinned.Request,
+			Stages:      append([]string(nil), doc.Pinned.Stages...),
+			Definitions: doc.Pinned.Definitions,
+		},
+		GraphJSON: doc.Graph.Raw,
+	})
 	if err != nil {
 		return err
 	}
@@ -274,6 +328,15 @@ func consultSupervisor(ctx context.Context, cfg *config, runID string) error {
 		return err
 	}
 	return cfg.Store.Transact(ctx, runID, func(d *Document) error {
+		if dec.RunID != d.RunID {
+			return fmt.Errorf("controller: decision run_id mismatch")
+		}
+		if dec.Generation != d.Generation {
+			return fmt.Errorf("controller: decision generation mismatch")
+		}
+		if dec.ExpectedRevision != d.Revision {
+			return fmt.Errorf("controller: decision revision mismatch")
+		}
 		g, err := decodeGraph(d.Graph)
 		if err != nil {
 			return err
@@ -318,6 +381,18 @@ func consultSupervisor(ctx context.Context, cfg *config, runID string) error {
 		}
 		d.Graph = GraphState{Raw: raw}
 		d.LastDecisionID = dec.DecisionID
+		d.Revision++
+		return nil
+	})
+}
+
+func markInterrupted(ctx context.Context, store Store, runID, reason string) error {
+	return store.Transact(ctx, runID, func(d *Document) error {
+		if d.Status != "active" {
+			return nil
+		}
+		d.Status = "interrupted"
+		d.FailureReason = reason
 		d.Revision++
 		return nil
 	})

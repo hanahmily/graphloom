@@ -70,6 +70,13 @@ func TestHarnessPinsTaskAppendsCommandAndInspectsObservation(t *testing.T) {
 	if len(rep.ObservedNodes) != 1 || rep.ObservedNodes[0] != "cmd-1" {
 		t.Fatalf("ObservedNodes = %v, want [cmd-1]", rep.ObservedNodes)
 	}
+	if len(rep.Observations) != 1 {
+		t.Fatalf("Observations = %d, want 1", len(rep.Observations))
+	}
+	ev := rep.Observations[0]
+	if !ev.OK || ev.EvidenceRef == "" || ev.ExitCode == nil || *ev.ExitCode != 0 {
+		t.Fatalf("observation evidence = %+v", ev)
+	}
 	if rep.PinnedGraph != "hello" || rep.PinnedRequest == "" {
 		t.Fatalf("pinned intake missing: graph=%q request=%q", rep.PinnedGraph, rep.PinnedRequest)
 	}
@@ -78,6 +85,49 @@ func TestHarnessPinsTaskAppendsCommandAndInspectsObservation(t *testing.T) {
 	}
 	if rep.PinnedDefinitions == "" {
 		t.Fatal("expected pinned stage definitions")
+	}
+}
+
+func TestStoreRejectsPathTraversalRunID(t *testing.T) {
+	st := storefs.New(t.TempDir())
+	_, err := st.Get(context.Background(), "../escape")
+	if err == nil {
+		t.Fatal("expected invalid run id error")
+	}
+}
+
+func TestCommandNonzeroExitIsNotOK(t *testing.T) {
+	ctx := context.Background()
+	runRoot := t.TempDir()
+	fixture := writeHarnessFixture(t)
+
+	appendDecision, _ := json.Marshal(map[string]any{
+		"action": "append", "decision_id": "d-append",
+		"nodes": []map[string]any{{
+			"id": "cmd-1", "stage": "write", "kind": "command", "purpose": "check", "argv": []string{"false"},
+		}},
+	})
+	stopDecision, _ := json.Marshal(map[string]any{
+		"action": "stop", "decision_id": "d-stop", "reason": "observed failure",
+	})
+	exit1 := 1
+	r := scripted.New([]scripted.Step{
+		{Role: controller.RoleSupervisor, Observation: controller.Observation{Status: controller.StatusCompleted, ResultRaw: appendDecision}},
+		{Role: controller.RoleCommand, Observation: controller.Observation{Status: controller.StatusCompleted, ExitCode: &exit1}},
+		{Role: controller.RoleSupervisor, Observation: controller.Observation{Status: controller.StatusCompleted, ResultRaw: stopDecision}},
+	})
+	st := storefs.New(runRoot)
+	out, err := controller.Run(ctx, filepath.Join(fixture, "task.yaml"),
+		controller.WithRunner(r), controller.WithStore(st), controller.WithRunRoot(runRoot))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rep, err := controller.Inspect(ctx, out.RunID, controller.WithStore(st))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Observations) != 1 || rep.Observations[0].OK {
+		t.Fatalf("want failed observation, got %+v", rep.Observations)
 	}
 }
 
