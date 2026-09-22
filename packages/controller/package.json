@@ -1,0 +1,20 @@
+{
+  "name": "@graphloom/controller",
+  "version": "0.0.0",
+  "description": "Durable state, admission, receipts, and run lifecycle",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node -e \"process.exit(0)\""
+  },
+  "dependencies": {
+    "@graphloom/sdk": "0.0.0"
+  }
+}

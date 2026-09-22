@@ -9,18 +9,25 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      # Ensure workspace devDependencies (typescript, vitest) install under npm ci.
+      NODE_ENV: development
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-node@v4
         with:
-          go-version-file: go.mod
+          node-version: "22"
+          cache: npm
 
-      - name: Vet
-        run: go vet ./...
+      - name: Install
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
 
       - name: Test
-        run: go test ./...
+        run: npm test
 
       - name: Build
-        run: go build ./...
+        run: npm run build

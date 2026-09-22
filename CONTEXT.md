@@ -48,8 +48,9 @@ The loom's record that a stage met its requirements for specific inputs and
 admitted validator bindings.
 
 **Supervisor**:
-The run-wide agent responsible for investigating failures and directing exceptional
-recovery within the task's required outcomes, granted authority, and finite resources.
+The run-wide agent whose job is to drive the graph to successful completion under
+failure—investigating, repairing, and reentering within the task's required
+outcomes, granted authority, and finite resources, rather than stopping early.
 
 **Recovery episode**:
 A period in which the supervisor directs investigation and repair before returning

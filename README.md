@@ -5,17 +5,26 @@
 Write a graph in TypeScript. Let the loom run its agents.
 
 Graph plugins define required outcomes and normal execution. A run-wide supervisor
-handles exceptional recovery, including tested repairs to readable plugin source.
-The controller executes admitted actions, owns accepted evidence, and preserves
+drives exceptional recovery so the graph can still finish—including tested repairs
+to readable plugin source—rather than giving up on the first failure. The
+controller executes admitted actions, owns accepted evidence, and preserves
 permissions, history, and finite budgets. Required outcomes remain unchanged when
 a validator implementation is repaired.
 
 ## Status
 
-The [TypeScript core design](docs/design-typescript-core.md) is the current target.
-The repository contains a partial Go implementation of an earlier design; the
-TypeScript runtime and plugin repair protocol are not implemented yet. Existing
-source is retained during migration. The native Go plugin design is superseded.
+The [TypeScript core design](docs/design-typescript-core.md) is authoritative.
+Active code lives under `packages/` (`sdk`, `controller`, `plugin-host`,
+`supervisor`, `runner`) and `apps/graphloom`. The public SDK and scripted
+`GraphPlugin` adapter are in place; durable run/inspect/stop/resume and plugin
+repair are not implemented yet. Earlier Go sources are frozen under
+[`legacy/go`](legacy/go) for reference and are not part of CI.
+
+```sh
+npm ci
+npm test
+npm run build
+```
 
 ## Select a graph
 

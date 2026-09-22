@@ -17,7 +17,7 @@ The core has three modules:
 | Module | Owns |
 |---|---|
 | Graph | Required stages and outcomes, normal task construction and routing, default validators, convenient corrections for known failures |
-| Supervisor | One logical session per run; unexpected recovery, investigation, reentry, and coordination of plugin or validator repair |
+| Supervisor | One logical session per run; drive the graph to successful completion under failure—investigate, reenter, repair, and exhaust authorized remedies before stopping |
 | Controller | Execution authority, process lifecycle, state, artifacts, validation scheduling, accepted receipts, worktrees, budgets, and version transitions |
 
 The plugin's declared steps (called stages in the SDK) are fixed for a run.
@@ -234,7 +234,15 @@ defect is resolved, rather than asking a worker to satisfy a known-wrong predica
 ## 6. Supervisor authority and routing
 
 The graph handles normal execution and optional known corrections. The supervisor
-owns exceptional recovery. The controller records exactly one active decision
+owns exceptional recovery. Its **core job is to make the graph advance
+successfully**: keep working the run toward accepted required stages, prefer
+investigation and repair over early Stop, and spend remaining budgets on the next
+plausible remedy within pinned outcomes and granted authority. Stopping is for
+exhausted limits, missing indispensable authority, contradictory requirements,
+opaque unrepairable gates, or operator cancellation—not for inconvenience or a
+single failed trial.
+
+The controller records exactly one active decision
 source through durable `normal` and `recovery` modes. Both use the same admission
 and execution interface. Workers and reviewers report typed results or conflicts;
 they do not route the run or modify receipts.
@@ -262,9 +270,11 @@ including repeated observations and Return cycles, consume global limits.
 The supervisor's repair scope covers every failing plugin implementation surface:
 prompts, available model settings, task construction, validation logic, artifact
 handling, error handling, and routing between existing steps. It may investigate,
-run repair jobs, reenter existing stages, qualify source patches, or stop. No
-plugin-specific repair allowlist is required. This is authority to attempt repairs,
-not a guarantee of success when source, capabilities, or budget are unavailable.
+run repair jobs, reenter existing stages, and qualify source patches. Prefer another
+authorized remedy while budget and authority remain; Stop only when further progress
+is blocked as above. No plugin-specific repair allowlist is required. This is a
+duty to attempt repairs aggressively within bounds—not a guarantee of success when
+source, capabilities, or budget are unavailable.
 Routing repairs preserve the fixed step set and required order; retry and reentry
 cannot be used to skip an outcome or introduce a new step. Changes to job instructions preserve the
 original task, evidence contracts, write scope, and reviewer independence. Persist
@@ -450,7 +460,9 @@ steps, independent review, and activation also consume applicable job/invocation
 decision limits, without counting the same correction twice. Reentry, activation,
 mode changes, session replacement, and resume never reset counters. Exhaustion
 preserves the run with attempted remedies, evidence, and an exact remaining blocker.
-Broad repair authority does not guarantee success for every task or plugin.
+Until those limits or hard blockers apply, the supervisor treats unfinished required
+stages as work still owed. Broad repair authority does not guarantee success for
+every task or plugin.
 
 ## 11. Minimal example and verification
 
@@ -515,15 +527,16 @@ These are release requirements, not claims of tests already run.
    affected-evidence invalidation. Pass the defective-gate scenario, activation
    crash scenarios, opaque-plugin stop case, and a real-backend hello run.
 
-Proposed package seams are `sdk` (value/wire contracts), `controller` (durable
-state and admission), `plugin-host` (process adapter), `supervisor` (session and
-recovery protocol), and `runner` (jobs and enforced scopes). CLI composition wires
-these together; graph authors depend on the SDK, not controller internals. Keep
-validation scheduling and receipt admission independent of normal graph routing.
+Proposed package seams are npm workspaces under `packages/`: `sdk` (value/wire
+contracts), `controller` (durable state and admission), `plugin-host` (process
+adapter), `supervisor` (session and recovery protocol), and `runner` (jobs and
+enforced scopes). `apps/graphloom` is the CLI composition root; graph authors
+depend on `@graphloom/sdk`, not controller internals. Keep validation scheduling
+and receipt admission independent of normal graph routing.
 
-Preserve existing Go source/tests during migration. Port useful invariant tests;
-do not mechanically preserve obsolete supervisor/plugin authority. Switch the CLI
-implementation only after parity for supported behavior is demonstrated. No native
+Earlier Go sources are frozen under `legacy/go` for selective porting. Do not
+extend that tree for new MVP features. Switch the CLI to full run/inspect/stop/
+resume only after parity for supported behavior is demonstrated. No native
 plugin implementation or arbitrary Go-run state migration is required by this plan.
 
 ## 13. Relationship to Loopx

@@ -1,0 +1,22 @@
+{
+  "name": "@graphloom/sdk",
+  "version": "0.0.0",
+  "description": "Public GraphLoom plugin SDK: value/wire contracts and scripted GraphPlugin",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  }
+}

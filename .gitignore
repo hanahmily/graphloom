@@ -10,7 +10,13 @@ artifacts/
 coverage/
 bin/
 dist/
+*.tsbuildinfo
 *.log
+
+# Node
+node_modules/
+npm-debug.log*
+package-lock.json.bak
 
 # Editor and OS files
 .idea/
@@ -21,6 +27,8 @@ Thumbs.db
 # Disposable example repository
 /examples/test-repo/
 
-# Generated native graph bundles
-/examples/plugins/*.so
-/examples/plugins/*.manifest.json
+# Generated plugin build outputs
+/examples/plugins/**/*.so
+/examples/plugins/**/*.manifest.json
+/examples/plugins/**/dist/
+/examples/plugins/**/node_modules/

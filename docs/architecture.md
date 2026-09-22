@@ -20,9 +20,10 @@ flowchart TD
     C -->|Recorded activation| G
 ```
 
-The graph owns normal routing; the supervisor owns exceptional recovery; the
-controller admits both and derives acceptance from required current evidence.
-Neither an agent success claim nor a plugin route can substitute for validation.
+The graph owns normal routing; the supervisor owns exceptional recovery and works
+to finish the run—exhausting authorized remedies before Stop; the controller admits
+both and derives acceptance from required current evidence. Neither an agent
+success claim nor a plugin route can substitute for validation.
 
 Required outcomes are pinned independently from versioned validator bindings.
 A qualified source patch or authorized validator replacement changes implementation
