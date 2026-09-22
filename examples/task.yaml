@@ -1,0 +1,5 @@
+graph: hello
+repo: ./test-repo
+request: |
+  Create GREETING.txt containing exactly "Hello, GraphLoom!" followed by
+  one newline. Do not modify other files.

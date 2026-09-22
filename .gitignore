@@ -1,0 +1,22 @@
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+
+# Runtime state and generated output
+.graphloom/
+.local/
+artifacts/
+coverage/
+bin/
+dist/
+*.log
+
+# Editor and OS files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Disposable example repository
+/examples/test-repo/
