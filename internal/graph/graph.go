@@ -47,6 +47,7 @@ const (
 type State struct {
 	Stages         Stages
 	Active         bool
+	Epoch          uint64 // bumps on reenter; evidence from older epochs cannot accept
 	Nodes          []Node
 	Receipts       map[StageID]Receipt // current receipt per stage (may be invalid)
 	ReceiptHistory []Receipt           // all receipts ever issued, including invalidated
@@ -61,7 +62,8 @@ type Node struct {
 	After     []NodeID
 	Requires  []ReceiptID
 	Status    NodeStatus
-	Bootstrap bool // plan-review exception: eligible before any stage receipt
+	Bootstrap bool   // plan-review exception: eligible before any stage receipt
+	Epoch     uint64 // epoch at append time
 	Outcome   *Outcome
 }
 
@@ -108,7 +110,7 @@ type ReenterSpec struct {
 
 type ObserveSpec struct {
 	NodeID         NodeID
-	Status         NodeStatus // observed, interrupted, or cancelled
+	Status         NodeStatus // running, observed, interrupted, or cancelled
 	OK             bool
 	Fingerprint    Fingerprint
 	CheckPassed    bool
@@ -133,11 +135,11 @@ func New(stages Stages) State {
 	}
 }
 
-// Node returns a copy of the named node, or nil.
+// Node returns a deep copy of the named node, or nil.
 func (s State) Node(id NodeID) *Node {
 	for i := range s.Nodes {
 		if s.Nodes[i].ID == id {
-			n := s.Nodes[i]
+			n := copyNode(s.Nodes[i])
 			return &n
 		}
 	}
@@ -192,6 +194,10 @@ func Ready(s State) Info {
 	if !s.Active {
 		return Info{Blocked: true}
 	}
+	// MVP is serial: nothing else may be ready while a job is running.
+	if hasRunning(s) {
+		return Info{Blocked: true}
+	}
 	for i := range s.Nodes {
 		n := s.Nodes[i]
 		if ready(s, n) {
@@ -239,7 +245,11 @@ func applyAppend(s State, spec AppendSpec) (State, error) {
 		if n.Kind != KindAgent && n.Kind != KindCommand {
 			return s, rejectf("invalid kind %q", n.Kind)
 		}
-		if !n.Bootstrap && n.Stage == "" {
+		if n.Bootstrap {
+			if n.Stage != "" {
+				return s, rejectf("bootstrap node %q must not set a stage", n.ID)
+			}
+		} else if n.Stage == "" {
 			return s, rejectf("node %q missing stage", n.ID)
 		}
 		if n.Stage != "" && !knownStage(s.Stages, n.Stage) {
@@ -253,7 +263,6 @@ func applyAppend(s State, spec AppendSpec) (State, error) {
 			}
 		}
 		for _, rid := range n.Requires {
-			// Receipt ids may be forward references; readiness waits until valid.
 			if rid == "" {
 				return s, rejectf("empty requires on %q", n.ID)
 			}
@@ -266,6 +275,7 @@ func applyAppend(s State, spec AppendSpec) (State, error) {
 			return s, rejectf("appended node %q must start pending", n.ID)
 		}
 		nn.Outcome = nil
+		nn.Epoch = s.Epoch
 		out.Nodes = append(out.Nodes, nn)
 		batch[n.ID] = struct{}{}
 	}
@@ -285,11 +295,27 @@ func applyObserve(s State, spec ObserveSpec) (State, error) {
 		return s, rejectf("node %q not pending/running", spec.NodeID)
 	}
 	switch spec.Status {
-	case StatusObserved, StatusInterrupted, StatusCancelled:
+	case StatusRunning, StatusObserved, StatusInterrupted, StatusCancelled:
 		// ok
 	default:
 		return s, rejectf("invalid observe status %q", spec.Status)
 	}
+	if n.Status == StatusPending && spec.Status != StatusCancelled {
+		// Pending work may only start/settle when it is the ready node.
+		if !ready(s, n) {
+			return s, rejectf("node %q is not ready", spec.NodeID)
+		}
+		if spec.Status == StatusRunning && hasRunning(s) {
+			return s, rejectf("another node is already running")
+		}
+	}
+	if n.Status == StatusRunning && spec.Status == StatusRunning {
+		return s, rejectf("node %q already running", spec.NodeID)
+	}
+	if n.Status == StatusPending && spec.Status == StatusCancelled {
+		// Cancellation of a non-ready pending node is allowed.
+	}
+
 	out := cloneState(s)
 	out.Nodes[idx].Status = spec.Status
 	if spec.Status == StatusObserved || spec.Status == StatusInterrupted {
@@ -310,10 +336,12 @@ func applyAccept(s State, spec AcceptSpec) (State, error) {
 	if spec.ReceiptID == "" {
 		return s, rejectf("receipt id required")
 	}
+	if receiptIDExists(s, spec.ReceiptID) {
+		return s, rejectf("duplicate receipt id %q", spec.ReceiptID)
+	}
 	if cur, ok := s.Receipts[spec.Stage]; ok && cur.Valid {
 		return s, rejectf("stage %q already has a valid receipt", spec.Stage)
 	}
-	// Must be the earliest unaccepted stage.
 	for _, stage := range s.Stages {
 		if stage == spec.Stage {
 			break
@@ -328,11 +356,24 @@ func applyAccept(s State, spec AcceptSpec) (State, error) {
 	if plan == nil || plan.Status != StatusObserved || plan.Outcome == nil || !plan.Outcome.OK {
 		return s, rejectf("plan review evidence missing or not OK")
 	}
+	if !plan.Bootstrap || plan.Stage != "" {
+		return s, rejectf("plan review must be a bootstrap node")
+	}
+
 	check := s.Node(spec.CheckNodeID)
 	if check == nil || check.Status != StatusObserved || check.Outcome == nil {
 		return s, rejectf("check evidence missing")
 	}
-	if !check.Outcome.CheckPassed {
+	if check.Purpose != PurposeCheck {
+		return s, rejectf("check evidence must have purpose check")
+	}
+	if check.Stage != spec.Stage && !stageBefore(s.Stages, check.Stage, spec.Stage) {
+		return s, rejectf("check evidence does not support stage %q", spec.Stage)
+	}
+	if check.Epoch != s.Epoch {
+		return s, rejectf("check evidence is from a prior epoch")
+	}
+	if !check.Outcome.OK || !check.Outcome.CheckPassed {
 		return s, rejectf("check did not pass")
 	}
 	if check.Outcome.Fingerprint != spec.Fingerprint {
@@ -346,7 +387,16 @@ func applyAccept(s State, spec AcceptSpec) (State, error) {
 		}
 	} else {
 		rev := s.Node(spec.ReviewNodeID)
-		if rev == nil || rev.Status != StatusObserved || rev.Outcome == nil || !rev.Outcome.ReviewApproved {
+		if rev == nil || rev.Status != StatusObserved || rev.Outcome == nil {
+			return s, rejectf("review evidence missing")
+		}
+		if rev.Purpose != PurposeReview || rev.Stage != spec.Stage {
+			return s, rejectf("review evidence does not support stage %q", spec.Stage)
+		}
+		if rev.Epoch != s.Epoch {
+			return s, rejectf("review evidence is from a prior epoch")
+		}
+		if !rev.Outcome.OK || !rev.Outcome.ReviewApproved {
 			return s, rejectf("review evidence missing or not approved")
 		}
 		if rev.Outcome.Fingerprint != spec.Fingerprint {
@@ -382,7 +432,6 @@ func applyReenter(s State, spec ReenterSpec) (State, error) {
 	if !knownStage(s.Stages, spec.Stage) {
 		return s, rejectf("unknown stage %q", spec.Stage)
 	}
-	// Find stage index; invalidate this and all later receipts.
 	idx := -1
 	for i, stage := range s.Stages {
 		if stage == spec.Stage {
@@ -391,6 +440,7 @@ func applyReenter(s State, spec ReenterSpec) (State, error) {
 		}
 	}
 	out := cloneState(s)
+	out.Epoch++
 	invalidated := map[ReceiptID]struct{}{}
 	for i := idx; i < len(s.Stages); i++ {
 		stage := s.Stages[i]
@@ -398,7 +448,6 @@ func applyReenter(s State, spec ReenterSpec) (State, error) {
 			r.Valid = false
 			out.Receipts[stage] = r
 			invalidated[r.ID] = struct{}{}
-			// Keep history entries; mark matching history as invalid too.
 			for j := range out.ReceiptHistory {
 				if out.ReceiptHistory[j].ID == r.ID {
 					out.ReceiptHistory[j].Valid = false
@@ -406,7 +455,6 @@ func applyReenter(s State, spec ReenterSpec) (State, error) {
 			}
 		}
 	}
-	// Cancel pending/running nodes that require an invalidated receipt.
 	for i := range out.Nodes {
 		n := &out.Nodes[i]
 		if n.Status != StatusPending && n.Status != StatusRunning {
@@ -431,7 +479,6 @@ func ready(s State, n Node) bool {
 		if d == nil {
 			return false
 		}
-		// Dependency means observation available, not success.
 		if d.Status != StatusObserved && d.Status != StatusInterrupted {
 			return false
 		}
@@ -448,11 +495,19 @@ func ready(s State, n Node) bool {
 	if earliest == "" {
 		return false
 	}
-	// Node must support the earliest unaccepted stage (or be bootstrap).
 	if n.Stage != earliest {
 		return false
 	}
 	return true
+}
+
+func hasRunning(s State) bool {
+	for i := range s.Nodes {
+		if s.Nodes[i].Status == StatusRunning {
+			return true
+		}
+	}
+	return false
 }
 
 func earliestUnaccepted(s State) StageID {
@@ -474,6 +529,20 @@ func validReceiptID(s State, id ReceiptID) bool {
 	return false
 }
 
+func receiptIDExists(s State, id ReceiptID) bool {
+	for _, r := range s.ReceiptHistory {
+		if r.ID == id {
+			return true
+		}
+	}
+	for _, r := range s.Receipts {
+		if r.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
 func knownStage(stages Stages, id StageID) bool {
 	for _, s := range stages {
 		if s == id {
@@ -481,6 +550,20 @@ func knownStage(stages Stages, id StageID) bool {
 		}
 	}
 	return false
+}
+
+// stageBefore reports whether a appears before b in the happy path.
+func stageBefore(stages Stages, a, b StageID) bool {
+	ai, bi := -1, -1
+	for i, s := range stages {
+		if s == a {
+			ai = i
+		}
+		if s == b {
+			bi = i
+		}
+	}
+	return ai >= 0 && bi >= 0 && ai < bi
 }
 
 func nodeIndex(s State, id NodeID) int {
@@ -492,29 +575,35 @@ func nodeIndex(s State, id NodeID) int {
 	return -1
 }
 
+func copyNode(n Node) Node {
+	out := n
+	if n.Outcome != nil {
+		oc := *n.Outcome
+		out.Outcome = &oc
+	}
+	if n.After != nil {
+		out.After = append([]NodeID(nil), n.After...)
+	}
+	if n.Requires != nil {
+		out.Requires = append([]ReceiptID(nil), n.Requires...)
+	}
+	return out
+}
+
 func cloneState(s State) State {
 	out := State{
 		Stages:         append(Stages(nil), s.Stages...),
 		Active:         s.Active,
-		Nodes:          append([]Node(nil), s.Nodes...),
+		Epoch:          s.Epoch,
+		Nodes:          make([]Node, len(s.Nodes)),
 		Receipts:       make(map[StageID]Receipt, len(s.Receipts)),
 		ReceiptHistory: append([]Receipt(nil), s.ReceiptHistory...),
 	}
 	for k, v := range s.Receipts {
 		out.Receipts[k] = v
 	}
-	// Deep-copy outcomes so mutations don't alias.
-	for i := range out.Nodes {
-		if out.Nodes[i].Outcome != nil {
-			oc := *out.Nodes[i].Outcome
-			out.Nodes[i].Outcome = &oc
-		}
-		if out.Nodes[i].After != nil {
-			out.Nodes[i].After = append([]NodeID(nil), out.Nodes[i].After...)
-		}
-		if out.Nodes[i].Requires != nil {
-			out.Nodes[i].Requires = append([]ReceiptID(nil), out.Nodes[i].Requires...)
-		}
+	for i := range s.Nodes {
+		out.Nodes[i] = copyNode(s.Nodes[i])
 	}
 	return out
 }

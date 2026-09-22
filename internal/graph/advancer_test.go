@@ -119,10 +119,6 @@ func TestRejectSkipWriteToAcceptReview(t *testing.T) {
 	s = mustApply(t, s, graph.Transition{Observe: &graph.ObserveSpec{NodeID: "plan-1", Status: graph.StatusObserved, OK: true}})
 	s = mustApply(t, s, graph.Transition{Observe: &graph.ObserveSpec{NodeID: "write-1", Status: graph.StatusObserved, OK: true, Fingerprint: "ws:1"}})
 	s = mustApply(t, s, graph.Transition{Observe: &graph.ObserveSpec{NodeID: "check-1", Status: graph.StatusObserved, OK: true, Fingerprint: "ws:1", CheckPassed: true}})
-	s = mustApply(t, s, graph.Transition{Observe: &graph.ObserveSpec{
-		NodeID: "review-1", Status: graph.StatusObserved, OK: true,
-		Fingerprint: "ws:1", ReviewApproved: true,
-	}})
 
 	_, err := graph.Apply(s, graph.Transition{Accept: &graph.AcceptSpec{
 		Stage: "review", ReceiptID: "rcpt-review-1", Fingerprint: "ws:1",
@@ -308,6 +304,149 @@ func TestReadySelectsReviewAfterWriteAccept(t *testing.T) {
 	info := graph.Ready(s)
 	if info.ReadyNode == nil || *info.ReadyNode != "review-1" {
 		t.Fatalf("Ready = %+v, want review-1", info)
+	}
+}
+
+func TestReadyBlockedWhileAnotherNodeRunning(t *testing.T) {
+	s := graph.New(graph.Stages{"write", "review"})
+	s = mustApply(t, s, graph.Transition{Append: &graph.AppendSpec{
+		Nodes: []graph.Node{
+			{ID: "a", Stage: "write", Kind: graph.KindAgent, Purpose: graph.PurposeWork},
+			{ID: "b", Stage: "write", Kind: graph.KindCommand, Purpose: graph.PurposeCheck, After: []graph.NodeID{"a"}},
+		},
+	}})
+	s = mustApply(t, s, graph.Transition{Observe: &graph.ObserveSpec{NodeID: "a", Status: graph.StatusRunning}})
+	info := graph.Ready(s)
+	if !info.Blocked || info.ReadyNode != nil {
+		t.Fatalf("Ready = %+v, want blocked while running", info)
+	}
+}
+
+func TestRejectBootstrapWithStage(t *testing.T) {
+	s := graph.New(graph.Stages{"write", "review"})
+	_, err := graph.Apply(s, graph.Transition{Append: &graph.AppendSpec{
+		Nodes: []graph.Node{{
+			ID: "bad", Stage: "write", Kind: graph.KindAgent, Purpose: graph.PurposeReview, Bootstrap: true,
+		}},
+	}})
+	if !errors.Is(err, graph.ErrReject) {
+		t.Fatalf("err = %v, want ErrReject", err)
+	}
+}
+
+func TestRejectObserveOfNonReadyPendingNode(t *testing.T) {
+	s := graph.New(graph.Stages{"write", "review"})
+	s = mustApply(t, s, graph.Transition{Append: &graph.AppendSpec{
+		Nodes: []graph.Node{
+			{ID: "a", Stage: "write", Kind: graph.KindAgent, Purpose: graph.PurposeWork},
+			{ID: "b", Stage: "write", Kind: graph.KindCommand, Purpose: graph.PurposeCheck, After: []graph.NodeID{"a"}},
+		},
+	}})
+	_, err := graph.Apply(s, graph.Transition{Observe: &graph.ObserveSpec{
+		NodeID: "b", Status: graph.StatusObserved, OK: true, CheckPassed: true, Fingerprint: "ws:1",
+	}})
+	if !errors.Is(err, graph.ErrReject) {
+		t.Fatalf("err = %v, want ErrReject", err)
+	}
+	// Cancellation of a non-ready pending node remains allowed.
+	s = mustApply(t, s, graph.Transition{Observe: &graph.ObserveSpec{NodeID: "b", Status: graph.StatusCancelled}})
+	if s.Node("b").Status != graph.StatusCancelled {
+		t.Fatal("want cancelled")
+	}
+}
+
+func TestRejectAcceptWithWrongEvidenceRoles(t *testing.T) {
+	s := graph.New(graph.Stages{"write", "review"})
+	s = mustApply(t, s, graph.Transition{Append: &graph.AppendSpec{
+		Nodes: []graph.Node{
+			{ID: "plan-1", Kind: graph.KindAgent, Purpose: graph.PurposeReview, Bootstrap: true},
+			{ID: "write-1", Stage: "write", Kind: graph.KindAgent, Purpose: graph.PurposeWork, After: []graph.NodeID{"plan-1"}},
+		},
+	}})
+	s = mustApply(t, s, graph.Transition{Observe: &graph.ObserveSpec{NodeID: "plan-1", Status: graph.StatusObserved, OK: true}})
+	s = mustApply(t, s, graph.Transition{Observe: &graph.ObserveSpec{NodeID: "write-1", Status: graph.StatusObserved, OK: true, Fingerprint: "ws:1"}})
+	_, err := graph.Apply(s, graph.Transition{Accept: &graph.AcceptSpec{
+		Stage: "write", ReceiptID: "rcpt-write-1", Fingerprint: "ws:1",
+		PlanReviewNodeID: "plan-1", CheckNodeID: "write-1", // work node cited as check
+	}})
+	if !errors.Is(err, graph.ErrReject) {
+		t.Fatalf("err = %v, want ErrReject", err)
+	}
+}
+
+func TestRejectAcceptWhenCheckOKFalseDespitePassedFlag(t *testing.T) {
+	s := graph.New(graph.Stages{"write", "review"})
+	s = mustApply(t, s, appendPlanWriteCheckReview())
+	s = mustApply(t, s, graph.Transition{Observe: &graph.ObserveSpec{NodeID: "plan-1", Status: graph.StatusObserved, OK: true}})
+	s = mustApply(t, s, graph.Transition{Observe: &graph.ObserveSpec{NodeID: "write-1", Status: graph.StatusObserved, OK: true, Fingerprint: "ws:1"}})
+	s = mustApply(t, s, graph.Transition{Observe: &graph.ObserveSpec{
+		NodeID: "check-1", Status: graph.StatusObserved, OK: false, Fingerprint: "ws:1", CheckPassed: true,
+	}})
+	_, err := graph.Apply(s, graph.Transition{Accept: &graph.AcceptSpec{
+		Stage: "write", ReceiptID: "rcpt-write-1", Fingerprint: "ws:1",
+		PlanReviewNodeID: "plan-1", CheckNodeID: "check-1",
+	}})
+	if !errors.Is(err, graph.ErrReject) {
+		t.Fatalf("err = %v, want ErrReject", err)
+	}
+}
+
+func TestRejectReuseEvidenceAfterReenter(t *testing.T) {
+	s := graph.New(graph.Stages{"write", "review"})
+	s = mustApply(t, s, appendPlanWriteCheckReview())
+	s = mustApply(t, s, graph.Transition{Observe: &graph.ObserveSpec{NodeID: "plan-1", Status: graph.StatusObserved, OK: true}})
+	s = mustApply(t, s, graph.Transition{Observe: &graph.ObserveSpec{NodeID: "write-1", Status: graph.StatusObserved, OK: true, Fingerprint: "ws:1"}})
+	s = mustApply(t, s, graph.Transition{Observe: &graph.ObserveSpec{NodeID: "check-1", Status: graph.StatusObserved, OK: true, Fingerprint: "ws:1", CheckPassed: true}})
+	s = mustApply(t, s, graph.Transition{Accept: &graph.AcceptSpec{
+		Stage: "write", ReceiptID: "rcpt-write-1", Fingerprint: "ws:1",
+		PlanReviewNodeID: "plan-1", CheckNodeID: "check-1",
+	}})
+	s = mustApply(t, s, graph.Transition{Reenter: &graph.ReenterSpec{Stage: "write"}})
+	_, err := graph.Apply(s, graph.Transition{Accept: &graph.AcceptSpec{
+		Stage: "write", ReceiptID: "rcpt-write-2", Fingerprint: "ws:1",
+		PlanReviewNodeID: "plan-1", CheckNodeID: "check-1",
+	}})
+	if !errors.Is(err, graph.ErrReject) {
+		t.Fatalf("err = %v, want ErrReject for prior-epoch check", err)
+	}
+}
+
+func TestRejectDuplicateReceiptID(t *testing.T) {
+	s := graph.New(graph.Stages{"write", "review"})
+	s = mustApply(t, s, appendPlanWriteCheckReview())
+	s = mustApply(t, s, graph.Transition{Observe: &graph.ObserveSpec{NodeID: "plan-1", Status: graph.StatusObserved, OK: true}})
+	s = mustApply(t, s, graph.Transition{Observe: &graph.ObserveSpec{NodeID: "write-1", Status: graph.StatusObserved, OK: true, Fingerprint: "ws:1"}})
+	s = mustApply(t, s, graph.Transition{Observe: &graph.ObserveSpec{NodeID: "check-1", Status: graph.StatusObserved, OK: true, Fingerprint: "ws:1", CheckPassed: true}})
+	s = mustApply(t, s, graph.Transition{Accept: &graph.AcceptSpec{
+		Stage: "write", ReceiptID: "rcpt-write-1", Fingerprint: "ws:1",
+		PlanReviewNodeID: "plan-1", CheckNodeID: "check-1",
+	}})
+	s = mustApply(t, s, graph.Transition{Observe: &graph.ObserveSpec{
+		NodeID: "review-1", Status: graph.StatusObserved, OK: true,
+		Fingerprint: "ws:1", ReviewApproved: true,
+	}})
+	_, err := graph.Apply(s, graph.Transition{Accept: &graph.AcceptSpec{
+		Stage: "review", ReceiptID: "rcpt-write-1", Fingerprint: "ws:1",
+		PlanReviewNodeID: "plan-1", CheckNodeID: "check-1", ReviewNodeID: "review-1",
+	}})
+	if !errors.Is(err, graph.ErrReject) {
+		t.Fatalf("err = %v, want ErrReject", err)
+	}
+}
+
+func TestNodeReturnsDeepCopy(t *testing.T) {
+	s := graph.New(graph.Stages{"write", "review"})
+	s = mustApply(t, s, graph.Transition{Append: &graph.AppendSpec{
+		Nodes: []graph.Node{{
+			ID: "a", Stage: "write", Kind: graph.KindAgent, Purpose: graph.PurposeWork,
+			After: []graph.NodeID{}, Requires: []graph.ReceiptID{"x"},
+		}},
+	}})
+	n := s.Node("a")
+	n.Requires[0] = "mutated"
+	n2 := s.Node("a")
+	if n2.Requires[0] != "x" {
+		t.Fatalf("Requires aliased: %v", n2.Requires)
 	}
 }
 
