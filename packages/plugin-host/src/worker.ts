@@ -77,8 +77,8 @@ async function main(): Promise<void> {
         continue;
       }
       writeError(envelope, "unknown", "unsupported request kind");
-    } catch (err) {
-      if (err instanceof WireValidationError) {
+    } catch (err: unknown) {
+      if (isWireValidationError(err)) {
         writeError(envelope, err.code, err.message);
       } else {
         writeError(envelope, "internal", errorMessage(err));
@@ -112,6 +112,10 @@ function writeError(
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+function isWireValidationError(err: unknown): err is WireValidationError {
+  return err instanceof WireValidationError;
 }
 
 main().catch((err: unknown) => {

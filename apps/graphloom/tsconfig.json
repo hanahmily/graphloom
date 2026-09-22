@@ -5,12 +5,5 @@
     "outDir": "dist"
   },
   "include": ["src/**/*.ts"],
-  "exclude": ["dist"],
-  "references": [
-    { "path": "../../packages/sdk" },
-    { "path": "../../packages/controller" },
-    { "path": "../../packages/plugin-host" },
-    { "path": "../../packages/supervisor" },
-    { "path": "../../packages/runner" }
-  ]
+  "exclude": ["dist"]
 }

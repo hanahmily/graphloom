@@ -398,7 +398,7 @@ function resolveEntryPath(entry: string): string {
 }
 
 function wireErrorToObservation(err: unknown): ChildObservation {
-  if (err instanceof WireValidationError) {
+  if (isWireValidationError(err)) {
     return {
       kind: "child_observation",
       code: mapWireErrorCode(err.code),
@@ -410,6 +410,10 @@ function wireErrorToObservation(err: unknown): ChildObservation {
     code: "internal",
     message: err instanceof Error ? err.message : String(err),
   };
+}
+
+function isWireValidationError(err: unknown): err is WireValidationError {
+  return err instanceof WireValidationError;
 }
 
 function mapWireErrorCode(
