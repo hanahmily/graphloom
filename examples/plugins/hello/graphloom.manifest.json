@@ -1,0 +1,31 @@
+{
+  "graphId": "hello",
+  "version": "0.1.0",
+  "sdkProtocol": 1,
+  "entryPoints": {
+    "createGraph": "./dist/index.js"
+  },
+  "privateStateSchema": "hello-private-v1",
+  "repairContract": "source-repairable",
+  "runtimeProfile": {
+    "node": ">=22",
+    "module": "nodenext"
+  },
+  "requirements": [
+    {
+      "id": "greeting-bytes",
+      "statement": "GREETING.txt contains exactly the UTF-8 bytes Hello, GraphLoom!\\n and is the only changed path in the workspace (excluding Git metadata).",
+      "evidenceSchema": "workspace-bytes-v1"
+    },
+    {
+      "id": "independent-review",
+      "statement": "An independent read-only reviewer approves the current GREETING.txt revision against the pinned task.",
+      "evidenceSchema": "review-verdict-v1"
+    }
+  ],
+  "stages": [
+    { "id": "write", "name": "Write", "requirementIds": ["greeting-bytes"] },
+    { "id": "review", "name": "Review", "requirementIds": ["independent-review"] }
+  ],
+  "notes": "Digests for source/lockfile/build artifacts are filled by the controller/builder at pin time."
+}
