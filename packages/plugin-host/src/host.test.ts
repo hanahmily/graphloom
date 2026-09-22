@@ -93,6 +93,36 @@ describe("createChildPluginHost", () => {
     expect(described.value.graphId).toBe("secondary");
   });
 
+  it("keeps NDJSON intact when the plugin writes to stdout/console", async () => {
+    const host = await track(
+      createChildPluginHost({
+        entryModule: fixture("chatty", "graph.mjs"),
+        activeVersion: "chatty@1",
+        generation: 1,
+        workerModule: workerJs,
+        callbackTimeoutMs: 3_000,
+      }),
+    );
+
+    const described = await host.describe(ctx("op-chatty"));
+    expect(described.ok).toBe(true);
+    if (!described.ok) throw new Error(`expected ok, got ${JSON.stringify(described)}`);
+    expect(described.value.graphId).toBe("chatty");
+  });
+
+  it("surfaces spawn failures without an unhandled child error", async () => {
+    await expect(
+      createChildPluginHost({
+        entryModule: fixture("minimal", "graph.mjs"),
+        activeVersion: "spawn-fail@1",
+        generation: 1,
+        workerModule: workerJs,
+        cwd: path.join(here, "definitely-missing-cwd"),
+        callbackTimeoutMs: 3_000,
+      }),
+    ).rejects.toThrow(/spawn failed|ENOENT|failed during startup|exited during startup/);
+  });
+
   it("observes process exit during advance as crash", async () => {
     const host = await track(
       createChildPluginHost({

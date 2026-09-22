@@ -1,7 +1,9 @@
 /**
  * Child worker: load a plugin entry and serve NDJSON wire requests on stdin/stdout.
- * Logs go to stderr only — never interleave with the protocol channel.
+ * Protocol uses a private stdout write; plugin console/stdout is diverted to stderr
+ * so logs cannot interleave with NDJSON responses.
  */
+import { Console } from "node:console";
 import { createInterface } from "node:readline";
 import { pathToFileURL } from "node:url";
 import {
@@ -15,6 +17,10 @@ import {
   type WireEnvelope,
   type WireResponse,
 } from "@graphloom/sdk";
+
+const protocolStdoutWrite = process.stdout.write.bind(process.stdout);
+
+isolatePluginStdout();
 
 async function main(): Promise<void> {
   const entry = process.argv[2];
@@ -87,6 +93,30 @@ async function main(): Promise<void> {
   }
 }
 
+/** Divert console and process.stdout writes to stderr before loading plugin code. */
+function isolatePluginStdout(): void {
+  const stderrConsole = new Console({ stdout: process.stderr, stderr: process.stderr });
+  console.log = stderrConsole.log.bind(stderrConsole);
+  console.info = stderrConsole.info.bind(stderrConsole);
+  console.debug = stderrConsole.debug.bind(stderrConsole);
+  console.dir = stderrConsole.dir.bind(stderrConsole);
+  console.trace = stderrConsole.trace.bind(stderrConsole);
+
+  process.stdout.write = ((
+    chunk: string | Uint8Array,
+    encoding?: BufferEncoding | ((err?: Error | null) => void),
+    cb?: (err?: Error | null) => void,
+  ) => {
+    if (typeof encoding === "function") {
+      return process.stderr.write(chunk, encoding);
+    }
+    if (encoding !== undefined) {
+      return process.stderr.write(chunk, encoding, cb);
+    }
+    return process.stderr.write(chunk, cb);
+  }) as typeof process.stdout.write;
+}
+
 function baseEnvelope(): WireEnvelope {
   return {
     protocolVersion: PROTOCOL_VERSION,
@@ -99,7 +129,7 @@ function baseEnvelope(): WireEnvelope {
 }
 
 function writeResponse(response: WireResponse): void {
-  process.stdout.write(`${JSON.stringify(response)}\n`);
+  protocolStdoutWrite(`${JSON.stringify(response)}\n`);
 }
 
 function writeError(

@@ -57,7 +57,7 @@ export async function createChildPluginHost(
     stderrChunks,
   });
 
-  // Fail fast if the worker dies during load before any call.
+  // Fail fast if the worker dies or fails to spawn before any call.
   await session.waitUntilReady();
   return session;
 }
@@ -80,7 +80,9 @@ class ChildSession implements PluginHost {
   >();
   private closed = false;
   private exitCode: number | null = null;
+  private spawnError: Error | null = null;
   private readonly exitPromise: Promise<number | null>;
+  private readonly spawnErrorPromise: Promise<Error>;
 
   constructor(args: {
     child: ChildProcessWithoutNullStreams;
@@ -101,14 +103,20 @@ class ChildSession implements PluginHost {
       /* Ignore EPIPE after the child exits; callers observe via exit/timeout. */
     });
 
+    this.spawnErrorPromise = new Promise((resolve) => {
+      this.child.on("error", (err) => {
+        this.spawnError = err;
+        this.stderrChunks.push(err.message);
+        this.rejectAllPending(err);
+        resolve(err);
+      });
+    });
+
     this.exitPromise = new Promise((resolve) => {
       this.child.on("exit", (code) => {
         this.exitCode = code;
         resolve(code);
-        for (const [opId, waiter] of this.pending) {
-          this.pending.delete(opId);
-          waiter.reject(new Error(`plugin child exited during ${opId}`));
-        }
+        this.rejectAllPending(new Error(`plugin child exited during pending call`));
       });
     });
 
@@ -118,7 +126,13 @@ class ChildSession implements PluginHost {
   }
 
   async waitUntilReady(): Promise<void> {
-    await sleep(25);
+    // Brief settle window; spawn `error` can win early without waiting on exit.
+    await Promise.race([sleep(25), this.spawnErrorPromise.then(() => undefined)]);
+    if (this.spawnError !== null && !this.closed) {
+      throw new Error(`plugin child spawn failed: ${this.spawnError.message}`, {
+        cause: this.spawnError,
+      });
+    }
     if (this.exitCode !== null && !this.closed) {
       throw new Error(
         `plugin child exited during startup (code=${String(this.exitCode)}): ${this.stderrChunks.join("")}`,
@@ -192,18 +206,28 @@ class ChildSession implements PluginHost {
     waiter.resolve(line);
   }
 
+  private rejectAllPending(err: Error): void {
+    for (const [opId, waiter] of this.pending) {
+      this.pending.delete(opId);
+      waiter.reject(err);
+    }
+  }
+
   private async call<T>(
     ctx: CallContext,
     body: { kind: "describe" } | { kind: "advance"; view: RunView },
     extract: (res: WireResponse) => T,
   ): Promise<HostResult<T>> {
-    if (this.closed || this.exitCode !== null) {
+    if (this.closed || this.exitCode !== null || this.spawnError !== null) {
       return {
         ok: false,
         observation: {
           kind: "child_observation",
           code: "crash",
-          message: `plugin child is not running (exit=${String(this.exitCode)})`,
+          message:
+            this.spawnError !== null
+              ? `plugin child spawn failed: ${this.spawnError.message}`
+              : `plugin child is not running (exit=${String(this.exitCode)})`,
           exitCode: this.exitCode,
         },
       };
@@ -257,6 +281,9 @@ class ChildSession implements PluginHost {
             `plugin child exited (code=${String(code)})`,
             code,
           );
+        }),
+        this.spawnErrorPromise.then((err) => {
+          throw new CrashError(`plugin child spawn failed: ${err.message}`, null);
         }),
       ]);
     } catch (err) {
