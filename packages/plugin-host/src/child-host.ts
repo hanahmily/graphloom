@@ -435,8 +435,15 @@ function wireErrorToObservation(err: unknown): ChildObservation {
   return {
     kind: "child_observation",
     code: "internal",
-    message: err instanceof Error ? err.message : String(err),
+    message: errorMessage(err),
   };
+}
+
+function errorMessage(err: unknown): string {
+  if (err instanceof Error) {
+    return err.message;
+  }
+  return String(err);
 }
 
 function isWireValidationError(err: unknown): err is WireValidationError {

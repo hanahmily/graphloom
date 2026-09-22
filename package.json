@@ -9,8 +9,8 @@
     "apps/*"
   ],
   "scripts": {
-    "build": "npm run build --workspaces --if-present",
-    "typecheck": "npm run build && npm run typecheck --workspaces --if-present",
+    "build": "npm run build -w @graphloom/sdk && npm run build -w @graphloom/controller -w @graphloom/plugin-host -w @graphloom/runner -w @graphloom/supervisor -w @graphloom/cli",
+    "typecheck": "npm run build -w @graphloom/sdk && npm run typecheck --workspaces --if-present",
     "test": "npm run build -w @graphloom/sdk && npm run test --workspaces --if-present",
     "lint": "npm run typecheck"
   },
