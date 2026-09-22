@@ -29,6 +29,8 @@ Thumbs.db
 
 # Generated plugin build outputs
 /examples/plugins/**/*.so
-/examples/plugins/**/*.manifest.json
 /examples/plugins/**/dist/
 /examples/plugins/**/node_modules/
+# Generated digest sidecars (checked-in graphloom.manifest.json is the template)
+/examples/plugins/**/*.digest.json
+/examples/plugins/**/hello.manifest.json
