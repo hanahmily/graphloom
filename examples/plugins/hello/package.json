@@ -1,0 +1,45 @@
+{
+  "name": "@graphloom/plugin-hello",
+  "version": "0.1.0",
+  "description": "Hello Write→Review source-repairable graph plugin",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "src",
+    "test",
+    "graphloom.manifest.json",
+    "package-lock.json",
+    "tsconfig.json"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "tsc -p tsconfig.json && vitest run",
+    "manifest": "node ./scripts/generate-manifest.mjs"
+  },
+  "dependencies": {
+    "@graphloom/sdk": "file:../../../packages/sdk"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.10",
+    "typescript": "^5.8.2",
+    "vitest": "^3.0.9"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "graphloom": {
+    "graphId": "hello",
+    "repairContract": "source-repairable",
+    "entry": "./dist/index.js"
+  }
+}
