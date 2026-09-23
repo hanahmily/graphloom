@@ -25,6 +25,13 @@ import {
 import type { IntakePin } from "./intake.js";
 import { assertSafeRunId } from "./ids.js";
 import { withDirectoryLock } from "./lock.js";
+import {
+  claimRunOwner,
+  clearOwnerClaim,
+  renewRunOwner,
+  updateOwnerChildPid,
+  type RunOwnerClaim,
+} from "./owner.js";
 import { reconcilePendingDispatch } from "./reconcile.js";
 import { loadRunState, type DurableRunState, saveRunState } from "./state.js";
 import {
@@ -41,17 +48,26 @@ export interface LoopDeps {
   validators: Record<string, AdmissionValidator>;
   /** Operator stop: checked each loop turn before advance (sync or async). */
   shouldStop?: () => boolean | Promise<boolean>;
+  /** Live revision bridge for host-backed validators. */
+  revisionBridge?: { current: number };
 }
 
 async function stopRequested(deps: LoopDeps): Promise<boolean> {
   return Boolean(await Promise.resolve(deps.shouldStop?.() ?? false));
 }
 
+function syncRevision(deps: LoopDeps, state: DurableRunState): void {
+  if (deps.revisionBridge) {
+    deps.revisionBridge.current = state.stateRevision;
+  }
+}
+
 export async function runNormalLoop(
   state: DurableRunState,
   deps: LoopDeps,
 ): Promise<DurableRunState> {
-  // Per-step lock so Stop/Resume can coordinate during long runner jobs.
+  // Per-step lock so Stop can coordinate during long runner jobs.
+  // Durable run.owner.json serializes which controller owns the loop.
   return runNormalLoopSteps(state, deps);
 }
 
@@ -66,55 +82,49 @@ async function runNormalLoopSteps(
   state: DurableRunState,
   deps: LoopDeps,
 ): Promise<DurableRunState> {
-  state = await withRunLock(state.stateDir, async () => {
-    if (state.pendingDispatch?.status === "pending") {
-      const reconciled = await reconcilePendingDispatch(state);
-      state = reconciled.state;
-      if (!reconciled.settled) {
-        state = {
-          ...state,
-          status: "stopped",
-          stopReason: "reconcile required",
-          blocker: reconciled.reason,
-        };
+  let owner: RunOwnerClaim | undefined;
+  try {
+    state = await withRunLock(state.stateDir, async () => {
+      owner = await claimRunOwner(state.stateDir, {
+        ...(deps.host.childPid !== undefined ? { childPid: deps.host.childPid } : {}),
+      });
+      if (state.pendingDispatch?.status === "pending") {
+        const reconciled = await reconcilePendingDispatch(state);
+        state = reconciled.state;
+        if (!reconciled.settled) {
+          state = {
+            ...state,
+            status: "stopped",
+            stopReason: "reconcile required",
+            blocker: reconciled.reason,
+          };
+          await saveRunState(state);
+          return state;
+        }
         await saveRunState(state);
-        return state;
       }
-      await saveRunState(state);
-    }
-    return state;
-  });
+      syncRevision(deps, state);
+      return state;
+    });
 
-  for (let step = 0; step < MAX_STEPS; step += 1) {
-    const turn = await withRunLock(state.stateDir, async () => {
-      // Reload in case Stop mutated durable state while we were unlocked.
-      state = await reloadIfPresent(state);
+    for (let step = 0; step < MAX_STEPS; step += 1) {
+      const turn = await withRunLock(state.stateDir, async () => {
+        if (!owner) {
+          throw new Error("missing run owner claim");
+        }
+        owner = await renewRunOwner(state.stateDir, owner.ownerId, {
+          ...(deps.host.childPid !== undefined ? { childPid: deps.host.childPid } : {}),
+        });
+        await updateOwnerChildPid(state.stateDir, owner.ownerId, deps.host.childPid);
 
-      if (state.status !== "running") {
-        await saveRunState(state);
-        return { done: true as const, state };
-      }
-      if (await stopRequested(deps)) {
-        state = {
-          ...state,
-          status: "stopped",
-          stopReason: "operator stop",
-          blocker: "stop requested",
-        };
-        await saveRunState(state);
-        return { done: true as const, state };
-      }
+        // Reload in case Stop mutated durable state while we were unlocked.
+        state = await reloadRunState(state);
+        syncRevision(deps, state);
 
-      const view = toRunView(state);
-      const advanced = await deps.host.advance(
-        {
-          runId: state.runId,
-          operationId: `adv-${state.stateRevision}-${step}`,
-          expectedStateRevision: state.stateRevision,
-        },
-        view,
-      );
-      if (!advanced.ok) {
+        if (state.status !== "running") {
+          await saveRunState(state);
+          return { done: true as const, state };
+        }
         if (await stopRequested(deps)) {
           state = {
             ...state,
@@ -122,92 +132,56 @@ async function runNormalLoopSteps(
             stopReason: "operator stop",
             blocker: "stop requested",
           };
-        } else {
-          state = {
-            ...state,
-            status: "stopped",
-            stopReason: `plugin host: ${advanced.observation.code}`,
-            blocker: advanced.observation.message,
-          };
+          await saveRunState(state);
+          return { done: true as const, state };
         }
-        await saveRunState(state);
-        return { done: true as const, state };
-      }
-      const decision = assertGraphDecision(advanced.value);
 
-      if (decision.action.type === "dispatch") {
-        const prepared = await prepareDispatch(state, decision, deps);
-        await saveRunState(prepared.state);
-        if (prepared.state.status !== "running" || !prepared.pending) {
-          return { done: true as const, state: prepared.state };
-        }
-        return {
-          done: false as const,
-          state: prepared.state,
-          pendingJob: prepared.pending,
-        };
-      }
-
-      state = await applyDecision(state, decision, deps);
-      if ((await stopRequested(deps)) && state.status === "running") {
-        state = {
-          ...state,
-          status: "stopped",
-          stopReason: "operator stop",
-          blocker: "stop requested",
-        };
-      }
-      await saveRunState(state);
-      return { done: state.status !== "running", state };
-    });
-
-    state = turn.state;
-    if (turn.done) {
-      return state;
-    }
-
-    if (turn.pendingJob) {
-      const { job, operationId, generation, isCorrection } = turn.pendingJob;
-      const result = await deps.runner.runJob(job, {
-        runId: state.runId,
-        operationId,
-        generation,
-        worktreePath: state.worktreePath,
-        artifactDir: state.artifactDir,
-      });
-
-      state = await withRunLock(state.stateDir, async () => {
-        state = await reloadIfPresent(state);
-        if (await stopRequested(deps) || state.status !== "running") {
-          // Operator stop won the lock; keep durable stopped / pending for reconcile.
-          if (state.status === "running") {
+        const view = toRunView(state);
+        const advanced = await deps.host.advance(
+          {
+            runId: state.runId,
+            operationId: `adv-${state.stateRevision}-${step}`,
+            expectedStateRevision: state.stateRevision,
+          },
+          view,
+        );
+        if (!advanced.ok) {
+          if (await stopRequested(deps)) {
             state = {
               ...state,
               status: "stopped",
               stopReason: "operator stop",
               blocker: "stop requested",
             };
-            await saveRunState(state);
+          } else {
+            state = {
+              ...state,
+              status: "stopped",
+              stopReason: `plugin host: ${advanced.observation.code}`,
+              blocker: advanced.observation.message,
+            };
           }
-          return state;
-        }
-        if (state.generation !== generation) {
-          state = {
-            ...state,
-            status: "stopped",
-            stopReason: "stale job result identity",
-            blocker: `generation ${generation} != ${state.generation}`,
-          };
           await saveRunState(state);
-          return state;
+          return { done: true as const, state };
         }
-        state = applyDispatchResult(state, {
-          job,
-          operationId,
-          generation,
-          isCorrection,
-          result,
-        });
+        const decision = assertGraphDecision(advanced.value);
+
+        if (decision.action.type === "dispatch") {
+          const prepared = await prepareDispatch(state, decision, deps);
+          await saveRunState(prepared.state);
+          syncRevision(deps, prepared.state);
+          if (prepared.state.status !== "running" || !prepared.pending) {
+            return { done: true as const, state: prepared.state };
+          }
+          return {
+            done: false as const,
+            state: prepared.state,
+            pendingJob: prepared.pending,
+          };
+        }
+
+        state = await applyDecision(state, decision, deps);
+        syncRevision(deps, state);
         if ((await stopRequested(deps)) && state.status === "running") {
           state = {
             ...state,
@@ -217,33 +191,106 @@ async function runNormalLoopSteps(
           };
         }
         await saveRunState(state);
-        return state;
+        return { done: state.status !== "running", state };
       });
 
-      if (state.status !== "running") {
+      state = turn.state;
+      if (turn.done) {
         return state;
       }
-    }
-  }
 
-  state = await withRunLock(state.stateDir, async () => {
-    state = {
-      ...state,
-      status: "stopped",
-      stopReason: "step limit",
-      blocker: `exceeded ${MAX_STEPS} controller steps`,
-    };
-    await saveRunState(state);
+      if (turn.pendingJob) {
+        const { job, operationId, generation, isCorrection } = turn.pendingJob;
+        const result = await deps.runner.runJob(job, {
+          runId: state.runId,
+          operationId,
+          generation,
+          worktreePath: state.worktreePath,
+          artifactDir: state.artifactDir,
+        });
+
+        state = await withRunLock(state.stateDir, async () => {
+          if (!owner) {
+            throw new Error("missing run owner claim");
+          }
+          owner = await renewRunOwner(state.stateDir, owner.ownerId, {
+            ...(deps.host.childPid !== undefined ? { childPid: deps.host.childPid } : {}),
+          });
+          state = await reloadRunState(state);
+          syncRevision(deps, state);
+          if (await stopRequested(deps) || state.status !== "running") {
+            if (state.status === "running") {
+              state = {
+                ...state,
+                status: "stopped",
+                stopReason: "operator stop",
+                blocker: "stop requested",
+              };
+              await saveRunState(state);
+            }
+            return state;
+          }
+          if (state.generation !== generation) {
+            state = {
+              ...state,
+              status: "stopped",
+              stopReason: "stale job result identity",
+              blocker: `generation ${generation} != ${state.generation}`,
+            };
+            await saveRunState(state);
+            return state;
+          }
+          state = applyDispatchResult(state, {
+            job,
+            operationId,
+            generation,
+            isCorrection,
+            result,
+          });
+          syncRevision(deps, state);
+          if ((await stopRequested(deps)) && state.status === "running") {
+            state = {
+              ...state,
+              status: "stopped",
+              stopReason: "operator stop",
+              blocker: "stop requested",
+            };
+          }
+          await saveRunState(state);
+          return state;
+        });
+
+        if (state.status !== "running") {
+          return state;
+        }
+      }
+    }
+
+    state = await withRunLock(state.stateDir, async () => {
+      state = {
+        ...state,
+        status: "stopped",
+        stopReason: "step limit",
+        blocker: `exceeded ${MAX_STEPS} controller steps`,
+      };
+      await saveRunState(state);
+      return state;
+    });
     return state;
-  });
-  return state;
+  } finally {
+    await clearOwnerClaim(state.stateDir);
+  }
 }
 
-async function reloadIfPresent(state: DurableRunState): Promise<DurableRunState> {
+async function reloadRunState(state: DurableRunState): Promise<DurableRunState> {
   try {
     return await loadRunState(state.stateDir);
-  } catch {
-    return state;
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") {
+      return state;
+    }
+    throw err;
   }
 }
 
@@ -325,9 +372,8 @@ async function applyDecision(
               ? state.current.attempt + 1
               : 1,
         },
-        generation: state.generation + 1,
       };
-      return next;
+      return bumpGeneration(next, "reenter");
     }
     case "supervise":
       return {

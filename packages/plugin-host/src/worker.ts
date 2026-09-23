@@ -11,6 +11,7 @@ import {
   WireValidationError,
   assertGraphDecision,
   assertGraphDefinition,
+  assertValidationResult,
   assertWireRequest,
   parseJsonBounded,
   type GraphPlugin,
@@ -93,7 +94,9 @@ async function main(): Promise<void> {
           writeError(envelope, "unknown", `validator not found: ${req.validatorId}`);
           continue;
         }
-        const result = await Promise.resolve(validator.evaluate(req.input));
+        const result = assertValidationResult(
+          await Promise.resolve(validator.evaluate(req.input)),
+        );
         writeResponse({ ...envelope, kind: "evaluate_ok", result });
         continue;
       }

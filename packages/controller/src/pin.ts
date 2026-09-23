@@ -2,8 +2,16 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import type { IntakePin } from "./intake.js";
+import { resolveBundleEntry } from "./bundle.js";
 
-/** Re-read the on-disk manifest and ensure it still matches the run pin. */
+/** Digest the pinned createGraph entry bytes (not just the manifest). */
+export async function digestBundleEntry(intake: IntakePin): Promise<string> {
+  const entry = resolveBundleEntry(intake);
+  const bytes = await readFile(entry);
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+/** Re-read the on-disk manifest and entry; ensure they still match the run pin. */
 export async function assertPinnedBundleUnchanged(intake: IntakePin): Promise<void> {
   const manifestPath = path.join(intake.bundle.bundlePath, "graphloom.manifest.json");
   const raw = await readFile(manifestPath, "utf8");
@@ -25,5 +33,12 @@ export async function assertPinnedBundleUnchanged(intake: IntakePin): Promise<vo
   const liveTree = manifest.digests?.sourceTree;
   if (pinnedTree && liveTree && pinnedTree !== liveTree) {
     throw new Error("pinned sourceTree digest no longer matches on-disk manifest");
+  }
+
+  const liveEntry = await digestBundleEntry(intake);
+  if (liveEntry !== intake.bundle.entryDigest) {
+    throw new Error(
+      `pinned entry digest mismatch: expected ${intake.bundle.entryDigest}, got ${liveEntry}`,
+    );
   }
 }

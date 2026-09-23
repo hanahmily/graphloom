@@ -33,6 +33,8 @@ export interface CallContext {
 export interface PluginHost {
   readonly activeVersion: string;
   readonly generation: number;
+  /** OS pid of the plugin child when hosted out-of-process. */
+  readonly childPid?: number | undefined;
   describe(ctx: CallContext): Promise<HostResult<GraphDefinition>>;
   advance(ctx: CallContext, view: RunView): Promise<HostResult<GraphDecision>>;
   evaluate?(

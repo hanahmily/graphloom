@@ -127,6 +127,10 @@ class ChildSession implements PluginHost {
     });
   }
 
+  get childPid(): number | undefined {
+    return this.child.pid ?? undefined;
+  }
+
   async waitUntilReady(): Promise<void> {
     // Brief settle window; spawn `error` can win early without waiting on exit.
     await Promise.race([sleep(25), this.spawnErrorPromise.then(() => undefined)]);
@@ -364,6 +368,38 @@ class ChildSession implements PluginHost {
           kind: "child_observation",
           code: "stale",
           message: `operationId mismatch: expected ${ctx.operationId}, got ${response.operationId}`,
+        },
+      };
+    }
+    if (response.runId !== ctx.runId) {
+      return {
+        ok: false,
+        observation: {
+          kind: "child_observation",
+          code: "stale",
+          message: `runId mismatch: expected ${ctx.runId}, got ${response.runId}`,
+        },
+      };
+    }
+    if (response.expectedStateRevision !== ctx.expectedStateRevision) {
+      return {
+        ok: false,
+        observation: {
+          kind: "child_observation",
+          code: "stale",
+          message: `expectedStateRevision mismatch: expected ${ctx.expectedStateRevision}, got ${response.expectedStateRevision}`,
+        },
+      };
+    }
+    const reqEpisode = ctx.recoveryEpisodeId;
+    const resEpisode = response.recoveryEpisodeId;
+    if (reqEpisode !== resEpisode) {
+      return {
+        ok: false,
+        observation: {
+          kind: "child_observation",
+          code: "stale",
+          message: `recoveryEpisodeId mismatch: expected ${String(reqEpisode)}, got ${String(resEpisode)}`,
         },
       };
     }

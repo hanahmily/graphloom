@@ -29,6 +29,12 @@ import {
 } from "./loop.js";
 import { sanitizedPluginEnv } from "./plugin-env.js";
 import { assertPinnedBundleUnchanged } from "./pin.js";
+import {
+  clearOwnerClaim,
+  isClaimStale,
+  readOwnerClaim,
+  reapOwnerProcesses,
+} from "./owner.js";
 import { reconcilePendingDispatch } from "./reconcile.js";
 import {
   getSession,
@@ -172,11 +178,15 @@ export function createController(): Controller {
         const definition = described.value;
         assertDefinitionMatchesPin(definition, intake);
 
+        const revisionBridge = { current: 0 };
         const validators = resolveValidators(
           request.validators,
           host,
           definition.defaultValidators.map((b) => b.validatorId),
-          { runId, stateRevision: 0 },
+          {
+            runId,
+            getStateRevision: () => revisionBridge.current,
+          },
         );
 
         const sourceDirtyBefore = await listDirtyPaths(intake.repoPath);
@@ -195,6 +205,7 @@ export function createController(): Controller {
           stateRoot,
           sourceDirtyBefore,
         });
+        revisionBridge.current = state.stateRevision;
         session.stateDir = state.stateDir;
         registerSession(session);
         await ensureArtifactDir(state);
@@ -206,12 +217,14 @@ export function createController(): Controller {
           runner: request.runner,
           validators,
           shouldStop: () => sessionStop(session),
+          revisionBridge,
         });
 
         const sourceDirtyAfter = await listDirtyPaths(intake.repoPath);
         return toReport(state, sourceDirtyAfter);
       } finally {
         await clearStopRequest(session.stateDir);
+        await clearOwnerClaim(session.stateDir);
         await reapSession(session);
       }
     },
@@ -225,6 +238,9 @@ export function createController(): Controller {
         session.stopRequested = true;
         await session.host.close().catch(() => undefined);
       }
+
+      // Cross-process: reap persisted plugin child / signal owner controller.
+      await reapOwnerProcesses(stateDir);
 
       // Serialize the final stopped write with the owner loop (lock is not held
       // across runner jobs, so this can proceed during an in-flight dispatch).
@@ -243,6 +259,7 @@ export function createController(): Controller {
           await saveRunState(state);
         }
         await clearStopRequest(stateDir);
+        await clearOwnerClaim(stateDir);
         if (session) {
           unregisterSession(session);
         }
@@ -267,6 +284,12 @@ export function createController(): Controller {
       await withDirectoryLock(stateDir, "run.exec.lock", async () => {
         if (getSession(stateDir) || getSession(request.runRef)) {
           throw new Error("cannot resume: run has an active controller session; stop first");
+        }
+        const owner = await readOwnerClaim(stateDir);
+        if (owner && !isClaimStale(owner)) {
+          throw new Error(
+            `cannot resume: run owned by live controller pid ${owner.controllerPid}; stop first`,
+          );
         }
         state = await loadRunState(stateDir);
         if (state.status === "succeeded" || state.status === "failed") {
@@ -376,11 +399,15 @@ export function createController(): Controller {
           return toReport(state, await listDirtyPaths(state.intake.repoPath));
         }
 
+        const revisionBridge = { current: state.stateRevision };
         const validators = resolveValidators(
           request.validators,
           host,
           state.definition.defaultValidators.map((b) => b.validatorId),
-          { runId: state.runId, stateRevision: state.stateRevision },
+          {
+            runId: state.runId,
+            getStateRevision: () => revisionBridge.current,
+          },
         );
 
         state = await runNormalLoop(state, {
@@ -388,10 +415,12 @@ export function createController(): Controller {
           runner: request.runner,
           validators,
           shouldStop: () => sessionStop(session!),
+          revisionBridge,
         });
         return toReport(state, await listDirtyPaths(state.intake.repoPath));
       } finally {
         await clearStopRequest(stateDir);
+        await clearOwnerClaim(stateDir);
         await reapSession(session);
       }
     },
@@ -425,7 +454,7 @@ function resolveValidators(
   explicit: Record<string, AdmissionValidator> | undefined,
   host: PluginHost,
   ids: string[],
-  ctx: { runId: string; stateRevision: number },
+  ctx: { runId: string; getStateRevision: () => number },
 ): Record<string, AdmissionValidator> {
   if (explicit) {
     return explicit;

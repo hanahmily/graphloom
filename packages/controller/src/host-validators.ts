@@ -10,6 +10,12 @@ export interface ControllerValidator {
   evaluate(input: ValidationInput): ValidationResult | Promise<ValidationResult>;
 }
 
+export interface HostValidatorContext {
+  runId: string;
+  /** Always read the live revision — never capture a stale snapshot. */
+  getStateRevision: () => number;
+}
+
 /**
  * Validators that evaluate via the plugin host (child process), never by
  * importing bundle code into the controller.
@@ -17,7 +23,7 @@ export interface ControllerValidator {
 export function createHostValidators(
   host: PluginHost,
   validatorIds: string[],
-  ctxBase: { runId: string; stateRevision: number },
+  ctxBase: HostValidatorContext,
 ): Record<string, ControllerValidator> {
   if (!host.evaluate) {
     throw new Error("plugin host does not support evaluate");
@@ -33,7 +39,7 @@ export function createHostValidators(
           {
             runId: ctxBase.runId,
             operationId: `eval-${validatorId}-${seq}`,
-            expectedStateRevision: ctxBase.stateRevision,
+            expectedStateRevision: ctxBase.getStateRevision(),
           },
           validatorId,
           input,
