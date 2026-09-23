@@ -1,10 +1,10 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import type {
   EvidenceRecord,
   GraphDecision,
-  GraphPlugin,
+  GraphDefinition,
   JobSpec,
   ObserveSpec,
   RunView,
@@ -12,13 +12,17 @@ import type {
 } from "@graphloom/sdk";
 import { assertGraphDecision } from "@graphloom/sdk";
 import type { Runner } from "@graphloom/runner";
+import type { PluginHost } from "@graphloom/plugin-host";
 import {
   admitValidation,
+  earliestIncompleteStage,
   freshEvidence,
   invalidateFromStage,
   newEvidenceRef,
+  stageRequirementsMet,
 } from "./admit.js";
 import type { IntakePin } from "./intake.js";
+import { assertSafeRunId } from "./ids.js";
 import { type DurableRunState, saveRunState } from "./state.js";
 import {
   readWorktreeFile,
@@ -28,7 +32,8 @@ import {
 const MAX_STEPS = 64;
 
 export interface LoopDeps {
-  plugin: GraphPlugin;
+  /** Plugin decisions go through the host seam (in-process scripted or child). */
+  host: PluginHost;
   runner: Runner;
   validators: Record<string, Validator>;
 }
@@ -37,6 +42,17 @@ export async function runNormalLoop(
   state: DurableRunState,
   deps: LoopDeps,
 ): Promise<DurableRunState> {
+  if (state.pendingDispatch?.status === "pending") {
+    state = {
+      ...state,
+      status: "stopped",
+      stopReason: "reconcile required",
+      blocker: `pending dispatch ${state.pendingDispatch.operationId} after restart`,
+    };
+    await saveRunState(state);
+    return state;
+  }
+
   for (let step = 0; step < MAX_STEPS; step += 1) {
     if (state.status !== "running") {
       await saveRunState(state);
@@ -44,17 +60,37 @@ export async function runNormalLoop(
     }
 
     const view = toRunView(state);
-    const decision = assertGraphDecision(deps.plugin.advance(view));
+    const advanced = await deps.host.advance(
+      {
+        runId: state.runId,
+        operationId: `adv-${state.stateRevision}-${step}`,
+        expectedStateRevision: state.stateRevision,
+      },
+      view,
+    );
+    if (!advanced.ok) {
+      state = {
+        ...state,
+        status: "stopped",
+        stopReason: `plugin host: ${advanced.observation.code}`,
+        blocker: advanced.observation.message,
+      };
+      await saveRunState(state);
+      return state;
+    }
+    const decision = assertGraphDecision(advanced.value);
     state = await applyDecision(state, decision, deps);
     await saveRunState(state);
   }
 
-  return {
+  state = {
     ...state,
     status: "stopped",
     stopReason: "step limit",
     blocker: `exceeded ${MAX_STEPS} controller steps`,
   };
+  await saveRunState(state);
+  return state;
 }
 
 export function toRunView(state: DurableRunState): RunView {
@@ -67,7 +103,7 @@ export function toRunView(state: DurableRunState): RunView {
     current: state.current,
     receipts: structuredClone(state.receipts),
     evidence: structuredClone(state.evidence),
-    outstanding: [],
+    outstanding: structuredClone(state.outstanding),
     budgets: { ...state.budgets },
     validatorBindings: structuredClone(state.validatorBindings),
     generation: state.generation,
@@ -105,13 +141,27 @@ async function applyDecision(
     case "observe":
       return observeWorkspace(state, action.observe);
     case "validate": {
-      const result = admitValidation(state, action.validate, deps.validators);
+      const result = await admitValidation(state, action.validate, deps.validators);
       return result.state;
     }
     case "reenter": {
+      if (state.budgets.corrections <= 0) {
+        return {
+          ...state,
+          status: "stopped",
+          stopReason: "corrections budget exhausted",
+          blocker: "reenter",
+        };
+      }
       let next = invalidateFromStage(state, action.reenter.stageId, state.definition);
+      const { workspaceRevision: _wr, ...withoutRev } = next;
+      void _wr;
       next = {
-        ...next,
+        ...withoutRev,
+        budgets: {
+          ...withoutRev.budgets,
+          corrections: withoutRev.budgets.corrections - 1,
+        },
         current: {
           stageId: action.reenter.stageId,
           attempt:
@@ -119,7 +169,6 @@ async function applyDecision(
               ? state.current.attempt + 1
               : 1,
         },
-        // Drop stale evidence from prior generation for freshness after reentry.
         generation: state.generation + 1,
       };
       return next;
@@ -136,7 +185,7 @@ async function applyDecision(
       const complete =
         action.stop.reason === "complete" &&
         state.definition.stages.every((s) =>
-          state.receipts.some((r) => r.stageId === s.id && r.valid),
+          stageRequirementsMet(state, s.id, s.requirementIds),
         );
       return {
         ...state,
@@ -160,35 +209,98 @@ async function dispatchJob(
   job: JobSpec,
   runner: Runner,
 ): Promise<DurableRunState> {
-  if (state.budgets.jobs <= 0 || state.budgets.agentInvocations <= 0) {
+  if (state.budgets.jobs <= 0) {
     return {
       ...state,
       status: "stopped",
       stopReason: "budgets exhausted",
-      blocker: "jobs or agentInvocations",
+      blocker: "jobs",
+    };
+  }
+  if (job.kind === "agent" && state.budgets.agentInvocations <= 0) {
+    return {
+      ...state,
+      status: "stopped",
+      stopReason: "budgets exhausted",
+      blocker: "agentInvocations",
     };
   }
 
+  const isCorrection =
+    job.purpose === "work" &&
+    (state.current.attempt > 1 ||
+      freshEvidence(state).some((e) => e.kind === "file" || e.kind === "workspace"));
+  if (isCorrection && state.budgets.corrections <= 0) {
+    return {
+      ...state,
+      status: "stopped",
+      stopReason: "corrections budget exhausted",
+      blocker: "dispatch correction",
+    };
+  }
+
+  const operationId = `op-${state.stateRevision}-${randomUUID().slice(0, 8)}`;
+  let next: DurableRunState = {
+    ...state,
+    outstanding: [
+      ...state.outstanding,
+      { operationId, kind: "dispatch", stageId: job.stageId },
+    ],
+    pendingDispatch: {
+      operationId,
+      generation: state.generation,
+      stageId: job.stageId,
+      job,
+      status: "pending",
+    },
+    current: { stageId: job.stageId, attempt: state.current.attempt },
+  };
+  // Persist intent before side effects so restart can reconcile instead of replay.
+  await saveRunState(next);
+
   const result = await runner.runJob(job, {
     runId: state.runId,
+    operationId,
     generation: state.generation,
     worktreePath: state.worktreePath,
     artifactDir: state.artifactDir,
   });
 
-  let next: DurableRunState = {
-    ...state,
+  if (
+    result.runId !== state.runId ||
+    result.operationId !== operationId ||
+    result.generation !== state.generation
+  ) {
+    return {
+      ...next,
+      pendingDispatch: { ...next.pendingDispatch!, status: "failed" },
+      status: "stopped",
+      stopReason: "stale job result identity",
+      blocker: `${result.runId}/${result.operationId}/g${result.generation}`,
+    };
+  }
+
+  next = {
+    ...next,
     budgets: {
-      ...state.budgets,
-      jobs: state.budgets.jobs - 1,
-      agentInvocations: state.budgets.agentInvocations - 1,
+      ...next.budgets,
+      jobs: next.budgets.jobs - 1,
+      agentInvocations:
+        job.kind === "agent"
+          ? next.budgets.agentInvocations - 1
+          : next.budgets.agentInvocations,
+      corrections: isCorrection
+        ? next.budgets.corrections - 1
+        : next.budgets.corrections,
     },
-    current: { stageId: job.stageId, attempt: state.current.attempt },
+    pendingDispatch: { ...next.pendingDispatch!, status: "completed" },
+    outstanding: next.outstanding.filter((o) => o.operationId !== operationId),
   };
 
   if (result.status !== "ok") {
     return {
       ...next,
+      pendingDispatch: { ...next.pendingDispatch!, status: "failed" },
       status: "stopped",
       stopReason: `job failed: ${result.summary}`,
       blocker: result.status,
@@ -220,7 +332,10 @@ async function dispatchJob(
     };
   }
 
-  return next;
+  // Clear completed intent after successful apply.
+  const { pendingDispatch: _done, ...cleared } = next;
+  void _done;
+  return cleared;
 }
 
 async function observeWorkspace(
@@ -229,6 +344,7 @@ async function observeWorkspace(
 ): Promise<DurableRunState> {
   const added: EvidenceRecord[] = [];
   let next = { ...state };
+  let workspaceFp: string | undefined;
 
   for (const rel of spec.paths ?? []) {
     const bytes = await readWorktreeFile(state.worktreePath, rel);
@@ -244,22 +360,27 @@ async function observeWorkspace(
 
   if (spec.includeWorkspaceManifest) {
     const changedPaths = await workspaceChangeManifest(state.worktreePath);
+    workspaceFp = hash(JSON.stringify(changedPaths));
     const ref = newEvidenceRef(next);
     added.push({
       ref,
       kind: "workspace",
       generation: next.generation,
       payload: { changedPaths },
-      fingerprint: hash(JSON.stringify(changedPaths)),
+      fingerprint: workspaceFp,
     });
   }
 
-  return {
+  const out: DurableRunState = {
     ...next,
     evidence: [...next.evidence, ...added],
     evidenceSeq: next.evidenceSeq,
     stateRevision: next.stateRevision + 1,
   };
+  if (workspaceFp !== undefined) {
+    out.workspaceRevision = workspaceFp;
+  }
+  return out;
 }
 
 function hash(text: string): string {
@@ -269,20 +390,21 @@ function hash(text: string): string {
 export function initialState(args: {
   runId: string;
   intake: IntakePin;
-  definition: ReturnType<GraphPlugin["describe"]>;
+  definition: GraphDefinition;
   worktreePath: string;
   worktreeBranch: string;
   stateRoot: string;
   sourceDirtyBefore: string[];
 }): DurableRunState {
-  const stateDir = path.join(args.stateRoot, args.runId);
+  const runId = assertSafeRunId(args.runId);
+  const stateDir = path.join(args.stateRoot, runId);
   const artifactDir = path.join(stateDir, "artifacts");
   const firstStage = args.definition.stages[0];
   if (!firstStage) {
     throw new Error("graph definition has no stages");
   }
   return {
-    runId: args.runId,
+    runId,
     status: "running",
     generation: 1,
     stateRevision: 0,
@@ -291,6 +413,7 @@ export function initialState(args: {
     current: { stageId: firstStage.id, attempt: 1 },
     receipts: [],
     evidence: [],
+    outstanding: [],
     definition: args.definition,
     validatorBindings: structuredClone(args.definition.defaultValidators),
     budgets: { ...args.intake.budgets },
@@ -312,11 +435,13 @@ export async function ensureArtifactDir(state: DurableRunState): Promise<void> {
 
 /** Exported for restart tests: bump generation so prior evidence is stale. */
 export function bumpGeneration(state: DurableRunState): DurableRunState {
+  const { workspaceRevision: _wr, ...rest } = state;
+  void _wr;
   return {
-    ...state,
+    ...rest,
     generation: state.generation + 1,
     stateRevision: state.stateRevision + 1,
   };
 }
 
-export { freshEvidence };
+export { freshEvidence, earliestIncompleteStage };

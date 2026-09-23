@@ -5,7 +5,7 @@ export type ScriptedJobHandler = (
   job: JobSpec,
   ctx: JobContext,
   index: number,
-) => JobResult | Promise<JobResult>;
+) => Omit<JobResult, "runId" | "operationId" | "generation"> | Promise<Omit<JobResult, "runId" | "operationId" | "generation">>;
 
 export interface ScriptedRunnerOptions {
   /** Handlers invoked in order for successive jobs. Functions may ignore index. */
@@ -15,6 +15,7 @@ export interface ScriptedRunnerOptions {
 /**
  * CI/scripted Runner: returns canned job results without live agents.
  * Throws when more jobs are requested than scripted.
+ * Echoes run/operation/generation from context onto every result.
  */
 export function createScriptedRunner(options: ScriptedRunnerOptions): Runner {
   let index = 0;
@@ -33,7 +34,13 @@ export function createScriptedRunner(options: ScriptedRunnerOptions): Runner {
       }
       const current = index;
       index += 1;
-      return handler(job, ctx, current);
+      const partial = await handler(job, ctx, current);
+      return {
+        ...partial,
+        runId: ctx.runId,
+        operationId: ctx.operationId,
+        generation: ctx.generation,
+      };
     },
   };
 }

@@ -17,5 +17,7 @@ export {
   saveRunState,
   tryAdmit,
   writeSourceSidecar,
+  assertSafeRunId,
+  assertSafeGraphId,
 } from "./controller.js";
 export type { DurableRunState, RunStatus, IntakePin } from "./controller.js";

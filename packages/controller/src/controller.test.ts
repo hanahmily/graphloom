@@ -43,12 +43,14 @@ const definition: GraphDefinition = {
   requirements: [
     {
       id: "greeting-bytes",
-      statement: "exact greeting bytes and sole path",
+      statement:
+        "GREETING.txt contains exactly the UTF-8 bytes Hello, GraphLoom!\\n and is the only changed path in the workspace (excluding Git metadata).",
       evidenceSchema: "workspace-bytes-v1",
     },
     {
       id: "independent-review",
-      statement: "independent reviewer approves",
+      statement:
+        "An independent read-only reviewer approves the current GREETING.txt revision against the pinned task.",
       evidenceSchema: "review-verdict-v1",
     },
   ],
@@ -130,6 +132,15 @@ request: |
   it("rejects path traversal", () => {
     expect(() => resolveUnderBase("/tmp/task", "../etc/passwd", "repo")).toThrow(IntakeError);
     expect(() => resolveUnderBase("/tmp/task", "/etc/passwd", "repo")).toThrow(IntakeError);
+  });
+
+  it("rejects graph ids with separators", () => {
+    expect(() =>
+      parseTaskYaml(`graph: ../outside
+repo: ./test-repo
+request: hello
+`),
+    ).toThrow(/invalid graph id/);
   });
 });
 
@@ -257,7 +268,7 @@ describe("durable controller Write→Review", () => {
     let state = await loadRunState(paused.stateDir);
     // Simulate crash restart: bump generation so prior Observe evidence is stale.
     state = { ...state, status: "running", generation: state.generation + 1 };
-    const admit = tryAdmit(state, "write", validators);
+    const admit = await tryAdmit(state, "write", validators);
     expect(admit.accepted).toBe(false);
     expect(admit.reason).toMatch(/no fresh evidence/);
 

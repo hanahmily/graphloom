@@ -3,6 +3,8 @@ import { access, readFile } from "node:fs/promises";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { PROTOCOL_VERSION } from "@graphloom/sdk";
+import { assertSafeGraphId } from "./ids.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -99,6 +101,11 @@ export function parseTaskYaml(text: string): TaskFile {
   if (!graph || !repo || request === undefined || request === "") {
     throw new IntakeError("task.yaml must declare graph, repo, and request");
   }
+  try {
+    assertSafeGraphId(graph);
+  } catch (err) {
+    throw new IntakeError(err instanceof Error ? err.message : String(err));
+  }
   return { graph, repo, request };
 }
 
@@ -112,8 +119,8 @@ export async function intakeTask(taskPath: string): Promise<IntakePin> {
   await assertExists(repoPath, "directory");
 
   const bundlePath = resolveUnderBase(
-    taskDir,
-    path.join("plugins", task.graph),
+    path.join(taskDir, "plugins"),
+    task.graph,
     "graph bundle",
   );
   await assertExists(bundlePath, "directory");
@@ -139,6 +146,11 @@ export async function intakeTask(taskPath: string): Promise<IntakePin> {
   }
   if (typeof manifest.version !== "string" || typeof manifest.sdkProtocol !== "number") {
     throw new IntakeError("manifest missing version or sdkProtocol");
+  }
+  if (manifest.sdkProtocol !== PROTOCOL_VERSION) {
+    throw new IntakeError(
+      `manifest sdkProtocol ${manifest.sdkProtocol} != host ${PROTOCOL_VERSION}`,
+    );
   }
 
   const pinnedHead = await gitRevParse(repoPath, "HEAD");
