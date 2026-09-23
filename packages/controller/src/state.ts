@@ -51,6 +51,8 @@ export interface DurableRunState {
   receiptSeq: number;
   /** Hash of last Observe workspace snapshot; Validate must match live worktree. */
   workspaceRevision?: string;
+  /** Last successful work-purpose dispatch; used for separate-reviewer checks. */
+  lastWorkOperationId?: string;
 }
 
 export async function saveRunState(state: DurableRunState): Promise<void> {

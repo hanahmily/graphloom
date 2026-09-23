@@ -79,50 +79,50 @@ export function createController(): Controller {
           generation: 1,
         });
 
-      const described = await host.describe({
-        runId: "intake",
-        operationId: "describe",
-        expectedStateRevision: 0,
-      });
-      if (!described.ok) {
-        throw new Error(`plugin describe failed: ${described.observation.message}`);
-      }
-      const definition = described.value;
-      assertDefinitionMatchesPin(definition, intake);
-
-      const sourceDirtyBefore = await listDirtyPaths(intake.repoPath);
-      const runId = assertSafeRunId(request.runId ?? randomUUID().slice(0, 12));
-      const stateRoot = request.stateRoot ?? path.join(intake.repoPath, "graphloom-state");
-      const { worktreePath, branchName } = await createRunWorktree(
-        intake.repoPath,
-        runId,
-        intake.pinnedHead,
-      );
-
-      let state = initialState({
-        runId,
-        intake,
-        definition,
-        worktreePath,
-        worktreeBranch: branchName,
-        stateRoot,
-        sourceDirtyBefore,
-      });
-      await ensureArtifactDir(state);
-      await saveRunState(state);
-
       try {
+        const described = await host.describe({
+          runId: "intake",
+          operationId: "describe",
+          expectedStateRevision: 0,
+        });
+        if (!described.ok) {
+          throw new Error(`plugin describe failed: ${described.observation.message}`);
+        }
+        const definition = described.value;
+        assertDefinitionMatchesPin(definition, intake);
+
+        const sourceDirtyBefore = await listDirtyPaths(intake.repoPath);
+        const runId = assertSafeRunId(request.runId ?? randomUUID().slice(0, 12));
+        const stateRoot = request.stateRoot ?? path.join(intake.repoPath, "graphloom-state");
+        const { worktreePath, branchName } = await createRunWorktree(
+          intake.repoPath,
+          runId,
+          intake.pinnedHead,
+        );
+
+        let state = initialState({
+          runId,
+          intake,
+          definition,
+          worktreePath,
+          worktreeBranch: branchName,
+          stateRoot,
+          sourceDirtyBefore,
+        });
+        await ensureArtifactDir(state);
+        await saveRunState(state);
+
         state = await runNormalLoop(state, {
           host,
           runner: request.runner,
           validators: request.validators,
         });
+
+        const sourceDirtyAfter = await listDirtyPaths(intake.repoPath);
+        return toReport(state, sourceDirtyAfter);
       } finally {
         await host.close().catch(() => undefined);
       }
-
-      const sourceDirtyAfter = await listDirtyPaths(intake.repoPath);
-      return toReport(state, sourceDirtyAfter);
     },
 
     async continueAfterRestart(stateDir, deps): Promise<RunReport> {
@@ -156,19 +156,19 @@ export function createController(): Controller {
           generation: state.generation,
         });
 
-      // Restart fences prior generation so stale evidence cannot Accept.
-      state = bumpGeneration(state);
-      await saveRunState(state);
       try {
+        // Restart fences prior generation so stale evidence cannot Accept.
+        state = bumpGeneration(state);
+        await saveRunState(state);
         state = await runNormalLoop(state, {
           host,
           runner: deps.runner,
           validators: deps.validators,
         });
+        return toReport(state, await listDirtyPaths(state.intake.repoPath));
       } finally {
         await host.close().catch(() => undefined);
       }
-      return toReport(state, await listDirtyPaths(state.intake.repoPath));
     },
 
     async inspect(stateDir: string): Promise<DurableRunState> {

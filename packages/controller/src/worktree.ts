@@ -22,10 +22,13 @@ export async function createRunWorktree(
   pinnedHead: string,
 ): Promise<WorktreeResult> {
   const safeId = assertSafeRunId(runId);
-  const worktreePath = path.join(repoPath, "graphloom", safeId);
+  const graphloomRoot = path.join(repoPath, "graphloom");
+  const worktreePath = path.join(graphloomRoot, safeId);
   const branchName = `graphloom/${safeId}`;
   await withDirectoryLock(repoPath, ".graphloom-repo.lock", async () => {
-    await mkdir(path.dirname(worktreePath), { recursive: true });
+    await assertNoSymlinkComponent(repoPath, "graphloom");
+    await mkdir(graphloomRoot, { recursive: true });
+    await assertNoSymlinkComponent(repoPath, "graphloom");
     await execFileAsync(
       "git",
       ["worktree", "add", "-b", branchName, worktreePath, pinnedHead],
@@ -35,35 +38,72 @@ export async function createRunWorktree(
   return { worktreePath, branchName };
 }
 
+/** Reject if any path component under base is a symlink. */
+export async function assertNoSymlinkComponent(
+  baseDir: string,
+  relative: string,
+): Promise<void> {
+  let cursor = baseDir;
+  for (const part of relative.split(/[/\\]/).filter(Boolean)) {
+    cursor = path.join(cursor, part);
+    let st;
+    try {
+      st = await lstat(cursor);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === "ENOENT") {
+        return;
+      }
+      throw err;
+    }
+    if (st.isSymbolicLink()) {
+      throw new Error(`symlink rejected in path: ${relative}`);
+    }
+  }
+}
+
 export async function listDirtyPaths(repoPath: string): Promise<string[]> {
   const { stdout } = await execFileAsync(
     "git",
-    ["status", "--porcelain", "-uall"],
+    ["status", "--porcelain", "-uall", "--ignored"],
     { cwd: repoPath },
   );
-  return stdout
-    .split("\n")
-    .map((l) => l.trimEnd())
-    .filter(Boolean)
-    .map((line) => line.slice(3).trim());
+  return parsePorcelainPaths(stdout);
 }
 
-/** Workspace change manifest relative to pinned HEAD (tracked + untracked, no .git). */
+/**
+ * Workspace change manifest relative to pinned HEAD.
+ * Includes tracked, untracked, and ignored paths (excluding .git).
+ */
 export async function workspaceChangeManifest(worktreePath: string): Promise<string[]> {
   const { stdout } = await execFileAsync(
     "git",
-    ["status", "--porcelain", "-uall"],
+    ["status", "--porcelain", "-uall", "--ignored"],
     { cwd: worktreePath },
   );
+  return parsePorcelainPaths(stdout);
+}
+
+function parsePorcelainPaths(stdout: string): string[] {
   const paths: string[] = [];
   for (const line of stdout.split("\n")) {
     if (!line.trim()) continue;
+    // XY PATH or XY ORIG -> PATH (rename/copy)
     const raw = line.slice(3).trim();
-    const arrow = raw.includes(" -> ") ? raw.split(" -> ").pop()! : raw;
-    if (arrow === ".git" || arrow.startsWith(".git/")) continue;
-    paths.push(arrow);
+    if (raw.includes(" -> ")) {
+      const [from, to] = raw.split(" -> ");
+      if (from) pushPath(paths, from.trim());
+      if (to) pushPath(paths, to.trim());
+    } else {
+      pushPath(paths, raw);
+    }
   }
   return [...new Set(paths)].sort();
+}
+
+function pushPath(paths: string[], p: string): void {
+  if (p === ".git" || p.startsWith(".git/")) return;
+  paths.push(p);
 }
 
 export async function readWorktreeFile(
@@ -71,8 +111,15 @@ export async function readWorktreeFile(
   relativePath: string,
 ): Promise<string | undefined> {
   const rootReal = await realpath(worktreePath);
-  const target = path.resolve(worktreePath, relativePath);
-  // Reject symlink components before following them out of the tree.
+  // Lexical containment before any walk that could treat escapes as missing.
+  const targetLexical = path.resolve(worktreePath, relativePath);
+  if (targetLexical !== worktreePath && !targetLexical.startsWith(worktreePath + path.sep)) {
+    throw new Error(`path escapes worktree: ${relativePath}`);
+  }
+  if (relativePath.split(/[/\\]/).includes("..")) {
+    throw new Error(`path escapes worktree: ${relativePath}`);
+  }
+
   let cursor = worktreePath;
   const parts = relativePath.split(/[/\\]/).filter(Boolean);
   for (const part of parts) {
@@ -92,7 +139,7 @@ export async function readWorktreeFile(
     }
   }
 
-  const targetReal = await realpath(target).catch((err: NodeJS.ErrnoException) => {
+  const targetReal = await realpath(targetLexical).catch((err: NodeJS.ErrnoException) => {
     if (err.code === "ENOENT") {
       return undefined;
     }
@@ -145,7 +192,6 @@ export async function assertWorktreeMatches(
           `worktree branch mismatch: expected ${branchName}, got ${branch}`,
         );
       }
-      // HEAD may advance with commits inside the worktree; pin is the creation base.
       void head;
       void pinnedHead;
       break;

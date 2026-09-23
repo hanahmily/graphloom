@@ -24,6 +24,7 @@ import {
   resolveUnderBase,
   tryAdmit,
 } from "./index.js";
+import { readWorktreeFile, workspaceChangeManifest } from "./worktree.js";
 
 const execFileAsync = promisify(execFile);
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -141,6 +142,23 @@ repo: ./test-repo
 request: hello
 `),
     ).toThrow(/invalid graph id/);
+  });
+});
+
+describe("worktree observe boundaries", () => {
+  it("rejects escaped observe paths before treating them as missing", async () => {
+    const env = await makeEnv();
+    await expect(readWorktreeFile(env.repoPath, "../missing")).rejects.toThrow(/escapes/);
+  });
+
+  it("includes ignored paths in the change manifest", async () => {
+    const env = await makeEnv();
+    await writeFile(path.join(env.repoPath, ".gitignore"), "secret.bin\n", "utf8");
+    await writeFile(path.join(env.repoPath, "secret.bin"), "x", "utf8");
+    await execFileAsync("git", ["add", ".gitignore"], { cwd: env.repoPath });
+    await execFileAsync("git", ["commit", "-m", "ignore"], { cwd: env.repoPath });
+    const paths = await workspaceChangeManifest(env.repoPath);
+    expect(paths).toContain("secret.bin");
   });
 });
 

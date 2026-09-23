@@ -22,6 +22,39 @@ export function freshEvidence(state: DurableRunState): EvidenceRecord[] {
   return state.evidence.filter((e) => e.generation === state.generation);
 }
 
+/**
+ * Latest observation per file path / kind within the current generation.
+ * Older same-generation observes (e.g. pre-correction) are superseded.
+ */
+export function candidateEvidence(state: DurableRunState): EvidenceRecord[] {
+  const fresh = freshEvidence(state);
+  const latest: EvidenceRecord[] = [];
+  const seenFiles = new Set<string>();
+  const seenKinds = new Set<string>();
+  for (let i = fresh.length - 1; i >= 0; i -= 1) {
+    const e = fresh[i]!;
+    if (e.kind === "file") {
+      const filePath = (e.payload as { path?: unknown } | undefined)?.path;
+      if (typeof filePath !== "string" || seenFiles.has(filePath)) {
+        continue;
+      }
+      seenFiles.add(filePath);
+      latest.unshift(e);
+      continue;
+    }
+    if (e.kind === "workspace" || e.kind === "review") {
+      if (seenKinds.has(e.kind)) {
+        continue;
+      }
+      seenKinds.add(e.kind);
+      latest.unshift(e);
+      continue;
+    }
+    latest.unshift(e);
+  }
+  return latest;
+}
+
 export function candidateFingerprint(evidence: EvidenceRecord[]): string {
   const h = createHash("sha256");
   for (const e of evidence) {
@@ -128,7 +161,7 @@ export async function admitValidation(
     };
   }
 
-  const evidence = freshEvidence(state);
+  const evidence = candidateEvidence(state);
   if (evidence.length === 0) {
     return { state, accepted: false, reason: "no fresh evidence for validation" };
   }
@@ -174,6 +207,17 @@ export async function admitValidation(
     const validator = validators[binding.validatorId];
     if (!validator) {
       throw new AdmissionError(`validator not registered: ${binding.validatorId}`);
+    }
+
+    if (binding.independence === "separate-reviewer") {
+      const independenceError = assertSeparateReviewer(working, evidence);
+      if (independenceError) {
+        return {
+          state: bumpRevision(working),
+          accepted: false,
+          reason: independenceError,
+        };
+      }
     }
 
     const result = validator.evaluate({
@@ -266,6 +310,38 @@ function bindingFor(
     state.validatorBindings.find((b) => b.requirementId === requirementId) ??
     state.definition.defaultValidators.find((b) => b.requirementId === requirementId)
   );
+}
+
+export interface EvidenceProducer {
+  operationId: string;
+  stageId: string;
+  purpose: string;
+  readOnly: boolean;
+  kind: string;
+}
+
+function assertSeparateReviewer(
+  state: DurableRunState,
+  evidence: EvidenceRecord[],
+): string | undefined {
+  const review = [...evidence].reverse().find((e) => e.kind === "review");
+  if (!review) {
+    return "missing review evidence for separate-reviewer requirement";
+  }
+  const producer = (review.payload as { producer?: EvidenceProducer } | undefined)?.producer;
+  if (!producer) {
+    return "review evidence missing producer identity";
+  }
+  if (!producer.readOnly || producer.purpose !== "review") {
+    return "review evidence must come from a read-only review job";
+  }
+  if (!state.lastWorkOperationId) {
+    return "no prior work operation for separate-reviewer check";
+  }
+  if (producer.operationId === state.lastWorkOperationId) {
+    return "reviewer operation must be distinct from the writer";
+  }
+  return undefined;
 }
 
 function bumpRevision(state: DurableRunState): DurableRunState {

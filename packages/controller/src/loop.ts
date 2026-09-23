@@ -20,9 +20,11 @@ import {
   invalidateFromStage,
   newEvidenceRef,
   stageRequirementsMet,
+  type EvidenceProducer,
 } from "./admit.js";
 import type { IntakePin } from "./intake.js";
 import { assertSafeRunId } from "./ids.js";
+import { withDirectoryLock } from "./lock.js";
 import { type DurableRunState, saveRunState } from "./state.js";
 import {
   readWorktreeFile,
@@ -39,6 +41,17 @@ export interface LoopDeps {
 }
 
 export async function runNormalLoop(
+  state: DurableRunState,
+  deps: LoopDeps,
+): Promise<DurableRunState> {
+  // Hold a run-scoped execution lock for the whole loop so concurrent
+  // controller processes cannot dual-dispatch the same revision.
+  return withDirectoryLock(state.stateDir, "run.exec.lock", async () => {
+    return runNormalLoopLocked(state, deps);
+  });
+}
+
+async function runNormalLoopLocked(
   state: DurableRunState,
   deps: LoopDeps,
 ): Promise<DurableRunState> {
@@ -100,7 +113,7 @@ export function toRunView(state: DurableRunState): RunView {
       request: state.intake.task.request,
       repo: state.intake.task.repo,
     },
-    current: state.current,
+    current: structuredClone(state.current),
     receipts: structuredClone(state.receipts),
     evidence: structuredClone(state.evidence),
     outstanding: structuredClone(state.outstanding),
@@ -309,6 +322,13 @@ async function dispatchJob(
 
   if (result.evidence) {
     const added: EvidenceRecord[] = [];
+    const producer: EvidenceProducer = {
+      operationId,
+      stageId: job.stageId,
+      purpose: job.purpose,
+      readOnly: job.readOnly === true,
+      kind: job.kind,
+    };
     for (const item of result.evidence) {
       const ref = newEvidenceRef(next);
       const record: EvidenceRecord = {
@@ -316,9 +336,7 @@ async function dispatchJob(
         kind: item.kind,
         generation: next.generation,
       };
-      if (item.payload !== undefined) {
-        record.payload = item.payload;
-      }
+      record.payload = attachProducer(item.payload, producer);
       if (item.fingerprint !== undefined) {
         record.fingerprint = item.fingerprint;
       }
@@ -332,10 +350,21 @@ async function dispatchJob(
     };
   }
 
+  if (job.purpose === "work") {
+    next = { ...next, lastWorkOperationId: operationId };
+  }
+
   // Clear completed intent after successful apply.
   const { pendingDispatch: _done, ...cleared } = next;
   void _done;
   return cleared;
+}
+
+function attachProducer(payload: unknown, producer: EvidenceProducer): unknown {
+  if (payload !== null && typeof payload === "object" && !Array.isArray(payload)) {
+    return { ...(payload as Record<string, unknown>), producer };
+  }
+  return { value: payload, producer };
 }
 
 async function observeWorkspace(
@@ -445,3 +474,4 @@ export function bumpGeneration(state: DurableRunState): DurableRunState {
 }
 
 export { freshEvidence, earliestIncompleteStage };
+export { candidateEvidence } from "./admit.js";
