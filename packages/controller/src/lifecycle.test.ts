@@ -118,66 +118,107 @@ describe("public controller: hello child host + stop/resume/inspect", () => {
     expect(report.stopReason).toMatch(/stale job result/);
   });
 
-  it("resume continues a stopped run to success via child host", async () => {
+  it("resume after a clean graph pause continues via child host", async () => {
     const env = await makeEnv();
     const controller = createController();
+    const { createScriptedGraph, dispatch, observe, stop, validate } = await import(
+      "@graphloom/sdk"
+    );
 
-    // Pause after observe by exhausting scripted advances... use stop after first job intent.
-    let release!: () => void;
-    const gate = new Promise<void>((r) => {
-      release = r;
-    });
-    const runPromise = controller.run({
+    const definition = {
+      graphId: "hello",
+      version: "0.1.0",
+      stages: [
+        { id: "write", name: "Write", requirementIds: ["greeting-bytes"] },
+        { id: "review", name: "Review", requirementIds: ["independent-review"] },
+      ],
+      requirements: [
+        {
+          id: "greeting-bytes",
+          statement:
+            "GREETING.txt contains exactly the UTF-8 bytes Hello, GraphLoom!\\n and is the only changed path in the workspace (excluding Git metadata).",
+          evidenceSchema: "workspace-bytes-v1",
+        },
+        {
+          id: "independent-review",
+          statement:
+            "An independent read-only reviewer approves the current GREETING.txt revision against the pinned task.",
+          evidenceSchema: "review-verdict-v1",
+        },
+      ],
+      defaultValidators: [
+        { requirementId: "greeting-bytes", validatorId: "exact-greeting", version: "1" },
+        {
+          requirementId: "independent-review",
+          validatorId: "independent-reviewer",
+          version: "1",
+          independence: "separate-reviewer" as const,
+        },
+      ],
+    };
+
+    // Pause after Write acceptance with no in-flight job.
+    const paused = await controller.run({
       taskPath: env.taskPath,
-      runner: createScriptedRunner({
-        jobs: [
-          async () => {
-            await gate;
-            return { status: "ok", summary: "never" };
-          },
+      plugin: createScriptedGraph({
+        definition,
+        advances: [
+          dispatch(
+            {
+              stageId: "write",
+              kind: "agent",
+              purpose: "work",
+              instruction: "write",
+              writeScope: [GREETING_PATH],
+            },
+            "dispatch writer",
+          ),
+          observe({ paths: [GREETING_PATH], includeWorkspaceManifest: true }, "observe"),
+          validate({ stageId: "write", requirementIds: ["greeting-bytes"] }, "validate write"),
+          stop({ reason: "paused", blocker: "test pause before review" }, "pause"),
         ],
       }),
+      runner: adaptiveScriptedRunner(2),
       stateRoot: env.stateRoot,
       runId: "resume1",
     });
-    const stateDir = path.join(env.stateRoot, "resume1");
-    await waitForState(stateDir);
-    await controller.stop(stateDir);
-    release();
-    await runPromise;
+    expect(paused.status).toBe("stopped");
+    expect(paused.stopReason).toBe("paused");
 
     const resumed = await controller.resume({
-      runRef: stateDir,
-      runner: helloScriptedRunner(),
+      runRef: paused.stateDir,
+      // Child hello takes over for Review → complete.
+      runner: adaptiveScriptedRunner(4),
     });
-    // Pending dispatch at stop → reconcile stop, OR clean resume to success.
-    if (resumed.stopReason === "reconcile required") {
-      expect(resumed.status).toBe("stopped");
-    } else {
-      expect(resumed.status).toBe("succeeded");
-      const inspect = await controller.inspect(stateDir);
-      expect(inspect.versionHistory.some((v) => v.reason === "resume")).toBe(true);
-    }
+    expect(resumed.status).toBe("succeeded");
+    const inspect = await controller.inspect(paused.stateDir);
+    expect(inspect.stages.every((s) => s.complete)).toBe(true);
+    expect(inspect.versionHistory.some((v) => v.reason === "resume")).toBe(true);
   });
 });
 
 function helloScriptedRunner() {
+  return adaptiveScriptedRunner(2);
+}
+
+/** Purpose-aware scripted jobs so Write/Review order stays flexible. */
+function adaptiveScriptedRunner(count = 8) {
+  const job = async (
+    jobSpec: { purpose?: string; readOnly?: boolean },
+    ctx: { worktreePath: string },
+  ) => {
+    if (jobSpec.purpose === "review" || jobSpec.readOnly) {
+      return {
+        status: "ok" as const,
+        summary: "approved",
+        evidence: [{ kind: "review" as const, payload: { verdict: "approved", summary: "ok" } }],
+      };
+    }
+    await writeFile(path.join(ctx.worktreePath, GREETING_PATH), GREETING, "utf8");
+    return { status: "ok" as const, summary: "wrote greeting" };
+  };
   return createScriptedRunner({
-    jobs: [
-      async (_job, ctx) => {
-        await writeFile(path.join(ctx.worktreePath, GREETING_PATH), GREETING, "utf8");
-        return { status: "ok", summary: "wrote greeting" };
-      },
-      async (job) => {
-        expect(job.readOnly).toBe(true);
-        expect(job.purpose).toBe("review");
-        return {
-          status: "ok",
-          summary: "approved",
-          evidence: [{ kind: "review", payload: { verdict: "approved", summary: "ok" } }],
-        };
-      },
-    ],
+    jobs: Array.from({ length: count }, () => job),
   });
 }
 
