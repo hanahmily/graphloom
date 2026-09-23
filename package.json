@@ -10,9 +10,9 @@
     "examples/plugins/*"
   ],
   "scripts": {
-    "build": "npm run build -w @graphloom/sdk && npm run build -w @graphloom/controller -w @graphloom/plugin-host -w @graphloom/runner -w @graphloom/supervisor -w @graphloom/cli -w @graphloom/plugin-hello",
-    "typecheck": "npm run build -w @graphloom/sdk && npm run typecheck --workspaces --if-present",
-    "test": "npm run build -w @graphloom/sdk && npm run test --workspaces --if-present",
+    "build": "npm run build -w @graphloom/sdk && npm run build -w @graphloom/runner && npm run build -w @graphloom/controller -w @graphloom/plugin-host -w @graphloom/supervisor -w @graphloom/cli -w @graphloom/plugin-hello",
+    "typecheck": "npm run build -w @graphloom/sdk && npm run build -w @graphloom/runner && npm run typecheck --workspaces --if-present",
+    "test": "npm run build -w @graphloom/sdk && npm run build -w @graphloom/runner && npm run test --workspaces --if-present",
     "lint": "npm run typecheck"
   },
   "engines": {
