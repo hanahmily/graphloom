@@ -157,6 +157,42 @@ describe("public controller: hello child host + stop/resume/inspect", () => {
       ],
     };
 
+    const scriptedValidators = {
+      "exact-greeting": {
+        evaluate(input: {
+          evidence: Array<{ kind: string; payload?: { path?: string; bytes?: string; changedPaths?: string[] } }>;
+        }) {
+          const file = [...input.evidence].reverse().find((e) => e.kind === "file")?.payload;
+          const manifest = [...input.evidence].reverse().find((e) => e.kind === "workspace")?.payload;
+          if (!file || !manifest) {
+            return { status: "inconclusive" as const, reason: "missing evidence" };
+          }
+          if (file.path !== GREETING_PATH || file.bytes !== GREETING) {
+            return { status: "failed" as const, reason: "bad bytes" };
+          }
+          if (
+            !manifest.changedPaths?.includes(GREETING_PATH) ||
+            manifest.changedPaths.some((p) => p !== GREETING_PATH)
+          ) {
+            return { status: "failed" as const, reason: "bad scope" };
+          }
+          return { status: "passed" as const, reason: "ok" };
+        },
+      },
+      "independent-reviewer": {
+        evaluate(input: { evidence: Array<{ kind: string; payload?: { verdict?: string } }> }) {
+          const review = [...input.evidence].reverse().find((e) => e.kind === "review")?.payload;
+          if (!review) {
+            return { status: "inconclusive" as const, reason: "missing review" };
+          }
+          if (review.verdict === "approved") {
+            return { status: "passed" as const, reason: "approved" };
+          }
+          return { status: "failed" as const, reason: "not approved" };
+        },
+      },
+    };
+
     // Pause after Write acceptance with no in-flight job.
     const paused = await controller.run({
       taskPath: env.taskPath,
@@ -178,6 +214,7 @@ describe("public controller: hello child host + stop/resume/inspect", () => {
           stop({ reason: "paused", blocker: "test pause before review" }, "pause"),
         ],
       }),
+      validators: scriptedValidators,
       runner: adaptiveScriptedRunner(2),
       stateRoot: env.stateRoot,
       runId: "resume1",

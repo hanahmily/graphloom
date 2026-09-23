@@ -22,6 +22,5 @@ export {
   assertSafeRunId,
   assertSafeGraphId,
   resolveBundleEntry,
-  loadValidatorsFromBundle,
 } from "./controller.js";
 export type { DurableRunState, RunStatus, IntakePin, VersionRecord } from "./controller.js";

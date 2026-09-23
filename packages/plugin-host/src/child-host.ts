@@ -10,6 +10,8 @@ import {
   type GraphDecision,
   type GraphDefinition,
   type RunView,
+  type ValidationInput,
+  type ValidationResult,
   type WireRequest,
   type WireResponse,
 } from "@graphloom/sdk";
@@ -158,6 +160,19 @@ class ChildSession implements PluginHost {
     });
   }
 
+  evaluate(
+    ctx: CallContext,
+    validatorId: string,
+    input: ValidationInput,
+  ): Promise<HostResult<ValidationResult>> {
+    return this.call(ctx, { kind: "evaluate", validatorId, input }, (res) => {
+      if (res.kind !== "evaluate_ok") {
+        throw new WireValidationError("malformed", `expected evaluate_ok, got ${res.kind}`);
+      }
+      return res.result;
+    });
+  }
+
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
@@ -215,7 +230,10 @@ class ChildSession implements PluginHost {
 
   private async call<T>(
     ctx: CallContext,
-    body: { kind: "describe" } | { kind: "advance"; view: RunView },
+    body:
+      | { kind: "describe" }
+      | { kind: "advance"; view: RunView }
+      | { kind: "evaluate"; validatorId: string; input: ValidationInput },
     extract: (res: WireResponse) => T,
   ): Promise<HostResult<T>> {
     if (this.closed || this.exitCode !== null || this.spawnError !== null) {

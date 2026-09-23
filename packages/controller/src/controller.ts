@@ -7,7 +7,6 @@ import {
   type GraphDefinition,
   type GraphPlugin,
   type StageAttempt,
-  type Validator,
 } from "@graphloom/sdk";
 import type { Runner } from "@graphloom/runner";
 import {
@@ -16,16 +15,21 @@ import {
   type PluginHost,
 } from "@graphloom/plugin-host";
 import { admitValidation } from "./admit.js";
-import { loadValidatorsFromBundle, resolveBundleEntry } from "./bundle.js";
+import type { AdmissionValidator } from "./admit.js";
+import { resolveBundleEntry } from "./bundle.js";
+import { createHostValidators } from "./host-validators.js";
 import { intakeTask, type IntakePin } from "./intake.js";
 import { assertSafeRunId } from "./ids.js";
+import { withDirectoryLock } from "./lock.js";
 import {
   bumpGeneration,
   ensureArtifactDir,
   initialState,
   runNormalLoop,
-  toRunView,
 } from "./loop.js";
+import { sanitizedPluginEnv } from "./plugin-env.js";
+import { assertPinnedBundleUnchanged } from "./pin.js";
+import { reconcilePendingDispatch } from "./reconcile.js";
 import {
   getSession,
   registerSession,
@@ -33,6 +37,11 @@ import {
   unregisterSession,
   type ActiveSession,
 } from "./sessions.js";
+import {
+  clearStopRequest,
+  hasStopRequest,
+  writeStopRequest,
+} from "./stop-request.js";
 import {
   loadRunState,
   saveRunState,
@@ -50,9 +59,10 @@ export interface RunRequest {
   taskPath: string;
   runner: Runner;
   /**
-   * Optional validators. When omitted, loaded from the pinned bundle entry.
+   * Optional validators. When omitted with a child host, evaluate runs in the
+   * plugin child. Required when using an in-process host that cannot evaluate.
    */
-  validators?: Record<string, Validator>;
+  validators?: Record<string, AdmissionValidator>;
   /**
    * Scripted/CI seam: wrapped in an in-process PluginHost.
    * When omitted (and `host` omitted), the controller loads the pinned
@@ -70,7 +80,7 @@ export interface ResumeRequest {
   /** Absolute state directory, or runId under stateRoot. */
   runRef: string;
   runner: Runner;
-  validators?: Record<string, Validator>;
+  validators?: Record<string, AdmissionValidator>;
   plugin?: GraphPlugin;
   host?: PluginHost;
   stateRoot?: string;
@@ -162,12 +172,12 @@ export function createController(): Controller {
         const definition = described.value;
         assertDefinitionMatchesPin(definition, intake);
 
-        const validators =
-          request.validators ??
-          (await loadValidatorsFromBundle(
-            intake,
-            definition.defaultValidators.map((b) => b.validatorId),
-          ));
+        const validators = resolveValidators(
+          request.validators,
+          host,
+          definition.defaultValidators.map((b) => b.validatorId),
+          { runId, stateRevision: 0 },
+        );
 
         const sourceDirtyBefore = await listDirtyPaths(intake.repoPath);
         const { worktreePath, branchName } = await createRunWorktree(
@@ -188,128 +198,200 @@ export function createController(): Controller {
         session.stateDir = state.stateDir;
         registerSession(session);
         await ensureArtifactDir(state);
+        await clearStopRequest(state.stateDir);
         await saveRunState(state);
 
         state = await runNormalLoop(state, {
           host,
           runner: request.runner,
           validators,
-          shouldStop: () => session.stopRequested,
+          shouldStop: () => sessionStop(session),
         });
 
         const sourceDirtyAfter = await listDirtyPaths(intake.repoPath);
         return toReport(state, sourceDirtyAfter);
       } finally {
+        await clearStopRequest(session.stateDir);
         await reapSession(session);
       }
     },
 
     async stop(runRef, options): Promise<InspectReport> {
       const stateDir = await resolveStateDir(runRef, options?.stateRoot);
+      await writeStopRequest(stateDir);
+
       const session = getSession(stateDir) ?? getSession(runRef);
       if (session) {
         session.stopRequested = true;
         await session.host.close().catch(() => undefined);
       }
 
-      let state = await loadRunState(stateDir);
-      if (state.status === "running") {
-        state = bumpGeneration(
-          {
-            ...state,
-            status: "stopped",
-            stopReason: "operator stop",
-            blocker: "stop requested",
-          },
-          "operator stop",
-        );
-        await saveRunState(state);
-      }
-      if (session) {
-        unregisterSession(session);
-      }
-      return toInspect(state);
+      // Serialize the final stopped write with the owner loop (lock is not held
+      // across runner jobs, so this can proceed during an in-flight dispatch).
+      return withDirectoryLock(stateDir, "run.exec.lock", async () => {
+        let state = await loadRunState(stateDir);
+        if (state.status === "running") {
+          state = bumpGeneration(
+            {
+              ...state,
+              status: "stopped",
+              stopReason: "operator stop",
+              blocker: "stop requested",
+            },
+            "operator stop",
+          );
+          await saveRunState(state);
+        }
+        await clearStopRequest(stateDir);
+        if (session) {
+          unregisterSession(session);
+        }
+        return toInspect(state);
+      });
     },
 
     async resume(request: ResumeRequest): Promise<RunReport> {
       const stateDir = await resolveStateDir(request.runRef, request.stateRoot);
-      let state = await loadRunState(stateDir);
+      if (getSession(stateDir) || getSession(request.runRef)) {
+        throw new Error("cannot resume: run has an active controller session; stop first");
+      }
 
+      let state = await loadRunState(stateDir);
       if (state.status === "succeeded" || state.status === "failed") {
         return toReport(state, await listDirtyPaths(state.intake.repoPath));
       }
 
-      try {
-        await assertWorktreeMatches(
-          state.intake.repoPath,
-          state.worktreePath,
-          state.worktreeBranch,
-          state.intake.pinnedHead,
-        );
-      } catch (err) {
-        state = {
-          ...state,
-          status: "stopped",
-          stopReason: "worktree mismatch",
-          blocker: err instanceof Error ? err.message : String(err),
-        };
-        await saveRunState(state);
-        return toReport(state, await listDirtyPaths(state.intake.repoPath));
-      }
+      // Claim the run under the exec lock, then release before the loop
+      // (which re-acquires the same lock).
+      let session: ActiveSession | undefined;
+      await withDirectoryLock(stateDir, "run.exec.lock", async () => {
+        if (getSession(stateDir) || getSession(request.runRef)) {
+          throw new Error("cannot resume: run has an active controller session; stop first");
+        }
+        state = await loadRunState(stateDir);
+        if (state.status === "succeeded" || state.status === "failed") {
+          return;
+        }
 
-      // Fence prior generation so late child/job results cannot apply.
-      state = bumpGeneration(
-        { ...state, status: "running" },
-        "resume",
-      );
-      // Drop incomplete dispatch intent — reconcile rather than replay.
-      if (state.pendingDispatch?.status === "pending") {
-        const pendingId = state.pendingDispatch.operationId;
-        const { pendingDispatch: _pending, ...rest } = state;
-        void _pending;
-        state = {
-          ...rest,
-          status: "stopped",
-          stopReason: "reconcile required",
-          blocker: `pending dispatch ${pendingId} at resume`,
-        };
-        await saveRunState(state);
-        return toReport(state, await listDirtyPaths(state.intake.repoPath));
-      }
-      await saveRunState(state);
+        try {
+          await assertWorktreeMatches(
+            state.intake.repoPath,
+            state.worktreePath,
+            state.worktreeBranch,
+            state.intake.pinnedHead,
+          );
+        } catch (err) {
+          state = {
+            ...state,
+            status: "stopped",
+            stopReason: "worktree mismatch",
+            blocker: err instanceof Error ? err.message : String(err),
+          };
+          await saveRunState(state);
+          return;
+        }
 
-      const host = await openHost({
-        intake: state.intake,
-        activeVersion: state.activeVersion,
-        generation: state.generation,
-        ...(request.plugin !== undefined ? { plugin: request.plugin } : {}),
-        ...(request.host !== undefined ? { host: request.host } : {}),
+        try {
+          await assertPinnedBundleUnchanged(state.intake);
+        } catch (err) {
+          state = {
+            ...state,
+            status: "stopped",
+            stopReason: "pin mismatch",
+            blocker: err instanceof Error ? err.message : String(err),
+          };
+          await saveRunState(state);
+          return;
+        }
+
+        if (state.pendingDispatch?.status === "pending") {
+          const reconciled = await reconcilePendingDispatch(state);
+          state = reconciled.state;
+          if (!reconciled.settled) {
+            state = {
+              ...state,
+              status: "stopped",
+              stopReason: "reconcile required",
+              blocker: reconciled.reason,
+            };
+            await saveRunState(state);
+            return;
+          }
+        }
+
+        state = bumpGeneration({ ...state, status: "running" }, "resume");
+        await clearStopRequest(stateDir);
+        await saveRunState(state);
+
+        // Placeholder host until openHost completes after the lock is released.
+        session = {
+          runId: state.runId,
+          stateDir: state.stateDir,
+          host: claimPlaceholderHost(state.activeVersion, state.generation),
+          stopRequested: false,
+        };
+        registerSession(session);
       });
 
-      const session: ActiveSession = {
-        runId: state.runId,
-        stateDir: state.stateDir,
-        host,
-        stopRequested: false,
-      };
-      registerSession(session);
+      if (state.status !== "running" || !session) {
+        return toReport(state, await listDirtyPaths(state.intake.repoPath));
+      }
 
       try {
-        const validators =
-          request.validators ??
-          (await loadValidatorsFromBundle(
-            state.intake,
-            state.definition.defaultValidators.map((b) => b.validatorId),
-          ));
+        const host = await openHost({
+          intake: state.intake,
+          activeVersion: state.activeVersion,
+          generation: state.generation,
+          ...(request.plugin !== undefined ? { plugin: request.plugin } : {}),
+          ...(request.host !== undefined ? { host: request.host } : {}),
+        });
+        session.host = host;
+
+        const described = await host.describe({
+          runId: state.runId,
+          operationId: "describe-resume",
+          expectedStateRevision: state.stateRevision,
+        });
+        if (!described.ok) {
+          state = {
+            ...state,
+            status: "stopped",
+            stopReason: "pin mismatch",
+            blocker: `plugin describe failed on resume: ${described.observation.message}`,
+          };
+          await saveRunState(state);
+          return toReport(state, await listDirtyPaths(state.intake.repoPath));
+        }
+        try {
+          assertDefinitionMatchesPin(described.value, state.intake);
+          assertDefinitionUnchanged(described.value, state.definition);
+        } catch (err) {
+          state = {
+            ...state,
+            status: "stopped",
+            stopReason: "pin mismatch",
+            blocker: err instanceof Error ? err.message : String(err),
+          };
+          await saveRunState(state);
+          return toReport(state, await listDirtyPaths(state.intake.repoPath));
+        }
+
+        const validators = resolveValidators(
+          request.validators,
+          host,
+          state.definition.defaultValidators.map((b) => b.validatorId),
+          { runId: state.runId, stateRevision: state.stateRevision },
+        );
 
         state = await runNormalLoop(state, {
           host,
           runner: request.runner,
           validators,
-          shouldStop: () => session.stopRequested,
+          shouldStop: () => sessionStop(session!),
         });
         return toReport(state, await listDirtyPaths(state.intake.repoPath));
       } finally {
+        await clearStopRequest(stateDir);
         await reapSession(session);
       }
     },
@@ -339,6 +421,47 @@ export function createController(): Controller {
   };
 }
 
+function resolveValidators(
+  explicit: Record<string, AdmissionValidator> | undefined,
+  host: PluginHost,
+  ids: string[],
+  ctx: { runId: string; stateRevision: number },
+): Record<string, AdmissionValidator> {
+  if (explicit) {
+    return explicit;
+  }
+  if (host.evaluate) {
+    return createHostValidators(host, ids, ctx);
+  }
+  throw new Error(
+    "validators required when the plugin host cannot evaluate (pass validators or use a child host)",
+  );
+}
+
+async function sessionStop(session: ActiveSession): Promise<boolean> {
+  return session.stopRequested || (await hasStopRequest(session.stateDir));
+}
+
+function claimPlaceholderHost(activeVersion: string, generation: number): PluginHost {
+  const fail = async <T>(): Promise<
+    { ok: false; observation: { kind: "child_observation"; code: "internal"; message: string } }
+  > => ({
+    ok: false,
+    observation: {
+      kind: "child_observation",
+      code: "internal",
+      message: "resume claim host is not ready",
+    },
+  });
+  return {
+    activeVersion,
+    generation,
+    describe: async () => fail(),
+    advance: async () => fail(),
+    close: async () => undefined,
+  };
+}
+
 async function openHost(args: {
   plugin?: GraphPlugin;
   host?: PluginHost;
@@ -361,6 +484,7 @@ async function openHost(args: {
     activeVersion: args.activeVersion,
     generation: args.generation,
     cwd: args.intake.bundle.bundlePath,
+    env: sanitizedPluginEnv(args.intake.bundle.bundlePath),
   });
 }
 
@@ -442,6 +566,21 @@ function assertDefinitionMatchesPin(definition: GraphDefinition, intake: IntakeP
   }
 }
 
+function assertDefinitionUnchanged(live: GraphDefinition, pinned: GraphDefinition): void {
+  if (live.graphId !== pinned.graphId || live.version !== pinned.version) {
+    throw new Error("plugin graphId/version changed since run start");
+  }
+  if (JSON.stringify(live.stages) !== JSON.stringify(pinned.stages)) {
+    throw new Error("plugin stages changed since run start");
+  }
+  if (JSON.stringify(live.requirements) !== JSON.stringify(pinned.requirements)) {
+    throw new Error("plugin requirements changed since run start");
+  }
+  if (JSON.stringify(live.defaultValidators) !== JSON.stringify(pinned.defaultValidators)) {
+    throw new Error("plugin defaultValidators changed since run start");
+  }
+}
+
 function toReport(state: DurableRunState, sourceDirtyAfter: string[]): RunReport {
   const report: RunReport = {
     runId: state.runId,
@@ -472,13 +611,13 @@ export { loadRunState, saveRunState } from "./state.js";
 export type { DurableRunState, RunStatus, VersionRecord } from "./state.js";
 export type { IntakePin } from "./intake.js";
 export { assertSafeRunId, assertSafeGraphId } from "./ids.js";
-export { resolveBundleEntry, loadValidatorsFromBundle } from "./bundle.js";
+export { resolveBundleEntry } from "./bundle.js";
 
 /** Test helper: attempt Validate using only current-generation evidence. */
 export async function tryAdmit(
   state: DurableRunState,
   stageId: string,
-  validators: Record<string, Validator>,
+  validators: Record<string, AdmissionValidator>,
 ) {
   return admitValidation(state, { stageId }, validators);
 }

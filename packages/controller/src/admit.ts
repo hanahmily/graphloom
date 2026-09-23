@@ -4,11 +4,19 @@ import type {
   GraphDefinition,
   Receipt,
   ValidateSpec,
-  Validator,
   ValidatorBinding,
 } from "@graphloom/sdk";
 import type { DurableRunState } from "./state.js";
 import { readWorktreeFile, workspaceChangeManifest } from "./worktree.js";
+
+/** Sync SDK validators or async host-backed evaluators. */
+export type AdmissionValidator = {
+  evaluate(
+    input: import("@graphloom/sdk").ValidationInput,
+  ):
+    | import("@graphloom/sdk").ValidationResult
+    | Promise<import("@graphloom/sdk").ValidationResult>;
+};
 
 export class AdmissionError extends Error {
   constructor(message: string) {
@@ -124,7 +132,7 @@ export async function assertLiveWorkspaceMatchesEvidence(
 export async function admitValidation(
   state: DurableRunState,
   spec: ValidateSpec,
-  validators: Record<string, Validator>,
+  validators: Record<string, AdmissionValidator>,
 ): Promise<{ state: DurableRunState; accepted: boolean; reason: string }> {
   const stage = state.definition.stages.find((s) => s.id === spec.stageId);
   if (!stage) {
@@ -226,12 +234,13 @@ export async function admitValidation(
       evidence,
       candidateFingerprint: fingerprint,
     });
+    const resolved = await Promise.resolve(result);
 
-    if (result.status !== "passed") {
+    if (resolved.status !== "passed") {
       return {
         state: bumpRevision(working),
         accepted: false,
-        reason: `validation ${result.status}: ${result.reason}`,
+        reason: `validation ${resolved.status}: ${resolved.reason}`,
       };
     }
 

@@ -35,7 +35,11 @@ export interface PluginHost {
   readonly generation: number;
   describe(ctx: CallContext): Promise<HostResult<GraphDefinition>>;
   advance(ctx: CallContext, view: RunView): Promise<HostResult<GraphDecision>>;
-  evaluate?(ctx: CallContext, input: ValidationInput): Promise<HostResult<ValidationResult>>;
+  evaluate?(
+    ctx: CallContext,
+    validatorId: string,
+    input: ValidationInput,
+  ): Promise<HostResult<ValidationResult>>;
   close(): Promise<void>;
 }
 

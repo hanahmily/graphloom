@@ -17,7 +17,8 @@ async function main(): Promise<void> {
 
   if (!cmd || cmd === "help" || cmd === "--help" || cmd === "-h") {
     printHelp();
-    process.exit(cmd ? 0 : 1);
+    process.exitCode = cmd ? 0 : 1;
+    return;
   }
 
   const controller = createController();
@@ -27,11 +28,12 @@ async function main(): Promise<void> {
     const taskPath = path.resolve(args[1] ?? "task.yaml");
     const report = await controller.run({ taskPath, runner });
     console.log(JSON.stringify(report, null, 2));
-    process.exit(report.status === "succeeded" ? 0 : 1);
+    process.exitCode = report.status === "succeeded" ? 0 : 1;
+    return;
   }
 
   if (cmd === "inspect") {
-    const runRef = requireArg(args[1], "inspect <stateDir|runId>");
+    const runRef = requireRunRef(args[1], "inspect <stateDir|runId>");
     const stateRoot = flagValue(args, "--state-root");
     const report = await controller.inspect(
       runRef,
@@ -42,7 +44,7 @@ async function main(): Promise<void> {
   }
 
   if (cmd === "stop") {
-    const runRef = requireArg(args[1], "stop <stateDir|runId>");
+    const runRef = requireRunRef(args[1], "stop <stateDir|runId>");
     const stateRoot = flagValue(args, "--state-root");
     const report = await controller.stop(
       runRef,
@@ -53,7 +55,7 @@ async function main(): Promise<void> {
   }
 
   if (cmd === "resume") {
-    const runRef = requireArg(args[1], "resume <stateDir|runId>");
+    const runRef = requireRunRef(args[1], "resume <stateDir|runId>");
     const stateRoot = flagValue(args, "--state-root");
     const report = await controller.resume({
       runRef,
@@ -61,12 +63,13 @@ async function main(): Promise<void> {
       ...(stateRoot ? { stateRoot: path.resolve(stateRoot) } : {}),
     });
     console.log(JSON.stringify(report, null, 2));
-    process.exit(report.status === "succeeded" ? 0 : 1);
+    process.exitCode = report.status === "succeeded" ? 0 : 1;
+    return;
   }
 
   console.error(`unknown command: ${cmd}`);
   printHelp();
-  process.exit(1);
+  process.exitCode = 1;
 }
 
 function unsupportedCliRunner(): Runner {
@@ -84,12 +87,17 @@ function unsupportedCliRunner(): Runner {
   };
 }
 
-function requireArg(value: string | undefined, usage: string): string {
+/** Bare run IDs stay bare so --state-root is honored; path-like refs are resolved. */
+function requireRunRef(value: string | undefined, usage: string): string {
   if (!value) {
     console.error(`usage: graphloom ${usage}`);
-    process.exit(1);
+    process.exitCode = 1;
+    throw new Error(`usage: graphloom ${usage}`);
   }
-  return value.startsWith("/") || /^[A-Za-z]:/.test(value) ? value : path.resolve(value);
+  if (value.startsWith("/") || /^[A-Za-z]:/.test(value) || value.includes("/") || value.includes("\\")) {
+    return path.resolve(value);
+  }
+  return value;
 }
 
 function flagValue(args: string[], name: string): string | undefined {
@@ -112,5 +120,5 @@ Usage:
 
 main().catch((err: unknown) => {
   console.error(err instanceof Error ? err.message : err);
-  process.exit(1);
+  process.exitCode = 1;
 });

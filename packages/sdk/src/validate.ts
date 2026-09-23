@@ -39,6 +39,7 @@ export function assertWireRequest(value: unknown): WireRequest {
       assertRunView(obj["view"]);
       return obj as unknown as WireRequest;
     case "evaluate":
+      requireString(obj, "validatorId");
       asObject(obj["input"], "input");
       return obj as unknown as WireRequest;
     default:
