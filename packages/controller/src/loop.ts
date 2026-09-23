@@ -109,20 +109,12 @@ async function runNormalLoopSteps(
 
     for (let step = 0; step < MAX_STEPS; step += 1) {
       const turn = await withRunLock(state.stateDir, async () => {
-        if (!owner) {
-          throw new Error("missing run owner claim");
-        }
-        owner = await renewRunOwner(state.stateDir, owner.ownerId, {
-          ...(deps.host.childPid !== undefined ? { childPid: deps.host.childPid } : {}),
-        });
-        await updateOwnerChildPid(state.stateDir, owner.ownerId, deps.host.childPid);
-
-        // Reload in case Stop mutated durable state while we were unlocked.
+        // Reload before renewing: Stop may have cleared the owner claim and
+        // persisted stopped while a runner job held no lock.
         state = await reloadRunState(state);
         syncRevision(deps, state);
 
         if (state.status !== "running") {
-          await saveRunState(state);
           return { done: true as const, state };
         }
         if (await stopRequested(deps)) {
@@ -135,6 +127,20 @@ async function runNormalLoopSteps(
           await saveRunState(state);
           return { done: true as const, state };
         }
+
+        const renewed = await tryRenewOwner(state.stateDir, owner, deps.host.childPid);
+        if (!renewed) {
+          state = {
+            ...state,
+            status: "stopped",
+            stopReason: "operator stop",
+            blocker: "run owner lease cleared",
+          };
+          await saveRunState(state);
+          return { done: true as const, state };
+        }
+        owner = renewed;
+        await updateOwnerChildPid(state.stateDir, owner.ownerId, deps.host.childPid);
 
         const view = toRunView(state);
         const advanced = await deps.host.advance(
@@ -210,12 +216,6 @@ async function runNormalLoopSteps(
         });
 
         state = await withRunLock(state.stateDir, async () => {
-          if (!owner) {
-            throw new Error("missing run owner claim");
-          }
-          owner = await renewRunOwner(state.stateDir, owner.ownerId, {
-            ...(deps.host.childPid !== undefined ? { childPid: deps.host.childPid } : {}),
-          });
           state = await reloadRunState(state);
           syncRevision(deps, state);
           if (await stopRequested(deps) || state.status !== "running") {
@@ -230,6 +230,22 @@ async function runNormalLoopSteps(
             }
             return state;
           }
+
+          const renewed = await tryRenewOwner(state.stateDir, owner, deps.host.childPid);
+          if (!renewed) {
+            if (state.status === "running") {
+              state = {
+                ...state,
+                status: "stopped",
+                stopReason: "operator stop",
+                blocker: "run owner lease cleared",
+              };
+              await saveRunState(state);
+            }
+            return state;
+          }
+          owner = renewed;
+
           if (state.generation !== generation) {
             state = {
               ...state,
@@ -279,6 +295,24 @@ async function runNormalLoopSteps(
     return state;
   } finally {
     await clearOwnerClaim(state.stateDir);
+  }
+}
+
+async function tryRenewOwner(
+  stateDir: string,
+  owner: RunOwnerClaim | undefined,
+  childPid: number | undefined,
+): Promise<RunOwnerClaim | undefined> {
+  if (!owner) {
+    return undefined;
+  }
+  try {
+    return await renewRunOwner(stateDir, owner.ownerId, {
+      ...(childPid !== undefined ? { childPid } : {}),
+    });
+  } catch {
+    // Stop may clear the durable claim while a runner job is in flight.
+    return undefined;
   }
 }
 
