@@ -1,5 +1,7 @@
 export type {
   Controller,
+  InspectReport,
+  ResumeRequest,
   RunReport,
   RunRequest,
 } from "./controller.js";
@@ -19,5 +21,7 @@ export {
   writeSourceSidecar,
   assertSafeRunId,
   assertSafeGraphId,
+  resolveBundleEntry,
+  loadValidatorsFromBundle,
 } from "./controller.js";
-export type { DurableRunState, RunStatus, IntakePin } from "./controller.js";
+export type { DurableRunState, RunStatus, IntakePin, VersionRecord } from "./controller.js";

@@ -1,15 +1,22 @@
 import { randomUUID } from "node:crypto";
-import { writeFile } from "node:fs/promises";
+import { access, writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
   PROTOCOL_VERSION,
+  type BudgetRemaining,
   type GraphDefinition,
   type GraphPlugin,
+  type StageAttempt,
   type Validator,
 } from "@graphloom/sdk";
 import type { Runner } from "@graphloom/runner";
-import { createInProcessPluginHost, type PluginHost } from "@graphloom/plugin-host";
+import {
+  createChildPluginHost,
+  createInProcessPluginHost,
+  type PluginHost,
+} from "@graphloom/plugin-host";
 import { admitValidation } from "./admit.js";
+import { loadValidatorsFromBundle, resolveBundleEntry } from "./bundle.js";
 import { intakeTask, type IntakePin } from "./intake.js";
 import { assertSafeRunId } from "./ids.js";
 import {
@@ -19,7 +26,20 @@ import {
   runNormalLoop,
   toRunView,
 } from "./loop.js";
-import { loadRunState, saveRunState, type DurableRunState, type RunStatus } from "./state.js";
+import {
+  getSession,
+  registerSession,
+  reapSession,
+  unregisterSession,
+  type ActiveSession,
+} from "./sessions.js";
+import {
+  loadRunState,
+  saveRunState,
+  type DurableRunState,
+  type RunStatus,
+  type VersionRecord,
+} from "./state.js";
 import {
   assertWorktreeMatches,
   createRunWorktree,
@@ -28,18 +48,32 @@ import {
 
 export interface RunRequest {
   taskPath: string;
+  runner: Runner;
+  /**
+   * Optional validators. When omitted, loaded from the pinned bundle entry.
+   */
+  validators?: Record<string, Validator>;
   /**
    * Scripted/CI seam: wrapped in an in-process PluginHost.
-   * Child-process loading of the pinned bundle is ticket #26.
+   * When omitted (and `host` omitted), the controller loads the pinned
+   * bundle in an isolated child process.
    */
-  plugin: GraphPlugin;
-  /** Optional pre-built host; when set, `plugin` is ignored for advance/describe. */
+  plugin?: GraphPlugin;
+  /** Optional pre-built host; when set, overrides plugin/child loading. */
   host?: PluginHost;
-  runner: Runner;
-  validators: Record<string, Validator>;
   /** Directory for durable run state (default: <repo>/graphloom-state). */
   stateRoot?: string;
   runId?: string;
+}
+
+export interface ResumeRequest {
+  /** Absolute state directory, or runId under stateRoot. */
+  runRef: string;
+  runner: Runner;
+  validators?: Record<string, Validator>;
+  plugin?: GraphPlugin;
+  host?: PluginHost;
+  stateRoot?: string;
 }
 
 export interface RunReport {
@@ -58,30 +92,67 @@ export interface RunReport {
   stateDir: string;
 }
 
+export interface InspectReport {
+  runId: string;
+  status: RunStatus;
+  mode: "normal" | "recovery";
+  stages: Array<{
+    id: string;
+    name: string;
+    requirementIds: string[];
+    complete: boolean;
+  }>;
+  current: StageAttempt;
+  evidenceRefs: string[];
+  budgets: BudgetRemaining;
+  versionHistory: VersionRecord[];
+  activeVersion: string;
+  generation: number;
+  worktreePath: string;
+  stateDir: string;
+  stopReason?: string;
+  blocker?: string;
+}
+
 export interface Controller {
   run(request: RunRequest): Promise<RunReport>;
-  /** Load persisted state, bump generation (simulating restart freshness), continue. */
+  stop(runRef: string, options?: { stateRoot?: string }): Promise<InspectReport>;
+  resume(request: ResumeRequest): Promise<RunReport>;
+  inspect(runRef: string, options?: { stateRoot?: string }): Promise<InspectReport>;
+  /** @deprecated Prefer resume(); retained for #25 tests. */
   continueAfterRestart(
     stateDir: string,
     deps: Pick<RunRequest, "plugin" | "host" | "runner" | "validators">,
   ): Promise<RunReport>;
-  inspect(stateDir: string): Promise<DurableRunState>;
 }
 
 export function createController(): Controller {
   return {
     async run(request: RunRequest): Promise<RunReport> {
       const intake = await intakeTask(request.taskPath);
-      const host =
-        request.host ??
-        createInProcessPluginHost(request.plugin, {
-          activeVersion: `${intake.bundle.graphId}@${intake.bundle.version}`,
-          generation: 1,
-        });
+      const runId = assertSafeRunId(request.runId ?? randomUUID().slice(0, 12));
+      const stateRoot = request.stateRoot ?? path.join(intake.repoPath, "graphloom-state");
+      const activeVersion = `${intake.bundle.graphId}@${intake.bundle.version}`;
+
+      const host = await openHost({
+        intake,
+        activeVersion,
+        generation: 1,
+        ...(request.plugin !== undefined ? { plugin: request.plugin } : {}),
+        ...(request.host !== undefined ? { host: request.host } : {}),
+      });
+
+      const session: ActiveSession = {
+        runId,
+        stateDir: path.join(stateRoot, runId),
+        host,
+        stopRequested: false,
+      };
+      registerSession(session);
 
       try {
         const described = await host.describe({
-          runId: "intake",
+          runId,
           operationId: "describe",
           expectedStateRevision: 0,
         });
@@ -91,9 +162,14 @@ export function createController(): Controller {
         const definition = described.value;
         assertDefinitionMatchesPin(definition, intake);
 
+        const validators =
+          request.validators ??
+          (await loadValidatorsFromBundle(
+            intake,
+            definition.defaultValidators.map((b) => b.validatorId),
+          ));
+
         const sourceDirtyBefore = await listDirtyPaths(intake.repoPath);
-        const runId = assertSafeRunId(request.runId ?? randomUUID().slice(0, 12));
-        const stateRoot = request.stateRoot ?? path.join(intake.repoPath, "graphloom-state");
         const { worktreePath, branchName } = await createRunWorktree(
           intake.repoPath,
           runId,
@@ -109,25 +185,57 @@ export function createController(): Controller {
           stateRoot,
           sourceDirtyBefore,
         });
+        session.stateDir = state.stateDir;
+        registerSession(session);
         await ensureArtifactDir(state);
         await saveRunState(state);
 
         state = await runNormalLoop(state, {
           host,
           runner: request.runner,
-          validators: request.validators,
+          validators,
+          shouldStop: () => session.stopRequested,
         });
 
         const sourceDirtyAfter = await listDirtyPaths(intake.repoPath);
         return toReport(state, sourceDirtyAfter);
       } finally {
-        await host.close().catch(() => undefined);
+        await reapSession(session);
       }
     },
 
-    async continueAfterRestart(stateDir, deps): Promise<RunReport> {
+    async stop(runRef, options): Promise<InspectReport> {
+      const stateDir = await resolveStateDir(runRef, options?.stateRoot);
+      const session = getSession(stateDir) ?? getSession(runRef);
+      if (session) {
+        session.stopRequested = true;
+        await session.host.close().catch(() => undefined);
+      }
+
       let state = await loadRunState(stateDir);
-      if (state.status !== "running") {
+      if (state.status === "running") {
+        state = bumpGeneration(
+          {
+            ...state,
+            status: "stopped",
+            stopReason: "operator stop",
+            blocker: "stop requested",
+          },
+          "operator stop",
+        );
+        await saveRunState(state);
+      }
+      if (session) {
+        unregisterSession(session);
+      }
+      return toInspect(state);
+    },
+
+    async resume(request: ResumeRequest): Promise<RunReport> {
+      const stateDir = await resolveStateDir(request.runRef, request.stateRoot);
+      let state = await loadRunState(stateDir);
+
+      if (state.status === "succeeded" || state.status === "failed") {
         return toReport(state, await listDirtyPaths(state.intake.repoPath));
       }
 
@@ -149,32 +257,157 @@ export function createController(): Controller {
         return toReport(state, await listDirtyPaths(state.intake.repoPath));
       }
 
-      const host =
-        deps.host ??
-        createInProcessPluginHost(deps.plugin, {
-          activeVersion: state.activeVersion,
-          generation: state.generation,
-        });
+      // Fence prior generation so late child/job results cannot apply.
+      state = bumpGeneration(
+        { ...state, status: "running" },
+        "resume",
+      );
+      // Drop incomplete dispatch intent — reconcile rather than replay.
+      if (state.pendingDispatch?.status === "pending") {
+        const pendingId = state.pendingDispatch.operationId;
+        const { pendingDispatch: _pending, ...rest } = state;
+        void _pending;
+        state = {
+          ...rest,
+          status: "stopped",
+          stopReason: "reconcile required",
+          blocker: `pending dispatch ${pendingId} at resume`,
+        };
+        await saveRunState(state);
+        return toReport(state, await listDirtyPaths(state.intake.repoPath));
+      }
+      await saveRunState(state);
+
+      const host = await openHost({
+        intake: state.intake,
+        activeVersion: state.activeVersion,
+        generation: state.generation,
+        ...(request.plugin !== undefined ? { plugin: request.plugin } : {}),
+        ...(request.host !== undefined ? { host: request.host } : {}),
+      });
+
+      const session: ActiveSession = {
+        runId: state.runId,
+        stateDir: state.stateDir,
+        host,
+        stopRequested: false,
+      };
+      registerSession(session);
 
       try {
-        // Restart fences prior generation so stale evidence cannot Accept.
-        state = bumpGeneration(state);
-        await saveRunState(state);
+        const validators =
+          request.validators ??
+          (await loadValidatorsFromBundle(
+            state.intake,
+            state.definition.defaultValidators.map((b) => b.validatorId),
+          ));
+
         state = await runNormalLoop(state, {
           host,
-          runner: deps.runner,
-          validators: deps.validators,
+          runner: request.runner,
+          validators,
+          shouldStop: () => session.stopRequested,
         });
         return toReport(state, await listDirtyPaths(state.intake.repoPath));
       } finally {
-        await host.close().catch(() => undefined);
+        await reapSession(session);
       }
     },
 
-    async inspect(stateDir: string): Promise<DurableRunState> {
-      return loadRunState(stateDir);
+    async inspect(runRef, options): Promise<InspectReport> {
+      const stateDir = await resolveStateDir(runRef, options?.stateRoot);
+      const state = await loadRunState(stateDir);
+      return toInspect(state);
+    },
+
+    async continueAfterRestart(stateDir, deps): Promise<RunReport> {
+      const resumeReq: ResumeRequest = {
+        runRef: stateDir,
+        runner: deps.runner,
+      };
+      if (deps.validators !== undefined) {
+        resumeReq.validators = deps.validators;
+      }
+      if (deps.plugin !== undefined) {
+        resumeReq.plugin = deps.plugin;
+      }
+      if (deps.host !== undefined) {
+        resumeReq.host = deps.host;
+      }
+      return this.resume(resumeReq);
     },
   };
+}
+
+async function openHost(args: {
+  plugin?: GraphPlugin;
+  host?: PluginHost;
+  intake: IntakePin;
+  activeVersion: string;
+  generation: number;
+}): Promise<PluginHost> {
+  if (args.host) {
+    return args.host;
+  }
+  if (args.plugin) {
+    return createInProcessPluginHost(args.plugin, {
+      activeVersion: args.activeVersion,
+      generation: args.generation,
+    });
+  }
+  const entryModule = resolveBundleEntry(args.intake);
+  return createChildPluginHost({
+    entryModule,
+    activeVersion: args.activeVersion,
+    generation: args.generation,
+    cwd: args.intake.bundle.bundlePath,
+  });
+}
+
+async function resolveStateDir(runRef: string, stateRoot?: string): Promise<string> {
+  if (path.isAbsolute(runRef)) {
+    await access(path.join(runRef, "state.json"));
+    return runRef;
+  }
+  if (!stateRoot) {
+    throw new Error("stateRoot required when runRef is not an absolute state directory");
+  }
+  const dir = path.join(stateRoot, assertSafeRunId(runRef));
+  await access(path.join(dir, "state.json"));
+  return dir;
+}
+
+function toInspect(state: DurableRunState): InspectReport {
+  const report: InspectReport = {
+    runId: state.runId,
+    status: state.status,
+    mode: state.mode,
+    stages: state.definition.stages.map((s) => ({
+      id: s.id,
+      name: s.name,
+      requirementIds: [...s.requirementIds],
+      complete: s.requirementIds.every((reqId) =>
+        state.receipts.some(
+          (r) => r.stageId === s.id && r.requirementId === reqId && r.valid,
+        ),
+      ),
+    })),
+    current: structuredClone(state.current),
+    evidenceRefs: state.evidence.map((e) => e.ref),
+    budgets: { ...state.budgets },
+    versionHistory: structuredClone(state.versionHistory ?? []),
+    activeVersion: state.activeVersion,
+    generation: state.generation,
+    worktreePath: state.worktreePath,
+    stateDir: state.stateDir,
+  };
+  if (state.stopReason !== undefined) {
+    report.stopReason = state.stopReason;
+  }
+  if (state.blocker !== undefined) {
+    report.blocker = state.blocker;
+  }
+  return report;
 }
 
 function assertDefinitionMatchesPin(definition: GraphDefinition, intake: IntakePin): void {
@@ -191,9 +424,6 @@ function assertDefinitionMatchesPin(definition: GraphDefinition, intake: IntakeP
   if (intake.bundle.sdkProtocol !== PROTOCOL_VERSION) {
     throw new Error(`pinned sdkProtocol ${intake.bundle.sdkProtocol} != ${PROTOCOL_VERSION}`);
   }
-  const pinnedReqs = (intake.bundle as { digests?: unknown }).digests;
-  void pinnedReqs;
-  // Requirement statements from manifest (when present) must match describe().
   const manifestReqs = (
     JSON.parse(intake.bundle.manifestRaw) as {
       requirements?: Array<{ id: string; statement: string; evidenceSchema: string }>;
@@ -239,9 +469,10 @@ export { intakeTask, parseTaskYaml, resolveUnderBase, IntakeError } from "./inta
 export { admitValidation, freshEvidence } from "./admit.js";
 export { toRunView, bumpGeneration } from "./loop.js";
 export { loadRunState, saveRunState } from "./state.js";
-export type { DurableRunState, RunStatus } from "./state.js";
+export type { DurableRunState, RunStatus, VersionRecord } from "./state.js";
 export type { IntakePin } from "./intake.js";
 export { assertSafeRunId, assertSafeGraphId } from "./ids.js";
+export { resolveBundleEntry, loadValidatorsFromBundle } from "./bundle.js";
 
 /** Test helper: attempt Validate using only current-generation evidence. */
 export async function tryAdmit(

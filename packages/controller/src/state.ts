@@ -53,6 +53,15 @@ export interface DurableRunState {
   workspaceRevision?: string;
   /** Last successful work-purpose dispatch; used for separate-reviewer checks. */
   lastWorkOperationId?: string;
+  /** Recorded active-version transitions (intake + generation fences). */
+  versionHistory: VersionRecord[];
+}
+
+export interface VersionRecord {
+  activeVersion: string;
+  generation: number;
+  reason: string;
+  at: string;
 }
 
 export async function saveRunState(state: DurableRunState): Promise<void> {

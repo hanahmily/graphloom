@@ -38,6 +38,8 @@ export interface LoopDeps {
   host: PluginHost;
   runner: Runner;
   validators: Record<string, Validator>;
+  /** Operator stop: checked each loop turn before advance. */
+  shouldStop?: () => boolean;
 }
 
 export async function runNormalLoop(
@@ -71,6 +73,16 @@ async function runNormalLoopLocked(
       await saveRunState(state);
       return state;
     }
+    if (deps.shouldStop?.()) {
+      state = {
+        ...state,
+        status: "stopped",
+        stopReason: "operator stop",
+        blocker: "stop requested",
+      };
+      await saveRunState(state);
+      return state;
+    }
 
     const view = toRunView(state);
     const advanced = await deps.host.advance(
@@ -82,17 +94,34 @@ async function runNormalLoopLocked(
       view,
     );
     if (!advanced.ok) {
-      state = {
-        ...state,
-        status: "stopped",
-        stopReason: `plugin host: ${advanced.observation.code}`,
-        blocker: advanced.observation.message,
-      };
+      if (deps.shouldStop?.()) {
+        state = {
+          ...state,
+          status: "stopped",
+          stopReason: "operator stop",
+          blocker: "stop requested",
+        };
+      } else {
+        state = {
+          ...state,
+          status: "stopped",
+          stopReason: `plugin host: ${advanced.observation.code}`,
+          blocker: advanced.observation.message,
+        };
+      }
       await saveRunState(state);
       return state;
     }
     const decision = assertGraphDecision(advanced.value);
     state = await applyDecision(state, decision, deps);
+    if (deps.shouldStop?.() && state.status === "running") {
+      state = {
+        ...state,
+        status: "stopped",
+        stopReason: "operator stop",
+        blocker: "stop requested",
+      };
+    }
     await saveRunState(state);
   }
 
@@ -432,12 +461,13 @@ export function initialState(args: {
   if (!firstStage) {
     throw new Error("graph definition has no stages");
   }
+  const activeVersion = `${args.intake.bundle.graphId}@${args.intake.bundle.version}`;
   return {
     runId,
     status: "running",
     generation: 1,
     stateRevision: 0,
-    activeVersion: `${args.intake.bundle.graphId}@${args.intake.bundle.version}`,
+    activeVersion,
     mode: "normal",
     current: { stageId: firstStage.id, attempt: 1 },
     receipts: [],
@@ -454,6 +484,14 @@ export function initialState(args: {
     sourceDirtyBefore: args.sourceDirtyBefore,
     evidenceSeq: 0,
     receiptSeq: 0,
+    versionHistory: [
+      {
+        activeVersion,
+        generation: 1,
+        reason: "intake",
+        at: new Date().toISOString(),
+      },
+    ],
   };
 }
 
@@ -463,13 +501,26 @@ export async function ensureArtifactDir(state: DurableRunState): Promise<void> {
 }
 
 /** Exported for restart tests: bump generation so prior evidence is stale. */
-export function bumpGeneration(state: DurableRunState): DurableRunState {
+export function bumpGeneration(
+  state: DurableRunState,
+  reason = "generation fence",
+): DurableRunState {
   const { workspaceRevision: _wr, ...rest } = state;
   void _wr;
+  const generation = state.generation + 1;
   return {
     ...rest,
-    generation: state.generation + 1,
+    generation,
     stateRevision: state.stateRevision + 1,
+    versionHistory: [
+      ...(state.versionHistory ?? []),
+      {
+        activeVersion: state.activeVersion,
+        generation,
+        reason,
+        at: new Date().toISOString(),
+      },
+    ],
   };
 }
 
