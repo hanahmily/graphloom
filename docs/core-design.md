@@ -270,8 +270,10 @@ Supervisor decisions go directly to controller admission. They can:
 - Write qualified plugin/validator repairs **via the supervisor's Pi session**
   against an isolated candidate tree (`QualifyRepair` → patch → review →
   `ActivateRepair`).
-- Retry a failed job with corrected instructions or available launch/model settings.
-- `Reenter` a declared current or earlier stage with a repair explanation.
+- Retry a failed job with **supervisor-authored** instructions or available
+  launch/model settings (not forced to reuse the plugin's original prompt).
+- `Reenter` a declared current or earlier stage with a repair explanation; the
+  following recovery `Dispatch` carries a supervisor-generated instruction.
 - `Return` control to normal graph execution, or `Stop` with an unresolved blocker.
 
 Retry is a `Dispatch` referencing its source job and correction reservation. It

@@ -166,6 +166,10 @@ Tooling has two layers:
 1. **GraphLoom-owned admission tools** — observe, dispatch, validate, reenter,
    qualify_repair, activate_repair, return, stop. Tool results report controller
    settlement; Pi cannot mint Accept or alter pinned steps/requirements.
+   After `Reenter` (or on a recovery `Dispatch`), the supervisor **supplies the
+   job instruction** for that trial; it does not have to reuse the plugin's
+   original prompt. Overrides remain bound to task, evidence contract, write
+   scope, and reviewer independence.
 2. **Pi coding tools for qualified repair** — after the controller admits
    `QualifyRepair` and materializes a candidate tree, the **same** supervisor
    `AgentSession` may use Pi read/edit/write/bash (or GraphLoom wrappers) with
