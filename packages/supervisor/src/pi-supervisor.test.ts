@@ -1,0 +1,174 @@
+import { describe, expect, it } from "vitest";
+import { returnToNormal, stop, WireValidationError } from "@graphloom/sdk";
+import {
+  createPiSupervisor,
+  type PiSupervisorSessionPort,
+  type SupervisorModelRef,
+} from "./pi-supervisor.js";
+import type { SupervisorInput } from "./types.js";
+
+function sampleInput(episodeId = "ep-1"): SupervisorInput {
+  return {
+    runId: "run-1",
+    episodeId,
+    trigger: { code: "supervise", message: "unfamiliar failure" },
+    view: {
+      runId: "run-1",
+      task: { request: "hi", repo: "." },
+      current: { stageId: "write", attempt: 1 },
+      receipts: [],
+      evidence: [],
+      outstanding: [],
+      budgets: { agentInvocations: 10, jobs: 10, decisions: 10, corrections: 4 },
+      validatorBindings: [],
+      generation: 1,
+      stateRevision: 2,
+      activeVersion: "hello@0.1.0",
+      recoveryEpisodeId: episodeId,
+    },
+  };
+}
+
+function fakeSession(args: {
+  replies: string[];
+  sessionId?: string;
+  sessionFile?: string;
+  provider?: string;
+  modelId?: string;
+  onPrompt?: (text: string) => void;
+  switchImpl?: (ref: SupervisorModelRef) => Promise<void>;
+}): PiSupervisorSessionPort {
+  let replyIndex = 0;
+  let provider = args.provider ?? "minimax-cn";
+  let modelId = args.modelId ?? "MiniMax-M3";
+  return {
+    runId: "run-1",
+    get provider() {
+      return provider;
+    },
+    get modelId() {
+      return modelId;
+    },
+    sessionId: args.sessionId ?? "sess-abc",
+    sessionFile: args.sessionFile ?? "/tmp/sess.jsonl",
+    credentialSource: "options",
+    async prompt(text) {
+      args.onPrompt?.(text);
+      const reply = args.replies[replyIndex];
+      replyIndex += 1;
+      if (reply === undefined) {
+        throw new Error("fake session exhausted");
+      }
+      return reply;
+    },
+    async close() {
+      /* no-op */
+    },
+    async setModel(ref) {
+      if (args.switchImpl) {
+        await args.switchImpl(ref);
+      }
+      provider = ref.provider;
+      modelId = ref.modelId;
+    },
+  };
+}
+
+describe("createPiSupervisor", () => {
+  it("parses a live decision from the session prompt and reuses one session", async () => {
+    const prompted: string[] = [];
+    const session = fakeSession({
+      replies: [
+        JSON.stringify(returnToNormal({ summary: "fixed" }, "return after repair")),
+        JSON.stringify(
+          stop({ reason: "still blocked", blocker: "external" }, "cannot proceed"),
+        ),
+      ],
+      onPrompt: (t) => prompted.push(t),
+    });
+    const supervisor = createPiSupervisor({ session });
+
+    const first = await supervisor.decide(sampleInput("ep-1"));
+    expect(first.action.type).toBe("return");
+    const second = await supervisor.decide(sampleInput("ep-2"));
+    expect(second.action.type).toBe("stop");
+
+    expect(prompted).toHaveLength(2);
+    expect(prompted[0]).toContain("ep-1");
+    expect(prompted[1]).toContain("ep-2");
+    expect(supervisor.binding.sessionId).toBe("sess-abc");
+    expect(supervisor.binding.sessionFile).toBe("/tmp/sess.jsonl");
+    expect(supervisor.drainProviderCalls()).toBe(2);
+    expect(supervisor.drainProviderCalls()).toBe(0);
+  });
+
+  it("rejects Accept proposals from the model", async () => {
+    const supervisor = createPiSupervisor({
+      session: fakeSession({
+        replies: [JSON.stringify({ action: { type: "accept" }, reason: "ship it" })],
+      }),
+    });
+    await expect(supervisor.decide(sampleInput())).rejects.toThrow(WireValidationError);
+  });
+
+  it("journals an explicit model switch and rejects silent fallback", async () => {
+    const configured: SupervisorModelRef[] = [
+      { provider: "minimax-cn", modelId: "MiniMax-M3" },
+      { provider: "openai", modelId: "gpt-4o" },
+      { provider: "deepseek", modelId: "deepseek-chat" },
+    ];
+    const supervisor = createPiSupervisor({
+      session: fakeSession({ provider: "minimax-cn", modelId: "MiniMax-M3" }),
+      configuredModels: configured,
+    });
+
+    await supervisor.switchModel({
+      provider: "openai",
+      modelId: "gpt-4o",
+      reason: "provider outage",
+    });
+    expect(supervisor.binding.provider).toBe("openai");
+    expect(supervisor.binding.modelId).toBe("gpt-4o");
+    expect(supervisor.binding.switchJournal).toEqual([
+      expect.objectContaining({
+        from: { provider: "minimax-cn", modelId: "MiniMax-M3" },
+        to: { provider: "openai", modelId: "gpt-4o" },
+        reason: "provider outage",
+        status: "committed",
+      }),
+    ]);
+
+    await expect(
+      supervisor.switchModel({
+        provider: "anthropic",
+        modelId: "claude-sonnet-4",
+        reason: "try another",
+      }),
+    ).rejects.toThrow(/not configured/i);
+    expect(supervisor.binding.provider).toBe("openai");
+  });
+
+  it("records a failed switch intent when setModel throws mid-flight", async () => {
+    const supervisor = createPiSupervisor({
+      session: fakeSession({
+        switchImpl: async () => {
+          throw new Error("auth missing");
+        },
+      }),
+      configuredModels: [
+        { provider: "minimax-cn", modelId: "MiniMax-M3" },
+        { provider: "openai", modelId: "gpt-4o" },
+      ],
+    });
+
+    await expect(
+      supervisor.switchModel({
+        provider: "openai",
+        modelId: "gpt-4o",
+        reason: "failover",
+      }),
+    ).rejects.toThrow(/auth missing/);
+    expect(supervisor.binding.provider).toBe("minimax-cn");
+    expect(supervisor.binding.switchJournal.at(-1)?.status).toBe("failed");
+  });
+});

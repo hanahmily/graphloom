@@ -64,6 +64,25 @@ export interface DurableRunState {
     code: string;
     message: string;
   };
+  /**
+   * Durable Pi supervisor session identity (session file + active model).
+   * On resume, when no supervisor is supplied, the controller restores from
+   * this binding (see ResumeRequest.restoreSupervisor / default Pi restore).
+   */
+  supervisorBinding?: {
+    sessionId: string;
+    sessionFile?: string;
+    provider: string;
+    modelId: string;
+    switchJournal: Array<{
+      at: string;
+      from: { provider: string; modelId: string };
+      to: { provider: string; modelId: string };
+      reason: string;
+      status: "intent" | "committed" | "failed";
+      error?: string;
+    }>;
+  };
 }
 
 export interface VersionRecord {

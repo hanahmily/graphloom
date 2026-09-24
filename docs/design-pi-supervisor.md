@@ -1,11 +1,13 @@
 # Pi SDK supervisor integration
 
-Status: MiniMax session adapter implemented; Pi-backed `decide` and recovery
-wiring continue under #43. This document specializes the
-[core design](design-typescript-core.md). The supervisor's Pi session must
-**write qualified repairs itself** into admitted candidate trees (not a separate
-non-Pi repair agent); unconstrained edit/write on the user worktree remains
-forbidden. Scripted supervisors stay the CI default.
+Status: Pi-backed `createPiSupervisor` wires recovery decisions and durable
+session binding (2026-09-24); provider call accounting settles against
+`agentInvocations`. The supervisor's Pi session must **write qualified repairs
+itself** into admitted candidate trees (not a separate non-Pi repair agent);
+unconstrained edit/write on the user worktree remains forbidden. Cross-provider
+live switching, BeforeProviderRequest interception, and candidate-scoped Pi coding
+tools remain follow-on under #43 / #29. Scripted supervisors stay the CI default.
+This document specializes the [core design](design-typescript-core.md).
 
 ## SDK choice and scope
 

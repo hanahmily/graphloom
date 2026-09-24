@@ -15,6 +15,7 @@ import {
   type PluginHost,
 } from "@graphloom/plugin-host";
 import type { Supervisor } from "@graphloom/supervisor";
+import { restorePiSupervisorFromBinding } from "@graphloom/supervisor";
 import { admitValidation } from "./admit.js";
 import type { AdmissionValidator } from "./admit.js";
 import { resolveBundleEntry } from "./bundle.js";
@@ -101,6 +102,14 @@ export interface ResumeRequest {
   plugin?: GraphPlugin;
   host?: PluginHost;
   supervisor?: Supervisor;
+  /**
+   * When `supervisor` is omitted and durable `supervisorBinding` exists,
+   * restore the logical Pi session. Defaults to `restorePiSupervisorFromBinding`.
+   */
+  restoreSupervisor?: (
+    binding: NonNullable<DurableRunState["supervisorBinding"]>,
+    ctx: { runId: string; stateDir: string },
+  ) => Promise<Supervisor>;
   recreateHost?: () => Promise<PluginHost>;
   stateRoot?: string;
 }
@@ -308,6 +317,7 @@ export function createController(): Controller {
       // Claim the run under the exec lock, then release before the loop
       // (which re-acquires the same lock).
       let session: ActiveSession | undefined;
+      let restoredSupervisor: Supervisor | undefined;
       await withDirectoryLock(stateDir, "run.exec.lock", async () => {
         if (getSession(stateDir) || getSession(request.runRef)) {
           throw new Error("cannot resume: run has an active controller session; stop first");
@@ -437,15 +447,18 @@ export function createController(): Controller {
           },
         );
 
+        const supervisor = await resolveResumeSupervisor(request, state, stateDir);
+        if (supervisor && !request.supervisor) {
+          restoredSupervisor = supervisor;
+        }
+
         state = await runNormalLoop(state, {
           host,
           runner: request.runner,
           validators,
           shouldStop: () => sessionStop(session!),
           revisionBridge,
-          ...(request.supervisor !== undefined
-            ? { supervisor: request.supervisor }
-            : {}),
+          ...(supervisor !== undefined ? { supervisor } : {}),
           ...resolveRecreateHost(session, {
             intake: state.intake,
             activeVersion: state.activeVersion,
@@ -462,6 +475,7 @@ export function createController(): Controller {
         await clearStopRequest(stateDir);
         await clearOwnerClaim(stateDir);
         await request.supervisor?.close?.().catch(() => undefined);
+        await restoredSupervisor?.close?.().catch(() => undefined);
         await reapSession(session);
       }
     },
@@ -509,6 +523,35 @@ function resolveValidators(
   throw new Error(
     "validators required when the plugin host cannot evaluate (pass validators or use a child host)",
   );
+}
+
+async function resolveResumeSupervisor(
+  request: ResumeRequest,
+  state: DurableRunState,
+  stateDir: string,
+): Promise<Supervisor | undefined> {
+  if (request.supervisor) {
+    return request.supervisor;
+  }
+  const binding = state.supervisorBinding;
+  if (!binding?.sessionFile) {
+    return undefined;
+  }
+  const restore =
+    request.restoreSupervisor ??
+    (async (b, ctx) =>
+      restorePiSupervisorFromBinding({
+        runId: ctx.runId,
+        binding: {
+          sessionId: b.sessionId,
+          sessionFile: b.sessionFile,
+          provider: b.provider,
+          modelId: b.modelId,
+          switchJournal: b.switchJournal,
+        },
+        sessionDir: path.dirname(b.sessionFile!),
+      }));
+  return restore(binding, { runId: state.runId, stateDir });
 }
 
 async function sessionStop(session: ActiveSession): Promise<boolean> {
