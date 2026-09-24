@@ -1,10 +1,11 @@
 # Pi SDK supervisor integration
 
-Status: SDK installed and MiniMax connectivity verified, 2026-09-23; supervisor
-adapter implementation pending. This document specializes the
-[core design](design-typescript-core.md). The supervisor package still has no
-recovery implementation. The live check below establishes credential and basic
-session connectivity, not end-to-end recovery, model switching, or billing behavior.
+Status: MiniMax session adapter implemented, 2026-09-24; recovery
+admission/Return/controller wiring still pending. This document specializes the
+[core design](design-typescript-core.md). `createPiSupervisorSession` provides a
+durable Pi transcript bound to a run `sessionDir`, MiniMax credential resolution,
+and opt-in live connectivity (`GRAPHLOOM_LIVE_MINIMAX=1`). It does not yet own
+end-to-end recovery, model switching, or billing behavior.
 
 ## SDK choice and scope
 
@@ -187,7 +188,7 @@ reconciles in-flight effects. Filter private thinking from user-facing activity.
 
 | Gap | Required work |
 |---|---|
-| SDK dependency and MiniMax connection are ready; supervisor logic is still a scaffold | Implement Pi session adapter and explicit recovery protocol |
+| SDK dependency and MiniMax connection are ready; session adapter creates a durable Pi transcript | Wire controller recovery admission/results loop and GraphLoom-owned tools |
 | Controller currently stops on Supervise | Wire one durable recovery decision owner and admission/results loop |
 | Cross-provider switching | Serialize selection, journal switches, enforce context/tool compatibility, retain session/history |
 | Invocation accounting | Count actual provider calls, including compaction/retry paths; avoid unmetered background work |

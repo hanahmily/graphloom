@@ -1,3 +1,4 @@
+import { mkdir } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import {
@@ -18,16 +19,30 @@ import {
 export const DEFAULT_SUPERVISOR_PROVIDER = "minimax-cn";
 export const DEFAULT_SUPERVISOR_MODEL = "MiniMax-M3";
 
+export function isMiniMaxProvider(provider: string): boolean {
+  return provider === "minimax-cn" || provider === "minimax";
+}
+
 export interface CreatePiSupervisorSessionOptions {
-  /** Run id for logging / future durable binding. */
+  /** Run id for logging / durable binding. */
   runId: string;
+  /**
+   * Directory for this run's durable Pi transcript.
+   * Required so restart can reopen the same logical session.
+   */
+  sessionDir: string;
+  /** Existing Pi session file to restore; omit to start a new durable session. */
+  sessionFile?: string;
   /** Pi provider id. Default: minimax-cn */
   provider?: string;
   /** Model id. Default: MiniMax-M3 */
   modelId?: string;
   /** Absolute Pi agent dir (auth.json / models.json). Default: ~/.pi/agent */
   agentDir?: string;
-  /** Explicit MiniMax API key; otherwise env or Pi-stored credential. */
+  /**
+   * Explicit MiniMax API key (MiniMax providers only).
+   * Otherwise env or Pi-stored credential for that provider.
+   */
   apiKey?: string;
   /** Working directory for the session (does not grant filesystem tools). */
   cwd?: string;
@@ -42,12 +57,12 @@ export interface PiSupervisorSession {
   readonly provider: string;
   readonly modelId: string;
   readonly sessionId: string;
+  /** Durable Pi transcript path (undefined only if the SDK did not persist). */
+  readonly sessionFile: string | undefined;
   readonly credentialSource: MiniMaxCredentialSource;
-  /** Underlying Pi session — do not use filesystem tools; GraphLoom owns authority. */
-  readonly session: AgentSession;
   /**
    * Send a prompt and wait until idle. Returns assistant text only
-   * (no thinking / tool internals).
+   * (no thinking / tool internals). Times out if the session does not settle.
    */
   prompt(text: string, options?: { signal?: AbortSignal }): Promise<string>;
   /** Dispose the Pi session and release resources. */
@@ -57,6 +72,7 @@ export interface PiSupervisorSession {
 /**
  * Create one Pi AgentSession for the run-wide supervisor.
  * Uses MiniMax by default; credentials never appear in prompts or activity.
+ * The raw AgentSession stays private — only mediated prompt/close are exposed.
  */
 export async function createPiSupervisorSession(
   options: CreatePiSupervisorSessionOptions,
@@ -66,26 +82,20 @@ export async function createPiSupervisorSession(
   const agentDir = options.agentDir ?? path.join(os.homedir(), ".pi", "agent");
   const cwd = options.cwd ?? process.cwd();
   const promptTimeoutMs = options.promptTimeoutMs ?? 60_000;
-
-  const credential = resolveMiniMaxCredential({
-    ...(options.apiKey !== undefined ? { apiKey: options.apiKey } : {}),
-  });
+  const sessionDir = path.resolve(options.sessionDir);
+  await mkdir(sessionDir, { recursive: true });
 
   const modelRuntime = await ModelRuntime.create({
     authPath: path.join(agentDir, "auth.json"),
     modelsPath: path.join(agentDir, "models.json"),
   });
 
-  if (credential.apiKey !== undefined) {
-    await modelRuntime.setRuntimeApiKey(provider, credential.apiKey);
-  } else {
-    const auth = await modelRuntime.getAuth(provider);
-    if (!auth) {
-      throw new Error(
-        `MiniMax credential unavailable for provider ${provider}: set MINIMAX_CN_API_KEY or MINIMAX_API_KEY, or configure Pi auth under ${agentDir}`,
-      );
-    }
-  }
+  const credentialSource = await applyProviderCredentials({
+    modelRuntime,
+    provider,
+    agentDir,
+    ...(options.apiKey !== undefined ? { apiKey: options.apiKey } : {}),
+  });
 
   const model = modelRuntime.getModel(provider, modelId);
   if (!model) {
@@ -109,6 +119,10 @@ export async function createPiSupervisorSession(
 
   const resourceLoader = createIsolatedResourceLoader(systemPrompt);
 
+  const sessionManager = options.sessionFile
+    ? SessionManager.open(options.sessionFile, sessionDir, cwd)
+    : SessionManager.create(cwd, sessionDir);
+
   const { session } = await createAgentSession({
     cwd,
     agentDir,
@@ -118,19 +132,78 @@ export async function createPiSupervisorSession(
     resourceLoader,
     noTools: "all",
     tools: [],
-    sessionManager: SessionManager.inMemory(cwd),
+    sessionManager,
     settingsManager,
   });
 
-  let closed = false;
-
-  const api: PiSupervisorSession = {
+  return wrapSession({
+    session,
     runId: options.runId,
     provider,
     modelId,
+    credentialSource,
+    promptTimeoutMs,
+  });
+}
+
+async function applyProviderCredentials(args: {
+  modelRuntime: ModelRuntime;
+  provider: string;
+  agentDir: string;
+  apiKey?: string;
+}): Promise<MiniMaxCredentialSource> {
+  const { modelRuntime, provider, agentDir } = args;
+
+  if (isMiniMaxProvider(provider)) {
+    const credential = resolveMiniMaxCredential({
+      ...(args.apiKey !== undefined ? { apiKey: args.apiKey } : {}),
+    });
+    if (credential.apiKey !== undefined) {
+      await modelRuntime.setRuntimeApiKey(provider, credential.apiKey);
+    } else {
+      const auth = await modelRuntime.getAuth(provider);
+      if (!auth) {
+        throw new Error(
+          `MiniMax credential unavailable for provider ${provider}: set MINIMAX_CN_API_KEY or MINIMAX_API_KEY, or configure Pi auth under ${agentDir}`,
+        );
+      }
+    }
+    return credential.source;
+  }
+
+  if (args.apiKey !== undefined) {
+    throw new Error(
+      `apiKey option is MiniMax-only; cannot inject MiniMax credentials into provider ${provider}`,
+    );
+  }
+  // Do not resolve or apply MiniMax env keys to other providers.
+  const auth = await modelRuntime.getAuth(provider);
+  if (!auth) {
+    throw new Error(
+      `credential unavailable for provider ${provider}: configure Pi auth under ${agentDir}`,
+    );
+  }
+  return "pi-stored";
+}
+
+function wrapSession(args: {
+  session: AgentSession;
+  runId: string;
+  provider: string;
+  modelId: string;
+  credentialSource: MiniMaxCredentialSource;
+  promptTimeoutMs: number;
+}): PiSupervisorSession {
+  const { session, promptTimeoutMs } = args;
+  let closed = false;
+
+  return {
+    runId: args.runId,
+    provider: args.provider,
+    modelId: args.modelId,
     sessionId: session.sessionId,
-    credentialSource: credential.source,
-    session,
+    sessionFile: session.sessionFile,
+    credentialSource: args.credentialSource,
     async prompt(text, promptOptions) {
       if (closed) {
         throw new Error("supervisor session is closed");
@@ -145,7 +218,9 @@ export async function createPiSupervisorSession(
         }
       });
 
+      let timedOut = false;
       const timeout = setTimeout(() => {
+        timedOut = true;
         void session.abort().catch(() => undefined);
       }, promptTimeoutMs);
       const onOuterAbort = () => {
@@ -165,6 +240,17 @@ export async function createPiSupervisorSession(
         if (promptOptions?.signal?.aborted) {
           throw new Error("supervisor prompt aborted");
         }
+        if (timedOut || !session.isIdle) {
+          await session.abort().catch(() => undefined);
+          // Brief settle after abort so callers do not observe a still-busy session.
+          const settleDeadline = Date.now() + 5_000;
+          while (!session.isIdle && Date.now() < settleDeadline) {
+            await sleep(25);
+          }
+          throw new Error(
+            `supervisor prompt timed out after ${promptTimeoutMs}ms (session still active)`,
+          );
+        }
         return collected.join("").trim();
       } finally {
         clearTimeout(timeout);
@@ -181,8 +267,6 @@ export async function createPiSupervisorSession(
       session.dispose();
     },
   };
-
-  return api;
 }
 
 function createIsolatedResourceLoader(systemPrompt: string): ResourceLoader {

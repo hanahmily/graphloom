@@ -10,6 +10,7 @@ export {
   createPiSupervisorSession,
   DEFAULT_SUPERVISOR_MODEL,
   DEFAULT_SUPERVISOR_PROVIDER,
+  isMiniMaxProvider,
   type CreatePiSupervisorSessionOptions,
   type PiSupervisorSession,
 } from "./pi-session.js";
