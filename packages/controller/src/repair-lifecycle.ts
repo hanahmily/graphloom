@@ -1,5 +1,5 @@
-import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { readFile, realpath } from "node:fs/promises";
 import path from "node:path";
 import type { GraphDefinition, QualifyRepairSpec, ActivateRepairSpec } from "@graphloom/sdk";
 import type { Supervisor } from "@graphloom/supervisor";
@@ -139,20 +139,67 @@ export async function applyQualifyRepair(
     };
   }
 
+  // Reserve the correction and record the attempt durably before any effect so a
+  // crash or thrown patch/review cannot replay the repair for free.
   const repairsDir = path.join(state.stateDir, "repairs");
-  const snap = await snapshotRepairCandidate({
-    bundlePath: state.intake.bundle.bundlePath,
-    repairsDir,
+  const artifactId = `repair-${randomUUID().slice(0, 8)}`;
+  const reserved: QualifiedRepairArtifact = {
+    artifactId,
+    candidateRoot: path.join(repairsDir, artifactId, "candidate"),
+    baseDigest: await digestDirectoryTree(await realpath(state.intake.bundle.bundlePath)),
     baseActiveVersion: state.activeVersion,
     target: qualify.target,
     reason: qualify.reason,
+    createdAt: new Date().toISOString(),
+    status: "qualifying",
+    patchAuthorSessionId: supervisorSessionId,
+    reviewerSessionId: deps.repair.reviewer.sessionId,
+  };
+  const reservedState: DurableRunState = {
+    ...state,
+    repairCandidates: [...(state.repairCandidates ?? []), reserved],
+    budgets: {
+      ...state.budgets,
+      corrections: state.budgets.corrections - 1,
+    },
+  };
+  await saveRunState(reservedState);
+
+  const settle = (artifact: QualifiedRepairArtifact): DurableRunState => ({
+    ...reservedState,
+    repairCandidates: (reservedState.repairCandidates ?? []).map((c) =>
+      c.artifactId === artifactId ? artifact : c,
+    ),
   });
-  await writeStagesPin(snap.candidateRoot, state.definition);
+  const reject = async (reason: string): Promise<DurableRunState> =>
+    settle({
+      ...reserved,
+      status: "rejected",
+      rejectionReason: reason,
+      ...(await digestDirectoryTree(reserved.candidateRoot)
+        .then((candidateDigest) => ({ candidateDigest }))
+        .catch(() => ({}))),
+    });
 
-  // Same logical supervisor session for every repair round.
-  await deps.supervisor?.grantCandidateCoding?.(snap.candidateRoot);
-
+  let granted = false;
   try {
+    const snap = await snapshotRepairCandidate({
+      bundlePath: state.intake.bundle.bundlePath,
+      repairsDir,
+      baseActiveVersion: state.activeVersion,
+      target: qualify.target,
+      reason: qualify.reason,
+      artifactId,
+    });
+    if (snap.baseDigest !== reserved.baseDigest) {
+      return await reject("active bundle changed while snapshotting the candidate");
+    }
+    await writeStagesPin(snap.candidateRoot, state.definition);
+
+    // Same logical supervisor session for every repair round.
+    await deps.supervisor?.grantCandidateCoding?.(snap.candidateRoot);
+    granted = true;
+
     await deps.repair.patchAuthor.patch({
       candidateRoot: snap.candidateRoot,
       target: qualify.target,
@@ -160,11 +207,7 @@ export async function applyQualifyRepair(
     });
 
     await assertCandidateStepsUnchanged({
-      baseDefinitionStages: state.definition.stages.map((s) => ({
-        id: s.id,
-        name: s.name,
-        requirementIds: [...s.requirementIds],
-      })),
+      baseDefinitionStages: stagePins(state.definition),
       candidateRoot: snap.candidateRoot,
     });
 
@@ -174,26 +217,14 @@ export async function applyQualifyRepair(
       baseDefinition: state.definition,
     });
     if (!preflight.ok) {
-      const artifact: QualifiedRepairArtifact = {
-        ...snap,
+      return settle({
+        ...reserved,
         status: "rejected",
         candidateDigest: await digestDirectoryTree(snap.candidateRoot),
-        patchAuthorSessionId: supervisorSessionId,
-        reviewerSessionId: deps.repair.reviewer.sessionId,
-        reviewReason: preflight.summary,
         rejectionReason: preflight.summary,
         preflightSummary: preflight.summary,
-      };
-      return {
-        ...state,
-        repairCandidates: [...(state.repairCandidates ?? []), artifact],
-        budgets: {
-          ...state.budgets,
-          corrections: state.budgets.corrections - 1,
-        },
-      };
+      });
     }
-
     if (preflight.definition) {
       assertCandidateDefinitionCompatible(preflight.definition, state.definition);
     }
@@ -206,30 +237,23 @@ export async function applyQualifyRepair(
       target: qualify.target,
     });
 
-    const artifact: QualifiedRepairArtifact = {
-      ...snap,
+    return settle({
+      ...reserved,
       status: review.approved ? "qualified" : "rejected",
       candidateDigest,
-      patchAuthorSessionId: supervisorSessionId,
-      reviewerSessionId: deps.repair.reviewer.sessionId,
       reviewReason: review.reason,
       preflightSummary: preflight.summary,
       ...(review.approved
         ? { qualifiedAt: new Date().toISOString() }
         : { rejectionReason: review.reason }),
-    };
-
-    const candidates = [...(state.repairCandidates ?? []), artifact];
-    return {
-      ...state,
-      repairCandidates: candidates,
-      budgets: {
-        ...state.budgets,
-        corrections: state.budgets.corrections - 1,
-      },
-    };
+    });
+  } catch (err) {
+    // Stay in recovery with the correction spent; the supervisor may try another round.
+    return await reject(err instanceof Error ? err.message : String(err));
   } finally {
-    await deps.supervisor?.revokeCandidateCoding?.();
+    if (granted) {
+      await deps.supervisor?.revokeCandidateCoding?.();
+    }
   }
 }
 
@@ -332,16 +356,6 @@ export async function applyActivateRepair(
     };
   }
 
-  // Stages pin must still match — cannot be deleted after review.
-  await assertCandidateStepsUnchanged({
-    baseDefinitionStages: state.definition.stages.map((s) => ({
-      id: s.id,
-      name: s.name,
-      requirementIds: [...s.requirementIds],
-    })),
-    candidateRoot: artifact.candidateRoot,
-  });
-
   const toVersion = `${state.intake.bundle.graphId}@repair-${artifact.artifactId}`;
   const intent = {
     artifactId: artifact.artifactId,
@@ -352,61 +366,137 @@ export async function applyActivateRepair(
     status: "intent" as const,
   };
 
-  // Persist intent under the run lock (caller holds it) before effects so resume
-  // can reconcile a crash mid-activation.
-  let next: DurableRunState = {
-    ...state,
-    activationIntent: intent,
-  };
-  await saveRunState(next);
-
-  const materialized = deps.repair.materializeValidators?.(artifact.candidateRoot);
-  let validators = deps.validators;
-  if (materialized) {
-    validators = { ...deps.validators, ...materialized };
-  }
-
-  // Commit version switch + validator bindings under the same state revision.
-  candidates[idx] = { ...artifact, status: "activated" };
-  // Supersede other qualified peers so only one activation owns the run.
-  for (let i = 0; i < candidates.length; i++) {
-    if (i !== idx && candidates[i]?.status === "qualified") {
-      candidates[i] = { ...candidates[i]!, status: "superseded" };
-    }
-  }
-
-  const candidatePin = await readCandidateBundlePin(artifact.candidateRoot, state.intake);
-
-  next = {
-    ...next,
-    repairCandidates: candidates,
-    activeVersion: toVersion,
-    activationIntent: { ...intent, status: "committed" },
-    intake: {
-      ...next.intake,
-      bundle: candidatePin,
-    },
-  };
-
-  // Validator repairs typically invalidate Write and everything after.
-  const earliest = next.definition.stages[0]?.id ?? next.current.stageId;
-  next = invalidateFromStage(next, earliest, next.definition);
-  next = {
-    ...next,
-    current: { stageId: earliest, attempt: 1 },
-  };
-  next = bumpGeneration(next, `activate_repair:${artifact.artifactId}`);
+  // Persist intent before effects; resume aborts an intent that never committed.
+  await saveRunState({ ...state, activationIntent: intent });
 
   let host: PluginHost | undefined;
-  if (deps.recreateHost) {
-    host = await deps.recreateHost({
-      intake: next.intake,
-      activeVersion: next.activeVersion,
-      generation: next.generation,
+  try {
+    // Stages pin must still match — cannot be deleted after review.
+    await assertCandidateStepsUnchanged({
+      baseDefinitionStages: stagePins(state.definition),
+      candidateRoot: artifact.candidateRoot,
     });
-  }
 
-  return { state: next, validators, ...(host !== undefined ? { host } : {}) };
+    const materialized = deps.repair.materializeValidators?.(artifact.candidateRoot);
+    const validators = materialized
+      ? { ...deps.validators, ...materialized }
+      : deps.validators;
+
+    candidates[idx] = { ...artifact, status: "activated" };
+    // Supersede other qualified peers so only one activation owns the run.
+    for (let i = 0; i < candidates.length; i++) {
+      if (i !== idx && candidates[i]?.status === "qualified") {
+        candidates[i] = { ...candidates[i]!, status: "superseded" };
+      }
+    }
+
+    const candidatePin = await readCandidateBundlePin(artifact.candidateRoot, state.intake);
+    let next: DurableRunState = {
+      ...state,
+      repairCandidates: candidates,
+      activeVersion: toVersion,
+      activationIntent: { ...intent, status: "committed" },
+      intake: { ...state.intake, bundle: candidatePin },
+    };
+
+    // Validator repairs typically invalidate Write and everything after.
+    const earliest = next.definition.stages[0]?.id ?? next.current.stageId;
+    next = invalidateFromStage(next, earliest, next.definition);
+    next = { ...next, current: { stageId: earliest, attempt: 1 } };
+    next = bumpGeneration(next, `activate_repair:${artifact.artifactId}`);
+
+    if (deps.recreateHost) {
+      host = await deps.recreateHost({
+        intake: next.intake,
+        activeVersion: next.activeVersion,
+        generation: next.generation,
+      });
+      // The loaded candidate, not the controller-written sidecar, must preserve
+      // the pinned graph contract before the run switches to it.
+      const described = await host.describe({
+        runId: next.runId,
+        operationId: `describe-activate-${artifact.artifactId}`,
+        expectedStateRevision: next.stateRevision,
+      });
+      if (!described.ok) {
+        throw new Error(`candidate describe failed: ${described.observation.message}`);
+      }
+      assertCandidateDefinitionCompatible(described.value, state.definition);
+    }
+
+    return { state: next, validators, ...(host !== undefined ? { host } : {}) };
+  } catch (err) {
+    await host?.close().catch(() => undefined);
+    const reason = err instanceof Error ? err.message : String(err);
+    const failed = [...(state.repairCandidates ?? [])];
+    failed[idx] = { ...artifact, status: "rejected", rejectionReason: reason };
+    return {
+      state: {
+        ...state,
+        repairCandidates: failed,
+        activationIntent: { ...intent, status: "aborted" },
+        status: "stopped",
+        stopReason: "activate_repair candidate rejected",
+        blocker: reason,
+      },
+      validators: deps.validators,
+    };
+  }
+}
+
+/**
+ * Reconcile repair journals left by a crashed controller: an uncommitted
+ * activation intent is aborted (the atomic commit never landed), and attempts
+ * still `qualifying` are rejected with their correction already spent.
+ */
+export function reconcileRepairJournal(state: DurableRunState): DurableRunState {
+  let next = state;
+  if (next.activationIntent?.status === "intent") {
+    next = { ...next, activationIntent: { ...next.activationIntent, status: "aborted" } };
+  }
+  if (next.repairCandidates?.some((c) => c.status === "qualifying")) {
+    next = {
+      ...next,
+      repairCandidates: next.repairCandidates.map((c) =>
+        c.status === "qualifying"
+          ? {
+              ...c,
+              status: "rejected" as const,
+              rejectionReason: "abandoned before qualification (controller restart)",
+            }
+          : c,
+      ),
+    };
+  }
+  return next;
+}
+
+/** Validators bound to the active repaired candidate, for resume. */
+export function activeRepairValidators(
+  state: DurableRunState,
+  repair: RepairDeps | undefined,
+): { ok: true; validators?: Record<string, AdmissionValidator> } | { ok: false; reason: string } {
+  const active = state.repairCandidates?.find(
+    (c) => c.status === "activated" && state.activeVersion.endsWith(`@repair-${c.artifactId}`),
+  );
+  if (!active) return { ok: true };
+  const materialized = repair?.materializeValidators?.(active.candidateRoot);
+  if (materialized) return { ok: true, validators: materialized };
+  if (active.target === "validator") {
+    return {
+      ok: false,
+      reason: `active validator repair ${active.artifactId} cannot be rehydrated (repair.materializeValidators missing)`,
+    };
+  }
+  return { ok: true };
+}
+
+function stagePins(definition: GraphDefinition) {
+  return definition.stages.map((s) => ({
+    id: s.id,
+    name: s.name,
+    requirementIds: [...s.requirementIds],
+  }));
 }
 
 function readSupervisorSessionId(supervisor: Supervisor | undefined): string | undefined {
@@ -488,11 +578,7 @@ export async function defaultRepairPreflight(args: {
   baseDefinition: GraphDefinition;
 }): Promise<RepairPreflightResult> {
   await assertCandidateStepsUnchanged({
-    baseDefinitionStages: args.baseDefinition.stages.map((s) => ({
-      id: s.id,
-      name: s.name,
-      requirementIds: [...s.requirementIds],
-    })),
+    baseDefinitionStages: stagePins(args.baseDefinition),
     candidateRoot: args.candidateRoot,
   });
 

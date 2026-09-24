@@ -22,6 +22,8 @@ export interface RestorePiSupervisorOptions {
   promptTimeoutMs?: number;
   systemPrompt?: string;
   cwd?: string;
+  /** Controller repairs directory; required for candidate coding grants. */
+  repairsDir?: string;
 }
 
 /**
@@ -51,6 +53,7 @@ export async function restorePiSupervisorFromBinding(
   }
   if (options.systemPrompt !== undefined) sessionOpts.systemPrompt = options.systemPrompt;
   if (options.cwd !== undefined) sessionOpts.cwd = options.cwd;
+  if (options.repairsDir !== undefined) sessionOpts.repairsDir = options.repairsDir;
 
   const session = await createPiSupervisorSession(sessionOpts);
 

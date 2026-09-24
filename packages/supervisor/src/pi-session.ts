@@ -3,14 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import {
   createAgentSession,
-  createBashToolDefinition,
-  createEditToolDefinition,
   createExtensionRuntime,
-  createFindToolDefinition,
-  createGrepToolDefinition,
-  createLsToolDefinition,
-  createReadToolDefinition,
-  createWriteToolDefinition,
   ModelRuntime,
   SessionManager,
   SettingsManager,
@@ -22,6 +15,11 @@ import {
   resolveMiniMaxCredential,
   type MiniMaxCredentialSource,
 } from "./credentials.js";
+import {
+  assertAdmittedCandidateRoot,
+  CANDIDATE_CODING_TOOL_NAMES,
+  createCandidateCodingTools,
+} from "./candidate-tools.js";
 
 /** Default initial supervisor model (design-pi-supervisor.md). */
 export const DEFAULT_SUPERVISOR_PROVIDER = "minimax-cn";
@@ -58,6 +56,11 @@ export interface CreatePiSupervisorSessionOptions {
   systemPrompt?: string;
   /** Abort / settle timeout for a single prompt (ms). Default 60_000. */
   promptTimeoutMs?: number;
+  /**
+   * Controller repairs directory (`<stateDir>/repairs`). Candidate coding grants
+   * are only accepted for snapshots issued under it.
+   */
+  repairsDir?: string;
 }
 
 export interface PiSupervisorSession {
@@ -79,8 +82,8 @@ export interface PiSupervisorSession {
    */
   setModel(ref: { provider: string; modelId: string }): Promise<void>;
   /**
-   * Enable coding tools scoped to a QualifyRepair candidate root.
-   * Session identity must not change across repair rounds.
+   * Enable path-confined file tools on a controller-issued QualifyRepair
+   * candidate root. Session identity must not change across repair rounds.
    */
   grantCandidateCoding?(candidateRoot: string): Promise<void>;
   revokeCandidateCoding?(): Promise<void>;
@@ -165,6 +168,7 @@ export async function createPiSupervisorSession(
     credentialSource,
     promptTimeoutMs,
     ...(options.apiKey !== undefined ? { apiKey: options.apiKey } : {}),
+    ...(options.repairsDir !== undefined ? { repairsDir: options.repairsDir } : {}),
   });
 }
 
@@ -228,6 +232,7 @@ function wrapSession(args: {
   credentialSource: MiniMaxCredentialSource;
   promptTimeoutMs: number;
   apiKey?: string;
+  repairsDir?: string;
 }): PiSupervisorSession {
   const { session, modelRuntime, agentDir, promptTimeoutMs } = args;
   let closed = false;
@@ -335,7 +340,7 @@ function wrapSession(args: {
       if (closed) {
         throw new Error("supervisor session is closed");
       }
-      const root = path.resolve(candidateRoot);
+      const root = await assertAdmittedCandidateRoot(args.repairsDir, candidateRoot);
       codingRoot = root;
       installCandidateCodingTools(session, root);
     },
@@ -375,16 +380,6 @@ function createIsolatedResourceLoader(systemPrompt: string): ResourceLoader {
   };
 }
 
-const CANDIDATE_CODING_TOOL_NAMES = [
-  "read",
-  "edit",
-  "write",
-  "bash",
-  "ls",
-  "grep",
-  "find",
-] as const;
-
 /** Pi AgentSession internals needed to swap candidate-scoped coding tools. */
 interface MutableToolSession {
   _customTools: ToolDefinition[];
@@ -397,26 +392,14 @@ function asMutableToolSession(session: AgentSession): MutableToolSession {
   return session as unknown as MutableToolSession;
 }
 
-function candidateCodingToolDefinitions(root: string): unknown[] {
-  return [
-    createReadToolDefinition(root),
-    createEditToolDefinition(root),
-    createWriteToolDefinition(root),
-    createBashToolDefinition(root),
-    createLsToolDefinition(root),
-    createGrepToolDefinition(root),
-    createFindToolDefinition(root),
-  ];
-}
-
 /**
- * Enable read/edit/write/bash (and discovery) tools bound to the candidate root.
- * Lifts the decision-only empty allowlist from session creation so tools can activate.
+ * Enable path-confined read/edit/write/ls on the candidate root. The allowlist
+ * names only those tools so Pi's unconfined built-ins (including bash) stay off.
  */
-function installCandidateCodingTools(session: AgentSession, root: string): void {
+function installCandidateCodingTools(session: AgentSession, rootReal: string): void {
   const host = asMutableToolSession(session);
-  host._allowedToolNames = undefined;
-  host._customTools = candidateCodingToolDefinitions(root) as ToolDefinition[];
+  host._allowedToolNames = new Set(CANDIDATE_CODING_TOOL_NAMES);
+  host._customTools = createCandidateCodingTools(rootReal);
   host._refreshToolRegistry({
     activeToolNames: [...CANDIDATE_CODING_TOOL_NAMES],
   });

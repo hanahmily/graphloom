@@ -16,7 +16,12 @@ import {
 } from "@graphloom/plugin-host";
 import type { Supervisor } from "@graphloom/supervisor";
 import { restorePiSupervisorFromBinding } from "@graphloom/supervisor";
-import type { RepairDeps, RecreateHostFn } from "./repair-lifecycle.js";
+import {
+  activeRepairValidators,
+  reconcileRepairJournal,
+  type RecreateHostFn,
+  type RepairDeps,
+} from "./repair-lifecycle.js";
 import { admitValidation } from "./admit.js";
 import type { AdmissionValidator } from "./admit.js";
 import { resolveBundleEntry } from "./bundle.js";
@@ -387,6 +392,7 @@ export function createController(): Controller {
           }
         }
 
+        state = reconcileRepairJournal(state);
         state = bumpGeneration({ ...state, status: "running" }, "resume");
         await clearStopRequest(stateDir);
         await saveRunState(state);
@@ -444,8 +450,25 @@ export function createController(): Controller {
           return toReport(state, await listDirtyPaths(state.intake.repoPath));
         }
 
+        // Host-backed validators already evaluate in the active (repaired) bundle;
+        // explicit in-process validators must be rebound to the repaired candidate.
+        const rehydrated: ReturnType<typeof activeRepairValidators> =
+          request.validators !== undefined
+            ? activeRepairValidators(state, request.repair)
+            : { ok: true };
+        if (!rehydrated.ok) {
+          state = {
+            ...state,
+            status: "stopped",
+            stopReason: "repair rehydration required",
+            blocker: rehydrated.reason,
+          };
+          await saveRunState(state);
+          return toReport(state, await listDirtyPaths(state.intake.repoPath));
+        }
+
         const revisionBridge = { current: state.stateRevision };
-        const validators = resolveValidators(
+        const baseValidators = resolveValidators(
           request.validators,
           () => session!.host,
           state.definition.defaultValidators.map((b) => b.validatorId),
@@ -454,6 +477,9 @@ export function createController(): Controller {
             getStateRevision: () => revisionBridge.current,
           },
         );
+        const validators = rehydrated.validators
+          ? { ...baseValidators, ...rehydrated.validators }
+          : baseValidators;
 
         const supervisor = await resolveResumeSupervisor(request, state, stateDir);
         if (supervisor && !request.supervisor) {
@@ -559,6 +585,7 @@ async function resolveResumeSupervisor(
           switchJournal: b.switchJournal,
         },
         sessionDir: path.dirname(b.sessionFile!),
+        repairsDir: path.join(ctx.stateDir, "repairs"),
       }));
   return restore(binding, { runId: state.runId, stateDir });
 }
