@@ -10,7 +10,8 @@ flowchart TD
     G -->|Normal decisions| C
     C -->|Recovery facts| S[Run supervisor]
     S -->|Recovery decisions| C
-    C --> J[Worker or command jobs]
+    C -->|Admit, track, cancel| J[Built-in or plugin executor processes]
+    J -->|Execute domain operations| E[GitHub, commands, agents, other services]
     J -->|Observed evidence| C
     C --> V[Validator and independent review jobs]
     V -->|Versioned results| C
@@ -24,6 +25,12 @@ The graph owns normal routing; the supervisor owns exceptional recovery and work
 to finish the run—exhausting authorized remedies before Stop; the controller admits
 both and derives acceptance from required current evidence. Neither an agent
 success claim nor a plugin route can substitute for validation.
+
+Plugins own execution logic and can reuse GraphLoom-provided executors. Built-in
+and custom executors use the same lifecycle interface and run outside the
+controller. New integrations ship as compatible executor packages or plugin code;
+they do not require controller releases. The controller retains durable operation
+records, cancellation, scopes, and budgets. See the [executor design](design-executors.md).
 
 Required outcomes are pinned independently from versioned validator bindings.
 A qualified source patch or authorized validator replacement changes implementation
