@@ -16,6 +16,7 @@ import {
 } from "@graphloom/plugin-host";
 import type { Supervisor } from "@graphloom/supervisor";
 import { restorePiSupervisorFromBinding } from "@graphloom/supervisor";
+import type { RepairDeps } from "./repair-lifecycle.js";
 import { admitValidation } from "./admit.js";
 import type { AdmissionValidator } from "./admit.js";
 import { resolveBundleEntry } from "./bundle.js";
@@ -82,8 +83,11 @@ export interface RunRequest {
   /**
    * Recovery decision owner for Supervise / host crash containment.
    * Scripted in CI; Pi-backed sessions in live runs.
+   * One session identity is reused for every repair round in the run.
    */
   supervisor?: Supervisor;
+  /** Qualified repair patch author + independent reviewer hooks. */
+  repair?: RepairDeps;
   /**
    * Replace a dead child host after crash/timeout. Defaults to spawning a
    * fresh child for controller-owned bundles; pass explicitly for custom hosts.
@@ -102,6 +106,7 @@ export interface ResumeRequest {
   plugin?: GraphPlugin;
   host?: PluginHost;
   supervisor?: Supervisor;
+  repair?: RepairDeps;
   /**
    * When `supervisor` is omitted and durable `supervisorBinding` exists,
    * restore the logical Pi session. Defaults to `restorePiSupervisorFromBinding`.
@@ -243,6 +248,7 @@ export function createController(): Controller {
           ...(request.supervisor !== undefined
             ? { supervisor: request.supervisor }
             : {}),
+          ...(request.repair !== undefined ? { repair: request.repair } : {}),
           ...resolveRecreateHost(session, {
             intake,
             activeVersion,
@@ -459,6 +465,7 @@ export function createController(): Controller {
           shouldStop: () => sessionStop(session!),
           revisionBridge,
           ...(supervisor !== undefined ? { supervisor } : {}),
+          ...(request.repair !== undefined ? { repair: request.repair } : {}),
           ...resolveRecreateHost(session, {
             intake: state.intake,
             activeVersion: state.activeVersion,
@@ -767,6 +774,11 @@ export { toRunView, bumpGeneration } from "./loop.js";
 export { loadRunState, saveRunState } from "./state.js";
 export type { DurableRunState, RunStatus, VersionRecord } from "./state.js";
 export type { IntakePin } from "./intake.js";
+export type {
+  RepairDeps,
+  RepairPatchAuthor,
+  RepairReviewer,
+} from "./repair-lifecycle.js";
 export { assertSafeRunId, assertSafeGraphId } from "./ids.js";
 export { resolveBundleEntry } from "./bundle.js";
 

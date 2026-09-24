@@ -70,6 +70,12 @@ export interface PiSupervisorSession {
    * Caller must ensure the target is operator-configured and idle.
    */
   setModel(ref: { provider: string; modelId: string }): Promise<void>;
+  /**
+   * Enable coding tools scoped to a QualifyRepair candidate root.
+   * Session identity must not change across repair rounds.
+   */
+  grantCandidateCoding?(candidateRoot: string): Promise<void>;
+  revokeCandidateCoding?(): Promise<void>;
   /** Dispose the Pi session and release resources. */
   close(): Promise<void>;
 }
@@ -219,6 +225,7 @@ function wrapSession(args: {
   let closed = false;
   let provider = args.provider;
   let modelId = args.modelId;
+  let codingRoot: string | undefined;
 
   return {
     runId: args.runId,
@@ -316,9 +323,22 @@ function wrapSession(args: {
         unsubscribe();
       }
     },
+    async grantCandidateCoding(candidateRoot: string) {
+      if (closed) {
+        throw new Error("supervisor session is closed");
+      }
+      // Track scoped root on this same AgentSession; tool enablement lands with
+      // candidate-bound read/edit/write (setActiveToolsByName) in a follow-on.
+      codingRoot = candidateRoot;
+      void codingRoot;
+    },
+    async revokeCandidateCoding() {
+      codingRoot = undefined;
+    },
     async close() {
       if (closed) return;
       closed = true;
+      codingRoot = undefined;
       if (!session.isIdle) {
         await session.abort().catch(() => undefined);
       }

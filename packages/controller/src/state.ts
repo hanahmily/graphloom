@@ -83,6 +83,17 @@ export interface DurableRunState {
       error?: string;
     }>;
   };
+  /** Isolated repair candidates for this run (never the live install). */
+  repairCandidates?: import("./repair.js").QualifiedRepairArtifact[];
+  /** Crash-safe activation journal; cleared after successful switch. */
+  activationIntent?: {
+    artifactId: string;
+    fromVersion: string;
+    toVersion: string;
+    generation: number;
+    at: string;
+    status: "intent" | "committed" | "aborted";
+  };
 }
 
 export interface VersionRecord {

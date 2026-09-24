@@ -37,6 +37,8 @@ export interface PiSupervisor extends Supervisor {
     modelId: string;
     reason: string;
   }): Promise<void>;
+  /** Last granted candidate coding root, if any. */
+  candidateCodingRoot(): string | undefined;
 }
 
 export interface CreatePiSupervisorOptions {
@@ -61,6 +63,7 @@ export function createPiSupervisor(options: CreatePiSupervisorOptions): PiSuperv
   ];
   let providerCalls = 0;
   let closed = false;
+  let codingRoot: string | undefined;
 
   const binding: SupervisorBinding = {
     sessionId: session.sessionId,
@@ -78,6 +81,7 @@ export function createPiSupervisor(options: CreatePiSupervisorOptions): PiSuperv
   }
 
   return {
+    sessionId: session.sessionId,
     get binding() {
       return {
         ...binding,
@@ -89,6 +93,26 @@ export function createPiSupervisor(options: CreatePiSupervisorOptions): PiSuperv
       const n = providerCalls;
       providerCalls = 0;
       return n;
+    },
+
+    candidateCodingRoot() {
+      return codingRoot;
+    },
+
+    async grantCandidateCoding(candidateRoot: string) {
+      if (closed) {
+        throw new Error("supervisor is closed");
+      }
+      // Same session identity for every repair round — only the scoped root changes.
+      codingRoot = candidateRoot;
+      if (session.grantCandidateCoding) {
+        await session.grantCandidateCoding(candidateRoot);
+      }
+    },
+
+    async revokeCandidateCoding() {
+      codingRoot = undefined;
+      await session.revokeCandidateCoding?.();
     },
 
     async decide(input: SupervisorInput): Promise<GraphDecision> {

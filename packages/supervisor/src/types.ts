@@ -22,6 +22,7 @@ export interface SupervisorInput {
 /**
  * Run-wide recovery decision source.
  * Implementations may be scripted (CI) or Pi-backed (live).
+ * One logical session identity is reused for every repair round in a run.
  */
 export interface Supervisor {
   decide(input: SupervisorInput): Promise<GraphDecision>;
@@ -31,6 +32,17 @@ export interface Supervisor {
    * Controller deducts from agentInvocations when present.
    */
   drainProviderCalls?(): number;
+  /**
+   * Stable session id for this run's supervisor (Pi session id or scripted stand-in).
+   * Required for qualified repair so every patch round binds to the same session.
+   */
+  sessionId?: string;
+  /**
+   * Grant Pi coding tools scoped to an admitted repair candidate tree.
+   * Must not change session identity; revoke after the qualification episode.
+   */
+  grantCandidateCoding?(candidateRoot: string): Promise<void>;
+  revokeCandidateCoding?(): Promise<void>;
 }
 
 export type ScriptedRecoveryStep =
@@ -39,6 +51,8 @@ export type ScriptedRecoveryStep =
 
 export interface ScriptedSupervisorOptions {
   decisions: ScriptedRecoveryStep[];
+  /** Stable id reused across every repair round (default: scripted-supervisor). */
+  sessionId?: string;
 }
 
 /** Canned recovery decisions for controller tests (no live LLM). */
@@ -47,7 +61,10 @@ export function createScriptedSupervisor(
 ): Supervisor {
   let index = 0;
   const { decisions } = options;
+  const sessionId = options.sessionId ?? "scripted-supervisor";
+  let codingRoot: string | undefined;
   return {
+    sessionId,
     async decide(input: SupervisorInput): Promise<GraphDecision> {
       if (index >= decisions.length) {
         throw new Error(
@@ -65,5 +82,15 @@ export function createScriptedSupervisor(
       }
       return structuredClone(step);
     },
-  };
+    async grantCandidateCoding(candidateRoot: string) {
+      codingRoot = candidateRoot;
+    },
+    async revokeCandidateCoding() {
+      codingRoot = undefined;
+    },
+    /** Test helper: last granted candidate root (undefined when revoked). */
+    getCandidateCodingRoot() {
+      return codingRoot;
+    },
+  } as Supervisor & { getCandidateCodingRoot(): string | undefined };
 }

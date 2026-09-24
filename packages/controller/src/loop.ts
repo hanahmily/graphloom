@@ -36,6 +36,12 @@ import {
 } from "./owner.js";
 import { reconcilePendingDispatch } from "./reconcile.js";
 import { loadRunState, type DurableRunState, saveRunState } from "./state.js";
+import { bumpGeneration } from "./generation.js";
+import {
+  applyActivateRepair,
+  applyQualifyRepair,
+  type RepairDeps,
+} from "./repair-lifecycle.js";
 import {
   readWorktreeFile,
   workspaceChangeManifest,
@@ -50,6 +56,8 @@ export interface LoopDeps {
   validators: Record<string, AdmissionValidator>;
   /** Optional recovery decision source; required to continue past Supervise / host failure. */
   supervisor?: Supervisor;
+  /** Qualified repair patch/review hooks (same supervisor session for patches). */
+  repair?: RepairDeps;
   /**
    * Replace a dead child plugin process after crash/timeout.
    * Required when recovering past a host that exposes `childPid`.
@@ -685,6 +693,44 @@ async function applyDecision(
         status: "running",
       };
     }
+    case "qualify_repair": {
+      if (!deps.repair) {
+        return {
+          ...state,
+          status: "stopped",
+          stopReason: "qualify_repair requires repair hooks",
+          blocker: action.qualify.reason,
+        };
+      }
+      return applyQualifyRepair(state, action.qualify, {
+        ...(deps.supervisor !== undefined ? { supervisor: deps.supervisor } : {}),
+        repair: deps.repair,
+        validators: deps.validators,
+      });
+    }
+    case "activate_repair": {
+      if (!deps.repair) {
+        return {
+          ...state,
+          status: "stopped",
+          stopReason: "activate_repair requires repair hooks",
+          blocker: action.activate.reason,
+        };
+      }
+      const activated = await applyActivateRepair(state, action.activate, {
+        repair: deps.repair,
+        validators: deps.validators,
+        ...(deps.recreateHost !== undefined
+          ? { recreateHost: deps.recreateHost }
+          : {}),
+      });
+      // Swap validators in place for the remainder of this loop.
+      for (const key of Object.keys(deps.validators)) {
+        delete deps.validators[key];
+      }
+      Object.assign(deps.validators, activated.validators);
+      return activated.state;
+    }
     case "stop": {
       const complete =
         action.stop.reason === "complete" &&
@@ -698,13 +744,15 @@ async function applyDecision(
         blocker: action.stop.blocker,
       };
     }
-    default:
+    default: {
+      const unexpected = action as { type: string };
       return {
         ...state,
         status: "stopped",
-        stopReason: `unsupported action in ${state.mode} mode: ${action.type}`,
-        blocker: action.type,
+        stopReason: `unsupported action in ${state.mode} mode: ${unexpected.type}`,
+        blocker: unexpected.type,
       };
+    }
   }
 }
 
@@ -1063,28 +1111,7 @@ export async function ensureArtifactDir(state: DurableRunState): Promise<void> {
 }
 
 /** Exported for restart tests: bump generation so prior evidence is stale. */
-export function bumpGeneration(
-  state: DurableRunState,
-  reason = "generation fence",
-): DurableRunState {
-  const { workspaceRevision: _wr, ...rest } = state;
-  void _wr;
-  const generation = state.generation + 1;
-  return {
-    ...rest,
-    generation,
-    stateRevision: state.stateRevision + 1,
-    versionHistory: [
-      ...(state.versionHistory ?? []),
-      {
-        activeVersion: state.activeVersion,
-        generation,
-        reason,
-        at: new Date().toISOString(),
-      },
-    ],
-  };
-}
+export { bumpGeneration } from "./generation.js";
 
 export { freshEvidence, earliestIncompleteStage };
 export { candidateEvidence } from "./admit.js";
