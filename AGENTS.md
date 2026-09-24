@@ -13,7 +13,7 @@ are superseded. Historical Go code lives under `legacy/go/` and is not built by 
 | `packages/sdk` | `@graphloom/sdk` | Public value/wire contracts, operations, scripted GraphPlugin |
 | `packages/controller` | `@graphloom/controller` | Durable state, admission, receipts (scaffold) |
 | `packages/plugin-host` | `@graphloom/plugin-host` | Isolated child process adapter (scaffold) |
-| `packages/supervisor` | `@graphloom/supervisor` | Recovery session protocol (scaffold) |
+| `packages/supervisor` | `@graphloom/supervisor` | Pi SDK recovery session (`minimax-cn`/`MiniMax-M3` default) |
 | `packages/runner` | `@graphloom/runner` | Jobs and scopes (scaffold) |
 | `apps/graphloom` | `@graphloom/cli` | CLI composition root (stub) |
 

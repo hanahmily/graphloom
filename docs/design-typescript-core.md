@@ -1,9 +1,10 @@
 # GraphLoom: TypeScript graphs and repairable execution
 
-Status: current design direction, 2026-09-22; implementation pending. This document
-supersedes the native Go plugin design in [core-design.md](core-design.md) and its
-[Go package plan](codebase.md). Existing Go code is a partial earlier implementation;
-this document does not claim a TypeScript runtime already exists.
+Status: current design direction, revised 2026-09-23; implementation partial.
+This document supersedes the native Go plugin design in [core-design.md](core-design.md)
+and its [Go package plan](codebase.md). Active TypeScript packages implement parts
+of this design; the Pi supervisor adapter and full repair lifecycle remain pending.
+Earlier Go source is retained under legacy/go.
 
 ## 1. Decisions and scope
 
@@ -32,9 +33,9 @@ steps. Reentry creates another attempt of an existing step, not a replacement st
 Every plugin step must be declared at intake; dynamically invented or optional
 repair steps cannot evade this fixed-step contract.
 
-The first complete release is a local Linux CLI, one agent backend, serial jobs,
-and an isolated Git worktree. The example is **Write → Review**, producing a local
-file change. It includes bounded recovery and one tested plugin-repair transition.
+The first complete release is a local Linux CLI, a Pi SDK supervisor backend with
+multiple configured model providers, serial jobs, and an isolated Git worktree.
+The example is **Write → Review**, producing a local file change. It includes bounded recovery and one tested plugin-repair transition.
 No RSI, cross-run memory, portal, distributed scheduler, or automatic publication
 is part of this release. Multiple roles do not require parallel execution.
 
@@ -252,6 +253,25 @@ recovery episodes, and restored from durable context if its provider session is
 lost. All supervisor diagnosis, repair coordination, and activation requests for
 that run use this session. Worker, validator-review, and patch-review agents have
 separate roles/sessions. No supervisor round trip is required on the happy path.
+
+### Pi SDK session implementation
+
+Use the pinned `@earendil-works/pi-coding-agent@0.87.1` for the supervisor runtime.
+The initial model is `minimax-cn/MiniMax-M3`, using a private command reference to
+the existing OpenCode MiniMax CN credential. SDK connectivity and project type
+checks have passed; supervisor recovery and cross-provider switching remain to be
+implemented. See the [verified MiniMax setup](design-pi-supervisor.md#initial-minimax-configuration).
+
+Model changes among configured DeepSeek, MiniMax, OpenAI, and Anthropic providers preserve one
+logical run-wide supervisor session. The controller owns model-switch admission,
+actual-request accounting, recovery decisions, and the fixed plugin steps.
+
+The [Pi integration design](design-pi-supervisor.md) defines explicit tools,
+resource isolation, session restoration, model-switch journaling, and required
+verification. Direct Pi Claude access uses API credentials; it must not promise
+included Claude Code subscription allowance. A genuine Claude Code backend would
+be a separate integration, not a Pi model setting. See the
+[authentication findings](research/pi-claude-auth.md).
 
 ### Trigger and repair
 
@@ -536,10 +556,12 @@ These are release requirements, not claims of tests already run.
    artifact channels, required validation, controller-owned receipts, and complete
    Write → Review with scripted agents. Test restart, freshness, stop/resume, and
    source preservation through the same public controller interface.
-3. **M3 — Supervisor recovery.** Add the single logical session, automatic fallback,
-   direct recovery admission, scoped overrides, reentry, Return, and shared budgets.
-   Recover an unfamiliar failure with no plugin repair handler and preserve modes
-   and reservations across restart.
+3. **M3 — Pi supervisor recovery.** Implement the selected Pi session adapter,
+   configured-provider switching, actual model-request accounting, automatic
+   fallback, direct recovery admission, scoped overrides, reentry, and Return.
+   Recover an unfamiliar failure without a plugin handler; preserve session,
+   active model, modes, and reservations across restart. Qualify DeepSeek, MiniMax,
+   and OpenAI switching as specified in the [Pi design](design-pi-supervisor.md).
 4. **M4 — Qualified plugin repair and local release.** Add isolated patch/build/
    test/review, same-run version transitions, validator substitution policy, and
    affected-evidence invalidation. Pass the defective-gate scenario, activation
