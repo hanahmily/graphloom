@@ -9,7 +9,7 @@ The authoritative scope and completion criteria are in the
 
 1. **M1:** TypeScript SDK, source bundle, and isolated plugin process.
 2. **M2:** Durable Write → Review execution and controller-owned acceptance.
-3. **M3:** Supervisor recovery without plugin-specific repair handlers.
+3. **M3:** [Pi supervisor](design-pi-supervisor.md), provider/model switching, and recovery without plugin-specific repair handlers.
 4. **M4:** Qualified plugin/gate repair, same-run version transitions, and local release.
 
 These milestones describe work to implement, not completed runtime capabilities.
