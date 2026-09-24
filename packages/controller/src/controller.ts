@@ -83,6 +83,11 @@ export interface RunRequest {
    * Scripted in CI; Pi-backed sessions in live runs.
    */
   supervisor?: Supervisor;
+  /**
+   * Replace a dead child host after crash/timeout. Defaults to spawning a
+   * fresh child for controller-owned bundles; pass explicitly for custom hosts.
+   */
+  recreateHost?: () => Promise<PluginHost>;
   /** Directory for durable run state (default: <repo>/graphloom-state). */
   stateRoot?: string;
   runId?: string;
@@ -96,6 +101,7 @@ export interface ResumeRequest {
   plugin?: GraphPlugin;
   host?: PluginHost;
   supervisor?: Supervisor;
+  recreateHost?: () => Promise<PluginHost>;
   stateRoot?: string;
 }
 
@@ -188,7 +194,7 @@ export function createController(): Controller {
         const revisionBridge = { current: 0 };
         const validators = resolveValidators(
           request.validators,
-          host,
+          () => session.host,
           definition.defaultValidators.map((b) => b.validatorId),
           {
             runId,
@@ -228,6 +234,16 @@ export function createController(): Controller {
           ...(request.supervisor !== undefined
             ? { supervisor: request.supervisor }
             : {}),
+          ...resolveRecreateHost(session, {
+            intake,
+            activeVersion,
+            generation: host.generation,
+            ...(request.plugin !== undefined ? { plugin: request.plugin } : {}),
+            ...(request.host !== undefined ? { host: request.host } : {}),
+            ...(request.recreateHost !== undefined
+              ? { recreateHost: request.recreateHost }
+              : {}),
+          }),
         });
 
         const sourceDirtyAfter = await listDirtyPaths(intake.repoPath);
@@ -413,7 +429,7 @@ export function createController(): Controller {
         const revisionBridge = { current: state.stateRevision };
         const validators = resolveValidators(
           request.validators,
-          host,
+          () => session!.host,
           state.definition.defaultValidators.map((b) => b.validatorId),
           {
             runId: state.runId,
@@ -430,6 +446,16 @@ export function createController(): Controller {
           ...(request.supervisor !== undefined
             ? { supervisor: request.supervisor }
             : {}),
+          ...resolveRecreateHost(session, {
+            intake: state.intake,
+            activeVersion: state.activeVersion,
+            generation: host.generation,
+            ...(request.plugin !== undefined ? { plugin: request.plugin } : {}),
+            ...(request.host !== undefined ? { host: request.host } : {}),
+            ...(request.recreateHost !== undefined
+              ? { recreateHost: request.recreateHost }
+              : {}),
+          }),
         });
         return toReport(state, await listDirtyPaths(state.intake.repoPath));
       } finally {
@@ -470,15 +496,15 @@ export function createController(): Controller {
 
 function resolveValidators(
   explicit: Record<string, AdmissionValidator> | undefined,
-  host: PluginHost,
+  getHost: () => PluginHost,
   ids: string[],
   ctx: { runId: string; getStateRevision: () => number },
 ): Record<string, AdmissionValidator> {
   if (explicit) {
     return explicit;
   }
-  if (host.evaluate) {
-    return createHostValidators(host, ids, ctx);
+  if (getHost().evaluate) {
+    return createHostValidators(getHost, ids, ctx);
   }
   throw new Error(
     "validators required when the plugin host cannot evaluate (pass validators or use a child host)",
@@ -533,6 +559,47 @@ async function openHost(args: {
     cwd: args.intake.bundle.bundlePath,
     env: sanitizedPluginEnv(args.intake.bundle.bundlePath),
   });
+}
+
+/**
+ * Prefer an explicit recreate hook; otherwise spawn a fresh child for
+ * controller-owned bundles. Caller-supplied hosts/plugins are left alone
+ * unless they pass recreateHost.
+ */
+function resolveRecreateHost(
+  session: ActiveSession,
+  args: {
+    intake: IntakePin;
+    activeVersion: string;
+    generation: number;
+    plugin?: GraphPlugin;
+    host?: PluginHost;
+    recreateHost?: () => Promise<PluginHost>;
+  },
+): { recreateHost: () => Promise<PluginHost> } | Record<string, never> {
+  if (args.recreateHost) {
+    return {
+      recreateHost: async () => {
+        const next = await args.recreateHost!();
+        session.host = next;
+        return next;
+      },
+    };
+  }
+  if (args.host !== undefined || args.plugin !== undefined) {
+    return {};
+  }
+  return {
+    recreateHost: async () => {
+      const next = await openHost({
+        intake: args.intake,
+        activeVersion: args.activeVersion,
+        generation: args.generation,
+      });
+      session.host = next;
+      return next;
+    },
+  };
 }
 
 async function resolveStateDir(runRef: string, stateRoot?: string): Promise<string> {

@@ -22,7 +22,7 @@ import {
 import { createScriptedRunner } from "@graphloom/runner";
 import { createInProcessPluginHost, type PluginHost } from "@graphloom/plugin-host";
 import { createScriptedSupervisor } from "@graphloom/supervisor";
-import { createController } from "./index.js";
+import { createController, loadRunState } from "./index.js";
 
 const execFileAsync = promisify(execFile);
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -210,6 +210,7 @@ describe("corrections, crash containment, unfamiliar failure (#28)", () => {
     const env = await makeEnv();
     const controller = createController();
     const reviewDispatches: string[] = [];
+    let seenEpisode: string | undefined;
 
     const plugin = createScriptedGraph({
       definition,
@@ -232,16 +233,21 @@ describe("corrections, crash containment, unfamiliar failure (#28)", () => {
 
     const supervisor = createScriptedSupervisor({
       decisions: [
-        dispatch(
-          {
-            stageId: "write",
-            kind: "agent",
-            purpose: "work",
-            instruction: "repair write",
-            writeScope: [GREETING_PATH],
-          },
-          "supervisor repair write",
-        ),
+        (input) => {
+          seenEpisode = input.view.recoveryEpisodeId;
+          expect(input.view.recoveryEpisodeId).toBe(input.episodeId);
+          expect(input.view.recoveryEpisodeId).toBeTruthy();
+          return dispatch(
+            {
+              stageId: "write",
+              kind: "agent",
+              purpose: "work",
+              instruction: "repair write",
+              writeScope: [GREETING_PATH],
+            },
+            "supervisor repair write",
+          );
+        },
         observe({ paths: [GREETING_PATH], includeWorkspaceManifest: true }, "observe"),
         validate({ stageId: "write", requirementIds: ["greeting-bytes"] }, "validate write"),
         returnToNormal({ summary: "write repaired" }, "return"),
@@ -276,11 +282,241 @@ describe("corrections, crash containment, unfamiliar failure (#28)", () => {
     });
 
     expect(report.status).toBe("succeeded");
+    expect(seenEpisode).toMatch(/^ep-/);
     expect(reviewDispatches).toEqual(["review"]);
     expect(report.receipts.filter((r) => r.valid).map((r) => r.stageId).sort()).toEqual([
       "review",
       "write",
     ]);
+    // Supervisor repair work must consume the shared corrections budget.
+    const inspect = await controller.inspect(report.stateDir);
+    expect(inspect.budgets.corrections).toBeLessThan(8);
+  });
+
+  it("ignores supervisor privateState so graph bookkeeping survives Return", async () => {
+    const env = await makeEnv();
+    const controller = createController();
+    const graphPrivate = JSON.stringify({ writerDispatched: true, marker: "graph-owned" });
+
+    const plugin = createScriptedGraph({
+      definition,
+      advances: [
+        (_view, _i) =>
+          supervise(
+            { reason: "escalate with private" },
+            "escalate",
+            graphPrivate,
+          ),
+        dispatch(
+          {
+            stageId: "write",
+            kind: "agent",
+            purpose: "work",
+            instruction: "write",
+            writeScope: [GREETING_PATH],
+          },
+          "after return",
+        ),
+        observe({ paths: [GREETING_PATH], includeWorkspaceManifest: true }, "observe"),
+        validate({ stageId: "write", requirementIds: ["greeting-bytes"] }, "validate write"),
+        dispatch(
+          {
+            stageId: "review",
+            kind: "agent",
+            purpose: "review",
+            instruction: "review",
+            readOnly: true,
+          },
+          "review",
+        ),
+        validate({ stageId: "review", requirementIds: ["independent-review"] }, "validate review"),
+        stop({ reason: "complete" }, "done"),
+      ],
+    });
+
+    const supervisor = createScriptedSupervisor({
+      decisions: [
+        returnToNormal(
+          { summary: "noop recovery" },
+          "return",
+          JSON.stringify({ marker: "supervisor-should-not-stick" }),
+        ),
+      ],
+    });
+
+    const report = await controller.run({
+      taskPath: env.taskPath,
+      plugin,
+      validators,
+      supervisor,
+      runner: createScriptedRunner({
+        jobs: [
+          async (_job, ctx) => {
+            await writeFile(path.join(ctx.worktreePath, GREETING_PATH), GREETING, "utf8");
+            return { status: "ok", summary: "wrote" };
+          },
+          async () => ({
+            status: "ok" as const,
+            summary: "approved",
+            evidence: [
+              { kind: "review" as const, payload: { verdict: "approved", summary: "ok" } },
+            ],
+          }),
+        ],
+      }),
+      stateRoot: env.stateRoot,
+      runId: "priv1",
+    });
+
+    expect(report.status).toBe("succeeded");
+    const state = await loadRunState(report.stateDir);
+    expect(state.privateState).toBe(graphPrivate);
+    expect(state.privateState).not.toContain("supervisor-should-not-stick");
+  });
+
+  it("stops when a dead child host cannot be restarted", async () => {
+    const env = await makeEnv();
+    const controller = createController();
+    const dead: PluginHost = {
+      activeVersion: "hello@0.1.0",
+      generation: 1,
+      childPid: 424242,
+      async describe() {
+        return { ok: true, value: structuredClone(definition) };
+      },
+      async advance() {
+        return {
+          ok: false,
+          observation: {
+            kind: "child_observation",
+            code: "crash",
+            message: "child exited",
+          },
+        };
+      },
+      async close() {
+        /* no-op */
+      },
+    };
+
+    const report = await controller.run({
+      taskPath: env.taskPath,
+      host: dead,
+      validators,
+      supervisor: createScriptedSupervisor({
+        decisions: [returnToNormal({ summary: "unreachable" }, "return")],
+      }),
+      runner: createScriptedRunner({ jobs: [] }),
+      stateRoot: env.stateRoot,
+      runId: "dead1",
+    });
+
+    expect(report.status).toBe("stopped");
+    expect(report.stopReason).toMatch(/crash/);
+    expect(report.blocker).toMatch(/host restart unavailable/);
+  });
+
+  it("rebinds a replacement host after child crash before Return advances", async () => {
+    const env = await makeEnv();
+    const controller = createController();
+    let hostSerial = 0;
+
+    const inner = createScriptedGraph({
+      definition,
+      advances: [
+        dispatch(
+          {
+            stageId: "write",
+            kind: "agent",
+            purpose: "work",
+            instruction: "write",
+            writeScope: [GREETING_PATH],
+          },
+          "dispatch writer",
+        ),
+        observe({ paths: [GREETING_PATH], includeWorkspaceManifest: true }, "observe"),
+        validate({ stageId: "write", requirementIds: ["greeting-bytes"] }, "validate write"),
+        dispatch(
+          {
+            stageId: "review",
+            kind: "agent",
+            purpose: "review",
+            instruction: "review",
+            readOnly: true,
+          },
+          "dispatch reviewer",
+        ),
+        validate({ stageId: "review", requirementIds: ["independent-review"] }, "validate review"),
+        stop({ reason: "complete" }, "done"),
+      ],
+    });
+
+    function makeChildLikeHost(): PluginHost {
+      hostSerial += 1;
+      const serial = hostSerial;
+      let advances = 0;
+      return {
+        activeVersion: "hello@0.1.0",
+        generation: 1,
+        childPid: 50_000 + serial,
+        async describe() {
+          return { ok: true, value: structuredClone(definition) };
+        },
+        async advance(_ctx, view) {
+          advances += 1;
+          if (serial === 1 && advances === 1) {
+            return {
+              ok: false,
+              observation: {
+                kind: "child_observation",
+                code: "crash",
+                message: "simulated child death",
+              },
+            };
+          }
+          return { ok: true, value: inner.advance(view) };
+        },
+        async close() {
+          /* no-op */
+        },
+      };
+    }
+
+    const report = await controller.run({
+      taskPath: env.taskPath,
+      host: makeChildLikeHost(),
+      recreateHost: async () => makeChildLikeHost(),
+      validators,
+      supervisor: createScriptedSupervisor({
+        decisions: [
+          (input) => {
+            expect(input.trigger.code).toBe("plugin_crash");
+            expect(input.view.recoveryEpisodeId).toBe(input.episodeId);
+            return returnToNormal({ summary: "retry on fresh host" }, "return");
+          },
+        ],
+      }),
+      runner: createScriptedRunner({
+        jobs: [
+          async (_job, ctx) => {
+            await writeFile(path.join(ctx.worktreePath, GREETING_PATH), GREETING, "utf8");
+            return { status: "ok", summary: "wrote" };
+          },
+          async () => ({
+            status: "ok" as const,
+            summary: "approved",
+            evidence: [
+              { kind: "review" as const, payload: { verdict: "approved", summary: "ok" } },
+            ],
+          }),
+        ],
+      }),
+      stateRoot: env.stateRoot,
+      runId: "rebind1",
+    });
+
+    expect(report.status).toBe("succeeded");
+    expect(hostSerial).toBe(2);
   });
 
   it("contains plugin crash with bounded recovery then completion", async () => {
