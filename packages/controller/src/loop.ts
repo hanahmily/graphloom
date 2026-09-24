@@ -23,6 +23,7 @@ import {
   type AdmissionValidator,
   type EvidenceProducer,
 } from "./admit.js";
+import { HostObservationError } from "./host-validators.js";
 import type { IntakePin } from "./intake.js";
 import { assertSafeRunId } from "./ids.js";
 import { withDirectoryLock } from "./lock.js";
@@ -201,46 +202,15 @@ async function runNormalLoopSteps(
             view,
           );
           if (!advanced.ok) {
-            if (await stopRequested(deps)) {
-              state = {
-                ...state,
-                status: "stopped",
-                stopReason: "operator stop",
-                blocker: "stop requested",
-              };
-              await saveRunState(state);
-              return { done: true as const, state };
-            }
-            const code = mapHostFailureCode(advanced.observation.code);
-            if (deps.supervisor) {
-              const restarted = await restartDeadChildHost(deps, code);
-              if (!restarted.ok) {
-                state = {
-                  ...state,
-                  status: "stopped",
-                  stopReason: restarted.stopReason,
-                  blocker: restarted.blocker,
-                };
-                await saveRunState(state);
-                return { done: true as const, state };
-              }
-              state = enterRecovery(
-                state,
-                code,
-                advanced.observation.message,
-              );
-              await saveRunState(state);
-              syncRevision(deps, state);
-              return { done: false as const, state };
-            }
-            state = {
-              ...state,
-              status: "stopped",
-              stopReason: `plugin host: ${advanced.observation.code}`,
-              blocker: advanced.observation.message,
-            };
-            await saveRunState(state);
-            return { done: true as const, state };
+            const contained = await containHostFailure(
+              state,
+              deps,
+              advanced.observation.code,
+              advanced.observation.message,
+            );
+            await saveRunState(contained.state);
+            syncRevision(deps, contained.state);
+            return { done: contained.done, state: contained.state };
           }
           decision = assertGraphDecision(advanced.value);
         }
@@ -259,7 +229,22 @@ async function runNormalLoopSteps(
           };
         }
 
-        state = await applyDecision(state, decision, deps);
+        try {
+          state = await applyDecision(state, decision, deps);
+        } catch (err) {
+          if (err instanceof HostObservationError) {
+            const contained = await containHostFailure(
+              state,
+              deps,
+              err.code,
+              err.message,
+            );
+            await saveRunState(contained.state);
+            syncRevision(deps, contained.state);
+            return { done: contained.done, state: contained.state };
+          }
+          throw err;
+        }
         syncRevision(deps, state);
         if ((await stopRequested(deps)) && state.status === "running") {
           state = {
@@ -447,6 +432,54 @@ async function restartDeadChildHost(
     };
   }
   return { ok: true };
+}
+
+/** Shared advance/evaluate host-failure containment → recovery or concrete stop. */
+async function containHostFailure(
+  state: DurableRunState,
+  deps: LoopDeps,
+  observationCode: string,
+  message: string,
+): Promise<{ done: boolean; state: DurableRunState }> {
+  if (await stopRequested(deps)) {
+    return {
+      done: true,
+      state: {
+        ...state,
+        status: "stopped",
+        stopReason: "operator stop",
+        blocker: "stop requested",
+      },
+    };
+  }
+  const code = mapHostFailureCode(observationCode);
+  if (deps.supervisor) {
+    const restarted = await restartDeadChildHost(deps, code);
+    if (!restarted.ok) {
+      return {
+        done: true,
+        state: {
+          ...state,
+          status: "stopped",
+          stopReason: restarted.stopReason,
+          blocker: restarted.blocker,
+        },
+      };
+    }
+    return {
+      done: false,
+      state: enterRecovery(state, code, message),
+    };
+  }
+  return {
+    done: true,
+    state: {
+      ...state,
+      status: "stopped",
+      stopReason: `plugin host: ${observationCode}`,
+      blocker: message,
+    },
+  };
 }
 
 function mapHostFailureCode(

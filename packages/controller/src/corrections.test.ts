@@ -416,6 +416,144 @@ describe("corrections, crash containment, unfamiliar failure (#28)", () => {
     expect(report.blocker).toMatch(/host restart unavailable/);
   });
 
+  it("contains validator host crash during Validate without rejecting run()", async () => {
+    const env = await makeEnv();
+    const controller = createController();
+    let writeDispatched = false;
+    let reviewDispatched = false;
+    let hostSerial = 0;
+    let evalCrashes = 0;
+
+    const plugin: GraphPlugin = {
+      describe: () => structuredClone(definition),
+      advance(view) {
+        const writeOk = view.receipts.some((r) => r.stageId === "write" && r.valid);
+        const reviewOk = view.receipts.some((r) => r.stageId === "review" && r.valid);
+        if (writeOk && reviewOk) {
+          return stop({ reason: "complete" }, "done");
+        }
+        if (!writeOk) {
+          const hasFile = view.evidence.some((e) => e.kind === "file");
+          const hasWorkspace = view.evidence.some((e) => e.kind === "workspace");
+          if (!writeDispatched) {
+            writeDispatched = true;
+            return dispatch(
+              {
+                stageId: "write",
+                kind: "agent",
+                purpose: "work",
+                instruction: "write",
+                writeScope: [GREETING_PATH],
+              },
+              "dispatch writer",
+            );
+          }
+          if (!hasFile || !hasWorkspace) {
+            return observe(
+              { paths: [GREETING_PATH], includeWorkspaceManifest: true },
+              "observe",
+            );
+          }
+          return validate(
+            { stageId: "write", requirementIds: ["greeting-bytes"] },
+            "validate write",
+          );
+        }
+        if (!reviewDispatched) {
+          reviewDispatched = true;
+          return dispatch(
+            {
+              stageId: "review",
+              kind: "agent",
+              purpose: "review",
+              instruction: "review",
+              readOnly: true,
+            },
+            "review",
+          );
+        }
+        return validate(
+          { stageId: "review", requirementIds: ["independent-review"] },
+          "validate review",
+        );
+      },
+    };
+
+    function makeHost(): PluginHost {
+      hostSerial += 1;
+      const serial = hostSerial;
+      const base = createInProcessPluginHost(plugin, {
+        activeVersion: "hello@0.1.0",
+        generation: 1,
+      });
+      return {
+        activeVersion: base.activeVersion,
+        generation: base.generation,
+        childPid: 60_000 + serial,
+        describe: (ctx) => base.describe(ctx),
+        advance: (ctx, view) => base.advance(ctx, view),
+        async evaluate(_ctx, _validatorId, input) {
+          if (serial === 1 && evalCrashes === 0) {
+            evalCrashes += 1;
+            return {
+              ok: false,
+              observation: {
+                kind: "child_observation",
+                code: "crash",
+                message: "validator child exited",
+              },
+            };
+          }
+          const id =
+            input.requirementId === "greeting-bytes"
+              ? "exact-greeting"
+              : "independent-reviewer";
+          return { ok: true, value: validators[id]!.evaluate(input) };
+        },
+        close: () => base.close(),
+      };
+    }
+
+    const report = await controller.run({
+      taskPath: env.taskPath,
+      host: makeHost(),
+      recreateHost: async () => makeHost(),
+      supervisor: createScriptedSupervisor({
+        decisions: [
+          (input) => {
+            expect(input.trigger.code).toBe("plugin_crash");
+            expect(input.trigger.message).toMatch(/validator/);
+            return returnToNormal({ summary: "retry validate on fresh host" }, "return");
+          },
+        ],
+      }),
+      runner: createScriptedRunner({
+        jobs: [
+          async (_job, ctx) => {
+            await writeFile(path.join(ctx.worktreePath, GREETING_PATH), GREETING, "utf8");
+            return { status: "ok", summary: "wrote" };
+          },
+          async () => ({
+            status: "ok" as const,
+            summary: "approved",
+            evidence: [
+              { kind: "review" as const, payload: { verdict: "approved", summary: "ok" } },
+            ],
+          }),
+        ],
+      }),
+      stateRoot: env.stateRoot,
+      runId: "evalcrash1",
+    });
+
+    expect(report.status).toBe("succeeded");
+    expect(hostSerial).toBe(2);
+    expect(evalCrashes).toBe(1);
+    const inspect = await controller.inspect(report.stateDir);
+    expect(inspect.status).toBe("succeeded");
+    expect(inspect.mode).toBe("normal");
+  });
+
   it("rebinds a replacement host after child crash before Return advances", async () => {
     const env = await makeEnv();
     const controller = createController();

@@ -2,10 +2,9 @@ import type {
   ValidationInput,
   ValidationResult,
 } from "@graphloom/sdk";
-import type { PluginHost } from "@graphloom/plugin-host";
-import { AdmissionError } from "./admit.js";
+import type { ChildObservation, PluginHost } from "@graphloom/plugin-host";
 
-/** Controller-side validator: may evaluate remotely via the plugin host. */
+/** Sync SDK validators or async host-backed evaluators. */
 export interface ControllerValidator {
   evaluate(input: ValidationInput): ValidationResult | Promise<ValidationResult>;
 }
@@ -14,6 +13,20 @@ export interface HostValidatorContext {
   runId: string;
   /** Always read the live revision — never capture a stale snapshot. */
   getStateRevision: () => number;
+}
+
+/**
+ * Host crash/timeout/malformed during evaluate — must be contained by the
+ * controller loop (recovery or concrete stop), not thrown out of `run`.
+ */
+export class HostObservationError extends Error {
+  readonly code: ChildObservation["code"];
+
+  constructor(code: ChildObservation["code"], message: string) {
+    super(message);
+    this.name = "HostObservationError";
+    this.code = code;
+  }
 }
 
 /**
@@ -37,8 +50,9 @@ export function createHostValidators(
       async evaluate(input: ValidationInput): Promise<ValidationResult> {
         const host = getHost();
         if (!host.evaluate) {
-          throw new AdmissionError(
-            `validator ${validatorId} host error: evaluate unavailable after host replacement`,
+          throw new HostObservationError(
+            "internal",
+            `validator ${validatorId}: evaluate unavailable after host replacement`,
           );
         }
         seq += 1;
@@ -52,7 +66,8 @@ export function createHostValidators(
           input,
         );
         if (!result.ok) {
-          throw new AdmissionError(
+          throw new HostObservationError(
+            result.observation.code,
             `validator ${validatorId} host error: ${result.observation.code}: ${result.observation.message}`,
           );
         }
