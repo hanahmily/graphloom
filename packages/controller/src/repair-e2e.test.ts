@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, symlink, writeFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile, rm } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -139,7 +139,13 @@ async function makeEnv(): Promise<{ taskPath: string; stateRoot: string; taskDir
   await execFileAsync("git", ["add", "README.md"], { cwd: repoPath });
   await execFileAsync("git", ["commit", "-m", "init"], { cwd: repoPath });
   await mkdir(path.join(taskDir, "plugins"), { recursive: true });
-  await symlink(helloBundle, path.join(taskDir, "plugins", "hello"));
+  // Copy (do not symlink) so repair snapshots never risk the repo hello tree.
+  const { cp } = await import("node:fs/promises");
+  await cp(helloBundle, path.join(taskDir, "plugins", "hello"), {
+    recursive: true,
+    dereference: true,
+    filter: (src) => path.basename(src) !== "node_modules",
+  });
   const taskPath = path.join(taskDir, "task.yaml");
   await writeFile(
     taskPath,
