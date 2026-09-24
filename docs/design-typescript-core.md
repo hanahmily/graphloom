@@ -1,9 +1,10 @@
 # GraphLoom: TypeScript graphs and repairable execution
 
-Status: current design direction, revised 2026-09-23; implementation partial.
+Status: current design direction, revised 2026-09-24; implementation partial.
 This document supersedes the native Go plugin design in [core-design.md](core-design.md)
 and its [Go package plan](codebase.md). Active TypeScript packages implement parts
-of this design; the Pi supervisor adapter and full repair lifecycle remain pending.
+of this design; the Pi session adapter exists, while full recovery wiring,
+executor extensions, and the full repair lifecycle remain pending.
 Earlier Go source is retained under legacy/go.
 
 ## 1. Decisions and scope
@@ -17,9 +18,15 @@ The core has three modules:
 
 | Module | Owns |
 |---|---|
-| Graph | Required stages and outcomes, normal task construction and routing, default validators, convenient corrections for known failures |
+| Graph/plugin | Required stages and outcomes, normal task construction and routing, executor implementations, default validators, convenient corrections for known failures |
 | Supervisor | One logical session per run; drive the graph to successful completion under failure—investigate, reenter, repair, and exhaust authorized remedies before stopping |
-| Controller | Execution authority, process lifecycle, state, artifacts, validation scheduling, accepted receipts, worktrees, budgets, and version transitions |
+| Controller | Execution admission and lifecycle, state, artifacts, validation scheduling, accepted receipts, worktrees, budgets, and version transitions |
+
+Plugins own execution logic; the controller owns its durable lifecycle. GraphLoom
+provides built-in executors for common needs, including GitHub, and plugins can
+supply additional executors using the same public interface. Domain integrations
+do not belong in the controller state machine. See the
+[executor design](design-executors.md) for extension, invocation, and recovery.
 
 The plugin's declared steps (called stages in the SDK) are fixed for a run.
 The supervisor may repair any failing implementation inside the plugin, but cannot
@@ -97,6 +104,7 @@ plugins/hello/
   graphloom.manifest.json       # generated bundle metadata
   src/graph.ts                  # definition and normal routing
   src/validators.ts             # default validation implementations
+  src/executors.ts              # optional custom execution implementations
   test/                        # positive, negative, and regression cases
   dist/                        # built JavaScript and source maps
 ```
@@ -167,7 +175,11 @@ is no operation for inserting or removing steps during a run.
 and chooses normal routes; it does not directly call models, launch processes,
 mutate files, or own authoritative state. `evaluate` is likewise pure over supplied
 observations. A test command or semantic review is a separately executed job;
-the validator interprets its observed result. All effects pass through the host.
+the validator interprets its observed result. These restrictions apply to graph
+decision callbacks, not the whole plugin: plugin-owned executors perform actual
+I/O in scoped execution processes. Built-in executors follow the same lifecycle
+protocol. The controller records and admits execution without implementing its
+domain behavior; see [executor invocation](design-executors.md#invocation-and-lifecycle).
 
 Values crossing processes use a versioned, bounded JSON protocol, with runtime
 schema checks. TypeScript types do not validate external data. Requests and replies
@@ -183,7 +195,7 @@ facts after recovery. It cannot be a second authoritative stage cursor.
 
 | Operation | Who requests it | Result |
 |---|---|---|
-| Dispatch | Graph or supervisor | Agent/command job with explicit inputs, schema, and scope |
+| Dispatch | Graph or supervisor | Built-in or plugin executor job (including agent/command jobs) with explicit inputs, schema, and scope |
 | Observe | Graph or supervisor | Immutable controller-observed file/command/workspace evidence |
 | Validate | Graph, supervisor, or controller when a candidate is ready | Run currently admitted checks for a named stage and candidate |
 | Reenter | Graph for known correction; supervisor during recovery | Invalidate affected receipts and revisit a current/earlier required stage |
@@ -231,6 +243,75 @@ are not a mathematical guarantee. User ambiguity remains a possible blocker.
 Requirement manifests and accepted history live outside plugin writable scope.
 Record a disputed gate as such. Freeze acceptance that depends on it until the
 defect is resolved, rather than asking a worker to satisfy a known-wrong predicate.
+
+### Where validation is defined
+
+Validation is declared by the graph plugin, not inferred from an executor's exit
+status. The plugin may use its own validator code or explicitly bind a compatible,
+versioned built-in validator. These remain distinct responsibilities:
+
+| Record or implementation | Owner/location | Example |
+|---|---|---|
+| Required outcome and evidence contract | Graph stage definition, pinned at intake | Relevant tests pass for the submitted candidate |
+| Validator implementation and default binding | Plugin source or imported reusable validator package | Interpret a completed test result against the required suite |
+| Evidence production | Scoped executors and controller observation | Test report, observed workspace fingerprint, independent review report |
+| Accepted receipt | Controller durable state | The named requirement passed for this candidate and binding |
+
+Illustrative target syntax, not the current SDK:
+
+```ts
+const testsPassed = defineValidator({
+  evaluate(input) {
+    const test = input.evidence.testRun;
+    if (!test || !test.completed || !test.reportAvailable) {
+      return { status: "inconclusive" };
+    }
+    if (!coversRequiredTests(test, input.requirement)) {
+      return { status: "inconclusive" };
+    }
+    return {
+      status: test.exitCode === 0 && test.failed === 0 ? "passed" : "failed",
+      evidence: [test.artifactRef],
+    };
+  },
+});
+
+const implement = defineStep({
+  id: "implement",
+  requirements: [{
+    id: "tests-pass",
+    statement: "The relevant tests pass for the submitted candidate.",
+    evidenceSchema: testEvidenceSchema,
+    validator: testsPassed,
+  }],
+});
+```
+
+Here, `coversRequiredTests` checks the relevant test selection established from
+the pinned task and admitted test plan; an empty test run or an unrelated command
+exiting zero cannot satisfy the requirement. Planning and collection of that
+evidence are executor jobs, not side effects hidden in `evaluate`. A candidate
+fingerprint covers the actual working tree, not only Git HEAD when edits are
+uncommitted. The controller rejects evidence from a different candidate, attempt,
+or inadmissible producer before issuing a receipt.
+
+For semantic requirements, an independent reviewer executor examines the task and
+candidate and emits a structured report. A validator interprets that report; the
+controller enforces reviewer identity and evidence provenance. The implementation
+agent's own approval cannot satisfy an independent review requirement. Checks
+belong to their declared stage: for Select → Implement → Review, Implement may
+require tests and Review may require issue-resolution/scope approval. Do not make
+Implement acceptance depend on the later Review receipt.
+
+Missing, malformed, or interrupted checks are inconclusive. A completed relevant
+test that fails is negative evidence. Both can trigger recovery, but the supervisor
+must distinguish product defects from broken validation infrastructure. Repairing
+validator code uses the existing qualification procedure; it cannot weaken the
+pinned requirement or synthesize a passing receipt.
+
+The [executor example](design-executors.md#example-graph-executor-and-coding-agent)
+connects these declarations to graph decisions, coding agents, and test/reviewer
+executions.
 
 ## 6. Supervisor authority and routing
 
@@ -523,6 +604,9 @@ The release must demonstrate these cases through the real controller interface:
 
 | Scenario | Required result |
 |---|---|
+| Custom executor and built-in GitHub executor | Same lifecycle interface; install a new custom executor without rebuilding the controller; record bounded results and actual implementation identity |
+| Crash after external write but before result | Reconcile remote outcome; do not blindly repeat the write |
+| Executor exceeds scope, hangs, or returns stale output | Enforce scope, stop independently, reject stale results, and retain evidence for recovery |
 | Correct file | Both stages accepted from observed evidence |
 | Missing newline or unrelated edit | Repair output; unchanged validation catches the defect |
 | Review requests changes | Known graph reentry or supervisor recovery; fresh downstream review |
@@ -566,6 +650,13 @@ These are release requirements, not claims of tests already run.
    test/review, same-run version transitions, validator substitution policy, and
    affected-evidence invalidation. Pass the defective-gate scenario, activation
    crash scenarios, opaque-plugin stop case, and a real-backend hello run.
+
+The executor extension design is an additional implementation slice alongside the
+existing milestones: establish the common executor lifecycle and a user-authored
+executor, provide independently packaged GitHub support, then qualify supervisor
+recovery and replacement through that same interface. These are design commitments,
+not implemented capabilities or additional graph steps. See the
+[delivery and checks](design-executors.md#delivery-and-checks).
 
 Proposed package seams are npm workspaces under `packages/`: `sdk` (value/wire
 contracts), `controller` (durable state and admission), `plugin-host` (process
