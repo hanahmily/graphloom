@@ -156,7 +156,9 @@ function advanceWrite(view: RunView, state: HelloPrivateState): GraphDecision {
     );
   }
 
-  if (!file || !manifest) {
+  // After a correction or Write reentry, observedWrite is cleared so we must
+  // re-observe even when older file/workspace evidence is still on the view.
+  if (!state.observedWrite || !file || !manifest) {
     return withPrivate(
       observe(
         { paths: [GREETING_PATH], includeWorkspaceManifest: true },

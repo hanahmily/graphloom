@@ -12,6 +12,7 @@ import type {
 import { assertGraphDecision } from "@graphloom/sdk";
 import type { Runner } from "@graphloom/runner";
 import type { PluginHost } from "@graphloom/plugin-host";
+import type { Supervisor } from "@graphloom/supervisor";
 import {
   admitValidation,
   earliestIncompleteStage,
@@ -46,6 +47,8 @@ export interface LoopDeps {
   host: PluginHost;
   runner: Runner;
   validators: Record<string, AdmissionValidator>;
+  /** Optional recovery decision source; required to continue past Supervise / host failure. */
+  supervisor?: Supervisor;
   /** Operator stop: checked each loop turn before advance (sync or async). */
   shouldStop?: () => boolean | Promise<boolean>;
   /** Live revision bridge for host-backed validators. */
@@ -143,34 +146,83 @@ async function runNormalLoopSteps(
         await updateOwnerChildPid(state.stateDir, owner.ownerId, deps.host.childPid);
 
         const view = toRunView(state);
-        const advanced = await deps.host.advance(
-          {
-            runId: state.runId,
-            operationId: `adv-${state.stateRevision}-${step}`,
-            expectedStateRevision: state.stateRevision,
-          },
-          view,
-        );
-        if (!advanced.ok) {
-          if (await stopRequested(deps)) {
+        let decision: GraphDecision;
+
+        if (state.mode === "recovery") {
+          if (!deps.supervisor) {
             state = {
               ...state,
               status: "stopped",
-              stopReason: "operator stop",
-              blocker: "stop requested",
+              stopReason: state.recoveryTrigger?.message ?? "recovery required",
+              blocker: "no supervisor configured",
             };
-          } else {
+            await saveRunState(state);
+            return { done: true as const, state };
+          }
+          const episodeId =
+            state.recoveryEpisodeId ?? `ep-${randomUUID().slice(0, 8)}`;
+          const trigger = state.recoveryTrigger ?? {
+            code: "unhandled",
+            message: "recovery",
+          };
+          const decided = await deps.supervisor.decide({
+            runId: state.runId,
+            episodeId,
+            trigger: {
+              code: trigger.code as
+                | "supervise"
+                | "plugin_crash"
+                | "plugin_timeout"
+                | "plugin_malformed"
+                | "stalled"
+                | "unhandled",
+              message: trigger.message,
+            },
+            view,
+          });
+          decision = assertGraphDecision(decided);
+        } else {
+          const advanced = await deps.host.advance(
+            {
+              runId: state.runId,
+              operationId: `adv-${state.stateRevision}-${step}`,
+              expectedStateRevision: state.stateRevision,
+            },
+            view,
+          );
+          if (!advanced.ok) {
+            if (await stopRequested(deps)) {
+              state = {
+                ...state,
+                status: "stopped",
+                stopReason: "operator stop",
+                blocker: "stop requested",
+              };
+              await saveRunState(state);
+              return { done: true as const, state };
+            }
+            const code = mapHostFailureCode(advanced.observation.code);
+            if (deps.supervisor) {
+              state = enterRecovery(
+                state,
+                code,
+                advanced.observation.message,
+              );
+              await saveRunState(state);
+              syncRevision(deps, state);
+              return { done: false as const, state };
+            }
             state = {
               ...state,
               status: "stopped",
               stopReason: `plugin host: ${advanced.observation.code}`,
               blocker: advanced.observation.message,
             };
+            await saveRunState(state);
+            return { done: true as const, state };
           }
-          await saveRunState(state);
-          return { done: true as const, state };
+          decision = assertGraphDecision(advanced.value);
         }
-        const decision = assertGraphDecision(advanced.value);
 
         if (decision.action.type === "dispatch") {
           const prepared = await prepareDispatch(state, decision, deps);
@@ -328,6 +380,35 @@ async function reloadRunState(state: DurableRunState): Promise<DurableRunState> 
   }
 }
 
+function enterRecovery(
+  state: DurableRunState,
+  code: string,
+  message: string,
+): DurableRunState {
+  return {
+    ...state,
+    mode: "recovery",
+    status: "running",
+    recoveryEpisodeId: `ep-${randomUUID().slice(0, 8)}`,
+    recoveryTrigger: { code, message },
+  };
+}
+
+function mapHostFailureCode(
+  code: string,
+): "plugin_crash" | "plugin_timeout" | "plugin_malformed" | "unhandled" {
+  switch (code) {
+    case "crash":
+      return "plugin_crash";
+    case "timeout":
+      return "plugin_timeout";
+    case "malformed":
+      return "plugin_malformed";
+    default:
+      return "unhandled";
+  }
+}
+
 export function toRunView(state: DurableRunState): RunView {
   const view: RunView = {
     runId: state.runId,
@@ -409,14 +490,44 @@ async function applyDecision(
       };
       return bumpGeneration(next, "reenter");
     }
-    case "supervise":
+    case "supervise": {
+      if (!deps.supervisor) {
+        return {
+          ...state,
+          status: "stopped",
+          mode: "recovery",
+          stopReason: action.supervise.reason,
+          blocker: "no supervisor configured",
+        };
+      }
+      return enterRecovery(state, "supervise", action.supervise.reason);
+    }
+    case "return": {
+      if (state.mode !== "recovery") {
+        return {
+          ...state,
+          status: "stopped",
+          stopReason: "return outside recovery",
+          blocker: action.return.summary,
+        };
+      }
+      const {
+        recoveryEpisodeId: _ep,
+        recoveryTrigger: _tr,
+        stopReason: _sr,
+        blocker: _bl,
+        ...rest
+      } = state;
+      void _ep;
+      void _tr;
+      void _sr;
+      void _bl;
       return {
-        ...state,
-        status: "stopped",
-        mode: "recovery",
-        stopReason: action.supervise.reason,
-        blocker: "supervisor not implemented in this ticket",
+        ...rest,
+        mode: "normal",
+        status: "running",
       };
+    }
     case "stop": {
       const complete =
         action.stop.reason === "complete" &&
@@ -434,7 +545,7 @@ async function applyDecision(
       return {
         ...state,
         status: "stopped",
-        stopReason: `unsupported action in normal mode: ${action.type}`,
+        stopReason: `unsupported action in ${state.mode} mode: ${action.type}`,
         blocker: action.type,
       };
   }

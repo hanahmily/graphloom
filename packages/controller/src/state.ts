@@ -55,6 +55,13 @@ export interface DurableRunState {
   lastWorkOperationId?: string;
   /** Recorded active-version transitions (intake + generation fences). */
   versionHistory: VersionRecord[];
+  /** Active recovery episode when mode is recovery. */
+  recoveryEpisodeId?: string;
+  /** Why the controller entered the current recovery episode. */
+  recoveryTrigger?: {
+    code: string;
+    message: string;
+  };
 }
 
 export interface VersionRecord {

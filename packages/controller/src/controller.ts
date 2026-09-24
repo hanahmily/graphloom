@@ -14,6 +14,7 @@ import {
   createInProcessPluginHost,
   type PluginHost,
 } from "@graphloom/plugin-host";
+import type { Supervisor } from "@graphloom/supervisor";
 import { admitValidation } from "./admit.js";
 import type { AdmissionValidator } from "./admit.js";
 import { resolveBundleEntry } from "./bundle.js";
@@ -77,6 +78,11 @@ export interface RunRequest {
   plugin?: GraphPlugin;
   /** Optional pre-built host; when set, overrides plugin/child loading. */
   host?: PluginHost;
+  /**
+   * Recovery decision owner for Supervise / host crash containment.
+   * Scripted in CI; Pi-backed sessions in live runs.
+   */
+  supervisor?: Supervisor;
   /** Directory for durable run state (default: <repo>/graphloom-state). */
   stateRoot?: string;
   runId?: string;
@@ -89,6 +95,7 @@ export interface ResumeRequest {
   validators?: Record<string, AdmissionValidator>;
   plugin?: GraphPlugin;
   host?: PluginHost;
+  supervisor?: Supervisor;
   stateRoot?: string;
 }
 
@@ -138,7 +145,7 @@ export interface Controller {
   /** @deprecated Prefer resume(); retained for #25 tests. */
   continueAfterRestart(
     stateDir: string,
-    deps: Pick<RunRequest, "plugin" | "host" | "runner" | "validators">,
+    deps: Pick<RunRequest, "plugin" | "host" | "runner" | "validators" | "supervisor">,
   ): Promise<RunReport>;
 }
 
@@ -218,6 +225,9 @@ export function createController(): Controller {
           validators,
           shouldStop: () => sessionStop(session),
           revisionBridge,
+          ...(request.supervisor !== undefined
+            ? { supervisor: request.supervisor }
+            : {}),
         });
 
         const sourceDirtyAfter = await listDirtyPaths(intake.repoPath);
@@ -225,6 +235,7 @@ export function createController(): Controller {
       } finally {
         await clearStopRequest(session.stateDir);
         await clearOwnerClaim(session.stateDir);
+        await request.supervisor?.close?.().catch(() => undefined);
         await reapSession(session);
       }
     },
@@ -416,11 +427,15 @@ export function createController(): Controller {
           validators,
           shouldStop: () => sessionStop(session!),
           revisionBridge,
+          ...(request.supervisor !== undefined
+            ? { supervisor: request.supervisor }
+            : {}),
         });
         return toReport(state, await listDirtyPaths(state.intake.repoPath));
       } finally {
         await clearStopRequest(stateDir);
         await clearOwnerClaim(stateDir);
+        await request.supervisor?.close?.().catch(() => undefined);
         await reapSession(session);
       }
     },
@@ -444,6 +459,9 @@ export function createController(): Controller {
       }
       if (deps.host !== undefined) {
         resumeReq.host = deps.host;
+      }
+      if (deps.supervisor !== undefined) {
+        resumeReq.supervisor = deps.supervisor;
       }
       return this.resume(resumeReq);
     },

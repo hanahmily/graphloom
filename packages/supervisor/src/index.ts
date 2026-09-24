@@ -14,3 +14,12 @@ export {
   type CreatePiSupervisorSessionOptions,
   type PiSupervisorSession,
 } from "./pi-session.js";
+
+export {
+  createScriptedSupervisor,
+  type RecoveryTrigger,
+  type ScriptedRecoveryStep,
+  type ScriptedSupervisorOptions,
+  type Supervisor,
+  type SupervisorInput,
+} from "./types.js";
