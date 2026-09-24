@@ -382,10 +382,13 @@ is blocked as above. No plugin-specific repair allowlist is required. This is a
 duty to attempt repairs aggressively within bounds—not a guarantee of success when
 source, capabilities, or budget are unavailable.
 Routing repairs preserve the fixed step set and required order; retry and reentry
-cannot be used to skip an outcome or introduce a new step. Changes to job instructions preserve the
-original task, evidence contracts, write scope, and reviewer independence. Persist
-scoped overrides with target job/stage, reason, source evidence, and expiry after
-the named trial; they cannot silently affect unrelated stages.
+cannot be used to skip an outcome or introduce a new step. When the supervisor
+retries or reenters a stage, it **generates the job instruction (prompt) itself**
+for that recovery trial—it must not be forced to reuse the plugin's original
+happy-path prompt. The override still preserves the original user task, evidence
+contracts, write scope, and reviewer independence. Persist scoped overrides with
+target job/stage, supervisor-authored instruction, reason, source evidence, and
+expiry after the named trial; they cannot silently affect unrelated stages.
 
 A denied optional action returns a rejection so the supervisor can choose an
 authorized alternative. Missing indispensable authority, contradictory requirements,
@@ -401,9 +404,14 @@ downstream receipts and dependent checks, cancel dependent pending jobs, and rec
 reason/evidence. Retain history and artifacts. Do not reset the worktree or discard
 operator edits. Retries append attempts, so the execution history remains acyclic.
 
-The active decision source dispatches the repair using that reservation. Reentry
-and its first trial consume one correction attempt, not two. Duplicate operation
-IDs return recorded settlements without additional invalidation or reservation.
+The active decision source then dispatches the recovery trial using that reservation.
+**In recovery, the supervisor authors the `Dispatch` instruction** (agent prompt or
+command description) for that trial. The plugin's prior instruction is diagnostic
+context only—it is not binding for the recovery attempt. Graph-authored known
+corrections in normal mode may still supply their own coded instructions; that does
+not constrain supervisor recovery. Reentry and its first trial consume one
+correction attempt, not two. Duplicate operation IDs return recorded settlements
+without additional invalidation or reservation.
 
 `Return` requires no active or ambiguous operation. It records recovery results
 and atomically restores normal mode. It does not declare success. The plugin sees
