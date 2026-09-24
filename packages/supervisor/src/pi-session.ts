@@ -65,6 +65,11 @@ export interface PiSupervisorSession {
    * (no thinking / tool internals). Times out if the session does not settle.
    */
   prompt(text: string, options?: { signal?: AbortSignal }): Promise<string>;
+  /**
+   * Switch the active model on this logical session.
+   * Caller must ensure the target is operator-configured and idle.
+   */
+  setModel(ref: { provider: string; modelId: string }): Promise<void>;
   /** Dispose the Pi session and release resources. */
   close(): Promise<void>;
 }
@@ -138,12 +143,25 @@ export async function createPiSupervisorSession(
 
   return wrapSession({
     session,
+    modelRuntime,
     runId: options.runId,
     provider,
     modelId,
+    agentDir,
     credentialSource,
     promptTimeoutMs,
+    ...(options.apiKey !== undefined ? { apiKey: options.apiKey } : {}),
   });
+}
+
+/** Ensure the target provider has usable credentials before setModel. */
+export async function ensureProviderCredentials(args: {
+  modelRuntime: ModelRuntime;
+  provider: string;
+  agentDir: string;
+  apiKey?: string;
+}): Promise<MiniMaxCredentialSource> {
+  return applyProviderCredentials(args);
 }
 
 async function applyProviderCredentials(args: {
@@ -188,22 +206,62 @@ async function applyProviderCredentials(args: {
 
 function wrapSession(args: {
   session: AgentSession;
+  modelRuntime: ModelRuntime;
   runId: string;
   provider: string;
   modelId: string;
+  agentDir: string;
   credentialSource: MiniMaxCredentialSource;
   promptTimeoutMs: number;
+  apiKey?: string;
 }): PiSupervisorSession {
-  const { session, promptTimeoutMs } = args;
+  const { session, modelRuntime, agentDir, promptTimeoutMs } = args;
   let closed = false;
+  let provider = args.provider;
+  let modelId = args.modelId;
 
   return {
     runId: args.runId,
-    provider: args.provider,
-    modelId: args.modelId,
+    get provider() {
+      return provider;
+    },
+    get modelId() {
+      return modelId;
+    },
     sessionId: session.sessionId,
     sessionFile: session.sessionFile,
     credentialSource: args.credentialSource,
+    async setModel(ref) {
+      if (closed) {
+        throw new Error("supervisor session is closed");
+      }
+      if (!session.isIdle) {
+        await session.abort().catch(() => undefined);
+        const settleDeadline = Date.now() + 5_000;
+        while (!session.isIdle && Date.now() < settleDeadline) {
+          await sleep(25);
+        }
+        if (!session.isIdle) {
+          throw new Error("cannot switch model: session still active after abort");
+        }
+      }
+      // Validate/prepare target credentials before mutating the active model.
+      await ensureProviderCredentials({
+        modelRuntime,
+        provider: ref.provider,
+        agentDir,
+        ...(args.apiKey !== undefined && isMiniMaxProvider(ref.provider)
+          ? { apiKey: args.apiKey }
+          : {}),
+      });
+      const model = modelRuntime.getModel(ref.provider, ref.modelId);
+      if (!model) {
+        throw new Error(`Pi model not found: ${ref.provider}/${ref.modelId}`);
+      }
+      await session.setModel(model, { persist: false });
+      provider = ref.provider;
+      modelId = ref.modelId;
+    },
     async prompt(text, promptOptions) {
       if (closed) {
         throw new Error("supervisor session is closed");
