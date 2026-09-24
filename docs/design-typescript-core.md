@@ -142,9 +142,10 @@ process for every replacement version. Node provides subprocesses and IPC throug
 Process separation contains ordinary crashes; it is not a malicious-code sandbox.
 The Linux runner must enforce filesystem, process, credential, and network scopes
 for jobs. Plugin callbacks and validators get only immutable bundle files and
-explicit evidence, not controller state or a writable target repository. Builders
-and repair agents get a separate writable candidate tree. Node's `vm` is not a
-security mechanism; do not use it as the isolation claim.
+explicit evidence, not controller state or a writable target repository. When the
+supervisor is admitted to repair source, its Pi session receives a **separate
+writable candidate tree** (never the user worktree or live install). Node's `vm`
+is not a security mechanism; do not use it as the isolation claim.
 [Node VM documentation](https://nodejs.org/api/vm.html).
 
 ## 4. Public interface and process protocol
@@ -331,9 +332,12 @@ they do not route the run or modify receipts.
 
 The run has one logical supervisor session, created lazily, continued across
 recovery episodes, and restored from durable context if its provider session is
-lost. All supervisor diagnosis, repair coordination, and activation requests for
-that run use this session. Worker, validator-review, and patch-review agents have
-separate roles/sessions. No supervisor round trip is required on the happy path.
+lost. All supervisor diagnosis, **source repair coding**, repair coordination, and
+activation requests for that run use this session. The supervisor writes qualified
+plugin/validator patches **itself** through the Pi SDK against an admitted candidate
+tree (see §7). Worker agents and the **independent patch reviewer** use separate
+roles/sessions; the reviewer must not be the same agent that authored the patch.
+No supervisor round trip is required on the happy path.
 
 ### Pi SDK session implementation
 
@@ -371,7 +375,8 @@ including repeated observations and Return cycles, consume global limits.
 The supervisor's repair scope covers every failing plugin implementation surface:
 prompts, available model settings, task construction, validation logic, artifact
 handling, error handling, and routing between existing steps. It may investigate,
-run repair jobs, reenter existing stages, and qualify source patches. Prefer another
+run repair jobs, reenter existing stages, and **write** qualified source patches
+through its Pi session against admitted candidate trees. Prefer another
 authorized remedy while budget and authority remain; Stop only when further progress
 is blocked as above. No plugin-specific repair allowlist is required. This is a
 duty to attempt repairs aggressively within bounds—not a guarantee of success when
@@ -410,20 +415,23 @@ itself be patched through the version procedure below.
 
 ## 7. Repairing plugin code or a defective validator
 
-The supervisor coordinates repair; a separate repair agent edits a candidate copy,
-and an independent reviewer evaluates it. The original bundle and failure evidence
-remain immutable. Repair source lives outside the target repository, so it cannot
-accidentally enter the user's deliverable diff.
+The run supervisor's **Pi SDK session writes the repair** into an isolated candidate
+copy; an **independent read-only reviewer** (separate session/role) evaluates it.
+There is no second non-Pi “repair agent” that owns coding—the supervisor codes via
+Pi. The original bundle and failure evidence remain immutable. Repair source lives
+outside the target repository, so it cannot accidentally enter the user's
+deliverable diff.
 
 **Snapshot base for every qualification.** `QualifyRepair` always starts from an
 immutable snapshot of a specific plugin version (normally the run's active pinned
 bundle: source, lockfile, build inputs, and digests). The controller materializes
-that snapshot into an isolated candidate tree before any patch agent runs. Concurrent
-or overlapping repair attempts each get their own snapshot and tree; they never share
-a writable working copy, and they never mutate the live installed bundle or another
-candidate. A revised patch forks again from the recorded base snapshot (or from an
-explicit prior candidate digest), not from a half-edited tree. Qualification receipts
-bind the base snapshot digest and the candidate digest together so activation cannot
+that snapshot into an isolated candidate tree **before** the supervisor's Pi session
+is granted write tools scoped to that tree. Concurrent or overlapping repair
+attempts each get their own snapshot and tree; they never share a writable working
+copy, and they never mutate the live installed bundle or another candidate. A
+revised patch forks again from the recorded base snapshot (or from an explicit
+prior candidate digest), not from a half-edited tree. Qualification receipts bind
+the base snapshot digest and the candidate digest together so activation cannot
 admit a patch whose parent is no longer the intended version.
 
 | Defect | Response |
@@ -439,18 +447,20 @@ A source repair or validator substitution follows the same bounded procedure:
 1. **Diagnose and reserve.** Identify the disputed requirement or route, faulty
    version, candidate revision, failure evidence, repair authority, and one shared
    correction reservation. Snapshot the faulty plugin version into an isolated
-   candidate tree before editing. A patch cannot change the repair policy that
+   candidate tree before editing. Admit Pi coding tools for the supervisor session
+   **only** against that candidate cwd. A patch cannot change the repair policy that
    admits it. Only one activation may proceed at a time under the run lock; other
    in-flight candidates remain durable artifacts until activated, rejected, or
    superseded.
 2. **Reproduce.** Add a focused regression case showing the defect in the original
    implementation. Include valid and invalid cases derived from the requirement.
    For an exact-byte gate, include missing newline, wrong content, and extra files.
-3. **Patch.** Change only the isolated plugin candidate. Preserve the readable
-   requirement, complete ordered step list, original test corpus, and original
-   failing result. A changed old
-   test needs an explicit defect explanation and independent review; deleting
-   negative coverage or loosening expected outcomes is not a repair shortcut.
+3. **Patch (supervisor via Pi).** The same logical supervisor Pi session edits only
+   the isolated plugin candidate (read/edit/write/bash or GraphLoom-scoped
+   equivalents bound to the candidate root). Preserve the readable requirement,
+   complete ordered step list, original test corpus, and original failing result.
+   A changed old test needs an explicit defect explanation and independent review;
+   deleting negative coverage or loosening expected outcomes is not a repair shortcut.
 4. **Build and test.** The host builds from pinned source/dependencies and runs
    regression, positive, negative, and affected integration checks. Reproduce the
    defect on the old version and demonstrate corrected behavior on the candidate.
@@ -459,7 +469,8 @@ A source repair or validator substitution follows the same bounded procedure:
 5. **Independent review.** Give a separate read-only reviewer the original task,
    requirement, patch, old/new observations, and test evidence. It must evaluate
    equivalence to the required outcome and remaining gaps. Its receipt binds the
-   exact source/build digests and cannot be authored by the patching agent.
+   exact source/build digests and **cannot be authored by the supervisor session
+   that wrote the patch**.
 6. **Activate.** The controller admits the exact qualified artifact and records a
    version transition as described below. A rejected or revised patch needs fresh
    qualification; previously failed candidates remain visible.
@@ -646,10 +657,13 @@ These are release requirements, not claims of tests already run.
    Recover an unfamiliar failure without a plugin handler; preserve session,
    active model, modes, and reservations across restart. Qualify DeepSeek, MiniMax,
    and OpenAI switching as specified in the [Pi design](design-pi-supervisor.md).
-4. **M4 — Qualified plugin repair and local release.** Add isolated patch/build/
-   test/review, same-run version transitions, validator substitution policy, and
-   affected-evidence invalidation. Pass the defective-gate scenario, activation
-   crash scenarios, opaque-plugin stop case, and a real-backend hello run.
+   After `QualifyRepair` admission, enable Pi coding tools scoped to the candidate
+   tree so the supervisor writes source repairs in-session.
+4. **M4 — Qualified plugin repair and local release.** Add isolated snapshot /
+   build/test/independent review/activation, same-run version transitions,
+   validator substitution policy, and affected-evidence invalidation—with the
+   supervisor Pi session as the patch author. Pass the defective-gate scenario,
+   activation crash scenarios, opaque-plugin stop case, and a real-backend hello run.
 
 The executor extension design is an additional implementation slice alongside the
 existing milestones: establish the common executor lifecycle and a user-authored

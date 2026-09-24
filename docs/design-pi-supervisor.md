@@ -2,10 +2,12 @@
 
 Status: Pi-backed `createPiSupervisor` wires recovery decisions and durable
 session binding (2026-09-24); provider call accounting settles against
-`agentInvocations`. Cross-provider live switching qualification and
-BeforeProviderRequest interception for multi-turn prompts remain follow-on
-within #43. Scripted supervisors stay the CI default. This document specializes
-the [core design](design-typescript-core.md).
+`agentInvocations`. The supervisor's Pi session must **write qualified repairs
+itself** into admitted candidate trees (not a separate non-Pi repair agent);
+unconstrained edit/write on the user worktree remains forbidden. Cross-provider
+live switching, BeforeProviderRequest interception, and candidate-scoped Pi coding
+tools remain follow-on under #43 / #29. Scripted supervisors stay the CI default.
+This document specializes the [core design](design-typescript-core.md).
 
 ## SDK choice and scope
 
@@ -155,11 +157,25 @@ provider test requirement.
 
 ## Tools, authority, and spend accounting
 
-Construct the SDK with explicit resources and only GraphLoom-owned custom tools.
-Disable default bash/edit/write and project-discovered extensions, skills, settings,
-and prompt templates. Route observation, dispatch, validation, reentry, repair,
-and Return requests through controller admission; tool results report actual
-settlement. Pi must not directly mutate the run worktree or authoritative state.
+Construct the SDK with explicit resources. Disable project-discovered extensions,
+skills, settings, and prompt templates. Do **not** grant unconstrained default
+bash/edit/write against the user run worktree or live plugin install.
+
+Tooling has two layers:
+
+1. **GraphLoom-owned admission tools** — observe, dispatch, validate, reenter,
+   qualify_repair, activate_repair, return, stop. Tool results report controller
+   settlement; Pi cannot mint Accept or alter pinned steps/requirements.
+2. **Pi coding tools for qualified repair** — after the controller admits
+   `QualifyRepair` and materializes a candidate tree, the **same** supervisor
+   `AgentSession` may use Pi read/edit/write/bash (or GraphLoom wrappers) with
+   filesystem scope **bound to that candidate root only**. The supervisor writes
+   plugin/validator source repairs itself through the Pi SDK; coding is not
+   delegated to a separate non-Pi repair agent. Revoke or rebind those tools when
+   the qualification episode ends. An independent read-only reviewer uses a
+   different session and must not share write tools with the patching supervisor.
+
+Pi must not directly mutate the run worktree or authoritative controller state.
 The fixed step list and acceptance requirements remain enforced by the controller.
 [SDK configuration](https://pi.dev/docs/latest/sdk),
 [Explicit resource configuration example](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/examples/sdk/12-full-control.ts).
@@ -189,7 +205,7 @@ reconciles in-flight effects. Filter private thinking from user-facing activity.
 | Gap | Required work |
 |---|---|
 | SDK dependency and MiniMax connection are ready; session adapter creates a durable Pi transcript | Wire controller recovery admission/results loop and GraphLoom-owned tools |
-| Controller currently stops on Supervise | Wire one durable recovery decision owner and admission/results loop |
+| Decision-only adapter (`noTools: "all"`) | After `QualifyRepair`, enable Pi coding tools scoped to the candidate tree so the supervisor can write plugin/validator fixes in-session |
 | Cross-provider switching | Serialize selection, journal switches, enforce context/tool compatibility, retain session/history |
 | Invocation accounting | Count actual provider calls, including compaction/retry paths; avoid unmetered background work |
 | Restart and cancellation | Reconcile session metadata, tool operations, active model, and generation fences |
