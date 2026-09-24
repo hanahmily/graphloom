@@ -12,6 +12,7 @@ import type {
 import { assertGraphDecision } from "@graphloom/sdk";
 import type { Runner } from "@graphloom/runner";
 import type { PluginHost } from "@graphloom/plugin-host";
+import type { Supervisor } from "@graphloom/supervisor";
 import {
   admitValidation,
   earliestIncompleteStage,
@@ -22,6 +23,7 @@ import {
   type AdmissionValidator,
   type EvidenceProducer,
 } from "./admit.js";
+import { HostObservationError } from "./host-validators.js";
 import type { IntakePin } from "./intake.js";
 import { assertSafeRunId } from "./ids.js";
 import { withDirectoryLock } from "./lock.js";
@@ -46,6 +48,13 @@ export interface LoopDeps {
   host: PluginHost;
   runner: Runner;
   validators: Record<string, AdmissionValidator>;
+  /** Optional recovery decision source; required to continue past Supervise / host failure. */
+  supervisor?: Supervisor;
+  /**
+   * Replace a dead child plugin process after crash/timeout.
+   * Required when recovering past a host that exposes `childPid`.
+   */
+  recreateHost?: () => Promise<PluginHost>;
   /** Operator stop: checked each loop turn before advance (sync or async). */
   shouldStop?: () => boolean | Promise<boolean>;
   /** Live revision bridge for host-backed validators. */
@@ -142,35 +151,69 @@ async function runNormalLoopSteps(
         owner = renewed;
         await updateOwnerChildPid(state.stateDir, owner.ownerId, deps.host.childPid);
 
-        const view = toRunView(state);
-        const advanced = await deps.host.advance(
-          {
-            runId: state.runId,
-            operationId: `adv-${state.stateRevision}-${step}`,
-            expectedStateRevision: state.stateRevision,
-          },
-          view,
-        );
-        if (!advanced.ok) {
-          if (await stopRequested(deps)) {
+        let decision: GraphDecision;
+        if (state.mode === "recovery") {
+          if (!deps.supervisor) {
             state = {
               ...state,
               status: "stopped",
-              stopReason: "operator stop",
-              blocker: "stop requested",
+              stopReason: state.recoveryTrigger?.message ?? "recovery required",
+              blocker: "no supervisor configured",
             };
-          } else {
+            await saveRunState(state);
+            return { done: true as const, state };
+          }
+          if (!state.recoveryEpisodeId) {
             state = {
               ...state,
-              status: "stopped",
-              stopReason: `plugin host: ${advanced.observation.code}`,
-              blocker: advanced.observation.message,
+              recoveryEpisodeId: `ep-${randomUUID().slice(0, 8)}`,
             };
           }
-          await saveRunState(state);
-          return { done: true as const, state };
+          const episodeId = state.recoveryEpisodeId!;
+          const trigger = state.recoveryTrigger ?? {
+            code: "unhandled",
+            message: "recovery",
+          };
+          const view = toRunView(state);
+          const decided = await deps.supervisor.decide({
+            runId: state.runId,
+            episodeId,
+            trigger: {
+              code: trigger.code as
+                | "supervise"
+                | "plugin_crash"
+                | "plugin_timeout"
+                | "plugin_malformed"
+                | "stalled"
+                | "unhandled",
+              message: trigger.message,
+            },
+            view,
+          });
+          decision = assertGraphDecision(decided);
+        } else {
+          const view = toRunView(state);
+          const advanced = await deps.host.advance(
+            {
+              runId: state.runId,
+              operationId: `adv-${state.stateRevision}-${step}`,
+              expectedStateRevision: state.stateRevision,
+            },
+            view,
+          );
+          if (!advanced.ok) {
+            const contained = await containHostFailure(
+              state,
+              deps,
+              advanced.observation.code,
+              advanced.observation.message,
+            );
+            await saveRunState(contained.state);
+            syncRevision(deps, contained.state);
+            return { done: contained.done, state: contained.state };
+          }
+          decision = assertGraphDecision(advanced.value);
         }
-        const decision = assertGraphDecision(advanced.value);
 
         if (decision.action.type === "dispatch") {
           const prepared = await prepareDispatch(state, decision, deps);
@@ -186,7 +229,22 @@ async function runNormalLoopSteps(
           };
         }
 
-        state = await applyDecision(state, decision, deps);
+        try {
+          state = await applyDecision(state, decision, deps);
+        } catch (err) {
+          if (err instanceof HostObservationError) {
+            const contained = await containHostFailure(
+              state,
+              deps,
+              err.code,
+              err.message,
+            );
+            await saveRunState(contained.state);
+            syncRevision(deps, contained.state);
+            return { done: contained.done, state: contained.state };
+          }
+          throw err;
+        }
         syncRevision(deps, state);
         if ((await stopRequested(deps)) && state.status === "running") {
           state = {
@@ -328,6 +386,117 @@ async function reloadRunState(state: DurableRunState): Promise<DurableRunState> 
   }
 }
 
+function enterRecovery(
+  state: DurableRunState,
+  code: string,
+  message: string,
+): DurableRunState {
+  return {
+    ...state,
+    mode: "recovery",
+    status: "running",
+    recoveryEpisodeId: `ep-${randomUUID().slice(0, 8)}`,
+    recoveryTrigger: { code, message },
+  };
+}
+
+/**
+ * After crash/timeout the child process is dead. Replace it before recovery
+ * continues so Return can advance again. In-process hosts need no restart.
+ */
+async function restartDeadChildHost(
+  deps: LoopDeps,
+  code: "plugin_crash" | "plugin_timeout" | "plugin_malformed" | "unhandled",
+): Promise<{ ok: true } | { ok: false; stopReason: string; blocker: string }> {
+  if (code !== "plugin_crash" && code !== "plugin_timeout") {
+    return { ok: true };
+  }
+  if (deps.host.childPid === undefined) {
+    return { ok: true };
+  }
+  if (!deps.recreateHost) {
+    return {
+      ok: false,
+      stopReason: `plugin host: ${code === "plugin_crash" ? "crash" : "timeout"}`,
+      blocker: "host restart unavailable after child failure",
+    };
+  }
+  await deps.host.close().catch(() => undefined);
+  try {
+    deps.host = await deps.recreateHost();
+  } catch (err) {
+    return {
+      ok: false,
+      stopReason: "plugin host restart failed",
+      blocker: err instanceof Error ? err.message : String(err),
+    };
+  }
+  return { ok: true };
+}
+
+/** Shared advance/evaluate host-failure containment → recovery or concrete stop. */
+async function containHostFailure(
+  state: DurableRunState,
+  deps: LoopDeps,
+  observationCode: string,
+  message: string,
+): Promise<{ done: boolean; state: DurableRunState }> {
+  if (await stopRequested(deps)) {
+    return {
+      done: true,
+      state: {
+        ...state,
+        status: "stopped",
+        stopReason: "operator stop",
+        blocker: "stop requested",
+      },
+    };
+  }
+  const code = mapHostFailureCode(observationCode);
+  if (deps.supervisor) {
+    const restarted = await restartDeadChildHost(deps, code);
+    if (!restarted.ok) {
+      return {
+        done: true,
+        state: {
+          ...state,
+          status: "stopped",
+          stopReason: restarted.stopReason,
+          blocker: restarted.blocker,
+        },
+      };
+    }
+    return {
+      done: false,
+      state: enterRecovery(state, code, message),
+    };
+  }
+  return {
+    done: true,
+    state: {
+      ...state,
+      status: "stopped",
+      stopReason: `plugin host: ${observationCode}`,
+      blocker: message,
+    },
+  };
+}
+
+function mapHostFailureCode(
+  code: string,
+): "plugin_crash" | "plugin_timeout" | "plugin_malformed" | "unhandled" {
+  switch (code) {
+    case "crash":
+      return "plugin_crash";
+    case "timeout":
+      return "plugin_timeout";
+    case "malformed":
+      return "plugin_malformed";
+    default:
+      return "unhandled";
+  }
+}
+
 export function toRunView(state: DurableRunState): RunView {
   const view: RunView = {
     runId: state.runId,
@@ -348,6 +517,9 @@ export function toRunView(state: DurableRunState): RunView {
   if (state.privateState !== undefined) {
     view.privateState = state.privateState;
   }
+  if (state.recoveryEpisodeId !== undefined) {
+    view.recoveryEpisodeId = state.recoveryEpisodeId;
+  }
   return view;
 }
 
@@ -356,7 +528,8 @@ async function applyDecision(
   decision: GraphDecision,
   deps: LoopDeps,
 ): Promise<DurableRunState> {
-  if (decision.privateState !== undefined) {
+  // Recovery decisions must not overwrite graph-owned private bookkeeping.
+  if (decision.privateState !== undefined && state.mode !== "recovery") {
     state = { ...state, privateState: decision.privateState };
   }
 
@@ -409,14 +582,44 @@ async function applyDecision(
       };
       return bumpGeneration(next, "reenter");
     }
-    case "supervise":
+    case "supervise": {
+      if (!deps.supervisor) {
+        return {
+          ...state,
+          status: "stopped",
+          mode: "recovery",
+          stopReason: action.supervise.reason,
+          blocker: "no supervisor configured",
+        };
+      }
+      return enterRecovery(state, "supervise", action.supervise.reason);
+    }
+    case "return": {
+      if (state.mode !== "recovery") {
+        return {
+          ...state,
+          status: "stopped",
+          stopReason: "return outside recovery",
+          blocker: action.return.summary,
+        };
+      }
+      const {
+        recoveryEpisodeId: _ep,
+        recoveryTrigger: _tr,
+        stopReason: _sr,
+        blocker: _bl,
+        ...rest
+      } = state;
+      void _ep;
+      void _tr;
+      void _sr;
+      void _bl;
       return {
-        ...state,
-        status: "stopped",
-        mode: "recovery",
-        stopReason: action.supervise.reason,
-        blocker: "supervisor not implemented in this ticket",
+        ...rest,
+        mode: "normal",
+        status: "running",
       };
+    }
     case "stop": {
       const complete =
         action.stop.reason === "complete" &&
@@ -434,7 +637,7 @@ async function applyDecision(
       return {
         ...state,
         status: "stopped",
-        stopReason: `unsupported action in normal mode: ${action.type}`,
+        stopReason: `unsupported action in ${state.mode} mode: ${action.type}`,
         blocker: action.type,
       };
   }
@@ -452,7 +655,8 @@ async function prepareDispatch(
   decision: GraphDecision,
   _deps: LoopDeps,
 ): Promise<{ state: DurableRunState; pending?: PendingJob }> {
-  if (decision.privateState !== undefined) {
+  // Recovery decisions must not overwrite graph-owned private bookkeeping.
+  if (decision.privateState !== undefined && state.mode !== "recovery") {
     state = { ...state, privateState: decision.privateState };
   }
   state = {
@@ -492,7 +696,8 @@ async function prepareDispatch(
 
   const isCorrection =
     job.purpose === "work" &&
-    (state.current.attempt > 1 ||
+    (state.mode === "recovery" ||
+      state.current.attempt > 1 ||
       freshEvidence(state).some((e) => e.kind === "file" || e.kind === "workspace"));
   if (isCorrection && state.budgets.corrections <= 0) {
     return {
