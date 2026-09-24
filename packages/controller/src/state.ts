@@ -66,7 +66,8 @@ export interface DurableRunState {
   };
   /**
    * Durable Pi supervisor session identity (session file + active model).
-   * Restored on resume so the logical session continues.
+   * On resume, when no supervisor is supplied, the controller restores from
+   * this binding (see ResumeRequest.restoreSupervisor / default Pi restore).
    */
   supervisorBinding?: {
     sessionId: string;

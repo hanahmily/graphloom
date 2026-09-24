@@ -12,6 +12,7 @@ export {
 
 export {
   createPiSupervisorSession,
+  ensureProviderCredentials,
   DEFAULT_SUPERVISOR_MODEL,
   DEFAULT_SUPERVISOR_PROVIDER,
   isMiniMaxProvider,
@@ -29,6 +30,11 @@ export {
   type SupervisorBinding,
   type SupervisorModelRef,
 } from "./pi-supervisor.js";
+
+export {
+  restorePiSupervisorFromBinding,
+  type RestorePiSupervisorOptions,
+} from "./restore.js";
 
 export {
   GRAPHLOOM_SUPERVISOR_ACTIONS,

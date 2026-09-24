@@ -43,6 +43,8 @@ export interface CreatePiSupervisorOptions {
   session: PiSupervisorSessionPort;
   /** Models the operator has configured; switches outside this set are rejected. */
   configuredModels?: SupervisorModelRef[];
+  /** Rehydrate journal when restoring a durable binding. */
+  initialSwitchJournal?: ModelSwitchRecord[];
 }
 
 /**
@@ -54,7 +56,9 @@ export function createPiSupervisor(options: CreatePiSupervisorOptions): PiSuperv
   const configured = options.configuredModels ?? [
     { provider: session.provider, modelId: session.modelId },
   ];
-  const switchJournal: ModelSwitchRecord[] = [];
+  const switchJournal: ModelSwitchRecord[] = [
+    ...(options.initialSwitchJournal ?? []).map((r) => ({ ...r })),
+  ];
   let providerCalls = 0;
   let closed = false;
 

@@ -175,27 +175,49 @@ async function runNormalLoopSteps(
             message: "recovery",
           };
           const view = toRunView(state);
-          const decided = await deps.supervisor.decide({
-            runId: state.runId,
-            episodeId,
-            trigger: {
-              code: trigger.code as
-                | "supervise"
-                | "plugin_crash"
-                | "plugin_timeout"
-                | "plugin_malformed"
-                | "stalled"
-                | "unhandled",
-              message: trigger.message,
-            },
-            view,
-          });
-          decision = assertGraphDecision(decided);
-          state = settleSupervisorUsage(state, deps.supervisor);
-          const binding = readSupervisorBinding(deps.supervisor);
-          if (binding) {
-            state = { ...state, supervisorBinding: binding };
+          let decided: unknown;
+          let decideError: unknown;
+          try {
+            decided = await deps.supervisor.decide({
+              runId: state.runId,
+              episodeId,
+              trigger: {
+                code: trigger.code as
+                  | "supervise"
+                  | "plugin_crash"
+                  | "plugin_timeout"
+                  | "plugin_malformed"
+                  | "stalled"
+                  | "unhandled",
+                message: trigger.message,
+              },
+              view,
+            });
+            decided = assertGraphDecision(decided);
+          } catch (err) {
+            decideError = err;
+          } finally {
+            state = settleSupervisorUsage(state, deps.supervisor);
+            const binding = readSupervisorBinding(deps.supervisor);
+            if (binding) {
+              state = { ...state, supervisorBinding: binding };
+            }
           }
+          if (decideError !== undefined) {
+            state = {
+              ...state,
+              status: "stopped",
+              stopReason: "supervisor decide failed",
+              blocker:
+                decideError instanceof Error
+                  ? decideError.message
+                  : String(decideError),
+            };
+            await saveRunState(state);
+            syncRevision(deps, state);
+            return { done: true as const, state };
+          }
+          decision = decided as GraphDecision;
         } else {
           const view = toRunView(state);
           const advanced = await deps.host.advance(
@@ -726,6 +748,17 @@ async function prepareDispatch(
         status: "stopped",
         stopReason: "executor pin rejected",
         blocker: err instanceof Error ? err.message : String(err),
+      },
+    };
+  }
+
+  if (!state.definition.stages.some((s) => s.id === job.stageId)) {
+    return {
+      state: {
+        ...state,
+        status: "stopped",
+        stopReason: "undeclared stage",
+        blocker: `stageId ${job.stageId} is not in the pinned graph definition`,
       },
     };
   }

@@ -158,10 +158,18 @@ request: |
   return { taskPath, stateRoot: path.join(taskDir, "state") };
 }
 
-function fakeSession(replies: string[]): PiSupervisorSessionPort {
+function fakeSession(
+  replies: string[],
+  identity?: {
+    sessionId?: string;
+    sessionFile?: string;
+    provider?: string;
+    modelId?: string;
+  },
+): PiSupervisorSessionPort {
   let i = 0;
-  let provider = "minimax-cn";
-  let modelId = "MiniMax-M3";
+  let provider = identity?.provider ?? "minimax-cn";
+  let modelId = identity?.modelId ?? "MiniMax-M3";
   return {
     runId: "pi-rec-1",
     get provider() {
@@ -170,8 +178,8 @@ function fakeSession(replies: string[]): PiSupervisorSessionPort {
     get modelId() {
       return modelId;
     },
-    sessionId: "sess-durable-1",
-    sessionFile: "/tmp/graphloom-sess-durable-1.jsonl",
+    sessionId: identity?.sessionId ?? "sess-durable-1",
+    sessionFile: identity?.sessionFile ?? "/tmp/graphloom-sess-durable-1.jsonl",
     credentialSource: "options",
     async prompt() {
       const reply = replies[i++];
@@ -264,5 +272,190 @@ describe("Pi supervisor recovery (controller)", () => {
     );
     expect(state.supervisorBinding?.provider).toBe("minimax-cn");
     expect(state.budgets.agentInvocations).toBeLessThan(32);
+  });
+
+  it("settles provider calls when decide returns malformed JSON", async () => {
+    const env = await makeEnv();
+    const controller = createController();
+    const supervisor = createPiSupervisor({
+      session: fakeSession(["this is not a decision"]),
+    });
+
+    const plugin = createScriptedGraph({
+      definition,
+      advances: [supervise({ reason: "escalate" }, "escalate")],
+    });
+
+    const report = await controller.run({
+      taskPath: env.taskPath,
+      plugin,
+      validators,
+      supervisor,
+      runner: createScriptedRunner({ jobs: [] }),
+      stateRoot: env.stateRoot,
+      runId: "pi-malformed-1",
+    });
+
+    expect(report.status).toBe("stopped");
+    expect(report.stopReason).toBe("supervisor decide failed");
+    const state = await loadRunState(report.stateDir);
+    expect(state.budgets.agentInvocations).toBeLessThan(32);
+    expect(state.supervisorBinding?.sessionId).toBe("sess-durable-1");
+  });
+
+  it("rejects dispatch to a stageId outside the pinned definition", async () => {
+    const env = await makeEnv();
+    const controller = createController();
+    const supervisor = createPiSupervisor({
+      session: fakeSession([
+        JSON.stringify(
+          dispatch(
+            {
+              stageId: "invented-stage",
+              kind: "agent",
+              purpose: "work",
+              instruction: "nope",
+              writeScope: [GREETING_PATH],
+            },
+            "escape hatch",
+          ),
+        ),
+      ]),
+    });
+
+    const plugin = createScriptedGraph({
+      definition,
+      advances: [supervise({ reason: "escalate" }, "escalate")],
+    });
+
+    const report = await controller.run({
+      taskPath: env.taskPath,
+      plugin,
+      validators,
+      supervisor,
+      runner: createScriptedRunner({ jobs: [] }),
+      stateRoot: env.stateRoot,
+      runId: "pi-bad-stage-1",
+    });
+
+    expect(report.status).toBe("stopped");
+    expect(report.stopReason).toBe("undeclared stage");
+    expect(report.blocker).toMatch(/invented-stage/);
+  });
+
+  it("restores supervisor from durable binding on resume via restoreSupervisor", async () => {
+    const env = await makeEnv();
+    const controller = createController();
+
+    const routingPlugin = {
+      describe: () => definition,
+      advance(view: import("@graphloom/sdk").RunView) {
+        const writeDone = view.receipts.some((r) => r.stageId === "write" && r.valid);
+        const reviewDone = view.receipts.some((r) => r.stageId === "review" && r.valid);
+        if (!writeDone) {
+          return supervise({ reason: "need write repair" }, "escalate");
+        }
+        if (!reviewDone) {
+          const hasReviewEvidence = view.evidence.some((e) => e.kind === "review");
+          if (!hasReviewEvidence) {
+            return dispatch(
+              {
+                stageId: "review",
+                kind: "agent",
+                purpose: "review",
+                instruction: "review",
+                readOnly: true,
+              },
+              "review",
+            );
+          }
+          return validate(
+            { stageId: "review", requirementIds: ["independent-review"] },
+            "val review",
+          );
+        }
+        return stop({ reason: "complete" }, "done");
+      },
+    };
+
+    const pauseSupervisor = createPiSupervisor({
+      session: fakeSession([
+        JSON.stringify(
+          dispatch(
+            {
+              stageId: "write",
+              kind: "agent",
+              purpose: "work",
+              instruction: "repair",
+              writeScope: [GREETING_PATH],
+            },
+            "repair",
+          ),
+        ),
+        JSON.stringify(observe({ paths: [GREETING_PATH], includeWorkspaceManifest: true }, "obs")),
+      ]),
+    });
+
+    const paused = await controller.run({
+      taskPath: env.taskPath,
+      plugin: routingPlugin,
+      validators,
+      supervisor: pauseSupervisor,
+      runner: createScriptedRunner({
+        jobs: [
+          async (_job, ctx) => {
+            await writeFile(path.join(ctx.worktreePath, GREETING_PATH), GREETING, "utf8");
+            return { status: "ok", summary: "wrote" };
+          },
+        ],
+      }),
+      stateRoot: env.stateRoot,
+      runId: "pi-resume-1",
+    });
+
+    expect(paused.status).toBe("stopped");
+    const mid = await loadRunState(paused.stateDir);
+    expect(mid.mode).toBe("recovery");
+    expect(mid.supervisorBinding?.sessionId).toBe("sess-durable-1");
+
+    let restoredSessionId: string | undefined;
+    const resumeReplies = [
+      JSON.stringify(observe({ paths: [GREETING_PATH], includeWorkspaceManifest: true }, "obs")),
+      JSON.stringify(validate({ stageId: "write", requirementIds: ["greeting-bytes"] }, "val")),
+      JSON.stringify(returnToNormal({ summary: "ok" }, "return")),
+    ];
+    const resumed = await controller.resume({
+      runRef: paused.stateDir,
+      runner: createScriptedRunner({
+        jobs: [
+          async () => ({
+            status: "ok" as const,
+            summary: "approved",
+            evidence: [
+              { kind: "review" as const, payload: { verdict: "approved", summary: "ok" } },
+            ],
+          }),
+        ],
+      }),
+      validators,
+      plugin: routingPlugin,
+      restoreSupervisor: async (binding) => {
+        restoredSessionId = binding.sessionId;
+        return createPiSupervisor({
+          session: fakeSession(resumeReplies, {
+            sessionId: binding.sessionId,
+            sessionFile: binding.sessionFile ?? "/tmp/x.jsonl",
+            provider: binding.provider,
+            modelId: binding.modelId,
+          }),
+          initialSwitchJournal: binding.switchJournal,
+        });
+      },
+    });
+
+    expect(restoredSessionId).toBe("sess-durable-1");
+    expect(resumed.status).toBe("succeeded");
+    const finalState = await loadRunState(resumed.stateDir);
+    expect(finalState.supervisorBinding?.sessionId).toBe("sess-durable-1");
   });
 });
