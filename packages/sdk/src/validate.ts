@@ -1,6 +1,7 @@
-import { PROTOCOL_VERSION, type GraphAction, type GraphDecision, type GraphDefinition, type RunView, type WireRequest, type WireResponse } from "./types.js";
+import { PROTOCOL_VERSION, type GraphAction, type GraphDecision, type GraphDefinition, type RunView, type ValidationInput, type ValidationResult, type WireRequest, type WireResponse } from "./types.js";
 
 const MAX_WIRE_BYTES = 1_000_000;
+const VALIDATION_STATUSES = new Set(["passed", "failed", "inconclusive"]);
 
 export class WireValidationError extends Error {
   readonly code: "malformed" | "stale" | "oversized" | "unknown";
@@ -39,7 +40,8 @@ export function assertWireRequest(value: unknown): WireRequest {
       assertRunView(obj["view"]);
       return obj as unknown as WireRequest;
     case "evaluate":
-      asObject(obj["input"], "input");
+      requireString(obj, "validatorId");
+      assertValidationInput(obj["input"]);
       return obj as unknown as WireRequest;
     default:
       throw new WireValidationError("unknown", `unknown request kind: ${kind}`);
@@ -49,6 +51,11 @@ export function assertWireRequest(value: unknown): WireRequest {
 export function assertWireResponse(value: unknown): WireResponse {
   const obj = asObject(value, "response");
   assertProtocol(obj);
+  requireString(obj, "runId");
+  requireString(obj, "operationId");
+  requireNumber(obj, "generation");
+  requireNumber(obj, "expectedStateRevision");
+  requireString(obj, "activeVersion");
   const kind = requireString(obj, "kind");
   switch (kind) {
     case "describe_ok":
@@ -58,7 +65,7 @@ export function assertWireResponse(value: unknown): WireResponse {
       assertGraphDecision(obj["decision"]);
       return obj as unknown as WireResponse;
     case "evaluate_ok":
-      asObject(obj["result"], "result");
+      assertValidationResult(obj["result"]);
       return obj as unknown as WireResponse;
     case "error":
       requireString(obj, "code");
@@ -67,6 +74,41 @@ export function assertWireResponse(value: unknown): WireResponse {
     default:
       throw new WireValidationError("unknown", `unknown response kind: ${kind}`);
   }
+}
+
+export function assertValidationInput(value: unknown): ValidationInput {
+  const obj = asObject(value, "input");
+  requireString(obj, "requirementId");
+  requireString(obj, "statement");
+  const evidence = requireArray(obj, "evidence");
+  for (const item of evidence) {
+    const e = asObject(item, "evidence");
+    requireString(e, "ref");
+    requireString(e, "kind");
+    requireNumber(e, "generation");
+  }
+  if (obj["candidateFingerprint"] !== undefined && typeof obj["candidateFingerprint"] !== "string") {
+    throw new WireValidationError("malformed", "candidateFingerprint must be a string");
+  }
+  return obj as unknown as ValidationInput;
+}
+
+export function assertValidationResult(value: unknown): ValidationResult {
+  const obj = asObject(value, "result");
+  const status = requireString(obj, "status");
+  if (!VALIDATION_STATUSES.has(status)) {
+    throw new WireValidationError("malformed", `invalid validation status: ${status}`);
+  }
+  requireString(obj, "reason");
+  if (obj["evidenceRefs"] !== undefined) {
+    const refs = requireArray(obj, "evidenceRefs");
+    for (const ref of refs) {
+      if (typeof ref !== "string" || ref.length === 0) {
+        throw new WireValidationError("malformed", "evidenceRefs must be non-empty strings");
+      }
+    }
+  }
+  return obj as unknown as ValidationResult;
 }
 
 export function assertGraphDefinition(value: unknown): GraphDefinition {

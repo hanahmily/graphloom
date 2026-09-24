@@ -60,6 +60,8 @@ export {
   assertRunView,
   assertWireRequest,
   assertWireResponse,
+  assertValidationInput,
+  assertValidationResult,
   parseJsonBounded,
 } from "./validate.js";
 

@@ -10,6 +10,8 @@ import {
   type GraphDecision,
   type GraphDefinition,
   type RunView,
+  type ValidationInput,
+  type ValidationResult,
   type WireRequest,
   type WireResponse,
 } from "@graphloom/sdk";
@@ -125,6 +127,10 @@ class ChildSession implements PluginHost {
     });
   }
 
+  get childPid(): number | undefined {
+    return this.child.pid ?? undefined;
+  }
+
   async waitUntilReady(): Promise<void> {
     // Brief settle window; spawn `error` can win early without waiting on exit.
     await Promise.race([sleep(25), this.spawnErrorPromise.then(() => undefined)]);
@@ -155,6 +161,19 @@ class ChildSession implements PluginHost {
         throw new WireValidationError("malformed", `expected advance_ok, got ${res.kind}`);
       }
       return res.decision;
+    });
+  }
+
+  evaluate(
+    ctx: CallContext,
+    validatorId: string,
+    input: ValidationInput,
+  ): Promise<HostResult<ValidationResult>> {
+    return this.call(ctx, { kind: "evaluate", validatorId, input }, (res) => {
+      if (res.kind !== "evaluate_ok") {
+        throw new WireValidationError("malformed", `expected evaluate_ok, got ${res.kind}`);
+      }
+      return res.result;
     });
   }
 
@@ -215,7 +234,10 @@ class ChildSession implements PluginHost {
 
   private async call<T>(
     ctx: CallContext,
-    body: { kind: "describe" } | { kind: "advance"; view: RunView },
+    body:
+      | { kind: "describe" }
+      | { kind: "advance"; view: RunView }
+      | { kind: "evaluate"; validatorId: string; input: ValidationInput },
     extract: (res: WireResponse) => T,
   ): Promise<HostResult<T>> {
     if (this.closed || this.exitCode !== null || this.spawnError !== null) {
@@ -346,6 +368,38 @@ class ChildSession implements PluginHost {
           kind: "child_observation",
           code: "stale",
           message: `operationId mismatch: expected ${ctx.operationId}, got ${response.operationId}`,
+        },
+      };
+    }
+    if (response.runId !== ctx.runId) {
+      return {
+        ok: false,
+        observation: {
+          kind: "child_observation",
+          code: "stale",
+          message: `runId mismatch: expected ${ctx.runId}, got ${response.runId}`,
+        },
+      };
+    }
+    if (response.expectedStateRevision !== ctx.expectedStateRevision) {
+      return {
+        ok: false,
+        observation: {
+          kind: "child_observation",
+          code: "stale",
+          message: `expectedStateRevision mismatch: expected ${ctx.expectedStateRevision}, got ${response.expectedStateRevision}`,
+        },
+      };
+    }
+    const reqEpisode = ctx.recoveryEpisodeId;
+    const resEpisode = response.recoveryEpisodeId;
+    if (reqEpisode !== resEpisode) {
+      return {
+        ok: false,
+        observation: {
+          kind: "child_observation",
+          code: "stale",
+          message: `recoveryEpisodeId mismatch: expected ${String(reqEpisode)}, got ${String(resEpisode)}`,
         },
       };
     }

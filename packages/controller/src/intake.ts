@@ -5,6 +5,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { PROTOCOL_VERSION } from "@graphloom/sdk";
 import { assertSafeGraphId } from "./ids.js";
+import { resolveBundleEntryFromManifest } from "./bundle.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -22,6 +23,8 @@ export interface BundlePin {
   digests: Record<string, unknown>;
   manifestRaw: string;
   manifestDigest: string;
+  /** SHA-256 of the resolved createGraph entry module bytes. */
+  entryDigest: string;
 }
 
 export interface IntakePin {
@@ -154,6 +157,13 @@ export async function intakeTask(taskPath: string): Promise<IntakePin> {
   }
 
   const pinnedHead = await gitRevParse(repoPath, "HEAD");
+  const entryPath = resolveBundleEntryFromManifest(bundlePath, manifestRaw);
+  let entryBytes: Buffer;
+  try {
+    entryBytes = await readFile(entryPath);
+  } catch {
+    throw new IntakeError(`missing bundle entry: ${entryPath}`);
+  }
 
   return {
     taskPath: absoluteTask,
@@ -169,6 +179,7 @@ export async function intakeTask(taskPath: string): Promise<IntakePin> {
       digests: manifest.digests ?? {},
       manifestRaw,
       manifestDigest: sha256(manifestRaw),
+      entryDigest: sha256Bytes(entryBytes),
     },
     grants: { sourceRepair: false, validatorSubstitution: false },
     budgets: {
@@ -222,4 +233,8 @@ async function gitRevParse(repoPath: string, rev: string): Promise<string> {
 
 function sha256(text: string): string {
   return createHash("sha256").update(text, "utf8").digest("hex");
+}
+
+function sha256Bytes(bytes: Buffer): string {
+  return createHash("sha256").update(bytes).digest("hex");
 }

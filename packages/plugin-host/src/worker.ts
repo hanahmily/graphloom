@@ -11,9 +11,11 @@ import {
   WireValidationError,
   assertGraphDecision,
   assertGraphDefinition,
+  assertValidationResult,
   assertWireRequest,
   parseJsonBounded,
   type GraphPlugin,
+  type Validator,
   type WireEnvelope,
   type WireResponse,
 } from "@graphloom/sdk";
@@ -30,10 +32,14 @@ async function main(): Promise<void> {
   }
 
   let plugin: GraphPlugin;
+  let resolveValidator: (id: string) => Validator | undefined = () => undefined;
   try {
     const mod = (await import(pathToFileURL(entry).href)) as {
       createGraph?: () => GraphPlugin | Promise<GraphPlugin>;
       default?: GraphPlugin | (() => GraphPlugin | Promise<GraphPlugin>);
+      validatorById?: (id: string) => Validator | undefined;
+      exactGreetingValidator?: Validator;
+      independentReviewValidator?: Validator;
     };
     if (typeof mod.createGraph === "function") {
       plugin = await mod.createGraph();
@@ -44,6 +50,10 @@ async function main(): Promise<void> {
     } else {
       throw new Error("plugin entry must export createGraph() or default GraphPlugin");
     }
+    resolveValidator = (id: string) =>
+      mod.validatorById?.(id) ??
+      (id === "exact-greeting" ? mod.exactGreetingValidator : undefined) ??
+      (id === "independent-reviewer" ? mod.independentReviewValidator : undefined);
   } catch (err) {
     writeError(baseEnvelope(), "internal", `failed to load plugin: ${errorMessage(err)}`);
     process.exit(1);
@@ -79,7 +89,15 @@ async function main(): Promise<void> {
         continue;
       }
       if (req.kind === "evaluate") {
-        writeError(envelope, "unknown", "evaluate is not supported by this worker yet");
+        const validator = resolveValidator(req.validatorId);
+        if (!validator) {
+          writeError(envelope, "unknown", `validator not found: ${req.validatorId}`);
+          continue;
+        }
+        const result = assertValidationResult(
+          await Promise.resolve(validator.evaluate(req.input)),
+        );
+        writeResponse({ ...envelope, kind: "evaluate_ok", result });
         continue;
       }
       writeError(envelope, "unknown", "unsupported request kind");

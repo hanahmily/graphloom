@@ -211,7 +211,11 @@ export interface WireEnvelope {
 export type WireRequest =
   | (WireEnvelope & { kind: "describe" })
   | (WireEnvelope & { kind: "advance"; view: RunView })
-  | (WireEnvelope & { kind: "evaluate"; input: ValidationInput });
+  | (WireEnvelope & {
+      kind: "evaluate";
+      validatorId: string;
+      input: ValidationInput;
+    });
 
 export type WireResponse =
   | (WireEnvelope & { kind: "describe_ok"; definition: GraphDefinition })

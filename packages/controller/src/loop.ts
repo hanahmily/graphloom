@@ -8,7 +8,6 @@ import type {
   JobSpec,
   ObserveSpec,
   RunView,
-  Validator,
 } from "@graphloom/sdk";
 import { assertGraphDecision } from "@graphloom/sdk";
 import type { Runner } from "@graphloom/runner";
@@ -20,12 +19,21 @@ import {
   invalidateFromStage,
   newEvidenceRef,
   stageRequirementsMet,
+  type AdmissionValidator,
   type EvidenceProducer,
 } from "./admit.js";
 import type { IntakePin } from "./intake.js";
 import { assertSafeRunId } from "./ids.js";
 import { withDirectoryLock } from "./lock.js";
-import { type DurableRunState, saveRunState } from "./state.js";
+import {
+  claimRunOwner,
+  clearOwnerClaim,
+  renewRunOwner,
+  updateOwnerChildPid,
+  type RunOwnerClaim,
+} from "./owner.js";
+import { reconcilePendingDispatch } from "./reconcile.js";
+import { loadRunState, type DurableRunState, saveRunState } from "./state.js";
 import {
   readWorktreeFile,
   workspaceChangeManifest,
@@ -37,73 +45,287 @@ export interface LoopDeps {
   /** Plugin decisions go through the host seam (in-process scripted or child). */
   host: PluginHost;
   runner: Runner;
-  validators: Record<string, Validator>;
+  validators: Record<string, AdmissionValidator>;
+  /** Operator stop: checked each loop turn before advance (sync or async). */
+  shouldStop?: () => boolean | Promise<boolean>;
+  /** Live revision bridge for host-backed validators. */
+  revisionBridge?: { current: number };
+}
+
+async function stopRequested(deps: LoopDeps): Promise<boolean> {
+  return Boolean(await Promise.resolve(deps.shouldStop?.() ?? false));
+}
+
+function syncRevision(deps: LoopDeps, state: DurableRunState): void {
+  if (deps.revisionBridge) {
+    deps.revisionBridge.current = state.stateRevision;
+  }
 }
 
 export async function runNormalLoop(
   state: DurableRunState,
   deps: LoopDeps,
 ): Promise<DurableRunState> {
-  // Hold a run-scoped execution lock for the whole loop so concurrent
-  // controller processes cannot dual-dispatch the same revision.
-  return withDirectoryLock(state.stateDir, "run.exec.lock", async () => {
-    return runNormalLoopLocked(state, deps);
-  });
+  // Per-step lock so Stop can coordinate during long runner jobs.
+  // Durable run.owner.json serializes which controller owns the loop.
+  return runNormalLoopSteps(state, deps);
 }
 
-async function runNormalLoopLocked(
+async function withRunLock<T>(
+  stateDir: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  return withDirectoryLock(stateDir, "run.exec.lock", fn);
+}
+
+async function runNormalLoopSteps(
   state: DurableRunState,
   deps: LoopDeps,
 ): Promise<DurableRunState> {
-  if (state.pendingDispatch?.status === "pending") {
-    state = {
-      ...state,
-      status: "stopped",
-      stopReason: "reconcile required",
-      blocker: `pending dispatch ${state.pendingDispatch.operationId} after restart`,
-    };
-    await saveRunState(state);
-    return state;
-  }
-
-  for (let step = 0; step < MAX_STEPS; step += 1) {
-    if (state.status !== "running") {
-      await saveRunState(state);
+  let owner: RunOwnerClaim | undefined;
+  try {
+    state = await withRunLock(state.stateDir, async () => {
+      owner = await claimRunOwner(state.stateDir, {
+        ...(deps.host.childPid !== undefined ? { childPid: deps.host.childPid } : {}),
+      });
+      if (state.pendingDispatch?.status === "pending") {
+        const reconciled = await reconcilePendingDispatch(state);
+        state = reconciled.state;
+        if (!reconciled.settled) {
+          state = {
+            ...state,
+            status: "stopped",
+            stopReason: "reconcile required",
+            blocker: reconciled.reason,
+          };
+          await saveRunState(state);
+          return state;
+        }
+        await saveRunState(state);
+      }
+      syncRevision(deps, state);
       return state;
+    });
+
+    for (let step = 0; step < MAX_STEPS; step += 1) {
+      const turn = await withRunLock(state.stateDir, async () => {
+        // Reload before renewing: Stop may have cleared the owner claim and
+        // persisted stopped while a runner job held no lock.
+        state = await reloadRunState(state);
+        syncRevision(deps, state);
+
+        if (state.status !== "running") {
+          return { done: true as const, state };
+        }
+        if (await stopRequested(deps)) {
+          state = {
+            ...state,
+            status: "stopped",
+            stopReason: "operator stop",
+            blocker: "stop requested",
+          };
+          await saveRunState(state);
+          return { done: true as const, state };
+        }
+
+        const renewed = await tryRenewOwner(state.stateDir, owner, deps.host.childPid);
+        if (!renewed) {
+          state = {
+            ...state,
+            status: "stopped",
+            stopReason: "operator stop",
+            blocker: "run owner lease cleared",
+          };
+          await saveRunState(state);
+          return { done: true as const, state };
+        }
+        owner = renewed;
+        await updateOwnerChildPid(state.stateDir, owner.ownerId, deps.host.childPid);
+
+        const view = toRunView(state);
+        const advanced = await deps.host.advance(
+          {
+            runId: state.runId,
+            operationId: `adv-${state.stateRevision}-${step}`,
+            expectedStateRevision: state.stateRevision,
+          },
+          view,
+        );
+        if (!advanced.ok) {
+          if (await stopRequested(deps)) {
+            state = {
+              ...state,
+              status: "stopped",
+              stopReason: "operator stop",
+              blocker: "stop requested",
+            };
+          } else {
+            state = {
+              ...state,
+              status: "stopped",
+              stopReason: `plugin host: ${advanced.observation.code}`,
+              blocker: advanced.observation.message,
+            };
+          }
+          await saveRunState(state);
+          return { done: true as const, state };
+        }
+        const decision = assertGraphDecision(advanced.value);
+
+        if (decision.action.type === "dispatch") {
+          const prepared = await prepareDispatch(state, decision, deps);
+          await saveRunState(prepared.state);
+          syncRevision(deps, prepared.state);
+          if (prepared.state.status !== "running" || !prepared.pending) {
+            return { done: true as const, state: prepared.state };
+          }
+          return {
+            done: false as const,
+            state: prepared.state,
+            pendingJob: prepared.pending,
+          };
+        }
+
+        state = await applyDecision(state, decision, deps);
+        syncRevision(deps, state);
+        if ((await stopRequested(deps)) && state.status === "running") {
+          state = {
+            ...state,
+            status: "stopped",
+            stopReason: "operator stop",
+            blocker: "stop requested",
+          };
+        }
+        await saveRunState(state);
+        return { done: state.status !== "running", state };
+      });
+
+      state = turn.state;
+      if (turn.done) {
+        return state;
+      }
+
+      if (turn.pendingJob) {
+        const { job, operationId, generation, isCorrection } = turn.pendingJob;
+        const result = await deps.runner.runJob(job, {
+          runId: state.runId,
+          operationId,
+          generation,
+          worktreePath: state.worktreePath,
+          artifactDir: state.artifactDir,
+        });
+
+        state = await withRunLock(state.stateDir, async () => {
+          state = await reloadRunState(state);
+          syncRevision(deps, state);
+          if (await stopRequested(deps) || state.status !== "running") {
+            if (state.status === "running") {
+              state = {
+                ...state,
+                status: "stopped",
+                stopReason: "operator stop",
+                blocker: "stop requested",
+              };
+              await saveRunState(state);
+            }
+            return state;
+          }
+
+          const renewed = await tryRenewOwner(state.stateDir, owner, deps.host.childPid);
+          if (!renewed) {
+            if (state.status === "running") {
+              state = {
+                ...state,
+                status: "stopped",
+                stopReason: "operator stop",
+                blocker: "run owner lease cleared",
+              };
+              await saveRunState(state);
+            }
+            return state;
+          }
+          owner = renewed;
+
+          if (state.generation !== generation) {
+            state = {
+              ...state,
+              status: "stopped",
+              stopReason: "stale job result identity",
+              blocker: `generation ${generation} != ${state.generation}`,
+            };
+            await saveRunState(state);
+            return state;
+          }
+          state = applyDispatchResult(state, {
+            job,
+            operationId,
+            generation,
+            isCorrection,
+            result,
+          });
+          syncRevision(deps, state);
+          if ((await stopRequested(deps)) && state.status === "running") {
+            state = {
+              ...state,
+              status: "stopped",
+              stopReason: "operator stop",
+              blocker: "stop requested",
+            };
+          }
+          await saveRunState(state);
+          return state;
+        });
+
+        if (state.status !== "running") {
+          return state;
+        }
+      }
     }
 
-    const view = toRunView(state);
-    const advanced = await deps.host.advance(
-      {
-        runId: state.runId,
-        operationId: `adv-${state.stateRevision}-${step}`,
-        expectedStateRevision: state.stateRevision,
-      },
-      view,
-    );
-    if (!advanced.ok) {
+    state = await withRunLock(state.stateDir, async () => {
       state = {
         ...state,
         status: "stopped",
-        stopReason: `plugin host: ${advanced.observation.code}`,
-        blocker: advanced.observation.message,
+        stopReason: "step limit",
+        blocker: `exceeded ${MAX_STEPS} controller steps`,
       };
       await saveRunState(state);
       return state;
-    }
-    const decision = assertGraphDecision(advanced.value);
-    state = await applyDecision(state, decision, deps);
-    await saveRunState(state);
+    });
+    return state;
+  } finally {
+    await clearOwnerClaim(state.stateDir);
   }
+}
 
-  state = {
-    ...state,
-    status: "stopped",
-    stopReason: "step limit",
-    blocker: `exceeded ${MAX_STEPS} controller steps`,
-  };
-  await saveRunState(state);
-  return state;
+async function tryRenewOwner(
+  stateDir: string,
+  owner: RunOwnerClaim | undefined,
+  childPid: number | undefined,
+): Promise<RunOwnerClaim | undefined> {
+  if (!owner) {
+    return undefined;
+  }
+  try {
+    return await renewRunOwner(stateDir, owner.ownerId, {
+      ...(childPid !== undefined ? { childPid } : {}),
+    });
+  } catch {
+    // Stop may clear the durable claim while a runner job is in flight.
+    return undefined;
+  }
+}
+
+async function reloadRunState(state: DurableRunState): Promise<DurableRunState> {
+  try {
+    return await loadRunState(state.stateDir);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") {
+      return state;
+    }
+    throw err;
+  }
 }
 
 export function toRunView(state: DurableRunState): RunView {
@@ -150,7 +372,9 @@ async function applyDecision(
   const action = decision.action;
   switch (action.type) {
     case "dispatch":
-      return dispatchJob(state, action.job, deps.runner);
+      // Handled by prepareDispatch / applyDispatchResult in the loop so the
+      // exec lock is not held across runner.runJob.
+      throw new Error("dispatch must be prepared outside applyDecision");
     case "observe":
       return observeWorkspace(state, action.observe);
     case "validate": {
@@ -182,9 +406,8 @@ async function applyDecision(
               ? state.current.attempt + 1
               : 1,
         },
-        generation: state.generation + 1,
       };
-      return next;
+      return bumpGeneration(next, "reenter");
     }
     case "supervise":
       return {
@@ -217,25 +440,53 @@ async function applyDecision(
   }
 }
 
-async function dispatchJob(
+interface PendingJob {
+  job: JobSpec;
+  operationId: string;
+  generation: number;
+  isCorrection: boolean;
+}
+
+async function prepareDispatch(
   state: DurableRunState,
-  job: JobSpec,
-  runner: Runner,
-): Promise<DurableRunState> {
+  decision: GraphDecision,
+  _deps: LoopDeps,
+): Promise<{ state: DurableRunState; pending?: PendingJob }> {
+  if (decision.privateState !== undefined) {
+    state = { ...state, privateState: decision.privateState };
+  }
+  state = {
+    ...state,
+    budgets: {
+      ...state.budgets,
+      decisions: Math.max(0, state.budgets.decisions - 1),
+    },
+    stateRevision: state.stateRevision + 1,
+  };
+
+  const job = decision.action.type === "dispatch" ? decision.action.job : undefined;
+  if (!job) {
+    throw new Error("prepareDispatch requires dispatch action");
+  }
+
   if (state.budgets.jobs <= 0) {
     return {
-      ...state,
-      status: "stopped",
-      stopReason: "budgets exhausted",
-      blocker: "jobs",
+      state: {
+        ...state,
+        status: "stopped",
+        stopReason: "budgets exhausted",
+        blocker: "jobs",
+      },
     };
   }
   if (job.kind === "agent" && state.budgets.agentInvocations <= 0) {
     return {
-      ...state,
-      status: "stopped",
-      stopReason: "budgets exhausted",
-      blocker: "agentInvocations",
+      state: {
+        ...state,
+        status: "stopped",
+        stopReason: "budgets exhausted",
+        blocker: "agentInvocations",
+      },
     };
   }
 
@@ -245,15 +496,17 @@ async function dispatchJob(
       freshEvidence(state).some((e) => e.kind === "file" || e.kind === "workspace"));
   if (isCorrection && state.budgets.corrections <= 0) {
     return {
-      ...state,
-      status: "stopped",
-      stopReason: "corrections budget exhausted",
-      blocker: "dispatch correction",
+      state: {
+        ...state,
+        status: "stopped",
+        stopReason: "corrections budget exhausted",
+        blocker: "dispatch correction",
+      },
     };
   }
 
   const operationId = `op-${state.stateRevision}-${randomUUID().slice(0, 8)}`;
-  let next: DurableRunState = {
+  const next: DurableRunState = {
     ...state,
     outstanding: [
       ...state.outstanding,
@@ -268,25 +521,37 @@ async function dispatchJob(
     },
     current: { stageId: job.stageId, attempt: state.current.attempt },
   };
-  // Persist intent before side effects so restart can reconcile instead of replay.
-  await saveRunState(next);
 
-  const result = await runner.runJob(job, {
-    runId: state.runId,
-    operationId,
-    generation: state.generation,
-    worktreePath: state.worktreePath,
-    artifactDir: state.artifactDir,
-  });
+  return {
+    state: next,
+    pending: { job, operationId, generation: state.generation, isCorrection },
+  };
+}
+
+function applyDispatchResult(
+  state: DurableRunState,
+  args: {
+    job: JobSpec;
+    operationId: string;
+    generation: number;
+    isCorrection: boolean;
+    result: Awaited<ReturnType<Runner["runJob"]>>;
+  },
+): DurableRunState {
+  const { job, operationId, generation, isCorrection, result } = args;
+  let next = state;
 
   if (
     result.runId !== state.runId ||
     result.operationId !== operationId ||
-    result.generation !== state.generation
+    result.generation !== generation
   ) {
+    const { pendingDispatch, ...rest } = next;
     return {
-      ...next,
-      pendingDispatch: { ...next.pendingDispatch!, status: "failed" },
+      ...rest,
+      ...(pendingDispatch
+        ? { pendingDispatch: { ...pendingDispatch, status: "failed" as const } }
+        : {}),
       status: "stopped",
       stopReason: "stale job result identity",
       blocker: `${result.runId}/${result.operationId}/g${result.generation}`,
@@ -306,14 +571,19 @@ async function dispatchJob(
         ? next.budgets.corrections - 1
         : next.budgets.corrections,
     },
-    pendingDispatch: { ...next.pendingDispatch!, status: "completed" },
+    ...(next.pendingDispatch
+      ? { pendingDispatch: { ...next.pendingDispatch, status: "completed" as const } }
+      : {}),
     outstanding: next.outstanding.filter((o) => o.operationId !== operationId),
   };
 
   if (result.status !== "ok") {
+    const { pendingDispatch, ...rest } = next;
     return {
-      ...next,
-      pendingDispatch: { ...next.pendingDispatch!, status: "failed" },
+      ...rest,
+      ...(pendingDispatch
+        ? { pendingDispatch: { ...pendingDispatch, status: "failed" as const } }
+        : {}),
       status: "stopped",
       stopReason: `job failed: ${result.summary}`,
       blocker: result.status,
@@ -354,7 +624,6 @@ async function dispatchJob(
     next = { ...next, lastWorkOperationId: operationId };
   }
 
-  // Clear completed intent after successful apply.
   const { pendingDispatch: _done, ...cleared } = next;
   void _done;
   return cleared;
@@ -432,12 +701,13 @@ export function initialState(args: {
   if (!firstStage) {
     throw new Error("graph definition has no stages");
   }
+  const activeVersion = `${args.intake.bundle.graphId}@${args.intake.bundle.version}`;
   return {
     runId,
     status: "running",
     generation: 1,
     stateRevision: 0,
-    activeVersion: `${args.intake.bundle.graphId}@${args.intake.bundle.version}`,
+    activeVersion,
     mode: "normal",
     current: { stageId: firstStage.id, attempt: 1 },
     receipts: [],
@@ -454,6 +724,14 @@ export function initialState(args: {
     sourceDirtyBefore: args.sourceDirtyBefore,
     evidenceSeq: 0,
     receiptSeq: 0,
+    versionHistory: [
+      {
+        activeVersion,
+        generation: 1,
+        reason: "intake",
+        at: new Date().toISOString(),
+      },
+    ],
   };
 }
 
@@ -463,13 +741,26 @@ export async function ensureArtifactDir(state: DurableRunState): Promise<void> {
 }
 
 /** Exported for restart tests: bump generation so prior evidence is stale. */
-export function bumpGeneration(state: DurableRunState): DurableRunState {
+export function bumpGeneration(
+  state: DurableRunState,
+  reason = "generation fence",
+): DurableRunState {
   const { workspaceRevision: _wr, ...rest } = state;
   void _wr;
+  const generation = state.generation + 1;
   return {
     ...rest,
-    generation: state.generation + 1,
+    generation,
     stateRevision: state.stateRevision + 1,
+    versionHistory: [
+      ...(state.versionHistory ?? []),
+      {
+        activeVersion: state.activeVersion,
+        generation,
+        reason,
+        at: new Date().toISOString(),
+      },
+    ],
   };
 }
 
