@@ -191,6 +191,11 @@ async function runNormalLoopSteps(
             view,
           });
           decision = assertGraphDecision(decided);
+          state = settleSupervisorUsage(state, deps.supervisor);
+          const binding = readSupervisorBinding(deps.supervisor);
+          if (binding) {
+            state = { ...state, supervisorBinding: binding };
+          }
         } else {
           const view = toRunView(state);
           const advanced = await deps.host.advance(
@@ -521,6 +526,44 @@ export function toRunView(state: DurableRunState): RunView {
     view.recoveryEpisodeId = state.recoveryEpisodeId;
   }
   return view;
+}
+
+function settleSupervisorUsage(
+  state: DurableRunState,
+  supervisor: Supervisor,
+): DurableRunState {
+  const calls = supervisor.drainProviderCalls?.() ?? 0;
+  if (calls <= 0) {
+    return state;
+  }
+  return {
+    ...state,
+    budgets: {
+      ...state.budgets,
+      agentInvocations: Math.max(0, state.budgets.agentInvocations - calls),
+    },
+    stateRevision: state.stateRevision + 1,
+  };
+}
+
+function readSupervisorBinding(
+  supervisor: Supervisor,
+): DurableRunState["supervisorBinding"] | undefined {
+  const withBinding = supervisor as Supervisor & {
+    binding?: DurableRunState["supervisorBinding"];
+  };
+  if (!withBinding.binding) {
+    return undefined;
+  }
+  return {
+    sessionId: withBinding.binding.sessionId,
+    ...(withBinding.binding.sessionFile !== undefined
+      ? { sessionFile: withBinding.binding.sessionFile }
+      : {}),
+    provider: withBinding.binding.provider,
+    modelId: withBinding.binding.modelId,
+    switchJournal: structuredClone(withBinding.binding.switchJournal),
+  };
 }
 
 async function applyDecision(

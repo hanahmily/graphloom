@@ -26,6 +26,11 @@ export interface SupervisorInput {
 export interface Supervisor {
   decide(input: SupervisorInput): Promise<GraphDecision>;
   close?(): Promise<void>;
+  /**
+   * Optional: settle provider/model calls spent during the last decide turn(s).
+   * Controller deducts from agentInvocations when present.
+   */
+  drainProviderCalls?(): number;
 }
 
 export type ScriptedRecoveryStep =

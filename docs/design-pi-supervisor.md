@@ -1,11 +1,11 @@
 # Pi SDK supervisor integration
 
-Status: MiniMax session adapter implemented, 2026-09-24; recovery
-admission/Return/controller wiring still pending. This document specializes the
-[core design](design-typescript-core.md). `createPiSupervisorSession` provides a
-durable Pi transcript bound to a run `sessionDir`, MiniMax credential resolution,
-and opt-in live connectivity (`GRAPHLOOM_LIVE_MINIMAX=1`). It does not yet own
-end-to-end recovery, model switching, or billing behavior.
+Status: Pi-backed `createPiSupervisor` wires recovery decisions and durable
+session binding (2026-09-24); provider call accounting settles against
+`agentInvocations`. Cross-provider live switching qualification and
+BeforeProviderRequest interception for multi-turn prompts remain follow-on
+within #43. Scripted supervisors stay the CI default. This document specializes
+the [core design](design-typescript-core.md).
 
 ## SDK choice and scope
 

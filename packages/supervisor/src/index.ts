@@ -7,6 +7,10 @@ export {
 } from "./credentials.js";
 
 export {
+  parseSupervisorDecision,
+} from "./decision.js";
+
+export {
   createPiSupervisorSession,
   DEFAULT_SUPERVISOR_MODEL,
   DEFAULT_SUPERVISOR_PROVIDER,
@@ -14,6 +18,23 @@ export {
   type CreatePiSupervisorSessionOptions,
   type PiSupervisorSession,
 } from "./pi-session.js";
+
+export {
+  buildRecoveryPrompt,
+  createPiSupervisor,
+  type CreatePiSupervisorOptions,
+  type ModelSwitchRecord,
+  type PiSupervisor,
+  type PiSupervisorSessionPort,
+  type SupervisorBinding,
+  type SupervisorModelRef,
+} from "./pi-supervisor.js";
+
+export {
+  GRAPHLOOM_SUPERVISOR_ACTIONS,
+  PROPOSE_DECISION_TOOL,
+  type GraphLoomSupervisorAction,
+} from "./tools.js";
 
 export {
   createScriptedSupervisor,
