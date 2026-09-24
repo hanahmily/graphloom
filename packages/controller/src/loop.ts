@@ -9,7 +9,7 @@ import type {
   ObserveSpec,
   RunView,
 } from "@graphloom/sdk";
-import { assertGraphDecision } from "@graphloom/sdk";
+import { assertGraphDecision, pinJobExecutor } from "@graphloom/sdk";
 import type { Runner } from "@graphloom/runner";
 import type { PluginHost } from "@graphloom/plugin-host";
 import type { Supervisor } from "@graphloom/supervisor";
@@ -668,9 +668,23 @@ async function prepareDispatch(
     stateRevision: state.stateRevision + 1,
   };
 
-  const job = decision.action.type === "dispatch" ? decision.action.job : undefined;
-  if (!job) {
+  const rawJob = decision.action.type === "dispatch" ? decision.action.job : undefined;
+  if (!rawJob) {
     throw new Error("prepareDispatch requires dispatch action");
+  }
+
+  let job: JobSpec;
+  try {
+    job = pinJobExecutor(rawJob);
+  } catch (err) {
+    return {
+      state: {
+        ...state,
+        status: "stopped",
+        stopReason: "executor pin rejected",
+        blocker: err instanceof Error ? err.message : String(err),
+      },
+    };
   }
 
   if (state.budgets.jobs <= 0) {
@@ -710,6 +724,31 @@ async function prepareDispatch(
     };
   }
 
+  // Write scope: mutable work must declare non-empty paths; read-only must not.
+  if (job.readOnly === true) {
+    if (job.writeScope !== undefined && job.writeScope.length > 0) {
+      return {
+        state: {
+          ...state,
+          status: "stopped",
+          stopReason: "scope rejected",
+          blocker: "readOnly jobs must not declare writeScope",
+        },
+      };
+    }
+  } else if (job.purpose === "work") {
+    if (!job.writeScope || job.writeScope.length === 0) {
+      return {
+        state: {
+          ...state,
+          status: "stopped",
+          stopReason: "scope rejected",
+          blocker: "work jobs require a non-empty writeScope",
+        },
+      };
+    }
+  }
+
   const operationId = `op-${state.stateRevision}-${randomUUID().slice(0, 8)}`;
   const next: DurableRunState = {
     ...state,
@@ -723,6 +762,7 @@ async function prepareDispatch(
       stageId: job.stageId,
       job,
       status: "pending",
+      ...(job.executor !== undefined ? { executor: job.executor } : {}),
     },
     current: { stageId: job.stageId, attempt: state.current.attempt },
   };
@@ -803,6 +843,7 @@ function applyDispatchResult(
       purpose: job.purpose,
       readOnly: job.readOnly === true,
       kind: job.kind,
+      ...(job.executor?.id !== undefined ? { executorId: job.executor.id } : {}),
     };
     for (const item of result.evidence) {
       const ref = newEvidenceRef(next);

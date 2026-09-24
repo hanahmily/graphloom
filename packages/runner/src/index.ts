@@ -4,3 +4,11 @@ export {
   type ScriptedJobHandler,
   type ScriptedRunnerOptions,
 } from "./scripted.js";
+export {
+  createRegistryRunner,
+  createTrustedInProcessRunner,
+  createChildExecutorRunner,
+  type TrustedInProcessRunnerOptions,
+  type ChildExecutorRunnerOptions,
+  type RegistryRunnerOptions,
+} from "./registry.js";

@@ -111,6 +111,13 @@ export interface JobSpec {
   resultSchema?: string;
   writeScope?: string[];
   readOnly?: boolean;
+  /**
+   * Pinned executor identity for durable admission.
+   * When omitted, the controller pins a built-in agent/command executor from `kind`.
+   */
+  executor?: import("./executor.js").ExecutorPin;
+  /** Bounded JSON-serializable input for the pinned executor. */
+  input?: unknown;
 }
 
 export interface ObserveSpec {
