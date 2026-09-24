@@ -327,6 +327,8 @@ export interface EvidenceProducer {
   purpose: string;
   readOnly: boolean;
   kind: string;
+  /** Pinned executor identity that produced this evidence, when known. */
+  executorId?: string;
 }
 
 function assertSeparateReviewer(

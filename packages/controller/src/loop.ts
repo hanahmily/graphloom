@@ -9,7 +9,7 @@ import type {
   ObserveSpec,
   RunView,
 } from "@graphloom/sdk";
-import { assertGraphDecision } from "@graphloom/sdk";
+import { assertGraphDecision, pinJobExecutor } from "@graphloom/sdk";
 import type { Runner } from "@graphloom/runner";
 import type { PluginHost } from "@graphloom/plugin-host";
 import type { Supervisor } from "@graphloom/supervisor";
@@ -668,9 +668,23 @@ async function prepareDispatch(
     stateRevision: state.stateRevision + 1,
   };
 
-  const job = decision.action.type === "dispatch" ? decision.action.job : undefined;
-  if (!job) {
+  const rawJob = decision.action.type === "dispatch" ? decision.action.job : undefined;
+  if (!rawJob) {
     throw new Error("prepareDispatch requires dispatch action");
+  }
+
+  let job: JobSpec;
+  try {
+    job = pinJobExecutor(rawJob);
+  } catch (err) {
+    return {
+      state: {
+        ...state,
+        status: "stopped",
+        stopReason: "executor pin rejected",
+        blocker: err instanceof Error ? err.message : String(err),
+      },
+    };
   }
 
   if (state.budgets.jobs <= 0) {
@@ -710,6 +724,23 @@ async function prepareDispatch(
     };
   }
 
+  // Write/read scopes: reject empty writeScope when purpose is work and not readOnly.
+  if (
+    job.purpose === "work" &&
+    job.readOnly !== true &&
+    job.writeScope !== undefined &&
+    job.writeScope.length === 0
+  ) {
+    return {
+      state: {
+        ...state,
+        status: "stopped",
+        stopReason: "scope rejected",
+        blocker: "work job writeScope must be non-empty when provided",
+      },
+    };
+  }
+
   const operationId = `op-${state.stateRevision}-${randomUUID().slice(0, 8)}`;
   const next: DurableRunState = {
     ...state,
@@ -723,6 +754,7 @@ async function prepareDispatch(
       stageId: job.stageId,
       job,
       status: "pending",
+      ...(job.executor !== undefined ? { executor: job.executor } : {}),
     },
     current: { stageId: job.stageId, attempt: state.current.attempt },
   };
@@ -803,6 +835,7 @@ function applyDispatchResult(
       purpose: job.purpose,
       readOnly: job.readOnly === true,
       kind: job.kind,
+      ...(job.executor?.id !== undefined ? { executorId: job.executor.id } : {}),
     };
     for (const item of result.evidence) {
       const ref = newEvidenceRef(next);

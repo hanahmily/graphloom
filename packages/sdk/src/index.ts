@@ -38,7 +38,29 @@ export type {
   WireResponse,
 } from "./types.js";
 
+export type {
+  DefineExecutorOptions,
+  ExecutorContext,
+  ExecutorCredentials,
+  ExecutorDefinition,
+  ExecutorEffect,
+  ExecutorId,
+  ExecutorPin,
+  JsonSchemaValidator,
+} from "./executor.js";
+
 export { PROTOCOL_VERSION } from "./types.js";
+
+export {
+  BUILTIN_AGENT_EXECUTOR_ID,
+  BUILTIN_COMMAND_EXECUTOR_ID,
+  assertExecutorId,
+  assertExecutorPin,
+  builtinPinForKind,
+  defineExecutor,
+  pinJobExecutor,
+  validateExecutorInput,
+} from "./executor.js";
 
 export {
   activateRepair,

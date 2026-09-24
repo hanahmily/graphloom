@@ -21,6 +21,8 @@ export interface PendingDispatch {
   stageId: string;
   job: JobSpec;
   status: "pending" | "completed" | "failed";
+  /** Durable pin recorded at admission (before effects). */
+  executor?: import("@graphloom/sdk").ExecutorPin;
 }
 
 export interface DurableRunState {
