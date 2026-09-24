@@ -1,3 +1,7 @@
+import { spawn } from "node:child_process";
+import { createInterface } from "node:readline";
+import { fileURLToPath } from "node:url";
+import path from "node:path";
 import {
   pinJobExecutor,
   validateExecutorInput,
@@ -5,16 +9,32 @@ import {
   type ExecutorPin,
   type JobSpec,
 } from "@graphloom/sdk";
-import type { JobContext, JobResult, Runner } from "./types.js";
+import type { JobContext, JobEvidenceItem, JobResult, Runner } from "./types.js";
 
-export interface RegistryRunnerOptions {
-  /** Executors loaded outside the controller (plugin/built-in packages). */
-  executors: ExecutorDefinition[];
+export interface TrustedInProcessRunnerOptions {
   /**
-   * Fallback for built-in agent/command pins (or unknown ids).
-   * Typically the scripted or live agent runner.
+   * Executors run in-process. Only for trusted CI/scripted code — never for
+   * untrusted plugin packages. Prefer `createChildExecutorRunner`.
    */
+  executors: ExecutorDefinition[];
   fallback: Runner;
+}
+
+/** @deprecated Alias of TrustedInProcessRunnerOptions. */
+export type RegistryRunnerOptions = TrustedInProcessRunnerOptions;
+
+export interface ChildExecutorRunnerOptions {
+  /** Absolute path to a module exporting `executors: ExecutorDefinition[]`. */
+  entryModule: string;
+  /** Ids served by the child; others fall through to `fallback`. */
+  executorIds: string[];
+  fallback: Runner;
+  /** Per-call timeout (ms). Default 30_000. */
+  timeoutMs?: number;
+  cwd?: string;
+  env?: NodeJS.ProcessEnv;
+  /** Override worker entry (tests). */
+  workerModule?: string;
 }
 
 function resultFromOutput(
@@ -28,7 +48,11 @@ function resultFromOutput(
     "status" in output &&
     "summary" in output
   ) {
-    const o = output as Partial<JobResult> & { status?: string; summary?: string };
+    const o = output as Partial<JobResult> & {
+      status?: string;
+      summary?: string;
+      evidence?: JobEvidenceItem[];
+    };
     return {
       status: o.status === "failed" || o.status === "conflict" ? o.status : status,
       summary: typeof o.summary === "string" ? o.summary : "executor completed",
@@ -48,12 +72,31 @@ function resultFromOutput(
   };
 }
 
+function executorCtx(job: JobSpec, ctx: JobContext) {
+  return {
+    runId: ctx.runId,
+    operationId: ctx.operationId,
+    generation: ctx.generation,
+    worktreePath: ctx.worktreePath,
+    artifactDir: ctx.artifactDir,
+    ...(job.writeScope !== undefined ? { writeScope: job.writeScope } : {}),
+    ...(job.readOnly !== undefined ? { readOnly: job.readOnly } : {}),
+  };
+}
+
 /**
- * Runner that resolves pinned executor ids from a registry (never imported by
- * the controller). Unregistered pins fall through to `fallback` so legacy
- * agent/command jobs keep working.
+ * @deprecated Use createTrustedInProcessRunner — alias retained for call sites.
+ * In-process only; does not isolate untrusted executor code.
  */
-export function createRegistryRunner(options: RegistryRunnerOptions): Runner {
+export const createRegistryRunner = createTrustedInProcessRunner;
+
+/**
+ * Trusted in-process executor registry for CI/scripted tests.
+ * Untrusted plugin executors must use `createChildExecutorRunner`.
+ */
+export function createTrustedInProcessRunner(
+  options: TrustedInProcessRunnerOptions,
+): Runner {
   const byId = new Map<string, ExecutorDefinition>();
   for (const def of options.executors) {
     if (byId.has(def.id)) {
@@ -82,13 +125,7 @@ export function createRegistryRunner(options: RegistryRunnerOptions): Runner {
         };
       }
       try {
-        const output = await def.execute(pinned.input, {
-          runId: ctx.runId,
-          operationId: ctx.operationId,
-          generation: ctx.generation,
-          worktreePath: ctx.worktreePath,
-          artifactDir: ctx.artifactDir,
-        });
+        const output = await def.execute(pinned.input, executorCtx(pinned, ctx));
         if (def.outputSchema && !def.outputSchema(output)) {
           return {
             status: "failed",
@@ -108,6 +145,124 @@ export function createRegistryRunner(options: RegistryRunnerOptions): Runner {
           generation: ctx.generation,
         };
       }
+    },
+  };
+}
+
+/**
+ * Runs registered custom executor pins in a child Node process loaded from
+ * `entryModule`. Built-in / unknown pins use `fallback` (still the caller's
+ * runner — typically scripted or agent — which may itself be in-process).
+ */
+export function createChildExecutorRunner(
+  options: ChildExecutorRunnerOptions,
+): Runner {
+  const served = new Set(options.executorIds);
+  const timeoutMs = options.timeoutMs ?? 30_000;
+  const workerModule =
+    options.workerModule ??
+    fileURLToPath(new URL("./executor-worker.js", import.meta.url));
+  const entryModule = path.resolve(options.entryModule);
+
+  return {
+    async runJob(job: JobSpec, ctx: JobContext): Promise<JobResult> {
+      const pinned = pinJobExecutor(job);
+      const pin = pinned.executor as ExecutorPin;
+      if (!served.has(pin.id)) {
+        return options.fallback.runJob(pinned, ctx);
+      }
+
+      return await new Promise<JobResult>((resolve) => {
+        const child = spawn(process.execPath, [workerModule, entryModule], {
+          stdio: ["pipe", "pipe", "pipe"],
+          cwd: options.cwd ?? path.dirname(entryModule),
+          env: options.env ?? process.env,
+        });
+        const stderr: string[] = [];
+        child.stderr.setEncoding("utf8");
+        child.stderr.on("data", (c: string) => {
+          stderr.push(c);
+        });
+
+        let settled = false;
+        const finish = (result: JobResult) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          child.kill("SIGKILL");
+          resolve(result);
+        };
+
+        const timer = setTimeout(() => {
+          finish({
+            status: "failed",
+            summary: `executor child timed out after ${timeoutMs}ms`,
+            runId: ctx.runId,
+            operationId: ctx.operationId,
+            generation: ctx.generation,
+          });
+        }, timeoutMs);
+
+        const rl = createInterface({ input: child.stdout, crlfDelay: Infinity });
+        rl.once("line", (line) => {
+          try {
+            const msg = JSON.parse(line) as {
+              kind?: string;
+              output?: unknown;
+              message?: string;
+            };
+            if (msg.kind === "ok") {
+              finish(resultFromOutput(msg.output, ctx));
+              return;
+            }
+            finish({
+              status: "failed",
+              summary: msg.message ?? "executor child error",
+              runId: ctx.runId,
+              operationId: ctx.operationId,
+              generation: ctx.generation,
+            });
+          } catch (err) {
+            finish({
+              status: "failed",
+              summary: err instanceof Error ? err.message : String(err),
+              runId: ctx.runId,
+              operationId: ctx.operationId,
+              generation: ctx.generation,
+            });
+          }
+        });
+
+        child.on("error", (err) => {
+          finish({
+            status: "failed",
+            summary: `executor child spawn failed: ${err.message}`,
+            runId: ctx.runId,
+            operationId: ctx.operationId,
+            generation: ctx.generation,
+          });
+        });
+        child.on("exit", (code) => {
+          if (!settled) {
+            finish({
+              status: "failed",
+              summary: `executor child exited (code=${String(code)}): ${stderr.join("")}`,
+              runId: ctx.runId,
+              operationId: ctx.operationId,
+              generation: ctx.generation,
+            });
+          }
+        });
+
+        const req = {
+          kind: "execute",
+          id: pin.id,
+          input: pinned.input,
+          ctx: executorCtx(pinned, ctx),
+        };
+        child.stdin.write(`${JSON.stringify(req)}\n`);
+        child.stdin.end();
+      });
     },
   };
 }

@@ -5,6 +5,9 @@ export type ExecutorId = string;
 
 export type ExecutorEffect = "read" | "write" | "ambiguous";
 
+/** Default max UTF-8 bytes for durable executor `input` (admission). */
+export const MAX_EXECUTOR_INPUT_BYTES = 256_000;
+
 /** Serializable pin recorded at admission — never a function or closure. */
 export interface ExecutorPin {
   id: ExecutorId;
@@ -22,6 +25,9 @@ export interface ExecutorContext {
   generation: number;
   worktreePath: string;
   artifactDir: string;
+  /** Admitted write paths when the job may mutate the worktree. */
+  writeScope?: string[];
+  readOnly?: boolean;
   signal?: AbortSignal;
   credentials?: ExecutorCredentials;
 }
@@ -90,6 +96,31 @@ export function assertExecutorPin(value: unknown): ExecutorPin {
 }
 
 /**
+ * Ensure a value is JSON-serializable and within the durable input size bound.
+ * Returns the canonical JSON string (for byte accounting / IPC).
+ */
+export function assertBoundedJson(
+  value: unknown,
+  maxBytes = MAX_EXECUTOR_INPUT_BYTES,
+): string {
+  let raw: string;
+  try {
+    raw = JSON.stringify(value);
+  } catch (err) {
+    throw new Error(
+      `executor input is not JSON-serializable: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  if (raw === undefined) {
+    throw new Error("executor input must not be undefined");
+  }
+  if (Buffer.byteLength(raw, "utf8") > maxBytes) {
+    throw new Error(`executor input exceeds ${maxBytes} bytes`);
+  }
+  return raw;
+}
+
+/**
  * Freeze an executor definition for export from a plugin or built-in package.
  * The controller never imports `execute`; only the runner/child host does.
  */
@@ -128,13 +159,27 @@ export function builtinPinForKind(kind: JobKind): ExecutorPin {
 /**
  * Ensure a JobSpec carries a serializable executor pin for durable admission.
  * Legacy agent/command jobs receive the matching built-in pin.
+ * When `input` is present it is JSON-canonicalized and size-bounded.
  */
 export function pinJobExecutor(job: JobSpec): JobSpec {
+  let input = job.input;
+  if (input !== undefined) {
+    const raw = assertBoundedJson(input);
+    input = JSON.parse(raw) as unknown;
+  }
+
+  const withInput =
+    input !== undefined ? { ...job, input } : (() => {
+      const { input: _drop, ...rest } = job;
+      void _drop;
+      return rest;
+    })();
+
   if (job.executor) {
     const pin = assertExecutorPin(job.executor);
-    return { ...job, executor: pin };
+    return { ...withInput, executor: pin };
   }
-  return { ...job, executor: builtinPinForKind(job.kind) };
+  return { ...withInput, executor: builtinPinForKind(job.kind) };
 }
 
 /** Validate executor input against a definition's schema when present. */

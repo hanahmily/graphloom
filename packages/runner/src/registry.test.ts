@@ -1,9 +1,24 @@
+import { mkdtemp } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { defineExecutor } from "@graphloom/sdk";
-import { createRegistryRunner, createScriptedRunner } from "./index.js";
+import { defineExecutor, MAX_EXECUTOR_INPUT_BYTES, assertBoundedJson } from "@graphloom/sdk";
+import {
+  createChildExecutorRunner,
+  createRegistryRunner,
+  createScriptedRunner,
+  createTrustedInProcessRunner,
+} from "./index.js";
 
-describe("createRegistryRunner", () => {
-  it("executes a registered custom executor by pin id", async () => {
+const fixture = path.join(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "../test/fixtures/write-greeting-executor.mjs",
+);
+
+describe("createTrustedInProcessRunner", () => {
+  it("executes a registered custom executor by pin id (trusted/CI only)", async () => {
     const echo = defineExecutor({
       id: "acme.echo/ping",
       effect: "read",
@@ -15,7 +30,7 @@ describe("createRegistryRunner", () => {
         return { status: "ok" as const, summary: `echo:${input.msg}` };
       },
     });
-    const runner = createRegistryRunner({
+    const runner = createTrustedInProcessRunner({
       executors: [echo],
       fallback: createScriptedRunner({ jobs: [] }),
     });
@@ -38,11 +53,14 @@ describe("createRegistryRunner", () => {
     );
     expect(result.status).toBe("ok");
     expect(result.summary).toBe("echo:hi");
-    expect(result.runId).toBe("r1");
+  });
+
+  it("createRegistryRunner remains an alias of trusted in-process", () => {
+    expect(createRegistryRunner).toBe(createTrustedInProcessRunner);
   });
 
   it("falls back for built-in agent pins", async () => {
-    const runner = createRegistryRunner({
+    const runner = createTrustedInProcessRunner({
       executors: [],
       fallback: createScriptedRunner({
         jobs: [async () => ({ status: "ok", summary: "scripted" })],
@@ -54,6 +72,7 @@ describe("createRegistryRunner", () => {
         kind: "agent",
         purpose: "work",
         instruction: "write",
+        writeScope: ["GREETING.txt"],
       },
       {
         runId: "r1",
@@ -78,7 +97,7 @@ describe("createRegistryRunner", () => {
         return input;
       },
     });
-    const runner = createRegistryRunner({
+    const runner = createTrustedInProcessRunner({
       executors: [echo],
       fallback: createScriptedRunner({ jobs: [] }),
     });
@@ -110,10 +129,57 @@ describe("createRegistryRunner", () => {
       execute: async () => ({}),
     });
     expect(() =>
-      createRegistryRunner({
+      createTrustedInProcessRunner({
         executors: [a, a],
         fallback: createScriptedRunner({ jobs: [] }),
       }),
     ).toThrow(/duplicate/);
+  });
+});
+
+describe("createChildExecutorRunner", () => {
+  it("runs a custom executor in a child process", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "gl-child-"));
+    const workerModule = path.join(
+      path.dirname(fileURLToPath(import.meta.url)),
+      "../dist/executor-worker.js",
+    );
+    const runner = createChildExecutorRunner({
+      entryModule: fixture,
+      executorIds: ["acme.hello/write-greeting"],
+      fallback: createScriptedRunner({ jobs: [] }),
+      workerModule,
+    });
+    const result = await runner.runJob(
+      {
+        stageId: "write",
+        kind: "agent",
+        purpose: "work",
+        instruction: "custom",
+        writeScope: ["GREETING.txt"],
+        executor: { id: "acme.hello/write-greeting", version: "1" },
+        input: {},
+      },
+      {
+        runId: "r1",
+        operationId: "op1",
+        generation: 1,
+        worktreePath: dir,
+        artifactDir: dir,
+      },
+    );
+    expect(result.status).toBe("ok");
+    expect(result.summary).toMatch(/custom wrote/);
+    const bytes = await readFile(path.join(dir, "GREETING.txt"), "utf8");
+    expect(bytes).toBe("Hello, GraphLoom!\n");
+  });
+});
+
+describe("assertBoundedJson", () => {
+  it("rejects oversized and non-JSON values", () => {
+    expect(() => assertBoundedJson({ ok: true })).not.toThrow();
+    expect(() => assertBoundedJson(BigInt(1))).toThrow(/JSON-serializable/);
+    const huge = "x".repeat(MAX_EXECUTOR_INPUT_BYTES + 1);
+    expect(() => assertBoundedJson(huge)).toThrow(/exceeds/);
   });
 });

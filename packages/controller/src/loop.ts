@@ -724,21 +724,29 @@ async function prepareDispatch(
     };
   }
 
-  // Write/read scopes: reject empty writeScope when purpose is work and not readOnly.
-  if (
-    job.purpose === "work" &&
-    job.readOnly !== true &&
-    job.writeScope !== undefined &&
-    job.writeScope.length === 0
-  ) {
-    return {
-      state: {
-        ...state,
-        status: "stopped",
-        stopReason: "scope rejected",
-        blocker: "work job writeScope must be non-empty when provided",
-      },
-    };
+  // Write scope: mutable work must declare non-empty paths; read-only must not.
+  if (job.readOnly === true) {
+    if (job.writeScope !== undefined && job.writeScope.length > 0) {
+      return {
+        state: {
+          ...state,
+          status: "stopped",
+          stopReason: "scope rejected",
+          blocker: "readOnly jobs must not declare writeScope",
+        },
+      };
+    }
+  } else if (job.purpose === "work") {
+    if (!job.writeScope || job.writeScope.length === 0) {
+      return {
+        state: {
+          ...state,
+          status: "stopped",
+          stopReason: "scope rejected",
+          blocker: "work jobs require a non-empty writeScope",
+        },
+      };
+    }
   }
 
   const operationId = `op-${state.stateRevision}-${randomUUID().slice(0, 8)}`;

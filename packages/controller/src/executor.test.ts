@@ -7,7 +7,6 @@ import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   createScriptedGraph,
-  defineExecutor,
   dispatch,
   observe,
   stop,
@@ -15,7 +14,7 @@ import {
   type GraphDefinition,
   type Validator,
 } from "@graphloom/sdk";
-import { createRegistryRunner, createScriptedRunner } from "@graphloom/runner";
+import { createChildExecutorRunner, createScriptedRunner } from "@graphloom/runner";
 import { createController, loadRunState } from "./index.js";
 
 const execFileAsync = promisify(execFile);
@@ -202,22 +201,12 @@ describe("executor contract (#38)", () => {
     expect(report.blocker).toMatch(/qualified/);
   });
 
-  it("runs a user-authored custom executor via registry without controller import", async () => {
+  it("runs a user-authored custom executor in a child process", async () => {
     const env = await makeEnv();
-    // Custom executor lives outside the controller package (simulates plugin/built-in).
-    const writeGreeting = defineExecutor({
-      id: "acme.hello/write-greeting",
-      version: "1",
-      effect: "write",
-      async execute(_input, ctx) {
-        await writeFile(path.join(ctx.worktreePath, GREETING_PATH), GREETING, "utf8");
-        return {
-          status: "ok" as const,
-          summary: "custom wrote greeting",
-          evidence: [{ kind: "other" as const, payload: { wrote: GREETING_PATH } }],
-        };
-      },
-    });
+    const fixture = path.resolve(
+      here,
+      "../../runner/test/fixtures/write-greeting-executor.mjs",
+    );
 
     const report = await createController().run({
       taskPath: env.taskPath,
@@ -253,8 +242,9 @@ describe("executor contract (#38)", () => {
         ],
       }),
       validators,
-      runner: createRegistryRunner({
-        executors: [writeGreeting],
+      runner: createChildExecutorRunner({
+        entryModule: fixture,
+        executorIds: ["acme.hello/write-greeting"],
         fallback: createScriptedRunner({
           jobs: [
             async () => ({
@@ -283,7 +273,7 @@ describe("executor contract (#38)", () => {
     ]);
   });
 
-  it("rejects empty writeScope for work jobs", async () => {
+  it("rejects work jobs without writeScope", async () => {
     const env = await makeEnv();
     const report = await createController().run({
       taskPath: env.taskPath,
@@ -296,9 +286,8 @@ describe("executor contract (#38)", () => {
               kind: "agent",
               purpose: "work",
               instruction: "x",
-              writeScope: [],
             },
-            "empty scope",
+            "missing scope",
           ),
         ],
       }),
@@ -309,6 +298,38 @@ describe("executor contract (#38)", () => {
     });
     expect(report.status).toBe("stopped");
     expect(report.stopReason).toBe("scope rejected");
+    expect(report.blocker).toMatch(/non-empty writeScope/);
+  });
+
+  it("rejects oversized executor input before durable admission", async () => {
+    const env = await makeEnv();
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({
+        definition,
+        advances: [
+          dispatch(
+            {
+              stageId: "write",
+              kind: "agent",
+              purpose: "work",
+              instruction: "x",
+              writeScope: [GREETING_PATH],
+              executor: { id: "acme.echo/ping" },
+              input: "x".repeat(300_000),
+            },
+            "huge input",
+          ),
+        ],
+      }),
+      validators,
+      runner: createScriptedRunner({ jobs: [] }),
+      stateRoot: env.stateRoot,
+      runId: "huge1",
+    });
+    expect(report.status).toBe("stopped");
+    expect(report.stopReason).toBe("executor pin rejected");
+    expect(report.blocker).toMatch(/exceeds/);
   });
 });
 

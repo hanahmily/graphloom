@@ -6,5 +6,9 @@ export {
 } from "./scripted.js";
 export {
   createRegistryRunner,
+  createTrustedInProcessRunner,
+  createChildExecutorRunner,
+  type TrustedInProcessRunnerOptions,
+  type ChildExecutorRunnerOptions,
   type RegistryRunnerOptions,
 } from "./registry.js";

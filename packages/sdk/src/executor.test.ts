@@ -1,13 +1,15 @@
 import { describe, expect, it } from "vitest";
 import {
-  BUILTIN_AGENT_EXECUTOR_ID,
-  BUILTIN_COMMAND_EXECUTOR_ID,
+  assertBoundedJson,
   assertExecutorId,
   assertExecutorPin,
   builtinPinForKind,
   defineExecutor,
   pinJobExecutor,
   validateExecutorInput,
+  BUILTIN_AGENT_EXECUTOR_ID,
+  BUILTIN_COMMAND_EXECUTOR_ID,
+  MAX_EXECUTOR_INPUT_BYTES,
 } from "./executor.js";
 import type { JobSpec } from "./types.js";
 
@@ -103,5 +105,22 @@ describe("validateExecutorInput", () => {
     });
     expect(() => validateExecutorInput(echo, { msg: 1 })).toThrow(/schema/);
     expect(() => validateExecutorInput(echo, { msg: "ok" })).not.toThrow();
+  });
+});
+
+describe("assertBoundedJson / pinJobExecutor input bounds", () => {
+  it("rejects non-serializable and oversized inputs at pin time", () => {
+    expect(() => assertBoundedJson(BigInt(1))).toThrow(/JSON-serializable/);
+    expect(() => assertBoundedJson("x".repeat(MAX_EXECUTOR_INPUT_BYTES + 1))).toThrow(/exceeds/);
+    expect(() =>
+      pinJobExecutor({
+        stageId: "write",
+        kind: "agent",
+        purpose: "work",
+        instruction: "x",
+        writeScope: ["a"],
+        input: { nest: { ok: true } },
+      }),
+    ).not.toThrow();
   });
 });
