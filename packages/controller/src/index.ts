@@ -24,3 +24,11 @@ export {
   resolveBundleEntry,
 } from "./controller.js";
 export type { DurableRunState, RunStatus, IntakePin, VersionRecord } from "./controller.js";
+export type {
+  RepairDeps,
+  RepairPatchAuthor,
+  RepairReviewer,
+  RepairPreflightResult,
+  RecreateHostFn,
+} from "./controller.js";
+export { defaultRepairPreflight } from "./controller.js";

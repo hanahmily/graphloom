@@ -189,6 +189,7 @@ export function buildRecoveryPrompt(input: SupervisorInput): string {
     generation: input.view.generation,
     stateRevision: input.view.stateRevision,
     activeVersion: input.view.activeVersion,
+    repairCandidates: input.view.repairCandidates ?? [],
   };
 
   return [
@@ -197,6 +198,7 @@ export function buildRecoveryPrompt(input: SupervisorInput): string {
     "Allowed action types: dispatch, observe, validate, reenter, qualify_repair, activate_repair, return, stop.",
     "Never propose Accept. Never add, remove, rename, or reorder graph steps.",
     "Prefer further authorized remedies over Stop while budgets and authority remain.",
+    "For activate_repair, use a qualifiedArtifactId from repairCandidates with status qualified.",
     `Episode: ${input.episodeId}`,
     "Recovery context:",
     "```json",

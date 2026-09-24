@@ -96,6 +96,20 @@ export interface RunView {
   generation: number;
   stateRevision: number;
   activeVersion: string;
+  /**
+   * Qualified / rejected repair candidates visible to the supervisor for
+   * ActivateRepair decisions (artifact ids and status only).
+   */
+  repairCandidates?: Array<{
+    artifactId: string;
+    status: string;
+    target: "plugin" | "validator";
+    reason: string;
+    candidateDigest?: string;
+    qualifiedAt?: string;
+    rejectionReason?: string;
+    preflightSummary?: string;
+  }>;
 }
 
 export type JobKind = "agent" | "command";

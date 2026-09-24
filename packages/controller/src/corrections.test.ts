@@ -517,7 +517,7 @@ describe("corrections, crash containment, unfamiliar failure (#28)", () => {
     const report = await controller.run({
       taskPath: env.taskPath,
       host: makeHost(),
-      recreateHost: async () => makeHost(),
+      recreateHost: async (_ctx) => makeHost(),
       supervisor: createScriptedSupervisor({
         decisions: [
           (input) => {
@@ -623,7 +623,7 @@ describe("corrections, crash containment, unfamiliar failure (#28)", () => {
     const report = await controller.run({
       taskPath: env.taskPath,
       host: makeChildLikeHost(),
-      recreateHost: async () => makeChildLikeHost(),
+      recreateHost: async (_ctx) => makeChildLikeHost(),
       validators,
       supervisor: createScriptedSupervisor({
         decisions: [

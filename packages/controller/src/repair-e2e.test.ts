@@ -154,6 +154,9 @@ repo: ./test-repo
 request: |
   Create GREETING.txt containing exactly "Hello, GraphLoom!" followed by
   one newline. Do not modify other files.
+grants:
+  sourceRepair: true
+  validatorSubstitution: true
 `,
     "utf8",
   );
@@ -175,13 +178,12 @@ describe("qualified repair + same-run activation (#29)", () => {
         // Round 1 after defective validate fails → graph Supervises
         qualifyRepair({ target: "validator", reason: "defective write gate" }, "qualify"),
         (input) => {
-          const qualified = (
-            input.view as { /* repair not on view */ }
-          );
-          void qualified;
-          // Read artifact id from durable state via a side channel filled by patch
+          const qualified = input.view.repairCandidates?.find((c) => c.status === "qualified");
+          if (!qualified) {
+            throw new Error("expected qualified repair candidate on RunView");
+          }
           return activateRepair(
-            { qualifiedArtifactId: lastArtifactId!, reason: "activate fixed gate" },
+            { qualifiedArtifactId: qualified.artifactId, reason: "activate fixed gate" },
             "activate",
           );
         },
@@ -208,8 +210,8 @@ describe("qualified repair + same-run activation (#29)", () => {
             "fixed-exact-greeting\n",
             "utf8",
           );
-          // Capture artifact id from path .../repairs/<id>/candidate
           lastArtifactId = path.basename(path.dirname(candidateRoot));
+          void lastArtifactId;
         },
       },
       reviewer: {
@@ -217,6 +219,9 @@ describe("qualified repair + same-run activation (#29)", () => {
         async review() {
           return { approved: true, reason: "gate now matches requirement" };
         },
+      },
+      async preflight() {
+        return { ok: true, summary: "scripted preflight ok" };
       },
       materializeValidators: (candidateRoot) => {
         expect(existsSync(path.join(candidateRoot, "REPAIR_MARKER.txt"))).toBe(true);
@@ -356,6 +361,9 @@ describe("qualified repair + same-run activation (#29)", () => {
             return { approved: true, reason: "self-review" };
           },
         },
+        async preflight() {
+          return { ok: true, summary: "unused" };
+        },
       },
       runner: createScriptedRunner({ jobs: [] }),
       stateRoot: env.stateRoot,
@@ -410,6 +418,9 @@ describe("qualified repair + same-run activation (#29)", () => {
         async review() {
           return { approved: true, reason: "ok" };
         },
+      },
+      async preflight() {
+        return { ok: true, summary: "ok" };
       },
     };
 

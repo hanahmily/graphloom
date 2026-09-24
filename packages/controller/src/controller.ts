@@ -16,7 +16,7 @@ import {
 } from "@graphloom/plugin-host";
 import type { Supervisor } from "@graphloom/supervisor";
 import { restorePiSupervisorFromBinding } from "@graphloom/supervisor";
-import type { RepairDeps } from "./repair-lifecycle.js";
+import type { RepairDeps, RecreateHostFn } from "./repair-lifecycle.js";
 import { admitValidation } from "./admit.js";
 import type { AdmissionValidator } from "./admit.js";
 import { resolveBundleEntry } from "./bundle.js";
@@ -89,10 +89,12 @@ export interface RunRequest {
   /** Qualified repair patch author + independent reviewer hooks. */
   repair?: RepairDeps;
   /**
-   * Replace a dead child host after crash/timeout. Defaults to spawning a
-   * fresh child for controller-owned bundles; pass explicitly for custom hosts.
+   * Replace a dead child host after crash/timeout, or after ActivateRepair.
+   * Defaults to spawning a fresh child for controller-owned bundles; pass
+   * explicitly for custom hosts. Receives the current intake pin so activation
+   * can open the candidate bundle.
    */
-  recreateHost?: () => Promise<PluginHost>;
+  recreateHost?: RecreateHostFn;
   /** Directory for durable run state (default: <repo>/graphloom-state). */
   stateRoot?: string;
   runId?: string;
@@ -115,7 +117,7 @@ export interface ResumeRequest {
     binding: NonNullable<DurableRunState["supervisorBinding"]>,
     ctx: { runId: string; stateDir: string },
   ) => Promise<Supervisor>;
-  recreateHost?: () => Promise<PluginHost>;
+  recreateHost?: RecreateHostFn;
   stateRoot?: string;
 }
 
@@ -615,6 +617,9 @@ async function openHost(args: {
  * Prefer an explicit recreate hook; otherwise spawn a fresh child for
  * controller-owned bundles. Caller-supplied hosts/plugins are left alone
  * unless they pass recreateHost.
+ *
+ * The returned closure reads intake/version/generation from the call args so
+ * ActivateRepair can point the next host at the candidate pin.
  */
 function resolveRecreateHost(
   session: ActiveSession,
@@ -624,13 +629,17 @@ function resolveRecreateHost(
     generation: number;
     plugin?: GraphPlugin;
     host?: PluginHost;
-    recreateHost?: () => Promise<PluginHost>;
+    recreateHost?: (ctx: {
+      intake: IntakePin;
+      activeVersion: string;
+      generation: number;
+    }) => Promise<PluginHost>;
   },
-): { recreateHost: () => Promise<PluginHost> } | Record<string, never> {
+): { recreateHost: RecreateHostFn } | Record<string, never> {
   if (args.recreateHost) {
     return {
-      recreateHost: async () => {
-        const next = await args.recreateHost!();
+      recreateHost: async (ctx) => {
+        const next = await args.recreateHost!(ctx);
         session.host = next;
         return next;
       },
@@ -640,11 +649,11 @@ function resolveRecreateHost(
     return {};
   }
   return {
-    recreateHost: async () => {
+    recreateHost: async (ctx) => {
       const next = await openHost({
-        intake: args.intake,
-        activeVersion: args.activeVersion,
-        generation: args.generation,
+        intake: ctx.intake,
+        activeVersion: ctx.activeVersion,
+        generation: ctx.generation,
       });
       session.host = next;
       return next;
@@ -778,7 +787,10 @@ export type {
   RepairDeps,
   RepairPatchAuthor,
   RepairReviewer,
+  RepairPreflightResult,
+  RecreateHostFn,
 } from "./repair-lifecycle.js";
+export { defaultRepairPreflight } from "./repair-lifecycle.js";
 export { assertSafeRunId, assertSafeGraphId } from "./ids.js";
 export { resolveBundleEntry } from "./bundle.js";
 

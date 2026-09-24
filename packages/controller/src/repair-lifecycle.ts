@@ -1,7 +1,11 @@
+import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import type { GraphDefinition, QualifyRepairSpec, ActivateRepairSpec } from "@graphloom/sdk";
 import type { Supervisor } from "@graphloom/supervisor";
+import type { PluginHost } from "@graphloom/plugin-host";
 import { invalidateFromStage, type AdmissionValidator } from "./admit.js";
+import { resolveBundleEntryFromManifest } from "./bundle.js";
 import {
   assertCandidateStepsUnchanged,
   digestDirectoryTree,
@@ -10,6 +14,7 @@ import {
 } from "./repair.js";
 import type { DurableRunState } from "./state.js";
 import { bumpGeneration } from "./generation.js";
+import { saveRunState } from "./state.js";
 
 export interface RepairPatchAuthor {
   /** Must equal the run supervisor session id for every repair round. */
@@ -32,9 +37,25 @@ export interface RepairReviewer {
   }): Promise<{ approved: boolean; reason: string }>;
 }
 
+export interface RepairPreflightResult {
+  ok: boolean;
+  summary: string;
+  /** Optional describe() of the candidate for contract comparison. */
+  definition?: GraphDefinition;
+}
+
 export interface RepairDeps {
   patchAuthor: RepairPatchAuthor;
   reviewer: RepairReviewer;
+  /**
+   * Controller-mediated build/test/contract checks before independent review.
+   * Required so a reviewer cannot approve an uncompilable or contract-breaking candidate.
+   */
+  preflight: (args: {
+    candidateRoot: string;
+    target: "plugin" | "validator";
+    baseDefinition: GraphDefinition;
+  }) => Promise<RepairPreflightResult>;
   /**
    * Optional: after activation, replace in-process validators from the candidate.
    * Child hosts rely on recreateHost + new bundle path instead.
@@ -43,6 +64,12 @@ export interface RepairDeps {
     candidateRoot: string,
   ) => Record<string, AdmissionValidator> | undefined;
 }
+
+export type RecreateHostFn = (args: {
+  intake: DurableRunState["intake"];
+  activeVersion: string;
+  generation: number;
+}) => Promise<PluginHost>;
 
 export async function applyQualifyRepair(
   state: DurableRunState,
@@ -67,6 +94,22 @@ export async function applyQualifyRepair(
       status: "stopped",
       stopReason: "corrections budget exhausted",
       blocker: "qualify_repair",
+    };
+  }
+
+  const grantOk =
+    qualify.target === "plugin"
+      ? state.intake.grants.sourceRepair
+      : state.intake.grants.validatorSubstitution;
+  if (!grantOk) {
+    return {
+      ...state,
+      status: "stopped",
+      stopReason: "qualify_repair missing operator grant",
+      blocker:
+        qualify.target === "plugin"
+          ? "sourceRepair grant is false"
+          : "validatorSubstitution grant is false",
     };
   }
 
@@ -125,8 +168,35 @@ export async function applyQualifyRepair(
       candidateRoot: snap.candidateRoot,
     });
 
-    // Write a stages pin from the active definition so future edits are checked.
-    // (Snapshot may not include this file; patch authors must not invent stages.)
+    const preflight = await deps.repair.preflight({
+      candidateRoot: snap.candidateRoot,
+      target: qualify.target,
+      baseDefinition: state.definition,
+    });
+    if (!preflight.ok) {
+      const artifact: QualifiedRepairArtifact = {
+        ...snap,
+        status: "rejected",
+        candidateDigest: await digestDirectoryTree(snap.candidateRoot),
+        patchAuthorSessionId: supervisorSessionId,
+        reviewerSessionId: deps.repair.reviewer.sessionId,
+        reviewReason: preflight.summary,
+        rejectionReason: preflight.summary,
+        preflightSummary: preflight.summary,
+      };
+      return {
+        ...state,
+        repairCandidates: [...(state.repairCandidates ?? []), artifact],
+        budgets: {
+          ...state.budgets,
+          corrections: state.budgets.corrections - 1,
+        },
+      };
+    }
+
+    if (preflight.definition) {
+      assertCandidateDefinitionCompatible(preflight.definition, state.definition);
+    }
 
     const candidateDigest = await digestDirectoryTree(snap.candidateRoot);
     const review = await deps.repair.reviewer.review({
@@ -143,24 +213,13 @@ export async function applyQualifyRepair(
       patchAuthorSessionId: supervisorSessionId,
       reviewerSessionId: deps.repair.reviewer.sessionId,
       reviewReason: review.reason,
+      preflightSummary: preflight.summary,
       ...(review.approved
         ? { qualifiedAt: new Date().toISOString() }
         : { rejectionReason: review.reason }),
     };
 
     const candidates = [...(state.repairCandidates ?? []), artifact];
-    if (!review.approved) {
-      return {
-        ...state,
-        repairCandidates: candidates,
-        budgets: {
-          ...state.budgets,
-          corrections: state.budgets.corrections - 1,
-        },
-        // Stay in recovery so the same supervisor session can try another round.
-      };
-    }
-
     return {
       ...state,
       repairCandidates: candidates,
@@ -180,9 +239,13 @@ export async function applyActivateRepair(
   deps: {
     repair: RepairDeps;
     validators: Record<string, AdmissionValidator>;
-    recreateHost?: () => Promise<unknown>;
+    recreateHost?: RecreateHostFn;
   },
-): Promise<{ state: DurableRunState; validators: Record<string, AdmissionValidator> }> {
+): Promise<{
+  state: DurableRunState;
+  validators: Record<string, AdmissionValidator>;
+  host?: PluginHost;
+}> {
   if (state.mode !== "recovery") {
     return {
       state: {
@@ -210,6 +273,20 @@ export async function applyActivateRepair(
     };
   }
 
+  if (artifact.baseActiveVersion !== state.activeVersion) {
+    candidates[idx] = { ...artifact, status: "superseded" };
+    return {
+      state: {
+        ...state,
+        repairCandidates: candidates,
+        status: "stopped",
+        stopReason: "activate_repair base version mismatch",
+        blocker: `expected active ${artifact.baseActiveVersion}, got ${state.activeVersion}`,
+      },
+      validators: deps.validators,
+    };
+  }
+
   // Base must still match the live install; concurrent activation of another candidate
   // would have moved the pin / changed the tree digest.
   const liveDigest = await digestDirectoryTree(state.intake.bundle.bundlePath);
@@ -227,6 +304,44 @@ export async function applyActivateRepair(
     };
   }
 
+  if (!artifact.candidateDigest) {
+    return {
+      state: {
+        ...state,
+        status: "stopped",
+        stopReason: "activate_repair missing candidate digest",
+        blocker: artifact.artifactId,
+      },
+      validators: deps.validators,
+    };
+  }
+
+  // Recompute so post-review edits cannot activate under a stale approval.
+  const liveCandidateDigest = await digestDirectoryTree(artifact.candidateRoot);
+  if (liveCandidateDigest !== artifact.candidateDigest) {
+    candidates[idx] = { ...artifact, status: "superseded" };
+    return {
+      state: {
+        ...state,
+        repairCandidates: candidates,
+        status: "stopped",
+        stopReason: "activate_repair candidate digest mismatch",
+        blocker: "candidate changed after independent review",
+      },
+      validators: deps.validators,
+    };
+  }
+
+  // Stages pin must still match — cannot be deleted after review.
+  await assertCandidateStepsUnchanged({
+    baseDefinitionStages: state.definition.stages.map((s) => ({
+      id: s.id,
+      name: s.name,
+      requirementIds: [...s.requirementIds],
+    })),
+    candidateRoot: artifact.candidateRoot,
+  });
+
   const toVersion = `${state.intake.bundle.graphId}@repair-${artifact.artifactId}`;
   const intent = {
     artifactId: artifact.artifactId,
@@ -237,10 +352,13 @@ export async function applyActivateRepair(
     status: "intent" as const,
   };
 
+  // Persist intent under the run lock (caller holds it) before effects so resume
+  // can reconcile a crash mid-activation.
   let next: DurableRunState = {
     ...state,
     activationIntent: intent,
   };
+  await saveRunState(next);
 
   const materialized = deps.repair.materializeValidators?.(artifact.candidateRoot);
   let validators = deps.validators;
@@ -248,7 +366,7 @@ export async function applyActivateRepair(
     validators = { ...deps.validators, ...materialized };
   }
 
-  // Commit version switch + invalidate bindings under the same state revision.
+  // Commit version switch + validator bindings under the same state revision.
   candidates[idx] = { ...artifact, status: "activated" };
   // Supersede other qualified peers so only one activation owns the run.
   for (let i = 0; i < candidates.length; i++) {
@@ -257,6 +375,8 @@ export async function applyActivateRepair(
     }
   }
 
+  const candidatePin = await readCandidateBundlePin(artifact.candidateRoot, state.intake);
+
   next = {
     ...next,
     repairCandidates: candidates,
@@ -264,11 +384,7 @@ export async function applyActivateRepair(
     activationIntent: { ...intent, status: "committed" },
     intake: {
       ...next.intake,
-      bundle: {
-        ...next.intake.bundle,
-        // Point the run at the candidate tree for subsequent child loads.
-        bundlePath: artifact.candidateRoot,
-      },
+      bundle: candidatePin,
     },
   };
 
@@ -281,11 +397,16 @@ export async function applyActivateRepair(
   };
   next = bumpGeneration(next, `activate_repair:${artifact.artifactId}`);
 
+  let host: PluginHost | undefined;
   if (deps.recreateHost) {
-    await deps.recreateHost();
+    host = await deps.recreateHost({
+      intake: next.intake,
+      activeVersion: next.activeVersion,
+      generation: next.generation,
+    });
   }
 
-  return { state: next, validators };
+  return { state: next, validators, ...(host !== undefined ? { host } : {}) };
 }
 
 function readSupervisorSessionId(supervisor: Supervisor | undefined): string | undefined {
@@ -318,4 +439,99 @@ export async function writeStagesPin(
     ),
     "utf8",
   );
+}
+
+/** Candidate describe() must preserve pinned stages, requirements, and bindings. */
+export function assertCandidateDefinitionCompatible(
+  candidate: GraphDefinition,
+  base: GraphDefinition,
+): void {
+  if (candidate.graphId !== base.graphId) {
+    throw new Error(
+      `candidate graphId ${candidate.graphId} != pinned ${base.graphId}`,
+    );
+  }
+  if (JSON.stringify(candidate.stages) !== JSON.stringify(base.stages)) {
+    throw new Error("candidate describe() alters pinned stages");
+  }
+  if (JSON.stringify(candidate.requirements) !== JSON.stringify(base.requirements)) {
+    throw new Error("candidate describe() alters pinned requirements");
+  }
+  if (
+    JSON.stringify(candidate.defaultValidators) !== JSON.stringify(base.defaultValidators)
+  ) {
+    throw new Error("candidate describe() alters pinned defaultValidators");
+  }
+}
+
+async function readCandidateBundlePin(
+  candidateRoot: string,
+  previous: DurableRunState["intake"],
+): Promise<DurableRunState["intake"]["bundle"]> {
+  const manifestPath = path.join(candidateRoot, "graphloom.manifest.json");
+  const manifestRaw = await readFile(manifestPath, "utf8");
+  const entryPath = resolveBundleEntryFromManifest(candidateRoot, manifestRaw);
+  const entryBytes = await readFile(entryPath);
+  return {
+    ...previous.bundle,
+    bundlePath: candidateRoot,
+    manifestRaw,
+    manifestDigest: createHash("sha256").update(manifestRaw, "utf8").digest("hex"),
+    entryDigest: createHash("sha256").update(entryBytes).digest("hex"),
+  };
+}
+
+/** Default preflight: stages pin + optional package build when dependencies exist. */
+export async function defaultRepairPreflight(args: {
+  candidateRoot: string;
+  target: "plugin" | "validator";
+  baseDefinition: GraphDefinition;
+}): Promise<RepairPreflightResult> {
+  await assertCandidateStepsUnchanged({
+    baseDefinitionStages: args.baseDefinition.stages.map((s) => ({
+      id: s.id,
+      name: s.name,
+      requirementIds: [...s.requirementIds],
+    })),
+    candidateRoot: args.candidateRoot,
+  });
+
+  const { access } = await import("node:fs/promises");
+  const pkgPath = path.join(args.candidateRoot, "package.json");
+  try {
+    await access(pkgPath);
+  } catch {
+    return { ok: true, summary: "stages pin ok; no package.json build required" };
+  }
+
+  const nm = path.join(args.candidateRoot, "node_modules");
+  try {
+    await access(nm);
+  } catch {
+    // Snapshots omit node_modules; callers with a full install should supply preflight.
+    return {
+      ok: true,
+      summary: "stages pin ok; skipped build/test (no node_modules in candidate)",
+    };
+  }
+
+  const { execFile } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  const execFileAsync = promisify(execFile);
+  try {
+    await execFileAsync("npm", ["run", "build", "--if-present"], {
+      cwd: args.candidateRoot,
+      timeout: 120_000,
+    });
+    await execFileAsync("npm", ["test", "--if-present"], {
+      cwd: args.candidateRoot,
+      timeout: 120_000,
+    });
+  } catch (err) {
+    return {
+      ok: false,
+      summary: `candidate build/test failed: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+  return { ok: true, summary: "stages pin ok; build/test passed" };
 }

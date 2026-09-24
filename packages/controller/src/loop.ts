@@ -40,6 +40,7 @@ import { bumpGeneration } from "./generation.js";
 import {
   applyActivateRepair,
   applyQualifyRepair,
+  type RecreateHostFn,
   type RepairDeps,
 } from "./repair-lifecycle.js";
 import {
@@ -59,10 +60,11 @@ export interface LoopDeps {
   /** Qualified repair patch/review hooks (same supervisor session for patches). */
   repair?: RepairDeps;
   /**
-   * Replace a dead child plugin process after crash/timeout.
+   * Replace a dead child plugin process after crash/timeout, or after
+   * ActivateRepair points the run at a candidate bundle.
    * Required when recovering past a host that exposes `childPid`.
    */
-  recreateHost?: () => Promise<PluginHost>;
+  recreateHost?: RecreateHostFn;
   /** Operator stop: checked each loop turn before advance (sync or async). */
   shouldStop?: () => boolean | Promise<boolean>;
   /** Live revision bridge for host-backed validators. */
@@ -440,6 +442,7 @@ function enterRecovery(
  * continues so Return can advance again. In-process hosts need no restart.
  */
 async function restartDeadChildHost(
+  state: DurableRunState,
   deps: LoopDeps,
   code: "plugin_crash" | "plugin_timeout" | "plugin_malformed" | "unhandled",
 ): Promise<{ ok: true } | { ok: false; stopReason: string; blocker: string }> {
@@ -458,7 +461,11 @@ async function restartDeadChildHost(
   }
   await deps.host.close().catch(() => undefined);
   try {
-    deps.host = await deps.recreateHost();
+    deps.host = await deps.recreateHost({
+      intake: state.intake,
+      activeVersion: state.activeVersion,
+      generation: state.generation,
+    });
   } catch (err) {
     return {
       ok: false,
@@ -489,7 +496,7 @@ async function containHostFailure(
   }
   const code = mapHostFailureCode(observationCode);
   if (deps.supervisor) {
-    const restarted = await restartDeadChildHost(deps, code);
+    const restarted = await restartDeadChildHost(state, deps, code);
     if (!restarted.ok) {
       return {
         done: true,
@@ -554,6 +561,18 @@ export function toRunView(state: DurableRunState): RunView {
   }
   if (state.recoveryEpisodeId !== undefined) {
     view.recoveryEpisodeId = state.recoveryEpisodeId;
+  }
+  if (state.repairCandidates !== undefined && state.repairCandidates.length > 0) {
+    view.repairCandidates = state.repairCandidates.map((c) => ({
+      artifactId: c.artifactId,
+      status: c.status,
+      target: c.target,
+      reason: c.reason,
+      ...(c.candidateDigest !== undefined ? { candidateDigest: c.candidateDigest } : {}),
+      ...(c.qualifiedAt !== undefined ? { qualifiedAt: c.qualifiedAt } : {}),
+      ...(c.rejectionReason !== undefined ? { rejectionReason: c.rejectionReason } : {}),
+      ...(c.preflightSummary !== undefined ? { preflightSummary: c.preflightSummary } : {}),
+    }));
   }
   return view;
 }
@@ -729,6 +748,10 @@ async function applyDecision(
         delete deps.validators[key];
       }
       Object.assign(deps.validators, activated.validators);
+      if (activated.host) {
+        await deps.host.close().catch(() => undefined);
+        deps.host = activated.host;
+      }
       return activated.state;
     }
     case "stop": {

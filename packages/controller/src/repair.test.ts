@@ -101,4 +101,30 @@ describe("repair snapshot", () => {
       }),
     ).rejects.toThrow(/alters pinned steps/i);
   });
+
+  it("rejects a missing stages pin instead of deferring", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "gl-repair-"));
+    temps.push(root);
+    const candidate = path.join(root, "candidate");
+    await mkdir(candidate, { recursive: true });
+    await expect(
+      assertCandidateStepsUnchanged({
+        baseDefinitionStages: [
+          { id: "write", name: "Write", requirementIds: ["greeting-bytes"] },
+        ],
+        candidateRoot: candidate,
+      }),
+    ).rejects.toThrow(/missing required stages pin/i);
+  });
+
+  it("rejects symlinks inside a candidate tree during digest", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "gl-repair-"));
+    temps.push(root);
+    const candidate = path.join(root, "candidate");
+    await mkdir(candidate, { recursive: true });
+    await writeFile(path.join(candidate, "ok.txt"), "x\n", "utf8");
+    const { symlink } = await import("node:fs/promises");
+    await symlink("/tmp", path.join(candidate, "escape"));
+    await expect(digestDirectoryTree(candidate)).rejects.toThrow(/symlink/i);
+  });
 });

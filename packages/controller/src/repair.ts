@@ -1,5 +1,13 @@
 import { createHash, randomUUID } from "node:crypto";
-import { cp, mkdir, readFile, readdir, realpath, stat, writeFile } from "node:fs/promises";
+import {
+  cp,
+  lstat,
+  mkdir,
+  readFile,
+  readdir,
+  realpath,
+  writeFile,
+} from "node:fs/promises";
 import path from "node:path";
 
 export interface RepairSnapshot {
@@ -20,6 +28,8 @@ export interface QualifiedRepairArtifact extends RepairSnapshot {
   reviewReason?: string;
   rejectionReason?: string;
   qualifiedAt?: string;
+  /** Controller-mediated preflight summary recorded at qualification. */
+  preflightSummary?: string;
 }
 
 /** SHA-256 of a directory tree (paths + file bytes), excluding node_modules. */
@@ -37,14 +47,30 @@ export async function digestDirectoryTree(root: string): Promise<string> {
   return h.digest("hex");
 }
 
+/**
+ * List files under root. Rejects symlinks so review/digest/activation cannot
+ * follow links outside the candidate scope.
+ */
 async function listFilesRecursive(root: string, prefix = ""): Promise<string[]> {
   const abs = prefix ? path.join(root, prefix) : root;
   const names = await readdir(abs);
   const out: string[] = [];
+  const rootReal = await realpath(root);
   for (const name of names) {
     if (name === "node_modules" || name === ".git") continue;
     const rel = prefix ? path.join(prefix, name) : name;
-    const info = await stat(path.join(root, rel));
+    const full = path.join(root, rel);
+    const info = await lstat(full);
+    if (info.isSymbolicLink()) {
+      throw new Error(
+        `candidate contains symlink (rejected): ${rel.split(path.sep).join("/")}`,
+      );
+    }
+    // Defense in depth: resolved path must stay under the candidate root.
+    const resolved = path.resolve(full);
+    if (resolved !== rootReal && !resolved.startsWith(rootReal + path.sep)) {
+      throw new Error(`candidate path escapes root: ${rel}`);
+    }
     if (info.isDirectory()) {
       out.push(...(await listFilesRecursive(root, rel)));
     } else if (info.isFile()) {
@@ -97,7 +123,7 @@ export async function snapshotRepairCandidate(args: {
   return meta;
 }
 
-/** Reject patches that alter the pinned step list declaration if present. */
+/** Reject patches that alter the pinned step list; stages pin is required. */
 export async function assertCandidateStepsUnchanged(args: {
   baseDefinitionStages: Array<{ id: string; name: string; requirementIds: string[] }>;
   candidateRoot: string;
@@ -110,8 +136,9 @@ export async function assertCandidateStepsUnchanged(args: {
   try {
     raw = await readFile(defPath, "utf8");
   } catch {
-    // No stage pin file — structural check deferred to describe()/activation.
-    return;
+    throw new Error(
+      `candidate missing required stages pin (${rel}); add/delete/rename/reorder check cannot be deferred`,
+    );
   }
   const parsed = JSON.parse(raw) as {
     stages?: Array<{ id: string; name: string; requirementIds: string[] }>;

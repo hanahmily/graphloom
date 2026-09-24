@@ -3,12 +3,20 @@ import os from "node:os";
 import path from "node:path";
 import {
   createAgentSession,
+  createBashToolDefinition,
+  createEditToolDefinition,
   createExtensionRuntime,
+  createFindToolDefinition,
+  createGrepToolDefinition,
+  createLsToolDefinition,
+  createReadToolDefinition,
+  createWriteToolDefinition,
   ModelRuntime,
   SessionManager,
   SettingsManager,
   type AgentSession,
   type ResourceLoader,
+  type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import {
   resolveMiniMaxCredential,
@@ -327,13 +335,13 @@ function wrapSession(args: {
       if (closed) {
         throw new Error("supervisor session is closed");
       }
-      // Track scoped root on this same AgentSession; tool enablement lands with
-      // candidate-bound read/edit/write (setActiveToolsByName) in a follow-on.
-      codingRoot = candidateRoot;
-      void codingRoot;
+      const root = path.resolve(candidateRoot);
+      codingRoot = root;
+      installCandidateCodingTools(session, root);
     },
     async revokeCandidateCoding() {
       codingRoot = undefined;
+      revokeCandidateCodingTools(session);
     },
     async close() {
       if (closed) return;
@@ -365,6 +373,62 @@ function createIsolatedResourceLoader(systemPrompt: string): ResourceLoader {
     extendResources: () => undefined,
     reload: async () => undefined,
   };
+}
+
+const CANDIDATE_CODING_TOOL_NAMES = [
+  "read",
+  "edit",
+  "write",
+  "bash",
+  "ls",
+  "grep",
+  "find",
+] as const;
+
+/** Pi AgentSession internals needed to swap candidate-scoped coding tools. */
+interface MutableToolSession {
+  _customTools: ToolDefinition[];
+  _allowedToolNames: Set<string> | undefined;
+  _refreshToolRegistry: (options?: { activeToolNames?: string[] }) => void;
+  setActiveToolsByName: (toolNames: string[]) => void;
+}
+
+function asMutableToolSession(session: AgentSession): MutableToolSession {
+  return session as unknown as MutableToolSession;
+}
+
+function candidateCodingToolDefinitions(root: string): unknown[] {
+  return [
+    createReadToolDefinition(root),
+    createEditToolDefinition(root),
+    createWriteToolDefinition(root),
+    createBashToolDefinition(root),
+    createLsToolDefinition(root),
+    createGrepToolDefinition(root),
+    createFindToolDefinition(root),
+  ];
+}
+
+/**
+ * Enable read/edit/write/bash (and discovery) tools bound to the candidate root.
+ * Lifts the decision-only empty allowlist from session creation so tools can activate.
+ */
+function installCandidateCodingTools(session: AgentSession, root: string): void {
+  const host = asMutableToolSession(session);
+  host._allowedToolNames = undefined;
+  host._customTools = candidateCodingToolDefinitions(root) as ToolDefinition[];
+  host._refreshToolRegistry({
+    activeToolNames: [...CANDIDATE_CODING_TOOL_NAMES],
+  });
+}
+
+/** Revoke coding tools; session returns to decision-only (no filesystem tools). */
+function revokeCandidateCodingTools(session: AgentSession): void {
+  const host = asMutableToolSession(session);
+  host._customTools = [];
+  host._allowedToolNames = new Set();
+  host._refreshToolRegistry({ activeToolNames: [] });
+  host.setActiveToolsByName([]);
 }
 
 function sleep(ms: number): Promise<void> {
