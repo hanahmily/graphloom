@@ -266,7 +266,10 @@ late results and stale decisions cannot advance either mode.
 Supervisor decisions go directly to controller admission. They can:
 
 - `Observe` files, artifacts, logs, and workspace state.
-- `Dispatch` diagnostic commands, independent investigation, or repair agents.
+- `Dispatch` diagnostic or work jobs within admitted scopes.
+- Write qualified plugin/validator repairs **via the supervisor's Pi session**
+  against an isolated candidate tree (`QualifyRepair` → patch → review →
+  `ActivateRepair`).
 - Retry a failed job with corrected instructions or available launch/model settings.
 - `Reenter` a declared current or earlier stage with a repair explanation.
 - `Return` control to normal graph execution, or `Stop` with an unresolved blocker.
