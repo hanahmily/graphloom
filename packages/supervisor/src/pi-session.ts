@@ -72,10 +72,17 @@ export interface PiSupervisorSession {
   readonly sessionFile: string | undefined;
   readonly credentialSource: MiniMaxCredentialSource;
   /**
-   * Send a prompt and wait until idle. Returns assistant text only
-   * (no thinking / tool internals). Times out if the session does not settle.
+   * Send a prompt and wait until idle. Returns the final turn's assistant text
+   * only (no thinking / tool internals). Times out if the session does not settle.
+   * With `maxTurns`, a turn beyond the cap is aborted before its provider request
+   * and the prompt rejects.
    */
-  prompt(text: string, options?: { signal?: AbortSignal }): Promise<string>;
+  prompt(
+    text: string,
+    options?: { signal?: AbortSignal; timeoutMs?: number; maxTurns?: number },
+  ): Promise<string>;
+  /** Provider turns (model calls) started since the last drain, including tool turns. */
+  drainTurnCount?(): number;
   /**
    * Switch the active model on this logical session.
    * Caller must ensure the target is operator-configured and idle.
@@ -158,7 +165,7 @@ export async function createPiSupervisorSession(
     settingsManager,
   });
 
-  return wrapSession({
+  return wrapPiAgentSession({
     session,
     modelRuntime,
     runId: options.runId,
@@ -222,7 +229,8 @@ async function applyProviderCredentials(args: {
   return "pi-stored";
 }
 
-function wrapSession(args: {
+/** @internal Exported for tests that drive a real AgentSession on a faux provider. */
+export function wrapPiAgentSession(args: {
   session: AgentSession;
   modelRuntime: ModelRuntime;
   runId: string;
@@ -239,6 +247,7 @@ function wrapSession(args: {
   let provider = args.provider;
   let modelId = args.modelId;
   let codingRoot: string | undefined;
+  let turns = 0;
 
   return {
     runId: args.runId,
@@ -286,9 +295,25 @@ function wrapSession(args: {
       if (closed) {
         throw new Error("supervisor session is closed");
       }
-      const collected: string[] = [];
+      const timeoutMs = promptOptions?.timeoutMs ?? promptTimeoutMs;
+      const maxTurns = promptOptions?.maxTurns;
+      let promptTurns = 0;
+      let turnCapHit = false;
+      let collected: string[] = [];
       const unsubscribe = session.subscribe((event) => {
-        if (
+        if (event.type === "turn_start") {
+          // Pi awaits listeners before streaming, so aborting here cancels the
+          // turn before its provider request is sent.
+          if (maxTurns !== undefined && promptTurns >= maxTurns) {
+            turnCapHit = true;
+            void session.abort().catch(() => undefined);
+            return;
+          }
+          promptTurns += 1;
+          turns += 1;
+          // Tool-using prompts span several turns; keep only the final reply.
+          collected = [];
+        } else if (
           event.type === "message_update" &&
           event.assistantMessageEvent.type === "text_delta"
         ) {
@@ -300,7 +325,7 @@ function wrapSession(args: {
       const timeout = setTimeout(() => {
         timedOut = true;
         void session.abort().catch(() => undefined);
-      }, promptTimeoutMs);
+      }, timeoutMs);
       const onOuterAbort = () => {
         void session.abort().catch(() => undefined);
       };
@@ -311,12 +336,15 @@ function wrapSession(args: {
           throw new Error("supervisor prompt aborted");
         }
         await session.prompt(text);
-        const idleDeadline = Date.now() + promptTimeoutMs;
+        const idleDeadline = Date.now() + timeoutMs;
         while (!session.isIdle && Date.now() < idleDeadline) {
           await sleep(25);
         }
         if (promptOptions?.signal?.aborted) {
           throw new Error("supervisor prompt aborted");
+        }
+        if (turnCapHit) {
+          throw new Error(`supervisor prompt exceeded its ${maxTurns}-turn allowance`);
         }
         if (timedOut || !session.isIdle) {
           await session.abort().catch(() => undefined);
@@ -326,7 +354,7 @@ function wrapSession(args: {
             await sleep(25);
           }
           throw new Error(
-            `supervisor prompt timed out after ${promptTimeoutMs}ms (session still active)`,
+            `supervisor prompt timed out after ${timeoutMs}ms (session still active)`,
           );
         }
         return collected.join("").trim();
@@ -335,6 +363,11 @@ function wrapSession(args: {
         promptOptions?.signal?.removeEventListener("abort", onOuterAbort);
         unsubscribe();
       }
+    },
+    drainTurnCount() {
+      const n = turns;
+      turns = 0;
+      return n;
     },
     async grantCandidateCoding(candidateRoot: string) {
       if (closed) {

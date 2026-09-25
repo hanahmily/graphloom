@@ -23,6 +23,7 @@ export interface RepairPatchAuthor {
     candidateRoot: string;
     target: "plugin" | "validator";
     reason: string;
+    maxProviderCalls?: number;
   }): Promise<{ summary: string }>;
 }
 
@@ -45,7 +46,11 @@ export interface RepairPreflightResult {
 }
 
 export interface RepairDeps {
-  patchAuthor: RepairPatchAuthor;
+  /**
+   * Test seam for the patch step. When omitted, the run supervisor's own
+   * `patchCandidate` authors the patch in the same session (the live Pi path).
+   */
+  patchAuthor?: RepairPatchAuthor;
   reviewer: RepairReviewer;
   /**
    * Controller-mediated build/test/contract checks before independent review.
@@ -122,12 +127,31 @@ export async function applyQualifyRepair(
       blocker: "no supervisor session id",
     };
   }
-  if (deps.repair.patchAuthor.sessionId !== supervisorSessionId) {
+  const patchAuthor = resolvePatchAuthor(deps.repair, deps.supervisor, supervisorSessionId);
+  if (!patchAuthor) {
+    return {
+      ...state,
+      status: "stopped",
+      stopReason: "qualify_repair requires a patch author",
+      blocker:
+        "no repair.patchAuthor, and the supervisor lacks patchCandidate with grant/revoke and provider-call accounting",
+    };
+  }
+  const meteredPatch = patchAuthor !== deps.repair.patchAuthor;
+  if (patchAuthor.sessionId !== supervisorSessionId) {
     return {
       ...state,
       status: "stopped",
       stopReason: "patch author must use the run supervisor session",
-      blocker: `patch=${deps.repair.patchAuthor.sessionId} supervisor=${supervisorSessionId}`,
+      blocker: `patch=${patchAuthor.sessionId} supervisor=${supervisorSessionId}`,
+    };
+  }
+  if (meteredPatch && state.budgets.agentInvocations <= 0) {
+    return {
+      ...state,
+      status: "stopped",
+      stopReason: "agentInvocations budget exhausted",
+      blocker: "supervisor candidate patch",
     };
   }
   if (deps.repair.reviewer.sessionId === supervisorSessionId) {
@@ -140,7 +164,10 @@ export async function applyQualifyRepair(
   }
 
   // Reserve the correction and record the attempt durably before any effect so a
-  // crash or thrown patch/review cannot replay the repair for free.
+  // crash or thrown patch/review cannot replay the repair for free. A metered patch
+  // also reserves the remaining invocations as its turn cap; unused calls are
+  // refunded once the patch settles, and a crash keeps the whole reservation spent.
+  const patchAllowance = meteredPatch ? state.budgets.agentInvocations : 0;
   const repairsDir = path.join(state.stateDir, "repairs");
   const artifactId = `repair-${randomUUID().slice(0, 8)}`;
   const reserved: QualifiedRepairArtifact = {
@@ -161,14 +188,23 @@ export async function applyQualifyRepair(
     budgets: {
       ...state.budgets,
       corrections: state.budgets.corrections - 1,
+      agentInvocations: state.budgets.agentInvocations - patchAllowance,
     },
   };
   await saveRunState(reservedState);
 
+  let patchRefund = patchAllowance;
+  let patchSummary: string | undefined;
   const settle = (artifact: QualifiedRepairArtifact): DurableRunState => ({
     ...reservedState,
+    budgets: {
+      ...reservedState.budgets,
+      agentInvocations: reservedState.budgets.agentInvocations + patchRefund,
+    },
     repairCandidates: (reservedState.repairCandidates ?? []).map((c) =>
-      c.artifactId === artifactId ? artifact : c,
+      c.artifactId === artifactId
+        ? { ...artifact, ...(patchSummary !== undefined ? { patchSummary } : {}) }
+        : c,
     ),
   });
   const reject = async (reason: string): Promise<DurableRunState> =>
@@ -200,11 +236,20 @@ export async function applyQualifyRepair(
     await deps.supervisor?.grantCandidateCoding?.(snap.candidateRoot);
     granted = true;
 
-    await deps.repair.patchAuthor.patch({
-      candidateRoot: snap.candidateRoot,
-      target: qualify.target,
-      reason: qualify.reason,
-    });
+    try {
+      const patched = await patchAuthor.patch({
+        candidateRoot: snap.candidateRoot,
+        target: qualify.target,
+        reason: qualify.reason,
+        ...(meteredPatch ? { maxProviderCalls: patchAllowance } : {}),
+      });
+      patchSummary = boundPatchSummary(patched?.summary);
+    } finally {
+      if (meteredPatch) {
+        const spent = deps.supervisor?.drainProviderCalls?.() ?? patchAllowance;
+        patchRefund = patchAllowance - Math.min(patchAllowance, Math.max(0, spent));
+      }
+    }
 
     await assertCandidateStepsUnchanged({
       baseDefinitionStages: stagePins(state.definition),
@@ -497,6 +542,36 @@ function stagePins(definition: GraphDefinition) {
     name: s.name,
     requirementIds: [...s.requirementIds],
   }));
+}
+
+function resolvePatchAuthor(
+  repair: RepairDeps,
+  supervisor: Supervisor | undefined,
+  supervisorSessionId: string,
+): RepairPatchAuthor | undefined {
+  if (repair.patchAuthor) return repair.patchAuthor;
+  // The controller must be able to scope, revoke, and meter the supervisor's patch.
+  if (
+    !supervisor?.patchCandidate ||
+    !supervisor.grantCandidateCoding ||
+    !supervisor.revokeCandidateCoding ||
+    !supervisor.drainProviderCalls
+  ) {
+    return undefined;
+  }
+  return {
+    sessionId: supervisorSessionId,
+    patch: (args) => supervisor.patchCandidate!(args),
+  };
+}
+
+const MAX_PATCH_SUMMARY_CHARS = 2_000;
+
+/** Every patch author's summary obeys the same bound before it becomes durable. */
+function boundPatchSummary(raw: unknown): string | undefined {
+  if (typeof raw !== "string") return undefined;
+  const summary = raw.trim().slice(0, MAX_PATCH_SUMMARY_CHARS);
+  return summary === "" ? undefined : summary;
 }
 
 function readSupervisorSessionId(supervisor: Supervisor | undefined): string | undefined {

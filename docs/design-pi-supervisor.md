@@ -178,9 +178,19 @@ Tooling has two layers:
    Bash, grep, and find are withheld because a working directory is not a
    sandbox; build and test run through controller preflight. The supervisor writes
    plugin/validator source repairs itself through the Pi SDK; coding is not
-   delegated to a separate non-Pi repair agent. Revoke or rebind those tools when
-   the qualification episode ends. An independent read-only reviewer uses a
-   different session and must not share write tools with the patching supervisor.
+   delegated to a separate non-Pi repair agent. When no explicit patch author is
+   configured, the controller calls `Supervisor.patchCandidate`, which sends one
+   repair prompt (target, reason, candidate root, tool rules) to that session under
+   a separate patch timeout. This fallback requires the supervisor to expose
+   grant, revoke, and provider-call accounting. Before the patch, the controller
+   durably reserves the remaining `agentInvocations` as the patch's turn cap; Pi
+   aborts any turn past the cap before its provider request, unused calls are
+   refunded when the patch settles, and a crash leaves the reservation spent.
+   The reply, bounded to 2,000 characters for every patch author, is recorded as
+   the artifact's `patchSummary`, including when a later qualification step
+   rejects the candidate. Revoke or rebind those tools when the qualification
+   episode ends. An independent read-only reviewer uses a different session and
+   must not share write tools with the patching supervisor.
 
 Pi must not directly mutate the run worktree or authoritative controller state.
 The fixed step list and acceptance requirements remain enforced by the controller.
@@ -212,7 +222,7 @@ reconciles in-flight effects. Filter private thinking from user-facing activity.
 | Gap | Required work |
 |---|---|
 | SDK dependency and MiniMax connection are ready; session adapter creates a durable Pi transcript | Wire controller recovery admission/results loop and GraphLoom-owned tools |
-| Decision-only adapter (`noTools: "all"`) | After `QualifyRepair`, enable Pi coding tools scoped to the candidate tree so the supervisor can write plugin/validator fixes in-session |
+| Candidate coding tools swap through private `AgentSession` fields | Replace with a public Pi tool-registry API when available; qualify on each Pi upgrade |
 | Cross-provider switching | Serialize selection, journal switches, enforce context/tool compatibility, retain session/history |
 | Invocation accounting | Count actual provider calls, including compaction/retry paths; avoid unmetered background work |
 | Restart and cancellation | Reconcile session metadata, tool operations, active model, and generation fences |

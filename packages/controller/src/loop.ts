@@ -572,6 +572,7 @@ export function toRunView(state: DurableRunState): RunView {
       ...(c.qualifiedAt !== undefined ? { qualifiedAt: c.qualifiedAt } : {}),
       ...(c.rejectionReason !== undefined ? { rejectionReason: c.rejectionReason } : {}),
       ...(c.preflightSummary !== undefined ? { preflightSummary: c.preflightSummary } : {}),
+      ...(c.patchSummary !== undefined ? { patchSummary: c.patchSummary } : {}),
     }));
   }
   return view;
@@ -744,10 +745,13 @@ async function applyDecision(
           : {}),
       });
       // Swap validators in place for the remainder of this loop.
-      for (const key of Object.keys(deps.validators)) {
-        delete deps.validators[key];
+      if (activated.validators !== deps.validators) {
+        const next = { ...activated.validators };
+        for (const key of Object.keys(deps.validators)) {
+          delete deps.validators[key];
+        }
+        Object.assign(deps.validators, next);
       }
-      Object.assign(deps.validators, activated.validators);
       if (activated.host) {
         await deps.host.close().catch(() => undefined);
         deps.host = activated.host;

@@ -109,6 +109,7 @@ export interface RunView {
     qualifiedAt?: string;
     rejectionReason?: string;
     preflightSummary?: string;
+    patchSummary?: string;
   }>;
 }
 

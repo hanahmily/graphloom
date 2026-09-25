@@ -550,7 +550,8 @@ function resolveValidators(
   ctx: { runId: string; getStateRevision: () => number },
 ): Record<string, AdmissionValidator> {
   if (explicit) {
-    return explicit;
+    // Activation swaps validators in place; never mutate the caller's map.
+    return { ...explicit };
   }
   if (getHost().evaluate) {
     return createHostValidators(getHost, ids, ctx);

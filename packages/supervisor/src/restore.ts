@@ -24,6 +24,7 @@ export interface RestorePiSupervisorOptions {
   cwd?: string;
   /** Controller repairs directory; required for candidate coding grants. */
   repairsDir?: string;
+  patchTimeoutMs?: number;
 }
 
 /**
@@ -72,6 +73,7 @@ export async function restorePiSupervisorFromBinding(
     session,
     configuredModels: configured,
     initialSwitchJournal: binding.switchJournal as ModelSwitchRecord[],
+    ...(options.patchTimeoutMs !== undefined ? { patchTimeoutMs: options.patchTimeoutMs } : {}),
   });
 }
 
