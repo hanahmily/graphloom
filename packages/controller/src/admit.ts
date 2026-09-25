@@ -329,6 +329,9 @@ export interface EvidenceProducer {
   kind: string;
   /** Pinned executor identity that produced this evidence, when known. */
   executorId?: string;
+  /** For child operations: the agent job that requested it, and its tool call. */
+  parentOperationId?: string;
+  toolCallId?: string;
 }
 
 function assertSeparateReviewer(

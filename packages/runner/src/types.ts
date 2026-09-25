@@ -1,4 +1,13 @@
-import type { JobSpec } from "@graphloom/sdk";
+import type { JobSpec, ToolCallRequest, ToolCallResult } from "@graphloom/sdk";
+
+/**
+ * Controller services for a running job: admitted tool calls become child
+ * operations, and model requests reserve the shared run budget.
+ */
+export interface ChildOperationPort {
+  callTool(request: ToolCallRequest): Promise<ToolCallResult>;
+  reserveModelCall(): Promise<boolean>;
+}
 
 export interface JobContext {
   runId: string;
@@ -7,6 +16,10 @@ export interface JobContext {
   worktreePath: string;
   /** Absolute path for immutable run artifacts (outside worktree). */
   artifactDir: string;
+  /** Aborted when the run stops; runners terminate the job's process. */
+  signal?: AbortSignal;
+  /** Present for jobs the controller can service tool calls and model usage for. */
+  children?: ChildOperationPort;
 }
 
 export interface JobEvidenceItem {

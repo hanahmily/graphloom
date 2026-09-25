@@ -5,6 +5,8 @@ import type { Runner } from "./types.js";
 
 export interface BuiltinExecutorPackage extends ExecutorBinding {
   manifest: ExecutorPackageManifest;
+  /** Per-job timeout (ms) for this package; overrides the runner default. */
+  timeoutMs?: number;
 }
 
 export interface BuiltinExecutorRunnerOptions {
@@ -19,14 +21,21 @@ export interface BuiltinExecutorRunnerOptions {
 }
 
 /**
- * Serve built-in executor packages, each in its own sandboxed executor process
- * that sees only the credentials, effect grant, and configuration the operator
- * bound, and can read only its own package and dependencies.
+ * Serve built-in executor packages, each in its own executor process that sees
+ * only the credentials, effect grant, and configuration the operator bound.
+ * Sandboxed packages can read only their own package and dependencies; a
+ * package declaring `isolation: "unrestricted"` runs with full user
+ * permissions and requires `allowUnrestricted`.
  */
 export function createBuiltinExecutorRunner(options: BuiltinExecutorRunnerOptions): Runner {
   assertSandboxSupported();
   const claimed = new Map<string, string>();
-  for (const { manifest, credentials, env } of options.packages) {
+  for (const { manifest, credentials, env, allowUnrestricted } of options.packages) {
+    if (manifest.isolation === "unrestricted" && allowUnrestricted !== true) {
+      throw new Error(
+        `built-in package ${manifest.name} runs unrestricted; the operator must set allowUnrestricted`,
+      );
+    }
     for (const id of manifest.executorIds) {
       if (!id.startsWith(BUILTIN_EXECUTOR_NAMESPACE)) {
         throw new Error(`built-in package ${manifest.name} serves ${id} outside ${BUILTIN_EXECUTOR_NAMESPACE}*`);
@@ -50,20 +59,23 @@ export function createBuiltinExecutorRunner(options: BuiltinExecutorRunnerOption
   }
 
   return options.packages.reduceRight<Runner>((fallback, pkg) => {
-    const env: NodeJS.ProcessEnv = { ...pkg.env };
+    const unrestricted = pkg.manifest.isolation === "unrestricted";
+    // An unrestricted package runs commands, so it needs the user's PATH and HOME.
+    const env: NodeJS.ProcessEnv = unrestricted ? { ...process.env, ...pkg.env } : { ...pkg.env };
     if (process.env.NODE_EXTRA_CA_CERTS !== undefined) {
       env.NODE_EXTRA_CA_CERTS = process.env.NODE_EXTRA_CA_CERTS;
     }
+    const timeoutMs = pkg.timeoutMs ?? options.timeoutMs;
     return createChildExecutorRunner({
       entryModule: pkg.manifest.entryModule,
       executorIds: [...pkg.manifest.executorIds],
       builtin: true,
-      sandbox: true,
+      sandbox: !unrestricted,
       fallback,
       env,
       allowedEffects: pkg.allowedEffects ?? ["read"],
       ...(pkg.credentials !== undefined ? { credentials: pkg.credentials } : {}),
-      ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
+      ...(timeoutMs !== undefined ? { timeoutMs } : {}),
       ...(options.workerModule !== undefined ? { workerModule: options.workerModule } : {}),
     });
   }, options.fallback);

@@ -386,6 +386,129 @@ describe("createBuiltinExecutorRunner", () => {
       createBuiltinExecutorRunner({ packages: [{ manifest }, { manifest: { ...manifest, name: "dup" } }], fallback }),
     ).toThrow("executor graphloom.fixture/echo is served by both @graphloom/executor-fixture and dup");
   });
+
+  it("runs an unrestricted package only with operator consent, and then without the sandbox", async () => {
+    const unrestricted = { ...manifest, isolation: "unrestricted" as const };
+    const fallback = createScriptedRunner({ jobs: [] });
+    expect(() => createBuiltinExecutorRunner({ packages: [{ manifest: unrestricted }], fallback })).toThrow(
+      "built-in package @graphloom/executor-fixture runs unrestricted; the operator must set allowUnrestricted",
+    );
+    const dir = await mkdtemp(path.join(os.tmpdir(), "gl-unrestricted-"));
+    const outside = path.join(dir, "readable.txt");
+    await writeFile(outside, "x", "utf8");
+    const runner = createBuiltinExecutorRunner({
+      packages: [{ manifest: unrestricted, allowUnrestricted: true }],
+      fallback,
+      workerModule,
+    });
+    const result = await runner.runJob(job("graphloom.fixture/probe", { outside }), ctx);
+    expect(result.evidence?.[0]?.payload).toMatchObject({ readOutside: "allowed", spawn: "allowed" });
+  });
+});
+
+describe("child operation protocol", () => {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const workerModule = path.join(here, "../dist/executor-worker.js");
+  const entryModule = path.join(here, "../test/fixtures/tool-agent-executor.mjs");
+  const tools = [
+    { name: "read_comments", effect: "read" as const, executor: { id: "acme.github/list-comments", version: "1" } },
+  ];
+  const agentJob = (input: unknown) => ({
+    stageId: "implement",
+    kind: "agent" as const,
+    purpose: "work" as const,
+    instruction: "implement",
+    writeScope: ["src"],
+    executor: { id: "acme.agent/tooling", version: "1" },
+    tools,
+    input,
+  });
+  const ctx = { runId: "r1", operationId: "op1", generation: 1, worktreePath: "/tmp", artifactDir: "/tmp/a" };
+  const runner = (credentials?: Record<string, string>) =>
+    createChildExecutorRunner({
+      entryModule,
+      executorIds: ["acme.agent/tooling"],
+      fallback: createScriptedRunner({ jobs: [] }),
+      workerModule,
+      ...(credentials !== undefined ? { credentials } : {}),
+    });
+  function port(budget = 1) {
+    const calls: unknown[] = [];
+    let remaining = budget;
+    return {
+      calls,
+      port: {
+        async callTool(req: { toolCallId: string; tool: string; input: unknown }) {
+          calls.push(req);
+          return { status: "ok" as const, summary: `ran ${req.tool}`, childOperationId: `child-${calls.length}` };
+        },
+        async reserveModelCall() {
+          remaining -= 1;
+          return remaining >= 0;
+        },
+      },
+    };
+  }
+
+  it("services tool calls and model reservations while the executor waits", async () => {
+    const p = port(1);
+    const result = await runner().runJob(
+      agentJob({
+        steps: [
+          { model: true },
+          { id: "t1", tool: "read_comments", input: { issue: 7 } },
+          { model: true },
+        ],
+      }),
+      { ...ctx, children: p.port },
+    );
+    expect(result.status, result.summary).toBe("ok");
+    expect(p.calls).toEqual([{ toolCallId: "t1", tool: "read_comments", input: { issue: 7 } }]);
+    expect(result.evidence?.[0]?.payload).toEqual({
+      calls: [
+        { model: true },
+        { tool: "read_comments", result: { status: "ok", summary: "ran read_comments", childOperationId: "child-1" } },
+        { model: false },
+      ],
+      tools: [{ name: "read_comments", effect: "read" }],
+    });
+  });
+
+  it("refuses a tool the job did not declare without reaching the controller", async () => {
+    const p = port();
+    const result = await runner().runJob(agentJob({ steps: [{ id: "t1", tool: "delete_repo" }] }), {
+      ...ctx,
+      children: p.port,
+    });
+    expect(p.calls).toEqual([]);
+    expect(result.evidence?.[0]?.payload).toMatchObject({
+      calls: [{ result: { status: "failed", summary: "tool delete_repo is not admitted for this job" } }],
+    });
+  });
+
+  it("redacts bound credentials from tool input before it reaches the controller", async () => {
+    const p = port();
+    await runner({ agent: "sekrit-9" }).runJob(
+      agentJob({ steps: [{ id: "t1", tool: "read_comments", input: { q: "token sekrit-9" } }] }),
+      { ...ctx, children: p.port },
+    );
+    expect(p.calls).toEqual([{ toolCallId: "t1", tool: "read_comments", input: { q: "token [REDACTED]" } }]);
+  });
+
+  it("kills the executor process when the run stops", async () => {
+    const abort = new AbortController();
+    const started = Date.now();
+    const pending = runner().runJob(agentJob({ hang: true }), { ...ctx, signal: abort.signal, children: port().port });
+    setTimeout(() => abort.abort(), 200);
+    const result = await pending;
+    expect(result).toMatchObject({ status: "failed", summary: "executor cancelled: run stopped" });
+    expect(Date.now() - started).toBeLessThan(5_000);
+  });
+
+  it("refuses an executor whose effect differs from the declared one", async () => {
+    const result = await runner().runJob({ ...agentJob({ steps: [] }), effect: "read" }, ctx);
+    expect(result.summary).toBe("executor acme.agent/tooling effect write does not match declared read");
+  });
 });
 
 describe("assertBoundedJson", () => {

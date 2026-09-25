@@ -133,6 +133,10 @@ export interface JobSpec {
   executor?: import("./executor.js").ExecutorPin;
   /** Bounded JSON-serializable input for the pinned executor. */
   input?: unknown;
+  /** Declared effect; the runner refuses an executor whose effect differs. */
+  effect?: import("./executor.js").ExecutorEffect;
+  /** Tools the job's agent may call; each call is admitted as a child operation. */
+  tools?: import("./executor.js").ToolBinding[];
 }
 
 export interface ObserveSpec {

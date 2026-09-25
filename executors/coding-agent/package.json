@@ -1,0 +1,31 @@
+{
+  "name": "@graphloom/executor-coding-agent",
+  "version": "0.1.0",
+  "description": "Built-in coding-agent executor (graphloom.coding-agent/run): adapts an agent harness to the executor protocol",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./executors": {
+      "types": "./dist/executors.d.ts",
+      "import": "./dist/executors.js"
+    },
+    "./testing": {
+      "types": "./dist/testing/scripted-harness.d.ts",
+      "import": "./dist/testing/scripted-harness.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "tsc -p tsconfig.json && vitest run"
+  },
+  "dependencies": {
+    "@graphloom/sdk": "0.0.0"
+  }
+}

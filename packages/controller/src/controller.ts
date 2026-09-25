@@ -44,6 +44,7 @@ import {
   reapOwnerProcesses,
 } from "./owner.js";
 import { reconcilePendingDispatch } from "./reconcile.js";
+import { reconcileChildOperations } from "./children.js";
 import {
   getSession,
   registerSession,
@@ -377,6 +378,13 @@ export function createController(): Controller {
           return;
         }
 
+        const children = reconcileChildOperations(state);
+        state = children.state;
+        if (!children.settled) {
+          state = { ...state, status: "stopped", stopReason: "reconcile required", blocker: children.reason };
+          await saveRunState(state);
+          return;
+        }
         if (state.pendingDispatch?.status === "pending") {
           const reconciled = await reconcilePendingDispatch(state);
           state = reconciled.state;

@@ -19,6 +19,54 @@ export interface ExecutorCredentials {
   get(name: string): Promise<string | undefined>;
 }
 
+/**
+ * A harness tool the graph exposes to an agent job. The agent calls it by
+ * name; the controller admits each call as a child operation of the pinned
+ * executor. The agent cannot name an executor or widen its grants.
+ */
+export interface ToolBinding {
+  name: string;
+  executor: ExecutorPin;
+  /** Declared effect; the runner refuses an executor whose effect differs. */
+  effect: ExecutorEffect;
+  description?: string;
+}
+
+export interface ToolCallRequest {
+  /** Harness tool-call identity; a repeated id replays the recorded result. */
+  toolCallId: string;
+  tool: string;
+  input: unknown;
+}
+
+export interface ToolCallEvidence {
+  kind: "file" | "command" | "workspace" | "review" | "other";
+  payload?: unknown;
+  fingerprint?: string;
+}
+
+export interface ToolCallResult {
+  status: "ok" | "failed" | "conflict";
+  summary: string;
+  evidence?: ToolCallEvidence[];
+  /** Controller operation that executed the call, when one was admitted. */
+  childOperationId?: string;
+  /** True when the result was recorded earlier and not executed again. */
+  replayed?: boolean;
+}
+
+/** Tools admitted for this job, serviced by the controller one call at a time. */
+export interface ExecutorTools {
+  readonly bindings: ReadonlyArray<Pick<ToolBinding, "name" | "effect" | "description">>;
+  call(request: ToolCallRequest): Promise<ToolCallResult>;
+}
+
+/** Shared run budget for model requests made inside an executor. */
+export interface ExecutorUsage {
+  /** Reserve one provider request; false when the run budget is exhausted or the job is fenced. */
+  reserveModelCall(): Promise<boolean>;
+}
+
 export interface ExecutorContext {
   runId: string;
   operationId: string;
@@ -30,6 +78,10 @@ export interface ExecutorContext {
   readOnly?: boolean;
   signal?: AbortSignal;
   credentials?: ExecutorCredentials;
+  /** Present when the job declared tools. */
+  tools?: ExecutorTools;
+  /** Present when the host accounts for model requests made by this job. */
+  usage?: ExecutorUsage;
 }
 
 export type JsonSchemaValidator<T> = (value: unknown) => value is T;
@@ -69,6 +121,12 @@ export interface ExecutorPackageManifest {
   credentials?: readonly string[];
   /** Non-secret environment variables the operator may set for the executor process. */
   configEnv?: readonly string[];
+  /**
+   * `sandbox` (default): read-only package closure, no writes or processes.
+   * `unrestricted`: full user permissions, e.g. a coding agent that edits the
+   * worktree and runs commands. The host requires explicit operator consent.
+   */
+  isolation?: "sandbox" | "unrestricted";
 }
 
 /** Operator-supplied grants for one executor package. */
@@ -79,6 +137,8 @@ export interface ExecutorBinding {
   allowedEffects?: readonly ExecutorEffect[];
   /** Values for names the manifest lists in `configEnv`. */
   env?: Record<string, string>;
+  /** Operator consent to run a manifest that declares `isolation: "unrestricted"`. */
+  allowUnrestricted?: boolean;
 }
 
 /** Built-in agent executor id — legacy `kind: "agent"` jobs pin to this. */
@@ -202,11 +262,52 @@ export function pinJobExecutor(job: JobSpec): JobSpec {
       return rest;
     })();
 
+  const withTools =
+    job.tools !== undefined ? { ...withInput, tools: assertToolBindings(job.tools) } : withInput;
+  if (job.effect !== undefined && !EFFECTS.includes(job.effect)) {
+    throw new Error(`job effect must be one of ${EFFECTS.join(", ")}`);
+  }
+
   if (job.executor) {
     const pin = assertExecutorPin(job.executor);
-    return { ...withInput, executor: pin };
+    return { ...withTools, executor: pin };
   }
-  return { ...withInput, executor: builtinPinForKind(job.kind) };
+  return { ...withTools, executor: builtinPinForKind(job.kind) };
+}
+
+const EFFECTS: readonly ExecutorEffect[] = ["read", "write", "ambiguous"];
+const TOOL_NAME = /^[a-z][a-z0-9_]{0,63}$/;
+export const MAX_TOOL_BINDINGS = 32;
+
+/** Validate and canonicalize a job's tool bindings. */
+export function assertToolBindings(value: unknown): ToolBinding[] {
+  if (!Array.isArray(value)) throw new Error("job tools must be an array");
+  if (value.length > MAX_TOOL_BINDINGS) throw new Error(`job declares more than ${MAX_TOOL_BINDINGS} tools`);
+  const seen = new Set<string>();
+  return value.map((raw: unknown) => {
+    if (raw === null || typeof raw !== "object") throw new Error("tool binding must be an object");
+    const b = raw as Record<string, unknown>;
+    const name = b["name"];
+    if (typeof name !== "string" || !TOOL_NAME.test(name)) {
+      throw new Error(`tool name must match ${TOOL_NAME.source} (got ${JSON.stringify(name)})`);
+    }
+    if (seen.has(name)) throw new Error(`duplicate tool ${name}`);
+    seen.add(name);
+    const effect = b["effect"];
+    if (!EFFECTS.includes(effect as ExecutorEffect)) {
+      throw new Error(`tool ${name} effect must be one of ${EFFECTS.join(", ")}`);
+    }
+    const binding: ToolBinding = {
+      name,
+      executor: assertExecutorPin(b["executor"]),
+      effect: effect as ExecutorEffect,
+    };
+    if (b["description"] !== undefined) {
+      if (typeof b["description"] !== "string") throw new Error(`tool ${name} description must be a string`);
+      binding.description = b["description"];
+    }
+    return binding;
+  });
 }
 
 /** Validate executor input against a definition's schema when present. */

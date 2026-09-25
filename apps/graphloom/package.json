@@ -20,6 +20,7 @@
     "@graphloom/supervisor": "0.0.0"
   },
   "devDependencies": {
+    "@graphloom/executor-coding-agent": "0.1.0",
     "@graphloom/executor-github": "0.1.0"
   }
 }
