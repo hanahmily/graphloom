@@ -1,4 +1,4 @@
-export type { JobContext, JobEvidenceItem, JobResult, Runner } from "./types.js";
+export type { ChildOperationPort, JobContext, JobEvidenceItem, JobResult, Runner } from "./types.js";
 export {
   createScriptedRunner,
   type ScriptedJobHandler,

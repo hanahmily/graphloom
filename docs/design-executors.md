@@ -87,8 +87,15 @@ permission model (below 22.13) rather than run them unconfined.
 Node's permission model has no network scope, so the host does not restrict
 where a built-in package connects. Built-in packages are first-party code that
 contacts only its configured API URL. Untrusted executors that need egress
-limits require an OS-level sandbox; that belongs to the child executor protocol
-work (#40), not this runner.
+limits require an OS-level sandbox, which this runner does not provide.
+
+A manifest may declare `isolation: "unrestricted"` for work the sandbox cannot
+host, such as a coding agent that edits the worktree and runs commands. Such a
+package runs with the user's full permissions and environment, and the runner
+refuses to serve it unless the operator's binding sets `allowUnrestricted`.
+The controller still admits its tool calls, budgets, cancellation, and
+evidence, but it cannot confine what the package does on the machine,
+including writes outside the job's `writeScope`.
 
 `@graphloom/executor-github` (`executors/github`) is the first built-in package:
 
@@ -140,6 +147,21 @@ How the package behaves:
   a graph that asks for fixes on its own pull request should post a `COMMENT`
   review. The refusal is a definite failure: nothing is posted, and a retry
   fails the same way.
+
+`@graphloom/executor-coding-agent` (`executors/coding-agent`) serves
+`graphloom.coding-agent/run`. It adapts an agent harness to the executor
+protocol:
+
+- A `CodingHarness` opens a session in the run worktree with the job's tools,
+  abort signal, credentials, and a `reserveModelCall` hook, then runs the
+  assignment. The package ships the harness interface and a scripted harness
+  for tests (`@graphloom/executor-coding-agent/testing`); a production Pi
+  harness is a separate adapter.
+- The executor process loads the harness named by `GRAPHLOOM_CODING_HARNESS`.
+  `codingAgentBinding({ harness })` sets it, grants read and write effects, and
+  consents to the package's unrestricted isolation.
+- The job result is the agent's claim: its status, structured output, the tool
+  calls it made with their child operation ids, and its model request count.
 
 Built-in packages and plugin bundles can be installed or upgraded independently
 of the controller when compatible with its executor protocol. No controller
@@ -325,6 +347,46 @@ call returns its existing result; a new harness session must not replay an
 ambiguous external write without reconciliation. A lost JavaScript promise is not
 a durable continuation. An unavailable parent session becomes an explicit recovery
 case with its settled/ambiguous children preserved.
+
+The implemented protocol works as follows:
+
+- A dispatched job declares `tools`: a name, a pinned executor, and the declared
+  effect for each. The SDK validates them at admission. The executor sees only
+  names and effects, and the runner refuses a pinned executor whose effect
+  differs from the declaration.
+- The executor worker protocol is two-way. While the job runs, the executor
+  sends `tool_call` and `model_call` messages and waits for the replies. The
+  runner forwards them to the controller and kills the process when the run
+  stops.
+- For each call, the controller checks the run is still running, the parent
+  is still the outstanding job at its generation, and one job remains reserved
+  for the parent. It then journals a child operation record and runs the child
+  as a leaf `command` job with the parent's worktree scope. The child gets no
+  tools of its own. A parent without a write scope may call only `read` tools.
+- Protocol messages need a positive integer sequence number. The runner ignores
+  any message that arrives after the job settled.
+- On settlement, the child spends one job, and its evidence is recorded with
+  the child operation, parent operation, and tool-call ids.
+- A model call reserves one agent invocation. A parent that reserved any calls
+  is not charged the flat per-dispatch invocation.
+- Calls are serviced one at a time; a concurrent call from the same parent is
+  refused rather than queued.
+- Replay is keyed by stage, attempt, and tool-call id. A settled call returns
+  its recorded result; reusing the id with different input is refused. A new
+  attempt runs the call fresh.
+- Stop aborts the parent and child. Once the parent returns, for any reason
+  including a timeout, the loop cancels a child still running and waits for it
+  to settle before it settles the parent. A child that finished after the fence
+  keeps its result for replay. A write cut short is recorded `ambiguous` and is
+  never replayed.
+- On restart, a pending read child is marked `abandoned` and may run again. A
+  pending write child is marked `ambiguous`, and the run stops once with
+  `reconcile required`. The parent is reconciled after its children.
+- Agent jobs cannot produce validation evidence about their own work. `command`,
+  `file`, and `workspace` evidence from an agent job is recorded as `other` with
+  a `selfReported` claim. So is `review` evidence from anything but a read-only
+  review job. Command evidence from the agent's tool calls counts, because a
+  command executor produced it.
 
 ## Validation ownership
 

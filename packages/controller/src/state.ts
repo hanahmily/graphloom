@@ -23,6 +23,36 @@ export interface PendingDispatch {
   status: "pending" | "completed" | "failed";
   /** Durable pin recorded at admission (before effects). */
   executor?: import("@graphloom/sdk").ExecutorPin;
+  /** Model requests the job reserved against the run's agent-invocation budget. */
+  modelCalls?: number;
+}
+
+/**
+ * A tool call an agent job made, admitted as a child operation. Recorded
+ * before the child runs; settled results are replayed for the same stage
+ * attempt and tool-call id instead of running again.
+ */
+export interface ChildOperationRecord {
+  childOperationId: string;
+  parentOperationId: string;
+  toolCallId: string;
+  tool: string;
+  stageId: string;
+  attempt: number;
+  generation: number;
+  executor: import("@graphloom/sdk").ExecutorPin;
+  effect: import("@graphloom/sdk").ExecutorEffect;
+  input: unknown;
+  /**
+   * `fenced`: settled after the run stopped or the parent ended; not delivered.
+   *   Keeps `result` when the child finished, so a retry replays it.
+   * `abandoned`: a read interrupted by a crash; the call may run again.
+   * `ambiguous`: a write interrupted by a crash or stop; never replayed.
+   */
+  status: "pending" | "ok" | "failed" | "conflict" | "fenced" | "abandoned" | "ambiguous";
+  result?: import("@graphloom/sdk").ToolCallResult;
+  admittedAt: string;
+  settledAt?: string;
 }
 
 export interface DurableRunState {
@@ -39,6 +69,7 @@ export interface DurableRunState {
   evidence: EvidenceRecord[];
   outstanding: OutstandingOperation[];
   pendingDispatch?: PendingDispatch;
+  childOperations?: ChildOperationRecord[];
   privateState?: string;
   definition: GraphDefinition;
   validatorBindings: ValidatorBinding[];

@@ -48,7 +48,13 @@ export type {
   ExecutorId,
   ExecutorPackageManifest,
   ExecutorPin,
+  ExecutorTools,
+  ExecutorUsage,
   JsonSchemaValidator,
+  ToolBinding,
+  ToolCallEvidence,
+  ToolCallRequest,
+  ToolCallResult,
 } from "./executor.js";
 
 export { PROTOCOL_VERSION } from "./types.js";
@@ -57,7 +63,9 @@ export {
   BUILTIN_AGENT_EXECUTOR_ID,
   BUILTIN_COMMAND_EXECUTOR_ID,
   MAX_EXECUTOR_INPUT_BYTES,
+  MAX_TOOL_BINDINGS,
   assertBoundedJson,
+  assertToolBindings,
   assertExecutorId,
   assertExecutorPin,
   builtinPinForKind,

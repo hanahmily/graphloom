@@ -35,6 +35,7 @@ import {
   type RunOwnerClaim,
 } from "./owner.js";
 import { reconcilePendingDispatch } from "./reconcile.js";
+import { createChildPort, reconcileChildOperations } from "./children.js";
 import { loadRunState, type DurableRunState, saveRunState } from "./state.js";
 import { bumpGeneration } from "./generation.js";
 import {
@@ -107,6 +108,16 @@ async function runNormalLoopSteps(
       owner = await claimRunOwner(state.stateDir, {
         ...(deps.host.childPid !== undefined ? { childPid: deps.host.childPid } : {}),
       });
+      const children = reconcileChildOperations(state);
+      if (children.state !== state) {
+        state = children.state;
+        if (!children.settled) {
+          state = { ...state, status: "stopped", stopReason: "reconcile required", blocker: children.reason };
+          await saveRunState(state);
+          return state;
+        }
+        await saveRunState(state);
+      }
       if (state.pendingDispatch?.status === "pending") {
         const reconciled = await reconcilePendingDispatch(state);
         state = reconciled.state;
@@ -302,13 +313,37 @@ async function runNormalLoopSteps(
 
       if (turn.pendingJob) {
         const { job, operationId, generation, isCorrection } = turn.pendingJob;
-        const result = await deps.runner.runJob(job, {
-          runId: state.runId,
-          operationId,
-          generation,
-          worktreePath: state.worktreePath,
-          artifactDir: state.artifactDir,
-        });
+        const abort = new AbortController();
+        const stopWatch = watchForStop(state.stateDir, deps, abort);
+        let result: Awaited<ReturnType<Runner["runJob"]>>;
+        let children: ReturnType<typeof createChildPort> | undefined;
+        try {
+          children =
+            job.kind === "agent" || job.tools !== undefined
+              ? createChildPort(
+                  { job, operationId, generation },
+                  {
+                    stateDir: state.stateDir,
+                    runner: deps.runner,
+                    shouldStop: () => stopRequested(deps),
+                    signal: abort.signal,
+                  },
+                )
+              : undefined;
+          result = await deps.runner.runJob(job, {
+            runId: state.runId,
+            operationId,
+            generation,
+            worktreePath: state.worktreePath,
+            artifactDir: state.artifactDir,
+            signal: abort.signal,
+            ...(children !== undefined ? { children } : {}),
+          });
+        } finally {
+          // A parent that stopped, timed out, or returned early can leave a child running.
+          await children?.close();
+          clearInterval(stopWatch);
+        }
 
         state = await withRunLock(state.stateDir, async () => {
           state = await reloadRunState(state);
@@ -391,6 +426,30 @@ async function runNormalLoopSteps(
   } finally {
     await clearOwnerClaim(state.stateDir);
   }
+}
+
+const STOP_POLL_MS = 200;
+
+/** Abort an outstanding job, and any child it is waiting on, once the run stops. */
+function watchForStop(stateDir: string, deps: LoopDeps, abort: AbortController): NodeJS.Timeout {
+  let checking = false;
+  const timer = setInterval(() => {
+    if (checking || abort.signal.aborted) return;
+    checking = true;
+    void (async () => {
+      try {
+        const stopped =
+          (await stopRequested(deps)) || (await loadRunState(stateDir)).status !== "running";
+        if (stopped) abort.abort();
+      } catch {
+        /* state briefly unavailable during an atomic rename; check again */
+      } finally {
+        checking = false;
+      }
+    })();
+  }, STOP_POLL_MS);
+  timer.unref();
+  return timer;
 }
 
 async function tryRenewOwner(
@@ -959,8 +1018,9 @@ function applyDispatchResult(
     budgets: {
       ...next.budgets,
       jobs: next.budgets.jobs - 1,
+      // Jobs that reserved their actual model requests were charged per request.
       agentInvocations:
-        job.kind === "agent"
+        job.kind === "agent" && !((next.pendingDispatch?.modelCalls ?? 0) > 0)
           ? next.budgets.agentInvocations - 1
           : next.budgets.agentInvocations,
       corrections: isCorrection
@@ -998,12 +1058,16 @@ function applyDispatchResult(
     };
     for (const item of result.evidence) {
       const ref = newEvidenceRef(next);
+      const claimed = selfReportedKind(job, item.kind);
       const record: EvidenceRecord = {
         ref,
-        kind: item.kind,
+        kind: claimed === undefined ? item.kind : "other",
         generation: next.generation,
       };
-      record.payload = attachProducer(item.payload, producer);
+      record.payload = attachProducer(
+        claimed === undefined ? item.payload : { selfReported: claimed, claim: item.payload ?? null },
+        producer,
+      );
       if (item.fingerprint !== undefined) {
         record.fingerprint = item.fingerprint;
       }
@@ -1024,6 +1088,20 @@ function applyDispatchResult(
   const { pendingDispatch: _done, ...cleared } = next;
   void _done;
   return cleared;
+}
+
+/**
+ * Validation evidence an agent reports about its own work is only a claim.
+ * Command results come from command executors (including an agent's tool
+ * calls), file and workspace evidence from controller Observe, and review
+ * verdicts from read-only review jobs. Returns the claimed kind to record
+ * as `other`, or undefined when the job may produce that kind.
+ */
+function selfReportedKind(job: JobSpec, kind: EvidenceRecord["kind"]): EvidenceRecord["kind"] | undefined {
+  if (job.kind !== "agent") return undefined;
+  if (kind === "command" || kind === "file" || kind === "workspace") return kind;
+  if (kind === "review" && !(job.purpose === "review" && job.readOnly === true)) return kind;
+  return undefined;
 }
 
 function attachProducer(payload: unknown, producer: EvidenceProducer): unknown {

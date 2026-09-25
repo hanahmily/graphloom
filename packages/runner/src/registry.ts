@@ -5,10 +5,12 @@ import path from "node:path";
 import {
   pinJobExecutor,
   validateExecutorInput,
+  type ExecutorContext,
   type ExecutorDefinition,
   type ExecutorEffect,
   type ExecutorPin,
   type JobSpec,
+  type ToolCallResult,
 } from "@graphloom/sdk";
 import { assertSandboxSupported, sandboxNodeArgs } from "./sandbox.js";
 import type { JobContext, JobEvidenceItem, JobResult, Runner } from "./types.js";
@@ -71,8 +73,8 @@ export interface ChildExecutorRunnerOptions {
   sandbox?: boolean;
 }
 
-/** Replace every bound credential value in a result before it can become durable. */
-function redactCredentials(result: JobResult, credentials: Record<string, string> | undefined): JobResult {
+/** Replace every bound credential value in a value before it can become durable. */
+function redactCredentials<T>(result: T, credentials: Record<string, string> | undefined): T {
   // Longest first, so a secret containing another is removed whole.
   const secrets = Object.values(credentials ?? {})
     .filter((s) => s.length > 0)
@@ -87,7 +89,7 @@ function redactCredentials(result: JobResult, credentials: Record<string, string
     }
     return value;
   };
-  return walk(result) as JobResult;
+  return walk(result) as T;
 }
 
 function resultFromOutput(
@@ -125,6 +127,7 @@ function resultFromOutput(
   };
 }
 
+/** Serializable context fields sent to an executor process. */
 function executorCtx(job: JobSpec, ctx: JobContext) {
   return {
     runId: ctx.runId,
@@ -135,6 +138,34 @@ function executorCtx(job: JobSpec, ctx: JobContext) {
     ...(job.writeScope !== undefined ? { writeScope: job.writeScope } : {}),
     ...(job.readOnly !== undefined ? { readOnly: job.readOnly } : {}),
   };
+}
+
+/** Tool bindings visible to the executor: names and effects, never pins. */
+function toolView(job: JobSpec) {
+  return (job.tools ?? []).map((t) => ({
+    name: t.name,
+    effect: t.effect,
+    ...(t.description !== undefined ? { description: t.description } : {}),
+  }));
+}
+
+function inProcessCtx(job: JobSpec, ctx: JobContext): ExecutorContext {
+  const children = ctx.children;
+  return {
+    ...executorCtx(job, ctx),
+    ...(ctx.signal !== undefined ? { signal: ctx.signal } : {}),
+    ...(children !== undefined && job.tools !== undefined
+      ? { tools: { bindings: toolView(job), call: (req) => children.callTool(req) } }
+      : {}),
+    ...(children !== undefined ? { usage: { reserveModelCall: () => children.reserveModelCall() } } : {}),
+  };
+}
+
+function effectMismatch(def: ExecutorDefinition, job: JobSpec): string | undefined {
+  if (job.effect !== undefined && job.effect !== def.effect) {
+    return `executor ${def.id} effect ${def.effect} does not match declared ${job.effect}`;
+  }
+  return undefined;
 }
 
 /**
@@ -171,6 +202,8 @@ export function createTrustedInProcessRunner(
         return options.fallback.runJob(pinned, ctx);
       }
       try {
+        const mismatch = effectMismatch(def, pinned);
+        if (mismatch) throw new Error(mismatch);
         validateExecutorInput(def, pinned.input);
       } catch (err) {
         return {
@@ -182,7 +215,7 @@ export function createTrustedInProcessRunner(
         };
       }
       try {
-        const output = await def.execute(pinned.input, executorCtx(pinned, ctx));
+        const output = await def.execute(pinned.input, inProcessCtx(pinned, ctx));
         if (def.outputSchema && !def.outputSchema(output)) {
           return {
             status: "failed",
@@ -239,6 +272,17 @@ export function createChildExecutorRunner(
       }
 
       return await new Promise<JobResult>((resolve) => {
+        const failed = (summary: string): JobResult => ({
+          status: "failed",
+          summary,
+          runId: ctx.runId,
+          operationId: ctx.operationId,
+          generation: ctx.generation,
+        });
+        if (ctx.signal?.aborted) {
+          resolve(failed("executor cancelled before start"));
+          return;
+        }
         const child = spawn(process.execPath, [...nodeArgs, workerModule, entryModule], {
           stdio: ["pipe", "pipe", "pipe"],
           cwd: options.cwd ?? path.dirname(entryModule),
@@ -249,74 +293,97 @@ export function createChildExecutorRunner(
         child.stderr.on("data", (c: string) => {
           stderr.push(c);
         });
+        child.stdin.on("error", () => undefined);
 
+        const rl = createInterface({ input: child.stdout, crlfDelay: Infinity });
         let settled = false;
+        const onAbort = () => finish(failed("executor cancelled: run stopped"));
         const finish = (result: JobResult) => {
           if (settled) return;
           settled = true;
+          rl.close();
           clearTimeout(timer);
+          ctx.signal?.removeEventListener("abort", onAbort);
+          child.stdin.end();
           child.kill("SIGKILL");
           resolve(redactCredentials(result, options.credentials));
         };
+        ctx.signal?.addEventListener("abort", onAbort, { once: true });
 
         const timer = setTimeout(() => {
-          finish({
-            status: "failed",
-            summary: `executor child timed out after ${timeoutMs}ms`,
-            runId: ctx.runId,
-            operationId: ctx.operationId,
-            generation: ctx.generation,
-          });
+          finish(failed(`executor child timed out after ${timeoutMs}ms`));
         }, timeoutMs);
 
-        const rl = createInterface({ input: child.stdout, crlfDelay: Infinity });
-        rl.once("line", (line) => {
+        const send = (message: unknown) => {
+          if (!settled) child.stdin.write(`${JSON.stringify(message)}\n`);
+        };
+        const children = ctx.children;
+        const toolNames = new Set((pinned.tools ?? []).map((t) => t.name));
+
+        rl.on("line", (line) => {
+          // Lines buffered before the job settled must not start work after it.
+          if (settled) return;
+          let msg: {
+            kind?: string;
+            seq?: number;
+            output?: unknown;
+            message?: string;
+            toolCallId?: unknown;
+            tool?: unknown;
+            input?: unknown;
+          };
           try {
-            const msg = JSON.parse(line) as {
-              kind?: string;
-              output?: unknown;
-              message?: string;
-            };
-            if (msg.kind === "ok") {
-              finish(resultFromOutput(msg.output, ctx));
+            msg = JSON.parse(line) as typeof msg;
+          } catch (err) {
+            finish(failed(err instanceof Error ? err.message : String(err)));
+            return;
+          }
+          if ((msg.kind === "tool_call" || msg.kind === "model_call") && !(Number.isSafeInteger(msg.seq) && msg.seq! > 0)) {
+            finish(failed(`executor sent ${msg.kind} without a positive integer seq`));
+            return;
+          }
+          if (msg.kind === "tool_call") {
+            const seq = msg.seq;
+            const answer = (result: ToolCallResult) =>
+              send({ kind: "tool_result", seq, result: redactCredentials(result, options.credentials) });
+            if (!children || typeof msg.toolCallId !== "string" || typeof msg.tool !== "string" || !toolNames.has(msg.tool)) {
+              answer({ status: "failed", summary: `tool ${String(msg.tool)} is not admitted for this job` });
               return;
             }
-            finish({
-              status: "failed",
-              summary: msg.message ?? "executor child error",
-              runId: ctx.runId,
-              operationId: ctx.operationId,
-              generation: ctx.generation,
-            });
-          } catch (err) {
-            finish({
-              status: "failed",
-              summary: err instanceof Error ? err.message : String(err),
-              runId: ctx.runId,
-              operationId: ctx.operationId,
-              generation: ctx.generation,
-            });
+            children
+              .callTool({
+                toolCallId: msg.toolCallId,
+                tool: msg.tool,
+                input: redactCredentials(msg.input, options.credentials),
+              })
+              .then(answer, (err: unknown) =>
+                answer({ status: "failed", summary: err instanceof Error ? err.message : String(err) }),
+              );
+            return;
           }
+          if (msg.kind === "model_call") {
+            const seq = msg.seq;
+            const grant = (granted: boolean) => send({ kind: "model_call_result", seq, granted });
+            if (!children) {
+              grant(false);
+              return;
+            }
+            children.reserveModelCall().then(grant, () => grant(false));
+            return;
+          }
+          if (msg.kind === "ok") {
+            finish(resultFromOutput(msg.output, ctx));
+            return;
+          }
+          finish(failed(msg.message ?? "executor child error"));
         });
 
         child.on("error", (err) => {
-          finish({
-            status: "failed",
-            summary: `executor child spawn failed: ${err.message}`,
-            runId: ctx.runId,
-            operationId: ctx.operationId,
-            generation: ctx.generation,
-          });
+          finish(failed(`executor child spawn failed: ${err.message}`));
         });
         child.on("exit", (code) => {
           if (!settled) {
-            finish({
-              status: "failed",
-              summary: `executor child exited (code=${String(code)}): ${stderr.join("")}`,
-              runId: ctx.runId,
-              operationId: ctx.operationId,
-              generation: ctx.generation,
-            });
+            finish(failed(`executor child exited (code=${String(code)}): ${stderr.join("")}`));
           }
         });
 
@@ -324,15 +391,19 @@ export function createChildExecutorRunner(
           kind: "execute",
           id: pin.id,
           ...(pin.version !== undefined ? { version: pin.version } : {}),
+          ...(pinned.effect !== undefined ? { effect: pinned.effect } : {}),
           input: pinned.input,
           ctx: executorCtx(pinned, ctx),
           ...(options.credentials !== undefined ? { credentials: options.credentials } : {}),
           ...(options.allowedEffects !== undefined
             ? { allowedEffects: [...options.allowedEffects] }
             : {}),
+          ...(children !== undefined && pinned.tools !== undefined ? { tools: toolView(pinned) } : {}),
+          ...(children !== undefined ? { usage: true } : {}),
         };
-        child.stdin.write(`${JSON.stringify(req)}\n`);
-        child.stdin.end();
+        send(req);
+        // Without a controller port nothing more is sent; closing stdin lets the worker exit.
+        if (children === undefined) child.stdin.end();
       });
     },
   };

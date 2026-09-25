@@ -11,9 +11,9 @@
     "examples/plugins/*"
   ],
   "scripts": {
-    "build": "npm run build -w @graphloom/sdk && npm run build -w @graphloom/runner && npm run build -w @graphloom/plugin-host && npm run build -w @graphloom/supervisor && npm run build -w @graphloom/controller -w @graphloom/cli -w @graphloom/plugin-hello -w @graphloom/executor-github",
+    "build": "npm run build -w @graphloom/sdk && npm run build -w @graphloom/runner && npm run build -w @graphloom/plugin-host && npm run build -w @graphloom/supervisor && npm run build -w @graphloom/controller -w @graphloom/cli -w @graphloom/plugin-hello -w @graphloom/executor-github -w @graphloom/executor-coding-agent",
     "typecheck": "npm run build -w @graphloom/sdk && npm run build -w @graphloom/runner && npm run build -w @graphloom/plugin-host && npm run build -w @graphloom/supervisor && npm run typecheck --workspaces --if-present",
-    "test": "npm run build -w @graphloom/sdk && npm run build -w @graphloom/runner && npm run build -w @graphloom/plugin-host && npm run build -w @graphloom/supervisor && npm run build -w @graphloom/controller -w @graphloom/executor-github && npm run test --workspaces --if-present",
+    "test": "npm run build -w @graphloom/sdk && npm run build -w @graphloom/runner && npm run build -w @graphloom/plugin-host && npm run build -w @graphloom/supervisor && npm run build -w @graphloom/controller -w @graphloom/executor-github -w @graphloom/executor-coding-agent && npm run test --workspaces --if-present",
     "lint": "npm run typecheck"
   },
   "engines": {
