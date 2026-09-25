@@ -1,7 +1,12 @@
 import type { GraphDecision } from "@graphloom/sdk";
 import { parseSupervisorDecision } from "./decision.js";
 import type { PiSupervisorSession } from "./pi-session.js";
-import type { Supervisor, SupervisorInput } from "./types.js";
+import {
+  assertGrantedRoot,
+  type CandidatePatchRequest,
+  type Supervisor,
+  type SupervisorInput,
+} from "./types.js";
 
 export interface SupervisorModelRef {
   provider: string;
@@ -47,7 +52,11 @@ export interface CreatePiSupervisorOptions {
   configuredModels?: SupervisorModelRef[];
   /** Rehydrate journal when restoring a durable binding. */
   initialSwitchJournal?: ModelSwitchRecord[];
+  /** Timeout for one candidate patch episode, which may span many tool turns. Default 600_000. */
+  patchTimeoutMs?: number;
 }
+
+const MAX_PATCH_SUMMARY_CHARS = 2_000;
 
 /**
  * Pi-backed recovery supervisor: one logical session, JSON GraphDecision replies,
@@ -64,6 +73,12 @@ export function createPiSupervisor(options: CreatePiSupervisorOptions): PiSuperv
   let providerCalls = 0;
   let closed = false;
   let codingRoot: string | undefined;
+  const patchTimeoutMs = options.patchTimeoutMs ?? 600_000;
+
+  /** Settle the model calls of one prompt; a prompt always costs at least one. */
+  function settleTurns(): void {
+    providerCalls += Math.max(1, session.drainTurnCount?.() ?? 0);
+  }
 
   const binding: SupervisorBinding = {
     sessionId: session.sessionId,
@@ -121,9 +136,28 @@ export function createPiSupervisor(options: CreatePiSupervisorOptions): PiSuperv
         throw new Error("supervisor is closed");
       }
       const prompt = buildRecoveryPrompt(input);
-      providerCalls += 1;
-      const text = await session.prompt(prompt);
+      let text: string;
+      try {
+        text = await session.prompt(prompt);
+      } finally {
+        settleTurns();
+      }
       return parseSupervisorDecision(text);
+    },
+
+    async patchCandidate(args: CandidatePatchRequest) {
+      if (closed) {
+        throw new Error("supervisor is closed");
+      }
+      assertGrantedRoot(codingRoot, args.candidateRoot);
+      let text: string;
+      try {
+        text = await session.prompt(buildRepairPrompt(args), { timeoutMs: patchTimeoutMs });
+      } finally {
+        settleTurns();
+      }
+      const summary = text.trim().slice(0, MAX_PATCH_SUMMARY_CHARS);
+      return { summary: summary === "" ? "(no summary returned)" : summary };
     },
 
     async switchModel(args) {
@@ -205,5 +239,25 @@ export function buildRecoveryPrompt(input: SupervisorInput): string {
     "```json",
     JSON.stringify(viewSummary, null, 2),
     "```",
+  ].join("\n");
+}
+
+/**
+ * Candidate patch instruction for the same supervisor session that proposed the
+ * QualifyRepair. The earlier recovery turns in this session carry the failure
+ * evidence; this prompt fixes the scope and the rules.
+ */
+export function buildRepairPrompt(args: CandidatePatchRequest): string {
+  return [
+    "You are the GraphLoom run supervisor, now authoring the qualified repair you proposed.",
+    `Target: ${args.target}`,
+    `Reason: ${args.reason}`,
+    `Candidate root: ${args.candidateRoot}`,
+    "Use the read, edit, write, and ls tools to fix the defect in the candidate tree.",
+    "Every path must stay inside the candidate root; the live install and the run worktree are off limits.",
+    "Do not edit graphloom.stages.json. Do not add, remove, rename, or reorder graph steps, and do not change requirement statements or evidence schemas.",
+    "Keep existing tests and negative cases; do not loosen expected outcomes. Add a focused regression case when the defect is testable.",
+    "No shell is available. The controller builds and tests the candidate after you finish, then an independent reviewer decides.",
+    "When done, reply with a short plain-text summary of what you changed and why (at most a few sentences). Do not include private reasoning.",
   ].join("\n");
 }

@@ -24,6 +24,8 @@ export interface QualifiedRepairArtifact extends RepairSnapshot {
   status: "qualifying" | "qualified" | "rejected" | "activated" | "superseded";
   candidateDigest?: string;
   patchAuthorSessionId?: string;
+  /** Patch author's concise user-facing summary of the change. */
+  patchSummary?: string;
   reviewerSessionId?: string;
   reviewReason?: string;
   rejectionReason?: string;

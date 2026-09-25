@@ -21,7 +21,12 @@ import {
 } from "@graphloom/sdk";
 import { createScriptedRunner } from "@graphloom/runner";
 import { createInProcessPluginHost } from "@graphloom/plugin-host";
-import { createScriptedSupervisor } from "@graphloom/supervisor";
+import {
+  assertAdmittedCandidateRoot,
+  createPiSupervisor,
+  createScriptedSupervisor,
+  type PiSupervisorSessionPort,
+} from "@graphloom/supervisor";
 import {
   createController,
   loadRunState,
@@ -576,6 +581,7 @@ describe("qualified repair + same-run activation (#29)", () => {
     const state = await loadRunState(report.stateDir);
     expect(state.repairCandidates?.[0]?.status).toBe("superseded");
     expect(state.activeVersion).toBe("hello@0.1.0");
+    expect(Object.keys(goodValidators)).toEqual(["exact-greeting", "independent-reviewer"]);
   });
 
   it("rejects activation when the loaded candidate alters the pinned graph contract", async () => {
@@ -652,5 +658,168 @@ describe("qualified repair + same-run activation (#29)", () => {
     });
     expect(resumed.status).toBe("stopped");
     expect(resumed.stopReason).toBe("repair rehydration required");
+  });
+
+  it("patches the candidate through the live Pi supervisor session when no patchAuthor is supplied", async () => {
+    const env = await makeEnv();
+    const runId = "repair-pi";
+    const repairsDir = path.join(env.stateRoot, runId, "repairs");
+    const prompts: string[] = [];
+    const grants: string[] = [];
+    let granted: string | undefined;
+    let pendingTurns = 0;
+
+    const decision = (d: unknown) => JSON.stringify(d);
+    const session: PiSupervisorSessionPort = {
+      runId,
+      provider: "minimax-cn",
+      modelId: "MiniMax-M3",
+      sessionId: "pi-sup-live",
+      sessionFile: "/tmp/pi-sup-live.jsonl",
+      credentialSource: "options",
+      async prompt(text) {
+        prompts.push(text);
+        if (text.includes("now authoring the qualified repair")) {
+          // Stands in for Pi's read/edit/write tool turns on the granted candidate.
+          const root = /Candidate root: (.+)/.exec(text)?.[1];
+          if (!root || root !== granted) throw new Error("patch prompt outside grant");
+          await writeFile(path.join(root, "REPAIR_MARKER.txt"), "fixed-exact-greeting\n", "utf8");
+          pendingTurns += 3;
+          return "Fixed exact-greeting to accept the pinned bytes.";
+        }
+        pendingTurns += 1;
+        if (!text.includes('"repairCandidates": [\n')) {
+          return decision(qualifyRepair({ target: "validator", reason: "defective write gate" }, "q"));
+        }
+        const id = /"artifactId": "(repair-[^"]+)",\s*"status": "qualified"/.exec(text)?.[1];
+        if (id) {
+          return decision(activateRepair({ qualifiedArtifactId: id, reason: "activate" }, "a"));
+        }
+        return decision(returnToNormal({ summary: "validator repaired" }, "r"));
+      },
+      drainTurnCount() {
+        const n = pendingTurns;
+        pendingTurns = 0;
+        return n;
+      },
+      async grantCandidateCoding(root) {
+        granted = await assertAdmittedCandidateRoot(repairsDir, root);
+        grants.push(granted);
+      },
+      async revokeCandidateCoding() {
+        granted = undefined;
+      },
+      async setModel() {
+        /* no-op */
+      },
+      async close() {
+        /* no-op */
+      },
+    };
+    const supervisor = createPiSupervisor({ session });
+
+    const repair: RepairDeps = {
+      reviewer: {
+        sessionId: "reviewer-independent",
+        async review() {
+          return { approved: true, reason: "gate matches requirement" };
+        },
+      },
+      async preflight({ candidateRoot }) {
+        const marker = await readFile(path.join(candidateRoot, "REPAIR_MARKER.txt"), "utf8");
+        return { ok: marker === "fixed-exact-greeting\n", summary: "marker present" };
+      },
+      materializeValidators: () => goodValidators,
+    };
+
+    const plugin = createScriptedGraph({
+      definition,
+      advances: [
+        dispatch(
+          { stageId: "write", kind: "agent", purpose: "work", instruction: "write", writeScope: [GREETING_PATH] },
+          "write",
+        ),
+        observe({ paths: [GREETING_PATH], includeWorkspaceManifest: true }, "obs"),
+        validate({ stageId: "write", requirementIds: ["greeting-bytes"] }, "val write"),
+        supervise({ reason: "write validator defective" }, "escalate"),
+        dispatch(
+          { stageId: "write", kind: "agent", purpose: "work", instruction: "rewrite", writeScope: [GREETING_PATH] },
+          "rewrite",
+        ),
+        observe({ paths: [GREETING_PATH], includeWorkspaceManifest: true }, "obs2"),
+        validate({ stageId: "write", requirementIds: ["greeting-bytes"] }, "val write2"),
+        dispatch(
+          { stageId: "review", kind: "agent", purpose: "review", instruction: "review", readOnly: true },
+          "review",
+        ),
+        validate({ stageId: "review", requirementIds: ["independent-review"] }, "val review"),
+        stop({ reason: "complete" }, "done"),
+      ],
+    });
+
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin,
+      validators: { ...goodValidators, "exact-greeting": defectiveGreeting },
+      supervisor,
+      repair,
+      runner: createScriptedRunner({
+        jobs: Array.from({ length: 4 }, () => async (
+          job: { purpose?: string; readOnly?: boolean },
+          ctx: { worktreePath: string },
+        ) => {
+          if (job.purpose === "review" || job.readOnly) {
+            return {
+              status: "ok" as const,
+              summary: "approved",
+              evidence: [{ kind: "review" as const, payload: { verdict: "approved", summary: "ok" } }],
+            };
+          }
+          await writeFile(path.join(ctx.worktreePath, GREETING_PATH), GREETING, "utf8");
+          return { status: "ok" as const, summary: "wrote" };
+        }),
+      }),
+      stateRoot: env.stateRoot,
+      runId,
+    });
+
+    expect(report.status).toBe("succeeded");
+    expect(grants).toHaveLength(1);
+    expect(granted).toBeUndefined();
+    const patchPrompts = prompts.filter((t) => t.includes("now authoring the qualified repair"));
+    expect(patchPrompts).toHaveLength(1);
+
+    const state = await loadRunState(report.stateDir);
+    const artifact = state.repairCandidates?.[0];
+    expect(artifact?.status).toBe("activated");
+    expect(artifact?.patchAuthorSessionId).toBe("pi-sup-live");
+    expect(artifact?.patchSummary).toBe("Fixed exact-greeting to accept the pinned bytes.");
+    expect(existsSync(path.join(artifact!.candidateRoot, "REPAIR_MARKER.txt"))).toBe(true);
+    expect(existsSync(path.join(env.taskDir, "plugins", "hello", "REPAIR_MARKER.txt"))).toBe(false);
+    // 3 decide prompts + 3 patch tool turns + 3 agent jobs (write, rewrite, review).
+    expect(state.budgets.agentInvocations).toBe(32 - 9);
+  });
+
+  it("stops qualify_repair when neither the supervisor nor repair deps can author a patch", async () => {
+    const env = await makeEnv();
+    const { patchAuthor: _omit, ...noAuthor } = approvingRepair("sup-n");
+    void _omit;
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: escalatingPlugin(),
+      validators: goodValidators,
+      supervisor: createScriptedSupervisor({
+        sessionId: "sup-n",
+        decisions: [qualifyRepair({ target: "plugin", reason: "try" }, "q")],
+      }),
+      repair: noAuthor,
+      runner: createScriptedRunner({ jobs: [] }),
+      stateRoot: env.stateRoot,
+      runId: "repair-no-author",
+    });
+    expect(report.status).toBe("stopped");
+    expect(report.stopReason).toBe("qualify_repair requires a patch author");
+    const state = await loadRunState(report.stateDir);
+    expect(state.budgets.corrections).toBe(8);
   });
 });

@@ -43,6 +43,17 @@ export interface Supervisor {
    */
   grantCandidateCoding?(candidateRoot: string): Promise<void>;
   revokeCandidateCoding?(): Promise<void>;
+  /**
+   * Author a qualified repair in the currently granted candidate tree using this
+   * same session. Returns a concise user-facing summary, not private reasoning.
+   */
+  patchCandidate?(args: CandidatePatchRequest): Promise<{ summary: string }>;
+}
+
+export interface CandidatePatchRequest {
+  candidateRoot: string;
+  target: "plugin" | "validator";
+  reason: string;
 }
 
 export type ScriptedRecoveryStep =
@@ -53,6 +64,8 @@ export interface ScriptedSupervisorOptions {
   decisions: ScriptedRecoveryStep[];
   /** Stable id reused across every repair round (default: scripted-supervisor). */
   sessionId?: string;
+  /** Canned candidate patch; requires an active candidate coding grant. */
+  patch?: (args: CandidatePatchRequest) => Promise<{ summary: string }>;
 }
 
 /** Canned recovery decisions for controller tests (no live LLM). */
@@ -88,9 +101,27 @@ export function createScriptedSupervisor(
     async revokeCandidateCoding() {
       codingRoot = undefined;
     },
+    ...(options.patch !== undefined
+      ? {
+          async patchCandidate(args: CandidatePatchRequest) {
+            assertGrantedRoot(codingRoot, args.candidateRoot);
+            return options.patch!(args);
+          },
+        }
+      : {}),
     /** Test helper: last granted candidate root (undefined when revoked). */
     getCandidateCodingRoot() {
       return codingRoot;
     },
   } as Supervisor & { getCandidateCodingRoot(): string | undefined };
+}
+
+/** A patch may only run on the candidate root the controller just granted. */
+export function assertGrantedRoot(granted: string | undefined, candidateRoot: string): void {
+  if (granted === undefined) {
+    throw new Error("patchCandidate requires an active candidate coding grant");
+  }
+  if (granted !== candidateRoot) {
+    throw new Error(`patchCandidate root ${candidateRoot} != granted ${granted}`);
+  }
 }

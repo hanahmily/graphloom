@@ -45,7 +45,11 @@ export interface RepairPreflightResult {
 }
 
 export interface RepairDeps {
-  patchAuthor: RepairPatchAuthor;
+  /**
+   * Test seam for the patch step. When omitted, the run supervisor's own
+   * `patchCandidate` authors the patch in the same session (the live Pi path).
+   */
+  patchAuthor?: RepairPatchAuthor;
   reviewer: RepairReviewer;
   /**
    * Controller-mediated build/test/contract checks before independent review.
@@ -122,12 +126,29 @@ export async function applyQualifyRepair(
       blocker: "no supervisor session id",
     };
   }
-  if (deps.repair.patchAuthor.sessionId !== supervisorSessionId) {
+  const patchAuthor = resolvePatchAuthor(deps.repair, deps.supervisor, supervisorSessionId);
+  if (!patchAuthor) {
+    return {
+      ...state,
+      status: "stopped",
+      stopReason: "qualify_repair requires a patch author",
+      blocker: "supervisor cannot patch candidates and no repair.patchAuthor was supplied",
+    };
+  }
+  if (patchAuthor.sessionId !== supervisorSessionId) {
     return {
       ...state,
       status: "stopped",
       stopReason: "patch author must use the run supervisor session",
-      blocker: `patch=${deps.repair.patchAuthor.sessionId} supervisor=${supervisorSessionId}`,
+      blocker: `patch=${patchAuthor.sessionId} supervisor=${supervisorSessionId}`,
+    };
+  }
+  if (!deps.repair.patchAuthor && state.budgets.agentInvocations <= 0) {
+    return {
+      ...state,
+      status: "stopped",
+      stopReason: "agentInvocations budget exhausted",
+      blocker: "supervisor candidate patch",
     };
   }
   if (deps.repair.reviewer.sessionId === supervisorSessionId) {
@@ -200,11 +221,12 @@ export async function applyQualifyRepair(
     await deps.supervisor?.grantCandidateCoding?.(snap.candidateRoot);
     granted = true;
 
-    await deps.repair.patchAuthor.patch({
+    const patched = await patchAuthor.patch({
       candidateRoot: snap.candidateRoot,
       target: qualify.target,
       reason: qualify.reason,
     });
+    const patchSummary = typeof patched?.summary === "string" ? patched.summary : undefined;
 
     await assertCandidateStepsUnchanged({
       baseDefinitionStages: stagePins(state.definition),
@@ -221,6 +243,7 @@ export async function applyQualifyRepair(
         ...reserved,
         status: "rejected",
         candidateDigest: await digestDirectoryTree(snap.candidateRoot),
+        ...(patchSummary !== undefined ? { patchSummary } : {}),
         rejectionReason: preflight.summary,
         preflightSummary: preflight.summary,
       });
@@ -241,6 +264,7 @@ export async function applyQualifyRepair(
       ...reserved,
       status: review.approved ? "qualified" : "rejected",
       candidateDigest,
+      ...(patchSummary !== undefined ? { patchSummary } : {}),
       reviewReason: review.reason,
       preflightSummary: preflight.summary,
       ...(review.approved
@@ -497,6 +521,19 @@ function stagePins(definition: GraphDefinition) {
     name: s.name,
     requirementIds: [...s.requirementIds],
   }));
+}
+
+function resolvePatchAuthor(
+  repair: RepairDeps,
+  supervisor: Supervisor | undefined,
+  supervisorSessionId: string,
+): RepairPatchAuthor | undefined {
+  if (repair.patchAuthor) return repair.patchAuthor;
+  if (!supervisor?.patchCandidate) return undefined;
+  return {
+    sessionId: supervisorSessionId,
+    patch: (args) => supervisor.patchCandidate!(args),
+  };
 }
 
 function readSupervisorSessionId(supervisor: Supervisor | undefined): string | undefined {

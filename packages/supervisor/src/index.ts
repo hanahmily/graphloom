@@ -22,6 +22,7 @@ export {
 
 export {
   buildRecoveryPrompt,
+  buildRepairPrompt,
   createPiSupervisor,
   type CreatePiSupervisorOptions,
   type ModelSwitchRecord,
@@ -30,6 +31,11 @@ export {
   type SupervisorBinding,
   type SupervisorModelRef,
 } from "./pi-supervisor.js";
+
+export {
+  assertAdmittedCandidateRoot,
+  CANDIDATE_CODING_TOOL_NAMES,
+} from "./candidate-tools.js";
 
 export {
   restorePiSupervisorFromBinding,
@@ -44,6 +50,7 @@ export {
 
 export {
   createScriptedSupervisor,
+  type CandidatePatchRequest,
   type RecoveryTrigger,
   type ScriptedRecoveryStep,
   type ScriptedSupervisorOptions,
