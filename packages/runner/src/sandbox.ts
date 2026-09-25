@@ -28,7 +28,8 @@ export function sandboxNodeArgs(modules: readonly string[], extraReadPaths: read
   return ["--permission", ...[...readable].sort().map((p) => `--allow-fs-read=${p}`)];
 }
 
-function packageRootOf(file: string): string {
+/** Nearest directory at or above `file` holding a package.json. */
+export function packageRootOf(file: string): string {
   let dir = path.dirname(path.resolve(file));
   for (;;) {
     if (existsSync(path.join(dir, "package.json"))) return dir;

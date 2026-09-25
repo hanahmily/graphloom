@@ -1,8 +1,10 @@
 # Built-in and plugin-owned executors
 
-Status: accepted design, 2026-09-24; partially implemented (executor contract and
-the packaged GitHub executor; the child-operation protocol and executor recovery
-remain). This specializes the [TypeScript core design](design-typescript-core.md).
+Status: accepted design, 2026-09-24; implemented: the executor contract, the
+packaged GitHub executor, the coding-agent harness with its child-operation
+protocol, and supervisor recovery through executors. Pins currently cover executor
+identity and code digest; schemas, runtime, and grants are not yet part of the pin.
+This specializes the [TypeScript core design](design-typescript-core.md).
 
 ## Ownership
 
@@ -430,6 +432,36 @@ Both executor kinds surface failures, progress, inputs, and observations through
 the same protocol so the supervisor can diagnose, retry, or repair them without a
 plugin-specific recovery branch. Rate-limit waits and retries are bounded by run
 limits. Source availability and operator authority still constrain repair.
+
+As implemented, the controller pins the runner's executor catalog when a run
+starts: each executor's id, where it is served from, its isolation, and a SHA-256
+digest of the code it runs. A package's digest covers its tree without
+`node_modules`; a single-module executor's covers the module file. Every dispatch,
+including an agent's child tool call, carries the pinned digest, and the runner
+refuses to run different bytes. Resume stops with `executor pin mismatch` when a
+pinned executor changed or is no longer installed.
+
+A failed executor job records its evidence plus an `executorFailure` record
+(operation, stage, attempt, pinned executor, status, summary, and any requested
+wait). The shape is the same for built-in and custom executors. With a supervisor, the run then
+enters recovery with trigger `executor_failed`; without one it stops as before.
+In recovery the supervisor may dispatch work for the current stage only, through
+an executor the run pinned or a built-in agent/command default. It can retry the
+same executor or switch to another one, but cannot add graph steps. An executor
+that returns `retryAfterMs` runs again no earlier than that. The wait is charged
+to the run's `waitMs` budget (15 minutes by default); a wait larger than what
+remains stops the run with `wait budget exhausted` instead of sleeping. Stop
+interrupts the wait.
+
+Executor repair uses the qualified repair lifecycle with target `executor` and
+requires the task grant `executorRepair: true` (off by default). Qualification
+copies the pinned package into the run's state directory, links the dependencies
+the installed package resolves, and lets the supervisor patch the copy. The copy
+must still define the same executor ids, versions, and effects, then pass
+preflight and independent review. Activation serves the copy for every executor
+of that package in this run, re-pins them to the copy's digest, and re-checks the
+current stage. The shared install is never modified, and resume serves the same
+reviewed copy. In-process executors cannot be repaired this way.
 
 ## Enforcement
 

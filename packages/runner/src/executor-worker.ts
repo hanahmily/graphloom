@@ -2,6 +2,7 @@
  * Child-process worker for executor packages (built-in or user-authored).
  *
  * Protocol (one JSON object per line on stdin/stdout, one execute per process):
+ *   → { kind: "describe" }                                  ← { kind: "described", executors: [{ id, version?, effect }] }
  *   → { kind: "execute", id, version?, effect?, input, ctx, credentials?, allowedEffects?, tools?, usage? }
  *   ← { kind: "tool_call", seq, toolCallId, tool, input }   → { kind: "tool_result", seq, result }
  *   ← { kind: "model_call", seq }                           → { kind: "model_call_result", seq, granted }
@@ -135,6 +136,13 @@ for await (const line of rl) {
     const resolve = waiting.get(msg.seq);
     waiting.delete(msg.seq);
     resolve?.(msg.kind === "tool_result" ? msg.result : msg.granted);
+    continue;
+  }
+  if (msg?.kind === "describe") {
+    reply({
+      kind: "described",
+      executors: [...byId.values()].map((d) => ({ id: d.id, version: d.version, effect: d.effect })),
+    });
     continue;
   }
   if (msg?.kind !== "execute" || typeof msg.id !== "string" || running !== undefined) {

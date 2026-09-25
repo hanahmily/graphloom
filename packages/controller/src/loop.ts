@@ -10,9 +10,10 @@ import type {
   RunView,
 } from "@graphloom/sdk";
 import { assertGraphDecision, pinJobExecutor } from "@graphloom/sdk";
-import type { Runner } from "@graphloom/runner";
+import type { ExecutorSourceOverride, Runner } from "@graphloom/runner";
 import type { PluginHost } from "@graphloom/plugin-host";
-import type { Supervisor } from "@graphloom/supervisor";
+import type { RecoveryTrigger, Supervisor } from "@graphloom/supervisor";
+import { catalogEntry, isKindDefaultExecutor, resolveExecutorPin } from "./executor-catalog.js";
 import {
   admitValidation,
   earliestIncompleteStage,
@@ -203,13 +204,7 @@ async function runNormalLoopSteps(
               runId: state.runId,
               episodeId,
               trigger: {
-                code: trigger.code as
-                  | "supervise"
-                  | "plugin_crash"
-                  | "plugin_timeout"
-                  | "plugin_malformed"
-                  | "stalled"
-                  | "unhandled",
+                code: trigger.code as RecoveryTrigger["code"],
                 message: trigger.message,
               },
               view,
@@ -312,33 +307,39 @@ async function runNormalLoopSteps(
       }
 
       if (turn.pendingJob) {
-        const { job, operationId, generation, isCorrection } = turn.pendingJob;
+        const { job, operationId, generation, isCorrection, source, notBefore } = turn.pendingJob;
         const abort = new AbortController();
         const stopWatch = watchForStop(state.stateDir, deps, abort);
         let result: Awaited<ReturnType<Runner["runJob"]>>;
         let children: ReturnType<typeof createChildPort> | undefined;
         try {
-          children =
-            job.kind === "agent" || job.tools !== undefined
-              ? createChildPort(
-                  { job, operationId, generation },
-                  {
-                    stateDir: state.stateDir,
-                    runner: deps.runner,
-                    shouldStop: () => stopRequested(deps),
-                    signal: abort.signal,
-                  },
-                )
-              : undefined;
-          result = await deps.runner.runJob(job, {
-            runId: state.runId,
-            operationId,
-            generation,
-            worktreePath: state.worktreePath,
-            artifactDir: state.artifactDir,
-            signal: abort.signal,
-            ...(children !== undefined ? { children } : {}),
-          });
+          if (notBefore !== undefined) await sleepUntil(notBefore, abort.signal);
+          if (abort.signal.aborted) {
+            result = { status: "failed", summary: "executor cancelled before start", runId: state.runId, operationId, generation };
+          } else {
+            children =
+              job.kind === "agent" || job.tools !== undefined
+                ? createChildPort(
+                    { job, operationId, generation },
+                    {
+                      stateDir: state.stateDir,
+                      runner: deps.runner,
+                      shouldStop: () => stopRequested(deps),
+                      signal: abort.signal,
+                    },
+                  )
+                : undefined;
+            result = await deps.runner.runJob(job, {
+              runId: state.runId,
+              operationId,
+              generation,
+              worktreePath: state.worktreePath,
+              artifactDir: state.artifactDir,
+              signal: abort.signal,
+              ...(children !== undefined ? { children } : {}),
+              ...(source !== undefined ? { executorSource: source } : {}),
+            });
+          }
         } finally {
           // A parent that stopped, timed out, or returned early can leave a child running.
           await children?.close();
@@ -392,6 +393,7 @@ async function runNormalLoopSteps(
             generation,
             isCorrection,
             result,
+            canRecover: deps.supervisor !== undefined,
           });
           syncRevision(deps, state);
           if ((await stopRequested(deps)) && state.status === "running") {
@@ -429,6 +431,21 @@ async function runNormalLoopSteps(
 }
 
 const STOP_POLL_MS = 200;
+
+/** Resolve at `until`, or as soon as the run stops. */
+function sleepUntil(until: string, signal: AbortSignal): Promise<void> {
+  const ms = Date.parse(until) - Date.now();
+  if (!(ms > 0) || signal.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const done = () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal.addEventListener("abort", done, { once: true });
+  });
+}
 
 /** Abort an outstanding job, and any child it is waiting on, once the run stops. */
 function watchForStop(stateDir: string, deps: LoopDeps, abort: AbortController): NodeJS.Timeout {
@@ -626,6 +643,7 @@ export function toRunView(state: DurableRunState): RunView {
       artifactId: c.artifactId,
       status: c.status,
       target: c.target,
+      ...(c.executorId !== undefined ? { executorId: c.executorId } : {}),
       reason: c.reason,
       ...(c.candidateDigest !== undefined ? { candidateDigest: c.candidateDigest } : {}),
       ...(c.qualifiedAt !== undefined ? { qualifiedAt: c.qualifiedAt } : {}),
@@ -847,6 +865,8 @@ interface PendingJob {
   operationId: string;
   generation: number;
   isCorrection: boolean;
+  source?: ExecutorSourceOverride;
+  notBefore?: string;
 }
 
 async function prepareDispatch(
@@ -873,8 +893,13 @@ async function prepareDispatch(
   }
 
   let job: JobSpec;
+  let source: ExecutorSourceOverride | undefined;
   try {
     job = pinJobExecutor(rawJob);
+    const resolved = resolveExecutorPin(state, job.executor!);
+    if ("error" in resolved) throw new Error(resolved.error);
+    job = { ...job, executor: resolved.pin };
+    source = resolved.source;
   } catch (err) {
     return {
       state: {
@@ -895,6 +920,42 @@ async function prepareDispatch(
         blocker: `stageId ${job.stageId} is not in the pinned graph definition`,
       },
     };
+  }
+
+  if (state.mode === "recovery") {
+    const refused = recoveryDispatchRefusal(state, job);
+    if (refused !== undefined) {
+      return {
+        state: { ...state, status: "stopped", stopReason: "recovery dispatch rejected", blocker: refused },
+      };
+    }
+  }
+
+  // An executor that asked for a wait runs no earlier than that, and the wait spends the run's budget.
+  const executorId = job.executor!.id;
+  const retryAt = state.executorRetryAt?.[executorId];
+  let notBefore: string | undefined;
+  if (retryAt !== undefined) {
+    const waitMs = Math.max(0, Date.parse(retryAt) - Date.now());
+    const remaining = state.budgets.waitMs ?? 0;
+    if (waitMs > remaining) {
+      return {
+        state: {
+          ...state,
+          status: "stopped",
+          stopReason: "wait budget exhausted",
+          blocker: `executor ${executorId} asks to wait ${Math.ceil(waitMs / 1000)}s; ${Math.floor(remaining / 1000)}s of the run's wait budget remain`,
+        },
+      };
+    }
+    const { [executorId]: _waited, ...otherRetries } = state.executorRetryAt!;
+    void _waited;
+    state = {
+      ...state,
+      budgets: { ...state.budgets, waitMs: remaining - waitMs },
+      executorRetryAt: otherRetries,
+    };
+    if (waitMs > 0) notBefore = retryAt;
   }
 
   if (state.budgets.jobs <= 0) {
@@ -973,14 +1034,40 @@ async function prepareDispatch(
       job,
       status: "pending",
       ...(job.executor !== undefined ? { executor: job.executor } : {}),
+      ...(notBefore !== undefined ? { notBefore } : {}),
     },
     current: { stageId: job.stageId, attempt: state.current.attempt },
   };
 
   return {
     state: next,
-    pending: { job, operationId, generation: state.generation, isCorrection },
+    pending: {
+      job,
+      operationId,
+      generation: state.generation,
+      isCorrection,
+      ...(source !== undefined ? { source } : {}),
+      ...(notBefore !== undefined ? { notBefore } : {}),
+    },
   };
+}
+
+/**
+ * The supervisor may retry the current stage's work or pick another admitted
+ * executor for it, but cannot add steps or run code the run did not pin.
+ */
+function recoveryDispatchRefusal(state: DurableRunState, job: JobSpec): string | undefined {
+  if (job.stageId !== state.current.stageId) {
+    return `recovery may only dispatch work for the current stage ${state.current.stageId}, not ${job.stageId}`;
+  }
+  if (state.executorCatalog === undefined) return undefined;
+  const pins = [job.executor!, ...(job.tools ?? []).map((t) => t.executor)];
+  for (const pin of pins) {
+    if (!isKindDefaultExecutor(pin.id) && catalogEntry(state, pin.id) === undefined) {
+      return `executor ${pin.id} is not pinned for this run`;
+    }
+  }
+  return undefined;
 }
 
 function applyDispatchResult(
@@ -991,6 +1078,8 @@ function applyDispatchResult(
     generation: number;
     isCorrection: boolean;
     result: Awaited<ReturnType<Runner["runJob"]>>;
+    /** A supervisor can take over; failures enter recovery instead of stopping. */
+    canRecover: boolean;
   },
 ): DurableRunState {
   const { job, operationId, generation, isCorrection, result } = args;
@@ -1033,8 +1122,22 @@ function applyDispatchResult(
     outstanding: next.outstanding.filter((o) => o.operationId !== operationId),
   };
 
+  const producer: EvidenceProducer = {
+    operationId,
+    stageId: job.stageId,
+    purpose: job.purpose,
+    readOnly: job.readOnly === true,
+    kind: job.kind,
+    ...(job.executor?.id !== undefined ? { executorId: job.executor.id } : {}),
+  };
+
   if (result.status !== "ok") {
+    next = recordExecutorFailure(recordJobEvidence(next, job, producer, result.evidence), job, producer, result);
     const { pendingDispatch, ...rest } = next;
+    if (args.canRecover) {
+      const executorId = job.executor?.id ?? job.kind;
+      return enterRecovery(rest, "executor_failed", boundText(`executor ${executorId} ${result.status}: ${result.summary}`));
+    }
     return {
       ...rest,
       ...(pendingDispatch
@@ -1046,17 +1149,76 @@ function applyDispatchResult(
     };
   }
 
-  if (result.evidence) {
+  next = recordJobEvidence(next, job, producer, result.evidence);
+
+  if (job.purpose === "work") {
+    next = { ...next, lastWorkOperationId: operationId };
+  }
+
+  const { pendingDispatch: _done, ...cleared } = next;
+  void _done;
+  return cleared;
+}
+
+const MAX_TRIGGER_CHARS = 500;
+
+function boundText(text: string): string {
+  return text.length <= MAX_TRIGGER_CHARS ? text : `${text.slice(0, MAX_TRIGGER_CHARS - 1)}…`;
+}
+
+/**
+ * Record what the controller observed about a failed executor job. Built-in
+ * and custom executors fail through the same result envelope, so recovery
+ * sees the same record for both. A requested wait gates the next run of
+ * that executor.
+ */
+function recordExecutorFailure(
+  state: DurableRunState,
+  job: JobSpec,
+  producer: EvidenceProducer,
+  result: Awaited<ReturnType<Runner["runJob"]>>,
+): DurableRunState {
+  const retryAt =
+    result.retryAfterMs !== undefined ? new Date(Date.now() + result.retryAfterMs).toISOString() : undefined;
+  const record: EvidenceRecord = {
+    ref: newEvidenceRef(state),
+    kind: "other",
+    generation: state.generation,
+    payload: attachProducer(
+      {
+        executorFailure: {
+          operationId: producer.operationId,
+          stageId: job.stageId,
+          attempt: state.current.attempt,
+          executor: job.executor ?? null,
+          status: result.status,
+          summary: result.summary,
+          ...(retryAt !== undefined ? { retryAfterMs: result.retryAfterMs, retryAt } : {}),
+        },
+      },
+      producer,
+    ),
+  };
+  const executorId = job.executor?.id;
+  return {
+    ...state,
+    evidence: [...state.evidence, record],
+    ...(retryAt !== undefined && executorId !== undefined
+      ? { executorRetryAt: { ...state.executorRetryAt, [executorId]: retryAt } }
+      : {}),
+    stateRevision: state.stateRevision + 1,
+  };
+}
+
+function recordJobEvidence(
+  next: DurableRunState,
+  job: JobSpec,
+  producer: EvidenceProducer,
+  evidence: Awaited<ReturnType<Runner["runJob"]>>["evidence"],
+): DurableRunState {
+  if (evidence) {
     const added: EvidenceRecord[] = [];
-    const producer: EvidenceProducer = {
-      operationId,
-      stageId: job.stageId,
-      purpose: job.purpose,
-      readOnly: job.readOnly === true,
-      kind: job.kind,
-      ...(job.executor?.id !== undefined ? { executorId: job.executor.id } : {}),
-    };
-    for (const item of result.evidence) {
+    for (const item of evidence) {
       const ref = newEvidenceRef(next);
       const claimed = selfReportedKind(job, item.kind);
       const record: EvidenceRecord = {
@@ -1080,14 +1242,7 @@ function applyDispatchResult(
       stateRevision: next.stateRevision + 1,
     };
   }
-
-  if (job.purpose === "work") {
-    next = { ...next, lastWorkOperationId: operationId };
-  }
-
-  const { pendingDispatch: _done, ...cleared } = next;
-  void _done;
-  return cleared;
+  return next;
 }
 
 /**

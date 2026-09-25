@@ -9,6 +9,7 @@ import {
 } from "@graphloom/sdk";
 import type { ChildOperationPort, JobResult, Runner } from "@graphloom/runner";
 import { newEvidenceRef, type EvidenceProducer } from "./admit.js";
+import { resolveExecutorPin } from "./executor-catalog.js";
 import { withDirectoryLock } from "./lock.js";
 import { loadRunState, saveRunState, type ChildOperationRecord, type DurableRunState } from "./state.js";
 
@@ -267,12 +268,13 @@ export function createChildPort(parent: ParentJob, deps: ChildPortDeps): Control
       const admitted = await admit(binding, { ...req, input });
       if ("done" in admitted) return admitted.done;
       const { record, state } = admitted;
+      const resolved = resolveExecutorPin(state, record.executor);
       const job: JobSpec = {
         stageId: record.stageId,
         kind: "command",
         purpose: "check",
         instruction: `tool ${record.tool} (${record.toolCallId}) for ${record.parentOperationId}`,
-        executor: record.executor,
+        executor: "error" in resolved ? record.executor : resolved.pin,
         effect: record.effect,
         input,
         // Children inherit the parent's worktree scope, never a broader one.
@@ -281,6 +283,7 @@ export function createChildPort(parent: ParentJob, deps: ChildPortDeps): Control
       let result: JobResult;
       let cutShort = false;
       try {
+        if ("error" in resolved) throw new Error(resolved.error);
         result = await deps.runner.runJob(job, {
           runId: state.runId,
           operationId: record.childOperationId,
@@ -288,6 +291,7 @@ export function createChildPort(parent: ParentJob, deps: ChildPortDeps): Control
           worktreePath: state.worktreePath,
           artifactDir: state.artifactDir,
           signal: cancel.signal,
+          ...(resolved.source !== undefined ? { executorSource: resolved.source } : {}),
         });
         cutShort = cancel.signal.aborted;
       } catch (err) {

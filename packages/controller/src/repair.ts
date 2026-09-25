@@ -9,13 +9,17 @@ import {
   writeFile,
 } from "node:fs/promises";
 import path from "node:path";
+import type { RepairTarget } from "@graphloom/sdk";
 
 export interface RepairSnapshot {
   artifactId: string;
   candidateRoot: string;
   baseDigest: string;
   baseActiveVersion: string;
-  target: "plugin" | "validator";
+  target: RepairTarget;
+  /** Executor repairs: the requested executor id and the candidate's entry module. */
+  executorId?: string;
+  candidateEntryModule?: string;
   reason: string;
   createdAt: string;
 }
@@ -90,7 +94,7 @@ export async function snapshotRepairCandidate(args: {
   bundlePath: string;
   repairsDir: string;
   baseActiveVersion: string;
-  target: "plugin" | "validator";
+  target: RepairTarget;
   reason: string;
   artifactId?: string;
 }): Promise<RepairSnapshot> {

@@ -25,6 +25,25 @@ export interface PendingDispatch {
   executor?: import("@graphloom/sdk").ExecutorPin;
   /** Model requests the job reserved against the run's agent-invocation budget. */
   modelCalls?: number;
+  /** The job starts no earlier than this (an executor asked for a wait before retrying). */
+  notBefore?: string;
+}
+
+/**
+ * An executor the run pinned at intake: identity plus the digest of the code
+ * it runs. Dispatches carry the digest, and resume checks it still matches.
+ */
+export interface ExecutorCatalogEntry {
+  id: string;
+  digest: string;
+  /** Package root, module file, or `in-process` the digest covers. */
+  source: string;
+  /** Present when `source` is a package root that can be copied for repair. */
+  entryModule?: string;
+  isolation: "sandbox" | "unrestricted" | "in-process";
+  builtin: boolean;
+  /** Set once a qualified repair of this executor's package is activated; `digest` is then the copy's. */
+  repair?: { artifactId: string; root: string; entryModule: string; baseDigest: string };
 }
 
 /**
@@ -70,6 +89,10 @@ export interface DurableRunState {
   outstanding: OutstandingOperation[];
   pendingDispatch?: PendingDispatch;
   childOperations?: ChildOperationRecord[];
+  /** Executors pinned at intake (absent for runs whose runner cannot describe its executors). */
+  executorCatalog?: ExecutorCatalogEntry[];
+  /** Earliest time each executor may run again, from a failure's retry timing. */
+  executorRetryAt?: Record<string, string>;
   privateState?: string;
   definition: GraphDefinition;
   validatorBindings: ValidatorBinding[];

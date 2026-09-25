@@ -9,12 +9,22 @@ import { resolveBundleEntryFromManifest } from "./bundle.js";
 
 const execFileAsync = promisify(execFile);
 
+/** Default time a run may spend waiting out executor retry timing (15 minutes). */
+export const DEFAULT_WAIT_BUDGET_MS = 15 * 60_000;
+
 export interface TaskFile {
   graph: string;
   repo: string;
   request: string;
   /** Operator-authorized repair grants (plugin metadata alone is not authority). */
-  grants?: { sourceRepair: boolean; validatorSubstitution: boolean };
+  grants?: RepairGrants;
+}
+
+export interface RepairGrants {
+  sourceRepair: boolean;
+  validatorSubstitution: boolean;
+  /** Qualify and activate run-local copies of executor packages. */
+  executorRepair?: boolean;
 }
 
 export interface BundlePin {
@@ -36,12 +46,14 @@ export interface IntakePin {
   repoPath: string;
   pinnedHead: string;
   bundle: BundlePin;
-  grants: { sourceRepair: boolean; validatorSubstitution: boolean };
+  grants: RepairGrants;
   budgets: {
     agentInvocations: number;
     jobs: number;
     decisions: number;
     corrections: number;
+    /** Time the controller may spend waiting out executor retry timing; absent means none. */
+    waitMs?: number;
   };
 }
 
@@ -60,6 +72,7 @@ export function parseTaskYaml(text: string): TaskFile {
   let request: string | undefined;
   let sourceRepair: boolean | undefined;
   let validatorSubstitution: boolean | undefined;
+  let executorRepair: boolean | undefined;
   let inGrants = false;
 
   for (let i = 0; i < lines.length; i += 1) {
@@ -80,6 +93,7 @@ export function parseTaskYaml(text: string): TaskFile {
         const value = parseBoolYaml(unquote(indented[3]!));
         if (key === "sourceRepair") sourceRepair = value;
         else if (key === "validatorSubstitution") validatorSubstitution = value;
+        else if (key === "executorRepair") executorRepair = value;
         else throw new IntakeError(`unknown grants key: ${key}`);
         continue;
       }
@@ -134,10 +148,11 @@ export function parseTaskYaml(text: string): TaskFile {
     throw new IntakeError(err instanceof Error ? err.message : String(err));
   }
   const task: TaskFile = { graph, repo, request };
-  if (sourceRepair !== undefined || validatorSubstitution !== undefined) {
+  if (sourceRepair !== undefined || validatorSubstitution !== undefined || executorRepair !== undefined) {
     task.grants = {
       sourceRepair: sourceRepair ?? false,
       validatorSubstitution: validatorSubstitution ?? false,
+      ...(executorRepair !== undefined ? { executorRepair } : {}),
     };
   }
   return task;
@@ -224,6 +239,7 @@ export async function intakeTask(taskPath: string): Promise<IntakePin> {
       jobs: 64,
       decisions: 128,
       corrections: 8,
+      waitMs: DEFAULT_WAIT_BUDGET_MS,
     },
   };
 }

@@ -1,4 +1,4 @@
-import type { GraphDecision, RunView } from "@graphloom/sdk";
+import type { GraphDecision, RepairTarget, RunView } from "@graphloom/sdk";
 
 /** Why the controller entered recovery for this episode. */
 export interface RecoveryTrigger {
@@ -7,6 +7,7 @@ export interface RecoveryTrigger {
     | "plugin_crash"
     | "plugin_timeout"
     | "plugin_malformed"
+    | "executor_failed"
     | "stalled"
     | "unhandled";
   message: string;
@@ -53,7 +54,7 @@ export interface Supervisor {
 
 export interface CandidatePatchRequest {
   candidateRoot: string;
-  target: "plugin" | "validator";
+  target: RepairTarget;
   reason: string;
   /** Provider calls the controller reserved for this patch; stop before exceeding it. */
   maxProviderCalls?: number;

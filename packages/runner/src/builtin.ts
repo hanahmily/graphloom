@@ -1,6 +1,6 @@
 import type { ExecutorBinding, ExecutorPackageManifest } from "@graphloom/sdk";
 import { BUILTIN_EXECUTOR_NAMESPACE, createChildExecutorRunner } from "./registry.js";
-import { assertSandboxSupported } from "./sandbox.js";
+import { assertSandboxSupported, packageRootOf } from "./sandbox.js";
 import type { Runner } from "./types.js";
 
 export interface BuiltinExecutorPackage extends ExecutorBinding {
@@ -71,6 +71,7 @@ export function createBuiltinExecutorRunner(options: BuiltinExecutorRunnerOption
       executorIds: [...pkg.manifest.executorIds],
       builtin: true,
       sandbox: !unrestricted,
+      sourceRoot: packageRootOf(pkg.manifest.entryModule),
       fallback,
       env,
       allowedEffects: pkg.allowedEffects ?? ["read"],
