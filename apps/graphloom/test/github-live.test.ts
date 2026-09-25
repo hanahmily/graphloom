@@ -4,7 +4,10 @@ import { githubEvidence as github, githubRunner as runner, runGitHub } from "./g
 
 // Opt-in live checks against api.github.com. Reads need only
 // GRAPHLOOM_GITHUB_LIVE_TOKEN; issue writes also need GRAPHLOOM_GITHUB_LIVE_ISSUE,
-// and the review needs GRAPHLOOM_GITHUB_LIVE_PULL.
+// and reviews need GRAPHLOOM_GITHUB_LIVE_PULL (plus _REVIEW_PATH and
+// _REVIEW_LINE for an inline comment). One token is enough: GitHub refuses
+// REQUEST_CHANGES from the pull request's author, and the review test asserts
+// that refusal when the token owner opened the pull request.
 const token = process.env.GRAPHLOOM_GITHUB_LIVE_TOKEN;
 const [owner, repo] = (process.env.GRAPHLOOM_GITHUB_LIVE_REPO ?? "hanahmily/graphloom").split("/") as [
   string,
@@ -172,24 +175,74 @@ describe.skipIf(token === undefined || writeIssue === undefined)("graphloom.gith
 });
 
 const writePull = process.env.GRAPHLOOM_GITHUB_LIVE_PULL;
+const reviewPath = process.env.GRAPHLOOM_GITHUB_LIVE_REVIEW_PATH;
+const reviewLine = process.env.GRAPHLOOM_GITHUB_LIVE_REVIEW_LINE;
+
+async function githubGet<T>(path: string): Promise<T> {
+  const res = await fetch(`https://api.github.com${path}`, {
+    headers: { authorization: `Bearer ${token!}`, accept: "application/vnd.github+json" },
+  });
+  expect(res.status, path).toBe(200);
+  return (await res.json()) as T;
+}
+
+async function reviewsMentioning(runId: string): Promise<number> {
+  const reviews = await githubGet<{ body: string }[]>(`/repos/${owner}/${repo}/pulls/${writePull}/reviews?per_page=100`);
+  return reviews.filter((r) => r.body.includes(runId)).length;
+}
 
 describe.skipIf(token === undefined || writePull === undefined)("graphloom.github live reviews", () => {
-  it("submits one marked review and reconciles the retry to it", async () => {
+  it("submits one marked comment review with an inline note and reconciles the retry to it", async () => {
     const r = runner({ token: token!, allowWrites: true });
     const runId = `live-${Date.now()}`;
     const input = {
       owner,
       repo,
       number: Number(writePull),
-      event: process.env.GRAPHLOOM_GITHUB_LIVE_REVIEW_EVENT ?? "COMMENT",
+      event: "COMMENT",
       body: `GraphLoom live review check (${runId}).`,
+      ...(reviewPath !== undefined && reviewLine !== undefined
+        ? { comments: [{ path: reviewPath, line: Number(reviewLine), body: "GraphLoom inline review check." }] }
+        : {}),
       idempotencyKey: "live-review",
     };
     const first = await run(r, "create-pull-review", input, runId);
     expect(first.status, first.summary).toBe("ok");
-    expect(github(first).outcome).toBe("created");
+    expect(github(first)).toMatchObject({ outcome: "created", review: { state: "COMMENTED" } });
     const retry = await run(r, "create-pull-review", input, runId);
     expect(github(retry).outcome).toBe("reconciled");
     expect((github(retry).review as { id: number }).id).toBe((github(first).review as { id: number }).id);
+    expect(await reviewsMentioning(runId)).toBe(1);
+  });
+
+  it("requests changes, or reports GitHub's refusal on the token owner's own pull request", async () => {
+    const r = runner({ token: token!, allowWrites: true });
+    const pull = github(await run(r, "get-pull", { owner, repo, number: Number(writePull) })).item as { author: string };
+    const viewer = (await githubGet<{ login: string }>("/user")).login;
+    const runId = `live-${Date.now()}`;
+    const input = {
+      owner,
+      repo,
+      number: Number(writePull),
+      event: "REQUEST_CHANGES",
+      body: `GraphLoom live request-changes check (${runId}).`,
+      idempotencyKey: "live-request-changes",
+    };
+    const first = await run(r, "create-pull-review", input, runId);
+
+    if (pull.author === viewer) {
+      expect(first.status).toBe("failed");
+      expect(first.summary).toMatch(/422: .*own pull request/);
+      const retry = await run(r, "create-pull-review", input, runId);
+      expect(retry.status).toBe("failed");
+      expect(retry.summary).toBe(first.summary);
+      expect(await reviewsMentioning(runId)).toBe(0);
+    } else {
+      expect(first.status, first.summary).toBe("ok");
+      expect(github(first)).toMatchObject({ outcome: "created", review: { state: "CHANGES_REQUESTED" } });
+      const retry = await run(r, "create-pull-review", input, runId);
+      expect(github(retry).outcome).toBe("reconciled");
+      expect(await reviewsMentioning(runId)).toBe(1);
+    }
   });
 });

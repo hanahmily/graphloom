@@ -135,6 +135,11 @@ How the package behaves:
 - GitHub's validation details are passed through in failure summaries. Examples
   are reviewing your own pull request, an unknown milestone, or an inline comment
   on a line outside the diff.
+- With a single GitHub account, GraphLoom usually opened the pull request it is
+  reviewing. GitHub refuses `REQUEST_CHANGES` and `APPROVE` from the author, so
+  a graph that asks for fixes on its own pull request should post a `COMMENT`
+  review. The refusal is a definite failure: nothing is posted, and a retry
+  fails the same way.
 
 Built-in packages and plugin bundles can be installed or upgraded independently
 of the controller when compatible with its executor protocol. No controller
