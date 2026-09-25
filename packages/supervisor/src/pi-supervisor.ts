@@ -37,6 +37,8 @@ export interface PiSupervisor extends Supervisor {
     modelId: string;
     reason: string;
   }): Promise<void>;
+  /** Last granted candidate coding root, if any. */
+  candidateCodingRoot(): string | undefined;
 }
 
 export interface CreatePiSupervisorOptions {
@@ -61,6 +63,7 @@ export function createPiSupervisor(options: CreatePiSupervisorOptions): PiSuperv
   ];
   let providerCalls = 0;
   let closed = false;
+  let codingRoot: string | undefined;
 
   const binding: SupervisorBinding = {
     sessionId: session.sessionId,
@@ -78,6 +81,7 @@ export function createPiSupervisor(options: CreatePiSupervisorOptions): PiSuperv
   }
 
   return {
+    sessionId: session.sessionId,
     get binding() {
       return {
         ...binding,
@@ -89,6 +93,27 @@ export function createPiSupervisor(options: CreatePiSupervisorOptions): PiSuperv
       const n = providerCalls;
       providerCalls = 0;
       return n;
+    },
+
+    candidateCodingRoot() {
+      return codingRoot;
+    },
+
+    async grantCandidateCoding(candidateRoot: string) {
+      if (closed) {
+        throw new Error("supervisor is closed");
+      }
+      if (!session.grantCandidateCoding) {
+        throw new Error("supervisor session cannot grant candidate coding tools");
+      }
+      // Same session identity for every repair round — only the scoped root changes.
+      await session.grantCandidateCoding(candidateRoot);
+      codingRoot = candidateRoot;
+    },
+
+    async revokeCandidateCoding() {
+      codingRoot = undefined;
+      await session.revokeCandidateCoding?.();
     },
 
     async decide(input: SupervisorInput): Promise<GraphDecision> {
@@ -165,6 +190,7 @@ export function buildRecoveryPrompt(input: SupervisorInput): string {
     generation: input.view.generation,
     stateRevision: input.view.stateRevision,
     activeVersion: input.view.activeVersion,
+    repairCandidates: input.view.repairCandidates ?? [],
   };
 
   return [
@@ -173,6 +199,7 @@ export function buildRecoveryPrompt(input: SupervisorInput): string {
     "Allowed action types: dispatch, observe, validate, reenter, qualify_repair, activate_repair, return, stop.",
     "Never propose Accept. Never add, remove, rename, or reorder graph steps.",
     "Prefer further authorized remedies over Stop while budgets and authority remain.",
+    "For activate_repair, use a qualifiedArtifactId from repairCandidates with status qualified.",
     `Episode: ${input.episodeId}`,
     "Recovery context:",
     "```json",

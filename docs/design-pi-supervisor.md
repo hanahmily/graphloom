@@ -172,8 +172,11 @@ Tooling has two layers:
    scope, and reviewer independence.
 2. **Pi coding tools for qualified repair** — after the controller admits
    `QualifyRepair` and materializes a candidate tree, the **same** supervisor
-   `AgentSession` may use Pi read/edit/write/bash (or GraphLoom wrappers) with
-   filesystem scope **bound to that candidate root only**. The supervisor writes
+   `AgentSession` may use Pi read/edit/write/ls whose file operations reject any
+   path outside that candidate root or through a symlink. The grant is accepted
+   only for a controller-issued `<stateDir>/repairs/<artifactId>/candidate`.
+   Bash, grep, and find are withheld because a working directory is not a
+   sandbox; build and test run through controller preflight. The supervisor writes
    plugin/validator source repairs itself through the Pi SDK; coding is not
    delegated to a separate non-Pi repair agent. Revoke or rebind those tools when
    the qualification episode ends. An independent read-only reviewer uses a

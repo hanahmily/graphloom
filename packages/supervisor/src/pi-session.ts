@@ -9,11 +9,17 @@ import {
   SettingsManager,
   type AgentSession,
   type ResourceLoader,
+  type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import {
   resolveMiniMaxCredential,
   type MiniMaxCredentialSource,
 } from "./credentials.js";
+import {
+  assertAdmittedCandidateRoot,
+  CANDIDATE_CODING_TOOL_NAMES,
+  createCandidateCodingTools,
+} from "./candidate-tools.js";
 
 /** Default initial supervisor model (design-pi-supervisor.md). */
 export const DEFAULT_SUPERVISOR_PROVIDER = "minimax-cn";
@@ -50,6 +56,11 @@ export interface CreatePiSupervisorSessionOptions {
   systemPrompt?: string;
   /** Abort / settle timeout for a single prompt (ms). Default 60_000. */
   promptTimeoutMs?: number;
+  /**
+   * Controller repairs directory (`<stateDir>/repairs`). Candidate coding grants
+   * are only accepted for snapshots issued under it.
+   */
+  repairsDir?: string;
 }
 
 export interface PiSupervisorSession {
@@ -70,6 +81,12 @@ export interface PiSupervisorSession {
    * Caller must ensure the target is operator-configured and idle.
    */
   setModel(ref: { provider: string; modelId: string }): Promise<void>;
+  /**
+   * Enable path-confined file tools on a controller-issued QualifyRepair
+   * candidate root. Session identity must not change across repair rounds.
+   */
+  grantCandidateCoding?(candidateRoot: string): Promise<void>;
+  revokeCandidateCoding?(): Promise<void>;
   /** Dispose the Pi session and release resources. */
   close(): Promise<void>;
 }
@@ -151,6 +168,7 @@ export async function createPiSupervisorSession(
     credentialSource,
     promptTimeoutMs,
     ...(options.apiKey !== undefined ? { apiKey: options.apiKey } : {}),
+    ...(options.repairsDir !== undefined ? { repairsDir: options.repairsDir } : {}),
   });
 }
 
@@ -214,11 +232,13 @@ function wrapSession(args: {
   credentialSource: MiniMaxCredentialSource;
   promptTimeoutMs: number;
   apiKey?: string;
+  repairsDir?: string;
 }): PiSupervisorSession {
   const { session, modelRuntime, agentDir, promptTimeoutMs } = args;
   let closed = false;
   let provider = args.provider;
   let modelId = args.modelId;
+  let codingRoot: string | undefined;
 
   return {
     runId: args.runId,
@@ -316,9 +336,22 @@ function wrapSession(args: {
         unsubscribe();
       }
     },
+    async grantCandidateCoding(candidateRoot: string) {
+      if (closed) {
+        throw new Error("supervisor session is closed");
+      }
+      const root = await assertAdmittedCandidateRoot(args.repairsDir, candidateRoot);
+      codingRoot = root;
+      installCandidateCodingTools(session, root);
+    },
+    async revokeCandidateCoding() {
+      codingRoot = undefined;
+      revokeCandidateCodingTools(session);
+    },
     async close() {
       if (closed) return;
       closed = true;
+      codingRoot = undefined;
       if (!session.isIdle) {
         await session.abort().catch(() => undefined);
       }
@@ -345,6 +378,40 @@ function createIsolatedResourceLoader(systemPrompt: string): ResourceLoader {
     extendResources: () => undefined,
     reload: async () => undefined,
   };
+}
+
+/** Pi AgentSession internals needed to swap candidate-scoped coding tools. */
+interface MutableToolSession {
+  _customTools: ToolDefinition[];
+  _allowedToolNames: Set<string> | undefined;
+  _refreshToolRegistry: (options?: { activeToolNames?: string[] }) => void;
+  setActiveToolsByName: (toolNames: string[]) => void;
+}
+
+function asMutableToolSession(session: AgentSession): MutableToolSession {
+  return session as unknown as MutableToolSession;
+}
+
+/**
+ * Enable path-confined read/edit/write/ls on the candidate root. The allowlist
+ * names only those tools so Pi's unconfined built-ins (including bash) stay off.
+ */
+function installCandidateCodingTools(session: AgentSession, rootReal: string): void {
+  const host = asMutableToolSession(session);
+  host._allowedToolNames = new Set(CANDIDATE_CODING_TOOL_NAMES);
+  host._customTools = createCandidateCodingTools(rootReal);
+  host._refreshToolRegistry({
+    activeToolNames: [...CANDIDATE_CODING_TOOL_NAMES],
+  });
+}
+
+/** Revoke coding tools; session returns to decision-only (no filesystem tools). */
+function revokeCandidateCodingTools(session: AgentSession): void {
+  const host = asMutableToolSession(session);
+  host._customTools = [];
+  host._allowedToolNames = new Set();
+  host._refreshToolRegistry({ activeToolNames: [] });
+  host.setActiveToolsByName([]);
 }
 
 function sleep(ms: number): Promise<void> {

@@ -1,0 +1,656 @@
+import { execFile } from "node:child_process";
+import { mkdir, mkdtemp, readFile, writeFile, rm } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
+import { afterEach, describe, expect, it } from "vitest";
+import {
+  activateRepair,
+  createScriptedGraph,
+  dispatch,
+  observe,
+  qualifyRepair,
+  returnToNormal,
+  stop,
+  supervise,
+  validate,
+  type GraphDefinition,
+  type Validator,
+} from "@graphloom/sdk";
+import { createScriptedRunner } from "@graphloom/runner";
+import { createInProcessPluginHost } from "@graphloom/plugin-host";
+import { createScriptedSupervisor } from "@graphloom/supervisor";
+import {
+  createController,
+  loadRunState,
+  type RepairDeps,
+} from "./index.js";
+
+const execFileAsync = promisify(execFile);
+const here = path.dirname(fileURLToPath(import.meta.url));
+const repoRoot = path.resolve(here, "../../..");
+const helloBundle = path.join(repoRoot, "examples/plugins/hello");
+
+const GREETING = "Hello, GraphLoom!\n";
+const GREETING_PATH = "GREETING.txt";
+
+const definition: GraphDefinition = {
+  graphId: "hello",
+  version: "0.1.0",
+  stages: [
+    { id: "write", name: "Write", requirementIds: ["greeting-bytes"] },
+    { id: "review", name: "Review", requirementIds: ["independent-review"] },
+  ],
+  requirements: [
+    {
+      id: "greeting-bytes",
+      statement:
+        "GREETING.txt contains exactly the UTF-8 bytes Hello, GraphLoom!\\n and is the only changed path in the workspace (excluding Git metadata).",
+      evidenceSchema: "workspace-bytes-v1",
+    },
+    {
+      id: "independent-review",
+      statement:
+        "An independent read-only reviewer approves the current GREETING.txt revision against the pinned task.",
+      evidenceSchema: "review-verdict-v1",
+    },
+  ],
+  defaultValidators: [
+    { requirementId: "greeting-bytes", validatorId: "exact-greeting", version: "1" },
+    {
+      requirementId: "independent-review",
+      validatorId: "independent-reviewer",
+      version: "1",
+      independence: "separate-reviewer" as const,
+    },
+  ],
+};
+
+function latest(
+  evidence: { kind: string; payload?: unknown }[],
+  kind: string,
+): unknown {
+  for (let i = evidence.length - 1; i >= 0; i--) {
+    if (evidence[i]?.kind === kind) return evidence[i]?.payload;
+  }
+  return undefined;
+}
+
+/** Defective Write gate: always fails even with correct greeting. */
+const defectiveGreeting: Validator = {
+  evaluate() {
+    return { status: "failed" as const, reason: "defective gate always fails" };
+  },
+};
+
+const goodGreeting: Validator = {
+  evaluate(input) {
+    const file = latest(input.evidence, "file") as { path?: string; bytes?: string } | undefined;
+    const manifest = latest(input.evidence, "workspace") as { changedPaths?: string[] } | undefined;
+    if (!file || !manifest) return { status: "inconclusive" as const, reason: "missing" };
+    if (file.path !== GREETING_PATH || file.bytes !== GREETING) {
+      return { status: "failed" as const, reason: "bad bytes" };
+    }
+    if (
+      !manifest.changedPaths?.includes(GREETING_PATH) ||
+      manifest.changedPaths.some((p) => p !== GREETING_PATH)
+    ) {
+      return { status: "failed" as const, reason: "bad scope" };
+    }
+    return { status: "passed" as const, reason: "ok" };
+  },
+};
+
+const independentReview: Validator = {
+  evaluate(input) {
+    const review = latest(input.evidence, "review") as { verdict?: string } | undefined;
+    if (review?.verdict === "approved") {
+      return { status: "passed" as const, reason: "approved" };
+    }
+    return { status: "failed" as const, reason: "not approved" };
+  },
+};
+
+const temps: string[] = [];
+
+afterEach(async () => {
+  while (temps.length > 0) {
+    const dir = temps.pop();
+    if (dir) {
+      await execFileAsync("git", ["worktree", "prune"], { cwd: dir }).catch(() => undefined);
+      await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+    }
+  }
+});
+
+async function makeEnv(
+  opts: { grants?: boolean } = {},
+): Promise<{ taskPath: string; stateRoot: string; taskDir: string }> {
+  await execFileAsync("npm", ["run", "build", "-w", "@graphloom/plugin-hello"], {
+    cwd: repoRoot,
+  });
+  const taskDir = await mkdtemp(path.join(os.tmpdir(), "gl-repair-e2e-"));
+  temps.push(taskDir);
+  const repoPath = path.join(taskDir, "test-repo");
+  await mkdir(repoPath, { recursive: true });
+  await execFileAsync("git", ["init"], { cwd: repoPath });
+  await execFileAsync("git", ["config", "user.email", "test@example.com"], { cwd: repoPath });
+  await execFileAsync("git", ["config", "user.name", "Test"], { cwd: repoPath });
+  await writeFile(path.join(repoPath, "README.md"), "repo\n", "utf8");
+  await execFileAsync("git", ["add", "README.md"], { cwd: repoPath });
+  await execFileAsync("git", ["commit", "-m", "init"], { cwd: repoPath });
+  await mkdir(path.join(taskDir, "plugins"), { recursive: true });
+  // Copy (do not symlink) so repair snapshots never risk the repo hello tree.
+  const { cp } = await import("node:fs/promises");
+  await cp(helloBundle, path.join(taskDir, "plugins", "hello"), {
+    recursive: true,
+    dereference: true,
+    filter: (src) => path.basename(src) !== "node_modules",
+  });
+  const taskPath = path.join(taskDir, "task.yaml");
+  await writeFile(
+    taskPath,
+    `graph: hello
+repo: ./test-repo
+request: |
+  Create GREETING.txt containing exactly "Hello, GraphLoom!" followed by
+  one newline. Do not modify other files.
+${
+  opts.grants === false
+    ? ""
+    : `grants:
+  sourceRepair: true
+  validatorSubstitution: true
+`
+}`,
+    "utf8",
+  );
+  return { taskPath, stateRoot: path.join(taskDir, "state"), taskDir };
+}
+
+describe("qualified repair + same-run activation (#29)", () => {
+  it("repairs a defective Write validator via the same supervisor session and activates", async () => {
+    const env = await makeEnv();
+    const controller = createController();
+    const SUPERVISOR_SESSION = "sup-session-run-1";
+    const REVIEWER_SESSION = "reviewer-session-independent";
+    const codingRoots: string[] = [];
+    const patchSessionIds: string[] = [];
+
+    const supervisor = createScriptedSupervisor({
+      sessionId: SUPERVISOR_SESSION,
+      decisions: [
+        // Round 1 after defective validate fails → graph Supervises
+        qualifyRepair({ target: "validator", reason: "defective write gate" }, "qualify"),
+        (input) => {
+          const qualified = input.view.repairCandidates?.find((c) => c.status === "qualified");
+          if (!qualified) {
+            throw new Error("expected qualified repair candidate on RunView");
+          }
+          return activateRepair(
+            { qualifiedArtifactId: qualified.artifactId, reason: "activate fixed gate" },
+            "activate",
+          );
+        },
+        returnToNormal({ summary: "validator repaired" }, "return"),
+      ],
+    });
+
+    let lastArtifactId: string | undefined;
+    const originalGrant = supervisor.grantCandidateCoding!.bind(supervisor);
+    supervisor.grantCandidateCoding = async (root) => {
+      codingRoots.push(root);
+      expect(supervisor.sessionId).toBe(SUPERVISOR_SESSION);
+      await originalGrant(root);
+    };
+
+    const repair: RepairDeps = {
+      patchAuthor: {
+        sessionId: SUPERVISOR_SESSION,
+        async patch({ candidateRoot }) {
+          patchSessionIds.push(SUPERVISOR_SESSION);
+          // Mark the candidate as patched; do not touch the live install.
+          await writeFile(
+            path.join(candidateRoot, "REPAIR_MARKER.txt"),
+            "fixed-exact-greeting\n",
+            "utf8",
+          );
+          lastArtifactId = path.basename(path.dirname(candidateRoot));
+          void lastArtifactId;
+        },
+      },
+      reviewer: {
+        sessionId: REVIEWER_SESSION,
+        async review() {
+          return { approved: true, reason: "gate now matches requirement" };
+        },
+      },
+      async preflight() {
+        return { ok: true, summary: "scripted preflight ok" };
+      },
+      materializeValidators: (candidateRoot) => {
+        expect(existsSync(path.join(candidateRoot, "REPAIR_MARKER.txt"))).toBe(true);
+        expect(existsSync(path.join(helloBundle, "REPAIR_MARKER.txt"))).toBe(false);
+        return {
+          "exact-greeting": goodGreeting,
+          "independent-reviewer": independentReview,
+        };
+      },
+    };
+
+    let writes = 0;
+    const plugin = createScriptedGraph({
+      definition,
+      advances: [
+        dispatch(
+          {
+            stageId: "write",
+            kind: "agent",
+            purpose: "work",
+            instruction: "write greeting",
+            writeScope: [GREETING_PATH],
+          },
+          "write",
+        ),
+        observe({ paths: [GREETING_PATH], includeWorkspaceManifest: true }, "obs"),
+        validate({ stageId: "write", requirementIds: ["greeting-bytes"] }, "val write"),
+        // Defective gate fails → escalate
+        supervise({ reason: "write validator defective" }, "escalate"),
+        // After Return with fixed validator:
+        dispatch(
+          {
+            stageId: "write",
+            kind: "agent",
+            purpose: "work",
+            instruction: "rewrite after repair",
+            writeScope: [GREETING_PATH],
+          },
+          "rewrite",
+        ),
+        observe({ paths: [GREETING_PATH], includeWorkspaceManifest: true }, "obs2"),
+        validate({ stageId: "write", requirementIds: ["greeting-bytes"] }, "val write2"),
+        dispatch(
+          {
+            stageId: "review",
+            kind: "agent",
+            purpose: "review",
+            instruction: "review",
+            readOnly: true,
+          },
+          "review",
+        ),
+        validate({ stageId: "review", requirementIds: ["independent-review"] }, "val review"),
+        stop({ reason: "complete" }, "done"),
+      ],
+    });
+
+    const report = await controller.run({
+      taskPath: env.taskPath,
+      plugin,
+      validators: {
+        "exact-greeting": defectiveGreeting,
+        "independent-reviewer": independentReview,
+      },
+      supervisor,
+      repair,
+      runner: createScriptedRunner({
+        jobs: Array.from({ length: 8 }, () => async (
+          job: { purpose?: string; readOnly?: boolean },
+          ctx: { worktreePath: string },
+        ) => {
+          if (job.purpose === "review" || job.readOnly) {
+            return {
+              status: "ok" as const,
+              summary: "approved",
+              evidence: [
+                { kind: "review" as const, payload: { verdict: "approved", summary: "ok" } },
+              ],
+            };
+          }
+          writes += 1;
+          await writeFile(path.join(ctx.worktreePath, GREETING_PATH), GREETING, "utf8");
+          return { status: "ok" as const, summary: `write-${writes}` };
+        }),
+      }),
+      stateRoot: env.stateRoot,
+      runId: "repair1",
+    });
+
+    expect(report.status).toBe("succeeded");
+    expect(patchSessionIds).toEqual([SUPERVISOR_SESSION]);
+    expect(codingRoots.length).toBe(1);
+    expect(supervisor.sessionId).toBe(SUPERVISOR_SESSION);
+
+    const state = await loadRunState(report.stateDir);
+    expect(state.repairCandidates?.some((c) => c.status === "activated")).toBe(true);
+    expect(state.activationIntent?.status).toBe("committed");
+    // Live install marker must not exist under the original hello symlink path.
+    await expect(
+      readFile(path.join(helloBundle, "REPAIR_MARKER.txt"), "utf8"),
+    ).rejects.toThrow();
+  });
+
+  it("rejects independent review authored by the supervisor session", async () => {
+    const env = await makeEnv();
+    const controller = createController();
+    const SAME = "same-session";
+    const supervisor = createScriptedSupervisor({
+      sessionId: SAME,
+      decisions: [
+        qualifyRepair({ target: "validator", reason: "try" }, "qualify"),
+        stop({ reason: "blocked", blocker: "review" }, "stop"),
+      ],
+    });
+
+    const report = await controller.run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({
+        definition,
+        advances: [supervise({ reason: "need repair" }, "esc")],
+      }),
+      validators: {
+        "exact-greeting": defectiveGreeting,
+        "independent-reviewer": independentReview,
+      },
+      supervisor,
+      repair: {
+        patchAuthor: {
+          sessionId: SAME,
+          async patch() {
+            /* no-op */
+          },
+        },
+        reviewer: {
+          sessionId: SAME, // illegal
+          async review() {
+            return { approved: true, reason: "self-review" };
+          },
+        },
+        async preflight() {
+          return { ok: true, summary: "unused" };
+        },
+      },
+      runner: createScriptedRunner({ jobs: [] }),
+      stateRoot: env.stateRoot,
+      runId: "repair-self-review",
+    });
+
+    expect(report.status).toBe("stopped");
+    expect(report.stopReason).toMatch(/independent review cannot use the supervisor session/i);
+  });
+
+  it("supersedes qualified peers when one candidate activates", async () => {
+    const env = await makeEnv();
+    // Direct unit-style: snapshot twice, activate first by mutating live digest via second activate path
+    // Covered by applyActivateRepair base check — exercise through two qualify then mutate install.
+    const controller = createController();
+    const SUPERVISOR_SESSION = "sup-2";
+    let artifactA: string | undefined;
+    let round = 0;
+
+    const supervisor = createScriptedSupervisor({
+      sessionId: SUPERVISOR_SESSION,
+      decisions: [
+        qualifyRepair({ target: "plugin", reason: "first" }, "q1"),
+        qualifyRepair({ target: "plugin", reason: "second" }, "q2"),
+        (input) => {
+          void input;
+          const id = round === 0 ? artifactA! : artifactB!;
+          round += 1;
+          return activateRepair({ qualifiedArtifactId: id, reason: "act" }, "a");
+        },
+        (input) => {
+          void input;
+          return activateRepair({ qualifiedArtifactId: artifactB!, reason: "act2" }, "a2");
+        },
+        stop({ reason: "done", blocker: "check" }, "stop"),
+      ],
+    });
+
+    let artifactB: string | undefined;
+    const repair: RepairDeps = {
+      patchAuthor: {
+        sessionId: SUPERVISOR_SESSION,
+        async patch({ candidateRoot }) {
+          const id = path.basename(path.dirname(candidateRoot));
+          if (!artifactA) artifactA = id;
+          else artifactB = id;
+          await writeFile(path.join(candidateRoot, "p.txt"), id, "utf8");
+        },
+      },
+      reviewer: {
+        sessionId: "rev-2",
+        async review() {
+          return { approved: true, reason: "ok" };
+        },
+      },
+      async preflight() {
+        return { ok: true, summary: "ok" };
+      },
+    };
+
+    const report = await controller.run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({
+        definition,
+        advances: [supervise({ reason: "r" }, "e")],
+      }),
+      validators: {
+        "exact-greeting": goodGreeting,
+        "independent-reviewer": independentReview,
+      },
+      supervisor,
+      repair,
+      runner: createScriptedRunner({ jobs: [] }),
+      stateRoot: env.stateRoot,
+      runId: "repair-concurrent",
+    });
+
+    // Activating A supersedes the qualified peer B, so the second activation
+    // finds no qualified artifact and the run stops without switching again.
+    expect(report.status).toBe("stopped");
+    expect(report.stopReason).toBe("activate_repair missing qualified artifact");
+    expect(report.blocker).toBe(artifactB);
+    const state = await loadRunState(report.stateDir!);
+    const byId = new Map(state.repairCandidates?.map((c) => [c.artifactId, c.status]));
+    expect(byId.get(artifactA!)).toBe("activated");
+    expect(byId.get(artifactB!)).toBe("superseded");
+    expect(state.activeVersion).toBe(`hello@repair-${artifactA}`);
+    expect(supervisor.sessionId).toBe(SUPERVISOR_SESSION);
+  });
+
+  function approvingRepair(sessionId: string, onPatch?: (root: string) => Promise<void>): RepairDeps {
+    return {
+      patchAuthor: {
+        sessionId,
+        async patch({ candidateRoot }) {
+          await onPatch?.(candidateRoot);
+          await writeFile(path.join(candidateRoot, "p.txt"), "patched\n", "utf8");
+          return { summary: "patched" };
+        },
+      },
+      reviewer: {
+        sessionId: `${sessionId}-reviewer`,
+        async review() {
+          return { approved: true, reason: "ok" };
+        },
+      },
+      async preflight() {
+        return { ok: true, summary: "ok" };
+      },
+    };
+  }
+
+  function activateFirstQualified() {
+    return (input: { view: { repairCandidates?: { artifactId: string; status: string }[] } }) => {
+      const qualified = input.view.repairCandidates?.find((c) => c.status === "qualified");
+      if (!qualified) throw new Error("no qualified candidate on RunView");
+      return activateRepair({ qualifiedArtifactId: qualified.artifactId, reason: "act" }, "act");
+    };
+  }
+
+  const escalatingPlugin = () =>
+    createScriptedGraph({ definition, advances: [supervise({ reason: "r" }, "e")] });
+  const goodValidators = {
+    "exact-greeting": goodGreeting,
+    "independent-reviewer": independentReview,
+  };
+
+  it("rejects qualify_repair when the operator grant is not pinned", async () => {
+    const env = await makeEnv({ grants: false });
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: escalatingPlugin(),
+      validators: goodValidators,
+      supervisor: createScriptedSupervisor({
+        sessionId: "sup-g",
+        decisions: [qualifyRepair({ target: "validator", reason: "try" }, "q")],
+      }),
+      repair: approvingRepair("sup-g"),
+      runner: createScriptedRunner({ jobs: [] }),
+      stateRoot: env.stateRoot,
+      runId: "repair-no-grant",
+    });
+    expect(report.status).toBe("stopped");
+    expect(report.stopReason).toBe("qualify_repair missing operator grant");
+    expect(report.blocker).toMatch(/validatorSubstitution/);
+    const state = await loadRunState(report.stateDir);
+    expect(state.repairCandidates ?? []).toHaveLength(0);
+  });
+
+  it("spends the correction and rejects the candidate when the patch throws", async () => {
+    const env = await makeEnv();
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: escalatingPlugin(),
+      validators: goodValidators,
+      supervisor: createScriptedSupervisor({
+        sessionId: "sup-t",
+        decisions: [
+          qualifyRepair({ target: "plugin", reason: "try" }, "q"),
+          stop({ reason: "gave up", blocker: "patch failed" }, "s"),
+        ],
+      }),
+      repair: approvingRepair("sup-t", async () => {
+        throw new Error("patch tool crashed");
+      }),
+      runner: createScriptedRunner({ jobs: [] }),
+      stateRoot: env.stateRoot,
+      runId: "repair-patch-throws",
+    });
+    expect(report.status).toBe("stopped");
+    expect(report.stopReason).toBe("gave up");
+    const state = await loadRunState(report.stateDir);
+    expect(state.repairCandidates).toHaveLength(1);
+    expect(state.repairCandidates?.[0]?.status).toBe("rejected");
+    expect(state.repairCandidates?.[0]?.rejectionReason).toBe("patch tool crashed");
+    expect(state.budgets.corrections).toBe(7);
+  });
+
+  it("rejects activation when the live install changed after qualification", async () => {
+    const env = await makeEnv();
+    const liveEntry = path.join(env.taskDir, "plugins", "hello", "TAMPER.txt");
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: escalatingPlugin(),
+      validators: goodValidators,
+      supervisor: createScriptedSupervisor({
+        sessionId: "sup-b",
+        decisions: [
+          qualifyRepair({ target: "plugin", reason: "try" }, "q"),
+          async (input) => {
+            await writeFile(liveEntry, "tampered\n", "utf8");
+            return activateFirstQualified()(input);
+          },
+        ],
+      }),
+      repair: approvingRepair("sup-b"),
+      runner: createScriptedRunner({ jobs: [] }),
+      stateRoot: env.stateRoot,
+      runId: "repair-base-mismatch",
+    });
+    expect(report.status).toBe("stopped");
+    expect(report.stopReason).toBe("activate_repair base mismatch");
+    const state = await loadRunState(report.stateDir);
+    expect(state.repairCandidates?.[0]?.status).toBe("superseded");
+    expect(state.activeVersion).toBe("hello@0.1.0");
+  });
+
+  it("rejects activation when the loaded candidate alters the pinned graph contract", async () => {
+    const env = await makeEnv();
+    const altered: GraphDefinition = {
+      ...definition,
+      stages: [...definition.stages].reverse(),
+    };
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: escalatingPlugin(),
+      validators: goodValidators,
+      recreateHost: async (ctx) =>
+        createInProcessPluginHost(createScriptedGraph({ definition: altered, advances: [] }), {
+          activeVersion: ctx.activeVersion,
+          generation: ctx.generation,
+        }),
+      supervisor: createScriptedSupervisor({
+        sessionId: "sup-c",
+        decisions: [
+          qualifyRepair({ target: "plugin", reason: "try" }, "q"),
+          activateFirstQualified(),
+        ],
+      }),
+      repair: approvingRepair("sup-c"),
+      runner: createScriptedRunner({ jobs: [] }),
+      stateRoot: env.stateRoot,
+      runId: "repair-contract",
+    });
+    expect(report.status).toBe("stopped");
+    expect(report.stopReason).toBe("activate_repair candidate rejected");
+    expect(report.blocker).toMatch(/alters pinned stages/);
+    const state = await loadRunState(report.stateDir);
+    expect(state.activationIntent?.status).toBe("aborted");
+    expect(state.repairCandidates?.[0]?.status).toBe("rejected");
+    expect(state.activeVersion).toBe("hello@0.1.0");
+  });
+
+  it("refuses to resume an activated validator repair it cannot rehydrate", async () => {
+    const env = await makeEnv();
+    const controller = createController();
+    const repair: RepairDeps = {
+      ...approvingRepair("sup-r"),
+      materializeValidators: () => goodValidators,
+    };
+    const first = await controller.run({
+      taskPath: env.taskPath,
+      plugin: escalatingPlugin(),
+      validators: { ...goodValidators, "exact-greeting": defectiveGreeting },
+      supervisor: createScriptedSupervisor({
+        sessionId: "sup-r",
+        decisions: [
+          qualifyRepair({ target: "validator", reason: "defective gate" }, "q"),
+          activateFirstQualified(),
+          stop({ reason: "pause", blocker: "operator pause" }, "s"),
+        ],
+      }),
+      repair,
+      runner: createScriptedRunner({ jobs: [] }),
+      stateRoot: env.stateRoot,
+      runId: "repair-resume",
+    });
+    expect(first.status).toBe("stopped");
+    expect((await loadRunState(first.stateDir)).activationIntent?.status).toBe("committed");
+
+    const { materializeValidators: _drop, ...withoutMaterialize } = repair;
+    void _drop;
+    const resumed = await controller.resume({
+      runRef: first.stateDir,
+      plugin: escalatingPlugin(),
+      validators: { ...goodValidators, "exact-greeting": defectiveGreeting },
+      repair: withoutMaterialize,
+      runner: createScriptedRunner({ jobs: [] }),
+    });
+    expect(resumed.status).toBe("stopped");
+    expect(resumed.stopReason).toBe("repair rehydration required");
+  });
+});

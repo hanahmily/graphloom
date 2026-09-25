@@ -16,6 +16,12 @@ import {
 } from "@graphloom/plugin-host";
 import type { Supervisor } from "@graphloom/supervisor";
 import { restorePiSupervisorFromBinding } from "@graphloom/supervisor";
+import {
+  activeRepairValidators,
+  reconcileRepairJournal,
+  type RecreateHostFn,
+  type RepairDeps,
+} from "./repair-lifecycle.js";
 import { admitValidation } from "./admit.js";
 import type { AdmissionValidator } from "./admit.js";
 import { resolveBundleEntry } from "./bundle.js";
@@ -82,13 +88,18 @@ export interface RunRequest {
   /**
    * Recovery decision owner for Supervise / host crash containment.
    * Scripted in CI; Pi-backed sessions in live runs.
+   * One session identity is reused for every repair round in the run.
    */
   supervisor?: Supervisor;
+  /** Qualified repair patch author + independent reviewer hooks. */
+  repair?: RepairDeps;
   /**
-   * Replace a dead child host after crash/timeout. Defaults to spawning a
-   * fresh child for controller-owned bundles; pass explicitly for custom hosts.
+   * Replace a dead child host after crash/timeout, or after ActivateRepair.
+   * Defaults to spawning a fresh child for controller-owned bundles; pass
+   * explicitly for custom hosts. Receives the current intake pin so activation
+   * can open the candidate bundle.
    */
-  recreateHost?: () => Promise<PluginHost>;
+  recreateHost?: RecreateHostFn;
   /** Directory for durable run state (default: <repo>/graphloom-state). */
   stateRoot?: string;
   runId?: string;
@@ -102,6 +113,7 @@ export interface ResumeRequest {
   plugin?: GraphPlugin;
   host?: PluginHost;
   supervisor?: Supervisor;
+  repair?: RepairDeps;
   /**
    * When `supervisor` is omitted and durable `supervisorBinding` exists,
    * restore the logical Pi session. Defaults to `restorePiSupervisorFromBinding`.
@@ -110,7 +122,7 @@ export interface ResumeRequest {
     binding: NonNullable<DurableRunState["supervisorBinding"]>,
     ctx: { runId: string; stateDir: string },
   ) => Promise<Supervisor>;
-  recreateHost?: () => Promise<PluginHost>;
+  recreateHost?: RecreateHostFn;
   stateRoot?: string;
 }
 
@@ -243,6 +255,7 @@ export function createController(): Controller {
           ...(request.supervisor !== undefined
             ? { supervisor: request.supervisor }
             : {}),
+          ...(request.repair !== undefined ? { repair: request.repair } : {}),
           ...resolveRecreateHost(session, {
             intake,
             activeVersion,
@@ -379,6 +392,7 @@ export function createController(): Controller {
           }
         }
 
+        state = reconcileRepairJournal(state);
         state = bumpGeneration({ ...state, status: "running" }, "resume");
         await clearStopRequest(stateDir);
         await saveRunState(state);
@@ -436,8 +450,25 @@ export function createController(): Controller {
           return toReport(state, await listDirtyPaths(state.intake.repoPath));
         }
 
+        // Host-backed validators already evaluate in the active (repaired) bundle;
+        // explicit in-process validators must be rebound to the repaired candidate.
+        const rehydrated: ReturnType<typeof activeRepairValidators> =
+          request.validators !== undefined
+            ? activeRepairValidators(state, request.repair)
+            : { ok: true };
+        if (!rehydrated.ok) {
+          state = {
+            ...state,
+            status: "stopped",
+            stopReason: "repair rehydration required",
+            blocker: rehydrated.reason,
+          };
+          await saveRunState(state);
+          return toReport(state, await listDirtyPaths(state.intake.repoPath));
+        }
+
         const revisionBridge = { current: state.stateRevision };
-        const validators = resolveValidators(
+        const baseValidators = resolveValidators(
           request.validators,
           () => session!.host,
           state.definition.defaultValidators.map((b) => b.validatorId),
@@ -446,6 +477,9 @@ export function createController(): Controller {
             getStateRevision: () => revisionBridge.current,
           },
         );
+        const validators = rehydrated.validators
+          ? { ...baseValidators, ...rehydrated.validators }
+          : baseValidators;
 
         const supervisor = await resolveResumeSupervisor(request, state, stateDir);
         if (supervisor && !request.supervisor) {
@@ -459,6 +493,7 @@ export function createController(): Controller {
           shouldStop: () => sessionStop(session!),
           revisionBridge,
           ...(supervisor !== undefined ? { supervisor } : {}),
+          ...(request.repair !== undefined ? { repair: request.repair } : {}),
           ...resolveRecreateHost(session, {
             intake: state.intake,
             activeVersion: state.activeVersion,
@@ -550,6 +585,7 @@ async function resolveResumeSupervisor(
           switchJournal: b.switchJournal,
         },
         sessionDir: path.dirname(b.sessionFile!),
+        repairsDir: path.join(ctx.stateDir, "repairs"),
       }));
   return restore(binding, { runId: state.runId, stateDir });
 }
@@ -608,6 +644,9 @@ async function openHost(args: {
  * Prefer an explicit recreate hook; otherwise spawn a fresh child for
  * controller-owned bundles. Caller-supplied hosts/plugins are left alone
  * unless they pass recreateHost.
+ *
+ * The returned closure reads intake/version/generation from the call args so
+ * ActivateRepair can point the next host at the candidate pin.
  */
 function resolveRecreateHost(
   session: ActiveSession,
@@ -617,13 +656,17 @@ function resolveRecreateHost(
     generation: number;
     plugin?: GraphPlugin;
     host?: PluginHost;
-    recreateHost?: () => Promise<PluginHost>;
+    recreateHost?: (ctx: {
+      intake: IntakePin;
+      activeVersion: string;
+      generation: number;
+    }) => Promise<PluginHost>;
   },
-): { recreateHost: () => Promise<PluginHost> } | Record<string, never> {
+): { recreateHost: RecreateHostFn } | Record<string, never> {
   if (args.recreateHost) {
     return {
-      recreateHost: async () => {
-        const next = await args.recreateHost!();
+      recreateHost: async (ctx) => {
+        const next = await args.recreateHost!(ctx);
         session.host = next;
         return next;
       },
@@ -633,11 +676,11 @@ function resolveRecreateHost(
     return {};
   }
   return {
-    recreateHost: async () => {
+    recreateHost: async (ctx) => {
       const next = await openHost({
-        intake: args.intake,
-        activeVersion: args.activeVersion,
-        generation: args.generation,
+        intake: ctx.intake,
+        activeVersion: ctx.activeVersion,
+        generation: ctx.generation,
       });
       session.host = next;
       return next;
@@ -767,6 +810,14 @@ export { toRunView, bumpGeneration } from "./loop.js";
 export { loadRunState, saveRunState } from "./state.js";
 export type { DurableRunState, RunStatus, VersionRecord } from "./state.js";
 export type { IntakePin } from "./intake.js";
+export type {
+  RepairDeps,
+  RepairPatchAuthor,
+  RepairReviewer,
+  RepairPreflightResult,
+  RecreateHostFn,
+} from "./repair-lifecycle.js";
+export { defaultRepairPreflight } from "./repair-lifecycle.js";
 export { assertSafeRunId, assertSafeGraphId } from "./ids.js";
 export { resolveBundleEntry } from "./bundle.js";
 

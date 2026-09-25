@@ -36,6 +36,13 @@ import {
 } from "./owner.js";
 import { reconcilePendingDispatch } from "./reconcile.js";
 import { loadRunState, type DurableRunState, saveRunState } from "./state.js";
+import { bumpGeneration } from "./generation.js";
+import {
+  applyActivateRepair,
+  applyQualifyRepair,
+  type RecreateHostFn,
+  type RepairDeps,
+} from "./repair-lifecycle.js";
 import {
   readWorktreeFile,
   workspaceChangeManifest,
@@ -50,11 +57,14 @@ export interface LoopDeps {
   validators: Record<string, AdmissionValidator>;
   /** Optional recovery decision source; required to continue past Supervise / host failure. */
   supervisor?: Supervisor;
+  /** Qualified repair patch/review hooks (same supervisor session for patches). */
+  repair?: RepairDeps;
   /**
-   * Replace a dead child plugin process after crash/timeout.
+   * Replace a dead child plugin process after crash/timeout, or after
+   * ActivateRepair points the run at a candidate bundle.
    * Required when recovering past a host that exposes `childPid`.
    */
-  recreateHost?: () => Promise<PluginHost>;
+  recreateHost?: RecreateHostFn;
   /** Operator stop: checked each loop turn before advance (sync or async). */
   shouldStop?: () => boolean | Promise<boolean>;
   /** Live revision bridge for host-backed validators. */
@@ -432,6 +442,7 @@ function enterRecovery(
  * continues so Return can advance again. In-process hosts need no restart.
  */
 async function restartDeadChildHost(
+  state: DurableRunState,
   deps: LoopDeps,
   code: "plugin_crash" | "plugin_timeout" | "plugin_malformed" | "unhandled",
 ): Promise<{ ok: true } | { ok: false; stopReason: string; blocker: string }> {
@@ -450,7 +461,11 @@ async function restartDeadChildHost(
   }
   await deps.host.close().catch(() => undefined);
   try {
-    deps.host = await deps.recreateHost();
+    deps.host = await deps.recreateHost({
+      intake: state.intake,
+      activeVersion: state.activeVersion,
+      generation: state.generation,
+    });
   } catch (err) {
     return {
       ok: false,
@@ -481,7 +496,7 @@ async function containHostFailure(
   }
   const code = mapHostFailureCode(observationCode);
   if (deps.supervisor) {
-    const restarted = await restartDeadChildHost(deps, code);
+    const restarted = await restartDeadChildHost(state, deps, code);
     if (!restarted.ok) {
       return {
         done: true,
@@ -546,6 +561,18 @@ export function toRunView(state: DurableRunState): RunView {
   }
   if (state.recoveryEpisodeId !== undefined) {
     view.recoveryEpisodeId = state.recoveryEpisodeId;
+  }
+  if (state.repairCandidates !== undefined && state.repairCandidates.length > 0) {
+    view.repairCandidates = state.repairCandidates.map((c) => ({
+      artifactId: c.artifactId,
+      status: c.status,
+      target: c.target,
+      reason: c.reason,
+      ...(c.candidateDigest !== undefined ? { candidateDigest: c.candidateDigest } : {}),
+      ...(c.qualifiedAt !== undefined ? { qualifiedAt: c.qualifiedAt } : {}),
+      ...(c.rejectionReason !== undefined ? { rejectionReason: c.rejectionReason } : {}),
+      ...(c.preflightSummary !== undefined ? { preflightSummary: c.preflightSummary } : {}),
+    }));
   }
   return view;
 }
@@ -685,6 +712,48 @@ async function applyDecision(
         status: "running",
       };
     }
+    case "qualify_repair": {
+      if (!deps.repair) {
+        return {
+          ...state,
+          status: "stopped",
+          stopReason: "qualify_repair requires repair hooks",
+          blocker: action.qualify.reason,
+        };
+      }
+      return applyQualifyRepair(state, action.qualify, {
+        ...(deps.supervisor !== undefined ? { supervisor: deps.supervisor } : {}),
+        repair: deps.repair,
+        validators: deps.validators,
+      });
+    }
+    case "activate_repair": {
+      if (!deps.repair) {
+        return {
+          ...state,
+          status: "stopped",
+          stopReason: "activate_repair requires repair hooks",
+          blocker: action.activate.reason,
+        };
+      }
+      const activated = await applyActivateRepair(state, action.activate, {
+        repair: deps.repair,
+        validators: deps.validators,
+        ...(deps.recreateHost !== undefined
+          ? { recreateHost: deps.recreateHost }
+          : {}),
+      });
+      // Swap validators in place for the remainder of this loop.
+      for (const key of Object.keys(deps.validators)) {
+        delete deps.validators[key];
+      }
+      Object.assign(deps.validators, activated.validators);
+      if (activated.host) {
+        await deps.host.close().catch(() => undefined);
+        deps.host = activated.host;
+      }
+      return activated.state;
+    }
     case "stop": {
       const complete =
         action.stop.reason === "complete" &&
@@ -698,13 +767,15 @@ async function applyDecision(
         blocker: action.stop.blocker,
       };
     }
-    default:
+    default: {
+      const unexpected = action as { type: string };
       return {
         ...state,
         status: "stopped",
-        stopReason: `unsupported action in ${state.mode} mode: ${action.type}`,
-        blocker: action.type,
+        stopReason: `unsupported action in ${state.mode} mode: ${unexpected.type}`,
+        blocker: unexpected.type,
       };
+    }
   }
 }
 
@@ -1063,28 +1134,7 @@ export async function ensureArtifactDir(state: DurableRunState): Promise<void> {
 }
 
 /** Exported for restart tests: bump generation so prior evidence is stale. */
-export function bumpGeneration(
-  state: DurableRunState,
-  reason = "generation fence",
-): DurableRunState {
-  const { workspaceRevision: _wr, ...rest } = state;
-  void _wr;
-  const generation = state.generation + 1;
-  return {
-    ...rest,
-    generation,
-    stateRevision: state.stateRevision + 1,
-    versionHistory: [
-      ...(state.versionHistory ?? []),
-      {
-        activeVersion: state.activeVersion,
-        generation,
-        reason,
-        at: new Date().toISOString(),
-      },
-    ],
-  };
-}
+export { bumpGeneration } from "./generation.js";
 
 export { freshEvidence, earliestIncompleteStage };
 export { candidateEvidence } from "./admit.js";

@@ -13,6 +13,8 @@ export interface TaskFile {
   graph: string;
   repo: string;
   request: string;
+  /** Operator-authorized repair grants (plugin metadata alone is not authority). */
+  grants?: { sourceRepair: boolean; validatorSubstitution: boolean };
 }
 
 export interface BundlePin {
@@ -50,17 +52,39 @@ export class IntakeError extends Error {
   }
 }
 
-/** Parse minimal task.yaml (graph / repo / request). */
+/** Parse minimal task.yaml (graph / repo / request [, grants]). */
 export function parseTaskYaml(text: string): TaskFile {
   const lines = text.replace(/\r\n/g, "\n").split("\n");
   let graph: string | undefined;
   let repo: string | undefined;
   let request: string | undefined;
+  let sourceRepair: boolean | undefined;
+  let validatorSubstitution: boolean | undefined;
+  let inGrants = false;
 
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i]!;
     if (/^\s*#/.test(line) || line.trim() === "") {
       continue;
+    }
+
+    if (/^grants:\s*$/.test(line)) {
+      inGrants = true;
+      continue;
+    }
+
+    if (inGrants) {
+      const indented = /^( {2}|\t)(\w+):\s*(.+?)\s*$/.exec(line);
+      if (indented) {
+        const key = indented[2]!;
+        const value = parseBoolYaml(unquote(indented[3]!));
+        if (key === "sourceRepair") sourceRepair = value;
+        else if (key === "validatorSubstitution") validatorSubstitution = value;
+        else throw new IntakeError(`unknown grants key: ${key}`);
+        continue;
+      }
+      // Non-indented line ends the grants block; fall through to parse it.
+      inGrants = false;
     }
 
     const graphMatch = /^graph:\s*(.+?)\s*$/.exec(line);
@@ -109,7 +133,20 @@ export function parseTaskYaml(text: string): TaskFile {
   } catch (err) {
     throw new IntakeError(err instanceof Error ? err.message : String(err));
   }
-  return { graph, repo, request };
+  const task: TaskFile = { graph, repo, request };
+  if (sourceRepair !== undefined || validatorSubstitution !== undefined) {
+    task.grants = {
+      sourceRepair: sourceRepair ?? false,
+      validatorSubstitution: validatorSubstitution ?? false,
+    };
+  }
+  return task;
+}
+
+function parseBoolYaml(value: string): boolean {
+  if (value === "true" || value === "yes" || value === "1") return true;
+  if (value === "false" || value === "no" || value === "0") return false;
+  throw new IntakeError(`grants value must be boolean, got ${JSON.stringify(value)}`);
 }
 
 export async function intakeTask(taskPath: string): Promise<IntakePin> {
@@ -181,7 +218,7 @@ export async function intakeTask(taskPath: string): Promise<IntakePin> {
       manifestDigest: sha256(manifestRaw),
       entryDigest: sha256Bytes(entryBytes),
     },
-    grants: { sourceRepair: false, validatorSubstitution: false },
+    grants: task.grants ?? { sourceRepair: false, validatorSubstitution: false },
     budgets: {
       agentInvocations: 32,
       jobs: 64,

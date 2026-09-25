@@ -464,8 +464,8 @@ A source repair or validator substitution follows the same bounded procedure:
    implementation. Include valid and invalid cases derived from the requirement.
    For an exact-byte gate, include missing newline, wrong content, and extra files.
 3. **Patch (supervisor via Pi).** The same logical supervisor Pi session edits only
-   the isolated plugin candidate (read/edit/write/bash or GraphLoom-scoped
-   equivalents bound to the candidate root). Preserve the readable requirement,
+   the isolated plugin candidate with path-confined read/edit/write/ls; shell
+   access is withheld and build/test runs in step 4. Preserve the readable requirement,
    complete ordered step list, original test corpus, and original failing result.
    A changed old test needs an explicit defect explanation and independent review;
    deleting negative coverage or loosening expected outcomes is not a repair shortcut.
