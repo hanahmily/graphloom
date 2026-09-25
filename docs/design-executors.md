@@ -1,7 +1,8 @@
 # Built-in and plugin-owned executors
 
-Status: accepted design, 2026-09-24; implementation pending. This specializes the
-[TypeScript core design](design-typescript-core.md).
+Status: accepted design, 2026-09-24; partially implemented (executor contract and
+the packaged GitHub executor; the child-operation protocol and executor recovery
+remain). This specializes the [TypeScript core design](design-typescript-core.md).
 
 ## Ownership
 
@@ -42,6 +43,103 @@ bindings; a custom executor must never silently shadow a built-in name. A plugin
 can explicitly select a custom implementation when the built-in cannot satisfy it.
 Both receive only their admitted inputs, credential bindings, and execution scope.
 Installing code does not grant permission to use new accounts or perform writes.
+
+### Built-in executor packages
+
+Built-in executor packages live under `executors/<name>/`, one npm workspace
+each. A package depends only on `@graphloom/sdk`, the same boundary a graph
+plugin has. The host composes it; the package never imports the runner,
+controller, or supervisor. To add one:
+
+1. Create `executors/<name>/` exporting `executors: ExecutorDefinition[]` from
+   an entry module. Qualify every id as `graphloom.<name>/<operation>`.
+2. Export an `ExecutorPackageManifest` that lists the entry module, the executor
+   ids, the credential binding names it reads, and the non-secret `configEnv`
+   names it accepts. Optionally export a helper that turns package-specific
+   operator settings into an `ExecutorBinding`, like `githubBinding`.
+3. Test executors in-process through the SDK contract. Put tests that need the
+   executor process, the controller, or a live service in the host
+   (`apps/graphloom/test`).
+
+The operator serves packages through `createBuiltinExecutorRunner` in
+`@graphloom/runner`:
+
+```ts
+createBuiltinExecutorRunner({
+  packages: [{ manifest: githubExecutorPackage, ...githubBinding({ token, allowWrites: true }) }],
+  fallback: agentRunner,
+});
+```
+
+The runner rejects ids outside `graphloom.`, ids served by two packages, and
+credentials or configuration a manifest did not declare. Each package gets its
+own executor process. That process receives only its bound credentials over
+stdin, its declared configuration, and its effect grant, which defaults to
+`read`. Every non-empty bound credential is redacted from job results, and an
+empty credential is rejected.
+
+The process runs under Node's permission model. It may read only its own
+package and the dependencies Node resolves for it. File writes, child
+processes, worker threads, native addons, and WASI are denied. The runner
+refuses to start built-in packages on a Node release without a stable
+permission model (below 22.13) rather than run them unconfined.
+
+Node's permission model has no network scope, so the host does not restrict
+where a built-in package connects. Built-in packages are first-party code that
+contacts only its configured API URL. Untrusted executors that need egress
+limits require an OS-level sandbox; that belongs to the child executor protocol
+work (#40), not this runner.
+
+`@graphloom/executor-github` (`executors/github`) is the first built-in package:
+
+- Reads (effect `read`): `graphloom.github/list-issues`, `list-pulls`,
+  `get-issue`, `get-pull`, `list-issue-comments`, `list-labels`, and
+  `list-milestones`.
+- Writes (effect `write`): `create-issue-comment`, `create-pull`,
+  `create-pull-review` (request changes, comment, or approve, with optional
+  inline comments), `add-labels`, `remove-labels`, and `update-issue` (title,
+  body, and milestone; a `null` milestone removes it). The label executors and
+  `update-issue` accept either an issue or a pull request number.
+
+How the package behaves:
+
+- `githubBinding` maps the token, the API URL, and `allowWrites` to the
+  package's binding. The token travels over stdin, never argv or the
+  environment, and the runner redacts it from job results. Writes stay refused
+  unless the operator sets `allowWrites`.
+- Custom runners cannot register ids under the reserved `graphloom.` namespace.
+  The worker refuses a pinned version other than the installed one, and it
+  enforces the input and output schemas.
+- List results carry the query, retrieval time, start and next cursors, and
+  `complete`. Pages per call are bounded, and pull requests returned by the
+  issues endpoint are counted but excluded.
+- A rate limit fails the job with retry timing. The executor never sleeps or
+  retries on its own.
+- Comments, reviews, and pull requests embed
+  `<!-- graphloom-op: <runId>/<idempotencyKey> -->`. The executor reconciles by
+  that marker, or by an open pull request with the same head and base, before
+  posting and again after an ambiguous POST. An unconfirmed outcome is reported,
+  never blindly repeated.
+- Label and field edits converge on a desired state. The executor re-reads the
+  issue first, so labels already present (or already absent, for removal) or
+  fields already matching need no write. It re-reads again after an ambiguous
+  request. `add-labels` refuses a label the repository does not define unless
+  `createMissing` is set, in which case it creates the label explicitly before
+  adding it.
+  `update-issue` records the prior values it replaced. With
+  `expectedUpdatedAt`, it reports a conflict rather than overwriting an edit
+  made after the supervisor read the issue. This check is best-effort: GitHub's
+  REST API has no conditional update, so an edit that lands between the
+  executor's re-read and its PATCH can still be overwritten. The recorded prior
+  values are the recovery path.
+- GitHub's validation details are passed through in failure summaries. Examples
+  are reviewing your own pull request, an unknown milestone, or an inline comment
+  on a line outside the diff.
+- With a single GitHub account, GraphLoom usually opened the pull request it is
+  reviewing. GitHub refuses `REQUEST_CHANGES` and `APPROVE` from the author, so
+  a graph that asks for fixes on its own pull request should post a `COMMENT`
+  review. The refusal is a definite failure: nothing is posted, and a retry
+  fails the same way.
 
 Built-in packages and plugin bundles can be installed or upgraded independently
 of the controller when compatible with its executor protocol. No controller

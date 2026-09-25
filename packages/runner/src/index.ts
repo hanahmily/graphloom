@@ -1,10 +1,12 @@
-export type { JobContext, JobResult, Runner } from "./types.js";
+export type { JobContext, JobEvidenceItem, JobResult, Runner } from "./types.js";
 export {
   createScriptedRunner,
   type ScriptedJobHandler,
   type ScriptedRunnerOptions,
 } from "./scripted.js";
 export {
+  assertNoBuiltinShadowing,
+  BUILTIN_EXECUTOR_NAMESPACE,
   createRegistryRunner,
   createTrustedInProcessRunner,
   createChildExecutorRunner,
@@ -12,3 +14,9 @@ export {
   type ChildExecutorRunnerOptions,
   type RegistryRunnerOptions,
 } from "./registry.js";
+export { assertSandboxSupported } from "./sandbox.js";
+export {
+  createBuiltinExecutorRunner,
+  type BuiltinExecutorPackage,
+  type BuiltinExecutorRunnerOptions,
+} from "./builtin.js";

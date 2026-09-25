@@ -15,7 +15,8 @@ a validator implementation is repaired.
 
 The [TypeScript core design](docs/design-typescript-core.md) is authoritative.
 Active code lives under `packages/` (`sdk`, `controller`, `plugin-host`,
-`supervisor`, `runner`) and `apps/graphloom`. The public SDK and scripted
+`supervisor`, `runner`), built-in executor packages under `executors/` (`github`),
+and `apps/graphloom`. The public SDK and scripted
 `GraphPlugin` adapter are in place; durable run/inspect/stop/resume and plugin
 repair are not implemented yet. Earlier Go sources are frozen under
 [`legacy/go`](legacy/go) for reference and are not part of CI.

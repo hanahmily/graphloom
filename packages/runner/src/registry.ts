@@ -6,10 +6,27 @@ import {
   pinJobExecutor,
   validateExecutorInput,
   type ExecutorDefinition,
+  type ExecutorEffect,
   type ExecutorPin,
   type JobSpec,
 } from "@graphloom/sdk";
+import { assertSandboxSupported, sandboxNodeArgs } from "./sandbox.js";
 import type { JobContext, JobEvidenceItem, JobResult, Runner } from "./types.js";
+
+/** Qualified ids under this namespace belong to GraphLoom built-in packages. */
+export const BUILTIN_EXECUTOR_NAMESPACE = "graphloom.";
+
+/** A custom registration must never shadow a built-in qualified id. */
+export function assertNoBuiltinShadowing(ids: Iterable<string>, builtin: boolean): void {
+  if (builtin) return;
+  for (const id of ids) {
+    if (id.startsWith(BUILTIN_EXECUTOR_NAMESPACE)) {
+      throw new Error(
+        `custom executor cannot claim built-in id ${id}; register it under your own namespace`,
+      );
+    }
+  }
+}
 
 export interface TrustedInProcessRunnerOptions {
   /**
@@ -18,6 +35,8 @@ export interface TrustedInProcessRunnerOptions {
    */
   executors: ExecutorDefinition[];
   fallback: Runner;
+  /** Registering `graphloom.*` ids requires declaring the executors built-in. */
+  builtin?: boolean;
 }
 
 /** @deprecated Alias of TrustedInProcessRunnerOptions. */
@@ -35,6 +54,40 @@ export interface ChildExecutorRunnerOptions {
   env?: NodeJS.ProcessEnv;
   /** Override worker entry (tests). */
   workerModule?: string;
+  /** Serving `graphloom.*` ids requires declaring the package built-in. */
+  builtin?: boolean;
+  /**
+   * Operator-bound credentials, delivered over stdin (never argv or env) and
+   * exposed as `ctx.credentials`. Their values are redacted from job results.
+   */
+  credentials?: Record<string, string>;
+  /** Effects the operator granted; executors declaring any other effect are refused. */
+  allowedEffects?: readonly ExecutorEffect[];
+  /**
+   * Run the executor under Node's permission model: it may read only its own
+   * package and dependencies, and cannot write files, spawn processes or
+   * workers, or load native addons. Network access is not restricted.
+   */
+  sandbox?: boolean;
+}
+
+/** Replace every bound credential value in a result before it can become durable. */
+function redactCredentials(result: JobResult, credentials: Record<string, string> | undefined): JobResult {
+  // Longest first, so a secret containing another is removed whole.
+  const secrets = Object.values(credentials ?? {})
+    .filter((s) => s.length > 0)
+    .sort((a, b) => b.length - a.length);
+  if (secrets.length === 0) return result;
+  const scrub = (s: string) => secrets.reduce((text, secret) => text.split(secret).join("[REDACTED]"), s);
+  const walk = (value: unknown): unknown => {
+    if (typeof value === "string") return scrub(value);
+    if (Array.isArray(value)) return value.map(walk);
+    if (value !== null && typeof value === "object") {
+      return Object.fromEntries(Object.entries(value).map(([k, v]) => [scrub(k), walk(v)]));
+    }
+    return value;
+  };
+  return walk(result) as JobResult;
 }
 
 function resultFromOutput(
@@ -97,6 +150,10 @@ export const createRegistryRunner = createTrustedInProcessRunner;
 export function createTrustedInProcessRunner(
   options: TrustedInProcessRunnerOptions,
 ): Runner {
+  assertNoBuiltinShadowing(
+    options.executors.map((def) => def.id),
+    options.builtin === true,
+  );
   const byId = new Map<string, ExecutorDefinition>();
   for (const def of options.executors) {
     if (byId.has(def.id)) {
@@ -157,12 +214,21 @@ export function createTrustedInProcessRunner(
 export function createChildExecutorRunner(
   options: ChildExecutorRunnerOptions,
 ): Runner {
+  assertNoBuiltinShadowing(options.executorIds, options.builtin === true);
   const served = new Set(options.executorIds);
   const timeoutMs = options.timeoutMs ?? 30_000;
   const workerModule =
     options.workerModule ??
     fileURLToPath(new URL("./executor-worker.js", import.meta.url));
   const entryModule = path.resolve(options.entryModule);
+  for (const [name, value] of Object.entries(options.credentials ?? {})) {
+    if (value.length === 0) throw new Error(`credential "${name}" is empty`);
+  }
+  const extraCa = options.env?.NODE_EXTRA_CA_CERTS;
+  const nodeArgs =
+    options.sandbox === true
+      ? (assertSandboxSupported(), sandboxNodeArgs([workerModule, entryModule], extraCa ? [extraCa] : []))
+      : [];
 
   return {
     async runJob(job: JobSpec, ctx: JobContext): Promise<JobResult> {
@@ -173,7 +239,7 @@ export function createChildExecutorRunner(
       }
 
       return await new Promise<JobResult>((resolve) => {
-        const child = spawn(process.execPath, [workerModule, entryModule], {
+        const child = spawn(process.execPath, [...nodeArgs, workerModule, entryModule], {
           stdio: ["pipe", "pipe", "pipe"],
           cwd: options.cwd ?? path.dirname(entryModule),
           env: options.env ?? process.env,
@@ -190,7 +256,7 @@ export function createChildExecutorRunner(
           settled = true;
           clearTimeout(timer);
           child.kill("SIGKILL");
-          resolve(result);
+          resolve(redactCredentials(result, options.credentials));
         };
 
         const timer = setTimeout(() => {
@@ -257,8 +323,13 @@ export function createChildExecutorRunner(
         const req = {
           kind: "execute",
           id: pin.id,
+          ...(pin.version !== undefined ? { version: pin.version } : {}),
           input: pinned.input,
           ctx: executorCtx(pinned, ctx),
+          ...(options.credentials !== undefined ? { credentials: options.credentials } : {}),
+          ...(options.allowedEffects !== undefined
+            ? { allowedEffects: [...options.allowedEffects] }
+            : {}),
         };
         child.stdin.write(`${JSON.stringify(req)}\n`);
         child.stdin.end();

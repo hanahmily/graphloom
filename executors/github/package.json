@@ -1,0 +1,31 @@
+{
+  "name": "@graphloom/executor-github",
+  "version": "0.1.0",
+  "description": "Built-in GitHub executors (graphloom.github/*) run through the common executor protocol",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./executors": {
+      "types": "./dist/executors.d.ts",
+      "import": "./dist/executors.js"
+    },
+    "./testing": {
+      "types": "./dist/testing/fake-github.d.ts",
+      "import": "./dist/testing/fake-github.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "tsc -p tsconfig.json && vitest run"
+  },
+  "dependencies": {
+    "@graphloom/sdk": "0.0.0"
+  }
+}
