@@ -181,11 +181,16 @@ Tooling has two layers:
    delegated to a separate non-Pi repair agent. When no explicit patch author is
    configured, the controller calls `Supervisor.patchCandidate`, which sends one
    repair prompt (target, reason, candidate root, tool rules) to that session under
-   a separate patch timeout. Every Pi turn in the patch settles into
-   `agentInvocations`, and the bounded reply is recorded as the artifact's
-   `patchSummary`. Revoke or rebind those tools when the qualification episode
-   ends. An independent read-only reviewer uses a different session and must not
-   share write tools with the patching supervisor.
+   a separate patch timeout. This fallback requires the supervisor to expose
+   grant, revoke, and provider-call accounting. Before the patch, the controller
+   durably reserves the remaining `agentInvocations` as the patch's turn cap; Pi
+   aborts any turn past the cap before its provider request, unused calls are
+   refunded when the patch settles, and a crash leaves the reservation spent.
+   The reply, bounded to 2,000 characters for every patch author, is recorded as
+   the artifact's `patchSummary`, including when a later qualification step
+   rejects the candidate. Revoke or rebind those tools when the qualification
+   episode ends. An independent read-only reviewer uses a different session and
+   must not share write tools with the patching supervisor.
 
 Pi must not directly mutate the run worktree or authoritative controller state.
 The fixed step list and acceptance requirements remain enforced by the controller.

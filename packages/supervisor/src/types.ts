@@ -46,6 +46,7 @@ export interface Supervisor {
   /**
    * Author a qualified repair in the currently granted candidate tree using this
    * same session. Returns a concise user-facing summary, not private reasoning.
+   * Provider calls spent here settle through `drainProviderCalls`.
    */
   patchCandidate?(args: CandidatePatchRequest): Promise<{ summary: string }>;
 }
@@ -54,6 +55,8 @@ export interface CandidatePatchRequest {
   candidateRoot: string;
   target: "plugin" | "validator";
   reason: string;
+  /** Provider calls the controller reserved for this patch; stop before exceeding it. */
+  maxProviderCalls?: number;
 }
 
 export type ScriptedRecoveryStep =
@@ -94,6 +97,9 @@ export function createScriptedSupervisor(
         return step(input, current);
       }
       return structuredClone(step);
+    },
+    drainProviderCalls() {
+      return 0;
     },
     async grantCandidateCoding(candidateRoot: string) {
       codingRoot = candidateRoot;

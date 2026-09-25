@@ -6,6 +6,7 @@ import { createScriptedSupervisor } from "./types.js";
 interface PromptCall {
   text: string;
   timeoutMs: number | undefined;
+  maxTurns?: number | undefined;
 }
 
 function codingSession(args: {
@@ -24,7 +25,7 @@ function codingSession(args: {
     sessionFile: "/tmp/sess-patch.jsonl",
     credentialSource: "options",
     async prompt(text, options) {
-      args.calls.push({ text, timeoutMs: options?.timeoutMs });
+      args.calls.push({ text, timeoutMs: options?.timeoutMs, maxTurns: options?.maxTurns });
       pendingTurns += args.turnsPerPrompt[reply] ?? 1;
       const next = args.replies[reply++];
       if (next === undefined) throw new Error("fake session exhausted");
@@ -133,6 +134,23 @@ describe("supervisor candidate patch", () => {
     const { summary } = await supervisor.patchCandidate!(request);
     expect(summary).toHaveLength(2000);
     expect(supervisor.drainProviderCalls()).toBe(2);
+  });
+
+  it("caps the patch at the controller's provider-call reservation", async () => {
+    const calls: PromptCall[] = [];
+    const supervisor = createPiSupervisor({
+      session: codingSession({ replies: ["done"], turnsPerPrompt: [3], calls, grants: [] }),
+    });
+    await supervisor.grantCandidateCoding!(request.candidateRoot);
+    await expect(
+      supervisor.patchCandidate!({ ...request, maxProviderCalls: 0 }),
+    ).rejects.toThrow(/no provider-call allowance/);
+    expect(calls).toHaveLength(0);
+
+    await supervisor.patchCandidate!({ ...request, maxProviderCalls: 7 });
+    expect(calls[0]?.maxTurns).toBe(7);
+    expect(calls[0]?.text).toContain("at most 7 model turns");
+    expect(supervisor.drainProviderCalls()).toBe(3);
   });
 
   it("scripted supervisor patches only the granted root", async () => {

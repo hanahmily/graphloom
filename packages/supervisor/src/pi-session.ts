@@ -74,10 +74,12 @@ export interface PiSupervisorSession {
   /**
    * Send a prompt and wait until idle. Returns the final turn's assistant text
    * only (no thinking / tool internals). Times out if the session does not settle.
+   * With `maxTurns`, a turn beyond the cap is aborted before its provider request
+   * and the prompt rejects.
    */
   prompt(
     text: string,
-    options?: { signal?: AbortSignal; timeoutMs?: number },
+    options?: { signal?: AbortSignal; timeoutMs?: number; maxTurns?: number },
   ): Promise<string>;
   /** Provider turns (model calls) started since the last drain, including tool turns. */
   drainTurnCount?(): number;
@@ -163,7 +165,7 @@ export async function createPiSupervisorSession(
     settingsManager,
   });
 
-  return wrapSession({
+  return wrapPiAgentSession({
     session,
     modelRuntime,
     runId: options.runId,
@@ -227,7 +229,8 @@ async function applyProviderCredentials(args: {
   return "pi-stored";
 }
 
-function wrapSession(args: {
+/** @internal Exported for tests that drive a real AgentSession on a faux provider. */
+export function wrapPiAgentSession(args: {
   session: AgentSession;
   modelRuntime: ModelRuntime;
   runId: string;
@@ -293,9 +296,20 @@ function wrapSession(args: {
         throw new Error("supervisor session is closed");
       }
       const timeoutMs = promptOptions?.timeoutMs ?? promptTimeoutMs;
+      const maxTurns = promptOptions?.maxTurns;
+      let promptTurns = 0;
+      let turnCapHit = false;
       let collected: string[] = [];
       const unsubscribe = session.subscribe((event) => {
         if (event.type === "turn_start") {
+          // Pi awaits listeners before streaming, so aborting here cancels the
+          // turn before its provider request is sent.
+          if (maxTurns !== undefined && promptTurns >= maxTurns) {
+            turnCapHit = true;
+            void session.abort().catch(() => undefined);
+            return;
+          }
+          promptTurns += 1;
           turns += 1;
           // Tool-using prompts span several turns; keep only the final reply.
           collected = [];
@@ -328,6 +342,9 @@ function wrapSession(args: {
         }
         if (promptOptions?.signal?.aborted) {
           throw new Error("supervisor prompt aborted");
+        }
+        if (turnCapHit) {
+          throw new Error(`supervisor prompt exceeded its ${maxTurns}-turn allowance`);
         }
         if (timedOut || !session.isIdle) {
           await session.abort().catch(() => undefined);

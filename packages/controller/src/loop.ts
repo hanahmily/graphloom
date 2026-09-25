@@ -722,13 +722,11 @@ async function applyDecision(
           blocker: action.qualify.reason,
         };
       }
-      const qualified = await applyQualifyRepair(state, action.qualify, {
+      return applyQualifyRepair(state, action.qualify, {
         ...(deps.supervisor !== undefined ? { supervisor: deps.supervisor } : {}),
         repair: deps.repair,
         validators: deps.validators,
       });
-      // The supervisor's patch turns spend the same agentInvocations budget.
-      return deps.supervisor ? settleSupervisorUsage(qualified, deps.supervisor) : qualified;
     }
     case "activate_repair": {
       if (!deps.repair) {

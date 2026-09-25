@@ -150,9 +150,16 @@ export function createPiSupervisor(options: CreatePiSupervisorOptions): PiSuperv
         throw new Error("supervisor is closed");
       }
       assertGrantedRoot(codingRoot, args.candidateRoot);
+      const maxTurns = args.maxProviderCalls;
+      if (maxTurns !== undefined && maxTurns < 1) {
+        throw new Error("patchCandidate has no provider-call allowance");
+      }
       let text: string;
       try {
-        text = await session.prompt(buildRepairPrompt(args), { timeoutMs: patchTimeoutMs });
+        text = await session.prompt(buildRepairPrompt(args), {
+          timeoutMs: patchTimeoutMs,
+          ...(maxTurns !== undefined ? { maxTurns } : {}),
+        });
       } finally {
         settleTurns();
       }
@@ -258,6 +265,9 @@ export function buildRepairPrompt(args: CandidatePatchRequest): string {
     "Do not edit graphloom.stages.json. Do not add, remove, rename, or reorder graph steps, and do not change requirement statements or evidence schemas.",
     "Keep existing tests and negative cases; do not loosen expected outcomes. Add a focused regression case when the defect is testable.",
     "No shell is available. The controller builds and tests the candidate after you finish, then an independent reviewer decides.",
+    ...(args.maxProviderCalls !== undefined
+      ? [`You have at most ${args.maxProviderCalls} model turns, including tool turns; the patch is aborted beyond that.`]
+      : []),
     "When done, reply with a short plain-text summary of what you changed and why (at most a few sentences). Do not include private reasoning.",
   ].join("\n");
 }

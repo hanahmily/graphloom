@@ -26,6 +26,7 @@ import {
   createPiSupervisor,
   createScriptedSupervisor,
   type PiSupervisorSessionPort,
+  type Supervisor,
 } from "@graphloom/supervisor";
 import {
   createController,
@@ -554,6 +555,142 @@ describe("qualified repair + same-run activation (#29)", () => {
     expect(state.budgets.corrections).toBe(7);
   });
 
+  it("bounds every patch summary and keeps it when a post-patch step throws", async () => {
+    const env = await makeEnv();
+    const repair: RepairDeps = {
+      ...approvingRepair("sup-sum"),
+      patchAuthor: {
+        sessionId: "sup-sum",
+        async patch() {
+          return { summary: `  ${"y".repeat(5000)}  ` };
+        },
+      },
+      async preflight() {
+        throw new Error("preflight crashed");
+      },
+    };
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: escalatingPlugin(),
+      validators: goodValidators,
+      supervisor: createScriptedSupervisor({
+        sessionId: "sup-sum",
+        decisions: [
+          qualifyRepair({ target: "plugin", reason: "try" }, "q"),
+          stop({ reason: "gave up", blocker: "preflight" }, "s"),
+        ],
+      }),
+      repair,
+      runner: createScriptedRunner({ jobs: [] }),
+      stateRoot: env.stateRoot,
+      runId: "repair-summary-bound",
+    });
+    expect(report.stopReason).toBe("gave up");
+    const artifact = (await loadRunState(report.stateDir)).repairCandidates?.[0];
+    expect(artifact?.status).toBe("rejected");
+    expect(artifact?.rejectionReason).toBe("preflight crashed");
+    expect(artifact?.patchSummary).toBe("y".repeat(2000));
+  });
+
+  it("refuses the supervisor patch fallback without grant and revoke hooks", async () => {
+    const scripted = createScriptedSupervisor({
+      sessionId: "sup-h",
+      decisions: [qualifyRepair({ target: "plugin", reason: "try" }, "q")],
+      patch: async () => ({ summary: "unscoped" }),
+    });
+    const {
+      grantCandidateCoding: _grant,
+      revokeCandidateCoding: _revoke,
+      ...ungated
+    } = scripted;
+    void _grant;
+    void _revoke;
+    const { patchAuthor: _omit, ...noAuthor } = approvingRepair("sup-h");
+    void _omit;
+    const env = await makeEnv();
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: escalatingPlugin(),
+      validators: goodValidators,
+      supervisor: ungated as Supervisor,
+      repair: noAuthor,
+      runner: createScriptedRunner({ jobs: [] }),
+      stateRoot: env.stateRoot,
+      runId: "repair-ungated",
+    });
+    expect(report.status).toBe("stopped");
+    expect(report.stopReason).toBe("qualify_repair requires a patch author");
+    expect(report.blocker).toMatch(/grant\/revoke/);
+    const state = await loadRunState(report.stateDir);
+    expect(state.budgets.corrections).toBe(8);
+    expect(state.repairCandidates ?? []).toHaveLength(0);
+  });
+
+  it("spends the whole reservation when a supervisor patch hits its turn cap", async () => {
+    const env = await makeEnv();
+    let pendingTurns = 0;
+    let decides = 0;
+    const session: PiSupervisorSessionPort = {
+      runId: "repair-cap",
+      provider: "minimax-cn",
+      modelId: "MiniMax-M3",
+      sessionId: "pi-sup-cap",
+      sessionFile: "/tmp/pi-sup-cap.jsonl",
+      credentialSource: "options",
+      async prompt(text, options) {
+        if (text.includes("now authoring the qualified repair")) {
+          // Pi aborts the turn past the cap; every allowed turn was a provider call.
+          pendingTurns += options?.maxTurns ?? 0;
+          throw new Error(`supervisor prompt exceeded its ${options?.maxTurns}-turn allowance`);
+        }
+        pendingTurns += 1;
+        decides += 1;
+        return JSON.stringify(
+          decides === 1
+            ? qualifyRepair({ target: "plugin", reason: "try" }, "q")
+            : stop({ reason: "gave up", blocker: "cap" }, "s"),
+        );
+      },
+      drainTurnCount() {
+        const n = pendingTurns;
+        pendingTurns = 0;
+        return n;
+      },
+      async grantCandidateCoding() {
+        /* admitted by the controller */
+      },
+      async revokeCandidateCoding() {
+        /* no-op */
+      },
+      async setModel() {
+        /* no-op */
+      },
+      async close() {
+        /* no-op */
+      },
+    };
+    const { patchAuthor: _omit, ...noAuthor } = approvingRepair("pi-sup-cap");
+    void _omit;
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: escalatingPlugin(),
+      validators: goodValidators,
+      supervisor: createPiSupervisor({ session }),
+      repair: noAuthor,
+      runner: createScriptedRunner({ jobs: [] }),
+      stateRoot: env.stateRoot,
+      runId: "repair-cap",
+    });
+    const state = await loadRunState(report.stateDir);
+    const artifact = state.repairCandidates?.[0];
+    expect(artifact?.status).toBe("rejected");
+    expect(artifact?.rejectionReason).toBe("supervisor prompt exceeded its 31-turn allowance");
+    expect(artifact?.patchSummary).toBeUndefined();
+    expect(state.budgets.corrections).toBe(7);
+    expect(state.budgets.agentInvocations).toBe(0);
+    expect(report.status).toBe("stopped");
+  });
+
   it("rejects activation when the live install changed after qualification", async () => {
     const env = await makeEnv();
     const liveEntry = path.join(env.taskDir, "plugins", "hello", "TAMPER.txt");
@@ -668,6 +805,8 @@ describe("qualified repair + same-run activation (#29)", () => {
     const grants: string[] = [];
     let granted: string | undefined;
     let pendingTurns = 0;
+    let patchMaxTurns: number | undefined;
+    let durableDuringPatch: { agentInvocations: number; status?: string } | undefined;
 
     const decision = (d: unknown) => JSON.stringify(d);
     const session: PiSupervisorSessionPort = {
@@ -677,12 +816,20 @@ describe("qualified repair + same-run activation (#29)", () => {
       sessionId: "pi-sup-live",
       sessionFile: "/tmp/pi-sup-live.jsonl",
       credentialSource: "options",
-      async prompt(text) {
+      async prompt(text, options) {
         prompts.push(text);
         if (text.includes("now authoring the qualified repair")) {
           // Stands in for Pi's read/edit/write tool turns on the granted candidate.
           const root = /Candidate root: (.+)/.exec(text)?.[1];
           if (!root || root !== granted) throw new Error("patch prompt outside grant");
+          patchMaxTurns = options?.maxTurns;
+          const durable = await loadRunState(path.join(env.stateRoot, runId));
+          durableDuringPatch = {
+            agentInvocations: durable.budgets.agentInvocations,
+            ...(durable.repairCandidates?.[0]?.status !== undefined
+              ? { status: durable.repairCandidates[0].status }
+              : {}),
+          };
           await writeFile(path.join(root, "REPAIR_MARKER.txt"), "fixed-exact-greeting\n", "utf8");
           pendingTurns += 3;
           return "Fixed exact-greeting to accept the pinned bytes.";
@@ -796,6 +943,10 @@ describe("qualified repair + same-run activation (#29)", () => {
     expect(artifact?.patchSummary).toBe("Fixed exact-greeting to accept the pinned bytes.");
     expect(existsSync(path.join(artifact!.candidateRoot, "REPAIR_MARKER.txt"))).toBe(true);
     expect(existsSync(path.join(env.taskDir, "plugins", "hello", "REPAIR_MARKER.txt"))).toBe(false);
+    // The whole remaining allowance (32 - write job - qualify decide) is reserved
+    // durably before the patch runs and becomes its turn cap.
+    expect(patchMaxTurns).toBe(30);
+    expect(durableDuringPatch).toEqual({ agentInvocations: 0, status: "qualifying" });
     // 3 decide prompts + 3 patch tool turns + 3 agent jobs (write, rewrite, review).
     expect(state.budgets.agentInvocations).toBe(32 - 9);
   });
