@@ -14,6 +14,7 @@ export {
   type ChildExecutorRunnerOptions,
   type RegistryRunnerOptions,
 } from "./registry.js";
+export { assertSandboxSupported } from "./sandbox.js";
 export {
   createBuiltinExecutorRunner,
   type BuiltinExecutorPackage,

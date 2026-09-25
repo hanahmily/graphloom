@@ -151,7 +151,7 @@ describe("controller runs graphloom.github through the executor protocol", () =>
             "review",
           ),
           validate({ stageId: "review", requirementIds: ["independent-review"] }, "v-review"),
-          stop({ reason: "complete" }, "done"),
+          stop({ reason: "complete", blocker: "none" }, "done"),
         ],
       }),
       validators,

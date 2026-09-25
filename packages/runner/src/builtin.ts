@@ -1,5 +1,6 @@
 import type { ExecutorBinding, ExecutorPackageManifest } from "@graphloom/sdk";
 import { BUILTIN_EXECUTOR_NAMESPACE, createChildExecutorRunner } from "./registry.js";
+import { assertSandboxSupported } from "./sandbox.js";
 import type { Runner } from "./types.js";
 
 export interface BuiltinExecutorPackage extends ExecutorBinding {
@@ -18,10 +19,12 @@ export interface BuiltinExecutorRunnerOptions {
 }
 
 /**
- * Serve built-in executor packages, each in its own executor process that sees
- * only the credentials, effect grant, and configuration the operator bound.
+ * Serve built-in executor packages, each in its own sandboxed executor process
+ * that sees only the credentials, effect grant, and configuration the operator
+ * bound, and can read only its own package and dependencies.
  */
 export function createBuiltinExecutorRunner(options: BuiltinExecutorRunnerOptions): Runner {
+  assertSandboxSupported();
   const claimed = new Map<string, string>();
   for (const { manifest, credentials, env } of options.packages) {
     for (const id of manifest.executorIds) {
@@ -55,6 +58,7 @@ export function createBuiltinExecutorRunner(options: BuiltinExecutorRunnerOption
       entryModule: pkg.manifest.entryModule,
       executorIds: [...pkg.manifest.executorIds],
       builtin: true,
+      sandbox: true,
       fallback,
       env,
       allowedEffects: pkg.allowedEffects ?? ["read"],

@@ -110,6 +110,11 @@ interface UpdateIssueInput extends NumberInput {
   title?: string;
   body?: string;
   milestone?: number | null;
+  /**
+   * Refuse the edit if the issue changed since this time. GitHub's REST API has
+   * no conditional update, so an edit landing between this check and the PATCH
+   * can still be overwritten; `previous` in the evidence allows recovery.
+   */
   expectedUpdatedAt?: string;
   idempotencyKey: string;
 }
@@ -406,15 +411,35 @@ export const createPull = defineExecutor<CreatePullInput, JobOutput>({
     const pullsPath = `/repos/${repoPath(input)}/pulls`;
 
     const inspect = async (): Promise<JobOutput | undefined> => {
-      const params = new URLSearchParams({ state: "all", head, base: input.base, per_page: "100" });
-      const res = await githubRequest<RawPull[]>(client, "GET", `${pullsPath}?${params.toString()}`);
-      const ours = res.data.find((p) => (p.body ?? "").includes(marker));
-      if (ours) {
-        return reconciled(`pull request already created (#${ours.number})`, {
-          pull: summarizePull(ours),
+      let foreign: RawPull | undefined;
+      let page: number | undefined = 1;
+      for (let fetched = 0; page !== undefined; fetched += 1) {
+        if (fetched >= MAX_RECONCILE_PAGES) {
+          return failed(
+            `cannot reconcile: more than ${MAX_RECONCILE_PAGES} pages of pull requests for ${head} -> ${input.base}`,
+          );
+        }
+        const params = new URLSearchParams({
+          state: "all",
+          head,
+          base: input.base,
+          per_page: "100",
+          page: String(page),
         });
+        const res: Awaited<ReturnType<typeof githubRequest<RawPull[]>>> = await githubRequest<RawPull[]>(
+          client,
+          "GET",
+          `${pullsPath}?${params.toString()}`,
+        );
+        const ours = res.data.find((p) => (p.body ?? "").includes(marker));
+        if (ours) {
+          return reconciled(`pull request already created (#${ours.number})`, {
+            pull: summarizePull(ours),
+          });
+        }
+        foreign ??= res.data.find((p) => p.state === "open");
+        page = res.nextPage;
       }
-      const foreign = res.data.find((p) => p.state === "open");
       if (foreign) {
         return {
           status: "conflict",
@@ -443,8 +468,10 @@ export const createPull = defineExecutor<CreatePullInput, JobOutput>({
       } catch (err) {
         const status = (err as { status?: unknown }).status;
         if (!isAmbiguous(err) && status !== 422) throw err;
+        // A 422 can mean a concurrent create won the race; otherwise it is a definite rejection.
         const after = await inspect().catch(() => undefined);
-        if (after) return after;
+        if (after && after.status !== "failed") return after;
+        if (status === 422) throw err;
         return ambiguous(
           `pull request outcome unknown: ${errorText(err)}; none is visible for ${head} -> ${input.base}, retry reconciles before creating`,
         );
@@ -544,19 +571,21 @@ export const addLabels = defineExecutor<AddLabelsInput, JobOutput>({
           labels: labelNames(before.data),
         });
       }
-      if (input.createMissing !== true) {
-        for (const name of missing) {
-          if (!(await labelExists(client, input, name))) {
-            return failed(
-              `label "${name}" does not exist in ${input.owner}/${input.repo}; set createMissing to create it`,
-            );
-          }
+      const createdLabels: string[] = [];
+      for (const name of missing) {
+        if (await labelExists(client, input, name)) continue;
+        if (input.createMissing !== true) {
+          return failed(
+            `label "${name}" does not exist in ${input.owner}/${input.repo}; set createMissing to create it`,
+          );
         }
+        if (await createLabel(client, input, name)) createdLabels.push(name);
       }
       try {
         const res = await githubRequest<RawLabel[]>(client, "POST", `${issuePath}/labels`, { labels: missing });
         return updated(`added ${missing.join(", ")} to #${input.number}`, {
           added: missing,
+          ...(createdLabels.length > 0 ? { createdLabels } : {}),
           labels: res.data.map((l) => l.name),
           rateLimit: res.rateLimit,
         });
@@ -1020,6 +1049,17 @@ async function labelExists(client: GitHubClientOptions, input: RepoInput, name: 
     return true;
   } catch (err) {
     if ((err as { status?: unknown }).status === 404) return false;
+    throw err;
+  }
+}
+
+/** Create a repository label; false when a concurrent writer created it first. */
+async function createLabel(client: GitHubClientOptions, input: RepoInput, name: string): Promise<boolean> {
+  try {
+    await githubRequest<RawLabel>(client, "POST", `/repos/${repoPath(input)}/labels`, { name });
+    return true;
+  } catch (err) {
+    if ((err as { status?: unknown }).status === 422 && (await labelExists(client, input, name))) return false;
     throw err;
   }
 }

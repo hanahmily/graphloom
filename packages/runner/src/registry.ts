@@ -10,6 +10,7 @@ import {
   type ExecutorPin,
   type JobSpec,
 } from "@graphloom/sdk";
+import { assertSandboxSupported, sandboxNodeArgs } from "./sandbox.js";
 import type { JobContext, JobEvidenceItem, JobResult, Runner } from "./types.js";
 
 /** Qualified ids under this namespace belong to GraphLoom built-in packages. */
@@ -62,17 +63,31 @@ export interface ChildExecutorRunnerOptions {
   credentials?: Record<string, string>;
   /** Effects the operator granted; executors declaring any other effect are refused. */
   allowedEffects?: readonly ExecutorEffect[];
+  /**
+   * Run the executor under Node's permission model: it may read only its own
+   * package and dependencies, and cannot write files, spawn processes or
+   * workers, or load native addons. Network access is not restricted.
+   */
+  sandbox?: boolean;
 }
 
 /** Replace every bound credential value in a result before it can become durable. */
 function redactCredentials(result: JobResult, credentials: Record<string, string> | undefined): JobResult {
-  const secrets = Object.values(credentials ?? {}).filter((s) => s.length >= 4);
+  // Longest first, so a secret containing another is removed whole.
+  const secrets = Object.values(credentials ?? {})
+    .filter((s) => s.length > 0)
+    .sort((a, b) => b.length - a.length);
   if (secrets.length === 0) return result;
-  let raw = JSON.stringify(result);
-  for (const secret of secrets) {
-    raw = raw.split(JSON.stringify(secret).slice(1, -1)).join("[REDACTED]");
-  }
-  return JSON.parse(raw) as JobResult;
+  const scrub = (s: string) => secrets.reduce((text, secret) => text.split(secret).join("[REDACTED]"), s);
+  const walk = (value: unknown): unknown => {
+    if (typeof value === "string") return scrub(value);
+    if (Array.isArray(value)) return value.map(walk);
+    if (value !== null && typeof value === "object") {
+      return Object.fromEntries(Object.entries(value).map(([k, v]) => [scrub(k), walk(v)]));
+    }
+    return value;
+  };
+  return walk(result) as JobResult;
 }
 
 function resultFromOutput(
@@ -206,6 +221,14 @@ export function createChildExecutorRunner(
     options.workerModule ??
     fileURLToPath(new URL("./executor-worker.js", import.meta.url));
   const entryModule = path.resolve(options.entryModule);
+  for (const [name, value] of Object.entries(options.credentials ?? {})) {
+    if (value.length === 0) throw new Error(`credential "${name}" is empty`);
+  }
+  const extraCa = options.env?.NODE_EXTRA_CA_CERTS;
+  const nodeArgs =
+    options.sandbox === true
+      ? (assertSandboxSupported(), sandboxNodeArgs([workerModule, entryModule], extraCa ? [extraCa] : []))
+      : [];
 
   return {
     async runJob(job: JobSpec, ctx: JobContext): Promise<JobResult> {
@@ -216,7 +239,7 @@ export function createChildExecutorRunner(
       }
 
       return await new Promise<JobResult>((resolve) => {
-        const child = spawn(process.execPath, [workerModule, entryModule], {
+        const child = spawn(process.execPath, [...nodeArgs, workerModule, entryModule], {
           stdio: ["pipe", "pipe", "pipe"],
           cwd: options.cwd ?? path.dirname(entryModule),
           env: options.env ?? process.env,

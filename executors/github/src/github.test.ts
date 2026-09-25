@@ -221,6 +221,50 @@ describe("graphloom.github writes", () => {
     expect(server.pulls).toHaveLength(2);
     expect(server.requests.filter((q) => q.method === "POST")).toHaveLength(1);
   });
+
+  it("finds its marked pull request past the first page of a reused branch", async () => {
+    const reused = Array.from({ length: 150 }, (_, i) => ({
+      number: i + 1,
+      title: `old ${i + 1}`,
+      state: "closed" as const,
+      head: "acme:reuse",
+      base: "main",
+      body: "earlier attempt",
+    }));
+    const server = await fake({
+      pulls: [
+        ...reused,
+        { number: 151, title: "ours", state: "open", head: "acme:reuse", base: "main", body: "x\n\n<!-- graphloom-op: run-1/fix-2 -->" },
+      ],
+    });
+    const result = await run(runner(server, { token: TOKEN }), "create-pull", {
+      owner: "acme",
+      repo: "app",
+      head: "reuse",
+      base: "main",
+      title: "Fix",
+      idempotencyKey: "fix-2",
+    });
+    expect(github(result)).toMatchObject({ outcome: "reconciled", pull: { number: 151 } });
+    expect(server.requests.filter((q) => q.method === "GET")).toHaveLength(2);
+    expect(server.requests.filter((q) => q.method === "POST")).toHaveLength(0);
+  });
+
+  it("reports a definite 422 with GitHub's reason instead of an unknown outcome", async () => {
+    const server = await fake();
+    const result = await run(runner(server, { token: TOKEN }), "create-pull", {
+      owner: "acme",
+      repo: "app",
+      head: "empty",
+      base: "main",
+      title: "Nothing",
+      idempotencyKey: "fix-3",
+    });
+    expect(result.status).toBe("failed");
+    expect(result.summary).toBe(
+      "GitHub POST /repos/acme/app/pulls returned 422: Validation Failed (No commits between main and empty)",
+    );
+  });
 });
 
 describe("graphloom.github reviews", () => {
@@ -409,7 +453,12 @@ describe("graphloom.github labels and edits", () => {
       idempotencyKey: "l",
     });
     expect(created.status, created.summary).toBe("ok");
-    expect(server.labels).toContain("triaged");
+    expect(github(created)).toMatchObject({ added: ["triaged"], createdLabels: ["triaged"] });
+    expect(server.requests.filter((q) => q.method === "POST").map((q) => q.path)).toEqual([
+      "/repos/acme/app/labels",
+      "/repos/acme/app/issues/5/labels",
+    ]);
+    expect(server.issues[0]!.labels).toContain("triaged");
   });
 
   it("edits title, body, and milestone on issues and pull requests, recording prior values", async () => {

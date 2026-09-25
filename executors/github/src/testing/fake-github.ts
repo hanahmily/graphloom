@@ -158,6 +158,16 @@ export async function startFakeGitHub(
     const milestoneOf = (n: number | null | undefined) => rawMilestone(milestones, n);
 
     if (resource === "labels") {
+      if (id === undefined && method === "POST") {
+        const name = String((body as { name?: unknown }).name ?? "");
+        if (labels.includes(name)) {
+          send(res, 422, { message: "Validation Failed", errors: [{ resource: "Label", code: "already_exists", field: "name" }] });
+          return;
+        }
+        labels.push(name);
+        send(res, 201, rawLabel(name));
+        return;
+      }
       if (id === undefined) {
         paginate(res, url, labels.map(rawLabel));
         return;
@@ -211,7 +221,11 @@ export async function startFakeGitHub(
       const item = issueLike(Number(id));
       if (!item) return send(res, 404, { message: "Not Found" });
       const added = ((body as { labels?: string[] }).labels ?? []);
-      for (const name of added) if (!labels.includes(name)) labels.push(name);
+      const unknown = added.find((name) => !labels.includes(name));
+      if (unknown !== undefined) {
+        send(res, 422, { message: "Validation Failed", errors: [{ message: `Label ${unknown} does not exist` }] });
+        return;
+      }
       item.labels = [...new Set([...(item.labels ?? []), ...added])];
       item.updatedAt = touch();
       if (interruptWrite(req)) return;
@@ -260,6 +274,13 @@ export async function startFakeGitHub(
         return;
       }
       const input = body as { title: string; head: string; base: string; body?: string };
+      if (input.head.endsWith(":empty")) {
+        send(res, 422, {
+          message: "Validation Failed",
+          errors: [{ message: `No commits between ${input.base} and ${input.head.split(":").pop()}` }],
+        });
+        return;
+      }
       if (pulls.some((p) => p.state === "open" && p.head === input.head && p.base === input.base)) {
         send(res, 422, { message: "A pull request already exists" });
         return;

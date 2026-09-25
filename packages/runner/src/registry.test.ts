@@ -1,11 +1,11 @@
-import { mkdtemp } from "node:fs/promises";
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { defineExecutor, MAX_EXECUTOR_INPUT_BYTES, assertBoundedJson } from "@graphloom/sdk";
 import {
+  assertSandboxSupported,
   createBuiltinExecutorRunner,
   createChildExecutorRunner,
   createRegistryRunner,
@@ -216,6 +216,29 @@ describe("createChildExecutorRunner", () => {
     expect(result.evidence?.[0]?.payload).toEqual({ seen: "[REDACTED]", env: null });
   });
 
+  it("redacts short credentials without corrupting the result, and rejects empty ones", async () => {
+    const runner = createChildExecutorRunner({
+      entryModule: credentialFixture,
+      executorIds: ["acme.cred/echo"],
+      fallback: createScriptedRunner({ jobs: [] }),
+      workerModule,
+      credentials: { api: "q7z" },
+    });
+    const result = await runner.runJob(job("acme.cred/echo", { msg: "hi" }), ctx);
+    expect(result.summary).toBe("echo hi with [REDACTED]");
+    expect(result.evidence?.[0]?.payload).toEqual({ seen: "[REDACTED]", env: null });
+    expect(result.runId).toBe("r1");
+
+    expect(() =>
+      createChildExecutorRunner({
+        entryModule: credentialFixture,
+        executorIds: ["acme.cred/echo"],
+        fallback: createScriptedRunner({ jobs: [] }),
+        credentials: { api: "" },
+      }),
+    ).toThrow('credential "api" is empty');
+  });
+
   it("refuses ungranted effects, pin mismatches, and schema violations in the child", async () => {
     const runner = createChildExecutorRunner({
       entryModule: credentialFixture,
@@ -270,19 +293,47 @@ describe("createBuiltinExecutorRunner", () => {
   const manifest = {
     name: "@graphloom/executor-fixture",
     entryModule: path.join(here, "../test/fixtures/builtin-executor.mjs"),
-    executorIds: ["graphloom.fixture/echo", "graphloom.fixture/post"],
+    executorIds: ["graphloom.fixture/echo", "graphloom.fixture/probe", "graphloom.fixture/post"],
     credentials: ["fixture"],
     configEnv: ["GL_FIXTURE_URL"],
   };
   const ctx = { runId: "r1", operationId: "op1", generation: 1, worktreePath: "/tmp", artifactDir: "/tmp/a" };
-  const job = (id: string) => ({
+  const job = (id: string, input: unknown = {}) => ({
     stageId: "select",
     kind: "command" as const,
     purpose: "check" as const,
     instruction: "unused",
     readOnly: true,
     executor: { id, version: "1" },
-    input: {},
+    input,
+  });
+
+  it("confines each package to reading its own code: no outside reads, writes, processes, or workers", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "gl-sandbox-"));
+    const outside = path.join(dir, "host-secret.txt");
+    await writeFile(outside, "host secret", "utf8");
+    const runner = createBuiltinExecutorRunner({
+      packages: [{ manifest }],
+      fallback: createScriptedRunner({ jobs: [] }),
+      workerModule,
+    });
+    const result = await runner.runJob(job("graphloom.fixture/probe", { outside }), ctx);
+    expect(result.status, result.summary).toBe("ok");
+    expect(result.evidence?.[0]?.payload).toEqual({
+      control: "allowed",
+      readOwnPackage: "allowed",
+      readOutside: "ERR_ACCESS_DENIED",
+      write: "ERR_ACCESS_DENIED",
+      spawn: "ERR_ACCESS_DENIED",
+      worker: "ERR_ACCESS_DENIED",
+    });
+  });
+
+  it("refuses to run built-in packages on Node without the permission model", () => {
+    expect(() => assertSandboxSupported("22.12.0")).toThrow(/cannot enforce executor filesystem and process scopes/);
+    expect(() => assertSandboxSupported("20.18.1")).toThrow(/require Node >= 22\.13/);
+    expect(() => assertSandboxSupported("22.13.0")).not.toThrow();
+    expect(() => assertSandboxSupported("24.6.0")).not.toThrow();
   });
 
   it("gives each package only its bound credential and declared configuration", async () => {

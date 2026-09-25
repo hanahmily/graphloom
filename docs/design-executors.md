@@ -75,7 +75,20 @@ The runner rejects ids outside `graphloom.`, ids served by two packages, and
 credentials or configuration a manifest did not declare. Each package gets its
 own executor process. That process receives only its bound credentials over
 stdin, its declared configuration, and its effect grant, which defaults to
-`read`.
+`read`. Every non-empty bound credential is redacted from job results, and an
+empty credential is rejected.
+
+The process runs under Node's permission model. It may read only its own
+package and the dependencies Node resolves for it. File writes, child
+processes, worker threads, native addons, and WASI are denied. The runner
+refuses to start built-in packages on a Node release without a stable
+permission model (below 22.13) rather than run them unconfined.
+
+Node's permission model has no network scope, so the host does not restrict
+where a built-in package connects. Built-in packages are first-party code that
+contacts only its configured API URL. Untrusted executors that need egress
+limits require an OS-level sandbox; that belongs to the child executor protocol
+work (#40), not this runner.
 
 `@graphloom/executor-github` (`executors/github`) is the first built-in package:
 
@@ -111,10 +124,14 @@ How the package behaves:
   issue first, so labels already present (or already absent, for removal) or
   fields already matching need no write. It re-reads again after an ambiguous
   request. `add-labels` refuses a label the repository does not define unless
-  `createMissing` is set.
+  `createMissing` is set, in which case it creates the label explicitly before
+  adding it.
   `update-issue` records the prior values it replaced. With
   `expectedUpdatedAt`, it reports a conflict rather than overwriting an edit
-  made after the supervisor read the issue.
+  made after the supervisor read the issue. This check is best-effort: GitHub's
+  REST API has no conditional update, so an edit that lands between the
+  executor's re-read and its PATCH can still be overwritten. The recorded prior
+  values are the recovery path.
 - GitHub's validation details are passed through in failure summaries. Examples
   are reviewing your own pull request, an unknown milestone, or an inline comment
   on a line outside the diff.
