@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { defineExecutor, MAX_EXECUTOR_INPUT_BYTES, assertBoundedJson } from "@graphloom/sdk";
 import {
+  createBuiltinExecutorRunner,
   createChildExecutorRunner,
   createRegistryRunner,
   createScriptedRunner,
@@ -172,6 +173,167 @@ describe("createChildExecutorRunner", () => {
     expect(result.summary).toMatch(/custom wrote/);
     const bytes = await readFile(path.join(dir, "GREETING.txt"), "utf8");
     expect(bytes).toBe("Hello, GraphLoom!\n");
+  });
+
+  const credentialFixture = path.join(
+    path.dirname(fileURLToPath(import.meta.url)),
+    "../test/fixtures/credential-executor.mjs",
+  );
+  const workerModule = path.join(
+    path.dirname(fileURLToPath(import.meta.url)),
+    "../dist/executor-worker.js",
+  );
+  const ctx = {
+    runId: "r1",
+    operationId: "op1",
+    generation: 1,
+    worktreePath: "/tmp",
+    artifactDir: "/tmp/a",
+  };
+  const job = (id: string, input: unknown, version = "2") => ({
+    stageId: "select",
+    kind: "command" as const,
+    purpose: "diagnostic" as const,
+    instruction: "unused",
+    readOnly: true,
+    executor: { id, version },
+    input,
+  });
+
+  it("delivers bound credentials over stdin and redacts them from results", async () => {
+    const runner = createChildExecutorRunner({
+      entryModule: credentialFixture,
+      executorIds: ["acme.cred/echo"],
+      fallback: createScriptedRunner({ jobs: [] }),
+      workerModule,
+      env: {},
+      credentials: { api: "tok-secret-123" },
+    });
+    const result = await runner.runJob(job("acme.cred/echo", { msg: "hi" }), ctx);
+    expect(result.status).toBe("ok");
+    expect(result.summary).toBe("echo hi with [REDACTED]");
+    expect(JSON.stringify(result)).not.toContain("tok-secret-123");
+    expect(result.evidence?.[0]?.payload).toEqual({ seen: "[REDACTED]", env: null });
+  });
+
+  it("refuses ungranted effects, pin mismatches, and schema violations in the child", async () => {
+    const runner = createChildExecutorRunner({
+      entryModule: credentialFixture,
+      executorIds: ["acme.cred/echo", "acme.cred/post"],
+      fallback: createScriptedRunner({ jobs: [] }),
+      workerModule,
+      allowedEffects: ["read"],
+    });
+    const write = await runner.runJob(job("acme.cred/post", {}), ctx);
+    expect(write.status).toBe("failed");
+    expect(write.summary).toBe("executor acme.cred/post effect write is not granted");
+
+    const stale = await runner.runJob(job("acme.cred/echo", { msg: "hi" }, "1"), ctx);
+    expect(stale.status).toBe("failed");
+    expect(stale.summary).toBe("executor acme.cred/echo pinned version 1 but installed 2");
+
+    const bad = await runner.runJob(job("acme.cred/echo", { msg: 7 }), ctx);
+    expect(bad.status).toBe("failed");
+    expect(bad.summary).toMatch(/input failed schema validation/);
+  });
+
+  it("rejects custom registrations that would shadow a built-in id", () => {
+    expect(() =>
+      createChildExecutorRunner({
+        entryModule: credentialFixture,
+        executorIds: ["graphloom.github/list-issues"],
+        fallback: createScriptedRunner({ jobs: [] }),
+      }),
+    ).toThrow(/cannot claim built-in id graphloom\.github\/list-issues/);
+    expect(() =>
+      createTrustedInProcessRunner({
+        executors: [
+          defineExecutor({ id: "graphloom.github/list-issues", effect: "read", execute: () => ({}) }),
+        ],
+        fallback: createScriptedRunner({ jobs: [] }),
+      }),
+    ).toThrow(/cannot claim built-in id/);
+    expect(() =>
+      createChildExecutorRunner({
+        entryModule: credentialFixture,
+        executorIds: ["graphloom.github/list-issues"],
+        fallback: createScriptedRunner({ jobs: [] }),
+        builtin: true,
+      }),
+    ).not.toThrow();
+  });
+});
+
+describe("createBuiltinExecutorRunner", () => {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const workerModule = path.join(here, "../dist/executor-worker.js");
+  const manifest = {
+    name: "@graphloom/executor-fixture",
+    entryModule: path.join(here, "../test/fixtures/builtin-executor.mjs"),
+    executorIds: ["graphloom.fixture/echo", "graphloom.fixture/post"],
+    credentials: ["fixture"],
+    configEnv: ["GL_FIXTURE_URL"],
+  };
+  const ctx = { runId: "r1", operationId: "op1", generation: 1, worktreePath: "/tmp", artifactDir: "/tmp/a" };
+  const job = (id: string) => ({
+    stageId: "select",
+    kind: "command" as const,
+    purpose: "check" as const,
+    instruction: "unused",
+    readOnly: true,
+    executor: { id, version: "1" },
+    input: {},
+  });
+
+  it("gives each package only its bound credential and declared configuration", async () => {
+    process.env.GL_HOST_SECRET = "host-only";
+    try {
+      const runner = createBuiltinExecutorRunner({
+        packages: [{ manifest, credentials: { fixture: "tok-fixture-9" }, env: { GL_FIXTURE_URL: "http://x" } }],
+        fallback: createScriptedRunner({ jobs: [] }),
+        workerModule,
+      });
+      const result = await runner.runJob(job("graphloom.fixture/echo"), ctx);
+      expect(result.status).toBe("ok");
+      expect(result.summary).toBe("token [REDACTED]");
+      expect(result.evidence?.[0]?.payload).toEqual({ config: "http://x", leaked: null });
+    } finally {
+      delete process.env.GL_HOST_SECRET;
+    }
+  });
+
+  it("grants reads only unless the operator grants writes, and falls back for other ids", async () => {
+    const fallback = createScriptedRunner({ jobs: [async () => ({ status: "ok", summary: "fallback" })] });
+    const readOnly = createBuiltinExecutorRunner({ packages: [{ manifest }], fallback, workerModule });
+    const refused = await readOnly.runJob(job("graphloom.fixture/post"), ctx);
+    expect(refused.summary).toBe("executor graphloom.fixture/post effect write is not granted");
+    expect((await readOnly.runJob(job("acme.other/thing"), ctx)).summary).toBe("fallback");
+
+    const writable = createBuiltinExecutorRunner({
+      packages: [{ manifest, allowedEffects: ["read", "write"] }],
+      fallback: createScriptedRunner({ jobs: [] }),
+      workerModule,
+    });
+    expect((await writable.runJob(job("graphloom.fixture/post"), ctx)).summary).toBe("posted");
+  });
+
+  it("rejects bindings or manifests the package did not declare", () => {
+    const fallback = createScriptedRunner({ jobs: [] });
+    expect(() =>
+      createBuiltinExecutorRunner({ packages: [{ manifest, credentials: { other: "x" } }], fallback }),
+    ).toThrow('built-in package @graphloom/executor-fixture does not accept credential "other"');
+    expect(() =>
+      createBuiltinExecutorRunner({ packages: [{ manifest, env: { PATH: "/bin" } }], fallback }),
+    ).toThrow('built-in package @graphloom/executor-fixture does not accept configuration "PATH"');
+    expect(() =>
+      createBuiltinExecutorRunner({
+        packages: [{ manifest: { ...manifest, executorIds: ["acme.fixture/echo"] } }],
+        fallback,
+      }),
+    ).toThrow(/serves acme\.fixture\/echo outside graphloom\.\*/);
+    expect(() =>
+      createBuiltinExecutorRunner({ packages: [{ manifest }, { manifest: { ...manifest, name: "dup" } }], fallback }),
+    ).toThrow("executor graphloom.fixture/echo is served by both @graphloom/executor-fixture and dup");
   });
 });
 

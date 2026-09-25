@@ -40,11 +40,13 @@ export type {
 
 export type {
   DefineExecutorOptions,
+  ExecutorBinding,
   ExecutorContext,
   ExecutorCredentials,
   ExecutorDefinition,
   ExecutorEffect,
   ExecutorId,
+  ExecutorPackageManifest,
   ExecutorPin,
   JsonSchemaValidator,
 } from "./executor.js";

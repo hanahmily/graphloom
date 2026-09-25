@@ -6,10 +6,26 @@ import {
   pinJobExecutor,
   validateExecutorInput,
   type ExecutorDefinition,
+  type ExecutorEffect,
   type ExecutorPin,
   type JobSpec,
 } from "@graphloom/sdk";
 import type { JobContext, JobEvidenceItem, JobResult, Runner } from "./types.js";
+
+/** Qualified ids under this namespace belong to GraphLoom built-in packages. */
+export const BUILTIN_EXECUTOR_NAMESPACE = "graphloom.";
+
+/** A custom registration must never shadow a built-in qualified id. */
+export function assertNoBuiltinShadowing(ids: Iterable<string>, builtin: boolean): void {
+  if (builtin) return;
+  for (const id of ids) {
+    if (id.startsWith(BUILTIN_EXECUTOR_NAMESPACE)) {
+      throw new Error(
+        `custom executor cannot claim built-in id ${id}; register it under your own namespace`,
+      );
+    }
+  }
+}
 
 export interface TrustedInProcessRunnerOptions {
   /**
@@ -18,6 +34,8 @@ export interface TrustedInProcessRunnerOptions {
    */
   executors: ExecutorDefinition[];
   fallback: Runner;
+  /** Registering `graphloom.*` ids requires declaring the executors built-in. */
+  builtin?: boolean;
 }
 
 /** @deprecated Alias of TrustedInProcessRunnerOptions. */
@@ -35,6 +53,26 @@ export interface ChildExecutorRunnerOptions {
   env?: NodeJS.ProcessEnv;
   /** Override worker entry (tests). */
   workerModule?: string;
+  /** Serving `graphloom.*` ids requires declaring the package built-in. */
+  builtin?: boolean;
+  /**
+   * Operator-bound credentials, delivered over stdin (never argv or env) and
+   * exposed as `ctx.credentials`. Their values are redacted from job results.
+   */
+  credentials?: Record<string, string>;
+  /** Effects the operator granted; executors declaring any other effect are refused. */
+  allowedEffects?: readonly ExecutorEffect[];
+}
+
+/** Replace every bound credential value in a result before it can become durable. */
+function redactCredentials(result: JobResult, credentials: Record<string, string> | undefined): JobResult {
+  const secrets = Object.values(credentials ?? {}).filter((s) => s.length >= 4);
+  if (secrets.length === 0) return result;
+  let raw = JSON.stringify(result);
+  for (const secret of secrets) {
+    raw = raw.split(JSON.stringify(secret).slice(1, -1)).join("[REDACTED]");
+  }
+  return JSON.parse(raw) as JobResult;
 }
 
 function resultFromOutput(
@@ -97,6 +135,10 @@ export const createRegistryRunner = createTrustedInProcessRunner;
 export function createTrustedInProcessRunner(
   options: TrustedInProcessRunnerOptions,
 ): Runner {
+  assertNoBuiltinShadowing(
+    options.executors.map((def) => def.id),
+    options.builtin === true,
+  );
   const byId = new Map<string, ExecutorDefinition>();
   for (const def of options.executors) {
     if (byId.has(def.id)) {
@@ -157,6 +199,7 @@ export function createTrustedInProcessRunner(
 export function createChildExecutorRunner(
   options: ChildExecutorRunnerOptions,
 ): Runner {
+  assertNoBuiltinShadowing(options.executorIds, options.builtin === true);
   const served = new Set(options.executorIds);
   const timeoutMs = options.timeoutMs ?? 30_000;
   const workerModule =
@@ -190,7 +233,7 @@ export function createChildExecutorRunner(
           settled = true;
           clearTimeout(timer);
           child.kill("SIGKILL");
-          resolve(result);
+          resolve(redactCredentials(result, options.credentials));
         };
 
         const timer = setTimeout(() => {
@@ -257,8 +300,13 @@ export function createChildExecutorRunner(
         const req = {
           kind: "execute",
           id: pin.id,
+          ...(pin.version !== undefined ? { version: pin.version } : {}),
           input: pinned.input,
           ctx: executorCtx(pinned, ctx),
+          ...(options.credentials !== undefined ? { credentials: options.credentials } : {}),
+          ...(options.allowedEffects !== undefined
+            ? { allowedEffects: [...options.allowedEffects] }
+            : {}),
         };
         child.stdin.write(`${JSON.stringify(req)}\n`);
         child.stdin.end();

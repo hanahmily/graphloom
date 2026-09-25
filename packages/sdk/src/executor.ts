@@ -54,6 +54,33 @@ export interface DefineExecutorOptions<TInput, TOutput> {
   execute: (input: TInput, ctx: ExecutorContext) => Promise<TOutput> | TOutput;
 }
 
+/**
+ * What an executor package declares to the host that runs it. Plain data: the
+ * host loads `entryModule` in a separate executor process and never imports it.
+ */
+export interface ExecutorPackageManifest {
+  /** Package name, used in errors and evidence. */
+  name: string;
+  /** Absolute path to a module exporting `executors: ExecutorDefinition[]`. */
+  entryModule: string;
+  /** Qualified ids the module serves. */
+  executorIds: readonly ExecutorId[];
+  /** Credential binding names executors may request through `ctx.credentials`. */
+  credentials?: readonly string[];
+  /** Non-secret environment variables the operator may set for the executor process. */
+  configEnv?: readonly string[];
+}
+
+/** Operator-supplied grants for one executor package. */
+export interface ExecutorBinding {
+  /** Secrets by binding name; delivered over stdin and redacted from results. */
+  credentials?: Record<string, string>;
+  /** Effects granted to the package. Default: `["read"]`. */
+  allowedEffects?: readonly ExecutorEffect[];
+  /** Values for names the manifest lists in `configEnv`. */
+  env?: Record<string, string>;
+}
+
 /** Built-in agent executor id — legacy `kind: "agent"` jobs pin to this. */
 export const BUILTIN_AGENT_EXECUTOR_ID = "graphloom.agent/run";
 
