@@ -4,10 +4,10 @@ import { githubEvidence as github, githubRunner as runner, runGitHub } from "./g
 
 // Opt-in live checks against api.github.com. Reads need only
 // GRAPHLOOM_GITHUB_LIVE_TOKEN; issue writes also need GRAPHLOOM_GITHUB_LIVE_ISSUE,
-// and reviews need GRAPHLOOM_GITHUB_LIVE_PULL (plus _REVIEW_PATH and
-// _REVIEW_LINE for an inline comment). One token is enough: GitHub refuses
-// REQUEST_CHANGES from the pull request's author, and the review test asserts
-// that refusal when the token owner opened the pull request.
+// and reviews need GRAPHLOOM_GITHUB_LIVE_PULL, a pull request opened by the
+// token's account (plus _REVIEW_PATH and _REVIEW_LINE for an inline comment).
+// Graphs run as the account that opened the pull request, so reviews are
+// COMMENTs and GitHub refuses REQUEST_CHANGES.
 const token = process.env.GRAPHLOOM_GITHUB_LIVE_TOKEN;
 const [owner, repo] = (process.env.GRAPHLOOM_GITHUB_LIVE_REPO ?? "hanahmily/graphloom").split("/") as [
   string,
@@ -215,10 +215,11 @@ describe.skipIf(token === undefined || writePull === undefined)("graphloom.githu
     expect(await reviewsMentioning(runId)).toBe(1);
   });
 
-  it("requests changes, or reports GitHub's refusal on the token owner's own pull request", async () => {
+  it("reports GitHub's refusal to request changes on the token owner's own pull request", async () => {
     const r = runner({ token: token!, allowWrites: true });
     const pull = github(await run(r, "get-pull", { owner, repo, number: Number(writePull) })).item as { author: string };
     const viewer = (await githubGet<{ login: string }>("/user")).login;
+    expect(pull.author, "GRAPHLOOM_GITHUB_LIVE_PULL must be opened by the token's account").toBe(viewer);
     const runId = `live-${Date.now()}`;
     const input = {
       owner,
@@ -229,20 +230,11 @@ describe.skipIf(token === undefined || writePull === undefined)("graphloom.githu
       idempotencyKey: "live-request-changes",
     };
     const first = await run(r, "create-pull-review", input, runId);
-
-    if (pull.author === viewer) {
-      expect(first.status).toBe("failed");
-      expect(first.summary).toMatch(/422: .*own pull request/);
-      const retry = await run(r, "create-pull-review", input, runId);
-      expect(retry.status).toBe("failed");
-      expect(retry.summary).toBe(first.summary);
-      expect(await reviewsMentioning(runId)).toBe(0);
-    } else {
-      expect(first.status, first.summary).toBe("ok");
-      expect(github(first)).toMatchObject({ outcome: "created", review: { state: "CHANGES_REQUESTED" } });
-      const retry = await run(r, "create-pull-review", input, runId);
-      expect(github(retry).outcome).toBe("reconciled");
-      expect(await reviewsMentioning(runId)).toBe(1);
-    }
+    expect(first.status).toBe("failed");
+    expect(first.summary).toMatch(/422: .*own pull request/);
+    const retry = await run(r, "create-pull-review", input, runId);
+    expect(retry.status).toBe("failed");
+    expect(retry.summary).toBe(first.summary);
+    expect(await reviewsMentioning(runId)).toBe(0);
   });
 });
