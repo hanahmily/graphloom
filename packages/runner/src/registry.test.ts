@@ -434,15 +434,18 @@ describe("child operation protocol", () => {
     });
   function port(budget = 1) {
     const calls: unknown[] = [];
+    const reservations = { count: 0 };
     let remaining = budget;
     return {
       calls,
+      reservations,
       port: {
         async callTool(req: { toolCallId: string; tool: string; input: unknown }) {
           calls.push(req);
           return { status: "ok" as const, summary: `ran ${req.tool}`, childOperationId: `child-${calls.length}` };
         },
         async reserveModelCall() {
+          reservations.count += 1;
           remaining -= 1;
           return remaining >= 0;
         },
@@ -503,6 +506,32 @@ describe("child operation protocol", () => {
     const result = await pending;
     expect(result).toMatchObject({ status: "failed", summary: "executor cancelled: run stopped" });
     expect(Date.now() - started).toBeLessThan(5_000);
+  });
+
+  it("fails the job on a tool or model call without a usable seq, before reaching the controller", async () => {
+    for (const [raw, kind] of [
+      ['{"kind":"tool_call","toolCallId":"t1","tool":"read_comments","input":{}}\n', "tool_call"],
+      ['{"kind":"model_call","seq":"1"}\n', "model_call"],
+    ] as const) {
+      const p = port();
+      const result = await runner().runJob(agentJob({ steps: [{ raw }], hang: true }), { ...ctx, children: p.port });
+      expect(result).toMatchObject({ status: "failed", summary: `executor sent ${kind} without a positive integer seq` });
+      expect(p.calls).toEqual([]);
+      expect(p.reservations.count).toBe(0);
+    }
+  });
+
+  it("ignores tool and model calls that arrive after the job settled", async () => {
+    const p = port();
+    const raw =
+      '{"kind":"ok","output":{"status":"ok","summary":"done early"}}\n' +
+      '{"kind":"tool_call","seq":1,"toolCallId":"t1","tool":"read_comments","input":{}}\n' +
+      '{"kind":"model_call","seq":2}\n';
+    const result = await runner().runJob(agentJob({ steps: [{ raw }], hang: true }), { ...ctx, children: p.port });
+    expect(result).toMatchObject({ status: "ok", summary: "done early" });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(p.calls).toEqual([]);
+    expect(p.reservations.count).toBe(0);
   });
 
   it("refuses an executor whose effect differs from the declared one", async () => {

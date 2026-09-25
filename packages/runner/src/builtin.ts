@@ -28,7 +28,7 @@ export interface BuiltinExecutorRunnerOptions {
  * permissions and requires `allowUnrestricted`.
  */
 export function createBuiltinExecutorRunner(options: BuiltinExecutorRunnerOptions): Runner {
-  assertSandboxSupported();
+  if (options.packages.some((p) => p.manifest.isolation !== "unrestricted")) assertSandboxSupported();
   const claimed = new Map<string, string>();
   for (const { manifest, credentials, env, allowUnrestricted } of options.packages) {
     if (manifest.isolation === "unrestricted" && allowUnrestricted !== true) {

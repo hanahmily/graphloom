@@ -120,7 +120,7 @@ async function execute(req: Record<string, any>): Promise<void> {
   }
 }
 
-let started = false;
+let running: Promise<void> | undefined;
 const rl = createInterface({ input: process.stdin, crlfDelay: Infinity });
 for await (const line of rl) {
   if (!line.trim()) continue;
@@ -137,10 +137,12 @@ for await (const line of rl) {
     resolve?.(msg.kind === "tool_result" ? msg.result : msg.granted);
     continue;
   }
-  if (msg?.kind !== "execute" || typeof msg.id !== "string" || started) {
+  if (msg?.kind !== "execute" || typeof msg.id !== "string" || running !== undefined) {
     reply({ kind: "error", message: "expected one execute request" });
     continue;
   }
-  started = true;
-  void execute(msg);
+  // Not awaited here: the loop must keep reading tool and model replies.
+  running = execute(msg);
 }
+// The host closes stdin once it needs no more replies; finish the execute before exiting.
+await running;

@@ -36,6 +36,19 @@ function withRunLock<T>(stateDir: string, fn: () => Promise<T>): Promise<T> {
   return withDirectoryLock(stateDir, "run.exec.lock", fn);
 }
 
+/** JSON with sorted object keys, so equal inputs compare equal regardless of key order. */
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    const o = value as Record<string, unknown>;
+    return `{${Object.keys(o)
+      .sort()
+      .map((k) => `${JSON.stringify(k)}:${canonicalJson(o[k])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
 /**
  * Controller side of the child-operation protocol for one outstanding agent
  * job. Each tool call is admitted under the run lock, journaled before it
@@ -44,16 +57,27 @@ function withRunLock<T>(stateDir: string, fn: () => Promise<T>): Promise<T> {
  * a time and never reenter graph routing.
  */
 export interface ControllerChildPort extends ChildOperationPort {
-  /** Resolves once no tool call is in flight; the loop awaits it before settling the parent. */
-  drain(): Promise<void>;
+  /**
+   * Called once the parent job has returned, normally or not. Refuses further
+   * calls, cancels a child still in flight, and resolves once it has settled.
+   */
+  close(): Promise<void>;
 }
 
 export function createChildPort(parent: ParentJob, deps: ChildPortDeps): ControllerChildPort {
   const bindings = new Map((parent.job.tools ?? []).map((t) => [t.name, t]));
+  const canWrite =
+    parent.job.readOnly !== true && parent.job.writeScope !== undefined && parent.job.writeScope.length > 0;
+  const cancel = new AbortController();
+  const onStop = () => cancel.abort();
+  if (deps.signal.aborted) cancel.abort();
+  else deps.signal.addEventListener("abort", onStop, { once: true });
+  let closed = false;
   let busy = false;
   let inFlight: Promise<unknown> = Promise.resolve();
 
   async function fence(state: DurableRunState): Promise<string | undefined> {
+    if (closed) return "parent job ended";
     if (state.status !== "running") return "run is not running";
     if (state.generation !== parent.generation) return `generation ${parent.generation} != ${state.generation}`;
     const pending = state.pendingDispatch;
@@ -79,6 +103,9 @@ export function createChildPort(parent: ParentJob, deps: ChildPortDeps): Control
         .find((c) => c.stageId === parent.job.stageId && c.attempt === attempt && c.toolCallId === req.toolCallId);
       if (prior && prior.tool !== req.tool) {
         return { done: failed(`tool call ${req.toolCallId} was recorded for tool ${prior.tool}`) };
+      }
+      if (prior && canonicalJson(prior.input) !== canonicalJson(req.input)) {
+        return { done: failed(`tool call ${req.toolCallId} was recorded with different input`) };
       }
       if (prior?.result && prior.status !== "pending") {
         return { done: { ...prior.result, replayed: true } };
@@ -117,7 +144,12 @@ export function createChildPort(parent: ParentJob, deps: ChildPortDeps): Control
     });
   }
 
-  async function settle(record: ChildOperationRecord, job: JobSpec, result: JobResult): Promise<ToolCallResult> {
+  async function settle(
+    record: ChildOperationRecord,
+    job: JobSpec,
+    result: JobResult,
+    cutShort: boolean,
+  ): Promise<ToolCallResult> {
     return withRunLock(deps.stateDir, async () => {
       const state = await loadRunState(deps.stateDir);
       const identity =
@@ -137,10 +169,9 @@ export function createChildPort(parent: ParentJob, deps: ChildPortDeps): Control
       };
 
       if (fenced) {
-        // A child cut short by stop has no trustworthy result; a write may still
-        // have reached the service. One that finished keeps its result for replay.
-        const aborted = deps.signal.aborted;
-        const settledRecord: ChildOperationRecord = aborted
+        // A child cut short has no trustworthy result; a write may still have
+        // reached the service. One that finished keeps its result for replay.
+        const settledRecord: ChildOperationRecord = cutShort
           ? { ...record, status: record.effect === "read" ? "fenced" : "ambiguous", settledAt }
           : { ...record, status: "fenced", result: delivered, settledAt };
         await saveRunState({
@@ -192,6 +223,9 @@ export function createChildPort(parent: ParentJob, deps: ChildPortDeps): Control
       }
       const binding = bindings.get(req.tool);
       if (!binding) return failed(`tool ${String(req.tool)} is not admitted for this job`);
+      if (binding.effect !== "read" && !canWrite) {
+        return failed(`tool ${binding.name} has effect ${binding.effect}, but this job has no write scope`);
+      }
       let input: unknown;
       try {
         input = JSON.parse(assertBoundedJson(req.input ?? null));
@@ -205,7 +239,10 @@ export function createChildPort(parent: ParentJob, deps: ChildPortDeps): Control
       return call;
     },
 
-    async drain() {
+    async close() {
+      closed = true;
+      cancel.abort();
+      deps.signal.removeEventListener("abort", onStop);
       await inFlight;
     },
 
@@ -239,11 +276,10 @@ export function createChildPort(parent: ParentJob, deps: ChildPortDeps): Control
         effect: record.effect,
         input,
         // Children inherit the parent's worktree scope, never a broader one.
-        ...(parent.job.readOnly !== true && parent.job.writeScope !== undefined
-          ? { writeScope: [...parent.job.writeScope] }
-          : { readOnly: true }),
+        ...(canWrite ? { writeScope: [...parent.job.writeScope!] } : { readOnly: true }),
       };
       let result: JobResult;
+      let cutShort = false;
       try {
         result = await deps.runner.runJob(job, {
           runId: state.runId,
@@ -251,9 +287,11 @@ export function createChildPort(parent: ParentJob, deps: ChildPortDeps): Control
           generation: record.generation,
           worktreePath: state.worktreePath,
           artifactDir: state.artifactDir,
-          signal: deps.signal,
+          signal: cancel.signal,
         });
+        cutShort = cancel.signal.aborted;
       } catch (err) {
+        cutShort = cancel.signal.aborted;
         result = {
           status: "failed",
           summary: err instanceof Error ? err.message : String(err),
@@ -262,7 +300,7 @@ export function createChildPort(parent: ParentJob, deps: ChildPortDeps): Control
           generation: record.generation,
         };
       }
-      return await settle(record, job, result);
+      return await settle(record, job, result, cutShort);
     } finally {
       busy = false;
     }

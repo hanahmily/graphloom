@@ -362,7 +362,9 @@ The implemented protocol works as follows:
   is still the outstanding job at its generation, and one job remains reserved
   for the parent. It then journals a child operation record and runs the child
   as a leaf `command` job with the parent's worktree scope. The child gets no
-  tools of its own.
+  tools of its own. A parent without a write scope may call only `read` tools.
+- Protocol messages need a positive integer sequence number. The runner ignores
+  any message that arrives after the job settled.
 - On settlement, the child spends one job, and its evidence is recorded with
   the child operation, parent operation, and tool-call ids.
 - A model call reserves one agent invocation. A parent that reserved any calls
@@ -370,11 +372,13 @@ The implemented protocol works as follows:
 - Calls are serviced one at a time; a concurrent call from the same parent is
   refused rather than queued.
 - Replay is keyed by stage, attempt, and tool-call id. A settled call returns
-  its recorded result. A new attempt runs the call fresh.
-- Stop aborts the parent and child, and the loop waits for the child to settle
-  before it settles the parent. A child that finished after the fence keeps its
-  result for replay. A write cut short is recorded `ambiguous` and is never
-  replayed.
+  its recorded result; reusing the id with different input is refused. A new
+  attempt runs the call fresh.
+- Stop aborts the parent and child. Once the parent returns, for any reason
+  including a timeout, the loop cancels a child still running and waits for it
+  to settle before it settles the parent. A child that finished after the fence
+  keeps its result for replay. A write cut short is recorded `ambiguous` and is
+  never replayed.
 - On restart, a pending read child is marked `abandoned` and may run again. A
   pending write child is marked `ambiguous`, and the run stops once with
   `reconcile required`. The parent is reconciled after its children.

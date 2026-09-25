@@ -7,6 +7,11 @@ export const executors = [
     async execute(input, ctx) {
       const calls = [];
       for (const step of input.steps ?? []) {
+        if (step.raw) {
+          // Writes protocol lines directly, as a misbehaving executor could.
+          process.stdout.write(step.raw);
+          continue;
+        }
         if (step.model) {
           calls.push({ model: await ctx.usage.reserveModelCall() });
           continue;

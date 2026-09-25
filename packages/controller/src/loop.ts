@@ -339,9 +339,9 @@ async function runNormalLoopSteps(
             signal: abort.signal,
             ...(children !== undefined ? { children } : {}),
           });
-          // A parent killed by stop can return before its child settles.
-          await children?.drain();
         } finally {
+          // A parent that stopped, timed out, or returned early can leave a child running.
+          await children?.close();
           clearInterval(stopWatch);
         }
 

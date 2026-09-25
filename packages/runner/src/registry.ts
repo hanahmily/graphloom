@@ -295,11 +295,13 @@ export function createChildExecutorRunner(
         });
         child.stdin.on("error", () => undefined);
 
+        const rl = createInterface({ input: child.stdout, crlfDelay: Infinity });
         let settled = false;
         const onAbort = () => finish(failed("executor cancelled: run stopped"));
         const finish = (result: JobResult) => {
           if (settled) return;
           settled = true;
+          rl.close();
           clearTimeout(timer);
           ctx.signal?.removeEventListener("abort", onAbort);
           child.stdin.end();
@@ -318,8 +320,9 @@ export function createChildExecutorRunner(
         const children = ctx.children;
         const toolNames = new Set((pinned.tools ?? []).map((t) => t.name));
 
-        const rl = createInterface({ input: child.stdout, crlfDelay: Infinity });
         rl.on("line", (line) => {
+          // Lines buffered before the job settled must not start work after it.
+          if (settled) return;
           let msg: {
             kind?: string;
             seq?: number;
@@ -333,6 +336,10 @@ export function createChildExecutorRunner(
             msg = JSON.parse(line) as typeof msg;
           } catch (err) {
             finish(failed(err instanceof Error ? err.message : String(err)));
+            return;
+          }
+          if ((msg.kind === "tool_call" || msg.kind === "model_call") && !(Number.isSafeInteger(msg.seq) && msg.seq! > 0)) {
+            finish(failed(`executor sent ${msg.kind} without a positive integer seq`));
             return;
           }
           if (msg.kind === "tool_call") {

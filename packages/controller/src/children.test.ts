@@ -108,12 +108,15 @@ type Step =
   | { parallel: Array<{ tool: string; id: string }> }
   | { model: number }
   | { toolsUntilRefused: string }
+  | { detach: string }
   | { write: true }
   | { claim: Array<{ kind: "command" | "review" | "file"; payload: unknown }> };
 
 interface Hooks {
   /** Runs inside a child executor before it returns. */
   onChild?: (id: string, ctx: ExecutorContext) => Promise<void>;
+  /** A detaching agent returns once this resolves. */
+  childStarted?: Promise<void>;
 }
 
 /** In-process executors standing in for the coding agent and its tools. */
@@ -157,6 +160,10 @@ function executors(hooks: Hooks = {}) {
             }
             ok += 1;
           }
+        } else if ("detach" in step) {
+          // Starts a call and returns without waiting, as a parent that timed out would.
+          void ctx.tools!.call({ toolCallId: "detached", tool: step.detach, input: {} });
+          await hooks.childStarted;
         } else if ("write" in step) {
           await writeFile(path.join(ctx.worktreePath, GREETING_PATH), GREETING, "utf8");
         } else {
@@ -297,7 +304,12 @@ describe("agent tool calls as child operations (#40)", () => {
     const { runner, counts } = executors();
     const report = await createController().run({
       taskPath: env.taskPath,
-      plugin: graph([{ tool: "post_comment", id: "p1" }, { tool: "post_comment", id: "p1" }, { write: true }]),
+      plugin: graph([
+        { tool: "post_comment", id: "p1", input: { body: "a", issue: 7 } },
+        { tool: "post_comment", id: "p1", input: { issue: 7, body: "a" } },
+        { tool: "post_comment", id: "p1", input: { body: "b", issue: 7 } },
+        { write: true },
+      ]),
       validators: { "exact-greeting": exactGreeting, "independent-reviewer": independentReview },
       runner,
       stateRoot: env.stateRoot,
@@ -305,9 +317,77 @@ describe("agent tool calls as child operations (#40)", () => {
     });
     expect(report.status).toBe("succeeded");
     expect(counts.write).toBe(1);
-    const [first, second] = agentResults(report.evidence) as ToolCallResult[];
+    const [first, second, changed] = agentResults(report.evidence) as ToolCallResult[];
     expect(first).toMatchObject({ status: "ok", summary: "posted" });
     expect(second).toEqual({ ...first, replayed: true });
+    expect(changed).toEqual({ status: "failed", summary: "tool call p1 was recorded with different input" });
+  });
+
+  it("refuses write tools to a job without write scope", async () => {
+    const env = await makeEnv();
+    const { runner, counts } = executors();
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({
+        definition,
+        advances: [
+          dispatch(
+            {
+              stageId: "write",
+              kind: "agent",
+              purpose: "check",
+              instruction: "inspect",
+              readOnly: true,
+              executor: { id: AGENT, version: "1" },
+              tools,
+              input: { steps: [{ tool: "post_comment", id: "w1" }, { tool: "read_comments", id: "r1" }] },
+            },
+            "inspect",
+          ),
+          stop({ reason: "inspected", blocker: "none" }, "done"),
+        ],
+      }),
+      validators: { "exact-greeting": exactGreeting, "independent-reviewer": independentReview },
+      runner,
+      stateRoot: env.stateRoot,
+      runId: "readonly1",
+    });
+    const [write, read] = agentResults(report.evidence) as ToolCallResult[];
+    expect(write).toEqual({ status: "failed", summary: "tool post_comment has effect write, but this job has no write scope" });
+    expect(read).toMatchObject({ status: "ok", summary: "2 comments" });
+    expect(counts).toEqual({ read: 1, write: 0, tests: 0 });
+  });
+
+  it("cancels a child still running when the parent returns, and records an interrupted write as ambiguous", async () => {
+    const env = await makeEnv();
+    let childSawAbort = false;
+    let started!: () => void;
+    const childStarted = new Promise<void>((resolve) => (started = resolve));
+    const { runner } = executors({
+      childStarted,
+      async onChild(id, ctx) {
+        if (id !== WRITE) return;
+        started();
+        await new Promise<void>((resolve) => ctx.signal?.addEventListener("abort", () => resolve(), { once: true }));
+        childSawAbort = true;
+      },
+    });
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: graph([{ detach: "post_comment" }, { write: true }]),
+      validators: { "exact-greeting": exactGreeting, "independent-reviewer": independentReview },
+      runner,
+      stateRoot: env.stateRoot,
+      runId: "detach1",
+    });
+    expect(report.status, report.blocker).toBe("succeeded");
+    expect(childSawAbort).toBe(true);
+    const state = await loadRunState(report.stateDir);
+    expect(state.childOperations?.map((c) => [c.toolCallId, c.status])).toEqual([["detached", "ambiguous"]]);
+    expect(state.childOperations?.[0]?.result).toBeUndefined();
+    expect(state.outstanding).toEqual([]);
+    // Only the parent and the reviewer are charged; the cancelled child is not.
+    expect(state.budgets.jobs).toBe(64 - 2);
   });
 
   it("services one tool call at a time while the agent waits, without deadlock", async () => {
