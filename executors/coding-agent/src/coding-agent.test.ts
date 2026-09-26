@@ -9,6 +9,7 @@ import {
   CODING_AGENT_RUN_ID,
   CONTINUATION_NOTICE,
   createCodingAgentExecutor,
+  DEFAULT_CODING_TIMEOUT_MS,
   piHarnessModule,
   type CodingHarness,
 } from "./index.js";
@@ -158,8 +159,10 @@ describe("graphloom.coding-agent/run", () => {
     expect(codingAgentBinding({ harness: "/h.js" })).toEqual({
       allowedEffects: ["read", "write"],
       allowUnrestricted: true,
+      timeoutMs: DEFAULT_CODING_TIMEOUT_MS,
       env: { GRAPHLOOM_CODING_HARNESS: "/h.js" },
     });
+    expect(codingAgentBinding({ harness: "/h.js", timeoutMs: 5_000 }).timeoutMs).toBe(5_000);
   });
 
   it("binds Pi settings as config and the API key only as a credential", () => {
@@ -170,6 +173,7 @@ describe("graphloom.coding-agent/run", () => {
     expect(binding).toEqual({
       allowedEffects: ["read", "write"],
       allowUnrestricted: true,
+      timeoutMs: DEFAULT_CODING_TIMEOUT_MS,
       env: {
         GRAPHLOOM_CODING_HARNESS: piHarnessModule,
         GRAPHLOOM_PI_PROVIDER: "anthropic",

@@ -13,6 +13,7 @@ export type ScriptedStep =
   | { tool: string; id: string; input?: unknown }
   | { write: { path: string; content: string } }
   | { wait: "abort" }
+  | { sleep: number }
   | { fail: string };
 
 export interface ScriptedOutput {
@@ -108,6 +109,8 @@ async function perform(steps: ScriptedStep[], out: ScriptedOutput, options: Codi
         options.signal?.addEventListener("abort", () => resolve(), { once: true });
       });
       return { status: "failed", summary: "aborted", output: out };
+    } else if ("sleep" in step) {
+      await new Promise((resolve) => setTimeout(resolve, step.sleep));
     } else {
       throw new Error(step.fail);
     }

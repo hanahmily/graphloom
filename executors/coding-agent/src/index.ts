@@ -4,6 +4,7 @@ export { CODING_HARNESS_ENV } from "./executors.js";
 export {
   codingAgentBinding,
   codingAgentExecutorPackage,
+  DEFAULT_CODING_TIMEOUT_MS,
   piHarnessModule,
   type CodingAgentBindingOptions,
   type PiBindingOptions,

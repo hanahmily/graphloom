@@ -131,8 +131,9 @@ function graph(steps: ScriptedStep[]) {
 }
 
 /** The operator's host: the coding agent runs unrestricted, GitHub sandboxed with writes granted. */
-function hostRunner(server: FakeGitHub, coding = codingAgentBinding({ harness: scriptedHarnessModule })) {
+function hostRunner(server: FakeGitHub, coding = codingAgentBinding({ harness: scriptedHarnessModule }), timeoutMs?: number) {
   return createBuiltinExecutorRunner({
+    ...(timeoutMs !== undefined ? { timeoutMs } : {}),
     packages: [
       { manifest: githubExecutorPackage, ...githubBinding({ token: TOKEN, baseUrl: server.baseUrl, allowWrites: true }) },
       { manifest: codingAgentExecutorPackage, ...coding },
@@ -291,6 +292,33 @@ describe("graph → coding agent → GitHub child executor", () => {
       .filter((p) => p.codingAgent)
       .at(-1)!.codingAgent!;
     expect(retried.output.toolResults[0]!.result.summary).toBe("tool call c1 has an unreconciled outcome");
+  });
+});
+
+describe("the coding agent's job timeout", () => {
+  it("outlasts the runner's default job timeout unless the binding sets its own", async () => {
+    const server = await fake();
+    const env = await makeEnv();
+    const slow = graph([{ sleep: 1_500 }, writeGreeting]);
+    const finished = await createController().run({
+      taskPath: env.taskPath,
+      plugin: slow,
+      validators,
+      runner: hostRunner(server, codingAgentBinding({ harness: scriptedHarnessModule }), 500),
+      stateRoot: env.stateRoot,
+      runId: "slow-default",
+    });
+    expect(finished.status, finished.blocker).toBe("succeeded");
+
+    const limited = await createController().run({
+      taskPath: env.taskPath,
+      plugin: graph([{ sleep: 1_500 }, writeGreeting]),
+      validators,
+      runner: hostRunner(server, codingAgentBinding({ harness: scriptedHarnessModule, timeoutMs: 500 })),
+      stateRoot: env.stateRoot,
+      runId: "slow-limited",
+    });
+    expect(limited).toMatchObject({ status: "stopped", stopReason: "job failed: executor child timed out after 500ms" });
   });
 });
 

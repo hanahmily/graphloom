@@ -5,8 +5,6 @@ import type { Runner } from "./types.js";
 
 export interface BuiltinExecutorPackage extends ExecutorBinding {
   manifest: ExecutorPackageManifest;
-  /** Per-job timeout (ms) for this package; overrides the runner default. */
-  timeoutMs?: number;
 }
 
 export interface BuiltinExecutorRunnerOptions {
@@ -14,7 +12,7 @@ export interface BuiltinExecutorRunnerOptions {
   packages: readonly BuiltinExecutorPackage[];
   /** Runner for every job no listed package serves. */
   fallback: Runner;
-  /** Per-job timeout (ms). Default 30_000. */
+  /** Per-job timeout (ms) for packages whose binding sets none. Default 30_000. */
   timeoutMs?: number;
   /** Override the runner's worker entry (tests). */
   workerModule?: string;

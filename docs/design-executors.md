@@ -78,7 +78,9 @@ credentials or configuration a manifest did not declare. Each package gets its
 own executor process. That process receives only its bound credentials over
 stdin, its declared configuration, and its effect grant, which defaults to
 `read`. Every non-empty bound credential is redacted from job results, and an
-empty credential is rejected.
+empty credential is rejected. A job that outlasts the binding's `timeoutMs`,
+or the runner's default of 30 seconds when the binding sets none, fails and
+its process is killed.
 
 The process runs under Node's permission model. It may read only its own
 package and the dependencies Node resolves for it. File writes, child
@@ -162,7 +164,9 @@ protocol:
   (`@graphloom/executor-coding-agent/testing`).
 - The executor process loads the harness named by `GRAPHLOOM_CODING_HARNESS`.
   `codingAgentBinding({ harness })` sets it, grants read and write effects, and
-  consents to the package's unrestricted isolation.
+  consents to the package's unrestricted isolation. It also sets the job
+  timeout to one hour unless `timeoutMs` says otherwise, because a coding job
+  runs far longer than the runner's default.
 - The job result is the agent's claim: its status, structured output, the tool
   calls it made with their child operation ids, and its model request count.
 

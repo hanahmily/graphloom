@@ -29,8 +29,13 @@ export interface PiBindingOptions {
 export interface CodingAgentBindingOptions {
   /** Absolute path (or package specifier) of the harness adapter module. */
   harness: string;
+  /** Wall-clock limit (ms) for one coding job. Default: one hour. */
+  timeoutMs?: number;
   pi?: PiBindingOptions;
 }
+
+/** A coding job runs many model turns and commands, far past the runner's default job timeout. */
+export const DEFAULT_CODING_TIMEOUT_MS = 60 * 60_000;
 
 /**
  * Operator binding for the coding agent: selects the harness and consents to
@@ -45,6 +50,7 @@ export function codingAgentBinding(options: CodingAgentBindingOptions): Executor
   return {
     allowedEffects: ["read", "write"],
     allowUnrestricted: true,
+    timeoutMs: options.timeoutMs ?? DEFAULT_CODING_TIMEOUT_MS,
     env: {
       [CODING_HARNESS_ENV]: options.harness,
       ...(pi.provider !== undefined ? { [PI_PROVIDER_ENV]: pi.provider } : {}),
