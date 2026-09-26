@@ -28,6 +28,27 @@ export interface PendingDispatch {
   modelCalls?: number;
   /** The job starts no earlier than this (an executor asked for a wait before retrying). */
   notBefore?: string;
+  /** Session directory given to an agent job, and the session it continues. */
+  session?: import("@graphloom/sdk").ExecutorSession;
+}
+
+/**
+ * An agent session a settled dispatch returned. A later dispatch of the same
+ * stage and dispatch key may continue it with `continueFrom`.
+ */
+export interface AgentSessionRecord {
+  operationId: string;
+  stageId: string;
+  attempt: number;
+  generation: number;
+  dispatchKey: string;
+  executorId: string;
+  status: "ok" | "failed" | "conflict";
+  /** Executor-defined identity of the saved session inside `sessionDir`. */
+  sessionRef: string;
+  sessionDir: string;
+  continuedFrom?: string;
+  settledAt: string;
 }
 
 /**
@@ -90,6 +111,7 @@ export interface DurableRunState {
   outstanding: OutstandingOperation[];
   pendingDispatch?: PendingDispatch;
   childOperations?: ChildOperationRecord[];
+  agentSessions?: AgentSessionRecord[];
   /** Executors pinned at intake (absent for runs whose runner cannot describe its executors). */
   executorCatalog?: ExecutorCatalogEntry[];
   /** Earliest time each executor may run again, from a failure's retry timing. */

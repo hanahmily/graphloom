@@ -13,6 +13,9 @@ import type {
 } from "./types.js";
 
 export function dispatch(job: JobSpec, reason: string, privateState?: string): GraphDecision {
+  if (job.continueFrom !== undefined && job.kind !== "agent") {
+    throw new Error(`only agent jobs carry sessions; a ${job.kind} job cannot continue ${job.continueFrom}`);
+  }
   return decide({ type: "dispatch", job }, reason, privateState);
 }
 

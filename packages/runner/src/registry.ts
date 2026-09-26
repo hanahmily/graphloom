@@ -5,6 +5,7 @@ import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import {
+  MAX_SESSION_REF_CHARS,
   pinJobExecutor,
   validateExecutorInput,
   type ExecutorContext,
@@ -116,11 +117,20 @@ function resultFromOutput(
       summary?: string;
       evidence?: JobEvidenceItem[];
       retryAfterMs?: unknown;
+      sessionRef?: unknown;
     };
     const resultStatus = o.status === "failed" || o.status === "conflict" ? o.status : status;
     const retryAfterMs =
       resultStatus !== "ok" && typeof o.retryAfterMs === "number" && Number.isFinite(o.retryAfterMs) && o.retryAfterMs >= 0
         ? Math.ceil(o.retryAfterMs)
+        : undefined;
+    // Only a job the controller gave a session directory can name a continuable session.
+    const sessionRef =
+      ctx.session !== undefined &&
+      typeof o.sessionRef === "string" &&
+      o.sessionRef.length > 0 &&
+      o.sessionRef.length <= MAX_SESSION_REF_CHARS
+        ? o.sessionRef
         : undefined;
     return {
       status: resultStatus,
@@ -130,6 +140,7 @@ function resultFromOutput(
       generation: ctx.generation,
       ...(o.evidence !== undefined ? { evidence: o.evidence } : {}),
       ...(retryAfterMs !== undefined ? { retryAfterMs } : {}),
+      ...(sessionRef !== undefined ? { sessionRef } : {}),
     };
   }
   return {
@@ -152,6 +163,7 @@ function executorCtx(job: JobSpec, ctx: JobContext) {
     artifactDir: ctx.artifactDir,
     ...(job.writeScope !== undefined ? { writeScope: job.writeScope } : {}),
     ...(job.readOnly !== undefined ? { readOnly: job.readOnly } : {}),
+    ...(ctx.session !== undefined ? { session: { ...ctx.session } } : {}),
   };
 }
 
@@ -347,6 +359,15 @@ export function createChildExecutorRunner(
         operationId: ctx.operationId,
         generation: ctx.generation,
       });
+      if (options.sandbox === true && ctx.session !== undefined) {
+        // A sandboxed executor cannot write, so it cannot keep a session, and must not silently start over.
+        if (ctx.session.resume !== undefined) {
+          return failed(`executor ${pin.id} runs sandboxed and cannot continue agent session ${ctx.session.resume}`);
+        }
+        const { session: _unusable, ...withoutSession } = ctx;
+        void _unusable;
+        ctx = withoutSession;
+      }
       const override = ctx.executorSource;
       if (override !== undefined && pin.digest === undefined) {
         return failed(`executor ${pin.id}: a run-local copy runs only under a pinned digest`);

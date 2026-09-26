@@ -58,6 +58,28 @@ describe("createTrustedInProcessRunner", () => {
     expect(result.summary).toBe("echo:hi");
   });
 
+  it("hands an agent job its session and returns the ref only for a job that had one", async () => {
+    const seen: unknown[] = [];
+    const agent = defineExecutor<{ ref: string }, unknown>({
+      id: "acme.agent/code",
+      effect: "read",
+      async execute(input, ctx) {
+        seen.push(ctx.session);
+        return { status: "ok", summary: "done", sessionRef: input.ref };
+      },
+    });
+    const runner = createTrustedInProcessRunner({ executors: [agent], fallback: createScriptedRunner({ jobs: [] }) });
+    const run = (ref: string, session?: { dir: string; resume?: string }) =>
+      runner.runJob(
+        { stageId: "write", kind: "agent", purpose: "work", instruction: "x", executor: { id: "acme.agent/code" }, input: { ref } },
+        { runId: "r1", operationId: "op1", generation: 1, worktreePath: "/tmp", artifactDir: "/tmp/a", ...(session ? { session } : {}) },
+      );
+    expect((await run("s1", { dir: "/state/s", resume: "s0" })).sessionRef).toBe("s1");
+    expect(seen[0]).toEqual({ dir: "/state/s", resume: "s0" });
+    expect(await run("s1")).not.toHaveProperty("sessionRef");
+    expect(await run("x".repeat(257), { dir: "/state/s" })).not.toHaveProperty("sessionRef");
+  });
+
   it("createRegistryRunner remains an alias of trusted in-process", () => {
     expect(createRegistryRunner).toBe(createTrustedInProcessRunner);
   });
@@ -349,7 +371,7 @@ describe("createBuiltinExecutorRunner", () => {
       const result = await runner.runJob(job("graphloom.fixture/echo"), ctx);
       expect(result.status).toBe("ok");
       expect(result.summary).toBe("token [REDACTED]");
-      expect(result.evidence?.[0]?.payload).toEqual({ config: "http://x", leaked: null });
+      expect(result.evidence?.[0]?.payload).toEqual({ config: "http://x", leaked: null, session: null });
     } finally {
       delete process.env.GL_HOST_SECRET;
     }
@@ -387,6 +409,34 @@ describe("createBuiltinExecutorRunner", () => {
     expect(() =>
       createBuiltinExecutorRunner({ packages: [{ manifest }, { manifest: { ...manifest, name: "dup" } }], fallback }),
     ).toThrow("executor graphloom.fixture/echo is served by both @graphloom/executor-fixture and dup");
+  });
+
+  it("keeps agent sessions from sandboxed packages, which cannot write them", async () => {
+    const run = (packages: Parameters<typeof createBuiltinExecutorRunner>[0]["packages"], session: { dir: string; resume?: string }) =>
+      createBuiltinExecutorRunner({ packages, fallback: createScriptedRunner({ jobs: [] }), workerModule }).runJob(
+        job("graphloom.fixture/echo"),
+        { ...ctx, session },
+      );
+    const fresh = await run([{ manifest }], { dir: "/state/agent-sessions/op1" });
+    expect(fresh.status).toBe("ok");
+    expect(fresh).not.toHaveProperty("sessionRef");
+    expect((fresh.evidence?.[0]?.payload as { session: unknown }).session).toBeNull();
+
+    const resumed = await run([{ manifest }], { dir: "/state/agent-sessions/op1", resume: "s1" });
+    expect(resumed).toMatchObject({
+      status: "failed",
+      summary: "executor graphloom.fixture/echo runs sandboxed and cannot continue agent session s1",
+    });
+
+    const unrestricted = await run(
+      [{ manifest: { ...manifest, isolation: "unrestricted" as const }, allowUnrestricted: true }],
+      { dir: "/state/agent-sessions/op1", resume: "s1" },
+    );
+    expect(unrestricted.sessionRef).toBe("fixture-session");
+    expect((unrestricted.evidence?.[0]?.payload as { session: unknown }).session).toEqual({
+      dir: "/state/agent-sessions/op1",
+      resume: "s1",
+    });
   });
 
   it("runs an unrestricted package only with operator consent, and then without the sandbox", async () => {

@@ -84,7 +84,22 @@ export interface ExecutorContext {
   tools?: ExecutorTools;
   /** Present when the host accounts for model requests made by this job. */
   usage?: ExecutorUsage;
+  /** Present for agent jobs: where a resumable session may be kept. */
+  session?: ExecutorSession;
 }
+
+/**
+ * A controller-owned directory for an agent job's resumable session. An
+ * executor returns `sessionRef` in its result to make the session continuable;
+ * a later job that continues it receives the same directory and `resume`.
+ */
+export interface ExecutorSession {
+  dir: string;
+  /** Session to continue. An executor that cannot restore it must fail, not start fresh. */
+  resume?: string;
+}
+
+export const MAX_SESSION_REF_CHARS = 256;
 
 export type JsonSchemaValidator<T> = (value: unknown) => value is T;
 
@@ -268,6 +283,12 @@ export function pinJobExecutor(job: JobSpec): JobSpec {
     job.tools !== undefined ? { ...withInput, tools: assertToolBindings(job.tools) } : withInput;
   if (job.effect !== undefined && !EFFECTS.includes(job.effect)) {
     throw new Error(`job effect must be one of ${EFFECTS.join(", ")}`);
+  }
+  if (
+    job.continueFrom !== undefined &&
+    (typeof job.continueFrom !== "string" || job.continueFrom.length === 0 || job.continueFrom.length > 128)
+  ) {
+    throw new Error("job continueFrom must be an operation id of at most 128 characters");
   }
 
   if (job.executor) {

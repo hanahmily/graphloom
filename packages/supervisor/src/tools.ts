@@ -61,6 +61,11 @@ const ACTION_TOOLS: Record<GraphLoomSupervisorAction, ActionTool> = {
         readOnly: { type: "boolean" },
         executor: spec({ id: STRING }, { version: STRING }),
         input: { description: "Bounded JSON input for the pinned executor." },
+        continueFrom: {
+          type: "string",
+          description:
+            "An operationId from agentSessions for this stage and dispatch key: the agent resumes that session with its earlier context. Omit to start fresh.",
+        },
       },
     ),
   },

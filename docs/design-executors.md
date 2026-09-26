@@ -165,6 +165,56 @@ protocol:
 - The job result is the agent's claim: its status, structured output, the tool
   calls it made with their child operation ids, and its model request count.
 
+### Continuing an agent session
+
+Every agent dispatch gets a controller-owned session directory under the run's
+state directory (`ctx.session.dir`). A harness that sets `resumable` saves its
+transcript there and returns a `sessionRef`. The controller records the ref
+against the run, stage, attempt, generation, and dispatch key. The dispatch key
+is the job's `jobId`, or its purpose and executor id. The record is written
+whether the job succeeded or failed, because a failed attempt's context is what
+a retry lacks. `RunView.agentSessions` lists the recorded sessions without
+their refs or paths.
+
+A later dispatch continues a session only when it asks for it explicitly with
+`job.continueFrom: <operationId>`. Without that field, the job starts fresh.
+The controller admits a continuation only for an agent job, and only when the
+operation settled in this run with a recorded session, for the same stage and
+dispatch key, in the current
+generation or an earlier one, and has not already been continued. It rejects
+anything else before the job runs, with `continuation rejected`. A continued
+job gets the same directory, and `ctx.session.resume` names the session.
+
+The continued session's transcript is context, not authority:
+
+- The assignment starts with a notice that the worktree and services may have
+  changed and that earlier tool results belong to an earlier attempt.
+- Scopes, tools, credentials, and budget come only from the new dispatch, and
+  model requests are charged to the run as usual.
+- Tool calls from earlier turns are never replayed. Reusing an earlier call id
+  is refused, and the agent must make a new call, which is admitted and
+  budgeted like any other.
+- An earlier write whose outcome is unknown (`ambiguous`) blocks the same call
+  (the same id, or the same tool with the same input) until it is reconciled.
+
+A session that cannot be restored fails the job with `agent session <ref> could
+not be restored: <reason>`. A harness that is not resumable fails the job too.
+A sandboxed executor cannot write, so the runner gives it no session directory
+and fails a continuation sent to it. None of these starts a fresh session in its
+place. With a supervisor, the failure
+becomes the recovery trigger; without one, the run stops. Records and
+transcripts live in the state directory, so a continuation survives a
+controller stop and resume.
+
+Continue when the earlier attempt's reasoning is still useful: the agent was
+interrupted, ran out of budget, or needs only a correction to finish. Start
+fresh when that context would mislead the agent. For example, the task or plan
+changed, a repair replaced the executor or graph behavior, or the transcript is
+anchored on an approach the supervisor has rejected. The graph or supervisor
+makes this choice; the controller never continues a session on its own. The
+scripted harness implements resume for tests. A production Pi coding harness
+would keep its session file in the same directory.
+
 Built-in packages and plugin bundles can be installed or upgraded independently
 of the controller when compatible with its executor protocol. No controller
 release is required for another API integration or custom processing function.
@@ -247,7 +297,9 @@ Requirements belong to their owning stage. Implement acceptance can require its
 relevant tests to pass; the independent issue-resolution/scope review belongs to
 Review. Implement must not wait for a later Review receipt, which would create a
 cycle. A failed review may request reentry to Implement with fresh downstream
-validation. Executor jobs neither insert steps nor bypass this ordering.
+validation, and the reentered dispatch may
+[continue the earlier agent session](#continuing-an-agent-session). Executor
+jobs neither insert steps nor bypass this ordering.
 
 The graph constructs a job using the selected issue from accepted Select evidence:
 

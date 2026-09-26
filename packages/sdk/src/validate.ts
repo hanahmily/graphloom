@@ -179,7 +179,24 @@ export function assertRunView(value: unknown): RunView {
   requireNumber(obj, "generation");
   requireNumber(obj, "stateRevision");
   requireString(obj, "activeVersion");
+  if (obj["agentSessions"] !== undefined) assertAgentSessions(requireArray(obj, "agentSessions"));
   return obj as unknown as RunView;
+}
+
+const SESSION_STATUSES = ["ok", "failed", "conflict"];
+
+/** A graph picks `continueFrom` from these entries, so each must be well formed. */
+function assertAgentSessions(sessions: unknown[]): void {
+  sessions.forEach((raw, i) => {
+    const s = asObject(raw, `agentSessions[${i}]`);
+    for (const key of ["operationId", "stageId", "dispatchKey", "executorId"]) requireString(s, key);
+    requireNumber(s, "attempt");
+    requireNumber(s, "generation");
+    if (!SESSION_STATUSES.includes(s["status"] as string)) {
+      throw new WireValidationError("malformed", `agentSessions[${i}].status must be one of ${SESSION_STATUSES.join(", ")}`);
+    }
+    if (s["continuedFrom"] !== undefined) requireString(s, "continuedFrom");
+  });
 }
 
 function assertProtocol(obj: Record<string, unknown>): void {

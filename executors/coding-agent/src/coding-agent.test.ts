@@ -1,9 +1,16 @@
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import type { ExecutorContext, ToolCallRequest } from "@graphloom/sdk";
-import { codingAgentBinding, codingAgentExecutorPackage, CODING_AGENT_RUN_ID, createCodingAgentExecutor } from "./index.js";
+import {
+  codingAgentBinding,
+  codingAgentExecutorPackage,
+  CODING_AGENT_RUN_ID,
+  CONTINUATION_NOTICE,
+  createCodingAgentExecutor,
+  type CodingHarness,
+} from "./index.js";
 import { createScriptedHarness } from "./testing/scripted-harness.js";
 
 const executor = createCodingAgentExecutor(createScriptedHarness());
@@ -80,6 +87,57 @@ describe("graphloom.coding-agent/run", () => {
       await ctx(),
     );
     expect(result).toMatchObject({ status: "failed", summary: "tool delete_repo is not available" });
+  });
+
+  it("saves a session the controller gave a directory for, and continues it with a notice", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "gl-session-"));
+    const first = await executor.execute(
+      { assignment: "Write notes.md", harnessOptions: { steps: [{ write: { path: "notes.md", content: "draft\n" } }] } },
+      await ctx({ session: { dir } }),
+    );
+    const sessionRef = (first as { sessionRef?: string }).sessionRef;
+    expect(sessionRef).toMatch(/^scripted-[a-z0-9]{8}$/);
+    expect(payload(first)).toMatchObject({ sessionRef, continued: false });
+    expect(JSON.parse(await readFile(path.join(dir, `${sessionRef}.json`), "utf8")).turns).toHaveLength(1);
+
+    const second = await executor.execute(
+      { assignment: "Fix notes.md", harnessOptions: { steps: [] } },
+      await ctx({ operationId: "op2", session: { dir, resume: sessionRef! } }),
+    );
+    expect(second).toMatchObject({ status: "ok", sessionRef });
+    const agent = payload(second);
+    expect(agent).toMatchObject({ continued: true, sessionRef });
+    const output = agent.output as { assignment: string; priorAssignments: string[] };
+    expect(output.priorAssignments).toEqual(["Write notes.md"]);
+    expect(output.assignment).toBe(`${CONTINUATION_NOTICE}\n\nFix notes.md`);
+    // Each turn replaces the transcript whole; no partial or temporary file is left behind.
+    expect(await readdir(dir)).toEqual([`${sessionRef}.json`]);
+    expect(JSON.parse(await readFile(path.join(dir, `${sessionRef}.json`), "utf8")).turns).toHaveLength(2);
+  });
+
+  it("fails instead of starting fresh when the session cannot be restored", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "gl-session-"));
+    const missing = await executor.execute(
+      { assignment: "Fix it", harnessOptions: { steps: [{ write: { path: "notes.md", content: "x" } }] } },
+      await ctx({ session: { dir, resume: "scripted-deadbeef" } }),
+    );
+    expect(missing).toEqual({
+      status: "failed",
+      summary: "agent session scripted-deadbeef could not be restored: no transcript for scripted-deadbeef",
+    });
+
+    const oneShot: CodingHarness = { name: "one-shot", createSession: createScriptedHarness().createSession };
+    const refused = await createCodingAgentExecutor(oneShot).execute(
+      { assignment: "Fix it" },
+      await ctx({ session: { dir, resume: "scripted-deadbeef" } }),
+    );
+    expect(refused).toEqual({ status: "failed", summary: "harness one-shot cannot continue agent session scripted-deadbeef" });
+  });
+
+  it("names no session when the controller gave the job no session directory", async () => {
+    const result = await executor.execute({ assignment: "work" }, await ctx());
+    expect(result).not.toHaveProperty("sessionRef");
+    expect(payload(result)).toMatchObject({ sessionRef: null, continued: false });
   });
 
   it("rejects an empty or oversized assignment", () => {
