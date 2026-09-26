@@ -80,6 +80,8 @@ export interface BudgetRemaining {
   jobs: number;
   decisions: number;
   corrections: number;
+  /** Milliseconds the controller may still spend waiting out executor retry timing. */
+  waitMs?: number;
 }
 
 export interface RunView {
@@ -103,7 +105,8 @@ export interface RunView {
   repairCandidates?: Array<{
     artifactId: string;
     status: string;
-    target: "plugin" | "validator";
+    target: RepairTarget;
+    executorId?: string;
     reason: string;
     candidateDigest?: string;
     qualifiedAt?: string;
@@ -162,8 +165,12 @@ export interface SuperviseSpec {
   evidenceRefs?: EvidenceRef[];
 }
 
+export type RepairTarget = "plugin" | "validator" | "executor";
+
 export interface QualifyRepairSpec {
-  target: "plugin" | "validator";
+  target: RepairTarget;
+  /** Required for `executor`: a pinned executor id; its whole package is copied and repaired. */
+  executorId?: string;
   reason: string;
   evidenceRefs?: EvidenceRef[];
 }

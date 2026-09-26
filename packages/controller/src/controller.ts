@@ -43,8 +43,9 @@ import {
   readOwnerClaim,
   reapOwnerProcesses,
 } from "./owner.js";
-import { reconcilePendingDispatch } from "./reconcile.js";
+import { isUnsettled, reconcilePendingDispatch } from "./reconcile.js";
 import { reconcileChildOperations } from "./children.js";
+import { pinExecutorCatalog, verifyExecutorCatalog } from "./executor-catalog.js";
 import {
   getSession,
   registerSession,
@@ -240,6 +241,8 @@ export function createController(): Controller {
           stateRoot,
           sourceDirtyBefore,
         });
+        const executorCatalog = await pinExecutorCatalog(request.runner);
+        if (executorCatalog !== undefined) state = { ...state, executorCatalog };
         revisionBridge.current = state.stateRevision;
         session.stateDir = state.stateDir;
         registerSession(session);
@@ -385,7 +388,7 @@ export function createController(): Controller {
           await saveRunState(state);
           return;
         }
-        if (state.pendingDispatch?.status === "pending") {
+        if (state.pendingDispatch !== undefined && isUnsettled(state.pendingDispatch)) {
           const reconciled = await reconcilePendingDispatch(state);
           state = reconciled.state;
           if (!reconciled.settled) {
@@ -454,6 +457,15 @@ export function createController(): Controller {
             stopReason: "pin mismatch",
             blocker: err instanceof Error ? err.message : String(err),
           };
+          await saveRunState(state);
+          return toReport(state, await listDirtyPaths(state.intake.repoPath));
+        }
+
+        const executorBlocker = await verifyExecutorCatalog(state, request.runner).catch(
+          (err: unknown) => `executor catalog unreadable: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        if (executorBlocker !== undefined) {
+          state = { ...state, status: "stopped", stopReason: "executor pin mismatch", blocker: executorBlocker };
           await saveRunState(state);
           return toReport(state, await listDirtyPaths(state.intake.repoPath));
         }

@@ -47,10 +47,12 @@ without automatic commit, push, or publication.
 ## Extend and repair
 
 Plugins implement the public TypeScript SDK and run in separate processes.
-The target [executor interface](docs/design-executors.md) lets plugins reuse
+The [executor interface](docs/design-executors.md) lets plugins reuse
 built-in executors such as GitHub or supply their own execution code without a
 controller release. The controller admits and tracks execution; executor code
-performs the actual operation.
+performs the actual operation. When an executor fails, the supervisor can retry
+it, switch to another pinned executor, or, with the `executorRepair` task grant,
+repair a run-local copy of its package.
 Repairable bundles include source, readable acceptance requirements, locked build
 dependencies, and tests. The supervisor coordinates isolated patches, regression
 checks, independent review, and recorded version transitions within the same run.

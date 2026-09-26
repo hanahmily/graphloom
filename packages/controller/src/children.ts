@@ -9,6 +9,8 @@ import {
 } from "@graphloom/sdk";
 import type { ChildOperationPort, JobResult, Runner } from "@graphloom/runner";
 import { newEvidenceRef, type EvidenceProducer } from "./admit.js";
+import { resolveExecutorPin } from "./executor-catalog.js";
+import { boundedRetryAfter, recordExecutorFailure } from "./executor-failure.js";
 import { withDirectoryLock } from "./lock.js";
 import { loadRunState, saveRunState, type ChildOperationRecord, type DurableRunState } from "./state.js";
 
@@ -113,6 +115,17 @@ export function createChildPort(parent: ParentJob, deps: ChildPortDeps): Control
       if (prior?.status === "ambiguous") {
         return { done: failed(`tool call ${req.toolCallId} has an unreconciled outcome`) };
       }
+      // The same retry time gates an executor whether the graph or an agent's tool calls it.
+      const executorId = binding.executor.id;
+      const retryAt = state.executorRetryAt?.[executorId];
+      const waitMs = retryAt !== undefined ? Date.parse(retryAt) - Date.now() : 0;
+      if (waitMs > 0) {
+        return {
+          done: { ...failed(`executor ${executorId} asked not to be called before ${retryAt}`), retryAfterMs: Math.ceil(waitMs) },
+        };
+      }
+      const { [executorId]: _elapsed, ...otherRetries } = state.executorRetryAt ?? {};
+      void _elapsed;
       // One job is reserved for the parent's own settlement.
       if (state.budgets.jobs < 2) return { done: failed("jobs budget exhausted") };
 
@@ -132,6 +145,7 @@ export function createChildPort(parent: ParentJob, deps: ChildPortDeps): Control
       };
       const next: DurableRunState = {
         ...state,
+        ...(retryAt !== undefined ? { executorRetryAt: otherRetries } : {}),
         childOperations: [...(state.childOperations ?? []), record],
         outstanding: [
           ...state.outstanding,
@@ -161,11 +175,13 @@ export function createChildPort(parent: ParentJob, deps: ChildPortDeps): Control
       const others = (state.childOperations ?? []).filter((c) => c.childOperationId !== record.childOperationId);
       const outstanding = state.outstanding.filter((o) => o.operationId !== record.childOperationId);
 
+      const retryAfterMs = result.status !== "ok" ? boundedRetryAfter(result.retryAfterMs) : undefined;
       const delivered: ToolCallResult = {
         status: result.status,
         summary: result.summary,
         childOperationId: record.childOperationId,
         ...(result.evidence !== undefined ? { evidence: result.evidence } : {}),
+        ...(retryAfterMs !== undefined ? { retryAfterMs } : {}),
       };
 
       if (fenced) {
@@ -204,14 +220,26 @@ export function createChildPort(parent: ParentJob, deps: ChildPortDeps): Control
             : { value: item.payload, producer },
         ...(item.fingerprint !== undefined ? { fingerprint: item.fingerprint } : {}),
       }));
-      await saveRunState({
+      let next: DurableRunState = {
         ...working,
         evidence: [...working.evidence, ...added],
         budgets: { ...working.budgets, jobs: working.budgets.jobs - 1 },
         childOperations: [...others, { ...record, status: result.status, result: delivered, settledAt }],
         outstanding,
         stateRevision: working.stateRevision + 1,
-      });
+      };
+      if (result.status !== "ok") {
+        next = recordExecutorFailure(next, {
+          producer,
+          stageId: record.stageId,
+          attempt: record.attempt,
+          executor: job.executor,
+          status: result.status,
+          summary: result.summary,
+          retryAfterMs,
+        });
+      }
+      await saveRunState(next);
       return delivered;
     });
   }
@@ -267,12 +295,13 @@ export function createChildPort(parent: ParentJob, deps: ChildPortDeps): Control
       const admitted = await admit(binding, { ...req, input });
       if ("done" in admitted) return admitted.done;
       const { record, state } = admitted;
+      const resolved = resolveExecutorPin(state, record.executor);
       const job: JobSpec = {
         stageId: record.stageId,
         kind: "command",
         purpose: "check",
         instruction: `tool ${record.tool} (${record.toolCallId}) for ${record.parentOperationId}`,
-        executor: record.executor,
+        executor: "error" in resolved ? record.executor : resolved.pin,
         effect: record.effect,
         input,
         // Children inherit the parent's worktree scope, never a broader one.
@@ -281,6 +310,7 @@ export function createChildPort(parent: ParentJob, deps: ChildPortDeps): Control
       let result: JobResult;
       let cutShort = false;
       try {
+        if ("error" in resolved) throw new Error(resolved.error);
         result = await deps.runner.runJob(job, {
           runId: state.runId,
           operationId: record.childOperationId,
@@ -288,6 +318,7 @@ export function createChildPort(parent: ParentJob, deps: ChildPortDeps): Control
           worktreePath: state.worktreePath,
           artifactDir: state.artifactDir,
           signal: cancel.signal,
+          ...(resolved.source !== undefined ? { executorSource: resolved.source } : {}),
         });
         cutShort = cancel.signal.aborted;
       } catch (err) {

@@ -9,6 +9,18 @@ export interface ChildOperationPort {
   reserveModelCall(): Promise<boolean>;
 }
 
+/**
+ * A run-local copy of an executor package that replaces the installed one
+ * for this job, after qualified repair. The job's pin must carry the copy's
+ * digest; the runner refuses to run it otherwise.
+ */
+export interface ExecutorSourceOverride {
+  /** Package root of the copy. */
+  root: string;
+  /** Entry module inside `root` exporting `executors`. */
+  entryModule: string;
+}
+
 export interface JobContext {
   runId: string;
   operationId: string;
@@ -20,6 +32,8 @@ export interface JobContext {
   signal?: AbortSignal;
   /** Present for jobs the controller can service tool calls and model usage for. */
   children?: ChildOperationPort;
+  /** Serve the job's executor from a repaired run-local copy instead of the installed package. */
+  executorSource?: ExecutorSourceOverride;
 }
 
 export interface JobEvidenceItem {
@@ -37,8 +51,24 @@ export interface JobResult {
   generation: number;
   /** Optional evidence payloads for the controller to record (e.g. review verdict). */
   evidence?: JobEvidenceItem[];
+  /** A failed executor's requested wait before retrying it (e.g. a rate limit). */
+  retryAfterMs?: number;
+}
+
+/** An executor a runner serves, identified by the digest of the code it would run. */
+export interface ExecutorDescriptor {
+  id: string;
+  digest: string;
+  /** Package root, module file, or `in-process` the digest covers. */
+  source: string;
+  /** Entry module, when `source` is a package root that can be copied for repair. */
+  entryModule?: string;
+  isolation: "sandbox" | "unrestricted" | "in-process";
+  builtin: boolean;
 }
 
 export interface Runner {
   runJob(job: JobSpec, ctx: JobContext): Promise<JobResult>;
+  /** Executors this runner (and its fallbacks) serve, for pinning at intake and checking on resume. */
+  describeExecutors?(): Promise<ExecutorDescriptor[]>;
 }

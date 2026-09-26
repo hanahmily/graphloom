@@ -1,4 +1,6 @@
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
+import { realpath } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -12,8 +14,9 @@ import {
   type JobSpec,
   type ToolCallResult,
 } from "@graphloom/sdk";
+import { digestExecutorSource } from "./digest.js";
 import { assertSandboxSupported, sandboxNodeArgs } from "./sandbox.js";
-import type { JobContext, JobEvidenceItem, JobResult, Runner } from "./types.js";
+import type { ExecutorDescriptor, JobContext, JobEvidenceItem, JobResult, Runner } from "./types.js";
 
 /** Qualified ids under this namespace belong to GraphLoom built-in packages. */
 export const BUILTIN_EXECUTOR_NAMESPACE = "graphloom.";
@@ -71,6 +74,11 @@ export interface ChildExecutorRunnerOptions {
    * workers, or load native addons. Network access is not restricted.
    */
   sandbox?: boolean;
+  /**
+   * Package root the executor digest covers, which also makes the package
+   * repairable from a run-local copy. Default: the entry module file alone.
+   */
+  sourceRoot?: string;
 }
 
 /** Replace every bound credential value in a value before it can become durable. */
@@ -107,14 +115,21 @@ function resultFromOutput(
       status?: string;
       summary?: string;
       evidence?: JobEvidenceItem[];
+      retryAfterMs?: unknown;
     };
+    const resultStatus = o.status === "failed" || o.status === "conflict" ? o.status : status;
+    const retryAfterMs =
+      resultStatus !== "ok" && typeof o.retryAfterMs === "number" && Number.isFinite(o.retryAfterMs) && o.retryAfterMs >= 0
+        ? Math.ceil(o.retryAfterMs)
+        : undefined;
     return {
-      status: o.status === "failed" || o.status === "conflict" ? o.status : status,
+      status: resultStatus,
       summary: typeof o.summary === "string" ? o.summary : "executor completed",
       runId: ctx.runId,
       operationId: ctx.operationId,
       generation: ctx.generation,
       ...(o.evidence !== undefined ? { evidence: o.evidence } : {}),
+      ...(retryAfterMs !== undefined ? { retryAfterMs } : {}),
     };
   }
   return {
@@ -161,6 +176,32 @@ function inProcessCtx(job: JobSpec, ctx: JobContext): ExecutorContext {
   };
 }
 
+/** In-process code has no files to hash; its identity and implementation text stand in. */
+function inProcessDigest(def: ExecutorDefinition): string {
+  return createHash("sha256")
+    .update(`${def.id}\0${def.version ?? ""}\0${def.effect}\0${def.execute.toString()}`)
+    .digest("hex");
+}
+
+/** The digest covers `root`, so the module that runs must really live inside it. */
+async function containedIn(root: string, file: string): Promise<boolean> {
+  try {
+    const rel = path.relative(await realpath(root), await realpath(file));
+    return rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel);
+  } catch {
+    return false;
+  }
+}
+
+function digestMismatch(pin: ExecutorPin, serving: string): string | undefined {
+  if (pin.digest === undefined || pin.digest === serving) return undefined;
+  return `executor ${pin.id} digest ${serving.slice(0, 12)} does not match pinned ${pin.digest.slice(0, 12)}`;
+}
+
+async function describeFallback(fallback: Runner, served: { has(id: string): boolean }): Promise<ExecutorDescriptor[]> {
+  return ((await fallback.describeExecutors?.()) ?? []).filter((d) => !served.has(d.id));
+}
+
 function effectMismatch(def: ExecutorDefinition, job: JobSpec): string | undefined {
   if (job.effect !== undefined && job.effect !== def.effect) {
     return `executor ${def.id} effect ${def.effect} does not match declared ${job.effect}`;
@@ -192,8 +233,19 @@ export function createTrustedInProcessRunner(
     }
     byId.set(def.id, def);
   }
+  const digests = new Map([...byId.values()].map((def) => [def.id, inProcessDigest(def)]));
 
   return {
+    async describeExecutors() {
+      const own = [...byId.keys()].map((id) => ({
+        id,
+        digest: digests.get(id)!,
+        source: "in-process",
+        isolation: "in-process" as const,
+        builtin: options.builtin === true,
+      }));
+      return [...own, ...(await describeFallback(options.fallback, byId))];
+    },
     async runJob(job: JobSpec, ctx: JobContext): Promise<JobResult> {
       const pinned = pinJobExecutor(job);
       const pin = pinned.executor as ExecutorPin;
@@ -202,6 +254,11 @@ export function createTrustedInProcessRunner(
         return options.fallback.runJob(pinned, ctx);
       }
       try {
+        if (ctx.executorSource !== undefined) {
+          throw new Error(`executor ${def.id} runs in-process and cannot be served from a run-local copy`);
+        }
+        const digestError = digestMismatch(pin, digests.get(def.id)!);
+        if (digestError) throw new Error(digestError);
         const mismatch = effectMismatch(def, pinned);
         if (mismatch) throw new Error(mismatch);
         validateExecutorInput(def, pinned.input);
@@ -257,35 +314,67 @@ export function createChildExecutorRunner(
   for (const [name, value] of Object.entries(options.credentials ?? {})) {
     if (value.length === 0) throw new Error(`credential "${name}" is empty`);
   }
+  const sourceRoot = options.sourceRoot !== undefined ? path.resolve(options.sourceRoot) : undefined;
   const extraCa = options.env?.NODE_EXTRA_CA_CERTS;
-  const nodeArgs =
-    options.sandbox === true
-      ? (assertSandboxSupported(), sandboxNodeArgs([workerModule, entryModule], extraCa ? [extraCa] : []))
-      : [];
+  const sandboxArgs = (entry: string) =>
+    options.sandbox === true ? sandboxNodeArgs([workerModule, entry], extraCa ? [extraCa] : []) : [];
+  if (options.sandbox === true) assertSandboxSupported();
+  const nodeArgs = sandboxArgs(entryModule);
 
   return {
+    async describeExecutors() {
+      const digest = await digestExecutorSource(sourceRoot ?? entryModule);
+      const own: ExecutorDescriptor[] = options.executorIds.map((id) => ({
+        id,
+        digest,
+        source: sourceRoot ?? entryModule,
+        ...(sourceRoot !== undefined ? { entryModule } : {}),
+        isolation: options.sandbox === true ? "sandbox" : "unrestricted",
+        builtin: options.builtin === true,
+      }));
+      return [...own, ...(await describeFallback(options.fallback, served))];
+    },
     async runJob(job: JobSpec, ctx: JobContext): Promise<JobResult> {
       const pinned = pinJobExecutor(job);
       const pin = pinned.executor as ExecutorPin;
       if (!served.has(pin.id)) {
         return options.fallback.runJob(pinned, ctx);
       }
+      const failed = (summary: string): JobResult => ({
+        status: "failed",
+        summary,
+        runId: ctx.runId,
+        operationId: ctx.operationId,
+        generation: ctx.generation,
+      });
+      const override = ctx.executorSource;
+      if (override !== undefined && pin.digest === undefined) {
+        return failed(`executor ${pin.id}: a run-local copy runs only under a pinned digest`);
+      }
+      const entry = override !== undefined ? path.resolve(override.entryModule) : entryModule;
+      if (override !== undefined && !(await containedIn(override.root, entry))) {
+        return failed(`executor ${pin.id}: run-local entry module ${entry} is outside its root ${override.root}`);
+      }
+      if (pin.digest !== undefined) {
+        let serving: string;
+        try {
+          serving = await digestExecutorSource(override !== undefined ? override.root : (sourceRoot ?? entryModule));
+        } catch (err) {
+          return failed(`executor ${pin.id} source unreadable: ${err instanceof Error ? err.message : String(err)}`);
+        }
+        const mismatch = digestMismatch(pin, serving);
+        if (mismatch) return failed(mismatch);
+      }
+      const args = override !== undefined ? sandboxArgs(entry) : nodeArgs;
 
       return await new Promise<JobResult>((resolve) => {
-        const failed = (summary: string): JobResult => ({
-          status: "failed",
-          summary,
-          runId: ctx.runId,
-          operationId: ctx.operationId,
-          generation: ctx.generation,
-        });
         if (ctx.signal?.aborted) {
           resolve(failed("executor cancelled before start"));
           return;
         }
-        const child = spawn(process.execPath, [...nodeArgs, workerModule, entryModule], {
+        const child = spawn(process.execPath, [...args, workerModule, entry], {
           stdio: ["pipe", "pipe", "pipe"],
-          cwd: options.cwd ?? path.dirname(entryModule),
+          cwd: options.cwd ?? path.dirname(entry),
           env: options.env ?? process.env,
         });
         const stderr: string[] = [];
@@ -407,4 +496,59 @@ export function createChildExecutorRunner(
       });
     },
   };
+}
+
+export interface DescribedExecutor {
+  id: string;
+  version?: string;
+  effect: ExecutorEffect;
+}
+
+/**
+ * Load an executor module in a worker process and list the executors it
+ * defines, without running any. Used to check a repaired copy still serves
+ * the pinned identities.
+ */
+export async function describeExecutorModule(options: {
+  entryModule: string;
+  sandbox?: boolean;
+  workerModule?: string;
+  timeoutMs?: number;
+}): Promise<DescribedExecutor[]> {
+  const workerModule = options.workerModule ?? fileURLToPath(new URL("./executor-worker.js", import.meta.url));
+  const entry = path.resolve(options.entryModule);
+  if (options.sandbox === true) assertSandboxSupported();
+  const args = options.sandbox === true ? sandboxNodeArgs([workerModule, entry]) : [];
+  const child = spawn(process.execPath, [...args, workerModule, entry], {
+    stdio: ["pipe", "pipe", "pipe"],
+    cwd: path.dirname(entry),
+  });
+  const stderr: string[] = [];
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (c: string) => stderr.push(c));
+  child.stdin.on("error", () => undefined);
+  return await new Promise<DescribedExecutor[]>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      reject(new Error(`describing ${entry} timed out`));
+    }, options.timeoutMs ?? 10_000);
+    const rl = createInterface({ input: child.stdout, crlfDelay: Infinity });
+    rl.on("line", (line) => {
+      let msg: { kind?: string; executors?: DescribedExecutor[]; message?: string };
+      try {
+        msg = JSON.parse(line) as typeof msg;
+      } catch {
+        return;
+      }
+      clearTimeout(timer);
+      child.kill("SIGKILL");
+      if (msg.kind === "described" && Array.isArray(msg.executors)) resolve(msg.executors);
+      else reject(new Error(msg.message ?? `unexpected describe reply from ${entry}`));
+    });
+    child.on("exit", (code) => {
+      clearTimeout(timer);
+      reject(new Error(`executor module ${entry} exited (code=${String(code)}): ${stderr.join("").trim()}`));
+    });
+    child.stdin.end(`${JSON.stringify({ kind: "describe" })}\n`);
+  });
 }

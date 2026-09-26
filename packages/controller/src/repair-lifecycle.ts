@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { readFile, realpath } from "node:fs/promises";
 import path from "node:path";
-import type { GraphDefinition, QualifyRepairSpec, ActivateRepairSpec } from "@graphloom/sdk";
+import type { GraphDefinition, QualifyRepairSpec, ActivateRepairSpec, RepairTarget } from "@graphloom/sdk";
 import type { Supervisor } from "@graphloom/supervisor";
 import type { PluginHost } from "@graphloom/plugin-host";
 import { invalidateFromStage, type AdmissionValidator } from "./admit.js";
@@ -14,6 +14,7 @@ import {
 } from "./repair.js";
 import type { DurableRunState } from "./state.js";
 import { bumpGeneration } from "./generation.js";
+import { activateExecutorRepair, executorRepairSubject } from "./executor-repair.js";
 import { saveRunState } from "./state.js";
 
 export interface RepairPatchAuthor {
@@ -21,7 +22,7 @@ export interface RepairPatchAuthor {
   sessionId: string;
   patch(args: {
     candidateRoot: string;
-    target: "plugin" | "validator";
+    target: RepairTarget;
     reason: string;
     maxProviderCalls?: number;
   }): Promise<{ summary: string }>;
@@ -34,7 +35,7 @@ export interface RepairReviewer {
     candidateRoot: string;
     baseDigest: string;
     candidateDigest: string;
-    target: "plugin" | "validator";
+    target: RepairTarget;
   }): Promise<{ approved: boolean; reason: string }>;
 }
 
@@ -58,7 +59,7 @@ export interface RepairDeps {
    */
   preflight: (args: {
     candidateRoot: string;
-    target: "plugin" | "validator";
+    target: RepairTarget;
     baseDefinition: GraphDefinition;
   }) => Promise<RepairPreflightResult>;
   /**
@@ -102,19 +103,18 @@ export async function applyQualifyRepair(
     };
   }
 
-  const grantOk =
+  const grant =
     qualify.target === "plugin"
-      ? state.intake.grants.sourceRepair
-      : state.intake.grants.validatorSubstitution;
-  if (!grantOk) {
+      ? { ok: state.intake.grants.sourceRepair, name: "sourceRepair" }
+      : qualify.target === "validator"
+        ? { ok: state.intake.grants.validatorSubstitution, name: "validatorSubstitution" }
+        : { ok: state.intake.grants.executorRepair === true, name: "executorRepair" };
+  if (!grant.ok) {
     return {
       ...state,
       status: "stopped",
       stopReason: "qualify_repair missing operator grant",
-      blocker:
-        qualify.target === "plugin"
-          ? "sourceRepair grant is false"
-          : "validatorSubstitution grant is false",
+      blocker: `${grant.name} grant is false`,
     };
   }
 
@@ -163,6 +163,12 @@ export async function applyQualifyRepair(
     };
   }
 
+  const subject =
+    qualify.target === "executor" ? await executorRepairSubject(state, qualify) : await bundleRepairSubject(state, qualify);
+  if ("error" in subject) {
+    return { ...state, status: "stopped", stopReason: "qualify_repair rejected", blocker: subject.error };
+  }
+
   // Reserve the correction and record the attempt durably before any effect so a
   // crash or thrown patch/review cannot replay the repair for free. A metered patch
   // also reserves the remaining invocations as its turn cap; unused calls are
@@ -173,9 +179,10 @@ export async function applyQualifyRepair(
   const reserved: QualifiedRepairArtifact = {
     artifactId,
     candidateRoot: path.join(repairsDir, artifactId, "candidate"),
-    baseDigest: await digestDirectoryTree(await realpath(state.intake.bundle.bundlePath)),
+    baseDigest: subject.baseDigest,
     baseActiveVersion: state.activeVersion,
     target: qualify.target,
+    ...(qualify.executorId !== undefined && qualify.target === "executor" ? { executorId: qualify.executorId } : {}),
     reason: qualify.reason,
     createdAt: new Date().toISOString(),
     status: "qualifying",
@@ -219,18 +226,13 @@ export async function applyQualifyRepair(
 
   let granted = false;
   try {
-    const snap = await snapshotRepairCandidate({
-      bundlePath: state.intake.bundle.bundlePath,
-      repairsDir,
-      baseActiveVersion: state.activeVersion,
-      target: qualify.target,
-      reason: qualify.reason,
-      artifactId,
-    });
+    const snap = await subject.snapshot({ repairsDir, artifactId });
     if (snap.baseDigest !== reserved.baseDigest) {
-      return await reject("active bundle changed while snapshotting the candidate");
+      return await reject(`${subject.label} changed while snapshotting the candidate`);
     }
-    await writeStagesPin(snap.candidateRoot, state.definition);
+    if (snap.candidateEntryModule !== undefined) {
+      reserved.candidateEntryModule = snap.candidateEntryModule;
+    }
 
     // Same logical supervisor session for every repair round.
     await deps.supervisor?.grantCandidateCoding?.(snap.candidateRoot);
@@ -251,10 +253,7 @@ export async function applyQualifyRepair(
       }
     }
 
-    await assertCandidateStepsUnchanged({
-      baseDefinitionStages: stagePins(state.definition),
-      candidateRoot: snap.candidateRoot,
-    });
+    await subject.checkCandidate(snap);
 
     const preflight = await deps.repair.preflight({
       candidateRoot: snap.candidateRoot,
@@ -302,6 +301,46 @@ export async function applyQualifyRepair(
   }
 }
 
+/** What a qualification round copies, digests, and checks, per repair target. */
+export interface RepairSubject {
+  /** Names the repaired code in rejection reasons. */
+  label: string;
+  baseDigest: string;
+  snapshot(args: { repairsDir: string; artifactId: string }): Promise<{
+    candidateRoot: string;
+    baseDigest: string;
+    candidateEntryModule?: string;
+  }>;
+  /** Throws when the patched candidate breaks what the run pinned. */
+  checkCandidate(snap: { candidateRoot: string; candidateEntryModule?: string }): Promise<void>;
+}
+
+/** Plugin and validator repairs copy the active graph bundle and must keep its steps. */
+async function bundleRepairSubject(state: DurableRunState, qualify: QualifyRepairSpec): Promise<RepairSubject> {
+  return {
+    label: "active bundle",
+    baseDigest: await digestDirectoryTree(await realpath(state.intake.bundle.bundlePath)),
+    async snapshot({ repairsDir, artifactId }) {
+      const snap = await snapshotRepairCandidate({
+        bundlePath: state.intake.bundle.bundlePath,
+        repairsDir,
+        baseActiveVersion: state.activeVersion,
+        target: qualify.target,
+        reason: qualify.reason,
+        artifactId,
+      });
+      await writeStagesPin(snap.candidateRoot, state.definition);
+      return snap;
+    },
+    async checkCandidate({ candidateRoot }) {
+      await assertCandidateStepsUnchanged({
+        baseDefinitionStages: stagePins(state.definition),
+        candidateRoot,
+      });
+    },
+  };
+}
+
 export async function applyActivateRepair(
   state: DurableRunState,
   activate: ActivateRepairSpec,
@@ -340,6 +379,10 @@ export async function applyActivateRepair(
       },
       validators: deps.validators,
     };
+  }
+
+  if (artifact.target === "executor") {
+    return { state: await activateExecutorRepair(state, candidates, idx, artifact), validators: deps.validators };
   }
 
   if (artifact.baseActiveVersion !== state.activeVersion) {
@@ -649,13 +692,16 @@ async function readCandidateBundlePin(
 /** Default preflight: stages pin + optional package build when dependencies exist. */
 export async function defaultRepairPreflight(args: {
   candidateRoot: string;
-  target: "plugin" | "validator";
+  target: RepairTarget;
   baseDefinition: GraphDefinition;
 }): Promise<RepairPreflightResult> {
-  await assertCandidateStepsUnchanged({
-    baseDefinitionStages: stagePins(args.baseDefinition),
-    candidateRoot: args.candidateRoot,
-  });
+  // Executor candidates carry no stages pin; the controller checks their executor contract.
+  if (args.target !== "executor") {
+    await assertCandidateStepsUnchanged({
+      baseDefinitionStages: stagePins(args.baseDefinition),
+      candidateRoot: args.candidateRoot,
+    });
+  }
 
   const { access } = await import("node:fs/promises");
   const pkgPath = path.join(args.candidateRoot, "package.json");

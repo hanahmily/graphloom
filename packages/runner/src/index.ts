@@ -1,4 +1,12 @@
-export type { ChildOperationPort, JobContext, JobEvidenceItem, JobResult, Runner } from "./types.js";
+export type {
+  ChildOperationPort,
+  ExecutorDescriptor,
+  ExecutorSourceOverride,
+  JobContext,
+  JobEvidenceItem,
+  JobResult,
+  Runner,
+} from "./types.js";
 export {
   createScriptedRunner,
   type ScriptedJobHandler,
@@ -10,11 +18,14 @@ export {
   createRegistryRunner,
   createTrustedInProcessRunner,
   createChildExecutorRunner,
+  describeExecutorModule,
+  type DescribedExecutor,
   type TrustedInProcessRunnerOptions,
   type ChildExecutorRunnerOptions,
   type RegistryRunnerOptions,
 } from "./registry.js";
-export { assertSandboxSupported } from "./sandbox.js";
+export { digestExecutorSource } from "./digest.js";
+export { assertSandboxSupported, packageRootOf } from "./sandbox.js";
 export {
   createBuiltinExecutorRunner,
   type BuiltinExecutorPackage,

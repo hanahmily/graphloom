@@ -24,6 +24,8 @@ type JobOutput = {
   status: "ok" | "failed" | "conflict";
   summary: string;
   evidence?: { kind: "other"; payload: { github: Record<string, unknown> } }[];
+  /** Wait the host should honor before running this executor again. */
+  retryAfterMs?: number;
 };
 
 interface RepoInput {
@@ -891,6 +893,7 @@ function failure(operation: string, err: unknown): JobOutput {
       status: "failed",
       summary: err.message,
       evidence: [evidence(operation, { outcome: "rate-limited", rateLimit: err.rateLimit })],
+      ...(err.rateLimit.retryAfterMs !== undefined ? { retryAfterMs: err.rateLimit.retryAfterMs } : {}),
     };
   }
   return failed(errorText(err));

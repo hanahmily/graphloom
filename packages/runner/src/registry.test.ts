@@ -11,6 +11,8 @@ import {
   createRegistryRunner,
   createScriptedRunner,
   createTrustedInProcessRunner,
+  describeExecutorModule,
+  digestExecutorSource,
 } from "./index.js";
 
 const fixture = path.join(
@@ -537,6 +539,108 @@ describe("child operation protocol", () => {
   it("refuses an executor whose effect differs from the declared one", async () => {
     const result = await runner().runJob({ ...agentJob({ steps: [] }), effect: "read" }, ctx);
     expect(result.summary).toBe("executor acme.agent/tooling effect write does not match declared read");
+  });
+});
+
+describe("executor pins and run-local copies", () => {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const workerModule = path.join(here, "../dist/executor-worker.js");
+  const credentialFixture = path.join(here, "../test/fixtures/credential-executor.mjs");
+  const ctx = { runId: "r1", operationId: "op1", generation: 1, worktreePath: "/tmp", artifactDir: "/tmp/a" };
+  const echoJob = (digest?: string) => ({
+    stageId: "select",
+    kind: "command" as const,
+    purpose: "diagnostic" as const,
+    instruction: "unused",
+    readOnly: true,
+    executor: { id: "acme.cred/echo", version: "2", ...(digest !== undefined ? { digest } : {}) },
+    input: { msg: "hi" },
+  });
+  const child = () =>
+    createChildExecutorRunner({
+      entryModule: credentialFixture,
+      executorIds: ["acme.cred/echo"],
+      fallback: createTrustedInProcessRunner({
+        executors: [defineExecutor({ id: "acme.inproc/noop", effect: "read", execute: async () => ({}) })],
+        fallback: createScriptedRunner({ jobs: [] }),
+      }),
+      workerModule,
+    });
+
+  it("describes every served executor with a digest of the code it runs", async () => {
+    const described = await child().describeExecutors!();
+    expect(described).toEqual([
+      {
+        id: "acme.cred/echo",
+        digest: await digestExecutorSource(credentialFixture),
+        source: credentialFixture,
+        isolation: "unrestricted",
+        builtin: false,
+      },
+      expect.objectContaining({ id: "acme.inproc/noop", source: "in-process", isolation: "in-process" }),
+    ]);
+  });
+
+  it("runs only the pinned bytes and serves a run-local copy under its own digest", async () => {
+    const runner = child();
+    const installed = await digestExecutorSource(credentialFixture);
+    expect((await runner.runJob(echoJob(installed), ctx)).status).toBe("ok");
+
+    const stale = await runner.runJob(echoJob("0".repeat(64)), ctx);
+    expect(stale.status).toBe("failed");
+    expect(stale.summary).toBe(`executor acme.cred/echo digest ${installed.slice(0, 12)} does not match pinned 000000000000`);
+
+    const copy = await mkdtemp(path.join(os.tmpdir(), "gl-copy-"));
+    const entryModule = path.join(copy, "credential-executor.mjs");
+    await writeFile(entryModule, (await readFile(credentialFixture, "utf8")).replace("`echo ${input.msg}", "`copy ${input.msg}"));
+    const executorSource = { root: copy, entryModule };
+    const copyDigest = await digestExecutorSource(copy);
+
+    const unpinned = await runner.runJob(echoJob(), { ...ctx, executorSource });
+    expect(unpinned.summary).toBe("executor acme.cred/echo: a run-local copy runs only under a pinned digest");
+    const wrongCopy = await runner.runJob(echoJob(installed), { ...ctx, executorSource });
+    expect(wrongCopy.status).toBe("failed");
+    const served = await runner.runJob(echoJob(copyDigest), { ...ctx, executorSource });
+    expect(served.summary).toBe("copy hi with no token");
+
+    const escaped = await runner.runJob(echoJob(copyDigest), {
+      ...ctx,
+      executorSource: { root: copy, entryModule: credentialFixture },
+    });
+    expect(escaped.summary).toBe(
+      `executor acme.cred/echo: run-local entry module ${credentialFixture} is outside its root ${copy}`,
+    );
+  });
+
+  it("refuses digest mismatches and run-local copies for in-process executors", async () => {
+    const noop = defineExecutor({ id: "acme.inproc/noop", effect: "read", execute: async () => ({ status: "ok" as const, summary: "noop" }) });
+    const runner = createTrustedInProcessRunner({ executors: [noop], fallback: createScriptedRunner({ jobs: [] }) });
+    const [described] = await runner.describeExecutors!();
+    const job = (digest: string) => ({ ...echoJob(digest), executor: { id: "acme.inproc/noop", digest } });
+    expect((await runner.runJob(job(described!.digest), ctx)).summary).toBe("noop");
+    expect((await runner.runJob(job("f".repeat(64)), ctx)).summary).toMatch(/does not match pinned ffffffffffff$/);
+    const copied = await runner.runJob(job(described!.digest), { ...ctx, executorSource: { root: "/tmp", entryModule: "/tmp/x.mjs" } });
+    expect(copied.summary).toBe("executor acme.inproc/noop runs in-process and cannot be served from a run-local copy");
+  });
+
+  it("passes a failed executor's retryAfterMs through, and drops it from successes", async () => {
+    const runner = createTrustedInProcessRunner({
+      executors: [
+        defineExecutor({ id: "acme.rl/fail", effect: "read", execute: async () => ({ status: "failed" as const, summary: "limited", retryAfterMs: 1500.2 }) }),
+        defineExecutor({ id: "acme.rl/ok", effect: "read", execute: async () => ({ status: "ok" as const, summary: "fine", retryAfterMs: 99 }) }),
+      ],
+      fallback: createScriptedRunner({ jobs: [] }),
+    });
+    const run = (id: string) => runner.runJob({ ...echoJob(), executor: { id } }, ctx);
+    expect((await run("acme.rl/fail")).retryAfterMs).toBe(1501);
+    expect((await run("acme.rl/ok")).retryAfterMs).toBeUndefined();
+  });
+
+  it("describes a module's executors in a child process without running them", async () => {
+    expect(await describeExecutorModule({ entryModule: credentialFixture, workerModule })).toEqual([
+      { id: "acme.cred/echo", version: "2", effect: "read" },
+      { id: "acme.cred/post", version: "2", effect: "write" },
+    ]);
   });
 });
 

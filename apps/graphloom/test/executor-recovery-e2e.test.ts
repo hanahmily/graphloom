@@ -1,0 +1,671 @@
+import { execFile } from "node:child_process";
+import { lstat, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
+import { afterEach, describe, expect, it } from "vitest";
+import {
+  activateRepair,
+  createScriptedGraph,
+  dispatch,
+  qualifyRepair,
+  returnToNormal,
+  stop,
+  type GraphDecision,
+  type GraphDefinition,
+  type JobSpec,
+  type Validator,
+} from "@graphloom/sdk";
+import {
+  createBuiltinExecutorRunner,
+  createChildExecutorRunner,
+  createScriptedRunner,
+  digestExecutorSource,
+  type Runner,
+} from "@graphloom/runner";
+import { createController, loadRunState, type RepairDeps } from "@graphloom/controller";
+import { createScriptedSupervisor, type ScriptedRecoveryStep, type SupervisorInput } from "@graphloom/supervisor";
+import { githubBinding, githubExecutorPackage } from "@graphloom/executor-github";
+import { startFakeGitHub, type FakeGitHub } from "@graphloom/executor-github/testing";
+
+const execFileAsync = promisify(execFile);
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
+const helloBundle = path.join(repoRoot, "examples/plugins/hello");
+const TOKEN = "ghp_executor_recovery_secret";
+const GH_LIST = "graphloom.github/list-issue-comments";
+const MIRROR = "acme.mirror/list-comments";
+const WAIT_BUDGET_MS = 15 * 60_000;
+
+const definition: GraphDefinition = {
+  graphId: "hello",
+  version: "0.1.0",
+  stages: [
+    { id: "write", name: "Write", requirementIds: ["greeting-bytes"] },
+    { id: "review", name: "Review", requirementIds: ["independent-review"] },
+  ],
+  requirements: [
+    {
+      id: "greeting-bytes",
+      statement:
+        "GREETING.txt contains exactly the UTF-8 bytes Hello, GraphLoom!\\n and is the only changed path in the workspace (excluding Git metadata).",
+      evidenceSchema: "workspace-bytes-v1",
+    },
+    {
+      id: "independent-review",
+      statement:
+        "An independent read-only reviewer approves the current GREETING.txt revision against the pinned task.",
+      evidenceSchema: "review-verdict-v1",
+    },
+  ],
+  defaultValidators: [
+    { requirementId: "greeting-bytes", validatorId: "exact-greeting", version: "1" },
+    {
+      requirementId: "independent-review",
+      validatorId: "independent-reviewer",
+      version: "1",
+      independence: "separate-reviewer",
+    },
+  ],
+};
+
+const inconclusive: Validator = { evaluate: () => ({ status: "inconclusive", reason: "not exercised" }) };
+const validators = { "exact-greeting": inconclusive, "independent-reviewer": inconclusive };
+
+const issue = { owner: "acme", repo: "app", number: 1 };
+function readJob(executorId: string, stageId = "write"): JobSpec {
+  return {
+    stageId,
+    kind: "command",
+    purpose: "check",
+    instruction: "read the issue comments",
+    readOnly: true,
+    executor: { id: executorId, version: "1" },
+    input: issue,
+  };
+}
+
+/** Read through `executorId`, then stop with `reason` once the graph gets control back. */
+function graph(executorId: string, reason = "read done") {
+  return createScriptedGraph({
+    definition,
+    advances: [dispatch(readJob(executorId), "read"), stop({ reason, blocker: "none" }, "done")],
+  });
+}
+
+interface Mirror {
+  dir: string;
+  entry: string;
+}
+
+/**
+ * A custom executor package outside the repository. It imports the SDK
+ * through its own node_modules, like an installed package would.
+ */
+async function mirrorPackage(parent: string, opts: { broken: boolean; retryAfterMs?: number }): Promise<Mirror> {
+  const dir = path.join(parent, "acme-mirror");
+  await mkdir(path.join(dir, "node_modules/@graphloom"), { recursive: true });
+  await symlink(path.join(repoRoot, "packages/sdk"), path.join(dir, "node_modules/@graphloom/sdk"), "dir");
+  await writeFile(
+    path.join(dir, "package.json"),
+    JSON.stringify({ name: "acme-mirror", version: "1.0.0", type: "module", dependencies: { "@graphloom/sdk": "0.0.0" } }),
+  );
+  const failure = JSON.stringify({
+    status: "failed",
+    summary: "mirror returned a truncated page",
+    ...(opts.retryAfterMs !== undefined ? { retryAfterMs: opts.retryAfterMs } : {}),
+  });
+  const entry = path.join(dir, "index.mjs");
+  await writeFile(
+    entry,
+    `import { stop } from "@graphloom/sdk";
+const BROKEN = ${opts.broken};
+export const executors = [
+  {
+    id: "${MIRROR}",
+    version: "1",
+    effect: "read",
+    async execute(input) {
+      if (BROKEN) return ${failure};
+      return {
+        status: "ok",
+        summary: "mirror listed comments for #" + input.number,
+        evidence: [{ kind: "other", payload: { mirror: { number: input.number, sdk: typeof stop } } }],
+      };
+    },
+  },
+];
+`,
+  );
+  return { dir, entry };
+}
+
+/** GitHub built in (sandboxed), the mirror as a custom sandboxed child package. */
+function hostRunner(server: FakeGitHub, mirror?: Mirror, sandbox = true): Runner {
+  const scripted = createScriptedRunner({ jobs: [] });
+  const fallback = mirror
+    ? createChildExecutorRunner({
+        entryModule: mirror.entry,
+        sourceRoot: mirror.dir,
+        executorIds: [MIRROR],
+        sandbox,
+        fallback: scripted,
+      })
+    : scripted;
+  return createBuiltinExecutorRunner({
+    packages: [{ manifest: githubExecutorPackage, ...githubBinding({ token: TOKEN, baseUrl: server.baseUrl }) }],
+    fallback,
+  });
+}
+
+function recorder(steps: ScriptedRecoveryStep[]) {
+  const inputs: SupervisorInput[] = [];
+  const decisions = steps.map((step): ScriptedRecoveryStep => async (input, index) => {
+    inputs.push(structuredClone(input));
+    return typeof step === "function" ? step(input, index) : structuredClone(step);
+  });
+  return { inputs, decisions };
+}
+
+const giveBack: GraphDecision = returnToNormal({ summary: "executor recovered" }, "return");
+
+type Payload = Record<string, unknown>;
+const payloads = (evidence: readonly { payload?: unknown }[], key: string): Payload[] =>
+  evidence.map((e) => (e.payload as Payload | undefined)?.[key]).filter((p): p is Payload => p !== undefined);
+
+const cleanups: (() => Promise<void>)[] = [];
+afterEach(async () => {
+  while (cleanups.length > 0) await cleanups.pop()!().catch(() => undefined);
+});
+
+async function fake(): Promise<FakeGitHub> {
+  const server = await startFakeGitHub({ issues: [{ number: 1, title: "Add a greeting", state: "open", labels: [] }] });
+  cleanups.push(() => server.close());
+  return server;
+}
+
+const gets = (server: FakeGitHub) => server.requests.filter((r) => r.method === "GET");
+
+async function waitFor(check: () => Promise<boolean>): Promise<void> {
+  for (let i = 0; i < 400; i += 1) {
+    if (await check().catch(() => false)) return;
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  throw new Error("condition not reached");
+}
+
+describe("executor failure recovery (#41)", () => {
+  it("retries a rate-limited built-in executor after a wait charged to the run's wait budget", async () => {
+    const server = await fake();
+    server.rateLimitNext(1, 2);
+    const env = await makeEnv();
+    const sup = recorder([dispatch(readJob(GH_LIST), "retry after the rate limit"), giveBack]);
+    const started = Date.now();
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: graph(GH_LIST),
+      validators,
+      runner: hostRunner(server),
+      supervisor: createScriptedSupervisor({ decisions: sup.decisions }),
+      stateRoot: env.stateRoot,
+      runId: "gh-retry",
+    });
+
+    expect(report.stopReason, report.blocker).toBe("read done");
+    expect(sup.inputs[0]!.trigger.code).toBe("executor_failed");
+    expect(sup.inputs[0]!.trigger.message).toMatch(/^executor graphloom\.github\/list-issue-comments failed: GitHub rate limited/);
+    expect(gets(server)).toHaveLength(2);
+
+    const state = await loadRunState(report.stateDir);
+    const [failure] = payloads(state.evidence, "executorFailure");
+    expect(failure).toMatchObject({ stageId: "write", status: "failed", executor: { id: GH_LIST } });
+    const retryAfterMs = failure!.retryAfterMs as number;
+    expect(retryAfterMs).toBeGreaterThan(0);
+    const waited = WAIT_BUDGET_MS - state.budgets.waitMs!;
+    expect(waited).toBeGreaterThan(0);
+    expect(waited).toBeLessThanOrEqual(retryAfterMs);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(waited);
+    expect(state.executorRetryAt?.[GH_LIST]).toBeUndefined();
+    expect(payloads(state.evidence, "github")).not.toHaveLength(0);
+  });
+
+  it("stops instead of waiting when the requested wait exceeds the remaining budget", async () => {
+    const server = await fake();
+    server.rateLimitNext(1, 3600);
+    const env = await makeEnv();
+    const started = Date.now();
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: graph(GH_LIST),
+      validators,
+      runner: hostRunner(server),
+      supervisor: createScriptedSupervisor({ decisions: [dispatch(readJob(GH_LIST), "retry")] }),
+      stateRoot: env.stateRoot,
+      runId: "gh-wait",
+    });
+
+    expect(report.stopReason).toBe("wait budget exhausted");
+    expect(report.blocker).toMatch(/^executor graphloom\.github\/list-issue-comments asks to wait 3[56]\d\ds; 900s of the run's wait budget remain$/);
+    expect(Date.now() - started).toBeLessThan(20_000);
+    expect(gets(server)).toHaveLength(1);
+    expect((await loadRunState(report.stateDir)).budgets.waitMs).toBe(WAIT_BUDGET_MS);
+  });
+
+  it("drops a retry stopped during its wait as never started, and charges only the wait actually spent", async () => {
+    const server = await fake();
+    server.rateLimitNext(1, 3);
+    const env = await makeEnv();
+    const controller = createController();
+    const stateDir = path.join(env.stateRoot, "wait-stop");
+    const retry = dispatch(readJob(GH_LIST), "retry after the rate limit");
+    const running = controller.run({
+      taskPath: env.taskPath,
+      plugin: graph(GH_LIST),
+      validators,
+      runner: hostRunner(server),
+      supervisor: createScriptedSupervisor({ decisions: [retry] }),
+      stateRoot: env.stateRoot,
+      runId: "wait-stop",
+    });
+    await waitFor(async () => (await loadRunState(stateDir)).pendingDispatch?.status === "waiting");
+    await controller.stop(stateDir);
+    expect((await running).status).toBe("stopped");
+    const stopped = await loadRunState(stateDir);
+    expect(stopped.pendingDispatch?.status).toBe("waiting");
+    expect(gets(server)).toHaveLength(1);
+
+    const resumed = await controller.resume({
+      runRef: stateDir,
+      plugin: graph(GH_LIST),
+      validators,
+      runner: hostRunner(server),
+      supervisor: createScriptedSupervisor({ decisions: [retry, giveBack] }),
+    });
+    expect(resumed.stopReason, resumed.blocker).toBe("read done");
+    const state = await loadRunState(stateDir);
+    const [failure] = payloads(state.evidence, "executorFailure");
+    expect(WAIT_BUDGET_MS - state.budgets.waitMs!).toBeLessThanOrEqual(failure!.retryAfterMs as number);
+    expect(payloads(state.evidence, "github")).not.toHaveLength(0);
+  });
+
+  it("clamps an executor's oversized retry request instead of failing the run", async () => {
+    const server = await fake();
+    const env = await makeEnv();
+    const mirror = await mirrorPackage(env.taskDir, { broken: true, retryAfterMs: 1e300 });
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: graph(MIRROR),
+      validators,
+      runner: hostRunner(server, mirror),
+      supervisor: createScriptedSupervisor({ decisions: [dispatch(readJob(MIRROR), "retry")] }),
+      stateRoot: env.stateRoot,
+      runId: "huge-wait",
+    });
+    expect(report.stopReason, report.blocker).toBe("wait budget exhausted");
+    const [failure] = payloads((await loadRunState(report.stateDir)).evidence, "executorFailure");
+    expect(failure!.retryAfterMs).toBe(30 * 24 * 60 * 60_000);
+  });
+
+  it("allows only built-in kind defaults in recovery when the runner pinned no executors", async () => {
+    const env = await makeEnv();
+    const runner = createScriptedRunner({ jobs: [async () => ({ status: "failed" as const, summary: "boom" })] });
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: graph("acme.custom/list-comments"),
+      validators,
+      runner,
+      supervisor: createScriptedSupervisor({ decisions: [dispatch(readJob("acme.custom/list-comments"), "retry")] }),
+      stateRoot: env.stateRoot,
+      runId: "no-catalog",
+    });
+    expect(report.stopReason).toBe("recovery dispatch rejected");
+    expect(report.blocker).toBe(
+      "executor acme.custom/list-comments cannot be used in recovery: the runner did not describe its executors, so none were pinned",
+    );
+  });
+
+  it("reports built-in and custom executor failures through the same recovery record", async () => {
+    const server = await fake();
+    server.rateLimitNext(1, 60);
+    const env = await makeEnv();
+    const mirror = await mirrorPackage(env.taskDir, { broken: true, retryAfterMs: 5 });
+    const controller = createController();
+    const observed: { trigger: SupervisorInput["trigger"]; failure: Payload; pinned: string }[] = [];
+    for (const executorId of [GH_LIST, MIRROR]) {
+      const sup = recorder([stop({ reason: "inspected", blocker: "none" }, "inspect")]);
+      const report = await controller.run({
+        taskPath: env.taskPath,
+        plugin: graph(executorId),
+        validators,
+        runner: hostRunner(server, mirror),
+        supervisor: createScriptedSupervisor({ decisions: sup.decisions }),
+        stateRoot: env.stateRoot,
+        runId: `parity-${executorId.split("/")[0]}`,
+      });
+      expect(report.stopReason, report.blocker).toBe("inspected");
+      const state = await loadRunState(report.stateDir);
+      observed.push({
+        trigger: sup.inputs[0]!.trigger,
+        failure: payloads(state.evidence, "executorFailure")[0]!,
+        pinned: state.executorCatalog!.find((e) => e.id === executorId)!.digest,
+      });
+    }
+
+    const [builtin, custom] = observed;
+    expect(builtin!.trigger.code).toBe("executor_failed");
+    expect(custom!.trigger.code).toBe("executor_failed");
+    expect(custom!.trigger.message).toBe(`executor ${MIRROR} failed: mirror returned a truncated page`);
+    expect(Object.keys(custom!.failure).sort()).toEqual(Object.keys(builtin!.failure).sort());
+    expect(custom!.failure).toMatchObject({ retryAfterMs: 5, executor: { id: MIRROR, digest: custom!.pinned } });
+    expect(builtin!.failure).toMatchObject({ executor: { id: GH_LIST, digest: builtin!.pinned } });
+  });
+
+  it("lets the supervisor switch to another pinned executor without adding graph steps", async () => {
+    const server = await fake();
+    server.rateLimitNext(1, 3600);
+    const env = await makeEnv();
+    const mirror = await mirrorPackage(env.taskDir, { broken: false });
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: graph(GH_LIST),
+      validators,
+      runner: hostRunner(server, mirror),
+      supervisor: createScriptedSupervisor({ decisions: [dispatch(readJob(MIRROR), "use the mirror"), giveBack] }),
+      stateRoot: env.stateRoot,
+      runId: "alternate",
+    });
+
+    expect(report.stopReason, report.blocker).toBe("read done");
+    const state = await loadRunState(report.stateDir);
+    expect(payloads(state.evidence, "mirror")).toEqual([{ number: 1, sdk: "function" }]);
+    // The rate limit only gates GitHub; the mirror ran without spending the wait budget.
+    expect(state.budgets.waitMs).toBe(WAIT_BUDGET_MS);
+    expect(state.executorRetryAt?.[GH_LIST]).toBeDefined();
+  });
+
+  it("refuses recovery dispatches for another stage or an executor the run did not pin", async () => {
+    const server = await fake();
+    const env = await makeEnv();
+    const mirror = await mirrorPackage(env.taskDir, { broken: true });
+    const controller = createController();
+    const cases: [JobSpec, string, RegExp][] = [
+      [
+        readJob("acme.unpinned/list-comments"),
+        "executor pin rejected",
+        /^executor acme\.unpinned\/list-comments is not pinned for this run$/,
+      ],
+      [
+        readJob(MIRROR, "review"),
+        "recovery dispatch rejected",
+        /^recovery may only dispatch work for the current stage write, not review$/,
+      ],
+    ];
+    for (const [i, [job, stopReason, blocker]] of cases.entries()) {
+      const report = await controller.run({
+        taskPath: env.taskPath,
+        plugin: graph(MIRROR),
+        validators,
+        runner: hostRunner(server, mirror),
+        supervisor: createScriptedSupervisor({ decisions: [dispatch(job, "try something else")] }),
+        stateRoot: env.stateRoot,
+        runId: `refused-${i}`,
+      });
+      expect(report.stopReason).toBe(stopReason);
+      expect(report.blocker).toMatch(blocker);
+    }
+  });
+
+  it("stops on an executor failure when the run has no supervisor", async () => {
+    const server = await fake();
+    const env = await makeEnv();
+    const mirror = await mirrorPackage(env.taskDir, { broken: true });
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: graph(MIRROR),
+      validators,
+      runner: hostRunner(server, mirror),
+      stateRoot: env.stateRoot,
+      runId: "no-supervisor",
+    });
+    expect(report.stopReason).toBe("job failed: mirror returned a truncated page");
+    const state = await loadRunState(report.stateDir);
+    expect(payloads(state.evidence, "executorFailure")).toHaveLength(1);
+  });
+});
+
+describe("pinned executor digests (#41)", () => {
+  it("resumes with exactly the pinned executors and blocks when one changed or disappeared", async () => {
+    const server = await fake();
+    const env = await makeEnv();
+    const mirror = await mirrorPackage(env.taskDir, { broken: false });
+    const controller = createController();
+    const first = await controller.run({
+      taskPath: env.taskPath,
+      plugin: graph(MIRROR, "pause"),
+      validators,
+      runner: hostRunner(server, mirror),
+      stateRoot: env.stateRoot,
+      runId: "pinned",
+    });
+    expect(first.stopReason, first.blocker).toBe("pause");
+    const catalog = (await loadRunState(first.stateDir)).executorCatalog!;
+    expect(catalog.find((e) => e.id === MIRROR)).toMatchObject({
+      digest: await digestExecutorSource(mirror.dir),
+      isolation: "sandbox",
+      builtin: false,
+    });
+    expect(catalog.find((e) => e.id === GH_LIST)).toMatchObject({ isolation: "sandbox", builtin: true });
+
+    const resumed = await controller.resume({
+      runRef: first.stateDir,
+      plugin: graph(MIRROR, "resumed"),
+      validators,
+      runner: hostRunner(server, mirror),
+    });
+    expect(resumed.stopReason, resumed.blocker).toBe("resumed");
+
+    const original = await readFile(mirror.entry, "utf8");
+    await writeFile(mirror.entry, `${original}// upgraded\n`);
+    const changed = await controller.resume({
+      runRef: first.stateDir,
+      plugin: graph(MIRROR),
+      validators,
+      runner: hostRunner(server, mirror),
+    });
+    expect(changed.stopReason).toBe("executor pin mismatch");
+    expect(changed.blocker).toMatch(/^pinned executor acme\.mirror\/list-comments changed: digest /);
+
+    await writeFile(mirror.entry, original);
+    const unsandboxed = await controller.resume({
+      runRef: first.stateDir,
+      plugin: graph(MIRROR),
+      validators,
+      runner: hostRunner(server, mirror, false),
+    });
+    expect(unsandboxed.stopReason).toBe("executor pin mismatch");
+    expect(unsandboxed.blocker).toBe(
+      "pinned executor acme.mirror/list-comments changed: isolation unrestricted != pinned sandbox",
+    );
+
+    const missing = await controller.resume({
+      runRef: first.stateDir,
+      plugin: graph(MIRROR),
+      validators,
+      runner: hostRunner(server),
+    });
+    expect(missing.stopReason).toBe("executor pin mismatch");
+    expect(missing.blocker).toBe("pinned executor acme.mirror/list-comments is no longer installed");
+  });
+});
+
+describe("executor repair (#41)", () => {
+  const reviewer = { sessionId: "independent-reviewer", review: async () => ({ approved: true, reason: "fix is minimal" }) };
+  const preflight = async () => ({ ok: true, summary: "scripted preflight ok" });
+  function repairDeps(patch: (candidateRoot: string) => Promise<void>): RepairDeps {
+    return {
+      patchAuthor: {
+        sessionId: "scripted-supervisor",
+        async patch({ candidateRoot }) {
+          await patch(candidateRoot);
+          return { summary: "patched the mirror executor" };
+        },
+      },
+      reviewer,
+      preflight,
+    };
+  }
+  const editEntry = (from: string, to: string) => async (candidateRoot: string) => {
+    const file = path.join(candidateRoot, "index.mjs");
+    await writeFile(file, (await readFile(file, "utf8")).replace(from, to));
+  };
+  const qualify = qualifyRepair({ target: "executor", executorId: MIRROR, reason: "mirror truncates pages" }, "qualify");
+
+  it("activates a qualified run-local copy, leaves the install untouched, and resumes from the copy", async () => {
+    const server = await fake();
+    const env = await makeEnv({ executorRepair: true });
+    const mirror = await mirrorPackage(env.taskDir, { broken: true });
+    const installed = await readFile(mirror.entry, "utf8");
+    const installedDigest = await digestExecutorSource(mirror.dir);
+    const controller = createController();
+    const report = await controller.run({
+      taskPath: env.taskPath,
+      plugin: graph(MIRROR),
+      validators,
+      runner: hostRunner(server, mirror),
+      supervisor: createScriptedSupervisor({
+        decisions: [
+          qualify,
+          (input) => {
+            const candidate = input.view.repairCandidates?.find((c) => c.status === "qualified");
+            expect(candidate).toMatchObject({ target: "executor", executorId: MIRROR });
+            return activateRepair({ qualifiedArtifactId: candidate!.artifactId, reason: "serve the fix" }, "activate");
+          },
+          dispatch(readJob(MIRROR), "retry on the repaired executor"),
+          giveBack,
+        ],
+      }),
+      repair: repairDeps(editEntry("const BROKEN = true", "const BROKEN = false")),
+      stateRoot: env.stateRoot,
+      runId: "exec-repair",
+    });
+
+    expect(report.stopReason, report.blocker).toBe("read done");
+    expect(await readFile(mirror.entry, "utf8")).toBe(installed);
+    expect(await digestExecutorSource(mirror.dir)).toBe(installedDigest);
+
+    const state = await loadRunState(report.stateDir);
+    expect(payloads(state.evidence, "mirror")).toEqual([{ number: 1, sdk: "function" }]);
+    const artifact = state.repairCandidates!.find((c) => c.status === "activated")!;
+    expect(artifact).toMatchObject({ target: "executor", executorId: MIRROR, baseDigest: installedDigest });
+    const entry = state.executorCatalog!.find((e) => e.id === MIRROR)!;
+    expect(entry.repair).toMatchObject({ artifactId: artifact.artifactId, baseDigest: installedDigest });
+    expect(entry.repair!.root.startsWith(report.stateDir)).toBe(true);
+    expect(entry.digest).toBe(await digestExecutorSource(entry.repair!.root));
+    expect(entry.digest).not.toBe(installedDigest);
+    const linked = path.join(entry.repair!.root, "node_modules/@graphloom/sdk");
+    expect((await lstat(linked)).isSymbolicLink()).toBe(true);
+    expect(await realpath(linked)).toBe(await realpath(path.join(repoRoot, "packages/sdk")));
+
+    // The install is still broken; a resumed run keeps serving the reviewed copy.
+    const resumed = await controller.resume({
+      runRef: report.stateDir,
+      plugin: graph(MIRROR, "resumed"),
+      validators,
+      runner: hostRunner(server, mirror),
+    });
+    expect(resumed.stopReason, resumed.blocker).toBe("resumed");
+    expect(payloads((await loadRunState(report.stateDir)).evidence, "mirror")).toHaveLength(2);
+
+    // The reviewed copy still runs only under the isolation the run pinned.
+    const unsandboxed = await controller.resume({
+      runRef: report.stateDir,
+      plugin: graph(MIRROR),
+      validators,
+      runner: hostRunner(server, mirror, false),
+    });
+    expect(unsandboxed.stopReason).toBe("executor pin mismatch");
+    expect(unsandboxed.blocker).toMatch(/isolation unrestricted != pinned sandbox$/);
+
+    await writeFile(path.join(entry.repair!.root, "index.mjs"), "export const executors = [];\n");
+    const tampered = await controller.resume({
+      runRef: report.stateDir,
+      plugin: graph(MIRROR),
+      validators,
+      runner: hostRunner(server, mirror),
+    });
+    expect(tampered.stopReason).toBe("executor pin mismatch");
+  });
+
+  it("requires the executorRepair grant", async () => {
+    const server = await fake();
+    const env = await makeEnv();
+    const mirror = await mirrorPackage(env.taskDir, { broken: true });
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: graph(MIRROR),
+      validators,
+      runner: hostRunner(server, mirror),
+      supervisor: createScriptedSupervisor({ decisions: [qualify] }),
+      repair: repairDeps(editEntry("const BROKEN = true", "const BROKEN = false")),
+      stateRoot: env.stateRoot,
+      runId: "no-grant",
+    });
+    expect(report.stopReason).toBe("qualify_repair missing operator grant");
+    expect(report.blocker).toBe("executorRepair grant is false");
+  });
+
+  it("rejects a candidate that changes the executors its package defines", async () => {
+    const server = await fake();
+    const env = await makeEnv({ executorRepair: true });
+    const mirror = await mirrorPackage(env.taskDir, { broken: true });
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: graph(MIRROR),
+      validators,
+      runner: hostRunner(server, mirror),
+      supervisor: createScriptedSupervisor({
+        decisions: [qualify, stop({ reason: "repair rejected", blocker: "none" }, "give up")],
+      }),
+      repair: repairDeps(editEntry('effect: "read"', 'effect: "write"')),
+      stateRoot: env.stateRoot,
+      runId: "contract",
+    });
+    expect(report.stopReason, report.blocker).toBe("repair rejected");
+    const [candidate] = (await loadRunState(report.stateDir)).repairCandidates!;
+    expect(candidate).toMatchObject({ status: "rejected", target: "executor", executorId: MIRROR });
+    expect(candidate!.rejectionReason).toBe(
+      `candidate changes the executors its package defines: pinned ${MIRROR}@1:read, candidate ${MIRROR}@1:write`,
+    );
+  });
+});
+
+async function makeEnv(opts: { executorRepair?: boolean } = {}): Promise<{ taskPath: string; stateRoot: string; taskDir: string }> {
+  await execFileAsync("npm", ["run", "build", "-w", "@graphloom/plugin-hello"], { cwd: repoRoot });
+  const taskDir = await mkdtemp(path.join(os.tmpdir(), "gl-exec-recovery-"));
+  cleanups.push(async () => {
+    await execFileAsync("git", ["worktree", "prune"], { cwd: taskDir }).catch(() => undefined);
+    await rm(taskDir, { recursive: true, force: true });
+  });
+  const repoPath = path.join(taskDir, "test-repo");
+  await mkdir(repoPath, { recursive: true });
+  await execFileAsync("git", ["init"], { cwd: repoPath });
+  await execFileAsync("git", ["config", "user.email", "test@example.com"], { cwd: repoPath });
+  await execFileAsync("git", ["config", "user.name", "Test"], { cwd: repoPath });
+  await writeFile(path.join(repoPath, "README.md"), "repo\n", "utf8");
+  await execFileAsync("git", ["add", "README.md"], { cwd: repoPath });
+  await execFileAsync("git", ["commit", "-m", "init"], { cwd: repoPath });
+  await mkdir(path.join(taskDir, "plugins"), { recursive: true });
+  await symlink(helloBundle, path.join(taskDir, "plugins/hello"));
+  const taskPath = path.join(taskDir, "task.yaml");
+  await writeFile(
+    taskPath,
+    `graph: hello
+repo: ./test-repo
+request: |
+  Create GREETING.txt containing exactly "Hello, GraphLoom!" followed by
+  one newline. Do not modify other files.
+${opts.executorRepair ? "grants:\n  executorRepair: true\n" : ""}`,
+    "utf8",
+  );
+  return { taskPath, stateRoot: path.join(taskDir, "state"), taskDir };
+}
