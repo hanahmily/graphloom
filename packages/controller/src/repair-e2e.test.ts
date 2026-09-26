@@ -225,6 +225,7 @@ describe("qualified repair + same-run activation (#29)", () => {
           );
           lastArtifactId = path.basename(path.dirname(candidateRoot));
           void lastArtifactId;
+          return { summary: "marked the candidate repaired" };
         },
       },
       reviewer: {
@@ -288,7 +289,7 @@ describe("qualified repair + same-run activation (#29)", () => {
           "review",
         ),
         validate({ stageId: "review", requirementIds: ["independent-review"] }, "val review"),
-        stop({ reason: "complete" }, "done"),
+        stop({ reason: "complete", blocker: "none" }, "done"),
       ],
     });
 
@@ -365,7 +366,7 @@ describe("qualified repair + same-run activation (#29)", () => {
         patchAuthor: {
           sessionId: SAME,
           async patch() {
-            /* no-op */
+            return { summary: "no-op" };
           },
         },
         reviewer: {
@@ -424,6 +425,7 @@ describe("qualified repair + same-run activation (#29)", () => {
           if (!artifactA) artifactA = id;
           else artifactB = id;
           await writeFile(path.join(candidateRoot, "p.txt"), id, "utf8");
+          return { summary: `patched ${id}` };
         },
       },
       reviewer: {
@@ -939,7 +941,7 @@ describe("qualified repair + same-run activation (#29)", () => {
           "review",
         ),
         validate({ stageId: "review", requirementIds: ["independent-review"] }, "val review"),
-        stop({ reason: "complete" }, "done"),
+        stop({ reason: "complete", blocker: "none" }, "done"),
       ],
     });
 

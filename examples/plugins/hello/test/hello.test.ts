@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { RunView } from "@graphloom/sdk";
+import type { GraphDecision, RunView } from "@graphloom/sdk";
 import {
   GREETING_BYTES,
   GREETING_PATH,
@@ -30,6 +30,11 @@ function baseView(overrides: Partial<RunView> = {}): RunView {
   };
 }
 
+/** The controller carries a decision's private state into the next view only when there is one. */
+function carried(d: GraphDecision): Partial<RunView> {
+  return d.privateState !== undefined ? { privateState: d.privateState } : {};
+}
+
 describe("createGraph.describe", () => {
   it("declares Write and Review with readable requirements", () => {
     const def = createGraph().describe();
@@ -52,12 +57,12 @@ describe("advanceHello happy path", () => {
     expect(d.action.job.writeScope).toEqual([GREETING_PATH]);
     expect(d.action.job.readOnly).toBeUndefined();
 
-    view = baseView({ privateState: d.privateState });
+    view = baseView(carried(d));
     d = g.advance(view);
     expect(d.action.type).toBe("observe");
 
     view = baseView({
-      privateState: d.privateState,
+      ...carried(d),
       evidence: [
         {
           ref: "file-1",
@@ -77,7 +82,7 @@ describe("advanceHello happy path", () => {
     expect(d.action.validate.stageId).toBe("write");
 
     view = baseView({
-      privateState: d.privateState,
+      ...carried(d),
       current: { stageId: "review", attempt: 1 },
       receipts: [
         {
@@ -103,7 +108,7 @@ describe("advanceHello happy path", () => {
     expect(d.action.job.readOnly).toBe(true);
 
     view = baseView({
-      privateState: d.privateState,
+      ...carried(d),
       current: { stageId: "review", attempt: 1 },
       receipts: view.receipts,
       evidence: [
