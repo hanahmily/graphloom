@@ -1,4 +1,4 @@
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -110,6 +110,9 @@ describe("graphloom.coding-agent/run", () => {
     const output = agent.output as { assignment: string; priorAssignments: string[] };
     expect(output.priorAssignments).toEqual(["Write notes.md"]);
     expect(output.assignment).toBe(`${CONTINUATION_NOTICE}\n\nFix notes.md`);
+    // Each turn replaces the transcript whole; no partial or temporary file is left behind.
+    expect(await readdir(dir)).toEqual([`${sessionRef}.json`]);
+    expect(JSON.parse(await readFile(path.join(dir, `${sessionRef}.json`), "utf8")).turns).toHaveLength(2);
   });
 
   it("fails instead of starting fresh when the session cannot be restored", async () => {

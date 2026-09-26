@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { ToolCallResult } from "@graphloom/sdk";
 import type { CodingHarness, CodingRunResult, CodingSessionOptions } from "../harness.js";
@@ -46,6 +46,15 @@ async function restore(options: CodingSessionOptions): Promise<Transcript | unde
   return JSON.parse(raw) as Transcript;
 }
 
+/** Replace the transcript whole, so a crash mid-write leaves the previous turn restorable. */
+async function saveTranscript(dir: string, transcript: Transcript): Promise<void> {
+  await mkdir(dir, { recursive: true });
+  const target = path.join(dir, `${transcript.sessionRef}.json`);
+  const tmp = `${target}.${process.pid}.${randomUUID()}.tmp`;
+  await writeFile(tmp, JSON.stringify(transcript, null, 2), "utf8");
+  await rename(tmp, target);
+}
+
 /** A harness that performs scripted steps instead of calling a model. */
 export function createScriptedHarness(): CodingHarness {
   return {
@@ -69,12 +78,7 @@ export function createScriptedHarness(): CodingHarness {
           const result = await perform(steps, out, options);
           if (options.sessionDir === undefined) return result;
           transcript.turns.push({ assignment: request.assignment, steps });
-          await mkdir(options.sessionDir, { recursive: true });
-          await writeFile(
-            path.join(options.sessionDir, `${transcript.sessionRef}.json`),
-            JSON.stringify(transcript, null, 2),
-            "utf8",
-          );
+          await saveTranscript(options.sessionDir, transcript);
           return { ...result, sessionRef: transcript.sessionRef };
         },
       };

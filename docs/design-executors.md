@@ -199,7 +199,9 @@ The continued session's transcript is context, not authority:
 
 A session that cannot be restored fails the job with `agent session <ref> could
 not be restored: <reason>`. A harness that is not resumable fails the job too.
-Neither starts a fresh session in its place. With a supervisor, the failure
+A sandboxed executor cannot write, so the runner gives it no session directory
+and fails a continuation sent to it. None of these starts a fresh session in its
+place. With a supervisor, the failure
 becomes the recovery trigger; without one, the run stops. Records and
 transcripts live in the state directory, so a continuation survives a
 controller stop and resume.

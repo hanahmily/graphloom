@@ -359,6 +359,15 @@ export function createChildExecutorRunner(
         operationId: ctx.operationId,
         generation: ctx.generation,
       });
+      if (options.sandbox === true && ctx.session !== undefined) {
+        // A sandboxed executor cannot write, so it cannot keep a session, and must not silently start over.
+        if (ctx.session.resume !== undefined) {
+          return failed(`executor ${pin.id} runs sandboxed and cannot continue agent session ${ctx.session.resume}`);
+        }
+        const { session: _unusable, ...withoutSession } = ctx;
+        void _unusable;
+        ctx = withoutSession;
+      }
       const override = ctx.executorSource;
       if (override !== undefined && pin.digest === undefined) {
         return failed(`executor ${pin.id}: a run-local copy runs only under a pinned digest`);

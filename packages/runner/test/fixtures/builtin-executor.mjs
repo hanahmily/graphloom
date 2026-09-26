@@ -9,12 +9,14 @@ export const executors = [
       return {
         status: "ok",
         summary: `token ${token ?? "none"}`,
+        sessionRef: "fixture-session",
         evidence: [
           {
             kind: "other",
             payload: {
               config: process.env.GL_FIXTURE_URL ?? null,
               leaked: process.env.GL_HOST_SECRET ?? null,
+              session: ctx.session ?? null,
             },
           },
         ],

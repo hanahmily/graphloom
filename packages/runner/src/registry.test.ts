@@ -371,7 +371,7 @@ describe("createBuiltinExecutorRunner", () => {
       const result = await runner.runJob(job("graphloom.fixture/echo"), ctx);
       expect(result.status).toBe("ok");
       expect(result.summary).toBe("token [REDACTED]");
-      expect(result.evidence?.[0]?.payload).toEqual({ config: "http://x", leaked: null });
+      expect(result.evidence?.[0]?.payload).toEqual({ config: "http://x", leaked: null, session: null });
     } finally {
       delete process.env.GL_HOST_SECRET;
     }
@@ -409,6 +409,34 @@ describe("createBuiltinExecutorRunner", () => {
     expect(() =>
       createBuiltinExecutorRunner({ packages: [{ manifest }, { manifest: { ...manifest, name: "dup" } }], fallback }),
     ).toThrow("executor graphloom.fixture/echo is served by both @graphloom/executor-fixture and dup");
+  });
+
+  it("keeps agent sessions from sandboxed packages, which cannot write them", async () => {
+    const run = (packages: Parameters<typeof createBuiltinExecutorRunner>[0]["packages"], session: { dir: string; resume?: string }) =>
+      createBuiltinExecutorRunner({ packages, fallback: createScriptedRunner({ jobs: [] }), workerModule }).runJob(
+        job("graphloom.fixture/echo"),
+        { ...ctx, session },
+      );
+    const fresh = await run([{ manifest }], { dir: "/state/agent-sessions/op1" });
+    expect(fresh.status).toBe("ok");
+    expect(fresh).not.toHaveProperty("sessionRef");
+    expect((fresh.evidence?.[0]?.payload as { session: unknown }).session).toBeNull();
+
+    const resumed = await run([{ manifest }], { dir: "/state/agent-sessions/op1", resume: "s1" });
+    expect(resumed).toMatchObject({
+      status: "failed",
+      summary: "executor graphloom.fixture/echo runs sandboxed and cannot continue agent session s1",
+    });
+
+    const unrestricted = await run(
+      [{ manifest: { ...manifest, isolation: "unrestricted" as const }, allowUnrestricted: true }],
+      { dir: "/state/agent-sessions/op1", resume: "s1" },
+    );
+    expect(unrestricted.sessionRef).toBe("fixture-session");
+    expect((unrestricted.evidence?.[0]?.payload as { session: unknown }).session).toEqual({
+      dir: "/state/agent-sessions/op1",
+      resume: "s1",
+    });
   });
 
   it("runs an unrestricted package only with operator consent, and then without the sandbox", async () => {

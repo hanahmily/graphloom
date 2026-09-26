@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   PROTOCOL_VERSION,
   assertGraphAction,
+  assertRunView,
   assertWireRequest,
   createScriptedGraph,
   dispatch,
@@ -89,6 +90,42 @@ describe("operations", () => {
     expect(() =>
       assertGraphAction({ type: "accept", stageId: "write" }),
     ).toThrow(WireValidationError);
+  });
+
+  it("lets only agent jobs continue a session", () => {
+    const job = { stageId: "write", purpose: "work", instruction: "retry", continueFrom: "op-1" } as const;
+    expect(dispatch({ ...job, kind: "agent" }, "continue").action).toMatchObject({ job: { continueFrom: "op-1" } });
+    expect(() => dispatch({ ...job, kind: "command" }, "continue")).toThrow(
+      "only agent jobs carry sessions; a command job cannot continue op-1",
+    );
+  });
+});
+
+describe("assertRunView agentSessions", () => {
+  const session = {
+    operationId: "op-1",
+    stageId: "write",
+    attempt: 1,
+    generation: 1,
+    dispatchKey: "work:acme.agent/code",
+    executorId: "acme.agent/code",
+    status: "failed" as const,
+  };
+
+  it("accepts well-formed sessions, or none", () => {
+    expect(assertRunView(emptyView({ agentSessions: [session, { ...session, operationId: "op-2", continuedFrom: "op-1" }] }))
+      .agentSessions).toHaveLength(2);
+    expect(assertRunView(emptyView()).agentSessions).toBeUndefined();
+  });
+
+  it("rejects malformed sessions", () => {
+    const bad = (agentSessions: unknown) => () => assertRunView({ ...emptyView(), agentSessions });
+    expect(bad({})).toThrow("agentSessions must be an array");
+    expect(bad(["op-1"])).toThrow("agentSessions[0] must be an object");
+    expect(bad([{ ...session, operationId: "" }])).toThrow("operationId must be a non-empty string");
+    expect(bad([{ ...session, attempt: "1" }])).toThrow("attempt must be a finite number");
+    expect(bad([{ ...session, status: "running" }])).toThrow("agentSessions[0].status must be one of ok, failed, conflict");
+    expect(bad([{ ...session, continuedFrom: 7 }])).toThrow("continuedFrom must be a non-empty string");
   });
 });
 

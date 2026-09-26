@@ -331,7 +331,15 @@ describe("continuing an agent session on reentry (#53)", () => {
       },
       {
         runId: "command",
-        advances: () => [first, retry, continueFirst([], { kind: "command" })],
+        // Built without the SDK helper, which refuses it: the controller must refuse it too.
+        advances: () => [
+          first,
+          retry,
+          (view) => ({
+            reason: "continue",
+            action: { type: "dispatch", job: agentJob([], { kind: "command", continueFrom: firstSession(view) }) },
+          }),
+        ],
         blocker: /^only agent jobs carry sessions; a command job cannot continue op-\S+$/,
         ran: 1,
       },
