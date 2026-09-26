@@ -263,15 +263,8 @@ export function wrapPiAgentSession(args: {
       if (closed) {
         throw new Error("supervisor session is closed");
       }
-      if (!session.isIdle) {
-        await session.abort().catch(() => undefined);
-        const settleDeadline = Date.now() + 5_000;
-        while (!session.isIdle && Date.now() < settleDeadline) {
-          await sleep(25);
-        }
-        if (!session.isIdle) {
-          throw new Error("cannot switch model: session still active after abort");
-        }
+      if (!(await settleIdle(session))) {
+        throw new Error("cannot switch model: session still active after abort");
       }
       // Validate/prepare target credentials before mutating the active model.
       await ensureProviderCredentials({
@@ -293,6 +286,10 @@ export function wrapPiAgentSession(args: {
     async prompt(text, promptOptions) {
       if (closed) {
         throw new Error("supervisor session is closed");
+      }
+      // An earlier abort may not have settled; never overlap provider requests.
+      if (!(await settleIdle(session))) {
+        throw new Error(STILL_ACTIVE);
       }
       const timeoutMs = promptOptions?.timeoutMs ?? promptTimeoutMs;
       const maxTurns = promptOptions?.maxTurns;
@@ -341,16 +338,17 @@ export function wrapPiAgentSession(args: {
           await sleep(25);
         }
         if (promptOptions?.signal?.aborted) {
-          await settleIdle(session);
-          throw new Error("supervisor prompt aborted");
+          throw new Error(
+            (await settleIdle(session)) ? "supervisor prompt aborted" : `supervisor prompt aborted; ${STILL_ACTIVE}`,
+          );
         }
         if (turnCapHit) {
           throw new Error(`supervisor prompt exceeded its ${maxTurns}-turn allowance`);
         }
         if (timedOut || !session.isIdle) {
-          await settleIdle(session);
+          const settled = await settleIdle(session);
           throw new Error(
-            `supervisor prompt timed out after ${timeoutMs}ms (session still active)`,
+            `supervisor prompt timed out after ${timeoutMs}ms` + (settled ? "" : `; ${STILL_ACTIVE}`),
           );
         }
         return collected.join("").trim();
@@ -438,14 +436,17 @@ function setSessionTools(session: AgentSession, tools: ToolDefinition[]): void {
   host.setActiveToolsByName(names);
 }
 
-/** Abort any active request and wait briefly until the session is idle. */
-async function settleIdle(session: AgentSession): Promise<void> {
-  if (session.isIdle) return;
+const STILL_ACTIVE = "supervisor session still active after abort; refusing to reuse it";
+
+/** Abort any active request and wait briefly for idle; false if it never settled. */
+async function settleIdle(session: AgentSession): Promise<boolean> {
+  if (session.isIdle) return true;
   await session.abort().catch(() => undefined);
   const settleDeadline = Date.now() + 5_000;
   while (!session.isIdle && Date.now() < settleDeadline) {
     await sleep(25);
   }
+  return session.isIdle;
 }
 
 function sleep(ms: number): Promise<void> {

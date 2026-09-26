@@ -1,25 +1,38 @@
-import { readFile, unlink, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { readFile, rename, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { ModelRef, Supervisor } from "@graphloom/supervisor";
+import { withDirectoryLock } from "./lock.js";
 import { noteOutcome } from "./settlement.js";
 import { saveRunState, type DurableRunState } from "./state.js";
 
 const SWITCH_REQUEST = "supervisor-switch.json";
+const SWITCH_LOCK = "supervisor-switch.lock";
 
 export interface ModelSwitchOrder extends ModelRef {
   reason: string;
 }
 
-/** Durable operator request, applied before the run's next supervisor prompt. */
-export async function writeSwitchRequest(stateDir: string, order: ModelSwitchOrder): Promise<void> {
-  await writeFile(
-    path.join(stateDir, SWITCH_REQUEST),
-    JSON.stringify({ ...order, requestedAt: new Date().toISOString() }),
-    "utf8",
-  );
+/** An operator request as read from disk; `id` names this instance of the file. */
+export interface PendingSwitchRequest extends ModelSwitchOrder {
+  id: string;
 }
 
-export async function readSwitchRequest(stateDir: string): Promise<ModelSwitchOrder | undefined> {
+/**
+ * Durable operator request, applied before the run's next supervisor prompt.
+ * Written atomically so the owner never reads a partial file; a newer request
+ * replaces an unapplied older one.
+ */
+export async function writeSwitchRequest(stateDir: string, order: ModelSwitchOrder): Promise<void> {
+  await withDirectoryLock(stateDir, SWITCH_LOCK, async () => {
+    const target = path.join(stateDir, SWITCH_REQUEST);
+    const tmp = `${target}.${process.pid}.${randomUUID()}.tmp`;
+    await writeFile(tmp, JSON.stringify({ ...order, id: randomUUID(), requestedAt: new Date().toISOString() }), "utf8");
+    await rename(tmp, target);
+  });
+}
+
+export async function readSwitchRequest(stateDir: string): Promise<PendingSwitchRequest | undefined> {
   let raw: string;
   try {
     raw = await readFile(path.join(stateDir, SWITCH_REQUEST), "utf8");
@@ -27,19 +40,31 @@ export async function readSwitchRequest(stateDir: string): Promise<ModelSwitchOr
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return undefined;
     throw err;
   }
-  const parsed = JSON.parse(raw) as Partial<ModelSwitchOrder>;
+  const parsed = JSON.parse(raw) as Partial<PendingSwitchRequest>;
   if (typeof parsed.provider !== "string" || typeof parsed.modelId !== "string") {
     throw new Error(`malformed ${SWITCH_REQUEST}: provider and modelId are required`);
   }
   return {
+    id: typeof parsed.id === "string" ? parsed.id : "",
     provider: parsed.provider,
     modelId: parsed.modelId,
     reason: typeof parsed.reason === "string" ? parsed.reason : "operator request",
   };
 }
 
-export async function clearSwitchRequest(stateDir: string): Promise<void> {
-  await unlink(path.join(stateDir, SWITCH_REQUEST)).catch(() => undefined);
+/**
+ * Remove the request the owner consumed. A request written after it was read
+ * has a different id and stays for the next prompt. Without an id (a malformed
+ * file), the file is removed unconditionally.
+ */
+export async function clearSwitchRequest(stateDir: string, id?: string): Promise<void> {
+  await withDirectoryLock(stateDir, SWITCH_LOCK, async () => {
+    if (id !== undefined) {
+      const current = await readSwitchRequest(stateDir).catch(() => undefined);
+      if (current?.id !== id) return;
+    }
+    await unlink(path.join(stateDir, SWITCH_REQUEST)).catch(() => undefined);
+  });
 }
 
 /**
@@ -56,23 +81,29 @@ export async function applyModelSwitch(
 ): Promise<DurableRunState> {
   const target = `${order.provider}/${order.modelId}`;
   const binding = state.supervisorBinding ?? readBinding(supervisor);
-  const current = binding !== undefined ? `${binding.provider}/${binding.modelId}` : "the current model";
-  if (!supervisor.switchModel) {
+  const refused = async (why: string, current: string) => {
     await afterIntent?.();
-    return noteOutcome(state, `${origin} model switch to ${target} refused: the supervisor cannot switch models; continuing on ${current}`);
+    return noteOutcome(state, `${origin} model switch to ${target} refused: ${why}; continuing on ${current}`);
+  };
+  if (binding === undefined) {
+    // Without a durable binding there is nowhere to journal the intent, so a
+    // crash after the model changed could not be reconciled.
+    return refused("the supervisor has no durable session binding", "the current model");
+  }
+  const current = `${binding.provider}/${binding.modelId}`;
+  if (!supervisor.switchModel) {
+    return refused("the supervisor cannot switch models", current);
   }
 
   const record = {
     at: new Date().toISOString(),
-    from: binding !== undefined ? { provider: binding.provider, modelId: binding.modelId } : { provider: "", modelId: "" },
+    from: { provider: binding.provider, modelId: binding.modelId },
     to: { provider: order.provider, modelId: order.modelId },
     reason: order.reason,
     status: "intent" as const,
   };
-  if (binding !== undefined) {
-    state = { ...state, supervisorBinding: { ...binding, switchJournal: [...binding.switchJournal, record] } };
-    await saveRunState(state);
-  }
+  state = { ...state, supervisorBinding: { ...binding, switchJournal: [...binding.switchJournal, record] } };
+  await saveRunState(state);
   await afterIntent?.();
 
   let failure: string | undefined;
@@ -86,7 +117,7 @@ export async function applyModelSwitch(
   const after = readBinding(supervisor);
   if (after !== undefined) {
     state = { ...state, supervisorBinding: after };
-  } else if (binding !== undefined) {
+  } else {
     state = {
       ...state,
       supervisorBinding: {

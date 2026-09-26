@@ -24,7 +24,7 @@ import {
   clearSwitchRequest,
   readBinding,
   readSwitchRequest,
-  type ModelSwitchOrder,
+  type PendingSwitchRequest,
 } from "./supervisor-switch.js";
 import { catalogEntry, isKindDefaultExecutor, resolveExecutorPin } from "./executor-catalog.js";
 import { recordExecutorFailure } from "./executor-failure.js";
@@ -759,19 +759,20 @@ function settleSupervisorUsage(
 
 /** Apply a pending operator model switch before the next supervisor prompt. */
 async function applyOperatorSwitch(state: DurableRunState, supervisor: Supervisor): Promise<DurableRunState> {
-  let order: ModelSwitchOrder | undefined;
+  let pending: PendingSwitchRequest | undefined;
   try {
-    order = await readSwitchRequest(state.stateDir);
+    pending = await readSwitchRequest(state.stateDir);
   } catch (err) {
     await clearSwitchRequest(state.stateDir);
     return noteOutcome(state, `operator model switch request ignored: ${err instanceof Error ? err.message : String(err)}`);
   }
-  if (order === undefined) return state;
+  if (pending === undefined) return state;
+  const { id, ...order } = pending;
   if (state.supervisorMark === undefined) {
     state = markProposal(state, { type: "switch_model", ...order, reason: `operator request: ${order.reason}` });
   }
   const stateDir = state.stateDir;
-  state = await applyModelSwitch(state, supervisor, order, "operator", () => clearSwitchRequest(stateDir));
+  state = await applyModelSwitch(state, supervisor, order, "operator", () => clearSwitchRequest(stateDir, id));
   await saveRunState(state);
   return state;
 }

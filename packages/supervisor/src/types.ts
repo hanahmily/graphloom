@@ -49,10 +49,13 @@ export interface ModelSwitchRequest extends ModelRef {
 export type SupervisorProposal = GraphDecision | ModelSwitchRequest;
 
 export function isModelSwitchRequest(value: unknown): value is ModelSwitchRequest {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
   return (
-    typeof value === "object" &&
-    value !== null &&
-    (value as { type?: unknown }).type === "switch_model"
+    v.type === "switch_model" &&
+    typeof v.provider === "string" &&
+    typeof v.modelId === "string" &&
+    typeof v.reason === "string"
   );
 }
 

@@ -169,7 +169,9 @@ request applied before the run's next supervisor prompt, including after resume.
 The supervisor can call its `switch_model` tool, limited to configured models; the
 call ends its turn and the controller applies the switch while the session is idle.
 The controller journals the intent in run state before `setModel` and the outcome
-after. A refused or failed switch (unconfigured target, missing credential) is
+after, so it refuses a switch for a supervisor without a durable session binding.
+Operator requests are written atomically with an id, and the owner removes only
+the request it applied. A refused or failed switch (unconfigured target, missing credential) is
 journaled as failed; the run continues on the current model and the next prompt
 reports the failure. On resume, an intent without an outcome is committed if the
 session file's last `model_change` entry names its target, and failed otherwise.

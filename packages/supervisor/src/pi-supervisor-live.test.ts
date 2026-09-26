@@ -356,6 +356,48 @@ describe("Pi supervisor on a live session (faux providers)", () => {
     expect(lost.switchJournal[0]!.error).toMatch(/interrupted before commit/);
   });
 
+  it("charges nothing for a decide aborted before its first provider request", async () => {
+    const world = await fauxWorld();
+    world.faux.deepseek.setResponses([toolTurn(world, "stop", stopCall)]);
+    const supervisor = await openSupervisor(world, DEEPSEEK);
+    try {
+      const abort = new AbortController();
+      abort.abort();
+      await expect(supervisor.decide(input("ep-1", { signal: abort.signal }))).rejects.toThrow(/aborted/);
+      expect(world.faux.deepseek.state.callCount).toBe(0);
+      expect(supervisor.drainProviderCalls()).toBe(0);
+    } finally {
+      await supervisor.close?.();
+    }
+  });
+
+  it("refuses to prompt a session that is still active after abort", async () => {
+    let prompted = false;
+    const stuck = {
+      isIdle: false,
+      sessionId: "stuck",
+      sessionFile: undefined,
+      abort: async () => undefined,
+      prompt: async () => {
+        prompted = true;
+      },
+      subscribe: () => () => undefined,
+      dispose: () => undefined,
+    };
+    const wrapped = wrapPiAgentSession({
+      session: stuck as never,
+      modelRuntime: {} as never,
+      runId: "run-stuck",
+      provider: DEEPSEEK.provider,
+      modelId: DEEPSEEK.modelId,
+      agentDir: os.tmpdir(),
+      credentialSource: "pi-stored",
+      promptTimeoutMs: 1_000,
+    });
+    await expect(wrapped.prompt("next episode")).rejects.toThrow(/still active after abort; refusing to reuse it/);
+    expect(prompted).toBe(false);
+  });
+
   it("aborts a streaming decide on signal and leaves the session usable", async () => {
     const world = await fauxWorld({ openaiTokensPerSecond: 20 });
     world.faux.openai.setResponses([

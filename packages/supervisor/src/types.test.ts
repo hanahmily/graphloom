@@ -1,13 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { returnToNormal, stop } from "@graphloom/sdk";
-import { createScriptedSupervisor } from "./types.js";
+import { assertGraphDecision, returnToNormal, stop } from "@graphloom/sdk";
+import { createScriptedSupervisor, isModelSwitchRequest } from "./types.js";
 
 describe("createScriptedSupervisor", () => {
   it("returns canned decisions in order", async () => {
     const supervisor = createScriptedSupervisor({
       decisions: [
         returnToNormal({ summary: "first" }, "return"),
-        stop({ reason: "done" }, "stop"),
+        stop({ reason: "done", blocker: "none" }, "stop"),
       ],
     });
     const input = {
@@ -28,10 +28,21 @@ describe("createScriptedSupervisor", () => {
         activeVersion: "hello@0.1.0",
       },
     };
-    const first = await supervisor.decide(input);
+    const first = assertGraphDecision(await supervisor.decide(input));
     expect(first.action.type).toBe("return");
-    const second = await supervisor.decide(input);
+    const second = assertGraphDecision(await supervisor.decide(input));
     expect(second.action.type).toBe("stop");
     await expect(supervisor.decide(input)).rejects.toThrow(/exhausted/);
+  });
+});
+
+describe("isModelSwitchRequest", () => {
+  it("requires provider, modelId, and reason as strings", () => {
+    expect(isModelSwitchRequest({ type: "switch_model", provider: "deepseek", modelId: "deepseek-chat", reason: "r" })).toBe(
+      true,
+    );
+    expect(isModelSwitchRequest({ type: "switch_model" })).toBe(false);
+    expect(isModelSwitchRequest({ type: "switch_model", provider: "deepseek", modelId: 7, reason: "r" })).toBe(false);
+    expect(isModelSwitchRequest({ type: "switch_model", provider: "deepseek", modelId: "m" })).toBe(false);
   });
 });

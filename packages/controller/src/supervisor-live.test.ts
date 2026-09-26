@@ -1,12 +1,18 @@
-import { access, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { createScriptedGraph, supervise, type GraphDefinition, type Validator } from "@graphloom/sdk";
+import { createScriptedGraph, stop, supervise, type GraphDefinition, type Validator } from "@graphloom/sdk";
 import { createScriptedRunner } from "@graphloom/runner";
-import { createPiSupervisor, type PiSupervisorSessionPort } from "@graphloom/supervisor";
+import {
+  createPiSupervisor,
+  createScriptedSupervisor,
+  type PiSupervisorSessionPort,
+  type SupervisorSettlement,
+} from "@graphloom/supervisor";
 import { createController, loadRunState, saveRunState } from "./index.js";
+import { clearSwitchRequest, readSwitchRequest, writeSwitchRequest } from "./supervisor-switch.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, "../../..");
@@ -376,6 +382,52 @@ describe("live supervisor recovery through the controller (#43)", () => {
       ...DEEPSEEK,
       switchJournal: [{ to: OPENAI, status: "failed", error: expect.stringMatching(/model not configured/) }],
     });
+  });
+
+  it("keeps an operator request written while an earlier one was being applied", async () => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "gl-switch-req-"));
+    temps.push(stateDir);
+    await writeSwitchRequest(stateDir, { ...MINIMAX, reason: "first" });
+    const consumed = await readSwitchRequest(stateDir);
+    await writeSwitchRequest(stateDir, { ...OPENAI, reason: "second" });
+    await clearSwitchRequest(stateDir, consumed!.id);
+
+    expect(await readSwitchRequest(stateDir)).toMatchObject({ ...OPENAI, reason: "second" });
+    expect((await readdir(stateDir)).filter((f) => f.endsWith(".tmp"))).toEqual([]);
+    await clearSwitchRequest(stateDir, (await readSwitchRequest(stateDir))!.id);
+    expect(await readSwitchRequest(stateDir)).toBeUndefined();
+  });
+
+  it("refuses a switch when the supervisor has no durable binding to journal it", async () => {
+    const env = await makeEnv();
+    let switched = false;
+    let settlement: SupervisorSettlement | undefined;
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: escalate(),
+      validators,
+      supervisor: createScriptedSupervisor({
+        decisions: [
+          { type: "switch_model", ...MINIMAX, reason: "try" },
+          (input) => {
+            settlement = input.lastSettlement;
+            return stop({ reason: "done", blocker: "none" }, "stop");
+          },
+        ],
+        switchModel: async () => {
+          switched = true;
+        },
+      }),
+      runner: createScriptedRunner({ jobs: [] }),
+      stateRoot: env.stateRoot,
+      runId: "switch-no-binding",
+    });
+
+    expect(report.status).toBe("stopped");
+    expect(switched).toBe(false);
+    expect(settlement?.facts).toContain(
+      "supervisor model switch to minimax-cn/MiniMax-M3 refused: the supervisor has no durable session binding; continuing on the current model",
+    );
   });
 
   it("settles a switch intent left by a crash before restoring the supervisor", async () => {

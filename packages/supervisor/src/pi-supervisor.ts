@@ -38,7 +38,7 @@ export type PiSupervisorSessionPort = PiSupervisorSession;
 
 export interface PiSupervisor extends Supervisor {
   readonly binding: SupervisorBinding;
-  /** Provider/model calls since the last drain (each decide prompt counts as ≥1). */
+  /** Provider/model calls since the last drain (turns that started). */
   drainProviderCalls(): number;
   switchModel(args: {
     provider: string;
@@ -79,9 +79,13 @@ export function createPiSupervisor(options: CreatePiSupervisorOptions): PiSuperv
   let codingRoot: string | undefined;
   const patchTimeoutMs = options.patchTimeoutMs ?? 600_000;
 
-  /** Settle the model calls of one prompt; a prompt always costs at least one. */
+  /**
+   * Settle the model calls of one prompt: the turns that actually started, so
+   * a prompt aborted before its first provider request costs nothing. A session
+   * that cannot count turns is charged one call per prompt.
+   */
   function settleTurns(): void {
-    providerCalls += Math.max(1, session.drainTurnCount?.() ?? 0);
+    providerCalls += session.drainTurnCount !== undefined ? session.drainTurnCount() : 1;
   }
 
   const binding: SupervisorBinding = {
