@@ -1,12 +1,11 @@
-import { existsSync } from "node:fs";
-import { cp, mkdir, readFile, realpath, symlink } from "node:fs/promises";
+import { cp, mkdir, realpath } from "node:fs/promises";
 import path from "node:path";
 import type { QualifyRepairSpec } from "@graphloom/sdk";
 import { describeExecutorModule, digestExecutorSource, type DescribedExecutor } from "@graphloom/runner";
 import { invalidateFromStage } from "./admit.js";
 import { catalogEntry } from "./executor-catalog.js";
 import { bumpGeneration } from "./generation.js";
-import type { QualifiedRepairArtifact } from "./repair.js";
+import { linkDependencies, type QualifiedRepairArtifact } from "./repair.js";
 import type { RepairSubject } from "./repair-lifecycle.js";
 import { saveRunState, type DurableRunState, type ExecutorCatalogEntry } from "./state.js";
 
@@ -85,38 +84,6 @@ function contract(executors: DescribedExecutor[]): string {
     .map((e) => `${e.id}@${e.version ?? "unversioned"}:${e.effect}`)
     .sort()
     .join(", ");
-}
-
-/**
- * The copy resolves the same dependencies the installed package does: each
- * declared dependency is linked from the candidate's own node_modules.
- */
-async function linkDependencies(baseReal: string, candidateRoot: string): Promise<void> {
-  const pkg = JSON.parse(await readFile(path.join(baseReal, "package.json"), "utf8")) as {
-    dependencies?: Record<string, string>;
-    optionalDependencies?: Record<string, string>;
-    peerDependencies?: Record<string, string>;
-  };
-  const names = new Set([
-    ...Object.keys(pkg.dependencies ?? {}),
-    ...Object.keys(pkg.optionalDependencies ?? {}),
-    ...Object.keys(pkg.peerDependencies ?? {}),
-  ]);
-  for (const name of names) {
-    const found = findDependency(baseReal, name);
-    if (found === undefined) continue;
-    const link = path.join(candidateRoot, "node_modules", name);
-    await mkdir(path.dirname(link), { recursive: true });
-    await symlink(await realpath(found), link, "dir");
-  }
-}
-
-function findDependency(fromRealRoot: string, name: string): string | undefined {
-  for (let dir = fromRealRoot; ; dir = path.dirname(dir)) {
-    const candidate = path.join(dir, "node_modules", name);
-    if (existsSync(path.join(candidate, "package.json"))) return candidate;
-    if (path.dirname(dir) === dir) return undefined;
-  }
 }
 
 /**

@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
 import {
   cp,
   lstat,
@@ -6,6 +7,7 @@ import {
   readFile,
   readdir,
   realpath,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import path from "node:path";
@@ -168,5 +170,44 @@ export async function assertCandidateStepsUnchanged(args: {
         `candidate alters pinned steps (stage ${want.id}): add/delete/rename/reorder rejected`,
       );
     }
+  }
+}
+
+/**
+ * Let a candidate copied without node_modules resolve the same dependencies the
+ * installed package does: each declared dependency is linked under
+ * `<intoDir>/node_modules`, which must be the candidate root or an ancestor.
+ */
+export async function linkDependencies(baseReal: string, intoDir: string): Promise<void> {
+  let raw: string;
+  try {
+    raw = await readFile(path.join(baseReal, "package.json"), "utf8");
+  } catch {
+    return;
+  }
+  const pkg = JSON.parse(raw) as {
+    dependencies?: Record<string, string>;
+    optionalDependencies?: Record<string, string>;
+    peerDependencies?: Record<string, string>;
+  };
+  const names = new Set([
+    ...Object.keys(pkg.dependencies ?? {}),
+    ...Object.keys(pkg.optionalDependencies ?? {}),
+    ...Object.keys(pkg.peerDependencies ?? {}),
+  ]);
+  for (const name of names) {
+    const found = findDependency(baseReal, name);
+    if (found === undefined) continue;
+    const link = path.join(intoDir, "node_modules", name);
+    await mkdir(path.dirname(link), { recursive: true });
+    await symlink(await realpath(found), link, "dir");
+  }
+}
+
+function findDependency(fromRealRoot: string, name: string): string | undefined {
+  for (let dir = fromRealRoot; ; dir = path.dirname(dir)) {
+    const candidate = path.join(dir, "node_modules", name);
+    if (existsSync(path.join(candidate, "package.json"))) return candidate;
+    if (path.dirname(dir) === dir) return undefined;
   }
 }

@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, writeFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile, rm, symlink } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -132,7 +132,7 @@ afterEach(async () => {
 });
 
 async function makeEnv(
-  opts: { grants?: boolean } = {},
+  opts: { grants?: boolean; linkBundle?: boolean } = {},
 ): Promise<{ taskPath: string; stateRoot: string; taskDir: string }> {
   await execFileAsync("npm", ["run", "build", "-w", "@graphloom/plugin-hello"], {
     cwd: repoRoot,
@@ -148,13 +148,18 @@ async function makeEnv(
   await execFileAsync("git", ["add", "README.md"], { cwd: repoPath });
   await execFileAsync("git", ["commit", "-m", "init"], { cwd: repoPath });
   await mkdir(path.join(taskDir, "plugins"), { recursive: true });
-  // Copy (do not symlink) so repair snapshots never risk the repo hello tree.
-  const { cp } = await import("node:fs/promises");
-  await cp(helloBundle, path.join(taskDir, "plugins", "hello"), {
-    recursive: true,
-    dereference: true,
-    filter: (src) => path.basename(src) !== "node_modules",
-  });
+  if (opts.linkBundle) {
+    // A child host must resolve the bundle's dependencies from the repo install.
+    await symlink(helloBundle, path.join(taskDir, "plugins", "hello"));
+  } else {
+    // Copy (do not symlink) so repair snapshots never risk the repo hello tree.
+    const { cp } = await import("node:fs/promises");
+    await cp(helloBundle, path.join(taskDir, "plugins", "hello"), {
+      recursive: true,
+      dereference: true,
+      filter: (src) => path.basename(src) !== "node_modules",
+    });
+  }
   const taskPath = path.join(taskDir, "task.yaml");
   await writeFile(
     taskPath,
@@ -762,21 +767,31 @@ describe("qualified repair + same-run activation (#29)", () => {
     expect(Object.keys(goodValidators)).toEqual(["exact-greeting", "independent-reviewer"]);
   });
 
-  it("rejects activation when the loaded candidate alters the pinned graph contract", async () => {
+  it.each([
+    ["stages", { ...definition, stages: [...definition.stages].reverse() }, /alters pinned stages/],
+    [
+      "requirements",
+      {
+        ...definition,
+        requirements: definition.requirements.map((r) =>
+          r.id === "greeting-bytes" ? { ...r, evidenceSchema: "workspace-bytes-v2" } : r,
+        ),
+      },
+      /alters pinned requirements: greeting-bytes evidenceSchema/,
+    ],
+  ] as const)("rejects activation when the loaded candidate alters the pinned %s", async (_field, altered, reason) => {
     const env = await makeEnv();
-    const altered: GraphDefinition = {
-      ...definition,
-      stages: [...definition.stages].reverse(),
-    };
+    // Qualification loads a compatible candidate; only the activation load differs.
+    let loads = 0;
     const report = await createController().run({
       taskPath: env.taskPath,
       plugin: escalatingPlugin(),
       validators: goodValidators,
       recreateHost: async (ctx) =>
-        createInProcessPluginHost(createScriptedGraph({ definition: altered, advances: [] }), {
-          activeVersion: ctx.activeVersion,
-          generation: ctx.generation,
-        }),
+        createInProcessPluginHost(
+          createScriptedGraph({ definition: loads++ === 0 ? definition : altered, advances: [] }),
+          { activeVersion: ctx.activeVersion, generation: ctx.generation },
+        ),
       supervisor: createScriptedSupervisor({
         sessionId: "sup-c",
         decisions: [
@@ -791,11 +806,13 @@ describe("qualified repair + same-run activation (#29)", () => {
     });
     expect(report.status).toBe("stopped");
     expect(report.stopReason).toBe("activate_repair candidate rejected");
-    expect(report.blocker).toMatch(/alters pinned stages/);
+    expect(report.blocker).toMatch(reason);
+    expect(loads).toBe(2);
     const state = await loadRunState(report.stateDir);
     expect(state.activationIntent?.status).toBe("aborted");
     expect(state.repairCandidates?.[0]?.status).toBe("rejected");
     expect(state.activeVersion).toBe("hello@0.1.0");
+    expect(state.definition).toEqual(definition);
   });
 
   it("refuses to resume an activated validator repair it cannot rehydrate", async () => {
@@ -1013,5 +1030,207 @@ describe("qualified repair + same-run activation (#29)", () => {
     expect(report.stopReason).toBe("qualify_repair requires a patch author");
     const state = await loadRunState(report.stateDir);
     expect(state.budgets.corrections).toBe(8);
+  });
+
+  describe("incompatible candidates (#58)", () => {
+    const completingPlugin = () =>
+      createScriptedGraph({
+        definition,
+        advances: [
+          supervise({ reason: "r" }, "e"),
+          dispatch(
+            { stageId: "write", kind: "agent", purpose: "work", instruction: "write", writeScope: [GREETING_PATH] },
+            "write",
+          ),
+          observe({ paths: [GREETING_PATH], includeWorkspaceManifest: true }, "obs"),
+          validate({ stageId: "write", requirementIds: ["greeting-bytes"] }, "val write"),
+          dispatch(
+            { stageId: "review", kind: "agent", purpose: "review", instruction: "review", readOnly: true },
+            "review",
+          ),
+          validate({ stageId: "review", requirementIds: ["independent-review"] }, "val review"),
+          stop({ reason: "complete", blocker: "none" }, "done"),
+        ],
+      });
+    const greetingRunner = () =>
+      createScriptedRunner({
+        jobs: [
+          async (_job, ctx) => {
+            await writeFile(path.join(ctx.worktreePath, GREETING_PATH), GREETING, "utf8");
+            return { status: "ok" as const, summary: "wrote" };
+          },
+          async () => ({
+            status: "ok" as const,
+            summary: "approved",
+            evidence: [{ kind: "review" as const, payload: { verdict: "approved", summary: "ok" } }],
+          }),
+        ],
+      });
+    const countingReviews = (repair: RepairDeps): { repair: RepairDeps; reviews: () => number } => {
+      let n = 0;
+      return {
+        repair: {
+          ...repair,
+          reviewer: {
+            sessionId: repair.reviewer.sessionId,
+            async review() {
+              n += 1;
+              return { approved: true, reason: "ok" };
+            },
+          },
+        },
+        reviews: () => n,
+      };
+    };
+    const withRequirement = (patch: Partial<GraphDefinition["requirements"][number]>): GraphDefinition => ({
+      ...definition,
+      requirements: definition.requirements.map((r) => (r.id === "greeting-bytes" ? { ...r, ...patch } : r)),
+    });
+
+    it.each([
+      [
+        "a requirement statement",
+        withRequirement({ statement: "GREETING.txt exists." }),
+        /alters pinned requirements: greeting-bytes statement/,
+      ],
+      [
+        "an evidence schema",
+        withRequirement({ evidenceSchema: "workspace-bytes-v2" }),
+        /alters pinned requirements: greeting-bytes evidenceSchema/,
+      ],
+      [
+        "a default validator binding",
+        {
+          ...definition,
+          defaultValidators: definition.defaultValidators.map((b) =>
+            b.requirementId === "greeting-bytes" ? { ...b, version: "2" } : b,
+          ),
+        },
+        /alters pinned defaultValidators: greeting-bytes/,
+      ],
+    ] as const)(
+      "rejects a candidate whose describe() changes %s at qualification and completes on the old version",
+      async (_change, altered, reason) => {
+        const env = await makeEnv();
+        const { repair, reviews } = countingReviews(approvingRepair("sup-58"));
+        let seen: { status: string; rejectionReason?: string } | undefined;
+        const report = await createController().run({
+          taskPath: env.taskPath,
+          plugin: completingPlugin(),
+          validators: goodValidators,
+          recreateHost: async (ctx) =>
+            createInProcessPluginHost(createScriptedGraph({ definition: altered, advances: [] }), {
+              activeVersion: ctx.activeVersion,
+              generation: ctx.generation,
+            }),
+          supervisor: createScriptedSupervisor({
+            sessionId: "sup-58",
+            decisions: [
+              qualifyRepair({ target: "plugin", reason: "try" }, "q"),
+              (input) => {
+                seen = input.view.repairCandidates?.[0];
+                return returnToNormal({ summary: "keep the pinned graph" }, "r");
+              },
+            ],
+          }),
+          repair,
+          runner: greetingRunner(),
+          stateRoot: env.stateRoot,
+          runId: "repair-incompatible",
+        });
+
+        expect(seen?.status).toBe("rejected");
+        expect(seen?.rejectionReason).toMatch(reason);
+        expect(reviews()).toBe(0);
+        expect(report.status).toBe("succeeded");
+        expect(report.receipts.filter((r) => r.valid).map((r) => r.requirementId)).toEqual([
+          "greeting-bytes",
+          "independent-review",
+        ]);
+        const state = await loadRunState(report.stateDir);
+        expect(state.activeVersion).toBe("hello@0.1.0");
+        expect(state.definition).toEqual(definition);
+        expect(state.intake.bundle.bundlePath).toBe(path.join(env.taskDir, "plugins", "hello"));
+        expect(state.budgets.corrections).toBe(7);
+      },
+    );
+
+    it("rejects a candidate whose manifest changes a pinned requirement", async () => {
+      const env = await makeEnv();
+      const liveManifest = path.join(env.taskDir, "plugins", "hello", "graphloom.manifest.json");
+      const before = await readFile(liveManifest, "utf8");
+      const { repair, reviews } = countingReviews(
+        approvingRepair("sup-58m", async (root) => {
+          const manifestPath = path.join(root, "graphloom.manifest.json");
+          const raw = await readFile(manifestPath, "utf8");
+          await writeFile(manifestPath, raw.replace('"workspace-bytes-v1"', '"workspace-bytes-v2"'), "utf8");
+        }),
+      );
+      const report = await createController().run({
+        taskPath: env.taskPath,
+        plugin: escalatingPlugin(),
+        validators: goodValidators,
+        supervisor: createScriptedSupervisor({
+          sessionId: "sup-58m",
+          decisions: [
+            qualifyRepair({ target: "plugin", reason: "try" }, "q"),
+            stop({ reason: "pause", blocker: "operator review" }, "s"),
+          ],
+        }),
+        repair,
+        runner: createScriptedRunner({ jobs: [] }),
+        stateRoot: env.stateRoot,
+        runId: "repair-manifest",
+      });
+      const state = await loadRunState(report.stateDir);
+      expect(state.repairCandidates?.[0]?.status).toBe("rejected");
+      expect(state.repairCandidates?.[0]?.rejectionReason).toMatch(
+        /candidate manifest alters pinned requirements: greeting-bytes evidenceSchema/,
+      );
+      expect(reviews()).toBe(0);
+      expect(state.activeVersion).toBe("hello@0.1.0");
+      expect(await readFile(liveManifest, "utf8")).toBe(before);
+    });
+
+    it("describes a controller-owned candidate bundle in its own child host", async () => {
+      const env = await makeEnv({ linkBundle: true });
+      const liveGraph = path.join(helloBundle, "dist", "graph.js");
+      const before = await readFile(liveGraph, "utf8");
+      const { repair, reviews } = countingReviews(
+        approvingRepair("sup-58c", async (root) => {
+          const graphPath = path.join(root, "dist", "graph.js");
+          const raw = await readFile(graphPath, "utf8");
+          await writeFile(graphPath, raw.replace('"workspace-bytes-v1"', '"workspace-bytes-v2"'), "utf8");
+        }),
+      );
+      const wrongBytes = async (_job: unknown, ctx: { worktreePath: string }) => {
+        await writeFile(path.join(ctx.worktreePath, GREETING_PATH), "wrong\n", "utf8");
+        return { status: "ok" as const, summary: "wrote" };
+      };
+      const report = await createController().run({
+        taskPath: env.taskPath,
+        supervisor: createScriptedSupervisor({
+          sessionId: "sup-58c",
+          decisions: [
+            qualifyRepair({ target: "plugin", reason: "try" }, "q"),
+            stop({ reason: "pause", blocker: "operator review" }, "s"),
+          ],
+        }),
+        repair,
+        runner: createScriptedRunner({ jobs: [wrongBytes, wrongBytes, wrongBytes] }),
+        stateRoot: env.stateRoot,
+        runId: "repair-child",
+      });
+      const state = await loadRunState(report.stateDir);
+      expect(state.repairCandidates?.[0]?.status).toBe("rejected");
+      expect(state.repairCandidates?.[0]?.rejectionReason).toMatch(
+        /candidate describe\(\) alters pinned requirements: greeting-bytes evidenceSchema/,
+      );
+      expect(reviews()).toBe(0);
+      expect(report.stopReason).toBe("pause");
+      expect(state.activeVersion).toBe("hello@0.1.0");
+      expect(state.definition.requirements[0]?.evidenceSchema).toBe("workspace-bytes-v1");
+      expect(await readFile(liveGraph, "utf8")).toBe(before);
+    });
   });
 });
