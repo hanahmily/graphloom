@@ -252,6 +252,37 @@ describe("Pi supervisor on a live session (faux providers)", () => {
     }
   });
 
+  it("shows an opaque bundle's repair authority and lets a substitution name its requirement", async () => {
+    const world = await fauxWorld();
+    const seen: string[] = [];
+    const qualify = { target: "validator", requirementId: "greeting-bytes", reason: "substitute the gate" };
+    world.faux.deepseek.setResponses([
+      (context: { messages: unknown[] }) => {
+        seen.push(JSON.stringify(context.messages));
+        return toolTurn(world, "qualify_repair", { reason: "substitute", qualify });
+      },
+    ]);
+    const supervisor = await openSupervisor(world, DEEPSEEK);
+    const base = input("ep-1");
+    const repairAuthority = {
+      contract: "opaque" as const,
+      grants: { sourceRepair: false, validatorSubstitution: true, executorRepair: false },
+    };
+    try {
+      const proposal = await supervisor.decide({
+        ...base,
+        trigger: { ...base.trigger, evidenceRefs: ["ev-file-1"] },
+        view: { ...base.view, repairAuthority },
+      });
+      expect(proposal).toEqual({ reason: "substitute", action: { type: "qualify_repair", qualify } });
+      expect(seen[0]).toContain('\\"contract\\": \\"opaque\\"');
+      expect(seen[0]).toContain("ev-file-1");
+      expect(seen[0]).toContain("never invent a replacement criterion");
+    } finally {
+      await supervisor.close?.();
+    }
+  });
+
   it("proposes a switch only to configured models and falls back to a JSON reply without tools", async () => {
     const world = await fauxWorld();
     world.faux.deepseek.setResponses([

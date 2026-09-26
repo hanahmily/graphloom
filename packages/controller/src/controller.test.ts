@@ -24,6 +24,7 @@ import {
   resolveUnderBase,
   tryAdmit,
 } from "./index.js";
+import { manifestRepairContract } from "./intake.js";
 import { readWorktreeFile, workspaceChangeManifest } from "./worktree.js";
 
 const execFileAsync = promisify(execFile);
@@ -128,6 +129,17 @@ request: |
     expect(task.graph).toBe("hello");
     expect(task.repo).toBe("./test-repo");
     expect(task.request).toContain("GREETING.txt");
+  });
+
+  it("treats a bundle without a declared repair contract as opaque", () => {
+    expect(manifestRepairContract(JSON.stringify({ graphId: "hello" }))).toBe("opaque");
+    expect(manifestRepairContract(JSON.stringify({ repairContract: "opaque" }))).toBe("opaque");
+    expect(manifestRepairContract(JSON.stringify({ repairContract: "source-repairable" }))).toBe(
+      "source-repairable",
+    );
+    expect(() => manifestRepairContract(JSON.stringify({ repairContract: "patchable" }))).toThrow(
+      /repairContract must be "source-repairable" or "opaque", got "patchable"/,
+    );
   });
 
   it("rejects path traversal", () => {

@@ -5,7 +5,12 @@ import { describeExecutorModule, digestExecutorSource, type DescribedExecutor } 
 import { invalidateFromStage } from "./admit.js";
 import { catalogEntry } from "./executor-catalog.js";
 import { bumpGeneration } from "./generation.js";
-import { assertDependenciesUnchanged, linkDependencies, type QualifiedRepairArtifact } from "./repair.js";
+import {
+  assertCandidateFullyReviewed,
+  assertDependenciesUnchanged,
+  linkDependencies,
+  type QualifiedRepairArtifact,
+} from "./repair.js";
 import type { RepairSubject } from "./repair-lifecycle.js";
 import { saveRunState, type DurableRunState, type ExecutorCatalogEntry } from "./state.js";
 
@@ -66,6 +71,7 @@ export async function executorRepairSubject(
     },
     async checkCandidate({ candidateRoot, candidateEntryModule }) {
       if (candidateEntryModule === undefined) throw new Error("executor candidate has no entry module");
+      await assertCandidateFullyReviewed(candidateRoot, { linkedDependencies: true });
       await assertDependenciesUnchanged(await realpath(base.root), candidateRoot);
       const [pinned, candidate] = await Promise.all([
         describeExecutorModule({ entryModule: base.entryModule, sandbox }),
@@ -114,6 +120,13 @@ export async function activateExecutorRepair(
   const liveCandidate = await digestExecutorSource(artifact.candidateRoot).catch(() => undefined);
   if (artifact.candidateDigest === undefined || liveCandidate !== artifact.candidateDigest) {
     return supersede("activate_repair candidate digest mismatch", "candidate changed after independent review");
+  }
+  const unreviewed = await assertCandidateFullyReviewed(artifact.candidateRoot, { linkedDependencies: true }).then(
+    () => undefined,
+    (err: unknown) => (err instanceof Error ? err.message : String(err)),
+  );
+  if (unreviewed !== undefined) {
+    return supersede("activate_repair candidate digest mismatch", unreviewed);
   }
 
   const tag = (suffix: string) => `executor:${entry.id}@${suffix}`;

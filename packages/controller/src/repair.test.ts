@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, writeFile, rm, readFile } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, rm, readFile, symlink } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -6,6 +6,7 @@ import {
   assertCandidateStepsUnchanged,
   digestDirectoryTree,
   snapshotRepairCandidate,
+  unreviewedEntries,
 } from "./repair.js";
 
 const temps: string[] = [];
@@ -15,6 +16,31 @@ afterEach(async () => {
     const dir = temps.pop();
     if (dir) await rm(dir, { recursive: true, force: true }).catch(() => undefined);
   }
+});
+
+describe("unreviewedEntries", () => {
+  it("finds node_modules and .git the digest skips, allowing only linked dependencies when asked", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "gl-unreviewed-"));
+    temps.push(root);
+    const target = path.join(root, "installed");
+    await mkdir(target, { recursive: true });
+    const candidate = path.join(root, "candidate");
+    await mkdir(path.join(candidate, "node_modules", "@scope", "real"), { recursive: true });
+    await mkdir(path.join(candidate, "node_modules", "shadow"), { recursive: true });
+    await symlink(target, path.join(candidate, "node_modules", "linked"), "dir");
+    await symlink(target, path.join(candidate, "node_modules", "@scope", "linked"), "dir");
+    await mkdir(path.join(candidate, "dist", ".git"), { recursive: true });
+    await mkdir(path.join(candidate, "src"), { recursive: true });
+    await writeFile(path.join(candidate, "src", "index.ts"), "export {};\n", "utf8");
+
+    expect(await unreviewedEntries(candidate)).toEqual(["dist/.git", "node_modules"]);
+    expect(await unreviewedEntries(candidate, { linkedDependencies: true })).toEqual([
+      "dist/.git",
+      "node_modules/@scope/real",
+      "node_modules/shadow",
+    ]);
+    expect(await unreviewedEntries(path.join(candidate, "src"))).toEqual([]);
+  });
 });
 
 describe("repair snapshot", () => {

@@ -27,6 +27,20 @@ export interface RepairGrants {
   executorRepair?: boolean;
 }
 
+/** How far a bundle's code may be repaired; grants decide whether it may be at all. */
+export type RepairContract = "source-repairable" | "opaque";
+
+/**
+ * The manifest's repair contract. A bundle that declares none is opaque:
+ * metadata can limit repair but never extends it.
+ */
+export function manifestRepairContract(manifestRaw: string): RepairContract {
+  const declared = (JSON.parse(manifestRaw) as { repairContract?: unknown }).repairContract;
+  if (declared === undefined) return "opaque";
+  if (declared === "source-repairable" || declared === "opaque") return declared;
+  throw new IntakeError(`manifest repairContract must be "source-repairable" or "opaque", got ${JSON.stringify(declared)}`);
+}
+
 export interface BundlePin {
   graphId: string;
   version: string;
@@ -207,6 +221,7 @@ export async function intakeTask(taskPath: string): Promise<IntakePin> {
       `manifest sdkProtocol ${manifest.sdkProtocol} != host ${PROTOCOL_VERSION}`,
     );
   }
+  manifestRepairContract(manifestRaw);
 
   const pinnedHead = await gitRevParse(repoPath, "HEAD");
   const entryPath = resolveBundleEntryFromManifest(bundlePath, manifestRaw);

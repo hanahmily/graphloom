@@ -89,7 +89,14 @@ const ACTION_TOOLS: Record<GraphLoomSupervisorAction, ActionTool> = {
     description: "Copy and patch a plugin, validator, or executor package, then qualify it through preflight and independent review.",
     spec: spec(
       { target: { type: "string", enum: ["plugin", "validator", "executor"] }, reason: STRING },
-      { executorId: { ...STRING, description: "Required when target is executor." }, evidenceRefs: EVIDENCE_REFS },
+      {
+        executorId: { ...STRING, description: "Required when target is executor." },
+        requirementId: {
+          ...STRING,
+          description: "The disputed requirement. Required to substitute a validator on an opaque bundle.",
+        },
+        evidenceRefs: EVIDENCE_REFS,
+      },
     ),
   },
   activate_repair: {

@@ -40,7 +40,7 @@ import {
   type EvidenceProducer,
 } from "./admit.js";
 import { HostObservationError } from "./host-validators.js";
-import type { IntakePin } from "./intake.js";
+import { manifestRepairContract, type IntakePin } from "./intake.js";
 import { assertSafeRunId } from "./ids.js";
 import { withDirectoryLock } from "./lock.js";
 import {
@@ -53,7 +53,7 @@ import {
 import { isUnsettled, reconcilePendingDispatch } from "./reconcile.js";
 import { createChildPort, reconcileChildOperations } from "./children.js";
 import { agentSessionViews, continuationRefusal, recordAgentSession, sessionForDispatch } from "./agent-sessions.js";
-import { loadRunState, type DurableRunState, saveRunState } from "./state.js";
+import { citedEvidence, loadRunState, type DurableRunState, saveRunState } from "./state.js";
 import { bumpGeneration } from "./generation.js";
 import {
   applyActivateRepair,
@@ -244,6 +244,7 @@ async function runNormalLoopSteps(
               trigger: {
                 code: trigger.code as RecoveryTrigger["code"],
                 message: trigger.message,
+                ...(trigger.evidenceRefs !== undefined ? { evidenceRefs: [...trigger.evidenceRefs] } : {}),
               },
               view,
               signal: abort.signal,
@@ -592,13 +593,14 @@ function enterRecovery(
   state: DurableRunState,
   code: string,
   message: string,
+  evidenceRefs: string[] = [],
 ): DurableRunState {
   return {
     ...state,
     mode: "recovery",
     status: "running",
     recoveryEpisodeId: `ep-${randomUUID().slice(0, 8)}`,
-    recoveryTrigger: { code, message },
+    recoveryTrigger: { code, message, ...(evidenceRefs.length > 0 ? { evidenceRefs } : {}) },
   };
 }
 
@@ -743,6 +745,15 @@ export function toRunView(state: DurableRunState): RunView {
   }
   const sessions = agentSessionViews(state);
   if (sessions !== undefined) view.agentSessions = sessions;
+  const { grants } = state.intake;
+  view.repairAuthority = {
+    contract: manifestRepairContract(state.intake.bundle.manifestRaw),
+    grants: {
+      sourceRepair: grants.sourceRepair,
+      validatorSubstitution: grants.validatorSubstitution,
+      executorRepair: grants.executorRepair === true,
+    },
+  };
   return view;
 }
 
@@ -854,7 +865,12 @@ async function applyDecision(
           blocker: "no supervisor configured",
         };
       }
-      return enterRecovery(state, "supervise", action.supervise.reason);
+      return enterRecovery(
+        state,
+        "supervise",
+        action.supervise.reason,
+        citedEvidence(state, action.supervise.evidenceRefs),
+      );
     }
     case "return": {
       if (state.mode !== "recovery") {
@@ -870,12 +886,14 @@ async function applyDecision(
         recoveryTrigger: _tr,
         stopReason: _sr,
         blocker: _bl,
+        stopEvidenceRefs: _se,
         ...rest
       } = state;
       void _ep;
       void _tr;
       void _sr;
       void _bl;
+      void _se;
       return {
         ...rest,
         mode: "normal",
@@ -935,11 +953,13 @@ async function applyDecision(
         state.definition.stages.every((s) =>
           stageRequirementsMet(state, s.id, s.requirementIds),
         );
+      const cited = citedEvidence(state, action.stop.evidenceRefs);
       return {
         ...state,
         status: complete ? "succeeded" : "stopped",
         stopReason: action.stop.reason,
         blocker: action.stop.blocker,
+        ...(cited.length > 0 ? { stopEvidenceRefs: cited } : {}),
       };
     }
     default: {

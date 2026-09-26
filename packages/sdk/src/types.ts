@@ -116,6 +116,14 @@ export interface RunView {
   }>;
   /** Settled dispatches whose agent session a later job of the same stage may continue. */
   agentSessions?: AgentSessionView[];
+  /** What repair the operator authorized and the bundle's code permits. */
+  repairAuthority?: RepairAuthorityView;
+}
+
+export interface RepairAuthorityView {
+  /** `opaque`: the bundle's code cannot be patched; only validator substitution may apply. */
+  contract: "source-repairable" | "opaque";
+  grants: { sourceRepair: boolean; validatorSubstitution: boolean; executorRepair: boolean };
 }
 
 export interface AgentSessionView {
@@ -191,6 +199,11 @@ export interface QualifyRepairSpec {
   target: RepairTarget;
   /** Required for `executor`: a pinned executor id; its whole package is copied and repaired. */
   executorId?: string;
+  /**
+   * The disputed requirement. Required for a `validator` target on an opaque
+   * bundle: substitution needs that requirement pinned readably in the manifest.
+   */
+  requirementId?: RequirementId;
   reason: string;
   evidenceRefs?: EvidenceRef[];
 }

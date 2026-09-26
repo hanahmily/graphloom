@@ -140,6 +140,8 @@ export interface RunReport {
   status: RunStatus;
   stopReason?: string;
   blocker?: string;
+  /** Recorded evidence the stop cites. */
+  stopEvidenceRefs?: string[];
   receipts: DurableRunState["receipts"];
   evidence: DurableRunState["evidence"];
   generation: number;
@@ -171,6 +173,8 @@ export interface InspectReport {
   stateDir: string;
   stopReason?: string;
   blocker?: string;
+  /** Recorded evidence the stop cites. */
+  stopEvidenceRefs?: string[];
 }
 
 export interface Controller {
@@ -373,6 +377,10 @@ export function createController(): Controller {
         if (state.status === "succeeded" || state.status === "failed") {
           return;
         }
+        // Evidence belongs to the stop being resumed; any stop from here on is a new one.
+        const { stopEvidenceRefs: _staleEvidence, ...resumable } = state;
+        void _staleEvidence;
+        state = resumable;
 
         try {
           await assertWorktreeMatches(
@@ -814,6 +822,9 @@ function toInspect(state: DurableRunState): InspectReport {
   if (state.blocker !== undefined) {
     report.blocker = state.blocker;
   }
+  if (state.stopEvidenceRefs !== undefined) {
+    report.stopEvidenceRefs = [...state.stopEvidenceRefs];
+  }
   return report;
 }
 
@@ -883,6 +894,9 @@ function toReport(state: DurableRunState, sourceDirtyAfter: string[]): RunReport
   }
   if (state.blocker !== undefined) {
     report.blocker = state.blocker;
+  }
+  if (state.stopEvidenceRefs !== undefined) {
+    report.stopEvidenceRefs = [...state.stopEvidenceRefs];
   }
   return report;
 }
