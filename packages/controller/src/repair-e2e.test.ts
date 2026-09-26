@@ -1108,6 +1108,12 @@ describe("qualified repair + same-run activation (#29)", () => {
         },
         /alters pinned defaultValidators: greeting-bytes/,
       ],
+      ["the graph version", { ...definition, version: "0.2.0" }, /candidate version 0\.2\.0 != pinned 0\.1\.0/],
+      [
+        "the private-state schema",
+        { ...definition, privateStateSchema: "hello-private-v2" },
+        /alters pinned privateStateSchema/,
+      ],
     ] as const)(
       "rejects a candidate whose describe() changes %s at qualification and completes on the old version",
       async (_change, altered, reason) => {
@@ -1155,15 +1161,46 @@ describe("qualified repair + same-run activation (#29)", () => {
       },
     );
 
-    it("rejects a candidate whose manifest changes a pinned requirement", async () => {
+    it.each([
+      [
+        "changes a pinned requirement",
+        "graphloom.manifest.json",
+        (raw: string) => raw.replace('"workspace-bytes-v1"', '"workspace-bytes-v2"'),
+        /candidate manifest alters pinned requirements: greeting-bytes evidenceSchema/,
+      ],
+      [
+        "removes the pinned requirements",
+        "graphloom.manifest.json",
+        (raw: string) => {
+          const { requirements: _drop, ...rest } = JSON.parse(raw) as Record<string, unknown>;
+          void _drop;
+          return JSON.stringify(rest);
+        },
+        /candidate manifest removes pinned requirements/,
+      ],
+      [
+        "changes the private-state schema",
+        "graphloom.manifest.json",
+        (raw: string) => raw.replace('"hello-private-v1"', '"hello-private-v2"'),
+        /candidate manifest alters pinned privateStateSchema/,
+      ],
+      [
+        "adds a declared dependency",
+        "package.json",
+        (raw: string) => {
+          const pkg = JSON.parse(raw) as { dependencies: Record<string, string> };
+          return JSON.stringify({ ...pkg, dependencies: { ...pkg.dependencies, "left-pad": "1.3.0" } });
+        },
+        /candidate changes declared dependencies in package\.json/,
+      ],
+    ] as const)("rejects a candidate that %s", async (_change, file, edit, reason) => {
       const env = await makeEnv();
-      const liveManifest = path.join(env.taskDir, "plugins", "hello", "graphloom.manifest.json");
-      const before = await readFile(liveManifest, "utf8");
+      const liveFile = path.join(env.taskDir, "plugins", "hello", file);
+      const before = await readFile(liveFile, "utf8");
       const { repair, reviews } = countingReviews(
         approvingRepair("sup-58m", async (root) => {
-          const manifestPath = path.join(root, "graphloom.manifest.json");
-          const raw = await readFile(manifestPath, "utf8");
-          await writeFile(manifestPath, raw.replace('"workspace-bytes-v1"', '"workspace-bytes-v2"'), "utf8");
+          const target = path.join(root, file);
+          await writeFile(target, edit(await readFile(target, "utf8")), "utf8");
         }),
       );
       const report = await createController().run({
@@ -1184,12 +1221,10 @@ describe("qualified repair + same-run activation (#29)", () => {
       });
       const state = await loadRunState(report.stateDir);
       expect(state.repairCandidates?.[0]?.status).toBe("rejected");
-      expect(state.repairCandidates?.[0]?.rejectionReason).toMatch(
-        /candidate manifest alters pinned requirements: greeting-bytes evidenceSchema/,
-      );
+      expect(state.repairCandidates?.[0]?.rejectionReason).toMatch(reason);
       expect(reviews()).toBe(0);
       expect(state.activeVersion).toBe("hello@0.1.0");
-      expect(await readFile(liveManifest, "utf8")).toBe(before);
+      expect(await readFile(liveFile, "utf8")).toBe(before);
     });
 
     it("describes a controller-owned candidate bundle in its own child host", async () => {

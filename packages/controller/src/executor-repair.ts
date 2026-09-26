@@ -5,7 +5,7 @@ import { describeExecutorModule, digestExecutorSource, type DescribedExecutor } 
 import { invalidateFromStage } from "./admit.js";
 import { catalogEntry } from "./executor-catalog.js";
 import { bumpGeneration } from "./generation.js";
-import { linkDependencies, type QualifiedRepairArtifact } from "./repair.js";
+import { assertDependenciesUnchanged, linkDependencies, type QualifiedRepairArtifact } from "./repair.js";
 import type { RepairSubject } from "./repair-lifecycle.js";
 import { saveRunState, type DurableRunState, type ExecutorCatalogEntry } from "./state.js";
 
@@ -64,8 +64,9 @@ export async function executorRepairSubject(
         candidateEntryModule: path.join(candidateRoot, path.relative(base.root, base.entryModule)),
       };
     },
-    async checkCandidate({ candidateEntryModule }) {
+    async checkCandidate({ candidateRoot, candidateEntryModule }) {
       if (candidateEntryModule === undefined) throw new Error("executor candidate has no entry module");
+      await assertDependenciesUnchanged(await realpath(base.root), candidateRoot);
       const [pinned, candidate] = await Promise.all([
         describeExecutorModule({ entryModule: base.entryModule, sandbox }),
         describeExecutorModule({ entryModule: candidateEntryModule, sandbox }),

@@ -507,11 +507,15 @@ correction reservation, and activation generation.
 The MVP accepts only the same SDK protocol, private-state schema, requirement
 manifest, complete step set/IDs/names/order, and evidence schemas. During
 qualification, before independent review, the controller checks the candidate's
-manifest and loads it in a throwaway host. Its `describe()` must match the pinned
-stages, requirement statements, evidence schemas and default validator bindings.
-A mismatch rejects the candidate with a reason naming what changed; the run stays in
-recovery on its old version. Activation repeats the `describe()` check on the host
-it switches to. An independent review cannot authorize a structural difference.
+manifest and declared dependencies, then loads it in a throwaway host. Its
+`describe()` must match the pinned version, private-state schema, stages,
+requirement statements, evidence schemas and default validator bindings. A run
+started with an in-process plugin or caller-supplied host and no `recreateHost`
+hook has no way to load the candidate, so only a definition returned by the
+operator's preflight is compared. A mismatch rejects the candidate with a reason
+naming what changed; the run stays in recovery on its old version. Activation
+repeats the `describe()` check on the host it switches to. An independent review
+cannot authorize a structural difference.
 Runtime admission also rejects jobs and routes that name undeclared steps.
 Arbitrary state migration is deferred.
 Private state is disposable bookkeeping: a compatible patched plugin must reconcile

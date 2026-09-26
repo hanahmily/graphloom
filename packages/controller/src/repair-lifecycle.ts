@@ -16,6 +16,7 @@ import { resolveBundleEntryFromManifest } from "./bundle.js";
 import {
   assertCandidateStepsUnchanged,
   digestDirectoryTree,
+  assertDependenciesUnchanged,
   linkDependencies,
   snapshotRepairCandidate,
   type QualifiedRepairArtifact,
@@ -366,6 +367,7 @@ async function bundleRepairSubject(state: DurableRunState, qualify: QualifyRepai
         candidateRoot,
       });
       await assertCandidateManifestCompatible(candidateRoot, state);
+      await assertDependenciesUnchanged(await realpath(state.intake.bundle.bundlePath), candidateRoot);
     },
   };
 }
@@ -375,16 +377,22 @@ async function assertCandidateManifestCompatible(
   candidateRoot: string,
   state: DurableRunState,
 ): Promise<void> {
+  type Manifest = Record<"graphId" | "version" | "sdkProtocol" | "privateStateSchema" | "requirements", unknown>;
   const manifest = JSON.parse(
     await readFile(path.join(candidateRoot, "graphloom.manifest.json"), "utf8"),
-  ) as { graphId?: unknown; version?: unknown; sdkProtocol?: unknown; requirements?: unknown };
-  const pin = state.intake.bundle;
-  for (const field of ["graphId", "version", "sdkProtocol"] as const) {
-    if (manifest[field] !== pin[field]) {
+  ) as Manifest;
+  const pinned = JSON.parse(state.intake.bundle.manifestRaw) as Manifest;
+  for (const field of ["graphId", "version", "sdkProtocol", "privateStateSchema"] as const) {
+    if (JSON.stringify(manifest[field]) !== JSON.stringify(pinned[field])) {
       throw new Error(`candidate manifest alters pinned ${field}`);
     }
   }
-  if (manifest.requirements === undefined) return;
+  if (manifest.requirements === undefined) {
+    if (pinned.requirements !== undefined) {
+      throw new Error("candidate manifest removes pinned requirements");
+    }
+    return;
+  }
   if (
     !Array.isArray(manifest.requirements) ||
     !manifest.requirements.every((r) => typeof r === "object" && r !== null)
@@ -740,6 +748,12 @@ export function assertCandidateDefinitionCompatible(
     throw new Error(
       `candidate graphId ${candidate.graphId} != pinned ${base.graphId}`,
     );
+  }
+  if (candidate.version !== base.version) {
+    throw new Error(`candidate version ${candidate.version} != pinned ${base.version}`);
+  }
+  if (candidate.privateStateSchema !== base.privateStateSchema) {
+    throw new Error("candidate describe() alters pinned privateStateSchema");
   }
   if (JSON.stringify(candidate.stages) !== JSON.stringify(base.stages)) {
     throw new Error("candidate describe() alters pinned stages");
