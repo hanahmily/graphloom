@@ -9,9 +9,12 @@ import {
   createScriptedGraph,
   dispatch,
   observe,
+  reenter,
   stop,
   validate,
   type GraphDefinition,
+  type JobSpec,
+  type RunView,
   type ToolBinding,
   type Validator,
 } from "@graphloom/sdk";
@@ -19,7 +22,7 @@ import { createBuiltinExecutorRunner, createScriptedRunner } from "@graphloom/ru
 import { createController, loadRunState } from "@graphloom/controller";
 import { githubBinding, githubExecutorPackage } from "@graphloom/executor-github";
 import { startFakeGitHub, type FakeGitHub } from "@graphloom/executor-github/testing";
-import { codingAgentBinding, codingAgentExecutorPackage } from "@graphloom/executor-coding-agent";
+import { CONTINUATION_NOTICE, codingAgentBinding, codingAgentExecutorPackage } from "@graphloom/executor-coding-agent";
 import { scriptedHarnessModule, type ScriptedStep } from "@graphloom/executor-coding-agent/testing";
 
 const execFileAsync = promisify(execFile);
@@ -275,6 +278,106 @@ describe("graph → coding agent → GitHub child executor", () => {
       .filter((p) => p.codingAgent)
       .at(-1)!.codingAgent!;
     expect(retried.output.toolResults[0]!.result.summary).toBe("tool call c1 has an unreconciled outcome");
+  });
+});
+
+describe("continuing the coding agent's session on reentry", () => {
+  const ASSIGNMENT = "Implement issue #1 and post a status comment.";
+  const agentJob = (steps: ScriptedStep[], continueFrom?: string): JobSpec => ({
+    stageId: "write",
+    kind: "agent",
+    purpose: "work",
+    instruction: "implement issue #1",
+    writeScope: ["GREETING.txt"],
+    executor: { id: "graphloom.coding-agent/run", version: "1" },
+    tools,
+    input: { assignment: continueFrom === undefined ? ASSIGNMENT : "Finish issue #1.", harnessOptions: { steps } },
+    ...(continueFrom !== undefined ? { continueFrom } : {}),
+  });
+  const retry = reenter({ stageId: "write", reason: "no greeting yet" }, "retry");
+  const continueFirst = (steps: ScriptedStep[]) => (view: RunView) =>
+    dispatch(agentJob(steps, view.agentSessions![0]!.operationId), "continue");
+  const rest = [
+    observe({ paths: ["GREETING.txt"], includeWorkspaceManifest: true }, "observe"),
+    validate({ stageId: "write", requirementIds: ["greeting-bytes"] }, "v-write"),
+    dispatch({ stageId: "review", kind: "agent", purpose: "review", instruction: "review", readOnly: true }, "review"),
+    validate({ stageId: "review", requirementIds: ["independent-review"] }, "v-review"),
+    stop({ reason: "complete", blocker: "none" }, "done"),
+  ];
+  type Agent = { sessionRef: string | null; continued: boolean; output: { assignment: string; priorAssignments: string[]; toolResults: { result: { status: string; summary: string } }[] } };
+  const agents = (evidence: readonly { payload?: unknown }[]) =>
+    evidence.map((e) => (e.payload as { codingAgent?: Agent }).codingAgent).filter((a): a is Agent => a !== undefined);
+
+  it("restores the harness session from the run's state directory in a new executor process", async () => {
+    const server = await fake();
+    const env = await makeEnv();
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({
+        definition,
+        advances: [
+          dispatch(agentJob([readComments("c1")]), "first try"),
+          retry,
+          continueFirst([readComments("c1"), readComments("c2"), writeGreeting]),
+          ...rest,
+        ],
+      }),
+      validators,
+      runner: hostRunner(server),
+      stateRoot: env.stateRoot,
+      runId: "agent-continue",
+    });
+    expect(report.status, report.blocker).toBe("succeeded");
+
+    const [first, continued] = agents(report.evidence);
+    expect(first).toMatchObject({ continued: false, output: { priorAssignments: [] } });
+    expect(continued).toMatchObject({ continued: true, sessionRef: first!.sessionRef });
+    expect(continued!.output.priorAssignments).toEqual([ASSIGNMENT]);
+    expect(continued!.output.assignment).toBe(`${CONTINUATION_NOTICE}\n\nFinish issue #1.`);
+    expect(continued!.output.toolResults.map((t) => t.result.summary)).toEqual([
+      "tool call c1 belongs to an earlier attempt; make a new call",
+      expect.stringMatching(/comment/),
+    ]);
+    expect(server.requests).toHaveLength(2);
+
+    const state = await loadRunState(report.stateDir);
+    const [recorded] = state.agentSessions!;
+    const transcript = JSON.parse(await readFile(path.join(recorded!.sessionDir, `${recorded!.sessionRef}.json`), "utf8"));
+    expect(recorded!.sessionDir.startsWith(path.join(report.stateDir, "agent-sessions"))).toBe(true);
+    expect(transcript.turns).toHaveLength(2);
+    expect(await readTree(report.stateDir)).not.toContain(TOKEN);
+  });
+
+  it("stops with the restore failure instead of starting a fresh session", async () => {
+    const server = await fake();
+    const env = await makeEnv();
+    const controller = createController();
+    const paused = await controller.run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({
+        definition,
+        advances: [dispatch(agentJob([]), "first try"), stop({ reason: "pause", blocker: "operator" }, "pause")],
+      }),
+      validators,
+      runner: hostRunner(server),
+      stateRoot: env.stateRoot,
+      runId: "agent-lost-session",
+    });
+    const [recorded] = (await loadRunState(paused.stateDir)).agentSessions!;
+    await rm(recorded!.sessionDir, { recursive: true });
+
+    const resumed = await controller.resume({
+      runRef: paused.stateDir,
+      plugin: createScriptedGraph({ definition, advances: [retry, continueFirst([writeGreeting]), ...rest] }),
+      validators,
+      runner: hostRunner(server),
+    });
+    expect(resumed).toMatchObject({
+      status: "stopped",
+      stopReason: `job failed: agent session ${recorded!.sessionRef} could not be restored: no transcript for ${recorded!.sessionRef}`,
+    });
+    const { worktreePath } = await loadRunState(paused.stateDir);
+    expect(await readFile(path.join(worktreePath, "GREETING.txt"), "utf8").catch(() => undefined)).toBeUndefined();
   });
 });
 

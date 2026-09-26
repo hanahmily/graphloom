@@ -212,6 +212,46 @@ describe("Pi supervisor on a live session (faux providers)", () => {
     }
   });
 
+  it("shows the stage's agent sessions and lets a dispatch continue one", async () => {
+    const world = await fauxWorld();
+    const seen: string[] = [];
+    const job = {
+      stageId: "write",
+      kind: "agent",
+      purpose: "work",
+      instruction: "finish the greeting",
+      writeScope: ["GREETING.txt"],
+      continueFrom: "op-3-abc",
+    };
+    world.faux.deepseek.setResponses([
+      (context: { messages: unknown[] }) => {
+        seen.push(JSON.stringify(context.messages));
+        return toolTurn(world, "dispatch", { reason: "keep the agent's context", job });
+      },
+    ]);
+    const supervisor = await openSupervisor(world, DEEPSEEK);
+    const base = input("ep-1");
+    const agentSessions = [
+      {
+        operationId: "op-3-abc",
+        stageId: "write",
+        attempt: 1,
+        generation: 1,
+        dispatchKey: "work:graphloom.coding-agent/run",
+        executorId: "graphloom.coding-agent/run",
+        status: "failed" as const,
+      },
+    ];
+    try {
+      const proposal = await supervisor.decide({ ...base, view: { ...base.view, agentSessions } });
+      expect(proposal).toEqual({ reason: "keep the agent's context", action: { type: "dispatch", job } });
+      expect(seen[0]).toContain("job.continueFrom");
+      expect(seen[0]).toContain("work:graphloom.coding-agent/run");
+    } finally {
+      await supervisor.close?.();
+    }
+  });
+
   it("proposes a switch only to configured models and falls back to a JSON reply without tools", async () => {
     const world = await fauxWorld();
     world.faux.deepseek.setResponses([

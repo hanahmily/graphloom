@@ -257,6 +257,7 @@ export function buildRecoveryPrompt(
     stateRevision: input.view.stateRevision,
     activeVersion: input.view.activeVersion,
     repairCandidates: input.view.repairCandidates ?? [],
+    agentSessions: input.view.agentSessions ?? [],
   };
 
   const settlement = input.lastSettlement;
@@ -268,6 +269,7 @@ export function buildRecoveryPrompt(
     "Never propose Accept. Never add, remove, rename, or reorder graph steps.",
     "Prefer further authorized remedies over Stop while budgets and authority remain.",
     "For activate_repair, use a qualifiedArtifactId from repairCandidates with status qualified.",
+    "To retry a stage's agent work with the context of its earlier session, dispatch with job.continueFrom set to an operationId from agentSessions of that stage and dispatch key; start fresh instead when that context is misleading.",
     ...(models !== undefined
       ? [
           `Your model is ${models.current.provider}/${models.current.modelId}. To continue on another operator-configured model (${models.configured

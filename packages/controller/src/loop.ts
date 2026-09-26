@@ -3,6 +3,7 @@ import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import type {
   EvidenceRecord,
+  ExecutorSession,
   GraphDecision,
   GraphDefinition,
   JobSpec,
@@ -51,6 +52,7 @@ import {
 } from "./owner.js";
 import { isUnsettled, reconcilePendingDispatch } from "./reconcile.js";
 import { createChildPort, reconcileChildOperations } from "./children.js";
+import { agentSessionViews, continuationRefusal, recordAgentSession, sessionForDispatch } from "./agent-sessions.js";
 import { loadRunState, type DurableRunState, saveRunState } from "./state.js";
 import { bumpGeneration } from "./generation.js";
 import {
@@ -369,7 +371,7 @@ async function runNormalLoopSteps(
       }
 
       if (turn.pendingJob) {
-        const { job, operationId, generation, isCorrection, source, notBefore } = turn.pendingJob;
+        const { job, operationId, generation, isCorrection, source, notBefore, session } = turn.pendingJob;
         const abort = new AbortController();
         const stopWatch = watchForStop(state.stateDir, deps, abort);
         let result: Awaited<ReturnType<Runner["runJob"]>>;
@@ -403,6 +405,7 @@ async function runNormalLoopSteps(
               signal: abort.signal,
               ...(children !== undefined ? { children } : {}),
               ...(source !== undefined ? { executorSource: source } : {}),
+              ...(session !== undefined ? { session } : {}),
             });
           }
         } finally {
@@ -736,6 +739,8 @@ export function toRunView(state: DurableRunState): RunView {
       ...(c.patchSummary !== undefined ? { patchSummary: c.patchSummary } : {}),
     }));
   }
+  const sessions = agentSessionViews(state);
+  if (sessions !== undefined) view.agentSessions = sessions;
   return view;
 }
 
@@ -953,6 +958,7 @@ interface PendingJob {
   isCorrection: boolean;
   source?: ExecutorSourceOverride;
   notBefore?: string;
+  session?: ExecutorSession;
 }
 
 async function prepareDispatch(
@@ -1015,6 +1021,11 @@ async function prepareDispatch(
         state: { ...state, status: "stopped", stopReason: "recovery dispatch rejected", blocker: refused },
       };
     }
+  }
+
+  const discontinued = continuationRefusal(state, job);
+  if (discontinued !== undefined) {
+    return { state: { ...state, status: "stopped", stopReason: "continuation rejected", blocker: discontinued } };
   }
 
   // An executor that asked for a wait runs no earlier than that, and the wait spends the run's budget.
@@ -1107,6 +1118,7 @@ async function prepareDispatch(
   }
 
   const operationId = `op-${state.stateRevision}-${randomUUID().slice(0, 8)}`;
+  const session = sessionForDispatch(state, job, operationId);
   const next: DurableRunState = {
     ...state,
     outstanding: [
@@ -1121,6 +1133,7 @@ async function prepareDispatch(
       status: notBefore !== undefined ? "waiting" : "pending",
       ...(job.executor !== undefined ? { executor: job.executor } : {}),
       ...(notBefore !== undefined ? { notBefore } : {}),
+      ...(session !== undefined ? { session } : {}),
     },
     current: { stageId: job.stageId, attempt: state.current.attempt },
   };
@@ -1134,6 +1147,7 @@ async function prepareDispatch(
       isCorrection,
       ...(source !== undefined ? { source } : {}),
       ...(notBefore !== undefined ? { notBefore } : {}),
+      ...(session !== undefined ? { session } : {}),
     },
   };
 }
@@ -1208,6 +1222,11 @@ function applyDispatchResult(
       : {}),
     outstanding: next.outstanding.filter((o) => o.operationId !== operationId),
   };
+  // A failed attempt's session is worth continuing too: its transcript is the context a retry lacks.
+  const session = next.pendingDispatch?.session;
+  if (session !== undefined) {
+    next = recordAgentSession(next, { job, operationId, generation, session, result });
+  }
 
   const producer: EvidenceProducer = {
     operationId,

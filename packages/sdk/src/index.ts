@@ -1,5 +1,6 @@
 export type {
   ActivateRepairSpec,
+  AgentSessionView,
   BudgetRemaining,
   EvidenceRecord,
   EvidenceRef,
@@ -49,6 +50,7 @@ export type {
   ExecutorId,
   ExecutorPackageManifest,
   ExecutorPin,
+  ExecutorSession,
   ExecutorTools,
   ExecutorUsage,
   JsonSchemaValidator,
@@ -64,6 +66,7 @@ export {
   BUILTIN_AGENT_EXECUTOR_ID,
   BUILTIN_COMMAND_EXECUTOR_ID,
   MAX_EXECUTOR_INPUT_BYTES,
+  MAX_SESSION_REF_CHARS,
   MAX_TOOL_BINDINGS,
   assertBoundedJson,
   assertToolBindings,

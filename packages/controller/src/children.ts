@@ -9,6 +9,7 @@ import {
 } from "@graphloom/sdk";
 import type { ChildOperationPort, JobResult, Runner } from "@graphloom/runner";
 import { newEvidenceRef, type EvidenceProducer } from "./admit.js";
+import { continuedOperations, earlierToolCallRefusal } from "./agent-sessions.js";
 import { resolveExecutorPin } from "./executor-catalog.js";
 import { boundedRetryAfter, recordExecutorFailure } from "./executor-failure.js";
 import { withDirectoryLock } from "./lock.js";
@@ -98,6 +99,14 @@ export function createChildPort(parent: ParentJob, deps: ChildPortDeps): Control
       const state = await loadRunState(deps.stateDir);
       const fenced = await fence(state);
       if (fenced) return { done: failed(`tool call fenced: ${fenced}`) };
+
+      const earlier = earlierToolCallRefusal(
+        state.childOperations ?? [],
+        continuedOperations(state, parent.job.continueFrom),
+        { toolCallId: req.toolCallId, tool: req.tool, inputKey: canonicalJson(req.input) },
+        canonicalJson,
+      );
+      if (earlier !== undefined) return { done: failed(earlier) };
 
       const attempt = state.current.attempt;
       const prior = [...(state.childOperations ?? [])]

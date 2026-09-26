@@ -58,6 +58,28 @@ describe("createTrustedInProcessRunner", () => {
     expect(result.summary).toBe("echo:hi");
   });
 
+  it("hands an agent job its session and returns the ref only for a job that had one", async () => {
+    const seen: unknown[] = [];
+    const agent = defineExecutor<{ ref: string }, unknown>({
+      id: "acme.agent/code",
+      effect: "read",
+      async execute(input, ctx) {
+        seen.push(ctx.session);
+        return { status: "ok", summary: "done", sessionRef: input.ref };
+      },
+    });
+    const runner = createTrustedInProcessRunner({ executors: [agent], fallback: createScriptedRunner({ jobs: [] }) });
+    const run = (ref: string, session?: { dir: string; resume?: string }) =>
+      runner.runJob(
+        { stageId: "write", kind: "agent", purpose: "work", instruction: "x", executor: { id: "acme.agent/code" }, input: { ref } },
+        { runId: "r1", operationId: "op1", generation: 1, worktreePath: "/tmp", artifactDir: "/tmp/a", ...(session ? { session } : {}) },
+      );
+    expect((await run("s1", { dir: "/state/s", resume: "s0" })).sessionRef).toBe("s1");
+    expect(seen[0]).toEqual({ dir: "/state/s", resume: "s0" });
+    expect(await run("s1")).not.toHaveProperty("sessionRef");
+    expect(await run("x".repeat(257), { dir: "/state/s" })).not.toHaveProperty("sessionRef");
+  });
+
   it("createRegistryRunner remains an alias of trusted in-process", () => {
     expect(createRegistryRunner).toBe(createTrustedInProcessRunner);
   });

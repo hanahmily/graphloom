@@ -114,6 +114,21 @@ export interface RunView {
     preflightSummary?: string;
     patchSummary?: string;
   }>;
+  /** Settled dispatches whose agent session a later job of the same stage may continue. */
+  agentSessions?: AgentSessionView[];
+}
+
+export interface AgentSessionView {
+  operationId: string;
+  stageId: StageId;
+  attempt: number;
+  generation: number;
+  /** A continuation must have the same key: `jobId`, or `purpose:executorId`. */
+  dispatchKey: string;
+  executorId: string;
+  status: "ok" | "failed" | "conflict";
+  /** Operation this session continued, when it was not fresh. */
+  continuedFrom?: string;
 }
 
 export type JobKind = "agent" | "command";
@@ -140,6 +155,11 @@ export interface JobSpec {
   effect?: import("./executor.js").ExecutorEffect;
   /** Tools the job's agent may call; each call is admitted as a child operation. */
   tools?: import("./executor.js").ToolBinding[];
+  /**
+   * Operation id of an earlier dispatch in this run (see `RunView.agentSessions`)
+   * whose agent session this job continues. Omit to start a fresh session.
+   */
+  continueFrom?: string;
 }
 
 export interface ObserveSpec {

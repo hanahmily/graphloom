@@ -1,4 +1,4 @@
-import type { JobSpec, ToolCallRequest, ToolCallResult } from "@graphloom/sdk";
+import type { ExecutorSession, JobSpec, ToolCallRequest, ToolCallResult } from "@graphloom/sdk";
 
 /**
  * Controller services for a running job: admitted tool calls become child
@@ -34,6 +34,8 @@ export interface JobContext {
   children?: ChildOperationPort;
   /** Serve the job's executor from a repaired run-local copy instead of the installed package. */
   executorSource?: ExecutorSourceOverride;
+  /** Where the job's agent may keep a resumable session, and the session to continue. */
+  session?: ExecutorSession;
 }
 
 export interface JobEvidenceItem {
@@ -53,6 +55,8 @@ export interface JobResult {
   evidence?: JobEvidenceItem[];
   /** A failed executor's requested wait before retrying it (e.g. a rate limit). */
   retryAfterMs?: number;
+  /** The job's agent session, which a later job may continue. */
+  sessionRef?: string;
 }
 
 /** An executor a runner serves, identified by the digest of the code it would run. */

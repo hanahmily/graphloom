@@ -18,5 +18,6 @@ These milestones describe work to implement, not completed runtime capabilities.
 M1–M2 and M3 are largely in tree: scripted recovery, and Pi recovery admission
 with model switching verified against faux providers. So are the executor
 contract, the packaged GitHub executor (qualified against a fake server), the
-coding-agent child protocol, and executor recovery. Live provider qualification
+coding-agent child protocol with explicit session continuation on reentry
+(scripted harness only), and executor recovery. Live provider qualification
 (#30) and M4 remain outstanding.

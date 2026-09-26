@@ -25,6 +25,13 @@ export interface CodingSessionOptions {
   signal?: AbortSignal;
   /** Harness-specific options from the job input (model, limits, scripted steps). */
   options?: Record<string, unknown>;
+  /** Controller-owned directory for the session transcript, when the job may be continued later. */
+  sessionDir?: string;
+  /**
+   * A `sessionRef` an earlier run returned. The harness restores that session
+   * or throws; it must never start a fresh one in its place.
+   */
+  resume?: string;
 }
 
 export interface CodingRunRequest {
@@ -37,6 +44,8 @@ export interface CodingRunResult {
   summary: string;
   /** Structured output matching `resultSchema`, when requested. */
   output?: unknown;
+  /** Identifies the saved session in `sessionDir`, so a later job can continue it. */
+  sessionRef?: string;
 }
 
 export interface CodingSession {
@@ -47,5 +56,7 @@ export interface CodingSession {
 /** Adapter for one agent harness (a Pi coding agent, another CLI agent, or a scripted test harness). */
 export interface CodingHarness {
   readonly name: string;
+  /** True when the harness saves sessions and honors `resume`. */
+  readonly resumable?: boolean;
   createSession(options: CodingSessionOptions): Promise<CodingSession>;
 }
