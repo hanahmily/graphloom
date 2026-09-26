@@ -45,6 +45,8 @@ export interface PiSupervisor extends Supervisor {
     modelId: string;
     reason: string;
   }): Promise<void>;
+  grantCandidateCoding(candidateRoot: string): Promise<void>;
+  revokeCandidateCoding(): Promise<void>;
   /** Last granted candidate coding root, if any. */
   candidateCodingRoot(): string | undefined;
 }

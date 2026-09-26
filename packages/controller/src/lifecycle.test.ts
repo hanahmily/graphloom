@@ -5,6 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
+import type { EvidenceRecord, Validator } from "@graphloom/sdk";
 import { createController } from "./index.js";
 import { createScriptedRunner } from "@graphloom/runner";
 
@@ -157,13 +158,13 @@ describe("public controller: hello child host + stop/resume/inspect", () => {
       ],
     };
 
-    const scriptedValidators = {
+    const latest = <T,>(evidence: readonly EvidenceRecord[], kind: string) =>
+      [...evidence].reverse().find((e) => e.kind === kind)?.payload as T | undefined;
+    const scriptedValidators: Record<string, Validator> = {
       "exact-greeting": {
-        evaluate(input: {
-          evidence: Array<{ kind: string; payload?: { path?: string; bytes?: string; changedPaths?: string[] } }>;
-        }) {
-          const file = [...input.evidence].reverse().find((e) => e.kind === "file")?.payload;
-          const manifest = [...input.evidence].reverse().find((e) => e.kind === "workspace")?.payload;
+        evaluate(input) {
+          const file = latest<{ path?: string; bytes?: string }>(input.evidence, "file");
+          const manifest = latest<{ changedPaths?: string[] }>(input.evidence, "workspace");
           if (!file || !manifest) {
             return { status: "inconclusive" as const, reason: "missing evidence" };
           }
@@ -180,8 +181,8 @@ describe("public controller: hello child host + stop/resume/inspect", () => {
         },
       },
       "independent-reviewer": {
-        evaluate(input: { evidence: Array<{ kind: string; payload?: { verdict?: string } }> }) {
-          const review = [...input.evidence].reverse().find((e) => e.kind === "review")?.payload;
+        evaluate(input) {
+          const review = latest<{ verdict?: string }>(input.evidence, "review");
           if (!review) {
             return { status: "inconclusive" as const, reason: "missing review" };
           }

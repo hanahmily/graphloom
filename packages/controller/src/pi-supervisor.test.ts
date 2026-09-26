@@ -236,7 +236,7 @@ describe("Pi supervisor recovery (controller)", () => {
           "review",
         ),
         validate({ stageId: "review", requirementIds: ["independent-review"] }, "val review"),
-        stop({ reason: "complete" }, "done"),
+        stop({ reason: "complete", blocker: "none" }, "done"),
       ],
     });
 
@@ -374,7 +374,7 @@ describe("Pi supervisor recovery (controller)", () => {
             "val review",
           );
         }
-        return stop({ reason: "complete" }, "done");
+        return stop({ reason: "complete", blocker: "none" }, "done");
       },
     };
 

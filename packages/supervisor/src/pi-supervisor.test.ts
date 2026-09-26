@@ -89,9 +89,9 @@ describe("createPiSupervisor", () => {
     const supervisor = createPiSupervisor({ session });
 
     const first = await supervisor.decide(sampleInput("ep-1"));
-    expect(first.action.type).toBe("return");
+    expect(first).toMatchObject({ action: { type: "return" } });
     const second = await supervisor.decide(sampleInput("ep-2"));
-    expect(second.action.type).toBe("stop");
+    expect(second).toMatchObject({ action: { type: "stop" } });
 
     expect(prompted).toHaveLength(2);
     expect(prompted[0]).toContain("ep-1");
@@ -118,7 +118,7 @@ describe("createPiSupervisor", () => {
       { provider: "deepseek", modelId: "deepseek-chat" },
     ];
     const supervisor = createPiSupervisor({
-      session: fakeSession({ provider: "minimax-cn", modelId: "MiniMax-M3" }),
+      session: fakeSession({ replies: [], provider: "minimax-cn", modelId: "MiniMax-M3" }),
       configuredModels: configured,
     });
 
@@ -151,6 +151,7 @@ describe("createPiSupervisor", () => {
   it("records a failed switch intent when setModel throws mid-flight", async () => {
     const supervisor = createPiSupervisor({
       session: fakeSession({
+        replies: [],
         switchImpl: async () => {
           throw new Error("auth missing");
         },

@@ -227,7 +227,7 @@ describe("corrections, crash containment, unfamiliar failure (#28)", () => {
           "review after return",
         ),
         validate({ stageId: "review", requirementIds: ["independent-review"] }, "validate review"),
-        stop({ reason: "complete" }, "done"),
+        stop({ reason: "complete", blocker: "none" }, "done"),
       ],
     });
 
@@ -330,7 +330,7 @@ describe("corrections, crash containment, unfamiliar failure (#28)", () => {
           "review",
         ),
         validate({ stageId: "review", requirementIds: ["independent-review"] }, "validate review"),
-        stop({ reason: "complete" }, "done"),
+        stop({ reason: "complete", blocker: "none" }, "done"),
       ],
     });
 
@@ -430,7 +430,7 @@ describe("corrections, crash containment, unfamiliar failure (#28)", () => {
         const writeOk = view.receipts.some((r) => r.stageId === "write" && r.valid);
         const reviewOk = view.receipts.some((r) => r.stageId === "review" && r.valid);
         if (writeOk && reviewOk) {
-          return stop({ reason: "complete" }, "done");
+          return stop({ reason: "complete", blocker: "none" }, "done");
         }
         if (!writeOk) {
           const hasFile = view.evidence.some((e) => e.kind === "file");
@@ -585,7 +585,7 @@ describe("corrections, crash containment, unfamiliar failure (#28)", () => {
           "dispatch reviewer",
         ),
         validate({ stageId: "review", requirementIds: ["independent-review"] }, "validate review"),
-        stop({ reason: "complete" }, "done"),
+        stop({ reason: "complete", blocker: "none" }, "done"),
       ],
     });
 
@@ -688,7 +688,7 @@ describe("corrections, crash containment, unfamiliar failure (#28)", () => {
           "dispatch reviewer",
         ),
         validate({ stageId: "review", requirementIds: ["independent-review"] }, "validate review"),
-        stop({ reason: "complete" }, "done"),
+        stop({ reason: "complete", blocker: "none" }, "done"),
       ],
     });
 
@@ -883,7 +883,7 @@ describe("corrections, crash containment, unfamiliar failure (#28)", () => {
             "review",
           ),
           validate({ stageId: "review", requirementIds: ["independent-review"] }, "validate review"),
-          stop({ reason: "complete" }, "done"),
+          stop({ reason: "complete", blocker: "none" }, "done"),
         ],
       }),
       validators,

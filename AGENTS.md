@@ -24,6 +24,9 @@ npm run typecheck
 npm run build
 ```
 
+`npm run typecheck` checks test files too, through each workspace's
+`tsconfig.test.json`; builds use `tsconfig.json`, so `dist/` never contains tests.
+
 ## Principles
 
 - Graphs are executable TypeScript plugins. Task YAML selects a graph; plugin code
