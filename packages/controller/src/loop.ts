@@ -824,10 +824,14 @@ async function applyDecision(
     case "observe":
       return observeWorkspace(state, action.observe);
     case "validate": {
+      const undeclared = stopForUndeclaredStage(state, action.validate.stageId);
+      if (undeclared) return undeclared;
       const result = await admitValidation(state, action.validate, deps.validators);
       return result.state;
     }
     case "reenter": {
+      const undeclared = stopForUndeclaredStage(state, action.reenter.stageId);
+      if (undeclared) return undeclared;
       if (state.budgets.corrections <= 0) {
         return {
           ...state,
@@ -1026,16 +1030,8 @@ async function prepareDispatch(
     };
   }
 
-  if (!state.definition.stages.some((s) => s.id === job.stageId)) {
-    return {
-      state: {
-        ...state,
-        status: "stopped",
-        stopReason: "undeclared stage",
-        blocker: `stageId ${job.stageId} is not in the pinned graph definition`,
-      },
-    };
-  }
+  const undeclared = stopForUndeclaredStage(state, job.stageId);
+  if (undeclared) return { state: undeclared };
 
   if (state.mode === "recovery") {
     const refused = recoveryDispatchRefusal(state, job);
@@ -1295,6 +1291,17 @@ function applyDispatchResult(
   const { pendingDispatch: _done, ...cleared } = next;
   void _done;
   return cleared;
+}
+
+/** A route naming a step outside the pinned definition stops the run instead of adding it. */
+function stopForUndeclaredStage(state: DurableRunState, stageId: string): DurableRunState | undefined {
+  if (state.definition.stages.some((s) => s.id === stageId)) return undefined;
+  return {
+    ...state,
+    status: "stopped",
+    stopReason: "undeclared stage",
+    blocker: `stageId ${stageId} is not in the pinned graph definition`,
+  };
 }
 
 const MAX_TRIGGER_CHARS = 500;

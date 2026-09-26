@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, writeFile, rm, symlink } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, readdir, readFile, writeFile, rm, symlink } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -786,6 +786,284 @@ describe("qualified repair + same-run activation (#29)", () => {
   });
 
   it.each([
+    [
+      "is gone",
+      (artifactDir: string) => rm(artifactDir, { recursive: true, force: true }),
+      "candidate is missing or unreadable",
+    ],
+    [
+      "changed after review",
+      (artifactDir: string) => writeFile(path.join(artifactDir, "candidate", "p.txt"), "edited\n", "utf8"),
+      "candidate changed after independent review",
+    ],
+  ] as const)("stops activation when the qualified candidate %s", async (_case, alter, blocker) => {
+    const env = await makeEnv();
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: escalatingPlugin(),
+      validators: goodValidators,
+      supervisor: createScriptedSupervisor({
+        sessionId: "sup-altered",
+        decisions: [
+          qualifyRepair({ target: "plugin", reason: "try" }, "q"),
+          async (input) => {
+            const qualified = input.view.repairCandidates?.find((c) => c.status === "qualified");
+            await alter(path.join(env.stateRoot, "repair-altered", "repairs", qualified!.artifactId));
+            return activateFirstQualified()(input);
+          },
+        ],
+      }),
+      repair: approvingRepair("sup-altered"),
+      runner: createScriptedRunner({ jobs: [] }),
+      stateRoot: env.stateRoot,
+      runId: "repair-altered",
+    });
+    expect(report.status).toBe("stopped");
+    expect(report.stopReason).toBe("activate_repair candidate digest mismatch");
+    expect(report.blocker).toBe(blocker);
+    const state = await loadRunState(report.stateDir);
+    expect(state.repairCandidates?.[0]?.status).toBe("superseded");
+    expect(state.activeVersion).toBe("hello@0.1.0");
+  });
+
+  const alwaysPasses: Validator = {
+    evaluate() {
+      return { status: "passed" as const, reason: "always passes" };
+    },
+  };
+
+  it.each([
+    [
+      "negative tests",
+      {
+        async preflight() {
+          return { ok: false, summary: "replacement passes the missing-newline case" };
+        },
+      },
+      "replacement passes the missing-newline case",
+    ],
+    [
+      "independent review",
+      {
+        reviewer: {
+          sessionId: "sup-perm-reviewer",
+          async review() {
+            return { approved: false, reason: "gate accepts any bytes" };
+          },
+        },
+      },
+      "gate accepts any bytes",
+    ],
+  ] as const)("keeps a permissive replacement out when rejected by %s", async (_gate, override, reason) => {
+    const env = await makeEnv();
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: escalatingPlugin(),
+      validators: { ...goodValidators, "exact-greeting": defectiveGreeting },
+      supervisor: createScriptedSupervisor({
+        sessionId: "sup-perm",
+        decisions: [
+          qualifyRepair({ target: "validator", reason: "defective gate" }, "q"),
+          (input) =>
+            activateRepair(
+              { qualifiedArtifactId: input.view.repairCandidates![0]!.artifactId, reason: "activate anyway" },
+              "act",
+            ),
+        ],
+      }),
+      repair: {
+        ...approvingRepair("sup-perm"),
+        ...override,
+        materializeValidators: () => ({ ...goodValidators, "exact-greeting": alwaysPasses }),
+      },
+      runner: createScriptedRunner({ jobs: [] }),
+      stateRoot: env.stateRoot,
+      runId: "repair-permissive",
+    });
+    expect(report.status).toBe("stopped");
+    expect(report.stopReason).toBe("activate_repair missing qualified artifact");
+    const state = await loadRunState(report.stateDir);
+    expect(state.repairCandidates?.[0]).toMatchObject({ status: "rejected", rejectionReason: reason });
+    expect(state.activeVersion).toBe("hello@0.1.0");
+    expect(state.receipts).toEqual([]);
+  });
+
+  it("moves the cursor back to Write when the Write validator is replaced while Review is active", async () => {
+    const env = await makeEnv();
+    const BAD = "Hello, GraphLoom!";
+    const writeJob = (instruction: string, id: string) =>
+      dispatch({ stageId: "write", kind: "agent", purpose: "work", instruction, writeScope: [GREETING_PATH] }, id);
+    const reviewJob = (id: string) =>
+      dispatch({ stageId: "review", kind: "agent", purpose: "review", instruction: "review", readOnly: true }, id);
+    let afterActivation: RunView | undefined;
+    const jobs = [
+      { write: BAD },
+      { verdict: "request_changes" },
+      { write: GREETING },
+      { verdict: "approved" },
+    ];
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({
+        definition,
+        advances: [
+          writeJob("write greeting", "w1"),
+          observe({ paths: [GREETING_PATH], includeWorkspaceManifest: true }, "o1"),
+          validate({ stageId: "write", requirementIds: ["greeting-bytes"] }, "v1"),
+          reviewJob("r1"),
+          supervise({ reason: "review found bytes the Write gate accepted" }, "esc"),
+          // Old evidence cannot establish Review once Write is invalidated.
+          validate({ stageId: "review", requirementIds: ["independent-review"] }, "stale review"),
+          writeJob("rewrite greeting", "w2"),
+          observe({ paths: [GREETING_PATH], includeWorkspaceManifest: true }, "o2"),
+          validate({ stageId: "write", requirementIds: ["greeting-bytes"] }, "v2"),
+          reviewJob("r2"),
+          validate({ stageId: "review", requirementIds: ["independent-review"] }, "v3"),
+          stop({ reason: "complete", blocker: "none" }, "done"),
+        ],
+      }),
+      validators: { ...goodValidators, "exact-greeting": alwaysPasses },
+      supervisor: createScriptedSupervisor({
+        sessionId: "sup-cursor",
+        decisions: [
+          qualifyRepair({ target: "validator", reason: "Write gate accepts any bytes" }, "q"),
+          activateFirstQualified(),
+          (input) => {
+            afterActivation = input.view;
+            return returnToNormal({ summary: "Write gate replaced" }, "ret");
+          },
+        ],
+      }),
+      repair: { ...approvingRepair("sup-cursor"), materializeValidators: () => goodValidators },
+      runner: createScriptedRunner({
+        jobs: jobs.map((step) => async (_job, ctx) => {
+          if ("write" in step) {
+            await writeFile(path.join(ctx.worktreePath, GREETING_PATH), step.write, "utf8");
+            return { status: "ok" as const, summary: "wrote" };
+          }
+          return {
+            status: "ok" as const,
+            summary: step.verdict,
+            evidence: [{ kind: "review" as const, payload: { verdict: step.verdict, summary: step.verdict } }],
+          };
+        }),
+      }),
+      stateRoot: env.stateRoot,
+      runId: "repair-cursor",
+    });
+
+    expect(afterActivation?.current.stageId).toBe("write");
+    expect(afterActivation?.outstanding).toEqual([]);
+    expect(afterActivation?.receipts.filter((r) => r.valid)).toEqual([]);
+    expect(report.status).toBe("succeeded");
+    const writes = report.receipts.filter((r) => r.stageId === "write");
+    expect(writes.map((r) => r.valid)).toEqual([false, true]);
+    expect(writes[1]!.evidenceRefs.some((ref) => writes[0]!.evidenceRefs.includes(ref))).toBe(false);
+    expect(report.receipts.filter((r) => r.stageId === "review").map((r) => r.valid)).toEqual([true]);
+  });
+
+  it("aborts an activation interrupted by a restart and activates exactly once on resume", async () => {
+    const env = await makeEnv();
+    const runId = "repair-restart";
+    const stateFile = path.join(env.stateRoot, runId, "state.json");
+    let loads = 0;
+    const first = await createController().run({
+      taskPath: env.taskPath,
+      plugin: escalatingPlugin(),
+      validators: goodValidators,
+      recreateHost: async (ctx) => {
+        // The second load is activation's, after its intent is durable.
+        if (loads++ === 1) await copyFile(stateFile, `${stateFile}.crash`);
+        return createInProcessPluginHost(createScriptedGraph({ definition, advances: [] }), {
+          activeVersion: ctx.activeVersion,
+          generation: ctx.generation,
+        });
+      },
+      supervisor: createScriptedSupervisor({
+        sessionId: "sup-restart",
+        decisions: [
+          qualifyRepair({ target: "plugin", reason: "try" }, "q"),
+          activateFirstQualified(),
+          stop({ reason: "pause", blocker: "operator pause" }, "s"),
+        ],
+      }),
+      repair: approvingRepair("sup-restart"),
+      runner: createScriptedRunner({ jobs: [] }),
+      stateRoot: env.stateRoot,
+      runId,
+    });
+    expect(first.status).toBe("stopped");
+    // Durable state as a crash inside activation would leave it.
+    await copyFile(`${stateFile}.crash`, stateFile);
+    expect((await loadRunState(first.stateDir)).activationIntent?.status).toBe("intent");
+
+    let reconciled: Awaited<ReturnType<typeof loadRunState>> | undefined;
+    const resumed = await createController().resume({
+      runRef: first.stateDir,
+      plugin: escalatingPlugin(),
+      validators: goodValidators,
+      supervisor: createScriptedSupervisor({
+        sessionId: "sup-restart",
+        decisions: [
+          async (input) => {
+            reconciled = await loadRunState(first.stateDir);
+            return activateFirstQualified()(input);
+          },
+          stop({ reason: "pause", blocker: "operator pause" }, "s"),
+        ],
+      }),
+      repair: approvingRepair("sup-restart"),
+      runner: createScriptedRunner({ jobs: [] }),
+    });
+
+    expect(reconciled?.activationIntent?.status).toBe("aborted");
+    expect(reconciled?.activeVersion).toBe("hello@0.1.0");
+    expect(reconciled?.repairCandidates?.map((c) => c.status)).toEqual(["qualified"]);
+    expect(resumed.stopReason).toBe("pause");
+    const state = await loadRunState(first.stateDir);
+    const [candidate] = state.repairCandidates ?? [];
+    expect(state.repairCandidates?.map((c) => c.status)).toEqual(["activated"]);
+    expect(state.activeVersion).toBe(`hello@repair-${candidate!.artifactId}`);
+    expect(state.activationIntent?.status).toBe("committed");
+    expect(state.budgets.corrections).toBe(7);
+    expect(await readdir(path.join(first.stateDir, "repairs"))).toEqual([candidate!.artifactId]);
+  });
+
+  it("stops resume when the activated candidate is gone", async () => {
+    const env = await makeEnv();
+    const first = await createController().run({
+      taskPath: env.taskPath,
+      plugin: escalatingPlugin(),
+      validators: goodValidators,
+      supervisor: createScriptedSupervisor({
+        sessionId: "sup-lost",
+        decisions: [
+          qualifyRepair({ target: "plugin", reason: "try" }, "q"),
+          activateFirstQualified(),
+          stop({ reason: "pause", blocker: "operator pause" }, "s"),
+        ],
+      }),
+      repair: approvingRepair("sup-lost"),
+      runner: createScriptedRunner({ jobs: [] }),
+      stateRoot: env.stateRoot,
+      runId: "repair-lost",
+    });
+    const [candidate] = (await loadRunState(first.stateDir)).repairCandidates ?? [];
+    expect(candidate?.status).toBe("activated");
+    await rm(path.join(first.stateDir, "repairs", candidate!.artifactId), { recursive: true, force: true });
+
+    const resumed = await createController().resume({
+      runRef: first.stateDir,
+      plugin: escalatingPlugin(),
+      validators: goodValidators,
+      repair: approvingRepair("sup-lost"),
+      runner: createScriptedRunner({ jobs: [] }),
+    });
+    expect(resumed.status).toBe("stopped");
+    expect(resumed.stopReason).toBe("pin mismatch");
+  });
+
+  it.each([
     ["stages", { ...definition, stages: [...definition.stages].reverse() }, /alters pinned stages/],
     [
       "requirements",
@@ -1104,6 +1382,7 @@ describe("qualified repair + same-run activation (#29)", () => {
       ...definition,
       requirements: definition.requirements.map((r) => (r.id === "greeting-bytes" ? { ...r, ...patch } : r)),
     });
+    const withStages = (stages: GraphDefinition["stages"]): GraphDefinition => ({ ...definition, stages });
 
     it.each([
       [
@@ -1127,6 +1406,18 @@ describe("qualified repair + same-run activation (#29)", () => {
         /alters pinned defaultValidators: greeting-bytes/,
       ],
       ["the graph version", { ...definition, version: "0.2.0" }, /candidate version 0\.2\.0 != pinned 0\.1\.0/],
+      [
+        "its steps by adding one",
+        withStages([...definition.stages, { id: "deploy", name: "Deploy", requirementIds: ["independent-review"] }]),
+        /alters pinned stages/,
+      ],
+      ["its steps by deleting one", withStages(definition.stages.slice(0, 1)), /alters pinned stages/],
+      [
+        "its steps by renaming one",
+        withStages(definition.stages.map((s) => (s.id === "review" ? { ...s, id: "approve", name: "Approve" } : s))),
+        /alters pinned stages/,
+      ],
+      ["its steps by reordering them", withStages([...definition.stages].reverse()), /alters pinned stages/],
       [
         "the private-state schema",
         { ...definition, privateStateSchema: "hello-private-v2" },

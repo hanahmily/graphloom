@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,6 +9,7 @@ import {
   createScriptedGraph,
   dispatch,
   observe,
+  reenter,
   stop,
   validate,
   type GraphDefinition,
@@ -335,6 +336,119 @@ request: |
         stateRoot: env.stateRoot,
       }),
     ).rejects.toThrow(/traversal|escapes|relative/i);
+  });
+});
+
+describe("release scenarios (#60)", () => {
+  const writeJob = dispatch(
+    { stageId: "write", kind: "agent", purpose: "work", instruction: "write", writeScope: [GREETING_PATH] },
+    "dispatch writer",
+  );
+  const writeGreeting = async (_job: unknown, ctx: { worktreePath: string }) => {
+    await writeFile(path.join(ctx.worktreePath, GREETING_PATH), GREETING, "utf8");
+    return { status: "ok" as const, summary: "wrote" };
+  };
+
+  async function pausedRun(env: Awaited<ReturnType<typeof makeEnv>>, runId: string) {
+    const paused = await createController().run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({
+        definition,
+        advances: [writeJob, stop({ reason: "paused", blocker: "test pause" }, "pause")],
+      }),
+      runner: createScriptedRunner({ jobs: [writeGreeting] }),
+      validators,
+      stateRoot: env.stateRoot,
+      runId,
+    });
+    expect(paused.status).toBe("stopped");
+    return paused;
+  }
+
+  it("stops resume when the run's worktree is gone", async () => {
+    const env = await makeEnv();
+    const paused = await pausedRun(env, "lost-worktree");
+    await rm(paused.worktreePath, { recursive: true, force: true });
+
+    const resumed = await createController().resume({
+      runRef: paused.stateDir,
+      plugin: scriptedHappyPath(),
+      runner: createScriptedRunner({ jobs: [] }),
+      validators,
+    });
+    expect(resumed.status).toBe("stopped");
+    expect(resumed.stopReason).toBe("worktree mismatch");
+    expect(resumed.blocker).toMatch(/worktree missing/);
+  });
+
+  it("stops resume when the pinned bundle is gone", async () => {
+    const env = await makeEnv();
+    const paused = await pausedRun(env, "lost-bundle");
+    // Removes the task's link to the bundle, not the bundle it points at.
+    await rm(path.join(env.taskDir, "plugins", "hello"));
+
+    const resumed = await createController().resume({
+      runRef: paused.stateDir,
+      plugin: scriptedHappyPath(),
+      runner: createScriptedRunner({ jobs: [] }),
+      validators,
+    });
+    expect(resumed.status).toBe("stopped");
+    expect(resumed.stopReason).toBe("pin mismatch");
+    expect(await readFile(path.join(helloBundle, "graphloom.manifest.json"), "utf8")).toContain("hello");
+  });
+
+  it("refuses Review evidence the writer produced", async () => {
+    const env = await makeEnv();
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({
+        definition,
+        advances: [
+          writeJob,
+          observe({ paths: [GREETING_PATH], includeWorkspaceManifest: true }, "observe"),
+          validate({ stageId: "write", requirementIds: ["greeting-bytes"] }, "validate write"),
+          validate({ stageId: "review", requirementIds: ["independent-review"] }, "self-review"),
+          stop({ reason: "complete", blocker: "none" }, "done"),
+        ],
+      }),
+      runner: createScriptedRunner({
+        jobs: [
+          async (job, ctx) => ({
+            ...(await writeGreeting(job, ctx)),
+            evidence: [{ kind: "review", payload: { verdict: "approved", summary: "my own work is fine" } }],
+          }),
+        ],
+      }),
+      validators,
+      stateRoot: env.stateRoot,
+      runId: "self-review",
+    });
+    expect(report.status).toBe("stopped");
+    expect(report.receipts.filter((r) => r.valid).map((r) => r.stageId)).toEqual(["write"]);
+    expect(report.evidence.filter((e) => e.kind === "review")).toEqual([]);
+    expect(report.evidence.find((e) => e.kind === "other")?.payload).toMatchObject({ selfReported: "review" });
+  });
+
+  it.each([
+    ["a dispatch", dispatch({ stageId: "deploy", kind: "agent", purpose: "work", instruction: "ship", writeScope: ["x"] }, "d")],
+    ["a reentry", reenter({ stageId: "deploy", reason: "again" }, "r")],
+    ["a validation", validate({ stageId: "deploy" }, "v")],
+  ])("stops when %s names an undeclared step", async (_route, decision) => {
+    const env = await makeEnv();
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({ definition, advances: [decision] }),
+      runner: createScriptedRunner({ jobs: [] }),
+      validators,
+      stateRoot: env.stateRoot,
+      runId: "undeclared",
+    });
+    expect(report.status).toBe("stopped");
+    expect(report.stopReason).toBe("undeclared stage");
+    expect(report.blocker).toMatch(/deploy/);
+    const state = await loadRunState(report.stateDir);
+    expect(state.definition.stages.map((s) => s.id)).toEqual(["write", "review"]);
   });
 });
 

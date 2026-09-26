@@ -568,7 +568,7 @@ export async function applyActivateRepair(
 
   // Base must still match the live install; concurrent activation of another candidate
   // would have moved the pin / changed the tree digest.
-  const liveDigest = await digestDirectoryTree(state.intake.bundle.bundlePath);
+  const liveDigest = await digestDirectoryTree(state.intake.bundle.bundlePath).catch(() => undefined);
   if (liveDigest !== artifact.baseDigest) {
     candidates[idx] = { ...artifact, status: "superseded" };
     return {
@@ -596,7 +596,7 @@ export async function applyActivateRepair(
   }
 
   // Recompute so post-review edits cannot activate under a stale approval.
-  const liveCandidateDigest = await digestDirectoryTree(artifact.candidateRoot);
+  const liveCandidateDigest = await digestDirectoryTree(artifact.candidateRoot).catch(() => undefined);
   if (liveCandidateDigest !== artifact.candidateDigest) {
     candidates[idx] = { ...artifact, status: "superseded" };
     return {
@@ -605,7 +605,10 @@ export async function applyActivateRepair(
         repairCandidates: candidates,
         status: "stopped",
         stopReason: "activate_repair candidate digest mismatch",
-        blocker: "candidate changed after independent review",
+        blocker:
+          liveCandidateDigest === undefined
+            ? "candidate is missing or unreadable"
+            : "candidate changed after independent review",
       },
       validators: deps.validators,
     };

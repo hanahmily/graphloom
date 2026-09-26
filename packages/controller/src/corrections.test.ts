@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -151,6 +151,99 @@ describe("corrections, crash containment, unfamiliar failure (#28)", () => {
     ]);
     const inspect = await controller.inspect(report.stateDir);
     expect(inspect.budgets.corrections).toBeLessThan(8);
+  });
+
+  it("catches an unrelated edit with the unchanged Write validator and repairs it", async () => {
+    const env = await makeEnv();
+    let writes = 0;
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      runner: createScriptedRunner({
+        jobs: Array.from({ length: 4 }, () => async (
+          job: { purpose?: string; readOnly?: boolean },
+          ctx: { worktreePath: string },
+        ) => {
+          if (job.readOnly) {
+            return {
+              status: "ok" as const,
+              summary: "approved",
+              evidence: [{ kind: "review" as const, payload: { verdict: "approved", summary: "ok" } }],
+            };
+          }
+          writes += 1;
+          await writeFile(path.join(ctx.worktreePath, GREETING_PATH), GREETING, "utf8");
+          if (writes === 1) {
+            await writeFile(path.join(ctx.worktreePath, "NOTES.txt"), "scratch\n", "utf8");
+          } else {
+            await rm(path.join(ctx.worktreePath, "NOTES.txt"), { force: true });
+          }
+          return { status: "ok" as const, summary: `write-${writes}` };
+        }),
+      }),
+      stateRoot: env.stateRoot,
+      runId: "unrelated1",
+    });
+
+    expect(report.status).toBe("succeeded");
+    expect(writes).toBe(2);
+    const writeReceipts = report.receipts.filter((r) => r.stageId === "write");
+    expect(writeReceipts.map((r) => r.valid)).toEqual([true]);
+    const accepted = report.evidence.filter((e) => writeReceipts[0]!.evidenceRefs.includes(e.ref));
+    expect(accepted.find((e) => e.kind === "workspace")?.payload).toMatchObject({ changedPaths: [GREETING_PATH] });
+  });
+
+  it("repairs an unknown launch failure through the supervisor without a duplicate Write", async () => {
+    const env = await makeEnv();
+    const jobs: string[] = [];
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      supervisor: createScriptedSupervisor({
+        decisions: [
+          dispatch(
+            {
+              stageId: "write",
+              kind: "agent",
+              purpose: "work",
+              instruction: "write GREETING.txt with the corrected invocation",
+              writeScope: [GREETING_PATH],
+            },
+            "relaunch writer",
+          ),
+          observe({ paths: [GREETING_PATH], includeWorkspaceManifest: true }, "observe"),
+          validate({ stageId: "write", requirementIds: ["greeting-bytes"] }, "validate write"),
+          returnToNormal({ summary: "writer relaunched" }, "return"),
+        ],
+      }),
+      runner: createScriptedRunner({
+        jobs: [
+          async () => {
+            jobs.push("launch failed");
+            return { status: "failed" as const, summary: "spawn writer-cli ENOENT" };
+          },
+          async (_job, ctx) => {
+            jobs.push("write");
+            await writeFile(path.join(ctx.worktreePath, GREETING_PATH), GREETING, "utf8");
+            return { status: "ok" as const, summary: "wrote" };
+          },
+          async (job) => {
+            jobs.push(job.stageId);
+            return {
+              status: "ok" as const,
+              summary: "approved",
+              evidence: [{ kind: "review" as const, payload: { verdict: "approved", summary: "ok" } }],
+            };
+          },
+        ],
+      }),
+      stateRoot: env.stateRoot,
+      runId: "launch1",
+    });
+
+    expect(report.status).toBe("succeeded");
+    expect(jobs).toEqual(["launch failed", "write", "review"]);
+    const state = await loadRunState(report.stateDir);
+    expect(state.recoveryTrigger).toBeUndefined();
+    expect(report.receipts.filter((r) => r.valid).map((r) => r.stageId).sort()).toEqual(["review", "write"]);
   });
 
   it("reenters Write on review request_changes and requires fresh Review", async () => {
