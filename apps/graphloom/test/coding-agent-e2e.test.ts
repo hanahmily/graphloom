@@ -203,6 +203,43 @@ describe("graph → coding agent → GitHub child executor", () => {
     expect(await readTree(report.stateDir)).not.toContain(TOKEN);
   });
 
+  it("records a rate-limited tool call like a graph dispatch and holds further calls until the retry time", async () => {
+    const server = await fake();
+    server.rateLimitNext(1, 60);
+    const env = await makeEnv();
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: graph([readComments("c1"), readComments("c2"), writeGreeting]),
+      validators,
+      runner: hostRunner(server),
+      stateRoot: env.stateRoot,
+      runId: "agent-rate-limit",
+    });
+
+    expect(report.status, report.blocker).toBe("succeeded");
+    expect(server.requests).toHaveLength(1);
+    const state = await loadRunState(report.stateDir);
+    expect(state.childOperations?.map((c) => [c.toolCallId, c.status])).toEqual([["c1", "failed"]]);
+    const agent = state.evidence
+      .map((e) => e.payload as { codingAgent?: { output: { toolResults: { result: { summary: string; retryAfterMs?: number } }[] } } })
+      .find((p) => p.codingAgent)!.codingAgent!;
+    const [limited, held] = agent.output.toolResults.map((t) => t.result);
+    expect(limited!.retryAfterMs).toBeGreaterThan(0);
+    expect(held!.summary).toMatch(/^executor graphloom\.github\/list-issue-comments asked not to be called before /);
+    expect(held!.retryAfterMs).toBeGreaterThan(0);
+    const failure = state.evidence
+      .map((e) => e.payload as { executorFailure?: Record<string, unknown>; producer?: { toolCallId?: string } })
+      .find((p) => p.executorFailure);
+    expect(failure?.producer?.toolCallId).toBe("c1");
+    expect(failure?.executorFailure).toMatchObject({
+      stageId: "write",
+      status: "failed",
+      executor: { id: "graphloom.github/list-issue-comments" },
+      retryAfterMs: limited!.retryAfterMs,
+    });
+    expect(state.executorRetryAt?.["graphloom.github/list-issue-comments"]).toBeDefined();
+  });
+
   it("stop mid-write kills both processes and a retried agent cannot repeat the write", async () => {
     const server = await fake();
     server.hangAfterNextWrite();

@@ -1,5 +1,5 @@
 import type { JobSpec } from "@graphloom/sdk";
-import type { DurableRunState } from "./state.js";
+import type { DurableRunState, PendingDispatch } from "./state.js";
 import { readWorktreeFile } from "./worktree.js";
 
 /**
@@ -13,6 +13,13 @@ export async function reconcilePendingDispatch(
   state: DurableRunState,
 ): Promise<{ state: DurableRunState; settled: boolean; reason: string }> {
   const pending = state.pendingDispatch;
+  if (pending?.status === "waiting") {
+    return {
+      state: dropWaitingDispatch(state, pending),
+      settled: true,
+      reason: `pending ${pending.operationId} never started; retry allowed`,
+    };
+  }
   if (!pending || pending.status !== "pending") {
     return { state, settled: true, reason: "no pending dispatch" };
   }
@@ -61,6 +68,30 @@ export async function reconcilePendingDispatch(
     state,
     settled: false,
     reason: `pending ${opId} (${job.purpose}/${job.kind}) needs operator reconcile`,
+  };
+}
+
+export function isUnsettled(pending: PendingDispatch): boolean {
+  return pending.status === "pending" || pending.status === "waiting";
+}
+
+/**
+ * A dispatch still waiting for its executor's retry time never reached the
+ * runner. Drop it, keep the retry time, and refund the wait not yet spent, so
+ * the next dispatch charges only what remains.
+ */
+function dropWaitingDispatch(state: DurableRunState, pending: PendingDispatch): DurableRunState {
+  const { pendingDispatch: _p, ...rest } = state;
+  void _p;
+  const unspent = pending.notBefore !== undefined ? Math.max(0, Date.parse(pending.notBefore) - Date.now()) : 0;
+  const executorId = pending.executor?.id;
+  return {
+    ...rest,
+    outstanding: state.outstanding.filter((o) => o.operationId !== pending.operationId),
+    budgets: { ...state.budgets, waitMs: (state.budgets.waitMs ?? 0) + unspent },
+    ...(executorId !== undefined && pending.notBefore !== undefined
+      ? { executorRetryAt: { ...state.executorRetryAt, [executorId]: pending.notBefore } }
+      : {}),
   };
 }
 

@@ -3,7 +3,12 @@ import {
   BUILTIN_COMMAND_EXECUTOR_ID,
   type ExecutorPin,
 } from "@graphloom/sdk";
-import { digestExecutorSource, type ExecutorSourceOverride, type Runner } from "@graphloom/runner";
+import {
+  digestExecutorSource,
+  type ExecutorDescriptor,
+  type ExecutorSourceOverride,
+  type Runner,
+} from "@graphloom/runner";
 import type { DurableRunState, ExecutorCatalogEntry } from "./state.js";
 
 /** Pin every executor the runner serves, with the digest of the code it would run. */
@@ -39,18 +44,38 @@ export async function verifyExecutorCatalog(state: DurableRunState, runner: Runn
   if (live === undefined) return "the runner cannot describe the executors this run pinned";
   const byId = new Map(live.map((d) => [d.id, d]));
   for (const entry of pinned) {
+    const current = byId.get(entry.id);
     if (entry.repair !== undefined) {
       const digest = await digestExecutorSource(entry.repair.root).catch(() => undefined);
       if (digest !== entry.digest) {
         return `run-local repair ${entry.repair.artifactId} of executor ${entry.id} is missing or changed`;
       }
-      if (!byId.has(entry.id)) return `pinned executor ${entry.id} is no longer served`;
+      if (current === undefined) return `pinned executor ${entry.id} is no longer served`;
+      // The copy runs under the runner's current configuration for that executor.
+      const changed = changedAttribute(entry, current, ["isolation", "builtin"]);
+      if (changed) return `pinned executor ${entry.id} changed: ${changed}`;
       continue;
     }
-    const current = byId.get(entry.id);
     if (current === undefined) return `pinned executor ${entry.id} is no longer installed`;
     if (current.digest !== entry.digest) {
       return `pinned executor ${entry.id} changed: digest ${current.digest.slice(0, 12)} != pinned ${entry.digest.slice(0, 12)}`;
+    }
+    const changed = changedAttribute(entry, current, ["source", "entryModule", "isolation", "builtin"]);
+    if (changed) return `pinned executor ${entry.id} changed: ${changed}`;
+  }
+  return undefined;
+}
+
+type PinnedAttribute = "source" | "entryModule" | "isolation" | "builtin";
+
+function changedAttribute(
+  entry: ExecutorCatalogEntry,
+  current: ExecutorDescriptor,
+  attributes: PinnedAttribute[],
+): string | undefined {
+  for (const attribute of attributes) {
+    if (entry[attribute] !== current[attribute]) {
+      return `${attribute} ${String(current[attribute])} != pinned ${String(entry[attribute])}`;
     }
   }
   return undefined;
@@ -74,7 +99,11 @@ export function resolveExecutorPin(
   pin: ExecutorPin,
 ): { pin: ExecutorPin; source?: ExecutorSourceOverride } | { error: string } {
   const entry = catalogEntry(state, pin.id);
-  if (entry === undefined) return { pin };
+  if (entry === undefined) {
+    // A runner that cannot describe its executors pins nothing to check against.
+    if (state.executorCatalog === undefined || isKindDefaultExecutor(pin.id)) return { pin };
+    return { error: `executor ${pin.id} is not pinned for this run` };
+  }
   if (pin.digest !== undefined && pin.digest !== entry.digest) {
     return { error: `executor ${pin.id} digest ${pin.digest.slice(0, 12)} is not the run's pin ${entry.digest.slice(0, 12)}` };
   }

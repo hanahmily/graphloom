@@ -43,7 +43,7 @@ import {
   readOwnerClaim,
   reapOwnerProcesses,
 } from "./owner.js";
-import { reconcilePendingDispatch } from "./reconcile.js";
+import { isUnsettled, reconcilePendingDispatch } from "./reconcile.js";
 import { reconcileChildOperations } from "./children.js";
 import { pinExecutorCatalog, verifyExecutorCatalog } from "./executor-catalog.js";
 import {
@@ -388,7 +388,7 @@ export function createController(): Controller {
           await saveRunState(state);
           return;
         }
-        if (state.pendingDispatch?.status === "pending") {
+        if (state.pendingDispatch !== undefined && isUnsettled(state.pendingDispatch)) {
           const reconciled = await reconcilePendingDispatch(state);
           state = reconciled.state;
           if (!reconciled.settled) {

@@ -602,6 +602,14 @@ describe("executor pins and run-local copies", () => {
     expect(wrongCopy.status).toBe("failed");
     const served = await runner.runJob(echoJob(copyDigest), { ...ctx, executorSource });
     expect(served.summary).toBe("copy hi with no token");
+
+    const escaped = await runner.runJob(echoJob(copyDigest), {
+      ...ctx,
+      executorSource: { root: copy, entryModule: credentialFixture },
+    });
+    expect(escaped.summary).toBe(
+      `executor acme.cred/echo: run-local entry module ${credentialFixture} is outside its root ${copy}`,
+    );
   });
 
   it("refuses digest mismatches and run-local copies for in-process executors", async () => {

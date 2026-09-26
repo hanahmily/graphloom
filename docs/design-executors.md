@@ -438,20 +438,31 @@ starts: each executor's id, where it is served from, its isolation, and a SHA-25
 digest of the code it runs. A package's digest covers its tree without
 `node_modules`; a single-module executor's covers the module file. Every dispatch,
 including an agent's child tool call, carries the pinned digest, and the runner
-refuses to run different bytes. Resume stops with `executor pin mismatch` when a
-pinned executor changed or is no longer installed.
+refuses to run different bytes. A dispatch naming an executor outside the catalog
+is refused. Resume stops with `executor pin mismatch` when a pinned executor's
+digest, source, isolation, or built-in status changed, or it is no longer
+installed.
 
 A failed executor job records its evidence plus an `executorFailure` record
 (operation, stage, attempt, pinned executor, status, summary, and any requested
 wait). The shape is the same for built-in and custom executors. With a supervisor, the run then
 enters recovery with trigger `executor_failed`; without one it stops as before.
 In recovery the supervisor may dispatch work for the current stage only, through
-an executor the run pinned or a built-in agent/command default. It can retry the
+an executor the run pinned or a built-in agent/command default. When the runner
+cannot describe its executors, only those defaults are allowed. It can retry the
 same executor or switch to another one, but cannot add graph steps. An executor
-that returns `retryAfterMs` runs again no earlier than that. The wait is charged
-to the run's `waitMs` budget (15 minutes by default); a wait larger than what
-remains stops the run with `wait budget exhausted` instead of sleeping. Stop
-interrupts the wait.
+that returns `retryAfterMs` (clamped to 30 days) runs again no earlier than that.
+The wait is charged to the run's `waitMs` budget (15 minutes by default); a wait
+larger than what remains stops the run with `wait budget exhausted` instead of
+sleeping. Stop interrupts the wait. A dispatch stopped or crashed during its
+wait never reached the runner, so resume drops it, refunds the unspent wait, and
+keeps the retry time.
+
+A failed tool call from an agent writes the same `executorFailure` record and
+sets the same retry time. The agent receives the failure, including
+`retryAfterMs`, as its tool result. Further calls to that executor are refused
+without running until the retry time passes. The parent agent handles its tool
+results; the run enters recovery only if the parent job itself fails.
 
 Executor repair uses the qualified repair lifecycle with target `executor` and
 requires the task grant `executorRepair: true` (off by default). Qualification

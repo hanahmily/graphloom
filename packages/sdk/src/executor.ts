@@ -53,6 +53,8 @@ export interface ToolCallResult {
   childOperationId?: string;
   /** True when the result was recorded earlier and not executed again. */
   replayed?: boolean;
+  /** The executor failed and asked not to be called again for this many milliseconds. */
+  retryAfterMs?: number;
 }
 
 /** Tools admitted for this job, serviced by the controller one call at a time. */

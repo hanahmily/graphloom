@@ -141,14 +141,14 @@ export const executors = [
 }
 
 /** GitHub built in (sandboxed), the mirror as a custom sandboxed child package. */
-function hostRunner(server: FakeGitHub, mirror?: Mirror): Runner {
+function hostRunner(server: FakeGitHub, mirror?: Mirror, sandbox = true): Runner {
   const scripted = createScriptedRunner({ jobs: [] });
   const fallback = mirror
     ? createChildExecutorRunner({
         entryModule: mirror.entry,
         sourceRoot: mirror.dir,
         executorIds: [MIRROR],
-        sandbox: true,
+        sandbox,
         fallback: scripted,
       })
     : scripted;
@@ -185,6 +185,14 @@ async function fake(): Promise<FakeGitHub> {
 }
 
 const gets = (server: FakeGitHub) => server.requests.filter((r) => r.method === "GET");
+
+async function waitFor(check: () => Promise<boolean>): Promise<void> {
+  for (let i = 0; i < 400; i += 1) {
+    if (await check().catch(() => false)) return;
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  throw new Error("condition not reached");
+}
 
 describe("executor failure recovery (#41)", () => {
   it("retries a rate-limited built-in executor after a wait charged to the run's wait budget", async () => {
@@ -241,6 +249,79 @@ describe("executor failure recovery (#41)", () => {
     expect(Date.now() - started).toBeLessThan(20_000);
     expect(gets(server)).toHaveLength(1);
     expect((await loadRunState(report.stateDir)).budgets.waitMs).toBe(WAIT_BUDGET_MS);
+  });
+
+  it("drops a retry stopped during its wait as never started, and charges only the wait actually spent", async () => {
+    const server = await fake();
+    server.rateLimitNext(1, 3);
+    const env = await makeEnv();
+    const controller = createController();
+    const stateDir = path.join(env.stateRoot, "wait-stop");
+    const retry = dispatch(readJob(GH_LIST), "retry after the rate limit");
+    const running = controller.run({
+      taskPath: env.taskPath,
+      plugin: graph(GH_LIST),
+      validators,
+      runner: hostRunner(server),
+      supervisor: createScriptedSupervisor({ decisions: [retry] }),
+      stateRoot: env.stateRoot,
+      runId: "wait-stop",
+    });
+    await waitFor(async () => (await loadRunState(stateDir)).pendingDispatch?.status === "waiting");
+    await controller.stop(stateDir);
+    expect((await running).status).toBe("stopped");
+    const stopped = await loadRunState(stateDir);
+    expect(stopped.pendingDispatch?.status).toBe("waiting");
+    expect(gets(server)).toHaveLength(1);
+
+    const resumed = await controller.resume({
+      runRef: stateDir,
+      plugin: graph(GH_LIST),
+      validators,
+      runner: hostRunner(server),
+      supervisor: createScriptedSupervisor({ decisions: [retry, giveBack] }),
+    });
+    expect(resumed.stopReason, resumed.blocker).toBe("read done");
+    const state = await loadRunState(stateDir);
+    const [failure] = payloads(state.evidence, "executorFailure");
+    expect(WAIT_BUDGET_MS - state.budgets.waitMs!).toBeLessThanOrEqual(failure!.retryAfterMs as number);
+    expect(payloads(state.evidence, "github")).not.toHaveLength(0);
+  });
+
+  it("clamps an executor's oversized retry request instead of failing the run", async () => {
+    const server = await fake();
+    const env = await makeEnv();
+    const mirror = await mirrorPackage(env.taskDir, { broken: true, retryAfterMs: 1e300 });
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: graph(MIRROR),
+      validators,
+      runner: hostRunner(server, mirror),
+      supervisor: createScriptedSupervisor({ decisions: [dispatch(readJob(MIRROR), "retry")] }),
+      stateRoot: env.stateRoot,
+      runId: "huge-wait",
+    });
+    expect(report.stopReason, report.blocker).toBe("wait budget exhausted");
+    const [failure] = payloads((await loadRunState(report.stateDir)).evidence, "executorFailure");
+    expect(failure!.retryAfterMs).toBe(30 * 24 * 60 * 60_000);
+  });
+
+  it("allows only built-in kind defaults in recovery when the runner pinned no executors", async () => {
+    const env = await makeEnv();
+    const runner = createScriptedRunner({ jobs: [async () => ({ status: "failed" as const, summary: "boom" })] });
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: graph("acme.custom/list-comments"),
+      validators,
+      runner,
+      supervisor: createScriptedSupervisor({ decisions: [dispatch(readJob("acme.custom/list-comments"), "retry")] }),
+      stateRoot: env.stateRoot,
+      runId: "no-catalog",
+    });
+    expect(report.stopReason).toBe("recovery dispatch rejected");
+    expect(report.blocker).toBe(
+      "executor acme.custom/list-comments cannot be used in recovery: the runner did not describe its executors, so none were pinned",
+    );
   });
 
   it("reports built-in and custom executor failures through the same recovery record", async () => {
@@ -307,11 +388,19 @@ describe("executor failure recovery (#41)", () => {
     const env = await makeEnv();
     const mirror = await mirrorPackage(env.taskDir, { broken: true });
     const controller = createController();
-    const cases: [JobSpec, RegExp][] = [
-      [readJob("acme.unpinned/list-comments"), /^executor acme\.unpinned\/list-comments is not pinned for this run$/],
-      [readJob(MIRROR, "review"), /^recovery may only dispatch work for the current stage write, not review$/],
+    const cases: [JobSpec, string, RegExp][] = [
+      [
+        readJob("acme.unpinned/list-comments"),
+        "executor pin rejected",
+        /^executor acme\.unpinned\/list-comments is not pinned for this run$/,
+      ],
+      [
+        readJob(MIRROR, "review"),
+        "recovery dispatch rejected",
+        /^recovery may only dispatch work for the current stage write, not review$/,
+      ],
     ];
-    for (const [i, [job, blocker]] of cases.entries()) {
+    for (const [i, [job, stopReason, blocker]] of cases.entries()) {
       const report = await controller.run({
         taskPath: env.taskPath,
         plugin: graph(MIRROR),
@@ -321,7 +410,7 @@ describe("executor failure recovery (#41)", () => {
         stateRoot: env.stateRoot,
         runId: `refused-${i}`,
       });
-      expect(report.stopReason).toBe("recovery dispatch rejected");
+      expect(report.stopReason).toBe(stopReason);
       expect(report.blocker).toMatch(blocker);
     }
   });
@@ -387,6 +476,17 @@ describe("pinned executor digests (#41)", () => {
     expect(changed.blocker).toMatch(/^pinned executor acme\.mirror\/list-comments changed: digest /);
 
     await writeFile(mirror.entry, original);
+    const unsandboxed = await controller.resume({
+      runRef: first.stateDir,
+      plugin: graph(MIRROR),
+      validators,
+      runner: hostRunner(server, mirror, false),
+    });
+    expect(unsandboxed.stopReason).toBe("executor pin mismatch");
+    expect(unsandboxed.blocker).toBe(
+      "pinned executor acme.mirror/list-comments changed: isolation unrestricted != pinned sandbox",
+    );
+
     const missing = await controller.resume({
       runRef: first.stateDir,
       plugin: graph(MIRROR),
@@ -475,6 +575,16 @@ describe("executor repair (#41)", () => {
     });
     expect(resumed.stopReason, resumed.blocker).toBe("resumed");
     expect(payloads((await loadRunState(report.stateDir)).evidence, "mirror")).toHaveLength(2);
+
+    // The reviewed copy still runs only under the isolation the run pinned.
+    const unsandboxed = await controller.resume({
+      runRef: report.stateDir,
+      plugin: graph(MIRROR),
+      validators,
+      runner: hostRunner(server, mirror, false),
+    });
+    expect(unsandboxed.stopReason).toBe("executor pin mismatch");
+    expect(unsandboxed.blocker).toMatch(/isolation unrestricted != pinned sandbox$/);
 
     await writeFile(path.join(entry.repair!.root, "index.mjs"), "export const executors = [];\n");
     const tampered = await controller.resume({

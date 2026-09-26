@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
+import { realpath } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -182,6 +183,16 @@ function inProcessDigest(def: ExecutorDefinition): string {
     .digest("hex");
 }
 
+/** The digest covers `root`, so the module that runs must really live inside it. */
+async function containedIn(root: string, file: string): Promise<boolean> {
+  try {
+    const rel = path.relative(await realpath(root), await realpath(file));
+    return rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel);
+  } catch {
+    return false;
+  }
+}
+
 function digestMismatch(pin: ExecutorPin, serving: string): string | undefined {
   if (pin.digest === undefined || pin.digest === serving) return undefined;
   return `executor ${pin.id} digest ${serving.slice(0, 12)} does not match pinned ${pin.digest.slice(0, 12)}`;
@@ -341,6 +352,9 @@ export function createChildExecutorRunner(
         return failed(`executor ${pin.id}: a run-local copy runs only under a pinned digest`);
       }
       const entry = override !== undefined ? path.resolve(override.entryModule) : entryModule;
+      if (override !== undefined && !(await containedIn(override.root, entry))) {
+        return failed(`executor ${pin.id}: run-local entry module ${entry} is outside its root ${override.root}`);
+      }
       if (pin.digest !== undefined) {
         let serving: string;
         try {
