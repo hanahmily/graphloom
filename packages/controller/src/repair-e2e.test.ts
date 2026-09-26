@@ -580,6 +580,44 @@ describe("qualified repair + same-run activation (#29)", () => {
     expect(state.budgets.corrections).toBe(7);
   });
 
+  it.each([
+    ["active bundle", (_: string, taskDir: string) => path.join(taskDir, "plugins/hello/stray.txt")],
+    ["run worktree", (worktree: string) => path.join(worktree, "stray.txt")],
+    ["run state", (_: string, __: string, stateDir: string) => path.join(stateDir, "state.json")],
+  ] as const)("stops the run when the patch changes the %s", async (changed, target) => {
+    const env = await makeEnv();
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: escalatingPlugin(),
+      validators: goodValidators,
+      supervisor: createScriptedSupervisor({
+        sessionId: "sup-escape",
+        decisions: [qualifyRepair({ target: "plugin", reason: "try" }, "q")],
+      }),
+      repair: approvingRepair("sup-escape", async (candidateRoot) => {
+        const stateDir = path.dirname(path.dirname(path.dirname(candidateRoot)));
+        const { worktreePath } = await loadRunState(stateDir);
+        const file = target(worktreePath, env.taskDir, stateDir);
+        await writeFile(file, `${await readFile(file, "utf8").catch(() => "")} `, "utf8");
+      }),
+      runner: createScriptedRunner({ jobs: [] }),
+      stateRoot: env.stateRoot,
+      runId: `repair-escape-${changed.replace(/ /g, "-")}`,
+    });
+
+    expect(report).toMatchObject({
+      status: "stopped",
+      stopReason: "repair patch changed files outside the candidate",
+      blocker: changed,
+    });
+    const state = await loadRunState(report.stateDir);
+    expect(state.repairCandidates?.[0]).toMatchObject({
+      status: "rejected",
+      rejectionReason: `the patch changed files outside the candidate: ${changed}`,
+      patchSummary: "patched",
+    });
+  });
+
   it("aborts the repair patch when the operator stops the run", async () => {
     const env = await makeEnv();
     let patching!: () => void;

@@ -13,9 +13,11 @@ import {
 
 /**
  * Pi's full coding toolset, granted to the supervisor on a repair candidate
- * with the candidate root as its working directory. The controller verifies
- * the result: it checks the candidate, builds and tests it, has it reviewed
- * independently, and re-digests the live install before activation.
+ * with the candidate root as its working directory. The tools are not confined
+ * to it. The controller stops the run if the patch changed the live install,
+ * the run worktree, or the run state, then checks the candidate, builds and
+ * tests it, has it reviewed independently, and re-digests the live install
+ * before activation.
  */
 export const CANDIDATE_CODING_TOOL_NAMES = ["read", "bash", "edit", "write", "grep", "find", "ls"] as const;
 

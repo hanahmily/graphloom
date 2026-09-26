@@ -689,6 +689,30 @@ describe("executor repair (#41)", () => {
     expect(candidate).toMatchObject({ status: "rejected", target: "executor", executorId: MIRROR });
     expect(candidate!.rejectionReason).toBe("candidate contains entries review cannot see: node_modules/left-pad");
   });
+
+  it("stops the run when the patch edits the installed executor package", async () => {
+    const server = await fake();
+    const env = await makeEnv({ executorRepair: true });
+    const mirror = await mirrorPackage(env.taskDir, { broken: true });
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: graph(MIRROR),
+      validators,
+      runner: hostRunner(server, mirror),
+      supervisor: createScriptedSupervisor({ decisions: [qualify] }),
+      repair: repairDeps(async () => {
+        await writeFile(mirror.entry, (await readFile(mirror.entry, "utf8")).replace("const BROKEN = true", "const BROKEN = false"));
+      }),
+      stateRoot: env.stateRoot,
+      runId: "install-edit",
+    });
+    expect(report).toMatchObject({
+      status: "stopped",
+      stopReason: "repair patch changed files outside the candidate",
+      blocker: `executor package ${mirror.dir}`,
+    });
+    expect((await loadRunState(report.stateDir)).repairCandidates![0]).toMatchObject({ status: "rejected" });
+  });
 });
 
 async function makeEnv(opts: { executorRepair?: boolean } = {}): Promise<{ taskPath: string; stateRoot: string; taskDir: string }> {

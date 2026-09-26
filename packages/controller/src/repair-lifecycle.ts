@@ -28,6 +28,7 @@ import type { DurableRunState } from "./state.js";
 import { bumpGeneration } from "./generation.js";
 import { activateExecutorRepair, executorRepairSubject } from "./executor-repair.js";
 import { citedEvidence, saveRunState } from "./state.js";
+import { worktreeChangeFingerprints } from "./worktree.js";
 
 export interface RepairPatchAuthor {
   /** Must equal the run supervisor session id for every repair round. */
@@ -280,6 +281,8 @@ export async function applyQualifyRepair(
     await deps.supervisor?.grantCandidateCoding?.(snap.candidateRoot);
     granted = true;
 
+    const outside = await patchSurroundings(state);
+    let patchError: { error: unknown } | undefined;
     try {
       const patched = await patchAuthor.patch({
         candidateRoot: snap.candidateRoot,
@@ -289,12 +292,31 @@ export async function applyQualifyRepair(
         ...(deps.signal !== undefined ? { signal: deps.signal } : {}),
       });
       patchSummary = boundPatchSummary(patched?.summary);
+    } catch (error) {
+      patchError = { error };
     } finally {
       if (meteredPatch) {
         const spent = deps.supervisor?.drainProviderCalls?.() ?? patchAllowance;
         patchRefund = patchAllowance - Math.min(patchAllowance, Math.max(0, spent));
       }
     }
+
+    // The patch author's tools are not confined to the candidate, so a change
+    // elsewhere stops the run before anything builds or runs the candidate.
+    const escaped = [
+      ...((await subject.liveDigest().catch(() => undefined)) !== reserved.baseDigest ? [subject.label] : []),
+      ...(await patchSurroundings(state).then((after) => changedSurroundings(outside, after))),
+    ];
+    if (escaped.length > 0) {
+      const rejected = await reject(`the patch changed files outside the candidate: ${escaped.join(", ")}`);
+      return {
+        ...rejected,
+        status: "stopped",
+        stopReason: "repair patch changed files outside the candidate",
+        blocker: escaped.join(", "),
+      };
+    }
+    if (patchError !== undefined) throw patchError.error;
 
     await subject.checkCandidate(snap);
 
@@ -389,11 +411,31 @@ function opaqueGateEvidence(state: DurableRunState, qualify: QualifyRepairSpec):
   return citedEvidence(state, [...(qualify.evidenceRefs ?? []), ...(state.recoveryTrigger?.evidenceRefs ?? [])]);
 }
 
+/** What the patch author must leave alone: the run worktree and the saved run state. */
+async function patchSurroundings(state: DurableRunState): Promise<{ worktree: Map<string, string>; runState: string }> {
+  return {
+    worktree: await worktreeChangeFingerprints(state.worktreePath),
+    runState: await readFile(path.join(state.stateDir, "state.json"), "utf8").catch(() => ""),
+  };
+}
+
+function changedSurroundings(
+  before: { worktree: Map<string, string>; runState: string },
+  after: { worktree: Map<string, string>; runState: string },
+): string[] {
+  const worktree = [...new Set([...before.worktree.keys(), ...after.worktree.keys()])].some(
+    (rel) => before.worktree.get(rel) !== after.worktree.get(rel),
+  );
+  return [...(worktree ? ["run worktree"] : []), ...(before.runState !== after.runState ? ["run state"] : [])];
+}
+
 /** What a qualification round copies, digests, and checks, per repair target. */
 export interface RepairSubject {
   /** Names the repaired code in rejection reasons. */
   label: string;
   baseDigest: string;
+  /** Digests the installed code again, to compare with `baseDigest`. */
+  liveDigest(): Promise<string>;
   snapshot(args: { repairsDir: string; artifactId: string }): Promise<{
     candidateRoot: string;
     baseDigest: string;
@@ -408,6 +450,7 @@ async function bundleRepairSubject(state: DurableRunState, qualify: QualifyRepai
   return {
     label: "active bundle",
     baseDigest: await digestDirectoryTree(await realpath(state.intake.bundle.bundlePath)),
+    liveDigest: async () => digestDirectoryTree(await realpath(state.intake.bundle.bundlePath)),
     async snapshot({ repairsDir, artifactId }) {
       const snap = await snapshotRepairCandidate({
         bundlePath: state.intake.bundle.bundlePath,
