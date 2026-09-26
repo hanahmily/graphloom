@@ -96,8 +96,9 @@ host, such as a coding agent that edits the worktree and runs commands. Such a
 package runs with the user's full permissions and environment, and the runner
 refuses to serve it unless the operator's binding sets `allowUnrestricted`.
 The controller still admits its tool calls, budgets, cancellation, and
-evidence, but it cannot confine what the package does on the machine,
-including writes outside the job's `writeScope`.
+evidence, but it cannot confine what the package does on the machine. It
+detects worktree writes outside the job's `writeScope` after the fact, as
+described below, but not effects elsewhere on the machine.
 
 `@graphloom/executor-github` (`executors/github`) is the first built-in package:
 
@@ -169,8 +170,18 @@ The Pi harness gives the agent its full toolset (shell, file editing,
 search) in the worktree. The package is unrestricted, so the agent
 works as the user would, and `writeScope` and `readOnly` reach it as
 instructions in the assignment. The controller does not trust those
-instructions: it observes the worktree for evidence and validates scope from
-what actually changed. Job tools are the one mediated path. Each call goes to
+instructions. For every dispatch, it compares the worktree before and after
+the job:
+
+- It checks tracked and untracked paths that differ from HEAD, by content, and
+  skips ignored paths. A `writeScope` entry covers that exact path or, as a
+  directory, every file under it.
+- A read-only job may change nothing. Restoring a path to HEAD is not a change,
+  so a correction may undo an earlier stray edit.
+- Any other changed path fails the job, even if the executor reported success.
+  The changes stay in the worktree, and the failure lists them for recovery.
+
+Job tools are the one mediated path. Each call goes to
 the controller as a child operation with a harness-generated id that is fresh
 for every turn, so a continued session never reuses an earlier id, and the
 agent sees the recorded `ToolCallResult`.

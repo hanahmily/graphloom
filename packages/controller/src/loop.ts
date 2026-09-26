@@ -62,8 +62,11 @@ import {
   type RepairDeps,
 } from "./repair-lifecycle.js";
 import {
+  changedPaths,
+  pathsOutsideWriteScope,
   readWorktreeFile,
   workspaceChangeManifest,
+  worktreeChangeFingerprints,
 } from "./worktree.js";
 
 const MAX_STEPS = 64;
@@ -379,6 +382,7 @@ async function runNormalLoopSteps(
         const stopWatch = watchForStop(state.stateDir, deps, abort);
         let result: Awaited<ReturnType<Runner["runJob"]>>;
         let children: ReturnType<typeof createChildPort> | undefined;
+        let before: Map<string, string> | undefined;
         try {
           if (notBefore !== undefined) {
             await sleepUntil(notBefore, abort.signal);
@@ -399,6 +403,7 @@ async function runNormalLoopSteps(
                     },
                   )
                 : undefined;
+            before = await worktreeChangeFingerprints(state.worktreePath);
             result = await deps.runner.runJob(job, {
               runId: state.runId,
               operationId,
@@ -416,6 +421,11 @@ async function runNormalLoopSteps(
           await children?.close();
           clearInterval(stopWatch);
         }
+        // Executors may run unconfined, so scope is checked against what actually changed.
+        const outOfScope =
+          before !== undefined
+            ? pathsOutsideWriteScope(changedPaths(before, await worktreeChangeFingerprints(state.worktreePath)), job)
+            : [];
 
         state = await withRunLock(state.stateDir, async () => {
           state = await reloadRunState(state);
@@ -463,7 +473,7 @@ async function runNormalLoopSteps(
             operationId,
             generation,
             isCorrection,
-            result,
+            result: outOfScope.length > 0 ? scopeViolation(result, job, outOfScope) : result,
             canRecover: deps.supervisor !== undefined,
           });
           syncRevision(deps, state);
@@ -1188,6 +1198,18 @@ function recoveryDispatchRefusal(state: DurableRunState, job: JobSpec): string |
     }
   }
   return undefined;
+}
+
+/** A job that changed paths it was not allowed to write fails, whatever it reported; the changes stay for recovery to handle. */
+function scopeViolation(
+  result: Awaited<ReturnType<Runner["runJob"]>>,
+  job: JobSpec,
+  paths: string[],
+): Awaited<ReturnType<Runner["runJob"]>> {
+  const shown = paths.slice(0, 10).join(", ") + (paths.length > 10 ? ` (+${paths.length - 10} more)` : "");
+  const violation = job.readOnly === true ? `read-only job changed ${shown}` : `changed paths outside the job's write scope: ${shown}`;
+  const reported = result.status === "ok" ? "" : `; the executor also reported ${result.status}: ${result.summary}`;
+  return { ...result, status: "failed", summary: boundText(`${violation}${reported}`) };
 }
 
 function applyDispatchResult(

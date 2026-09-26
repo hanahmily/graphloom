@@ -153,43 +153,92 @@ describe("corrections, crash containment, unfamiliar failure (#28)", () => {
     expect(inspect.budgets.corrections).toBeLessThan(8);
   });
 
-  it("catches an unrelated edit with the unchanged Write validator and repairs it", async () => {
+  it("fails a job that edits outside its write scope, and a correction may undo the stray edit", async () => {
     const env = await makeEnv();
-    let writes = 0;
+    const jobs: string[] = [];
     const report = await createController().run({
       taskPath: env.taskPath,
+      supervisor: createScriptedSupervisor({
+        decisions: [
+          dispatch(
+            {
+              stageId: "write",
+              kind: "agent",
+              purpose: "work",
+              instruction: "rewrite GREETING.txt and remove the stray NOTES.txt",
+              writeScope: [GREETING_PATH],
+            },
+            "undo the stray edit",
+          ),
+          observe({ paths: [GREETING_PATH], includeWorkspaceManifest: true }, "observe"),
+          validate({ stageId: "write", requirementIds: ["greeting-bytes"] }, "validate write"),
+          returnToNormal({ summary: "stray edit undone" }, "return"),
+        ],
+      }),
       runner: createScriptedRunner({
-        jobs: Array.from({ length: 4 }, () => async (
-          job: { purpose?: string; readOnly?: boolean },
-          ctx: { worktreePath: string },
-        ) => {
-          if (job.readOnly) {
+        jobs: [
+          async (_job, ctx) => {
+            jobs.push("write with stray edit");
+            await writeFile(path.join(ctx.worktreePath, GREETING_PATH), GREETING, "utf8");
+            await writeFile(path.join(ctx.worktreePath, "NOTES.txt"), "scratch\n", "utf8");
+            return { status: "ok" as const, summary: "wrote" };
+          },
+          async (_job, ctx) => {
+            jobs.push("correct");
+            await writeFile(path.join(ctx.worktreePath, GREETING_PATH), GREETING, "utf8");
+            await rm(path.join(ctx.worktreePath, "NOTES.txt"), { force: true });
+            return { status: "ok" as const, summary: "corrected" };
+          },
+          async () => {
+            jobs.push("review");
             return {
               status: "ok" as const,
               summary: "approved",
               evidence: [{ kind: "review" as const, payload: { verdict: "approved", summary: "ok" } }],
             };
-          }
-          writes += 1;
-          await writeFile(path.join(ctx.worktreePath, GREETING_PATH), GREETING, "utf8");
-          if (writes === 1) {
-            await writeFile(path.join(ctx.worktreePath, "NOTES.txt"), "scratch\n", "utf8");
-          } else {
-            await rm(path.join(ctx.worktreePath, "NOTES.txt"), { force: true });
-          }
-          return { status: "ok" as const, summary: `write-${writes}` };
-        }),
+          },
+        ],
       }),
       stateRoot: env.stateRoot,
-      runId: "unrelated1",
+      runId: "scope1",
     });
 
-    expect(report.status).toBe("succeeded");
-    expect(writes).toBe(2);
-    const writeReceipts = report.receipts.filter((r) => r.stageId === "write");
-    expect(writeReceipts.map((r) => r.valid)).toEqual([true]);
-    const accepted = report.evidence.filter((e) => writeReceipts[0]!.evidenceRefs.includes(e.ref));
-    expect(accepted.find((e) => e.kind === "workspace")?.payload).toMatchObject({ changedPaths: [GREETING_PATH] });
+    expect(report.status, report.blocker).toBe("succeeded");
+    expect(jobs).toEqual(["write with stray edit", "correct", "review"]);
+    const failures = report.evidence.flatMap((e) => {
+      const failure = (e.payload as { executorFailure?: { summary: string } } | undefined)?.executorFailure;
+      return failure ? [failure.summary] : [];
+    });
+    expect(failures).toEqual(["changed paths outside the job's write scope: NOTES.txt"]);
+  });
+
+  it("fails a read-only job that changes the worktree, even when it reports success", async () => {
+    const env = await makeEnv();
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      runner: createScriptedRunner({
+        jobs: [
+          async (_job, ctx) => {
+            await writeFile(path.join(ctx.worktreePath, GREETING_PATH), GREETING, "utf8");
+            return { status: "ok" as const, summary: "wrote" };
+          },
+          async (_job, ctx) => {
+            await writeFile(path.join(ctx.worktreePath, GREETING_PATH), "rewritten by the reviewer\n", "utf8");
+            return {
+              status: "ok" as const,
+              summary: "approved",
+              evidence: [{ kind: "review" as const, payload: { verdict: "approved", summary: "ok" } }],
+            };
+          },
+        ],
+      }),
+      stateRoot: env.stateRoot,
+      runId: "scope2",
+    });
+
+    expect(report.status).toBe("stopped");
+    expect(report.stopReason).toBe(`job failed: read-only job changed ${GREETING_PATH}`);
+    expect(report.receipts.filter((r) => r.stageId === "review" && r.valid)).toEqual([]);
   });
 
   it("repairs an unknown launch failure through the supervisor without a duplicate Write", async () => {

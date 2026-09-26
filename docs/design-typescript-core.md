@@ -649,7 +649,7 @@ The release must demonstrate these cases through the real controller interface:
 | Crash after external write but before result | Reconcile remote outcome; do not blindly repeat the write |
 | Executor exceeds scope, hangs, or returns stale output | Enforce scope, stop independently, reject stale results, and retain evidence for recovery |
 | Correct file | Both stages accepted from observed evidence |
-| Missing newline or unrelated edit | Repair output; unchanged validation catches the defect |
+| Missing newline or unrelated edit | Repair output; unchanged validation catches the defect, and a job that edits outside its write scope fails |
 | Review requests changes | Known graph reentry or supervisor recovery; fresh downstream review |
 | Unknown launch failure with no plugin handler | Supervisor repairs invocation and returns without duplicate Write |
 | Plugin process crashes or hangs | Controller remains responsive; bounded recovery or concrete stopped state |
