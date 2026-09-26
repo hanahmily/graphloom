@@ -1438,6 +1438,108 @@ describe("qualified repair + same-run activation (#29)", () => {
       );
     });
 
+    it.each([
+      [
+        "a substitution shadowing a dependency",
+        opaque,
+        qualifyRepair({ target: "validator", requirementId: "greeting-bytes", reason: "substitute" }, "q"),
+        "node_modules/@graphloom/sdk/dist/index.js",
+        "candidate contains entries review cannot see: node_modules",
+      ],
+      [
+        "a source patch adding a nested .git",
+        (m: Record<string, unknown>) => m,
+        qualifyRepair({ target: "plugin", reason: "patch" }, "q"),
+        "dist/.git/config",
+        "candidate contains entries review cannot see: dist/.git",
+      ],
+    ] as const)("rejects %s that the digest cannot see", async (_case, manifest, decision, file, reason) => {
+      const env = await makeEnv({ manifest });
+      const { repair } = patchCounter("sup-59n", async (root) => {
+        await mkdir(path.dirname(path.join(root, file)), { recursive: true });
+        await writeFile(path.join(root, file), "export const shadow = true;\n", "utf8");
+      });
+      const report = await createController().run({
+        taskPath: env.taskPath,
+        plugin: failingGatePlugin(),
+        validators: defectiveValidators,
+        supervisor: createScriptedSupervisor({
+          sessionId: "sup-59n",
+          decisions: [decision, stop({ reason: "candidate rejected", blocker: "operator review" }, "s")],
+        }),
+        repair,
+        runner: writer(),
+        stateRoot: env.stateRoot,
+        runId: "unreviewed",
+      });
+      expect(report.stopReason).toBe("candidate rejected");
+      const [candidate] = (await loadRunState(report.stateDir)).repairCandidates!;
+      expect(candidate?.status).toBe("rejected");
+      expect(candidate?.rejectionReason).toBe(reason);
+    });
+
+    it("rejects activation when node_modules appeared in the candidate after review", async () => {
+      const env = await makeEnv();
+      const report = await createController().run({
+        taskPath: env.taskPath,
+        plugin: escalatingPlugin(),
+        validators: goodValidators,
+        supervisor: createScriptedSupervisor({
+          sessionId: "sup-59a",
+          decisions: [
+            qualifyRepair({ target: "plugin", reason: "patch" }, "q"),
+            async (input) => {
+              const id = input.view.repairCandidates?.find((c) => c.status === "qualified")?.artifactId;
+              const shadow = path.join(env.stateRoot, "activate-late", "repairs", id!, "candidate", "node_modules", "x");
+              await mkdir(shadow, { recursive: true });
+              await writeFile(path.join(shadow, "index.js"), "export {};\n", "utf8");
+              return activateFirstQualified()(input);
+            },
+          ],
+        }),
+        repair: approvingRepair("sup-59a"),
+        runner: createScriptedRunner({ jobs: [] }),
+        stateRoot: env.stateRoot,
+        runId: "activate-late",
+      });
+      expect(report.stopReason).toBe("activate_repair candidate rejected");
+      expect(report.blocker).toBe("candidate contains entries review cannot see: node_modules");
+      const state = await loadRunState(report.stateDir);
+      expect(state.activationIntent?.status).toBe("aborted");
+      expect(state.activeVersion).toBe("hello@0.1.0");
+    });
+
+    it("drops the resumed stop's evidence when resume itself stops", async () => {
+      const env = await makeEnv({ manifest: opaque });
+      const controller = createController();
+      const first = await controller.run({
+        taskPath: env.taskPath,
+        plugin: failingGatePlugin(),
+        validators: defectiveValidators,
+        supervisor: createScriptedSupervisor({
+          sessionId: "sup-59p",
+          decisions: [qualifyRepair({ target: "plugin", reason: "patch" }, "q")],
+        }),
+        repair: approvingRepair("sup-59p"),
+        runner: writer(),
+        stateRoot: env.stateRoot,
+        runId: "resume-pin",
+      });
+      expect(first.stopEvidenceRefs?.length).toBeGreaterThan(0);
+
+      const liveManifest = path.join(env.taskDir, "plugins", "hello", "graphloom.manifest.json");
+      await writeFile(liveManifest, `${await readFile(liveManifest, "utf8")}\n`, "utf8");
+      const resumed = await controller.resume({
+        runRef: first.stateDir,
+        plugin: failingGatePlugin(),
+        validators: defectiveValidators,
+        runner: writer(),
+      });
+      expect(resumed.stopReason).toBe("pin mismatch");
+      expect(resumed.stopEvidenceRefs).toBeUndefined();
+      expect((await loadRunState(first.stateDir)).stopEvidenceRefs).toBeUndefined();
+    });
+
     it("qualifies and activates a substitute validator for a readable requirement", async () => {
       const env = await makeEnv({ manifest: opaque });
       const { repair } = patchCounter("sup-59s", async (root) => {

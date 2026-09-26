@@ -663,6 +663,32 @@ describe("executor repair (#41)", () => {
     expect(candidate).toMatchObject({ status: "rejected", target: "executor", executorId: MIRROR });
     expect(candidate!.rejectionReason).toBe("candidate changes declared dependencies in package.json");
   });
+
+  it("rejects a candidate that adds a package beside its linked dependencies", async () => {
+    const server = await fake();
+    const env = await makeEnv({ executorRepair: true });
+    const mirror = await mirrorPackage(env.taskDir, { broken: true });
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: graph(MIRROR),
+      validators,
+      runner: hostRunner(server, mirror),
+      supervisor: createScriptedSupervisor({
+        decisions: [qualify, stop({ reason: "repair rejected", blocker: "none" }, "give up")],
+      }),
+      repair: repairDeps(async (candidateRoot) => {
+        const shadow = path.join(candidateRoot, "node_modules", "left-pad");
+        await mkdir(shadow, { recursive: true });
+        await writeFile(path.join(shadow, "index.js"), "export default () => 'shadow';\n");
+      }),
+      stateRoot: env.stateRoot,
+      runId: "shadow",
+    });
+    expect(report.stopReason, report.blocker).toBe("repair rejected");
+    const [candidate] = (await loadRunState(report.stateDir)).repairCandidates!;
+    expect(candidate).toMatchObject({ status: "rejected", target: "executor", executorId: MIRROR });
+    expect(candidate!.rejectionReason).toBe("candidate contains entries review cannot see: node_modules/left-pad");
+  });
 });
 
 async function makeEnv(opts: { executorRepair?: boolean } = {}): Promise<{ taskPath: string; stateRoot: string; taskDir: string }> {

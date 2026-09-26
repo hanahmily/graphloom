@@ -15,6 +15,7 @@ import { invalidateFromStage, type AdmissionValidator } from "./admit.js";
 import { resolveBundleEntryFromManifest } from "./bundle.js";
 import { manifestRepairContract } from "./intake.js";
 import {
+  assertCandidateFullyReviewed,
   assertCandidateStepsUnchanged,
   changedBaseFiles,
   digestDirectoryTree,
@@ -425,6 +426,7 @@ async function bundleRepairSubject(state: DurableRunState, qualify: QualifyRepai
       return snap;
     },
     async checkCandidate({ candidateRoot }) {
+      await assertCandidateFullyReviewed(candidateRoot);
       await assertCandidateStepsUnchanged({
         baseDefinitionStages: stagePins(state.definition),
         candidateRoot,
@@ -624,6 +626,8 @@ export async function applyActivateRepair(
 
   let host: PluginHost | undefined;
   try {
+    // The digest cannot see entries added after review under node_modules or .git.
+    await assertCandidateFullyReviewed(artifact.candidateRoot);
     // Stages pin must still match — cannot be deleted after review.
     await assertCandidateStepsUnchanged({
       baseDefinitionStages: stagePins(state.definition),

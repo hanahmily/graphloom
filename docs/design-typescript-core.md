@@ -519,7 +519,8 @@ correction reservation, and activation generation.
 The MVP accepts only the same SDK protocol, private-state schema, requirement
 manifest, complete step set/IDs/names/order, and evidence schemas. During
 qualification, before independent review, the controller checks the candidate's
-manifest and declared dependencies, then loads it in a throwaway host. Its
+manifest and declared dependencies, rejects any `node_modules` or `.git` entry its
+digest cannot cover, then loads it in a throwaway host. Its
 `describe()` must match the pinned version, private-state schema, stages,
 requirement statements, evidence schemas and default validator bindings. A run
 started with an in-process plugin or caller-supplied host and no `recreateHost`

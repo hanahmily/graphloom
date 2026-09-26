@@ -377,6 +377,10 @@ export function createController(): Controller {
         if (state.status === "succeeded" || state.status === "failed") {
           return;
         }
+        // Evidence belongs to the stop being resumed; any stop from here on is a new one.
+        const { stopEvidenceRefs: _staleEvidence, ...resumable } = state;
+        void _staleEvidence;
+        state = resumable;
 
         try {
           await assertWorktreeMatches(
@@ -433,9 +437,7 @@ export function createController(): Controller {
 
         state = reconcileRepairJournal(state);
         state = await reconcileSwitchJournal(state);
-        const { stopEvidenceRefs: _staleEvidence, ...resumable } = state;
-        void _staleEvidence;
-        state = bumpGeneration({ ...resumable, status: "running" }, "resume");
+        state = bumpGeneration({ ...state, status: "running" }, "resume");
         await clearStopRequest(stateDir);
         await saveRunState(state);
 

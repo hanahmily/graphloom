@@ -55,6 +55,68 @@ export async function digestDirectoryTree(root: string): Promise<string> {
   return h.digest("hex");
 }
 
+const UNDIGESTED = new Set(["node_modules", ".git"]);
+
+/**
+ * Entries under a candidate that the digest skips, so review and activation
+ * would never see what Node loads from them. With `linkedDependencies`, the
+ * top-level node_modules may hold only the controller's dependency symlinks.
+ */
+export async function unreviewedEntries(
+  root: string,
+  options: { linkedDependencies?: boolean } = {},
+): Promise<string[]> {
+  const found: string[] = [];
+  const walk = async (rel: string): Promise<void> => {
+    for (const name of await readdir(path.join(root, rel))) {
+      const child = rel === "" ? name : `${rel}/${name}`;
+      const info = await lstat(path.join(root, child));
+      if (UNDIGESTED.has(name)) {
+        if (child === "node_modules" && options.linkedDependencies) {
+          found.push(...(await unlinkedDependencies(root)));
+        } else {
+          found.push(child);
+        }
+      } else if (info.isDirectory()) {
+        await walk(child);
+      }
+    }
+  };
+  await walk("");
+  return found.sort();
+}
+
+async function unlinkedDependencies(root: string): Promise<string[]> {
+  const found: string[] = [];
+  const modules = path.join(root, "node_modules");
+  for (const name of await readdir(modules)) {
+    const info = await lstat(path.join(modules, name));
+    if (info.isSymbolicLink()) continue;
+    if (name.startsWith("@") && info.isDirectory()) {
+      for (const scoped of await readdir(path.join(modules, name))) {
+        if (!(await lstat(path.join(modules, name, scoped))).isSymbolicLink()) {
+          found.push(`node_modules/${name}/${scoped}`);
+        }
+      }
+      continue;
+    }
+    found.push(`node_modules/${name}`);
+  }
+  return found;
+}
+
+/** Throws when a candidate holds entries its digest cannot cover. */
+export async function assertCandidateFullyReviewed(
+  root: string,
+  options: { linkedDependencies?: boolean } = {},
+): Promise<void> {
+  const found = await unreviewedEntries(root, options);
+  if (found.length > 0) {
+    const shown = found.slice(0, 5).join(", ");
+    throw new Error(`candidate contains entries review cannot see: ${shown}${found.length > 5 ? ", …" : ""}`);
+  }
+}
+
 /** Base files the candidate edited or deleted, sorted; files it only added are not listed. */
 export async function changedBaseFiles(
   baseRoot: string,
