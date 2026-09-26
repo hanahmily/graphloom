@@ -306,11 +306,11 @@ export function buildRepairPrompt(args: CandidatePatchRequest): string {
     `Target: ${args.target}`,
     `Reason: ${args.reason}`,
     `Candidate root: ${args.candidateRoot}`,
-    "Use the read, edit, write, and ls tools to fix the defect in the candidate tree.",
-    "Every path must stay inside the candidate root; the live install and the run worktree are off limits.",
+    "Your working directory is the candidate root. Use the shell and file tools to investigate, fix the defect, and build and run the candidate's tests.",
+    "Change only files inside the candidate root; the live install and the run worktree are off limits, and the controller rejects an activation when the live install changed.",
     "Do not edit graphloom.stages.json. Do not add, remove, rename, or reorder graph steps, and do not change requirement statements or evidence schemas.",
     "Keep existing tests and negative cases; do not loosen expected outcomes. Add a focused regression case when the defect is testable.",
-    "No shell is available. The controller builds and tests the candidate after you finish, then an independent reviewer decides.",
+    "After you finish, the controller builds and tests the candidate itself, then an independent reviewer decides.",
     ...(args.maxProviderCalls !== undefined
       ? [`You have at most ${args.maxProviderCalls} model turns, including tool turns; the patch is aborted beyond that.`]
       : []),

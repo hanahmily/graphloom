@@ -39,10 +39,9 @@ async function run(root: string, name: string, params: Record<string, unknown>) 
 }
 
 describe("candidate coding tools", () => {
-  it("withholds shell and search tools that cannot be confined", () => {
-    expect([...CANDIDATE_CODING_TOOL_NAMES]).toEqual(["read", "edit", "write", "ls"]);
-    const names = createCandidateCodingTools("/tmp").map((t) => t.name);
-    expect(names).not.toContain("bash");
+  it("grants Pi's full coding toolset, shell included", () => {
+    expect([...CANDIDATE_CODING_TOOL_NAMES]).toEqual(["read", "bash", "edit", "write", "grep", "find", "ls"]);
+    expect(createCandidateCodingTools("/tmp").map((t) => t.name)).toEqual([...CANDIDATE_CODING_TOOL_NAMES]);
   });
 
   it("admits only controller-issued, non-symlinked candidate roots", async () => {
@@ -64,26 +63,11 @@ describe("candidate coding tools", () => {
     );
   });
 
-  it("writes inside the candidate but rejects traversal, absolute escapes, and symlinks", async () => {
-    const { root, base } = await issuedCandidate();
-    await run(root, "write", { path: "validator.js", content: "export const ok = true;\n" });
-    expect(await readFile(path.join(root, "validator.js"), "utf8")).toBe(
-      "export const ok = true;\n",
-    );
-
-    await expect(
-      run(root, "write", { path: "../../../escape.txt", content: "x" }),
-    ).rejects.toThrow(/outside repair candidate/);
-    await expect(
-      run(root, "write", { path: path.join(base, "live.txt"), content: "x" }),
-    ).rejects.toThrow(/outside repair candidate/);
-    await expect(run(root, "read", { path: path.join(base, "state") })).rejects.toThrow(
-      /outside repair candidate/,
-    );
-
-    await symlink(base, path.join(root, "link"));
-    await expect(
-      run(root, "write", { path: "link/escape.txt", content: "x" }),
-    ).rejects.toThrow(/symlink/);
+  it("writes and lists with the candidate root as the working directory", async () => {
+    const { root } = await issuedCandidate();
+    await run(root, "write", { path: "test/regression.test.js", content: "// newline case\n" });
+    expect(await readFile(path.join(root, "test/regression.test.js"), "utf8")).toBe("// newline case\n");
+    const listed = await run(root, "ls", { path: "." });
+    expect(JSON.stringify(listed.content)).toContain("validator.js");
   });
 });
