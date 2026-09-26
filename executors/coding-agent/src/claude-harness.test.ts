@@ -151,6 +151,12 @@ describe("Claude Code harness", () => {
     expect(configured!.env).toMatchObject({ CUSTOM_TOOL_HOME: "/opt/custom", OTHER_TOOL_HOME: "/opt/other" });
     expect(configured!.env).not.toHaveProperty("GRAPHLOOM_CLAUDE_PASS_ENV");
     expect(configured!.env).not.toHaveProperty("GRAPHLOOM_GITHUB_LIVE_TOKEN");
+
+    const refused = "passEnv cannot include ANTHROPIC_API_KEY; bind the anthropic-api-key credential instead";
+    await expect(h.makeExecutor({ passEnv: ["ANTHROPIC_API_KEY"] }).execute({ assignment: "work" }, h.ctx())).rejects.toThrow(refused);
+    vi.stubEnv("GRAPHLOOM_CLAUDE_PASS_ENV", "CUSTOM_TOOL_HOME,ANTHROPIC_API_KEY");
+    await expect(h.makeExecutor({ passEnv: undefined as never }).execute({ assignment: "work" }, h.ctx())).rejects.toThrow(refused);
+    expect(await h.invocations()).toHaveLength(2);
   });
 
   it("stops a Claude Code run that shows no model output after starting", async () => {
@@ -447,6 +453,44 @@ describe("MCP tool bridge", () => {
       expect(JSON.parse(called.result.content[0].text)).toEqual({ status: "failed", summary: "rate limited", retryAfterMs: 1000 });
       const unknown = await rpc({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "bash" } });
       expect(unknown.error).toMatchObject({ code: -32602, message: "unknown tool bash" });
+    } finally {
+      await bridge.close();
+    }
+  });
+
+  it("forwards concurrent and batched tool calls to the controller one at a time", async () => {
+    let inFlight = false;
+    const calls: string[] = [];
+    let n = 0;
+    const bridge = await startToolBridge(
+      [
+        {
+          name: "slow_read",
+          effect: "read",
+          async call(id, input) {
+            if ((input as { fail?: boolean }).fail) throw new Error("tool crashed");
+            if (inFlight) throw new Error("another tool call is in progress");
+            inFlight = true;
+            await new Promise((resolve) => setTimeout(resolve, 50));
+            inFlight = false;
+            calls.push(id);
+            return { status: "ok", summary: id };
+          },
+        },
+      ],
+      () => `id-${(n += 1)}`,
+    );
+    const call = (id: number) => ({ jsonrpc: "2.0", id, method: "tools/call", params: { name: "slow_read", arguments: {} } });
+    const post = async (body: unknown): Promise<any> =>
+      (await fetch(bridge.url, { method: "POST", headers: { authorization: `Bearer ${bridge.token}`, "content-type": "application/json" }, body: JSON.stringify(body) })).json();
+    try {
+      const [batch, single] = await Promise.all([post([call(1), call(2)]), post(call(3))]);
+      for (const reply of [...batch, single]) expect(reply.result.isError, JSON.stringify(reply)).toBe(false);
+      expect(calls.sort()).toEqual(["id-1", "id-2", "id-3"]);
+      const failFirst = { ...call(4), params: { name: "slow_read", arguments: { fail: true } } };
+      const [crashed, after] = await post([failFirst, call(5)]);
+      expect(crashed.error).toMatchObject({ message: "tool crashed" });
+      expect(after.result.isError).toBe(false);
     } finally {
       await bridge.close();
     }

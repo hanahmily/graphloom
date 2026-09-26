@@ -29,6 +29,13 @@ interface JsonRpcRequest {
 export async function startToolBridge(tools: CodingTool[], callId: () => string): Promise<ToolBridge> {
   const token = randomBytes(24).toString("hex");
   const byName = new Map(tools.map((t) => [t.name, t]));
+  // The controller takes one tool call at a time, but the agent may send several at once.
+  let pending: Promise<unknown> = Promise.resolve();
+  const oneAtATime = <T>(call: () => Promise<T>): Promise<T> => {
+    const next = pending.then(call, call);
+    pending = next;
+    return next;
+  };
 
   async function handle(req: JsonRpcRequest): Promise<unknown> {
     switch (req.method) {
@@ -52,7 +59,7 @@ export async function startToolBridge(tools: CodingTool[], callId: () => string)
         const name = req.params?.name;
         const tool = typeof name === "string" ? byName.get(name) : undefined;
         if (!tool) throw Object.assign(new Error(`unknown tool ${String(name)}`), { code: -32602 });
-        const result = await tool.call(callId(), req.params?.arguments ?? {});
+        const result = await oneAtATime(() => tool.call(callId(), req.params?.arguments ?? {}));
         const text = JSON.stringify(result);
         return {
           content: [{ type: "text", text: text.length <= MAX_TOOL_RESULT_CHARS ? text : `${text.slice(0, MAX_TOOL_RESULT_CHARS)}…` }],

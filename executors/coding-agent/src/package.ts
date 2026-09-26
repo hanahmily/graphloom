@@ -3,6 +3,8 @@ import type { ExecutorBinding, ExecutorPackageManifest } from "@graphloom/sdk";
 import {
   CLAUDE_API_KEY_CREDENTIAL,
   CLAUDE_BIN_ENV,
+  CLAUDE_DEFAULT_RESPONSE_TIMEOUT_MS,
+  CLAUDE_DEFAULT_STARTUP_TIMEOUT_MS,
   CLAUDE_MODEL_ENV,
   CLAUDE_PASS_ENV_ENV,
   CLAUDE_RESPONSE_TIMEOUT_ENV,
@@ -82,6 +84,18 @@ export const DEFAULT_CODING_TIMEOUT_MS = 60 * 60_000;
 export function codingAgentBinding(options: CodingAgentBindingOptions): ExecutorBinding {
   const claude = options.claude ?? {};
   const pi = options.pi ?? {};
+  const timeoutMs = options.timeoutMs ?? DEFAULT_CODING_TIMEOUT_MS;
+  if (options.claude !== undefined || options.harness === claudeCodeHarnessModule) {
+    const watchdogs = {
+      startupTimeoutMs: claude.startupTimeoutMs ?? CLAUDE_DEFAULT_STARTUP_TIMEOUT_MS,
+      responseTimeoutMs: claude.responseTimeoutMs ?? CLAUDE_DEFAULT_RESPONSE_TIMEOUT_MS,
+    };
+    for (const [name, ms] of Object.entries(watchdogs)) {
+      if (ms >= timeoutMs) {
+        throw new Error(`claude.${name} (${ms} ms) must be shorter than the job timeout (${timeoutMs} ms), or the job is killed before the stall is reported`);
+      }
+    }
+  }
   const credentials: Record<string, string> = {
     ...(claude.apiKey !== undefined ? { [CLAUDE_API_KEY_CREDENTIAL]: claude.apiKey } : {}),
     ...(pi.apiKey !== undefined ? { [PI_API_KEY_CREDENTIAL]: pi.apiKey } : {}),
@@ -89,7 +103,7 @@ export function codingAgentBinding(options: CodingAgentBindingOptions): Executor
   return {
     allowedEffects: ["read", "write"],
     allowUnrestricted: true,
-    timeoutMs: options.timeoutMs ?? DEFAULT_CODING_TIMEOUT_MS,
+    timeoutMs,
     env: {
       [CODING_HARNESS_ENV]: options.harness,
       ...(claude.command !== undefined ? { [CLAUDE_BIN_ENV]: claude.command } : {}),

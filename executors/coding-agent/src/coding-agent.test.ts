@@ -176,6 +176,17 @@ describe("graphloom.coding-agent/run", () => {
     expect(codingAgentBinding({ harness: "/h.js", timeoutMs: 5_000 }).timeoutMs).toBe(5_000);
   });
 
+  it("refuses Claude Code watchdogs that the job timeout would cut off", () => {
+    expect(() => codingAgentBinding({ harness: claudeCodeHarnessModule, timeoutMs: 400_000 })).toThrow(
+      "claude.responseTimeoutMs (600000 ms) must be shorter than the job timeout (400000 ms), or the job is killed before the stall is reported",
+    );
+    expect(() => codingAgentBinding({ harness: "/wrapper.js", timeoutMs: 1_000, claude: { startupTimeoutMs: 1_000, responseTimeoutMs: 0 } })).toThrow(
+      "claude.startupTimeoutMs (1000 ms)",
+    );
+    expect(codingAgentBinding({ harness: claudeCodeHarnessModule, timeoutMs: 1_000, claude: { startupTimeoutMs: 999, responseTimeoutMs: 0 } }).timeoutMs).toBe(1_000);
+    expect(codingAgentBinding({ harness: "/h.js", timeoutMs: 1_000 }).timeoutMs).toBe(1_000);
+  });
+
   it("binds Claude Code settings as config and an API key only as a credential", () => {
     expect(codingAgentBinding({ harness: claudeCodeHarnessModule })).toEqual({
       allowedEffects: ["read", "write"],

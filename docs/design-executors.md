@@ -205,6 +205,8 @@ configured from the environment):
   `--tools default` and `--permission-mode bypassPermissions`. Job tools are
   served on a loopback MCP endpoint with a per-run bearer token, as the
   `graphloom` server (`--strict-mcp-config`, so no other MCP servers load).
+  The endpoint forwards tool calls to the controller one at a time, even when
+  Claude Code sends several at once.
 - Claude Code has no hook before each provider request. The harness reserves
   the first request before launching, and each later one when the stream
   shows it coming: at the first tool result of a response, or at a response it
@@ -218,7 +220,8 @@ configured from the environment):
   directories, proxy and CA settings, plus `CLAUDE_CONFIG_DIR` set to the
   harness's config dir. Anything else, such as Bedrock or Vertex settings,
   must be named in `passEnv` (`GRAPHLOOM_CLAUDE_PASS_ENV`, comma-separated). An
-  ambient `ANTHROPIC_API_KEY` is not passed; bind the credential instead.
+  ambient `ANTHROPIC_API_KEY` is never passed, and a `passEnv` naming it is
+  refused; bind the credential instead.
   Gateway settings belong in the config dir's `settings.json`.
 - A watchdog stops a quiet run. Model output (assistant messages, tool results,
   and `system/thinking_tokens`) is progress. The run fails as stalled when
@@ -227,6 +230,8 @@ configured from the environment):
   (default 600 s, `GRAPHLOOM_CLAUDE_RESPONSE_TIMEOUT_MS`). The response timer
   pauses while a tool or subagent is running; 0 disables either timer. A
   stalled run still saves its session, so a later job can continue it.
+  `codingAgentBinding` refuses a timer that is not shorter than the job
+  timeout, because the runner would kill the job before the stall is reported.
 - The final `result` event's token totals (input, output, cache read, cache
   write) and cost are reported as `usage` in the job's `codingAgent` evidence.
 - With `resultSchema`, Claude Code validates its final answer against

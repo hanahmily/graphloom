@@ -8,6 +8,8 @@ import { bounded, inlineObjectSchema, scopeNotes } from "./assignment.js";
 import {
   CLAUDE_API_KEY_CREDENTIAL,
   CLAUDE_BIN_ENV,
+  CLAUDE_DEFAULT_RESPONSE_TIMEOUT_MS,
+  CLAUDE_DEFAULT_STARTUP_TIMEOUT_MS,
   CLAUDE_MODEL_ENV,
   CLAUDE_PASS_ENV_ENV,
   CLAUDE_RESPONSE_TIMEOUT_ENV,
@@ -41,9 +43,6 @@ export interface ClaudeCodeHarnessOptions {
    */
   responseTimeoutMs?: number;
 }
-
-const DEFAULT_STARTUP_TIMEOUT_MS = 300_000;
-const DEFAULT_RESPONSE_TIMEOUT_MS = 600_000;
 
 /** Environment Claude Code and its shell need to run, find its login, and reach the network. */
 const BASE_ENV = new Set([
@@ -130,8 +129,11 @@ export function createClaudeCodeHarness(harnessOptions: ClaudeCodeHarnessOptions
       const configDir = harnessOptions.configDir ?? (process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude"));
       const systemPrompt = harnessOptions.systemPrompt ?? DEFAULT_SYSTEM_PROMPT;
       const passEnv = harnessOptions.passEnv ?? envList(process.env[CLAUDE_PASS_ENV_ENV]);
-      const startupTimeoutMs = harnessOptions.startupTimeoutMs ?? envMs(CLAUDE_STARTUP_TIMEOUT_ENV, DEFAULT_STARTUP_TIMEOUT_MS);
-      const responseTimeoutMs = harnessOptions.responseTimeoutMs ?? envMs(CLAUDE_RESPONSE_TIMEOUT_ENV, DEFAULT_RESPONSE_TIMEOUT_MS);
+      if (passEnv.includes("ANTHROPIC_API_KEY")) {
+        throw new Error(`passEnv cannot include ANTHROPIC_API_KEY; bind the ${CLAUDE_API_KEY_CREDENTIAL} credential instead`);
+      }
+      const startupTimeoutMs = harnessOptions.startupTimeoutMs ?? envMs(CLAUDE_STARTUP_TIMEOUT_ENV, CLAUDE_DEFAULT_STARTUP_TIMEOUT_MS);
+      const responseTimeoutMs = harnessOptions.responseTimeoutMs ?? envMs(CLAUDE_RESPONSE_TIMEOUT_ENV, CLAUDE_DEFAULT_RESPONSE_TIMEOUT_MS);
       const settings: SessionSettings = { model: model ?? null, systemPromptSha256: sha256(systemPrompt) };
       const saved = await openSession(options, configDir, settings);
       const apiKey = await options.credentials?.get(CLAUDE_API_KEY_CREDENTIAL);
