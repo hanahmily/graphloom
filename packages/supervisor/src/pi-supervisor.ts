@@ -260,6 +260,7 @@ export function buildRecoveryPrompt(
     activeVersion: input.view.activeVersion,
     repairCandidates: input.view.repairCandidates ?? [],
     agentSessions: input.view.agentSessions ?? [],
+    ...(input.view.repairAuthority !== undefined ? { repairAuthority: input.view.repairAuthority } : {}),
   };
 
   const settlement = input.lastSettlement;
@@ -271,6 +272,7 @@ export function buildRecoveryPrompt(
     "Never propose Accept. Never add, remove, rename, or reorder graph steps.",
     "Prefer further authorized remedies over Stop while budgets and authority remain.",
     "For activate_repair, use a qualifiedArtifactId from repairCandidates with status qualified.",
+    "repairAuthority shows what the operator granted and whether the graph bundle's code can be patched. An opaque bundle's code cannot be: retry the work or repair its environment instead. Substitute a validator (qualify_repair target validator with requirementId, adding files without editing existing ones) only when validatorSubstitution is granted and that requirement has a readable statement. Otherwise stop, citing the failing validation's evidenceRefs; never invent a replacement criterion.",
     "To retry a stage's agent work with the context of its earlier session, dispatch with job.continueFrom set to an operationId from agentSessions of that stage and dispatch key; start fresh instead when that context is misleading.",
     ...(models !== undefined
       ? [

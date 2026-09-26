@@ -180,7 +180,21 @@ export function assertRunView(value: unknown): RunView {
   requireNumber(obj, "stateRevision");
   requireString(obj, "activeVersion");
   if (obj["agentSessions"] !== undefined) assertAgentSessions(requireArray(obj, "agentSessions"));
+  if (obj["repairAuthority"] !== undefined) assertRepairAuthority(obj["repairAuthority"]);
   return obj as unknown as RunView;
+}
+
+function assertRepairAuthority(value: unknown): void {
+  const authority = asObject(value, "repairAuthority");
+  if (authority["contract"] !== "source-repairable" && authority["contract"] !== "opaque") {
+    throw new WireValidationError("malformed", "repairAuthority.contract must be source-repairable or opaque");
+  }
+  const grants = asObject(authority["grants"], "repairAuthority.grants");
+  for (const key of ["sourceRepair", "validatorSubstitution", "executorRepair"]) {
+    if (typeof grants[key] !== "boolean") {
+      throw new WireValidationError("malformed", `repairAuthority.grants.${key} must be boolean`);
+    }
+  }
 }
 
 const SESSION_STATUSES = ["ok", "failed", "conflict"];

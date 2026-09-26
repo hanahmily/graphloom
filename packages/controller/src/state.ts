@@ -101,6 +101,8 @@ export interface DurableRunState {
   status: RunStatus;
   stopReason?: string;
   blocker?: string;
+  /** Recorded evidence the stop cites, such as the failing validation of an opaque gate. */
+  stopEvidenceRefs?: string[];
   generation: number;
   stateRevision: number;
   activeVersion: string;
@@ -140,6 +142,8 @@ export interface DurableRunState {
   recoveryTrigger?: {
     code: string;
     message: string;
+    /** Recorded evidence the escalation cited. */
+    evidenceRefs?: string[];
   };
   /**
    * Durable Pi supervisor session identity (session file + active model).
@@ -198,6 +202,12 @@ export interface VersionRecord {
   generation: number;
   reason: string;
   at: string;
+}
+
+/** The cited refs that name evidence this run recorded, deduplicated in order. */
+export function citedEvidence(state: DurableRunState, refs: readonly string[] | undefined): string[] {
+  const known = new Set(state.evidence.map((e) => e.ref));
+  return [...new Set((refs ?? []).filter((ref) => known.has(ref)))];
 }
 
 export async function saveRunState(state: DurableRunState): Promise<void> {

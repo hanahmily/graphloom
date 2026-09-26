@@ -89,8 +89,9 @@ repairs already within that scope. Plugin metadata alone grants no authority.
 
 Inspect shows the required stages, current attempt, normal/recovery mode, active
 job and phase, validation evidence, concise decision reasons, correction allowance,
-and plugin version history. Show build/test/review/activation phases during repair.
-Expose useful explanations and evidence references, not private model reasoning.
+plugin version history, and the evidence a stop cites. Show build/test/review/activation
+phases during repair. Expose useful explanations and evidence references, not
+private model reasoning.
 
 ## 3. Plugin package and trust
 
@@ -132,6 +133,17 @@ build dependencies, and tests. A plugin wrapping an unavailable service or binar
 must disclose that dependency; calling the wrapper TypeScript does not make the
 hidden behavior repairable. The MVP qualifies source-repairable plugins; any opaque
 bundle it admits must visibly retain the limited contract above.
+
+The manifest's `repairContract` is `source-repairable` or `opaque`; a bundle that
+declares none is opaque, and a patch cannot change it. The run view shows the
+contract with the operator's grants, so the supervisor sees the limit before
+spending a correction. On an opaque bundle, QualifyRepair refuses a plugin patch.
+A validator repair is a substitution only: it needs the `validatorSubstitution`
+grant, a `requirementId` whose statement the manifest pins, and a candidate that
+adds files without editing or deleting the bundle's own. Any other request stops
+the run with reason `opaque gate`. The blocker says what is missing, and the stop
+cites the evidence the escalation and the supervisor referenced. No snapshot is
+taken and no correction is spent.
 
 Plugins, validators, builders, workers, and reviewers run outside the controller
 process. A plugin crash or hang becomes an observed child failure; the controller

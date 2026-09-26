@@ -16,6 +16,7 @@ export type {
   ObserveSpec,
   OutstandingOperation,
   QualifyRepairSpec,
+  RepairAuthorityView,
   RepairTarget,
   Receipt,
   ReenterSpec,

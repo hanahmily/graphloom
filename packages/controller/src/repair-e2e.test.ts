@@ -16,7 +16,9 @@ import {
   stop,
   supervise,
   validate,
+  type GraphDecision,
   type GraphDefinition,
+  type RunView,
   type Validator,
 } from "@graphloom/sdk";
 import { createScriptedRunner } from "@graphloom/runner";
@@ -132,7 +134,12 @@ afterEach(async () => {
 });
 
 async function makeEnv(
-  opts: { grants?: boolean; linkBundle?: boolean } = {},
+  opts: {
+    grants?: boolean | { sourceRepair: boolean; validatorSubstitution: boolean };
+    linkBundle?: boolean;
+    /** Rewrites the copied bundle's manifest. */
+    manifest?: (manifest: Record<string, unknown>) => Record<string, unknown>;
+  } = {},
 ): Promise<{ taskPath: string; stateRoot: string; taskDir: string }> {
   await execFileAsync("npm", ["run", "build", "-w", "@graphloom/plugin-hello"], {
     cwd: repoRoot,
@@ -159,7 +166,18 @@ async function makeEnv(
       dereference: true,
       filter: (src) => path.basename(src) !== "node_modules",
     });
+    if (opts.manifest) {
+      const manifestPath = path.join(taskDir, "plugins", "hello", "graphloom.manifest.json");
+      const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as Record<string, unknown>;
+      await writeFile(manifestPath, JSON.stringify(opts.manifest(manifest), null, 2), "utf8");
+    }
   }
+  const grants =
+    opts.grants === false
+      ? undefined
+      : opts.grants === undefined || opts.grants === true
+        ? { sourceRepair: true, validatorSubstitution: true }
+        : opts.grants;
   const taskPath = path.join(taskDir, "task.yaml");
   await writeFile(
     taskPath,
@@ -169,11 +187,11 @@ request: |
   Create GREETING.txt containing exactly "Hello, GraphLoom!" followed by
   one newline. Do not modify other files.
 ${
-  opts.grants === false
+  grants === undefined
     ? ""
     : `grants:
-  sourceRepair: true
-  validatorSubstitution: true
+  sourceRepair: ${grants.sourceRepair}
+  validatorSubstitution: ${grants.validatorSubstitution}
 `
 }`,
     "utf8",
@@ -1185,6 +1203,12 @@ describe("qualified repair + same-run activation (#29)", () => {
         /candidate manifest alters pinned privateStateSchema/,
       ],
       [
+        "changes the repair contract",
+        "graphloom.manifest.json",
+        (raw: string) => raw.replace('"source-repairable"', '"opaque"'),
+        /candidate manifest alters pinned repairContract/,
+      ],
+      [
         "adds a declared dependency",
         "package.json",
         (raw: string) => {
@@ -1266,6 +1290,270 @@ describe("qualified repair + same-run activation (#29)", () => {
       expect(state.activeVersion).toBe("hello@0.1.0");
       expect(state.definition.requirements[0]?.evidenceSchema).toBe("workspace-bytes-v1");
       expect(await readFile(liveGraph, "utf8")).toBe(before);
+    });
+  });
+
+  describe("opaque gates (#59)", () => {
+    const opaque = (m: Record<string, unknown>) => ({ ...m, repairContract: "opaque" });
+    /** Writes the greeting, fails the defective Write gate, then escalates. */
+    const failingGatePlugin = (after: GraphDecision[] = []) =>
+      createScriptedGraph({
+        definition,
+        advances: [
+          dispatch(
+            { stageId: "write", kind: "agent", purpose: "work", instruction: "write", writeScope: [GREETING_PATH] },
+            "write",
+          ),
+          observe({ paths: [GREETING_PATH], includeWorkspaceManifest: true }, "obs"),
+          validate({ stageId: "write", requirementIds: ["greeting-bytes"] }, "val write"),
+          (view: RunView) =>
+            supervise(
+              { reason: "write gate failed", evidenceRefs: [...view.evidence.map((e) => e.ref), "not-recorded"] },
+              "escalate",
+            ),
+          ...after,
+        ],
+      });
+    const writer = (writes = 1) =>
+      createScriptedRunner({
+        jobs: [
+          ...Array.from({ length: writes }, () => async (_job: unknown, ctx: { worktreePath: string }) => {
+            await writeFile(path.join(ctx.worktreePath, GREETING_PATH), GREETING, "utf8");
+            return { status: "ok" as const, summary: "wrote" };
+          }),
+          async () => ({
+            status: "ok" as const,
+            summary: "approved",
+            evidence: [{ kind: "review" as const, payload: { verdict: "approved", summary: "ok" } }],
+          }),
+        ],
+      });
+    const defectiveValidators = { ...goodValidators, "exact-greeting": defectiveGreeting };
+    const patchCounter = (sessionId: string, onPatch?: (root: string) => Promise<void>) => {
+      let patches = 0;
+      const repair = approvingRepair(sessionId, async (root) => {
+        patches += 1;
+        await onPatch?.(root);
+      });
+      return { repair, patches: () => patches };
+    };
+    it.each([
+      [
+        "a source patch",
+        { grants: true },
+        qualifyRepair({ target: "plugin", reason: "patch the gate" }, "q"),
+        /the graph bundle is opaque: its code cannot be patched/,
+      ],
+      [
+        "a substitution without the grant",
+        { grants: { sourceRepair: true, validatorSubstitution: false } },
+        qualifyRepair({ target: "validator", requirementId: "greeting-bytes", reason: "substitute" }, "q"),
+        /validator substitution is not authorized/,
+      ],
+      [
+        "a substitution that names no requirement",
+        { grants: true },
+        qualifyRepair({ target: "validator", reason: "substitute" }, "q"),
+        /must name the disputed requirement/,
+      ],
+      [
+        "a substitution for a requirement the manifest does not pin",
+        { grants: true, withoutRequirements: true },
+        qualifyRepair({ target: "validator", requirementId: "greeting-bytes", reason: "substitute" }, "q"),
+        /requirement greeting-bytes has no readable statement pinned in the manifest/,
+      ],
+    ] as const)("stops with evidence instead of qualifying %s", async (_case, setup, decision, reason) => {
+      const env = await makeEnv({
+        grants: setup.grants,
+        manifest: (m) => {
+          const next: Record<string, unknown> = opaque(m);
+          if ("withoutRequirements" in setup) delete next["requirements"];
+          return next;
+        },
+      });
+      const { repair, patches } = patchCounter("sup-59");
+      let authority: unknown;
+      const report = await createController().run({
+        taskPath: env.taskPath,
+        plugin: failingGatePlugin(),
+        validators: defectiveValidators,
+        supervisor: createScriptedSupervisor({
+          sessionId: "sup-59",
+          decisions: [
+            (input) => {
+              authority = input.view.repairAuthority;
+              return decision;
+            },
+          ],
+        }),
+        repair,
+        runner: writer(),
+        stateRoot: env.stateRoot,
+        runId: "opaque",
+      });
+
+      expect(authority).toMatchObject({ contract: "opaque" });
+      expect(report.status).toBe("stopped");
+      expect(report.stopReason).toBe("opaque gate");
+      expect(report.blocker).toMatch(reason);
+      const state = await loadRunState(report.stateDir);
+      // The escalation cited the failing gate's evidence; unrecorded refs are dropped.
+      const failed = state.evidence.map((e) => e.ref);
+      expect(failed.length).toBeGreaterThan(0);
+      expect(state.recoveryTrigger?.evidenceRefs).toEqual(failed);
+      expect(report.stopEvidenceRefs).toEqual(failed);
+      expect((await createController().inspect(report.stateDir)).stopEvidenceRefs).toEqual(failed);
+      expect(patches()).toBe(0);
+      expect(state.repairCandidates ?? []).toEqual([]);
+      expect(existsSync(path.join(report.stateDir, "repairs"))).toBe(false);
+      expect(state.budgets.corrections).toBe(8);
+    });
+
+    it("rejects a substitution that edits the opaque bundle's existing files", async () => {
+      const env = await makeEnv({ manifest: opaque });
+      const { repair } = patchCounter("sup-59e", async (root) => {
+        await writeFile(path.join(root, "dist", "validators.js"), "export {};\n", "utf8");
+      });
+      const report = await createController().run({
+        taskPath: env.taskPath,
+        plugin: failingGatePlugin(),
+        validators: defectiveValidators,
+        supervisor: createScriptedSupervisor({
+          sessionId: "sup-59e",
+          decisions: [
+            qualifyRepair({ target: "validator", requirementId: "greeting-bytes", reason: "substitute" }, "q"),
+            stop({ reason: "substitution rejected", blocker: "operator review" }, "s"),
+          ],
+        }),
+        repair,
+        runner: writer(),
+        stateRoot: env.stateRoot,
+        runId: "opaque-edit",
+      });
+      expect(report.stopReason).toBe("substitution rejected");
+      const [candidate] = (await loadRunState(report.stateDir)).repairCandidates!;
+      expect(candidate?.status).toBe("rejected");
+      expect(candidate?.rejectionReason).toBe(
+        "validator substitution on an opaque bundle may only add files; changed dist/validators.js",
+      );
+    });
+
+    it("qualifies and activates a substitute validator for a readable requirement", async () => {
+      const env = await makeEnv({ manifest: opaque });
+      const { repair } = patchCounter("sup-59s", async (root) => {
+        await mkdir(path.join(root, "substitute"), { recursive: true });
+        await writeFile(path.join(root, "substitute", "exact-greeting.mjs"), "export const validator = {};\n", "utf8");
+      });
+      repair.materializeValidators = (root) =>
+        existsSync(path.join(root, "substitute", "exact-greeting.mjs")) ? goodValidators : undefined;
+      const report = await createController().run({
+        taskPath: env.taskPath,
+        plugin: failingGatePlugin([
+          dispatch(
+            { stageId: "write", kind: "agent", purpose: "work", instruction: "rewrite", writeScope: [GREETING_PATH] },
+            "rewrite",
+          ),
+          observe({ paths: [GREETING_PATH], includeWorkspaceManifest: true }, "obs2"),
+          validate({ stageId: "write", requirementIds: ["greeting-bytes"] }, "val write2"),
+          dispatch(
+            { stageId: "review", kind: "agent", purpose: "review", instruction: "review", readOnly: true },
+            "review",
+          ),
+          validate({ stageId: "review", requirementIds: ["independent-review"] }, "val review"),
+          stop({ reason: "complete", blocker: "none" }, "done"),
+        ]),
+        validators: defectiveValidators,
+        supervisor: createScriptedSupervisor({
+          sessionId: "sup-59s",
+          decisions: [
+            qualifyRepair({ target: "validator", requirementId: "greeting-bytes", reason: "substitute" }, "q"),
+            activateFirstQualified(),
+            returnToNormal({ summary: "substitute validator active" }, "r"),
+          ],
+        }),
+        repair,
+        runner: writer(2),
+        stateRoot: env.stateRoot,
+        runId: "opaque-substitute",
+      });
+      expect(report.status, report.blocker).toBe("succeeded");
+      const [candidate] = (await loadRunState(report.stateDir)).repairCandidates!;
+      expect(candidate?.status).toBe("activated");
+    });
+
+    it("stops qualify_repair naming a requirement the run did not pin", async () => {
+      const env = await makeEnv();
+      const report = await createController().run({
+        taskPath: env.taskPath,
+        plugin: escalatingPlugin(),
+        validators: goodValidators,
+        supervisor: createScriptedSupervisor({
+          sessionId: "sup-59u",
+          decisions: [qualifyRepair({ target: "validator", requirementId: "made-up", reason: "substitute" }, "q")],
+        }),
+        repair: approvingRepair("sup-59u"),
+        runner: createScriptedRunner({ jobs: [] }),
+        stateRoot: env.stateRoot,
+        runId: "unknown-requirement",
+      });
+      expect(report.stopReason).toBe("qualify_repair rejected");
+      expect(report.blocker).toBe("requirement made-up is not pinned by this run");
+    });
+
+    it("records a stop's recorded evidence refs and clears them on resume", async () => {
+      const env = await makeEnv({ manifest: opaque });
+      const controller = createController();
+      const first = await controller.run({
+        taskPath: env.taskPath,
+        plugin: failingGatePlugin(),
+        validators: defectiveValidators,
+        supervisor: createScriptedSupervisor({
+          sessionId: "sup-59r",
+          decisions: [
+            (input) =>
+              stop(
+                {
+                  reason: "opaque gate",
+                  blocker: "supplier must fix exact-greeting",
+                  evidenceRefs: [...input.view.evidence.map((e) => e.ref), "not-recorded"],
+                },
+                "stop",
+              ),
+          ],
+        }),
+        runner: writer(),
+        stateRoot: env.stateRoot,
+        runId: "stop-evidence",
+      });
+      const state = await loadRunState(first.stateDir);
+      expect(first.stopEvidenceRefs).toEqual(state.evidence.map((e) => e.ref));
+
+      const resumed = await controller.resume({
+        runRef: first.stateDir,
+        plugin: failingGatePlugin(),
+        validators: defectiveValidators,
+        supervisor: createScriptedSupervisor({
+          sessionId: "sup-59r",
+          decisions: [stop({ reason: "pause", blocker: "operator pause" }, "pause")],
+        }),
+        runner: writer(),
+      });
+      expect(resumed.stopReason).toBe("pause");
+      expect(resumed.stopEvidenceRefs).toBeUndefined();
+    });
+
+    it("refuses a bundle whose manifest declares an unknown repair contract", async () => {
+      const env = await makeEnv({ manifest: (m) => ({ ...m, repairContract: "patchable" }) });
+      await expect(
+        createController().run({
+          taskPath: env.taskPath,
+          plugin: escalatingPlugin(),
+          validators: goodValidators,
+          runner: createScriptedRunner({ jobs: [] }),
+          stateRoot: env.stateRoot,
+          runId: "bad-contract",
+        }),
+      ).rejects.toThrow(/repairContract must be "source-repairable" or "opaque"/);
     });
   });
 });

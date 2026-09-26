@@ -55,6 +55,24 @@ export async function digestDirectoryTree(root: string): Promise<string> {
   return h.digest("hex");
 }
 
+/** Base files the candidate edited or deleted, sorted; files it only added are not listed. */
+export async function changedBaseFiles(
+  baseRoot: string,
+  candidateRoot: string,
+  ignore: ReadonlySet<string>,
+): Promise<string[]> {
+  const changed: string[] = [];
+  for (const rel of (await listFilesRecursive(baseRoot)).sort()) {
+    if (ignore.has(rel)) continue;
+    const [want, got] = await Promise.all([
+      readFile(path.join(baseRoot, rel)),
+      readFile(path.join(candidateRoot, rel)).catch(() => undefined),
+    ]);
+    if (got === undefined || !want.equals(got)) changed.push(rel);
+  }
+  return changed;
+}
+
 /**
  * List files under root. Rejects symlinks so review/digest/activation cannot
  * follow links outside the candidate scope.

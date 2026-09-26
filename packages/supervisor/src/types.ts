@@ -11,6 +11,8 @@ export interface RecoveryTrigger {
     | "stalled"
     | "unhandled";
   message: string;
+  /** Recorded evidence the escalation cites, such as the failing validation's inputs. */
+  evidenceRefs?: string[];
 }
 
 export interface SupervisorInput {

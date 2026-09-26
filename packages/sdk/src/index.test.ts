@@ -129,6 +129,30 @@ describe("assertRunView agentSessions", () => {
   });
 });
 
+describe("assertRunView repairAuthority", () => {
+  const authority: NonNullable<RunView["repairAuthority"]> = {
+    contract: "opaque",
+    grants: { sourceRepair: false, validatorSubstitution: true, executorRepair: false },
+  };
+
+  it("accepts a well-formed authority, or none", () => {
+    expect(assertRunView(emptyView({ repairAuthority: authority })).repairAuthority).toEqual(authority);
+    expect(assertRunView(emptyView()).repairAuthority).toBeUndefined();
+  });
+
+  it("rejects a malformed authority", () => {
+    const bad = (repairAuthority: unknown) => () => assertRunView({ ...emptyView(), repairAuthority });
+    expect(bad("opaque")).toThrow("repairAuthority must be an object");
+    expect(bad({ ...authority, contract: "patchable" })).toThrow(
+      "repairAuthority.contract must be source-repairable or opaque",
+    );
+    expect(bad({ ...authority, grants: undefined })).toThrow("repairAuthority.grants must be an object");
+    expect(bad({ ...authority, grants: { ...authority.grants, executorRepair: "no" } })).toThrow(
+      "repairAuthority.grants.executorRepair must be boolean",
+    );
+  });
+});
+
 describe("createScriptedGraph", () => {
   it("returns canned describe and sequenced advances", () => {
     const graph = createScriptedGraph({

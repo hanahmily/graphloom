@@ -140,6 +140,8 @@ export interface RunReport {
   status: RunStatus;
   stopReason?: string;
   blocker?: string;
+  /** Recorded evidence the stop cites. */
+  stopEvidenceRefs?: string[];
   receipts: DurableRunState["receipts"];
   evidence: DurableRunState["evidence"];
   generation: number;
@@ -171,6 +173,8 @@ export interface InspectReport {
   stateDir: string;
   stopReason?: string;
   blocker?: string;
+  /** Recorded evidence the stop cites. */
+  stopEvidenceRefs?: string[];
 }
 
 export interface Controller {
@@ -429,7 +433,9 @@ export function createController(): Controller {
 
         state = reconcileRepairJournal(state);
         state = await reconcileSwitchJournal(state);
-        state = bumpGeneration({ ...state, status: "running" }, "resume");
+        const { stopEvidenceRefs: _staleEvidence, ...resumable } = state;
+        void _staleEvidence;
+        state = bumpGeneration({ ...resumable, status: "running" }, "resume");
         await clearStopRequest(stateDir);
         await saveRunState(state);
 
@@ -814,6 +820,9 @@ function toInspect(state: DurableRunState): InspectReport {
   if (state.blocker !== undefined) {
     report.blocker = state.blocker;
   }
+  if (state.stopEvidenceRefs !== undefined) {
+    report.stopEvidenceRefs = [...state.stopEvidenceRefs];
+  }
   return report;
 }
 
@@ -883,6 +892,9 @@ function toReport(state: DurableRunState, sourceDirtyAfter: string[]): RunReport
   }
   if (state.blocker !== undefined) {
     report.blocker = state.blocker;
+  }
+  if (state.stopEvidenceRefs !== undefined) {
+    report.stopEvidenceRefs = [...state.stopEvidenceRefs];
   }
   return report;
 }

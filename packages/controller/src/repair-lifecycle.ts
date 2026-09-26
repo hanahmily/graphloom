@@ -13,8 +13,10 @@ import type { Supervisor } from "@graphloom/supervisor";
 import type { PluginHost } from "@graphloom/plugin-host";
 import { invalidateFromStage, type AdmissionValidator } from "./admit.js";
 import { resolveBundleEntryFromManifest } from "./bundle.js";
+import { manifestRepairContract } from "./intake.js";
 import {
   assertCandidateStepsUnchanged,
+  changedBaseFiles,
   digestDirectoryTree,
   assertDependenciesUnchanged,
   linkDependencies,
@@ -24,7 +26,7 @@ import {
 import type { DurableRunState } from "./state.js";
 import { bumpGeneration } from "./generation.js";
 import { activateExecutorRepair, executorRepairSubject } from "./executor-repair.js";
-import { saveRunState } from "./state.js";
+import { citedEvidence, saveRunState } from "./state.js";
 
 export interface RepairPatchAuthor {
   /** Must equal the run supervisor session id for every repair round. */
@@ -117,6 +119,28 @@ export async function applyQualifyRepair(
       status: "stopped",
       stopReason: "corrections budget exhausted",
       blocker: "qualify_repair",
+    };
+  }
+  if (
+    qualify.requirementId !== undefined &&
+    !state.definition.requirements.some((r) => r.id === qualify.requirementId)
+  ) {
+    return {
+      ...state,
+      status: "stopped",
+      stopReason: "qualify_repair rejected",
+      blocker: `requirement ${qualify.requirementId} is not pinned by this run`,
+    };
+  }
+  const opaque = opaqueGateRefusal(state, qualify);
+  if (opaque !== undefined) {
+    const cited = opaqueGateEvidence(state, qualify);
+    return {
+      ...state,
+      status: "stopped",
+      stopReason: "opaque gate",
+      blocker: opaque,
+      ...(cited.length > 0 ? { stopEvidenceRefs: cited } : {}),
     };
   }
 
@@ -325,6 +349,45 @@ export async function applyQualifyRepair(
   }
 }
 
+/**
+ * Why an opaque bundle cannot take this repair, or undefined when it can.
+ * Its code is never patched; a validator may be substituted only under the
+ * operator's grant, for a requirement the manifest pins readably.
+ */
+function opaqueGateRefusal(state: DurableRunState, qualify: QualifyRepairSpec): string | undefined {
+  if (qualify.target === "executor") return undefined;
+  if (manifestRepairContract(state.intake.bundle.manifestRaw) !== "opaque") return undefined;
+  if (qualify.target === "plugin") {
+    return "the graph bundle is opaque: its code cannot be patched";
+  }
+  if (!state.intake.grants.validatorSubstitution) {
+    return "the graph bundle is opaque and validator substitution is not authorized";
+  }
+  if (qualify.requirementId === undefined) {
+    return "validator substitution on an opaque bundle must name the disputed requirement";
+  }
+  const pinned = (JSON.parse(state.intake.bundle.manifestRaw) as { requirements?: unknown }).requirements;
+  const readable =
+    Array.isArray(pinned) &&
+    pinned.some(
+      (r: unknown) =>
+        typeof r === "object" &&
+        r !== null &&
+        (r as Requirement).id === qualify.requirementId &&
+        typeof (r as Requirement).statement === "string" &&
+        (r as Requirement).statement.trim() !== "",
+    );
+  if (!readable) {
+    return `requirement ${qualify.requirementId} has no readable statement pinned in the manifest`;
+  }
+  return undefined;
+}
+
+/** The refs the supervisor cited, plus those the escalation into recovery cited. */
+function opaqueGateEvidence(state: DurableRunState, qualify: QualifyRepairSpec): string[] {
+  return citedEvidence(state, [...(qualify.evidenceRefs ?? []), ...(state.recoveryTrigger?.evidenceRefs ?? [])]);
+}
+
 /** What a qualification round copies, digests, and checks, per repair target. */
 export interface RepairSubject {
   /** Names the repaired code in rejection reasons. */
@@ -367,7 +430,18 @@ async function bundleRepairSubject(state: DurableRunState, qualify: QualifyRepai
         candidateRoot,
       });
       await assertCandidateManifestCompatible(candidateRoot, state);
-      await assertDependenciesUnchanged(await realpath(state.intake.bundle.bundlePath), candidateRoot);
+      const baseReal = await realpath(state.intake.bundle.bundlePath);
+      await assertDependenciesUnchanged(baseReal, candidateRoot);
+      if (manifestRepairContract(state.intake.bundle.manifestRaw) === "opaque") {
+        // The controller rewrites the stages pin in every candidate.
+        const changed = await changedBaseFiles(baseReal, candidateRoot, new Set(["graphloom.stages.json"]));
+        if (changed.length > 0) {
+          const shown = changed.slice(0, 5).join(", ");
+          throw new Error(
+            `validator substitution on an opaque bundle may only add files; changed ${shown}${changed.length > 5 ? ", …" : ""}`,
+          );
+        }
+      }
     },
   };
 }
@@ -377,12 +451,13 @@ async function assertCandidateManifestCompatible(
   candidateRoot: string,
   state: DurableRunState,
 ): Promise<void> {
-  type Manifest = Record<"graphId" | "version" | "sdkProtocol" | "privateStateSchema" | "requirements", unknown>;
+  const fields = ["graphId", "version", "sdkProtocol", "privateStateSchema", "repairContract"] as const;
+  type Manifest = Record<(typeof fields)[number] | "requirements", unknown>;
   const manifest = JSON.parse(
     await readFile(path.join(candidateRoot, "graphloom.manifest.json"), "utf8"),
   ) as Manifest;
   const pinned = JSON.parse(state.intake.bundle.manifestRaw) as Manifest;
-  for (const field of ["graphId", "version", "sdkProtocol", "privateStateSchema"] as const) {
+  for (const field of fields) {
     if (JSON.stringify(manifest[field]) !== JSON.stringify(pinned[field])) {
       throw new Error(`candidate manifest alters pinned ${field}`);
     }
