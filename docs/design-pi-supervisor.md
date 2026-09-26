@@ -95,7 +95,7 @@ These three cases are different:
 |---|---|---|
 | Claude through Pi with an Anthropic API key | Supported API credential path | Baseline direct-Pi route; separate provider billing |
 | Claude subscription OAuth through Pi | Pi has OAuth support, but warns that third-party usage uses paid extra usage rather than included Claude plan limits | Do not promise included-plan access or copy Claude Code tokens into GraphLoom |
-| User-authenticated, unmodified Claude Code | Anthropic documents subscription use through its genuine binary under its stated conditions | Separate possible harness adapter; not a native Pi model switch and not implemented here |
+| User-authenticated, unmodified Claude Code | Anthropic documents subscription use through its genuine binary under its stated conditions | The coding-agent executor's Claude Code harness runs the user's own `claude` CLI and login ([executors](design-executors.md)); it is not a Pi model switch, and the supervisor stays on Pi |
 
 Pi's current provider documentation recognizes Anthropic OAuth tokens. Its
 interactive-mode source explicitly distinguishes third-party extra-usage billing
@@ -108,9 +108,9 @@ Anthropic's current documentation distinguishes genuine unmodified Claude Code,
 where end users authenticate themselves, from third-party applications collecting
 or routing Claude subscription credentials. It directs product integrations to
 API keys or supported cloud providers. GraphLoom's Pi backend uses those supported
-credential paths; a later genuine Claude Code adapter needs its own integration
-and session handoff qualification. It must not masquerade as Claude Code or proxy
-its subscription credentials into Pi.
+credential paths. The Claude Code coding harness runs the unmodified CLI with
+the user's own login and never reads or copies its credentials. Nothing may
+masquerade as Claude Code or proxy its subscription credentials into Pi.
 [Anthropic authentication and product-integration rules](https://code.claude.com/docs/en/legal-and-compliance).
 
 For the requested direct providers, Pi documents `DEEPSEEK_API_KEY`,

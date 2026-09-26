@@ -8,6 +8,7 @@ import {
   codingAgentExecutorPackage,
   CODING_AGENT_RUN_ID,
   CONTINUATION_NOTICE,
+  claudeCodeHarnessModule,
   createCodingAgentExecutor,
   DEFAULT_CODING_TIMEOUT_MS,
   piHarnessModule,
@@ -152,8 +153,18 @@ describe("graphloom.coding-agent/run", () => {
   it("declares an unrestricted package that the operator binding consents to", () => {
     expect(codingAgentExecutorPackage).toMatchObject({
       executorIds: [CODING_AGENT_RUN_ID],
-      credentials: ["pi-api-key"],
-      configEnv: ["GRAPHLOOM_CODING_HARNESS", "GRAPHLOOM_PI_PROVIDER", "GRAPHLOOM_PI_MODEL", "GRAPHLOOM_PI_AGENT_DIR"],
+      credentials: ["anthropic-api-key", "pi-api-key"],
+      configEnv: [
+        "GRAPHLOOM_CODING_HARNESS",
+        "GRAPHLOOM_CLAUDE_BIN",
+        "GRAPHLOOM_CLAUDE_MODEL",
+        "GRAPHLOOM_CLAUDE_PASS_ENV",
+        "GRAPHLOOM_CLAUDE_STARTUP_TIMEOUT_MS",
+        "GRAPHLOOM_CLAUDE_RESPONSE_TIMEOUT_MS",
+        "GRAPHLOOM_PI_PROVIDER",
+        "GRAPHLOOM_PI_MODEL",
+        "GRAPHLOOM_PI_AGENT_DIR",
+      ],
       isolation: "unrestricted",
     });
     expect(codingAgentBinding({ harness: "/h.js" })).toEqual({
@@ -163,6 +174,42 @@ describe("graphloom.coding-agent/run", () => {
       env: { GRAPHLOOM_CODING_HARNESS: "/h.js" },
     });
     expect(codingAgentBinding({ harness: "/h.js", timeoutMs: 5_000 }).timeoutMs).toBe(5_000);
+  });
+
+  it("binds Claude Code settings as config and an API key only as a credential", () => {
+    expect(codingAgentBinding({ harness: claudeCodeHarnessModule })).toEqual({
+      allowedEffects: ["read", "write"],
+      allowUnrestricted: true,
+      timeoutMs: DEFAULT_CODING_TIMEOUT_MS,
+      env: { GRAPHLOOM_CODING_HARNESS: claudeCodeHarnessModule },
+    });
+    expect(
+      codingAgentBinding({
+        harness: claudeCodeHarnessModule,
+        claude: {
+          command: "/bin/claude",
+          model: "opus",
+          apiKey: "sk-ant",
+          passEnv: ["AWS_PROFILE", "CLAUDE_CODE_USE_BEDROCK"],
+          startupTimeoutMs: 60_000,
+          responseTimeoutMs: 0,
+        },
+      }),
+    ).toEqual({
+      allowedEffects: ["read", "write"],
+      allowUnrestricted: true,
+      timeoutMs: DEFAULT_CODING_TIMEOUT_MS,
+      env: {
+        GRAPHLOOM_CODING_HARNESS: claudeCodeHarnessModule,
+        GRAPHLOOM_CLAUDE_BIN: "/bin/claude",
+        GRAPHLOOM_CLAUDE_MODEL: "opus",
+        GRAPHLOOM_CLAUDE_PASS_ENV: "AWS_PROFILE,CLAUDE_CODE_USE_BEDROCK",
+        GRAPHLOOM_CLAUDE_STARTUP_TIMEOUT_MS: "60000",
+        GRAPHLOOM_CLAUDE_RESPONSE_TIMEOUT_MS: "0",
+      },
+      credentials: { "anthropic-api-key": "sk-ant" },
+    });
+    expect(claudeCodeHarnessModule).toMatch(/[\\/]claude\.js$/);
   });
 
   it("binds Pi settings as config and the API key only as a credential", () => {

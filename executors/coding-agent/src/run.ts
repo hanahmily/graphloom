@@ -123,6 +123,7 @@ export function createCodingAgentExecutor(
                   output: result.output ?? null,
                   toolCalls,
                   modelCalls,
+                  usage: result.usage ?? null,
                   sessionRef: sessionRef ?? null,
                   continued: resume !== undefined,
                 },
