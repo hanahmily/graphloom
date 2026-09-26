@@ -14,8 +14,9 @@ import {
   createInProcessPluginHost,
   type PluginHost,
 } from "@graphloom/plugin-host";
-import type { Supervisor } from "@graphloom/supervisor";
-import { restorePiSupervisorFromBinding } from "@graphloom/supervisor";
+import type { Supervisor, SupervisorBinding } from "@graphloom/supervisor";
+import { reconcileSupervisorBinding, restorePiSupervisorFromBinding } from "@graphloom/supervisor";
+import { writeSwitchRequest, type ModelSwitchOrder } from "./supervisor-switch.js";
 import {
   activeRepairValidators,
   reconcileRepairJournal,
@@ -93,6 +94,11 @@ export interface RunRequest {
    * One session identity is reused for every repair round in the run.
    */
   supervisor?: Supervisor;
+  /**
+   * Create the run's supervisor once the run id and state directory exist, so
+   * its session transcript lives with the run. Ignored when `supervisor` is set.
+   */
+  supervisorFactory?: (ctx: { runId: string; stateDir: string }) => Promise<Supervisor>;
   /** Qualified repair patch author + independent reviewer hooks. */
   repair?: RepairDeps;
   /**
@@ -169,6 +175,11 @@ export interface InspectReport {
 export interface Controller {
   run(request: RunRequest): Promise<RunReport>;
   stop(runRef: string, options?: { stateRoot?: string }): Promise<InspectReport>;
+  /**
+   * Ask the run's supervisor to continue on another operator-configured model.
+   * Applied before the next supervisor prompt, including after resume.
+   */
+  switchModel(runRef: string, order: ModelSwitchOrder, options?: { stateRoot?: string }): Promise<void>;
   resume(request: ResumeRequest): Promise<RunReport>;
   inspect(runRef: string, options?: { stateRoot?: string }): Promise<InspectReport>;
   /** @deprecated Prefer resume(); retained for #25 tests. */
@@ -201,6 +212,7 @@ export function createController(): Controller {
         stopRequested: false,
       };
       registerSession(session);
+      let supervisor = request.supervisor;
 
       try {
         const described = await host.describe({
@@ -249,6 +261,9 @@ export function createController(): Controller {
         await ensureArtifactDir(state);
         await clearStopRequest(state.stateDir);
         await saveRunState(state);
+        if (supervisor === undefined && request.supervisorFactory !== undefined) {
+          supervisor = await request.supervisorFactory({ runId, stateDir: state.stateDir });
+        }
 
         state = await runNormalLoop(state, {
           host,
@@ -256,9 +271,7 @@ export function createController(): Controller {
           validators,
           shouldStop: () => sessionStop(session),
           revisionBridge,
-          ...(request.supervisor !== undefined
-            ? { supervisor: request.supervisor }
-            : {}),
+          ...(supervisor !== undefined ? { supervisor } : {}),
           ...(request.repair !== undefined ? { repair: request.repair } : {}),
           ...resolveRecreateHost(session, {
             intake,
@@ -277,7 +290,7 @@ export function createController(): Controller {
       } finally {
         await clearStopRequest(session.stateDir);
         await clearOwnerClaim(session.stateDir);
-        await request.supervisor?.close?.().catch(() => undefined);
+        await supervisor?.close?.().catch(() => undefined);
         await reapSession(session);
       }
     },
@@ -318,6 +331,15 @@ export function createController(): Controller {
         }
         return toInspect(state);
       });
+    },
+
+    async switchModel(runRef, order, options): Promise<void> {
+      const stateDir = await resolveStateDir(runRef, options?.stateRoot);
+      const state = await loadRunState(stateDir);
+      if (state.status === "succeeded" || state.status === "failed") {
+        throw new Error(`cannot switch model: run ${state.runId} is ${state.status}`);
+      }
+      await writeSwitchRequest(stateDir, order);
     },
 
     async resume(request: ResumeRequest): Promise<RunReport> {
@@ -404,6 +426,7 @@ export function createController(): Controller {
         }
 
         state = reconcileRepairJournal(state);
+        state = await reconcileSwitchJournal(state);
         state = bumpGeneration({ ...state, status: "running" }, "resume");
         await clearStopRequest(stateDir);
         await saveRunState(state);
@@ -598,17 +621,38 @@ async function resolveResumeSupervisor(
     (async (b, ctx) =>
       restorePiSupervisorFromBinding({
         runId: ctx.runId,
-        binding: {
-          sessionId: b.sessionId,
-          sessionFile: b.sessionFile,
-          provider: b.provider,
-          modelId: b.modelId,
-          switchJournal: b.switchJournal,
-        },
+        binding: toSupervisorBinding(b),
         sessionDir: path.dirname(b.sessionFile!),
         repairsDir: path.join(ctx.stateDir, "repairs"),
       }));
   return restore(binding, { runId: state.runId, stateDir });
+}
+
+function toSupervisorBinding(b: NonNullable<DurableRunState["supervisorBinding"]>): SupervisorBinding {
+  return {
+    sessionId: b.sessionId,
+    sessionFile: b.sessionFile,
+    provider: b.provider,
+    modelId: b.modelId,
+    switchJournal: b.switchJournal,
+    ...(b.configuredModels !== undefined ? { configuredModels: b.configuredModels } : {}),
+  };
+}
+
+/** Settle a model switch interrupted by a crash, from the Pi session file. */
+async function reconcileSwitchJournal(state: DurableRunState): Promise<DurableRunState> {
+  const binding = state.supervisorBinding;
+  if (binding === undefined || !binding.switchJournal.some((r) => r.status === "intent")) return state;
+  const settled = await reconcileSupervisorBinding(toSupervisorBinding(binding));
+  return {
+    ...state,
+    supervisorBinding: {
+      ...binding,
+      provider: settled.provider,
+      modelId: settled.modelId,
+      switchJournal: settled.switchJournal,
+    },
+  };
 }
 
 async function sessionStop(session: ActiveSession): Promise<boolean> {

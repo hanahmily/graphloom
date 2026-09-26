@@ -555,6 +555,45 @@ describe("qualified repair + same-run activation (#29)", () => {
     expect(state.budgets.corrections).toBe(7);
   });
 
+  it("aborts the repair patch when the operator stops the run", async () => {
+    const env = await makeEnv();
+    let patching!: () => void;
+    const started = new Promise<void>((resolve) => {
+      patching = resolve;
+    });
+    const repair: RepairDeps = {
+      ...approvingRepair("sup-stop"),
+      patchAuthor: {
+        sessionId: "sup-stop",
+        patch: ({ signal }) =>
+          new Promise((_resolve, reject) => {
+            patching();
+            signal?.addEventListener("abort", () => reject(new Error("patch aborted")));
+          }),
+      },
+    };
+    const running = createController().run({
+      taskPath: env.taskPath,
+      plugin: escalatingPlugin(),
+      validators: goodValidators,
+      supervisor: createScriptedSupervisor({
+        sessionId: "sup-stop",
+        decisions: [qualifyRepair({ target: "plugin", reason: "try" }, "q")],
+      }),
+      repair,
+      runner: createScriptedRunner({ jobs: [] }),
+      stateRoot: env.stateRoot,
+      runId: "repair-stop",
+    });
+    await started;
+    await createController().stop("repair-stop", { stateRoot: env.stateRoot });
+    const report = await running;
+
+    expect(report).toMatchObject({ status: "stopped", stopReason: "operator stop" });
+    const state = await loadRunState(report.stateDir);
+    expect(state.repairCandidates?.[0]).toMatchObject({ status: "rejected", rejectionReason: "patch aborted" });
+  });
+
   it("bounds every patch summary and keeps it when a post-patch step throws", async () => {
     const env = await makeEnv();
     const repair: RepairDeps = {

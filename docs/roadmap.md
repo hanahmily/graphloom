@@ -15,7 +15,8 @@ and the [executor design](design-executors.md).
 5. **M4:** Qualified plugin/gate/executor repair (supervisor Pi authors the patch; independent reviewer), same-run version transitions, and local release.
 
 These milestones describe work to implement, not completed runtime capabilities.
-M1–M2 and the scripted recovery path for M3 are largely in tree, as are the
-executor contract and the packaged GitHub executor (qualified against a fake
-server). Live Pi recovery admission, the coding-agent child protocol, executor
-recovery, and M4 remain outstanding.
+M1–M2 and M3 are largely in tree: scripted recovery, and Pi recovery admission
+with model switching verified against faux providers. So are the executor
+contract, the packaged GitHub executor (qualified against a fake server), the
+coding-agent child protocol, and executor recovery. Live provider qualification
+(#30) and M4 remain outstanding.

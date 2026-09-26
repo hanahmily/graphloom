@@ -1,12 +1,16 @@
 # Pi SDK supervisor integration
 
-Status: Pi-backed `createPiSupervisor` wires recovery decisions and durable
-session binding (2026-09-24); provider call accounting settles against
-`agentInvocations`. The supervisor's Pi session must **write qualified repairs
-itself** into admitted candidate trees (not a separate non-Pi repair agent);
-unconstrained edit/write on the user worktree remains forbidden. Cross-provider
-live switching, BeforeProviderRequest interception, and candidate-scoped Pi coding
-tools remain follow-on under #43 / #29. Scripted supervisors stay the CI default.
+Status (2026-09-25, #43): Pi-backed `createPiSupervisor` decides recovery through
+GraphLoom admission tools on one durable session per run, with durable session
+binding, per-decision turn caps settled against `agentInvocations`, operator Stop
+during a prompt or patch, and journaled model switching with crash reconciliation.
+The supervisor's Pi session writes qualified repairs itself into admitted
+candidate trees through candidate-scoped coding tools; unconstrained edit/write on
+the user worktree remains forbidden. The CLI composes a Pi supervisor from an
+operator config file. These paths are verified with faux Pi providers; live
+qualification against configured accounts is tracked in #30, and
+BeforeProviderRequest interception is not implemented. Scripted supervisors stay
+the CI default.
 This document specializes the [core design](design-typescript-core.md).
 
 ## SDK choice and scope
@@ -50,8 +54,16 @@ there is no duplicated key in Pi configuration, repository files, task YAML, or
 plugin bundles. Auth/settings files are mode 0600 and the reader is mode 0700.
 These are operator-local files, not portable repository configuration.
 
-The future adapter should receive an explicit operator credential-store path and
-provider/model selection rather than discover credentials from the target repo.
+The CLI reads the operator's supervisor config from `$GRAPHLOOM_SUPERVISOR_CONFIG`,
+or `~/.config/graphloom/supervisor.json` when unset: initial `provider` and
+`modelId`, the other `models` it may switch to (`"provider/model"`), an optional
+Pi `agentDir`, and `promptTimeoutMs`. The file never holds credentials (`apiKey` is
+refused). Without it, `graphloom run` has no supervisor. The run's Pi transcript
+lives under `<stateDir>/supervisor`, and `resume` reopens it with the config's
+current model list.
+
+The adapter receives an explicit operator credential-store path and
+provider/model selection rather than discovering credentials from the target repo.
 It must resolve the existing reference without exposing the key to prompts,
 transcripts, plugin processes, or activity events. A missing credential is a
 configuration failure, not permission to silently select another account/region.
@@ -150,6 +162,22 @@ A switch alone does not spend a correction attempt, but its decision and subsequ
 model calls spend their applicable allowances. Authorized automatic fallback may
 select among configured models after a provider failure; there is no fallback to
 an unconfigured provider. Authentication presence is not live-provider validation.
+
+Implemented switching has two triggers and no automatic fallback. The operator runs
+`graphloom switch-model <run> <provider/model> --reason …`, which leaves a durable
+request applied before the run's next supervisor prompt, including after resume.
+The supervisor can call its `switch_model` tool, limited to configured models; the
+call ends its turn and the controller applies the switch while the session is idle.
+The controller journals the intent in run state before `setModel` and the outcome
+after. A refused or failed switch (unconfigured target, missing credential) is
+journaled as failed; the run continues on the current model and the next prompt
+reports the failure. On resume, an intent without an outcome is committed if the
+session file's last `model_change` entry names its target, and failed otherwise.
+
+Each recovery prompt opens with the controller's settlement of the previous
+proposal: new evidence (including executor failures), receipts, repair-candidate
+transitions, stage, generation, and switch outcomes. These are controller
+observations, not the supervisor's claims.
 Pi documents persistent model changes and calls out cross-provider handoff as a
 provider test requirement.
 [Model selection](https://pi.dev/docs/latest/models),
@@ -164,8 +192,12 @@ bash/edit/write against the user run worktree or live plugin install.
 Tooling has two layers:
 
 1. **GraphLoom-owned admission tools** — observe, dispatch, validate, reenter,
-   qualify_repair, activate_repair, return, stop. Tool results report controller
-   settlement; Pi cannot mint Accept or alter pinned steps/requirements.
+   qualify_repair, activate_repair, return, stop, plus switch_model. Each tool's
+   parameters are a JSON Schema of its action spec, so Pi returns malformed calls
+   to the model for correction. The first valid call ends the turn and becomes the
+   proposal; the controller admits it and reports its settlement at the start of
+   the next prompt. A plain JSON decision reply remains a fallback for models
+   without tool calling. Pi cannot mint Accept or alter pinned steps/requirements.
    After `Reenter` (or on a recovery `Dispatch`), the supervisor **supplies the
    job instruction** for that trial; it does not have to reuse the plugin's
    original prompt. Overrides remain bound to task, evidence contract, write
@@ -215,26 +247,27 @@ Use settled/idle semantics, not a single low-level `agent_end`, before switching
 or closing a supervisor request; queued work or automatic recovery can follow that
 event. Operator Stop aborts the request and waits for idle, then the controller
 reconciles in-flight effects. Filter private thinking from user-facing activity.
+
+The controller does not prompt a metered supervisor with no `agentInvocations`
+left, and caps each decision prompt at the invocations remaining. A Stop during a
+decision or a candidate patch aborts that prompt; the run records an operator stop.
 [SDK events and cancellation](https://pi.dev/docs/latest/sdk).
 
 ## Implementation and verification gaps
 
 | Gap | Required work |
 |---|---|
-| SDK dependency and MiniMax connection are ready; session adapter creates a durable Pi transcript | Wire controller recovery admission/results loop and GraphLoom-owned tools |
-| Candidate coding tools swap through private `AgentSession` fields | Replace with a public Pi tool-registry API when available; qualify on each Pi upgrade |
-| Cross-provider switching | Serialize selection, journal switches, enforce context/tool compatibility, retain session/history |
-| Invocation accounting | Count actual provider calls, including compaction/retry paths; avoid unmetered background work |
-| Restart and cancellation | Reconcile session metadata, tool operations, active model, and generation fences |
+| Admission and candidate coding tools swap through private `AgentSession` fields | Replace with a public Pi tool-registry API when available; qualify on each Pi upgrade |
+| Context/tool compatibility on switch | Check the target's context limits and modalities before switching; budgeted compaction or reported incompatibility |
+| Invocation accounting | Turn caps count prompt turns; interception of compaction/retry provider calls is still required (both are disabled) |
+| Live provider qualification | DeepSeek, MiniMax, and OpenAI accounts in the user's authorized scope (#30) |
 | Claude included subscription allowance | Not supplied by direct Pi integration; separate genuine Claude Code backend if needed |
 
-Tests must cover: two recovery episodes use the same logical session; switching
-DeepSeek → MiniMax → OpenAI preserves prior tool evidence; credential failure does
-not silently choose another provider; stop during a request settles safely; crash
-between switch intent and completion reconciles correctly; no hidden SDK tool or
-resource discovery; malformed/stale decisions cannot alter state; every model call
-is budgeted; and the supervisor cannot add or remove plugin steps. Use scripted
-provider transports for repeatable tests, followed by live qualification for
-configured accounts within the user's authorized scope. The completed MiniMax
-connectivity check above is the initial baseline; it does not satisfy these
-recovery and cross-provider test requirements.
+Faux-provider tests cover: two recovery episodes and a restart share one session
+file; switching DeepSeek → MiniMax → OpenAI keeps prior history in the same
+session; a credential failure (Anthropic without a key) keeps the current model;
+Stop during a decision prompt or candidate patch settles as an operator stop; a
+crash between switch intent and outcome reconciles from the session file; decisions
+are capped at the remaining invocations and refused at zero; admission tools reject
+malformed specs and end the turn on a valid one; and settlements reach the next
+prompt. The MiniMax connectivity check above remains the only live check.

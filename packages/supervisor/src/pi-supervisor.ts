@@ -1,11 +1,12 @@
-import type { GraphDecision } from "@graphloom/sdk";
 import { parseSupervisorDecision } from "./decision.js";
 import type { PiSupervisorSession } from "./pi-session.js";
+import { createAdmissionTools } from "./tools.js";
 import {
   assertGrantedRoot,
   type CandidatePatchRequest,
   type Supervisor,
   type SupervisorInput,
+  type SupervisorProposal,
 } from "./types.js";
 
 export interface SupervisorModelRef {
@@ -29,6 +30,8 @@ export interface SupervisorBinding {
   provider: string;
   modelId: string;
   switchJournal: ModelSwitchRecord[];
+  /** Models the operator configured; switches outside this set are refused. */
+  configuredModels?: SupervisorModelRef[];
 }
 
 export type PiSupervisorSessionPort = PiSupervisorSession;
@@ -59,8 +62,9 @@ export interface CreatePiSupervisorOptions {
 const MAX_PATCH_SUMMARY_CHARS = 2_000;
 
 /**
- * Pi-backed recovery supervisor: one logical session, JSON GraphDecision replies,
- * explicit model switching, and provider-call accounting for controller budgets.
+ * Pi-backed recovery supervisor: one logical session, one admission tool call per
+ * decision (JSON reply as fallback), explicit model switching, and provider-call
+ * accounting for controller budgets.
  */
 export function createPiSupervisor(options: CreatePiSupervisorOptions): PiSupervisor {
   const { session } = options;
@@ -86,6 +90,7 @@ export function createPiSupervisor(options: CreatePiSupervisorOptions): PiSuperv
     provider: session.provider,
     modelId: session.modelId,
     switchJournal,
+    configuredModels: configured.map((m) => ({ ...m })),
   };
 
   function syncBindingModel(): void {
@@ -131,18 +136,30 @@ export function createPiSupervisor(options: CreatePiSupervisorOptions): PiSuperv
       await session.revokeCandidateCoding?.();
     },
 
-    async decide(input: SupervisorInput): Promise<GraphDecision> {
+    async decide(input: SupervisorInput): Promise<SupervisorProposal> {
       if (closed) {
         throw new Error("supervisor is closed");
       }
-      const prompt = buildRecoveryPrompt(input);
+      if (input.maxProviderCalls !== undefined && input.maxProviderCalls < 1) {
+        throw new Error("decide has no provider-call allowance");
+      }
+      const toolbox = createAdmissionTools(configured);
+      const prompt = buildRecoveryPrompt(input, {
+        current: { provider: binding.provider, modelId: binding.modelId },
+        configured,
+      });
       let text: string;
       try {
-        text = await session.prompt(prompt);
+        text = await session.prompt(prompt, {
+          tools: toolbox.tools,
+          ...(input.signal !== undefined ? { signal: input.signal } : {}),
+          ...(input.maxProviderCalls !== undefined ? { maxTurns: input.maxProviderCalls } : {}),
+        });
       } finally {
         settleTurns();
       }
-      return parseSupervisorDecision(text);
+      // Models without tool calling may still reply with the decision as JSON.
+      return toolbox.proposal() ?? parseSupervisorDecision(text);
     },
 
     async patchCandidate(args: CandidatePatchRequest) {
@@ -159,6 +176,7 @@ export function createPiSupervisor(options: CreatePiSupervisorOptions): PiSuperv
         text = await session.prompt(buildRepairPrompt(args), {
           timeoutMs: patchTimeoutMs,
           ...(maxTurns !== undefined ? { maxTurns } : {}),
+          ...(args.signal !== undefined ? { signal: args.signal } : {}),
         });
       } finally {
         settleTurns();
@@ -172,11 +190,6 @@ export function createPiSupervisor(options: CreatePiSupervisorOptions): PiSuperv
         throw new Error("supervisor is closed");
       }
       const to = { provider: args.provider, modelId: args.modelId };
-      if (!isConfigured(configured, to)) {
-        throw new Error(
-          `model not configured: ${to.provider}/${to.modelId}; refusing silent fallback`,
-        );
-      }
       const from = { provider: binding.provider, modelId: binding.modelId };
       const record: ModelSwitchRecord = {
         at: new Date().toISOString(),
@@ -186,6 +199,11 @@ export function createPiSupervisor(options: CreatePiSupervisorOptions): PiSuperv
         status: "intent",
       };
       switchJournal.push(record);
+      if (!isConfigured(configured, to)) {
+        record.status = "failed";
+        record.error = `model not configured: ${to.provider}/${to.modelId}; refusing silent fallback`;
+        throw new Error(record.error);
+      }
 
       try {
         await session.setModel(to);
@@ -213,7 +231,10 @@ function isConfigured(configured: SupervisorModelRef[], ref: SupervisorModelRef)
   );
 }
 
-export function buildRecoveryPrompt(input: SupervisorInput): string {
+export function buildRecoveryPrompt(
+  input: SupervisorInput,
+  models?: { current: SupervisorModelRef; configured: readonly SupervisorModelRef[] },
+): string {
   const viewSummary = {
     runId: input.runId,
     episodeId: input.episodeId,
@@ -234,13 +255,28 @@ export function buildRecoveryPrompt(input: SupervisorInput): string {
     repairCandidates: input.view.repairCandidates ?? [],
   };
 
+  const settlement = input.lastSettlement;
   return [
     "You are the GraphLoom run supervisor in recovery.",
-    "Propose exactly one GraphDecision as JSON (optionally in a ```json fence).",
-    "Allowed action types: dispatch, observe, validate, reenter, qualify_repair, activate_repair, return, stop.",
+    "Propose exactly one action by calling one GraphLoom tool: dispatch, observe, validate, reenter, qualify_repair, activate_repair, return, or stop.",
+    "The controller admits and settles it and reports the outcome at the start of your next turn.",
+    "If tools are unavailable, reply with one GraphDecision as JSON ({\"reason\", \"action\": {\"type\", ...}}), optionally in a ```json fence.",
     "Never propose Accept. Never add, remove, rename, or reorder graph steps.",
     "Prefer further authorized remedies over Stop while budgets and authority remain.",
     "For activate_repair, use a qualifiedArtifactId from repairCandidates with status qualified.",
+    ...(models !== undefined
+      ? [
+          `Your model is ${models.current.provider}/${models.current.modelId}. To continue on another operator-configured model (${models.configured
+            .map((m) => `${m.provider}/${m.modelId}`)
+            .join(", ")}), call switch_model instead of an action.`,
+        ]
+      : []),
+    ...(settlement !== undefined
+      ? [
+          `Since the last proposal (${settlement.action}: ${settlement.reason}), the controller settled:`,
+          ...settlement.facts.map((f) => `- ${f}`),
+        ]
+      : []),
     `Episode: ${input.episodeId}`,
     "Recovery context:",
     "```json",

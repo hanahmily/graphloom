@@ -38,22 +38,30 @@ export {
 } from "./candidate-tools.js";
 
 export {
+  reconcileSupervisorBinding,
   restorePiSupervisorFromBinding,
   type RestorePiSupervisorOptions,
 } from "./restore.js";
 
 export {
+  createAdmissionTools,
   GRAPHLOOM_SUPERVISOR_ACTIONS,
-  PROPOSE_DECISION_TOOL,
+  SWITCH_MODEL_TOOL,
+  type AdmissionToolbox,
   type GraphLoomSupervisorAction,
 } from "./tools.js";
 
 export {
   createScriptedSupervisor,
+  isModelSwitchRequest,
   type CandidatePatchRequest,
+  type ModelRef,
+  type ModelSwitchRequest,
   type RecoveryTrigger,
   type ScriptedRecoveryStep,
   type ScriptedSupervisorOptions,
   type Supervisor,
   type SupervisorInput,
+  type SupervisorProposal,
+  type SupervisorSettlement,
 } from "./types.js";

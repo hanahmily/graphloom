@@ -18,6 +18,42 @@ export interface SupervisorInput {
   episodeId: string;
   trigger: RecoveryTrigger;
   view: RunView;
+  /** What the controller settled for the supervisor's previous proposal in this run. */
+  lastSettlement?: SupervisorSettlement;
+  /** Provider calls this turn may spend; a turn beyond it is aborted before its request. */
+  maxProviderCalls?: number;
+  /** Aborted when the run stops; the session aborts its request and settles idle. */
+  signal?: AbortSignal;
+}
+
+/** The controller's outcome for a supervisor proposal, reported on the next turn. */
+export interface SupervisorSettlement {
+  action: string;
+  reason: string;
+  /** Concise facts: job results, receipts, candidate status, stage, run status. */
+  facts: string[];
+}
+
+export interface ModelRef {
+  provider: string;
+  modelId: string;
+}
+
+/** Ask the controller to switch the supervisor's model before its next turn. */
+export interface ModelSwitchRequest extends ModelRef {
+  type: "switch_model";
+  reason: string;
+}
+
+/** A supervisor turn yields a graph decision, or a request to change its own model. */
+export type SupervisorProposal = GraphDecision | ModelSwitchRequest;
+
+export function isModelSwitchRequest(value: unknown): value is ModelSwitchRequest {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    (value as { type?: unknown }).type === "switch_model"
+  );
 }
 
 /**
@@ -26,7 +62,12 @@ export interface SupervisorInput {
  * One logical session identity is reused for every repair round in a run.
  */
 export interface Supervisor {
-  decide(input: SupervisorInput): Promise<GraphDecision>;
+  decide(input: SupervisorInput): Promise<SupervisorProposal>;
+  /**
+   * Switch the session's model. The controller journals the intent durably
+   * before calling this and commits it after; only configured models succeed.
+   */
+  switchModel?(request: ModelRef & { reason: string }): Promise<void>;
   close?(): Promise<void>;
   /**
    * Optional: settle provider/model calls spent during the last decide turn(s).
@@ -58,11 +99,13 @@ export interface CandidatePatchRequest {
   reason: string;
   /** Provider calls the controller reserved for this patch; stop before exceeding it. */
   maxProviderCalls?: number;
+  /** Aborted when the run stops. */
+  signal?: AbortSignal;
 }
 
 export type ScriptedRecoveryStep =
-  | GraphDecision
-  | ((input: SupervisorInput, index: number) => GraphDecision | Promise<GraphDecision>);
+  | SupervisorProposal
+  | ((input: SupervisorInput, index: number) => SupervisorProposal | Promise<SupervisorProposal>);
 
 export interface ScriptedSupervisorOptions {
   decisions: ScriptedRecoveryStep[];
@@ -70,6 +113,8 @@ export interface ScriptedSupervisorOptions {
   sessionId?: string;
   /** Canned candidate patch; requires an active candidate coding grant. */
   patch?: (args: CandidatePatchRequest) => Promise<{ summary: string }>;
+  /** Canned model switch; omitted means the supervisor cannot switch. */
+  switchModel?: (request: ModelRef & { reason: string }) => Promise<void>;
 }
 
 /** Canned recovery decisions for controller tests (no live LLM). */
@@ -82,7 +127,7 @@ export function createScriptedSupervisor(
   let codingRoot: string | undefined;
   return {
     sessionId,
-    async decide(input: SupervisorInput): Promise<GraphDecision> {
+    async decide(input: SupervisorInput): Promise<SupervisorProposal> {
       if (index >= decisions.length) {
         throw new Error(
           `scripted supervisor exhausted: decide called ${index + 1} times, only ${decisions.length} scripted`,
@@ -116,6 +161,7 @@ export function createScriptedSupervisor(
           },
         }
       : {}),
+    ...(options.switchModel !== undefined ? { switchModel: options.switchModel } : {}),
     /** Test helper: last granted candidate root (undefined when revoked). */
     getCandidateCodingRoot() {
       return codingRoot;

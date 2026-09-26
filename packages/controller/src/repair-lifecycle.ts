@@ -25,6 +25,8 @@ export interface RepairPatchAuthor {
     target: RepairTarget;
     reason: string;
     maxProviderCalls?: number;
+    /** Aborted when the operator stops the run mid-patch. */
+    signal?: AbortSignal;
   }): Promise<{ summary: string }>;
 }
 
@@ -84,6 +86,7 @@ export async function applyQualifyRepair(
     supervisor?: Supervisor;
     repair: RepairDeps;
     validators: Record<string, AdmissionValidator>;
+    signal?: AbortSignal;
   },
 ): Promise<DurableRunState> {
   if (state.mode !== "recovery") {
@@ -244,6 +247,7 @@ export async function applyQualifyRepair(
         target: qualify.target,
         reason: qualify.reason,
         ...(meteredPatch ? { maxProviderCalls: patchAllowance } : {}),
+        ...(deps.signal !== undefined ? { signal: deps.signal } : {}),
       });
       patchSummary = boundPatchSummary(patched?.summary);
     } finally {
