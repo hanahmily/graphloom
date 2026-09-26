@@ -1,4 +1,6 @@
+import { readFile } from "node:fs/promises";
 import path from "node:path";
+import { parseSessionEntries } from "@earendil-works/pi-coding-agent";
 import {
   createPiSupervisorSession,
   type CreatePiSupervisorSessionOptions,
@@ -67,6 +69,7 @@ export async function restorePiSupervisorFromBinding(
 
   const configured =
     options.configuredModels ??
+    binding.configuredModels ??
     configuredModelsFromBinding(binding);
 
   return createPiSupervisor({
@@ -75,6 +78,59 @@ export async function restorePiSupervisorFromBinding(
     initialSwitchJournal: binding.switchJournal as ModelSwitchRecord[],
     ...(options.patchTimeoutMs !== undefined ? { patchTimeoutMs: options.patchTimeoutMs } : {}),
   });
+}
+
+/**
+ * Settle switch intents left by a crash between journaling and commit. Pi
+ * appends a `model_change` entry to the session file when a switch takes
+ * effect, so an intent whose target matches the file's last model change is
+ * committed; any other intent failed and the run stays on its `from` model.
+ * The session itself is never replaced.
+ */
+export async function reconcileSupervisorBinding(
+  binding: SupervisorBinding,
+): Promise<SupervisorBinding> {
+  if (!binding.switchJournal.some((r) => r.status === "intent")) return binding;
+  const last = await lastModelChange(binding.sessionFile);
+  let model: SupervisorModelRef = { provider: binding.provider, modelId: binding.modelId };
+  const switchJournal = binding.switchJournal.map((record) => {
+    if (record.status !== "intent") return record;
+    if (last !== undefined && sameModel(last, record.to)) {
+      model = { ...record.to };
+      return { ...record, status: "committed" as const };
+    }
+    model = { ...record.from };
+    return {
+      ...record,
+      status: "failed" as const,
+      error: "switch interrupted before commit; the session did not record the model change",
+    };
+  });
+  return { ...binding, ...model, switchJournal };
+}
+
+async function lastModelChange(
+  sessionFile: string | undefined,
+): Promise<SupervisorModelRef | undefined> {
+  if (sessionFile === undefined) return undefined;
+  let content: string;
+  try {
+    content = await readFile(sessionFile, "utf8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw err;
+  }
+  let found: SupervisorModelRef | undefined;
+  for (const entry of parseSessionEntries(content)) {
+    if (entry.type === "model_change") {
+      found = { provider: entry.provider, modelId: entry.modelId };
+    }
+  }
+  return found;
+}
+
+function sameModel(a: SupervisorModelRef, b: SupervisorModelRef): boolean {
+  return a.provider === b.provider && a.modelId === b.modelId;
 }
 
 function configuredModelsFromBinding(binding: SupervisorBinding): SupervisorModelRef[] {

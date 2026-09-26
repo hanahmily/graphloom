@@ -12,7 +12,20 @@ import type {
 import { assertGraphDecision, pinJobExecutor } from "@graphloom/sdk";
 import type { ExecutorSourceOverride, Runner } from "@graphloom/runner";
 import type { PluginHost } from "@graphloom/plugin-host";
-import type { RecoveryTrigger, Supervisor } from "@graphloom/supervisor";
+import {
+  isModelSwitchRequest,
+  type RecoveryTrigger,
+  type Supervisor,
+  type SupervisorProposal,
+} from "@graphloom/supervisor";
+import { markProposal, noteOutcome, settleProposal } from "./settlement.js";
+import {
+  applyModelSwitch,
+  clearSwitchRequest,
+  readBinding,
+  readSwitchRequest,
+  type PendingSwitchRequest,
+} from "./supervisor-switch.js";
 import { catalogEntry, isKindDefaultExecutor, resolveExecutorPin } from "./executor-catalog.js";
 import { recordExecutorFailure } from "./executor-failure.js";
 import {
@@ -197,11 +210,31 @@ async function runNormalLoopSteps(
             code: "unhandled",
             message: "recovery",
           };
+          const supervisor = deps.supervisor;
+          state = await applyOperatorSwitch(state, supervisor);
+
+          // A metered supervisor spends agent invocations; never prompt it without one left.
+          const metered = supervisor.drainProviderCalls !== undefined;
+          if (metered && state.budgets.agentInvocations <= 0) {
+            state = {
+              ...state,
+              status: "stopped",
+              stopReason: "agentInvocations budget exhausted",
+              blocker: "supervisor decide",
+            };
+            await saveRunState(state);
+            syncRevision(deps, state);
+            return { done: true as const, state };
+          }
+
           const view = toRunView(state);
-          let decided: unknown;
+          const lastSettlement = settleProposal(state);
+          const abort = new AbortController();
+          const stopWatch = watchForStop(state.stateDir, deps, abort);
+          let decided: SupervisorProposal | undefined;
           let decideError: unknown;
           try {
-            decided = await deps.supervisor.decide({
+            const proposal = await supervisor.decide({
               runId: state.runId,
               episodeId,
               trigger: {
@@ -209,18 +242,33 @@ async function runNormalLoopSteps(
                 message: trigger.message,
               },
               view,
+              signal: abort.signal,
+              ...(lastSettlement !== undefined ? { lastSettlement } : {}),
+              ...(metered ? { maxProviderCalls: state.budgets.agentInvocations } : {}),
             });
-            decided = assertGraphDecision(decided);
+            decided = isModelSwitchRequest(proposal) ? proposal : assertGraphDecision(proposal);
           } catch (err) {
             decideError = err;
           } finally {
-            state = settleSupervisorUsage(state, deps.supervisor);
-            const binding = readSupervisorBinding(deps.supervisor);
+            clearInterval(stopWatch);
+            state = settleSupervisorUsage(state, supervisor);
+            const binding = readBinding(supervisor);
             if (binding) {
               state = { ...state, supervisorBinding: binding };
             }
           }
-          if (decideError !== undefined) {
+          if (abort.signal.aborted || (await stopRequested(deps))) {
+            state = {
+              ...state,
+              status: "stopped",
+              stopReason: "operator stop",
+              blocker: "stop requested",
+            };
+            await saveRunState(state);
+            syncRevision(deps, state);
+            return { done: true as const, state };
+          }
+          if (decideError !== undefined || decided === undefined) {
             state = {
               ...state,
               status: "stopped",
@@ -234,7 +282,14 @@ async function runNormalLoopSteps(
             syncRevision(deps, state);
             return { done: true as const, state };
           }
-          decision = decided as GraphDecision;
+          state = markProposal(state, decided);
+          if (isModelSwitchRequest(decided)) {
+            state = await applyModelSwitch(state, supervisor, decided, "supervisor");
+            await saveRunState(state);
+            syncRevision(deps, state);
+            return { done: false as const, state };
+          }
+          decision = decided;
         } else {
           const view = toRunView(state);
           const advanced = await deps.host.advance(
@@ -273,8 +328,12 @@ async function runNormalLoopSteps(
           };
         }
 
+        // A qualified repair's patch is a long supervisor episode; Stop must abort it.
+        const applyAbort = new AbortController();
+        const applyWatch =
+          decision.action.type === "qualify_repair" ? watchForStop(state.stateDir, deps, applyAbort) : undefined;
         try {
-          state = await applyDecision(state, decision, deps);
+          state = await applyDecision(state, decision, deps, applyAbort.signal);
         } catch (err) {
           if (err instanceof HostObservationError) {
             const contained = await containHostFailure(
@@ -288,6 +347,8 @@ async function runNormalLoopSteps(
             return { done: contained.done, state: contained.state };
           }
           throw err;
+        } finally {
+          if (applyWatch !== undefined) clearInterval(applyWatch);
         }
         syncRevision(deps, state);
         if ((await stopRequested(deps)) && state.status === "running") {
@@ -696,30 +757,31 @@ function settleSupervisorUsage(
   };
 }
 
-function readSupervisorBinding(
-  supervisor: Supervisor,
-): DurableRunState["supervisorBinding"] | undefined {
-  const withBinding = supervisor as Supervisor & {
-    binding?: DurableRunState["supervisorBinding"];
-  };
-  if (!withBinding.binding) {
-    return undefined;
+/** Apply a pending operator model switch before the next supervisor prompt. */
+async function applyOperatorSwitch(state: DurableRunState, supervisor: Supervisor): Promise<DurableRunState> {
+  let pending: PendingSwitchRequest | undefined;
+  try {
+    pending = await readSwitchRequest(state.stateDir);
+  } catch (err) {
+    await clearSwitchRequest(state.stateDir);
+    return noteOutcome(state, `operator model switch request ignored: ${err instanceof Error ? err.message : String(err)}`);
   }
-  return {
-    sessionId: withBinding.binding.sessionId,
-    ...(withBinding.binding.sessionFile !== undefined
-      ? { sessionFile: withBinding.binding.sessionFile }
-      : {}),
-    provider: withBinding.binding.provider,
-    modelId: withBinding.binding.modelId,
-    switchJournal: structuredClone(withBinding.binding.switchJournal),
-  };
+  if (pending === undefined) return state;
+  const { id, ...order } = pending;
+  if (state.supervisorMark === undefined) {
+    state = markProposal(state, { type: "switch_model", ...order, reason: `operator request: ${order.reason}` });
+  }
+  const stateDir = state.stateDir;
+  state = await applyModelSwitch(state, supervisor, order, "operator", () => clearSwitchRequest(stateDir, id));
+  await saveRunState(state);
+  return state;
 }
 
 async function applyDecision(
   state: DurableRunState,
   decision: GraphDecision,
   deps: LoopDeps,
+  signal?: AbortSignal,
 ): Promise<DurableRunState> {
   // Recovery decisions must not overwrite graph-owned private bookkeeping.
   if (decision.privateState !== undefined && state.mode !== "recovery") {
@@ -826,6 +888,7 @@ async function applyDecision(
         ...(deps.supervisor !== undefined ? { supervisor: deps.supervisor } : {}),
         repair: deps.repair,
         validators: deps.validators,
+        ...(signal !== undefined ? { signal } : {}),
       });
     }
     case "activate_repair": {

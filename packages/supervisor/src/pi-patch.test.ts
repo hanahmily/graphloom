@@ -102,12 +102,12 @@ describe("supervisor candidate patch", () => {
     expect(supervisor.drainProviderCalls()).toBe(0);
   });
 
-  it("charges at least one call per prompt and bounds the summary", async () => {
+  it("charges only the turns each prompt started and bounds the summary", async () => {
     const calls: PromptCall[] = [];
     const supervisor = createPiSupervisor({
       session: codingSession({
         replies: [JSON.stringify(returnToNormal({ summary: "ok" }, "r")), "x".repeat(5000)],
-        turnsPerPrompt: [0, 0],
+        turnsPerPrompt: [0, 2],
         calls,
         grants: [],
       }),

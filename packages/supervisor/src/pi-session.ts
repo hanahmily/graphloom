@@ -17,7 +17,6 @@ import {
 } from "./credentials.js";
 import {
   assertAdmittedCandidateRoot,
-  CANDIDATE_CODING_TOOL_NAMES,
   createCandidateCodingTools,
 } from "./candidate-tools.js";
 
@@ -75,11 +74,11 @@ export interface PiSupervisorSession {
    * Send a prompt and wait until idle. Returns the final turn's assistant text
    * only (no thinking / tool internals). Times out if the session does not settle.
    * With `maxTurns`, a turn beyond the cap is aborted before its provider request
-   * and the prompt rejects.
+   * and the prompt rejects. `tools` are active for this prompt only.
    */
   prompt(
     text: string,
-    options?: { signal?: AbortSignal; timeoutMs?: number; maxTurns?: number },
+    options?: { signal?: AbortSignal; timeoutMs?: number; maxTurns?: number; tools?: ToolDefinition[] },
   ): Promise<string>;
   /** Provider turns (model calls) started since the last drain, including tool turns. */
   drainTurnCount?(): number;
@@ -264,15 +263,8 @@ export function wrapPiAgentSession(args: {
       if (closed) {
         throw new Error("supervisor session is closed");
       }
-      if (!session.isIdle) {
-        await session.abort().catch(() => undefined);
-        const settleDeadline = Date.now() + 5_000;
-        while (!session.isIdle && Date.now() < settleDeadline) {
-          await sleep(25);
-        }
-        if (!session.isIdle) {
-          throw new Error("cannot switch model: session still active after abort");
-        }
+      if (!(await settleIdle(session))) {
+        throw new Error("cannot switch model: session still active after abort");
       }
       // Validate/prepare target credentials before mutating the active model.
       await ensureProviderCredentials({
@@ -294,6 +286,10 @@ export function wrapPiAgentSession(args: {
     async prompt(text, promptOptions) {
       if (closed) {
         throw new Error("supervisor session is closed");
+      }
+      // An earlier abort may not have settled; never overlap provider requests.
+      if (!(await settleIdle(session))) {
+        throw new Error(STILL_ACTIVE);
       }
       const timeoutMs = promptOptions?.timeoutMs ?? promptTimeoutMs;
       const maxTurns = promptOptions?.maxTurns;
@@ -330,6 +326,7 @@ export function wrapPiAgentSession(args: {
         void session.abort().catch(() => undefined);
       };
       promptOptions?.signal?.addEventListener("abort", onOuterAbort, { once: true });
+      if (promptOptions?.tools !== undefined) setSessionTools(session, promptOptions.tools);
 
       try {
         if (promptOptions?.signal?.aborted) {
@@ -341,20 +338,17 @@ export function wrapPiAgentSession(args: {
           await sleep(25);
         }
         if (promptOptions?.signal?.aborted) {
-          throw new Error("supervisor prompt aborted");
+          throw new Error(
+            (await settleIdle(session)) ? "supervisor prompt aborted" : `supervisor prompt aborted; ${STILL_ACTIVE}`,
+          );
         }
         if (turnCapHit) {
           throw new Error(`supervisor prompt exceeded its ${maxTurns}-turn allowance`);
         }
         if (timedOut || !session.isIdle) {
-          await session.abort().catch(() => undefined);
-          // Brief settle after abort so callers do not observe a still-busy session.
-          const settleDeadline = Date.now() + 5_000;
-          while (!session.isIdle && Date.now() < settleDeadline) {
-            await sleep(25);
-          }
+          const settled = await settleIdle(session);
           throw new Error(
-            `supervisor prompt timed out after ${timeoutMs}ms (session still active)`,
+            `supervisor prompt timed out after ${timeoutMs}ms` + (settled ? "" : `; ${STILL_ACTIVE}`),
           );
         }
         return collected.join("").trim();
@@ -362,6 +356,9 @@ export function wrapPiAgentSession(args: {
         clearTimeout(timeout);
         promptOptions?.signal?.removeEventListener("abort", onOuterAbort);
         unsubscribe();
+        if (promptOptions?.tools !== undefined) {
+          setSessionTools(session, codingRoot !== undefined ? createCandidateCodingTools(codingRoot) : []);
+        }
       }
     },
     drainTurnCount() {
@@ -375,11 +372,11 @@ export function wrapPiAgentSession(args: {
       }
       const root = await assertAdmittedCandidateRoot(args.repairsDir, candidateRoot);
       codingRoot = root;
-      installCandidateCodingTools(session, root);
+      setSessionTools(session, createCandidateCodingTools(root));
     },
     async revokeCandidateCoding() {
       codingRoot = undefined;
-      revokeCandidateCodingTools(session);
+      setSessionTools(session, []);
     },
     async close() {
       if (closed) return;
@@ -426,25 +423,30 @@ function asMutableToolSession(session: AgentSession): MutableToolSession {
 }
 
 /**
- * Enable path-confined read/edit/write/ls on the candidate root. The allowlist
- * names only those tools so Pi's unconfined built-ins (including bash) stay off.
+ * Make exactly `tools` active: candidate coding tools, admission tools for a
+ * decision turn, or none. The allowlist names only these tools, so Pi's
+ * unconfined built-ins (including bash) stay off.
  */
-function installCandidateCodingTools(session: AgentSession, rootReal: string): void {
+function setSessionTools(session: AgentSession, tools: ToolDefinition[]): void {
   const host = asMutableToolSession(session);
-  host._allowedToolNames = new Set(CANDIDATE_CODING_TOOL_NAMES);
-  host._customTools = createCandidateCodingTools(rootReal);
-  host._refreshToolRegistry({
-    activeToolNames: [...CANDIDATE_CODING_TOOL_NAMES],
-  });
+  const names = tools.map((t) => t.name);
+  host._allowedToolNames = new Set(names);
+  host._customTools = tools;
+  host._refreshToolRegistry({ activeToolNames: names });
+  host.setActiveToolsByName(names);
 }
 
-/** Revoke coding tools; session returns to decision-only (no filesystem tools). */
-function revokeCandidateCodingTools(session: AgentSession): void {
-  const host = asMutableToolSession(session);
-  host._customTools = [];
-  host._allowedToolNames = new Set();
-  host._refreshToolRegistry({ activeToolNames: [] });
-  host.setActiveToolsByName([]);
+const STILL_ACTIVE = "supervisor session still active after abort; refusing to reuse it";
+
+/** Abort any active request and wait briefly for idle; false if it never settled. */
+async function settleIdle(session: AgentSession): Promise<boolean> {
+  if (session.isIdle) return true;
+  await session.abort().catch(() => undefined);
+  const settleDeadline = Date.now() + 5_000;
+  while (!session.isIdle && Date.now() < settleDeadline) {
+    await sleep(25);
+  }
+  return session.isIdle;
 }
 
 function sleep(ms: number): Promise<void> {

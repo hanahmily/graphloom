@@ -137,7 +137,13 @@ export interface DurableRunState {
       status: "intent" | "committed" | "failed";
       error?: string;
     }>;
+    configuredModels?: Array<{ provider: string; modelId: string }>;
   };
+  /**
+   * The supervisor's last proposal and the run as it stood when it was taken.
+   * The next recovery prompt opens with what changed since (the settlement).
+   */
+  supervisorMark?: SupervisorMark;
   /** Isolated repair candidates for this run (never the live install). */
   repairCandidates?: import("./repair.js").QualifiedRepairArtifact[];
   /** Crash-safe activation journal; cleared after successful switch. */
@@ -149,6 +155,20 @@ export interface DurableRunState {
     at: string;
     status: "intent" | "committed" | "aborted";
   };
+}
+
+export interface SupervisorMark {
+  action: string;
+  reason: string;
+  episodeId?: string;
+  stageId: string;
+  attempt: number;
+  generation: number;
+  evidenceRefs: string[];
+  receiptIds: string[];
+  candidates: Record<string, string>;
+  /** Outcomes the controller recorded directly, such as a refused model switch. */
+  notes: string[];
 }
 
 export interface VersionRecord {
