@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 import type { JobSpec } from "@graphloom/sdk";
-import { continuationRefusal, continuedOperations, dispatchKey, earlierToolCallRefusal } from "./agent-sessions.js";
+import {
+  continuationRefusal,
+  continuedOperations,
+  dispatchKey,
+  earlierToolCallRefusal,
+  recordAgentSession,
+  sessionForDispatch,
+} from "./agent-sessions.js";
 import type { AgentSessionRecord, ChildOperationRecord, DurableRunState } from "./state.js";
 
 const job = (over: Partial<JobSpec> = {}): JobSpec => ({
@@ -69,6 +76,21 @@ describe("continuation admission", () => {
         job(from),
       ),
     ).toBe("operation op-1 was already continued by op-2; continue from that one");
+  });
+
+  it("keeps session state to agent jobs", () => {
+    const command = job({ kind: "command", continueFrom: "op-1" });
+    expect(continuationRefusal(state(), command)).toBe("only agent jobs carry sessions; a command job cannot continue op-1");
+    expect(sessionForDispatch(state({ stateDir: "/state" }), command, "op-2")).toBeUndefined();
+    const result = { status: "ok" as const, summary: "ran", runId: "r1", operationId: "op-2", generation: 2, sessionRef: "s2" };
+    const recorded = recordAgentSession(state(), {
+      job: command,
+      operationId: "op-2",
+      generation: 2,
+      session: { dir: "/state/agent-sessions/op-1", resume: "s1" },
+      result,
+    });
+    expect(recorded.agentSessions).toEqual([session()]);
   });
 
   it("follows a continued session back through everything it continued", () => {

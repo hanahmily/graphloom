@@ -12,6 +12,7 @@ export function dispatchKey(job: JobSpec): string {
 export function continuationRefusal(state: DurableRunState, job: JobSpec): string | undefined {
   const from = job.continueFrom;
   if (from === undefined) return undefined;
+  if (job.kind !== "agent") return `only agent jobs carry sessions; a ${job.kind} job cannot continue ${from}`;
   const sessions = state.agentSessions ?? [];
   const record = sessions.find((r) => r.operationId === from);
   if (record === undefined) {
@@ -45,11 +46,11 @@ export function sessionForDispatch(
   job: JobSpec,
   operationId: string,
 ): ExecutorSession | undefined {
+  if (job.kind !== "agent") return undefined;
   if (job.continueFrom !== undefined) {
     const record = state.agentSessions!.find((r) => r.operationId === job.continueFrom)!;
     return { dir: record.sessionDir, resume: record.sessionRef };
   }
-  if (job.kind !== "agent") return undefined;
   return { dir: path.join(state.stateDir, "agent-sessions", operationId) };
 }
 
@@ -58,7 +59,7 @@ export function recordAgentSession(
   args: { job: JobSpec; operationId: string; generation: number; session: ExecutorSession; result: JobResult },
 ): DurableRunState {
   const { job, operationId, generation, session, result } = args;
-  if (result.sessionRef === undefined) return state;
+  if (job.kind !== "agent" || result.sessionRef === undefined) return state;
   const record: AgentSessionRecord = {
     operationId,
     stageId: job.stageId,

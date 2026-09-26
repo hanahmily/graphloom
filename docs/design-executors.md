@@ -178,8 +178,9 @@ their refs or paths.
 
 A later dispatch continues a session only when it asks for it explicitly with
 `job.continueFrom: <operationId>`. Without that field, the job starts fresh.
-The controller admits a continuation only when the operation settled in this
-run with a recorded session, for the same stage and dispatch key, in the current
+The controller admits a continuation only for an agent job, and only when the
+operation settled in this run with a recorded session, for the same stage and
+dispatch key, in the current
 generation or an earlier one, and has not already been continued. It rejects
 anything else before the job runs, with `continuation rejected`. A continued
 job gets the same directory, and `ctx.session.resume` names the session.

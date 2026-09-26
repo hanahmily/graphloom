@@ -330,6 +330,12 @@ describe("continuing an agent session on reentry (#53)", () => {
         ran: 1,
       },
       {
+        runId: "command",
+        advances: () => [first, retry, continueFirst([], { kind: "command" })],
+        blocker: /^only agent jobs carry sessions; a command job cannot continue op-\S+$/,
+        ran: 1,
+      },
+      {
         runId: "twice",
         advances: () => [first, retry, continueFirst([]), retry, continueFirst([])],
         blocker: /^operation op-\S+ was already continued by op-\S+; continue from that one$/,
