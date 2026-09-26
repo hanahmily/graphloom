@@ -105,7 +105,8 @@ export interface RunRequest {
    * Replace a dead child host after crash/timeout, or after ActivateRepair.
    * Defaults to spawning a fresh child for controller-owned bundles; pass
    * explicitly for custom hosts. Receives the current intake pin so activation
-   * can open the candidate bundle.
+   * can open the candidate bundle. QualifyRepair also calls it for a throwaway
+   * host that describes the candidate, then closes that host.
    */
   recreateHost?: RecreateHostFn;
   /** Directory for durable run state (default: <repo>/graphloom-state). */
@@ -273,6 +274,7 @@ export function createController(): Controller {
           revisionBridge,
           ...(supervisor !== undefined ? { supervisor } : {}),
           ...(request.repair !== undefined ? { repair: request.repair } : {}),
+          ...resolveCandidateHost(request),
           ...resolveRecreateHost(session, {
             intake,
             activeVersion,
@@ -537,6 +539,7 @@ export function createController(): Controller {
           revisionBridge,
           ...(supervisor !== undefined ? { supervisor } : {}),
           ...(request.repair !== undefined ? { repair: request.repair } : {}),
+          ...resolveCandidateHost(request),
           ...resolveRecreateHost(session, {
             intake: state.intake,
             activeVersion: state.activeVersion,
@@ -751,6 +754,21 @@ function resolveRecreateHost(
       return next;
     },
   };
+}
+
+/**
+ * Hosts for describing repair candidates at qualification: the explicit
+ * recreate hook, else a child for controller-owned bundles. Unlike
+ * recreateHost, these never replace the session's live host.
+ */
+function resolveCandidateHost(request: {
+  plugin?: GraphPlugin;
+  host?: PluginHost;
+  recreateHost?: RecreateHostFn;
+}): { openCandidateHost: RecreateHostFn } | Record<string, never> {
+  if (request.recreateHost) return { openCandidateHost: request.recreateHost };
+  if (request.host !== undefined || request.plugin !== undefined) return {};
+  return { openCandidateHost: (ctx) => openHost(ctx) };
 }
 
 async function resolveStateDir(runRef: string, stateRoot?: string): Promise<string> {

@@ -1,7 +1,14 @@
 import { createHash, randomUUID } from "node:crypto";
 import { readFile, realpath } from "node:fs/promises";
 import path from "node:path";
-import type { GraphDefinition, QualifyRepairSpec, ActivateRepairSpec, RepairTarget } from "@graphloom/sdk";
+import type {
+  ActivateRepairSpec,
+  GraphDefinition,
+  QualifyRepairSpec,
+  RepairTarget,
+  Requirement,
+  ValidatorBinding,
+} from "@graphloom/sdk";
 import type { Supervisor } from "@graphloom/supervisor";
 import type { PluginHost } from "@graphloom/plugin-host";
 import { invalidateFromStage, type AdmissionValidator } from "./admit.js";
@@ -9,6 +16,8 @@ import { resolveBundleEntryFromManifest } from "./bundle.js";
 import {
   assertCandidateStepsUnchanged,
   digestDirectoryTree,
+  assertDependenciesUnchanged,
+  linkDependencies,
   snapshotRepairCandidate,
   type QualifiedRepairArtifact,
 } from "./repair.js";
@@ -87,6 +96,11 @@ export async function applyQualifyRepair(
     repair: RepairDeps;
     validators: Record<string, AdmissionValidator>;
     signal?: AbortSignal;
+    /**
+     * Opens a throwaway host on a candidate bundle pin so qualification can
+     * compare its describe() with the pinned contract. The caller closes it.
+     */
+    openCandidateHost?: RecreateHostFn;
   },
 ): Promise<DurableRunState> {
   if (state.mode !== "recovery") {
@@ -276,6 +290,12 @@ export async function applyQualifyRepair(
     if (preflight.definition) {
       assertCandidateDefinitionCompatible(preflight.definition, state.definition);
     }
+    if (qualify.target !== "executor" && deps.openCandidateHost) {
+      assertCandidateDefinitionCompatible(
+        await describeCandidate(state, snap.candidateRoot, artifactId, deps.openCandidateHost),
+        state.definition,
+      );
+    }
 
     const candidateDigest = await digestDirectoryTree(snap.candidateRoot);
     const review = await deps.repair.reviewer.review({
@@ -334,6 +354,11 @@ async function bundleRepairSubject(state: DurableRunState, qualify: QualifyRepai
         artifactId,
       });
       await writeStagesPin(snap.candidateRoot, state.definition);
+      // Linked beside the candidate, not inside it, so the reviewed tree stays unchanged.
+      await linkDependencies(
+        await realpath(state.intake.bundle.bundlePath),
+        path.dirname(snap.candidateRoot),
+      );
       return snap;
     },
     async checkCandidate({ candidateRoot }) {
@@ -341,8 +366,69 @@ async function bundleRepairSubject(state: DurableRunState, qualify: QualifyRepai
         baseDefinitionStages: stagePins(state.definition),
         candidateRoot,
       });
+      await assertCandidateManifestCompatible(candidateRoot, state);
+      await assertDependenciesUnchanged(await realpath(state.intake.bundle.bundlePath), candidateRoot);
     },
   };
+}
+
+/** Resume checks the loaded plugin against the activated manifest, so it must keep the pin. */
+async function assertCandidateManifestCompatible(
+  candidateRoot: string,
+  state: DurableRunState,
+): Promise<void> {
+  type Manifest = Record<"graphId" | "version" | "sdkProtocol" | "privateStateSchema" | "requirements", unknown>;
+  const manifest = JSON.parse(
+    await readFile(path.join(candidateRoot, "graphloom.manifest.json"), "utf8"),
+  ) as Manifest;
+  const pinned = JSON.parse(state.intake.bundle.manifestRaw) as Manifest;
+  for (const field of ["graphId", "version", "sdkProtocol", "privateStateSchema"] as const) {
+    if (JSON.stringify(manifest[field]) !== JSON.stringify(pinned[field])) {
+      throw new Error(`candidate manifest alters pinned ${field}`);
+    }
+  }
+  if (manifest.requirements === undefined) {
+    if (pinned.requirements !== undefined) {
+      throw new Error("candidate manifest removes pinned requirements");
+    }
+    return;
+  }
+  if (
+    !Array.isArray(manifest.requirements) ||
+    !manifest.requirements.every((r) => typeof r === "object" && r !== null)
+  ) {
+    throw new Error("candidate manifest requirements are malformed");
+  }
+  const changes = requirementChanges(manifest.requirements as Requirement[], state.definition.requirements);
+  if (changes.length > 0) {
+    throw new Error(`candidate manifest alters pinned requirements: ${changes.join(", ")}`);
+  }
+}
+
+async function describeCandidate(
+  state: DurableRunState,
+  candidateRoot: string,
+  artifactId: string,
+  openHost: RecreateHostFn,
+): Promise<GraphDefinition> {
+  const host = await openHost({
+    intake: { ...state.intake, bundle: await readCandidateBundlePin(candidateRoot, state.intake) },
+    activeVersion: `${state.intake.bundle.graphId}@candidate-${artifactId}`,
+    generation: state.generation,
+  });
+  try {
+    const described = await host.describe({
+      runId: state.runId,
+      operationId: `describe-qualify-${artifactId}`,
+      expectedStateRevision: state.stateRevision,
+    });
+    if (!described.ok) {
+      throw new Error(`candidate describe failed: ${described.observation.message}`);
+    }
+    return described.value;
+  } finally {
+    await host.close().catch(() => undefined);
+  }
 }
 
 export async function applyActivateRepair(
@@ -663,17 +749,56 @@ export function assertCandidateDefinitionCompatible(
       `candidate graphId ${candidate.graphId} != pinned ${base.graphId}`,
     );
   }
+  if (candidate.version !== base.version) {
+    throw new Error(`candidate version ${candidate.version} != pinned ${base.version}`);
+  }
+  if (candidate.privateStateSchema !== base.privateStateSchema) {
+    throw new Error("candidate describe() alters pinned privateStateSchema");
+  }
   if (JSON.stringify(candidate.stages) !== JSON.stringify(base.stages)) {
     throw new Error("candidate describe() alters pinned stages");
   }
   if (JSON.stringify(candidate.requirements) !== JSON.stringify(base.requirements)) {
-    throw new Error("candidate describe() alters pinned requirements");
+    const changes = requirementChanges(candidate.requirements, base.requirements);
+    throw new Error(
+      `candidate describe() alters pinned requirements: ${changes.length > 0 ? changes.join(", ") : "order"}`,
+    );
   }
   if (
     JSON.stringify(candidate.defaultValidators) !== JSON.stringify(base.defaultValidators)
   ) {
-    throw new Error("candidate describe() alters pinned defaultValidators");
+    const changes = bindingChanges(candidate.defaultValidators, base.defaultValidators);
+    throw new Error(
+      `candidate describe() alters pinned defaultValidators: ${changes.length > 0 ? changes.join(", ") : "order"}`,
+    );
   }
+}
+
+/** Requirement ids added, removed, or whose statement or evidence schema changed. */
+function requirementChanges(candidate: Requirement[], base: Requirement[]): string[] {
+  const changes: string[] = [];
+  for (const want of base) {
+    const got = candidate.find((r) => r.id === want.id);
+    if (!got) {
+      changes.push(`${want.id} removed`);
+      continue;
+    }
+    for (const field of ["statement", "evidenceSchema"] as const) {
+      if (got[field] !== want[field]) changes.push(`${want.id} ${field}`);
+    }
+  }
+  for (const got of candidate) {
+    if (!base.some((r) => r.id === got.id)) changes.push(`${got.id} added`);
+  }
+  return changes;
+}
+
+/** Requirement ids whose default validator bindings differ. */
+function bindingChanges(candidate: ValidatorBinding[], base: ValidatorBinding[]): string[] {
+  const ids = [...new Set([...base, ...candidate].map((b) => b.requirementId))];
+  const bindingsFor = (list: ValidatorBinding[], id: string) =>
+    JSON.stringify(list.filter((b) => b.requirementId === id));
+  return ids.filter((id) => bindingsFor(candidate, id) !== bindingsFor(base, id));
 }
 
 async function readCandidateBundlePin(

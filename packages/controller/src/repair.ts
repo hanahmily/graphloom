@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
 import {
   cp,
   lstat,
@@ -6,6 +7,7 @@ import {
   readFile,
   readdir,
   realpath,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import path from "node:path";
@@ -168,5 +170,65 @@ export async function assertCandidateStepsUnchanged(args: {
         `candidate alters pinned steps (stage ${want.id}): add/delete/rename/reorder rejected`,
       );
     }
+  }
+}
+
+/**
+ * Let a candidate copied without node_modules resolve the same dependencies the
+ * installed package does: each declared dependency is linked under
+ * `<intoDir>/node_modules`, which must be the candidate root or an ancestor.
+ */
+export async function linkDependencies(baseReal: string, intoDir: string): Promise<void> {
+  const declared = await declaredDependencies(baseReal);
+  const names = new Set(Object.values(declared).flatMap((deps) => Object.keys(deps ?? {})));
+  for (const name of names) {
+    const found = findDependency(baseReal, name);
+    if (found === undefined) continue;
+    const link = path.join(intoDir, "node_modules", name);
+    await mkdir(path.dirname(link), { recursive: true });
+    await symlink(await realpath(found), link, "dir");
+  }
+}
+
+/**
+ * Candidates run against the installed package's dependencies, linked before
+ * the patch, so a patch may not change what package.json declares.
+ */
+export async function assertDependenciesUnchanged(baseReal: string, candidateRoot: string): Promise<void> {
+  const [base, candidate] = await Promise.all([
+    declaredDependencies(baseReal),
+    declaredDependencies(candidateRoot),
+  ]);
+  for (const field of DEPENDENCY_FIELDS) {
+    if (JSON.stringify(sortedEntries(candidate[field])) !== JSON.stringify(sortedEntries(base[field]))) {
+      throw new Error(`candidate changes declared ${field} in package.json`);
+    }
+  }
+}
+
+const DEPENDENCY_FIELDS = ["dependencies", "optionalDependencies", "peerDependencies"] as const;
+
+type DeclaredDependencies = Partial<Record<(typeof DEPENDENCY_FIELDS)[number], Record<string, string>>>;
+
+async function declaredDependencies(root: string): Promise<DeclaredDependencies> {
+  let raw: string;
+  try {
+    raw = await readFile(path.join(root, "package.json"), "utf8");
+  } catch {
+    return {};
+  }
+  const pkg = JSON.parse(raw) as DeclaredDependencies;
+  return Object.fromEntries(DEPENDENCY_FIELDS.map((field) => [field, pkg[field]]));
+}
+
+function sortedEntries(deps: Record<string, string> | undefined): [string, string][] {
+  return Object.entries(deps ?? {}).sort(([a], [b]) => a.localeCompare(b));
+}
+
+function findDependency(fromRealRoot: string, name: string): string | undefined {
+  for (let dir = fromRealRoot; ; dir = path.dirname(dir)) {
+    const candidate = path.join(dir, "node_modules", name);
+    if (existsSync(path.join(candidate, "package.json"))) return candidate;
+    if (path.dirname(dir) === dir) return undefined;
   }
 }

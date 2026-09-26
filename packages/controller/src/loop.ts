@@ -83,6 +83,8 @@ export interface LoopDeps {
    * Required when recovering past a host that exposes `childPid`.
    */
   recreateHost?: RecreateHostFn;
+  /** Throwaway host on a candidate bundle, so QualifyRepair can check its describe(). */
+  openCandidateHost?: RecreateHostFn;
   /** Operator stop: checked each loop turn before advance (sync or async). */
   shouldStop?: () => boolean | Promise<boolean>;
   /** Live revision bridge for host-backed validators. */
@@ -894,6 +896,7 @@ async function applyDecision(
         repair: deps.repair,
         validators: deps.validators,
         ...(signal !== undefined ? { signal } : {}),
+        ...(deps.openCandidateHost !== undefined ? { openCandidateHost: deps.openCandidateHost } : {}),
       });
     }
     case "activate_repair": {
