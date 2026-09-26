@@ -1,0 +1,27 @@
+import type { CodingSessionOptions } from "./harness.js";
+
+/** The job's scope as guidance for the agent; the controller observes what actually changed. */
+export function scopeNotes(options: CodingSessionOptions): string[] {
+  if (options.readOnly) return ["This job is read-only: do not change files in the worktree."];
+  if (options.writeScope !== undefined && options.writeScope.length > 0) {
+    return [`Change only these paths: ${options.writeScope.join(", ")}.`];
+  }
+  return [];
+}
+
+export function bounded(text: string, max = 4_000): string {
+  return text.length <= max ? text : `${text.slice(0, max)}…`;
+}
+
+/** `resultSchema` may be an inline JSON object schema or just a schema name. */
+export function inlineObjectSchema(resultSchema: string): Record<string, unknown> | undefined {
+  try {
+    const parsed: unknown = JSON.parse(resultSchema);
+    if (parsed !== null && typeof parsed === "object" && (parsed as { type?: unknown }).type === "object") {
+      return parsed as Record<string, unknown>;
+    }
+  } catch {
+    // A schema name.
+  }
+  return undefined;
+}

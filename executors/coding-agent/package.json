@@ -12,6 +12,10 @@
       "types": "./dist/executors.d.ts",
       "import": "./dist/executors.js"
     },
+    "./pi": {
+      "types": "./dist/pi.d.ts",
+      "import": "./dist/pi.js"
+    },
     "./testing": {
       "types": "./dist/testing/scripted-harness.d.ts",
       "import": "./dist/testing/scripted-harness.js"
@@ -26,6 +30,7 @@
     "test": "tsc -p tsconfig.json && vitest run"
   },
   "dependencies": {
+    "@earendil-works/pi-coding-agent": "0.87.1",
     "@graphloom/sdk": "0.0.0"
   }
 }

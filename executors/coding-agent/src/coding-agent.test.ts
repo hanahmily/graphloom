@@ -9,6 +9,7 @@ import {
   CODING_AGENT_RUN_ID,
   CONTINUATION_NOTICE,
   createCodingAgentExecutor,
+  piHarnessModule,
   type CodingHarness,
 } from "./index.js";
 import { createScriptedHarness } from "./testing/scripted-harness.js";
@@ -150,7 +151,8 @@ describe("graphloom.coding-agent/run", () => {
   it("declares an unrestricted package that the operator binding consents to", () => {
     expect(codingAgentExecutorPackage).toMatchObject({
       executorIds: [CODING_AGENT_RUN_ID],
-      configEnv: ["GRAPHLOOM_CODING_HARNESS"],
+      credentials: ["pi-api-key"],
+      configEnv: ["GRAPHLOOM_CODING_HARNESS", "GRAPHLOOM_PI_PROVIDER", "GRAPHLOOM_PI_MODEL", "GRAPHLOOM_PI_AGENT_DIR"],
       isolation: "unrestricted",
     });
     expect(codingAgentBinding({ harness: "/h.js" })).toEqual({
@@ -158,5 +160,25 @@ describe("graphloom.coding-agent/run", () => {
       allowUnrestricted: true,
       env: { GRAPHLOOM_CODING_HARNESS: "/h.js" },
     });
+  });
+
+  it("binds Pi settings as config and the API key only as a credential", () => {
+    const binding = codingAgentBinding({
+      harness: piHarnessModule,
+      pi: { provider: "anthropic", modelId: "claude-x", agentDir: "/pi", apiKey: "sk-secret" },
+    });
+    expect(binding).toEqual({
+      allowedEffects: ["read", "write"],
+      allowUnrestricted: true,
+      env: {
+        GRAPHLOOM_CODING_HARNESS: piHarnessModule,
+        GRAPHLOOM_PI_PROVIDER: "anthropic",
+        GRAPHLOOM_PI_MODEL: "claude-x",
+        GRAPHLOOM_PI_AGENT_DIR: "/pi",
+      },
+      credentials: { "pi-api-key": "sk-secret" },
+    });
+    expect(JSON.stringify(binding.env)).not.toContain("sk-secret");
+    expect(piHarnessModule).toMatch(/[\\/]pi\.js$/);
   });
 });

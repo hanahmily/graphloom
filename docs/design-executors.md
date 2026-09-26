@@ -156,14 +156,44 @@ protocol:
 
 - A `CodingHarness` opens a session in the run worktree with the job's tools,
   abort signal, credentials, and a `reserveModelCall` hook, then runs the
-  assignment. The package ships the harness interface and a scripted harness
-  for tests (`@graphloom/executor-coding-agent/testing`); a production Pi
-  harness is a separate adapter.
+  assignment. The package ships the harness interface, the Pi harness
+  (`@graphloom/executor-coding-agent/pi`), and a scripted harness for tests
+  (`@graphloom/executor-coding-agent/testing`).
 - The executor process loads the harness named by `GRAPHLOOM_CODING_HARNESS`.
   `codingAgentBinding({ harness })` sets it, grants read and write effects, and
   consents to the package's unrestricted isolation.
 - The job result is the agent's claim: its status, structured output, the tool
   calls it made with their child operation ids, and its model request count.
+
+The Pi harness gives the agent its full toolset (shell, file editing,
+search) in the worktree. The package is unrestricted, so the agent
+works as the user would, and `writeScope` and `readOnly` reach it as
+instructions in the assignment. The controller does not trust those
+instructions: it observes the worktree for evidence and validates scope from
+what actually changed. Job tools are the one mediated path. Each call goes to
+the controller as a child operation with a harness-generated id that is fresh
+for every turn, so a continued session never reuses an earlier id, and the
+agent sees the recorded `ToolCallResult`.
+
+The Pi harness runs a Pi coding agent in-process (`createPiHarness`, or the
+module at `piHarnessModule` configured from the environment):
+
+- Pi's built-in tools are all active: `read`, `bash`, `edit`, `write`, `grep`,
+  `find`, and `ls`, next to the job tools.
+- Every provider request reserves budget through `reserveModelCall()` first. A
+  refusal ends the session with `model request budget exhausted`, and cancelling
+  the job aborts the session.
+- With `resultSchema`, the agent submits its result through a `submit_result`
+  tool. An inline JSON object schema is enforced on the call; a schema name is
+  only shown to the model. Finishing without submitting fails the job.
+- The provider and model come from `GRAPHLOOM_PI_PROVIDER` and
+  `GRAPHLOOM_PI_MODEL`, and Pi's `auth.json` and `models.json` from
+  `GRAPHLOOM_PI_AGENT_DIR` (default `~/.pi/agent`). A job may choose another
+  model of the same provider with `harnessOptions.modelId`. An API key bound as
+  the `pi-api-key` credential (`codingAgentBinding({ harness, pi: { apiKey } })`)
+  is set on the provider runtime only, never in prompts or the transcript.
+- Sessions are saved as `<sessionDir>/<sessionRef>.jsonl`. A missing, empty,
+  or corrupt session file fails a resume with a clear reason.
 
 ### Continuing an agent session
 
@@ -212,8 +242,7 @@ fresh when that context would mislead the agent. For example, the task or plan
 changed, a repair replaced the executor or graph behavior, or the transcript is
 anchored on an approach the supervisor has rejected. The graph or supervisor
 makes this choice; the controller never continues a session on its own. The
-scripted harness implements resume for tests. A production Pi coding harness
-would keep its session file in the same directory.
+The Pi and scripted test harnesses implement resume.
 
 Built-in packages and plugin bundles can be installed or upgraded independently
 of the controller when compatible with its executor protocol. No controller
