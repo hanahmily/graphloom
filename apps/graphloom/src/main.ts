@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * GraphLoom CLI: run | inspect | stop | resume | switch-model | version
+ * GraphLoom CLI: run | inspect | stop | resume | switch-model | delete | version
  */
 import path from "node:path";
 import { createController } from "@graphloom/controller";
@@ -80,6 +80,17 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (cmd === "delete") {
+    const runRef = requireRunRef(args[1], "delete <stateDir|runId> [--state-root <dir>] [--force]");
+    const stateRoot = flagValue(args, "--state-root");
+    const report = await controller.delete(runRef, {
+      ...(stateRoot ? { stateRoot: path.resolve(stateRoot) } : {}),
+      force: args.includes("--force"),
+    });
+    console.log(JSON.stringify(report, null, 2));
+    return;
+  }
+
   if (cmd === "switch-model") {
     const usage = "switch-model <stateDir|runId> <provider/model> --reason <text> [--state-root <dir>]";
     const runRef = requireRunRef(args[1], usage);
@@ -155,7 +166,11 @@ Usage:
   graphloom stop <stateDir|runId> [--state-root <dir>]
   graphloom resume <stateDir|runId> [--state-root <dir>]
   graphloom switch-model <stateDir|runId> <provider/model> --reason <text> [--state-root <dir>]
+  graphloom delete <stateDir|runId> [--state-root <dir>] [--force]
   graphloom version
+
+Delete removes a stopped or finished run's worktree, graphloom/<runId> branch, and
+state directory. --force also discards uncommitted changes and branch commits.
 
 Supervisor: run and resume use a Pi supervisor when an operator config exists at
 $GRAPHLOOM_SUPERVISOR_CONFIG or ~/.config/graphloom/supervisor.json:

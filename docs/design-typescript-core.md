@@ -74,12 +74,25 @@ graphloom run task.yaml
 graphloom inspect <run-id>
 graphloom stop <run-id>
 graphloom resume <run-id>
+graphloom delete <run-id> [--force]
 ```
 
 These are target interfaces. Relative paths resolve from the task file. `hello`
 selects an operator-installed bundle at `plugins/hello/` beside that file. Reject
 path traversal. Installation and dependency preparation are separate from run
 startup; there is no automatic registry download on a run's execution path.
+
+Delete removes a stopped or finished run's worktree, `graphloom/<run-id>` branch,
+and state directory, in that order and with `state.json` last, so a delete that
+fails partway can be repeated. It refuses a run that is running, owned by a live
+controller, or has an active session in this process, and a state file whose
+directory, worktree, or branch is not the run's own name. Creating the worktree
+records the run's state directory in the repository's git config
+(`branch.graphloom/<run-id>.graphloomStateDir`); delete touches a worktree or
+branch only when that record names this run, so an edited state file cannot
+point it at another run. Uncommitted worktree changes, ignored files included,
+and branch commits beyond the pinned head are discarded only with `--force`, and
+the branch is deleted only at the tip that was checked.
 
 Intake pins the task, repository HEAD, graph definition, plugin bundle, runtime
 profile, grants, and finite budgets. Additional graph-specific options wait for
