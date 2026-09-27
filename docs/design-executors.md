@@ -177,12 +177,11 @@ protocol:
 - The job result is the agent's claim: its status, structured output, the tool
   calls it made with their child operation ids, and its model request count.
 
-Both production harnesses give the agent its full toolset (shell, file
-editing, search) in the worktree. The package is unrestricted, so the agent
-works as the user would, and `writeScope` and `readOnly` reach it as
-instructions in the assignment. The controller does not trust those
-instructions. For every dispatch, it compares the worktree before and after
-the job:
+Both production harnesses provide coding tools in the worktree and include
+`writeScope` and `readOnly` in the assignment. Claude also checks file-tool
+permission requests and denies shell use by reviewers; Pi retains advisory
+scope instructions. Writer shell commands remain unrestricted. For every
+dispatch, the controller compares the worktree before and after the job:
 
 - It checks tracked and untracked paths that differ from HEAD, by content, and
   skips ignored paths. A `writeScope` entry covers that exact path or, as a
@@ -201,8 +200,12 @@ The Claude Code harness runs the user's `claude` CLI headless
 (`createClaudeCodeHarness`, or the module at `claudeCodeHarnessModule`
 configured from the environment):
 
-- It runs `claude -p --output-format stream-json` in the worktree with
-  `--tools default` and `--permission-mode bypassPermissions`. Job tools are
+- It runs `claude -p` with stream-json input/output, `--tools default`, and
+  `--permission-prompt-tool stdio` in permission mode `default`. File-tool
+  permissions enforce the job's write scope; read-only jobs cannot use file
+  mutation tools or Bash. Unknown permission requests are denied. Writer shell
+  commands remain unrestricted; see the [live-mode design](design-claude-live-mode.md).
+  Job tools are
   served on a loopback MCP endpoint with a per-run bearer token, as the
   `graphloom` server (`--strict-mcp-config`, so no other MCP servers load).
   The endpoint forwards tool calls to the controller one at a time, even when
@@ -218,8 +221,9 @@ configured from the environment):
   Requests Claude Code makes outside the transcript's responses, such as
   context compaction or `WebFetch`'s summarizing, are never charged per
   request; their tokens still appear in the reported usage.
-- Cancelling the job sends SIGTERM to the process group, then SIGKILL after a
-  grace period.
+- Cancelling the job first sends an `interrupt` control request, allowing the
+  CLI to save the interrupted turn. An unresponsive process receives SIGTERM
+  after an interrupt grace period, then SIGKILL. Saved sessions remain resumable.
 - Claude Code gets a minimal environment, not the executor's: `PATH`, `HOME`,
   user, shell, temp, locale (`LANG`, `LC_*`, `TZ`), `SSH_AUTH_SOCK`, XDG
   directories, proxy and CA settings, plus `CLAUDE_CONFIG_DIR` set to the

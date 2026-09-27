@@ -15,7 +15,7 @@ export interface CodingTool {
 export interface CodingSessionOptions {
   /** Run worktree the agent works in. */
   cwd: string;
-  /** Paths the graph admitted for writing (relative to `cwd`). Advisory: the harness runs unrestricted. */
+  /** Paths the graph admitted for writing (relative to `cwd`). Claude checks file-tool permissions; shell execution remains unrestricted. */
   writeScope?: string[];
   readOnly: boolean;
   tools: CodingTool[];

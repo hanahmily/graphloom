@@ -23,6 +23,11 @@ for await (const line of rl) {
     continue;
   }
 
+  if (mode.startsWith("json-")) {
+    process.stdout.write(`${mode.slice(5)}\n`);
+    continue;
+  }
+
   if (mode === "stale-generation") {
     process.stdout.write(
       `${JSON.stringify({

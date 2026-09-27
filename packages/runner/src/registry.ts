@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import {
   MAX_SESSION_REF_CHARS,
+  parseJsonBounded,
   pinJobExecutor,
   validateExecutorInput,
   type ExecutorContext,
@@ -21,6 +22,22 @@ import type { ExecutorDescriptor, JobContext, JobEvidenceItem, JobResult, Runner
 
 /** Qualified ids under this namespace belong to GraphLoom built-in packages. */
 export const BUILTIN_EXECUTOR_NAMESPACE = "graphloom.";
+
+/** Check the envelope before accessing fields received from an executor process. */
+function parseExecutorReply(line: string): Record<string, unknown> & { kind: string; message?: string } {
+  const value = parseJsonBounded(line);
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("malformed executor reply: expected an object");
+  }
+  const reply = value as Record<string, unknown>;
+  if (typeof reply.kind !== "string" || reply.kind.length === 0) {
+    throw new Error("malformed executor reply: expected a kind");
+  }
+  if (reply.message !== undefined && typeof reply.message !== "string") {
+    throw new Error("malformed executor reply: message must be a string");
+  }
+  return reply as Record<string, unknown> & { kind: string; message?: string };
+}
 
 /** A custom registration must never shadow a built-in qualified id. */
 export function assertNoBuiltinShadowing(ids: Iterable<string>, builtin: boolean): void {
@@ -275,6 +292,9 @@ export function createTrustedInProcessRunner(
         if (ctx.executorSource !== undefined) {
           throw new Error(`executor ${def.id} runs in-process and cannot be served from a run-local copy`);
         }
+        if (pin.version !== undefined && pin.version !== def.version) {
+          throw new Error(`executor ${def.id} pinned version ${pin.version} but installed ${def.version ?? "(unversioned)"}`);
+        }
         const digestError = digestMismatch(pin, digests.get(def.id)!);
         if (digestError) throw new Error(digestError);
         const mismatch = effectMismatch(def, pinned);
@@ -462,7 +482,7 @@ export function createChildExecutorRunner(
             input?: unknown;
           };
           try {
-            msg = JSON.parse(line) as typeof msg;
+            msg = parseExecutorReply(line) as typeof msg;
           } catch (err) {
             finish(failed(err instanceof Error ? err.message : String(err)));
             return;
@@ -576,8 +596,11 @@ export async function describeExecutorModule(options: {
     rl.on("line", (line) => {
       let msg: { kind?: string; executors?: DescribedExecutor[]; message?: string };
       try {
-        msg = JSON.parse(line) as typeof msg;
-      } catch {
+        msg = parseExecutorReply(line) as typeof msg;
+      } catch (err) {
+        clearTimeout(timer);
+        child.kill("SIGKILL");
+        reject(err);
         return;
       }
       clearTimeout(timer);

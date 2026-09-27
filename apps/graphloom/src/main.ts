@@ -4,7 +4,8 @@
  */
 import path from "node:path";
 import { createController } from "@graphloom/controller";
-import { agentRunner, loadAgentConfig } from "./agent-config.js";
+import { createCliRunner } from "./cli-runner.js";
+import { requireRunnerConfig } from "./runner-config.js";
 import {
   loadSupervisorConfig,
   parseModelRef,
@@ -30,8 +31,8 @@ async function main(): Promise<void> {
   const controller = createController();
 
   if (cmd === "run") {
+    const runner = createCliRunner(await requireRunnerConfig());
     const taskPath = path.resolve(args[1] ?? "task.yaml");
-    const runner = agentRunner(await loadAgentConfig());
     const config = await loadSupervisorConfig();
     const report = await controller.run({
       taskPath,
@@ -66,9 +67,9 @@ async function main(): Promise<void> {
   }
 
   if (cmd === "resume") {
+    const runner = createCliRunner(await requireRunnerConfig());
     const runRef = requireRunRef(args[1], "resume <stateDir|runId>");
     const stateRoot = flagValue(args, "--state-root");
-    const runner = agentRunner(await loadAgentConfig());
     const config = await loadSupervisorConfig();
     const report = await controller.resume({
       runRef,
@@ -158,12 +159,12 @@ Usage:
 Delete removes a stopped or finished run's worktree, graphloom/<runId> branch, and
 state directory. --force also discards uncommitted changes and branch commits.
 
-Coding agent: run and resume need one, configured at $GRAPHLOOM_AGENT_CONFIG or
-~/.config/graphloom/agent.json:
-  { "harness": "claude-code", "model": "sonnet", "configDir": "~/.claude" }
-  { "harness": "pi", "provider": "minimax-cn", "modelId": "MiniMax-M3" }
-or, without a file, GRAPHLOOM_AGENT_HARNESS=claude-code|pi (Pi also reads
-GRAPHLOOM_PI_PROVIDER and GRAPHLOOM_PI_MODEL). Claude Code uses its own login.
+Agent runner: run and resume refuse to start without $GRAPHLOOM_RUNNER_CONFIG or
+~/.config/graphloom/runner.json:
+  { "harness": "claude-code", "allowUnrestricted": true }
+Use "pi" for the Pi harness. The agent runs with your user permissions;
+credentials come from the harness login. Optional claude/pi settings select
+the executable, model, provider, agent directory, and environment names.
 
 Supervisor: run and resume use a Pi supervisor when an operator config exists at
 $GRAPHLOOM_SUPERVISOR_CONFIG or ~/.config/graphloom/supervisor.json:

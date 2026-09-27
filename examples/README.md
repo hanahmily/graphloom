@@ -13,37 +13,41 @@ npm test -w @graphloom/plugin-hello
 
 `graphloom run` sends each job hello dispatches to the coding agent the operator
 configures: [Claude Code](https://docs.anthropic.com/en/docs/claude-code) or a
-Pi coding agent. Both run unrestricted in the run's worktree, as you would. The
-controller checks afterwards that each job changed only the paths it was allowed
-to. Configure the agent in `~/.config/graphloom/agent.json`, or in the file
-`GRAPHLOOM_AGENT_CONFIG` names:
+Pi coding agent. Both run with your user permissions in the run's worktree, so
+the runner config must say `"allowUnrestricted": true`. Configure it in
+`~/.config/graphloom/runner.json`, or in the file `GRAPHLOOM_RUNNER_CONFIG`
+names:
 
 ```json
-{ "harness": "claude-code" }
+{ "harness": "claude-code", "allowUnrestricted": true }
 ```
 
 ```json
-{ "harness": "pi", "provider": "minimax-cn", "modelId": "MiniMax-M3", "agentDir": "~/.pi/agent" }
+{
+  "harness": "pi",
+  "allowUnrestricted": true,
+  "pi": { "provider": "minimax-cn", "modelId": "MiniMax-M3", "agentDir": "~/.pi/agent" }
+}
 ```
 
-Without a file, `GRAPHLOOM_AGENT_HARNESS=claude-code` or `=pi` selects the
-harness. Pi then reads `GRAPHLOOM_PI_PROVIDER` and `GRAPHLOOM_PI_MODEL`. Other
-settings:
+Pi falls back to `GRAPHLOOM_PI_PROVIDER` and `GRAPHLOOM_PI_MODEL` when the file
+omits them. Other settings:
 
-- Claude Code: `command` (default `claude` on `PATH`; a relative path resolves
+- `claude`: `command` (default `claude` on `PATH`; a relative path resolves
   against the directory you run `graphloom` in), `model`, and `configDir`, its
   config dir, which picks the login or gateway. `startupTimeoutMs` and
   `responseTimeoutMs` stop a Claude Code session that shows no model output for
   that long (defaults five and ten minutes; 0 disables). Each must be shorter
   than `timeoutMs`; a default that is not falls to half of it.
-- Pi: `agentDir`.
-- Both: `timeoutMs` per job (default one hour) and `passEnv`, extra environment
-  variable names the agent's commands may see.
+- `pi`: `agentDir`.
+- Both `claude` and `pi` take `passEnv`, extra environment variable names the
+  agent's commands may see. `timeoutMs` at the top level limits each job
+  (default one hour).
 
 Credentials never go in this file, and `graphloom` refuses one that holds them.
 Claude Code uses the login in its config dir. Pi uses the keys in its agent dir
 or the provider's environment variable, such as `MINIMAX_CN_API_KEY`. A missing
-or incomplete agent configuration fails before the run starts.
+runner config, Claude Code command, or Pi model fails before the run starts.
 
 Then build, prepare a disposable repository beside the task, and run:
 
@@ -61,8 +65,8 @@ Write requires exact bytes `Hello, GraphLoom!\n` at `GREETING.txt` only. Review
 is an independent read-only job, and its structured result is the verdict. See
 [design §11](../docs/design-typescript-core.md#11-minimal-example-and-verification).
 
-The same run as an opt-in test, using your agent config (or Claude Code when you
-have none). It stays out of CI:
+The same run as an opt-in test, using your runner config (or Claude Code when
+you have none). It stays out of CI:
 
 ```sh
 npm run build && GRAPHLOOM_HELLO_LIVE=1 npm exec -w @graphloom/cli -- vitest run test/hello-live.test.ts

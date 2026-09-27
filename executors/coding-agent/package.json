@@ -12,6 +12,10 @@
       "types": "./dist/executors.d.ts",
       "import": "./dist/executors.js"
     },
+    "./legacy-executors": {
+      "types": "./dist/legacy-executors.d.ts",
+      "import": "./dist/legacy-executors.js"
+    },
     "./claude": {
       "types": "./dist/claude.d.ts",
       "import": "./dist/claude.js"

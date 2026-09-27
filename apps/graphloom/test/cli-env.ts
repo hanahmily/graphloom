@@ -13,6 +13,12 @@ const fakeClaude = path.join(repoRoot, "executors/coding-agent/test/fake-claude.
 export const HELLO_REQUEST =
   'Create GREETING.txt containing exactly "Hello, GraphLoom!" followed by one newline. Do not modify other files.';
 
+export interface FakeClaudeOptions {
+  /** `claude.command` in the runner config; defaults to the absolute path of `dir/claude`. */
+  command?: string;
+  timeoutMs?: number;
+}
+
 export interface CliEnv {
   dir: string;
   repo: string;
@@ -20,8 +26,8 @@ export interface CliEnv {
   /** Run the built CLI in `dir` with this env's HOME and agent config. */
   graphloom(...args: string[]): Promise<{ stdout: string; stderr: string; code: number }>;
   git(...args: string[]): Promise<string>;
-  /** Point the agent config at the fake Claude CLI running `script`, installed at `dir/claude`. */
-  fakeClaude(script: Record<string, unknown>, options?: { command?: string }): Promise<void>;
+  /** Point the runner config at the fake Claude CLI running `script`, installed at `dir/claude`. */
+  fakeClaude(script: Record<string, unknown>, options?: FakeClaudeOptions): Promise<void>;
   env: NodeJS.ProcessEnv;
 }
 
@@ -52,18 +58,22 @@ export async function makeCliEnv(cleanups: (() => Promise<void>)[]): Promise<Cli
       }),
     );
 
-  const fake = async (script: Record<string, unknown>, options: { command?: string } = {}) => {
+  const fake = async (script: Record<string, unknown>, options: FakeClaudeOptions = {}) => {
     const bin = path.join(dir, "claude");
     await writeFile(bin, `#!/bin/sh\nexec "${process.execPath}" "${fakeClaude}" "$@"\n`, { mode: 0o755 });
     await writeFile(path.join(dir, "script.json"), JSON.stringify(script));
     const config = {
       harness: "claude-code",
-      command: options.command ?? bin,
-      configDir: path.join(dir, "claude-config"),
-      passEnv: ["FAKE_CLAUDE_SCRIPT", "FAKE_CLAUDE_LOG"],
+      allowUnrestricted: true,
+      ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
+      claude: {
+        command: options.command ?? bin,
+        configDir: path.join(dir, "claude-config"),
+        passEnv: ["FAKE_CLAUDE_SCRIPT", "FAKE_CLAUDE_LOG"],
+      },
     };
-    await writeFile(path.join(dir, "agent.json"), JSON.stringify(config));
-    env.GRAPHLOOM_AGENT_CONFIG = path.join(dir, "agent.json");
+    await writeFile(path.join(dir, "runner.json"), JSON.stringify(config));
+    env.GRAPHLOOM_RUNNER_CONFIG = path.join(dir, "runner.json");
     env.FAKE_CLAUDE_SCRIPT = path.join(dir, "script.json");
     env.FAKE_CLAUDE_LOG = path.join(dir, "claude-log.jsonl");
   };

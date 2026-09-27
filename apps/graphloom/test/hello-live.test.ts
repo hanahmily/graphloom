@@ -1,17 +1,18 @@
-import { readFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { AGENT_SETUP_ENV } from "../src/agent-config.js";
+import { RUNNER_SETUP_ENV } from "../src/runner-config.js";
 import { makeCliEnv } from "./cli-env.js";
 
 /**
  * `graphloom run` on hello against a real coding model, through the operator's
- * own setup: their HOME (the agent's login, any supervisor config) and
- * GRAPHLOOM_AGENT_CONFIG when set, else Claude Code. Opt in with
+ * own setup: their HOME (the agent's login, runner and supervisor config) and
+ * GRAPHLOOM_RUNNER_CONFIG when set, else Claude Code. Opt in with
  * GRAPHLOOM_HELLO_LIVE=1; it never runs in CI.
  */
 const live = process.env.GRAPHLOOM_HELLO_LIVE === "1";
-const OPERATOR_ENV = ["HOME", "GRAPHLOOM_SUPERVISOR_CONFIG", ...AGENT_SETUP_ENV];
+const OPERATOR_ENV = ["HOME", "GRAPHLOOM_SUPERVISOR_CONFIG", ...RUNNER_SETUP_ENV];
 
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => {
@@ -22,7 +23,10 @@ describe.skipIf(!live)("graphloom run on hello with a real coding model", () => 
   it("writes and independently reviews GREETING.txt, and inspect shows both receipts", async () => {
     const env = await makeCliEnv(cleanups);
     for (const name of OPERATOR_ENV) if (process.env[name]) env.env[name] = process.env[name];
-    if (!env.env.GRAPHLOOM_AGENT_CONFIG && !env.env.GRAPHLOOM_AGENT_HARNESS) env.env.GRAPHLOOM_AGENT_HARNESS = "claude-code";
+    if (!env.env.GRAPHLOOM_RUNNER_CONFIG && !existsSync(path.join(env.env.HOME!, ".config/graphloom/runner.json"))) {
+      env.env.GRAPHLOOM_RUNNER_CONFIG = path.join(env.dir, "runner.json");
+      await writeFile(env.env.GRAPHLOOM_RUNNER_CONFIG, JSON.stringify({ harness: "claude-code", allowUnrestricted: true }));
+    }
 
     const run = await env.graphloom("run", "task.yaml");
     const report = JSON.parse(run.stdout) as { runId: string; status: string; stopReason?: string; blocker?: string; worktreePath: string };

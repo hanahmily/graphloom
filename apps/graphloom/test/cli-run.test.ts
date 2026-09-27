@@ -21,7 +21,7 @@ async function readTree(dir: string): Promise<string> {
 }
 
 describe("graphloom run with a coding agent", () => {
-  it("runs hello to completion on Claude Code configured by a relative path, and inspect shows its receipts", async () => {
+  it("runs hello on Claude Code at a relative path with a ten-minute job timeout, and inspect shows its receipts", async () => {
     const env = await makeCliEnv(cleanups);
     await env.fakeClaude(
       {
@@ -30,7 +30,7 @@ describe("graphloom run with a coding agent", () => {
           { match: "GREETING.txt", steps: writer },
         ],
       },
-      { command: "./claude" },
+      { command: "./claude", timeoutMs: 600_000 },
     );
 
     const run = await env.graphloom("run", "task.yaml");
@@ -79,22 +79,25 @@ describe("graphloom run with a coding agent", () => {
     expect(prompts.filter((p) => p.startsWith("Create GREETING.txt")).length).toBe(verdicts.length);
   }, 60_000);
 
-  it("fails before the run starts when no coding agent is configured", async () => {
+  it("fails before the run starts when no runner is configured, Pi has no model, or Claude Code is missing", async () => {
     const env = await makeCliEnv(cleanups);
     const run = await env.graphloom("run", "task.yaml");
     expect(run.code).toBe(1);
-    expect(run.stderr).toContain("no coding agent configured");
+    expect(run.stderr).toContain("no agent runner configured");
     expect(existsSync(env.stateRoot)).toBe(false);
     expect(await env.git("branch", "--list", "graphloom/*")).toBe("");
 
-    env.env.GRAPHLOOM_AGENT_HARNESS = "pi";
+    const config = path.join(env.dir, "runner.json");
+    env.env.GRAPHLOOM_RUNNER_CONFIG = config;
+    await writeFile(config, JSON.stringify({ harness: "pi", allowUnrestricted: true }));
     const pi = await env.graphloom("run", "task.yaml");
-    expect(pi.stderr).toContain("the pi harness needs provider and modelId (or GRAPHLOOM_PI_PROVIDER and GRAPHLOOM_PI_MODEL)");
+    expect(pi.stderr).toContain("the pi harness needs pi.provider and pi.modelId in the runner config (or GRAPHLOOM_PI_PROVIDER and GRAPHLOOM_PI_MODEL)");
 
-    await writeFile(path.join(env.dir, "agent.json"), JSON.stringify({ harness: "claude-code", command: path.join(env.dir, "missing") }));
-    env.env.GRAPHLOOM_AGENT_CONFIG = path.join(env.dir, "agent.json");
+    await writeFile(config, JSON.stringify({ harness: "claude-code", allowUnrestricted: true, claude: { command: "./missing" } }));
     const missing = await env.graphloom("run", "task.yaml");
-    expect(missing.stderr).toContain(`Claude Code command ${path.join(env.dir, "missing")} was not found`);
+    expect(missing.stderr).toContain("Claude Code command ./missing was not found");
+    const resumed = await env.graphloom("resume", "some-run");
+    expect(resumed.stderr).toContain("Claude Code command ./missing was not found");
     expect(existsSync(env.stateRoot)).toBe(false);
   }, 60_000);
 
