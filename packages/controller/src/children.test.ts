@@ -294,8 +294,8 @@ describe("agent tool calls as child operations (#40)", () => {
       toolCallId: "c1",
     });
     // Parent + child + reviewer spend jobs; the agent's two model requests replace its flat invocation charge.
-    expect(state.budgets.jobs).toBe(64 - 3);
-    expect(state.budgets.agentInvocations).toBe(32 - 2 - 1);
+    expect(state.budgets.jobs).toBe(128 - 3);
+    expect(state.budgets.agentInvocations).toBe(64 - 2 - 1);
     expect(state.outstanding).toEqual([]);
   });
 
@@ -387,7 +387,7 @@ describe("agent tool calls as child operations (#40)", () => {
     expect(state.childOperations?.[0]?.result).toBeUndefined();
     expect(state.outstanding).toEqual([]);
     // Only the parent and the reviewer are charged; the cancelled child is not.
-    expect(state.budgets.jobs).toBe(64 - 2);
+    expect(state.budgets.jobs).toBe(128 - 2);
   });
 
   it("services one tool call at a time while the agent waits, without deadlock", async () => {
@@ -418,14 +418,14 @@ describe("agent tool calls as child operations (#40)", () => {
     const { runner } = executors();
     const report = await createController().run({
       taskPath: env.taskPath,
-      plugin: graph([{ model: 40 }, { toolsUntilRefused: "read_comments" }]),
+      plugin: graph([{ model: 80 }, { toolsUntilRefused: "read_comments" }]),
       validators: { "exact-greeting": exactGreeting, "independent-reviewer": independentReview },
       runner,
       stateRoot: env.stateRoot,
       runId: "budget1",
     });
     const state = await loadRunState(report.stateDir);
-    expect(agentResults(state.evidence)).toEqual([{ granted: 32 }, { ok: 63, refused: "jobs budget exhausted" }]);
+    expect(agentResults(state.evidence)).toEqual([{ granted: 64 }, { ok: 127, refused: "jobs budget exhausted" }]);
     expect(state.budgets.agentInvocations).toBe(0);
     expect(state.budgets.jobs).toBe(0);
   }, 60_000);

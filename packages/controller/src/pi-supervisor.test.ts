@@ -271,7 +271,7 @@ describe("Pi supervisor recovery (controller)", () => {
       "/tmp/graphloom-sess-durable-1.jsonl",
     );
     expect(state.supervisorBinding?.provider).toBe("minimax-cn");
-    expect(state.budgets.agentInvocations).toBeLessThan(32);
+    expect(state.budgets.agentInvocations).toBeLessThan(64);
   });
 
   it("settles provider calls when decide returns malformed JSON", async () => {
@@ -299,7 +299,7 @@ describe("Pi supervisor recovery (controller)", () => {
     expect(report.status).toBe("stopped");
     expect(report.stopReason).toBe("supervisor decide failed");
     const state = await loadRunState(report.stateDir);
-    expect(state.budgets.agentInvocations).toBeLessThan(32);
+    expect(state.budgets.agentInvocations).toBeLessThan(64);
     expect(state.supervisorBinding?.sessionId).toBe("sess-durable-1");
   });
 

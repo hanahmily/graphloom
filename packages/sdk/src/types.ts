@@ -82,6 +82,8 @@ export interface BudgetRemaining {
   corrections: number;
   /** Milliseconds the controller may still spend waiting out executor retry timing. */
   waitMs?: number;
+  /** Milliseconds of execution the run has left; it runs down only while a controller is running the run. */
+  activeMs?: number;
 }
 
 export interface RunView {

@@ -201,7 +201,7 @@ describe("controller runs graphloom.github through the executor protocol", () =>
     expect(report.stopReason).toMatch(/^job failed: GitHub rate limited GET \/repos\/acme\/app\/issues; retry after \d+s/);
     expect(server.requests).toHaveLength(1);
     const state = await loadRunState(report.stateDir);
-    expect(state.budgets.jobs).toBe(63);
+    expect(state.budgets.jobs).toBe(127);
   });
 
   it("keeps the bound token out of durable state when GitHub echoes it", async () => {

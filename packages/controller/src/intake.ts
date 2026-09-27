@@ -12,6 +12,9 @@ const execFileAsync = promisify(execFile);
 /** Default time a run may spend waiting out executor retry timing (15 minutes). */
 export const DEFAULT_WAIT_BUDGET_MS = 15 * 60_000;
 
+/** Default execution time a run may spend while a controller is running it (4 hours). */
+export const DEFAULT_ACTIVE_BUDGET_MS = 4 * 60 * 60_000;
+
 export interface TaskFile {
   graph: string;
   repo: string;
@@ -68,6 +71,8 @@ export interface IntakePin {
     corrections: number;
     /** Time the controller may spend waiting out executor retry timing; absent means none. */
     waitMs?: number;
+    /** Execution time left while a controller is running the run; absent in runs saved before it existed. */
+    activeMs?: number;
   };
 }
 
@@ -250,11 +255,12 @@ export async function intakeTask(taskPath: string): Promise<IntakePin> {
     },
     grants: task.grants ?? { sourceRepair: false, validatorSubstitution: false },
     budgets: {
-      agentInvocations: 32,
-      jobs: 64,
-      decisions: 128,
+      agentInvocations: 64,
+      jobs: 128,
+      decisions: 512,
       corrections: 8,
       waitMs: DEFAULT_WAIT_BUDGET_MS,
+      activeMs: DEFAULT_ACTIVE_BUDGET_MS,
     },
   };
 }

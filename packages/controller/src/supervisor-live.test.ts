@@ -228,7 +228,7 @@ describe("live supervisor recovery through the controller (#43)", () => {
     expect(session.prompts[2]).toMatch(/Since the last proposal \(observe: look\)[\s\S]*file evidence/);
     expect(session.prompts[3]).toMatch(/receipt \S+ for greeting-bytes at stage write: valid/);
     // Every decide is capped at the invocations still unspent.
-    expect(session.options.map((o) => o?.maxTurns)).toEqual([32, 30, 29, 28]);
+    expect(session.options.map((o) => o?.maxTurns)).toEqual([64, 62, 61, 60]);
   });
 
   it("stops before prompting a metered supervisor with no agent invocations left", async () => {
