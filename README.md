@@ -60,8 +60,9 @@ Claude Code must be installed and logged in. Optional `claude.command` and
 `claude.model` select its executable and model. For Pi, use `"harness": "pi"`
 with `"pi": { "provider": "minimax-cn", "modelId": "MiniMax-M3" }` and the
 existing Pi credential store. Keep credentials out of runner configuration.
-The same configuration is used by `resume`. Without runner configuration,
-agent jobs stop with a configuration error.
+The same configuration is used by `resume`. Without runner configuration, or
+without the Claude Code command or Pi model it names, `run` and `resume` refuse
+to start. The [example guide](examples/README.md) lists every setting.
 
 `allowUnrestricted` is required because coding agents can run shell commands
 with the operator's permissions. Claude's file-tool permission checks restrict

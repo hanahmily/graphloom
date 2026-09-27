@@ -1,7 +1,23 @@
-import { readFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { access, readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import type { ClaudeCodeBindingOptions, PiBindingOptions } from "@graphloom/executor-coding-agent";
+import {
+  CLAUDE_BIN_ENV,
+  PI_MODEL_ENV,
+  PI_PROVIDER_ENV,
+  codingAgentExecutorPackage,
+  type ClaudeCodeBindingOptions,
+  type PiBindingOptions,
+} from "@graphloom/executor-coding-agent";
+
+export const RUNNER_CONFIG_ENV = "GRAPHLOOM_RUNNER_CONFIG";
+/** Environment variables the CLI's runner setup reads, besides HOME and provider keys. */
+export const RUNNER_SETUP_ENV: readonly string[] = [
+  RUNNER_CONFIG_ENV,
+  ...(codingAgentExecutorPackage.configEnv ?? []),
+  "CLAUDE_CONFIG_DIR",
+];
 
 /** Operator consent and nonsecret settings; the harness uses its existing login. */
 export interface RunnerConfig {
@@ -13,7 +29,7 @@ export interface RunnerConfig {
 }
 
 export async function loadRunnerConfig(env: NodeJS.ProcessEnv = process.env): Promise<RunnerConfig | undefined> {
-  const explicit = env.GRAPHLOOM_RUNNER_CONFIG;
+  const explicit = env[RUNNER_CONFIG_ENV];
   const file = explicit
     ? path.resolve(explicit)
     : path.join(env.HOME ?? os.homedir(), ".config", "graphloom", "runner.json");
@@ -33,6 +49,47 @@ export async function loadRunnerConfig(env: NodeJS.ProcessEnv = process.env): Pr
   return parseRunnerConfig(value, file);
 }
 
+/**
+ * The runner config for `run` and `resume`, checked before a run starts: it
+ * exists, Pi has a model, and the Claude Code command is executable. A command
+ * given as a path is bound to the absolute path that passed the check, since
+ * the agent starts in the run's worktree.
+ */
+export async function requireRunnerConfig(env: NodeJS.ProcessEnv = process.env): Promise<RunnerConfig> {
+  const config = await loadRunnerConfig(env);
+  if (config === undefined) {
+    throw new Error(
+      `no agent runner configured: create ~/.config/graphloom/runner.json (or point ${RUNNER_CONFIG_ENV} at one) with {"harness": "claude-code", "allowUnrestricted": true}`,
+    );
+  }
+  if (config.harness === "pi") {
+    if (!(config.pi?.provider ?? env[PI_PROVIDER_ENV]) || !(config.pi?.modelId ?? env[PI_MODEL_ENV])) {
+      throw new Error(`the pi harness needs pi.provider and pi.modelId in the runner config (or ${PI_PROVIDER_ENV} and ${PI_MODEL_ENV})`);
+    }
+    return config;
+  }
+  const command = config.claude?.command ?? (env[CLAUDE_BIN_ENV] || "claude");
+  const bound = command.includes("/") ? expandHome(command) : command;
+  if (!(await isExecutable(bound, env.PATH ?? ""))) {
+    throw new Error(`Claude Code command ${command} was not found; install Claude Code or set claude.command in the runner config`);
+  }
+  return bound === command && config.claude?.command === undefined ? config : { ...config, claude: { ...config.claude, command: bound } };
+}
+
+async function isExecutable(command: string, searchPath: string): Promise<boolean> {
+  const candidates = command.includes("/")
+    ? [command]
+    : searchPath.split(path.delimiter).filter(Boolean).map((dir) => path.join(dir, command));
+  for (const candidate of candidates) {
+    if (await access(candidate, constants.X_OK).then(() => true, () => false)) return true;
+  }
+  return false;
+}
+
+function expandHome(p: string): string {
+  return path.resolve(p === "~" || p.startsWith("~/") ? path.join(os.homedir(), p.slice(1)) : p);
+}
+
 export function parseRunnerConfig(value: unknown, source = "runner config"): RunnerConfig {
   const obj = settings(value, source, ["harness", "allowUnrestricted", "timeoutMs", "claude", "pi"]);
   if (obj.harness !== "claude-code" && obj.harness !== "pi") throw new Error(`${source}: harness must be claude-code or pi`);
@@ -44,7 +101,7 @@ export function parseRunnerConfig(value: unknown, source = "runner config"): Run
     const c = settings(obj.claude, nested, ["command", "model", "configDir", "passEnv", "startupTimeoutMs", "responseTimeoutMs"]);
     config.claude = {
       ...(c.command !== undefined ? { command: nonempty(c.command, `${nested}.command`) } : {}),
-      ...(c.configDir !== undefined ? { configDir: nonempty(c.configDir, `${nested}.configDir`) } : {}),
+      ...(c.configDir !== undefined ? { configDir: expandHome(nonempty(c.configDir, `${nested}.configDir`)) } : {}),
       ...(c.model !== undefined ? { model: nonempty(c.model, `${nested}.model`) } : {}),
       ...(c.passEnv !== undefined ? { passEnv: environmentNames(c.passEnv, nested) } : {}),
       ...(c.startupTimeoutMs !== undefined ? { startupTimeoutMs: milliseconds(c.startupTimeoutMs, `${nested}.startupTimeoutMs`, true) } : {}),
@@ -58,7 +115,7 @@ export function parseRunnerConfig(value: unknown, source = "runner config"): Run
     config.pi = {
       ...(p.provider !== undefined ? { provider: nonempty(p.provider, `${nested}.provider`) } : {}),
       ...(p.modelId !== undefined ? { modelId: nonempty(p.modelId, `${nested}.modelId`) } : {}),
-      ...(dir !== undefined ? { agentDir: path.resolve(dir === "~" || dir.startsWith("~/") ? path.join(os.homedir(), dir.slice(1)) : dir) } : {}),
+      ...(dir !== undefined ? { agentDir: expandHome(dir) } : {}),
       ...(p.passEnv !== undefined ? { passEnv: environmentNames(p.passEnv, nested) } : {}),
     };
   }

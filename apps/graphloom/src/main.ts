@@ -5,7 +5,7 @@
 import path from "node:path";
 import { createController } from "@graphloom/controller";
 import { createCliRunner } from "./cli-runner.js";
-import { loadRunnerConfig } from "./runner-config.js";
+import { requireRunnerConfig } from "./runner-config.js";
 import {
   loadSupervisorConfig,
   parseModelRef,
@@ -31,7 +31,7 @@ async function main(): Promise<void> {
   const controller = createController();
 
   if (cmd === "run") {
-    const runner = createCliRunner(await loadRunnerConfig());
+    const runner = createCliRunner(await requireRunnerConfig());
     const taskPath = path.resolve(args[1] ?? "task.yaml");
     const config = await loadSupervisorConfig();
     const report = await controller.run({
@@ -67,7 +67,7 @@ async function main(): Promise<void> {
   }
 
   if (cmd === "resume") {
-    const runner = createCliRunner(await loadRunnerConfig());
+    const runner = createCliRunner(await requireRunnerConfig());
     const runRef = requireRunRef(args[1], "resume <stateDir|runId>");
     const stateRoot = flagValue(args, "--state-root");
     const config = await loadSupervisorConfig();
@@ -159,7 +159,7 @@ Usage:
 Delete removes a stopped or finished run's worktree, graphloom/<runId> branch, and
 state directory. --force also discards uncommitted changes and branch commits.
 
-Agent runner: run and resume load $GRAPHLOOM_RUNNER_CONFIG or
+Agent runner: run and resume refuse to start without $GRAPHLOOM_RUNNER_CONFIG or
 ~/.config/graphloom/runner.json:
   { "harness": "claude-code", "allowUnrestricted": true }
 Use "pi" for the Pi harness. The agent runs with your user permissions;

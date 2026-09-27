@@ -2,7 +2,10 @@ import path from "node:path";
 import { BUILTIN_AGENT_EXECUTOR_ID, pinJobExecutor, type JobSpec } from "@graphloom/sdk";
 import { createBuiltinExecutorRunner, type JobResult, type Runner } from "@graphloom/runner";
 import {
+  CLAUDE_DEFAULT_RESPONSE_TIMEOUT_MS,
+  CLAUDE_DEFAULT_STARTUP_TIMEOUT_MS,
   CODING_AGENT_RUN_ID,
+  DEFAULT_CODING_TIMEOUT_MS,
   claudeCodeHarnessModule,
   codingAgentBinding,
   codingAgentExecutorPackage,
@@ -16,6 +19,10 @@ const REVIEW_SCHEMA = JSON.stringify({
   required: ["verdict", "summary"],
   additionalProperties: false,
 });
+const WATCHDOGS = [
+  ["startupTimeoutMs", CLAUDE_DEFAULT_STARTUP_TIMEOUT_MS],
+  ["responseTimeoutMs", CLAUDE_DEFAULT_RESPONSE_TIMEOUT_MS],
+] as const;
 
 /** Keep the controller's executor pin, tools, budget port and session unchanged. */
 export function createCliRunner(config: RunnerConfig | undefined): Runner {
@@ -44,7 +51,7 @@ export function createCliRunner(config: RunnerConfig | undefined): Runner {
       ...codingAgentBinding({
         harness: config.harness === "claude-code" ? claudeCodeHarnessModule : piHarnessModule,
         ...(config.timeoutMs !== undefined ? { timeoutMs: config.timeoutMs } : {}),
-        ...(config.claude !== undefined ? { claude: config.claude } : {}),
+        ...(config.harness === "claude-code" ? { claude: claudeOptions(config) } : {}),
         ...(config.pi !== undefined ? { pi: config.pi } : {}),
       }),
     }],
@@ -69,6 +76,16 @@ export function createCliRunner(config: RunnerConfig | undefined): Runner {
       return review ? reviewEvidence(result) : result;
     },
   };
+}
+
+/** Claude Code settings, with any default watchdog that would outlast the job timeout cut to half of it. */
+export function claudeOptions(config: RunnerConfig): NonNullable<RunnerConfig["claude"]> {
+  const timeoutMs = config.timeoutMs ?? DEFAULT_CODING_TIMEOUT_MS;
+  const claude = { ...config.claude };
+  for (const [name, fallback] of WATCHDOGS) {
+    if (claude[name] === undefined && fallback >= timeoutMs) claude[name] = Math.floor(timeoutMs / 2);
+  }
+  return claude;
 }
 
 function object(value: unknown): Record<string, unknown> | undefined {

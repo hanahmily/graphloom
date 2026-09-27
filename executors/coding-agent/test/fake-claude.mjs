@@ -14,6 +14,8 @@
 // and restored from it on resume, unless the script sets `restoreCost: false`.
 // `dropSide: true` makes a resumed session delete its side directory, and
 // `linkTranscript: path` leaves the transcript a symlink to `path` at exit.
+// `byPrompt: [{ match, steps }]` runs the first entry whose `match` the prompt
+// contains, in place of `start` or `resume`.
 // FAKE_CLAUDE_LOG names a file that gets one JSON line per invocation.
 // Both are read from the environment as it reaches the process.
 import { execSync, spawn } from "node:child_process";
@@ -296,7 +298,8 @@ async function respond(step, parent) {
   }
 }
 
-for (const step of resume !== undefined ? script.resume : script.start) await respond(step, null);
+const matched = (script.byPrompt ?? []).find((entry) => prompt.includes(entry.match));
+for (const step of matched?.steps ?? (resume !== undefined ? script.resume : script.start)) await respond(step, null);
 result();
 if (!interrupted && background.length > 0) {
   for (const { id, steps } of background) {
