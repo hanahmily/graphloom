@@ -71,3 +71,20 @@ you have none). It stays out of CI:
 ```sh
 npm run build && GRAPHLOOM_HELLO_LIVE=1 npm exec -w @graphloom/cli -- vitest run test/hello-live.test.ts
 ```
+
+## A second graph: release
+
+[`plugins/release`](plugins/release/) is a second plugin written only against
+the public SDK (`@graphloom/plugin-release`). It is shaped differently from
+hello: its three stages are Bump version, Changelog, and Review. Changelog
+carries two requirements, and one of its validators reads two files. The
+[plugin README](plugins/release/README.md) describes its routing and how a copy
+of it rebuilds for repair. Run it the same way, from `examples`:
+
+```sh
+node ../apps/graphloom/dist/main.js run release-task.yaml
+```
+
+`apps/graphloom/test/release-e2e.test.ts` runs it through the controller with
+scripted jobs. One of those runs repairs a faulty validator with a qualified
+source patch and completes after activation.
