@@ -404,6 +404,31 @@ describe("Claude Code harness", () => {
     expect(await h.invocations()).toHaveLength(3);
   });
 
+  it("does not save a transcript that is a symlink out of Claude Code's store", async () => {
+    const h = await setup();
+    const outside = path.join(h.configDir, "..", "outside.jsonl");
+    await writeFile(outside, '{"text":"not the session"}\n', "utf8");
+    await h.script([{ text: "done" }], [], { linkTranscript: outside });
+    const result = await h.executor.execute({ assignment: "draft" }, h.ctx({ session: { dir: h.sessions } }));
+    expect(result).toMatchObject({ status: "ok", summary: "done" });
+    expect(result).not.toHaveProperty("sessionRef");
+    expect(await readdir(h.sessions).catch(() => [])).toEqual([]);
+  });
+
+  it("drops the saved subagent transcripts once the resumed session no longer has them", async () => {
+    const h = await setup();
+    await h.script([{ agent: [{ text: "the number is 42" }] }, { text: "delegated" }], [{ text: "continued" }], { dropSide: true });
+    const first = await h.executor.execute({ assignment: "draft" }, h.ctx({ session: { dir: h.sessions } }));
+    const ref = (first as { sessionRef: string }).sessionRef;
+    expect(await readdir(h.sessions)).toContain(ref);
+
+    const session = { dir: h.sessions, resume: ref };
+    expect(await h.executor.execute({ assignment: "revise" }, h.ctx({ session }))).toMatchObject({ status: "ok", sessionRef: ref });
+    expect((await readdir(h.sessions)).sort()).toEqual([`${ref}.json`, `${ref}.jsonl`]);
+    await h.executor.execute({ assignment: "revise" }, h.ctx({ session }));
+    expect((await h.invocations())[2]!.side).toEqual({});
+  });
+
   it("reports only a resumed run's own usage, though Claude Code's totals span the session", async () => {
     const h = await setup();
     const own = { inputTokens: 10, outputTokens: 5, cacheReadTokens: 100, cacheWriteTokens: 20, costUsd: 0.0125 };

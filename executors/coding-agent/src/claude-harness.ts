@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { copyFile, lstat, mkdir, mkdtemp, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { createInterface } from "node:readline";
@@ -18,6 +18,7 @@ import {
 } from "./claude-config.js";
 import type { CodingHarness, CodingRunRequest, CodingRunResult, CodingSessionOptions, CodingUsage } from "./harness.js";
 import { envList, minimalEnv } from "./child-env.js";
+import { copyFiles, filesUnder, readScanned } from "./session-files.js";
 import { startToolBridge, type ToolBridge } from "./mcp-bridge.js";
 
 export interface ClaudeCodeHarnessOptions {
@@ -235,10 +236,11 @@ async function saveTranscript(configDir: string, sessionDir: string, saved: Save
   const projects = path.join(configDir, "projects");
   const dirs = await readdir(projects).catch(() => [] as string[]);
   for (const project of dirs) {
+    if (!PROJECT_DIR.test(project) || !(await lstat(path.join(projects, project)).catch(() => undefined))?.isDirectory()) continue;
     const file = path.join(projects, project, `${saved.sessionId}.jsonl`);
-    const info = await stat(file).catch(() => undefined);
-    if (!info?.isFile() || !PROJECT_DIR.test(project)) continue;
-    const transcript = await readFile(file, "utf8");
+    const info = await lstat(file, { bigint: true }).catch(() => undefined);
+    if (!info?.isFile()) continue;
+    const transcript = (await readScanned(file, info)).toString("utf8");
     await saveSide(path.join(projects, project, saved.sessionId), path.join(sessionDir, saved.ref));
     await writeAtomic(path.join(sessionDir, `${saved.ref}.jsonl`), transcript);
     await writeAtomic(path.join(sessionDir, `${saved.ref}.json`), JSON.stringify({ project, ...settings }));
@@ -256,7 +258,10 @@ async function saveTranscript(configDir: string, sessionDir: string, saved: Save
  */
 async function saveSide(source: string, target: string): Promise<void> {
   const side = await filesUnder(source);
-  if (side === undefined) return;
+  if (side === undefined) {
+    await rm(target, { recursive: true, force: true });
+    return;
+  }
   const tmp = `${target}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
   try {
     await copyFiles(source, side.files, tmp);
@@ -264,33 +269,6 @@ async function saveSide(source: string, target: string): Promise<void> {
     await rename(tmp, target);
   } finally {
     await rm(tmp, { recursive: true, force: true });
-  }
-}
-
-/** Regular files under `root`, relative to it; `other` flags symlinks and special files. Undefined when `root` is absent. */
-async function filesUnder(root: string): Promise<{ files: string[]; other: boolean } | undefined> {
-  const info = await lstat(root).catch(() => undefined);
-  if (info === undefined) return undefined;
-  if (!info.isDirectory()) return { files: [], other: true };
-  const files: string[] = [];
-  let other = false;
-  const walk = async (rel: string): Promise<void> => {
-    for (const entry of await readdir(path.join(root, rel), { withFileTypes: true })) {
-      const child = path.join(rel, entry.name);
-      if (entry.isDirectory()) await walk(child);
-      else if (entry.isFile()) files.push(child);
-      else other = true;
-    }
-  };
-  await walk("");
-  return { files, other };
-}
-
-async function copyFiles(from: string, files: string[], to: string): Promise<void> {
-  await mkdir(to, { recursive: true, mode: 0o700 });
-  for (const file of files) {
-    await mkdir(path.dirname(path.join(to, file)), { recursive: true, mode: 0o700 });
-    await copyFile(path.join(from, file), path.join(to, file));
   }
 }
 

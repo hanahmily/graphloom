@@ -12,10 +12,12 @@
 // Like Claude Code, running totals (`modelUsage`, `total_cost_usd`) cover the
 // whole session: they are appended to the transcript as a `cost-state` record
 // and restored from it on resume, unless the script sets `restoreCost: false`.
+// `dropSide: true` makes a resumed session delete its side directory, and
+// `linkTranscript: path` leaves the transcript a symlink to `path` at exit.
 // FAKE_CLAUDE_LOG names a file that gets one JSON line per invocation.
 // Both are read from the environment as it reaches the process.
 import { execSync } from "node:child_process";
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync } from "node:fs";
 import path from "node:path";
 
 const argv = process.argv.slice(2);
@@ -55,6 +57,7 @@ if (resume !== undefined) {
   history = entries.filter((e) => e.text !== undefined).map((e) => e.text);
   const costState = entries.filter((e) => e.type === "cost-state").at(-1);
   if (costState !== undefined && script.restoreCost !== false) restored = costState;
+  if (script.dropSide === true) rmSync(sideDir, { recursive: true, force: true });
 }
 
 const mcpFile = flag("--mcp-config");
@@ -215,3 +218,7 @@ if (background.length > 0) {
   result();
 }
 appendFileSync(transcript, `${JSON.stringify({ type: "cost-state", ...totals() })}\n`);
+if (script.linkTranscript !== undefined) {
+  rmSync(transcript);
+  symlinkSync(script.linkTranscript, transcript);
+}

@@ -262,7 +262,10 @@ configured from the environment):
 - Claude Code writes transcripts under its config dir. After each run the harness copies the transcript to
   `<sessionDir>/<sessionRef>.jsonl`, with `<sessionRef>.json` naming its
   project directory, model, and system prompt digest. The session's side
-  directory is mirrored to `<sessionDir>/<sessionRef>/`, regular files only.
+  directory is mirrored to `<sessionDir>/<sessionRef>/`, regular files only,
+  and removed there when the session no longer has one. A transcript that is a
+  symlink is not saved, and a file replaced between scanning and copying (by a
+  symlink, a special file, or a new file) fails the copy.
   That directory holds subagent transcripts, which a resumed session needs to
   continue a subagent with `SendMessage`, and tool output spilled to files. A
   resume validates the saved copy, writes the transcript and side files back
