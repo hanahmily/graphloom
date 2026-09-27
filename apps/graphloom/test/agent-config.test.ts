@@ -4,7 +4,8 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { JobResult, Runner } from "@graphloom/runner";
 import type { JobSpec } from "@graphloom/sdk";
-import { loadAgentConfig, parseAgentConfig, servePlainAgentJobs } from "../src/agent-config.js";
+import { CLAUDE_RESPONSE_TIMEOUT_ENV, CLAUDE_STARTUP_TIMEOUT_ENV } from "@graphloom/executor-coding-agent";
+import { agentBinding, loadAgentConfig, parseAgentConfig, servePlainAgentJobs } from "../src/agent-config.js";
 
 const temps: string[] = [];
 afterEach(async () => {
@@ -48,6 +49,35 @@ describe("operator coding agent config", () => {
     );
   });
 
+  it("reports a malformed file without quoting it, so a misplaced credential is not echoed", async () => {
+    const dir = await tempDir();
+    const file = path.join(dir, "agent.json");
+    await writeFile(file, '{"harness":"claude-code", "apiKey": sk-ant-FAKE_SECRET}');
+    const err = await loadAgentConfig({ GRAPHLOOM_AGENT_CONFIG: file }).catch((e: Error) => e);
+    expect((err as Error).message).toBe(`${file}: not valid JSON`);
+  });
+
+  it("fits Claude Code's watchdogs inside a shorter job timeout, and refuses ones that do not fit", () => {
+    const env = (config: Record<string, unknown>) => {
+      const bound = agentBinding(parseAgentConfig({ harness: "claude-code", ...config }, "cfg")).env ?? {};
+      return [bound[CLAUDE_STARTUP_TIMEOUT_ENV], bound[CLAUDE_RESPONSE_TIMEOUT_ENV]];
+    };
+    expect(env({})).toEqual([undefined, undefined]);
+    expect(env({ timeoutMs: 600_000 })).toEqual([undefined, "300000"]);
+    expect(env({ timeoutMs: 120_000 })).toEqual(["60000", "60000"]);
+    expect(env({ timeoutMs: 120_000, responseTimeoutMs: 90_000, startupTimeoutMs: 0 })).toEqual(["0", "90000"]);
+    expect(() => parseAgentConfig({ harness: "claude-code", timeoutMs: 120_000, responseTimeoutMs: 120_000 }, "cfg")).toThrow(
+      "cfg: responseTimeoutMs (120000 ms) must be shorter than timeoutMs (120000 ms)",
+    );
+    expect(() => parseAgentConfig({ harness: "claude-code", startupTimeoutMs: 3_600_000 }, "cfg")).toThrow(
+      "cfg: startupTimeoutMs (3600000 ms) must be shorter than timeoutMs (3600000 ms)",
+    );
+    expect(() => parseAgentConfig({ harness: "claude-code", startupTimeoutMs: -1 }, "cfg")).toThrow(/non-negative/);
+    expect(() => parseAgentConfig({ harness: "pi", provider: "p", modelId: "m", startupTimeoutMs: 1 }, "cfg")).toThrow(
+      "cfg: startupTimeoutMs is not a pi setting",
+    );
+  });
+
   it("loads the file named by GRAPHLOOM_AGENT_CONFIG, falls back to GRAPHLOOM_AGENT_HARNESS, and otherwise says how to configure one", async () => {
     const dir = await tempDir();
     const bin = path.join(dir, "claude");
@@ -56,6 +86,8 @@ describe("operator coding agent config", () => {
     await writeFile(file, JSON.stringify({ harness: "claude-code", command: bin }));
     expect(await loadAgentConfig({ GRAPHLOOM_AGENT_CONFIG: file })).toEqual({ harness: "claude-code", command: bin });
     expect(await loadAgentConfig({ HOME: dir, GRAPHLOOM_AGENT_HARNESS: "claude-code", PATH: dir })).toEqual({ harness: "claude-code" });
+    const relative = path.relative(process.cwd(), bin);
+    expect(await loadAgentConfig({ GRAPHLOOM_AGENT_HARNESS: "claude-code", GRAPHLOOM_CLAUDE_BIN: relative })).toEqual({ harness: "claude-code", command: bin });
     await expect(loadAgentConfig({ GRAPHLOOM_AGENT_CONFIG: path.join(dir, "absent.json") })).rejects.toThrow(/cannot read agent config/);
     await expect(loadAgentConfig({ GRAPHLOOM_AGENT_HARNESS: "claude-code", PATH: path.join(dir, "empty") })).rejects.toThrow(
       "Claude Code command claude was not found",

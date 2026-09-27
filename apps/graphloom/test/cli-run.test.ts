@@ -21,14 +21,17 @@ async function readTree(dir: string): Promise<string> {
 }
 
 describe("graphloom run with a coding agent", () => {
-  it("runs hello to completion on the configured Claude Code, and inspect shows its receipts", async () => {
+  it("runs hello to completion on Claude Code configured by a relative path, and inspect shows its receipts", async () => {
     const env = await makeCliEnv(cleanups);
-    await env.fakeClaude({
-      byPrompt: [
-        { match: "independent read-only reviewer", steps: reviewer("approved") },
-        { match: "GREETING.txt", steps: writer },
-      ],
-    });
+    await env.fakeClaude(
+      {
+        byPrompt: [
+          { match: "independent read-only reviewer", steps: reviewer("approved") },
+          { match: "GREETING.txt", steps: writer },
+        ],
+      },
+      { command: "./claude" },
+    );
 
     const run = await env.graphloom("run", "task.yaml");
     const report = JSON.parse(run.stdout) as { runId: string; status: string; blocker?: string; worktreePath: string };

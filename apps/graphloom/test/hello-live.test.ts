@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { AGENT_SETUP_ENV } from "../src/agent-config.js";
 import { makeCliEnv } from "./cli-env.js";
 
 /**
@@ -10,16 +11,7 @@ import { makeCliEnv } from "./cli-env.js";
  * GRAPHLOOM_HELLO_LIVE=1; it never runs in CI.
  */
 const live = process.env.GRAPHLOOM_HELLO_LIVE === "1";
-const OPERATOR_ENV = [
-  "HOME",
-  "GRAPHLOOM_AGENT_CONFIG",
-  "GRAPHLOOM_AGENT_HARNESS",
-  "GRAPHLOOM_SUPERVISOR_CONFIG",
-  "GRAPHLOOM_CLAUDE_MODEL",
-  "GRAPHLOOM_PI_PROVIDER",
-  "GRAPHLOOM_PI_MODEL",
-  "CLAUDE_CONFIG_DIR",
-];
+const OPERATOR_ENV = ["HOME", "GRAPHLOOM_SUPERVISOR_CONFIG", ...AGENT_SETUP_ENV];
 
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => {

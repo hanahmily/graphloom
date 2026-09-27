@@ -30,8 +30,12 @@ Without a file, `GRAPHLOOM_AGENT_HARNESS=claude-code` or `=pi` selects the
 harness. Pi then reads `GRAPHLOOM_PI_PROVIDER` and `GRAPHLOOM_PI_MODEL`. Other
 settings:
 
-- Claude Code: `command` (default `claude` on `PATH`), `model`, and `configDir`,
-  its config dir, which picks the login or gateway.
+- Claude Code: `command` (default `claude` on `PATH`; a relative path resolves
+  against the directory you run `graphloom` in), `model`, and `configDir`, its
+  config dir, which picks the login or gateway. `startupTimeoutMs` and
+  `responseTimeoutMs` stop a Claude Code session that shows no model output for
+  that long (defaults five and ten minutes; 0 disables). Each must be shorter
+  than `timeoutMs`; a default that is not falls to half of it.
 - Pi: `agentDir`.
 - Both: `timeoutMs` per job (default one hour) and `passEnv`, extra environment
   variable names the agent's commands may see.

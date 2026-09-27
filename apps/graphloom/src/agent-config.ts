@@ -2,11 +2,14 @@ import { constants } from "node:fs";
 import { access, readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { BUILTIN_AGENT_EXECUTOR_ID, type JobSpec } from "@graphloom/sdk";
+import { BUILTIN_AGENT_EXECUTOR_ID, type ExecutorBinding, type JobSpec } from "@graphloom/sdk";
 import { createBuiltinExecutorRunner, type JobResult, type Runner } from "@graphloom/runner";
 import {
   CLAUDE_BIN_ENV,
+  CLAUDE_DEFAULT_RESPONSE_TIMEOUT_MS,
+  CLAUDE_DEFAULT_STARTUP_TIMEOUT_MS,
   CODING_AGENT_RUN_ID,
+  DEFAULT_CODING_TIMEOUT_MS,
   PI_MODEL_ENV,
   PI_PROVIDER_ENV,
   claudeCodeHarnessModule,
@@ -36,6 +39,10 @@ export interface ClaudeCodeAgentConfig extends AgentConfigBase {
   command?: string;
   model?: string;
   configDir?: string;
+  /** Stop Claude Code when it shows no model output this long after starting; 0 disables. */
+  startupTimeoutMs?: number;
+  /** Stop Claude Code when no model output arrives this long while no tool runs; 0 disables. */
+  responseTimeoutMs?: number;
 }
 
 export interface PiAgentConfig extends AgentConfigBase {
@@ -47,12 +54,23 @@ export interface PiAgentConfig extends AgentConfigBase {
 
 const HARNESSES = ["claude-code", "pi"] as const;
 const KEYS: Record<AgentConfig["harness"], readonly string[]> = {
-  "claude-code": ["harness", "timeoutMs", "passEnv", "command", "model", "configDir"],
+  "claude-code": ["harness", "timeoutMs", "passEnv", "command", "model", "configDir", "startupTimeoutMs", "responseTimeoutMs"],
   pi: ["harness", "timeoutMs", "passEnv", "provider", "modelId", "agentDir"],
 };
+const WATCHDOGS = [
+  ["startupTimeoutMs", CLAUDE_DEFAULT_STARTUP_TIMEOUT_MS],
+  ["responseTimeoutMs", CLAUDE_DEFAULT_RESPONSE_TIMEOUT_MS],
+] as const;
 
 export const AGENT_CONFIG_ENV = "GRAPHLOOM_AGENT_CONFIG";
 export const AGENT_HARNESS_ENV = "GRAPHLOOM_AGENT_HARNESS";
+/** Environment variables the CLI's agent setup reads, besides HOME and provider keys. */
+export const AGENT_SETUP_ENV: readonly string[] = [
+  AGENT_CONFIG_ENV,
+  AGENT_HARNESS_ENV,
+  ...(codingAgentExecutorPackage.configEnv ?? []),
+  "CLAUDE_CONFIG_DIR",
+];
 
 const NOT_CONFIGURED = [
   "no coding agent configured:",
@@ -87,8 +105,9 @@ export async function loadAgentConfig(env: NodeJS.ProcessEnv = process.env): Pro
     let parsed: unknown;
     try {
       parsed = JSON.parse(raw);
-    } catch (err) {
-      throw new Error(`${file}: ${err instanceof Error ? err.message : String(err)}`);
+    } catch {
+      // The parser's message quotes the file, which may hold a misplaced credential.
+      throw new Error(`${file}: not valid JSON`);
     }
     config = parseAgentConfig(parsed, file, env);
   } else {
@@ -96,8 +115,7 @@ export async function loadAgentConfig(env: NodeJS.ProcessEnv = process.env): Pro
     if (harness === undefined || harness === "") throw new Error(NOT_CONFIGURED);
     config = parseAgentConfig({ harness }, AGENT_HARNESS_ENV, env);
   }
-  await checkAgentAvailable(config, env);
-  return config;
+  return bindAgentCommand(config, env);
 }
 
 export function parseAgentConfig(value: unknown, source = "agent config", env: NodeJS.ProcessEnv = process.env): AgentConfig {
@@ -132,6 +150,14 @@ export function parseAgentConfig(value: unknown, source = "agent config", env: N
     if (obj.command !== undefined) config.command = requireString(obj.command, `${source}: command`);
     if (obj.model !== undefined) config.model = requireString(obj.model, `${source}: model`);
     if (obj.configDir !== undefined) config.configDir = expandHome(requireString(obj.configDir, `${source}: configDir`));
+    const timeoutMs = config.timeoutMs ?? DEFAULT_CODING_TIMEOUT_MS;
+    for (const [name] of WATCHDOGS) {
+      const ms = obj[name];
+      if (ms === undefined) continue;
+      if (typeof ms !== "number" || !(ms >= 0)) throw new Error(`${source}: ${name} must be a non-negative number (0 disables it)`);
+      if (ms >= timeoutMs) throw new Error(`${source}: ${name} (${ms} ms) must be shorter than timeoutMs (${timeoutMs} ms)`);
+      config[name] = ms;
+    }
     return config;
   }
   const provider = obj.provider ?? env[PI_PROVIDER_ENV];
@@ -149,13 +175,19 @@ export function parseAgentConfig(value: unknown, source = "agent config", env: N
   return config;
 }
 
-/** Claude Code must be installed; its login is checked by its first request. */
-async function checkAgentAvailable(config: AgentConfig, env: NodeJS.ProcessEnv): Promise<void> {
-  if (config.harness !== "claude-code") return;
+/**
+ * Claude Code must be installed; its login is checked by its first request.
+ * A command given as a path is bound as the absolute path checked here, since
+ * the harness starts it from the run's worktree.
+ */
+async function bindAgentCommand(config: AgentConfig, env: NodeJS.ProcessEnv): Promise<AgentConfig> {
+  if (config.harness !== "claude-code") return config;
   const command = config.command ?? (env[CLAUDE_BIN_ENV] || "claude");
-  if (!(await isExecutable(command, env.PATH ?? ""))) {
+  const bound = command.includes("/") ? expandHome(command) : command;
+  if (!(await isExecutable(bound, env.PATH ?? ""))) {
     throw new Error(`Claude Code command ${command} was not found; install Claude Code or set "command" in the agent config`);
   }
+  return bound === command && config.command === undefined ? config : { ...config, command: bound };
 }
 
 async function isExecutable(command: string, searchPath: string): Promise<boolean> {
@@ -174,30 +206,8 @@ async function isExecutable(command: string, searchPath: string): Promise<boolea
  * dispatches without naming an executor.
  */
 export function agentRunner(config: AgentConfig): Runner {
-  const binding =
-    config.harness === "claude-code"
-      ? codingAgentBinding({
-          harness: claudeCodeHarnessModule,
-          ...(config.timeoutMs !== undefined ? { timeoutMs: config.timeoutMs } : {}),
-          claude: {
-            ...(config.command !== undefined ? { command: config.command } : {}),
-            ...(config.model !== undefined ? { model: config.model } : {}),
-            ...(config.configDir !== undefined ? { configDir: config.configDir } : {}),
-            ...(config.passEnv !== undefined ? { passEnv: config.passEnv } : {}),
-          },
-        })
-      : codingAgentBinding({
-          harness: piHarnessModule,
-          ...(config.timeoutMs !== undefined ? { timeoutMs: config.timeoutMs } : {}),
-          pi: {
-            provider: config.provider,
-            modelId: config.modelId,
-            ...(config.agentDir !== undefined ? { agentDir: config.agentDir } : {}),
-            ...(config.passEnv !== undefined ? { passEnv: config.passEnv } : {}),
-          },
-        });
   const builtin = createBuiltinExecutorRunner({
-    packages: [{ manifest: codingAgentExecutorPackage, ...binding }],
+    packages: [{ manifest: codingAgentExecutorPackage, ...agentBinding(config) }],
     fallback: {
       async runJob(job, ctx) {
         return {
@@ -211,6 +221,32 @@ export function agentRunner(config: AgentConfig): Runner {
     },
   });
   return servePlainAgentJobs(builtin);
+}
+
+/** The coding-agent package's binding for the configured harness. */
+export function agentBinding(config: AgentConfig): ExecutorBinding {
+  return config.harness === "claude-code"
+      ? codingAgentBinding({
+          harness: claudeCodeHarnessModule,
+          ...(config.timeoutMs !== undefined ? { timeoutMs: config.timeoutMs } : {}),
+          claude: {
+            ...(config.command !== undefined ? { command: config.command } : {}),
+            ...(config.model !== undefined ? { model: config.model } : {}),
+            ...(config.configDir !== undefined ? { configDir: config.configDir } : {}),
+            ...(config.passEnv !== undefined ? { passEnv: config.passEnv } : {}),
+            ...claudeWatchdogs(config),
+          },
+        })
+      : codingAgentBinding({
+          harness: piHarnessModule,
+          ...(config.timeoutMs !== undefined ? { timeoutMs: config.timeoutMs } : {}),
+          pi: {
+            provider: config.provider,
+            modelId: config.modelId,
+            ...(config.agentDir !== undefined ? { agentDir: config.agentDir } : {}),
+            ...(config.passEnv !== undefined ? { passEnv: config.passEnv } : {}),
+          },
+        });
 }
 
 /**
@@ -249,6 +285,17 @@ function agentOutput(result: JobResult): Record<string, unknown> | undefined {
     if (output !== null && typeof output === "object" && !Array.isArray(output)) return output as Record<string, unknown>;
   }
   return undefined;
+}
+
+/** Configured watchdogs, and for a job timeout at or under a default, half the timeout in its place. */
+function claudeWatchdogs(config: ClaudeCodeAgentConfig): { startupTimeoutMs?: number; responseTimeoutMs?: number } {
+  const timeoutMs = config.timeoutMs ?? DEFAULT_CODING_TIMEOUT_MS;
+  const watchdogs: { startupTimeoutMs?: number; responseTimeoutMs?: number } = {};
+  for (const [name, fallback] of WATCHDOGS) {
+    const ms = config[name] ?? (fallback < timeoutMs ? undefined : Math.floor(timeoutMs / 2));
+    if (ms !== undefined) watchdogs[name] = ms;
+  }
+  return watchdogs;
 }
 
 function expandHome(p: string): string {

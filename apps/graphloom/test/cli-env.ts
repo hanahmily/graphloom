@@ -20,8 +20,8 @@ export interface CliEnv {
   /** Run the built CLI in `dir` with this env's HOME and agent config. */
   graphloom(...args: string[]): Promise<{ stdout: string; stderr: string; code: number }>;
   git(...args: string[]): Promise<string>;
-  /** Point the agent config at the fake Claude CLI running `script`. */
-  fakeClaude(script: Record<string, unknown>): Promise<void>;
+  /** Point the agent config at the fake Claude CLI running `script`, installed at `dir/claude`. */
+  fakeClaude(script: Record<string, unknown>, options?: { command?: string }): Promise<void>;
   env: NodeJS.ProcessEnv;
 }
 
@@ -52,13 +52,13 @@ export async function makeCliEnv(cleanups: (() => Promise<void>)[]): Promise<Cli
       }),
     );
 
-  const fake = async (script: Record<string, unknown>) => {
+  const fake = async (script: Record<string, unknown>, options: { command?: string } = {}) => {
     const bin = path.join(dir, "claude");
     await writeFile(bin, `#!/bin/sh\nexec "${process.execPath}" "${fakeClaude}" "$@"\n`, { mode: 0o755 });
     await writeFile(path.join(dir, "script.json"), JSON.stringify(script));
     const config = {
       harness: "claude-code",
-      command: bin,
+      command: options.command ?? bin,
       configDir: path.join(dir, "claude-config"),
       passEnv: ["FAKE_CLAUDE_SCRIPT", "FAKE_CLAUDE_LOG"],
     };
