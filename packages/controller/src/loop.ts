@@ -1165,7 +1165,7 @@ async function prepareDispatch(
     },
     current: { stageId: job.stageId, attempt: state.current.attempt },
     ...(job.purpose === "work"
-      ? { lastWorkDispatch: { stageId: job.stageId, evidenceCount: state.evidence.length } }
+      ? { workDispatchEvidence: { ...state.workDispatchEvidence, [job.stageId]: state.evidence.length } }
       : {}),
   };
 
@@ -1190,12 +1190,12 @@ async function prepareDispatch(
  */
 function redoesStageWork(state: DurableRunState, stageId: string): boolean {
   const observed = (e: EvidenceRecord) => (e.kind === "file" || e.kind === "workspace") && e.generation === state.generation;
-  const last = state.lastWorkDispatch;
-  if (last === undefined) {
-    // State written before lastWorkDispatch existed: keep the rule it was charged under.
+  if (state.workDispatchEvidence === undefined) {
+    // State written before work dispatches were recorded: keep the rule it was charged under.
     return state.lastWorkOperationId !== undefined && state.evidence.some(observed);
   }
-  return last.stageId === stageId && state.evidence.slice(last.evidenceCount).some(observed);
+  const since = state.workDispatchEvidence[stageId];
+  return since !== undefined && state.evidence.slice(since).some(observed);
 }
 
 /**

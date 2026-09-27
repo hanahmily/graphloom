@@ -1081,9 +1081,9 @@ describe("corrections, crash containment, unfamiliar failure (#28)", () => {
       runId: "resume-rewrite",
     });
     const saved = await loadRunState(paused.stateDir);
-    expect(saved.lastWorkDispatch?.stageId).toBe("write");
+    expect(Object.keys(saved.workDispatchEvidence ?? {})).toEqual(["write"]);
     if (legacy) {
-      const { lastWorkDispatch: _dropped, ...unmarked } = saved;
+      const { workDispatchEvidence: _dropped, ...unmarked } = saved;
       await saveRunState(unmarked);
     }
 
