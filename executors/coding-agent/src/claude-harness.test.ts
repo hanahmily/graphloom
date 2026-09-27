@@ -274,6 +274,24 @@ describe("Claude Code harness", () => {
       summary: "agent session aborted",
     });
     expect(await skipped.invocations()).toEqual([]);
+
+    const during = new AbortController();
+    const late = await setup({ startupTimeoutMs: 0 });
+    await late.script([{ hang: true }]);
+    const aborted = await late.executor.execute(
+      { assignment: "work" },
+      late.ctx({
+        signal: during.signal,
+        usage: {
+          reserveModelCall: async () => {
+            during.abort();
+            return true;
+          },
+        },
+      }),
+    );
+    expect(aborted).toMatchObject({ status: "failed", summary: "agent session aborted" });
+    expect(await late.invocations()).toEqual([]);
   });
 
   it("returns structured output validated by Claude Code against the result schema", async () => {

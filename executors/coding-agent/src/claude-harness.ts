@@ -318,6 +318,8 @@ async function runClaude(args: RunArgs): Promise<CodingRunResult> {
     }
     cli.push(saved.started ? "--resume" : "--session-id", saved.sessionId);
 
+    // Nothing awaits between this check and the abort listener, so a stop during setup cannot miss the process.
+    if (options.signal?.aborted) return { status: "failed", summary: "agent session aborted" };
     const child = spawn(args.command, cli, {
       cwd: options.cwd,
       env: args.env,
