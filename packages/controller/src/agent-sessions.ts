@@ -1,3 +1,4 @@
+import { rm } from "node:fs/promises";
 import path from "node:path";
 import type { AgentSessionView, ExecutorSession, JobSpec } from "@graphloom/sdk";
 import type { JobResult } from "@graphloom/runner";
@@ -51,7 +52,20 @@ export function sessionForDispatch(
     const record = state.agentSessions!.find((r) => r.operationId === job.continueFrom)!;
     return { dir: record.sessionDir, resume: record.sessionRef };
   }
-  return { dir: path.join(state.stateDir, "agent-sessions", operationId) };
+  return { dir: path.join(agentSessionsDir(state.stateDir), operationId) };
+}
+
+function agentSessionsDir(stateDir: string): string {
+  return path.join(stateDir, "agent-sessions");
+}
+
+/**
+ * Remove a finished run's saved agent sessions: nothing can continue them,
+ * and transcripts with subagents grow large. The records stay in run state.
+ */
+export async function wipeAgentSessions(state: DurableRunState): Promise<void> {
+  if (state.status !== "succeeded" && state.status !== "failed") return;
+  await rm(agentSessionsDir(state.stateDir), { recursive: true, force: true });
 }
 
 export function recordAgentSession(

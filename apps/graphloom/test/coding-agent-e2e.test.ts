@@ -16,10 +16,11 @@ import {
   type GraphDefinition,
   type JobSpec,
   type RunView,
+  type ScriptedAdvance,
   type ToolBinding,
   type Validator,
 } from "@graphloom/sdk";
-import { createBuiltinExecutorRunner, createScriptedRunner } from "@graphloom/runner";
+import { createBuiltinExecutorRunner, createScriptedRunner, type Runner } from "@graphloom/runner";
 import { createController, loadRunState } from "@graphloom/controller";
 import { githubBinding, githubExecutorPackage } from "@graphloom/executor-github";
 import { startFakeGitHub, type FakeGitHub } from "@graphloom/executor-github/testing";
@@ -161,6 +162,33 @@ const rest = [
   validate({ stageId: "review", requirementIds: ["independent-review"] }, "v-review"),
   stop({ reason: "complete", blocker: "none" }, "done"),
 ];
+
+type RunState = Awaited<ReturnType<typeof loadRunState>>;
+/**
+ * Run `advances` to a pause, so the saved agent sessions can be inspected
+ * before the finished run wipes them, then resume through `rest`.
+ */
+async function pauseToInspectSessions(
+  run: { taskPath: string; stateRoot: string; runId: string; runner: Runner },
+  advances: ScriptedAdvance[],
+  inspect: (state: RunState) => Promise<void>,
+) {
+  const controller = createController();
+  const paused = await controller.run({
+    taskPath: run.taskPath,
+    plugin: createScriptedGraph({ definition, advances: [...advances, stop({ reason: "pause", blocker: "inspect sessions" }, "pause")] }),
+    validators,
+    runner: run.runner,
+    stateRoot: run.stateRoot,
+    runId: run.runId,
+  });
+  expect(paused.status, paused.blocker).toBe("stopped");
+  await inspect(await loadRunState(paused.stateDir));
+  const report = await controller.resume({ runRef: paused.stateDir, plugin: createScriptedGraph({ definition, advances: rest }), validators, runner: run.runner });
+  expect(report.status, report.blocker).toBe("succeeded");
+  expect(existsSync(path.join(report.stateDir, "agent-sessions"))).toBe(false);
+  return report;
+}
 
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => {
@@ -349,23 +377,17 @@ describe("continuing the coding agent's session on reentry", () => {
   it("restores the harness session from the run's state directory in a new executor process", async () => {
     const server = await fake();
     const env = await makeEnv();
-    const report = await createController().run({
-      taskPath: env.taskPath,
-      plugin: createScriptedGraph({
-        definition,
-        advances: [
-          dispatch(agentJob([readComments("c1")]), "first try"),
-          retry,
-          continueFirst([readComments("c1"), readComments("c2"), writeGreeting]),
-          ...rest,
-        ],
-      }),
-      validators,
-      runner: hostRunner(server),
-      stateRoot: env.stateRoot,
-      runId: "agent-continue",
-    });
-    expect(report.status, report.blocker).toBe("succeeded");
+    const report = await pauseToInspectSessions(
+      { ...env, runId: "agent-continue", runner: hostRunner(server) },
+      [dispatch(agentJob([readComments("c1")]), "first try"), retry, continueFirst([readComments("c1"), readComments("c2"), writeGreeting])],
+      async (state) => {
+        const [recorded] = state.agentSessions!;
+        const transcript = JSON.parse(await readFile(path.join(recorded!.sessionDir, `${recorded!.sessionRef}.json`), "utf8"));
+        expect(recorded!.sessionDir.startsWith(path.join(state.stateDir, "agent-sessions"))).toBe(true);
+        expect(transcript.turns).toHaveLength(2);
+        expect(await readTree(state.stateDir)).not.toContain(TOKEN);
+      },
+    );
 
     const [first, continued] = agents(report.evidence);
     expect(first).toMatchObject({ continued: false, output: { priorAssignments: [] } });
@@ -377,13 +399,6 @@ describe("continuing the coding agent's session on reentry", () => {
       expect.stringMatching(/comment/),
     ]);
     expect(server.requests).toHaveLength(2);
-
-    const state = await loadRunState(report.stateDir);
-    const [recorded] = state.agentSessions!;
-    const transcript = JSON.parse(await readFile(path.join(recorded!.sessionDir, `${recorded!.sessionRef}.json`), "utf8"));
-    expect(recorded!.sessionDir.startsWith(path.join(report.stateDir, "agent-sessions"))).toBe(true);
-    expect(transcript.turns).toHaveLength(2);
-    expect(await readTree(report.stateDir)).not.toContain(TOKEN);
   });
 
   it("stops with the restore failure instead of starting a fresh session", async () => {
@@ -450,30 +465,28 @@ describe("the Pi harness in the coding-agent executor process", () => {
   it("records the Pi agent's tool calls as child operations and completes the run", async () => {
     const server = await fake();
     const env = await makeEnv();
-    const report = await createController().run({
-      taskPath: env.taskPath,
-      plugin: createScriptedGraph({
-        definition,
-        advances: [
-          dispatch(
-            piJob([
-              { tool: "read_comments", args: { ...repo, number: 1 } },
-              { tool: "comment", args: { ...repo, issueNumber: 1, body: "Working on it.", idempotencyKey: "status" } },
-              writeGreetingCall,
-              { text: "Wrote GREETING.txt and posted a status comment." },
-            ]),
-            "implement",
-          ),
-          ...rest,
-        ],
-      }),
-      validators,
-      runner: await piRunner(server),
-      stateRoot: env.stateRoot,
-      runId: "pi-agent",
-    });
+    const report = await pauseToInspectSessions(
+      { ...env, runId: "pi-agent", runner: await piRunner(server) },
+      [
+        dispatch(
+          piJob([
+            { tool: "read_comments", args: { ...repo, number: 1 } },
+            { tool: "comment", args: { ...repo, issueNumber: 1, body: "Working on it.", idempotencyKey: "status" } },
+            writeGreetingCall,
+            { text: "Wrote GREETING.txt and posted a status comment." },
+          ]),
+          "implement",
+        ),
+      ],
+      async (state) => {
+        const [recorded] = state.agentSessions!;
+        expect((await readdir(recorded!.sessionDir)).sort()).toEqual([`${recorded!.sessionRef}.json`, `${recorded!.sessionRef}.jsonl`]);
+        const tree = await readTree(state.stateDir);
+        expect(tree).not.toContain(TOKEN);
+        expect(tree).not.toContain(PI_KEY);
+      },
+    );
 
-    expect(report.status, report.blocker).toBe("succeeded");
     expect(posts(server)).toHaveLength(1);
     expect(server.comments.get(1)?.[0]?.body).toContain("Working on it.");
     const state = await loadRunState(report.stateDir);
@@ -485,8 +498,7 @@ describe("the Pi harness in the coding-agent executor process", () => {
     const [agent] = piAgents(report.evidence);
     expect(agent).toMatchObject({ harness: "pi", modelCalls: 4, continued: false });
     expect(agent!.sessionRef).toMatch(/^pi-[0-9a-f]{12}$/);
-    const [recorded] = state.agentSessions!;
-    expect((await readdir(recorded!.sessionDir)).sort()).toEqual([`${agent!.sessionRef}.json`, `${agent!.sessionRef}.jsonl`]);
+    expect(state.agentSessions![0]!.sessionRef).toBe(agent!.sessionRef);
     const tree = await readTree(report.stateDir);
     expect(tree).not.toContain(TOKEN);
     expect(tree).not.toContain(PI_KEY);
@@ -495,34 +507,26 @@ describe("the Pi harness in the coding-agent executor process", () => {
   it("continues the saved Pi session in a new executor process", async () => {
     const server = await fake();
     const env = await makeEnv();
-    const report = await createController().run({
-      taskPath: env.taskPath,
-      plugin: createScriptedGraph({
-        definition,
-        advances: [
-          dispatch(piJob([{ text: "Not done yet." }]), "first try"),
-          retry,
-          (view: RunView) =>
-            dispatch(piJob([writeGreetingCall, { text: "Done." }], view.agentSessions![0]!.operationId), "continue"),
-          ...rest,
-        ],
-      }),
-      validators,
-      runner: await piRunner(server),
-      stateRoot: env.stateRoot,
-      runId: "pi-continue",
-    });
+    const report = await pauseToInspectSessions(
+      { ...env, runId: "pi-continue", runner: await piRunner(server) },
+      [
+        dispatch(piJob([{ text: "Not done yet." }]), "first try"),
+        retry,
+        (view: RunView) => dispatch(piJob([writeGreetingCall, { text: "Done." }], view.agentSessions![0]!.operationId), "continue"),
+      ],
+      async (state) => {
+        const [recorded] = state.agentSessions!;
+        const transcript = await readFile(path.join(recorded!.sessionDir, `${recorded!.sessionRef}.jsonl`), "utf8");
+        expect(transcript).toContain("Implement issue #1 and post a status comment.");
+        expect(transcript).toContain("Not done yet.");
+        expect(transcript).toContain(CONTINUATION_NOTICE.slice(0, 40));
+        expect(transcript).toContain("Finish issue #1.");
+        expect(transcript).not.toContain(PI_KEY);
+      },
+    );
 
-    expect(report.status, report.blocker).toBe("succeeded");
     const [first, continued] = piAgents(report.evidence);
     expect(continued).toMatchObject({ continued: true, sessionRef: first!.sessionRef });
-    const [recorded] = (await loadRunState(report.stateDir)).agentSessions!;
-    const transcript = await readFile(path.join(recorded!.sessionDir, `${first!.sessionRef}.jsonl`), "utf8");
-    expect(transcript).toContain("Implement issue #1 and post a status comment.");
-    expect(transcript).toContain("Not done yet.");
-    expect(transcript).toContain(CONTINUATION_NOTICE.slice(0, 40));
-    expect(transcript).toContain("Finish issue #1.");
-    expect(transcript).not.toContain(PI_KEY);
   });
 });
 
@@ -589,16 +593,18 @@ describe("the Claude Code harness in the coding-agent executor process", () => {
       writeGreetingBash,
       { text: "Wrote GREETING.txt and posted a status comment." },
     ]);
-    const report = await createController().run({
-      taskPath: env.taskPath,
-      plugin: createScriptedGraph({ definition, advances: [dispatch(claudeJob(), "implement"), ...rest] }),
-      validators,
-      runner: claude.runner,
-      stateRoot: env.stateRoot,
-      runId: "claude-agent",
-    });
+    const report = await pauseToInspectSessions(
+      { ...env, runId: "claude-agent", runner: claude.runner },
+      [dispatch(claudeJob(), "implement")],
+      async (state) => {
+        const [recorded] = state.agentSessions!;
+        expect((await readdir(recorded!.sessionDir)).sort()).toEqual([`${recorded!.sessionRef}.json`, `${recorded!.sessionRef}.jsonl`]);
+        const tree = await readTree(state.stateDir);
+        expect(tree).not.toContain(TOKEN);
+        expect(tree).not.toContain(API_KEY);
+      },
+    );
 
-    expect(report.status, report.blocker).toBe("succeeded");
     expect(posts(server)).toHaveLength(1);
     const state = await loadRunState(report.stateDir);
     expect(state.childOperations?.map((c) => [c.executor.id, c.status])).toEqual([
@@ -613,8 +619,7 @@ describe("the Claude Code harness in the coding-agent executor process", () => {
       continued: false,
       usage: { inputTokens: 40, outputTokens: 20, cacheReadTokens: 100, cacheWriteTokens: 20, costUsd: 0.0125 },
     });
-    const [recorded] = state.agentSessions!;
-    expect((await readdir(recorded!.sessionDir)).sort()).toEqual([`${agent!.sessionRef}.json`, `${agent!.sessionRef}.jsonl`]);
+    expect(state.agentSessions![0]!.sessionRef).toBe(agent!.sessionRef);
     const [call] = await claude.log();
     expect(call!.apiKey).toBe(API_KEY);
     expect(call!.env).not.toHaveProperty("GRAPHLOOM_CODING_HARNESS");

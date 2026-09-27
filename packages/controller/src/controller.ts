@@ -46,6 +46,7 @@ import {
 } from "./owner.js";
 import { isUnsettled, reconcilePendingDispatch } from "./reconcile.js";
 import { reconcileChildOperations } from "./children.js";
+import { wipeAgentSessions } from "./agent-sessions.js";
 import { pinExecutorCatalog, verifyExecutorCatalog } from "./executor-catalog.js";
 import {
   getSession,
@@ -356,6 +357,8 @@ export function createController(): Controller {
 
       let state = await loadRunState(stateDir);
       if (state.status === "succeeded" || state.status === "failed") {
+        // A crash after the finished state was saved can leave them behind.
+        await wipeAgentSessions(state);
         return toReport(state, await listDirtyPaths(state.intake.repoPath));
       }
 

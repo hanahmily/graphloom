@@ -337,7 +337,11 @@ and fails a continuation sent to it. None of these starts a fresh session in its
 place. With a supervisor, the failure
 becomes the recovery trigger; without one, the run stops. Records and
 transcripts live in the state directory, so a continuation survives a
-controller stop and resume.
+controller stop and resume. When the run finishes (`succeeded` or `failed`),
+the controller deletes its `agent-sessions/` directory, since nothing can
+continue those sessions and transcripts with subagents grow large. The records
+stay in run state. A `resume` of a finished run deletes any directory a crash
+left behind.
 
 Continue when the earlier attempt's reasoning is still useful: the agent was
 interrupted, ran out of budget, or needs only a correction to finish. Start
