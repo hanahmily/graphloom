@@ -9,6 +9,7 @@ export interface RecoveryTrigger {
     | "plugin_malformed"
     | "executor_failed"
     | "stalled"
+    | "correction_limit"
     | "unhandled";
   message: string;
   /** Recorded evidence the escalation cites, such as the failing validation's inputs. */

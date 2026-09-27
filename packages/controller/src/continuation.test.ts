@@ -350,7 +350,14 @@ describe("continuing an agent session on reentry (#53)", () => {
       },
       {
         runId: "twice",
-        advances: () => [first, retry, continueFirst([]), retry, continueFirst([])],
+        // Distinct decisions, so the refusal is not preempted by a stall.
+        advances: () => [
+          first,
+          retry,
+          continueFirst([]),
+          reenter({ stageId: "write", reason: "the continuation wrote nothing" }, "retry again"),
+          continueFirst([], { instruction: "try once more" }),
+        ],
         blocker: /^operation op-\S+ was already continued by op-\S+; continue from that one$/,
         ran: 2,
       },

@@ -470,7 +470,10 @@ export function createController(): Controller {
         state = reconcileRepairJournal(state);
         state = await reconcileSwitchJournal(state);
         state = await reassessAcceptedWorkspace(state);
-        state = bumpGeneration({ ...state, status: "running" }, "resume");
+        // The operator's resume restarts the graph, so its replayed decisions are not repeats.
+        const { noProgress: _repeats, ...resumed } = state;
+        void _repeats;
+        state = bumpGeneration({ ...resumed, status: "running" }, "resume");
         await clearStopRequest(stateDir);
         await saveRunState(state);
 

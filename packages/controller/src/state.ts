@@ -140,6 +140,13 @@ export interface DurableRunState {
    * workspace evidence recorded since redoes the work and is a correction.
    */
   workDispatchEvidence?: Record<string, number>;
+  /**
+   * Normal-mode graph decisions (by action hash) made since the progress mark
+   * last changed. A decision made twice without progress starts recovery.
+   */
+  noProgress?: { mark: string; counts: Record<string, number> };
+  /** Normal-mode correction dispatches per stage since that stage was last accepted. */
+  correctionTrials?: Record<string, number>;
   /** Recorded active-version transitions (intake + generation fences). */
   versionHistory: VersionRecord[];
   /** Active recovery episode when mode is recovery. */

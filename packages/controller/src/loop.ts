@@ -55,6 +55,7 @@ import { createChildPort, reconcileChildOperations } from "./children.js";
 import { agentSessionViews, continuationRefusal, recordAgentSession, sessionForDispatch, wipeAgentSessions } from "./agent-sessions.js";
 import { citedEvidence, loadRunState, type DurableRunState, saveRunState } from "./state.js";
 import { bumpGeneration } from "./generation.js";
+import { clearResolvedTrials, correctionHandoff, countCorrectionTrial, noteGraphDecision } from "./escalation.js";
 import {
   applyActivateRepair,
   applyQualifyRepair,
@@ -197,6 +198,7 @@ async function runNormalLoopSteps(
         await updateOwnerChildPid(state.stateDir, owner.ownerId, deps.host.childPid);
 
         let decision: GraphDecision;
+        let priorNoProgress = state.noProgress;
         if (state.mode === "recovery") {
           if (!deps.supervisor) {
             state = {
@@ -322,14 +324,33 @@ async function runNormalLoopSteps(
             return { done: contained.done, state: contained.state };
           }
           decision = assertGraphDecision(advanced.value);
+          const noted = noteGraphDecision(state, decision);
+          state = noted.state;
+          if (noted.stalled !== undefined) {
+            state = enterRecovery(
+              {
+                ...state,
+                budgets: { ...state.budgets, decisions: Math.max(0, state.budgets.decisions - 1) },
+                stateRevision: state.stateRevision + 1,
+              },
+              "stalled",
+              noted.stalled,
+            );
+            await saveRunState(state);
+            syncRevision(deps, state);
+            return { done: false as const, state };
+          }
         }
 
         if (decision.action.type === "dispatch") {
           const prepared = await prepareDispatch(state, decision, deps);
           await saveRunState(prepared.state);
           syncRevision(deps, prepared.state);
-          if (prepared.state.status !== "running" || !prepared.pending) {
+          if (prepared.state.status !== "running") {
             return { done: true as const, state: prepared.state };
+          }
+          if (!prepared.pending) {
+            return { done: false as const, state: prepared.state };
           }
           return {
             done: false as const,
@@ -346,8 +367,11 @@ async function runNormalLoopSteps(
           state = await applyDecision(state, decision, deps, applyAbort.signal);
         } catch (err) {
           if (err instanceof HostObservationError) {
+            // The decision never took effect, so proposing it again is not a repeat.
+            const { noProgress: _counted, ...uncounted } = state;
+            void _counted;
             const contained = await containHostFailure(
-              state,
+              priorNoProgress !== undefined ? { ...uncounted, noProgress: priorNoProgress } : uncounted,
               deps,
               err.code,
               err.message,
@@ -839,7 +863,7 @@ async function applyDecision(
       const undeclared = stopForUndeclaredStage(state, action.validate.stageId);
       if (undeclared) return undeclared;
       const result = await admitValidation(state, action.validate, deps.validators);
-      return result.state;
+      return clearResolvedTrials(result.state);
     }
     case "reenter": {
       const undeclared = stopForUndeclaredStage(state, action.reenter.stageId);
@@ -1005,6 +1029,7 @@ async function prepareDispatch(
   decision: GraphDecision,
   _deps: LoopDeps,
 ): Promise<{ state: DurableRunState; pending?: PendingJob }> {
+  const priorPrivateState = state.privateState;
   // Recovery decisions must not overwrite graph-owned private bookkeeping.
   if (decision.privateState !== undefined && state.mode !== "recovery") {
     state = { ...state, privateState: decision.privateState };
@@ -1119,6 +1144,16 @@ async function prepareDispatch(
       },
     };
   }
+  const graphCorrection = isCorrection && state.mode === "normal";
+  const handoff = graphCorrection ? correctionHandoff(state, job.stageId) : undefined;
+  if (handoff !== undefined) {
+    const observed = freshEvidence(state).filter((e) => e.kind === "file" || e.kind === "workspace").map((e) => e.ref);
+    // The graph's bookkeeping for a dispatch that never happened is not kept.
+    const { privateState: _proposed, ...refused } = state;
+    void _proposed;
+    const restored = priorPrivateState !== undefined ? { ...refused, privateState: priorPrivateState } : refused;
+    return { state: enterRecovery(restored, "correction_limit", handoff, observed.slice(-10)) };
+  }
 
   // Write scope: mutable work must declare non-empty paths; read-only must not.
   if (job.readOnly === true) {
@@ -1167,6 +1202,7 @@ async function prepareDispatch(
     ...(job.purpose === "work"
       ? { workDispatchEvidence: { ...state.workDispatchEvidence, [job.stageId]: state.evidence.length } }
       : {}),
+    ...(graphCorrection ? { correctionTrials: countCorrectionTrial(state, job.stageId) } : {}),
   };
 
   return {

@@ -1092,7 +1092,12 @@ describe("corrections, crash containment, unfamiliar failure (#28)", () => {
       plugin: createScriptedGraph({
         definition,
         // The second rewrite follows no observation of the first, so it is not charged again.
-        advances: [observeWrite, writeJob, writeJob, stop({ reason: "paused", blocker: "checked" }, "pause")],
+        advances: [
+          observeWrite,
+          writeJob,
+          dispatch({ stageId: "write", kind: "agent", purpose: "work", instruction: "write again", writeScope: [GREETING_PATH] }, "rewrite"),
+          stop({ reason: "paused", blocker: "checked" }, "pause"),
+        ],
       }),
       validators,
       runner: createScriptedRunner({ jobs: [writeGreeting, writeGreeting] }),
@@ -1150,6 +1155,366 @@ describe("corrections, crash containment, unfamiliar failure (#28)", () => {
     expect(invalidWrite.length).toBeGreaterThanOrEqual(1);
     expect(validWrite).toHaveLength(1);
     expect(report.receipts.filter((r) => r.stageId === "review" && r.valid)).toHaveLength(1);
+  });
+});
+
+describe("controller-started recovery for stalls and repeated corrections", () => {
+  const writeJob = (instruction: string) =>
+    dispatch({ stageId: "write", kind: "agent", purpose: "work", instruction, writeScope: [GREETING_PATH] }, "dispatch writer");
+  const observeWrite = observe({ paths: [GREETING_PATH], includeWorkspaceManifest: true }, "observe");
+  const validateWrite = validate({ stageId: "write", requirementIds: ["greeting-bytes"] }, "validate write");
+  const writes = (contents: string[]) =>
+    createScriptedRunner({
+      jobs: contents.map((bytes) => async (_job: unknown, ctx: { worktreePath: string }) => {
+        await writeFile(path.join(ctx.worktreePath, GREETING_PATH), bytes, "utf8");
+        return { status: "ok" as const, summary: "wrote" };
+      }),
+    });
+
+  it("starts recovery when the graph repeats a decision without progress, and again after a Return that changed nothing", async () => {
+    const env = await makeEnv();
+    // Write once, then alternate Observe and Validate: each Observe records new refs for the same bytes.
+    let proposals = 0;
+    const graph: GraphPlugin = {
+      describe: () => structuredClone(definition),
+      advance() {
+        proposals += 1;
+        if (proposals === 1) return writeJob("write");
+        return proposals % 2 === 0 ? observeWrite : validateWrite;
+      },
+    };
+    const triggers: { code: string; message: string }[] = [];
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: graph,
+      validators,
+      supervisor: createScriptedSupervisor({
+        decisions: [
+          (input) => {
+            triggers.push(input.trigger);
+            return returnToNormal({ summary: "try again" }, "return");
+          },
+          (input) => {
+            triggers.push(input.trigger);
+            return stop({ reason: "stalled at write", blocker: "the greeting never passes" }, "stop");
+          },
+        ],
+      }),
+      runner: writes([BAD_GREETING]),
+      stateRoot: env.stateRoot,
+      runId: "stalled",
+    });
+
+    const stalled = (what: string) => ({ code: "stalled", message: `the graph repeated ${what} with no progress since it last proposed it` });
+    // The first repeat is the second Validate; after the Return, the next Observe is a repeat too.
+    expect(triggers).toEqual([stalled("validate of write"), stalled("observe")]);
+    expect(report).toMatchObject({ status: "stopped", stopReason: "stalled at write" });
+    const state = await loadRunState(report.stateDir);
+    // dispatch, observe, validate, observe, the refused validate, return, the refused observe, stop
+    expect(state.budgets.decisions).toBe(128 - 8);
+    expect(state.evidence.filter((e) => e.kind === "file")).toHaveLength(2);
+    expect(state.receipts.filter((r) => r.valid)).toEqual([]);
+  });
+
+  it("counts observing a second file with the same bytes as progress", async () => {
+    const env = await makeEnv();
+    const [A, B] = ["A.txt", "B.txt"];
+    const bothFiles: Validator = {
+      evaluate(input) {
+        const seen = input.evidence.flatMap((e) => (e.kind === "file" ? [(e.payload as { path: string }).path] : []));
+        return seen.includes(A) && seen.includes(B)
+          ? { status: "passed" as const, reason: "both observed" }
+          : { status: "inconclusive" as const, reason: "a file is unobserved" };
+      },
+    };
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({
+        definition,
+        advances: [
+          dispatch({ stageId: "write", kind: "agent", purpose: "work", instruction: "write both", writeScope: [A, B] }, "dispatch writer"),
+          observe({ paths: [A] }, "observe A"),
+          validateWrite,
+          observe({ paths: [B] }, "observe B"),
+          validateWrite,
+          stop({ reason: "paused", blocker: "checked" }, "pause"),
+        ],
+      }),
+      validators: { ...validators, "exact-greeting": bothFiles },
+      runner: createScriptedRunner({
+        jobs: [
+          async (_job, ctx) => {
+            for (const file of [A, B]) await writeFile(path.join(ctx.worktreePath, file), GREETING, "utf8");
+            return { status: "ok", summary: "wrote" };
+          },
+        ],
+      }),
+      stateRoot: env.stateRoot,
+      runId: "same-bytes",
+    });
+    expect(report, `${report.stopReason}: ${report.blocker}`).toMatchObject({ stopReason: "paused", blocker: "checked" });
+    expect(report.receipts.filter((r) => r.valid).map((r) => r.stageId)).toEqual(["write"]);
+  });
+
+  it("keeps counting across a Supervise and Return that changed nothing", async () => {
+    const env = await makeEnv();
+    const graph: GraphPlugin = {
+      describe: () => structuredClone(definition),
+      advance: () => supervise({ reason: "unfamiliar state" }, "escalate"),
+    };
+    const triggers: string[] = [];
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: graph,
+      validators,
+      supervisor: createScriptedSupervisor({
+        decisions: [
+          (input) => {
+            triggers.push(input.trigger.message);
+            return returnToNormal({ summary: "carry on" }, "return");
+          },
+          (input) => {
+            triggers.push(input.trigger.message);
+            return stop({ reason: "stalled", blocker: "the graph keeps escalating" }, "stop");
+          },
+        ],
+      }),
+      runner: writes([]),
+      stateRoot: env.stateRoot,
+      runId: "supervise-cycle",
+    });
+    expect(report).toMatchObject({ status: "stopped", stopReason: "stalled" });
+    expect(triggers).toEqual(["unfamiliar state", "the graph repeated supervise with no progress since it last proposed it"]);
+  });
+
+  it("starts recovery on a repeated Reenter before it spends the correction budget", async () => {
+    const env = await makeEnv();
+    let proposals = 0;
+    const graph: GraphPlugin = {
+      describe: () => structuredClone(definition),
+      advance() {
+        proposals += 1;
+        if (proposals === 1) return writeJob("write");
+        if (proposals === 2) return observeWrite;
+        if (proposals === 3) return validateWrite;
+        return reenter({ stageId: "write", reason: "the greeting is wrong" }, "reenter");
+      },
+    };
+    let trigger: { code: string; message: string } | undefined;
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: graph,
+      validators,
+      supervisor: createScriptedSupervisor({
+        decisions: [
+          (input) => {
+            trigger = input.trigger;
+            return stop({ reason: "reentry stalled", blocker: "nothing changes" }, "stop");
+          },
+        ],
+      }),
+      runner: writes([BAD_GREETING]),
+      stateRoot: env.stateRoot,
+      runId: "reenter-cycle",
+    });
+    expect(report.stopReason).toBe("reentry stalled");
+    expect(trigger).toEqual({ code: "stalled", message: "the graph repeated reenter of write with no progress since it last proposed it" });
+    expect(proposals).toBe(5);
+    expect((await loadRunState(report.stateDir)).budgets.corrections).toBe(7);
+  });
+
+  it("does not count a repeated job's identical result as progress", async () => {
+    const env = await makeEnv();
+    const reviewJob = dispatch({ stageId: "review", kind: "agent", purpose: "review", instruction: "review", readOnly: true }, "review");
+    const validateReview = validate({ stageId: "review", requirementIds: ["independent-review"] }, "validate review");
+    const rejects = async () => ({
+      status: "ok" as const,
+      summary: "changes requested",
+      evidence: [{ kind: "review" as const, payload: { verdict: "request_changes", summary: "name the file" } }],
+    });
+    let trigger: { code: string; message: string } | undefined;
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({
+        definition,
+        advances: [writeJob("write"), observeWrite, validateWrite, reviewJob, validateReview, reviewJob, validateReview],
+      }),
+      validators,
+      supervisor: createScriptedSupervisor({
+        decisions: [
+          (input) => {
+            trigger = input.trigger;
+            return stop({ reason: "review stalled", blocker: "same verdict" }, "stop");
+          },
+        ],
+      }),
+      runner: createScriptedRunner({
+        jobs: [
+          async (_job, ctx) => {
+            await writeFile(path.join(ctx.worktreePath, GREETING_PATH), GREETING, "utf8");
+            return { status: "ok", summary: "wrote" };
+          },
+          rejects,
+          rejects,
+        ],
+      }),
+      stateRoot: env.stateRoot,
+      runId: "same-verdict",
+    });
+    expect(report.stopReason).toBe("review stalled");
+    expect(trigger).toEqual({ code: "stalled", message: "the graph repeated validate of review with no progress since it last proposed it" });
+  });
+
+  it("counts stage acceptance as progress, so a decision made before it is not a repeat after it", async () => {
+    const env = await makeEnv();
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({
+        definition,
+        advances: [
+          writeJob("write"),
+          observeWrite,
+          validateWrite,
+          // Adds no evidence; only the acceptance it follows separates it from the first.
+          validateWrite,
+          dispatch({ stageId: "review", kind: "agent", purpose: "review", instruction: "review", readOnly: true }, "review"),
+          validate({ stageId: "review", requirementIds: ["independent-review"] }, "validate review"),
+          stop({ reason: "complete", blocker: "none" }, "done"),
+        ],
+      }),
+      validators,
+      runner: createScriptedRunner({
+        jobs: [
+          async (_job, ctx) => {
+            await writeFile(path.join(ctx.worktreePath, GREETING_PATH), GREETING, "utf8");
+            return { status: "ok", summary: "wrote" };
+          },
+          async () => ({ status: "ok" as const, summary: "approved", evidence: [{ kind: "review" as const, payload: { verdict: "approved" } }] }),
+        ],
+      }),
+      stateRoot: env.stateRoot,
+      runId: "accepted-progress",
+    });
+    expect(report.status, `${report.stopReason}: ${report.blocker}`).toBe("succeeded");
+  });
+
+  it("hands a third correction at an unresolved stage to the supervisor without dispatching or charging it, and lets the supervisor try", async () => {
+    const env = await makeEnv();
+    type Phase = { phase: "dispatch" | "observe" | "validate"; tries: number };
+    const graph: GraphPlugin = {
+      describe: () => structuredClone(definition),
+      advance(view) {
+        const s: Phase = view.privateState ? (JSON.parse(view.privateState) as Phase) : { phase: "dispatch", tries: 0 };
+        const next = (p: Phase) => JSON.stringify(p);
+        if (s.phase === "dispatch") return { ...writeJob(`write, try ${s.tries + 1}`), privateState: next({ phase: "observe", tries: s.tries + 1 }) };
+        if (s.phase === "observe") return { ...observeWrite, privateState: next({ ...s, phase: "validate" }) };
+        return { ...validateWrite, privateState: next({ ...s, phase: "dispatch" }) };
+      },
+    };
+    let handedOff: { trigger: { code: string; message: string; evidenceRefs?: string[] }; privateState?: string } | undefined;
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: graph,
+      validators,
+      supervisor: createScriptedSupervisor({
+        decisions: [
+          (input) => {
+            handedOff = { trigger: input.trigger, ...(input.view.privateState !== undefined ? { privateState: input.view.privateState } : {}) };
+            return writeJob("write exactly the greeting");
+          },
+          stop({ reason: "handed off", blocker: "checked the supervisor's own trial" }, "stop"),
+        ],
+      }),
+      runner: writes(["Hello 1", "Hello 2", "Hello 3", GREETING]),
+      stateRoot: env.stateRoot,
+      runId: "correction-limit",
+    });
+
+    expect(report).toMatchObject({ status: "stopped", stopReason: "handed off" });
+    expect(handedOff?.trigger).toMatchObject({
+      code: "correction_limit",
+      message: "stage write is still unresolved after 2 correction trials; the supervisor decides any further trial",
+    });
+    const state = await loadRunState(report.stateDir);
+    const observed = state.evidence.filter((e) => e.kind === "file" || e.kind === "workspace").map((e) => e.ref);
+    expect(handedOff?.trigger.evidenceRefs).toEqual(observed.slice(-10));
+    // The refused fourth dispatch left the graph's bookkeeping as it was after the third validation.
+    expect(JSON.parse(handedOff!.privateState!)).toEqual({ phase: "dispatch", tries: 3 });
+    // The supervisor's own trial runs, spends a correction, and is not counted against the graph's limit.
+    expect(await readFile(path.join(report.worktreePath, GREETING_PATH), "utf8")).toBe(GREETING);
+    expect(state.budgets.corrections).toBe(5);
+    expect(state.correctionTrials).toEqual({ write: 2 });
+  });
+
+  it("stops at the correction limit when no supervisor is configured", async () => {
+    const env = await makeEnv();
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({
+        definition,
+        advances: [
+          writeJob("write"),
+          observeWrite,
+          validateWrite,
+          writeJob("fix 1"),
+          observeWrite,
+          validateWrite,
+          writeJob("fix 2"),
+          observeWrite,
+          validateWrite,
+          writeJob("fix 3"),
+        ],
+      }),
+      validators,
+      runner: writes(["Hello 1", "Hello 2", "Hello 3"]),
+      stateRoot: env.stateRoot,
+      runId: "correction-limit-alone",
+    });
+    expect(report).toMatchObject({
+      status: "stopped",
+      stopReason: "stage write is still unresolved after 2 correction trials; the supervisor decides any further trial",
+      blocker: "no supervisor configured",
+    });
+  });
+
+  it("starts counting correction trials again once the stage is accepted", async () => {
+    const env = await makeEnv();
+    const review = (verdict: string) => async () => ({
+      status: "ok" as const,
+      summary: verdict,
+      evidence: [{ kind: "review" as const, payload: { verdict, summary: verdict } }],
+    });
+    const write = (bytes: string) => async (_job: unknown, ctx: { worktreePath: string }) => {
+      await writeFile(path.join(ctx.worktreePath, GREETING_PATH), bytes, "utf8");
+      return { status: "ok" as const, summary: "wrote" };
+    };
+    const reviewJob = dispatch({ stageId: "review", kind: "agent", purpose: "review", instruction: "review", readOnly: true }, "review");
+    const validateReview = validate({ stageId: "review", requirementIds: ["independent-review"] }, "validate review");
+    const reenterWrite = reenter({ stageId: "write", reason: "reviewer asked for changes", evidenceRefs: [] }, "reenter");
+    // Write passes after two corrections; Review rejects it, and the correction after the rewrite is a first trial again.
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({
+        definition,
+        advances: [
+          writeJob("write"), observeWrite, validateWrite,
+          writeJob("fix 1"), observeWrite, validateWrite,
+          writeJob("fix 2"), observeWrite, validateWrite,
+          reviewJob, validateReview, reenterWrite,
+          writeJob("rewrite"), observeWrite, validateWrite,
+          writeJob("rewrite, fix 1"), observeWrite, validateWrite,
+          stop({ reason: "paused", blocker: "checked" }, "pause"),
+        ],
+      }),
+      validators,
+      runner: createScriptedRunner({
+        jobs: [write("Hello 1"), write("Hello 2"), write(GREETING), review("request_changes"), write("Hello 3"), write("Hello 4")],
+      }),
+      stateRoot: env.stateRoot,
+      runId: "correction-reset",
+    });
+    expect(report, `${report.stopReason}: ${report.blocker}`).toMatchObject({ stopReason: "paused", blocker: "checked" });
+    expect((await loadRunState(report.stateDir)).correctionTrials).toEqual({ write: 1 });
   });
 });
 
