@@ -1,5 +1,6 @@
 export type {
   Controller,
+  DeleteReport,
   InspectReport,
   ResumeRequest,
   RunReport,

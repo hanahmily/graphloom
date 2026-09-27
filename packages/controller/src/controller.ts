@@ -30,6 +30,7 @@ import { createHostValidators } from "./host-validators.js";
 import { intakeTask, type IntakePin } from "./intake.js";
 import { assertSafeRunId } from "./ids.js";
 import { withDirectoryLock } from "./lock.js";
+import { deleteRun, type DeleteReport } from "./delete-run.js";
 import {
   bumpGeneration,
   ensureArtifactDir,
@@ -187,6 +188,12 @@ export interface Controller {
   switchModel(runRef: string, order: ModelSwitchOrder, options?: { stateRoot?: string }): Promise<void>;
   resume(request: ResumeRequest): Promise<RunReport>;
   inspect(runRef: string, options?: { stateRoot?: string }): Promise<InspectReport>;
+  /**
+   * Delete a stopped or finished run: its worktree, branch, and state
+   * directory. Refuses a run a controller is driving, and discards uncommitted
+   * changes or branch commits only with `force`.
+   */
+  delete(runRef: string, options?: { stateRoot?: string; force?: boolean }): Promise<DeleteReport>;
   /** @deprecated Prefer resume(); retained for #25 tests. */
   continueAfterRestart(
     stateDir: string,
@@ -337,6 +344,15 @@ export function createController(): Controller {
         }
         return toInspect(state);
       });
+    },
+
+    async delete(runRef, options): Promise<DeleteReport> {
+      const stateDir = await resolveStateDir(runRef, options?.stateRoot);
+      if (getSession(stateDir) || getSession(runRef)) {
+        const { runId } = await loadRunState(stateDir);
+        throw new Error(`cannot delete run ${runId}: it has an active controller session; stop it first`);
+      }
+      return deleteRun(stateDir, { force: options?.force === true });
     },
 
     async switchModel(runRef, order, options): Promise<void> {
@@ -906,6 +922,7 @@ export { admitValidation, freshEvidence } from "./admit.js";
 export { toRunView, bumpGeneration } from "./loop.js";
 export { loadRunState, saveRunState } from "./state.js";
 export type { DurableRunState, RunStatus, VersionRecord } from "./state.js";
+export type { DeleteReport } from "./delete-run.js";
 export type { IntakePin } from "./intake.js";
 export type {
   RepairDeps,
