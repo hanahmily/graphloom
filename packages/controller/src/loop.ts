@@ -198,6 +198,7 @@ async function runNormalLoopSteps(
         await updateOwnerChildPid(state.stateDir, owner.ownerId, deps.host.childPid);
 
         let decision: GraphDecision;
+        let priorNoProgress = state.noProgress;
         if (state.mode === "recovery") {
           if (!deps.supervisor) {
             state = {
@@ -366,8 +367,11 @@ async function runNormalLoopSteps(
           state = await applyDecision(state, decision, deps, applyAbort.signal);
         } catch (err) {
           if (err instanceof HostObservationError) {
+            // The decision never took effect, so proposing it again is not a repeat.
+            const { noProgress: _counted, ...uncounted } = state;
+            void _counted;
             const contained = await containHostFailure(
-              state,
+              priorNoProgress !== undefined ? { ...uncounted, noProgress: priorNoProgress } : uncounted,
               deps,
               err.code,
               err.message,
@@ -627,13 +631,6 @@ function enterRecovery(
   message: string,
   evidenceRefs: string[] = [],
 ): DurableRunState {
-  // A retry the supervisor sanctions after another failure is not a repeat;
-  // returning from a stall without progress still is.
-  if (code !== "stalled" && state.noProgress !== undefined) {
-    const { noProgress: _cleared, ...rest } = state;
-    void _cleared;
-    state = rest;
-  }
   return {
     ...state,
     mode: "recovery",

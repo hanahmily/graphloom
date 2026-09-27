@@ -1,26 +1,32 @@
 import { createHash } from "node:crypto";
 import type { EvidenceRecord, GraphDecision } from "@graphloom/sdk";
-import { freshEvidence, stageRequirementsMet } from "./admit.js";
+import { stageRequirementsMet } from "./admit.js";
 import type { DurableRunState } from "./state.js";
 
 /** Failed correction trials at one unresolved stage before the supervisor decides any further trial. */
 export const MAX_CORRECTION_TRIALS = 2;
 
 /**
- * What counts as progress: the generation, accepted receipts, and the content
- * of current-generation evidence. New operation IDs and evidence refs alone
- * do not change it.
+ * What the run has established so far: the active plugin version, the
+ * content of every observation and result (by kind, path, and bytes), and
+ * every acceptance (by stage, requirement, validator, and the content it
+ * judged). It changes only when something new is established. New operation
+ * IDs, evidence refs, generation fences, and invalidation alone do not change it.
  */
 export function progressMark(state: DurableRunState): string {
-  const accepted = state.receipts.filter((r) => r.valid).map((r) => r.id).sort();
-  const seen = [...new Set(freshEvidence(state).map(evidenceContent))].sort();
-  return sha256(JSON.stringify([state.generation, accepted, seen]));
+  const keyByRef = new Map(state.evidence.map((e) => [e.ref, evidenceKey(e)]));
+  const facts = new Set(keyByRef.values());
+  for (const r of state.receipts) {
+    const judged = r.evidenceRefs.map((ref) => keyByRef.get(ref) ?? ref).sort();
+    facts.add(`receipt:${stableJson([r.stageId, r.requirementId, r.validatorBinding, judged])}`);
+  }
+  return sha256(JSON.stringify([state.activeVersion, [...facts].sort()]));
 }
 
 /**
  * Record a normal-mode graph decision. Returns why the run is stalled when
  * the graph proposes a decision it already made since the run last
- * progressed. Counts survive mode changes until progress clears them.
+ * progressed. Counts survive recovery and Return until progress clears them.
  */
 export function noteGraphDecision(
   state: DurableRunState,
@@ -73,13 +79,12 @@ function describeAction(decision: GraphDecision): string {
   }
 }
 
-function evidenceContent(e: EvidenceRecord): string {
-  if (e.fingerprint !== undefined) return `${e.kind}:${e.fingerprint}`;
-  const payload =
-    e.payload !== null && typeof e.payload === "object" && !Array.isArray(e.payload)
-      ? Object.fromEntries(Object.entries(e.payload).filter(([k]) => k !== "producer"))
-      : e.payload;
-  return `${e.kind}:${sha256(stableJson(payload ?? null))}`;
+function evidenceKey(e: EvidenceRecord): string {
+  const record = e.payload !== null && typeof e.payload === "object" && !Array.isArray(e.payload) ? (e.payload as Record<string, unknown>) : undefined;
+  const identity = typeof record?.path === "string" ? record.path : "";
+  if (e.fingerprint !== undefined) return `${e.kind}:${identity}:${e.fingerprint}`;
+  const payload = record !== undefined ? Object.fromEntries(Object.entries(record).filter(([k]) => k !== "producer")) : e.payload;
+  return `${e.kind}:${identity}:${sha256(stableJson(payload ?? null))}`;
 }
 
 function stableJson(value: unknown): string {
