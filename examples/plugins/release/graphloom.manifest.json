@@ -1,0 +1,76 @@
+{
+  "graphId": "release",
+  "version": "0.1.0",
+  "sdkProtocol": 1,
+  "entryPoints": {
+    "createGraph": "./dist/index.js"
+  },
+  "privateStateSchema": "release-private-v1",
+  "repairContract": "source-repairable",
+  "runtimeProfile": {
+    "node": ">=22",
+    "module": "nodenext",
+    "typescript": "^5.8.2",
+    "vitest": "^3.0.9"
+  },
+  "digests": {
+    "sourceTree": "7e12fda8e681c46a25413710d42b2775b2bcb48d2f8ee3b6c0420dacb11e736e",
+    "packageLock": "ba7452e2c4acc687e2f78d6b6bc2672a93770e37c7e494d4f2c1d81a25d37647",
+    "files": {
+      "package.json": "cf3715cb15fc3e6e29f8e34eae9b51633722af8fecca7fcf87ada481a5639cb8",
+      "package-lock.json": "ba7452e2c4acc687e2f78d6b6bc2672a93770e37c7e494d4f2c1d81a25d37647",
+      "tsconfig.json": "ffed4b469e52e0642fabcb6a20f4ba178fce44e5e37567a0ee96571a150a1109",
+      "src/constants.ts": "38a4703883486a1780a4f3c85c4a07877e5f84827f4580afb588cebda7ae0604",
+      "src/graph.ts": "a5852e117f37f7a27aff58ca761c47593bc1b3991c2a46445804c2b8df13d575",
+      "src/index.ts": "687a0408570873504fad2eb17ff578bcd227c69ab99bacb8a9ae5e9bb3128aa1",
+      "src/validators.ts": "abd8da60b562d00d547e2348933931dd9dd09b31d214a629e516f2669a53eeeb",
+      "test/release.test.ts": "86fa70e8a14f0b23af8a72d0249b388e60ed31fa6822f9f828844cecd4e51c26"
+    }
+  },
+  "requirements": [
+    {
+      "id": "version-file",
+      "statement": "VERSION holds exactly one semantic version (MAJOR.MINOR.PATCH) followed by a newline.",
+      "evidenceSchema": "workspace-bytes-v1"
+    },
+    {
+      "id": "changelog-entry",
+      "statement": "The first release section of CHANGELOG.md below any [Unreleased] section is headed \"## [X.Y.Z]\" for the version in VERSION, optionally followed by \" - YYYY-MM-DD\", and lists at least one change as a \"- \" bullet.",
+      "evidenceSchema": "workspace-bytes-v1"
+    },
+    {
+      "id": "release-scope",
+      "statement": "VERSION and CHANGELOG.md are both changed, and they are the only changed paths in the workspace (excluding Git metadata).",
+      "evidenceSchema": "workspace-manifest-v1"
+    },
+    {
+      "id": "release-review",
+      "statement": "An independent read-only reviewer approves that VERSION and the new CHANGELOG.md entry match the requested release.",
+      "evidenceSchema": "review-verdict-v1"
+    }
+  ],
+  "stages": [
+    {
+      "id": "bump",
+      "name": "Bump version",
+      "requirementIds": [
+        "version-file"
+      ]
+    },
+    {
+      "id": "changelog",
+      "name": "Changelog",
+      "requirementIds": [
+        "changelog-entry",
+        "release-scope"
+      ]
+    },
+    {
+      "id": "review",
+      "name": "Review",
+      "requirementIds": [
+        "release-review"
+      ]
+    }
+  ]
+}

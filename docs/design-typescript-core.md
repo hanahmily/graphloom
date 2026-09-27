@@ -682,7 +682,8 @@ The release must demonstrate these cases through the real controller interface:
 
 Also test scoped permissions, source-checkout preservation, independent reviewer
 identity, missing worktrees, and missing immutable artifacts. Qualify a second
-user-authored plugin without changes to the controller. Scripted runners establish
+user-authored plugin without changes to the controller; the
+[release example](../examples/plugins/release/README.md) is that plugin. Scripted runners establish
 repeatable behavior; one real-backend hello run verifies actual agent integration.
 These are release requirements, not claims of tests already run.
 

@@ -1,0 +1,5 @@
+graph: release
+repo: ./test-repo
+request: |
+  Release version 0.2.0: record it in VERSION and add a CHANGELOG.md entry
+  saying the release adds a second example graph.
