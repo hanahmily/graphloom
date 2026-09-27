@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { EvidenceRecord, Validator } from "@graphloom/sdk";
 import { createController } from "./index.js";
 import { createScriptedRunner } from "@graphloom/runner";
+import { readOwnerClaim } from "./owner.js";
 
 const execFileAsync = promisify(execFile);
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -63,12 +64,15 @@ describe("public controller: hello child host + stop/resume/inspect", () => {
     const writerGate = new Promise<void>((resolve) => {
       releaseWriter = resolve;
     });
+    let startedWriter!: () => void;
+    const writerStarted = new Promise<void>((resolve) => { startedWriter = resolve; });
 
     const runPromise = controller.run({
       taskPath: env.taskPath,
       runner: createScriptedRunner({
         jobs: [
           async (_job, ctx) => {
+            startedWriter();
             await writerGate;
             await writeFile(path.join(ctx.worktreePath, GREETING_PATH), GREETING, "utf8");
             return { status: "ok", summary: "wrote" };
@@ -81,19 +85,28 @@ describe("public controller: hello child host + stop/resume/inspect", () => {
 
     const stateDir = path.join(env.stateRoot, "stop1");
     await waitForState(stateDir);
+    await writerStarted;
 
     const stopped = await controller.stop(stateDir);
     expect(stopped.status).toBe("stopped");
     expect(stopped.stopReason).toMatch(/operator stop|plugin host/);
     expect(stopped.generation).toBeGreaterThanOrEqual(1);
     expect(stopped.versionHistory.length).toBeGreaterThanOrEqual(1);
+    expect(await readOwnerClaim(stateDir)).toBeDefined();
 
     releaseWriter();
     await runPromise;
+    expect(await readOwnerClaim(stateDir)).toBeUndefined();
 
     const inspect = await controller.inspect(stateDir);
     expect(inspect.status).toBe("stopped");
     expect(inspect.stages.some((s) => s.id === "write")).toBe(true);
+
+    // The stopped loop fenced the writer's result. Resume must reconcile its
+    // visible output and remember who wrote it before independent review.
+    const resumed = await controller.resume({ runRef: stateDir, runner: adaptiveScriptedRunner() });
+    expect(resumed.status).toBe("succeeded");
+    expect(resumed.receipts.filter((receipt) => receipt.valid).map((receipt) => receipt.stageId)).toEqual(["write", "review"]);
   });
 
   it("rejects late job results from an old generation", async () => {

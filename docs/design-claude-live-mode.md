@@ -67,6 +67,17 @@ finished. Saved transcripts remain resumable; a process killed before it writes
 one cannot claim a saved session. Budget exhaustion and stall watchdogs use the
 same bounded stop path.
 
+A separate `graphloom stop` writes the stop request and signals the verified
+controller owner. Active controller sessions handle SIGTERM cooperatively, so
+the stop watcher aborts the executor and its detached Claude process group. The
+stop command waits for owner cleanup before returning; a cleanup timeout keeps
+the ownership record and reports that stopping is still pending. Persisted
+controller and plugin PIDs are paired with the Linux boot ID and process start
+time before signaling. Legacy PID-only claims are never signaled; a still-live
+PID remains conservatively fenced until it exits or an operator verifies it.
+When resume settles an interrupted writer from observed file effects, it also
+retains that writer operation ID for independent-review admission.
+
 Tests cover allowed and denied file requests, traversal and link rejection,
 read-only shell denial, unknown requests, MCP calls after the first user message,
 interrupt-before-signal ordering, forced-stop fallback, and restoring the saved

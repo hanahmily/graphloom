@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -18,7 +18,7 @@ afterEach(async () => {
   for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true });
 });
 
-async function fixture(badReview = false) {
+async function fixture(badReview = false, live = false) {
   const dir = await mkdtemp(path.join(os.tmpdir(), "gl-cli-runner-"));
   dirs.push(dir);
   const repo = path.join(dir, "repo");
@@ -32,14 +32,80 @@ async function fixture(badReview = false) {
   await writeFile(command, await readFile(path.join(root, "apps/graphloom/test/fixtures/cli-agent.mjs")));
   await chmod(command, 0o700);
   const config = path.join(dir, "runner.json");
-  await writeFile(config, JSON.stringify({ harness: "claude-code", allowUnrestricted: true, claude: { command, passEnv: ["GRAPHLOOM_TEST_BAD_REVIEW"] } }));
+  await writeFile(config, JSON.stringify({ harness: "claude-code", allowUnrestricted: true, claude: { command, passEnv: ["GRAPHLOOM_TEST_BAD_REVIEW", "GRAPHLOOM_TEST_LIVE_DIR"] } }));
   const { GRAPHLOOM_SUPERVISOR_CONFIG: _supervisor, CLAUDE_CONFIG_DIR: _claude, ...inherited } = process.env;
-  const env = { ...inherited, HOME: dir, GRAPHLOOM_RUNNER_CONFIG: config, GRAPHLOOM_TEST_BAD_REVIEW: badReview ? "1" : "0" };
+  const env = { ...inherited, HOME: dir, GRAPHLOOM_RUNNER_CONFIG: config, GRAPHLOOM_TEST_BAD_REVIEW: badReview ? "1" : "0", GRAPHLOOM_TEST_LIVE_DIR: live ? path.join(dir, "live") : "" };
   const run = () => execFileAsync(process.execPath, [cli, "run", "task.yaml"], { cwd: dir, env }).catch((err: { stdout: string; stderr: string }) => err);
-  return { dir, repo, config, run };
+  return { dir, repo, config, env, run };
+}
+
+async function eventually<T>(read: () => Promise<T | undefined>): Promise<T> {
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    const value = await read();
+    if (value !== undefined) return value;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error("Timed out waiting for the live CLI run");
+}
+
+function processExists(pid: number): boolean {
+  try { process.kill(pid, 0); return true; } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ESRCH") return false;
+    throw err;
+  }
 }
 
 describe("configured CLI runner", () => {
+  it("stops an active agent from another CLI process before reporting that the run stopped", async () => {
+    const f = await fixture(false, true);
+    const running = execFileAsync(process.execPath, [cli, "run", "task.yaml"], { cwd: f.dir, env: f.env, timeout: 25_000 });
+    const completion = running.catch((err: { stdout: string; stderr: string }) => err);
+    let agentPid: number | undefined;
+    try {
+      const live = await eventually(async () => {
+        const raw = await readFile(path.join(f.env.GRAPHLOOM_TEST_LIVE_DIR, "running.json"), "utf8").catch(() => undefined);
+        try { return raw === undefined ? undefined : JSON.parse(raw) as { pid: number; cwd: string }; } catch { return undefined; }
+      });
+      agentPid = live.pid;
+      expect(processExists(agentPid)).toBe(true);
+      const stateRoot = path.join(f.repo, "graphloom-state");
+      const stateDir = await eventually(async () => {
+        for (const name of await readdir(stateRoot)) {
+          const candidate = path.join(stateRoot, name);
+          const state = await loadRunState(candidate).catch(() => undefined);
+          if (state?.status === "running") return candidate;
+        }
+        return undefined;
+      });
+      const stopped = await execFileAsync(process.execPath, [cli, "stop", stateDir], { cwd: f.dir, env: f.env, timeout: 15_000 });
+      expect(JSON.parse(stopped.stdout).status).toBe("stopped");
+      expect(processExists(agentPid)).toBe(false);
+      expect(await readFile(path.join(f.env.GRAPHLOOM_TEST_LIVE_DIR, "interrupted"), "utf8")).toBe("interrupt received\n");
+      const heartbeat = await readFile(path.join(f.env.GRAPHLOOM_TEST_LIVE_DIR, "heartbeat"), "utf8");
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      expect(await readFile(path.join(f.env.GRAPHLOOM_TEST_LIVE_DIR, "heartbeat"), "utf8")).toBe(heartbeat);
+      const result = await completion;
+      expect(result.stderr).toBe("");
+      expect(JSON.parse(result.stdout).status).toBe("stopped");
+      await expect(stat(path.join(stateDir, "run.owner.json"))).rejects.toMatchObject({ code: "ENOENT" });
+      const state = await loadRunState(stateDir);
+      const sessionDir = state.pendingDispatch?.session?.dir;
+      expect(sessionDir).toBeDefined();
+      const transcripts = (await readdir(sessionDir!)).filter((name) => name.endsWith(".jsonl"));
+      expect(transcripts).toHaveLength(1);
+      expect(await readFile(path.join(sessionDir!, transcripts[0]!), "utf8")).toContain("Interrupted live turn");
+      const resumed = await execFileAsync(process.execPath, [cli, "resume", stateDir], {
+        cwd: f.dir, env: { ...f.env, GRAPHLOOM_TEST_LIVE_DIR: "" }, timeout: 15_000,
+      }).catch((err: { stdout: string; stderr: string }) => err);
+      expect(JSON.parse(resumed.stdout).status, resumed.stdout || resumed.stderr).toBe("succeeded");
+    } finally {
+      if (agentPid !== undefined && processExists(agentPid)) process.kill(-agentPid, "SIGKILL");
+      if (running.child.exitCode === null && running.child.signalCode === null) running.child.kill("SIGKILL");
+      await completion;
+    }
+  }, 40_000);
+
   it("serves an explicit coding-agent pin and refuses unknown IDs and changed pinned bytes", async () => {
     const f = await fixture();
     vi.stubEnv("CLAUDE_CONFIG_DIR", path.join(f.dir, "claude"));

@@ -53,7 +53,6 @@ import {
   getSession,
   registerSession,
   reapSession,
-  unregisterSession,
   type ActiveSession,
 } from "./sessions.js";
 import {
@@ -304,9 +303,9 @@ export function createController(): Controller {
         return toReport(state, sourceDirtyAfter);
       } finally {
         await clearStopRequest(session.stateDir);
-        await clearOwnerClaim(session.stateDir);
         await supervisor?.close?.().catch(() => undefined);
         await reapSession(session);
+        await clearOwnerClaim(session.stateDir);
       }
     },
 
@@ -320,8 +319,20 @@ export function createController(): Controller {
         await session.host.close().catch(() => undefined);
       }
 
-      // Cross-process: reap persisted plugin child / signal owner controller.
+      // Cross-process: the owner handles SIGTERM cooperatively so its abort
+      // reaches executor children, including detached agent process groups.
       await reapOwnerProcesses(stateDir);
+      if (!session) {
+        const deadline = Date.now() + 15_000;
+        for (;;) {
+          const owner = await readOwnerClaim(stateDir);
+          if (!owner || isClaimStale(owner)) break;
+          if (Date.now() >= deadline) {
+            throw new Error("stop requested, but controller cleanup is still pending; ownership retained, retry stop");
+          }
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+      }
 
       // Serialize the final stopped write with the owner loop (lock is not held
       // across runner jobs, so this can proceed during an in-flight dispatch).
@@ -340,10 +351,9 @@ export function createController(): Controller {
           await saveRunState(state);
         }
         await clearStopRequest(stateDir);
-        await clearOwnerClaim(stateDir);
-        if (session) {
-          unregisterSession(session);
-        }
+        // In-process stop can return before a custom runner observes abort.
+        // Its loop retains ownership until all execution has actually ended.
+        if (!session) await clearOwnerClaim(stateDir);
         return toInspect(state);
       });
     },
@@ -583,10 +593,10 @@ export function createController(): Controller {
         return toReport(state, await listDirtyPaths(state.intake.repoPath));
       } finally {
         await clearStopRequest(stateDir);
-        await clearOwnerClaim(stateDir);
         await request.supervisor?.close?.().catch(() => undefined);
         await restoredSupervisor?.close?.().catch(() => undefined);
         await reapSession(session);
+        await clearOwnerClaim(stateDir);
       }
     },
 

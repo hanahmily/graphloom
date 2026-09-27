@@ -1,15 +1,25 @@
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { readFile, rename, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 const OWNER_FILE = "run.owner.json";
 const DEFAULT_LEASE_MS = 60_000;
 
+/** Linux identity that remains distinct when a PID is reused or the host reboots. */
+export interface ProcessIdentity {
+  bootId: string;
+  /** /proc/<pid>/stat field 22, kept as text to avoid loss of integer precision. */
+  startTime: string;
+}
+
 export interface RunOwnerClaim {
   ownerId: string;
   controllerPid: number;
+  controllerIdentity?: ProcessIdentity;
   /** Plugin child pid when using createChildPluginHost; omitted for in-process. */
   childPid?: number;
+  childIdentity?: ProcessIdentity;
   claimedAt: string;
   expiresAt: number;
 }
@@ -46,14 +56,19 @@ export async function claimRunOwner(
     );
   }
   const leaseMs = options?.leaseMs ?? DEFAULT_LEASE_MS;
+  const controllerIdentity = readProcessIdentity(process.pid);
+  if (controllerIdentity === undefined) throw new Error("cannot identify controller process from Linux /proc");
   const claim: RunOwnerClaim = {
     ownerId: `${process.pid}:${randomUUID()}`,
     controllerPid: process.pid,
+    controllerIdentity,
     claimedAt: new Date().toISOString(),
     expiresAt: Date.now() + leaseMs,
   };
   if (options?.childPid !== undefined) {
     claim.childPid = options.childPid;
+    const identity = readProcessIdentity(options.childPid);
+    if (identity !== undefined) claim.childIdentity = identity;
   }
   await writeOwnerClaim(stateDir, claim);
   return claim;
@@ -72,12 +87,16 @@ export async function renewRunOwner(
   const claim: RunOwnerClaim = {
     ownerId: existing.ownerId,
     controllerPid: existing.controllerPid,
+    ...(existing.controllerIdentity !== undefined ? { controllerIdentity: existing.controllerIdentity } : {}),
     claimedAt: existing.claimedAt,
     expiresAt: Date.now() + leaseMs,
   };
   const childPid = options?.childPid ?? existing.childPid;
   if (childPid !== undefined) {
     claim.childPid = childPid;
+    // A heartbeat must not adopt a different process that reused a dead child's PID.
+    const identity = childPid === existing.childPid ? existing.childIdentity : readProcessIdentity(childPid);
+    if (identity !== undefined) claim.childIdentity = identity;
   }
   await writeOwnerClaim(stateDir, claim);
   return claim;
@@ -95,11 +114,15 @@ export async function updateOwnerChildPid(
   const claim: RunOwnerClaim = {
     ownerId: existing.ownerId,
     controllerPid: existing.controllerPid,
+    ...(existing.controllerIdentity !== undefined ? { controllerIdentity: existing.controllerIdentity } : {}),
     claimedAt: existing.claimedAt,
     expiresAt: existing.expiresAt,
   };
   if (childPid !== undefined) {
     claim.childPid = childPid;
+    // A heartbeat must not adopt a different process that reused a dead child's PID.
+    const identity = childPid === existing.childPid ? existing.childIdentity : readProcessIdentity(childPid);
+    if (identity !== undefined) claim.childIdentity = identity;
   }
   await writeOwnerClaim(stateDir, claim);
 }
@@ -116,7 +139,7 @@ export async function reapOwnerProcesses(stateDir: string): Promise<{
 
   let killedChild = false;
   if (typeof claim.childPid === "number" && claim.childPid > 0) {
-    killedChild = tryKill(claim.childPid, "SIGKILL");
+    killedChild = tryKill(claim.childPid, claim.childIdentity, "SIGKILL");
   }
 
   let signaledController = false;
@@ -126,7 +149,7 @@ export async function reapOwnerProcesses(stateDir: string): Promise<{
     claim.controllerPid !== process.pid
   ) {
     // Cooperative: SIGTERM lets the owner observe stop.request and exit cleanly.
-    signaledController = tryKill(claim.controllerPid, "SIGTERM");
+    signaledController = tryKill(claim.controllerPid, claim.controllerIdentity, "SIGTERM");
   }
 
   return { killedChild, signaledController };
@@ -135,7 +158,12 @@ export async function reapOwnerProcesses(stateDir: string): Promise<{
 export function isClaimStale(claim: RunOwnerClaim): boolean {
   // Jobs and retry waits can exceed the lease interval. Elapsed time does not
   // authorize stealing ownership from a controller that is still executing.
-  return !pidAlive(claim.controllerPid);
+  if (!pidAlive(claim.controllerPid)) return true;
+  const current = readProcessIdentity(claim.controllerPid);
+  // Legacy claims and inaccessible /proc cannot prove that a live PID is the
+  // original controller. Keep them fenced conservatively, but never signal them.
+  return claim.controllerIdentity !== undefined && current !== undefined &&
+    !sameProcess(claim.controllerIdentity, current);
 }
 
 async function writeOwnerClaim(stateDir: string, claim: RunOwnerClaim): Promise<void> {
@@ -158,7 +186,33 @@ function pidAlive(pid: number): boolean {
   }
 }
 
-function tryKill(pid: number, signal: NodeJS.Signals): boolean {
+/** Read a process identity without importing or executing any plugin code. */
+export function readProcessIdentity(pid: number): ProcessIdentity | undefined {
+  if (!Number.isInteger(pid) || pid <= 0) return undefined;
+  try {
+    const bootId = readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    // comm is parenthesized and may itself contain spaces or parentheses.
+    const fields = stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/);
+    const startTime = fields[19];
+    if (!bootId || startTime === undefined || !/^\d+$/.test(startTime)) return undefined;
+    return { bootId, startTime };
+  } catch {
+    return undefined;
+  }
+}
+
+function sameProcess(expected: ProcessIdentity, actual: ProcessIdentity): boolean {
+  return expected.bootId === actual.bootId && expected.startTime === actual.startTime;
+}
+
+function tryKill(pid: number, identity: ProcessIdentity | undefined, signal: NodeJS.Signals): boolean {
+  // Old PID-only records are intentionally non-signaling: the stop request is
+  // still durable, and a live legacy controller must cooperate or be handled
+  // by the operator after verifying its identity outside GraphLoom.
+  if (identity === undefined) return false;
+  const current = readProcessIdentity(pid);
+  if (current === undefined || !sameProcess(identity, current)) return false;
   try {
     process.kill(pid, signal);
     return true;
