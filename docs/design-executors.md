@@ -165,7 +165,8 @@ protocol:
 
 - A `CodingHarness` opens a session in the run worktree with the job's tools,
   abort signal, credentials, and a `reserveModelCall` hook, then runs the
-  assignment. The package ships the harness interface, the Pi harness
+  assignment. The package ships the harness interface, the Claude Code
+  harness (`@graphloom/executor-coding-agent/claude`), the Pi harness
   (`@graphloom/executor-coding-agent/pi`), and a scripted harness for tests
   (`@graphloom/executor-coding-agent/testing`).
 - The executor process loads the harness named by `GRAPHLOOM_CODING_HARNESS`.
@@ -176,8 +177,8 @@ protocol:
 - The job result is the agent's claim: its status, structured output, the tool
   calls it made with their child operation ids, and its model request count.
 
-The Pi harness gives the agent its full toolset (shell, file editing,
-search) in the worktree. The package is unrestricted, so the agent
+Both production harnesses give the agent its full toolset (shell, file
+editing, search) in the worktree. The package is unrestricted, so the agent
 works as the user would, and `writeScope` and `readOnly` reach it as
 instructions in the assignment. The controller does not trust those
 instructions. For every dispatch, it compares the worktree before and after
@@ -195,6 +196,61 @@ Job tools are the one mediated path. Each call goes to
 the controller as a child operation with a harness-generated id that is fresh
 for every turn, so a continued session never reuses an earlier id, and the
 agent sees the recorded `ToolCallResult`.
+
+The Claude Code harness runs the user's `claude` CLI headless
+(`createClaudeCodeHarness`, or the module at `claudeCodeHarnessModule`
+configured from the environment):
+
+- It runs `claude -p --output-format stream-json` in the worktree with
+  `--tools default` and `--permission-mode bypassPermissions`. Job tools are
+  served on a loopback MCP endpoint with a per-run bearer token, as the
+  `graphloom` server (`--strict-mcp-config`, so no other MCP servers load).
+  The endpoint forwards tool calls to the controller one at a time, even when
+  Claude Code sends several at once.
+- Claude Code has no hook before each provider request. The harness reserves
+  the first request before launching, and each later one when the stream
+  shows it coming: at the first tool result of a response, or at a response it
+  has not yet charged. A refusal stops the process, so at most the request
+  already in flight runs past the budget. Requests made inside Claude Code
+  subagents are not visible in the stream and are not charged.
+- Cancelling the job sends SIGTERM to the process group, then SIGKILL after a
+  grace period.
+- Claude Code gets a minimal environment, not the executor's: `PATH`, `HOME`,
+  user, shell, temp, locale (`LANG`, `LC_*`, `TZ`), `SSH_AUTH_SOCK`, XDG
+  directories, proxy and CA settings, plus `CLAUDE_CONFIG_DIR` set to the
+  harness's config dir. Anything else, such as Bedrock or Vertex settings,
+  must be named in `passEnv` (`GRAPHLOOM_CLAUDE_PASS_ENV`, comma-separated). An
+  ambient `ANTHROPIC_API_KEY` is never passed, and a `passEnv` naming it is
+  refused; bind the credential instead.
+  Gateway settings belong in the config dir's `settings.json`.
+- A watchdog stops a quiet run. Model output (assistant messages, tool results,
+  and `system/thinking_tokens`) is progress. The run fails as stalled when
+  none arrives within `startupTimeoutMs` of launch (default 300 s,
+  `GRAPHLOOM_CLAUDE_STARTUP_TIMEOUT_MS`) or for `responseTimeoutMs` afterwards
+  (default 600 s, `GRAPHLOOM_CLAUDE_RESPONSE_TIMEOUT_MS`). The response timer
+  pauses while a tool or subagent is running; 0 disables either timer. A
+  stalled run still saves its session, so a later job can continue it.
+  `codingAgentBinding` refuses a timer that is not shorter than the job
+  timeout, because the runner would kill the job before the stall is reported.
+- The final `result` event's token totals (input, output, cache read, cache
+  write) and cost are reported as `usage` in the job's `codingAgent` evidence.
+- With `resultSchema`, Claude Code validates its final answer against
+  `--json-schema`: the inline JSON object schema, or an open object named for
+  the schema. A run without structured output fails the job.
+- Claude Code keeps its own login, so a Claude subscription works as is.
+  `GRAPHLOOM_CLAUDE_BIN` and `GRAPHLOOM_CLAUDE_MODEL` pick the executable and
+  model, and a job may pick a model with `harnessOptions.model`. An API key
+  bound as the `anthropic-api-key` credential
+  (`codingAgentBinding({ harness, claude: { apiKey } })`) reaches Claude Code
+  only as `ANTHROPIC_API_KEY` in its environment.
+- Claude Code writes transcripts under its config dir (`CLAUDE_CONFIG_DIR`,
+  default `~/.claude`). After each run the harness copies the transcript to
+  `<sessionDir>/<sessionRef>.jsonl`, with `<sessionRef>.json` naming its
+  project directory, model, and system prompt digest. A resume validates both
+  files, writes the transcript back into Claude Code's store, and runs
+  `--resume`. A missing, empty, or corrupt copy fails the resume before Claude
+  Code starts. So does a different model or system prompt: Claude Code would
+  resume under either, and the earlier turns would pass as continuity.
 
 The Pi harness runs a Pi coding agent in-process (`createPiHarness`, or the
 module at `piHarnessModule` configured from the environment):
@@ -263,7 +319,7 @@ fresh when that context would mislead the agent. For example, the task or plan
 changed, a repair replaced the executor or graph behavior, or the transcript is
 anchored on an approach the supervisor has rejected. The graph or supervisor
 makes this choice; the controller never continues a session on its own. The
-The Pi and scripted test harnesses implement resume.
+Claude Code, Pi, and scripted test harnesses all implement resume.
 
 Built-in packages and plugin bundles can be installed or upgraded independently
 of the controller when compatible with its executor protocol. No controller

@@ -19,6 +19,6 @@ M1–M2 and M3 are largely in tree: scripted recovery, and Pi recovery admission
 with model switching verified against faux providers. So are the executor
 contract, the packaged GitHub executor (qualified against a fake server), the
 coding-agent child protocol with explicit session continuation on reentry
-(scripted and Pi harnesses, the Pi harness verified against faux providers),
-and executor recovery. Live provider qualification (#30) and M4 remain
-outstanding.
+(Claude Code and Pi harnesses, verified against a fake Claude Code CLI and
+faux Pi providers), and executor recovery. Live provider qualification (#30)
+and M4 remain outstanding.

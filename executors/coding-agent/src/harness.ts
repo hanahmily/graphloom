@@ -39,6 +39,15 @@ export interface CodingRunRequest {
   resultSchema?: string;
 }
 
+/** Provider token usage one run reported, as totals over all its model requests. */
+export interface CodingUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  costUsd?: number;
+}
+
 export interface CodingRunResult {
   status: "completed" | "failed";
   summary: string;
@@ -46,6 +55,8 @@ export interface CodingRunResult {
   output?: unknown;
   /** Identifies the saved session in `sessionDir`, so a later job can continue it. */
   sessionRef?: string;
+  /** Token usage, when the harness can report it. */
+  usage?: CodingUsage;
 }
 
 export interface CodingSession {

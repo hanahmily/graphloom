@@ -12,6 +12,10 @@
       "types": "./dist/executors.d.ts",
       "import": "./dist/executors.js"
     },
+    "./claude": {
+      "types": "./dist/claude.d.ts",
+      "import": "./dist/claude.js"
+    },
     "./pi": {
       "types": "./dist/pi.d.ts",
       "import": "./dist/pi.js"

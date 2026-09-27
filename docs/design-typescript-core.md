@@ -366,8 +366,9 @@ actual-request accounting, recovery decisions, and the fixed plugin steps.
 The [Pi integration design](design-pi-supervisor.md) defines explicit tools,
 resource isolation, session restoration, model-switch journaling, and required
 verification. Direct Pi Claude access uses API credentials; it must not promise
-included Claude Code subscription allowance. A genuine Claude Code backend would
-be a separate integration, not a Pi model setting. See the
+included Claude Code subscription allowance. Coding agents can instead run the
+user's own Claude Code through the coding-agent executor's Claude Code harness,
+a separate integration rather than a Pi model setting. See the
 [authentication findings](research/pi-claude-auth.md).
 
 ### Trigger and repair

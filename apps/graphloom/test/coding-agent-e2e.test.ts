@@ -24,8 +24,10 @@ import { githubBinding, githubExecutorPackage } from "@graphloom/executor-github
 import { startFakeGitHub, type FakeGitHub } from "@graphloom/executor-github/testing";
 import {
   CONTINUATION_NOTICE,
+  claudeCodeHarnessModule,
   codingAgentBinding,
   codingAgentExecutorPackage,
+  type ClaudeCodeBindingOptions,
 } from "@graphloom/executor-coding-agent";
 import { scriptedHarnessModule, type ScriptedStep } from "@graphloom/executor-coding-agent/testing";
 
@@ -520,6 +522,196 @@ describe("the Pi harness in the coding-agent executor process", () => {
     expect(transcript).toContain(CONTINUATION_NOTICE.slice(0, 40));
     expect(transcript).toContain("Finish issue #1.");
     expect(transcript).not.toContain(PI_KEY);
+  });
+});
+
+describe("the Claude Code harness in the coding-agent executor process", () => {
+  const fakeClaude = path.join(repoRoot, "executors/coding-agent/test/fake-claude.mjs");
+  const API_KEY = "sk-ant-e2e-secret-5190";
+  type Step = Record<string, unknown>;
+  const claudeJob = (continueFrom?: string): JobSpec => ({
+    stageId: "write",
+    kind: "agent",
+    purpose: "work",
+    instruction: "implement issue #1",
+    writeScope: ["GREETING.txt"],
+    executor: { id: "graphloom.coding-agent/run", version: "1" },
+    tools,
+    input: { assignment: continueFrom === undefined ? "Implement issue #1 and post a status comment." : "Finish issue #1." },
+    ...(continueFrom !== undefined ? { continueFrom } : {}),
+  });
+  const writeGreetingBash: Step = { bash: "printf 'Hello, GraphLoom!\\n' > GREETING.txt" };
+  /** The fake CLI's script and log reach it through the executor's environment and the binding's `passEnv`. */
+  async function claudeRunner(
+    server: FakeGitHub,
+    start: Step[],
+    resume: Step[] = [],
+    binding: { timeoutMs?: number; claude?: ClaudeCodeBindingOptions } = {},
+  ) {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "gl-claude-e2e-"));
+    cleanups.push(() => rm(dir, { recursive: true, force: true }));
+    const bin = path.join(dir, "claude");
+    await writeFile(bin, `#!/bin/sh\nexec "${process.execPath}" "${fakeClaude}" "$@"\n`, { mode: 0o755 });
+    await writeFile(path.join(dir, "script.json"), JSON.stringify({ start, resume }), "utf8");
+    const saved = { ...process.env };
+    process.env.CLAUDE_CONFIG_DIR = path.join(dir, "config");
+    process.env.FAKE_CLAUDE_SCRIPT = path.join(dir, "script.json");
+    process.env.FAKE_CLAUDE_LOG = path.join(dir, "log.jsonl");
+    cleanups.push(async () => {
+      for (const name of ["CLAUDE_CONFIG_DIR", "FAKE_CLAUDE_SCRIPT", "FAKE_CLAUDE_LOG"]) {
+        if (saved[name] === undefined) delete process.env[name];
+        else process.env[name] = saved[name];
+      }
+    });
+    const runner = hostRunner(
+      server,
+      codingAgentBinding({
+        harness: claudeCodeHarnessModule,
+        ...(binding.timeoutMs !== undefined ? { timeoutMs: binding.timeoutMs } : {}),
+        claude: { command: bin, apiKey: API_KEY, passEnv: ["FAKE_CLAUDE_SCRIPT", "FAKE_CLAUDE_LOG"], ...binding.claude },
+      }),
+    );
+    type Call = { argv: string[]; apiKey: string | null; env: Record<string, string>; history: string[] };
+    const log = async () => (await readFile(path.join(dir, "log.jsonl"), "utf8")).split("\n").filter(Boolean).map((l) => JSON.parse(l) as Call);
+    return { runner, log, dir, configDir: path.join(dir, "config") };
+  }
+  type ClaudeAgent = { harness: string; modelCalls: number; sessionRef: string | null; continued: boolean; usage: unknown };
+  const claudeAgents = (evidence: readonly { payload?: unknown }[]) =>
+    evidence.map((e) => (e.payload as { codingAgent?: ClaudeAgent }).codingAgent).filter((a): a is ClaudeAgent => a !== undefined);
+
+  it("runs Claude Code with its own tools and records its graph tool calls as child operations", async () => {
+    const server = await fake();
+    const env = await makeEnv();
+    const claude = await claudeRunner(server, [
+      { tool: "read_comments", args: { ...repo, number: 1 } },
+      { tool: "comment", args: { ...repo, issueNumber: 1, body: "Working on it.", idempotencyKey: "status" } },
+      writeGreetingBash,
+      { text: "Wrote GREETING.txt and posted a status comment." },
+    ]);
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({ definition, advances: [dispatch(claudeJob(), "implement"), ...rest] }),
+      validators,
+      runner: claude.runner,
+      stateRoot: env.stateRoot,
+      runId: "claude-agent",
+    });
+
+    expect(report.status, report.blocker).toBe("succeeded");
+    expect(posts(server)).toHaveLength(1);
+    const state = await loadRunState(report.stateDir);
+    expect(state.childOperations?.map((c) => [c.executor.id, c.status])).toEqual([
+      ["graphloom.github/list-issue-comments", "ok"],
+      ["graphloom.github/create-issue-comment", "ok"],
+    ]);
+    for (const child of state.childOperations!) expect(child.toolCallId).toMatch(/^claude-[0-9a-f]{8}-\d+$/);
+    const [agent] = claudeAgents(report.evidence);
+    expect(agent).toMatchObject({
+      harness: "claude-code",
+      modelCalls: 4,
+      continued: false,
+      usage: { inputTokens: 40, outputTokens: 20, cacheReadTokens: 100, cacheWriteTokens: 20, costUsd: 0.0125 },
+    });
+    const [recorded] = state.agentSessions!;
+    expect((await readdir(recorded!.sessionDir)).sort()).toEqual([`${agent!.sessionRef}.json`, `${agent!.sessionRef}.jsonl`]);
+    const [call] = await claude.log();
+    expect(call!.apiKey).toBe(API_KEY);
+    expect(call!.env).not.toHaveProperty("GRAPHLOOM_CODING_HARNESS");
+    expect(JSON.stringify(call!.env)).not.toContain(TOKEN);
+    const tree = await readTree(report.stateDir);
+    expect(tree).not.toContain(TOKEN);
+    expect(tree).not.toContain(API_KEY);
+  });
+
+  /** A step that records Claude Code's pid and its tool's pid, then hangs in the tool. */
+  const hangInTool = (dir: string): Step => ({
+    bash: `echo $PPID > ${dir}/claude.pid; echo $$ > ${dir}/tool.pid; exec sleep 60`,
+  });
+  const alive = (pid: number) => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  async function hungPids(dir: string): Promise<number[]> {
+    await waitFor(async () => (await readFile(path.join(dir, "tool.pid"), "utf8").catch(() => "")).trim() !== "");
+    return Promise.all(["claude.pid", "tool.pid"].map(async (f) => Number((await readFile(path.join(dir, f), "utf8")).trim())));
+  }
+
+  it("kills Claude Code and its tools when the job times out", async () => {
+    const server = await fake();
+    const env = await makeEnv();
+    const claude = await claudeRunner(server, [], [], {
+      timeoutMs: 1_500,
+      claude: { startupTimeoutMs: 0, responseTimeoutMs: 0 },
+    });
+    await writeFile(path.join(claude.dir, "script.json"), JSON.stringify({ start: [hangInTool(claude.dir)], resume: [] }));
+    const running = createController().run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({ definition, advances: [dispatch(claudeJob(), "implement"), ...rest] }),
+      validators,
+      runner: claude.runner,
+      stateRoot: env.stateRoot,
+      runId: "claude-timeout",
+    });
+    const pids = await hungPids(claude.dir);
+    const report = await running;
+
+    expect(report).toMatchObject({ status: "stopped", stopReason: "job failed: executor child timed out after 1500ms" });
+    expect(pids.filter(alive)).toEqual([]);
+  });
+
+  it("kills Claude Code and its tools when the operator stops the run", async () => {
+    const server = await fake();
+    const env = await makeEnv();
+    const claude = await claudeRunner(server, []);
+    await writeFile(path.join(claude.dir, "script.json"), JSON.stringify({ start: [hangInTool(claude.dir)], resume: [] }));
+    const controller = createController();
+    const running = controller.run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({ definition, advances: [dispatch(claudeJob(), "implement"), ...rest] }),
+      validators,
+      runner: claude.runner,
+      stateRoot: env.stateRoot,
+      runId: "claude-stop",
+    });
+    const pids = await hungPids(claude.dir);
+    await controller.stop(path.join(env.stateRoot, "claude-stop"));
+    const report = await running;
+
+    expect(report.status).toBe("stopped");
+    expect(pids.filter(alive)).toEqual([]);
+  });
+
+  it("resumes the saved Claude Code session in a new executor process", async () => {
+    const server = await fake();
+    const env = await makeEnv();
+    const claude = await claudeRunner(server, [{ text: "Not done yet." }], [writeGreetingBash, { text: "Done." }]);
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({
+        definition,
+        advances: [
+          dispatch(claudeJob(), "first try"),
+          retry,
+          (view: RunView) => dispatch(claudeJob(view.agentSessions![0]!.operationId), "continue"),
+          ...rest,
+        ],
+      }),
+      validators,
+      runner: claude.runner,
+      stateRoot: env.stateRoot,
+      runId: "claude-continue",
+    });
+
+    expect(report.status, report.blocker).toBe("succeeded");
+    const [first, continued] = claudeAgents(report.evidence);
+    expect(continued).toMatchObject({ continued: true, sessionRef: first!.sessionRef });
+    const [, resumed] = await claude.log();
+    expect(resumed!.argv).toContain("--resume");
+    expect(resumed!.history).toEqual([expect.stringContaining("Implement issue #1"), "Not done yet."]);
   });
 });
 
