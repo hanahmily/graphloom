@@ -42,6 +42,10 @@ export async function reconcilePendingDispatch(
         state: {
           ...rest,
           outstanding: state.outstanding.filter((o) => o.operationId !== opId),
+          // Settlement establishes the writer's identity, not acceptance of
+          // its output. Observe/Validate still verify the candidate, and a
+          // separate reviewer must be distinct from this reconciled job.
+          ...(job.purpose === "work" ? { lastWorkOperationId: opId } : {}),
         },
         settled: true,
         reason: `pending ${opId} settled: observed writes ${present.join(",")}`,

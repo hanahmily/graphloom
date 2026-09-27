@@ -54,6 +54,20 @@ async function track(host: Promise<PluginHost>): Promise<PluginHost> {
 }
 
 describe("createChildPluginHost", () => {
+  it.each(["null", "[]", "true", "42", '"text"'])("observes non-object JSON %s as malformed", async (json) => {
+    const host = await track(createChildPluginHost({
+      entryModule: `json-${json}`,
+      activeVersion: "v1",
+      generation: 1,
+      workerModule: fixture("bad-worker.mjs"),
+      callbackTimeoutMs: 200,
+    }));
+    expect(await host.describe(ctx("op-non-object"))).toMatchObject({
+      ok: false,
+      observation: { code: "malformed" },
+    });
+  });
+
   it("loads a minimal plugin and round-trips describe/advance", async () => {
     const host = await track(
       createChildPluginHost({

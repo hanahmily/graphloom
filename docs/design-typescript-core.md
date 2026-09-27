@@ -3,8 +3,9 @@
 Status: current design direction, revised 2026-09-24; implementation partial.
 This document supersedes the native Go plugin design in [core-design.md](core-design.md)
 and its [Go package plan](codebase.md). Active TypeScript packages implement parts
-of this design; the Pi session adapter exists, while full recovery wiring,
-executor extensions, and the full repair lifecycle remain pending.
+of this design, including durable execution, Pi recovery, executor extensions,
+and qualified repair. Live-provider qualification and full local-release
+verification remain pending.
 Earlier Go source is retained under legacy/go.
 
 ## 1. Decisions and scope

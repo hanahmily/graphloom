@@ -16,9 +16,10 @@ a validator implementation is repaired.
 The [TypeScript core design](docs/design-typescript-core.md) is authoritative.
 Active code lives under `packages/` (`sdk`, `controller`, `plugin-host`,
 `supervisor`, `runner`), built-in executor packages under `executors/` (`github`, `coding-agent`),
-and `apps/graphloom`. The public SDK and scripted
-`GraphPlugin` adapter are in place; durable run/inspect/stop/resume and plugin
-repair are not implemented yet. Earlier Go sources are frozen under
+and `apps/graphloom`. The SDK, isolated plugin host, durable controller lifecycle,
+Pi supervisor, executor packages, and qualified repair workflows are implemented
+and covered by scripted integration tests. Live-provider qualification and the
+complete local-release scenarios remain outstanding. Earlier Go sources are frozen under
 [`legacy/go`](legacy/go) for reference and are not part of CI.
 
 ```sh
@@ -27,9 +28,13 @@ npm test
 npm run build
 ```
 
+The local runtime requires Linux, Node.js 22.19 or newer, Git, and util-linux
+`flock`. Controller and repository locks use kernel locks held by a helper
+process; a controller exit releases them without deleting or reclaiming leases.
+
 ## Select a graph
 
-The proposed operator interface is `graphloom run task.yaml`:
+Run an installed graph with `graphloom run task.yaml`:
 
 ```yaml
 graph: hello
@@ -43,6 +48,26 @@ request: |
 It implements Write → Review in code. The controller creates an isolated Git
 worktree and preserves the source checkout. Successful runs deliver a local diff
 without automatic commit, push, or publication.
+
+Configure the job runner in `~/.config/graphloom/runner.json`, or point
+`GRAPHLOOM_RUNNER_CONFIG` at an operator-owned file. For Claude Code:
+
+```json
+{ "harness": "claude-code", "allowUnrestricted": true }
+```
+
+Claude Code must be installed and logged in. Optional `claude.command` and
+`claude.model` select its executable and model. For Pi, use `"harness": "pi"`
+with `"pi": { "provider": "minimax-cn", "modelId": "MiniMax-M3" }` and the
+existing Pi credential store. Keep credentials out of runner configuration.
+The same configuration is used by `resume`. Without runner configuration,
+agent jobs stop with a configuration error.
+
+`allowUnrestricted` is required because coding agents can run shell commands
+with the operator's permissions. Claude's file-tool permission checks restrict
+file mutations to the job scope and deny shell commands for read-only jobs;
+writer shell commands still require trust. See the
+[permission and cancellation design](docs/design-claude-live-mode.md).
 
 ## Extend and repair
 

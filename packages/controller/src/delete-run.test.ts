@@ -139,6 +139,27 @@ describe("deleting a run", () => {
     expect(await branches(env)).toBe("");
   });
 
+  it("preserves ignored files unless deletion is explicitly forced", async () => {
+    const env = await makeEnv();
+    await writeFile(path.join(env.repoPath, ".gitignore"), "notes.private\ncache/\n");
+    await env.git("add", ".gitignore");
+    await env.git("commit", "-m", "ignore local files");
+    const run = await stoppedRun(env, "ignored");
+    await writeFile(path.join(run.worktreePath, "notes.private"), "keep this\n");
+    await mkdir(path.join(run.worktreePath, "cache"));
+    await writeFile(path.join(run.worktreePath, "cache", "notes.txt"), "also keep\n");
+
+    await expect(createController().delete(run.stateDir)).rejects.toThrow("pass force to discard");
+    expect(existsSync(path.join(run.worktreePath, "notes.private"))).toBe(true);
+    expect(existsSync(path.join(run.worktreePath, "cache", "notes.txt"))).toBe(true);
+    expect(existsSync(run.stateDir)).toBe(true);
+    expect(await branches(env)).toContain("graphloom/ignored");
+
+    await createController().delete(run.stateDir, { force: true });
+    expect(existsSync(run.worktreePath)).toBe(false);
+    expect(existsSync(run.stateDir)).toBe(false);
+  });
+
   it("refuses a run that is running, owned by a live controller, or has an active session", async () => {
     const env = await makeEnv();
     const run = await stoppedRun(env, "busy");

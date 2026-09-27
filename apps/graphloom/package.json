@@ -13,6 +13,7 @@
     "test": "tsc -p tsconfig.json && vitest run"
   },
   "dependencies": {
+    "@graphloom/executor-coding-agent": "0.1.0",
     "@graphloom/controller": "0.0.0",
     "@graphloom/plugin-host": "0.0.0",
     "@graphloom/runner": "0.0.0",
@@ -20,7 +21,6 @@
     "@graphloom/supervisor": "0.0.0"
   },
   "devDependencies": {
-    "@graphloom/executor-coding-agent": "0.1.0",
     "@graphloom/executor-github": "0.1.0"
   }
 }

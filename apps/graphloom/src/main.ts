@@ -4,7 +4,8 @@
  */
 import path from "node:path";
 import { createController } from "@graphloom/controller";
-import type { Runner } from "@graphloom/runner";
+import { createCliRunner } from "./cli-runner.js";
+import { loadRunnerConfig } from "./runner-config.js";
 import {
   loadSupervisorConfig,
   parseModelRef,
@@ -28,9 +29,9 @@ async function main(): Promise<void> {
   }
 
   const controller = createController();
-  const runner = unsupportedCliRunner();
 
   if (cmd === "run") {
+    const runner = createCliRunner(await loadRunnerConfig());
     const taskPath = path.resolve(args[1] ?? "task.yaml");
     const config = await loadSupervisorConfig();
     const report = await controller.run({
@@ -66,6 +67,7 @@ async function main(): Promise<void> {
   }
 
   if (cmd === "resume") {
+    const runner = createCliRunner(await loadRunnerConfig());
     const runRef = requireRunRef(args[1], "resume <stateDir|runId>");
     const stateRoot = flagValue(args, "--state-root");
     const config = await loadSupervisorConfig();
@@ -123,21 +125,6 @@ async function main(): Promise<void> {
   process.exitCode = 1;
 }
 
-function unsupportedCliRunner(): Runner {
-  return {
-    async runJob(_job, ctx) {
-      return {
-        status: "failed",
-        summary:
-          "CLI agent runner not configured yet; drive runs through the controller API with a scripted runner",
-        runId: ctx.runId,
-        operationId: ctx.operationId,
-        generation: ctx.generation,
-      };
-    },
-  };
-}
-
 /** Bare run IDs stay bare so --state-root is honored; path-like refs are resolved. */
 function requireRunRef(value: string | undefined, usage: string): string {
   if (!value) {
@@ -171,6 +158,13 @@ Usage:
 
 Delete removes a stopped or finished run's worktree, graphloom/<runId> branch, and
 state directory. --force also discards uncommitted changes and branch commits.
+
+Agent runner: run and resume load $GRAPHLOOM_RUNNER_CONFIG or
+~/.config/graphloom/runner.json:
+  { "harness": "claude-code", "allowUnrestricted": true }
+Use "pi" for the Pi harness. The agent runs with your user permissions;
+credentials come from the harness login. Optional claude/pi settings select
+the executable, model, provider, agent directory, and environment names.
 
 Supervisor: run and resume use a Pi supervisor when an operator config exists at
 $GRAPHLOOM_SUPERVISOR_CONFIG or ~/.config/graphloom/supervisor.json:
