@@ -166,6 +166,8 @@ export interface InspectReport {
     complete: boolean;
   }>;
   current: StageAttempt;
+  /** Validation receipts; a stage is complete when each of its requirements has a valid one. */
+  receipts: Array<{ stageId: string; requirementId: string; validatorId: string; valid: boolean; evidenceRefs: string[] }>;
   evidenceRefs: string[];
   budgets: BudgetRemaining;
   versionHistory: VersionRecord[];
@@ -828,6 +830,13 @@ function toInspect(state: DurableRunState): InspectReport {
       ),
     })),
     current: structuredClone(state.current),
+    receipts: state.receipts.map((r) => ({
+      stageId: r.stageId,
+      requirementId: r.requirementId,
+      validatorId: r.validatorBinding.validatorId,
+      valid: r.valid,
+      evidenceRefs: [...r.evidenceRefs],
+    })),
     evidenceRefs: state.evidence.map((e) => e.ref),
     budgets: { ...state.budgets },
     versionHistory: structuredClone(state.versionHistory ?? []),

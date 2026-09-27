@@ -4,7 +4,7 @@
  */
 import path from "node:path";
 import { createController } from "@graphloom/controller";
-import type { Runner } from "@graphloom/runner";
+import { agentRunner, loadAgentConfig } from "./agent-config.js";
 import {
   loadSupervisorConfig,
   parseModelRef,
@@ -28,10 +28,10 @@ async function main(): Promise<void> {
   }
 
   const controller = createController();
-  const runner = unsupportedCliRunner();
 
   if (cmd === "run") {
     const taskPath = path.resolve(args[1] ?? "task.yaml");
+    const runner = agentRunner(await loadAgentConfig());
     const config = await loadSupervisorConfig();
     const report = await controller.run({
       taskPath,
@@ -68,6 +68,7 @@ async function main(): Promise<void> {
   if (cmd === "resume") {
     const runRef = requireRunRef(args[1], "resume <stateDir|runId>");
     const stateRoot = flagValue(args, "--state-root");
+    const runner = agentRunner(await loadAgentConfig());
     const config = await loadSupervisorConfig();
     const report = await controller.resume({
       runRef,
@@ -123,21 +124,6 @@ async function main(): Promise<void> {
   process.exitCode = 1;
 }
 
-function unsupportedCliRunner(): Runner {
-  return {
-    async runJob(_job, ctx) {
-      return {
-        status: "failed",
-        summary:
-          "CLI agent runner not configured yet; drive runs through the controller API with a scripted runner",
-        runId: ctx.runId,
-        operationId: ctx.operationId,
-        generation: ctx.generation,
-      };
-    },
-  };
-}
-
 /** Bare run IDs stay bare so --state-root is honored; path-like refs are resolved. */
 function requireRunRef(value: string | undefined, usage: string): string {
   if (!value) {
@@ -171,6 +157,13 @@ Usage:
 
 Delete removes a stopped or finished run's worktree, graphloom/<runId> branch, and
 state directory. --force also discards uncommitted changes and branch commits.
+
+Coding agent: run and resume need one, configured at $GRAPHLOOM_AGENT_CONFIG or
+~/.config/graphloom/agent.json:
+  { "harness": "claude-code", "model": "sonnet", "configDir": "~/.claude" }
+  { "harness": "pi", "provider": "minimax-cn", "modelId": "MiniMax-M3" }
+or, without a file, GRAPHLOOM_AGENT_HARNESS=claude-code|pi (Pi also reads
+GRAPHLOOM_PI_PROVIDER and GRAPHLOOM_PI_MODEL). Claude Code uses its own login.
 
 Supervisor: run and resume use a Pi supervisor when an operator config exists at
 $GRAPHLOOM_SUPERVISOR_CONFIG or ~/.config/graphloom/supervisor.json:

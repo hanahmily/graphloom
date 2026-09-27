@@ -29,7 +29,9 @@ npm run build
 
 ## Select a graph
 
-The proposed operator interface is `graphloom run task.yaml`:
+The operator interface is `graphloom run task.yaml`, with jobs run by the
+coding agent the operator configures (Claude Code or Pi; see the
+[example guide](examples/README.md)):
 
 ```yaml
 graph: hello
