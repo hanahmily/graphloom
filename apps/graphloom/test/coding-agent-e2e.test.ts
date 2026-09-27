@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -712,6 +713,40 @@ describe("the Claude Code harness in the coding-agent executor process", () => {
     const [, resumed] = await claude.log();
     expect(resumed!.argv).toContain("--resume");
     expect(resumed!.history).toEqual([expect.stringContaining("Implement issue #1"), "Not done yet."]);
+  });
+
+  it("runs each binding's Claude Code on the config dir (account) it names", async () => {
+    const server = await fake();
+    const accounts = await mkdtemp(path.join(os.tmpdir(), "gl-claude-accounts-"));
+    cleanups.push(() => rm(accounts, { recursive: true, force: true }));
+    for (const account of ["gateway", "first-party"]) {
+      const configDir = path.join(accounts, account);
+      const env = await makeEnv();
+      const claude = await claudeRunner(server, [{ text: "Not done yet." }], [writeGreetingBash, { text: "Done." }], { claude: { configDir } });
+      const report = await createController().run({
+        taskPath: env.taskPath,
+        plugin: createScriptedGraph({
+          definition,
+          advances: [
+            dispatch(claudeJob(), "first try"),
+            retry,
+            (view: RunView) => dispatch(claudeJob(view.agentSessions![0]!.operationId), "continue"),
+            ...rest,
+          ],
+        }),
+        validators,
+        runner: claude.runner,
+        stateRoot: env.stateRoot,
+        runId: `claude-${account}`,
+      });
+
+      expect(report.status, report.blocker).toBe("succeeded");
+      expect((await claude.log()).map((call) => call.env.CLAUDE_CONFIG_DIR)).toEqual([configDir, configDir]);
+      const sessionId = claudeAgents(report.evidence)[0]!.sessionRef!.slice("claude-".length);
+      const [project] = await readdir(path.join(configDir, "projects"));
+      expect(await readFile(path.join(configDir, "projects", project!, `${sessionId}.jsonl`), "utf8")).toContain("Done.");
+      expect(existsSync(claude.configDir)).toBe(false);
+    }
   });
 });
 

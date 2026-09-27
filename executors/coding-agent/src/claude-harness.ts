@@ -8,6 +8,7 @@ import { bounded, inlineObjectSchema, scopeNotes } from "./assignment.js";
 import {
   CLAUDE_API_KEY_CREDENTIAL,
   CLAUDE_BIN_ENV,
+  CLAUDE_CONFIG_DIR_ENV,
   CLAUDE_DEFAULT_RESPONSE_TIMEOUT_MS,
   CLAUDE_DEFAULT_STARTUP_TIMEOUT_MS,
   CLAUDE_MODEL_ENV,
@@ -24,7 +25,11 @@ export interface ClaudeCodeHarnessOptions {
   command?: string;
   /** Model alias or name; a job's `harnessOptions.model` overrides it. Default: `GRAPHLOOM_CLAUDE_MODEL`, then Claude Code's own. */
   model?: string;
-  /** Claude Code config dir holding its transcripts. Default: `CLAUDE_CONFIG_DIR`, then `~/.claude`. */
+  /**
+   * Claude Code config dir: its login, settings, and transcripts, so it selects
+   * the account or gateway. Default: `GRAPHLOOM_CLAUDE_CONFIG_DIR`, then
+   * `CLAUDE_CONFIG_DIR`, then `~/.claude`.
+   */
   configDir?: string;
   /** Appended to Claude Code's system prompt. */
   systemPrompt?: string;
@@ -63,6 +68,17 @@ interface SavedSession {
   ref: string;
   /** True once the Claude Code session exists, so the next run resumes it. */
   started: boolean;
+  /** Session totals Claude Code restores when it resumes, from the transcript's last `cost-state` record. */
+  baseline?: Totals;
+}
+
+/** Usage totals; Claude Code's `modelUsage` and `total_cost_usd` span the whole session, subagents included. */
+interface Totals {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  costUsd?: number;
 }
 
 /** Settings a resumed session must share with the one that recorded its earlier turns. */
@@ -77,6 +93,7 @@ interface ResultEvent {
   result?: string;
   structured_output?: unknown;
   usage?: Record<string, unknown>;
+  modelUsage?: unknown;
   total_cost_usd?: unknown;
 }
 
@@ -96,7 +113,8 @@ export function createClaudeCodeHarness(harnessOptions: ClaudeCodeHarnessOptions
       const jobModel = options.options?.model;
       if (jobModel !== undefined && typeof jobModel !== "string") throw new Error("harnessOptions.model must be a string");
       const model = jobModel ?? harnessOptions.model ?? (process.env[CLAUDE_MODEL_ENV] || undefined);
-      const configDir = harnessOptions.configDir ?? (process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude"));
+      const configDir =
+        harnessOptions.configDir ?? (process.env[CLAUDE_CONFIG_DIR_ENV] || process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude"));
       const systemPrompt = harnessOptions.systemPrompt ?? DEFAULT_SYSTEM_PROMPT;
       const passEnv = harnessOptions.passEnv ?? envList(process.env[CLAUDE_PASS_ENV_ENV]);
       if (passEnv.includes("ANTHROPIC_API_KEY")) {
@@ -201,7 +219,8 @@ async function openSession(options: CodingSessionOptions, configDir: string, set
     throw new Error(`saved session ${ref} ran with a different system prompt`);
   }
   await writeAtomic(path.join(configDir, "projects", project, `${sessionId}.jsonl`), transcript);
-  return { sessionId, ref, started: true };
+  const baseline = costState(transcript);
+  return { sessionId, ref, started: true, ...(baseline !== undefined ? { baseline } : {}) };
 }
 
 /** Copy Claude Code's transcript into the controller's session directory; false when it wrote none. */
@@ -212,8 +231,11 @@ async function saveTranscript(configDir: string, sessionDir: string, saved: Save
     const file = path.join(projects, project, `${saved.sessionId}.jsonl`);
     const info = await stat(file).catch(() => undefined);
     if (!info?.isFile() || !PROJECT_DIR.test(project)) continue;
-    await writeAtomic(path.join(sessionDir, `${saved.ref}.jsonl`), await readFile(file, "utf8"));
+    const transcript = await readFile(file, "utf8");
+    await writeAtomic(path.join(sessionDir, `${saved.ref}.jsonl`), transcript);
     await writeAtomic(path.join(sessionDir, `${saved.ref}.json`), JSON.stringify({ project, ...settings }));
+    const baseline = costState(transcript);
+    if (baseline !== undefined) saved.baseline = baseline;
     return true;
   }
   return false;
@@ -255,6 +277,8 @@ async function runClaude(args: RunArgs): Promise<CodingRunResult> {
       "-p",
       "--output-format", "stream-json",
       "--verbose",
+      // Subagents' responses reach the stream, so each of their requests is charged too.
+      "--forward-subagent-text",
       "--permission-mode", "bypassPermissions",
       "--tools", "default",
       "--strict-mcp-config",
@@ -310,7 +334,8 @@ async function runClaude(args: RunArgs): Promise<CodingRunResult> {
     child.stdin.on("error", () => undefined);
     child.stdin.end([request.assignment, ...scopeNotes(options)].join("\n\n"));
 
-    let result: ResultEvent | undefined;
+    // A background subagent's report starts another turn, which ends with its own result.
+    const results: ResultEvent[] = [];
     let bridgeFailed = false;
     let budgetRefused = false;
     const seen = new Set<string>();
@@ -373,9 +398,10 @@ async function runClaude(args: RunArgs): Promise<CodingRunResult> {
           reserve();
         }
       } else if (event.type === "result") {
-        result = event as ResultEvent;
+        results.push(event as ResultEvent);
       }
     }
+    const result = results.at(-1);
     clearTimeout(watchdog);
     const { code, error } = await exited;
     await reservations;
@@ -408,7 +434,7 @@ async function runClaude(args: RunArgs): Promise<CodingRunResult> {
       }
       return { status: "completed", summary: bounded(result.result?.trim() || "Claude Code completed") };
     })();
-    const usage = usageOf(result);
+    const usage = usageOf(results, saved.baseline);
     return usage !== undefined ? { ...outcome, usage } : outcome;
   } finally {
     await bridge?.close();
@@ -429,18 +455,83 @@ function trackTools(content: unknown, running: Set<string>): void {
   }
 }
 
-/** Totals from the final result event; streamed per-message counts are partial. */
-function usageOf(result: ResultEvent | undefined): CodingUsage | undefined {
-  const usage = result?.usage;
+/**
+ * This run's usage. Streamed per-message counts are partial, and a result's
+ * `usage` covers only its turn's main thread, so prefer the session totals in
+ * `modelUsage`, which include subagents, less what Claude Code restored.
+ */
+function usageOf(results: ResultEvent[], baseline: Totals | undefined): CodingUsage | undefined {
+  const last = results.at(-1);
+  const totals = last !== undefined ? modelTotals(last.modelUsage, last.total_cost_usd) : undefined;
+  if (totals !== undefined) {
+    // Totals below the baseline mean Claude Code started this run from zero.
+    return baseline !== undefined && covers(totals, baseline) ? less(totals, baseline) : totals;
+  }
+  const usage = last?.usage;
   if (usage === undefined || usage === null || typeof usage !== "object") return undefined;
-  const count = (value: unknown) => (typeof value === "number" && Number.isFinite(value) ? value : 0);
   return {
     inputTokens: count(usage.input_tokens),
     outputTokens: count(usage.output_tokens),
     cacheReadTokens: count(usage.cache_read_input_tokens),
     cacheWriteTokens: count(usage.cache_creation_input_tokens),
-    ...(typeof result!.total_cost_usd === "number" ? { costUsd: result!.total_cost_usd } : {}),
+    ...(typeof last!.total_cost_usd === "number" ? { costUsd: last!.total_cost_usd } : {}),
   };
+}
+
+function count(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+/** Sum Claude Code's per-model `modelUsage`; undefined when it reports none. */
+function modelTotals(modelUsage: unknown, costUsd: unknown): Totals | undefined {
+  if (modelUsage === null || typeof modelUsage !== "object" || Array.isArray(modelUsage)) return undefined;
+  const models = Object.values(modelUsage as Record<string, Record<string, unknown> | null>).filter(
+    (m): m is Record<string, unknown> => m !== null && typeof m === "object",
+  );
+  if (models.length === 0) return undefined;
+  const sum = (key: string) => models.reduce((total, m) => total + count(m[key]), 0);
+  return {
+    inputTokens: sum("inputTokens"),
+    outputTokens: sum("outputTokens"),
+    cacheReadTokens: sum("cacheReadInputTokens"),
+    cacheWriteTokens: sum("cacheCreationInputTokens"),
+    ...(typeof costUsd === "number" && Number.isFinite(costUsd) ? { costUsd } : {}),
+  };
+}
+
+/** The session totals in a transcript's last `cost-state` record, which Claude Code restores on resume. */
+function costState(transcript: string): Totals | undefined {
+  const lines = transcript.split("\n");
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    if (!lines[i]!.includes('"cost-state"')) continue;
+    try {
+      const entry = JSON.parse(lines[i]!) as { type?: unknown; modelUsage?: unknown; totalCostUSD?: unknown };
+      if (entry.type === "cost-state") return modelTotals(entry.modelUsage, entry.totalCostUSD);
+    } catch {
+      // Not a record.
+    }
+  }
+  return undefined;
+}
+
+const TOKEN_KEYS = ["inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens"] as const;
+
+function covers(totals: Totals, baseline: Totals): boolean {
+  return (
+    TOKEN_KEYS.every((k) => totals[k] >= baseline[k]) &&
+    (totals.costUsd === undefined || baseline.costUsd === undefined || totals.costUsd >= baseline.costUsd)
+  );
+}
+
+function less(totals: Totals, baseline: Totals): CodingUsage {
+  const usage: CodingUsage = {
+    inputTokens: totals.inputTokens - baseline.inputTokens,
+    outputTokens: totals.outputTokens - baseline.outputTokens,
+    cacheReadTokens: totals.cacheReadTokens - baseline.cacheReadTokens,
+    cacheWriteTokens: totals.cacheWriteTokens - baseline.cacheWriteTokens,
+  };
+  if (totals.costUsd !== undefined) usage.costUsd = totals.costUsd - (baseline.costUsd ?? 0);
+  return usage;
 }
 
 function hasToolResult(content: unknown): boolean {

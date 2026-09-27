@@ -211,14 +211,19 @@ configured from the environment):
   the first request before launching, and each later one when the stream
   shows it coming: at the first tool result of a response, or at a response it
   has not yet charged. A refusal stops the process, so at most the request
-  already in flight runs past the budget. Requests made inside Claude Code
-  subagents are not visible in the stream and are not charged.
+  already in flight runs past the budget. Subagents' responses reach the
+  stream (`--forward-subagent-text`, marked with `parent_tool_use_id`) and are
+  charged the same way. Subagents run concurrently with the main thread, so
+  each running thread can have one request in flight past a refusal.
+  Requests Claude Code makes outside the transcript's responses, such as
+  context compaction or `WebFetch`'s summarizing, are never charged per
+  request; their tokens still appear in the reported usage.
 - Cancelling the job sends SIGTERM to the process group, then SIGKILL after a
   grace period.
 - Claude Code gets a minimal environment, not the executor's: `PATH`, `HOME`,
   user, shell, temp, locale (`LANG`, `LC_*`, `TZ`), `SSH_AUTH_SOCK`, XDG
   directories, proxy and CA settings, plus `CLAUDE_CONFIG_DIR` set to the
-  harness's config dir. Anything else, such as Bedrock or Vertex settings,
+  binding's config dir. Anything else, such as Bedrock or Vertex settings,
   must be named in `passEnv` (`GRAPHLOOM_CLAUDE_PASS_ENV`, comma-separated). An
   ambient `ANTHROPIC_API_KEY` is never passed, and a `passEnv` naming it is
   refused; bind the credential instead.
@@ -232,8 +237,14 @@ configured from the environment):
   stalled run still saves its session, so a later job can continue it.
   `codingAgentBinding` refuses a timer that is not shorter than the job
   timeout, because the runner would kill the job before the stall is reported.
-- The final `result` event's token totals (input, output, cache read, cache
-  write) and cost are reported as `usage` in the job's `codingAgent` evidence.
+- The run's token totals (input, output, cache read, cache write) and cost are
+  reported as `usage` in the job's `codingAgent` evidence. They come from the
+  last `result` event's `modelUsage` and `total_cost_usd`, which cover every
+  turn and subagent (a background subagent's report adds a turn with its own
+  `result`). Those totals span the whole session: on resume Claude Code
+  restores them from the transcript's last `cost-state` record, so the harness
+  subtracts that record's totals. If the final totals fall below that record's,
+  Claude Code did not restore them and they are reported as they are.
 - With `resultSchema`, Claude Code validates its final answer against
   `--json-schema`: the inline JSON object schema, or an open object named for
   the schema. A run without structured output fails the job.
@@ -243,8 +254,12 @@ configured from the environment):
   bound as the `anthropic-api-key` credential
   (`codingAgentBinding({ harness, claude: { apiKey } })`) reaches Claude Code
   only as `ANTHROPIC_API_KEY` in its environment.
-- Claude Code writes transcripts under its config dir (`CLAUDE_CONFIG_DIR`,
-  default `~/.claude`). After each run the harness copies the transcript to
+- The config dir holds Claude Code's login and `settings.json`, so it picks
+  the account or gateway. `codingAgentBinding({ claude: { configDir } })`
+  (an absolute path, `GRAPHLOOM_CLAUDE_CONFIG_DIR`) sets it per binding, so one
+  workflow can use a gateway and another a first-party account. The default is
+  the executor's `CLAUDE_CONFIG_DIR`, then `~/.claude`.
+- Claude Code writes transcripts under its config dir. After each run the harness copies the transcript to
   `<sessionDir>/<sessionRef>.jsonl`, with `<sessionRef>.json` naming its
   project directory, model, and system prompt digest. A resume validates both
   files, writes the transcript back into Claude Code's store, and runs

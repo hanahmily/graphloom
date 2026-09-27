@@ -158,6 +158,7 @@ describe("graphloom.coding-agent/run", () => {
         "GRAPHLOOM_CODING_HARNESS",
         "GRAPHLOOM_CLAUDE_BIN",
         "GRAPHLOOM_CLAUDE_MODEL",
+        "GRAPHLOOM_CLAUDE_CONFIG_DIR",
         "GRAPHLOOM_CLAUDE_PASS_ENV",
         "GRAPHLOOM_CLAUDE_STARTUP_TIMEOUT_MS",
         "GRAPHLOOM_CLAUDE_RESPONSE_TIMEOUT_MS",
@@ -201,6 +202,7 @@ describe("graphloom.coding-agent/run", () => {
         claude: {
           command: "/bin/claude",
           model: "opus",
+          configDir: "/accounts/gateway",
           apiKey: "sk-ant",
           passEnv: ["AWS_PROFILE", "CLAUDE_CODE_USE_BEDROCK"],
           startupTimeoutMs: 60_000,
@@ -215,12 +217,16 @@ describe("graphloom.coding-agent/run", () => {
         GRAPHLOOM_CODING_HARNESS: claudeCodeHarnessModule,
         GRAPHLOOM_CLAUDE_BIN: "/bin/claude",
         GRAPHLOOM_CLAUDE_MODEL: "opus",
+        GRAPHLOOM_CLAUDE_CONFIG_DIR: "/accounts/gateway",
         GRAPHLOOM_CLAUDE_PASS_ENV: "AWS_PROFILE,CLAUDE_CODE_USE_BEDROCK",
         GRAPHLOOM_CLAUDE_STARTUP_TIMEOUT_MS: "60000",
         GRAPHLOOM_CLAUDE_RESPONSE_TIMEOUT_MS: "0",
       },
       credentials: { "anthropic-api-key": "sk-ant" },
     });
+    expect(() => codingAgentBinding({ harness: claudeCodeHarnessModule, claude: { configDir: "accounts/gateway" } })).toThrow(
+      "claude.configDir must be an absolute path",
+    );
     expect(claudeCodeHarnessModule).toMatch(/[\\/]claude\.js$/);
   });
 

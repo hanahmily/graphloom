@@ -1,8 +1,10 @@
+import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExecutorBinding, ExecutorPackageManifest } from "@graphloom/sdk";
 import {
   CLAUDE_API_KEY_CREDENTIAL,
   CLAUDE_BIN_ENV,
+  CLAUDE_CONFIG_DIR_ENV,
   CLAUDE_DEFAULT_RESPONSE_TIMEOUT_MS,
   CLAUDE_DEFAULT_STARTUP_TIMEOUT_MS,
   CLAUDE_MODEL_ENV,
@@ -24,6 +26,7 @@ export const codingAgentExecutorPackage: ExecutorPackageManifest = {
     CODING_HARNESS_ENV,
     CLAUDE_BIN_ENV,
     CLAUDE_MODEL_ENV,
+    CLAUDE_CONFIG_DIR_ENV,
     CLAUDE_PASS_ENV_ENV,
     CLAUDE_STARTUP_TIMEOUT_ENV,
     CLAUDE_RESPONSE_TIMEOUT_ENV,
@@ -48,6 +51,12 @@ export const piHarnessModule = fileURLToPath(new URL("./pi.js", import.meta.url)
 export interface ClaudeCodeBindingOptions {
   command?: string;
   model?: string;
+  /**
+   * Absolute path of the Claude Code config dir (its login and `settings.json`),
+   * which picks the account or gateway this binding uses. Default: the
+   * executor's `CLAUDE_CONFIG_DIR`, then `~/.claude`.
+   */
+  configDir?: string;
   apiKey?: string;
   /** Extra environment variable names Claude Code may see, beyond its minimal set. */
   passEnv?: string[];
@@ -88,6 +97,9 @@ export function codingAgentBinding(options: CodingAgentBindingOptions): Executor
   const claude = options.claude ?? {};
   const pi = options.pi ?? {};
   const timeoutMs = options.timeoutMs ?? DEFAULT_CODING_TIMEOUT_MS;
+  if (claude.configDir !== undefined && !path.isAbsolute(claude.configDir)) {
+    throw new Error("claude.configDir must be an absolute path");
+  }
   if (options.claude !== undefined || options.harness === claudeCodeHarnessModule) {
     const watchdogs = {
       startupTimeoutMs: claude.startupTimeoutMs ?? CLAUDE_DEFAULT_STARTUP_TIMEOUT_MS,
@@ -111,6 +123,7 @@ export function codingAgentBinding(options: CodingAgentBindingOptions): Executor
       [CODING_HARNESS_ENV]: options.harness,
       ...(claude.command !== undefined ? { [CLAUDE_BIN_ENV]: claude.command } : {}),
       ...(claude.model !== undefined ? { [CLAUDE_MODEL_ENV]: claude.model } : {}),
+      ...(claude.configDir !== undefined ? { [CLAUDE_CONFIG_DIR_ENV]: claude.configDir } : {}),
       ...(claude.passEnv !== undefined ? { [CLAUDE_PASS_ENV_ENV]: claude.passEnv.join(",") } : {}),
       ...(claude.startupTimeoutMs !== undefined ? { [CLAUDE_STARTUP_TIMEOUT_ENV]: String(claude.startupTimeoutMs) } : {}),
       ...(claude.responseTimeoutMs !== undefined ? { [CLAUDE_RESPONSE_TIMEOUT_ENV]: String(claude.responseTimeoutMs) } : {}),

@@ -73,7 +73,8 @@ async function setup(harnessOverrides: ClaudeCodeHarnessOptions = {}) {
     },
     ...over,
   });
-  const script = (start: Step[], resume: Step[] = []) => writeFile(scriptFile, JSON.stringify({ start, resume }), "utf8");
+  const script = (start: Step[], resume: Step[] = [], extra: Record<string, unknown> = {}) =>
+    writeFile(scriptFile, JSON.stringify({ start, resume, ...extra }), "utf8");
   const invocations = async (): Promise<Invocation[]> =>
     existsSync(logFile)
       ? (await readFile(logFile, "utf8")).split("\n").filter(Boolean).map((l) => JSON.parse(l) as Invocation)
@@ -244,6 +245,41 @@ describe("Claude Code harness", () => {
     expect(h.reservations()).toBe(2);
   });
 
+  it("charges each subagent request and reports the subagent's usage", async () => {
+    const h = await setup();
+    await h.script([{ agent: [{ bash: "echo found > found.txt" }, { text: "the subagent found it" }] }, { text: "done with a subagent" }]);
+    const result = await h.executor.execute({ assignment: "work" }, h.ctx());
+
+    expect(result).toMatchObject({ status: "ok", summary: "done with a subagent" });
+    expect(await readFile(path.join(h.worktree, "found.txt"), "utf8")).toBe("found\n");
+    // Two main-thread responses and two from the subagent, which the result's `usage` leaves out.
+    expect(h.reservations()).toBe(4);
+    expect(payload(result)).toMatchObject({ modelCalls: 4 });
+    expect(payload(result).usage).toEqual({ inputTokens: 40, outputTokens: 20, cacheReadTokens: 100, cacheWriteTokens: 20, costUsd: 0.0125 });
+    const [call] = await h.invocations();
+    expect(call!.argv).toContain("--forward-subagent-text");
+  });
+
+  it("counts a background subagent's requests and every turn it adds", async () => {
+    const h = await setup();
+    await h.script([{ agent: [{ text: "subagent step one" }, { text: "subagent step two" }], background: true }, { text: "launched a subagent" }]);
+    const result = await h.executor.execute({ assignment: "work" }, h.ctx());
+
+    expect(result).toMatchObject({ status: "ok", summary: "The background subagent finished." });
+    expect(h.reservations()).toBe(5);
+    expect(payload(result).usage).toEqual({ inputTokens: 50, outputTokens: 25, cacheReadTokens: 200, cacheWriteTokens: 40, costUsd: 0.025 });
+  });
+
+  it("stops Claude Code when a subagent's request is refused", async () => {
+    const h = await setup();
+    await h.script([{ agent: [{ text: "subagent looking" }, { hang: true }] }]);
+    let grants = 1;
+    const started = Date.now();
+    const result = await h.executor.execute({ assignment: "work" }, h.ctx({ usage: { reserveModelCall: async () => grants-- > 0 } }));
+    expect(result).toMatchObject({ status: "failed", summary: "model request budget exhausted" });
+    expect(Date.now() - started).toBeLessThan(5_000);
+  });
+
   it("stops the Claude Code process when the job is cancelled", async () => {
     const h = await setup();
     const controller = new AbortController();
@@ -338,6 +374,59 @@ describe("Claude Code harness", () => {
     expect(resumed!.history).toEqual([expect.stringContaining("Write the first draft"), "first turn done"]);
     expect(resumed!.prompt.startsWith(CONTINUATION_NOTICE)).toBe(true);
     expect(await readFile(path.join(h.sessions, `${ref}.jsonl`), "utf8")).toContain("second turn done");
+  });
+
+  it("reports only a resumed run's own usage, though Claude Code's totals span the session", async () => {
+    const h = await setup();
+    const own = { inputTokens: 10, outputTokens: 5, cacheReadTokens: 100, cacheWriteTokens: 20, costUsd: 0.0125 };
+    await h.script([{ text: "first" }], [{ text: "again" }]);
+    const first = await h.executor.execute({ assignment: "draft" }, h.ctx({ session: { dir: h.sessions } }));
+    const session = { dir: h.sessions, resume: (first as { sessionRef: string }).sessionRef };
+    const second = await h.executor.execute({ assignment: "revise" }, h.ctx({ session }));
+    await h.script([], [{ text: "again" }], { restoreCost: false });
+    const unrestored = await h.executor.execute({ assignment: "revise" }, h.ctx({ session }));
+
+    expect(payload(first).usage).toEqual(own);
+    expect(payload(second).usage).toEqual(own);
+    expect(payload(unrestored).usage).toEqual(own);
+
+    await h.script([{ text: "first" }], [{ text: "again" }]);
+    const direct = await createClaudeCodeHarness({ command: path.join(h.dir, "claude") }).createSession({
+      cwd: h.worktree,
+      readOnly: false,
+      tools: [],
+      reserveModelCall: async () => true,
+      sessionDir: path.join(h.dir, "direct-sessions"),
+    });
+    const runs = [await direct.run({ assignment: "draft" }), await direct.run({ assignment: "revise" })];
+    expect(runs.map((r) => [r.summary, r.usage])).toEqual([["first", own], ["again", own]]);
+  });
+
+  it("runs each binding on its own config dir, saving and restoring transcripts there", async () => {
+    const h = await setup();
+    const gateway = path.join(h.dir, "gateway-account");
+    const firstParty = path.join(h.dir, "first-party-account");
+    await h.script([{ text: "first" }], [{ text: "again" }]);
+    const byOption = h.makeExecutor({ configDir: gateway });
+    vi.stubEnv("GRAPHLOOM_CLAUDE_CONFIG_DIR", firstParty);
+    const byConfig = h.makeExecutor();
+
+    const refs: string[] = [];
+    for (const [executor, dir] of [[byOption, gateway], [byConfig, firstParty]] as const) {
+      const sessions = path.join(h.dir, `sessions-${path.basename(dir)}`);
+      const first = await executor.execute({ assignment: "draft" }, h.ctx({ session: { dir: sessions } }));
+      const ref = (first as { sessionRef: string }).sessionRef;
+      refs.push(ref);
+      await rm(path.join(dir, "projects"), { recursive: true });
+      const resumed = await executor.execute({ assignment: "revise" }, h.ctx({ session: { dir: sessions, resume: ref } }));
+      expect(resumed).toMatchObject({ status: "ok", summary: "again", sessionRef: ref });
+      const [project] = await readdir(path.join(dir, "projects"));
+      expect(await readFile(path.join(dir, "projects", project!, `${ref.slice("claude-".length)}.jsonl`), "utf8")).toContain("again");
+    }
+
+    const dirs = (await h.invocations()).map((call) => call.env.CLAUDE_CONFIG_DIR);
+    expect(dirs).toEqual([gateway, gateway, firstParty, firstParty]);
+    expect(existsSync(h.configDir)).toBe(false);
   });
 
   const REF = "claude-00000000-0000-4000-8000-000000000000";

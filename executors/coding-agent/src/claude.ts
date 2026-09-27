@@ -4,6 +4,7 @@ export { createClaudeCodeHarness, type ClaudeCodeHarnessOptions } from "./claude
 export {
   CLAUDE_API_KEY_CREDENTIAL,
   CLAUDE_BIN_ENV,
+  CLAUDE_CONFIG_DIR_ENV,
   CLAUDE_MODEL_ENV,
   CLAUDE_PASS_ENV_ENV,
   CLAUDE_RESPONSE_TIMEOUT_ENV,

@@ -3,6 +3,13 @@
 // step is one model response:
 //   { text } | { tool, args } | { parallel: [{ tool, args } | { bash }] } | { bash }
 //   | { structured } | { think: ms } | { hang: true } | { error } | { crash }
+//   | { agent: Step[], background?: true }
+// An `agent` step is an Agent tool call whose subagent makes the given responses,
+// forwarded with parent_tool_use_id. A background subagent runs after the turn's
+// result, then a follow-up turn reports it and ends with a second result.
+// Like Claude Code, running totals (`modelUsage`, `total_cost_usd`) cover the
+// whole session: they are appended to the transcript as a `cost-state` record
+// and restored from it on resume, unless the script sets `restoreCost: false`.
 // FAKE_CLAUDE_LOG names a file that gets one JSON line per invocation.
 // Both are read from the environment as it reaches the process.
 import { execSync } from "node:child_process";
@@ -23,14 +30,19 @@ const projectDir = path.join(process.env.CLAUDE_CONFIG_DIR, "projects", cwd.repl
 const transcript = path.join(projectDir, `${sessionId}.jsonl`);
 const prompt = readFileSync(0, "utf8");
 
+const script = JSON.parse(readFileSync(process.env.FAKE_CLAUDE_SCRIPT, "utf8"));
 let history = [];
+let restored = { totalCostUSD: 0, modelUsage: {} };
 if (resume !== undefined) {
   if (!existsSync(transcript)) {
     emit({ type: "result", subtype: "error_during_execution", is_error: true, session_id: sessionId });
     process.stderr.write(`No conversation found with session ID: ${sessionId}\n`);
     process.exit(1);
   }
-  history = readFileSync(transcript, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l).text);
+  const entries = readFileSync(transcript, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+  history = entries.filter((e) => e.text !== undefined).map((e) => e.text);
+  const costState = entries.filter((e) => e.type === "cost-state").at(-1);
+  if (costState !== undefined && script.restoreCost !== false) restored = costState;
 }
 
 const mcpFile = flag("--mcp-config");
@@ -66,38 +78,91 @@ let connected = false;
 if (server) connected = (await rpc("initialize", { protocolVersion: "2025-06-18", capabilities: {} })) !== undefined;
 emit({ type: "system", subtype: "init", session_id: sessionId, mcp_servers: server ? [{ name: "graphloom", status: connected ? "connected" : "failed" }] : [] });
 
-const script = JSON.parse(readFileSync(process.env.FAKE_CLAUDE_SCRIPT, "utf8"));
 let responses = 0;
+let turnResponses = 0;
 let lastText = "";
 let structured;
 let toolUses = 0;
+let cost = 0;
+/** This process's usage per model; the main thread and subagents run on different models. */
+const usage = {};
+const MAIN_MODEL = "claude-fake-main";
+const SUB_MODEL = "claude-fake-sub";
+const count = (model, tokens) => {
+  const u = (usage[model] ??= { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 });
+  for (const [k, v] of Object.entries(tokens)) u[k] += v;
+};
+const totals = () => {
+  const models = structuredClone(restored.modelUsage);
+  for (const [model, u] of Object.entries(usage)) {
+    const t = (models[model] ??= { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 });
+    for (const [k, v] of Object.entries(u)) t[k] += v;
+  }
+  return { totalCostUSD: restored.totalCostUSD + cost, modelUsage: models };
+};
+const assistant = (msgId, parent, content) => emit({ type: "assistant", message: { id: msgId, content }, parent_tool_use_id: parent });
+const toolResult = (parent, id, content) =>
+  emit({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: id, content }] }, parent_tool_use_id: parent });
 
-async function runTool(msgId, step) {
+async function runTool(msgId, step, parent) {
   const id = `toolu_${(toolUses += 1)}`;
   if (step.bash !== undefined) {
-    emit({ type: "assistant", message: { id: msgId, content: [{ type: "tool_use", id, name: "Bash", input: { command: step.bash } }] } });
+    assistant(msgId, parent, [{ type: "tool_use", id, name: "Bash", input: { command: step.bash } }]);
     const out = execSync(step.bash, { cwd, encoding: "utf8" });
-    emit({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: id, content: out }] } });
+    toolResult(parent, id, out);
     return;
   }
-  emit({ type: "assistant", message: { id: msgId, content: [{ type: "tool_use", id, name: `mcp__graphloom__${step.tool}`, input: step.args ?? {} }] } });
+  assistant(msgId, parent, [{ type: "tool_use", id, name: `mcp__graphloom__${step.tool}`, input: step.args ?? {} }]);
   const result = await rpc("tools/call", { name: step.tool, arguments: step.args ?? {} });
-  emit({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: id, content: result.content }] } });
+  toolResult(parent, id, result.content);
 }
 
-for (const step of resume !== undefined ? script.resume : script.start) {
+function result() {
+  count(MAIN_MODEL, { cacheReadInputTokens: 100, cacheCreationInputTokens: 20 });
+  cost += 0.0125;
+  const { totalCostUSD, modelUsage } = totals();
+  emit({
+    type: "result",
+    subtype: "success",
+    is_error: false,
+    result: structured !== undefined ? JSON.stringify(structured) : lastText,
+    session_id: sessionId,
+    num_turns: turnResponses,
+    usage: { input_tokens: 10 * turnResponses, output_tokens: 5 * turnResponses, cache_read_input_tokens: 100, cache_creation_input_tokens: 20 },
+    modelUsage,
+    total_cost_usd: totalCostUSD,
+    ...(structured !== undefined && flag("--json-schema") !== undefined ? { structured_output: structured } : {}),
+  });
+  turnResponses = 0;
+}
+
+const background = [];
+
+async function respond(step, parent) {
   const msgId = `msg_${(responses += 1)}`;
+  if (parent === null) turnResponses += 1;
+  count(parent === null ? MAIN_MODEL : SUB_MODEL, { inputTokens: 10, outputTokens: 5 });
   if (step.text !== undefined) {
-    lastText = step.text;
+    if (parent === null) lastText = step.text;
     record(step.text);
-    emit({ type: "assistant", message: { id: msgId, content: [{ type: "text", text: step.text }] } });
+    assistant(msgId, parent, [{ type: "text", text: step.text }]);
   } else if (step.tool !== undefined || step.bash !== undefined) {
-    await runTool(msgId, step);
+    await runTool(msgId, step, parent);
   } else if (step.parallel !== undefined) {
-    for (const call of step.parallel) await runTool(msgId, call);
+    for (const call of step.parallel) await runTool(msgId, call, parent);
+  } else if (step.agent !== undefined) {
+    const id = `toolu_${(toolUses += 1)}`;
+    assistant(msgId, parent, [{ type: "tool_use", id, name: "Agent", input: { prompt: "subtask", run_in_background: step.background === true } }]);
+    if (step.background) {
+      toolResult(parent, id, "Async agent launched");
+      background.push({ id, steps: step.agent });
+    } else {
+      for (const inner of step.agent) await respond(inner, id);
+      toolResult(parent, id, "subagent done");
+    }
   } else if (step.structured !== undefined) {
     structured = step.structured;
-    emit({ type: "assistant", message: { id: msgId, content: [{ type: "tool_use", id: "structured", name: "StructuredOutput", input: step.structured }] } });
+    assistant(msgId, parent, [{ type: "tool_use", id: "structured", name: "StructuredOutput", input: step.structured }]);
   } else if (step.think !== undefined) {
     for (let waited = 0; waited < step.think; waited += 100) {
       emit({ type: "system", subtype: "thinking_tokens", session_id: sessionId });
@@ -122,14 +187,14 @@ for (const step of resume !== undefined ? script.resume : script.start) {
   }
 }
 
-emit({
-  type: "result",
-  subtype: "success",
-  is_error: false,
-  result: structured !== undefined ? JSON.stringify(structured) : lastText,
-  session_id: sessionId,
-  num_turns: responses,
-  usage: { input_tokens: 10 * responses, output_tokens: 5 * responses, cache_read_input_tokens: 100, cache_creation_input_tokens: 20 },
-  total_cost_usd: 0.0125,
-  ...(structured !== undefined && flag("--json-schema") !== undefined ? { structured_output: structured } : {}),
-});
+for (const step of resume !== undefined ? script.resume : script.start) await respond(step, null);
+result();
+if (background.length > 0) {
+  for (const { id, steps } of background) {
+    for (const step of steps) await respond(step, id);
+    emit({ type: "system", subtype: "task_notification", tool_use_id: id, status: "completed", session_id: sessionId });
+  }
+  await respond({ text: "The background subagent finished." }, null);
+  result();
+}
+appendFileSync(transcript, `${JSON.stringify({ type: "cost-state", ...totals() })}\n`);
