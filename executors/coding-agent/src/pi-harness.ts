@@ -1,10 +1,11 @@
 import { createHash, randomBytes } from "node:crypto";
-import { existsSync, statSync } from "node:fs";
-import { realpath } from "node:fs/promises";
+import { existsSync, readFileSync, statSync } from "node:fs";
+import { realpath, rename, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import {
   createAgentSession,
+  createBashToolDefinition,
   createExtensionRuntime,
   ModelRuntime,
   SessionManager,
@@ -14,7 +15,8 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { CodingHarness, CodingRunRequest, CodingRunResult, CodingSession, CodingSessionOptions, CodingTool } from "./harness.js";
 import { bounded, inlineObjectSchema, scopeNotes } from "./assignment.js";
-import { PI_AGENT_DIR_ENV, PI_API_KEY_CREDENTIAL, PI_MODEL_ENV, PI_PROVIDER_ENV } from "./pi-config.js";
+import { envList, minimalEnv } from "./child-env.js";
+import { PI_AGENT_DIR_ENV, PI_API_KEY_CREDENTIAL, PI_MODEL_ENV, PI_PASS_ENV_ENV, PI_PROVIDER_ENV } from "./pi-config.js";
 
 export interface PiHarnessOptions {
   /** Pi provider id. Default: `GRAPHLOOM_PI_PROVIDER`. */
@@ -24,6 +26,12 @@ export interface PiHarnessOptions {
   /** Pi agent dir holding `auth.json` and `models.json`. Default: `GRAPHLOOM_PI_AGENT_DIR`, then `~/.pi/agent`. */
   agentDir?: string;
   systemPrompt?: string;
+  /**
+   * Extra environment variable names Pi's shell commands may see. They
+   * otherwise get only `PATH`, `HOME`, locale, proxy, and similar basics, never
+   * the executor's secrets. Default: `GRAPHLOOM_PI_PASS_ENV` (comma-separated).
+   */
+  passEnv?: string[];
   /** Builds the provider registry and auth store. Default: Pi's, from `agentDir`. */
   createModelRuntime?: (agentDir: string) => Promise<ModelRuntime>;
 }
@@ -63,7 +71,10 @@ export function createPiHarness(harnessOptions: PiHarnessOptions = {}): CodingHa
         throw new Error(`no Pi model configured: set ${PI_PROVIDER_ENV} and ${PI_MODEL_ENV}`);
       }
       const agentDir = harnessOptions.agentDir ?? process.env[PI_AGENT_DIR_ENV] ?? path.join(os.homedir(), ".pi", "agent");
-      const saved = openSessionManager(options);
+      const systemPrompt = harnessOptions.systemPrompt ?? DEFAULT_SYSTEM_PROMPT;
+      const passEnv = harnessOptions.passEnv ?? envList(process.env[PI_PASS_ENV_ENV]);
+      const settings: SessionSettings = { provider, modelId, systemPromptSha256: sha256(systemPrompt) };
+      const saved = openSessionManager(options, settings);
       const modelRuntime = await (harnessOptions.createModelRuntime ?? defaultModelRuntime)(agentDir);
       // The key is bound to the operator's provider; it never enters a prompt or the transcript.
       const apiKey = await options.credentials?.get(PI_API_KEY_CREDENTIAL);
@@ -74,7 +85,10 @@ export function createPiHarness(harnessOptions: PiHarnessOptions = {}): CodingHa
       for (const tool of options.tools) {
         if (RESERVED_TOOL_NAMES.has(tool.name)) throw new Error(`tool ${tool.name} collides with a Pi harness tool`);
       }
-      const systemPrompt = harnessOptions.systemPrompt ?? DEFAULT_SYSTEM_PROMPT;
+      // Pi's own bash would hand every command the executor's whole environment.
+      const bash = createBashToolDefinition(root, {
+        spawnHook: (spawn) => ({ ...spawn, env: minimalEnv(spawn.env, passEnv) }),
+      }) as unknown as ToolDefinition;
 
       let disposed: (() => void) | undefined;
       const session: CodingSession = {
@@ -97,7 +111,7 @@ export function createPiHarness(harnessOptions: PiHarnessOptions = {}): CodingHa
             resourceLoader: isolatedResourceLoader(systemPrompt),
             noTools: "all",
             tools: [...PI_BUILTIN_TOOLS, ...tools.map((t) => t.name)],
-            customTools: tools,
+            customTools: [bash, ...tools],
             sessionManager: saved.manager,
             settingsManager: SettingsManager.inMemory({
               compaction: { enabled: false },
@@ -150,8 +164,10 @@ export function createPiHarness(harnessOptions: PiHarnessOptions = {}): CodingHa
         },
       };
 
-      function finish(result: CodingRunResult): CodingRunResult {
-        return saved.ref !== undefined && existsSync(saved.file) ? { ...result, sessionRef: saved.ref } : result;
+      async function finish(result: CodingRunResult): Promise<CodingRunResult> {
+        if (saved.ref === undefined || !existsSync(saved.file)) return result;
+        await writeAtomic(settingsFile(saved.file), JSON.stringify(settings));
+        return { ...result, sessionRef: saved.ref };
       }
       return session;
     },
@@ -165,12 +181,33 @@ async function defaultModelRuntime(agentDir: string): Promise<ModelRuntime> {
   });
 }
 
+/** What a saved session ran under; a resume under other settings would pass their turns off as continuity. */
+interface SessionSettings {
+  provider: string;
+  modelId: string;
+  systemPromptSha256: string;
+}
+
+function sha256(text: string): string {
+  return createHash("sha256").update(text).digest("hex");
+}
+
+function settingsFile(sessionFile: string): string {
+  return sessionFile.replace(/\.jsonl$/, ".json");
+}
+
+async function writeAtomic(target: string, contents: string): Promise<void> {
+  const tmp = `${target}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
+  await writeFile(tmp, contents, "utf8");
+  await rename(tmp, target);
+}
+
 type SavedSession =
   | { manager: SessionManager; ref: string; file: string }
   | { manager: SessionManager; ref?: undefined; file?: undefined };
 
 /** Restore the session `resume` names or fail; never start a fresh one in its place. */
-function openSessionManager(options: CodingSessionOptions): SavedSession {
+function openSessionManager(options: CodingSessionOptions, settings: SessionSettings): SavedSession {
   if (options.resume === undefined) {
     if (options.sessionDir === undefined) return { manager: SessionManager.inMemory(options.cwd) };
     const ref = `pi-${randomBytes(6).toString("hex")}`;
@@ -191,6 +228,20 @@ function openSessionManager(options: CodingSessionOptions): SavedSession {
     throw new Error(`saved session ${ref} is corrupt`);
   }
   if (manager.buildSessionContext().messages.length === 0) throw new Error(`saved session ${ref} has no turns`);
+  let recorded: Partial<Record<keyof SessionSettings, unknown>>;
+  try {
+    recorded = JSON.parse(readFileSync(settingsFile(file), "utf8")) as typeof recorded;
+  } catch {
+    throw new Error(`saved session ${ref} has no readable settings record`);
+  }
+  if (recorded?.provider !== settings.provider || recorded.modelId !== settings.modelId) {
+    throw new Error(
+      `saved session ${ref} ran on ${String(recorded?.provider)}/${String(recorded?.modelId)}; this job asks for ${settings.provider}/${settings.modelId}`,
+    );
+  }
+  if (recorded.systemPromptSha256 !== settings.systemPromptSha256) {
+    throw new Error(`saved session ${ref} ran with a different system prompt`);
+  }
   return { manager, ref, file };
 }
 

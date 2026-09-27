@@ -11,7 +11,7 @@ import {
   CLAUDE_STARTUP_TIMEOUT_ENV,
 } from "./claude-config.js";
 import { CODING_HARNESS_ENV } from "./executors.js";
-import { PI_AGENT_DIR_ENV, PI_API_KEY_CREDENTIAL, PI_MODEL_ENV, PI_PROVIDER_ENV } from "./pi-config.js";
+import { PI_AGENT_DIR_ENV, PI_API_KEY_CREDENTIAL, PI_MODEL_ENV, PI_PASS_ENV_ENV, PI_PROVIDER_ENV } from "./pi-config.js";
 import { CODING_AGENT_RUN_ID } from "./run.js";
 
 /** Host-facing declaration; the host runs `entryModule` in an executor process and never imports it. */
@@ -30,6 +30,7 @@ export const codingAgentExecutorPackage: ExecutorPackageManifest = {
     PI_PROVIDER_ENV,
     PI_MODEL_ENV,
     PI_AGENT_DIR_ENV,
+    PI_PASS_ENV_ENV,
   ],
   // The agent edits the worktree and runs commands as the user.
   isolation: "unrestricted",
@@ -61,6 +62,8 @@ export interface PiBindingOptions {
   provider?: string;
   modelId?: string;
   agentDir?: string;
+  /** Extra environment variable names Pi's shell commands may see, beyond their minimal set. */
+  passEnv?: string[];
   apiKey?: string;
 }
 
@@ -114,6 +117,7 @@ export function codingAgentBinding(options: CodingAgentBindingOptions): Executor
       ...(pi.provider !== undefined ? { [PI_PROVIDER_ENV]: pi.provider } : {}),
       ...(pi.modelId !== undefined ? { [PI_MODEL_ENV]: pi.modelId } : {}),
       ...(pi.agentDir !== undefined ? { [PI_AGENT_DIR_ENV]: pi.agentDir } : {}),
+      ...(pi.passEnv !== undefined ? { [PI_PASS_ENV_ENV]: pi.passEnv.join(",") } : {}),
     },
     ...(Object.keys(credentials).length > 0 ? { credentials } : {}),
   };

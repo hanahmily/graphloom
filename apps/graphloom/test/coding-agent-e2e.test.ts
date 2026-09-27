@@ -485,7 +485,7 @@ describe("the Pi harness in the coding-agent executor process", () => {
     expect(agent).toMatchObject({ harness: "pi", modelCalls: 4, continued: false });
     expect(agent!.sessionRef).toMatch(/^pi-[0-9a-f]{12}$/);
     const [recorded] = state.agentSessions!;
-    expect(await readdir(recorded!.sessionDir)).toEqual([`${agent!.sessionRef}.jsonl`]);
+    expect((await readdir(recorded!.sessionDir)).sort()).toEqual([`${agent!.sessionRef}.json`, `${agent!.sessionRef}.jsonl`]);
     const tree = await readTree(report.stateDir);
     expect(tree).not.toContain(TOKEN);
     expect(tree).not.toContain(PI_KEY);

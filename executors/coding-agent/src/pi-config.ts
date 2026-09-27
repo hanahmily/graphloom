@@ -5,3 +5,5 @@ export const PI_PROVIDER_ENV = "GRAPHLOOM_PI_PROVIDER";
 export const PI_MODEL_ENV = "GRAPHLOOM_PI_MODEL";
 /** Pi agent dir holding `auth.json` and `models.json`. Default: `~/.pi/agent`. */
 export const PI_AGENT_DIR_ENV = "GRAPHLOOM_PI_AGENT_DIR";
+/** Comma-separated names of extra environment variables Pi's shell commands may see. */
+export const PI_PASS_ENV_ENV = "GRAPHLOOM_PI_PASS_ENV";

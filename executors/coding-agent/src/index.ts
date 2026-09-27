@@ -27,6 +27,6 @@ export {
   CLAUDE_RESPONSE_TIMEOUT_ENV,
   CLAUDE_STARTUP_TIMEOUT_ENV,
 } from "./claude-config.js";
-export { PI_AGENT_DIR_ENV, PI_API_KEY_CREDENTIAL, PI_MODEL_ENV, PI_PROVIDER_ENV } from "./pi-config.js";
+export { PI_AGENT_DIR_ENV, PI_API_KEY_CREDENTIAL, PI_MODEL_ENV, PI_PASS_ENV_ENV, PI_PROVIDER_ENV } from "./pi-config.js";
 export type { ClaudeCodeHarnessOptions } from "./claude-harness.js";
 export type { PiHarnessOptions } from "./pi-harness.js";

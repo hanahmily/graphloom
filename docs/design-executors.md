@@ -257,6 +257,10 @@ module at `piHarnessModule` configured from the environment):
 
 - Pi's built-in tools are all active: `read`, `bash`, `edit`, `write`, `grep`,
   `find`, and `ls`, next to the job tools.
+- Pi runs inside the executor process, but its `bash` commands get the same
+  minimal environment as Claude Code (without `CLAUDE_CONFIG_DIR`), not the
+  executor's. Other variables must be named in `passEnv`
+  (`GRAPHLOOM_PI_PASS_ENV`, comma-separated).
 - Every provider request reserves budget through `reserveModelCall()` first. A
   refusal ends the session with `model request budget exhausted`, and cancelling
   the job aborts the session.
@@ -269,8 +273,11 @@ module at `piHarnessModule` configured from the environment):
   model of the same provider with `harnessOptions.modelId`. An API key bound as
   the `pi-api-key` credential (`codingAgentBinding({ harness, pi: { apiKey } })`)
   is set on the provider runtime only, never in prompts or the transcript.
-- Sessions are saved as `<sessionDir>/<sessionRef>.jsonl`. A missing, empty,
-  or corrupt session file fails a resume with a clear reason.
+- Sessions are saved as `<sessionDir>/<sessionRef>.jsonl`, with
+  `<sessionRef>.json` recording the provider, model, and system prompt digest.
+  A missing, empty, or corrupt session file fails a resume with a clear reason.
+  So do a missing settings record and a different provider, model, or system
+  prompt, before any provider request.
 
 ### Continuing an agent session
 
