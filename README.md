@@ -19,7 +19,8 @@ Active code lives under `packages/` (`sdk`, `controller`, `plugin-host`,
 and `apps/graphloom`. The SDK, isolated plugin host, durable controller lifecycle,
 Pi supervisor, executor packages, and qualified repair workflows are implemented
 and covered by scripted integration tests. Live-provider qualification and the
-complete local-release scenarios remain outstanding. Earlier Go sources are frozen under
+complete local-release scenarios remain outstanding. [Agent-host mode](docs/design-agent-host.md) is newly designed and not implemented.
+Earlier Go sources are frozen under
 [`legacy/go`](legacy/go) for reference and are not part of CI.
 
 ```sh
@@ -69,6 +70,14 @@ with the operator's permissions. Claude's file-tool permission checks restrict
 file mutations to the job scope and deny shell commands for read-only jobs;
 writer shell commands still require trust. See the
 [permission and cancellation design](docs/design-claude-live-mode.md).
+
+## Agent-host mode (proposed)
+
+An existing coding-agent session can be the primary worker and supervisor, using
+GraphLoom tools for assignments, executors, evidence, and recovery. This mode needs
+no separate Pi supervisor, and retains separate sessions for independent review.
+The first adapter targets a Claude Code plugin; the existing headless Claude worker
+is not that plugin. See the [agent-host design](docs/design-agent-host.md).
 
 ## Extend and repair
 

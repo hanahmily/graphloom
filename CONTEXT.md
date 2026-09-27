@@ -65,3 +65,24 @@ A proposed implementation change with reproduced defect evidence, regression
 checks, and independent review, eligible for an authorized version transition.
 Each attempt patches an isolated snapshot of a specific base plugin version so
 concurrent candidates cannot share or mutate one another's trees.
+
+**Driver mode**:
+The run's choice of who supplies its continuation: the loom itself in standalone
+mode, or an attached coding-agent host in agent-host mode.
+
+**Primary host**:
+The attached agent session that performs assigned work and supplies supervisor
+judgment during recovery. It cannot independently review its own output.
+
+**Host claim**:
+A time-bounded assignment of admitted work to the primary host for a particular
+run and attempt. Reporting completion does not itself establish acceptance.
+
+**Host slice**:
+One admitted unit of primary-host work, whether implementation, a recovery proposal,
+or repair editing, counted independently from the host's model requests.
+
+**Host epoch**:
+The durable fencing number for a run's primary-host binding. Rebind, claim expiry,
+detach, and operator stop advance it; a transport reconnect to a still-valid
+binding preserves it. Old-epoch requests cannot mutate the run or confirm drainage.

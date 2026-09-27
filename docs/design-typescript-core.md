@@ -1,11 +1,12 @@
 # GraphLoom: TypeScript graphs and repairable execution
 
-Status: current design direction, revised 2026-09-24; implementation partial.
+Status: current design direction, revised 2026-09-27; implementation partial.
 This document supersedes the native Go plugin design in [core-design.md](core-design.md)
 and its [Go package plan](codebase.md). Active TypeScript packages implement parts
 of this design, including durable execution, Pi recovery, executor extensions,
 and qualified repair. Live-provider qualification and full local-release
 verification remain pending.
+[Agent-host mode](design-agent-host.md) is newly designed, not implemented.
 Earlier Go source is retained under legacy/go.
 
 ## 1. Decisions and scope
@@ -46,6 +47,22 @@ multiple configured model providers, serial jobs, and an isolated Git worktree.
 The example is **Write → Review**, producing a local file change. It includes bounded recovery and one tested plugin-repair transition.
 No RSI, cross-run memory, portal, distributed scheduler, or automatic publication
 is part of this release. Multiple roles do not require parallel execution.
+
+### Execution modes
+
+The existing **standalone** mode uses the GraphLoom CLI as driver and Pi as the
+supervisor backend. The proposed **agent-host** mode attaches an existing coding
+session, which executes admitted implementation work and supplies supervisor
+judgment during recovery. It requires no second Pi supervisor. Both use the same
+graph, controller state, executor lifecycle, validation, and repair admission.
+
+Mode is selected at invocation and pinned for a run; task YAML remains unchanged.
+One primary host can fulfill worker and supervisor roles in normal and recovery
+phases, but
+cannot fulfill an independent reviewer requirement for its own work. Independent
+review uses another session. See [agent-host mode](design-agent-host.md) for the
+host protocol, evidence, leases, accounting profiles, and implementation milestones.
+Its mode-specific session and accounting rules extend the standalone defaults below.
 
 ### Why TypeScript replaces native Go plugins
 
@@ -94,6 +111,11 @@ branch only when that record names this run, so an edited state file cannot
 point it at another run. Uncommitted worktree changes, ignored files included,
 and branch commits beyond the pinned head are discarded only with `--force`, and
 the branch is deleted only at the tip that was checked.
+For agent-host runs, deletion also checks durable host quiescence and execution
+reconciliation under the run lock. It refuses while native work may still be
+active or effects remain unreconciled, even after the controller service exits.
+`--force` does not bypass this check or permit removal of the reconciliation
+journal; see the [host lifecycle contract](design-agent-host.md#leases-disconnection-stop-and-resume).
 
 Intake pins the task, repository HEAD, graph definition, plugin bundle, runtime
 profile, grants, and finite budgets. Additional graph-specific options wait for
@@ -166,11 +188,16 @@ process for every replacement version. Node provides subprocesses and IPC throug
 [`node:child_process`](https://nodejs.org/api/child_process.html).
 
 Process separation contains ordinary crashes; it is not a malicious-code sandbox.
-The Linux runner must enforce filesystem, process, credential, and network scopes
-for jobs. Plugin callbacks and validators get only immutable bundle files and
-explicit evidence, not controller state or a writable target repository. When the
-supervisor is admitted to repair source, its Pi session receives a **separate
-writable candidate tree** (never the user worktree or live install). Node's `vm`
+Execution profiles must distinguish enforced restrictions from cooperative policy
+and post-execution checks. The current coding harnesses permit unrestricted native
+tools and detect some worktree violations afterward; they do not provide OS
+confinement or general network enforcement. A profile requiring those guarantees
+must reject unsupported execution. Agent-host mode records these capabilities at
+attachment, as defined in its [authority contract](design-agent-host.md#authority-accounting-and-honest-limits).
+Plugin callbacks and validators should get only immutable bundle files and explicit
+evidence, not controller state or a writable target repository. Builders and repair
+authors get a separate candidate tree; a working directory alone does not confine
+them. Node's `vm`
 is not a security mechanism; do not use it as the isolation claim.
 [Node VM documentation](https://nodejs.org/api/vm.html).
 
@@ -356,22 +383,26 @@ source through durable `normal` and `recovery` modes. Both use the same admissio
 and execution interface. Workers and reviewers report typed results or conflicts;
 they do not route the run or modify receipts.
 
-The run has one logical supervisor session, created lazily, continued across
-recovery episodes, and restored from durable context if its provider session is
-lost. All supervisor diagnosis, **source repair coding**, repair coordination, and
-activation requests for that run use this session. The supervisor writes qualified
-plugin/validator patches **itself** through the Pi SDK against an admitted candidate
-tree (see §7). Worker agents and the **independent patch reviewer** use separate
-roles/sessions; the reviewer must not be the same agent that authored the patch.
-No supervisor round trip is required on the happy path.
+The run has one logical supervisor identity, continued across recovery episodes
+and restored from durable context if its host/provider session is lost. All
+supervisor diagnosis, **source repair coding**, repair coordination, and activation
+requests use that identity. In standalone mode this is a Pi session created lazily;
+workers and the independent patch reviewer use separate sessions. In agent-host
+mode the attached primary session performs normal assigned coding and fulfills the
+supervisor role during recovery. An explicit host rebind preserves logical identity,
+records the new conversation, and resets no budgets. The supervisor writes repairs
+itself against admitted candidate trees (see §7); an independent reviewer must use
+a different session. No supervisor decision round trip is required on the happy
+path. A host acting as a worker does not simultaneously own recovery decisions.
 
-### Pi SDK session implementation
+### Standalone Pi SDK session implementation
 
 Use the pinned `@earendil-works/pi-coding-agent@0.87.1` for the supervisor runtime.
 The initial model is `minimax-cn/MiniMax-M3`, using a private command reference to
 the existing OpenCode MiniMax CN credential. SDK connectivity and project type
-checks have passed; supervisor recovery and cross-provider switching remain to be
-implemented. See the [verified MiniMax setup](design-pi-supervisor.md#initial-minimax-configuration).
+checks have passed. Recovery and model switching are implemented with faux-provider
+verification; live recovery/provider qualification remains outstanding. See the
+[verified MiniMax setup](design-pi-supervisor.md#initial-minimax-configuration).
 
 Model changes among configured DeepSeek, MiniMax, OpenAI, and Anthropic providers preserve one
 logical run-wide supervisor session. The controller owns model-switch admission,
@@ -403,7 +434,7 @@ The supervisor's repair scope covers every failing plugin implementation surface
 prompts, available model settings, task construction, validation logic, artifact
 handling, error handling, and routing between existing steps. It may investigate,
 run repair jobs, reenter existing stages, and **write** qualified source patches
-through its Pi session against admitted candidate trees. Prefer another
+through its selected supervisor session against admitted candidate trees. Prefer another
 authorized remedy while budget and authority remain; Stop only when further progress
 is blocked as above. No plugin-specific repair allowlist is required. This is a
 duty to attempt repairs aggressively within bounds—not a guarantee of success when
@@ -450,18 +481,21 @@ itself be patched through the version procedure below.
 
 ## 7. Repairing plugin code or a defective validator
 
-The run supervisor's **Pi SDK session writes the repair** into an isolated candidate
-copy; an **independent read-only reviewer** (separate session/role) evaluates it.
-There is no second non-Pi “repair agent” that owns coding—the supervisor codes via
-Pi. The original bundle and failure evidence remain immutable. Repair source lives
+The run supervisor **writes the repair** into an isolated candidate copy using
+its Pi session in standalone mode, or the attached primary session in agent-host
+mode. An **independent read-only reviewer** (separate session/role) evaluates it.
+The supervisor remains the patch author; repair is not automatically delegated to
+a second coding agent. The original bundle and failure evidence remain immutable.
+Repair source lives
 outside the target repository, so it cannot accidentally enter the user's
 deliverable diff.
 
 **Snapshot base for every qualification.** `QualifyRepair` always starts from an
 immutable snapshot of a specific plugin version (normally the run's active pinned
 bundle: source, lockfile, build inputs, and digests). The controller materializes
-that snapshot into an isolated candidate tree **before** the supervisor's Pi session
-is granted write tools scoped to that tree. Concurrent or overlapping repair
+that snapshot into an isolated candidate tree **before** the supervisor session
+receives the candidate-edit assignment and its write scope. Concurrent or overlapping
+repair
 attempts each get their own snapshot and tree; they never share a writable working
 copy, and they never mutate the live installed bundle or another candidate. A
 revised patch forks again from the recorded base snapshot (or from an explicit
@@ -482,18 +516,22 @@ A source repair or validator substitution follows the same bounded procedure:
 1. **Diagnose and reserve.** Identify the disputed requirement or route, faulty
    version, candidate revision, failure evidence, repair authority, and one shared
    correction reservation. Snapshot the faulty plugin version into an isolated
-   candidate tree before editing. Admit Pi coding tools for the supervisor session
-   **only** against that candidate cwd. A patch cannot change the repair policy that
+   candidate tree before editing. Admit candidate coding for the supervisor session
+   **only** against that candidate cwd, under the declared execution profile. A patch
+   cannot change the repair policy that
    admits it. Only one activation may proceed at a time under the run lock; other
    in-flight candidates remain durable artifacts until activated, rejected, or
    superseded.
 2. **Reproduce.** Add a focused regression case showing the defect in the original
    implementation. Include valid and invalid cases derived from the requirement.
    For an exact-byte gate, include missing newline, wrong content, and extra files.
-3. **Patch (supervisor via Pi).** The same logical supervisor Pi session patches
-   the isolated plugin candidate with Pi's full coding toolset, shell included,
-   rooted at the candidate; it may build and test there, but step 4 is the
-   controller's own check. Preserve the readable requirement,
+3. **Patch (supervisor session).** The same logical supervisor patches the isolated
+   plugin candidate using Pi coding tools in standalone mode or native host tools
+   in agent-host mode. Tools operate under the declared profile, rooted at the
+   candidate; exploratory builds/tests do not replace step 4's controller check.
+   Agent-host repair uses a durable edit offer and settlement rather than blocking
+   a controller callback on the very host that issued it. Preserve the readable
+   requirement,
    complete ordered step list, original test corpus, and original failing result.
    A changed old test needs an explicit defect explanation and independent review;
    deleting negative coverage or loosening expected outcomes is not a repair shortcut.
@@ -506,7 +544,7 @@ A source repair or validator substitution follows the same bounded procedure:
    requirement, patch, old/new observations, and test evidence. It must evaluate
    equivalence to the required outcome and remaining gaps. Its receipt binds the
    exact source/build digests and **cannot be authored by the supervisor session
-   that wrote the patch**.
+   that wrote the patch**, regardless of driver mode.
 6. **Activate.** The controller admits the exact qualified artifact and records a
    version transition as described below. A rejected or revised patch needs fresh
    qualification; previously failed candidates remain visible.
@@ -600,8 +638,10 @@ Jobs exchange explicit immutable artifacts and the admitted workspace revision
 through the controller. Agents return a typed result envelope containing run/job
 identity, revision, status, summary, outputs, and evidence references. The host
 rejects stale identities, escaping paths, symlinks, and oversized results, then
-snapshots outputs after the child finishes. Workers can write only their assigned
-worktree/output scope; reviewers and validators have read-only candidate access.
+snapshots outputs after the child finishes. Worker assignments permit only their
+worktree/output scope; reviewers and validators require read-only candidate access.
+Enforcement depends on the admitted profile. Unrestricted tools receive these as
+policy and are checked afterward; do not claim this prevents arbitrary writes.
 Shared Git metadata, plugin repair trees, and controller state are separate scopes.
 
 One private durable state contains pinned inputs, active versions/bindings, stages,
@@ -628,6 +668,14 @@ progress fields. No automatic commit, push, merge, or external publication occur
 | Individual job or agent invocation | 20 minutes |
 | Plugin protocol callback | 10 seconds |
 | Active run execution time | 4 hours |
+
+These are standalone defaults. Agent-host mode preserves correction, job, decision,
+and active-run limits while using separate coding/proposal deadlines, adding a
+distinct host-slice allowance, and declaring explicit usage coverage; see [host accounting](design-agent-host.md#authority-accounting-and-honest-limits).
+An external host without provider interception cannot promise this exact model-call
+ceiling. Even the current standalone Claude harness has documented request-count
+limitations; inspect must disclose the accounting profile rather than imply a
+hard ceiling it cannot enforce.
 
 Reserve before effects. One repair candidate and its first trial use one correction
 reservation; a revised patch or repeated failed trial requires another. Diagnostic
@@ -716,6 +764,10 @@ executor, provide independently packaged GitHub support, then qualify supervisor
 recovery and replacement through that same interface. These are design commitments,
 not implemented capabilities or additional graph steps. See the
 [delivery and checks](design-executors.md#delivery-and-checks).
+
+Agent-host delivery is a separate H1–H4 sequence in the
+[host plan](design-agent-host.md#delivery-and-acceptance). It reuses these modules
+and does not replace outstanding standalone qualification.
 
 Proposed package seams are npm workspaces under `packages/`: `sdk` (value/wire
 contracts), `controller` (durable state and admission), `plugin-host` (process
