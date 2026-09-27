@@ -228,15 +228,18 @@ function openSessionManager(options: CodingSessionOptions, settings: SessionSett
     throw new Error(`saved session ${ref} is corrupt`);
   }
   if (manager.buildSessionContext().messages.length === 0) throw new Error(`saved session ${ref} has no turns`);
-  let recorded: Partial<Record<keyof SessionSettings, unknown>>;
+  let recorded: Partial<Record<keyof SessionSettings, unknown>> | null;
   try {
     recorded = JSON.parse(readFileSync(settingsFile(file), "utf8")) as typeof recorded;
   } catch {
+    recorded = null;
+  }
+  if (typeof recorded !== "object" || recorded === null || Array.isArray(recorded)) {
     throw new Error(`saved session ${ref} has no readable settings record`);
   }
-  if (recorded?.provider !== settings.provider || recorded.modelId !== settings.modelId) {
+  if (recorded.provider !== settings.provider || recorded.modelId !== settings.modelId) {
     throw new Error(
-      `saved session ${ref} ran on ${String(recorded?.provider)}/${String(recorded?.modelId)}; this job asks for ${settings.provider}/${settings.modelId}`,
+      `saved session ${ref} ran on ${String(recorded.provider)}/${String(recorded.modelId)}; this job asks for ${settings.provider}/${settings.modelId}`,
     );
   }
   if (recorded.systemPromptSha256 !== settings.systemPromptSha256) {

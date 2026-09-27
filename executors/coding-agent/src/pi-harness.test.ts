@@ -340,8 +340,16 @@ describe("Pi coding harness", () => {
     expect(await resume(h.executor, { modelId: "another-model" })).toEqual(
       restoreFailure(`saved session ${ref} ran on ${model}; this job asks for ${h.provider}/another-model`),
     );
+    const switched = (await setup({ provider: "another-provider", modelId: h.faux.getModel().id })).executor;
+    expect(await resume(switched)).toEqual(
+      restoreFailure(`saved session ${ref} ran on ${model}; this job asks for another-provider/${h.faux.getModel().id}`),
+    );
     const prompted = (await setup({ provider: h.provider, modelId: h.faux.getModel().id, systemPrompt: "Another prompt." })).executor;
     expect(await resume(prompted)).toEqual(restoreFailure(`saved session ${ref} ran with a different system prompt`));
+    for (const record of ["null", "[]", "{not json"]) {
+      await writeFile(path.join(h.sessions, `${ref}.json`), record, "utf8");
+      expect(await resume(h.executor)).toEqual(restoreFailure(`saved session ${ref} has no readable settings record`));
+    }
     await rm(path.join(h.sessions, `${ref}.json`));
     expect(await resume(h.executor)).toEqual(restoreFailure(`saved session ${ref} has no readable settings record`));
     expect(h.faux.state.callCount).toBe(1);
