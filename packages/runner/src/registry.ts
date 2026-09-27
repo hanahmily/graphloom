@@ -56,6 +56,12 @@ export interface ChildExecutorRunnerOptions {
   fallback: Runner;
   /** Per-call timeout (ms). Default 30_000. */
   timeoutMs?: number;
+  /**
+   * After a timeout or stop, how long the executor gets to stop what it
+   * started (its abort signal fires) before its process is killed. The job
+   * settles only once the process is gone. Default 10_000.
+   */
+  stopGraceMs?: number;
   cwd?: string;
   env?: NodeJS.ProcessEnv;
   /** Override worker entry (tests). */
@@ -319,6 +325,7 @@ export function createChildExecutorRunner(
   assertNoBuiltinShadowing(options.executorIds, options.builtin === true);
   const served = new Set(options.executorIds);
   const timeoutMs = options.timeoutMs ?? 30_000;
+  const stopGraceMs = options.stopGraceMs ?? 10_000;
   const workerModule =
     options.workerModule ??
     fileURLToPath(new URL("./executor-worker.js", import.meta.url));
@@ -408,15 +415,27 @@ export function createChildExecutorRunner(
         const rl = createInterface({ input: child.stdout, crlfDelay: Infinity });
         let settled = false;
         const onAbort = () => finish(failed("executor cancelled: run stopped"));
-        const finish = (result: JobResult) => {
+        /** `executing`: the executor may still be running, so it gets the stop grace to clean up. */
+        const finish = (result: JobResult, executing = true) => {
           if (settled) return;
           settled = true;
           rl.close();
           clearTimeout(timer);
           ctx.signal?.removeEventListener("abort", onAbort);
           child.stdin.end();
-          child.kill("SIGKILL");
-          resolve(redactCredentials(result, options.credentials));
+          const settle = () => resolve(redactCredentials(result, options.credentials));
+          if (!executing || child.exitCode !== null || child.signalCode !== null) {
+            child.kill("SIGKILL");
+            settle();
+            return;
+          }
+          // SIGTERM aborts the executor's signal, so it can stop processes it started in their own groups.
+          const kill = setTimeout(() => child.kill("SIGKILL"), stopGraceMs);
+          child.once("exit", () => {
+            clearTimeout(kill);
+            settle();
+          });
+          child.kill("SIGTERM");
         };
         ctx.signal?.addEventListener("abort", onAbort, { once: true });
 
@@ -482,18 +501,18 @@ export function createChildExecutorRunner(
             return;
           }
           if (msg.kind === "ok") {
-            finish(resultFromOutput(msg.output, ctx));
+            finish(resultFromOutput(msg.output, ctx), false);
             return;
           }
-          finish(failed(msg.message ?? "executor child error"));
+          finish(failed(msg.message ?? "executor child error"), msg.kind !== "error");
         });
 
         child.on("error", (err) => {
-          finish(failed(`executor child spawn failed: ${err.message}`));
+          finish(failed(`executor child spawn failed: ${err.message}`), false);
         });
         child.on("exit", (code) => {
           if (!settled) {
-            finish(failed(`executor child exited (code=${String(code)}): ${stderr.join("")}`));
+            finish(failed(`executor child exited (code=${String(code)}): ${stderr.join("")}`), false);
           }
         });
 

@@ -319,6 +319,8 @@ describe("the coding agent's job timeout", () => {
       runId: "slow-limited",
     });
     expect(limited).toMatchObject({ status: "stopped", stopReason: "job failed: executor child timed out after 500ms" });
+    const { worktreePath } = await loadRunState(limited.stateDir);
+    expect(await readFile(path.join(worktreePath, "GREETING.txt"), "utf8").catch(() => undefined)).toBeUndefined();
   });
 });
 

@@ -79,8 +79,14 @@ own executor process. That process receives only its bound credentials over
 stdin, its declared configuration, and its effect grant, which defaults to
 `read`. Every non-empty bound credential is redacted from job results, and an
 empty credential is rejected. A job that outlasts the binding's `timeoutMs`,
-or the runner's default of 30 seconds when the binding sets none, fails and
-its process is killed.
+or the runner's default of 30 seconds when the binding sets none, fails.
+
+On a timeout or a run stop, the runner sends the executor process SIGTERM.
+That aborts the executor's `signal` and refuses the tool and model requests it
+is still waiting on, so it can stop processes it started in their own process
+groups, such as an agent CLI and its commands. The job settles only when the
+process has exited, or after a 10-second grace, when it is killed. Processes an
+executor leaves behind after ignoring its signal are not tracked.
 
 The process runs under Node's permission model. It may read only its own
 package and the dependencies Node resolves for it. File writes, child

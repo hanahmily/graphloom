@@ -7,6 +7,7 @@
  *   ← { kind: "tool_call", seq, toolCallId, tool, input }   → { kind: "tool_result", seq, result }
  *   ← { kind: "model_call", seq }                           → { kind: "model_call_result", seq, granted }
  *   ← { kind: "ok", output } | { kind: "error", message }
+ *   SIGTERM stops the job: `ctx.signal` aborts and unanswered requests are refused.
  *
  * Entry module must export `executors` as an array of ExecutorDefinition
  * (from defineExecutor). The parent never imports executor code, so the pinned
@@ -67,9 +68,21 @@ function refusal(def: {
 let seq = 0;
 const waiting = new Map<number, (value: unknown) => void>();
 
+// The host stops a job with SIGTERM: the executor's signal aborts so it can stop
+// what it started, and requests the host will no longer answer are refused.
+const abort = new AbortController();
+process.on("SIGTERM", () => {
+  abort.abort();
+  for (const [id, resolve] of waiting) {
+    waiting.delete(id);
+    resolve(undefined);
+  }
+});
+
 function request(message: Record<string, unknown>): Promise<unknown> {
   seq += 1;
   const id = seq;
+  if (abort.signal.aborted) return Promise.resolve(undefined);
   return new Promise((resolve) => {
     waiting.set(id, resolve);
     reply({ ...message, seq: id });
@@ -91,6 +104,7 @@ async function execute(req: Record<string, any>): Promise<void> {
     req.credentials && typeof req.credentials === "object" ? req.credentials : {};
   const ctx: Record<string, unknown> = {
     ...(req.ctx ?? {}),
+    signal: abort.signal,
     credentials: {
       async get(name: string) {
         return Object.hasOwn(credentials, name) ? credentials[name] : undefined;
@@ -100,8 +114,11 @@ async function execute(req: Record<string, any>): Promise<void> {
   if (Array.isArray(req.tools)) {
     ctx.tools = {
       bindings: req.tools,
-      call: (call: { toolCallId: string; tool: string; input: unknown }) =>
-        request({ kind: "tool_call", toolCallId: call.toolCallId, tool: call.tool, input: call.input }),
+      call: async (call: { toolCallId: string; tool: string; input: unknown }) =>
+        (await request({ kind: "tool_call", toolCallId: call.toolCallId, tool: call.tool, input: call.input })) ?? {
+          status: "failed",
+          summary: "executor stopped before the tool call was answered",
+        },
     };
   }
   if (req.usage === true) {
