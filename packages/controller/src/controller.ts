@@ -23,7 +23,7 @@ import {
   type RecreateHostFn,
   type RepairDeps,
 } from "./repair-lifecycle.js";
-import { admitValidation } from "./admit.js";
+import { admitValidation, assertLiveWorkspaceMatchesEvidence, invalidateFromStage } from "./admit.js";
 import type { AdmissionValidator } from "./admit.js";
 import { resolveBundleEntry } from "./bundle.js";
 import { createHostValidators } from "./host-validators.js";
@@ -453,6 +453,7 @@ export function createController(): Controller {
 
         state = reconcileRepairJournal(state);
         state = await reconcileSwitchJournal(state);
+        state = await reassessAcceptedWorkspace(state);
         state = bumpGeneration({ ...state, status: "running" }, "resume");
         await clearStopRequest(stateDir);
         await saveRunState(state);
@@ -611,6 +612,40 @@ export function createController(): Controller {
       return this.resume(resumeReq);
     },
   };
+}
+
+/** Accepted evidence survives restart only while its observed inputs still match. */
+async function reassessAcceptedWorkspace(state: DurableRunState): Promise<DurableRunState> {
+  // The last Observe revision may belong to a later candidate; each receipt is
+  // assessed against its own immutable evidence, not that global revision.
+  const { workspaceRevision: _revision, ...snapshot } = state;
+  void _revision;
+  for (const stage of state.definition.stages) {
+    for (const receipt of state.receipts.filter((r) => r.valid && r.stageId === stage.id)) {
+      const evidence = receipt.evidenceRefs.map((ref) => state.evidence.find((e) => e.ref === ref));
+      const missing = evidence.some((e) => e === undefined);
+      const drift = missing || await assertLiveWorkspaceMatchesEvidence(
+        snapshot,
+        evidence.filter((e) => e !== undefined),
+      ).catch(() => "accepted evidence is no longer readable");
+      if (!drift) continue;
+
+      const invalidated = invalidateFromStage(snapshot, stage.id, state.definition);
+      // Discard routing state that may assume the invalidated prerequisites.
+      // Resume's generation fence makes historical observations unavailable to
+      // validation while preserving them for audit.
+      const { privateState: _privateState, ...next } = invalidated;
+      void _privateState;
+      return {
+        ...next,
+        current: {
+          stageId: stage.id,
+          attempt: state.current.stageId === stage.id ? state.current.attempt + 1 : 1,
+        },
+      };
+    }
+  }
+  return state;
 }
 
 function resolveValidators(

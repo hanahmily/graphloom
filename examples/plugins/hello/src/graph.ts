@@ -259,7 +259,7 @@ function advanceReview(view: RunView, state: HelloPrivateState): GraphDecision {
     );
   }
 
-  const freshEvidence = view.evidence.slice(state.reviewEvidenceFromIndex);
+  const freshEvidence = freshReviewEvidence(view, state);
   const check = independentReviewValidator.evaluate({
     requirementId: REQUIREMENT_REVIEW,
     statement: definition.requirements[1]!.statement,
@@ -358,12 +358,18 @@ function latestReviewSinceCutoff(
   view: RunView,
   state: HelloPrivateState,
 ): ReviewVerdictPayload | undefined {
-  const slice = view.evidence.slice(state.reviewEvidenceFromIndex);
+  const slice = freshReviewEvidence(view, state);
   const raw = latestEvidencePayload(slice, "review");
   if (raw === undefined) {
     return undefined;
   }
   return asReviewVerdictPayload(raw);
+}
+
+function freshReviewEvidence(view: RunView, state: HelloPrivateState) {
+  return view.evidence.slice(state.reviewEvidenceFromIndex).filter(
+    (e) => e.generation === undefined || e.generation === view.generation,
+  );
 }
 
 function readPrivate(view: RunView): HelloPrivateState {

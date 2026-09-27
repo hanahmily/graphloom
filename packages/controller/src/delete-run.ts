@@ -47,7 +47,8 @@ export async function deleteRun(stateDir: string, options: { force?: boolean } =
       );
       if (options.force !== true) {
         if (hasWorktree) {
-          const changed = (await git(worktreePath, "status", "--porcelain")).split("\n").filter(Boolean).map((l) => l.slice(3));
+          const { stdout } = await execFileAsync("git", ["status", "--porcelain", "--ignored", "--untracked-files=all", "-z"], { cwd: worktreePath });
+          const changed = stdout.split("\0").filter(Boolean).map((entry) => entry.slice(3));
           if (changed.length > 0) {
             throw refuse(`its worktree has uncommitted changes (${listed(changed)}); pass force to discard them`);
           }

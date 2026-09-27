@@ -119,7 +119,7 @@ describe("public controller: hello child host + stop/resume/inspect", () => {
     expect(report.stopReason).toMatch(/stale job result/);
   });
 
-  it("resume after a clean graph pause continues via child host", async () => {
+  it.each(["unchanged", "changed bytes", "changed bytes after review", "changed manifest"])("resume reassesses accepted evidence: %s", async (change) => {
     const env = await makeEnv();
     const controller = createController();
     const { createScriptedGraph, dispatch, observe, stop, validate } = await import(
@@ -212,6 +212,11 @@ describe("public controller: hello child host + stop/resume/inspect", () => {
           ),
           observe({ paths: [GREETING_PATH], includeWorkspaceManifest: true }, "observe"),
           validate({ stageId: "write", requirementIds: ["greeting-bytes"] }, "validate write"),
+          ...(change === "changed bytes after review" ? [
+            dispatch({ stageId: "review", kind: "agent", purpose: "review", instruction: "review", readOnly: true }, "review"),
+            observe({ paths: [GREETING_PATH], includeWorkspaceManifest: true }, "observe reviewed bytes"),
+            validate({ stageId: "review" }, "validate review"),
+          ] : []),
           stop({ reason: "paused", blocker: "test pause before review" }, "pause"),
         ],
       }),
@@ -222,13 +227,34 @@ describe("public controller: hello child host + stop/resume/inspect", () => {
     });
     expect(paused.status).toBe("stopped");
     expect(paused.stopReason).toBe("paused");
+    const originalReceipt = paused.receipts.find((r) => r.valid)!;
+    if (change.startsWith("changed bytes")) {
+      await writeFile(path.join(paused.worktreePath, GREETING_PATH), "externally edited\n");
+    } else if (change === "changed manifest") {
+      await writeFile(path.join(paused.worktreePath, "EXTRA.txt"), "external file\n");
+    }
 
     const resumed = await controller.resume({
       runRef: paused.stateDir,
       // Child hello takes over for Review → complete.
       runner: adaptiveScriptedRunner(4),
     });
+    expect(resumed.receipts.find((r) => r.id === originalReceipt.id)?.valid).toBe(change === "unchanged");
+    if (change === "changed bytes after review") {
+      expect(paused.receipts.filter((r) => r.valid)).toHaveLength(2);
+      for (const receipt of paused.receipts) {
+        expect(resumed.receipts.find((r) => r.id === receipt.id)?.valid).toBe(false);
+      }
+    }
+    if (change === "changed manifest") {
+      // The writer cannot fix an out-of-scope path; stale acceptance must not
+      // let Review and completion bypass the now-failing Write requirement.
+      expect(resumed.status).toBe("stopped");
+      expect(resumed.receipts.some((r) => r.valid)).toBe(false);
+      return;
+    }
     expect(resumed.status).toBe("succeeded");
+    expect(await readFile(path.join(paused.worktreePath, GREETING_PATH), "utf8")).toBe(GREETING);
     const inspect = await controller.inspect(paused.stateDir);
     expect(inspect.stages.every((s) => s.complete)).toBe(true);
     expect(inspect.versionHistory.some((v) => v.reason === "resume")).toBe(true);

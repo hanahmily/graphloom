@@ -21,6 +21,27 @@ const fixture = path.join(
 );
 
 describe("createTrustedInProcessRunner", () => {
+  it("refuses a pinned version mismatch before executing trusted code", async () => {
+    let executions = 0;
+    const executor = defineExecutor({
+      id: "acme.version/read",
+      version: "2",
+      effect: "read",
+      execute: async () => {
+        executions += 1;
+        return { status: "ok", summary: "executed" };
+      },
+    });
+    const runner = createTrustedInProcessRunner({ executors: [executor], fallback: createScriptedRunner({ jobs: [] }) });
+    const job = { stageId: "write", kind: "agent" as const, purpose: "work" as const, instruction: "x", input: {} };
+    const context = { runId: "r", operationId: "op", generation: 1, worktreePath: "/tmp", artifactDir: "/tmp" };
+    expect(await runner.runJob({ ...job, executor: { id: executor.id, version: "1" } }, context))
+      .toMatchObject({ status: "failed", summary: "executor acme.version/read pinned version 1 but installed 2" });
+    expect(executions).toBe(0);
+    expect((await runner.runJob({ ...job, executor: { id: executor.id, version: "2" } }, context)).status).toBe("ok");
+    expect(executions).toBe(1);
+  });
+
   it("executes a registered custom executor by pin id (trusted/CI only)", async () => {
     const echo = defineExecutor({
       id: "acme.echo/ping",
@@ -163,6 +184,37 @@ describe("createTrustedInProcessRunner", () => {
 });
 
 describe("createChildExecutorRunner", () => {
+  it.each(["null", "[]", "true", "42", '"text"', "not-json"])(
+    "rejects malformed module description %s without an uncaught exception",
+    async (reply) => {
+      const dir = await mkdtemp(path.join(os.tmpdir(), "gl-bad-description-"));
+      const workerModule = path.join(dir, "worker.mjs");
+      await writeFile(workerModule, `process.stdin.once("data", () => process.stdout.write(${JSON.stringify(`${reply}\n`)}));`);
+      await expect(describeExecutorModule({ entryModule: fixture, workerModule, timeoutMs: 500 }))
+        .rejects.toThrow(/malformed|JSON|object/);
+    },
+  );
+
+  it.each(["null", "[]", "true", "42", '"text"', "not-json", '{}', '{"kind":"error","message":{}}'])(
+    "rejects malformed executor reply %s without crashing the host",
+    async (reply) => {
+      const runner = createChildExecutorRunner({
+        entryModule: fixture,
+        executorIds: ["acme.hello/write-greeting"],
+        fallback: createScriptedRunner({ jobs: [] }),
+        workerModule: path.join(path.dirname(fixture), "bad-worker.mjs"),
+        timeoutMs: 500,
+        stopGraceMs: 100,
+      });
+      const result = await runner.runJob(
+        { stageId: "write", kind: "agent", purpose: "work", instruction: "x", executor: { id: "acme.hello/write-greeting" }, input: { reply } },
+        { runId: "r", operationId: "op", generation: 1, worktreePath: "/tmp", artifactDir: "/tmp" },
+      );
+      expect(result).toMatchObject({ status: "failed", summary: expect.stringMatching(/malformed|JSON|object|kind|message/) });
+      expect(result.summary).not.toMatch(/timed out/);
+    },
+  );
+
   it("runs a custom executor in a child process", async () => {
     const dir = await mkdtemp(path.join(os.tmpdir(), "gl-child-"));
     const workerModule = path.join(

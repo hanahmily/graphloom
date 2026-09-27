@@ -17,6 +17,7 @@ import {
 } from "./claude-config.js";
 import type { CodingHarness, CodingRunRequest, CodingRunResult, CodingSessionOptions, CodingUsage } from "./harness.js";
 import { envList, minimalEnv } from "./child-env.js";
+import { evaluateClaudePermission } from "./claude-permissions.js";
 import { startToolBridge, type ToolBridge } from "./mcp-bridge.js";
 
 export interface ClaudeCodeHarnessOptions {
@@ -30,6 +31,8 @@ export interface ClaudeCodeHarnessOptions {
   systemPrompt?: string;
   /** How long a stopped process gets before SIGKILL. Default 5000 ms. */
   killGraceMs?: number;
+  /** Time for an interrupt to finish the turn before falling back to SIGTERM. Default 1000 ms. */
+  interruptGraceMs?: number;
   /**
    * Extra environment variable names Claude Code may see. It otherwise gets
    * only `PATH`, `HOME`, locale, proxy, and similar basics, never the
@@ -116,6 +119,7 @@ export function createClaudeCodeHarness(harnessOptions: ClaudeCodeHarnessOptions
             model,
             systemPrompt,
             killGraceMs: harnessOptions.killGraceMs ?? 5_000,
+            interruptGraceMs: harnessOptions.interruptGraceMs ?? 1_000,
             startupTimeoutMs,
             responseTimeoutMs,
             env: childEnv(passEnv, configDir, apiKey),
@@ -231,6 +235,7 @@ interface RunArgs {
   model: string | undefined;
   systemPrompt: string;
   killGraceMs: number;
+  interruptGraceMs: number;
   startupTimeoutMs: number;
   responseTimeoutMs: number;
   env: NodeJS.ProcessEnv;
@@ -254,8 +259,11 @@ async function runClaude(args: RunArgs): Promise<CodingRunResult> {
     const cli = [
       "-p",
       "--output-format", "stream-json",
+      "--input-format", "stream-json",
       "--verbose",
-      "--permission-mode", "bypassPermissions",
+      "--permission-mode", "default",
+      "--permission-prompt-tool", "stdio",
+      "--settings", JSON.stringify({ permissions: { ask: ["Write", "Edit", "MultiEdit", "NotebookEdit", "Bash", "mcp__graphloom__*"] } }),
       "--tools", "default",
       "--strict-mcp-config",
       "--append-system-prompt", args.systemPrompt,
@@ -292,12 +300,29 @@ async function runClaude(args: RunArgs): Promise<CodingRunResult> {
     });
 
     let stopped = false;
+    let terminated = false;
+    let interruptTimer: NodeJS.Timeout | undefined;
     let killTimer: NodeJS.Timeout | undefined;
+    const send = (message: unknown): boolean => {
+      if (child.stdin.destroyed || child.stdin.writableEnded) return false;
+      child.stdin.write(`${JSON.stringify(message)}\n`);
+      return true;
+    };
+    const terminate = () => {
+      // A descendant can retain the pipes after the CLI parent has exited.
+      if (terminated || child.pid === undefined) return;
+      terminated = true;
+      signalGroup(child.pid, "SIGTERM");
+      killTimer = setTimeout(() => signalGroup(child.pid!, "SIGKILL"), args.killGraceMs);
+    };
     const stop = () => {
       if (stopped || child.pid === undefined) return;
       stopped = true;
-      signalGroup(child.pid, "SIGTERM");
-      killTimer = setTimeout(() => signalGroup(child.pid!, "SIGKILL"), args.killGraceMs);
+      if (!send({ type: "control_request", request_id: `interrupt-${turn}`, request: { subtype: "interrupt" } })) {
+        terminate();
+        return;
+      }
+      interruptTimer = setTimeout(terminate, args.interruptGraceMs);
     };
     const onAbort = () => stop();
     options.signal?.addEventListener("abort", onAbort, { once: true });
@@ -308,9 +333,12 @@ async function runClaude(args: RunArgs): Promise<CodingRunResult> {
       stderr = (stderr + chunk).slice(-MAX_STDERR_CHARS);
     });
     child.stdin.on("error", () => undefined);
-    child.stdin.end([request.assignment, ...scopeNotes(options)].join("\n\n"));
+    const initializeId = `initialize-${turn}`;
+    send({ type: "control_request", request_id: initializeId, request: { subtype: "initialize", hooks: {} } });
 
     let result: ResultEvent | undefined;
+    let initialized = false;
+    let protocolFailed: string | undefined;
     let bridgeFailed = false;
     let budgetRefused = false;
     const seen = new Set<string>();
@@ -326,6 +354,9 @@ async function runClaude(args: RunArgs): Promise<CodingRunResult> {
           budgetRefused = true;
           stop();
         }
+      }).catch(() => {
+        protocolFailed = "Claude Code model request accounting failed";
+        stop();
       });
     };
 
@@ -344,72 +375,142 @@ async function runClaude(args: RunArgs): Promise<CodingRunResult> {
     };
     arm(args.startupTimeoutMs, `no model output within ${seconds(args.startupTimeoutMs)} of starting`);
 
-    for await (const line of createInterface({ input: child.stdout })) {
-      let event: { type?: string; subtype?: string; message?: { id?: unknown; content?: unknown }; mcp_servers?: unknown };
-      try {
-        event = JSON.parse(line) as typeof event;
-      } catch {
-        continue;
-      }
-      if (event.type === "assistant" || event.type === "user" || (event.type === "system" && event.subtype === "thinking_tokens")) {
-        trackTools(event.message?.content, running);
-        arm(args.responseTimeoutMs, `no model output for ${seconds(args.responseTimeoutMs)}`);
-      }
-      if (event.type === "system" && event.subtype === "init" && bridge !== undefined) {
-        const servers = Array.isArray(event.mcp_servers) ? (event.mcp_servers as { name?: unknown; status?: unknown }[]) : [];
-        if (servers.find((s) => s.name === BRIDGE_NAME)?.status !== "connected") {
-          bridgeFailed = true;
-          stop();
-        }
-      } else if (event.type === "assistant" && typeof event.message?.id === "string" && !seen.has(event.message.id)) {
-        // One response may arrive as several events and carry several tool calls.
-        seen.add(event.message.id);
-        lastResponse = event.message.id;
-        if (seen.size > charged) reserve();
-      } else if (event.type === "user" && hasToolResult(event.message?.content) && lastResponse !== undefined) {
-        // Tool results go back in the next request: reserve it once per response.
-        if (reservedAfter !== lastResponse && charged <= seen.size) {
-          reservedAfter = lastResponse;
-          reserve();
-        }
-      } else if (event.type === "result") {
-        result = event as ResultEvent;
-      }
-    }
-    clearTimeout(watchdog);
-    const { code, error } = await exited;
-    await reservations;
-    clearTimeout(killTimer);
-    options.signal?.removeEventListener("abort", onAbort);
-
-    const outcome = ((): CodingRunResult => {
-      if (budgetRefused) return { status: "failed", summary: BUDGET_EXHAUSTED };
-      if (options.signal?.aborted) return { status: "failed", summary: "agent session aborted" };
-      if (stalled !== undefined) return { status: "failed", summary: `Claude Code stalled: ${stalled}` };
-      if (bridgeFailed) return { status: "failed", summary: "Claude Code could not connect to the GraphLoom tool server" };
-      if (error !== undefined) return { status: "failed", summary: bounded(`could not start Claude Code (${args.command}): ${error.message}`) };
-      if (result === undefined) {
-        return { status: "failed", summary: bounded(`Claude Code exited with code ${code} and no result${stderr.trim() ? `: ${stderr.trim()}` : ""}`) };
-      }
-      if (result.is_error === true || result.subtype !== "success") {
-        const detail = stderr.trim() || result.result || "";
-        return { status: "failed", summary: bounded(`Claude Code run failed (${result.subtype ?? "error"})${detail ? `: ${detail}` : ""}`) };
-      }
-      if (request.resultSchema !== undefined) {
-        if (result.structured_output === undefined) {
-          return { status: "failed", summary: `agent finished without submitting a ${request.resultSchema} result` };
-        }
-        const submitted = (result.structured_output as { summary?: unknown } | null)?.summary;
-        return {
-          status: "completed",
-          summary: bounded(typeof submitted === "string" ? submitted : `Claude Code submitted a ${request.resultSchema} result`),
-          output: result.structured_output,
+    let reaped = false;
+    try {
+      for await (const line of createInterface({ input: child.stdout })) {
+        let event: {
+          type?: string;
+          subtype?: string;
+          message?: { id?: unknown; content?: unknown };
+          mcp_servers?: unknown;
+          request_id?: unknown;
+          request?: { subtype?: unknown; tool_name?: unknown; input?: unknown };
+          response?: { request_id?: unknown; subtype?: unknown; error?: unknown };
         };
+        try {
+          event = JSON.parse(line) as typeof event;
+        } catch {
+          continue;
+        }
+        if (event === null || typeof event !== "object" || Array.isArray(event)) continue;
+        if (event.type === "control_response") {
+          if (event.response?.request_id === initializeId && !initialized) {
+            if (event.response.subtype !== "success") {
+              protocolFailed = "Claude Code rejected the control protocol initialization";
+              stop();
+            } else {
+              initialized = true;
+              if (!stopped) send({
+                type: "user",
+                session_id: saved.sessionId,
+                parent_tool_use_id: null,
+                message: { role: "user", content: [request.assignment, ...scopeNotes(options)].join("\n\n") },
+              });
+            }
+          }
+          continue;
+        }
+        if (event.type === "control_request") {
+          if (typeof event.request_id !== "string" || event.request_id.length === 0) {
+            protocolFailed = "Claude Code sent a control request without an identity";
+            stop();
+            continue;
+          }
+          if (event.request?.subtype !== "can_use_tool") {
+            send({ type: "control_response", response: {
+              subtype: "error", request_id: event.request_id, error: "Unsupported control request",
+            } });
+            continue;
+          }
+          const permission = await evaluateClaudePermission(event.request.tool_name, event.request.input, options);
+          send({ type: "control_response", response: {
+            subtype: "success", request_id: event.request_id,
+            response: stopped || !initialized || result !== undefined
+              ? { behavior: "deny", message: "No active job turn" } : permission,
+          } });
+          continue;
+        }
+        if (event.type === "assistant" || event.type === "user" || (event.type === "system" && event.subtype === "thinking_tokens")) {
+          trackTools(event.message?.content, running);
+          arm(args.responseTimeoutMs, `no model output for ${seconds(args.responseTimeoutMs)}`);
+        }
+        if (event.type === "system" && event.subtype === "init" && bridge !== undefined) {
+          const servers = Array.isArray(event.mcp_servers) ? (event.mcp_servers as { name?: unknown; status?: unknown }[]) : [];
+          if (servers.find((s) => s?.name === BRIDGE_NAME)?.status !== "connected") {
+            bridgeFailed = true;
+            stop();
+          }
+        } else if (event.type === "assistant" && typeof event.message?.id === "string" && !seen.has(event.message.id)) {
+          // One response may arrive as several events and carry several tool calls.
+          seen.add(event.message.id);
+          lastResponse = event.message.id;
+          if (seen.size > charged) reserve();
+        } else if (event.type === "user" && hasToolResult(event.message?.content) && lastResponse !== undefined) {
+          // Tool results go back in the next request: reserve it once per response.
+          if (reservedAfter !== lastResponse && charged <= seen.size) {
+            reservedAfter = lastResponse;
+            reserve();
+          }
+        } else if (event.type === "result") {
+          if (!initialized) protocolFailed = "Claude Code returned a result before control initialization";
+          result = event as ResultEvent;
+          clearTimeout(watchdog);
+          clearTimeout(interruptTimer);
+          // The executor owns one turn. EOF closes a live CLI cleanly after it has
+          // produced its result, including a cancelled turn's saved transcript.
+          child.stdin.end();
+          interruptTimer = setTimeout(terminate, args.interruptGraceMs);
+        }
       }
-      return { status: "completed", summary: bounded(result.result?.trim() || "Claude Code completed") };
-    })();
-    const usage = usageOf(result);
-    return usage !== undefined ? { ...outcome, usage } : outcome;
+      clearTimeout(watchdog);
+      // EOF without a result is terminal even if the process keeps running.
+      if (result === undefined) terminate();
+      const { code, error } = await exited;
+      reaped = true;
+      await reservations;
+      clearTimeout(interruptTimer);
+      clearTimeout(killTimer);
+      options.signal?.removeEventListener("abort", onAbort);
+
+      const outcome = ((): CodingRunResult => {
+        if (budgetRefused) return { status: "failed", summary: BUDGET_EXHAUSTED };
+        if (options.signal?.aborted) return { status: "failed", summary: "agent session aborted" };
+        if (stalled !== undefined) return { status: "failed", summary: `Claude Code stalled: ${stalled}` };
+        if (bridgeFailed) return { status: "failed", summary: "Claude Code could not connect to the GraphLoom tool server" };
+        if (protocolFailed !== undefined) return { status: "failed", summary: protocolFailed };
+        if (error !== undefined) return { status: "failed", summary: bounded(`could not start Claude Code (${args.command}): ${error.message}`) };
+        if (result === undefined) {
+          return { status: "failed", summary: bounded(`Claude Code exited with code ${code} and no result${stderr.trim() ? `: ${stderr.trim()}` : ""}`) };
+        }
+        if (result.is_error === true || result.subtype !== "success") {
+          const detail = stderr.trim() || result.result || "";
+          return { status: "failed", summary: bounded(`Claude Code run failed (${result.subtype ?? "error"})${detail ? `: ${detail}` : ""}`) };
+        }
+        if (request.resultSchema !== undefined) {
+          if (result.structured_output === undefined) {
+            return { status: "failed", summary: `agent finished without submitting a ${request.resultSchema} result` };
+          }
+          const submitted = (result.structured_output as { summary?: unknown } | null)?.summary;
+          return {
+            status: "completed",
+            summary: bounded(typeof submitted === "string" ? submitted : `Claude Code submitted a ${request.resultSchema} result`),
+            output: result.structured_output,
+          };
+        }
+        return { status: "completed", summary: bounded(result.result?.trim() || "Claude Code completed") };
+      })();
+      const usage = usageOf(result);
+      return usage !== undefined ? { ...outcome, usage } : outcome;
+    } finally {
+      clearTimeout(watchdog);
+      clearTimeout(interruptTimer);
+      options.signal?.removeEventListener("abort", onAbort);
+      if (!reaped) {
+        terminate();
+        await exited;
+      }
+      clearTimeout(killTimer);
+    }
   } finally {
     await bridge?.close();
     await rm(scratch, { recursive: true, force: true });

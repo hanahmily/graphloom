@@ -73,7 +73,14 @@ async function setup(harnessOverrides: ClaudeCodeHarnessOptions = {}) {
     },
     ...over,
   });
-  const script = (start: Step[], resume: Step[] = []) => writeFile(scriptFile, JSON.stringify({ start, resume }), "utf8");
+  const script = (start: Step[], resume: Step[] = [], extra: Record<string, unknown> = {}) =>
+    writeFile(scriptFile, JSON.stringify({ start, resume, ...extra }), "utf8");
+  const controls = async (): Promise<Array<{
+    signal?: string;
+    request?: { subtype?: string };
+    tool?: string;
+    reply?: { subtype: string; response?: { behavior: string }; error?: string };
+  }>> => (await readFile(`${logFile}.controls`, "utf8").catch(() => "")).split("\n").filter(Boolean).map((line) => JSON.parse(line));
   const invocations = async (): Promise<Invocation[]> =>
     existsSync(logFile)
       ? (await readFile(logFile, "utf8")).split("\n").filter(Boolean).map((l) => JSON.parse(l) as Invocation)
@@ -89,6 +96,7 @@ async function setup(harnessOverrides: ClaudeCodeHarnessOptions = {}) {
     toolCalls,
     script,
     invocations,
+    controls,
     reservations: () => reservations,
   };
 }
@@ -120,7 +128,9 @@ describe("Claude Code harness", () => {
     expect(call!.argv).toEqual(expect.arrayContaining(["-p", "--verbose", "--strict-mcp-config"]));
     expect(flagValue(call!.argv, "--output-format")).toBe("stream-json");
     expect(flagValue(call!.argv, "--tools")).toBe("default");
-    expect(flagValue(call!.argv, "--permission-mode")).toBe("bypassPermissions");
+    expect(flagValue(call!.argv, "--input-format")).toBe("stream-json");
+    expect(flagValue(call!.argv, "--permission-mode")).toBe("default");
+    expect(flagValue(call!.argv, "--permission-prompt-tool")).toBe("stdio");
     expect(call!.mcp).toMatchObject({ type: "http", url: expect.stringMatching(/^http:\/\/127\.0\.0\.1:\d+\/mcp$/) });
     expect(call!.prompt).toBe("Summarize issue 7\n\nChange only these paths: notes.md.");
   });
@@ -242,6 +252,114 @@ describe("Claude Code harness", () => {
       expect.stringMatching(/-2$/),
     ]);
     expect(h.reservations()).toBe(2);
+  });
+
+  it("answers file permissions from the admitted scope and denies unknown requests", async () => {
+    const h = await setup();
+    await h.script([
+      { permission: { tool: "Write", input: { file_path: "notes.md", content: "allowed" } }, write: "allowed" },
+      { permission: { tool: "Write", input: { file_path: "elsewhere.md", content: "denied" } }, write: "denied" },
+      { permission: { tool: "NewMutationTool", input: {} } },
+      { permission: { tool: "Write", input: null } },
+      { permission: { tool: "Write", input: {}, subtype: "unknown_control" } },
+      { text: "done" },
+    ]);
+    const result = await h.executor.execute({ assignment: "work" }, h.ctx());
+    expect(result).toMatchObject({ status: "ok" });
+    expect(await readFile(path.join(h.worktree, "notes.md"), "utf8")).toBe("allowed");
+    expect(existsSync(path.join(h.worktree, "elsewhere.md"))).toBe(false);
+    const replies = (await h.controls()).filter((entry) => entry.reply !== undefined).map((entry) => entry.reply!);
+    expect(replies.map((reply) => reply.response?.behavior ?? reply.subtype)).toEqual(["allow", "deny", "deny", "deny", "error"]);
+  });
+
+  it("denies file writes and shell commands for read-only jobs", async () => {
+    const h = await setup();
+    await h.script([
+      { permission: { tool: "Write", input: { file_path: "notes.md" } }, write: "no" },
+      { bash: "printf 'no' > shell.txt" },
+      { text: "reviewed" },
+    ]);
+    const result = await h.executor.execute({ assignment: "review" }, h.ctx({ readOnly: true }));
+    expect(result).toMatchObject({ status: "ok" });
+    expect(existsSync(path.join(h.worktree, "notes.md"))).toBe(false);
+    expect(existsSync(path.join(h.worktree, "shell.txt"))).toBe(false);
+    expect((await h.controls()).filter((entry) => entry.reply).map((entry) => entry.reply?.response?.behavior)).toEqual(["deny", "deny"]);
+  });
+
+  it("interrupts a cancelled turn, saves its session, and resumes it", async () => {
+    const h = await setup();
+    const controller = new AbortController();
+    await h.script([{ tool: "read_comments", args: {} }, { hang: true }], [{ text: "resumed interrupted session" }]);
+    const first = await h.executor.execute({ assignment: "first assignment" }, h.ctx({
+      signal: controller.signal,
+      session: { dir: h.sessions },
+      tools: {
+        bindings: [{ name: "read_comments", effect: "read" }],
+        async call() {
+          controller.abort();
+          return { status: "ok", summary: "read" };
+        },
+      },
+    }));
+    expect(first).toMatchObject({ status: "failed", summary: "agent session aborted", sessionRef: expect.stringMatching(/^claude-/) });
+    const controls = await h.controls();
+    expect(controls.some((entry) => entry.request?.subtype === "interrupt")).toBe(true);
+    expect(controls.some((entry) => entry.signal !== undefined)).toBe(false);
+    const ref = (first as { sessionRef: string }).sessionRef;
+    expect(await readFile(path.join(h.sessions, `${ref}.jsonl`), "utf8")).toContain("interrupted turn saved");
+    const second = await h.executor.execute({ assignment: "continue" }, h.ctx({ session: { dir: h.sessions, resume: ref } }));
+    expect(second).toMatchObject({ status: "ok", summary: "resumed interrupted session", sessionRef: ref });
+  });
+
+  it.each([false, true])("falls back to signals when the CLI ignores an interrupt (ignore SIGTERM: %s)", async (ignoreTerm) => {
+    const h = await setup({ interruptGraceMs: 50, killGraceMs: 50 });
+    const controller = new AbortController();
+    await h.script([{ tool: "read_comments", args: {} }, { hang: true }], [], { ignoreInterrupt: true, ignoreTerm });
+    const started = Date.now();
+    const result = await h.executor.execute({ assignment: "work" }, h.ctx({
+      signal: controller.signal,
+      tools: {
+        bindings: [{ name: "read_comments", effect: "read" }],
+        async call() {
+          controller.abort();
+          return { status: "ok", summary: "read" };
+        },
+      },
+    }));
+    expect(result).toMatchObject({ status: "failed", summary: "agent session aborted" });
+    const stops = (await h.controls()).filter((entry) => entry.request?.subtype === "interrupt" || entry.signal);
+    expect(stops).toMatchObject([{ request: { subtype: "interrupt" } }, { signal: "SIGTERM" }]);
+    expect(Date.now() - started).toBeLessThan(2000);
+  });
+
+  it("reaps descendants holding output pipes after the CLI exits", async () => {
+    const h = await setup({ startupTimeoutMs: 100, interruptGraceMs: 50, killGraceMs: 50 });
+    await h.script([{ orphan: true }]);
+    const start = Date.now();
+    const result = await h.executor.execute({ assignment: "work" }, h.ctx());
+    expect(result).toMatchObject({ status: "failed" });
+    expect(Date.now() - start).toBeLessThan(2000);
+  });
+
+  it("reaps a CLI that closes stdout without ending the process", async () => {
+    const h = await setup({ startupTimeoutMs: 0, interruptGraceMs: 50, killGraceMs: 50 });
+    await h.script([{ closeOutput: true }]);
+    const start = Date.now();
+    const result = await h.executor.execute({ assignment: "work" }, h.ctx());
+    expect(result).toMatchObject({ status: "failed", summary: expect.stringContaining("no result") });
+    expect(Date.now() - start).toBeLessThan(2000);
+  });
+
+  it("rejects malformed MCP initialization and results before control initialization", async () => {
+    const h = await setup({ interruptGraceMs: 50, killGraceMs: 50 });
+    await h.script([{ hang: true }], [], { malformedInit: true });
+    expect(await h.executor.execute({ assignment: "work" }, h.ctx())).toMatchObject({
+      status: "failed", summary: "Claude Code could not connect to the GraphLoom tool server",
+    });
+    await h.script([], [], { earlyResult: true });
+    expect(await h.executor.execute({ assignment: "work" }, h.ctx())).toMatchObject({
+      status: "failed", summary: "Claude Code returned a result before control initialization",
+    });
   });
 
   it("stops the Claude Code process when the job is cancelled", async () => {

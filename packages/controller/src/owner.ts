@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { readFile, unlink, writeFile } from "node:fs/promises";
+import { readFile, rename, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 const OWNER_FILE = "run.owner.json";
@@ -33,7 +33,7 @@ export async function clearOwnerClaim(stateDir: string): Promise<void> {
 
 /**
  * Claim exclusive loop ownership for this controller process.
- * Fails if another live controller still holds a non-expired lease.
+ * Fails if another controller is alive, even while a long job outlasts its lease.
  */
 export async function claimRunOwner(
   stateDir: string,
@@ -55,7 +55,7 @@ export async function claimRunOwner(
   if (options?.childPid !== undefined) {
     claim.childPid = options.childPid;
   }
-  await writeFile(path.join(stateDir, OWNER_FILE), JSON.stringify(claim, null, 2), "utf8");
+  await writeOwnerClaim(stateDir, claim);
   return claim;
 }
 
@@ -79,7 +79,7 @@ export async function renewRunOwner(
   if (childPid !== undefined) {
     claim.childPid = childPid;
   }
-  await writeFile(path.join(stateDir, OWNER_FILE), JSON.stringify(claim, null, 2), "utf8");
+  await writeOwnerClaim(stateDir, claim);
   return claim;
 }
 
@@ -101,7 +101,7 @@ export async function updateOwnerChildPid(
   if (childPid !== undefined) {
     claim.childPid = childPid;
   }
-  await writeFile(path.join(stateDir, OWNER_FILE), JSON.stringify(claim, null, 2), "utf8");
+  await writeOwnerClaim(stateDir, claim);
 }
 
 /** Signal/reap persisted owner processes from a separate stop CLI. */
@@ -133,18 +133,28 @@ export async function reapOwnerProcesses(stateDir: string): Promise<{
 }
 
 export function isClaimStale(claim: RunOwnerClaim): boolean {
-  if (Date.now() > claim.expiresAt) {
-    return true;
-  }
+  // Jobs and retry waits can exceed the lease interval. Elapsed time does not
+  // authorize stealing ownership from a controller that is still executing.
   return !pidAlive(claim.controllerPid);
 }
 
+async function writeOwnerClaim(stateDir: string, claim: RunOwnerClaim): Promise<void> {
+  const temporary = path.join(stateDir, `.${OWNER_FILE}.${randomUUID()}.tmp`);
+  try {
+    await writeFile(temporary, JSON.stringify(claim, null, 2), "utf8");
+    await rename(temporary, path.join(stateDir, OWNER_FILE));
+  } finally {
+    await unlink(temporary).catch(() => undefined);
+  }
+}
+
 function pidAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
   try {
     process.kill(pid, 0);
     return true;
-  } catch {
-    return false;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code !== "ESRCH";
   }
 }
 

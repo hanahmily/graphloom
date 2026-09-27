@@ -196,6 +196,10 @@ class ChildSession implements PluginHost {
       return;
     }
 
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      this.deliverToSolePending(line);
+      return;
+    }
     const obj = parsed as { operationId?: unknown };
     const opId = typeof obj.operationId === "string" ? obj.operationId : undefined;
     if (opId) {

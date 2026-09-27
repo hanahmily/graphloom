@@ -5,9 +5,10 @@
 //   | { structured } | { think: ms } | { hang: true } | { error } | { crash }
 // FAKE_CLAUDE_LOG names a file that gets one JSON line per invocation.
 // Both are read from the environment as it reaches the process.
-import { execSync } from "node:child_process";
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { execSync, spawn } from "node:child_process";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { createInterface } from "node:readline";
 
 const argv = process.argv.slice(2);
 const flag = (name) => {
@@ -21,7 +22,57 @@ const sessionId = resume ?? flag("--session-id");
 const cwd = process.cwd();
 const projectDir = path.join(process.env.CLAUDE_CONFIG_DIR, "projects", cwd.replace(/[^A-Za-z0-9]/g, "-"));
 const transcript = path.join(projectDir, `${sessionId}.jsonl`);
-const prompt = readFileSync(0, "utf8");
+const streaming = flag("--input-format") === "stream-json";
+const controlLog = `${process.env.FAKE_CLAUDE_LOG}.controls`;
+const controls = (value) => appendFileSync(controlLog, `${JSON.stringify(value)}\n`);
+const waiting = new Map();
+let nextPermission = 0;
+let interrupted = false;
+let input;
+const prompt = streaming ? await new Promise((resolve) => {
+  input = createInterface({ input: process.stdin });
+  input.on("line", (line) => {
+    const message = JSON.parse(line);
+    if (message.type === "user") resolve(message.message.content);
+    else if (message.type === "control_response") {
+      const response = message.response;
+      waiting.get(response.request_id)?.(response);
+      waiting.delete(response.request_id);
+    } else if (message.type === "control_request") {
+      controls(message);
+      const script = JSON.parse(readFileSync(process.env.FAKE_CLAUDE_SCRIPT, "utf8"));
+      if (message.request.subtype === "initialize" && script.earlyResult) {
+        emit({ type: "result", subtype: "success", is_error: false, result: "never ran the assignment" });
+        return;
+      }
+      emit({ type: "control_response", response: { subtype: "success", request_id: message.request_id, response: {} } });
+      if (message.request.subtype === "interrupt") {
+        const script = JSON.parse(readFileSync(process.env.FAKE_CLAUDE_SCRIPT, "utf8"));
+        if (script.ignoreInterrupt) return;
+        interrupted = true;
+        mkdirSync(projectDir, { recursive: true });
+        appendFileSync(transcript, `${JSON.stringify({ text: "interrupted turn saved" })}\n`);
+        emit({ type: "result", subtype: "error_during_execution", is_error: true, result: "interrupted" });
+      }
+    }
+  });
+  input.on("close", () => process.exit(0));
+}) : readFileSync(0, "utf8");
+process.on("SIGTERM", () => {
+  controls({ signal: "SIGTERM" });
+  const script = JSON.parse(readFileSync(process.env.FAKE_CLAUDE_SCRIPT, "utf8"));
+  if (!script.ignoreTerm) process.exit(143);
+});
+
+async function permission(toolName, toolInput, subtype = "can_use_tool") {
+  if (!streaming) return { behavior: "allow", updatedInput: toolInput };
+  const request_id = `permission-${++nextPermission}`;
+  const response = new Promise((resolve) => waiting.set(request_id, resolve));
+  emit({ type: "control_request", request_id, request: { subtype, tool_name: toolName, input: toolInput, tool_use_id: `tool-${nextPermission}` } });
+  const reply = await response;
+  controls({ tool: toolName, input: toolInput, reply });
+  return reply.subtype === "success" ? reply.response : { behavior: "deny", message: reply.error };
+}
 
 let history = [];
 if (resume !== undefined) {
@@ -64,9 +115,8 @@ record(prompt);
 
 let connected = false;
 if (server) connected = (await rpc("initialize", { protocolVersion: "2025-06-18", capabilities: {} })) !== undefined;
-emit({ type: "system", subtype: "init", session_id: sessionId, mcp_servers: server ? [{ name: "graphloom", status: connected ? "connected" : "failed" }] : [] });
-
 const script = JSON.parse(readFileSync(process.env.FAKE_CLAUDE_SCRIPT, "utf8"));
+emit({ type: "system", subtype: "init", session_id: sessionId, mcp_servers: script.malformedInit ? [null] : server ? [{ name: "graphloom", status: connected ? "connected" : "failed" }] : [] });
 let responses = 0;
 let lastText = "";
 let structured;
@@ -76,16 +126,21 @@ async function runTool(msgId, step) {
   const id = `toolu_${(toolUses += 1)}`;
   if (step.bash !== undefined) {
     emit({ type: "assistant", message: { id: msgId, content: [{ type: "tool_use", id, name: "Bash", input: { command: step.bash } }] } });
-    const out = execSync(step.bash, { cwd, encoding: "utf8" });
+    const decision = await permission("Bash", { command: step.bash });
+    const out = decision.behavior === "allow" ? execSync(step.bash, { cwd, encoding: "utf8" }) : decision.message;
     emit({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: id, content: out }] } });
     return;
   }
   emit({ type: "assistant", message: { id: msgId, content: [{ type: "tool_use", id, name: `mcp__graphloom__${step.tool}`, input: step.args ?? {} }] } });
-  const result = await rpc("tools/call", { name: step.tool, arguments: step.args ?? {} });
+  const decision = await permission(`mcp__graphloom__${step.tool}`, step.args ?? {});
+  const result = decision.behavior === "allow"
+    ? await rpc("tools/call", { name: step.tool, arguments: step.args ?? {} })
+    : { content: decision.message };
   emit({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: id, content: result.content }] } });
 }
 
 for (const step of resume !== undefined ? script.resume : script.start) {
+  if (interrupted) break;
   const msgId = `msg_${(responses += 1)}`;
   if (step.text !== undefined) {
     lastText = step.text;
@@ -98,11 +153,25 @@ for (const step of resume !== undefined ? script.resume : script.start) {
   } else if (step.structured !== undefined) {
     structured = step.structured;
     emit({ type: "assistant", message: { id: msgId, content: [{ type: "tool_use", id: "structured", name: "StructuredOutput", input: step.structured }] } });
+  } else if (step.permission !== undefined) {
+    const { tool, input: toolInput, subtype } = step.permission;
+    const decision = await permission(tool, toolInput, subtype);
+    if (decision.behavior === "allow" && step.write !== undefined) {
+      writeFileSync(path.resolve(cwd, toolInput.file_path ?? toolInput.notebook_path), step.write);
+    }
   } else if (step.think !== undefined) {
     for (let waited = 0; waited < step.think; waited += 100) {
       emit({ type: "system", subtype: "thinking_tokens", session_id: sessionId });
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
+  } else if (step.orphan) {
+    // Retain the parent's output pipes briefly; the harness must reap the group.
+    spawn(process.execPath, ["-e", "setTimeout(() => {}, 2500)"], { stdio: ["ignore", "inherit", "inherit"] });
+    process.exit(0);
+  } else if (step.closeOutput) {
+    process.stdout.end();
+    setInterval(() => undefined, 1000);
+    await new Promise(() => undefined);
   } else if (step.hang) {
     setInterval(() => undefined, 1_000);
     await new Promise(() => undefined);
@@ -122,7 +191,7 @@ for (const step of resume !== undefined ? script.resume : script.start) {
   }
 }
 
-emit({
+if (!interrupted) emit({
   type: "result",
   subtype: "success",
   is_error: false,
