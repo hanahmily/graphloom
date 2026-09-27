@@ -160,6 +160,34 @@ describe("Pi coding harness", () => {
     expect(await readFile(path.join(h.worktree, "notes.md"), "utf8")).toBe("final summary\n");
   });
 
+  it("runs Pi's shell commands with a minimal environment, never the executor's secrets", async () => {
+    vi.stubEnv("GRAPHLOOM_GITHUB_LIVE_TOKEN", "ghp-executor-secret");
+    vi.stubEnv("LC_ALL", "C.UTF-8");
+    vi.stubEnv("CUSTOM_TOOL_HOME", "/opt/custom");
+    vi.stubEnv("OTHER_TOOL_HOME", "/opt/other");
+    const printEnv = "env | grep -E '^(GRAPHLOOM_|PI_|LC_ALL|HOME|PATH|CUSTOM_|OTHER_)' | sort";
+    const outputs: string[] = [];
+    const run = (h: Awaited<ReturnType<typeof setup>>) => {
+      h.faux.setResponses([
+        h.use("bash", { command: printEnv }),
+        (context: FauxContext) => {
+          outputs.push(lastMessageText(context));
+          return h.say("listed");
+        },
+      ]);
+      return h.executor.execute({ assignment: "list the environment" }, h.ctx());
+    };
+    await run(await setup({ passEnv: ["CUSTOM_TOOL_HOME"] }));
+    vi.stubEnv("GRAPHLOOM_PI_PASS_ENV", "CUSTOM_TOOL_HOME, OTHER_TOOL_HOME");
+    await run(await setup());
+
+    const [chosen, configured] = outputs;
+    for (const kept of ["HOME=", "PATH=", "LC_ALL=C.UTF-8", "CUSTOM_TOOL_HOME=/opt/custom"]) expect(chosen).toContain(kept);
+    for (const dropped of ["ghp-executor-secret", "GRAPHLOOM_", "PI_", "OTHER_TOOL_HOME"]) expect(chosen).not.toContain(dropped);
+    expect(configured).toContain("OTHER_TOOL_HOME=/opt/other");
+    expect(configured).not.toContain("ghp-executor-secret");
+  });
+
   it("tells the agent its write scope, or that the job is read-only", async () => {
     const h = await setup();
     const prompts: string[] = [];
@@ -277,7 +305,12 @@ describe("Pi coding harness", () => {
     const first = await h.executor.execute({ assignment: "Write the first draft" }, h.ctx({ session: { dir: h.sessions } }));
     const ref = (first as { sessionRef?: string }).sessionRef;
     expect(ref).toMatch(/^pi-[0-9a-f]{12}$/);
-    expect(await readdir(h.sessions)).toEqual([`${ref}.jsonl`]);
+    expect((await readdir(h.sessions)).sort()).toEqual([`${ref}.json`, `${ref}.jsonl`]);
+    expect(JSON.parse(await readFile(path.join(h.sessions, `${ref}.json`), "utf8"))).toEqual({
+      provider: h.provider,
+      modelId: h.faux.getModel().id,
+      systemPromptSha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+    });
 
     const second = await h.executor.execute(
       { assignment: "Revise the draft" },
@@ -287,7 +320,39 @@ describe("Pi coding harness", () => {
     expect(history).toContain("Write the first draft");
     expect(history).toContain("first turn done");
     expect(history).toContain(CONTINUATION_NOTICE.slice(0, 40));
-    expect(await readdir(h.sessions)).toEqual([`${ref}.jsonl`]);
+    expect((await readdir(h.sessions)).sort()).toEqual([`${ref}.json`, `${ref}.jsonl`]);
+  });
+
+  it("refuses to resume a session under a different model or system prompt, before any request", async () => {
+    const h = await setup();
+    h.faux.setResponses([h.say("first turn done")]);
+    const first = await h.executor.execute({ assignment: "draft" }, h.ctx({ session: { dir: h.sessions } }));
+    const ref = (first as { sessionRef: string }).sessionRef;
+    const model = `${h.provider}/${h.faux.getModel().id}`;
+    const resume = (executor: typeof h.executor, harnessOptions?: Record<string, unknown>) =>
+      executor.execute(
+        { assignment: "revise", ...(harnessOptions !== undefined ? { harnessOptions } : {}) },
+        h.ctx({ session: { dir: h.sessions, resume: ref } }),
+      );
+    const restoreFailure = (reason: string) => ({ status: "failed", summary: `agent session ${ref} could not be restored: ${reason}` });
+
+    h.faux.setResponses([h.say("never sent")]);
+    expect(await resume(h.executor, { modelId: "another-model" })).toEqual(
+      restoreFailure(`saved session ${ref} ran on ${model}; this job asks for ${h.provider}/another-model`),
+    );
+    const switched = (await setup({ provider: "another-provider", modelId: h.faux.getModel().id })).executor;
+    expect(await resume(switched)).toEqual(
+      restoreFailure(`saved session ${ref} ran on ${model}; this job asks for another-provider/${h.faux.getModel().id}`),
+    );
+    const prompted = (await setup({ provider: h.provider, modelId: h.faux.getModel().id, systemPrompt: "Another prompt." })).executor;
+    expect(await resume(prompted)).toEqual(restoreFailure(`saved session ${ref} ran with a different system prompt`));
+    for (const record of ["null", "[]", "{not json"]) {
+      await writeFile(path.join(h.sessions, `${ref}.json`), record, "utf8");
+      expect(await resume(h.executor)).toEqual(restoreFailure(`saved session ${ref} has no readable settings record`));
+    }
+    await rm(path.join(h.sessions, `${ref}.json`));
+    expect(await resume(h.executor)).toEqual(restoreFailure(`saved session ${ref} has no readable settings record`));
+    expect(h.faux.state.callCount).toBe(1);
   });
 
   it.each([

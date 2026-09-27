@@ -164,6 +164,7 @@ describe("graphloom.coding-agent/run", () => {
         "GRAPHLOOM_PI_PROVIDER",
         "GRAPHLOOM_PI_MODEL",
         "GRAPHLOOM_PI_AGENT_DIR",
+        "GRAPHLOOM_PI_PASS_ENV",
       ],
       isolation: "unrestricted",
     });
@@ -226,7 +227,7 @@ describe("graphloom.coding-agent/run", () => {
   it("binds Pi settings as config and the API key only as a credential", () => {
     const binding = codingAgentBinding({
       harness: piHarnessModule,
-      pi: { provider: "anthropic", modelId: "claude-x", agentDir: "/pi", apiKey: "sk-secret" },
+      pi: { provider: "anthropic", modelId: "claude-x", agentDir: "/pi", passEnv: ["GOPATH", "CARGO_HOME"], apiKey: "sk-secret" },
     });
     expect(binding).toEqual({
       allowedEffects: ["read", "write"],
@@ -237,6 +238,7 @@ describe("graphloom.coding-agent/run", () => {
         GRAPHLOOM_PI_PROVIDER: "anthropic",
         GRAPHLOOM_PI_MODEL: "claude-x",
         GRAPHLOOM_PI_AGENT_DIR: "/pi",
+        GRAPHLOOM_PI_PASS_ENV: "GOPATH,CARGO_HOME",
       },
       credentials: { "pi-api-key": "sk-secret" },
     });

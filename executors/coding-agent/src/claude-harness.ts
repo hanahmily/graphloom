@@ -16,6 +16,7 @@ import {
   CLAUDE_STARTUP_TIMEOUT_ENV,
 } from "./claude-config.js";
 import type { CodingHarness, CodingRunRequest, CodingRunResult, CodingSessionOptions, CodingUsage } from "./harness.js";
+import { envList, minimalEnv } from "./child-env.js";
 import { startToolBridge, type ToolBridge } from "./mcp-bridge.js";
 
 export interface ClaudeCodeHarnessOptions {
@@ -43,37 +44,6 @@ export interface ClaudeCodeHarnessOptions {
    */
   responseTimeoutMs?: number;
 }
-
-/** Environment Claude Code and its shell need to run, find its login, and reach the network. */
-const BASE_ENV = new Set([
-  "PATH",
-  "HOME",
-  "USER",
-  "LOGNAME",
-  "SHELL",
-  "TMPDIR",
-  "TMP",
-  "TEMP",
-  "LANG",
-  "LANGUAGE",
-  "TZ",
-  "TERM",
-  "SSH_AUTH_SOCK",
-  "XDG_CONFIG_HOME",
-  "XDG_CACHE_HOME",
-  "XDG_DATA_HOME",
-  "XDG_STATE_HOME",
-  "XDG_RUNTIME_DIR",
-  "HTTP_PROXY",
-  "HTTPS_PROXY",
-  "NO_PROXY",
-  "http_proxy",
-  "https_proxy",
-  "no_proxy",
-  "NODE_EXTRA_CA_CERTS",
-  "SSL_CERT_FILE",
-  "SSL_CERT_DIR",
-]);
 
 const SESSION_REF = /^claude-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
 const PROJECT_DIR = /^[A-Za-z0-9._-]+$/;
@@ -165,13 +135,6 @@ export function createClaudeCodeHarness(harnessOptions: ClaudeCodeHarnessOptions
   };
 }
 
-function envList(value: string | undefined): string[] {
-  return (value ?? "")
-    .split(",")
-    .map((name) => name.trim())
-    .filter((name) => name !== "");
-}
-
 function envMs(name: string, fallback: number): number {
   const value = process.env[name];
   if (value === undefined || value === "") return fallback;
@@ -186,10 +149,7 @@ function sha256(text: string): string {
 
 /** Claude Code's environment: the basics it needs plus `passEnv`, never the rest of the controller's. */
 function childEnv(passEnv: string[], configDir: string, apiKey: string | undefined): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = {};
-  for (const [name, value] of Object.entries(process.env)) {
-    if (value !== undefined && (BASE_ENV.has(name) || name.startsWith("LC_") || passEnv.includes(name))) env[name] = value;
-  }
+  const env = minimalEnv(process.env, passEnv);
   env.CLAUDE_CONFIG_DIR = configDir;
   if (apiKey) env.ANTHROPIC_API_KEY = apiKey;
   return env;
