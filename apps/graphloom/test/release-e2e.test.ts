@@ -137,6 +137,16 @@ function repairDeps(installed: string, supervisorSessionId: string, patch: (cand
 }
 
 describe("the release example plugin through the controller", () => {
+  it("spends no correction budget on a clean run through both work stages", async () => {
+    const env = await makeEnv();
+    const { runner: scripted } = runner([bump, changelog("Export command"), reviewer("approved", "matches the request")]);
+    const report = await createController().run({ taskPath: env.taskPath, runner: scripted, stateRoot: env.stateRoot, runId: "release-clean" });
+
+    expect(report.status, `${report.stopReason}: ${report.blocker}`).toBe("succeeded");
+    const state = await loadRunState(report.stateDir);
+    expect(state.budgets.corrections).toBe(state.intake.budgets.corrections);
+  }, 60_000);
+
   it("runs Bump → Changelog → Review from its installed bundle, reentering Changelog on the reviewer's request", async () => {
     const env = await makeEnv();
     const { seen, runner: scripted } = runner([
@@ -168,6 +178,8 @@ describe("the release example plugin through the controller", () => {
     const state = await loadRunState(report.stateDir);
     expect(state.intake.bundle.bundlePath).toBe(env.installed);
     expect(state.definition.stages.map((s) => s.id)).toEqual(["bump", "changelog", "review"]);
+    // Only the reentry is charged; the rewrite it starts is the new generation's first Changelog job.
+    expect(state.budgets.corrections).toBe(state.intake.budgets.corrections - 1);
   }, 60_000);
 
   it("qualifies and activates a source repair of its changelog validator, then completes without redoing accepted work", async () => {
@@ -247,6 +259,8 @@ describe("the release example plugin through the controller", () => {
       ["changelog", "work"],
       ["review", "review"],
     ]);
+    // One for the Changelog correction after its own observation, one for the repair.
+    expect(state.budgets.corrections).toBe(state.intake.budgets.corrections - 2);
   }, 90_000);
 
   it("rejects an always-passing changelog validator in qualification, before review, and keeps the installed version", async () => {

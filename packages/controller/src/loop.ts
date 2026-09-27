@@ -1108,10 +1108,7 @@ async function prepareDispatch(
   }
 
   const isCorrection =
-    job.purpose === "work" &&
-    (state.mode === "recovery" ||
-      state.current.attempt > 1 ||
-      freshEvidence(state).some((e) => e.kind === "file" || e.kind === "workspace"));
+    job.purpose === "work" && (state.mode === "recovery" || state.current.attempt > 1 || redoesStageWork(state, job.stageId));
   if (isCorrection && state.budgets.corrections <= 0) {
     return {
       state: {
@@ -1167,6 +1164,9 @@ async function prepareDispatch(
       ...(session !== undefined ? { session } : {}),
     },
     current: { stageId: job.stageId, attempt: state.current.attempt },
+    ...(job.purpose === "work"
+      ? { lastWorkDispatch: { stageId: job.stageId, evidenceCount: state.evidence.length } }
+      : {}),
   };
 
   return {
@@ -1181,6 +1181,21 @@ async function prepareDispatch(
       ...(session !== undefined ? { session } : {}),
     },
   };
+}
+
+/**
+ * Whether a work dispatch for `stageId` follows fresh observations of that
+ * stage's own earlier work. Observations left by an earlier, accepted stage do
+ * not make the next stage's first job a correction.
+ */
+function redoesStageWork(state: DurableRunState, stageId: string): boolean {
+  const observed = (e: EvidenceRecord) => (e.kind === "file" || e.kind === "workspace") && e.generation === state.generation;
+  const last = state.lastWorkDispatch;
+  if (last === undefined) {
+    // State written before lastWorkDispatch existed: keep the rule it was charged under.
+    return state.lastWorkOperationId !== undefined && state.evidence.some(observed);
+  }
+  return last.stageId === stageId && state.evidence.slice(last.evidenceCount).some(observed);
 }
 
 /**

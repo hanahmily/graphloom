@@ -23,6 +23,7 @@ import { createScriptedRunner } from "@graphloom/runner";
 import { createInProcessPluginHost, type PluginHost } from "@graphloom/plugin-host";
 import { createScriptedSupervisor } from "@graphloom/supervisor";
 import { createController, loadRunState } from "./index.js";
+import { saveRunState } from "./state.js";
 
 const execFileAsync = promisify(execFile);
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -150,7 +151,8 @@ describe("corrections, crash containment, unfamiliar failure (#28)", () => {
       "write",
     ]);
     const inspect = await controller.inspect(report.stateDir);
-    expect(inspect.budgets.corrections).toBeLessThan(8);
+    // The rewrite after Write's own observation is the one correction.
+    expect(inspect.budgets.corrections).toBe(7);
   });
 
   it("fails a job that edits outside its write scope, and a correction may undo the stray edit", async () => {
@@ -1048,9 +1050,55 @@ describe("corrections, crash containment, unfamiliar failure (#28)", () => {
 
     expect(resumed.status).toBe("succeeded");
     const after = await controller.inspect(paused.stateDir);
-    // Still burned from pre-resume reenter; rewrite may burn another as correction.
-    expect(after.budgets.corrections).toBeLessThanOrEqual(before.budgets.corrections);
-    expect(after.budgets.corrections).toBeLessThan(8);
+    // The pre-resume reentry stays spent, and the rewrite is Write's second attempt.
+    expect(after.budgets.corrections).toBe(6);
+  });
+
+  it.each([
+    ["the run marks its work dispatches", false],
+    ["the run was saved before work dispatches were marked", true],
+  ])("charges a rewrite after resume and a fresh observation when %s", async (_case, legacy) => {
+    const env = await makeEnv();
+    const controller = createController();
+    const writeJob = dispatch(
+      { stageId: "write", kind: "agent", purpose: "work", instruction: "write", writeScope: [GREETING_PATH] },
+      "dispatch writer",
+    );
+    const observeWrite = observe({ paths: [GREETING_PATH], includeWorkspaceManifest: true }, "observe");
+    const writeGreeting = async (_job: unknown, ctx: { worktreePath: string }) => {
+      await writeFile(path.join(ctx.worktreePath, GREETING_PATH), GREETING, "utf8");
+      return { status: "ok" as const, summary: "wrote" };
+    };
+    const paused = await controller.run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({
+        definition,
+        advances: [writeJob, observeWrite, stop({ reason: "paused", blocker: "upgrade" }, "pause")],
+      }),
+      validators,
+      runner: createScriptedRunner({ jobs: [writeGreeting] }),
+      stateRoot: env.stateRoot,
+      runId: "resume-rewrite",
+    });
+    const saved = await loadRunState(paused.stateDir);
+    expect(saved.lastWorkDispatch?.stageId).toBe("write");
+    if (legacy) {
+      const { lastWorkDispatch: _dropped, ...unmarked } = saved;
+      await saveRunState(unmarked);
+    }
+
+    const resumed = await controller.resume({
+      runRef: paused.stateDir,
+      plugin: createScriptedGraph({
+        definition,
+        // The second rewrite follows no observation of the first, so it is not charged again.
+        advances: [observeWrite, writeJob, writeJob, stop({ reason: "paused", blocker: "checked" }, "pause")],
+      }),
+      validators,
+      runner: createScriptedRunner({ jobs: [writeGreeting, writeGreeting] }),
+    });
+    expect(resumed, `${resumed.stopReason}: ${resumed.blocker}`).toMatchObject({ stopReason: "paused", blocker: "checked" });
+    expect((await controller.inspect(paused.stateDir)).budgets.corrections).toBe(7);
   });
 
   it("rejects Accept from stale pre-reentry evidence after Write reentry", async () => {

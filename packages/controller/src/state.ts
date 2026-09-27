@@ -134,6 +134,13 @@ export interface DurableRunState {
   workspaceRevision?: string;
   /** Last successful work-purpose dispatch; used for separate-reviewer checks. */
   lastWorkOperationId?: string;
+  /**
+   * The last work dispatch's stage, and the evidence count when it was
+   * admitted. Another work dispatch for that stage after current-generation
+   * file or workspace evidence recorded since redoes the work and is a
+   * correction.
+   */
+  lastWorkDispatch?: { stageId: string; evidenceCount: number };
   /** Recorded active-version transitions (intake + generation fences). */
   versionHistory: VersionRecord[];
   /** Active recovery episode when mode is recovery. */
