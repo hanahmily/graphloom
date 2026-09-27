@@ -254,6 +254,7 @@ export function createController(): Controller {
           intake.repoPath,
           runId,
           intake.pinnedHead,
+          session.stateDir,
         );
 
         let state = initialState({
