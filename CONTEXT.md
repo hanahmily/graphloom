@@ -81,3 +81,8 @@ run and attempt. Reporting completion does not itself establish acceptance.
 **Host slice**:
 One admitted unit of primary-host work, whether implementation, a recovery proposal,
 or repair editing, counted independently from the host's model requests.
+
+**Host epoch**:
+The durable fencing number for a run's primary-host binding. Rebind, claim expiry,
+detach, and operator stop advance it; a transport reconnect to a still-valid
+binding preserves it. Old-epoch requests cannot mutate the run or confirm drainage.

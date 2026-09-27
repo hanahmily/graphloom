@@ -670,8 +670,8 @@ progress fields. No automatic commit, push, merge, or external publication occur
 | Active run execution time | 4 hours |
 
 These are standalone defaults. Agent-host mode preserves correction, job, decision,
-and time limits while adding a distinct host-slice allowance and explicit usage
-coverage; see [host accounting](design-agent-host.md#authority-accounting-and-honest-limits).
+and active-run limits while using separate coding/proposal deadlines, adding a
+distinct host-slice allowance, and declaring explicit usage coverage; see [host accounting](design-agent-host.md#authority-accounting-and-honest-limits).
 An external host without provider interception cannot promise this exact model-call
 ceiling. Even the current standalone Claude harness has documented request-count
 limitations; inspect must disclose the accounting profile rather than imply a

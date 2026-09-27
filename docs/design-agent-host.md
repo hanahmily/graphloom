@@ -128,6 +128,16 @@ the model. `next` is a bounded mutation, not an alias for read-only status. Dupl
 requests return recorded outcomes. Long jobs use IDs and subsequent status reads;
 MCP request timeouts do not mean the job failed or authorize restarting it.
 
+Before evaluating the plugin or requesting a new supervisor decision, `next`
+checks for outstanding work and existing offers. Returning an existing offer or
+`wait` for pending work does not evaluate the plugin, spend the decisions budget,
+or increment the no-progress counter. Prefer `status` for polling operation IDs;
+repeated `next` polls have the same exemption. Actual admitted/rejected graph or
+supervisor decisions still spend their normal allowances and participate in
+no-progress detection, even if that call eventually returns `wait`. Waiting for
+pending work still counts toward its deadline and active-run time; polling cannot
+extend either limit.
+
 Every mutation binds run ID, authenticated host binding, host epoch, expected
 state revision, request ID, and when relevant operation/claim ID and attempt.
 For retries, authenticate first and look up the durable request ID: the same
@@ -135,6 +145,24 @@ payload returns its recorded outcome or an in-progress operation handle, even if
 its expected revision is now old. Reuse with different payload is rejected. Apply
 revision checks only to new requests; reconcile an existing intent without
 redispatching its effect.
+
+A host epoch is the controller's durable, monotonically increasing fencing number
+for the run's primary-host binding, distinct from the service owner generation.
+Initial attachment creates it. Explicit rebind, host-claim expiry, detach, and
+operator stop advance it atomically while fencing the old binding and claims.
+Resumption after fencing requires an explicit authorized attachment using the new
+epoch; no counters or operation identities reset. Recovery attachment may report
+verified drainage of a fenced claim under the current epoch, but cannot admit new
+work until the quiescence/reconciliation barriers clear. Old-epoch mutations,
+renewals, and quiescence
+acknowledgments are rejected, including request-ID replays.
+
+A transport reconnect to a still-valid binding preserves its epoch and outstanding
+claim. The adapter authenticates continuity and replaces the old connection's
+transport authority; two connections cannot independently renew or mutate the
+binding. Reconnect alone grants neither a new claim nor a new deadline. Controller
+restart restores the persisted epoch and reconciles expiry before accepting work;
+it does not silently rebind the host.
 
 Capabilities are bound by the adapter, never accepted because the model asserts
 it is a reviewer or supplies another session ID. Reject stale revisions before
@@ -252,7 +280,14 @@ conversation is the old transcript. Starting a new session never resets limits.
 Host attachment and the controller service owner are distinct leases. A healthy
 connection alone cannot own an assignment indefinitely. Initial defaults: host
 heartbeat every 30 seconds, claim lease 90 seconds renewed by the adapter, and an
-absolute 20-minute assignment deadline. Renewal cannot extend the job deadline.
+absolute assignment deadline fixed at claim admission. Implementation and
+candidate-edit assignments default to one hour, matching the standalone coding
+executor; recovery proposal slices default to 20 minutes. A compatible job's
+explicit timeout, or an operator-configured positive finite timeout pinned at
+intake, overrides the default. A job's explicit timeout takes precedence over the
+operator default. Admission caps every deadline by the remaining active-run time.
+Renewal, reconnect, and child execution cannot extend that deadline. These timeouts
+are independent of the 90-second liveness lease.
 The MVP has no partial-success/checkpoint outcome: deadline expiry interrupts the
 job and enters recovery, with work and evidence retained. An admitted retry creates
 a new operation/attempt, spends the applicable correction and host-slice allowances,
@@ -302,19 +337,34 @@ subscription tokens into Pi or switch the interactive host's model itself. Recor
 host-reported model changes as observations; reject work needing unsupported
 capabilities. Pi-specific `switch_model` is unavailable for a Claude-host binding.
 
-Two independent capability axes must be visible at attachment and in inspect:
+Three independent capability axes must be visible at attachment and in inspect:
 
 - **Enforcement:** host-policy/cooperative tools versus OS-confined execution.
   Local hooks can reject many inadmissible calls and help enforce cwd/lease rules,
   but do not turn unrestricted shell into a sandbox. Post-execution diffs detect
   some violations; they do not undo external effects or detect all off-tree writes.
+- **Quiescence:** a qualified adapter must be able to revoke new native write
+  admission and confirm drainage of every admitted native execution, including
+  background commands and delegated work. Negotiate this at `attach` and rebind
+  before offering or claiming work; reject an unsupported host with
+  `host quiescence unsupported`. A version string or model assertion is insufficient:
+  qualify the adapter's concrete native-tool lifecycle tracking and cancellation
+  mechanism with background-work and disconnect tests. Native execution modes it
+  cannot track must be disabled and denied before admission; if it cannot enforce
+  that restriction under its declared profile, reject the attachment. This covers
+  admitted work, not arbitrary processes outside a cooperative host's control.
+  Loss of the capability mid-run fences work and invokes the quiescence blocker;
+  manual reconciliation is an exceptional recovery path, not the normal way an
+  unsupported attachment settles every job.
 - **Accounting:** exact provider interception versus host-reported/incomplete
   usage. Claude-native compaction, hidden model requests, and subagents cannot be
   advertised as covered by a hard global request count without interception.
 
 Agent-host mode uses explicit finite admission limits: retain 8 corrections, 128
-executor jobs/observations, 512 decisions, 20 minutes per work slice, and 4 hours
-active run time. Add **64 host slices** per run, covering implementation, recovery
+executor jobs/observations, 512 decisions, and 4 hours active run time. Work slices
+use the finite deadlines defined above: one hour for coding and 20 minutes for
+recovery proposals by default, capped by remaining run time. Add **64 host slices**
+per run, covering implementation, recovery
 proposal turns, and candidate edits. A recovery proposal claims a recovery slice;
 its patch-edit phase claims a separate slice, but shares the existing correction
 reservation. Claim reserves before work; an interrupted slice remains spent.
@@ -394,6 +444,20 @@ In particular, scripted lifecycle tests must prove:
   unknown or effects remain unreconciled, preserving the workspace and journal.
   After quiescence and reconciliation are recorded, normal deletion succeeds
   subject to the existing dirty-worktree checks.
+- Repeated `status` and `next` polling during a pending executor job or an unclaimed
+  offer neither re-evaluates the graph nor changes decision/no-progress counters.
+  Real decisions remain charged, and pending work still exhausts its time limit.
+- Attachment and rebind without qualified quiescence support fail before a work
+  offer, claim, or slice reservation. Loss of support after admission fences work
+  and preserves the pending quiescence barrier.
+- A default coding assignment can run beyond 20 minutes without entering recovery
+  or spending a correction, but expires at one hour. Explicit timeout precedence,
+  recovery-proposal deadlines, remaining-run-time caps, and reconnect/renewal not
+  extending deadlines are verified with a controlled clock.
+- Reconnect to a valid binding preserves the epoch, claim, and budgets while
+  revoking the previous connection's authority. Rebind, expiry, detach, and stop
+  advance the epoch durably; stale mutations, replay requests, renewals, and drain
+  acknowledgments are rejected after those transitions and controller restart.
 
 ## Relationship to Loopx and host documentation
 
