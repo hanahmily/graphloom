@@ -284,6 +284,71 @@ describe("createChildExecutorRunner", () => {
     expect(bad.summary).toMatch(/input failed schema validation/);
   });
 
+  describe("stopping an executor that started its own process group", () => {
+    const groupFixture = path.join(path.dirname(fileURLToPath(import.meta.url)), "../test/fixtures/process-group-executor.mjs");
+    const alive = (pid: number) => {
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    const pidIn = async (file: string) => Number(await readFile(file, "utf8"));
+    const groupRunner = (extra: { timeoutMs?: number; stopGraceMs?: number }) =>
+      createChildExecutorRunner({
+        entryModule: groupFixture,
+        executorIds: ["acme.group/stop-on-abort", "acme.group/await-tool", "acme.group/ignore-abort"],
+        fallback: createScriptedRunner({ jobs: [] }),
+        workerModule,
+        ...extra,
+      });
+
+    it("aborts the executor's signal on timeout and settles once it has stopped its processes", async () => {
+      const pidFile = path.join(await mkdtemp(path.join(os.tmpdir(), "gl-group-")), "pid");
+      const result = await groupRunner({ timeoutMs: 500 }).runJob(job("acme.group/stop-on-abort", { pidFile }, "1"), ctx);
+      expect(result).toMatchObject({ status: "failed", summary: "executor child timed out after 500ms" });
+      expect(alive(await pidIn(pidFile))).toBe(false);
+    });
+
+    it("aborts the executor's signal when the run stops", async () => {
+      const pidFile = path.join(await mkdtemp(path.join(os.tmpdir(), "gl-group-")), "pid");
+      const stop = new AbortController();
+      const running = groupRunner({}).runJob(job("acme.group/stop-on-abort", { pidFile }, "1"), { ...ctx, signal: stop.signal });
+      await expect.poll(() => readFile(pidFile, "utf8").catch(() => ""), { timeout: 5_000 }).not.toBe("");
+      stop.abort();
+      expect(await running).toMatchObject({ status: "failed", summary: "executor cancelled: run stopped" });
+      expect(alive(await pidIn(pidFile))).toBe(false);
+    });
+
+    it("refuses a tool call left unanswered, so a stopped executor can return", async () => {
+      const children = {
+        callTool: () => new Promise<never>(() => undefined),
+        reserveModelCall: async () => true,
+      };
+      const started = Date.now();
+      const result = await groupRunner({ timeoutMs: 300, stopGraceMs: 5_000 }).runJob(
+        {
+          ...job("acme.group/await-tool", {}, "1"),
+          tools: [{ name: "probe", effect: "read" as const, executor: { id: "acme.other/probe", version: "1" } }],
+        },
+        { ...ctx, children } as never,
+      );
+      expect(result.summary).toBe("executor child timed out after 300ms");
+      expect(Date.now() - started).toBeLessThan(3_000);
+    });
+
+    it("kills an executor that ignores its signal after the stop grace", async () => {
+      const pidFile = path.join(await mkdtemp(path.join(os.tmpdir(), "gl-group-")), "pid");
+      const started = Date.now();
+      const result = await groupRunner({ timeoutMs: 300, stopGraceMs: 400 }).runJob(job("acme.group/ignore-abort", { pidFile }, "1"), ctx);
+      expect(result.summary).toBe("executor child timed out after 300ms");
+      expect(Date.now() - started).toBeGreaterThanOrEqual(700);
+      const pid = await pidIn(pidFile);
+      process.kill(-pid, "SIGKILL");
+    });
+  });
+
   it("rejects custom registrations that would shadow a built-in id", () => {
     expect(() =>
       createChildExecutorRunner({

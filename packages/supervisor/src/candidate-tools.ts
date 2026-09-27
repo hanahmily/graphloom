@@ -1,8 +1,10 @@
-import { constants } from "node:fs";
-import { access, lstat, mkdir, readFile, readdir, realpath, stat, writeFile } from "node:fs/promises";
+import { access, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import {
+  createBashToolDefinition,
   createEditToolDefinition,
+  createFindToolDefinition,
+  createGrepToolDefinition,
   createLsToolDefinition,
   createReadToolDefinition,
   createWriteToolDefinition,
@@ -10,11 +12,14 @@ import {
 } from "@earendil-works/pi-coding-agent";
 
 /**
- * File tools granted to the supervisor on a repair candidate. Shell, grep, and
- * find are withheld: they cannot be confined to the candidate root, and
- * build/test runs through controller preflight instead.
+ * Pi's full coding toolset, granted to the supervisor on a repair candidate
+ * with the candidate root as its working directory. The tools are not confined
+ * to it. The controller stops the run if the patch changed the live install,
+ * the run worktree, or the run state, then checks the candidate, builds and
+ * tests it, has it reviewed independently, and re-digests the live install
+ * before activation.
  */
-export const CANDIDATE_CODING_TOOL_NAMES = ["read", "edit", "write", "ls"] as const;
+export const CANDIDATE_CODING_TOOL_NAMES = ["read", "bash", "edit", "write", "grep", "find", "ls"] as const;
 
 /**
  * Validate a candidate root issued by the controller: it must be the real
@@ -49,83 +54,32 @@ export async function assertAdmittedCandidateRoot(
   return real;
 }
 
-/** Reject paths that resolve outside root or traverse a symlink. */
-export async function assertInsideCandidate(rootReal: string, absolutePath: string): Promise<void> {
-  const target = path.resolve(absolutePath);
-  const rel = path.relative(rootReal, target);
-  if (rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) {
-    throw new Error(`path outside repair candidate: ${absolutePath}`);
-  }
-  let current = rootReal;
-  for (const segment of rel === "" ? [] : rel.split(path.sep)) {
-    current = path.join(current, segment);
-    const info = await lstat(current).catch(() => undefined);
-    if (!info) return;
-    if (info.isSymbolicLink()) {
-      throw new Error(`symlink in repair candidate path rejected: ${absolutePath}`);
-    }
-  }
+export function createCandidateCodingTools(rootReal: string): ToolDefinition[] {
+  const tools = [
+    createReadToolDefinition(rootReal),
+    createBashToolDefinition(rootReal),
+    createEditToolDefinition(rootReal),
+    createWriteToolDefinition(rootReal),
+    createGrepToolDefinition(rootReal),
+    createFindToolDefinition(rootReal),
+    createLsToolDefinition(rootReal),
+  ] as unknown as ToolDefinition[];
+  return tools.map((tool) => rootedAt(tool, rootReal));
 }
 
-export function createCandidateCodingTools(rootReal: string): ToolDefinition[] {
-  const guard = (p: string) => assertInsideCandidate(rootReal, p);
-  const tools: unknown[] = [
-    createReadToolDefinition(rootReal, {
-      operations: {
-        async readFile(p) {
-          await guard(p);
-          return readFile(p);
-        },
-        async access(p) {
-          await guard(p);
-          await access(p, constants.R_OK);
-        },
-      },
-    }),
-    createEditToolDefinition(rootReal, {
-      operations: {
-        async readFile(p) {
-          await guard(p);
-          return readFile(p);
-        },
-        async writeFile(p, content) {
-          await guard(p);
-          await writeFile(p, content, "utf8");
-        },
-        async access(p) {
-          await guard(p);
-          await access(p, constants.R_OK | constants.W_OK);
-        },
-      },
-    }),
-    createWriteToolDefinition(rootReal, {
-      operations: {
-        async writeFile(p, content) {
-          await guard(p);
-          await writeFile(p, content, "utf8");
-        },
-        async mkdir(dir) {
-          await guard(dir);
-          await mkdir(dir, { recursive: true });
-        },
-      },
-    }),
-    createLsToolDefinition(rootReal, {
-      operations: {
-        async exists(p) {
-          await guard(p);
-          return (await lstat(p).catch(() => undefined)) !== undefined;
-        },
-        async stat(p) {
-          await guard(p);
-          return stat(p);
-        },
-        async readdir(p) {
-          await guard(p);
-          return readdir(p);
-        },
-      },
-    }),
-  ];
-  return tools as ToolDefinition[];
+/** Pi's tools prefer the session's `ctx.cwd` over their factory cwd. */
+function rootedAt(tool: ToolDefinition, rootReal: string): ToolDefinition {
+  return {
+    ...tool,
+    execute: (toolCallId, params, signal, onUpdate, ctx) =>
+      tool.execute(
+        toolCallId,
+        params,
+        signal,
+        onUpdate,
+        new Proxy(ctx ?? {}, {
+          get: (target, key, receiver) => (key === "cwd" ? rootReal : Reflect.get(target, key, receiver)),
+        }) as typeof ctx,
+      ),
+  };
 }

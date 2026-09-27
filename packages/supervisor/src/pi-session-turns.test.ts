@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
@@ -22,6 +22,10 @@ interface FauxModule {
   };
   fauxAssistantMessage(content: unknown, options?: { stopReason?: string }): unknown;
   fauxToolCall(name: string, args: Record<string, unknown>): unknown;
+}
+
+interface FauxContext {
+  messages: Array<{ role: string; toolName?: string; content?: unknown }>;
 }
 
 /** First `<node_modules>/<pkg>` visible from `fromFile` (works for ESM-only packages). */
@@ -49,7 +53,7 @@ afterEach(async () => {
   }
 });
 
-describe("Pi session turn cap", () => {
+describe("Pi supervisor session", () => {
   it("aborts the turn beyond maxTurns before its provider request", async () => {
     const ai = await loadPiAi();
     const dir = await mkdtemp(path.join(os.tmpdir(), "gl-pi-turns-"));
@@ -102,6 +106,81 @@ describe("Pi session turn cap", () => {
       );
       expect(faux.state.callCount).toBe(2);
       expect(wrapped.drainTurnCount!()).toBe(2);
+    } finally {
+      await wrapped.close();
+    }
+  });
+
+  it("runs shell commands in the granted candidate root and drops them on revoke", async () => {
+    const ai = await loadPiAi();
+    const dir = await mkdtemp(path.join(os.tmpdir(), "gl-pi-shell-"));
+    temps.push(dir);
+    const repairsDir = path.join(dir, "repairs");
+    const candidateRoot = path.join(repairsDir, "repair-1", "candidate");
+    await mkdir(candidateRoot, { recursive: true });
+    await writeFile(path.join(repairsDir, "repair-1", "snapshot.json"), "{}\n", "utf8");
+
+    const modelRuntime = await ModelRuntime.create({
+      authPath: path.join(dir, "auth.json"),
+      modelsPath: path.join(dir, "models.json"),
+    });
+    const faux = ai.fauxProvider({ provider: "faux-shell" });
+    modelRuntime.registerNativeProvider(faux.provider as never);
+    const bash = (command: string) =>
+      ai.fauxAssistantMessage(ai.fauxToolCall("bash", { command }), { stopReason: "toolUse" });
+    let afterRevoke: FauxContext | undefined;
+    faux.setResponses([
+      bash("pwd > where.txt && printf fixed > validator.js"),
+      ai.fauxAssistantMessage("patched"),
+      bash("printf leaked > leaked.txt"),
+      (context: FauxContext) => {
+        afterRevoke = context;
+        return ai.fauxAssistantMessage("done");
+      },
+    ]);
+
+    const { session } = await createAgentSession({
+      cwd: dir,
+      agentDir: dir,
+      model: faux.getModel() as never,
+      thinkingLevel: "off",
+      modelRuntime,
+      noTools: "all",
+      tools: [],
+      sessionManager: SessionManager.inMemory(dir),
+      settingsManager: SettingsManager.inMemory({
+        compaction: { enabled: false },
+        retry: { enabled: false },
+      }),
+    });
+    const wrapped = wrapPiAgentSession({
+      session,
+      modelRuntime,
+      runId: "run-shell",
+      provider: "faux-shell",
+      modelId: "faux",
+      agentDir: dir,
+      credentialSource: "pi-stored",
+      promptTimeoutMs: 10_000,
+      repairsDir,
+    });
+
+    try {
+      await wrapped.grantCandidateCoding!(candidateRoot);
+      await wrapped.prompt("patch it");
+      expect((await readFile(path.join(candidateRoot, "where.txt"), "utf8")).trim()).toBe(
+        await realpath(candidateRoot),
+      );
+      expect(await readFile(path.join(candidateRoot, "validator.js"), "utf8")).toBe("fixed");
+      expect(existsSync(path.join(dir, "where.txt"))).toBe(false);
+
+      await wrapped.revokeCandidateCoding!();
+      await wrapped.prompt("anything else?");
+      expect(existsSync(path.join(candidateRoot, "leaked.txt"))).toBe(false);
+      expect(existsSync(path.join(dir, "leaked.txt"))).toBe(false);
+      const last = afterRevoke?.messages.at(-1);
+      expect(last?.role).toBe("toolResult");
+      expect(JSON.stringify(last?.content)).toMatch(/Tool bash not found/);
     } finally {
       await wrapped.close();
     }

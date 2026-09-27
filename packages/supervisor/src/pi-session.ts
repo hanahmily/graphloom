@@ -88,7 +88,7 @@ export interface PiSupervisorSession {
    */
   setModel(ref: { provider: string; modelId: string }): Promise<void>;
   /**
-   * Enable path-confined file tools on a controller-issued QualifyRepair
+   * Enable Pi's full coding toolset, rooted at a controller-issued QualifyRepair
    * candidate root. Session identity must not change across repair rounds.
    */
   grantCandidateCoding?(candidateRoot: string): Promise<void>;
@@ -425,7 +425,7 @@ function asMutableToolSession(session: AgentSession): MutableToolSession {
 /**
  * Make exactly `tools` active: candidate coding tools, admission tools for a
  * decision turn, or none. The allowlist names only these tools, so Pi's
- * unconfined built-ins (including bash) stay off.
+ * built-ins (including bash) are active only while candidate coding is granted.
  */
 function setSessionTools(session: AgentSession, tools: ToolDefinition[]): void {
   const host = asMutableToolSession(session);

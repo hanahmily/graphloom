@@ -156,6 +156,8 @@ export interface ExecutorBinding {
   env?: Record<string, string>;
   /** Operator consent to run a manifest that declares `isolation: "unrestricted"`. */
   allowUnrestricted?: boolean;
+  /** Wall-clock limit (ms) for one job in the package's executor process. Default: the runner's. */
+  timeoutMs?: number;
 }
 
 /** Built-in agent executor id — legacy `kind: "agent"` jobs pin to this. */

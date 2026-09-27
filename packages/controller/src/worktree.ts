@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
-import { lstat, mkdir, readFile, realpath } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { lstat, mkdir, readFile, readlink, realpath } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { assertSafeRunId } from "./ids.js";
@@ -82,6 +83,57 @@ export async function workspaceChangeManifest(worktreePath: string): Promise<str
     { cwd: worktreePath },
   );
   return parsePorcelainPaths(stdout);
+}
+
+/**
+ * Fingerprint of every path git would commit that differs from HEAD: tracked
+ * changes and untracked files, not ignored ones (build output, dependencies).
+ * Comparing two fingerprints shows which paths a job changed, including a path
+ * that was already dirty before it.
+ */
+export async function worktreeChangeFingerprints(worktreePath: string): Promise<Map<string, string>> {
+  const { stdout } = await execFileAsync("git", ["status", "--porcelain", "-z", "-uall"], {
+    cwd: worktreePath,
+    maxBuffer: 64 * 1024 * 1024,
+  });
+  const paths = new Set<string>();
+  const entries = stdout.split("\0");
+  for (let i = 0; i < entries.length; i += 1) {
+    const entry = entries[i]!;
+    if (entry.length < 4) continue;
+    paths.add(entry.slice(3));
+    // Renames and copies are followed by their source path.
+    if (entry[0] === "R" || entry[0] === "C") paths.add(entries[(i += 1)]!);
+  }
+  const fingerprints = new Map<string, string>();
+  for (const rel of paths) {
+    if (rel === ".git" || rel.startsWith(".git/")) continue;
+    fingerprints.set(rel, await fingerprintPath(path.join(worktreePath, rel)));
+  }
+  return fingerprints;
+}
+
+async function fingerprintPath(file: string): Promise<string> {
+  const st = await lstat(file).catch(() => undefined);
+  if (st === undefined) return "missing";
+  if (st.isSymbolicLink()) return `link:${await readlink(file)}`;
+  if (!st.isFile()) return "other";
+  return `file:${createHash("sha256").update(await readFile(file)).digest("hex")}`;
+}
+
+/**
+ * Paths a job changed that still differ from HEAD. A path restored to HEAD is
+ * left out, so a correction may undo a stray change outside its scope.
+ */
+export function changedPaths(before: Map<string, string>, after: Map<string, string>): string[] {
+  return [...after].filter(([rel, fp]) => before.get(rel) !== fp).map(([rel]) => rel).sort();
+}
+
+/** Changed paths a job was not allowed to write: all of them when read-only, else those outside `writeScope`. */
+export function pathsOutsideWriteScope(changed: string[], job: { readOnly?: boolean; writeScope?: string[] }): string[] {
+  if (job.readOnly === true) return changed;
+  const scope = (job.writeScope ?? []).map((entry) => entry.replace(/\/+$/, ""));
+  return changed.filter((rel) => !scope.some((entry) => rel === entry || rel.startsWith(`${entry}/`)));
 }
 
 function parsePorcelainPaths(stdout: string): string[] {

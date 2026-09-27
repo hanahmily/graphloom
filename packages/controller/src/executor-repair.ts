@@ -50,6 +50,7 @@ export async function executorRepairSubject(
   return {
     label: `executor package ${base.root}`,
     baseDigest,
+    liveDigest: () => digestExecutorSource(base.root),
     async snapshot({ repairsDir, artifactId }) {
       const candidateRoot = path.join(repairsDir, artifactId, "candidate");
       await mkdir(path.dirname(candidateRoot), { recursive: true });

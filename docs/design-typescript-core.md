@@ -475,9 +475,10 @@ A source repair or validator substitution follows the same bounded procedure:
 2. **Reproduce.** Add a focused regression case showing the defect in the original
    implementation. Include valid and invalid cases derived from the requirement.
    For an exact-byte gate, include missing newline, wrong content, and extra files.
-3. **Patch (supervisor via Pi).** The same logical supervisor Pi session edits only
-   the isolated plugin candidate with path-confined read/edit/write/ls; shell
-   access is withheld and build/test runs in step 4. Preserve the readable requirement,
+3. **Patch (supervisor via Pi).** The same logical supervisor Pi session patches
+   the isolated plugin candidate with Pi's full coding toolset, shell included,
+   rooted at the candidate; it may build and test there, but step 4 is the
+   controller's own check. Preserve the readable requirement,
    complete ordered step list, original test corpus, and original failing result.
    A changed old test needs an explicit defect explanation and independent review;
    deleting negative coverage or loosening expected outcomes is not a repair shortcut.
@@ -648,7 +649,7 @@ The release must demonstrate these cases through the real controller interface:
 | Crash after external write but before result | Reconcile remote outcome; do not blindly repeat the write |
 | Executor exceeds scope, hangs, or returns stale output | Enforce scope, stop independently, reject stale results, and retain evidence for recovery |
 | Correct file | Both stages accepted from observed evidence |
-| Missing newline or unrelated edit | Repair output; unchanged validation catches the defect |
+| Missing newline or unrelated edit | Repair output; unchanged validation catches the defect, and a job that edits outside its write scope fails |
 | Review requests changes | Known graph reentry or supervisor recovery; fresh downstream review |
 | Unknown launch failure with no plugin handler | Supervisor repairs invocation and returns without duplicate Write |
 | Plugin process crashes or hangs | Controller remains responsive; bounded recovery or concrete stopped state |

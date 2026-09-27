@@ -22,7 +22,11 @@ import { createBuiltinExecutorRunner, createScriptedRunner } from "@graphloom/ru
 import { createController, loadRunState } from "@graphloom/controller";
 import { githubBinding, githubExecutorPackage } from "@graphloom/executor-github";
 import { startFakeGitHub, type FakeGitHub } from "@graphloom/executor-github/testing";
-import { CONTINUATION_NOTICE, codingAgentBinding, codingAgentExecutorPackage } from "@graphloom/executor-coding-agent";
+import {
+  CONTINUATION_NOTICE,
+  codingAgentBinding,
+  codingAgentExecutorPackage,
+} from "@graphloom/executor-coding-agent";
 import { scriptedHarnessModule, type ScriptedStep } from "@graphloom/executor-coding-agent/testing";
 
 const execFileAsync = promisify(execFile);
@@ -127,11 +131,12 @@ function graph(steps: ScriptedStep[]) {
 }
 
 /** The operator's host: the coding agent runs unrestricted, GitHub sandboxed with writes granted. */
-function hostRunner(server: FakeGitHub) {
+function hostRunner(server: FakeGitHub, coding = codingAgentBinding({ harness: scriptedHarnessModule }), timeoutMs?: number) {
   return createBuiltinExecutorRunner({
+    ...(timeoutMs !== undefined ? { timeoutMs } : {}),
     packages: [
       { manifest: githubExecutorPackage, ...githubBinding({ token: TOKEN, baseUrl: server.baseUrl, allowWrites: true }) },
-      { manifest: codingAgentExecutorPackage, ...codingAgentBinding({ harness: scriptedHarnessModule }) },
+      { manifest: codingAgentExecutorPackage, ...coding },
     ],
     fallback: createScriptedRunner({
       jobs: Array.from({ length: 2 }, () => async () => ({
@@ -144,6 +149,15 @@ function hostRunner(server: FakeGitHub) {
 }
 
 const posts = (server: FakeGitHub) => server.requests.filter((r) => r.method === "POST");
+
+const retry = reenter({ stageId: "write", reason: "no greeting yet" }, "retry");
+const rest = [
+  observe({ paths: ["GREETING.txt"], includeWorkspaceManifest: true }, "observe"),
+  validate({ stageId: "write", requirementIds: ["greeting-bytes"] }, "v-write"),
+  dispatch({ stageId: "review", kind: "agent", purpose: "review", instruction: "review", readOnly: true }, "review"),
+  validate({ stageId: "review", requirementIds: ["independent-review"] }, "v-review"),
+  stop({ reason: "complete", blocker: "none" }, "done"),
+];
 
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => {
@@ -281,6 +295,35 @@ describe("graph → coding agent → GitHub child executor", () => {
   });
 });
 
+describe("the coding agent's job timeout", () => {
+  it("outlasts the runner's default job timeout unless the binding sets its own", async () => {
+    const server = await fake();
+    const env = await makeEnv();
+    const slow = graph([{ sleep: 1_500 }, writeGreeting]);
+    const finished = await createController().run({
+      taskPath: env.taskPath,
+      plugin: slow,
+      validators,
+      runner: hostRunner(server, codingAgentBinding({ harness: scriptedHarnessModule }), 500),
+      stateRoot: env.stateRoot,
+      runId: "slow-default",
+    });
+    expect(finished.status, finished.blocker).toBe("succeeded");
+
+    const limited = await createController().run({
+      taskPath: env.taskPath,
+      plugin: graph([{ sleep: 1_500 }, writeGreeting]),
+      validators,
+      runner: hostRunner(server, codingAgentBinding({ harness: scriptedHarnessModule, timeoutMs: 500 })),
+      stateRoot: env.stateRoot,
+      runId: "slow-limited",
+    });
+    expect(limited).toMatchObject({ status: "stopped", stopReason: "job failed: executor child timed out after 500ms" });
+    const { worktreePath } = await loadRunState(limited.stateDir);
+    expect(await readFile(path.join(worktreePath, "GREETING.txt"), "utf8").catch(() => undefined)).toBeUndefined();
+  });
+});
+
 describe("continuing the coding agent's session on reentry", () => {
   const ASSIGNMENT = "Implement issue #1 and post a status comment.";
   const agentJob = (steps: ScriptedStep[], continueFrom?: string): JobSpec => ({
@@ -294,16 +337,8 @@ describe("continuing the coding agent's session on reentry", () => {
     input: { assignment: continueFrom === undefined ? ASSIGNMENT : "Finish issue #1.", harnessOptions: { steps } },
     ...(continueFrom !== undefined ? { continueFrom } : {}),
   });
-  const retry = reenter({ stageId: "write", reason: "no greeting yet" }, "retry");
   const continueFirst = (steps: ScriptedStep[]) => (view: RunView) =>
     dispatch(agentJob(steps, view.agentSessions![0]!.operationId), "continue");
-  const rest = [
-    observe({ paths: ["GREETING.txt"], includeWorkspaceManifest: true }, "observe"),
-    validate({ stageId: "write", requirementIds: ["greeting-bytes"] }, "v-write"),
-    dispatch({ stageId: "review", kind: "agent", purpose: "review", instruction: "review", readOnly: true }, "review"),
-    validate({ stageId: "review", requirementIds: ["independent-review"] }, "v-review"),
-    stop({ reason: "complete", blocker: "none" }, "done"),
-  ];
   type Agent = { sessionRef: string | null; continued: boolean; output: { assignment: string; priorAssignments: string[]; toolResults: { result: { status: string; summary: string } }[] } };
   const agents = (evidence: readonly { payload?: unknown }[]) =>
     evidence.map((e) => (e.payload as { codingAgent?: Agent }).codingAgent).filter((a): a is Agent => a !== undefined);
@@ -378,6 +413,113 @@ describe("continuing the coding agent's session on reentry", () => {
     });
     const { worktreePath } = await loadRunState(paused.stateDir);
     expect(await readFile(path.join(worktreePath, "GREETING.txt"), "utf8").catch(() => undefined)).toBeUndefined();
+  });
+});
+
+describe("the Pi harness in the coding-agent executor process", () => {
+  const piHarnessFixture = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures/pi-faux-harness.mjs");
+  const PI_KEY = "sk-pi-e2e-secret-7731";
+  type FauxStep = { tool: string; args?: Record<string, unknown> } | { text: string };
+  const piJob = (faux: FauxStep[], continueFrom?: string): JobSpec => ({
+    stageId: "write",
+    kind: "agent",
+    purpose: "work",
+    instruction: "implement issue #1",
+    writeScope: ["GREETING.txt"],
+    executor: { id: "graphloom.coding-agent/run", version: "1" },
+    tools,
+    input: {
+      assignment: continueFrom === undefined ? "Implement issue #1 and post a status comment." : "Finish issue #1.",
+      harnessOptions: { faux },
+    },
+    ...(continueFrom !== undefined ? { continueFrom } : {}),
+  });
+  const writeGreetingCall: FauxStep = { tool: "bash", args: { command: "printf 'Hello, GraphLoom!\\n' > GREETING.txt" } };
+  const piRunner = async (server: FakeGitHub) => {
+    const agentDir = await mkdtemp(path.join(os.tmpdir(), "gl-pi-agent-"));
+    cleanups.push(() => rm(agentDir, { recursive: true, force: true }));
+    return hostRunner(server, codingAgentBinding({ harness: piHarnessFixture, pi: { agentDir, apiKey: PI_KEY } }));
+  };
+  type PiAgent = { harness: string; modelCalls: number; sessionRef: string | null; continued: boolean; toolCalls: { toolCallId: string }[] };
+  const piAgents = (evidence: readonly { payload?: unknown }[]) =>
+    evidence.map((e) => (e.payload as { codingAgent?: PiAgent }).codingAgent).filter((a): a is PiAgent => a !== undefined);
+
+  it("records the Pi agent's tool calls as child operations and completes the run", async () => {
+    const server = await fake();
+    const env = await makeEnv();
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({
+        definition,
+        advances: [
+          dispatch(
+            piJob([
+              { tool: "read_comments", args: { ...repo, number: 1 } },
+              { tool: "comment", args: { ...repo, issueNumber: 1, body: "Working on it.", idempotencyKey: "status" } },
+              writeGreetingCall,
+              { text: "Wrote GREETING.txt and posted a status comment." },
+            ]),
+            "implement",
+          ),
+          ...rest,
+        ],
+      }),
+      validators,
+      runner: await piRunner(server),
+      stateRoot: env.stateRoot,
+      runId: "pi-agent",
+    });
+
+    expect(report.status, report.blocker).toBe("succeeded");
+    expect(posts(server)).toHaveLength(1);
+    expect(server.comments.get(1)?.[0]?.body).toContain("Working on it.");
+    const state = await loadRunState(report.stateDir);
+    expect(state.childOperations?.map((c) => [c.executor.id, c.status])).toEqual([
+      ["graphloom.github/list-issue-comments", "ok"],
+      ["graphloom.github/create-issue-comment", "ok"],
+    ]);
+    for (const child of state.childOperations!) expect(child.toolCallId).toMatch(/^pi-[0-9a-f]{8}-/);
+    const [agent] = piAgents(report.evidence);
+    expect(agent).toMatchObject({ harness: "pi", modelCalls: 4, continued: false });
+    expect(agent!.sessionRef).toMatch(/^pi-[0-9a-f]{12}$/);
+    const [recorded] = state.agentSessions!;
+    expect(await readdir(recorded!.sessionDir)).toEqual([`${agent!.sessionRef}.jsonl`]);
+    const tree = await readTree(report.stateDir);
+    expect(tree).not.toContain(TOKEN);
+    expect(tree).not.toContain(PI_KEY);
+  });
+
+  it("continues the saved Pi session in a new executor process", async () => {
+    const server = await fake();
+    const env = await makeEnv();
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({
+        definition,
+        advances: [
+          dispatch(piJob([{ text: "Not done yet." }]), "first try"),
+          retry,
+          (view: RunView) =>
+            dispatch(piJob([writeGreetingCall, { text: "Done." }], view.agentSessions![0]!.operationId), "continue"),
+          ...rest,
+        ],
+      }),
+      validators,
+      runner: await piRunner(server),
+      stateRoot: env.stateRoot,
+      runId: "pi-continue",
+    });
+
+    expect(report.status, report.blocker).toBe("succeeded");
+    const [first, continued] = piAgents(report.evidence);
+    expect(continued).toMatchObject({ continued: true, sessionRef: first!.sessionRef });
+    const [recorded] = (await loadRunState(report.stateDir)).agentSessions!;
+    const transcript = await readFile(path.join(recorded!.sessionDir, `${first!.sessionRef}.jsonl`), "utf8");
+    expect(transcript).toContain("Implement issue #1 and post a status comment.");
+    expect(transcript).toContain("Not done yet.");
+    expect(transcript).toContain(CONTINUATION_NOTICE.slice(0, 40));
+    expect(transcript).toContain("Finish issue #1.");
+    expect(transcript).not.toContain(PI_KEY);
   });
 });
 

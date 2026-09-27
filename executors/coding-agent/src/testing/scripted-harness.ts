@@ -13,6 +13,7 @@ export type ScriptedStep =
   | { tool: string; id: string; input?: unknown }
   | { write: { path: string; content: string } }
   | { wait: "abort" }
+  | { sleep: number }
   | { fail: string };
 
 export interface ScriptedOutput {
@@ -88,6 +89,7 @@ export function createScriptedHarness(): CodingHarness {
 
 async function perform(steps: ScriptedStep[], out: ScriptedOutput, options: CodingSessionOptions): Promise<CodingRunResult> {
   for (const step of steps) {
+    if (options.signal?.aborted) return { status: "failed", summary: "aborted", output: out };
     if ("model" in step) {
       if (!(await options.reserveModelCall())) {
         return { status: "failed", summary: "model request budget exhausted", output: out };
@@ -108,6 +110,11 @@ async function perform(steps: ScriptedStep[], out: ScriptedOutput, options: Codi
         options.signal?.addEventListener("abort", () => resolve(), { once: true });
       });
       return { status: "failed", summary: "aborted", output: out };
+    } else if ("sleep" in step) {
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, step.sleep);
+        options.signal?.addEventListener("abort", () => (clearTimeout(timer), resolve()), { once: true });
+      });
     } else {
       throw new Error(step.fail);
     }

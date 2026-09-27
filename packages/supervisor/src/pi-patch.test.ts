@@ -81,7 +81,7 @@ describe("supervisor candidate patch", () => {
     expect(calls[0]?.text).toContain(`Candidate root: ${request.candidateRoot}`);
     expect(calls[0]?.text).toContain("Reason: exact-greeting gate rejects correct bytes");
     expect(calls[0]?.text).toMatch(/Do not edit graphloom\.stages\.json/);
-    expect(calls[0]?.text).toMatch(/No shell is available/);
+    expect(calls[0]?.text).toMatch(/Your working directory is the candidate root\. Use the shell and file tools/);
     expect(supervisor.drainProviderCalls()).toBe(4);
     expect(supervisor.sessionId).toBe("sess-patch");
   });

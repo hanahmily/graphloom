@@ -1,0 +1,292 @@
+import { createHash, randomBytes } from "node:crypto";
+import { existsSync, statSync } from "node:fs";
+import { realpath } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import {
+  createAgentSession,
+  createExtensionRuntime,
+  ModelRuntime,
+  SessionManager,
+  SettingsManager,
+  type ResourceLoader,
+  type ToolDefinition,
+} from "@earendil-works/pi-coding-agent";
+import type { CodingHarness, CodingRunRequest, CodingRunResult, CodingSession, CodingSessionOptions, CodingTool } from "./harness.js";
+import { bounded, inlineObjectSchema, scopeNotes } from "./assignment.js";
+import { PI_AGENT_DIR_ENV, PI_API_KEY_CREDENTIAL, PI_MODEL_ENV, PI_PROVIDER_ENV } from "./pi-config.js";
+
+export interface PiHarnessOptions {
+  /** Pi provider id. Default: `GRAPHLOOM_PI_PROVIDER`. */
+  provider?: string;
+  /** Model id; a job's `harnessOptions.modelId` overrides it. Default: `GRAPHLOOM_PI_MODEL`. */
+  modelId?: string;
+  /** Pi agent dir holding `auth.json` and `models.json`. Default: `GRAPHLOOM_PI_AGENT_DIR`, then `~/.pi/agent`. */
+  agentDir?: string;
+  systemPrompt?: string;
+  /** Builds the provider registry and auth store. Default: Pi's, from `agentDir`. */
+  createModelRuntime?: (agentDir: string) => Promise<ModelRuntime>;
+}
+
+const SESSION_REF = /^pi-[0-9a-f]{12}$/;
+const SUBMIT_RESULT = "submit_result";
+/** Pi's built-in coding tools, all active: the agent runs unrestricted in the worktree. */
+export const PI_BUILTIN_TOOLS = ["read", "bash", "edit", "write", "grep", "find", "ls"] as const;
+const RESERVED_TOOL_NAMES = new Set<string>([...PI_BUILTIN_TOOLS, SUBMIT_RESULT]);
+const BUDGET_EXHAUSTED = "model request budget exhausted";
+const MAX_TOOL_RESULT_CHARS = 32_000;
+const OPEN_OBJECT = { type: "object", additionalProperties: true } as unknown as ToolDefinition["parameters"];
+
+const DEFAULT_SYSTEM_PROMPT = [
+  "You are a GraphLoom coding agent working in a git worktree.",
+  "Use the shell and file tools to investigate, write code, and run builds and tests in the worktree.",
+  "GraphLoom tools go through the controller, which records each call; treat their results as the recorded observations.",
+  "Finish with a short summary of what you did and what you observed. Do not include secrets or private reasoning.",
+].join(" ");
+
+/**
+ * A `CodingHarness` that runs a Pi coding agent with Pi's full built-in toolset
+ * (shell included) in the worktree. Graph tools become Pi tools whose calls go
+ * to the controller as child operations. Each provider request reserves run
+ * budget first, and sessions persist under the controller's session directory.
+ */
+export function createPiHarness(harnessOptions: PiHarnessOptions = {}): CodingHarness {
+  return {
+    name: "pi",
+    resumable: true,
+    async createSession(options) {
+      const provider = harnessOptions.provider ?? process.env[PI_PROVIDER_ENV];
+      const jobModel = options.options?.modelId;
+      if (jobModel !== undefined && typeof jobModel !== "string") throw new Error("harnessOptions.modelId must be a string");
+      const modelId = jobModel ?? harnessOptions.modelId ?? process.env[PI_MODEL_ENV];
+      if (!provider || !modelId) {
+        throw new Error(`no Pi model configured: set ${PI_PROVIDER_ENV} and ${PI_MODEL_ENV}`);
+      }
+      const agentDir = harnessOptions.agentDir ?? process.env[PI_AGENT_DIR_ENV] ?? path.join(os.homedir(), ".pi", "agent");
+      const saved = openSessionManager(options);
+      const modelRuntime = await (harnessOptions.createModelRuntime ?? defaultModelRuntime)(agentDir);
+      // The key is bound to the operator's provider; it never enters a prompt or the transcript.
+      const apiKey = await options.credentials?.get(PI_API_KEY_CREDENTIAL);
+      if (apiKey) await modelRuntime.setRuntimeApiKey(provider, apiKey);
+      const model = modelRuntime.getModel(provider, modelId);
+      if (!model) throw new Error(`Pi model not found: ${provider}/${modelId}`);
+      const root = await realpath(options.cwd);
+      for (const tool of options.tools) {
+        if (RESERVED_TOOL_NAMES.has(tool.name)) throw new Error(`tool ${tool.name} collides with a Pi harness tool`);
+      }
+      const systemPrompt = harnessOptions.systemPrompt ?? DEFAULT_SYSTEM_PROMPT;
+
+      let disposed: (() => void) | undefined;
+      const session: CodingSession = {
+        async run(request) {
+          if (options.signal?.aborted) return finish({ status: "failed", summary: "agent session aborted" });
+          let submitted: { value: unknown } | undefined;
+          const callId = turnCallId();
+          const tools = [
+            ...options.tools.map((tool) => mediatedTool(tool, callId)),
+            ...(request.resultSchema !== undefined
+              ? [submitResultTool(request.resultSchema, (value) => (submitted = { value }))]
+              : []),
+          ];
+          const { session: agent } = await createAgentSession({
+            cwd: root,
+            agentDir,
+            model,
+            thinkingLevel: "off",
+            modelRuntime,
+            resourceLoader: isolatedResourceLoader(systemPrompt),
+            noTools: "all",
+            tools: [...PI_BUILTIN_TOOLS, ...tools.map((t) => t.name)],
+            customTools: tools,
+            sessionManager: saved.manager,
+            settingsManager: SettingsManager.inMemory({
+              compaction: { enabled: false },
+              retry: { enabled: false },
+              cacheWarming: "off",
+            }),
+          });
+          disposed = () => agent.dispose();
+          let budgetRefused = false;
+          const stream = agent.agent.streamFunction;
+          agent.agent.streamFunction = async (...args: Parameters<typeof stream>) => {
+            if (!(await options.reserveModelCall())) {
+              budgetRefused = true;
+              throw new Error(BUDGET_EXHAUSTED);
+            }
+            return stream(...args);
+          };
+          const onAbort = () => void agent.abort().catch(() => undefined);
+          options.signal?.addEventListener("abort", onAbort, { once: true });
+          try {
+            await agent.prompt(promptText(request, options), { expandPromptTemplates: false });
+            await agent.waitForIdle();
+          } catch (err) {
+            return finish({ status: "failed", summary: bounded(err instanceof Error ? err.message : String(err)) });
+          } finally {
+            options.signal?.removeEventListener("abort", onAbort);
+          }
+
+          const last = lastAssistant(agent.messages);
+          if (budgetRefused) return finish({ status: "failed", summary: BUDGET_EXHAUSTED, ...output(submitted) });
+          if (options.signal?.aborted || last?.stopReason === "aborted") {
+            return finish({ status: "failed", summary: "agent session aborted", ...output(submitted) });
+          }
+          if (last?.stopReason === "error") {
+            return finish({ status: "failed", summary: bounded(`agent request failed: ${last.errorMessage ?? "unknown error"}`) });
+          }
+          const text = last !== undefined ? assistantText(last) : "";
+          if (request.resultSchema !== undefined && submitted === undefined) {
+            const missing = `agent finished without submitting a ${request.resultSchema} result`;
+            return finish({ status: "failed", summary: bounded(text ? `${missing}: ${text}` : missing) });
+          }
+          return finish({
+            status: "completed",
+            summary: bounded(text || submittedSummary(submitted) || "agent completed"),
+            ...output(submitted),
+          });
+        },
+        async dispose() {
+          disposed?.();
+        },
+      };
+
+      function finish(result: CodingRunResult): CodingRunResult {
+        return saved.ref !== undefined && existsSync(saved.file) ? { ...result, sessionRef: saved.ref } : result;
+      }
+      return session;
+    },
+  };
+}
+
+async function defaultModelRuntime(agentDir: string): Promise<ModelRuntime> {
+  return ModelRuntime.create({
+    authPath: path.join(agentDir, "auth.json"),
+    modelsPath: path.join(agentDir, "models.json"),
+  });
+}
+
+type SavedSession =
+  | { manager: SessionManager; ref: string; file: string }
+  | { manager: SessionManager; ref?: undefined; file?: undefined };
+
+/** Restore the session `resume` names or fail; never start a fresh one in its place. */
+function openSessionManager(options: CodingSessionOptions): SavedSession {
+  if (options.resume === undefined) {
+    if (options.sessionDir === undefined) return { manager: SessionManager.inMemory(options.cwd) };
+    const ref = `pi-${randomBytes(6).toString("hex")}`;
+    const file = path.join(options.sessionDir, `${ref}.jsonl`);
+    return { manager: SessionManager.open(file, options.sessionDir, options.cwd), ref, file };
+  }
+  const ref = options.resume;
+  if (!SESSION_REF.test(ref)) throw new Error(`malformed session ref ${ref}`);
+  if (options.sessionDir === undefined) throw new Error("no session directory to restore from");
+  const file = path.join(options.sessionDir, `${ref}.jsonl`);
+  // Pi opens a missing file as a new session and rewrites an empty one, so check first.
+  if (!existsSync(file)) throw new Error(`no saved session for ${ref}`);
+  if (statSync(file).size === 0) throw new Error(`saved session ${ref} is empty`);
+  let manager: SessionManager;
+  try {
+    manager = SessionManager.open(file, options.sessionDir, options.cwd);
+  } catch {
+    throw new Error(`saved session ${ref} is corrupt`);
+  }
+  if (manager.buildSessionContext().messages.length === 0) throw new Error(`saved session ${ref} has no turns`);
+  return { manager, ref, file };
+}
+
+/** A fresh prefix per turn, so a provider's call id never matches a call from an earlier turn. */
+function turnCallId(): (id: string) => string {
+  const turn = randomBytes(4).toString("hex");
+  return (id) => `pi-${turn}-${id.length <= 96 ? id : createHash("sha256").update(id).digest("hex").slice(0, 32)}`;
+}
+
+function mediatedTool(tool: CodingTool, callId: (id: string) => string): ToolDefinition {
+  return {
+    name: tool.name,
+    label: tool.name,
+    description: tool.description ?? `GraphLoom ${tool.effect} tool ${tool.name}. The controller records each call.`,
+    parameters: OPEN_OBJECT,
+    executionMode: "sequential",
+    async execute(toolCallId, params) {
+      const result = await tool.call(callId(toolCallId), params);
+      const text = JSON.stringify(result);
+      return {
+        content: [{ type: "text", text: text.length <= MAX_TOOL_RESULT_CHARS ? text : `${text.slice(0, MAX_TOOL_RESULT_CHARS)}…` }],
+        details: undefined,
+      };
+    },
+  };
+}
+
+function submitResultTool(resultSchema: string, onSubmit: (value: unknown) => void): ToolDefinition {
+  const schema = inlineObjectSchema(resultSchema) as ToolDefinition["parameters"] | undefined;
+  return {
+    name: SUBMIT_RESULT,
+    label: "submit result",
+    description:
+      schema !== undefined
+        ? "Submit your structured result once the work is done."
+        : `Submit your structured result (${resultSchema}) once the work is done.`,
+    parameters: schema ?? OPEN_OBJECT,
+    executionMode: "sequential",
+    async execute(_toolCallId, params) {
+      onSubmit(params);
+      return { content: [{ type: "text", text: "result recorded" }], details: undefined, terminate: true };
+    },
+  };
+}
+
+function promptText(request: CodingRunRequest, options: CodingSessionOptions): string {
+  const parts = [request.assignment, ...scopeNotes(options)];
+  if (request.resultSchema !== undefined) parts.push(`When you are done, call ${SUBMIT_RESULT} with your result.`);
+  return parts.join("\n\n");
+}
+
+function isolatedResourceLoader(systemPrompt: string): ResourceLoader {
+  return {
+    getExtensions: () => ({ extensions: [], errors: [], runtime: createExtensionRuntime() }),
+    getSkills: () => ({ skills: [], diagnostics: [] }),
+    getPrompts: () => ({ prompts: [], diagnostics: [] }),
+    getThemes: () => ({ themes: [], diagnostics: [] }),
+    getAgentsFiles: () => ({ agentsFiles: [] }),
+    getSystemPrompt: () => systemPrompt,
+    getSystemPromptSource: () => undefined,
+    getAppendSystemPrompt: () => [],
+    getAppendSystemPromptSources: () => [],
+    extendResources: () => undefined,
+    reload: async () => undefined,
+  };
+}
+
+interface AssistantView {
+  content?: unknown;
+  stopReason?: string;
+  errorMessage?: string;
+}
+
+function lastAssistant(messages: readonly unknown[]): AssistantView | undefined {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const m = messages[i] as { role?: unknown };
+    if (m.role === "assistant") return m as AssistantView;
+  }
+  return undefined;
+}
+
+/** Visible reply text only; thinking blocks and tool calls stay out of the summary. */
+function assistantText(message: AssistantView): string {
+  if (!Array.isArray(message.content)) return "";
+  return message.content
+    .filter((c): c is { type: "text"; text: string } => c?.type === "text" && typeof c.text === "string")
+    .map((c) => c.text)
+    .join("")
+    .trim();
+}
+
+function submittedSummary(submitted: { value: unknown } | undefined): string | undefined {
+  const value = submitted?.value as { summary?: unknown } | undefined;
+  return typeof value?.summary === "string" ? value.summary : undefined;
+}
+
+function output(submitted: { value: unknown } | undefined): { output?: unknown } {
+  return submitted !== undefined ? { output: submitted.value } : {};
+}

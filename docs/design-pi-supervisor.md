@@ -206,11 +206,21 @@ Tooling has two layers:
    scope, and reviewer independence.
 2. **Pi coding tools for qualified repair** — after the controller admits
    `QualifyRepair` and materializes a candidate tree, the **same** supervisor
-   `AgentSession` may use Pi read/edit/write/ls whose file operations reject any
-   path outside that candidate root or through a symlink. The grant is accepted
-   only for a controller-issued `<stateDir>/repairs/<artifactId>/candidate`.
-   Bash, grep, and find are withheld because a working directory is not a
-   sandbox; build and test run through controller preflight. The supervisor writes
+   `AgentSession` gets Pi's full coding toolset (read, bash, edit, write, grep,
+   find, ls) with the candidate root as its working directory, so it can
+   investigate, edit, and build and run the candidate's tests while patching.
+   The grant is accepted only for a controller-issued
+   `<stateDir>/repairs/<artifactId>/candidate` and is revoked when the patch
+   settles; decision turns see admission tools only. The working directory is not
+   a sandbox: `bash` and absolute paths reach anything the user can. GraphLoom
+   does not confine them without an OS sandbox, so it detects instead. Right
+   after the patch, before anything builds or runs the candidate, the controller
+   compares the live install's digest, the run worktree, and the saved run state
+   with their state before the patch. Any change rejects the candidate and stops
+   the run, because the change cannot be undone and later steps would run
+   against it. It then rebuilds and tests the candidate in preflight, requires
+   independent review, and refuses activation when the live install's digest
+   changed. The supervisor writes
    plugin/validator source repairs itself through the Pi SDK; coding is not
    delegated to a separate non-Pi repair agent. When no explicit patch author is
    configured, the controller calls `Supervisor.patchCandidate`, which sends one
