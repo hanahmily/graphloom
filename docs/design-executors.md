@@ -6,6 +6,17 @@ protocol, and supervisor recovery through executors. Pins currently cover execut
 identity and code digest; schemas, runtime, and grants are not yet part of the pin.
 This specializes the [TypeScript core design](design-typescript-core.md).
 
+## Driver scope
+
+The coding-agent harness described here launches worker sessions under standalone
+controller ownership. Proposed [agent-host mode](design-agent-host.md) instead
+binds compatible implementation jobs to an existing session using durable work
+offers and claims. Built-in/custom executors, child-operation evidence, validation,
+and independent reviewers still use this design's lifecycle. Its host-facing MCP
+service is separate from the existing MCP bridge serving tools to a launched job.
+Native host actions have only the enforcement and accounting coverage explicitly
+negotiated at attachment; they do not inherit isolation from this job protocol.
+
 ## Ownership
 
 Plugins own domain execution logic. The controller owns admission, durable
@@ -671,11 +682,14 @@ reviewed copy. In-process executors cannot be repaired this way.
 
 ## Enforcement
 
-The controller process never imports executor implementation code. The runner
-provides actual process, filesystem, credential, and network isolation. A wrapper
-or TypeScript declaration alone does not enforce permissions or limits. Any host
-profile unable to enforce required constraints must reject that execution rather
-than advertise guarantees it cannot provide. A GitHub read grant cannot authorize
+Production executor code runs outside the controller through the declared execution
+profile. The runner enforces the restrictions supported by that profile; the
+current unrestricted coding profile and Node-based package profile do not provide
+general OS/network confinement. A wrapper or TypeScript declaration alone cannot
+enforce it. Explicitly distinguish allowed unrestricted execution from executions
+requiring confinement: reject the latter when unavailable. Agent-host attachments
+must disclose the same distinction and their model-accounting coverage.
+A GitHub read grant cannot authorize
 creating a PR; neither built-in status nor plugin installation expands that grant.
 
 Publication remains an explicit task/operator permission. The minimal Hello graph

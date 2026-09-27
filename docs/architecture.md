@@ -1,6 +1,6 @@
 # GraphLoom architecture
 
-Status: TypeScript target, 2026-09-22; implementation pending. The
+Status: revised 2026-09-27; standalone implementation partial, agent-host mode proposed. The
 [core design](design-typescript-core.md) is authoritative.
 
 ```mermaid
@@ -31,6 +31,14 @@ and custom executors use the same lifecycle interface and run outside the
 controller. New integrations ship as compatible executor packages or plugin code;
 they do not require controller releases. The controller retains durable operation
 records, cancellation, scopes, and budgets. See the [executor design](design-executors.md).
+
+The diagram above is standalone mode. In proposed
+[agent-host mode](design-agent-host.md), an existing Claude Code or Pi session
+calls a host-facing controller service, receives admitted assignments, and supplies
+recovery proposals. It replaces the CLI-driven agent loop and the separate Pi
+supervisor, while the graph still selects normal work and the controller retains
+acceptance. Independent review uses another session. Both drivers call the same
+durable transition interface; only one driver owns a run.
 
 Required outcomes are pinned independently from versioned validator bindings.
 A qualified source patch or authorized validator replacement changes implementation

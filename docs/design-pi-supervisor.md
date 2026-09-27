@@ -13,6 +13,15 @@ BeforeProviderRequest interception is not implemented. Scripted supervisors stay
 the CI default.
 This document specializes the [core design](design-typescript-core.md).
 
+## Driver scope
+
+This document specifies the **standalone** supervisor backend. In proposed
+[agent-host mode](design-agent-host.md), the attached coding session fulfills the
+supervisor role and writes admitted repairs itself; a second Pi supervisor is not
+started. Pi credentials, provider switching, and private session internals below
+are backend-specific, not universal requirements for every GraphLoom driver.
+Both drivers preserve controller-owned acceptance and independent repair review.
+
 ## SDK choice and scope
 
 Use `@earendil-works/pi-coding-agent` for the supervisor's agent/session runtime.

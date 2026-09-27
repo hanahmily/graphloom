@@ -1,6 +1,6 @@
 # GraphLoom implementation roadmap
 
-Status: TypeScript target, 2026-09-24. This supersedes the native Go plugin roadmap;
+Status: TypeScript target, revised 2026-09-27. This supersedes the native Go plugin roadmap;
 existing Go source remains available during migration.
 
 The authoritative scope and completion criteria are in the
@@ -22,3 +22,16 @@ coding-agent child protocol with explicit session continuation on reentry
 (Claude Code and Pi harnesses, verified against a fake Claude Code CLI and
 faux Pi providers), and executor recovery. Live provider qualification (#30)
 and M4 remain outstanding.
+
+## Agent-host mode (proposed)
+
+The [agent-host design](design-agent-host.md) adds a second driver without changing
+graph requirements or replacing the shared controller:
+
+1. **H1:** Resumable controller transitions, host protocol, durable assignments and claims.
+2. **H2:** Claude Code plugin, native coding, executor evidence, and separate review.
+3. **H3:** Same-host supervisor recovery, qualified source repair, and release qualification.
+4. **H4:** Compatible Pi host adapter after the first Claude-host release.
+
+No host-mode feature is implemented by this design change. See the design for
+crash/stop, stale-host, independence, and accounting acceptance criteria.
