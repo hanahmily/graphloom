@@ -6,6 +6,8 @@ export const CLAUDE_API_KEY_CREDENTIAL = "anthropic-api-key";
 /** Operator config for the Claude Code harness module (`@graphloom/executor-coding-agent/claude`). */
 export const CLAUDE_BIN_ENV = "GRAPHLOOM_CLAUDE_BIN";
 export const CLAUDE_MODEL_ENV = "GRAPHLOOM_CLAUDE_MODEL";
+/** Claude Code config dir (its login, settings, and transcripts), which selects the account or gateway. */
+export const CLAUDE_CONFIG_DIR_ENV = "GRAPHLOOM_CLAUDE_CONFIG_DIR";
 /** Comma-separated names of extra environment variables Claude Code may see. */
 export const CLAUDE_PASS_ENV_ENV = "GRAPHLOOM_CLAUDE_PASS_ENV";
 export const CLAUDE_STARTUP_TIMEOUT_ENV = "GRAPHLOOM_CLAUDE_STARTUP_TIMEOUT_MS";
