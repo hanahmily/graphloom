@@ -28,6 +28,7 @@ requirements, so one Validate covers both.
 | Reviewer requests changes | Reenter Changelog; the rewrite instruction quotes the reviewer |
 | Reviewer approves | Validate Review |
 | Every stage has valid receipts | Stop complete |
+| Agent work is next and no agent invocations remain | Stop budgets exhausted |
 | Request names no version | Stop incompatible |
 
 After a repair activation or a Changelog reentry, a new generation makes earlier
@@ -47,8 +48,22 @@ repair copy, with `@graphloom/sdk` linked beside it, therefore rebuilds with pla
 `tsc -p tsconfig.json`. The manifest's requirements and stages come from the built
 `describe()`, so they cannot drift from the graph.
 
+`src/qualification.ts` holds positive and negative cases for every validator,
+derived from the requirement statements. A repair preflight runs them from the
+installed copy, never from the candidate, so a patch cannot weaken them:
+
+```sh
+node <installed>/scripts/qualify.mjs <candidateRoot>   # after building the candidate
+```
+
+It exits 0 only when two conditions hold. The candidate must pass every case,
+and the installed validators must fail at least one, reproducing the defect.
+
 `apps/graphloom/test/release-e2e.test.ts` runs this bundle through the
-controller. One run installs a copy whose changelog validator rejects dated
-headings. The supervisor qualifies a source repair, and the preflight rebuilds
-`dist` from the patched source. After activation, the run completes under the
-repaired validator without redoing work already accepted.
+controller, installing a copy whose changelog validator rejects dated headings.
+In one run, the supervisor qualifies a source repair: the preflight rebuilds
+`dist` from the patched source and runs the qualification cases. After
+activation, the run completes under the repaired validator without redoing work
+already accepted. In another run, the patch makes the changelog validator
+always pass. Qualification rejects it on the negative cases before review, and
+the installed version stays active.

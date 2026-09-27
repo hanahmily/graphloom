@@ -112,9 +112,6 @@ export function advanceRelease(view: RunView): GraphDecision {
   if (stage === undefined) {
     return stop({ reason: "complete", blocker: "none" }, "every stage has valid receipts");
   }
-  if (view.budgets.agentInvocations <= 0) {
-    return stop({ reason: "budgets exhausted", blocker: "no agent invocations left" }, "cannot dispatch more work");
-  }
   const state = enterStage(readPrivate(view), stage.id, view.generation);
   return stage.id === REVIEW_STAGE ? advanceReview(view, state, version) : advanceWork(view, state, version);
 }
@@ -122,8 +119,10 @@ export function advanceRelease(view: RunView): GraphDecision {
 function advanceWork(view: RunView, state: ReleasePrivateState, version: string): GraphDecision {
   const stageId = state.stageId;
   if (!state.dispatched) {
-    return withPrivate(
-      dispatch(workJob(stageId, workInstruction(stageId, view.task.request, version, state.feedback)), `dispatch the ${stageId} writer`),
+    return dispatchAgent(
+      view,
+      workJob(stageId, workInstruction(stageId, view.task.request, version, state.feedback)),
+      `dispatch the ${stageId} writer`,
       { ...state, dispatched: true, observed: false, ran: addOnce(state.ran, stageId) },
     );
   }
@@ -145,11 +144,10 @@ function advanceWork(view: RunView, state: ReleasePrivateState, version: string)
   }
   const failure = results.find((r) => r.status === "failed");
   if (failure && state.corrections < MAX_STAGE_CORRECTIONS && view.budgets.corrections > 0) {
-    return withPrivate(
-      dispatch(
-        workJob(stageId, [`The previous attempt failed validation: ${failure.reason}`, workInstruction(stageId, view.task.request, version)].join("\n")),
-        `correct the ${stageId} result`,
-      ),
+    return dispatchAgent(
+      view,
+      workJob(stageId, [`The previous attempt failed validation: ${failure.reason}`, workInstruction(stageId, view.task.request, version)].join("\n")),
+      `correct the ${stageId} result`,
       { ...state, observed: false, corrections: state.corrections + 1 },
     );
   }
@@ -163,18 +161,17 @@ function advanceWork(view: RunView, state: ReleasePrivateState, version: string)
 
 function advanceReview(view: RunView, state: ReleasePrivateState, version: string): GraphDecision {
   if (!state.dispatched) {
-    return withPrivate(
-      dispatch(
-        {
-          stageId: REVIEW_STAGE,
-          kind: "agent",
-          purpose: "review",
-          instruction: reviewInstruction(view.task.request, version),
-          resultSchema: "review-verdict-v1",
-          readOnly: true,
-        },
-        "dispatch an independent read-only reviewer",
-      ),
+    return dispatchAgent(
+      view,
+      {
+        stageId: REVIEW_STAGE,
+        kind: "agent",
+        purpose: "review",
+        instruction: reviewInstruction(view.task.request, version),
+        resultSchema: "review-verdict-v1",
+        readOnly: true,
+      },
+      "dispatch an independent read-only reviewer",
       { ...state, dispatched: true },
     );
   }
@@ -294,6 +291,14 @@ function readPrivate(view: RunView): ReleasePrivateState {
 
 function addOnce(list: string[], item: string): string[] {
   return list.includes(item) ? list : [...list, item];
+}
+
+/** Only agent work spends an invocation; observing and validating stay open after the last one. */
+function dispatchAgent(view: RunView, job: JobSpec, summary: string, state: ReleasePrivateState): GraphDecision {
+  if (view.budgets.agentInvocations <= 0) {
+    return stop({ reason: "budgets exhausted", blocker: "no agent invocations left" }, `cannot ${summary}`);
+  }
+  return withPrivate(dispatch(job, summary), state);
 }
 
 function withPrivate(decision: GraphDecision, state: ReleasePrivateState): GraphDecision {

@@ -3,8 +3,10 @@ import { describe, expect, it } from "vitest";
 import type { EvidenceRecord, GraphDecision, Receipt, RunView } from "@graphloom/sdk";
 import {
   CHANGELOG_PATH,
+  QUALIFICATION_CASES,
   VERSION_PATH,
   advanceRelease,
+  qualifyValidators,
   changelogEntryValidator,
   createGraph,
   independentReviewValidator,
@@ -133,6 +135,64 @@ describe("release validators", () => {
   });
 });
 
+describe("release repair qualification", () => {
+  const alwaysPasses = (id: string) =>
+    id === "changelog-entry" ? { evaluate: () => ({ status: "passed" as const, reason: "always passes" }) } : validatorById(id);
+  const dropsDates = (id: string) =>
+    id === "changelog-entry"
+      ? {
+          evaluate: (i: Parameters<typeof changelogEntryValidator.evaluate>[0]) => {
+            const log = i.evidence.find((e) => (e.payload as { path?: string } | undefined)?.path === CHANGELOG_PATH);
+            const dated = / - \d{4}-\d{2}-\d{2}/.test((log?.payload as { bytes?: string } | undefined)?.bytes ?? "");
+            return dated ? { status: "failed" as const, reason: "dated" } : changelogEntryValidator.evaluate(i);
+          },
+        }
+      : validatorById(id);
+
+  it("covers every shipped validator with passing and failing cases, all of which the shipped validators satisfy", () => {
+    for (const binding of createGraph().describe().defaultValidators) {
+      const statuses = QUALIFICATION_CASES.filter((c) => c.validatorId === binding.validatorId).map((c) => c.expected);
+      expect(statuses, binding.validatorId).toEqual(expect.arrayContaining(["passed", "failed"]));
+    }
+    expect(qualifyValidators(validatorById)).toMatchObject({ ok: true, candidateMismatches: [] });
+  });
+
+  it("qualifies a fix only when the old version reproduces the defect", () => {
+    const fixed = qualifyValidators(validatorById, dropsDates);
+    expect(fixed.ok).toBe(true);
+    expect(fixed.baselineMismatches).toEqual([
+      "changelog-entry: dated heading (expected passed, got failed)",
+      "changelog-entry: bullet under a subsection (expected passed, got failed)",
+    ]);
+    expect(qualifyValidators(validatorById, validatorById)).toMatchObject({
+      ok: false,
+      summary: `the old version passes all ${QUALIFICATION_CASES.length} qualification cases, so no defect is reproduced`,
+    });
+  });
+
+  it("rejects an always-passing replacement on the requirement's negative cases", () => {
+    const report = qualifyValidators(alwaysPasses, dropsDates);
+    expect(report.ok).toBe(false);
+    expect(report.candidateMismatches).toEqual(
+      expect.arrayContaining([
+        "changelog-entry: mismatched VERSION (expected failed, got passed)",
+        "changelog-entry: heading without brackets (expected failed, got passed)",
+        "changelog-entry: no listed change (expected failed, got passed)",
+        "changelog-entry: VERSION never observed (expected inconclusive, got passed)",
+      ]),
+    );
+    expect(report.summary).toMatch(/^candidate fails \d+ of \d+ qualification cases: /);
+  });
+
+  it("counts a missing or throwing validator as a mismatch", () => {
+    const report = qualifyValidators((id) =>
+      id === "semver-file" ? undefined : id === "release-scope" ? { evaluate: () => { throw new Error("boom"); } } : validatorById(id),
+    );
+    expect(report.candidateMismatches).toContain("semver-file: missing newline (expected failed, got no validator)");
+    expect(report.candidateMismatches).toContain("release-scope: an unrelated path (expected failed, got a throw (boom))");
+  });
+});
+
 describe("release graph routing", () => {
   it("runs each work stage as dispatch → observe → validate, then an independent review, then stops complete", () => {
     let s = step(view());
@@ -215,6 +275,21 @@ describe("release graph routing", () => {
     expect(s.decision.action).toMatchObject({ type: "dispatch", job: { stageId: "review", readOnly: true } });
     // The fresh reviewer returned nothing: the old approval must not stand in for it.
     expect(step(s.next()).decision.action).toMatchObject({ type: "supervise", supervise: { reason: "the reviewer returned no verdict" } });
+  });
+
+  it("validates an approval that spent the last agent invocation, and stops only when more agent work is needed", () => {
+    const logged = [receipt("bump", "version-file"), receipt("changelog", "changelog-entry"), receipt("changelog", "release-scope")];
+    const reviewing = JSON.stringify({ stageId: "review", generation: 1, dispatched: true, observed: false, corrections: 0, ran: ["bump", "changelog"] });
+    const spent = { agentInvocations: 0, jobs: 60, decisions: 100, corrections: 8 };
+    const approved = view({ receipts: logged, evidence: [review("approved", "matches")], privateState: reviewing, budgets: spent });
+    expect(advanceRelease(approved).action).toEqual({ type: "validate", validate: { stageId: "review", requirementIds: ["release-review"] } });
+
+    const exhausted = { type: "stop", stop: { reason: "budgets exhausted", blocker: "no agent invocations left" } };
+    expect(advanceRelease(view({ budgets: spent })).action).toEqual(exhausted);
+    expect(advanceRelease(view({ receipts: logged, budgets: spent })).action).toEqual(exhausted);
+    const bumping = JSON.stringify({ stageId: "bump", generation: 1, dispatched: true, observed: true, corrections: 0, ran: ["bump"] });
+    const bad = [file(VERSION_PATH, "v1.2.0\n"), workspace([VERSION_PATH])];
+    expect(advanceRelease(view({ evidence: bad, privateState: bumping, budgets: spent })).action).toEqual(exhausted);
   });
 
   it("stops on a request that names no version to release", () => {

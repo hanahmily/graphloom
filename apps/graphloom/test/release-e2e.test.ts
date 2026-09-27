@@ -5,7 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
-import { activateRepair, qualifyRepair, returnToNormal, type JobSpec } from "@graphloom/sdk";
+import { activateRepair, qualifyRepair, returnToNormal, stop, type JobSpec } from "@graphloom/sdk";
 import { createScriptedRunner, type JobContext } from "@graphloom/runner";
 import { createScriptedSupervisor } from "@graphloom/supervisor";
 import { createController, loadRunState, type RepairDeps } from "@graphloom/controller";
@@ -101,6 +101,41 @@ function runner(jobs: Job[]) {
 const validReceipts = (receipts: { stageId: string; requirementId: string; valid: boolean }[]) =>
   receipts.filter((r) => r.valid).map((r) => `${r.stageId}/${r.requirementId}`);
 
+/**
+ * Repair deps whose preflight rebuilds the candidate, then runs the installed
+ * copy's qualification cases against it, so the patch cannot edit the checks.
+ */
+function repairDeps(installed: string, supervisorSessionId: string, patch: (candidateRoot: string) => Promise<void>) {
+  const reviewed: string[] = [];
+  const deps: RepairDeps = {
+    patchAuthor: {
+      sessionId: supervisorSessionId,
+      async patch({ candidateRoot }) {
+        await patch(candidateRoot);
+        await execFileAsync(process.execPath, [path.join(candidateRoot, "scripts", "generate-manifest.mjs")]);
+        return { summary: "patched the changelog validator" };
+      },
+    },
+    reviewer: {
+      sessionId: "release-repair-reviewer",
+      async review({ candidateRoot }) {
+        reviewed.push(candidateRoot);
+        return { approved: true, reason: "the heading pattern now matches the requirement statement" };
+      },
+    },
+    async preflight({ candidateRoot }) {
+      await execFileAsync(process.execPath, [tsc, "-p", path.join(candidateRoot, "tsconfig.json")]);
+      try {
+        const { stdout } = await execFileAsync(process.execPath, [path.join(installed, "scripts", "qualify.mjs"), candidateRoot]);
+        return { ok: true, summary: `rebuilt dist; ${stdout.trim()}` };
+      } catch (err) {
+        return { ok: false, summary: `rebuilt dist; ${(err as { stdout?: string }).stdout?.trim() ?? String(err)}` };
+      }
+    },
+  };
+  return { deps, reviewed };
+}
+
 describe("the release example plugin through the controller", () => {
   it("runs Bump → Changelog → Review from its installed bundle, reentering Changelog on the reviewer's request", async () => {
     const env = await makeEnv();
@@ -157,28 +192,9 @@ describe("the release example plugin through the controller", () => {
         returnToNormal({ summary: "changelog validator repaired" }, "resume the release"),
       ],
     });
-    const reviewed: string[] = [];
-    const repair: RepairDeps = {
-      patchAuthor: {
-        sessionId: SUPERVISOR,
-        async patch({ candidateRoot }) {
-          await copyFile(path.join(bundle, "src", "validators.ts"), path.join(candidateRoot, "src", "validators.ts"));
-          await execFileAsync(process.execPath, [path.join(candidateRoot, "scripts", "generate-manifest.mjs")]);
-          return { summary: "accept an optional release date after the heading's version" };
-        },
-      },
-      reviewer: {
-        sessionId: "release-repair-reviewer",
-        async review({ candidateRoot }) {
-          reviewed.push(candidateRoot);
-          return { approved: true, reason: "the heading pattern now matches the requirement statement" };
-        },
-      },
-      async preflight({ candidateRoot }) {
-        await execFileAsync(process.execPath, [tsc, "-p", path.join(candidateRoot, "tsconfig.json")]);
-        return { ok: true, summary: "rebuilt dist from the patched source" };
-      },
-    };
+    const { deps: repair, reviewed } = repairDeps(env.installed, SUPERVISOR, (candidateRoot) =>
+      copyFile(path.join(bundle, "src", "validators.ts"), path.join(candidateRoot, "src", "validators.ts")),
+    );
     const { seen, runner: scripted } = runner([
       bump,
       changelog("Export command"),
@@ -203,7 +219,10 @@ describe("the release example plugin through the controller", () => {
     expect(candidate).toMatchObject({
       status: "activated",
       target: "validator",
-      preflightSummary: "rebuilt dist from the patched source",
+      preflightSummary:
+        "rebuilt dist; candidate passes all 29 qualification cases; the old version fails " +
+        "changelog-entry: dated heading (expected passed, got failed); " +
+        "changelog-entry: bullet under a subsection (expected passed, got failed)",
       reviewReason: "the heading pattern now matches the requirement statement",
     });
     expect(reviewed).toEqual([candidate!.candidateRoot]);
@@ -228,5 +247,53 @@ describe("the release example plugin through the controller", () => {
       ["changelog", "work"],
       ["review", "review"],
     ]);
+  }, 90_000);
+
+  it("rejects an always-passing changelog validator in qualification, before review, and keeps the installed version", async () => {
+    const env = await makeEnv({ defective: true, grants: true });
+    const SUPERVISOR = "release-supervisor";
+    let rejected: { status: string; rejectionReason?: string } | undefined;
+    const supervisor = createScriptedSupervisor({
+      sessionId: SUPERVISOR,
+      decisions: [
+        qualifyRepair(
+          { target: "validator", requirementId: "changelog-entry", reason: "the changelog validator rejects dated release headings" },
+          "repair the changelog validator",
+        ),
+        (input) => {
+          rejected = input.view.repairCandidates?.[0];
+          return stop({ reason: "repair rejected", blocker: "no qualified changelog validator" }, "stop for the operator");
+        },
+      ],
+    });
+    const { deps: repair, reviewed } = repairDeps(env.installed, SUPERVISOR, async (candidateRoot) => {
+      const source = path.join(candidateRoot, "src", "validators.ts");
+      await writeFile(
+        source,
+        `${await readFile(source, "utf8")}\nchangelogEntryValidator.evaluate = () => ({ status: "passed", reason: "always passes" });\n`,
+      );
+    });
+    const { runner: scripted } = runner([bump, changelog("Export command"), changelog("Export command")]);
+
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      runner: scripted,
+      supervisor,
+      repair,
+      stateRoot: env.stateRoot,
+      runId: "release-always-passes",
+    });
+
+    expect(report).toMatchObject({ status: "stopped", stopReason: "repair rejected" });
+    expect(rejected?.status).toBe("rejected");
+    expect(rejected?.rejectionReason).toMatch(/^rebuilt dist; candidate fails \d+ of 29 qualification cases: /);
+    for (const negative of ["mismatched VERSION", "heading without brackets", "no listed change"]) {
+      expect(rejected?.rejectionReason).toContain(`changelog-entry: ${negative} (expected failed, got passed)`);
+    }
+    expect(reviewed).toEqual([]);
+    const state = await loadRunState(report.stateDir);
+    expect(state.activeVersion).toBe("release@0.1.0");
+    expect(state.intake.bundle.bundlePath).toBe(env.installed);
+    expect(validReceipts(state.receipts)).toEqual(["bump/version-file"]);
   }, 90_000);
 });
