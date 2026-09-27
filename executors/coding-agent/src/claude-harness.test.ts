@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { chmod, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -19,6 +19,7 @@ interface Invocation {
   apiKey: string | null;
   env: Record<string, string>;
   history: string[];
+  side: Record<string, string>;
   mcp: { type: string; url: string } | null;
 }
 
@@ -374,6 +375,33 @@ describe("Claude Code harness", () => {
     expect(resumed!.history).toEqual([expect.stringContaining("Write the first draft"), "first turn done"]);
     expect(resumed!.prompt.startsWith(CONTINUATION_NOTICE)).toBe(true);
     expect(await readFile(path.join(h.sessions, `${ref}.jsonl`), "utf8")).toContain("second turn done");
+  });
+
+  it("saves subagent transcripts with the session and restores them, so a resume can continue a subagent", async () => {
+    const h = await setup();
+    await h.script([{ agent: [{ text: "the number is 42" }] }, { text: "delegated" }], [{ text: "continued" }]);
+    const first = await h.executor.execute({ assignment: "draft" }, h.ctx({ session: { dir: h.sessions } }));
+    const ref = (first as { sessionRef: string }).sessionRef;
+    const session = { dir: h.sessions, resume: ref };
+    const subagent = { [path.join("subagents", "agent-toolu_1.jsonl")]: '{"text":"the number is 42"}\n' };
+    expect((await readdir(h.sessions)).sort()).toEqual([ref, `${ref}.json`, `${ref}.jsonl`]);
+
+    await rm(path.join(h.configDir, "projects"), { recursive: true });
+    expect(await h.executor.execute({ assignment: "revise" }, h.ctx({ session }))).toMatchObject({ status: "ok", summary: "continued" });
+    const [project] = await readdir(path.join(h.configDir, "projects"));
+    const store = path.join(h.configDir, "projects", project!, ref.slice("claude-".length));
+    await writeFile(path.join(store, "stale.txt"), "not from the saved session", "utf8");
+    await h.executor.execute({ assignment: "revise" }, h.ctx({ session }));
+    const [, restored, replaced] = await h.invocations();
+    expect(restored!.side).toEqual(subagent);
+    expect(replaced!.side).toEqual(subagent);
+
+    await symlink("/etc/passwd", path.join(h.sessions, ref, "subagents", "agent-leak.jsonl"));
+    expect(await h.executor.execute({ assignment: "revise" }, h.ctx({ session }))).toEqual({
+      status: "failed",
+      summary: `agent session ${ref} could not be restored: saved session ${ref} is corrupt`,
+    });
+    expect(await h.invocations()).toHaveLength(3);
   });
 
   it("reports only a resumed run's own usage, though Claude Code's totals span the session", async () => {

@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { mkdir, mkdtemp, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { copyFile, lstat, mkdir, mkdtemp, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { createInterface } from "node:readline";
@@ -218,7 +218,14 @@ async function openSession(options: CodingSessionOptions, configDir: string, set
   if (systemPromptSha256 !== settings.systemPromptSha256) {
     throw new Error(`saved session ${ref} ran with a different system prompt`);
   }
+  const savedSide = path.join(options.sessionDir, ref);
+  const side = await filesUnder(savedSide);
+  if (side?.other) throw new Error(`saved session ${ref} is corrupt`);
   await writeAtomic(path.join(configDir, "projects", project, `${sessionId}.jsonl`), transcript);
+  // The saved copy is authoritative for the side files too, so none of the store's own survive.
+  const storeSide = path.join(configDir, "projects", project, sessionId);
+  await rm(storeSide, { recursive: true, force: true });
+  if (side !== undefined) await copyFiles(savedSide, side.files, storeSide);
   const baseline = costState(transcript);
   return { sessionId, ref, started: true, ...(baseline !== undefined ? { baseline } : {}) };
 }
@@ -232,6 +239,7 @@ async function saveTranscript(configDir: string, sessionDir: string, saved: Save
     const info = await stat(file).catch(() => undefined);
     if (!info?.isFile() || !PROJECT_DIR.test(project)) continue;
     const transcript = await readFile(file, "utf8");
+    await saveSide(path.join(projects, project, saved.sessionId), path.join(sessionDir, saved.ref));
     await writeAtomic(path.join(sessionDir, `${saved.ref}.jsonl`), transcript);
     await writeAtomic(path.join(sessionDir, `${saved.ref}.json`), JSON.stringify({ project, ...settings }));
     const baseline = costState(transcript);
@@ -239,6 +247,51 @@ async function saveTranscript(configDir: string, sessionDir: string, saved: Save
     return true;
   }
   return false;
+}
+
+/**
+ * Mirror the session's side directory (subagent transcripts, which a resumed
+ * session needs to continue a subagent, and tool output spilled to files) into
+ * `target`, replacing what was there. Only regular files are session state.
+ */
+async function saveSide(source: string, target: string): Promise<void> {
+  const side = await filesUnder(source);
+  if (side === undefined) return;
+  const tmp = `${target}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
+  try {
+    await copyFiles(source, side.files, tmp);
+    await rm(target, { recursive: true, force: true });
+    await rename(tmp, target);
+  } finally {
+    await rm(tmp, { recursive: true, force: true });
+  }
+}
+
+/** Regular files under `root`, relative to it; `other` flags symlinks and special files. Undefined when `root` is absent. */
+async function filesUnder(root: string): Promise<{ files: string[]; other: boolean } | undefined> {
+  const info = await lstat(root).catch(() => undefined);
+  if (info === undefined) return undefined;
+  if (!info.isDirectory()) return { files: [], other: true };
+  const files: string[] = [];
+  let other = false;
+  const walk = async (rel: string): Promise<void> => {
+    for (const entry of await readdir(path.join(root, rel), { withFileTypes: true })) {
+      const child = path.join(rel, entry.name);
+      if (entry.isDirectory()) await walk(child);
+      else if (entry.isFile()) files.push(child);
+      else other = true;
+    }
+  };
+  await walk("");
+  return { files, other };
+}
+
+async function copyFiles(from: string, files: string[], to: string): Promise<void> {
+  await mkdir(to, { recursive: true, mode: 0o700 });
+  for (const file of files) {
+    await mkdir(path.dirname(path.join(to, file)), { recursive: true, mode: 0o700 });
+    await copyFile(path.join(from, file), path.join(to, file));
+  }
 }
 
 async function writeAtomic(target: string, contents: string): Promise<void> {

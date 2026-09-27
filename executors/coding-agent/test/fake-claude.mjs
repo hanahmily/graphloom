@@ -6,14 +6,16 @@
 //   | { agent: Step[], background?: true }
 // An `agent` step is an Agent tool call whose subagent makes the given responses,
 // forwarded with parent_tool_use_id. A background subagent runs after the turn's
-// result, then a follow-up turn reports it and ends with a second result.
+// result, then a follow-up turn reports it and ends with a second result. Each
+// subagent's texts go to `<session>/subagents/agent-<id>.jsonl` beside the
+// transcript, and the log records the files under `<session>/` at startup.
 // Like Claude Code, running totals (`modelUsage`, `total_cost_usd`) cover the
 // whole session: they are appended to the transcript as a `cost-state` record
 // and restored from it on resume, unless the script sets `restoreCost: false`.
 // FAKE_CLAUDE_LOG names a file that gets one JSON line per invocation.
 // Both are read from the environment as it reaches the process.
 import { execSync } from "node:child_process";
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 
 const argv = process.argv.slice(2);
@@ -28,7 +30,17 @@ const sessionId = resume ?? flag("--session-id");
 const cwd = process.cwd();
 const projectDir = path.join(process.env.CLAUDE_CONFIG_DIR, "projects", cwd.replace(/[^A-Za-z0-9]/g, "-"));
 const transcript = path.join(projectDir, `${sessionId}.jsonl`);
+const sideDir = path.join(projectDir, sessionId);
 const prompt = readFileSync(0, "utf8");
+const side = {};
+if (existsSync(sideDir)) {
+  for (const entry of readdirSync(sideDir, { recursive: true, withFileTypes: true })) {
+    if (entry.isFile()) {
+      const file = path.join(entry.parentPath, entry.name);
+      side[path.relative(sideDir, file)] = readFileSync(file, "utf8");
+    }
+  }
+}
 
 const script = JSON.parse(readFileSync(process.env.FAKE_CLAUDE_SCRIPT, "utf8"));
 let history = [];
@@ -56,6 +68,7 @@ appendFileSync(
     apiKey: process.env.ANTHROPIC_API_KEY ?? null,
     env: process.env,
     history,
+    side,
     mcp: server ? { type: server.type, url: server.url } : null,
   })}\n`,
 );
@@ -144,7 +157,11 @@ async function respond(step, parent) {
   count(parent === null ? MAIN_MODEL : SUB_MODEL, { inputTokens: 10, outputTokens: 5 });
   if (step.text !== undefined) {
     if (parent === null) lastText = step.text;
-    record(step.text);
+    if (parent === null) record(step.text);
+    else {
+      mkdirSync(path.join(sideDir, "subagents"), { recursive: true });
+      appendFileSync(path.join(sideDir, "subagents", `agent-${parent}.jsonl`), `${JSON.stringify({ text: step.text })}\n`);
+    }
     assistant(msgId, parent, [{ type: "text", text: step.text }]);
   } else if (step.tool !== undefined || step.bash !== undefined) {
     await runTool(msgId, step, parent);

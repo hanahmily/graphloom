@@ -261,10 +261,14 @@ configured from the environment):
   the executor's `CLAUDE_CONFIG_DIR`, then `~/.claude`.
 - Claude Code writes transcripts under its config dir. After each run the harness copies the transcript to
   `<sessionDir>/<sessionRef>.jsonl`, with `<sessionRef>.json` naming its
-  project directory, model, and system prompt digest. A resume validates both
-  files, writes the transcript back into Claude Code's store, and runs
-  `--resume`. A missing, empty, or corrupt copy fails the resume before Claude
-  Code starts. So does a different model or system prompt: Claude Code would
+  project directory, model, and system prompt digest. The session's side
+  directory is mirrored to `<sessionDir>/<sessionRef>/`, regular files only.
+  That directory holds subagent transcripts, which a resumed session needs to
+  continue a subagent with `SendMessage`, and tool output spilled to files. A
+  resume validates the saved copy, writes the transcript and side files back
+  into Claude Code's store, replacing its own, and runs `--resume`. A missing,
+  empty, or corrupt copy fails the resume before Claude Code starts; a symlink
+  or special file among the side files counts as corrupt. So does a different model or system prompt: Claude Code would
   resume under either, and the earlier turns would pass as continuity.
 
 The Pi harness runs a Pi coding agent in-process (`createPiHarness`, or the
