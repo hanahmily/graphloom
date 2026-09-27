@@ -41,9 +41,10 @@ export function parseRunnerConfig(value: unknown, source = "runner config"): Run
   if (obj.timeoutMs !== undefined) config.timeoutMs = milliseconds(obj.timeoutMs, `${source}: timeoutMs`, false);
   if (obj.claude !== undefined) {
     const nested = `${source}: claude`;
-    const c = settings(obj.claude, nested, ["command", "model", "passEnv", "startupTimeoutMs", "responseTimeoutMs"]);
+    const c = settings(obj.claude, nested, ["command", "model", "configDir", "passEnv", "startupTimeoutMs", "responseTimeoutMs"]);
     config.claude = {
       ...(c.command !== undefined ? { command: nonempty(c.command, `${nested}.command`) } : {}),
+      ...(c.configDir !== undefined ? { configDir: nonempty(c.configDir, `${nested}.configDir`) } : {}),
       ...(c.model !== undefined ? { model: nonempty(c.model, `${nested}.model`) } : {}),
       ...(c.passEnv !== undefined ? { passEnv: environmentNames(c.passEnv, nested) } : {}),
       ...(c.startupTimeoutMs !== undefined ? { startupTimeoutMs: milliseconds(c.startupTimeoutMs, `${nested}.startupTimeoutMs`, true) } : {}),

@@ -14,13 +14,24 @@ export interface WorktreeResult {
 }
 
 /**
- * Create `graphloom/<run-id>` worktree from pinned HEAD.
- * Does not copy uncommitted source changes. Serialized under a per-repo lock.
+ * Git config key naming the state directory of the run that owns a branch.
+ * It lives in the repository, so editing a run's state file cannot claim
+ * another run's worktree and branch.
+ */
+export function runStateDirKey(branchName: string): string {
+  return `branch.${branchName}.graphloomStateDir`;
+}
+
+/**
+ * Create `graphloom/<run-id>` worktree from pinned HEAD, recording `stateDir`
+ * as its owner. Does not copy uncommitted source changes. Serialized under a
+ * per-repo lock.
  */
 export async function createRunWorktree(
   repoPath: string,
   runId: string,
   pinnedHead: string,
+  stateDir: string,
 ): Promise<WorktreeResult> {
   const safeId = assertSafeRunId(runId);
   const graphloomRoot = path.join(repoPath, "graphloom");
@@ -35,6 +46,7 @@ export async function createRunWorktree(
       ["worktree", "add", "-b", branchName, worktreePath, pinnedHead],
       { cwd: repoPath },
     );
+    await execFileAsync("git", ["config", runStateDirKey(branchName), path.resolve(stateDir)], { cwd: repoPath });
   });
   return { worktreePath, branchName };
 }

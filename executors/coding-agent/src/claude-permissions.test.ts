@@ -18,6 +18,16 @@ async function denied(tool: unknown, input: unknown, config = options) {
 }
 
 describe("Claude tool permissions", () => {
+  it.each(["Agent", "Task"])("allows %s delegation while keeping each delegated tool within the job permissions", async (tool) => {
+    const input = { prompt: "Review the current implementation", run_in_background: true };
+    const reviewer = { ...options, readOnly: true };
+    expect(await evaluateClaudePermission(tool, input, reviewer)).toEqual({ behavior: "allow", updatedInput: input });
+    await denied(tool, {});
+    await denied(tool, { prompt: "" });
+    await denied("Write", { file_path: "src/file.ts" }, reviewer);
+    await denied("Bash", { command: "touch src/file.ts" }, reviewer);
+  });
+
   it.each(["Write", "Edit", "MultiEdit", "NotebookEdit"])("allows %s only inside an admitted prefix", async (tool) => {
     const field = tool === "NotebookEdit" ? "notebook_path" : "file_path";
     const input = { [field]: path.join(root, "src/new/file.ts"), content: "hello" };

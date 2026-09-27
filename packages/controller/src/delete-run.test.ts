@@ -1,11 +1,11 @@
 import { execFile, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createScriptedGraph, dispatch, stop, type GraphDefinition } from "@graphloom/sdk";
 import { createScriptedRunner } from "@graphloom/runner";
 import { createController, loadRunState, saveRunState } from "./index.js";
@@ -103,6 +103,7 @@ describe("deleting a run", () => {
     expect(existsSync(run.worktreePath)).toBe(false);
     expect(await branches(env)).toBe("");
     expect((await env.git("worktree", "list")).stdout).not.toContain(run.worktreePath);
+    expect((await env.git("config", "--get-regexp", "graphloom").catch(() => ({ stdout: "" }))).stdout).toBe("");
     expect(existsSync(path.join(env.repoPath, "README.md"))).toBe(true);
     await expect(createController().delete(run.stateDir)).rejects.toThrow();
   });
@@ -117,6 +118,14 @@ describe("deleting a run", () => {
     expect(existsSync(dirty.stateDir)).toBe(true);
     await createController().delete(dirty.stateDir, { force: true });
     expect(existsSync(dirty.worktreePath)).toBe(false);
+
+    await writeFile(path.join(env.repoPath, ".git", "info", "exclude"), "*.log\n", "utf8");
+    const ignored = await stoppedRun(env, "ignored");
+    await writeFile(path.join(ignored.worktreePath, "build.log"), "output\n", "utf8");
+    await expect(createController().delete(ignored.stateDir)).rejects.toThrow(
+      "cannot delete run ignored: its worktree has uncommitted changes (build.log); pass force to discard them",
+    );
+    await createController().delete(ignored.stateDir, { force: true });
 
     const committed = await stoppedRun(env, "committed");
     await writeFile(path.join(committed.worktreePath, "work.md"), "work\n", "utf8");
@@ -215,6 +224,88 @@ describe("deleting a run", () => {
       "cannot delete run tampered: its branch main is not graphloom/tampered",
     );
     expect(existsSync(path.join(env.repoPath, "README.md"))).toBe(true);
+
+    await saveRunState(state);
+    const moved = path.join(env.stateRoot, "moved");
+    await rename(run.stateDir, moved);
+    await expect(createController().delete(moved, { force: true })).rejects.toThrow(
+      `cannot delete run tampered: its state directory ${moved} is not named for it`,
+    );
+  });
+
+  it("refuses to delete another run's worktree and branch, even with force", async () => {
+    const env = await makeEnv();
+    const other = await makeEnv();
+    const run = await stoppedRun(env, "same");
+    const theirs = await stoppedRun(other, "same");
+    const state = await loadRunState(run.stateDir);
+    await saveRunState({
+      ...state,
+      intake: { ...state.intake, repoPath: other.repoPath },
+      worktreePath: theirs.worktreePath,
+    });
+    await expect(createController().delete(run.stateDir, { force: true })).rejects.toThrow(
+      `cannot delete run same: branch graphloom/same in ${other.repoPath} belongs to the run at ${theirs.stateDir}`,
+    );
+    expect(existsSync(theirs.worktreePath)).toBe(true);
+    expect(await branches(other)).toContain("graphloom/same");
+
+    await saveRunState(state);
+    await env.git("config", "--unset", "branch.graphloom/same.graphloomStateDir");
+    await expect(createController().delete(run.stateDir, { force: true })).rejects.toThrow(
+      `cannot delete run same: ${env.repoPath} does not record which run owns branch graphloom/same; remove it with git`,
+    );
+    expect(existsSync(run.worktreePath)).toBe(true);
+  });
+
+  it("keeps a commit made to the branch after the check", async () => {
+    const env = await makeEnv();
+    const run = await stoppedRun(env, "raced");
+    const realGit = (await execFileAsync("sh", ["-c", "command -v git"])).stdout.trim();
+    const bin = path.join(path.dirname(env.stateRoot), "bin");
+    await mkdir(bin, { recursive: true });
+    await writeFile(
+      path.join(bin, "git"),
+      [
+        "#!/bin/sh",
+        'if [ "$1" = worktree ] && [ "$2" = remove ]; then',
+        `  c=$(${realGit} commit-tree -p refs/heads/graphloom/raced -m late "$(${realGit} rev-parse HEAD^{tree})")`,
+        `  ${realGit} update-ref refs/heads/graphloom/raced "$c"`,
+        "fi",
+        `exec ${realGit} "$@"`,
+        "",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+    vi.stubEnv("PATH", `${bin}${path.delimiter}${process.env.PATH ?? ""}`);
+    cleanups.push(async () => vi.unstubAllEnvs());
+    await expect(createController().delete(run.stateDir)).rejects.toThrow(
+      "cannot delete run raced: branch graphloom/raced moved while it was being deleted; run delete again",
+    );
+    vi.unstubAllEnvs();
+    expect((await env.git("log", "-1", "--format=%s", "graphloom/raced")).stdout.trim()).toBe("late");
+    await expect(createController().delete(run.stateDir)).rejects.toThrow(
+      "cannot delete run raced: branch graphloom/raced has 1 commit(s) beyond the pinned head; pass force to discard them",
+    );
+    await createController().delete(run.stateDir, { force: true });
+    expect(await branches(env)).toBe("");
+  });
+
+  it("can repeat a delete whose state directory removal failed", async () => {
+    const env = await makeEnv();
+    const run = await stoppedRun(env, "stuck");
+    const locked = path.join(run.stateDir, "extra", "locked");
+    await mkdir(locked, { recursive: true });
+    await writeFile(path.join(locked, "held"), "x", "utf8");
+    await chmod(locked, 0o500);
+    cleanups.push(() => chmod(locked, 0o700).catch(() => undefined));
+    await expect(createController().delete(run.stateDir)).rejects.toThrow(/EACCES/);
+    expect(existsSync(run.worktreePath)).toBe(false);
+    expect(existsSync(path.join(run.stateDir, "state.json"))).toBe(true);
+
+    await chmod(locked, 0o700);
+    await createController().delete("stuck", { stateRoot: env.stateRoot });
+    expect(await readdir(env.stateRoot)).toEqual([]);
   });
 
   it("finishes a delete that stopped partway", async () => {

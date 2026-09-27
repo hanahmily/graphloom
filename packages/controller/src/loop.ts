@@ -52,7 +52,7 @@ import {
 } from "./owner.js";
 import { isUnsettled, reconcilePendingDispatch } from "./reconcile.js";
 import { createChildPort, reconcileChildOperations } from "./children.js";
-import { agentSessionViews, continuationRefusal, recordAgentSession, sessionForDispatch } from "./agent-sessions.js";
+import { agentSessionViews, continuationRefusal, recordAgentSession, sessionForDispatch, wipeAgentSessions } from "./agent-sessions.js";
 import { citedEvidence, loadRunState, type DurableRunState, saveRunState } from "./state.js";
 import { bumpGeneration } from "./generation.js";
 import {
@@ -110,7 +110,9 @@ export async function runNormalLoop(
 ): Promise<DurableRunState> {
   // Per-step lock so Stop can coordinate during long runner jobs.
   // Durable run.owner.json serializes which controller owns the loop.
-  return runNormalLoopSteps(state, deps);
+  const final = await runNormalLoopSteps(state, deps);
+  await wipeAgentSessions(final);
+  return final;
 }
 
 async function withRunLock<T>(

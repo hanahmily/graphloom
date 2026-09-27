@@ -14,9 +14,10 @@ keeps stdin open to answer permission requests. It does not wait for
 after the first user message. The GraphLoom MCP connection is checked when that
 event arrives.
 
-Each executor job owns one turn and one child process. The bidirectional stream
-serves model/tool exchanges during that turn; this change does not pool running
-processes across jobs. At a result, stdin closes, the CLI exits, and its transcript
+Each executor job owns one child process, including background subagent reports
+and their follow-up turns. The bidirectional stream serves model/tool exchanges;
+this change does not pool running processes across jobs. After the final result
+with no pending background agents, stdin closes, the CLI exits, and its transcript
 is copied to the controller's session directory. Another job can restore the same
 session through the existing `sessionRef` contract.
 
@@ -38,6 +39,7 @@ deny rules may still reject a request before it reaches the harness; see
 | `Write`, `Edit`, `MultiEdit`, `NotebookEdit` | Require a writer job and a target in its admitted `writeScope` |
 | Read-only job's file mutation or `Bash` | Deny |
 | `Read`, `Grep`, `Glob`, `StructuredOutput` | Allow |
+| `Agent`, `Task` | Require a nonempty subagent prompt; delegated tool calls retain the job's permissions |
 | `mcp__graphloom__<name>` | Require an admitted job tool; a read-only job may call only read tools |
 | Writer job's `Bash` | Allow under the operator's unrestricted-package grant |
 | Unknown tool or malformed input | Deny |

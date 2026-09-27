@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, symlink, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { appendFile, mkdir, mkdtemp, readdir, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -132,6 +133,10 @@ function executors() {
         }
       }
       const sessionRef = input.noSession ? undefined : (ctx.session?.resume ?? `s-${runs.length}`);
+      if (sessionRef !== undefined && ctx.session !== undefined) {
+        await mkdir(ctx.session.dir, { recursive: true });
+        await appendFile(path.join(ctx.session.dir, `${sessionRef}.jsonl`), `${JSON.stringify({ operationId: ctx.operationId })}\n`, "utf8");
+      }
       return {
         status: input.fail ? "failed" : "ok",
         summary: input.fail ? "agent gave up" : "agent done",
@@ -443,6 +448,8 @@ describe("continuing an agent session on reentry (#53)", () => {
       runId: "resume1",
     });
     expect(stopped.status).toBe("stopped");
+    const dir = path.join(stopped.stateDir, "agent-sessions", first.runs[0]!.operationId);
+    expect(await readdir(dir)).toEqual(["s-1.jsonl"]);
 
     const second = executors();
     const resumed = await controller.resume({
@@ -452,8 +459,31 @@ describe("continuing an agent session on reentry (#53)", () => {
       runner: second.runner,
     });
     expect(resumed.status, resumed.blocker).toBe("succeeded");
-    const dir = path.join(stopped.stateDir, "agent-sessions", first.runs[0]!.operationId);
     expect(second.runs[0]!.session).toEqual({ dir, resume: "s-1" });
+    expect(existsSync(path.join(stopped.stateDir, "agent-sessions"))).toBe(false);
+  });
+
+  it("wipes the run's agent sessions once it succeeds, and on a later resume if a crash left them", async () => {
+    const env = await makeEnv();
+    const { runner } = executors();
+    const controller = createController();
+    const report = await controller.run({
+      taskPath: env.taskPath,
+      plugin: graph([dispatch(agentJob([]), "first try"), retry, continueFirst([{ write: true }]), ...finish]),
+      validators,
+      runner,
+      stateRoot: env.stateRoot,
+      runId: "wipe1",
+    });
+    expect(report.status, report.blocker).toBe("succeeded");
+    const sessions = path.join(report.stateDir, "agent-sessions");
+    expect(existsSync(sessions)).toBe(false);
+    expect((await loadRunState(report.stateDir)).agentSessions).toHaveLength(2);
+
+    await mkdir(path.join(sessions, "op-left"), { recursive: true });
+    await writeFile(path.join(sessions, "op-left", "s-1.jsonl"), "{}\n", "utf8");
+    expect((await controller.resume({ runRef: report.stateDir, validators, runner })).status).toBe("succeeded");
+    expect(existsSync(sessions)).toBe(false);
   });
 });
 

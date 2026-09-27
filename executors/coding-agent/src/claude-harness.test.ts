@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { chmod, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -19,6 +19,7 @@ interface Invocation {
   apiKey: string | null;
   env: Record<string, string>;
   history: string[];
+  side: Record<string, string>;
   mcp: { type: string; url: string } | null;
 }
 
@@ -362,6 +363,83 @@ describe("Claude Code harness", () => {
     });
   });
 
+  it("charges each subagent request and reports the subagent's usage", async () => {
+    const h = await setup();
+    await h.script([{ agent: [{ bash: "echo found > found.txt" }, { text: "the subagent found it" }] }, { text: "done with a subagent" }]);
+    const result = await h.executor.execute({ assignment: "work" }, h.ctx());
+
+    expect(result).toMatchObject({ status: "ok", summary: "done with a subagent" });
+    expect(await readFile(path.join(h.worktree, "found.txt"), "utf8")).toBe("found\n");
+    // Two main-thread responses and two from the subagent, which the result's `usage` leaves out.
+    expect(h.reservations()).toBe(4);
+    expect(payload(result)).toMatchObject({ modelCalls: 4 });
+    expect(payload(result).usage).toEqual({ inputTokens: 40, outputTokens: 20, cacheReadTokens: 100, cacheWriteTokens: 20, costUsd: 0.0125 });
+    const [call] = await h.invocations();
+    expect(call!.argv).toContain("--forward-subagent-text");
+  });
+
+  it.each(["Agent", "Task"])("admits %s subagents without granting writes to a read-only job", async (agentTool) => {
+    const h = await setup();
+    await h.script([
+      { agentTool, agent: [
+        { bash: "printf 'no' > shell.txt" },
+        { permission: { tool: "Write", input: { file_path: "notes.md" } }, write: "no" },
+        { text: "read-only subagent finished" },
+      ] },
+      { text: "review finished" },
+    ]);
+    expect(await h.executor.execute({ assignment: "review" }, h.ctx({ readOnly: true })))
+      .toMatchObject({ status: "ok", summary: "review finished" });
+    expect(existsSync(path.join(h.worktree, "shell.txt"))).toBe(false);
+    expect(existsSync(path.join(h.worktree, "notes.md"))).toBe(false);
+    expect((await h.controls()).filter((entry) => entry.reply).map((entry) => [entry.tool, entry.reply?.response?.behavior]))
+      .toEqual([[agentTool, "allow"], ["Bash", "deny"], ["Write", "deny"]]);
+  });
+
+  it("counts a background subagent's requests and every turn it adds", async () => {
+    const h = await setup();
+    await h.script([{ agent: [{ text: "subagent step one" }, { text: "subagent step two" }], background: true }, { text: "launched a subagent" }]);
+    const result = await h.executor.execute({ assignment: "work" }, h.ctx());
+
+    expect(result).toMatchObject({ status: "ok", summary: "The background subagent finished." });
+    expect(h.reservations()).toBe(5);
+    expect(payload(result).usage).toEqual({ inputTokens: 50, outputTokens: 25, cacheReadTokens: 200, cacheWriteTokens: 40, costUsd: 0.025 });
+  });
+
+  it("stops Claude Code when a subagent's request is refused", async () => {
+    const h = await setup();
+    await h.script([{ agent: [{ text: "subagent looking" }, { hang: true }] }]);
+    let grants = 1;
+    const started = Date.now();
+    const result = await h.executor.execute({ assignment: "work" }, h.ctx({ usage: { reserveModelCall: async () => grants-- > 0 } }));
+    expect(result).toMatchObject({ status: "failed", summary: "model request budget exhausted" });
+    expect(Date.now() - started).toBeLessThan(5_000);
+  });
+
+  it("answers a background subagent's permission and late tool result after the first turn result", async () => {
+    const h = await setup({ startupTimeoutMs: 500, responseTimeoutMs: 500 });
+    await h.script([
+      { agent: [{ tool: "read_comments", args: { issue: 9 } }, { text: "background read complete" }], background: true },
+      { text: "launched a subagent" },
+    ]);
+    const calls: ToolCallRequest[] = [];
+    const result = await h.executor.execute({ assignment: "work" }, h.ctx({
+      tools: {
+        bindings: [{ name: "read_comments", effect: "read" }],
+        async call(request) {
+          calls.push(request);
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          return { status: "ok", summary: "late comments" };
+        },
+      },
+    }));
+    expect(result).toMatchObject({ status: "ok", summary: "The background subagent finished." });
+    expect(calls).toMatchObject([{ tool: "read_comments", input: { issue: 9 } }]);
+    expect((await h.controls()).find((entry) => entry.tool === "mcp__graphloom__read_comments")?.reply)
+      .toMatchObject({ response: { behavior: "allow" } });
+    expect(h.reservations()).toBe(5);
+  });
+
   it("stops the Claude Code process when the job is cancelled", async () => {
     const h = await setup();
     const controller = new AbortController();
@@ -456,6 +534,111 @@ describe("Claude Code harness", () => {
     expect(resumed!.history).toEqual([expect.stringContaining("Write the first draft"), "first turn done"]);
     expect(resumed!.prompt.startsWith(CONTINUATION_NOTICE)).toBe(true);
     expect(await readFile(path.join(h.sessions, `${ref}.jsonl`), "utf8")).toContain("second turn done");
+  });
+
+  it("saves subagent transcripts with the session and restores them, so a resume can continue a subagent", async () => {
+    const h = await setup();
+    await h.script([{ agent: [{ text: "the number is 42" }] }, { text: "delegated" }], [{ text: "continued" }]);
+    const first = await h.executor.execute({ assignment: "draft" }, h.ctx({ session: { dir: h.sessions } }));
+    const ref = (first as { sessionRef: string }).sessionRef;
+    const session = { dir: h.sessions, resume: ref };
+    const subagent = { [path.join("subagents", "agent-toolu_1.jsonl")]: '{"text":"the number is 42"}\n' };
+    expect((await readdir(h.sessions)).sort()).toEqual([ref, `${ref}.json`, `${ref}.jsonl`]);
+
+    await rm(path.join(h.configDir, "projects"), { recursive: true });
+    expect(await h.executor.execute({ assignment: "revise" }, h.ctx({ session }))).toMatchObject({ status: "ok", summary: "continued" });
+    const [project] = await readdir(path.join(h.configDir, "projects"));
+    const store = path.join(h.configDir, "projects", project!, ref.slice("claude-".length));
+    await writeFile(path.join(store, "stale.txt"), "not from the saved session", "utf8");
+    await h.executor.execute({ assignment: "revise" }, h.ctx({ session }));
+    const [, restored, replaced] = await h.invocations();
+    expect(restored!.side).toEqual(subagent);
+    expect(replaced!.side).toEqual(subagent);
+
+    await symlink("/etc/passwd", path.join(h.sessions, ref, "subagents", "agent-leak.jsonl"));
+    expect(await h.executor.execute({ assignment: "revise" }, h.ctx({ session }))).toEqual({
+      status: "failed",
+      summary: `agent session ${ref} could not be restored: saved session ${ref} is corrupt`,
+    });
+    expect(await h.invocations()).toHaveLength(3);
+  });
+
+  it("does not save a transcript that is a symlink out of Claude Code's store", async () => {
+    const h = await setup();
+    const outside = path.join(h.configDir, "..", "outside.jsonl");
+    await writeFile(outside, '{"text":"not the session"}\n', "utf8");
+    await h.script([{ text: "done" }], [], { linkTranscript: outside });
+    const result = await h.executor.execute({ assignment: "draft" }, h.ctx({ session: { dir: h.sessions } }));
+    expect(result).toMatchObject({ status: "ok", summary: "done" });
+    expect(result).not.toHaveProperty("sessionRef");
+    expect(await readdir(h.sessions).catch(() => [])).toEqual([]);
+  });
+
+  it("drops the saved subagent transcripts once the resumed session no longer has them", async () => {
+    const h = await setup();
+    await h.script([{ agent: [{ text: "the number is 42" }] }, { text: "delegated" }], [{ text: "continued" }], { dropSide: true });
+    const first = await h.executor.execute({ assignment: "draft" }, h.ctx({ session: { dir: h.sessions } }));
+    const ref = (first as { sessionRef: string }).sessionRef;
+    expect(await readdir(h.sessions)).toContain(ref);
+
+    const session = { dir: h.sessions, resume: ref };
+    expect(await h.executor.execute({ assignment: "revise" }, h.ctx({ session }))).toMatchObject({ status: "ok", sessionRef: ref });
+    expect((await readdir(h.sessions)).sort()).toEqual([`${ref}.json`, `${ref}.jsonl`]);
+    await h.executor.execute({ assignment: "revise" }, h.ctx({ session }));
+    expect((await h.invocations())[2]!.side).toEqual({});
+  });
+
+  it("reports only a resumed run's own usage, though Claude Code's totals span the session", async () => {
+    const h = await setup();
+    const own = { inputTokens: 10, outputTokens: 5, cacheReadTokens: 100, cacheWriteTokens: 20, costUsd: 0.0125 };
+    await h.script([{ text: "first" }], [{ text: "again" }]);
+    const first = await h.executor.execute({ assignment: "draft" }, h.ctx({ session: { dir: h.sessions } }));
+    const session = { dir: h.sessions, resume: (first as { sessionRef: string }).sessionRef };
+    const second = await h.executor.execute({ assignment: "revise" }, h.ctx({ session }));
+    await h.script([], [{ text: "again" }], { restoreCost: false });
+    const unrestored = await h.executor.execute({ assignment: "revise" }, h.ctx({ session }));
+
+    expect(payload(first).usage).toEqual(own);
+    expect(payload(second).usage).toEqual(own);
+    expect(payload(unrestored).usage).toEqual(own);
+
+    await h.script([{ text: "first" }], [{ text: "again" }]);
+    const direct = await createClaudeCodeHarness({ command: path.join(h.dir, "claude") }).createSession({
+      cwd: h.worktree,
+      readOnly: false,
+      tools: [],
+      reserveModelCall: async () => true,
+      sessionDir: path.join(h.dir, "direct-sessions"),
+    });
+    const runs = [await direct.run({ assignment: "draft" }), await direct.run({ assignment: "revise" })];
+    expect(runs.map((r) => [r.summary, r.usage])).toEqual([["first", own], ["again", own]]);
+  });
+
+  it("runs each binding on its own config dir, saving and restoring transcripts there", async () => {
+    const h = await setup();
+    const gateway = path.join(h.dir, "gateway-account");
+    const firstParty = path.join(h.dir, "first-party-account");
+    await h.script([{ text: "first" }], [{ text: "again" }]);
+    const byOption = h.makeExecutor({ configDir: gateway });
+    vi.stubEnv("GRAPHLOOM_CLAUDE_CONFIG_DIR", firstParty);
+    const byConfig = h.makeExecutor();
+
+    const refs: string[] = [];
+    for (const [executor, dir] of [[byOption, gateway], [byConfig, firstParty]] as const) {
+      const sessions = path.join(h.dir, `sessions-${path.basename(dir)}`);
+      const first = await executor.execute({ assignment: "draft" }, h.ctx({ session: { dir: sessions } }));
+      const ref = (first as { sessionRef: string }).sessionRef;
+      refs.push(ref);
+      await rm(path.join(dir, "projects"), { recursive: true });
+      const resumed = await executor.execute({ assignment: "revise" }, h.ctx({ session: { dir: sessions, resume: ref } }));
+      expect(resumed).toMatchObject({ status: "ok", summary: "again", sessionRef: ref });
+      const [project] = await readdir(path.join(dir, "projects"));
+      expect(await readFile(path.join(dir, "projects", project!, `${ref.slice("claude-".length)}.jsonl`), "utf8")).toContain("again");
+    }
+
+    const dirs = (await h.invocations()).map((call) => call.env.CLAUDE_CONFIG_DIR);
+    expect(dirs).toEqual([gateway, gateway, firstParty, firstParty]);
+    expect(existsSync(h.configDir)).toBe(false);
   });
 
   const REF = "claude-00000000-0000-4000-8000-000000000000";

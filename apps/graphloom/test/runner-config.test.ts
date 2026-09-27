@@ -13,8 +13,8 @@ describe("operator runner configuration", () => {
   it("requires explicit unrestricted execution consent", () => {
     expect(() => parseRunnerConfig({ harness: "claude-code" })).toThrow(/allowUnrestricted.*true/);
     expect(() => parseRunnerConfig({ harness: "pi", allowUnrestricted: false })).toThrow(/allowUnrestricted.*true/);
-    expect(parseRunnerConfig({ harness: "claude-code", allowUnrestricted: true, claude: { command: "/usr/bin/claude", model: "sonnet" } }))
-      .toEqual({ harness: "claude-code", allowUnrestricted: true, claude: { command: "/usr/bin/claude", model: "sonnet" } });
+    expect(parseRunnerConfig({ harness: "claude-code", allowUnrestricted: true, claude: { command: "/usr/bin/claude", model: "sonnet", configDir: "/operator/claude" } }))
+      .toEqual({ harness: "claude-code", allowUnrestricted: true, claude: { command: "/usr/bin/claude", model: "sonnet", configDir: "/operator/claude" } });
   });
 
   it.each([

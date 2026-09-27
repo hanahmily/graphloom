@@ -19,6 +19,12 @@ export async function evaluateClaudePermission(
   const record = input as Record<string, unknown>;
   const allow = (): PermissionDecision => ({ behavior: "allow", updatedInput: record });
   if (["Read", "Grep", "Glob", "StructuredOutput"].includes(toolName)) return allow();
+  if (toolName === "Agent" || toolName === "Task") {
+    // Delegation does not expand authority: each subagent tool request uses this same policy.
+    return typeof record.prompt === "string" && record.prompt.trim().length > 0
+      ? allow()
+      : deny("Subagent prompt is required");
+  }
   if (toolName.startsWith("mcp__graphloom__")) {
     const name = toolName.slice("mcp__graphloom__".length);
     const tool = options.tools.find((candidate) => candidate.name === name);
