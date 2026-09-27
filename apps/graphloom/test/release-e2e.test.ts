@@ -2,10 +2,22 @@ import { execFile } from "node:child_process";
 import { copyFile, cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
-import { activateRepair, qualifyRepair, returnToNormal, stop, type JobSpec } from "@graphloom/sdk";
+import {
+  activateRepair,
+  createScriptedGraph,
+  dispatch,
+  observe,
+  qualifyRepair,
+  returnToNormal,
+  stop,
+  validate,
+  type GraphPlugin,
+  type JobSpec,
+  type Validator,
+} from "@graphloom/sdk";
 import { createScriptedRunner, type JobContext } from "@graphloom/runner";
 import { createScriptedSupervisor } from "@graphloom/supervisor";
 import { createController, loadRunState, type RepairDeps } from "@graphloom/controller";
@@ -137,6 +149,74 @@ function repairDeps(installed: string, supervisorSessionId: string, patch: (cand
 }
 
 describe("the release example plugin through the controller", () => {
+  it("spends no correction budget on a clean run through both work stages", async () => {
+    const env = await makeEnv();
+    const { runner: scripted } = runner([bump, changelog("Export command"), reviewer("approved", "matches the request")]);
+    const report = await createController().run({ taskPath: env.taskPath, runner: scripted, stateRoot: env.stateRoot, runId: "release-clean" });
+
+    expect(report.status, `${report.stopReason}: ${report.blocker}`).toBe("succeeded");
+    const state = await loadRunState(report.stateDir);
+    expect(state.budgets.corrections).toBe(state.intake.budgets.corrections);
+  }, 60_000);
+
+  it("charges a Bump rewrite after resume sends the run back past an accepted Changelog", async () => {
+    const env = await makeEnv();
+    const release = (await import(pathToFileURL(path.join(bundle, "dist", "index.js")).href)) as {
+      createGraph(): GraphPlugin;
+      validatorById(id: string): Validator | undefined;
+    };
+    const definition = release.createGraph().describe();
+    const validators = Object.fromEntries(
+      definition.defaultValidators.map((b) => [b.validatorId, release.validatorById(b.validatorId)!]),
+    );
+    const writeJob = (stageId: string) =>
+      dispatch(
+        { stageId, kind: "agent", purpose: "work", instruction: `write ${stageId}`, writeScope: [stageId === "bump" ? "VERSION" : "CHANGELOG.md"] },
+        `dispatch ${stageId}`,
+      );
+    const observeRelease = observe({ paths: ["VERSION", "CHANGELOG.md"], includeWorkspaceManifest: true }, "observe");
+    const controller = createController();
+
+    const paused = await controller.run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({
+        definition,
+        advances: [
+          writeJob("bump"),
+          observeRelease,
+          validate({ stageId: "bump", requirementIds: ["version-file"] }, "validate bump"),
+          writeJob("changelog"),
+          observeRelease,
+          validate({ stageId: "changelog", requirementIds: ["changelog-entry", "release-scope"] }, "validate changelog"),
+          stop({ reason: "paused", blocker: "before review" }, "pause"),
+        ],
+      }),
+      validators,
+      runner: runner([bump, changelog("Export command")]).runner,
+      stateRoot: env.stateRoot,
+      runId: "release-resume-bump",
+    });
+    expect(validReceipts(paused.receipts)).toEqual(["bump/version-file", "changelog/changelog-entry", "changelog/release-scope"]);
+    expect((await loadRunState(paused.stateDir)).budgets.corrections).toBe(8);
+    await writeFile(path.join(paused.worktreePath, "VERSION"), "v1.2.0\n");
+
+    const resumed = await controller.resume({
+      runRef: paused.stateDir,
+      plugin: createScriptedGraph({
+        definition,
+        advances: [observeRelease, writeJob("bump"), stop({ reason: "paused", blocker: "rewrote bump" }, "pause")],
+      }),
+      validators,
+      runner: runner([bump]).runner,
+    });
+
+    expect(resumed, `${resumed.stopReason}: ${resumed.blocker}`).toMatchObject({ stopReason: "paused", blocker: "rewrote bump" });
+    const state = await loadRunState(paused.stateDir);
+    expect(state.current).toEqual({ stageId: "bump", attempt: 1 });
+    expect(validReceipts(state.receipts)).toEqual([]);
+    expect(state.budgets.corrections).toBe(7);
+  }, 60_000);
+
   it("runs Bump → Changelog → Review from its installed bundle, reentering Changelog on the reviewer's request", async () => {
     const env = await makeEnv();
     const { seen, runner: scripted } = runner([
@@ -168,6 +248,8 @@ describe("the release example plugin through the controller", () => {
     const state = await loadRunState(report.stateDir);
     expect(state.intake.bundle.bundlePath).toBe(env.installed);
     expect(state.definition.stages.map((s) => s.id)).toEqual(["bump", "changelog", "review"]);
+    // Only the reentry is charged; the rewrite it starts is the new generation's first Changelog job.
+    expect(state.budgets.corrections).toBe(state.intake.budgets.corrections - 1);
   }, 60_000);
 
   it("qualifies and activates a source repair of its changelog validator, then completes without redoing accepted work", async () => {
@@ -247,6 +329,8 @@ describe("the release example plugin through the controller", () => {
       ["changelog", "work"],
       ["review", "review"],
     ]);
+    // One for the Changelog correction after its own observation, one for the repair.
+    expect(state.budgets.corrections).toBe(state.intake.budgets.corrections - 2);
   }, 90_000);
 
   it("rejects an always-passing changelog validator in qualification, before review, and keeps the installed version", async () => {
