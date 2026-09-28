@@ -40,7 +40,8 @@ import {
   type EvidenceProducer,
 } from "./admit.js";
 import { HostObservationError } from "./host-validators.js";
-import { DEFAULT_ACTIVE_BUDGET_MS, manifestRepairContract, type IntakePin } from "./intake.js";
+import { manifestRepairContract, type IntakePin } from "./intake.js";
+import { startActiveClock, type ActiveClock } from "./active-time.js";
 import { assertSafeRunId } from "./ids.js";
 import { withDirectoryLock } from "./lock.js";
 import {
@@ -113,26 +114,21 @@ export async function runNormalLoop(
 ): Promise<DurableRunState> {
   // Per-step lock so Stop can coordinate during long runner jobs.
   // Durable run.owner.json serializes which controller owns the loop.
-  const activeClock = startActiveClock(state);
-  let final: DurableRunState;
+  const timing: { clock?: ActiveClock } = {};
+  let final: DurableRunState | undefined;
   try {
-    final = await recordActiveTime(await runNormalLoopSteps(state, { ...deps, activeClock }), activeClock);
+    final = await runNormalLoopSteps(state, deps, timing);
   } finally {
+    if (timing.clock !== undefined) {
+      // Also on a throw: the time spent must not be given back on resume.
+      const recorded = await recordActiveTime(final ?? state, timing.clock).catch(() => undefined);
+      if (final !== undefined && recorded !== undefined) final = recorded;
+      await timing.clock.close();
+    }
     await clearOwnerClaim(state.stateDir);
   }
   await wipeAgentSessions(final);
   return final;
-}
-
-interface ActiveClock {
-  remaining(): number;
-}
-
-/** Runs down the run's active-time budget from now, while this controller runs it. */
-function startActiveClock(state: DurableRunState): ActiveClock {
-  const allowance = state.budgets.activeMs ?? DEFAULT_ACTIVE_BUDGET_MS;
-  const startedAt = Date.now();
-  return { remaining: () => Math.max(0, allowance - (Date.now() - startedAt)) };
 }
 
 function chargeActiveTime(state: DurableRunState, deps: LoopDeps): DurableRunState {
@@ -174,12 +170,15 @@ async function withRunLock<T>(
 async function runNormalLoopSteps(
   state: DurableRunState,
   deps: LoopDeps,
+  timing: { clock?: ActiveClock },
 ): Promise<DurableRunState> {
   let owner: RunOwnerClaim | undefined;
   state = await withRunLock(state.stateDir, async () => {
     owner = await claimRunOwner(state.stateDir, {
       ...(deps.host.childPid !== undefined ? { childPid: deps.host.childPid } : {}),
     });
+    timing.clock = await startActiveClock(state);
+    deps = { ...deps, activeClock: timing.clock };
     const children = reconcileChildOperations(state);
     if (children.state !== state) {
       state = children.state;
@@ -308,7 +307,7 @@ async function runNormalLoopSteps(
         } catch (err) {
           decideError = err;
         } finally {
-          clearInterval(stopWatch);
+          stopWatch();
           state = settleSupervisorUsage(state, supervisor);
           const binding = readBinding(supervisor);
           if (binding) {
@@ -387,6 +386,14 @@ async function runNormalLoopSteps(
         }
       }
 
+      // The callback that proposed this decision may have used up the time left.
+      if (activeTimeExhausted(deps)) {
+        state = { ...chargeActiveTime(state, deps), status: "stopped", ...stopCause(deps) };
+        await saveRunState(state);
+        syncRevision(deps, state);
+        return { done: true as const, state };
+      }
+
       if (decision.action.type === "dispatch") {
         const prepared = await prepareDispatch(state, decision, deps);
         await saveRunState(prepared.state);
@@ -427,7 +434,7 @@ async function runNormalLoopSteps(
         }
         throw err;
       } finally {
-        if (applyWatch !== undefined) clearInterval(applyWatch);
+        applyWatch?.();
       }
       syncRevision(deps, state);
       if ((await stopRequested(deps)) && state.status === "running") {
@@ -454,13 +461,13 @@ async function runNormalLoopSteps(
       let children: ReturnType<typeof createChildPort> | undefined;
       let before: Map<string, string> | undefined;
       try {
-        if (notBefore !== undefined) {
-          await sleepUntil(notBefore, abort.signal);
-          if (!abort.signal.aborted && !(await startWaitedDispatch(state, operationId, deps))) abort.abort();
-        }
+        if (notBefore !== undefined) await sleepUntil(notBefore, abort.signal);
+        const unchanged = abort.signal.aborted ? undefined : await worktreeChangeFingerprints(state.worktreePath);
+        if (!abort.signal.aborted && !(await startDispatch(state, operationId, deps))) abort.abort();
         if (abort.signal.aborted) {
           result = { status: "failed", summary: "executor cancelled before start", runId: state.runId, operationId, generation };
         } else {
+          before = unchanged;
           children =
             job.kind === "agent" || job.tools !== undefined
               ? createChildPort(
@@ -473,7 +480,6 @@ async function runNormalLoopSteps(
                   },
                 )
               : undefined;
-          before = await worktreeChangeFingerprints(state.worktreePath);
           result = await deps.runner.runJob(job, {
             runId: state.runId,
             operationId,
@@ -489,7 +495,7 @@ async function runNormalLoopSteps(
       } finally {
         // A parent that stopped, timed out, or returned early can leave a child running.
         await children?.close();
-        clearInterval(stopWatch);
+        stopWatch();
       }
       // Executors may run unconfined, so scope is checked against what actually changed.
       const outOfScope =
@@ -594,10 +600,11 @@ function sleepUntil(until: string, signal: AbortSignal): Promise<void> {
 }
 
 /**
- * Mark a dispatch that waited as handed to the runner, while it is still the
- * run's outstanding job. Until then a restart may drop it as never started.
+ * Mark an admitted dispatch as handed to the runner, while it is still the
+ * run's outstanding job and the run may still act. Until then a restart may
+ * drop it as never started.
  */
-async function startWaitedDispatch(state: DurableRunState, operationId: string, deps: LoopDeps): Promise<boolean> {
+async function startDispatch(state: DurableRunState, operationId: string, deps: LoopDeps): Promise<boolean> {
   return withRunLock(state.stateDir, async () => {
     const current = await reloadRunState(state);
     const pending = current.pendingDispatch;
@@ -612,8 +619,17 @@ async function startWaitedDispatch(state: DurableRunState, operationId: string, 
   });
 }
 
-/** Abort an outstanding job, and any child it is waiting on, once the run stops. */
-function watchForStop(stateDir: string, deps: LoopDeps, abort: AbortController): NodeJS.Timeout {
+/** Abort an outstanding job, and any child it is waiting on, once the run stops or its time runs out. Returns the disposer. */
+function watchForStop(stateDir: string, deps: LoopDeps, abort: AbortController): () => void {
+  // Timers can fire before the monotonic deadline, so recheck before aborting.
+  let deadline: NodeJS.Timeout | undefined;
+  const armDeadline = (clock: ActiveClock) => {
+    const left = clock.remaining();
+    if (left === 0) return abort.abort();
+    deadline = setTimeout(() => armDeadline(clock), left + 1);
+    deadline.unref();
+  };
+  if (deps.activeClock !== undefined) armDeadline(deps.activeClock);
   let checking = false;
   const timer = setInterval(() => {
     if (checking || abort.signal.aborted) return;
@@ -631,7 +647,10 @@ function watchForStop(stateDir: string, deps: LoopDeps, abort: AbortController):
     })();
   }, STOP_POLL_MS);
   timer.unref();
-  return timer;
+  return () => {
+    clearInterval(timer);
+    clearTimeout(deadline);
+  };
 }
 
 async function tryRenewOwner(
@@ -1231,7 +1250,7 @@ async function prepareDispatch(
       generation: state.generation,
       stageId: job.stageId,
       job,
-      status: notBefore !== undefined ? "waiting" : "pending",
+      status: "waiting",
       ...(job.executor !== undefined ? { executor: job.executor } : {}),
       ...(notBefore !== undefined ? { notBefore } : {}),
       ...(session !== undefined ? { session } : {}),

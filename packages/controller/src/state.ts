@@ -20,7 +20,7 @@ export interface PendingDispatch {
   generation: number;
   stageId: string;
   job: JobSpec;
-  /** `waiting` until the job is handed to the runner after `notBefore`; then `pending`. */
+  /** `waiting` from admission until the job is handed to the runner (after any `notBefore`); then `pending`. */
   status: "waiting" | "pending" | "completed" | "failed";
   /** Durable pin recorded at admission (before effects). */
   executor?: import("@graphloom/sdk").ExecutorPin;
