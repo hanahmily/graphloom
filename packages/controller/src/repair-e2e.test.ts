@@ -786,7 +786,7 @@ describe("qualified repair + same-run activation (#29)", () => {
     const state = await loadRunState(report.stateDir);
     const artifact = state.repairCandidates?.[0];
     expect(artifact?.status).toBe("rejected");
-    expect(artifact?.rejectionReason).toBe("supervisor prompt exceeded its 31-turn allowance");
+    expect(artifact?.rejectionReason).toBe("supervisor prompt exceeded its 63-turn allowance");
     expect(artifact?.patchSummary).toBeUndefined();
     expect(state.budgets.corrections).toBe(7);
     expect(state.budgets.agentInvocations).toBe(0);
@@ -1335,12 +1335,12 @@ describe("qualified repair + same-run activation (#29)", () => {
     expect(artifact?.patchSummary).toBe("Fixed exact-greeting to accept the pinned bytes.");
     expect(existsSync(path.join(artifact!.candidateRoot, "REPAIR_MARKER.txt"))).toBe(true);
     expect(existsSync(path.join(env.taskDir, "plugins", "hello", "REPAIR_MARKER.txt"))).toBe(false);
-    // The whole remaining allowance (32 - write job - qualify decide) is reserved
+    // The whole remaining allowance (64 - write job - qualify decide) is reserved
     // durably before the patch runs and becomes its turn cap.
-    expect(patchMaxTurns).toBe(30);
+    expect(patchMaxTurns).toBe(62);
     expect(durableDuringPatch).toEqual({ agentInvocations: 0, status: "qualifying" });
     // 3 decide prompts + 3 patch tool turns + 3 agent jobs (write, rewrite, review).
-    expect(state.budgets.agentInvocations).toBe(32 - 9);
+    expect(state.budgets.agentInvocations).toBe(64 - 9);
   });
 
   it("stops qualify_repair when neither the supervisor nor repair deps can author a patch", async () => {

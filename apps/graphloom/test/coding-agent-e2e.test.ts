@@ -247,7 +247,7 @@ describe("graph → coding agent → GitHub child executor", () => {
     // The second read sees the comment the agent posted in between.
     const lastRead = agent.output.toolResults[2]!.result.evidence?.[0] as { payload: { github: { items: unknown[] } } };
     expect(lastRead.payload.github.items).toHaveLength(1);
-    expect(state.budgets.jobs).toBe(64 - 1 - 3 - 1);
+    expect(state.budgets.jobs).toBe(128 - 1 - 3 - 1);
     expect(await readTree(report.stateDir)).not.toContain(TOKEN);
   });
 

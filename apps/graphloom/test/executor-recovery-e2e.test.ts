@@ -267,7 +267,10 @@ describe("executor failure recovery (#41)", () => {
       stateRoot: env.stateRoot,
       runId: "wait-stop",
     });
-    await waitFor(async () => (await loadRunState(stateDir)).pendingDispatch?.status === "waiting");
+    await waitFor(async () => {
+      const pending = (await loadRunState(stateDir)).pendingDispatch;
+      return pending?.status === "waiting" && pending.notBefore !== undefined;
+    });
     await controller.stop(stateDir);
     expect((await running).status).toBe("stopped");
     const stopped = await loadRunState(stateDir);

@@ -50,7 +50,7 @@ describe("public controller: hello child host + stop/resume/inspect", () => {
     expect(inspected.stages.map((s) => s.id)).toEqual(["write", "review"]);
     expect(inspected.stages.every((s) => s.complete)).toBe(true);
     expect(inspected.evidenceRefs.length).toBeGreaterThan(0);
-    expect(inspected.budgets.agentInvocations).toBeLessThan(32);
+    expect(inspected.budgets.agentInvocations).toBeLessThan(64);
     expect(inspected.versionHistory.length).toBeGreaterThanOrEqual(1);
     expect(inspected.versionHistory[0]?.reason).toBe("intake");
     expect(inspected.activeVersion).toContain("hello@");

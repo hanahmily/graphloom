@@ -80,9 +80,9 @@ export function isUnsettled(pending: PendingDispatch): boolean {
 }
 
 /**
- * A dispatch still waiting for its executor's retry time never reached the
- * runner. Drop it, keep the retry time, and refund the wait not yet spent, so
- * the next dispatch charges only what remains.
+ * A waiting dispatch never reached the runner. Drop it, keep any executor
+ * retry time, and refund the wait not yet spent, so the next dispatch charges
+ * only what remains.
  */
 function dropWaitingDispatch(state: DurableRunState, pending: PendingDispatch): DurableRunState {
   const { pendingDispatch: _p, ...rest } = state;

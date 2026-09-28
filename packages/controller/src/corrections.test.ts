@@ -1,10 +1,10 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createScriptedGraph,
   dispatch,
@@ -1211,7 +1211,7 @@ describe("controller-started recovery for stalls and repeated corrections", () =
     expect(report).toMatchObject({ status: "stopped", stopReason: "stalled at write" });
     const state = await loadRunState(report.stateDir);
     // dispatch, observe, validate, observe, the refused validate, return, the refused observe, stop
-    expect(state.budgets.decisions).toBe(128 - 8);
+    expect(state.budgets.decisions).toBe(512 - 8);
     expect(state.evidence.filter((e) => e.kind === "file")).toHaveLength(2);
     expect(state.receipts.filter((r) => r.valid)).toEqual([]);
   });
@@ -1515,6 +1515,328 @@ describe("controller-started recovery for stalls and repeated corrections", () =
     });
     expect(report, `${report.stopReason}: ${report.blocker}`).toMatchObject({ stopReason: "paused", blocker: "checked" });
     expect((await loadRunState(report.stateDir)).correctionTrials).toEqual({ write: 1 });
+  });
+});
+
+describe("active execution time budget", () => {
+  const writeJob = dispatch({ stageId: "write", kind: "agent", purpose: "work", instruction: "write", writeScope: [GREETING_PATH] }, "dispatch writer");
+  const pause = stop({ reason: "paused", blocker: "checked" }, "pause");
+  const write = async (_job: unknown, ctx: { worktreePath: string }) => {
+    await writeFile(path.join(ctx.worktreePath, GREETING_PATH), GREETING, "utf8");
+    return { status: "ok" as const, summary: "wrote" };
+  };
+  const setActiveMs = async (stateDir: string, activeMs: number) => {
+    const state = await loadRunState(stateDir);
+    await saveRunState({ ...state, budgets: { ...state.budgets, activeMs } });
+  };
+
+  it("starts at four hours and runs down across resume without being replenished", async () => {
+    const env = await makeEnv();
+    const controller = createController();
+    const paused = await controller.run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({ definition, advances: [writeJob, pause] }),
+      validators,
+      runner: createScriptedRunner({ jobs: [write] }),
+      stateRoot: env.stateRoot,
+      runId: "active-down",
+    });
+    const first = (await controller.inspect(paused.stateDir)).budgets.activeMs!;
+    expect(first).toBeLessThan(4 * 60 * 60_000);
+    expect(first).toBeGreaterThan(4 * 60 * 60_000 - 60_000);
+
+    let seen: number | undefined;
+    const resumed = await controller.resume({
+      runRef: paused.stateDir,
+      plugin: createScriptedGraph({
+        definition,
+        advances: [
+          (view) => {
+            seen = view.budgets.activeMs;
+            return pause;
+          },
+        ],
+      }),
+      validators,
+      runner: createScriptedRunner({ jobs: [] }),
+    });
+    expect(resumed.stopReason).toBe("paused");
+    // The graph sees the time left as of its turn, not as of the last save.
+    expect(seen).toBeLessThan(first);
+    expect((await controller.inspect(paused.stateDir)).budgets.activeMs).toBeLessThanOrEqual(seen!);
+  });
+
+  it("does not count time while the run is stopped", async () => {
+    const env = await makeEnv();
+    const controller = createController();
+    const paused = await controller.run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({ definition, advances: [pause] }),
+      validators,
+      runner: createScriptedRunner({ jobs: [] }),
+      stateRoot: env.stateRoot,
+      runId: "active-idle",
+    });
+    await setActiveMs(paused.stateDir, 3_000);
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+
+    const resumedAt = Date.now();
+    const resumed = await controller.resume({
+      runRef: paused.stateDir,
+      plugin: createScriptedGraph({ definition, advances: [writeJob, pause] }),
+      validators,
+      runner: createScriptedRunner({ jobs: [write] }),
+    });
+    const ran = Date.now() - resumedAt;
+    expect(resumed.stopReason).toBe("paused");
+    const left = (await controller.inspect(paused.stateDir)).budgets.activeMs!;
+    expect(left).toBeLessThan(3_000);
+    expect(left).toBeGreaterThanOrEqual(3_000 - ran);
+  });
+
+  const pausedRun = async (runId: string, activeMs: number) => {
+    const env = await makeEnv();
+    const controller = createController();
+    const paused = await controller.run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({ definition, advances: [pause] }),
+      validators,
+      runner: createScriptedRunner({ jobs: [] }),
+      stateRoot: env.stateRoot,
+      runId,
+    });
+    await setActiveMs(paused.stateDir, activeMs);
+    return { controller, stateDir: paused.stateDir };
+  };
+
+  it("does not admit a dispatch the graph proposed after the time ran out", async () => {
+    const { controller, stateDir } = await pausedRun("active-late-dispatch", 1_000);
+    let ran = false;
+    const report = await controller.resume({
+      runRef: stateDir,
+      plugin: createScriptedGraph({
+        definition,
+        advances: [
+          () => {
+            const until = Date.now() + 1_200;
+            while (Date.now() < until) {
+              /* a slow advance callback */
+            }
+            return writeJob;
+          },
+        ],
+      }),
+      validators,
+      runner: createScriptedRunner({
+        jobs: [
+          async (job, ctx) => {
+            ran = true;
+            return write(job, ctx);
+          },
+        ],
+      }),
+    });
+    expect(report).toMatchObject({ status: "stopped", stopReason: "active time budget exhausted" });
+    expect(ran).toBe(false);
+    expect((await loadRunState(stateDir)).pendingDispatch).toBeUndefined();
+  });
+
+  it("measures elapsed time monotonically, so wall-clock jumps neither expire nor replenish it", async () => {
+    const { controller, stateDir } = await pausedRun("active-clock-jump", 10_000);
+    const wallClock = Date.now.bind(Date);
+    const jump = (offset: number) => vi.spyOn(Date, "now").mockImplementation(() => wallClock() + offset);
+    const pauseAfter = (offset: number) => () => {
+      jump(offset);
+      return pause;
+    };
+    try {
+      const forward = await controller.resume({
+        runRef: stateDir,
+        plugin: createScriptedGraph({ definition, advances: [pauseAfter(60_000)] }),
+        validators,
+        runner: createScriptedRunner({ jobs: [] }),
+      });
+      expect(forward.stopReason).toBe("paused");
+      vi.restoreAllMocks();
+      const afterForward = (await controller.inspect(stateDir)).budgets.activeMs!;
+      expect(afterForward).toBeGreaterThan(5_000);
+
+      const back = await controller.resume({
+        runRef: stateDir,
+        plugin: createScriptedGraph({ definition, advances: [pauseAfter(-60_000)] }),
+        validators,
+        runner: createScriptedRunner({ jobs: [] }),
+      });
+      expect(back.stopReason).toBe("paused");
+      vi.restoreAllMocks();
+      expect((await controller.inspect(stateDir)).budgets.activeMs).toBeLessThanOrEqual(afterForward);
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
+  it("keeps the time a job used when the runner throws", async () => {
+    const { controller, stateDir } = await pausedRun("active-runner-throws", 10_000);
+    await expect(
+      controller.resume({
+        runRef: stateDir,
+        plugin: createScriptedGraph({ definition, advances: [writeJob] }),
+        validators,
+        runner: createScriptedRunner({
+          jobs: [
+            async () => {
+              await new Promise((resolve) => setTimeout(resolve, 1_200));
+              throw new Error("runner crashed");
+            },
+          ],
+        }),
+      }),
+    ).rejects.toThrow("runner crashed");
+    expect((await controller.inspect(stateDir)).budgets.activeMs).toBeLessThanOrEqual(10_000 - 1_200);
+  });
+
+  it("keeps the time a killed controller spent, to within one checkpoint", async () => {
+    const { controller, stateDir } = await pausedRun("active-killed", 10_000);
+    const url = (rel: string) => JSON.stringify(new URL(rel, import.meta.url).href);
+    // A controller process that is killed outright 2.5 s into a job, with no chance to record anything.
+    const script = `
+      import { createController } from ${url("../dist/index.js")};
+      import { createScriptedGraph, dispatch } from ${url("../../sdk/dist/index.js")};
+      import { createScriptedRunner } from ${url("../../runner/dist/index.js")};
+      const job = dispatch({ stageId: "write", kind: "agent", purpose: "work", instruction: "write", writeScope: [${JSON.stringify(GREETING_PATH)}] }, "dispatch writer");
+      await createController().resume({
+        runRef: ${JSON.stringify(stateDir)},
+        plugin: createScriptedGraph({ definition: ${JSON.stringify(definition)}, advances: [job] }),
+        validators: {},
+        runner: createScriptedRunner({ jobs: [async () => { await new Promise((r) => setTimeout(r, 2_500)); process.kill(process.pid, "SIGKILL"); }] }),
+      });
+    `;
+    const signal = await new Promise<NodeJS.Signals | null>((resolve, reject) => {
+      const child = spawn(process.execPath, ["--input-type=module", "-e", script], { stdio: ["ignore", "ignore", "inherit"] });
+      child.once("error", reject);
+      child.once("close", (_code, sig) => resolve(sig));
+    });
+    expect(signal).toBe("SIGKILL");
+    expect((await loadRunState(stateDir)).budgets.activeMs).toBeGreaterThan(9_000);
+
+    const report = await controller.resume({
+      runRef: stateDir,
+      plugin: createScriptedGraph({ definition, advances: [pause] }),
+      validators,
+      runner: createScriptedRunner({ jobs: [] }),
+    });
+    expect(report.stopReason).toBe("paused");
+    expect((await controller.inspect(stateDir)).budgets.activeMs).toBeLessThanOrEqual(10_000 - 1_500);
+  });
+
+  it("aborts a job that outlives the budget, stops the run, and stops again at once on resume", async () => {
+    const env = await makeEnv();
+    const controller = createController();
+    const paused = await controller.run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({ definition, advances: [pause] }),
+      validators,
+      runner: createScriptedRunner({ jobs: [] }),
+      stateRoot: env.stateRoot,
+      runId: "active-out",
+    });
+    await setActiveMs(paused.stateDir, 1_500);
+
+    let aborted = false;
+    const hang = async (_job: unknown, ctx: { signal?: AbortSignal }) => {
+      await new Promise<void>((resolve) => ctx.signal?.addEventListener("abort", () => resolve(), { once: true }));
+      aborted = true;
+      return { status: "failed" as const, summary: "cancelled" };
+    };
+    const resumedAt = Date.now();
+    const outOfTime = await controller.resume({
+      runRef: paused.stateDir,
+      plugin: createScriptedGraph({ definition, advances: [writeJob] }),
+      validators,
+      runner: createScriptedRunner({ jobs: [hang] }),
+    });
+    expect(Date.now() - resumedAt).toBeGreaterThanOrEqual(1_500);
+    expect(Date.now() - resumedAt).toBeLessThan(10_000);
+    expect(aborted).toBe(true);
+    expect(outOfTime).toMatchObject({
+      status: "stopped",
+      stopReason: "active time budget exhausted",
+      blocker: "no active execution time remains",
+    });
+    expect((await controller.inspect(paused.stateDir)).budgets.activeMs).toBe(0);
+
+    const again = await controller.resume({
+      runRef: paused.stateDir,
+      plugin: createScriptedGraph({ definition, advances: [writeJob] }),
+      validators,
+      runner: createScriptedRunner({ jobs: [] }),
+    });
+    expect(again).toMatchObject({ status: "stopped", stopReason: "active time budget exhausted" });
+    expect((await controller.inspect(paused.stateDir)).budgets.activeMs).toBe(0);
+  });
+
+  it("records the time a job ran when the run is stopped from outside the loop", async () => {
+    const env = await makeEnv();
+    const controller = createController();
+    const paused = await controller.run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({ definition, advances: [pause] }),
+      validators,
+      runner: createScriptedRunner({ jobs: [] }),
+      stateRoot: env.stateRoot,
+      runId: "active-external-stop",
+    });
+    await setActiveMs(paused.stateDir, 60_000);
+
+    const hang = async (_job: unknown, ctx: { signal?: AbortSignal }) => {
+      // Another process persists the stop while the job runs; the loop sees it and aborts the job.
+      setTimeout(() => {
+        void loadRunState(paused.stateDir).then((state) =>
+          saveRunState({ ...state, status: "stopped", stopReason: "operator stop", blocker: "stop requested" }),
+        );
+      }, 1_000);
+      await new Promise<void>((resolve) => ctx.signal?.addEventListener("abort", () => resolve(), { once: true }));
+      return { status: "failed" as const, summary: "cancelled" };
+    };
+    const report = await controller.resume({
+      runRef: paused.stateDir,
+      plugin: createScriptedGraph({ definition, advances: [writeJob] }),
+      validators,
+      runner: createScriptedRunner({ jobs: [hang] }),
+    });
+    expect(report.stopReason).toBe("operator stop");
+    expect((await controller.inspect(paused.stateDir)).budgets.activeMs).toBeLessThanOrEqual(59_000);
+  });
+
+  it("aborts a supervisor decision that outlives the budget", async () => {
+    const env = await makeEnv();
+    const controller = createController();
+    const paused = await controller.run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({ definition, advances: [pause] }),
+      validators,
+      runner: createScriptedRunner({ jobs: [] }),
+      stateRoot: env.stateRoot,
+      runId: "active-supervisor",
+    });
+    await setActiveMs(paused.stateDir, 1_000);
+
+    let aborted = false;
+    const report = await controller.resume({
+      runRef: paused.stateDir,
+      plugin: createScriptedGraph({ definition, advances: [supervise({ reason: "unfamiliar state" }, "escalate")] }),
+      validators,
+      runner: createScriptedRunner({ jobs: [] }),
+      supervisor: {
+        async decide(input) {
+          await new Promise<void>((resolve) => input.signal?.addEventListener("abort", () => resolve(), { once: true }));
+          aborted = true;
+          throw new Error("cancelled");
+        },
+      },
+    });
+    expect(aborted).toBe(true);
+    expect(report).toMatchObject({ status: "stopped", stopReason: "active time budget exhausted" });
   });
 });
 

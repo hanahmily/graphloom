@@ -281,7 +281,7 @@ describe("continuing an agent session on reentry (#53)", () => {
       ["c2", 2, continued!.operationId],
     ]);
     // Two agent jobs, two children, one reviewer.
-    expect(state.budgets.jobs).toBe(64 - 5);
+    expect(state.budgets.jobs).toBe(128 - 5);
   });
 
   it("gives a dispatch without continueFrom a fresh session of its own", async () => {

@@ -41,6 +41,7 @@ import {
 } from "./admit.js";
 import { HostObservationError } from "./host-validators.js";
 import { manifestRepairContract, type IntakePin } from "./intake.js";
+import { startActiveClock, type ActiveClock } from "./active-time.js";
 import { assertSafeRunId } from "./ids.js";
 import { withDirectoryLock } from "./lock.js";
 import {
@@ -93,10 +94,12 @@ export interface LoopDeps {
   shouldStop?: () => boolean | Promise<boolean>;
   /** Live revision bridge for host-backed validators. */
   revisionBridge?: { current: number };
+  /** Set by runNormalLoop for the time this controller runs the run. */
+  activeClock?: ActiveClock;
 }
 
 async function stopRequested(deps: LoopDeps): Promise<boolean> {
-  return Boolean(await Promise.resolve(deps.shouldStop?.() ?? false));
+  return activeTimeExhausted(deps) || Boolean(await Promise.resolve(deps.shouldStop?.() ?? false));
 }
 
 function syncRevision(deps: LoopDeps, state: DurableRunState): void {
@@ -111,9 +114,50 @@ export async function runNormalLoop(
 ): Promise<DurableRunState> {
   // Per-step lock so Stop can coordinate during long runner jobs.
   // Durable run.owner.json serializes which controller owns the loop.
-  const final = await runNormalLoopSteps(state, deps);
+  const timing: { clock?: ActiveClock } = {};
+  let final: DurableRunState | undefined;
+  try {
+    final = await runNormalLoopSteps(state, deps, timing);
+  } finally {
+    if (timing.clock !== undefined) {
+      // Also on a throw: the time spent must not be given back on resume.
+      const recorded = await recordActiveTime(final ?? state, timing.clock).catch(() => undefined);
+      if (final !== undefined && recorded !== undefined) final = recorded;
+      await timing.clock.close();
+    }
+    await clearOwnerClaim(state.stateDir);
+  }
   await wipeAgentSessions(final);
   return final;
+}
+
+function chargeActiveTime(state: DurableRunState, deps: LoopDeps): DurableRunState {
+  if (deps.activeClock === undefined) return state;
+  return { ...state, budgets: { ...state.budgets, activeMs: deps.activeClock.remaining() } };
+}
+
+/** Persist the time this controller spent before it gives up ownership. */
+async function recordActiveTime(state: DurableRunState, clock: ActiveClock): Promise<DurableRunState> {
+  return withRunLock(state.stateDir, async () => {
+    const saved = await loadRunState(state.stateDir).catch((err: NodeJS.ErrnoException) => {
+      if (err.code === "ENOENT") return undefined;
+      throw err;
+    });
+    const activeMs = clock.remaining();
+    if (saved !== undefined) await saveRunState({ ...saved, budgets: { ...saved.budgets, activeMs } });
+    return { ...state, budgets: { ...state.budgets, activeMs } };
+  });
+}
+
+function activeTimeExhausted(deps: LoopDeps): boolean {
+  return deps.activeClock !== undefined && deps.activeClock.remaining() === 0;
+}
+
+/** Why a run that was asked to stop, or ran out of time, stopped. */
+function stopCause(deps: LoopDeps): { stopReason: string; blocker: string } {
+  return activeTimeExhausted(deps)
+    ? { stopReason: "active time budget exhausted", blocker: "no active execution time remains" }
+    : { stopReason: "operator stop", blocker: "stop requested" };
 }
 
 async function withRunLock<T>(
@@ -126,415 +170,416 @@ async function withRunLock<T>(
 async function runNormalLoopSteps(
   state: DurableRunState,
   deps: LoopDeps,
+  timing: { clock?: ActiveClock },
 ): Promise<DurableRunState> {
   let owner: RunOwnerClaim | undefined;
-  try {
-    state = await withRunLock(state.stateDir, async () => {
-      owner = await claimRunOwner(state.stateDir, {
-        ...(deps.host.childPid !== undefined ? { childPid: deps.host.childPid } : {}),
-      });
-      const children = reconcileChildOperations(state);
-      if (children.state !== state) {
-        state = children.state;
-        if (!children.settled) {
-          state = { ...state, status: "stopped", stopReason: "reconcile required", blocker: children.reason };
-          await saveRunState(state);
-          return state;
-        }
+  state = await withRunLock(state.stateDir, async () => {
+    owner = await claimRunOwner(state.stateDir, {
+      ...(deps.host.childPid !== undefined ? { childPid: deps.host.childPid } : {}),
+    });
+    timing.clock = await startActiveClock(state);
+    deps = { ...deps, activeClock: timing.clock };
+    const children = reconcileChildOperations(state);
+    if (children.state !== state) {
+      state = children.state;
+      if (!children.settled) {
+        state = { ...state, status: "stopped", stopReason: "reconcile required", blocker: children.reason };
         await saveRunState(state);
+        return state;
       }
-      if (state.pendingDispatch !== undefined && isUnsettled(state.pendingDispatch)) {
-        const reconciled = await reconcilePendingDispatch(state);
-        state = reconciled.state;
-        if (!reconciled.settled) {
+      await saveRunState(state);
+    }
+    if (state.pendingDispatch !== undefined && isUnsettled(state.pendingDispatch)) {
+      const reconciled = await reconcilePendingDispatch(state);
+      state = reconciled.state;
+      if (!reconciled.settled) {
+        state = {
+          ...state,
+          status: "stopped",
+          stopReason: "reconcile required",
+          blocker: reconciled.reason,
+        };
+        await saveRunState(state);
+        return state;
+      }
+      await saveRunState(state);
+    }
+    syncRevision(deps, state);
+    return state;
+  });
+
+  for (let step = 0; step < MAX_STEPS; step += 1) {
+    const turn = await withRunLock(state.stateDir, async () => {
+      // Reload before renewing: Stop may have cleared the owner claim and
+      // persisted stopped while a runner job held no lock.
+      state = chargeActiveTime(await reloadRunState(state), deps);
+      syncRevision(deps, state);
+
+      if (state.status !== "running") {
+        return { done: true as const, state };
+      }
+      if (await stopRequested(deps)) {
+        state = {
+          ...state,
+          status: "stopped",
+          ...stopCause(deps),
+        };
+        await saveRunState(state);
+        return { done: true as const, state };
+      }
+
+      const renewed = await tryRenewOwner(state.stateDir, owner, deps.host.childPid);
+      if (!renewed) {
+        state = {
+          ...state,
+          status: "stopped",
+          stopReason: "operator stop",
+          blocker: "run owner lease cleared",
+        };
+        await saveRunState(state);
+        return { done: true as const, state };
+      }
+      owner = renewed;
+      await updateOwnerChildPid(state.stateDir, owner.ownerId, deps.host.childPid);
+
+      let decision: GraphDecision;
+      let priorNoProgress = state.noProgress;
+      if (state.mode === "recovery") {
+        if (!deps.supervisor) {
           state = {
             ...state,
             status: "stopped",
-            stopReason: "reconcile required",
-            blocker: reconciled.reason,
+            stopReason: state.recoveryTrigger?.message ?? "recovery required",
+            blocker: "no supervisor configured",
           };
           await saveRunState(state);
-          return state;
+          return { done: true as const, state };
         }
+        if (!state.recoveryEpisodeId) {
+          state = {
+            ...state,
+            recoveryEpisodeId: `ep-${randomUUID().slice(0, 8)}`,
+          };
+        }
+        const episodeId = state.recoveryEpisodeId!;
+        const trigger = state.recoveryTrigger ?? {
+          code: "unhandled",
+          message: "recovery",
+        };
+        const supervisor = deps.supervisor;
+        state = await applyOperatorSwitch(state, supervisor);
+
+        // A metered supervisor spends agent invocations; never prompt it without one left.
+        const metered = supervisor.drainProviderCalls !== undefined;
+        if (metered && state.budgets.agentInvocations <= 0) {
+          state = {
+            ...state,
+            status: "stopped",
+            stopReason: "agentInvocations budget exhausted",
+            blocker: "supervisor decide",
+          };
+          await saveRunState(state);
+          syncRevision(deps, state);
+          return { done: true as const, state };
+        }
+
+        const view = toRunView(state);
+        const lastSettlement = settleProposal(state);
+        const abort = new AbortController();
+        const stopWatch = watchForStop(state.stateDir, deps, abort);
+        let decided: SupervisorProposal | undefined;
+        let decideError: unknown;
+        try {
+          const proposal = await supervisor.decide({
+            runId: state.runId,
+            episodeId,
+            trigger: {
+              code: trigger.code as RecoveryTrigger["code"],
+              message: trigger.message,
+              ...(trigger.evidenceRefs !== undefined ? { evidenceRefs: [...trigger.evidenceRefs] } : {}),
+            },
+            view,
+            signal: abort.signal,
+            ...(lastSettlement !== undefined ? { lastSettlement } : {}),
+            ...(metered ? { maxProviderCalls: state.budgets.agentInvocations } : {}),
+          });
+          decided = isModelSwitchRequest(proposal) ? proposal : assertGraphDecision(proposal);
+        } catch (err) {
+          decideError = err;
+        } finally {
+          stopWatch();
+          state = settleSupervisorUsage(state, supervisor);
+          const binding = readBinding(supervisor);
+          if (binding) {
+            state = { ...state, supervisorBinding: binding };
+          }
+        }
+        if (abort.signal.aborted || (await stopRequested(deps))) {
+          state = {
+            ...state,
+            status: "stopped",
+            ...stopCause(deps),
+          };
+          await saveRunState(state);
+          syncRevision(deps, state);
+          return { done: true as const, state };
+        }
+        if (decideError !== undefined || decided === undefined) {
+          state = {
+            ...state,
+            status: "stopped",
+            stopReason: "supervisor decide failed",
+            blocker:
+              decideError instanceof Error
+                ? decideError.message
+                : String(decideError),
+          };
+          await saveRunState(state);
+          syncRevision(deps, state);
+          return { done: true as const, state };
+        }
+        state = markProposal(state, decided);
+        if (isModelSwitchRequest(decided)) {
+          state = await applyModelSwitch(state, supervisor, decided, "supervisor");
+          await saveRunState(state);
+          syncRevision(deps, state);
+          return { done: false as const, state };
+        }
+        decision = decided;
+      } else {
+        const view = toRunView(state);
+        const advanced = await deps.host.advance(
+          {
+            runId: state.runId,
+            operationId: `adv-${state.stateRevision}-${step}`,
+            expectedStateRevision: state.stateRevision,
+          },
+          view,
+        );
+        if (!advanced.ok) {
+          const contained = await containHostFailure(
+            state,
+            deps,
+            advanced.observation.code,
+            advanced.observation.message,
+          );
+          await saveRunState(contained.state);
+          syncRevision(deps, contained.state);
+          return { done: contained.done, state: contained.state };
+        }
+        decision = assertGraphDecision(advanced.value);
+        const noted = noteGraphDecision(state, decision);
+        state = noted.state;
+        if (noted.stalled !== undefined) {
+          state = enterRecovery(
+            {
+              ...state,
+              budgets: { ...state.budgets, decisions: Math.max(0, state.budgets.decisions - 1) },
+              stateRevision: state.stateRevision + 1,
+            },
+            "stalled",
+            noted.stalled,
+          );
+          await saveRunState(state);
+          syncRevision(deps, state);
+          return { done: false as const, state };
+        }
+      }
+
+      // The callback that proposed this decision may have used up the time left.
+      if (activeTimeExhausted(deps)) {
+        state = { ...chargeActiveTime(state, deps), status: "stopped", ...stopCause(deps) };
         await saveRunState(state);
+        syncRevision(deps, state);
+        return { done: true as const, state };
+      }
+
+      if (decision.action.type === "dispatch") {
+        const prepared = await prepareDispatch(state, decision, deps);
+        await saveRunState(prepared.state);
+        syncRevision(deps, prepared.state);
+        if (prepared.state.status !== "running") {
+          return { done: true as const, state: prepared.state };
+        }
+        if (!prepared.pending) {
+          return { done: false as const, state: prepared.state };
+        }
+        return {
+          done: false as const,
+          state: prepared.state,
+          pendingJob: prepared.pending,
+        };
+      }
+
+      // A qualified repair's patch is a long supervisor episode; Stop must abort it.
+      const applyAbort = new AbortController();
+      const applyWatch =
+        decision.action.type === "qualify_repair" ? watchForStop(state.stateDir, deps, applyAbort) : undefined;
+      try {
+        state = await applyDecision(state, decision, deps, applyAbort.signal);
+      } catch (err) {
+        if (err instanceof HostObservationError) {
+          // The decision never took effect, so proposing it again is not a repeat.
+          const { noProgress: _counted, ...uncounted } = state;
+          void _counted;
+          const contained = await containHostFailure(
+            priorNoProgress !== undefined ? { ...uncounted, noProgress: priorNoProgress } : uncounted,
+            deps,
+            err.code,
+            err.message,
+          );
+          await saveRunState(contained.state);
+          syncRevision(deps, contained.state);
+          return { done: contained.done, state: contained.state };
+        }
+        throw err;
+      } finally {
+        applyWatch?.();
       }
       syncRevision(deps, state);
-      return state;
+      if ((await stopRequested(deps)) && state.status === "running") {
+        state = {
+          ...state,
+          status: "stopped",
+          ...stopCause(deps),
+        };
+      }
+      await saveRunState(state);
+      return { done: state.status !== "running", state };
     });
 
-    for (let step = 0; step < MAX_STEPS; step += 1) {
-      const turn = await withRunLock(state.stateDir, async () => {
-        // Reload before renewing: Stop may have cleared the owner claim and
-        // persisted stopped while a runner job held no lock.
-        state = await reloadRunState(state);
-        syncRevision(deps, state);
+    state = turn.state;
+    if (turn.done) {
+      return state;
+    }
 
-        if (state.status !== "running") {
-          return { done: true as const, state };
+    if (turn.pendingJob) {
+      const { job, operationId, generation, isCorrection, source, notBefore, session } = turn.pendingJob;
+      const abort = new AbortController();
+      const stopWatch = watchForStop(state.stateDir, deps, abort);
+      let result: Awaited<ReturnType<Runner["runJob"]>>;
+      let children: ReturnType<typeof createChildPort> | undefined;
+      let before: Map<string, string> | undefined;
+      try {
+        if (notBefore !== undefined) await sleepUntil(notBefore, abort.signal);
+        const unchanged = abort.signal.aborted ? undefined : await worktreeChangeFingerprints(state.worktreePath);
+        if (!abort.signal.aborted && !(await startDispatch(state, operationId, deps))) abort.abort();
+        if (abort.signal.aborted) {
+          result = { status: "failed", summary: "executor cancelled before start", runId: state.runId, operationId, generation };
+        } else {
+          before = unchanged;
+          children =
+            job.kind === "agent" || job.tools !== undefined
+              ? createChildPort(
+                  { job, operationId, generation },
+                  {
+                    stateDir: state.stateDir,
+                    runner: deps.runner,
+                    shouldStop: () => stopRequested(deps),
+                    signal: abort.signal,
+                  },
+                )
+              : undefined;
+          result = await deps.runner.runJob(job, {
+            runId: state.runId,
+            operationId,
+            generation,
+            worktreePath: state.worktreePath,
+            artifactDir: state.artifactDir,
+            signal: abort.signal,
+            ...(children !== undefined ? { children } : {}),
+            ...(source !== undefined ? { executorSource: source } : {}),
+            ...(session !== undefined ? { session } : {}),
+          });
         }
-        if (await stopRequested(deps)) {
-          state = {
-            ...state,
-            status: "stopped",
-            stopReason: "operator stop",
-            blocker: "stop requested",
-          };
-          await saveRunState(state);
-          return { done: true as const, state };
+      } finally {
+        // A parent that stopped, timed out, or returned early can leave a child running.
+        await children?.close();
+        stopWatch();
+      }
+      // Executors may run unconfined, so scope is checked against what actually changed.
+      const outOfScope =
+        before !== undefined
+          ? pathsOutsideWriteScope(changedPaths(before, await worktreeChangeFingerprints(state.worktreePath)), job)
+          : [];
+
+      state = await withRunLock(state.stateDir, async () => {
+        state = chargeActiveTime(await reloadRunState(state), deps);
+        syncRevision(deps, state);
+        if (await stopRequested(deps) || state.status !== "running") {
+          if (state.status === "running") {
+            state = {
+              ...state,
+              status: "stopped",
+              ...stopCause(deps),
+            };
+            await saveRunState(state);
+          }
+          return state;
         }
 
         const renewed = await tryRenewOwner(state.stateDir, owner, deps.host.childPid);
         if (!renewed) {
-          state = {
-            ...state,
-            status: "stopped",
-            stopReason: "operator stop",
-            blocker: "run owner lease cleared",
-          };
-          await saveRunState(state);
-          return { done: true as const, state };
-        }
-        owner = renewed;
-        await updateOwnerChildPid(state.stateDir, owner.ownerId, deps.host.childPid);
-
-        let decision: GraphDecision;
-        let priorNoProgress = state.noProgress;
-        if (state.mode === "recovery") {
-          if (!deps.supervisor) {
-            state = {
-              ...state,
-              status: "stopped",
-              stopReason: state.recoveryTrigger?.message ?? "recovery required",
-              blocker: "no supervisor configured",
-            };
-            await saveRunState(state);
-            return { done: true as const, state };
-          }
-          if (!state.recoveryEpisodeId) {
-            state = {
-              ...state,
-              recoveryEpisodeId: `ep-${randomUUID().slice(0, 8)}`,
-            };
-          }
-          const episodeId = state.recoveryEpisodeId!;
-          const trigger = state.recoveryTrigger ?? {
-            code: "unhandled",
-            message: "recovery",
-          };
-          const supervisor = deps.supervisor;
-          state = await applyOperatorSwitch(state, supervisor);
-
-          // A metered supervisor spends agent invocations; never prompt it without one left.
-          const metered = supervisor.drainProviderCalls !== undefined;
-          if (metered && state.budgets.agentInvocations <= 0) {
-            state = {
-              ...state,
-              status: "stopped",
-              stopReason: "agentInvocations budget exhausted",
-              blocker: "supervisor decide",
-            };
-            await saveRunState(state);
-            syncRevision(deps, state);
-            return { done: true as const, state };
-          }
-
-          const view = toRunView(state);
-          const lastSettlement = settleProposal(state);
-          const abort = new AbortController();
-          const stopWatch = watchForStop(state.stateDir, deps, abort);
-          let decided: SupervisorProposal | undefined;
-          let decideError: unknown;
-          try {
-            const proposal = await supervisor.decide({
-              runId: state.runId,
-              episodeId,
-              trigger: {
-                code: trigger.code as RecoveryTrigger["code"],
-                message: trigger.message,
-                ...(trigger.evidenceRefs !== undefined ? { evidenceRefs: [...trigger.evidenceRefs] } : {}),
-              },
-              view,
-              signal: abort.signal,
-              ...(lastSettlement !== undefined ? { lastSettlement } : {}),
-              ...(metered ? { maxProviderCalls: state.budgets.agentInvocations } : {}),
-            });
-            decided = isModelSwitchRequest(proposal) ? proposal : assertGraphDecision(proposal);
-          } catch (err) {
-            decideError = err;
-          } finally {
-            clearInterval(stopWatch);
-            state = settleSupervisorUsage(state, supervisor);
-            const binding = readBinding(supervisor);
-            if (binding) {
-              state = { ...state, supervisorBinding: binding };
-            }
-          }
-          if (abort.signal.aborted || (await stopRequested(deps))) {
+          if (state.status === "running") {
             state = {
               ...state,
               status: "stopped",
               stopReason: "operator stop",
-              blocker: "stop requested",
+              blocker: "run owner lease cleared",
             };
             await saveRunState(state);
-            syncRevision(deps, state);
-            return { done: true as const, state };
           }
-          if (decideError !== undefined || decided === undefined) {
-            state = {
-              ...state,
-              status: "stopped",
-              stopReason: "supervisor decide failed",
-              blocker:
-                decideError instanceof Error
-                  ? decideError.message
-                  : String(decideError),
-            };
-            await saveRunState(state);
-            syncRevision(deps, state);
-            return { done: true as const, state };
-          }
-          state = markProposal(state, decided);
-          if (isModelSwitchRequest(decided)) {
-            state = await applyModelSwitch(state, supervisor, decided, "supervisor");
-            await saveRunState(state);
-            syncRevision(deps, state);
-            return { done: false as const, state };
-          }
-          decision = decided;
-        } else {
-          const view = toRunView(state);
-          const advanced = await deps.host.advance(
-            {
-              runId: state.runId,
-              operationId: `adv-${state.stateRevision}-${step}`,
-              expectedStateRevision: state.stateRevision,
-            },
-            view,
-          );
-          if (!advanced.ok) {
-            const contained = await containHostFailure(
-              state,
-              deps,
-              advanced.observation.code,
-              advanced.observation.message,
-            );
-            await saveRunState(contained.state);
-            syncRevision(deps, contained.state);
-            return { done: contained.done, state: contained.state };
-          }
-          decision = assertGraphDecision(advanced.value);
-          const noted = noteGraphDecision(state, decision);
-          state = noted.state;
-          if (noted.stalled !== undefined) {
-            state = enterRecovery(
-              {
-                ...state,
-                budgets: { ...state.budgets, decisions: Math.max(0, state.budgets.decisions - 1) },
-                stateRevision: state.stateRevision + 1,
-              },
-              "stalled",
-              noted.stalled,
-            );
-            await saveRunState(state);
-            syncRevision(deps, state);
-            return { done: false as const, state };
-          }
+          return state;
         }
+        owner = renewed;
 
-        if (decision.action.type === "dispatch") {
-          const prepared = await prepareDispatch(state, decision, deps);
-          await saveRunState(prepared.state);
-          syncRevision(deps, prepared.state);
-          if (prepared.state.status !== "running") {
-            return { done: true as const, state: prepared.state };
-          }
-          if (!prepared.pending) {
-            return { done: false as const, state: prepared.state };
-          }
-          return {
-            done: false as const,
-            state: prepared.state,
-            pendingJob: prepared.pending,
+        if (state.generation !== generation) {
+          state = {
+            ...state,
+            status: "stopped",
+            stopReason: "stale job result identity",
+            blocker: `generation ${generation} != ${state.generation}`,
           };
+          await saveRunState(state);
+          return state;
         }
-
-        // A qualified repair's patch is a long supervisor episode; Stop must abort it.
-        const applyAbort = new AbortController();
-        const applyWatch =
-          decision.action.type === "qualify_repair" ? watchForStop(state.stateDir, deps, applyAbort) : undefined;
-        try {
-          state = await applyDecision(state, decision, deps, applyAbort.signal);
-        } catch (err) {
-          if (err instanceof HostObservationError) {
-            // The decision never took effect, so proposing it again is not a repeat.
-            const { noProgress: _counted, ...uncounted } = state;
-            void _counted;
-            const contained = await containHostFailure(
-              priorNoProgress !== undefined ? { ...uncounted, noProgress: priorNoProgress } : uncounted,
-              deps,
-              err.code,
-              err.message,
-            );
-            await saveRunState(contained.state);
-            syncRevision(deps, contained.state);
-            return { done: contained.done, state: contained.state };
-          }
-          throw err;
-        } finally {
-          if (applyWatch !== undefined) clearInterval(applyWatch);
-        }
+        state = applyDispatchResult(state, {
+          job,
+          operationId,
+          generation,
+          isCorrection,
+          result: outOfScope.length > 0 ? scopeViolation(result, job, outOfScope) : result,
+          canRecover: deps.supervisor !== undefined,
+        });
         syncRevision(deps, state);
         if ((await stopRequested(deps)) && state.status === "running") {
           state = {
             ...state,
             status: "stopped",
-            stopReason: "operator stop",
-            blocker: "stop requested",
+            ...stopCause(deps),
           };
         }
         await saveRunState(state);
-        return { done: state.status !== "running", state };
+        return state;
       });
 
-      state = turn.state;
-      if (turn.done) {
+      if (state.status !== "running") {
         return state;
       }
-
-      if (turn.pendingJob) {
-        const { job, operationId, generation, isCorrection, source, notBefore, session } = turn.pendingJob;
-        const abort = new AbortController();
-        const stopWatch = watchForStop(state.stateDir, deps, abort);
-        let result: Awaited<ReturnType<Runner["runJob"]>>;
-        let children: ReturnType<typeof createChildPort> | undefined;
-        let before: Map<string, string> | undefined;
-        try {
-          if (notBefore !== undefined) {
-            await sleepUntil(notBefore, abort.signal);
-            if (!abort.signal.aborted && !(await startWaitedDispatch(state, operationId, deps))) abort.abort();
-          }
-          if (abort.signal.aborted) {
-            result = { status: "failed", summary: "executor cancelled before start", runId: state.runId, operationId, generation };
-          } else {
-            children =
-              job.kind === "agent" || job.tools !== undefined
-                ? createChildPort(
-                    { job, operationId, generation },
-                    {
-                      stateDir: state.stateDir,
-                      runner: deps.runner,
-                      shouldStop: () => stopRequested(deps),
-                      signal: abort.signal,
-                    },
-                  )
-                : undefined;
-            before = await worktreeChangeFingerprints(state.worktreePath);
-            result = await deps.runner.runJob(job, {
-              runId: state.runId,
-              operationId,
-              generation,
-              worktreePath: state.worktreePath,
-              artifactDir: state.artifactDir,
-              signal: abort.signal,
-              ...(children !== undefined ? { children } : {}),
-              ...(source !== undefined ? { executorSource: source } : {}),
-              ...(session !== undefined ? { session } : {}),
-            });
-          }
-        } finally {
-          // A parent that stopped, timed out, or returned early can leave a child running.
-          await children?.close();
-          clearInterval(stopWatch);
-        }
-        // Executors may run unconfined, so scope is checked against what actually changed.
-        const outOfScope =
-          before !== undefined
-            ? pathsOutsideWriteScope(changedPaths(before, await worktreeChangeFingerprints(state.worktreePath)), job)
-            : [];
-
-        state = await withRunLock(state.stateDir, async () => {
-          state = await reloadRunState(state);
-          syncRevision(deps, state);
-          if (await stopRequested(deps) || state.status !== "running") {
-            if (state.status === "running") {
-              state = {
-                ...state,
-                status: "stopped",
-                stopReason: "operator stop",
-                blocker: "stop requested",
-              };
-              await saveRunState(state);
-            }
-            return state;
-          }
-
-          const renewed = await tryRenewOwner(state.stateDir, owner, deps.host.childPid);
-          if (!renewed) {
-            if (state.status === "running") {
-              state = {
-                ...state,
-                status: "stopped",
-                stopReason: "operator stop",
-                blocker: "run owner lease cleared",
-              };
-              await saveRunState(state);
-            }
-            return state;
-          }
-          owner = renewed;
-
-          if (state.generation !== generation) {
-            state = {
-              ...state,
-              status: "stopped",
-              stopReason: "stale job result identity",
-              blocker: `generation ${generation} != ${state.generation}`,
-            };
-            await saveRunState(state);
-            return state;
-          }
-          state = applyDispatchResult(state, {
-            job,
-            operationId,
-            generation,
-            isCorrection,
-            result: outOfScope.length > 0 ? scopeViolation(result, job, outOfScope) : result,
-            canRecover: deps.supervisor !== undefined,
-          });
-          syncRevision(deps, state);
-          if ((await stopRequested(deps)) && state.status === "running") {
-            state = {
-              ...state,
-              status: "stopped",
-              stopReason: "operator stop",
-              blocker: "stop requested",
-            };
-          }
-          await saveRunState(state);
-          return state;
-        });
-
-        if (state.status !== "running") {
-          return state;
-        }
-      }
     }
-
-    state = await withRunLock(state.stateDir, async () => {
-      state = {
-        ...state,
-        status: "stopped",
-        stopReason: "step limit",
-        blocker: `exceeded ${MAX_STEPS} controller steps`,
-      };
-      await saveRunState(state);
-      return state;
-    });
-    return state;
-  } finally {
-    await clearOwnerClaim(state.stateDir);
   }
+
+  state = await withRunLock(state.stateDir, async () => {
+    state = {
+      ...state,
+      status: "stopped",
+      stopReason: "step limit",
+      blocker: `exceeded ${MAX_STEPS} controller steps`,
+    };
+    await saveRunState(state);
+    return state;
+  });
+  return state;
 }
 
 const STOP_POLL_MS = 200;
@@ -555,10 +600,11 @@ function sleepUntil(until: string, signal: AbortSignal): Promise<void> {
 }
 
 /**
- * Mark a dispatch that waited as handed to the runner, while it is still the
- * run's outstanding job. Until then a restart may drop it as never started.
+ * Mark an admitted dispatch as handed to the runner, while it is still the
+ * run's outstanding job and the run may still act. Until then a restart may
+ * drop it as never started.
  */
-async function startWaitedDispatch(state: DurableRunState, operationId: string, deps: LoopDeps): Promise<boolean> {
+async function startDispatch(state: DurableRunState, operationId: string, deps: LoopDeps): Promise<boolean> {
   return withRunLock(state.stateDir, async () => {
     const current = await reloadRunState(state);
     const pending = current.pendingDispatch;
@@ -573,8 +619,17 @@ async function startWaitedDispatch(state: DurableRunState, operationId: string, 
   });
 }
 
-/** Abort an outstanding job, and any child it is waiting on, once the run stops. */
-function watchForStop(stateDir: string, deps: LoopDeps, abort: AbortController): NodeJS.Timeout {
+/** Abort an outstanding job, and any child it is waiting on, once the run stops or its time runs out. Returns the disposer. */
+function watchForStop(stateDir: string, deps: LoopDeps, abort: AbortController): () => void {
+  // Timers can fire before the monotonic deadline, so recheck before aborting.
+  let deadline: NodeJS.Timeout | undefined;
+  const armDeadline = (clock: ActiveClock) => {
+    const left = clock.remaining();
+    if (left === 0) return abort.abort();
+    deadline = setTimeout(() => armDeadline(clock), left + 1);
+    deadline.unref();
+  };
+  if (deps.activeClock !== undefined) armDeadline(deps.activeClock);
   let checking = false;
   const timer = setInterval(() => {
     if (checking || abort.signal.aborted) return;
@@ -592,7 +647,10 @@ function watchForStop(stateDir: string, deps: LoopDeps, abort: AbortController):
     })();
   }, STOP_POLL_MS);
   timer.unref();
-  return timer;
+  return () => {
+    clearInterval(timer);
+    clearTimeout(deadline);
+  };
 }
 
 async function tryRenewOwner(
@@ -692,8 +750,7 @@ async function containHostFailure(
       state: {
         ...state,
         status: "stopped",
-        stopReason: "operator stop",
-        blocker: "stop requested",
+        ...stopCause(deps),
       },
     };
   }
@@ -1193,7 +1250,7 @@ async function prepareDispatch(
       generation: state.generation,
       stageId: job.stageId,
       job,
-      status: notBefore !== undefined ? "waiting" : "pending",
+      status: "waiting",
       ...(job.executor !== undefined ? { executor: job.executor } : {}),
       ...(notBefore !== undefined ? { notBefore } : {}),
       ...(session !== undefined ? { session } : {}),
