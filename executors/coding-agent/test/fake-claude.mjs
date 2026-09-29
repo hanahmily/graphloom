@@ -3,7 +3,9 @@
 // step is one model response:
 //   { text } | { tool, args } | { parallel: [{ tool, args } | { bash }] } | { bash }
 //   | { structured } | { think: ms } | { hang: true } | { error } | { crash }
-//   | { agent: Step[], background?: true }
+//   | { agent: Step[], background?: true } | { spawnChild: { pidFile, ignoreTerm } }
+// A `spawnChild` step starts a descendant in the CLI's process group with its
+// stdio redirected, which writes its pid once ready and then runs forever.
 // An `agent` step is an Agent tool call whose subagent makes the given responses,
 // forwarded with parent_tool_use_id. A background subagent runs after the turn's
 // result, then a follow-up turn reports it and ends with a second result. Each
@@ -301,6 +303,11 @@ async function respond(step, parent) {
       emit({ type: "system", subtype: "thinking_tokens", session_id: sessionId });
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
+  } else if (step.spawnChild !== undefined) {
+    const { pidFile, ignoreTerm } = step.spawnChild;
+    const body = `${ignoreTerm ? "process.on('SIGTERM', () => undefined);" : ""}require('fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));setInterval(() => undefined, 1000);`;
+    spawn(process.execPath, ["-e", body], { stdio: "ignore" }).unref();
+    while (!existsSync(pidFile)) await new Promise((resolve) => setTimeout(resolve, 10));
   } else if (step.orphan) {
     // Retain the parent's output pipes briefly; the harness must reap the group.
     spawn(process.execPath, ["-e", "setTimeout(() => {}, 2500)"], { stdio: ["ignore", "inherit", "inherit"] });

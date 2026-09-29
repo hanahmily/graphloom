@@ -236,6 +236,10 @@ configured from the environment):
 - Cancelling the job first sends an `interrupt` control request, allowing the
   CLI to save the interrupted turn. An unresponsive process receives SIGTERM
   after an interrupt grace period, then SIGKILL. Saved sessions remain resumable.
+- Nothing the CLI started outlives the job. When Claude Code exits, after a
+  normal turn or a cancellation, the rest of its process group receives
+  SIGTERM, then SIGKILL after the grace period. The job settles once the group
+  is gone.
 - Claude Code gets a minimal environment, not the executor's: `PATH`, `HOME`,
   user, shell, temp, locale (`LANG`, `LC_*`, `TZ`), `SSH_AUTH_SOCK`, XDG
   directories, proxy and CA settings, plus `CLAUDE_CONFIG_DIR` set to the
@@ -339,7 +343,8 @@ or the module at `codexHarnessModule` configured from the environment):
   input reported as cache reads.
 - `GRAPHLOOM_CODEX_RESPONSE_TIMEOUT_MS` (default ten minutes) stops a Codex
   that emits nothing while no command runs. Cancelling the job stops its
-  process group.
+  process group, and, as with Claude Code, the job settles only once
+  everything Codex started is gone.
 
 ### Continuing an agent session
 

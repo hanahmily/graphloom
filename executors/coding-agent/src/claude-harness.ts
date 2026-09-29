@@ -17,6 +17,7 @@ import {
   CLAUDE_STARTUP_TIMEOUT_ENV,
 } from "./claude-config.js";
 import type { CodingHarness, CodingRunRequest, CodingRunResult, CodingSessionOptions, CodingUsage } from "./harness.js";
+import { drainOnExit, signalGroup } from "./process-group.js";
 import { envList, minimalEnv } from "./child-env.js";
 import { copyFiles, filesUnder, readScanned } from "./session-files.js";
 import { evaluateClaudePermission } from "./claude-permissions.js";
@@ -385,6 +386,7 @@ async function runClaude(args: RunArgs): Promise<CodingRunResult> {
       }
       interruptTimer = setTimeout(terminate, args.interruptGraceMs);
     };
+    const drainGroup = drainOnExit(child, terminate, args.killGraceMs);
     const onAbort = () => stop();
     options.signal?.addEventListener("abort", onAbort, { once: true });
 
@@ -562,6 +564,7 @@ async function runClaude(args: RunArgs): Promise<CodingRunResult> {
       // EOF without a result is terminal even if the process keeps running.
       if (result === undefined) terminate();
       const { code, error } = await exited;
+      await drainGroup();
       reaped = true;
       await reservations;
       clearTimeout(interruptTimer);
@@ -605,6 +608,7 @@ async function runClaude(args: RunArgs): Promise<CodingRunResult> {
       if (!reaped) {
         terminate();
         await exited;
+        await drainGroup();
       }
       clearTimeout(killTimer);
     }
@@ -708,16 +712,4 @@ function less(totals: Totals, baseline: Totals): CodingUsage {
 
 function hasToolResult(content: unknown): boolean {
   return Array.isArray(content) && content.some((c) => (c as { type?: unknown })?.type === "tool_result");
-}
-
-function signalGroup(pid: number, signal: NodeJS.Signals): void {
-  try {
-    process.kill(-pid, signal);
-  } catch {
-    try {
-      process.kill(pid, signal);
-    } catch {
-      // Already gone.
-    }
-  }
 }
