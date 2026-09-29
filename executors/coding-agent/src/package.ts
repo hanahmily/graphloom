@@ -12,6 +12,15 @@ import {
   CLAUDE_RESPONSE_TIMEOUT_ENV,
   CLAUDE_STARTUP_TIMEOUT_ENV,
 } from "./claude-config.js";
+import {
+  CODEX_BIN_ENV,
+  CODEX_DEFAULT_RESPONSE_TIMEOUT_MS,
+  CODEX_HOME_ENV,
+  CODEX_MODEL_ENV,
+  CODEX_PASS_ENV_ENV,
+  CODEX_REASONING_EFFORT_ENV,
+  CODEX_RESPONSE_TIMEOUT_ENV,
+} from "./codex-config.js";
 import { CODING_HARNESS_ENV } from "./executors.js";
 import { PI_AGENT_DIR_ENV, PI_API_KEY_CREDENTIAL, PI_MODEL_ENV, PI_PASS_ENV_ENV, PI_PROVIDER_ENV } from "./pi-config.js";
 import { CODING_AGENT_RUN_ID } from "./run.js";
@@ -30,6 +39,12 @@ export const codingAgentExecutorPackage: ExecutorPackageManifest = {
     CLAUDE_PASS_ENV_ENV,
     CLAUDE_STARTUP_TIMEOUT_ENV,
     CLAUDE_RESPONSE_TIMEOUT_ENV,
+    CODEX_BIN_ENV,
+    CODEX_MODEL_ENV,
+    CODEX_HOME_ENV,
+    CODEX_PASS_ENV_ENV,
+    CODEX_REASONING_EFFORT_ENV,
+    CODEX_RESPONSE_TIMEOUT_ENV,
     PI_PROVIDER_ENV,
     PI_MODEL_ENV,
     PI_AGENT_DIR_ENV,
@@ -43,6 +58,8 @@ export const codingAgentExecutorPackage: ExecutorPackageManifest = {
 export const claudeCodeHarnessModule = fileURLToPath(new URL("./claude.js", import.meta.url));
 /** Absolute path of the Pi harness module, for `codingAgentBinding({ harness })`. */
 export const piHarnessModule = fileURLToPath(new URL("./pi.js", import.meta.url));
+/** Absolute path of the Codex harness module, for `codingAgentBinding({ harness })`. */
+export const codexHarnessModule = fileURLToPath(new URL("./codex.js", import.meta.url));
 
 /**
  * Operator settings for the Claude Code harness. Without `apiKey`, Claude Code
@@ -76,12 +93,27 @@ export interface PiBindingOptions {
   apiKey?: string;
 }
 
+/** Operator settings for the Codex harness, which uses Codex's own login and serves read-only jobs only. */
+export interface CodexBindingOptions {
+  command?: string;
+  model?: string;
+  /** `minimal`, `low`, `medium`, `high` or `xhigh`. */
+  reasoningEffort?: string;
+  /** Absolute path of the Codex home (its login and config). Default: the executor's `CODEX_HOME`, then `~/.codex`. */
+  codexHome?: string;
+  /** Extra environment variable names Codex may see, beyond its minimal set. */
+  passEnv?: string[];
+  /** Stop Codex when it shows no activity this long while no command is running; 0 disables. */
+  responseTimeoutMs?: number;
+}
+
 export interface CodingAgentBindingOptions {
   /** Absolute path (or package specifier) of the harness adapter module. */
   harness: string;
   /** Wall-clock limit (ms) for one coding job. Default: one hour. */
   timeoutMs?: number;
   claude?: ClaudeCodeBindingOptions;
+  codex?: CodexBindingOptions;
   pi?: PiBindingOptions;
 }
 
@@ -95,10 +127,20 @@ export const DEFAULT_CODING_TIMEOUT_MS = 60 * 60_000;
  */
 export function codingAgentBinding(options: CodingAgentBindingOptions): ExecutorBinding {
   const claude = options.claude ?? {};
+  const codex = options.codex ?? {};
   const pi = options.pi ?? {};
   const timeoutMs = options.timeoutMs ?? DEFAULT_CODING_TIMEOUT_MS;
   if (claude.configDir !== undefined && !path.isAbsolute(claude.configDir)) {
     throw new Error("claude.configDir must be an absolute path");
+  }
+  if (codex.codexHome !== undefined && !path.isAbsolute(codex.codexHome)) {
+    throw new Error("codex.codexHome must be an absolute path");
+  }
+  if (options.codex !== undefined || options.harness === codexHarnessModule) {
+    const ms = codex.responseTimeoutMs ?? CODEX_DEFAULT_RESPONSE_TIMEOUT_MS;
+    if (ms >= timeoutMs) {
+      throw new Error(`codex.responseTimeoutMs (${ms} ms) must be shorter than the job timeout (${timeoutMs} ms), or the job is killed before the stall is reported`);
+    }
   }
   if (options.claude !== undefined || options.harness === claudeCodeHarnessModule) {
     const watchdogs = {
@@ -127,6 +169,12 @@ export function codingAgentBinding(options: CodingAgentBindingOptions): Executor
       ...(claude.passEnv !== undefined ? { [CLAUDE_PASS_ENV_ENV]: claude.passEnv.join(",") } : {}),
       ...(claude.startupTimeoutMs !== undefined ? { [CLAUDE_STARTUP_TIMEOUT_ENV]: String(claude.startupTimeoutMs) } : {}),
       ...(claude.responseTimeoutMs !== undefined ? { [CLAUDE_RESPONSE_TIMEOUT_ENV]: String(claude.responseTimeoutMs) } : {}),
+      ...(codex.command !== undefined ? { [CODEX_BIN_ENV]: codex.command } : {}),
+      ...(codex.model !== undefined ? { [CODEX_MODEL_ENV]: codex.model } : {}),
+      ...(codex.reasoningEffort !== undefined ? { [CODEX_REASONING_EFFORT_ENV]: codex.reasoningEffort } : {}),
+      ...(codex.codexHome !== undefined ? { [CODEX_HOME_ENV]: codex.codexHome } : {}),
+      ...(codex.passEnv !== undefined ? { [CODEX_PASS_ENV_ENV]: codex.passEnv.join(",") } : {}),
+      ...(codex.responseTimeoutMs !== undefined ? { [CODEX_RESPONSE_TIMEOUT_ENV]: String(codex.responseTimeoutMs) } : {}),
       ...(pi.provider !== undefined ? { [PI_PROVIDER_ENV]: pi.provider } : {}),
       ...(pi.modelId !== undefined ? { [PI_MODEL_ENV]: pi.modelId } : {}),
       ...(pi.agentDir !== undefined ? { [PI_AGENT_DIR_ENV]: pi.agentDir } : {}),

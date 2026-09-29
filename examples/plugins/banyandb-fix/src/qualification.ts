@@ -61,6 +61,7 @@ interface RunOptions {
   digest?: string;
   stageId?: string;
   purpose?: string;
+  timedOut?: boolean;
 }
 
 const command = (id: string, exitCode: number, o: RunOptions = {}): EvidenceRecord => ({
@@ -73,7 +74,7 @@ const command = (id: string, exitCode: number, o: RunOptions = {}): EvidenceReco
       argv: [id],
       exitCode,
       signal: null,
-      timedOut: false,
+      timedOut: o.timedOut ?? false,
       aborted: false,
       durationMs: 1,
       stdoutTail: o.stdout ?? "",
@@ -152,11 +153,22 @@ const comment = (severity: string | undefined) => ({
   ...(severity !== undefined ? { severity } : {}),
   content: "Close waits for an action that ignores cancellation.",
 });
-/** The line the code-review command's filter writes from open-code-review's JSON result. */
-const ocrReport = (status: string, comments: object[]) =>
-  JSON.stringify({ GraphLoomOcr: { status, message: "", model: "MiniMax-M3", commentCount: comments.length, comments, warnings: [] } });
-const ocr = (report: string, exitCode = 0, o: RunOptions = {}): EvidenceRecord =>
-  command(COMMAND.codeReview, exitCode, { report, op: "op-code-review", stageId: REVIEW_STAGE, purpose: "review", ...o });
+/** The code reviewer's structured result. */
+const reviewed = (comments: object[], summary: object = { total_files: 3, reviewed_files: 3, skipped: [] }) => ({ comments, summary });
+interface CodeReviewOptions {
+  status?: string;
+  readOnly?: boolean;
+  digest?: string;
+}
+const codeReviewRun = (output: unknown, o: CodeReviewOptions = {}): EvidenceRecord => ({
+  ref: ref(),
+  kind: "other",
+  candidateDigest: o.digest ?? DIGEST,
+  payload: {
+    codingAgent: { harness: "codex", status: o.status ?? "completed", output },
+    producer: { operationId: "op-code-review", stageId: REVIEW_STAGE, purpose: "review", readOnly: o.readOnly ?? true, kind: "agent", executorId: CODING_AGENT.id },
+  },
+});
 
 const c = (validatorId: string, name: string, evidence: EvidenceRecord[], expected: ValidationStatus): QualificationCase => ({ validatorId, name, evidence, expected });
 
@@ -184,6 +196,9 @@ export const QUALIFICATION_CASES: readonly QualificationCase[] = [
   c("red-reproduces", "a Ginkgo suite's setup fails on the base", [implementer(SUITE_READY), red(suite(failedByAssertion, [spec("", "failed", "BeforeSuite")]))], "failed"),
   c("red-reproduces", "a Ginkgo spec panics on the base", [implementer(SUITE_READY), red(suite(failedByAssertion, [spec(FOCUSED, "panicked")]))], "failed"),
   c("red-reproduces", "a Ginkgo spec fails in its BeforeEach", [implementer(SUITE_READY), red(suite(failedByAssertion, [spec(FOCUSED, "failed", "It", "BeforeEach")]))], "failed"),
+  c("red-reproduces", "a Ginkgo run lost its spec summary", [implementer(SUITE_READY), red(failedByAssertion)], "failed"),
+  c("red-reproduces", "only a spec other than the focused one fails", [implementer(SUITE_READY), red(suite(failedByAssertion, [spec("scheduler stops cleanly", "failed"), spec(FOCUSED, "passed")]))], "failed"),
+  c("red-reproduces", "the RED check timed out", [implementer(READY), red(failedByAssertion, 1, { timedOut: true })], "failed"),
   c("red-reproduces", "RED ran on an older change", [implementer(READY), red(failedByAssertion, 1, { digest: OTHER })], "inconclusive"),
 
   c("green-passes", "test and packages pass", [implementer(READY), ...candidate()], "passed"),
@@ -222,18 +237,18 @@ export const QUALIFICATION_CASES: readonly QualificationCase[] = [
   c("plan-reviewer", "no plan in this generation", [review("approved")], "inconclusive"),
   c("plan-reviewer", "unknown verdict", [plan(), review("lgtm")], "inconclusive"),
 
-  c("open-code-review", "no comments", [ocr(ocrReport("complete", []))], "passed"),
-  c("open-code-review", "only low and medium comments", [ocr(ocrReport("success", [comment("low"), comment("medium")]))], "passed"),
-  c("open-code-review", "warnings without lost coverage", [ocr(ocrReport("completed_with_warnings", [comment("low")]))], "passed"),
-  c("open-code-review", "a high comment", [ocr(ocrReport("complete", [comment("low"), comment("high")]))], "failed"),
-  c("open-code-review", "a comment without a severity", [ocr(ocrReport("complete", [comment(undefined)]))], "failed"),
-  c("open-code-review", "some files were not reviewed", [ocr(ocrReport("partial", []))], "failed"),
-  c("open-code-review", "files failed with errors", [ocr(ocrReport("completed_with_errors", []))], "failed"),
-  c("open-code-review", "ocr exited non-zero", [ocr(ocrReport("complete", []), 1)], "failed"),
-  c("open-code-review", "no result was written", [ocr(`{"GraphLoomOcr":{"missing":true}}`, 1)], "failed"),
-  c("open-code-review", "the review changed a file", [ocr(ocrReport("complete", []), 0, { mutations: ["pkg/timestamp/scheduler.go"] })], "failed"),
-  c("open-code-review", "the review ran as a check job", [ocr(ocrReport("complete", []), 0, { purpose: "check" })], "failed"),
-  c("open-code-review", "the review ran on an older change", [ocr(ocrReport("complete", []), 0, { digest: OTHER })], "inconclusive"),
+  c("open-code-review", "no comments", [codeReviewRun(reviewed([]))], "passed"),
+  c("open-code-review", "only low and medium comments", [codeReviewRun(reviewed([comment("low"), comment("medium")]))], "passed"),
+  c("open-code-review", "a high comment", [codeReviewRun(reviewed([comment("low"), comment("high")]))], "failed"),
+  c("open-code-review", "a critical comment", [codeReviewRun(reviewed([comment("critical")]))], "failed"),
+  c("open-code-review", "a comment without a severity", [codeReviewRun(reviewed([comment(undefined)]))], "failed"),
+  c("open-code-review", "some files were not reviewed", [codeReviewRun(reviewed([], { total_files: 3, reviewed_files: 2, skipped: [] }))], "failed"),
+  c("open-code-review", "a file was skipped", [codeReviewRun(reviewed([], { total_files: 3, reviewed_files: 3, skipped: [{ path: "a.go", reason: "generated" }] }))], "failed"),
+  c("open-code-review", "no file was reviewed", [codeReviewRun(reviewed([], { total_files: 0, reviewed_files: 0, skipped: [] }))], "failed"),
+  c("open-code-review", "no coverage summary", [codeReviewRun({ comments: [] })], "failed"),
+  c("open-code-review", "the reviewer failed", [codeReviewRun(null, { status: "failed" })], "failed"),
+  c("open-code-review", "the review could write", [codeReviewRun(reviewed([]), { readOnly: false })], "failed"),
+  c("open-code-review", "the review ran on an older change", [codeReviewRun(reviewed([]), { digest: OTHER })], "inconclusive"),
   c("open-code-review", "the review did not run", [...candidate()], "inconclusive"),
 ];
 

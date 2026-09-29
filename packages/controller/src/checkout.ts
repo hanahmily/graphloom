@@ -111,9 +111,12 @@ export async function runInCheckout(args: {
       const prepMismatch = identityMismatch(prep, prepContext);
       if (prepMismatch !== undefined) return stale(prepMismatch);
       const mutations = await checkoutMutations(dir, commit);
+      const reported = new Set((prep.evidence ?? []).map((item) => commandOutcome(item)?.id).filter((id) => id !== undefined));
+      const unreported = setup.filter((c) => !reported.has(c.id)).map((c) => c.id);
       const failures = [
         ...(prep.status === "ok" ? [] : [`${prep.status}: ${prep.summary}`]),
         ...failedCommands(prep.evidence ?? []),
+        ...(unreported.length > 0 ? [`no result for ${unreported.join(", ")}`] : []),
         ...(mutations.length > 0 ? [`changed tracked files: ${mutations.slice(0, 10).join(", ")}`] : []),
       ];
       const prepared = failures.length === 0;

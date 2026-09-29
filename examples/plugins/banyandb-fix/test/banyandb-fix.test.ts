@@ -7,17 +7,17 @@ import { describe, expect, it } from "vitest";
 import type { AgentSessionView, EvidenceRecord, GraphDecision, JobSpec, Receipt, RunView, Validator } from "@graphloom/sdk";
 import {
   CHANGES_PATH,
+  CODE_REVIEW_SCHEMA,
   COMMAND,
   ENVIRONMENT,
   MAX_SNAPSHOT_CHARS,
-  OCR_RULE,
   QUALIFICATION_CASES,
   advanceFix,
   blockingComments,
-  codeReviewCommands,
+  codeReviewInstruction,
   createGraph,
   ginkgoSpecs,
-  parseOcrReport,
+  parseCodeReview,
   qualifyValidators,
   reviewBackground,
   regressionArgv,
@@ -70,8 +70,10 @@ interface Scenario {
   red?: CommandResult;
   /** The plan reviewer's verdict for each plan review, in order; the last repeats. */
   planReviews?: Array<Record<string, unknown>>;
-  /** The code-review command's outcome for each run, in order; the last repeats. */
-  codeReviews?: CommandResult[];
+  /** The code reviewer's result for each review, in order; the last repeats. */
+  codeReviews?: Array<{ output: unknown; status?: string }>;
+  /** What the environment check printed for ocr; null records no passing check. */
+  ocrPath?: string | null;
   changes?: string;
   /** Bump the generation once Fix is accepted, as an operator's resume does. */
   resumeAfterFix?: boolean;
@@ -83,8 +85,10 @@ interface Scenario {
   reenter?: number;
 }
 
-const ocrReport = (status: string, comments: Array<Record<string, unknown>> = []) =>
-  JSON.stringify({ GraphLoomOcr: { status, message: "", model: "MiniMax-M3", commentCount: comments.length, comments, warnings: [] } });
+const OCR = "/opt/open code review/bin/ocr";
+const reviewed = (comments: Array<Record<string, unknown>> = [], summary: object = { total_files: 3, reviewed_files: 3, skipped: [] }): { output: unknown; status?: string } => ({
+  output: { comments, summary },
+});
 const HANG = { path: "pkg/timestamp/scheduler.go", start_line: 88, end_line: 95, category: "bug", severity: "high", content: "Close now waits forever for an action that ignores cancellation." };
 
 const CHANGES = "# Changes by Version\n\nRelease Notes.\n\n## 0.12.0\n\n### Bug Fixes\n\n- Warn while a scheduled action is still running.\n\n## 0.11.0\n\n- Older.\n";
@@ -125,6 +129,10 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
     evidence.push(e);
     return e;
   };
+  if (scenario.ocrPath !== null) {
+    const stdoutTail = `${scenario.ocrPath ?? OCR}\n`;
+    record("command", { command: { id: "ocr", argv: ["sh"], exitCode: 0, stdoutTail, stderrTail: "" }, environment: { phase: "preflight" } }, undefined, "env-0");
+  }
   const commandPayload = (id: string, r: CommandResult) => ({
     command: { id, argv: [id], exitCode: r.exitCode ?? 0, stdoutTail: r.stdout ?? "", stderrTail: r.stderr ?? "", ...(r.report !== undefined ? { report: { text: r.report, truncated: false } } : {}) },
   });
@@ -148,6 +156,10 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
         output = scenario.implement?.[implemented] ?? nth(scenario.plans, planned - 1) ?? PLAN;
         implemented += 1;
         digest = `d${implemented}`;
+      } else if (job.purpose === "review" && job.stageId === "review") {
+        const result = nth(scenario.codeReviews, codeReviewed++) ?? reviewed();
+        record("other", { codingAgent: { harness: "codex", status: result.status ?? "completed", output: result.output } }, job, op);
+        return;
       } else if (job.purpose === "review") {
         const verdict = nth(scenario.planReviews, planReviewed++) ?? { verdict: "approved", summary: "ok" };
         record("other", { codingAgent: { status: "completed", output: verdict } }, job, op);
@@ -166,11 +178,6 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
         status: "ok",
         ...(job.continueFrom !== undefined ? { continuedFrom: job.continueFrom } : {}),
       });
-      return;
-    }
-    if (job.checkout?.from === "candidate" && input!.commands![0]!.id === COMMAND.codeReview) {
-      const result = nth(scenario.codeReviews, codeReviewed++) ?? { report: ocrReport("complete") };
-      record("command", { ...commandPayload(COMMAND.codeReview, result), checkout: { from: "candidate", base: "base-sha", commit: `c-${op}`, paths: CHANGED, prepared: true, mutations: [], phase: "run" } }, job, op);
       return;
     }
     if (job.checkout?.from === "candidate") {
@@ -269,12 +276,12 @@ describe("banyandb-fix graph", () => {
     const definition = createGraph().describe();
     expect(definition.stages.map((s) => s.id)).toEqual(["fix", "review"]);
     expect(definition.environment).toEqual(ENVIRONMENT);
-    expect(ENVIRONMENT.checks!.map((c) => c.id)).toEqual(["go", "git", "ocr", "claude", "make", "check-req"]);
+    expect(ENVIRONMENT.checks!.map((c) => c.id)).toEqual(["go", "git", "ocr", "codex", "claude", "make", "check-req"]);
     expect(ENVIRONMENT.prepare!.map((c) => c.argv.join(" "))).toEqual(["make generate"]);
     expect(ENVIRONMENT.pinnedFiles![0]!.path).toBe("CONTRIBUTING.md");
   });
 
-  it("checks that open-code-review and Claude Code are installed and ready before any job", async () => {
+  it("checks that open-code-review, Codex and Claude Code are installed and ready before any job", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "bydb-tools-"));
     const bin = path.join(root, "bin");
     await mkdir(bin);
@@ -283,18 +290,25 @@ describe("banyandb-fix graph", () => {
     const run = async (id: string, env: Record<string, string> = {}) => {
       const [cmd, ...args] = check(id);
       return execFileAsync(cmd!, args, { env: { PATH: `${bin}:/usr/bin:/bin`, HOME: root, ...env } }).then(
-        () => ({ code: 0, stderr: "" }),
+        ({ stdout }) => ({ code: 0, stderr: "", stdout: stdout.trim() }),
         (err: { code: number; stderr: string }) => ({ code: err.code, stderr: err.stderr.trim() }),
       );
     };
     try {
       expect(await run("ocr")).toEqual({ code: 127, stderr: "open-code-review (ocr) is not installed" });
+      expect(await run("codex")).toEqual({ code: 127, stderr: "Codex (codex) is not installed" });
       expect(await run("claude")).toEqual({ code: 127, stderr: "Claude Code (claude) is not installed" });
 
-      await tool("ocr", 'case "$1" in version) exit 0;; llm) exit 1;; esac');
-      expect(await run("ocr")).toEqual({ code: 1, stderr: "ocr llm test failed: configure a model with ocr config" });
-      await tool("ocr", "exit 0");
-      expect((await run("ocr")).code).toBe(0);
+      // An ocr without delegation mode fails; one with it prints its absolute path for the code reviewer.
+      await tool("ocr", "exit 1");
+      expect(await run("ocr")).toEqual({ code: 1, stderr: `${bin}/ocr has no delegation mode; install open-code-review 1.9 or later` });
+      await tool("ocr", '[ "$1 $2 $3" = "delegate preview --help" ]');
+      expect(await run("ocr")).toEqual({ code: 0, stderr: "", stdout: `${bin}/ocr` });
+
+      await tool("codex", `case "$1" in --version) exit 0;; login) [ "$CODEX_HOME" = "${root}/codex" ];; esac`);
+      expect(await run("codex")).toEqual({ code: 1, stderr: "Codex is not logged in: run codex login" });
+      expect(await run("codex", { CODEX_HOME: `${root}/other` })).toEqual({ code: 1, stderr: `Codex is not logged in for ${root}/other: run codex login` });
+      expect((await run("codex", { GRAPHLOOM_CODEX_HOME: `${root}/codex`, CODEX_HOME: `${root}/other` })).code).toBe(0);
 
       // Logged in only for the config dir the harness would use.
       await tool("claude", `case "$1" in --version) exit 0;; auth) [ "$CLAUDE_CONFIG_DIR" = "${root}/claude" ];; esac`);
@@ -339,11 +353,19 @@ describe("banyandb-fix graph", () => {
     const redArgv = (red!.input as { commands: Array<{ argv: string[] }> }).commands[0]!.argv;
     expect(redArgv).toEqual(regressionArgv({ package: "./pkg/timestamp", name: TEST }));
 
-    expect(codeReview).toMatchObject({ stageId: "review", kind: "command", purpose: "review", readOnly: true, checkout: { from: "candidate" } });
-    const [review] = (codeReview!.input as { commands: Array<{ id: string; argv: string[] }> }).commands;
-    expect(review!.id).toBe(COMMAND.codeReview);
-    expect(review!.argv).toContain(OCR_RULE);
-    expect(review!.argv.join(" ")).toContain(PLAN.summary);
+    expect(codeReview).toMatchObject({
+      stageId: "review",
+      kind: "agent",
+      purpose: "review",
+      readOnly: true,
+      input: { harness: "codex", resultSchema: CODE_REVIEW_SCHEMA },
+    });
+    expect(codeReview!.checkout).toBeUndefined();
+    expect(codeReview!.jobId).toBeUndefined();
+    expect(codeReview!.continueFrom).toBeUndefined();
+    expect(assignment(codeReview)).toContain(`'${OCR}' delegate preview --format json`);
+    expect(assignment(codeReview)).toContain("against HEAD (the base commit base-sha)");
+    expect(assignment(codeReview)).toContain(PLAN.summary);
 
     const { branch, message, body } = deliverArgs(jobs);
     expect(branch).toBe(`fix/${ISSUE}`);
@@ -352,7 +374,7 @@ describe("banyandb-fix graph", () => {
     expect(body).toContain(`### Fix apache/skywalking#${ISSUE}: Scheduler reports long actions as timed out`);
     expect(body).toContain("- Should TotalTasksTimeout keep counting actions that are still running?");
     expect(body).toContain("- What to do at five minutes: warn and wait.");
-    expect(body).toContain("Reviewed with open-code-review with MiniMax-M3: no comments.");
+    expect(body).toContain("Reviewed by Codex in open-code-review's delegation mode (reviewed 3 of 3 file(s)): no comments.");
     expect(body).toContain(`Fixes apache/skywalking#${ISSUE}.`);
     expect(`${message}\n${body}`).not.toMatch(/rcpt|receipt|ev-\d/);
     expect(decision.reason).toMatch(/pull request body is the report of evidence ev-\d+/);
@@ -367,7 +389,7 @@ describe("banyandb-fix graph", () => {
     });
     expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
     const plans = jobs.filter((j) => j.purpose === "diagnostic" && j.kind === "agent");
-    const planReviews = jobs.filter((j) => j.purpose === "review" && j.kind === "agent");
+    const planReviews = jobs.filter((j) => j.purpose === "review" && j.stageId === "fix");
     expect(plans).toHaveLength(2);
     expect(planReviews).toHaveLength(2);
     expect(plans[1]).toMatchObject({ jobId: "implementer", readOnly: true, continueFrom: "op-2" });
@@ -412,7 +434,7 @@ describe("banyandb-fix graph", () => {
   });
 
   it("hands a high code-review comment to the supervisor instead of delivering", () => {
-    const { decision, jobs } = simulate({ codeReviews: [{ report: ocrReport("complete", [HANG]) }] });
+    const { decision, jobs } = simulate({ codeReviews: [reviewed([HANG])] });
     expect(decision.action).toMatchObject({ type: "supervise" });
     const reason = (decision.action as { supervise: { reason: string } }).supervise.reason;
     expect(reason).toContain("1 critical or high comment(s)");
@@ -421,20 +443,31 @@ describe("banyandb-fix graph", () => {
   });
 
   it("does not pass a code review that failed or did not cover every file", () => {
-    for (const run of [{ exitCode: 1, report: '{"GraphLoomOcr":{"missing":true}}' }, { report: ocrReport("partial") }, { report: ocrReport("complete", [{ ...HANG, severity: undefined }]) }]) {
+    for (const run of [
+      { output: null, status: "failed" },
+      reviewed([], { total_files: 3, reviewed_files: 2, skipped: [] }),
+      reviewed([], { total_files: 3, reviewed_files: 3, skipped: [{ path: "pkg/timestamp/scheduler_test.go", reason: "too long" }] }),
+      reviewed([{ ...HANG, severity: undefined }]),
+    ]) {
       const { decision } = simulate({ codeReviews: [run] });
       expect(decision.action).toMatchObject({ type: "supervise" });
     }
   });
 
+  it("asks the supervisor when the environment check recorded no ocr path for the reviewer", () => {
+    const { decision, jobs } = simulate({ ocrPath: null });
+    expect(decision.action).toMatchObject({ type: "supervise", supervise: { reason: expect.stringContaining("no open-code-review path") } });
+    expect(jobs.some((j) => j.stageId === "review")).toBe(false);
+  });
+
   it("delivers with lower-severity code-review comments left for the maintainers", () => {
-    const { decision, jobs } = simulate({ codeReviews: [{ report: ocrReport("complete", [{ ...HANG, severity: "low" }]) }] });
+    const { decision, jobs } = simulate({ codeReviews: [reviewed([{ ...HANG, severity: "low" }])] });
     expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
     expect(deliverArgs(jobs).body).toContain("no critical or high comments; 1 lower-severity comment(s) left for the reviewer.");
   });
 
   it("revisits the plan with the code review's findings when the supervisor re-enters Fix", () => {
-    const { decision, jobs } = simulate({ reenter: 1, codeReviews: [{ report: ocrReport("complete", [HANG]) }, { report: ocrReport("complete") }] });
+    const { decision, jobs } = simulate({ reenter: 1, codeReviews: [reviewed([HANG]), reviewed()] });
     expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
     const plans = jobs.filter((j) => j.purpose === "diagnostic" && j.kind === "agent");
     const work = jobs.filter((j) => j.purpose === "work");
@@ -442,14 +475,15 @@ describe("banyandb-fix graph", () => {
     expect(work).toHaveLength(2);
     const revisit = assignment(plans[1]);
     expect(revisit).toContain("The working tree holds your previous change");
-    expect(revisit).toContain("Code review of your previous change did not pass (open-code-review status complete, 1 critical or high comment(s))");
+    expect(revisit).toContain("Code review of your previous change did not pass (reviewed 3 of 3 file(s), 1 critical or high comment(s))");
     expect(revisit).toContain("Close now waits forever");
     // The revisited plan continues the implementer's session and is reviewed again before implementing.
     const implementOp = `op-${jobs.indexOf(work[0]!)}`;
     expect(plans[1]!.continueFrom).toBe(implementOp);
-    const planReviews = jobs.filter((j) => j.purpose === "review" && j.kind === "agent");
+    const planReviews = jobs.filter((j) => j.purpose === "review" && j.stageId === "fix");
     expect(planReviews).toHaveLength(2);
     expect(assignment(planReviews[1])).toContain("Close now waits forever");
+    expect(jobs.filter((j) => j.purpose === "review" && j.stageId === "review")).toHaveLength(2);
     expect(jobs.indexOf(planReviews[1]!)).toBeLessThan(jobs.indexOf(work[1]!));
   });
 
@@ -463,7 +497,7 @@ describe("banyandb-fix graph", () => {
       ],
     });
     expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
-    for (const job of [jobs.find((j) => j.purpose === "diagnostic" && j.kind === "agent")!, jobs.find((j) => j.purpose === "review" && j.kind === "agent")!]) {
+    for (const job of [jobs.find((j) => j.purpose === "diagnostic" && j.kind === "agent")!, jobs.find((j) => j.purpose === "review" && j.stageId === "fix")!]) {
       const assignment = (job.input as { assignment: string }).assignment;
       expect(assignment.length).toBeGreaterThan(36_000);
       expect(assignment).toContain(answer);
@@ -485,8 +519,8 @@ describe("banyandb-fix graph", () => {
     const { decision, jobs } = simulate({ resumeAfterFix: true });
     expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
     expect(jobs.filter((j) => j.purpose === "diagnostic" && j.kind === "agent")).toHaveLength(1);
-    const codeReview = jobs.find((j) => j.kind === "command" && j.purpose === "review")!;
-    expect(codeReview.checkout).toEqual({ from: "candidate" });
+    const codeReview = jobs.find((j) => j.stageId === "review" && j.purpose === "review")!;
+    expect(codeReview).toMatchObject({ kind: "agent", readOnly: true, input: { harness: "codex" } });
     expect(deliverArgs(jobs).body).toContain(`- ${TEST} in \`./pkg/timestamp\` fails by assertion on base-sha`);
   });
 
@@ -580,8 +614,20 @@ describe("go test -json outcome", () => {
     expect(regressionOutcome(ginkgo([]), suite)).toBe("not-run");
     expect(regressionOutcome(`${FAILED}\n{"GraphLoomGinkgo":{"missing":true}}`, suite)).toBe("not-run");
     expect(regressionOutcome(events({ Action: "build-fail" }, { GraphLoomGinkgo: { missing: true } }), suite)).toBe("build-failed");
-    expect(regressionOutcome(FAILED, { name: TEST, focus: "ignored in a plain package" })).toBe("failed");
+    expect(regressionOutcome(`${FAILED}\n{"GraphLoomPlainTest":true}`, { name: TEST, focus: "ignored in a plain package" })).toBe("failed");
     expect(ginkgoSpecs(ginkgo([{ state: "failed", failureNode: "It" }]))!.map((s) => s.text)).toEqual(["scheduler warns"]);
+  });
+
+  it("judges only the focused spec, and a focused run without its spec summary as not run", () => {
+    const ginkgo = (specs: Array<Partial<GinkgoSpec>>) =>
+      `${FAILED}\n${JSON.stringify({ GraphLoomGinkgo: { specs: specs.map((s) => ({ text: "scheduler warns", node: "It", state: "passed", failureNode: "", message: "", ...s })) } })}`;
+    const suite = { name: TEST, focus: "scheduler warns" };
+    expect(regressionOutcome(ginkgo([{ text: "scheduler stops", state: "failed", failureNode: "It" }]), suite)).toBe("not-run");
+    expect(regressionOutcome(ginkgo([{ text: "scheduler stops", state: "failed", failureNode: "It" }, {}]), suite)).toBe("passed");
+    expect(regressionOutcome(ginkgo([{ text: "scheduler stops", state: "passed" }, { state: "failed", failureNode: "It" }]), suite)).toBe("failed");
+    // The suite's TestXxx failed, but nothing shows which spec ran: an interrupted run or lost summary is not RED.
+    expect(regressionOutcome(FAILED, suite)).toBe("not-run");
+    expect(regressionOutcome(FAILED, { name: TEST })).toBe("failed");
   });
 
   it.skipIf(REAL_GO === "")("reduces a real Ginkgo report to the specs that ran", async () => {
@@ -637,72 +683,64 @@ describe("go test -json outcome", () => {
       return (await readFile(report, "utf8")).trim();
     };
     try {
-      expect(await run("./pkg/plain", "a long description of the test")).toBe(`test -json -count=1 -run ^${TEST}$ ./pkg/plain`);
+      const plain = [`test -json -count=1 -run ^${TEST}$ ./pkg/plain`, '{"GraphLoomPlainTest":true}'].join("\n");
+      expect(await run("./pkg/plain", "a long description of the test")).toBe(plain);
       const suiteReport = path.join(root, "pkgsuite.out");
-      expect((await run("./pkg/suite", "warns while running")).split("\n")[0]).toBe(
-        `test -json -count=1 -run ^${TEST}$ ./pkg/suite -args -ginkgo.focus=warns while running -ginkgo.json-report=${suiteReport}.ginkgo`,
+      expect((await run("./pkg/suite", "warns (twice) [x] a.b+")).split("\n")[0]).toBe(
+        `test -json -count=1 -run ^${TEST}$ ./pkg/suite -args -ginkgo.focus=warns \\(twice\\) \\[x\\] a\\.b\\+ -ginkgo.json-report=${suiteReport}.ginkgo`,
       );
-      expect(await run("./pkg/suite")).toBe(`test -json -count=1 -run ^${TEST}$ ./pkg/suite`);
+      expect(await run("./pkg/suite")).toBe([`test -json -count=1 -run ^${TEST}$ ./pkg/suite`, '{"GraphLoomPlainTest":true}'].join("\n"));
     } finally {
       await rm(root, { recursive: true, force: true });
     }
   });
 });
 
-describe("open-code-review command", () => {
+describe("code review in open-code-review's delegation mode", () => {
   const issue = { number: ISSUE, title: "Scheduler reports long actions as timed out", state: "open", url: "u", labels: [], body: "x".repeat(10_000) };
 
-  it("keeps the background within open-code-review's recommended size and every argument within the command executor's limit", () => {
+  it("tells the reviewer to run ocr by its absolute path, on the worktree change, with test files and the extra rule", () => {
     const background = reviewBackground(issue, PLAN);
     expect(background.length).toBeLessThanOrEqual(2_000);
     expect(background).toContain(PLAN.summary);
     expect(background).toContain("- What to do at five minutes: warn and wait");
-    const argv = codeReviewCommands(background)[0]!.argv;
-    expect(argv.length).toBeLessThanOrEqual(64);
-    for (const arg of argv) expect(arg.length).toBeLessThanOrEqual(4_096);
-    expect(JSON.parse(OCR_RULE)).toMatchObject({ include: ["**/*_test.go"], rules: [{ path: "**/*.go", merge_system_rule: true }] });
+    const text = codeReviewInstruction({ ocr: "/home/me/.nvm/bin/ocr", base: "abc123", background });
+    expect(text).toContain("`/home/me/.nvm/bin/ocr delegate preview --format json`");
+    expect(text).toContain("`/home/me/.nvm/bin/ocr delegate rule --format json <path>...`");
+    expect(text).toContain("against HEAD (the base commit abc123)");
+    expect(text).toContain("Go test files (`_test.go`) are reviewable too");
+    expect(text).toContain("a test whose expected value is derived from the new code rather than from the issue");
+    expect(text).toContain(background);
+    expect(codeReviewInstruction({ ocr: "/it's/ocr", base: "b", background: "" })).toContain(`'/it'\\''s/ocr' delegate preview`);
   });
 
-  it.skipIf(REAL_GO === "")("runs ocr on HEAD with the rule and background, and reduces its result without the model's reasoning", async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), "bydb-ocr-"));
-    const bin = path.join(root, "bin");
-    await mkdir(bin);
-    const comments = [
-      ...Array.from({ length: 40 }, (_, i) => ({ path: "a.go", start_line: i + 1, end_line: i + 1, severity: "low", category: "style", content: `nit ${i}`, thinking: "private reasoning" })),
-      { ...HANG, thinking: "private reasoning", content: `${HANG.content} ${"y".repeat(2_000)}` },
-    ];
-    const result = { status: "complete", llm: { provider: "minimax-cn", model: "MiniMax-M3" }, message: "done", summary: { files_reviewed: 3, total_tokens: 10 }, comments, warnings: [{ file: "a.go", type: "tool", message: "file_read failed" }] };
-    // Stands in for ocr: keeps its arguments and the rule and background it was given, then writes the result; `go run` stays real.
-    await writeFile(
-      path.join(bin, "ocr"),
-      `#!/bin/sh\nprintf '%s\\n' "$@" > "${root}/args"\nwhile [ $# -gt 0 ]; do case "$1" in --rule) cp "$2" "${root}/rule.json";; --background-file) cp "$2" "${root}/background.md";; --output) out="$2";; esac; shift; done\nprintf '%s' '${JSON.stringify(result)}' > "$out"\necho "review done" >&2\n`,
-      { mode: 0o755 },
-    );
-    const report = path.join(root, "code-review.out");
-    const background = reviewBackground(issue, PLAN);
-    try {
-      const [cmd, ...args] = codeReviewCommands(background)[0]!.argv;
-      const { stderr } = await execFileAsync(cmd!, args, { cwd: root, env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, GRAPHLOOM_REPORT_FILE: report } });
-      expect(stderr).toContain("review done");
-      const passed = (await readFile(path.join(root, "args"), "utf8")).trim().split("\n");
-      expect(passed.slice(0, 10)).toEqual(["review", "--commit", "HEAD", "--format", "json", "--audience", "agent", "--effort", "high", "--rule"]);
-      expect(passed).toContain("--max-tokens-budget");
-      expect(await readFile(path.join(root, "rule.json"), "utf8")).toBe(OCR_RULE);
-      expect((await readFile(path.join(root, "background.md"), "utf8")).trim()).toBe(background.trim());
+  it("asks for a result Codex's structured output accepts: every property required, none extra", () => {
+    const strict = (schema: Record<string, unknown>): void => {
+      if (schema.type === "object") {
+        const properties = schema.properties as Record<string, Record<string, unknown>>;
+        expect(schema.additionalProperties).toBe(false);
+        expect([...(schema.required as string[])].sort()).toEqual(Object.keys(properties).sort());
+        for (const p of Object.values(properties)) strict(p);
+      }
+      if (schema.type === "array") strict(schema.items as Record<string, unknown>);
+    };
+    strict(JSON.parse(CODE_REVIEW_SCHEMA));
+  });
 
-      const text = await readFile(report, "utf8");
-      expect(text).not.toContain("private reasoning");
-      const parsed = parseOcrReport(text);
-      if ("problem" in parsed) throw new Error(parsed.problem);
-      expect(parsed.report).toMatchObject({ status: "complete", model: "MiniMax-M3", commentCount: 41, warnings: [{ message: "file_read failed" }] });
-      expect(parsed.report.comments).toHaveLength(30);
-      expect(parsed.report.comments[0]).toMatchObject({ path: HANG.path, start_line: 88, severity: "high" });
-      expect(parsed.report.comments[0]!.content.length).toBeLessThan(1_300);
-      expect(blockingComments(parsed.report)).toHaveLength(1);
-    } finally {
-      await rm(root, { recursive: true, force: true });
-    }
-  }, 60_000);
+  it("reads the reviewer's result, most severe first, and refuses one without coverage", () => {
+    const parsed = parseCodeReview({
+      comments: [{ ...HANG, severity: "low" }, { path: "a.go", content: "no severity" }, HANG],
+      summary: { total_files: 3, reviewed_files: 3, skipped: [] },
+    });
+    if ("problem" in parsed) throw new Error(parsed.problem);
+    expect(parsed.report.comments.map((c) => c.severity ?? "none")).toEqual(["high", "none", "low"]);
+    expect(blockingComments(parsed.report)).toHaveLength(2);
+    expect(parseCodeReview({ comments: [] })).toEqual({ problem: "the code reviewer's result has no comments or coverage summary" });
+    expect(parseCodeReview("looks fine")).toEqual({ problem: "the code reviewer returned no result" });
+    expect(parseCodeReview({ comments: [{ severity: "high" }], summary: { total_files: 1, reviewed_files: 1, skipped: [] } })).toEqual({
+      problem: "a code review comment has no path or content",
+    });
+  });
 });
 
 describe("qualification", () => {

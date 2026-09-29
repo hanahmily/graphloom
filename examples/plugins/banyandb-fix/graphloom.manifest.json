@@ -14,23 +14,23 @@
     "vitest": "^3.0.9"
   },
   "digests": {
-    "sourceTree": "5bbd5da5ff2f145c7cb63b67fcdb02c7d78ef37d24887fc3bb88471076e7dcc9",
+    "sourceTree": "c8b7bb2b971bd1aed89550e8bc548779d4a3e57ad0cd349c6ab27be42739cca3",
     "packageLock": "ae799e9b4b3482e5e3306f421002e111b81056e94c3baa0a18a97d016e6da633",
     "files": {
       "package.json": "e66e83d9303aee39689c8c9b37f51dea579680cca9787a146838356b489d386e",
       "package-lock.json": "ae799e9b4b3482e5e3306f421002e111b81056e94c3baa0a18a97d016e6da633",
       "tsconfig.json": "ffed4b469e52e0642fabcb6a20f4ba178fce44e5e37567a0ee96571a150a1109",
-      "src/constants.ts": "21835a258fadd5d5218d8accb8add67f78508996fdcdf12f97a1d516ee361b7d",
+      "src/constants.ts": "1a761ca3507b1bba1e1b7d8411bbacc3c77f6386d6abfb2f751f41fcfd7c70cc",
       "src/decision-record.ts": "21c2d80260dcf0562646a4d6aa793ff6a18745c5c0daaeb0edcf8d351bc7a1a8",
-      "src/evidence.ts": "204f59e08c20db1ce13ac3dbf9a4df8b03abea6b7181e6d9a9c256a6b94d358a",
-      "src/gotest.ts": "391f4fd7a0394e7e6517bbb86efa1910c7eab9d0f082dccfdfd5b402fde2db73",
-      "src/graph.ts": "edcf20c7a2252930998267083e06ab23db8de325bb841addcb1200b2fd716a38",
-      "src/index.ts": "f477aced7b8080b8c034ad9d21367a0bbc2a5225537c67bf51418e1b5fdd36a4",
-      "src/ocr.ts": "d2dc3fad58a3d39f05a00b126050568edb099587161f219def0cc9631ae02e54",
+      "src/evidence.ts": "3ef2d32238b01d205919757d3372da9c2f28ee79ff0415b3d33643259f0443bf",
+      "src/gotest.ts": "15c7e7a85c860549461bf3e2d5f9d9482f93c3c57bab369c137878b2a0ef00a3",
+      "src/graph.ts": "68bf7d0b7aab787ed6616344eda6222fd566a208c07a0f61cd5857a381227b0e",
+      "src/index.ts": "165e4ff8714564f5fd8e303511de4150429603e08b6f799ea205cac7a661f810",
+      "src/ocr.ts": "50f8026099091798e718232435b2912c869e283344a2a45b6527c12f0bd1e5f7",
       "src/prompts.ts": "072bef870c85f4be714a6a8db863e5f4709b54c028ceffc70a974e012df1f4ad",
-      "src/qualification.ts": "68f53efd85483de3684a6ec7e685b959a17cbd801c072f05f0d13e1d74ac07d9",
-      "src/validators.ts": "f8929552adc5e5060f672e09bd8298aac9fb6214784b84d82fd1c6d413dda6a4",
-      "test/banyandb-fix.test.ts": "7b9e8c0c4bbd18d210e060444b8f4b903dbad54cca85e04494bb92f1affbdd75"
+      "src/qualification.ts": "aa94c7b04f2f955dbd463c66e668c2bfbed559716a0c6269595065a12209dc21",
+      "src/validators.ts": "1223e39be5a522dde125a59c460fdb752add3baea074924a93ebe232e1b6fd45",
+      "test/banyandb-fix.test.ts": "115d12e9c0d2e74728402733f019d5ef671bf1f267ec48ccf436b3fcf267eedf"
     }
   },
   "requirements": [
@@ -71,8 +71,8 @@
     },
     {
       "id": "code-review",
-      "statement": "open-code-review, run read-only in a prepared checkout of the current change, reviewed every changed file and reported no critical or high comment, and the checkout was left unchanged.",
-      "evidenceSchema": "checkout-command-v1"
+      "statement": "A read-only Codex reviewer, following open-code-review's delegation workflow on the current change, reviewed every changed file, test files included, skipped none, and reported no critical or high comment.",
+      "evidenceSchema": "code-review-v1"
     }
   ],
   "stages": [

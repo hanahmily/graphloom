@@ -69,7 +69,7 @@ Fix
   checks                        (command jobs run by the controller)
   validate  --failed check-->   reenter Fix with the failing evidence
   |
-Review                          (open-code-review command, read-only candidate checkout)
+Review                          (Codex in open-code-review's delegation mode, read-only)
   no critical or high comment  --> Return: branch + PR body
   otherwise                    --> supervisor: reenter Fix (revisit the plan), or Stop
 ```
@@ -89,7 +89,7 @@ The graph package declares:
 
 | Kind | Content |
 |---|---|
-| Checks | `make check-req`; Go version equal to `go.mod` (1.25.13); Git >= 2.41 (open-code-review; BanyanDB needs 2.30); `ocr version` and `ocr llm test`; `claude --version` and `claude auth status`; GNU make; Node.js >= 24.6.0 only when the issue touches Canopy (`ui/`) |
+| Checks | `make check-req`; Go version equal to `go.mod` (1.25.13); Git >= 2.41 (open-code-review; BanyanDB needs 2.30); `ocr delegate preview --help`, printing the absolute `ocr` path; `codex --version` and `codex login status`; `claude --version` and `claude auth status`; GNU make; Node.js >= 24.6.0 only when the issue touches Canopy (`ui/`) |
 | Prepare | `make generate` in the run's worktree |
 | Pinned source | Digest of `CONTRIBUTING.md` at the version the checklist was written against |
 
@@ -220,40 +220,47 @@ when an issue needs them.
 
 ## Review
 
-[open-code-review](https://github.com/alibaba/open-code-review) reviews the
-committed candidate (`ocr review --commit HEAD`) in a prepared, read-only
-candidate checkout. The job is a command job with purpose `review`, so its
-result is bound to the candidate digest like every check. Its inputs are:
+Codex reviews the change in
+[open-code-review](https://github.com/alibaba/open-code-review)'s delegation
+mode. The job is a fresh read-only agent job with purpose `review` in the run's
+worktree, on the coding-agent executor's Codex harness (`codex exec` in its
+read-only sandbox, without graph tools). Its result is bound to the candidate
+digest like every check. open-code-review only does the deterministic part:
+`ocr delegate preview` selects the files of the uncommitted change against the
+base commit, and `ocr delegate rule` resolves their review rules. Codex reads
+the diffs and reviews. The assignment carries:
 
-- open-code-review's own rules, merged with a Go rule that asks what the change
-  breaks outside its diff: every changed caller and lifecycle path without a
-  covering test, a removed guarantee that other code or comments rely on, a
-  stale comment describing a removed guarantee, a test whose expected value
-  comes from the new code, and an on-disk or wire format change are high
-  severity; a goroutine outside `run.Go` is medium. `_test.go` files are
-  reviewed too;
+- the delegation workflow, naming `ocr` by the absolute path the environment
+  check printed, because Codex runs commands in a login shell that may reset
+  `PATH`;
+- the change's `_test.go` files, which preview excludes by default;
+- a Go rule that asks what the change breaks outside its diff: every changed
+  caller and lifecycle path without a covering test, a removed guarantee that
+  other code or comments rely on, a stale comment describing a removed
+  guarantee, a test whose expected value comes from the new code, and an
+  on-disk or wire format change are high severity; a goroutine outside
+  `run.Go` is medium;
 - a background of at most 2,000 characters: the issue, the plan's summary,
-  test, decisions and open questions;
-- `--effort high` (three review rounds) and a token budget of 8,000,000 per
-  review.
+  test, decisions and open questions.
 
-The effort matters. On the #14111 change the first live run delivered, which
-made `Scheduler.Close` wait forever for an action that ignores cancellation,
-open-code-review with MiniMax-M3 found nothing blocking at the default effort,
-with or without the rule. With the rule at high effort it reported the hang at
-high severity, named three registered actions that ignore their context, and
-flagged the stale comment; that review used 3.5 million tokens, mostly cached,
-in 16 minutes.
+The result is strict JSON: comments with a path, lines, category and severity,
+and a coverage summary listing any skipped file with its reason. The
+requirement passes when the reviewer finished, every file on its list was
+reviewed and none skipped, and no comment is critical or high; a comment
+without a severity counts as blocking. Anything else goes to the supervisor
+with the comments. If it re-enters Fix, the planner revisits its plan with
+them, the plan is reviewed again, and the new change is checked and reviewed
+from scratch. Lower-severity comments are listed as left for the human
+reviewer.
 
-The command reduces the JSON result to status, model, warnings and at most 30
-comments, most severe first, without the model's reasoning. The requirement
-passes when the review covered every file (status `success`,
-`completed_with_warnings` or `complete`), the command succeeded, the checkout
-was left unchanged, and no comment is critical or high; a comment without a
-severity counts as blocking. Anything else goes to the supervisor with the
-comments. If it re-enters Fix, the planner revisits its plan with them, the plan
-is reviewed again, and the new change is checked and reviewed from scratch.
-Lower-severity comments are listed as left for the human reviewer.
+The reviewer changed after a comparison on PR #94's graph code, which had four
+known defects. open-code-review driving MiniMax-M3 itself, at high effort with
+the rule, found one of them and reported high-severity false positives, using
+7 to 8 million tokens. Codex in delegation mode found three, with no clear
+false positives, using about 1.4 million input tokens, mostly cached. Before
+that, on the #14111 change that made `Scheduler.Close` wait forever for an
+action that ignores cancellation, MiniMax-M3 found the hang only with the rule
+at high effort (3.5 million tokens in 16 minutes).
 
 ## Unclear issues
 
@@ -305,7 +312,7 @@ changing what the metric means affects anyone alerting on it.
 |---|---|---|---|
 | Plan and implement | Claude Code | One session, continued across plan, plan revisions, implement and corrections | Plan read-only; implement within the write scope |
 | Plan review | Pi | Fresh for each review | Read-only |
-| Code review | open-code-review command | One process per review | Read-only candidate checkout |
+| Code review | Codex, in open-code-review's delegation mode | Fresh for each review | Read-only sandbox in the run's worktree |
 | Supervisor | Pi | The run's logical supervisor session | Recovery decisions and qualified graph/validator repairs in isolated candidate trees |
 
 The supervisor handles recovery. It investigates, directs corrections and writes

@@ -418,6 +418,31 @@ describe("graph-declared environment and disposable checkouts", () => {
     expect(report.stopReason).toContain("changed tracked files: README.md");
   });
 
+  it("fails a checkout job whose preparation reports no result for a declared command", async () => {
+    const env = await makeEnv();
+    const inner = testRunner(fixAndAddTest);
+    const runner: Runner = {
+      async runJob(job, ctx) {
+        const result = await inner.runJob(job, ctx);
+        if (!ctx.operationId.endsWith("-prepare")) return result;
+        const kept = (result.evidence ?? []).filter((e) => (e.payload as CommandPayload).command.id !== "generate");
+        return { ...result, evidence: kept };
+      },
+    };
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({ definition: definitionWith(PREPARE), advances: [work, red] }),
+      validators,
+      runner,
+      stateRoot: env.stateRoot,
+      runId: "unreported-prepare",
+    });
+    expect(report.status).toBe("stopped");
+    expect(report.stopReason).toContain("preparation failed in the checkout");
+    expect(report.stopReason).toContain("no result for generate");
+    expect(commandRuns((await loadRunState(report.stateDir)).evidence, "red")).toEqual([]);
+  });
+
   it("stops before any job when a declared tool is missing, naming it", async () => {
     const env = await makeEnv();
     let agentJobs = 0;

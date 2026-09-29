@@ -123,6 +123,16 @@ describe("command executor", () => {
     expect(() => process.kill(pid, 0)).toThrow();
   });
 
+  it("does not start a command when the job is aborted while it is being set up", async () => {
+    const marker = path.join(dir, "started");
+    const abort = new AbortController();
+    const running = executor.execute({ commands: [{ id: "touch", argv: ["sh", "-c", `touch ${marker}`] }] }, { ...ctx, signal: abort.signal });
+    abort.abort();
+    const [touch] = outcomes(await running);
+    expect(touch).toMatchObject({ aborted: true, exitCode: null });
+    await expect(readFile(marker)).rejects.toThrow();
+  });
+
   it("stops when the job is aborted", async () => {
     const abort = new AbortController();
     setTimeout(() => abort.abort(), 200);

@@ -178,7 +178,8 @@ protocol:
   abort signal, credentials, and a `reserveModelCall` hook, then runs the
   assignment. The package ships the harness interface, the Claude Code
   harness (`@graphloom/executor-coding-agent/claude`), the Pi harness
-  (`@graphloom/executor-coding-agent/pi`), and a scripted harness for tests
+  (`@graphloom/executor-coding-agent/pi`), the read-only Codex harness
+  (`@graphloom/executor-coding-agent/codex`), and a scripted harness for tests
   (`@graphloom/executor-coding-agent/testing`).
 - The executor process loads the harness named by `GRAPHLOOM_CODING_HARNESS`.
   `codingAgentBinding({ harness })` sets it, grants read and write effects, and
@@ -315,6 +316,30 @@ module at `piHarnessModule` configured from the environment):
   A missing, empty, or corrupt session file fails a resume with a clear reason.
   So do a missing settings record and a different provider, model, or system
   prompt, before any provider request.
+
+The Codex harness runs the user's `codex` CLI headless (`createCodexHarness`,
+or the module at `codexHarnessModule` configured from the environment):
+
+- It serves read-only jobs without job tools, and refuses others before
+  starting: Codex cannot confine writes to a write scope, and it has no bridge
+  to the controller's tools. It is not resumable.
+- Each job runs `codex exec --json --ephemeral --sandbox read-only` in the
+  worktree, with the assignment on stdin. The model, reasoning effort and
+  Codex home come from `GRAPHLOOM_CODEX_MODEL`,
+  `GRAPHLOOM_CODEX_REASONING_EFFORT` and `GRAPHLOOM_CODEX_HOME` (then
+  `CODEX_HOME`). Codex uses its own login. Its environment is the same minimal
+  set as Claude Code's, plus `GRAPHLOOM_CODEX_PASS_ENV` names.
+- With `resultSchema`, an inline JSON object schema goes to
+  `--output-schema`, so it must suit strict structured output: every property
+  required, no extra ones. The final message must parse as a JSON object, or
+  the job fails.
+- Codex has no hook before each provider request. The first is reserved up
+  front, and one more after each command whose output goes back to the model;
+  a refusal stops the process. Usage comes from `turn.completed`, with cached
+  input reported as cache reads.
+- `GRAPHLOOM_CODEX_RESPONSE_TIMEOUT_MS` (default ten minutes) stops a Codex
+  that emits nothing while no command runs. Cancelling the job stops its
+  process group.
 
 ### Continuing an agent session
 

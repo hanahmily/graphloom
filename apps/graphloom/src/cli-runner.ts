@@ -4,9 +4,11 @@ import { createBuiltinExecutorRunner, type JobResult, type Runner } from "@graph
 import {
   CLAUDE_DEFAULT_RESPONSE_TIMEOUT_MS,
   CLAUDE_DEFAULT_STARTUP_TIMEOUT_MS,
+  CODEX_DEFAULT_RESPONSE_TIMEOUT_MS,
   CODING_AGENT_RUN_ID,
   DEFAULT_CODING_TIMEOUT_MS,
   claudeCodeHarnessModule,
+  codexHarnessModule,
   codingAgentBinding,
   codingAgentExecutorPackage,
   piHarnessModule,
@@ -38,6 +40,11 @@ const WATCHDOGS = [
   ["startupTimeoutMs", CLAUDE_DEFAULT_STARTUP_TIMEOUT_MS],
   ["responseTimeoutMs", CLAUDE_DEFAULT_RESPONSE_TIMEOUT_MS],
 ] as const;
+const INSTALLED_HARNESSES: Record<HarnessName, string> = {
+  "claude-code": claudeCodeHarnessModule,
+  codex: codexHarnessModule,
+  pi: piHarnessModule,
+};
 
 /**
  * Keep the controller's executor pin, tools, budget port and session unchanged.
@@ -73,9 +80,10 @@ export function createCliRunner(
             executorIds: [CODING_AGENT_RUN_ID, BUILTIN_AGENT_EXECUTOR_ID],
           },
           ...codingAgentBinding({
-            harness: harnessModules[harness] ?? (harness === "claude-code" ? claudeCodeHarnessModule : piHarnessModule),
+            harness: harnessModules[harness] ?? INSTALLED_HARNESSES[harness],
             ...(config.timeoutMs !== undefined ? { timeoutMs: config.timeoutMs } : {}),
             ...(harness === "claude-code" ? { claude: claudeOptions(config) } : {}),
+            ...(harness === "codex" ? { codex: codexOptions(config) } : {}),
             ...(config.pi !== undefined ? { pi: config.pi } : {}),
           }),
         }],
@@ -134,6 +142,14 @@ export function claudeOptions(config: RunnerConfig): NonNullable<RunnerConfig["c
     if (claude[name] === undefined && fallback >= timeoutMs) claude[name] = Math.floor(timeoutMs / 2);
   }
   return claude;
+}
+
+/** Codex settings, with a default watchdog that would outlast the job timeout cut to half of it. */
+export function codexOptions(config: RunnerConfig): NonNullable<RunnerConfig["codex"]> {
+  const timeoutMs = config.timeoutMs ?? DEFAULT_CODING_TIMEOUT_MS;
+  const codex = { ...config.codex };
+  if (codex.responseTimeoutMs === undefined && CODEX_DEFAULT_RESPONSE_TIMEOUT_MS >= timeoutMs) codex.responseTimeoutMs = Math.floor(timeoutMs / 2);
+  return codex;
 }
 
 function object(value: unknown): Record<string, unknown> | undefined {

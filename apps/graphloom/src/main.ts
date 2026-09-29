@@ -169,10 +169,11 @@ first that no longer passes sends the run back to its stage.
 Agent runner: run and resume refuse to start without $GRAPHLOOM_RUNNER_CONFIG or
 ~/.config/graphloom/runner.json:
   { "harness": "claude-code", "allowUnrestricted": true }
-Use "pi" for the Pi harness. The agent runs with your user permissions;
-credentials come from the harness login. Optional claude/pi settings select
-the executable, model, provider, agent directory, and environment names.
-"harnesses": ["claude-code", "pi"] lets a job choose either harness with
+Use "pi" for the Pi harness, or "codex" for Codex, which runs read-only jobs
+only. The agent runs with your user permissions; credentials come from the
+harness login. Optional claude/codex/pi settings select the executable, model,
+provider, agent or Codex home directory, and environment names.
+"harnesses": ["claude-code", "pi", "codex"] lets a job choose any of them with
 input.harness. Command jobs run as you in the job's workspace ("command":
 { "timeoutMs": ... } bounds one job). "github": { "tokenEnv": "GITHUB_TOKEN" }
 serves read-only GitHub executors with the token from that variable.

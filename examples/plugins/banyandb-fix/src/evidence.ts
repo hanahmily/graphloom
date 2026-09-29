@@ -92,6 +92,18 @@ export function commandRuns(evidence: EvidenceRecord[], id?: string): CommandRun
   return runs;
 }
 
+/** The last line the latest passing run of environment check `id` printed. */
+export function environmentOutput(evidence: EvidenceRecord[], id: string): string | undefined {
+  for (const record of [...evidence].reverse()) {
+    const payload = object(record.payload);
+    const command = object(payload?.command) as CommandOutcome | undefined;
+    if (record.kind !== "command" || object(payload?.environment) === undefined || command?.id !== id) continue;
+    if (!succeeded(command)) return undefined;
+    return String(command.stdoutTail ?? "").trim().split("\n").at(-1)?.trim() || undefined;
+  }
+  return undefined;
+}
+
 /** The latest run of `id` bound to `digest` in a checkout of `from`, after preparation. */
 export function latestCheckoutRun(
   evidence: EvidenceRecord[],

@@ -4,6 +4,7 @@ import {
   CHANGES_PATH,
   COMMAND,
   FIX_STAGE,
+  REVIEW_STAGE,
 } from "./constants.js";
 import { decisionProblems, outOfScope, parseDecisionRecord, type DecisionRecord } from "./decision-record.js";
 import {
@@ -12,13 +13,13 @@ import {
   latestCheckoutRun,
   latestFile,
   latestReview,
-  producer,
   sameCheckoutJob,
   succeeded,
+  type AgentRun,
   type CommandRun,
 } from "./evidence.js";
 import { ginkgoSpecs, regressionOutcome } from "./gotest.js";
-import { blockingComments, describeComment, parseOcrReport, reviewComplete } from "./ocr.js";
+import { blockingComments, describeComment, describeCoverage, parseCodeReview, reviewComplete } from "./ocr.js";
 
 const passed = (reason: string): ValidationResult => ({ status: "passed", reason });
 const failed = (reason: string): ValidationResult => ({ status: "failed", reason });
@@ -71,6 +72,9 @@ export const reproduces: Validator = {
     const unclean = cleanRun(red);
     if (unclean !== undefined) return failed(unclean);
     if (red.checkout!.paths.length === 0 || !red.checkout!.paths.every(isTestPath)) return failed("the RED checkout must apply only test files");
+    if (red.command.timedOut === true || red.command.aborted === true || red.command.spawnError !== undefined) {
+      return failed(`the RED check did not finish (${describeCommand(red.command)})`);
+    }
     const name = testLabel(record);
     const outcome = regressionOutcome(reportText(red), record.test);
     if (outcome === "failed" && !succeeded(red.command)) return passed(`${name} fails on the base commit with only the test files applied`);
@@ -186,26 +190,28 @@ export const planReviewed: Validator = {
   },
 };
 
-/** open-code-review ran read-only on exactly the current change, reviewed every file and reported no critical or high comment. */
+/** The latest code review of the change `digest` names. */
+export function latestCodeReview(evidence: EvidenceRecord[], digest: string | undefined): AgentRun | undefined {
+  return agentRuns(evidence, REVIEW_STAGE, "review").filter((r) => digest !== undefined && r.record.candidateDigest === digest).at(-1);
+}
+
+/** A read-only reviewer, following open-code-review's delegation workflow on exactly the current change, reviewed every file and reported no critical or high comment. */
 export const codeReview: Validator = {
   evaluate(input: ValidationInput) {
-    const run = latestCheckoutRun(input.evidence, COMMAND.codeReview, "candidate", input.candidateDigest);
-    if (run === undefined) return inconclusive("open-code-review has not run on the current change");
-    const p = producer(run.record);
-    if (p?.purpose !== "review" || !p.readOnly) return failed("the code review must come from a read-only review job");
-    const unclean = cleanRun(run);
-    if (unclean !== undefined) return failed(unclean);
-    const parsed = parseOcrReport(reportText(run));
-    if ("problem" in parsed) return failed(`${parsed.problem} (${describeCommand(run.command)})`);
-    if (!succeeded(run.command)) return failed(`open-code-review failed: ${describeCommand(run.command)}`);
+    const run = latestCodeReview(input.evidence, input.candidateDigest);
+    if (run === undefined) return inconclusive("the code has not been reviewed on the current change");
+    if (!run.producer.readOnly) return failed("the code review must come from a read-only review job");
+    if (run.status !== "completed") return failed(`the code reviewer did not finish (${run.status})`);
+    const parsed = parseCodeReview(run.output);
+    if ("problem" in parsed) return failed(parsed.problem);
     const { report } = parsed;
-    if (!reviewComplete(report)) return failed(`open-code-review did not review every file (status ${report.status}): ${report.message}`);
+    if (!reviewComplete(report)) return failed(`the code review did not cover every file: ${describeCoverage(report)}`);
     const blocking = blockingComments(report);
     if (blocking.length > 0) {
-      return failed(`open-code-review reported ${blocking.length} critical or high comment(s): ${blocking.slice(0, 3).map(describeComment).join("; ")}`);
+      return failed(`the code review reported ${blocking.length} critical or high comment(s): ${blocking.slice(0, 3).map(describeComment).join("; ")}`);
     }
-    const lower = report.commentCount - blocking.length;
-    return passed(`open-code-review${report.model !== undefined ? ` (${report.model})` : ""} reported no critical or high comment${lower > 0 ? ` and ${lower} lower` : ""}`);
+    const lower = report.comments.length - blocking.length;
+    return passed(`the code review ${describeCoverage(report)} and reported no critical or high comment${lower > 0 ? ` and ${lower} lower` : ""}`);
   },
 };
 

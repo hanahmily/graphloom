@@ -1,6 +1,6 @@
 import { execFile, execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -131,41 +131,39 @@ const PLAN = {
 };
 
 /**
- * Stands in for open-code-review on PATH: `version` and `llm test` succeed, and
- * `review` records its arguments and the files the committed change touches,
- * then writes a result with one low comment.
+ * Stands in for open-code-review on PATH: it has a delegation mode, and
+ * `delegate preview` records where it ran, its arguments, and the files the
+ * worktree change touches.
  */
 async function fakeOcr(dir: string): Promise<{ bin: string; calls: string }> {
   const bin = path.join(dir, "bin");
   const calls = path.join(dir, "ocr-calls");
   await mkdir(bin);
-  const result = JSON.stringify({
-    status: "complete",
-    llm: { provider: "fake", model: "fake-model" },
-    message: "Review complete: 1 finding(s)",
-    comments: [{ path: "pkg/timestamp/scheduler.go", start_line: 5, end_line: 5, severity: "low", category: "style", content: "Name the constant.", thinking: "private" }],
-  });
   await writeFile(
     path.join(bin, "ocr"),
     [
       "#!/bin/sh",
-      'case "$1" in version) echo "open-code-review v0-fake"; exit 0;; llm) exit 0;; esac',
-      `{ echo "cwd=$(pwd)"; echo "args=$*"; echo "changed=$(git diff --name-only HEAD~1 HEAD | tr '\\n' ' ')"; } >> "${calls}"`,
-      'while [ $# -gt 0 ]; do [ "$1" = --output ] && out="$2"; shift; done',
-      `printf '%s' '${result}' > "$out"`,
+      '[ "$1 $2" = "delegate preview" ] || exit 1',
+      '[ "$3" = --help ] && exit 0',
+      `{ echo "cwd=$(pwd)"; echo "args=$*"; echo "changed=$(git status --porcelain | awk '{print $2}' | sort | tr '\\n' ' ')"; } >> "${calls}"`,
+      'echo \'{"mode":"workspace","reviewable_files":[]}\'',
       "",
     ].join("\n"),
     { mode: 0o755 },
   );
-  // The agents are scripted; the preflight still needs Claude Code installed and logged in.
+  // The agents are scripted; the preflight still needs Claude Code and Codex installed and logged in.
   await writeFile(path.join(bin, "claude"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  await writeFile(path.join(bin, "codex"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
   return { bin, calls };
 }
 
+const LOW = { path: "pkg/timestamp/scheduler.go", start_line: 5, end_line: 5, category: "style", severity: "low", content: "Name the constant." };
+
 /**
  * Real command and GitHub executors, as the CLI composes them, with scripted
- * Claude Code and Pi agents: the plan, an approving plan review, and an
- * implementation that writes the fix, test and changelog entry.
+ * Claude Code, Pi and Codex agents: the plan, an approving plan review, an
+ * implementation that writes the fix, test and changelog entry, and a code
+ * review that runs the ocr its assignment names in the worktree.
  */
 function fixRunner(baseUrl: string) {
   const agentJobs: JobSpec[] = [];
@@ -184,6 +182,11 @@ function fixRunner(baseUrl: string) {
         evidence: [{ kind: "other", payload: { codingAgent: { harness: (job.input as { harness: string }).harness, status: "completed", output } } }, ...extra],
         ...identity,
       });
+      if (job.purpose === "review" && job.stageId === "review") {
+        const ocr = /`(\S+) delegate preview --format json`/.exec((job.input as { assignment: string }).assignment)![1]!;
+        await execFileAsync(ocr, ["delegate", "preview", "--format", "json"], { cwd: ctx.worktreePath });
+        return done({ comments: [LOW], summary: { total_files: 3, reviewed_files: 3, skipped: [] } });
+      }
       if (job.purpose === "review") {
         const verdict = { verdict: "approved", summary: "The plan fixes the issue, names Status's callers, and lists the metric question." };
         return done(verdict, [{ kind: "review", payload: verdict }]);
@@ -257,14 +260,16 @@ describe.skipIf(GO === undefined)("banyandb-fix on a Go repository", () => {
     expect(planReview).toMatchObject({ stageId: "fix", purpose: "review", readOnly: true, input: { harness: "pi" } });
     expect((planReview!.input as { assignment: string }).assignment).toContain(PLAN.summary);
     expect(implement!.continueFrom).toBeDefined();
-    expect(agentJobs).toHaveLength(3);
+    expect(agentJobs).toHaveLength(4);
 
-    // open-code-review ran once, in a disposable checkout of the committed change, not in the worktree.
+    // Codex reviewed read-only, running the ocr the preflight found, in the worktree holding the uncommitted change.
+    expect(agentJobs[3]).toMatchObject({ stageId: "review", kind: "agent", purpose: "review", readOnly: true, input: { harness: "codex" } });
     const calls = (await readFile(ocr.calls, "utf8")).trim().split("\n");
-    expect(calls).toHaveLength(3);
-    expect(calls[0]).not.toBe(`cwd=${report.worktreePath}`);
-    expect(calls[1]).toMatch(/^args=review --commit HEAD --format json --audience agent --effort high --rule \S+ --background-file \S+ --max-tokens-budget \d+ --output \S+$/);
-    expect(calls[2]!.replace(/^changed=/, "").trim().split(" ").sort()).toEqual(["CHANGES.md", "pkg/timestamp/scheduler.go", "pkg/timestamp/status_test.go"]);
+    expect(calls).toEqual([
+      `cwd=${await realpath(report.worktreePath)}`,
+      "args=delegate preview --format json",
+      "changed=CHANGES.md pkg/timestamp/scheduler.go pkg/timestamp/status_test.go",
+    ]);
 
     // RED failed by assertion on the base with only the test; GREEN passed on the committed change.
     const command = (id: string) =>
@@ -287,7 +292,9 @@ describe.skipIf(GO === undefined)("banyandb-fix on a Go repository", () => {
     const body = (deliver.payload as { command: { report: { text: string } } }).command.report.text;
     expect(body).toContain(`### Fix apache/skywalking#${ISSUE}: Scheduler reports long actions as timed out`);
     expect(body).toContain("- Should the timeout metric keep counting running actions?");
-    expect(body).toContain("Reviewed with open-code-review with fake-model: no critical or high comments; 1 lower-severity comment(s) left for the reviewer.");
+    expect(body).toContain(
+      "Reviewed by Codex in open-code-review's delegation mode (reviewed 3 of 3 file(s)): no critical or high comments; 1 lower-severity comment(s) left for the reviewer.",
+    );
     expect(body).not.toMatch(/rcpt|receipt/);
     expect(execFileSync("git", ["status", "--porcelain"], { cwd: report.worktreePath, encoding: "utf8" })).toContain("M pkg/timestamp/scheduler.go");
     expect(await readFile(path.join(report.worktreePath, "pkg/timestamp/mock_limit.go"), "utf8")).toContain("generatedLimit");

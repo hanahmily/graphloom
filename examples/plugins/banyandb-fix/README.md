@@ -5,9 +5,9 @@ milestone of apache/skywalking, written only against the public
 `@graphloom/sdk`. Given a request that names an issue, such as
 `Fix apache/skywalking#14111.`, it plans the fix with Claude Code, has a fresh
 Pi session review the plan, implements it, proves it with a regression test
-that fails on the base and passes on the change, reviews the committed change
-with [open-code-review](https://github.com/alibaba/open-code-review), and
-leaves a local `fix/<issue>` branch with a short commit message. The pull
+that fails on the base and passes on the change, has Codex review the change in
+[open-code-review](https://github.com/alibaba/open-code-review)'s delegation
+mode, and leaves a local `fix/<issue>` branch with a short commit message. The pull
 request body is the delivery command's report in the run's evidence.
 Publishing stays with you. The
 [design](../../../docs/design-banyandb-fix-graph.md) explains the choices.
@@ -21,7 +21,8 @@ before any job, on every resume, and after a repair activation:
 |---|---|
 | `go` | `go env GOVERSION` equals the `go` line of `go.mod` |
 | `git` | Git 2.41 or later (open-code-review needs it; BanyanDB needs 2.30) |
-| `ocr` | `ocr version` and `ocr llm test`: open-code-review is installed and its model answers |
+| `ocr` | open-code-review is installed and has a delegation mode (`ocr delegate preview --help`); prints the absolute path the code reviewer is told to run |
+| `codex` | `codex --version` and `codex login status`: Codex is installed and logged in, using `GRAPHLOOM_CODEX_BIN` and `GRAPHLOOM_CODEX_HOME` (then `CODEX_HOME`) as the harness does |
 | `claude` | `claude --version` and `claude auth status`: Claude Code is installed and logged in, using `GRAPHLOOM_CLAUDE_BIN` and `GRAPHLOOM_CLAUDE_CONFIG_DIR` (then `CLAUDE_CONFIG_DIR`) as the harness does |
 | `make` | GNU make |
 | `check-req` | `make check-req` |
@@ -42,17 +43,19 @@ the declaration; without a supervisor, the run stops.
 | Fix | `builds`: in the same checkout, make license-check, build, lint and check pass | `build-checks` |
 | Fix | `in-scope`: the change avoids `api/proto`, `go.mod`, `go.sum` and `.github` unless the record justifies it | `write-scope` |
 | Fix | `changelog-entry`: the change adds a bullet to the current release section of `CHANGES.md` | `changes-entry` |
-| Review | `code-review`: open-code-review, run read-only in a prepared checkout of the committed change, reviewed every file and reported no critical or high comment | `open-code-review` |
+| Review | `code-review`: a read-only Codex reviewer, following open-code-review's delegation workflow on the current change, reviewed every changed file, test files included, skipped none, and reported no critical or high comment | `open-code-review` |
 
 Validators see only the current generation's evidence, so each generation plans
 and reviews its plan again: after the supervisor re-enters Fix, or after a
 resume during Fix, the planner revisits its plan in its continued session and a
 fresh reviewer checks it before any code changes.
 
-Checks and the code review run in disposable checkouts, never in the run's worktree. Each checkout
+Checks run in disposable checkouts, never in the run's worktree. Each checkout
 is prepared with `make generate`; a check that leaves a file changed (such as
-`make check` reformatting Go code) fails its requirement. Every receipt is bound
-to the change's digest, so a later edit invalidates it.
+`make check` reformatting Go code) fails its requirement. The code review is a
+read-only agent job in the run's worktree, where Codex runs in its read-only
+sandbox. Every receipt is bound to the change's digest, so a later edit
+invalidates it.
 
 ## Behavior
 
@@ -70,9 +73,10 @@ to the change's digest, so a later edit invalidates it.
 | Implemented | Observe `CHANGES.md`, run the candidate checks, then RED on the base |
 | Every Fix requirement passes | Validate Fix |
 | A requirement fails | Return the reasons and failing output to the implementer's session, at most twice, then Supervise |
-| Review | Run open-code-review on the committed change in a candidate checkout, with the review rule and the issue and plan as background |
+| Review | Dispatch a fresh read-only Codex reviewer with open-code-review's delegation workflow, the `ocr` path from the environment check, the review rule, and the issue and plan |
+| Review, but no `ocr` path was recorded | Supervise |
 | Code review passes | Validate Review, then deliver |
-| Code review fails or reports a critical or high comment | Supervise; if it re-enters Fix, the planner revisits its plan with the comments |
+| Code review fails, misses or skips a file, or reports a critical or high comment | Supervise; if it re-enters Fix, the planner revisits its plan with the comments |
 | Delivered | Stop complete; the branch has a short commit message, and the delivery report holds the PR body |
 | Request names no issue | Stop incompatible |
 
@@ -82,15 +86,23 @@ means every caller and lifecycle path whose behaviour the plan changes
 resource release) is named, and covered by a planned test or stated as a
 risk. The planner is asked for the same in each behaviour decision's basis.
 
-The code review uses open-code-review's own rules plus a Go rule that asks the
-same reach question of the diff, and it reviews `_test.go` files too. A comment
-without a severity counts as blocking. The command reduces open-code-review's
-JSON to status, model, warnings and at most 30 comments, most severe first,
-without the model's reasoning. It runs at `--effort high` (three review rounds)
-and caps the review at 8,000,000 tokens. On the #14111 change that hung
-`Scheduler.Close` for actions ignoring cancellation, MiniMax-M3 missed the hang
-at the default effort, with or without the rule, and reported it at high
-severity with the rule at high effort, using 3.5 million tokens in 16 minutes.
+In delegation mode open-code-review only selects the files (`ocr delegate
+preview`) and resolves their rules (`ocr delegate rule`); Codex reads the diffs
+and does the review. The assignment adds a Go rule that asks the same reach
+question of the diff, and the change's `_test.go` files, which preview excludes
+by default. The result is strict JSON: comments with a path, lines, category
+and severity, and a coverage summary. The review passes only when every file on
+the list was reviewed and none skipped. A comment without a severity counts as
+blocking. The assignment names `ocr` by the absolute path the environment
+check printed, because Codex runs commands in a login shell that may reset
+`PATH`.
+
+Codex runs through the coding-agent executor's Codex harness (`codex exec` in
+its read-only sandbox, no graph tools, no saved session). On PR #94's graph
+code with four known defects, open-code-review with MiniMax-M3 at high effort
+found one, with high-severity false positives, using 7 to 8 million tokens;
+Codex in delegation mode found three, with no clear false positives, using
+about 1.4 million input tokens, mostly cached.
 
 Delivery builds the commit from a temporary index, so the run's worktree, index
 and branch stay untouched. It refuses to overwrite an existing `fix/<issue>`
@@ -113,30 +125,33 @@ budgets:
 per run is too few for BanyanDB: every agent turn counts, and a plan alone can
 spend 64 while reading the code.
 
-The runner config must enable both harnesses and the GitHub reads, and give
-command jobs room for BanyanDB's checks:
+The runner config must enable all three harnesses and the GitHub reads, and
+give command jobs room for BanyanDB's checks:
 
 ```json
 {
   "harness": "claude-code",
-  "harnesses": ["claude-code", "pi"],
+  "harnesses": ["claude-code", "pi", "codex"],
   "allowUnrestricted": true,
   "pi": { "provider": "minimax-cn", "modelId": "MiniMax-M3", "agentDir": "~/.pi/agent" },
+  "codex": { "reasoningEffort": "high" },
   "github": { "tokenEnv": "GRAPHLOOM_GITHUB_LIVE_TOKEN" },
   "command": { "timeoutMs": 10800000 }
 }
 ```
 
-Install open-code-review (`npm install -g @alibaba-group/open-code-review`) and configure
-its model in `~/.opencodereview/config.json`; `ocr llm test` must pass. Claude
-Code must be installed and logged in (`claude auth status`). The environment
-checks stop the run before any job otherwise, naming the tool. If `runner.json`
-sets `claude.command` or `claude.configDir`, export `GRAPHLOOM_CLAUDE_BIN` or
-`GRAPHLOOM_CLAUDE_CONFIG_DIR` to match, because the check reads only the
-environment. To check by hand:
+Install open-code-review 1.9 or later (`npm install -g
+@alibaba-group/open-code-review`); delegation mode needs no model on its side.
+Claude Code and Codex must be installed and logged in (`claude auth status`,
+`codex login status`). The environment checks stop the run before any job
+otherwise, naming the tool. If `runner.json` sets `claude.command`,
+`claude.configDir`, `codex.command` or `codex.codexHome`, export
+`GRAPHLOOM_CLAUDE_BIN`, `GRAPHLOOM_CLAUDE_CONFIG_DIR`, `GRAPHLOOM_CODEX_BIN` or
+`GRAPHLOOM_CODEX_HOME` to match, because the checks read only the environment.
+To check by hand:
 
 ```sh
-ocr version && ocr llm test && claude --version && claude auth status
+ocr delegate preview --help >/dev/null && codex login status && claude --version && claude auth status
 ```
 
 ```sh
@@ -162,4 +177,5 @@ controller on a small Go module shaped like BanyanDB, with the real command and
 GitHub executors (against a fake GitHub), scripted agents and a stand-in `ocr`
 on `PATH`. The run checks the environment, gets the plan approved, fails RED by
 assertion on the base, passes GREEN and the build checks on the committed
-change, runs the code review in a candidate checkout, and leaves `fix/14111`.
+change, has the scripted reviewer run the `ocr` path from the environment check
+in the worktree, and leaves `fix/14111`.

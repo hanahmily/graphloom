@@ -14,6 +14,7 @@ import {
 } from "@graphloom/sdk";
 import {
   CHANGES_PATH,
+  CODE_REVIEWER_HARNESS,
   CODING_AGENT,
   COMMAND,
   ENVIRONMENT,
@@ -41,6 +42,7 @@ import {
   agentRuns,
   commandRuns,
   describeCommand,
+  environmentOutput,
   inGeneration,
   issueComments,
   issueSnapshot,
@@ -51,10 +53,19 @@ import {
   reviews,
   sameCheckoutJob,
   succeeded,
-  type CommandRun,
+  type AgentRun,
   type ReviewVerdict,
 } from "./evidence.js";
-import { blockingComments, codeReviewCommands, describeComment, parseOcrReport, reviewBackground, reviewComplete } from "./ocr.js";
+import {
+  blockingComments,
+  CODE_REVIEW_SCHEMA,
+  codeReviewInstruction,
+  describeComment,
+  describeCoverage,
+  parseCodeReview,
+  reviewBackground,
+  reviewComplete,
+} from "./ocr.js";
 import {
   candidateCommands,
   commitMessage,
@@ -68,7 +79,7 @@ import {
   redCommands,
   snapshotText,
 } from "./prompts.js";
-import { codeReview, implementerRecord, isTestPath, validatorById } from "./validators.js";
+import { codeReview, implementerRecord, isTestPath, latestCodeReview, validatorById } from "./validators.js";
 
 /** Graph bookkeeping; everything else is read back from recorded evidence. */
 export interface FixPrivateState {
@@ -141,8 +152,8 @@ const definition: GraphDefinition = {
     {
       id: REQUIREMENT_REVIEW,
       statement:
-        "open-code-review, run read-only in a prepared checkout of the current change, reviewed every changed file and reported no critical or high comment, and the checkout was left unchanged.",
-      evidenceSchema: "checkout-command-v1",
+        "A read-only Codex reviewer, following open-code-review's delegation workflow on the current change, reviewed every changed file, test files included, skipped none, and reported no critical or high comment.",
+      evidenceSchema: "code-review-v1",
     },
   ],
   defaultValidators: [
@@ -310,26 +321,18 @@ function fix(view: RunView, issue: number, state: FixPrivateState): GraphDecisio
 
 function review(view: RunView, issue: number, state: FixPrivateState): GraphDecision {
   const current = inGeneration(view.evidence, view.generation);
-  // Fix was accepted for this candidate, possibly before a resume moved the generation on.
-  const run = latestCheckoutRun(current, COMMAND.codeReview, "candidate", view.candidateDigest);
+  const run = latestCodeReview(current, view.candidateDigest);
   if (run === undefined) {
+    const ocr = environmentOutput(view.evidence, "ocr");
+    if (ocr === undefined) {
+      return supervise({ reason: "the environment check recorded no open-code-review path for the code reviewer" }, "escalate a missing ocr path", JSON.stringify(state));
+    }
+    // Fix was accepted for this candidate, possibly before a resume moved the generation on.
     const record = implementerRecord(view.evidence).record!;
     const snapshot = issueSnapshot(view.evidence, issue)!;
-    return withPrivate(
-      dispatch(
-        {
-          stageId: REVIEW_STAGE,
-          kind: "command",
-          purpose: "review",
-          readOnly: true,
-          instruction: "Review the change with open-code-review",
-          checkout: { from: "candidate" },
-          input: { commands: codeReviewCommands(reviewBackground(snapshot.issue, record)) },
-        },
-        "review the committed change with open-code-review",
-      ),
-      state,
-    );
+    const base = latestCheckoutRun(view.evidence, COMMAND.regression, "candidate", view.candidateDigest)?.checkout?.base ?? "the run's base commit";
+    const assignment = codeReviewInstruction({ ocr, base, background: reviewBackground(snapshot.issue, record) });
+    return dispatchAgent(view, codeReviewJob(assignment), "review the change with Codex in open-code-review's delegation mode (read-only)", state);
   }
   const statement = definition.requirements.find((r) => r.id === REQUIREMENT_REVIEW)!.statement;
   const result = codeReview.evaluate({ requirementId: REQUIREMENT_REVIEW, statement, evidence: current, candidateDigest: run.record.candidateDigest! }) as ValidationResult;
@@ -351,7 +354,7 @@ function deliver(view: RunView, issue: number, state: FixPrivateState): GraphDec
     const asked = latestReview(view.evidence, FIX_STAGE)?.productDecision;
     const openQuestions = asked !== undefined && !record.openQuestions.includes(asked) ? [...record.openQuestions, asked] : record.openQuestions;
     const green = latestCheckoutRun(view.evidence, COMMAND.regression, "candidate", view.candidateDigest);
-    const reviewed = latestCheckoutRun(view.evidence, COMMAND.codeReview, "candidate", view.candidateDigest);
+    const reviewed = latestCodeReview(view.evidence, view.candidateDigest);
     const issueTitle = issueSnapshot(view.evidence, issue)?.issue.title ?? issueRef(issue);
     const body = pullRequestDescription({
       issue,
@@ -393,14 +396,14 @@ function partialSnapshot(problem: string, refs: string[]): GraphDecision {
 }
 
 /** The test plan's line for the code review. */
-function reviewSummary(run: CommandRun): string {
-  const parsed = parseOcrReport(run.command.report?.text ?? run.command.stdoutTail);
+function reviewSummary(run: AgentRun): string {
+  const parsed = parseCodeReview(run.output);
   if ("problem" in parsed) return "Code review did not produce a result.";
   const { report } = parsed;
-  const by = `open-code-review${report.model !== undefined ? ` with ${report.model}` : ""}`;
-  return report.commentCount === 0
-    ? `Reviewed with ${by}: no comments.`
-    : `Reviewed with ${by}: no critical or high comments; ${report.commentCount} lower-severity comment(s) left for the reviewer.`;
+  const by = `Codex in open-code-review's delegation mode (${describeCoverage(report)})`;
+  return report.comments.length === 0
+    ? `Reviewed by ${by}: no comments.`
+    : `Reviewed by ${by}: no critical or high comments; ${report.comments.length} lower-severity comment(s) left for the reviewer.`;
 }
 
 /** What a plan reviewer's verdict asks the planner to change. */
@@ -413,16 +416,16 @@ function verdictFeedback(verdict: ReviewVerdict): string[] {
 
 /** Why the run is back in Fix: the code review that failed an earlier change, when there is one. */
 function reentryFeedback(view: RunView): string[] {
-  const run = commandRuns(view.evidence, COMMAND.codeReview)
+  const run = agentRuns(view.evidence, REVIEW_STAGE, "review")
     .filter((r) => (r.record.generation ?? view.generation) < view.generation)
     .at(-1);
-  const parsed = run !== undefined ? parseOcrReport(run.command.report?.text ?? run.command.stdoutTail) : undefined;
+  const parsed = run?.status === "completed" ? parseCodeReview(run.output) : undefined;
   if (parsed === undefined || "problem" in parsed || (reviewComplete(parsed.report) && blockingComments(parsed.report).length === 0)) {
     return ["The run returned to Fix after a resume or a supervisor decision. Check the plan against the current code and the change in the working tree."];
   }
   const blocking = blockingComments(parsed.report);
   return [
-    `Code review of your previous change did not pass (open-code-review status ${parsed.report.status}${blocking.length > 0 ? `, ${blocking.length} critical or high comment(s)` : ""}):`,
+    `Code review of your previous change did not pass (${describeCoverage(parsed.report)}${blocking.length > 0 ? `, ${blocking.length} critical or high comment(s)` : ""}):`,
     ...blocking.slice(0, 10).map(describeComment),
   ];
 }
@@ -493,6 +496,20 @@ function planReviewJob(assignment: string): JobSpec {
     resultSchema: "review-verdict-v1",
     executor: CODING_AGENT,
     input: { assignment, resultSchema: "review-verdict-v1", harness: REVIEWER_HARNESS },
+  };
+}
+
+/** A fresh read-only session that reviews the change in the run worktree. */
+function codeReviewJob(assignment: string): JobSpec {
+  return {
+    stageId: REVIEW_STAGE,
+    kind: "agent",
+    purpose: "review",
+    readOnly: true,
+    instruction: "Review the code",
+    resultSchema: "code-review-v1",
+    executor: CODING_AGENT,
+    input: { assignment, resultSchema: CODE_REVIEW_SCHEMA, harness: CODE_REVIEWER_HARNESS },
   };
 }
 

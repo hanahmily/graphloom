@@ -4,10 +4,12 @@ import os from "node:os";
 import path from "node:path";
 import {
   CLAUDE_BIN_ENV,
+  CODEX_BIN_ENV,
   PI_MODEL_ENV,
   PI_PROVIDER_ENV,
   codingAgentExecutorPackage,
   type ClaudeCodeBindingOptions,
+  type CodexBindingOptions,
   type PiBindingOptions,
 } from "@graphloom/executor-coding-agent";
 
@@ -17,9 +19,11 @@ export const RUNNER_SETUP_ENV: readonly string[] = [
   RUNNER_CONFIG_ENV,
   ...(codingAgentExecutorPackage.configEnv ?? []),
   "CLAUDE_CONFIG_DIR",
+  "CODEX_HOME",
 ];
 
-export type HarnessName = "claude-code" | "pi";
+export type HarnessName = "claude-code" | "codex" | "pi";
+const HARNESS_NAMES: readonly HarnessName[] = ["claude-code", "codex", "pi"];
 
 /** Operator consent and nonsecret settings; the harness uses its existing login. */
 export interface RunnerConfig {
@@ -30,6 +34,8 @@ export interface RunnerConfig {
   allowUnrestricted: true;
   timeoutMs?: number;
   claude?: Omit<ClaudeCodeBindingOptions, "apiKey">;
+  /** Codex serves read-only jobs only, with its own login. */
+  codex?: CodexBindingOptions;
   pi?: Omit<PiBindingOptions, "apiKey">;
   /** Serve the read-only GitHub executors; the token comes from the named environment variable. */
   github?: { tokenEnv?: string };
@@ -65,30 +71,44 @@ export async function loadRunnerConfig(env: NodeJS.ProcessEnv = process.env): Pr
 
 /**
  * The runner config for `run` and `resume`, checked before a run starts: it
- * exists, Pi has a model, and the Claude Code command is executable. A command
- * given as a path is bound to the absolute path that passed the check, since
- * the agent starts in the run's worktree.
+ * exists, Pi has a model, and the Claude Code and Codex commands are
+ * executable. A command given as a path is bound to the absolute path that
+ * passed the check, since the agent starts in the run's worktree.
  */
 export async function requireRunnerConfig(env: NodeJS.ProcessEnv = process.env): Promise<RunnerConfig> {
-  const config = await loadRunnerConfig(env);
-  if (config === undefined) {
+  const loaded = await loadRunnerConfig(env);
+  if (loaded === undefined) {
     throw new Error(
       `no agent runner configured: create ~/.config/graphloom/runner.json (or point ${RUNNER_CONFIG_ENV} at one) with {"harness": "claude-code", "allowUnrestricted": true}`,
     );
   }
+  let config = loaded;
   const harnesses = enabledHarnesses(config);
   if (harnesses.includes("pi")) {
     if (!(config.pi?.provider ?? env[PI_PROVIDER_ENV]) || !(config.pi?.modelId ?? env[PI_MODEL_ENV])) {
       throw new Error(`the pi harness needs pi.provider and pi.modelId in the runner config (or ${PI_PROVIDER_ENV} and ${PI_MODEL_ENV})`);
     }
   }
-  if (!harnesses.includes("claude-code")) return config;
-  const command = config.claude?.command ?? (env[CLAUDE_BIN_ENV] || "claude");
+  if (harnesses.includes("claude-code")) {
+    const configured = config.claude?.command;
+    const command = await requireCommand(configured ?? (env[CLAUDE_BIN_ENV] || "claude"), env, "Claude Code", "claude.command");
+    if (configured !== undefined || command.includes("/")) config = { ...config, claude: { ...config.claude, command } };
+  }
+  if (harnesses.includes("codex")) {
+    const configured = config.codex?.command;
+    const command = await requireCommand(configured ?? (env[CODEX_BIN_ENV] || "codex"), env, "Codex", "codex.command");
+    if (configured !== undefined || command.includes("/")) config = { ...config, codex: { ...config.codex, command } };
+  }
+  return config;
+}
+
+/** The command as it will be bound: a path is made absolute; it must be executable. */
+async function requireCommand(command: string, env: NodeJS.ProcessEnv, name: string, setting: string): Promise<string> {
   const bound = command.includes("/") ? expandHome(command) : command;
   if (!(await isExecutable(bound, env.PATH ?? ""))) {
-    throw new Error(`Claude Code command ${command} was not found; install Claude Code or set claude.command in the runner config`);
+    throw new Error(`${name} command ${command} was not found; install ${name} or set ${setting} in the runner config`);
   }
-  return bound === command && config.claude?.command === undefined ? config : { ...config, claude: { ...config.claude, command: bound } };
+  return bound;
 }
 
 async function isExecutable(command: string, searchPath: string): Promise<boolean> {
@@ -106,13 +126,13 @@ function expandHome(p: string): string {
 }
 
 export function parseRunnerConfig(value: unknown, source = "runner config"): RunnerConfig {
-  const obj = settings(value, source, ["harness", "harnesses", "allowUnrestricted", "timeoutMs", "claude", "pi", "github", "command"]);
-  if (!isHarness(obj.harness)) throw new Error(`${source}: harness must be claude-code or pi`);
+  const obj = settings(value, source, ["harness", "harnesses", "allowUnrestricted", "timeoutMs", "claude", "codex", "pi", "github", "command"]);
+  if (!isHarness(obj.harness)) throw new Error(`${source}: harness must be one of ${HARNESS_NAMES.join(", ")}`);
   if (obj.allowUnrestricted !== true) throw new Error(`${source}: allowUnrestricted must be true to run an agent with your user permissions`);
   const config: RunnerConfig = { harness: obj.harness, allowUnrestricted: true };
   if (obj.harnesses !== undefined) {
     if (!Array.isArray(obj.harnesses) || obj.harnesses.length === 0 || !obj.harnesses.every(isHarness)) {
-      throw new Error(`${source}: harnesses must be a non-empty array of claude-code and pi`);
+      throw new Error(`${source}: harnesses must be a non-empty array of ${HARNESS_NAMES.join(", ")}`);
     }
     config.harnesses = [...new Set(obj.harnesses)];
   }
@@ -140,6 +160,21 @@ export function parseRunnerConfig(value: unknown, source = "runner config"): Run
       ...(c.responseTimeoutMs !== undefined ? { responseTimeoutMs: milliseconds(c.responseTimeoutMs, `${nested}.responseTimeoutMs`, true) } : {}),
     };
   }
+  if (obj.codex !== undefined) {
+    const nested = `${source}: codex`;
+    const c = settings(obj.codex, nested, ["command", "model", "reasoningEffort", "codexHome", "passEnv", "responseTimeoutMs"]);
+    if (c.reasoningEffort !== undefined && !["minimal", "low", "medium", "high", "xhigh"].includes(c.reasoningEffort as string)) {
+      throw new Error(`${nested}.reasoningEffort: expected minimal, low, medium, high or xhigh`);
+    }
+    config.codex = {
+      ...(c.command !== undefined ? { command: nonempty(c.command, `${nested}.command`) } : {}),
+      ...(c.model !== undefined ? { model: nonempty(c.model, `${nested}.model`) } : {}),
+      ...(c.reasoningEffort !== undefined ? { reasoningEffort: c.reasoningEffort as string } : {}),
+      ...(c.codexHome !== undefined ? { codexHome: expandHome(nonempty(c.codexHome, `${nested}.codexHome`)) } : {}),
+      ...(c.passEnv !== undefined ? { passEnv: environmentNames(c.passEnv, nested) } : {}),
+      ...(c.responseTimeoutMs !== undefined ? { responseTimeoutMs: milliseconds(c.responseTimeoutMs, `${nested}.responseTimeoutMs`, true) } : {}),
+    };
+  }
   if (obj.pi !== undefined) {
     const nested = `${source}: pi`;
     const p = settings(obj.pi, nested, ["provider", "modelId", "agentDir", "passEnv"]);
@@ -155,7 +190,7 @@ export function parseRunnerConfig(value: unknown, source = "runner config"): Run
 }
 
 function isHarness(value: unknown): value is HarnessName {
-  return value === "claude-code" || value === "pi";
+  return HARNESS_NAMES.includes(value as HarnessName);
 }
 
 function settings(value: unknown, source: string, keys: string[]): Record<string, unknown> {

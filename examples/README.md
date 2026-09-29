@@ -40,14 +40,20 @@ omits them. Other settings:
   that long (defaults five and ten minutes; 0 disables). Each must be shorter
   than `timeoutMs`; a default that is not falls to half of it.
 - `pi`: `agentDir`.
-- Both `claude` and `pi` take `passEnv`, extra environment variable names the
-  agent's commands may see. `timeoutMs` at the top level limits each job
+- `codex`, for the read-only Codex harness (`"harness": "codex"`, or listed in
+  `harnesses` so a job can choose it with `input.harness`): `command` (default
+  `codex` on `PATH`), `model`, `reasoningEffort` (`minimal` to `xhigh`),
+  `codexHome` (its login and config), and `responseTimeoutMs` (default ten
+  minutes; 0 disables). Codex uses its own login and runs only read-only jobs.
+- `claude`, `pi` and `codex` take `passEnv`, extra environment variable names
+  the agent's commands may see. `timeoutMs` at the top level limits each job
   (default one hour).
 
 Credentials never go in this file, and `graphloom` refuses one that holds them.
 Claude Code uses the login in its config dir. Pi uses the keys in its agent dir
 or the provider's environment variable, such as `MINIMAX_CN_API_KEY`. A missing
-runner config, Claude Code command, or Pi model fails before the run starts.
+runner config, Claude Code or Codex command, or Pi model fails before the run
+starts.
 
 Then build, prepare a disposable repository beside the task, and run:
 
