@@ -173,11 +173,12 @@ function fix(view: RunView, issue: number, state: FixPrivateState): GraphDecisio
       state,
     );
   }
-  const snapshotBody = snapshotText(snapshot.issue, comments.comments);
+  const snapshotBody = snapshotText(snapshot.issue, comments.comments, comments.complete);
+  if ("problem" in snapshotBody) return partialSnapshot(snapshotBody.problem, [snapshot.record.ref, comments.record.ref]);
 
   const planRun = agentRuns(view.evidence, FIX_STAGE, "diagnostic").at(-1);
   if (planRun === undefined || planRun.status !== "completed") {
-    return dispatchAgent(view, planJob(planInstruction({ issue, request: view.task.request, snapshot: snapshotBody })), "plan the fix (read-only)", state);
+    return dispatchAgent(view, planJob(planInstruction({ issue, request: view.task.request, snapshot: snapshotBody.text })), "plan the fix (read-only)", state);
   }
   const plan = parseDecisionRecord(planRun.output);
   if ("problem" in plan) {
@@ -256,6 +257,9 @@ function review(view: RunView, issue: number, state: FixPrivateState): GraphDeci
     // Fix was accepted for this candidate, possibly before a resume moved the generation on.
     const record = implementerRecord(view.evidence).record;
     const snapshot = issueSnapshot(view.evidence, issue)!;
+    const comments = issueComments(view.evidence);
+    const snapshotBody = snapshotText(snapshot.issue, comments?.comments ?? [], comments?.complete ?? false);
+    if ("problem" in snapshotBody) return partialSnapshot(snapshotBody.problem, [snapshot.record.ref, ...(comments !== undefined ? [comments.record.ref] : [])]);
     const green = latestCheckoutRun(view.evidence, COMMAND.regression, "candidate", view.candidateDigest);
     return dispatchAgent(
       view,
@@ -270,7 +274,7 @@ function review(view: RunView, issue: number, state: FixPrivateState): GraphDeci
         input: {
           assignment: reviewInstruction({
             issue,
-            snapshot: snapshotText(snapshot.issue, issueComments(view.evidence)?.comments ?? []),
+            snapshot: snapshotBody.text,
             record: record!,
             base: green?.checkout?.base ?? "the pinned base commit",
             paths: green?.checkout?.paths ?? [],
@@ -344,6 +348,11 @@ function deliver(view: RunView, issue: number, state: FixPrivateState): GraphDec
     { reason: "complete", blocker: "none", evidenceRefs: [delivered.record.ref] },
     `the change is on ${branch}; the draft pull request is its commit message`,
   );
+}
+
+/** Agents act only on the whole issue snapshot; when it cannot be supplied, the run stops rather than work from part of it. */
+function partialSnapshot(problem: string, refs: string[]): GraphDecision {
+  return stop({ reason: "incompatible task", blocker: problem, evidenceRefs: refs }, "stop: the issue snapshot cannot be handed to the agents whole");
 }
 
 /** A plan or implementer that cannot proceed stops the run with its question. */

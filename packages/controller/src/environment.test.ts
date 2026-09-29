@@ -442,6 +442,55 @@ describe("graph-declared environment and disposable checkouts", () => {
     expect(agentJobs).toBe(0);
   });
 
+  describe("nested results for another invocation", () => {
+    const tampers = {
+      "wrong run": (r: JobResult) => ({ ...r, runId: "other-run" }),
+      "wrong operation": (r: JobResult) => ({ ...r, operationId: `${r.operationId}-other` }),
+      "stale generation": (r: JobResult) => ({ ...r, generation: r.generation - 1 }),
+    };
+    // A stale checkout result discards the whole checkout job, its preparation included.
+    const targets = [
+      { target: "the environment preflight", hits: (ctx: JobContext) => ctx.operationId.startsWith("env-"), kept: [] },
+      { target: "a checkout's preparation", hits: (ctx: JobContext) => ctx.operationId.endsWith("-prepare"), kept: ["preflight"] },
+      {
+        target: "a checkout's command",
+        hits: (ctx: JobContext) => !ctx.operationId.startsWith("env-") && !ctx.operationId.endsWith("-prepare"),
+        kept: ["preflight"],
+      },
+    ];
+    const cases = targets.flatMap((t) => Object.entries(tampers).map(([tamper, change]) => ({ ...t, tamper, change })));
+
+    it.each(cases)("stops on $tamper from $target without recording its evidence", async ({ hits, kept, change }) => {
+      const env = await makeEnv();
+      const inner = testRunner(fixAndAddTest);
+      let tampered = 0;
+      const runner: Runner = {
+        async runJob(job, ctx) {
+          const result = await inner.runJob(job, ctx);
+          if (job.kind !== "command" || !hits(ctx)) return result;
+          tampered += 1;
+          return change(result);
+        },
+      };
+      const report = await createController().run({
+        taskPath: env.taskPath,
+        plugin: createScriptedGraph({ definition: definitionWith(PREPARE), advances: [work, red, stop({ reason: "paused", blocker: "inspect" }, "pause")] }),
+        validators,
+        runner,
+        stateRoot: env.stateRoot,
+        runId: "stale-nested",
+      });
+
+      expect(tampered).toBe(1);
+      expect(report).toMatchObject({ status: "stopped", stopReason: "stale job result identity" });
+      expect(report.blocker).toContain("expected ");
+      const state = await loadRunState(report.stateDir);
+      const recorded = ["sh", "generate", "red"].flatMap((id) => commandRuns(state.evidence, id));
+      expect([...new Set(recorded.map((e) => e.payload.checkout?.phase ?? "preflight"))].sort()).toEqual(kept);
+      expect(commandRuns(state.evidence, "red")).toEqual([]);
+    });
+  });
+
   it("checks the environment again on resume", async () => {
     const env = await makeEnv();
     const marker = path.join(env.taskDir, "tool-installed");

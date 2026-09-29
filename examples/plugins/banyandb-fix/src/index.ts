@@ -11,7 +11,7 @@ export {
   type Tier,
 } from "./decision-record.js";
 export { ginkgoSpecs, regressionArgv, regressionOutcome, testOutcome, type GinkgoSpec, type RegressionOutcome, type TestOutcome } from "./gotest.js";
-export { candidateCommands, deliverCommands, pullRequestDescription, redCommands } from "./prompts.js";
+export { MAX_SNAPSHOT_CHARS, candidateCommands, deliverCommands, pullRequestDescription, redCommands } from "./prompts.js";
 export { QUALIFICATION_CASES, qualifyValidators, type QualificationCase, type QualificationReport } from "./qualification.js";
 export {
   builds,

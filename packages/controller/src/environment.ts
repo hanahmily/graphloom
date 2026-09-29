@@ -4,7 +4,7 @@ import { promisify } from "node:util";
 import type { EnvironmentDeclaration, JobSpec } from "@graphloom/sdk";
 import { builtinPinForKind } from "@graphloom/sdk";
 import type { JobEvidenceItem, Runner } from "@graphloom/runner";
-import { commandOutcome, describeFailure } from "./checkout.js";
+import { commandOutcome, describeFailure, identityMismatch } from "./checkout.js";
 import { resolveExecutorPin } from "./executor-catalog.js";
 import type { DurableRunState } from "./state.js";
 import { changedPaths, worktreeChangeFingerprints } from "./worktree.js";
@@ -71,15 +71,16 @@ export async function checkEnvironment(args: {
     input: { commands: [...checks, ...prepare].map((c) => ({ ...c })) },
   };
   const before = await worktreeChangeFingerprints(state.worktreePath);
+  const expected = { runId: state.runId, operationId, generation: state.generation };
   const result = await args.runner.runJob(job, {
-    runId: state.runId,
-    operationId,
-    generation: state.generation,
+    ...expected,
     worktreePath: state.worktreePath,
     artifactDir: state.artifactDir,
     signal: args.signal,
     ...(resolved.source !== undefined ? { executorSource: resolved.source } : {}),
   });
+  const mismatch = identityMismatch(result, expected);
+  if (mismatch !== undefined) return { kind: "failed", operationId, evidence, stopReason: "stale job result identity", blocker: mismatch };
   evidence.push(...(result.evidence ?? []).map((item) => withEnvironment(item)));
   if (result.status !== "ok") {
     return { kind: "failed", operationId, evidence, stopReason: "environment check failed", blocker: `${result.status}: ${result.summary}` };

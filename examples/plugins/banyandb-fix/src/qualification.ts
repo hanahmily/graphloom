@@ -99,6 +99,12 @@ const failedByAssertion = events(
   { Action: "fail", Package: "p" },
 );
 const passedReport = events({ Action: "run", Test: TEST }, { Action: "pass", Test: TEST }, { Action: "pass", Package: "p" });
+const panicked = events(
+  { Action: "run", Test: TEST },
+  { Action: "output", Test: TEST, Output: "panic: runtime error: invalid memory address or nil pointer dereference [recovered]\n" },
+  { Action: "fail", Test: TEST },
+  { Action: "fail", Package: "p" },
+);
 const buildFailed = events({ ImportPath: "p [p.test]", Action: "build-fail" }, { Action: "fail", Package: "p", Output: "FAIL p [build failed]\n" });
 
 const SUITE_READY: DecisionRecord = { ...READY, test: { ...READY.test!, focus: "scheduler warns while an action runs" } };
@@ -145,10 +151,12 @@ export const QUALIFICATION_CASES: readonly QualificationCase[] = [
   c("red-reproduces", "production code applied", [implementer(READY), red(failedByAssertion, 1, { paths: ["pkg/timestamp/scheduler.go", "pkg/timestamp/scheduler_test.go"] })], "failed"),
   c("red-reproduces", "preparation failed", [implementer(READY), red(failedByAssertion, 1, { prepared: false })], "failed"),
   c("red-reproduces", "the check changed a file", [implementer(READY), red(failedByAssertion, 1, { mutations: ["pkg/timestamp/scheduler_test.go"] })], "failed"),
+  c("red-reproduces", "the test panics on the base", [implementer(READY), red(panicked, 2)], "failed"),
   c("red-reproduces", "another test failed", [implementer(READY), red(events({ Action: "fail", Test: "TestOther" }))], "failed"),
   c("red-reproduces", "no test files changed", [implementer(READY), green(passedReport, 0, { paths: ["pkg/timestamp/scheduler.go"] })], "failed"),
   c("red-reproduces", "a Ginkgo spec fails by assertion on the base", [implementer(SUITE_READY), red(suite(failedByAssertion, [spec(FOCUSED, "failed")]))], "passed"),
   c("red-reproduces", "a Ginkgo suite's setup fails on the base", [implementer(SUITE_READY), red(suite(failedByAssertion, [spec("", "failed", "BeforeSuite")]))], "failed"),
+  c("red-reproduces", "a Ginkgo spec panics on the base", [implementer(SUITE_READY), red(suite(failedByAssertion, [spec(FOCUSED, "panicked")]))], "failed"),
   c("red-reproduces", "a Ginkgo spec fails in its BeforeEach", [implementer(SUITE_READY), red(suite(failedByAssertion, [spec(FOCUSED, "failed", "It", "BeforeEach")]))], "failed"),
   c("red-reproduces", "RED ran on an older change", [implementer(READY), red(failedByAssertion, 1, { digest: OTHER })], "inconclusive"),
 

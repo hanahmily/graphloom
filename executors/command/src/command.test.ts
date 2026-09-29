@@ -107,6 +107,22 @@ describe("command executor", () => {
     expect(() => process.kill(pid, 0)).toThrow();
   }, 20_000);
 
+  it("finishes a command whose background descendant still holds its output pipes", async () => {
+    const pidFile = path.join(dir, "holder.pid");
+    const started = Date.now();
+    const [quick] = outcomes(
+      await executor.execute(
+        { commands: [{ id: "quick", argv: ["sh", "-c", `sleep 3 & echo $! > ${pidFile}; echo done; exit 0`], timeoutMs: 150 }] },
+        ctx,
+      ),
+    );
+    expect(quick).toMatchObject({ exitCode: 0, timedOut: false, stdoutTail: "done\n" });
+    expect(commandSucceeded(quick!)).toBe(true);
+    expect(Date.now() - started).toBeLessThan(2_500);
+    const pid = Number(await readFile(pidFile, "utf8"));
+    expect(() => process.kill(pid, 0)).toThrow();
+  });
+
   it("stops when the job is aborted", async () => {
     const abort = new AbortController();
     setTimeout(() => abort.abort(), 200);

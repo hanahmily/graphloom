@@ -9,6 +9,7 @@ import {
   CHANGES_PATH,
   COMMAND,
   ENVIRONMENT,
+  MAX_SNAPSHOT_CHARS,
   QUALIFICATION_CASES,
   advanceFix,
   createGraph,
@@ -65,6 +66,10 @@ interface Scenario {
   changes?: string;
   /** Bump the generation once Fix is accepted, as an operator's resume does. */
   resumeAfterFix?: boolean;
+  issueBody?: string;
+  comments?: Array<{ author: string; createdAt: string; body: string }>;
+  /** Whether the comment listing reached its last page. */
+  commentsComplete?: boolean;
 }
 
 const CHANGES = "# Changes by Version\n\nRelease Notes.\n\n## 0.12.0\n\n### Bug Fixes\n\n- Warn while a scheduled action is still running.\n\n## 0.11.0\n\n- Older.\n";
@@ -108,11 +113,12 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
     jobs.push(job);
     const input = job.input as { commands?: Array<{ id: string }>; number?: number } | undefined;
     if (job.executor?.id === "graphloom.github/get-issue") {
-      record("other", { github: { item: { number: input!.number, title: "Scheduler reports long actions as timed out", state: "open", url: "u", labels: [], body: "Backups longer than five minutes are reported as action timed out." } } }, job, op);
+      record("other", { github: { item: { number: input!.number, title: "Scheduler reports long actions as timed out", state: "open", url: "u", labels: [], body: scenario.issueBody ?? "Backups longer than five minutes are reported as action timed out." } } }, job, op);
       return;
     }
     if (job.executor?.id === "graphloom.github/list-issue-comments") {
-      record("other", { github: { items: [{ author: "maintainer", createdAt: "2026-09-01", body: "It should not be an error." }] } }, job, op);
+      const items = scenario.comments ?? [{ author: "maintainer", createdAt: "2026-09-01", body: "It should not be an error." }];
+      record("other", { github: { items, page: { complete: scenario.commentsComplete ?? true } } }, job, op);
       return;
     }
     if (job.kind === "agent") {
@@ -246,6 +252,34 @@ describe("banyandb-fix graph", () => {
     expect(message).toMatch(/RED: .* \(receipt rcpt-\d+\)/);
   });
 
+  it("hands the planner and the reviewer a long issue whole, with its latest maintainer answer", () => {
+    const answer = "Maintainer answer: keep the action running and warn once.";
+    const { decision, jobs } = simulate({
+      issueBody: `Backups longer than five minutes are reported as action timed out.\n${"log line\n".repeat(4_000)}`,
+      comments: [
+        { author: "reporter", createdAt: "2026-09-01", body: "Maybe cancel it at five minutes?" },
+        { author: "maintainer", createdAt: "2026-09-02", body: answer },
+      ],
+    });
+    expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+    for (const job of [jobs.find((j) => j.purpose === "diagnostic" && j.kind === "agent")!, jobs.find((j) => j.purpose === "review")!]) {
+      const assignment = (job.input as { assignment: string }).assignment;
+      expect(assignment.length).toBeGreaterThan(36_000);
+      expect(assignment).toContain(answer);
+      expect(assignment).not.toContain("truncated");
+    }
+  });
+
+  it("stops before any agent when the issue snapshot cannot be handed over whole", () => {
+    const incomplete = simulate({ commentsComplete: false });
+    expect(incomplete.decision.action).toMatchObject({ type: "stop", stop: { reason: "incompatible task", blocker: expect.stringContaining("more comments than the run fetched") } });
+    expect(incomplete.jobs.filter((j) => j.kind === "agent")).toEqual([]);
+
+    const huge = simulate({ issueBody: "x".repeat(MAX_SNAPSHOT_CHARS + 1) });
+    expect(huge.decision.action).toMatchObject({ type: "stop", stop: { reason: "incompatible task", blocker: expect.stringContaining(`more than the ${MAX_SNAPSHOT_CHARS}`) } });
+    expect(huge.jobs.filter((j) => j.kind === "agent")).toEqual([]);
+  });
+
   it("reviews and delivers the accepted fix after a resume", () => {
     const { decision, jobs } = simulate({ resumeAfterFix: true });
     expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
@@ -356,11 +390,19 @@ describe("go test -json outcome", () => {
     expect(testOutcome(events({ Action: "pass", Test: TEST }, { Action: "fail", Test: TEST }), TEST)).toBe("failed");
   });
 
+  it("tells a panic from an assertion failure", () => {
+    const panic = events({ Action: "output", Test: TEST, Output: "panic: runtime error: index out of range [recovered]\n" }, { Action: "fail", Test: TEST });
+    expect(testOutcome(panic, TEST)).toBe("panicked");
+    expect(testOutcome(events({ Action: "output", Test: "TestOther", Output: "panic: boom\n" }, { Action: "fail", Test: TEST }), TEST)).toBe("failed");
+    expect(testOutcome(events({ Action: "output", Test: TEST, Output: "expected panic: none\n" }, { Action: "fail", Test: TEST }), TEST)).toBe("failed");
+  });
+
   it("judges a Ginkgo suite by the specs that ran, not by the suite's TestXxx", () => {
     const ginkgo = (specs: Array<Partial<GinkgoSpec>>) =>
       `${FAILED}\n${JSON.stringify({ GraphLoomGinkgo: { specs: specs.map((s) => ({ text: "scheduler warns", node: "It", state: "passed", failureNode: "", message: "", ...s })) } })}`;
     const suite = { name: TEST, focus: "warns" };
     expect(regressionOutcome(ginkgo([{ state: "failed", failureNode: "It" }]), suite)).toBe("failed");
+    expect(regressionOutcome(ginkgo([{ state: "panicked", failureNode: "It" }]), suite)).toBe("panicked");
     expect(regressionOutcome(ginkgo([{ state: "passed" }]), suite)).toBe("passed");
     expect(regressionOutcome(ginkgo([{ node: "BeforeSuite", state: "failed", failureNode: "BeforeSuite" }]), suite)).toBe("not-run");
     expect(regressionOutcome(ginkgo([{ state: "failed", failureNode: "BeforeEach" }]), suite)).toBe("setup-failed");

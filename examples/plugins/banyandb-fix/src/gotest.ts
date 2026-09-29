@@ -1,11 +1,12 @@
 /**
  * What a `go test -json` report says about one top-level test:
- * - `failed`: the test ran and failed (an assertion, not a build error);
+ * - `failed`: the test ran and failed (an assertion, not a build error or a panic);
+ * - `panicked`: the test ran and panicked, so it proves nothing about the behaviour it asserts;
  * - `passed`: the test ran and passed;
  * - `build-failed`: the package did not build, so the test never ran;
  * - `not-run`: the report has no result for the test.
  */
-export type TestOutcome = "failed" | "passed" | "build-failed" | "not-run";
+export type TestOutcome = "failed" | "panicked" | "passed" | "build-failed" | "not-run";
 
 interface TestEvent {
   Action?: string;
@@ -18,6 +19,7 @@ interface TestEvent {
 export function testOutcome(report: string, testName: string): TestOutcome {
   let outcome: TestOutcome = "not-run";
   let buildFailed = false;
+  let panicked = false;
   for (const line of report.split("\n")) {
     const trimmed = line.trim();
     if (!trimmed.startsWith("{")) {
@@ -33,11 +35,12 @@ export function testOutcome(report: string, testName: string): TestOutcome {
     if (event.Action === "build-fail") buildFailed = true;
     if (event.Action === "output" && event.Test === undefined && /\[(build|setup) failed\]/.test(event.Output ?? "")) buildFailed = true;
     if (event.Test !== testName) continue;
+    if (event.Action === "output" && /^panic: /m.test(event.Output ?? "")) panicked = true;
     if (event.Action === "fail") outcome = "failed";
     else if (event.Action === "pass" && outcome !== "failed") outcome = "passed";
   }
   if (buildFailed && outcome !== "failed") return "build-failed";
-  return outcome;
+  return outcome === "failed" && panicked ? "panicked" : outcome;
 }
 
 /**
@@ -107,7 +110,8 @@ export function regressionOutcome(report: string, test: { name: string; focus?: 
   if (specs === undefined) return testOutcome(report, test.name);
   const its = specs.filter((s) => s.node === "It");
   const broken = (s: GinkgoSpec) => s.state !== "passed";
-  if (its.some((s) => (s.state === "failed" || s.state === "panicked") && s.failureNode === "It")) return "failed";
+  if (its.some((s) => s.state === "panicked" && s.failureNode === "It")) return "panicked";
+  if (its.some((s) => s.state === "failed" && s.failureNode === "It")) return "failed";
   if (its.some(broken)) return "setup-failed";
   if (its.length > 0 && !specs.some(broken)) return "passed";
   return testOutcome(report, test.name) === "build-failed" ? "build-failed" : "not-run";

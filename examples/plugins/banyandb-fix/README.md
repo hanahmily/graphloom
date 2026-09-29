@@ -31,7 +31,7 @@ the declaration; without a supervisor, the run stops.
 | Stage | Requirement | Validator |
 |---|---|---|
 | Fix | `decisions-recorded`: the implementer's `decision-record-v1` names the test, the expected value's source, the production caller, and every decision with its tier and basis | `decisions-recorded` |
-| Fix | `reproduces`: in a prepared base checkout with only the change's test files, the regression test fails by assertion | `red-reproduces` |
+| Fix | `reproduces`: in a prepared base checkout with only the change's test files, the regression test fails by assertion, not by a build error, setup failure or panic | `red-reproduces` |
 | Fix | `passes`: in the committed candidate checkout, the regression test and `make test-ci` for the changed packages pass | `green-passes` |
 | Fix | `builds`: in the same checkout, make license-check, build, lint and check pass | `build-checks` |
 | Fix | `in-scope`: the change avoids `api/proto`, `go.mod`, `go.sum` and `.github` unless the record justifies it | `write-scope` |

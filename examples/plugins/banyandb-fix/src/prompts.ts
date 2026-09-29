@@ -6,7 +6,7 @@ import type { Issue, IssueComment } from "./evidence.js";
 import { regressionArgv } from "./gotest.js";
 
 const MINUTE = 60_000;
-const MAX_SNAPSHOT_CHARS = 24_000;
+export const MAX_SNAPSHOT_CHARS = 200_000;
 
 export const UNCLEAR_POLICY = [
   "Unclear points (issue descriptions are often incomplete):",
@@ -22,14 +22,22 @@ export function issueRef(issue: number): string {
   return `${ISSUE_REPO.owner}/${ISSUE_REPO.repo}#${issue}`;
 }
 
-/** The issue snapshot as text, bounded; the snapshot is the run's authority. */
-export function snapshotText(issue: Issue, comments: IssueComment[]): string {
+/**
+ * The complete issue snapshot as text, or why it cannot be handed over whole.
+ * The snapshot is the run's authority and later comments take precedence, so
+ * a prefix of it, or of its discussion, cannot stand for it.
+ */
+export function snapshotText(issue: Issue, comments: IssueComment[], commentsComplete: boolean): { text: string } | { problem: string } {
+  if (!commentsComplete) return { problem: `${issueRef(issue.number)} has more comments than the run fetched, and later comments take precedence` };
   const parts = [`# ${issueRef(issue.number)}: ${issue.title}`, `State: ${issue.state}. Labels: ${issue.labels.join(", ") || "none"}. ${issue.url}`, "", issue.body.trim() || "(no description)"];
   for (const c of comments) {
     parts.push("", `## Comment by ${c.author ?? "unknown"}${c.createdAt !== null ? ` at ${c.createdAt}` : ""}`, c.body.trim());
   }
   const text = parts.join("\n");
-  return text.length <= MAX_SNAPSHOT_CHARS ? text : `${text.slice(0, MAX_SNAPSHOT_CHARS)}\n…(snapshot truncated)`;
+  if (text.length > MAX_SNAPSHOT_CHARS) {
+    return { problem: `the snapshot of ${issueRef(issue.number)} is ${text.length} characters, more than the ${MAX_SNAPSHOT_CHARS} an agent prompt carries whole` };
+  }
+  return { text };
 }
 
 export function planInstruction(args: { issue: number; request: string; snapshot: string }): string {

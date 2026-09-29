@@ -169,13 +169,15 @@ export function issueSnapshot(evidence: EvidenceRecord[], number: number): { rec
   return undefined;
 }
 
-export function issueComments(evidence: EvidenceRecord[]): { record: EvidenceRecord; comments: IssueComment[] } | undefined {
+export function issueComments(evidence: EvidenceRecord[]): { record: EvidenceRecord; comments: IssueComment[]; complete: boolean } | undefined {
   for (const record of [...evidence].reverse()) {
     if (producer(record)?.executorId !== LIST_ISSUE_COMMENTS.id) continue;
-    const items = object(object(record.payload)?.github)?.items;
+    const github = object(object(record.payload)?.github);
+    const items = github?.items;
     if (!Array.isArray(items)) continue;
     return {
       record,
+      complete: object(github?.page)?.complete === true,
       comments: items.map((raw) => {
         const c = object(raw) ?? {};
         return {

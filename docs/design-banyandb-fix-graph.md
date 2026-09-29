@@ -128,7 +128,11 @@ in the change the controller checks against the write scope.
 1. **Issue snapshot.** The GitHub executor's `get-issue` and
    `list-issue-comments` operations fetch the issue body and comments. The
    snapshot becomes evidence and is the authority for the whole run. Comments
-   posted later need a new run.
+   posted later need a new run. The planner and the reviewer receive the whole
+   snapshot, never a prefix: later comments take precedence. When the comment
+   listing is incomplete or the snapshot exceeds what one prompt carries
+   (200,000 characters), the run stops as an incompatible task before any agent
+   job.
 2. **Plan.** A read-only Claude Code job reads the snapshot, the repository and
    its `AGENTS.md` and `CLAUDE.md`. It returns a `decision-record-v1` result:
    - the test to add, its package, and where the expected value comes from;
@@ -153,7 +157,8 @@ in the change the controller checks against the write scope.
      lockfiles and build inputs, then applies only the candidate's test-file
      changes. No production edits or generated output are copied from the fixed
      worktree. Preparation failure is environment evidence, never a RED pass.
-     RED passes only when the new test fails by assertion, not compilation.
+     RED passes only when the new test fails by assertion, not by compilation,
+     setup failure or panic.
      Test identity comes from `go test -json` for plain tests, or from a Ginkgo
      JSON report with a focus on the new spec for suites; GREEN must execute the
      same regression.

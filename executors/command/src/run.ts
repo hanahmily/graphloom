@@ -176,22 +176,41 @@ async function runCommand(spec: CommandSpec, extraEnv: Record<string, string>, c
     ctx.signal?.addEventListener("abort", onAbort, { once: true });
     child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
     child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
-    const finish = async (value: { exitCode: number | null; signal: string | null; spawnError?: string }) => {
+    const closed = new Promise<void>((done) => child.once("close", () => done()));
+    const settle = (value: { exitCode: number | null; signal: string | null; spawnError?: string }) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       ctx.signal?.removeEventListener("abort", onAbort);
-      // The direct child is gone, but what it started may not be: nothing may
-      // outlive the command and keep changing the workspace.
-      if (child.pid !== undefined && groupAlive(child.pid)) {
-        terminate();
-        await waitForGroupExit(child.pid, KILL_GRACE_MS * 2);
-      }
       if (killTimer !== undefined) clearTimeout(killTimer);
       resolve(value);
     };
-    child.once("error", (err) => void finish({ exitCode: null, signal: null, spawnError: err.message }));
-    child.once("close", (code, signal) => void finish({ exitCode: code, signal }));
+    child.once("error", (err) => settle({ exitCode: null, signal: null, spawnError: err.message }));
+    // Cleanup starts when the direct child exits, not when its pipes close: a
+    // descendant holding them would otherwise keep a finished command running
+    // until its time limit. Nothing may outlive the command and keep changing
+    // the workspace.
+    child.once("exit", (code, signal) => {
+      clearTimeout(timer);
+      void (async () => {
+        if (child.pid !== undefined && groupAlive(child.pid)) {
+          terminate();
+          await waitForGroupExit(child.pid, KILL_GRACE_MS * 2);
+        }
+        // A descendant that left the group can still hold the pipes.
+        let drainTimer: NodeJS.Timeout | undefined;
+        const drained = await Promise.race([
+          closed.then(() => true),
+          new Promise<false>((r) => (drainTimer = setTimeout(() => r(false), KILL_GRACE_MS))),
+        ]);
+        clearTimeout(drainTimer);
+        if (!drained) {
+          child.stdout.destroy();
+          child.stderr.destroy();
+        }
+        settle({ exitCode: code, signal });
+      })();
+    });
   });
 
   const report = await readTail(reportFile, REPORT_TAIL_BYTES);

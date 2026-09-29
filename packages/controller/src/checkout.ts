@@ -59,7 +59,7 @@ export async function runInCheckout(args: {
   runner: Runner;
   signal: AbortSignal;
   source?: ExecutorSourceOverride;
-}): Promise<{ result: JobResult; candidateDigest: string }> {
+}): Promise<{ result: JobResult; candidateDigest: string; staleIdentity?: string }> {
   const { job, operationId, generation, runId } = args;
   const change = await candidateChange(args.worktreePath, args.pinnedHead);
   const identity = { runId, operationId, generation };
@@ -67,6 +67,8 @@ export async function runInCheckout(args: {
     result: { status: "failed", summary, ...identity, ...(evidence !== undefined ? { evidence } : {}) },
     candidateDigest: change.digest,
   });
+  /** A nested result for another run, operation or generation: the run stops and keeps none of this job's evidence. */
+  const stale = (mismatch: string) => ({ ...failed(`stale job result identity: ${mismatch}`), staleIdentity: mismatch });
   const dir = path.join(checkoutsDir(args.stateDir), operationId);
   const { checkout, ...plain } = job;
   const evidence: JobEvidenceItem[] = [];
@@ -104,10 +106,10 @@ export async function runInCheckout(args: {
     });
     const setup = [...args.checks, ...args.prepare];
     if (setup.length > 0) {
-      const prep = await args.runner.runJob(
-        { ...plain, input: { commands: setup.map((c) => ({ ...c })) } },
-        context(`${operationId}-prepare`),
-      );
+      const prepContext = context(`${operationId}-prepare`);
+      const prep = await args.runner.runJob({ ...plain, input: { commands: setup.map((c) => ({ ...c })) } }, prepContext);
+      const prepMismatch = identityMismatch(prep, prepContext);
+      if (prepMismatch !== undefined) return stale(prepMismatch);
       const mutations = await checkoutMutations(dir, commit);
       const failures = [
         ...(prep.status === "ok" ? [] : [`${prep.status}: ${prep.summary}`]),
@@ -138,7 +140,10 @@ export async function runInCheckout(args: {
       if (args.signal.aborted) break;
       const step = command === undefined ? plain : { ...plain, input: { ...input, commands: [command] } };
       const suffix = typeof command?.id === "string" ? command.id : String(i);
-      const result = await args.runner.runJob(step, context(commands.length === 1 ? operationId : `${operationId}-${suffix}`));
+      const stepContext = context(commands.length === 1 ? operationId : `${operationId}-${suffix}`);
+      const result = await args.runner.runJob(step, stepContext);
+      const mismatch = identityMismatch(result, stepContext);
+      if (mismatch !== undefined) return stale(mismatch);
       ran += 1;
       for (const rel of await checkoutMutations(dir, commit)) seen.add(rel);
       for (const item of result.evidence ?? []) {
@@ -162,6 +167,15 @@ export async function runInCheckout(args: {
   } finally {
     await removeTree(dir);
   }
+}
+
+/** Why a runner's result does not belong to the invocation that asked for it, or undefined when it does. */
+export function identityMismatch(
+  result: Pick<JobResult, "runId" | "operationId" | "generation">,
+  expected: { runId: string; operationId: string; generation: number },
+): string | undefined {
+  if (result.runId === expected.runId && result.operationId === expected.operationId && result.generation === expected.generation) return undefined;
+  return `${result.runId}/${result.operationId}/g${result.generation}, expected ${expected.runId}/${expected.operationId}/g${expected.generation}`;
 }
 
 /** The changed paths a checkout applies: all of them, or those under the listed paths. */

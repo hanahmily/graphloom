@@ -492,6 +492,7 @@ async function runNormalLoopSteps(
       let children: ReturnType<typeof createChildPort> | undefined;
       let before: Map<string, string> | undefined;
       let checkedDigest: string | undefined;
+      let staleIdentity: string | undefined;
       try {
         if (notBefore !== undefined) await sleepUntil(notBefore, abort.signal);
         const unchanged = abort.signal.aborted ? undefined : await worktreeChangeFingerprints(state.worktreePath);
@@ -531,6 +532,7 @@ async function runNormalLoopSteps(
             });
             result = ran.result;
             checkedDigest = ran.candidateDigest;
+            staleIdentity = ran.staleIdentity;
           } else {
             result = await deps.runner.runJob(job, {
               runId: state.runId,
@@ -593,6 +595,18 @@ async function runNormalLoopSteps(
             status: "stopped",
             stopReason: "stale job result identity",
             blocker: `generation ${generation} != ${state.generation}`,
+          };
+          await saveRunState(state);
+          return state;
+        }
+        if (staleIdentity !== undefined) {
+          const { pendingDispatch, ...rest } = state;
+          state = {
+            ...rest,
+            ...(pendingDispatch ? { pendingDispatch: { ...pendingDispatch, status: "failed" as const } } : {}),
+            status: "stopped",
+            stopReason: "stale job result identity",
+            blocker: staleIdentity,
           };
           await saveRunState(state);
           return state;

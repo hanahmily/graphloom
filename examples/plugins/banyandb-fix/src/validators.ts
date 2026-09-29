@@ -74,6 +74,7 @@ export const reproduces: Validator = {
     if (outcome === "failed" && !succeeded(red.command)) return passed(`${name} fails on the base commit with only the test files applied`);
     if (outcome === "build-failed") return failed(`${name} does not build on the base commit; RED must fail by assertion`);
     if (outcome === "setup-failed") return failed(`${name} fails in its setup on the base commit, not in the spec; RED must fail by assertion`);
+    if (outcome === "panicked") return failed(`${name} panics on the base commit instead of failing an assertion; RED must fail by assertion`);
     if (outcome === "passed") return failed(`${name} passes on the base commit, so it does not reproduce the bug`);
     return failed(`${name} has no result on the base commit (${describeCommand(red.command)})`);
   },
