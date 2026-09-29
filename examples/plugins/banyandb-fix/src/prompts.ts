@@ -1,4 +1,4 @@
-import type { EnvironmentCommand, Receipt } from "@graphloom/sdk";
+import type { EnvironmentCommand } from "@graphloom/sdk";
 import { CHANGES_PATH, COMMAND, ISSUE_REPO, PROTECTED_PATHS } from "./constants.js";
 import type { DecisionRecord } from "./decision-record.js";
 import { writeScopeFor } from "./decision-record.js";
@@ -51,6 +51,7 @@ export function planInstruction(args: { issue: number; request: string; snapshot
     args.request.trim(),
     "",
     "Read AGENTS.md and CLAUDE.md if present, the code the issue names, its tests and its production callers.",
+    "A read-only reviewer checks this plan before you implement it.",
     "",
     UNCLEAR_POLICY,
     "",
@@ -60,8 +61,50 @@ export function planInstruction(args: { issue: number; request: string; snapshot
     "- test: the regression test to add. package is the Go package (./pkg/timestamp); name is the top-level TestXxx function `go test -run` selects (for a Ginkgo suite, the suite's TestXxx, with focus set to the new spec's exact text; omit focus for a plain Go test); expectedValueSource says where the expected value comes from, independent of the fix.",
     "- productionCaller: the production code path the fix changes.",
     "- decisions: each unclear point with tier, options, chosen (empty for product points) and basis.",
+    `- ${REACH}`,
     "- openQuestions for maintainers, followUps, needsE2E when the behaviour needs the Kind end-to-end tests, and title for the pull request.",
     `- scopeExceptions: only when the fix must change ${PROTECTED_PATHS.join(", ")}, with the reason.`,
+  ].join("\n");
+}
+
+const REACH =
+  "Reach: for every behaviour the fix changes, the basis of that decision names each caller and lifecycle path that depends on the old behaviour (shutdown and Close, context cancellation, error returns, panics, retries, concurrency, resource release), starting with the changed type's own Close, Stop and shutdown paths, and the test that covers it; a path no test covers is stated there as a risk. For a wait the fix makes longer or unbounded, say what happens when the awaited code ignores cancellation or never returns.";
+
+/** The plan went back to the planner: the plan reviewer's findings, or the code review's after the supervisor re-entered Fix. */
+export function planRevisionInstruction(args: { issue: number; feedback: string[]; changed: boolean }): string {
+  return [
+    `Revise your plan for ${issueRef(args.issue)}. Do not modify any file.`,
+    ...(args.changed ? ["The working tree holds your previous change; plan what to change in it."] : []),
+    "",
+    ...args.feedback.map((f) => `- ${f}`),
+    "",
+    "Read the code again where a finding needs it. A finding you disagree with is answered in the basis of the decision it concerns, with the evidence.",
+    REACH,
+    "",
+    "Return the full decision-record-v1 result again, with every required field.",
+  ].join("\n");
+}
+
+export function planReviewInstruction(args: { issue: number; snapshot: string; record: DecisionRecord; previous?: string[] }): string {
+  return [
+    `You are an independent read-only reviewer of a plan to fix ${issueRef(args.issue)} in this repository (apache/skywalking-banyandb). Nothing is implemented yet${args.previous !== undefined ? " beyond the change already in the working tree" : ""}. Do not modify anything.`,
+    "",
+    "Issue snapshot:",
+    args.snapshot,
+    "",
+    "The plan (decision record):",
+    JSON.stringify(args.record, null, 2),
+    ...(args.previous !== undefined && args.previous.length > 0 ? ["", "The plan was revised because of:", ...args.previous.map((f) => `- ${f}`)] : []),
+    "",
+    "Read the code the plan names, its callers and its tests before judging. Judge four axes:",
+    "- spec: the plan fixes the issue's expected behaviour at its root cause, and changes nothing the issue does not name.",
+    "- decisions: every unclear point has the right tier and a basis in the issue, a maintainer comment or the repository; behaviour points take the most conservative option; no product point is decided.",
+    "- reach: for every behaviour the plan changes, search for each caller and lifecycle path that depends on the old behaviour: shutdown and Close, context cancellation, error returns, panics, retries, concurrency, resource release. Start with the changed type's own Close, Stop and shutdown paths, then its callers. For every wait the plan makes longer or unbounded, ask what happens when the awaited code ignores cancellation or never returns, and find such code among the callers. A path the plan does not name, a removed guarantee (a bound, a timeout, a cleanup, a cancellation) that other code or comments rely on, or a changed path no planned test covers is blocking.",
+    "- test: the regression test's expected value comes from the issue, not from the new code; it fails by assertion on the base commit; its package and name exist or fit the repository's conventions.",
+    "",
+    UNCLEAR_POLICY,
+    "",
+    'Return verdict "approved" or "request_changes", a summary, and findings (axis spec, decisions, reach or test; severity blocking or minor; detail naming the file and function). Request changes only for blocking findings. If the plan decides or depends on a product question, set productDecision to the question for the maintainers; a question the plan leaves open, with that behaviour unchanged, is a finding, not a productDecision.',
   ].join("\n");
 }
 
@@ -87,37 +130,6 @@ export function implementInstruction(args: { issue: number; plan: DecisionRecord
   ].join("\n");
 }
 
-export function reviewInstruction(args: {
-  issue: number;
-  snapshot: string;
-  record: DecisionRecord;
-  base: string;
-  paths: string[];
-  checks: string[];
-}): string {
-  return [
-    `You are an independent read-only reviewer of a fix for ${issueRef(args.issue)} in this repository. Do not modify anything.`,
-    "",
-    "Issue snapshot:",
-    args.snapshot,
-    "",
-    "The implementer's decision record:",
-    JSON.stringify(args.record, null, 2),
-    "",
-    `The change is every difference from base commit ${args.base} in the working tree (read it with git diff ${args.base}, including new files). Changed paths: ${args.paths.join(", ")}.`,
-    "Checks the controller ran on exactly this change:",
-    ...args.checks.map((c) => `- ${c}`),
-    "",
-    "Judge two axes:",
-    "- Spec: the change delivers the issue's expected behaviour; each decision has the right tier and a basis in the issue, a maintainer comment or the repository; nothing outside the issue changed.",
-    "- Standards: run.Go instead of raw goroutines; a behavioural test whose expected value comes from an independent source; the named production caller is wired to the fix; the `bydb file compatible change` label noted when on-disk formats move.",
-    "",
-    UNCLEAR_POLICY,
-    "",
-    'Return verdict "approved" or "request_changes", a summary, and findings (axis spec or standards, severity blocking or minor, detail). If a choice the change makes is really a product decision, set productDecision to the question for the maintainers; a question the change leaves open, with that behaviour unchanged, is a finding, not a productDecision.',
-  ].join("\n");
-}
-
 /** RED: the base commit with only the test files applied. */
 export function redCommands(test: NonNullable<DecisionRecord["test"]>): EnvironmentCommand[] {
   return [{ id: COMMAND.regression, argv: regressionArgv(test), timeoutMs: 30 * MINUTE }];
@@ -140,57 +152,66 @@ export function candidateCommands(test: NonNullable<DecisionRecord["test"]>): En
 }
 
 const DELIVER =
-  'set -eu; branch="$1"; shift; message=""; for part in "$@"; do message="$message$part"; done; ' +
+  'set -eu; branch="$1"; n="$2"; shift 2; message=""; while [ "$n" -gt 0 ]; do message="$message$1"; shift; n=$((n - 1)); done; ' +
+  'body=""; for part in "$@"; do body="$body$part"; done; ' +
   'if git show-ref --verify --quiet "refs/heads/$branch"; then echo "branch $branch already exists" >&2; exit 1; fi; ' +
   'index="$(mktemp -u)"; trap \'rm -f "$index"\' EXIT; ' +
   'GIT_INDEX_FILE="$index" git read-tree HEAD; GIT_INDEX_FILE="$index" git add -A; tree="$(GIT_INDEX_FILE="$index" git write-tree)"; ' +
   'commit="$(printf "%s\\n" "$message" | git commit-tree "$tree" -p HEAD)"; git branch "$branch" "$commit"; ' +
-  'printf "%s\\n" "$message" > "$GRAPHLOOM_REPORT_FILE"; echo "$commit"';
+  'printf "%s\\n" "$body" > "$GRAPHLOOM_REPORT_FILE"; echo "$commit"';
 
-/**
- * Put the change on a local branch as one commit whose message is the draft
- * pull request, without touching the worktree, its index or its branch.
- */
-export function deliverCommands(branch: string, message: string): EnvironmentCommand[] {
+function chunked(text: string): string[] {
   const chunks: string[] = [];
-  for (let i = 0; i < message.length; i += 4_000) chunks.push(message.slice(i, i + 4_000));
-  return [{ id: COMMAND.deliver, argv: ["sh", "-c", DELIVER, "deliver", branch, ...chunks.slice(0, 59)] }];
+  for (let i = 0; i < text.length; i += 4_000) chunks.push(text.slice(i, i + 4_000));
+  return chunks;
 }
 
+/**
+ * Put the change on a local branch as one commit with `message`, without
+ * touching the worktree, its index or its branch. The pull request body goes
+ * to the command's report, which the controller keeps with the run's evidence.
+ */
+export function deliverCommands(branch: string, message: string, body: string): EnvironmentCommand[] {
+  const messageChunks = chunked(message).slice(0, 4);
+  return [{ id: COMMAND.deliver, argv: ["sh", "-c", DELIVER, "deliver", branch, String(messageChunks.length), ...messageChunks, ...chunked(body).slice(0, 54)] }];
+}
+
+/** The commit message: the title, the summary and the issue it fixes. */
+export function commitMessage(args: { issue: number; issueTitle: string; record: DecisionRecord }): string {
+  return [args.record.title?.trim() || `Fix ${args.issueTitle}`, "", args.record.summary.trim(), "", `Fixes ${issueRef(args.issue)}`].join("\n");
+}
+
+/** The pull request body, following BanyanDB's pull request template. */
 export function pullRequestDescription(args: {
   issue: number;
   issueTitle: string;
   record: DecisionRecord;
   base: string;
-  receipts: Receipt[];
-  checks: string[];
+  review: string;
 }): string {
   const { record } = args;
-  const receipt = (requirementId: string) => args.receipts.find((r) => r.valid && r.requirementId === requirementId)?.id ?? "no receipt";
-  const decisions = record.decisions;
+  const decided = record.decisions.filter((d) => d.chosen?.trim());
   const lines = [
-    record.title?.trim() || `Fix ${args.issueTitle}`,
-    "",
-    `Fixes ${issueRef(args.issue)}`,
+    `### Fix ${issueRef(args.issue)}: ${args.issueTitle}`,
+    "- [x] Add a unit test to verify that the fix works.",
+    "- [x] Explain briefly why the bug exists and how to fix it.",
     "",
     "## Summary",
     record.summary.trim(),
-    "",
-    "## Decisions",
-    ...(decisions.length === 0
-      ? ["None."]
-      : decisions.map((d) => `- ${d.point} (${d.tier}): ${d.chosen?.trim() || "left unchanged"}. ${d.basis.trim()}${d.options.length > 0 ? ` Options: ${d.options.join("; ")}.` : ""}`)),
-    "",
-    "## Open questions",
-    ...(record.openQuestions.length === 0 ? ["None."] : record.openQuestions.map((q) => `- ${q}`)),
+    ...(decided.length > 0
+      ? ["", "## Decisions", ...decided.map((d) => `- ${d.point}: ${d.chosen!.trim()}. ${d.basis.trim()}${d.options.length > 1 ? ` Alternatives: ${d.options.filter((o) => o !== d.chosen).join("; ")}.` : ""}`)]
+      : []),
+    ...(record.openQuestions.length > 0 ? ["", "## Open questions", "This change leaves these behaviours unchanged:", ...record.openQuestions.map((q) => `- ${q}`)] : []),
     ...((record.followUps ?? []).length > 0 ? ["", "## Follow-ups", ...record.followUps!.map((f) => `- ${f}`)] : []),
     "",
     "## Test plan",
-    `- RED: ${record.test?.name ?? "the regression test"} in ${record.test?.package ?? "?"} fails by assertion on ${args.base.slice(0, 12)} with only the test files applied (receipt ${receipt("reproduces")}).`,
-    `- GREEN: the same test and \`make test-ci\` for the changed packages pass on the change (receipt ${receipt("passes")}).`,
-    `- Build: make license-check, build, lint and check pass (receipt ${receipt("builds")}).`,
-    ...args.checks.map((c) => `- ${c}`),
-    ...(record.needsE2E === true ? ["- End-to-end tests (Kind) were not run; this change needs them."] : []),
+    `- ${record.test?.name ?? "The regression test"} in \`${record.test?.package ?? "?"}\` fails by assertion on ${args.base.slice(0, 12) || "the base commit"} with only the test files applied, and passes with the fix.`,
+    "- `make test-ci` for the changed packages, `make license-check`, `make build`, `make lint` and `make check` pass.",
+    `- ${args.review}`,
+    ...(record.needsE2E === true ? ["- The end-to-end tests (Kind) were not run; this change needs them."] : []),
+    "",
+    `- [x] If this pull request closes/resolves/fixes an existing issue, replace the issue number. Fixes ${issueRef(args.issue)}.`,
+    "- [x] Update the [`CHANGES` log](https://github.com/apache/skywalking-banyandb/blob/main/CHANGES.md).",
   ];
   return lines.join("\n");
 }

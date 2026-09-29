@@ -24,10 +24,12 @@ import {
   ISSUE_REPO,
   LIST_ISSUE_COMMENTS,
   MAX_FIX_CORRECTIONS,
+  MAX_PLAN_REVISIONS,
   REQUIREMENT_BUILDS,
   REQUIREMENT_CHANGELOG,
   REQUIREMENT_DECISIONS,
   REQUIREMENT_PASSES,
+  REQUIREMENT_PLAN_REVIEW,
   REQUIREMENT_REPRODUCES,
   REQUIREMENT_REVIEW,
   REQUIREMENT_SCOPE,
@@ -46,21 +48,27 @@ import {
   latestFile,
   latestReview,
   outputTail,
+  reviews,
   sameCheckoutJob,
   succeeded,
+  type CommandRun,
+  type ReviewVerdict,
 } from "./evidence.js";
+import { blockingComments, codeReviewCommands, describeComment, parseOcrReport, reviewBackground, reviewComplete } from "./ocr.js";
 import {
   candidateCommands,
+  commitMessage,
   deliverCommands,
   implementInstruction,
   issueRef,
   planInstruction,
+  planReviewInstruction,
+  planRevisionInstruction,
   pullRequestDescription,
   redCommands,
-  reviewInstruction,
   snapshotText,
 } from "./prompts.js";
-import { implementerRecord, isTestPath, validatorById } from "./validators.js";
+import { codeReview, implementerRecord, isTestPath, validatorById } from "./validators.js";
 
 /** Graph bookkeeping; everything else is read back from recorded evidence. */
 export interface FixPrivateState {
@@ -71,17 +79,31 @@ export interface FixPrivateState {
 
 const definition: GraphDefinition = {
   graphId: "banyandb-fix",
-  version: "0.1.0",
+  version: "0.2.0",
   privateStateSchema: "banyandb-fix-private-v1",
   stages: [
     {
       id: FIX_STAGE,
       name: "Fix",
-      requirementIds: [REQUIREMENT_DECISIONS, REQUIREMENT_REPRODUCES, REQUIREMENT_PASSES, REQUIREMENT_BUILDS, REQUIREMENT_SCOPE, REQUIREMENT_CHANGELOG],
+      requirementIds: [
+        REQUIREMENT_PLAN_REVIEW,
+        REQUIREMENT_DECISIONS,
+        REQUIREMENT_REPRODUCES,
+        REQUIREMENT_PASSES,
+        REQUIREMENT_BUILDS,
+        REQUIREMENT_SCOPE,
+        REQUIREMENT_CHANGELOG,
+      ],
     },
     { id: REVIEW_STAGE, name: "Review", requirementIds: [REQUIREMENT_REVIEW] },
   ],
   requirements: [
+    {
+      id: REQUIREMENT_PLAN_REVIEW,
+      statement:
+        "A fresh read-only reviewer approved the plan the implementer followed, after that plan was written, on the spec, decisions, reach and test axes.",
+      evidenceSchema: "review-verdict-v1",
+    },
     {
       id: REQUIREMENT_DECISIONS,
       statement:
@@ -119,18 +141,19 @@ const definition: GraphDefinition = {
     {
       id: REQUIREMENT_REVIEW,
       statement:
-        "An independent read-only reviewer approves the current change on the Spec and Standards axes, and the verdict is bound to that change.",
-      evidenceSchema: "review-verdict-v1",
+        "open-code-review, run read-only in a prepared checkout of the current change, reviewed every changed file and reported no critical or high comment, and the checkout was left unchanged.",
+      evidenceSchema: "checkout-command-v1",
     },
   ],
   defaultValidators: [
+    { requirementId: REQUIREMENT_PLAN_REVIEW, validatorId: "plan-reviewer", version: "1", independence: "separate-reviewer" },
     { requirementId: REQUIREMENT_DECISIONS, validatorId: "decisions-recorded", version: "1" },
     { requirementId: REQUIREMENT_REPRODUCES, validatorId: "red-reproduces", version: "1" },
     { requirementId: REQUIREMENT_PASSES, validatorId: "green-passes", version: "1" },
     { requirementId: REQUIREMENT_BUILDS, validatorId: "build-checks", version: "1" },
     { requirementId: REQUIREMENT_SCOPE, validatorId: "write-scope", version: "1" },
     { requirementId: REQUIREMENT_CHANGELOG, validatorId: "changes-entry", version: "1" },
-    { requirementId: REQUIREMENT_REVIEW, validatorId: "independent-reviewer", version: "1", independence: "separate-reviewer" },
+    { requirementId: REQUIREMENT_REVIEW, validatorId: "open-code-review", version: "1" },
   ],
   environment: ENVIRONMENT,
 };
@@ -173,12 +196,19 @@ function fix(view: RunView, issue: number, state: FixPrivateState): GraphDecisio
       state,
     );
   }
-  const snapshotBody = snapshotText(snapshot.issue, comments.comments, comments.complete);
-  if ("problem" in snapshotBody) return partialSnapshot(snapshotBody.problem, [snapshot.record.ref, comments.record.ref]);
+  const snapshotResult = snapshotText(snapshot.issue, comments.comments, comments.complete);
+  if ("problem" in snapshotResult) return partialSnapshot(snapshotResult.problem, [snapshot.record.ref, comments.record.ref]);
+  const snapshotBody = snapshotResult.text;
+  const current = inGeneration(view.evidence, view.generation);
 
-  const planRun = agentRuns(view.evidence, FIX_STAGE, "diagnostic").at(-1);
-  if (planRun === undefined || planRun.status !== "completed") {
-    return dispatchAgent(view, planJob(planInstruction({ issue, request: view.task.request, snapshot: snapshotBody.text })), "plan the fix (read-only)", state);
+  // Validators see only this generation's evidence, so every generation plans and reviews its plan.
+  const planRun = agentRuns(current, FIX_STAGE, "diagnostic").filter((r) => r.status === "completed").at(-1);
+  if (planRun === undefined) {
+    const revisit = agentRuns(view.evidence, FIX_STAGE, "diagnostic").some((r) => r.status === "completed");
+    const assignment = revisit
+      ? planRevisionInstruction({ issue, feedback: reentryFeedback(view), changed: agentRuns(view.evidence, FIX_STAGE, "work").length > 0 })
+      : planInstruction({ issue, request: view.task.request, snapshot: snapshotBody });
+    return dispatchAgent(view, planJob(view, assignment), revisit ? "revisit the plan after returning to Fix (read-only)" : "plan the fix (read-only)", state);
   }
   const plan = parseDecisionRecord(planRun.output);
   if ("problem" in plan) {
@@ -187,14 +217,42 @@ function fix(view: RunView, issue: number, state: FixPrivateState): GraphDecisio
   const blocked = notReady(plan.record, [planRun.record.ref], "the plan");
   if (blocked !== undefined) return blocked;
 
-  const current = inGeneration(view.evidence, view.generation);
+  const planReviews = reviews(current, FIX_STAGE);
+  const verdict = planReviews.filter((r) => current.indexOf(r.record) > current.indexOf(planRun.record)).at(-1);
+  if (verdict === undefined) {
+    const earlier = planReviews.at(-1);
+    const previous = earlier !== undefined ? verdictFeedback(earlier) : agentRuns(view.evidence, FIX_STAGE, "work").length > 0 ? reentryFeedback(view) : undefined;
+    return dispatchAgent(view, planReviewJob(planReviewInstruction({ issue, snapshot: snapshotBody, record: plan.record, ...(previous !== undefined ? { previous } : {}) })), "dispatch a fresh read-only reviewer for the plan", state);
+  }
+  if (verdict.productDecision !== undefined && verdict.verdict !== "approved") {
+    return stop(
+      { reason: "needs maintainer decision", blocker: verdict.productDecision, evidenceRefs: [verdict.record.ref] },
+      "the plan reviewer found a product decision an agent must not make",
+    );
+  }
+  if (verdict.verdict !== "approved") {
+    const sentBack = planReviews.filter((r) => r.verdict !== "approved").length;
+    if (sentBack > MAX_PLAN_REVISIONS) {
+      return supervise(
+        { reason: `the reviewer sent the plan back ${sentBack} times: ${verdict.summary}`, evidenceRefs: planReviews.map((r) => r.record.ref) },
+        "hand the disputed plan to the supervisor",
+        JSON.stringify(state),
+      );
+    }
+    return dispatchAgent(
+      view,
+      planJob(view, planRevisionInstruction({ issue, feedback: verdictFeedback(verdict), changed: agentRuns(view.evidence, FIX_STAGE, "work").length > 0 })),
+      "revise the plan with the reviewer's findings",
+      state,
+    );
+  }
+
   const implemented = agentRuns(current, FIX_STAGE, "work").at(-1);
-  const latestRecord = implementerRecord(view.evidence).record ?? plan.record;
   if (implemented === undefined || implemented.status !== "completed") {
     return dispatchAgent(
       view,
-      implementJob(view, issue, latestRecord, reviewFeedback(view, implemented === undefined)),
-      implemented === undefined ? "implement the fix, continuing the plan session" : "retry the implementation",
+      implementJob(view, issue, plan.record, undefined),
+      implemented === undefined ? "implement the reviewed plan, continuing the plan session" : "retry the implementation",
       state,
     );
   }
@@ -238,7 +296,7 @@ function fix(view: RunView, issue: number, state: FixPrivateState): GraphDecisio
   if (state.corrections < MAX_FIX_CORRECTIONS && view.budgets.corrections > 0) {
     return dispatchAgent(
       view,
-      implementJob(view, issue, record ?? latestRecord, feedback),
+      implementJob(view, issue, record ?? plan.record, feedback),
       "correct the change with the failing evidence",
       { ...state, corrections: state.corrections + 1 },
     );
@@ -252,56 +310,33 @@ function fix(view: RunView, issue: number, state: FixPrivateState): GraphDecisio
 
 function review(view: RunView, issue: number, state: FixPrivateState): GraphDecision {
   const current = inGeneration(view.evidence, view.generation);
-  const verdict = latestReview(current);
-  if (verdict === undefined) {
-    // Fix was accepted for this candidate, possibly before a resume moved the generation on.
-    const record = implementerRecord(view.evidence).record;
+  // Fix was accepted for this candidate, possibly before a resume moved the generation on.
+  const run = latestCheckoutRun(current, COMMAND.codeReview, "candidate", view.candidateDigest);
+  if (run === undefined) {
+    const record = implementerRecord(view.evidence).record!;
     const snapshot = issueSnapshot(view.evidence, issue)!;
-    const comments = issueComments(view.evidence);
-    const snapshotBody = snapshotText(snapshot.issue, comments?.comments ?? [], comments?.complete ?? false);
-    if ("problem" in snapshotBody) return partialSnapshot(snapshotBody.problem, [snapshot.record.ref, ...(comments !== undefined ? [comments.record.ref] : [])]);
-    const green = latestCheckoutRun(view.evidence, COMMAND.regression, "candidate", view.candidateDigest);
-    return dispatchAgent(
-      view,
-      {
-        stageId: REVIEW_STAGE,
-        kind: "agent",
-        purpose: "review",
-        readOnly: true,
-        instruction: "Review the fix",
-        resultSchema: "review-verdict-v1",
-        executor: CODING_AGENT,
-        input: {
-          assignment: reviewInstruction({
-            issue,
-            snapshot: snapshotBody.text,
-            record: record!,
-            base: green?.checkout?.base ?? "the pinned base commit",
-            paths: green?.checkout?.paths ?? [],
-            checks: checkFacts(view.evidence, view.candidateDigest),
-          }),
-          resultSchema: "review-verdict-v1",
-          harness: REVIEWER_HARNESS,
+    return withPrivate(
+      dispatch(
+        {
+          stageId: REVIEW_STAGE,
+          kind: "command",
+          purpose: "review",
+          readOnly: true,
+          instruction: "Review the change with open-code-review",
+          checkout: { from: "candidate" },
+          input: { commands: codeReviewCommands(reviewBackground(snapshot.issue, record)) },
         },
-      },
-      "dispatch a fresh read-only reviewer",
+        "review the committed change with open-code-review",
+      ),
       state,
     );
   }
-  // An approved change does not depend on the answer; delivery asks it in the pull request.
-  if (verdict.productDecision !== undefined && verdict.verdict !== "approved") {
-    return stop(
-      { reason: "needs maintainer decision", blocker: verdict.productDecision, evidenceRefs: [verdict.record.ref] },
-      "the reviewer found a product decision an agent must not make",
-    );
-  }
-  if (verdict.verdict === "approved") {
-    return withPrivate(validate({ stageId: REVIEW_STAGE }, "validate the approved change"), state);
-  }
-  const findings = verdict.findings.map((f) => f.detail).join("; ");
+  const statement = definition.requirements.find((r) => r.id === REQUIREMENT_REVIEW)!.statement;
+  const result = codeReview.evaluate({ requirementId: REQUIREMENT_REVIEW, statement, evidence: current, candidateDigest: run.record.candidateDigest! }) as ValidationResult;
+  if (result.status === "passed") return withPrivate(validate({ stageId: REVIEW_STAGE }, "validate the reviewed change"), state);
   return supervise(
-    { reason: `the reviewer requested changes: ${verdict.summary}${findings !== "" ? ` (${findings})` : ""}`, evidenceRefs: [verdict.record.ref] },
-    "hand the requested changes to the supervisor",
+    { reason: `code review did not pass: ${result.reason}`, evidenceRefs: [run.record.ref] },
+    "hand the code review findings to the supervisor",
     JSON.stringify(state),
   );
 }
@@ -312,16 +347,18 @@ function deliver(view: RunView, issue: number, state: FixPrivateState): GraphDec
   const branch = `fix/${issue}`;
   if (delivered === undefined) {
     const record = implementerRecord(view.evidence).record!;
-    const asked = latestReview(current)?.productDecision;
+    // An approved plan does not depend on the answer; the pull request asks it.
+    const asked = latestReview(view.evidence, FIX_STAGE)?.productDecision;
     const openQuestions = asked !== undefined && !record.openQuestions.includes(asked) ? [...record.openQuestions, asked] : record.openQuestions;
     const green = latestCheckoutRun(view.evidence, COMMAND.regression, "candidate", view.candidateDigest);
-    const message = pullRequestDescription({
+    const reviewed = latestCheckoutRun(view.evidence, COMMAND.codeReview, "candidate", view.candidateDigest);
+    const issueTitle = issueSnapshot(view.evidence, issue)?.issue.title ?? issueRef(issue);
+    const body = pullRequestDescription({
       issue,
-      issueTitle: issueSnapshot(view.evidence, issue)?.issue.title ?? issueRef(issue),
+      issueTitle,
       record: { ...record, openQuestions },
       base: green?.checkout?.base ?? "",
-      receipts: view.receipts,
-      checks: [],
+      review: reviewed !== undefined ? reviewSummary(reviewed) : "Code review did not run.",
     });
     return withPrivate(
       dispatch(
@@ -331,9 +368,9 @@ function deliver(view: RunView, issue: number, state: FixPrivateState): GraphDec
           purpose: "diagnostic",
           readOnly: true,
           instruction: `Put the change on ${branch}`,
-          input: { commands: deliverCommands(branch, message) },
+          input: { commands: deliverCommands(branch, commitMessage({ issue, issueTitle, record }), body) },
         },
-        `put the change on the local branch ${branch} with the draft pull request as its message`,
+        `put the change on the local branch ${branch} and write the pull request body`,
       ),
       state,
     );
@@ -346,13 +383,48 @@ function deliver(view: RunView, issue: number, state: FixPrivateState): GraphDec
   }
   return stop(
     { reason: "complete", blocker: "none", evidenceRefs: [delivered.record.ref] },
-    `the change is on ${branch}; the draft pull request is its commit message`,
+    `the change is on ${branch}; the pull request body is the report of evidence ${delivered.record.ref}`,
   );
 }
 
 /** Agents act only on the whole issue snapshot; when it cannot be supplied, the run stops rather than work from part of it. */
 function partialSnapshot(problem: string, refs: string[]): GraphDecision {
   return stop({ reason: "incompatible task", blocker: problem, evidenceRefs: refs }, "stop: the issue snapshot cannot be handed to the agents whole");
+}
+
+/** The test plan's line for the code review. */
+function reviewSummary(run: CommandRun): string {
+  const parsed = parseOcrReport(run.command.report?.text ?? run.command.stdoutTail);
+  if ("problem" in parsed) return "Code review did not produce a result.";
+  const { report } = parsed;
+  const by = `open-code-review${report.model !== undefined ? ` with ${report.model}` : ""}`;
+  return report.commentCount === 0
+    ? `Reviewed with ${by}: no comments.`
+    : `Reviewed with ${by}: no critical or high comments; ${report.commentCount} lower-severity comment(s) left for the reviewer.`;
+}
+
+/** What a plan reviewer's verdict asks the planner to change. */
+function verdictFeedback(verdict: ReviewVerdict): string[] {
+  return [
+    `The plan reviewer sent your plan back: ${verdict.summary}`,
+    ...verdict.findings.map((f) => `${f.axis ?? "finding"}${f.severity !== undefined ? ` (${f.severity})` : ""}: ${f.detail}`),
+  ];
+}
+
+/** Why the run is back in Fix: the code review that failed an earlier change, when there is one. */
+function reentryFeedback(view: RunView): string[] {
+  const run = commandRuns(view.evidence, COMMAND.codeReview)
+    .filter((r) => (r.record.generation ?? view.generation) < view.generation)
+    .at(-1);
+  const parsed = run !== undefined ? parseOcrReport(run.command.report?.text ?? run.command.stdoutTail) : undefined;
+  if (parsed === undefined || "problem" in parsed || (reviewComplete(parsed.report) && blockingComments(parsed.report).length === 0)) {
+    return ["The run returned to Fix after a resume or a supervisor decision. Check the plan against the current code and the change in the working tree."];
+  }
+  const blocking = blockingComments(parsed.report);
+  return [
+    `Code review of your previous change did not pass (open-code-review status ${parsed.report.status}${blocking.length > 0 ? `, ${blocking.length} critical or high comment(s)` : ""}):`,
+    ...blocking.slice(0, 10).map(describeComment),
+  ];
 }
 
 /** A plan or implementer that cannot proceed stops the run with its question. */
@@ -393,22 +465,9 @@ function correctionFeedback(evidence: EvidenceRecord[], digest: string, results:
   return feedback;
 }
 
-/** One line per check bound to the change, for the reviewer. */
-function checkFacts(evidence: EvidenceRecord[], digest: string | undefined): string[] {
-  return commandRuns(evidence)
-    .filter((r) => r.checkout?.phase === "run" && r.record.candidateDigest === digest && r.command.id !== COMMAND.changesDiff)
-    .map((r) => `${r.command.id} in the ${r.checkout!.from} checkout: ${describeCommand(r.command)} (evidence ${r.record.ref})`);
-}
-
-/** The reviewer's requested changes, when Fix is being redone after a review. */
-function reviewFeedback(view: RunView, fresh: boolean): string[] | undefined {
-  if (!fresh) return undefined;
-  const verdict = latestReview(view.evidence);
-  if (verdict === undefined || verdict.verdict !== "request_changes" || (verdict.record.generation ?? view.generation) >= view.generation) return undefined;
-  return [`The reviewer requested changes: ${verdict.summary}`, ...verdict.findings.map((f) => `${f.axis ?? "finding"}${f.severity !== undefined ? ` (${f.severity})` : ""}: ${f.detail}`)];
-}
-
-function planJob(assignment: string): JobSpec {
+/** A plan continues the implementer's session when there is one, so a revision keeps what the planner read. */
+function planJob(view: RunView, assignment: string): JobSpec {
+  const from = implementerSession(view);
   return {
     jobId: IMPLEMENTER_JOB,
     stageId: FIX_STAGE,
@@ -419,6 +478,21 @@ function planJob(assignment: string): JobSpec {
     resultSchema: "decision-record-v1",
     executor: CODING_AGENT,
     input: { assignment, resultSchema: DECISION_RECORD_SCHEMA, harness: IMPLEMENTER_HARNESS },
+    ...(from !== undefined ? { continueFrom: from } : {}),
+  };
+}
+
+/** A fresh session each time: the plan reviewer carries nothing from an earlier review. */
+function planReviewJob(assignment: string): JobSpec {
+  return {
+    stageId: FIX_STAGE,
+    kind: "agent",
+    purpose: "review",
+    readOnly: true,
+    instruction: "Review the plan",
+    resultSchema: "review-verdict-v1",
+    executor: CODING_AGENT,
+    input: { assignment, resultSchema: "review-verdict-v1", harness: REVIEWER_HARNESS },
   };
 }
 

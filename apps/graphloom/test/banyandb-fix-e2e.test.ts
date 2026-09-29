@@ -131,9 +131,41 @@ const PLAN = {
 };
 
 /**
+ * Stands in for open-code-review on PATH: `version` and `llm test` succeed, and
+ * `review` records its arguments and the files the committed change touches,
+ * then writes a result with one low comment.
+ */
+async function fakeOcr(dir: string): Promise<{ bin: string; calls: string }> {
+  const bin = path.join(dir, "bin");
+  const calls = path.join(dir, "ocr-calls");
+  await mkdir(bin);
+  const result = JSON.stringify({
+    status: "complete",
+    llm: { provider: "fake", model: "fake-model" },
+    message: "Review complete: 1 finding(s)",
+    comments: [{ path: "pkg/timestamp/scheduler.go", start_line: 5, end_line: 5, severity: "low", category: "style", content: "Name the constant.", thinking: "private" }],
+  });
+  await writeFile(
+    path.join(bin, "ocr"),
+    [
+      "#!/bin/sh",
+      'case "$1" in version) echo "open-code-review v0-fake"; exit 0;; llm) exit 0;; esac',
+      `{ echo "cwd=$(pwd)"; echo "args=$*"; echo "changed=$(git diff --name-only HEAD~1 HEAD | tr '\\n' ' ')"; } >> "${calls}"`,
+      'while [ $# -gt 0 ]; do [ "$1" = --output ] && out="$2"; shift; done',
+      `printf '%s' '${result}' > "$out"`,
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  // The agents are scripted; the preflight still needs Claude Code installed and logged in.
+  await writeFile(path.join(bin, "claude"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  return { bin, calls };
+}
+
+/**
  * Real command and GitHub executors, as the CLI composes them, with scripted
- * Claude Code and Pi agents: the plan, an implementation that writes the fix,
- * test and changelog entry, and an approving review.
+ * Claude Code and Pi agents: the plan, an approving plan review, and an
+ * implementation that writes the fix, test and changelog entry.
  */
 function fixRunner(baseUrl: string) {
   const agentJobs: JobSpec[] = [];
@@ -153,7 +185,7 @@ function fixRunner(baseUrl: string) {
         ...identity,
       });
       if (job.purpose === "review") {
-        const verdict = { verdict: "approved", summary: "The fix and test match the issue; the metric question is listed." };
+        const verdict = { verdict: "approved", summary: "The plan fixes the issue, names Status's callers, and lists the metric question." };
         return done(verdict, [{ kind: "review", payload: verdict }]);
       }
       if (job.purpose === "work") {
@@ -176,43 +208,63 @@ function fixRunner(baseUrl: string) {
 }
 
 describe.skipIf(GO === undefined)("banyandb-fix on a Go repository", () => {
-  it("checks the environment, fixes the issue with RED and GREEN proof, gets a review, and delivers a local branch", async () => {
+  it("checks the environment, reviews the plan, fixes the issue with RED and GREEN proof, reviews the code, and delivers a local branch", async () => {
     const env = await makeEnv();
     github = await startFakeGitHub({
       issues: [{ number: ISSUE, title: "Scheduler reports long actions as timed out", state: "open", labels: ["bug"], body: "Backups over five minutes log action timed out." }],
     });
     github.comments.set(ISSUE, [{ id: 1, body: "A running backup is not an error; report it as running." }]);
-    const { runner, agentJobs } = fixRunner(github.baseUrl);
-    const definition = fixtureGraph(env.contributing).describe();
-    const validators = Object.fromEntries(definition.defaultValidators.map((b) => [b.validatorId, plugin.validatorById(b.validatorId)!]));
-
-    const report = await createController().run({
-      taskPath: env.taskPath,
-      plugin: fixtureGraph(env.contributing),
-      validators,
-      runner,
-      stateRoot: env.stateRoot,
-      runId: "bydb-14111",
-    });
+    const ocr = await fakeOcr(env.dir);
+    const savedPath = process.env.PATH;
+    process.env.PATH = `${ocr.bin}:${savedPath}`;
+    let report: Awaited<ReturnType<ReturnType<typeof createController>["run"]>>;
+    let agentJobs: JobSpec[];
+    try {
+      const composed = fixRunner(github.baseUrl);
+      agentJobs = composed.agentJobs;
+      const runner = composed.runner;
+      const definition = fixtureGraph(env.contributing).describe();
+      const validators = Object.fromEntries(definition.defaultValidators.map((b) => [b.validatorId, plugin.validatorById(b.validatorId)!]));
+      report = await createController().run({
+        taskPath: env.taskPath,
+        plugin: fixtureGraph(env.contributing),
+        validators,
+        runner,
+        stateRoot: env.stateRoot,
+        runId: "bydb-14111",
+      });
+    } finally {
+      process.env.PATH = savedPath;
+    }
 
     expect(report.status, `${report.stopReason}: ${report.blocker}`).toBe("succeeded");
     const state = await loadRunState(report.stateDir);
     expect(state.receipts.filter((r) => r.valid).map((r) => `${r.stageId}/${r.requirementId}`)).toEqual([
+      "fix/plan-reviewed",
       "fix/decisions-recorded",
       "fix/reproduces",
       "fix/passes",
       "fix/builds",
       "fix/in-scope",
       "fix/changelog-entry",
-      "review/spec-and-standards-review",
+      "review/code-review",
     ]);
     expect(new Set(state.receipts.map((r) => r.candidateDigest))).toEqual(new Set([state.candidateDigest]));
 
-    // The plan saw the issue and its comments; the implementer continued the plan's session.
-    const [plan, implement, review] = agentJobs;
+    // The plan saw the issue and its comments; Pi reviewed it; the implementer continued the plan's session.
+    const [plan, planReview, implement] = agentJobs;
     expect((plan!.input as { assignment: string }).assignment).toContain("A running backup is not an error");
+    expect(planReview).toMatchObject({ stageId: "fix", purpose: "review", readOnly: true, input: { harness: "pi" } });
+    expect((planReview!.input as { assignment: string }).assignment).toContain(PLAN.summary);
     expect(implement!.continueFrom).toBeDefined();
-    expect(review!.input).toMatchObject({ harness: "pi" });
+    expect(agentJobs).toHaveLength(3);
+
+    // open-code-review ran once, in a disposable checkout of the committed change, not in the worktree.
+    const calls = (await readFile(ocr.calls, "utf8")).trim().split("\n");
+    expect(calls).toHaveLength(3);
+    expect(calls[0]).not.toBe(`cwd=${report.worktreePath}`);
+    expect(calls[1]).toMatch(/^args=review --commit HEAD --format json --audience agent --effort high --rule \S+ --background-file \S+ --max-tokens-budget \d+ --output \S+$/);
+    expect(calls[2]!.replace(/^changed=/, "").trim().split(" ").sort()).toEqual(["CHANGES.md", "pkg/timestamp/scheduler.go", "pkg/timestamp/status_test.go"]);
 
     // RED failed by assertion on the base with only the test; GREEN passed on the committed change.
     const command = (id: string) =>
@@ -224,15 +276,19 @@ describe.skipIf(GO === undefined)("banyandb-fix on a Go repository", () => {
       expect(command(id).at(-1)!.payload, id).toMatchObject({ command: { exitCode: 0 }, checkout: { from: "candidate", mutations: [] } });
     }
 
-    // Delivery: a local branch with the whole change and the PR description, and the worktree untouched.
+    // Delivery: a local branch with the whole change and a short message, the PR body in the evidence, and the worktree untouched.
     const git = (...args: string[]) => execFileSync("git", args, { cwd: env.repo, encoding: "utf8" });
     expect(git("show", `fix/${ISSUE}:pkg/timestamp/scheduler.go`)).toBe(FIXED);
     expect(git("ls-tree", "-r", "--name-only", `fix/${ISSUE}`).split("\n")).not.toContain("pkg/timestamp/mock_limit.go");
     expect(git("log", "-1", "--format=%an <%ae>", `fix/${ISSUE}`).trim()).toBe("Maintainer <maintainer@example.com>");
-    const message = git("log", "-1", "--format=%B", `fix/${ISSUE}`);
-    expect(message).toMatch(/^Report long scheduled actions as running, not timed out\n/);
-    expect(message).toContain(`Fixes apache/skywalking#${ISSUE}`);
-    expect(message).toContain("Should the timeout metric keep counting running actions?");
+    const message = git("log", "-1", "--format=%B", `fix/${ISSUE}`).trim();
+    expect(message).toBe(`${PLAN.title}\n\n${PLAN.summary}\n\nFixes apache/skywalking#${ISSUE}`);
+    const deliver = state.evidence.find((e) => (e.payload as { command?: { id?: string } }).command?.id === "deliver")!;
+    const body = (deliver.payload as { command: { report: { text: string } } }).command.report.text;
+    expect(body).toContain(`### Fix apache/skywalking#${ISSUE}: Scheduler reports long actions as timed out`);
+    expect(body).toContain("- Should the timeout metric keep counting running actions?");
+    expect(body).toContain("Reviewed with open-code-review with fake-model: no critical or high comments; 1 lower-severity comment(s) left for the reviewer.");
+    expect(body).not.toMatch(/rcpt|receipt/);
     expect(execFileSync("git", ["status", "--porcelain"], { cwd: report.worktreePath, encoding: "utf8" })).toContain("M pkg/timestamp/scheduler.go");
     expect(await readFile(path.join(report.worktreePath, "pkg/timestamp/mock_limit.go"), "utf8")).toContain("generatedLimit");
     expect(github.requests.every((r) => r.method === "GET")).toBe(true);

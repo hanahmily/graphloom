@@ -1,6 +1,6 @@
 {
   "graphId": "banyandb-fix",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "sdkProtocol": 1,
   "entryPoints": {
     "createGraph": "./dist/index.js"
@@ -14,25 +14,31 @@
     "vitest": "^3.0.9"
   },
   "digests": {
-    "sourceTree": "587faabcbd9fd1a26235e9a60a3a60f9cf54d45abd327d0a0748840aa3bdcd7f",
-    "packageLock": "b9ee95733f6bcb2b014acbe36d7961bf6aa14d7a9fd14c07d715cc67d2196881",
+    "sourceTree": "5bbd5da5ff2f145c7cb63b67fcdb02c7d78ef37d24887fc3bb88471076e7dcc9",
+    "packageLock": "ae799e9b4b3482e5e3306f421002e111b81056e94c3baa0a18a97d016e6da633",
     "files": {
-      "package.json": "4fe38fccb8bceec81d1d66905941634d5cf6772ea0cd6c196a3216ff88116c17",
-      "package-lock.json": "b9ee95733f6bcb2b014acbe36d7961bf6aa14d7a9fd14c07d715cc67d2196881",
+      "package.json": "e66e83d9303aee39689c8c9b37f51dea579680cca9787a146838356b489d386e",
+      "package-lock.json": "ae799e9b4b3482e5e3306f421002e111b81056e94c3baa0a18a97d016e6da633",
       "tsconfig.json": "ffed4b469e52e0642fabcb6a20f4ba178fce44e5e37567a0ee96571a150a1109",
-      "src/constants.ts": "47946a450f2a3feba07bc016134fd72851e5c13aca27dedb6ac28a200a20e39f",
+      "src/constants.ts": "21835a258fadd5d5218d8accb8add67f78508996fdcdf12f97a1d516ee361b7d",
       "src/decision-record.ts": "21c2d80260dcf0562646a4d6aa793ff6a18745c5c0daaeb0edcf8d351bc7a1a8",
-      "src/evidence.ts": "ffb1007cbb8e2b8f1532520f7e520779332e7506d01e1c46b1a12bd3160c5ab0",
+      "src/evidence.ts": "204f59e08c20db1ce13ac3dbf9a4df8b03abea6b7181e6d9a9c256a6b94d358a",
       "src/gotest.ts": "391f4fd7a0394e7e6517bbb86efa1910c7eab9d0f082dccfdfd5b402fde2db73",
-      "src/graph.ts": "1b3c94cab65a7a0074b31104a1c6666d9f5ca25dcdbfded8b302ebbe5d8bb4ae",
-      "src/index.ts": "5dc185d6d5ad3286a54a2386614cd02081240e23c072adf1e7935a8b432507f4",
-      "src/prompts.ts": "7110e26b55cdfda65312bcd7f07ba3766d1ec820749a1c9500aef4056512177d",
-      "src/qualification.ts": "5da1afbdb84a645a288e2dd751ab08f6ce7a4446226164e3be221681b89fa2aa",
-      "src/validators.ts": "8ba49fdf194330e23123ba5a808742a32867769e41e2f8bb973e506c087b3cfe",
-      "test/banyandb-fix.test.ts": "5400f6284311addb0ee4ab873ad3e8bd1cf6f4994f953c4d6e392911accd8be0"
+      "src/graph.ts": "edcf20c7a2252930998267083e06ab23db8de325bb841addcb1200b2fd716a38",
+      "src/index.ts": "f477aced7b8080b8c034ad9d21367a0bbc2a5225537c67bf51418e1b5fdd36a4",
+      "src/ocr.ts": "d2dc3fad58a3d39f05a00b126050568edb099587161f219def0cc9631ae02e54",
+      "src/prompts.ts": "072bef870c85f4be714a6a8db863e5f4709b54c028ceffc70a974e012df1f4ad",
+      "src/qualification.ts": "68f53efd85483de3684a6ec7e685b959a17cbd801c072f05f0d13e1d74ac07d9",
+      "src/validators.ts": "f8929552adc5e5060f672e09bd8298aac9fb6214784b84d82fd1c6d413dda6a4",
+      "test/banyandb-fix.test.ts": "7b9e8c0c4bbd18d210e060444b8f4b903dbad54cca85e04494bb92f1affbdd75"
     }
   },
   "requirements": [
+    {
+      "id": "plan-reviewed",
+      "statement": "A fresh read-only reviewer approved the plan the implementer followed, after that plan was written, on the spec, decisions, reach and test axes.",
+      "evidenceSchema": "review-verdict-v1"
+    },
     {
       "id": "decisions-recorded",
       "statement": "The implementer's decision record is ready, names the regression test and the production caller, gives every unclear point a tier and a basis, takes an option for every behaviour point, and marks no product point chosen.",
@@ -64,9 +70,9 @@
       "evidenceSchema": "workspace-bytes-v1"
     },
     {
-      "id": "spec-and-standards-review",
-      "statement": "An independent read-only reviewer approves the current change on the Spec and Standards axes, and the verdict is bound to that change.",
-      "evidenceSchema": "review-verdict-v1"
+      "id": "code-review",
+      "statement": "open-code-review, run read-only in a prepared checkout of the current change, reviewed every changed file and reported no critical or high comment, and the checkout was left unchanged.",
+      "evidenceSchema": "checkout-command-v1"
     }
   ],
   "stages": [
@@ -74,6 +80,7 @@
       "id": "fix",
       "name": "Fix",
       "requirementIds": [
+        "plan-reviewed",
         "decisions-recorded",
         "reproduces",
         "passes",
@@ -86,7 +93,7 @@
       "id": "review",
       "name": "Review",
       "requirementIds": [
-        "spec-and-standards-review"
+        "code-review"
       ]
     }
   ]

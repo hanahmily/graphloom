@@ -191,10 +191,24 @@ export function issueComments(evidence: EvidenceRecord[]): { record: EvidenceRec
   return undefined;
 }
 
-export function latestReview(evidence: EvidenceRecord[]): ReviewVerdict | undefined {
-  const record = [...evidence].reverse().find((e) => e.kind === "review");
-  const payload = object(record?.payload);
-  if (record === undefined || payload === undefined) return undefined;
+/** Review verdicts a read-only review job in `stageId` returned, oldest first. */
+export function reviews(evidence: EvidenceRecord[], stageId: string): ReviewVerdict[] {
+  return evidence.flatMap((record) => {
+    if (record.kind !== "review") return [];
+    const p = producer(record);
+    if (p === undefined || p.stageId !== stageId || p.purpose !== "review" || !p.readOnly) return [];
+    const verdict = reviewVerdict(record);
+    return verdict !== undefined ? [verdict] : [];
+  });
+}
+
+export function latestReview(evidence: EvidenceRecord[], stageId: string): ReviewVerdict | undefined {
+  return reviews(evidence, stageId).at(-1);
+}
+
+function reviewVerdict(record: EvidenceRecord): ReviewVerdict | undefined {
+  const payload = object(record.payload);
+  if (payload === undefined) return undefined;
   const findings = Array.isArray(payload.findings)
     ? payload.findings.flatMap((raw) => {
         const f = object(raw);
