@@ -1,7 +1,10 @@
 // Stands in for `codex exec --json`: logs its invocation, prints the scripted
 // JSONL events, and writes the scripted last message to --output-last-message.
-// Steps: {event}, {sleepMs}, {hang: true}, {last: "..."}, {stderr: "..."}, {exit: code}.
-import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
+// Steps: {event}, {sleepMs}, {hang: true}, {last: "..."}, {stderr: "..."}, {exit: code},
+// {spawnChild: {pidFile, ignoreTerm}}: a descendant in Codex's process group with
+// its stdio redirected, which writes its pid once ready and then runs forever.
+import { spawn } from "node:child_process";
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 
 const argv = process.argv.slice(2);
 const flag = (name) => (argv.includes(name) ? argv[argv.indexOf(name) + 1] : undefined);
@@ -25,5 +28,11 @@ for (const step of steps) {
   if (step.hang === true) await new Promise(() => setInterval(() => undefined, 1_000));
   if (step.last !== undefined) writeFileSync(flag("--output-last-message"), step.last);
   if (step.stderr !== undefined) process.stderr.write(step.stderr);
+  if (step.spawnChild !== undefined) {
+    const { pidFile, ignoreTerm } = step.spawnChild;
+    const body = `${ignoreTerm ? "process.on('SIGTERM', () => undefined);" : ""}require('fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));setInterval(() => undefined, 1000);`;
+    spawn(process.execPath, ["-e", body], { stdio: "ignore" }).unref();
+    while (!existsSync(pidFile)) await new Promise((r) => setTimeout(r, 10));
+  }
   if (step.exit !== undefined) process.exit(step.exit);
 }

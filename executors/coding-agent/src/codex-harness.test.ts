@@ -80,6 +80,15 @@ function payload(result: unknown) {
 
 const flagValue = (argv: string[], name: string) => argv[argv.indexOf(name) + 1];
 
+function alive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 describe("Codex harness", () => {
   it("runs codex exec read-only in the worktree and returns its JSON result and usage", async () => {
     vi.stubEnv("GRAPHLOOM_TEST_SECRET", "s3cret");
@@ -179,6 +188,24 @@ describe("Codex harness", () => {
     setTimeout(() => abort.abort(), 300);
     expect(await h.executor.execute({ assignment: "Review" }, h.ctx({ signal: abort.signal }))).toMatchObject({ status: "failed", summary: "agent session aborted" });
     expect(Date.now() - started).toBeLessThan(5_000);
+  });
+
+  it("stops a descendant left in Codex's process group when Codex completes", async () => {
+    const h = await setup();
+    const pidFile = path.join(h.worktree, "..", "child.pid");
+    await h.script([{ spawnChild: { pidFile, ignoreTerm: false } }, ...turn()]);
+    expect(await h.executor.execute({ assignment: "Review" }, h.ctx())).toMatchObject({ status: "ok" });
+    expect(alive(Number(await readFile(pidFile, "utf8")))).toBe(false);
+  });
+
+  it("kills a descendant that ignores SIGTERM after Codex exits on cancellation", async () => {
+    const h = await setup({ responseTimeoutMs: 0 });
+    const pidFile = path.join(h.worktree, "..", "child.pid");
+    const abort = new AbortController();
+    await h.script([{ spawnChild: { pidFile, ignoreTerm: true } }, { event: { type: "turn.started" } }, { hang: true }]);
+    setTimeout(() => abort.abort(), 300);
+    expect(await h.executor.execute({ assignment: "Review" }, h.ctx({ signal: abort.signal }))).toMatchObject({ status: "failed", summary: "agent session aborted" });
+    expect(alive(Number(await readFile(pidFile, "utf8")))).toBe(false);
   });
 
   it("is bound with its settings as executor environment", () => {

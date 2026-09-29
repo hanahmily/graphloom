@@ -12,6 +12,8 @@ import { createController, loadRunState } from "@graphloom/controller";
 import { commandBinding, commandExecutorPackage } from "@graphloom/executor-command";
 import { githubBinding, githubExecutorPackage } from "@graphloom/executor-github";
 import { startFakeGitHub, type FakeGitHub } from "@graphloom/executor-github/testing";
+import { commandOptions } from "../dist/cli-runner.js";
+import type { RunnerConfig } from "../src/runner-config.js";
 
 const execFileAsync = promisify(execFile);
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
@@ -151,10 +153,38 @@ async function fakeOcr(dir: string): Promise<{ bin: string; calls: string }> {
     ].join("\n"),
     { mode: 0o755 },
   );
-  // The agents are scripted; the preflight still needs Claude Code and Codex installed and logged in.
-  await writeFile(path.join(bin, "claude"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
-  await writeFile(path.join(bin, "codex"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
   return { bin, calls };
+}
+
+/**
+ * The agents are scripted, but the preflight still needs Claude Code and Codex
+ * installed and logged in. They sit off PATH, as runner.json names them, and
+ * are logged in only in the login directories runner.json names.
+ */
+async function fakeAgents(dir: string): Promise<{ config: RunnerConfig; calls: string }> {
+  const bin = path.join(dir, "agents");
+  const calls = path.join(dir, "agent-calls");
+  await mkdir(bin);
+  const claudeConfig = path.join(dir, "claude-config");
+  const codexHome = path.join(dir, "codex-home");
+  const fake = (name: string, loginVar: string, loginDir: string) =>
+    writeFile(
+      path.join(bin, name),
+      `#!/bin/sh\necho "${name} $* ${loginVar}=$${loginVar}" >> "${calls}"\n[ "$1" = --version ] || [ "$${loginVar}" = "${loginDir}" ]\n`,
+      { mode: 0o755 },
+    );
+  await fake("claude", "CLAUDE_CONFIG_DIR", claudeConfig);
+  await fake("codex", "CODEX_HOME", codexHome);
+  return {
+    config: {
+      harness: "claude-code",
+      harnesses: ["claude-code", "codex"],
+      allowUnrestricted: true,
+      claude: { command: path.join(bin, "claude"), configDir: claudeConfig },
+      codex: { command: path.join(bin, "codex"), codexHome },
+    },
+    calls,
+  };
 }
 
 const LOW = { path: "pkg/timestamp/scheduler.go", start_line: 5, end_line: 5, category: "style", severity: "low", content: "Name the constant." };
@@ -165,7 +195,7 @@ const LOW = { path: "pkg/timestamp/scheduler.go", start_line: 5, end_line: 5, ca
  * implementation that writes the fix, test and changelog entry, and a code
  * review that runs the ocr its assignment names in the worktree.
  */
-function fixRunner(baseUrl: string) {
+function fixRunner(baseUrl: string, config: RunnerConfig) {
   const agentJobs: JobSpec[] = [];
   let session = 0;
   const agent: Runner = {
@@ -202,7 +232,7 @@ function fixRunner(baseUrl: string) {
   };
   const runner = createBuiltinExecutorRunner({
     packages: [
-      { manifest: commandExecutorPackage, ...commandBinding() },
+      { manifest: commandExecutorPackage, ...commandBinding(commandOptions(config)) },
       { manifest: githubExecutorPackage, ...githubBinding({ baseUrl, token: "fake" }) },
     ],
     fallback: agent,
@@ -218,12 +248,13 @@ describe.skipIf(GO === undefined)("banyandb-fix on a Go repository", () => {
     });
     github.comments.set(ISSUE, [{ id: 1, body: "A running backup is not an error; report it as running." }]);
     const ocr = await fakeOcr(env.dir);
+    const agents = await fakeAgents(env.dir);
     const savedPath = process.env.PATH;
     process.env.PATH = `${ocr.bin}:${savedPath}`;
     let report: Awaited<ReturnType<ReturnType<typeof createController>["run"]>>;
     let agentJobs: JobSpec[];
     try {
-      const composed = fixRunner(github.baseUrl);
+      const composed = fixRunner(github.baseUrl, agents.config);
       agentJobs = composed.agentJobs;
       const runner = composed.runner;
       const definition = fixtureGraph(env.contributing).describe();
@@ -253,6 +284,13 @@ describe.skipIf(GO === undefined)("banyandb-fix on a Go repository", () => {
       "review/code-review",
     ]);
     expect(new Set(state.receipts.map((r) => r.candidateDigest))).toEqual(new Set([state.candidateDigest]));
+    // The preflight checked the agents runner.json names, in the login directories it names.
+    expect([...new Set((await readFile(agents.calls, "utf8")).trim().split("\n"))]).toEqual([
+      `codex --version CODEX_HOME=${agents.config.codex!.codexHome}`,
+      `codex login status CODEX_HOME=${agents.config.codex!.codexHome}`,
+      `claude --version CLAUDE_CONFIG_DIR=${agents.config.claude!.configDir}`,
+      `claude auth status CLAUDE_CONFIG_DIR=${agents.config.claude!.configDir}`,
+    ]);
 
     // The plan saw the issue and its comments; Pi reviewed it; the implementer continued the plan's session.
     const [plan, planReview, implement] = agentJobs;

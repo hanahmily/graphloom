@@ -22,8 +22,8 @@ before any job, on every resume, and after a repair activation:
 | `go` | `go env GOVERSION` equals the `go` line of `go.mod` |
 | `git` | Git 2.41 or later (open-code-review needs it; BanyanDB needs 2.30) |
 | `ocr` | open-code-review is installed and has a delegation mode (`ocr delegate preview --help`); prints the absolute path the code reviewer is told to run |
-| `codex` | `codex --version` and `codex login status`: Codex is installed and logged in, using `GRAPHLOOM_CODEX_BIN` and `GRAPHLOOM_CODEX_HOME` (then `CODEX_HOME`) as the harness does |
-| `claude` | `claude --version` and `claude auth status`: Claude Code is installed and logged in, using `GRAPHLOOM_CLAUDE_BIN` and `GRAPHLOOM_CLAUDE_CONFIG_DIR` (then `CLAUDE_CONFIG_DIR`) as the harness does |
+| `codex` | `codex --version` and `codex login status`: Codex is installed and logged in, with the command and home the runner configures for the harness (`GRAPHLOOM_CODEX_BIN`, `GRAPHLOOM_CODEX_HOME`, then `CODEX_HOME`) |
+| `claude` | `claude --version` and `claude auth status`: Claude Code is installed and logged in, with the command and config directory the runner configures for the harness (`GRAPHLOOM_CLAUDE_BIN`, `GRAPHLOOM_CLAUDE_CONFIG_DIR`, then `CLAUDE_CONFIG_DIR`) |
 | `make` | GNU make |
 | `check-req` | `make check-req` |
 | `generate` (prepare) | `make generate` leaves no tracked or unignored file changed |
@@ -144,10 +144,9 @@ Install open-code-review 1.9 or later (`npm install -g
 @alibaba-group/open-code-review`); delegation mode needs no model on its side.
 Claude Code and Codex must be installed and logged in (`claude auth status`,
 `codex login status`). The environment checks stop the run before any job
-otherwise, naming the tool. If `runner.json` sets `claude.command`,
-`claude.configDir`, `codex.command` or `codex.codexHome`, export
-`GRAPHLOOM_CLAUDE_BIN`, `GRAPHLOOM_CLAUDE_CONFIG_DIR`, `GRAPHLOOM_CODEX_BIN` or
-`GRAPHLOOM_CODEX_HOME` to match, because the checks read only the environment.
+otherwise, naming the tool. They check the commands and login directories
+`runner.json` gives the harnesses (`claude.command`, `claude.configDir`,
+`codex.command`, `codex.codexHome`), which the CLI passes to command jobs.
 To check by hand:
 
 ```sh

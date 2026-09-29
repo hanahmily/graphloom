@@ -134,6 +134,17 @@ async function runCodex(args: RunArgs): Promise<CodingRunResult> {
       signalGroup(child.pid, "SIGTERM");
       killTimer = setTimeout(() => signalGroup(child.pid!, "SIGKILL"), args.killGraceMs);
     };
+    // Nothing Codex started may outlive the job: once Codex exits, the rest of
+    // its process group is stopped, with SIGKILL after the grace period, and
+    // the run settles only when the group is gone.
+    let groupGone: Promise<void> | undefined;
+    const drainGroup = (): Promise<void> =>
+      (groupGone ??= (async () => {
+        if (child.pid === undefined || !groupAlive(child.pid)) return;
+        terminate();
+        await waitForGroupExit(child.pid, args.killGraceMs * 2);
+      })());
+    child.once("exit", () => void drainGroup());
     options.signal?.addEventListener("abort", terminate, { once: true });
     let stderr = "";
     child.stderr.setEncoding("utf8");
@@ -210,6 +221,7 @@ async function runCodex(args: RunArgs): Promise<CodingRunResult> {
       }
       clearTimeout(watchdog);
       const { code, error } = await exited;
+      await drainGroup();
       reaped = true;
       await reservations;
       clearTimeout(closeTimer);
@@ -245,6 +257,7 @@ async function runCodex(args: RunArgs): Promise<CodingRunResult> {
       if (!reaped) {
         terminate();
         await exited;
+        await drainGroup();
       }
       clearTimeout(killTimer);
     }
@@ -283,6 +296,20 @@ function usageOf(usage: Record<string, unknown> | undefined): CodingUsage | unde
 
 function count(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function groupAlive(pid: number): boolean {
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+async function waitForGroupExit(pid: number, limitMs: number): Promise<void> {
+  const deadline = Date.now() + limitMs;
+  while (groupAlive(pid) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20));
 }
 
 function signalGroup(pid: number, signal: NodeJS.Signals): void {

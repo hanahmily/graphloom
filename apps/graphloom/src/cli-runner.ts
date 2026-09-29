@@ -2,9 +2,13 @@ import path from "node:path";
 import { BUILTIN_AGENT_EXECUTOR_ID, pinJobExecutor, type JobSpec } from "@graphloom/sdk";
 import { createBuiltinExecutorRunner, type JobResult, type Runner } from "@graphloom/runner";
 import {
+  CLAUDE_BIN_ENV,
+  CLAUDE_CONFIG_DIR_ENV,
   CLAUDE_DEFAULT_RESPONSE_TIMEOUT_MS,
   CLAUDE_DEFAULT_STARTUP_TIMEOUT_MS,
+  CODEX_BIN_ENV,
   CODEX_DEFAULT_RESPONSE_TIMEOUT_MS,
+  CODEX_HOME_ENV,
   CODING_AGENT_RUN_ID,
   DEFAULT_CODING_TIMEOUT_MS,
   claudeCodeHarnessModule,
@@ -13,7 +17,7 @@ import {
   codingAgentExecutorPackage,
   piHarnessModule,
 } from "@graphloom/executor-coding-agent";
-import { commandBinding, commandExecutorPackage } from "@graphloom/executor-command";
+import { commandBinding, commandExecutorPackage, type CommandBindingOptions } from "@graphloom/executor-command";
 import { githubBinding, githubExecutorPackage } from "@graphloom/executor-github";
 import { enabledHarnesses, type HarnessName, type RunnerConfig } from "./runner-config.js";
 
@@ -95,7 +99,7 @@ export function createCliRunner(
   const token = tokenEnv !== undefined ? env[tokenEnv] : undefined;
   const others = createBuiltinExecutorRunner({
     packages: [
-      { manifest: commandExecutorPackage, ...commandBinding(config.command?.timeoutMs !== undefined ? { timeoutMs: config.command.timeoutMs } : {}) },
+      { manifest: commandExecutorPackage, ...commandBinding(commandOptions(config)) },
       ...(config.github !== undefined
         ? [{ manifest: githubExecutorPackage, ...githubBinding(token !== undefined && token !== "" ? { token } : {}) }]
         : []),
@@ -132,6 +136,28 @@ export function createCliRunner(
 
 function failure(ctx: { runId: string; operationId: string; generation: number }, summary: string): JobResult {
   return { status: "failed", summary, runId: ctx.runId, operationId: ctx.operationId, generation: ctx.generation };
+}
+
+/**
+ * Command job settings. Commands see the command and login directory each
+ * enabled harness is configured with, so an environment check finds the agent
+ * its jobs will run on.
+ */
+export function commandOptions(config: RunnerConfig): CommandBindingOptions {
+  const harnesses = enabledHarnesses(config);
+  const env: Record<string, string> = {};
+  if (harnesses.includes("claude-code")) {
+    if (config.claude?.command !== undefined) env[CLAUDE_BIN_ENV] = config.claude.command;
+    if (config.claude?.configDir !== undefined) env[CLAUDE_CONFIG_DIR_ENV] = config.claude.configDir;
+  }
+  if (harnesses.includes("codex")) {
+    if (config.codex?.command !== undefined) env[CODEX_BIN_ENV] = config.codex.command;
+    if (config.codex?.codexHome !== undefined) env[CODEX_HOME_ENV] = config.codex.codexHome;
+  }
+  return {
+    ...(config.command?.timeoutMs !== undefined ? { timeoutMs: config.command.timeoutMs } : {}),
+    ...(Object.keys(env).length > 0 ? { env } : {}),
+  };
 }
 
 /** Claude Code settings, with any default watchdog that would outlast the job timeout cut to half of it. */
