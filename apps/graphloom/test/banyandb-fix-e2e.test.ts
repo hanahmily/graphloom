@@ -90,8 +90,11 @@ async function makeEnv() {
   for (const [name, bytes] of Object.entries(files)) await writeFile(path.join(repo, name), bytes);
   const git = (...args: string[]) => execFileAsync("git", args, { cwd: repo });
   await git("init", "-q", "-b", "main");
+  // Delivery commits as the repository's own identity, not a global one.
+  await git("config", "user.email", "maintainer@example.com");
+  await git("config", "user.name", "Maintainer");
   await git("add", ".");
-  await git("-c", "user.email=t@example.com", "-c", "user.name=T", "commit", "-q", "-m", "init");
+  await git("commit", "-q", "-m", "init");
 
   const taskPath = path.join(dir, "task.yaml");
   await writeFile(taskPath, `graph: banyandb-fix\nrepo: ./banyandb\nrequest: ${JSON.stringify(`Fix apache/skywalking#${ISSUE}.`)}\n`);
@@ -225,6 +228,7 @@ describe.skipIf(GO === undefined)("banyandb-fix on a Go repository", () => {
     const git = (...args: string[]) => execFileSync("git", args, { cwd: env.repo, encoding: "utf8" });
     expect(git("show", `fix/${ISSUE}:pkg/timestamp/scheduler.go`)).toBe(FIXED);
     expect(git("ls-tree", "-r", "--name-only", `fix/${ISSUE}`).split("\n")).not.toContain("pkg/timestamp/mock_limit.go");
+    expect(git("log", "-1", "--format=%an <%ae>", `fix/${ISSUE}`).trim()).toBe("Maintainer <maintainer@example.com>");
     const message = git("log", "-1", "--format=%B", `fix/${ISSUE}`);
     expect(message).toMatch(/^Report long scheduled actions as running, not timed out\n/);
     expect(message).toContain(`Fixes apache/skywalking#${ISSUE}`);
