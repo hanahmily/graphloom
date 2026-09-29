@@ -680,7 +680,9 @@ hard ceiling it cannot enforce.
 Reserve before effects. One repair candidate and its first trial use one correction
 reservation; a revised patch or repeated failed trial requires another. Diagnostic
 steps, independent review, and activation also consume applicable job/invocation/
-decision limits, without counting the same correction twice. Reentry, activation,
+decision limits, without counting the same correction twice. The graph's
+environment checks and preparation count as a job, reserved before they run; a
+checkout job that repeats them counts as two. Reentry, activation,
 mode changes, session replacement, and resume never reset counters. Exhaustion
 preserves the run with attempted remedies, evidence, and an exact remaining blocker.
 Until those limits or hard blockers apply, the supervisor treats unfinished required

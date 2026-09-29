@@ -10,6 +10,7 @@ export interface RecoveryTrigger {
     | "executor_failed"
     | "stalled"
     | "correction_limit"
+    | "environment_changed"
     | "unhandled";
   message: string;
   /** Recorded evidence the escalation cites, such as the failing validation's inputs. */

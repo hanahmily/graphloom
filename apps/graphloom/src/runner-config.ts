@@ -19,13 +19,27 @@ export const RUNNER_SETUP_ENV: readonly string[] = [
   "CLAUDE_CONFIG_DIR",
 ];
 
+export type HarnessName = "claude-code" | "pi";
+
 /** Operator consent and nonsecret settings; the harness uses its existing login. */
 export interface RunnerConfig {
-  harness: "claude-code" | "pi";
+  /** Harness for agent jobs that do not choose one. */
+  harness: HarnessName;
+  /** Harnesses a job may choose with `input.harness`. Default: only `harness`. */
+  harnesses?: HarnessName[];
   allowUnrestricted: true;
   timeoutMs?: number;
   claude?: Omit<ClaudeCodeBindingOptions, "apiKey">;
   pi?: Omit<PiBindingOptions, "apiKey">;
+  /** Serve the read-only GitHub executors; the token comes from the named environment variable. */
+  github?: { tokenEnv?: string };
+  /** Settings for command jobs, which run as the user in the job's workspace. */
+  command?: { timeoutMs?: number };
+}
+
+/** Every harness a job of this run may use. */
+export function enabledHarnesses(config: RunnerConfig): HarnessName[] {
+  return [...new Set([config.harness, ...(config.harnesses ?? [])])];
 }
 
 export async function loadRunnerConfig(env: NodeJS.ProcessEnv = process.env): Promise<RunnerConfig | undefined> {
@@ -62,12 +76,13 @@ export async function requireRunnerConfig(env: NodeJS.ProcessEnv = process.env):
       `no agent runner configured: create ~/.config/graphloom/runner.json (or point ${RUNNER_CONFIG_ENV} at one) with {"harness": "claude-code", "allowUnrestricted": true}`,
     );
   }
-  if (config.harness === "pi") {
+  const harnesses = enabledHarnesses(config);
+  if (harnesses.includes("pi")) {
     if (!(config.pi?.provider ?? env[PI_PROVIDER_ENV]) || !(config.pi?.modelId ?? env[PI_MODEL_ENV])) {
       throw new Error(`the pi harness needs pi.provider and pi.modelId in the runner config (or ${PI_PROVIDER_ENV} and ${PI_MODEL_ENV})`);
     }
-    return config;
   }
+  if (!harnesses.includes("claude-code")) return config;
   const command = config.claude?.command ?? (env[CLAUDE_BIN_ENV] || "claude");
   const bound = command.includes("/") ? expandHome(command) : command;
   if (!(await isExecutable(bound, env.PATH ?? ""))) {
@@ -91,11 +106,28 @@ function expandHome(p: string): string {
 }
 
 export function parseRunnerConfig(value: unknown, source = "runner config"): RunnerConfig {
-  const obj = settings(value, source, ["harness", "allowUnrestricted", "timeoutMs", "claude", "pi"]);
-  if (obj.harness !== "claude-code" && obj.harness !== "pi") throw new Error(`${source}: harness must be claude-code or pi`);
+  const obj = settings(value, source, ["harness", "harnesses", "allowUnrestricted", "timeoutMs", "claude", "pi", "github", "command"]);
+  if (!isHarness(obj.harness)) throw new Error(`${source}: harness must be claude-code or pi`);
   if (obj.allowUnrestricted !== true) throw new Error(`${source}: allowUnrestricted must be true to run an agent with your user permissions`);
   const config: RunnerConfig = { harness: obj.harness, allowUnrestricted: true };
+  if (obj.harnesses !== undefined) {
+    if (!Array.isArray(obj.harnesses) || obj.harnesses.length === 0 || !obj.harnesses.every(isHarness)) {
+      throw new Error(`${source}: harnesses must be a non-empty array of claude-code and pi`);
+    }
+    config.harnesses = [...new Set(obj.harnesses)];
+  }
   if (obj.timeoutMs !== undefined) config.timeoutMs = milliseconds(obj.timeoutMs, `${source}: timeoutMs`, false);
+  if (obj.github !== undefined) {
+    const g = settings(obj.github, `${source}: github`, ["tokenEnv"]);
+    if (g.tokenEnv !== undefined && (typeof g.tokenEnv !== "string" || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(g.tokenEnv))) {
+      throw new Error(`${source}: github.tokenEnv must name an environment variable`);
+    }
+    config.github = g.tokenEnv !== undefined ? { tokenEnv: g.tokenEnv } : {};
+  }
+  if (obj.command !== undefined) {
+    const c = settings(obj.command, `${source}: command`, ["timeoutMs"]);
+    config.command = c.timeoutMs !== undefined ? { timeoutMs: milliseconds(c.timeoutMs, `${source}: command.timeoutMs`, false) } : {};
+  }
   if (obj.claude !== undefined) {
     const nested = `${source}: claude`;
     const c = settings(obj.claude, nested, ["command", "model", "configDir", "passEnv", "startupTimeoutMs", "responseTimeoutMs"]);
@@ -120,6 +152,10 @@ export function parseRunnerConfig(value: unknown, source = "runner config"): Run
     };
   }
   return config;
+}
+
+function isHarness(value: unknown): value is HarnessName {
+  return value === "claude-code" || value === "pi";
 }
 
 function settings(value: unknown, source: string, keys: string[]): Record<string, unknown> {

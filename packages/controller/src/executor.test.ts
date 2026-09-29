@@ -301,6 +301,22 @@ describe("executor contract (#38)", () => {
     expect(report.blocker).toMatch(/non-empty writeScope/);
   });
 
+  it("stops, recorded, on an observation outside the worktree", async () => {
+    const env = await makeEnv();
+    const outside = path.dirname(env.taskPath);
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({ definition, advances: [observe({ paths: [outside] }, "look around")] }),
+      validators,
+      runner: createScriptedRunner({ jobs: [] }),
+      stateRoot: env.stateRoot,
+      runId: "observe-escape",
+    });
+    expect(report).toMatchObject({ status: "stopped", stopReason: "observe rejected", blocker: `path escapes worktree: ${outside}` });
+    const saved = await loadRunState(path.join(env.stateRoot, "observe-escape"));
+    expect(saved).toMatchObject({ status: "stopped", stopReason: "observe rejected" });
+  });
+
   it("rejects oversized executor input before durable admission", async () => {
     const env = await makeEnv();
     const report = await createController().run({

@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { copyFile, mkdir, mkdtemp, readdir, readFile, writeFile, rm, symlink } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import os from "node:os";
@@ -528,6 +529,51 @@ describe("qualified repair + same-run activation (#29)", () => {
     "exact-greeting": goodGreeting,
     "independent-reviewer": independentReview,
   };
+
+  it("adopts a repaired environment declaration and checks it again before normal work", async () => {
+    const env = await makeEnv();
+    const pinned = (sha256: string): GraphDefinition => ({
+      ...definition,
+      environment: { pinnedFiles: [{ path: "README.md", sha256 }] },
+    });
+    const stale = pinned("0".repeat(64));
+    const repaired = pinned(createHash("sha256").update("repo\n").digest("hex"));
+    const triggers: string[] = [];
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({ definition: stale, advances: [] }),
+      validators: goodValidators,
+      recreateHost: async (ctx) =>
+        createInProcessPluginHost(
+          createScriptedGraph({ definition: repaired, advances: [stop({ reason: "paused", blocker: "checked" }, "pause")] }),
+          { activeVersion: ctx.activeVersion, generation: ctx.generation },
+        ),
+      supervisor: createScriptedSupervisor({
+        sessionId: "sup-env",
+        decisions: [
+          (input) => {
+            triggers.push(input.trigger.code);
+            return qualifyRepair({ target: "plugin", reason: "update the environment checklist" }, "q");
+          },
+          activateFirstQualified(),
+          returnToNormal({ summary: "checklist updated" }, "return"),
+        ],
+      }),
+      repair: approvingRepair("sup-env"),
+      runner: createScriptedRunner({ jobs: [] }),
+      stateRoot: env.stateRoot,
+      runId: "repair-environment",
+    });
+
+    expect(triggers).toEqual(["environment_changed"]);
+    expect(report.stopReason).toBe("paused");
+    const state = await loadRunState(report.stateDir);
+    expect(state.activeVersion).not.toBe("hello@0.1.0");
+    expect(state.definition.environment).toEqual(repaired.environment);
+    expect(state.environmentBlock).toBeUndefined();
+    const checks = state.evidence.filter((e) => (e.payload as { environment?: unknown }).environment !== undefined);
+    expect(checks).toHaveLength(2);
+  });
 
   it("rejects qualify_repair when the operator grant is not pinned", async () => {
     const env = await makeEnv({ grants: false });

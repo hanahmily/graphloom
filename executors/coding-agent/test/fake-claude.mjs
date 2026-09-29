@@ -16,6 +16,14 @@
 // `linkTranscript: path` leaves the transcript a symlink to `path` at exit.
 // `byPrompt: [{ match, steps }]` runs the first entry whose `match` the prompt
 // contains, in place of `start` or `resume`.
+// `background: "default"` backgrounds an Agent call that did not ask for it, as
+// Claude Code now does, announcing it with `task_started` and an
+// `async_launched` tool result. With `autoTurnOnResume: true`, a resumed
+// session first runs a turn of its own (Claude Code does this for background
+// agents the previous process left unfinished) and emits its empty result
+// before it reads the prompt. `--replay-user-messages` echoes the prompt back,
+// marked `isReplay`, when the session takes it up. Only the result of the turn
+// that called StructuredOutput carries `structured_output`.
 // FAKE_CLAUDE_LOG names a file that gets one JSON line per invocation.
 // Both are read from the environment as it reaches the process.
 import { execSync, spawn } from "node:child_process";
@@ -52,7 +60,20 @@ const prompt = streaming ? await new Promise((resolve) => {
     const message = JSON.parse(line);
     if (message.type === "user") {
       assignmentStarted = true;
-      resolve(message.message.content);
+      const script = JSON.parse(readFileSync(process.env.FAKE_CLAUDE_SCRIPT, "utf8"));
+      const takeUp = () => {
+        if (argv.includes("--replay-user-messages")) {
+          emit({ type: "user", isReplay: true, message: { role: "user", content: message.message.content }, session_id: flag("--resume") ?? flag("--session-id") });
+        }
+        resolve(message.message.content);
+      };
+      if (flag("--resume") !== undefined && script.autoTurnOnResume) {
+        emit({ type: "result", subtype: "success", is_error: false, result: "", session_id: flag("--resume") });
+        // Like Claude Code, a prompt still queued when input closes is dropped.
+        setTimeout(() => (inputClosed ? process.exit(0) : takeUp()), 200);
+      } else {
+        takeUp();
+      }
     } else if (message.type === "control_response") {
       const response = message.response;
       waiting.get(response.request_id)?.(response);
@@ -180,8 +201,8 @@ const totals = () => {
   return { totalCostUSD: restored.totalCostUSD + cost, modelUsage: models };
 };
 const assistant = (msgId, parent, content) => emit({ type: "assistant", message: { id: msgId, content }, parent_tool_use_id: parent });
-const toolResult = (parent, id, content) =>
-  emit({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: id, content }] }, parent_tool_use_id: parent });
+const toolResult = (parent, id, content, extra = {}) =>
+  emit({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: id, content }] }, parent_tool_use_id: parent, ...extra });
 
 async function runTool(msgId, step, parent) {
   const id = `toolu_${(toolUses += 1)}`;
@@ -215,9 +236,17 @@ function result() {
     usage: { input_tokens: 10 * turnResponses, output_tokens: 5 * turnResponses, cache_read_input_tokens: 100, cache_creation_input_tokens: 20 },
     modelUsage,
     total_cost_usd: totalCostUSD,
-    ...(structured !== undefined && flag("--json-schema") !== undefined ? { structured_output: structured } : {}),
+    ...(structured !== undefined && flag("--json-schema") !== undefined ? { structured_output: fillSchema(structured) } : {}),
   });
   turnResponses = 0;
+  structured = undefined;
+}
+
+/** A `structured` step is the result; like a model, fill the schema's shape with it. */
+function fillSchema(value) {
+  const schema = JSON.parse(flag("--json-schema"));
+  const keys = Object.keys(schema.properties ?? {});
+  return keys.length === 1 && schema.required?.[0] === keys[0] && keys[0] === "result" ? { result: value } : value;
 }
 
 const background = [];
@@ -242,7 +271,7 @@ async function respond(step, parent) {
   } else if (step.agent !== undefined) {
     const id = `toolu_${(toolUses += 1)}`;
     const tool = step.agentTool ?? "Agent";
-    const agentInput = { prompt: "subtask", run_in_background: step.background === true };
+    const agentInput = step.background === "default" ? { prompt: "subtask" } : { prompt: "subtask", run_in_background: step.background === true };
     assistant(msgId, parent, [{ type: "tool_use", id, name: tool, input: agentInput }]);
     const decision = await permission(tool, agentInput);
     if (decision.behavior !== "allow") {
@@ -251,7 +280,8 @@ async function respond(step, parent) {
       return;
     }
     if (step.background) {
-      toolResult(parent, id, "Async agent launched");
+      emit({ type: "system", subtype: "task_started", task_id: `task-${id}`, tool_use_id: id, is_backgrounded: true, session_id: sessionId });
+      toolResult(parent, id, "Async agent launched", { tool_use_result: { isAsync: true, status: "async_launched", agentId: `task-${id}` } });
       background.push({ id, steps: step.agent });
     } else {
       for (const inner of step.agent) await respond(inner, id);

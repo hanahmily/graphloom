@@ -30,6 +30,15 @@ describe("parseSupervisorDecision", () => {
     expect(decision.action.type).toBe("stop");
   });
 
+  it("reads an action whose fields sit beside its type", () => {
+    const decision = parseSupervisorDecision(
+      JSON.stringify({ reason: "nothing left", action: { type: "stop", reason: "no authority", blocker: "corrections", evidenceRefs: ["ev-1"] } }),
+    );
+    expect(decision.action).toEqual({ type: "stop", stop: { reason: "no authority", blocker: "corrections", evidenceRefs: ["ev-1"] } });
+    expect(parseSupervisorDecision(JSON.stringify({ reason: "retry", action: { type: "reenter", stageId: "fix", reason: "fresh" } })).action)
+      .toEqual({ type: "reenter", reenter: { stageId: "fix", reason: "fresh" } });
+  });
+
   it("rejects Accept even if wrapped as a decision", () => {
     expect(() =>
       parseSupervisorDecision(

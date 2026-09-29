@@ -16,7 +16,7 @@ import {
   type GraphPlugin,
   type Validator,
 } from "@graphloom/sdk";
-import { createScriptedRunner } from "@graphloom/runner";
+import { createScriptedRunner, type Runner } from "@graphloom/runner";
 import {
   createController,
   IntakeError,
@@ -25,7 +25,7 @@ import {
   resolveUnderBase,
   tryAdmit,
 } from "./index.js";
-import { manifestRepairContract } from "./intake.js";
+import { intakeTask, manifestRepairContract } from "./intake.js";
 import { readWorktreeFile, workspaceChangeManifest } from "./worktree.js";
 
 const execFileAsync = promisify(execFile);
@@ -130,6 +130,34 @@ request: |
     expect(task.graph).toBe("hello");
     expect(task.repo).toBe("./test-repo");
     expect(task.request).toContain("GREETING.txt");
+  });
+
+  it("takes operator budgets from the task and rejects unbounded or unknown ones", async () => {
+    const task = parseTaskYaml(`graph: hello
+repo: ./test-repo
+budgets:
+  agentInvocations: 600
+  activeMs: 28800000
+grants:
+  sourceRepair: true
+request: fix it
+`);
+    expect(task.budgets).toEqual({ agentInvocations: 600, activeMs: 28800000 });
+    expect(task.grants?.sourceRepair).toBe(true);
+    for (const [value, message] of [
+      ["0", /budgets agentInvocations must be a positive integer, got "0"/],
+      ["-1", /must be a positive integer/],
+      ["1e9", /must be a positive integer/],
+      ["99999999999999999999", /must be a positive integer/],
+    ] as const) {
+      expect(() => parseTaskYaml(`graph: hello\nrepo: ./r\nrequest: x\nbudgets:\n  agentInvocations: ${value}\n`)).toThrow(message);
+    }
+    expect(() => parseTaskYaml("graph: hello\nrepo: ./r\nrequest: x\nbudgets:\n  tokens: 5\n")).toThrow(/unknown budgets key: tokens/);
+
+    const env = await makeEnv();
+    await writeFile(env.taskPath, `${await readFile(env.taskPath, "utf8")}budgets:\n  agentInvocations: 600\n`);
+    const intake = await intakeTask(env.taskPath);
+    expect(intake.budgets).toMatchObject({ agentInvocations: 600, jobs: 128, decisions: 512, corrections: 8 });
   });
 
   it("treats a bundle without a declared repair contract as opaque", () => {
@@ -396,6 +424,145 @@ describe("release scenarios (#60)", () => {
     expect(resumed.status).toBe("stopped");
     expect(resumed.stopReason).toBe("pin mismatch");
     expect(await readFile(path.join(helloBundle, "graphloom.manifest.json"), "utf8")).toContain("hello");
+  });
+
+  it("resumes on an updated plugin only when the operator asks and the graph's contract is unchanged", async () => {
+    const env = await makeEnv();
+    const bundle = path.join(env.taskDir, "hello-bundle");
+    await execFileAsync("cp", ["-r", helloBundle, bundle]);
+    await rm(path.join(env.taskDir, "plugins", "hello"));
+    await symlink(bundle, path.join(env.taskDir, "plugins", "hello"));
+    const paused = await pausedRun(env, "updated-plugin");
+    const pinned = (await loadRunState(paused.stateDir)).intake.bundle;
+
+    const manifestPath = path.join(bundle, "graphloom.manifest.json");
+    const entry = path.join(bundle, "dist", "index.js");
+    await writeFile(entry, `${await readFile(entry, "utf8")}\n// a fix to the graph's routing\n`, "utf8");
+    await writeFile(manifestPath, `${await readFile(manifestPath, "utf8")}\n`, "utf8");
+    const resumed = (plugin: GraphPlugin, updatePlugin?: boolean) =>
+      createController().resume({
+        runRef: paused.stateDir,
+        plugin,
+        runner: createScriptedRunner({ jobs: [] }),
+        validators,
+        ...(updatePlugin !== undefined ? { updatePlugin } : {}),
+      });
+    const resumedStop = () => createScriptedGraph({ definition, advances: [stop({ reason: "resumed", blocker: "none" }, "stop")] });
+
+    expect(await resumed(resumedStop())).toMatchObject({ status: "stopped", stopReason: "pin mismatch" });
+
+    const bumped = { ...definition, defaultValidators: definition.defaultValidators.map((b) => ({ ...b, version: "2" })) };
+    expect(await resumed(createScriptedGraph({ definition: bumped, advances: [] }), true)).toMatchObject({
+      status: "stopped",
+      stopReason: "pin mismatch",
+      blocker: "plugin defaultValidators changed since run start",
+    });
+    expect((await loadRunState(paused.stateDir)).intake.bundle.manifestDigest).toBe(pinned.manifestDigest);
+
+    expect(await resumed(resumedStop(), true)).toMatchObject({ status: "stopped", stopReason: "resumed" });
+    const state = await loadRunState(paused.stateDir);
+    expect(state.intake.bundle.manifestDigest).not.toBe(pinned.manifestDigest);
+    expect(state.intake.bundle.entryDigest).not.toBe(pinned.entryDigest);
+    expect(state.versionHistory!.map((v) => v.reason)).toContain(
+      `operator plugin update: manifest ${pinned.manifestDigest.slice(0, 12)} -> ${state.intake.bundle.manifestDigest.slice(0, 12)}`,
+    );
+    expect(await resumed(resumedStop())).toMatchObject({ status: "stopped", stopReason: "resumed" });
+  });
+
+  describe("an operator plugin update after Write was accepted", () => {
+    async function acceptedWrite(runId: string) {
+      const env = await makeEnv();
+      const bundle = path.join(env.taskDir, "hello-bundle");
+      await execFileAsync("cp", ["-r", helloBundle, bundle]);
+      await rm(path.join(env.taskDir, "plugins", "hello"));
+      await symlink(bundle, path.join(env.taskDir, "plugins", "hello"));
+      const paused = await createController().run({
+        taskPath: env.taskPath,
+        plugin: createScriptedGraph({
+          definition,
+          advances: [
+            writeJob,
+            observe({ paths: [GREETING_PATH], includeWorkspaceManifest: true }, "observe"),
+            validate({ stageId: "write", requirementIds: ["greeting-bytes"] }, "validate write"),
+            stop({ reason: "paused", blocker: "test pause" }, "pause"),
+          ],
+        }),
+        runner: createScriptedRunner({ jobs: [writeGreeting] }),
+        validators,
+        stateRoot: env.stateRoot,
+        runId,
+      });
+      expect(paused.receipts.filter((r) => r.valid).map((r) => r.stageId)).toEqual(["write"]);
+      const entry = path.join(bundle, "dist", "index.js");
+      await writeFile(entry, `${await readFile(entry, "utf8")}\n// updated\n`, "utf8");
+      return paused;
+    }
+    const resumedStop = (environment?: GraphDefinition["environment"]) =>
+      createScriptedGraph({
+        definition: environment !== undefined ? { ...definition, environment } : definition,
+        advances: [stop({ reason: "resumed", blocker: "none" }, "stop")],
+      });
+
+    it("keeps a receipt the updated validator still accepts on the same evidence", async () => {
+      const paused = await acceptedWrite("update-keeps");
+      const resumed = await createController().resume({
+        runRef: paused.stateDir,
+        plugin: resumedStop(),
+        runner: createScriptedRunner({ jobs: [] }),
+        validators,
+        updatePlugin: true,
+      });
+      expect(resumed.stopReason).toBe("resumed");
+      expect(resumed.receipts.filter((r) => r.valid).map((r) => r.stageId)).toEqual(["write"]);
+    });
+
+    it("invalidates a receipt the updated validator no longer accepts and returns to its stage", async () => {
+      const paused = await acceptedWrite("update-invalidates");
+      const stricter = { evaluate: () => ({ status: "failed" as const, reason: "stricter now" }) };
+      const resumed = await createController().resume({
+        runRef: paused.stateDir,
+        plugin: resumedStop(),
+        runner: createScriptedRunner({ jobs: [] }),
+        validators: { ...validators, "exact-greeting": stricter },
+        updatePlugin: true,
+      });
+      expect(resumed.stopReason).toBe("resumed");
+      expect(resumed.receipts.some((r) => r.valid)).toBe(false);
+      const state = await loadRunState(paused.stateDir);
+      expect(state.current.stageId).toBe("write");
+      expect(state.versionHistory!.at(-1)!.reason).toMatch(/invalidated from write: greeting-bytes failed: stricter now$/);
+    });
+
+    it("checks the environment the updated plugin declares", async () => {
+      const paused = await acceptedWrite("update-environment");
+      const environment = { checks: [{ id: "new-tool", argv: ["graphloom-missing-new-tool"] }] };
+      const missingTool: Runner = {
+        async runJob(job, ctx) {
+          const commands = (job.input as { commands: Array<{ id: string; argv: string[] }> }).commands;
+          return {
+            status: "ok",
+            summary: "ran",
+            runId: ctx.runId,
+            operationId: ctx.operationId,
+            generation: ctx.generation,
+            evidence: commands.map((c) => ({
+              kind: "command" as const,
+              payload: { command: { id: c.id, argv: c.argv, exitCode: null, signal: null, timedOut: false, aborted: false, durationMs: 0, stdoutTail: "", stderrTail: "", spawnError: "spawn ENOENT" } },
+            })),
+          };
+        },
+      };
+      const resumed = await createController().resume({
+        runRef: paused.stateDir,
+        plugin: resumedStop(environment),
+        runner: missingTool,
+        validators,
+        updatePlugin: true,
+      });
+      expect(resumed).toMatchObject({ status: "stopped", stopReason: "environment check failed" });
+      expect(resumed.blocker).toMatch(/^new-tool: /);
+      expect((await loadRunState(paused.stateDir)).definition.environment).toEqual(environment);
+    });
   });
 
   it("refuses Review evidence the writer produced", async () => {

@@ -1,10 +1,14 @@
+import { writeScopeExcludes, writeScopeIncludes } from "@graphloom/sdk";
 import type { CodingSessionOptions } from "./harness.js";
 
 /** The job's scope as guidance for the agent; the controller observes what actually changed. */
 export function scopeNotes(options: CodingSessionOptions): string[] {
   if (options.readOnly) return ["This job is read-only: do not change files in the worktree."];
   if (options.writeScope !== undefined && options.writeScope.length > 0) {
-    return [`Change only these paths: ${options.writeScope.join(", ")}.`];
+    const includes = writeScopeIncludes(options.writeScope);
+    const excludes = writeScopeExcludes(options.writeScope);
+    const allowed = includes.includes(".") ? "You may change files anywhere in the worktree" : `Change only these paths: ${includes.join(", ")}`;
+    return [excludes.length > 0 ? `${allowed}, except these, which you must not change: ${excludes.join(", ")}.` : `${allowed}.`];
   }
   return [];
 }

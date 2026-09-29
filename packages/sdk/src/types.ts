@@ -37,6 +37,35 @@ export interface GraphDefinition {
   requirements: Requirement[];
   defaultValidators: ValidatorBinding[];
   privateStateSchema?: string;
+  /** What the run's workspace needs before any stage runs; the controller enforces it. */
+  environment?: EnvironmentDeclaration;
+}
+
+/** A command the controller runs with the built-in command executor. */
+export interface EnvironmentCommand {
+  id: string;
+  argv: string[];
+  timeoutMs?: number;
+}
+
+export interface EnvironmentDeclaration {
+  /**
+   * Tools the run needs. The controller runs them in the worktree before any
+   * job at the start of a run, on every resume, and after a repair is
+   * activated. A failing check stops the run.
+   */
+  checks?: EnvironmentCommand[];
+  /**
+   * Preparation such as code generation, run after the checks in the worktree
+   * and in every disposable checkout. It may change only files Git ignores.
+   */
+  prepare?: EnvironmentCommand[];
+  /**
+   * Files this declaration was written against, by SHA-256 of their bytes at
+   * the pinned base commit. A mismatch blocks normal jobs; only a qualified
+   * repair that updates the declaration lets the run continue.
+   */
+  pinnedFiles?: Array<{ path: string; sha256: string }>;
 }
 
 export interface TaskInputs {
@@ -58,6 +87,8 @@ export interface Receipt {
   candidateFingerprint: Fingerprint;
   evidenceRefs: EvidenceRef[];
   valid: boolean;
+  /** The workspace change this receipt accepted; the run cannot complete once it changes. */
+  candidateDigest?: Fingerprint;
 }
 
 export interface EvidenceRecord {
@@ -67,6 +98,11 @@ export interface EvidenceRecord {
   payload?: unknown;
   /** Controller generation that produced this evidence; used for freshness admission. */
   generation?: number;
+  /**
+   * Digest of the workspace change (every path that differs from the pinned
+   * base commit, with its content) the evidence was produced against.
+   */
+  candidateDigest?: Fingerprint;
 }
 
 export interface OutstandingOperation {
@@ -100,6 +136,8 @@ export interface RunView {
   generation: number;
   stateRevision: number;
   activeVersion: string;
+  /** Digest of the current workspace change; compare with `EvidenceRecord.candidateDigest`. */
+  candidateDigest?: Fingerprint;
   /**
    * Qualified / rejected repair candidates visible to the supervisor for
    * ActivateRepair decisions (artifact ids and status only).
@@ -152,6 +190,7 @@ export interface JobSpec {
   /** Agent prompt or command argv description. */
   instruction: string;
   resultSchema?: string;
+  /** Paths the job may change: `path`, `.` for the whole workspace, `!path` to forbid one. */
   writeScope?: string[];
   readOnly?: boolean;
   /**
@@ -170,7 +209,21 @@ export interface JobSpec {
    * whose agent session this job continues. Omit to start a fresh session.
    */
   continueFrom?: string;
+  /**
+   * Run a read-only command job in a disposable checkout instead of the
+   * worktree. The controller commits the checkout's contents, runs the graph's
+   * environment checks and preparation there, and records any file the
+   * preparation or the job changed.
+   */
+  checkout?: CheckoutSpec;
 }
+
+/**
+ * `candidate`: the pinned base commit plus the whole current workspace change.
+ * `base`: the pinned base commit plus only the listed changed paths, such as
+ * new tests, to show they fail without the rest of the change.
+ */
+export type CheckoutSpec = { from: "candidate" } | { from: "base"; paths: string[] };
 
 export interface ObserveSpec {
   paths?: string[];
@@ -248,6 +301,8 @@ export interface ValidationInput {
   statement: string;
   evidence: EvidenceRecord[];
   candidateFingerprint?: Fingerprint;
+  /** Digest of the live workspace change being accepted. */
+  candidateDigest?: Fingerprint;
 }
 
 export interface ValidationResult {

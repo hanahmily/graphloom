@@ -11,11 +11,26 @@ import {
   codingAgentExecutorPackage,
   piHarnessModule,
 } from "@graphloom/executor-coding-agent";
-import type { RunnerConfig } from "./runner-config.js";
+import { commandBinding, commandExecutorPackage } from "@graphloom/executor-command";
+import { githubBinding, githubExecutorPackage } from "@graphloom/executor-github";
+import { enabledHarnesses, type HarnessName, type RunnerConfig } from "./runner-config.js";
 
 const REVIEW_SCHEMA = JSON.stringify({
   type: "object",
-  properties: { verdict: { type: "string", enum: ["approved", "request_changes"] }, summary: { type: "string" } },
+  properties: {
+    verdict: { type: "string", enum: ["approved", "request_changes"] },
+    summary: { type: "string" },
+    findings: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: { axis: { type: "string" }, severity: { type: "string" }, detail: { type: "string" } },
+        required: ["detail"],
+        additionalProperties: false,
+      },
+    },
+    productDecision: { type: "string" },
+  },
   required: ["verdict", "summary"],
   additionalProperties: false,
 });
@@ -24,58 +39,91 @@ const WATCHDOGS = [
   ["responseTimeoutMs", CLAUDE_DEFAULT_RESPONSE_TIMEOUT_MS],
 ] as const;
 
-/** Keep the controller's executor pin, tools, budget port and session unchanged. */
-export function createCliRunner(config: RunnerConfig | undefined): Runner {
+/**
+ * Keep the controller's executor pin, tools, budget port and session unchanged.
+ * Agent jobs run on the configured harness, or the one `input.harness` names;
+ * command jobs and GitHub reads run in their own built-in executor processes.
+ */
+export function createCliRunner(
+  config: RunnerConfig | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+  /** Harness adapter modules to load instead of the installed ones (tests). */
+  harnessModules: Partial<Record<HarnessName, string>> = {},
+): Runner {
   const fallback: Runner = {
     async runJob(job, ctx) {
-      return {
-        status: "failed",
-        summary: config === undefined
+      return failure(
+        ctx,
+        config === undefined
           ? "CLI agent runner is not configured; set GRAPHLOOM_RUNNER_CONFIG or ~/.config/graphloom/runner.json with a harness and allowUnrestricted: true"
           : `CLI runner does not serve executor ${job.executor?.id ?? job.kind}`,
-        runId: ctx.runId,
-        operationId: ctx.operationId,
-        generation: ctx.generation,
-      };
+      );
     },
   };
   if (config === undefined) return fallback;
   if (config.allowUnrestricted !== true) throw new Error("CLI runner requires allowUnrestricted: true");
-  const child = createBuiltinExecutorRunner({
-    packages: [{
-      manifest: {
-        ...codingAgentExecutorPackage,
-        entryModule: path.join(path.dirname(codingAgentExecutorPackage.entryModule), "legacy-executors.js"),
-        executorIds: [CODING_AGENT_RUN_ID, BUILTIN_AGENT_EXECUTOR_ID],
-      },
-      ...codingAgentBinding({
-        harness: config.harness === "claude-code" ? claudeCodeHarnessModule : piHarnessModule,
-        ...(config.timeoutMs !== undefined ? { timeoutMs: config.timeoutMs } : {}),
-        ...(config.harness === "claude-code" ? { claude: claudeOptions(config) } : {}),
-        ...(config.pi !== undefined ? { pi: config.pi } : {}),
+  const agents = new Map<HarnessName, Runner>(
+    enabledHarnesses(config).map((harness) => [
+      harness,
+      createBuiltinExecutorRunner({
+        packages: [{
+          manifest: {
+            ...codingAgentExecutorPackage,
+            entryModule: path.join(path.dirname(codingAgentExecutorPackage.entryModule), "legacy-executors.js"),
+            executorIds: [CODING_AGENT_RUN_ID, BUILTIN_AGENT_EXECUTOR_ID],
+          },
+          ...codingAgentBinding({
+            harness: harnessModules[harness] ?? (harness === "claude-code" ? claudeCodeHarnessModule : piHarnessModule),
+            ...(config.timeoutMs !== undefined ? { timeoutMs: config.timeoutMs } : {}),
+            ...(harness === "claude-code" ? { claude: claudeOptions(config) } : {}),
+            ...(config.pi !== undefined ? { pi: config.pi } : {}),
+          }),
+        }],
+        fallback,
       }),
-    }],
+    ]),
+  );
+  const tokenEnv = config.github?.tokenEnv;
+  const token = tokenEnv !== undefined ? env[tokenEnv] : undefined;
+  const others = createBuiltinExecutorRunner({
+    packages: [
+      { manifest: commandExecutorPackage, ...commandBinding(config.command?.timeoutMs !== undefined ? { timeoutMs: config.command.timeoutMs } : {}) },
+      ...(config.github !== undefined
+        ? [{ manifest: githubExecutorPackage, ...githubBinding(token !== undefined && token !== "" ? { token } : {}) }]
+        : []),
+    ],
     fallback,
   });
+  const defaultAgent = agents.get(config.harness)!;
   return {
-    describeExecutors: () => child.describeExecutors!(),
+    async describeExecutors() {
+      return [...(await defaultAgent.describeExecutors!()), ...(await others.describeExecutors!())];
+    },
     async runJob(job, ctx) {
       const pinned = pinJobExecutor(job);
       const id = pinned.executor!.id;
-      if (id !== BUILTIN_AGENT_EXECUTOR_ID && id !== CODING_AGENT_RUN_ID) return fallback.runJob(pinned, ctx);
+      if (id !== BUILTIN_AGENT_EXECUTOR_ID && id !== CODING_AGENT_RUN_ID) return others.runJob(pinned, ctx);
       const legacy = id === BUILTIN_AGENT_EXECUTOR_ID;
-      const input = legacy
+      const { harness: chosen, ...input } = legacy
         ? { assignment: pinned.instruction, ...(pinned.resultSchema !== undefined ? { resultSchema: pinned.resultSchema } : {}) }
-        : object(pinned.input);
-      const review = pinned.purpose === "review" && input?.resultSchema === "review-verdict-v1";
+        : (object(pinned.input) ?? {});
+      const agent = chosen === undefined ? defaultAgent : agents.get(chosen as HarnessName);
+      if (agent === undefined) {
+        return failure(ctx, `agent job asks for harness ${JSON.stringify(chosen)}, which the runner config does not enable (harnesses: ${[...agents.keys()].join(", ")})`);
+      }
+      const review = pinned.purpose === "review" && input.resultSchema === "review-verdict-v1";
       const adapted: JobSpec = {
         ...pinned,
-        ...(legacy || review ? { input: { ...input, ...(review ? { resultSchema: REVIEW_SCHEMA } : {}) } } : {}),
+        ...(legacy || review || chosen !== undefined ? { input: { ...input, ...(review ? { resultSchema: REVIEW_SCHEMA } : {}) } } : {}),
       };
-      const result = await child.runJob(adapted, ctx);
+      const result = await agent.runJob(adapted, ctx);
       return review ? reviewEvidence(result) : result;
     },
   };
+}
+
+function failure(ctx: { runId: string; operationId: string; generation: number }, summary: string): JobResult {
+  return { status: "failed", summary, runId: ctx.runId, operationId: ctx.operationId, generation: ctx.generation };
 }
 
 /** Claude Code settings, with any default watchdog that would outlast the job timeout cut to half of it. */
@@ -100,8 +148,8 @@ function reviewEvidence(result: JobResult): JobResult {
   if ((verdict?.verdict !== "approved" && verdict?.verdict !== "request_changes") || typeof verdict.summary !== "string") {
     return { ...result, status: "failed", summary: "reviewer did not return a valid structured review-verdict-v1 result" };
   }
-  return {
-    ...result,
-    evidence: [...(result.evidence ?? []), { kind: "review", payload: { verdict: verdict.verdict, summary: verdict.summary } }],
-  };
+  const payload: Record<string, unknown> = { verdict: verdict.verdict, summary: verdict.summary };
+  if (Array.isArray(verdict.findings)) payload.findings = verdict.findings;
+  if (typeof verdict.productDecision === "string") payload.productDecision = verdict.productDecision;
+  return { ...result, evidence: [...(result.evidence ?? []), { kind: "review", payload }] };
 }

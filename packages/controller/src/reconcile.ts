@@ -1,10 +1,10 @@
-import type { JobSpec } from "@graphloom/sdk";
+import { writeScopeAllows, type JobSpec } from "@graphloom/sdk";
 import type { DurableRunState, PendingDispatch } from "./state.js";
-import { readWorktreeFile } from "./worktree.js";
+import { worktreeChangeFingerprints } from "./worktree.js";
 
 /**
  * Settle a pending dispatch after stop/crash.
- * - If write-scope files exist, treat the effect as done (do not re-dispatch).
+ * - If paths in the write scope differ from HEAD, treat the effect as done (do not re-dispatch).
  * - If no effect is visible, clear the intent and reset advisory writer flags
  *   so the graph can retry.
  * - Otherwise keep the intent and stop for operator reconcile.
@@ -28,13 +28,10 @@ export async function reconcilePendingDispatch(
   const opId = pending.operationId;
 
   if (job.writeScope && job.writeScope.length > 0) {
-    const present: string[] = [];
-    for (const rel of job.writeScope) {
-      const bytes = await readWorktreeFile(state.worktreePath, rel);
-      if (bytes !== undefined && bytes.length > 0) {
-        present.push(rel);
-      }
-    }
+    const scope = job.writeScope;
+    const present = [...(await worktreeChangeFingerprints(state.worktreePath)).keys()]
+      .filter((rel) => writeScopeAllows(rel, scope))
+      .sort();
     if (present.length > 0) {
       const { pendingDispatch: _p, ...rest } = state;
       void _p;

@@ -88,3 +88,14 @@ node ../apps/graphloom/dist/main.js run release-task.yaml
 `apps/graphloom/test/release-e2e.test.ts` runs it through the controller with
 scripted jobs. One of those runs repairs a faulty validator with a qualified
 source patch and completes after activation.
+
+## A real repository: banyandb-fix
+
+[`plugins/banyandb-fix`](plugins/banyandb-fix/) fixes bug issues in
+[Apache SkyWalking BanyanDB](https://github.com/apache/skywalking-banyandb)
+(`@graphloom/plugin-banyandb-fix`). Its two stages are Fix and Review. The graph
+declares BanyanDB's contributor checklist, which the controller runs before any
+job, and proves each fix in disposable checkouts: the regression test fails on
+the base and passes, with the build checks, on the committed change. The
+[plugin README](plugins/banyandb-fix/README.md) shows the task and runner
+config for a real run.

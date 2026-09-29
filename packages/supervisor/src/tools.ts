@@ -1,3 +1,4 @@
+import path from "node:path";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { assertGraphDecision } from "@graphloom/sdk";
 import type { ModelRef, SupervisorProposal } from "./types.js";
@@ -71,7 +72,7 @@ const ACTION_TOOLS: Record<GraphLoomSupervisorAction, ActionTool> = {
   },
   observe: {
     specKey: "observe",
-    description: "Record worktree evidence.",
+    description: "Record worktree evidence. paths are relative to the run worktree.",
     spec: spec({}, { paths: STRINGS, includeWorkspaceManifest: { type: "boolean" } }),
   },
   validate: {
@@ -155,6 +156,16 @@ export function createAdmissionTools(configured: readonly ModelRef[]): Admission
       }),
       async execute(_toolCallId: string, params: Record<string, unknown>) {
         if (proposal !== undefined) return duplicate();
+        const job = params[specKey] as { purpose?: unknown; readOnly?: unknown; writeScope?: unknown } | undefined;
+        if (action === "dispatch" && job?.purpose === "work" && job.readOnly !== true &&
+            !(Array.isArray(job.writeScope) && job.writeScope.length > 0)) {
+          return reject("a work job needs a non-empty writeScope; to rerun the graph's own step, reenter the stage instead");
+        }
+        const paths = (params[specKey] as { paths?: unknown } | undefined)?.paths;
+        const escaping = action === "observe" && Array.isArray(paths)
+          ? paths.find((p) => typeof p === "string" && (path.isAbsolute(p) || p.split(/[/\\]/).includes("..")))
+          : undefined;
+        if (escaping !== undefined) return reject(`observe paths are relative to the run worktree; ${escaping} is not`);
         try {
           return accept(assertGraphDecision({ reason: params.reason, action: { type: action, [specKey]: params[specKey] } }));
         } catch (err) {

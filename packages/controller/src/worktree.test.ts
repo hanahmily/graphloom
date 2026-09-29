@@ -1,10 +1,17 @@
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
-import { changedPaths, pathsOutsideWriteScope, worktreeChangeFingerprints } from "./worktree.js";
+import {
+  candidateChange,
+  changedPaths,
+  listDirtyPaths,
+  pathsOutsideWriteScope,
+  workspaceChangeManifest,
+  worktreeChangeFingerprints,
+} from "./worktree.js";
 
 const execFileAsync = promisify(execFile);
 const cleanup: string[] = [];
@@ -25,6 +32,21 @@ async function repo(): Promise<string> {
   await execFileAsync("git", ["commit", "-m", "init"], { cwd: dir });
   return dir;
 }
+
+describe("source checkout dirt", () => {
+  it("lists a large ignored build tree as one entry", async () => {
+    const dir = await repo();
+    const deps = path.join(dir, "build", "node_modules", "pkg");
+    await mkdir(deps, { recursive: true });
+    const name = "a".repeat(200);
+    await Promise.all(Array.from({ length: 6000 }, (_, i) => writeFile(path.join(deps, `${name}-${i}.js`), "")));
+    await writeFile(path.join(dir, "tracked.txt"), "two\n");
+    await writeFile(path.join(dir, "notes.md"), "x\n");
+
+    expect((await listDirtyPaths(dir)).sort()).toEqual(["build/", "notes.md", "tracked.txt"]);
+    expect(await workspaceChangeManifest(dir)).toHaveLength(6002);
+  });
+});
 
 describe("write-scope change detection", () => {
   it("reports edited, new, and renamed paths but not ignored ones", async () => {
@@ -78,5 +100,43 @@ describe("write-scope change detection", () => {
     expect(pathsOutsideWriteScope(changed, { writeScope: ["src", "docs"] })).toEqual(["README.md", "srcx/c.ts"]);
     expect(pathsOutsideWriteScope(changed, {})).toEqual(changed);
     expect(pathsOutsideWriteScope(changed, { readOnly: true, writeScope: ["README.md"] })).toEqual(changed);
+  });
+
+  it("allows the whole workspace except excluded paths", () => {
+    const changed = ["README.md", "api/proto/v1/a.proto", "api/protox.go", "go.mod", "pkg/x.go"];
+    expect(pathsOutsideWriteScope(changed, { writeScope: [".", "!api/proto/", "!go.mod"] })).toEqual(["api/proto/v1/a.proto", "go.mod"]);
+    expect(pathsOutsideWriteScope(changed, { writeScope: ["pkg", "!pkg/x.go"] })).toEqual(["README.md", "api/proto/v1/a.proto", "api/protox.go", "go.mod", "pkg/x.go"]);
+  });
+});
+
+describe("candidate change", () => {
+  it("covers committed and uncommitted changes against the pinned base, but not ignored files", async () => {
+    const dir = await repo();
+    const base = (await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: dir })).stdout.trim();
+    const empty = await candidateChange(dir, base);
+    expect([...empty.fingerprints.keys()]).toEqual([]);
+
+    await writeFile(path.join(dir, "tracked.txt"), "two\n");
+    await execFileAsync("git", ["commit", "-am", "agent commit"], { cwd: dir });
+    await writeFile(path.join(dir, "new.txt"), "x\n");
+    await mkdir(path.join(dir, "build"));
+    await writeFile(path.join(dir, "build/out.js"), "ignored\n");
+    const changed = await candidateChange(dir, base);
+    expect([...changed.fingerprints.keys()]).toEqual(["new.txt", "tracked.txt"]);
+    expect(changed.digest).not.toBe(empty.digest);
+
+    await writeFile(path.join(dir, "build/out.js"), "still ignored\n");
+    expect((await candidateChange(dir, base)).digest).toBe(changed.digest);
+    await writeFile(path.join(dir, "new.txt"), "y\n");
+    expect((await candidateChange(dir, base)).digest).not.toBe(changed.digest);
+  });
+
+  it("changes when only a file's executable bit changes", async () => {
+    const dir = await repo();
+    const base = (await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: dir })).stdout.trim();
+    await writeFile(path.join(dir, "run.sh"), "echo hi\n");
+    const plain = await candidateChange(dir, base);
+    await chmod(path.join(dir, "run.sh"), 0o755);
+    expect((await candidateChange(dir, base)).digest).not.toBe(plain.digest);
   });
 });

@@ -45,6 +45,15 @@ describe("Claude tool permissions", () => {
     await denied(tool, { [field]: 123 });
   });
 
+  it("allows the whole workspace except excluded paths", async () => {
+    const config = { ...options, writeScope: [".", "!api/proto", "!go.mod"] };
+    expect((await evaluateClaudePermission("Write", { file_path: "pkg/scheduler.go" }, config)).behavior).toBe("allow");
+    expect((await evaluateClaudePermission("Edit", { file_path: "api/protocol.go" }, config)).behavior).toBe("allow");
+    await denied("Edit", { file_path: "api/proto/v1/x.proto" }, config);
+    await denied("Write", { file_path: "go.mod" }, config);
+    await denied("Write", { file_path: ".git/config" }, config);
+  });
+
   it("rejects symbolic links and hard links even within a permitted prefix", async () => {
     await mkdir(path.join(root, "src"));
     await mkdir(path.join(root, "outside"));

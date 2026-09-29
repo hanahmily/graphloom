@@ -14,7 +14,10 @@ if (argv.includes("--input-format") && flag("--input-format") === "stream-json")
   prompt = await new Promise((resolve) => {
     lines.on("line", (line) => {
       const event = JSON.parse(line);
-      if (event.type === "user") resolve(event.message.content);
+      if (event.type === "user") {
+        if (argv.includes("--replay-user-messages")) process.stdout.write(`${JSON.stringify({ ...event, isReplay: true })}\n`);
+        resolve(event.message.content);
+      }
       if (event.type === "control_request") {
         process.stdout.write(`${JSON.stringify({ type: "control_response", response: { subtype: "success", request_id: event.request_id, response: {} } })}\n`);
         if (event.request.subtype === "interrupt") void interruptLive?.();
@@ -65,4 +68,7 @@ if (review) {
 }
 await writeFile(path.join(projectDir, `${sessionId}.jsonl`), `${JSON.stringify({ role: "assistant", content: output })}\n`);
 process.stdout.write(`${JSON.stringify({ type: "assistant", message: { id: "reply-1", content: [{ type: "text", text: output.summary }] } })}\n`);
-process.stdout.write(`${JSON.stringify({ type: "result", subtype: "success", is_error: false, structured_output: output, session_id: sessionId })}\n`, () => process.exit(0));
+// Fill the schema's shape, as a model does: a lone `result` property holds the whole result.
+const schema = argv.includes("--json-schema") ? JSON.parse(flag("--json-schema")) : undefined;
+const structured = Object.keys(schema?.properties ?? {}).join() === "result" ? { result: output } : output;
+process.stdout.write(`${JSON.stringify({ type: "result", subtype: "success", is_error: false, structured_output: structured, session_id: sessionId })}\n`, () => process.exit(0));

@@ -20,8 +20,35 @@ describe("operator runner configuration", () => {
       .toEqual({ configDir: path.join(os.homedir(), ".claude") });
   });
 
+  it("accepts the harnesses jobs may choose, GitHub reads by token variable name, and command settings", () => {
+    expect(parseRunnerConfig({
+      harness: "claude-code", allowUnrestricted: true, harnesses: ["claude-code", "pi", "pi"],
+      github: { tokenEnv: "GITHUB_TOKEN" }, command: { timeoutMs: 60_000 },
+    })).toEqual({
+      harness: "claude-code", allowUnrestricted: true, harnesses: ["claude-code", "pi"],
+      github: { tokenEnv: "GITHUB_TOKEN" }, command: { timeoutMs: 60_000 },
+    });
+  });
+
+  it("checks every harness a job may choose before a run starts", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "gl-runner-config-"));
+    dirs.push(dir);
+    const file = path.join(dir, "runner.json");
+    await writeFile(file, JSON.stringify({ harness: "claude-code", harnesses: ["pi"], allowUnrestricted: true }));
+    await expect(requireRunnerConfig({ GRAPHLOOM_RUNNER_CONFIG: file, PATH: dir })).rejects.toThrow(/pi\.provider and pi\.modelId/);
+    await writeFile(file, JSON.stringify({ harness: "pi", harnesses: ["claude-code"], allowUnrestricted: true, pi: { provider: "p", modelId: "m" } }));
+    await expect(requireRunnerConfig({ GRAPHLOOM_RUNNER_CONFIG: file, PATH: path.join(dir, "empty") })).rejects.toThrow(
+      "Claude Code command claude was not found",
+    );
+  });
+
   it.each([
     null, [], { harness: "other", allowUnrestricted: true },
+    { harness: "claude-code", allowUnrestricted: true, harnesses: [] },
+    { harness: "claude-code", allowUnrestricted: true, harnesses: ["codex"] },
+    { harness: "claude-code", allowUnrestricted: true, github: { token: "secret" } },
+    { harness: "claude-code", allowUnrestricted: true, github: { tokenEnv: "not a name" } },
+    { harness: "claude-code", allowUnrestricted: true, command: { timeoutMs: 0 } },
     { harness: "pi", allowUnrestricted: true, apiKey: "secret" },
     { harness: "pi", allowUnrestricted: true, pi: { apiKey: "secret" } },
     { harness: "claude-code", allowUnrestricted: true, claude: { passEnv: [123] } },

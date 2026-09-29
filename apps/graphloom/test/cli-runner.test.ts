@@ -7,7 +7,7 @@ import { promisify } from "node:util";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { loadRunState } from "@graphloom/controller";
 import { createCliRunner } from "../dist/cli-runner.js";
-import { loadRunnerConfig } from "../src/runner-config.js";
+import { loadRunnerConfig, parseRunnerConfig } from "../src/runner-config.js";
 
 const execFileAsync = promisify(execFile);
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
@@ -162,6 +162,77 @@ describe("configured CLI runner", () => {
     expect(state.evidence.filter((e) => e.kind === "review")).toEqual([]);
     expect(state.receipts.some((r) => r.stageId === "write" && r.valid)).toBe(true);
     expect(state.receipts.some((r) => r.stageId === "review" && r.valid)).toBe(false);
+  });
+
+  it("runs each agent job on the harness it names, and refuses one the config does not enable", async () => {
+    const f = await fixture();
+    vi.stubEnv("CLAUDE_CONFIG_DIR", path.join(f.dir, "claude"));
+    const base = JSON.parse(await readFile(f.config, "utf8")) as Record<string, unknown>;
+    const agentDir = path.join(f.dir, "pi-agent");
+    await mkdir(agentDir);
+    const both = { ...base, harnesses: ["claude-code", "pi"], pi: { provider: "faux-e2e", modelId: "faux", agentDir } };
+    const piFixture = path.join(root, "apps/graphloom/test/fixtures/pi-faux-harness.mjs");
+    const runner = createCliRunner(parseRunnerConfig(both), {}, { pi: piFixture });
+    const context = (operationId: string) => ({
+      runId: "direct", operationId, generation: 1, worktreePath: f.repo, artifactDir: f.dir,
+      children: { callTool: async () => ({ status: "failed" as const, summary: "no tools" }), reserveModelCall: async () => true },
+    });
+    const job = (input: Record<string, unknown>) => ({
+      stageId: "fix", kind: "agent" as const, purpose: "work" as const, instruction: "unused", writeScope: ["GREETING.txt"],
+      executor: { id: "graphloom.coding-agent/run", version: "1" }, input: { assignment: "Create GREETING.txt", ...input },
+    });
+    const harnessOf = (result: { evidence?: { payload?: unknown }[] }) =>
+      result.evidence?.map((e) => (e.payload as { codingAgent?: { harness: string } }).codingAgent?.harness).find(Boolean);
+
+    const onPi = await runner.runJob(job({ harness: "pi", harnessOptions: { faux: [{ text: "done" }] } }), context("op-pi"));
+    expect(onPi.status, onPi.summary).toBe("ok");
+    expect(harnessOf(onPi)).toBe("pi");
+    const onDefault = await runner.runJob(job({ resultSchema: "writer-result-v1" }), context("op-default"));
+    expect(onDefault.status, onDefault.summary).toBe("ok");
+    expect(harnessOf(onDefault)).toBe("claude-code");
+
+    const verdict = {
+      verdict: "request_changes",
+      summary: "changes what the metric counts",
+      findings: [{ axis: "spec", severity: "blocking", detail: "TotalTasksTimeout no longer counts running actions" }],
+      productDecision: "Should TotalTasksTimeout keep counting actions that are still running?",
+    };
+    const review = await runner.runJob(
+      {
+        stageId: "review", kind: "agent", purpose: "review", readOnly: true, instruction: "unused",
+        executor: { id: "graphloom.coding-agent/run", version: "1" },
+        input: { assignment: "Review the fix", resultSchema: "review-verdict-v1", harness: "pi", harnessOptions: { faux: [{ tool: "submit_result", args: verdict }, { text: "reviewed" }] } },
+      },
+      context("op-review"),
+    );
+    expect(review.status, review.summary).toBe("ok");
+    expect(review.evidence?.find((e) => e.kind === "review")?.payload).toEqual(verdict);
+
+    const claudeOnly = createCliRunner(parseRunnerConfig(base), {});
+    expect(await claudeOnly.runJob(job({ harness: "pi" }), context("op-refused"))).toMatchObject({
+      status: "failed",
+      summary: 'agent job asks for harness "pi", which the runner config does not enable (harnesses: claude-code)',
+    });
+  });
+
+  it("serves command jobs always, and GitHub reads only when the config asks for them", async () => {
+    const f = await fixture();
+    const base = JSON.parse(await readFile(f.config, "utf8")) as Record<string, unknown>;
+    const plain = createCliRunner(parseRunnerConfig(base), {});
+    const ids = (await plain.describeExecutors!()).map((e) => e.id);
+    expect(ids).toContain("graphloom.command/run");
+    expect(ids.some((id) => id.startsWith("graphloom.github/"))).toBe(false);
+
+    const result = await plain.runJob(
+      { stageId: "fix", kind: "command", purpose: "check", instruction: "list files", readOnly: true, input: { commands: [{ id: "ls", argv: ["git", "status", "--porcelain"] }] } },
+      { runId: "direct", operationId: "op-cmd", generation: 1, worktreePath: f.repo, artifactDir: f.dir },
+    );
+    expect(result).toMatchObject({ status: "ok", evidence: [{ kind: "command", payload: { command: { id: "ls", exitCode: 0 } } }] });
+
+    const withGitHub = createCliRunner(parseRunnerConfig({ ...base, github: { tokenEnv: "GL_TEST_GITHUB_TOKEN" } }), { GL_TEST_GITHUB_TOKEN: "t0ken" });
+    const described = await withGitHub.describeExecutors!();
+    expect(described.map((e) => e.id)).toEqual(expect.arrayContaining(["graphloom.github/get-issue", "graphloom.github/list-issue-comments"]));
+    expect(JSON.stringify(described)).not.toContain("t0ken");
   });
 
   it("fails before creating a run when explicit runner configuration is malformed", async () => {

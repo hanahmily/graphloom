@@ -90,6 +90,9 @@ export function assertValidationInput(value: unknown): ValidationInput {
   if (obj["candidateFingerprint"] !== undefined && typeof obj["candidateFingerprint"] !== "string") {
     throw new WireValidationError("malformed", "candidateFingerprint must be a string");
   }
+  if (obj["candidateDigest"] !== undefined && typeof obj["candidateDigest"] !== "string") {
+    throw new WireValidationError("malformed", "candidateDigest must be a string");
+  }
   return obj as unknown as ValidationInput;
 }
 
@@ -133,7 +136,49 @@ export function assertGraphDefinition(value: unknown): GraphDefinition {
     requireString(r, "statement");
     requireString(r, "evidenceSchema");
   }
+  if (obj["environment"] !== undefined) assertEnvironment(obj["environment"]);
   return obj as unknown as GraphDefinition;
+}
+
+const ENVIRONMENT_COMMAND_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/i;
+const SHA256 = /^[0-9a-f]{64}$/;
+
+function assertEnvironment(value: unknown): void {
+  const env = asObject(value, "environment");
+  const ids = new Set<string>();
+  for (const key of ["checks", "prepare"]) {
+    if (env[key] === undefined) continue;
+    requireArray(env, key).forEach((raw, i) => {
+      const label = `environment.${key}[${i}]`;
+      const c = asObject(raw, label);
+      const id = requireString(c, "id");
+      if (!ENVIRONMENT_COMMAND_ID.test(id) || ids.has(id)) {
+        throw new WireValidationError("malformed", `${label}.id must be a unique name of letters, digits, ".", "_" or "-"`);
+      }
+      ids.add(id);
+      const argv = requireArray(c, "argv");
+      if (argv.length === 0 || !argv.every((a) => typeof a === "string") || (argv[0] as string).length === 0) {
+        throw new WireValidationError("malformed", `${label}.argv must be a non-empty array of strings`);
+      }
+      if (c["timeoutMs"] !== undefined && (typeof c["timeoutMs"] !== "number" || !Number.isSafeInteger(c["timeoutMs"]) || c["timeoutMs"] < 1)) {
+        throw new WireValidationError("malformed", `${label}.timeoutMs must be a positive integer`);
+      }
+    });
+  }
+  if (ids.size > 16) throw new WireValidationError("malformed", "environment declares more than 16 commands");
+  if (env["pinnedFiles"] !== undefined) {
+    requireArray(env, "pinnedFiles").forEach((raw, i) => {
+      const label = `environment.pinnedFiles[${i}]`;
+      const f = asObject(raw, label);
+      const file = requireString(f, "path");
+      if (file.startsWith("/") || file.split("/").includes("..")) {
+        throw new WireValidationError("malformed", `${label}.path must stay inside the repository`);
+      }
+      if (!SHA256.test(requireString(f, "sha256"))) {
+        throw new WireValidationError("malformed", `${label}.sha256 must be a lowercase hex SHA-256`);
+      }
+    });
+  }
 }
 
 export function assertGraphDecision(value: unknown): GraphDecision {
@@ -163,8 +208,26 @@ export function assertGraphAction(value: unknown): GraphAction {
   if (type === "accept") {
     throw new WireValidationError("malformed", "Accept is not a plugin/supervisor action");
   }
+  const key = ACTION_SPEC_KEYS[type]!;
+  const spec = obj[key];
+  if (spec === null || typeof spec !== "object" || Array.isArray(spec)) {
+    throw new WireValidationError("malformed", `${type} action needs a ${key} object`);
+  }
   return obj as unknown as GraphAction;
 }
+
+/** The property that holds each action type's spec. */
+export const ACTION_SPEC_KEYS: Record<string, string> = {
+  dispatch: "job",
+  observe: "observe",
+  validate: "validate",
+  reenter: "reenter",
+  supervise: "supervise",
+  qualify_repair: "qualify",
+  activate_repair: "activate",
+  return: "return",
+  stop: "stop",
+};
 
 export function assertRunView(value: unknown): RunView {
   const obj = asObject(value, "view");

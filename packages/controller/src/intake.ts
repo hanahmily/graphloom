@@ -21,7 +21,20 @@ export interface TaskFile {
   request: string;
   /** Operator-authorized repair grants (plugin metadata alone is not authority). */
   grants?: RepairGrants;
+  /** Operator limits that replace the defaults; each stays finite. */
+  budgets?: Partial<RunBudgets>;
 }
+
+export interface RunBudgets {
+  agentInvocations: number;
+  jobs: number;
+  decisions: number;
+  corrections: number;
+  waitMs: number;
+  activeMs: number;
+}
+
+const BUDGET_KEYS: ReadonlySet<string> = new Set(["agentInvocations", "jobs", "decisions", "corrections", "waitMs", "activeMs"]);
 
 export interface RepairGrants {
   sourceRepair: boolean;
@@ -83,7 +96,7 @@ export class IntakeError extends Error {
   }
 }
 
-/** Parse minimal task.yaml (graph / repo / request [, grants]). */
+/** Parse minimal task.yaml (graph / repo / request [, grants] [, budgets]). */
 export function parseTaskYaml(text: string): TaskFile {
   const lines = text.replace(/\r\n/g, "\n").split("\n");
   let graph: string | undefined;
@@ -93,6 +106,8 @@ export function parseTaskYaml(text: string): TaskFile {
   let validatorSubstitution: boolean | undefined;
   let executorRepair: boolean | undefined;
   let inGrants = false;
+  let inBudgets = false;
+  const budgets: Partial<RunBudgets> = {};
 
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i]!;
@@ -102,7 +117,27 @@ export function parseTaskYaml(text: string): TaskFile {
 
     if (/^grants:\s*$/.test(line)) {
       inGrants = true;
+      inBudgets = false;
       continue;
+    }
+    if (/^budgets:\s*$/.test(line)) {
+      inBudgets = true;
+      inGrants = false;
+      continue;
+    }
+
+    if (inBudgets) {
+      const indented = /^( {2}|\t)(\w+):\s*(.+?)\s*$/.exec(line);
+      if (indented) {
+        const key = indented[2]!;
+        if (!BUDGET_KEYS.has(key)) throw new IntakeError(`unknown budgets key: ${key}`);
+        const raw = unquote(indented[3]!);
+        const value = /^[1-9][0-9]*$/.test(raw) ? Number(raw) : NaN;
+        if (!Number.isSafeInteger(value)) throw new IntakeError(`budgets ${key} must be a positive integer, got ${JSON.stringify(raw)}`);
+        budgets[key as keyof RunBudgets] = value;
+        continue;
+      }
+      inBudgets = false;
     }
 
     if (inGrants) {
@@ -174,6 +209,7 @@ export function parseTaskYaml(text: string): TaskFile {
       ...(executorRepair !== undefined ? { executorRepair } : {}),
     };
   }
+  if (Object.keys(budgets).length > 0) task.budgets = budgets;
   return task;
 }
 
@@ -261,6 +297,7 @@ export async function intakeTask(taskPath: string): Promise<IntakePin> {
       corrections: 8,
       waitMs: DEFAULT_WAIT_BUDGET_MS,
       activeMs: DEFAULT_ACTIVE_BUDGET_MS,
+      ...task.budgets,
     },
   };
 }

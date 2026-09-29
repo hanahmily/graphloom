@@ -10,7 +10,14 @@ import type {
   ObserveSpec,
   RunView,
 } from "@graphloom/sdk";
-import { assertGraphDecision, pinJobExecutor } from "@graphloom/sdk";
+import {
+  assertGraphDecision,
+  BUILTIN_COMMAND_EXECUTOR_ID,
+  pinJobExecutor,
+  writeScopeProblem,
+  type CheckoutSpec,
+  type EnvironmentDeclaration,
+} from "@graphloom/sdk";
 import type { ExecutorSourceOverride, Runner } from "@graphloom/runner";
 import type { PluginHost } from "@graphloom/plugin-host";
 import {
@@ -31,9 +38,11 @@ import { catalogEntry, isKindDefaultExecutor, resolveExecutorPin } from "./execu
 import { recordExecutorFailure } from "./executor-failure.js";
 import {
   admitValidation,
+  deliveryDrift,
   earliestIncompleteStage,
   freshEvidence,
   invalidateFromStage,
+  liveCandidateDigest,
   newEvidenceRef,
   stageRequirementsMet,
   type AdmissionValidator,
@@ -70,6 +79,8 @@ import {
   workspaceChangeManifest,
   worktreeChangeFingerprints,
 } from "./worktree.js";
+import { clearCheckouts, runInCheckout } from "./checkout.js";
+import { checkEnvironment, declaresEnvironment, type EnvironmentOutcome } from "./environment.js";
 
 const MAX_STEPS = 64;
 
@@ -204,11 +215,31 @@ async function runNormalLoopSteps(
       }
       await saveRunState(state);
     }
+    await clearCheckouts(state.stateDir);
+    const digest = await liveCandidateDigest(state);
+    if (digest !== state.candidateDigest) {
+      state = withCandidateDigest(state, digest);
+      await saveRunState(state);
+    }
     syncRevision(deps, state);
     return state;
   });
 
+  // The environment is checked once per loop and active version: at the start
+  // of a run, on every resume, and after a repair changes the version.
+  let environmentReadyFor: string | undefined;
   for (let step = 0; step < MAX_STEPS; step += 1) {
+    if (
+      state.status === "running" &&
+      state.mode === "normal" &&
+      environmentReadyFor !== state.activeVersion &&
+      declaresEnvironment(state.definition.environment)
+    ) {
+      state = await preflightEnvironment(state, deps);
+      if (state.status !== "running") return state;
+      if (state.mode === "normal") environmentReadyFor = state.activeVersion;
+      continue;
+    }
     const turn = await withRunLock(state.stateDir, async () => {
       // Reload before renewing: Stop may have cleared the owner claim and
       // persisted stopped while a runner job held no lock.
@@ -460,6 +491,8 @@ async function runNormalLoopSteps(
       let result: Awaited<ReturnType<Runner["runJob"]>>;
       let children: ReturnType<typeof createChildPort> | undefined;
       let before: Map<string, string> | undefined;
+      let checkedDigest: string | undefined;
+      let staleIdentity: string | undefined;
       try {
         if (notBefore !== undefined) await sleepUntil(notBefore, abort.signal);
         const unchanged = abort.signal.aborted ? undefined : await worktreeChangeFingerprints(state.worktreePath);
@@ -480,17 +513,39 @@ async function runNormalLoopSteps(
                   },
                 )
               : undefined;
-          result = await deps.runner.runJob(job, {
-            runId: state.runId,
-            operationId,
-            generation,
-            worktreePath: state.worktreePath,
-            artifactDir: state.artifactDir,
-            signal: abort.signal,
-            ...(children !== undefined ? { children } : {}),
-            ...(source !== undefined ? { executorSource: source } : {}),
-            ...(session !== undefined ? { session } : {}),
-          });
+          if (job.checkout !== undefined) {
+            const ran = await runInCheckout({
+              job: job as JobSpec & { checkout: CheckoutSpec },
+              operationId,
+              generation,
+              runId: state.runId,
+              repoPath: state.intake.repoPath,
+              worktreePath: state.worktreePath,
+              pinnedHead: state.intake.pinnedHead,
+              stateDir: state.stateDir,
+              artifactDir: state.artifactDir,
+              checks: state.definition.environment?.checks ?? [],
+              prepare: state.definition.environment?.prepare ?? [],
+              runner: deps.runner,
+              signal: abort.signal,
+              ...(source !== undefined ? { source } : {}),
+            });
+            result = ran.result;
+            checkedDigest = ran.candidateDigest;
+            staleIdentity = ran.staleIdentity;
+          } else {
+            result = await deps.runner.runJob(job, {
+              runId: state.runId,
+              operationId,
+              generation,
+              worktreePath: state.worktreePath,
+              artifactDir: state.artifactDir,
+              signal: abort.signal,
+              ...(children !== undefined ? { children } : {}),
+              ...(source !== undefined ? { executorSource: source } : {}),
+              ...(session !== undefined ? { session } : {}),
+            });
+          }
         }
       } finally {
         // A parent that stopped, timed out, or returned early can leave a child running.
@@ -502,6 +557,7 @@ async function runNormalLoopSteps(
         before !== undefined
           ? pathsOutsideWriteScope(changedPaths(before, await worktreeChangeFingerprints(state.worktreePath)), job)
           : [];
+      const afterDigest = await liveCandidateDigest(state);
 
       state = await withRunLock(state.stateDir, async () => {
         state = chargeActiveTime(await reloadRunState(state), deps);
@@ -543,13 +599,26 @@ async function runNormalLoopSteps(
           await saveRunState(state);
           return state;
         }
-        state = applyDispatchResult(state, {
+        if (staleIdentity !== undefined) {
+          const { pendingDispatch, ...rest } = state;
+          state = {
+            ...rest,
+            ...(pendingDispatch ? { pendingDispatch: { ...pendingDispatch, status: "failed" as const } } : {}),
+            status: "stopped",
+            stopReason: "stale job result identity",
+            blocker: staleIdentity,
+          };
+          await saveRunState(state);
+          return state;
+        }
+        state = applyDispatchResult(withCandidateDigest(state, afterDigest), {
           job,
           operationId,
           generation,
           isCorrection,
           result: outOfScope.length > 0 ? scopeViolation(result, job, outOfScope) : result,
           canRecover: deps.supervisor !== undefined,
+          candidateDigest: checkedDigest ?? afterDigest,
         });
         syncRevision(deps, state);
         if ((await stopRequested(deps)) && state.status === "running") {
@@ -616,6 +685,127 @@ async function startDispatch(state: DurableRunState, operationId: string, deps: 
     await saveRunState(started);
     syncRevision(deps, started);
     return true;
+  });
+}
+
+/** Environment checks and preparation commands the graph declares. */
+function setupCommands(env: EnvironmentDeclaration | undefined): number {
+  return (env?.checks?.length ?? 0) + (env?.prepare?.length ?? 0);
+}
+
+/** A checkout job's own checks and preparation run before its commands, and count as a job of their own. */
+function jobCost(state: DurableRunState, job: JobSpec): number {
+  return job.checkout !== undefined && setupCommands(state.definition.environment) > 0 ? 2 : 1;
+}
+
+function withCandidateDigest(state: DurableRunState, digest: string | undefined): DurableRunState {
+  if (digest === undefined) {
+    const { candidateDigest: _dropped, ...rest } = state;
+    void _dropped;
+    return rest;
+  }
+  return { ...state, candidateDigest: digest };
+}
+
+/**
+ * Check the graph's declared environment before normal work, outside the run
+ * lock so Stop is not held up by slow preparation. A missing tool or failed
+ * preparation stops the run; a changed pinned file blocks normal jobs and
+ * hands the run to the supervisor, once per active version.
+ */
+async function preflightEnvironment(state: DurableRunState, deps: LoopDeps): Promise<DurableRunState> {
+  const env = state.definition.environment!;
+  if (setupCommands(env) > 0) {
+    // Reserved and saved before anything runs, so a crash or another resume cannot run it for free.
+    state = await withRunLock(state.stateDir, async () => {
+      let next = chargeActiveTime(await reloadRunState(state), deps);
+      syncRevision(deps, next);
+      if (next.status !== "running") return next;
+      next =
+        next.budgets.jobs <= 0
+          ? { ...next, status: "stopped", stopReason: "budgets exhausted", blocker: "jobs" }
+          : { ...next, budgets: { ...next.budgets, jobs: next.budgets.jobs - 1 } };
+      await saveRunState(next);
+      return next;
+    });
+    if (state.status !== "running") return state;
+  }
+  const abort = new AbortController();
+  const stopWatch = watchForStop(state.stateDir, deps, abort);
+  let outcome: EnvironmentOutcome;
+  try {
+    outcome = await checkEnvironment({ state, env, runner: deps.runner, signal: abort.signal });
+  } catch (err) {
+    outcome = {
+      kind: "failed",
+      operationId: `env-${state.stateRevision}`,
+      evidence: [],
+      stopReason: "environment check failed",
+      blocker: err instanceof Error ? err.message : String(err),
+    };
+  } finally {
+    stopWatch();
+  }
+  return withRunLock(state.stateDir, async () => {
+    state = chargeActiveTime(await reloadRunState(state), deps);
+    syncRevision(deps, state);
+    if (state.status !== "running") return state;
+    if (abort.signal.aborted || (await stopRequested(deps))) {
+      state = { ...state, status: "stopped", ...stopCause(deps) };
+      await saveRunState(state);
+      return state;
+    }
+    const job: JobSpec = {
+      stageId: state.current.stageId,
+      kind: "command",
+      purpose: "diagnostic",
+      instruction: "environment check",
+      readOnly: true,
+    };
+    const producer: EvidenceProducer = {
+      operationId: outcome.operationId,
+      stageId: job.stageId,
+      purpose: job.purpose,
+      readOnly: true,
+      kind: job.kind,
+      executorId: BUILTIN_COMMAND_EXECUTOR_ID,
+    };
+    const before = state.evidence.length;
+    state = recordJobEvidence(state, job, producer, outcome.evidence, state.candidateDigest);
+    const refs = state.evidence.slice(before).map((e) => e.ref);
+    const { environmentBlock, ...unblocked } = state;
+    switch (outcome.kind) {
+      case "ready":
+        state = unblocked;
+        break;
+      case "failed":
+        state = { ...state, status: "stopped", stopReason: outcome.stopReason, blocker: boundText(outcome.blocker), stopEvidenceRefs: refs };
+        break;
+      case "changed":
+        if (environmentBlock?.activeVersion === state.activeVersion) {
+          state = {
+            ...state,
+            status: "stopped",
+            stopReason: "environment changed",
+            blocker: boundText(`no repair updated the environment declaration: ${outcome.reason}`),
+            stopEvidenceRefs: refs,
+          };
+        } else if (deps.supervisor === undefined) {
+          state = { ...state, status: "stopped", stopReason: "environment changed", blocker: boundText(outcome.reason), stopEvidenceRefs: refs };
+        } else {
+          state = enterRecovery(
+            { ...state, environmentBlock: { activeVersion: state.activeVersion, reason: outcome.reason } },
+            "environment_changed",
+            boundText(outcome.reason),
+            refs,
+          );
+        }
+        break;
+    }
+    state = { ...state, stateRevision: state.stateRevision + 1 };
+    await saveRunState(state);
+    syncRevision(deps, state);
+    return state;
   });
 }
 
@@ -816,6 +1006,9 @@ export function toRunView(state: DurableRunState): RunView {
     stateRevision: state.stateRevision,
     activeVersion: state.activeVersion,
   };
+  if (state.candidateDigest !== undefined) {
+    view.candidateDigest = state.candidateDigest;
+  }
   if (state.privateState !== undefined) {
     view.privateState = state.privateState;
   }
@@ -1051,6 +1244,16 @@ async function applyDecision(
           stageRequirementsMet(state, s.id, s.requirementIds),
         );
       const cited = citedEvidence(state, action.stop.evidenceRefs);
+      const drift = complete ? await deliveryDrift(state) : undefined;
+      if (drift !== undefined) {
+        return {
+          ...state,
+          status: "stopped",
+          stopReason: "delivery changed after acceptance",
+          blocker: drift,
+          ...(cited.length > 0 ? { stopEvidenceRefs: cited } : {}),
+        };
+      }
       return {
         ...state,
         status: complete ? "succeeded" : "stopped",
@@ -1168,7 +1371,7 @@ async function prepareDispatch(
     if (waitMs > 0) notBefore = retryAt;
   }
 
-  if (state.budgets.jobs <= 0) {
+  if (state.budgets.jobs < jobCost(state, job)) {
     return {
       state: {
         ...state,
@@ -1236,6 +1439,14 @@ async function prepareDispatch(
       };
     }
   }
+  const scopeProblem = job.writeScope !== undefined && job.writeScope.length > 0 ? writeScopeProblem(job.writeScope) : undefined;
+  if (scopeProblem !== undefined) {
+    return { state: { ...state, status: "stopped", stopReason: "scope rejected", blocker: scopeProblem } };
+  }
+  const checkoutProblem = job.checkout !== undefined ? checkoutRefusal(job) : undefined;
+  if (checkoutProblem !== undefined) {
+    return { state: { ...state, status: "stopped", stopReason: "checkout rejected", blocker: checkoutProblem } };
+  }
 
   const operationId = `op-${state.stateRevision}-${randomUUID().slice(0, 8)}`;
   const session = sessionForDispatch(state, job, operationId);
@@ -1296,6 +1507,9 @@ function redoesStageWork(state: DurableRunState, stageId: string): boolean {
  * executor for it, but cannot add steps or run code the run did not pin.
  */
 function recoveryDispatchRefusal(state: DurableRunState, job: JobSpec): string | undefined {
+  if (state.environmentBlock !== undefined) {
+    return `jobs are blocked until a qualified repair updates the environment declaration: ${state.environmentBlock.reason}`;
+  }
   if (job.stageId !== state.current.stageId) {
     return `recovery may only dispatch work for the current stage ${state.current.stageId}, not ${job.stageId}`;
   }
@@ -1308,6 +1522,23 @@ function recoveryDispatchRefusal(state: DurableRunState, job: JobSpec): string |
     }
   }
   return undefined;
+}
+
+/** Only read-only command jobs run in a disposable checkout; agents and tools stay in the worktree. */
+function checkoutRefusal(job: JobSpec): string | undefined {
+  const checkout = job.checkout as unknown;
+  if (job.kind !== "command" || job.readOnly !== true || job.tools !== undefined || job.continueFrom !== undefined) {
+    return "only read-only command jobs without tools or continuations may run in a checkout";
+  }
+  if (typeof checkout !== "object" || checkout === null) return "checkout must be an object";
+  const spec = checkout as { from?: unknown; paths?: unknown };
+  if (spec.from === "candidate") return spec.paths === undefined ? undefined : "a candidate checkout takes no paths";
+  if (spec.from !== "base") return `checkout.from must be "candidate" or "base"`;
+  if (!Array.isArray(spec.paths) || spec.paths.length === 0 || !spec.paths.every((p) => typeof p === "string")) {
+    return "a base checkout must list the changed paths to apply";
+  }
+  const problem = writeScopeProblem(spec.paths as string[]);
+  return problem === undefined ? undefined : `checkout paths: ${problem}`;
 }
 
 /** A job that changed paths it was not allowed to write fails, whatever it reported; the changes stay for recovery to handle. */
@@ -1332,9 +1563,11 @@ function applyDispatchResult(
     result: Awaited<ReturnType<Runner["runJob"]>>;
     /** A supervisor can take over; failures enter recovery instead of stopping. */
     canRecover: boolean;
+    /** The workspace change the job ran against, stamped on its evidence. */
+    candidateDigest?: string | undefined;
   },
 ): DurableRunState {
-  const { job, operationId, generation, isCorrection, result } = args;
+  const { job, operationId, generation, isCorrection, result, candidateDigest } = args;
   let next = state;
 
   if (
@@ -1358,7 +1591,7 @@ function applyDispatchResult(
     ...next,
     budgets: {
       ...next.budgets,
-      jobs: next.budgets.jobs - 1,
+      jobs: next.budgets.jobs - jobCost(next, job),
       // Jobs that reserved their actual model requests were charged per request.
       agentInvocations:
         job.kind === "agent" && !((next.pendingDispatch?.modelCalls ?? 0) > 0)
@@ -1389,7 +1622,7 @@ function applyDispatchResult(
   };
 
   if (result.status !== "ok") {
-    next = recordExecutorFailure(recordJobEvidence(next, job, producer, result.evidence), {
+    next = recordExecutorFailure(recordJobEvidence(next, job, producer, result.evidence, candidateDigest), {
       producer,
       stageId: job.stageId,
       attempt: next.current.attempt,
@@ -1414,7 +1647,7 @@ function applyDispatchResult(
     };
   }
 
-  next = recordJobEvidence(next, job, producer, result.evidence);
+  next = recordJobEvidence(next, job, producer, result.evidence, candidateDigest);
 
   if (job.purpose === "work") {
     next = { ...next, lastWorkOperationId: operationId };
@@ -1447,6 +1680,7 @@ function recordJobEvidence(
   job: JobSpec,
   producer: EvidenceProducer,
   evidence: Awaited<ReturnType<Runner["runJob"]>>["evidence"],
+  candidateDigest?: string,
 ): DurableRunState {
   if (evidence) {
     const added: EvidenceRecord[] = [];
@@ -1457,6 +1691,7 @@ function recordJobEvidence(
         ref,
         kind: claimed === undefined ? item.kind : "other",
         generation: next.generation,
+        ...(candidateDigest !== undefined ? { candidateDigest } : {}),
       };
       record.payload = attachProducer(
         claimed === undefined ? item.payload : { selfReported: claimed, claim: item.payload ?? null },
@@ -1503,11 +1738,18 @@ async function observeWorkspace(
   spec: ObserveSpec,
 ): Promise<DurableRunState> {
   const added: EvidenceRecord[] = [];
-  let next = { ...state };
+  const digest = await liveCandidateDigest(state);
+  let next = withCandidateDigest(state, digest);
+  const stamp = digest !== undefined ? { candidateDigest: digest } : {};
   let workspaceFp: string | undefined;
 
   for (const rel of spec.paths ?? []) {
-    const bytes = await readWorktreeFile(state.worktreePath, rel);
+    let bytes: string | undefined;
+    try {
+      bytes = await readWorktreeFile(state.worktreePath, rel);
+    } catch (err) {
+      return { ...state, status: "stopped", stopReason: "observe rejected", blocker: err instanceof Error ? err.message : String(err) };
+    }
     const ref = newEvidenceRef(next);
     added.push({
       ref,
@@ -1515,6 +1757,7 @@ async function observeWorkspace(
       generation: next.generation,
       payload: { path: rel, bytes: bytes ?? "" },
       fingerprint: bytes === undefined ? "missing" : hash(bytes),
+      ...stamp,
     });
   }
 
@@ -1528,6 +1771,7 @@ async function observeWorkspace(
       generation: next.generation,
       payload: { changedPaths },
       fingerprint: workspaceFp,
+      ...stamp,
     });
   }
 

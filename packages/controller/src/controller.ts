@@ -23,7 +23,7 @@ import {
   type RecreateHostFn,
   type RepairDeps,
 } from "./repair-lifecycle.js";
-import { admitValidation, assertLiveWorkspaceMatchesEvidence, invalidateFromStage } from "./admit.js";
+import { admitValidation, assertLiveWorkspaceMatchesEvidence, deliveryDrift, invalidateFromStage } from "./admit.js";
 import type { AdmissionValidator } from "./admit.js";
 import { resolveBundleEntry } from "./bundle.js";
 import { createHostValidators } from "./host-validators.js";
@@ -38,7 +38,7 @@ import {
   runNormalLoop,
 } from "./loop.js";
 import { sanitizedPluginEnv } from "./plugin-env.js";
-import { assertPinnedBundleUnchanged } from "./pin.js";
+import { assertPinnedBundleUnchanged, readInstalledBundlePin } from "./pin.js";
 import {
   clearOwnerClaim,
   isClaimStale,
@@ -132,8 +132,21 @@ export interface ResumeRequest {
     binding: NonNullable<DurableRunState["supervisorBinding"]>,
     ctx: { runId: string; stateDir: string },
   ) => Promise<Supervisor>;
+  /**
+   * A fresh supervisor when there is no session to restore: the run stopped
+   * before its supervisor made a decision, or started without one.
+   */
+  supervisorFactory?: (ctx: { runId: string; stateDir: string }) => Promise<Supervisor>;
   recreateHost?: RecreateHostFn;
   stateRoot?: string;
+  /**
+   * Pin the installed plugin bundle when its bytes changed since the run
+   * started. Refused unless the graph keeps its stages, requirements,
+   * validator bindings and private-state schema. Adopts the updated
+   * environment declaration and rechecks accepted receipts with the updated
+   * validators.
+   */
+  updatePlugin?: boolean;
 }
 
 export interface RunReport {
@@ -395,6 +408,8 @@ export function createController(): Controller {
       // (which re-acquires the same lock).
       let session: ActiveSession | undefined;
       let restoredSupervisor: Supervisor | undefined;
+      // The operator's plugin update is committed only after the updated graph keeps the pinned contract.
+      let pluginUpdate: IntakePin["bundle"] | undefined;
       await withDirectoryLock(stateDir, "run.exec.lock", async () => {
         if (getSession(stateDir) || getSession(request.runRef)) {
           throw new Error("cannot resume: run has an active controller session; stop first");
@@ -433,7 +448,17 @@ export function createController(): Controller {
         }
 
         try {
-          await assertPinnedBundleUnchanged(state.intake);
+          if (request.updatePlugin === true) {
+            const { graphId, version } = state.intake.bundle;
+            if (state.activeVersion !== `${graphId}@${version}`) {
+              throw new Error(`an activated repair (${state.activeVersion}) owns this run's plugin; only the installed bundle can be updated`);
+            }
+            const installed = await readInstalledBundlePin(state.intake.bundle);
+            if (installed.manifestDigest !== state.intake.bundle.manifestDigest || installed.entryDigest !== state.intake.bundle.entryDigest) {
+              pluginUpdate = installed;
+            }
+          }
+          await assertPinnedBundleUnchanged(pluginUpdate !== undefined ? { ...state.intake, bundle: pluginUpdate } : state.intake);
         } catch (err) {
           state = {
             ...state,
@@ -493,7 +518,7 @@ export function createController(): Controller {
 
       try {
         const host = await openHost({
-          intake: state.intake,
+          intake: pluginUpdate !== undefined ? { ...state.intake, bundle: pluginUpdate } : state.intake,
           activeVersion: state.activeVersion,
           generation: state.generation,
           ...(request.plugin !== undefined ? { plugin: request.plugin } : {}),
@@ -517,8 +542,12 @@ export function createController(): Controller {
           return toReport(state, await listDirtyPaths(state.intake.repoPath));
         }
         try {
-          assertDefinitionMatchesPin(described.value, state.intake);
+          assertDefinitionMatchesPin(described.value, pluginUpdate !== undefined ? { ...state.intake, bundle: pluginUpdate } : state.intake);
           assertDefinitionUnchanged(described.value, state.definition);
+          if (pluginUpdate !== undefined && described.value.privateStateSchema !== state.definition.privateStateSchema) {
+            // Saved private state was written for the pinned schema.
+            throw new Error("plugin privateStateSchema changed since run start");
+          }
         } catch (err) {
           state = {
             ...state,
@@ -529,7 +558,6 @@ export function createController(): Controller {
           await saveRunState(state);
           return toReport(state, await listDirtyPaths(state.intake.repoPath));
         }
-
         const executorBlocker = await verifyExecutorCatalog(state, request.runner).catch(
           (err: unknown) => `executor catalog unreadable: ${err instanceof Error ? err.message : String(err)}`,
         );
@@ -569,6 +597,28 @@ export function createController(): Controller {
         const validators = rehydrated.validators
           ? { ...baseValidators, ...rehydrated.validators }
           : baseValidators;
+
+        if (pluginUpdate !== undefined) {
+          // Same stages, requirements and validator bindings, but the validators' code may differ.
+          const { environment: _previous, ...pinned } = state.definition;
+          void _previous;
+          const { environment } = described.value;
+          const updated = await recheckReceipts(
+            {
+              ...state,
+              intake: { ...state.intake, bundle: pluginUpdate },
+              definition: environment !== undefined ? { ...pinned, environment } : pinned,
+            },
+            validators,
+          );
+          const reason = `operator plugin update: manifest ${state.intake.bundle.manifestDigest.slice(0, 12)} -> ${pluginUpdate.manifestDigest.slice(0, 12)}${updated.note}`;
+          state = {
+            ...updated.state,
+            versionHistory: [...(state.versionHistory ?? []), { activeVersion: state.activeVersion, generation: state.generation, reason, at: new Date().toISOString() }],
+          };
+          revisionBridge.current = state.stateRevision;
+          await saveRunState(state);
+        }
 
         const supervisor = await resolveResumeSupervisor(request, state, stateDir);
         if (supervisor && !request.supervisor) {
@@ -664,7 +714,61 @@ async function reassessAcceptedWorkspace(state: DurableRunState): Promise<Durabl
       };
     }
   }
+  const last = state.definition.stages.at(-1);
+  if (last !== undefined && (await deliveryDrift(snapshot)) !== undefined) {
+    const { privateState: _privateState, ...next } = invalidateFromStage(snapshot, last.id, state.definition);
+    void _privateState;
+    return {
+      ...next,
+      current: { stageId: last.id, attempt: state.current.stageId === last.id ? state.current.attempt + 1 : 1 },
+    };
+  }
   return state;
+}
+
+/**
+ * Rechecks each accepted receipt with the current validators on the evidence it
+ * was accepted on; the first one that no longer passes invalidates its stage and
+ * every later one, and the run returns to that stage.
+ */
+async function recheckReceipts(
+  state: DurableRunState,
+  validators: Record<string, AdmissionValidator>,
+): Promise<{ state: DurableRunState; note: string }> {
+  for (const stage of state.definition.stages) {
+    for (const receipt of state.receipts.filter((r) => r.valid && r.stageId === stage.id)) {
+      const requirement = state.definition.requirements.find((r) => r.id === receipt.requirementId);
+      const validator = validators[receipt.validatorBinding.validatorId];
+      const evidence = receipt.evidenceRefs.map((ref) => state.evidence.find((e) => e.ref === ref));
+      let failure: string | undefined;
+      if (requirement === undefined || validator === undefined || evidence.some((e) => e === undefined)) {
+        failure = "cannot be rechecked";
+      } else {
+        const result = await Promise.resolve(
+          validator.evaluate({
+            requirementId: receipt.requirementId,
+            statement: requirement.statement,
+            evidence: evidence.filter((e) => e !== undefined),
+            candidateFingerprint: receipt.candidateFingerprint,
+            ...(receipt.candidateDigest !== undefined ? { candidateDigest: receipt.candidateDigest } : {}),
+          }),
+        ).catch((err: unknown) => ({ status: "failed" as const, reason: err instanceof Error ? err.message : String(err) }));
+        if (result.status !== "passed") failure = `${result.status}: ${result.reason}`;
+      }
+      if (failure === undefined) continue;
+      // Discard routing state that may assume the invalidated prerequisites.
+      const { privateState: _privateState, ...next } = invalidateFromStage(state, stage.id, state.definition);
+      void _privateState;
+      return {
+        state: {
+          ...next,
+          current: { stageId: stage.id, attempt: state.current.stageId === stage.id ? state.current.attempt + 1 : 1 },
+        },
+        note: `; invalidated from ${stage.id}: ${receipt.requirementId} ${failure}`,
+      };
+    }
+  }
+  return { state, note: "" };
 }
 
 function resolveValidators(
@@ -695,7 +799,7 @@ async function resolveResumeSupervisor(
   }
   const binding = state.supervisorBinding;
   if (!binding?.sessionFile) {
-    return undefined;
+    return request.supervisorFactory?.({ runId: state.runId, stateDir });
   }
   const restore =
     request.restoreSupervisor ??
