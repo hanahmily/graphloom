@@ -59,6 +59,9 @@ interface RunOptions {
   report?: string;
   stdout?: string;
   digest?: string;
+  stageId?: string;
+  purpose?: string;
+  timedOut?: boolean;
 }
 
 const command = (id: string, exitCode: number, o: RunOptions = {}): EvidenceRecord => ({
@@ -71,7 +74,7 @@ const command = (id: string, exitCode: number, o: RunOptions = {}): EvidenceReco
       argv: [id],
       exitCode,
       signal: null,
-      timedOut: false,
+      timedOut: o.timedOut ?? false,
       aborted: false,
       durationMs: 1,
       stdoutTail: o.stdout ?? "",
@@ -87,7 +90,7 @@ const command = (id: string, exitCode: number, o: RunOptions = {}): EvidenceReco
       mutations: o.mutations ?? [],
       phase: "run",
     },
-    producer: { operationId: o.op ?? `op-${o.from ?? "candidate"}`, stageId: FIX_STAGE, purpose: "check", readOnly: true, kind: "command" },
+    producer: { operationId: o.op ?? `op-${o.from ?? "candidate"}`, stageId: o.stageId ?? FIX_STAGE, purpose: o.purpose ?? "check", readOnly: true, kind: "command" },
   },
 });
 
@@ -125,11 +128,46 @@ const CHANGES = "# Changes by Version\n\nRelease Notes.\n\n## 0.12.0\n\n### Bug 
 const file = (bytes: string, digest = DIGEST): EvidenceRecord => ({ ref: ref(), kind: "file", candidateDigest: digest, payload: { path: CHANGES_PATH, bytes }, fingerprint: `fp-${seq}` });
 const diff = (added: string): EvidenceRecord => command(COMMAND.changesDiff, 0, { stdout: `diff --git a/CHANGES.md b/CHANGES.md\n+++ b/CHANGES.md\n@@ -9,0 +10 @@\n+${added}\n` });
 
-const review = (verdict: string, digest = DIGEST): EvidenceRecord => ({
+const plan = (): EvidenceRecord => ({
+  ref: ref(),
+  kind: "other",
+  candidateDigest: DIGEST,
+  payload: {
+    codingAgent: { harness: "claude-code", status: "completed", output: READY },
+    producer: { operationId: "op-plan", stageId: FIX_STAGE, purpose: "diagnostic", readOnly: true, kind: "agent", executorId: CODING_AGENT.id },
+  },
+});
+
+const review = (verdict: string, stageId: string = FIX_STAGE): EvidenceRecord => ({
   ref: ref(),
   kind: "review",
-  candidateDigest: digest,
-  payload: { verdict, summary: "s", producer: { operationId: "op-review", stageId: REVIEW_STAGE, purpose: "review", readOnly: true, kind: "agent" } },
+  candidateDigest: DIGEST,
+  payload: { verdict, summary: "s", producer: { operationId: "op-review", stageId, purpose: "review", readOnly: true, kind: "agent" } },
+});
+
+const comment = (severity: string | undefined) => ({
+  path: "pkg/timestamp/scheduler.go",
+  start_line: 10,
+  end_line: 12,
+  category: "bug",
+  ...(severity !== undefined ? { severity } : {}),
+  content: "Close waits for an action that ignores cancellation.",
+});
+/** The code reviewer's structured result. */
+const reviewed = (comments: object[], summary: object = { total_files: 3, reviewed_files: 3, skipped: [] }) => ({ comments, summary });
+interface CodeReviewOptions {
+  status?: string;
+  readOnly?: boolean;
+  digest?: string;
+}
+const codeReviewRun = (output: unknown, o: CodeReviewOptions = {}): EvidenceRecord => ({
+  ref: ref(),
+  kind: "other",
+  candidateDigest: o.digest ?? DIGEST,
+  payload: {
+    codingAgent: { harness: "codex", status: o.status ?? "completed", output },
+    producer: { operationId: "op-code-review", stageId: REVIEW_STAGE, purpose: "review", readOnly: o.readOnly ?? true, kind: "agent", executorId: CODING_AGENT.id },
+  },
 });
 
 const c = (validatorId: string, name: string, evidence: EvidenceRecord[], expected: ValidationStatus): QualificationCase => ({ validatorId, name, evidence, expected });
@@ -158,6 +196,9 @@ export const QUALIFICATION_CASES: readonly QualificationCase[] = [
   c("red-reproduces", "a Ginkgo suite's setup fails on the base", [implementer(SUITE_READY), red(suite(failedByAssertion, [spec("", "failed", "BeforeSuite")]))], "failed"),
   c("red-reproduces", "a Ginkgo spec panics on the base", [implementer(SUITE_READY), red(suite(failedByAssertion, [spec(FOCUSED, "panicked")]))], "failed"),
   c("red-reproduces", "a Ginkgo spec fails in its BeforeEach", [implementer(SUITE_READY), red(suite(failedByAssertion, [spec(FOCUSED, "failed", "It", "BeforeEach")]))], "failed"),
+  c("red-reproduces", "a Ginkgo run lost its spec summary", [implementer(SUITE_READY), red(failedByAssertion)], "failed"),
+  c("red-reproduces", "only a spec other than the focused one fails", [implementer(SUITE_READY), red(suite(failedByAssertion, [spec("scheduler stops cleanly", "failed"), spec(FOCUSED, "passed")]))], "failed"),
+  c("red-reproduces", "the RED check timed out", [implementer(READY), red(failedByAssertion, 1, { timedOut: true })], "failed"),
   c("red-reproduces", "RED ran on an older change", [implementer(READY), red(failedByAssertion, 1, { digest: OTHER })], "inconclusive"),
 
   c("green-passes", "test and packages pass", [implementer(READY), ...candidate()], "passed"),
@@ -188,10 +229,27 @@ export const QUALIFICATION_CASES: readonly QualificationCase[] = [
   c("changes-entry", "no release section", [file("# Changes\n\n- Warn.\n"), green(), diff("- Warn.")], "failed"),
   c("changes-entry", "CHANGES.md not observed for this change", [file(CHANGES, OTHER), green(), diff("- Warn instead of reporting a timeout for long scheduled actions.")], "inconclusive"),
 
-  c("independent-reviewer", "approved this change", [review("approved")], "passed"),
-  c("independent-reviewer", "approved another change", [review("approved", OTHER)], "failed"),
-  c("independent-reviewer", "changes requested", [review("request_changes")], "failed"),
-  c("independent-reviewer", "unknown verdict", [review("lgtm")], "inconclusive"),
+  c("plan-reviewer", "the plan was approved", [plan(), review("approved")], "passed"),
+  c("plan-reviewer", "the plan was sent back", [plan(), review("request_changes")], "failed"),
+  c("plan-reviewer", "the approval is older than the plan", [review("approved"), plan()], "failed"),
+  c("plan-reviewer", "the review came from another stage", [plan(), review("approved", REVIEW_STAGE)], "inconclusive"),
+  c("plan-reviewer", "no review", [plan()], "inconclusive"),
+  c("plan-reviewer", "no plan in this generation", [review("approved")], "inconclusive"),
+  c("plan-reviewer", "unknown verdict", [plan(), review("lgtm")], "inconclusive"),
+
+  c("open-code-review", "no comments", [codeReviewRun(reviewed([]))], "passed"),
+  c("open-code-review", "only low and medium comments", [codeReviewRun(reviewed([comment("low"), comment("medium")]))], "passed"),
+  c("open-code-review", "a high comment", [codeReviewRun(reviewed([comment("low"), comment("high")]))], "failed"),
+  c("open-code-review", "a critical comment", [codeReviewRun(reviewed([comment("critical")]))], "failed"),
+  c("open-code-review", "a comment without a severity", [codeReviewRun(reviewed([comment(undefined)]))], "failed"),
+  c("open-code-review", "some files were not reviewed", [codeReviewRun(reviewed([], { total_files: 3, reviewed_files: 2, skipped: [] }))], "failed"),
+  c("open-code-review", "a file was skipped", [codeReviewRun(reviewed([], { total_files: 3, reviewed_files: 3, skipped: [{ path: "a.go", reason: "generated" }] }))], "failed"),
+  c("open-code-review", "no file was reviewed", [codeReviewRun(reviewed([], { total_files: 0, reviewed_files: 0, skipped: [] }))], "failed"),
+  c("open-code-review", "no coverage summary", [codeReviewRun({ comments: [] })], "failed"),
+  c("open-code-review", "the reviewer failed", [codeReviewRun(null, { status: "failed" })], "failed"),
+  c("open-code-review", "the review could write", [codeReviewRun(reviewed([]), { readOnly: false })], "failed"),
+  c("open-code-review", "the review ran on an older change", [codeReviewRun(reviewed([]), { digest: OTHER })], "inconclusive"),
+  c("open-code-review", "the review did not run", [...candidate()], "inconclusive"),
 ];
 
 /**

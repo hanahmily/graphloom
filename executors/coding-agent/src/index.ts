@@ -11,11 +11,13 @@ export { CODING_AGENT_RUN_ID, CONTINUATION_NOTICE, createCodingAgentExecutor, ty
 export { CODING_HARNESS_ENV } from "./executors.js";
 export {
   claudeCodeHarnessModule,
+  codexHarnessModule,
   codingAgentBinding,
   codingAgentExecutorPackage,
   DEFAULT_CODING_TIMEOUT_MS,
   piHarnessModule,
   type ClaudeCodeBindingOptions,
+  type CodexBindingOptions,
   type CodingAgentBindingOptions,
   type PiBindingOptions,
 } from "./package.js";
@@ -30,6 +32,16 @@ export {
   CLAUDE_RESPONSE_TIMEOUT_ENV,
   CLAUDE_STARTUP_TIMEOUT_ENV,
 } from "./claude-config.js";
+export {
+  CODEX_BIN_ENV,
+  CODEX_DEFAULT_RESPONSE_TIMEOUT_MS,
+  CODEX_HOME_ENV,
+  CODEX_MODEL_ENV,
+  CODEX_PASS_ENV_ENV,
+  CODEX_REASONING_EFFORT_ENV,
+  CODEX_RESPONSE_TIMEOUT_ENV,
+} from "./codex-config.js";
+export type { CodexHarnessOptions } from "./codex-harness.js";
 export { PI_AGENT_DIR_ENV, PI_API_KEY_CREDENTIAL, PI_MODEL_ENV, PI_PASS_ENV_ENV, PI_PROVIDER_ENV } from "./pi-config.js";
 export type { ClaudeCodeHarnessOptions } from "./claude-harness.js";
 export type { PiHarnessOptions } from "./pi-harness.js";

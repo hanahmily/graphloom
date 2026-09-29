@@ -1,6 +1,6 @@
 import { execFile, execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -12,6 +12,8 @@ import { createController, loadRunState } from "@graphloom/controller";
 import { commandBinding, commandExecutorPackage } from "@graphloom/executor-command";
 import { githubBinding, githubExecutorPackage } from "@graphloom/executor-github";
 import { startFakeGitHub, type FakeGitHub } from "@graphloom/executor-github/testing";
+import { commandOptions } from "../dist/cli-runner.js";
+import type { RunnerConfig } from "../src/runner-config.js";
 
 const execFileAsync = promisify(execFile);
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
@@ -131,11 +133,69 @@ const PLAN = {
 };
 
 /**
- * Real command and GitHub executors, as the CLI composes them, with scripted
- * Claude Code and Pi agents: the plan, an implementation that writes the fix,
- * test and changelog entry, and an approving review.
+ * Stands in for open-code-review on PATH: it has a delegation mode, and
+ * `delegate preview` records where it ran, its arguments, and the files the
+ * worktree change touches.
  */
-function fixRunner(baseUrl: string) {
+async function fakeOcr(dir: string): Promise<{ bin: string; calls: string }> {
+  const bin = path.join(dir, "bin");
+  const calls = path.join(dir, "ocr-calls");
+  await mkdir(bin);
+  await writeFile(
+    path.join(bin, "ocr"),
+    [
+      "#!/bin/sh",
+      '[ "$1 $2" = "delegate preview" ] || exit 1',
+      '[ "$3" = --help ] && exit 0',
+      `{ echo "cwd=$(pwd)"; echo "args=$*"; echo "changed=$(git status --porcelain | awk '{print $2}' | sort | tr '\\n' ' ')"; } >> "${calls}"`,
+      'echo \'{"mode":"workspace","reviewable_files":[]}\'',
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  return { bin, calls };
+}
+
+/**
+ * The agents are scripted, but the preflight still needs Claude Code and Codex
+ * installed and logged in. They sit off PATH, as runner.json names them, and
+ * are logged in only in the login directories runner.json names.
+ */
+async function fakeAgents(dir: string): Promise<{ config: RunnerConfig; calls: string }> {
+  const bin = path.join(dir, "agents");
+  const calls = path.join(dir, "agent-calls");
+  await mkdir(bin);
+  const claudeConfig = path.join(dir, "claude-config");
+  const codexHome = path.join(dir, "codex-home");
+  const fake = (name: string, loginVar: string, loginDir: string) =>
+    writeFile(
+      path.join(bin, name),
+      `#!/bin/sh\necho "${name} $* ${loginVar}=$${loginVar}" >> "${calls}"\n[ "$1" = --version ] || [ "$${loginVar}" = "${loginDir}" ]\n`,
+      { mode: 0o755 },
+    );
+  await fake("claude", "CLAUDE_CONFIG_DIR", claudeConfig);
+  await fake("codex", "CODEX_HOME", codexHome);
+  return {
+    config: {
+      harness: "claude-code",
+      harnesses: ["claude-code", "codex"],
+      allowUnrestricted: true,
+      claude: { command: path.join(bin, "claude"), configDir: claudeConfig },
+      codex: { command: path.join(bin, "codex"), codexHome },
+    },
+    calls,
+  };
+}
+
+const LOW = { path: "pkg/timestamp/scheduler.go", start_line: 5, end_line: 5, category: "style", severity: "low", content: "Name the constant." };
+
+/**
+ * Real command and GitHub executors, as the CLI composes them, with scripted
+ * Claude Code, Pi and Codex agents: the plan, an approving plan review, an
+ * implementation that writes the fix, test and changelog entry, and a code
+ * review that runs the ocr its assignment names in the worktree.
+ */
+function fixRunner(baseUrl: string, config: RunnerConfig) {
   const agentJobs: JobSpec[] = [];
   let session = 0;
   const agent: Runner = {
@@ -152,8 +212,13 @@ function fixRunner(baseUrl: string) {
         evidence: [{ kind: "other", payload: { codingAgent: { harness: (job.input as { harness: string }).harness, status: "completed", output } } }, ...extra],
         ...identity,
       });
+      if (job.purpose === "review" && job.stageId === "review") {
+        const ocr = /`(\S+) delegate preview --format json`/.exec((job.input as { assignment: string }).assignment)![1]!;
+        await execFileAsync(ocr, ["delegate", "preview", "--format", "json"], { cwd: ctx.worktreePath });
+        return done({ comments: [LOW], summary: { total_files: 3, reviewed_files: 3, skipped: [] } });
+      }
       if (job.purpose === "review") {
-        const verdict = { verdict: "approved", summary: "The fix and test match the issue; the metric question is listed." };
+        const verdict = { verdict: "approved", summary: "The plan fixes the issue, names Status's callers, and lists the metric question." };
         return done(verdict, [{ kind: "review", payload: verdict }]);
       }
       if (job.purpose === "work") {
@@ -167,7 +232,7 @@ function fixRunner(baseUrl: string) {
   };
   const runner = createBuiltinExecutorRunner({
     packages: [
-      { manifest: commandExecutorPackage, ...commandBinding() },
+      { manifest: commandExecutorPackage, ...commandBinding(commandOptions(config)) },
       { manifest: githubExecutorPackage, ...githubBinding({ baseUrl, token: "fake" }) },
     ],
     fallback: agent,
@@ -176,43 +241,73 @@ function fixRunner(baseUrl: string) {
 }
 
 describe.skipIf(GO === undefined)("banyandb-fix on a Go repository", () => {
-  it("checks the environment, fixes the issue with RED and GREEN proof, gets a review, and delivers a local branch", async () => {
+  it("checks the environment, reviews the plan, fixes the issue with RED and GREEN proof, reviews the code, and delivers a local branch", async () => {
     const env = await makeEnv();
     github = await startFakeGitHub({
       issues: [{ number: ISSUE, title: "Scheduler reports long actions as timed out", state: "open", labels: ["bug"], body: "Backups over five minutes log action timed out." }],
     });
     github.comments.set(ISSUE, [{ id: 1, body: "A running backup is not an error; report it as running." }]);
-    const { runner, agentJobs } = fixRunner(github.baseUrl);
-    const definition = fixtureGraph(env.contributing).describe();
-    const validators = Object.fromEntries(definition.defaultValidators.map((b) => [b.validatorId, plugin.validatorById(b.validatorId)!]));
-
-    const report = await createController().run({
-      taskPath: env.taskPath,
-      plugin: fixtureGraph(env.contributing),
-      validators,
-      runner,
-      stateRoot: env.stateRoot,
-      runId: "bydb-14111",
-    });
+    const ocr = await fakeOcr(env.dir);
+    const agents = await fakeAgents(env.dir);
+    const savedPath = process.env.PATH;
+    process.env.PATH = `${ocr.bin}:${savedPath}`;
+    let report: Awaited<ReturnType<ReturnType<typeof createController>["run"]>>;
+    let agentJobs: JobSpec[];
+    try {
+      const composed = fixRunner(github.baseUrl, agents.config);
+      agentJobs = composed.agentJobs;
+      const runner = composed.runner;
+      const definition = fixtureGraph(env.contributing).describe();
+      const validators = Object.fromEntries(definition.defaultValidators.map((b) => [b.validatorId, plugin.validatorById(b.validatorId)!]));
+      report = await createController().run({
+        taskPath: env.taskPath,
+        plugin: fixtureGraph(env.contributing),
+        validators,
+        runner,
+        stateRoot: env.stateRoot,
+        runId: "bydb-14111",
+      });
+    } finally {
+      process.env.PATH = savedPath;
+    }
 
     expect(report.status, `${report.stopReason}: ${report.blocker}`).toBe("succeeded");
     const state = await loadRunState(report.stateDir);
     expect(state.receipts.filter((r) => r.valid).map((r) => `${r.stageId}/${r.requirementId}`)).toEqual([
+      "fix/plan-reviewed",
       "fix/decisions-recorded",
       "fix/reproduces",
       "fix/passes",
       "fix/builds",
       "fix/in-scope",
       "fix/changelog-entry",
-      "review/spec-and-standards-review",
+      "review/code-review",
     ]);
     expect(new Set(state.receipts.map((r) => r.candidateDigest))).toEqual(new Set([state.candidateDigest]));
+    // The preflight checked the agents runner.json names, in the login directories it names.
+    expect([...new Set((await readFile(agents.calls, "utf8")).trim().split("\n"))]).toEqual([
+      `codex --version CODEX_HOME=${agents.config.codex!.codexHome}`,
+      `codex login status CODEX_HOME=${agents.config.codex!.codexHome}`,
+      `claude --version CLAUDE_CONFIG_DIR=${agents.config.claude!.configDir}`,
+      `claude auth status CLAUDE_CONFIG_DIR=${agents.config.claude!.configDir}`,
+    ]);
 
-    // The plan saw the issue and its comments; the implementer continued the plan's session.
-    const [plan, implement, review] = agentJobs;
+    // The plan saw the issue and its comments; Pi reviewed it; the implementer continued the plan's session.
+    const [plan, planReview, implement] = agentJobs;
     expect((plan!.input as { assignment: string }).assignment).toContain("A running backup is not an error");
+    expect(planReview).toMatchObject({ stageId: "fix", purpose: "review", readOnly: true, input: { harness: "pi" } });
+    expect((planReview!.input as { assignment: string }).assignment).toContain(PLAN.summary);
     expect(implement!.continueFrom).toBeDefined();
-    expect(review!.input).toMatchObject({ harness: "pi" });
+    expect(agentJobs).toHaveLength(4);
+
+    // Codex reviewed read-only, running the ocr the preflight found, in the worktree holding the uncommitted change.
+    expect(agentJobs[3]).toMatchObject({ stageId: "review", kind: "agent", purpose: "review", readOnly: true, input: { harness: "codex" } });
+    const calls = (await readFile(ocr.calls, "utf8")).trim().split("\n");
+    expect(calls).toEqual([
+      `cwd=${await realpath(report.worktreePath)}`,
+      "args=delegate preview --format json",
+      "changed=CHANGES.md pkg/timestamp/scheduler.go pkg/timestamp/status_test.go",
+    ]);
 
     // RED failed by assertion on the base with only the test; GREEN passed on the committed change.
     const command = (id: string) =>
@@ -224,15 +319,21 @@ describe.skipIf(GO === undefined)("banyandb-fix on a Go repository", () => {
       expect(command(id).at(-1)!.payload, id).toMatchObject({ command: { exitCode: 0 }, checkout: { from: "candidate", mutations: [] } });
     }
 
-    // Delivery: a local branch with the whole change and the PR description, and the worktree untouched.
+    // Delivery: a local branch with the whole change and a short message, the PR body in the evidence, and the worktree untouched.
     const git = (...args: string[]) => execFileSync("git", args, { cwd: env.repo, encoding: "utf8" });
     expect(git("show", `fix/${ISSUE}:pkg/timestamp/scheduler.go`)).toBe(FIXED);
     expect(git("ls-tree", "-r", "--name-only", `fix/${ISSUE}`).split("\n")).not.toContain("pkg/timestamp/mock_limit.go");
     expect(git("log", "-1", "--format=%an <%ae>", `fix/${ISSUE}`).trim()).toBe("Maintainer <maintainer@example.com>");
-    const message = git("log", "-1", "--format=%B", `fix/${ISSUE}`);
-    expect(message).toMatch(/^Report long scheduled actions as running, not timed out\n/);
-    expect(message).toContain(`Fixes apache/skywalking#${ISSUE}`);
-    expect(message).toContain("Should the timeout metric keep counting running actions?");
+    const message = git("log", "-1", "--format=%B", `fix/${ISSUE}`).trim();
+    expect(message).toBe(`${PLAN.title}\n\n${PLAN.summary}\n\nFixes apache/skywalking#${ISSUE}`);
+    const deliver = state.evidence.find((e) => (e.payload as { command?: { id?: string } }).command?.id === "deliver")!;
+    const body = (deliver.payload as { command: { report: { text: string } } }).command.report.text;
+    expect(body).toContain(`### Fix apache/skywalking#${ISSUE}: Scheduler reports long actions as timed out`);
+    expect(body).toContain("- Should the timeout metric keep counting running actions?");
+    expect(body).toContain(
+      "Reviewed by Codex in open-code-review's delegation mode (reviewed 3 of 3 file(s)): no critical or high comments; 1 lower-severity comment(s) left for the reviewer.",
+    );
+    expect(body).not.toMatch(/rcpt|receipt/);
     expect(execFileSync("git", ["status", "--porcelain"], { cwd: report.worktreePath, encoding: "utf8" })).toContain("M pkg/timestamp/scheduler.go");
     expect(await readFile(path.join(report.worktreePath, "pkg/timestamp/mock_limit.go"), "utf8")).toContain("generatedLimit");
     expect(github.requests.every((r) => r.method === "GET")).toBe(true);

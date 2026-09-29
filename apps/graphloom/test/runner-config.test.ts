@@ -2,7 +2,7 @@ import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { claudeOptions, createCliRunner } from "../src/cli-runner.js";
+import { claudeOptions, codexOptions, createCliRunner } from "../src/cli-runner.js";
 import { loadRunnerConfig, parseRunnerConfig, requireRunnerConfig } from "../src/runner-config.js";
 
 const dirs: string[] = [];
@@ -40,12 +40,34 @@ describe("operator runner configuration", () => {
     await expect(requireRunnerConfig({ GRAPHLOOM_RUNNER_CONFIG: file, PATH: path.join(dir, "empty") })).rejects.toThrow(
       "Claude Code command claude was not found",
     );
+    await writeFile(file, JSON.stringify({ harness: "pi", harnesses: ["codex"], allowUnrestricted: true, pi: { provider: "p", modelId: "m" } }));
+    await expect(requireRunnerConfig({ GRAPHLOOM_RUNNER_CONFIG: file, PATH: path.join(dir, "empty") })).rejects.toThrow(
+      "Codex command codex was not found; install Codex or set codex.command in the runner config",
+    );
+  });
+
+  it("accepts Codex settings and binds its command to the absolute path it checked", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "gl-runner-config-"));
+    dirs.push(dir);
+    expect(parseRunnerConfig({
+      harness: "claude-code", allowUnrestricted: true, harnesses: ["codex"],
+      codex: { model: "gpt-6", reasoningEffort: "high", codexHome: "~/.codex", passEnv: ["X"], responseTimeoutMs: 0 },
+    }).codex).toEqual({ model: "gpt-6", reasoningEffort: "high", codexHome: path.join(os.homedir(), ".codex"), passEnv: ["X"], responseTimeoutMs: 0 });
+    const bin = path.join(dir, "codex");
+    await writeFile(bin, "#!/bin/sh\n", { mode: 0o755 });
+    const file = path.join(dir, "runner.json");
+    await writeFile(file, JSON.stringify({ harness: "codex", allowUnrestricted: true, codex: { command: path.relative(process.cwd(), bin) } }));
+    expect(await requireRunnerConfig({ GRAPHLOOM_RUNNER_CONFIG: file })).toEqual({ harness: "codex", allowUnrestricted: true, codex: { command: bin } });
+    await writeFile(file, JSON.stringify({ harness: "codex", allowUnrestricted: true }));
+    expect(await requireRunnerConfig({ GRAPHLOOM_RUNNER_CONFIG: file, PATH: dir })).toEqual({ harness: "codex", allowUnrestricted: true });
   });
 
   it.each([
     null, [], { harness: "other", allowUnrestricted: true },
     { harness: "claude-code", allowUnrestricted: true, harnesses: [] },
-    { harness: "claude-code", allowUnrestricted: true, harnesses: ["codex"] },
+    { harness: "claude-code", allowUnrestricted: true, harnesses: ["gemini"] },
+    { harness: "codex", allowUnrestricted: true, codex: { reasoningEffort: "extreme" } },
+    { harness: "codex", allowUnrestricted: true, codex: { apiKey: "secret" } },
     { harness: "claude-code", allowUnrestricted: true, github: { token: "secret" } },
     { harness: "claude-code", allowUnrestricted: true, github: { tokenEnv: "not a name" } },
     { harness: "claude-code", allowUnrestricted: true, command: { timeoutMs: 0 } },
@@ -119,5 +141,10 @@ describe("operator runner configuration", () => {
     expect(claude({ timeoutMs: 120_000, claude: { startupTimeoutMs: 0, responseTimeoutMs: 90_000 } })).toEqual({ startupTimeoutMs: 0, responseTimeoutMs: 90_000 });
     expect(() => createCliRunner(parseRunnerConfig({ harness: "claude-code", allowUnrestricted: true, timeoutMs: 120_000, claude: { responseTimeoutMs: 120_000 } })))
       .toThrow("claude.responseTimeoutMs (120000 ms) must be shorter than the job timeout (120000 ms)");
+    const codex = (config: Record<string, unknown>) => codexOptions(parseRunnerConfig({ harness: "codex", allowUnrestricted: true, ...config }));
+    expect(codex({})).toEqual({});
+    expect(codex({ timeoutMs: 600_000 })).toEqual({ responseTimeoutMs: 300_000 });
+    expect(() => createCliRunner(parseRunnerConfig({ harness: "codex", allowUnrestricted: true, timeoutMs: 120_000, codex: { responseTimeoutMs: 120_000 } })))
+      .toThrow("codex.responseTimeoutMs (120000 ms) must be shorter than the job timeout (120000 ms)");
   });
 });

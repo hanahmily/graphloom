@@ -145,6 +145,12 @@ async function runCommand(spec: CommandSpec, extraEnv: Record<string, string>, c
   let aborted = false;
 
   const result = await new Promise<{ exitCode: number | null; signal: string | null; spawnError?: string }>((resolve) => {
+    // An abort during the awaits above has already fired; nothing awaits between this check and the listener.
+    if (ctx.signal?.aborted) {
+      aborted = true;
+      resolve({ exitCode: null, signal: null });
+      return;
+    }
     let child;
     try {
       child = spawn(spec.argv[0]!, spec.argv.slice(1), {

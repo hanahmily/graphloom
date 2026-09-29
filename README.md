@@ -60,10 +60,12 @@ Configure the job runner in `~/.config/graphloom/runner.json`, or point
 Claude Code must be installed and logged in. Optional `claude.command` and
 `claude.model` select its executable and model. For Pi, use `"harness": "pi"`
 with `"pi": { "provider": "minimax-cn", "modelId": "MiniMax-M3" }` and the
-existing Pi credential store. Keep credentials out of runner configuration.
+existing Pi credential store. Codex (`"codex"`, installed and logged in) serves
+read-only jobs only, such as a plugin's code review; list it in `harnesses` next
+to the default. Keep credentials out of runner configuration.
 The same configuration is used by `resume`. Without runner configuration, or
-without the Claude Code command or Pi model it names, `run` and `resume` refuse
-to start. The [example guide](examples/README.md) lists every setting.
+without the Claude Code or Codex command or Pi model it names, `run` and
+`resume` refuse to start. The [example guide](examples/README.md) lists every setting.
 
 `allowUnrestricted` is required because coding agents can run shell commands
 with the operator's permissions. Claude's file-tool permission checks restrict

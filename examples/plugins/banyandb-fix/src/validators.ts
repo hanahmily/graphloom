@@ -4,6 +4,7 @@ import {
   CHANGES_PATH,
   COMMAND,
   FIX_STAGE,
+  REVIEW_STAGE,
 } from "./constants.js";
 import { decisionProblems, outOfScope, parseDecisionRecord, type DecisionRecord } from "./decision-record.js";
 import {
@@ -14,9 +15,11 @@ import {
   latestReview,
   sameCheckoutJob,
   succeeded,
+  type AgentRun,
   type CommandRun,
 } from "./evidence.js";
 import { ginkgoSpecs, regressionOutcome } from "./gotest.js";
+import { blockingComments, describeComment, describeCoverage, parseCodeReview, reviewComplete } from "./ocr.js";
 
 const passed = (reason: string): ValidationResult => ({ status: "passed", reason });
 const failed = (reason: string): ValidationResult => ({ status: "failed", reason });
@@ -69,6 +72,9 @@ export const reproduces: Validator = {
     const unclean = cleanRun(red);
     if (unclean !== undefined) return failed(unclean);
     if (red.checkout!.paths.length === 0 || !red.checkout!.paths.every(isTestPath)) return failed("the RED checkout must apply only test files");
+    if (red.command.timedOut === true || red.command.aborted === true || red.command.spawnError !== undefined) {
+      return failed(`the RED check did not finish (${describeCommand(red.command)})`);
+    }
     const name = testLabel(record);
     const outcome = regressionOutcome(reportText(red), record.test);
     if (outcome === "failed" && !succeeded(red.command)) return passed(`${name} fails on the base commit with only the test files applied`);
@@ -170,14 +176,42 @@ export const changelogEntry: Validator = {
   },
 };
 
-export const independentReview: Validator = {
+/** The plan the implementer followed was approved by the read-only reviewer after it was written. */
+export const planReviewed: Validator = {
   evaluate(input: ValidationInput) {
-    const review = latestReview(input.evidence);
-    if (review === undefined) return inconclusive("no review verdict");
-    if (input.candidateDigest !== undefined && review.record.candidateDigest !== input.candidateDigest) return failed("the verdict is for a different change");
-    if (review.verdict === "approved") return passed("the reviewer approved the change");
-    if (review.verdict === "request_changes") return failed(`the reviewer requested changes: ${review.summary}`);
+    const plan = agentRuns(input.evidence, FIX_STAGE, "diagnostic").at(-1);
+    if (plan === undefined) return inconclusive("no plan in this generation");
+    const review = latestReview(input.evidence, FIX_STAGE);
+    if (review === undefined) return inconclusive("the plan has not been reviewed");
+    if (input.evidence.indexOf(review.record) < input.evidence.indexOf(plan.record)) return failed("the latest plan was not reviewed");
+    if (review.verdict === "approved") return passed("the reviewer approved the plan");
+    if (review.verdict === "request_changes") return failed(`the reviewer sent the plan back: ${review.summary}`);
     return inconclusive(`unknown verdict ${JSON.stringify(review.verdict)}`);
+  },
+};
+
+/** The latest code review of the change `digest` names. */
+export function latestCodeReview(evidence: EvidenceRecord[], digest: string | undefined): AgentRun | undefined {
+  return agentRuns(evidence, REVIEW_STAGE, "review").filter((r) => digest !== undefined && r.record.candidateDigest === digest).at(-1);
+}
+
+/** A read-only reviewer, following open-code-review's delegation workflow on exactly the current change, reviewed every file and reported no critical or high comment. */
+export const codeReview: Validator = {
+  evaluate(input: ValidationInput) {
+    const run = latestCodeReview(input.evidence, input.candidateDigest);
+    if (run === undefined) return inconclusive("the code has not been reviewed on the current change");
+    if (!run.producer.readOnly) return failed("the code review must come from a read-only review job");
+    if (run.status !== "completed") return failed(`the code reviewer did not finish (${run.status})`);
+    const parsed = parseCodeReview(run.output);
+    if ("problem" in parsed) return failed(parsed.problem);
+    const { report } = parsed;
+    if (!reviewComplete(report)) return failed(`the code review did not cover every file: ${describeCoverage(report)}`);
+    const blocking = blockingComments(report);
+    if (blocking.length > 0) {
+      return failed(`the code review reported ${blocking.length} critical or high comment(s): ${blocking.slice(0, 3).map(describeComment).join("; ")}`);
+    }
+    const lower = report.comments.length - blocking.length;
+    return passed(`the code review ${describeCoverage(report)} and reported no critical or high comment${lower > 0 ? ` and ${lower} lower` : ""}`);
   },
 };
 
@@ -188,7 +222,8 @@ const VALIDATORS: Record<string, Validator> = {
   "build-checks": builds,
   "write-scope": inScope,
   "changes-entry": changelogEntry,
-  "independent-reviewer": independentReview,
+  "plan-reviewer": planReviewed,
+  "open-code-review": codeReview,
 };
 
 export function validatorById(id: string): Validator | undefined {

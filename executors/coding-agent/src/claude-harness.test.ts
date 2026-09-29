@@ -108,6 +108,15 @@ function payload(result: unknown) {
 
 const flagValue = (argv: string[], name: string) => argv[argv.indexOf(name) + 1];
 
+function alive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 describe("Claude Code harness", () => {
   it("runs Claude Code headless with its full toolset, graph tools served over MCP", async () => {
     const h = await setup();
@@ -340,6 +349,26 @@ describe("Claude Code harness", () => {
     const result = await h.executor.execute({ assignment: "work" }, h.ctx());
     expect(result).toMatchObject({ status: "failed" });
     expect(Date.now() - start).toBeLessThan(2000);
+  });
+
+  it("stops a descendant left in the CLI's process group when Claude Code completes", async () => {
+    const h = await setup();
+    const pidFile = path.join(h.dir, "child.pid");
+    await h.script([{ spawnChild: { pidFile, ignoreTerm: false } }, { text: "done" }]);
+    expect(await h.executor.execute({ assignment: "work" }, h.ctx())).toMatchObject({ status: "ok", summary: "done" });
+    expect(alive(Number(await readFile(pidFile, "utf8")))).toBe(false);
+  });
+
+  it("kills a descendant that ignores SIGTERM after the CLI exits on cancellation", async () => {
+    const h = await setup({ startupTimeoutMs: 0, interruptGraceMs: 50, killGraceMs: 300 });
+    const pidFile = path.join(h.dir, "child.pid");
+    const controller = new AbortController();
+    await h.script([{ spawnChild: { pidFile, ignoreTerm: true } }, { hang: true }], [], { ignoreInterrupt: true });
+    setTimeout(() => controller.abort(), 300);
+    expect(await h.executor.execute({ assignment: "work" }, h.ctx({ signal: controller.signal }))).toMatchObject({
+      status: "failed", summary: "agent session aborted",
+    });
+    expect(alive(Number(await readFile(pidFile, "utf8")))).toBe(false);
   });
 
   it("reaps a CLI that closes stdout without ending the process", async () => {

@@ -9,6 +9,7 @@ export {
   type CommandSpec,
 } from "./run.js";
 export {
+  AGENT_LOCATION_ENV,
   DEFAULT_COMMAND_JOB_TIMEOUT_MS,
   commandBinding,
   commandExecutorPackage,

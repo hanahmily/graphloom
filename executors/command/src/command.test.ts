@@ -123,6 +123,16 @@ describe("command executor", () => {
     expect(() => process.kill(pid, 0)).toThrow();
   });
 
+  it("does not start a command when the job is aborted while it is being set up", async () => {
+    const marker = path.join(dir, "started");
+    const abort = new AbortController();
+    const running = executor.execute({ commands: [{ id: "touch", argv: ["sh", "-c", `touch ${marker}`] }] }, { ...ctx, signal: abort.signal });
+    abort.abort();
+    const [touch] = outcomes(await running);
+    expect(touch).toMatchObject({ aborted: true, exitCode: null });
+    await expect(readFile(marker)).rejects.toThrow();
+  });
+
   it("stops when the job is aborted", async () => {
     const abort = new AbortController();
     setTimeout(() => abort.abort(), 200);
@@ -209,5 +219,27 @@ describe("command executor package", () => {
     expect(outcome.stdoutTail.trim()).toBe(await realpath(dir));
     const described = await runner.describeExecutors!();
     expect(described.map((d) => d.id)).toContain(COMMAND_RUN_ID);
+  });
+
+  it("gives every command the agent locations it is bound with, and nothing else", async () => {
+    const { commandBinding, commandExecutorPackage } = await import("../dist/package.js");
+    const env = { GRAPHLOOM_CODEX_BIN: "/opt/codex/bin/codex", GRAPHLOOM_CODEX_HOME: "/srv/codex-home" };
+    const runner = createBuiltinExecutorRunner({
+      packages: [{ manifest: commandExecutorPackage, ...commandBinding({ env }) }],
+      fallback: { runJob: async () => { throw new Error("not served"); } },
+    });
+    const result = await runner.runJob(
+      {
+        stageId: "fix",
+        kind: "command",
+        purpose: "check",
+        instruction: "print the Codex location",
+        readOnly: true,
+        input: { commands: [{ id: "where", argv: ["sh", "-c", 'printf "%s %s" "$GRAPHLOOM_CODEX_BIN" "$GRAPHLOOM_CODEX_HOME"'] }] },
+      },
+      { runId: "r1", operationId: "op-3", generation: 1, worktreePath: dir, artifactDir: path.join(dir, ".artifacts") },
+    );
+    expect((result.evidence![0]!.payload as { command: CommandOutcome }).command.stdoutTail).toBe("/opt/codex/bin/codex /srv/codex-home");
+    expect(() => commandBinding({ env: { GITHUB_TOKEN: "t" } })).toThrow('does not accept configuration "GITHUB_TOKEN"');
   });
 });

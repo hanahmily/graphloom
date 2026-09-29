@@ -235,6 +235,37 @@ describe("configured CLI runner", () => {
     expect(JSON.stringify(described)).not.toContain("t0ken");
   });
 
+  it("tells command jobs where the enabled harnesses' agents and logins are", async () => {
+    const f = await fixture();
+    const agents = {
+      harness: "claude-code",
+      harnesses: ["claude-code", "codex"],
+      allowUnrestricted: true,
+      claude: { command: "/opt/claude/bin/claude", configDir: "/srv/claude-config" },
+      codex: { command: "/opt/codex/bin/codex", codexHome: "/srv/codex-home" },
+    };
+    const job = {
+      stageId: "fix",
+      kind: "command" as const,
+      purpose: "check" as const,
+      instruction: "print the agent locations",
+      readOnly: true,
+      input: { commands: [{ id: "where", argv: ["sh", "-c", 'printf "%s|" "$GRAPHLOOM_CLAUDE_BIN" "$GRAPHLOOM_CLAUDE_CONFIG_DIR" "$GRAPHLOOM_CODEX_BIN" "$GRAPHLOOM_CODEX_HOME"'] }] },
+    };
+    const ctx = { runId: "direct", operationId: "op-where", generation: 1, worktreePath: f.repo, artifactDir: f.dir };
+    const stdout = async (config: Record<string, unknown>) => {
+      const result = await createCliRunner(parseRunnerConfig(config), {}).runJob(job, ctx);
+      return (result.evidence![0]!.payload as { command: { stdoutTail: string } }).command.stdoutTail;
+    };
+    vi.stubEnv("GRAPHLOOM_CLAUDE_BIN", "");
+    vi.stubEnv("GRAPHLOOM_CLAUDE_CONFIG_DIR", "");
+    vi.stubEnv("GRAPHLOOM_CODEX_BIN", "");
+    vi.stubEnv("GRAPHLOOM_CODEX_HOME", "");
+    expect(await stdout(agents)).toBe("/opt/claude/bin/claude|/srv/claude-config|/opt/codex/bin/codex|/srv/codex-home|");
+    // Settings of a harness the config does not enable stay out.
+    expect(await stdout({ ...agents, harnesses: undefined })).toBe("/opt/claude/bin/claude|/srv/claude-config|||");
+  });
+
   it("fails before creating a run when explicit runner configuration is malformed", async () => {
     const f = await fixture();
     await writeFile(f.config, "{ invalid");

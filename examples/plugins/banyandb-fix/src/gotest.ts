@@ -82,6 +82,7 @@ export interface GinkgoSpec {
 export type RegressionOutcome = TestOutcome | "setup-failed";
 
 const GINKGO_MARKER = "GraphLoomGinkgo";
+const PLAIN_LINE = '{"GraphLoomPlainTest":true}';
 
 /**
  * The Ginkgo specs a regression run executed, or undefined when the run did not
@@ -102,18 +103,25 @@ export function ginkgoSpecs(report: string): GinkgoSpec[] | undefined {
 }
 
 /**
- * The outcome of the regression test: from the Ginkgo specs that ran when the
- * package uses Ginkgo, else from `go test -json`.
+ * The outcome of the regression test: from the focused Ginkgo specs that ran
+ * when the package uses Ginkgo, else from `go test -json`. A focused run with
+ * neither the Ginkgo summary nor the plain-run marker is `not-run`: the suite's
+ * own result cannot stand for a spec nobody saw.
  */
 export function regressionOutcome(report: string, test: { name: string; focus?: string }): RegressionOutcome {
   const specs = ginkgoSpecs(report);
-  if (specs === undefined) return testOutcome(report, test.name);
-  const its = specs.filter((s) => s.node === "It");
+  if (specs === undefined) {
+    const outcome = testOutcome(report, test.name);
+    if (test.focus === undefined || report.split("\n").includes(PLAIN_LINE) || outcome === "build-failed") return outcome;
+    return "not-run";
+  }
+  const focus = test.focus;
+  const its = specs.filter((s) => s.node === "It" && (focus === undefined || s.text.includes(focus)));
   const broken = (s: GinkgoSpec) => s.state !== "passed";
   if (its.some((s) => s.state === "panicked" && s.failureNode === "It")) return "panicked";
   if (its.some((s) => s.state === "failed" && s.failureNode === "It")) return "failed";
   if (its.some(broken)) return "setup-failed";
-  if (its.length > 0 && !specs.some(broken)) return "passed";
+  if (its.length > 0 && !specs.some((s) => s.node !== "It" && broken(s))) return "passed";
   return testOutcome(report, test.name) === "build-failed" ? "build-failed" : "not-run";
 }
 
@@ -176,10 +184,12 @@ func main() {
  * The focus reaches only a package whose tests use Ginkgo; a plain test binary
  * rejects the flag before running anything. For Ginkgo, the report also gets
  * one line naming the specs that ran, so the suite's TestXxx result alone
- * cannot stand for the spec.
+ * cannot stand for the spec; a plain run ends with its own marker line, so a
+ * lost Ginkgo summary cannot pass for a plain run.
  */
 export function regressionArgv(test: { package: string; name: string; focus?: string }): string[] {
   const go = 'go test -json -count=1 -run "$2" "$3"';
+  const plain = `${go} > "$GRAPHLOOM_REPORT_FILE"; rc=$?; echo '${PLAIN_LINE}' >> "$GRAPHLOOM_REPORT_FILE"; exit $rc`;
   const ginkgo = [
     'r="$GRAPHLOOM_REPORT_FILE"',
     `${go} -args "-ginkgo.focus=$1" "-ginkgo.json-report=$r.ginkgo" > "$r"`,
@@ -193,11 +203,16 @@ export function regressionArgv(test: { package: string; name: string; focus?: st
   return [
     "sh",
     "-c",
-    `if [ -n "$1" ] && grep -qs "github.com/onsi/ginkgo" "$3"/*_test.go; then ${ginkgo}; else exec ${go} > "$GRAPHLOOM_REPORT_FILE"; fi`,
+    `if [ -n "$1" ] && grep -qs "github.com/onsi/ginkgo" "$3"/*_test.go; then ${ginkgo}; else ${plain}; fi`,
     "regression",
-    test.focus ?? "",
+    test.focus === undefined ? "" : quoteRegexp(test.focus),
     `^${test.name}$`,
     test.package,
     GINKGO_FILTER,
   ];
+}
+
+/** `text` as a Go regular expression that matches it literally, like `regexp.QuoteMeta`. */
+export function quoteRegexp(text: string): string {
+  return text.replace(/[\\.+*?()|[\]{}^$]/g, "\\$&");
 }

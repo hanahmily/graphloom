@@ -20,6 +20,10 @@
       "types": "./dist/claude.d.ts",
       "import": "./dist/claude.js"
     },
+    "./codex": {
+      "types": "./dist/codex.d.ts",
+      "import": "./dist/codex.js"
+    },
     "./pi": {
       "types": "./dist/pi.d.ts",
       "import": "./dist/pi.js"
