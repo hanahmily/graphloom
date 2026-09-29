@@ -1,4 +1,5 @@
 import {
+  ACTION_SPEC_KEYS,
   WireValidationError,
   assertGraphDecision,
   type GraphDecision,
@@ -28,7 +29,7 @@ export function parseSupervisorDecision(text: string): GraphDecision {
   for (const candidate of candidates) {
     try {
       const parsed: unknown = JSON.parse(candidate);
-      return assertGraphDecision(parsed);
+      return assertGraphDecision(nestActionFields(parsed));
     } catch (err) {
       lastError = err;
     }
@@ -41,4 +42,14 @@ export function parseSupervisorDecision(text: string): GraphDecision {
     "malformed",
     "no GraphDecision JSON in supervisor response",
   );
+}
+
+/** Models writing JSON by hand often put an action's fields beside its type. */
+function nestActionFields(value: unknown): unknown {
+  const action = (value as { action?: unknown } | null)?.action as Record<string, unknown> | undefined;
+  if (action === null || typeof action !== "object" || Array.isArray(action) || typeof action.type !== "string") return value;
+  const key = ACTION_SPEC_KEYS[action.type];
+  if (key === undefined || action[key] !== undefined) return value;
+  const { type, ...fields } = action;
+  return { ...(value as object), action: { type, [key]: fields } };
 }

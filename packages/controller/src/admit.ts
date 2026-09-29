@@ -7,7 +7,7 @@ import type {
   ValidatorBinding,
 } from "@graphloom/sdk";
 import type { DurableRunState } from "./state.js";
-import { readWorktreeFile, workspaceChangeManifest } from "./worktree.js";
+import { candidateChange, readWorktreeFile, workspaceChangeManifest } from "./worktree.js";
 
 /** Sync SDK validators or async host-backed evaluators. */
 export type AdmissionValidator = {
@@ -92,6 +92,30 @@ export function earliestIncompleteStage(
   return state.definition.stages.find(
     (s) => !stageRequirementsMet(state, s.id, s.requirementIds),
   );
+}
+
+/** Digest of the live workspace change, or undefined when the worktree is not a Git checkout of the pinned base. */
+export async function liveCandidateDigest(state: DurableRunState): Promise<string | undefined> {
+  try {
+    return (await candidateChange(state.worktreePath, state.intake.pinnedHead)).digest;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Why the final stage's receipts no longer describe the workspace: they
+ * accepted a different change than the one the run would deliver.
+ */
+export async function deliveryDrift(state: DurableRunState): Promise<string | undefined> {
+  const last = state.definition.stages.at(-1);
+  if (last === undefined) return undefined;
+  const bound = state.receipts.filter((r) => r.valid && r.stageId === last.id && r.candidateDigest !== undefined);
+  if (bound.length === 0) return undefined;
+  const live = await liveCandidateDigest(state);
+  const stale = bound.filter((r) => r.candidateDigest !== live);
+  if (stale.length === 0) return undefined;
+  return `the workspace changed after ${last.id} accepted it (${stale.map((r) => r.requirementId).join(", ")})`;
 }
 
 /** Re-read worktree and ensure Observe fingerprints still match. */
@@ -187,6 +211,7 @@ export async function admitValidation(
       reason: "candidateFingerprint does not match current evidence",
     };
   }
+  const liveDigest = await liveCandidateDigest(state);
 
   // Predecessor receipts: every requirement on earlier stages must be valid.
   const stageIndex = state.definition.stages.findIndex((s) => s.id === spec.stageId);
@@ -233,6 +258,7 @@ export async function admitValidation(
       statement: requirement.statement,
       evidence,
       candidateFingerprint: fingerprint,
+      ...(liveDigest !== undefined ? { candidateDigest: liveDigest } : {}),
     });
     const resolved = await Promise.resolve(result);
 
@@ -253,6 +279,7 @@ export async function admitValidation(
       candidateFingerprint: fingerprint,
       evidenceRefs: evidence.map((e) => e.ref),
       valid: true,
+      ...(liveDigest !== undefined ? { candidateDigest: liveDigest } : {}),
     });
   }
 

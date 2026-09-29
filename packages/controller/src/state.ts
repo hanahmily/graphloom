@@ -132,6 +132,13 @@ export interface DurableRunState {
   receiptSeq: number;
   /** Hash of last Observe workspace snapshot; Validate must match live worktree. */
   workspaceRevision?: string;
+  /** Digest of the workspace change after the last job or Observe (see `candidateChange`). */
+  candidateDigest?: string;
+  /**
+   * Set when the files the graph's environment declaration pins no longer
+   * match: normal jobs stay blocked until a repair changes the active version.
+   */
+  environmentBlock?: { activeVersion: string; reason: string };
   /** Last successful work-purpose dispatch; used for separate-reviewer checks. */
   lastWorkOperationId?: string;
   /**

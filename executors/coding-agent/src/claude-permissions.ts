@@ -1,5 +1,6 @@
 import { lstat } from "node:fs/promises";
 import path from "node:path";
+import { writeScopeAllows } from "@graphloom/sdk";
 import type { CodingSessionOptions } from "./harness.js";
 
 type PermissionDecision =
@@ -51,11 +52,9 @@ export async function evaluateClaudePermission(
     return deny("File path is outside the job workspace");
   }
   if (relative.split(path.sep).includes(".git")) return deny("Git metadata cannot be edited");
-  const allowed = (options.writeScope ?? []).some((entry) => {
-    const scope = entry.replace(/\/+$/, "");
-    return relative === scope || relative.startsWith(`${scope}/`);
-  });
-  if (!allowed) return deny("File path is outside the admitted write scope");
+  if (!writeScopeAllows(relative.split(path.sep).join("/"), options.writeScope ?? [])) {
+    return deny("File path is outside the admitted write scope");
+  }
   let current = path.parse(target).root;
   for (const component of target.slice(current.length).split(path.sep)) {
     current = path.join(current, component);

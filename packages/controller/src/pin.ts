@@ -11,6 +11,19 @@ export async function digestBundleEntry(intake: IntakePin): Promise<string> {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
+/** The installed bundle's pin, read the way intake reads it. */
+export async function readInstalledBundlePin(previous: IntakePin["bundle"]): Promise<IntakePin["bundle"]> {
+  const manifestRaw = await readFile(path.join(previous.bundlePath, "graphloom.manifest.json"), "utf8");
+  const manifest = JSON.parse(manifestRaw) as { digests?: Record<string, unknown> };
+  const bundle = {
+    ...previous,
+    digests: manifest.digests ?? {},
+    manifestRaw,
+    manifestDigest: createHash("sha256").update(manifestRaw, "utf8").digest("hex"),
+  };
+  return { ...bundle, entryDigest: await digestBundleEntry({ bundle } as IntakePin) };
+}
+
 /** Re-read the on-disk manifest and entry; ensure they still match the run pin. */
 export async function assertPinnedBundleUnchanged(intake: IntakePin): Promise<void> {
   const manifestPath = path.join(intake.bundle.bundlePath, "graphloom.manifest.json");

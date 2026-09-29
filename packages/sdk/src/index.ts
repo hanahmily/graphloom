@@ -2,6 +2,9 @@ export type {
   ActivateRepairSpec,
   AgentSessionView,
   BudgetRemaining,
+  CheckoutSpec,
+  EnvironmentCommand,
+  EnvironmentDeclaration,
   EvidenceRecord,
   EvidenceRef,
   Fingerprint,
@@ -92,6 +95,7 @@ export {
 } from "./operations.js";
 
 export {
+  ACTION_SPEC_KEYS,
   WireValidationError,
   assertGraphAction,
   assertGraphDecision,
@@ -105,3 +109,5 @@ export {
 } from "./validate.js";
 
 export { createScriptedGraph, type ScriptedAdvance, type ScriptedGraphOptions } from "./scripted.js";
+
+export { writeScopeAllows, writeScopeExcludes, writeScopeIncludes, writeScopeProblem } from "./scope.js";

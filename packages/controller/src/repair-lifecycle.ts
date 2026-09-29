@@ -725,6 +725,12 @@ export async function applyActivateRepair(
         throw new Error(`candidate describe failed: ${described.observation.message}`);
       }
       assertCandidateDefinitionCompatible(described.value, state.definition);
+      // A repair may update what the environment needs (the checks rerun before
+      // normal work continues); the stages and requirements stay pinned.
+      const { environment: _previous, ...pinned } = next.definition;
+      void _previous;
+      const { environment } = described.value;
+      next = { ...next, definition: environment !== undefined ? { ...pinned, environment } : pinned };
     }
 
     return { state: next, validators, ...(host !== undefined ? { host } : {}) };

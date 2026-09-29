@@ -343,6 +343,41 @@ describe("Pi supervisor recovery (controller)", () => {
     expect(report.blocker).toMatch(/invented-stage/);
   });
 
+  it("gives a resumed run a fresh supervisor when it stopped before its supervisor decided anything", async () => {
+    const env = await makeEnv();
+    const controller = createController();
+    const factoryCalls: string[] = [];
+    const supervisorFactory = async (ctx: { runId: string }) => {
+      factoryCalls.push(ctx.runId);
+      return createPiSupervisor({
+        session: fakeSession([JSON.stringify(stop({ reason: "supervisor stopped", blocker: "the implementer keeps failing" }, "stop"))]),
+      });
+    };
+    const work = dispatch({ stageId: "write", kind: "agent", purpose: "work", instruction: "write", writeScope: [GREETING_PATH] }, "write");
+
+    const paused = await controller.run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({ definition, advances: [stop({ reason: "paused", blocker: "operator" }, "pause")] }),
+      validators,
+      supervisorFactory,
+      runner: createScriptedRunner({ jobs: [] }),
+      stateRoot: env.stateRoot,
+      runId: "fresh-supervisor",
+    });
+    expect((await loadRunState(paused.stateDir)).supervisorBinding).toBeUndefined();
+
+    const resumed = await controller.resume({
+      runRef: paused.stateDir,
+      plugin: createScriptedGraph({ definition, advances: [work] }),
+      validators,
+      supervisorFactory,
+      runner: createScriptedRunner({ jobs: [async () => ({ status: "failed" as const, summary: "agent finished without a result" })] }),
+    });
+
+    expect(resumed).toMatchObject({ stopReason: "supervisor stopped", blocker: "the implementer keeps failing" });
+    expect(factoryCalls).toEqual(["fresh-supervisor", "fresh-supervisor"]);
+  });
+
   it("restores supervisor from durable binding on resume via restoreSupervisor", async () => {
     const env = await makeEnv();
     const controller = createController();

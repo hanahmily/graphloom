@@ -1,0 +1,93 @@
+{
+  "graphId": "banyandb-fix",
+  "version": "0.1.0",
+  "sdkProtocol": 1,
+  "entryPoints": {
+    "createGraph": "./dist/index.js"
+  },
+  "privateStateSchema": "banyandb-fix-private-v1",
+  "repairContract": "source-repairable",
+  "runtimeProfile": {
+    "node": ">=22",
+    "module": "nodenext",
+    "typescript": "^5.8.2",
+    "vitest": "^3.0.9"
+  },
+  "digests": {
+    "sourceTree": "8e0a00cd428454b0d9d5b2f77d4ff5eeb677f2c69b561f7f4186f5850ec270ae",
+    "packageLock": "b9ee95733f6bcb2b014acbe36d7961bf6aa14d7a9fd14c07d715cc67d2196881",
+    "files": {
+      "package.json": "4fe38fccb8bceec81d1d66905941634d5cf6772ea0cd6c196a3216ff88116c17",
+      "package-lock.json": "b9ee95733f6bcb2b014acbe36d7961bf6aa14d7a9fd14c07d715cc67d2196881",
+      "tsconfig.json": "ffed4b469e52e0642fabcb6a20f4ba178fce44e5e37567a0ee96571a150a1109",
+      "src/constants.ts": "47946a450f2a3feba07bc016134fd72851e5c13aca27dedb6ac28a200a20e39f",
+      "src/decision-record.ts": "21c2d80260dcf0562646a4d6aa793ff6a18745c5c0daaeb0edcf8d351bc7a1a8",
+      "src/evidence.ts": "f376fc205eb27c57922c4bf6ccb0f6f0b7800fe1813b05a8049d1ca00d9f328e",
+      "src/gotest.ts": "dc184fd1a0439e2d0f79cfcf0c94884393f5a73ffd9b407e49c359ee3be53352",
+      "src/graph.ts": "bc7e085c845e123a0287b552c37cb8ad61bf879a02a1a3451f9ab0dbc3f1f731",
+      "src/index.ts": "06ccda114c65997634bb854adbdeaaafddfbd700919a5c9693167631cf4bf3fc",
+      "src/prompts.ts": "fc6b17462c3e9d3503720b359a61c45bafd15b00403643a7eb9c4f50ebf96f15",
+      "src/qualification.ts": "5b4238003cadb3994bde9b9142504ddf315638d44f22c56362617c24e4b3d7df",
+      "src/validators.ts": "a5546cf7445b622be3342aa19425e426bc051b1a8f5a08bf6c0abe52088c2dfd",
+      "test/banyandb-fix.test.ts": "372ba5e873184cf1fa82ea8c9d173b80691a191bf2d8db908ce97c9c2c570790"
+    }
+  },
+  "requirements": [
+    {
+      "id": "decisions-recorded",
+      "statement": "The implementer's decision record is ready, names the regression test and the production caller, gives every unclear point a tier and a basis, takes an option for every behaviour point, and marks no product point chosen.",
+      "evidenceSchema": "decision-record-v1"
+    },
+    {
+      "id": "reproduces",
+      "statement": "In a prepared checkout of the base commit with only the change's test files applied, the named regression test fails by assertion (go test -json reports it failed, and the package built), and the check changed no file.",
+      "evidenceSchema": "checkout-command-v1"
+    },
+    {
+      "id": "passes",
+      "statement": "In a prepared checkout of the full change, the named regression test passes and make test-ci passes for the changed Go packages, and the checks changed no file.",
+      "evidenceSchema": "checkout-command-v1"
+    },
+    {
+      "id": "builds",
+      "statement": "In the same checkout of the full change, make license-check, make build, make lint and make check all pass and change no file.",
+      "evidenceSchema": "checkout-command-v1"
+    },
+    {
+      "id": "in-scope",
+      "statement": "Every changed path is inside the repository and outside api/proto, go.mod, go.sum and .github, except those the decision record names with a reason.",
+      "evidenceSchema": "checkout-command-v1"
+    },
+    {
+      "id": "changelog-entry",
+      "statement": "The change adds a list entry to CHANGES.md inside its first \"## \" release section.",
+      "evidenceSchema": "workspace-bytes-v1"
+    },
+    {
+      "id": "spec-and-standards-review",
+      "statement": "An independent read-only reviewer approves the current change on the Spec and Standards axes, and the verdict is bound to that change.",
+      "evidenceSchema": "review-verdict-v1"
+    }
+  ],
+  "stages": [
+    {
+      "id": "fix",
+      "name": "Fix",
+      "requirementIds": [
+        "decisions-recorded",
+        "reproduces",
+        "passes",
+        "builds",
+        "in-scope",
+        "changelog-entry"
+      ]
+    },
+    {
+      "id": "review",
+      "name": "Review",
+      "requirementIds": [
+        "spec-and-standards-review"
+      ]
+    }
+  ]
+}

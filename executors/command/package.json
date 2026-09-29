@@ -1,0 +1,30 @@
+{
+  "name": "@graphloom/executor-command",
+  "version": "0.1.0",
+  "description": "Built-in command executor (graphloom.command/run): runs argv commands in the job's workspace and records their outcomes",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./executors": {
+      "types": "./dist/executors.d.ts",
+      "import": "./dist/executors.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.test.json",
+    "test": "tsc -p tsconfig.json && vitest run"
+  },
+  "dependencies": {
+    "@graphloom/sdk": "0.0.0"
+  },
+  "devDependencies": {
+    "@graphloom/runner": "0.0.0"
+  }
+}

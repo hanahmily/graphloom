@@ -68,14 +68,15 @@ async function main(): Promise<void> {
 
   if (cmd === "resume") {
     const runner = createCliRunner(await requireRunnerConfig());
-    const runRef = requireRunRef(args[1], "resume <stateDir|runId>");
+    const runRef = requireRunRef(args[1], "resume <stateDir|runId> [--state-root <dir>] [--update-plugin]");
     const stateRoot = flagValue(args, "--state-root");
     const config = await loadSupervisorConfig();
     const report = await controller.resume({
       runRef,
       runner,
       ...(stateRoot ? { stateRoot: path.resolve(stateRoot) } : {}),
-      ...(config !== undefined ? { restoreSupervisor: piSupervisorRestore(config) } : {}),
+      ...(args.includes("--update-plugin") ? { updatePlugin: true } : {}),
+      ...(config !== undefined ? { restoreSupervisor: piSupervisorRestore(config), supervisorFactory: piSupervisorFactory(config) } : {}),
     });
     console.log(JSON.stringify(report, null, 2));
     process.exitCode = report.status === "succeeded" ? 0 : 1;
@@ -151,7 +152,7 @@ Usage:
   graphloom run <task.yaml>
   graphloom inspect <stateDir|runId> [--state-root <dir>]
   graphloom stop <stateDir|runId> [--state-root <dir>]
-  graphloom resume <stateDir|runId> [--state-root <dir>]
+  graphloom resume <stateDir|runId> [--state-root <dir>] [--update-plugin]
   graphloom switch-model <stateDir|runId> <provider/model> --reason <text> [--state-root <dir>]
   graphloom delete <stateDir|runId> [--state-root <dir>] [--force]
   graphloom version
@@ -159,12 +160,22 @@ Usage:
 Delete removes a stopped or finished run's worktree, graphloom/<runId> branch, and
 state directory. --force also discards uncommitted changes and branch commits.
 
+Resume --update-plugin pins the installed plugin bundle when its bytes changed
+since the run started. It is refused unless the graph keeps its stages,
+requirements, validator bindings and private-state schema. Each accepted receipt
+is rechecked with the updated validators on the evidence it was accepted on; the
+first that no longer passes sends the run back to its stage.
+
 Agent runner: run and resume refuse to start without $GRAPHLOOM_RUNNER_CONFIG or
 ~/.config/graphloom/runner.json:
   { "harness": "claude-code", "allowUnrestricted": true }
 Use "pi" for the Pi harness. The agent runs with your user permissions;
 credentials come from the harness login. Optional claude/pi settings select
 the executable, model, provider, agent directory, and environment names.
+"harnesses": ["claude-code", "pi"] lets a job choose either harness with
+input.harness. Command jobs run as you in the job's workspace ("command":
+{ "timeoutMs": ... } bounds one job). "github": { "tokenEnv": "GITHUB_TOKEN" }
+serves read-only GitHub executors with the token from that variable.
 
 Supervisor: run and resume use a Pi supervisor when an operator config exists at
 $GRAPHLOOM_SUPERVISOR_CONFIG or ~/.config/graphloom/supervisor.json:

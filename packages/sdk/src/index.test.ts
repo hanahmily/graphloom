@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   PROTOCOL_VERSION,
   assertGraphAction,
+  assertGraphDefinition,
   assertRunView,
   assertWireRequest,
   createScriptedGraph,
@@ -90,6 +91,14 @@ describe("operations", () => {
     expect(() =>
       assertGraphAction({ type: "accept", stageId: "write" }),
     ).toThrow(WireValidationError);
+  });
+
+  it("rejects an action without its spec object", () => {
+    expect(() => assertGraphAction({ type: "stop", reason: "done", blocker: "none" })).toThrow(
+      "stop action needs a stop object",
+    );
+    expect(() => assertGraphAction({ type: "dispatch", job: "run it" })).toThrow("dispatch action needs a job object");
+    expect(assertGraphAction({ type: "stop", stop: { reason: "done", blocker: "none" } }).type).toBe("stop");
   });
 
   it("lets only agent jobs continue a session", () => {
@@ -225,5 +234,25 @@ describe("wire validation", () => {
   it("rejects oversized payloads", () => {
     const huge = `"${"x".repeat(1_000_001)}"`;
     expect(() => parseJsonBounded(huge, 1000)).toThrow(WireValidationError);
+  });
+
+  it("checks a declared environment", () => {
+    const sha = "a".repeat(64);
+    const withEnv = (environment: unknown) => ({ ...helloDefinition, environment });
+    expect(
+      assertGraphDefinition(
+        withEnv({
+          checks: [{ id: "go", argv: ["go", "version"] }],
+          prepare: [{ id: "generate", argv: ["make", "generate"], timeoutMs: 600_000 }],
+          pinnedFiles: [{ path: "CONTRIBUTING.md", sha256: sha }],
+        }),
+      ).environment?.checks?.[0]?.id,
+    ).toBe("go");
+    expect(() => assertGraphDefinition(withEnv({ checks: [{ id: "go", argv: [] }] }))).toThrow(/argv/);
+    expect(() =>
+      assertGraphDefinition(withEnv({ checks: [{ id: "x", argv: ["a"] }], prepare: [{ id: "x", argv: ["b"] }] })),
+    ).toThrow(/unique/);
+    expect(() => assertGraphDefinition(withEnv({ pinnedFiles: [{ path: "../x", sha256: sha }] }))).toThrow(/inside/);
+    expect(() => assertGraphDefinition(withEnv({ pinnedFiles: [{ path: "x", sha256: "abc" }] }))).toThrow(/SHA-256/);
   });
 });

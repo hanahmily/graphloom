@@ -67,6 +67,9 @@ const DEFAULT_SYSTEM_PROMPT = [
   "Finish with a short summary of what you did and what you observed. Do not include secrets.",
 ].join(" ");
 
+const RESULT_NOTE =
+  "StructuredOutput is your final answer and ends your turn: call it once, with the complete result under `result`, and never with test or placeholder values.";
+
 interface SavedSession {
   sessionId: string;
   ref: string;
@@ -314,6 +317,7 @@ async function runClaude(args: RunArgs): Promise<CodingRunResult> {
       "--output-format", "stream-json",
       "--input-format", "stream-json",
       "--verbose",
+      "--replay-user-messages",
       "--forward-subagent-text",
       "--permission-mode", "default",
       "--permission-prompt-tool", "stdio",
@@ -336,7 +340,10 @@ async function runClaude(args: RunArgs): Promise<CodingRunResult> {
         description: `${request.resultSchema} result`,
         additionalProperties: true,
       };
-      cli.push("--json-schema", JSON.stringify(schema));
+      // With one object parameter the model writes the result as JSON. With one parameter per
+      // field, a long raw-text field can swallow the fields after it.
+      const wrapped = { type: "object", properties: { result: schema }, required: ["result"], additionalProperties: false };
+      cli.push("--json-schema", JSON.stringify(wrapped));
     }
     cli.push(saved.started ? "--resume" : "--session-id", saved.sessionId);
 
@@ -395,6 +402,8 @@ async function runClaude(args: RunArgs): Promise<CodingRunResult> {
     const background = new Set<string>();
     let finished = false;
     let initialized = false;
+    // A resumed session can run a turn of its own before it reads the prompt.
+    let prompted = false;
     let protocolFailed: string | undefined;
     let bridgeFailed = false;
     let budgetRefused = false;
@@ -441,6 +450,8 @@ async function runClaude(args: RunArgs): Promise<CodingRunResult> {
           message?: { id?: unknown; content?: unknown };
           mcp_servers?: unknown;
           tool_use_id?: unknown;
+          is_backgrounded?: unknown;
+          isReplay?: unknown;
           request_id?: unknown;
           request?: { subtype?: unknown; tool_name?: unknown; input?: unknown };
           response?: { request_id?: unknown; subtype?: unknown; error?: unknown };
@@ -462,7 +473,7 @@ async function runClaude(args: RunArgs): Promise<CodingRunResult> {
                 type: "user",
                 session_id: saved.sessionId,
                 parent_tool_use_id: null,
-                message: { role: "user", content: [request.assignment, ...scopeNotes(options)].join("\n\n") },
+                message: { role: "user", content: [request.assignment, ...scopeNotes(options), ...(request.resultSchema !== undefined ? [RESULT_NOTE] : [])].join("\n\n") },
               });
             }
           }
@@ -488,6 +499,10 @@ async function runClaude(args: RunArgs): Promise<CodingRunResult> {
           } });
           continue;
         }
+        if (event.type === "user" && event.isReplay === true) {
+          prompted = true;
+          continue;
+        }
         if (event.type === "assistant" || event.type === "user" || (event.type === "system" && event.subtype === "thinking_tokens")) {
           trackTools(event.message?.content, running);
           if (Array.isArray(event.message?.content)) {
@@ -498,6 +513,9 @@ async function runClaude(args: RunArgs): Promise<CodingRunResult> {
             }
           }
           arm(args.responseTimeoutMs, `no model output for ${seconds(args.responseTimeoutMs)}`);
+        }
+        if (event.type === "system" && event.subtype === "task_started" && event.is_backgrounded === true && typeof event.tool_use_id === "string") {
+          background.add(event.tool_use_id);
         }
         if (event.type === "system" && event.subtype === "task_notification" && typeof event.tool_use_id === "string") {
           background.delete(event.tool_use_id);
@@ -522,7 +540,14 @@ async function runClaude(args: RunArgs): Promise<CodingRunResult> {
           }
         } else if (event.type === "result") {
           if (!initialized) protocolFailed = "Claude Code returned a result before control initialization";
+          else if (!prompted && !stopped && (event as ResultEvent).is_error !== true) {
+            results.push(event as ResultEvent);
+            continue;
+          }
+          // A background subagent's report turn ends without repeating an earlier submission.
+          const submitted = result?.structured_output;
           result = event as ResultEvent;
+          if (result.structured_output === undefined && submitted !== undefined) result = { ...result, structured_output: submitted };
           results.push(result);
           if (background.size > 0 && !stopped && result.is_error !== true) continue;
           finished = true;
@@ -558,14 +583,15 @@ async function runClaude(args: RunArgs): Promise<CodingRunResult> {
           return { status: "failed", summary: bounded(`Claude Code run failed (${result.subtype ?? "error"})${detail ? `: ${detail}` : ""}`) };
         }
         if (request.resultSchema !== undefined) {
-          if (result.structured_output === undefined) {
+          const output = (result.structured_output as { result?: unknown } | null | undefined)?.result;
+          if (output === undefined) {
             return { status: "failed", summary: `agent finished without submitting a ${request.resultSchema} result` };
           }
-          const submitted = (result.structured_output as { summary?: unknown } | null)?.summary;
+          const submitted = (output as { summary?: unknown } | null)?.summary;
           return {
             status: "completed",
             summary: bounded(typeof submitted === "string" ? submitted : `Claude Code submitted a ${request.resultSchema} result`),
-            output: result.structured_output,
+            output,
           };
         }
         return { status: "completed", summary: bounded(result.result?.trim() || "Claude Code completed") };

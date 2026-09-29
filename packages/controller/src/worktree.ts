@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { lstat, mkdir, readFile, readlink, realpath } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
+import { writeScopeAllows } from "@graphloom/sdk";
 import { assertSafeRunId } from "./ids.js";
 import { withDirectoryLock } from "./lock.js";
 
@@ -75,11 +76,16 @@ export async function assertNoSymlinkComponent(
   }
 }
 
+/**
+ * Changed, untracked and ignored paths in the source checkout, for the run
+ * report. A wholly untracked or ignored directory (dependencies, build output)
+ * is one entry.
+ */
 export async function listDirtyPaths(repoPath: string): Promise<string[]> {
   const { stdout } = await execFileAsync(
     "git",
-    ["status", "--porcelain", "-uall", "--ignored"],
-    { cwd: repoPath },
+    ["status", "--porcelain", "--untracked-files=normal", "--ignored"],
+    { cwd: repoPath, maxBuffer: 64 * 1024 * 1024 },
   );
   return parsePorcelainPaths(stdout);
 }
@@ -92,7 +98,7 @@ export async function workspaceChangeManifest(worktreePath: string): Promise<str
   const { stdout } = await execFileAsync(
     "git",
     ["status", "--porcelain", "-uall", "--ignored"],
-    { cwd: worktreePath },
+    { cwd: worktreePath, maxBuffer: 64 * 1024 * 1024 },
   );
   return parsePorcelainPaths(stdout);
 }
@@ -125,12 +131,39 @@ export async function worktreeChangeFingerprints(worktreePath: string): Promise<
   return fingerprints;
 }
 
+/**
+ * The workspace change relative to the pinned base commit: every path that
+ * differs from it, including changes an agent committed, and every untracked
+ * file Git does not ignore, each with a fingerprint of its content. The digest
+ * identifies the candidate that checks, reviews, and receipts are bound to.
+ */
+export async function candidateChange(
+  worktreePath: string,
+  pinnedHead: string,
+): Promise<{ digest: string; fingerprints: Map<string, string> }> {
+  const options = { cwd: worktreePath, maxBuffer: 64 * 1024 * 1024 };
+  const [tracked, untracked] = await Promise.all([
+    execFileAsync("git", ["diff", "--name-only", "--no-renames", "-z", pinnedHead, "--"], options),
+    execFileAsync("git", ["ls-files", "--others", "--exclude-standard", "-z"], options),
+  ]);
+  const paths = new Set(
+    `${tracked.stdout}\0${untracked.stdout}`.split("\0").filter((rel) => rel !== "" && rel !== ".git" && !rel.startsWith(".git/")),
+  );
+  const fingerprints = new Map<string, string>();
+  for (const rel of [...paths].sort()) {
+    fingerprints.set(rel, await fingerprintPath(path.join(worktreePath, rel)));
+  }
+  return { digest: createHash("sha256").update(JSON.stringify([...fingerprints])).digest("hex"), fingerprints };
+}
+
 async function fingerprintPath(file: string): Promise<string> {
   const st = await lstat(file).catch(() => undefined);
   if (st === undefined) return "missing";
   if (st.isSymbolicLink()) return `link:${await readlink(file)}`;
   if (!st.isFile()) return "other";
-  return `file:${createHash("sha256").update(await readFile(file)).digest("hex")}`;
+  // Git records the executable bit, so a delivered commit differs when only it changes.
+  const kind = (st.mode & 0o111) !== 0 ? "exec" : "file";
+  return `${kind}:${createHash("sha256").update(await readFile(file)).digest("hex")}`;
 }
 
 /**
@@ -144,8 +177,7 @@ export function changedPaths(before: Map<string, string>, after: Map<string, str
 /** Changed paths a job was not allowed to write: all of them when read-only, else those outside `writeScope`. */
 export function pathsOutsideWriteScope(changed: string[], job: { readOnly?: boolean; writeScope?: string[] }): string[] {
   if (job.readOnly === true) return changed;
-  const scope = (job.writeScope ?? []).map((entry) => entry.replace(/\/+$/, ""));
-  return changed.filter((rel) => !scope.some((entry) => rel === entry || rel.startsWith(`${entry}/`)));
+  return changed.filter((rel) => !writeScopeAllows(rel, job.writeScope ?? []));
 }
 
 function parsePorcelainPaths(stdout: string): string[] {

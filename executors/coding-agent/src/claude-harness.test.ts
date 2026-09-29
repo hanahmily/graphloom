@@ -502,12 +502,15 @@ describe("Claude Code harness", () => {
     expect(inline).toMatchObject({ status: "ok", summary: "greeted" });
     expect(payload(inline)).toMatchObject({ output: { greeting: "hello", summary: "greeted" } });
     const [first, named] = await h.invocations();
-    expect(JSON.parse(flagValue(first!.argv, "--json-schema")!)).toEqual(schema);
-    expect(JSON.parse(flagValue(named!.argv, "--json-schema")!)).toEqual({
+    // One object parameter: the model writes the whole result as JSON, not one raw-text parameter per field.
+    const wrapped = (inner: unknown) => ({ type: "object", properties: { result: inner }, required: ["result"], additionalProperties: false });
+    expect(JSON.parse(flagValue(first!.argv, "--json-schema")!)).toEqual(wrapped(schema));
+    expect(JSON.parse(flagValue(named!.argv, "--json-schema")!)).toEqual(wrapped({
       type: "object",
       description: "writer-result-v1 result",
       additionalProperties: true,
-    });
+    }));
+    expect(first!.prompt).toContain("StructuredOutput is your final answer");
     expect(missing).toMatchObject({ status: "failed", summary: "agent finished without submitting a writer-result-v1 result" });
   });
 
@@ -534,6 +537,41 @@ describe("Claude Code harness", () => {
     expect(resumed!.history).toEqual([expect.stringContaining("Write the first draft"), "first turn done"]);
     expect(resumed!.prompt.startsWith(CONTINUATION_NOTICE)).toBe(true);
     expect(await readFile(path.join(h.sessions, `${ref}.jsonl`), "utf8")).toContain("second turn done");
+  });
+
+  it("answers the prompt, not a turn a resumed session ran on its own before reading it", async () => {
+    const h = await setup();
+    const plan = { note: "planned" };
+    const done = { note: "implemented" };
+    await h.script([{ structured: plan }], [{ text: "implementing" }, { structured: done }], { autoTurnOnResume: true });
+    const schema = JSON.stringify({ type: "object", properties: { note: { type: "string" } }, required: ["note"] });
+    const first = await h.executor.execute({ assignment: "Plan", resultSchema: schema }, h.ctx({ session: { dir: h.sessions } }));
+    const ref = (first as { sessionRef: string }).sessionRef;
+
+    const second = await h.executor.execute(
+      { assignment: "Implement", resultSchema: schema },
+      h.ctx({ session: { dir: h.sessions, resume: ref } }),
+    );
+    expect(second).toMatchObject({ status: "ok" });
+    expect(payload(second).output).toEqual(done);
+    expect((await h.invocations())[1]!.argv).toContain("--replay-user-messages");
+  });
+
+  it("waits for a subagent Claude Code backgrounded without being asked", async () => {
+    const h = await setup({ interruptGraceMs: 300 });
+    await h.script([{ agent: [{ think: 1_000 }, { text: "subagent step one" }], background: "default" }, { text: "launched a subagent" }]);
+    const result = await h.executor.execute({ assignment: "work" }, h.ctx());
+    expect(result).toMatchObject({ status: "ok", summary: "The background subagent finished." });
+  });
+
+  it("keeps the result submitted before a background subagent's report turn", async () => {
+    const h = await setup({ interruptGraceMs: 300 });
+    const plan = { note: "planned" };
+    await h.script([{ agent: [{ think: 300 }, { text: "subagent step one" }], background: "default" }, { structured: plan }]);
+    const schema = JSON.stringify({ type: "object", properties: { note: { type: "string" } }, required: ["note"] });
+    const result = await h.executor.execute({ assignment: "Plan", resultSchema: schema }, h.ctx());
+    expect(result).toMatchObject({ status: "ok" });
+    expect(payload(result).output).toEqual(plan);
   });
 
   it("saves subagent transcripts with the session and restores them, so a resume can continue a subagent", async () => {

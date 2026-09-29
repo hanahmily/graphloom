@@ -1,0 +1,227 @@
+import type { EvidenceRecord, ValidationStatus, Validator } from "@graphloom/sdk";
+import { CHANGES_PATH, CODING_AGENT, COMMAND, FIX_STAGE, REVIEW_STAGE } from "./constants.js";
+import type { DecisionRecord } from "./decision-record.js";
+import { createGraph } from "./graph.js";
+
+/** One expected outcome, derived from a requirement statement rather than from any validator's code. */
+export interface QualificationCase {
+  validatorId: string;
+  name: string;
+  evidence: EvidenceRecord[];
+  expected: ValidationStatus;
+}
+
+export interface QualificationReport {
+  ok: boolean;
+  summary: string;
+  candidateMismatches: string[];
+  baselineMismatches: string[];
+}
+
+type ValidatorLookup = (validatorId: string) => Validator | undefined;
+
+/** The live change every case is judged against. */
+const DIGEST = "qualify-digest";
+const OTHER = "qualify-stale-digest";
+const TEST = "TestSchedulerReportsLongActions";
+
+let seq = 0;
+const ref = () => `qualify-${++seq}`;
+
+const READY: DecisionRecord = {
+  status: "ready",
+  summary: "Warn while a scheduled action is still running instead of reporting a timeout.",
+  test: { package: "./pkg/timestamp", name: TEST, expectedValueSource: "the issue's expected behaviour section" },
+  productionCaller: "pkg/timestamp.Scheduler.trigger",
+  decisions: [
+    { point: "What happens at the timeout", tier: "behaviour", options: ["cancel", "warn and wait"], chosen: "warn and wait", basis: "the issue: it should not be reported as an error" },
+    { point: "Keep counting TotalTasksTimeout", tier: "product", options: ["keep", "stop"], basis: "changes what the metric means" },
+  ],
+  openQuestions: ["Should TotalTasksTimeout keep counting actions that are still running?"],
+};
+
+const implementer = (record: unknown): EvidenceRecord => ({
+  ref: ref(),
+  kind: "other",
+  candidateDigest: DIGEST,
+  payload: {
+    codingAgent: { harness: "claude-code", status: "completed", output: record },
+    producer: { operationId: "op-implement", stageId: FIX_STAGE, purpose: "work", readOnly: false, kind: "agent", executorId: CODING_AGENT.id },
+  },
+});
+
+interface RunOptions {
+  from?: "base" | "candidate";
+  paths?: string[];
+  mutations?: string[];
+  prepared?: boolean;
+  op?: string;
+  report?: string;
+  stdout?: string;
+  digest?: string;
+}
+
+const command = (id: string, exitCode: number, o: RunOptions = {}): EvidenceRecord => ({
+  ref: ref(),
+  kind: "command",
+  candidateDigest: o.digest ?? DIGEST,
+  payload: {
+    command: {
+      id,
+      argv: [id],
+      exitCode,
+      signal: null,
+      timedOut: false,
+      aborted: false,
+      durationMs: 1,
+      stdoutTail: o.stdout ?? "",
+      stderrTail: "",
+      ...(o.report !== undefined ? { report: { text: o.report, truncated: false } } : {}),
+    },
+    checkout: {
+      from: o.from ?? "candidate",
+      base: "base-commit",
+      commit: `${o.from ?? "candidate"}-commit`,
+      paths: o.paths ?? ["CHANGES.md", "pkg/timestamp/scheduler.go", "pkg/timestamp/scheduler_test.go"],
+      prepared: o.prepared ?? true,
+      mutations: o.mutations ?? [],
+      phase: "run",
+    },
+    producer: { operationId: o.op ?? `op-${o.from ?? "candidate"}`, stageId: FIX_STAGE, purpose: "check", readOnly: true, kind: "command" },
+  },
+});
+
+const events = (...lines: object[]) => lines.map((l) => JSON.stringify(l)).join("\n");
+const failedByAssertion = events(
+  { Action: "run", Test: TEST },
+  { Action: "output", Test: TEST, Output: "scheduler_test.go:42: expected no timeout error\n" },
+  { Action: "fail", Test: TEST },
+  { Action: "fail", Package: "p" },
+);
+const passedReport = events({ Action: "run", Test: TEST }, { Action: "pass", Test: TEST }, { Action: "pass", Package: "p" });
+const buildFailed = events({ ImportPath: "p [p.test]", Action: "build-fail" }, { Action: "fail", Package: "p", Output: "FAIL p [build failed]\n" });
+
+const SUITE_READY: DecisionRecord = { ...READY, test: { ...READY.test!, focus: "scheduler warns while an action runs" } };
+const spec = (text: string, state: string, node = "It", failureNode = state === "passed" ? "" : node) => ({ text, node, state, failureNode, message: "" });
+/** A suite's go test -json report followed by the line naming the Ginkgo specs that ran. */
+const suite = (report: string, specs: Array<ReturnType<typeof spec>>) => `${report}\n${JSON.stringify({ GraphLoomGinkgo: { specs } })}`;
+const FOCUSED = "scheduler warns while an action runs";
+
+const red = (report: string, exitCode = 1, o: RunOptions = {}) =>
+  command(COMMAND.regression, exitCode, { from: "base", paths: ["pkg/timestamp/scheduler_test.go"], report, ...o });
+const green = (report = passedReport, exitCode = 0, o: RunOptions = {}) => command(COMMAND.regression, exitCode, { report, ...o });
+const candidate = (overrides: Partial<Record<string, number>> = {}, o: RunOptions = {}): EvidenceRecord[] => [
+  green(passedReport, overrides[COMMAND.regression] ?? 0, o),
+  ...[COMMAND.testCi, COMMAND.license, COMMAND.build, COMMAND.lint, COMMAND.check].map((id) => command(id, overrides[id] ?? 0, o)),
+];
+
+const CHANGES = "# Changes by Version\n\nRelease Notes.\n\n## 0.12.0\n\n### Bug Fixes\n\n- Warn instead of reporting a timeout for long scheduled actions.\n\n## 0.11.0\n\n- Older.\n";
+const file = (bytes: string, digest = DIGEST): EvidenceRecord => ({ ref: ref(), kind: "file", candidateDigest: digest, payload: { path: CHANGES_PATH, bytes }, fingerprint: `fp-${seq}` });
+const diff = (added: string): EvidenceRecord => command(COMMAND.changesDiff, 0, { stdout: `diff --git a/CHANGES.md b/CHANGES.md\n+++ b/CHANGES.md\n@@ -9,0 +10 @@\n+${added}\n` });
+
+const review = (verdict: string, digest = DIGEST): EvidenceRecord => ({
+  ref: ref(),
+  kind: "review",
+  candidateDigest: digest,
+  payload: { verdict, summary: "s", producer: { operationId: "op-review", stageId: REVIEW_STAGE, purpose: "review", readOnly: true, kind: "agent" } },
+});
+
+const c = (validatorId: string, name: string, evidence: EvidenceRecord[], expected: ValidationStatus): QualificationCase => ({ validatorId, name, evidence, expected });
+
+/** Positive and negative cases for every shipped validator. */
+export const QUALIFICATION_CASES: readonly QualificationCase[] = [
+  c("decisions-recorded", "complete ready record", [implementer(READY)], "passed"),
+  c("decisions-recorded", "a product decision taken", [implementer({ ...READY, decisions: [{ ...READY.decisions[1]!, chosen: "stop" }] })], "failed"),
+  c("decisions-recorded", "a behaviour point without a choice", [implementer({ ...READY, decisions: [{ ...READY.decisions[0]!, chosen: "" }] })], "failed"),
+  c("decisions-recorded", "a point without a tier", [implementer({ ...READY, decisions: [{ point: "x", options: [], basis: "b" }] })], "failed"),
+  c("decisions-recorded", "no regression test", [implementer({ ...READY, test: undefined })], "failed"),
+  c("decisions-recorded", "a test name go test cannot select", [implementer({ ...READY, test: { ...READY.test!, name: "scheduler reports" } })], "failed"),
+  c("decisions-recorded", "a blocked record", [implementer({ ...READY, status: "blocked" })], "failed"),
+  c("decisions-recorded", "no implementer result", [], "inconclusive"),
+
+  c("red-reproduces", "fails by assertion on the base", [implementer(READY), red(failedByAssertion)], "passed"),
+  c("red-reproduces", "does not build on the base", [implementer(READY), red(buildFailed)], "failed"),
+  c("red-reproduces", "passes on the base", [implementer(READY), red(passedReport, 0)], "failed"),
+  c("red-reproduces", "production code applied", [implementer(READY), red(failedByAssertion, 1, { paths: ["pkg/timestamp/scheduler.go", "pkg/timestamp/scheduler_test.go"] })], "failed"),
+  c("red-reproduces", "preparation failed", [implementer(READY), red(failedByAssertion, 1, { prepared: false })], "failed"),
+  c("red-reproduces", "the check changed a file", [implementer(READY), red(failedByAssertion, 1, { mutations: ["pkg/timestamp/scheduler_test.go"] })], "failed"),
+  c("red-reproduces", "another test failed", [implementer(READY), red(events({ Action: "fail", Test: "TestOther" }))], "failed"),
+  c("red-reproduces", "no test files changed", [implementer(READY), green(passedReport, 0, { paths: ["pkg/timestamp/scheduler.go"] })], "failed"),
+  c("red-reproduces", "a Ginkgo spec fails by assertion on the base", [implementer(SUITE_READY), red(suite(failedByAssertion, [spec(FOCUSED, "failed")]))], "passed"),
+  c("red-reproduces", "a Ginkgo suite's setup fails on the base", [implementer(SUITE_READY), red(suite(failedByAssertion, [spec("", "failed", "BeforeSuite")]))], "failed"),
+  c("red-reproduces", "a Ginkgo spec fails in its BeforeEach", [implementer(SUITE_READY), red(suite(failedByAssertion, [spec(FOCUSED, "failed", "It", "BeforeEach")]))], "failed"),
+  c("red-reproduces", "RED ran on an older change", [implementer(READY), red(failedByAssertion, 1, { digest: OTHER })], "inconclusive"),
+
+  c("green-passes", "test and packages pass", [implementer(READY), ...candidate()], "passed"),
+  c("green-passes", "the regression fails", [implementer(READY), green(failedByAssertion, 1), command(COMMAND.testCi, 0)], "failed"),
+  c("green-passes", "the package tests fail", [implementer(READY), ...candidate({ [COMMAND.testCi]: 2 })], "failed"),
+  c("green-passes", "the package tests did not run", [implementer(READY), green()], "failed"),
+  c("green-passes", "the check changed a file", [implementer(READY), ...candidate({}, { mutations: ["pkg/timestamp/scheduler.go"] })], "failed"),
+  c("green-passes", "the Ginkgo spec that failed on the base passes", [implementer(SUITE_READY), red(suite(failedByAssertion, [spec(FOCUSED, "failed")])), green(suite(passedReport, [spec(FOCUSED, "passed")])), command(COMMAND.testCi, 0)], "passed"),
+  c("green-passes", "the Ginkgo focus matches no spec", [implementer(SUITE_READY), green(suite(passedReport, [])), command(COMMAND.testCi, 0)], "failed"),
+  c("green-passes", "GREEN passes another Ginkgo spec than the one that failed on the base", [implementer(SUITE_READY), red(suite(failedByAssertion, [spec(FOCUSED, "failed")])), green(suite(passedReport, [spec("scheduler logs", "passed")])), command(COMMAND.testCi, 0)], "failed"),
+  c("green-passes", "GREEN ran on an older change", [implementer(READY), ...candidate({}, { digest: OTHER })], "inconclusive"),
+
+  c("build-checks", "all build checks pass", [...candidate()], "passed"),
+  c("build-checks", "lint fails", [...candidate({ [COMMAND.lint]: 2 })], "failed"),
+  c("build-checks", "make check reformatted a file", [green(), ...[COMMAND.testCi, COMMAND.license, COMMAND.build, COMMAND.lint].map((id) => command(id, 0)), command(COMMAND.check, 0, { mutations: ["pkg/timestamp/scheduler.go"] })], "failed"),
+  c("build-checks", "make check did not run", [green(), ...[COMMAND.testCi, COMMAND.license, COMMAND.build, COMMAND.lint].map((id) => command(id, 0))], "failed"),
+  c("build-checks", "no candidate checks", [], "inconclusive"),
+
+  c("write-scope", "code, test and changelog", [implementer(READY), green()], "passed"),
+  c("write-scope", "go.mod without a reason", [implementer(READY), green(passedReport, 0, { paths: ["go.mod", "pkg/timestamp/scheduler.go"] })], "failed"),
+  c("write-scope", "a proto file", [implementer(READY), green(passedReport, 0, { paths: ["api/proto/banyandb/v1/x.proto"] })], "failed"),
+  c("write-scope", "go.mod with a recorded reason", [implementer({ ...READY, scopeExceptions: [{ path: "go.mod", reason: "the fix needs a newer dependency" }] }), green(passedReport, 0, { paths: ["go.mod"] })], "passed"),
+  c("write-scope", "not checked out", [implementer(READY)], "inconclusive"),
+
+  c("changes-entry", "an entry under the current release", [file(CHANGES), green(), diff("- Warn instead of reporting a timeout for long scheduled actions.")], "passed"),
+  c("changes-entry", "an entry under an older release", [file(CHANGES.replace("- Older.", "- Older.\n- Late entry.")), green(), diff("- Late entry.")], "failed"),
+  c("changes-entry", "no new entry", [file(CHANGES), green(), command(COMMAND.changesDiff, 0, { stdout: "" })], "failed"),
+  c("changes-entry", "no release section", [file("# Changes\n\n- Warn.\n"), green(), diff("- Warn.")], "failed"),
+  c("changes-entry", "CHANGES.md not observed for this change", [file(CHANGES, OTHER), green(), diff("- Warn instead of reporting a timeout for long scheduled actions.")], "inconclusive"),
+
+  c("independent-reviewer", "approved this change", [review("approved")], "passed"),
+  c("independent-reviewer", "approved another change", [review("approved", OTHER)], "failed"),
+  c("independent-reviewer", "changes requested", [review("request_changes")], "failed"),
+  c("independent-reviewer", "unknown verdict", [review("lgtm")], "inconclusive"),
+];
+
+/**
+ * Qualify a candidate's validators against the cases. With a baseline, the
+ * old version must get at least one case wrong: a repair has to reproduce the
+ * defect it fixes.
+ */
+export function qualifyValidators(candidate: ValidatorLookup, baseline?: ValidatorLookup): QualificationReport {
+  const candidateMismatches = mismatches(candidate);
+  const baselineMismatches = baseline ? mismatches(baseline) : [];
+  const total = QUALIFICATION_CASES.length;
+  let summary: string;
+  if (candidateMismatches.length > 0) {
+    summary = `candidate fails ${candidateMismatches.length} of ${total} qualification cases: ${candidateMismatches.join("; ")}`;
+  } else if (baseline && baselineMismatches.length === 0) {
+    summary = `the old version passes all ${total} qualification cases, so no defect is reproduced`;
+  } else {
+    summary = `candidate passes all ${total} qualification cases` + (baseline ? `; the old version fails ${baselineMismatches.join("; ")}` : "");
+  }
+  return { ok: candidateMismatches.length === 0 && (!baseline || baselineMismatches.length > 0), summary, candidateMismatches, baselineMismatches };
+}
+
+function mismatches(lookup: ValidatorLookup): string[] {
+  return QUALIFICATION_CASES.flatMap((q) => {
+    const got = outcome(lookup, q);
+    return got === q.expected ? [] : [`${q.validatorId}: ${q.name} (expected ${q.expected}, got ${got})`];
+  });
+}
+
+function outcome(lookup: ValidatorLookup, q: QualificationCase): string {
+  const validator = lookup(q.validatorId);
+  if (validator === undefined) return "no validator";
+  const definition = createGraph().describe();
+  const requirementId = definition.defaultValidators.find((b) => b.validatorId === q.validatorId)!.requirementId;
+  const statement = definition.requirements.find((r) => r.id === requirementId)!.statement;
+  try {
+    return validator.evaluate({ requirementId, statement, evidence: q.evidence, candidateDigest: DIGEST }).status;
+  } catch (err) {
+    return `a throw (${err instanceof Error ? err.message : String(err)})`;
+  }
+}
