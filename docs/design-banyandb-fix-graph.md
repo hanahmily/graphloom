@@ -3,7 +3,9 @@
 Status: implemented, 2026-09-28, as
 [`examples/plugins/banyandb-fix`](../examples/plugins/banyandb-fix/). The
 GraphLoom gaps listed at the end are closed except where the table says
-otherwise; no live run on BanyanDB has been made yet. This applies the
+otherwise; no live run on BanyanDB has been made yet.
+[Review convergence](#review-convergence) is implemented except its second
+phase, executable confirmations. This applies the
 [TypeScript core design](design-typescript-core.md) and the
 [executor design](design-executors.md) to a real repository.
 
@@ -70,8 +72,10 @@ Fix
   validate  --failed check-->   reenter Fix with the failing evidence
   |
 Review                          (Codex in open-code-review's delegation mode, read-only)
-  no critical or high comment  --> Return: branch + PR body
-  otherwise                    --> supervisor: reenter Fix (revisit the plan), or Stop
+  critical or high comment     --> verify (Claude Code, read-only, fresh session)
+    confirmed or disputed      --> another pass for new ones, at most four per change
+  nothing new survives, nothing open --> Return: branch + PR body
+  otherwise                    --> supervisor: reenter Fix with confirmed findings, or Stop
 ```
 
 Two stages is the minimum that keeps writing and judging independent. The issue
@@ -89,7 +93,7 @@ The graph package declares:
 
 | Kind | Content |
 |---|---|
-| Checks | `make check-req`; Go version equal to `go.mod` (1.25.13); Git >= 2.41 (open-code-review; BanyanDB needs 2.30); `ocr delegate preview --help`, printing the absolute `ocr` path; `codex --version` and `codex login status`; `claude --version` and `claude auth status`; GNU make; Node.js >= 24.6.0 only when the issue touches Canopy (`ui/`) |
+| Checks | `make -C scripts/ci/check test` (BanyanDB's Go version and architecture test, without `make check-req`'s `ui`/`mcp` steps, which need Node.js and run `npm ci`); Go version equal to `go.mod` (1.25.13); Git >= 2.41 (open-code-review; BanyanDB needs 2.30); `ocr delegate preview --help`, printing the absolute `ocr` path; `codex --version` and `codex login status`; `claude --version` and `claude auth status`; GNU make; Node.js >= 24.6.0 |
 | Prepare | `make generate` in the run's worktree |
 | Pinned source | Digest of `CONTRIBUTING.md` at the version the checklist was written against |
 
@@ -172,10 +176,12 @@ in the change the controller checks against the write scope.
    blocked the plan on a test that would not fail on the base. The plan review
    narrows what reaches the code; it is not the check that proves reach.
 
-   Validators see only the current generation's evidence, so each generation
-   plans and reviews again. After a re-entry, the planner revisits its plan in
-   its continued session with the code review's comments, and a fresh
-   reviewer checks the revision before any code changes.
+   Validators see the current generation's evidence, so each generation plans
+   and reviews again. After a re-entry, the planner revisits its plan in its
+   continued session with the confirmed findings, and a fresh reviewer checks
+   the revision before any code changes. The code review validator also reads
+   earlier generations' evidence, passed as history, to rebuild the findings
+   ledger; it still needs a pass on the current change.
 4. **Implement.** A Claude Code job continues the plan's session. It writes the
    test, the fix and the `CHANGES.md` entry. Its write scope is the repository
    except `api/proto/**`, `go.mod`, `go.sum` and `.github/**`. A decision record
@@ -243,15 +249,16 @@ the diffs and reviews. The assignment carries:
 - a background of at most 2,000 characters: the issue, the plan's summary,
   test, decisions and open questions.
 
-The result is strict JSON: comments with a path, lines, category and severity,
-and a coverage summary listing any skipped file with its reason. The
-requirement passes when the reviewer finished, every file on its list was
-reviewed and none skipped, and no comment is critical or high; a comment
-without a severity counts as blocking. Anything else goes to the supervisor
-with the comments. If it re-enters Fix, the planner revisits its plan with
-them, the plan is reviewed again, and the new change is checked and reviewed
-from scratch. Lower-severity comments are listed as left for the human
-reviewer.
+The result is strict JSON: comments with a path, lines, category, severity, the
+known finding they repeat and a concrete failure; a status for each open
+finding; and a coverage summary listing any skipped file with its reason.
+Critical and high comments, and comments without a severity, are verified
+independently, and the review passes only as [review
+convergence](#review-convergence) describes. Anything else goes to the
+supervisor with the confirmed findings. If it re-enters Fix, the planner
+revisits its plan with them, the plan is reviewed again, and the new change is
+checked and reviewed again. Lower-severity comments are listed as left for the
+human reviewer.
 
 The reviewer changed after a comparison on PR #94's graph code, which had four
 known defects. open-code-review driving MiniMax-M3 itself, at high effort with
@@ -261,6 +268,254 @@ false positives, using about 1.4 million input tokens, mostly cached. Before
 that, on the #14111 change that made `Scheduler.Close` wait forever for an
 action that ignores cancellation, MiniMax-M3 found the hang only with the rule
 at high effort (3.5 million tokens in 16 minutes).
+
+## Review convergence
+
+Without this design, the loop between Fix and Review ends only through its
+limits. Every review is fresh and has no memory, so a later review can raise new
+findings, raise a finding again that earlier work settled, or block on a false
+positive that sends the run back to Fix until the budget runs out. Every
+blocking comment also went to the implementer, so a false positive could make
+it change correct code. This design makes the loop monotone and settles false
+positives with evidence.
+
+Terms: a *P0* is a critical comment and a *P1* a high one; a comment without a
+severity counts as P1. A *round* reviews one candidate digest. A *pass* is one
+Codex review job on a candidate.
+
+### Evidence from earlier generations
+
+A reentry and a resume both start a new generation, and the controller shows
+validators only the current generation's evidence. The graph sees all of it,
+but acceptance would not. `ValidationInput.history` therefore carries the
+evidence of earlier generations, oldest first. It is context: a receipt still
+rests on current evidence, and a validator must not pass a requirement from
+history alone. The code review validator rebuilds the findings ledger from
+history and current evidence together, and still requires a pass on the
+current candidate in the current generation.
+
+### The findings ledger
+
+The ledger is a pure function of the run's review passes, verification jobs and
+file observations, in evidence order. It holds no private state, so a resume
+or a supervisor decision cannot lose it.
+
+**Identity.** The plugin names findings `F1`, `F2`, … in the order they first
+appear, so the names are the same every time the ledger is rebuilt. A pass sees
+the known findings with their names. A comment matches a known finding only
+when its `finding` field names one; anything else is a new finding and is
+verified. Nothing is matched by path, line or text, so an ambiguous comment
+never inherits a closed state. The cost is that a reviewer who repeats a known
+finding without its name creates a duplicate, which verification judges again.
+
+**States.**
+
+| State | Meaning |
+|---|---|
+| pending | Awaits verification on a named candidate |
+| confirmed | Verified as a defect; open until fixed |
+| disputed | The verifier could not decide, gave no verdict, or refuted it with quotes that do not match the candidate |
+| fixed | A pass marked it resolved on a candidate other than the one it was last confirmed on |
+| dismissed | Refuted with quotes that match the candidate |
+
+**How a pass on candidate D changes it.** The pass reports a status for each
+open finding it was shown: `resolved`, `still_present` or `withdrawn` (never a
+defect), with a reason. A comment that names an open finding counts as
+`still_present` for it. A pass that leaves an open finding without a status is
+incomplete. Only critical and high comments, and comments without a severity,
+become findings.
+
+| Finding | Pass says | Result |
+|---|---|---|
+| confirmed | resolved, on a candidate other than the one it was last confirmed on | fixed |
+| confirmed | resolved, on that same candidate | unchanged: a read-only pass cannot fix code |
+| confirmed | still_present | confirmed, last seen on D |
+| confirmed | withdrawn | pending on D: verification decides whether it was a defect |
+| pending or disputed | resolved, on another candidate | fixed |
+| pending or disputed | still_present or withdrawn | pending on D |
+| fixed | raised again with its name | pending on D, as a regression |
+| dismissed | raised again with its name | still dismissed while every line its refutation quoted matches D; otherwise pending on D |
+
+A dismissal rests on the refutation's quoted lines, the code that made the
+claim false, not on the line the comment pointed at. When a later change removes
+the lock a refutation quoted, the quote no longer matches, and the finding is
+verified again.
+
+### Searching until no new P0 or P1
+
+On each candidate, passes run until one raises nothing that survives
+verification:
+
+1. A pass reviews the whole change with open-code-review's delegation
+   workflow. Its assignment lists the open findings, which need a status, and
+   the settled ones (fixed and dismissed), which it must not report again
+   unless the defect is back, and then with its name.
+2. Every finding the pass raised, whether new, a regression, or a dismissal
+   whose quotes broke, is verified (below).
+3. When any of them was confirmed or disputed, another pass runs, in a fresh
+   Codex session. It gets every known finding as already reported, must still
+   review every changed file, and looks for P0 and P1 issues outside the list.
+4. The sweep ends at the first pass whose raised findings were all dismissed,
+   or when none were raised. It is capped at four passes per candidate. A sweep
+   that reaches the cap ends unsaturated and fails the round.
+
+The sweep collects every defect it can find before the run returns to Fix,
+which saves round trips. A passing round needs only one pass, since its first
+pass raises nothing that survives verification. A resume starts a new
+generation, so the first pass after it runs again with the ledger intact.
+
+### Acceptance
+
+The code review requirement passes when all of these hold:
+
+1. The latest pass on the current candidate ran in the current generation,
+   read-only, finished, returned a readable result, reviewed every file on its
+   list, skipped none, and gave a status for every open finding it was shown.
+2. No finding awaits verification or a file observation.
+3. Every finding that pass raised is dismissed.
+4. No finding is confirmed or disputed: every confirmed finding became fixed
+   on a later candidate.
+
+These four conditions are the only acceptance rule; the graph calls the same
+validator before it asks the controller to validate. Because fixing needs a
+different candidate, a sweep that confirmed a new finding on a candidate cannot
+pass on that candidate.
+
+### Monotone rules
+
+1. The ledger only grows. Every finding keeps its name and history.
+2. A closed finding stays closed. A dismissal holds while its quoted lines
+   match; a fix holds until a regression is confirmed.
+3. Only confirmed and disputed findings block. A dismissed finding never blocks,
+   and it never reaches the implementer.
+4. Delivery needs saturation: the last pass on the delivered candidate raised
+   nothing that survived verification, and nothing confirmed is still open.
+5. Each failed round reports its progress to the supervisor, for example:
+   "passes on this change: 2 (sweep saturated); 2 fixed, 1 dismissed, 1 new
+   confirmed, 0 regressions, 0 disputed". A round that fixed nothing and ended
+   without saturating is reported as not converging.
+
+The supervisor still decides whether to reenter Fix or stop, and the
+controller's correction budget is still the hard limit. The rules guarantee
+that settled work stays settled, and that every block was confirmed or honestly
+disputed by an independent verifier. They cannot bound how many real defects a
+change has: a run that finds a new confirmed defect every round is working, and
+its budget decides how far it goes.
+
+### Verifying findings
+
+After each pass that raised findings, the graph dispatches one read-only
+verification job for every finding pending on the candidate. That covers new
+findings, regressions, withdrawn confirmations, dismissals whose quotes broke,
+findings a resume left unverified, and disputed findings on a new candidate.
+The job runs on another model family from the reviewer (Claude Code), in a
+fresh read-only session that has never written the change, uses a strict
+`finding-verification-v1` result, and is bound to the candidate digest. For
+each finding it returns:
+
+| Verdict | Must include | Effect |
+|---|---|---|
+| `confirmed` | Its own call path or reproduction with `file:line`, not the reviewer's restated | The finding blocks and goes to Fix |
+| `refuted` | Quotes of candidate lines, each copied from one line, that disprove the claim, such as the lock that is held or the caller that does not exist | Dismissed once the quotes match the candidate; listed in the pull request body |
+| `uncertain` | Both arguments | Disputed; goes to the supervisor |
+
+Nothing is downgraded. A P0 or P1 with thin evidence still goes to the
+verifier, and one it cannot decide is disputed, so a real defect cannot slip
+through on a malformed comment. A finding the verification job gives no verdict
+for is disputed too, so one verification per pass is enough and the graph never
+loops on it.
+
+A refutation pins at most three quotes, and a confirmation without a `file:line`
+witness is disputed. The graph observes the files a refutation quotes; a quote
+matches when its text, with whitespace collapsed and at least eight characters
+long, appears within three lines of the cited line. Only a relative path
+without `.` or `..` segments, outside `.git`, that names a file by its
+extension is observed, since observing a directory or an escaping path stops
+the run; any other quoted path never matches. A refutation whose quotes do not
+match is disputed.
+
+For a disputed finding the supervisor can reenter Fix, where the next pass
+gives the finding a status and a new candidate verifies it again, or stop for a
+maintainer with the finding in the pull request body. It cannot dismiss a
+finding by itself: a dismissal is always verification evidence.
+
+Only confirmed findings return to Fix, each with the verifier's witness.
+Dismissed findings never reach the planner or the implementer. The pull request
+body lists each dismissed P0 or P1 with its refutation, so a human can overrule
+a wrong dismissal.
+
+### Executable confirmations (second phase)
+
+For a behaviour defect, the verifier can write a Go test that the controller
+runs in a candidate checkout with the test file added. Such a test confirms the
+finding only under the RED contract: go test reports the named test failed by
+assertion, the package built, no panic, no timeout, and the check changed no
+file. The expected value must come from the issue or the code's documented
+contract, never from the candidate's output, and the verifier states its
+source. A confirmed reproduction becomes part of the finding: after Fix, GREEN
+runs it by name with the file's bytes pinned, so it cannot be dropped or
+weakened to close the finding. This needs the controller to add an
+agent-written file to a checkout; see the gaps table.
+
+**Scope of the missing controller capability.** `CheckoutSpec` (`packages/sdk/src/types.ts`)
+is `{ from: "candidate" }` or `{ from: "base"; paths: string[] }`; `selectPaths`
+and `commitPaths` (`packages/controller/src/checkout.ts`) both source bytes
+only from the *live worktree's* current change (`candidateChange`), keyed by a
+path already in `change.fingerprints`. A verifier's proposed test never
+reaches the worktree — it is read-only and returns the file as `{path, bytes}`
+in its structured result — so no existing `CheckoutSpec` variant can place it.
+Closing this needs, at minimum:
+
+- A new `CheckoutSpec` field, for example `write?: Array<{ path: string; bytes: string }>`,
+  applied in `runInCheckout` before `commitPaths` commits the checkout, for
+  both `from: "candidate"` and `from: "base"` (RED needs `base` plus the
+  verifier's test file and nothing else; a later GREEN pin needs `candidate`
+  plus that same file, unmodified).
+- The same path safety already enforced for observed quotes in [review
+  convergence](#review-convergence) (relative, no `.` or `..` segment, outside
+  `.git`, a real file extension — see `observablePath` in the plugin's
+  `findings.ts`) — worth promoting to a shared SDK guard so the controller can
+  enforce it once, not trust each plugin to. A written path must not collide
+  with a path the candidate's own change already touches, so a verifier cannot
+  overwrite production code or existing tests under the guise of adding one.
+- A stable way to "pin" the written bytes across two checkouts (RED, then
+  GREEN after Fix): the finding already carries the verifier's file as
+  evidence, so GREEN's `write` would replay that same evidence rather than
+  re-deriving it, keeping the earlier "cannot be dropped or weakened" property
+  from evidence alone, not from re-running the verifier.
+- Evidence and receipts already bind to `candidateDigest` and record
+  `checkout.paths`; a written file should appear there the same way, so a
+  refutation or a later pass can still observe it like any other checkout
+  path.
+
+This is a `packages/sdk` and `packages/controller` change, not a plugin change:
+every graph that uses checkouts would gain the capability, but only a graph
+that opts into executable confirmations (like this one) would use it.
+
+### Cost and budgets
+
+A clean round costs one pass. A failed round costs up to four passes and four
+verification jobs, all read-only. The controller's `agentInvocations` budget
+counts model requests, not jobs: harnesses reserve each request, Codex once at
+the start and once after each command it runs, and supervisor calls draw from
+the same budget. A small Codex review used 7 requests at low effort; a review of
+this design used about 20 at high effort. The default 64 is therefore likely to
+run out within one failing round with planning and implementation, so a
+BanyanDB task should raise `budgets.agentInvocations`. The round summary shows
+the remaining budget so the supervisor can stop before it runs out.
+
+### Where it lives
+
+- Controller and SDK: `ValidationInput.history`, checked on the wire like
+  `evidence`.
+- `ocr.ts`: the `code-review-v2` result (comments add `finding` and
+  `evidence`; the report adds `prior`) and the pass assignment.
+- `findings.ts`: the ledger, quote matching, the verification job's result and
+  assignment, and the round summary.
+- `validators.ts`: `code-review` evaluates the acceptance rule above.
+- `graph.ts`: passes, observations, verification and the sweep; reentry
+  feedback sends confirmed findings only; the pull request body lists
+  dismissed findings.
 
 ## Unclear issues
 
@@ -312,7 +567,8 @@ changing what the metric means affects anyone alerting on it.
 |---|---|---|---|
 | Plan and implement | Claude Code | One session, continued across plan, plan revisions, implement and corrections | Plan read-only; implement within the write scope |
 | Plan review | Pi | Fresh for each review | Read-only |
-| Code review | Codex, in open-code-review's delegation mode | Fresh for each review | Read-only sandbox in the run's worktree |
+| Code review | Codex, in open-code-review's delegation mode | Fresh for each pass | Read-only sandbox in the run's worktree |
+| Finding verification | Claude Code | Fresh for each verification, never the implementer's | Read-only, no shell |
 | Supervisor | Pi | The run's logical supervisor session | Recovery decisions and qualified graph/validator repairs in isolated candidate trees |
 
 The supervisor handles recovery. It investigates, directs corrections and writes
@@ -362,8 +618,9 @@ follows BanyanDB's pull request template:
 | Structured test evidence from command jobs | Closed: the regression command writes `go test -json` to the report file, and the plugin tells an assertion failure from a build failure |
 | Prepared scratch checkouts for RED and candidate checks | Closed: `JobSpec.checkout` runs a read-only command job in a disposable, prepared checkout of the base with chosen paths or of the committed candidate. Mutations are recorded, and receipts carry the candidate digest; a changed workspace invalidates the final stage |
 | Write scope exclusions | Closed: `!path` entries exclude paths from a broader scope |
+| Agent-written files in a checkout | Open, scoped: the second phase of [review convergence](#executable-confirmations-second-phase) needs a candidate checkout with a verifier's test file added, so a confirmation can be a failing test. Needs a new `CheckoutSpec` field in `packages/sdk`, applied in `packages/controller/src/checkout.ts` before the checkout commits, with the same path safety as observed quotes; see the scoping note above |
 | Qualified repair from the CLI | Open: `graphloom run` does not wire repair dependencies, so a changed `CONTRIBUTING.md` stops the run instead of reaching a repair |
-| Canopy's Node.js version | Open: covered only by `make check-req` |
+| Canopy's Node.js version | Closed: a dedicated `node` preflight check, cheaper than the full `ui check-version`/`mcp check-version`. Node.js is required unconditionally, not only when the change touches `ui/` or `mcp/`: `make generate` (preparation) and `make build` (the `builds` requirement) both loop over every BanyanDB project, `ui` and `mcp` included, and each runs `npm ci` regardless of what the task changes (confirmed with `make -n` in the target repository). Scoping either to a Node-free subset would mean overriding BanyanDB's own `PROJECTS` variable per target, coupled to its Makefile internals, so the requirement stays unconditional until those paths support Go-only execution |
 | Live run on BanyanDB | Open: the first milestone below has been exercised on a Go fixture, not on BanyanDB. When the local Go is older than `go.mod` requires, the default `GOTOOLCHAIN=auto` downloads the required toolchain during the check; with `GOTOOLCHAIN=local` the preflight stops and names both versions |
 
 ## First milestone

@@ -188,6 +188,8 @@ export function pullRequestDescription(args: {
   record: DecisionRecord;
   base: string;
   review: string;
+  /** Critical or high review findings an independent verifier refuted. */
+  dismissed?: string[];
 }): string {
   const { record } = args;
   const decided = record.decisions.filter((d) => d.chosen?.trim());
@@ -208,6 +210,9 @@ export function pullRequestDescription(args: {
     `- ${record.test?.name ?? "The regression test"} in \`${record.test?.package ?? "?"}\` fails by assertion on ${args.base.slice(0, 12) || "the base commit"} with only the test files applied, and passes with the fix.`,
     "- `make test-ci` for the changed packages, `make license-check`, `make build`, `make lint` and `make check` pass.",
     `- ${args.review}`,
+    ...((args.dismissed ?? []).length > 0
+      ? ["- Critical or high review findings an independent verifier refuted; overrule any that is wrong:", ...args.dismissed!.map((d) => `  - ${d}`)]
+      : []),
     ...(record.needsE2E === true ? ["- The end-to-end tests (Kind) were not run; this change needs them."] : []),
     "",
     `- [x] If this pull request closes/resolves/fixes an existing issue, replace the issue number. Fixes ${issueRef(args.issue)}.`,

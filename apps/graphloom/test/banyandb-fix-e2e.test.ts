@@ -54,10 +54,9 @@ const BUGGY = `${LICENSE}package timestamp\n\n// Status reports a scheduled acti
 const FIXED = BUGGY.replace("\tif minutes >= generatedLimit {", "\tif running {\n\t\treturn \"running\"\n\t}\n\tif minutes >= generatedLimit {");
 const REGRESSION = `${LICENSE}package timestamp\n\nimport "testing"\n\nfunc ${TEST}(t *testing.T) {\n\tif got := Status(generatedLimit, true); got != "running" {\n\t\tt.Fatalf("Status = %q, want running", got)\n\t}\n}\n`;
 const CHANGES = "# Changes by Version\n\n## 0.12.0\n\n### Bug Fixes\n\n- Older fix.\n\n## 0.11.0\n\n- Old.\n";
+const CHECK_MAKEFILE = [".PHONY: test", "test:", "\t@go version >/dev/null", ""].join("\n");
 const MAKEFILE = [
-  ".PHONY: check-req generate test-ci license-check build lint check",
-  "check-req:",
-  "\t@go version >/dev/null",
+  ".PHONY: generate test-ci license-check build lint check",
   // Like BanyanDB's mocks: generated, gitignored, and needed by the tests.
   "generate:",
   "\t@printf 'package timestamp\\n\\nconst generatedLimit = 5\\n' > pkg/timestamp/mock_limit.go",
@@ -81,10 +80,12 @@ async function makeEnv() {
   temps.push(dir);
   const repo = path.join(dir, "banyandb");
   await mkdir(path.join(repo, "pkg", "timestamp"), { recursive: true });
+  await mkdir(path.join(repo, "scripts", "ci", "check"), { recursive: true });
   const files: Record<string, string> = {
     "go.mod": `module example.com/banyandb\n\ngo ${GO}\n`,
     ".gitignore": "mock_*.go\n",
     Makefile: MAKEFILE,
+    "scripts/ci/check/Makefile": CHECK_MAKEFILE,
     "CONTRIBUTING.md": "# Contributing\n\nRun make check-req, then make generate.\n",
     "CHANGES.md": CHANGES,
     "pkg/timestamp/scheduler.go": BUGGY,
@@ -135,7 +136,9 @@ const PLAN = {
 /**
  * Stands in for open-code-review on PATH: it has a delegation mode, and
  * `delegate preview` records where it ran, its arguments, and the files the
- * worktree change touches.
+ * worktree change touches. Also shadows `node` with a version the environment
+ * check accepts, since real CI runners are not guaranteed to have one that is
+ * new enough, and this fixture's own Makefile never actually invokes Node.
  */
 async function fakeOcr(dir: string): Promise<{ bin: string; calls: string }> {
   const bin = path.join(dir, "bin");
@@ -153,6 +156,7 @@ async function fakeOcr(dir: string): Promise<{ bin: string; calls: string }> {
     ].join("\n"),
     { mode: 0o755 },
   );
+  await writeFile(path.join(bin, "node"), '#!/bin/sh\necho "v24.6.0"\n', { mode: 0o755 });
   return { bin, calls };
 }
 
@@ -188,6 +192,17 @@ async function fakeAgents(dir: string): Promise<{ config: RunnerConfig; calls: s
 }
 
 const LOW = { path: "pkg/timestamp/scheduler.go", start_line: 5, end_line: 5, category: "style", severity: "low", content: "Name the constant." };
+/** A false positive: the fix returns "running" before the limit check. */
+const FALSE_POSITIVE = {
+  path: "pkg/timestamp/scheduler.go",
+  start_line: 10,
+  end_line: 12,
+  category: "bug",
+  severity: "high",
+  content: "A running action past the limit is still reported as timed out.",
+  finding: "",
+  evidence: "Status(generatedLimit, true) reaches the limit check.",
+};
 
 /**
  * Real command and GitHub executors, as the CLI composes them, with scripted
@@ -215,7 +230,14 @@ function fixRunner(baseUrl: string, config: RunnerConfig) {
       if (job.purpose === "review" && job.stageId === "review") {
         const ocr = /`(\S+) delegate preview --format json`/.exec((job.input as { assignment: string }).assignment)![1]!;
         await execFileAsync(ocr, ["delegate", "preview", "--format", "json"], { cwd: ctx.worktreePath });
-        return done({ comments: [LOW], summary: { total_files: 3, reviewed_files: 3, skipped: [] } });
+        return done({ comments: [LOW, FALSE_POSITIVE], prior: [], summary: { total_files: 3, reviewed_files: 3, skipped: [] } });
+      }
+      if (job.purpose === "diagnostic" && job.stageId === "review") {
+        const quotes = [
+          { path: "pkg/timestamp/scheduler.go", line: 7, text: "if running {" },
+          { path: "pkg/timestamp/scheduler.go", line: 8, text: 'return "running"' },
+        ];
+        return done({ verdicts: [{ finding: "F1", verdict: "refuted", reason: "Status returns running before it checks the limit.", quotes }] });
       }
       if (job.purpose === "review") {
         const verdict = { verdict: "approved", summary: "The plan fixes the issue, names Status's callers, and lists the metric question." };
@@ -298,7 +320,13 @@ describe.skipIf(GO === undefined)("banyandb-fix on a Go repository", () => {
     expect(planReview).toMatchObject({ stageId: "fix", purpose: "review", readOnly: true, input: { harness: "pi" } });
     expect((planReview!.input as { assignment: string }).assignment).toContain(PLAN.summary);
     expect(implement!.continueFrom).toBeDefined();
-    expect(agentJobs).toHaveLength(4);
+    expect(agentJobs).toHaveLength(5);
+
+    // Claude Code verified the high comment read-only in a fresh session; the controller observed the lines it quoted, and they matched.
+    expect(agentJobs[4]).toMatchObject({ stageId: "review", kind: "agent", purpose: "diagnostic", readOnly: true, resultSchema: "finding-verification-v1", input: { harness: "claude-code" } });
+    expect(agentJobs[4]!.continueFrom).toBeUndefined();
+    const observed = state.evidence.find((e) => e.kind === "file" && (e.payload as { path: string }).path === "pkg/timestamp/scheduler.go")!;
+    expect(observed).toMatchObject({ candidateDigest: state.candidateDigest, payload: { bytes: FIXED } });
 
     // Codex reviewed read-only, running the ocr the preflight found, in the worktree holding the uncommitted change.
     expect(agentJobs[3]).toMatchObject({ stageId: "review", kind: "agent", purpose: "review", readOnly: true, input: { harness: "codex" } });
@@ -331,8 +359,9 @@ describe.skipIf(GO === undefined)("banyandb-fix on a Go repository", () => {
     expect(body).toContain(`### Fix apache/skywalking#${ISSUE}: Scheduler reports long actions as timed out`);
     expect(body).toContain("- Should the timeout metric keep counting running actions?");
     expect(body).toContain(
-      "Reviewed by Codex in open-code-review's delegation mode (reviewed 3 of 3 file(s)): no critical or high comments; 1 lower-severity comment(s) left for the reviewer.",
+      "Reviewed by Codex in open-code-review's delegation mode (reviewed 3 of 3 file(s)): no critical or high finding left open (1 refuted by an independent verifier, listed below); 1 lower-severity comment(s) left for the reviewer.",
     );
+    expect(body).toContain("  - F1 pkg/timestamp/scheduler.go:10-12 (high, bug): A running action past the limit is still reported as timed out. Verifier: Status returns running before it checks the limit.");
     expect(body).not.toMatch(/rcpt|receipt/);
     expect(execFileSync("git", ["status", "--porcelain"], { cwd: report.worktreePath, encoding: "utf8" })).toContain("M pkg/timestamp/scheduler.go");
     expect(await readFile(path.join(report.worktreePath, "pkg/timestamp/mock_limit.go"), "utf8")).toContain("generatedLimit");

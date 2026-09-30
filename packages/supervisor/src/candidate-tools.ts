@@ -67,6 +67,24 @@ export function createCandidateCodingTools(rootReal: string): ToolDefinition[] {
   return tools.map((tool) => rootedAt(tool, rootReal));
 }
 
+/** Tool names an independent reviewer gets: read-only, no shell, no edits. */
+export const CANDIDATE_REVIEW_TOOL_NAMES = ["read", "grep", "find", "ls"] as const;
+
+/**
+ * Read-only tools for an independent repair reviewer, rooted at the candidate:
+ * no bash, no edit, no write, so a reviewer session cannot itself change the
+ * candidate it judges.
+ */
+export function createCandidateReviewTools(rootReal: string): ToolDefinition[] {
+  const tools = [
+    createReadToolDefinition(rootReal),
+    createGrepToolDefinition(rootReal),
+    createFindToolDefinition(rootReal),
+    createLsToolDefinition(rootReal),
+  ] as unknown as ToolDefinition[];
+  return tools.map((tool) => rootedAt(tool, rootReal));
+}
+
 /** Pi's tools prefer the session's `ctx.cwd` over their factory cwd. */
 function rootedAt(tool: ToolDefinition, rootReal: string): ToolDefinition {
   return {

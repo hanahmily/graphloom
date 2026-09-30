@@ -5,6 +5,7 @@
 import path from "node:path";
 import { createController } from "@graphloom/controller";
 import { createCliRunner } from "./cli-runner.js";
+import { piRepairDeps, resolveBundlePath, resolveBundlePathForResume } from "./repair-config.js";
 import { requireRunnerConfig } from "./runner-config.js";
 import {
   loadSupervisorConfig,
@@ -37,7 +38,9 @@ async function main(): Promise<void> {
     const report = await controller.run({
       taskPath,
       runner,
-      ...(config !== undefined ? { supervisorFactory: piSupervisorFactory(config) } : {}),
+      ...(config !== undefined
+        ? { supervisorFactory: piSupervisorFactory(config), repair: piRepairDeps(config, await resolveBundlePath(taskPath)) }
+        : {}),
     });
     console.log(JSON.stringify(report, null, 2));
     process.exitCode = report.status === "succeeded" ? 0 : 1;
@@ -76,7 +79,13 @@ async function main(): Promise<void> {
       runner,
       ...(stateRoot ? { stateRoot: path.resolve(stateRoot) } : {}),
       ...(args.includes("--update-plugin") ? { updatePlugin: true } : {}),
-      ...(config !== undefined ? { restoreSupervisor: piSupervisorRestore(config), supervisorFactory: piSupervisorFactory(config) } : {}),
+      ...(config !== undefined
+        ? {
+            restoreSupervisor: piSupervisorRestore(config),
+            supervisorFactory: piSupervisorFactory(config),
+            repair: piRepairDeps(config, await resolveBundlePathForResume(runRef, stateRoot ? path.resolve(stateRoot) : undefined)),
+          }
+        : {}),
     });
     console.log(JSON.stringify(report, null, 2));
     process.exitCode = report.status === "succeeded" ? 0 : 1;

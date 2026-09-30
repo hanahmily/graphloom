@@ -10,21 +10,33 @@ import {
   CODE_REVIEW_SCHEMA,
   COMMAND,
   ENVIRONMENT,
+  candidateCommands,
   MAX_SNAPSHOT_CHARS,
   QUALIFICATION_CASES,
+  VERIFICATION_SCHEMA,
   advanceFix,
   blockingComments,
   codeReviewInstruction,
   createGraph,
+  describeFinding,
+  findingById,
+  findingLedger,
   ginkgoSpecs,
+  observablePath,
   parseCodeReview,
+  parseVerification,
+  pathsToObserve,
+  quoteMatches,
   qualifyValidators,
+  roundSummary,
   reviewBackground,
   regressionArgv,
   regressionOutcome,
   requestedIssue,
   testOutcome,
+  toVerify,
   validatorById,
+  verificationInstruction,
   type DecisionRecord,
   type GinkgoSpec,
 } from "../src/index.js";
@@ -72,6 +84,10 @@ interface Scenario {
   planReviews?: Array<Record<string, unknown>>;
   /** The code reviewer's result for each review, in order; the last repeats. */
   codeReviews?: Array<{ output: unknown; status?: string }>;
+  /** The verifier's result for each verification, in order; the last repeats. By default it confirms every finding it is given. */
+  verifications?: Array<{ output: unknown; status?: string }>;
+  /** Bytes an observation records for each path; CHANGES.md defaults to `changes`, anything else to empty. */
+  files?: Record<string, string>;
   /** What the environment check printed for ocr; null records no passing check. */
   ocrPath?: string | null;
   changes?: string;
@@ -90,6 +106,16 @@ const reviewed = (comments: Array<Record<string, unknown>> = [], summary: object
   output: { comments, summary },
 });
 const HANG = { path: "pkg/timestamp/scheduler.go", start_line: 88, end_line: 95, category: "bug", severity: "high", content: "Close now waits forever for an action that ignores cancellation." };
+const SUMMARY = { total_files: 3, reviewed_files: 3, skipped: [] };
+/** A pass that gives each named finding `status` and raises `comments`. */
+const priorPass = (statuses: Record<string, string>, comments: Array<Record<string, unknown>> = []): { output: unknown } => ({
+  output: { comments, prior: Object.entries(statuses).map(([finding, status]) => ({ finding, status, reason: `${finding} is ${status}` })), summary: SUMMARY },
+});
+const verdicts = (...list: Array<{ finding: string; verdict: string; reason?: string; quotes?: Array<{ path: string; line: number; text: string }> }>) => ({
+  output: { verdicts: list.map((v) => ({ reason: `${v.verdict} by the verifier`, quotes: [], ...v })) },
+});
+const SCHEDULER = ["package timestamp", "", "func (s *Scheduler) Close() {", "\ts.cancel()", "\tctx, done := context.WithTimeout(context.Background(), s.closeTimeout)", "\tdefer done()", "\ts.wait(ctx)", "}"].join("\n");
+const BOUNDED = { path: "pkg/timestamp/scheduler.go", line: 5, text: "ctx, done := context.WithTimeout(context.Background(), s.closeTimeout)" };
 
 const CHANGES = "# Changes by Version\n\nRelease Notes.\n\n## 0.12.0\n\n### Bug Fixes\n\n- Warn while a scheduled action is still running.\n\n## 0.11.0\n\n- Older.\n";
 const CHANGED = ["CHANGES.md", "pkg/timestamp/scheduler.go", "pkg/timestamp/scheduler_test.go"];
@@ -105,6 +131,7 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
   const sessions: AgentSessionView[] = [];
   const jobs: JobSpec[] = [];
   const decisions: GraphDecision[] = [];
+  const observed: string[] = [];
   let privateState: string | undefined;
   let digest = "d0";
   let implemented = 0;
@@ -112,6 +139,7 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
   let planned = 0;
   let planReviewed = 0;
   let codeReviewed = 0;
+  let verified = 0;
   let reentries = scenario.reenter ?? 0;
   let seq = 0;
   let generation = 1;
@@ -151,6 +179,13 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
     }
     if (job.kind === "agent") {
       let output: unknown;
+      if (job.purpose === "diagnostic" && job.stageId === "review") {
+        const ids = [...assignment(job).matchAll(/^- (F\d+) /gm)].map((m) => m[1]!);
+        const confirmAll = verdicts(...ids.map((finding) => ({ finding, verdict: "confirmed", quotes: [{ path: "pkg/timestamp/scheduler.go", line: 7, text: "s.wait(ctx)" }] })));
+        const result: { output: unknown; status?: string } = nth(scenario.verifications, verified++) ?? confirmAll;
+        record("other", { codingAgent: { harness: "claude-code", status: result.status ?? "completed", output: result.output } }, job, op);
+        return;
+      }
       if (job.purpose === "diagnostic") output = nth(scenario.plans, planned++) ?? PLAN;
       else if (job.purpose === "work") {
         output = scenario.implement?.[implemented] ?? nth(scenario.plans, planned - 1) ?? PLAN;
@@ -211,7 +246,7 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
       validatorBindings: definition.defaultValidators,
       generation,
       stateRevision: step,
-      activeVersion: "banyandb-fix@0.2.0",
+      activeVersion: "banyandb-fix@0.3.0",
       candidateDigest: digest,
       ...(sessions.length > 0 ? { agentSessions: structuredClone(sessions) } : {}),
       ...(privateState !== undefined ? { privateState } : {}),
@@ -223,13 +258,17 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
     const op = `op-${step}`;
     if (action.type === "dispatch") run(action.job, op);
     else if (action.type === "observe") {
-      for (const p of action.observe.paths ?? []) record("file", { path: p, bytes: p === CHANGES_PATH ? (scenario.changes ?? CHANGES) : "" }, undefined, op);
+      for (const p of action.observe.paths ?? []) {
+        observed.push(p);
+        record("file", { path: p, bytes: p === CHANGES_PATH ? (scenario.changes ?? CHANGES) : (scenario.files?.[p] ?? "") }, undefined, op);
+      }
     } else if (action.type === "validate") {
       const stage = definition.stages.find((s) => s.id === action.validate.stageId)!;
       const visible = candidateEvidence(evidence, generation);
+      const history = evidence.filter((e) => e.generation! < generation);
       const results = stage.requirementIds.map((requirementId) => {
         const binding = definition.defaultValidators.find((b) => b.requirementId === requirementId)!;
-        return { requirementId, binding, result: validatorById(binding.validatorId)!.evaluate({ requirementId, statement: "s", evidence: visible, candidateDigest: digest }) };
+        return { requirementId, binding, result: validatorById(binding.validatorId)!.evaluate({ requirementId, statement: "s", evidence: visible, history, candidateDigest: digest }) };
       });
       const failure = results.find((r) => r.result.status !== "passed");
       if (failure !== undefined) throw new Error(`validate ${stage.id} failed: ${failure.requirementId}: ${failure.result.reason}`);
@@ -241,7 +280,7 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
       for (const r of receipts) r.valid = false;
       generation += 1;
     } else {
-      return { decision, decisions, jobs, evidence, receipts };
+      return { decision, decisions, jobs, evidence, receipts, observed };
     }
   }
   throw new Error("the graph did not finish in 60 steps");
@@ -276,7 +315,7 @@ describe("banyandb-fix graph", () => {
     const definition = createGraph().describe();
     expect(definition.stages.map((s) => s.id)).toEqual(["fix", "review"]);
     expect(definition.environment).toEqual(ENVIRONMENT);
-    expect(ENVIRONMENT.checks!.map((c) => c.id)).toEqual(["go", "git", "ocr", "codex", "claude", "make", "check-req"]);
+    expect(ENVIRONMENT.checks!.map((c) => c.id)).toEqual(["go", "git", "ocr", "codex", "claude", "make", "check-req", "node"]);
     expect(ENVIRONMENT.prepare!.map((c) => c.argv.join(" "))).toEqual(["make generate"]);
     expect(ENVIRONMENT.pinnedFiles![0]!.path).toBe("CONTRIBUTING.md");
   });
@@ -318,6 +357,12 @@ describe("banyandb-fix graph", () => {
 
       await tool("claude-custom", "exit 0");
       expect((await run("claude", { GRAPHLOOM_CLAUDE_BIN: path.join(bin, "claude-custom") })).code).toBe(0);
+
+      // Node.js is required unconditionally: make generate and make build need it for every task.
+      await tool("node", "echo v20.0.0");
+      expect(await run("node")).toEqual({ code: 1, stderr: "Node.js >= 24.6.0 required, found v20.0.0" });
+      await tool("node", "echo v24.6.0");
+      expect((await run("node")).code).toBe(0);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -433,13 +478,84 @@ describe("banyandb-fix graph", () => {
     expect(deliverArgs(jobs).message).not.toContain(question);
   });
 
-  it("hands a high code-review comment to the supervisor instead of delivering", () => {
-    const { decision, jobs } = simulate({ codeReviews: [reviewed([HANG])] });
+  it("verifies a high comment, sweeps once more for new ones, and hands the confirmed finding to the supervisor", () => {
+    const { decision, jobs } = simulate({ codeReviews: [reviewed([HANG]), priorPass({ F1: "still_present" })] });
     expect(decision.action).toMatchObject({ type: "supervise" });
     const reason = (decision.action as { supervise: { reason: string } }).supervise.reason;
-    expect(reason).toContain("1 critical or high comment(s)");
-    expect(reason).toContain("pkg/timestamp/scheduler.go:88-95 (high, bug): Close now waits forever");
+    expect(reason).toContain("1 critical or high finding(s) confirmed or disputed: F1 pkg/timestamp/scheduler.go:88-95 (high, bug): Close now waits forever");
+    expect(reason).toContain("passes on this change: 2 (sweep saturated); 0 fixed, 0 dismissed, 1 new confirmed, 0 regression(s), 0 disputed");
+    expect(reason).toMatch(/\d+ agent invocation\(s\) left/);
     expect(jobs.some((j) => (j.input as { commands?: Array<{ id: string }> }).commands?.[0]?.id === COMMAND.deliver)).toBe(false);
+
+    const review = jobs.filter((j) => j.stageId === "review");
+    expect(review.map((j) => `${j.purpose}:${(j.input as { harness: string }).harness}`)).toEqual(["review:codex", "diagnostic:claude-code", "review:codex"]);
+    const verification = review[1]!;
+    expect(verification).toMatchObject({ kind: "agent", readOnly: true, resultSchema: "finding-verification-v1", input: { resultSchema: VERIFICATION_SCHEMA } });
+    expect(verification.jobId).toBeUndefined();
+    expect(verification.continueFrom).toBeUndefined();
+    expect(assignment(verification)).toContain("- F1 pkg/timestamp/scheduler.go:88-95 (high, bug): Close now waits forever");
+    expect(assignment(verification)).toContain("- pkg/timestamp/scheduler_test.go");
+    // The sweep pass knows F1 by name, owes it a status, and looks for issues beyond it.
+    expect(assignment(review[2])).toContain("- F1 (confirmed) pkg/timestamp/scheduler.go:88-95");
+    expect(assignment(review[2])).toContain("An earlier pass on this same change reported the findings above");
+    expect(assignment(review[0])).not.toContain("An earlier pass");
+  });
+
+  it("dismisses a finding the verifier refutes with lines that match the change, and lists it in the pull request", () => {
+    const { decision, jobs, observed } = simulate({
+      codeReviews: [reviewed([HANG])],
+      verifications: [verdicts({ finding: "F1", verdict: "refuted", reason: "Close bounds the wait with closeTimeout.", quotes: [BOUNDED] })],
+      files: { "pkg/timestamp/scheduler.go": SCHEDULER },
+    });
+    expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+    expect(observed).toContain("pkg/timestamp/scheduler.go");
+    // One pass: it raised nothing that survived verification. The implementer never saw the false positive.
+    expect(jobs.filter((j) => j.stageId === "review" && j.purpose === "review")).toHaveLength(1);
+    expect(jobs.filter((j) => j.purpose === "work")).toHaveLength(1);
+    const { body } = deliverArgs(jobs);
+    expect(body).toContain("no critical or high finding left open (1 refuted by an independent verifier, listed below)");
+    expect(body).toContain("- Critical or high review findings an independent verifier refuted; overrule any that is wrong:");
+    expect(body).toContain("  - F1 pkg/timestamp/scheduler.go:88-95 (high, bug): Close now waits forever for an action that ignores cancellation. Verifier: Close bounds the wait with closeTimeout.");
+  });
+
+  it("disputes a refutation whose quotes do not match or leave the worktree, and never observes such a path", () => {
+    const { decision, jobs, observed } = simulate({
+      codeReviews: [reviewed([HANG, { ...HANG, start_line: 120, end_line: 121, content: "trigger leaks the timer." }]), priorPass({ F1: "still_present", F2: "still_present" })],
+      verifications: [
+        verdicts(
+          { finding: "F1", verdict: "refuted", quotes: [{ ...BOUNDED, text: "ctx, done := context.WithTimeout(ctx, time.Minute)" }] },
+          { finding: "F2", verdict: "refuted", quotes: [{ path: "/etc/passwd", line: 1, text: "root:x:0:0:root:/root" }] },
+        ),
+        verdicts({ finding: "F1", verdict: "uncertain", reason: "the timeout may not cover wait" }),
+      ],
+      files: { "pkg/timestamp/scheduler.go": SCHEDULER },
+    });
+    expect(decision.action).toMatchObject({ type: "supervise" });
+    const reason = (decision.action as { supervise: { reason: string } }).supervise.reason;
+    expect(reason).toContain("2 critical or high finding(s) confirmed or disputed");
+    expect(reason).toContain("F1 pkg/timestamp/scheduler.go:88-95 (high, bug): Close now waits forever for an action that ignores cancellation. Verifier: the timeout may not cover wait");
+    expect(reason).toContain("F2 pkg/timestamp/scheduler.go:120-121 (high, bug): trigger leaks the timer. Verifier: the verifier gave no verdict");
+    expect(reason).toContain("0 fixed, 0 dismissed, 0 new confirmed, 0 regression(s), 2 disputed");
+    expect(observed).toEqual(["CHANGES.md", "pkg/timestamp/scheduler.go"]);
+    // Disputed findings sent the sweep on; the second pass raised nothing new, and both findings, still present, were verified again.
+    const verifications = jobs.filter((j) => j.stageId === "review" && j.purpose === "diagnostic" && j.kind === "agent");
+    expect(verifications).toHaveLength(2);
+    expect(assignment(verifications[1])).toContain("- F1 ");
+    expect(assignment(verifications[1])).toContain("- F2 ");
+    expect(jobs.filter((j) => j.stageId === "review" && j.purpose === "review")).toHaveLength(2);
+  });
+
+  it("stops sweeping at four passes on one change when every pass finds a new defect", () => {
+    const defect = (line: number) => ({ ...HANG, start_line: line, end_line: line, content: `defect at ${line}` });
+    const still = (k: number) => Object.fromEntries(Array.from({ length: k }, (_, i) => [`F${i + 1}`, "still_present"]));
+    const { decision, jobs } = simulate({
+      codeReviews: [reviewed([defect(1)]), priorPass(still(1), [defect(2)]), priorPass(still(2), [defect(3)]), priorPass(still(3), [defect(4)]), priorPass(still(4))],
+    });
+    expect(decision.action).toMatchObject({ type: "supervise" });
+    const reason = (decision.action as { supervise: { reason: string } }).supervise.reason;
+    expect(reason).toContain("passes on this change: 4 (sweep stopped at the 4-pass limit); 0 fixed, 0 dismissed, 4 new confirmed");
+    expect(reason).toContain("not converging");
+    expect(jobs.filter((j) => j.stageId === "review" && j.purpose === "review")).toHaveLength(4);
   });
 
   it("does not pass a code review that failed or did not cover every file", () => {
@@ -466,24 +582,33 @@ describe("banyandb-fix graph", () => {
     expect(deliverArgs(jobs).body).toContain("no critical or high comments; 1 lower-severity comment(s) left for the reviewer.");
   });
 
-  it("revisits the plan with the code review's findings when the supervisor re-enters Fix", () => {
-    const { decision, jobs } = simulate({ reenter: 1, codeReviews: [reviewed([HANG]), reviewed()] });
+  it("revisits the plan with the confirmed findings when the supervisor re-enters Fix, and fixes them on the new change", () => {
+    const { decision, jobs } = simulate({
+      reenter: 1,
+      codeReviews: [reviewed([HANG]), priorPass({ F1: "still_present" }), priorPass({ F1: "resolved" })],
+    });
     expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
-    const plans = jobs.filter((j) => j.purpose === "diagnostic" && j.kind === "agent");
+    const plans = jobs.filter((j) => j.purpose === "diagnostic" && j.kind === "agent" && j.stageId === "fix");
     const work = jobs.filter((j) => j.purpose === "work");
     expect(plans).toHaveLength(2);
     expect(work).toHaveLength(2);
     const revisit = assignment(plans[1]);
     expect(revisit).toContain("The working tree holds your previous change");
-    expect(revisit).toContain("Code review of your previous change did not pass (reviewed 3 of 3 file(s), 1 critical or high comment(s))");
-    expect(revisit).toContain("Close now waits forever");
+    expect(revisit).toContain("Code review of your previous change found 1 critical or high defect(s), each confirmed by an independent verifier:");
+    expect(revisit).toContain("F1 pkg/timestamp/scheduler.go:88-95 (high, bug): Close now waits forever");
+    expect(revisit).toContain("pkg/timestamp/scheduler.go:7 `s.wait(ctx)`");
+    expect(deliverArgs(jobs).body).toContain("no critical or high finding left open (1 fixed during review)");
     // The revisited plan continues the implementer's session and is reviewed again before implementing.
     const implementOp = `op-${jobs.indexOf(work[0]!)}`;
     expect(plans[1]!.continueFrom).toBe(implementOp);
     const planReviews = jobs.filter((j) => j.purpose === "review" && j.stageId === "fix");
     expect(planReviews).toHaveLength(2);
     expect(assignment(planReviews[1])).toContain("Close now waits forever");
-    expect(jobs.filter((j) => j.purpose === "review" && j.stageId === "review")).toHaveLength(2);
+    const passes = jobs.filter((j) => j.purpose === "review" && j.stageId === "review");
+    expect(passes).toHaveLength(3);
+    // The first pass on the new change owes F1 a status and is not a sweep.
+    expect(assignment(passes[2])).toContain("- F1 (confirmed) pkg/timestamp/scheduler.go:88-95");
+    expect(assignment(passes[2])).not.toContain("An earlier pass");
     expect(jobs.indexOf(planReviews[1]!)).toBeLessThan(jobs.indexOf(work[1]!));
   });
 
@@ -725,6 +850,33 @@ describe("code review in open-code-review's delegation mode", () => {
       if (schema.type === "array") strict(schema.items as Record<string, unknown>);
     };
     strict(JSON.parse(CODE_REVIEW_SCHEMA));
+    strict(JSON.parse(VERIFICATION_SCHEMA));
+  });
+
+  it("shows a pass the known findings by name: open ones owe a status, settled ones return only by name", () => {
+    const known = { open: [{ id: "F2", state: "confirmed", description: "a.go:3 (high, bug): leak" }], settled: [{ id: "F1", state: "dismissed", description: "b.go:9 (high, bug): race" }] };
+    const text = codeReviewInstruction({ ocr: "ocr", base: "b", background: "", known, sweep: true });
+    expect(text).toContain("Give each one a status in `prior`");
+    expect(text).toContain("- F2 (confirmed) a.go:3 (high, bug): leak");
+    expect(text).toContain("Do not report them again unless the defect is back in the current code; then report it with its name in `finding`.\n- F1 (dismissed) b.go:9 (high, bug): race");
+    expect(text).toContain("look for critical or high issues that are not on the list");
+    expect(codeReviewInstruction({ ocr: "ocr", base: "b", background: "" })).not.toContain("prior`:");
+  });
+
+  it("reads each pass's statuses and named comments, and the verifier's verdicts", () => {
+    const parsed = parseCodeReview({
+      comments: [{ ...HANG, finding: " F1 ", evidence: "Close blocks on wg.Wait" }, { ...HANG, finding: "", evidence: "" }],
+      prior: [{ finding: "F2", status: "resolved", reason: "gone" }, { finding: "F3", status: "fixed", reason: "not a status" }],
+      summary: SUMMARY,
+    });
+    if ("problem" in parsed) throw new Error(parsed.problem);
+    expect(parsed.report.comments.map((c) => [c.finding, c.evidence])).toEqual([["F1", "Close blocks on wg.Wait"], [undefined, undefined]]);
+    expect(parsed.report.prior).toEqual([{ finding: "F2", status: "resolved", reason: "gone" }]);
+    const verification = parseVerification({ verdicts: [{ finding: "F1", verdict: "refuted", reason: "r", quotes: [BOUNDED, { path: "x" }] }, { finding: "F2", verdict: "maybe" }] });
+    if ("problem" in verification) throw new Error(verification.problem);
+    expect([...verification.verdicts.keys()]).toEqual(["F1"]);
+    expect(verification.verdicts.get("F1")!.quotes).toEqual([BOUNDED]);
+    expect(parseVerification("done")).toEqual({ problem: "the verifier returned no verdicts" });
   });
 
   it("reads the reviewer's result, most severe first, and refuses one without coverage", () => {
@@ -740,6 +892,109 @@ describe("code review in open-code-review's delegation mode", () => {
     expect(parseCodeReview({ comments: [{ severity: "high" }], summary: { total_files: 1, reviewed_files: 1, skipped: [] } })).toEqual({
       problem: "a code review comment has no path or content",
     });
+  });
+});
+
+describe("findings ledger", () => {
+  let n = 0;
+  const agent = (purpose: string, digest: string, output: unknown, status = "completed"): EvidenceRecord => ({
+    ref: `r-${++n}`,
+    kind: "other",
+    generation: 1,
+    candidateDigest: digest,
+    payload: { codingAgent: { status, output }, producer: { operationId: `op-${n}`, stageId: "review", purpose, readOnly: true, kind: "agent", executorId: "graphloom.coding-agent/run" } },
+  });
+  const pass = (digest: string, comments: Array<Record<string, unknown>>, statuses: Record<string, string> = {}) => agent("review", digest, priorPass(statuses, comments).output);
+  const verify = (digest: string, ...list: Parameters<typeof verdicts>) => agent("diagnostic", digest, verdicts(...list).output);
+  const confirm = (digest: string, finding = "F1") => verify(digest, { finding, verdict: "confirmed", quotes: [{ path: "pkg/timestamp/scheduler.go", line: 7, text: "s.wait(ctx)" }] });
+  const file = (digest: string, bytes: string, path = "pkg/timestamp/scheduler.go"): EvidenceRecord => ({ ref: `r-${++n}`, kind: "file", generation: 1, candidateDigest: digest, payload: { path, bytes } });
+  const states = (evidence: EvidenceRecord[]) => Object.fromEntries(findingLedger(evidence).findings.map((f) => [f.id, `${f.state}@${f.on}`]));
+
+  it("fixes a confirmed finding only on another change, and reopens it as a regression when raised again by name", () => {
+    const evidence = [pass("d1", [HANG]), confirm("d1"), pass("d1", [], { F1: "resolved" })];
+    expect(states(evidence)).toEqual({ F1: "confirmed@d1" });
+    evidence.push(pass("d2", [], { F1: "resolved" }));
+    expect(states(evidence)).toEqual({ F1: "fixed@d2" });
+    evidence.push(pass("d3", [{ ...HANG, finding: "F1" }]));
+    const ledger = findingLedger(evidence);
+    expect(states(evidence)).toEqual({ F1: "pending@d3" });
+    expect(ledger.findings[0]!.regressedOn).toBe("d3");
+    expect(ledger.passes.at(-1)!.raised).toEqual(["F1"]);
+    expect(roundSummary(ledger, "d3", [ledger.passes.at(-1)!])).toContain("1 regression(s)");
+  });
+
+  it("carries a regression's current occurrence, not the original one it was first raised with", () => {
+    const original = { path: "pkg/timestamp/old.go", start_line: 10, end_line: 10, category: "bug", severity: "high", content: "Close waits forever." };
+    const regression = { ...original, path: "pkg/timestamp/new.go", start_line: 55, end_line: 55, content: "Close does not honour cancellation." };
+    const evidence = [pass("d1", [original]), confirm("d1"), pass("d2", [], { F1: "resolved" }), pass("d3", [{ ...regression, finding: "F1" }])];
+    const ledger = findingLedger(evidence);
+    const f1 = findingById(ledger, "F1")!;
+    expect(f1.comment).toMatchObject({ path: "pkg/timestamp/new.go", start_line: 55, content: "Close does not honour cancellation." });
+    expect(f1.original).toMatchObject({ path: "pkg/timestamp/old.go", start_line: 10 });
+    expect(describeFinding(f1)).toContain("pkg/timestamp/new.go:55");
+    expect(describeFinding(f1)).not.toContain("pkg/timestamp/old.go");
+    const instruction = verificationInstruction({ findings: toVerify(ledger, "d3"), background: "bg", changed: [] });
+    expect(instruction).toContain("pkg/timestamp/new.go:55");
+    expect(instruction).not.toContain("pkg/timestamp/old.go");
+  });
+
+  it("carries a dismissed finding's current occurrence when it is raised again at a new location", () => {
+    const original = { path: "pkg/timestamp/old.go", start_line: 10, end_line: 10, category: "bug", severity: "high", content: "Close waits forever." };
+    const dismissed = [pass("d1", [original]), verify("d1", { finding: "F1", verdict: "refuted", reason: "bounded", quotes: [BOUNDED] }), file("d1", SCHEDULER)];
+    expect(states(dismissed)).toEqual({ F1: "dismissed@d1" });
+    const regression = { ...original, path: "pkg/timestamp/new.go", start_line: 55, end_line: 55, content: "A new call path reaches the same hang." };
+    const raisedAgain = [...dismissed, pass("d2", [{ ...regression, finding: "F1" }])];
+    const ledger = findingLedger(raisedAgain);
+    const f1 = findingById(ledger, "F1")!;
+    expect(f1.comment).toMatchObject({ path: "pkg/timestamp/new.go", start_line: 55 });
+    expect(f1.original).toMatchObject({ path: "pkg/timestamp/old.go", start_line: 10 });
+  });
+
+  it("sends a withdrawn confirmation back to verification, and leaves a pass that skips a status incomplete", () => {
+    const evidence = [pass("d1", [HANG]), confirm("d1"), pass("d1", [], { F1: "withdrawn" })];
+    expect(states(evidence)).toEqual({ F1: "pending@d1" });
+    evidence.push(confirm("d1"), pass("d2", []));
+    const last = findingLedger(evidence).passes.at(-1)!;
+    expect(last.missingStatus).toEqual(["F1"]);
+    expect(states(evidence)).toEqual({ F1: "confirmed@d1" });
+  });
+
+  it("reads a comment that names an open finding as its status, and one naming an unknown finding as new", () => {
+    const evidence = [pass("d1", [HANG, { ...HANG, severity: "medium", content: "naming" }]), confirm("d1"), pass("d1", [{ ...HANG, finding: "F1" }, { ...HANG, finding: "F9" }])];
+    const ledger = findingLedger(evidence);
+    expect(states(evidence)).toEqual({ F1: "confirmed@d1", F2: "pending@d1" });
+    expect(ledger.passes[1]!.missingStatus).toEqual([]);
+    expect(ledger.passes[1]!.raised).toEqual(["F2"]);
+  });
+
+  it("keeps a dismissal while its quoted lines match a later change, and reopens it when they break", () => {
+    const dismissed = [pass("d1", [HANG]), verify("d1", { finding: "F1", verdict: "refuted", reason: "bounded", quotes: [BOUNDED] }), file("d1", SCHEDULER)];
+    expect(states(dismissed)).toEqual({ F1: "dismissed@d1" });
+    const raisedAgain = [...dismissed, pass("d2", [{ ...HANG, finding: "F1" }])];
+    const waiting = findingLedger(raisedAgain);
+    expect(states(raisedAgain)).toEqual({ F1: "pending@d2" });
+    expect(pathsToObserve(waiting, "d2")).toEqual(["pkg/timestamp/scheduler.go"]);
+    expect(states([...raisedAgain, file("d2", SCHEDULER)])).toEqual({ F1: "dismissed@d1" });
+    const broken = [...raisedAgain, file("d2", SCHEDULER.replace("s.closeTimeout", "0"))];
+    expect(states(broken)).toEqual({ F1: "pending@d2" });
+    expect(findingLedger(broken).findings[0]!.awaiting).toBeUndefined();
+  });
+
+  it("disputes a finding on conflicting verdicts, a missing verdict, a failed verifier or a confirmation without a witness", () => {
+    const two = pass("d1", [HANG, { ...HANG, start_line: 120 }]);
+    expect(states([two, verify("d1", { finding: "F1", verdict: "confirmed", quotes: [BOUNDED] }, { finding: "F1", verdict: "refuted", quotes: [BOUNDED] })])).toEqual({ F1: "disputed@d1", F2: "disputed@d1" });
+    expect(states([two, agent("diagnostic", "d1", null, "failed")])).toEqual({ F1: "disputed@d1", F2: "disputed@d1" });
+    expect(states([two, verify("d1", { finding: "F1", verdict: "confirmed" }, { finding: "F2", verdict: "refuted" })])).toEqual({ F1: "disputed@d1", F2: "disputed@d1" });
+    const ledger = findingLedger([two, verify("d1")]);
+    expect(ledger.findings[0]!.dispute).toBe("the verifier gave no verdict");
+  });
+
+  it("matches a quote within three lines with whitespace collapsed, and observes only safe file paths", () => {
+    expect(quoteMatches({ ...BOUNDED, line: 8, text: "ctx,  done :=\tcontext.WithTimeout(context.Background(), s.closeTimeout)" }, SCHEDULER)).toBe(true);
+    expect(quoteMatches({ ...BOUNDED, line: 9 }, SCHEDULER)).toBe(false);
+    expect(quoteMatches({ ...BOUNDED, text: "done()" }, SCHEDULER)).toBe(false);
+    expect(["pkg/timestamp/scheduler.go", ".golangci.yml", "banyand/Makefile.inc"].every(observablePath)).toBe(true);
+    for (const p of ["../x.go", "/etc/passwd", "pkg/./x.go", ".git/config", "pkg/timestamp", ".github", "pkg//x.go", "a b.go"]) expect(observablePath(p), p).toBe(false);
   });
 });
 

@@ -8,6 +8,8 @@ export interface QualificationCase {
   validatorId: string;
   name: string;
   evidence: EvidenceRecord[];
+  /** Earlier generations' evidence, as the controller passes it. */
+  history?: EvidenceRecord[];
   expected: ValidationStatus;
 }
 
@@ -154,7 +156,11 @@ const comment = (severity: string | undefined) => ({
   content: "Close waits for an action that ignores cancellation.",
 });
 /** The code reviewer's structured result. */
-const reviewed = (comments: object[], summary: object = { total_files: 3, reviewed_files: 3, skipped: [] }) => ({ comments, summary });
+const reviewed = (comments: object[], summary: object = { total_files: 3, reviewed_files: 3, skipped: [] }, prior: Record<string, string> = {}) => ({
+  comments,
+  prior: Object.entries(prior).map(([finding, status]) => ({ finding, status, reason: status })),
+  summary,
+});
 interface CodeReviewOptions {
   status?: string;
   readOnly?: boolean;
@@ -169,8 +175,32 @@ const codeReviewRun = (output: unknown, o: CodeReviewOptions = {}): EvidenceReco
     producer: { operationId: "op-code-review", stageId: REVIEW_STAGE, purpose: "review", readOnly: o.readOnly ?? true, kind: "agent", executorId: CODING_AGENT.id },
   },
 });
+const SCHEDULER_PATH = "pkg/timestamp/scheduler.go";
+const SCHEDULER = "package timestamp\n\nfunc (s *Scheduler) Close() {\n\tctx, done := context.WithTimeout(context.Background(), s.closeTimeout)\n\tdefer done()\n\ts.wait(ctx)\n}\n";
+const BOUNDED = { path: SCHEDULER_PATH, line: 4, text: "ctx, done := context.WithTimeout(context.Background(), s.closeTimeout)" };
+/** The verifier's verdict on F1. */
+const verification = (verdict: string, quotes: object[] = [], digest = DIGEST): EvidenceRecord => ({
+  ref: ref(),
+  kind: "other",
+  candidateDigest: digest,
+  payload: {
+    codingAgent: { harness: "claude-code", status: "completed", output: { verdicts: [{ finding: "F1", verdict, reason: `${verdict} by the verifier`, quotes }] } },
+    producer: { operationId: "op-verify", stageId: REVIEW_STAGE, purpose: "diagnostic", readOnly: true, kind: "agent", executorId: CODING_AGENT.id },
+  },
+});
+const confirmed = (digest = DIGEST) => verification("confirmed", [{ path: SCHEDULER_PATH, line: 6, text: "s.wait(ctx)" }], digest);
+const refuted = (quotes: object[] = [BOUNDED]) => verification("refuted", quotes);
+const scheduler = (bytes = SCHEDULER, digest = DIGEST): EvidenceRecord => ({ ref: ref(), kind: "file", candidateDigest: digest, payload: { path: SCHEDULER_PATH, bytes }, fingerprint: `fp-${seq}` });
+/** F1, raised and confirmed on an earlier change in an earlier generation. */
+const confirmedEarlier = () => [codeReviewRun(reviewed([comment("high")]), { digest: OTHER }), confirmed(OTHER)];
 
-const c = (validatorId: string, name: string, evidence: EvidenceRecord[], expected: ValidationStatus): QualificationCase => ({ validatorId, name, evidence, expected });
+const c = (validatorId: string, name: string, evidence: EvidenceRecord[], expected: ValidationStatus, history?: EvidenceRecord[]): QualificationCase => ({
+  validatorId,
+  name,
+  evidence,
+  expected,
+  ...(history !== undefined ? { history } : {}),
+});
 
 /** Positive and negative cases for every shipped validator. */
 export const QUALIFICATION_CASES: readonly QualificationCase[] = [
@@ -239,9 +269,22 @@ export const QUALIFICATION_CASES: readonly QualificationCase[] = [
 
   c("open-code-review", "no comments", [codeReviewRun(reviewed([]))], "passed"),
   c("open-code-review", "only low and medium comments", [codeReviewRun(reviewed([comment("low"), comment("medium")]))], "passed"),
-  c("open-code-review", "a high comment", [codeReviewRun(reviewed([comment("low"), comment("high")]))], "failed"),
-  c("open-code-review", "a critical comment", [codeReviewRun(reviewed([comment("critical")]))], "failed"),
-  c("open-code-review", "a comment without a severity", [codeReviewRun(reviewed([comment(undefined)]))], "failed"),
+  c("open-code-review", "a high comment not yet verified", [codeReviewRun(reviewed([comment("low"), comment("high")]))], "inconclusive"),
+  c("open-code-review", "a high comment the verifier confirmed", [codeReviewRun(reviewed([comment("low"), comment("high")])), confirmed()], "failed"),
+  c("open-code-review", "a critical comment the verifier confirmed", [codeReviewRun(reviewed([comment("critical")])), confirmed()], "failed"),
+  c("open-code-review", "a comment without a severity the verifier confirmed", [codeReviewRun(reviewed([comment(undefined)])), confirmed()], "failed"),
+  c("open-code-review", "a high comment refuted with quotes that match the change", [codeReviewRun(reviewed([comment("high")])), refuted(), scheduler()], "passed"),
+  c("open-code-review", "a refutation whose quote does not match the change", [codeReviewRun(reviewed([comment("high")])), refuted(), scheduler(SCHEDULER.replace("s.closeTimeout", "time.Hour"))], "failed"),
+  c("open-code-review", "a refutation quoting a line of another change", [codeReviewRun(reviewed([comment("high")])), refuted(), scheduler(SCHEDULER, OTHER)], "inconclusive"),
+  c("open-code-review", "a refutation quoting a path outside the worktree", [codeReviewRun(reviewed([comment("high")])), refuted([{ ...BOUNDED, path: "../scheduler.go" }])], "failed"),
+  c("open-code-review", "a refutation without quotes", [codeReviewRun(reviewed([comment("high")])), refuted([])], "failed"),
+  c("open-code-review", "the verifier could not decide", [codeReviewRun(reviewed([comment("high")])), verification("uncertain")], "failed"),
+  c("open-code-review", "a confirmation without a witness", [codeReviewRun(reviewed([comment("high")])), verification("confirmed")], "failed"),
+  c("open-code-review", "the latest pass on the change it was confirmed on calls it resolved", [codeReviewRun(reviewed([comment("high")])), confirmed(), codeReviewRun(reviewed([], undefined, { F1: "resolved" }))], "failed"),
+  c("open-code-review", "a finding confirmed on an earlier change and resolved on this one", [codeReviewRun(reviewed([], undefined, { F1: "resolved" }))], "passed", confirmedEarlier()),
+  c("open-code-review", "a finding confirmed on an earlier change and still present", [codeReviewRun(reviewed([], undefined, { F1: "still_present" }))], "failed", confirmedEarlier()),
+  c("open-code-review", "a pass that gives an open finding no status", [codeReviewRun(reviewed([]))], "failed", confirmedEarlier()),
+  c("open-code-review", "a clean pass only in an earlier generation", [], "inconclusive", [codeReviewRun(reviewed([]))]),
   c("open-code-review", "some files were not reviewed", [codeReviewRun(reviewed([], { total_files: 3, reviewed_files: 2, skipped: [] }))], "failed"),
   c("open-code-review", "a file was skipped", [codeReviewRun(reviewed([], { total_files: 3, reviewed_files: 3, skipped: [{ path: "a.go", reason: "generated" }] }))], "failed"),
   c("open-code-review", "no file was reviewed", [codeReviewRun(reviewed([], { total_files: 0, reviewed_files: 0, skipped: [] }))], "failed"),
@@ -286,7 +329,7 @@ function outcome(lookup: ValidatorLookup, q: QualificationCase): string {
   const requirementId = definition.defaultValidators.find((b) => b.validatorId === q.validatorId)!.requirementId;
   const statement = definition.requirements.find((r) => r.id === requirementId)!.statement;
   try {
-    return validator.evaluate({ requirementId, statement, evidence: q.evidence, candidateDigest: DIGEST }).status;
+    return validator.evaluate({ requirementId, statement, evidence: q.evidence, ...(q.history !== undefined ? { history: q.history } : {}), candidateDigest: DIGEST }).status;
   } catch (err) {
     return `a throw (${err instanceof Error ? err.message : String(err)})`;
   }

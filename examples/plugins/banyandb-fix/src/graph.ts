@@ -26,6 +26,7 @@ import {
   LIST_ISSUE_COMMENTS,
   MAX_FIX_CORRECTIONS,
   MAX_PLAN_REVISIONS,
+  MAX_SWEEP_PASSES,
   REQUIREMENT_BUILDS,
   REQUIREMENT_CHANGELOG,
   REQUIREMENT_DECISIONS,
@@ -36,6 +37,7 @@ import {
   REQUIREMENT_SCOPE,
   REVIEW_STAGE,
   REVIEWER_HARNESS,
+  VERIFIER_HARNESS,
 } from "./constants.js";
 import { DECISION_RECORD_SCHEMA, parseDecisionRecord, writeScopeFor, type DecisionRecord } from "./decision-record.js";
 import {
@@ -53,19 +55,21 @@ import {
   reviews,
   sameCheckoutJob,
   succeeded,
-  type AgentRun,
   type ReviewVerdict,
 } from "./evidence.js";
 import {
-  blockingComments,
-  CODE_REVIEW_SCHEMA,
-  codeReviewInstruction,
-  describeComment,
-  describeCoverage,
-  parseCodeReview,
-  reviewBackground,
-  reviewComplete,
-} from "./ocr.js";
+  describeFinding,
+  findingById,
+  findingLedger,
+  knownFindings,
+  passUsable,
+  pathsToObserve,
+  roundSummary,
+  toVerify,
+  VERIFICATION_SCHEMA,
+  verificationInstruction,
+} from "./findings.js";
+import { CODE_REVIEW_SCHEMA, codeReviewInstruction, describeCoverage, isBlocking, reviewBackground } from "./ocr.js";
 import {
   candidateCommands,
   commitMessage,
@@ -79,7 +83,7 @@ import {
   redCommands,
   snapshotText,
 } from "./prompts.js";
-import { codeReview, implementerRecord, isTestPath, latestCodeReview, validatorById } from "./validators.js";
+import { codeReview, implementerRecord, isTestPath, validatorById } from "./validators.js";
 
 /** Graph bookkeeping; everything else is read back from recorded evidence. */
 export interface FixPrivateState {
@@ -90,7 +94,7 @@ export interface FixPrivateState {
 
 const definition: GraphDefinition = {
   graphId: "banyandb-fix",
-  version: "0.2.0",
+  version: "0.3.0",
   privateStateSchema: "banyandb-fix-private-v1",
   stages: [
     {
@@ -152,8 +156,8 @@ const definition: GraphDefinition = {
     {
       id: REQUIREMENT_REVIEW,
       statement:
-        "A read-only Codex reviewer, following open-code-review's delegation workflow on the current change, reviewed every changed file, test files included, skipped none, and reported no critical or high comment.",
-      evidenceSchema: "code-review-v1",
+        "The latest read-only Codex review pass on the current change, following open-code-review's delegation workflow in this generation, reviewed every changed file, test files included, skipped none, and gave a status for every open finding; every critical or high finding it raised was refuted by an independent read-only verifier with quotes that match the change; and no finding of the run is confirmed and unfixed, disputed, or awaiting verification.",
+      evidenceSchema: "code-review-v2",
     },
   ],
   defaultValidators: [
@@ -164,7 +168,7 @@ const definition: GraphDefinition = {
     { requirementId: REQUIREMENT_BUILDS, validatorId: "build-checks", version: "1" },
     { requirementId: REQUIREMENT_SCOPE, validatorId: "write-scope", version: "1" },
     { requirementId: REQUIREMENT_CHANGELOG, validatorId: "changes-entry", version: "1" },
-    { requirementId: REQUIREMENT_REVIEW, validatorId: "open-code-review", version: "1" },
+    { requirementId: REQUIREMENT_REVIEW, validatorId: "open-code-review", version: "2" },
   ],
   environment: ENVIRONMENT,
 };
@@ -319,26 +323,59 @@ function fix(view: RunView, issue: number, state: FixPrivateState): GraphDecisio
   );
 }
 
+/**
+ * Review convergence on the current change: review passes until one raises
+ * nothing that survives verification, then the acceptance rule.
+ */
 function review(view: RunView, issue: number, state: FixPrivateState): GraphDecision {
+  const digest = view.candidateDigest;
+  if (digest === undefined) {
+    return supervise({ reason: "the controller reports no candidate digest for the worktree" }, "escalate a missing candidate digest", JSON.stringify(state));
+  }
   const current = inGeneration(view.evidence, view.generation);
-  const run = latestCodeReview(current, view.candidateDigest);
-  if (run === undefined) {
+  const currentRefs = new Set(current.map((e) => e.ref));
+  const ledger = findingLedger(view.evidence);
+  const passes = ledger.passes.filter((p) => p.digest === digest && currentRefs.has(p.run.record.ref));
+  const last = passes.at(-1);
+  // Fix was accepted for this candidate, possibly before a resume moved the generation on.
+  const record = implementerRecord(view.evidence).record!;
+  const background = reviewBackground(issueSnapshot(view.evidence, issue)!.issue, record);
+  const green = latestCheckoutRun(view.evidence, COMMAND.regression, "candidate", digest);
+
+  const pass = (sweep: boolean): GraphDecision => {
     const ocr = environmentOutput(view.evidence, "ocr");
     if (ocr === undefined) {
       return supervise({ reason: "the environment check recorded no open-code-review path for the code reviewer" }, "escalate a missing ocr path", JSON.stringify(state));
     }
-    // Fix was accepted for this candidate, possibly before a resume moved the generation on.
-    const record = implementerRecord(view.evidence).record!;
-    const snapshot = issueSnapshot(view.evidence, issue)!;
-    const base = latestCheckoutRun(view.evidence, COMMAND.regression, "candidate", view.candidateDigest)?.checkout?.base ?? "the run's base commit";
-    const assignment = codeReviewInstruction({ ocr, base, background: reviewBackground(snapshot.issue, record) });
-    return dispatchAgent(view, codeReviewJob(assignment), "review the change with Codex in open-code-review's delegation mode (read-only)", state);
+    const base = green?.checkout?.base ?? "the run's base commit";
+    const assignment = codeReviewInstruction({ ocr, base, background, known: knownFindings(ledger), sweep });
+    const summary = sweep
+      ? `review the change again for critical or high issues the ${passes.length} earlier pass(es) missed (read-only)`
+      : "review the change with Codex in open-code-review's delegation mode (read-only)";
+    return dispatchAgent(view, codeReviewJob(assignment), summary, state);
+  };
+  if (last === undefined) return pass(false);
+
+  const paths = pathsToObserve(ledger, digest);
+  if (paths.length > 0) return withPrivate(observe({ paths }, "observe the lines a refutation quotes on the current change"), state);
+  const pending = toVerify(ledger, digest);
+  if (pending.length > 0) {
+    const assignment = verificationInstruction({ findings: pending, background, changed: green?.checkout?.paths ?? [] });
+    return dispatchAgent(view, verificationJob(assignment), `verify ${pending.map((f) => f.id).join(", ")} with a fresh read-only Claude Code session`, state);
   }
+  const survived = last.raised.some((id) => {
+    const s = findingById(ledger, id)?.state;
+    return s === "confirmed" || s === "disputed";
+  });
+  if (passUsable(last) && survived && passes.length < MAX_SWEEP_PASSES) return pass(true);
+
   const statement = definition.requirements.find((r) => r.id === REQUIREMENT_REVIEW)!.statement;
-  const result = codeReview.evaluate({ requirementId: REQUIREMENT_REVIEW, statement, evidence: current, candidateDigest: run.record.candidateDigest! }) as ValidationResult;
+  const history = view.evidence.filter((e) => e.generation !== undefined && e.generation < view.generation);
+  const result = codeReview.evaluate({ requirementId: REQUIREMENT_REVIEW, statement, evidence: current, history, candidateDigest: digest }) as ValidationResult;
   if (result.status === "passed") return withPrivate(validate({ stageId: REVIEW_STAGE }, "validate the reviewed change"), state);
+  const refs = [...passes.map((p) => p.run.record.ref), ...ledger.verifications.filter((v) => v.digest === digest && currentRefs.has(v.run.record.ref)).map((v) => v.run.record.ref)];
   return supervise(
-    { reason: `code review did not pass: ${result.reason}`, evidenceRefs: [run.record.ref] },
+    { reason: `code review did not pass: ${result.reason}. ${roundSummary(ledger, digest, passes)}; ${view.budgets.agentInvocations} agent invocation(s) left`, evidenceRefs: refs.slice(-10) },
     "hand the code review findings to the supervisor",
     JSON.stringify(state),
   );
@@ -354,14 +391,13 @@ function deliver(view: RunView, issue: number, state: FixPrivateState): GraphDec
     const asked = latestReview(view.evidence, FIX_STAGE)?.productDecision;
     const openQuestions = asked !== undefined && !record.openQuestions.includes(asked) ? [...record.openQuestions, asked] : record.openQuestions;
     const green = latestCheckoutRun(view.evidence, COMMAND.regression, "candidate", view.candidateDigest);
-    const reviewed = latestCodeReview(view.evidence, view.candidateDigest);
     const issueTitle = issueSnapshot(view.evidence, issue)?.issue.title ?? issueRef(issue);
     const body = pullRequestDescription({
       issue,
       issueTitle,
       record: { ...record, openQuestions },
       base: green?.checkout?.base ?? "",
-      review: reviewed !== undefined ? reviewSummary(reviewed) : "Code review did not run.",
+      ...reviewSummary(view),
     });
     return withPrivate(
       dispatch(
@@ -395,15 +431,25 @@ function partialSnapshot(problem: string, refs: string[]): GraphDecision {
   return stop({ reason: "incompatible task", blocker: problem, evidenceRefs: refs }, "stop: the issue snapshot cannot be handed to the agents whole");
 }
 
-/** The test plan's line for the code review. */
-function reviewSummary(run: AgentRun): string {
-  const parsed = parseCodeReview(run.output);
-  if ("problem" in parsed) return "Code review did not produce a result.";
-  const { report } = parsed;
+/** The test plan's line for the code review, and the dismissed findings a maintainer can overrule. */
+function reviewSummary(view: RunView): { review: string; dismissed: string[] } {
+  const ledger = findingLedger(view.evidence);
+  const last = ledger.passes.filter((p) => p.digest === view.candidateDigest).at(-1);
+  if (last?.report === undefined) return { review: "Code review did not produce a result.", dismissed: [] };
+  const { report } = last;
+  const dismissed = ledger.findings.filter((f) => f.state === "dismissed");
+  const fixed = ledger.findings.filter((f) => f.state === "fixed").length;
+  const lower = report.comments.filter((c) => !isBlocking(c)).length;
   const by = `Codex in open-code-review's delegation mode (${describeCoverage(report)})`;
-  return report.comments.length === 0
-    ? `Reviewed by ${by}: no comments.`
-    : `Reviewed by ${by}: no critical or high comments; ${report.comments.length} lower-severity comment(s) left for the reviewer.`;
+  const settled = [
+    ...(fixed > 0 ? [`${fixed} fixed during review`] : []),
+    ...(dismissed.length > 0 ? [`${dismissed.length} refuted by an independent verifier, listed below`] : []),
+  ];
+  const open = settled.length > 0 ? `no critical or high finding left open (${settled.join("; ")})` : "no critical or high comments";
+  return {
+    review: report.comments.length === 0 && settled.length === 0 ? `Reviewed by ${by}: no comments.` : `Reviewed by ${by}: ${open}${lower > 0 ? `; ${lower} lower-severity comment(s) left for the reviewer` : ""}.`,
+    dismissed: dismissed.map(describeFinding),
+  };
 }
 
 /** What a plan reviewer's verdict asks the planner to change. */
@@ -414,19 +460,15 @@ function verdictFeedback(verdict: ReviewVerdict): string[] {
   ];
 }
 
-/** Why the run is back in Fix: the code review that failed an earlier change, when there is one. */
+/** Why the run is back in Fix: the confirmed findings of the code review, when there are any. Dismissed and disputed ones never reach the implementer. */
 function reentryFeedback(view: RunView): string[] {
-  const run = agentRuns(view.evidence, REVIEW_STAGE, "review")
-    .filter((r) => (r.record.generation ?? view.generation) < view.generation)
-    .at(-1);
-  const parsed = run?.status === "completed" ? parseCodeReview(run.output) : undefined;
-  if (parsed === undefined || "problem" in parsed || (reviewComplete(parsed.report) && blockingComments(parsed.report).length === 0)) {
+  const confirmed = findingLedger(view.evidence).findings.filter((f) => f.state === "confirmed");
+  if (confirmed.length === 0) {
     return ["The run returned to Fix after a resume or a supervisor decision. Check the plan against the current code and the change in the working tree."];
   }
-  const blocking = blockingComments(parsed.report);
   return [
-    `Code review of your previous change did not pass (${describeCoverage(parsed.report)}${blocking.length > 0 ? `, ${blocking.length} critical or high comment(s)` : ""}):`,
-    ...blocking.slice(0, 10).map(describeComment),
+    `Code review of your previous change found ${confirmed.length} critical or high defect(s), each confirmed by an independent verifier:`,
+    ...confirmed.slice(0, 10).map(describeFinding),
   ];
 }
 
@@ -507,9 +549,23 @@ function codeReviewJob(assignment: string): JobSpec {
     purpose: "review",
     readOnly: true,
     instruction: "Review the code",
-    resultSchema: "code-review-v1",
+    resultSchema: "code-review-v2",
     executor: CODING_AGENT,
     input: { assignment, resultSchema: CODE_REVIEW_SCHEMA, harness: CODE_REVIEWER_HARNESS },
+  };
+}
+
+/** A fresh read-only session, on another model family than the reviewer, that has never written the change. */
+function verificationJob(assignment: string): JobSpec {
+  return {
+    stageId: REVIEW_STAGE,
+    kind: "agent",
+    purpose: "diagnostic",
+    readOnly: true,
+    instruction: "Verify the code review findings",
+    resultSchema: "finding-verification-v1",
+    executor: CODING_AGENT,
+    input: { assignment, resultSchema: VERIFICATION_SCHEMA, harness: VERIFIER_HARNESS },
   };
 }
 

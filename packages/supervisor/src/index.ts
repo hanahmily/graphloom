@@ -34,7 +34,9 @@ export {
 
 export {
   assertAdmittedCandidateRoot,
+  createCandidateReviewTools,
   CANDIDATE_CODING_TOOL_NAMES,
+  CANDIDATE_REVIEW_TOOL_NAMES,
 } from "./candidate-tools.js";
 
 export {

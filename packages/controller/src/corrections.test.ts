@@ -1516,6 +1516,59 @@ describe("controller-started recovery for stalls and repeated corrections", () =
     expect(report, `${report.stopReason}: ${report.blocker}`).toMatchObject({ stopReason: "paused", blocker: "checked" });
     expect((await loadRunState(report.stateDir)).correctionTrials).toEqual({ write: 1 });
   });
+
+  it("gives validators earlier generations' evidence as history, apart from the current evidence", async () => {
+    const env = await makeEnv();
+    const review = (verdict: string) => async () => ({
+      status: "ok" as const,
+      summary: verdict,
+      evidence: [{ kind: "review" as const, payload: { verdict, summary: verdict } }],
+    });
+    const write = async (_job: unknown, ctx: { worktreePath: string }) => {
+      await writeFile(path.join(ctx.worktreePath, GREETING_PATH), GREETING, "utf8");
+      return { status: "ok" as const, summary: "wrote" };
+    };
+    const seen: { generation: number | undefined; evidence: string[]; history: string[] }[] = [];
+    const reviewJob = dispatch({ stageId: "review", kind: "agent", purpose: "review", instruction: "review", readOnly: true }, "review");
+    const validateReview = validate({ stageId: "review", requirementIds: ["independent-review"] }, "validate review");
+    const verdicts = (records: { kind: string; payload?: unknown }[] | undefined) =>
+      (records ?? []).filter((e) => e.kind === "review").map((e) => (e.payload as { verdict: string }).verdict);
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({
+        definition,
+        advances: [
+          writeJob("write"), observeWrite, validateWrite,
+          reviewJob, validateReview,
+          reenter({ stageId: "write", reason: "reviewer asked for changes", evidenceRefs: [] }, "reenter"),
+          writeJob("rewrite"), observeWrite, validateWrite,
+          reviewJob, validateReview,
+          stop({ reason: "complete", blocker: "none" }, "done"),
+        ],
+      }),
+      validators: {
+        ...validators,
+        "independent-reviewer": {
+          evaluate(input) {
+            seen.push({
+              generation: input.evidence[0]!.generation,
+              evidence: verdicts(input.evidence),
+              history: verdicts(input.history),
+            });
+            return independentReview.evaluate(input);
+          },
+        },
+      },
+      runner: createScriptedRunner({ jobs: [write, review("request_changes"), write, review("approved")] }),
+      stateRoot: env.stateRoot,
+      runId: "validation-history",
+    });
+    expect(report.status, `${report.stopReason}: ${report.blocker}`).toBe("succeeded");
+    expect(seen).toEqual([
+      { generation: 1, evidence: ["request_changes"], history: [] },
+      { generation: 2, evidence: ["approved"], history: ["request_changes"] },
+    ]);
+  });
 });
 
 describe("active execution time budget", () => {

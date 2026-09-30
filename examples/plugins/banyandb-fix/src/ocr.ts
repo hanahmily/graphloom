@@ -19,19 +19,21 @@ export const REVIEW_RULE = [
 
 const CATEGORIES = ["bug", "security", "performance", "maintainability", "test", "style", "documentation", "other"];
 const SEVERITIES = ["critical", "high", "medium", "low"];
+export const PRIOR_STATUSES = ["resolved", "still_present", "withdrawn"] as const;
+export type PriorStatus = (typeof PRIOR_STATUSES)[number];
 
-/** The code reviewer's result, strict enough for Codex's structured output: every property required, none extra. */
+/** The code reviewer's result (code-review-v2), strict enough for Codex's structured output: every property required, none extra. */
 export const CODE_REVIEW_SCHEMA = JSON.stringify({
   type: "object",
   additionalProperties: false,
-  required: ["comments", "summary"],
+  required: ["comments", "prior", "summary"],
   properties: {
     comments: {
       type: "array",
       items: {
         type: "object",
         additionalProperties: false,
-        required: ["path", "start_line", "end_line", "category", "severity", "content"],
+        required: ["path", "start_line", "end_line", "category", "severity", "content", "finding", "evidence"],
         properties: {
           path: { type: "string" },
           start_line: { type: "integer" },
@@ -39,6 +41,21 @@ export const CODE_REVIEW_SCHEMA = JSON.stringify({
           category: { type: "string", enum: CATEGORIES },
           severity: { type: "string", enum: SEVERITIES },
           content: { type: "string" },
+          finding: { type: "string" },
+          evidence: { type: "string" },
+        },
+      },
+    },
+    prior: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["finding", "status", "reason"],
+        properties: {
+          finding: { type: "string" },
+          status: { type: "string", enum: PRIOR_STATUSES },
+          reason: { type: "string" },
         },
       },
     },
@@ -81,8 +98,29 @@ export function reviewBackground(issue: Issue, record: DecisionRecord): string {
  * reviews. `ocr` is the absolute path the environment check found, since the
  * agent's shell may not have it on PATH.
  */
-export function codeReviewInstruction(args: { ocr: string; base: string; background: string }): string {
+export function codeReviewInstruction(args: { ocr: string; base: string; background: string; known?: KnownFindings; sweep?: boolean }): string {
   const ocr = shellQuote(args.ocr);
+  const open = args.known?.open ?? [];
+  const settled = args.known?.settled ?? [];
+  const known = [
+    ...(open.length > 0
+      ? [
+          "",
+          "Open findings from earlier review passes. Give each one a status in `prior`: `resolved` (the current code no longer has the defect), `still_present`, or `withdrawn` (it was never a defect), with a reason. Do not report them again as comments.",
+          ...open.map((f) => `- ${f.id} (${f.state}) ${f.description}`),
+        ]
+      : []),
+    ...(settled.length > 0
+      ? [
+          "",
+          "Settled findings. Do not report them again unless the defect is back in the current code; then report it with its name in `finding`.",
+          ...settled.map((f) => `- ${f.id} (${f.state}) ${f.description}`),
+        ]
+      : []),
+    ...(args.sweep === true
+      ? ["", "An earlier pass on this same change reported the findings above, and they are being handled. Review every file on your list again and look for critical or high issues that are not on the list."]
+      : []),
+  ];
   return [
     `Review the uncommitted change in this worktree against HEAD (the base commit ${args.base}) with open-code-review's delegation mode: open-code-review selects the files and resolves their rules; you do the review. Run open-code-review as ${ocr}. Do not change any file, and do not run git commands that write.`,
     "",
@@ -90,16 +128,29 @@ export function codeReviewInstruction(args: { ocr: string; base: string; backgro
     "2. The change's Go test files (`_test.go`) are reviewable too, even when preview excludes them as tests: add them to your list. Leave out other excluded files.",
     "3. Run `" + `${ocr} delegate rule --format json <path>...` + "` with every file on your list. Its output groups the files by the review rules that apply to them.",
     "4. For each file, read its diff (`git diff HEAD -- <path>`; read a new untracked file whole) and review it against its rule group and the extra rule below, reading any other code you need. Check every file off as reviewed, or as skipped with a concrete reason. Do not stop at the first serious finding.",
-    "5. Report each finding once, with the path, the line range in the new file, a category and a severity. Drop likely false positives. Check that every file on your list is accounted for.",
+    "5. Report each finding once, with the path, the line range in the new file, a category, a severity, and in `evidence` the concrete failure: the input or sequence of calls and what goes wrong, with file:line. An independent verifier checks every critical and high finding against the code. Drop likely false positives. Check that every file on your list is accounted for.",
     "",
     "Extra rule for Go files:",
     ...REVIEW_RULE.map((r) => `- ${r}`),
+    ...known,
     "",
     "What the change is for:",
     args.background,
     "",
-    "Your result: `comments` with your findings (empty when there are none), and `summary` with `total_files` (the files on your list), `reviewed_files`, and `skipped` (each skipped file with its reason).",
+    "Your result: `comments` with your findings (empty when there are none), each with `finding` set to a known finding's name when it reports that finding again and \"\" otherwise; `prior` with a status for every open finding listed above (empty when there are none); and `summary` with `total_files` (the files on your list), `reviewed_files`, and `skipped` (each skipped file with its reason).",
   ].join("\n");
+}
+
+/** Findings a review pass is shown by name; `description` says where and what. */
+export interface KnownFinding {
+  id: string;
+  state: string;
+  description: string;
+}
+
+export interface KnownFindings {
+  open: KnownFinding[];
+  settled: KnownFinding[];
 }
 
 function shellQuote(value: string): string {
@@ -113,10 +164,21 @@ export interface ReviewComment {
   category?: string;
   severity?: string;
   content: string;
+  /** The known finding this comment reports again. */
+  finding?: string;
+  /** The concrete failure the reviewer describes. */
+  evidence?: string;
+}
+
+export interface PriorFinding {
+  finding: string;
+  status: PriorStatus;
+  reason: string;
 }
 
 export interface CodeReviewReport {
   comments: ReviewComment[];
+  prior: PriorFinding[];
   totalFiles: number;
   reviewedFiles: number;
   skipped: Array<{ path: string; reason: string }>;
@@ -149,14 +211,21 @@ export function parseCodeReview(output: unknown): { report: CodeReviewReport } |
       ...(typeof c.category === "string" && c.category !== "" ? { category: c.category } : {}),
       ...(typeof c.severity === "string" && c.severity !== "" ? { severity: c.severity } : {}),
       content: c.content,
+      ...(typeof c.finding === "string" && c.finding.trim() !== "" ? { finding: c.finding.trim() } : {}),
+      ...(typeof c.evidence === "string" && c.evidence.trim() !== "" ? { evidence: c.evidence } : {}),
     });
   }
+  const prior: PriorFinding[] = (Array.isArray(result.prior) ? result.prior : []).flatMap((raw) => {
+    const p = object(raw);
+    const status = PRIOR_STATUSES.find((s) => s === p?.status);
+    return p !== undefined && typeof p.finding === "string" && status !== undefined ? [{ finding: p.finding.trim(), status, reason: String(p.reason ?? "") }] : [];
+  });
   const skipped = (summary!.skipped as unknown[]).map((raw) => {
     const s = object(raw);
     return { path: String(s?.path ?? ""), reason: String(s?.reason ?? "") };
   });
   const rank = (c: ReviewComment) => { const i = SEVERITIES.indexOf(c.severity ?? ""); return i < 0 ? 1.5 : i; };
-  return { report: { comments: comments.sort((a, b) => rank(a) - rank(b)), totalFiles, reviewedFiles, skipped } };
+  return { report: { comments: comments.sort((a, b) => rank(a) - rank(b)), prior, totalFiles, reviewedFiles, skipped } };
 }
 
 /** Every file on the reviewer's list was reviewed, and none skipped. */
@@ -170,12 +239,20 @@ export function describeCoverage(report: CodeReviewReport): string {
 }
 
 /** A comment without a severity counts as blocking: the change must not pass on a missing label. */
+export function isBlocking(c: Pick<ReviewComment, "severity">): boolean {
+  return c.severity === undefined || c.severity === "critical" || c.severity === "high";
+}
+
 export function blockingComments(report: CodeReviewReport): ReviewComment[] {
-  return report.comments.filter((c) => c.severity === undefined || c.severity === "critical" || c.severity === "high");
+  return report.comments.filter(isBlocking);
 }
 
 export function describeComment(c: ReviewComment): string {
   const where = c.start_line > 0 ? `${c.path}:${c.start_line}${c.end_line > c.start_line ? `-${c.end_line}` : ""}` : c.path;
-  const content = c.content.trim();
-  return `${where} (${[c.severity || "no severity", c.category].filter(Boolean).join(", ")}): ${content.length <= 1_200 ? content : `${content.slice(0, 1_200)}…`}`;
+  return `${where} (${[c.severity || "no severity", c.category].filter(Boolean).join(", ")}): ${clip(c.content, 1_200)}`;
+}
+
+export function clip(text: string, max: number): string {
+  const t = text.trim();
+  return t.length <= max ? t : `${t.slice(0, max)}…`;
 }

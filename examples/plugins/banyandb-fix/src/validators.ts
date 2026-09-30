@@ -18,8 +18,9 @@ import {
   type AgentRun,
   type CommandRun,
 } from "./evidence.js";
+import { describeFinding, findingById, findingLedger } from "./findings.js";
 import { ginkgoSpecs, regressionOutcome } from "./gotest.js";
-import { blockingComments, describeComment, describeCoverage, parseCodeReview, reviewComplete } from "./ocr.js";
+import { describeCoverage, isBlocking, reviewComplete } from "./ocr.js";
 
 const passed = (reason: string): ValidationResult => ({ status: "passed", reason });
 const failed = (reason: string): ValidationResult => ({ status: "failed", reason });
@@ -190,28 +191,45 @@ export const planReviewed: Validator = {
   },
 };
 
-/** The latest code review of the change `digest` names. */
+/** The latest code review pass on the change `digest` names. */
 export function latestCodeReview(evidence: EvidenceRecord[], digest: string | undefined): AgentRun | undefined {
   return agentRuns(evidence, REVIEW_STAGE, "review").filter((r) => digest !== undefined && r.record.candidateDigest === digest).at(-1);
 }
 
-/** A read-only reviewer, following open-code-review's delegation workflow on exactly the current change, reviewed every file and reported no critical or high comment. */
+/**
+ * Review convergence's acceptance rule: the latest pass on the current change
+ * ran in this generation, read-only, finished, covered every file and gave
+ * every status; no finding awaits verification or observation; every finding
+ * that pass raised was dismissed; and none is confirmed or disputed. History
+ * rebuilds the ledger; it never stands in for the current pass.
+ */
 export const codeReview: Validator = {
   evaluate(input: ValidationInput) {
     const run = latestCodeReview(input.evidence, input.candidateDigest);
     if (run === undefined) return inconclusive("the code has not been reviewed on the current change");
     if (!run.producer.readOnly) return failed("the code review must come from a read-only review job");
     if (run.status !== "completed") return failed(`the code reviewer did not finish (${run.status})`);
-    const parsed = parseCodeReview(run.output);
-    if ("problem" in parsed) return failed(parsed.problem);
-    const { report } = parsed;
+    const ledger = findingLedger([...(input.history ?? []), ...input.evidence]);
+    const pass = ledger.passes.find((p) => p.run.record.ref === run.record.ref)!;
+    if (pass.report === undefined) return failed(pass.problem!);
+    const { report } = pass;
     if (!reviewComplete(report)) return failed(`the code review did not cover every file: ${describeCoverage(report)}`);
-    const blocking = blockingComments(report);
+    if (pass.missingStatus.length > 0) return failed(`the code review gave no status for open finding(s) ${pass.missingStatus.join(", ")}`);
+    const waiting = ledger.findings.filter((f) => f.state === "pending");
+    if (waiting.length > 0) return inconclusive(`finding(s) ${waiting.map((f) => f.id).join(", ")} await verification`);
+    const blocking = ledger.findings.filter((f) => f.state === "confirmed" || f.state === "disputed");
     if (blocking.length > 0) {
-      return failed(`the code review reported ${blocking.length} critical or high comment(s): ${blocking.slice(0, 3).map(describeComment).join("; ")}`);
+      return failed(`${blocking.length} critical or high finding(s) confirmed or disputed: ${blocking.slice(0, 3).map(describeFinding).join("; ")}`);
     }
-    const lower = report.comments.length - blocking.length;
-    return passed(`the code review ${describeCoverage(report)} and reported no critical or high comment${lower > 0 ? ` and ${lower} lower` : ""}`);
+    const survived = pass.raised.filter((id) => findingById(ledger, id)?.state !== "dismissed");
+    if (survived.length > 0) return failed(`the latest pass raised finding(s) ${survived.join(", ")} that verification did not dismiss`);
+    const fixed = ledger.findings.filter((f) => f.state === "fixed").length;
+    const dismissed = ledger.findings.filter((f) => f.state === "dismissed").length;
+    const lower = report.comments.filter((c) => !isBlocking(c)).length;
+    const settled = [...(fixed > 0 ? [`${fixed} fixed`] : []), ...(dismissed > 0 ? [`${dismissed} dismissed`] : [])];
+    return passed(
+      `the code review ${describeCoverage(report)} and left no critical or high finding open${settled.length > 0 ? ` (${settled.join(", ")})` : ""}${lower > 0 ? `; ${lower} lower-severity comment(s)` : ""}`,
+    );
   },
 };
 

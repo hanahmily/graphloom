@@ -5,7 +5,9 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   assertAdmittedCandidateRoot,
   CANDIDATE_CODING_TOOL_NAMES,
+  CANDIDATE_REVIEW_TOOL_NAMES,
   createCandidateCodingTools,
+  createCandidateReviewTools,
 } from "./candidate-tools.js";
 
 const temps: string[] = [];
@@ -68,6 +70,26 @@ describe("candidate coding tools", () => {
     await run(root, "write", { path: "test/regression.test.js", content: "// newline case\n" });
     expect(await readFile(path.join(root, "test/regression.test.js"), "utf8")).toBe("// newline case\n");
     const listed = await run(root, "ls", { path: "." });
+    expect(JSON.stringify(listed.content)).toContain("validator.js");
+  });
+});
+
+describe("candidate review tools", () => {
+  it("grants only read-only tools: no bash, edit or write", () => {
+    expect([...CANDIDATE_REVIEW_TOOL_NAMES]).toEqual(["read", "grep", "find", "ls"]);
+    expect(createCandidateReviewTools("/tmp").map((t) => t.name)).toEqual([...CANDIDATE_REVIEW_TOOL_NAMES]);
+  });
+
+  it("reads and lists with the candidate root as the working directory", async () => {
+    const { root } = await issuedCandidate();
+    const tool = (name: string) => {
+      const found = createCandidateReviewTools(root).find((t) => t.name === name);
+      if (!found) throw new Error(`missing tool ${name}`);
+      return found;
+    };
+    const read = await tool("read").execute("call-1", { path: "validator.js" } as never, undefined, undefined, {} as never);
+    expect(JSON.stringify(read.content)).toContain("export const ok = false");
+    const listed = await tool("ls").execute("call-2", { path: "." } as never, undefined, undefined, {} as never);
     expect(JSON.stringify(listed.content)).toContain("validator.js");
   });
 });

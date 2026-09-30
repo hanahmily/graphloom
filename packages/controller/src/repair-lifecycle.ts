@@ -3,6 +3,7 @@ import { readFile, realpath } from "node:fs/promises";
 import path from "node:path";
 import type {
   ActivateRepairSpec,
+  EvidenceRecord,
   GraphDefinition,
   QualifyRepairSpec,
   RepairTarget,
@@ -51,7 +52,28 @@ export interface RepairReviewer {
     baseDigest: string;
     candidateDigest: string;
     target: RepairTarget;
+    /** Why the supervisor requested this repair. */
+    reason: string;
+    /** The run's original task request. */
+    task: string;
+    /** The disputed requirement's statement, when the repair targets one. */
+    requirement?: string;
+    /** The patch author's own summary of what it changed and why. */
+    patchSummary?: string;
+    /** Evidence the supervisor cited for the repair. */
+    evidence: EvidenceRecord[];
+    /**
+     * Caps the reviewer's own provider calls, present only when the reviewer
+     * implements `drainProviderCalls`: the controller then reserves this many
+     * `agentInvocations` before calling `review` and refunds through it. A cap
+     * of 0 means no budget remains: refuse instead of prompting. Absent for a
+     * reviewer that does not report its usage; the controller then trusts it
+     * to account for itself, as it does an unmetered patch author.
+     */
+    maxProviderCalls?: number;
   }): Promise<{ approved: boolean; reason: string }>;
+  /** Provider calls this review spent; settles through here. Omit to charge the full `maxProviderCalls`. */
+  drainProviderCalls?(): number;
 }
 
 export interface RepairPreflightResult {
@@ -181,6 +203,10 @@ export async function applyQualifyRepair(
     };
   }
   const meteredPatch = patchAuthor !== deps.repair.patchAuthor;
+  // A reviewer opts into metering by implementing drainProviderCalls, the same
+  // signal the run's own supervisor uses (loop.ts); one that does not is trusted
+  // to account for itself, the same way a caller-supplied patchAuthor is.
+  const meteredReview = deps.repair.reviewer.drainProviderCalls !== undefined;
   if (patchAuthor.sessionId !== supervisorSessionId) {
     return {
       ...state,
@@ -189,12 +215,12 @@ export async function applyQualifyRepair(
       blocker: `patch=${patchAuthor.sessionId} supervisor=${supervisorSessionId}`,
     };
   }
-  if (meteredPatch && state.budgets.agentInvocations <= 0) {
+  if ((meteredPatch || meteredReview) && state.budgets.agentInvocations <= 0) {
     return {
       ...state,
       status: "stopped",
       stopReason: "agentInvocations budget exhausted",
-      blocker: "supervisor candidate patch",
+      blocker: meteredPatch ? "supervisor candidate patch" : "independent repair review",
     };
   }
   if (deps.repair.reviewer.sessionId === supervisorSessionId) {
@@ -216,6 +242,10 @@ export async function applyQualifyRepair(
   // crash or thrown patch/review cannot replay the repair for free. A metered patch
   // also reserves the remaining invocations as its turn cap; unused calls are
   // refunded once the patch settles, and a crash keeps the whole reservation spent.
+  // A metered independent review reserves whatever the patch leaves behind (computed
+  // once the patch has settled, not from this pre-patch snapshot, so a metered patch's
+  // full reservation does not leave the review with nothing regardless of what the
+  // patch actually spent) and is refused outright once that reaches zero.
   const patchAllowance = meteredPatch ? state.budgets.agentInvocations : 0;
   const repairsDir = path.join(state.stateDir, "repairs");
   const artifactId = `repair-${randomUUID().slice(0, 8)}`;
@@ -244,12 +274,16 @@ export async function applyQualifyRepair(
   await saveRunState(reservedState);
 
   let patchRefund = patchAllowance;
+  // Negative once a metered review reports spend: a deduction from what the patch
+  // left behind, not a pre-reserved allowance (there is nothing to reserve for it
+  // until the patch has settled and its actual leftover is known).
+  let reviewRefund = 0;
   let patchSummary: string | undefined;
   const settle = (artifact: QualifiedRepairArtifact): DurableRunState => ({
     ...reservedState,
     budgets: {
       ...reservedState.budgets,
-      agentInvocations: reservedState.budgets.agentInvocations + patchRefund,
+      agentInvocations: reservedState.budgets.agentInvocations + patchRefund + reviewRefund,
     },
     repairCandidates: (reservedState.repairCandidates ?? []).map((c) =>
       c.artifactId === artifactId
@@ -344,13 +378,43 @@ export async function applyQualifyRepair(
       );
     }
 
+    // Computed now, from the patch's actual leftover (reservedState already withheld
+    // patchAllowance; patchRefund gives back what the patch did not spend), not from
+    // the pre-patch budget: a metered patch's full reservation must not leave the
+    // review with nothing regardless of what the patch actually used.
+    const reviewAllowance = meteredReview ? Math.max(0, reservedState.budgets.agentInvocations + patchRefund) : 0;
+    if (meteredReview && reviewAllowance <= 0) {
+      return settle({
+        ...reserved,
+        status: "rejected",
+        candidateDigest: await digestDirectoryTree(snap.candidateRoot),
+        rejectionReason: "no agentInvocations budget remains for independent review",
+      });
+    }
+
     const candidateDigest = await digestDirectoryTree(snap.candidateRoot);
+    const requirement =
+      qualify.requirementId !== undefined
+        ? state.definition.requirements.find((r) => r.id === qualify.requirementId)?.statement
+        : undefined;
+    const evidence: EvidenceRecord[] = state.evidence.filter((e) => (qualify.evidenceRefs ?? []).includes(e.ref));
     const review = await deps.repair.reviewer.review({
       candidateRoot: snap.candidateRoot,
       baseDigest: snap.baseDigest,
       candidateDigest,
       target: qualify.target,
+      reason: qualify.reason,
+      task: state.intake.task.request,
+      ...(requirement !== undefined ? { requirement } : {}),
+      ...(patchSummary !== undefined ? { patchSummary } : {}),
+      evidence,
+      ...(meteredReview ? { maxProviderCalls: reviewAllowance } : {}),
     });
+    if (meteredReview) {
+      const reviewSpent = deps.repair.reviewer.drainProviderCalls!() ?? reviewAllowance;
+      // A deduction from the patch's leftover, not a refund from a pre-reservation.
+      reviewRefund = -Math.min(reviewAllowance, Math.max(0, reviewSpent));
+    }
 
     return settle({
       ...reserved,

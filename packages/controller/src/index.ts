@@ -23,6 +23,7 @@ export {
   assertSafeRunId,
   assertSafeGraphId,
   resolveBundleEntry,
+  resolveStateDir,
 } from "./controller.js";
 export type { DurableRunState, RunStatus, IntakePin, VersionRecord } from "./controller.js";
 export type { ChildOperationRecord, SupervisorMark } from "./state.js";

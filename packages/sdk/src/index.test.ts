@@ -4,6 +4,7 @@ import {
   assertGraphAction,
   assertGraphDefinition,
   assertRunView,
+  assertValidationInput,
   assertWireRequest,
   createScriptedGraph,
   dispatch,
@@ -229,6 +230,15 @@ describe("wire validation", () => {
         kind: "describe",
       }),
     ).toThrow(/protocolVersion/);
+  });
+
+  it("checks validation history like evidence", () => {
+    const record = { ref: "e1", kind: "review", generation: 1 };
+    const input = { requirementId: "r", statement: "s", evidence: [record] };
+    expect(assertValidationInput({ ...input, history: [record] }).history).toEqual([record]);
+    expect(assertValidationInput(input).history).toBeUndefined();
+    expect(() => assertValidationInput({ ...input, history: {} })).toThrow(/history must be an array/);
+    expect(() => assertValidationInput({ ...input, history: [{ ref: "e0", kind: "review" }] })).toThrow(/generation/);
   });
 
   it("rejects oversized payloads", () => {

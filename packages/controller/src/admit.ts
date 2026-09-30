@@ -212,6 +212,7 @@ export async function admitValidation(
     };
   }
   const liveDigest = await liveCandidateDigest(state);
+  const history = state.evidence.filter((e) => e.generation !== undefined && e.generation < state.generation);
 
   // Predecessor receipts: every requirement on earlier stages must be valid.
   const stageIndex = state.definition.stages.findIndex((s) => s.id === spec.stageId);
@@ -257,6 +258,7 @@ export async function admitValidation(
       requirementId,
       statement: requirement.statement,
       evidence,
+      history,
       candidateFingerprint: fingerprint,
       ...(liveDigest !== undefined ? { candidateDigest: liveDigest } : {}),
     });

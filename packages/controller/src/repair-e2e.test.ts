@@ -703,6 +703,122 @@ describe("qualified repair + same-run activation (#29)", () => {
     expect(state.repairCandidates?.[0]).toMatchObject({ status: "rejected", rejectionReason: "patch aborted" });
   });
 
+  it("meters an independent review that reports its usage, and refunds what it did not spend", async () => {
+    const env = await makeEnv();
+    let seenCap: number | undefined;
+    const repair: RepairDeps = {
+      ...approvingRepair("sup-meter"),
+      reviewer: {
+        sessionId: "sup-meter-reviewer",
+        async review({ maxProviderCalls }) {
+          seenCap = maxProviderCalls;
+          return { approved: true, reason: "ok" };
+        },
+        drainProviderCalls: () => 3,
+      },
+    };
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: escalatingPlugin(),
+      validators: goodValidators,
+      supervisor: createScriptedSupervisor({
+        sessionId: "sup-meter",
+        decisions: [qualifyRepair({ target: "plugin", reason: "try" }, "q"), activateFirstQualified(), returnToNormal({ summary: "done" }, "return")],
+      }),
+      repair,
+      runner: createScriptedRunner({ jobs: [] }),
+      stateRoot: env.stateRoot,
+      runId: "repair-review-metered",
+    });
+    expect(seenCap).toBe(64);
+    const state = await loadRunState(report.stateDir);
+    expect(state.repairCandidates?.[0]?.status).toBe("activated");
+    // 64 reserved for review, 3 spent (drainProviderCalls), 61 refunded; nothing reserved for
+    // the patch itself since approvingRepair supplies its own unmetered patchAuthor.
+    expect(state.budgets.agentInvocations).toBe(64 - 3);
+  });
+
+  it("refuses to review, without prompting, once a metered patch's actual spend exhausts the budget", async () => {
+    const env = await makeEnv();
+    let prompted = false;
+    // Tracks calls since the last drain, like a real Pi session's drainTurnCount: the
+    // supervisor's own decide loop (loop.ts) also drains this, so a constant here would
+    // double-count against a decide call that spent nothing.
+    let spent = 0;
+    const supervisor: Supervisor = {
+      sessionId: "sup-broke",
+      decide: createScriptedSupervisor({
+        sessionId: "sup-broke",
+        decisions: [qualifyRepair({ target: "plugin", reason: "try" }, "q"), stop({ reason: "gave up", blocker: "budget" }, "s")],
+      }).decide,
+      drainProviderCalls: () => {
+        const n = spent;
+        spent = 0;
+        return n;
+      },
+      async grantCandidateCoding() {
+        /* admitted by the controller */
+      },
+      async revokeCandidateCoding() {
+        /* no-op */
+      },
+      async patchCandidate({ candidateRoot }) {
+        spent += 64; // consumes the whole reservation, leaving nothing behind for review
+        await writeFile(path.join(candidateRoot, "p.txt"), "patched\n", "utf8");
+        return { summary: "patched" };
+      },
+    };
+    const { patchAuthor: _omit, ...noAuthor } = approvingRepair("sup-broke");
+    void _omit;
+    const repair: RepairDeps = {
+      ...noAuthor,
+      reviewer: {
+        sessionId: "sup-broke-reviewer",
+        async review() {
+          prompted = true;
+          return { approved: true, reason: "ok" };
+        },
+        drainProviderCalls: () => 0,
+      },
+    };
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: escalatingPlugin(),
+      validators: goodValidators,
+      supervisor,
+      repair,
+      runner: createScriptedRunner({ jobs: [] }),
+      stateRoot: env.stateRoot,
+      runId: "repair-review-broke",
+    });
+    expect(prompted).toBe(false);
+    const state = await loadRunState(report.stateDir);
+    expect(state.budgets.agentInvocations).toBe(0);
+    expect(state.repairCandidates?.[0]).toMatchObject({ status: "rejected", rejectionReason: "no agentInvocations budget remains for independent review" });
+  });
+
+  it("does not meter a reviewer that never reports its usage, trusting it like an unmetered patch author", async () => {
+    const env = await makeEnv();
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: escalatingPlugin(),
+      validators: goodValidators,
+      supervisor: createScriptedSupervisor({
+        sessionId: "sup-trust",
+        decisions: [qualifyRepair({ target: "plugin", reason: "try" }, "q"), activateFirstQualified(), returnToNormal({ summary: "done" }, "return")],
+      }),
+      repair: approvingRepair("sup-trust"),
+      runner: createScriptedRunner({ jobs: [] }),
+      stateRoot: env.stateRoot,
+      runId: "repair-review-trusted",
+    });
+    const state = await loadRunState(report.stateDir);
+    expect(state.repairCandidates?.[0]?.status).toBe("activated");
+    // approvingRepair's patch is unmetered (an explicit patchAuthor) and its reviewer
+    // never implements drainProviderCalls: neither is charged against the budget.
+    expect(state.budgets.agentInvocations).toBe(64);
+  });
+
   it("bounds every patch summary and keeps it when a post-patch step throws", async () => {
     const env = await makeEnv();
     const repair: RepairDeps = {
