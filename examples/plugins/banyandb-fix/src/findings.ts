@@ -33,7 +33,10 @@ export interface Quote {
 export interface Finding {
   /** F1, F2, … in the order findings first appear. */
   id: string;
+  /** The finding's current occurrence: where and how it manifests on `on`. */
   comment: ReviewComment;
+  /** The comment it was first raised with, kept once a later occurrence replaces `comment`. */
+  original?: ReviewComment;
   state: FindingState;
   /** The candidate digest the state applies to. */
   on: string;
@@ -162,6 +165,13 @@ function applyPass(ledger: FindingLedger, run: AgentRun, digest: string, files: 
   if (pass.report === undefined) return;
   const report = pass.report;
   const open = ledger.findings.filter(isOpen);
+  // A named comment carries the finding's current occurrence, so the verifier and the
+  // pull request describe where and how it manifests now, not where it first appeared.
+  for (const c of report.comments) {
+    if (c.finding === undefined) continue;
+    const known = findingById(ledger, c.finding);
+    if (known !== undefined) updateComment(known, c);
+  }
   const status = new Map<string, PriorStatus>();
   for (const p of report.prior) if (!status.has(p.finding)) status.set(p.finding, p.status);
   // A comment that names an open finding says it is still there.
@@ -258,6 +268,12 @@ function applyVerification(ledger: FindingLedger, run: AgentRun, digest: string,
       else f.awaiting = check;
     }
   }
+}
+
+/** Replace a finding's comment with its latest occurrence, keeping the first for history. */
+function updateComment(f: Finding, c: ReviewComment): void {
+  if (f.original === undefined) f.original = f.comment;
+  f.comment = c;
 }
 
 function settle(f: Finding, state: FindingState, digest: string): void {

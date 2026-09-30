@@ -138,16 +138,6 @@ export function redCommands(test: NonNullable<DecisionRecord["test"]>): Environm
 const AFFECTED_PACKAGES =
   'pkgs=$(git diff --name-only --diff-filter=d HEAD~1 HEAD -- "*.go" | while read -r f; do d=$(dirname "$f"); [ -d "$d" ] && echo "./$d"; done | sort -u | tr "\\n" " "); [ -n "$pkgs" ] || { echo "the change touches no Go package" >&2; exit 1; }; exec make test-ci PKG="$pkgs"';
 
-/**
- * Node.js >= 24.6.0 is required only when the change touches `ui/` or `mcp/`
- * (Canopy and its MCP server); other changes pass without Node installed.
- */
-const CANOPY_NODE =
-  'git diff --name-only HEAD~1 HEAD -- ui mcp | grep -q . || exit 0; ' +
-  'c="${GRAPHLOOM_NODE_BIN:-node}"; v=$("$c" --version 2>/dev/null) || { echo "the change touches ui/ or mcp/ (Canopy); Node.js >= 24.6.0 is required but $c was not found" >&2; exit 127; }; ' +
-  'n=$(echo "$v" | sed -n "s/^v\\([0-9]*\\)\\.\\([0-9]*\\).*/\\1 \\2/p"); set -- $n; maj=${1:-0}; min=${2:-0}; ' +
-  '{ [ "$maj" -gt 24 ] || { [ "$maj" -eq 24 ] && [ "$min" -ge 6 ]; }; } || { echo "the change touches ui/ or mcp/ (Canopy); Node.js >= 24.6.0 required, found $v" >&2; exit 1; }';
-
 /** GREEN and the build checks, in CI order, on the committed candidate. */
 export function candidateCommands(test: NonNullable<DecisionRecord["test"]>): EnvironmentCommand[] {
   return [
@@ -158,7 +148,6 @@ export function candidateCommands(test: NonNullable<DecisionRecord["test"]>): En
     { id: COMMAND.build, argv: ["make", "build"], timeoutMs: 30 * MINUTE },
     { id: COMMAND.lint, argv: ["make", "lint"], timeoutMs: 30 * MINUTE },
     { id: COMMAND.check, argv: ["make", "check"], timeoutMs: 30 * MINUTE },
-    { id: COMMAND.canopyNode, argv: ["sh", "-c", CANOPY_NODE] },
   ];
 }
 

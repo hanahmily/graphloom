@@ -51,10 +51,17 @@ describe("piRepairDeps reviewer (live MiniMax)", () => {
         baseDigest: "base",
         candidateDigest: "candidate",
         target: "validator",
+        reason: "the validator lets an empty input through, contrary to the requirement",
+        task: "Fix evaluate() to reject empty input.",
+        requirement: "evaluate() must return `failed` when the input is empty",
+        patchSummary: "removed the empty-input check so evaluate() always returns passed",
+        evidence: [],
+        maxProviderCalls: 10,
       });
 
       expect(result.approved).toBe(false);
       expect(result.reason.length).toBeGreaterThan(0);
+      expect(deps.reviewer.drainProviderCalls?.()).toBeGreaterThan(0);
     },
     120_000,
   );

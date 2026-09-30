@@ -50,10 +50,9 @@ export const COMMAND = {
   check: "check",
   changesDiff: "changes-diff",
   deliver: "deliver",
-  canopyNode: "canopy-node",
 } as const;
 
-export const BUILD_COMMANDS = [COMMAND.license, COMMAND.build, COMMAND.lint, COMMAND.check, COMMAND.canopyNode] as const;
+export const BUILD_COMMANDS = [COMMAND.license, COMMAND.build, COMMAND.lint, COMMAND.check] as const;
 
 const MINUTE = 60_000;
 
@@ -63,10 +62,15 @@ const MINUTE = 60_000;
  * the supervisor repairs it here and pins the new digest. `check-req` here runs
  * only its Go version and architecture test; `make check-req` also runs
  * `ui check-version` and `mcp check-version`, which need Node.js and run
- * `npm ci`, for every task regardless of what it touches. Node.js is required
- * only when a task's change touches `ui/` or `mcp/` (Canopy and its MCP
- * server), so that check runs as one of the candidate's build commands, once
- * the change is known; see `canopy-node` in `prompts.ts`. Code review needs
+ * `npm ci`. Node.js is required unconditionally, not only for a task that
+ * touches `ui/` or `mcp/`: preparation's `make generate` and the `build`
+ * requirement's `make build` both loop over every project, `ui` and `mcp`
+ * included, and each needs `npm ci` regardless of what the task changes
+ * (confirmed with `make -n` in the target repository). Scoping either to a
+ * Node-free subset would mean overriding BanyanDB's own `PROJECTS` variable
+ * per target, coupled to its Makefile internals; a dedicated `node` check
+ * here, cheaper than the full `ui check-version`/`mcp check-version`, is the
+ * safer choice until those paths support Go-only execution. Code review needs
  * open-code-review with its delegation mode, and git 2.41 for it; the `ocr`
  * check prints the absolute path the code reviewer is told to run. Planning and
  * implementing need Claude Code, and code review needs Codex, each installed
@@ -127,6 +131,17 @@ export const ENVIRONMENT: EnvironmentDeclaration = {
     },
     { id: "make", argv: ["sh", "-c", 'make --version 2>/dev/null | grep -q "GNU Make" || { echo "GNU make required" >&2; exit 1; }'] },
     { id: "check-req", argv: ["make", "-C", "scripts/ci/check", "test"], timeoutMs: 5 * MINUTE },
+    {
+      id: "node",
+      argv: [
+        "sh",
+        "-c",
+        'v=$(node --version 2>/dev/null) || { echo "Node.js >= 24.6.0 is required (make generate and make build run npm ci for the ui and mcp projects, on every task)" >&2; exit 127; }; ' +
+          'n=$(echo "$v" | sed -n "s/^v\\([0-9]*\\)\\.\\([0-9]*\\).*/\\1 \\2/p"); set -- $n; maj=${1:-0}; min=${2:-0}; ' +
+          '{ [ "$maj" -gt 24 ] || { [ "$maj" -eq 24 ] && [ "$min" -ge 6 ]; }; } || { echo "Node.js >= 24.6.0 required, found $v" >&2; exit 1; }',
+      ],
+      timeoutMs: 2 * MINUTE,
+    },
   ],
   prepare: [{ id: "generate", argv: ["make", "generate"], timeoutMs: 30 * MINUTE }],
   pinnedFiles: [{ path: "CONTRIBUTING.md", sha256: "c5d43a0272accb597b1ddc502bd5ce374b233fe327e80f3420b84a4ac67f2f71" }],

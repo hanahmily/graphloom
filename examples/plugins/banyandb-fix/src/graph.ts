@@ -139,8 +139,7 @@ const definition: GraphDefinition = {
     },
     {
       id: REQUIREMENT_BUILDS,
-      statement:
-        "In the same checkout of the full change, make license-check, make build, make lint and make check all pass; Node.js >= 24.6.0 is available whenever the change touches ui/ or mcp/; and the checks change no file.",
+      statement: "In the same checkout of the full change, make license-check, make build, make lint and make check all pass and change no file.",
       evidenceSchema: "checkout-command-v1",
     },
     {

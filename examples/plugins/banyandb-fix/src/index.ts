@@ -12,12 +12,15 @@ export {
 } from "./decision-record.js";
 export {
   VERIFICATION_SCHEMA,
+  describeFinding,
+  findingById,
   findingLedger,
   observablePath,
   parseVerification,
   pathsToObserve,
   quoteMatches,
   roundSummary,
+  toVerify,
   verificationInstruction,
   type Finding,
   type FindingLedger,

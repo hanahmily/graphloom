@@ -18,6 +18,8 @@ import {
   blockingComments,
   codeReviewInstruction,
   createGraph,
+  describeFinding,
+  findingById,
   findingLedger,
   ginkgoSpecs,
   observablePath,
@@ -32,7 +34,9 @@ import {
   regressionOutcome,
   requestedIssue,
   testOutcome,
+  toVerify,
   validatorById,
+  verificationInstruction,
   type DecisionRecord,
   type GinkgoSpec,
 } from "../src/index.js";
@@ -311,7 +315,7 @@ describe("banyandb-fix graph", () => {
     const definition = createGraph().describe();
     expect(definition.stages.map((s) => s.id)).toEqual(["fix", "review"]);
     expect(definition.environment).toEqual(ENVIRONMENT);
-    expect(ENVIRONMENT.checks!.map((c) => c.id)).toEqual(["go", "git", "ocr", "codex", "claude", "make", "check-req"]);
+    expect(ENVIRONMENT.checks!.map((c) => c.id)).toEqual(["go", "git", "ocr", "codex", "claude", "make", "check-req", "node"]);
     expect(ENVIRONMENT.prepare!.map((c) => c.argv.join(" "))).toEqual(["make generate"]);
     expect(ENVIRONMENT.pinnedFiles![0]!.path).toBe("CONTRIBUTING.md");
   });
@@ -353,57 +357,12 @@ describe("banyandb-fix graph", () => {
 
       await tool("claude-custom", "exit 0");
       expect((await run("claude", { GRAPHLOOM_CLAUDE_BIN: path.join(bin, "claude-custom") })).code).toBe(0);
-    } finally {
-      await rm(root, { recursive: true, force: true });
-    }
-  });
 
-  it("canopy-node: Node.js is required only when the candidate touches ui/ or mcp/", async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), "bydb-canopy-"));
-    try {
-      const repo = path.join(root, "repo");
-      await mkdir(path.join(repo, "pkg"), { recursive: true });
-      const git = (...args: string[]) => execFileAsync("git", args, { cwd: repo });
-      await writeFile(path.join(repo, "pkg", "a.go"), "package pkg\n");
-      await git("init", "-q", "-b", "main");
-      await git("config", "user.email", "a@example.com");
-      await git("config", "user.name", "A");
-      await git("add", ".");
-      await git("commit", "-q", "-m", "base");
-
-      const { argv } = candidateCommands(PLAN.test!).find((c) => c.id === COMMAND.canopyNode)!;
-      // A PATH with only git and sed, so the host's own Node (if any) never leaks in.
-      const tools = path.join(root, "tools");
-      await mkdir(tools);
-      for (const [name, real] of Object.entries({ sh: "/usr/bin/sh", git: "/usr/bin/git", sed: "/usr/bin/sed", grep: "/usr/bin/grep" })) {
-        await execFileAsync("ln", ["-s", real, path.join(tools, name)]);
-      }
-      const bin = path.join(root, "bin");
-      await mkdir(bin);
-      const node = (body: string) => writeFile(path.join(bin, "node"), `#!/bin/sh\n${body}\n`, { mode: 0o755 });
-      const run = async (extraPath?: string) =>
-        execFileAsync(argv[0]!, argv.slice(1), { cwd: repo, env: { PATH: `${extraPath ? `${extraPath}:` : ""}${tools}` } }).then(
-          () => ({ code: 0, stderr: "" }),
-          (err: { code: number; stderr: string }) => ({ code: err.code, stderr: err.stderr.trim() }),
-        );
-
-      // No candidate change under ui/ or mcp/: passes without Node on PATH.
-      await writeFile(path.join(repo, "pkg", "a.go"), "package pkg\n\nconst x = 1\n");
-      await git("commit", "-qam", "touch pkg only");
-      expect(await run()).toEqual({ code: 0, stderr: "" });
-
-      // The candidate touches ui/: Node is required.
-      await mkdir(path.join(repo, "ui"), { recursive: true });
-      await writeFile(path.join(repo, "ui", "app.ts"), "export const x = 1;\n");
-      await git("add", ".");
-      await git("commit", "-q", "-m", "touch ui");
-      expect(await run()).toMatchObject({ code: 127, stderr: "the change touches ui/ or mcp/ (Canopy); Node.js >= 24.6.0 is required but node was not found" });
-
-      await node("echo v20.0.0");
-      expect(await run(bin)).toMatchObject({ code: 1, stderr: "the change touches ui/ or mcp/ (Canopy); Node.js >= 24.6.0 required, found v20.0.0" });
-
-      await node("echo v24.6.0");
-      expect(await run(bin)).toEqual({ code: 0, stderr: "" });
+      // Node.js is required unconditionally: make generate and make build need it for every task.
+      await tool("node", "echo v20.0.0");
+      expect(await run("node")).toEqual({ code: 1, stderr: "Node.js >= 24.6.0 required, found v20.0.0" });
+      await tool("node", "echo v24.6.0");
+      expect((await run("node")).code).toBe(0);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -434,7 +393,7 @@ describe("banyandb-fix graph", () => {
 
     expect(candidate).toMatchObject({ kind: "command", readOnly: true, checkout: { from: "candidate" } });
     const ids = (candidate!.input as { commands: Array<{ id: string }> }).commands.map((c) => c.id);
-    expect(ids).toEqual(["changes-diff", "regression", "test-ci", "license-check", "build", "lint", "check", "canopy-node"]);
+    expect(ids).toEqual(["changes-diff", "regression", "test-ci", "license-check", "build", "lint", "check"]);
     expect(red).toMatchObject({ checkout: { from: "base", paths: ["pkg/timestamp/scheduler_test.go"] } });
     const redArgv = (red!.input as { commands: Array<{ argv: string[] }> }).commands[0]!.argv;
     expect(redArgv).toEqual(regressionArgv({ package: "./pkg/timestamp", name: TEST }));
@@ -962,6 +921,33 @@ describe("findings ledger", () => {
     expect(ledger.findings[0]!.regressedOn).toBe("d3");
     expect(ledger.passes.at(-1)!.raised).toEqual(["F1"]);
     expect(roundSummary(ledger, "d3", [ledger.passes.at(-1)!])).toContain("1 regression(s)");
+  });
+
+  it("carries a regression's current occurrence, not the original one it was first raised with", () => {
+    const original = { path: "pkg/timestamp/old.go", start_line: 10, end_line: 10, category: "bug", severity: "high", content: "Close waits forever." };
+    const regression = { ...original, path: "pkg/timestamp/new.go", start_line: 55, end_line: 55, content: "Close does not honour cancellation." };
+    const evidence = [pass("d1", [original]), confirm("d1"), pass("d2", [], { F1: "resolved" }), pass("d3", [{ ...regression, finding: "F1" }])];
+    const ledger = findingLedger(evidence);
+    const f1 = findingById(ledger, "F1")!;
+    expect(f1.comment).toMatchObject({ path: "pkg/timestamp/new.go", start_line: 55, content: "Close does not honour cancellation." });
+    expect(f1.original).toMatchObject({ path: "pkg/timestamp/old.go", start_line: 10 });
+    expect(describeFinding(f1)).toContain("pkg/timestamp/new.go:55");
+    expect(describeFinding(f1)).not.toContain("pkg/timestamp/old.go");
+    const instruction = verificationInstruction({ findings: toVerify(ledger, "d3"), background: "bg", changed: [] });
+    expect(instruction).toContain("pkg/timestamp/new.go:55");
+    expect(instruction).not.toContain("pkg/timestamp/old.go");
+  });
+
+  it("carries a dismissed finding's current occurrence when it is raised again at a new location", () => {
+    const original = { path: "pkg/timestamp/old.go", start_line: 10, end_line: 10, category: "bug", severity: "high", content: "Close waits forever." };
+    const dismissed = [pass("d1", [original]), verify("d1", { finding: "F1", verdict: "refuted", reason: "bounded", quotes: [BOUNDED] }), file("d1", SCHEDULER)];
+    expect(states(dismissed)).toEqual({ F1: "dismissed@d1" });
+    const regression = { ...original, path: "pkg/timestamp/new.go", start_line: 55, end_line: 55, content: "A new call path reaches the same hang." };
+    const raisedAgain = [...dismissed, pass("d2", [{ ...regression, finding: "F1" }])];
+    const ledger = findingLedger(raisedAgain);
+    const f1 = findingById(ledger, "F1")!;
+    expect(f1.comment).toMatchObject({ path: "pkg/timestamp/new.go", start_line: 55 });
+    expect(f1.original).toMatchObject({ path: "pkg/timestamp/old.go", start_line: 10 });
   });
 
   it("sends a withdrawn confirmation back to verification, and leaves a pass that skips a status incomplete", () => {

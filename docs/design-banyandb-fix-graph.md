@@ -93,7 +93,7 @@ The graph package declares:
 
 | Kind | Content |
 |---|---|
-| Checks | `make -C scripts/ci/check test` (BanyanDB's Go version and architecture test, without `make check-req`'s `ui`/`mcp` steps, which need Node.js and run `npm ci` regardless of what the change touches); Go version equal to `go.mod` (1.25.13); Git >= 2.41 (open-code-review; BanyanDB needs 2.30); `ocr delegate preview --help`, printing the absolute `ocr` path; `codex --version` and `codex login status`; `claude --version` and `claude auth status`; GNU make; Node.js >= 24.6.0, checked as one of the candidate's build commands, only when the change touches `ui/` or `mcp/` |
+| Checks | `make -C scripts/ci/check test` (BanyanDB's Go version and architecture test, without `make check-req`'s `ui`/`mcp` steps, which need Node.js and run `npm ci`); Go version equal to `go.mod` (1.25.13); Git >= 2.41 (open-code-review; BanyanDB needs 2.30); `ocr delegate preview --help`, printing the absolute `ocr` path; `codex --version` and `codex login status`; `claude --version` and `claude auth status`; GNU make; Node.js >= 24.6.0 |
 | Prepare | `make generate` in the run's worktree |
 | Pinned source | Digest of `CONTRIBUTING.md` at the version the checklist was written against |
 
@@ -128,7 +128,7 @@ in the change the controller checks against the write scope.
 | `decisions-recorded` | The plan's decision record is valid, every unclear point has a tier, and no product decision is marked chosen |
 | `reproduces` | RED check: the base commit plus only the test-file changes fails on the new test by assertion, not by build error |
 | `passes` | GREEN check: the full change passes the new test and the affected packages |
-| `builds` | `make build`, `make lint`, `make check` and `make license-check` pass; Node.js >= 24.6.0 is available whenever the change touches `ui/` or `mcp/` |
+| `builds` | `make build`, `make lint`, `make check` and `make license-check` pass |
 | `in-scope` | The changed paths fall within the write scope |
 | `changelog-entry` | `CHANGES.md` has an entry for the issue under the current release |
 
@@ -620,7 +620,7 @@ follows BanyanDB's pull request template:
 | Write scope exclusions | Closed: `!path` entries exclude paths from a broader scope |
 | Agent-written files in a checkout | Open, scoped: the second phase of [review convergence](#executable-confirmations-second-phase) needs a candidate checkout with a verifier's test file added, so a confirmation can be a failing test. Needs a new `CheckoutSpec` field in `packages/sdk`, applied in `packages/controller/src/checkout.ts` before the checkout commits, with the same path safety as observed quotes; see the scoping note above |
 | Qualified repair from the CLI | Open: `graphloom run` does not wire repair dependencies, so a changed `CONTRIBUTING.md` stops the run instead of reaching a repair |
-| Canopy's Node.js version | Closed: a dedicated `canopy-node` build command checks it only when the candidate's diff touches `ui/` or `mcp/`; preflight's `check-req` no longer needs Node.js |
+| Canopy's Node.js version | Closed: a dedicated `node` preflight check, cheaper than the full `ui check-version`/`mcp check-version`. Node.js is required unconditionally, not only when the change touches `ui/` or `mcp/`: `make generate` (preparation) and `make build` (the `builds` requirement) both loop over every BanyanDB project, `ui` and `mcp` included, and each runs `npm ci` regardless of what the task changes (confirmed with `make -n` in the target repository). Scoping either to a Node-free subset would mean overriding BanyanDB's own `PROJECTS` variable per target, coupled to its Makefile internals, so the requirement stays unconditional until those paths support Go-only execution |
 | Live run on BanyanDB | Open: the first milestone below has been exercised on a Go fixture, not on BanyanDB. When the local Go is older than `go.mod` requires, the default `GOTOOLCHAIN=auto` downloads the required toolchain during the check; with `GOTOOLCHAIN=local` the preflight stops and names both versions |
 
 ## First milestone

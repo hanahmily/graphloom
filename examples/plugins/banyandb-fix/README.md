@@ -25,7 +25,8 @@ before any job, on every resume, and after a repair activation:
 | `codex` | `codex --version` and `codex login status`: Codex is installed and logged in, with the command and home the runner configures for the harness (`GRAPHLOOM_CODEX_BIN`, `GRAPHLOOM_CODEX_HOME`, then `CODEX_HOME`) |
 | `claude` | `claude --version` and `claude auth status`: Claude Code is installed and logged in, with the command and config directory the runner configures for the harness (`GRAPHLOOM_CLAUDE_BIN`, `GRAPHLOOM_CLAUDE_CONFIG_DIR`, then `CLAUDE_CONFIG_DIR`) |
 | `make` | GNU make |
-| `check-req` | `make -C scripts/ci/check test`: BanyanDB's Go version and architecture test. Not `make check-req` itself, which also runs `ui`/`mcp` `check-version` (Node.js, `npm ci`) for every task; that check runs instead as one of the candidate's build commands, only when the change touches `ui/` or `mcp/` |
+| `check-req` | `make -C scripts/ci/check test`: BanyanDB's Go version and architecture test, not `make check-req` itself (which also runs `ui`/`mcp` `check-version`, redundant with the dedicated `node` check below, and slower: it runs `npm ci`) |
+| `node` | Node.js >= 24.6.0, unconditionally: `make generate` and `make build` both need it for every task, since they loop over BanyanDB's `ui` and `mcp` projects regardless of what changed |
 | `generate` (prepare) | `make generate` leaves no tracked or unignored file changed |
 
 It also pins the SHA-256 of `CONTRIBUTING.md`. A missing tool stops the run and
@@ -40,7 +41,7 @@ the declaration; without a supervisor, the run stops.
 | Fix | `decisions-recorded`: the implementer's `decision-record-v1` names the test, the expected value's source, the production caller, and every decision with its tier and basis | `decisions-recorded` |
 | Fix | `reproduces`: in a prepared base checkout with only the change's test files, the regression test fails by assertion, not by a build error, setup failure or panic | `red-reproduces` |
 | Fix | `passes`: in the committed candidate checkout, the regression test and `make test-ci` for the changed packages pass | `green-passes` |
-| Fix | `builds`: in the same checkout, make license-check, build, lint and check pass, and Node.js >= 24.6.0 is available whenever the change touches `ui/` or `mcp/` | `build-checks` |
+| Fix | `builds`: in the same checkout, make license-check, build, lint and check pass | `build-checks` |
 | Fix | `in-scope`: the change avoids `api/proto`, `go.mod`, `go.sum` and `.github` unless the record justifies it | `write-scope` |
 | Fix | `changelog-entry`: the change adds a bullet to the current release section of `CHANGES.md` | `changes-entry` |
 | Review | `code-review`: the latest read-only Codex pass on the current change, in this generation, reviewed every changed file, test files included, skipped none, and gave a status for every open finding; every critical or high finding it raised was refuted by a read-only verifier with quotes that match the change; and no finding of the run is confirmed and unfixed, disputed, or awaiting verification | `open-code-review` |

@@ -4,7 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { loadRunState } from "@graphloom/controller";
-import { parseRepairVerdict, piRepairDeps, repairReviewPrompt, resolveBundlePath, resolveBundlePathForResume } from "../src/repair-config.js";
+import { candidateDiff, parseRepairVerdict, piRepairDeps, repairReviewPrompt, resolveBundlePath, resolveBundlePathForResume } from "../src/repair-config.js";
 import type { SupervisorConfig } from "../src/supervisor-config.js";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
@@ -43,12 +43,41 @@ describe("the reviewer's verdict line", () => {
 });
 
 describe("the reviewer's assignment", () => {
-  it("names the candidate root and the target, and asks for a read-only, plain-text verdict", () => {
-    const prompt = repairReviewPrompt({ candidateRoot: "/repairs/r1/candidate", target: "validator" });
+  it("carries the original task and defect, the patch, its evidence and diff, and asks for a read-only, plain-text verdict", () => {
+    const prompt = repairReviewPrompt({
+      candidateRoot: "/repairs/r1/candidate",
+      target: "validator",
+      reason: "the changelog validator rejects a dated heading",
+      task: "Release version 1.2.0",
+      requirement: "the changelog entry matches the release heading pattern",
+      patchSummary: "loosened the heading pattern to allow an optional date suffix",
+      evidence: [{ ref: "e1", kind: "review", payload: { verdict: "request_changes" } }],
+      diff: "--- a/src/validators.ts\n+++ b/src/validators.ts\n",
+    });
     expect(prompt).toContain("/repairs/r1/candidate");
     expect(prompt).toContain("Target: validator");
+    expect(prompt).toContain("Release version 1.2.0");
+    expect(prompt).toContain("the changelog entry matches the release heading pattern");
+    expect(prompt).toContain("the changelog validator rejects a dated heading");
+    expect(prompt).toContain("loosened the heading pattern");
+    expect(prompt).toContain("request_changes");
+    expect(prompt).toContain("--- a/src/validators.ts");
     expect(prompt).toContain("read-only");
     expect(prompt).toContain("VERDICT: approved");
+  });
+
+  it("omits the requirement and patch summary lines when there is none", () => {
+    const prompt = repairReviewPrompt({
+      candidateRoot: "/repairs/r1/candidate",
+      target: "plugin",
+      reason: "the CONTRIBUTING.md digest no longer matches the pinned checklist",
+      task: "Fix apache/skywalking#14111.",
+      evidence: [],
+      diff: "(no textual difference)",
+    });
+    expect(prompt).not.toContain("The disputed requirement:");
+    expect(prompt).not.toContain("The patch author's own summary");
+    expect(prompt).not.toContain("Evidence the supervisor cited");
   });
 });
 
@@ -158,5 +187,76 @@ describe("the repair preflight", () => {
     const result = await deps.preflight({ candidateRoot: root, target: "validator", baseDefinition: { graphId: "g", version: "1", stages: [], requirements: [], defaultValidators: [] } });
     expect(result).toMatchObject({ ok: false });
     expect(result.summary).toContain("npm ci");
+  });
+
+  it("skips scripts/qualify.mjs for a plugin or executor repair, since its validator-regression contract does not apply", async () => {
+    const bundlePath = await fakeBundle();
+    await mkdir(path.join(bundlePath, "scripts"), { recursive: true });
+    // Mirrors the real qualify.mjs contract: rejects whenever the installed (unpatched)
+    // validators already pass every case, which is always true for a patch that changes
+    // no validator (an environment/checklist-only repair, for example).
+    await writeFile(path.join(bundlePath, "scripts", "qualify.mjs"), "console.error('the old version passes all cases, so no defect is reproduced');\nprocess.exit(1);\n", "utf8");
+    const deps = piRepairDeps(CONFIG, bundlePath);
+    const root = await candidate("export const x: number = 1;\n");
+    const baseDefinition = { graphId: "g", version: "1", stages: [], requirements: [], defaultValidators: [] };
+
+    const pluginResult = await deps.preflight({ candidateRoot: root, target: "plugin", baseDefinition });
+    expect(pluginResult).toMatchObject({ ok: true });
+    expect(pluginResult.summary).toContain("skipped for this target");
+
+    const executorResult = await deps.preflight({ candidateRoot: root, target: "executor", baseDefinition });
+    expect(executorResult).toMatchObject({ ok: true });
+
+    const validatorResult = await deps.preflight({ candidateRoot: root, target: "validator", baseDefinition });
+    expect(validatorResult.ok).toBe(false);
+    expect(validatorResult.summary).toContain("qualification failed");
+  });
+});
+
+describe("the candidate diff", () => {
+  it("shows a unified diff from the installed bundle to the candidate, excluding node_modules, dist and .git", async () => {
+    const bundlePath = await tempDir();
+    await writeFile(path.join(bundlePath, "validator.ts"), "export const ok = false;\n", "utf8");
+    await mkdir(path.join(bundlePath, "node_modules", "noise"), { recursive: true });
+    await writeFile(path.join(bundlePath, "node_modules", "noise", "index.js"), "junk\n", "utf8");
+
+    const candidateRoot = await tempDir();
+    await writeFile(path.join(candidateRoot, "validator.ts"), "export const ok = true;\n", "utf8");
+    await mkdir(path.join(candidateRoot, "node_modules", "noise"), { recursive: true });
+    await writeFile(path.join(candidateRoot, "node_modules", "noise", "index.js"), "junk\n", "utf8");
+
+    const diff = await candidateDiff(bundlePath, candidateRoot);
+    expect(diff).toContain("-export const ok = false;");
+    expect(diff).toContain("+export const ok = true;");
+    // node_modules/noise/index.js is identical on both sides; excluding it means diff never
+    // reads it at all, so its content ("junk") never appears, even though the invocation's
+    // own --exclude flags (naming node_modules) show up in diff's per-file header line.
+    expect(diff).not.toContain("junk");
+  });
+
+  it("reports no textual difference when the candidate matches the installed bundle", async () => {
+    const bundlePath = await tempDir();
+    await writeFile(path.join(bundlePath, "validator.ts"), "export const ok = false;\n", "utf8");
+    const candidateRoot = await tempDir();
+    await writeFile(path.join(candidateRoot, "validator.ts"), "export const ok = false;\n", "utf8");
+    expect(await candidateDiff(bundlePath, candidateRoot)).toBe("(no textual difference)");
+  });
+});
+
+describe("the reviewer's budget", () => {
+  it("refuses to review without prompting when no agentInvocations allowance remains", async () => {
+    const bundlePath = await tempDir();
+    const deps = piRepairDeps(CONFIG, bundlePath);
+    const result = await deps.reviewer.review({
+      candidateRoot: "/repairs/r1/candidate",
+      baseDigest: "base",
+      candidateDigest: "candidate",
+      target: "plugin",
+      reason: "test",
+      task: "test",
+      evidence: [],
+      maxProviderCalls: 0,
+    });
+    expect(result).toEqual({ approved: false, reason: "no agentInvocations budget remains for independent review" });
   });
 });

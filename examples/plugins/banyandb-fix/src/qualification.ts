@@ -123,7 +123,7 @@ const red = (report: string, exitCode = 1, o: RunOptions = {}) =>
 const green = (report = passedReport, exitCode = 0, o: RunOptions = {}) => command(COMMAND.regression, exitCode, { report, ...o });
 const candidate = (overrides: Partial<Record<string, number>> = {}, o: RunOptions = {}): EvidenceRecord[] => [
   green(passedReport, overrides[COMMAND.regression] ?? 0, o),
-  ...[COMMAND.testCi, COMMAND.license, COMMAND.build, COMMAND.lint, COMMAND.check, COMMAND.canopyNode].map((id) => command(id, overrides[id] ?? 0, o)),
+  ...[COMMAND.testCi, COMMAND.license, COMMAND.build, COMMAND.lint, COMMAND.check].map((id) => command(id, overrides[id] ?? 0, o)),
 ];
 
 const CHANGES = "# Changes by Version\n\nRelease Notes.\n\n## 0.12.0\n\n### Bug Fixes\n\n- Warn instead of reporting a timeout for long scheduled actions.\n\n## 0.11.0\n\n- Older.\n";
@@ -243,7 +243,6 @@ export const QUALIFICATION_CASES: readonly QualificationCase[] = [
 
   c("build-checks", "all build checks pass", [...candidate()], "passed"),
   c("build-checks", "lint fails", [...candidate({ [COMMAND.lint]: 2 })], "failed"),
-  c("build-checks", "the change touches ui/ or mcp/ without Node.js >= 24.6.0", [...candidate({ [COMMAND.canopyNode]: 1 })], "failed"),
   c("build-checks", "make check reformatted a file", [green(), ...[COMMAND.testCi, COMMAND.license, COMMAND.build, COMMAND.lint].map((id) => command(id, 0)), command(COMMAND.check, 0, { mutations: ["pkg/timestamp/scheduler.go"] })], "failed"),
   c("build-checks", "make check did not run", [green(), ...[COMMAND.testCi, COMMAND.license, COMMAND.build, COMMAND.lint].map((id) => command(id, 0))], "failed"),
   c("build-checks", "no candidate checks", [], "inconclusive"),

@@ -14,24 +14,24 @@
     "vitest": "^3.0.9"
   },
   "digests": {
-    "sourceTree": "96e53b7fe5fb8b59478243ff509cdd865eb6d46cef92deffed621277a2adc893",
+    "sourceTree": "c5396c26cb437e98b2484fb91c28e28de7693ff6920b356af709afc6674173c3",
     "packageLock": "3a10a234ba1253d9b918e329819c06a9f2e18a73ea4d9e414a96ab9e2db15492",
     "files": {
       "package.json": "4ffa13e2bee3e4f5cb6db3a2ede4b908031598a7b7ea3a3563434963571c2f45",
       "package-lock.json": "3a10a234ba1253d9b918e329819c06a9f2e18a73ea4d9e414a96ab9e2db15492",
       "tsconfig.json": "ffed4b469e52e0642fabcb6a20f4ba178fce44e5e37567a0ee96571a150a1109",
-      "src/constants.ts": "fa036541f6ad92e7e5ae857a0a00ca63c67967ff5bf3ace58892fd2453b44110",
+      "src/constants.ts": "0591b2737ff544df0096b558af273b840e222300108d51a0404c37edf6626a25",
       "src/decision-record.ts": "21c2d80260dcf0562646a4d6aa793ff6a18745c5c0daaeb0edcf8d351bc7a1a8",
       "src/evidence.ts": "3ef2d32238b01d205919757d3372da9c2f28ee79ff0415b3d33643259f0443bf",
-      "src/findings.ts": "8a88c971761ae533e02098c89c6982d9cec8a2286982a6c1aa0fe367ac509ad7",
+      "src/findings.ts": "df702f8db9e59fda94552479c57ac2e56785a1073543b76cfc5422ce36fde2f8",
       "src/gotest.ts": "15c7e7a85c860549461bf3e2d5f9d9482f93c3c57bab369c137878b2a0ef00a3",
-      "src/graph.ts": "839eb58e3ce8f1d7b17e70351c186992afa79196a2c73d331dbbfc29a55356b6",
-      "src/index.ts": "90ab7005e116347a9c482938224912c4e406ba9d867b992082026821b37b15f8",
+      "src/graph.ts": "e0863ee51db65f28a69102f3a23e91d2c8a88524212e80989f5ec17bd41598c2",
+      "src/index.ts": "70dfc21b8407ee644b1a4a1a7026ad70820d0854926ae3787ac9bea0dc3980d7",
       "src/ocr.ts": "2c71ccabe907fefe7552ba3bf86b41ada94a9a084f4a41406b0daeb481730839",
-      "src/prompts.ts": "3c981808bde6dd9f47ebd9cd9a1e070f9934a8b6ef4929079af6e8eed5abd927",
-      "src/qualification.ts": "cd2d422579b1782ba3a9d8989898adcfa4a76b3487d3449cade38a6fdf5a7f93",
+      "src/prompts.ts": "ed9115344bebd6680b1e5d8d43c6d181e5aff44618f04649b9d913fa8ac54513",
+      "src/qualification.ts": "25210e4580d5fe730cbf77be8970b436d4d1d8c471ee920da8b6f3918982bbd4",
       "src/validators.ts": "79109b0aa4e33b130bcfcee63013572638e2f57807374291f3bca7b01c780126",
-      "test/banyandb-fix.test.ts": "8147e34dca21ec3f77cea2b48d11a0a30f25d44a7421636bf034452899a327f1"
+      "test/banyandb-fix.test.ts": "f58a0bde6bebc7c8e54a480383a8d04da61734453e7dd859e6c6ee44bd0e9f27"
     }
   },
   "requirements": [
@@ -57,7 +57,7 @@
     },
     {
       "id": "builds",
-      "statement": "In the same checkout of the full change, make license-check, make build, make lint and make check all pass; Node.js >= 24.6.0 is available whenever the change touches ui/ or mcp/; and the checks change no file.",
+      "statement": "In the same checkout of the full change, make license-check, make build, make lint and make check all pass and change no file.",
       "evidenceSchema": "checkout-command-v1"
     },
     {
