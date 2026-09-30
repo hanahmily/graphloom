@@ -136,7 +136,9 @@ const PLAN = {
 /**
  * Stands in for open-code-review on PATH: it has a delegation mode, and
  * `delegate preview` records where it ran, its arguments, and the files the
- * worktree change touches.
+ * worktree change touches. Also shadows `node` with a version the environment
+ * check accepts, since real CI runners are not guaranteed to have one that is
+ * new enough, and this fixture's own Makefile never actually invokes Node.
  */
 async function fakeOcr(dir: string): Promise<{ bin: string; calls: string }> {
   const bin = path.join(dir, "bin");
@@ -154,6 +156,7 @@ async function fakeOcr(dir: string): Promise<{ bin: string; calls: string }> {
     ].join("\n"),
     { mode: 0o755 },
   );
+  await writeFile(path.join(bin, "node"), '#!/bin/sh\necho "v24.6.0"\n', { mode: 0o755 });
   return { bin, calls };
 }
 
