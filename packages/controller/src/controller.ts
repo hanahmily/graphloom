@@ -953,7 +953,8 @@ function resolveCandidateHost(request: {
   return { openCandidateHost: (ctx) => openHost(ctx) };
 }
 
-async function resolveStateDir(runRef: string, stateRoot?: string): Promise<string> {
+/** Resolve a run reference (absolute state directory, or bare run id under `stateRoot`) to its state directory. */
+export async function resolveStateDir(runRef: string, stateRoot?: string): Promise<string> {
   if (path.isAbsolute(runRef)) {
     await access(path.join(runRef, "state.json"));
     return runRef;
