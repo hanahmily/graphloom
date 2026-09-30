@@ -1,6 +1,6 @@
 {
   "graphId": "banyandb-fix",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "sdkProtocol": 1,
   "entryPoints": {
     "createGraph": "./dist/index.js"
@@ -14,23 +14,24 @@
     "vitest": "^3.0.9"
   },
   "digests": {
-    "sourceTree": "c8b7bb2b971bd1aed89550e8bc548779d4a3e57ad0cd349c6ab27be42739cca3",
-    "packageLock": "ae799e9b4b3482e5e3306f421002e111b81056e94c3baa0a18a97d016e6da633",
+    "sourceTree": "96e53b7fe5fb8b59478243ff509cdd865eb6d46cef92deffed621277a2adc893",
+    "packageLock": "3a10a234ba1253d9b918e329819c06a9f2e18a73ea4d9e414a96ab9e2db15492",
     "files": {
-      "package.json": "e66e83d9303aee39689c8c9b37f51dea579680cca9787a146838356b489d386e",
-      "package-lock.json": "ae799e9b4b3482e5e3306f421002e111b81056e94c3baa0a18a97d016e6da633",
+      "package.json": "4ffa13e2bee3e4f5cb6db3a2ede4b908031598a7b7ea3a3563434963571c2f45",
+      "package-lock.json": "3a10a234ba1253d9b918e329819c06a9f2e18a73ea4d9e414a96ab9e2db15492",
       "tsconfig.json": "ffed4b469e52e0642fabcb6a20f4ba178fce44e5e37567a0ee96571a150a1109",
-      "src/constants.ts": "1a761ca3507b1bba1e1b7d8411bbacc3c77f6386d6abfb2f751f41fcfd7c70cc",
+      "src/constants.ts": "fa036541f6ad92e7e5ae857a0a00ca63c67967ff5bf3ace58892fd2453b44110",
       "src/decision-record.ts": "21c2d80260dcf0562646a4d6aa793ff6a18745c5c0daaeb0edcf8d351bc7a1a8",
       "src/evidence.ts": "3ef2d32238b01d205919757d3372da9c2f28ee79ff0415b3d33643259f0443bf",
+      "src/findings.ts": "8a88c971761ae533e02098c89c6982d9cec8a2286982a6c1aa0fe367ac509ad7",
       "src/gotest.ts": "15c7e7a85c860549461bf3e2d5f9d9482f93c3c57bab369c137878b2a0ef00a3",
-      "src/graph.ts": "68bf7d0b7aab787ed6616344eda6222fd566a208c07a0f61cd5857a381227b0e",
-      "src/index.ts": "165e4ff8714564f5fd8e303511de4150429603e08b6f799ea205cac7a661f810",
-      "src/ocr.ts": "50f8026099091798e718232435b2912c869e283344a2a45b6527c12f0bd1e5f7",
-      "src/prompts.ts": "072bef870c85f4be714a6a8db863e5f4709b54c028ceffc70a974e012df1f4ad",
-      "src/qualification.ts": "aa94c7b04f2f955dbd463c66e668c2bfbed559716a0c6269595065a12209dc21",
-      "src/validators.ts": "1223e39be5a522dde125a59c460fdb752add3baea074924a93ebe232e1b6fd45",
-      "test/banyandb-fix.test.ts": "115d12e9c0d2e74728402733f019d5ef671bf1f267ec48ccf436b3fcf267eedf"
+      "src/graph.ts": "839eb58e3ce8f1d7b17e70351c186992afa79196a2c73d331dbbfc29a55356b6",
+      "src/index.ts": "90ab7005e116347a9c482938224912c4e406ba9d867b992082026821b37b15f8",
+      "src/ocr.ts": "2c71ccabe907fefe7552ba3bf86b41ada94a9a084f4a41406b0daeb481730839",
+      "src/prompts.ts": "3c981808bde6dd9f47ebd9cd9a1e070f9934a8b6ef4929079af6e8eed5abd927",
+      "src/qualification.ts": "cd2d422579b1782ba3a9d8989898adcfa4a76b3487d3449cade38a6fdf5a7f93",
+      "src/validators.ts": "79109b0aa4e33b130bcfcee63013572638e2f57807374291f3bca7b01c780126",
+      "test/banyandb-fix.test.ts": "8147e34dca21ec3f77cea2b48d11a0a30f25d44a7421636bf034452899a327f1"
     }
   },
   "requirements": [
@@ -56,7 +57,7 @@
     },
     {
       "id": "builds",
-      "statement": "In the same checkout of the full change, make license-check, make build, make lint and make check all pass and change no file.",
+      "statement": "In the same checkout of the full change, make license-check, make build, make lint and make check all pass; Node.js >= 24.6.0 is available whenever the change touches ui/ or mcp/; and the checks change no file.",
       "evidenceSchema": "checkout-command-v1"
     },
     {
@@ -71,8 +72,8 @@
     },
     {
       "id": "code-review",
-      "statement": "A read-only Codex reviewer, following open-code-review's delegation workflow on the current change, reviewed every changed file, test files included, skipped none, and reported no critical or high comment.",
-      "evidenceSchema": "code-review-v1"
+      "statement": "The latest read-only Codex review pass on the current change, following open-code-review's delegation workflow in this generation, reviewed every changed file, test files included, skipped none, and gave a status for every open finding; every critical or high finding it raised was refuted by an independent read-only verifier with quotes that match the change; and no finding of the run is confirmed and unfixed, disputed, or awaiting verification.",
+      "evidenceSchema": "code-review-v2"
     }
   ],
   "stages": [

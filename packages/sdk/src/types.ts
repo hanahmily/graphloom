@@ -300,6 +300,11 @@ export interface ValidationInput {
   requirementId: RequirementId;
   statement: string;
   evidence: EvidenceRecord[];
+  /**
+   * Evidence of earlier generations, oldest first. Context only: a receipt
+   * rests on `evidence`, so a validator must not pass from history alone.
+   */
+  history?: EvidenceRecord[];
   candidateFingerprint?: Fingerprint;
   /** Digest of the live workspace change being accepted. */
   candidateDigest?: Fingerprint;

@@ -25,7 +25,7 @@ before any job, on every resume, and after a repair activation:
 | `codex` | `codex --version` and `codex login status`: Codex is installed and logged in, with the command and home the runner configures for the harness (`GRAPHLOOM_CODEX_BIN`, `GRAPHLOOM_CODEX_HOME`, then `CODEX_HOME`) |
 | `claude` | `claude --version` and `claude auth status`: Claude Code is installed and logged in, with the command and config directory the runner configures for the harness (`GRAPHLOOM_CLAUDE_BIN`, `GRAPHLOOM_CLAUDE_CONFIG_DIR`, then `CLAUDE_CONFIG_DIR`) |
 | `make` | GNU make |
-| `check-req` | `make check-req` |
+| `check-req` | `make -C scripts/ci/check test`: BanyanDB's Go version and architecture test. Not `make check-req` itself, which also runs `ui`/`mcp` `check-version` (Node.js, `npm ci`) for every task; that check runs instead as one of the candidate's build commands, only when the change touches `ui/` or `mcp/` |
 | `generate` (prepare) | `make generate` leaves no tracked or unignored file changed |
 
 It also pins the SHA-256 of `CONTRIBUTING.md`. A missing tool stops the run and
@@ -40,15 +40,18 @@ the declaration; without a supervisor, the run stops.
 | Fix | `decisions-recorded`: the implementer's `decision-record-v1` names the test, the expected value's source, the production caller, and every decision with its tier and basis | `decisions-recorded` |
 | Fix | `reproduces`: in a prepared base checkout with only the change's test files, the regression test fails by assertion, not by a build error, setup failure or panic | `red-reproduces` |
 | Fix | `passes`: in the committed candidate checkout, the regression test and `make test-ci` for the changed packages pass | `green-passes` |
-| Fix | `builds`: in the same checkout, make license-check, build, lint and check pass | `build-checks` |
+| Fix | `builds`: in the same checkout, make license-check, build, lint and check pass, and Node.js >= 24.6.0 is available whenever the change touches `ui/` or `mcp/` | `build-checks` |
 | Fix | `in-scope`: the change avoids `api/proto`, `go.mod`, `go.sum` and `.github` unless the record justifies it | `write-scope` |
 | Fix | `changelog-entry`: the change adds a bullet to the current release section of `CHANGES.md` | `changes-entry` |
-| Review | `code-review`: a read-only Codex reviewer, following open-code-review's delegation workflow on the current change, reviewed every changed file, test files included, skipped none, and reported no critical or high comment | `open-code-review` |
+| Review | `code-review`: the latest read-only Codex pass on the current change, in this generation, reviewed every changed file, test files included, skipped none, and gave a status for every open finding; every critical or high finding it raised was refuted by a read-only verifier with quotes that match the change; and no finding of the run is confirmed and unfixed, disputed, or awaiting verification | `open-code-review` |
 
-Validators see only the current generation's evidence, so each generation plans
+Validators see the current generation's evidence, so each generation plans
 and reviews its plan again: after the supervisor re-enters Fix, or after a
 resume during Fix, the planner revisits its plan in its continued session and a
-fresh reviewer checks it before any code changes.
+fresh reviewer checks it before any code changes. The code review validator
+also reads earlier generations' evidence, which the controller passes as
+history, to rebuild the findings ledger; it still needs a pass on the current
+change.
 
 Checks run in disposable checkouts, never in the run's worktree. Each checkout
 is prepared with `make generate`; a check that leaves a file changed (such as
@@ -73,10 +76,12 @@ invalidates it.
 | Implemented | Observe `CHANGES.md`, run the candidate checks, then RED on the base |
 | Every Fix requirement passes | Validate Fix |
 | A requirement fails | Return the reasons and failing output to the implementer's session, at most twice, then Supervise |
-| Review | Dispatch a fresh read-only Codex reviewer with open-code-review's delegation workflow, the `ocr` path from the environment check, the review rule, and the issue and plan |
+| Review, no pass on the current change in this generation | Dispatch a fresh read-only Codex reviewer with open-code-review's delegation workflow, the `ocr` path from the environment check, the review rule, the issue and plan, and the known findings by name |
 | Review, but no `ocr` path was recorded | Supervise |
-| Code review passes | Validate Review, then deliver |
-| Code review fails, misses or skips a file, or reports a critical or high comment | Supervise; if it re-enters Fix, the planner revisits its plan with the comments |
+| A pass raised critical or high findings | Dispatch one fresh read-only Claude Code verifier for every finding pending on the change, then observe the files its refutations quote |
+| A finding the pass raised was confirmed or disputed | Another pass, told every known finding, looks for new ones; at most four passes per change |
+| Code review passes | Validate Review, then deliver; the PR body lists dismissed findings |
+| Code review fails, misses or skips a file, or leaves a finding confirmed or disputed | Supervise with the round's progress; if it re-enters Fix, the planner revisits its plan with the confirmed findings only |
 | Delivered | Stop complete; the branch has a short commit message, and the delivery report holds the PR body |
 | Request names no issue | Stop incompatible |
 
@@ -90,12 +95,25 @@ In delegation mode open-code-review only selects the files (`ocr delegate
 preview`) and resolves their rules (`ocr delegate rule`); Codex reads the diffs
 and does the review. The assignment adds a Go rule that asks the same reach
 question of the diff, and the change's `_test.go` files, which preview excludes
-by default. The result is strict JSON: comments with a path, lines, category
-and severity, and a coverage summary. The review passes only when every file on
-the list was reviewed and none skipped. A comment without a severity counts as
-blocking. The assignment names `ocr` by the absolute path the environment
-check printed, because Codex runs commands in a login shell that may reset
-`PATH`.
+by default. The result is strict JSON (`code-review-v2`): comments with a
+path, lines, category, severity, the known finding they repeat and a concrete
+failure; a status for each open finding; and a coverage summary. A pass counts
+only when every file on the list was reviewed, none skipped, and every open
+finding has a status. A comment without a severity counts as blocking. The
+assignment names `ocr` by the absolute path the environment check printed,
+because Codex runs commands in a login shell that may reset `PATH`.
+
+Critical and high findings are named `F1`, `F2`, … and kept in a ledger rebuilt
+from the evidence. A verifier confirms each with its own `file:line` witness,
+refutes it with at most three quoted lines, or cannot decide. A refutation
+dismisses the finding only once the controller has observed the quoted files
+on the current change and every quote, whitespace collapsed, appears within
+three lines of the line it cites; otherwise, and when the verifier gives no
+verdict, the finding is disputed and blocks. A confirmed finding is fixed only
+when a pass on a later change calls it resolved. A dismissed finding raised
+again stays dismissed while its quotes still match. The design's [review
+convergence](../../../docs/design-banyandb-fix-graph.md#review-convergence)
+section gives the full rules.
 
 Codex runs through the coding-agent executor's Codex harness (`codex exec` in
 its read-only sandbox, no graph tools, no saved session). On PR #94's graph
@@ -122,8 +140,9 @@ budgets:
 ```
 
 `budgets` replaces the controller's defaults. The default of 64 model requests
-per run is too few for BanyanDB: every agent turn counts, and a plan alone can
-spend 64 while reading the code.
+per run is too few for BanyanDB: every agent turn counts, a plan alone can
+spend 64 while reading the code, and a failing review round can run four
+passes and four verifications.
 
 The runner config must enable all three harnesses and the GitHub reads, and
 give command jobs room for BanyanDB's checks:
@@ -177,4 +196,6 @@ GitHub executors (against a fake GitHub), scripted agents and a stand-in `ocr`
 on `PATH`. The run checks the environment, gets the plan approved, fails RED by
 assertion on the base, passes GREEN and the build checks on the committed
 change, has the scripted reviewer run the `ocr` path from the environment check
-in the worktree, and leaves `fix/14111`.
+in the worktree and raise a false positive, has the scripted verifier refute it
+with lines the controller observes in the worktree, and leaves `fix/14111`
+with the dismissed finding in the PR body.

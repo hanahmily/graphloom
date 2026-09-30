@@ -10,6 +10,22 @@ export {
   type RegressionTest,
   type Tier,
 } from "./decision-record.js";
+export {
+  VERIFICATION_SCHEMA,
+  findingLedger,
+  observablePath,
+  parseVerification,
+  pathsToObserve,
+  quoteMatches,
+  roundSummary,
+  verificationInstruction,
+  type Finding,
+  type FindingLedger,
+  type FindingState,
+  type Quote,
+  type ReviewPass,
+  type Verdict,
+} from "./findings.js";
 export { ginkgoSpecs, regressionArgv, regressionOutcome, testOutcome, type GinkgoSpec, type RegressionOutcome, type TestOutcome } from "./gotest.js";
 export {
   CODE_REVIEW_SCHEMA,

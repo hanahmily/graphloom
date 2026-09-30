@@ -80,8 +80,9 @@ export function assertValidationInput(value: unknown): ValidationInput {
   const obj = asObject(value, "input");
   requireString(obj, "requirementId");
   requireString(obj, "statement");
-  const evidence = requireArray(obj, "evidence");
-  for (const item of evidence) {
+  const records = [...requireArray(obj, "evidence")];
+  if (obj["history"] !== undefined) records.push(...requireArray(obj, "history"));
+  for (const item of records) {
     const e = asObject(item, "evidence");
     requireString(e, "ref");
     requireString(e, "kind");
