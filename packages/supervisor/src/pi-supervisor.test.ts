@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { returnToNormal, stop, WireValidationError } from "@graphloom/sdk";
+import { dispatch, returnToNormal, stop, WireValidationError, type AgentSessionView, type EvidenceRecord } from "@graphloom/sdk";
 import {
+  buildRecoveryPrompt,
   createPiSupervisor,
   type PiSupervisorSessionPort,
   type SupervisorModelRef,
@@ -171,5 +172,116 @@ describe("createPiSupervisor", () => {
     ).rejects.toThrow(/auth missing/);
     expect(supervisor.binding.provider).toBe("minimax-cn");
     expect(supervisor.binding.switchJournal.at(-1)?.status).toBe("failed");
+  });
+
+  it("drops an invalid continueFrom from a text-only (non-tool-call) reply instead of letting it reach the controller", async () => {
+    const staleSession: AgentSessionView = {
+      operationId: "op-1",
+      stageId: "fix",
+      attempt: 1,
+      generation: 1,
+      dispatchKey: "review:graphloom.coding-agent/run",
+      executorId: "graphloom.coding-agent/run",
+      status: "failed",
+    };
+    const badJob = {
+      stageId: "fix",
+      kind: "agent" as const,
+      purpose: "work" as const,
+      instruction: "finish the review",
+      writeScope: ["."],
+      continueFrom: "op-1",
+    };
+    const supervisor = createPiSupervisor({
+      session: fakeSession({ replies: [JSON.stringify(dispatch(badJob, "finish the stuck review"))] }),
+    });
+    const input = sampleInput();
+    input.view.agentSessions = [staleSession];
+    const decision = await supervisor.decide(input);
+    expect(decision).toMatchObject({ action: { type: "dispatch", job: { instruction: "finish the review" } } });
+    if (!("action" in decision) || decision.action.type !== "dispatch") throw new Error("expected dispatch");
+    expect(decision.action.job.continueFrom).toBeUndefined();
+  });
+
+  it("replaces a text-only work dispatch missing its writeScope with a reenter, instead of letting it reach the controller", async () => {
+    const badJob = {
+      stageId: "fix",
+      kind: "agent" as const,
+      purpose: "work" as const,
+      instruction: "implement the fix",
+    };
+    const supervisor = createPiSupervisor({
+      session: fakeSession({ replies: [JSON.stringify(dispatch(badJob, "implement it"))] }),
+    });
+    const decision = await supervisor.decide(sampleInput());
+    expect(decision).toMatchObject({ action: { type: "reenter", reenter: { stageId: "fix" } } });
+  });
+});
+
+describe("buildRecoveryPrompt", () => {
+  const review = (verdict: string, ref = "ev-review"): EvidenceRecord => ({
+    ref,
+    kind: "review",
+    generation: 1,
+    payload: {
+      verdict,
+      reason: "looks fine",
+      producer: { stageId: "fix", purpose: "review" },
+    },
+  });
+
+  it("describes the current generation's own evidence by producer and verdict, not just its ref", () => {
+    const input = sampleInput();
+    input.view.evidence = [review("approved")];
+    const prompt = buildRecoveryPrompt(input);
+    expect(prompt).toContain("ev-review (fix/review): approved, looks fine");
+  });
+
+  it("nudges toward reentering and returning when the plan is already approved but unattempted this generation", () => {
+    const input = sampleInput();
+    input.view.evidence = [review("approved")];
+    const prompt = buildRecoveryPrompt(input);
+    expect(prompt).toContain("Prefer reenter then return over re-dispatching another review of the same approved plan.");
+  });
+
+  it("does not nudge once work-purpose evidence already exists this generation", () => {
+    const input = sampleInput();
+    const work: EvidenceRecord = {
+      ref: "ev-work",
+      kind: "other",
+      generation: 1,
+      payload: { producer: { stageId: "fix", purpose: "work" } },
+    };
+    input.view.evidence = [review("approved"), work];
+    const prompt = buildRecoveryPrompt(input);
+    expect(prompt).not.toContain("Prefer reenter then return");
+  });
+
+  it("does not nudge when the latest review in this generation requested changes", () => {
+    const input = sampleInput();
+    input.view.evidence = [review("request_changes")];
+    const prompt = buildRecoveryPrompt(input);
+    expect(prompt).not.toContain("Prefer reenter then return");
+  });
+
+  it("tells the supervisor to dispatch the stage's work itself on a correction_limit trigger, not reenter", () => {
+    const input = sampleInput();
+    input.trigger = { code: "correction_limit", message: "stage fix is still unresolved after 2 correction trials; the supervisor decides any further trial" };
+    input.view.evidence = [review("approved")];
+    const prompt = buildRecoveryPrompt(input);
+    expect(prompt).toContain("reenter then return only sends the graph back to the same refusal");
+    expect(prompt).toContain("Dispatch that stage's work yourself");
+    expect(prompt).toContain('job.writeScope: ["."]');
+    expect(prompt).not.toContain("Prefer reenter then return over re-dispatching");
+  });
+
+  it("only names older-generation evidence by ref, keeping full detail to the current generation", () => {
+    const input = sampleInput();
+    input.view.generation = 2;
+    input.view.evidence = [review("approved", "ev-old"), { ...review("approved", "ev-new"), generation: 2 }];
+    const prompt = buildRecoveryPrompt(input);
+    expect(prompt).toContain('"ev-old"');
+    expect(prompt).not.toContain("ev-old (fix/review)");
+    expect(prompt).toContain("ev-new (fix/review): approved, looks fine");
   });
 });

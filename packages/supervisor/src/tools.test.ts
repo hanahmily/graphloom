@@ -1,16 +1,28 @@
 import { describe, expect, it } from "vitest";
+import type { AgentSessionView } from "@graphloom/sdk";
 import { createAdmissionTools } from "./tools.js";
 
 type Execute = (id: string, params: Record<string, unknown>) => Promise<{ content: { text: string }[]; terminate?: boolean }>;
 
-function actionTool(name: string) {
-  const toolbox = createAdmissionTools([{ provider: "p", modelId: "m" }]);
+function actionTool(name: string, agentSessions: AgentSessionView[] = [], generation = 1) {
+  const toolbox = createAdmissionTools([{ provider: "p", modelId: "m" }], agentSessions, generation);
   const tool = toolbox.tools.find((t) => t.name === name)!;
   return { toolbox, execute: (tool as unknown as { execute: Execute }).execute };
 }
-const dispatchTool = () => actionTool("dispatch");
+const dispatchTool = (agentSessions: AgentSessionView[] = [], generation = 1) =>
+  actionTool("dispatch", agentSessions, generation);
 
 const job = { stageId: "fix", kind: "agent", purpose: "work", instruction: "Implement the fix." };
+
+const reviewSession: AgentSessionView = {
+  operationId: "op-1",
+  stageId: "fix",
+  attempt: 10,
+  generation: 1,
+  dispatchKey: "review:graphloom.coding-agent/run",
+  executorId: "graphloom.coding-agent/run",
+  status: "failed",
+};
 
 describe("admission tools", () => {
   it("rejects work without a writeScope so the model can correct it in the same turn", async () => {
@@ -29,6 +41,47 @@ describe("admission tools", () => {
     const { toolbox, execute } = dispatchTool();
     await execute("1", { reason: "look", job: { ...job, purpose: "diagnostic", readOnly: true } });
     expect(toolbox.proposal()).toMatchObject({ action: { job: { purpose: "diagnostic" } } });
+  });
+
+  it("rejects a continuation dispatched as a command job so the model can correct it in the same turn", async () => {
+    const { toolbox, execute } = dispatchTool([reviewSession]);
+    const rejected = await execute("1", {
+      reason: "finish the review",
+      job: { ...job, kind: "command", purpose: "review", readOnly: true, executor: { id: "graphloom.coding-agent/run" }, continueFrom: "op-1" },
+    });
+    expect(rejected.terminate).toBeUndefined();
+    expect(rejected.content[0]!.text).toMatch(/^Rejected: only agent jobs carry sessions/);
+    expect(toolbox.proposal()).toBeUndefined();
+
+    const accepted = await execute("2", {
+      reason: "finish the review",
+      job: { ...job, purpose: "review", readOnly: true, executor: { id: "graphloom.coding-agent/run" }, continueFrom: "op-1" },
+    });
+    expect(accepted.terminate).toBe(true);
+    expect(toolbox.proposal()).toMatchObject({ action: { type: "dispatch", job: { continueFrom: "op-1" } } });
+  });
+
+  it("rejects a continuation whose dispatch key does not match the session it names", async () => {
+    const { toolbox, execute } = dispatchTool([reviewSession]);
+    const rejected = await execute("1", {
+      reason: "finish the review",
+      job: { ...job, readOnly: true, executor: { id: "graphloom.agent/run" }, continueFrom: "op-1" },
+    });
+    expect(rejected.terminate).toBeUndefined();
+    expect(rejected.content[0]!.text).toMatch(
+      /^Rejected: operation op-1 has dispatch key review:graphloom\.coding-agent\/run, not work:graphloom\.agent\/run/,
+    );
+    expect(toolbox.proposal()).toBeUndefined();
+  });
+
+  it("rejects a continuation naming an operation with no recorded session", async () => {
+    const { toolbox, execute } = dispatchTool([]);
+    const rejected = await execute("1", {
+      reason: "finish the review",
+      job: { ...job, readOnly: true, continueFrom: "op-missing" },
+    });
+    expect(rejected.content[0]!.text).toMatch(/^Rejected: no agent session was recorded for operation op-missing/);
+    expect(toolbox.proposal()).toBeUndefined();
   });
 
   it("rejects observe paths outside the run worktree", async () => {
