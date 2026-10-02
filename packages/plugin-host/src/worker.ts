@@ -102,6 +102,13 @@ async function main(): Promise<void> {
       }
       writeError(envelope, "unknown", "unsupported request kind");
     } catch (err: unknown) {
+      // parseJsonBounded/assertWireRequest can throw before envelope is set from
+      // the real request (oversized, malformed), leaving it as baseEnvelope()'s
+      // empty runId. The parent's own wire validation then rejects that error
+      // response too, masking the real cause behind a confusing "malformed"
+      // failure. Recover what we can from the raw line so the error we send
+      // back still names the run it came from.
+      if (envelope.runId === "") envelope = recoverEnvelope(line);
       if (isWireValidationError(err)) {
         writeError(envelope, err.code, err.message);
       } else {
@@ -143,6 +150,31 @@ function baseEnvelope(): WireEnvelope {
     generation: 0,
     expectedStateRevision: 0,
     activeVersion: "",
+  };
+}
+
+/**
+ * Best-effort envelope fields scraped from a request line that failed full
+ * parsing or validation (oversized, malformed), without re-parsing the whole
+ * line: a regex scan works even on a line too large for parseJsonBounded, and
+ * degrades to the empty defaults only if the line carries no such fields at all.
+ */
+function recoverEnvelope(line: string): WireEnvelope {
+  const str = (key: string): string => new RegExp(`"${key}"\\s*:\\s*"([^"]*)"`).exec(line)?.[1] ?? "";
+  const optionalStr = (key: string): string | undefined => new RegExp(`"${key}"\\s*:\\s*"([^"]*)"`).exec(line)?.[1];
+  const num = (key: string): number => {
+    const m = new RegExp(`"${key}"\\s*:\\s*(-?\\d+(?:\\.\\d+)?)`).exec(line);
+    return m ? Number(m[1]) : 0;
+  };
+  const recoveryEpisodeId = optionalStr("recoveryEpisodeId");
+  return {
+    protocolVersion: PROTOCOL_VERSION,
+    runId: str("runId"),
+    operationId: str("operationId"),
+    generation: num("generation"),
+    expectedStateRevision: num("expectedStateRevision"),
+    activeVersion: str("activeVersion"),
+    ...(recoveryEpisodeId !== undefined ? { recoveryEpisodeId } : {}),
   };
 }
 

@@ -1,6 +1,12 @@
 import { PROTOCOL_VERSION, type GraphAction, type GraphDecision, type GraphDefinition, type RunView, type ValidationInput, type ValidationResult, type WireRequest, type WireResponse } from "./types.js";
 
-const MAX_WIRE_BYTES = 1_000_000;
+/**
+ * A run's RunView grows with its evidence (command stdout/stderr tails, file
+ * snapshots, issue bodies); a long-lived graph legitimately passes several MB
+ * of advance() input well before any run is actually pathological. This stays
+ * a sanity bound against a runaway/looping plugin, not a tight protocol limit.
+ */
+const MAX_WIRE_BYTES = 16_000_000;
 const VALIDATION_STATUSES = new Set(["passed", "failed", "inconclusive"]);
 
 export class WireValidationError extends Error {

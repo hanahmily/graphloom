@@ -240,9 +240,10 @@ function fix(view: RunView, issue: number, state: FixPrivateState): GraphDecisio
     return dispatchAgent(view, planReviewJob(planReviewInstruction({ issue, snapshot: snapshotBody, record: plan.record, ...(previous !== undefined ? { previous } : {}) })), "dispatch a fresh read-only reviewer for the plan", state);
   }
   if (verdict.productDecision !== undefined && verdict.verdict !== "approved") {
-    return stop(
-      { reason: "needs maintainer decision", blocker: verdict.productDecision, evidenceRefs: [verdict.record.ref] },
-      "the plan reviewer found a product decision an agent must not make",
+    return supervise(
+      { reason: `the plan reviewer named a product decision an agent must not make: ${verdict.productDecision}`, evidenceRefs: [verdict.record.ref] },
+      "hand a reviewer's product decision to the supervisor",
+      JSON.stringify(state),
     );
   }
   if (verdict.verdict !== "approved") {

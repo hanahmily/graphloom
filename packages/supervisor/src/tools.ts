@@ -1,6 +1,6 @@
 import path from "node:path";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { assertGraphDecision } from "@graphloom/sdk";
+import { assertGraphDecision, type AgentSessionView } from "@graphloom/sdk";
 import type { ModelRef, SupervisorProposal } from "./types.js";
 
 /**
@@ -126,11 +126,84 @@ export interface AdmissionToolbox {
   proposal(): SupervisorProposal | undefined;
 }
 
+export interface ContinuationJob {
+  stageId?: unknown;
+  kind?: unknown;
+  purpose?: unknown;
+  jobId?: unknown;
+  executor?: { id?: unknown };
+  continueFrom?: unknown;
+}
+
+/** Mirrors packages/controller/src/agent-sessions.ts's dispatchKey, pure and duplicable: supervisor depends only on @graphloom/sdk, not controller. */
+function dispatchKey(job: ContinuationJob, fallbackExecutorId?: string): string {
+  if (typeof job.jobId === "string") return job.jobId;
+  const pinnedId = typeof job.executor?.id === "string" ? job.executor.id : fallbackExecutorId ?? String(job.kind);
+  return `${String(job.purpose)}:${pinnedId}`;
+}
+
+/**
+ * Same checks as the controller's continuationRefusal, run before admission so
+ * a bad continueFrom is rejected in-turn like any other malformed job, rather
+ * than reaching the controller and hard-stopping the run with no recovery.
+ */
+/** Mutable work must declare where it may write; the controller hard-stops the run on this, with no recovery. */
+export function writeScopeRefusal(job: { purpose?: unknown; readOnly?: unknown; writeScope?: unknown }): string | undefined {
+  if (job.purpose !== "work" || job.readOnly === true) return undefined;
+  if (Array.isArray(job.writeScope) && job.writeScope.length > 0) return undefined;
+  return "a work job needs a non-empty writeScope; to rerun the graph's own step, reenter the stage instead";
+}
+
+/** An observe path outside the run worktree; the controller hard-stops the run on this too. */
+export function escapingObservePath(paths: unknown): string | undefined {
+  if (!Array.isArray(paths)) return undefined;
+  return paths.find((p) => typeof p === "string" && (path.isAbsolute(p) || p.split(/[/\\]/).includes("..")));
+}
+
+export function continuationRefusal(
+  job: ContinuationJob,
+  agentSessions: readonly AgentSessionView[],
+  generation: number,
+): string | undefined {
+  const from = job.continueFrom;
+  if (typeof from !== "string") return undefined;
+  if (job.kind !== "agent") {
+    return `only agent jobs carry sessions; set kind to "agent" to continue ${from}, or omit continueFrom for a ${String(job.kind)} job`;
+  }
+  const record = agentSessions.find((r) => r.operationId === from);
+  if (record === undefined) {
+    return `no agent session was recorded for operation ${from}`;
+  }
+  if (record.stageId !== job.stageId) {
+    return `operation ${from} ran stage ${record.stageId}, not ${String(job.stageId)}`;
+  }
+  // A job that does not name its own executor inherits the session's: continuing
+  // a session means using the executor that session already ran on, and the
+  // supervisor cannot otherwise predict a run's own executor-catalog overrides
+  // (RunView exposes no such catalog) the way the controller's own pinning does.
+  const key = dispatchKey(job, record.executorId);
+  if (record.dispatchKey !== key) {
+    return `operation ${from} has dispatch key ${record.dispatchKey}, not ${key}`;
+  }
+  if (record.generation > generation) {
+    return `operation ${from} was recorded by a later generation (${record.generation} > ${generation})`;
+  }
+  const successor = agentSessions.find((r) => r.continuedFrom === from);
+  if (successor !== undefined) {
+    return `operation ${from} was already continued by ${successor.operationId}; continue from that one`;
+  }
+  return undefined;
+}
+
 /**
  * Build the admission tools for one supervisor turn. The first valid call
  * ends the turn; invalid arguments return an error the model can correct.
  */
-export function createAdmissionTools(configured: readonly ModelRef[]): AdmissionToolbox {
+export function createAdmissionTools(
+  configured: readonly ModelRef[],
+  agentSessions: readonly AgentSessionView[] = [],
+  generation = 0,
+): AdmissionToolbox {
   let proposal: SupervisorProposal | undefined;
 
   const accept = (next: SupervisorProposal) => {
@@ -156,15 +229,17 @@ export function createAdmissionTools(configured: readonly ModelRef[]): Admission
       }),
       async execute(_toolCallId: string, params: Record<string, unknown>) {
         if (proposal !== undefined) return duplicate();
-        const job = params[specKey] as { purpose?: unknown; readOnly?: unknown; writeScope?: unknown } | undefined;
-        if (action === "dispatch" && job?.purpose === "work" && job.readOnly !== true &&
-            !(Array.isArray(job.writeScope) && job.writeScope.length > 0)) {
-          return reject("a work job needs a non-empty writeScope; to rerun the graph's own step, reenter the stage instead");
+        const job = params[specKey] as
+          | ({ purpose?: unknown; readOnly?: unknown; writeScope?: unknown } & ContinuationJob)
+          | undefined;
+        if (action === "dispatch" && job !== undefined) {
+          const scopeRefusal = writeScopeRefusal(job);
+          if (scopeRefusal !== undefined) return reject(scopeRefusal);
+          const refusal = continuationRefusal(job, agentSessions, generation);
+          if (refusal !== undefined) return reject(refusal);
         }
         const paths = (params[specKey] as { paths?: unknown } | undefined)?.paths;
-        const escaping = action === "observe" && Array.isArray(paths)
-          ? paths.find((p) => typeof p === "string" && (path.isAbsolute(p) || p.split(/[/\\]/).includes("..")))
-          : undefined;
+        const escaping = action === "observe" ? escapingObservePath(paths) : undefined;
         if (escaping !== undefined) return reject(`observe paths are relative to the run worktree; ${escaping} is not`);
         try {
           return accept(assertGraphDecision({ reason: params.reason, action: { type: action, [specKey]: params[specKey] } }));

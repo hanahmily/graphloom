@@ -71,7 +71,7 @@ invalidates it.
 | Plan is `cannot_reproduce` | Stop "cannot reproduce" |
 | Plan is invalid | Supervise |
 | Plan ready, not reviewed | Dispatch a fresh read-only Pi reviewer with the issue and the plan |
-| Plan reviewer names a product decision without approving | Stop "needs maintainer decision" |
+| Plan reviewer names a product decision without approving | Supervise; the graph itself cannot tell a genuine product question from a malformed one, so the supervisor judges it and stops "needs maintainer decision" only if it is real |
 | Plan reviewer requests changes | Return the findings to the planner's session, at most twice, then Supervise |
 | Plan approved | Implement, continuing the plan's session, with the protected paths excluded from write scope |
 | Implemented | Observe `CHANGES.md`, run the candidate checks, then RED on the base |

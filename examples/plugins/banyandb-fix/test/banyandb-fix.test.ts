@@ -464,9 +464,11 @@ describe("banyandb-fix graph", () => {
     expect(jobs.some((j) => j.purpose === "work" || j.purpose === "review")).toBe(false);
   });
 
-  it("stops with the plan reviewer's question when the plan depends on a product decision", () => {
+  it("hands the plan reviewer's product decision to the supervisor instead of stopping directly", () => {
     const { decision, jobs } = simulate({ planReviews: [{ verdict: "request_changes", summary: "changes the metric", productDecision: "Should the metric change?" }] });
-    expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "needs maintainer decision", blocker: "Should the metric change?" } });
+    expect(decision.action).toMatchObject({ type: "supervise" });
+    const reason = (decision.action as { supervise: { reason: string } }).supervise.reason;
+    expect(reason).toContain("Should the metric change?");
     expect(jobs.some((j) => j.purpose === "work")).toBe(false);
   });
 

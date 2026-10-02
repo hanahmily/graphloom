@@ -1,6 +1,7 @@
+import type { AgentSessionView, EvidenceRecord } from "@graphloom/sdk";
 import { parseSupervisorDecision } from "./decision.js";
 import type { PiSupervisorSession } from "./pi-session.js";
-import { createAdmissionTools } from "./tools.js";
+import { continuationRefusal, createAdmissionTools, escapingObservePath, writeScopeRefusal } from "./tools.js";
 import {
   assertGrantedRoot,
   type CandidatePatchRequest,
@@ -149,7 +150,7 @@ export function createPiSupervisor(options: CreatePiSupervisorOptions): PiSuperv
       if (input.maxProviderCalls !== undefined && input.maxProviderCalls < 1) {
         throw new Error("decide has no provider-call allowance");
       }
-      const toolbox = createAdmissionTools(configured);
+      const toolbox = createAdmissionTools(configured, input.view.agentSessions ?? [], input.view.generation);
       const prompt = buildRecoveryPrompt(input, {
         current: { provider: binding.provider, modelId: binding.modelId },
         configured,
@@ -164,8 +165,13 @@ export function createPiSupervisor(options: CreatePiSupervisorOptions): PiSuperv
       } finally {
         settleTurns();
       }
-      // Models without tool calling may still reply with the decision as JSON.
-      return toolbox.proposal() ?? parseSupervisorDecision(text);
+      // Models without tool calling may still reply with the decision as JSON,
+      // bypassing the admission tools' in-turn checks entirely; an otherwise
+      // malformed proposal from that path would reach the controller and
+      // hard-stop the run with no chance to self-correct, the way the
+      // tool-call path's reject() already lets the model fix in-turn.
+      const proposal = toolbox.proposal() ?? parseSupervisorDecision(text);
+      return sanitizeProposal(proposal, input.view.agentSessions ?? [], input.view.generation);
     },
 
     async patchCandidate(args: CandidatePatchRequest) {
@@ -237,10 +243,52 @@ function isConfigured(configured: SupervisorModelRef[], ref: SupervisorModelRef)
   );
 }
 
+/**
+ * Repair what the tool-call path's reject() would have let the model correct
+ * in-turn, so a text-only reply cannot reach the controller with a mistake
+ * that hard-stops the whole run instead of being recoverable.
+ *
+ * - An invalid continueFrom is dropped: the dispatch still runs (fresh
+ *   session, same instruction and writeScope), which is a far better outcome
+ *   than losing the run to it.
+ * - A work job missing its writeScope cannot be safely defaulted (there is no
+ *   safe scope to invent), so the dispatch is replaced with a reenter of the
+ *   same stage instead: safe, and it gives the supervisor another turn to
+ *   dispatch that work with a real writeScope.
+ * - An observe action keeps only the paths that do not escape the worktree.
+ */
+function sanitizeProposal(
+  proposal: SupervisorProposal,
+  agentSessions: readonly AgentSessionView[],
+  generation: number,
+): SupervisorProposal {
+  if (!("action" in proposal)) return proposal;
+  const { action } = proposal;
+  if (action.type === "dispatch") {
+    const scopeRefusal = writeScopeRefusal(action.job);
+    if (scopeRefusal !== undefined) {
+      return { ...proposal, action: { type: "reenter", reenter: { stageId: action.job.stageId, reason: scopeRefusal } } };
+    }
+    if (continuationRefusal(action.job, agentSessions, generation) === undefined) return proposal;
+    const { continueFrom: _continueFrom, ...job2 } = action.job;
+    void _continueFrom;
+    return { ...proposal, action: { ...action, job: job2 } };
+  }
+  if (action.type === "observe" && action.observe.paths !== undefined) {
+    const escaping = action.observe.paths.filter(
+      (p) => escapingObservePath([p]) === undefined,
+    );
+    if (escaping.length === action.observe.paths.length) return proposal;
+    return { ...proposal, action: { ...action, observe: { ...action.observe, paths: escaping } } };
+  }
+  return proposal;
+}
+
 export function buildRecoveryPrompt(
   input: SupervisorInput,
   models?: { current: SupervisorModelRef; configured: readonly SupervisorModelRef[] },
 ): string {
+  const currentGeneration = currentGenerationEvidence(input.view.evidence, input.view.generation);
   const viewSummary = {
     runId: input.runId,
     episodeId: input.episodeId,
@@ -254,7 +302,13 @@ export function buildRecoveryPrompt(
       valid: r.valid,
       requirementId: r.requirementId,
     })),
+    // Older generations are named here by ref only: a long recovery history
+    // should not force every past episode's full detail into every prompt.
     evidenceRefs: input.view.evidence.map((e) => e.ref),
+    // The current generation's own evidence, described rather than just named:
+    // across many recovery episodes this session's own memory of what an older
+    // evidence ref actually contained gets less reliable than reading it fresh.
+    currentGenerationEvidence: currentGeneration.map((e) => describeRecoveryEvidence(e)),
     generation: input.view.generation,
     stateRevision: input.view.stateRevision,
     activeVersion: input.view.activeVersion,
@@ -262,6 +316,14 @@ export function buildRecoveryPrompt(
     agentSessions: input.view.agentSessions ?? [],
     ...(input.view.repairAuthority !== undefined ? { repairAuthority: input.view.repairAuthority } : {}),
   };
+  const workThisGeneration = currentGeneration.some((e) => producerOf(e)?.purpose === "work");
+  const latestReviewVerdict = [...currentGeneration].reverse().map((e) => verdictOf(e)).find((v) => v !== undefined);
+  // correction_limit means the controller already refused the graph's own work dispatch for
+  // this stage and discarded it unrun (see packages/controller/src/escalation.ts's
+  // correctionHandoff): reenter only starts another attempt whose first work dispatch the
+  // controller refuses the same way, forever, since reenter never clears correctionTrials.
+  // Only this supervisor dispatching that stage's work itself breaks the cycle.
+  const correctionLimitHandoff = input.trigger.code === "correction_limit";
 
   const settlement = input.lastSettlement;
   return [
@@ -274,7 +336,16 @@ export function buildRecoveryPrompt(
     "For activate_repair, use a qualifiedArtifactId from repairCandidates with status qualified.",
     "repairAuthority shows what the operator granted and whether the graph bundle's code can be patched. An opaque bundle's code cannot be: retry the work or repair its environment instead. Substitute a validator (qualify_repair target validator with requirementId, adding files without editing existing ones) only when validatorSubstitution is granted and that requirement has a readable statement. Otherwise stop, citing the failing validation's evidenceRefs; never invent a replacement criterion.",
     "reenter starts a new attempt but runs nothing. To have the graph run that attempt's own jobs (its instructions, result schemas and write scopes), return after reentering; dispatch only work the graph would not run itself.",
-    "To retry a stage's agent work with the context of its earlier session, dispatch with job.continueFrom set to an operationId from agentSessions of that stage and dispatch key; start fresh instead when that context is misleading.",
+    "To retry a stage's agent work with the context of its earlier session, dispatch with job.kind \"agent\" and job.continueFrom set to an operationId from agentSessions of that stage and dispatch key; start fresh instead when that context is misleading. continueFrom only works on an agent job: a command job has no session to resume.",
+    ...(correctionLimitHandoff
+      ? [
+          "This episode's trigger is correction_limit: the controller already refused the graph's own next work dispatch for the current stage and discarded it unrun, because that stage hit its correction-trial limit. reenter does not clear that limit, so reenter then return only sends the graph back to the same refusal; it is not a usable remedy here. Dispatch that stage's work yourself (job.purpose \"work\", kind \"agent\", continuing the stage's earlier agent session with job.continueFrom when agentSessions has one for its dispatch key) to make real progress, or stop if the underlying problem is genuinely unrepairable. A work job's writeScope is required and must be non-empty; when you do not know this stage's own narrower convention, job.writeScope: [\".\"] (the whole worktree) is always valid — do not omit writeScope or the controller refuses the dispatch outright.",
+        ]
+      : latestReviewVerdict === "approved" && !workThisGeneration
+        ? [
+            "The current generation's own review already approved, and no work-purpose evidence exists yet this generation: the graph has not actually attempted that work. Prefer reenter then return over re-dispatching another review of the same approved plan.",
+          ]
+        : []),
     ...(models !== undefined
       ? [
           `Your model is ${models.current.provider}/${models.current.modelId}. To continue on another operator-configured model (${models.configured
@@ -294,6 +365,54 @@ export function buildRecoveryPrompt(
     JSON.stringify(viewSummary, null, 2),
     "```",
   ].join("\n");
+}
+
+const MAX_CURRENT_GENERATION_EVIDENCE = 40;
+const MAX_EVIDENCE_DETAIL_CHARS = 160;
+
+function currentGenerationEvidence(evidence: EvidenceRecord[], generation: number): EvidenceRecord[] {
+  return evidence.filter((e) => e.generation === generation).slice(-MAX_CURRENT_GENERATION_EVIDENCE);
+}
+
+function producerOf(record: EvidenceRecord): { stageId?: string; purpose?: string } | undefined {
+  const payload = record.payload as { producer?: { stageId?: string; purpose?: string } } | undefined;
+  return payload?.producer;
+}
+
+/** The verdict a review-purpose or review-kind evidence record carries, wherever its payload puts it. */
+function verdictOf(record: EvidenceRecord): string | undefined {
+  const payload = (record.payload ?? {}) as Record<string, unknown>;
+  if (typeof payload.verdict === "string") return payload.verdict;
+  const output = (payload.codingAgent as { output?: unknown } | undefined)?.output as
+    | Record<string, unknown>
+    | undefined;
+  return typeof output?.verdict === "string" ? (output.verdict as string) : undefined;
+}
+
+/**
+ * One line describing an evidence record by its producer and whatever
+ * verdict/status/summary its payload carries, not just its bare ref: across
+ * many recovery episodes this session's own memory of an older ref's content
+ * gets less reliable than reading a fresh, bounded description of it.
+ */
+function describeRecoveryEvidence(record: EvidenceRecord): string {
+  const producer = producerOf(record);
+  const who = producer?.stageId !== undefined && producer?.purpose !== undefined ? `${producer.stageId}/${producer.purpose}` : record.kind;
+  const payload = (record.payload ?? {}) as Record<string, unknown>;
+  const codingAgent = payload.codingAgent as { status?: string; output?: unknown } | undefined;
+  const output = codingAgent?.output as Record<string, unknown> | undefined;
+  const verdict = verdictOf(record);
+  const status = typeof output?.status === "string" ? (output.status as string) : codingAgent?.status;
+  // "summary" and "reason" are both common across this codebase's evidence
+  // shapes (job summaries vs. decision/review reasons); either is worth showing.
+  const text = (value: unknown): string | undefined => (typeof value === "string" ? value : undefined);
+  const summary = text(payload.summary) ?? text(output?.summary) ?? text(payload.reason) ?? text(output?.reason);
+  const detail = [verdict, status, summary].filter((s): s is string => s !== undefined).join(", ");
+  return `${record.ref} (${who})${detail !== "" ? `: ${clipDetail(detail)}` : ""}`;
+}
+
+function clipDetail(text: string): string {
+  return text.length <= MAX_EVIDENCE_DETAIL_CHARS ? text : `${text.slice(0, MAX_EVIDENCE_DETAIL_CHARS)}…`;
 }
 
 /**
