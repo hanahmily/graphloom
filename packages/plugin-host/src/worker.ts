@@ -161,10 +161,12 @@ function baseEnvelope(): WireEnvelope {
  */
 function recoverEnvelope(line: string): WireEnvelope {
   const str = (key: string): string => new RegExp(`"${key}"\\s*:\\s*"([^"]*)"`).exec(line)?.[1] ?? "";
+  const optionalStr = (key: string): string | undefined => new RegExp(`"${key}"\\s*:\\s*"([^"]*)"`).exec(line)?.[1];
   const num = (key: string): number => {
     const m = new RegExp(`"${key}"\\s*:\\s*(-?\\d+(?:\\.\\d+)?)`).exec(line);
     return m ? Number(m[1]) : 0;
   };
+  const recoveryEpisodeId = optionalStr("recoveryEpisodeId");
   return {
     protocolVersion: PROTOCOL_VERSION,
     runId: str("runId"),
@@ -172,6 +174,7 @@ function recoverEnvelope(line: string): WireEnvelope {
     generation: num("generation"),
     expectedStateRevision: num("expectedStateRevision"),
     activeVersion: str("activeVersion"),
+    ...(recoveryEpisodeId !== undefined ? { recoveryEpisodeId } : {}),
   };
 }
 

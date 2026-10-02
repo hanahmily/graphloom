@@ -203,6 +203,33 @@ describe("createPiSupervisor", () => {
     expect(decision.action.job.continueFrom).toBeUndefined();
   });
 
+  it("keeps a valid continuation from a text-only reply whose job omits executor", async () => {
+    const defaultAgentSession: AgentSessionView = {
+      operationId: "op-2",
+      stageId: "fix",
+      attempt: 5,
+      generation: 1,
+      dispatchKey: "work:graphloom.agent/run",
+      executorId: "graphloom.agent/run",
+      status: "failed",
+    };
+    const okJob = {
+      stageId: "fix",
+      kind: "agent" as const,
+      purpose: "work" as const,
+      instruction: "finish the implementation",
+      writeScope: ["."],
+      continueFrom: "op-2",
+    };
+    const supervisor = createPiSupervisor({
+      session: fakeSession({ replies: [JSON.stringify(dispatch(okJob, "finish it"))] }),
+    });
+    const input = sampleInput();
+    input.view.agentSessions = [defaultAgentSession];
+    const decision = await supervisor.decide(input);
+    expect(decision).toMatchObject({ action: { type: "dispatch", job: { continueFrom: "op-2" } } });
+  });
+
   it("replaces a text-only work dispatch missing its writeScope with a reenter, instead of letting it reach the controller", async () => {
     const badJob = {
       stageId: "fix",

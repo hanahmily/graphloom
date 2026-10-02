@@ -1,6 +1,6 @@
 import path from "node:path";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { assertGraphDecision, type AgentSessionView } from "@graphloom/sdk";
+import { assertGraphDecision, builtinPinForKind, type AgentSessionView } from "@graphloom/sdk";
 import type { ModelRef, SupervisorProposal } from "./types.js";
 
 /**
@@ -137,7 +137,13 @@ export interface ContinuationJob {
 
 /** Mirrors packages/controller/src/agent-sessions.ts's dispatchKey, pure and duplicable: supervisor depends only on @graphloom/sdk, not controller. */
 function dispatchKey(job: ContinuationJob): string {
-  return typeof job.jobId === "string" ? job.jobId : `${String(job.purpose)}:${job.executor?.id ?? job.kind}`;
+  if (typeof job.jobId === "string") return job.jobId;
+  const pinnedId = typeof job.executor?.id === "string"
+    ? job.executor.id
+    : job.kind === "agent" || job.kind === "command"
+      ? builtinPinForKind(job.kind).id
+      : String(job.kind);
+  return `${String(job.purpose)}:${pinnedId}`;
 }
 
 /**

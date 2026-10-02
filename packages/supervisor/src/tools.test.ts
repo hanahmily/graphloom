@@ -74,6 +74,25 @@ describe("admission tools", () => {
     expect(toolbox.proposal()).toBeUndefined();
   });
 
+  it("accepts a continuation whose job omits executor, normalizing through the default agent pin", async () => {
+    const defaultAgentSession: AgentSessionView = {
+      operationId: "op-2",
+      stageId: "fix",
+      attempt: 5,
+      generation: 1,
+      dispatchKey: "work:graphloom.agent/run",
+      executorId: "graphloom.agent/run",
+      status: "failed",
+    };
+    const { toolbox, execute } = dispatchTool([defaultAgentSession]);
+    const accepted = await execute("1", {
+      reason: "finish the implementation",
+      job: { ...job, readOnly: true, continueFrom: "op-2" },
+    });
+    expect(accepted.terminate).toBe(true);
+    expect(toolbox.proposal()).toMatchObject({ action: { type: "dispatch", job: { continueFrom: "op-2" } } });
+  });
+
   it("rejects a continuation naming an operation with no recorded session", async () => {
     const { toolbox, execute } = dispatchTool([]);
     const rejected = await execute("1", {
