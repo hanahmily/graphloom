@@ -66,7 +66,7 @@ Fix
     blocked                     --> Stop: needs maintainer decision
   plan review                   (Pi, read-only, fresh session)
     request_changes             --> revise the plan in the planner's session, at most twice, then supervisor
-    product decision            --> Stop: needs maintainer decision
+    product decision            --> supervisor: judges it, Stop: needs maintainer decision only if it is real
   implement                     (Claude Code, continues the plan session)
   checks                        (command jobs run by the controller)
   validate  --failed check-->   reenter Fix with the failing evidence
@@ -166,8 +166,10 @@ in the change the controller checks against the write scope.
    named, and covered by a planned test or stated as a risk; a removed
    guarantee that other code relies on is blocking). Findings go back to the
    planner's session; after two revisions the supervisor decides. A product
-   decision the plan depends on stops the run; one raised with an approval
-   goes into the pull request's open questions.
+   decision the plan depends on goes to the supervisor, since the graph
+   itself cannot tell a genuine product question from a reviewer artifact;
+   the supervisor stops the run only if it is real. One raised with an
+   approval goes into the pull request's open questions.
 
    On the #14111 plan from the first live run, Pi with MiniMax-M3 approved it
    when the reach axis only listed lifecycle paths. Told to start from the
@@ -578,7 +580,9 @@ read-only session and controller-admitted activation. It stops when no authorize
 remedy remains or a hard blocker or budget prevents progress. It may switch the
 implementer to Pi, or the reviewer to Claude Code, after repeated failures. It
 never lets one session both write and review the same revision. It cannot
-unblock a product decision, change a tier or waive a requirement.
+unblock a product decision, change a tier or waive a requirement. It can judge
+whether a reviewer's flagged product decision is a genuine one or a malformed
+artifact from that pass; only a genuine one stops the run.
 
 Budgets use the controller defaults, including the four-hour active-time budget,
 unless the task sets tighter ones.
