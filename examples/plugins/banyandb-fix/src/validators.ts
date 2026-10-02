@@ -219,7 +219,17 @@ export const planReviewed: Validator = {
     });
     if (survived.length > 0) return failed(`the latest plan review raised finding(s) ${survived.join(", ")} that are not settled`);
     if (planPass.verdict === "approved") return passed("the reviewer approved the plan");
-    if (planPass.verdict === "request_changes") return failed(`the reviewer sent the plan back: ${planPass.summary}`);
+    // Design §4.4: the pass passes when it approves or raises only dismissed
+    // findings. planPass.raised alone cannot tell "raises only dismissed
+    // findings" from "raises nothing": a finding this very pass newly raises
+    // is always "raised", never simultaneously dismissed, so survived (just
+    // above) already fails on any fresh raise before this is reached — the
+    // repeat of an already-open finding via `prior` is what later settles as
+    // dismissed, so check whether the pass named anything there instead.
+    if (planPass.verdict === "request_changes") {
+      if (pass.prior.length > 0) return passed(`the reviewer's finding(s) were all settled by verification: ${planPass.summary}`);
+      return failed(`the reviewer sent the plan back: ${planPass.summary}`);
+    }
     return inconclusive(`unknown verdict ${JSON.stringify(pass.verdict)}`);
   },
 };

@@ -1,7 +1,7 @@
 import type { AgentSessionView, EvidenceRecord } from "@graphloom/sdk";
 import { parseSupervisorDecision } from "./decision.js";
 import type { PiSupervisorSession } from "./pi-session.js";
-import { continuationRefusal, createAdmissionTools, escapingObservePath, writeScopeRefusal } from "./tools.js";
+import { continuationRefusal, createAdmissionTools, escapingObservePath, supervisorProposalKey, writeScopeRefusal } from "./tools.js";
 import {
   assertGrantedRoot,
   type CandidatePatchRequest,
@@ -177,7 +177,22 @@ export function createPiSupervisor(options: CreatePiSupervisorOptions): PiSuperv
       // hard-stop the run with no chance to self-correct, the way the
       // tool-call path's reject() already lets the model fix in-turn.
       const proposal = toolbox.proposal() ?? parseSupervisorDecision(text);
-      return sanitizeProposal(proposal, input.view.agentSessions ?? [], input.view.generation);
+      const sanitized = sanitizeProposal(proposal, input.view.agentSessions ?? [], input.view.generation);
+      // A JSON-only reply never went through the admission tools' own
+      // repeated-proposal rejection (there is no tool call to reject, and no
+      // further turn for the model to retry in): reject it here instead of
+      // letting a repeated no-progress proposal reach the controller through
+      // this path alone.
+      if ("action" in sanitized) {
+        const key = supervisorProposalKey(input.trigger.code, sanitized.action);
+        const already = input.view.escalation?.repeatedProposals[key]?.count ?? 0;
+        if (already + 1 >= 3) {
+          throw new Error(
+            `this exact ${sanitized.action.type} proposal would be the ${already + 1 === 3 ? "3rd" : `${already + 1}th`} time with no progress since the controller last checked; propose something that would change the outcome, or stop`,
+          );
+        }
+      }
+      return sanitized;
     },
 
     async patchCandidate(args: CandidatePatchRequest) {

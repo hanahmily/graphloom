@@ -1,11 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { dispatch, returnToNormal, stop, WireValidationError, type AgentSessionView, type EvidenceRecord } from "@graphloom/sdk";
+import { dispatch, reenter, returnToNormal, stop, WireValidationError, type AgentSessionView, type EvidenceRecord } from "@graphloom/sdk";
 import {
   buildRecoveryPrompt,
   createPiSupervisor,
   type PiSupervisorSessionPort,
   type SupervisorModelRef,
 } from "./pi-supervisor.js";
+import { supervisorProposalKey } from "./tools.js";
 import type { SupervisorInput } from "./types.js";
 
 function sampleInput(episodeId = "ep-1"): SupervisorInput {
@@ -110,6 +111,30 @@ describe("createPiSupervisor", () => {
       }),
     });
     await expect(supervisor.decide(sampleInput())).rejects.toThrow(WireValidationError);
+  });
+
+  it("rejects a JSON-only reply that repeats a proposal already at its rejection threshold", async () => {
+    const repeated = reenter({ stageId: "write", reason: "check again" }, "reenter");
+    const key = supervisorProposalKey("correction_limit", repeated.action);
+    const input: SupervisorInput = {
+      ...sampleInput(),
+      trigger: { code: "correction_limit", message: "stage write is still unresolved" },
+      view: {
+        ...sampleInput().view,
+        escalation: {
+          correctionTrials: {},
+          handoff: {},
+          repeatedProposals: { [key]: { triggerCode: "correction_limit", actionType: "reenter", stageId: "write", count: 2 } },
+        },
+      },
+    };
+    const supervisor = createPiSupervisor({
+      session: fakeSession({ replies: [JSON.stringify(repeated)] }),
+    });
+    // A JSON-only reply never calls the admission tools, so there is no
+    // in-turn reject() to catch this: it must still be refused here, the
+    // same way the tool-calling path's execute() refuses a 3rd repeat.
+    await expect(supervisor.decide(input)).rejects.toThrow(/3rd time with no progress/);
   });
 
   it("journals an explicit model switch and rejects silent fallback", async () => {

@@ -571,6 +571,43 @@ describe("graph-declared environment and disposable checkouts", () => {
     expect(report.blocker).toContain("independent-review");
   });
 
+  it("invalidates a receipt bound only to command evidence when the candidate changes afterward", async () => {
+    const env = await makeEnv();
+    let worktree = "";
+    const runner = testRunner(async (job, ctx) => {
+      worktree = ctx.worktreePath;
+      return job.purpose === "review" ? review() : fixAndAddTest(job, ctx);
+    });
+    const tamper: ScriptedAdvance = () => {
+      writeFileSync(path.join(worktree, "README.md"), "tampered further\n", "utf8");
+      return reviewJob;
+    };
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({
+        definition: definitionWith(PREPARE),
+        advances: [
+          work,
+          red,
+          green,
+          validate({ stageId: "write" }, "accept the fix"),
+          tamper,
+          validate({ stageId: "review" }, "accept the review"),
+          stop({ reason: "complete", blocker: "none" }, "done"),
+        ],
+      }),
+      validators,
+      runner,
+      stateRoot: env.stateRoot,
+      runId: "command-identity",
+    });
+
+    const state = await loadRunState(report.stateDir);
+    const writeReceipt = state.receipts.find((r) => r.stageId === "write")!;
+    expect(writeReceipt.valid).toBe(false);
+    expect(report.status).not.toBe("succeeded");
+  });
+
   describe("pinned files", () => {
     const pinned = (sha256: string): EnvironmentDeclaration => ({ pinnedFiles: [{ path: "README.md", sha256 }] });
     const baseSha = createHash("sha256").update(BASE_README).digest("hex");

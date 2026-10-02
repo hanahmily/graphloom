@@ -39,6 +39,7 @@ import {
   requestedIssue,
   testOutcome,
   toVerify,
+  toVerifyPlan,
   validatorById,
   verificationInstruction,
   type DecisionRecord,
@@ -1198,6 +1199,19 @@ describe("plan findings ledger", () => {
     const p1 = planFindingById(ledger, "P1")!;
     expect(p1.state).toBe("disputed");
     expect(p1.dispute).toMatch(/do not match the change/);
+  });
+
+  it("consumes a verification that gives no verdict, so it is not dispatched again before the round cap", () => {
+    const evidence = [planRecord(), planPass([DEFECT]), planRecord(), planPass([], { P1: "still_present" })];
+    expect(planStates(evidence)).toEqual({ P1: "disputed@1" });
+    const noVerdict = [...evidence, planVerify([], "d1")];
+    const ledger = planFindingLedger(noVerdict, "fix");
+    expect(toVerifyPlan(ledger)).toEqual([]);
+    const p1 = planFindingById(ledger, "P1")!;
+    expect(p1.state).toBe("disputed");
+    expect(p1.rounds).toBe(1);
+    expect(p1.verdict).toMatchObject({ verdict: "uncertain" });
+    expect(p1.dispute).toBe("the verifier gave no verdict");
   });
 });
 

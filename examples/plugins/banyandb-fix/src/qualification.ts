@@ -296,7 +296,20 @@ export const QUALIFICATION_CASES: readonly QualificationCase[] = [
   ),
   c(
     "plan-reviewer",
-    "a plan finding the verifier dismisses with matching quotes does not block approval",
+    "a plan finding the verifier dismisses with matching quotes does not block approval, even when the pass itself still says request_changes",
+    [
+      plan(),
+      review("request_changes", FIX_STAGE, { findings: [{ axis: "reach", severity: "blocking", detail: "Close waits forever" }] }),
+      plan(),
+      review("request_changes", FIX_STAGE, { prior: [{ finding: "P1", status: "still_present", reason: "still there" }] }),
+      planVerification("refuted", [BOUNDED]),
+      scheduler(),
+    ],
+    "passed",
+  ),
+  c(
+    "plan-reviewer",
+    "a plan finding the verifier dismisses does not block an approved plan",
     [
       plan(),
       review("request_changes", FIX_STAGE, { findings: [{ axis: "reach", severity: "blocking", detail: "Close waits forever" }] }),

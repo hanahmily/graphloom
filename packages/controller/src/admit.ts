@@ -308,6 +308,14 @@ export async function admitValidation(
     if (identityArtifactSchema !== undefined) {
       const artifactDigest = currentArtifactDigest(working, identityArtifactSchema);
       if (artifactDigest !== undefined) acceptedIdentity[identityArtifactSchema] = artifactDigest;
+    } else if (liveDigest !== undefined && evidence.some((e) => e.kind === "command")) {
+      // A command-backed check (a build or test run in a checkout of the
+      // candidate) can depend on any file in the repository, not only the
+      // ones explicit file observations named: narrow path-scoped identity
+      // cannot cover it, so anchor to the whole candidate instead. A
+      // requirement that needs narrower semantics than this declares its own
+      // identityArtifactSchema above.
+      acceptedIdentity.candidate = liveDigest;
     }
     newReceipts.push({
       id: `rcpt-${working.receiptSeq}`,
@@ -319,10 +327,11 @@ export async function admitValidation(
       valid: true,
       ...(liveDigest !== undefined ? { candidateDigest: liveDigest } : {}),
       // Always set, even empty: an empty acceptedIdentity means this
-      // receipt's evidence named nothing to anchor to (e.g. a command-only
-      // check with no file evidence), so nothing invalidates it — distinct
-      // from acceptedIdentity being entirely absent, which only a
-      // pre-migration receipt (minted before this field existed) can be.
+      // receipt's evidence named nothing at all to anchor to (e.g. an
+      // environment check or a review with no command or file evidence), so
+      // nothing invalidates it — distinct from acceptedIdentity being
+      // entirely absent, which only a pre-migration receipt (minted before
+      // this field existed) can be.
       acceptedIdentity,
       ...(requirement.prerequisiteRequirementIds !== undefined
         ? { prerequisiteBindings: prerequisiteBindingsFor(working, requirement.prerequisiteRequirementIds, requirementId) }
@@ -396,6 +405,7 @@ export function invalidateStageAndAfter(
  */
 export async function invalidateFromStage(state: DurableRunState): Promise<DurableRunState> {
   const liveFingerprintCache = new Map<string, string>();
+  let liveCandidate: Promise<string | undefined> | undefined;
   const checks = await Promise.all(
     state.receipts.map(async (r) => {
       if (!r.valid) return true;
@@ -404,7 +414,9 @@ export async function invalidateFromStage(state: DurableRunState): Promise<Durab
         const current =
           key === "workspace"
             ? await liveReceiptWorkspaceDigest(state, r, liveFingerprintCache)
-            : currentArtifactDigest(state, key);
+            : key === "candidate"
+              ? await (liveCandidate ??= liveCandidateDigest(state))
+              : currentArtifactDigest(state, key);
         if (current !== digest) return false;
       }
       if (r.prerequisiteBindings !== undefined) {

@@ -222,7 +222,14 @@ function applyPlanVerification(ledger: PlanLedger, record: EvidenceRecord, statu
   for (const f of covered) {
     const v = "verdicts" in parsed ? parsed.verdicts.get(f.id) : undefined;
     if (v === undefined) {
-      f.dispute = "problem" in parsed ? parsed.problem : "the verifier gave no verdict";
+      const reason = "problem" in parsed ? parsed.problem : "the verifier gave no verdict";
+      // Record the attempt as a verdict too (uncertain), not just a dispute
+      // reason: toVerifyPlan selects by verdict === undefined, and leaving it
+      // unset here would make this finding eligible for verification again
+      // next turn, dispatching the same verification forever instead of
+      // letting the round cap route it to the supervisor.
+      f.verdict = { verdict: "uncertain", reason, quotes: [] };
+      f.dispute = reason;
       continue;
     }
     f.verdict = v;
