@@ -74,7 +74,7 @@ describe("admission tools", () => {
     expect(toolbox.proposal()).toBeUndefined();
   });
 
-  it("accepts a continuation whose job omits executor, normalizing through the default agent pin", async () => {
+  it("accepts a continuation whose job omits executor, inheriting the session's default-pinned executor", async () => {
     const defaultAgentSession: AgentSessionView = {
       operationId: "op-2",
       stageId: "fix",
@@ -91,6 +91,29 @@ describe("admission tools", () => {
     });
     expect(accepted.terminate).toBe(true);
     expect(toolbox.proposal()).toMatchObject({ action: { type: "dispatch", job: { continueFrom: "op-2" } } });
+  });
+
+  it("accepts a continuation whose job omits executor, inheriting a run's own custom-catalog executor", async () => {
+    // RunView exposes no executor catalog, so the supervisor cannot predict a
+    // run's own override (here, the catalog pins "agent" kind work to a
+    // specific coding-agent executor rather than the generic built-in
+    // default). Continuing the session names the answer directly.
+    const customCatalogSession: AgentSessionView = {
+      operationId: "op-3",
+      stageId: "fix",
+      attempt: 5,
+      generation: 1,
+      dispatchKey: "work:graphloom.coding-agent/run",
+      executorId: "graphloom.coding-agent/run",
+      status: "failed",
+    };
+    const { toolbox, execute } = dispatchTool([customCatalogSession]);
+    const accepted = await execute("1", {
+      reason: "finish the implementation",
+      job: { ...job, readOnly: true, continueFrom: "op-3" },
+    });
+    expect(accepted.terminate).toBe(true);
+    expect(toolbox.proposal()).toMatchObject({ action: { type: "dispatch", job: { continueFrom: "op-3" } } });
   });
 
   it("rejects a continuation naming an operation with no recorded session", async () => {

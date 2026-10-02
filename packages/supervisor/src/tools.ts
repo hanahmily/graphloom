@@ -1,6 +1,6 @@
 import path from "node:path";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { assertGraphDecision, builtinPinForKind, type AgentSessionView } from "@graphloom/sdk";
+import { assertGraphDecision, type AgentSessionView } from "@graphloom/sdk";
 import type { ModelRef, SupervisorProposal } from "./types.js";
 
 /**
@@ -136,13 +136,9 @@ export interface ContinuationJob {
 }
 
 /** Mirrors packages/controller/src/agent-sessions.ts's dispatchKey, pure and duplicable: supervisor depends only on @graphloom/sdk, not controller. */
-function dispatchKey(job: ContinuationJob): string {
+function dispatchKey(job: ContinuationJob, fallbackExecutorId?: string): string {
   if (typeof job.jobId === "string") return job.jobId;
-  const pinnedId = typeof job.executor?.id === "string"
-    ? job.executor.id
-    : job.kind === "agent" || job.kind === "command"
-      ? builtinPinForKind(job.kind).id
-      : String(job.kind);
+  const pinnedId = typeof job.executor?.id === "string" ? job.executor.id : fallbackExecutorId ?? String(job.kind);
   return `${String(job.purpose)}:${pinnedId}`;
 }
 
@@ -181,7 +177,11 @@ export function continuationRefusal(
   if (record.stageId !== job.stageId) {
     return `operation ${from} ran stage ${record.stageId}, not ${String(job.stageId)}`;
   }
-  const key = dispatchKey(job);
+  // A job that does not name its own executor inherits the session's: continuing
+  // a session means using the executor that session already ran on, and the
+  // supervisor cannot otherwise predict a run's own executor-catalog overrides
+  // (RunView exposes no such catalog) the way the controller's own pinning does.
+  const key = dispatchKey(job, record.executorId);
   if (record.dispatchKey !== key) {
     return `operation ${from} has dispatch key ${record.dispatchKey}, not ${key}`;
   }
