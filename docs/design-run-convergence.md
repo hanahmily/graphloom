@@ -143,48 +143,94 @@ statement.
 
 ### 4.1 Candidate-anchored freshness
 
-Evidence and receipts are fresh when they were produced for the current
-candidate under the currently admitted binding. Generation becomes producer
-metadata and a fence for version transitions and crash recovery (its purpose in
-core design §8), not a freshness boundary.
+Evidence and receipts are fresh when they were produced for the still-accepted
+state they named, under the currently admitted bindings. Generation becomes
+producer metadata and a fence for version transitions and crash recovery (its
+purpose in core design §8), not a freshness boundary. "Accepted state" is
+broader than workspace bytes: a requirement whose evidence is an agent-produced
+artifact not reflected in the workspace (the implementer's decision record,
+which an agent can revise before any code changes) needs its own identity, and
+a receipt whose evidence depended on another requirement's evidence needs that
+prerequisite's binding pinned too, or a later validator replacement would leave
+a now-stale downstream receipt looking valid.
 
 Controller:
 
-- A receipt is `valid` while `receipt.candidateDigest === state.candidateDigest`
-  and its validator binding is unchanged. Receipts already carry the candidate
-  digest ([GraphLoom gaps](design-banyandb-fix-graph.md#graphloom-gaps)).
-- `invalidateFromStage` on reentry invalidates a receipt only if the candidate
-  changed since it was issued, or the receipt's stage depends on a stage being
-  reentered *and* that reentry produces a new candidate. A reentry that edits
-  nothing invalidates nothing; the graph still gets a new attempt.
-- A workspace change (already detected by fingerprint) invalidates every receipt
-  whose digest no longer matches, in any stage. This replaces the current
-  "changed workspace invalidates the final stage" rule with the general one.
-- `ValidationInput.evidence` is the evidence for the current candidate digest,
-  oldest first, across generations; `ValidationInput.history` is the evidence
-  for other candidates. Validators that order evidence (`planReviewed` checks
-  that the review follows the plan) keep working, because order within one
-  candidate's evidence is preserved.
+- Each receipt records an `acceptedIdentity`: the workspace candidate digest,
+  plus a named artifact digest for a requirement whose evidence schema is not
+  workspace bytes (`decisions-recorded`'s and `plan-reviewed`'s evidence is the
+  decision record's own content, not the workspace, so a planner revising it
+  with unchanged workspace bytes must invalidate both). A receipt is `valid`
+  while every component of its `acceptedIdentity` is unchanged. Receipts
+  already carry the candidate digest ([GraphLoom gaps](design-banyandb-fix-graph.md#graphloom-gaps)).
+- Each receipt also records `prerequisiteBindings`: the full validator identity
+  (`validatorId` and version, not version alone — a same-version swap to a
+  different validator must still invalidate) of every other requirement its
+  evidence depended on at acceptance time. A receipt is valid only while every
+  recorded prerequisite's currently admitted binding still matches. This is how
+  an upstream validator's qualified replacement cascades to a downstream
+  receipt without touching the workspace or re-deriving a dependency graph at
+  invalidation time: the dependency was recorded once, at acceptance.
+- `invalidateFromStage` keeps invalidating a receipt whose `acceptedIdentity` or
+  `prerequisiteBindings` no longer match, in every stage, whether or not that
+  stage is the reentry target; it is no longer the sole invalidation path for a
+  reentered stage's own work (see reopened execution, below).
+- A workspace change (already detected by fingerprint) invalidates every
+  receipt whose workspace component no longer matches, in any stage. A decision
+  record revision invalidates every receipt naming it in `acceptedIdentity`,
+  independent of the workspace. This replaces the current "changed workspace
+  invalidates the final stage" rule with the general one.
+- `ValidationInput.evidence` is the evidence for the current accepted identity,
+  oldest first, across generations; `ValidationInput.history` is evidence for a
+  since-superseded identity. Validators that order evidence (`planReviewed`
+  checks that the review follows the plan) keep working, because order within
+  one identity's evidence is preserved.
 - Resume never invalidates; it already does not, but the plugin-side generation
   window made it behave as if it did.
 
-Plugin (BanyanDB graph): replace `inGeneration` with `forCandidate(evidence,
-digest)` in `fix()`, `review()` and `evaluateFix`; delete the "every generation
-plans and reviews its plan" behaviour. The plan reviewer is re-dispatched when
-the plan record or the candidate changed, not when the generation did.
+Reopened execution is tracked separately from receipt validity, because they
+are different claims: reentry targets a stage because its *execution* needs
+another attempt, not because its evidence necessarily went stale.
+`state.openAttempt[stageId]` is set unconditionally by `reenter(stageId)`,
+regardless of whether any receipt actually invalidates, and cleared only when a
+`work`-purpose dispatch for that stage settles in the current attempt.
+`RunView.openAttempt` exposes it. Stage-selection logic that currently reads
+"the first stage lacking a valid receipt" (the BanyanDB graph's `advanceFix`,
+and any plugin written the same way) must read "the first stage that is open:
+lacking a valid receipt, *or* `openAttempt[stage]` true." Without this,
+Reenter(Fix) after Review rejects a change is a no-op: Fix's receipts stay
+valid because nothing has edited the candidate yet, stage-selection finds
+Review (whose own receipt the rejection invalidated) as the first incomplete
+stage, and the implementer never runs — the reentry accomplished nothing.
 
-What this buys: in the live run, generations 13 through 45 would have shared one
-candidate digest. The deterministic receipts (RED, GREEN, builds, scope,
-changelog, decision record) earned once would have stayed valid; the plan-review
-approval at generation 13 would have stayed valid; Fix would have been accepted
-when the seventh receipt landed, and the run would have moved to Review.
+Plugin (BanyanDB graph): replace `inGeneration` with `forIdentity(evidence,
+identity)` in `fix()`, `review()` and `evaluateFix`; delete the "every
+generation plans and reviews its plan" behaviour. The plan reviewer is
+re-dispatched when the decision record or the workspace changed, not when the
+generation did. `advanceFix`'s stage selection reads `view.openAttempt` as
+described above, alongside receipt validity.
+
+What this buys: in the live run, generations 13 through 45 would have shared
+one accepted identity. The deterministic receipts (RED, GREEN, builds, scope,
+changelog) earned once would have stayed valid; the plan-review approval at
+generation 13 would have stayed valid; Fix would have been accepted when the
+seventh receipt landed, and the run would have moved to Review.
 
 Illustrative controller rule, not the current code:
 
 ```ts
 function receiptStillValid(r: Receipt, state: DurableRunState): boolean {
-  return r.candidateDigest === state.candidateDigest
-    && bindingFor(state, r.requirementId)?.version === r.validatorBinding.version;
+  const identityMatches = Object.entries(r.acceptedIdentity).every(
+    ([key, digest]) => currentIdentity(state, key) === digest,
+  );
+  const prerequisitesMatch = Object.entries(r.prerequisiteBindings).every(
+    ([requirementId, binding]) => sameBinding(bindingFor(state, requirementId), binding),
+  );
+  return identityMatches && prerequisitesMatch;
+}
+
+function sameBinding(a: ValidatorBinding | undefined, b: ValidatorBinding): boolean {
+  return a?.validatorId === b.validatorId && a?.version === b.version;
 }
 ```
 
@@ -193,14 +239,25 @@ function receiptStillValid(r: Receipt, state: DurableRunState): boolean {
 Keep the rule "after two failed trials at one unresolved stage, the supervisor
 authorizes the next." Change what the counter counts and how it clears:
 
-- A correction trial is a `work` dispatch that follows a *failed* `work`
-  dispatch on the *same* candidate. The first `work` dispatch after a candidate
-  change, or after upstream acceptance, is not a correction. `isCorrection`
-  derives from this, not from `attempt > 1`, which is permanent once set.
-- `correctionTrials[stage]` counts consecutive failed trials since the last
-  supervisor-authorized trial on that stage. A supervisor-dispatched `work` job
-  that settles — succeed or fail — resets the counter to 0 and clears the
-  handoff. The graph then owns the next trials again, up to the cap.
+- A correction trial is a `work` dispatch that *settles* — executor success or
+  failure both count — while the stage's target requirement is unresolved both
+  before and after. Define "unresolved" by validation outcome, not executor
+  status or candidate identity: an ordinary implementer job usually reports
+  `status: completed` even when its edit still fails the requirement, and a
+  genuine fix attempt almost always changes the candidate between tries, so
+  counting only repeated failures on the *same* candidate would let the cap
+  evade itself — two different edits that both still fail RED, GREEN or builds
+  are two trials, not zero, because neither resolved anything. A trial resolves
+  the counter only when the next validation of that requirement passes.
+- `isCorrection` derives from this (the stage has a requirement that is still
+  unresolved after at least one prior settled trial since the last supervisor-
+  authorized trial or upstream acceptance), not from `attempt > 1`, which is
+  permanent once set.
+- `correctionTrials[stage]` counts consecutive trials meeting that definition
+  since the last supervisor-authorized trial on that stage. A supervisor-
+  dispatched `work` job that settles — succeed or fail — resets the counter to
+  0 and clears the handoff. The graph then owns the next trials again, up to
+  the cap.
 - The handoff is explicit durable state: `handoff[stage] = { since, reason,
   trials }`. While it is set, a graph `work` dispatch is refused with the
   existing `correction_limit` trigger; a supervisor `work` dispatch is admitted
@@ -267,16 +324,18 @@ handoff can be cleared by any authorized trial it dispatches.
 
 | Surface | Change | Package |
 |---|---|---|
-| `Receipt.valid` semantics | candidate- and binding-anchored; generation not consulted | controller `admit.ts` |
-| `invalidateFromStage` | invalidates only receipts whose candidate changed or depend on a changed upstream candidate | controller `admit.ts` |
-| `ValidationInput.evidence` / `history` | current-candidate evidence across generations; other candidates in history | sdk `types.ts`, controller `admit.ts` |
+| `Receipt.acceptedIdentity`, `prerequisiteBindings` | workspace digest plus named artifact digests; full validator identity of every evidential prerequisite | controller `admit.ts`, sdk `types.ts` |
+| `invalidateFromStage` | invalidates only receipts whose `acceptedIdentity` or `prerequisiteBindings` no longer match | controller `admit.ts` |
+| `DurableRunState.openAttempt` | set unconditionally by `reenter`; cleared when a `work` dispatch for that stage settles | controller `state.ts`, `loop.ts` |
+| `RunView.openAttempt` | exposes reopened-but-unattempted stages to graph routing | sdk `types.ts`, controller `toRunView` |
+| `ValidationInput.evidence` / `history` | current-accepted-identity evidence across generations; a superseded identity's evidence in history | sdk `types.ts`, controller `admit.ts` |
 | `DurableRunState.handoff`, `repeatedProposals` | new durable fields with defaults | controller `state.ts` |
-| `correctionTrials` counting and clearing | consecutive failed trials since last authorized trial; reset on any settled supervisor `work` dispatch | controller `escalation.ts`, `loop.ts` |
-| `isCorrection` | derived from candidate and prior failed trial, not `attempt > 1` | controller `loop.ts` |
+| `correctionTrials` counting and clearing | consecutive trials whose target requirement stayed unresolved since the last authorized trial; reset on any settled supervisor `work` dispatch | controller `escalation.ts`, `loop.ts` |
+| `isCorrection` | derived from requirement-outcome history across candidate edits, not `attempt > 1` | controller `loop.ts` |
 | Supervisor proposal repetition | counted against `progressMark`; third repeat rejected in-turn | controller `loop.ts`, `escalation.ts` |
 | `RunView.escalation` | exposes trials, handoff, repeated proposals | sdk `types.ts`, controller `toRunView` |
 | `review-verdict-v1` findings state; plan-review verifier job | per-finding state; dispute verification | banyandb-fix `validators.ts`, `graph.ts`, `prompts.ts` |
-| `inGeneration` → `forCandidate` | candidate-scoped evidence selection | banyandb-fix `evidence.ts`, `graph.ts` |
+| `inGeneration` → `forIdentity`; `advanceFix` stage selection | identity-scoped evidence selection; selection also reads `openAttempt` | banyandb-fix `evidence.ts`, `graph.ts` |
 
 The supervisor package still depends only on `@graphloom/sdk`; everything it
 needs arrives through `RunView` and settlement facts.
@@ -285,26 +344,37 @@ needs arrives through `RunView` and settlement facts.
 
 Controller tests (`packages/controller`):
 
-1. Resume with an unchanged candidate keeps every valid receipt and dispatches
-   no job for a requirement that already has one.
-2. A worktree edit invalidates exactly the receipts whose digest changed, in
-   every stage, and nothing else.
-3. Reentry without an edit creates a new attempt and invalidates no receipt.
-4. Two failed graph trials hand off; a supervisor `work` dispatch that settles
-   clears the handoff and the graph's next `work` dispatch is admitted.
-5. The same supervisor proposal with no progress is reported once and rejected
+1. Resume with an unchanged accepted identity keeps every valid receipt and
+   dispatches no job for a requirement that already has one.
+2. A worktree edit invalidates exactly the receipts whose workspace component
+   changed, in every stage, and nothing else.
+3. A decision-record revision with unchanged workspace bytes invalidates
+   `decisions-recorded` and `plan-reviewed` but no workspace-anchored receipt;
+   an upstream validator's qualified replacement invalidates every downstream
+   receipt that recorded it as a prerequisite, with both the candidate and the
+   receipt's own binding unchanged.
+4. Reentry without an edit sets `openAttempt` for the target stage, creates a
+   new attempt, and invalidates no receipt; stage selection still dispatches
+   that stage's own work rather than skipping to a later stage whose receipt
+   the same event invalidated. Cover both: no-edit reentry preserves receipts,
+   and a Review rejection reopens Fix's implementer before Review runs again.
+5. Two different settled `work` dispatches that each produce a different,
+   still-failing candidate count as two correction trials, not zero; two
+   failed trials hand off, and a supervisor `work` dispatch that settles clears
+   the handoff so the graph's next `work` dispatch is admitted.
+6. The same supervisor proposal with no progress is reported once and rejected
    in-turn on the third repeat; the run does not stop.
-6. Replay the live run's durable state as a fixture: under the new rules the Fix
-   stage accepts at the first generation where all seven requirements hold
-   receipts for one candidate digest, and the run proceeds to Review.
+7. Replay the live run's durable state as a fixture: under the new rules the
+   Fix stage accepts at the first generation where all seven requirements hold
+   receipts for one accepted identity, and the run proceeds to Review.
 
 Plugin tests (`examples/plugins/banyandb-fix`):
 
-7. A plan-review finding answered in `basis` and repeated by the reviewer is
+8. A plan-review finding answered in `basis` and repeated by the reviewer is
    dispatched to a verifier; a dismissed finding does not block approval; a
    confirmed one does.
-8. The plan reviewer is not re-dispatched when neither the plan record nor the
-   candidate changed.
+9. The plan reviewer is not re-dispatched when neither the decision record nor
+   the workspace changed.
 
 The e2e scenarios in §11 of the core design stay green; the hello and release
 example plugins, which have no correction loops, are unaffected beyond type
@@ -313,8 +383,11 @@ changes.
 ## 7. Migration
 
 - New durable fields default to empty; existing run state loads unchanged.
-- A receipt without `candidateDigest` (pre-checkout-era runs) is treated as
-  stale once, then re-issued anchored.
+- A receipt without `acceptedIdentity` (pre-checkout-era runs, or a receipt
+  issued before this change) is treated as stale once, then re-issued anchored.
+  A receipt without `prerequisiteBindings` is treated the same way if any of
+  its requirement's declared prerequisites exist; one with no declared
+  prerequisites needs no backfill.
 - Plugins that filter by `generation` keep working — generation remains on
   `EvidenceRecord` — but lose the reuse benefit until they switch to candidate
   scoping. The BanyanDB graph switches in the same change.
@@ -328,8 +401,15 @@ changes.
    failure history in view, so the graph's next trials start from a reviewed
    position.
 2. Should `generation` stay visible to plugins at all, or be replaced in
-   `RunView` by `candidateDigest` plus a version-transition counter? Keeping it
-   as metadata is proposed to avoid a protocol version bump.
+   `RunView` by the accepted identity plus a version-transition counter?
+   Keeping it as metadata is proposed to avoid a protocol version bump.
 3. Whether the plan-review verifier should reuse the Review stage's verification
    prompts or get its own; the claims differ (plan reach versus code defects),
    so separate prompts are expected.
+4. How a receipt's `prerequisiteBindings` gets populated: every validator
+   declares the requirement IDs its evidence reads as context (plan review
+   reads none; code review reads none; a future validator could read plan
+   review's), or the controller infers it from which evidence a validator's
+   `input.evidence` actually touched. Explicit declaration is proposed: cheaper
+   to implement correctly than inferring it from evidence access, and visible
+   in the plugin's own requirement declarations for review.
