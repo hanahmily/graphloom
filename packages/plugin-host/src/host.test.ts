@@ -90,6 +90,24 @@ describe("createChildPluginHost", () => {
     expect(advanced.value.action.type).toBe("dispatch");
   });
 
+  it("attributes an oversized advance request to its real run, not a malformed-response failure", async () => {
+    const host = await track(
+      createChildPluginHost({
+        entryModule: fixture("minimal", "graph.mjs"),
+        activeVersion: "minimal@1",
+        generation: 1,
+        workerModule: workerJs,
+        callbackTimeoutMs: 3_000,
+      }),
+    );
+    // Large enough to exceed the wire byte cap once serialized as part of the request.
+    const huge: RunView = { ...view(), task: { request: "x".repeat(17_000_000) } };
+    const result = await host.advance(ctx("op-huge"), huge);
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected failure");
+    expect(result.observation.code).toBe("oversized");
+  });
+
   it("loads a second external plugin with the same host code", async () => {
     const host = await track(
       createChildPluginHost({
