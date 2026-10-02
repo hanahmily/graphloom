@@ -65,7 +65,7 @@ import { createChildPort, reconcileChildOperations } from "./children.js";
 import { agentSessionViews, continuationRefusal, recordAgentSession, sessionForDispatch, wipeAgentSessions } from "./agent-sessions.js";
 import { citedEvidence, loadRunState, type DurableRunState, saveRunState } from "./state.js";
 import { bumpGeneration } from "./generation.js";
-import { clearResolvedTrials, correctionHandoff, countCorrectionTrial, noteGraphDecision } from "./escalation.js";
+import { noteGraphDecision, noteSupervisorProposal, progressMark, settleCorrectionTrial, settleSupervisorCorrection } from "./escalation.js";
 import {
   applyActivateRepair,
   applyQualifyRepair,
@@ -369,13 +369,19 @@ async function runNormalLoopSteps(
           syncRevision(deps, state);
           return { done: true as const, state };
         }
-        state = markProposal(state, decided);
         if (isModelSwitchRequest(decided)) {
+          state = markProposal(state, decided);
           state = await applyModelSwitch(state, supervisor, decided, "supervisor");
           await saveRunState(state);
           syncRevision(deps, state);
           return { done: false as const, state };
         }
+        const notedProposal = noteSupervisorProposal(state, trigger.code, decided);
+        state = markProposal(
+          notedProposal.state,
+          decided,
+          notedProposal.count >= 2 ? { count: notedProposal.count, triggerCode: trigger.code } : undefined,
+        );
         decision = decided;
       } else {
         const view = toRunView(state);
@@ -485,7 +491,8 @@ async function runNormalLoopSteps(
     }
 
     if (turn.pendingJob) {
-      const { job, operationId, generation, isCorrection, source, notBefore, session } = turn.pendingJob;
+      const { job, operationId, generation, isCorrection, graphCorrectionTrial, supervisorWorkDispatch, source, notBefore, session } =
+        turn.pendingJob;
       const abort = new AbortController();
       const stopWatch = watchForStop(state.stateDir, deps, abort);
       let result: Awaited<ReturnType<Runner["runJob"]>>;
@@ -616,6 +623,8 @@ async function runNormalLoopSteps(
           operationId,
           generation,
           isCorrection,
+          graphCorrectionTrial,
+          supervisorWorkDispatch,
           result: outOfScope.length > 0 ? scopeViolation(result, job, outOfScope) : result,
           canRecover: deps.supervisor !== undefined,
           candidateDigest: checkedDigest ?? afterDigest,
@@ -1015,6 +1024,20 @@ export function toRunView(state: DurableRunState): RunView {
   if (state.recoveryEpisodeId !== undefined) {
     view.recoveryEpisodeId = state.recoveryEpisodeId;
   }
+  if (state.openAttempt !== undefined && Object.keys(state.openAttempt).length > 0) {
+    view.openAttempt = { ...state.openAttempt };
+  }
+  const correctionTrials = state.correctionTrials ?? {};
+  const handoff = state.handoff ?? {};
+  const mark = progressMark(state);
+  const repeatedProposals = state.repeatedProposals?.mark === mark ? state.repeatedProposals.entries : {};
+  if (Object.keys(correctionTrials).length > 0 || Object.keys(handoff).length > 0 || Object.keys(repeatedProposals).length > 0) {
+    view.escalation = {
+      correctionTrials: { ...correctionTrials },
+      handoff: structuredClone(handoff),
+      repeatedProposals: structuredClone(repeatedProposals),
+    };
+  }
   if (state.repairCandidates !== undefined && state.repairCandidates.length > 0) {
     view.repairCandidates = state.repairCandidates.map((c) => ({
       artifactId: c.artifactId,
@@ -1113,7 +1136,11 @@ async function applyDecision(
       const undeclared = stopForUndeclaredStage(state, action.validate.stageId);
       if (undeclared) return undeclared;
       const result = await admitValidation(state, action.validate, deps.validators);
-      return clearResolvedTrials(result.state);
+      const settled = settleCorrectionTrial(result.state, action.validate.stageId, {
+        evaluated: result.evaluated,
+        accepted: result.accepted,
+      });
+      return clearOpenAttempt(settled, action.validate.stageId);
     }
     case "reenter": {
       const undeclared = stopForUndeclaredStage(state, action.reenter.stageId);
@@ -1126,7 +1153,7 @@ async function applyDecision(
           blocker: "reenter",
         };
       }
-      let next = invalidateFromStage(state, action.reenter.stageId, state.definition);
+      let next = await invalidateFromStage(state);
       const { workspaceRevision: _wr, ...withoutRev } = next;
       void _wr;
       next = {
@@ -1142,6 +1169,11 @@ async function applyDecision(
               ? state.current.attempt + 1
               : 1,
         },
+        // Reentry means this stage's execution needs another attempt,
+        // regardless of whether anything above actually invalidated — stage
+        // selection must dispatch its work again rather than trust an
+        // unchanged candidate's still-valid receipts.
+        openAttempt: { ...withoutRev.openAttempt, [action.reenter.stageId]: true },
       };
       return bumpGeneration(next, "reenter");
     }
@@ -1279,6 +1311,10 @@ interface PendingJob {
   operationId: string;
   generation: number;
   isCorrection: boolean;
+  /** Was a graph-authored (not supervisor) correction-eligible work dispatch at admission. */
+  graphCorrectionTrial: boolean;
+  /** Was a supervisor-authored work dispatch at admission. */
+  supervisorWorkDispatch: boolean;
   source?: ExecutorSourceOverride;
   notBefore?: string;
   session?: ExecutorSession;
@@ -1392,8 +1428,21 @@ async function prepareDispatch(
     };
   }
 
+  // A correction is a work dispatch while its stage's own target requirement
+  // is still unresolved — a fact about current requirement state, not about
+  // whether a validate call has run: a plugin that recognizes a known defect
+  // itself and redispatches without ever asking the controller to validate
+  // it is still correcting. The graph's own first-ever attempt at a stage is
+  // not a correction (nothing has been tried yet to redo); a supervisor's
+  // work dispatch has no such exemption — recovery-mode work is exceptional
+  // repair by construction, charged even as the stage's very first attempt
+  // (e.g. recovering from a launch failure the graph never got to attempt
+  // normal work for).
+  const correctionStage = job.purpose === "work" ? state.definition.stages.find((s) => s.id === job.stageId) : undefined;
   const isCorrection =
-    job.purpose === "work" && (state.mode === "recovery" || state.current.attempt > 1 || redoesStageWork(state, job.stageId));
+    correctionStage !== undefined &&
+    !stageRequirementsMet(state, job.stageId, correctionStage.requirementIds) &&
+    (state.mode === "recovery" || state.workDispatched?.[job.stageId] === true);
   if (isCorrection && state.budgets.corrections <= 0) {
     return {
       state: {
@@ -1405,15 +1454,16 @@ async function prepareDispatch(
     };
   }
   const graphCorrection = isCorrection && state.mode === "normal";
-  const handoff = graphCorrection ? correctionHandoff(state, job.stageId) : undefined;
+  const handoff = graphCorrection ? state.handoff?.[job.stageId] : undefined;
   if (handoff !== undefined) {
     const observed = freshEvidence(state).filter((e) => e.kind === "file" || e.kind === "workspace").map((e) => e.ref);
     // The graph's bookkeeping for a dispatch that never happened is not kept.
     const { privateState: _proposed, ...refused } = state;
     void _proposed;
     const restored = priorPrivateState !== undefined ? { ...refused, privateState: priorPrivateState } : refused;
-    return { state: enterRecovery(restored, "correction_limit", handoff, observed.slice(-10)) };
+    return { state: enterRecovery(restored, "correction_limit", handoff.reason, observed.slice(-10)) };
   }
+  const supervisorWorkDispatch = job.purpose === "work" && state.mode === "recovery";
 
   // Write scope: mutable work must declare non-empty paths; read-only must not.
   if (job.readOnly === true) {
@@ -1467,10 +1517,7 @@ async function prepareDispatch(
       ...(session !== undefined ? { session } : {}),
     },
     current: { stageId: job.stageId, attempt: state.current.attempt },
-    ...(job.purpose === "work"
-      ? { workDispatchEvidence: { ...state.workDispatchEvidence, [job.stageId]: state.evidence.length } }
-      : {}),
-    ...(graphCorrection ? { correctionTrials: countCorrectionTrial(state, job.stageId) } : {}),
+    ...(job.purpose === "work" ? { workDispatched: { ...state.workDispatched, [job.stageId]: true as const } } : {}),
   };
 
   return {
@@ -1480,26 +1527,13 @@ async function prepareDispatch(
       operationId,
       generation: state.generation,
       isCorrection,
+      graphCorrectionTrial: graphCorrection,
+      supervisorWorkDispatch,
       ...(source !== undefined ? { source } : {}),
       ...(notBefore !== undefined ? { notBefore } : {}),
       ...(session !== undefined ? { session } : {}),
     },
   };
-}
-
-/**
- * Whether a work dispatch for `stageId` follows fresh observations of that
- * stage's own earlier work. Observations left by an earlier, accepted stage do
- * not make the next stage's first job a correction.
- */
-function redoesStageWork(state: DurableRunState, stageId: string): boolean {
-  const observed = (e: EvidenceRecord) => (e.kind === "file" || e.kind === "workspace") && e.generation === state.generation;
-  if (state.workDispatchEvidence === undefined) {
-    // State written before work dispatches were recorded: keep the rule it was charged under.
-    return state.lastWorkOperationId !== undefined && state.evidence.some(observed);
-  }
-  const since = state.workDispatchEvidence[stageId];
-  return since !== undefined && state.evidence.slice(since).some(observed);
 }
 
 /**
@@ -1560,6 +1594,8 @@ function applyDispatchResult(
     operationId: string;
     generation: number;
     isCorrection: boolean;
+    graphCorrectionTrial: boolean;
+    supervisorWorkDispatch: boolean;
     result: Awaited<ReturnType<Runner["runJob"]>>;
     /** A supervisor can take over; failures enter recovery instead of stopping. */
     canRecover: boolean;
@@ -1621,6 +1657,18 @@ function applyDispatchResult(
     ...(job.executor?.id !== undefined ? { executorId: job.executor.id } : {}),
   };
 
+  // A work dispatch settling — success or failure both count — is this
+  // attempt's chance at the stage's own work. A graph-authored correction
+  // trial awaits the next validate to learn whether it resolved anything; a
+  // supervisor-authored one clears the streak immediately, regardless of
+  // outcome, handing the stage back to the graph.
+  if (args.graphCorrectionTrial) {
+    next = { ...next, correctionPendingTrial: { ...next.correctionPendingTrial, [job.stageId]: true as const } };
+  }
+  if (args.supervisorWorkDispatch) {
+    next = settleSupervisorCorrection(next, job.stageId);
+  }
+
   if (result.status !== "ok") {
     next = recordExecutorFailure(recordJobEvidence(next, job, producer, result.evidence, candidateDigest), {
       producer,
@@ -1659,6 +1707,22 @@ function applyDispatchResult(
 }
 
 /** A route naming a step outside the pinned definition stops the run instead of adding it. */
+/**
+ * Reentry's openAttempt has done its job once the stage is actually
+ * re-validated — accepted or rejected both count — not merely once its work
+ * dispatch settles. Clearing it earlier, at dispatch settlement, leaves a gap
+ * where a stale receipt (not yet invalidated — invalidation is lazy, inside
+ * admitValidation) still reads as valid and openAttempt no longer forces the
+ * stage open, so stage-selection skips straight past freshly rewritten work
+ * to a later stage.
+ */
+function clearOpenAttempt(state: DurableRunState, stageId: string): DurableRunState {
+  if (state.openAttempt?.[stageId] === undefined) return state;
+  const { [stageId]: _cleared, ...rest } = state.openAttempt;
+  void _cleared;
+  return { ...state, openAttempt: rest };
+}
+
 function stopForUndeclaredStage(state: DurableRunState, stageId: string): DurableRunState | undefined {
   if (state.definition.stages.some((s) => s.id === stageId)) return undefined;
   return {
@@ -1692,6 +1756,7 @@ function recordJobEvidence(
         kind: claimed === undefined ? item.kind : "other",
         generation: next.generation,
         ...(candidateDigest !== undefined ? { candidateDigest } : {}),
+        ...(job.resultSchema !== undefined ? { resultSchema: job.resultSchema } : {}),
       };
       record.payload = attachProducer(
         claimed === undefined ? item.payload : { selfReported: claimed, claim: item.payload ?? null },

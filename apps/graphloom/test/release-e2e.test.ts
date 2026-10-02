@@ -174,6 +174,12 @@ describe("the release example plugin through the controller", () => {
         { stageId, kind: "agent", purpose: "work", instruction: `write ${stageId}`, writeScope: [stageId === "bump" ? "VERSION" : "CHANGELOG.md"] },
         `dispatch ${stageId}`,
       );
+    // Bump's own observe names only VERSION, matching the real graph
+    // (hello/release only ever observe a stage's own paths): observing
+    // CHANGELOG.md too, before Changelog has even run, would anchor Bump's
+    // receipt to a file it has no business tracking, and invalidate it the
+    // moment Changelog later creates that file.
+    const observeBump = observe({ paths: ["VERSION"], includeWorkspaceManifest: true }, "observe VERSION");
     const observeRelease = observe({ paths: ["VERSION", "CHANGELOG.md"], includeWorkspaceManifest: true }, "observe");
     const controller = createController();
 
@@ -183,7 +189,7 @@ describe("the release example plugin through the controller", () => {
         definition,
         advances: [
           writeJob("bump"),
-          observeRelease,
+          observeBump,
           validate({ stageId: "bump", requirementIds: ["version-file"] }, "validate bump"),
           writeJob("changelog"),
           observeRelease,

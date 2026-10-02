@@ -41,6 +41,28 @@ export {
   type CodeReviewReport,
   type ReviewComment,
 } from "./ocr.js";
+export {
+  PLAN_AXES,
+  PLAN_REVIEW_SCHEMA,
+  PLAN_SEVERITIES,
+  describePlanFinding,
+  isPlanOpen,
+  knownPlanFindings,
+  pathsToObservePlan,
+  planFindingById,
+  planFindingLedger,
+  planVerificationInstruction,
+  toVerifyPlan,
+  type KnownPlanFinding,
+  type KnownPlanFindings,
+  type PlanAxis,
+  type PlanFinding,
+  type PlanFindingState,
+  type PlanLedger,
+  type PlanReviewPass,
+  type PlanSeverity,
+  type PlanVerification,
+} from "./plan-findings.js";
 export { MAX_SNAPSHOT_CHARS, candidateCommands, commitMessage, deliverCommands, pullRequestDescription, redCommands } from "./prompts.js";
 export { QUALIFICATION_CASES, qualifyValidators, type QualificationCase, type QualificationReport } from "./qualification.js";
 export {

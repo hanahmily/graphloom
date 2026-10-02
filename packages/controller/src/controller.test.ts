@@ -267,25 +267,11 @@ describe("durable controller Write→Review", () => {
     expect(report.receipts.every((r) => r.id.startsWith("rcpt-"))).toBe(true);
   });
 
-  it("rejects stale evidence after generation bump (restart freshness)", async () => {
-    const env = await makeEnv();
-    const plugin = scriptedHappyPath();
-    const runner = createScriptedRunner({
-      jobs: [
-        async (_job, ctx) => {
-          await writeFile(path.join(ctx.worktreePath, GREETING_PATH), GREETING, "utf8");
-          return { status: "ok", summary: "wrote" };
-        },
-        async () => ({
-          status: "ok",
-          summary: "approved",
-          evidence: [{ kind: "review", payload: { verdict: "approved" } }],
-        }),
-      ],
-    });
-
-    // Run only until Write evidence exists: use a plugin that stops after observe.
-    const observeOnly = createScriptedGraph({
+  // A restart bumps generation unconditionally as a crash-recovery fence; it
+  // is no longer the freshness boundary (docs/design-run-convergence.md §4.1).
+  // Only an actual candidate change invalidates evidence now.
+  function observeOnlyToPause() {
+    return createScriptedGraph({
       definition,
       advances: [
         dispatch(
@@ -305,11 +291,29 @@ describe("durable controller Write→Review", () => {
         stop({ reason: "paused", blocker: "test pause" }, "pause before validate"),
       ],
     });
+  }
+
+  it("admits evidence across a generation bump alone, since nothing about the candidate changed", async () => {
+    const env = await makeEnv();
+    const plugin = scriptedHappyPath();
+    const runner = createScriptedRunner({
+      jobs: [
+        async (_job, ctx) => {
+          await writeFile(path.join(ctx.worktreePath, GREETING_PATH), GREETING, "utf8");
+          return { status: "ok", summary: "wrote" };
+        },
+        async () => ({
+          status: "ok",
+          summary: "approved",
+          evidence: [{ kind: "review", payload: { verdict: "approved" } }],
+        }),
+      ],
+    });
 
     const controller = createController();
     const paused = await controller.run({
       taskPath: env.taskPath,
-      plugin: observeOnly,
+      plugin: observeOnlyToPause(),
       runner: createScriptedRunner({
         jobs: [
           async (_job, ctx) => {
@@ -325,11 +329,10 @@ describe("durable controller Write→Review", () => {
     expect(paused.status).toBe("stopped");
 
     let state = await loadRunState(paused.stateDir);
-    // Simulate crash restart: bump generation so prior Observe evidence is stale.
+    // Simulate crash restart: bump generation with the worktree untouched.
     state = { ...state, status: "running", generation: state.generation + 1 };
     const admit = await tryAdmit(state, "write", validators);
-    expect(admit.accepted).toBe(false);
-    expect(admit.reason).toMatch(/no fresh evidence/);
+    expect(admit.accepted).toBe(true);
 
     // Full happy path still works with fresh generation evidence from a new run.
     const ok = await controller.run({
@@ -341,6 +344,36 @@ describe("durable controller Write→Review", () => {
       runId: "stale1-ok",
     });
     expect(ok.status).toBe("succeeded");
+  });
+
+  it("rejects stale evidence after a generation bump plus a real edit", async () => {
+    const env = await makeEnv();
+    const controller = createController();
+    const paused = await controller.run({
+      taskPath: env.taskPath,
+      plugin: observeOnlyToPause(),
+      runner: createScriptedRunner({
+        jobs: [
+          async (_job, ctx) => {
+            await writeFile(path.join(ctx.worktreePath, GREETING_PATH), GREETING, "utf8");
+            return { status: "ok", summary: "wrote" };
+          },
+        ],
+      }),
+      validators,
+      stateRoot: env.stateRoot,
+      runId: "stale2",
+    });
+    expect(paused.status).toBe("stopped");
+
+    // Simulate crash restart plus an out-of-band edit: the observed evidence
+    // no longer describes the live candidate.
+    await writeFile(path.join(paused.worktreePath, GREETING_PATH), "tampered\n", "utf8");
+    let state = await loadRunState(paused.stateDir);
+    state = { ...state, status: "running", generation: state.generation + 1 };
+    const admit = await tryAdmit(state, "write", validators);
+    expect(admit.accepted).toBe(false);
+    expect(admit.reason).toMatch(/no fresh evidence/);
   });
 
   it("rejects path traversal in task repo", async () => {

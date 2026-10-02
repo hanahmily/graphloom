@@ -192,8 +192,14 @@ Reopened execution is tracked separately from receipt validity, because they
 are different claims: reentry targets a stage because its *execution* needs
 another attempt, not because its evidence necessarily went stale.
 `state.openAttempt[stageId]` is set unconditionally by `reenter(stageId)`,
-regardless of whether any receipt actually invalidates, and cleared only when a
-`work`-purpose dispatch for that stage settles in the current attempt.
+regardless of whether any receipt actually invalidates, and cleared only when
+the stage is next validated — accepted or rejected both count — not merely
+when its `work`-purpose dispatch settles. Invalidation is lazy, evaluated
+inside that same validate call, so clearing any earlier (e.g. the moment the
+work dispatch settles, before the stage is re-validated) leaves a gap where a
+stale receipt that has not yet been re-checked still reads as valid and
+`openAttempt` no longer forces the stage open — stage-selection then skips
+straight past the freshly rewritten work to a later stage.
 `RunView.openAttempt` exposes it. Stage-selection logic that currently reads
 "the first stage lacking a valid receipt" (the BanyanDB graph's `advanceFix`,
 and any plugin written the same way) must read "the first stage that is open:
@@ -326,7 +332,7 @@ handoff can be cleared by any authorized trial it dispatches.
 |---|---|---|
 | `Receipt.acceptedIdentity`, `prerequisiteBindings` | workspace digest plus named artifact digests; full validator identity of every evidential prerequisite | controller `admit.ts`, sdk `types.ts` |
 | `invalidateFromStage` | invalidates only receipts whose `acceptedIdentity` or `prerequisiteBindings` no longer match | controller `admit.ts` |
-| `DurableRunState.openAttempt` | set unconditionally by `reenter`; cleared when a `work` dispatch for that stage settles | controller `state.ts`, `loop.ts` |
+| `DurableRunState.openAttempt` | set unconditionally by `reenter`; cleared when the stage is next validated (accepted or rejected) | controller `state.ts`, `loop.ts` |
 | `RunView.openAttempt` | exposes reopened-but-unattempted stages to graph routing | sdk `types.ts`, controller `toRunView` |
 | `ValidationInput.evidence` / `history` | current-accepted-identity evidence across generations; a superseded identity's evidence in history | sdk `types.ts`, controller `admit.ts` |
 | `DurableRunState.handoff`, `repeatedProposals` | new durable fields with defaults | controller `state.ts` |

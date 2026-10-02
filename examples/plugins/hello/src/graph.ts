@@ -115,17 +115,17 @@ export function advanceHello(view: RunView): GraphDecision {
   }
 
   const state = readPrivate(view);
-  const writeOk = validReceipt(view, WRITE_STAGE);
-  const reviewOk = validReceipt(view, REVIEW_STAGE);
+  const writeOpen = !validReceipt(view, WRITE_STAGE) || view.openAttempt?.[WRITE_STAGE] === true;
+  const reviewOpen = !validReceipt(view, REVIEW_STAGE) || view.openAttempt?.[REVIEW_STAGE] === true;
 
-  if (reviewOk && writeOk) {
+  if (!reviewOpen && !writeOpen) {
     return stop(
       { reason: "complete", blocker: "none" },
       "Write and Review receipts present — host completes the run",
     );
   }
 
-  if (!writeOk) {
+  if (writeOpen) {
     return advanceWrite(view, state);
   }
   return advanceReview(view, state);
@@ -368,7 +368,7 @@ function latestReviewSinceCutoff(
 
 function freshReviewEvidence(view: RunView, state: HelloPrivateState) {
   return view.evidence.slice(state.reviewEvidenceFromIndex).filter(
-    (e) => e.generation === undefined || e.generation === view.generation,
+    (e) => e.candidateDigest === undefined || e.candidateDigest === view.candidateDigest,
   );
 }
 

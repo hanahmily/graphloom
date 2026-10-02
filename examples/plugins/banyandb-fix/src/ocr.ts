@@ -1,6 +1,9 @@
 import type { DecisionRecord } from "./decision-record.js";
 import type { Issue } from "./evidence.js";
 import { issueRef } from "./prompts.js";
+import { clip, PRIOR_STATUSES, type PriorStatus } from "./review-common.js";
+
+export { clip, PRIOR_STATUSES, type PriorStatus } from "./review-common.js";
 
 /** open-code-review warns above this many characters of background; the reviewer gets the same bound. */
 const MAX_BACKGROUND_CHARS = 2_000;
@@ -19,8 +22,6 @@ export const REVIEW_RULE = [
 
 const CATEGORIES = ["bug", "security", "performance", "maintainability", "test", "style", "documentation", "other"];
 const SEVERITIES = ["critical", "high", "medium", "low"];
-export const PRIOR_STATUSES = ["resolved", "still_present", "withdrawn"] as const;
-export type PriorStatus = (typeof PRIOR_STATUSES)[number];
 
 /** The code reviewer's result (code-review-v2), strict enough for Codex's structured output: every property required, none extra. */
 export const CODE_REVIEW_SCHEMA = JSON.stringify({
@@ -250,9 +251,4 @@ export function blockingComments(report: CodeReviewReport): ReviewComment[] {
 export function describeComment(c: ReviewComment): string {
   const where = c.start_line > 0 ? `${c.path}:${c.start_line}${c.end_line > c.start_line ? `-${c.end_line}` : ""}` : c.path;
   return `${where} (${[c.severity || "no severity", c.category].filter(Boolean).join(", ")}): ${clip(c.content, 1_200)}`;
-}
-
-export function clip(text: string, max: number): string {
-  const t = text.trim();
-  return t.length <= max ? t : `${t.slice(0, max)}…`;
 }

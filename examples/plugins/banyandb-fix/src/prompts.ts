@@ -3,6 +3,7 @@ import { CHANGES_PATH, COMMAND, ISSUE_REPO, PROTECTED_PATHS } from "./constants.
 import type { DecisionRecord } from "./decision-record.js";
 import { writeScopeFor } from "./decision-record.js";
 import type { Issue, IssueComment } from "./evidence.js";
+import type { KnownPlanFindings } from "./plan-findings.js";
 import { regressionArgv } from "./gotest.js";
 
 const MINUTE = 60_000;
@@ -85,7 +86,25 @@ export function planRevisionInstruction(args: { issue: number; feedback: string[
   ].join("\n");
 }
 
-export function planReviewInstruction(args: { issue: number; snapshot: string; record: DecisionRecord; previous?: string[] }): string {
+export function planReviewInstruction(args: { issue: number; snapshot: string; record: DecisionRecord; previous?: string[]; known?: KnownPlanFindings }): string {
+  const open = args.known?.open ?? [];
+  const settled = args.known?.settled ?? [];
+  const known = [
+    ...(open.length > 0
+      ? [
+          "",
+          "Open findings from an earlier pass. The planner has had a chance to answer each one (in a decision's basis, or by changing the plan). Give each one a status in `prior`: `resolved` (the plan no longer has the defect), `still_present`, or `withdrawn` (it was never a defect), with a reason. Do not report them again as findings.",
+          ...open.map((f) => `- ${f.id} (${f.state}) ${f.description}`),
+        ]
+      : []),
+    ...(settled.length > 0
+      ? [
+          "",
+          "Settled findings. Do not report them again unless the defect is back in the plan; then report it again with its name in `finding`.",
+          ...settled.map((f) => `- ${f.id} (${f.state}) ${f.description}`),
+        ]
+      : []),
+  ];
   return [
     `You are an independent read-only reviewer of a plan to fix ${issueRef(args.issue)} in this repository (apache/skywalking-banyandb). Nothing is implemented yet${args.previous !== undefined ? " beyond the change already in the working tree" : ""}. Do not modify anything.`,
     "",
@@ -103,8 +122,9 @@ export function planReviewInstruction(args: { issue: number; snapshot: string; r
     "- test: the regression test's expected value comes from the issue, not from the new code; it fails by assertion on the base commit; its package and name exist or fit the repository's conventions.",
     "",
     UNCLEAR_POLICY,
+    ...known,
     "",
-    'Return verdict "approved" or "request_changes", a summary, and findings (axis spec, decisions, reach or test; severity blocking or minor; detail naming the file and function). Request changes only for blocking findings. If the plan decides or depends on a product question, set productDecision to the question for the maintainers; a question the plan leaves open, with that behaviour unchanged, is a finding, not a productDecision.',
+    'Return verdict "approved" or "request_changes", a summary, and findings (axis spec, decisions, reach or test; severity blocking or minor; detail naming the file and function, finding set to a known finding\'s name when it reports that finding again and "" otherwise). Request changes only for blocking findings. prior gives a status for every open finding listed above (empty when there are none). If the plan decides or depends on a product question, set productDecision to the question for the maintainers; a question the plan leaves open, with that behaviour unchanged, is a finding, not a productDecision.',
   ].join("\n");
 }
 

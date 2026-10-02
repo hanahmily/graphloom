@@ -1,6 +1,6 @@
 {
   "graphId": "banyandb-fix",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "sdkProtocol": 1,
   "entryPoints": {
     "createGraph": "./dist/index.js"
@@ -14,36 +14,40 @@
     "vitest": "^3.0.9"
   },
   "digests": {
-    "sourceTree": "3c05939f8ad4a855b13e263566d85e4d7282bf0cda9fe26d3341d05277240f81",
+    "sourceTree": "7cd7493f0a88329541945ac126420fa6af45b04bd9cdf84ed6506f5bc071b827",
     "packageLock": "3a10a234ba1253d9b918e329819c06a9f2e18a73ea4d9e414a96ab9e2db15492",
     "files": {
-      "package.json": "4ffa13e2bee3e4f5cb6db3a2ede4b908031598a7b7ea3a3563434963571c2f45",
+      "package.json": "59a9f38685a9dbba9b12e9670e3d2581ac7bce95c06855cba550df4a098e4ade",
       "package-lock.json": "3a10a234ba1253d9b918e329819c06a9f2e18a73ea4d9e414a96ab9e2db15492",
       "tsconfig.json": "ffed4b469e52e0642fabcb6a20f4ba178fce44e5e37567a0ee96571a150a1109",
-      "src/constants.ts": "0591b2737ff544df0096b558af273b840e222300108d51a0404c37edf6626a25",
+      "src/constants.ts": "9fef0c73836f9ad4c796bf1272a54beae92041257d0ac92149840ae81aa0cfa6",
       "src/decision-record.ts": "21c2d80260dcf0562646a4d6aa793ff6a18745c5c0daaeb0edcf8d351bc7a1a8",
-      "src/evidence.ts": "3ef2d32238b01d205919757d3372da9c2f28ee79ff0415b3d33643259f0443bf",
-      "src/findings.ts": "df702f8db9e59fda94552479c57ac2e56785a1073543b76cfc5422ce36fde2f8",
+      "src/evidence.ts": "3fbd94697a083e386342f2cc3d929d205d8156bf9200fb631a1a0b92bfe8bed2",
+      "src/findings.ts": "bdc70d112b921cfac296f802fdf74832b870e2161fad4c3fae19a60ca36009fd",
       "src/gotest.ts": "15c7e7a85c860549461bf3e2d5f9d9482f93c3c57bab369c137878b2a0ef00a3",
-      "src/graph.ts": "da5d3354a0904a14b922f5cc5921bd1bee1ddd1a8f2fb48a74395a975921295d",
-      "src/index.ts": "70dfc21b8407ee644b1a4a1a7026ad70820d0854926ae3787ac9bea0dc3980d7",
-      "src/ocr.ts": "2c71ccabe907fefe7552ba3bf86b41ada94a9a084f4a41406b0daeb481730839",
-      "src/prompts.ts": "ed9115344bebd6680b1e5d8d43c6d181e5aff44618f04649b9d913fa8ac54513",
-      "src/qualification.ts": "25210e4580d5fe730cbf77be8970b436d4d1d8c471ee920da8b6f3918982bbd4",
-      "src/validators.ts": "79109b0aa4e33b130bcfcee63013572638e2f57807374291f3bca7b01c780126",
-      "test/banyandb-fix.test.ts": "a422971766eea29b71cb54db955ac232819b4988a80dd6df73abab7442849b08"
+      "src/graph.ts": "43b6ade9ac9bad9f618b496b027455e271e73b0b40e30a5e0c93899a5b4d7787",
+      "src/index.ts": "d0bce3bbd4fcb89edaded3e6257abe9d509d3412ecab71157befb53fb0cb2195",
+      "src/ocr.ts": "af062bcc2352d947f70789a36de0bc4cda0fd11c2a8de8cec25df873628fc287",
+      "src/plan-findings.ts": "04f894e1d7812a11e655b0f63fb8a9fce1324e461b646cb296532cc3bca231c4",
+      "src/prompts.ts": "34179757787522dbbfca07c35de4733758254d4ced6132d8638f17c81c645862",
+      "src/qualification.ts": "78b36f8a753a183090d0a69f39eb7ce047d2e9d6e7549a6f4015b09184ffdd0c",
+      "src/review-common.ts": "2b711248d1b227c01f8ed36bfa2399791fbcf9543a92e89414c74f119b20323c",
+      "src/validators.ts": "561f7361eb080eb1671f40d8534c57f2cc67f7e4d34ea0f5a206ca5c2e4a432c",
+      "test/banyandb-fix.test.ts": "502e4c86969749fe0bd9ca92a49430a6ce9a92ff3e772fba13a9e5072e46f1ca"
     }
   },
   "requirements": [
     {
       "id": "plan-reviewed",
-      "statement": "A fresh read-only reviewer approved the plan the implementer followed, after that plan was written, on the spec, decisions, reach and test axes.",
-      "evidenceSchema": "review-verdict-v1"
+      "statement": "A fresh read-only reviewer reviewed the current plan record, following the plan the implementer followed, on the spec, decisions, reach and test axes, and gave a status for every finding the planner had a chance to answer; every finding that pass raised was dismissed or resolved; no plan finding of this generation is confirmed or disputed; and the reviewer approved.",
+      "evidenceSchema": "review-verdict-v1",
+      "identityArtifactSchema": "decision-record-v1"
     },
     {
       "id": "decisions-recorded",
       "statement": "The implementer's decision record is ready, names the regression test and the production caller, gives every unclear point a tier and a basis, takes an option for every behaviour point, and marks no product point chosen.",
-      "evidenceSchema": "decision-record-v1"
+      "evidenceSchema": "decision-record-v1",
+      "identityArtifactSchema": "decision-record-v1"
     },
     {
       "id": "reproduces",

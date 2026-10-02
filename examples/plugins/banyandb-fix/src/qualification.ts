@@ -140,11 +140,11 @@ const plan = (): EvidenceRecord => ({
   },
 });
 
-const review = (verdict: string, stageId: string = FIX_STAGE): EvidenceRecord => ({
+const review = (verdict: string, stageId: string = FIX_STAGE, extra: Record<string, unknown> = {}): EvidenceRecord => ({
   ref: ref(),
   kind: "review",
   candidateDigest: DIGEST,
-  payload: { verdict, summary: "s", producer: { operationId: "op-review", stageId, purpose: "review", readOnly: true, kind: "agent" } },
+  payload: { verdict, summary: "s", ...extra, producer: { operationId: "op-review", stageId, purpose: "review", readOnly: true, kind: "agent" } },
 });
 
 const comment = (severity: string | undefined) => ({
@@ -191,6 +191,16 @@ const verification = (verdict: string, quotes: object[] = [], digest = DIGEST): 
 const confirmed = (digest = DIGEST) => verification("confirmed", [{ path: SCHEDULER_PATH, line: 6, text: "s.wait(ctx)" }], digest);
 const refuted = (quotes: object[] = [BOUNDED]) => verification("refuted", quotes);
 const scheduler = (bytes = SCHEDULER, digest = DIGEST): EvidenceRecord => ({ ref: ref(), kind: "file", candidateDigest: digest, payload: { path: SCHEDULER_PATH, bytes }, fingerprint: `fp-${seq}` });
+/** The plan-review verifier's verdict on P1: a fresh read-only session at {FIX_STAGE, "verify"}. */
+const planVerification = (verdict: string, quotes: object[] = []): EvidenceRecord => ({
+  ref: ref(),
+  kind: "other",
+  candidateDigest: DIGEST,
+  payload: {
+    codingAgent: { harness: "claude-code", status: "completed", output: { verdicts: [{ finding: "P1", verdict, reason: `${verdict} by the verifier`, quotes }] } },
+    producer: { operationId: "op-plan-verify", stageId: FIX_STAGE, purpose: "verify", readOnly: true, kind: "agent", executorId: CODING_AGENT.id },
+  },
+});
 /** F1, raised and confirmed on an earlier change in an earlier generation. */
 const confirmedEarlier = () => [codeReviewRun(reviewed([comment("high")]), { digest: OTHER }), confirmed(OTHER)];
 
@@ -266,6 +276,55 @@ export const QUALIFICATION_CASES: readonly QualificationCase[] = [
   c("plan-reviewer", "no review", [plan()], "inconclusive"),
   c("plan-reviewer", "no plan in this generation", [review("approved")], "inconclusive"),
   c("plan-reviewer", "unknown verdict", [plan(), review("lgtm")], "inconclusive"),
+  c(
+    "plan-reviewer",
+    "a repeated plan finding not yet verified defers acceptance",
+    [plan(), review("request_changes", FIX_STAGE, { findings: [{ axis: "reach", severity: "blocking", detail: "Close waits forever" }] }), plan(), review("approved", FIX_STAGE, { prior: [{ finding: "P1", status: "still_present", reason: "still there" }] })],
+    "inconclusive",
+  ),
+  c(
+    "plan-reviewer",
+    "a plan finding the verifier confirms blocks an otherwise-approved plan",
+    [
+      plan(),
+      review("request_changes", FIX_STAGE, { findings: [{ axis: "reach", severity: "blocking", detail: "Close waits forever" }] }),
+      plan(),
+      review("approved", FIX_STAGE, { prior: [{ finding: "P1", status: "still_present", reason: "still there" }] }),
+      planVerification("confirmed", [{ path: SCHEDULER_PATH, line: 6, text: "s.wait(ctx)" }]),
+    ],
+    "failed",
+  ),
+  c(
+    "plan-reviewer",
+    "a plan finding the verifier dismisses with matching quotes does not block approval",
+    [
+      plan(),
+      review("request_changes", FIX_STAGE, { findings: [{ axis: "reach", severity: "blocking", detail: "Close waits forever" }] }),
+      plan(),
+      review("approved", FIX_STAGE, { prior: [{ finding: "P1", status: "still_present", reason: "still there" }] }),
+      planVerification("refuted", [BOUNDED]),
+      scheduler(),
+    ],
+    "passed",
+  ),
+  c(
+    "plan-reviewer",
+    "a plan finding the verifier cannot decide blocks approval",
+    [
+      plan(),
+      review("request_changes", FIX_STAGE, { findings: [{ axis: "reach", severity: "blocking", detail: "Close waits forever" }] }),
+      plan(),
+      review("approved", FIX_STAGE, { prior: [{ finding: "P1", status: "still_present", reason: "still there" }] }),
+      planVerification("uncertain"),
+    ],
+    "failed",
+  ),
+  c(
+    "plan-reviewer",
+    "the latest plan review gives an answered finding no status",
+    [plan(), review("request_changes", FIX_STAGE, { findings: [{ axis: "reach", severity: "blocking", detail: "Close waits forever" }] }), plan(), review("approved")],
+    "failed",
+  ),
 
   c("open-code-review", "no comments", [codeReviewRun(reviewed([]))], "passed"),
   c("open-code-review", "only low and medium comments", [codeReviewRun(reviewed([comment("low"), comment("medium")]))], "passed"),

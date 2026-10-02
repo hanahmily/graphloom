@@ -1,6 +1,7 @@
 import type { EvidenceRecord } from "@graphloom/sdk";
 import { CODING_AGENT, GET_ISSUE, LIST_ISSUE_COMMENTS } from "./constants.js";
 import { packageOutput } from "./gotest.js";
+import { PRIOR_STATUSES, type PriorStatus } from "./review-common.js";
 
 /** Who produced a piece of evidence; the controller attaches it to job evidence. */
 export interface Producer {
@@ -60,7 +61,9 @@ export interface ReviewVerdict {
   record: EvidenceRecord;
   verdict: string;
   summary: string;
-  findings: Array<{ axis?: string; severity?: string; detail: string }>;
+  findings: Array<{ axis?: string; severity?: string; detail: string; finding?: string }>;
+  /** A status for each known finding from an earlier pass, like a code review pass's own `prior`. */
+  prior: Array<{ finding: string; status: PriorStatus; reason: string }>;
   productDecision?: string;
 }
 
@@ -73,8 +76,9 @@ export function producer(e: EvidenceRecord): Producer | undefined {
   return p !== undefined && typeof p.operationId === "string" ? (p as unknown as Producer) : undefined;
 }
 
-export function inGeneration(evidence: EvidenceRecord[], generation: number): EvidenceRecord[] {
-  return evidence.filter((e) => e.generation === undefined || e.generation === generation);
+/** Evidence for the given accepted candidate identity, or carrying no candidate identity at all (e.g. environment checks). */
+export function forIdentity(evidence: EvidenceRecord[], identity: string | undefined): EvidenceRecord[] {
+  return evidence.filter((e) => e.candidateDigest === undefined || e.candidateDigest === identity);
 }
 
 /** Command results, oldest first, optionally only those with `id`. */
@@ -225,15 +229,28 @@ function reviewVerdict(record: EvidenceRecord): ReviewVerdict | undefined {
     ? payload.findings.flatMap((raw) => {
         const f = object(raw);
         return f !== undefined && typeof f.detail === "string"
-          ? [{ detail: f.detail, ...(typeof f.axis === "string" ? { axis: f.axis } : {}), ...(typeof f.severity === "string" ? { severity: f.severity } : {}) }]
+          ? [
+              {
+                detail: f.detail,
+                ...(typeof f.axis === "string" ? { axis: f.axis } : {}),
+                ...(typeof f.severity === "string" ? { severity: f.severity } : {}),
+                ...(typeof f.finding === "string" && f.finding.trim() !== "" ? { finding: f.finding.trim() } : {}),
+              },
+            ]
           : [];
       })
     : [];
+  const prior = (Array.isArray(payload.prior) ? payload.prior : []).flatMap((raw) => {
+    const p = object(raw);
+    const status = PRIOR_STATUSES.find((s) => s === p?.status);
+    return p !== undefined && typeof p.finding === "string" && status !== undefined ? [{ finding: p.finding.trim(), status, reason: String(p.reason ?? "") }] : [];
+  });
   return {
     record,
     verdict: String(payload.verdict ?? ""),
     summary: String(payload.summary ?? ""),
     findings,
+    prior,
     ...(typeof payload.productDecision === "string" && payload.productDecision.trim() !== "" ? { productDecision: payload.productDecision } : {}),
   };
 }

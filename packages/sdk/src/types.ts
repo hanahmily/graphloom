@@ -15,6 +15,20 @@ export interface Requirement {
   /** Human-readable statement independent of the checking predicate. */
   statement: string;
   evidenceSchema: string;
+  /**
+   * Requirement IDs whose evidence this requirement's validator reads as
+   * context. Their currently admitted bindings are pinned into this
+   * requirement's receipt as prerequisiteBindings, so a later qualified
+   * replacement of any of them invalidates this receipt too.
+   */
+  prerequisiteRequirementIds?: RequirementId[];
+  /**
+   * When this requirement's evidence is not workspace bytes (e.g. a decision
+   * record an agent can revise before any code changes), the resultSchema of
+   * the job output whose digest anchors this requirement's receipt in
+   * acceptedIdentity, keyed by this same string.
+   */
+  identityArtifactSchema?: string;
 }
 
 export interface ValidatorBinding {
@@ -89,6 +103,19 @@ export interface Receipt {
   valid: boolean;
   /** The workspace change this receipt accepted; the run cannot complete once it changes. */
   candidateDigest?: Fingerprint;
+  /**
+   * Component digests that must stay unchanged for this receipt to stay
+   * valid: "workspace" plus, for a requirement whose evidence is not
+   * workspace bytes, a named artifact digest keyed by its
+   * Requirement.identityArtifactSchema.
+   */
+  acceptedIdentity?: Record<string, Fingerprint>;
+  /**
+   * Full validator identity (validatorId and version) of every other
+   * requirement this receipt's evidence depended on at acceptance time.
+   * A requirement's own Requirement.prerequisiteRequirementIds names them.
+   */
+  prerequisiteBindings?: Record<RequirementId, ValidatorBinding>;
 }
 
 export interface EvidenceRecord {
@@ -96,13 +123,15 @@ export interface EvidenceRecord {
   kind: "file" | "command" | "workspace" | "review" | "other";
   fingerprint?: Fingerprint;
   payload?: unknown;
-  /** Controller generation that produced this evidence; used for freshness admission. */
+  /** Controller generation that produced this evidence: producer metadata and a version-transition/crash-recovery fence, not a freshness boundary. */
   generation?: number;
   /**
    * Digest of the workspace change (every path that differs from the pinned
    * base commit, with its content) the evidence was produced against.
    */
   candidateDigest?: Fingerprint;
+  /** The producing job's declared JobSpec.resultSchema, stamped by the controller; anchors a non-workspace requirement's acceptedIdentity component. */
+  resultSchema?: string;
 }
 
 export interface OutstandingOperation {
@@ -158,6 +187,38 @@ export interface RunView {
   agentSessions?: AgentSessionView[];
   /** What repair the operator authorized and the bundle's code permits. */
   repairAuthority?: RepairAuthorityView;
+  /**
+   * Stages reentered but not yet settled by a fresh work-purpose dispatch in
+   * the current attempt. Stage-selection must treat these as still open
+   * regardless of receipt validity: a reentry whose candidate has not
+   * changed yet leaves receipts valid, and without this a stage-selection
+   * rule that reads receipts alone would skip the reentered stage entirely.
+   */
+  openAttempt?: Record<StageId, boolean>;
+  /**
+   * Correction-escalation and repeat-proposal state the supervisor needs.
+   * Present only when at least one of the three is non-empty.
+   */
+  escalation?: {
+    correctionTrials: Record<string, number>;
+    handoff: Record<string, CorrectionHandoff>;
+    repeatedProposals: Record<string, SupervisorRepeatEntry>;
+  };
+}
+
+/** Why a stage's correction trials are handed off to the supervisor. */
+export interface CorrectionHandoff {
+  since: string;
+  reason: string;
+  trials: number;
+}
+
+/** A supervisor proposal repeated with no progress since it was last made. */
+export interface SupervisorRepeatEntry {
+  triggerCode: string;
+  stageId?: string;
+  actionType: string;
+  count: number;
 }
 
 export interface RepairAuthorityView {
@@ -180,7 +241,7 @@ export interface AgentSessionView {
 }
 
 export type JobKind = "agent" | "command";
-export type JobPurpose = "work" | "check" | "review" | "repair" | "diagnostic";
+export type JobPurpose = "work" | "check" | "review" | "repair" | "diagnostic" | "verify";
 
 export interface JobSpec {
   jobId?: JobId;
