@@ -107,7 +107,9 @@ export function advanceRelease(view: RunView): GraphDecision {
     );
   }
   const stage = definition.stages.find(
-    (s) => !s.requirementIds.every((id) => view.receipts.some((r) => r.stageId === s.id && r.requirementId === id && r.valid)),
+    (s) =>
+      !s.requirementIds.every((id) => view.receipts.some((r) => r.stageId === s.id && r.requirementId === id && r.valid)) ||
+      view.openAttempt?.[s.id] === true,
   );
   if (stage === undefined) {
     return stop({ reason: "complete", blocker: "none" }, "every stage has valid receipts");
@@ -231,7 +233,7 @@ function evaluate(requirementId: string, evidence: EvidenceRecord[]): Validation
 }
 
 function currentEvidence(view: RunView): EvidenceRecord[] {
-  return view.evidence.filter((e) => e.generation === undefined || e.generation === view.generation);
+  return view.evidence.filter((e) => e.candidateDigest === undefined || e.candidateDigest === view.candidateDigest);
 }
 
 export function requestedVersion(request: string): string | undefined {

@@ -1,7 +1,7 @@
 import type { AgentSessionView, EvidenceRecord } from "@graphloom/sdk";
 import { parseSupervisorDecision } from "./decision.js";
 import type { PiSupervisorSession } from "./pi-session.js";
-import { continuationRefusal, createAdmissionTools, escapingObservePath, writeScopeRefusal } from "./tools.js";
+import { continuationRefusal, createAdmissionTools, escapingObservePath, supervisorProposalKey, writeScopeRefusal } from "./tools.js";
 import {
   assertGrantedRoot,
   type CandidatePatchRequest,
@@ -150,7 +150,13 @@ export function createPiSupervisor(options: CreatePiSupervisorOptions): PiSuperv
       if (input.maxProviderCalls !== undefined && input.maxProviderCalls < 1) {
         throw new Error("decide has no provider-call allowance");
       }
-      const toolbox = createAdmissionTools(configured, input.view.agentSessions ?? [], input.view.generation);
+      const toolbox = createAdmissionTools(
+        configured,
+        input.view.agentSessions ?? [],
+        input.view.generation,
+        input.trigger.code,
+        input.view.escalation?.repeatedProposals,
+      );
       const prompt = buildRecoveryPrompt(input, {
         current: { provider: binding.provider, modelId: binding.modelId },
         configured,
@@ -171,7 +177,22 @@ export function createPiSupervisor(options: CreatePiSupervisorOptions): PiSuperv
       // hard-stop the run with no chance to self-correct, the way the
       // tool-call path's reject() already lets the model fix in-turn.
       const proposal = toolbox.proposal() ?? parseSupervisorDecision(text);
-      return sanitizeProposal(proposal, input.view.agentSessions ?? [], input.view.generation);
+      const sanitized = sanitizeProposal(proposal, input.view.agentSessions ?? [], input.view.generation);
+      // A JSON-only reply never went through the admission tools' own
+      // repeated-proposal rejection (there is no tool call to reject, and no
+      // further turn for the model to retry in): reject it here instead of
+      // letting a repeated no-progress proposal reach the controller through
+      // this path alone.
+      if ("action" in sanitized) {
+        const key = supervisorProposalKey(input.trigger.code, sanitized.action);
+        const already = input.view.escalation?.repeatedProposals[key]?.count ?? 0;
+        if (already + 1 >= 3) {
+          throw new Error(
+            `this exact ${sanitized.action.type} proposal would be the ${already + 1 === 3 ? "3rd" : `${already + 1}th`} time with no progress since the controller last checked; propose something that would change the outcome, or stop`,
+          );
+        }
+      }
+      return sanitized;
     },
 
     async patchCandidate(args: CandidatePatchRequest) {
@@ -284,6 +305,34 @@ function sanitizeProposal(
   return proposal;
 }
 
+/**
+ * Why each recovery trigger code fired and which actions are, or are not, a
+ * usable remedy given it — "what #97 did for correction_limit," generalized.
+ * A code absent here (`supervise`, `unhandled`) gets no fixed guidance: read
+ * the trigger's own message instead.
+ */
+const TRIGGER_GUIDANCE: Partial<Record<string, string>> = {
+  // The controller already refused the graph's own work dispatch for the
+  // current stage and discarded it unrun (see
+  // packages/controller/src/escalation.ts's settleCorrectionTrial):
+  // reenter does not clear that, so reenter then return only sends the
+  // graph back to the same refusal; it is not a usable remedy here.
+  correction_limit:
+    'This episode\'s trigger is correction_limit: the controller already refused the graph\'s own next work dispatch for the current stage and discarded it unrun, because that stage hit its correction-trial limit. reenter does not clear that limit, so reenter then return only sends the graph back to the same refusal; it is not a usable remedy here. Dispatch that stage\'s work yourself (job.purpose "work", kind "agent", continuing the stage\'s earlier agent session with job.continueFrom when agentSessions has one for its dispatch key) to make real progress, or stop if the underlying problem is genuinely unrepairable. A work job\'s writeScope is required and must be non-empty; when you do not know this stage\'s own narrower convention, job.writeScope: ["."] (the whole worktree) is always valid — do not omit writeScope or the controller refuses the dispatch outright.',
+  stalled:
+    "This episode's trigger is stalled: the graph proposed the exact same decision twice with no progress since it last proposed it. Propose something that would actually change the outcome, not the same action again; reenter or dispatch new work for the stage are usually more useful than return.",
+  executor_failed:
+    "This episode's trigger is executor_failed: an executor reported failure or an abnormal result. Retry the dispatch, switch to another executor this run already pinned for the stage, or repair the executor's package; stop only if none of those is viable.",
+  environment_changed:
+    "This episode's trigger is environment_changed: a file the graph's environment declaration pins no longer matches what it was written against. A repair that updates the declaration (qualify_repair target plugin, when the bundle is source-repairable) is usually the fix; the run stays blocked otherwise.",
+  plugin_crash:
+    "This episode's trigger is plugin_crash: the graph plugin itself failed while deciding. A plugin repair (qualify_repair target plugin) may fix it when the bundle is source-repairable; otherwise stop, citing the failure.",
+  plugin_timeout:
+    "This episode's trigger is plugin_timeout: the graph plugin did not respond in time. Reentering rarely helps if the plugin itself is hanging; prefer a plugin repair when the bundle is source-repairable, or stop.",
+  plugin_malformed:
+    "This episode's trigger is plugin_malformed: the graph returned a decision the controller could not validate. A plugin repair (qualify_repair target plugin) may fix it when the bundle is source-repairable; otherwise stop, citing what was malformed.",
+};
+
 export function buildRecoveryPrompt(
   input: SupervisorInput,
   models?: { current: SupervisorModelRef; configured: readonly SupervisorModelRef[] },
@@ -315,15 +364,11 @@ export function buildRecoveryPrompt(
     repairCandidates: input.view.repairCandidates ?? [],
     agentSessions: input.view.agentSessions ?? [],
     ...(input.view.repairAuthority !== undefined ? { repairAuthority: input.view.repairAuthority } : {}),
+    ...(input.view.escalation !== undefined ? { escalation: input.view.escalation } : {}),
   };
   const workThisGeneration = currentGeneration.some((e) => producerOf(e)?.purpose === "work");
   const latestReviewVerdict = [...currentGeneration].reverse().map((e) => verdictOf(e)).find((v) => v !== undefined);
-  // correction_limit means the controller already refused the graph's own work dispatch for
-  // this stage and discarded it unrun (see packages/controller/src/escalation.ts's
-  // correctionHandoff): reenter only starts another attempt whose first work dispatch the
-  // controller refuses the same way, forever, since reenter never clears correctionTrials.
-  // Only this supervisor dispatching that stage's work itself breaks the cycle.
-  const correctionLimitHandoff = input.trigger.code === "correction_limit";
+  const triggerGuidance = TRIGGER_GUIDANCE[input.trigger.code];
 
   const settlement = input.lastSettlement;
   return [
@@ -337,15 +382,13 @@ export function buildRecoveryPrompt(
     "repairAuthority shows what the operator granted and whether the graph bundle's code can be patched. An opaque bundle's code cannot be: retry the work or repair its environment instead. Substitute a validator (qualify_repair target validator with requirementId, adding files without editing existing ones) only when validatorSubstitution is granted and that requirement has a readable statement. Otherwise stop, citing the failing validation's evidenceRefs; never invent a replacement criterion.",
     "reenter starts a new attempt but runs nothing. To have the graph run that attempt's own jobs (its instructions, result schemas and write scopes), return after reentering; dispatch only work the graph would not run itself.",
     "To retry a stage's agent work with the context of its earlier session, dispatch with job.kind \"agent\" and job.continueFrom set to an operationId from agentSessions of that stage and dispatch key; start fresh instead when that context is misleading. continueFrom only works on an agent job: a command job has no session to resume.",
-    ...(correctionLimitHandoff
+    ...(triggerGuidance !== undefined ? [triggerGuidance] : []),
+    ...(triggerGuidance === undefined && latestReviewVerdict === "approved" && !workThisGeneration
       ? [
-          "This episode's trigger is correction_limit: the controller already refused the graph's own next work dispatch for the current stage and discarded it unrun, because that stage hit its correction-trial limit. reenter does not clear that limit, so reenter then return only sends the graph back to the same refusal; it is not a usable remedy here. Dispatch that stage's work yourself (job.purpose \"work\", kind \"agent\", continuing the stage's earlier agent session with job.continueFrom when agentSessions has one for its dispatch key) to make real progress, or stop if the underlying problem is genuinely unrepairable. A work job's writeScope is required and must be non-empty; when you do not know this stage's own narrower convention, job.writeScope: [\".\"] (the whole worktree) is always valid — do not omit writeScope or the controller refuses the dispatch outright.",
+          "The current generation's own review already approved, and no work-purpose evidence exists yet this generation: the graph has not actually attempted that work. Prefer reenter then return over re-dispatching another review of the same approved plan.",
         ]
-      : latestReviewVerdict === "approved" && !workThisGeneration
-        ? [
-            "The current generation's own review already approved, and no work-purpose evidence exists yet this generation: the graph has not actually attempted that work. Prefer reenter then return over re-dispatching another review of the same approved plan.",
-          ]
-        : []),
+      : []),
+    "A proposal identical to one you already made, with no progress since, is tracked: the 2nd time is reported back as a settlement fact on your next turn, and the 3rd time is rejected in-turn by the tool itself — propose something that would actually change the outcome instead, or stop.",
     ...(models !== undefined
       ? [
           `Your model is ${models.current.provider}/${models.current.modelId}. To continue on another operator-configured model (${models.configured

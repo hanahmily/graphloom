@@ -3,6 +3,7 @@ export type {
   AgentSessionView,
   BudgetRemaining,
   CheckoutSpec,
+  CorrectionHandoff,
   EnvironmentCommand,
   EnvironmentDeclaration,
   EvidenceRecord,
@@ -32,6 +33,7 @@ export type {
   StageId,
   StopSpec,
   SuperviseSpec,
+  SupervisorRepeatEntry,
   TaskInputs,
   ValidateSpec,
   ValidationInput,
@@ -111,3 +113,5 @@ export {
 export { createScriptedGraph, type ScriptedAdvance, type ScriptedGraphOptions } from "./scripted.js";
 
 export { writeScopeAllows, writeScopeExcludes, writeScopeIncludes, writeScopeProblem } from "./scope.js";
+
+export { stableHash, stableJson } from "./stable-hash.js";

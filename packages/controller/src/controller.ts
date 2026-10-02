@@ -23,7 +23,7 @@ import {
   type RecreateHostFn,
   type RepairDeps,
 } from "./repair-lifecycle.js";
-import { admitValidation, assertLiveWorkspaceMatchesEvidence, deliveryDrift, invalidateFromStage } from "./admit.js";
+import { admitValidation, assertLiveWorkspaceMatchesEvidence, deliveryDrift, invalidateStageAndAfter } from "./admit.js";
 import type { AdmissionValidator } from "./admit.js";
 import { resolveBundleEntry } from "./bundle.js";
 import { createHostValidators } from "./host-validators.js";
@@ -699,7 +699,7 @@ async function reassessAcceptedWorkspace(state: DurableRunState): Promise<Durabl
       ).catch(() => "accepted evidence is no longer readable");
       if (!drift) continue;
 
-      const invalidated = invalidateFromStage(snapshot, stage.id, state.definition);
+      const invalidated = invalidateStageAndAfter(snapshot, stage.id, state.definition);
       // Discard routing state that may assume the invalidated prerequisites.
       // Resume's generation fence makes historical observations unavailable to
       // validation while preserving them for audit.
@@ -716,7 +716,7 @@ async function reassessAcceptedWorkspace(state: DurableRunState): Promise<Durabl
   }
   const last = state.definition.stages.at(-1);
   if (last !== undefined && (await deliveryDrift(snapshot)) !== undefined) {
-    const { privateState: _privateState, ...next } = invalidateFromStage(snapshot, last.id, state.definition);
+    const { privateState: _privateState, ...next } = invalidateStageAndAfter(snapshot, last.id, state.definition);
     void _privateState;
     return {
       ...next,
@@ -757,7 +757,7 @@ async function recheckReceipts(
       }
       if (failure === undefined) continue;
       // Discard routing state that may assume the invalidated prerequisites.
-      const { privateState: _privateState, ...next } = invalidateFromStage(state, stage.id, state.definition);
+      const { privateState: _privateState, ...next } = invalidateStageAndAfter(state, stage.id, state.definition);
       void _privateState;
       return {
         state: {

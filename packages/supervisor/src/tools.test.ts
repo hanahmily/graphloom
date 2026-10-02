@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { AgentSessionView } from "@graphloom/sdk";
-import { createAdmissionTools } from "./tools.js";
+import type { AgentSessionView, GraphAction } from "@graphloom/sdk";
+import { createAdmissionTools, supervisorProposalKey } from "./tools.js";
 
 type Execute = (id: string, params: Record<string, unknown>) => Promise<{ content: { text: string }[]; terminate?: boolean }>;
 
@@ -135,5 +135,30 @@ describe("admission tools", () => {
     expect(toolbox.proposal()).toBeUndefined();
     await execute("2", { reason: "look", observe: { paths: ["CHANGES.md"], includeWorkspaceManifest: true } });
     expect(toolbox.proposal()).toMatchObject({ action: { type: "observe", observe: { paths: ["CHANGES.md"] } } });
+  });
+
+  it("accepts a repeated no-progress proposal at its 2nd occurrence but rejects it in-turn at its 3rd", async () => {
+    const dispatchJob = { stageId: "fix", kind: "agent" as const, purpose: "work" as const, instruction: "retry", writeScope: ["pkg/timestamp"] };
+    const action: GraphAction = { type: "dispatch", job: dispatchJob };
+    const key = supervisorProposalKey("correction_limit", action);
+
+    const accepting = createAdmissionTools([{ provider: "p", modelId: "m" }], [], 1, "correction_limit", {
+      [key]: { count: 1 },
+    });
+    const acceptTool = accepting.tools.find((t) => t.name === "dispatch")!;
+    const accepted = await (acceptTool as unknown as { execute: Execute }).execute("1", { reason: "retry", job: dispatchJob });
+    expect(accepted.terminate).toBe(true);
+    expect(accepting.proposal()).toMatchObject({ action: { type: "dispatch" } });
+
+    const rejecting = createAdmissionTools([{ provider: "p", modelId: "m" }], [], 1, "correction_limit", {
+      [key]: { count: 2 },
+    });
+    const rejectTool = rejecting.tools.find((t) => t.name === "dispatch")!;
+    const rejected = await (rejectTool as unknown as { execute: Execute }).execute("1", { reason: "retry", job: dispatchJob });
+    expect(rejected.terminate).toBeUndefined();
+    expect(rejected.content[0]!.text).toMatch(
+      /^Rejected: this exact dispatch proposal would be the 3rd time with no progress since the controller last checked/,
+    );
+    expect(rejecting.proposal()).toBeUndefined();
   });
 });

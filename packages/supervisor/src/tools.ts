@@ -1,6 +1,6 @@
 import path from "node:path";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { assertGraphDecision, type AgentSessionView } from "@graphloom/sdk";
+import { ACTION_SPEC_KEYS, assertGraphDecision, stableHash, type AgentSessionView, type GraphAction } from "@graphloom/sdk";
 import type { ModelRef, SupervisorProposal } from "./types.js";
 
 /**
@@ -142,6 +142,39 @@ function dispatchKey(job: ContinuationJob, fallbackExecutorId?: string): string 
   return `${String(job.purpose)}:${pinnedId}`;
 }
 
+/** The stage an action concerns, for keys and repeat-detection; `undefined` for a stage-less action type. */
+function stageForAction(action: GraphAction): string | undefined {
+  switch (action.type) {
+    case "dispatch":
+      return action.job.stageId;
+    case "validate":
+      return action.validate.stageId;
+    case "reenter":
+      return action.reenter.stageId;
+    default:
+      return undefined;
+  }
+}
+
+/** The action's own spec, with its free text (`reason`, and a dispatch's `instruction`) stripped before hashing. */
+function specForHash(action: GraphAction): unknown {
+  const key = ACTION_SPEC_KEYS[action.type]!;
+  const spec = (action as unknown as Record<string, unknown>)[key];
+  if (spec === null || typeof spec !== "object") return spec;
+  const { reason: _reason, instruction: _instruction, ...rest } = spec as Record<string, unknown>;
+  return rest;
+}
+
+/**
+ * Mirrors packages/controller/src/escalation.ts's supervisorProposalKey,
+ * byte-for-byte: both call the same promoted @graphloom/sdk stableHash, so
+ * there is nothing left to diverge the way a hand-duplicated canonicalizer
+ * could. Exported so tests can precompute the key for a known action.
+ */
+export function supervisorProposalKey(triggerCode: string, action: GraphAction): string {
+  return stableHash([triggerCode, stageForAction(action) ?? null, action.type, specForHash(action)]);
+}
+
 /**
  * Same checks as the controller's continuationRefusal, run before admission so
  * a bad continueFrom is rejected in-turn like any other malformed job, rather
@@ -203,6 +236,8 @@ export function createAdmissionTools(
   configured: readonly ModelRef[],
   agentSessions: readonly AgentSessionView[] = [],
   generation = 0,
+  triggerCode?: string,
+  repeatedProposals: Record<string, { count: number }> = {},
 ): AdmissionToolbox {
   let proposal: SupervisorProposal | undefined;
 
@@ -241,11 +276,22 @@ export function createAdmissionTools(
         const paths = (params[specKey] as { paths?: unknown } | undefined)?.paths;
         const escaping = action === "observe" ? escapingObservePath(paths) : undefined;
         if (escaping !== undefined) return reject(`observe paths are relative to the run worktree; ${escaping} is not`);
+        let candidate: SupervisorProposal;
         try {
-          return accept(assertGraphDecision({ reason: params.reason, action: { type: action, [specKey]: params[specKey] } }));
+          candidate = assertGraphDecision({ reason: params.reason, action: { type: action, [specKey]: params[specKey] } });
         } catch (err) {
           return reject(err instanceof Error ? err.message : String(err));
         }
+        if (triggerCode !== undefined) {
+          const key = supervisorProposalKey(triggerCode, candidate.action);
+          const already = repeatedProposals[key]?.count ?? 0;
+          if (already + 1 >= 3) {
+            return reject(
+              `this exact ${action} proposal would be the ${already + 1 === 3 ? "3rd" : `${already + 1}th`} time with no progress since the controller last checked; propose something that would change the outcome, or stop`,
+            );
+          }
+        }
+        return accept(candidate);
       },
     } as ToolDefinition;
   });

@@ -10,7 +10,11 @@ const MAX_FACTS = 16;
 const MAX_TEXT = 300;
 
 /** Record a supervisor proposal before the controller admits it. */
-export function markProposal(state: DurableRunState, proposal: SupervisorProposal): DurableRunState {
+export function markProposal(
+  state: DurableRunState,
+  proposal: SupervisorProposal,
+  repeat?: { count: number; triggerCode: string },
+): DurableRunState {
   const mark: SupervisorMark = {
     action: isModelSwitchRequest(proposal) ? "switch_model" : proposal.action.type,
     reason: bounded(proposal.reason),
@@ -22,6 +26,7 @@ export function markProposal(state: DurableRunState, proposal: SupervisorProposa
     receiptIds: state.receipts.map((r) => r.id),
     candidates: Object.fromEntries((state.repairCandidates ?? []).map((c) => [c.artifactId, c.status])),
     notes: [],
+    ...(repeat !== undefined ? { repeat } : {}),
   };
   return { ...state, supervisorMark: mark };
 }
@@ -44,6 +49,11 @@ export function settleProposal(state: DurableRunState): SupervisorSettlement | u
   const mark = state.supervisorMark;
   if (mark === undefined) return undefined;
   const facts = [...mark.notes];
+  if (mark.repeat !== undefined) {
+    facts.push(
+      `this proposal (${mark.action}) is the ${ordinal(mark.repeat.count)} with no progress since it was last made, under the ${mark.repeat.triggerCode} trigger`,
+    );
+  }
 
   const knownEvidence = new Set(mark.evidenceRefs);
   for (const record of state.evidence) {
@@ -101,4 +111,19 @@ function describeEvidence(record: EvidenceRecord): string {
 
 function bounded(text: string): string {
   return text.length > MAX_TEXT ? `${text.slice(0, MAX_TEXT)}…` : text;
+}
+
+function ordinal(n: number): string {
+  const mod100 = n % 100;
+  if (mod100 >= 11 && mod100 <= 13) return `${n}th`;
+  switch (n % 10) {
+    case 1:
+      return `${n}st`;
+    case 2:
+      return `${n}nd`;
+    case 3:
+      return `${n}rd`;
+    default:
+      return `${n}th`;
+  }
 }

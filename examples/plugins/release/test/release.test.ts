@@ -268,12 +268,15 @@ describe("release graph routing", () => {
     expect(s.decision.action).toMatchObject({ observe: { paths: [VERSION_PATH, CHANGELOG_PATH] } });
   });
 
-  it("ignores a stale verdict after a new generation and asks for a fresh review", () => {
+  it("ignores a stale verdict after a candidate change and asks for a fresh review", () => {
     const logged = [receipt("bump", "version-file"), receipt("changelog", "changelog-entry"), receipt("changelog", "release-scope")];
     const reviewing = JSON.stringify({ stageId: "review", generation: 1, dispatched: true, observed: false, corrections: 0, ran: ["bump", "changelog"] });
-    const s = step(view({ generation: 2, receipts: logged, evidence: [review("approved", "old", 1)], privateState: reviewing }));
+    const staleReview: EvidenceRecord = { ...review("approved", "old", 1), candidateDigest: "digest-1" };
+    const s = step(
+      view({ generation: 2, candidateDigest: "digest-2", receipts: logged, evidence: [staleReview], privateState: reviewing }),
+    );
     expect(s.decision.action).toMatchObject({ type: "dispatch", job: { stageId: "review", readOnly: true } });
-    // The fresh reviewer returned nothing: the old approval must not stand in for it.
+    // The fresh reviewer returned nothing: the old approval (a different candidate) must not stand in for it.
     expect(step(s.next()).decision.action).toMatchObject({ type: "supervise", supervise: { reason: "the reviewer returned no verdict" } });
   });
 

@@ -1,6 +1,6 @@
 {
   "name": "@graphloom/plugin-banyandb-fix",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Fix → Review graph plugin for BanyanDB bug issues",
   "type": "module",
   "exports": {

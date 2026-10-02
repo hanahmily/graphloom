@@ -12,7 +12,7 @@ import type {
 } from "@graphloom/sdk";
 import type { Supervisor } from "@graphloom/supervisor";
 import type { PluginHost } from "@graphloom/plugin-host";
-import { invalidateFromStage, type AdmissionValidator } from "./admit.js";
+import { invalidateStageAndAfter, type AdmissionValidator } from "./admit.js";
 import { resolveBundleEntryFromManifest } from "./bundle.js";
 import { manifestRepairContract } from "./intake.js";
 import {
@@ -768,7 +768,7 @@ export async function applyActivateRepair(
 
     // Validator repairs typically invalidate Write and everything after.
     const earliest = next.definition.stages[0]?.id ?? next.current.stageId;
-    next = invalidateFromStage(next, earliest, next.definition);
+    next = invalidateStageAndAfter(next, earliest, next.definition);
     next = { ...next, current: { stageId: earliest, attempt: 1 } };
     next = bumpGeneration(next, `activate_repair:${artifact.artifactId}`);
 

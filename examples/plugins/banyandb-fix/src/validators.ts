@@ -12,7 +12,8 @@ import {
   describeCommand,
   latestCheckoutRun,
   latestFile,
-  latestReview,
+  producer,
+  reviews,
   sameCheckoutJob,
   succeeded,
   type AgentRun,
@@ -21,6 +22,7 @@ import {
 import { describeFinding, findingById, findingLedger } from "./findings.js";
 import { ginkgoSpecs, regressionOutcome } from "./gotest.js";
 import { describeCoverage, isBlocking, reviewComplete } from "./ocr.js";
+import { describePlanFinding, pathsToObservePlan, planFindingById, planFindingLedger, toVerifyPlan } from "./plan-findings.js";
 
 const passed = (reason: string): ValidationResult => ({ status: "passed", reason });
 const failed = (reason: string): ValidationResult => ({ status: "failed", reason });
@@ -177,17 +179,58 @@ export const changelogEntry: Validator = {
   },
 };
 
-/** The plan the implementer followed was approved by the read-only reviewer after it was written. */
+/**
+ * The plan the implementer followed was approved by the latest read-only
+ * review of the current plan record; every finding that review raised was
+ * dismissed or resolved, and none of the run's plan findings is confirmed or
+ * disputed. The plan and its review both predate the implementer's own edit,
+ * so the fix stage's one combined validate call — which happens after that
+ * edit changed the live candidate — finds them in history, not evidence
+ * (candidateEvidence scopes "evidence" to the now-current candidate).
+ */
 export const planReviewed: Validator = {
   evaluate(input: ValidationInput) {
-    const plan = agentRuns(input.evidence, FIX_STAGE, "diagnostic").at(-1);
+    const raw = [...(input.history ?? []), ...input.evidence];
+    const plan = agentRuns(raw, FIX_STAGE, "diagnostic").filter((r) => r.status === "completed").at(-1);
     if (plan === undefined) return inconclusive("no plan in this generation");
-    const review = latestReview(input.evidence, FIX_STAGE);
-    if (review === undefined) return inconclusive("the plan has not been reviewed");
-    if (input.evidence.indexOf(review.record) < input.evidence.indexOf(plan.record)) return failed("the latest plan was not reviewed");
-    if (review.verdict === "approved") return passed("the reviewer approved the plan");
-    if (review.verdict === "request_changes") return failed(`the reviewer sent the plan back: ${review.summary}`);
-    return inconclusive(`unknown verdict ${JSON.stringify(review.verdict)}`);
+    // A reentry starts a fresh plan dialogue (fix()'s own generation-scoped
+    // view agrees): scope to the plan's own generation, not every generation
+    // history ever carried, so a resolved or still-open finding from a
+    // superseded dialogue cannot block or pass this one.
+    const seen = raw.filter((e) => e.generation === plan.record.generation);
+    const pass = reviews(seen, FIX_STAGE).at(-1);
+    if (pass === undefined) return inconclusive("the plan has not been reviewed");
+    if (seen.indexOf(pass.record) < seen.indexOf(plan.record)) return failed("the latest plan was not reviewed");
+    if (producer(pass.record)?.readOnly !== true) return failed("the plan review must come from a read-only review job");
+    const ledger = planFindingLedger(seen, FIX_STAGE);
+    const planPass = ledger.passes.find((p) => p.record.ref === pass.record.ref)!;
+    if (planPass.missingStatus.length > 0) return failed(`the plan review gave no status for open finding(s) ${planPass.missingStatus.join(", ")}`);
+    const awaiting = pathsToObservePlan(ledger);
+    if (awaiting.length > 0) return inconclusive(`quoted path(s) await observation: ${awaiting.join(", ")}`);
+    const pending = toVerifyPlan(ledger);
+    if (pending.length > 0) return inconclusive(`finding(s) ${pending.map((f) => f.id).join(", ")} await verification`);
+    const blocking = ledger.findings.filter((f) => f.state === "confirmed" || f.state === "disputed");
+    if (blocking.length > 0) {
+      return failed(`${blocking.length} plan finding(s) confirmed or disputed: ${blocking.slice(0, 3).map(describePlanFinding).join("; ")}`);
+    }
+    const survived = planPass.raised.filter((id) => {
+      const s = planFindingById(ledger, id)?.state;
+      return s !== "dismissed" && s !== "resolved";
+    });
+    if (survived.length > 0) return failed(`the latest plan review raised finding(s) ${survived.join(", ")} that are not settled`);
+    if (planPass.verdict === "approved") return passed("the reviewer approved the plan");
+    // Design §4.4: the pass passes when it approves or raises only dismissed
+    // findings. planPass.raised alone cannot tell "raises only dismissed
+    // findings" from "raises nothing": a finding this very pass newly raises
+    // is always "raised", never simultaneously dismissed, so survived (just
+    // above) already fails on any fresh raise before this is reached — the
+    // repeat of an already-open finding via `prior` is what later settles as
+    // dismissed, so check whether the pass named anything there instead.
+    if (planPass.verdict === "request_changes") {
+      if (pass.prior.length > 0) return passed(`the reviewer's finding(s) were all settled by verification: ${planPass.summary}`);
+      return failed(`the reviewer sent the plan back: ${planPass.summary}`);
+    }
+    return inconclusive(`unknown verdict ${JSON.stringify(pass.verdict)}`);
   },
 };
 

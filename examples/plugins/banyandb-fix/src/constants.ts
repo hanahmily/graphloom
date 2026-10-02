@@ -35,8 +35,10 @@ export const LIST_ISSUE_COMMENTS: ExecutorPin = { id: "graphloom.github/list-iss
 
 /** Corrections the graph dispatches itself in Fix before it asks the supervisor. */
 export const MAX_FIX_CORRECTIONS = 2;
-/** Plans the reviewer may send back in one generation before the supervisor decides. */
-export const MAX_PLAN_REVISIONS = 2;
+/** Rounds a single plan-review finding may go unresolved (planner answers, reviewer repeats it) before the supervisor decides that finding. */
+export const MAX_FINDING_ROUNDS = 2;
+/** Plan-review passes on one generation overall, as a backstop: unlike work dispatches, these are never charged against the corrections budget. */
+export const MAX_PLAN_REVIEW_ROUNDS = 6;
 /** Code review passes on one change in one generation; a sweep that reaches it has not saturated. */
 export const MAX_SWEEP_PASSES = 4;
 

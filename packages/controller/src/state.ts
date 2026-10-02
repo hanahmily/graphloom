@@ -141,19 +141,45 @@ export interface DurableRunState {
   environmentBlock?: { activeVersion: string; reason: string };
   /** Last successful work-purpose dispatch; used for separate-reviewer checks. */
   lastWorkOperationId?: string;
+  /** Per stage, whether a work-purpose dispatch has ever been admitted for it. Never cleared. */
+  workDispatched?: Record<string, true>;
   /**
-   * Per stage, the evidence count when its last work dispatch was admitted.
-   * Another work dispatch for that stage after current-generation file or
-   * workspace evidence recorded since redoes the work and is a correction.
+   * Per stage, a graph-authored correction-eligible work dispatch has settled
+   * (succeeded or failed) and is awaiting the next validation of that stage
+   * to learn whether it resolved anything. Set in applyDispatchResult,
+   * consumed (and cleared) by the next validate of that stage.
    */
-  workDispatchEvidence?: Record<string, number>;
+  correctionPendingTrial?: Record<string, true>;
   /**
    * Normal-mode graph decisions (by action hash) made since the progress mark
    * last changed. A decision made twice without progress starts recovery.
    */
   noProgress?: { mark: string; counts: Record<string, number> };
-  /** Normal-mode correction dispatches per stage since that stage was last accepted. */
+  /**
+   * Per stage: key presence means an unresolved correction streak is open
+   * since that stage's last upstream acceptance or supervisor-authorized
+   * trial; the value counts trials confirmed-unresolved within it. Settles
+   * (key deleted, along with any `handoff` entry) when the stage's target
+   * requirement next validates passing, or when a supervisor work dispatch
+   * for that stage settles regardless of outcome.
+   */
   correctionTrials?: Record<string, number>;
+  /** Per stage: the correction-limit handoff the supervisor must clear. */
+  handoff?: Record<string, import("@graphloom/sdk").CorrectionHandoff>;
+  /**
+   * Supervisor proposals (by trigger code, stage, action type, and action
+   * spec hash) made since the progress mark last changed. Persists across
+   * resume and mode transitions; only progress or acceptance clears it.
+   */
+  repeatedProposals?: { mark: string; entries: Record<string, import("@graphloom/sdk").SupervisorRepeatEntry> };
+  /**
+   * Stages reenter() opened that have not yet had a work-purpose dispatch
+   * settle in the current attempt. Set unconditionally by reenter, regardless
+   * of whether any receipt actually invalidates; cleared on settlement, not
+   * on receipt validity, so stage-selection can tell "this stage's execution
+   * needs another attempt" apart from "its evidence went stale."
+   */
+  openAttempt?: Record<string, boolean>;
   /** Recorded active-version transitions (intake + generation fences). */
   versionHistory: VersionRecord[];
   /** Active recovery episode when mode is recovery. */
@@ -215,6 +241,8 @@ export interface SupervisorMark {
   candidates: Record<string, string>;
   /** Outcomes the controller recorded directly, such as a refused model switch. */
   notes: string[];
+  /** Set when this proposal repeated an earlier one with no progress since. */
+  repeat?: { count: number; triggerCode: string };
 }
 
 export interface VersionRecord {

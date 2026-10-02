@@ -22,10 +22,14 @@ import {
   findingById,
   findingLedger,
   ginkgoSpecs,
+  MAX_FINDING_ROUNDS,
   observablePath,
   parseCodeReview,
   parseVerification,
   pathsToObserve,
+  planFindingById,
+  planFindingLedger,
+  PLAN_REVIEW_SCHEMA,
   quoteMatches,
   qualifyValidators,
   roundSummary,
@@ -35,6 +39,7 @@ import {
   requestedIssue,
   testOutcome,
   toVerify,
+  toVerifyPlan,
   validatorById,
   verificationInstruction,
   type DecisionRecord,
@@ -86,6 +91,8 @@ interface Scenario {
   codeReviews?: Array<{ output: unknown; status?: string }>;
   /** The verifier's result for each verification, in order; the last repeats. By default it confirms every finding it is given. */
   verifications?: Array<{ output: unknown; status?: string }>;
+  /** The plan-review verifier's result for each verification, in order; the last repeats. By default it confirms every plan finding it is given. */
+  planVerifications?: Array<{ output: unknown; status?: string }>;
   /** Bytes an observation records for each path; CHANGES.md defaults to `changes`, anything else to empty. */
   files?: Record<string, string>;
   /** What the environment check printed for ocr; null records no passing check. */
@@ -134,15 +141,23 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
   const observed: string[] = [];
   let privateState: string | undefined;
   let digest = "d0";
+  let planDigest = "p0";
+  // decisions-recorded/plan-reviewed anchor to the plan's own content
+  // (identityArtifactSchema in the real graph), not the workspace candidate —
+  // an implementer edit must not invalidate an already-accepted plan.
+  const identityFor = (requirementId: string): string =>
+    requirementId === "decisions-recorded" || requirementId === "plan-reviewed" ? planDigest : digest;
   let implemented = 0;
   let candidates = 0;
   let planned = 0;
   let planReviewed = 0;
   let codeReviewed = 0;
   let verified = 0;
+  let planVerified = 0;
   let reentries = scenario.reenter ?? 0;
   let seq = 0;
   let generation = 1;
+  const openAttempt: Record<string, boolean> = {};
   const nth = <T>(list: T[] | undefined, i: number): T | undefined => (list === undefined || list.length === 0 ? undefined : list[Math.min(i, list.length - 1)]);
   const budgets = { agentInvocations: 32, jobs: 64, decisions: 128, corrections: 8 };
 
@@ -152,6 +167,7 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
       kind,
       generation,
       candidateDigest: digest,
+      ...(job?.resultSchema !== undefined ? { resultSchema: job.resultSchema } : {}),
       payload: job === undefined ? payload : { ...payload, producer: { operationId: op, stageId: job.stageId, purpose: job.purpose, readOnly: job.readOnly === true, kind: job.kind, ...(job.executor ? { executorId: job.executor.id } : {}) } },
     };
     evidence.push(e);
@@ -186,11 +202,25 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
         record("other", { codingAgent: { harness: "claude-code", status: result.status ?? "completed", output: result.output } }, job, op);
         return;
       }
-      if (job.purpose === "diagnostic") output = nth(scenario.plans, planned++) ?? PLAN;
-      else if (job.purpose === "work") {
+      if (job.purpose === "verify") {
+        const ids = [...assignment(job).matchAll(/^- (P\d+) /gm)].map((m) => m[1]!);
+        const confirmAll = verdicts(...ids.map((finding) => ({ finding, verdict: "confirmed", quotes: [{ path: "pkg/timestamp/scheduler.go", line: 7, text: "s.wait(ctx)" }] })));
+        const result: { output: unknown; status?: string } = nth(scenario.planVerifications, planVerified++) ?? confirmAll;
+        record("other", { codingAgent: { harness: "claude-code", status: result.status ?? "completed", output: result.output } }, job, op);
+        return;
+      }
+      if (job.purpose === "diagnostic") {
+        output = nth(scenario.plans, planned++) ?? PLAN;
+        // The plan's own identity, independent of the workspace candidate:
+        // an implementer edit must not invalidate an already-accepted plan.
+        planDigest = `p${planned}`;
+      } else if (job.purpose === "work") {
         output = scenario.implement?.[implemented] ?? nth(scenario.plans, planned - 1) ?? PLAN;
         implemented += 1;
         digest = `d${implemented}`;
+        // A work dispatch settling is this attempt's chance at the stage's
+        // own work; reentry's openAttempt has done its job once that happens.
+        openAttempt[job.stageId] = false;
       } else if (job.purpose === "review" && job.stageId === "review") {
         const result = nth(scenario.codeReviews, codeReviewed++) ?? reviewed();
         record("other", { codingAgent: { harness: "codex", status: result.status ?? "completed", output: result.output } }, job, op);
@@ -239,7 +269,12 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
       runId: "run",
       task: { request, repo: "../skywalking-banyandb" },
       current: { stageId: "fix", attempt: 1 },
-      receipts: structuredClone(receipts),
+      // A receipt is valid only while the candidate it names is still the
+      // accepted one — the same identity-match invalidation the controller
+      // applies, simplified to one whole-candidate digest since Fix is the
+      // only stage that ever edits it (unlike release's incremental Bump
+      // then Changelog, nothing here grows the diff stage by stage).
+      receipts: structuredClone(receipts).map((r) => (r.candidateDigest === identityFor(r.requirementId) ? r : { ...r, valid: false })),
       evidence: structuredClone(evidence),
       outstanding: [],
       budgets,
@@ -250,6 +285,7 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
       candidateDigest: digest,
       ...(sessions.length > 0 ? { agentSessions: structuredClone(sessions) } : {}),
       ...(privateState !== undefined ? { privateState } : {}),
+      ...(Object.values(openAttempt).some(Boolean) ? { openAttempt: { ...openAttempt } } : {}),
     };
     const decision = advanceFix(view);
     decisions.push(decision);
@@ -264,20 +300,23 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
       }
     } else if (action.type === "validate") {
       const stage = definition.stages.find((s) => s.id === action.validate.stageId)!;
-      const visible = candidateEvidence(evidence, generation);
-      const history = evidence.filter((e) => e.generation! < generation);
+      const visible = candidateEvidence(evidence, digest);
+      const history = evidence.filter((e) => e.candidateDigest !== undefined && e.candidateDigest !== digest);
       const results = stage.requirementIds.map((requirementId) => {
         const binding = definition.defaultValidators.find((b) => b.requirementId === requirementId)!;
         return { requirementId, binding, result: validatorById(binding.validatorId)!.evaluate({ requirementId, statement: "s", evidence: visible, history, candidateDigest: digest }) };
       });
       const failure = results.find((r) => r.result.status !== "passed");
       if (failure !== undefined) throw new Error(`validate ${stage.id} failed: ${failure.requirementId}: ${failure.result.reason}`);
-      for (const r of results) receipts.push({ id: `rcpt-${receipts.length + 1}`, stageId: stage.id, requirementId: r.requirementId, validatorBinding: r.binding, candidateFingerprint: "fp", evidenceRefs: [], valid: true, candidateDigest: digest });
+      for (const r of results) receipts.push({ id: `rcpt-${receipts.length + 1}`, stageId: stage.id, requirementId: r.requirementId, validatorBinding: r.binding, candidateFingerprint: "fp", evidenceRefs: [], valid: true, candidateDigest: identityFor(r.requirementId) });
       if (scenario.resumeAfterFix === true && stage.id === "fix") generation += 1;
     } else if (action.type === "supervise" && reentries > 0) {
-      // The supervisor re-enters Fix: receipts from Fix on are invalidated and the generation moves on.
+      // The supervisor re-enters Fix: its execution needs another attempt,
+      // regardless of whether the candidate has changed yet (it has not, so
+      // receipts stay valid — openAttempt alone is what sends Fix's work
+      // dispatch again instead of skipping past it to Review).
       reentries -= 1;
-      for (const r of receipts) r.valid = false;
+      openAttempt.fix = true;
       generation += 1;
     } else {
       return { decision, decisions, jobs, evidence, receipts, observed };
@@ -286,11 +325,11 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
   throw new Error("the graph did not finish in 60 steps");
 }
 
-/** What the controller shows validators: this generation, with only the latest review and the latest observation of each file. */
-function candidateEvidence(evidence: EvidenceRecord[], generation: number): EvidenceRecord[] {
+/** What the controller shows validators: this accepted candidate, with only the latest review and the latest observation of each file. */
+function candidateEvidence(evidence: EvidenceRecord[], digest: string): EvidenceRecord[] {
   const seen = new Set<string>();
   return evidence
-    .filter((e) => e.generation === generation)
+    .filter((e) => e.candidateDigest === undefined || e.candidateDigest === digest)
     .reverse()
     .filter((e) => {
       const key = e.kind === "review" ? "review" : e.kind === "file" ? `file:${String((e.payload as { path?: unknown }).path)}` : undefined;
@@ -382,7 +421,7 @@ describe("banyandb-fix graph", () => {
     expect(assignment(plan)).toContain("It should not be an error.");
     expect(assignment(plan)).toContain("names each caller and lifecycle path that depends on the old behaviour");
 
-    expect(planReview).toMatchObject({ stageId: "fix", kind: "agent", purpose: "review", readOnly: true, input: { harness: "pi", resultSchema: "review-verdict-v1" } });
+    expect(planReview).toMatchObject({ stageId: "fix", kind: "agent", purpose: "review", readOnly: true, input: { harness: "pi", resultSchema: PLAN_REVIEW_SCHEMA } });
     expect(planReview!.jobId).toBeUndefined();
     expect(planReview!.continueFrom).toBeUndefined();
     expect(assignment(planReview)).toContain(PLAN.summary);
@@ -430,7 +469,10 @@ describe("banyandb-fix graph", () => {
     const finding = { axis: "reach", severity: "blocking", detail: "Scheduler.Close waits for trigger, which never returns for an action that ignores cancellation." };
     const { decision, jobs } = simulate({
       plans: [PLAN, revised],
-      planReviews: [{ verdict: "request_changes", summary: "the plan misses the shutdown path", findings: [finding] }, { verdict: "approved", summary: "ok" }],
+      planReviews: [
+        { verdict: "request_changes", summary: "the plan misses the shutdown path", findings: [finding] },
+        { verdict: "approved", summary: "ok", prior: [{ finding: "P1", status: "resolved", reason: "the revision closes the gap" }] },
+      ],
     });
     expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
     const plans = jobs.filter((j) => j.purpose === "diagnostic" && j.kind === "agent");
@@ -448,11 +490,35 @@ describe("banyandb-fix graph", () => {
     expect(assignment(implement)).toContain(revised.summary);
   });
 
-  it("hands a plan the reviewer keeps sending back to the supervisor", () => {
-    const { decision, jobs } = simulate({ planReviews: [{ verdict: "request_changes", summary: "still misses Close" }] });
+  it("hands a plan finding the reviewer keeps repeating to the supervisor, naming that finding", () => {
+    const finding = { axis: "reach", severity: "blocking", detail: "Close waits for an action that ignores cancellation." };
+    const stillPresent = { finding: "P1", status: "still_present", reason: "the revision does not address it" };
+    const { decision, jobs } = simulate({
+      planReviews: [
+        { verdict: "request_changes", summary: "misses Close", findings: [finding] },
+        { verdict: "request_changes", summary: "still misses Close", prior: [stillPresent] },
+        { verdict: "request_changes", summary: "still misses Close", prior: [stillPresent] },
+      ],
+    });
     expect(decision.action).toMatchObject({ type: "supervise" });
-    expect((decision.action as { supervise: { reason: string } }).supervise.reason).toContain("sent the plan back 3 times");
+    const reason = (decision.action as { supervise: { reason: string } }).supervise.reason;
+    expect(reason).toContain("plan finding P1 is still unresolved after 2 round(s)");
+    expect(reason).toContain(finding.detail);
     expect(jobs.filter((j) => j.purpose === "diagnostic" && j.kind === "agent")).toHaveLength(3);
+    expect(jobs.filter((j) => j.purpose === "verify")).toHaveLength(2);
+    expect(jobs.some((j) => j.purpose === "work")).toBe(false);
+  });
+
+  it("stops sweeping the plan at the overall round backstop when every pass raises a fresh finding", () => {
+    const defect = (n: number) => ({ axis: "reach" as const, severity: "blocking" as const, detail: `defect number ${n}` });
+    const { decision, jobs } = simulate({
+      planReviews: Array.from({ length: 6 }, (_, i) => ({ verdict: "request_changes", summary: `defect ${i + 1}`, findings: [defect(i + 1)] })),
+    });
+    expect(decision.action).toMatchObject({ type: "supervise" });
+    const reason = (decision.action as { supervise: { reason: string } }).supervise.reason;
+    expect(reason).toContain("the plan review has run 6 passes in this generation without converging");
+    expect(jobs.filter((j) => j.purpose === "review" && j.stageId === "fix")).toHaveLength(6);
+    expect(jobs.some((j) => j.purpose === "verify")).toBe(false);
     expect(jobs.some((j) => j.purpose === "work")).toBe(false);
   });
 
@@ -640,6 +706,31 @@ describe("banyandb-fix graph", () => {
     const huge = simulate({ issueBody: "x".repeat(MAX_SNAPSHOT_CHARS + 1) });
     expect(huge.decision.action).toMatchObject({ type: "stop", stop: { reason: "incompatible task", blocker: expect.stringContaining(`more than the ${MAX_SNAPSHOT_CHARS}`) } });
     expect(huge.jobs.filter((j) => j.kind === "agent")).toEqual([]);
+  });
+
+  // docs/design-run-convergence.md §6 item 7. The real run this design is
+  // named for (a23b53b8-5df, fixing apache/skywalking#14075, shipped as
+  // apache/skywalking-banyandb#1383) issued zero receipts across 45
+  // generations: the working-tree diff was unchanged from about generation
+  // 12 on, the plan reviewer approved 19 passes in a row from generation 22,
+  // yet every reentry and resume re-earned all seven Fix requirements from
+  // scratch because freshness was generation-scoped, not candidate-scoped.
+  // (That run's own durable state no longer exists to replay verbatim — the
+  // directory was later recycled for unrelated work — so this reconstructs
+  // its documented shape: one clean plan/review/implement/RED/GREEN/build
+  // pass, surviving a resume exactly as the real fix would have.)
+  it("accepts Fix as soon as all seven requirements hold for one candidate, and survives a resume without re-earning them", () => {
+    const { decision, jobs, receipts } = simulate({ resumeAfterFix: true });
+    expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+    // One pass earns every Fix requirement: no repeated planning or
+    // rechecking, unlike the live run's 45 generations and 0 receipts.
+    expect(jobs.filter((j) => j.purpose === "diagnostic" && j.kind === "agent")).toHaveLength(1);
+    expect(jobs.filter((j) => j.purpose === "work")).toHaveLength(1);
+    expect(jobs.filter((j) => j.checkout?.from === "candidate" && j.purpose === "check")).toHaveLength(1);
+    const fixReceipts = receipts.filter((r) => r.stageId === "fix" && r.valid);
+    expect(fixReceipts.map((r) => r.requirementId).sort()).toEqual(
+      ["builds", "changelog-entry", "decisions-recorded", "in-scope", "passes", "plan-reviewed", "reproduces"].sort(),
+    );
   });
 
   it("reviews and delivers the accepted fix after a resume", () => {
@@ -997,6 +1088,130 @@ describe("findings ledger", () => {
     expect(quoteMatches({ ...BOUNDED, text: "done()" }, SCHEDULER)).toBe(false);
     expect(["pkg/timestamp/scheduler.go", ".golangci.yml", "banyand/Makefile.inc"].every(observablePath)).toBe(true);
     for (const p of ["../x.go", "/etc/passwd", "pkg/./x.go", ".git/config", "pkg/timestamp", ".github", "pkg//x.go", "a b.go"]) expect(observablePath(p), p).toBe(false);
+  });
+});
+
+describe("plan findings ledger", () => {
+  let n = 0;
+  const planAgent = (purpose: string, output: unknown, digest?: string, status = "completed"): EvidenceRecord => ({
+    ref: `p-${++n}`,
+    kind: "other",
+    generation: 1,
+    ...(digest !== undefined ? { candidateDigest: digest } : {}),
+    payload: { codingAgent: { status, output }, producer: { operationId: `op-${n}`, stageId: "fix", purpose, readOnly: true, kind: "agent", executorId: "graphloom.coding-agent/run" } },
+  });
+  const planRecord = () => planAgent("diagnostic", PLAN);
+  // Unlike the plan and the verifier (read from the codingAgent wrapper via
+  // agentRuns), a review-purpose job's structured verdict is read as its own
+  // kind: "review" evidence (reviews(), reviewVerdict()), so this builds that
+  // shape directly rather than reusing planAgent.
+  const planPass = (findings: Array<Record<string, unknown>>, prior: Record<string, string> = {}): EvidenceRecord => ({
+    ref: `p-${++n}`,
+    kind: "review",
+    generation: 1,
+    payload: {
+      verdict: findings.length > 0 ? "request_changes" : "approved",
+      summary: "s",
+      findings,
+      prior: Object.entries(prior).map(([finding, status]) => ({ finding, status, reason: `${finding} is ${status}` })),
+      producer: { operationId: `op-${n}`, stageId: "fix", purpose: "review", readOnly: true, kind: "agent", executorId: "graphloom.coding-agent/run" },
+    },
+  });
+  const planVerify = (list: Parameters<typeof verdicts>, digest?: string) => planAgent("verify", verdicts(...list).output, digest);
+  const confirmP1 = (digest?: string) => planVerify([{ finding: "P1", verdict: "confirmed", quotes: [{ path: "pkg/timestamp/scheduler.go", line: 7, text: "s.wait(ctx)" }] }], digest);
+  const planFile = (digest: string, bytes: string, path = "pkg/timestamp/scheduler.go"): EvidenceRecord => ({
+    ref: `p-${++n}`,
+    kind: "file",
+    generation: 1,
+    candidateDigest: digest,
+    payload: { path, bytes },
+  });
+  const planStates = (evidence: EvidenceRecord[]) => Object.fromEntries(planFindingLedger(evidence, "fix").findings.map((f) => [f.id, `${f.state}@${f.rounds}`]));
+  const DEFECT = { axis: "reach", severity: "blocking", detail: "Close waits for an action that ignores cancellation." };
+
+  it("disputes a finding the reviewer repeats after a revision, and the verifier's confirmation blocks regardless of the pass's own verdict", () => {
+    const evidence = [planRecord(), planPass([DEFECT])];
+    expect(planStates(evidence)).toEqual({ P1: "raised@0" });
+    evidence.push(planRecord());
+    // The reviewer can even say "approved" while still flagging P1 as repeated; the
+    // dispute-then-verify cycle, not the pass's own verdict, decides whether it blocks.
+    evidence.push(planPass([], { P1: "still_present" }));
+    expect(planStates(evidence)).toEqual({ P1: "disputed@1" });
+    evidence.push(confirmP1("d1"));
+    expect(planStates(evidence)).toEqual({ P1: "confirmed@1" });
+  });
+
+  it("dismisses a repeated finding whose refutation matches the current code, and does not block approval", () => {
+    const evidence = [planRecord(), planPass([DEFECT]), planRecord(), planPass([], { P1: "still_present" })];
+    expect(planStates(evidence)).toEqual({ P1: "disputed@1" });
+    const dismissed = [...evidence, planVerify([{ finding: "P1", verdict: "refuted", quotes: [BOUNDED] }], "d1"), planFile("d1", SCHEDULER)];
+    expect(planStates(dismissed)).toEqual({ P1: "dismissed@1" });
+  });
+
+  it("does not re-raise a dismissed finding against the same plan record, only a later one", () => {
+    const evidence = [
+      planRecord(),
+      planPass([DEFECT]),
+      planRecord(),
+      planPass([], { P1: "still_present" }),
+      planVerify([{ finding: "P1", verdict: "refuted", quotes: [BOUNDED] }], "d1"),
+      planFile("d1", SCHEDULER),
+    ];
+    expect(planStates(evidence)).toEqual({ P1: "dismissed@1" });
+    // Naming P1 again on the same plan record changes nothing: it is not reopened.
+    const sameRecord = [...evidence, planPass([{ ...DEFECT, finding: "P1" }])];
+    expect(planStates(sameRecord)).toEqual({ P1: "dismissed@1" });
+    const ledger = planFindingLedger(sameRecord, "fix");
+    expect(ledger.passes.at(-1)!.raised).toEqual([]);
+    // A later plan record can still reopen it as a regression.
+    const laterRecord = [...evidence, planRecord(), planPass([{ ...DEFECT, finding: "P1" }])];
+    const laterLedger = planFindingLedger(laterRecord, "fix");
+    const p1 = planFindingById(laterLedger, "P1")!;
+    expect(p1.state).toBe("raised");
+    expect(p1.regressedOn).toBe(p1.on);
+  });
+
+  it("counts rounds per finding, not per whole-plan revision: one finding sticks while another settles after one round", () => {
+    const other = { axis: "test" as const, severity: "blocking" as const, detail: "a different, soon-resolved defect" };
+    let evidence = [planRecord(), planPass([DEFECT, other])];
+    expect(planStates(evidence)).toEqual({ P1: "raised@0", P2: "raised@0" });
+    evidence = [...evidence, planRecord(), planPass([], { P1: "still_present", P2: "resolved" })];
+    expect(planStates(evidence)).toEqual({ P1: "disputed@1", P2: "resolved@0" });
+    evidence = [...evidence, confirmP1("d1")];
+    expect(planStates(evidence)).toEqual({ P1: "confirmed@1", P2: "resolved@0" });
+    evidence = [...evidence, planRecord(), planPass([], { P1: "still_present" })];
+    expect(planStates(evidence)).toEqual({ P1: "disputed@2", P2: "resolved@0" });
+    const ledger = planFindingLedger(evidence, "fix");
+    const p1 = planFindingById(ledger, "P1")!;
+    expect(p1.rounds).toBe(MAX_FINDING_ROUNDS);
+    // P2 never had to go through a second dispute round; the cap tracks P1 alone.
+    expect(planFindingById(ledger, "P2")!.rounds).toBe(0);
+  });
+
+  it("confirms a finding with no file evidence needed, but cannot dismiss one without code to quote, before anything is implemented", () => {
+    const evidence = [planRecord(), planPass([DEFECT]), planRecord(), planPass([], { P1: "still_present" })];
+    expect(planStates(evidence)).toEqual({ P1: "disputed@1" });
+    const confirmedNoCode = [...evidence, planVerify([{ finding: "P1", verdict: "confirmed", quotes: [{ path: "x", line: 1, text: "the plan's own argument" }] }])];
+    expect(planStates(confirmedNoCode)).toEqual({ P1: "confirmed@1" });
+    // A refutation needs quotes that match real code; there is none yet, so it cannot settle as dismissed.
+    const refutedNoCode = [...evidence, planVerify([{ finding: "P1", verdict: "refuted", quotes: [{ path: "x", line: 1, text: "whatever" }] }])];
+    const ledger = planFindingLedger(refutedNoCode, "fix");
+    const p1 = planFindingById(ledger, "P1")!;
+    expect(p1.state).toBe("disputed");
+    expect(p1.dispute).toMatch(/do not match the change/);
+  });
+
+  it("consumes a verification that gives no verdict, so it is not dispatched again before the round cap", () => {
+    const evidence = [planRecord(), planPass([DEFECT]), planRecord(), planPass([], { P1: "still_present" })];
+    expect(planStates(evidence)).toEqual({ P1: "disputed@1" });
+    const noVerdict = [...evidence, planVerify([], "d1")];
+    const ledger = planFindingLedger(noVerdict, "fix");
+    expect(toVerifyPlan(ledger)).toEqual([]);
+    const p1 = planFindingById(ledger, "P1")!;
+    expect(p1.state).toBe("disputed");
+    expect(p1.rounds).toBe(1);
+    expect(p1.verdict).toMatchObject({ verdict: "uncertain" });
+    expect(p1.dispute).toBe("the verifier gave no verdict");
   });
 });
 
