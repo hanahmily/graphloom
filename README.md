@@ -104,6 +104,9 @@ crashes; filesystem and execution scopes require host enforcement.
 - [Domain glossary](CONTEXT.md): project vocabulary.
 - [Roadmap](docs/roadmap.md): entry point to the implementation sequence.
 - [TypeScript decision](docs/adr/0002-typescript-repairable-plugins.md).
+- [Run convergence design](docs/design-run-convergence.md): candidate-anchored
+  freshness, correction escalation with an exit, supervisor repetition detection,
+  and adjudicated plan review.
 - [Example task](examples/task.yaml) and [example guide](examples/README.md).
 - [Loopx gate-repair study](docs/research/loopx-gate-defect-handling.md) and
   [issue-fix study](docs/research/loopx-issue-fix-example.md).
