@@ -4,17 +4,21 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { runGate } from "../src/gate.js";
+import { RUNNER_CONFIG_ENV } from "../src/runner-config.js";
+import { fakeRunnerConfig, writeFakeCodingAgents } from "./fixtures/fake-coding-agents.js";
 
 const execFileAsync = promisify(execFile);
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const dirs: string[] = [];
 
 afterEach(async () => {
+  vi.unstubAllEnvs();
   for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true });
 });
 
+/** B2 (§3.1) reads the operator's own runner config; fake binaries make it genuinely pass, not depend on a real Claude Code being configured here. */
 async function fixture(graph: "hello" | "release", request: string) {
   const dir = await mkdtemp(path.join(os.tmpdir(), "gl-gate-"));
   dirs.push(dir);
@@ -27,6 +31,12 @@ async function fixture(graph: "hello" | "release", request: string) {
   const taskPath = path.join(dir, "task.yaml");
   await writeFile(taskPath, `graph: ${graph}\nrepo: ./repo\nrequest: ${JSON.stringify(request)}\n`);
   const stateRoot = path.join(dir, "graphloom-state");
+
+  const agents = await writeFakeCodingAgents(dir);
+  const runnerConfigPath = path.join(dir, "runner.json");
+  await writeFile(runnerConfigPath, JSON.stringify(fakeRunnerConfig(agents)));
+  vi.stubEnv(RUNNER_CONFIG_ENV, runnerConfigPath);
+
   return { dir, repo, taskPath, stateRoot };
 }
 

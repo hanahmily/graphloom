@@ -4,19 +4,29 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { JobResult } from "@graphloom/runner";
 import { intakeTask, IntakeError, type DurableRunState } from "@graphloom/controller";
 import { check, checkProvenance, probe, recordScenario, rehearse, replay } from "../src/rehearsal.js";
+import { RUNNER_CONFIG_ENV } from "../src/runner-config.js";
+import { fakeRunnerConfig, writeFakeCodingAgents } from "./fixtures/fake-coding-agents.js";
 
 const execFileAsync = promisify(execFile);
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const dirs: string[] = [];
 
 afterEach(async () => {
+  vi.unstubAllEnvs();
   for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true });
 });
 
+/**
+ * B2's capability probe (§3.1) reads the *operator's own* runner config, not
+ * anything the rehearsal itself stands in for — so a verdict's own "ready"
+ * must not depend on whether a real, logged-in Claude Code happens to be
+ * configured on whatever machine runs this test. Fake binaries make B2
+ * genuinely pass, same as the real check they stand in for.
+ */
 async function fixture(graph: "hello" | "release", request: string) {
   const dir = await mkdtemp(path.join(os.tmpdir(), "gl-rehearsal-"));
   dirs.push(dir);
@@ -28,6 +38,12 @@ async function fixture(graph: "hello" | "release", request: string) {
   await symlink(path.join(root, "examples/plugins", graph), path.join(dir, "plugins", graph));
   const taskPath = path.join(dir, "task.yaml");
   await writeFile(taskPath, `graph: ${graph}\nrepo: ./repo\nrequest: ${JSON.stringify(request)}\n`);
+
+  const agents = await writeFakeCodingAgents(dir);
+  const runnerConfigPath = path.join(dir, "runner.json");
+  await writeFile(runnerConfigPath, JSON.stringify(fakeRunnerConfig(agents)));
+  vi.stubEnv(RUNNER_CONFIG_ENV, runnerConfigPath);
+
   return { dir, repo, taskPath };
 }
 

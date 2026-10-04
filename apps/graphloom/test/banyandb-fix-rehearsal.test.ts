@@ -10,6 +10,8 @@ import type { JobResult } from "@graphloom/runner";
 import { GITHUB_API_URL_ENV } from "@graphloom/executor-github";
 import { startFakeGitHub, type FakeGitHub } from "@graphloom/executor-github/testing";
 import { check, probe, rehearse, REHEARSAL_GITHUB_TOKEN_ENV } from "../src/rehearsal.js";
+import { RUNNER_CONFIG_ENV } from "../src/runner-config.js";
+import { fakeRunnerConfig, writeFakeCodingAgents } from "./fixtures/fake-coding-agents.js";
 
 const execFileAsync = promisify(execFile);
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
@@ -138,10 +140,19 @@ async function ready() {
   });
   github.comments.set(ISSUE, [{ id: 1, body: "A running backup is not an error; report it as running." }]);
   const ocrBin = await fakeOcr(env.dir);
+  const agents = await writeFakeCodingAgents(env.dir);
   savedPath = process.env.PATH;
-  process.env.PATH = `${ocrBin}:${savedPath}`;
+  // The environment check (go/git/ocr/node/claude/codex) reads bare names off
+  // PATH directly, never the operator's own runner config — a fake claude/
+  // codex here is what lets it pass regardless of what is actually installed.
+  process.env.PATH = `${ocrBin}:${agents.bin}:${savedPath}`;
   vi.stubEnv(GITHUB_API_URL_ENV, github.baseUrl);
   vi.stubEnv(REHEARSAL_GITHUB_TOKEN_ENV, "fake");
+  // B2's capability probe reads the operator's own runner config separately;
+  // point it at the same fake binaries so it genuinely passes too.
+  const runnerConfigPath = path.join(env.dir, "runner.json");
+  await writeFile(runnerConfigPath, JSON.stringify(fakeRunnerConfig(agents)));
+  vi.stubEnv(RUNNER_CONFIG_ENV, runnerConfigPath);
   return env;
 }
 
