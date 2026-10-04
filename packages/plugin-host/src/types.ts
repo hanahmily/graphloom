@@ -1,4 +1,4 @@
-import type { GraphDecision, GraphDefinition, RunView, ValidationInput, ValidationResult } from "@graphloom/sdk";
+import type { GraphDecision, GraphDefinition, GraphRehearsal, RunView, ValidationInput, ValidationResult } from "@graphloom/sdk";
 
 /** Non-durable observation returned instead of applying a plugin result. */
 export interface ChildObservation {
@@ -42,6 +42,8 @@ export interface PluginHost {
     validatorId: string,
     input: ValidationInput,
   ): Promise<HostResult<ValidationResult>>;
+  /** Loads the bundle's declared rehearsal entry inside this same sandbox, never the caller's own process. */
+  rehearsal?(ctx: CallContext, entry: string): Promise<HostResult<GraphRehearsal | undefined>>;
   close(): Promise<void>;
 }
 

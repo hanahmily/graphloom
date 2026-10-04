@@ -1,4 +1,46 @@
 export type {
+  ContractCheck,
+  ReferenceSet,
+  ResultContract,
+} from "./result-contract.js";
+export { applyReferenceEnums, checkContract, checkReferences, unsupportedSchemaKeywords, validateResultShape } from "./result-contract.js";
+
+export type {
+  AdversarialMutation,
+  AdversarialResult,
+  GraphRehearsal,
+  RehearsalBudgets,
+  RehearsalCommandResult,
+  RehearsalExpectation,
+  RehearsalFailure,
+  RehearsalReply,
+  RehearsalScenario,
+} from "./rehearsal.js";
+export { assignmentNamesField, checkAssignmentFidelity, mutateAdversarially, synthesizeFromSchema } from "./rehearsal.js";
+
+export type { RecordedAssignment, RecordedCall } from "./rehearsal-client.js";
+export {
+  adversarialMutationOnly,
+  nextCommandOutcome,
+  nextReply,
+  nextRead,
+  readCallLog,
+  readRecordedAssignment,
+  readUnverifiedReads,
+  recordAssignment,
+  recordCall,
+  recordUnverifiedRead,
+  rehearsalHomeDir,
+  REHEARSAL_ADVERSARIAL_ENV,
+  REHEARSAL_HOME_ENV,
+  REHEARSAL_SCENARIO_ENV,
+  REHEARSAL_SYNTHESIZED_ENV,
+  requireScenario,
+  resetRehearsalScenarioCache,
+  synthesizedRepliesOnly,
+} from "./rehearsal-client.js";
+
+export type {
   ActivateRepairSpec,
   AgentSessionView,
   BudgetRemaining,
@@ -102,6 +144,7 @@ export {
   assertGraphAction,
   assertGraphDecision,
   assertGraphDefinition,
+  assertGraphRehearsal,
   assertRunView,
   assertWireRequest,
   assertWireResponse,

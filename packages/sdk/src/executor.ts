@@ -86,6 +86,18 @@ export interface ExecutorContext {
   usage?: ExecutorUsage;
   /** Present for agent jobs: where a resumable session may be kept. */
   session?: ExecutorSession;
+  /**
+   * The job's declared result contract, resolved by the controller from the
+   * run's GraphDefinition.resultContracts: the schema to constrain and
+   * validate structured output against, and any per-dispatch reference id
+   * sets. Present only for an agent job naming a contract its plugin declared.
+   */
+  resultContract?: {
+    name: string;
+    schema: Record<string, unknown>;
+    references?: string[];
+    knownReferences?: Record<string, import("./result-contract.js").ReferenceSet>;
+  };
 }
 
 /**

@@ -11,10 +11,12 @@ import {
   WireValidationError,
   assertGraphDecision,
   assertGraphDefinition,
+  assertGraphRehearsal,
   assertValidationResult,
   assertWireRequest,
   parseJsonBounded,
   type GraphPlugin,
+  type GraphRehearsal,
   type Validator,
   type WireEnvelope,
   type WireResponse,
@@ -100,6 +102,11 @@ async function main(): Promise<void> {
         writeResponse({ ...envelope, kind: "evaluate_ok", result });
         continue;
       }
+      if (req.kind === "rehearsal") {
+        const rehearsal = await loadRehearsalExport(req.entry);
+        writeResponse({ ...envelope, kind: "rehearsal_ok", ...(rehearsal !== undefined ? { rehearsal } : {}) });
+        continue;
+      }
       writeError(envelope, "unknown", "unsupported request kind");
     } catch (err: unknown) {
       // parseJsonBounded/assertWireRequest can throw before envelope is set from
@@ -116,6 +123,19 @@ async function main(): Promise<void> {
       }
     }
   }
+}
+
+/**
+ * Loads a bundle's declared rehearsal entry (docs/design-graph-rehearsal.md
+ * §4.4) inside this already-sandboxed child, same as the graph entry this
+ * process loaded at startup — the rehearsal module is the same untrusted
+ * bundle code, so the CLI process that asks for it must never `import()` it
+ * directly.
+ */
+async function loadRehearsalExport(entry: string): Promise<GraphRehearsal | undefined> {
+  const mod = (await import(pathToFileURL(entry).href)) as { rehearsal?: unknown };
+  if (mod.rehearsal === undefined) return undefined;
+  return assertGraphRehearsal(mod.rehearsal);
 }
 
 /** Divert console and process.stdout writes to stderr before loading plugin code. */

@@ -23,6 +23,7 @@ import {
 } from "./codex-config.js";
 import { CODING_HARNESS_ENV } from "./executors.js";
 import { PI_AGENT_DIR_ENV, PI_API_KEY_CREDENTIAL, PI_MODEL_ENV, PI_PASS_ENV_ENV, PI_PROVIDER_ENV } from "./pi-config.js";
+import { REHEARSAL_HOME_ENV, REHEARSAL_SCENARIO_ENV } from "./rehearsal/scenario.js";
 import { CODING_AGENT_RUN_ID } from "./run.js";
 
 /** Host-facing declaration; the host runs `entryModule` in an executor process and never imports it. */
@@ -49,6 +50,8 @@ export const codingAgentExecutorPackage: ExecutorPackageManifest = {
     PI_MODEL_ENV,
     PI_AGENT_DIR_ENV,
     PI_PASS_ENV_ENV,
+    REHEARSAL_SCENARIO_ENV,
+    REHEARSAL_HOME_ENV,
   ],
   // The agent edits the worktree and runs commands as the user.
   isolation: "unrestricted",
@@ -60,6 +63,45 @@ export const claudeCodeHarnessModule = fileURLToPath(new URL("./claude.js", impo
 export const piHarnessModule = fileURLToPath(new URL("./pi.js", import.meta.url));
 /** Absolute path of the Codex harness module, for `codingAgentBinding({ harness })`. */
 export const codexHarnessModule = fileURLToPath(new URL("./codex.js", import.meta.url));
+/**
+ * Absolute path of the Pi rehearsal stand-in (docs/design-graph-rehearsal.md
+ * §4.1): the real Pi harness driven by a faux provider scripted from a
+ * rehearsal scenario, in place of `piHarnessModule`.
+ */
+export const piRehearsalModule = fileURLToPath(new URL("./rehearsal/pi.js", import.meta.url));
+/**
+ * Absolute path of the Codex rehearsal stand-in executable
+ * (docs/design-graph-rehearsal.md §4.1): a script that speaks just enough of
+ * `codex exec --json`'s wire protocol to satisfy the real, unmodified Codex
+ * harness, answering from a rehearsal scenario. Bind it as `codex.command`
+ * (with `codex.passEnv` naming `REHEARSAL_SCENARIO_ENV`/`REHEARSAL_HOME_ENV`,
+ * so the stand-in actually receives them) in place of a real Codex install.
+ */
+export const codexRehearsalStandIn = fileURLToPath(new URL("./rehearsal/codex-standin.js", import.meta.url));
+/**
+ * Absolute path of the Claude Code rehearsal stand-in executable
+ * (docs/design-graph-rehearsal.md §4.1): a script that speaks just enough of
+ * the stream-json control protocol to satisfy the real, unmodified Claude
+ * Code harness, answering from a rehearsal scenario. Bind it as
+ * `claude.command` (with `claude.passEnv` naming the same two variables) in
+ * place of a real Claude Code install.
+ */
+export const claudeRehearsalStandIn = fileURLToPath(new URL("./rehearsal/claude-standin.js", import.meta.url));
+
+/** Rehearsal settings (§4.2/§4.6): which scenario a stand-in answers from, and its isolated state root. */
+export interface RehearsalBindingOptions {
+  scenarioPath: string;
+  /** Root directory for every stand-in's isolated HOME/config/agent dirs; never an operator's real ones. */
+  homeDir: string;
+}
+
+/** Env overlay naming the scenario and isolated state root a rehearsal's stand-ins read (merge into `codingAgentBinding`'s own `env`). */
+export function rehearsalBinding(options: RehearsalBindingOptions): Record<string, string> {
+  return {
+    [REHEARSAL_SCENARIO_ENV]: options.scenarioPath,
+    [REHEARSAL_HOME_ENV]: options.homeDir,
+  };
+}
 
 /**
  * Operator settings for the Claude Code harness. Without `apiKey`, Claude Code

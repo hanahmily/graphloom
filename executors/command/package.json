@@ -11,6 +11,10 @@
     "./executors": {
       "types": "./dist/executors.d.ts",
       "import": "./dist/executors.js"
+    },
+    "./rehearsal/command-standin": {
+      "types": "./dist/rehearsal/command-standin.d.ts",
+      "import": "./dist/rehearsal/command-standin.js"
     }
   },
   "files": [

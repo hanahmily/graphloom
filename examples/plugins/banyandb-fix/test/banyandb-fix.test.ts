@@ -23,13 +23,13 @@ import {
   findingLedger,
   ginkgoSpecs,
   MAX_FINDING_ROUNDS,
+  MAX_SWEEP_PASSES,
   observablePath,
   parseCodeReview,
   parseVerification,
   pathsToObserve,
   planFindingById,
   planFindingLedger,
-  PLAN_REVIEW_SCHEMA,
   quoteMatches,
   qualifyValidators,
   roundSummary,
@@ -421,7 +421,7 @@ describe("banyandb-fix graph", () => {
     expect(assignment(plan)).toContain("It should not be an error.");
     expect(assignment(plan)).toContain("names each caller and lifecycle path that depends on the old behaviour");
 
-    expect(planReview).toMatchObject({ stageId: "fix", kind: "agent", purpose: "review", readOnly: true, input: { harness: "pi", resultSchema: PLAN_REVIEW_SCHEMA } });
+    expect(planReview).toMatchObject({ stageId: "fix", kind: "agent", purpose: "review", readOnly: true, resultSchema: "review-verdict-v1", input: { harness: "pi" } });
     expect(planReview!.jobId).toBeUndefined();
     expect(planReview!.continueFrom).toBeUndefined();
     expect(assignment(planReview)).toContain(PLAN.summary);
@@ -442,7 +442,8 @@ describe("banyandb-fix graph", () => {
       kind: "agent",
       purpose: "review",
       readOnly: true,
-      input: { harness: "codex", resultSchema: CODE_REVIEW_SCHEMA },
+      resultSchema: "code-review-v2",
+      input: { harness: "codex" },
     });
     expect(codeReview!.checkout).toBeUndefined();
     expect(codeReview!.jobId).toBeUndefined();
@@ -483,6 +484,11 @@ describe("banyandb-fix graph", () => {
     expect(assignment(plans[1])).toContain(`reach (blocking): ${finding.detail}`);
     expect(assignment(plans[1])).not.toContain("working tree holds your previous change");
     expect(planReviews[1]!.continueFrom).toBeUndefined();
+    // §4.3: the second pass is shown P1 (open after the first pass raised
+    // it) as a valid reference id for findings[].finding/prior[].finding, so
+    // "resolved" can name it instead of repeating its description.
+    expect(planReviews[1]!.knownReferences?.["findings[].finding"]?.ids).toContain("P1");
+    expect(planReviews[1]!.knownReferences?.["prior[].finding"]?.ids).toContain("P1");
     expect(assignment(planReviews[1])).toContain(revised.summary);
     expect(assignment(planReviews[1])).toContain(`The plan was revised because of:\n- The plan reviewer sent your plan back: the plan misses the shutdown path`);
     const implement = jobs.find((j) => j.purpose === "work")!;
@@ -558,7 +564,7 @@ describe("banyandb-fix graph", () => {
     const review = jobs.filter((j) => j.stageId === "review");
     expect(review.map((j) => `${j.purpose}:${(j.input as { harness: string }).harness}`)).toEqual(["review:codex", "diagnostic:claude-code", "review:codex"]);
     const verification = review[1]!;
-    expect(verification).toMatchObject({ kind: "agent", readOnly: true, resultSchema: "finding-verification-v1", input: { resultSchema: VERIFICATION_SCHEMA } });
+    expect(verification).toMatchObject({ kind: "agent", readOnly: true, resultSchema: "finding-verification-v1" });
     expect(verification.jobId).toBeUndefined();
     expect(verification.continueFrom).toBeUndefined();
     expect(assignment(verification)).toContain("- F1 pkg/timestamp/scheduler.go:88-95 (high, bug): Close now waits forever");
@@ -626,16 +632,36 @@ describe("banyandb-fix graph", () => {
     expect(jobs.filter((j) => j.stageId === "review" && j.purpose === "review")).toHaveLength(4);
   });
 
-  it("does not pass a code review that failed or did not cover every file", () => {
+  it("retries a pass that failed or did not cover every file, up to the sweep cap, before supervising", () => {
+    // Regression: a live run found open-code-review's delegation excluding a
+    // test file by its own default path filter (a transient, environment-level
+    // problem, not a finding to adjudicate). The old code treated any unusable
+    // pass as a final verdict and supervised on the very first one; an unusable
+    // pass deserves the same retry budget a sweep continuation gets instead.
     for (const run of [
       { output: null, status: "failed" },
       reviewed([], { total_files: 3, reviewed_files: 2, skipped: [] }),
       reviewed([], { total_files: 3, reviewed_files: 3, skipped: [{ path: "pkg/timestamp/scheduler_test.go", reason: "too long" }] }),
-      reviewed([{ ...HANG, severity: undefined }]),
     ]) {
-      const { decision } = simulate({ codeReviews: [run] });
+      // nth() repeats the last scripted result, so every retry reproduces the
+      // same unusable pass until the sweep cap gives up and hands it off.
+      const { decision, jobs } = simulate({ codeReviews: [run] });
       expect(decision.action).toMatchObject({ type: "supervise" });
+      expect(jobs.filter((j) => j.stageId === "review" && j.purpose === "review")).toHaveLength(MAX_SWEEP_PASSES);
     }
+  });
+
+  it("does not pass a code review that completed but left a finding unresolved", () => {
+    const { decision } = simulate({ codeReviews: [reviewed([{ ...HANG, severity: undefined }])] });
+    expect(decision.action).toMatchObject({ type: "supervise" });
+  });
+
+  it("recovers on a fresh retry after one unusable pass, without burning the whole sweep cap", () => {
+    const { decision, jobs } = simulate({
+      codeReviews: [reviewed([], { total_files: 3, reviewed_files: 2, skipped: [] }), reviewed()],
+    });
+    expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+    expect(jobs.filter((j) => j.stageId === "review" && j.purpose === "review")).toHaveLength(2);
   });
 
   it("asks the supervisor when the environment check recorded no ocr path for the reviewer", () => {

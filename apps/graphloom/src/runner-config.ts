@@ -38,7 +38,7 @@ export interface RunnerConfig {
   codex?: CodexBindingOptions;
   pi?: Omit<PiBindingOptions, "apiKey">;
   /** Serve the read-only GitHub executors; the token comes from the named environment variable. */
-  github?: { tokenEnv?: string };
+  github?: { tokenEnv?: string; baseUrl?: string };
   /** Settings for command jobs, which run as the user in the job's workspace. */
   command?: { timeoutMs?: number };
 }
@@ -138,11 +138,15 @@ export function parseRunnerConfig(value: unknown, source = "runner config"): Run
   }
   if (obj.timeoutMs !== undefined) config.timeoutMs = milliseconds(obj.timeoutMs, `${source}: timeoutMs`, false);
   if (obj.github !== undefined) {
-    const g = settings(obj.github, `${source}: github`, ["tokenEnv"]);
+    const nested = `${source}: github`;
+    const g = settings(obj.github, nested, ["tokenEnv", "baseUrl"]);
     if (g.tokenEnv !== undefined && (typeof g.tokenEnv !== "string" || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(g.tokenEnv))) {
       throw new Error(`${source}: github.tokenEnv must name an environment variable`);
     }
-    config.github = g.tokenEnv !== undefined ? { tokenEnv: g.tokenEnv } : {};
+    config.github = {
+      ...(g.tokenEnv !== undefined ? { tokenEnv: g.tokenEnv } : {}),
+      ...(g.baseUrl !== undefined ? { baseUrl: nonempty(g.baseUrl, `${nested}.baseUrl`) } : {}),
+    };
   }
   if (obj.command !== undefined) {
     const c = settings(obj.command, `${source}: command`, ["timeoutMs"]);

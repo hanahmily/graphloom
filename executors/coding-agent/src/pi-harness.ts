@@ -13,7 +13,8 @@ import {
   type ResourceLoader,
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
-import type { CodingHarness, CodingRunRequest, CodingRunResult, CodingSession, CodingSessionOptions, CodingTool } from "./harness.js";
+import { checkReferences, validateResultShape } from "@graphloom/sdk";
+import type { CodingHarness, CodingResultContract, CodingRunRequest, CodingRunResult, CodingSession, CodingSessionOptions, CodingTool } from "./harness.js";
 import { bounded, inlineObjectSchema, scopeNotes } from "./assignment.js";
 import { envList, minimalEnv } from "./child-env.js";
 import { PI_AGENT_DIR_ENV, PI_API_KEY_CREDENTIAL, PI_MODEL_ENV, PI_PASS_ENV_ENV, PI_PROVIDER_ENV } from "./pi-config.js";
@@ -44,6 +45,8 @@ const RESERVED_TOOL_NAMES = new Set<string>([...PI_BUILTIN_TOOLS, SUBMIT_RESULT]
 const BUDGET_EXHAUSTED = "model request budget exhausted";
 const MAX_TOOL_RESULT_CHARS = 32_000;
 const OPEN_OBJECT = { type: "object", additionalProperties: true } as unknown as ToolDefinition["parameters"];
+/** §4.2: in-turn correction attempts beyond the first before the job fails. */
+const MAX_RESULT_RETRIES = 2;
 
 const DEFAULT_SYSTEM_PROMPT = [
   "You are a GraphLoom coding agent working in a git worktree.",
@@ -95,13 +98,19 @@ export function createPiHarness(harnessOptions: PiHarnessOptions = {}): CodingHa
         async run(request) {
           if (options.signal?.aborted) return finish({ status: "failed", summary: "agent session aborted" });
           let submitted: { value: unknown } | undefined;
+          let contractFailure: string[] | undefined;
           const callId = turnCallId();
-          const tools = [
-            ...options.tools.map((tool) => mediatedTool(tool, callId)),
-            ...(request.resultSchema !== undefined
-              ? [submitResultTool(request.resultSchema, (value) => (submitted = { value }))]
-              : []),
-          ];
+          const resultTool =
+            request.resultContract !== undefined
+              ? submitContractResultTool(
+                  request.resultContract,
+                  (value) => (submitted = { value }),
+                  (problems) => (contractFailure = problems),
+                )
+              : request.resultSchema !== undefined
+                ? submitResultTool(request.resultSchema, (value) => (submitted = { value }))
+                : undefined;
+          const tools = [...options.tools.map((tool) => mediatedTool(tool, callId)), ...(resultTool !== undefined ? [resultTool] : [])];
           const { session: agent } = await createAgentSession({
             cwd: root,
             agentDir,
@@ -149,8 +158,18 @@ export function createPiHarness(harnessOptions: PiHarnessOptions = {}): CodingHa
             return finish({ status: "failed", summary: bounded(`agent request failed: ${last.errorMessage ?? "unknown error"}`) });
           }
           const text = last !== undefined ? assistantText(last) : "";
-          if (request.resultSchema !== undefined && submitted === undefined) {
-            const missing = `agent finished without submitting a ${request.resultSchema} result`;
+          if (contractFailure !== undefined) {
+            const problems = contractFailure.join("; ");
+            return finish({
+              status: "failed",
+              summary: bounded(`result did not satisfy its declared contract (${request.resultContract!.name}) after ${MAX_RESULT_RETRIES} retries: ${problems}`),
+              failureKind: "contract_violation",
+              ...output(submitted),
+            });
+          }
+          const resultName = request.resultContract?.name ?? request.resultSchema;
+          if (resultName !== undefined && submitted === undefined) {
+            const missing = `agent finished without submitting a ${resultName} result`;
             return finish({ status: "failed", summary: bounded(text ? `${missing}: ${text}` : missing) });
           }
           return finish({
@@ -290,9 +309,62 @@ function submitResultTool(resultSchema: string, onSubmit: (value: unknown) => vo
   };
 }
 
+/**
+ * §4.2/§4.3: validates a submission against its declared contract (schema
+ * and, when the contract lists reference paths and the job supplied the
+ * matching id sets, membership) and returns the problems to the model as a
+ * non-terminating rejection it can act on in the same turn, bounded by
+ * MAX_RESULT_RETRIES. `onFailure` fires once that bound is spent with an
+ * invalid submission still on the table; the turn then ends (one more
+ * rejection message, `terminate: true`) and the job fails as
+ * `contract_violation`, not a silent "other".
+ */
+function submitContractResultTool(
+  contract: CodingResultContract,
+  onSubmit: (value: unknown) => void,
+  onFailure: (problems: string[]) => void,
+): ToolDefinition {
+  let attempts = 0;
+  return {
+    name: SUBMIT_RESULT,
+    label: "submit result",
+    description: `Submit your structured result (${contract.name}) once the work is done.`,
+    parameters: contract.schema as ToolDefinition["parameters"],
+    executionMode: "sequential",
+    async execute(_toolCallId, params) {
+      let problems = validateResultShape(params, contract.schema);
+      let value: unknown = params;
+      if (problems.length === 0 && contract.references !== undefined && contract.knownReferences !== undefined) {
+        const checked = checkReferences(params, contract.references, contract.knownReferences);
+        problems = checked.problems;
+        value = checked.value;
+      }
+      if (problems.length === 0) {
+        onSubmit(value);
+        return { content: [{ type: "text", text: "result recorded" }], details: undefined, terminate: true };
+      }
+      attempts += 1;
+      if (attempts > MAX_RESULT_RETRIES) {
+        onFailure(problems);
+        return {
+          content: [{ type: "text", text: `Rejected: ${problems.join("; ")}. No retries remain; this job fails.` }],
+          details: undefined,
+          terminate: true,
+        };
+      }
+      return {
+        content: [{ type: "text", text: `Rejected: ${problems.join("; ")}. Call ${SUBMIT_RESULT} again with a corrected result.` }],
+        details: undefined,
+      };
+    },
+  };
+}
+
 function promptText(request: CodingRunRequest, options: CodingSessionOptions): string {
   const parts = [request.assignment, ...scopeNotes(options)];
-  if (request.resultSchema !== undefined) parts.push(`When you are done, call ${SUBMIT_RESULT} with your result.`);
+  if (request.resultContract !== undefined || request.resultSchema !== undefined) {
+    parts.push(`When you are done, call ${SUBMIT_RESULT} with your result.`);
+  }
   return parts.join("\n\n");
 }
 

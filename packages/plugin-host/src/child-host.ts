@@ -9,6 +9,7 @@ import {
   parseJsonBounded,
   type GraphDecision,
   type GraphDefinition,
+  type GraphRehearsal,
   type RunView,
   type ValidationInput,
   type ValidationResult,
@@ -177,6 +178,15 @@ class ChildSession implements PluginHost {
     });
   }
 
+  rehearsal(ctx: CallContext, entry: string): Promise<HostResult<GraphRehearsal | undefined>> {
+    return this.call(ctx, { kind: "rehearsal", entry }, (res) => {
+      if (res.kind !== "rehearsal_ok") {
+        throw new WireValidationError("malformed", `expected rehearsal_ok, got ${res.kind}`);
+      }
+      return res.rehearsal;
+    });
+  }
+
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
@@ -241,7 +251,8 @@ class ChildSession implements PluginHost {
     body:
       | { kind: "describe" }
       | { kind: "advance"; view: RunView }
-      | { kind: "evaluate"; validatorId: string; input: ValidationInput },
+      | { kind: "evaluate"; validatorId: string; input: ValidationInput }
+      | { kind: "rehearsal"; entry: string },
     extract: (res: WireResponse) => T,
   ): Promise<HostResult<T>> {
     if (this.closed || this.exitCode !== null || this.spawnError !== null) {

@@ -352,11 +352,16 @@ export async function admitValidation(
       : r,
   );
 
+  const { [spec.stageId]: _acceptedStageDispatches, ...otherStageDispatches } = working.dispatchesSinceReceipt ?? {};
+  void _acceptedStageDispatches;
+
   return {
     state: bumpRevision({
       ...working,
       receipts: [...receipts, ...newReceipts],
       current: { stageId: spec.stageId, attempt: working.current.attempt },
+      // A receipt just minted for this stage: its dispatch-without-acceptance clock restarts (§4.6).
+      dispatchesSinceReceipt: otherStageDispatches,
     }),
     accepted: true,
     reason: `accepted ${spec.stageId}`,

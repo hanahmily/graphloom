@@ -91,7 +91,12 @@ function clearCorrectionStreak(state: DurableRunState, stageId: string): Durable
   if (state.correctionTrials?.[stageId] === undefined && state.handoff?.[stageId] === undefined) return state;
   const { [stageId]: _t, ...trials } = state.correctionTrials ?? {};
   const { [stageId]: _h, ...handoff } = state.handoff ?? {};
-  return { ...state, correctionTrials: trials, handoff };
+  // A supervisor settling the stage's correction streak is as much a
+  // deliberate fresh start as a receipt: the §4.6 dispatch-without-receipt
+  // clock restarts with it, so the graph's next cap is judged on what
+  // happens from here, not on dispatches the handoff already resolved.
+  const { [stageId]: _d, ...dispatchesSinceReceipt } = state.dispatchesSinceReceipt ?? {};
+  return { ...state, correctionTrials: trials, handoff, dispatchesSinceReceipt };
 }
 
 function clearCorrectionPendingTrial(state: DurableRunState, stageId: string): DurableRunState {

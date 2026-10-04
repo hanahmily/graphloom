@@ -543,6 +543,26 @@ describe("Claude Code harness", () => {
     expect(missing).toMatchObject({ status: "failed", summary: "agent finished without submitting a writer-result-v1 result" });
   });
 
+  it("bakes a result contract's reference ids into the schema, and fails as a contract violation on an unreconcilable miss", async () => {
+    const h = await setup();
+    const resultContract = {
+      name: "plan-review-v1",
+      schema: { type: "object", properties: { finding: { type: "string" } }, required: ["finding"] },
+      references: ["finding"],
+      knownReferences: { finding: { ids: ["", "P1"], descriptions: { P1: "metric counts running actions" } } },
+    };
+    await h.script([{ structured: { finding: "P1", summary: "repeats P1" } }]);
+    const ok = await h.executor.execute({ assignment: "review" }, h.ctx({ resultContract }));
+    expect(ok).toMatchObject({ status: "ok" });
+    const [invocation] = await h.invocations();
+    const wrapped = JSON.parse(flagValue(invocation!.argv, "--json-schema")!);
+    expect(wrapped.properties.result.properties.finding).toMatchObject({ enum: ["", "P1"] });
+
+    await h.script([{ structured: { finding: "a made-up finding" } }]);
+    const violated = await h.executor.execute({ assignment: "review" }, h.ctx({ resultContract }));
+    expect(violated).toMatchObject({ status: "failed", failureKind: "contract_violation" });
+  });
+
   it("saves the transcript under sessionDir and restores it for a resume", async () => {
     const h = await setup();
     await h.script([{ text: "first turn done" }], [{ text: "second turn done" }]);

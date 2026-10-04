@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { loadRunState } from "@graphloom/controller";
-import { createCliRunner } from "../dist/cli-runner.js";
+import { createCliRunner, isEnvironmentDispatch } from "../dist/cli-runner.js";
 import { loadRunnerConfig, parseRunnerConfig } from "../src/runner-config.js";
 
 const execFileAsync = promisify(execFile);
@@ -145,10 +145,15 @@ describe("configured CLI runner", () => {
     expect(state.executorCatalog?.map((e) => e.id)).toContain("graphloom.agent/run");
     expect(state.agentSessions).toHaveLength(2);
     expect(state.agentSessions?.every((s) => s.executorId === "graphloom.agent/run")).toBe(true);
-    expect(state.evidence.find((e) => e.kind === "review")?.payload).toMatchObject({
+    const reviewRecord = state.evidence.find((e) => e.kind === "review");
+    expect(reviewRecord?.payload).toMatchObject({
       verdict: "approved", summary: "Checked exact greeting bytes",
       producer: { executorId: "graphloom.agent/run", purpose: "review", readOnly: true },
     });
+    // §4.1/§6.1: the controller classified this itself, from hello's own
+    // declared review-verdict-v1 contract — not a schema name cli-runner.ts
+    // or the controller know on their own.
+    expect(reviewRecord?.contract).toMatchObject({ name: "review-verdict-v1", status: "valid", problems: [] });
     expect(state.budgets.agentInvocations).toBe(state.intake.budgets.agentInvocations - 2);
     expect((await execFileAsync("git", ["status", "--porcelain"], { cwd: f.repo })).stdout).not.toContain("GREETING");
   });
@@ -191,6 +196,14 @@ describe("configured CLI runner", () => {
     expect(onDefault.status, onDefault.summary).toBe("ok");
     expect(harnessOf(onDefault)).toBe("claude-code");
 
+    // This runner no longer classifies or validates a result against a
+    // schema name: that is the controller's job now (recordJobEvidence,
+    // against the run's own declared resultContracts), reading a contract
+    // the controller resolves and forwards as ctx.resultContract — not
+    // something this direct runner.runJob call (with a hand-built context
+    // that supplies none) can exercise. The runner's own job is just to
+    // forward the harness choice and schema text unchanged, whatever job.kind
+    // or input.resultSchema says; it still records as kind: "other".
     const verdict = {
       verdict: "request_changes",
       summary: "changes what the metric counts",
@@ -206,7 +219,7 @@ describe("configured CLI runner", () => {
       context("op-review"),
     );
     expect(review.status, review.summary).toBe("ok");
-    expect(review.evidence?.find((e) => e.kind === "review")?.payload).toEqual(verdict);
+    expect(review.evidence).toMatchObject([{ kind: "other", payload: { codingAgent: { output: verdict } } }]);
 
     const claudeOnly = createCliRunner(parseRunnerConfig(base), {});
     expect(await claudeOnly.runJob(job({ harness: "pi" }), context("op-refused"))).toMatchObject({
@@ -273,5 +286,35 @@ describe("configured CLI runner", () => {
     await expect(stat(path.join(f.repo, "graphloom-state"))).rejects.toMatchObject({ code: "ENOENT" });
     await rm(f.config);
     expect((await f.run()).stderr).toContain("cannot read runner config");
+  });
+});
+
+describe("isEnvironmentDispatch", () => {
+  // Regression: matching by command id alone let a graph-authored command job
+  // that happened to reuse the environment's own ids, with different argv,
+  // reach the real executor in quick-mode rehearsal instead of being stubbed.
+  const environmentCommands = new Map([
+    ["go", ["go", "version"]],
+    ["git", ["git", "--version"]],
+  ]);
+
+  it("matches the environment's own declared checks, id and argv together", () => {
+    const job = { input: { commands: [{ id: "go", argv: ["go", "version"] }, { id: "git", argv: ["git", "--version"] }] } };
+    expect(isEnvironmentDispatch(job, environmentCommands)).toBe(true);
+  });
+
+  it("does not match a different command count, order aside", () => {
+    const job = { input: { commands: [{ id: "go", argv: ["go", "version"] }] } };
+    expect(isEnvironmentDispatch(job, environmentCommands)).toBe(false);
+  });
+
+  it("does not match a graph-authored command reusing an environment id with different argv", () => {
+    const job = { input: { commands: [{ id: "go", argv: ["go", "test", "./..."] }, { id: "git", argv: ["git", "--version"] }] } };
+    expect(isEnvironmentDispatch(job, environmentCommands)).toBe(false);
+  });
+
+  it("does not match a command missing argv entirely", () => {
+    const job = { input: { commands: [{ id: "go" }, { id: "git", argv: ["git", "--version"] }] } };
+    expect(isEnvironmentDispatch(job, environmentCommands)).toBe(false);
   });
 });

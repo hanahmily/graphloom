@@ -1,4 +1,4 @@
-import type { EvidenceRecord } from "@graphloom/sdk";
+import type { EvidenceRecord, ReferenceSet } from "@graphloom/sdk";
 import { agentRuns, reviews } from "./evidence.js";
 import type { ReviewVerdict } from "./evidence.js";
 import { checkQuotes, clip, fileIndex, MAX_REFUTATION_QUOTES, parseVerification, type FileIndex, type PriorStatus, type Quote, type Verdict } from "./review-common.js";
@@ -139,6 +139,17 @@ export interface KnownPlanFindings {
 export function knownPlanFindings(ledger: PlanLedger): KnownPlanFindings {
   const known = (f: PlanFinding) => ({ id: f.id, state: f.state, description: describePlanFinding(f) });
   return { open: ledger.findings.filter(isPlanOpen).map(known), settled: ledger.findings.filter((f) => !isPlanOpen(f)).map(known) };
+}
+
+/**
+ * The valid id set for `findings[].finding`/`prior[].finding` (§4.3): every
+ * finding the reviewer was shown, open or settled, by id — plus `""` for "no
+ * repeat, this is new" — with each id's shown description, so a reviewer
+ * that writes the description instead of the id can still be reconciled.
+ */
+export function planFindingReferenceSet(known: KnownPlanFindings): ReferenceSet {
+  const all = [...known.open, ...known.settled];
+  return { ids: ["", ...all.map((f) => f.id)], descriptions: Object.fromEntries(all.map((f) => [f.id, f.description])) };
 }
 
 export function planFindingById(ledger: PlanLedger, id: string): PlanFinding | undefined {

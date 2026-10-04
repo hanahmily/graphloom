@@ -20,6 +20,7 @@ import {
   type Validator,
 } from "@graphloom/sdk";
 import { createScriptedRunner, createTrustedInProcessRunner, type Runner } from "@graphloom/runner";
+import { createScriptedSupervisor } from "@graphloom/supervisor";
 import { createController, loadRunState } from "./index.js";
 
 const execFileAsync = promisify(execFile);
@@ -425,10 +426,79 @@ describe("agent tool calls as child operations (#40)", () => {
       runId: "budget1",
     });
     const state = await loadRunState(report.stateDir);
-    expect(agentResults(state.evidence)).toEqual([{ granted: 64 }, { ok: 127, refused: "jobs budget exhausted" }]);
-    expect(state.budgets.agentInvocations).toBe(0);
+    // Normal-mode model calls stop 8 short of 0: the default recoveryReserve
+    // (max(8, 5%) of the 64 default agentInvocations budget) is never spent
+    // outside recovery, so a metered supervisor always has budget to act.
+    expect(agentResults(state.evidence)).toEqual([{ granted: 56 }, { ok: 127, refused: "jobs budget exhausted" }]);
+    expect(state.budgets.agentInvocations).toBe(8);
     expect(state.budgets.jobs).toBe(0);
   }, 60_000);
+
+  it("refuses a normal-mode agent dispatch at the recovery floor instead of admitting and fallback-charging it", async () => {
+    // Regression: reserveModelCall's own floor (children.ts) correctly denies
+    // a model-call reservation once agentInvocations reaches recoveryReserve,
+    // but nothing stopped the controller from admitting the *next* dispatch
+    // anyway — which then settled with zero model calls ever granted, and
+    // applyDispatchResult's "zero model calls" fallback charged it one
+    // invocation regardless, spending exactly the budget the floor exists to
+    // protect. Now refused before any pendingDispatch exists, so the
+    // fallback charge never runs for it at all.
+    const env = await makeEnv({ agentInvocations: 10 }); // recoveryReserve computes to 8
+    const { runner } = executors();
+    const triggers: string[] = [];
+    const twoDispatches = createScriptedGraph({
+      definition,
+      advances: [
+        dispatch(
+          {
+            stageId: "write",
+            kind: "agent",
+            purpose: "work",
+            instruction: "consume down to the reserve",
+            writeScope: [GREETING_PATH],
+            executor: { id: AGENT, version: "1" },
+            input: { steps: [{ model: 5 }] },
+          },
+          "first",
+        ),
+        dispatch(
+          {
+            stageId: "write",
+            kind: "agent",
+            purpose: "work",
+            instruction: "should be refused at the floor",
+            writeScope: [GREETING_PATH],
+            executor: { id: AGENT, version: "1" },
+            input: { steps: [{ model: 1 }] },
+          },
+          "second",
+        ),
+      ],
+    });
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: twoDispatches,
+      validators: { "exact-greeting": exactGreeting, "independent-reviewer": independentReview },
+      supervisor: createScriptedSupervisor({
+        decisions: [
+          (input) => {
+            triggers.push(input.trigger.code);
+            return stop({ reason: "observed the refusal", blocker: "test" }, "stop");
+          },
+        ],
+      }),
+      runner,
+      stateRoot: env.stateRoot,
+      runId: "budget-floor",
+    });
+    expect(report).toMatchObject({ status: "stopped", stopReason: "observed the refusal" });
+    expect(triggers).toEqual(["recovery_budget_reached"]);
+    const state = await loadRunState(report.stateDir);
+    // Only the first dispatch's own two granted calls (10 - 8 = 2) spent
+    // anything; the refused second dispatch left the floor untouched.
+    expect(state.budgets.agentInvocations).toBe(8);
+    expect(agentResults(state.evidence)).toEqual([{ granted: 2 }]);
+  }, 30_000);
 
   it("stop cancels the agent and its child, and fences the child's late result", async () => {
     const env = await makeEnv();
@@ -620,7 +690,7 @@ describe("agent tool calls as child operations (#40)", () => {
   });
 });
 
-async function makeEnv(): Promise<{ taskPath: string; stateRoot: string }> {
+async function makeEnv(budgets?: { agentInvocations: number }): Promise<{ taskPath: string; stateRoot: string }> {
   const taskDir = await mkdtemp(path.join(os.tmpdir(), "gl-child-"));
   temps.push(taskDir);
   const repoPath = path.join(taskDir, "test-repo");
@@ -634,6 +704,7 @@ async function makeEnv(): Promise<{ taskPath: string; stateRoot: string }> {
   await mkdir(path.join(taskDir, "plugins"), { recursive: true });
   await symlink(helloBundle, path.join(taskDir, "plugins/hello"));
   const taskPath = path.join(taskDir, "task.yaml");
+  const budgetsLines = budgets !== undefined ? `budgets:\n  agentInvocations: ${budgets.agentInvocations}\n` : "";
   await writeFile(
     taskPath,
     `graph: hello
@@ -641,7 +712,7 @@ repo: ./test-repo
 request: |
   Create GREETING.txt containing exactly "Hello, GraphLoom!" followed by
   one newline. Do not modify other files.
-`,
+${budgetsLines}`,
     "utf8",
   );
   return { taskPath, stateRoot: path.join(taskDir, "state") };

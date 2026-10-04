@@ -286,11 +286,21 @@ export function createChildPort(parent: ParentJob, deps: ChildPortDeps): Control
     async reserveModelCall() {
       return withRunLock(deps.stateDir, async () => {
         const state = await loadRunState(deps.stateDir);
-        if ((await fence(state)) !== undefined || state.budgets.agentInvocations <= 0) return false;
+        if ((await fence(state)) !== undefined) return false;
+        // §4.7: normal-mode dispatch stops short of the reserve so recovery
+        // (including a metered supervisor's own decide() call) always has
+        // budget to act; recovery-mode calls may spend down to zero.
+        const floor = state.mode === "recovery" ? 0 : (state.budgets.recoveryReserve ?? 0);
+        if (state.budgets.agentInvocations <= floor) return false;
         const pending = state.pendingDispatch!;
+        const stageId = pending.stageId;
         await saveRunState({
           ...state,
           budgets: { ...state.budgets, agentInvocations: state.budgets.agentInvocations - 1 },
+          agentInvocationsByStage: {
+            ...state.agentInvocationsByStage,
+            [stageId]: (state.agentInvocationsByStage?.[stageId] ?? 0) + 1,
+          },
           pendingDispatch: { ...pending, modelCalls: (pending.modelCalls ?? 0) + 1 },
           stateRevision: state.stateRevision + 1,
         });

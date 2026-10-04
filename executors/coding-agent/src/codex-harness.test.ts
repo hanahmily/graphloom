@@ -119,6 +119,25 @@ describe("Codex harness", () => {
     expect(run!.env.GRAPHLOOM_TEST_SECRET).toBeUndefined();
   });
 
+  it("bakes a result contract's reference ids into the schema, and fails as a contract violation on an unreconcilable miss", async () => {
+    const h = await setup();
+    const resultContract = {
+      name: "plan-review-v1",
+      schema: { type: "object", properties: { finding: { type: "string" } }, required: ["finding"] },
+      references: ["finding"],
+      knownReferences: { finding: { ids: ["", "P1"], descriptions: { P1: "metric counts running actions" } } },
+    };
+    await h.script([...turn().slice(0, -2), { last: JSON.stringify({ finding: "P1" }) }, turn().at(-1)!]);
+    const ok = await h.executor.execute({ assignment: "review" }, h.ctx({ resultContract }));
+    expect(ok).toMatchObject({ status: "ok" });
+    const [first] = await h.invocations();
+    expect((first!.schema as { properties: { finding: { enum: string[] } } }).properties.finding).toMatchObject({ enum: ["", "P1"] });
+
+    await h.script([...turn().slice(0, -2), { last: JSON.stringify({ finding: "a made-up finding" }) }, turn().at(-1)!]);
+    const violated = await h.executor.execute({ assignment: "review" }, h.ctx({ resultContract }));
+    expect(violated).toMatchObject({ status: "failed", failureKind: "contract_violation" });
+  });
+
   it("serves only read-only jobs without graph tools", async () => {
     const h = await setup();
     await h.script(turn());

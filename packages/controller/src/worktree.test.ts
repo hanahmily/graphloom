@@ -9,6 +9,7 @@ import {
   changedPaths,
   listDirtyPaths,
   pathsOutsideWriteScope,
+  readWorktreeFile,
   workspaceChangeManifest,
   worktreeChangeFingerprints,
 } from "./worktree.js";
@@ -32,6 +33,30 @@ async function repo(): Promise<string> {
   await execFileAsync("git", ["commit", "-m", "init"], { cwd: dir });
   return dir;
 }
+
+describe("readWorktreeFile", () => {
+  it("reads a tracked file's own content", async () => {
+    const dir = await repo();
+    expect(await readWorktreeFile(dir, "tracked.txt")).toBe("one\n");
+  });
+
+  it("is undefined for a path that does not exist", async () => {
+    const dir = await repo();
+    expect(await readWorktreeFile(dir, "nope.txt")).toBeUndefined();
+  });
+
+  it("is undefined, not a thrown EISDIR, for a path naming a directory", async () => {
+    // Regression: a real model's plan legitimately quoted a Go package path
+    // ("./pkg/timestamp", a directory) in a field the controller later
+    // observed — found live, running banyandb-fix's own graph for real.
+    // Node's readFile throws EISDIR on a directory; observeWorkspace
+    // (loop.ts) turned that into an unconditional run-stopping "observe
+    // rejected", for a path that was never missing, just not a file.
+    const dir = await repo();
+    await mkdir(path.join(dir, "pkg", "timestamp"), { recursive: true });
+    expect(await readWorktreeFile(dir, "pkg/timestamp")).toBeUndefined();
+  });
+});
 
 describe("source checkout dirt", () => {
   it("lists a large ignored build tree as one entry", async () => {

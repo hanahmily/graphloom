@@ -1,5 +1,7 @@
 /** Public value contracts for GraphLoom plugins. No Accept operation exists. */
 
+import type { GraphRehearsal } from "./rehearsal.js";
+
 export const PROTOCOL_VERSION = 1 as const;
 
 export type StageId = string;
@@ -53,6 +55,12 @@ export interface GraphDefinition {
   privateStateSchema?: string;
   /** What the run's workspace needs before any stage runs; the controller enforces it. */
   environment?: EnvironmentDeclaration;
+  /**
+   * Shapes this graph's own agent jobs ask for, by the name it gives each in
+   * JobSpec.resultSchema and a requirement's evidenceSchema. The SDK and
+   * controller carry these opaquely; see docs/design-agent-contract-robustness.md.
+   */
+  resultContracts?: import("./result-contract.js").ResultContract[];
 }
 
 /** A command the controller runs with the built-in command executor. */
@@ -132,6 +140,13 @@ export interface EvidenceRecord {
   candidateDigest?: Fingerprint;
   /** The producing job's declared JobSpec.resultSchema, stamped by the controller; anchors a non-workspace requirement's acceptedIdentity component. */
   resultSchema?: string;
+  /** Outcome of checking this evidence against its producing job's declared result contract, when it named one. */
+  contract?: {
+    name: string;
+    status: "valid" | "invalid" | "repaired";
+    problems: string[];
+    repairs?: string[];
+  };
 }
 
 export interface OutstandingOperation {
@@ -277,6 +292,14 @@ export interface JobSpec {
    * preparation or the job changed.
    */
   checkout?: CheckoutSpec;
+  /**
+   * Per-dispatch valid id sets for this job's declared result contract's own
+   * `references` paths (e.g. "findings[].finding"), keyed by that same path.
+   * The harness constrains the model to these ids and validates the result
+   * against them; absent when the contract names no references, or this
+   * dispatch has none open yet.
+   */
+  knownReferences?: Record<string, import("./result-contract.js").ReferenceSet>;
 }
 
 /**
@@ -404,12 +427,14 @@ export type WireRequest =
       kind: "evaluate";
       validatorId: string;
       input: ValidationInput;
-    });
+    })
+  | (WireEnvelope & { kind: "rehearsal"; entry: string });
 
 export type WireResponse =
   | (WireEnvelope & { kind: "describe_ok"; definition: GraphDefinition })
   | (WireEnvelope & { kind: "advance_ok"; decision: GraphDecision })
   | (WireEnvelope & { kind: "evaluate_ok"; result: ValidationResult })
+  | (WireEnvelope & { kind: "rehearsal_ok"; rehearsal?: GraphRehearsal })
   | (WireEnvelope & {
       kind: "error";
       code: "malformed" | "stale" | "oversized" | "unknown" | "internal";

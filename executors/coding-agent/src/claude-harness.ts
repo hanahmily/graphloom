@@ -4,6 +4,7 @@ import { lstat, mkdir, mkdtemp, readdir, readFile, rename, rm, writeFile } from 
 import os from "node:os";
 import path from "node:path";
 import { createInterface } from "node:readline";
+import { applyReferenceEnums, checkReferences, validateResultShape } from "@graphloom/sdk";
 import { bounded, inlineObjectSchema, scopeNotes } from "./assignment.js";
 import {
   CLAUDE_API_KEY_CREDENTIAL,
@@ -16,7 +17,16 @@ import {
   CLAUDE_RESPONSE_TIMEOUT_ENV,
   CLAUDE_STARTUP_TIMEOUT_ENV,
 } from "./claude-config.js";
-import type { CodingHarness, CodingRunRequest, CodingRunResult, CodingSessionOptions, CodingUsage } from "./harness.js";
+import {
+  JOB_CONTRACT_ENV,
+  JOB_IDENTITY_ENV,
+  JOB_REFERENCES_ENV,
+  type CodingHarness,
+  type CodingRunRequest,
+  type CodingRunResult,
+  type CodingSessionOptions,
+  type CodingUsage,
+} from "./harness.js";
 import { drainOnExit, signalGroup } from "./process-group.js";
 import { envList, minimalEnv } from "./child-env.js";
 import { copyFiles, filesUnder, readScanned } from "./session-files.js";
@@ -70,6 +80,32 @@ const DEFAULT_SYSTEM_PROMPT = [
 
 const RESULT_NOTE =
   "StructuredOutput is your final answer and ends your turn: call it once, with the complete result under `result`, and never with test or placeholder values.";
+
+/**
+ * Every flag `runClaude` below passes Claude Code, for the B2 capability
+ * probe (docs/design-graph-rehearsal.md §3.1): a binary whose `--help` is
+ * missing one of these silently lacks a feature this adapter depends on. Keep
+ * this in sync with the `cli.push(...)` calls in `runClaude`.
+ */
+export const CLAUDE_CODE_ADAPTER_FLAGS: readonly string[] = [
+  "-p",
+  "--output-format",
+  "--input-format",
+  "--verbose",
+  "--replay-user-messages",
+  "--forward-subagent-text",
+  "--permission-mode",
+  "--permission-prompt-tool",
+  "--settings",
+  "--tools",
+  "--strict-mcp-config",
+  "--append-system-prompt",
+  "--mcp-config",
+  "--model",
+  "--json-schema",
+  "--resume",
+  "--session-id",
+];
 
 interface SavedSession {
   sessionId: string;
@@ -335,12 +371,19 @@ async function runClaude(args: RunArgs): Promise<CodingRunResult> {
       cli.push("--mcp-config", config);
     }
     if (args.model !== undefined) cli.push("--model", args.model);
-    if (request.resultSchema !== undefined) {
-      const schema = inlineObjectSchema(request.resultSchema) ?? {
-        type: "object",
-        description: `${request.resultSchema} result`,
-        additionalProperties: true,
-      };
+    if (request.resultContract !== undefined || request.resultSchema !== undefined) {
+      // Claude has no in-turn retry in this harness, so the reference id set
+      // is baked into the schema as `enum` up front (§4.3) rather than left
+      // for a post-turn reconciliation pass to catch.
+      const schema =
+        (request.resultContract !== undefined
+          ? applyReferenceEnums(request.resultContract.schema, request.resultContract.references, request.resultContract.knownReferences)
+          : undefined) ??
+        inlineObjectSchema(request.resultSchema!) ?? {
+          type: "object",
+          description: `${request.resultSchema} result`,
+          additionalProperties: true,
+        };
       // With one object parameter the model writes the result as JSON. With one parameter per
       // field, a long raw-text field can swallow the fields after it.
       const wrapped = { type: "object", properties: { result: schema }, required: ["result"], additionalProperties: false };
@@ -348,11 +391,17 @@ async function runClaude(args: RunArgs): Promise<CodingRunResult> {
     }
     cli.push(saved.started ? "--resume" : "--session-id", saved.sessionId);
 
+    const childEnv = { ...args.env };
+    const contractName = request.resultContract?.name ?? request.resultSchema;
+    if (contractName !== undefined) childEnv[JOB_CONTRACT_ENV] = contractName;
+    if (request.identity !== undefined) childEnv[JOB_IDENTITY_ENV] = JSON.stringify(request.identity);
+    if (request.resultContract?.knownReferences !== undefined) childEnv[JOB_REFERENCES_ENV] = JSON.stringify(request.resultContract.knownReferences);
+
     // Nothing awaits between this check and the abort listener, so a stop during setup cannot miss the process.
     if (options.signal?.aborted) return { status: "failed", summary: "agent session aborted" };
     const child = spawn(args.command, cli, {
       cwd: options.cwd,
-      env: args.env,
+      env: childEnv,
       stdio: ["pipe", "pipe", "pipe"],
       detached: true,
     });
@@ -475,7 +524,7 @@ async function runClaude(args: RunArgs): Promise<CodingRunResult> {
                 type: "user",
                 session_id: saved.sessionId,
                 parent_tool_use_id: null,
-                message: { role: "user", content: [request.assignment, ...scopeNotes(options), ...(request.resultSchema !== undefined ? [RESULT_NOTE] : [])].join("\n\n") },
+                message: { role: "user", content: [request.assignment, ...scopeNotes(options), ...(request.resultContract !== undefined || request.resultSchema !== undefined ? [RESULT_NOTE] : [])].join("\n\n") },
               });
             }
           }
@@ -585,15 +634,44 @@ async function runClaude(args: RunArgs): Promise<CodingRunResult> {
           const detail = stderr.trim() || result.result || "";
           return { status: "failed", summary: bounded(`Claude Code run failed (${result.subtype ?? "error"})${detail ? `: ${detail}` : ""}`) };
         }
-        if (request.resultSchema !== undefined) {
+        if (request.resultContract !== undefined || request.resultSchema !== undefined) {
+          const name = request.resultContract?.name ?? request.resultSchema!;
           const output = (result.structured_output as { result?: unknown } | null | undefined)?.result;
           if (output === undefined) {
-            return { status: "failed", summary: `agent finished without submitting a ${request.resultSchema} result` };
+            return { status: "failed", summary: `agent finished without submitting a ${name} result` };
+          }
+          if (request.resultContract !== undefined) {
+            const problems = validateResultShape(output, request.resultContract.schema);
+            let value: unknown = output;
+            if (problems.length === 0 && request.resultContract.references !== undefined && request.resultContract.knownReferences !== undefined) {
+              const checked = checkReferences(output, request.resultContract.references, request.resultContract.knownReferences);
+              problems.push(...checked.problems);
+              value = checked.value;
+            }
+            if (problems.length > 0) {
+              // B2's --json-schema makes a type-level miss rare; a reference
+              // outside the shown set is the likely case here. Claude Code
+              // has no further turn in this run to correct it in, so the job
+              // fails as a named contract violation rather than recording an
+              // invalid result as if it were accepted.
+              return {
+                status: "failed",
+                summary: bounded(`result did not satisfy its declared contract (${name}): ${problems.join("; ")}`),
+                failureKind: "contract_violation",
+                output,
+              };
+            }
+            const submitted = (value as { summary?: unknown } | null)?.summary;
+            return {
+              status: "completed",
+              summary: bounded(typeof submitted === "string" ? submitted : `Claude Code submitted a ${name} result`),
+              output: value,
+            };
           }
           const submitted = (output as { summary?: unknown } | null)?.summary;
           return {
             status: "completed",
-            summary: bounded(typeof submitted === "string" ? submitted : `Claude Code submitted a ${request.resultSchema} result`),
+            summary: bounded(typeof submitted === "string" ? submitted : `Claude Code submitted a ${name} result`),
             output,
           };
         }

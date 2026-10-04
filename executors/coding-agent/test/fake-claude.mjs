@@ -40,6 +40,20 @@ const flag = (name) => {
 };
 const emit = (event) => process.stdout.write(`${JSON.stringify(event)}\n`);
 
+if (argv.includes("--help")) {
+  // B2's capability probe (docs/design-graph-rehearsal.md §3.1) asks the
+  // configured binary's own --help for every flag the adapter passes it;
+  // this stand-in must answer that the same way the real CLI would, or every
+  // gated `run` in these tests hangs for the probe's own timeout.
+  process.stdout.write([
+    "-p", "--output-format", "--input-format", "--verbose", "--replay-user-messages",
+    "--forward-subagent-text", "--permission-mode", "--permission-prompt-tool", "--settings",
+    "--tools", "--strict-mcp-config", "--append-system-prompt", "--mcp-config", "--model",
+    "--json-schema", "--resume", "--session-id",
+  ].join(" ") + "\n");
+  process.exit(0);
+}
+
 const resume = flag("--resume");
 const sessionId = resume ?? flag("--session-id");
 const cwd = process.cwd();

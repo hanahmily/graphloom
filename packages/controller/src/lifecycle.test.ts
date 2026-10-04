@@ -9,6 +9,7 @@ import type { EvidenceRecord, Validator } from "@graphloom/sdk";
 import { createController } from "./index.js";
 import { createScriptedRunner } from "@graphloom/runner";
 import { readOwnerClaim } from "./owner.js";
+import { loadRunState } from "./state.js";
 
 const execFileAsync = promisify(execFile);
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -54,6 +55,30 @@ describe("public controller: hello child host + stop/resume/inspect", () => {
     expect(inspected.versionHistory.length).toBeGreaterThanOrEqual(1);
     expect(inspected.versionHistory[0]?.reason).toBe("intake");
     expect(inspected.activeVersion).toContain("hello@");
+  });
+
+  it("pins a caller-supplied rehearsalGate onto the run's own intake", async () => {
+    const env = await makeEnv();
+    const controller = createController();
+    const rehearsalGate = {
+      fingerprint: "sha256:deadbeef",
+      verdict: "ready" as const,
+      notes: ["L0 check passed", "L1 quick rehearsal passed"],
+    };
+    const report = await controller.run({
+      taskPath: env.taskPath,
+      runner: helloScriptedRunner(),
+      stateRoot: env.stateRoot,
+      runId: "gate1",
+      rehearsalGate,
+    });
+
+    expect(report.status).toBe("succeeded");
+    expect(report.rehearsalGate).toEqual(rehearsalGate);
+    const state = await loadRunState(report.stateDir);
+    expect(state.intake.rehearsalGate).toEqual(rehearsalGate);
+    const inspected = await controller.inspect(report.stateDir);
+    expect(inspected.rehearsalGate).toEqual(rehearsalGate);
   });
 
   it("stop reaps the child and leaves a resumable stopped run", async () => {
@@ -167,6 +192,16 @@ describe("public controller: hello child host + stop/resume/inspect", () => {
           validatorId: "independent-reviewer",
           version: "1",
           independence: "separate-reviewer" as const,
+        },
+      ],
+      // Resume hands decisions to the real pinned hello bundle (child host),
+      // whose dispatches name the same contracts hello itself declares.
+      resultContracts: [
+        { name: "writer-result-v1", schema: { type: "object" }, evidenceKind: "other" as const },
+        {
+          name: "review-verdict-v1",
+          schema: { type: "object", properties: { verdict: { type: "string" }, summary: { type: "string" } }, required: ["verdict", "summary"] },
+          evidenceKind: "review" as const,
         },
       ],
     };
