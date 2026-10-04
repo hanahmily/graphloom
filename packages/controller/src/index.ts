@@ -24,6 +24,7 @@ export {
   assertSafeRunId,
   assertSafeGraphId,
   resolveBundleEntry,
+  resolveBundleEntryFromManifest,
   resolveBundleRehearsalEntry,
   resolveStateDir,
 } from "./controller.js";

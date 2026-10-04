@@ -19,6 +19,7 @@ import {
   producerOf,
   replayRun,
   resolveBundleEntry,
+  resolveBundleEntryFromManifest,
   resolveBundleRehearsalEntry,
   resolveStateDir,
   type BoundaryResult,
@@ -405,15 +406,26 @@ export async function rehearse(taskPath: string, options: RehearseOptions = {}):
   return run.report;
 }
 
-/** L2 (§3.3): would a recorded run's real outputs be accepted under the bundle's current code? Reads only; no provider calls. */
-export async function replay(runRef: string, options: { stateRoot?: string } = {}): Promise<ReplayReport> {
+/**
+ * L2 (§3.3): would a recorded run's real outputs be accepted under the
+ * bundle's current code? Reads only; no provider calls.
+ *
+ * `bundlePath` overrides the recorded run's own `intake.bundle.bundlePath`,
+ * an absolute path frozen at record time on whatever machine recorded it —
+ * replaying "the bundle's current code" means wherever it is installed now,
+ * which is only ever the same path by coincidence (found running this
+ * design's own committed fixture in CI, on a different machine than the one
+ * that recorded it).
+ */
+export async function replay(runRef: string, options: { stateRoot?: string; bundlePath?: string } = {}): Promise<ReplayReport> {
   const stateDir = await resolveStateDir(runRef, options.stateRoot);
   const recorded = await loadRunState(stateDir);
+  const bundlePath = options.bundlePath ?? recorded.intake.bundle.bundlePath;
   const host = await createChildPluginHost({
-    entryModule: resolveBundleEntry(recorded.intake),
+    entryModule: resolveBundleEntryFromManifest(bundlePath, recorded.intake.bundle.manifestRaw),
     activeVersion: recorded.activeVersion,
     generation: recorded.generation,
-    cwd: recorded.intake.bundle.bundlePath,
+    cwd: bundlePath,
   });
   try {
     return await replayRun(recorded, host);

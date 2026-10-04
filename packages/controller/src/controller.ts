@@ -1148,7 +1148,7 @@ export type {
 } from "./repair-lifecycle.js";
 export { defaultRepairPreflight } from "./repair-lifecycle.js";
 export { assertSafeRunId, assertSafeGraphId } from "./ids.js";
-export { resolveBundleEntry, resolveBundleRehearsalEntry } from "./bundle.js";
+export { resolveBundleEntry, resolveBundleEntryFromManifest, resolveBundleRehearsalEntry } from "./bundle.js";
 
 /** Test helper: attempt Validate using only current-generation evidence. */
 export async function tryAdmit(

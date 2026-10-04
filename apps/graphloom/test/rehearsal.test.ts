@@ -92,7 +92,10 @@ describe("graphloom rehearse (L1)", () => {
 describe("graphloom replay (L2)", () => {
   it("replays the recorded banyandb-fix run this design was built from, reclassifying its evidence and surfacing the unresolved findings", async () => {
     const stateDir = path.join(root, "examples/skywalking-banyandb/graphloom-state/879ee04f-e57");
-    const report = await replay(stateDir);
+    // The recorded run's own intake pins the bundle path of whatever machine
+    // recorded it; replay reads the bundle's current code, which is wherever
+    // this checkout actually has it installed, not that frozen absolute path.
+    const report = await replay(stateDir, { bundlePath: path.join(root, "examples/plugins/banyandb-fix") });
     expect(report.contracts.valid).toBeGreaterThanOrEqual(5);
     const planReviewed = report.requirements.find((r) => r.requirementId === "plan-reviewed");
     expect(planReviewed?.hadReceipt).toBe(false);
