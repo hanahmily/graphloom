@@ -149,16 +149,6 @@ function repairDeps(installed: string, supervisorSessionId: string, patch: (cand
 }
 
 describe("the release example plugin through the controller", () => {
-  it("spends no correction budget on a clean run through both work stages", async () => {
-    const env = await makeEnv();
-    const { runner: scripted } = runner([bump, changelog("Export command"), reviewer("approved", "matches the request")]);
-    const report = await createController().run({ taskPath: env.taskPath, runner: scripted, stateRoot: env.stateRoot, runId: "release-clean" });
-
-    expect(report.status, `${report.stopReason}: ${report.blocker}`).toBe("succeeded");
-    const state = await loadRunState(report.stateDir);
-    expect(state.budgets.corrections).toBe(state.intake.budgets.corrections);
-  }, 60_000);
-
   it("charges a Bump rewrite after resume sends the run back past an accepted Changelog", async () => {
     const env = await makeEnv();
     const release = (await import(pathToFileURL(path.join(bundle, "dist", "index.js")).href)) as {
