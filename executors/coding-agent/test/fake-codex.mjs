@@ -8,6 +8,19 @@ import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs
 
 const argv = process.argv.slice(2);
 const flag = (name) => (argv.includes(name) ? argv[argv.indexOf(name) + 1] : undefined);
+
+if (argv.includes("--help")) {
+  // B2's capability probe (docs/design-graph-rehearsal.md §3.1) asks the
+  // configured binary's own `exec --help` for every flag the adapter passes
+  // it; this stand-in must answer that the same way the real CLI would, or
+  // every gated `run` in these tests hangs reading stdin for the probe's own
+  // timeout.
+  process.stdout.write(
+    ["--json", "--ephemeral", "--skip-git-repo-check", "--sandbox", "--cd", "--output-last-message", "--model", "--config", "--output-schema"].join(" ") + "\n",
+  );
+  process.exit(0);
+}
+
 const chunks = [];
 for await (const chunk of process.stdin) chunks.push(chunk);
 const schemaFile = flag("--output-schema");

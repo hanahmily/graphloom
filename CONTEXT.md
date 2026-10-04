@@ -66,6 +66,13 @@ checks, and independent review, eligible for an authorized version transition.
 Each attempt patches an isolated snapshot of a specific base plugin version so
 concurrent candidates cannot share or mutate one another's trees.
 
+**Rehearsal**:
+A run of the real controller, plugin host, runner and harness adapters with
+the model replaced by a stand-in that answers from the plugin's own declared
+fixtures by contract name. Spends no provider calls; verifies that a
+well-formed result travels every agent–harness boundary and that the graph
+converges, before a live run spends its budget.
+
 **Driver mode**:
 The run's choice of who supplies its continuation: the loom itself in standalone
 mode, or an attached coding-agent host in agent-host mode.

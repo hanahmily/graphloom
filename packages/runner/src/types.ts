@@ -36,6 +36,19 @@ export interface JobContext {
   executorSource?: ExecutorSourceOverride;
   /** Where the job's agent may keep a resumable session, and the session to continue. */
   session?: ExecutorSession;
+  /**
+   * The job's declared result contract, resolved by the controller from the
+   * run's GraphDefinition.resultContracts (the name the controller was never
+   * given by anyone but the plugin). Forwarded to ExecutorContext for a
+   * coding-agent executor to constrain and validate structured output with;
+   * a runner that has no opinion about it just passes it through.
+   */
+  resultContract?: {
+    name: string;
+    schema: Record<string, unknown>;
+    references?: string[];
+    knownReferences?: Record<string, import("@graphloom/sdk").ReferenceSet>;
+  };
 }
 
 export interface JobEvidenceItem {
@@ -57,6 +70,13 @@ export interface JobResult {
   retryAfterMs?: number;
   /** The job's agent session, which a later job may continue. */
   sessionRef?: string;
+  /**
+   * Coarse reason category a recovery trigger can read instead of parsing
+   * `summary`. "contract_violation": the job failed after its agent could
+   * not produce a result satisfying its declared contract within the
+   * in-turn correction bound.
+   */
+  failureKind?: "contract_violation";
 }
 
 /** An executor a runner serves, identified by the digest of the code it would run. */

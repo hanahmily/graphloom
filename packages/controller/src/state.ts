@@ -180,6 +180,27 @@ export interface DurableRunState {
    * needs another attempt" apart from "its evidence went stale."
    */
   openAttempt?: Record<string, boolean>;
+  /**
+   * Per stage, dispatches settled since its last receipt (agent dispatches
+   * counted separately from the total of every kind). Reset to `{agent: 0,
+   * total: 0, since: <now>}` when admit.ts mints a receipt for that stage.
+   * Independent of any plugin evidence lookup — unlike a plugin's own round
+   * cap, which reads the plugin's ledger and can be fooled by the same
+   * mismatch it exists to catch. See docs/design-agent-contract-robustness.md §4.6.
+   */
+  dispatchesSinceReceipt?: Record<string, { agent: number; total: number; since: string }>;
+  /**
+   * Per `${stageId}:${purpose}`, consecutive agent results recorded with
+   * `contract.status: "invalid"`. Reset to 0 by a valid or repaired result
+   * for the same key; never by an unrelated job. See §4.5(b).
+   */
+  contractViolationStreak?: Record<string, number>;
+  /**
+   * Per stage, model calls reserved (children.ts's reserveModelCall) by jobs
+   * dispatched for it. Never reset — the §4.7 pacing check compares a
+   * stage's running total against the run's whole agent budget.
+   */
+  agentInvocationsByStage?: Record<string, number>;
   /** Recorded active-version transitions (intake + generation fences). */
   versionHistory: VersionRecord[];
   /** Active recovery episode when mode is recovery. */

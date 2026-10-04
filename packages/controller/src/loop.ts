@@ -13,12 +13,14 @@ import type {
 import {
   assertGraphDecision,
   BUILTIN_COMMAND_EXECUTOR_ID,
+  checkReferences,
   pinJobExecutor,
+  validateResultShape,
   writeScopeProblem,
   type CheckoutSpec,
   type EnvironmentDeclaration,
 } from "@graphloom/sdk";
-import type { ExecutorSourceOverride, Runner } from "@graphloom/runner";
+import type { ExecutorSourceOverride, JobContext, Runner } from "@graphloom/runner";
 import type { PluginHost } from "@graphloom/plugin-host";
 import {
   isModelSwitchRequest,
@@ -541,6 +543,7 @@ async function runNormalLoopSteps(
             checkedDigest = ran.candidateDigest;
             staleIdentity = ran.staleIdentity;
           } else {
+            const resultContract = resolveResultContract(state, job);
             result = await deps.runner.runJob(job, {
               runId: state.runId,
               operationId,
@@ -551,6 +554,7 @@ async function runNormalLoopSteps(
               ...(children !== undefined ? { children } : {}),
               ...(source !== undefined ? { executorSource: source } : {}),
               ...(session !== undefined ? { session } : {}),
+              ...(resultContract !== undefined ? { resultContract } : {}),
             });
           }
         }
@@ -705,6 +709,25 @@ function setupCommands(env: EnvironmentDeclaration | undefined): number {
 /** A checkout job's own checks and preparation run before its commands, and count as a job of their own. */
 function jobCost(state: DurableRunState, job: JobSpec): number {
   return job.checkout !== undefined && setupCommands(state.definition.environment) > 0 ? 2 : 1;
+}
+
+/**
+ * B1/B2: resolves `job.resultSchema` against the run's own plugin-declared
+ * contracts, so the executor receives real schema text (and any reference id
+ * sets the job supplied) instead of a bare name. Admission already refused a
+ * name the plugin did not declare, so a miss here just means no contract
+ * applies to this job.
+ */
+function resolveResultContract(state: DurableRunState, job: JobSpec): JobContext["resultContract"] {
+  if (job.resultSchema === undefined) return undefined;
+  const contract = state.definition.resultContracts?.find((c) => c.name === job.resultSchema);
+  if (contract === undefined) return undefined;
+  return {
+    name: contract.name,
+    schema: contract.schema,
+    ...(contract.references !== undefined ? { references: contract.references } : {}),
+    ...(job.knownReferences !== undefined ? { knownReferences: job.knownReferences } : {}),
+  };
 }
 
 function withCandidateDigest(state: DurableRunState, digest: string | undefined): DurableRunState {
@@ -1366,6 +1389,11 @@ async function prepareDispatch(
   const undeclared = stopForUndeclaredStage(state, job.stageId);
   if (undeclared) return { state: undeclared };
 
+  const contractProblem = contractAdmissionRefusal(state, job);
+  if (contractProblem !== undefined) {
+    return { state: { ...state, status: "stopped", stopReason: "contract rejected", blocker: contractProblem } };
+  }
+
   if (state.mode === "recovery") {
     const refused = recoveryDispatchRefusal(state, job);
     if (refused !== undefined) {
@@ -1423,7 +1451,7 @@ async function prepareDispatch(
         ...state,
         status: "stopped",
         stopReason: "budgets exhausted",
-        blocker: "agentInvocations",
+        blocker: budgetExhaustionBlocker(state, job.stageId, job.purpose),
       },
     };
   }
@@ -1669,6 +1697,11 @@ function applyDispatchResult(
     next = settleSupervisorCorrection(next, job.stageId);
   }
 
+  // §4.6: every settlement, success or failure, counts toward its stage's
+  // own dispatch-without-acceptance clock — independent of any plugin
+  // evidence lookup, unlike the plugin's own round caps.
+  next = recordDispatchSettlement(next, job);
+
   if (result.status !== "ok") {
     next = recordExecutorFailure(recordJobEvidence(next, job, producer, result.evidence, candidateDigest), {
       producer,
@@ -1679,9 +1712,17 @@ function applyDispatchResult(
       summary: result.summary,
       retryAfterMs: result.retryAfterMs,
     });
+    next = recordContractStreak(next, job, result.evidence);
     const { pendingDispatch, ...rest } = next;
     if (args.canRecover) {
       const executorId = job.executor?.id ?? job.kind;
+      if (result.failureKind === "contract_violation") {
+        return enterRecovery(
+          rest,
+          "contract_violation",
+          boundText(`executor ${executorId} could not produce a result satisfying its declared contract (${job.resultSchema ?? "unknown"}): ${result.summary}`),
+        );
+      }
       return enterRecovery(rest, "executor_failed", boundText(`executor ${executorId} ${result.status}: ${result.summary}`));
     }
     return {
@@ -1696,14 +1737,99 @@ function applyDispatchResult(
   }
 
   next = recordJobEvidence(next, job, producer, result.evidence, candidateDigest);
+  next = recordContractStreak(next, job, result.evidence);
 
   if (job.purpose === "work") {
     next = { ...next, lastWorkOperationId: operationId };
   }
 
+  // §4.5(b)/§4.6/§4.7: a success can still be the mismatch these exist to
+  // catch — a contract-invalid or merely unaccepted result recorded as
+  // "ok". Checked only in normal mode: a recovery episode already has the
+  // run's attention, and the supervisor's own repeat detection applies there.
+  if (state.mode === "normal" && args.canRecover) {
+    const { pendingDispatch, ...rest } = next;
+    void pendingDispatch;
+    const contractMessage = contractViolationStreakMessage(next, job);
+    if (contractMessage !== undefined) return enterRecovery(rest, "contract_violation", contractMessage);
+    const stalledMessage = stalledDispatchMessage(next, job);
+    if (stalledMessage !== undefined) return enterRecovery(rest, "stalled", stalledMessage);
+    const pacingMessage = stagePacingMessage(next, job);
+    if (pacingMessage !== undefined) return enterRecovery(rest, "stalled", pacingMessage);
+  }
+
   const { pendingDispatch: _done, ...cleared } = next;
   void _done;
   return cleared;
+}
+
+/** §4.6: per-stage dispatch count since its last receipt, kept whether the dispatch succeeded or failed. */
+function recordDispatchSettlement(state: DurableRunState, job: JobSpec): DurableRunState {
+  const prior = state.dispatchesSinceReceipt?.[job.stageId];
+  return {
+    ...state,
+    dispatchesSinceReceipt: {
+      ...state.dispatchesSinceReceipt,
+      [job.stageId]: {
+        agent: (prior?.agent ?? 0) + (job.kind === "agent" ? 1 : 0),
+        total: (prior?.total ?? 0) + 1,
+        since: prior?.since ?? new Date().toISOString(),
+      },
+    },
+  };
+}
+
+/** §4.5(b): consecutive contract-invalid agent results for this stage and purpose. */
+function recordContractStreak(
+  state: DurableRunState,
+  job: JobSpec,
+  evidence: Awaited<ReturnType<Runner["runJob"]>>["evidence"],
+): DurableRunState {
+  const outcomes = (evidence ?? [])
+    .map((item) => classifyAgentResult(state.definition, job, item))
+    .filter((c): c is ContractOutcome => c !== undefined);
+  if (outcomes.length === 0) return state;
+  const key = `${job.stageId}:${job.purpose}`;
+  if (outcomes.some((c) => c.contract.status === "invalid")) {
+    const streak = (state.contractViolationStreak?.[key] ?? 0) + 1;
+    return { ...state, contractViolationStreak: { ...state.contractViolationStreak, [key]: streak } };
+  }
+  if (state.contractViolationStreak?.[key] === undefined) return state;
+  const { [key]: _cleared, ...rest } = state.contractViolationStreak;
+  void _cleared;
+  return { ...state, contractViolationStreak: rest };
+}
+
+const CONTRACT_VIOLATION_STREAK_LIMIT = 2;
+
+function contractViolationStreakMessage(state: DurableRunState, job: JobSpec): string | undefined {
+  const key = `${job.stageId}:${job.purpose}`;
+  const streak = state.contractViolationStreak?.[key];
+  if (streak === undefined || streak < CONTRACT_VIOLATION_STREAK_LIMIT) return undefined;
+  return boundText(
+    `stage ${job.stageId}: ${streak} consecutive contract-invalid results for purpose ${job.purpose} (contract ${job.resultSchema ?? "unknown"})`,
+  );
+}
+
+const MAX_STAGE_DISPATCHES_WITHOUT_RECEIPT = 4;
+
+function stalledDispatchMessage(state: DurableRunState, job: JobSpec): string | undefined {
+  const counts = state.dispatchesSinceReceipt?.[job.stageId];
+  if (counts === undefined || counts.agent < MAX_STAGE_DISPATCHES_WITHOUT_RECEIPT) return undefined;
+  return boundText(`stage ${job.stageId}: ${counts.agent} agent dispatches (most recently ${job.purpose}) since its last receipt`);
+}
+
+const STAGE_BUDGET_SHARE = 0.5;
+
+/** §4.7 pacing: a stage spending more than its share of the run's whole agent budget with nothing accepted, while budget remains to act on it. */
+function stagePacingMessage(state: DurableRunState, job: JobSpec): string | undefined {
+  const total = state.intake.budgets.agentInvocations;
+  const spent = state.agentInvocationsByStage?.[job.stageId] ?? 0;
+  if (total <= 0 || spent <= total * STAGE_BUDGET_SHARE) return undefined;
+  const receipts = state.receipts.filter((r) => r.stageId === job.stageId && r.valid).length;
+  return boundText(
+    `stage ${job.stageId} has spent ${spent} of the run's ${total} agent invocations (over ${Math.round(STAGE_BUDGET_SHARE * 100)}%) with ${receipts} receipts`,
+  );
 }
 
 /** A route naming a step outside the pinned definition stops the run instead of adding it. */
@@ -1733,10 +1859,96 @@ function stopForUndeclaredStage(state: DurableRunState, stageId: string): Durabl
   };
 }
 
+/**
+ * §4.4: a job naming a contract its own plugin did not declare is refused
+ * before it runs, and so is one dispatched for a stage whose requirement
+ * consumes that contract when the job's purpose/readOnly flags are not ones
+ * the controller may trust to self-report that contract's evidenceKind (the
+ * same gate `selfReportedKind` applies after the fact, applied here first).
+ * Every name compared here is one the plugin itself declared.
+ */
+function contractAdmissionRefusal(state: DurableRunState, job: JobSpec): string | undefined {
+  if (job.resultSchema === undefined) return undefined;
+  const contract = state.definition.resultContracts?.find((c) => c.name === job.resultSchema);
+  if (contract === undefined) {
+    return `job names ${job.resultSchema}, which the plugin did not declare`;
+  }
+  const stage = state.definition.stages.find((s) => s.id === job.stageId);
+  const consuming = stage?.requirementIds
+    .map((id) => state.definition.requirements.find((r) => r.id === id))
+    .find((r) => r?.evidenceSchema === contract.name);
+  if (consuming !== undefined && selfReportedKind(job, contract.evidenceKind) !== undefined) {
+    return `stage ${job.stageId}'s requirement ${consuming.id} consumes ${contract.name} (kind ${JSON.stringify(contract.evidenceKind)}), which this job (purpose ${JSON.stringify(job.purpose)}, readOnly ${job.readOnly === true}) may not produce`;
+  }
+  return undefined;
+}
+
+/** What spent the stage's share of the run's agent budget, for a budget-exhaustion stop. */
+function budgetExhaustionBlocker(state: DurableRunState, stageId: string, purpose?: string): string {
+  const spent = state.agentInvocationsByStage?.[stageId] ?? 0;
+  const total = state.intake.budgets.agentInvocations;
+  const dispatches = state.dispatchesSinceReceipt?.[stageId]?.agent ?? 0;
+  const receipts = state.receipts.filter((r) => r.stageId === stageId && r.valid).length;
+  const kind = purpose !== undefined ? `${purpose} dispatches` : "agent dispatches";
+  return `agentInvocations exhausted: stage ${stageId} spent ${spent} of ${total} across ${dispatches} ${kind}, ${receipts} receipts`;
+}
+
 const MAX_TRIGGER_CHARS = 500;
 
 function boundText(text: string): string {
   return text.length <= MAX_TRIGGER_CHARS ? text : `${text.slice(0, MAX_TRIGGER_CHARS - 1)}…`;
+}
+
+type EvidenceItem = NonNullable<Awaited<ReturnType<Runner["runJob"]>>["evidence"]>[number];
+
+interface ContractOutcome {
+  kind: EvidenceRecord["kind"];
+  payload: unknown;
+  contract: NonNullable<EvidenceRecord["contract"]>;
+}
+
+/**
+ * When `job.resultSchema` names a contract its own plugin declared in
+ * `definition.resultContracts` and `item` carries a coding-agent result,
+ * validates `codingAgent.output` against the contract's schema and (when the
+ * contract lists reference paths and the job supplied `knownReferences`) its
+ * ids, and returns the recordable kind, payload with any §4.3 repairs
+ * applied, and the outcome to show on the record. Returns undefined for
+ * every other evidence item, which records exactly as it always has: the
+ * controller only ever compares strings the plugin itself handed it.
+ */
+function classifyAgentResult(definition: GraphDefinition, job: JobSpec, item: EvidenceItem): ContractOutcome | undefined {
+  if (job.resultSchema === undefined) return undefined;
+  const contract = definition.resultContracts?.find((c) => c.name === job.resultSchema);
+  if (contract === undefined) return undefined;
+  const payload = item.payload;
+  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) return undefined;
+  const codingAgent = (payload as Record<string, unknown>).codingAgent;
+  if (codingAgent === null || typeof codingAgent !== "object" || Array.isArray(codingAgent)) return undefined;
+  const agent = codingAgent as Record<string, unknown>;
+  let value = agent.output;
+  let problems = validateResultShape(value, contract.schema);
+  let repairs: string[] = [];
+  if (problems.length === 0 && contract.references !== undefined && job.knownReferences !== undefined) {
+    const checked = checkReferences(value, contract.references, job.knownReferences);
+    problems = checked.problems;
+    repairs = checked.repairs;
+    value = checked.value;
+  }
+  const status: "valid" | "invalid" | "repaired" = problems.length > 0 ? "invalid" : repairs.length > 0 ? "repaired" : "valid";
+  // A valid/repaired "review" result flattens to the validated output itself
+  // (the shape a review parser has always read a payload as, following the
+  // one precedent this generalises); every other kind keeps the executor's
+  // own wrapper intact (what agentRuns-style lookups have always read,
+  // unrelated to this run's declared contracts) with any §4.3 repair applied
+  // to its output. An invalid result always keeps the wrapper, so nothing is
+  // lost even though it cannot satisfy anything.
+  const flatten = status !== "invalid" && contract.evidenceKind === "review";
+  return {
+    kind: status === "invalid" ? "other" : contract.evidenceKind,
+    payload: flatten ? value : { ...(payload as Record<string, unknown>), codingAgent: { ...agent, output: value } },
+    contract: { name: contract.name, status, problems, ...(repairs.length > 0 ? { repairs } : {}) },
+  };
 }
 
 function recordJobEvidence(
@@ -1750,16 +1962,22 @@ function recordJobEvidence(
     const added: EvidenceRecord[] = [];
     for (const item of evidence) {
       const ref = newEvidenceRef(next);
-      const claimed = selfReportedKind(job, item.kind);
+      const classified = classifyAgentResult(next.definition, job, item);
+      const claimed = classified === undefined ? selfReportedKind(job, item.kind) : undefined;
       const record: EvidenceRecord = {
         ref,
-        kind: claimed === undefined ? item.kind : "other",
+        kind: classified !== undefined ? classified.kind : claimed === undefined ? item.kind : "other",
         generation: next.generation,
         ...(candidateDigest !== undefined ? { candidateDigest } : {}),
         ...(job.resultSchema !== undefined ? { resultSchema: job.resultSchema } : {}),
+        ...(classified !== undefined ? { contract: classified.contract } : {}),
       };
       record.payload = attachProducer(
-        claimed === undefined ? item.payload : { selfReported: claimed, claim: item.payload ?? null },
+        classified !== undefined
+          ? classified.payload
+          : claimed === undefined
+            ? item.payload
+            : { selfReported: claimed, claim: item.payload ?? null },
         producer,
       );
       if (item.fingerprint !== undefined) {

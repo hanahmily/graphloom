@@ -248,6 +248,15 @@ export async function readWorktreeFile(
     throw new Error(`path escapes worktree: ${relativePath}`);
   }
 
+  // A quoted path naming a directory (a Go package path, e.g. "./pkg/timestamp",
+  // is a legitimate thing for a plan or review to reference) is not a file to
+  // read — treat it as "missing" (observeWorkspace already has that
+  // convention for undefined) rather than crashing the run over readFile's
+  // own EISDIR.
+  if ((await lstat(targetReal)).isDirectory()) {
+    return undefined;
+  }
+
   try {
     return await readFile(targetReal, "utf8");
   } catch (err) {

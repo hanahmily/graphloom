@@ -156,10 +156,21 @@ export function agentRuns(evidence: EvidenceRecord[], stageId: string, purpose: 
   const runs: AgentRun[] = [];
   for (const record of evidence) {
     const p = producer(record);
-    const agent = object(object(record.payload)?.codingAgent);
-    if (p === undefined || agent === undefined || p.stageId !== stageId || p.purpose !== purpose) continue;
+    if (p === undefined || p.stageId !== stageId || p.purpose !== purpose) continue;
     if (p.executorId !== undefined && p.executorId !== CODING_AGENT.id) continue;
-    runs.push({ record, producer: p, status: String(agent.status), output: agent.output });
+    const agent = object(object(record.payload)?.codingAgent);
+    if (agent !== undefined) {
+      runs.push({ record, producer: p, status: String(agent.status), output: agent.output });
+      continue;
+    }
+    // A contract-valid "review" result flattens to the validated output itself,
+    // producer reattached as a sibling (packages/controller/src/loop.ts's
+    // classifyAgentResult) — this only ever happens for a completed result;
+    // an invalid one always keeps the codingAgent wrapper above.
+    if (record.kind === "review") {
+      const { producer: _producer, ...output } = object(record.payload) ?? {};
+      runs.push({ record, producer: p, status: "completed", output });
+    }
   }
   return runs;
 }

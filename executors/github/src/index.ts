@@ -3,6 +3,7 @@ export {
   GITHUB_EXECUTOR_IDS,
   githubBinding,
   githubExecutorPackage,
+  githubRehearsalModule,
   type GitHubBindingOptions,
 } from "./package.js";
 export {

@@ -4,7 +4,7 @@
  * Run after changing sources or the package lock: `npm run manifest -w @graphloom/plugin-hello`
  */
 import { createHash } from "node:crypto";
-import { readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -69,6 +69,8 @@ const manifest = {
   sdkProtocol: 1,
   entryPoints: {
     createGraph: "./dist/index.js",
+    // docs/design-graph-rehearsal.md §4.4: declared only when the plugin ships one.
+    ...(existsSync(path.join(root, "src", "rehearsal.ts")) ? { rehearsal: "./dist/rehearsal.js" } : {}),
   },
   privateStateSchema: "hello-private-v1",
   repairContract: "source-repairable",

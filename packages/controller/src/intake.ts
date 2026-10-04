@@ -32,9 +32,19 @@ export interface RunBudgets {
   corrections: number;
   waitMs: number;
   activeMs: number;
+  /** Agent invocations reserved for recovery-mode calls once normal-mode dispatch is denied. Default: max(8, 5% of agentInvocations). */
+  recoveryReserve?: number;
 }
 
-const BUDGET_KEYS: ReadonlySet<string> = new Set(["agentInvocations", "jobs", "decisions", "corrections", "waitMs", "activeMs"]);
+const BUDGET_KEYS: ReadonlySet<string> = new Set([
+  "agentInvocations",
+  "jobs",
+  "decisions",
+  "corrections",
+  "waitMs",
+  "activeMs",
+  "recoveryReserve",
+]);
 
 export interface RepairGrants {
   sourceRepair: boolean;
@@ -86,6 +96,19 @@ export interface IntakePin {
     waitMs?: number;
     /** Execution time left while a controller is running the run; absent in runs saved before it existed. */
     activeMs?: number;
+    /** Agent invocations reserved for recovery-mode calls; absent in runs saved before it existed. */
+    recoveryReserve?: number;
+  };
+  /**
+   * The gate in `run` (docs/design-graph-rehearsal.md §3.5): whether this run
+   * was checked/rehearsed before it was intaken, and what that found. Absent
+   * in runs saved before the gate existed, or whenever a caller runs
+   * un-gated (the controller never requires or runs the gate itself).
+   */
+  rehearsalGate?: {
+    fingerprint: string;
+    verdict: "ready" | "not-ready" | "inconclusive" | "skipped";
+    notes: string[];
   };
 }
 
@@ -297,6 +320,7 @@ export async function intakeTask(taskPath: string): Promise<IntakePin> {
       corrections: 8,
       waitMs: DEFAULT_WAIT_BUDGET_MS,
       activeMs: DEFAULT_ACTIVE_BUDGET_MS,
+      recoveryReserve: Math.max(8, Math.ceil((task.budgets?.agentInvocations ?? 64) * 0.05)),
       ...task.budgets,
     },
   };

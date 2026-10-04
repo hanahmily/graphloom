@@ -144,7 +144,33 @@ export function assertGraphDefinition(value: unknown): GraphDefinition {
     requireString(r, "evidenceSchema");
   }
   if (obj["environment"] !== undefined) assertEnvironment(obj["environment"]);
+  if (obj["resultContracts"] !== undefined) assertResultContracts(obj["resultContracts"]);
   return obj as unknown as GraphDefinition;
+}
+
+const EVIDENCE_KINDS = new Set(["file", "command", "workspace", "review", "other"]);
+
+/** Defense in depth for a crashed or malformed plugin process: the controller never trusts this shape, only compares strings inside it. */
+function assertResultContracts(value: unknown): void {
+  if (!Array.isArray(value)) {
+    throw new WireValidationError("malformed", "resultContracts must be an array");
+  }
+  value.forEach((raw, i) => {
+    const label = `resultContracts[${i}]`;
+    const c = asObject(raw, label);
+    requireString(c, "name");
+    asObject(c["schema"], `${label}.schema`);
+    if (!EVIDENCE_KINDS.has(c["evidenceKind"] as string)) {
+      throw new WireValidationError("malformed", `${label}.evidenceKind must be one of ${[...EVIDENCE_KINDS].join(", ")}`);
+    }
+    if (c["references"] !== undefined) {
+      requireArray(c, "references").forEach((ref, j) => {
+        if (typeof ref !== "string" || ref.length === 0) {
+          throw new WireValidationError("malformed", `${label}.references[${j}] must be a non-empty string`);
+        }
+      });
+    }
+  });
 }
 
 const ENVIRONMENT_COMMAND_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/i;

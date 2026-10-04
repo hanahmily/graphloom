@@ -141,6 +141,7 @@ function resultFromOutput(
       evidence?: JobEvidenceItem[];
       retryAfterMs?: unknown;
       sessionRef?: unknown;
+      failureKind?: unknown;
     };
     const resultStatus = o.status === "failed" || o.status === "conflict" ? o.status : status;
     const retryAfterMs =
@@ -155,6 +156,7 @@ function resultFromOutput(
       o.sessionRef.length <= MAX_SESSION_REF_CHARS
         ? o.sessionRef
         : undefined;
+    const failureKind = resultStatus !== "ok" && o.failureKind === "contract_violation" ? "contract_violation" as const : undefined;
     return {
       status: resultStatus,
       summary: typeof o.summary === "string" ? o.summary : "executor completed",
@@ -164,6 +166,7 @@ function resultFromOutput(
       ...(o.evidence !== undefined ? { evidence: o.evidence } : {}),
       ...(retryAfterMs !== undefined ? { retryAfterMs } : {}),
       ...(sessionRef !== undefined ? { sessionRef } : {}),
+      ...(failureKind !== undefined ? { failureKind } : {}),
     };
   }
   return {
@@ -187,6 +190,7 @@ function executorCtx(job: JobSpec, ctx: JobContext) {
     ...(job.writeScope !== undefined ? { writeScope: job.writeScope } : {}),
     ...(job.readOnly !== undefined ? { readOnly: job.readOnly } : {}),
     ...(ctx.session !== undefined ? { session: { ...ctx.session } } : {}),
+    ...(ctx.resultContract !== undefined ? { resultContract: ctx.resultContract } : {}),
   };
 }
 

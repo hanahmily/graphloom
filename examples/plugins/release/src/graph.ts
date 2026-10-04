@@ -44,10 +44,23 @@ export interface ReleasePrivateState {
   feedback?: string;
 }
 
+/** The writer has nothing to say beyond "I wrote it"; Observe confirms the bytes. */
+const WRITER_RESULT_SCHEMA: Record<string, unknown> = { type: "object" };
+
+const REVIEW_SCHEMA: Record<string, unknown> = {
+  type: "object",
+  properties: { verdict: { type: "string", enum: ["approved", "request_changes"] }, summary: { type: "string" } },
+  required: ["verdict", "summary"],
+};
+
 const definition: GraphDefinition = {
   graphId: "release",
   version: "0.1.0",
   privateStateSchema: "release-private-v1",
+  resultContracts: [
+    { name: "writer-result-v1", schema: WRITER_RESULT_SCHEMA, evidenceKind: "other" },
+    { name: "review-verdict-v1", schema: REVIEW_SCHEMA, evidenceKind: "review" },
+  ],
   stages: [
     { id: BUMP_STAGE, name: "Bump version", requirementIds: [REQUIREMENT_VERSION] },
     { id: CHANGELOG_STAGE, name: "Changelog", requirementIds: [REQUIREMENT_ENTRY, REQUIREMENT_SCOPE] },

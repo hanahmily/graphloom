@@ -11,6 +11,7 @@ export interface RecoveryTrigger {
     | "stalled"
     | "correction_limit"
     | "environment_changed"
+    | "contract_violation"
     | "unhandled";
   message: string;
   /** Recorded evidence the escalation cites, such as the failing validation's inputs. */

@@ -2,10 +2,14 @@
 /**
  * GraphLoom CLI: run | inspect | stop | resume | switch-model | delete | version
  */
+import { writeFile } from "node:fs/promises";
 import path from "node:path";
 import { createController } from "@graphloom/controller";
+import type { GraphRehearsal } from "@graphloom/sdk";
 import { createCliRunner } from "./cli-runner.js";
+import { runGate } from "./gate.js";
 import { piRepairDeps, resolveBundlePath, resolveBundlePathForResume } from "./repair-config.js";
+import { check, probe, recordScenario, rehearse, replay } from "./rehearsal.js";
 import { requireRunnerConfig } from "./runner-config.js";
 import {
   loadSupervisorConfig,
@@ -32,12 +36,34 @@ async function main(): Promise<void> {
   const controller = createController();
 
   if (cmd === "run") {
-    const runner = createCliRunner(await requireRunnerConfig());
     const taskPath = path.resolve(args[1] ?? "task.yaml");
+    const stateRootFlag = flagValue(args, "--state-root");
+    const stateRoot = stateRootFlag ? path.resolve(stateRootFlag) : undefined;
+    // Validate the runner config before gating: a run that could never start
+    // anyway (no runner, or a malformed one) must fail the same way it always
+    // has, before anything — including the gate's own cache — touches disk.
+    const runnerConfig = await requireRunnerConfig();
+    const gate = await runGate(taskPath, {
+      ...(stateRoot !== undefined ? { stateRoot } : {}),
+      skip: args.includes("--skip-rehearsal"),
+    });
+    if (gate.verdict === "not-ready") {
+      // The gate's own L0/L1 report stands in for the run's: nothing was intaken, so there is no RunReport to show instead.
+      console.log(JSON.stringify(gate.report, null, 2));
+      process.exitCode = 1;
+      return;
+    }
+    if (gate.verdict === "inconclusive") {
+      console.error(`graphloom run: rehearsal gate inconclusive${gate.notes.length > 0 ? `: ${gate.notes.join("; ")}` : ""}`);
+    }
+
+    const runner = createCliRunner(runnerConfig);
     const config = await loadSupervisorConfig();
     const report = await controller.run({
       taskPath,
       runner,
+      ...(stateRoot !== undefined ? { stateRoot } : {}),
+      rehearsalGate: { fingerprint: gate.fingerprint, verdict: gate.verdict, notes: gate.notes },
       ...(config !== undefined
         ? { supervisorFactory: piSupervisorFactory(config), repair: piRepairDeps(config, await resolveBundlePath(taskPath)) }
         : {}),
@@ -130,6 +156,73 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (cmd === "check") {
+    const taskPath = path.resolve(args[1] ?? "task.yaml");
+    const report = await check(taskPath);
+    console.log(JSON.stringify(report, null, 2));
+    process.exitCode = report.ok ? 0 : 1;
+    return;
+  }
+
+  if (cmd === "rehearse") {
+    const recordFrom = flagValue(args, "--record-from");
+    if (recordFrom !== undefined) {
+      const stateRoot = flagValue(args, "--state-root");
+      const recorded = await recordScenario(recordFrom, stateRoot ? { stateRoot: path.resolve(stateRoot) } : {});
+      const name = flagValue(args, "--name") ?? recorded.name;
+      const rehearsal: GraphRehearsal = { scenarios: { [name]: recorded.scenario } };
+      const out = JSON.stringify(rehearsal, null, 2);
+      const outPath = flagValue(args, "--out");
+      if (outPath !== undefined) await writeFile(path.resolve(outPath), `${out}\n`, "utf8");
+      console.log(out);
+      return;
+    }
+    const taskPath = path.resolve(args[1] ?? "task.yaml");
+    const scenario = flagValue(args, "--scenario");
+    const commands = requireCommandsMode(args);
+    const report = await rehearse(taskPath, {
+      ...(scenario !== undefined ? { scenario } : {}),
+      ...(commands !== undefined ? { commands } : {}),
+      keep: args.includes("--keep"),
+      offline: args.includes("--offline"),
+      synthesized: args.includes("--synthesized"),
+      adversarial: args.includes("--adversarial"),
+    });
+    console.log(JSON.stringify(report, null, 2));
+    process.exitCode = report.verdict === "not-ready" ? 1 : 0;
+    return;
+  }
+
+  if (cmd === "replay") {
+    const runRef = requireRunRef(args[1], "replay <stateDir|runId> [--state-root <dir>]");
+    const stateRoot = flagValue(args, "--state-root");
+    const report = await replay(runRef, stateRoot ? { stateRoot: path.resolve(stateRoot) } : {});
+    console.log(JSON.stringify(report, null, 2));
+    return;
+  }
+
+  if (cmd === "probe") {
+    const usage = "probe <task.yaml> --contract <name> [--scenario <name>] [--commands <stub|run>]";
+    const taskPath = path.resolve(args[1] ?? "task.yaml");
+    const contract = flagValue(args, "--contract");
+    if (!contract) {
+      console.error(`usage: graphloom ${usage}`);
+      process.exitCode = 1;
+      return;
+    }
+    const scenario = flagValue(args, "--scenario");
+    const commands = requireCommandsMode(args);
+    const report = await probe(taskPath, {
+      contract,
+      ...(scenario !== undefined ? { scenario } : {}),
+      ...(commands !== undefined ? { commands } : {}),
+      offline: args.includes("--offline"),
+    });
+    console.log(JSON.stringify(report, null, 2));
+    process.exitCode = report.status === "ok" && report.check?.status !== "invalid" ? 0 : 1;
+    return;
+  }
+
   console.error(`unknown command: ${cmd}`);
   printHelp();
   process.exitCode = 1;
@@ -148,6 +241,13 @@ function requireRunRef(value: string | undefined, usage: string): string {
   return value;
 }
 
+function requireCommandsMode(args: string[]): "stub" | "run" | undefined {
+  const value = flagValue(args, "--commands");
+  if (value === undefined) return undefined;
+  if (value !== "stub" && value !== "run") throw new Error(`--commands must be "stub" or "run", not ${JSON.stringify(value)}`);
+  return value;
+}
+
 function flagValue(args: string[], name: string): string | undefined {
   const i = args.indexOf(name);
   if (i < 0) return undefined;
@@ -158,13 +258,42 @@ function printHelp(): void {
   console.log(`graphloom — TypeScript harness
 
 Usage:
-  graphloom run <task.yaml>
+  graphloom run <task.yaml> [--state-root <dir>] [--skip-rehearsal]
+  graphloom check <task.yaml>
+  graphloom rehearse <task.yaml> [--scenario <name>] [--commands <stub|run>] [--offline] [--synthesized] [--adversarial] [--keep]
+  graphloom rehearse --record-from <stateDir|runId> [--state-root <dir>] [--name <name>] [--out <path>]
+  graphloom replay <stateDir|runId> [--state-root <dir>]
+  graphloom probe <task.yaml> --contract <name> [--scenario <name>] [--commands <stub|run>] [--offline]
   graphloom inspect <stateDir|runId> [--state-root <dir>]
   graphloom stop <stateDir|runId> [--state-root <dir>]
   graphloom resume <stateDir|runId> [--state-root <dir>] [--update-plugin]
   graphloom switch-model <stateDir|runId> <provider/model> --reason <text> [--state-root <dir>]
   graphloom delete <stateDir|runId> [--state-root <dir>] [--force]
   graphloom version
+
+check, rehearse, replay and probe verify a graph can run before spending a
+live run's budget (docs/design-graph-rehearsal.md): check is a static check
+of the declared data and the environment's tools, for free; rehearse runs the
+real controller and harness adapters against stand-in models (Pi, Claude Code
+and Codex all have one) answering from the bundle's declared rehearsal
+scenario (default "happy"), for zero provider calls; replay re-checks a
+recorded run's real evidence against the bundle's *current* code
+(reclassifying it, re-running its validators, and asking what advance()
+would do next), also for zero provider calls; probe spends real (but
+bounded, at most 10) provider calls on the real configured harness, judging
+its result against the contract with the real assignment a rehearsal's own
+dispatch rendered. check, rehearse and replay need no
+$GRAPHLOOM_RUNNER_CONFIG; probe does, same as run.
+
+rehearse and probe default to quick mode (--commands stub): command jobs
+answer from the scenario's own stubs instead of actually running (so
+make test-ci and friends never execute); environment checks always run for
+real in both modes, since they are the graph's own statement of what the
+machine must have. --commands run executes every command job for real
+instead, verifying the toolchain, build and tests too — slower, but the
+full verdict. A plugin whose validators need the same command id to behave
+differently per checkout (RED failing, GREEN passing) cannot be fully
+rehearsed in quick mode; run it with --commands run.
 
 Delete removes a stopped or finished run's worktree, graphloom/<runId> branch, and
 state directory. --force also discards uncommitted changes and branch commits.

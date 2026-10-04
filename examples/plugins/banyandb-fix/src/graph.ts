@@ -76,9 +76,11 @@ import {
   knownPlanFindings,
   pathsToObservePlan,
   planFindingLedger,
+  planFindingReferenceSet,
   planVerificationInstruction,
   PLAN_REVIEW_SCHEMA,
   toVerifyPlan,
+  type KnownPlanFindings,
   type PlanLedger,
   type PlanReviewPass,
 } from "./plan-findings.js";
@@ -104,10 +106,23 @@ export interface FixPrivateState {
   corrections: number;
 }
 
+const asSchema = (text: string): Record<string, unknown> => JSON.parse(text) as Record<string, unknown>;
+
 const definition: GraphDefinition = {
   graphId: "banyandb-fix",
   version: "0.4.0",
   privateStateSchema: "banyandb-fix-private-v1",
+  resultContracts: [
+    { name: "decision-record-v1", schema: asSchema(DECISION_RECORD_SCHEMA), evidenceKind: "other" },
+    {
+      name: "review-verdict-v1",
+      schema: asSchema(PLAN_REVIEW_SCHEMA),
+      evidenceKind: "review",
+      references: ["findings[].finding", "prior[].finding"],
+    },
+    { name: "finding-verification-v1", schema: asSchema(VERIFICATION_SCHEMA), evidenceKind: "other" },
+    { name: "code-review-v2", schema: asSchema(CODE_REVIEW_SCHEMA), evidenceKind: "review" },
+  ],
   stages: [
     {
       id: FIX_STAGE,
@@ -266,9 +281,10 @@ function fix(view: RunView, issue: number, state: FixPrivateState): GraphDecisio
     const earlier = planReviews.at(-1);
     const earlierPass = earlier !== undefined ? ledger.passes.find((p) => p.record.ref === earlier.record.ref) : undefined;
     const previous = earlierPass !== undefined ? planFeedback(ledger, earlierPass) : agentRuns(view.evidence, FIX_STAGE, "work").length > 0 ? reentryFeedback(view) : undefined;
+    const known = knownPlanFindings(ledger);
     return dispatchAgent(
       view,
-      planReviewJob(planReviewInstruction({ issue, snapshot: snapshotBody, record: plan.record, known: knownPlanFindings(ledger), ...(previous !== undefined ? { previous } : {}) })),
+      planReviewJob(planReviewInstruction({ issue, snapshot: snapshotBody, record: plan.record, known, ...(previous !== undefined ? { previous } : {}) }), known),
       "dispatch a fresh read-only reviewer for the plan",
       state,
     );
@@ -417,6 +433,11 @@ function review(view: RunView, issue: number, state: FixPrivateState): GraphDeci
     return dispatchAgent(view, codeReviewJob(assignment), summary, state);
   };
   if (last === undefined) return pass(false);
+  // An unusable pass (incomplete coverage, a crash, a non-read-only run) is not
+  // a verdict to re-evaluate forever: retry a fresh pass the same way a sweep
+  // continuation would, bounded by the same cap, rather than reporting the
+  // same stale coverage gap to the supervisor on every subsequent attempt.
+  if (!passUsable(last) && passes.length < MAX_SWEEP_PASSES) return pass(false);
 
   const paths = pathsToObserve(ledger, digest);
   if (paths.length > 0) return withPrivate(observe({ paths }, "observe the lines a refutation quotes on the current change"), state);
@@ -583,13 +604,13 @@ function planJob(view: RunView, assignment: string): JobSpec {
     instruction: "Plan the fix",
     resultSchema: "decision-record-v1",
     executor: CODING_AGENT,
-    input: { assignment, resultSchema: DECISION_RECORD_SCHEMA, harness: IMPLEMENTER_HARNESS },
+    input: { assignment, harness: IMPLEMENTER_HARNESS },
     ...(from !== undefined ? { continueFrom: from } : {}),
   };
 }
 
 /** A fresh session each time: the plan reviewer carries nothing from an earlier review. */
-function planReviewJob(assignment: string): JobSpec {
+function planReviewJob(assignment: string, known: KnownPlanFindings): JobSpec {
   return {
     stageId: FIX_STAGE,
     kind: "agent",
@@ -598,7 +619,11 @@ function planReviewJob(assignment: string): JobSpec {
     instruction: "Review the plan",
     resultSchema: "review-verdict-v1",
     executor: CODING_AGENT,
-    input: { assignment, resultSchema: PLAN_REVIEW_SCHEMA, harness: REVIEWER_HARNESS },
+    input: { assignment, harness: REVIEWER_HARNESS },
+    knownReferences: {
+      "findings[].finding": planFindingReferenceSet(known),
+      "prior[].finding": planFindingReferenceSet(known),
+    },
   };
 }
 
@@ -618,7 +643,7 @@ function planVerificationJob(assignment: string): JobSpec {
     instruction: "Verify the plan review findings",
     resultSchema: "finding-verification-v1",
     executor: CODING_AGENT,
-    input: { assignment, resultSchema: VERIFICATION_SCHEMA, harness: VERIFIER_HARNESS },
+    input: { assignment, harness: VERIFIER_HARNESS },
   };
 }
 
@@ -632,7 +657,7 @@ function codeReviewJob(assignment: string): JobSpec {
     instruction: "Review the code",
     resultSchema: "code-review-v2",
     executor: CODING_AGENT,
-    input: { assignment, resultSchema: CODE_REVIEW_SCHEMA, harness: CODE_REVIEWER_HARNESS },
+    input: { assignment, harness: CODE_REVIEWER_HARNESS },
   };
 }
 
@@ -646,7 +671,7 @@ function verificationJob(assignment: string): JobSpec {
     instruction: "Verify the code review findings",
     resultSchema: "finding-verification-v1",
     executor: CODING_AGENT,
-    input: { assignment, resultSchema: VERIFICATION_SCHEMA, harness: VERIFIER_HARNESS },
+    input: { assignment, harness: VERIFIER_HARNESS },
   };
 }
 
@@ -663,7 +688,6 @@ function implementJob(view: RunView, issue: number, record: DecisionRecord, feed
     executor: CODING_AGENT,
     input: {
       assignment: implementInstruction({ issue, plan: record, ...(feedback !== undefined ? { feedback } : {}) }),
-      resultSchema: DECISION_RECORD_SCHEMA,
       harness: IMPLEMENTER_HARNESS,
     },
     ...(from !== undefined ? { continueFrom: from } : {}),

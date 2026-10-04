@@ -425,8 +425,11 @@ describe("agent tool calls as child operations (#40)", () => {
       runId: "budget1",
     });
     const state = await loadRunState(report.stateDir);
-    expect(agentResults(state.evidence)).toEqual([{ granted: 64 }, { ok: 127, refused: "jobs budget exhausted" }]);
-    expect(state.budgets.agentInvocations).toBe(0);
+    // Normal-mode model calls stop 8 short of 0: the default recoveryReserve
+    // (max(8, 5%) of the 64 default agentInvocations budget) is never spent
+    // outside recovery, so a metered supervisor always has budget to act.
+    expect(agentResults(state.evidence)).toEqual([{ granted: 56 }, { ok: 127, refused: "jobs budget exhausted" }]);
+    expect(state.budgets.agentInvocations).toBe(8);
     expect(state.budgets.jobs).toBe(0);
   }, 60_000);
 

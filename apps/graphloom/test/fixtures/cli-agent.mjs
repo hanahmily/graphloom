@@ -7,6 +7,22 @@ import { createInterface } from "node:readline";
 
 const argv = process.argv.slice(2);
 const flag = (name) => argv[argv.indexOf(name) + 1];
+
+if (argv.includes("--help")) {
+  // B2's capability probe (docs/design-graph-rehearsal.md §3.1) asks the
+  // configured binary's own --help for every flag the adapter passes it;
+  // this fixture must answer that the same way the real CLI would, or every
+  // gated `run` in these tests hangs reading stdin for the probe's own
+  // timeout.
+  process.stdout.write([
+    "-p", "--output-format", "--input-format", "--verbose", "--replay-user-messages",
+    "--forward-subagent-text", "--permission-mode", "--permission-prompt-tool", "--settings",
+    "--tools", "--strict-mcp-config", "--append-system-prompt", "--mcp-config", "--model",
+    "--json-schema", "--resume", "--session-id",
+  ].join(" ") + "\n");
+  process.exit(0);
+}
+
 let prompt;
 let interruptLive;
 if (argv.includes("--input-format") && flag("--input-format") === "stream-json") {

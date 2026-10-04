@@ -31,6 +31,9 @@ export const githubExecutorPackage: ExecutorPackageManifest = {
   configEnv: [GITHUB_API_URL_ENV],
 };
 
+/** `--offline`'s stand-in entry module (docs/design-graph-rehearsal.md §4.6): swapped in for `githubExecutorPackage.entryModule` to replay recorded reads instead of making real ones. */
+export const githubRehearsalModule = fileURLToPath(new URL("./rehearsal/github-standin.js", import.meta.url));
+
 export interface GitHubBindingOptions {
   /** Token for the `github` credential binding. */
   token?: string;

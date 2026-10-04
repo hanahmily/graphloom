@@ -1,5 +1,5 @@
 import path from "node:path";
-import { BUILTIN_AGENT_EXECUTOR_ID, pinJobExecutor, type JobSpec } from "@graphloom/sdk";
+import { BUILTIN_AGENT_EXECUTOR_ID, pinJobExecutor } from "@graphloom/sdk";
 import { createBuiltinExecutorRunner, type JobResult, type Runner } from "@graphloom/runner";
 import {
   CLAUDE_BIN_ENV,
@@ -21,25 +21,6 @@ import { commandBinding, commandExecutorPackage, type CommandBindingOptions } fr
 import { githubBinding, githubExecutorPackage } from "@graphloom/executor-github";
 import { enabledHarnesses, type HarnessName, type RunnerConfig } from "./runner-config.js";
 
-const REVIEW_SCHEMA = JSON.stringify({
-  type: "object",
-  properties: {
-    verdict: { type: "string", enum: ["approved", "request_changes"] },
-    summary: { type: "string" },
-    findings: {
-      type: "array",
-      items: {
-        type: "object",
-        properties: { axis: { type: "string" }, severity: { type: "string" }, detail: { type: "string" } },
-        required: ["detail"],
-        additionalProperties: false,
-      },
-    },
-    productDecision: { type: "string" },
-  },
-  required: ["verdict", "summary"],
-  additionalProperties: false,
-});
 const WATCHDOGS = [
   ["startupTimeoutMs", CLAUDE_DEFAULT_STARTUP_TIMEOUT_MS],
   ["responseTimeoutMs", CLAUDE_DEFAULT_RESPONSE_TIMEOUT_MS],
@@ -60,6 +41,19 @@ export function createCliRunner(
   env: NodeJS.ProcessEnv = process.env,
   /** Harness adapter modules to load instead of the installed ones (tests). */
   harnessModules: Partial<Record<HarnessName, string>> = {},
+  /** Command executor module to load instead of the installed one (quick mode's stand-in; tests). */
+  commandModule?: string,
+  /**
+   * Command ids the graph's own `environment.checks`/`.prepare` declares.
+   * Quick mode (§3.2) never stubs these: not just the once-per-run preflight,
+   * but every checkout's own re-preparation of them (`runInCheckout`, which
+   * dispatches the identical id set under the *checkout job's own*
+   * instruction — "RED check", "Candidate checks" — not a recognizable
+   * environment-check one), so matching by instruction text alone misses it.
+   */
+  environmentCommandIds?: ReadonlySet<string>,
+  /** GitHub executor module to load instead of the installed one (`--offline`'s stand-in; tests). */
+  githubModule?: string,
 ): Runner {
   const fallback: Runner = {
     async runJob(job, ctx) {
@@ -97,15 +91,37 @@ export function createCliRunner(
   );
   const tokenEnv = config.github?.tokenEnv;
   const token = tokenEnv !== undefined ? env[tokenEnv] : undefined;
-  const others = createBuiltinExecutorRunner({
-    packages: [
-      { manifest: commandExecutorPackage, ...commandBinding(commandOptions(config)) },
-      ...(config.github !== undefined
-        ? [{ manifest: githubExecutorPackage, ...githubBinding(token !== undefined && token !== "" ? { token } : {}) }]
-        : []),
-    ],
-    fallback,
+  const githubPackages = config.github !== undefined
+    ? [{
+        // The real package is sandboxed (read-only closure, no writes); the
+        // --offline stand-in is shipped code, not plugin-authored, that
+        // writes nothing but its own cursor sidecars beside the scenario
+        // file (packages/sdk/src/rehearsal-client.ts) — the same trust and
+        // isolation already given to the command and coding-agent stand-ins,
+        // and the only way it can read the scenario file at all (a sandbox
+        // has no path to grant an arbitrary rehearsal scratch directory).
+        manifest: githubModule !== undefined
+          ? { ...githubExecutorPackage, entryModule: githubModule, isolation: "unrestricted" as const }
+          : githubExecutorPackage,
+        ...githubBinding({
+          ...(token !== undefined && token !== "" ? { token } : {}),
+          ...(config.github.baseUrl !== undefined ? { baseUrl: config.github.baseUrl } : {}),
+        }),
+        ...(githubModule !== undefined ? { allowUnrestricted: true as const } : {}),
+      }]
+    : [];
+  const commandPackage = (module: string) => ({
+    manifest: { ...commandExecutorPackage, entryModule: module },
+    ...commandBinding(commandOptions(config)),
   });
+  const others =
+    commandModule === undefined
+      ? createBuiltinExecutorRunner({ packages: [commandPackage(commandExecutorPackage.entryModule), ...githubPackages], fallback })
+      : routeEnvironmentChecks(
+          createBuiltinExecutorRunner({ packages: [commandPackage(commandExecutorPackage.entryModule), ...githubPackages], fallback }),
+          createBuiltinExecutorRunner({ packages: [commandPackage(commandModule), ...githubPackages], fallback }),
+          environmentCommandIds ?? new Set(),
+        );
   const defaultAgent = agents.get(config.harness)!;
   return {
     async describeExecutors() {
@@ -116,26 +132,58 @@ export function createCliRunner(
       const id = pinned.executor!.id;
       if (id !== BUILTIN_AGENT_EXECUTOR_ID && id !== CODING_AGENT_RUN_ID) return others.runJob(pinned, ctx);
       const legacy = id === BUILTIN_AGENT_EXECUTOR_ID;
-      const { harness: chosen, ...input } = legacy
-        ? { assignment: pinned.instruction, ...(pinned.resultSchema !== undefined ? { resultSchema: pinned.resultSchema } : {}) }
-        : (object(pinned.input) ?? {});
+      // The schema a plugin's resultSchema names (if any) reaches the
+      // executor through ctx.resultContract, resolved by the controller from
+      // the run's own declared contracts; this runner forwards only the
+      // harness choice and the assignment text.
+      const { harness: chosen, ...input } = legacy ? { assignment: pinned.instruction } : (object(pinned.input) ?? {});
       const agent = chosen === undefined ? defaultAgent : agents.get(chosen as HarnessName);
       if (agent === undefined) {
         return failure(ctx, `agent job asks for harness ${JSON.stringify(chosen)}, which the runner config does not enable (harnesses: ${[...agents.keys()].join(", ")})`);
       }
-      const review = pinned.purpose === "review" && input.resultSchema === "review-verdict-v1";
-      const adapted: JobSpec = {
-        ...pinned,
-        ...(legacy || review || chosen !== undefined ? { input: { ...input, ...(review ? { resultSchema: REVIEW_SCHEMA } : {}) } } : {}),
-      };
-      const result = await agent.runJob(adapted, ctx);
-      return review ? reviewEvidence(result) : result;
+      // stageId/purpose travel only as far as the job's own identity for B3's
+      // provenance check (docs/design-graph-rehearsal.md §4.1, §4.7); a
+      // plugin never declares either itself, and the legacy executor has no
+      // use for them.
+      const finalInput = legacy ? input : { ...input, stageId: job.stageId, purpose: job.purpose };
+      return agent.runJob({ ...pinned, input: finalInput }, ctx);
     },
   };
 }
 
 function failure(ctx: { runId: string; operationId: string; generation: number }, summary: string): JobResult {
   return { status: "failed", summary, runId: ctx.runId, operationId: ctx.operationId, generation: ctx.generation };
+}
+
+/**
+ * A command job dispatches only the environment's own declared checks and
+ * preparation in two places (packages/controller/src/{environment,checkout}.ts):
+ * the once-per-run preflight (`checkEnvironment`), and every checkout's own
+ * re-preparation of them in its own directory (`runInCheckout`, which
+ * dispatches the identical id set under the *checkout job's own* instruction
+ * — "RED check", "Candidate checks" — not a recognizable one). Neither case
+ * is visible to an executor itself (the protocol hands it only `input`+
+ * context, never `instruction`/`purpose`/`stageId`), so the router — which
+ * does see the full job — tells them apart by matching the exact id set
+ * instead: only the environment's own checks and prepare commands are ever
+ * dispatched together, on their own, with no graph command mixed in.
+ */
+function isEnvironmentDispatch(job: { input?: unknown }, environmentCommandIds: ReadonlySet<string>): boolean {
+  const commands = (job.input as { commands?: Array<{ id?: unknown }> } | undefined)?.commands;
+  if (!Array.isArray(commands) || commands.length === 0 || commands.length !== environmentCommandIds.size) return false;
+  return commands.every((c) => typeof c.id === "string" && environmentCommandIds.has(c.id));
+}
+
+/** Routes a job dispatching exactly the environment's own declared commands to `real`; everything else to `standIn`. */
+function routeEnvironmentChecks(real: Runner, standIn: Runner, environmentCommandIds: ReadonlySet<string>): Runner {
+  return {
+    async describeExecutors() {
+      return standIn.describeExecutors!();
+    },
+    async runJob(job, ctx) {
+      return (isEnvironmentDispatch(job, environmentCommandIds) ? real : standIn).runJob(job, ctx);
+    },
+  };
 }
 
 /**
@@ -180,18 +228,4 @@ export function codexOptions(config: RunnerConfig): NonNullable<RunnerConfig["co
 
 function object(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
-}
-
-/** Only the reviewer's structured result can supply a verdict; prose is never an approval. */
-function reviewEvidence(result: JobResult): JobResult {
-  if (result.status !== "ok") return result;
-  const output = result.evidence?.map((e) => object(object(e.payload)?.codingAgent)?.output).find((v) => v !== undefined);
-  const verdict = object(output);
-  if ((verdict?.verdict !== "approved" && verdict?.verdict !== "request_changes") || typeof verdict.summary !== "string") {
-    return { ...result, status: "failed", summary: "reviewer did not return a valid structured review-verdict-v1 result" };
-  }
-  const payload: Record<string, unknown> = { verdict: verdict.verdict, summary: verdict.summary };
-  if (Array.isArray(verdict.findings)) payload.findings = verdict.findings;
-  if (typeof verdict.productDecision === "string") payload.productDecision = verdict.productDecision;
-  return { ...result, evidence: [...(result.evidence ?? []), { kind: "review", payload }] };
 }

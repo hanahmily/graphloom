@@ -1,4 +1,33 @@
-import type { ExecutorCredentials, ExecutorEffect, ToolCallResult } from "@graphloom/sdk";
+import type { ExecutorCredentials, ExecutorEffect, ReferenceSet, ToolCallResult } from "@graphloom/sdk";
+
+/**
+ * Names the result contract (or bare `resultSchema`) a spawned-process
+ * harness's job carries, set on the child's own environment only. Claude
+ * Code and Codex's wire protocols hand the child the schema itself (an
+ * inline `--json-schema` argument; an `--output-schema` file) but never its
+ * name, which a rehearsal stand-in replacing that child needs to look up the
+ * right scripted reply (docs/design-graph-rehearsal.md §4.1). Harmless to a
+ * real `claude`/`codex` binary, which never reads it.
+ */
+export const JOB_CONTRACT_ENV = "GRAPHLOOM_JOB_CONTRACT";
+
+/**
+ * JSON-encodes the dispatching job's own identity (`operationId`, `stageId`,
+ * `purpose`) on the child's own environment only, for the same reason
+ * `JOB_CONTRACT_ENV` exists: a rehearsal stand-in replacing Claude Code or
+ * Codex needs it to log which job it actually answered, so B3 (§4.1, §4.7)
+ * can tell a reply that landed under a different job than the one that asked
+ * from one that did not. Harmless to a real `claude`/`codex` binary, which
+ * never reads it.
+ */
+export const JOB_IDENTITY_ENV = "GRAPHLOOM_JOB_IDENTITY";
+
+/** The dispatching job's own identity, threaded through for B3's provenance check (§4.1); absent outside a rehearsal, and ignored by a real harness either way. */
+export interface JobIdentity {
+  operationId?: string;
+  stageId?: string;
+  purpose?: string;
+}
 
 /**
  * A tool the harness may expose to its model. Calling it submits a child
@@ -34,9 +63,32 @@ export interface CodingSessionOptions {
   resume?: string;
 }
 
+/**
+ * A structured-result contract already resolved by the controller (schema
+ * narrowed with any reference enums, §4.3): the harness constrains the model
+ * to it (B2), validates the submission against it, and gives the model a
+ * chance to correct a violation in-turn (§4.2) before the job fails.
+ */
+export interface CodingResultContract {
+  name: string;
+  schema: Record<string, unknown>;
+  references?: string[];
+  knownReferences?: Record<string, ReferenceSet>;
+}
+
 export interface CodingRunRequest {
   assignment: string;
+  /**
+   * @deprecated A bare schema name or inline JSON Schema text, forwarded
+   * as-is with no constraint or validation beyond "some object was
+   * submitted". Prefer `resultContract`, which the executor builds from the
+   * run's own declared contracts; kept for callers outside a GraphLoom run
+   * (direct executor tests, pre-migration jobs).
+   */
   resultSchema?: string;
+  resultContract?: CodingResultContract;
+  /** The dispatching job's own identity (§4.1, §4.7); set by the executor from its own `ctx`/`input`, read only by a rehearsal stand-in. */
+  identity?: JobIdentity;
 }
 
 /** Provider token usage one run reported, as totals over all its model requests. */
@@ -51,12 +103,14 @@ export interface CodingUsage {
 export interface CodingRunResult {
   status: "completed" | "failed";
   summary: string;
-  /** Structured output matching `resultSchema`, when requested. */
+  /** Structured output matching `resultSchema`/`resultContract`, when requested. */
   output?: unknown;
   /** Identifies the saved session in `sessionDir`, so a later job can continue it. */
   sessionRef?: string;
   /** Token usage, when the harness can report it. */
   usage?: CodingUsage;
+  /** Set when `status: "failed"` because the model could not produce a contract-valid result within the §4.2 retry bound. */
+  failureKind?: "contract_violation";
 }
 
 export interface CodingSession {

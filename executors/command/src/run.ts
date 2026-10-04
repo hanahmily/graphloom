@@ -57,7 +57,7 @@ export function commandSucceeded(outcome: CommandOutcome): boolean {
   return outcome.exitCode === 0 && outcome.spawnError === undefined && !outcome.timedOut && !outcome.aborted;
 }
 
-function isInput(v: unknown): v is CommandInput {
+export function isCommandInput(v: unknown): v is CommandInput {
   if (v === null || typeof v !== "object" || Array.isArray(v)) return false;
   const o = v as Record<string, unknown>;
   if (!Array.isArray(o.commands) || o.commands.length === 0 || o.commands.length > MAX_COMMANDS) return false;
@@ -104,7 +104,7 @@ export function createCommandExecutor(): ExecutorDefinition<CommandInput> {
     id: COMMAND_RUN_ID,
     version: "1",
     effect: "write",
-    inputSchema: isInput,
+    inputSchema: isCommandInput,
     async execute(input, ctx: ExecutorContext) {
       const outcomes: CommandOutcome[] = [];
       for (const spec of input.commands) {

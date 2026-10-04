@@ -322,7 +322,7 @@ const TRIGGER_GUIDANCE: Partial<Record<string, string>> = {
   stalled:
     "This episode's trigger is stalled: the graph proposed the exact same decision twice with no progress since it last proposed it. Propose something that would actually change the outcome, not the same action again; reenter or dispatch new work for the stage are usually more useful than return.",
   executor_failed:
-    "This episode's trigger is executor_failed: an executor reported failure or an abnormal result. Retry the dispatch, switch to another executor this run already pinned for the stage, or repair the executor's package; stop only if none of those is viable.",
+    "This episode's trigger is executor_failed: an executor reported failure or an abnormal result. Check this stage's own agentSessions entries' executorId first: only when it shows the default built-in agent executor, graphloom.agent/run, does a plain instruction-only dispatch (no input needed) retry safely yourself. For any other pinned executor — the usual case for a plugin's own work/review stages — its input shape (e.g. input.assignment, a harness choice) is plugin-specific and not visible to you, so a guessed dispatch usually fails the executor's own input schema validation rather than retrying anything; return instead, so the graph's own advance() reissues the dispatch with the input shape it already knows. Repairing the executor's package, or stopping, are the remedies when return does not change the outcome.",
   environment_changed:
     "This episode's trigger is environment_changed: a file the graph's environment declaration pins no longer matches what it was written against. A repair that updates the declaration (qualify_repair target plugin, when the bundle is source-repairable) is usually the fix; the run stays blocked otherwise.",
   plugin_crash:
@@ -331,6 +331,8 @@ const TRIGGER_GUIDANCE: Partial<Record<string, string>> = {
     "This episode's trigger is plugin_timeout: the graph plugin did not respond in time. Reentering rarely helps if the plugin itself is hanging; prefer a plugin repair when the bundle is source-repairable, or stop.",
   plugin_malformed:
     "This episode's trigger is plugin_malformed: the graph returned a decision the controller could not validate. A plugin repair (qualify_repair target plugin) may fix it when the bundle is source-repairable; otherwise stop, citing what was malformed.",
+  contract_violation:
+    "This episode's trigger is contract_violation: an agent result repeatedly failed to match its job's declared result contract (a missing/mis-typed field, or a reference id outside the set it was shown) even after the harness gave it a chance to correct it in-turn. Re-dispatch the stage's work with a more explicit instruction about the required shape, or switch to another pinned executor for it, if the contract itself looks right. If the trigger message shows the contract's own schema or reference set is wrong for what the stage actually needs, qualify_repair target plugin instead (when the bundle is source-repairable) rather than repeating the same dispatch.",
 };
 
 export function buildRecoveryPrompt(

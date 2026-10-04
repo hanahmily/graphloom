@@ -1,0 +1,6 @@
+graph: banyandb-fix
+repo: skywalking-banyandb
+request: "Fix apache/skywalking#14092."
+budgets:
+  agentInvocations: 600
+  activeMs: 28800000

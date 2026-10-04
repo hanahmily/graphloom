@@ -3,7 +3,8 @@
   "version": "0.4.0",
   "sdkProtocol": 1,
   "entryPoints": {
-    "createGraph": "./dist/index.js"
+    "createGraph": "./dist/index.js",
+    "rehearsal": "./dist/rehearsal.js"
   },
   "privateStateSchema": "banyandb-fix-private-v1",
   "repairContract": "source-repairable",
@@ -14,7 +15,7 @@
     "vitest": "^3.0.9"
   },
   "digests": {
-    "sourceTree": "7cd7493f0a88329541945ac126420fa6af45b04bd9cdf84ed6506f5bc071b827",
+    "sourceTree": "06cbef92844d19394d5ff6d08bc4dbea880e2b577bc9a281383b7c8811b12f32",
     "packageLock": "3a10a234ba1253d9b918e329819c06a9f2e18a73ea4d9e414a96ab9e2db15492",
     "files": {
       "package.json": "59a9f38685a9dbba9b12e9670e3d2581ac7bce95c06855cba550df4a098e4ade",
@@ -22,18 +23,19 @@
       "tsconfig.json": "ffed4b469e52e0642fabcb6a20f4ba178fce44e5e37567a0ee96571a150a1109",
       "src/constants.ts": "9fef0c73836f9ad4c796bf1272a54beae92041257d0ac92149840ae81aa0cfa6",
       "src/decision-record.ts": "21c2d80260dcf0562646a4d6aa793ff6a18745c5c0daaeb0edcf8d351bc7a1a8",
-      "src/evidence.ts": "3fbd94697a083e386342f2cc3d929d205d8156bf9200fb631a1a0b92bfe8bed2",
+      "src/evidence.ts": "e2f9b05ae270ee3909d46c840e9d57dbefd3e69878b3c8938876ed0db97428ab",
       "src/findings.ts": "bdc70d112b921cfac296f802fdf74832b870e2161fad4c3fae19a60ca36009fd",
       "src/gotest.ts": "15c7e7a85c860549461bf3e2d5f9d9482f93c3c57bab369c137878b2a0ef00a3",
-      "src/graph.ts": "43b6ade9ac9bad9f618b496b027455e271e73b0b40e30a5e0c93899a5b4d7787",
+      "src/graph.ts": "80948417dab4e46964359315d11e11835d3140f6c7602e942a2298f423fff75a",
       "src/index.ts": "d0bce3bbd4fcb89edaded3e6257abe9d509d3412ecab71157befb53fb0cb2195",
       "src/ocr.ts": "af062bcc2352d947f70789a36de0bc4cda0fd11c2a8de8cec25df873628fc287",
-      "src/plan-findings.ts": "04f894e1d7812a11e655b0f63fb8a9fce1324e461b646cb296532cc3bca231c4",
+      "src/plan-findings.ts": "a937ffd81fcd82148ad0d5b40bb8d8898259b85a75bf6992c403ec82046475af",
       "src/prompts.ts": "34179757787522dbbfca07c35de4733758254d4ced6132d8638f17c81c645862",
-      "src/qualification.ts": "78b36f8a753a183090d0a69f39eb7ce047d2e9d6e7549a6f4015b09184ffdd0c",
+      "src/qualification.ts": "86861f90dbef327a2a60a0caff5abdffa7bedd4235e7e46105bab1ea3c5c6d59",
+      "src/rehearsal.ts": "237359561205523dc6f80a7745f77f1fe3dcb1b874303ccf65d88da66713c147",
       "src/review-common.ts": "2b711248d1b227c01f8ed36bfa2399791fbcf9543a92e89414c74f119b20323c",
-      "src/validators.ts": "561f7361eb080eb1671f40d8534c57f2cc67f7e4d34ea0f5a206ca5c2e4a432c",
-      "test/banyandb-fix.test.ts": "502e4c86969749fe0bd9ca92a49430a6ce9a92ff3e772fba13a9e5072e46f1ca"
+      "src/validators.ts": "540933c0dc74b804b96cce8498eb2fbe5e21e8599954959119fec979221d4d19",
+      "test/banyandb-fix.test.ts": "29f529115492e5c9123391c961098d84725c4345d917047214d1a79d5ee0d55f"
     }
   },
   "requirements": [

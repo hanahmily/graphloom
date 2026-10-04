@@ -292,6 +292,60 @@ describe("Pi coding harness", () => {
     });
   });
 
+  const findingContract = {
+    name: "plan-review-v1",
+    schema: { type: "object", properties: { finding: { type: "string" } }, required: ["finding"] },
+    references: ["finding"],
+    knownReferences: { finding: { ids: ["", "P1"], descriptions: { P1: "metric counts running actions" } } },
+  };
+
+  it("reconciles a reference written as its shown description, in one turn", async () => {
+    const h = await setup();
+    h.faux.setResponses([h.use("submit_result", { finding: "metric counts running actions" }), h.say("never sent")]);
+    const result = await h.executor.execute(
+      { assignment: "review" },
+      h.ctx({ resultContract: findingContract }),
+    );
+    expect(result).toMatchObject({ status: "ok" });
+    expect(payload(result)).toMatchObject({ output: { finding: "P1" } });
+    expect(h.faux.state.callCount).toBe(1);
+  });
+
+  it("rejects a reference outside the shown set in-turn, and accepts the corrected retry", async () => {
+    const h = await setup();
+    let rejection = "";
+    h.faux.setResponses([
+      h.use("submit_result", { finding: "a made-up finding" }),
+      (context: FauxContext) => {
+        rejection = lastMessageText(context);
+        return h.use("submit_result", { finding: "P1" });
+      },
+      h.say("never sent"),
+    ]);
+    const result = await h.executor.execute({ assignment: "review" }, h.ctx({ resultContract: findingContract }));
+    expect(rejection).toContain("P1");
+    expect(result).toMatchObject({ status: "ok" });
+    expect(payload(result)).toMatchObject({ output: { finding: "P1" } });
+    expect(h.faux.state.callCount).toBe(2);
+  });
+
+  it("fails the job as a contract violation once in-turn retries are spent on an unreconcilable reference", async () => {
+    const h = await setup();
+    h.faux.setResponses([
+      h.use("submit_result", { finding: "nope 1" }),
+      h.use("submit_result", { finding: "nope 2" }),
+      h.use("submit_result", { finding: "nope 3" }),
+      h.say("never sent"),
+    ]);
+    const result = await h.executor.execute({ assignment: "review" }, h.ctx({ resultContract: findingContract }));
+    expect(result).toMatchObject({
+      status: "failed",
+      failureKind: "contract_violation",
+      summary: expect.stringContaining("plan-review-v1"),
+    });
+    expect(h.faux.state.callCount).toBe(3);
+  });
+
   it("saves the session under sessionDir and resumes it with its history", async () => {
     const h = await setup();
     let history = "";

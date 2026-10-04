@@ -172,6 +172,8 @@ describe("graphloom.coding-agent/run", () => {
         "GRAPHLOOM_PI_MODEL",
         "GRAPHLOOM_PI_AGENT_DIR",
         "GRAPHLOOM_PI_PASS_ENV",
+        "GRAPHLOOM_REHEARSAL_SCENARIO",
+        "GRAPHLOOM_REHEARSAL_HOME",
       ],
       isolation: "unrestricted",
     });

@@ -107,6 +107,14 @@ crashes; filesystem and execution scopes require host enforcement.
 - [Run convergence design](docs/design-run-convergence.md): candidate-anchored
   freshness, correction escalation with an exit, supervisor repetition detection,
   and adjudicated plan review.
+- [Agent–harness contract robustness](docs/design-agent-contract-robustness.md):
+  plugin-declared result contracts applied generically by the controller,
+  boundary validation with in-turn correction, reference integrity, and
+  controller-owned acceptance accounting, from the first live BanyanDB run.
+- [Graph rehearsal](docs/design-graph-rehearsal.md): a verification ladder —
+  static check, zero-token rehearsal on stand-in models through the real
+  harnesses, replay of recorded runs, a bounded real-model probe — and the
+  gate `run` climbs before spending a live run's budget.
 - [Example task](examples/task.yaml) and [example guide](examples/README.md).
 - [Loopx gate-repair study](docs/research/loopx-gate-defect-handling.md) and
   [issue-fix study](docs/research/loopx-issue-fix-example.md).

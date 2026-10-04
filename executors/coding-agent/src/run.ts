@@ -17,6 +17,9 @@ export interface CodingAgentInput {
   resultSchema?: string;
   /** Passed to the harness session unchanged. */
   harnessOptions?: Record<string, unknown>;
+  /** The dispatching job's own stageId/purpose (§4.1, §4.7); `cli-runner.ts` sets these, a plugin never declares them itself. */
+  stageId?: string;
+  purpose?: string;
 }
 
 interface ToolCallSummary {
@@ -36,7 +39,9 @@ function isInput(v: unknown): v is CodingAgentInput {
     o.assignment.length <= MAX_ASSIGNMENT_CHARS &&
     (o.resultSchema === undefined || typeof o.resultSchema === "string") &&
     (o.harnessOptions === undefined ||
-      (o.harnessOptions !== null && typeof o.harnessOptions === "object" && !Array.isArray(o.harnessOptions)))
+      (o.harnessOptions !== null && typeof o.harnessOptions === "object" && !Array.isArray(o.harnessOptions))) &&
+    (o.stageId === undefined || typeof o.stageId === "string") &&
+    (o.purpose === undefined || typeof o.purpose === "string")
   );
 }
 
@@ -103,16 +108,44 @@ export function createCodingAgentExecutor(
         const reason = err instanceof Error ? err.message : String(err);
         return { status: "failed", summary: `agent session ${resume} could not be restored: ${reason}` };
       }
+      // ctx.resultContract (resolved by the controller from the run's own
+      // declared contracts) is the schema the model is actually constrained
+      // to and validated against; input.resultSchema is a deprecated bare
+      // name/inline-JSON fallback for callers outside a GraphLoom run. The
+      // schema travels unnarrowed: a harness that validates a submission
+      // itself (Pi's submit_result) needs the raw value to reconcile a
+      // reference miss against a shown description (§4.3); one that can only
+      // constrain the model up front (Claude, Codex) narrows it itself.
+      const resultContract =
+        ctx.resultContract !== undefined
+          ? {
+              name: ctx.resultContract.name,
+              schema: ctx.resultContract.schema,
+              ...(ctx.resultContract.references !== undefined ? { references: ctx.resultContract.references } : {}),
+              ...(ctx.resultContract.knownReferences !== undefined ? { knownReferences: ctx.resultContract.knownReferences } : {}),
+            }
+          : undefined;
       try {
+        const identity = {
+          operationId: ctx.operationId,
+          ...(input.stageId !== undefined ? { stageId: input.stageId } : {}),
+          ...(input.purpose !== undefined ? { purpose: input.purpose } : {}),
+        };
         const result = await session.run({
           assignment: resume !== undefined ? `${CONTINUATION_NOTICE}\n\n${input.assignment}` : input.assignment,
-          ...(input.resultSchema !== undefined ? { resultSchema: input.resultSchema } : {}),
+          ...(resultContract !== undefined
+            ? { resultContract }
+            : input.resultSchema !== undefined
+              ? { resultSchema: input.resultSchema }
+              : {}),
+          identity,
         });
         const sessionRef = ctx.session !== undefined ? result.sessionRef : undefined;
         return {
           status: result.status === "completed" ? "ok" : "failed",
           summary: result.summary,
           ...(sessionRef !== undefined ? { sessionRef } : {}),
+          ...(result.failureKind !== undefined ? { failureKind: result.failureKind } : {}),
           evidence: [
             {
               kind: "other",

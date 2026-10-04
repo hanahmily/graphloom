@@ -8,6 +8,7 @@ export type {
 } from "./controller.js";
 export {
   createController,
+  defaultStateRoot,
   intakeTask,
   parseTaskYaml,
   resolveUnderBase,
@@ -23,6 +24,7 @@ export {
   assertSafeRunId,
   assertSafeGraphId,
   resolveBundleEntry,
+  resolveBundleRehearsalEntry,
   resolveStateDir,
 } from "./controller.js";
 export type { DurableRunState, RunStatus, IntakePin, VersionRecord } from "./controller.js";
@@ -36,3 +38,7 @@ export type {
   RecreateHostFn,
 } from "./controller.js";
 export { defaultRepairPreflight } from "./controller.js";
+export type { Boundary, BoundaryResult, BoundaryStatus, EvidenceProducerInfo, RehearsalConvergence, RehearsalReport } from "./rehearsal.js";
+export { checkB3, evaluateRehearsal, producerOf } from "./rehearsal.js";
+export type { ReclassifiedRecord, ReplayReport, ReplayRequirementResult } from "./replay.js";
+export { replayRun } from "./replay.js";

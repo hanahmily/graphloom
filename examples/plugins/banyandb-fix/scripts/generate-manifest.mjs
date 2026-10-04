@@ -5,7 +5,7 @@
  * `npm run manifest -w @graphloom/plugin-banyandb-fix`
  */
 import { createHash } from "node:crypto";
-import { readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -42,7 +42,11 @@ const manifest = {
   graphId: definition.graphId,
   version: definition.version,
   sdkProtocol: 1,
-  entryPoints: { createGraph: "./dist/index.js" },
+  entryPoints: {
+    createGraph: "./dist/index.js",
+    // docs/design-graph-rehearsal.md §4.4: declared only when the plugin ships one.
+    ...(existsSync(path.join(root, "src", "rehearsal.ts")) ? { rehearsal: "./dist/rehearsal.js" } : {}),
+  },
   privateStateSchema: definition.privateStateSchema,
   repairContract: pkg.graphloom.repairContract,
   runtimeProfile: {

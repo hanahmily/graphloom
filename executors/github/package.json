@@ -15,6 +15,10 @@
     "./testing": {
       "types": "./dist/testing/fake-github.d.ts",
       "import": "./dist/testing/fake-github.js"
+    },
+    "./rehearsal/github-standin": {
+      "types": "./dist/rehearsal/github-standin.d.ts",
+      "import": "./dist/rehearsal/github-standin.js"
     }
   },
   "files": [

@@ -31,18 +31,31 @@
     "./testing": {
       "types": "./dist/testing/scripted-harness.d.ts",
       "import": "./dist/testing/scripted-harness.js"
+    },
+    "./rehearsal/pi": {
+      "types": "./dist/rehearsal/pi.d.ts",
+      "import": "./dist/rehearsal/pi.js"
+    },
+    "./rehearsal/codex-standin": {
+      "types": "./dist/rehearsal/codex-standin.d.ts",
+      "import": "./dist/rehearsal/codex-standin.js"
+    },
+    "./rehearsal/claude-standin": {
+      "types": "./dist/rehearsal/claude-standin.d.ts",
+      "import": "./dist/rehearsal/claude-standin.js"
     }
   },
   "files": [
     "dist"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node scripts/patch-standin-shebang.mjs",
     "typecheck": "tsc -p tsconfig.test.json",
-    "test": "tsc -p tsconfig.json && vitest run"
+    "test": "tsc -p tsconfig.json && node scripts/patch-standin-shebang.mjs && vitest run"
   },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "0.87.1",
-    "@graphloom/sdk": "0.0.0"
+    "@graphloom/sdk": "0.0.0",
+    "@earendil-works/pi-ai": "0.87.1"
   }
 }

@@ -3,7 +3,8 @@
   "version": "0.1.0",
   "sdkProtocol": 1,
   "entryPoints": {
-    "createGraph": "./dist/index.js"
+    "createGraph": "./dist/index.js",
+    "rehearsal": "./dist/rehearsal.js"
   },
   "privateStateSchema": "hello-private-v1",
   "repairContract": "source-repairable",
@@ -14,17 +15,18 @@
     "vitest": "^3.0.9"
   },
   "digests": {
-    "sourceTree": "a35f10fdb5240024464203076a7f1b1a3c48bc10226c7b0c547816c5f9f4138c",
+    "sourceTree": "7632b41cf403b407adad54cc44a98fbbed1ecc3d14fdc7d983c4ec538c00a7eb",
     "packageLock": "b8602594cf71784eff3f42f6a35e1716f8d1697dea86a7eda497d71ed97e5b87",
     "files": {
-      "package.json": "a039a941f2974866dda84d9048bd414e354f5139fbf4659990f1cd417694e438",
+      "package.json": "b1093f184d87e3085f79e2ba6ac3bf388a915442211b513119110fb598eca2fe",
       "package-lock.json": "b8602594cf71784eff3f42f6a35e1716f8d1697dea86a7eda497d71ed97e5b87",
       "tsconfig.json": "6c095d082835cbe84c047862b0f6d42fb292b310be8e5f2b58c009def9407d69",
       "src/constants.ts": "be9ca3e1047f5613f4c3a580d73bbe9aadf7a7eb8c3f0fff56a31ffc3267a98b",
-      "src/graph.ts": "bdf081d0b086820436032b777540b8540d16b69180a6437fd388c4b501b5cd1c",
+      "src/graph.ts": "b5fc6f15672eaaff6a030a28a0140c20679905cf804e9554e7bcf445c9484964",
       "src/index.ts": "73323338d0a5be46de553f5bbd0bd9aa902b4599e4cc911138994e00af68038a",
+      "src/rehearsal.ts": "040853aff99f326ac6b5c1e49c3f5a08ecd714329a4335518d10d7188d3a2ebe",
       "src/validators.ts": "df8b28fd37cfd5efc322cdcc9aebacac153d26cb0cee3668604d7a301841b571",
-      "test/hello.test.ts": "e981cceced8cca13db663f40a32597093262a6e55ca6f3964eb52c39be6a6137"
+      "test/hello.test.ts": "001b369a702857d3ee0bfa1cf01c6aaa359453cc81e1c760a4ecf8ac6ae05c39"
     }
   },
   "requirements": [

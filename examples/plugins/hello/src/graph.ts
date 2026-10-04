@@ -40,10 +40,43 @@ export interface HelloPrivateState {
   reviewEvidenceFromIndex: number;
 }
 
+/**
+ * The writer has nothing to say beyond "I wrote it" — the controller's own
+ * Observe confirms the bytes — so its contract accepts any object the model
+ * submits. Declaring one at all still gets the job a real, enforced shape
+ * (an object) instead of no constraint whatsoever.
+ */
+const WRITER_RESULT_SCHEMA: Record<string, unknown> = { type: "object" };
+
+/** What today's cli-runner.ts hardcoded as REVIEW_SCHEMA; the schema is hello's own, not the composition root's. */
+const REVIEW_SCHEMA: Record<string, unknown> = {
+  type: "object",
+  properties: {
+    verdict: { type: "string", enum: ["approved", "request_changes"] },
+    summary: { type: "string" },
+    findings: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: { axis: { type: "string" }, severity: { type: "string" }, detail: { type: "string" } },
+        required: ["detail"],
+        additionalProperties: false,
+      },
+    },
+    productDecision: { type: "string" },
+  },
+  required: ["verdict", "summary"],
+  additionalProperties: false,
+};
+
 const definition: GraphDefinition = {
   graphId: "hello",
   version: "0.1.0",
   privateStateSchema: "hello-private-v1",
+  resultContracts: [
+    { name: "writer-result-v1", schema: WRITER_RESULT_SCHEMA, evidenceKind: "other" },
+    { name: "review-verdict-v1", schema: REVIEW_SCHEMA, evidenceKind: "review" },
+  ],
   stages: [
     {
       id: WRITE_STAGE,

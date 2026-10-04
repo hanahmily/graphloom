@@ -19,6 +19,13 @@ export const commandExecutorPackage: ExecutorPackageManifest = {
   isolation: "unrestricted",
 };
 
+/**
+ * Absolute path of the command executor's rehearsal stand-in
+ * (docs/design-graph-rehearsal.md §3.2, §4.1): quick mode's default, in place
+ * of `commandExecutorPackage.entryModule`.
+ */
+export const commandRehearsalModule = fileURLToPath(new URL("./rehearsal/command-standin.js", import.meta.url));
+
 export interface CommandBindingOptions {
   /** Wall-clock limit (ms) for one job, covering all of its commands. Default: two hours. */
   timeoutMs?: number;

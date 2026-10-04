@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { createInterface } from "node:readline";
+import { applyReferenceEnums, checkReferences, validateResultShape } from "@graphloom/sdk";
 import { bounded, inlineObjectSchema, scopeNotes } from "./assignment.js";
 import { envList, minimalEnv } from "./child-env.js";
 import {
@@ -14,7 +15,15 @@ import {
   CODEX_REASONING_EFFORT_ENV,
   CODEX_RESPONSE_TIMEOUT_ENV,
 } from "./codex-config.js";
-import type { CodingHarness, CodingRunRequest, CodingRunResult, CodingSessionOptions, CodingUsage } from "./harness.js";
+import {
+  JOB_CONTRACT_ENV,
+  JOB_IDENTITY_ENV,
+  type CodingHarness,
+  type CodingRunRequest,
+  type CodingRunResult,
+  type CodingSessionOptions,
+  type CodingUsage,
+} from "./harness.js";
 import { drainOnExit, signalGroup } from "./process-group.js";
 
 export interface CodexHarnessOptions {
@@ -38,6 +47,24 @@ const BUDGET_EXHAUSTED = "model request budget exhausted";
 const MAX_STDERR_CHARS = 8_000;
 const RESULT_NOTE = "Your final message is your result: only the JSON object, with no prose and no code fence.";
 const REASONING_EFFORTS = new Set(["minimal", "low", "medium", "high", "xhigh"]);
+
+/**
+ * Every flag `runCodex` below passes Codex's `exec` subcommand, for the B2
+ * capability probe (docs/design-graph-rehearsal.md §3.1): a binary whose
+ * `codex exec --help` is missing one of these silently lacks a feature this
+ * adapter depends on. Keep this in sync with the `cli` array in `runCodex`.
+ */
+export const CODEX_ADAPTER_FLAGS: readonly string[] = [
+  "--json",
+  "--ephemeral",
+  "--skip-git-repo-check",
+  "--sandbox",
+  "--cd",
+  "--output-last-message",
+  "--model",
+  "--config",
+  "--output-schema",
+];
 
 interface CodexEvent {
   type?: string;
@@ -111,18 +138,31 @@ async function runCodex(args: RunArgs): Promise<CodingRunResult> {
     const cli = ["exec", "--json", "--ephemeral", "--skip-git-repo-check", "--sandbox", "read-only", "--cd", options.cwd, "--output-last-message", last];
     if (args.model !== undefined) cli.push("--model", args.model);
     if (args.reasoningEffort !== undefined) cli.push("--config", `model_reasoning_effort="${args.reasoningEffort}"`);
-    const schema = request.resultSchema !== undefined ? inlineObjectSchema(request.resultSchema) : undefined;
+    // Codex has no in-turn retry in this harness either, so the reference id
+    // set is baked into the schema as `enum` up front (§4.3).
+    const schema =
+      request.resultContract !== undefined
+        ? applyReferenceEnums(request.resultContract.schema, request.resultContract.references, request.resultContract.knownReferences)
+        : request.resultSchema !== undefined
+          ? inlineObjectSchema(request.resultSchema)
+          : undefined;
     if (schema !== undefined) {
       const file = path.join(scratch, "schema.json");
       await writeFile(file, JSON.stringify(schema), { mode: 0o600 });
       cli.push("--output-schema", file);
     }
     cli.push("-");
-    const prompt = [request.assignment, ...scopeNotes(options), ...(request.resultSchema !== undefined ? [RESULT_NOTE] : [])].join("\n\n");
+    const wantsResult = request.resultContract !== undefined || request.resultSchema !== undefined;
+    const prompt = [request.assignment, ...scopeNotes(options), ...(wantsResult ? [RESULT_NOTE] : [])].join("\n\n");
+
+    const childEnv = { ...args.env };
+    const contractName = request.resultContract?.name ?? request.resultSchema;
+    if (contractName !== undefined) childEnv[JOB_CONTRACT_ENV] = contractName;
+    if (request.identity !== undefined) childEnv[JOB_IDENTITY_ENV] = JSON.stringify(request.identity);
 
     // Nothing awaits between this check and the abort listener, so a stop during setup cannot miss the process.
     if (options.signal?.aborted) return { status: "failed", summary: "agent session aborted" };
-    const child = spawn(args.command, cli, { cwd: options.cwd, env: args.env, stdio: ["pipe", "pipe", "pipe"], detached: true });
+    const child = spawn(args.command, cli, { cwd: options.cwd, env: childEnv, stdio: ["pipe", "pipe", "pipe"], detached: true });
     const exited = new Promise<{ code: number | null; error?: Error }>((resolve) => {
       child.once("error", (error) => resolve({ code: null, error }));
       child.once("close", (code) => resolve({ code }));
@@ -229,10 +269,37 @@ async function runCodex(args: RunArgs): Promise<CodingRunResult> {
           return { status: "failed", summary: bounded(`Codex run failed: ${detail}`) };
         }
         const message = (await readFile(last, "utf8").catch(() => "")).trim();
-        if (request.resultSchema === undefined) return { status: "completed", summary: bounded(message || "Codex completed") };
-        const kind = schema !== undefined ? "structured" : request.resultSchema;
+        if (!wantsResult) return { status: "completed", summary: bounded(message || "Codex completed") };
+        const kind = request.resultContract?.name ?? (schema !== undefined ? "structured" : request.resultSchema);
         const output = parseJson(message);
         if (output === undefined) return { status: "failed", summary: `agent finished without submitting a ${kind} result` };
+        if (request.resultContract !== undefined) {
+          const problems = validateResultShape(output, request.resultContract.schema);
+          let value: unknown = output;
+          if (problems.length === 0 && request.resultContract.references !== undefined && request.resultContract.knownReferences !== undefined) {
+            const checked = checkReferences(output, request.resultContract.references, request.resultContract.knownReferences);
+            problems.push(...checked.problems);
+            value = checked.value;
+          }
+          if (problems.length > 0) {
+            // --output-schema makes a type-level miss rare; a reference
+            // outside the shown set is the likely case here. Codex has no
+            // further turn in this run to correct it in, so the job fails as
+            // a named contract violation instead of recording the result.
+            return {
+              status: "failed",
+              summary: bounded(`result did not satisfy its declared contract (${kind}): ${problems.join("; ")}`),
+              failureKind: "contract_violation",
+              output,
+            };
+          }
+          const submitted = (value as { summary?: unknown } | null)?.summary;
+          return {
+            status: "completed",
+            summary: bounded(typeof submitted === "string" ? submitted : `Codex submitted a ${kind} result`),
+            output: value,
+          };
+        }
         const submitted = (output as { summary?: unknown } | null)?.summary;
         return {
           status: "completed",

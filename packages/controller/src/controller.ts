@@ -113,6 +113,14 @@ export interface RunRequest {
   /** Directory for durable run state (default: <repo>/graphloom-state). */
   stateRoot?: string;
   runId?: string;
+  /**
+   * The gate in `run` (docs/design-graph-rehearsal.md §3.5): the CLI's own
+   * L0+L1 outcome before this run was intaken, pinned onto the run's own
+   * `IntakePin` so `inspect` can show whether (and how) it was rehearsed.
+   * The controller does not run the gate itself — a caller that skips this
+   * runs un-gated, same as always.
+   */
+  rehearsalGate?: IntakePin["rehearsalGate"];
 }
 
 export interface ResumeRequest {
@@ -165,6 +173,8 @@ export interface RunReport {
   sourceDirtyBefore: string[];
   sourceDirtyAfter: string[];
   stateDir: string;
+  /** The gate in `run` (docs/design-graph-rehearsal.md §3.5): whether (and how) this run was rehearsed before it was intaken. Absent for runs intaken un-gated. */
+  rehearsalGate?: IntakePin["rehearsalGate"];
 }
 
 export interface InspectReport {
@@ -191,6 +201,17 @@ export interface InspectReport {
   blocker?: string;
   /** Recorded evidence the stop cites. */
   stopEvidenceRefs?: string[];
+  /** Agent results checked against a declared result contract (§4.1), by outcome and by contract name. */
+  contracts: {
+    valid: number;
+    invalid: number;
+    repaired: number;
+    byName: Record<string, { valid: number; invalid: number; repaired: number }>;
+  };
+  /** Per stage, dispatches settled since its last receipt (§4.6). */
+  dispatchesSinceReceipt: Record<string, { agent: number; total: number; since: string }>;
+  /** The gate in `run` (docs/design-graph-rehearsal.md §3.5): whether (and how) this run was rehearsed before it was intaken. Absent for runs intaken un-gated. */
+  rehearsalGate?: IntakePin["rehearsalGate"];
 }
 
 export interface Controller {
@@ -216,12 +237,18 @@ export interface Controller {
   ): Promise<RunReport>;
 }
 
+/** Where durable run state lives when a caller names no `stateRoot` of its own. */
+export function defaultStateRoot(repoPath: string): string {
+  return path.join(repoPath, "graphloom-state");
+}
+
 export function createController(): Controller {
   return {
     async run(request: RunRequest): Promise<RunReport> {
-      const intake = await intakeTask(request.taskPath);
+      const taskIntake = await intakeTask(request.taskPath);
+      const intake = request.rehearsalGate !== undefined ? { ...taskIntake, rehearsalGate: request.rehearsalGate } : taskIntake;
       const runId = assertSafeRunId(request.runId ?? randomUUID().slice(0, 12));
-      const stateRoot = request.stateRoot ?? path.join(intake.repoPath, "graphloom-state");
+      const stateRoot = request.stateRoot ?? defaultStateRoot(intake.repoPath);
       const activeVersion = `${intake.bundle.graphId}@${intake.bundle.version}`;
 
       const host = await openHost({
@@ -967,6 +994,20 @@ export async function resolveStateDir(runRef: string, stateRoot?: string): Promi
   return dir;
 }
 
+/** §4.8: how many agent results checked against a declared contract landed valid, invalid, or repaired — overall and by contract name. */
+function contractSummary(evidence: DurableRunState["evidence"]): InspectReport["contracts"] {
+  const byName: Record<string, { valid: number; invalid: number; repaired: number }> = {};
+  const totals = { valid: 0, invalid: 0, repaired: 0 };
+  for (const e of evidence) {
+    const contract = e.contract;
+    if (contract === undefined) continue;
+    const bucket = (byName[contract.name] ??= { valid: 0, invalid: 0, repaired: 0 });
+    bucket[contract.status] += 1;
+    totals[contract.status] += 1;
+  }
+  return { ...totals, byName };
+}
+
 function toInspect(state: DurableRunState): InspectReport {
   const report: InspectReport = {
     runId: state.runId,
@@ -997,6 +1038,8 @@ function toInspect(state: DurableRunState): InspectReport {
     generation: state.generation,
     worktreePath: state.worktreePath,
     stateDir: state.stateDir,
+    contracts: contractSummary(state.evidence),
+    dispatchesSinceReceipt: structuredClone(state.dispatchesSinceReceipt ?? {}),
   };
   if (state.stopReason !== undefined) {
     report.stopReason = state.stopReason;
@@ -1006,6 +1049,9 @@ function toInspect(state: DurableRunState): InspectReport {
   }
   if (state.stopEvidenceRefs !== undefined) {
     report.stopEvidenceRefs = [...state.stopEvidenceRefs];
+  }
+  if (state.intake.rehearsalGate !== undefined) {
+    report.rehearsalGate = structuredClone(state.intake.rehearsalGate);
   }
   return report;
 }
@@ -1080,6 +1126,9 @@ function toReport(state: DurableRunState, sourceDirtyAfter: string[]): RunReport
   if (state.stopEvidenceRefs !== undefined) {
     report.stopEvidenceRefs = [...state.stopEvidenceRefs];
   }
+  if (state.intake.rehearsalGate !== undefined) {
+    report.rehearsalGate = structuredClone(state.intake.rehearsalGate);
+  }
   return report;
 }
 
@@ -1099,7 +1148,7 @@ export type {
 } from "./repair-lifecycle.js";
 export { defaultRepairPreflight } from "./repair-lifecycle.js";
 export { assertSafeRunId, assertSafeGraphId } from "./ids.js";
-export { resolveBundleEntry } from "./bundle.js";
+export { resolveBundleEntry, resolveBundleRehearsalEntry } from "./bundle.js";
 
 /** Test helper: attempt Validate using only current-generation evidence. */
 export async function tryAdmit(
