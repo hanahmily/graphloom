@@ -949,7 +949,14 @@ verdict is read next to the list of what it did not prove.
    synthesis. Point each plugin's unit simulation at its scenario files. Done
    2026-10-04 for all three example plugins (§1, §4.5).
 3. Replace the hand-written e2e runs that a recorded scenario duplicates with
-   `rehearse` invocations in CI.
+   `rehearse` invocations in CI. Done 2026-10-04: release's own "clean run
+   through both work stages" e2e test duplicated `rehearsal.test.ts`'s
+   "reaches ready for release's happy scenario" exactly (same claim — clean
+   convergence through bump→changelog→review — proven more cheaply by a
+   genuine recording than a hand-maintained script can be) and was removed.
+   banyandb-fix's own e2e test stays: its real value is exact delivery-text
+   and evidence-shape assertions `rehearse`'s deliberately generic evaluator
+   never inspects, not happy-path convergence alone.
 4. Turn on the gate in `run`, cached by fingerprint. Add `probe` last; it is
    the only rung that costs anything to try.
 
