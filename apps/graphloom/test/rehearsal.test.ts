@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 import type { JobResult } from "@graphloom/runner";
-import type { DurableRunState } from "@graphloom/controller";
+import { intakeTask, IntakeError, type DurableRunState } from "@graphloom/controller";
 import { check, checkProvenance, probe, recordScenario, rehearse, replay } from "../src/rehearsal.js";
 
 const execFileAsync = promisify(execFile);
@@ -38,6 +38,39 @@ describe("graphloom check (L0)", () => {
     expect(report).toMatchObject({ ok: true, problems: [] });
     expect(report.rehearsal?.scenarios.happy).toBeDefined();
     expect(report.definition?.resultContracts?.map((c) => c.name).sort()).toEqual(["review-verdict-v1", "writer-result-v1"]);
+  });
+});
+
+describe("intake budgets", () => {
+  // Regression: recoveryReserve's own default (at least 8, or 5% of
+  // agentInvocations) can meet or exceed a small agentInvocations total —
+  // children.ts's own floor (this reserve, outside recovery mode) would then
+  // refuse the run's very first normal-mode agent call, with no agent
+  // invocation ever possible at all.
+  it("refuses a budget whose recoveryReserve leaves no room for a normal-mode agent call", async () => {
+    const f = await fixture("hello", "Create GREETING.txt.");
+    await writeFile(f.taskPath, `graph: hello\nrepo: ./repo\nrequest: Create GREETING.txt.\nbudgets:\n  agentInvocations: 4\n`);
+    await expect(intakeTask(f.taskPath)).rejects.toThrow(IntakeError);
+    await expect(intakeTask(f.taskPath)).rejects.toThrow(/recoveryReserve/);
+  });
+
+  it("refuses an explicit recoveryReserve at or above an explicit agentInvocations too", async () => {
+    const f = await fixture("hello", "Create GREETING.txt.");
+    await writeFile(
+      f.taskPath,
+      `graph: hello\nrepo: ./repo\nrequest: Create GREETING.txt.\nbudgets:\n  agentInvocations: 20\n  recoveryReserve: 20\n`,
+    );
+    await expect(intakeTask(f.taskPath)).rejects.toThrow(IntakeError);
+  });
+
+  it("accepts a small budget whose explicit recoveryReserve still leaves room", async () => {
+    const f = await fixture("hello", "Create GREETING.txt.");
+    await writeFile(
+      f.taskPath,
+      `graph: hello\nrepo: ./repo\nrequest: Create GREETING.txt.\nbudgets:\n  agentInvocations: 4\n  recoveryReserve: 1\n`,
+    );
+    const intake = await intakeTask(f.taskPath);
+    expect(intake.budgets).toMatchObject({ agentInvocations: 4, recoveryReserve: 1 });
   });
 });
 
@@ -140,6 +173,33 @@ describe("graphloom probe (L3)", () => {
     };
     const report = await probe(f.taskPath, { contract: "review-verdict-v1" }, fakeRunner);
     expect(report.check?.status).toBe("invalid");
+  }, 30_000);
+
+  it("dispatches against a disposable worktree, never the operator's own checkout, and cleans it up", async () => {
+    // Regression: probe ran the real model's job directly against
+    // intake.repoPath — the operator's real checkout — with no controller-
+    // level post-job scope check behind it, and the Pi harness's write/bash
+    // tools are not actually gated by job.readOnly (prompt guidance only).
+    const f = await fixture("hello", "Create GREETING.txt.");
+    let sawWorktreePath: string | undefined;
+    const fakeRunner = {
+      async runJob(_job: unknown, ctx: { worktreePath: string }): Promise<JobResult> {
+        sawWorktreePath = ctx.worktreePath;
+        return {
+          status: "ok",
+          summary: "stubbed",
+          runId: "probe",
+          operationId: "op",
+          generation: 1,
+          evidence: [{ kind: "other", payload: { codingAgent: { output: { verdict: "approved", summary: "ok" } } } }],
+        };
+      },
+    };
+    await probe(f.taskPath, { contract: "review-verdict-v1" }, fakeRunner);
+    expect(sawWorktreePath).toBeDefined();
+    expect(sawWorktreePath).not.toBe(f.repo);
+    expect((await execFileAsync("git", ["worktree", "list"], { cwd: f.repo })).stdout.trim().split("\n")).toHaveLength(1);
+    expect((await execFileAsync("git", ["branch", "--list", "graphloom/probe-*"], { cwd: f.repo })).stdout.trim()).toBe("");
   }, 30_000);
 
   it("refuses a contract name the plugin did not declare", async () => {

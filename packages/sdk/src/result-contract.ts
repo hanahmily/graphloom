@@ -53,6 +53,31 @@ export function validateResultShape(value: unknown, schema: Record<string, unkno
   return problems;
 }
 
+const SUPPORTED_SCHEMA_KEYWORDS = new Set(["type", "properties", "required", "additionalProperties", "enum", "items"]);
+
+/**
+ * Every keyword `validateResultShape` does not read, anywhere in `schema`
+ * (recursing through `properties` and `items`) — a keyword outside this
+ * codebase's declared subset (above) is silently ignored by checking, not
+ * refused, so a contract using one (`minimum`, `pattern`, `oneOf`, …) can
+ * look stricter than it is enforced to be.
+ */
+export function unsupportedSchemaKeywords(schema: Record<string, unknown>, path = "$"): string[] {
+  const problems: string[] = [];
+  for (const key of Object.keys(schema)) {
+    if (!SUPPORTED_SCHEMA_KEYWORDS.has(key)) problems.push(`${path}.${key}`);
+  }
+  const properties = schema.properties as Record<string, Record<string, unknown>> | undefined;
+  if (properties !== undefined) {
+    for (const [key, propSchema] of Object.entries(properties)) {
+      problems.push(...unsupportedSchemaKeywords(propSchema, `${path}.properties.${key}`));
+    }
+  }
+  const items = schema.items as Record<string, unknown> | undefined;
+  if (items !== undefined) problems.push(...unsupportedSchemaKeywords(items, `${path}.items`));
+  return problems;
+}
+
 function checkNode(value: unknown, schema: Record<string, unknown>, path: string, problems: string[]): void {
   const type = schema.type as string | undefined;
   if (type !== undefined && !matchesType(value, type)) {

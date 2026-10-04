@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { loadRunState } from "@graphloom/controller";
-import { createCliRunner } from "../dist/cli-runner.js";
+import { createCliRunner, isEnvironmentDispatch } from "../dist/cli-runner.js";
 import { loadRunnerConfig, parseRunnerConfig } from "../src/runner-config.js";
 
 const execFileAsync = promisify(execFile);
@@ -286,5 +286,35 @@ describe("configured CLI runner", () => {
     await expect(stat(path.join(f.repo, "graphloom-state"))).rejects.toMatchObject({ code: "ENOENT" });
     await rm(f.config);
     expect((await f.run()).stderr).toContain("cannot read runner config");
+  });
+});
+
+describe("isEnvironmentDispatch", () => {
+  // Regression: matching by command id alone let a graph-authored command job
+  // that happened to reuse the environment's own ids, with different argv,
+  // reach the real executor in quick-mode rehearsal instead of being stubbed.
+  const environmentCommands = new Map([
+    ["go", ["go", "version"]],
+    ["git", ["git", "--version"]],
+  ]);
+
+  it("matches the environment's own declared checks, id and argv together", () => {
+    const job = { input: { commands: [{ id: "go", argv: ["go", "version"] }, { id: "git", argv: ["git", "--version"] }] } };
+    expect(isEnvironmentDispatch(job, environmentCommands)).toBe(true);
+  });
+
+  it("does not match a different command count, order aside", () => {
+    const job = { input: { commands: [{ id: "go", argv: ["go", "version"] }] } };
+    expect(isEnvironmentDispatch(job, environmentCommands)).toBe(false);
+  });
+
+  it("does not match a graph-authored command reusing an environment id with different argv", () => {
+    const job = { input: { commands: [{ id: "go", argv: ["go", "test", "./..."] }, { id: "git", argv: ["git", "--version"] }] } };
+    expect(isEnvironmentDispatch(job, environmentCommands)).toBe(false);
+  });
+
+  it("does not match a command missing argv entirely", () => {
+    const job = { input: { commands: [{ id: "go" }, { id: "git", argv: ["git", "--version"] }] } };
+    expect(isEnvironmentDispatch(job, environmentCommands)).toBe(false);
   });
 });

@@ -9,7 +9,7 @@ import type { JobSpec } from "@graphloom/sdk";
 import type { JobResult } from "@graphloom/runner";
 import { GITHUB_API_URL_ENV } from "@graphloom/executor-github";
 import { startFakeGitHub, type FakeGitHub } from "@graphloom/executor-github/testing";
-import { probe, rehearse, REHEARSAL_GITHUB_TOKEN_ENV } from "../src/rehearsal.js";
+import { check, probe, rehearse, REHEARSAL_GITHUB_TOKEN_ENV } from "../src/rehearsal.js";
 
 const execFileAsync = promisify(execFile);
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
@@ -159,6 +159,12 @@ describe.skipIf(GO === undefined)("graphloom rehearse (L1) on banyandb-fix", () 
     expect(report.convergence.actual.receipts.sort()).toEqual(["fix", "review"]);
   }, 120_000);
 
+  it("walks banyandb-fix's own recorded replies through its real validators at L0, finding nothing a real dispatch would not", async () => {
+    const env = await ready();
+    const report = await check(env.taskPath);
+    expect(report.ok, JSON.stringify(report.problems)).toBe(true);
+  }, 30_000);
+
   it("--offline never asks the real (fake) GitHub, and reports the unrecorded read as unverified under B2", async () => {
     const env = await ready();
     // banyandb-fix's own scenario declares no `reads` at all (§4.5 has not
@@ -199,5 +205,32 @@ describe.skipIf(GO === undefined)("graphloom probe (L3) on banyandb-fix", () => 
     expect(report.status).toBe("ok");
     expect(jobs).toHaveLength(1);
     expect(jobs[0]!.input).toMatchObject({ harness: "codex" });
+  }, 120_000);
+
+  it("preserves a rehearsed dispatch's own knownReferences, so checkContract can verify membership", async () => {
+    // Regression: probe passed only the bare schema, so a contract declaring
+    // reference paths (review-verdict-v1's own "findings[].finding", set by
+    // banyandb-fix's planReviewJob) never got its per-dispatch id set threaded
+    // through, and checkContract silently skipped membership checking.
+    const env = await ready();
+    const jobs: JobSpec[] = [];
+    const fakeRunner = {
+      async runJob(job: JobSpec): Promise<JobResult> {
+        jobs.push(job);
+        return {
+          status: "ok",
+          summary: "stubbed",
+          runId: "probe",
+          operationId: "op",
+          generation: 1,
+          evidence: [{ kind: "other", payload: { codingAgent: { output: { verdict: "approved", summary: "ok", findings: [], prior: [], productDecision: "" } } } }],
+        };
+      },
+    };
+    const report = await probe(env.taskPath, { contract: "review-verdict-v1", commands: "run" }, fakeRunner);
+    expect(report.status).toBe("ok");
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]!.knownReferences).toBeDefined();
+    expect(jobs[0]!.knownReferences!["findings[].finding"]).toBeDefined();
   }, 120_000);
 });

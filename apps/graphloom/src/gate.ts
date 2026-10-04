@@ -96,6 +96,13 @@ export async function runGate(taskPath: string, options: GateOptions = {}): Prom
   const fingerprintValue = stableHash({
     protocolVersion: PROTOCOL_VERSION,
     bundle: { manifestDigest: intake.bundle.manifestDigest, entryDigest: intake.bundle.entryDigest },
+    // Rehearsal runs the graph's own request text verbatim, against the
+    // pinned repository revision: two tasks sharing a bundle/config/
+    // environment but a different request or checkout can converge
+    // differently, so a cached "ready" must not cross either boundary.
+    repoPath: intake.repoPath,
+    pinnedHead: intake.pinnedHead,
+    request: intake.task.request,
     runnerConfig,
     environmentOutputs: checkReport.environmentOutputs,
     helpText: checkReport.capabilities?.helpText ?? {},

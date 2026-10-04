@@ -60,23 +60,61 @@ function codingAgentOf(payload: unknown): Record<string, unknown> | undefined {
 }
 
 /**
+ * A flattened "review" record's own payload, producer aside (a sibling of
+ * the validated value, not part of it — attachProducer's own convention), is
+ * itself the value classifyAgentResult already validated once; nothing left
+ * to re-extract from a `codingAgent` wrapper, since flattening removed it.
+ */
+function flattenedOutputOf(payload: unknown): { output: unknown; producer: unknown } {
+  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) return { output: payload, producer: undefined };
+  const { producer, ...output } = payload as Record<string, unknown>;
+  return { output, producer };
+}
+
+/**
  * Re-derives what `recordJobEvidence` would classify a record as today: a
- * record whose raw executor wrapper is still present (every record this
- * design's original defect produced, since the bug recorded them as `kind:
- * "other"` and never flattened them) is reclassified against the current
- * `resultContracts`; one already flattened by a prior, correct
- * classification (nothing left to re-extract `.output` from) is left as is
- * — replay only acts on what it still has raw data for.
+ * record whose raw executor wrapper is still present is reclassified against
+ * the current `resultContracts` directly; one already flattened by a prior,
+ * correct classification (nothing left to re-extract `.output` from) is
+ * re-checked from its own payload instead — tightening the current schema or
+ * validator can turn a recorded verdict invalid, and a replay that only ever
+ * looked for a raw wrapper would never see that.
  */
 function reclassify(definition: GraphDefinition, record: EvidenceRecord): EvidenceRecord {
   if (record.resultSchema === undefined) return record;
   const contract = definition.resultContracts?.find((c) => c.name === record.resultSchema);
   if (contract === undefined) return record;
   const agent = codingAgentOf(record.payload);
-  if (agent === undefined) return record;
 
   // No stamped knownReferences (§3.3 limitation): a reference field's
   // membership cannot be checked here, only the contract's shape.
+  if (agent === undefined) {
+    if (record.kind !== "review") return record; // nothing flattened by classifyAgentResult reaches here otherwise.
+    const { output, producer } = flattenedOutputOf(record.payload);
+    const checked = checkContract(output, contract);
+    if (checked.status === "invalid") {
+      // An invalid result always keeps a wrapper (classifyAgentResult's own
+      // convention), so nothing downstream that reads `.codingAgent.output`
+      // silently sees the pre-flatten shape as if it were still valid.
+      return {
+        ...record,
+        kind: "other",
+        payload: { producer, codingAgent: { status: "completed", output: checked.value } },
+        contract: { name: contract.name, status: checked.status, problems: checked.problems },
+      };
+    }
+    const flattenedValue =
+      checked.value !== null && typeof checked.value === "object" && !Array.isArray(checked.value)
+        ? { ...(checked.value as Record<string, unknown>), producer }
+        : checked.value;
+    return {
+      ...record,
+      kind: contract.evidenceKind,
+      payload: flattenedValue,
+      contract: { name: contract.name, status: checked.status, problems: checked.problems, ...(checked.repairs !== undefined ? { repairs: checked.repairs } : {}) },
+    };
+  }
+
   const checked = checkContract(agent.output, contract);
   const kind = checked.status === "invalid" ? "other" : contract.evidenceKind;
   const flatten = checked.status !== "invalid" && contract.evidenceKind === "review";

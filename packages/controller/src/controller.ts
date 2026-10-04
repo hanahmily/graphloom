@@ -1134,7 +1134,8 @@ function toReport(state: DurableRunState, sourceDirtyAfter: string[]): RunReport
 
 export { intakeTask, parseTaskYaml, resolveUnderBase, IntakeError } from "./intake.js";
 export { admitValidation, freshEvidence } from "./admit.js";
-export { toRunView, bumpGeneration } from "./loop.js";
+export { toRunView, bumpGeneration, classifyAgentResult } from "./loop.js";
+export type { ContractOutcome } from "./loop.js";
 export { loadRunState, saveRunState } from "./state.js";
 export type { DurableRunState, RunStatus, VersionRecord } from "./state.js";
 export type { DeleteReport } from "./delete-run.js";

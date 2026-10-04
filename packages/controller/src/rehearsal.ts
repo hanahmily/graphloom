@@ -91,7 +91,12 @@ export function evaluateRehearsal(
   notCovered.push("provider health and real GitHub state beyond what the scenario recorded");
 
   const failedEntry = (Object.entries(boundaries) as Array<[Boundary, BoundaryResult]>).find(([, r]) => r.status === "failed");
-  const unexercised = (Object.entries(boundaries) as Array<[Boundary, BoundaryResult]>).some(([, r]) => r.status === "unexercised");
+  // "unverified" (e.g. B2: a configured Claude/Codex binary's --help could
+  // not be read) is not "passed" with nothing to say about it — a scenario
+  // that otherwise fully converges must not become "ready" and get cached on
+  // a capability the gate never actually checked; the next live run can then
+  // fail on exactly that, with the gate having reported nothing wrong.
+  const unexercised = (Object.entries(boundaries) as Array<[Boundary, BoundaryResult]>).some(([, r]) => r.status === "unexercised" || r.status === "unverified");
 
   let verdict: RehearsalReport["verdict"];
   let blocker: RehearsalReport["blocker"];

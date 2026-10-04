@@ -12,6 +12,7 @@ export interface RecoveryTrigger {
     | "correction_limit"
     | "environment_changed"
     | "contract_violation"
+    | "recovery_budget_reached"
     | "unhandled";
   message: string;
   /** Recorded evidence the escalation cites, such as the failing validation's inputs. */

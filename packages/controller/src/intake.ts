@@ -296,6 +296,29 @@ export async function intakeTask(taskPath: string): Promise<IntakePin> {
     throw new IntakeError(`missing bundle entry: ${entryPath}`);
   }
 
+  const agentInvocations = task.budgets?.agentInvocations ?? 64;
+  const budgets = {
+    agentInvocations,
+    jobs: 128,
+    decisions: 512,
+    corrections: 8,
+    waitMs: DEFAULT_WAIT_BUDGET_MS,
+    activeMs: DEFAULT_ACTIVE_BUDGET_MS,
+    recoveryReserve: Math.max(8, Math.ceil(agentInvocations * 0.05)),
+    ...task.budgets,
+  };
+  // A reserve that is not strictly smaller than the total leaves no room for
+  // even one normal-mode agent call: children.ts's own floor (0 in recovery,
+  // this reserve otherwise) would then refuse the run's very first dispatch.
+  // Unreachable from the 5%-with-an-8-floor default alone once agentInvocations
+  // is large enough, but task.yaml's own explicit budgets (either number) are
+  // not bound by that formula, so this is checked after merging both.
+  if (budgets.recoveryReserve >= budgets.agentInvocations) {
+    throw new IntakeError(
+      `budgets.recoveryReserve (${budgets.recoveryReserve}) must be less than budgets.agentInvocations (${budgets.agentInvocations}), leaving room for at least one normal-mode agent call`,
+    );
+  }
+
   return {
     taskPath: absoluteTask,
     taskDir,
@@ -313,16 +336,7 @@ export async function intakeTask(taskPath: string): Promise<IntakePin> {
       entryDigest: sha256Bytes(entryBytes),
     },
     grants: task.grants ?? { sourceRepair: false, validatorSubstitution: false },
-    budgets: {
-      agentInvocations: 64,
-      jobs: 128,
-      decisions: 512,
-      corrections: 8,
-      waitMs: DEFAULT_WAIT_BUDGET_MS,
-      activeMs: DEFAULT_ACTIVE_BUDGET_MS,
-      recoveryReserve: Math.max(8, Math.ceil((task.budgets?.agentInvocations ?? 64) * 0.05)),
-      ...task.budgets,
-    },
+    budgets,
   };
 }
 

@@ -1455,6 +1455,23 @@ async function prepareDispatch(
       },
     };
   }
+  // §4.7: a normal-mode agent dispatch must not spend into the reserve
+  // children.ts's own reserveModelCall floor protects (recovery, including a
+  // metered supervisor decide() call, may spend down to zero) — refused here,
+  // before any pendingDispatch exists, so a denied reservation never reaches
+  // applyDispatchResult's fallback charge (which cannot tell "the floor
+  // refused this" from "the executor failed before ever trying," and would
+  // otherwise spend one of the reserved invocations on a dispatch children.ts
+  // never actually let happen).
+  if (job.kind === "agent" && state.mode === "normal" && state.budgets.agentInvocations <= (state.budgets.recoveryReserve ?? 0)) {
+    return {
+      state: enterRecovery(
+        state,
+        "recovery_budget_reached",
+        `agentInvocations (${state.budgets.agentInvocations}) has reached the recovery reserve (${state.budgets.recoveryReserve ?? 0}); normal-mode dispatch stops here so recovery still has budget to act`,
+      ),
+    };
+  }
 
   // A correction is a work dispatch while its stage's own target requirement
   // is still unresolved — a fact about current requirement state, not about
@@ -1901,7 +1918,7 @@ function boundText(text: string): string {
 
 type EvidenceItem = NonNullable<Awaited<ReturnType<Runner["runJob"]>>["evidence"]>[number];
 
-interface ContractOutcome {
+export interface ContractOutcome {
   kind: EvidenceRecord["kind"];
   payload: unknown;
   contract: NonNullable<EvidenceRecord["contract"]>;
@@ -1916,8 +1933,12 @@ interface ContractOutcome {
  * applied, and the outcome to show on the record. Returns undefined for
  * every other evidence item, which records exactly as it always has: the
  * controller only ever compares strings the plugin itself handed it.
+ *
+ * Exported so L0's static check (§3.1) can classify a scenario's own scripted
+ * replies exactly this way, not a second, hand-maintained copy that could
+ * silently drift from what a real dispatch would actually record.
  */
-function classifyAgentResult(definition: GraphDefinition, job: JobSpec, item: EvidenceItem): ContractOutcome | undefined {
+export function classifyAgentResult(definition: GraphDefinition, job: JobSpec, item: EvidenceItem): ContractOutcome | undefined {
   if (job.resultSchema === undefined) return undefined;
   const contract = definition.resultContracts?.find((c) => c.name === job.resultSchema);
   if (contract === undefined) return undefined;

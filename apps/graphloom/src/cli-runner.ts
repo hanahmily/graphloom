@@ -44,14 +44,17 @@ export function createCliRunner(
   /** Command executor module to load instead of the installed one (quick mode's stand-in; tests). */
   commandModule?: string,
   /**
-   * Command ids the graph's own `environment.checks`/`.prepare` declares.
+   * The graph's own `environment.checks`/`.prepare` declarations, by id.
    * Quick mode (§3.2) never stubs these: not just the once-per-run preflight,
    * but every checkout's own re-preparation of them (`runInCheckout`, which
    * dispatches the identical id set under the *checkout job's own*
    * instruction — "RED check", "Candidate checks" — not a recognizable
    * environment-check one), so matching by instruction text alone misses it.
+   * Matched by complete declaration (id and argv), not id alone: a graph's own
+   * command job could otherwise reuse the environment's ids with different
+   * argv and reach the real executor instead of quick mode's stub.
    */
-  environmentCommandIds?: ReadonlySet<string>,
+  environmentCommands?: ReadonlyMap<string, readonly string[]>,
   /** GitHub executor module to load instead of the installed one (`--offline`'s stand-in; tests). */
   githubModule?: string,
 ): Runner {
@@ -120,7 +123,7 @@ export function createCliRunner(
       : routeEnvironmentChecks(
           createBuiltinExecutorRunner({ packages: [commandPackage(commandExecutorPackage.entryModule), ...githubPackages], fallback }),
           createBuiltinExecutorRunner({ packages: [commandPackage(commandModule), ...githubPackages], fallback }),
-          environmentCommandIds ?? new Set(),
+          environmentCommands ?? new Map(),
         );
   const defaultAgent = agents.get(config.harness)!;
   return {
@@ -164,24 +167,32 @@ function failure(ctx: { runId: string; operationId: string; generation: number }
  * — "RED check", "Candidate checks" — not a recognizable one). Neither case
  * is visible to an executor itself (the protocol hands it only `input`+
  * context, never `instruction`/`purpose`/`stageId`), so the router — which
- * does see the full job — tells them apart by matching the exact id set
+ * does see the full job — tells them apart by matching the exact declarations
  * instead: only the environment's own checks and prepare commands are ever
- * dispatched together, on their own, with no graph command mixed in.
+ * dispatched together, on their own, with no graph command mixed in. Id
+ * alone is not enough: a graph's own command job could reuse the
+ * environment's ids with different argv and reach the real executor instead
+ * of quick mode's stub, so argv must match too.
  */
-function isEnvironmentDispatch(job: { input?: unknown }, environmentCommandIds: ReadonlySet<string>): boolean {
-  const commands = (job.input as { commands?: Array<{ id?: unknown }> } | undefined)?.commands;
-  if (!Array.isArray(commands) || commands.length === 0 || commands.length !== environmentCommandIds.size) return false;
-  return commands.every((c) => typeof c.id === "string" && environmentCommandIds.has(c.id));
+export function isEnvironmentDispatch(job: { input?: unknown }, environmentCommands: ReadonlyMap<string, readonly string[]>): boolean {
+  const commands = (job.input as { commands?: Array<{ id?: unknown; argv?: unknown }> } | undefined)?.commands;
+  if (!Array.isArray(commands) || commands.length === 0 || commands.length !== environmentCommands.size) return false;
+  return commands.every((c) => {
+    const argv = c.argv;
+    if (typeof c.id !== "string" || !Array.isArray(argv)) return false;
+    const declared = environmentCommands.get(c.id);
+    return declared !== undefined && declared.length === argv.length && declared.every((arg, i) => arg === argv[i]);
+  });
 }
 
 /** Routes a job dispatching exactly the environment's own declared commands to `real`; everything else to `standIn`. */
-function routeEnvironmentChecks(real: Runner, standIn: Runner, environmentCommandIds: ReadonlySet<string>): Runner {
+function routeEnvironmentChecks(real: Runner, standIn: Runner, environmentCommands: ReadonlyMap<string, readonly string[]>): Runner {
   return {
     async describeExecutors() {
       return standIn.describeExecutors!();
     },
     async runJob(job, ctx) {
-      return (isEnvironmentDispatch(job, environmentCommandIds) ? real : standIn).runJob(job, ctx);
+      return (isEnvironmentDispatch(job, environmentCommands) ? real : standIn).runJob(job, ctx);
     },
   };
 }

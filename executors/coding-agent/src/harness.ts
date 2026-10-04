@@ -22,6 +22,17 @@ export const JOB_CONTRACT_ENV = "GRAPHLOOM_JOB_CONTRACT";
  */
 export const JOB_IDENTITY_ENV = "GRAPHLOOM_JOB_IDENTITY";
 
+/**
+ * JSON-encodes the dispatching job's own `resultContract.knownReferences` on
+ * the child's own environment only, for the same reason `JOB_CONTRACT_ENV`
+ * exists: the wire schema the child actually receives has already had
+ * `applyReferenceEnums` bake these ids into `enum` constraints, not a
+ * separately readable structure, so a rehearsal stand-in recording this
+ * dispatch for `graphloom probe` (§3.4) needs its own copy to record.
+ * Harmless to a real `claude`/`codex` binary, which never reads it.
+ */
+export const JOB_REFERENCES_ENV = "GRAPHLOOM_JOB_REFERENCES";
+
 /** The dispatching job's own identity, threaded through for B3's provenance check (§4.1); absent outside a rehearsal, and ignored by a real harness either way. */
 export interface JobIdentity {
   operationId?: string;

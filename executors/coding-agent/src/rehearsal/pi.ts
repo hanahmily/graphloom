@@ -57,7 +57,7 @@ export function createPiRehearsalHarness(): CodingHarness {
         async run(request): Promise<CodingRunResult> {
           const scenario = requireScenario(HARNESS_NAME);
           const contractName = request.resultContract?.name;
-          recordAssignment(contractName, request.assignment, HARNESS_NAME);
+          recordAssignment(contractName, request.assignment, HARNESS_NAME, request.resultContract?.knownReferences);
           recordCall({ ...(contractName !== undefined ? { contractName } : {}), ...request.identity });
           const reply =
             (synthesizedRepliesOnly() ? undefined : nextReply(scenario, contractName)) ??

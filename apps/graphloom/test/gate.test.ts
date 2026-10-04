@@ -43,6 +43,22 @@ describe("the gate in run (§3.5)", () => {
     expect(second.notes.some((n) => n.includes("reused cached rehearsal"))).toBe(true);
   }, 30_000);
 
+  it("does not share a cached ready verdict across a different request or pinned checkout", async () => {
+    // Regression: the fingerprint covered the bundle, runner config, and
+    // environment, but not the task's own request text or repository
+    // identity — rehearsal runs that request verbatim against that pinned
+    // revision, so two tasks differing only in one of those could still
+    // reuse each other's cached "ready", even if one would not actually
+    // converge for real.
+    const a = await fixture("hello", "Create GREETING.txt.");
+    const b = await fixture("hello", "Create GREETING.txt. Please.");
+    const resultA = await runGate(a.taskPath, { stateRoot: a.stateRoot });
+    const resultB = await runGate(b.taskPath, { stateRoot: b.stateRoot });
+    expect(resultA.fingerprint).not.toBe("");
+    expect(resultB.fingerprint).not.toBe("");
+    expect(resultA.fingerprint).not.toBe(resultB.fingerprint);
+  }, 30_000);
+
   it("reports not-ready from L1 when the request never converges, and caches nothing", async () => {
     const f = await fixture("hello", "this request never mentions the greeting file");
     const result = await runGate(f.taskPath, { stateRoot: f.stateRoot });

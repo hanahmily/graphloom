@@ -83,7 +83,10 @@ describe("evaluateRehearsal", () => {
       evidence: [reviewEvidence("valid")],
       receipts: [{ id: "rcpt-1", stageId: "review", requirementId: "req", validatorBinding: definition.defaultValidators[0]!, candidateFingerprint: "f", evidenceRefs: ["ev-1"], valid: true }],
     });
-    const report = evaluateRehearsal(state, scenario);
+    // B2 is this test's own concern elsewhere ("merges a CLI-supplied B2…"
+    // below); supplied passed here so an unrelated default (unverified, since
+    // no capability probe was given) does not mask what this test checks.
+    const report = evaluateRehearsal(state, scenario, { B2: { status: "passed", notes: [] } });
     expect(report.verdict).toBe("ready");
     expect(report.boundaries.B4.status).toBe("passed");
     expect(report.boundaries.B5.status).toBe("passed");
@@ -110,6 +113,22 @@ describe("evaluateRehearsal", () => {
     const noReceiptExpectation: RehearsalScenario = { results: scenario.results, expect: { status: "succeeded" } };
     const report = evaluateRehearsal(state, noReceiptExpectation);
     expect(report.boundaries.B5.status).toBe("unexercised");
+    expect(report.verdict).toBe("inconclusive");
+  });
+
+  it("is inconclusive, not ready, when a boundary is unverified even though the scenario otherwise converges", () => {
+    // Regression: an unreadable/missing configured Claude or Codex binary
+    // (B2's capability probe) left B2 "unverified," but nothing in the
+    // verdict logic distinguished that from "passed" — a fully exercised
+    // scenario could still become "ready" and get cached, with the live run
+    // later failing on exactly the capability the gate never checked.
+    const state = baseState({
+      status: "succeeded",
+      evidence: [reviewEvidence("valid")],
+      receipts: [{ id: "rcpt-1", stageId: "review", requirementId: "req", validatorBinding: definition.defaultValidators[0]!, candidateFingerprint: "f", evidenceRefs: ["ev-1"], valid: true }],
+    });
+    const report = evaluateRehearsal(state, scenario); // B2 defaults to unverified: no capability probe supplied.
+    expect(report.boundaries.B2.status).toBe("unverified");
     expect(report.verdict).toBe("inconclusive");
   });
 

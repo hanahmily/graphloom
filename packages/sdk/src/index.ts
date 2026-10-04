@@ -3,7 +3,7 @@ export type {
   ReferenceSet,
   ResultContract,
 } from "./result-contract.js";
-export { applyReferenceEnums, checkContract, checkReferences, validateResultShape } from "./result-contract.js";
+export { applyReferenceEnums, checkContract, checkReferences, unsupportedSchemaKeywords, validateResultShape } from "./result-contract.js";
 
 export type {
   AdversarialMutation,
@@ -144,6 +144,7 @@ export {
   assertGraphAction,
   assertGraphDecision,
   assertGraphDefinition,
+  assertGraphRehearsal,
   assertRunView,
   assertWireRequest,
   assertWireResponse,

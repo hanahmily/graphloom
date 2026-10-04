@@ -18,6 +18,7 @@
  */
 import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import type { ReferenceSet } from "./result-contract.js";
 import type { RehearsalReply, RehearsalScenario } from "./rehearsal.js";
 
 /** Names the scenario file this process rehearses with; absent means "not a rehearsal". */
@@ -108,6 +109,8 @@ export interface RecordedAssignment {
   assignment: string;
   /** The harness that actually carried this contract, so `probe` (§3.4) dispatches to the same one. */
   harness: string;
+  /** The dispatch's own per-reference id sets, so `probe` constrains and checks membership the same way the rehearsed dispatch did. */
+  knownReferences?: Record<string, ReferenceSet>;
 }
 
 /**
@@ -118,11 +121,16 @@ export interface RecordedAssignment {
  * dispatch for a contract wins; harmless to skip when there is no active
  * scenario (a direct executor call outside a rehearsal).
  */
-export function recordAssignment(contractName: string | undefined, assignment: string, harness: string): void {
+export function recordAssignment(
+  contractName: string | undefined,
+  assignment: string,
+  harness: string,
+  knownReferences?: Record<string, ReferenceSet>,
+): void {
   if (cachedFile === undefined || contractName === undefined) return;
   const file = sidecarFile(cachedFile, "assignments.json");
   const assignments = readJson<Record<string, RecordedAssignment>>(file, {});
-  assignments[contractName] = { assignment, harness };
+  assignments[contractName] = { assignment, harness, ...(knownReferences !== undefined ? { knownReferences } : {}) };
   writeFileSync(file, JSON.stringify(assignments), "utf8");
 }
 

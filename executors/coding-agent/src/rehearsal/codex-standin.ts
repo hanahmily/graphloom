@@ -23,9 +23,10 @@ import {
   mutateAdversarially,
   synthesizeFromSchema,
   synthesizedRepliesOnly,
+  type ReferenceSet,
   type RehearsalReply,
 } from "@graphloom/sdk";
-import { JOB_CONTRACT_ENV, JOB_IDENTITY_ENV, type JobIdentity } from "../harness.js";
+import { JOB_CONTRACT_ENV, JOB_IDENTITY_ENV, JOB_REFERENCES_ENV, type JobIdentity } from "../harness.js";
 import { nextReply, recordAssignment, recordCall, requireScenario } from "./scenario.js";
 
 const HARNESS_NAME = "codex";
@@ -50,8 +51,10 @@ async function main(): Promise<void> {
   const contractName = process.env[JOB_CONTRACT_ENV];
   const identityRaw = process.env[JOB_IDENTITY_ENV];
   const identity = identityRaw !== undefined ? (JSON.parse(identityRaw) as JobIdentity) : undefined;
+  const referencesRaw = process.env[JOB_REFERENCES_ENV];
+  const knownReferences = referencesRaw !== undefined ? (JSON.parse(referencesRaw) as Record<string, ReferenceSet>) : undefined;
   const prompt = await readStdin();
-  if (contractName !== undefined) recordAssignment(contractName, prompt, HARNESS_NAME);
+  if (contractName !== undefined) recordAssignment(contractName, prompt, HARNESS_NAME, knownReferences);
   recordCall({ ...(contractName !== undefined ? { contractName } : {}), ...identity });
 
   const schema = schemaFile !== undefined ? (JSON.parse(await readFile(schemaFile, "utf8")) as Record<string, unknown>) : undefined;

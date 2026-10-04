@@ -17,6 +17,7 @@ export {
   freshEvidence,
   toRunView,
   bumpGeneration,
+  classifyAgentResult,
   loadRunState,
   saveRunState,
   tryAdmit,
@@ -29,6 +30,7 @@ export {
   resolveStateDir,
 } from "./controller.js";
 export type { DurableRunState, RunStatus, IntakePin, VersionRecord } from "./controller.js";
+export type { ContractOutcome } from "./controller.js";
 export type { ChildOperationRecord, SupervisorMark } from "./state.js";
 export type { ModelSwitchOrder } from "./supervisor-switch.js";
 export type {

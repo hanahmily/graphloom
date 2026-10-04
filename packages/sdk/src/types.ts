@@ -1,5 +1,7 @@
 /** Public value contracts for GraphLoom plugins. No Accept operation exists. */
 
+import type { GraphRehearsal } from "./rehearsal.js";
+
 export const PROTOCOL_VERSION = 1 as const;
 
 export type StageId = string;
@@ -425,12 +427,14 @@ export type WireRequest =
       kind: "evaluate";
       validatorId: string;
       input: ValidationInput;
-    });
+    })
+  | (WireEnvelope & { kind: "rehearsal"; entry: string });
 
 export type WireResponse =
   | (WireEnvelope & { kind: "describe_ok"; definition: GraphDefinition })
   | (WireEnvelope & { kind: "advance_ok"; decision: GraphDecision })
   | (WireEnvelope & { kind: "evaluate_ok"; result: ValidationResult })
+  | (WireEnvelope & { kind: "rehearsal_ok"; rehearsal?: GraphRehearsal })
   | (WireEnvelope & {
       kind: "error";
       code: "malformed" | "stale" | "oversized" | "unknown" | "internal";

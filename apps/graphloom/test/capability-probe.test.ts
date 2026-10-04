@@ -64,6 +64,23 @@ describe("harness capability probe (B2)", () => {
     expect(result.notes[0]).toContain("--json-schema");
   });
 
+  it("does not let one flag's name satisfy another it merely prefixes", async () => {
+    // Regression: a substring check let "--model-provider" (present) satisfy
+    // the required "--model" (absent), producing a false B2 pass for a binary
+    // that does not actually have the flag the adapter depends on.
+    const dir = await mkdtemp(path.join(os.tmpdir(), "gl-capability-"));
+    dirs.push(dir);
+    const flagsWithoutModel = CODEX_ADAPTER_FLAGS.filter((f) => f !== "--model");
+    const help = [...flagsWithoutModel, "--model-provider"].join(" ");
+    const codex = path.join(dir, "codex");
+    await mkdir(dir, { recursive: true });
+    await writeFile(codex, `#!/bin/sh\n[ "$*" = "exec --help" ] && { echo "${help}"; exit 0; }\nexit 1\n`, { mode: 0o755 });
+    const config: RunnerConfig = { harness: "codex", allowUnrestricted: true, codex: { command: codex } };
+    const result = await probeHarnessCapabilities(config);
+    expect(result.status).toBe("failed");
+    expect(result.notes[0]).toContain("--model");
+  });
+
   it("reports unverified, never a pass, when a configured binary's --help cannot be read", async () => {
     const dir = await mkdtemp(path.join(os.tmpdir(), "gl-capability-"));
     dirs.push(dir);

@@ -18,6 +18,7 @@ import {
 import {
   JOB_CONTRACT_ENV,
   JOB_IDENTITY_ENV,
+  JOB_REFERENCES_ENV,
   type CodingHarness,
   type CodingRunRequest,
   type CodingRunResult,
@@ -159,6 +160,7 @@ async function runCodex(args: RunArgs): Promise<CodingRunResult> {
     const contractName = request.resultContract?.name ?? request.resultSchema;
     if (contractName !== undefined) childEnv[JOB_CONTRACT_ENV] = contractName;
     if (request.identity !== undefined) childEnv[JOB_IDENTITY_ENV] = JSON.stringify(request.identity);
+    if (request.resultContract?.knownReferences !== undefined) childEnv[JOB_REFERENCES_ENV] = JSON.stringify(request.resultContract.knownReferences);
 
     // Nothing awaits between this check and the abort listener, so a stop during setup cannot miss the process.
     if (options.signal?.aborted) return { status: "failed", summary: "agent session aborted" };

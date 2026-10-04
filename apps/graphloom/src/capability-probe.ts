@@ -26,8 +26,19 @@ async function helpText(command: string, args: string[]): Promise<string | undef
   }
 }
 
+/**
+ * Flag-shaped tokens in `--help` text: `--model-provider` must not satisfy a
+ * required `--model` (a substring check would let it, since one flag can be a
+ * prefix of another's name), so each declared flag is matched as a complete
+ * token, not a substring of the raw text.
+ */
+function helpFlagTokens(help: string): Set<string> {
+  return new Set(help.match(/--?[a-zA-Z][a-zA-Z0-9-]*/g) ?? []);
+}
+
 function missingFlags(help: string, flags: readonly string[]): string[] {
-  return flags.filter((flag) => !help.includes(flag));
+  const tokens = helpFlagTokens(help);
+  return flags.filter((flag) => !tokens.has(flag));
 }
 
 /**

@@ -1,3 +1,4 @@
+import type { GraphRehearsal, RehearsalExpectation, RehearsalReply, RehearsalScenario } from "./rehearsal.js";
 import { PROTOCOL_VERSION, type GraphAction, type GraphDecision, type GraphDefinition, type RunView, type ValidationInput, type ValidationResult, type WireRequest, type WireResponse } from "./types.js";
 
 /**
@@ -49,6 +50,9 @@ export function assertWireRequest(value: unknown): WireRequest {
       requireString(obj, "validatorId");
       assertValidationInput(obj["input"]);
       return obj as unknown as WireRequest;
+    case "rehearsal":
+      requireString(obj, "entry");
+      return obj as unknown as WireRequest;
     default:
       throw new WireValidationError("unknown", `unknown request kind: ${kind}`);
   }
@@ -72,6 +76,9 @@ export function assertWireResponse(value: unknown): WireResponse {
       return obj as unknown as WireResponse;
     case "evaluate_ok":
       assertValidationResult(obj["result"]);
+      return obj as unknown as WireResponse;
+    case "rehearsal_ok":
+      if (obj["rehearsal"] !== undefined) assertGraphRehearsal(obj["rehearsal"]);
       return obj as unknown as WireResponse;
     case "error":
       requireString(obj, "code");
@@ -119,6 +126,75 @@ export function assertValidationResult(value: unknown): ValidationResult {
     }
   }
   return obj as unknown as ValidationResult;
+}
+
+const REHEARSAL_STATUSES = new Set(["succeeded", "stopped"]);
+const REHEARSAL_FAILURE_KINDS = new Set(["no-result", "exit", "hang"]);
+
+/**
+ * A bundle's rehearsal entry is imported inside the already-isolated plugin
+ * child (worker.ts), never the CLI process directly — the same sandbox
+ * `createGraph` gets, since it is the same untrusted bundle code. This
+ * validates the `GraphRehearsal` the wire protocol carries back, loosely
+ * matching `assertGraphDefinition`'s rigor: enough to stop a malformed
+ * export from corrupting the parent's own assumptions, not a re-check of
+ * every reply's `output` shape (validateResultShape already does that
+ * against the plugin's own declared contracts, downstream).
+ */
+export function assertGraphRehearsal(value: unknown): GraphRehearsal {
+  const obj = asObject(value, "rehearsal");
+  const scenarios = asObject(obj["scenarios"], "rehearsal.scenarios");
+  for (const [name, raw] of Object.entries(scenarios)) {
+    assertRehearsalScenario(raw, `rehearsal.scenarios[${JSON.stringify(name)}]`);
+  }
+  return obj as unknown as GraphRehearsal;
+}
+
+function assertRehearsalScenario(value: unknown, label: string): RehearsalScenario {
+  const obj = asObject(value, label);
+  const results = asObject(obj["results"], `${label}.results`);
+  for (const name of Object.keys(results)) {
+    requireArray(results, name).forEach((reply, i) => assertRehearsalReply(reply, `${label}.results[${JSON.stringify(name)}][${i}]`));
+  }
+  if (obj["commands"] !== undefined) asObject(obj["commands"], `${label}.commands`);
+  if (obj["reads"] !== undefined) asObject(obj["reads"], `${label}.reads`);
+  if (obj["supervisor"] !== undefined) {
+    for (const decision of requireArray(obj, "supervisor")) assertGraphDecision(decision);
+  }
+  if (obj["budgets"] !== undefined) asObject(obj["budgets"], `${label}.budgets`);
+  assertRehearsalExpectation(obj["expect"], `${label}.expect`);
+  return obj as unknown as RehearsalScenario;
+}
+
+function assertRehearsalReply(value: unknown, label: string): RehearsalReply {
+  const obj = asObject(value, label);
+  if (obj["effects"] !== undefined) {
+    for (const [i, effect] of requireArray(obj, "effects").entries()) {
+      const e = asObject(effect, `${label}.effects[${i}]`);
+      requireString(e, "path");
+      requireString(e, "bytes");
+    }
+  }
+  if (obj["harnessSupplied"] !== undefined) {
+    for (const name of requireArray(obj, "harnessSupplied")) {
+      if (typeof name !== "string") throw new WireValidationError("malformed", `${label}.harnessSupplied must be strings`);
+    }
+  }
+  if (obj["fail"] !== undefined) {
+    const fail = asObject(obj["fail"], `${label}.fail`);
+    const kind = requireString(fail, "kind");
+    if (!REHEARSAL_FAILURE_KINDS.has(kind)) throw new WireValidationError("malformed", `${label}.fail.kind must be one of ${[...REHEARSAL_FAILURE_KINDS].join(", ")}`);
+  }
+  return obj as unknown as RehearsalReply;
+}
+
+function assertRehearsalExpectation(value: unknown, label: string): RehearsalExpectation {
+  const obj = asObject(value, label);
+  const status = requireString(obj, "status");
+  if (!REHEARSAL_STATUSES.has(status)) throw new WireValidationError("malformed", `${label}.status must be one of ${[...REHEARSAL_STATUSES].join(", ")}`);
+  if (obj["receipts"] !== undefined) requireArray(obj, "receipts");
+  if (obj["recovery"] !== undefined) requireArray(obj, "recovery");
+  return obj as unknown as RehearsalExpectation;
 }
 
 export function assertGraphDefinition(value: unknown): GraphDefinition {

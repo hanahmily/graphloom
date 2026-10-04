@@ -165,6 +165,61 @@ describe("replayRun", () => {
     expect(report.nextDecision).toEqual({ decision: expectedDecision });
   });
 
+  it("re-checks an already-flattened review record too, not only a raw wrapper", async () => {
+    // Regression: a successful live run's review evidence has no codingAgent
+    // wrapper (classifyAgentResult already flattened it once, correctly) —
+    // reclassify's early return left it untouched, so tightening the current
+    // schema could never surface as invalid on replay.
+    const flattenedReview: EvidenceRecord = {
+      ref: "ev-4",
+      kind: "review",
+      generation: 2,
+      resultSchema: "review-verdict-v1",
+      contract: { name: "review-verdict-v1", status: "valid", problems: [] },
+      payload: { verdict: "approved", summary: "looks right", producer: { stageId: "review", purpose: "review", executorId: "graphloom.agent/run" } },
+    };
+    const state = recordedState([flattenedReview]);
+    const tightened: GraphDefinition = {
+      ...definition,
+      resultContracts: [
+        {
+          name: "review-verdict-v1",
+          schema: { type: "object", properties: { verdict: { type: "string" }, summary: { type: "string" }, findings: { type: "array" } }, required: ["verdict", "summary", "findings"] },
+          evidenceKind: "review",
+        },
+      ],
+    };
+    const host = fakeHost({ definition: tightened });
+    const report = await replayRun(state, host);
+    expect(report.reclassified).toEqual([
+      { ref: "ev-4", before: "review", after: "other", contract: { name: "review-verdict-v1", status: "invalid", problems: ["$.findings is required"] } },
+    ]);
+    expect(report.contracts).toMatchObject({ invalid: 1, valid: 0 });
+  });
+
+  it("keeps an already-flattened review record flattened when it still validates, and preserves its producer", async () => {
+    const flattenedReview: EvidenceRecord = {
+      ref: "ev-5",
+      kind: "review",
+      generation: 2,
+      resultSchema: "review-verdict-v1",
+      contract: { name: "review-verdict-v1", status: "valid", problems: [] },
+      payload: { verdict: "approved", summary: "looks right", producer: { stageId: "review", purpose: "review", executorId: "graphloom.agent/run" } },
+    };
+    const state = recordedState([flattenedReview]);
+    const host = fakeHost({
+      definition,
+      evaluateImpl: (input) => {
+        const review = input.evidence.find((e) => e.kind === "review");
+        const producer = (review?.payload as { producer?: { stageId?: string } } | undefined)?.producer;
+        return producer?.stageId === "review" ? { status: "passed", reason: "found by stage" } : { status: "inconclusive", reason: "producer lost" };
+      },
+    });
+    const report = await replayRun(state, host);
+    expect(report.reclassified).toEqual([]); // kind and status both unchanged; nothing to report.
+    expect(report.requirements).toEqual([{ requirementId: "req", hadReceipt: false, now: { status: "passed", reason: "found by stage" } }]);
+  });
+
   it("reports describe() failure as an error rather than throwing", async () => {
     const state = recordedState([misclassifiedReview]);
     const host: PluginHost = {

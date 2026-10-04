@@ -12,6 +12,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import {
   checkB3,
+  classifyAgentResult,
   createController,
   evaluateRehearsal,
   intakeTask,
@@ -23,6 +24,7 @@ import {
   resolveBundleRehearsalEntry,
   resolveStateDir,
   type BoundaryResult,
+  type ContractOutcome,
   type DurableRunState,
   type RehearsalReport,
   type ReplayReport,
@@ -35,10 +37,14 @@ import {
   readUnverifiedReads,
   REHEARSAL_ADVERSARIAL_ENV,
   REHEARSAL_SYNTHESIZED_ENV,
+  unsupportedSchemaKeywords,
   validateResultShape,
   type ContractCheck,
+  type EvidenceRecord,
   type GraphDefinition,
   type GraphRehearsal,
+  type JobSpec,
+  type ReferenceSet,
   type RecordedCall,
   type RehearsalCommandResult,
   type RehearsalExpectation,
@@ -114,14 +120,71 @@ async function describeBundle(intake: Awaited<ReturnType<typeof intakeTask>>): P
   }
 }
 
+/**
+ * A bundle's rehearsal entry is the same untrusted bundle code as its graph
+ * entry, so it loads inside the same isolated child host `describeBundle`
+ * uses for `createGraph`/`describe()` — never a bare `import()` into this
+ * CLI process, which would run arbitrary bundle code with the CLI's own
+ * full environment and filesystem access.
+ */
 async function loadRehearsal(intake: Awaited<ReturnType<typeof intakeTask>>): Promise<GraphRehearsal | undefined> {
   const entry = resolveBundleRehearsalEntry(intake);
   if (entry === undefined) return undefined;
-  const mod = (await import(entry)) as { rehearsal?: GraphRehearsal };
-  if (mod.rehearsal === undefined) {
-    throw new Error(`${entry} does not export \`rehearsal\``);
+  const host = await createChildPluginHost({
+    entryModule: resolveBundleEntry(intake),
+    activeVersion: `${intake.bundle.graphId}@${intake.bundle.version}`,
+    generation: 1,
+    cwd: intake.bundle.bundlePath,
+  });
+  try {
+    const result = await host.rehearsal!({ runId: "check", operationId: `op-${randomUUID().slice(0, 8)}`, expectedStateRevision: 0 }, entry);
+    if (!result.ok) {
+      throw new Error(`rehearsal entry failed: ${JSON.stringify(result.observation)}`);
+    }
+    if (result.value === undefined) {
+      throw new Error(`${entry} does not export \`rehearsal\``);
+    }
+    return result.value;
+  } finally {
+    await host.close();
   }
-  return mod.rehearsal;
+}
+
+/**
+ * A scenario reply, staged as the one piece of evidence a real dispatch for
+ * `contractName` would have left behind (classifyAgentResult, the same
+ * function a real run's recordJobEvidence calls) — a synthetic ref and a
+ * best-effort producer, since L0 has no real dispatch to read one from:
+ * `advance()`'s own choice of purpose/readOnly for this contract is plugin
+ * code (§3.1), not something a static check can see, so a review-kind
+ * contract is assumed read-only review and anything else a work dispatch.
+ */
+function syntheticEvidenceRecord(
+  definition: GraphDefinition,
+  stageId: string,
+  contractName: string,
+  evidenceKind: "file" | "command" | "workspace" | "review" | "other",
+  output: unknown,
+): EvidenceRecord {
+  const purpose = evidenceKind === "review" ? "review" : "work";
+  const job: JobSpec = {
+    stageId,
+    kind: "agent",
+    purpose,
+    instruction: "L0 static check",
+    resultSchema: contractName,
+    ...(purpose === "review" ? { readOnly: true } : {}),
+  };
+  const item = { kind: "other" as const, payload: { codingAgent: { status: "completed", output } } };
+  const outcome: ContractOutcome | undefined = classifyAgentResult(definition, job, item);
+  const producer = { operationId: "op-l0-synthetic", stageId, purpose, readOnly: purpose === "review", kind: "agent" };
+  const attach = (payload: unknown) =>
+    payload !== null && typeof payload === "object" && !Array.isArray(payload) ? { ...payload, producer } : { value: payload, producer };
+  const base = { ref: "l0-synthetic", generation: 1, resultSchema: contractName };
+  if (outcome === undefined) {
+    return { ...base, kind: "other", payload: attach(item.payload) };
+  }
+  return { ...base, kind: outcome.kind, contract: outcome.contract, payload: attach(outcome.payload) };
 }
 
 /** L0 (§3.1): the declared data agrees with itself and the environment's tools are present, for zero provider calls. */
@@ -132,11 +195,20 @@ export async function check(taskPath: string): Promise<CheckReport> {
 
   const contracts = definition.resultContracts ?? [];
   const byName = new Map(contracts.map((c) => [c.name, c]));
+  const bindingByRequirement = new Map(definition.defaultValidators.map((b) => [b.requirementId, b]));
   for (const requirement of definition.requirements) {
     const contract = byName.get(requirement.evidenceSchema);
     if (contract === undefined) continue; // not every evidenceSchema names a result contract (file/workspace/command evidence).
     if (!["file", "command", "workspace", "review", "other"].includes(contract.evidenceKind)) {
       problems.push(`contract ${contract.name}: evidenceKind ${JSON.stringify(contract.evidenceKind)} is not a recognized kind`);
+    }
+    if (!bindingByRequirement.has(requirement.id)) {
+      problems.push(`requirement ${requirement.id}: names contract ${contract.name} but has no validator binding`);
+    }
+  }
+  for (const contract of contracts) {
+    for (const keyword of unsupportedSchemaKeywords(contract.schema)) {
+      problems.push(`contract ${contract.name}: schema uses ${keyword}, which validateResultShape does not enforce`);
     }
   }
 
@@ -147,21 +219,73 @@ export async function check(taskPath: string): Promise<CheckReport> {
     problems.push(`rehearsal entry: ${err instanceof Error ? err.message : String(err)}`);
   }
   if (rehearsal !== undefined) {
-    for (const [scenarioName, scenario] of Object.entries(rehearsal.scenarios)) {
-      for (const [contractName, replies] of Object.entries(scenario.results)) {
-        const contract = byName.get(contractName);
-        if (contract === undefined) {
-          problems.push(`scenario ${scenarioName}: names contract ${contractName}, which the plugin did not declare`);
-          continue;
-        }
-        for (const [i, reply] of replies.entries()) {
-          if (reply.output === undefined) continue;
-          const violations = validateResultShape(reply.output, contract.schema);
-          if (violations.length > 0) {
-            problems.push(`scenario ${scenarioName}: ${contractName}[${i}] does not validate against its own contract: ${violations.join("; ")}`);
+    // The contract-versus-parser check (B5, §3.1): a reply that validates
+    // against its own declared schema is then classified exactly as a real
+    // dispatch's evidence would be (classifyAgentResult, the same function
+    // recordJobEvidence calls) and walked through the requirement's own
+    // validator, read-only, in the plugin host — a scenario can be green
+    // under a plugin's unit simulation and still assert a journey the real
+    // validators would refuse.
+    const requirementByContract = new Map(
+      definition.requirements.filter((r) => bindingByRequirement.has(r.id)).map((r) => [r.evidenceSchema, r]),
+    );
+    const host = await createChildPluginHost({
+      entryModule: resolveBundleEntry(intake),
+      activeVersion: `${intake.bundle.graphId}@${intake.bundle.version}`,
+      generation: 1,
+      cwd: intake.bundle.bundlePath,
+    });
+    try {
+      for (const [scenarioName, scenario] of Object.entries(rehearsal.scenarios)) {
+        for (const [contractName, replies] of Object.entries(scenario.results)) {
+          const contract = byName.get(contractName);
+          if (contract === undefined) {
+            problems.push(`scenario ${scenarioName}: names contract ${contractName}, which the plugin did not declare`);
+            continue;
+          }
+          const requirement = requirementByContract.get(contractName);
+          const binding = requirement !== undefined ? bindingByRequirement.get(requirement.id) : undefined;
+          const stage = requirement !== undefined ? definition.stages.find((s) => s.requirementIds.includes(requirement.id)) : undefined;
+          for (const [i, reply] of replies.entries()) {
+            if (reply.output === undefined) continue;
+            const violations = validateResultShape(reply.output, contract.schema);
+            if (violations.length > 0) {
+              problems.push(`scenario ${scenarioName}: ${contractName}[${i}] does not validate against its own contract: ${violations.join("; ")}`);
+              continue;
+            }
+            if (requirement === undefined || binding === undefined || stage === undefined) continue; // no bound requirement to walk its validator; already flagged above if that is itself the problem.
+            // Only the last reply (§4.4: "the last reply repeats") is the
+            // steady state a requirement's validator should see — an earlier
+            // one can legitimately be a mid-sequence draft a different part of
+            // the same contract's own dispatch history produced (banyandb-fix's
+            // own planner draft under decision-record-v1, before the
+            // implementer's confirmation settles it), not evidence that
+            // requirement ever saw on its own.
+            if (i !== replies.length - 1) continue;
+            const label = `scenario ${scenarioName}: ${contractName}[${i}] against ${requirement.id}'s validator`;
+            try {
+              const record = syntheticEvidenceRecord(definition, stage.id, contractName, contract.evidenceKind, reply.output);
+              const result = await host.evaluate!(
+                { runId: "check", operationId: `op-${randomUUID().slice(0, 8)}`, expectedStateRevision: 0 },
+                binding.validatorId,
+                { requirementId: requirement.id, statement: requirement.statement, evidence: [record] },
+              );
+              if (!result.ok) {
+                problems.push(`${label}: ${JSON.stringify(result.observation)}`);
+              } else if (result.value.status === "failed") {
+                problems.push(`${label}: ${result.value.reason}`);
+              }
+              // "inconclusive" (missing command/file evidence quick mode never
+              // stages) and "passed" are both fine: only a real refusal, not an
+              // under-informed validator, is this check's business.
+            } catch (err) {
+              problems.push(`${label}: ${err instanceof Error ? err.message : String(err)}`);
+            }
           }
         }
       }
+    } finally {
+      await host.close();
     }
   }
 
@@ -243,8 +367,8 @@ async function performRehearsal(
   const intake = await intakeTask(absoluteTaskPath);
   const rehearsalData = await loadRehearsal(intake);
   const definition = await describeBundle(intake);
-  const environmentCommandIds = new Set(
-    [...(definition.environment?.checks ?? []), ...(definition.environment?.prepare ?? [])].map((c) => c.id),
+  const environmentCommands = new Map(
+    [...(definition.environment?.checks ?? []), ...(definition.environment?.prepare ?? [])].map((c) => [c.id, c.argv] as const),
   );
   const scenarioName = options.scenario ?? "happy";
   const scenario: RehearsalScenario = rehearsalData?.scenarios[scenarioName] ?? {
@@ -312,7 +436,7 @@ async function performRehearsal(
       process.env,
       { pi: piRehearsalModule },
       stubCommands ? commandRehearsalModule : undefined,
-      environmentCommandIds,
+      environmentCommands,
       offline ? githubRehearsalModule : undefined,
     );
     const substituted = [
@@ -573,6 +697,28 @@ export interface ProbeReport {
 }
 
 /**
+ * A throwaway `git worktree` off the task's own pinned commit, outside the
+ * operator's real checkout entirely and always force-removed: `probe`
+ * dispatches directly to the real runner, with none of a controller run's
+ * own post-job scope diff to catch a stray write, and the Pi harness exposes
+ * its write/bash tools regardless of `job.readOnly` (prompt guidance there,
+ * not an enforced restriction) — so a real model's probe turn must never run
+ * against a path the operator actually cares about.
+ */
+async function withDisposableWorktree<T>(repoPath: string, pinnedHead: string, fn: (worktreePath: string) => Promise<T>): Promise<T> {
+  const branch = `graphloom/probe-${randomUUID().slice(0, 8)}`;
+  const worktreePath = path.join(os.tmpdir(), `graphloom-probe-worktree-${randomUUID().slice(0, 8)}`);
+  await execFileAsync("git", ["worktree", "add", "-b", branch, worktreePath, pinnedHead], { cwd: repoPath });
+  try {
+    return await fn(worktreePath);
+  } finally {
+    await execFileAsync("git", ["worktree", "remove", "--force", worktreePath], { cwd: repoPath }).catch(() => undefined);
+    await execFileAsync("git", ["worktree", "prune"], { cwd: repoPath }).catch(() => undefined);
+    await execFileAsync("git", ["branch", "-D", branch], { cwd: repoPath }).catch(() => undefined);
+  }
+}
+
+/**
  * L3 (§3.4): does the real model on the real configured harness produce
  * what this contract demands? The only rung that spends provider calls,
  * bounded to `MAX_PROBE_MODEL_CALLS`. The assignment is the real text a
@@ -598,7 +744,7 @@ export async function probe(
     ...(options.commands !== undefined ? { commands: options.commands } : {}),
     ...(options.offline !== undefined ? { offline: options.offline } : {}),
   });
-  let recorded: { assignment: string; harness: string } | undefined;
+  let recorded: { assignment: string; harness: string; knownReferences?: Record<string, ReferenceSet> } | undefined;
   try {
     recorded = readRecordedAssignment(run.scenarioPath, options.contract);
   } finally {
@@ -609,50 +755,58 @@ export async function probe(
       `the rehearsal never dispatched a job naming contract ${JSON.stringify(options.contract)}; is it reached on the ${JSON.stringify(options.scenario ?? "happy")} scenario path?`,
     );
   }
-  const { assignment, harness } = recorded;
+  const { assignment, harness, knownReferences } = recorded;
 
   const runner = overrideRunner ?? createCliRunner(await requireRunnerConfig());
   let providerCalls = 0;
   const probeDir = await mkdtemp(path.join(os.tmpdir(), "graphloom-probe-"));
   try {
-    const result = await runner.runJob(
-      {
-        stageId: "probe",
-        kind: "agent",
-        purpose: "diagnostic",
-        readOnly: true,
-        instruction: assignment,
-        resultSchema: contract.name,
-        executor: { id: CODING_AGENT_RUN_ID },
-        input: { assignment, harness },
-      },
-      {
-        runId: "probe",
-        operationId: `op-${randomUUID().slice(0, 8)}`,
-        generation: 1,
-        worktreePath: intake.repoPath,
-        artifactDir: probeDir,
-        resultContract: { name: contract.name, schema: contract.schema },
-        children: {
-          callTool: async () => ({ status: "failed", summary: "probe admits no tools" }),
-          reserveModelCall: async () => {
-            providerCalls += 1;
-            return providerCalls <= MAX_PROBE_MODEL_CALLS;
+    return await withDisposableWorktree(intake.repoPath, intake.pinnedHead, async (worktreePath) => {
+      const result = await runner.runJob(
+        {
+          stageId: "probe",
+          kind: "agent",
+          purpose: "diagnostic",
+          readOnly: true,
+          instruction: assignment,
+          resultSchema: contract.name,
+          executor: { id: CODING_AGENT_RUN_ID },
+          input: { assignment, harness },
+          ...(knownReferences !== undefined ? { knownReferences } : {}),
+        },
+        {
+          runId: "probe",
+          operationId: `op-${randomUUID().slice(0, 8)}`,
+          generation: 1,
+          worktreePath,
+          artifactDir: probeDir,
+          resultContract: {
+            name: contract.name,
+            schema: contract.schema,
+            ...(contract.references !== undefined ? { references: contract.references } : {}),
+            ...(knownReferences !== undefined ? { knownReferences } : {}),
+          },
+          children: {
+            callTool: async () => ({ status: "failed", summary: "probe admits no tools" }),
+            reserveModelCall: async () => {
+              providerCalls += 1;
+              return providerCalls <= MAX_PROBE_MODEL_CALLS;
+            },
           },
         },
-      },
-    );
-    const output = result.evidence
-      ?.map((e) => (e.payload as { codingAgent?: { output?: unknown } } | undefined)?.codingAgent?.output)
-      .find((v) => v !== undefined);
-    return {
-      contract: contract.name,
-      assignment,
-      status: result.status === "ok" ? "ok" : "failed",
-      summary: result.summary,
-      providerCalls,
-      ...(output !== undefined ? { check: checkContract(output, contract) } : {}),
-    };
+      );
+      const output = result.evidence
+        ?.map((e) => (e.payload as { codingAgent?: { output?: unknown } } | undefined)?.codingAgent?.output)
+        .find((v) => v !== undefined);
+      return {
+        contract: contract.name,
+        assignment,
+        status: result.status === "ok" ? "ok" : "failed",
+        summary: result.summary,
+        providerCalls,
+        ...(output !== undefined ? { check: checkContract(output, contract, knownReferences) } : {}),
+      };
+    });
   } finally {
     await rm(probeDir, { recursive: true, force: true });
   }
