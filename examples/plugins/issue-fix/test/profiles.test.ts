@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
@@ -30,6 +30,7 @@ import {
   vitestArgv,
   vitestOutcome,
   vitestOutput,
+  vitestSummary,
   writeScopeFor,
   type DecisionRecord,
 } from "../src/index.js";
@@ -133,7 +134,13 @@ describe("the graphloom profile", () => {
     expect(plan).toContain("Plan a fix for hanahmily/graphloom#7 in this repository (hanahmily/graphloom).");
     expect(plan).toContain("package is the test file, relative to the repository root");
     expect(plan).toContain("scopeExceptions: only when the fix must change package-lock.json, .github, legacy");
+    // Enhancement issues: the new test is the RED test, and the issue's own surface is not a product decision.
+    expect(plan).toContain("About hanahmily/graphloom:");
+    expect(plan).toContain("Issues here are often enhancements rather than bug reports.");
+    expect(plan).toContain("is what was asked for, not an open product decision");
+    expect(planInstruction(banyandb, { issue: 7, request: "r", snapshot: "s" })).not.toContain("About ");
     const implement = implementInstruction(graphloom, { issue: 7, plan: TS_PLAN });
+    expect(implement).toContain("keeps the new names and signatures the test imports but restores the old behaviour");
     expect(implement).not.toContain("CHANGES");
     expect(implement).toContain("Do not change package-lock.json, .github, legacy.");
     expect(implement).toContain("the full change must pass the test and `npm run typecheck`, `npm run build` and `npm test`");
@@ -206,6 +213,38 @@ describe("the graphloom profile", () => {
     }));
     const red = advanceFix(view([...evidence, ...ran]));
     expect((red.action as { job: JobSpec }).job.checkout).toEqual({ from: "base", paths: [TS_TEST] });
+
+    // An enhancement's new test calls an export the base lacks: RED cannot load it, so the graph asks for a revert patch.
+    const redArgv = ((red.action as { job: JobSpec }).job.input as { commands: Array<{ argv: string[] }> }).commands[0]!.argv;
+    const unloadable = JSON.stringify({
+      GraphLoomVitest: {
+        target: { file: TS_TEST, name: TS_PLAN.test!.name },
+        files: [{ name: `/w/${TS_TEST}`, status: "failed", message: "" }],
+        tests: [{ fullName: TS_PLAN.test!.name, status: "failed", failure: "TypeError: (0 , writeScopeAllows) is not a function" }],
+      },
+    });
+    const baseRun: EvidenceRecord = {
+      ref: "r1",
+      kind: "command",
+      generation: 1,
+      candidateDigest: "d1",
+      payload: {
+        command: { id: "regression", argv: redArgv, exitCode: 1, stdoutTail: "", stderrTail: "", report: { text: unloadable, truncated: false } },
+        checkout: { ...checkout, from: "base", commit: "b1", paths: [TS_TEST] },
+        producer: { operationId: "op6", stageId: "fix", purpose: "check", readOnly: true, kind: "command" },
+      },
+    };
+    const ask = (advanceFix(view([...evidence, ...ran, baseRun])).action as { job: JobSpec }).job;
+    expect(ask).toMatchObject({ purpose: "work", jobId: "implementer" });
+    expect((ask.input as { assignment: string }).assignment).toContain('Add a "revertPatch" field to your decision record');
+
+    // A correction renames the test without changing a byte: the old test's GREEN must not stand for the new one.
+    const renamed = { ...TS_PLAN, test: { ...TS_PLAN.test!, name: "writeScopeAllows forbids a renamed path" } };
+    const correction: EvidenceRecord = { ref: "e9", kind: "other", generation: 1, candidateDigest: "d1", payload: { codingAgent: { harness: "claude-code", status: "completed", output: renamed }, producer: producer("op9", "work") } };
+    const again = advanceFix(view([...evidence, ...ran, correction]));
+    const rerun = (again.action as { job: JobSpec }).job;
+    expect(rerun.checkout).toEqual({ from: "candidate" });
+    expect((rerun.input as { commands: Array<{ argv: string[] }> }).commands[0]!.argv[5]).toBe(renamed.test.name);
   });
 });
 
@@ -287,6 +326,12 @@ async function vitestProject() {
       "",
     ].join("\n"),
   );
+  // Another file whose path ends like the target's, with a same-named test that fails.
+  await mkdir(path.join(root, "packages/lib/other/src"), { recursive: true });
+  await writeFile(
+    path.join(root, "packages/lib/other/src/scope.test.ts"),
+    'import { describe, expect, it } from "vitest";\ndescribe("allows (scope)", () => {\n  it("forbids legacy", () => { expect(1).toBe(2); });\n});\n',
+  );
   await writeFile(path.join(root, "packages/lib/src/broken.test.ts"), 'import { it } from "vitest";\nimport { gone } from "./gone.js";\nit("loads", () => gone());\n');
   return root;
 }
@@ -315,6 +360,22 @@ describe("vitest regression runner", () => {
     expect((await runRegression(root, file, "allows (scope) calls a missing export")).outcome).toBe("build-failed");
     expect((await runRegression(root, "packages/lib/src/broken.test.ts", "loads")).outcome).toBe("build-failed");
     expect((await runRegression(root, file, "allows (scope) no such test")).outcome).toBe("not-run");
+  }, 120_000);
+
+  it("judges only the requested file, not another whose path ends the same way with a same-named test", async () => {
+    const root = await vitestProject();
+    const target = await runRegression(root, "packages/lib/src/scope.test.ts", "allows (scope) forbids legacy");
+    expect(target).toMatchObject({ exit: 0, outcome: "passed" });
+    expect(vitestSummary(target.text)?.files?.map((f) => f.name)).toEqual([await realpath(path.join(root, "packages/lib/src/scope.test.ts"))]);
+    expect((await runRegression(root, "packages/lib/other/src/scope.test.ts", "allows (scope) forbids legacy")).outcome).toBe("failed");
+  }, 120_000);
+
+  it("reads a report as no result for any other test than the one it was run for", async () => {
+    const root = await vitestProject();
+    const { text } = await runRegression(root, "packages/lib/src/scope.test.ts", "allows (scope) is wrong");
+    expect(vitestOutcome(text, { package: "packages/lib/src/scope.test.ts", name: "allows (scope) is wrong" })).toBe("failed");
+    expect(vitestOutcome(text, { package: "packages/lib/src/scope.test.ts", name: "allows (scope) forbids legacy" })).toBe("not-run");
+    expect(vitestOutcome(text, { package: "packages/lib/other/src/scope.test.ts", name: "allows (scope) is wrong" })).toBe("not-run");
   }, 120_000);
 
   it("refuses a path outside the repository and reports a missing vitest", async () => {

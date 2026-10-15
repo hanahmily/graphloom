@@ -4,6 +4,8 @@ import { CODING_AGENT, COMMAND, FIX_STAGE, REVIEW_STAGE } from "./constants.js";
 import type { DecisionRecord } from "./decision-record.js";
 import { definitionFor } from "./graph.js";
 import { parseProfile } from "./profile.js";
+import { goTestRunner } from "./runners/go-test.js";
+import { vitestRunner } from "./runners/vitest.js";
 
 /** A profile shipped in the bundle's `profiles/` directory, as JSON: the cases judge against these exact files. */
 export function shippedProfile(name: "banyandb" | "graphloom"): unknown {
@@ -81,6 +83,8 @@ interface RunOptions {
   timedOut?: boolean;
   reverted?: boolean;
   revertedPaths?: string[];
+  /** The argv the run executed; a regression run defaults to the one for the case's recorded test. */
+  argv?: string[];
 }
 
 const command = (id: string, exitCode: number, o: RunOptions = {}): EvidenceRecord => ({
@@ -90,7 +94,7 @@ const command = (id: string, exitCode: number, o: RunOptions = {}): EvidenceReco
   payload: {
     command: {
       id,
-      argv: [id],
+      argv: o.argv ?? [id],
       exitCode,
       signal: null,
       timedOut: o.timedOut ?? false,
@@ -202,10 +206,27 @@ const c = (validatorId: string, name: string, evidence: EvidenceRecord[], expect
   validatorId,
   name,
   config,
-  evidence,
+  evidence: withRegressionArgv(evidence, config),
   expected,
   ...(history !== undefined ? { history } : {}),
 });
+
+/**
+ * A regression run names its test only in its argv: give each regression run
+ * without an explicit argv the one the profile's runner builds for the
+ * case's recorded test, as a real check job would have run.
+ */
+function withRegressionArgv(evidence: EvidenceRecord[], config: unknown): EvidenceRecord[] {
+  const record = [...evidence].reverse().find((e) => (e.payload as { producer?: { purpose?: string } } | undefined)?.producer?.purpose === "work");
+  const test = (record?.payload as { codingAgent?: { output?: DecisionRecord } } | undefined)?.codingAgent?.output?.test;
+  if (test === undefined) return evidence;
+  const argv = parseProfile(config).runner.argv(test);
+  return evidence.map((e) => {
+    const command = (e.payload as { command?: { id?: string; argv?: string[] } } | undefined)?.command;
+    if (command?.id !== COMMAND.regression || command.argv?.length !== 1 || command.argv[0] !== COMMAND.regression) return e;
+    return { ...e, payload: { ...(e.payload as object), command: { ...command, argv } } };
+  });
+}
 
 // The graphloom profile: the vitest runner, npm build checks, no changelog.
 const TS_TEST = "packages/sdk/src/scope.test.ts";
@@ -220,6 +241,7 @@ const TS_READY: DecisionRecord = {
 const vitest = (tests: Array<{ status: string; failure?: string }>, fileMessage = "") =>
   JSON.stringify({
     GraphLoomVitest: {
+      target: { file: TS_TEST, name: TS_NAME },
       files: [{ name: `/w/${TS_TEST}`, status: tests.some((t) => t.status === "failed") || fileMessage !== "" ? "failed" : "passed", message: fileMessage }],
       tests: tests.map((t) => ({ fullName: TS_NAME, status: t.status, failure: t.failure ?? "" })),
     },
@@ -260,6 +282,8 @@ export const QUALIFICATION_CASES: readonly QualificationCase[] = [
   c("red-reproduces", "a Ginkgo run lost its spec summary", [implementer(SUITE_READY), red(failedByAssertion)], "failed"),
   c("red-reproduces", "only a spec other than the focused one fails", [implementer(SUITE_READY), red(suite(failedByAssertion, [spec("scheduler stops cleanly", "failed"), spec(FOCUSED, "passed")]))], "failed"),
   c("red-reproduces", "the RED check timed out", [implementer(READY), red(failedByAssertion, 1, { timedOut: true })], "failed"),
+  c("red-reproduces", "RED ran a test the record has since renamed", [implementer(READY), red(failedByAssertion, 1, { argv: goTestRunner.argv({ ...READY.test!, name: "TestOldName" }) })], "inconclusive"),
+  c("red-reproduces", "RED ran the same test in another package", [implementer(READY), red(failedByAssertion, 1, { argv: goTestRunner.argv({ ...READY.test!, package: "./pkg/other" }) })], "inconclusive"),
   c("red-reproduces", "RED ran on an older change", [implementer(READY), red(failedByAssertion, 1, { digest: OTHER })], "inconclusive"),
   c("red-reproduces", "fails by assertion on the candidate with the fix reverted", [implementer(READY), redReverted(failedByAssertion)], "passed"),
   c("red-reproduces", "still does not build with the fix reverted", [implementer(READY), redReverted(buildFailed)], "failed"),
@@ -280,6 +304,7 @@ export const QUALIFICATION_CASES: readonly QualificationCase[] = [
   c("green-passes", "the Ginkgo spec that failed on the base passes", [implementer(SUITE_READY), red(suite(failedByAssertion, [spec(FOCUSED, "failed")])), green(suite(passedReport, [spec(FOCUSED, "passed")])), command(BYDB.testCi, 0)], "passed"),
   c("green-passes", "the Ginkgo focus matches no spec", [implementer(SUITE_READY), green(suite(passedReport, [])), command(BYDB.testCi, 0)], "failed"),
   c("green-passes", "GREEN passes another Ginkgo spec than the one that failed on the base", [implementer(SUITE_READY), red(suite(failedByAssertion, [spec(FOCUSED, "failed")])), green(suite(passedReport, [spec("scheduler logs", "passed")])), command(BYDB.testCi, 0)], "failed"),
+  c("green-passes", "GREEN ran a test the record has since renamed", [implementer(READY), green(passedReport, 0, { argv: goTestRunner.argv({ ...READY.test!, name: "TestOldName" }) }), command(BYDB.testCi, 0)], "inconclusive"),
   c("green-passes", "GREEN ran on an older change", [implementer(READY), ...candidate({}, { digest: OTHER })], "inconclusive"),
 
   c("build-checks", "all build checks pass", [...candidate()], "passed"),
@@ -345,6 +370,9 @@ export const QUALIFICATION_CASES: readonly QualificationCase[] = [
 
   g("green-passes", "the regression passes, with no further commands to run", [implementer(TS_READY), tsGreen()], "passed"),
   g("green-passes", "the regression fails on the change", [implementer(TS_READY), tsGreen(tsAssertion, 1)], "failed"),
+  g("green-passes", "GREEN ran a test the record has since renamed", [implementer(TS_READY), tsGreen(tsPassed, 0, { argv: vitestRunner.argv({ ...TS_READY.test!, name: "writeScopeAllows an old name" }) })], "inconclusive"),
+  g("green-passes", "a report of another test, under this test's argv", [implementer(TS_READY), tsGreen(JSON.stringify({ GraphLoomVitest: { target: { file: TS_TEST, name: "another" }, files: [], tests: [{ fullName: TS_NAME, status: "passed", failure: "" }] } }))], "failed"),
+  g("red-reproduces", "RED ran a test the record has since renamed", [implementer(TS_READY), tsRed(tsAssertion, 1, { argv: vitestRunner.argv({ ...TS_READY.test!, name: "writeScopeAllows an old name" }) })], "inconclusive"),
   g("green-passes", "the regression test is not in the report", [implementer(TS_READY), tsGreen(vitest([]), 0)], "failed"),
 
   g("build-checks", "typecheck, build and the full suite pass", [tsGreen(), ...tsBuilds()], "passed"),

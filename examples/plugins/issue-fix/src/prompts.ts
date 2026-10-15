@@ -49,6 +49,7 @@ export function planInstruction(profile: Profile, args: { issue: number; request
     "",
     "Read AGENTS.md and CLAUDE.md if present, the code the issue names, its tests and its production callers.",
     "A read-only reviewer checks this plan before you implement it.",
+    ...notes(profile),
     "",
     UNCLEAR_POLICY,
     "",
@@ -64,6 +65,12 @@ export function planInstruction(profile: Profile, args: { issue: number; request
   ].join("\n");
 }
 
+/** The profile's planning notes, as a block of the prompt; nothing when it has none. */
+function notes(profile: Profile): string[] {
+  const list = profile.planning.notes ?? [];
+  return list.length > 0 ? ["", `About ${profile.project}:`, ...list.map((n) => `- ${n}`)] : [];
+}
+
 /** The plan went back to the planner: the code review's confirmed findings, after the supervisor re-entered Fix. */
 export function planRevisionInstruction(profile: Profile, args: { issue: number; feedback: string[]; changed: boolean }): string {
   return [
@@ -74,6 +81,7 @@ export function planRevisionInstruction(profile: Profile, args: { issue: number;
     "",
     "Read the code again where a finding needs it. A finding you disagree with is answered in the basis of the decision it concerns, with the evidence.",
     profile.planning.reach,
+    ...notes(profile),
     "",
     "Return the full decision-record-v1 result again, with every required field.",
   ].join("\n");
@@ -101,6 +109,7 @@ export function implementInstruction(profile: Profile, args: { issue: number; pl
     ...(profile.changelog !== undefined ? [`- Add an entry for the fix under the current release (the first "## " section) of ${profile.changelog.path}, in the matching subsection.`] : []),
     `- ${excluded.length > 0 ? `Do not change ${excluded.join(", ")}. ` : ""}Do not commit, push, create branches or edit generated files.`,
     checksNote(profile),
+    ...notes(profile),
     "",
     UNCLEAR_POLICY,
     "",

@@ -179,13 +179,14 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
     const stdoutTail = `${scenario.ocrPath ?? OCR}\n`;
     record("command", { command: { id: "ocr", argv: ["sh"], exitCode: 0, stdoutTail, stderrTail: "" }, environment: { phase: "preflight" } }, undefined, "env-0");
   }
-  const commandPayload = (id: string, r: CommandResult) => ({
-    command: { id, argv: [id], exitCode: r.exitCode ?? 0, stdoutTail: r.stdout ?? "", stderrTail: r.stderr ?? "", ...(r.report !== undefined ? { report: { text: r.report, truncated: false } } : {}) },
+  // The argv the job asked for: a regression run names its test only there.
+  const commandPayload = (id: string, r: CommandResult, argv: string[] = [id]) => ({
+    command: { id, argv, exitCode: r.exitCode ?? 0, stdoutTail: r.stdout ?? "", stderrTail: r.stderr ?? "", ...(r.report !== undefined ? { report: { text: r.report, truncated: false } } : {}) },
   });
 
   function run(job: JobSpec, op: string): void {
     jobs.push(job);
-    const input = job.input as { commands?: Array<{ id: string }>; number?: number } | undefined;
+    const input = job.input as { commands?: Array<{ id: string; argv: string[] }>; number?: number } | undefined;
     if (job.executor?.id === "graphloom.github/get-issue") {
       record("other", { github: { item: { number: input!.number, title: "Scheduler reports long actions as timed out", state: "open", url: "u", labels: [], body: scenario.issueBody ?? "Backups longer than five minutes are reported as action timed out." } } }, job, op);
       return;
@@ -248,7 +249,7 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
       record(
         "command",
         {
-          ...commandPayload(COMMAND.regression, outcome),
+          ...commandPayload(COMMAND.regression, outcome, input!.commands![0]!.argv),
           checkout: { from: "candidate", base: "base-sha", commit: `rc-${op}`, paths: CHANGED, prepared: true, mutations: [], phase: "run", reverted: true, revertedPaths: ["pkg/timestamp/scheduler.go"] },
         },
         job,
@@ -263,12 +264,12 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
       for (const c of input!.commands!) {
         const defaults: CommandResult =
           c.id === COMMAND.regression ? { report: PASSED } : c.id === COMMAND.changesDiff ? { stdout: "+- Warn while a scheduled action is still running.\n" } : {};
-        record("command", { ...commandPayload(c.id, { ...defaults, ...results[c.id] }), checkout: { from: "candidate", base: "base-sha", commit: `c-${op}`, paths: CHANGED, prepared: true, mutations, phase: "run" } }, job, op);
+        record("command", { ...commandPayload(c.id, { ...defaults, ...results[c.id] }, c.argv), checkout: { from: "candidate", base: "base-sha", commit: `c-${op}`, paths: CHANGED, prepared: true, mutations, phase: "run" } }, job, op);
       }
       return;
     }
     if (job.checkout?.from === "base") {
-      record("command", { ...commandPayload(COMMAND.regression, scenario.red ?? { exitCode: 1, report: FAILED }), checkout: { from: "base", base: "base-sha", commit: `b-${op}`, paths: job.checkout.paths, prepared: true, mutations: [], phase: "run" } }, job, op);
+      record("command", { ...commandPayload(COMMAND.regression, scenario.red ?? { exitCode: 1, report: FAILED }, input!.commands![0]!.argv), checkout: { from: "base", base: "base-sha", commit: `b-${op}`, paths: job.checkout.paths, prepared: true, mutations: [], phase: "run" } }, job, op);
       return;
     }
     for (const c of input!.commands!) record("command", commandPayload(c.id, { stdout: "abc123\n" }), job, op);

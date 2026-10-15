@@ -316,7 +316,9 @@ function fix(ctx: Context, view: RunView, issue: number, state: FixPrivateState)
     if (changes !== undefined && latestFile(current, changes, digest) === undefined) {
       return withPrivate(observe({ paths: [changes] }, `observe ${changes} for the current change`), state);
     }
-    const green = latestCheckoutRun(current, COMMAND.regression, "candidate", digest);
+    // Runs of this test only: the record may rename it without changing the candidate.
+    const argv = profile.runner.argv(test);
+    const green = latestCheckoutRun(current, COMMAND.regression, "candidate", digest, argv);
     if (green === undefined) {
       return withPrivate(
         dispatch(checkJob("Candidate checks", { from: "candidate" }, candidateCommands(profile, test), true), "run GREEN and the build checks on the committed change"),
@@ -325,7 +327,7 @@ function fix(ctx: Context, view: RunView, issue: number, state: FixPrivateState)
     }
     const tests = green.checkout!.paths.filter((p) => isTestPath(profile, p));
     if (tests.length > 0) {
-      const baseRed = latestCheckoutRun(current, COMMAND.regression, "base", digest);
+      const baseRed = latestCheckoutRun(current, COMMAND.regression, "base", digest, argv);
       if (baseRed === undefined) {
         return withPrivate(
           dispatch(checkJob("RED check", { from: "base", paths: tests }, redCommands(profile, test), false), "run RED on the base commit with only the test files"),
@@ -357,7 +359,7 @@ function fix(ctx: Context, view: RunView, issue: number, state: FixPrivateState)
               { ...state, corrections: state.corrections + 1 },
             );
           }
-        } else if (latestRevertedCheckoutRun(current, COMMAND.regression, digest) === undefined) {
+        } else if (latestRevertedCheckoutRun(current, COMMAND.regression, digest, argv) === undefined) {
           return withPrivate(
             dispatch(
               checkJob("RED check (reverted)", { from: "candidate", revertPatch: record.revertPatch }, redCommands(profile, test), false),

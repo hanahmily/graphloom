@@ -9,21 +9,31 @@ import type { RegressionOutcome, RegressionRunner, RegressionTestRef } from "./t
 const MARKER = "GraphLoomVitest";
 
 interface VitestSummary {
+  /** The test the run was asked for: its repository-relative file and full name. */
+  target?: { file: string; name: string };
   files?: Array<{ name: string; status: string; message: string }>;
   tests?: Array<{ fullName: string; status: string; failure: string }>;
   missing?: boolean;
   unreadable?: boolean;
 }
 
-/** Reduces vitest's JSON report to the named test's results and each file's own error. */
+/**
+ * Reduces vitest's JSON report to the named test's results in the requested
+ * file alone, and that file's own error. vitest's file argument is a
+ * substring filter, so the report may hold other files with a test of the
+ * same name; only the file whose real path is the target's counts.
+ */
 const REDUCE = `const fs = require("node:fs");
-const [, file, name] = process.argv;
-const out = {};
+const [, file, name, target, rel] = process.argv;
+const real = (p) => { try { return fs.realpathSync(p); } catch { return p; } };
+const want = real(target);
+const out = { target: { file: rel, name } };
 try {
   const d = JSON.parse(fs.readFileSync(file, "utf8"));
-  out.files = (d.testResults || []).map((t) => ({ name: String(t.name || ""), status: String(t.status || ""), message: String(t.message || "").slice(0, 600) }));
+  const mine = (d.testResults || []).filter((t) => real(String(t.name || "")) === want);
+  out.files = mine.map((t) => ({ name: String(t.name || ""), status: String(t.status || ""), message: String(t.message || "").slice(0, 600) }));
   out.tests = [];
-  for (const t of d.testResults || []) {
+  for (const t of mine) {
     for (const a of t.assertionResults || []) {
       if (a.fullName === name) out.tests.push({ fullName: a.fullName, status: String(a.status || ""), failure: String((a.failureMessages || [])[0] || "").slice(0, 600) });
     }
@@ -32,6 +42,9 @@ try {
   out[fs.existsSync(file) ? "unreadable" : "missing"] = true;
 }
 process.stdout.write(JSON.stringify({ ${MARKER}: out }) + "\\n");
+// The target test's own status: 0 passed, 1 failed, 3 no result for it.
+const own = (out.tests || []).map((t) => t.status);
+process.exitCode = own.includes("failed") ? 1 : own.includes("passed") ? 0 : 3;
 `;
 
 /**
@@ -47,12 +60,19 @@ const SCRIPT = [
   's="$d"; bin=""',
   'while :; do if [ -x "$s/node_modules/.bin/vitest" ]; then bin="$(cd "$s" && pwd)/node_modules/.bin/vitest"; break; fi; [ "$s" = "." ] && break; s=$(dirname "$s"); done',
   '[ -n "$bin" ] || { echo "vitest is not installed: no node_modules/.bin/vitest at or above $d" >&2; exit 127; }',
-  'if [ "$d" = "." ]; then rel="$f"; else rel="${f#"$d"/}"; fi',
+  // vitest's file argument is a substring filter (relative to its root even when absolute), so other
+  // files ending the same way may run too: the reducer keeps exactly this file, and the command exits
+  // with the target test's own status rather than vitest's.
+  'a="$(cd "$(dirname "$f")" && pwd -P)/$(basename "$f")"',
   'r="$GRAPHLOOM_REPORT_FILE"',
-  '(cd "$d" && "$bin" run "$rel" --testNamePattern "$p" --reporter=json --outputFile="$r.vitest")',
+  '(cd "$d" && "$bin" run "$a" --testNamePattern "$p" --reporter=json --outputFile="$r.vitest")',
   "rc=$?",
-  `node -e "$4" "$r.vitest" "$t" > "$r" || echo '{"${MARKER}":{"unreadable":true}}' > "$r"`,
+  `node -e "$4" "$r.vitest" "$t" "$a" "$f" > "$r"; n=$?`,
+  `case "$n" in 0|1|3) ;; *) echo '{"${MARKER}":{"unreadable":true}}' > "$r" ;; esac`,
   'rm -f "$r.vitest"',
+  'case "$n" in 0|1) exit "$n" ;; esac',
+  // No result for the target: never a success, whatever else ran.
+  '[ "$rc" -eq 0 ] && exit 1',
   "exit $rc",
 ].join("\n");
 
@@ -96,13 +116,14 @@ function failureOutcome(failure: string): RegressionOutcome {
 export function vitestOutcome(report: string, test: RegressionTestRef): RegressionOutcome {
   const summary = vitestSummary(report);
   if (summary === undefined || summary.missing === true || summary.unreadable === true) return "not-run";
-  const tests = summary.tests ?? [];
+  // A report of another test, such as one recorded before the record renamed it, says nothing about this one.
+  if (summary.target?.file !== test.package || summary.target.name !== test.name) return "not-run";
+  const tests = (summary.tests ?? []).filter((t) => t.fullName === test.name);
   const failed = tests.find((t) => t.status === "failed");
   if (failed !== undefined) return failureOutcome(failed.failure);
   if (tests.some((t) => t.status === "passed")) return "passed";
   const message = (summary.files ?? []).map((f) => f.message).find((m) => m.trim() !== "");
   if (message !== undefined) return LOAD_ERROR.test(message) ? "build-failed" : "setup-failed";
-  void test;
   return "not-run";
 }
 

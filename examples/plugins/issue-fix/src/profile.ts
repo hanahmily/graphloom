@@ -50,6 +50,12 @@ export interface ProfileData {
     reach: string;
     /** What `needsE2E` means for this repository, such as `the Kind end-to-end tests`. */
     e2e?: string;
+    /**
+     * Repository-specific guidance the planner and the implementer both get,
+     * such as how to treat an issue that asks for a feature rather than
+     * reporting a bug.
+     */
+    notes?: string[];
   };
   implementation: {
     /** The repository's coding conventions the implementer follows. */
@@ -170,6 +176,7 @@ export function parseProfile(config: unknown): Profile {
   }
   need(isObject(p.planning) && isString(p.planning.reach), "planning.reach is required");
   need((p.planning as Record<string, unknown>).e2e === undefined || isString((p.planning as Record<string, unknown>).e2e), "planning.e2e must be text");
+  need((p.planning as Record<string, unknown>).notes === undefined || isStrings((p.planning as Record<string, unknown>).notes), "planning.notes must be a list of text");
   need(isObject(p.implementation) && isString(p.implementation.conventions), "implementation.conventions is required");
   for (const key of ["checks", "cleanCheckHint"]) {
     const v = (p.implementation as Record<string, unknown>)[key];

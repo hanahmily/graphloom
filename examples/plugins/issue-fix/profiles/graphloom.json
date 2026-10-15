@@ -139,7 +139,13 @@
   ],
   "planning": {
     "reach": "Reach: for every behaviour the fix changes, the basis of that decision names each caller and lifecycle path that depends on the old behaviour (resume and restart from durable state, stop and AbortSignal cancellation, thrown errors and rejected promises, retries, concurrent runs and locks, child-process and resource cleanup), starting with the changed module's own close, stop and shutdown paths, and the test that covers it; a path no test covers is stated there as a risk. For a wait the fix makes longer or unbounded, say what happens when the awaited promise never settles or ignores its abort signal.",
-    "e2e": "the live-provider tests (the *.live.test.ts and *-live tests, which need real credentials)"
+    "e2e": "the live-provider tests (the *.live.test.ts and *-live tests, which need real credentials)",
+    "notes": [
+      "Issues here are often enhancements rather than bug reports. Treat an enhancement the same way as a bug: the regression test is a new test of the behaviour the issue asks for, and it must fail without your change (RED) and pass with it (GREEN). Its expected value comes from the issue's acceptance criteria, not from your implementation.",
+      "The public surface an enhancement issue itself specifies (a new export, option, field or CLI flag) is what was asked for, not an open product decision: record it as a behaviour decision with the issue as its basis. Points the issue leaves open stay product decisions.",
+      "A new test usually calls code the base commit does not have, so in RED's base checkout it fails to load (a missing export or module) instead of failing an assertion. Then put a revertPatch in your decision record: a diff that, applied in reverse to your change, keeps the new names and signatures the test imports but restores the old behaviour behind them (for example a stub that returns what the code did before), so the test fails by assertion.",
+      "Use cannot_reproduce only when the issue does not say what the new behaviour must be, so no test's expected value can be written from it; ask in draftComment."
+    ]
   },
   "implementation": {
     "conventions": "Follow AGENTS.md: work in the TypeScript packages, keep the controller, SDK and CLI free of any plugin's own notions, and do not touch legacy/ or .local/. Follow the repository's conventions."

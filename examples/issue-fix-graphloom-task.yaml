@@ -2,12 +2,12 @@
 # `repo: .` is the GraphLoom checkout this file lives in: the run's worktree
 # is a full checkout of the repository under examples/graphloom/<run-id>, and
 # its state under examples/graphloom-state/ (both ignored by Git).
-# Replace N with the number of the bug issue to fix; until then the run stops
-# as an incompatible task before any job.
+# GraphLoom's issues are mostly enhancements: the profile tells the agents to
+# treat one like a bug, with a new test that fails without the change.
 graph: issue-fix
 repo: .
 config: plugins/issue-fix/profiles/graphloom.json
-request: "Fix hanahmily/graphloom#N."
+request: "Fix hanahmily/graphloom#119."
 budgets:
   agentInvocations: 2000
   jobs: 1024

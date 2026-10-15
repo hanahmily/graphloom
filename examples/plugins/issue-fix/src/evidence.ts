@@ -116,10 +116,21 @@ export function latestCheckoutRun(
   id: string,
   from: CheckoutRecord["from"],
   digest: string | undefined,
+  argv?: readonly string[],
 ): CommandRun | undefined {
   return commandRuns(evidence, id)
-    .filter((r) => r.checkout?.from === from && r.checkout.reverted !== true && r.checkout.phase === "run" && digest !== undefined && r.record.candidateDigest === digest)
+    .filter((r) => r.checkout?.from === from && r.checkout.reverted !== true && r.checkout.phase === "run" && digest !== undefined && r.record.candidateDigest === digest && ranArgv(r, argv))
     .at(-1);
+}
+
+/**
+ * Whether `run` executed exactly `argv`, when one is given. A regression run
+ * names its test only in its argv, and the workspace digest does not change
+ * when a decision record renames the test, so evidence for one test must not
+ * stand for another on the same candidate.
+ */
+export function ranArgv(run: CommandRun, argv: readonly string[] | undefined): boolean {
+  return argv === undefined || (Array.isArray(run.command.argv) && run.command.argv.length === argv.length && run.command.argv.every((a, i) => a === argv[i]));
 }
 
 /**
@@ -129,9 +140,9 @@ export function latestCheckoutRun(
  * candidate has, including earlier-round infrastructure a later test may
  * depend on to even build.
  */
-export function latestRevertedCheckoutRun(evidence: EvidenceRecord[], id: string, digest: string | undefined): CommandRun | undefined {
+export function latestRevertedCheckoutRun(evidence: EvidenceRecord[], id: string, digest: string | undefined, argv?: readonly string[]): CommandRun | undefined {
   return commandRuns(evidence, id)
-    .filter((r) => r.checkout?.from === "candidate" && r.checkout.reverted === true && r.checkout.phase === "run" && digest !== undefined && r.record.candidateDigest === digest)
+    .filter((r) => r.checkout?.from === "candidate" && r.checkout.reverted === true && r.checkout.phase === "run" && digest !== undefined && r.record.candidateDigest === digest && ranArgv(r, argv))
     .at(-1);
 }
 

@@ -7,7 +7,8 @@ been made with it yet; its banyandb profile reproduces
 
 ## Purpose
 
-`issue-fix` fixes one bug issue in any repository, given a repository
+`issue-fix` resolves one issue, a bug or an
+[enhancement](#enhancement-issues), in any repository, given a repository
 *profile*. It is [banyandb-fix](design-banyandb-fix-graph.md) with everything
 BanyanDB-specific moved into the profile, so the same graph runs on BanyanDB
 and on GraphLoom itself. The stages, requirements, review convergence, RED and
@@ -42,7 +43,7 @@ The profile supplies, as data:
 | `testPaths` | `suffixes`, and `directories` whose contents count as test files; RED applies only these | `_test.go`, `testdata/` | `.test.ts`, `test/`, `fixtures/` |
 | `protectedPaths` | Excluded from the write scope unless the record justifies one | `api/proto`, `go.mod`, `go.sum`, `.github` | `package-lock.json`, `.github`, `legacy` |
 | `changelog` | Optional `{ path, rule }`; absent means no `changelog-entry` requirement. The one rule, `first-release-section-entry`, needs a new list entry inside the first `## ` section | `CHANGES.md` | none: the repository keeps no changelog |
-| `planning` | `reach` (the reach question for the plan) and optional `e2e` (what `needsE2E` means) | Go lifecycle wording, Kind tests | TypeScript lifecycle wording, live-provider tests |
+| `planning` | `reach` (the reach question for the plan), optional `e2e` (what `needsE2E` means) and optional `notes` (guidance the planner and implementer both get) | Go lifecycle wording, Kind tests, no notes | TypeScript lifecycle wording, live-provider tests, [enhancement issues](#enhancement-issues) |
 | `implementation` | `conventions`, optional `checks` (what the implementer is told is checked; generated from the commands when absent) and `cleanCheckHint` | `run.Go`, `make format` | AGENTS.md rules; generated checks text |
 | `review` | `language`, `testFiles` and `rules`: the extra "what does the change break" rule | the Go rule | the same questions for TypeScript: resume, AbortSignal, rejected promises, locks, persisted state and wire formats, plugin notions in the controller |
 | `pullRequest` | `checklist` after the title, `footer` (`{issue}` becomes the reference), optional `e2eNote` | BanyanDB's template | a short checklist and `Fixes {issue}.` |
@@ -82,7 +83,47 @@ report's own error lines for corrections.
 | Runner | `test` | Outcome |
 |---|---|---|
 | `go-test` | `package` a `./` Go package, `name` a `TestXxx`, optional Ginkgo `focus` | banyandb-fix's `go test -json` and Ginkgo report parser, unchanged |
-| `vitest` | `package` the test file relative to the repository root, `name` the test's full name (describe titles and title joined by spaces); no `focus` | Runs `vitest run <file> --testNamePattern ^name$ --reporter=json` from the file's package directory with the nearest installed vitest, and reduces the report to one line. An `AssertionError` is `failed`; a missing export or module (`is not a function`, `Cannot find module`, …) or a file that does not load is `build-failed`, which sends RED to the revert patch as a Go build failure does; any other error is `panicked`; a skipped test with a file error is `setup-failed` |
+| `vitest` | `package` the test file relative to the repository root, `name` the test's full name (describe titles and title joined by spaces); no `focus` | Runs `vitest run <file> --testNamePattern ^name$ --reporter=json` from the file's package directory with the nearest installed vitest, and reduces the report to one line naming the requested file and test. An `AssertionError` is `failed`; a missing export or module (`is not a function`, `Cannot find module`, …) or a file that does not load is `build-failed`, which sends RED to the revert patch as a Go build failure does; any other error is `panicked`; a skipped test with a file error is `setup-failed` |
+
+vitest's file argument is a substring filter, relative to its root even when
+given absolute, so `src/a.test.ts` also selects `other/src/a.test.ts`. The
+reducer keeps only the file whose real path is the requested one, and the
+command exits with that test's own status (0 passed, 1 failed, non-zero when
+it has no result), not vitest's, so another file's failure can neither
+satisfy RED nor block GREEN.
+
+**A run counts only for the test it ran.** The regression command names its
+test only in its argv, and the candidate digest does not change when a
+decision record renames the test or moves it to another package. RED and
+GREEN therefore count only runs whose recorded argv is exactly the one the
+runner builds for the record's current test; for any other, the graph runs
+the checks again. This closes the hole for both runners: a Go run's argv
+names its package, test and focus. The vitest report also records the test
+it was run for, and `vitestOutcome` reads a report for any other test as
+`not-run`.
+
+### Enhancement issues
+
+GraphLoom's issues are mostly enhancements, not bug reports. The graph treats
+both the same way: the regression test is a new test of the behaviour the
+issue asks for, RED shows it fails without the change, and GREEN shows it
+passes with it. The graphloom profile's `planning.notes` tell the planner and
+the implementer that:
+
+- the expected value comes from the issue's acceptance criteria;
+- the public surface the issue itself specifies (a new export, option, field
+  or flag) is what was asked for and is recorded as a behaviour decision; only
+  points the issue leaves open stay product decisions, so the
+  unclear-issue policy does not block every enhancement;
+- a new test usually calls code the base lacks, so RED's base checkout fails
+  to load it (`build-failed`). The graph then asks for a revert patch, and the
+  implementer supplies one that keeps the new names and signatures but
+  restores the old behaviour behind them, so RED fails by assertion on the
+  candidate with that patch reversed;
+- `cannot_reproduce` is only for an issue that does not say what the new
+  behaviour must be.
+
+The example task requests `Fix hanahmily/graphloom#119.`
 
 ## How the config is pinned and passed
 
@@ -183,7 +224,11 @@ built-in runner in the bundle, a source change qualified like any other.
   vitest test rules and its GREEN-then-RED commands are tested; the vitest
   runner runs real vitest on a scratch project and classifies passes,
   assertion failures, crashes, missing exports, unloadable files and missing
-  tests.
+  tests, judges only the requested file when another file's path ends the
+  same way, and reads a report as no result for any other test. Graph and
+  qualification cases show that a renamed test, or the same name in another
+  package, reruns the checks rather than reusing the old runs, and that an
+  enhancement's unloadable RED leads to the revert-patch request.
 - Qualification cases cover both shipped profiles.
 - The CLI e2e test runs issue-fix with a fixture profile through the
   controller and a child plugin host, and the rehearsal tests rehearse it

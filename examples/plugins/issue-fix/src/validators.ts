@@ -70,7 +70,9 @@ export const reproduces: Validator = profiled((input, profile) => {
   // evidence: it exists only because the plain base checkout could not
   // even build the test alone (see graph.ts), so the base run's own
   // build-failed result no longer speaks for the current RED attempt.
-  const red = latestRevertedCheckoutRun(input.evidence, COMMAND.regression, input.candidateDigest) ?? latestCheckoutRun(input.evidence, COMMAND.regression, "base", input.candidateDigest);
+  // Only runs of this test count: a renamed test on an unchanged candidate needs its own RED.
+  const argv = profile.runner.argv(record.test);
+  const red = latestRevertedCheckoutRun(input.evidence, COMMAND.regression, input.candidateDigest, argv) ?? latestCheckoutRun(input.evidence, COMMAND.regression, "base", input.candidateDigest, argv);
   if (red === undefined) {
     const candidate = latestCheckoutRun(input.evidence, COMMAND.regression, "candidate", input.candidateDigest);
     if (candidate !== undefined && !candidate.checkout!.paths.some(testPath)) return failed("the change adds or edits no test files");
@@ -103,8 +105,9 @@ export const reproduces: Validator = profiled((input, profile) => {
 export const passes: Validator = profiled((input, profile) => {
   const { record } = implementerRecord(input.evidence);
   if (record?.test === undefined) return inconclusive("no regression test is named");
-  const green = latestCheckoutRun(input.evidence, COMMAND.regression, "candidate", input.candidateDigest);
-  if (green === undefined) return inconclusive("no GREEN check ran on the current change");
+  const argv = profile.runner.argv(record.test);
+  const green = latestCheckoutRun(input.evidence, COMMAND.regression, "candidate", input.candidateDigest, argv);
+  if (green === undefined) return inconclusive(`no GREEN check of ${profile.runner.label(record.test)} ran on the current change`);
   const unclean = cleanRun(green);
   if (unclean !== undefined) return failed(unclean);
   const name = profile.runner.label(record.test);
@@ -113,7 +116,7 @@ export const passes: Validator = profiled((input, profile) => {
   // Only the plain base RED carries finer test identities (Ginkgo specs) to
   // cross-check; a reverted-candidate RED has none here, so this secondary
   // check is simply skipped then, same as when no RED has run at all.
-  const red = latestCheckoutRun(input.evidence, COMMAND.regression, "base", input.candidateDigest);
+  const red = latestCheckoutRun(input.evidence, COMMAND.regression, "base", input.candidateDigest, argv);
   const missing = profile.runner.missingOnGreen(red !== undefined ? reportText(red) : undefined, reportText(green));
   if (missing.length > 0) return failed(`GREEN did not pass the spec that failed on the base: ${missing.join("; ")}`);
   const further = commandsFor(profile, "passes");
