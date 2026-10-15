@@ -13,6 +13,7 @@ import {
   validate,
   type GraphDefinition,
   type GraphPlugin,
+  type JobSpec,
   type Validator,
 } from "@graphloom/sdk";
 import { createScriptedRunner } from "@graphloom/runner";
@@ -800,6 +801,112 @@ describe("supervisor provider failures and deterministic remedies (controller)",
     });
     expect(report).toMatchObject({ status: "stopped", stopReason: "upstream down" });
     expect(triggers).toEqual([expect.stringMatching(/failed \(after 1 retries, the executor's limit\): upstream 503$/)]);
+  });
+
+  it("retries a continued agent job from the failed attempt's own session, keeping the session chain", async () => {
+    const env = await makeEnv();
+    let proposals = 0;
+    const graph: GraphPlugin = {
+      describe: () => structuredClone(definition),
+      advance(view) {
+        proposals += 1;
+        if (proposals === 1) return writeWork;
+        if (proposals === 2) {
+          const first = view.agentSessions![0]!.operationId;
+          return dispatch(
+            { stageId: "write", kind: "agent", purpose: "work", instruction: "write", writeScope: [GREETING_PATH], continueFrom: first },
+            "continue the writer",
+          );
+        }
+        return stop({ reason: "continued writer settled", blocker: "none" }, "done");
+      },
+    };
+    const seen: Array<{ continueFrom?: string; resume?: string; operationId: string }> = [];
+    const job = (reply: Record<string, unknown>) => async (j: { continueFrom?: string }, ctx: { operationId: string; session?: { resume?: string } }) => {
+      seen.push({
+        operationId: ctx.operationId,
+        ...(j.continueFrom !== undefined ? { continueFrom: j.continueFrom } : {}),
+        ...(ctx.session?.resume !== undefined ? { resume: ctx.session.resume } : {}),
+      });
+      return { status: "ok" as const, summary: "ran", ...reply };
+    };
+    const counted = countingDecides(createScriptedSupervisor({ decisions: [] }));
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: graph,
+      validators,
+      supervisor: counted.supervisor,
+      runner: createScriptedRunner({
+        jobs: [
+          job({ sessionRef: "s1" }),
+          job({ status: "failed", summary: "upstream 503", sessionRef: "s2", retryLimit: 1 }),
+          job({ sessionRef: "s3" }),
+        ],
+      }),
+      stateRoot: env.stateRoot,
+      runId: "continued-retry-1",
+    });
+    expect(report, `${report.stopReason}: ${report.blocker}`).toMatchObject({ stopReason: "continued writer settled" });
+    expect(counted.decides()).toBe(0);
+    const [first, failed, retried] = seen;
+    expect(failed).toMatchObject({ continueFrom: first!.operationId, resume: "s1" });
+    // The retry continues the failed attempt, which already continued the first.
+    expect(retried).toMatchObject({ continueFrom: failed!.operationId, resume: "s2" });
+    const chain = (await loadRunState(report.stateDir)).agentSessions!.map((r) => [r.operationId, r.continuedFrom]);
+    expect(chain).toEqual([
+      [first!.operationId, undefined],
+      [failed!.operationId, first!.operationId],
+      [retried!.operationId, failed!.operationId],
+    ]);
+  });
+
+  it("runs a retry stopped during its backoff on resume, without asking the graph or supervisor", async () => {
+    const env = await makeEnv();
+    const controller = createController();
+    const stateDir = path.join(env.stateRoot, "retry-wait-stop-1");
+    const running = controller.run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({ definition, advances: finishingAdvances }),
+      validators,
+      supervisor: createScriptedSupervisor({ decisions: [] }),
+      runner: createScriptedRunner({
+        jobs: [async () => ({ status: "failed" as const, summary: "upstream 503", retryLimit: 2, retryAfterMs: 3_000 })],
+      }),
+      stateRoot: env.stateRoot,
+      runId: "retry-wait-stop-1",
+    });
+    for (let i = 0; i < 200; i += 1) {
+      const pending = await loadRunState(stateDir).then((s) => s.pendingDispatch).catch(() => undefined);
+      if (pending?.status === "waiting" && pending.retry !== undefined) break;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    await controller.stop(stateDir);
+    expect((await running).status).toBe("stopped");
+    const stopped = await loadRunState(stateDir);
+    expect(stopped.executorRetry).toBeUndefined();
+    expect(stopped.pendingDispatch).toMatchObject({ status: "waiting", retry: { attempt: 1, limit: 2 } });
+
+    const counted = countingDecides(createScriptedSupervisor({ decisions: [] }));
+    const resumedJobs: string[] = [];
+    const resumed = await controller.resume({
+      runRef: stateDir,
+      // The graph's first advance (the write dispatch) was already made before the stop.
+      plugin: createScriptedGraph({ definition, advances: finishingAdvances.slice(1) }),
+      validators,
+      runner: createScriptedRunner({
+        jobs: [writeJob, reviewJob].map((run) => async (j: JobSpec, ctx: { worktreePath: string }) => {
+          resumedJobs.push(`${j.stageId}/${j.purpose}`);
+          return run(j, ctx);
+        }),
+      }),
+      supervisor: counted.supervisor,
+    });
+    expect(resumed, `${resumed.stopReason}: ${resumed.blocker}`).toMatchObject({ status: "succeeded" });
+    expect(counted.decides()).toBe(0);
+    // The first job after resume is the queued retry of the write, before the graph is asked anything.
+    expect(resumedJobs).toEqual(["write/work", "review/review"]);
+    const state = await loadRunState(stateDir);
+    expect(state.remedies?.map((r) => r.remedy)).toEqual([expect.stringMatching(/^retry 1 of 2 after/)]);
   });
 
   it("never retries a failure the controller found, even when the executor declared it retryable", async () => {

@@ -55,6 +55,12 @@ export interface PendingDispatch {
   notBefore?: string;
   /** Session directory given to an agent job, and the session it continues. */
   session?: import("@graphloom/sdk").ExecutorSession;
+  /**
+   * Set when this dispatch is a controller retry of a failure its executor
+   * declared retryable. A retry dropped before it reached the runner (Stop or
+   * a crash during its backoff) is queued again on resume, not lost.
+   */
+  retry?: { attempt: number; limit: number; graphCorrectionTrial: boolean; supervisorWorkDispatch: boolean };
 }
 
 /**

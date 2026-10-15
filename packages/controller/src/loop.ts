@@ -294,6 +294,8 @@ async function runNormalLoopSteps(
           `retry ${queuedRetry.attempt} of ${queuedRetry.limit} after a failure the executor declared retryable`,
         );
         retryFlags = {
+          attempt: queuedRetry.attempt,
+          limit: queuedRetry.limit,
           graphCorrectionTrial: queuedRetry.graphCorrectionTrial,
           supervisorWorkDispatch: queuedRetry.supervisorWorkDispatch,
         };
@@ -1240,7 +1242,8 @@ function scheduleExecutorRetry(
   state: DurableRunState,
   job: JobSpec,
   result: Awaited<ReturnType<Runner["runJob"]>>,
-  flags: RetryFlags,
+  operationId: string,
+  flags: Omit<RetryFlags, "attempt" | "limit">,
 ): { state?: DurableRunState; exhausted?: string; cleared: DurableRunState } {
   const declared = result.retryLimit;
   if (result.status !== "failed" || result.failureKind !== undefined || declared === undefined || !(declared > 0)) {
@@ -1264,10 +1267,16 @@ function scheduleExecutorRetry(
       cleared,
     };
   }
+  // A continued agent job that failed with a session of its own became that
+  // session's successor; continuing the same predecessor again would fork the
+  // chain, so the retry continues the failed attempt's session instead.
+  const continuedByFailure =
+    job.continueFrom !== undefined && (state.agentSessions ?? []).some((r) => r.operationId === operationId);
+  const retryJob: JobSpec = continuedByFailure ? { ...job, continueFrom: operationId } : job;
   const queued: DurableRunState = {
     ...state,
     executorRetryCounts: { ...state.executorRetryCounts, [key]: attempt },
-    executorRetry: { job, attempt, limit, ...flags },
+    executorRetry: { job: retryJob, attempt, limit, ...flags },
     executorRetryAt: { ...state.executorRetryAt, [executorId]: retryAt },
   };
   return {
@@ -1525,6 +1534,8 @@ interface PendingJob {
  * flags: it is the same attempt run again, not a new correction to charge.
  */
 interface RetryFlags {
+  attempt: number;
+  limit: number;
   graphCorrectionTrial: boolean;
   supervisorWorkDispatch: boolean;
 }
@@ -1748,6 +1759,7 @@ async function prepareDispatch(
       ...(job.executor !== undefined ? { executor: job.executor } : {}),
       ...(notBefore !== undefined ? { notBefore } : {}),
       ...(session !== undefined ? { session } : {}),
+      ...(retry !== undefined ? { retry: { ...retry } } : {}),
     },
     current: { stageId: job.stageId, attempt: state.current.attempt },
     ...(job.purpose === "work" ? { workDispatched: { ...state.workDispatched, [job.stageId]: true as const } } : {}),
@@ -1923,7 +1935,7 @@ function applyDispatchResult(
     });
     next = recordContractStreak(next, job, result.evidence);
     const { pendingDispatch, ...unsettled } = next;
-    const retried = scheduleExecutorRetry(unsettled, job, result, {
+    const retried = scheduleExecutorRetry(unsettled, job, result, operationId, {
       graphCorrectionTrial: args.graphCorrectionTrial,
       supervisorWorkDispatch: args.supervisorWorkDispatch,
     });
