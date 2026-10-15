@@ -65,6 +65,16 @@ describe("operator supervisor config", () => {
     );
   });
 
+  it("reads an optional quotaRetryMs fallback and rejects a non-positive one", () => {
+    expect(parseSupervisorConfig({ provider: "minimax-cn", modelId: "MiniMax-M3" }).quotaRetryMs).toBeUndefined();
+    expect(parseSupervisorConfig({ provider: "minimax-cn", modelId: "MiniMax-M3", quotaRetryMs: 300_000 }).quotaRetryMs).toBe(300_000);
+    for (const bad of [0, -1, "60s"]) {
+      expect(() => parseSupervisorConfig({ provider: "minimax-cn", modelId: "MiniMax-M3", quotaRetryMs: bad })).toThrow(
+        /quotaRetryMs must be a positive number/,
+      );
+    }
+  });
+
   it("refuses credentials in the config file", () => {
     expect(() => parseSupervisorConfig({ provider: "deepseek", modelId: "x", apiKey: "sk-test" })).toThrow(
       /apiKey is not accepted/,

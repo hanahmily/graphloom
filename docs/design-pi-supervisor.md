@@ -66,7 +66,7 @@ These are operator-local files, not portable repository configuration.
 The CLI reads the operator's supervisor config from `$GRAPHLOOM_SUPERVISOR_CONFIG`,
 or `~/.config/graphloom/supervisor.json` when unset: initial `provider` and
 `modelId`, the other `models` it may switch to (`"provider/model"`), an optional
-Pi `agentDir`, and `promptTimeoutMs`. The file never holds credentials (`apiKey` is
+Pi `agentDir`, `promptTimeoutMs`, and `quotaRetryMs` (see Provider failures). The file never holds credentials (`apiKey` is
 refused). Without it, `graphloom run` has no supervisor. The run's Pi transcript
 lives under `<stateDir>/supervisor`, and `resume` reopens it with the config's
 current model list.
@@ -273,6 +273,41 @@ The controller does not prompt a metered supervisor with no `agentInvocations`
 left, and caps each decision prompt at the invocations remaining. A Stop during a
 decision or a candidate patch aborts that prompt; the run records an operator stop.
 [SDK events and cancellation](https://pi.dev/docs/latest/sdk).
+
+### Provider failures
+
+A decision turn that yields no proposal is classified from the provider's last
+assistant message (`stopReason`, `errorMessage`), not from the missing JSON:
+`quota` (429 and rate/usage limits; any reset time the message states becomes
+`retryAt`), `overflow` (Pi's own `isContextOverflow`), `auth` (401/403 and
+credential refusals), `empty` (no tool call and no text, including thinking-only
+replies), `malformed` (text that is not a GraphDecision), or `unknown`. The host
+applies a fixed remedy without asking the model what to do: a quota error with a
+reset time waits until then (at most three waits a turn, only within the
+`maxWaitMs` the controller passes from the run's `waitMs`) and retries the turn;
+an overflow compacts the session and retries once. An empty or malformed reply
+gets the turn's single re-ask: one for both kinds together, not one each. The
+re-ask says what was wrong; a second unreadable reply stops the run, naming its
+class. Every retried call, compaction, re-ask and rejection re-ask counts against
+the turn's provider-call allowance. A provider failure is never sent to admission,
+so it is not counted as an inadmissible proposal and is not charged to
+`decisions`. The compaction honors the run's Stop
+and the prompt timeout: either aborts Pi's summarization request and fails the
+remedy.
+
+Some providers give no reset time; MiniMax's quota 429 `(2056)` is one. For
+those, the operator may set `quotaRetryMs` in the supervisor config
+(`~/.config/graphloom/supervisor.json`, or `GRAPHLOOM_SUPERVISOR_CONFIG`), for
+example `"quotaRetryMs": 300000`. A quota error with no parsed reset time then
+waits that long and retries the turn. The wait has the same bounds as a
+provider-stated one: the run's remaining `waitMs` and at most three waits a turn.
+The remedy is recorded with `waitBasis: "operator"`. Without `quotaRetryMs`, such
+an error stops the run. `drainRemedies()` reports what was
+done; the controller charges the waits to `waitMs` and records each remedy in the
+run's `remedies` (shown by `inspect`). A failure with no remedy left stops the
+run with `stopReason` `supervisor provider <class>: <provider message>`, and the
+blocker adds why no remedy applied (for example, no reset time, wait budget,
+already compacted once).
 
 ## Implementation and verification gaps
 

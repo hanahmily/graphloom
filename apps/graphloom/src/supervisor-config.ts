@@ -25,6 +25,12 @@ export interface SupervisorConfig {
   models: SupervisorModelRef[];
   agentDir?: string;
   promptTimeoutMs?: number;
+  /**
+   * Fixed wait before retrying a provider quota error that states no reset
+   * time (MiniMax's 429 `(2056)` gives none). Still bounded by the run's
+   * `waitMs` budget and the per-turn wait limit. Omitted: such errors stop.
+   */
+  quotaRetryMs?: number;
 }
 
 export function supervisorConfigPath(env: NodeJS.ProcessEnv = process.env): { file: string; explicit: boolean } {
@@ -77,6 +83,12 @@ export function parseSupervisorConfig(value: unknown, source = "supervisor confi
     }
     config.promptTimeoutMs = obj.promptTimeoutMs;
   }
+  if (obj.quotaRetryMs !== undefined) {
+    if (typeof obj.quotaRetryMs !== "number" || !Number.isFinite(obj.quotaRetryMs) || !(obj.quotaRetryMs > 0)) {
+      throw new Error(`${source}: quotaRetryMs must be a positive number`);
+    }
+    config.quotaRetryMs = obj.quotaRetryMs;
+  }
   return config;
 }
 
@@ -122,7 +134,11 @@ export function piSupervisorFactory(config: SupervisorConfig): NonNullable<RunRe
       ...(config.agentDir !== undefined ? { agentDir: config.agentDir } : {}),
       ...(config.promptTimeoutMs !== undefined ? { promptTimeoutMs: config.promptTimeoutMs } : {}),
     });
-    return createPiSupervisor({ session, configuredModels: config.models });
+    return createPiSupervisor({
+      session,
+      configuredModels: config.models,
+      ...(config.quotaRetryMs !== undefined ? { quotaRetryMs: config.quotaRetryMs } : {}),
+    });
   };
 }
 
@@ -142,6 +158,7 @@ export function piSupervisorRestore(config: SupervisorConfig): NonNullable<Resum
       repairsDir: path.join(stateDir, "repairs"),
       ...(config.agentDir !== undefined ? { agentDir: config.agentDir } : {}),
       ...(config.promptTimeoutMs !== undefined ? { promptTimeoutMs: config.promptTimeoutMs } : {}),
+      ...(config.quotaRetryMs !== undefined ? { quotaRetryMs: config.quotaRetryMs } : {}),
     });
 }
 

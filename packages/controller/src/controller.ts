@@ -64,7 +64,9 @@ import {
   loadRunState,
   saveRunState,
   type DurableRunState,
+  type RemedyRecord,
   type RunStatus,
+  type SupervisorOutcomeRecord,
   type VersionRecord,
 } from "./state.js";
 import {
@@ -212,6 +214,10 @@ export interface InspectReport {
   dispatchesSinceReceipt: Record<string, { agent: number; total: number; since: string }>;
   /** The task config intake pinned (path and digest; its content stays with the run). */
   config?: { path: string; sha256: string };
+  /** Deterministic remedies applied without a model decision (quota waits, compactions, re-asks, retries), newest last. */
+  remedies: RemedyRecord[];
+  /** Supervisor turns that ended without an admitted proposal (#117), such as `supervisor_inadmissible`. */
+  supervisorOutcomes: SupervisorOutcomeRecord[];
   /** The gate in `run` (docs/design-graph-rehearsal.md §3.5): whether (and how) this run was rehearsed before it was intaken. Absent for runs intaken un-gated. */
   rehearsalGate?: IntakePin["rehearsalGate"];
 }
@@ -1049,6 +1055,8 @@ function toInspect(state: DurableRunState): InspectReport {
     stateDir: state.stateDir,
     contracts: contractSummary(state.evidence),
     dispatchesSinceReceipt: structuredClone(state.dispatchesSinceReceipt ?? {}),
+    remedies: structuredClone(state.remedies ?? []),
+    supervisorOutcomes: structuredClone(state.supervisorOutcomes ?? []),
   };
   if (state.stopReason !== undefined) {
     report.stopReason = state.stopReason;
@@ -1149,7 +1157,7 @@ export { admitValidation, freshEvidence } from "./admit.js";
 export { toRunView, bumpGeneration, classifyAgentResult } from "./loop.js";
 export type { ContractOutcome } from "./loop.js";
 export { loadRunState, saveRunState } from "./state.js";
-export type { DurableRunState, RunStatus, VersionRecord } from "./state.js";
+export type { DurableRunState, RemedyRecord, RunStatus, SupervisorOutcomeRecord, VersionRecord } from "./state.js";
 export type { DeleteReport } from "./delete-run.js";
 export type { IntakePin, TaskConfigPin } from "./intake.js";
 export type {

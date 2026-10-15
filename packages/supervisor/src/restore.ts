@@ -28,6 +28,8 @@ export interface RestorePiSupervisorOptions {
   /** Controller repairs directory; required for candidate coding grants. */
   repairsDir?: string;
   patchTimeoutMs?: number;
+  /** Operator fallback wait for a quota error with no reset time (see CreatePiSupervisorOptions). */
+  quotaRetryMs?: number;
 }
 
 /**
@@ -84,6 +86,7 @@ export async function restorePiSupervisorFromBinding(
     configuredModels: configured,
     initialSwitchJournal: binding.switchJournal as ModelSwitchRecord[],
     ...(options.patchTimeoutMs !== undefined ? { patchTimeoutMs: options.patchTimeoutMs } : {}),
+    ...(options.quotaRetryMs !== undefined ? { quotaRetryMs: options.quotaRetryMs } : {}),
   });
 }
 

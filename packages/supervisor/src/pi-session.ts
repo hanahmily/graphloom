@@ -19,6 +19,7 @@ import {
   assertAdmittedCandidateRoot,
   createCandidateCodingTools,
 } from "./candidate-tools.js";
+import { classifyAssistantMessage, type ProviderFailure } from "./provider-failure.js";
 
 /** Default initial supervisor model (design-pi-supervisor.md). */
 export const DEFAULT_SUPERVISOR_PROVIDER = "minimax-cn";
@@ -95,6 +96,19 @@ export interface PiSupervisorSession {
   ): Promise<string>;
   /** Provider turns (model calls) started since the last drain, including tool turns. */
   drainTurnCount?(): number;
+  /**
+   * Why the last prompt's final assistant message carries no usable reply,
+   * classified from the provider's own stopReason and errorMessage; undefined
+   * when it carried a tool call or text, or when no reply was recorded.
+   */
+  lastReplyFailure?(): ProviderFailure | undefined;
+  /**
+   * Compact the session's history now (overflow recovery). Its provider
+   * requests are charged to the turn count like any other model call.
+   * `signal` (the run's Stop) and the deadline (default: the prompt timeout)
+   * abort the summarization and reject.
+   */
+  compact?(options?: { signal?: AbortSignal; timeoutMs?: number }): Promise<void>;
   /**
    * Switch the active model on this logical session, and its reasoning level
    * (default "off" when the target does not specify one, even if the previous
@@ -267,6 +281,7 @@ export function wrapPiAgentSession(args: {
   let modelId = args.modelId;
   let codingRoot: string | undefined;
   let turns = 0;
+  let lastReply: ProviderFailure | undefined;
 
   return {
     runId: args.runId,
@@ -320,8 +335,12 @@ export function wrapPiAgentSession(args: {
       let promptTurns = 0;
       let turnCapHit = false;
       let collected: string[] = [];
+      let lastAssistant: Parameters<typeof classifyAssistantMessage>[0] | undefined;
+      lastReply = undefined;
       const unsubscribe = session.subscribe((event) => {
-        if (event.type === "compaction_start") {
+        if (event.type === "message_end" && event.message.role === "assistant") {
+          lastAssistant = event.message;
+        } else if (event.type === "compaction_start") {
           // Compaction (manual or Pi's own) makes summarization requests outside
           // turn_start, so charge them here. Pi emits this synchronously after
           // arming its abort controller and before any request, so aborting
@@ -387,6 +406,11 @@ export function wrapPiAgentSession(args: {
             `supervisor prompt timed out after ${timeoutMs}ms` + (settled ? "" : `; ${STILL_ACTIVE}`),
           );
         }
+        const contextWindow = session.model?.contextWindow;
+        lastReply =
+          lastAssistant !== undefined
+            ? classifyAssistantMessage(lastAssistant, contextWindow !== undefined ? { contextWindow } : {})
+            : undefined;
         return collected.join("").trim();
       } finally {
         clearTimeout(timeout);
@@ -401,6 +425,41 @@ export function wrapPiAgentSession(args: {
       const n = turns;
       turns = 0;
       return n;
+    },
+    lastReplyFailure() {
+      return lastReply;
+    },
+    async compact(compactOptions) {
+      if (closed) {
+        throw new Error("supervisor session is closed");
+      }
+      const signal = compactOptions?.signal;
+      if (signal?.aborted) throw new Error("supervisor compaction aborted");
+      if (!(await settleIdle(session, settleTimeoutMs(promptTimeoutMs)))) {
+        throw new Error(STILL_ACTIVE);
+      }
+      const timeoutMs = compactOptions?.timeoutMs ?? promptTimeoutMs;
+      // Charged before the request: a compaction that fails still spent its calls.
+      turns += COMPACTION_PROVIDER_CALLS;
+      // Stop and the deadline both cancel Pi's summarization request; the
+      // race also releases the caller when a provider ignores the abort.
+      let cancel: (reason: Error) => void = () => undefined;
+      const cancelled = new Promise<never>((_resolve, reject) => {
+        cancel = reject;
+      });
+      const stop = (reason: Error) => {
+        session.abortCompaction();
+        cancel(reason);
+      };
+      const onAbort = () => stop(new Error("supervisor compaction aborted"));
+      const timer = setTimeout(() => stop(new Error(`supervisor compaction timed out after ${timeoutMs}ms`)), timeoutMs);
+      signal?.addEventListener("abort", onAbort, { once: true });
+      try {
+        await Promise.race([session.compact(), cancelled]);
+      } finally {
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", onAbort);
+      }
     },
     async grantCandidateCoding(candidateRoot: string) {
       if (closed) {

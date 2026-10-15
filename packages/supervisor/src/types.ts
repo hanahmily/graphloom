@@ -1,4 +1,5 @@
 import type { GraphDecision, RepairTarget, RunView } from "@graphloom/sdk";
+import type { ProviderFailureClass } from "./provider-failure.js";
 
 /** Why the controller entered recovery for this episode. */
 export interface RecoveryTrigger {
@@ -29,6 +30,12 @@ export interface SupervisorInput {
   /** Provider calls this turn may spend; a turn beyond it is aborted before its request. */
   maxProviderCalls?: number;
   /**
+   * Milliseconds of the run's wait budget this turn may spend waiting out a
+   * provider quota reset. Omitted means no wait is allowed. Waits spent are
+   * reported through `drainRemedies` for the controller to charge.
+   */
+  maxWaitMs?: number;
+  /**
    * True only on the first turn after `resume()`. The process may now run
    * different controller or plugin code, or carry newly granted repair
    * authority, than whatever rejected a past proposal still sitting in this
@@ -37,6 +44,56 @@ export interface SupervisorInput {
   resumed?: boolean;
   /** Aborted when the run stops; the session aborts its request and settles idle. */
   signal?: AbortSignal;
+  /**
+   * The controller's admission, offered for this turn: state facts that narrow
+   * the action tools, and a pre-admission check. A supervisor that uses it
+   * returns an inadmissible proposal to the model within the same decide().
+   */
+  admission?: SupervisorAdmission;
+  /**
+   * Set when the controller re-asks within the same turn because the previous
+   * proposal was inadmissible (for supervisors that did not run the check
+   * themselves). Nothing in the run changed since that proposal.
+   */
+  rejection?: SupervisorRejection;
+}
+
+/** What the controller can tell a supervisor before admission, so tools that cannot hold are not offered. */
+export interface AdmissionFacts {
+  /** False outside recovery: `return` cannot be admitted. */
+  inRecovery: boolean;
+  /** False when no qualified repair can be admitted (no repair hooks, grants, or corrections). */
+  canQualify: boolean;
+  /** Candidates whose status is `qualified`; `activate_repair` needs one. */
+  qualifiedArtifactIds: string[];
+}
+
+/** An inadmissible proposal, as the controller reports it: the failed precondition and the current value. */
+export interface SupervisorRejection {
+  action: string;
+  reason: string;
+  /** Inadmissible proposals still allowed this turn before the controller applies its safe default. */
+  remaining: number;
+}
+
+/**
+ * Pre-admission check. Returns undefined when the proposal would be admitted,
+ * otherwise the rejection; `remaining: 0` means the turn is over and the
+ * controller applies the trigger's safe default.
+ */
+export type AdmissionCheck = (decision: GraphDecision) => Promise<SupervisorRejection | undefined>;
+
+export interface SupervisorAdmission {
+  facts: AdmissionFacts;
+  check: AdmissionCheck;
+  /**
+   * Charge a rejection the supervisor found itself (malformed spec, bad
+   * write scope or continuation, escaping observe path, repeated proposal)
+   * against the same per-turn allowance `check` uses; the controller owns
+   * the count, and charges each rejection to the run's durable decisions
+   * budget before it resolves. Returns the counted rejection.
+   */
+  refuse(action: string, reason: string): Promise<SupervisorRejection>;
 }
 
 /** The controller's outcome for a supervisor proposal, reported on the next turn. */
@@ -45,6 +102,23 @@ export interface SupervisorSettlement {
   reason: string;
   /** Concise facts: job results, receipts, candidate status, stage, run status. */
   facts: string[];
+}
+
+/**
+ * A deterministic remedy the supervisor host applied to a failed provider
+ * turn without asking the model what to do: wait out a quota reset and retry,
+ * compact and retry after an overflow, or re-ask once after an empty reply.
+ */
+export interface SupervisorRemedy {
+  at: string;
+  failureClass: ProviderFailureClass;
+  remedy: "wait_and_retry" | "compact_and_retry" | "reask";
+  /** The provider's message (or what the reply lacked), bounded. */
+  message: string;
+  /** Wall-clock milliseconds spent waiting; charged to the run's waitMs. */
+  waitedMs?: number;
+  /** What a wait followed: the provider's stated reset, or the operator's `quotaRetryMs` fallback. */
+  waitBasis?: "provider" | "operator";
 }
 
 export interface ModelRef {
@@ -90,6 +164,12 @@ export interface Supervisor {
    * Controller deducts from agentInvocations when present.
    */
   drainProviderCalls?(): number;
+  /**
+   * Optional: deterministic remedies the host applied to failed provider
+   * turns since the last drain (waits, compactions, re-asks). The controller
+   * records them for the operator and charges their waits to `waitMs`.
+   */
+  drainRemedies?(): SupervisorRemedy[];
   /**
    * Stable session id for this run's supervisor (Pi session id or scripted stand-in).
    * Required for qualified repair so every patch round binds to the same session.

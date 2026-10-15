@@ -14,6 +14,8 @@ import {
   assertGraphDecision,
   BUILTIN_COMMAND_EXECUTOR_ID,
   checkReferences,
+  dispatch,
+  returnToNormal,
   pinJobExecutor,
   validateResultShape,
   writeScopeProblem,
@@ -24,7 +26,10 @@ import type { ExecutorSourceOverride, JobContext, Runner } from "@graphloom/runn
 import type { PluginHost } from "@graphloom/plugin-host";
 import {
   isModelSwitchRequest,
+  isSupervisorProviderError,
+  type AdmissionCheck,
   type RecoveryTrigger,
+  type SupervisorRejection,
   type Supervisor,
   type SupervisorProposal,
 } from "@graphloom/supervisor";
@@ -65,7 +70,7 @@ import {
 import { isUnsettled, reconcilePendingDispatch } from "./reconcile.js";
 import { createChildPort, reconcileChildOperations } from "./children.js";
 import { agentSessionViews, continuationRefusal, recordAgentSession, sessionForDispatch, wipeAgentSessions } from "./agent-sessions.js";
-import { citedEvidence, loadRunState, type DurableRunState, saveRunState } from "./state.js";
+import { citedEvidence, loadRunState, recordRemedy, type DurableRunState, saveRunState } from "./state.js";
 import { bumpGeneration } from "./generation.js";
 import { noteGraphDecision, noteSupervisorProposal, progressMark, settleCorrectionTrial, settleSupervisorCorrection } from "./escalation.js";
 import {
@@ -84,6 +89,19 @@ import {
 } from "./worktree.js";
 import { clearCheckouts, runInCheckout } from "./checkout.js";
 import { checkEnvironment, declaresEnvironment, type EnvironmentOutcome } from "./environment.js";
+import {
+  activateRefusal,
+  admissionFacts,
+  describeInadmissible,
+  inadmissible,
+  MAX_INADMISSIBLE_PER_TURN,
+  qualifyRefusal,
+  recordSupervisorOutcome,
+  repeatRefusal,
+  returnRefusal,
+  safeDefault,
+  type Inadmissible,
+} from "./inadmissible.js";
 
 const MAX_STEPS = 64;
 
@@ -276,9 +294,60 @@ async function runNormalLoopSteps(
       owner = renewed;
       await updateOwnerChildPid(state.stateDir, owner.ownerId, deps.host.childPid);
 
+      // A finite decisions budget: once it is spent, neither the graph nor the
+      // supervisor is asked for another decision.
+      if (state.budgets.decisions <= 0) {
+        state = {
+          ...state,
+          status: "stopped",
+          stopReason: "decisions budget exhausted",
+          blocker:
+            state.mode === "recovery"
+              ? `supervisor decision for the ${state.recoveryTrigger?.code ?? "unhandled"} trigger at stage ${state.current.stageId}`
+              : `graph decision at stage ${state.current.stageId}`,
+        };
+        await saveRunState(state);
+        syncRevision(deps, state);
+        return { done: true as const, state };
+      }
+
       let decision: GraphDecision;
       let priorNoProgress = state.noProgress;
-      if (state.mode === "recovery") {
+      let retryFlags: RetryFlags | undefined;
+      const queuedRetry = state.executorRetry;
+      if (queuedRetry !== undefined) {
+        // §4.3: a failure its executor declared retryable runs again unchanged,
+        // before the graph or the supervisor is asked anything.
+        const { executorRetry: _queued, ...rest } = state;
+        void _queued;
+        state = rest;
+        decision = dispatch(
+          queuedRetry.job,
+          `retry ${queuedRetry.attempt} of ${queuedRetry.limit} after a failure the executor declared retryable`,
+        );
+        retryFlags = {
+          attempt: queuedRetry.attempt,
+          limit: queuedRetry.limit,
+          graphCorrectionTrial: queuedRetry.graphCorrectionTrial,
+          supervisorWorkDispatch: queuedRetry.supervisorWorkDispatch,
+        };
+      } else if (state.mode === "recovery" && deps.supervisor !== undefined && stalledWithFreshEvidence(state)) {
+        // §4.3: the run progressed since the last episode, so the stall the
+        // trigger reports is already past; hand the run back to its graph.
+        decision = returnToNormal(
+          { summary: "the run produced new evidence since the last recovery episode" },
+          "stalled trigger with new evidence since the last episode",
+        );
+        state = recordRemedy(
+          { ...state, lastEpisodeMark: progressMark(state) },
+          {
+            condition: "stalled",
+            remedy: "returned to normal without a model call: new evidence since the last recovery episode",
+            detail: boundText(state.recoveryTrigger?.message ?? "stalled"),
+            ...(state.recoveryEpisodeId !== undefined ? { episodeId: state.recoveryEpisodeId } : {}),
+          },
+        );
+      } else if (state.mode === "recovery") {
         if (!deps.supervisor) {
           state = {
             ...state,
@@ -324,74 +393,178 @@ async function runNormalLoopSteps(
         if (resumed) state = { ...state, resumedSinceLastDecision: false };
         const view = toRunView(state);
         const lastSettlement = settleProposal(state);
-        const abort = new AbortController();
-        const stopWatch = watchForStop(state.stateDir, deps, abort);
+        // Admission feedback within the turn: the controller's own check, run
+        // by the supervisor's tools before a proposal ends the turn and again
+        // here on whatever decide() returns. Nothing in the run changes during
+        // the turn, so the check reads the state as it stands now.
+        const admittedAgainst = state;
+        const rejections: SupervisorRejection[] = [];
+        // Every inadmissible proposal this turn is charged here, whether the
+        // controller's check found it or the supervisor's own tools did: to
+        // the turn's allowance, and to the run's decisions budget, persisted
+        // before the supervisor hears the rejection so a crash refunds nothing.
+        let decisionsExhausted = false;
+        const refuse = async (action: string, reason: string): Promise<SupervisorRejection> => {
+          state = {
+            ...state,
+            budgets: { ...state.budgets, decisions: Math.max(0, state.budgets.decisions - 1) },
+            stateRevision: state.stateRevision + 1,
+          };
+          await saveRunState(state);
+          syncRevision(deps, state);
+          if (state.budgets.decisions <= 0) decisionsExhausted = true;
+          const rejection: SupervisorRejection = {
+            action,
+            reason,
+            remaining: decisionsExhausted ? 0 : Math.max(0, MAX_INADMISSIBLE_PER_TURN - rejections.length - 1),
+          };
+          rejections.push(rejection);
+          return rejection;
+        };
+        const check: AdmissionCheck = async (candidate) => {
+          const refusal = supervisorAdmissionRefusal(admittedAgainst, candidate, deps, trigger.code);
+          return refusal === undefined ? undefined : refuse(candidate.action.type, describeInadmissible(refusal));
+        };
+        const admission = { facts: admissionFacts(state, deps.repair !== undefined), check, refuse };
         let decided: SupervisorProposal | undefined;
         let decideError: unknown;
-        try {
-          const proposal = await supervisor.decide({
-            runId: state.runId,
-            episodeId,
-            trigger: {
-              code: trigger.code as RecoveryTrigger["code"],
-              message: trigger.message,
-              ...(trigger.evidenceRefs !== undefined ? { evidenceRefs: [...trigger.evidenceRefs] } : {}),
-            },
-            view,
-            signal: abort.signal,
-            ...(lastSettlement !== undefined ? { lastSettlement } : {}),
-            ...(metered ? { maxProviderCalls: state.budgets.agentInvocations } : {}),
-            ...(resumed ? { resumed: true } : {}),
-          });
-          decided = isModelSwitchRequest(proposal) ? proposal : assertGraphDecision(proposal);
-        } catch (err) {
-          decideError = err;
-        } finally {
-          stopWatch();
-          state = settleSupervisorUsage(state, supervisor);
-          const binding = readBinding(supervisor);
-          if (binding) {
-            state = { ...state, supervisorBinding: binding };
+        let rejection: SupervisorRejection | undefined;
+        for (;;) {
+          const abort = new AbortController();
+          const stopWatch = watchForStop(state.stateDir, deps, abort);
+          decided = undefined;
+          decideError = undefined;
+          try {
+            const proposal = await supervisor.decide({
+              runId: state.runId,
+              episodeId,
+              trigger: {
+                code: trigger.code as RecoveryTrigger["code"],
+                message: trigger.message,
+                ...(trigger.evidenceRefs !== undefined ? { evidenceRefs: [...trigger.evidenceRefs] } : {}),
+              },
+              view,
+              signal: abort.signal,
+              admission,
+              ...(rejection !== undefined ? { rejection } : {}),
+              ...(lastSettlement !== undefined ? { lastSettlement } : {}),
+              ...(metered ? { maxProviderCalls: state.budgets.agentInvocations } : {}),
+              maxWaitMs: state.budgets.waitMs ?? 0,
+              ...(resumed && rejection === undefined ? { resumed: true } : {}),
+            });
+            decided = isModelSwitchRequest(proposal) ? proposal : assertGraphDecision(proposal);
+          } catch (err) {
+            decideError = err;
+          } finally {
+            stopWatch();
+            state = settleSupervisorUsage(state, supervisor);
+            state = settleSupervisorRemedies(state, supervisor, episodeId);
+            const binding = readBinding(supervisor);
+            if (binding) {
+              state = { ...state, supervisorBinding: binding };
+            }
+          }
+          if (abort.signal.aborted || (await stopRequested(deps))) {
+            state = {
+              ...state,
+              status: "stopped",
+              ...stopCause(deps),
+            };
+            await saveRunState(state);
+            syncRevision(deps, state);
+            return { done: true as const, state };
+          }
+          if (decisionsExhausted || rejections.length >= MAX_INADMISSIBLE_PER_TURN) break;
+          if (decideError !== undefined || decided === undefined || isModelSwitchRequest(decided)) break;
+          // A supervisor that ran the check in its tools only returns proposals
+          // that passed it; any other (scripted, or one ignoring the check) is
+          // re-asked here, within the same turn, with the rejection.
+          const refused = await check(decided);
+          if (refused === undefined || refused.remaining <= 0) break;
+          rejection = refused;
+          if (metered && state.budgets.agentInvocations <= 0) {
+            state = {
+              ...state,
+              status: "stopped",
+              stopReason: "agentInvocations budget exhausted",
+              blocker: "supervisor decide",
+            };
+            await saveRunState(state);
+            syncRevision(deps, state);
+            return { done: true as const, state };
           }
         }
-        if (abort.signal.aborted || (await stopRequested(deps))) {
+        if (decisionsExhausted) {
+          // A blocking stop: the rejections spent the last of the decisions budget.
+          const last = rejections[rejections.length - 1]!;
           state = {
             ...state,
             status: "stopped",
-            ...stopCause(deps),
+            stopReason: "decisions budget exhausted",
+            blocker: boundText(`supervisor proposal rejected with no decisions left: ${last.action}: ${last.reason}`),
           };
           await saveRunState(state);
           syncRevision(deps, state);
           return { done: true as const, state };
         }
-        if (decideError !== undefined || decided === undefined) {
-          state = {
-            ...state,
-            status: "stopped",
-            stopReason: "supervisor decide failed",
-            blocker:
-              decideError instanceof Error
-                ? decideError.message
-                : String(decideError),
+        if (rejections.length >= MAX_INADMISSIBLE_PER_TURN) {
+          // The episode ends with the trigger's safe default, recorded for the operator.
+          const last = rejections[rejections.length - 1]!;
+          const outcome = safeDefault(state, trigger.code);
+          state = recordSupervisorOutcome(state, {
+            outcome: "supervisor_inadmissible",
+            rejections: rejections.map((r) => `${r.action}: ${r.reason}`),
+            applied: outcome,
+          });
+          if (outcome === "stop") {
+            state = {
+              ...state,
+              status: "stopped",
+              stopReason: "supervisor_inadmissible",
+              blocker: boundText(`${rejections.length} inadmissible proposals this turn; last: ${last.action}: ${last.reason}`),
+            };
+            await saveRunState(state);
+            syncRevision(deps, state);
+            return { done: true as const, state };
+          }
+          decided = {
+            reason: `controller safe default: ${rejections.length} inadmissible supervisor proposals this turn`,
+            action: {
+              type: "return",
+              return: { summary: `supervisor_inadmissible; last rejection: ${last.action}: ${last.reason}` },
+            },
           };
-          await saveRunState(state);
-          syncRevision(deps, state);
-          return { done: true as const, state };
+          state = markProposal({ ...state, lastEpisodeMark: progressMark(state) }, decided);
+          for (const r of rejections) state = noteOutcome(state, `inadmissible, not applied: ${r.action}: ${r.reason}`);
+          decision = decided;
+        } else {
+          if (decideError !== undefined || decided === undefined) {
+            state = {
+              ...state,
+              status: "stopped",
+              ...decideFailureStop(decideError),
+            };
+            await saveRunState(state);
+            syncRevision(deps, state);
+            return { done: true as const, state };
+          }
+          if (isModelSwitchRequest(decided)) {
+            state = markProposal(state, decided);
+            state = await applyModelSwitch(state, supervisor, decided, "supervisor");
+            await saveRunState(state);
+            syncRevision(deps, state);
+            return { done: false as const, state };
+          }
+          const notedProposal = noteSupervisorProposal({ ...state, lastEpisodeMark: progressMark(state) }, trigger.code, decided);
+          state = markProposal(
+            notedProposal.state,
+            decided,
+            notedProposal.count >= 2 ? { count: notedProposal.count, triggerCode: trigger.code } : undefined,
+          );
+          // The next turn's settlement says what this turn refused before admitting it.
+          for (const r of rejections) state = noteOutcome(state, `refused earlier this turn: ${r.action}: ${r.reason}`);
+          decision = decided;
         }
-        if (isModelSwitchRequest(decided)) {
-          state = markProposal(state, decided);
-          state = await applyModelSwitch(state, supervisor, decided, "supervisor");
-          await saveRunState(state);
-          syncRevision(deps, state);
-          return { done: false as const, state };
-        }
-        const notedProposal = noteSupervisorProposal(state, trigger.code, decided);
-        state = markProposal(
-          notedProposal.state,
-          decided,
-          notedProposal.count >= 2 ? { count: notedProposal.count, triggerCode: trigger.code } : undefined,
-        );
-        decision = decided;
       } else {
         const view = toRunView(state);
         const advanced = await deps.host.advance(
@@ -441,7 +614,7 @@ async function runNormalLoopSteps(
       }
 
       if (decision.action.type === "dispatch") {
-        const prepared = await prepareDispatch(state, decision, deps);
+        const prepared = await prepareDispatch(state, decision, deps, retryFlags);
         await saveRunState(prepared.state);
         syncRevision(deps, prepared.state);
         if (prepared.state.status !== "running") {
@@ -1118,6 +1291,144 @@ function settleSupervisorUsage(
   };
 }
 
+/**
+ * Record the remedies the supervisor host applied to failed provider turns,
+ * charging any time it spent waiting out a quota reset to `waitMs`.
+ */
+function settleSupervisorRemedies(state: DurableRunState, supervisor: Supervisor, episodeId: string): DurableRunState {
+  const applied = supervisor.drainRemedies?.() ?? [];
+  if (applied.length === 0) return state;
+  let next = state;
+  let waited = 0;
+  for (const r of applied) {
+    const waitedMs = r.waitedMs !== undefined && r.waitedMs > 0 ? Math.ceil(r.waitedMs) : undefined;
+    if (waitedMs !== undefined) waited += waitedMs;
+    next = recordRemedy(next, {
+      at: r.at,
+      condition: `supervisor provider ${r.failureClass}`,
+      remedy:
+        r.remedy === "wait_and_retry"
+          ? r.waitBasis === "operator"
+            ? `waited ${Math.ceil((waitedMs ?? 0) / 1000)}s (the operator's quotaRetryMs; the provider gave no reset time) and retried the turn`
+            : `waited ${Math.ceil((waitedMs ?? 0) / 1000)}s for the provider's reset and retried the turn`
+          : r.remedy === "compact_and_retry"
+            ? "compacted the supervisor session and retried the turn"
+            : "re-asked the supervisor once to call exactly one tool",
+      detail: boundText(r.message),
+      episodeId,
+      ...(waitedMs !== undefined ? { waitedMs } : {}),
+    });
+  }
+  if (waited > 0) {
+    next = { ...next, budgets: { ...next.budgets, waitMs: Math.max(0, (next.budgets.waitMs ?? 0) - waited) } };
+  }
+  return { ...next, stateRevision: next.stateRevision + 1 };
+}
+
+/**
+ * Why a decide() call stopped the run. A classified provider failure names
+ * its class and the provider's own message (and why no remedy applied);
+ * anything else keeps the generic reason.
+ */
+function decideFailureStop(err: unknown): { stopReason: string; blocker: string } {
+  if (isSupervisorProviderError(err)) {
+    const named = `supervisor provider ${err.failureClass}: ${err.providerMessage}`;
+    return {
+      stopReason: boundText(named),
+      blocker: boundText(err.unremedied !== undefined ? `${named} (not remedied: ${err.unremedied})` : named),
+    };
+  }
+  return { stopReason: "supervisor decide failed", blocker: err instanceof Error ? err.message : String(err) };
+}
+
+/**
+ * §4.3: a `stalled` episode's first turn, when the run's progress mark has
+ * moved since the last recovery episode decided anything. Only the episode's
+ * first turn qualifies, so a supervisor already working the episode keeps it.
+ */
+function stalledWithFreshEvidence(state: DurableRunState): boolean {
+  if (state.recoveryTrigger?.code !== "stalled") return false;
+  if (state.lastEpisodeMark === undefined) return false;
+  if (state.supervisorMark?.episodeId !== undefined && state.supervisorMark.episodeId === state.recoveryEpisodeId) return false;
+  return progressMark(state) !== state.lastEpisodeMark;
+}
+
+/** Most consecutive retries the controller grants one executor, whatever it declares. */
+const MAX_EXECUTOR_RETRY_LIMIT = 10;
+const EXECUTOR_RETRY_BASE_MS = 1_000;
+const EXECUTOR_RETRY_MAX_BACKOFF_MS = 60_000;
+
+function retryKey(job: JobSpec): string {
+  return `${job.stageId}:${job.purpose}:${job.executor?.id ?? job.kind}`;
+}
+
+function clearRetryCount(state: DurableRunState, job: JobSpec): DurableRunState {
+  const key = retryKey(job);
+  if (state.executorRetryCounts?.[key] === undefined) return state;
+  const { [key]: _cleared, ...rest } = state.executorRetryCounts;
+  void _cleared;
+  return { ...state, executorRetryCounts: rest };
+}
+
+/**
+ * §4.3: a failure the executor declared retryable (`retryLimit`) is queued to
+ * run again unchanged, waiting the executor's own `retryAfterMs` or an
+ * exponential backoff, charged to `waitMs` when the retry is admitted.
+ * `exhausted` says why a declared-retryable failure is not retried again.
+ */
+function scheduleExecutorRetry(
+  state: DurableRunState,
+  job: JobSpec,
+  result: Awaited<ReturnType<Runner["runJob"]>>,
+  operationId: string,
+  flags: Omit<RetryFlags, "attempt" | "limit">,
+): { state?: DurableRunState; exhausted?: string; cleared: DurableRunState } {
+  const declared = result.retryLimit;
+  if (result.status !== "failed" || result.failureKind !== undefined || declared === undefined || !(declared > 0)) {
+    return { cleared: state };
+  }
+  const limit = Math.min(Math.floor(declared), MAX_EXECUTOR_RETRY_LIMIT);
+  const key = retryKey(job);
+  const done = state.executorRetryCounts?.[key] ?? 0;
+  const cleared = clearRetryCount(state, job);
+  if (done >= limit) return { exhausted: `after ${done} retries, the executor's limit`, cleared };
+  const attempt = done + 1;
+  const executorId = job.executor?.id ?? job.kind;
+  const askedFor = state.executorRetryAt?.[executorId];
+  const retryAt =
+    askedFor ?? new Date(Date.now() + Math.min(EXECUTOR_RETRY_BASE_MS * 2 ** (attempt - 1), EXECUTOR_RETRY_MAX_BACKOFF_MS)).toISOString();
+  const waitMs = Math.max(0, Date.parse(retryAt) - Date.now());
+  const remaining = state.budgets.waitMs ?? 0;
+  if (waitMs > remaining) {
+    return {
+      exhausted: `retry ${attempt} needs a ${Math.ceil(waitMs / 1000)}s wait; ${Math.floor(remaining / 1000)}s of the run's wait budget remain`,
+      cleared,
+    };
+  }
+  // A continued agent job that failed with a session of its own became that
+  // session's successor; continuing the same predecessor again would fork the
+  // chain, so the retry continues the failed attempt's session instead.
+  const continuedByFailure =
+    job.continueFrom !== undefined && (state.agentSessions ?? []).some((r) => r.operationId === operationId);
+  const retryJob: JobSpec = continuedByFailure ? { ...job, continueFrom: operationId } : job;
+  const queued: DurableRunState = {
+    ...state,
+    executorRetryCounts: { ...state.executorRetryCounts, [key]: attempt },
+    executorRetry: { job: retryJob, attempt, limit, ...flags },
+    executorRetryAt: { ...state.executorRetryAt, [executorId]: retryAt },
+  };
+  return {
+    cleared,
+    state: recordRemedy(queued, {
+      condition: `executor ${executorId} ${result.status} (declared retryable)`,
+      remedy: `retry ${attempt} of ${limit} after ${Math.ceil(waitMs / 1000)}s, without a model call`,
+      detail: boundText(result.summary),
+      ...(state.recoveryEpisodeId !== undefined ? { episodeId: state.recoveryEpisodeId } : {}),
+      ...(waitMs > 0 ? { waitedMs: waitMs } : {}),
+    }),
+  };
+}
+
 /** Apply a pending operator model switch before the next supervisor prompt. */
 async function applyOperatorSwitch(state: DurableRunState, supervisor: Supervisor): Promise<DurableRunState> {
   let pending: PendingSwitchRequest | undefined;
@@ -1231,14 +1542,8 @@ async function applyDecision(
       );
     }
     case "return": {
-      if (state.mode !== "recovery") {
-        return {
-          ...state,
-          status: "stopped",
-          stopReason: "return outside recovery",
-          blocker: action.return.summary,
-        };
-      }
+      const outside = returnRefusal(state);
+      if (outside !== undefined) return inadmissible(state, { ...outside, detail: action.return.summary });
       const {
         recoveryEpisodeId: _ep,
         recoveryTrigger: _tr,
@@ -1260,12 +1565,7 @@ async function applyDecision(
     }
     case "qualify_repair": {
       if (!deps.repair) {
-        return {
-          ...state,
-          status: "stopped",
-          stopReason: "qualify_repair requires repair hooks",
-          blocker: action.qualify.reason,
-        };
+        return inadmissible(state, { precondition: "qualify_repair requires repair hooks", detail: "this controller has no repair hooks configured" });
       }
       return applyQualifyRepair(state, action.qualify, {
         ...(deps.supervisor !== undefined ? { supervisor: deps.supervisor } : {}),
@@ -1277,12 +1577,7 @@ async function applyDecision(
     }
     case "activate_repair": {
       if (!deps.repair) {
-        return {
-          ...state,
-          status: "stopped",
-          stopReason: "activate_repair requires repair hooks",
-          blocker: action.activate.reason,
-        };
+        return inadmissible(state, { precondition: "activate_repair requires repair hooks", detail: "this controller has no repair hooks configured" });
       }
       const activated = await applyActivateRepair(state, action.activate, {
         repair: deps.repair,
@@ -1356,10 +1651,22 @@ interface PendingJob {
   session?: ExecutorSession;
 }
 
+/**
+ * A controller retry of a failed dispatch carries the original's correction
+ * flags: it is the same attempt run again, not a new correction to charge.
+ */
+interface RetryFlags {
+  attempt: number;
+  limit: number;
+  graphCorrectionTrial: boolean;
+  supervisorWorkDispatch: boolean;
+}
+
 async function prepareDispatch(
   state: DurableRunState,
   decision: GraphDecision,
   _deps: LoopDeps,
+  retry?: RetryFlags,
 ): Promise<{ state: DurableRunState; pending?: PendingJob }> {
   const priorPrivateState = state.privateState;
   // Recovery decisions must not overwrite graph-owned private bookkeeping.
@@ -1380,46 +1687,10 @@ async function prepareDispatch(
     throw new Error("prepareDispatch requires dispatch action");
   }
 
-  let job: JobSpec;
-  let source: ExecutorSourceOverride | undefined;
-  try {
-    job = pinJobExecutor(rawJob);
-    const resolved = resolveExecutorPin(state, job.executor!);
-    if ("error" in resolved) throw new Error(resolved.error);
-    job = { ...job, executor: resolved.pin };
-    source = resolved.source;
-  } catch (err) {
-    return {
-      state: {
-        ...state,
-        status: "stopped",
-        stopReason: "executor pin rejected",
-        blocker: err instanceof Error ? err.message : String(err),
-      },
-    };
-  }
-
-  const undeclared = stopForUndeclaredStage(state, job.stageId);
-  if (undeclared) return { state: undeclared };
-
-  const contractProblem = contractAdmissionRefusal(state, job);
-  if (contractProblem !== undefined) {
-    return { state: { ...state, status: "stopped", stopReason: "contract rejected", blocker: contractProblem } };
-  }
-
-  if (state.mode === "recovery") {
-    const refused = recoveryDispatchRefusal(state, job);
-    if (refused !== undefined) {
-      return {
-        state: { ...state, status: "stopped", stopReason: "recovery dispatch rejected", blocker: refused },
-      };
-    }
-  }
-
-  const discontinued = continuationRefusal(state, job);
-  if (discontinued !== undefined) {
-    return { state: { ...state, status: "stopped", stopReason: "continuation rejected", blocker: discontinued } };
-  }
+  const admitted = dispatchPreconditions(state, rawJob);
+  if ("precondition" in admitted) return { state: inadmissible(state, admitted) };
+  let job = admitted.job;
+  const source = admitted.source;
 
   // An executor that asked for a wait runs no earlier than that, and the wait spends the run's budget.
   const executorId = job.executor!.id;
@@ -1498,6 +1769,7 @@ async function prepareDispatch(
   // normal work for).
   const correctionStage = job.purpose === "work" ? state.definition.stages.find((s) => s.id === job.stageId) : undefined;
   const isCorrection =
+    retry === undefined &&
     correctionStage !== undefined &&
     !stageRequirementsMet(state, job.stageId, correctionStage.requirementIds) &&
     (state.mode === "recovery" || state.workDispatched?.[job.stageId] === true);
@@ -1511,8 +1783,8 @@ async function prepareDispatch(
       },
     };
   }
-  const graphCorrection = isCorrection && state.mode === "normal";
-  const handoff = graphCorrection ? state.handoff?.[job.stageId] : undefined;
+  const graphCorrection = retry?.graphCorrectionTrial ?? (isCorrection && state.mode === "normal");
+  const handoff = graphCorrection && retry === undefined ? state.handoff?.[job.stageId] : undefined;
   if (handoff !== undefined) {
     const observed = freshEvidence(state).filter((e) => e.kind === "file" || e.kind === "workspace").map((e) => e.ref);
     // The graph's bookkeeping for a dispatch that never happened is not kept.
@@ -1521,40 +1793,10 @@ async function prepareDispatch(
     const restored = priorPrivateState !== undefined ? { ...refused, privateState: priorPrivateState } : refused;
     return { state: enterRecovery(restored, "correction_limit", handoff.reason, observed.slice(-10)) };
   }
-  const supervisorWorkDispatch = job.purpose === "work" && state.mode === "recovery";
+  const supervisorWorkDispatch = retry?.supervisorWorkDispatch ?? (job.purpose === "work" && state.mode === "recovery");
 
-  // Write scope: mutable work must declare non-empty paths; read-only must not.
-  if (job.readOnly === true) {
-    if (job.writeScope !== undefined && job.writeScope.length > 0) {
-      return {
-        state: {
-          ...state,
-          status: "stopped",
-          stopReason: "scope rejected",
-          blocker: "readOnly jobs must not declare writeScope",
-        },
-      };
-    }
-  } else if (job.purpose === "work") {
-    if (!job.writeScope || job.writeScope.length === 0) {
-      return {
-        state: {
-          ...state,
-          status: "stopped",
-          stopReason: "scope rejected",
-          blocker: "work jobs require a non-empty writeScope",
-        },
-      };
-    }
-  }
-  const scopeProblem = job.writeScope !== undefined && job.writeScope.length > 0 ? writeScopeProblem(job.writeScope) : undefined;
-  if (scopeProblem !== undefined) {
-    return { state: { ...state, status: "stopped", stopReason: "scope rejected", blocker: scopeProblem } };
-  }
-  const checkoutProblem = job.checkout !== undefined ? checkoutRefusal(job) : undefined;
-  if (checkoutProblem !== undefined) {
-    return { state: { ...state, status: "stopped", stopReason: "checkout rejected", blocker: checkoutProblem } };
-  }
+  const shapeProblem = jobShapeRefusal(job);
+  if (shapeProblem !== undefined) return { state: inadmissible(state, shapeProblem) };
 
   const operationId = `op-${state.stateRevision}-${randomUUID().slice(0, 8)}`;
   const session = sessionForDispatch(state, job, operationId);
@@ -1573,6 +1815,7 @@ async function prepareDispatch(
       ...(job.executor !== undefined ? { executor: job.executor } : {}),
       ...(notBefore !== undefined ? { notBefore } : {}),
       ...(session !== undefined ? { session } : {}),
+      ...(retry !== undefined ? { retry: { ...retry } } : {}),
     },
     current: { stageId: job.stageId, attempt: state.current.attempt },
     ...(job.purpose === "work" ? { workDispatched: { ...state.workDispatched, [job.stageId]: true as const } } : {}),
@@ -1592,6 +1835,103 @@ async function prepareDispatch(
       ...(session !== undefined ? { session } : {}),
     },
   };
+}
+
+/**
+ * Dispatch preconditions decided by state alone: the executor pin resolves,
+ * the stage is declared (and current, in recovery), the contract and
+ * continuation are admissible. Budgets are checked after, as blocking.
+ */
+function dispatchPreconditions(
+  state: DurableRunState,
+  rawJob: JobSpec,
+): { job: JobSpec; source?: ExecutorSourceOverride } | Inadmissible {
+  let job: JobSpec;
+  let source: ExecutorSourceOverride | undefined;
+  try {
+    job = pinJobExecutor(rawJob);
+    const resolved = resolveExecutorPin(state, job.executor!);
+    if ("error" in resolved) throw new Error(resolved.error);
+    job = { ...job, executor: resolved.pin };
+    source = resolved.source;
+  } catch (err) {
+    return { precondition: "executor pin rejected", detail: err instanceof Error ? err.message : String(err) };
+  }
+  const undeclared = undeclaredStage(state, job.stageId);
+  if (undeclared !== undefined) return undeclared;
+  const contractProblem = contractAdmissionRefusal(state, job);
+  if (contractProblem !== undefined) return { precondition: "contract rejected", detail: contractProblem };
+  if (state.mode === "recovery") {
+    const refused = recoveryDispatchRefusal(state, job);
+    if (refused !== undefined) return { precondition: "recovery dispatch rejected", detail: refused };
+  }
+  const discontinued = continuationRefusal(state, job);
+  if (discontinued !== undefined) return { precondition: "continuation rejected", detail: discontinued };
+  return { job, ...(source !== undefined ? { source } : {}) };
+}
+
+/** Write scope and checkout shape: mutable work declares non-empty paths; read-only must not. */
+function jobShapeRefusal(job: JobSpec): Inadmissible | undefined {
+  if (job.readOnly === true) {
+    if (job.writeScope !== undefined && job.writeScope.length > 0) {
+      return { precondition: "scope rejected", detail: "readOnly jobs must not declare writeScope" };
+    }
+  } else if (job.purpose === "work") {
+    if (!job.writeScope || job.writeScope.length === 0) {
+      return { precondition: "scope rejected", detail: "work jobs require a non-empty writeScope" };
+    }
+  }
+  const scopeProblem = job.writeScope !== undefined && job.writeScope.length > 0 ? writeScopeProblem(job.writeScope) : undefined;
+  if (scopeProblem !== undefined) return { precondition: "scope rejected", detail: scopeProblem };
+  const checkoutProblem = job.checkout !== undefined ? checkoutRefusal(job) : undefined;
+  if (checkoutProblem !== undefined) return { precondition: "checkout rejected", detail: checkoutProblem };
+  return undefined;
+}
+
+/**
+ * The controller's pre-admission check for a supervisor proposal: the first
+ * precondition that fails, with its current value, or undefined. Pure; the
+ * supervisor's tools run it within the turn, and the controller runs it again
+ * on whatever decide() returns. Budgets are not preconditions: running out
+ * stays blocking at admission.
+ */
+export function supervisorAdmissionRefusal(
+  state: DurableRunState,
+  decision: GraphDecision,
+  deps: Pick<LoopDeps, "repair">,
+  triggerCode: string,
+): Inadmissible | undefined {
+  const repeated = repeatRefusal(state, triggerCode, decision);
+  if (repeated !== undefined) return repeated;
+  const action = decision.action;
+  const hasRepair = deps.repair !== undefined;
+  switch (action.type) {
+    case "dispatch": {
+      const admitted = dispatchPreconditions(state, action.job);
+      if ("precondition" in admitted) return admitted;
+      return jobShapeRefusal(admitted.job);
+    }
+    case "observe": {
+      const escaping = (action.observe.paths ?? []).find((p) => path.isAbsolute(p) || p.split(/[/\\]/).includes(".."));
+      return escaping === undefined
+        ? undefined
+        : { precondition: "observe rejected", detail: `observe paths are relative to the run worktree; ${escaping} is not` };
+    }
+    case "validate":
+      return undeclaredStage(state, action.validate.stageId || state.current.stageId);
+    case "reenter":
+      return undeclaredStage(state, action.reenter.stageId || state.current.stageId);
+    case "return":
+      return returnRefusal(state);
+    case "qualify_repair":
+      return qualifyRefusal(state, action.qualify, hasRepair);
+    case "activate_repair":
+      return activateRefusal(state, action.activate, hasRepair);
+    case "stop":
+      return undefined;
+    default:
+      return { precondition: "unsupported action", detail: `${action.type} is not a supervisor action in ${state.mode} mode` };
+  }
 }
 
 /**
@@ -1642,7 +1982,11 @@ function scopeViolation(
   const shown = paths.slice(0, 10).join(", ") + (paths.length > 10 ? ` (+${paths.length - 10} more)` : "");
   const violation = job.readOnly === true ? `read-only job modified or removed ${shown}` : `changed paths outside the job's write scope: ${shown}`;
   const reported = result.status === "ok" ? "" : `; the executor also reported ${result.status}: ${result.summary}`;
-  return { ...result, status: "failed", summary: boundText(`${violation}${reported}`) };
+  // The controller found this failure, not the executor: whatever the
+  // executor declared retryable, rerunning the job unchanged would repeat it.
+  const { retryLimit: _declared, ...rest } = result;
+  void _declared;
+  return { ...rest, status: "failed", summary: boundText(`${violation}${reported}`) };
 }
 
 function applyDispatchResult(
@@ -1743,9 +2087,22 @@ function applyDispatchResult(
       retryAfterMs: result.retryAfterMs,
     });
     next = recordContractStreak(next, job, result.evidence);
-    const { pendingDispatch, ...rest } = next;
+    const { pendingDispatch, ...unsettled } = next;
+    const retried = scheduleExecutorRetry(unsettled, job, result, operationId, {
+      graphCorrectionTrial: args.graphCorrectionTrial,
+      supervisorWorkDispatch: args.supervisorWorkDispatch,
+    });
+    if (retried.state !== undefined) return retried.state;
+    const rest = retried.cleared;
     if (args.canRecover) {
       const executorId = job.executor?.id ?? job.kind;
+      if (retried.exhausted !== undefined) {
+        return enterRecovery(
+          rest,
+          "executor_failed",
+          boundText(`executor ${executorId} ${result.status} (${retried.exhausted}): ${result.summary}`),
+        );
+      }
       if (result.failureKind === "contract_violation") {
         return enterRecovery(
           rest,
@@ -1766,7 +2123,7 @@ function applyDispatchResult(
     };
   }
 
-  next = recordJobEvidence(next, job, producer, result.evidence, candidateDigest);
+  next = clearRetryCount(recordJobEvidence(next, job, producer, result.evidence, candidateDigest), job);
   next = recordContractStreak(next, job, result.evidence);
 
   if (job.purpose === "work") {
@@ -1869,14 +2226,17 @@ function clearOpenAttempt(state: DurableRunState, stageId: string): DurableRunSt
   return { ...state, openAttempt: rest };
 }
 
-function stopForUndeclaredStage(state: DurableRunState, stageId: string): DurableRunState | undefined {
+function undeclaredStage(state: DurableRunState, stageId: string): Inadmissible | undefined {
   if (state.definition.stages.some((s) => s.id === stageId)) return undefined;
   return {
-    ...state,
-    status: "stopped",
-    stopReason: "undeclared stage",
-    blocker: `stageId ${stageId} is not in the pinned graph definition`,
+    precondition: "undeclared stage",
+    detail: `stageId ${stageId} is not in the pinned graph definition; stages are ${state.definition.stages.map((s) => s.id).join(", ")}`,
   };
+}
+
+function stopForUndeclaredStage(state: DurableRunState, stageId: string): DurableRunState | undefined {
+  const undeclared = undeclaredStage(state, stageId);
+  return undeclared === undefined ? undefined : inadmissible(state, undeclared);
 }
 
 /**
@@ -2055,7 +2415,7 @@ async function observeWorkspace(
     try {
       bytes = await readWorktreeFile(state.worktreePath, rel);
     } catch (err) {
-      return { ...state, status: "stopped", stopReason: "observe rejected", blocker: err instanceof Error ? err.message : String(err) };
+      return inadmissible(state, { precondition: "observe rejected", detail: err instanceof Error ? err.message : String(err) });
     }
     const ref = newEvidenceRef(next);
     added.push({

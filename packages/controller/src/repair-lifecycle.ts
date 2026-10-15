@@ -15,6 +15,7 @@ import type { PluginHost } from "@graphloom/plugin-host";
 import { invalidateStageAndAfter, type AdmissionValidator } from "./admit.js";
 import { resolveBundleEntryFromManifest } from "./bundle.js";
 import { manifestRepairContract } from "./intake.js";
+import { activateRefusal, inadmissible, qualifyRefusal } from "./inadmissible.js";
 import {
   assertCandidateFullyReviewed,
   assertCandidateStepsUnchanged,
@@ -134,12 +135,7 @@ export async function applyQualifyRepair(
   },
 ): Promise<DurableRunState> {
   if (state.mode !== "recovery") {
-    return {
-      ...state,
-      status: "stopped",
-      stopReason: "qualify_repair outside recovery",
-      blocker: qualify.reason,
-    };
+    return inadmissible(state, { precondition: "qualify_repair outside recovery", detail: qualify.reason });
   }
   if (state.budgets.corrections <= 0) {
     return {
@@ -149,42 +145,12 @@ export async function applyQualifyRepair(
       blocker: "qualify_repair",
     };
   }
-  if (
-    qualify.requirementId !== undefined &&
-    !state.definition.requirements.some((r) => r.id === qualify.requirementId)
-  ) {
-    return {
-      ...state,
-      status: "stopped",
-      stopReason: "qualify_repair rejected",
-      blocker: `requirement ${qualify.requirementId} is not pinned by this run`,
-    };
-  }
-  const opaque = opaqueGateRefusal(state, qualify);
-  if (opaque !== undefined) {
-    const cited = opaqueGateEvidence(state, qualify);
-    return {
-      ...state,
-      status: "stopped",
-      stopReason: "opaque gate",
-      blocker: opaque,
-      ...(cited.length > 0 ? { stopEvidenceRefs: cited } : {}),
-    };
-  }
-
-  const grant =
-    qualify.target === "plugin"
-      ? { ok: state.intake.grants.sourceRepair, name: "sourceRepair" }
-      : qualify.target === "validator"
-        ? { ok: state.intake.grants.validatorSubstitution, name: "validatorSubstitution" }
-        : { ok: state.intake.grants.executorRepair === true, name: "executorRepair" };
-  if (!grant.ok) {
-    return {
-      ...state,
-      status: "stopped",
-      stopReason: "qualify_repair missing operator grant",
-      blocker: `${grant.name} grant is false`,
-    };
+  // Requirement not pinned, opaque gate, or missing grant: the supervisor can
+  // act on any of these (stop citing the evidence, or another remedy).
+  const refusal = qualifyRefusal(state, qualify, true);
+  if (refusal !== undefined) {
+    const cited = refusal.precondition === "opaque gate" ? opaqueGateEvidence(state, qualify) : [];
+    return inadmissible(state, refusal, cited.length > 0 ? { stopEvidenceRefs: cited } : {});
   }
 
   const supervisorSessionId = readSupervisorSessionId(deps.supervisor);
@@ -239,7 +205,7 @@ export async function applyQualifyRepair(
   const subject =
     qualify.target === "executor" ? await executorRepairSubject(state, qualify) : await bundleRepairSubject(state, qualify);
   if ("error" in subject) {
-    return { ...state, status: "stopped", stopReason: "qualify_repair rejected", blocker: subject.error };
+    return inadmissible(state, { precondition: "qualify_repair rejected", detail: subject.error });
   }
 
   // Reserve the correction and record the attempt durably before any effect so a
@@ -461,40 +427,6 @@ export async function applyQualifyRepair(
   }
 }
 
-/**
- * Why an opaque bundle cannot take this repair, or undefined when it can.
- * Its code is never patched; a validator may be substituted only under the
- * operator's grant, for a requirement the manifest pins readably.
- */
-function opaqueGateRefusal(state: DurableRunState, qualify: QualifyRepairSpec): string | undefined {
-  if (qualify.target === "executor") return undefined;
-  if (manifestRepairContract(state.intake.bundle.manifestRaw) !== "opaque") return undefined;
-  if (qualify.target === "plugin") {
-    return "the graph bundle is opaque: its code cannot be patched";
-  }
-  if (!state.intake.grants.validatorSubstitution) {
-    return "the graph bundle is opaque and validator substitution is not authorized";
-  }
-  if (qualify.requirementId === undefined) {
-    return "validator substitution on an opaque bundle must name the disputed requirement";
-  }
-  const pinned = (JSON.parse(state.intake.bundle.manifestRaw) as { requirements?: unknown }).requirements;
-  const readable =
-    Array.isArray(pinned) &&
-    pinned.some(
-      (r: unknown) =>
-        typeof r === "object" &&
-        r !== null &&
-        (r as Requirement).id === qualify.requirementId &&
-        typeof (r as Requirement).statement === "string" &&
-        (r as Requirement).statement.trim() !== "",
-    );
-  if (!readable) {
-    return `requirement ${qualify.requirementId} has no readable statement pinned in the manifest`;
-  }
-  return undefined;
-}
-
 /** The refs the supervisor cited, plus those the escalation into recovery cited. */
 function opaqueGateEvidence(state: DurableRunState, qualify: QualifyRepairSpec): string[] {
   return citedEvidence(state, [...(qualify.evidenceRefs ?? []), ...(state.recoveryTrigger?.evidenceRefs ?? [])]);
@@ -657,49 +589,24 @@ export async function applyActivateRepair(
   validators: Record<string, AdmissionValidator>;
   host?: PluginHost;
 }> {
-  if (state.mode !== "recovery") {
-    return {
-      state: {
-        ...state,
-        status: "stopped",
-        stopReason: "activate_repair outside recovery",
-        blocker: activate.reason,
-      },
-      validators: deps.validators,
-    };
-  }
-
   const candidates = [...(state.repairCandidates ?? [])];
   const idx = candidates.findIndex((c) => c.artifactId === activate.qualifiedArtifactId);
-  const artifact = idx >= 0 ? candidates[idx] : undefined;
-  if (!artifact || artifact.status !== "qualified") {
-    return {
-      state: {
-        ...state,
-        status: "stopped",
-        stopReason: "activate_repair missing qualified artifact",
-        blocker: activate.qualifiedArtifactId,
-      },
-      validators: deps.validators,
-    };
+  // Unknown or non-qualified candidate, wrong mode, a moved base version, or
+  // no reviewed digest: inadmissible, so the supervisor hears why and the
+  // current value, and proposes again.
+  const refusal = activateRefusal(state, activate, true);
+  if (refusal !== undefined) {
+    // A candidate whose base version moved can never activate: retire it.
+    if (refusal.precondition === "activate_repair base version mismatch" && idx >= 0) {
+      candidates[idx] = { ...candidates[idx]!, status: "superseded" };
+      return { state: inadmissible({ ...state, repairCandidates: candidates }, refusal), validators: deps.validators };
+    }
+    return { state: inadmissible(state, refusal), validators: deps.validators };
   }
+  const artifact = candidates[idx]!;
 
   if (artifact.target === "executor") {
     return { state: await activateExecutorRepair(state, candidates, idx, artifact), validators: deps.validators };
-  }
-
-  if (artifact.baseActiveVersion !== state.activeVersion) {
-    candidates[idx] = { ...artifact, status: "superseded" };
-    return {
-      state: {
-        ...state,
-        repairCandidates: candidates,
-        status: "stopped",
-        stopReason: "activate_repair base version mismatch",
-        blocker: `expected active ${artifact.baseActiveVersion}, got ${state.activeVersion}`,
-      },
-      validators: deps.validators,
-    };
   }
 
   // Base must still match the live install; concurrent activation of another candidate
@@ -708,25 +615,13 @@ export async function applyActivateRepair(
   if (liveDigest !== artifact.baseDigest) {
     candidates[idx] = { ...artifact, status: "superseded" };
     return {
-      state: {
-        ...state,
-        repairCandidates: candidates,
-        status: "stopped",
-        stopReason: "activate_repair base mismatch",
-        blocker: "active pin no longer matches candidate base snapshot",
-      },
-      validators: deps.validators,
-    };
-  }
-
-  if (!artifact.candidateDigest) {
-    return {
-      state: {
-        ...state,
-        status: "stopped",
-        stopReason: "activate_repair missing candidate digest",
-        blocker: artifact.artifactId,
-      },
+      state: inadmissible(
+        { ...state, repairCandidates: candidates },
+        {
+          precondition: "activate_repair base mismatch",
+          detail: `${artifact.artifactId}: active pin no longer matches candidate base snapshot; it is now \`superseded\``,
+        },
+      ),
       validators: deps.validators,
     };
   }
@@ -736,16 +631,17 @@ export async function applyActivateRepair(
   if (liveCandidateDigest !== artifact.candidateDigest) {
     candidates[idx] = { ...artifact, status: "superseded" };
     return {
-      state: {
-        ...state,
-        repairCandidates: candidates,
-        status: "stopped",
-        stopReason: "activate_repair candidate digest mismatch",
-        blocker:
-          liveCandidateDigest === undefined
-            ? "candidate is missing or unreadable"
-            : "candidate changed after independent review",
-      },
+      state: inadmissible(
+        { ...state, repairCandidates: candidates },
+        {
+          precondition: "activate_repair candidate digest mismatch",
+          detail: `${artifact.artifactId}: ${
+            liveCandidateDigest === undefined
+              ? "candidate is missing or unreadable"
+              : "candidate changed after independent review"
+          }; it is now \`superseded\``,
+        },
+      ),
       validators: deps.validators,
     };
   }
@@ -832,15 +728,12 @@ export async function applyActivateRepair(
     const reason = err instanceof Error ? err.message : String(err);
     const failed = [...(state.repairCandidates ?? [])];
     failed[idx] = { ...artifact, status: "rejected", rejectionReason: reason };
+    // The run keeps its previous version and host; the supervisor may qualify another candidate.
     return {
-      state: {
-        ...state,
-        repairCandidates: failed,
-        activationIntent: { ...intent, status: "aborted" },
-        status: "stopped",
-        stopReason: "activate_repair candidate rejected",
-        blocker: reason,
-      },
+      state: inadmissible(
+        { ...state, repairCandidates: failed, activationIntent: { ...intent, status: "aborted" } },
+        { precondition: "activate_repair candidate rejected", detail: `${artifact.artifactId}: ${reason}; it is now \`rejected\`` },
+      ),
       validators: deps.validators,
     };
   }

@@ -31,7 +31,7 @@ export {
   resolveBundleRehearsalEntry,
   resolveStateDir,
 } from "./controller.js";
-export type { DurableRunState, RunStatus, IntakePin, TaskConfigPin, VersionRecord } from "./controller.js";
+export type { DurableRunState, RunStatus, IntakePin, SupervisorOutcomeRecord, TaskConfigPin, VersionRecord } from "./controller.js";
 export type { ContractOutcome } from "./controller.js";
 export type { ChildOperationRecord, SupervisorMark } from "./state.js";
 export type { ModelSwitchOrder } from "./supervisor-switch.js";

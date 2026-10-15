@@ -52,8 +52,8 @@ describe("parseSupervisorDecision", () => {
 
   it("rejects malformed or empty assistant text", () => {
     expect(() => parseSupervisorDecision("I think we should retry.")).toThrow(
-      /no GraphDecision JSON/i,
+      /neither a tool call nor GraphDecision JSON/i,
     );
-    expect(() => parseSupervisorDecision("")).toThrow(/no GraphDecision JSON/i);
+    expect(() => parseSupervisorDecision("")).toThrow(/neither a tool call nor GraphDecision JSON/i);
   });
 });

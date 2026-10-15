@@ -101,6 +101,9 @@ function dropWaitingDispatch(state: DurableRunState, pending: PendingDispatch): 
   const executorId = pending.executor?.id;
   return {
     ...rest,
+    // An unstarted controller retry is queued again, so resume runs it
+    // instead of asking the graph or supervisor what to do next.
+    ...(pending.retry !== undefined ? { executorRetry: { job: pending.job, ...pending.retry } } : {}),
     outstanding: state.outstanding.filter((o) => o.operationId !== pending.operationId),
     budgets: { ...state.budgets, waitMs: (state.budgets.waitMs ?? 0) + unspent },
     ...(executorId !== undefined && pending.notBefore !== undefined
