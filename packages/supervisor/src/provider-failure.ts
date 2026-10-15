@@ -126,11 +126,38 @@ const UNIT_MS: Record<string, number> = {
   hours: 3_600_000,
 };
 
-const RELATIVE: Array<RegExp | [RegExp, string]> = [
-  /server requested (\d+(?:\.\d+)?)\s*(s)\b/i,
-  [/retry[- _]?after[- _]?ms["']?\s*[:=]?\s*["']?(\d+(?:\.\d+)?)/i, "ms"],
-  /retry[- _]?after["']?\s*[:=]?\s*["']?(\d+(?:\.\d+)?)(?![\d.:-])\s*(ms|milliseconds?|s|secs?|seconds?|m|mins?|minutes?|h|hrs?|hours?)?\b/i,
-  /(?:try again|retry|resets?|available again)\s+in\s+(\d+(?:\.\d+)?)\s*(ms|milliseconds?|s|secs?|seconds?|m|mins?|minutes?|h|hrs?|hours?)\b/i,
+/**
+ * One `<number><unit>` part of a duration. Longer unit names come first so
+ * `ms` is not read as minutes, and a unit only needs no letter after it, so
+ * compact forms such as `1m30s` split into parts.
+ */
+const UNIT = String.raw`(milliseconds?|ms|seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h)(?![a-z])`;
+const PART = String.raw`\d+(?:\.\d+)?\s*${UNIT}`;
+/** A whole duration: parts joined by nothing, spaces, commas, or "and" (`1h2m3s`, `2 hours and 5 minutes`). */
+const DURATION = String.raw`${PART}(?:\s*(?:,\s*)?(?:and\s+)?${PART})*`;
+const PART_GLOBAL = new RegExp(String.raw`(\d+(?:\.\d+)?)\s*${UNIT}`, "gi");
+
+/** Milliseconds a duration such as `1m30s` or `1 minute 30 seconds` adds up to. */
+export function durationMs(text: string): number | undefined {
+  let total = 0;
+  let parts = 0;
+  for (const m of text.matchAll(PART_GLOBAL)) {
+    const factor = UNIT_MS[m[2]!.toLowerCase()];
+    if (factor === undefined) return undefined;
+    total += Number.parseFloat(m[1]!) * factor;
+    parts += 1;
+  }
+  return parts > 0 && Number.isFinite(total) ? total : undefined;
+}
+
+/** Relative waits: each pattern's group 1 is a whole duration, or a bare number in the given unit. */
+const RELATIVE: Array<{ pattern: RegExp; bareUnit?: string }> = [
+  { pattern: /server requested (\d+(?:\.\d+)?)s\b/i, bareUnit: "s" },
+  { pattern: /retry[- _]?after[- _]?ms["']?\s*[:=]?\s*["']?(\d+(?:\.\d+)?)(?![\d.])/i, bareUnit: "ms" },
+  { pattern: new RegExp(String.raw`retry[- _]?after["']?\s*[:=]?\s*["']?(${DURATION})`, "i") },
+  // A bare number after "retry-after" is seconds, as in the HTTP header.
+  { pattern: /retry[- _]?after["']?\s*[:=]?\s*["']?(\d+(?:\.\d+)?)(?![\d.:a-z-])/i, bareUnit: "s" },
+  { pattern: new RegExp(String.raw`(?:try again|retry|resets?|available again)\s+in\s+(${DURATION})`, "i") },
 ];
 const KEYWORD = String.raw`(?:resets?|reset_at|x-ratelimit-reset|retry[- _]?after|retry|available again)`;
 const ABSOLUTE = new RegExp(
@@ -163,13 +190,11 @@ export function retryAtFromMessage(message: string, now: number): string | undef
     const at = epoch.length > 10 ? value : value * 1_000;
     if (Number.isFinite(at)) return new Date(at).toISOString();
   }
-  for (const entry of RELATIVE) {
-    const [pattern, fixedUnit] = Array.isArray(entry) ? entry : [entry, undefined];
-    const m = pattern.exec(message);
-    if (m?.[1] === undefined) continue;
-    const unit = (fixedUnit ?? m[2] ?? "s").toLowerCase();
-    const ms = Number.parseFloat(m[1]) * (UNIT_MS[unit] ?? 1_000);
-    if (Number.isFinite(ms) && ms >= 0) return new Date(now + Math.ceil(ms)).toISOString();
+  for (const { pattern, bareUnit } of RELATIVE) {
+    const captured = pattern.exec(message)?.[1];
+    if (captured === undefined) continue;
+    const ms = bareUnit !== undefined ? Number.parseFloat(captured) * UNIT_MS[bareUnit]! : durationMs(captured);
+    if (ms !== undefined && Number.isFinite(ms) && ms >= 0) return new Date(now + Math.ceil(ms)).toISOString();
   }
   return undefined;
 }

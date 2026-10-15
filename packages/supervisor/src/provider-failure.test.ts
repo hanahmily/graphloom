@@ -58,6 +58,15 @@ describe("retryAtFromMessage", () => {
     ["Server requested 45s retry delay (max: 60s)", "2026-10-15T00:00:45.000Z"],
     ["limit resets at 2026-10-15T06:00:00Z", "2026-10-15T06:00:00.000Z"],
     ['"reset_at": 1792036800', new Date(1792036800 * 1000).toISOString()],
+    // Compound durations are summed whole, compact or spelled out.
+    ["Please try again in 1m30s", "2026-10-15T00:01:30.000Z"],
+    ["retry after 1h2m3s", "2026-10-15T01:02:03.000Z"],
+    ["try again in 1 minute 30 seconds", "2026-10-15T00:01:30.000Z"],
+    ["quota resets in 2 hours and 5 minutes", "2026-10-15T02:05:00.000Z"],
+    ["retry after 1 min, 15 sec", "2026-10-15T00:01:15.000Z"],
+    ["try again in 1.5s", "2026-10-15T00:00:01.500Z"],
+    ["retry after 500ms", "2026-10-15T00:00:00.500Z"],
+    ["try again in 2m 500ms", "2026-10-15T00:02:00.500Z"],
     // Absolute times after "retry after" are times, not counts of seconds.
     ["429 rate limit; retry after 2026-10-16T00:00:00Z", "2026-10-16T00:00:00.000Z"],
     ["Retry-After: 1792036800", new Date(1792036800 * 1000).toISOString()],
