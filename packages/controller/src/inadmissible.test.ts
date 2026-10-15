@@ -349,6 +349,41 @@ describe("inadmissible supervisor proposals (#117)", () => {
     expect(inspected.supervisorOutcomes[0]!.rejections[2]).toMatch(/^dispatch: undeclared stage: stageId invented/);
   });
 
+  it("counts tool-detected rejections (invalid write scope) toward the same allowance and applies the safe default", async () => {
+    const env = await makeEnv();
+    const replies: string[] = [];
+    const session = toolCallingSession("sup-117-scope", [
+      // One prompt: the model keeps submitting a work dispatch with no writeScope.
+      async (_prompt, tools) => {
+        const job = { stageId: "write", kind: "agent", purpose: "work", instruction: "write" };
+        for (let i = 0; i < 4; i += 1) replies.push(await call(tools, "dispatch", { reason: "retry", job }));
+        return "";
+      },
+    ]);
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({ definition, advances: [supervise({ reason: "unfamiliar" }, "escalate"), ...finish] }),
+      validators: goodValidators,
+      supervisor: createPiSupervisor({ session }),
+      runner: runner(),
+      stateRoot: env.stateRoot,
+      runId: "safe-default-scope",
+    });
+
+    expect(report.status, report.blocker).toBe("succeeded");
+    expect(session.prompts).toHaveLength(1);
+    expect(replies[0]).toContain("2 more inadmissible proposals allowed this turn");
+    expect(replies[2]).toMatch(/last inadmissible proposal allowed this turn/);
+    // The turn already ended: a further call is refused as a duplicate, not counted.
+    expect(replies[3]).toMatch(/a proposal was already submitted this turn/);
+    const state = await loadRunState(report.stateDir);
+    expect(state.supervisorOutcomes).toMatchObject([
+      { outcome: "supervisor_inadmissible", triggerCode: "supervise", applied: "return" },
+    ]);
+    expect(state.supervisorOutcomes?.[0]?.rejections).toHaveLength(3);
+    expect(state.supervisorOutcomes?.[0]?.rejections[0]).toMatch(/^dispatch: a work job needs a non-empty writeScope/);
+  });
+
   it("still stops on a blocking condition: an exhausted corrections budget", async () => {
     const env = await makeEnv("budgets:\n  corrections: 1\n");
     const report = await createController().run({

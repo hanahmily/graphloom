@@ -345,18 +345,22 @@ async function runNormalLoopSteps(
         // the turn, so the check reads the state as it stands now.
         const admittedAgainst = state;
         const rejections: SupervisorRejection[] = [];
-        const check: AdmissionCheck = (candidate) => {
-          const refusal = supervisorAdmissionRefusal(admittedAgainst, candidate, deps, trigger.code);
-          if (refusal === undefined) return undefined;
+        // Every inadmissible proposal this turn is charged here, whether the
+        // controller's check found it or the supervisor's own tools did.
+        const refuse = (action: string, reason: string): SupervisorRejection => {
           const rejection: SupervisorRejection = {
-            action: candidate.action.type,
-            reason: describeInadmissible(refusal),
+            action,
+            reason,
             remaining: Math.max(0, MAX_INADMISSIBLE_PER_TURN - rejections.length - 1),
           };
           rejections.push(rejection);
           return rejection;
         };
-        const admission = { facts: admissionFacts(state, deps.repair !== undefined), check };
+        const check: AdmissionCheck = (candidate) => {
+          const refusal = supervisorAdmissionRefusal(admittedAgainst, candidate, deps, trigger.code);
+          return refusal === undefined ? undefined : refuse(candidate.action.type, describeInadmissible(refusal));
+        };
+        const admission = { facts: admissionFacts(state, deps.repair !== undefined), check, refuse };
         let decided: SupervisorProposal | undefined;
         let decideError: unknown;
         let rejection: SupervisorRejection | undefined;

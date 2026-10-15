@@ -79,6 +79,13 @@ export type AdmissionCheck = (decision: GraphDecision) => SupervisorRejection | 
 export interface SupervisorAdmission {
   facts: AdmissionFacts;
   check: AdmissionCheck;
+  /**
+   * Charge a rejection the supervisor found itself (malformed spec, bad
+   * write scope or continuation, escaping observe path, repeated proposal)
+   * against the same per-turn allowance `check` uses; the controller owns
+   * the count. Returns the counted rejection.
+   */
+  refuse(action: string, reason: string): SupervisorRejection;
 }
 
 /** The controller's outcome for a supervisor proposal, reported on the next turn. */

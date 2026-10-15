@@ -370,6 +370,7 @@ describe("createPiSupervisor in-turn feedback (#117)", () => {
       ...sampleInput(),
       admission: {
         facts: { inRecovery: true, canQualify: false, qualifiedArtifactIds: [] },
+        refuse: (action, reason) => ({ action, reason, remaining: 2 }),
         check: (d) => {
           if (d.action.type !== "activate_repair") return undefined;
           rejections += 1;
@@ -398,7 +399,7 @@ describe("createPiSupervisor in-turn feedback (#117)", () => {
     const supervisor = createPiSupervisor({ session });
     await supervisor.decide({
       ...sampleInput(),
-      admission: { facts: { inRecovery: true, canQualify: false, qualifiedArtifactIds: [] }, check: () => undefined },
+      admission: { facts: { inRecovery: true, canQualify: false, qualifiedArtifactIds: [] }, check: () => undefined, refuse: (action, reason) => ({ action, reason, remaining: 2 }) },
     });
     expect(tools).toEqual(["dispatch", "observe", "validate", "reenter", "return", "stop", "switch_model"]);
     expect(prompted[0]).toContain("Propose exactly one action by calling one GraphLoom tool: dispatch, observe, validate, reenter, return, or stop.");

@@ -163,9 +163,11 @@ describe("admission tools", () => {
   });
 });
 
+const noRefuse = (action: string, reason: string) => ({ action, reason, remaining: 2 });
+
 describe("admission tools narrowed by state (#117)", () => {
   const names = (facts: { inRecovery: boolean; canQualify: boolean; qualifiedArtifactIds: string[] }) =>
-    createAdmissionTools([{ provider: "p", modelId: "m" }], [], 1, "supervise", {}, { facts, check: () => undefined })
+    createAdmissionTools([{ provider: "p", modelId: "m" }], [], 1, "supervise", {}, { facts, check: () => undefined, refuse: noRefuse })
       .tools.map((t) => t.name);
 
   it("offers no activate_repair without a qualified candidate", () => {
@@ -196,7 +198,7 @@ describe("controller admission check within the turn (#117)", () => {
             remaining: 2,
           }
         : undefined;
-    const toolbox = createAdmissionTools([{ provider: "p", modelId: "m" }], [], 1, "supervise", {}, { facts, check });
+    const toolbox = createAdmissionTools([{ provider: "p", modelId: "m" }], [], 1, "supervise", {}, { facts, check, refuse: noRefuse });
     const exec = (name: string) => (toolbox.tools.find((t) => t.name === name) as unknown as { execute: Execute }).execute;
 
     const rejected = await exec("activate_repair")("1", {
@@ -220,12 +222,45 @@ describe("controller admission check within the turn (#117)", () => {
       reason: "undeclared stage: stageId nope is not in the pinned graph definition",
       remaining: 0,
     });
-    const toolbox = createAdmissionTools([{ provider: "p", modelId: "m" }], [], 1, "supervise", {}, { facts, check });
+    const toolbox = createAdmissionTools([{ provider: "p", modelId: "m" }], [], 1, "supervise", {}, { facts, check, refuse: noRefuse });
     const validateTool = toolbox.tools.find((t) => t.name === "validate") as unknown as { execute: Execute };
     const last = await validateTool.execute("1", { reason: "check", validate: { stageId: "nope" } });
     expect(last.terminate).toBe(true);
     expect(last.content[0]!.text).toMatch(/last inadmissible proposal allowed this turn/);
     expect(toolbox.proposal()).toBeUndefined();
     expect(toolbox.exhausted()).toMatchObject({ action: "validate", remaining: 0 });
+  });
+});
+
+describe("locally detected rejections count toward the controller's allowance (#117)", () => {
+  it("charges each invalid write scope through admission.refuse and ends the turn at the third", async () => {
+    const charged: string[] = [];
+    const refuse = (action: string, reason: string) => {
+      charged.push(`${action}: ${reason}`);
+      return { action, reason, remaining: 3 - charged.length };
+    };
+    const toolbox = createAdmissionTools([{ provider: "p", modelId: "m" }], [], 1, "supervise", {}, {
+      facts: { inRecovery: true, canQualify: false, qualifiedArtifactIds: [] },
+      check: () => undefined,
+      refuse,
+    });
+    const tool = toolbox.tools.find((t) => t.name === "dispatch") as unknown as { execute: Execute };
+    const results = [];
+    for (let i = 0; i < 3; i += 1) results.push(await tool.execute(String(i), { reason: "retry", job }));
+    expect(charged).toHaveLength(3);
+    expect(charged[0]).toMatch(/^dispatch: a work job needs a non-empty writeScope/);
+    expect(results.slice(0, 2).map((r) => r.terminate)).toEqual([undefined, undefined]);
+    expect(results[2]!.terminate).toBe(true);
+    expect(toolbox.exhausted()).toMatchObject({ action: "dispatch", remaining: 0 });
+    expect(toolbox.proposal()).toBeUndefined();
+  });
+
+  it("keeps uncounted local rejections when no controller admission is given", async () => {
+    const { toolbox, execute } = dispatchTool();
+    for (let i = 0; i < 4; i += 1) {
+      const rejected = await execute(String(i), { reason: "retry", job });
+      expect(rejected.terminate).toBeUndefined();
+    }
+    expect(toolbox.exhausted()).toBeUndefined();
   });
 });

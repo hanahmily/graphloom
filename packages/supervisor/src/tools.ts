@@ -295,29 +295,33 @@ export function createAdmissionTools(
       }),
       async execute(_toolCallId: string, params: Record<string, unknown>) {
         if (proposal !== undefined || exhausted !== undefined) return duplicate();
+        // With a controller, a rejection found here counts toward the same
+        // per-turn allowance as one the controller's check finds.
+        const refuse = (message: string) =>
+          admission !== undefined ? refused(admission.refuse(action, message)) : reject(message);
         const job = params[specKey] as
           | ({ purpose?: unknown; readOnly?: unknown; writeScope?: unknown } & ContinuationJob)
           | undefined;
         if (action === "dispatch" && job !== undefined) {
           const scopeRefusal = writeScopeRefusal(job);
-          if (scopeRefusal !== undefined) return reject(scopeRefusal);
+          if (scopeRefusal !== undefined) return refuse(scopeRefusal);
           const refusal = continuationRefusal(job, agentSessions, generation);
-          if (refusal !== undefined) return reject(refusal);
+          if (refusal !== undefined) return refuse(refusal);
         }
         const paths = (params[specKey] as { paths?: unknown } | undefined)?.paths;
         const escaping = action === "observe" ? escapingObservePath(paths) : undefined;
-        if (escaping !== undefined) return reject(`observe paths are relative to the run worktree; ${escaping} is not`);
+        if (escaping !== undefined) return refuse(`observe paths are relative to the run worktree; ${escaping} is not`);
         let candidate: SupervisorProposal;
         try {
           candidate = assertGraphDecision({ reason: params.reason, action: { type: action, [specKey]: params[specKey] } });
         } catch (err) {
-          return reject(err instanceof Error ? err.message : String(err));
+          return refuse(err instanceof Error ? err.message : String(err));
         }
         if (triggerCode !== undefined) {
           const key = supervisorProposalKey(triggerCode, candidate.action);
           const already = repeatedProposals[key]?.count ?? 0;
           if (already + 1 >= 3) {
-            return reject(
+            return refuse(
               `this exact ${action} proposal would be the ${already + 1 === 3 ? "3rd" : `${already + 1}th`} time with no progress since the controller last checked; propose something that would change the outcome, or stop`,
             );
           }
