@@ -123,7 +123,7 @@ describe("the graphloom profile", () => {
     expect(statement("builds")).toBe("In the same checkout of the full change, npm run typecheck, npm run build and npm test all pass and change no file.");
     expect(statement("passes")).toBe("In a prepared checkout of the full change, the named regression test passes, and the checks changed no file.");
     expect(statement("in-scope")).toBe("Every changed path is inside the repository and outside package-lock.json, .github and legacy, except those the decision record names with a reason.");
-    expect(statement("reproduces")).toContain("vitest's JSON report shows it failed with an assertion error");
+    expect(statement("reproduces")).toContain("vitest reports it failed with an assertion error in its own body, its file loaded, and no hook, suite or file around it failed");
     expect(definition.environment!.checks!.map((c) => c.id)).toEqual(["node", "npm", "flock", "git", "ocr", "codex", "claude"]);
     expect(definition.environment!.prepare!.map((c) => c.argv.join(" "))).toEqual(["npm ci --include=dev", "npm run build"]);
     expect(graphloom.commands.find((c) => c.id === "test")!.timeoutMs).toBeGreaterThanOrEqual(30 * 60_000);
@@ -368,6 +368,46 @@ describe("vitest regression runner", () => {
     expect(target).toMatchObject({ exit: 0, outcome: "passed" });
     expect(vitestSummary(target.text)?.files?.map((f) => f.name)).toEqual([await realpath(path.join(root, "packages/lib/src/scope.test.ts"))]);
     expect((await runRegression(root, "packages/lib/other/src/scope.test.ts", "allows (scope) forbids legacy")).outcome).toBe("failed");
+  }, 120_000);
+
+  it("does not take a test whose hook, suite or file failed around it as RED or as GREEN", async () => {
+    const root = await vitestProject();
+    const file = "packages/lib/src/hooks.test.ts";
+    await writeFile(
+      path.join(root, file),
+      [
+        'import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";',
+        'describe("before", () => {',
+        "  beforeEach(() => { expect(1).toBe(2); });",
+        '  it("passes", () => { expect(1).toBe(1); });',
+        "});",
+        'describe("after each", () => {',
+        "  afterEach(() => { expect(1).toBe(2); });",
+        '  it("passes", () => { expect(1).toBe(1); });',
+        "});",
+        'describe("cleanup", () => {',
+        "  afterAll(() => { expect(1).toBe(3); });",
+        '  it("passes", () => { expect(1).toBe(1); });',
+        "});",
+        'describe("clean", () => {',
+        '  it("fails", () => { expect(1).toBe(2); });',
+        "});",
+        "",
+      ].join("\n"),
+    );
+    // A failing beforeEach: vitest reports the test failed by assertion, but its body never ran.
+    const before = await runRegression(root, file, "before passes");
+    expect(before.outcome).toBe("setup-failed");
+    expect(before.exit).not.toBe(0);
+    expect(vitestOutput(before.text)).toContain("(in a hook)");
+    expect((await runRegression(root, file, "after each passes")).outcome).toBe("setup-failed");
+    // A failing afterAll: the test passed, but the run did not clean up.
+    const cleanup = await runRegression(root, file, "cleanup passes");
+    expect(cleanup.outcome).toBe("setup-failed");
+    expect(cleanup.exit).not.toBe(0);
+    expect(vitestOutput(cleanup.text)).toMatch(/around the test: AssertionError: expected 1 to be 3/);
+    // Nothing around it failed: an assertion in the body is a reproduction.
+    expect((await runRegression(root, file, "clean fails")).outcome).toBe("failed");
   }, 120_000);
 
   it("reads a report as no result for any other test than the one it was run for", async () => {

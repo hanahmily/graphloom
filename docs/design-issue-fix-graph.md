@@ -61,8 +61,9 @@ refuses a missing or unusable profile, so a run cannot start on one.
   names a changelog. Review has `code-review`.
 - Statements name what is checked for this repository, built from the profile:
   the runner's evidence for `reproduces` ("go test -json reports it failed, and
-  the package built", or "vitest's JSON report shows it failed with an
-  assertion error, and its file loaded"), the `passes` commands' statements,
+  the package built", or "vitest reports it failed with an assertion error in
+  its own body, its file loaded, and no hook, suite or file around it
+  failed"), the `passes` commands' statements,
   the `builds` commands' labels, the protected paths, the changelog path and
   the reviewer's harness. Qualification derives its cases from these
   statements, so they stay meaningful per repository.
@@ -83,14 +84,26 @@ report's own error lines for corrections.
 | Runner | `test` | Outcome |
 |---|---|---|
 | `go-test` | `package` a `./` Go package, `name` a `TestXxx`, optional Ginkgo `focus` | banyandb-fix's `go test -json` and Ginkgo report parser, unchanged |
-| `vitest` | `package` the test file relative to the repository root, `name` the test's full name (describe titles and title joined by spaces); no `focus` | Runs `vitest run <file> --testNamePattern ^name$ --reporter=json` from the file's package directory with the nearest installed vitest, and reduces the report to one line naming the requested file and test. An `AssertionError` is `failed`; a missing export or module (`is not a function`, `Cannot find module`, …) or a file that does not load is `build-failed`, which sends RED to the revert patch as a Go build failure does; any other error is `panicked`; a skipped test with a file error is `setup-failed` |
+| `vitest` | `package` the test file relative to the repository root, `name` the test's full name (describe titles and title joined by spaces); no `focus` | Runs `vitest run <file> --testNamePattern ^name$` from the file's package directory with the nearest installed vitest and a small reporter the command installs, which writes one line naming the requested file and test, its result, and any failed hook, suite or file around it. A failed `beforeEach`/`afterEach` of the test, or a failed hook or error of an enclosing suite or the file (such as `afterAll`), is `setup-failed` whatever the test's own state; otherwise an `AssertionError` is `failed`; a missing export or module (`is not a function`, `Cannot find module`, …) or a file that does not load is `build-failed`, which sends RED to the revert patch as a Go build failure does; any other error is `panicked`; a skipped test with a file error is `setup-failed` |
 
 vitest's file argument is a substring filter, relative to its root even when
 given absolute, so `src/a.test.ts` also selects `other/src/a.test.ts`. The
-reducer keeps only the file whose real path is the requested one, and the
-command exits with that test's own status (0 passed, 1 failed, non-zero when
-it has no result), not vitest's, so another file's failure can neither
-satisfy RED nor block GREEN.
+reporter keeps only the file whose real path is the requested one, and the
+command exits with that test's own status, not vitest's: 0 only when it
+passed with no hook, suite, file or unhandled error failing around it, 1
+otherwise, and non-zero when it has no result. Another file's failure can
+neither satisfy RED nor block GREEN, and a failed cleanup cannot pass GREEN.
+
+The reporter replaces vitest's JSON reporter, which loses exactly what RED and
+GREEN need: it reports a test whose `beforeEach` threw an assertion as an
+assertion failure of the test, though its body never ran, and it drops an
+`afterAll` failure entirely, so a passing test there looks clean. vitest
+leaves a hook's state at `run` when the hook throws, so the reporter reads any
+hook state other than `pass` as a failure. The go-test runner has no such gap
+for GREEN, which also needs `go test` to exit 0, so a failing `TestMain` or
+package cleanup fails it; a `TestMain` that fails before the tests leaves no
+result, so RED is not satisfied either. A Go `t.Cleanup` that fails marks the
+test itself failed, which `go test -json` does not tell apart from its body.
 
 **A run counts only for the test it ran.** The regression command names its
 test only in its argv, and the candidate digest does not change when a

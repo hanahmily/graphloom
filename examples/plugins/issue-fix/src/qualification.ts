@@ -238,12 +238,12 @@ const TS_READY: DecisionRecord = {
   productionCaller: "packages/sdk/src/scope.ts writeScopeAllows",
 };
 /** vitest's report as the runner reduces it: the named test's results and each file's own error. */
-const vitest = (tests: Array<{ status: string; failure?: string }>, fileMessage = "") =>
+const vitest = (tests: Array<{ status: string; failure?: string; hook?: boolean; scope?: string[] }>, fileMessage = "") =>
   JSON.stringify({
     GraphLoomVitest: {
       target: { file: TS_TEST, name: TS_NAME },
       files: [{ name: `/w/${TS_TEST}`, status: tests.some((t) => t.status === "failed") || fileMessage !== "" ? "failed" : "passed", message: fileMessage }],
-      tests: tests.map((t) => ({ fullName: TS_NAME, status: t.status, failure: t.failure ?? "" })),
+      tests: tests.map((t) => ({ fullName: TS_NAME, status: t.status, failure: t.failure ?? "", hook: t.hook ?? false, scope: t.scope ?? [] })),
     },
   });
 const tsAssertion = vitest([{ status: "failed", failure: "AssertionError: expected true to be false // Object.is equality\n    at scope.test.ts:12:5" }]);
@@ -363,12 +363,16 @@ export const QUALIFICATION_CASES: readonly QualificationCase[] = [
   g("red-reproduces", "the test file does not load on the base", [implementer(TS_READY), tsRed(vitest([], "Cannot find module './scope-helpers.js' imported from scope.test.ts"))], "failed"),
   g("red-reproduces", "throws something other than an assertion on the base", [implementer(TS_READY), tsRed(vitest([{ status: "failed", failure: "Error: ENOENT: no such file or directory" }]))], "failed"),
   g("red-reproduces", "a hook fails before the test runs", [implementer(TS_READY), tsRed(vitest([{ status: "skipped" }], "Error: beforeAll timed out"))], "failed"),
+  g("red-reproduces", "a beforeEach assertion fails, so the test body never ran", [implementer(TS_READY), tsRed(vitest([{ status: "failed", failure: "AssertionError: expected 1 to be 2", hook: true }]))], "failed"),
+  g("red-reproduces", "the body fails, but an enclosing suite's hook failed too", [implementer(TS_READY), tsRed(vitest([{ status: "failed", failure: "AssertionError: expected 1 to be 2", scope: ['a beforeAll hook of "suite" failed'] }]))], "failed"),
   g("red-reproduces", "passes on the base", [implementer(TS_READY), tsRed(tsPassed, 0)], "failed"),
   g("red-reproduces", "vitest wrote no report", [implementer(TS_READY), tsRed("", 1)], "failed"),
   g("red-reproduces", "production code applied", [implementer(TS_READY), tsRed(tsAssertion, 1, { paths: TS_PATHS })], "failed"),
   g("red-reproduces", "fails by assertion with the fix reverted", [implementer(TS_READY), command(COMMAND.regression, 1, { from: "candidate", reverted: true, revertedPaths: [TS_SOURCE], report: tsAssertion })], "passed"),
 
   g("green-passes", "the regression passes, with no further commands to run", [implementer(TS_READY), tsGreen()], "passed"),
+  g("green-passes", "the test passes but its suite's afterAll fails", [implementer(TS_READY), tsGreen(vitest([{ status: "passed", scope: ["AssertionError: expected 1 to be 3"] }]), 1)], "failed"),
+  g("green-passes", "a clean pass reported despite the afterAll failure", [implementer(TS_READY), tsGreen(vitest([{ status: "passed", scope: ["AssertionError: expected 1 to be 3"] }]), 0)], "failed"),
   g("green-passes", "the regression fails on the change", [implementer(TS_READY), tsGreen(tsAssertion, 1)], "failed"),
   g("green-passes", "GREEN ran a test the record has since renamed", [implementer(TS_READY), tsGreen(tsPassed, 0, { argv: vitestRunner.argv({ ...TS_READY.test!, name: "writeScopeAllows an old name" }) })], "inconclusive"),
   g("green-passes", "a report of another test, under this test's argv", [implementer(TS_READY), tsGreen(JSON.stringify({ GraphLoomVitest: { target: { file: TS_TEST, name: "another" }, files: [], tests: [{ fullName: TS_NAME, status: "passed", failure: "" }] } }))], "failed"),
