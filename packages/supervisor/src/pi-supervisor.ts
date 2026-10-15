@@ -1,4 +1,4 @@
-import type { AgentSessionView, EvidenceRecord } from "@graphloom/sdk";
+import type { AgentSessionView, EvidenceRecord, GraphAction } from "@graphloom/sdk";
 import { parseSupervisorDecision } from "./decision.js";
 import type { PiSupervisorSession, ThinkingLevel } from "./pi-session.js";
 import {
@@ -222,12 +222,16 @@ export function createPiSupervisor(options: CreatePiSupervisorOptions): PiSuperv
             continue;
           }
         }
-        const sanitized = sanitizeProposal(proposal, input.view.agentSessions ?? [], input.view.generation);
-        if (!("action" in sanitized)) return sanitized;
+        if (!("action" in proposal)) return proposal;
         if (input.admission !== undefined) {
-          // Admitted tool calls already passed this check; a JSON reply has not.
-          const rejection = input.admission.check(sanitized);
-          if (rejection === undefined) return sanitized;
+          // Admitted tool calls already passed these checks; a JSON reply has
+          // not. The original proposal is judged, never a sanitized rewrite:
+          // a local refusal is charged to the turn's allowance like the
+          // controller's own, and the model is asked again in this decide().
+          const local = localRefusal(proposal.action, input.view.agentSessions ?? [], input.view.generation);
+          const rejection =
+            local !== undefined ? input.admission.refuse(proposal.action.type, local) : input.admission.check(proposal);
+          if (rejection === undefined) return proposal;
           if (rejection.remaining <= 0 || input.signal?.aborted === true || (remainingCalls() ?? 1) < 1) {
             throw new Error(`inadmissible proposal: ${rejection.action}: ${rejection.reason}`);
           }
@@ -235,9 +239,13 @@ export function createPiSupervisor(options: CreatePiSupervisorOptions): PiSuperv
           text = await ask(buildRejectionPrompt(rejection, toolbox.offered), toolbox);
           continue;
         }
-        // Without the controller's check, a JSON-only reply never went through
-        // the admission tools' own repeated-proposal rejection: reject it here
-        // instead of letting a repeated no-progress proposal through.
+        // Without the controller's check (legacy path), repair what the tools
+        // would have refused rather than let it reach admission.
+        const sanitized = sanitizeProposal(proposal, input.view.agentSessions ?? [], input.view.generation);
+        if (!("action" in sanitized)) return sanitized;
+        // A JSON-only reply never went through the admission tools' own
+        // repeated-proposal rejection: reject it here instead of letting a
+        // repeated no-progress proposal through.
         const key = supervisorProposalKey(input.trigger.code, sanitized.action);
         const already = input.view.escalation?.repeatedProposals[key]?.count ?? 0;
         if (already + 1 >= 3) {
@@ -323,6 +331,22 @@ export function findConfigured(
   ref: { provider: string; modelId: string },
 ): SupervisorModelRef | undefined {
   return configured.find((m) => m.provider === ref.provider && m.modelId === ref.modelId);
+}
+
+/** The admission tools' own pre-checks, applied to a JSON-only proposal. */
+function localRefusal(
+  action: GraphAction,
+  agentSessions: readonly AgentSessionView[],
+  generation: number,
+): string | undefined {
+  if (action.type === "dispatch") {
+    return writeScopeRefusal(action.job) ?? continuationRefusal(action.job, agentSessions, generation);
+  }
+  if (action.type === "observe") {
+    const escaping = escapingObservePath(action.observe.paths);
+    return escaping === undefined ? undefined : `observe paths are relative to the run worktree; ${escaping} is not`;
+  }
+  return undefined;
 }
 
 /**

@@ -384,6 +384,35 @@ describe("createPiSupervisor in-turn feedback (#117)", () => {
     expect(prompted[1]).toContain("Call one GraphLoom tool: dispatch, observe, validate, reenter, return, or stop.");
   });
 
+  it("rejects a JSON work dispatch missing its writeScope in-turn and charges it, instead of rewriting it into a reenter", async () => {
+    const prompted: string[] = [];
+    const charged: string[] = [];
+    const noScope = dispatch({ stageId: "write", kind: "agent", purpose: "work", instruction: "fix it" }, "retry the work");
+    const supervisor = createPiSupervisor({
+      session: fakeSession({
+        replies: [JSON.stringify(noScope), JSON.stringify(returnToNormal({ summary: "let the graph rerun it" }, "return"))],
+        onPrompt: (t) => prompted.push(t),
+      }),
+    });
+    const decided = await supervisor.decide({
+      ...sampleInput(),
+      admission: {
+        facts: { inRecovery: true, canQualify: false, qualifiedArtifactIds: [] },
+        check: () => undefined,
+        refuse: (action, reason) => {
+          charged.push(`${action}: ${reason}`);
+          return { action, reason, remaining: 3 - charged.length };
+        },
+      },
+    });
+    expect(decided).toMatchObject({ action: { type: "return" } });
+    expect(charged).toHaveLength(1);
+    expect(charged[0]).toMatch(/^dispatch: a work job needs a non-empty writeScope/);
+    expect(prompted).toHaveLength(2);
+    expect(prompted[1]).toContain("a work job needs a non-empty writeScope");
+    expect(prompted[1]).toContain("2 more inadmissible proposals allowed this turn");
+  });
+
   it("lists exactly the offered tools in the recovery prompt", async () => {
     let tools: string[] = [];
     const prompted: string[] = [];
