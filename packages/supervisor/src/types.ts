@@ -1,4 +1,5 @@
 import type { GraphDecision, RepairTarget, RunView } from "@graphloom/sdk";
+import type { ProviderFailureClass } from "./provider-failure.js";
 
 /** Why the controller entered recovery for this episode. */
 export interface RecoveryTrigger {
@@ -28,6 +29,12 @@ export interface SupervisorInput {
   lastSettlement?: SupervisorSettlement;
   /** Provider calls this turn may spend; a turn beyond it is aborted before its request. */
   maxProviderCalls?: number;
+  /**
+   * Milliseconds of the run's wait budget this turn may spend waiting out a
+   * provider quota reset. Omitted means no wait is allowed. Waits spent are
+   * reported through `drainRemedies` for the controller to charge.
+   */
+  maxWaitMs?: number;
   /**
    * True only on the first turn after `resume()`. The process may now run
    * different controller or plugin code, or carry newly granted repair
@@ -97,6 +104,23 @@ export interface SupervisorSettlement {
   facts: string[];
 }
 
+/**
+ * A deterministic remedy the supervisor host applied to a failed provider
+ * turn without asking the model what to do: wait out a quota reset and retry,
+ * compact and retry after an overflow, or re-ask once after an empty reply.
+ */
+export interface SupervisorRemedy {
+  at: string;
+  failureClass: ProviderFailureClass;
+  remedy: "wait_and_retry" | "compact_and_retry" | "reask";
+  /** The provider's message (or what the reply lacked), bounded. */
+  message: string;
+  /** Wall-clock milliseconds spent waiting; charged to the run's waitMs. */
+  waitedMs?: number;
+  /** What a wait followed: the provider's stated reset, or the operator's `quotaRetryMs` fallback. */
+  waitBasis?: "provider" | "operator";
+}
+
 export interface ModelRef {
   provider: string;
   modelId: string;
@@ -140,6 +164,12 @@ export interface Supervisor {
    * Controller deducts from agentInvocations when present.
    */
   drainProviderCalls?(): number;
+  /**
+   * Optional: deterministic remedies the host applied to failed provider
+   * turns since the last drain (waits, compactions, re-asks). The controller
+   * records them for the operator and charges their waits to `waitMs`.
+   */
+  drainRemedies?(): SupervisorRemedy[];
   /**
    * Stable session id for this run's supervisor (Pi session id or scripted stand-in).
    * Required for qualified repair so every patch round binds to the same session.

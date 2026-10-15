@@ -694,6 +694,23 @@ sleeping. Stop interrupts the wait. A dispatch stopped or crashed during its
 wait never reached the runner, so resume drops it, refunds the unspent wait, and
 keeps the retry time.
 
+An executor can also declare a failure transient by returning `retryLimit` (a
+positive integer, capped at 10) with `status: "failed"`. The controller then runs
+the same job again, unchanged, before the graph or the supervisor is asked
+anything: after the executor's `retryAfterMs` when given, otherwise after an
+exponential backoff (1s, 2s, 4s, up to 60s). Waits are charged to `waitMs`, and
+each retry is a job charged like any other. The retry is recorded in the run's
+`remedies` (shown by `inspect`). When the limit is spent, or the next wait does
+not fit the wait budget, the failure reaches recovery as `executor_failed`, and
+the trigger message says why it was not retried again. A success clears the
+count for that stage, purpose, and executor. A continued agent job whose failed
+attempt saved a session is retried from that attempt's session, keeping the
+session chain linear. A retry that has not started when the run stops or
+crashes (during its wait) is queued again on resume. The resumed run starts with
+that retry, before the graph or the supervisor is called. A failure the
+controller finds itself, such as a write outside the job's scope, is never
+retried.
+
 A failed tool call from an agent writes the same `executorFailure` record and
 sets the same retry time. The agent receives the failure, including
 `retryAfterMs`, as its tool result. Further calls to that executor are refused

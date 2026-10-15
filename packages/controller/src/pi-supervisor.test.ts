@@ -12,6 +12,8 @@ import {
   supervise,
   validate,
   type GraphDefinition,
+  type GraphPlugin,
+  type JobSpec,
   type Validator,
 } from "@graphloom/sdk";
 import { createScriptedRunner } from "@graphloom/runner";
@@ -19,6 +21,8 @@ import {
   createPiSupervisor,
   createScriptedSupervisor,
   type PiSupervisorSessionPort,
+  type ProviderFailure,
+  type Supervisor,
 } from "@graphloom/supervisor";
 import { createController, loadRunState } from "./index.js";
 
@@ -279,7 +283,7 @@ describe("Pi supervisor recovery (controller)", () => {
     const env = await makeEnv();
     const controller = createController();
     const supervisor = createPiSupervisor({
-      session: fakeSession(["this is not a decision"]),
+      session: fakeSession(["this is not a decision", "still not a decision"]),
     });
 
     const plugin = createScriptedGraph({
@@ -298,8 +302,14 @@ describe("Pi supervisor recovery (controller)", () => {
     });
 
     expect(report.status).toBe("stopped");
-    expect(report.stopReason).toBe("supervisor decide failed");
+    expect(report.stopReason).toMatch(/^supervisor provider malformed: the reply is neither a tool call nor GraphDecision JSON/);
+    // Re-asked once with what was wrong (charged like any call), then named; not counted as inadmissible.
+    expect(report.blocker).toMatch(/\(not remedied: already re-asked once in this turn\)$/);
     const state = await loadRunState(report.stateDir);
+    expect(state.remedies).toMatchObject([{ condition: "supervisor provider malformed", remedy: expect.stringMatching(/re-asked/) }]);
+    expect(state.supervisorOutcomes ?? []).toEqual([]);
+    // Only the graph's own supervise decision was charged; the unreadable replies were not rejections.
+    expect(state.intake.budgets.decisions - state.budgets.decisions).toBe(1);
     expect(state.budgets.agentInvocations).toBeLessThan(64);
     expect(state.supervisorBinding?.sessionId).toBe("sess-durable-1");
   });
@@ -548,5 +558,411 @@ describe("Pi supervisor recovery (controller)", () => {
     expect(resumed.status).toBe("succeeded");
     const finalState = await loadRunState(resumed.stateDir);
     expect(finalState.supervisorBinding?.sessionId).toBe("sess-durable-1");
+  });
+});
+
+/** A reply, or a classified failure; `retryInMs` sets the failure's reset time relative to when the turn runs. */
+type ScriptedTurn = { reply: string } | { failure: ProviderFailure; retryInMs?: number };
+
+/** A session whose turns fail the way a provider would, as the Pi host classifies them. */
+function failingSession(turns: ScriptedTurn[]): PiSupervisorSessionPort & { prompts: number; compactions: number } {
+  let i = 0;
+  let current: ScriptedTurn | undefined;
+  let undrained = 0;
+  const port = {
+    runId: "pi-fail-1",
+    provider: "minimax-cn",
+    modelId: "MiniMax-M3",
+    sessionId: "sess-fail-1",
+    sessionFile: "/tmp/graphloom-sess-fail-1.jsonl",
+    credentialSource: "options" as const,
+    prompts: 0,
+    compactions: 0,
+    async prompt() {
+      current = turns[i++];
+      if (current === undefined) throw new Error("scripted session exhausted");
+      port.prompts += 1;
+      undrained += 1;
+      return "reply" in current ? current.reply : "";
+    },
+    lastReplyFailure() {
+      if (current === undefined || !("failure" in current)) return undefined;
+      return current.retryInMs !== undefined ? { ...current.failure, retryAt: new Date(Date.now() + current.retryInMs).toISOString() } : current.failure;
+    },
+    async compact() {
+      port.compactions += 1;
+      undrained += 2;
+    },
+    drainTurnCount() {
+      const n = undrained;
+      undrained = 0;
+      return n;
+    },
+    async setModel() {
+      /* */
+    },
+    async close() {
+      /* */
+    },
+  };
+  return port;
+}
+
+/** Counts decide() calls the controller makes, delegating everything else. */
+function countingDecides(supervisor: Supervisor): { supervisor: Supervisor; decides: () => number } {
+  let n = 0;
+  const counted = Object.assign(Object.create(supervisor) as Supervisor, {
+    decide: (input: Parameters<Supervisor["decide"]>[0]) => {
+      n += 1;
+      return supervisor.decide(input);
+    },
+  });
+  return { supervisor: counted, decides: () => n };
+}
+
+describe("supervisor provider failures and deterministic remedies (controller)", () => {
+  const writeWork = dispatch(
+    { stageId: "write", kind: "agent", purpose: "work", instruction: "write", writeScope: [GREETING_PATH] },
+    "write",
+  );
+  const finishingAdvances = [
+    writeWork,
+    observe({ paths: [GREETING_PATH], includeWorkspaceManifest: true }, "obs"),
+    validate({ stageId: "write", requirementIds: ["greeting-bytes"] }, "val"),
+    dispatch({ stageId: "review", kind: "agent", purpose: "review", instruction: "review", readOnly: true }, "review"),
+    validate({ stageId: "review", requirementIds: ["independent-review"] }, "val review"),
+    stop({ reason: "complete", blocker: "none" }, "done"),
+  ];
+  const writeJob = async (_job: unknown, ctx: { worktreePath: string }) => {
+    await writeFile(path.join(ctx.worktreePath, GREETING_PATH), GREETING, "utf8");
+    return { status: "ok" as const, summary: "wrote" };
+  };
+  const reviewJob = async () => ({
+    status: "ok" as const,
+    summary: "approved",
+    evidence: [{ kind: "review" as const, payload: { verdict: "approved", summary: "ok" } }],
+  });
+  const returnReply = { reply: JSON.stringify(returnToNormal({ summary: "carry on" }, "return")) };
+
+  async function runWith(session: PiSupervisorSessionPort, runId: string) {
+    const env = await makeEnv();
+    const counted = countingDecides(createPiSupervisor({ session }));
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({
+        definition,
+        advances: [supervise({ reason: "unfamiliar" }, "escalate"), ...finishingAdvances],
+      }),
+      validators,
+      supervisor: counted.supervisor,
+      runner: createScriptedRunner({ jobs: [writeJob, reviewJob] }),
+      stateRoot: env.stateRoot,
+      runId,
+    });
+    const loaded = await loadRunState(report.stateDir);
+    return { report, decides: counted.decides(), state: loaded };
+  }
+
+  it("waits out a 429 with a reset time, charges waitMs, and completes without a stop or an extra decide", async () => {
+    const session = failingSession([
+      { failure: { failureClass: "quota", message: "429 rate limit reached (2056)" }, retryInMs: 300 },
+      returnReply,
+    ]);
+    const { report, decides, state } = await runWith(session, "pi-quota-1");
+    expect(report, `${report.stopReason}: ${report.blocker}`).toMatchObject({ status: "succeeded" });
+    expect(decides).toBe(1);
+    expect(session.prompts).toBe(2);
+    expect(state.remedies).toMatchObject([
+      { condition: "supervisor provider quota", detail: "429 rate limit reached (2056)", remedy: expect.stringMatching(/^waited \d+s/) },
+    ]);
+    const waited = state.remedies![0]!.waitedMs!;
+    expect(waited).toBeGreaterThan(0);
+    expect(state.budgets.waitMs).toBeLessThanOrEqual(state.intake.budgets.waitMs! - waited);
+    const inspected = await createController().inspect(report.stateDir);
+    expect(inspected.remedies.map((r) => r.condition)).toEqual(["supervisor provider quota"]);
+  });
+
+  it("compacts after an overflow and retries the turn", async () => {
+    const session = failingSession([
+      { failure: { failureClass: "overflow", message: "400 invalid params, context window exceeds limit (2013)" } },
+      returnReply,
+    ]);
+    const { report, decides, state } = await runWith(session, "pi-overflow-1");
+    expect(report, `${report.stopReason}: ${report.blocker}`).toMatchObject({ status: "succeeded" });
+    expect(decides).toBe(1);
+    expect(session.compactions).toBe(1);
+    expect(state.remedies).toMatchObject([{ condition: "supervisor provider overflow", remedy: expect.stringMatching(/compacted/) }]);
+    // two prompts plus the compaction's two-call upper bound, before the graph's own two agent jobs
+    expect(state.intake.budgets.agentInvocations - state.budgets.agentInvocations).toBe(4 + 2);
+  });
+
+  it("re-asks once after an empty reply", async () => {
+    const session = failingSession([
+      { failure: { failureClass: "empty", message: "the reply had only thinking, no tool call or text (stopReason stop)" } },
+      returnReply,
+    ]);
+    const { report, decides, state } = await runWith(session, "pi-empty-1");
+    expect(report, `${report.stopReason}: ${report.blocker}`).toMatchObject({ status: "succeeded" });
+    expect(decides).toBe(1);
+    expect(session.prompts).toBe(2);
+    expect(state.remedies).toMatchObject([{ condition: "supervisor provider empty", remedy: expect.stringMatching(/re-asked/) }]);
+  });
+
+  it("names the failure class and provider message when a failure stops the run", async () => {
+    const message =
+      '429 {"type":"error","error":{"type":"rate_limit_error","message":"已达到 Token Plan 用量上限：请升级 Token Plan 套餐或购买积分补充用量。 (2056)"}}';
+    const session = failingSession([{ failure: { failureClass: "quota", message } }, returnReply]);
+    const { report, decides } = await runWith(session, "pi-quota-stop-1");
+    expect(report.status).toBe("stopped");
+    expect(decides).toBe(1);
+    expect(report.stopReason).toBe(`supervisor provider quota: ${message}`);
+    expect(report.blocker).toBe(`supervisor provider quota: ${message} (not remedied: the provider gave no reset time to wait for)`);
+  });
+
+  it("returns a stalled episode with new evidence since the last episode to normal without a decide call", async () => {
+    const env = await makeEnv();
+    const readme = observe({ paths: ["README.md"] }, "observe readme");
+    let proposals = 0;
+    const graph: GraphPlugin = {
+      describe: () => structuredClone(definition),
+      advance() {
+        proposals += 1;
+        // supervise, then observe the same unchanged file again and again
+        return proposals === 1 ? supervise({ reason: "unfamiliar" }, "escalate") : readme;
+      },
+    };
+    const triggers: string[] = [];
+    const counted = countingDecides(
+      createScriptedSupervisor({
+        decisions: [
+          (input) => {
+            triggers.push(input.trigger.code);
+            return returnToNormal({ summary: "carry on" }, "return");
+          },
+          (input) => {
+            triggers.push(input.trigger.code);
+            return stop({ reason: "observing changes nothing", blocker: "no progress" }, "stop");
+          },
+        ],
+      }),
+    );
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: graph,
+      validators,
+      supervisor: counted.supervisor,
+      runner: createScriptedRunner({ jobs: [] }),
+      stateRoot: env.stateRoot,
+      runId: "stalled-fresh-1",
+    });
+    // The first stall comes after README evidence the last episode never
+    // saw: it returns without a model call. The next stall has nothing new.
+    expect(report).toMatchObject({ status: "stopped", stopReason: "observing changes nothing" });
+    expect(triggers).toEqual(["supervise", "stalled"]);
+    expect(counted.decides()).toBe(2);
+    const state = await loadRunState(report.stateDir);
+    expect(state.remedies).toMatchObject([
+      { condition: "stalled", remedy: expect.stringMatching(/^returned to normal without a model call/) },
+    ]);
+  });
+
+  it("retries a failure the executor declares retryable, with its wait charged, without asking the supervisor", async () => {
+    const env = await makeEnv();
+    const counted = countingDecides(createScriptedSupervisor({ decisions: [] }));
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({ definition, advances: finishingAdvances }),
+      validators,
+      supervisor: counted.supervisor,
+      runner: createScriptedRunner({
+        jobs: [
+          async () => ({ status: "failed" as const, summary: "upstream 503", retryLimit: 2, retryAfterMs: 50 }),
+          async () => ({ status: "failed" as const, summary: "upstream 503 again", retryLimit: 2 }),
+          writeJob,
+          reviewJob,
+        ],
+      }),
+      stateRoot: env.stateRoot,
+      runId: "executor-retry-1",
+    });
+    expect(report, `${report.stopReason}: ${report.blocker}`).toMatchObject({ status: "succeeded" });
+    expect(counted.decides()).toBe(0);
+    const state = await loadRunState(report.stateDir);
+    expect(state.remedies?.map((r) => r.remedy)).toEqual([
+      expect.stringMatching(/^retry 1 of 2 after/),
+      expect.stringMatching(/^retry 2 of 2 after/),
+    ]);
+    expect(state.budgets.waitMs).toBeLessThan(state.intake.budgets.waitMs!);
+    expect(state.executorRetryCounts ?? {}).toEqual({});
+  });
+
+  it("hands a retryable failure to recovery once the executor's retry limit is spent", async () => {
+    const env = await makeEnv();
+    const triggers: string[] = [];
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({ definition, advances: [writeWork] }),
+      validators,
+      supervisor: createScriptedSupervisor({
+        decisions: [
+          (input) => {
+            triggers.push(input.trigger.message);
+            return stop({ reason: "upstream down", blocker: "503" }, "stop");
+          },
+        ],
+      }),
+      runner: createScriptedRunner({
+        jobs: [
+          async () => ({ status: "failed" as const, summary: "upstream 503", retryLimit: 1 }),
+          async () => ({ status: "failed" as const, summary: "upstream 503", retryLimit: 1 }),
+        ],
+      }),
+      stateRoot: env.stateRoot,
+      runId: "executor-retry-2",
+    });
+    expect(report).toMatchObject({ status: "stopped", stopReason: "upstream down" });
+    expect(triggers).toEqual([expect.stringMatching(/failed \(after 1 retries, the executor's limit\): upstream 503$/)]);
+  });
+
+  it("retries a continued agent job from the failed attempt's own session, keeping the session chain", async () => {
+    const env = await makeEnv();
+    let proposals = 0;
+    const graph: GraphPlugin = {
+      describe: () => structuredClone(definition),
+      advance(view) {
+        proposals += 1;
+        if (proposals === 1) return writeWork;
+        if (proposals === 2) {
+          const first = view.agentSessions![0]!.operationId;
+          return dispatch(
+            { stageId: "write", kind: "agent", purpose: "work", instruction: "write", writeScope: [GREETING_PATH], continueFrom: first },
+            "continue the writer",
+          );
+        }
+        return stop({ reason: "continued writer settled", blocker: "none" }, "done");
+      },
+    };
+    const seen: Array<{ continueFrom?: string; resume?: string; operationId: string }> = [];
+    const job = (reply: Record<string, unknown>) => async (j: { continueFrom?: string }, ctx: { operationId: string; session?: { resume?: string } }) => {
+      seen.push({
+        operationId: ctx.operationId,
+        ...(j.continueFrom !== undefined ? { continueFrom: j.continueFrom } : {}),
+        ...(ctx.session?.resume !== undefined ? { resume: ctx.session.resume } : {}),
+      });
+      return { status: "ok" as const, summary: "ran", ...reply };
+    };
+    const counted = countingDecides(createScriptedSupervisor({ decisions: [] }));
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: graph,
+      validators,
+      supervisor: counted.supervisor,
+      runner: createScriptedRunner({
+        jobs: [
+          job({ sessionRef: "s1" }),
+          job({ status: "failed", summary: "upstream 503", sessionRef: "s2", retryLimit: 1 }),
+          job({ sessionRef: "s3" }),
+        ],
+      }),
+      stateRoot: env.stateRoot,
+      runId: "continued-retry-1",
+    });
+    expect(report, `${report.stopReason}: ${report.blocker}`).toMatchObject({ stopReason: "continued writer settled" });
+    expect(counted.decides()).toBe(0);
+    const [first, failed, retried] = seen;
+    expect(failed).toMatchObject({ continueFrom: first!.operationId, resume: "s1" });
+    // The retry continues the failed attempt, which already continued the first.
+    expect(retried).toMatchObject({ continueFrom: failed!.operationId, resume: "s2" });
+    const chain = (await loadRunState(report.stateDir)).agentSessions!.map((r) => [r.operationId, r.continuedFrom]);
+    expect(chain).toEqual([
+      [first!.operationId, undefined],
+      [failed!.operationId, first!.operationId],
+      [retried!.operationId, failed!.operationId],
+    ]);
+  });
+
+  it("runs a retry stopped during its backoff on resume, without asking the graph or supervisor", async () => {
+    const env = await makeEnv();
+    const controller = createController();
+    const stateDir = path.join(env.stateRoot, "retry-wait-stop-1");
+    const running = controller.run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({ definition, advances: finishingAdvances }),
+      validators,
+      supervisor: createScriptedSupervisor({ decisions: [] }),
+      runner: createScriptedRunner({
+        jobs: [async () => ({ status: "failed" as const, summary: "upstream 503", retryLimit: 2, retryAfterMs: 3_000 })],
+      }),
+      stateRoot: env.stateRoot,
+      runId: "retry-wait-stop-1",
+    });
+    for (let i = 0; i < 200; i += 1) {
+      const pending = await loadRunState(stateDir).then((s) => s.pendingDispatch).catch(() => undefined);
+      if (pending?.status === "waiting" && pending.retry !== undefined) break;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    await controller.stop(stateDir);
+    expect((await running).status).toBe("stopped");
+    const stopped = await loadRunState(stateDir);
+    expect(stopped.executorRetry).toBeUndefined();
+    expect(stopped.pendingDispatch).toMatchObject({ status: "waiting", retry: { attempt: 1, limit: 2 } });
+
+    const counted = countingDecides(createScriptedSupervisor({ decisions: [] }));
+    const resumedJobs: string[] = [];
+    const resumed = await controller.resume({
+      runRef: stateDir,
+      // The graph's first advance (the write dispatch) was already made before the stop.
+      plugin: createScriptedGraph({ definition, advances: finishingAdvances.slice(1) }),
+      validators,
+      runner: createScriptedRunner({
+        jobs: [writeJob, reviewJob].map((run) => async (j: JobSpec, ctx: { worktreePath: string }) => {
+          resumedJobs.push(`${j.stageId}/${j.purpose}`);
+          return run(j, ctx);
+        }),
+      }),
+      supervisor: counted.supervisor,
+    });
+    expect(resumed, `${resumed.stopReason}: ${resumed.blocker}`).toMatchObject({ status: "succeeded" });
+    expect(counted.decides()).toBe(0);
+    // The first job after resume is the queued retry of the write, before the graph is asked anything.
+    expect(resumedJobs).toEqual(["write/work", "review/review"]);
+    const state = await loadRunState(stateDir);
+    expect(state.remedies?.map((r) => r.remedy)).toEqual([expect.stringMatching(/^retry 1 of 2 after/)]);
+  });
+
+  it("never retries a failure the controller found, even when the executor declared it retryable", async () => {
+    const env = await makeEnv();
+    const triggers: string[] = [];
+    let jobs = 0;
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({ definition, advances: [writeWork] }),
+      validators,
+      supervisor: createScriptedSupervisor({
+        decisions: [
+          (input) => {
+            triggers.push(`${input.trigger.code}: ${input.trigger.message}`);
+            return stop({ reason: "wrote outside its scope", blocker: "scope" }, "stop");
+          },
+        ],
+      }),
+      runner: createScriptedRunner({
+        jobs: [
+          async (_job, ctx) => {
+            jobs += 1;
+            await writeFile(path.join(ctx.worktreePath, "OTHER.txt"), "nope\n", "utf8");
+            return { status: "failed" as const, summary: "upstream 503", retryLimit: 3 };
+          },
+        ],
+      }),
+      stateRoot: env.stateRoot,
+      runId: "scope-no-retry-1",
+    });
+    expect(report).toMatchObject({ status: "stopped", stopReason: "wrote outside its scope" });
+    expect(jobs).toBe(1);
+    expect(triggers).toEqual([expect.stringMatching(/^executor_failed: .*changed paths outside the job's write scope: OTHER\.txt/)]);
+    const state = await loadRunState(report.stateDir);
+    expect(state.remedies ?? []).toEqual([]);
+    expect(state.executorRetry).toBeUndefined();
   });
 });

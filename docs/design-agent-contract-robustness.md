@@ -294,6 +294,11 @@ budget pacing, plugin round caps and the finite budgets.
 - Pacing: when one stage has consumed more than `STAGE_BUDGET_SHARE` (50%) of
   the run's agent budget without a receipt, enter recovery (`stalled`, same
   message family as §4.6) while budget remains to act on it.
+- A `stalled` episode whose run has produced new evidence (its progress mark
+  moved) since the last recovery episode decided anything returns to normal
+  on its first turn without a model call, and the remedy is recorded in the
+  run's `remedies`. The return becomes the new baseline, so a stall with
+  nothing new since then reaches the supervisor.
 - The budget-exhaustion stop names the consumer: `agentInvocations exhausted:
   stage fix spent 502 of 600 across 6 review dispatches, 0 receipts`.
 

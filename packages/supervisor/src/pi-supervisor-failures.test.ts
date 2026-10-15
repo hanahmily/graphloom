@@ -47,9 +47,12 @@ describe("createPiSupervisor decide failures still count provider calls", () => 
       },
     };
     const supervisor = createPiSupervisor({ session });
-    await expect(supervisor.decide(sampleInput())).rejects.toThrow(/no GraphDecision JSON/i);
+    await expect(supervisor.decide(sampleInput())).rejects.toThrow(
+      /^supervisor provider malformed: the reply is neither a tool call nor GraphDecision JSON/,
+    );
     // The unreadable reply is asked again once, with the parse error, before the turn fails.
     expect(supervisor.drainProviderCalls()).toBe(2);
+    expect(supervisor.drainRemedies()).toMatchObject([{ failureClass: "malformed", remedy: "reask" }]);
   });
 });
 

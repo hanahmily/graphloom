@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { dispatch, reenter, returnToNormal, stop, WireValidationError, type AgentSessionView, type EvidenceRecord } from "@graphloom/sdk";
+import { dispatch, reenter, returnToNormal, stop, type AgentSessionView, type EvidenceRecord } from "@graphloom/sdk";
 import {
   buildRecoveryPrompt,
   buildRepairPrompt,
@@ -116,7 +116,10 @@ describe("createPiSupervisor", () => {
         ],
       }),
     });
-    await expect(supervisor.decide(sampleInput())).rejects.toThrow(WireValidationError);
+    await expect(supervisor.decide(sampleInput())).rejects.toMatchObject({
+      failureClass: "malformed",
+      message: expect.stringMatching(/^supervisor provider malformed: unsupported action type: accept/),
+    });
   });
 
   it("rejects a JSON-only reply that repeats a proposal already at its rejection threshold", async () => {
@@ -352,7 +355,11 @@ describe("createPiSupervisor in-turn feedback (#117)", () => {
     const supervisor = createPiSupervisor({
       session: fakeSession({ replies: ["not json", JSON.stringify(returnToNormal({ summary: "ok" }, "return"))] }),
     });
-    await expect(supervisor.decide({ ...sampleInput(), maxProviderCalls: 1 })).rejects.toThrow(/no GraphDecision JSON/);
+    await expect(supervisor.decide({ ...sampleInput(), maxProviderCalls: 1 })).rejects.toMatchObject({
+      failureClass: "malformed",
+      message: expect.stringMatching(/neither a tool call nor GraphDecision JSON/),
+      unremedied: "no provider calls left in the run's budget to retry",
+    });
     expect(supervisor.drainProviderCalls()).toBe(1);
   });
 

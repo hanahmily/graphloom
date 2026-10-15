@@ -14,6 +14,8 @@ import {
   assertGraphDecision,
   BUILTIN_COMMAND_EXECUTOR_ID,
   checkReferences,
+  dispatch,
+  returnToNormal,
   pinJobExecutor,
   validateResultShape,
   writeScopeProblem,
@@ -24,6 +26,7 @@ import type { ExecutorSourceOverride, JobContext, Runner } from "@graphloom/runn
 import type { PluginHost } from "@graphloom/plugin-host";
 import {
   isModelSwitchRequest,
+  isSupervisorProviderError,
   type AdmissionCheck,
   type RecoveryTrigger,
   type SupervisorRejection,
@@ -67,7 +70,7 @@ import {
 import { isUnsettled, reconcilePendingDispatch } from "./reconcile.js";
 import { createChildPort, reconcileChildOperations } from "./children.js";
 import { agentSessionViews, continuationRefusal, recordAgentSession, sessionForDispatch, wipeAgentSessions } from "./agent-sessions.js";
-import { citedEvidence, loadRunState, type DurableRunState, saveRunState } from "./state.js";
+import { citedEvidence, loadRunState, recordRemedy, type DurableRunState, saveRunState } from "./state.js";
 import { bumpGeneration } from "./generation.js";
 import { noteGraphDecision, noteSupervisorProposal, progressMark, settleCorrectionTrial, settleSupervisorCorrection } from "./escalation.js";
 import {
@@ -310,7 +313,41 @@ async function runNormalLoopSteps(
 
       let decision: GraphDecision;
       let priorNoProgress = state.noProgress;
-      if (state.mode === "recovery") {
+      let retryFlags: RetryFlags | undefined;
+      const queuedRetry = state.executorRetry;
+      if (queuedRetry !== undefined) {
+        // §4.3: a failure its executor declared retryable runs again unchanged,
+        // before the graph or the supervisor is asked anything.
+        const { executorRetry: _queued, ...rest } = state;
+        void _queued;
+        state = rest;
+        decision = dispatch(
+          queuedRetry.job,
+          `retry ${queuedRetry.attempt} of ${queuedRetry.limit} after a failure the executor declared retryable`,
+        );
+        retryFlags = {
+          attempt: queuedRetry.attempt,
+          limit: queuedRetry.limit,
+          graphCorrectionTrial: queuedRetry.graphCorrectionTrial,
+          supervisorWorkDispatch: queuedRetry.supervisorWorkDispatch,
+        };
+      } else if (state.mode === "recovery" && deps.supervisor !== undefined && stalledWithFreshEvidence(state)) {
+        // §4.3: the run progressed since the last episode, so the stall the
+        // trigger reports is already past; hand the run back to its graph.
+        decision = returnToNormal(
+          { summary: "the run produced new evidence since the last recovery episode" },
+          "stalled trigger with new evidence since the last episode",
+        );
+        state = recordRemedy(
+          { ...state, lastEpisodeMark: progressMark(state) },
+          {
+            condition: "stalled",
+            remedy: "returned to normal without a model call: new evidence since the last recovery episode",
+            detail: boundText(state.recoveryTrigger?.message ?? "stalled"),
+            ...(state.recoveryEpisodeId !== undefined ? { episodeId: state.recoveryEpisodeId } : {}),
+          },
+        );
+      } else if (state.mode === "recovery") {
         if (!deps.supervisor) {
           state = {
             ...state,
@@ -412,6 +449,7 @@ async function runNormalLoopSteps(
               ...(rejection !== undefined ? { rejection } : {}),
               ...(lastSettlement !== undefined ? { lastSettlement } : {}),
               ...(metered ? { maxProviderCalls: state.budgets.agentInvocations } : {}),
+              maxWaitMs: state.budgets.waitMs ?? 0,
               ...(resumed && rejection === undefined ? { resumed: true } : {}),
             });
             decided = isModelSwitchRequest(proposal) ? proposal : assertGraphDecision(proposal);
@@ -420,6 +458,7 @@ async function runNormalLoopSteps(
           } finally {
             stopWatch();
             state = settleSupervisorUsage(state, supervisor);
+            state = settleSupervisorRemedies(state, supervisor, episodeId);
             const binding = readBinding(supervisor);
             if (binding) {
               state = { ...state, supervisorBinding: binding };
@@ -495,7 +534,7 @@ async function runNormalLoopSteps(
               return: { summary: `supervisor_inadmissible; last rejection: ${last.action}: ${last.reason}` },
             },
           };
-          state = markProposal(state, decided);
+          state = markProposal({ ...state, lastEpisodeMark: progressMark(state) }, decided);
           for (const r of rejections) state = noteOutcome(state, `inadmissible, not applied: ${r.action}: ${r.reason}`);
           decision = decided;
         } else {
@@ -503,11 +542,7 @@ async function runNormalLoopSteps(
             state = {
               ...state,
               status: "stopped",
-              stopReason: "supervisor decide failed",
-              blocker:
-                decideError instanceof Error
-                  ? decideError.message
-                  : String(decideError),
+              ...decideFailureStop(decideError),
             };
             await saveRunState(state);
             syncRevision(deps, state);
@@ -520,7 +555,7 @@ async function runNormalLoopSteps(
             syncRevision(deps, state);
             return { done: false as const, state };
           }
-          const notedProposal = noteSupervisorProposal(state, trigger.code, decided);
+          const notedProposal = noteSupervisorProposal({ ...state, lastEpisodeMark: progressMark(state) }, trigger.code, decided);
           state = markProposal(
             notedProposal.state,
             decided,
@@ -579,7 +614,7 @@ async function runNormalLoopSteps(
       }
 
       if (decision.action.type === "dispatch") {
-        const prepared = await prepareDispatch(state, decision, deps);
+        const prepared = await prepareDispatch(state, decision, deps, retryFlags);
         await saveRunState(prepared.state);
         syncRevision(deps, prepared.state);
         if (prepared.state.status !== "running") {
@@ -1256,6 +1291,144 @@ function settleSupervisorUsage(
   };
 }
 
+/**
+ * Record the remedies the supervisor host applied to failed provider turns,
+ * charging any time it spent waiting out a quota reset to `waitMs`.
+ */
+function settleSupervisorRemedies(state: DurableRunState, supervisor: Supervisor, episodeId: string): DurableRunState {
+  const applied = supervisor.drainRemedies?.() ?? [];
+  if (applied.length === 0) return state;
+  let next = state;
+  let waited = 0;
+  for (const r of applied) {
+    const waitedMs = r.waitedMs !== undefined && r.waitedMs > 0 ? Math.ceil(r.waitedMs) : undefined;
+    if (waitedMs !== undefined) waited += waitedMs;
+    next = recordRemedy(next, {
+      at: r.at,
+      condition: `supervisor provider ${r.failureClass}`,
+      remedy:
+        r.remedy === "wait_and_retry"
+          ? r.waitBasis === "operator"
+            ? `waited ${Math.ceil((waitedMs ?? 0) / 1000)}s (the operator's quotaRetryMs; the provider gave no reset time) and retried the turn`
+            : `waited ${Math.ceil((waitedMs ?? 0) / 1000)}s for the provider's reset and retried the turn`
+          : r.remedy === "compact_and_retry"
+            ? "compacted the supervisor session and retried the turn"
+            : "re-asked the supervisor once to call exactly one tool",
+      detail: boundText(r.message),
+      episodeId,
+      ...(waitedMs !== undefined ? { waitedMs } : {}),
+    });
+  }
+  if (waited > 0) {
+    next = { ...next, budgets: { ...next.budgets, waitMs: Math.max(0, (next.budgets.waitMs ?? 0) - waited) } };
+  }
+  return { ...next, stateRevision: next.stateRevision + 1 };
+}
+
+/**
+ * Why a decide() call stopped the run. A classified provider failure names
+ * its class and the provider's own message (and why no remedy applied);
+ * anything else keeps the generic reason.
+ */
+function decideFailureStop(err: unknown): { stopReason: string; blocker: string } {
+  if (isSupervisorProviderError(err)) {
+    const named = `supervisor provider ${err.failureClass}: ${err.providerMessage}`;
+    return {
+      stopReason: boundText(named),
+      blocker: boundText(err.unremedied !== undefined ? `${named} (not remedied: ${err.unremedied})` : named),
+    };
+  }
+  return { stopReason: "supervisor decide failed", blocker: err instanceof Error ? err.message : String(err) };
+}
+
+/**
+ * §4.3: a `stalled` episode's first turn, when the run's progress mark has
+ * moved since the last recovery episode decided anything. Only the episode's
+ * first turn qualifies, so a supervisor already working the episode keeps it.
+ */
+function stalledWithFreshEvidence(state: DurableRunState): boolean {
+  if (state.recoveryTrigger?.code !== "stalled") return false;
+  if (state.lastEpisodeMark === undefined) return false;
+  if (state.supervisorMark?.episodeId !== undefined && state.supervisorMark.episodeId === state.recoveryEpisodeId) return false;
+  return progressMark(state) !== state.lastEpisodeMark;
+}
+
+/** Most consecutive retries the controller grants one executor, whatever it declares. */
+const MAX_EXECUTOR_RETRY_LIMIT = 10;
+const EXECUTOR_RETRY_BASE_MS = 1_000;
+const EXECUTOR_RETRY_MAX_BACKOFF_MS = 60_000;
+
+function retryKey(job: JobSpec): string {
+  return `${job.stageId}:${job.purpose}:${job.executor?.id ?? job.kind}`;
+}
+
+function clearRetryCount(state: DurableRunState, job: JobSpec): DurableRunState {
+  const key = retryKey(job);
+  if (state.executorRetryCounts?.[key] === undefined) return state;
+  const { [key]: _cleared, ...rest } = state.executorRetryCounts;
+  void _cleared;
+  return { ...state, executorRetryCounts: rest };
+}
+
+/**
+ * §4.3: a failure the executor declared retryable (`retryLimit`) is queued to
+ * run again unchanged, waiting the executor's own `retryAfterMs` or an
+ * exponential backoff, charged to `waitMs` when the retry is admitted.
+ * `exhausted` says why a declared-retryable failure is not retried again.
+ */
+function scheduleExecutorRetry(
+  state: DurableRunState,
+  job: JobSpec,
+  result: Awaited<ReturnType<Runner["runJob"]>>,
+  operationId: string,
+  flags: Omit<RetryFlags, "attempt" | "limit">,
+): { state?: DurableRunState; exhausted?: string; cleared: DurableRunState } {
+  const declared = result.retryLimit;
+  if (result.status !== "failed" || result.failureKind !== undefined || declared === undefined || !(declared > 0)) {
+    return { cleared: state };
+  }
+  const limit = Math.min(Math.floor(declared), MAX_EXECUTOR_RETRY_LIMIT);
+  const key = retryKey(job);
+  const done = state.executorRetryCounts?.[key] ?? 0;
+  const cleared = clearRetryCount(state, job);
+  if (done >= limit) return { exhausted: `after ${done} retries, the executor's limit`, cleared };
+  const attempt = done + 1;
+  const executorId = job.executor?.id ?? job.kind;
+  const askedFor = state.executorRetryAt?.[executorId];
+  const retryAt =
+    askedFor ?? new Date(Date.now() + Math.min(EXECUTOR_RETRY_BASE_MS * 2 ** (attempt - 1), EXECUTOR_RETRY_MAX_BACKOFF_MS)).toISOString();
+  const waitMs = Math.max(0, Date.parse(retryAt) - Date.now());
+  const remaining = state.budgets.waitMs ?? 0;
+  if (waitMs > remaining) {
+    return {
+      exhausted: `retry ${attempt} needs a ${Math.ceil(waitMs / 1000)}s wait; ${Math.floor(remaining / 1000)}s of the run's wait budget remain`,
+      cleared,
+    };
+  }
+  // A continued agent job that failed with a session of its own became that
+  // session's successor; continuing the same predecessor again would fork the
+  // chain, so the retry continues the failed attempt's session instead.
+  const continuedByFailure =
+    job.continueFrom !== undefined && (state.agentSessions ?? []).some((r) => r.operationId === operationId);
+  const retryJob: JobSpec = continuedByFailure ? { ...job, continueFrom: operationId } : job;
+  const queued: DurableRunState = {
+    ...state,
+    executorRetryCounts: { ...state.executorRetryCounts, [key]: attempt },
+    executorRetry: { job: retryJob, attempt, limit, ...flags },
+    executorRetryAt: { ...state.executorRetryAt, [executorId]: retryAt },
+  };
+  return {
+    cleared,
+    state: recordRemedy(queued, {
+      condition: `executor ${executorId} ${result.status} (declared retryable)`,
+      remedy: `retry ${attempt} of ${limit} after ${Math.ceil(waitMs / 1000)}s, without a model call`,
+      detail: boundText(result.summary),
+      ...(state.recoveryEpisodeId !== undefined ? { episodeId: state.recoveryEpisodeId } : {}),
+      ...(waitMs > 0 ? { waitedMs: waitMs } : {}),
+    }),
+  };
+}
+
 /** Apply a pending operator model switch before the next supervisor prompt. */
 async function applyOperatorSwitch(state: DurableRunState, supervisor: Supervisor): Promise<DurableRunState> {
   let pending: PendingSwitchRequest | undefined;
@@ -1478,10 +1651,22 @@ interface PendingJob {
   session?: ExecutorSession;
 }
 
+/**
+ * A controller retry of a failed dispatch carries the original's correction
+ * flags: it is the same attempt run again, not a new correction to charge.
+ */
+interface RetryFlags {
+  attempt: number;
+  limit: number;
+  graphCorrectionTrial: boolean;
+  supervisorWorkDispatch: boolean;
+}
+
 async function prepareDispatch(
   state: DurableRunState,
   decision: GraphDecision,
   _deps: LoopDeps,
+  retry?: RetryFlags,
 ): Promise<{ state: DurableRunState; pending?: PendingJob }> {
   const priorPrivateState = state.privateState;
   // Recovery decisions must not overwrite graph-owned private bookkeeping.
@@ -1584,6 +1769,7 @@ async function prepareDispatch(
   // normal work for).
   const correctionStage = job.purpose === "work" ? state.definition.stages.find((s) => s.id === job.stageId) : undefined;
   const isCorrection =
+    retry === undefined &&
     correctionStage !== undefined &&
     !stageRequirementsMet(state, job.stageId, correctionStage.requirementIds) &&
     (state.mode === "recovery" || state.workDispatched?.[job.stageId] === true);
@@ -1597,8 +1783,8 @@ async function prepareDispatch(
       },
     };
   }
-  const graphCorrection = isCorrection && state.mode === "normal";
-  const handoff = graphCorrection ? state.handoff?.[job.stageId] : undefined;
+  const graphCorrection = retry?.graphCorrectionTrial ?? (isCorrection && state.mode === "normal");
+  const handoff = graphCorrection && retry === undefined ? state.handoff?.[job.stageId] : undefined;
   if (handoff !== undefined) {
     const observed = freshEvidence(state).filter((e) => e.kind === "file" || e.kind === "workspace").map((e) => e.ref);
     // The graph's bookkeeping for a dispatch that never happened is not kept.
@@ -1607,7 +1793,7 @@ async function prepareDispatch(
     const restored = priorPrivateState !== undefined ? { ...refused, privateState: priorPrivateState } : refused;
     return { state: enterRecovery(restored, "correction_limit", handoff.reason, observed.slice(-10)) };
   }
-  const supervisorWorkDispatch = job.purpose === "work" && state.mode === "recovery";
+  const supervisorWorkDispatch = retry?.supervisorWorkDispatch ?? (job.purpose === "work" && state.mode === "recovery");
 
   const shapeProblem = jobShapeRefusal(job);
   if (shapeProblem !== undefined) return { state: inadmissible(state, shapeProblem) };
@@ -1629,6 +1815,7 @@ async function prepareDispatch(
       ...(job.executor !== undefined ? { executor: job.executor } : {}),
       ...(notBefore !== undefined ? { notBefore } : {}),
       ...(session !== undefined ? { session } : {}),
+      ...(retry !== undefined ? { retry: { ...retry } } : {}),
     },
     current: { stageId: job.stageId, attempt: state.current.attempt },
     ...(job.purpose === "work" ? { workDispatched: { ...state.workDispatched, [job.stageId]: true as const } } : {}),
@@ -1795,7 +1982,11 @@ function scopeViolation(
   const shown = paths.slice(0, 10).join(", ") + (paths.length > 10 ? ` (+${paths.length - 10} more)` : "");
   const violation = job.readOnly === true ? `read-only job modified or removed ${shown}` : `changed paths outside the job's write scope: ${shown}`;
   const reported = result.status === "ok" ? "" : `; the executor also reported ${result.status}: ${result.summary}`;
-  return { ...result, status: "failed", summary: boundText(`${violation}${reported}`) };
+  // The controller found this failure, not the executor: whatever the
+  // executor declared retryable, rerunning the job unchanged would repeat it.
+  const { retryLimit: _declared, ...rest } = result;
+  void _declared;
+  return { ...rest, status: "failed", summary: boundText(`${violation}${reported}`) };
 }
 
 function applyDispatchResult(
@@ -1896,9 +2087,22 @@ function applyDispatchResult(
       retryAfterMs: result.retryAfterMs,
     });
     next = recordContractStreak(next, job, result.evidence);
-    const { pendingDispatch, ...rest } = next;
+    const { pendingDispatch, ...unsettled } = next;
+    const retried = scheduleExecutorRetry(unsettled, job, result, operationId, {
+      graphCorrectionTrial: args.graphCorrectionTrial,
+      supervisorWorkDispatch: args.supervisorWorkDispatch,
+    });
+    if (retried.state !== undefined) return retried.state;
+    const rest = retried.cleared;
     if (args.canRecover) {
       const executorId = job.executor?.id ?? job.kind;
+      if (retried.exhausted !== undefined) {
+        return enterRecovery(
+          rest,
+          "executor_failed",
+          boundText(`executor ${executorId} ${result.status} (${retried.exhausted}): ${result.summary}`),
+        );
+      }
       if (result.failureKind === "contract_violation") {
         return enterRecovery(
           rest,
@@ -1919,7 +2123,7 @@ function applyDispatchResult(
     };
   }
 
-  next = recordJobEvidence(next, job, producer, result.evidence, candidateDigest);
+  next = clearRetryCount(recordJobEvidence(next, job, producer, result.evidence, candidateDigest), job);
   next = recordContractStreak(next, job, result.evidence);
 
   if (job.purpose === "work") {

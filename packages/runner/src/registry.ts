@@ -140,6 +140,7 @@ function resultFromOutput(
       summary?: string;
       evidence?: JobEvidenceItem[];
       retryAfterMs?: unknown;
+      retryLimit?: unknown;
       sessionRef?: unknown;
       failureKind?: unknown;
     };
@@ -147,6 +148,10 @@ function resultFromOutput(
     const retryAfterMs =
       resultStatus !== "ok" && typeof o.retryAfterMs === "number" && Number.isFinite(o.retryAfterMs) && o.retryAfterMs >= 0
         ? Math.ceil(o.retryAfterMs)
+        : undefined;
+    const retryLimit =
+      resultStatus === "failed" && typeof o.retryLimit === "number" && Number.isInteger(o.retryLimit) && o.retryLimit > 0
+        ? o.retryLimit
         : undefined;
     // Only a job the controller gave a session directory can name a continuable session.
     const sessionRef =
@@ -165,6 +170,7 @@ function resultFromOutput(
       generation: ctx.generation,
       ...(o.evidence !== undefined ? { evidence: o.evidence } : {}),
       ...(retryAfterMs !== undefined ? { retryAfterMs } : {}),
+      ...(retryLimit !== undefined ? { retryLimit } : {}),
       ...(sessionRef !== undefined ? { sessionRef } : {}),
       ...(failureKind !== undefined ? { failureKind } : {}),
     };
