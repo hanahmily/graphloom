@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AgentSessionView, GraphAction } from "@graphloom/sdk";
-import { createAdmissionTools, supervisorProposalKey } from "./tools.js";
+import { createAdmissionTools, GRAPHLOOM_SUPERVISOR_ACTIONS, offeredActions, supervisorProposalKey } from "./tools.js";
 
 type Execute = (id: string, params: Record<string, unknown>) => Promise<{ content: { text: string }[]; terminate?: boolean }>;
 
@@ -160,5 +160,107 @@ describe("admission tools", () => {
       /^Rejected: this exact dispatch proposal would be the 3rd time with no progress since the controller last checked/,
     );
     expect(rejecting.proposal()).toBeUndefined();
+  });
+});
+
+const noRefuse = async (action: string, reason: string) => ({ action, reason, remaining: 2 });
+
+describe("admission tools narrowed by state (#117)", () => {
+  const names = (facts: { inRecovery: boolean; canQualify: boolean; qualifiedArtifactIds: string[] }) =>
+    createAdmissionTools([{ provider: "p", modelId: "m" }], [], 1, "supervise", {}, { facts, check: async () => undefined, refuse: noRefuse })
+      .tools.map((t) => t.name);
+
+  it("offers no activate_repair without a qualified candidate", () => {
+    expect(names({ inRecovery: true, canQualify: true, qualifiedArtifactIds: [] })).not.toContain("activate_repair");
+    expect(names({ inRecovery: true, canQualify: true, qualifiedArtifactIds: ["repair-1"] })).toContain("activate_repair");
+  });
+
+  it("offers no qualify_repair without repair authority, and no return outside recovery", () => {
+    const narrowed = names({ inRecovery: false, canQualify: false, qualifiedArtifactIds: [] });
+    expect(narrowed).toEqual(["dispatch", "observe", "validate", "reenter", "stop", "switch_model"]);
+  });
+
+  it("offers every action when the controller gives no facts", () => {
+    expect(offeredActions()).toEqual([...GRAPHLOOM_SUPERVISOR_ACTIONS]);
+  });
+});
+
+describe("controller admission check within the turn (#117)", () => {
+  const facts = { inRecovery: true, canQualify: false, qualifiedArtifactIds: ["repair-f7a36302"] };
+
+  it("returns an inadmissible proposal to the model with the reason and current value, then admits the next", async () => {
+    const check = async (d: { action: GraphAction }) =>
+      d.action.type === "activate_repair"
+        ? {
+            action: "activate_repair",
+            reason:
+              "activate_repair missing qualified artifact: repair-f7a36302 is `activated`, not `qualified`; active version is g@repair-repair-f7a36302",
+            remaining: 2,
+          }
+        : undefined;
+    const toolbox = createAdmissionTools([{ provider: "p", modelId: "m" }], [], 1, "supervise", {}, { facts, check, refuse: noRefuse });
+    const exec = (name: string) => (toolbox.tools.find((t) => t.name === name) as unknown as { execute: Execute }).execute;
+
+    const rejected = await exec("activate_repair")("1", {
+      reason: "activate",
+      activate: { qualifiedArtifactId: "repair-f7a36302", reason: "fix" },
+    });
+    expect(rejected.terminate).toBeUndefined();
+    expect(rejected.content[0]!.text).toContain("repair-f7a36302 is `activated`, not `qualified`");
+    expect(rejected.content[0]!.text).toContain("2 more inadmissible proposals allowed this turn");
+    expect(toolbox.proposal()).toBeUndefined();
+
+    const accepted = await exec("return")("2", { reason: "already active", return: { summary: "repair is active" } });
+    expect(accepted.terminate).toBe(true);
+    expect(toolbox.proposal()).toMatchObject({ action: { type: "return" } });
+    expect(toolbox.exhausted()).toBeUndefined();
+  });
+
+  it("ends the turn when the controller says no inadmissible proposals remain", async () => {
+    const check = async () => ({
+      action: "validate",
+      reason: "undeclared stage: stageId nope is not in the pinned graph definition",
+      remaining: 0,
+    });
+    const toolbox = createAdmissionTools([{ provider: "p", modelId: "m" }], [], 1, "supervise", {}, { facts, check, refuse: noRefuse });
+    const validateTool = toolbox.tools.find((t) => t.name === "validate") as unknown as { execute: Execute };
+    const last = await validateTool.execute("1", { reason: "check", validate: { stageId: "nope" } });
+    expect(last.terminate).toBe(true);
+    expect(last.content[0]!.text).toMatch(/last inadmissible proposal allowed this turn/);
+    expect(toolbox.proposal()).toBeUndefined();
+    expect(toolbox.exhausted()).toMatchObject({ action: "validate", remaining: 0 });
+  });
+});
+
+describe("locally detected rejections count toward the controller's allowance (#117)", () => {
+  it("charges each invalid write scope through admission.refuse and ends the turn at the third", async () => {
+    const charged: string[] = [];
+    const refuse = async (action: string, reason: string) => {
+      charged.push(`${action}: ${reason}`);
+      return { action, reason, remaining: 3 - charged.length };
+    };
+    const toolbox = createAdmissionTools([{ provider: "p", modelId: "m" }], [], 1, "supervise", {}, {
+      facts: { inRecovery: true, canQualify: false, qualifiedArtifactIds: [] },
+      check: async () => undefined,
+      refuse,
+    });
+    const tool = toolbox.tools.find((t) => t.name === "dispatch") as unknown as { execute: Execute };
+    const results = [];
+    for (let i = 0; i < 3; i += 1) results.push(await tool.execute(String(i), { reason: "retry", job }));
+    expect(charged).toHaveLength(3);
+    expect(charged[0]).toMatch(/^dispatch: a work job needs a non-empty writeScope/);
+    expect(results.slice(0, 2).map((r) => r.terminate)).toEqual([undefined, undefined]);
+    expect(results[2]!.terminate).toBe(true);
+    expect(toolbox.exhausted()).toMatchObject({ action: "dispatch", remaining: 0 });
+    expect(toolbox.proposal()).toBeUndefined();
+  });
+
+  it("keeps uncounted local rejections when no controller admission is given", async () => {
+    const { toolbox, execute } = dispatchTool();
+    for (let i = 0; i < 4; i += 1) {
+      const rejected = await execute(String(i), { reason: "retry", job });
+      expect(rejected.terminate).toBeUndefined();
+    }
+    expect(toolbox.exhausted()).toBeUndefined();
   });
 });

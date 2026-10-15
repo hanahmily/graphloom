@@ -109,7 +109,11 @@ describe("createPiSupervisor", () => {
   it("rejects Accept proposals from the model", async () => {
     const supervisor = createPiSupervisor({
       session: fakeSession({
-        replies: [JSON.stringify({ action: { type: "accept" }, reason: "ship it" })],
+        // Re-asked once with the parse error; a second Accept still fails the turn.
+        replies: [
+          JSON.stringify({ action: { type: "accept" }, reason: "ship it" }),
+          JSON.stringify({ action: { type: "accept" }, reason: "ship it" }),
+        ],
       }),
     });
     await expect(supervisor.decide(sampleInput())).rejects.toMatchObject({
@@ -329,6 +333,113 @@ describe("createPiSupervisor", () => {
     });
     const decision = await supervisor.decide(sampleInput());
     expect(decision).toMatchObject({ action: { type: "reenter", reenter: { stageId: "fix" } } });
+  });
+});
+
+describe("createPiSupervisor in-turn feedback (#117)", () => {
+  it("re-asks an unparseable reply once with the parse error, within the same decide()", async () => {
+    const prompted: string[] = [];
+    const supervisor = createPiSupervisor({
+      session: fakeSession({
+        replies: ["I think we should return now.", JSON.stringify(returnToNormal({ summary: "ok" }, "return"))],
+        onPrompt: (t) => prompted.push(t),
+      }),
+    });
+    await expect(supervisor.decide(sampleInput())).resolves.toMatchObject({ action: { type: "return" } });
+    expect(prompted).toHaveLength(2);
+    expect(prompted[1]).toMatch(/could not be read as a decision: .*GraphDecision/);
+    expect(supervisor.drainProviderCalls()).toBe(2);
+  });
+
+  it("does not re-ask when the turn's provider-call allowance is spent", async () => {
+    const supervisor = createPiSupervisor({
+      session: fakeSession({ replies: ["not json", JSON.stringify(returnToNormal({ summary: "ok" }, "return"))] }),
+    });
+    await expect(supervisor.decide({ ...sampleInput(), maxProviderCalls: 1 })).rejects.toMatchObject({
+      failureClass: "malformed",
+      message: expect.stringMatching(/neither a tool call nor GraphDecision JSON/),
+      unremedied: "no provider calls left in the run's budget to retry",
+    });
+    expect(supervisor.drainProviderCalls()).toBe(1);
+  });
+
+  it("returns a JSON reply the controller would not admit to the model in the same decide(), then admits the next", async () => {
+    const prompted: string[] = [];
+    const bad = { reason: "activate", action: { type: "activate_repair", activate: { qualifiedArtifactId: "repair-1", reason: "fix" } } };
+    let rejections = 0;
+    const supervisor = createPiSupervisor({
+      session: fakeSession({
+        replies: [JSON.stringify(bad), JSON.stringify(returnToNormal({ summary: "already active" }, "return"))],
+        onPrompt: (t) => prompted.push(t),
+      }),
+    });
+    const decided = await supervisor.decide({
+      ...sampleInput(),
+      admission: {
+        facts: { inRecovery: true, canQualify: false, qualifiedArtifactIds: [] },
+        refuse: async (action, reason) => ({ action, reason, remaining: 2 }),
+        check: async (d) => {
+          if (d.action.type !== "activate_repair") return undefined;
+          rejections += 1;
+          return { action: "activate_repair", reason: "repair-1 is `activated`, not `qualified`", remaining: 2 };
+        },
+      },
+    });
+    expect(decided).toMatchObject({ action: { type: "return" } });
+    expect(rejections).toBe(1);
+    expect(prompted[1]).toContain("repair-1 is `activated`, not `qualified`");
+    expect(prompted[1]).toContain("Call one GraphLoom tool: dispatch, observe, validate, reenter, return, or stop.");
+  });
+
+  it("rejects a JSON work dispatch missing its writeScope in-turn and charges it, instead of rewriting it into a reenter", async () => {
+    const prompted: string[] = [];
+    const charged: string[] = [];
+    const noScope = dispatch({ stageId: "write", kind: "agent", purpose: "work", instruction: "fix it" }, "retry the work");
+    const supervisor = createPiSupervisor({
+      session: fakeSession({
+        replies: [JSON.stringify(noScope), JSON.stringify(returnToNormal({ summary: "let the graph rerun it" }, "return"))],
+        onPrompt: (t) => prompted.push(t),
+      }),
+    });
+    const decided = await supervisor.decide({
+      ...sampleInput(),
+      admission: {
+        facts: { inRecovery: true, canQualify: false, qualifiedArtifactIds: [] },
+        check: async () => undefined,
+        refuse: async (action, reason) => {
+          charged.push(`${action}: ${reason}`);
+          return { action, reason, remaining: 3 - charged.length };
+        },
+      },
+    });
+    expect(decided).toMatchObject({ action: { type: "return" } });
+    expect(charged).toHaveLength(1);
+    expect(charged[0]).toMatch(/^dispatch: a work job needs a non-empty writeScope/);
+    expect(prompted).toHaveLength(2);
+    expect(prompted[1]).toContain("a work job needs a non-empty writeScope");
+    expect(prompted[1]).toContain("2 more inadmissible proposals allowed this turn");
+  });
+
+  it("lists exactly the offered tools in the recovery prompt", async () => {
+    let tools: string[] = [];
+    const prompted: string[] = [];
+    const session = fakeSession({
+      replies: [JSON.stringify(stop({ reason: "blocked", blocker: "x" }, "stop"))],
+      onPrompt: (t) => prompted.push(t),
+    });
+    const prompt = session.prompt.bind(session);
+    session.prompt = async (text, options) => {
+      tools = (options?.tools ?? []).map((t) => t.name);
+      return prompt(text, options);
+    };
+    const supervisor = createPiSupervisor({ session });
+    await supervisor.decide({
+      ...sampleInput(),
+      admission: { facts: { inRecovery: true, canQualify: false, qualifiedArtifactIds: [] }, check: async () => undefined, refuse: async (action, reason) => ({ action, reason, remaining: 2 }) },
+    });
+    expect(tools).toEqual(["dispatch", "observe", "validate", "reenter", "return", "stop", "switch_model"]);
+    expect(prompted[0]).toContain("Propose exactly one action by calling one GraphLoom tool: dispatch, observe, validate, reenter, return, or stop.");
+    expect(prompted[0]).not.toContain("For activate_repair");
   });
 });
 

@@ -30,6 +30,7 @@ import {
   createScriptedSupervisor,
   type PiSupervisorSessionPort,
   type Supervisor,
+  type SupervisorInput,
 } from "@graphloom/supervisor";
 import {
   createController,
@@ -123,6 +124,29 @@ const independentReview: Validator = {
 };
 
 const temps: string[] = [];
+
+/**
+ * The admission feedback the supervisor got for an inadmissible proposal
+ * (#117): the in-turn rejection, or the inadmissible outcome the previous
+ * turn's settlement reported when only admission itself could see it.
+ */
+function admissionFeedback(input: SupervisorInput): string | undefined {
+  const prefix = "inadmissible, not applied: ";
+  return input.rejection?.reason ?? input.lastSettlement?.facts.find((f) => f.startsWith(prefix))?.slice(prefix.length);
+}
+
+/** A supervisor that stops after admission feedback, naming it and citing the escalation's evidence. */
+function stopOnRejection(reason = "inadmissible") {
+  return (input: SupervisorInput) =>
+    stop(
+      {
+        reason,
+        blocker: admissionFeedback(input) ?? "no admission feedback",
+        ...(input.trigger.evidenceRefs !== undefined ? { evidenceRefs: input.trigger.evidenceRefs } : {}),
+      },
+      "stop on admission feedback",
+    );
+}
 
 afterEach(async () => {
   while (temps.length > 0) {
@@ -436,7 +460,7 @@ describe("qualified repair + same-run activation (#29)", () => {
           void input;
           return activateRepair({ qualifiedArtifactId: artifactB!, reason: "act2" }, "a2");
         },
-        stop({ reason: "done", blocker: "check" }, "stop"),
+        stopOnRejection(),
       ],
     });
 
@@ -481,10 +505,13 @@ describe("qualified repair + same-run activation (#29)", () => {
     });
 
     // Activating A supersedes the qualified peer B, so the second activation
-    // finds no qualified artifact and the run stops without switching again.
+    // is inadmissible: the supervisor hears why within the same turn (#117)
+    // and decides the stop itself; nothing switches again.
     expect(report.status).toBe("stopped");
-    expect(report.stopReason).toBe("activate_repair missing qualified artifact");
-    expect(report.blocker).toBe(artifactB);
+    expect(report.stopReason).toBe("inadmissible");
+    expect(report.blocker).toBe(
+      `activate_repair missing qualified artifact: ${artifactB} is \`superseded\`, not \`qualified\`; qualified candidates: none; active version is hello@repair-${artifactA}`,
+    );
     const state = await loadRunState(report.stateDir!);
     const byId = new Map(state.repairCandidates?.map((c) => [c.artifactId, c.status]));
     expect(byId.get(artifactA!)).toBe("activated");
@@ -583,7 +610,7 @@ describe("qualified repair + same-run activation (#29)", () => {
       validators: goodValidators,
       supervisor: createScriptedSupervisor({
         sessionId: "sup-g",
-        decisions: [qualifyRepair({ target: "validator", reason: "try" }, "q")],
+        decisions: [qualifyRepair({ target: "validator", reason: "try" }, "q"), stopOnRejection()],
       }),
       repair: approvingRepair("sup-g"),
       runner: createScriptedRunner({ jobs: [] }),
@@ -591,8 +618,9 @@ describe("qualified repair + same-run activation (#29)", () => {
       runId: "repair-no-grant",
     });
     expect(report.status).toBe("stopped");
-    expect(report.stopReason).toBe("qualify_repair missing operator grant");
-    expect(report.blocker).toMatch(/validatorSubstitution/);
+    // Inadmissible, not a stop: the supervisor is told the missing grant in-turn (#117).
+    expect(report.stopReason).toBe("inadmissible");
+    expect(report.blocker).toBe("qualify_repair missing operator grant: validatorSubstitution grant is false");
     const state = await loadRunState(report.stateDir);
     expect(state.repairCandidates ?? []).toHaveLength(0);
   });
@@ -970,6 +998,7 @@ describe("qualified repair + same-run activation (#29)", () => {
             await writeFile(liveEntry, "tampered\n", "utf8");
             return activateFirstQualified()(input);
           },
+          stopOnRejection(),
         ],
       }),
       repair: approvingRepair("sup-b"),
@@ -978,7 +1007,9 @@ describe("qualified repair + same-run activation (#29)", () => {
       runId: "repair-base-mismatch",
     });
     expect(report.status).toBe("stopped");
-    expect(report.stopReason).toBe("activate_repair base mismatch");
+    // Only admission can see the live install moved: the run stays in recovery and the next turn hears why (#117).
+    expect(report.stopReason).toBe("inadmissible");
+    expect(report.blocker).toMatch(/^activate_repair base mismatch: repair-\S+: active pin no longer matches candidate base snapshot; it is now `superseded`$/);
     const state = await loadRunState(report.stateDir);
     expect(state.repairCandidates?.[0]?.status).toBe("superseded");
     expect(state.activeVersion).toBe("hello@0.1.0");
@@ -1011,6 +1042,7 @@ describe("qualified repair + same-run activation (#29)", () => {
             await alter(path.join(env.stateRoot, "repair-altered", "repairs", qualified!.artifactId));
             return activateFirstQualified()(input);
           },
+          stopOnRejection(),
         ],
       }),
       repair: approvingRepair("sup-altered"),
@@ -1019,8 +1051,9 @@ describe("qualified repair + same-run activation (#29)", () => {
       runId: "repair-altered",
     });
     expect(report.status).toBe("stopped");
-    expect(report.stopReason).toBe("activate_repair candidate digest mismatch");
-    expect(report.blocker).toBe(blocker);
+    expect(report.stopReason).toBe("inadmissible");
+    expect(report.blocker).toMatch(/^activate_repair candidate digest mismatch: repair-\S+: /);
+    expect(report.blocker).toContain(`${blocker}; it is now \`superseded\``);
     const state = await loadRunState(report.stateDir);
     expect(state.repairCandidates?.[0]?.status).toBe("superseded");
     expect(state.activeVersion).toBe("hello@0.1.0");
@@ -1069,6 +1102,7 @@ describe("qualified repair + same-run activation (#29)", () => {
               { qualifiedArtifactId: input.view.repairCandidates![0]!.artifactId, reason: "activate anyway" },
               "act",
             ),
+          stopOnRejection(),
         ],
       }),
       repair: {
@@ -1081,7 +1115,8 @@ describe("qualified repair + same-run activation (#29)", () => {
       runId: "repair-permissive",
     });
     expect(report.status).toBe("stopped");
-    expect(report.stopReason).toBe("activate_repair missing qualified artifact");
+    expect(report.stopReason).toBe("inadmissible");
+    expect(report.blocker).toMatch(/^activate_repair missing qualified artifact: repair-\S+ is `rejected`, not `qualified`/);
     const state = await loadRunState(report.stateDir);
     expect(state.repairCandidates?.[0]?.status).toBe("rejected");
     // An always-rejecting independent reviewer gets re-prompted for a few
@@ -1353,6 +1388,7 @@ describe("qualified repair + same-run activation (#29)", () => {
         decisions: [
           qualifyRepair({ target: "plugin", reason: "try" }, "q"),
           activateFirstQualified(),
+          stopOnRejection(),
         ],
       }),
       repair: approvingRepair("sup-c"),
@@ -1361,7 +1397,8 @@ describe("qualified repair + same-run activation (#29)", () => {
       runId: "repair-contract",
     });
     expect(report.status).toBe("stopped");
-    expect(report.stopReason).toBe("activate_repair candidate rejected");
+    expect(report.stopReason).toBe("inadmissible");
+    expect(report.blocker).toMatch(/^activate_repair candidate rejected: /);
     expect(report.blocker).toMatch(reason);
     expect(loads).toBe(2);
     const state = await loadRunState(report.stateDir);
@@ -1935,6 +1972,8 @@ describe("qualified repair + same-run activation (#29)", () => {
               authority = input.view.repairAuthority;
               return decision;
             },
+            // Inadmissible in-turn (#117): the supervisor stops itself, citing the failing gate.
+            stopOnRejection("opaque gate"),
           ],
         }),
         repair,
@@ -1946,6 +1985,7 @@ describe("qualified repair + same-run activation (#29)", () => {
       expect(authority).toMatchObject({ contract: "opaque" });
       expect(report.status).toBe("stopped");
       expect(report.stopReason).toBe("opaque gate");
+      expect(report.blocker).toMatch(/^opaque gate: /);
       expect(report.blocker).toMatch(reason);
       const state = await loadRunState(report.stateDir);
       // The escalation cited the failing gate's evidence; unrecorded refs are dropped.
@@ -2046,6 +2086,7 @@ describe("qualified repair + same-run activation (#29)", () => {
               await writeFile(path.join(shadow, "index.js"), "export {};\n", "utf8");
               return activateFirstQualified()(input);
             },
+            stopOnRejection(),
           ],
         }),
         repair: approvingRepair("sup-59a"),
@@ -2053,8 +2094,10 @@ describe("qualified repair + same-run activation (#29)", () => {
         stateRoot: env.stateRoot,
         runId: "activate-late",
       });
-      expect(report.stopReason).toBe("activate_repair candidate rejected");
-      expect(report.blocker).toBe("candidate contains entries review cannot see: node_modules");
+      expect(report.stopReason).toBe("inadmissible");
+      expect(report.blocker).toMatch(
+        /^activate_repair candidate rejected: repair-\S+: candidate contains entries review cannot see: node_modules; it is now `rejected`$/,
+      );
       const state = await loadRunState(report.stateDir);
       expect(state.activationIntent?.status).toBe("aborted");
       expect(state.activeVersion).toBe("hello@0.1.0");
@@ -2069,7 +2112,7 @@ describe("qualified repair + same-run activation (#29)", () => {
         validators: defectiveValidators,
         supervisor: createScriptedSupervisor({
           sessionId: "sup-59p",
-          decisions: [qualifyRepair({ target: "plugin", reason: "patch" }, "q")],
+          decisions: [qualifyRepair({ target: "plugin", reason: "patch" }, "q"), stopOnRejection("opaque gate")],
         }),
         repair: approvingRepair("sup-59p"),
         runner: writer(),
@@ -2142,15 +2185,18 @@ describe("qualified repair + same-run activation (#29)", () => {
         validators: goodValidators,
         supervisor: createScriptedSupervisor({
           sessionId: "sup-59u",
-          decisions: [qualifyRepair({ target: "validator", requirementId: "made-up", reason: "substitute" }, "q")],
+          decisions: [
+            qualifyRepair({ target: "validator", requirementId: "made-up", reason: "substitute" }, "q"),
+            stopOnRejection(),
+          ],
         }),
         repair: approvingRepair("sup-59u"),
         runner: createScriptedRunner({ jobs: [] }),
         stateRoot: env.stateRoot,
         runId: "unknown-requirement",
       });
-      expect(report.stopReason).toBe("qualify_repair rejected");
-      expect(report.blocker).toBe("requirement made-up is not pinned by this run");
+      expect(report.stopReason).toBe("inadmissible");
+      expect(report.blocker).toBe("qualify_repair rejected: requirement made-up is not pinned by this run");
     });
 
     it("records a stop's recorded evidence refs and clears them on resume", async () => {

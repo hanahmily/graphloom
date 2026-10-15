@@ -251,20 +251,89 @@ describe("Pi supervisor provider failures (faux provider)", () => {
     expect(w.faux.state.callCount).toBe(2);
   });
 
-  it("names auth, unknown, and malformed failures without retrying them", async () => {
+  it("re-asks a malformed reply once (the single re-ask shared with empty replies), then names malformed", async () => {
+    const fixed = await world();
+    fixed.faux.setResponses([fixed.ai.fauxAssistantMessage("I think we should retry."), stopTurn(fixed)]);
+    expect(await fixed.supervisor.decide(input())).toMatchObject({ action: { type: "stop" } });
+    expect(fixed.faux.state.callCount).toBe(2);
+    expect(fixed.supervisor.drainRemedies()).toMatchObject([{ failureClass: "malformed", remedy: "reask" }]);
+
+    // An empty reply followed by a malformed one is not re-asked twice.
+    const w = await world();
+    w.faux.setResponses([w.ai.fauxAssistantMessage([]), w.ai.fauxAssistantMessage("still prose"), stopTurn(w)]);
+    const err = await failure(w.supervisor.decide(input()));
+    expect(err.failureClass).toBe("malformed");
+    expect(err.message.startsWith("supervisor provider malformed: ")).toBe(true);
+    expect(err.unremedied).toMatch(/already re-asked once/);
+    expect(w.faux.state.callCount).toBe(2);
+  });
+
+  it("names auth and unknown failures without retrying them, and does not count them as inadmissible", async () => {
     const cases: Array<[string, Step[] | ((w: World) => Step[])]> = [
       ["auth", (w) => [errorTurn(w, "401 Unauthorized: invalid api key"), stopTurn(w)]],
       ["unknown", (w) => [errorTurn(w, "500 internal server error"), stopTurn(w)]],
-      ["malformed", (w) => [w.ai.fauxAssistantMessage("I think we should retry."), stopTurn(w)]],
     ];
     for (const [cls, steps] of cases) {
       const w = await world();
       w.faux.setResponses(typeof steps === "function" ? steps(w) : steps);
-      const err = await failure(w.supervisor.decide(input({ maxWaitMs: 60_000 })));
+      let judged = 0;
+      const admission: NonNullable<SupervisorInput["admission"]> = {
+        facts: { inRecovery: true, canQualify: false, qualifiedArtifactIds: [] },
+        check: async () => {
+          judged += 1;
+          return undefined;
+        },
+        refuse: async (action, reason) => {
+          judged += 1;
+          return { action, reason, remaining: 2 };
+        },
+      };
+      const err = await failure(w.supervisor.decide(input({ maxWaitMs: 60_000, admission })));
       expect(err.failureClass).toBe(cls);
       expect(err.message.startsWith(`supervisor provider ${cls}: `)).toBe(true);
       expect(w.faux.state.callCount).toBe(1);
+      expect(judged).toBe(0);
     }
+  });
+
+  it("charges a quota retry and a rejection re-ask to the same provider-call allowance", async () => {
+    const w = await world();
+    const reenterCall = { reason: "retry write", reenter: { stageId: "write", reason: "again" } };
+    w.faux.setResponses([
+      errorTurn(w, "429 rate limit; retry after 50ms"),
+      w.ai.fauxAssistantMessage(w.ai.fauxToolCall("reenter", reenterCall), { stopReason: "toolUse" }),
+      stopTurn(w),
+    ]);
+    let rejected = false;
+    const admission: NonNullable<SupervisorInput["admission"]> = {
+      facts: { inRecovery: true, canQualify: false, qualifiedArtifactIds: [] },
+      check: async (decision) => {
+        if (decision.action.type !== "reenter" || rejected) return undefined;
+        rejected = true;
+        return { action: "reenter", reason: "stage write is not open", remaining: 2 };
+      },
+      refuse: async (action, reason) => ({ action, reason, remaining: 2 }),
+    };
+    // Three calls are needed: the 429, the rejected reenter, and the admitted stop.
+    // With two allowed, the retried prompt gets the one call left, and the
+    // turn after the rejection is refused before its request.
+    await expect(w.supervisor.decide(input({ maxWaitMs: 60_000, admission, maxProviderCalls: 2 }))).rejects.toThrow(
+      /exceeded its 1-turn allowance/,
+    );
+    expect(w.supervisor.drainProviderCalls()).toBe(2);
+    expect(w.faux.state.callCount).toBe(2);
+
+    const ok = await world();
+    ok.faux.setResponses([
+      errorTurn(ok, "429 rate limit; retry after 50ms"),
+      ok.ai.fauxAssistantMessage(ok.ai.fauxToolCall("reenter", reenterCall), { stopReason: "toolUse" }),
+      stopTurn(ok),
+    ]);
+    rejected = false;
+    const proposal = await ok.supervisor.decide(input({ maxWaitMs: 60_000, admission, maxProviderCalls: 3 }));
+    expect(proposal).toMatchObject({ action: { type: "stop" } });
+    expect(ok.supervisor.drainProviderCalls()).toBe(3);
+    expect(ok.supervisor.drainRemedies()).toMatchObject([{ failureClass: "quota", remedy: "wait_and_retry" }]);
   });
 
   it("does not retry past the run's provider-call allowance", async () => {

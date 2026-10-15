@@ -285,9 +285,13 @@ replies), `malformed` (text that is not a GraphDecision), or `unknown`. The host
 applies a fixed remedy without asking the model what to do: a quota error with a
 reset time waits until then (at most three waits a turn, only within the
 `maxWaitMs` the controller passes from the run's `waitMs`) and retries the turn;
-an overflow compacts the session and retries once; an empty reply is re-asked
-once with "call exactly one tool". Every retried call and compaction counts
-against the turn's provider-call allowance. The compaction honors the run's Stop
+an overflow compacts the session and retries once. An empty or malformed reply
+gets the turn's single re-ask: one for both kinds together, not one each. The
+re-ask says what was wrong; a second unreadable reply stops the run, naming its
+class. Every retried call, compaction, re-ask and rejection re-ask counts against
+the turn's provider-call allowance. A provider failure is never sent to admission,
+so it is not counted as an inadmissible proposal and is not charged to
+`decisions`. The compaction honors the run's Stop
 and the prompt timeout: either aborts Pi's summarization request and fails the
 remedy.
 

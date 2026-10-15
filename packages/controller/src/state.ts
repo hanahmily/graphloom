@@ -301,6 +301,8 @@ export interface DurableRunState {
    * The next recovery prompt opens with what changed since (the settlement).
    */
   supervisorMark?: SupervisorMark;
+  /** Supervisor turns that ended without an admitted proposal, newest last (bounded). */
+  supervisorOutcomes?: SupervisorOutcomeRecord[];
   /** Isolated repair candidates for this run (never the live install). */
   repairCandidates?: import("./repair.js").QualifiedRepairArtifact[];
   /** Crash-safe activation journal; cleared after successful switch. */
@@ -328,6 +330,24 @@ export interface SupervisorMark {
   notes: string[];
   /** Set when this proposal repeated an earlier one with no progress since. */
   repeat?: { count: number; triggerCode: string };
+}
+
+/**
+ * A supervisor outcome the operator can see. `supervisor_inadmissible`: a turn
+ * reached the inadmissible-proposal limit and the controller applied the
+ * trigger's safe default. `inadmissible`: a proposal that passed the
+ * pre-admission check failed a precondition only admission could see (such as
+ * a candidate digest on disk); the run stayed in recovery.
+ */
+export interface SupervisorOutcomeRecord {
+  at: string;
+  episodeId?: string;
+  triggerCode?: string;
+  outcome: "supervisor_inadmissible" | "inadmissible";
+  /** Each rejection as `<precondition>: <current value>`, oldest first. */
+  rejections: string[];
+  /** What the controller did: returned to the graph, stopped, or stayed in recovery. */
+  applied: "return" | "stop" | "recovery";
 }
 
 export interface VersionRecord {
