@@ -48,6 +48,7 @@ export {
 
 export {
   createAdmissionTools,
+  offeredActions,
   GRAPHLOOM_SUPERVISOR_ACTIONS,
   SWITCH_MODEL_TOOL,
   type AdmissionToolbox,
@@ -57,6 +58,10 @@ export {
 export {
   createScriptedSupervisor,
   isModelSwitchRequest,
+  type AdmissionCheck,
+  type AdmissionFacts,
+  type SupervisorAdmission,
+  type SupervisorRejection,
   type CandidatePatchRequest,
   type ModelRef,
   type ModelSwitchRequest,

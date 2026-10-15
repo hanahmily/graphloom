@@ -669,7 +669,10 @@ describe("graph-declared environment and disposable checkouts", () => {
 
     it("refuses recovery jobs while the declaration is stale", async () => {
       const env = await makeEnv();
-      const supervisor = createScriptedSupervisor({ decisions: [work] });
+      // Each refused dispatch is inadmissible and re-asked within the turn
+      // (#117); after the third, the environment_changed trigger's safe
+      // default is to stop (returning would only hit the same block).
+      const supervisor = createScriptedSupervisor({ decisions: [work, work, work] });
       const report = await createController().run({
         taskPath: env.taskPath,
         plugin: createScriptedGraph({ definition: definitionWith(pinned(staleSha)), advances: [] }),
@@ -679,8 +682,14 @@ describe("graph-declared environment and disposable checkouts", () => {
         stateRoot: env.stateRoot,
         runId: "pinned-refuse",
       });
-      expect(report.stopReason).toBe("recovery dispatch rejected");
+      expect(report.stopReason).toBe("supervisor_inadmissible");
+      expect(report.blocker).toContain("recovery dispatch rejected");
       expect(report.blocker).toContain("environment declaration");
+      const state = await loadRunState(report.stateDir);
+      expect(state.supervisorOutcomes).toMatchObject([
+        { outcome: "supervisor_inadmissible", triggerCode: "environment_changed", applied: "stop" },
+      ]);
+      expect(state.supervisorOutcomes?.[0]?.rejections).toHaveLength(3);
     });
   });
 

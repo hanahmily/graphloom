@@ -65,6 +65,7 @@ import {
   saveRunState,
   type DurableRunState,
   type RunStatus,
+  type SupervisorOutcomeRecord,
   type VersionRecord,
 } from "./state.js";
 import {
@@ -210,6 +211,8 @@ export interface InspectReport {
   };
   /** Per stage, dispatches settled since its last receipt (§4.6). */
   dispatchesSinceReceipt: Record<string, { agent: number; total: number; since: string }>;
+  /** Supervisor turns that ended without an admitted proposal (#117), such as `supervisor_inadmissible`. */
+  supervisorOutcomes: SupervisorOutcomeRecord[];
   /** The gate in `run` (docs/design-graph-rehearsal.md §3.5): whether (and how) this run was rehearsed before it was intaken. Absent for runs intaken un-gated. */
   rehearsalGate?: IntakePin["rehearsalGate"];
 }
@@ -1040,6 +1043,7 @@ function toInspect(state: DurableRunState): InspectReport {
     stateDir: state.stateDir,
     contracts: contractSummary(state.evidence),
     dispatchesSinceReceipt: structuredClone(state.dispatchesSinceReceipt ?? {}),
+    supervisorOutcomes: structuredClone(state.supervisorOutcomes ?? []),
   };
   if (state.stopReason !== undefined) {
     report.stopReason = state.stopReason;
@@ -1137,7 +1141,7 @@ export { admitValidation, freshEvidence } from "./admit.js";
 export { toRunView, bumpGeneration, classifyAgentResult } from "./loop.js";
 export type { ContractOutcome } from "./loop.js";
 export { loadRunState, saveRunState } from "./state.js";
-export type { DurableRunState, RunStatus, VersionRecord } from "./state.js";
+export type { DurableRunState, RunStatus, SupervisorOutcomeRecord, VersionRecord } from "./state.js";
 export type { DeleteReport } from "./delete-run.js";
 export type { IntakePin } from "./intake.js";
 export type {
