@@ -321,7 +321,18 @@ export function wrapPiAgentSession(args: {
       let turnCapHit = false;
       let collected: string[] = [];
       const unsubscribe = session.subscribe((event) => {
-        if (event.type === "turn_start") {
+        if (event.type === "compaction_start") {
+          // Compaction (manual or Pi's own) makes summarization requests outside
+          // turn_start, so charge them here. Pi emits this synchronously after
+          // arming its abort controller and before any request, so aborting
+          // here sends nothing.
+          if (maxTurns !== undefined && promptTurns + COMPACTION_PROVIDER_CALLS > maxTurns) {
+            session.abortCompaction();
+            return;
+          }
+          promptTurns += COMPACTION_PROVIDER_CALLS;
+          turns += COMPACTION_PROVIDER_CALLS;
+        } else if (event.type === "turn_start") {
           // Pi awaits listeners before streaming, so aborting here cancels the
           // turn before its provider request is sent.
           if (maxTurns !== undefined && promptTurns >= maxTurns) {
@@ -461,6 +472,12 @@ function setSessionTools(session: AgentSession, tools: ToolDefinition[]): void {
   host.setActiveToolsByName(names);
 }
 
+/**
+ * Provider requests one compaction may make: a history summary plus, when the
+ * cut splits a turn, a summary of that turn's prefix. Charged as the upper
+ * bound, since an undercount would break the finite budget.
+ */
+const COMPACTION_PROVIDER_CALLS = 2;
 /** Fraction of the model's context window a prompt may fill before the session is compacted first. */
 const PROACTIVE_COMPACTION_FRACTION = 0.7;
 /** Pessimistic characters per token, so a large prompt is never underestimated. */
@@ -478,7 +495,10 @@ export async function compactBeforePrompt(session: AgentSession, text: string): 
   if (usage?.tokens == null || !(usage.contextWindow > 0)) return;
   const projected = usage.tokens + Math.ceil(text.length / CHARS_PER_TOKEN);
   if (projected <= usage.contextWindow * PROACTIVE_COMPACTION_FRACTION) return;
-  await session.compact();
+  // A compaction refused by the turn allowance, or one that fails, still lets
+  // the prompt go out: the provider's own overflow error is then the failure
+  // the caller sees, not a compaction error that hides it.
+  await session.compact().catch(() => undefined);
 }
 
 const STILL_ACTIVE = "supervisor session still active after abort; refusing to reuse it";

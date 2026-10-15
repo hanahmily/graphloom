@@ -243,6 +243,37 @@ describe("corrections, crash containment, unfamiliar failure (#28)", () => {
     expect(report.receipts.filter((r) => r.stageId === "review" && r.valid)).toEqual([]);
   });
 
+  it("fails a read-only job that edits a clean tracked file", async () => {
+    const env = await makeEnv();
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      runner: createScriptedRunner({
+        jobs: [
+          async (_job, ctx) => {
+            await writeFile(path.join(ctx.worktreePath, GREETING_PATH), GREETING, "utf8");
+            return { status: "ok" as const, summary: "wrote" };
+          },
+          async (_job, ctx) => {
+            // README.md is tracked and clean, so it is absent from the
+            // pre-job status snapshot; it still existed before the job.
+            await writeFile(path.join(ctx.worktreePath, "README.md"), "edited by the reviewer\n", "utf8");
+            return {
+              status: "ok" as const,
+              summary: "approved",
+              evidence: [{ kind: "review" as const, payload: { verdict: "approved", summary: "ok" } }],
+            };
+          },
+        ],
+      }),
+      stateRoot: env.stateRoot,
+      runId: "scope4",
+    });
+
+    expect(report.status).toBe("stopped");
+    expect(report.stopReason).toBe("job failed: read-only job modified or removed README.md");
+    expect(report.receipts.filter((r) => r.stageId === "review" && r.valid)).toEqual([]);
+  });
+
   it("does not fail a read-only job for leaving behind a scratch file that did not exist before it ran", async () => {
     const env = await makeEnv();
     const report = await createController().run({

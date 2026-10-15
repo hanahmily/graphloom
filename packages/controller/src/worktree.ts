@@ -175,6 +175,20 @@ export function changedPaths(before: Map<string, string>, after: Map<string, str
 }
 
 /**
+ * The subset of `paths` tracked at HEAD. A path missing from the pre-job
+ * status snapshot may still have existed before the job (any clean tracked
+ * file), so "new" also requires that HEAD does not track it.
+ */
+export async function trackedAtHead(worktreePath: string, paths: string[]): Promise<Set<string>> {
+  if (paths.length === 0) return new Set();
+  const { stdout } = await execFileAsync("git", ["ls-tree", "-r", "-z", "--name-only", "HEAD", "--", ...paths], {
+    cwd: worktreePath,
+    maxBuffer: 64 * 1024 * 1024,
+  });
+  return new Set(stdout.split("\0").filter((p) => p.length > 0));
+}
+
+/**
  * Changed paths a job was not allowed to write: for a read-only job, any path
  * that existed before and was modified or removed (a path `isNewPath` reports
  * as new — one that did not exist before the job ran — is not a violation: a

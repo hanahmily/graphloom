@@ -77,6 +77,7 @@ import {
 import {
   changedPaths,
   pathsOutsideWriteScope,
+  trackedAtHead,
   readWorktreeFile,
   workspaceChangeManifest,
   worktreeChangeFingerprints,
@@ -570,14 +571,14 @@ async function runNormalLoopSteps(
         stopWatch();
       }
       // Executors may run unconfined, so scope is checked against what actually changed.
-      const outOfScope =
-        before !== undefined
-          ? pathsOutsideWriteScope(
-              changedPaths(before, await worktreeChangeFingerprints(state.worktreePath)),
-              job,
-              (rel) => !before.has(rel),
-            )
-          : [];
+      let outOfScope: string[] = [];
+      if (before !== undefined) {
+        const changed = changedPaths(before, await worktreeChangeFingerprints(state.worktreePath));
+        // New means absent before the job: neither dirty in the pre-job
+        // snapshot nor a clean file tracked at HEAD.
+        const tracked = job.readOnly === true ? await trackedAtHead(state.worktreePath, changed) : new Set<string>();
+        outOfScope = pathsOutsideWriteScope(changed, job, (rel) => !before.has(rel) && !tracked.has(rel));
+      }
       const afterDigest = await liveCandidateDigest(state);
 
       state = await withRunLock(state.stateDir, async () => {
