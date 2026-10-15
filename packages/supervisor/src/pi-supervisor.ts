@@ -1,6 +1,6 @@
 import type { AgentSessionView, EvidenceRecord } from "@graphloom/sdk";
 import { parseSupervisorDecision } from "./decision.js";
-import type { PiSupervisorSession } from "./pi-session.js";
+import type { PiSupervisorSession, ThinkingLevel } from "./pi-session.js";
 import { continuationRefusal, createAdmissionTools, escapingObservePath, supervisorProposalKey, writeScopeRefusal } from "./tools.js";
 import {
   assertGrantedRoot,
@@ -13,6 +13,8 @@ import {
 export interface SupervisorModelRef {
   provider: string;
   modelId: string;
+  /** Reasoning level this model needs; omit for the "off" default. */
+  thinkingLevel?: ThinkingLevel;
 }
 
 export interface ModelSwitchRecord {
@@ -232,14 +234,15 @@ export function createPiSupervisor(options: CreatePiSupervisorOptions): PiSuperv
         status: "intent",
       };
       switchJournal.push(record);
-      if (!isConfigured(configured, to)) {
+      const target = findConfigured(configured, to);
+      if (!target) {
         record.status = "failed";
         record.error = `model not configured: ${to.provider}/${to.modelId}; refusing silent fallback`;
         throw new Error(record.error);
       }
 
       try {
-        await session.setModel(to);
+        await session.setModel(target);
         syncBindingModel();
         record.status = "committed";
       } catch (err) {
@@ -259,9 +262,15 @@ export function createPiSupervisor(options: CreatePiSupervisorOptions): PiSuperv
 }
 
 function isConfigured(configured: SupervisorModelRef[], ref: SupervisorModelRef): boolean {
-  return configured.some(
-    (m) => m.provider === ref.provider && m.modelId === ref.modelId,
-  );
+  return findConfigured(configured, ref) !== undefined;
+}
+
+/** The operator's own configured entry for `ref` (carries its thinkingLevel), or undefined if not configured. */
+export function findConfigured(
+  configured: SupervisorModelRef[],
+  ref: { provider: string; modelId: string },
+): SupervisorModelRef | undefined {
+  return configured.find((m) => m.provider === ref.provider && m.modelId === ref.modelId);
 }
 
 /**
@@ -380,6 +389,11 @@ export function buildRecoveryPrompt(
     "If tools are unavailable, reply with one GraphDecision as JSON ({\"reason\", \"action\": {\"type\", ...}}), optionally in a ```json fence.",
     "Never propose Accept. Never add, remove, rename, or reorder graph steps.",
     "Prefer further authorized remedies over Stop while budgets and authority remain.",
+    ...(input.resumed === true
+      ? [
+          "This run was just resumed: the process may now run different controller or plugin code, or carry newly granted repair authority, than whatever rejected a proposal earlier in this conversation. Do not treat an earlier rejection as still true. Before repeating a past conclusion or proposing stop, re-attempt at least one previously-rejected action (qualify_repair, dispatch, etc.) if one exists, or re-check the specific condition that caused it to fail.",
+        ]
+      : []),
     "For activate_repair, use a qualifiedArtifactId from repairCandidates with status qualified.",
     "repairAuthority shows what the operator granted and whether the graph bundle's code can be patched. An opaque bundle's code cannot be: retry the work or repair its environment instead. Substitute a validator (qualify_repair target validator with requirementId, adding files without editing existing ones) only when validatorSubstitution is granted and that requirement has a readable statement. Otherwise stop, citing the failing validation's evidenceRefs; never invent a replacement criterion.",
     "reenter starts a new attempt but runs nothing. To have the graph run that attempt's own jobs (its instructions, result schemas and write scopes), return after reentering; dispatch only work the graph would not run itself.",
@@ -467,7 +481,9 @@ function clipDetail(text: string): string {
  */
 export function buildRepairPrompt(args: CandidatePatchRequest): string {
   return [
-    "You are the GraphLoom run supervisor, now authoring the qualified repair you proposed.",
+    args.reviewFeedback !== undefined
+      ? "You are the GraphLoom run supervisor, revising the qualified repair you are authoring after the independent reviewer sent it back."
+      : "You are the GraphLoom run supervisor, now authoring the qualified repair you proposed.",
     `Target: ${args.target}`,
     `Reason: ${args.reason}`,
     `Candidate root: ${args.candidateRoot}`,
@@ -475,6 +491,15 @@ export function buildRepairPrompt(args: CandidatePatchRequest): string {
     "Change only files inside the candidate root; the live install and the run worktree are off limits, and the controller stops the run if the patch changes the live install, the run worktree, or the run state.",
     "Do not edit graphloom.stages.json. Do not add, remove, rename, or reorder graph steps, and do not change requirement statements or evidence schemas.",
     "Keep existing tests and negative cases; do not loosen expected outcomes. Add a focused regression case when the defect is testable.",
+    ...(args.reviewFeedback !== undefined
+      ? [
+          "",
+          "The independent reviewer rejected your last revision of this same candidate:",
+          args.reviewFeedback,
+          "Fix exactly what the reviewer raised; keep whatever it did not object to. Do not reintroduce the original defect while addressing this feedback.",
+          "",
+        ]
+      : []),
     "After you finish, the controller builds and tests the candidate itself, then an independent reviewer decides.",
     ...(args.maxProviderCalls !== undefined
       ? [`You have at most ${args.maxProviderCalls} model turns, including tool turns; the patch is aborted beyond that.`]

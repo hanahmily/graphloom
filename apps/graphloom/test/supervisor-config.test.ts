@@ -40,6 +40,31 @@ describe("operator supervisor config", () => {
     expect(() => parseModelRef("deepseek")).toThrow(/provider\/model/);
   });
 
+  it("accepts an object models entry naming its own thinkingLevel, alongside plain strings", () => {
+    const config = parseSupervisorConfig({
+      provider: "minimax-cn",
+      modelId: "MiniMax-M3",
+      models: [{ provider: "minimax-cn", modelId: "MiniMax-M3.1-Flash-Preview", thinkingLevel: "low" }, "deepseek/deepseek-chat"],
+    });
+    expect(config.models).toEqual([
+      { provider: "minimax-cn", modelId: "MiniMax-M3" },
+      { provider: "minimax-cn", modelId: "MiniMax-M3.1-Flash-Preview", thinkingLevel: "low" },
+      { provider: "deepseek", modelId: "deepseek-chat" },
+    ]);
+  });
+
+  it("applies a top-level thinkingLevel to the initial provider/modelId entry", () => {
+    const config = parseSupervisorConfig({ provider: "minimax-cn", modelId: "MiniMax-M3.1-Flash-Preview", thinkingLevel: "low" });
+    expect(config.thinkingLevel).toBe("low");
+    expect(config.models).toEqual([{ provider: "minimax-cn", modelId: "MiniMax-M3.1-Flash-Preview", thinkingLevel: "low" }]);
+  });
+
+  it("rejects an unknown thinkingLevel value", () => {
+    expect(() => parseSupervisorConfig({ provider: "minimax-cn", modelId: "MiniMax-M3", thinkingLevel: "extreme" })).toThrow(
+      /thinkingLevel must be one of/,
+    );
+  });
+
   it("refuses credentials in the config file", () => {
     expect(() => parseSupervisorConfig({ provider: "deepseek", modelId: "x", apiKey: "sk-test" })).toThrow(
       /apiKey is not accepted/,

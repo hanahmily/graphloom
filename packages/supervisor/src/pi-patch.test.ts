@@ -86,6 +86,18 @@ describe("supervisor candidate patch", () => {
     expect(supervisor.sessionId).toBe("sess-patch");
   });
 
+  it("passes the independent reviewer's feedback through to the session prompt", async () => {
+    const calls: PromptCall[] = [];
+    const supervisor = createPiSupervisor({
+      session: codingSession({ replies: ["fixed per review"], turnsPerPrompt: [2], calls, grants: [] }),
+    });
+    await supervisor.grantCandidateCoding!(request.candidateRoot);
+    await supervisor.patchCandidate!({ ...request, reviewFeedback: "the fix only sets a flag the harness ignores" });
+
+    expect(calls[0]?.text).toContain("revising the qualified repair you are authoring after the independent reviewer sent it back");
+    expect(calls[0]?.text).toContain("the fix only sets a flag the harness ignores");
+  });
+
   it("refuses to patch without a grant or outside the granted root", async () => {
     const supervisor = createPiSupervisor({
       session: codingSession({ replies: [], turnsPerPrompt: [], calls: [], grants: [] }),

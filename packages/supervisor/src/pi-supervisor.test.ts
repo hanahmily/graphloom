@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import { dispatch, reenter, returnToNormal, stop, WireValidationError, type AgentSessionView, type EvidenceRecord } from "@graphloom/sdk";
 import {
   buildRecoveryPrompt,
+  buildRepairPrompt,
   createPiSupervisor,
+  findConfigured,
   type PiSupervisorSessionPort,
   type SupervisorModelRef,
 } from "./pi-supervisor.js";
@@ -172,6 +174,36 @@ describe("createPiSupervisor", () => {
       }),
     ).rejects.toThrow(/not configured/i);
     expect(supervisor.binding.provider).toBe("openai");
+  });
+
+  it("passes the configured target's own thinkingLevel to the session, not the switch call's", async () => {
+    const seen: SupervisorModelRef[] = [];
+    const supervisor = createPiSupervisor({
+      session: fakeSession({
+        replies: [],
+        provider: "minimax-cn",
+        modelId: "MiniMax-M3",
+        switchImpl: async (ref) => {
+          seen.push(ref);
+        },
+      }),
+      configuredModels: [
+        { provider: "minimax-cn", modelId: "MiniMax-M3" },
+        { provider: "minimax-cn", modelId: "MiniMax-M3.1-Flash-Preview", thinkingLevel: "low" },
+      ],
+    });
+
+    await supervisor.switchModel({
+      provider: "minimax-cn",
+      modelId: "MiniMax-M3.1-Flash-Preview",
+      reason: "model requires adaptive thinking",
+    });
+    expect(seen).toEqual([{ provider: "minimax-cn", modelId: "MiniMax-M3.1-Flash-Preview", thinkingLevel: "low" }]);
+
+    // Switching back to a model with no configured thinkingLevel must not keep
+    // "low" from the previous model: it goes through unset, not re-sent as-is.
+    await supervisor.switchModel({ provider: "minimax-cn", modelId: "MiniMax-M3", reason: "revert" });
+    expect(seen[1]).toEqual({ provider: "minimax-cn", modelId: "MiniMax-M3" });
   });
 
   it("records a failed switch intent when setModel throws mid-flight", async () => {
@@ -362,5 +394,61 @@ describe("buildRecoveryPrompt", () => {
     expect(prompt).toContain('"ev-old"');
     expect(prompt).not.toContain("ev-old (fix/review)");
     expect(prompt).toContain("ev-new (fix/review): approved, looks fine");
+  });
+
+  it("tells the supervisor to re-verify stale rejections only on the first turn after a resume", () => {
+    const resumedInput = sampleInput();
+    resumedInput.resumed = true;
+    expect(buildRecoveryPrompt(resumedInput)).toContain("This run was just resumed");
+
+    const laterInput = sampleInput();
+    expect(buildRecoveryPrompt(laterInput)).not.toContain("This run was just resumed");
+  });
+});
+
+describe("buildRepairPrompt", () => {
+  const request = {
+    candidateRoot: "/repairs/r1/candidate",
+    target: "executor" as const,
+    reason: "the executor writes outside its write scope on review-purpose jobs",
+  };
+
+  it("asks for a first patch with no reviewer feedback", () => {
+    const prompt = buildRepairPrompt(request);
+    expect(prompt).toContain("now authoring the qualified repair you proposed");
+    expect(prompt).not.toContain("independent reviewer rejected");
+  });
+
+  it("sends the independent reviewer's own rejection back for a revision, not a fresh patch", () => {
+    const prompt = buildRepairPrompt({ ...request, reviewFeedback: "the read-only flag is set but never enforced" });
+    expect(prompt).toContain("revising the qualified repair you are authoring after the independent reviewer sent it back");
+    expect(prompt).toContain("independent reviewer rejected your last revision");
+    expect(prompt).toContain("the read-only flag is set but never enforced");
+    expect(prompt).not.toContain("now authoring the qualified repair you proposed");
+  });
+});
+
+describe("findConfigured", () => {
+  const configured: SupervisorModelRef[] = [
+    { provider: "minimax-cn", modelId: "MiniMax-M3" },
+    { provider: "minimax-cn", modelId: "MiniMax-M3.1-Flash-Preview", thinkingLevel: "low" },
+  ];
+
+  it("returns the operator's own entry, thinkingLevel included, for a configured model", () => {
+    expect(findConfigured(configured, { provider: "minimax-cn", modelId: "MiniMax-M3.1-Flash-Preview" })).toEqual({
+      provider: "minimax-cn",
+      modelId: "MiniMax-M3.1-Flash-Preview",
+      thinkingLevel: "low",
+    });
+  });
+
+  it("returns an entry with no thinkingLevel key for a model that does not need one", () => {
+    const found = findConfigured(configured, { provider: "minimax-cn", modelId: "MiniMax-M3" });
+    expect(found).toEqual({ provider: "minimax-cn", modelId: "MiniMax-M3" });
+    expect(found).not.toHaveProperty("thinkingLevel");
+  });
+
+  it("returns undefined for a model the operator never configured", () => {
+    expect(findConfigured(configured, { provider: "anthropic", modelId: "claude-sonnet-4-5" })).toBeUndefined();
   });
 });
