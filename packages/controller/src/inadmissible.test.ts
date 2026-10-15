@@ -438,6 +438,51 @@ describe("inadmissible supervisor proposals (#117)", () => {
     expect(state.supervisorOutcomes).toBeUndefined();
   });
 
+  it("does not ask the supervisor when its turn starts with no decisions left", async () => {
+    const env = await makeEnv("budgets:\n  decisions: 1\n");
+    let asked = 0;
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      // The graph's supervise spends the only decision.
+      plugin: createScriptedGraph({ definition, advances: [supervise({ reason: "unfamiliar" }, "escalate")] }),
+      validators: goodValidators,
+      supervisor: createScriptedSupervisor({
+        decisions: [
+          () => {
+            asked += 1;
+            return stop({ reason: "blocked", blocker: "should not be asked" }, "stop");
+          },
+        ],
+      }),
+      runner: runner(),
+      stateRoot: env.stateRoot,
+      runId: "decisions-zero-supervisor",
+    });
+    expect(asked).toBe(0);
+    expect(report.stopReason).toBe("decisions budget exhausted");
+    expect(report.blocker).toBe("supervisor decision for the supervise trigger at stage write");
+    expect((await loadRunState(report.stateDir)).budgets.decisions).toBe(0);
+  });
+
+  it("does not ask the graph for a decision once the decisions budget is spent", async () => {
+    const env = await makeEnv("budgets:\n  decisions: 1\n");
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({ definition, advances: finish }),
+      validators: goodValidators,
+      runner: runner(),
+      stateRoot: env.stateRoot,
+      runId: "decisions-zero-graph",
+    });
+    expect(report.status).toBe("stopped");
+    expect(report.stopReason).toBe("decisions budget exhausted");
+    expect(report.blocker).toBe("graph decision at stage write");
+    const state = await loadRunState(report.stateDir);
+    expect(state.budgets.decisions).toBe(0);
+    // Only the first decision (the write dispatch) was applied.
+    expect(state.evidence.some((e) => e.kind === "file")).toBe(false);
+  });
+
   it("still stops on a blocking condition: an exhausted corrections budget", async () => {
     const env = await makeEnv("budgets:\n  corrections: 1\n");
     const report = await createController().run({

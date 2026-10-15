@@ -291,6 +291,23 @@ async function runNormalLoopSteps(
       owner = renewed;
       await updateOwnerChildPid(state.stateDir, owner.ownerId, deps.host.childPid);
 
+      // A finite decisions budget: once it is spent, neither the graph nor the
+      // supervisor is asked for another decision.
+      if (state.budgets.decisions <= 0) {
+        state = {
+          ...state,
+          status: "stopped",
+          stopReason: "decisions budget exhausted",
+          blocker:
+            state.mode === "recovery"
+              ? `supervisor decision for the ${state.recoveryTrigger?.code ?? "unhandled"} trigger at stage ${state.current.stageId}`
+              : `graph decision at stage ${state.current.stageId}`,
+        };
+        await saveRunState(state);
+        syncRevision(deps, state);
+        return { done: true as const, state };
+      }
+
       let decision: GraphDecision;
       let priorNoProgress = state.noProgress;
       if (state.mode === "recovery") {
