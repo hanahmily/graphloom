@@ -118,8 +118,12 @@ active or effects remain unreconciled, even after the controller service exits.
 journal; see the [host lifecycle contract](design-agent-host.md#leases-disconnection-stop-and-resume).
 
 Intake pins the task, repository HEAD, graph definition, plugin bundle, runtime
-profile, grants, and finite budgets. Additional graph-specific options wait for
-a concrete need. The operator installation policy records whether local source
+profile, grants, and finite budgets. A task may also name a JSON `config:` file
+relative to it; intake pins its bytes and digest, and the plugin host hands that
+pinned value, unread by the controller, to `describe`, `advance` and every
+validator, so one graph can serve many repositories. Resume uses the pinned
+copy. See the [issue-fix design](design-issue-fix-graph.md#how-the-config-is-pinned-and-passed).
+The operator installation policy records whether local source
 repair or validator substitution is authorized, avoiding repeated approval for
 repairs already within that scope. Plugin metadata alone grants no authority.
 
@@ -208,8 +212,8 @@ value types and wire schemas must be defined and tested during implementation:
 
 ```ts
 export interface GraphPlugin {
-  describe(): GraphDefinition;
-  advance(view: RunView): GraphDecision;
+  describe(config?: unknown): GraphDefinition; // config: the task's pinned config
+  advance(view: RunView): GraphDecision;       // view.config: the same value
 }
 
 export interface Validator {
