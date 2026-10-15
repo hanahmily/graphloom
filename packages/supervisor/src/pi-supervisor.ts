@@ -1,7 +1,16 @@
 import type { AgentSessionView, EvidenceRecord } from "@graphloom/sdk";
 import { parseSupervisorDecision } from "./decision.js";
 import type { PiSupervisorSession, ThinkingLevel } from "./pi-session.js";
-import { continuationRefusal, createAdmissionTools, escapingObservePath, supervisorProposalKey, writeScopeRefusal } from "./tools.js";
+import {
+  continuationRefusal,
+  createAdmissionTools,
+  escapingObservePath,
+  offeredActions,
+  rejectionText,
+  supervisorProposalKey,
+  writeScopeRefusal,
+  type GraphLoomSupervisorAction,
+} from "./tools.js";
 import {
   assertGrantedRoot,
   type CandidatePatchRequest,
@@ -152,40 +161,83 @@ export function createPiSupervisor(options: CreatePiSupervisorOptions): PiSuperv
       if (input.maxProviderCalls !== undefined && input.maxProviderCalls < 1) {
         throw new Error("decide has no provider-call allowance");
       }
-      const toolbox = createAdmissionTools(
-        configured,
-        input.view.agentSessions ?? [],
-        input.view.generation,
-        input.trigger.code,
-        input.view.escalation?.repeatedProposals,
+      const toolsFor = () =>
+        createAdmissionTools(
+          configured,
+          input.view.agentSessions ?? [],
+          input.view.generation,
+          input.trigger.code,
+          input.view.escalation?.repeatedProposals,
+          input.admission,
+        );
+      const callsBefore = providerCalls;
+      // Every prompt of this turn shares the controller's one allowance.
+      const remainingCalls = () =>
+        input.maxProviderCalls === undefined ? undefined : input.maxProviderCalls - (providerCalls - callsBefore);
+      const ask = async (text: string, toolbox: ReturnType<typeof toolsFor>): Promise<string> => {
+        const maxTurns = remainingCalls();
+        if (maxTurns !== undefined && maxTurns < 1) throw new Error("decide has no provider-call allowance left this turn");
+        try {
+          return await session.prompt(text, {
+            tools: toolbox.tools,
+            ...(input.signal !== undefined ? { signal: input.signal } : {}),
+            ...(maxTurns !== undefined ? { maxTurns } : {}),
+          });
+        } finally {
+          settleTurns();
+        }
+      };
+
+      let toolbox = toolsFor();
+      let text = await ask(
+        input.rejection !== undefined
+          ? buildRejectionPrompt(input.rejection, toolbox.offered)
+          : buildRecoveryPrompt(input, {
+              current: { provider: binding.provider, modelId: binding.modelId },
+              configured,
+              offered: toolbox.offered,
+            }),
+        toolbox,
       );
-      const prompt = buildRecoveryPrompt(input, {
-        current: { provider: binding.provider, modelId: binding.modelId },
-        configured,
-      });
-      let text: string;
-      try {
-        text = await session.prompt(prompt, {
-          tools: toolbox.tools,
-          ...(input.signal !== undefined ? { signal: input.signal } : {}),
-          ...(input.maxProviderCalls !== undefined ? { maxTurns: input.maxProviderCalls } : {}),
-        });
-      } finally {
-        settleTurns();
-      }
-      // Models without tool calling may still reply with the decision as JSON,
-      // bypassing the admission tools' in-turn checks entirely; an otherwise
-      // malformed proposal from that path would reach the controller and
-      // hard-stop the run with no chance to self-correct, the way the
-      // tool-call path's reject() already lets the model fix in-turn.
-      const proposal = toolbox.proposal() ?? parseSupervisorDecision(text);
-      const sanitized = sanitizeProposal(proposal, input.view.agentSessions ?? [], input.view.generation);
-      // A JSON-only reply never went through the admission tools' own
-      // repeated-proposal rejection (there is no tool call to reject, and no
-      // further turn for the model to retry in): reject it here instead of
-      // letting a repeated no-progress proposal reach the controller through
-      // this path alone.
-      if ("action" in sanitized) {
+      let reasked = false;
+      for (;;) {
+        const exhausted = toolbox.exhausted();
+        if (exhausted !== undefined) {
+          throw new Error(`inadmissible proposal limit reached this turn: ${exhausted.action}: ${exhausted.reason}`);
+        }
+        // Models without tool calling may still reply with the decision as
+        // JSON, bypassing the admission tools' in-turn checks; that path gets
+        // the same chances to self-correct within this decide().
+        let proposal = toolbox.proposal();
+        if (proposal === undefined) {
+          try {
+            proposal = parseSupervisorDecision(text);
+          } catch (err) {
+            // An unreadable reply is asked again once, with the parse error,
+            // before it counts as a failed turn.
+            if (reasked || input.signal?.aborted === true || (remainingCalls() ?? 1) < 1) throw err;
+            reasked = true;
+            toolbox = toolsFor();
+            text = await ask(buildReaskPrompt(err, toolbox.offered), toolbox);
+            continue;
+          }
+        }
+        const sanitized = sanitizeProposal(proposal, input.view.agentSessions ?? [], input.view.generation);
+        if (!("action" in sanitized)) return sanitized;
+        if (input.admission !== undefined) {
+          // Admitted tool calls already passed this check; a JSON reply has not.
+          const rejection = input.admission.check(sanitized);
+          if (rejection === undefined) return sanitized;
+          if (rejection.remaining <= 0 || input.signal?.aborted === true || (remainingCalls() ?? 1) < 1) {
+            throw new Error(`inadmissible proposal: ${rejection.action}: ${rejection.reason}`);
+          }
+          toolbox = toolsFor();
+          text = await ask(buildRejectionPrompt(rejection, toolbox.offered), toolbox);
+          continue;
+        }
+        // Without the controller's check, a JSON-only reply never went through
+        // the admission tools' own repeated-proposal rejection: reject it here
+        // instead of letting a repeated no-progress proposal through.
         const key = supervisorProposalKey(input.trigger.code, sanitized.action);
         const already = input.view.escalation?.repeatedProposals[key]?.count ?? 0;
         if (already + 1 >= 3) {
@@ -193,8 +245,8 @@ export function createPiSupervisor(options: CreatePiSupervisorOptions): PiSuperv
             `this exact ${sanitized.action.type} proposal would be the ${already + 1 === 3 ? "3rd" : `${already + 1}th`} time with no progress since the controller last checked; propose something that would change the outcome, or stop`,
           );
         }
+        return sanitized;
       }
-      return sanitized;
     },
 
     async patchCandidate(args: CandidatePatchRequest) {
@@ -344,10 +396,41 @@ const TRIGGER_GUIDANCE: Partial<Record<string, string>> = {
     "This episode's trigger is contract_violation: an agent result repeatedly failed to match its job's declared result contract (a missing/mis-typed field, or a reference id outside the set it was shown) even after the harness gave it a chance to correct it in-turn. Re-dispatch the stage's work with a more explicit instruction about the required shape, or switch to another pinned executor for it, if the contract itself looks right. If the trigger message shows the contract's own schema or reference set is wrong for what the stage actually needs, qualify_repair target plugin instead (when the bundle is source-repairable) rather than repeating the same dispatch.",
 };
 
+/** Re-ask within the same turn after the controller refused a proposal; the run has not changed since. */
+export function buildRejectionPrompt(
+  rejection: NonNullable<SupervisorInput["rejection"]>,
+  offered: readonly GraphLoomSupervisorAction[],
+): string {
+  return [
+    `Rejected: ${rejectionText(rejection)}.`,
+    "Nothing in the run changed. Propose one admissible action now, using the current values above.",
+    `Call one GraphLoom tool: ${actionList(offered)}.`,
+  ].join("\n");
+}
+
+/** Re-ask once after a reply that was neither a tool call nor a readable GraphDecision. */
+export function buildReaskPrompt(err: unknown, offered: readonly GraphLoomSupervisorAction[]): string {
+  return [
+    `Your reply could not be read as a decision: ${err instanceof Error ? err.message : String(err)}.`,
+    `Call one GraphLoom tool (${actionList(offered)}), or reply with one GraphDecision as JSON ({"reason", "action": {"type", ...}}).`,
+  ].join("\n");
+}
+
+function actionList(offered: readonly string[]): string {
+  if (offered.length <= 1) return offered.join("");
+  return `${offered.slice(0, -1).join(", ")}, or ${offered[offered.length - 1]}`;
+}
+
 export function buildRecoveryPrompt(
   input: SupervisorInput,
-  models?: { current: SupervisorModelRef; configured: readonly SupervisorModelRef[] },
+  models?: {
+    current: SupervisorModelRef;
+    configured: readonly SupervisorModelRef[];
+    /** The action tools offered this turn; defaults to those the input's admission facts allow. */
+    offered?: readonly GraphLoomSupervisorAction[];
+  },
 ): string {
+  const offered = models?.offered ?? offeredActions(input.admission?.facts);
   const currentGeneration = currentGenerationEvidence(input.view.evidence, input.view.generation);
   const viewSummary = {
     runId: input.runId,
@@ -384,7 +467,7 @@ export function buildRecoveryPrompt(
   const settlement = input.lastSettlement;
   return [
     "You are the GraphLoom run supervisor in recovery.",
-    "Propose exactly one action by calling one GraphLoom tool: dispatch, observe, validate, reenter, qualify_repair, activate_repair, return, or stop.",
+    `Propose exactly one action by calling one GraphLoom tool: ${actionList(offered)}.`,
     "The controller admits and settles it and reports the outcome at the start of your next turn.",
     "If tools are unavailable, reply with one GraphDecision as JSON ({\"reason\", \"action\": {\"type\", ...}}), optionally in a ```json fence.",
     "Never propose Accept. Never add, remove, rename, or reorder graph steps.",
@@ -394,7 +477,10 @@ export function buildRecoveryPrompt(
           "This run was just resumed: the process may now run different controller or plugin code, or carry newly granted repair authority, than whatever rejected a proposal earlier in this conversation. Do not treat an earlier rejection as still true. Before repeating a past conclusion or proposing stop, re-attempt at least one previously-rejected action (qualify_repair, dispatch, etc.) if one exists, or re-check the specific condition that caused it to fail.",
         ]
       : []),
-    "For activate_repair, use a qualifiedArtifactId from repairCandidates with status qualified.",
+    ...(offered.includes("activate_repair")
+      ? ["For activate_repair, use a qualifiedArtifactId from repairCandidates with status qualified."]
+      : []),
+    "A proposal the controller would not admit is returned to you in this same turn with the failed precondition and the current value; correct it and propose again.",
     "repairAuthority shows what the operator granted and whether the graph bundle's code can be patched. An opaque bundle's code cannot be: retry the work or repair its environment instead. Substitute a validator (qualify_repair target validator with requirementId, adding files without editing existing ones) only when validatorSubstitution is granted and that requirement has a readable statement. Otherwise stop, citing the failing validation's evidenceRefs; never invent a replacement criterion.",
     "reenter starts a new attempt but runs nothing. To have the graph run that attempt's own jobs (its instructions, result schemas and write scopes), return after reentering; dispatch only work the graph would not run itself.",
     "To retry a stage's agent work with the context of its earlier session, dispatch with job.kind \"agent\" and job.continueFrom set to an operationId from agentSessions of that stage and dispatch key; start fresh instead when that context is misleading. continueFrom only works on an agent job: a command job has no session to resume.",

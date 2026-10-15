@@ -161,13 +161,20 @@ function hostRunner(server: FakeGitHub, mirror?: Mirror, sandbox = true): Runner
 function recorder(steps: ScriptedRecoveryStep[]) {
   const inputs: SupervisorInput[] = [];
   const decisions = steps.map((step): ScriptedRecoveryStep => async (input, index) => {
-    inputs.push(structuredClone(input));
+    // The controller's admission check is a function, not recorded data.
+    const { admission: _admission, ...recorded } = input;
+    void _admission;
+    inputs.push(structuredClone(recorded));
     return typeof step === "function" ? step(input, index) : structuredClone(step);
   });
   return { inputs, decisions };
 }
 
 const giveBack: GraphDecision = returnToNormal({ summary: "executor recovered" }, "return");
+
+/** After an inadmissible proposal the supervisor is re-asked in-turn (#117); this one stops, naming the rejection. */
+const stopOnRejection: ScriptedRecoveryStep = (input) =>
+  stop({ reason: "inadmissible", blocker: input.rejection?.reason ?? "no rejection" }, "stop on rejection");
 
 type Payload = Record<string, unknown>;
 const payloads = (evidence: readonly { payload?: unknown }[], key: string): Payload[] =>
@@ -317,13 +324,15 @@ describe("executor failure recovery (#41)", () => {
       plugin: graph("acme.custom/list-comments"),
       validators,
       runner,
-      supervisor: createScriptedSupervisor({ decisions: [dispatch(readJob("acme.custom/list-comments"), "retry")] }),
+      supervisor: createScriptedSupervisor({
+        decisions: [dispatch(readJob("acme.custom/list-comments"), "retry"), stopOnRejection],
+      }),
       stateRoot: env.stateRoot,
       runId: "no-catalog",
     });
-    expect(report.stopReason).toBe("recovery dispatch rejected");
+    expect(report.stopReason).toBe("inadmissible");
     expect(report.blocker).toBe(
-      "executor acme.custom/list-comments cannot be used in recovery: the runner did not describe its executors, so none were pinned",
+      "recovery dispatch rejected: executor acme.custom/list-comments cannot be used in recovery: the runner did not describe its executors, so none were pinned",
     );
   });
 
@@ -409,12 +418,14 @@ describe("executor failure recovery (#41)", () => {
         plugin: graph(MIRROR),
         validators,
         runner: hostRunner(server, mirror),
-        supervisor: createScriptedSupervisor({ decisions: [dispatch(job, "try something else")] }),
+        supervisor: createScriptedSupervisor({ decisions: [dispatch(job, "try something else"), stopOnRejection] }),
         stateRoot: env.stateRoot,
         runId: `refused-${i}`,
       });
-      expect(report.stopReason).toBe(stopReason);
-      expect(report.blocker).toMatch(blocker);
+      // Inadmissible, returned to the supervisor in-turn rather than stopping the run (#117).
+      expect(report.stopReason).toBe("inadmissible");
+      expect(report.blocker?.startsWith(`${stopReason}: `)).toBe(true);
+      expect(report.blocker?.slice(stopReason.length + 2)).toMatch(blocker);
     }
   });
 
@@ -624,13 +635,13 @@ describe("executor repair (#41)", () => {
       plugin: graph(MIRROR),
       validators,
       runner: hostRunner(server, mirror),
-      supervisor: createScriptedSupervisor({ decisions: [qualify] }),
+      supervisor: createScriptedSupervisor({ decisions: [qualify, stopOnRejection] }),
       repair: repairDeps(editEntry("const BROKEN = true", "const BROKEN = false")),
       stateRoot: env.stateRoot,
       runId: "no-grant",
     });
-    expect(report.stopReason).toBe("qualify_repair missing operator grant");
-    expect(report.blocker).toBe("executorRepair grant is false");
+    expect(report.stopReason).toBe("inadmissible");
+    expect(report.blocker).toBe("qualify_repair missing operator grant: executorRepair grant is false");
   });
 
   it("rejects a candidate that changes the executors its package defines", async () => {

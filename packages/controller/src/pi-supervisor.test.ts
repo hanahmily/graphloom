@@ -304,25 +304,31 @@ describe("Pi supervisor recovery (controller)", () => {
     expect(state.supervisorBinding?.sessionId).toBe("sess-durable-1");
   });
 
-  it("rejects dispatch to a stageId outside the pinned definition", async () => {
+  it("rejects dispatch to a stageId outside the pinned definition within the same turn", async () => {
     const env = await makeEnv();
     const controller = createController();
-    const supervisor = createPiSupervisor({
-      session: fakeSession([
-        JSON.stringify(
-          dispatch(
-            {
-              stageId: "invented-stage",
-              kind: "agent",
-              purpose: "work",
-              instruction: "nope",
-              writeScope: [GREETING_PATH],
-            },
-            "escape hatch",
-          ),
+    const session = fakeSession([
+      JSON.stringify(
+        dispatch(
+          {
+            stageId: "invented-stage",
+            kind: "agent",
+            purpose: "work",
+            instruction: "nope",
+            writeScope: [GREETING_PATH],
+          },
+          "escape hatch",
         ),
-      ]),
-    });
+      ),
+      JSON.stringify(stop({ reason: "no such stage", blocker: "the graph has no invented-stage" }, "stop")),
+    ]);
+    const prompts: string[] = [];
+    const prompt = session.prompt.bind(session);
+    session.prompt = async (text, options) => {
+      prompts.push(text);
+      return prompt(text, options);
+    };
+    const supervisor = createPiSupervisor({ session });
 
     const plugin = createScriptedGraph({
       definition,
@@ -339,9 +345,18 @@ describe("Pi supervisor recovery (controller)", () => {
       runId: "pi-bad-stage-1",
     });
 
+    // The bad dispatch never reaches admission's stop path: the same decide()
+    // re-asks with the failed precondition, and the supervisor decides again.
+    expect(prompts).toHaveLength(2);
+    expect(prompts[1]).toContain(
+      "undeclared stage: stageId invented-stage is not in the pinned graph definition; stages are write, review",
+    );
     expect(report.status).toBe("stopped");
-    expect(report.stopReason).toBe("undeclared stage");
-    expect(report.blocker).toMatch(/invented-stage/);
+    expect(report.stopReason).toBe("no such stage");
+    const state = await loadRunState(report.stateDir);
+    expect(state.supervisorMark?.notes).toContain(
+      "refused earlier this turn: dispatch: undeclared stage: stageId invented-stage is not in the pinned graph definition; stages are write, review",
+    );
   });
 
   it("gives a resumed run a fresh supervisor when it stopped before its supervisor decided anything", async () => {

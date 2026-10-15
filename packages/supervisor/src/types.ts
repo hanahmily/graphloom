@@ -37,6 +37,48 @@ export interface SupervisorInput {
   resumed?: boolean;
   /** Aborted when the run stops; the session aborts its request and settles idle. */
   signal?: AbortSignal;
+  /**
+   * The controller's admission, offered for this turn: state facts that narrow
+   * the action tools, and a pre-admission check. A supervisor that uses it
+   * returns an inadmissible proposal to the model within the same decide().
+   */
+  admission?: SupervisorAdmission;
+  /**
+   * Set when the controller re-asks within the same turn because the previous
+   * proposal was inadmissible (for supervisors that did not run the check
+   * themselves). Nothing in the run changed since that proposal.
+   */
+  rejection?: SupervisorRejection;
+}
+
+/** What the controller can tell a supervisor before admission, so tools that cannot hold are not offered. */
+export interface AdmissionFacts {
+  /** False outside recovery: `return` cannot be admitted. */
+  inRecovery: boolean;
+  /** False when no qualified repair can be admitted (no repair hooks, grants, or corrections). */
+  canQualify: boolean;
+  /** Candidates whose status is `qualified`; `activate_repair` needs one. */
+  qualifiedArtifactIds: string[];
+}
+
+/** An inadmissible proposal, as the controller reports it: the failed precondition and the current value. */
+export interface SupervisorRejection {
+  action: string;
+  reason: string;
+  /** Inadmissible proposals still allowed this turn before the controller applies its safe default. */
+  remaining: number;
+}
+
+/**
+ * Pre-admission check. Returns undefined when the proposal would be admitted,
+ * otherwise the rejection; `remaining: 0` means the turn is over and the
+ * controller applies the trigger's safe default.
+ */
+export type AdmissionCheck = (decision: GraphDecision) => SupervisorRejection | undefined;
+
+export interface SupervisorAdmission {
+  facts: AdmissionFacts;
+  check: AdmissionCheck;
 }
 
 /** The controller's outcome for a supervisor proposal, reported on the next turn. */

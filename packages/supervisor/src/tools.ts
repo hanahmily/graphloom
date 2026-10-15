@@ -1,7 +1,7 @@
 import path from "node:path";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { ACTION_SPEC_KEYS, assertGraphDecision, stableHash, type AgentSessionView, type GraphAction } from "@graphloom/sdk";
-import type { ModelRef, SupervisorProposal } from "./types.js";
+import type { AdmissionFacts, ModelRef, SupervisorAdmission, SupervisorProposal, SupervisorRejection } from "./types.js";
 
 /**
  * GraphLoom-owned admission tools. Each proposes one controller action; the
@@ -122,8 +122,26 @@ const SUBMITTED =
 
 export interface AdmissionToolbox {
   tools: ToolDefinition[];
+  /** The action tools offered this turn, in prompt order. */
+  offered: GraphLoomSupervisorAction[];
   /** The proposal a tool accepted this turn, if any. */
   proposal(): SupervisorProposal | undefined;
+  /** The controller's last rejection, once it ended the turn (`remaining: 0`). */
+  exhausted(): SupervisorRejection | undefined;
+}
+
+/**
+ * The action tools whose preconditions can hold in this state. Narrowing only
+ * saves wasted turns; the controller's admission stays the authority.
+ */
+export function offeredActions(facts?: AdmissionFacts): GraphLoomSupervisorAction[] {
+  if (facts === undefined) return [...GRAPHLOOM_SUPERVISOR_ACTIONS];
+  return GRAPHLOOM_SUPERVISOR_ACTIONS.filter((action) => {
+    if (action === "activate_repair") return facts.qualifiedArtifactIds.length > 0;
+    if (action === "qualify_repair") return facts.canQualify;
+    if (action === "return") return facts.inRecovery;
+    return true;
+  });
 }
 
 export interface ContinuationJob {
@@ -229,8 +247,9 @@ export function continuationRefusal(
 }
 
 /**
- * Build the admission tools for one supervisor turn. The first valid call
- * ends the turn; invalid arguments return an error the model can correct.
+ * Build the admission tools for one supervisor turn. The first admissible
+ * call ends the turn; invalid arguments, and a proposal the controller's
+ * pre-admission check refuses, return an error the model can correct.
  */
 export function createAdmissionTools(
   configured: readonly ModelRef[],
@@ -238,8 +257,11 @@ export function createAdmissionTools(
   generation = 0,
   triggerCode?: string,
   repeatedProposals: Record<string, { count: number }> = {},
+  admission?: SupervisorAdmission,
 ): AdmissionToolbox {
   let proposal: SupervisorProposal | undefined;
+  let exhausted: SupervisorRejection | undefined;
+  const offered = offeredActions(admission?.facts);
 
   const accept = (next: SupervisorProposal) => {
     proposal = next;
@@ -251,8 +273,17 @@ export function createAdmissionTools(
   });
   // A second call in the same batch must not keep the turn going after a proposal.
   const duplicate = () => ({ ...reject("a proposal was already submitted this turn"), terminate: true });
+  const refused = (rejection: SupervisorRejection) => {
+    if (rejection.remaining > 0) return reject(rejectionText(rejection));
+    exhausted = rejection;
+    return {
+      content: [{ type: "text" as const, text: `Rejected: ${rejectionText(rejection)}.` }],
+      details: undefined,
+      terminate: true,
+    };
+  };
 
-  const actionTools = GRAPHLOOM_SUPERVISOR_ACTIONS.map((action): ToolDefinition => {
+  const actionTools = offered.map((action): ToolDefinition => {
     const { specKey, description, spec: specSchema } = ACTION_TOOLS[action];
     return {
       name: action,
@@ -263,7 +294,7 @@ export function createAdmissionTools(
         [specKey]: specSchema,
       }),
       async execute(_toolCallId: string, params: Record<string, unknown>) {
-        if (proposal !== undefined) return duplicate();
+        if (proposal !== undefined || exhausted !== undefined) return duplicate();
         const job = params[specKey] as
           | ({ purpose?: unknown; readOnly?: unknown; writeScope?: unknown } & ContinuationJob)
           | undefined;
@@ -291,6 +322,8 @@ export function createAdmissionTools(
             );
           }
         }
+        const rejection = "action" in candidate ? admission?.check(candidate) : undefined;
+        if (rejection !== undefined) return refused(rejection);
         return accept(candidate);
       },
     } as ToolDefinition;
@@ -306,7 +339,7 @@ export function createAdmissionTools(
       reason: { type: "string" },
     }),
     async execute(_toolCallId: string, params: Record<string, unknown>) {
-      if (proposal !== undefined) return duplicate();
+      if (proposal !== undefined || exhausted !== undefined) return duplicate();
       const { provider, modelId, reason } = params as { provider: string; modelId: string; reason: string };
       if (!configured.some((m) => m.provider === provider && m.modelId === modelId)) {
         return reject(`${provider}/${modelId} is not an operator-configured model`);
@@ -315,7 +348,16 @@ export function createAdmissionTools(
     },
   } as ToolDefinition;
 
-  return { tools: [...actionTools, switchTool], proposal: () => proposal };
+  return { tools: [...actionTools, switchTool], offered, proposal: () => proposal, exhausted: () => exhausted };
+}
+
+/** How a controller rejection reads to the model: the failed precondition and current value, and what is left this turn. */
+export function rejectionText(rejection: SupervisorRejection): string {
+  const head = `the controller would not admit this ${rejection.action}: ${rejection.reason}`;
+  if (rejection.remaining <= 0) {
+    return `${head}. That was the last inadmissible proposal allowed this turn; the controller now applies its safe default`;
+  }
+  return `${head}. ${rejection.remaining} more inadmissible proposal${rejection.remaining === 1 ? "" : "s"} allowed this turn before the controller applies its safe default`;
 }
 
 function schema(properties: Record<string, unknown>): ToolDefinition["parameters"] {

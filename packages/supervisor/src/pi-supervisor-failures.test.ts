@@ -28,7 +28,7 @@ function sampleInput() {
 }
 
 describe("createPiSupervisor decide failures still count provider calls", () => {
-  it("increments providerCalls when prompt returns malformed JSON", async () => {
+  it("increments providerCalls for the reply and its one re-ask when both are malformed JSON", async () => {
     const session: PiSupervisorSessionPort = {
       runId: "r1",
       provider: "minimax-cn",
@@ -48,7 +48,8 @@ describe("createPiSupervisor decide failures still count provider calls", () => 
     };
     const supervisor = createPiSupervisor({ session });
     await expect(supervisor.decide(sampleInput())).rejects.toThrow(/no GraphDecision JSON/i);
-    expect(supervisor.drainProviderCalls()).toBe(1);
+    // The unreadable reply is asked again once, with the parse error, before the turn fails.
+    expect(supervisor.drainProviderCalls()).toBe(2);
   });
 });
 

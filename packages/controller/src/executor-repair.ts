@@ -5,6 +5,7 @@ import { describeExecutorModule, digestExecutorSource, type DescribedExecutor } 
 import { invalidateStageAndAfter } from "./admit.js";
 import { catalogEntry } from "./executor-catalog.js";
 import { bumpGeneration } from "./generation.js";
+import { inadmissible } from "./inadmissible.js";
 import {
   assertCandidateFullyReviewed,
   assertDependenciesUnchanged,
@@ -117,10 +118,11 @@ export async function activateExecutorRepair(
   idx: number,
   artifact: QualifiedRepairArtifact,
 ): Promise<DurableRunState> {
-  const supersede = (stopReason: string, blocker: string): DurableRunState => {
+  // The candidate can never activate now; the supervisor is told and proposes again.
+  const supersede = (precondition: string, detail: string): DurableRunState => {
     const next = [...candidates];
     next[idx] = { ...artifact, status: "superseded" };
-    return { ...state, repairCandidates: next, status: "stopped", stopReason, blocker };
+    return inadmissible({ ...state, repairCandidates: next }, { precondition, detail: `${artifact.artifactId}: ${detail}` });
   };
   const entry = artifact.executorId !== undefined ? catalogEntry(state, artifact.executorId) : undefined;
   const base = entry !== undefined ? currentSource(entry) : undefined;
