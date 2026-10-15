@@ -1,0 +1,48 @@
+{
+  "graphId": "issue-fix",
+  "version": "0.1.0",
+  "sdkProtocol": 1,
+  "taskConfig": "required",
+  "entryPoints": {
+    "createGraph": "./dist/index.js",
+    "rehearsal": "./dist/rehearsal.js"
+  },
+  "privateStateSchema": "issue-fix-private-v1",
+  "repairContract": "source-repairable",
+  "runtimeProfile": {
+    "node": ">=22",
+    "module": "nodenext",
+    "typescript": "^5.8.2",
+    "vitest": "^3.0.9"
+  },
+  "digests": {
+    "sourceTree": "bcaba3ac77a593891d772a7d6fa9c3c4f9c47d593254ba701a524041a7cb5d86",
+    "packageLock": "c1ff413082670fa8c654aaf64ce8927154d02243bfc9363e37e8bd57ae44fe74",
+    "files": {
+      "package.json": "b778ed4f3b48f3ceb90067595417645d04d9093bfa2b57a6b3a67b5811664828",
+      "package-lock.json": "c1ff413082670fa8c654aaf64ce8927154d02243bfc9363e37e8bd57ae44fe74",
+      "tsconfig.json": "3bafb75902b6084b621c996ae838dbfb87088cf095ce411be9809ce79bf3916b",
+      "profiles/banyandb.json": "be1973e06b19b97c9f6c70dd2fe2c8adb50cb04984c73a843229e27a7ef8562a",
+      "profiles/graphloom.json": "c69cb1a26c6d6a1a3dc2acb62d8a0ea996bca7a6e028a3ab2f10af7513d12dc7",
+      "src/constants.ts": "9e758d3c33ae5b301b82aec3ba405531cd7558ea905232448b440fff7c714617",
+      "src/decision-record.ts": "880ae99047b4d4220af5d17c6f7422ac0d7b4121ed9e87ed1c89437d1ccb67c7",
+      "src/evidence.ts": "d18d4dbdcdc54905d003b8244cec5e927cf51da4b9fa109ef3c1d2b7a3202408",
+      "src/findings.ts": "7a1bdf1d5679e6d92ce3df01ae3a9ebbffbe5811eefd682938a76e64670c0fea",
+      "src/graph.ts": "770031d33b15031a4a750257434a8bebcdfab716b8576e68a79220195515f39f",
+      "src/index.ts": "13984bafecb5c002797dae9c7a0f442d8af64888d7c9fe80f29bb976f78abc68",
+      "src/ocr.ts": "236560dd302c4e7aee61af05b64e28acec871cb85558c4a13063a053756ba43b",
+      "src/profile.ts": "6bf0e2bdc9448a0318194ce1acbdf013604106665b5c8b813bf225cf21364ded",
+      "src/prompts.ts": "396ef74cd4e51231be16858724ff0d049a9b2a59003fb229f1517ccf58b53690",
+      "src/qualification.ts": "aa05a042eb36beb87a402312993c45612ccd5b8be5fffa0353a8f0bfa0b3ef36",
+      "src/rehearsal.ts": "3d26d15275a0897ca0de5048da92e5e7dfd5dbbc3426188d8499e8f0e31e17c3",
+      "src/review-common.ts": "2b711248d1b227c01f8ed36bfa2399791fbcf9543a92e89414c74f119b20323c",
+      "src/runners/go-test.ts": "321eddf6923ca422c6b2be6511a337aead0887ec9245cd77a7a6ceec59994128",
+      "src/runners/index.ts": "8bef945520b8015089f28e50256ded20b47d7d7666e94942b3fc373db592359e",
+      "src/runners/types.ts": "a85674b56aee33dcd1c74e45721afab82c5ee50e5f6aa5267df65032789c5900",
+      "src/runners/vitest.ts": "3be891a57729a2bbf598afe671283e6c0869436b38503eabcd92a015991c8dde",
+      "src/validators.ts": "3093143a27ab9a8c604c3f91ae875fb854ce39c234b6247609dd3ea366401c32",
+      "test/issue-fix.test.ts": "eb1f5c2e6be832cd95f66b9d2e2da35a66fd8348611891f1c42dd04782129a51",
+      "test/profiles.test.ts": "d138cace367f77ff674cdda0a18543f8344d56eff2f884231c5f9ec8fb3c05d7"
+    }
+  }
+}

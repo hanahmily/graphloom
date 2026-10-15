@@ -1,0 +1,730 @@
+import {
+  dispatch,
+  observe,
+  stop,
+  supervise,
+  validate,
+  type EvidenceRecord,
+  type GraphDecision,
+  type GraphDefinition,
+  type GraphPlugin,
+  type JobSpec,
+  type Requirement,
+  type RunView,
+  type ValidationResult,
+  type ValidatorBinding,
+} from "@graphloom/sdk";
+import {
+  CODING_AGENT,
+  COMMAND,
+  FIX_STAGE,
+  GET_ISSUE,
+  IMPLEMENTER_JOB,
+  LIST_ISSUE_COMMENTS,
+  MAX_FIX_CORRECTIONS,
+  MAX_SWEEP_PASSES,
+  REQUIREMENT_BUILDS,
+  REQUIREMENT_CHANGELOG,
+  REQUIREMENT_DECISIONS,
+  REQUIREMENT_PASSES,
+  REQUIREMENT_REPRODUCES,
+  REQUIREMENT_REVIEW,
+  REQUIREMENT_SCOPE,
+  REVIEW_STAGE,
+} from "./constants.js";
+import { DECISION_RECORD_SCHEMA, parseDecisionRecord, writeScopeFor, type DecisionRecord } from "./decision-record.js";
+import {
+  agentRuns,
+  commandRuns,
+  describeCommand,
+  environmentOutput,
+  forIdentity,
+  issueComments,
+  issueSnapshot,
+  latestCheckoutRun,
+  latestFile,
+  latestRevertFailure,
+  latestRevertedCheckoutRun,
+  outputTail,
+  sameCheckoutJob,
+  succeeded,
+  type CommandRun,
+} from "./evidence.js";
+import {
+  describeFinding,
+  findingById,
+  findingLedger,
+  knownFindings,
+  passUsable,
+  pathsToObserve,
+  roundSummary,
+  toVerify,
+  VERIFICATION_SCHEMA,
+  verificationInstruction,
+} from "./findings.js";
+import { CODE_REVIEW_SCHEMA, codeReviewInstruction, describeCoverage, isBlocking, reviewBackground } from "./ocr.js";
+import {
+  commandLabel,
+  commandsFor,
+  commandStatement,
+  harnessName,
+  isTestPath,
+  issueRef,
+  listAnd,
+  parseProfile,
+  ProfileError,
+  type Profile,
+} from "./profile.js";
+import {
+  candidateCommands,
+  commitMessage,
+  deliverCommands,
+  implementInstruction,
+  planInstruction,
+  planRevisionInstruction,
+  pullRequestDescription,
+  redCommands,
+  snapshotText,
+} from "./prompts.js";
+import { codeReview, implementerRecord, reportText, validatorById } from "./validators.js";
+
+export const GRAPH_ID = "issue-fix";
+export const GRAPH_VERSION = "0.1.0";
+
+/** Graph bookkeeping; everything else is read back from recorded evidence. */
+export interface FixPrivateState {
+  /** `view.current.attempt` as of the last call: unchanged by a resume, only by a reentry of Fix. */
+  attempt: number;
+  /** The generation this attempt actually started at (design-run-convergence.md
+   * §4.1): no longer a fence on which evidence is visible — evidence is scoped
+   * by candidate identity (`forIdentity`) so a reentry does not re-earn what an
+   * unchanged candidate already earned — only a marker of when *this* attempt
+   * began, to tell an implementer run that predates a reentry (stale: it ran
+   * before the reentry asked for anything new) from one that answers it. */
+  attemptGeneration: number;
+  /** Corrections the graph dispatched in Fix in this attempt. */
+  corrections: number;
+}
+
+const asSchema = (text: string): Record<string, unknown> => JSON.parse(text) as Record<string, unknown>;
+
+/** What one advance call works from: the run's profile and the definition it gives. */
+interface Context {
+  profile: Profile;
+  definition: GraphDefinition;
+}
+
+/**
+ * The graph definition for a profile. The step set and requirement ids are
+ * fixed by the profile: `builds` exists when the profile has build commands,
+ * `changelog-entry` when it names a changelog. Statements are generated from
+ * the profile, so they say what is checked for this repository.
+ */
+export function definitionFor(profile: Profile): GraphDefinition {
+  const further = commandsFor(profile, "passes");
+  const buildCommands = commandsFor(profile, "builds");
+  const requirements: Requirement[] = [
+    {
+      id: REQUIREMENT_DECISIONS,
+      statement:
+        "The implementer's decision record is ready, names the regression test and the production caller, gives every unclear point a tier and a basis, takes an option for every behaviour point, and marks no product point chosen.",
+      evidenceSchema: "decision-record-v1",
+      identityArtifactSchema: "decision-record-v1",
+    },
+    {
+      id: REQUIREMENT_REPRODUCES,
+      statement: `In a prepared checkout of the base commit with only the change's test files applied, the named regression test fails by assertion (${profile.runner.reproducesEvidence}), and the check changed no file. When that checkout cannot even build the test alone, a prepared checkout of the full candidate with the implementer's own patch reverting just the behavioral change applied instead — the revert touching no test file — stands in, and the same build-and-fail-by-assertion rule applies there.`,
+      evidenceSchema: "checkout-command-v1",
+    },
+    {
+      id: REQUIREMENT_PASSES,
+      statement: `In a prepared checkout of the full change, the named regression test passes${further.length > 0 ? ` and ${listAnd(further.map(commandStatement))}` : ""}, and the checks changed no file.`,
+      evidenceSchema: "checkout-command-v1",
+    },
+    ...(buildCommands.length > 0
+      ? [
+          {
+            id: REQUIREMENT_BUILDS,
+            statement: `In the same checkout of the full change, ${listAnd(buildCommands.map(commandLabel))} all pass and change no file.`,
+            evidenceSchema: "checkout-command-v1",
+          },
+        ]
+      : []),
+    {
+      id: REQUIREMENT_SCOPE,
+      statement:
+        profile.protectedPaths.length > 0
+          ? `Every changed path is inside the repository and outside ${listAnd(profile.protectedPaths)}, except those the decision record names with a reason.`
+          : "Every changed path is inside the repository.",
+      evidenceSchema: "checkout-command-v1",
+    },
+    ...(profile.changelog !== undefined
+      ? [
+          {
+            id: REQUIREMENT_CHANGELOG,
+            statement: `The change adds a list entry to ${profile.changelog.path} inside its first "## " release section.`,
+            evidenceSchema: "workspace-bytes-v1",
+          },
+        ]
+      : []),
+    {
+      id: REQUIREMENT_REVIEW,
+      statement: `The latest read-only ${harnessName(profile.roles.reviewer)} review pass on the current change, following open-code-review's delegation workflow in this generation, reviewed every changed file, test files included, skipped none, and gave a status for every open finding; every critical or high finding it raised was refuted by an independent read-only verifier with quotes that match the change; and no finding of the run is confirmed and unfixed, disputed, or awaiting verification.`,
+      evidenceSchema: "code-review-v2",
+    },
+  ];
+  const bindings: Record<string, ValidatorBinding> = {
+    [REQUIREMENT_DECISIONS]: { requirementId: REQUIREMENT_DECISIONS, validatorId: "decisions-recorded", version: "1" },
+    [REQUIREMENT_REPRODUCES]: { requirementId: REQUIREMENT_REPRODUCES, validatorId: "red-reproduces", version: "1" },
+    [REQUIREMENT_PASSES]: { requirementId: REQUIREMENT_PASSES, validatorId: "green-passes", version: "1" },
+    [REQUIREMENT_BUILDS]: { requirementId: REQUIREMENT_BUILDS, validatorId: "build-checks", version: "1" },
+    [REQUIREMENT_SCOPE]: { requirementId: REQUIREMENT_SCOPE, validatorId: "write-scope", version: "1" },
+    [REQUIREMENT_CHANGELOG]: { requirementId: REQUIREMENT_CHANGELOG, validatorId: "changes-entry", version: "1" },
+    [REQUIREMENT_REVIEW]: { requirementId: REQUIREMENT_REVIEW, validatorId: "open-code-review", version: "2" },
+  };
+  const fixRequirements = requirements.map((r) => r.id).filter((id) => id !== REQUIREMENT_REVIEW);
+  return {
+    graphId: GRAPH_ID,
+    version: GRAPH_VERSION,
+    privateStateSchema: "issue-fix-private-v1",
+    resultContracts: [
+      { name: "decision-record-v1", schema: asSchema(DECISION_RECORD_SCHEMA), evidenceKind: "other" },
+      { name: "finding-verification-v1", schema: asSchema(VERIFICATION_SCHEMA), evidenceKind: "other" },
+      { name: "code-review-v2", schema: asSchema(CODE_REVIEW_SCHEMA), evidenceKind: "review" },
+    ],
+    stages: [
+      { id: FIX_STAGE, name: "Fix", requirementIds: fixRequirements },
+      { id: REVIEW_STAGE, name: "Review", requirementIds: [REQUIREMENT_REVIEW] },
+    ],
+    requirements,
+    defaultValidators: requirements.map((r) => bindings[r.id]!),
+    environment: structuredClone(profile.environment),
+  };
+}
+
+/** The graph: its definition and routing both come from the task's profile (`config`). */
+export function createGraph(): GraphPlugin {
+  return {
+    describe: (config?: unknown) => definitionFor(parseProfile(config)),
+    advance: advanceFix,
+  };
+}
+
+/** The issue the request names: `owner/repo#N` for the profile's issue repository, or the first `#N`. */
+export function requestedIssue(request: string, profile: Profile): number | undefined {
+  const repo = `${profile.issues.owner}/${profile.issues.repo}`.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = new RegExp(`${repo}#(\\d+)`).exec(request) ?? /#(\d+)\b/.exec(request);
+  return match !== null ? Number(match[1]) : undefined;
+}
+
+export function advanceFix(view: RunView): GraphDecision {
+  let profile: Profile;
+  try {
+    profile = parseProfile(view.config);
+  } catch (err) {
+    if (!(err instanceof ProfileError)) throw err;
+    return stop({ reason: "incompatible task", blocker: err.message }, "reject a task without a usable profile");
+  }
+  const ctx: Context = { profile, definition: definitionFor(profile) };
+  const issue = requestedIssue(view.task.request, profile);
+  if (issue === undefined) {
+    return stop({ reason: "incompatible task", blocker: `the request names no ${profile.issues.owner}/${profile.issues.repo} issue` }, "reject a request without an issue");
+  }
+  const state = readPrivate(view);
+  const stage = ctx.definition.stages.find(
+    (s) =>
+      !s.requirementIds.every((id) => view.receipts.some((r) => r.stageId === s.id && r.requirementId === id && r.valid)) ||
+      view.openAttempt?.[s.id] === true,
+  );
+  if (stage === undefined) return deliver(ctx, view, issue, state);
+  return stage.id === FIX_STAGE ? fix(ctx, view, issue, state) : review(ctx, view, issue, state);
+}
+
+function fix(ctx: Context, view: RunView, issue: number, state: FixPrivateState): GraphDecision {
+  const { profile } = ctx;
+  const snapshot = issueSnapshot(view.evidence, issue);
+  if (snapshot === undefined) {
+    return withPrivate(dispatch(githubJob(GET_ISSUE, "Fetch the issue", { owner: profile.issues.owner, repo: profile.issues.repo, number: issue }), `fetch ${issueRef(profile, issue)}`), state);
+  }
+  const comments = issueComments(view.evidence);
+  if (comments === undefined) {
+    return withPrivate(
+      dispatch(
+        githubJob(LIST_ISSUE_COMMENTS, "Fetch the issue comments", { owner: profile.issues.owner, repo: profile.issues.repo, number: issue, perPage: 100, maxPages: 5 }),
+        `fetch the comments on ${issueRef(profile, issue)}`,
+      ),
+      state,
+    );
+  }
+  const snapshotResult = snapshotText(profile, snapshot.issue, comments.comments, comments.complete);
+  if ("problem" in snapshotResult) return partialSnapshot(snapshotResult.problem, [snapshot.record.ref, comments.record.ref]);
+  const snapshotBody = snapshotResult.text;
+  // The plan and the implementer's decision record are their own artifacts,
+  // not workspace bytes (design-run-convergence.md §4.1): they stay on
+  // record, unscoped by generation or candidate, until an explicit new
+  // diagnostic or work dispatch supersedes them — a reentry alone does not
+  // invalidate either, so it does not re-earn a plan or implementation that
+  // is already right.
+  const reopened = view.openAttempt?.[FIX_STAGE] === true;
+
+  const planRun = agentRuns(view.evidence, FIX_STAGE, "diagnostic").filter((r) => r.status === "completed").at(-1);
+  if (planRun === undefined) {
+    const revisit = agentRuns(view.evidence, FIX_STAGE, "diagnostic").some((r) => r.status === "completed");
+    const assignment = revisit
+      ? planRevisionInstruction(profile, { issue, feedback: reentryFeedback(view), changed: agentRuns(view.evidence, FIX_STAGE, "work").length > 0 })
+      : planInstruction(profile, { issue, request: view.task.request, snapshot: snapshotBody });
+    return dispatchAgent(view, planJob(ctx, view, assignment), revisit ? "revisit the plan after returning to Fix (read-only)" : "plan the fix (read-only)", state);
+  }
+  const plan = parseDecisionRecord(planRun.output);
+  if ("problem" in plan) {
+    return supervise({ reason: `the plan returned no valid decision record: ${plan.problem}`, evidenceRefs: [planRun.record.ref] }, "escalate an invalid plan", JSON.stringify(state));
+  }
+  const blocked = notReady(plan.record, [planRun.record.ref], "the plan");
+  if (blocked !== undefined) return blocked;
+
+  const implemented = agentRuns(view.evidence, FIX_STAGE, "work").at(-1);
+  // A reentry whose own implementer run predates it answers nothing new:
+  // the same candidate that sent Fix back here is still the one on record.
+  const stalePreReentry = reopened && implemented !== undefined && (implemented.record.generation ?? 0) < state.attemptGeneration;
+  if (implemented === undefined || implemented.status !== "completed" || stalePreReentry) {
+    return dispatchAgent(
+      view,
+      implementJob(ctx, view, issue, plan.record, stalePreReentry ? reentryFeedback(view) : undefined),
+      implemented === undefined ? "implement the reviewed plan, continuing the plan session" : stalePreReentry ? "answer why Fix was re-entered with a fresh implementation pass" : "retry the implementation",
+      state,
+    );
+  }
+  const record = implementerRecord(view.evidence).record;
+  if (record !== undefined) {
+    const stopped = notReady(record, [implemented.record.ref], "the implementer");
+    if (stopped !== undefined) return stopped;
+  }
+
+  const digest = view.candidateDigest;
+  if (digest === undefined) {
+    return supervise({ reason: "the controller reports no candidate digest for the worktree" }, "escalate a missing candidate digest", JSON.stringify(state));
+  }
+  // The checks below are genuinely candidate-anchored: RED, GREEN, the build
+  // suite and the changelog entry are all earned once per workspace change
+  // and stay valid, unscoped by generation, until the candidate changes again.
+  const current = forIdentity(view.evidence, digest);
+  const test = record?.test;
+  const results = evaluateFix(ctx, view, current, digest);
+  const decisions = results.find((r) => r.requirementId === REQUIREMENT_DECISIONS)!;
+  if (record !== undefined && test !== undefined && decisions.result.status === "passed") {
+    const changes = profile.changelog?.path;
+    if (changes !== undefined && latestFile(current, changes, digest) === undefined) {
+      return withPrivate(observe({ paths: [changes] }, `observe ${changes} for the current change`), state);
+    }
+    const green = latestCheckoutRun(current, COMMAND.regression, "candidate", digest);
+    if (green === undefined) {
+      return withPrivate(
+        dispatch(checkJob("Candidate checks", { from: "candidate" }, candidateCommands(profile, test), true), "run GREEN and the build checks on the committed change"),
+        state,
+      );
+    }
+    const tests = green.checkout!.paths.filter((p) => isTestPath(profile, p));
+    if (tests.length > 0) {
+      const baseRed = latestCheckoutRun(current, COMMAND.regression, "base", digest);
+      if (baseRed === undefined) {
+        return withPrivate(
+          dispatch(checkJob("RED check", { from: "base", paths: tests }, redCommands(profile, test), false), "run RED on the base commit with only the test files"),
+          state,
+        );
+      }
+      // The base commit plus only the test files could not even build it:
+      // the test depends on something this round's change added. Ask for a
+      // patch undoing just the behavioral fix, then retry RED against the
+      // full candidate with that patch reverted, instead of looping the
+      // implementer on a generic "fix your code" correction that misdiagnoses
+      // a structurally unfair check as a real defect.
+      if (regressionBlocked(profile, baseRed, test)) {
+        // A patch is only good for the candidate it was written against: the
+        // implementer's record names a digest, and a patch the controller
+        // already reported as not applying is dead until replaced.
+        const stalePatch = staleRevertPatch(record, implemented.record.candidateDigest, digest, current);
+        if (record.revertPatch === undefined || stalePatch !== undefined) {
+          // Bounded exactly like a generic correction, so an implementer that
+          // never supplies a working patch still lands on the supervisor
+          // instead of looping forever: once exhausted, fall through below.
+          if (state.corrections < MAX_FIX_CORRECTIONS && view.budgets.corrections > 0) {
+            return dispatchAgent(
+              view,
+              implementJob(ctx, view, issue, record, revertPatchAsk(test, stalePatch)),
+              stalePatch === undefined
+                ? "ask the implementer for a patch reverting just this round's behavioral fix, since RED's base-commit checkout cannot build the test alone"
+                : "ask the implementer for a fresh revert patch, since the recorded one does not fit the current candidate",
+              { ...state, corrections: state.corrections + 1 },
+            );
+          }
+        } else if (latestRevertedCheckoutRun(current, COMMAND.regression, digest) === undefined) {
+          return withPrivate(
+            dispatch(
+              checkJob("RED check (reverted)", { from: "candidate", revertPatch: record.revertPatch }, redCommands(profile, test), false),
+              "run RED against the candidate with this round's behavioral fix reverted",
+            ),
+            state,
+          );
+        }
+      }
+    }
+  }
+
+  if (results.every((r) => r.result.status === "passed")) {
+    return withPrivate(validate({ stageId: FIX_STAGE }, "validate Fix from the checks bound to the current change"), state);
+  }
+  const feedback = correctionFeedback(profile, current, digest, results);
+  if (state.corrections < MAX_FIX_CORRECTIONS && view.budgets.corrections > 0) {
+    return dispatchAgent(
+      view,
+      implementJob(ctx, view, issue, record ?? plan.record, feedback),
+      "correct the change with the failing evidence",
+      { ...state, corrections: state.corrections + 1 },
+    );
+  }
+  return supervise(
+    { reason: `Fix still fails after ${state.corrections} corrections: ${feedback.slice(0, 3).join("; ")}`, evidenceRefs: current.map((e) => e.ref).slice(-10) },
+    "hand the unresolved Fix stage to the supervisor",
+    JSON.stringify(state),
+  );
+}
+
+/**
+ * Review convergence on the current change: review passes until one raises
+ * nothing that survives verification, then the acceptance rule.
+ */
+function review(ctx: Context, view: RunView, issue: number, state: FixPrivateState): GraphDecision {
+  const { profile, definition } = ctx;
+  const digest = view.candidateDigest;
+  if (digest === undefined) {
+    return supervise({ reason: "the controller reports no candidate digest for the worktree" }, "escalate a missing candidate digest", JSON.stringify(state));
+  }
+  const current = forIdentity(view.evidence, view.candidateDigest);
+  const currentRefs = new Set(current.map((e) => e.ref));
+  const ledger = findingLedger(view.evidence);
+  const passes = ledger.passes.filter((p) => p.digest === digest && currentRefs.has(p.run.record.ref));
+  const last = passes.at(-1);
+  // Fix was accepted for this candidate, possibly before a resume moved the generation on.
+  const record = implementerRecord(view.evidence).record!;
+  const background = reviewBackground(profile, issueSnapshot(view.evidence, issue)!.issue, record);
+  const green = latestCheckoutRun(view.evidence, COMMAND.regression, "candidate", digest);
+  const reviewer = harnessName(profile.roles.reviewer);
+
+  const pass = (sweep: boolean): GraphDecision => {
+    const ocr = environmentOutput(view.evidence, "ocr");
+    if (ocr === undefined) {
+      return supervise({ reason: "the environment check recorded no open-code-review path for the code reviewer" }, "escalate a missing ocr path", JSON.stringify(state));
+    }
+    const base = green?.checkout?.base ?? "the run's base commit";
+    const assignment = codeReviewInstruction(profile, { ocr, base, background, known: knownFindings(ledger), sweep });
+    const summary = sweep
+      ? `review the change again for critical or high issues the ${passes.length} earlier pass(es) missed (read-only)`
+      : `review the change with ${reviewer} in open-code-review's delegation mode (read-only)`;
+    return dispatchAgent(view, codeReviewJob(profile, assignment), summary, state);
+  };
+  if (last === undefined) return pass(false);
+  // An unusable pass (incomplete coverage, a crash, a non-read-only run) is not
+  // a verdict to re-evaluate forever: retry a fresh pass the same way a sweep
+  // continuation would, bounded by the same cap, rather than reporting the
+  // same stale coverage gap to the supervisor on every subsequent attempt.
+  if (!passUsable(last) && passes.length < MAX_SWEEP_PASSES) return pass(false);
+
+  const paths = pathsToObserve(ledger, digest);
+  if (paths.length > 0) return withPrivate(observe({ paths }, "observe the lines a refutation quotes on the current change"), state);
+  const pending = toVerify(ledger, digest);
+  if (pending.length > 0) {
+    const assignment = verificationInstruction(profile, { findings: pending, background, changed: green?.checkout?.paths ?? [] });
+    return dispatchAgent(
+      view,
+      verificationJob(profile, assignment),
+      `verify ${pending.map((f) => f.id).join(", ")} with a fresh read-only ${harnessName(profile.roles.verifier)} session`,
+      state,
+    );
+  }
+  const survived = last.raised.some((id) => {
+    const s = findingById(ledger, id)?.state;
+    return s === "confirmed" || s === "disputed";
+  });
+  if (passUsable(last) && survived && passes.length < MAX_SWEEP_PASSES) return pass(true);
+
+  const statement = definition.requirements.find((r) => r.id === REQUIREMENT_REVIEW)!.statement;
+  const history = view.evidence.filter((e) => e.candidateDigest !== undefined && e.candidateDigest !== view.candidateDigest);
+  const result = codeReview.evaluate({ requirementId: REQUIREMENT_REVIEW, statement, evidence: current, history, candidateDigest: digest }) as ValidationResult;
+  if (result.status === "passed") return withPrivate(validate({ stageId: REVIEW_STAGE }, "validate the reviewed change"), state);
+  const refs = [...passes.map((p) => p.run.record.ref), ...ledger.verifications.filter((v) => v.digest === digest && currentRefs.has(v.run.record.ref)).map((v) => v.run.record.ref)];
+  return supervise(
+    { reason: `code review did not pass: ${result.reason}. ${roundSummary(ledger, digest, passes)}; ${view.budgets.agentInvocations} agent invocation(s) left`, evidenceRefs: refs.slice(-10) },
+    "hand the code review findings to the supervisor",
+    JSON.stringify(state),
+  );
+}
+
+function deliver(ctx: Context, view: RunView, issue: number, state: FixPrivateState): GraphDecision {
+  const { profile } = ctx;
+  const current = forIdentity(view.evidence, view.candidateDigest);
+  const delivered = commandRuns(current, COMMAND.deliver).filter((r) => r.record.candidateDigest === view.candidateDigest).at(-1);
+  const branch = `fix/${issue}`;
+  if (delivered === undefined) {
+    const record = implementerRecord(view.evidence).record!;
+    const green = latestCheckoutRun(view.evidence, COMMAND.regression, "candidate", view.candidateDigest);
+    const issueTitle = issueSnapshot(view.evidence, issue)?.issue.title ?? issueRef(profile, issue);
+    const body = pullRequestDescription(profile, {
+      issue,
+      issueTitle,
+      record,
+      base: green?.checkout?.base ?? "",
+      ...reviewSummary(profile, view),
+    });
+    return withPrivate(
+      dispatch(
+        {
+          stageId: REVIEW_STAGE,
+          kind: "command",
+          purpose: "diagnostic",
+          readOnly: true,
+          instruction: `Put the change on ${branch}`,
+          input: { commands: deliverCommands(branch, commitMessage(profile, { issue, issueTitle, record }), body) },
+        },
+        `put the change on the local branch ${branch} and write the pull request body`,
+      ),
+      state,
+    );
+  }
+  if (!succeeded(delivered.command)) {
+    return stop(
+      {
+        reason: "delivery failed",
+        blocker: `${describeCommand(delivered.command)}: ${outputTail(delivered.command, 500, profile.runner.reportOutput)}`,
+        evidenceRefs: [delivered.record.ref],
+      },
+      `could not create ${branch}`,
+    );
+  }
+  return stop(
+    { reason: "complete", blocker: "none", evidenceRefs: [delivered.record.ref] },
+    `the change is on ${branch}; the pull request body is the report of evidence ${delivered.record.ref}`,
+  );
+}
+
+/** Agents act only on the whole issue snapshot; when it cannot be supplied, the run stops rather than work from part of it. */
+function partialSnapshot(problem: string, refs: string[]): GraphDecision {
+  return stop({ reason: "incompatible task", blocker: problem, evidenceRefs: refs }, "stop: the issue snapshot cannot be handed to the agents whole");
+}
+
+/** The test plan's line for the code review, and the dismissed findings a maintainer can overrule. */
+function reviewSummary(profile: Profile, view: RunView): { review: string; dismissed: string[] } {
+  const ledger = findingLedger(view.evidence);
+  const last = ledger.passes.filter((p) => p.digest === view.candidateDigest).at(-1);
+  if (last?.report === undefined) return { review: "Code review did not produce a result.", dismissed: [] };
+  const { report } = last;
+  const dismissed = ledger.findings.filter((f) => f.state === "dismissed");
+  const fixed = ledger.findings.filter((f) => f.state === "fixed").length;
+  const lower = report.comments.filter((c) => !isBlocking(c)).length;
+  const by = `${harnessName(profile.roles.reviewer)} in open-code-review's delegation mode (${describeCoverage(report)})`;
+  const settled = [
+    ...(fixed > 0 ? [`${fixed} fixed during review`] : []),
+    ...(dismissed.length > 0 ? [`${dismissed.length} refuted by an independent verifier, listed below`] : []),
+  ];
+  const open = settled.length > 0 ? `no critical or high finding left open (${settled.join("; ")})` : "no critical or high comments";
+  return {
+    review: report.comments.length === 0 && settled.length === 0 ? `Reviewed by ${by}: no comments.` : `Reviewed by ${by}: ${open}${lower > 0 ? `; ${lower} lower-severity comment(s) left for the reviewer` : ""}.`,
+    dismissed: dismissed.map(describeFinding),
+  };
+}
+
+/** Why the run is back in Fix: the confirmed findings of the code review, when there are any. Dismissed and disputed ones never reach the implementer. */
+function reentryFeedback(view: RunView): string[] {
+  const confirmed = findingLedger(view.evidence).findings.filter((f) => f.state === "confirmed");
+  if (confirmed.length === 0) {
+    return ["The run returned to Fix after a resume or a supervisor decision. Check the plan against the current code and the change in the working tree."];
+  }
+  return [
+    `Code review of your previous change found ${confirmed.length} critical or high defect(s), each confirmed by an independent verifier:`,
+    ...confirmed.slice(0, 10).map(describeFinding),
+  ];
+}
+
+/** A plan or implementer that cannot proceed stops the run with its question. */
+function notReady(record: DecisionRecord, refs: string[], who: string): GraphDecision | undefined {
+  if (record.status === "ready") return undefined;
+  const reason = record.status === "blocked" ? "needs maintainer decision" : "cannot reproduce";
+  const question = record.draftComment?.trim() || record.openQuestions[0] || record.summary;
+  return stop({ reason, blocker: question.slice(0, 1_000), evidenceRefs: refs }, `${who} returned ${record.status}: ${record.summary.slice(0, 200)}`);
+}
+
+/** RED's checkout did not even run the named test: a reason to ask for a revert patch, not a generic correction. */
+function regressionBlocked(profile: Profile, run: CommandRun, test: NonNullable<DecisionRecord["test"]>): boolean {
+  const outcome = profile.runner.outcome(reportText(run), test);
+  return outcome === "build-failed" || outcome === "setup-failed";
+}
+
+/** Why the record's revertPatch cannot be used for the candidate at `digest`, or undefined when it can. */
+function staleRevertPatch(record: DecisionRecord, recordedDigest: string | undefined, digest: string, current: EvidenceRecord[]): string | undefined {
+  if (record.revertPatch === undefined) return undefined;
+  if (recordedDigest !== undefined && recordedDigest !== digest) return "it was written against an earlier version of the candidate, which has changed since";
+  const failure = latestRevertFailure(current, digest);
+  if (failure !== undefined && failure.patch === record.revertPatch) {
+    return `it does not apply (in reverse) to the current candidate: ${failure.error.slice(0, 300)}`;
+  }
+  return undefined;
+}
+
+/** Feedback asking the implementer for a patch undoing just this round's behavioral change. */
+function revertPatchAsk(test: NonNullable<DecisionRecord["test"]>, stale?: string): string[] {
+  return [
+    ...(stale !== undefined ? [`Your earlier revertPatch cannot be used: ${stale}. Write a new one against the current candidate (the files as they are now) and include it in your decision record.`] : []),
+    `RED could not build ${test.name} on the base commit with only the test file(s) applied: the test depends on something this change added to the production code (e.g. a new parameter, type or helper), which a bare test-file checkout does not have.`,
+    'Add a "revertPatch" field to your decision record: a unified diff (`git diff` format, applying cleanly in reverse to the full candidate) that undoes only this round\'s specific behavioral change in the production code, keeping everything else — including anything the test itself depends on. Do not revert the test file; RED will apply this patch in reverse on the full candidate and expect the named test to then fail by assertion.',
+  ];
+}
+
+function evaluateFix(ctx: Context, view: RunView, evidence: EvidenceRecord[], digest: string): Array<{ requirementId: string; result: ValidationResult }> {
+  const { definition } = ctx;
+  const stage = definition.stages.find((s) => s.id === FIX_STAGE)!;
+  return stage.requirementIds.map((requirementId) => {
+    const binding = definition.defaultValidators.find((b) => b.requirementId === requirementId)!;
+    const statement = definition.requirements.find((r) => r.id === requirementId)!.statement;
+    const input = { requirementId, statement, evidence, candidateDigest: digest, config: view.config };
+    return { requirementId, result: validatorById(binding.validatorId)!.evaluate(input) as ValidationResult };
+  });
+}
+
+/** What the implementer needs to fix: each unmet requirement, with the failing command's output. */
+function correctionFeedback(profile: Profile, evidence: EvidenceRecord[], digest: string, results: Array<{ requirementId: string; result: ValidationResult }>): string[] {
+  const feedback = results.filter((r) => r.result.status !== "passed").map((r) => `${r.requirementId}: ${r.result.reason}`);
+  const runs = [latestCheckoutRun(evidence, COMMAND.regression, "base", digest), latestCheckoutRun(evidence, COMMAND.regression, "candidate", digest)];
+  const green = runs[1];
+  if (green !== undefined) {
+    for (const c of profile.commands) runs.push(sameCheckoutJob(evidence, green, c.id));
+  }
+  const hint = profile.implementation.cleanCheckHint !== undefined ? ` (${profile.implementation.cleanCheckHint})` : "";
+  const reported = new Set<string>();
+  for (const run of runs) {
+    if (run === undefined) continue;
+    if (run.checkout !== undefined && run.checkout.mutations.length > 0 && !reported.has(run.checkout.commit)) {
+      reported.add(run.checkout.commit);
+      feedback.push(`the checks in the ${run.checkout.from} checkout left ${run.checkout.mutations.join(", ")} changed${hint}; make the change so the checks leave it unchanged`);
+    }
+    if (run.command.id === COMMAND.regression && run.checkout?.from === "base") continue;
+    if (!succeeded(run.command)) {
+      feedback.push(`${describeCommand(run.command)} in the ${run.checkout?.from ?? "worktree"} checkout:\n${outputTail(run.command, undefined, profile.runner.reportOutput)}`);
+    }
+  }
+  return feedback;
+}
+
+/** A plan continues the implementer's session when there is one, so a revision keeps what the planner read. */
+function planJob(ctx: Context, view: RunView, assignment: string): JobSpec {
+  const from = implementerSession(view);
+  return {
+    jobId: IMPLEMENTER_JOB,
+    stageId: FIX_STAGE,
+    kind: "agent",
+    purpose: "diagnostic",
+    readOnly: true,
+    instruction: "Plan the fix",
+    resultSchema: "decision-record-v1",
+    executor: CODING_AGENT,
+    input: { assignment, harness: ctx.profile.roles.implementer },
+    ...(from !== undefined ? { continueFrom: from } : {}),
+  };
+}
+
+/** A fresh read-only session that reviews the change in the run worktree. */
+function codeReviewJob(profile: Profile, assignment: string): JobSpec {
+  return {
+    stageId: REVIEW_STAGE,
+    kind: "agent",
+    purpose: "review",
+    readOnly: true,
+    instruction: "Review the code",
+    resultSchema: "code-review-v2",
+    executor: CODING_AGENT,
+    input: { assignment, harness: profile.roles.reviewer },
+  };
+}
+
+/** A fresh read-only session, on another model family than the reviewer, that has never written the change. */
+function verificationJob(profile: Profile, assignment: string): JobSpec {
+  return {
+    stageId: REVIEW_STAGE,
+    kind: "agent",
+    purpose: "diagnostic",
+    readOnly: true,
+    instruction: "Verify the code review findings",
+    resultSchema: "finding-verification-v1",
+    executor: CODING_AGENT,
+    input: { assignment, harness: profile.roles.verifier },
+  };
+}
+
+function implementJob(ctx: Context, view: RunView, issue: number, record: DecisionRecord, feedback: string[] | undefined): JobSpec {
+  const { profile } = ctx;
+  const from = implementerSession(view);
+  return {
+    jobId: IMPLEMENTER_JOB,
+    stageId: FIX_STAGE,
+    kind: "agent",
+    purpose: "work",
+    instruction: "Implement the fix",
+    resultSchema: "decision-record-v1",
+    writeScope: writeScopeFor(record, profile),
+    executor: CODING_AGENT,
+    input: {
+      assignment: implementInstruction(profile, { issue, plan: record, ...(feedback !== undefined ? { feedback } : {}) }),
+      harness: profile.roles.implementer,
+    },
+    ...(from !== undefined ? { continueFrom: from } : {}),
+  };
+}
+
+/** The newest implementer session, which no later job has continued. */
+function implementerSession(view: RunView): string | undefined {
+  const sessions = (view.agentSessions ?? []).filter((s) => s.stageId === FIX_STAGE && s.dispatchKey === IMPLEMENTER_JOB && s.generation <= view.generation);
+  const continued = new Set(sessions.map((s) => s.continuedFrom).filter((s) => s !== undefined));
+  return sessions.filter((s) => !continued.has(s.operationId)).at(-1)?.operationId;
+}
+
+function githubJob(executor: NonNullable<JobSpec["executor"]>, instruction: string, input: Record<string, unknown>): JobSpec {
+  return { stageId: FIX_STAGE, kind: "command", purpose: "diagnostic", readOnly: true, instruction, executor, input };
+}
+
+function checkJob(instruction: string, checkout: NonNullable<JobSpec["checkout"]>, commands: ReturnType<typeof candidateCommands>, continueOnFailure: boolean): JobSpec {
+  return {
+    stageId: FIX_STAGE,
+    kind: "command",
+    purpose: "check",
+    readOnly: true,
+    instruction,
+    checkout,
+    input: { commands, ...(continueOnFailure ? { continueOnFailure: true } : {}) },
+  };
+}
+
+function readPrivate(view: RunView): FixPrivateState {
+  const blank: FixPrivateState = { attempt: view.current.attempt, attemptGeneration: view.generation, corrections: 0 };
+  if (!view.privateState) return blank;
+  try {
+    const saved = JSON.parse(view.privateState) as Partial<FixPrivateState>;
+    // Same attempt as last observed: a resume may have bumped view.generation
+    // since, but Fix was not reentered, so attemptGeneration (and corrections
+    // count) carry forward unchanged rather than re-pinning to the new one.
+    return saved.attempt === view.current.attempt && saved.attemptGeneration !== undefined
+      ? { attempt: view.current.attempt, attemptGeneration: saved.attemptGeneration, corrections: saved.corrections ?? 0 }
+      : blank;
+  } catch {
+    return blank;
+  }
+}
+
+/** Only agent work spends an invocation; checks and validation stay open after the last one. */
+function dispatchAgent(view: RunView, job: JobSpec, summary: string, state: FixPrivateState): GraphDecision {
+  if (view.budgets.agentInvocations <= 0) {
+    return stop({ reason: "budgets exhausted", blocker: "no agent invocations left" }, `cannot ${summary}`);
+  }
+  return withPrivate(dispatch(job, summary), state);
+}
+
+function withPrivate(decision: GraphDecision, state: FixPrivateState): GraphDecision {
+  return { ...decision, privateState: JSON.stringify(state) };
+}

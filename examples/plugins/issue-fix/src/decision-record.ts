@@ -1,0 +1,166 @@
+import { writeScopeAllows } from "@graphloom/sdk";
+import { isTestPath, type Profile } from "./profile.js";
+
+export type Tier = "implementation" | "behaviour" | "product";
+
+export interface Decision {
+  point: string;
+  tier: Tier;
+  options: string[];
+  chosen?: string;
+  basis: string;
+}
+
+export interface RegressionTest {
+  /** Where the test lives, as the profile's runner reads it: a Go package (`./pkg/timestamp`) or a test file. */
+  package: string;
+  /** The test the runner selects: a Go TestXxx function, or a vitest test's full name. */
+  name: string;
+  /** Ginkgo spec text to focus on inside the suite (go-test runner only). */
+  focus?: string;
+  expectedValueSource: string;
+}
+
+/** The plan and implementer's result (`decision-record-v1`). */
+export interface DecisionRecord {
+  status: "ready" | "blocked" | "cannot_reproduce";
+  summary: string;
+  title?: string;
+  test?: RegressionTest;
+  productionCaller?: string;
+  decisions: Decision[];
+  openQuestions: string[];
+  followUps?: string[];
+  scopeExceptions?: Array<{ path: string; reason: string }>;
+  needsE2E?: boolean;
+  draftComment?: string;
+  /**
+   * A unified diff (as `git diff` produces) undoing just this round's
+   * behavioral change in the production code, supplied only when RED's
+   * plain base-commit checkout could not even build the named test alone
+   * (it depends on something this round's change added). Must not touch the
+   * test file itself.
+   */
+  revertPatch?: string;
+}
+
+const strings = { type: "array", items: { type: "string" } };
+
+/** Inline JSON schema passed to the agent harness as `resultSchema`. */
+export const DECISION_RECORD_SCHEMA = JSON.stringify({
+  type: "object",
+  properties: {
+    status: { type: "string", enum: ["ready", "blocked", "cannot_reproduce"] },
+    summary: { type: "string" },
+    title: { type: "string" },
+    test: {
+      type: "object",
+      properties: {
+        package: { type: "string" },
+        name: { type: "string" },
+        focus: { type: "string" },
+        expectedValueSource: { type: "string" },
+      },
+      required: ["package", "name", "expectedValueSource"],
+    },
+    productionCaller: { type: "string" },
+    decisions: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          point: { type: "string" },
+          tier: { type: "string", enum: ["implementation", "behaviour", "product"] },
+          options: strings,
+          chosen: { type: "string" },
+          basis: { type: "string" },
+        },
+        required: ["point", "tier", "options", "basis"],
+      },
+    },
+    openQuestions: strings,
+    followUps: strings,
+    scopeExceptions: {
+      type: "array",
+      items: { type: "object", properties: { path: { type: "string" }, reason: { type: "string" } }, required: ["path", "reason"] },
+    },
+    needsE2E: { type: "boolean" },
+    draftComment: { type: "string" },
+    revertPatch: { type: "string" },
+  },
+  required: ["status", "summary", "decisions", "openQuestions"],
+});
+
+/** The record, or why the value is not one. */
+export function parseDecisionRecord(value: unknown): { record: DecisionRecord } | { problem: string } {
+  let v = value;
+  if (typeof v === "string") {
+    try {
+      v = JSON.parse(v);
+    } catch {
+      return { problem: "the result is not JSON" };
+    }
+  }
+  if (v === null || typeof v !== "object" || Array.isArray(v)) return { problem: "the result is not an object" };
+  const o = v as Record<string, unknown>;
+  if (o.status !== "ready" && o.status !== "blocked" && o.status !== "cannot_reproduce") return { problem: "status must be ready, blocked or cannot_reproduce" };
+  if (typeof o.summary !== "string") return { problem: "summary is missing" };
+  if (!Array.isArray(o.decisions)) return { problem: "decisions must be a list" };
+  if (!Array.isArray(o.openQuestions) || !o.openQuestions.every((q) => typeof q === "string")) return { problem: "openQuestions must be a list of strings" };
+  return { record: o as unknown as DecisionRecord };
+}
+
+/**
+ * What keeps a ready record from satisfying `decisions-recorded`: every unclear
+ * point has a tier and a basis, behaviour points take an option, no product
+ * point is decided, and the test (as the profile's runner can run it) and the
+ * caller are named.
+ */
+export function decisionProblems(record: DecisionRecord, profile: Profile): string[] {
+  const problems: string[] = [];
+  if (record.status !== "ready") problems.push(`the record is ${record.status}, not ready`);
+  const test = record.test;
+  if (test === undefined) problems.push("no regression test is named");
+  else {
+    problems.push(...profile.runner.testProblems(test, (p) => isTestPath(profile, p)));
+    if (typeof test.expectedValueSource !== "string" || test.expectedValueSource.trim() === "") problems.push("the test's expected value has no source");
+  }
+  if (typeof record.productionCaller !== "string" || record.productionCaller.trim() === "") problems.push("no production caller is named");
+  if (record.revertPatch !== undefined && (typeof record.revertPatch !== "string" || record.revertPatch.trim() === "")) {
+    problems.push("revertPatch, when given, must be a non-empty unified diff");
+  }
+  record.decisions.forEach((d, i) => {
+    const label = `decision ${i + 1}${typeof d?.point === "string" ? ` (${d.point})` : ""}`;
+    if (d === null || typeof d !== "object") {
+      problems.push(`${label} is not an object`);
+      return;
+    }
+    if (d.tier !== "implementation" && d.tier !== "behaviour" && d.tier !== "product") problems.push(`${label} has no tier`);
+    if (typeof d.basis !== "string" || d.basis.trim() === "") problems.push(`${label} has no basis`);
+    const chosen = typeof d.chosen === "string" && d.chosen.trim() !== "";
+    if (d.tier === "product" && chosen) problems.push(`${label} is a product decision, which an agent must not make`);
+    if (d.tier === "behaviour" && !chosen) problems.push(`${label} is a behaviour point without a chosen option`);
+  });
+  for (const e of record.scopeExceptions ?? []) {
+    if (!profile.protectedPaths.includes(e.path)) {
+      problems.push(
+        profile.protectedPaths.length > 0
+          ? `scope exception ${JSON.stringify(e.path)} is not one of ${profile.protectedPaths.join(", ")}`
+          : `scope exception ${JSON.stringify(e.path)} names no protected path; this repository protects none`,
+      );
+    }
+    if (typeof e.reason !== "string" || e.reason.trim() === "") problems.push(`scope exception ${JSON.stringify(e.path)} has no reason`);
+  }
+  return problems;
+}
+
+/** The implementer's write scope: the repository except protected paths the record does not justify. */
+export function writeScopeFor(record: DecisionRecord | undefined, profile: Profile): string[] {
+  const allowed = new Set((record?.scopeExceptions ?? []).filter((e) => typeof e.reason === "string" && e.reason.trim() !== "").map((e) => e.path));
+  return [".", ...profile.protectedPaths.filter((p) => !allowed.has(p)).map((p) => `!${p}`)];
+}
+
+export function outOfScope(paths: string[], record: DecisionRecord | undefined, profile: Profile): string[] {
+  const scope = writeScopeFor(record, profile);
+  return paths.filter((p) => !writeScopeAllows(p, scope));
+}
