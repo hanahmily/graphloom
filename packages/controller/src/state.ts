@@ -15,6 +15,31 @@ import { withDirectoryLock } from "./lock.js";
 
 export type RunStatus = "running" | "succeeded" | "stopped" | "failed";
 
+/**
+ * A remedy the controller or the supervisor host applied without a model
+ * decision: what failed, what was done about it, and any wait it charged.
+ */
+export interface RemedyRecord {
+  at: string;
+  /** What failed, e.g. `supervisor provider quota`, `executor acme/x failed`, `stalled`. */
+  condition: string;
+  /** What was done, e.g. `waited 30s and retried the turn`. */
+  remedy: string;
+  /** The provider's or executor's own message, bounded. */
+  detail?: string;
+  episodeId?: string;
+  /** Milliseconds charged to the run's waitMs budget. */
+  waitedMs?: number;
+}
+
+/** Remedy records kept in run state; older ones are dropped. */
+export const MAX_REMEDY_RECORDS = 100;
+
+export function recordRemedy(state: DurableRunState, record: Omit<RemedyRecord, "at"> & { at?: string }): DurableRunState {
+  const entry: RemedyRecord = { ...record, at: record.at ?? new Date().toISOString() };
+  return { ...state, remedies: [...(state.remedies ?? []), entry].slice(-MAX_REMEDY_RECORDS) };
+}
+
 export interface PendingDispatch {
   operationId: string;
   generation: number;
@@ -118,6 +143,31 @@ export interface DurableRunState {
   executorCatalog?: ExecutorCatalogEntry[];
   /** Earliest time each executor may run again, from a failure's retry timing. */
   executorRetryAt?: Record<string, string>;
+  /**
+   * A failed job its executor declared retryable (`retryLimit`), queued to run
+   * again unchanged before the graph or supervisor is asked anything.
+   */
+  executorRetry?: {
+    job: JobSpec;
+    /** 1-based retry number this dispatch is. */
+    attempt: number;
+    limit: number;
+    graphCorrectionTrial: boolean;
+    supervisorWorkDispatch: boolean;
+  };
+  /** Per `${stageId}:${purpose}:${executorId}`, consecutive retryable failures retried so far. */
+  executorRetryCounts?: Record<string, number>;
+  /**
+   * Deterministic remedies applied without asking the model what to do
+   * (design-supervisor-robustness.md §4.3), newest last, bounded.
+   */
+  remedies?: RemedyRecord[];
+  /**
+   * Progress mark (escalation.ts) at the last recovery episode's decision,
+   * whether the supervisor's or a deterministic remedy's. A `stalled` trigger
+   * whose run has progressed past it returns to normal without a model call.
+   */
+  lastEpisodeMark?: string;
   privateState?: string;
   definition: GraphDefinition;
   validatorBindings: ValidatorBinding[];

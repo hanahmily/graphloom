@@ -1,0 +1,271 @@
+import { existsSync } from "node:fs";
+import { mkdtemp, rm } from "node:fs/promises";
+import { createRequire } from "node:module";
+import os from "node:os";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
+import {
+  createAgentSession,
+  ModelRuntime,
+  SessionManager,
+  SettingsManager,
+} from "@earendil-works/pi-coding-agent";
+import type { RunView } from "@graphloom/sdk";
+import { afterEach, describe, expect, it } from "vitest";
+import { wrapPiAgentSession } from "./pi-session.js";
+import { createPiSupervisor, type PiSupervisor } from "./pi-supervisor.js";
+import { isSupervisorProviderError, type SupervisorProviderError } from "./provider-failure.js";
+import type { SupervisorInput } from "./types.js";
+
+type Step = unknown;
+interface Faux {
+  provider: unknown;
+  state: { callCount: number };
+  setResponses(responses: Step[]): void;
+  getModel(): unknown;
+}
+interface FauxModule {
+  fauxProvider(options?: { provider?: string; models?: Array<{ id: string }> }): Faux;
+  fauxAssistantMessage(content: unknown, options?: { stopReason?: string; errorMessage?: string }): unknown;
+  fauxToolCall(name: string, args: Record<string, unknown>): unknown;
+  fauxThinking(text: string): unknown;
+}
+
+function findPackageDir(fromFile: string, pkg: string): string {
+  for (const dir of createRequire(fromFile).resolve.paths(pkg) ?? []) {
+    const candidate = path.join(dir, pkg);
+    if (existsSync(path.join(candidate, "package.json"))) return candidate;
+  }
+  throw new Error(`${pkg} not found from ${fromFile}`);
+}
+
+/** Pi's own pi-ai instance, wherever npm placed it. */
+async function loadPiAi(): Promise<FauxModule> {
+  const piDir = findPackageDir(import.meta.filename, "@earendil-works/pi-coding-agent");
+  const aiDir = findPackageDir(path.join(piDir, "package.json"), "@earendil-works/pi-ai");
+  return (await import(pathToFileURL(path.join(aiDir, "dist", "index.js")).href)) as FauxModule;
+}
+
+const temps: string[] = [];
+afterEach(async () => {
+  while (temps.length > 0) {
+    const dir = temps.pop();
+    if (dir) await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+  }
+});
+
+interface World {
+  ai: FauxModule;
+  faux: Faux;
+  supervisor: PiSupervisor;
+  /** Plain prompts to build history (compaction needs something to summarize). */
+  warmUp(turns: number): Promise<void>;
+}
+
+async function world(): Promise<World> {
+  const ai = await loadPiAi();
+  const dir = await mkdtemp(path.join(os.tmpdir(), "gl-pi-fail-"));
+  temps.push(dir);
+  const modelRuntime = await ModelRuntime.create({
+    authPath: path.join(dir, "auth.json"),
+    modelsPath: path.join(dir, "models.json"),
+  });
+  const faux = ai.fauxProvider({ provider: "faux-fail", models: [{ id: "faux" }] });
+  modelRuntime.registerNativeProvider(faux.provider as never);
+  const { session } = await createAgentSession({
+    cwd: dir,
+    agentDir: dir,
+    model: faux.getModel() as never,
+    thinkingLevel: "off",
+    modelRuntime,
+    noTools: "all",
+    tools: [],
+    sessionManager: SessionManager.inMemory(dir),
+    // Pi's own overflow recovery is off so the host's remedy is what runs.
+    settingsManager: SettingsManager.inMemory({
+      compaction: { enabled: false, keepRecentTokens: 1 },
+      retry: { enabled: false },
+    }),
+  });
+  const wrapped = wrapPiAgentSession({
+    session,
+    modelRuntime,
+    runId: "run-fail",
+    provider: "faux-fail",
+    modelId: "faux",
+    agentDir: dir,
+    credentialSource: "pi-stored",
+    promptTimeoutMs: 10_000,
+  });
+  const supervisor = createPiSupervisor({ session: wrapped });
+  return {
+    ai,
+    faux,
+    supervisor,
+    async warmUp(turns) {
+      for (let i = 0; i < turns; i += 1) await wrapped.prompt(`history ${i} ${"x".repeat(200)}`);
+      wrapped.drainTurnCount!();
+    },
+  };
+}
+
+function input(extra: Partial<SupervisorInput> = {}): SupervisorInput {
+  const view: RunView = {
+    runId: "run-fail",
+    task: { request: "write hello", repo: "/repo" },
+    current: { stageId: "write", attempt: 1 },
+    receipts: [],
+    evidence: [],
+    outstanding: [],
+    budgets: { agentInvocations: 20, jobs: 8, decisions: 8, corrections: 2 },
+    validatorBindings: [],
+    generation: 1,
+    stateRevision: 1,
+    activeVersion: "hello@1",
+  };
+  return { runId: "run-fail", episodeId: "ep-1", trigger: { code: "supervise", message: "stuck" }, view, maxProviderCalls: 20, ...extra };
+}
+
+const stopCall = { reason: "nothing left", stop: { reason: "no remedy", blocker: "none" } };
+const QUOTA_NO_RESET =
+  '429 {"type":"error","error":{"type":"rate_limit_error","message":"已达到 Token Plan 用量上限：请升级 Token Plan 套餐或购买积分补充用量。 (2056)"}}';
+const OVERFLOW =
+  '400 {"type":"error","error":{"type":"invalid_request_error","message":"invalid params, context window exceeds limit (2013)"}}';
+
+function errorTurn(w: World, errorMessage: string): Step {
+  return w.ai.fauxAssistantMessage([], { stopReason: "error", errorMessage });
+}
+function stopTurn(w: World): Step {
+  return w.ai.fauxAssistantMessage(w.ai.fauxToolCall("stop", stopCall), { stopReason: "toolUse" });
+}
+
+/**
+ * Provider steps for decision requests (the recovery prompt is the last
+ * message), answering compaction's summarization requests with a summary.
+ */
+function decisionsAmongSummaries(w: World, decisions: Step[]): Step[] {
+  const queue = [...decisions];
+  const step = (context: { messages: Array<{ content?: unknown }> }) => {
+    const last = JSON.stringify(context.messages.at(-1)?.content ?? "");
+    if (last.includes("Episode: ep-1")) return queue.shift();
+    return w.ai.fauxAssistantMessage("summary of earlier recovery turns");
+  };
+  return Array.from({ length: 8 }, () => step);
+}
+
+async function failure(promise: Promise<unknown>): Promise<SupervisorProviderError> {
+  const err = await promise.then(
+    () => undefined,
+    (e: unknown) => e,
+  );
+  if (!isSupervisorProviderError(err)) throw new Error(`expected a SupervisorProviderError, got ${String(err)}`);
+  return err;
+}
+
+describe("Pi supervisor provider failures (faux provider)", () => {
+  it("waits out a quota reset the provider states, retries the turn, and reports the wait", async () => {
+    const w = await world();
+    w.faux.setResponses([errorTurn(w, "429 Too Many Requests: rate limit reached, retry after 1s"), stopTurn(w)]);
+    const started = Date.now();
+    const proposal = await w.supervisor.decide(input({ maxWaitMs: 60_000 }));
+    expect(proposal).toMatchObject({ action: { type: "stop" } });
+    expect(Date.now() - started).toBeGreaterThanOrEqual(900);
+    expect(w.faux.state.callCount).toBe(2);
+    expect(w.supervisor.drainProviderCalls()).toBe(2);
+    const [remedy, ...more] = w.supervisor.drainRemedies();
+    expect(more).toEqual([]);
+    expect(remedy).toMatchObject({ failureClass: "quota", remedy: "wait_and_retry" });
+    expect(remedy!.waitedMs).toBeGreaterThanOrEqual(900);
+  });
+
+  it("names quota and the provider message when no reset time is given", async () => {
+    const w = await world();
+    w.faux.setResponses([errorTurn(w, QUOTA_NO_RESET), stopTurn(w)]);
+    const err = await failure(w.supervisor.decide(input({ maxWaitMs: 60_000 })));
+    expect(err.failureClass).toBe("quota");
+    expect(err.message).toMatch(/^supervisor provider quota: 429 .*\(2056\)/);
+    expect(err.unremedied).toMatch(/no reset time/);
+    expect(w.faux.state.callCount).toBe(1);
+    expect(w.supervisor.drainRemedies()).toEqual([]);
+  });
+
+  it("does not wait past the run's wait budget", async () => {
+    const w = await world();
+    w.faux.setResponses([errorTurn(w, "429 rate limit exceeded; try again in 10 minutes"), stopTurn(w)]);
+    const err = await failure(w.supervisor.decide(input({ maxWaitMs: 1_000 })));
+    expect(err.failureClass).toBe("quota");
+    expect(err.retryAt).toBeDefined();
+    expect(err.unremedied).toMatch(/wait budget/);
+    expect(w.faux.state.callCount).toBe(1);
+  });
+
+  it("compacts and retries once after a context overflow, charging the compaction", async () => {
+    const w = await world();
+    w.faux.setResponses(Array.from({ length: 3 }, (_, i) => w.ai.fauxAssistantMessage(`reply ${i}`)));
+    await w.warmUp(3);
+    w.supervisor.drainProviderCalls();
+    const before = w.faux.state.callCount;
+    w.faux.setResponses(decisionsAmongSummaries(w, [errorTurn(w, OVERFLOW), stopTurn(w)]));
+    const proposal = await w.supervisor.decide(input());
+    expect(proposal).toMatchObject({ action: { type: "stop" } });
+    // overflowed turn + compaction (charged as its 2-call upper bound) + retried turn
+    expect(w.supervisor.drainProviderCalls()).toBe(4);
+    expect(w.faux.state.callCount - before).toBeGreaterThanOrEqual(3);
+    expect(w.supervisor.drainRemedies()).toMatchObject([{ failureClass: "overflow", remedy: "compact_and_retry" }]);
+  });
+
+  it("stops naming overflow when the retried turn overflows again", async () => {
+    const w = await world();
+    w.faux.setResponses(Array.from({ length: 3 }, (_, i) => w.ai.fauxAssistantMessage(`reply ${i}`)));
+    await w.warmUp(3);
+    w.faux.setResponses(decisionsAmongSummaries(w, [errorTurn(w, OVERFLOW), errorTurn(w, OVERFLOW), stopTurn(w)]));
+    const err = await failure(w.supervisor.decide(input()));
+    expect(err.failureClass).toBe("overflow");
+    expect(err.message).toMatch(/^supervisor provider overflow: 400 .*context window exceeds limit \(2013\)/);
+    expect(err.unremedied).toMatch(/already compacted/);
+  });
+
+  it("re-asks once after a thinking-only reply", async () => {
+    const w = await world();
+    w.faux.setResponses([w.ai.fauxAssistantMessage([w.ai.fauxThinking("let me think about it")]), stopTurn(w)]);
+    const proposal = await w.supervisor.decide(input());
+    expect(proposal).toMatchObject({ action: { type: "stop" } });
+    expect(w.faux.state.callCount).toBe(2);
+    expect(w.supervisor.drainProviderCalls()).toBe(2);
+    expect(w.supervisor.drainRemedies()).toMatchObject([{ failureClass: "empty", remedy: "reask", message: expect.stringMatching(/only thinking/) }]);
+  });
+
+  it("stops naming empty after the re-ask is empty too", async () => {
+    const w = await world();
+    w.faux.setResponses([w.ai.fauxAssistantMessage([]), w.ai.fauxAssistantMessage([]), stopTurn(w)]);
+    const err = await failure(w.supervisor.decide(input()));
+    expect(err.failureClass).toBe("empty");
+    expect(err.unremedied).toMatch(/already re-asked/);
+    expect(w.faux.state.callCount).toBe(2);
+  });
+
+  it("names auth, unknown, and malformed failures without retrying them", async () => {
+    const cases: Array<[string, Step[] | ((w: World) => Step[])]> = [
+      ["auth", (w) => [errorTurn(w, "401 Unauthorized: invalid api key"), stopTurn(w)]],
+      ["unknown", (w) => [errorTurn(w, "500 internal server error"), stopTurn(w)]],
+      ["malformed", (w) => [w.ai.fauxAssistantMessage("I think we should retry."), stopTurn(w)]],
+    ];
+    for (const [cls, steps] of cases) {
+      const w = await world();
+      w.faux.setResponses(typeof steps === "function" ? steps(w) : steps);
+      const err = await failure(w.supervisor.decide(input({ maxWaitMs: 60_000 })));
+      expect(err.failureClass).toBe(cls);
+      expect(err.message.startsWith(`supervisor provider ${cls}: `)).toBe(true);
+      expect(w.faux.state.callCount).toBe(1);
+    }
+  });
+
+  it("does not retry past the run's provider-call allowance", async () => {
+    const w = await world();
+    w.faux.setResponses([w.ai.fauxAssistantMessage([]), stopTurn(w)]);
+    const err = await failure(w.supervisor.decide(input({ maxProviderCalls: 1 })));
+    expect(err.failureClass).toBe("empty");
+    expect(err.unremedied).toMatch(/no provider calls left/);
+    expect(w.faux.state.callCount).toBe(1);
+  });
+});

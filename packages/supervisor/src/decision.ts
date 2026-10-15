@@ -15,7 +15,7 @@ const FENCED_JSON = /```(?:json)?\s*([\s\S]*?)```/i;
 export function parseSupervisorDecision(text: string): GraphDecision {
   const trimmed = text.trim();
   if (!trimmed) {
-    throw new WireValidationError("malformed", "no GraphDecision JSON in supervisor response");
+    throw new WireValidationError("malformed", "the reply is neither a tool call nor GraphDecision JSON");
   }
 
   const fenced = trimmed.match(FENCED_JSON);
@@ -40,7 +40,7 @@ export function parseSupervisorDecision(text: string): GraphDecision {
   }
   throw new WireValidationError(
     "malformed",
-    "no GraphDecision JSON in supervisor response",
+    "the reply is neither a tool call nor GraphDecision JSON",
   );
 }
 

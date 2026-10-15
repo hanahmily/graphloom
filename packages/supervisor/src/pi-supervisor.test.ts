@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { dispatch, reenter, returnToNormal, stop, WireValidationError, type AgentSessionView, type EvidenceRecord } from "@graphloom/sdk";
+import { dispatch, reenter, returnToNormal, stop, type AgentSessionView, type EvidenceRecord } from "@graphloom/sdk";
 import {
   buildRecoveryPrompt,
   buildRepairPrompt,
@@ -112,7 +112,10 @@ describe("createPiSupervisor", () => {
         replies: [JSON.stringify({ action: { type: "accept" }, reason: "ship it" })],
       }),
     });
-    await expect(supervisor.decide(sampleInput())).rejects.toThrow(WireValidationError);
+    await expect(supervisor.decide(sampleInput())).rejects.toMatchObject({
+      failureClass: "malformed",
+      message: expect.stringMatching(/^supervisor provider malformed: unsupported action type: accept/),
+    });
   });
 
   it("rejects a JSON-only reply that repeats a proposal already at its rejection threshold", async () => {

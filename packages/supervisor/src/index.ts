@@ -66,5 +66,15 @@ export {
   type Supervisor,
   type SupervisorInput,
   type SupervisorProposal,
+  type SupervisorRemedy,
   type SupervisorSettlement,
 } from "./types.js";
+
+export {
+  classifyAssistantMessage,
+  isSupervisorProviderError,
+  retryAtFromMessage,
+  SupervisorProviderError,
+  type ProviderFailure,
+  type ProviderFailureClass,
+} from "./provider-failure.js";

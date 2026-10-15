@@ -68,6 +68,13 @@ export interface JobResult {
   evidence?: JobEvidenceItem[];
   /** A failed executor's requested wait before retrying it (e.g. a rate limit). */
   retryAfterMs?: number;
+  /**
+   * The executor declares this failure transient: the controller may run the
+   * same job again, unchanged, up to this many consecutive times (waiting
+   * `retryAfterMs`, or an exponential backoff, between tries) before the
+   * failure reaches recovery. Omitted means the failure is not retryable.
+   */
+  retryLimit?: number;
   /** The job's agent session, which a later job may continue. */
   sessionRef?: string;
   /**

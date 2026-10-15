@@ -274,6 +274,26 @@ left, and caps each decision prompt at the invocations remaining. A Stop during 
 decision or a candidate patch aborts that prompt; the run records an operator stop.
 [SDK events and cancellation](https://pi.dev/docs/latest/sdk).
 
+### Provider failures
+
+A decision turn that yields no proposal is classified from the provider's last
+assistant message (`stopReason`, `errorMessage`), not from the missing JSON:
+`quota` (429 and rate/usage limits; any reset time the message states becomes
+`retryAt`), `overflow` (Pi's own `isContextOverflow`), `auth` (401/403 and
+credential refusals), `empty` (no tool call and no text, including thinking-only
+replies), `malformed` (text that is not a GraphDecision), or `unknown`. The host
+applies a fixed remedy without asking the model what to do: a quota error with a
+reset time waits until then (at most three waits a turn, only within the
+`maxWaitMs` the controller passes from the run's `waitMs`) and retries the turn;
+an overflow compacts the session and retries once; an empty reply is re-asked
+once with "call exactly one tool". Every retried call and compaction counts
+against the turn's provider-call allowance. `drainRemedies()` reports what was
+done; the controller charges the waits to `waitMs` and records each remedy in the
+run's `remedies` (shown by `inspect`). A failure with no remedy left stops the
+run with `stopReason` `supervisor provider <class>: <provider message>`, and the
+blocker adds why no remedy applied (for example, no reset time, wait budget,
+already compacted once).
+
 ## Implementation and verification gaps
 
 | Gap | Required work |

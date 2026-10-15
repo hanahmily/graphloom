@@ -47,7 +47,9 @@ describe("createPiSupervisor decide failures still count provider calls", () => 
       },
     };
     const supervisor = createPiSupervisor({ session });
-    await expect(supervisor.decide(sampleInput())).rejects.toThrow(/no GraphDecision JSON/i);
+    await expect(supervisor.decide(sampleInput())).rejects.toThrow(
+      /^supervisor provider malformed: the reply is neither a tool call nor GraphDecision JSON/,
+    );
     expect(supervisor.drainProviderCalls()).toBe(1);
   });
 });

@@ -1,13 +1,22 @@
 import type { AgentSessionView, EvidenceRecord } from "@graphloom/sdk";
 import { parseSupervisorDecision } from "./decision.js";
 import type { PiSupervisorSession, ThinkingLevel } from "./pi-session.js";
-import { continuationRefusal, createAdmissionTools, escapingObservePath, supervisorProposalKey, writeScopeRefusal } from "./tools.js";
+import { SupervisorProviderError, type ProviderFailure } from "./provider-failure.js";
+import {
+  continuationRefusal,
+  createAdmissionTools,
+  escapingObservePath,
+  supervisorProposalKey,
+  writeScopeRefusal,
+  type AdmissionToolbox,
+} from "./tools.js";
 import {
   assertGrantedRoot,
   type CandidatePatchRequest,
   type Supervisor,
   type SupervisorInput,
   type SupervisorProposal,
+  type SupervisorRemedy,
 } from "./types.js";
 
 export interface SupervisorModelRef {
@@ -43,6 +52,8 @@ export interface PiSupervisor extends Supervisor {
   readonly binding: SupervisorBinding;
   /** Provider/model calls since the last drain (turns that started). */
   drainProviderCalls(): number;
+  /** Deterministic remedies applied to failed provider turns since the last drain. */
+  drainRemedies(): SupervisorRemedy[];
   switchModel(args: {
     provider: string;
     modelId: string;
@@ -65,6 +76,27 @@ export interface CreatePiSupervisorOptions {
 }
 
 const MAX_PATCH_SUMMARY_CHARS = 2_000;
+/** Quota waits one decision turn may take before the failure stops the run. */
+const MAX_QUOTA_WAITS = 3;
+/** Upper bound of one compaction's provider requests (mirrors pi-session.ts). */
+const COMPACTION_PROVIDER_CALLS = 2;
+/** A compaction plus at least one retried turn. */
+const COMPACT_AND_RETRY_CALLS = COMPACTION_PROVIDER_CALLS + 1;
+const REASK_PROMPT =
+  "Your last reply had no tool call and no text. Call exactly one GraphLoom tool now to propose your action for the recovery context above.";
+
+function abortableSleep(ms: number, signal: AbortSignal | undefined): Promise<void> {
+  if (!(ms > 0) || signal?.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const done = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal?.addEventListener("abort", done, { once: true });
+  });
+}
 
 /**
  * Pi-backed recovery supervisor: one logical session, one admission tool call per
@@ -89,8 +121,141 @@ export function createPiSupervisor(options: CreatePiSupervisorOptions): PiSuperv
    * a prompt aborted before its first provider request costs nothing. A session
    * that cannot count turns is charged one call per prompt.
    */
-  function settleTurns(): void {
-    providerCalls += session.drainTurnCount !== undefined ? session.drainTurnCount() : 1;
+  function settleTurns(): number {
+    const n = session.drainTurnCount !== undefined ? session.drainTurnCount() : 1;
+    providerCalls += n;
+    return n;
+  }
+
+  let remedies: SupervisorRemedy[] = [];
+
+  /**
+   * One decision turn, with the deterministic remedies for failures whose fix
+   * is known (design-supervisor-robustness.md §4.3), applied without asking
+   * the model what to do: wait out a stated quota reset and retry, compact
+   * and retry once after an overflow, re-ask once after an empty reply.
+   * Every retried model call is charged against `maxProviderCalls`, and every
+   * wait against `maxWaitMs`. A failure with no applicable remedy throws a
+   * SupervisorProviderError naming its class and the provider's message.
+   */
+  async function promptWithRemedies(
+    input: SupervisorInput,
+    prompt: string,
+    toolbox: AdmissionToolbox,
+  ): Promise<SupervisorProposal> {
+    let spent = 0;
+    let waitLeft = Math.max(0, input.maxWaitMs ?? 0);
+    let quotaWaits = 0;
+    let compacted = false;
+    let reasked = false;
+    let next = prompt;
+    let last: SupervisorProviderError | undefined;
+    for (;;) {
+      const allowance = input.maxProviderCalls !== undefined ? input.maxProviderCalls - spent : undefined;
+      if (allowance !== undefined && allowance < 1) {
+        if (last !== undefined) throw last.withUnremedied("no provider calls left in the run's budget to retry");
+        throw new Error("decide has no provider-call allowance");
+      }
+      let text: string;
+      try {
+        text = await session.prompt(next, {
+          tools: toolbox.tools,
+          ...(input.signal !== undefined ? { signal: input.signal } : {}),
+          ...(allowance !== undefined ? { maxTurns: allowance } : {}),
+        });
+      } finally {
+        spent += settleTurns();
+      }
+      const admitted = toolbox.proposal();
+      if (admitted !== undefined) return admitted;
+      const failure: ProviderFailure | undefined =
+        session.lastReplyFailure?.() ??
+        (text === "" ? { failureClass: "empty", message: "the reply had no tool call or text" } : undefined);
+      if (failure === undefined) {
+        // Models without tool calling may still reply with the decision as
+        // JSON, bypassing the admission tools' in-turn checks entirely.
+        try {
+          return parseSupervisorDecision(text);
+        } catch (err) {
+          throw new SupervisorProviderError({
+            failureClass: "malformed",
+            message: `${err instanceof Error ? err.message : String(err)}; reply began: ${JSON.stringify(text.slice(0, 160))}`,
+          });
+        }
+      }
+      last = new SupervisorProviderError(failure);
+      const callsLeft = input.maxProviderCalls !== undefined ? input.maxProviderCalls - spent : Number.POSITIVE_INFINITY;
+      if (callsLeft < 1 && (failure.failureClass === "quota" || failure.failureClass === "empty")) {
+        throw last.withUnremedied("no provider calls left in the run's budget to retry");
+      }
+      const remedy = (kind: SupervisorRemedy["remedy"], waitedMs?: number): void => {
+        remedies.push({
+          at: new Date().toISOString(),
+          failureClass: failure.failureClass,
+          remedy: kind,
+          message: failure.message,
+          ...(waitedMs !== undefined ? { waitedMs } : {}),
+        });
+      };
+      switch (failure.failureClass) {
+        case "quota": {
+          if (failure.retryAt === undefined) throw last.withUnremedied("the provider gave no reset time to wait for");
+          if (quotaWaits >= MAX_QUOTA_WAITS) {
+            throw last.withUnremedied(`still over quota after ${MAX_QUOTA_WAITS} waits in this turn`);
+          }
+          const waitMs = Math.max(0, Date.parse(failure.retryAt) - Date.now());
+          if (waitMs > waitLeft) {
+            throw last.withUnremedied(
+              `the reset at ${failure.retryAt} is ${Math.ceil(waitMs / 1000)}s away; ${Math.floor(waitLeft / 1000)}s of the run's wait budget remain`,
+            );
+          }
+          const started = Date.now();
+          await abortableSleep(waitMs, input.signal);
+          const elapsed = Date.now() - started;
+          const waited = Math.min(waitLeft, input.signal?.aborted === true ? elapsed : Math.max(waitMs, elapsed));
+          waitLeft -= waited;
+          quotaWaits += 1;
+          remedy("wait_and_retry", waited);
+          if (input.signal?.aborted) throw new Error("supervisor prompt aborted");
+          next = prompt;
+          continue;
+        }
+        case "overflow": {
+          if (compacted) throw last.withUnremedied("already compacted and retried once in this turn");
+          if (session.compact === undefined) throw last.withUnremedied("the session cannot compact");
+          const left = input.maxProviderCalls !== undefined ? input.maxProviderCalls - spent : undefined;
+          if (left !== undefined && left < COMPACT_AND_RETRY_CALLS) {
+            throw last.withUnremedied(`compacting and retrying needs ${COMPACT_AND_RETRY_CALLS} provider calls; ${left} remain`);
+          }
+          compacted = true;
+          try {
+            await session.compact();
+          } catch (err) {
+            throw last.withUnremedied(`compaction failed: ${err instanceof Error ? err.message : String(err)}`);
+          } finally {
+            if (session.drainTurnCount !== undefined) {
+              spent += settleTurns();
+            } else {
+              // A session that cannot count turns is charged compaction's upper bound.
+              providerCalls += COMPACTION_PROVIDER_CALLS;
+              spent += COMPACTION_PROVIDER_CALLS;
+            }
+          }
+          remedy("compact_and_retry");
+          next = prompt;
+          continue;
+        }
+        case "empty": {
+          if (reasked) throw last.withUnremedied("already re-asked once in this turn");
+          reasked = true;
+          remedy("reask");
+          next = REASK_PROMPT;
+          continue;
+        }
+        default:
+          throw last;
+      }
+    }
   }
 
   const binding: SupervisorBinding = {
@@ -122,6 +287,12 @@ export function createPiSupervisor(options: CreatePiSupervisorOptions): PiSuperv
       const n = providerCalls;
       providerCalls = 0;
       return n;
+    },
+
+    drainRemedies() {
+      const drained = remedies;
+      remedies = [];
+      return drained;
     },
 
     candidateCodingRoot() {
@@ -163,22 +334,7 @@ export function createPiSupervisor(options: CreatePiSupervisorOptions): PiSuperv
         current: { provider: binding.provider, modelId: binding.modelId },
         configured,
       });
-      let text: string;
-      try {
-        text = await session.prompt(prompt, {
-          tools: toolbox.tools,
-          ...(input.signal !== undefined ? { signal: input.signal } : {}),
-          ...(input.maxProviderCalls !== undefined ? { maxTurns: input.maxProviderCalls } : {}),
-        });
-      } finally {
-        settleTurns();
-      }
-      // Models without tool calling may still reply with the decision as JSON,
-      // bypassing the admission tools' in-turn checks entirely; an otherwise
-      // malformed proposal from that path would reach the controller and
-      // hard-stop the run with no chance to self-correct, the way the
-      // tool-call path's reject() already lets the model fix in-turn.
-      const proposal = toolbox.proposal() ?? parseSupervisorDecision(text);
+      const proposal = await promptWithRemedies(input, prompt, toolbox);
       const sanitized = sanitizeProposal(proposal, input.view.agentSessions ?? [], input.view.generation);
       // A JSON-only reply never went through the admission tools' own
       // repeated-proposal rejection (there is no tool call to reject, and no
