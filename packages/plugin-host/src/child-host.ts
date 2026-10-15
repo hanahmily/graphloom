@@ -58,6 +58,7 @@ export async function createChildPluginHost(
     generation: options.generation,
     timeoutMs,
     stderrChunks,
+    config: options.config,
   });
 
   // Fail fast if the worker dies or fails to spawn before any call.
@@ -73,6 +74,8 @@ class ChildSession implements PluginHost {
   private readonly stdout: Interface;
   private readonly timeoutMs: number;
   private readonly stderrChunks: string[];
+  /** The run's pinned task config; opaque, attached to every request. */
+  private readonly config: unknown;
   private readonly pending = new Map<
     string,
     {
@@ -94,7 +97,9 @@ class ChildSession implements PluginHost {
     generation: number;
     timeoutMs: number;
     stderrChunks: string[];
+    config?: unknown;
   }) {
+    this.config = args.config;
     this.child = args.child;
     this.stdout = args.stdout;
     this.activeVersion = args.activeVersion;
@@ -128,6 +133,10 @@ class ChildSession implements PluginHost {
     });
   }
 
+  private configField(): { config?: unknown } {
+    return this.config !== undefined ? { config: this.config } : {};
+  }
+
   get childPid(): number | undefined {
     return this.child.pid ?? undefined;
   }
@@ -148,7 +157,7 @@ class ChildSession implements PluginHost {
   }
 
   describe(ctx: CallContext): Promise<HostResult<GraphDefinition>> {
-    return this.call(ctx, { kind: "describe" }, (res) => {
+    return this.call(ctx, { kind: "describe", ...this.configField() }, (res) => {
       if (res.kind !== "describe_ok") {
         throw new WireValidationError("malformed", `expected describe_ok, got ${res.kind}`);
       }
@@ -157,7 +166,8 @@ class ChildSession implements PluginHost {
   }
 
   advance(ctx: CallContext, view: RunView): Promise<HostResult<GraphDecision>> {
-    return this.call(ctx, { kind: "advance", view }, (res) => {
+    const sent = this.config !== undefined ? { ...view, config: this.config } : view;
+    return this.call(ctx, { kind: "advance", view: sent }, (res) => {
       if (res.kind !== "advance_ok") {
         throw new WireValidationError("malformed", `expected advance_ok, got ${res.kind}`);
       }
@@ -170,7 +180,8 @@ class ChildSession implements PluginHost {
     validatorId: string,
     input: ValidationInput,
   ): Promise<HostResult<ValidationResult>> {
-    return this.call(ctx, { kind: "evaluate", validatorId, input }, (res) => {
+    const sent = this.config !== undefined ? { ...input, config: this.config } : input;
+    return this.call(ctx, { kind: "evaluate", validatorId, input: sent }, (res) => {
       if (res.kind !== "evaluate_ok") {
         throw new WireValidationError("malformed", `expected evaluate_ok, got ${res.kind}`);
       }
@@ -179,7 +190,7 @@ class ChildSession implements PluginHost {
   }
 
   rehearsal(ctx: CallContext, entry: string): Promise<HostResult<GraphRehearsal | undefined>> {
-    return this.call(ctx, { kind: "rehearsal", entry }, (res) => {
+    return this.call(ctx, { kind: "rehearsal", entry, ...this.configField() }, (res) => {
       if (res.kind !== "rehearsal_ok") {
         throw new WireValidationError("malformed", `expected rehearsal_ok, got ${res.kind}`);
       }
@@ -249,10 +260,10 @@ class ChildSession implements PluginHost {
   private async call<T>(
     ctx: CallContext,
     body:
-      | { kind: "describe" }
+      | { kind: "describe"; config?: unknown }
       | { kind: "advance"; view: RunView }
       | { kind: "evaluate"; validatorId: string; input: ValidationInput }
-      | { kind: "rehearsal"; entry: string },
+      | { kind: "rehearsal"; entry: string; config?: unknown },
     extract: (res: WireResponse) => T,
   ): Promise<HostResult<T>> {
     if (this.closed || this.exitCode !== null || this.spawnError !== null) {

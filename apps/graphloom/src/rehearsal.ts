@@ -23,6 +23,7 @@ import {
   resolveBundleEntryFromManifest,
   resolveBundleRehearsalEntry,
   resolveStateDir,
+  taskConfigValue,
   type BoundaryResult,
   type ContractOutcome,
   type DurableRunState,
@@ -102,12 +103,19 @@ export interface CheckReport {
   environmentOutputs: Record<string, string>;
 }
 
+/** The task's pinned config for a plugin host, so check, rehearse and replay describe the same graph a run would. */
+function configOption(intake: Pick<DurableRunState["intake"], "config">): { config?: unknown } {
+  const config = taskConfigValue(intake);
+  return config !== undefined ? { config } : {};
+}
+
 async function describeBundle(intake: Awaited<ReturnType<typeof intakeTask>>): Promise<GraphDefinition> {
   const host = await createChildPluginHost({
     entryModule: resolveBundleEntry(intake),
     activeVersion: `${intake.bundle.graphId}@${intake.bundle.version}`,
     generation: 1,
     cwd: intake.bundle.bundlePath,
+    ...configOption(intake),
   });
   try {
     const result = await host.describe({ runId: "check", operationId: `op-${randomUUID().slice(0, 8)}`, expectedStateRevision: 0 });
@@ -135,6 +143,7 @@ async function loadRehearsal(intake: Awaited<ReturnType<typeof intakeTask>>): Pr
     activeVersion: `${intake.bundle.graphId}@${intake.bundle.version}`,
     generation: 1,
     cwd: intake.bundle.bundlePath,
+    ...configOption(intake),
   });
   try {
     const result = await host.rehearsal!({ runId: "check", operationId: `op-${randomUUID().slice(0, 8)}`, expectedStateRevision: 0 }, entry);
@@ -234,6 +243,7 @@ export async function check(taskPath: string): Promise<CheckReport> {
       activeVersion: `${intake.bundle.graphId}@${intake.bundle.version}`,
       generation: 1,
       cwd: intake.bundle.bundlePath,
+      ...configOption(intake),
     });
     try {
       for (const [scenarioName, scenario] of Object.entries(rehearsal.scenarios)) {
@@ -394,7 +404,9 @@ async function performRehearsal(
   const requestBody = intake.task.request.split("\n").map((line) => `  ${line}`).join("\n");
   await writeFile(
     tempTaskPath,
-    `graph: ${intake.task.graph}\nrepo: ${intake.task.repo}\nrequest: |\n${requestBody}\nbudgets:\n${budgetLines}\n`,
+    // The task's own config path: the temporary task sits beside it, so the
+    // rehearsal intakes the same config (and digest) a live run would.
+    `graph: ${intake.task.graph}\nrepo: ${intake.task.repo}\n${intake.task.config !== undefined ? `config: ${JSON.stringify(intake.task.config)}\n` : ""}request: |\n${requestBody}\nbudgets:\n${budgetLines}\n`,
     "utf8",
   );
 
@@ -550,6 +562,7 @@ export async function replay(runRef: string, options: { stateRoot?: string; bund
     activeVersion: recorded.activeVersion,
     generation: recorded.generation,
     cwd: bundlePath,
+    ...configOption(recorded.intake),
   });
   try {
     return await replayRun(recorded, host);

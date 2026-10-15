@@ -211,6 +211,13 @@ export interface RunView {
    */
   openAttempt?: Record<StageId, boolean>;
   /**
+   * The task's config: the JSON file the task file's `config:` names, as
+   * pinned at intake (a resume uses the pinned copy, never the file on disk).
+   * Opaque to the controller, which never reads a field of it; the plugin
+   * host attaches it to every call. Absent when the task names no config.
+   */
+  config?: unknown;
+  /**
    * Correction-escalation and repeat-proposal state the supervisor needs.
    * Present only when at least one of the three is non-empty.
    */
@@ -407,6 +414,8 @@ export interface ValidationInput {
   candidateFingerprint?: Fingerprint;
   /** Digest of the live workspace change being accepted. */
   candidateDigest?: Fingerprint;
+  /** The task's pinned config, as in `RunView.config`; absent when the task names none. */
+  config?: unknown;
 }
 
 export interface ValidationResult {
@@ -416,7 +425,13 @@ export interface ValidationResult {
 }
 
 export interface GraphPlugin {
-  describe(): GraphDefinition;
+  /**
+   * The run's graph definition. `config` is the task's pinned config (see
+   * `RunView.config`), absent when the task names none; a graph whose
+   * stages or requirements depend on it must return the same definition for
+   * the same config, since the controller pins it for the whole run.
+   */
+  describe(config?: unknown): GraphDefinition;
   advance(view: RunView): GraphDecision;
 }
 
@@ -436,14 +451,14 @@ export interface WireEnvelope {
 }
 
 export type WireRequest =
-  | (WireEnvelope & { kind: "describe" })
+  | (WireEnvelope & { kind: "describe"; config?: unknown })
   | (WireEnvelope & { kind: "advance"; view: RunView })
   | (WireEnvelope & {
       kind: "evaluate";
       validatorId: string;
       input: ValidationInput;
     })
-  | (WireEnvelope & { kind: "rehearsal"; entry: string });
+  | (WireEnvelope & { kind: "rehearsal"; entry: string; config?: unknown });
 
 export type WireResponse =
   | (WireEnvelope & { kind: "describe_ok"; definition: GraphDefinition })

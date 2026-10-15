@@ -88,6 +88,14 @@ export interface GraphRehearsal {
 }
 
 /**
+ * What a bundle's rehearsal entry exports as `rehearsal`: the data itself, or
+ * a function of the task's pinned config (`RunView.config`) for a graph whose
+ * scenarios depend on it. The plugin host calls the function with the run's
+ * config, inside the same isolated child as the graph.
+ */
+export type GraphRehearsalExport = GraphRehearsal | ((config: unknown) => GraphRehearsal | undefined);
+
+/**
  * The smallest instance of `schema` that validates against the same subset
  * `validateResultShape` checks: required properties only, the first `enum`
  * value where one is declared, `[]` for an array, and the property's own

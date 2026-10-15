@@ -9,6 +9,7 @@ export type {
   AdversarialMutation,
   AdversarialResult,
   GraphRehearsal,
+  GraphRehearsalExport,
   RehearsalBudgets,
   RehearsalCommandResult,
   RehearsalExpectation,

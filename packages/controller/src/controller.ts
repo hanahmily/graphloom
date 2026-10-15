@@ -27,7 +27,7 @@ import { admitValidation, assertLiveWorkspaceMatchesEvidence, deliveryDrift, inv
 import type { AdmissionValidator } from "./admit.js";
 import { resolveBundleEntry } from "./bundle.js";
 import { createHostValidators } from "./host-validators.js";
-import { intakeTask, type IntakePin } from "./intake.js";
+import { intakeTask, taskConfigValue, type IntakePin } from "./intake.js";
 import { assertSafeRunId } from "./ids.js";
 import { withDirectoryLock } from "./lock.js";
 import { deleteRun, type DeleteReport } from "./delete-run.js";
@@ -210,6 +210,8 @@ export interface InspectReport {
   };
   /** Per stage, dispatches settled since its last receipt (§4.6). */
   dispatchesSinceReceipt: Record<string, { agent: number; total: number; since: string }>;
+  /** The task config intake pinned (path and digest; its content stays with the run). */
+  config?: { path: string; sha256: string };
   /** The gate in `run` (docs/design-graph-rehearsal.md §3.5): whether (and how) this run was rehearsed before it was intaken. Absent for runs intaken un-gated. */
   rehearsalGate?: IntakePin["rehearsalGate"];
 }
@@ -486,6 +488,8 @@ export function createController(): Controller {
             }
           }
           await assertPinnedBundleUnchanged(pluginUpdate !== undefined ? { ...state.intake, bundle: pluginUpdate } : state.intake);
+          // The pinned config must still match its digest; the file on disk is never reread.
+          taskConfigValue(state.intake);
         } catch (err) {
           state = {
             ...state,
@@ -901,10 +905,14 @@ async function openHost(args: {
   if (args.host) {
     return args.host;
   }
+  // The pinned copy, never the file on disk: every host this run opens,
+  // including on resume and for a repair candidate, sees the same config.
+  const config = taskConfigValue(args.intake);
   if (args.plugin) {
     return createInProcessPluginHost(args.plugin, {
       activeVersion: args.activeVersion,
       generation: args.generation,
+      ...(config !== undefined ? { config } : {}),
     });
   }
   const entryModule = resolveBundleEntry(args.intake);
@@ -914,6 +922,7 @@ async function openHost(args: {
     generation: args.generation,
     cwd: args.intake.bundle.bundlePath,
     env: sanitizedPluginEnv(args.intake.bundle.bundlePath),
+    ...(config !== undefined ? { config } : {}),
   });
 }
 
@@ -1050,6 +1059,9 @@ function toInspect(state: DurableRunState): InspectReport {
   if (state.stopEvidenceRefs !== undefined) {
     report.stopEvidenceRefs = [...state.stopEvidenceRefs];
   }
+  if (state.intake.config !== undefined) {
+    report.config = { path: state.intake.config.path, sha256: state.intake.config.sha256 };
+  }
   if (state.intake.rehearsalGate !== undefined) {
     report.rehearsalGate = structuredClone(state.intake.rehearsalGate);
   }
@@ -1132,14 +1144,14 @@ function toReport(state: DurableRunState, sourceDirtyAfter: string[]): RunReport
   return report;
 }
 
-export { intakeTask, parseTaskYaml, resolveUnderBase, IntakeError } from "./intake.js";
+export { intakeTask, parseTaskYaml, resolveUnderBase, taskConfigValue, IntakeError, MAX_TASK_CONFIG_BYTES } from "./intake.js";
 export { admitValidation, freshEvidence } from "./admit.js";
 export { toRunView, bumpGeneration, classifyAgentResult } from "./loop.js";
 export type { ContractOutcome } from "./loop.js";
 export { loadRunState, saveRunState } from "./state.js";
 export type { DurableRunState, RunStatus, VersionRecord } from "./state.js";
 export type { DeleteReport } from "./delete-run.js";
-export type { IntakePin } from "./intake.js";
+export type { IntakePin, TaskConfigPin } from "./intake.js";
 export type {
   RepairDeps,
   RepairPatchAuthor,

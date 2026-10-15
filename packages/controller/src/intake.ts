@@ -23,6 +23,29 @@ export interface TaskFile {
   grants?: RepairGrants;
   /** Operator limits that replace the defaults; each stays finite. */
   budgets?: Partial<RunBudgets>;
+  /**
+   * A JSON file, relative to the task file, handed to the plugin as its
+   * opaque config (`GraphPlugin.describe(config)`, `RunView.config`,
+   * `ValidationInput.config`). Intake pins its bytes and digest; the
+   * controller never reads a field of it.
+   */
+  config?: string;
+}
+
+/** Largest task config intake accepts: it travels on every plugin call. */
+export const MAX_TASK_CONFIG_BYTES = 256 * 1024;
+
+/**
+ * The task config as intake pinned it. A run, its resume, its rehearsal and
+ * every plugin host it opens use `text`, never the file on disk.
+ */
+export interface TaskConfigPin {
+  /** The task's `config` value, relative to the task file. */
+  path: string;
+  /** SHA-256 of the file's bytes at intake. */
+  sha256: string;
+  /** The file's exact UTF-8 text at intake; valid JSON. */
+  text: string;
 }
 
 export interface RunBudgets {
@@ -86,6 +109,8 @@ export interface IntakePin {
   repoPath: string;
   pinnedHead: string;
   bundle: BundlePin;
+  /** The task's config, pinned; absent when the task names none. */
+  config?: TaskConfigPin;
   grants: RepairGrants;
   budgets: {
     agentInvocations: number;
@@ -125,6 +150,7 @@ export function parseTaskYaml(text: string): TaskFile {
   let graph: string | undefined;
   let repo: string | undefined;
   let request: string | undefined;
+  let config: string | undefined;
   let sourceRepair: boolean | undefined;
   let validatorSubstitution: boolean | undefined;
   let executorRepair: boolean | undefined;
@@ -188,6 +214,11 @@ export function parseTaskYaml(text: string): TaskFile {
       repo = unquote(repoMatch[1]!);
       continue;
     }
+    const configMatch = /^config:\s*(.+?)\s*$/.exec(line);
+    if (configMatch) {
+      config = unquote(configMatch[1]!);
+      continue;
+    }
 
     if (/^request:\s*\|\s*$/.test(line)) {
       const body: string[] = [];
@@ -233,6 +264,10 @@ export function parseTaskYaml(text: string): TaskFile {
     };
   }
   if (Object.keys(budgets).length > 0) task.budgets = budgets;
+  if (config !== undefined) {
+    if (config === "") throw new IntakeError("config must name a JSON file relative to the task file");
+    task.config = config;
+  }
   return task;
 }
 
@@ -286,6 +321,10 @@ export async function intakeTask(taskPath: string): Promise<IntakePin> {
     );
   }
   manifestRepairContract(manifestRaw);
+  const config = task.config !== undefined ? await pinTaskConfig(taskDir, task.config) : undefined;
+  if (manifestRequiresConfig(manifestRaw) && config === undefined) {
+    throw new IntakeError(`graph ${task.graph} needs a task config: name a JSON file with config: in the task file`);
+  }
 
   const pinnedHead = await gitRevParse(repoPath, "HEAD");
   const entryPath = resolveBundleEntryFromManifest(bundlePath, manifestRaw);
@@ -335,9 +374,54 @@ export async function intakeTask(taskPath: string): Promise<IntakePin> {
       manifestDigest: sha256(manifestRaw),
       entryDigest: sha256Bytes(entryBytes),
     },
+    ...(config !== undefined ? { config } : {}),
     grants: task.grants ?? { sourceRepair: false, validatorSubstitution: false },
     budgets,
   };
+}
+
+/** Reads, bounds and pins the task config; it must be JSON, but intake reads no field of it. */
+async function pinTaskConfig(taskDir: string, relative: string): Promise<TaskConfigPin> {
+  const configPath = resolveUnderBase(taskDir, relative, "config");
+  let bytes: Buffer;
+  try {
+    bytes = await readFile(configPath);
+  } catch {
+    throw new IntakeError(`missing file: ${configPath}`);
+  }
+  if (bytes.length > MAX_TASK_CONFIG_BYTES) {
+    throw new IntakeError(`config ${relative} is ${bytes.length} bytes, more than ${MAX_TASK_CONFIG_BYTES}`);
+  }
+  const text = bytes.toString("utf8");
+  if (!Buffer.from(text, "utf8").equals(bytes)) throw new IntakeError(`config ${relative} is not UTF-8`);
+  try {
+    JSON.parse(text);
+  } catch (err) {
+    throw new IntakeError(`config ${relative} is not valid JSON: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  return { path: relative, sha256: sha256Bytes(bytes), text };
+}
+
+/**
+ * The run's pinned task config as the plugin receives it, or undefined when
+ * the task names none. Refuses a pin whose text no longer matches its
+ * digest, so an edited state file cannot hand the plugin another config.
+ */
+export function taskConfigValue(intake: Pick<IntakePin, "config">): unknown {
+  const pin = intake.config;
+  if (pin === undefined) return undefined;
+  if (sha256(pin.text) !== pin.sha256) {
+    throw new Error(`pinned task config ${pin.path} does not match its digest`);
+  }
+  return JSON.parse(pin.text) as unknown;
+}
+
+/** A manifest's `taskConfig: "required"`: the graph cannot describe itself without a task config. */
+export function manifestRequiresConfig(manifestRaw: string): boolean {
+  const declared = (JSON.parse(manifestRaw) as { taskConfig?: unknown }).taskConfig;
+  if (declared === undefined || declared === "optional") return false;
+  if (declared === "required") return true;
+  throw new IntakeError(`manifest taskConfig must be "required" or "optional", got ${JSON.stringify(declared)}`);
 }
 
 /** Resolve relative path under base; reject traversal and absolute escapes. */

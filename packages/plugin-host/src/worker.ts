@@ -81,7 +81,9 @@ async function main(): Promise<void> {
       };
 
       if (req.kind === "describe") {
-        const definition = assertGraphDefinition(await Promise.resolve(plugin.describe()));
+        const definition = assertGraphDefinition(
+          await Promise.resolve(req.config !== undefined ? plugin.describe(req.config) : plugin.describe()),
+        );
         writeResponse({ ...envelope, kind: "describe_ok", definition });
         continue;
       }
@@ -103,7 +105,7 @@ async function main(): Promise<void> {
         continue;
       }
       if (req.kind === "rehearsal") {
-        const rehearsal = await loadRehearsalExport(req.entry);
+        const rehearsal = await loadRehearsalExport(req.entry, req.config);
         writeResponse({ ...envelope, kind: "rehearsal_ok", ...(rehearsal !== undefined ? { rehearsal } : {}) });
         continue;
       }
@@ -132,10 +134,13 @@ async function main(): Promise<void> {
  * bundle code, so the CLI process that asks for it must never `import()` it
  * directly.
  */
-async function loadRehearsalExport(entry: string): Promise<GraphRehearsal | undefined> {
+async function loadRehearsalExport(entry: string, config: unknown): Promise<GraphRehearsal | undefined> {
   const mod = (await import(pathToFileURL(entry).href)) as { rehearsal?: unknown };
-  if (mod.rehearsal === undefined) return undefined;
-  return assertGraphRehearsal(mod.rehearsal);
+  // A function of the run's config (GraphRehearsalExport) for a graph whose
+  // scenarios depend on it; plain data otherwise.
+  const rehearsal = typeof mod.rehearsal === "function" ? await Promise.resolve((mod.rehearsal as (c: unknown) => unknown)(config)) : mod.rehearsal;
+  if (rehearsal === undefined) return undefined;
+  return assertGraphRehearsal(rehearsal);
 }
 
 /** Divert console and process.stdout writes to stderr before loading plugin code. */
