@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import { access, constants, mkdtemp, readFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -11,6 +12,21 @@ import type { SupervisorConfig } from "./supervisor-config.js";
 const execFileAsync = promisify(execFile);
 
 const REVIEWER_SESSION_ID = "graphloom-repair-reviewer";
+
+/**
+ * GraphLoom's own `tsc`, not the installed plugin's: `bundlePath` is `state.intake.bundle.bundlePath`,
+ * which `applyActivateRepair` repoints at the activated repair's own candidate tree once any plugin-level
+ * repair has ever been activated — and a candidate root never ships `node_modules` (reviewers must see
+ * the whole tree; `linkDependencies` links only `@graphloom/*` packages beside it, never `typescript`).
+ * Resolving `tsc/.bin` from `bundlePath` therefore breaks preflight for every repair after the first
+ * plugin-level activation, regardless of target. GraphLoom's own installation always has `typescript` as
+ * a real dependency, independent of whatever `bundlePath` currently is.
+ */
+function resolveGraphloomTsc(): string {
+  const require = createRequire(import.meta.url);
+  const typescriptPkg = require.resolve("typescript/package.json");
+  return path.join(path.dirname(typescriptPkg), "bin", "tsc");
+}
 
 /** Where the task's plugin bundle is installed, the same way the controller's intake resolves it. */
 export async function resolveBundlePath(taskPath: string): Promise<string> {
@@ -45,6 +61,7 @@ export function piRepairDeps(config: SupervisorConfig, bundlePath: string): Repa
         sessionDir,
         provider: config.provider,
         modelId: config.modelId,
+        ...(config.thinkingLevel !== undefined ? { thinkingLevel: config.thinkingLevel } : {}),
         ...(config.agentDir !== undefined ? { agentDir: config.agentDir } : {}),
         ...(config.promptTimeoutMs !== undefined ? { promptTimeoutMs: config.promptTimeoutMs } : {}),
       });
@@ -56,7 +73,7 @@ export function piRepairDeps(config: SupervisorConfig, bundlePath: string): Repa
 
   const reviewer: RepairReviewer = {
     sessionId: REVIEWER_SESSION_ID,
-    async review({ candidateRoot, target, reason, task, requirement, patchSummary, evidence, maxProviderCalls }) {
+    async review({ candidateRoot, baseRoot, target, reason, task, requirement, patchSummary, evidence, maxProviderCalls }) {
       // This reviewer always implements drainProviderCalls, so the controller always
       // reserves and passes an allowance; a missing one would be a caller bug, and
       // failing closed (refuse) is safer than prompting with no cap at all.
@@ -64,7 +81,11 @@ export function piRepairDeps(config: SupervisorConfig, bundlePath: string): Repa
       if (cap <= 0) return { approved: false, reason: "no agentInvocations budget remains for independent review" };
       const repairsDir = path.dirname(path.dirname(candidateRoot));
       const root = await assertAdmittedCandidateRoot(repairsDir, candidateRoot);
-      const diff = await candidateDiff(bundlePath, root);
+      // baseRoot, not the fixed bundlePath: for an executor repair, the candidate is a
+      // copy of that executor's own package, not of the plugin bundle — diffing against
+      // the plugin would show the reviewer what looks like the candidate replacing the
+      // entire plugin with unrelated code.
+      const diff = await candidateDiff(baseRoot, root);
       const s = await reviewerSession();
       const text = await s.prompt(
         repairReviewPrompt({
@@ -92,9 +113,9 @@ export function piRepairDeps(config: SupervisorConfig, bundlePath: string): Repa
   return {
     reviewer,
     async preflight({ candidateRoot, target }) {
-      const tsc = path.join(bundlePath, "node_modules", ".bin", "tsc");
+      const tsc = resolveGraphloomTsc();
       if (!(await isExecutable(tsc))) {
-        return { ok: false, summary: `the installed plugin has no node_modules/.bin/tsc; run npm ci in ${bundlePath}` };
+        return { ok: false, summary: `graphloom's own typescript installation has no bin/tsc at ${tsc}` };
       }
       try {
         await execFileAsync(tsc, ["-p", path.join(candidateRoot, "tsconfig.json")]);

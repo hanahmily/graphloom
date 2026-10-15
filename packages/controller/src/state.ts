@@ -141,6 +141,14 @@ export interface DurableRunState {
   environmentBlock?: { activeVersion: string; reason: string };
   /** Last successful work-purpose dispatch; used for separate-reviewer checks. */
   lastWorkOperationId?: string;
+  /**
+   * Set by `resume()`; consumed and cleared by the supervisor's next decide()
+   * call. A resumed process may run different controller or plugin code, or
+   * carry newly granted repair authority, than whatever rejected a past
+   * proposal still sitting in the supervisor's own conversation history —
+   * this tells it to re-verify rather than trust that history as settled.
+   */
+  resumedSinceLastDecision?: boolean;
   /** Per stage, whether a work-purpose dispatch has ever been admitted for it. Never cleared. */
   workDispatched?: Record<string, true>;
   /**

@@ -7,7 +7,6 @@ import path from "node:path";
 import { createController } from "@graphloom/controller";
 import type { GraphRehearsal } from "@graphloom/sdk";
 import { createCliRunner } from "./cli-runner.js";
-import { runGate } from "./gate.js";
 import { piRepairDeps, resolveBundlePath, resolveBundlePathForResume } from "./repair-config.js";
 import { check, probe, recordScenario, rehearse, replay } from "./rehearsal.js";
 import { requireRunnerConfig } from "./runner-config.js";
@@ -39,31 +38,12 @@ async function main(): Promise<void> {
     const taskPath = path.resolve(args[1] ?? "task.yaml");
     const stateRootFlag = flagValue(args, "--state-root");
     const stateRoot = stateRootFlag ? path.resolve(stateRootFlag) : undefined;
-    // Validate the runner config before gating: a run that could never start
-    // anyway (no runner, or a malformed one) must fail the same way it always
-    // has, before anything — including the gate's own cache — touches disk.
-    const runnerConfig = await requireRunnerConfig();
-    const gate = await runGate(taskPath, {
-      ...(stateRoot !== undefined ? { stateRoot } : {}),
-      skip: args.includes("--skip-rehearsal"),
-    });
-    if (gate.verdict === "not-ready") {
-      // The gate's own L0/L1 report stands in for the run's: nothing was intaken, so there is no RunReport to show instead.
-      console.log(JSON.stringify(gate.report, null, 2));
-      process.exitCode = 1;
-      return;
-    }
-    if (gate.verdict === "inconclusive") {
-      console.error(`graphloom run: rehearsal gate inconclusive${gate.notes.length > 0 ? `: ${gate.notes.join("; ")}` : ""}`);
-    }
-
-    const runner = createCliRunner(runnerConfig);
+    const runner = createCliRunner(await requireRunnerConfig());
     const config = await loadSupervisorConfig();
     const report = await controller.run({
       taskPath,
       runner,
       ...(stateRoot !== undefined ? { stateRoot } : {}),
-      rehearsalGate: { fingerprint: gate.fingerprint, verdict: gate.verdict, notes: gate.notes },
       ...(config !== undefined
         ? { supervisorFactory: piSupervisorFactory(config), repair: piRepairDeps(config, await resolveBundlePath(taskPath)) }
         : {}),
@@ -258,7 +238,7 @@ function printHelp(): void {
   console.log(`graphloom — TypeScript harness
 
 Usage:
-  graphloom run <task.yaml> [--state-root <dir>] [--skip-rehearsal]
+  graphloom run <task.yaml> [--state-root <dir>]
   graphloom check <task.yaml>
   graphloom rehearse <task.yaml> [--scenario <name>] [--commands <stub|run>] [--offline] [--synthesized] [--adversarial] [--keep]
   graphloom rehearse --record-from <stateDir|runId> [--state-root <dir>] [--name <name>] [--out <path>]

@@ -17,6 +17,7 @@ import {
 import { createScriptedRunner } from "@graphloom/runner";
 import {
   createPiSupervisor,
+  createScriptedSupervisor,
   type PiSupervisorSessionPort,
 } from "@graphloom/supervisor";
 import { createController, loadRunState } from "./index.js";
@@ -376,6 +377,46 @@ describe("Pi supervisor recovery (controller)", () => {
 
     expect(resumed).toMatchObject({ stopReason: "supervisor stopped", blocker: "the implementer keeps failing" });
     expect(factoryCalls).toEqual(["fresh-supervisor", "fresh-supervisor"]);
+  });
+
+  it("tells the supervisor it was resumed only on its first decide() call, not on later turns in the same process", async () => {
+    const env = await makeEnv();
+    const controller = createController();
+    const resumedFlags: Array<boolean | undefined> = [];
+
+    const paused = await controller.run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({ definition, advances: [stop({ reason: "paused", blocker: "operator" }, "pause")] }),
+      validators,
+      runner: createScriptedRunner({ jobs: [] }),
+      stateRoot: env.stateRoot,
+      runId: "resumed-flag",
+    });
+
+    const resumed = await controller.resume({
+      runRef: paused.stateDir,
+      plugin: createScriptedGraph({
+        definition,
+        advances: [dispatch({ stageId: "write", kind: "agent", purpose: "work", instruction: "write", writeScope: [GREETING_PATH] }, "write")],
+      }),
+      validators,
+      supervisor: createScriptedSupervisor({
+        decisions: [
+          (input) => {
+            resumedFlags.push(input.resumed);
+            return observe({ paths: [GREETING_PATH] }, "look again");
+          },
+          (input) => {
+            resumedFlags.push(input.resumed);
+            return stop({ reason: "done looking", blocker: "test ends here" }, "stop");
+          },
+        ],
+      }),
+      runner: createScriptedRunner({ jobs: [async () => ({ status: "failed" as const, summary: "agent finished without a result" })] }),
+    });
+
+    expect(resumed.stopReason).toBe("done looking");
+    expect(resumedFlags).toEqual([true, undefined]);
   });
 
   it("restores supervisor from durable binding on resume via restoreSupervisor", async () => {

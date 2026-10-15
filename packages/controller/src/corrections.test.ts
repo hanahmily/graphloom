@@ -239,8 +239,38 @@ describe("corrections, crash containment, unfamiliar failure (#28)", () => {
     });
 
     expect(report.status).toBe("stopped");
-    expect(report.stopReason).toBe(`job failed: read-only job changed ${GREETING_PATH}`);
+    expect(report.stopReason).toBe(`job failed: read-only job modified or removed ${GREETING_PATH}`);
     expect(report.receipts.filter((r) => r.stageId === "review" && r.valid)).toEqual([]);
+  });
+
+  it("does not fail a read-only job for leaving behind a scratch file that did not exist before it ran", async () => {
+    const env = await makeEnv();
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      runner: createScriptedRunner({
+        jobs: [
+          async (_job, ctx) => {
+            await writeFile(path.join(ctx.worktreePath, GREETING_PATH), GREETING, "utf8");
+            return { status: "ok" as const, summary: "wrote" };
+          },
+          async (_job, ctx) => {
+            // A read-only reviewer's own throwaway verification artifact, same
+            // shape as a real review writing a scratch test it never cleaned up.
+            await writeFile(path.join(ctx.worktreePath, "scratch_verify.txt"), "reviewer's own check\n", "utf8");
+            return {
+              status: "ok" as const,
+              summary: "approved",
+              evidence: [{ kind: "review" as const, payload: { verdict: "approved", summary: "ok" } }],
+            };
+          },
+        ],
+      }),
+      stateRoot: env.stateRoot,
+      runId: "scope3",
+    });
+
+    expect(report.status, report.blocker).toBe("succeeded");
+    expect(report.receipts.some((r) => r.stageId === "review" && r.valid)).toBe(true);
   });
 
   it("repairs an unknown launch failure through the supervisor without a duplicate Write", async () => {
@@ -1290,6 +1320,62 @@ describe("controller-started recovery for stalls and repeated corrections", () =
     expect(trigger).toEqual({ code: "stalled", message: "the graph repeated reenter of write with no progress since it last proposed it" });
     expect(proposals).toBe(5);
     expect((await loadRunState(report.stateDir)).budgets.corrections).toBe(7);
+  });
+
+  it("defaults a supervisor's reenter with no named stage to the one it is recovering, instead of stopping on an undeclared stage", async () => {
+    const env = await makeEnv();
+    const graph: GraphPlugin = {
+      describe: () => structuredClone(definition),
+      advance: () => supervise({ reason: "ask the supervisor" }, "ask"),
+    };
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: graph,
+      validators,
+      supervisor: createScriptedSupervisor({
+        decisions: [
+          // Same shape a free-text (non-tool-call) supervisor reply produced for
+          // real: a well-formed "reenter" action missing its own stageId.
+          () =>
+            ({ reason: "reenter without naming a stage", action: { type: "reenter", reenter: { reason: "try again" } } }) as unknown as ReturnType<typeof reenter>,
+          () => stop({ reason: "done", blocker: "test ends here" }, "stop"),
+        ],
+      }),
+      runner: writes([BAD_GREETING]),
+      stateRoot: env.stateRoot,
+      runId: "reenter-no-stage",
+    });
+    expect(report.stopReason).toBe("done");
+    expect(report.blocker).not.toMatch(/undeclared/i);
+    expect((await loadRunState(report.stateDir)).current.stageId).toBe("write");
+  });
+
+  it("defaults a supervisor's validate with no named stage to the one it is recovering, instead of stopping on an undeclared stage", async () => {
+    const env = await makeEnv();
+    const graph: GraphPlugin = {
+      describe: () => structuredClone(definition),
+      advance: () => supervise({ reason: "ask the supervisor" }, "ask"),
+    };
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: graph,
+      validators,
+      supervisor: createScriptedSupervisor({
+        decisions: [
+          () =>
+            ({
+              reason: "validate without naming a stage",
+              action: { type: "validate", validate: { requirementIds: ["greeting-bytes"] } },
+            }) as unknown as ReturnType<typeof validate>,
+          () => stop({ reason: "done", blocker: "test ends here" }, "stop"),
+        ],
+      }),
+      runner: writes([BAD_GREETING]),
+      stateRoot: env.stateRoot,
+      runId: "validate-no-stage",
+    });
+    expect(report.stopReason).toBe("done");
+    expect(report.blocker).not.toMatch(/undeclared/i);
   });
 
   it("does not count a repeated job's identical result as progress", async () => {

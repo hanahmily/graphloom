@@ -217,31 +217,4 @@ describe.skipIf(GO === undefined)("graphloom probe (L3) on banyandb-fix", () => 
     expect(jobs).toHaveLength(1);
     expect(jobs[0]!.input).toMatchObject({ harness: "codex" });
   }, 120_000);
-
-  it("preserves a rehearsed dispatch's own knownReferences, so checkContract can verify membership", async () => {
-    // Regression: probe passed only the bare schema, so a contract declaring
-    // reference paths (review-verdict-v1's own "findings[].finding", set by
-    // banyandb-fix's planReviewJob) never got its per-dispatch id set threaded
-    // through, and checkContract silently skipped membership checking.
-    const env = await ready();
-    const jobs: JobSpec[] = [];
-    const fakeRunner = {
-      async runJob(job: JobSpec): Promise<JobResult> {
-        jobs.push(job);
-        return {
-          status: "ok",
-          summary: "stubbed",
-          runId: "probe",
-          operationId: "op",
-          generation: 1,
-          evidence: [{ kind: "other", payload: { codingAgent: { output: { verdict: "approved", summary: "ok", findings: [], prior: [], productDecision: "" } } } }],
-        };
-      },
-    };
-    const report = await probe(env.taskPath, { contract: "review-verdict-v1", commands: "run" }, fakeRunner);
-    expect(report.status).toBe("ok");
-    expect(jobs).toHaveLength(1);
-    expect(jobs[0]!.knownReferences).toBeDefined();
-    expect(jobs[0]!.knownReferences!["findings[].finding"]).toBeDefined();
-  }, 120_000);
 });

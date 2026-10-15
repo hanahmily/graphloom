@@ -307,7 +307,22 @@ export interface JobSpec {
  * `base`: the pinned base commit plus only the listed changed paths, such as
  * new tests, to show they fail without the rest of the change.
  */
-export type CheckoutSpec = { from: "candidate" } | { from: "base"; paths: string[] };
+export type CheckoutSpec =
+  | {
+      from: "candidate";
+      /**
+       * A unified diff (as `git diff` produces) applied in reverse to the
+       * candidate checkout before commands run — undoing one specific,
+       * already-identified behavioral change while keeping everything else
+       * the candidate has (including earlier, already-accepted work the new
+       * change may depend on to even build). The `"base"` variant below
+       * cannot express this: it can only include or exclude whole paths from
+       * the pinned base commit, which fails when the behavioral change and
+       * the infrastructure it depends on live in the same file.
+       */
+      revertPatch?: string;
+    }
+  | { from: "base"; paths: string[] };
 
 export interface ObserveSpec {
   paths?: string[];

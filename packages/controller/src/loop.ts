@@ -316,6 +316,11 @@ async function runNormalLoopSteps(
           return { done: true as const, state };
         }
 
+        // One-shot: a resumed process may run different controller or plugin
+        // code, or carry newly granted authority, than whatever rejected a
+        // past proposal still sitting in the supervisor's own history.
+        const resumed = state.resumedSinceLastDecision === true;
+        if (resumed) state = { ...state, resumedSinceLastDecision: false };
         const view = toRunView(state);
         const lastSettlement = settleProposal(state);
         const abort = new AbortController();
@@ -335,6 +340,7 @@ async function runNormalLoopSteps(
             signal: abort.signal,
             ...(lastSettlement !== undefined ? { lastSettlement } : {}),
             ...(metered ? { maxProviderCalls: state.budgets.agentInvocations } : {}),
+            ...(resumed ? { resumed: true } : {}),
           });
           decided = isModelSwitchRequest(proposal) ? proposal : assertGraphDecision(proposal);
         } catch (err) {
@@ -566,7 +572,11 @@ async function runNormalLoopSteps(
       // Executors may run unconfined, so scope is checked against what actually changed.
       const outOfScope =
         before !== undefined
-          ? pathsOutsideWriteScope(changedPaths(before, await worktreeChangeFingerprints(state.worktreePath)), job)
+          ? pathsOutsideWriteScope(
+              changedPaths(before, await worktreeChangeFingerprints(state.worktreePath)),
+              job,
+              (rel) => !before.has(rel),
+            )
           : [];
       const afterDigest = await liveCandidateDigest(state);
 
@@ -1156,17 +1166,22 @@ async function applyDecision(
     case "observe":
       return observeWorkspace(state, action.observe);
     case "validate": {
-      const undeclared = stopForUndeclaredStage(state, action.validate.stageId);
+      // A recovery proposal that names no stage means the one it is recovering;
+      // a graph-authored action always names its own, so this never masks a
+      // real plugin bug — only normal mode's own stopForUndeclaredStage does.
+      const stageId = action.validate.stageId || (state.mode === "recovery" ? state.current.stageId : action.validate.stageId);
+      const undeclared = stopForUndeclaredStage(state, stageId);
       if (undeclared) return undeclared;
-      const result = await admitValidation(state, action.validate, deps.validators);
-      const settled = settleCorrectionTrial(result.state, action.validate.stageId, {
+      const result = await admitValidation(state, { ...action.validate, stageId }, deps.validators);
+      const settled = settleCorrectionTrial(result.state, stageId, {
         evaluated: result.evaluated,
         accepted: result.accepted,
       });
-      return clearOpenAttempt(settled, action.validate.stageId);
+      return clearOpenAttempt(settled, stageId);
     }
     case "reenter": {
-      const undeclared = stopForUndeclaredStage(state, action.reenter.stageId);
+      const stageId = action.reenter.stageId || (state.mode === "recovery" ? state.current.stageId : action.reenter.stageId);
+      const undeclared = stopForUndeclaredStage(state, stageId);
       if (undeclared) return undeclared;
       if (state.budgets.corrections <= 0) {
         return {
@@ -1186,17 +1201,14 @@ async function applyDecision(
           corrections: withoutRev.budgets.corrections - 1,
         },
         current: {
-          stageId: action.reenter.stageId,
-          attempt:
-            state.current.stageId === action.reenter.stageId
-              ? state.current.attempt + 1
-              : 1,
+          stageId,
+          attempt: state.current.stageId === stageId ? state.current.attempt + 1 : 1,
         },
         // Reentry means this stage's execution needs another attempt,
         // regardless of whether anything above actually invalidated — stage
         // selection must dispatch its work again rather than trust an
         // unchanged candidate's still-valid receipts.
-        openAttempt: { ...withoutRev.openAttempt, [action.reenter.stageId]: true },
+        openAttempt: { ...withoutRev.openAttempt, [stageId]: true },
       };
       return bumpGeneration(next, "reenter");
     }
@@ -1627,7 +1639,7 @@ function scopeViolation(
   paths: string[],
 ): Awaited<ReturnType<Runner["runJob"]>> {
   const shown = paths.slice(0, 10).join(", ") + (paths.length > 10 ? ` (+${paths.length - 10} more)` : "");
-  const violation = job.readOnly === true ? `read-only job changed ${shown}` : `changed paths outside the job's write scope: ${shown}`;
+  const violation = job.readOnly === true ? `read-only job modified or removed ${shown}` : `changed paths outside the job's write scope: ${shown}`;
   const reported = result.status === "ok" ? "" : `; the executor also reported ${result.status}: ${result.summary}`;
   return { ...result, status: "failed", summary: boundText(`${violation}${reported}`) };
 }
@@ -1769,8 +1781,6 @@ function applyDispatchResult(
     void pendingDispatch;
     const contractMessage = contractViolationStreakMessage(next, job);
     if (contractMessage !== undefined) return enterRecovery(rest, "contract_violation", contractMessage);
-    const stalledMessage = stalledDispatchMessage(next, job);
-    if (stalledMessage !== undefined) return enterRecovery(rest, "stalled", stalledMessage);
     const pacingMessage = stagePacingMessage(next, job);
     if (pacingMessage !== undefined) return enterRecovery(rest, "stalled", pacingMessage);
   }
@@ -1826,14 +1836,6 @@ function contractViolationStreakMessage(state: DurableRunState, job: JobSpec): s
   return boundText(
     `stage ${job.stageId}: ${streak} consecutive contract-invalid results for purpose ${job.purpose} (contract ${job.resultSchema ?? "unknown"})`,
   );
-}
-
-const MAX_STAGE_DISPATCHES_WITHOUT_RECEIPT = 4;
-
-function stalledDispatchMessage(state: DurableRunState, job: JobSpec): string | undefined {
-  const counts = state.dispatchesSinceReceipt?.[job.stageId];
-  if (counts === undefined || counts.agent < MAX_STAGE_DISPATCHES_WITHOUT_RECEIPT) return undefined;
-  return boundText(`stage ${job.stageId}: ${counts.agent} agent dispatches (most recently ${job.purpose}) since its last receipt`);
 }
 
 const STAGE_BUDGET_SHARE = 0.5;

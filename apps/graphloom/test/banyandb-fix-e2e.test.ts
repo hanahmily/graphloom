@@ -6,7 +6,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
-import type { GraphPlugin, JobSpec, Validator } from "@graphloom/sdk";
+import { stop, type GraphPlugin, type JobSpec, type Validator } from "@graphloom/sdk";
 import { createBuiltinExecutorRunner, type JobContext, type JobResult, type Runner } from "@graphloom/runner";
 import { createController, loadRunState } from "@graphloom/controller";
 import { commandBinding, commandExecutorPackage } from "@graphloom/executor-command";
@@ -120,6 +120,28 @@ function fixtureGraph(contributing: string): GraphPlugin {
   };
 }
 
+/**
+ * The real graph, stopped cleanly in normal mode the instant it is about to
+ * dispatch the implementer — everything up to there (environment, issue
+ * fetch, the plan, its review) is the graph's own real decision, not a
+ * script. A budget cut small enough to force the same pause instead would
+ * stop inside a recovery episode (no supervisor to settle it), not normal
+ * mode, so the resume that follows would just re-report that episode rather
+ * than exercising the graph's own next decision.
+ */
+function pauseBeforeWork(contributing: string): GraphPlugin {
+  const graph = fixtureGraph(contributing);
+  return {
+    describe: graph.describe,
+    advance: (view) => {
+      const decision = graph.advance(view);
+      return decision.action.type === "dispatch" && decision.action.job.purpose === "work"
+        ? stop({ reason: "paused", blocker: "before implementing" }, "pause before work")
+        : decision;
+    },
+  };
+}
+
 const PLAN = {
   status: "ready",
   summary: "Report a running action as running at the timeout instead of timed out.",
@@ -206,9 +228,9 @@ const FALSE_POSITIVE = {
 
 /**
  * Real command and GitHub executors, as the CLI composes them, with scripted
- * Claude Code, Pi and Codex agents: the plan, an approving plan review, an
- * implementation that writes the fix, test and changelog entry, and a code
- * review that runs the ocr its assignment names in the worktree.
+ * Claude Code and Codex agents: the plan, an implementation that writes the
+ * fix, test and changelog entry, and a code review that runs the ocr its
+ * assignment names in the worktree.
  */
 function fixRunner(baseUrl: string, config: RunnerConfig) {
   const agentJobs: JobSpec[] = [];
@@ -239,10 +261,6 @@ function fixRunner(baseUrl: string, config: RunnerConfig) {
         ];
         return done({ verdicts: [{ finding: "F1", verdict: "refuted", reason: "Status returns running before it checks the limit.", quotes }] });
       }
-      if (job.purpose === "review") {
-        const verdict = { verdict: "approved", summary: "The plan fixes the issue, names Status's callers, and lists the metric question." };
-        return done(verdict, [{ kind: "review", payload: verdict }]);
-      }
       if (job.purpose === "work") {
         const at = (p: string) => path.join(ctx.worktreePath, p);
         await writeFile(at("pkg/timestamp/scheduler.go"), FIXED);
@@ -263,7 +281,7 @@ function fixRunner(baseUrl: string, config: RunnerConfig) {
 }
 
 describe.skipIf(GO === undefined)("banyandb-fix on a Go repository", () => {
-  it("checks the environment, reviews the plan, fixes the issue with RED and GREEN proof, reviews the code, and delivers a local branch", async () => {
+  it("checks the environment, plans and fixes the issue with RED and GREEN proof, reviews the code, and delivers a local branch", async () => {
     const env = await makeEnv();
     github = await startFakeGitHub({
       issues: [{ number: ISSUE, title: "Scheduler reports long actions as timed out", state: "open", labels: ["bug"], body: "Backups over five minutes log action timed out." }],
@@ -296,7 +314,6 @@ describe.skipIf(GO === undefined)("banyandb-fix on a Go repository", () => {
     expect(report.status, `${report.stopReason}: ${report.blocker}`).toBe("succeeded");
     const state = await loadRunState(report.stateDir);
     expect(state.receipts.filter((r) => r.valid).map((r) => `${r.stageId}/${r.requirementId}`)).toEqual([
-      "fix/plan-reviewed",
       "fix/decisions-recorded",
       "fix/reproduces",
       "fix/passes",
@@ -314,22 +331,20 @@ describe.skipIf(GO === undefined)("banyandb-fix on a Go repository", () => {
       `claude auth status CLAUDE_CONFIG_DIR=${agents.config.claude!.configDir}`,
     ]);
 
-    // The plan saw the issue and its comments; Pi reviewed it; the implementer continued the plan's session.
-    const [plan, planReview, implement] = agentJobs;
+    // The plan saw the issue and its comments; the implementer continued the plan's session.
+    const [plan, implement] = agentJobs;
     expect((plan!.input as { assignment: string }).assignment).toContain("A running backup is not an error");
-    expect(planReview).toMatchObject({ stageId: "fix", purpose: "review", readOnly: true, input: { harness: "pi" } });
-    expect((planReview!.input as { assignment: string }).assignment).toContain(PLAN.summary);
     expect(implement!.continueFrom).toBeDefined();
-    expect(agentJobs).toHaveLength(5);
+    expect(agentJobs).toHaveLength(4);
 
     // Claude Code verified the high comment read-only in a fresh session; the controller observed the lines it quoted, and they matched.
-    expect(agentJobs[4]).toMatchObject({ stageId: "review", kind: "agent", purpose: "diagnostic", readOnly: true, resultSchema: "finding-verification-v1", input: { harness: "claude-code" } });
-    expect(agentJobs[4]!.continueFrom).toBeUndefined();
+    expect(agentJobs[3]).toMatchObject({ stageId: "review", kind: "agent", purpose: "diagnostic", readOnly: true, resultSchema: "finding-verification-v1", input: { harness: "claude-code" } });
+    expect(agentJobs[3]!.continueFrom).toBeUndefined();
     const observed = state.evidence.find((e) => e.kind === "file" && (e.payload as { path: string }).path === "pkg/timestamp/scheduler.go")!;
     expect(observed).toMatchObject({ candidateDigest: state.candidateDigest, payload: { bytes: FIXED } });
 
     // Codex reviewed read-only, running the ocr the preflight found, in the worktree holding the uncommitted change.
-    expect(agentJobs[3]).toMatchObject({ stageId: "review", kind: "agent", purpose: "review", readOnly: true, input: { harness: "codex" } });
+    expect(agentJobs[2]).toMatchObject({ stageId: "review", kind: "agent", purpose: "review", readOnly: true, input: { harness: "codex" } });
     const calls = (await readFile(ocr.calls, "utf8")).trim().split("\n");
     expect(calls).toEqual([
       `cwd=${await realpath(report.worktreePath)}`,
@@ -367,4 +382,61 @@ describe.skipIf(GO === undefined)("banyandb-fix on a Go repository", () => {
     expect(await readFile(path.join(report.worktreePath, "pkg/timestamp/mock_limit.go"), "utf8")).toContain("generatedLimit");
     expect(github.requests.every((r) => r.method === "GET")).toBe(true);
   }, 600_000);
+
+  // This is the real-world shape of the bug a run-convergence investigation
+  // this design is named for: a live run (a23b53b8-5df, fixing
+  // apache/skywalking#14075) issued zero receipts across 45 generations
+  // because every resume forced Fix to redraft its already-approved plan —
+  // the plan-lookup and the plan-reviewed validator both fenced on exact
+  // generation equality, and `resume()` bumping generation (§4.6) looked
+  // identical to a genuine reentry to both. Through the real controller, the
+  // real graph and the real validator, not a hand-rolled simulation.
+  it("goes straight to implementing an already-approved plan after a resume, instead of redrafting it", async () => {
+    const env = await makeEnv();
+    github = await startFakeGitHub({
+      issues: [{ number: ISSUE, title: "Scheduler reports long actions as timed out", state: "open", labels: ["bug"], body: "Backups over five minutes log action timed out." }],
+    });
+    github.comments.set(ISSUE, [{ id: 1, body: "A running backup is not an error; report it as running." }]);
+    const ocr = await fakeOcr(env.dir);
+    const agents = await fakeAgents(env.dir);
+    const savedPath = process.env.PATH;
+    process.env.PATH = `${ocr.bin}:${savedPath}`;
+    try {
+      const definition = fixtureGraph(env.contributing).describe();
+      const validators = Object.fromEntries(definition.defaultValidators.map((b) => [b.validatorId, plugin.validatorById(b.validatorId)!]));
+      const first = fixRunner(github.baseUrl, agents.config);
+
+      // The real graph's own plan, paused in normal mode the instant it is
+      // about to implement — the plan already on record and zero Fix
+      // receipts yet, the gap no existing resume test covered.
+      const paused = await createController().run({
+        taskPath: env.taskPath,
+        plugin: pauseBeforeWork(env.contributing),
+        validators,
+        runner: first.runner,
+        stateRoot: env.stateRoot,
+        runId: "bydb-resume-plan",
+      });
+      expect(paused, `${paused.stopReason}: ${paused.blocker}`).toMatchObject({ status: "stopped", stopReason: "paused", blocker: "before implementing" });
+      expect(first.agentJobs.map((j) => j.purpose)).toEqual(["diagnostic"]);
+      expect(paused.receipts.filter((r) => r.valid)).toEqual([]);
+
+      const second = fixRunner(github.baseUrl, agents.config);
+      const resumed = await createController().resume({
+        runRef: paused.stateDir,
+        plugin: fixtureGraph(env.contributing),
+        validators,
+        runner: second.runner,
+      });
+
+      expect(resumed.status, `${resumed.stopReason}: ${resumed.blocker}`).toBe("succeeded");
+      // Straight to implementing the plan already on record: no second
+      // diagnostic/review pair redrafting it from scratch.
+      expect(second.agentJobs[0]).toMatchObject({ stageId: "fix", purpose: "work" });
+      expect(second.agentJobs.filter((j) => j.stageId === "fix" && j.purpose === "diagnostic")).toEqual([]);
+      expect(second.agentJobs.filter((j) => j.stageId === "fix" && j.purpose === "review")).toEqual([]);
+    } finally {
+      process.env.PATH = savedPath;
+    }
+  }, 60_000);
 });

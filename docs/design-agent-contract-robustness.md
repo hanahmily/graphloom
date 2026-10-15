@@ -276,14 +276,14 @@ Independent of any plugin lookup, the controller keeps per stage:
 dispatchesSinceReceipt: Record<StageId, { agent: number; total: number; since: string }>
 ```
 
-reset when a receipt for that stage is minted. When `agent` reaches
-`MAX_STAGE_DISPATCHES_WITHOUT_RECEIPT` (4), the controller enters recovery with
-`stalled` and the message `stage fix: 4 agent dispatches (review ×4) since its
-last receipt`. This is the counter the plugin's own round cap could not be,
-because it does not read the plugin's evidence. It complements, not replaces,
-`noteGraphDecision`'s content-hash detector: that one catches identical
-decisions with identical outcomes; this one catches different outcomes that
-never amount to acceptance.
+reset when a receipt for that stage is minted. It is observability only: it feeds
+the budget-exhaustion message (§4.7) and recovery views, and does not trigger
+recovery. An earlier fixed cap (4 agent dispatches without a receipt entered
+`stalled`) was removed: a multi-pass stage such as a review sweep with
+verifiers legitimately exceeds any fixed count while making progress, so the
+cap misfired and invited needless supervisor turns. Runaway stages are caught
+by `noteGraphDecision`'s repeat detector, the contract-violation streak, §4.7
+budget pacing, plugin round caps and the finite budgets.
 
 ### 4.7 Budget pacing and a recovery floor (B10)
 

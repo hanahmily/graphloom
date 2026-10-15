@@ -142,7 +142,7 @@ describe("the repair preflight", () => {
     return root;
   }
 
-  it("builds the candidate with the installed bundle's own tsc", async () => {
+  it("builds the candidate with graphloom's own tsc", async () => {
     const bundlePath = await fakeBundle();
     const deps = piRepairDeps(CONFIG, bundlePath);
     const ok = await candidate("export const x: number = 1;\n");
@@ -180,13 +180,18 @@ describe("the repair preflight", () => {
     expect(result.summary).toContain("qualification failed");
   });
 
-  it("fails clearly when the installed bundle has no node_modules/.bin/tsc", async () => {
+  it("builds the candidate even when the installed bundle itself ships no node_modules", async () => {
+    // Regression: preflight once resolved tsc from the installed bundle's own
+    // node_modules, which `applyActivateRepair` repoints at an activated
+    // repair's own candidate tree — a tree that never ships node_modules, by
+    // design, so a reviewer always sees the whole thing. That broke preflight
+    // for every repair after the first plugin-level activation, regardless of
+    // target. tsc is GraphLoom's own tooling dependency, not the plugin's.
     const bundlePath = await tempDir();
     const deps = piRepairDeps(CONFIG, bundlePath);
-    const root = await candidate("export const x = 1;\n");
+    const root = await candidate("export const x: number = 1;\n");
     const result = await deps.preflight({ candidateRoot: root, target: "validator", baseDefinition: { graphId: "g", version: "1", stages: [], requirements: [], defaultValidators: [] } });
-    expect(result).toMatchObject({ ok: false });
-    expect(result.summary).toContain("npm ci");
+    expect(result).toMatchObject({ ok: true });
   });
 
   it("skips scripts/qualify.mjs for a plugin or executor repair, since its validator-regression contract does not apply", async () => {
@@ -249,6 +254,7 @@ describe("the reviewer's budget", () => {
     const deps = piRepairDeps(CONFIG, bundlePath);
     const result = await deps.reviewer.review({
       candidateRoot: "/repairs/r1/candidate",
+      baseRoot: bundlePath,
       baseDigest: "base",
       candidateDigest: "candidate",
       target: "plugin",

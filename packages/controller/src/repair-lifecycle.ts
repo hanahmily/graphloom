@@ -38,6 +38,8 @@ export interface RepairPatchAuthor {
     candidateRoot: string;
     target: RepairTarget;
     reason: string;
+    /** The independent reviewer's rejection of this same candidate's previous round, present from the second round on. */
+    reviewFeedback?: string;
     maxProviderCalls?: number;
     /** Aborted when the operator stops the run mid-patch. */
     signal?: AbortSignal;
@@ -49,6 +51,8 @@ export interface RepairReviewer {
   sessionId: string;
   review(args: {
     candidateRoot: string;
+    /** Where the unpatched code actually lives, for the reviewer's own diff. */
+    baseRoot: string;
     baseDigest: string;
     candidateDigest: string;
     target: RepairTarget;
@@ -239,14 +243,12 @@ export async function applyQualifyRepair(
   }
 
   // Reserve the correction and record the attempt durably before any effect so a
-  // crash or thrown patch/review cannot replay the repair for free. A metered patch
-  // also reserves the remaining invocations as its turn cap; unused calls are
-  // refunded once the patch settles, and a crash keeps the whole reservation spent.
-  // A metered independent review reserves whatever the patch leaves behind (computed
-  // once the patch has settled, not from this pre-patch snapshot, so a metered patch's
-  // full reservation does not leave the review with nothing regardless of what the
-  // patch actually spent) and is refused outright once that reaches zero.
-  const patchAllowance = meteredPatch ? state.budgets.agentInvocations : 0;
+  // crash or thrown patch/review cannot replay the repair for free. A metered round
+  // (patch or review) draws from one shared allowance for the whole call, across
+  // every internal round below; unused calls are refunded once the call settles,
+  // and a crash keeps the whole reservation spent.
+  const metered = meteredPatch || meteredReview;
+  const startingAllowance = metered ? state.budgets.agentInvocations : 0;
   const repairsDir = path.join(state.stateDir, "repairs");
   const artifactId = `repair-${randomUUID().slice(0, 8)}`;
   const reserved: QualifiedRepairArtifact = {
@@ -268,22 +270,20 @@ export async function applyQualifyRepair(
     budgets: {
       ...state.budgets,
       corrections: state.budgets.corrections - 1,
-      agentInvocations: state.budgets.agentInvocations - patchAllowance,
+      agentInvocations: state.budgets.agentInvocations - startingAllowance,
     },
   };
   await saveRunState(reservedState);
 
-  let patchRefund = patchAllowance;
-  // Negative once a metered review reports spend: a deduction from what the patch
-  // left behind, not a pre-reserved allowance (there is nothing to reserve for it
-  // until the patch has settled and its actual leftover is known).
-  let reviewRefund = 0;
+  // Drawn down by every metered patch or review call across every round; what is
+  // left when the call settles (approved, rejected, or rounds exhausted) is refunded.
+  let remaining = startingAllowance;
   let patchSummary: string | undefined;
   const settle = (artifact: QualifiedRepairArtifact): DurableRunState => ({
     ...reservedState,
     budgets: {
       ...reservedState.budgets,
-      agentInvocations: reservedState.budgets.agentInvocations + patchRefund + reviewRefund,
+      agentInvocations: reservedState.budgets.agentInvocations + remaining,
     },
     repairCandidates: (reservedState.repairCandidates ?? []).map((c) =>
       c.artifactId === artifactId
@@ -315,117 +315,142 @@ export async function applyQualifyRepair(
     await deps.supervisor?.grantCandidateCoding?.(snap.candidateRoot);
     granted = true;
 
-    const outside = await patchSurroundings(state);
-    let patchError: { error: unknown } | undefined;
-    try {
-      const patched = await patchAuthor.patch({
+    const currentDigest = () => digestDirectoryTree(snap.candidateRoot);
+    let reviewFeedback: string | undefined;
+    for (let round = 1; round <= MAX_REPAIR_ROUNDS; round++) {
+      if (metered && remaining <= 0) {
+        return settle({
+          ...reserved,
+          status: "rejected",
+          candidateDigest: await currentDigest(),
+          rejectionReason: `no agentInvocations budget remains for ${round === 1 ? "the repair patch" : "a revision round"}`,
+        });
+      }
+
+      const outside = await patchSurroundings(state);
+      let patchError: { error: unknown } | undefined;
+      try {
+        const patched = await patchAuthor.patch({
+          candidateRoot: snap.candidateRoot,
+          target: qualify.target,
+          reason: qualify.reason,
+          ...(reviewFeedback !== undefined ? { reviewFeedback } : {}),
+          ...(metered ? { maxProviderCalls: remaining } : {}),
+          ...(deps.signal !== undefined ? { signal: deps.signal } : {}),
+        });
+        patchSummary = boundPatchSummary(patched?.summary);
+      } catch (error) {
+        patchError = { error };
+      } finally {
+        if (meteredPatch) {
+          const spent = deps.supervisor?.drainProviderCalls?.() ?? remaining;
+          remaining -= Math.min(remaining, Math.max(0, spent));
+        }
+      }
+
+      // The patch author's tools are not confined to the candidate, so a change
+      // elsewhere stops the run before anything builds or runs the candidate.
+      const escaped = [
+        ...((await subject.liveDigest().catch(() => undefined)) !== reserved.baseDigest ? [subject.label] : []),
+        ...(await patchSurroundings(state).then((after) => changedSurroundings(outside, after))),
+      ];
+      if (escaped.length > 0) {
+        const rejected = await reject(`the patch changed files outside the candidate: ${escaped.join(", ")}`);
+        return {
+          ...rejected,
+          status: "stopped",
+          stopReason: "repair patch changed files outside the candidate",
+          blocker: escaped.join(", "),
+        };
+      }
+      if (patchError !== undefined) throw patchError.error;
+
+      await subject.checkCandidate(snap);
+
+      const preflight = await deps.repair.preflight({
         candidateRoot: snap.candidateRoot,
         target: qualify.target,
-        reason: qualify.reason,
-        ...(meteredPatch ? { maxProviderCalls: patchAllowance } : {}),
-        ...(deps.signal !== undefined ? { signal: deps.signal } : {}),
+        baseDefinition: state.definition,
       });
-      patchSummary = boundPatchSummary(patched?.summary);
-    } catch (error) {
-      patchError = { error };
-    } finally {
-      if (meteredPatch) {
-        const spent = deps.supervisor?.drainProviderCalls?.() ?? patchAllowance;
-        patchRefund = patchAllowance - Math.min(patchAllowance, Math.max(0, spent));
+      if (!preflight.ok) {
+        return settle({
+          ...reserved,
+          status: "rejected",
+          candidateDigest: await currentDigest(),
+          rejectionReason: preflight.summary,
+          preflightSummary: preflight.summary,
+        });
       }
-    }
+      if (preflight.definition) {
+        assertCandidateDefinitionCompatible(preflight.definition, state.definition);
+      }
+      if (qualify.target !== "executor" && deps.openCandidateHost) {
+        assertCandidateDefinitionCompatible(
+          await describeCandidate(state, snap.candidateRoot, artifactId, deps.openCandidateHost),
+          state.definition,
+        );
+      }
 
-    // The patch author's tools are not confined to the candidate, so a change
-    // elsewhere stops the run before anything builds or runs the candidate.
-    const escaped = [
-      ...((await subject.liveDigest().catch(() => undefined)) !== reserved.baseDigest ? [subject.label] : []),
-      ...(await patchSurroundings(state).then((after) => changedSurroundings(outside, after))),
-    ];
-    if (escaped.length > 0) {
-      const rejected = await reject(`the patch changed files outside the candidate: ${escaped.join(", ")}`);
-      return {
-        ...rejected,
-        status: "stopped",
-        stopReason: "repair patch changed files outside the candidate",
-        blocker: escaped.join(", "),
-      };
-    }
-    if (patchError !== undefined) throw patchError.error;
+      if (metered && remaining <= 0) {
+        return settle({
+          ...reserved,
+          status: "rejected",
+          candidateDigest: await currentDigest(),
+          rejectionReason: "no agentInvocations budget remains for independent review",
+        });
+      }
 
-    await subject.checkCandidate(snap);
-
-    const preflight = await deps.repair.preflight({
-      candidateRoot: snap.candidateRoot,
-      target: qualify.target,
-      baseDefinition: state.definition,
-    });
-    if (!preflight.ok) {
-      return settle({
-        ...reserved,
-        status: "rejected",
-        candidateDigest: await digestDirectoryTree(snap.candidateRoot),
-        rejectionReason: preflight.summary,
-        preflightSummary: preflight.summary,
+      const candidateDigest = await currentDigest();
+      const requirement =
+        qualify.requirementId !== undefined
+          ? state.definition.requirements.find((r) => r.id === qualify.requirementId)?.statement
+          : undefined;
+      const evidence: EvidenceRecord[] = state.evidence.filter((e) => (qualify.evidenceRefs ?? []).includes(e.ref));
+      const review = await deps.repair.reviewer.review({
+        candidateRoot: snap.candidateRoot,
+        baseRoot: subject.baseRoot,
+        baseDigest: snap.baseDigest,
+        candidateDigest,
+        target: qualify.target,
+        reason: qualify.reason,
+        task: state.intake.task.request,
+        ...(requirement !== undefined ? { requirement } : {}),
+        ...(patchSummary !== undefined ? { patchSummary } : {}),
+        evidence,
+        ...(meteredReview ? { maxProviderCalls: remaining } : {}),
       });
-    }
-    if (preflight.definition) {
-      assertCandidateDefinitionCompatible(preflight.definition, state.definition);
-    }
-    if (qualify.target !== "executor" && deps.openCandidateHost) {
-      assertCandidateDefinitionCompatible(
-        await describeCandidate(state, snap.candidateRoot, artifactId, deps.openCandidateHost),
-        state.definition,
-      );
-    }
+      if (meteredReview) {
+        const reviewSpent = deps.repair.reviewer.drainProviderCalls!() ?? remaining;
+        remaining -= Math.min(remaining, Math.max(0, reviewSpent));
+      }
 
-    // Computed now, from the patch's actual leftover (reservedState already withheld
-    // patchAllowance; patchRefund gives back what the patch did not spend), not from
-    // the pre-patch budget: a metered patch's full reservation must not leave the
-    // review with nothing regardless of what the patch actually used.
-    const reviewAllowance = meteredReview ? Math.max(0, reservedState.budgets.agentInvocations + patchRefund) : 0;
-    if (meteredReview && reviewAllowance <= 0) {
-      return settle({
-        ...reserved,
-        status: "rejected",
-        candidateDigest: await digestDirectoryTree(snap.candidateRoot),
-        rejectionReason: "no agentInvocations budget remains for independent review",
-      });
+      if (review.approved) {
+        return settle({
+          ...reserved,
+          status: "qualified",
+          candidateDigest,
+          reviewReason: review.reason,
+          preflightSummary: preflight.summary,
+          qualifiedAt: new Date().toISOString(),
+        });
+      }
+      if (round === MAX_REPAIR_ROUNDS) {
+        return settle({
+          ...reserved,
+          status: "rejected",
+          candidateDigest,
+          reviewReason: review.reason,
+          preflightSummary: preflight.summary,
+          rejectionReason: `${review.reason} (no rounds left after ${MAX_REPAIR_ROUNDS} patch/review rounds)`,
+        });
+      }
+      // The reviewer rejected this round: send its own stated reason back to the
+      // same patch-author session for a revision, instead of ending the whole
+      // qualify_repair attempt on the first disagreement.
+      reviewFeedback = review.reason;
     }
-
-    const candidateDigest = await digestDirectoryTree(snap.candidateRoot);
-    const requirement =
-      qualify.requirementId !== undefined
-        ? state.definition.requirements.find((r) => r.id === qualify.requirementId)?.statement
-        : undefined;
-    const evidence: EvidenceRecord[] = state.evidence.filter((e) => (qualify.evidenceRefs ?? []).includes(e.ref));
-    const review = await deps.repair.reviewer.review({
-      candidateRoot: snap.candidateRoot,
-      baseDigest: snap.baseDigest,
-      candidateDigest,
-      target: qualify.target,
-      reason: qualify.reason,
-      task: state.intake.task.request,
-      ...(requirement !== undefined ? { requirement } : {}),
-      ...(patchSummary !== undefined ? { patchSummary } : {}),
-      evidence,
-      ...(meteredReview ? { maxProviderCalls: reviewAllowance } : {}),
-    });
-    if (meteredReview) {
-      const reviewSpent = deps.repair.reviewer.drainProviderCalls!() ?? reviewAllowance;
-      // A deduction from the patch's leftover, not a refund from a pre-reservation.
-      reviewRefund = -Math.min(reviewAllowance, Math.max(0, reviewSpent));
-    }
-
-    return settle({
-      ...reserved,
-      status: review.approved ? "qualified" : "rejected",
-      candidateDigest,
-      reviewReason: review.reason,
-      preflightSummary: preflight.summary,
-      ...(review.approved
-        ? { qualifiedAt: new Date().toISOString() }
-        : { rejectionReason: review.reason }),
-    });
+    // Unreachable: the loop always returns by MAX_REPAIR_ROUNDS.
+    throw new Error("qualify_repair round loop exited without a result");
   } catch (err) {
     // Stay in recovery with the correction spent; the supervisor may try another round.
     return await reject(err instanceof Error ? err.message : String(err));
@@ -497,6 +522,8 @@ function changedSurroundings(
 export interface RepairSubject {
   /** Names the repaired code in rejection reasons. */
   label: string;
+  /** Where the unpatched code actually lives, for the independent reviewer's own diff. */
+  baseRoot: string;
   baseDigest: string;
   /** Digests the installed code again, to compare with `baseDigest`. */
   liveDigest(): Promise<string>;
@@ -511,9 +538,11 @@ export interface RepairSubject {
 
 /** Plugin and validator repairs copy the active graph bundle and must keep its steps. */
 async function bundleRepairSubject(state: DurableRunState, qualify: QualifyRepairSpec): Promise<RepairSubject> {
+  const bundleReal = await realpath(state.intake.bundle.bundlePath);
   return {
     label: "active bundle",
-    baseDigest: await digestDirectoryTree(await realpath(state.intake.bundle.bundlePath)),
+    baseRoot: bundleReal,
+    baseDigest: await digestDirectoryTree(bundleReal),
     liveDigest: async () => digestDirectoryTree(await realpath(state.intake.bundle.bundlePath)),
     async snapshot({ repairsDir, artifactId }) {
       const snap = await snapshotRepairCandidate({
@@ -894,6 +923,16 @@ function resolvePatchAuthor(
 }
 
 const MAX_PATCH_SUMMARY_CHARS = 2_000;
+
+/**
+ * Patch/review rounds one qualify_repair call runs before settling as
+ * rejected: the patch author gets this many chances to address the
+ * independent reviewer's own stated objections to its immediately preceding
+ * revision, converging within one correction instead of costing the
+ * supervisor a fresh qualify_repair decision (and a fresh candidate) per
+ * round.
+ */
+const MAX_REPAIR_ROUNDS = 3;
 
 /** Every patch author's summary obeys the same bound before it becomes durable. */
 function boundPatchSummary(raw: unknown): string | undefined {

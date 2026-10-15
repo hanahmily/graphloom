@@ -58,6 +58,15 @@ export async function digestDirectoryTree(root: string): Promise<string> {
 const UNDIGESTED = new Set(["node_modules", ".git"]);
 
 /**
+ * Test-tool cache directories a candidate's own patch author or preflight can
+ * leave behind inside a linked node_modules by actually running its test
+ * suite (e.g. Vite's transform cache for vitest). Never a real dependency —
+ * npm package names cannot start with a dot — so these cannot hide unreviewed
+ * code the way a shadowed or unlinked package could.
+ */
+const KNOWN_TEST_TOOL_CACHE = new Set([".vite", ".vite-temp"]);
+
+/**
  * Entries under a candidate that the digest skips, so review and activation
  * would never see what Node loads from them. With `linkedDependencies`, the
  * top-level node_modules may hold only the controller's dependency symlinks.
@@ -90,6 +99,7 @@ async function unlinkedDependencies(root: string): Promise<string[]> {
   const found: string[] = [];
   const modules = path.join(root, "node_modules");
   for (const name of await readdir(modules)) {
+    if (KNOWN_TEST_TOOL_CACHE.has(name)) continue;
     const info = await lstat(path.join(modules, name));
     if (info.isSymbolicLink()) continue;
     if (name.startsWith("@") && info.isDirectory()) {

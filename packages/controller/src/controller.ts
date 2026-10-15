@@ -454,7 +454,7 @@ export function createController(): Controller {
         // Evidence belongs to the stop being resumed; any stop from here on is a new one.
         const { stopEvidenceRefs: _staleEvidence, ...resumable } = state;
         void _staleEvidence;
-        state = resumable;
+        state = { ...resumable, resumedSinceLastDecision: true };
 
         try {
           await assertWorktreeMatches(
