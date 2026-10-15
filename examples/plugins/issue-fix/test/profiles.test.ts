@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -248,11 +249,23 @@ describe("profiles", () => {
   });
 });
 
+/** The installed vitest package this suite runs on, wherever the bundle is installed. */
+function vitestPackage(): string {
+  // vitest's own package.json is not exported; its CommonJS-visible entry resolves from here.
+  let dir = path.dirname(createRequire(import.meta.url).resolve("vitest"));
+  while (!existsSync(path.join(dir, "vitest.mjs"))) {
+    const up = path.dirname(dir);
+    if (up === dir) throw new Error("vitest is not installed");
+    dir = up;
+  }
+  return dir;
+}
+
 /** A one-package project with vitest installed, as the runner finds it. */
 async function vitestProject() {
   const root = await mkdtemp(path.join(os.tmpdir(), "issue-fix-vitest-"));
   temps.push(root);
-  const vitest = path.join(repoRoot, "node_modules/vitest");
+  const vitest = vitestPackage();
   await mkdir(path.join(root, "node_modules/.bin"), { recursive: true });
   await symlink(vitest, path.join(root, "node_modules/vitest"));
   await symlink(path.join(vitest, "vitest.mjs"), path.join(root, "node_modules/.bin/vitest"));
