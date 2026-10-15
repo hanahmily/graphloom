@@ -384,6 +384,60 @@ describe("inadmissible supervisor proposals (#117)", () => {
     expect(state.supervisorOutcomes?.[0]?.rejections[0]).toMatch(/^dispatch: a work job needs a non-empty writeScope/);
   });
 
+  it("charges each rejection to the decisions budget: two rejections and an admitted stop spend three", async () => {
+    const env = await makeEnv("budgets:\n  decisions: 10\n");
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({ definition, advances: [supervise({ reason: "unfamiliar" }, "escalate")] }),
+      validators: goodValidators,
+      supervisor: createScriptedSupervisor({
+        decisions: [
+          validate({ stageId: "nope" }, "undeclared stage"),
+          activateRepair({ qualifiedArtifactId: "repair-missing", reason: "activate" }, "activate"),
+          stop({ reason: "blocked", blocker: "giving up" }, "stop"),
+        ],
+      }),
+      runner: runner(),
+      stateRoot: env.stateRoot,
+      runId: "decisions-charged",
+    });
+    expect(report.stopReason).toBe("blocked");
+    // 10 - 1 (the graph's supervise) - 2 (rejections) - 1 (the admitted stop).
+    expect((await loadRunState(report.stateDir)).budgets.decisions).toBe(6);
+  });
+
+  it("stops on the decisions budget when a rejection spends the last decision, without another re-ask", async () => {
+    const env = await makeEnv("budgets:\n  decisions: 2\n");
+    let asked = 0;
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({ definition, advances: [supervise({ reason: "unfamiliar" }, "escalate")] }),
+      validators: goodValidators,
+      supervisor: createScriptedSupervisor({
+        decisions: [
+          () => {
+            asked += 1;
+            return validate({ stageId: "nope" }, "undeclared stage");
+          },
+          () => {
+            asked += 1;
+            return stop({ reason: "blocked", blocker: "should not be asked" }, "stop");
+          },
+        ],
+      }),
+      runner: runner(),
+      stateRoot: env.stateRoot,
+      runId: "decisions-exhausted",
+    });
+    expect(asked).toBe(1);
+    expect(report.status).toBe("stopped");
+    expect(report.stopReason).toBe("decisions budget exhausted");
+    expect(report.blocker).toMatch(/^supervisor proposal rejected with no decisions left: validate: undeclared stage: stageId nope/);
+    const state = await loadRunState(report.stateDir);
+    expect(state.budgets.decisions).toBe(0);
+    expect(state.supervisorOutcomes).toBeUndefined();
+  });
+
   it("still stops on a blocking condition: an exhausted corrections budget", async () => {
     const env = await makeEnv("budgets:\n  corrections: 1\n");
     const report = await createController().run({

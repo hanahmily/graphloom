@@ -346,17 +346,28 @@ async function runNormalLoopSteps(
         const admittedAgainst = state;
         const rejections: SupervisorRejection[] = [];
         // Every inadmissible proposal this turn is charged here, whether the
-        // controller's check found it or the supervisor's own tools did.
-        const refuse = (action: string, reason: string): SupervisorRejection => {
+        // controller's check found it or the supervisor's own tools did: to
+        // the turn's allowance, and to the run's decisions budget, persisted
+        // before the supervisor hears the rejection so a crash refunds nothing.
+        let decisionsExhausted = false;
+        const refuse = async (action: string, reason: string): Promise<SupervisorRejection> => {
+          state = {
+            ...state,
+            budgets: { ...state.budgets, decisions: Math.max(0, state.budgets.decisions - 1) },
+            stateRevision: state.stateRevision + 1,
+          };
+          await saveRunState(state);
+          syncRevision(deps, state);
+          if (state.budgets.decisions <= 0) decisionsExhausted = true;
           const rejection: SupervisorRejection = {
             action,
             reason,
-            remaining: Math.max(0, MAX_INADMISSIBLE_PER_TURN - rejections.length - 1),
+            remaining: decisionsExhausted ? 0 : Math.max(0, MAX_INADMISSIBLE_PER_TURN - rejections.length - 1),
           };
           rejections.push(rejection);
           return rejection;
         };
-        const check: AdmissionCheck = (candidate) => {
+        const check: AdmissionCheck = async (candidate) => {
           const refusal = supervisorAdmissionRefusal(admittedAgainst, candidate, deps, trigger.code);
           return refusal === undefined ? undefined : refuse(candidate.action.type, describeInadmissible(refusal));
         };
@@ -407,12 +418,12 @@ async function runNormalLoopSteps(
             syncRevision(deps, state);
             return { done: true as const, state };
           }
-          if (rejections.length >= MAX_INADMISSIBLE_PER_TURN) break;
+          if (decisionsExhausted || rejections.length >= MAX_INADMISSIBLE_PER_TURN) break;
           if (decideError !== undefined || decided === undefined || isModelSwitchRequest(decided)) break;
           // A supervisor that ran the check in its tools only returns proposals
           // that passed it; any other (scripted, or one ignoring the check) is
           // re-asked here, within the same turn, with the rejection.
-          const refused = check(decided);
+          const refused = await check(decided);
           if (refused === undefined || refused.remaining <= 0) break;
           rejection = refused;
           if (metered && state.budgets.agentInvocations <= 0) {
@@ -426,6 +437,19 @@ async function runNormalLoopSteps(
             syncRevision(deps, state);
             return { done: true as const, state };
           }
+        }
+        if (decisionsExhausted) {
+          // A blocking stop: the rejections spent the last of the decisions budget.
+          const last = rejections[rejections.length - 1]!;
+          state = {
+            ...state,
+            status: "stopped",
+            stopReason: "decisions budget exhausted",
+            blocker: boundText(`supervisor proposal rejected with no decisions left: ${last.action}: ${last.reason}`),
+          };
+          await saveRunState(state);
+          syncRevision(deps, state);
+          return { done: true as const, state };
         }
         if (rejections.length >= MAX_INADMISSIBLE_PER_TURN) {
           // The episode ends with the trigger's safe default, recorded for the operator.

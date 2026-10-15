@@ -297,8 +297,8 @@ export function createAdmissionTools(
         if (proposal !== undefined || exhausted !== undefined) return duplicate();
         // With a controller, a rejection found here counts toward the same
         // per-turn allowance as one the controller's check finds.
-        const refuse = (message: string) =>
-          admission !== undefined ? refused(admission.refuse(action, message)) : reject(message);
+        const refuse = async (message: string) =>
+          admission !== undefined ? refused(await admission.refuse(action, message)) : reject(message);
         const job = params[specKey] as
           | ({ purpose?: unknown; readOnly?: unknown; writeScope?: unknown } & ContinuationJob)
           | undefined;
@@ -326,7 +326,7 @@ export function createAdmissionTools(
             );
           }
         }
-        const rejection = "action" in candidate ? admission?.check(candidate) : undefined;
+        const rejection = "action" in candidate ? await admission?.check(candidate) : undefined;
         if (rejection !== undefined) return refused(rejection);
         return accept(candidate);
       },

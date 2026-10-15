@@ -230,7 +230,9 @@ export function createPiSupervisor(options: CreatePiSupervisorOptions): PiSuperv
           // controller's own, and the model is asked again in this decide().
           const local = localRefusal(proposal.action, input.view.agentSessions ?? [], input.view.generation);
           const rejection =
-            local !== undefined ? input.admission.refuse(proposal.action.type, local) : input.admission.check(proposal);
+            local !== undefined
+              ? await input.admission.refuse(proposal.action.type, local)
+              : await input.admission.check(proposal);
           if (rejection === undefined) return proposal;
           if (rejection.remaining <= 0 || input.signal?.aborted === true || (remainingCalls() ?? 1) < 1) {
             throw new Error(`inadmissible proposal: ${rejection.action}: ${rejection.reason}`);

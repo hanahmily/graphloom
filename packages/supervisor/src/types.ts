@@ -74,7 +74,7 @@ export interface SupervisorRejection {
  * otherwise the rejection; `remaining: 0` means the turn is over and the
  * controller applies the trigger's safe default.
  */
-export type AdmissionCheck = (decision: GraphDecision) => SupervisorRejection | undefined;
+export type AdmissionCheck = (decision: GraphDecision) => Promise<SupervisorRejection | undefined>;
 
 export interface SupervisorAdmission {
   facts: AdmissionFacts;
@@ -83,9 +83,10 @@ export interface SupervisorAdmission {
    * Charge a rejection the supervisor found itself (malformed spec, bad
    * write scope or continuation, escaping observe path, repeated proposal)
    * against the same per-turn allowance `check` uses; the controller owns
-   * the count. Returns the counted rejection.
+   * the count, and charges each rejection to the run's durable decisions
+   * budget before it resolves. Returns the counted rejection.
    */
-  refuse(action: string, reason: string): SupervisorRejection;
+  refuse(action: string, reason: string): Promise<SupervisorRejection>;
 }
 
 /** The controller's outcome for a supervisor proposal, reported on the next turn. */

@@ -370,8 +370,8 @@ describe("createPiSupervisor in-turn feedback (#117)", () => {
       ...sampleInput(),
       admission: {
         facts: { inRecovery: true, canQualify: false, qualifiedArtifactIds: [] },
-        refuse: (action, reason) => ({ action, reason, remaining: 2 }),
-        check: (d) => {
+        refuse: async (action, reason) => ({ action, reason, remaining: 2 }),
+        check: async (d) => {
           if (d.action.type !== "activate_repair") return undefined;
           rejections += 1;
           return { action: "activate_repair", reason: "repair-1 is `activated`, not `qualified`", remaining: 2 };
@@ -398,8 +398,8 @@ describe("createPiSupervisor in-turn feedback (#117)", () => {
       ...sampleInput(),
       admission: {
         facts: { inRecovery: true, canQualify: false, qualifiedArtifactIds: [] },
-        check: () => undefined,
-        refuse: (action, reason) => {
+        check: async () => undefined,
+        refuse: async (action, reason) => {
           charged.push(`${action}: ${reason}`);
           return { action, reason, remaining: 3 - charged.length };
         },
@@ -428,7 +428,7 @@ describe("createPiSupervisor in-turn feedback (#117)", () => {
     const supervisor = createPiSupervisor({ session });
     await supervisor.decide({
       ...sampleInput(),
-      admission: { facts: { inRecovery: true, canQualify: false, qualifiedArtifactIds: [] }, check: () => undefined, refuse: (action, reason) => ({ action, reason, remaining: 2 }) },
+      admission: { facts: { inRecovery: true, canQualify: false, qualifiedArtifactIds: [] }, check: async () => undefined, refuse: async (action, reason) => ({ action, reason, remaining: 2 }) },
     });
     expect(tools).toEqual(["dispatch", "observe", "validate", "reenter", "return", "stop", "switch_model"]);
     expect(prompted[0]).toContain("Propose exactly one action by calling one GraphLoom tool: dispatch, observe, validate, reenter, return, or stop.");

@@ -163,11 +163,11 @@ describe("admission tools", () => {
   });
 });
 
-const noRefuse = (action: string, reason: string) => ({ action, reason, remaining: 2 });
+const noRefuse = async (action: string, reason: string) => ({ action, reason, remaining: 2 });
 
 describe("admission tools narrowed by state (#117)", () => {
   const names = (facts: { inRecovery: boolean; canQualify: boolean; qualifiedArtifactIds: string[] }) =>
-    createAdmissionTools([{ provider: "p", modelId: "m" }], [], 1, "supervise", {}, { facts, check: () => undefined, refuse: noRefuse })
+    createAdmissionTools([{ provider: "p", modelId: "m" }], [], 1, "supervise", {}, { facts, check: async () => undefined, refuse: noRefuse })
       .tools.map((t) => t.name);
 
   it("offers no activate_repair without a qualified candidate", () => {
@@ -189,7 +189,7 @@ describe("controller admission check within the turn (#117)", () => {
   const facts = { inRecovery: true, canQualify: false, qualifiedArtifactIds: ["repair-f7a36302"] };
 
   it("returns an inadmissible proposal to the model with the reason and current value, then admits the next", async () => {
-    const check = (d: { action: GraphAction }) =>
+    const check = async (d: { action: GraphAction }) =>
       d.action.type === "activate_repair"
         ? {
             action: "activate_repair",
@@ -217,7 +217,7 @@ describe("controller admission check within the turn (#117)", () => {
   });
 
   it("ends the turn when the controller says no inadmissible proposals remain", async () => {
-    const check = () => ({
+    const check = async () => ({
       action: "validate",
       reason: "undeclared stage: stageId nope is not in the pinned graph definition",
       remaining: 0,
@@ -235,13 +235,13 @@ describe("controller admission check within the turn (#117)", () => {
 describe("locally detected rejections count toward the controller's allowance (#117)", () => {
   it("charges each invalid write scope through admission.refuse and ends the turn at the third", async () => {
     const charged: string[] = [];
-    const refuse = (action: string, reason: string) => {
+    const refuse = async (action: string, reason: string) => {
       charged.push(`${action}: ${reason}`);
       return { action, reason, remaining: 3 - charged.length };
     };
     const toolbox = createAdmissionTools([{ provider: "p", modelId: "m" }], [], 1, "supervise", {}, {
       facts: { inRecovery: true, canQualify: false, qualifiedArtifactIds: [] },
-      check: () => undefined,
+      check: async () => undefined,
       refuse,
     });
     const tool = toolbox.tools.find((t) => t.name === "dispatch") as unknown as { execute: Execute };
