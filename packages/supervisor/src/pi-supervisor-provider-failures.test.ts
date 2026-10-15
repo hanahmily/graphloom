@@ -60,9 +60,11 @@ interface World {
   supervisor: PiSupervisor;
   /** Plain prompts to build history (compaction needs something to summarize). */
   warmUp(turns: number): Promise<void>;
+  session: import("@earendil-works/pi-coding-agent").AgentSession;
+  wrapped: ReturnType<typeof wrapPiAgentSession>;
 }
 
-async function world(): Promise<World> {
+async function world(options: { quotaRetryMs?: number; promptTimeoutMs?: number } = {}): Promise<World> {
   const ai = await loadPiAi();
   const dir = await mkdtemp(path.join(os.tmpdir(), "gl-pi-fail-"));
   temps.push(dir);
@@ -95,13 +97,18 @@ async function world(): Promise<World> {
     modelId: "faux",
     agentDir: dir,
     credentialSource: "pi-stored",
-    promptTimeoutMs: 10_000,
+    promptTimeoutMs: options.promptTimeoutMs ?? 10_000,
   });
-  const supervisor = createPiSupervisor({ session: wrapped });
+  const supervisor = createPiSupervisor({
+    session: wrapped,
+    ...(options.quotaRetryMs !== undefined ? { quotaRetryMs: options.quotaRetryMs } : {}),
+  });
   return {
     ai,
     faux,
     supervisor,
+    session,
+    wrapped,
     async warmUp(turns) {
       for (let i = 0; i < turns; i += 1) await wrapped.prompt(`history ${i} ${"x".repeat(200)}`);
       wrapped.drainTurnCount!();
@@ -267,5 +274,64 @@ describe("Pi supervisor provider failures (faux provider)", () => {
     expect(err.failureClass).toBe("empty");
     expect(err.unremedied).toMatch(/no provider calls left/);
     expect(w.faux.state.callCount).toBe(1);
+  });
+
+  it("waits the operator's quotaRetryMs for a quota error with no reset time, and records it", async () => {
+    const w = await world({ quotaRetryMs: 300 });
+    w.faux.setResponses([errorTurn(w, QUOTA_NO_RESET), stopTurn(w)]);
+    const started = Date.now();
+    const proposal = await w.supervisor.decide(input({ maxWaitMs: 60_000 }));
+    expect(proposal).toMatchObject({ action: { type: "stop" } });
+    expect(Date.now() - started).toBeGreaterThanOrEqual(250);
+    expect(w.faux.state.callCount).toBe(2);
+    const [remedy] = w.supervisor.drainRemedies();
+    expect(remedy).toMatchObject({ failureClass: "quota", remedy: "wait_and_retry", waitBasis: "operator" });
+    expect(remedy!.waitedMs).toBeGreaterThanOrEqual(250);
+  });
+
+  it("bounds the quotaRetryMs fallback by the wait budget and the per-turn wait limit", async () => {
+    const overBudget = await world({ quotaRetryMs: 5_000 });
+    overBudget.faux.setResponses([errorTurn(overBudget, QUOTA_NO_RESET), stopTurn(overBudget)]);
+    const err = await failure(overBudget.supervisor.decide(input({ maxWaitMs: 1_000 })));
+    expect(err.unremedied).toMatch(/quotaRetryMs wait is 5s; 1s of the run's wait budget remain/);
+    expect(overBudget.faux.state.callCount).toBe(1);
+
+    const persistent = await world({ quotaRetryMs: 10 });
+    persistent.faux.setResponses(Array.from({ length: 5 }, () => errorTurn(persistent, QUOTA_NO_RESET)));
+    const again = await failure(persistent.supervisor.decide(input({ maxWaitMs: 60_000 })));
+    expect(again.unremedied).toMatch(/still over quota after 3 waits/);
+    expect(persistent.faux.state.callCount).toBe(4);
+  });
+
+  it("aborts a compaction that never settles when the run stops, and when the prompt timeout passes", async () => {
+    for (const how of ["stop", "timeout"] as const) {
+      const w = await world({ promptTimeoutMs: how === "timeout" ? 200 : 10_000 });
+      let aborted = 0;
+      const pi = w.session as unknown as { compact: () => Promise<unknown>; abortCompaction: () => void };
+      pi.compact = () => new Promise(() => undefined);
+      pi.abortCompaction = () => {
+        aborted += 1;
+      };
+      const stop = new AbortController();
+      const pending = w.wrapped.compact!(how === "stop" ? { signal: stop.signal } : undefined);
+      if (how === "stop") setTimeout(() => stop.abort(), 50);
+      await expect(pending).rejects.toThrow(how === "stop" ? /compaction aborted/ : /compaction timed out after 200ms/);
+      expect(aborted).toBe(1);
+      expect(w.wrapped.drainTurnCount!()).toBe(2);
+    }
+  });
+
+  it("passes the run's stop signal to overflow compaction in decide", async () => {
+    const w = await world();
+    const pi = w.session as unknown as { compact: () => Promise<unknown>; abortCompaction: () => void };
+    pi.compact = () => new Promise(() => undefined);
+    pi.abortCompaction = () => undefined;
+    w.faux.setResponses([errorTurn(w, OVERFLOW), stopTurn(w)]);
+    const stop = new AbortController();
+    const pending = w.supervisor.decide(input({ signal: stop.signal }));
+    setTimeout(() => stop.abort(), 100);
+    const err = await failure(pending);
+    expect(err.failureClass).toBe("overflow");
+    expect(err.unremedied).toMatch(/compaction failed: supervisor compaction aborted/);
   });
 });

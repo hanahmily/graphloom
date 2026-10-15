@@ -58,6 +58,11 @@ describe("retryAtFromMessage", () => {
     ["Server requested 45s retry delay (max: 60s)", "2026-10-15T00:00:45.000Z"],
     ["limit resets at 2026-10-15T06:00:00Z", "2026-10-15T06:00:00.000Z"],
     ['"reset_at": 1792036800', new Date(1792036800 * 1000).toISOString()],
+    // Absolute times after "retry after" are times, not counts of seconds.
+    ["429 rate limit; retry after 2026-10-16T00:00:00Z", "2026-10-16T00:00:00.000Z"],
+    ["Retry-After: 1792036800", new Date(1792036800 * 1000).toISOString()],
+    ["retry after 1792036800123", new Date(1792036800123).toISOString()],
+    ["Retry-After: Fri, 16 Oct 2026 07:28:00 GMT", "2026-10-16T07:28:00.000Z"],
   ])("reads %j", (message, expected) => {
     expect(retryAtFromMessage(message, NOW)).toBe(expected);
   });

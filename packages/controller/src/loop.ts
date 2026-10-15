@@ -1168,7 +1168,9 @@ function settleSupervisorRemedies(state: DurableRunState, supervisor: Supervisor
       condition: `supervisor provider ${r.failureClass}`,
       remedy:
         r.remedy === "wait_and_retry"
-          ? `waited ${Math.ceil((waitedMs ?? 0) / 1000)}s for the provider's reset and retried the turn`
+          ? r.waitBasis === "operator"
+            ? `waited ${Math.ceil((waitedMs ?? 0) / 1000)}s (the operator's quotaRetryMs; the provider gave no reset time) and retried the turn`
+            : `waited ${Math.ceil((waitedMs ?? 0) / 1000)}s for the provider's reset and retried the turn`
           : r.remedy === "compact_and_retry"
             ? "compacted the supervisor session and retried the turn"
             : "re-asked the supervisor once to call exactly one tool",
@@ -1815,7 +1817,11 @@ function scopeViolation(
   const shown = paths.slice(0, 10).join(", ") + (paths.length > 10 ? ` (+${paths.length - 10} more)` : "");
   const violation = job.readOnly === true ? `read-only job modified or removed ${shown}` : `changed paths outside the job's write scope: ${shown}`;
   const reported = result.status === "ok" ? "" : `; the executor also reported ${result.status}: ${result.summary}`;
-  return { ...result, status: "failed", summary: boundText(`${violation}${reported}`) };
+  // The controller found this failure, not the executor: whatever the
+  // executor declared retryable, rerunning the job unchanged would repeat it.
+  const { retryLimit: _declared, ...rest } = result;
+  void _declared;
+  return { ...rest, status: "failed", summary: boundText(`${violation}${reported}`) };
 }
 
 function applyDispatchResult(

@@ -67,6 +67,8 @@ export interface SupervisorRemedy {
   message: string;
   /** Wall-clock milliseconds spent waiting; charged to the run's waitMs. */
   waitedMs?: number;
+  /** What a wait followed: the provider's stated reset, or the operator's `quotaRetryMs` fallback. */
+  waitBasis?: "provider" | "operator";
 }
 
 export interface ModelRef {

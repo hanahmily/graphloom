@@ -129,29 +129,32 @@ const UNIT_MS: Record<string, number> = {
 const RELATIVE: Array<RegExp | [RegExp, string]> = [
   /server requested (\d+(?:\.\d+)?)\s*(s)\b/i,
   [/retry[- _]?after[- _]?ms["']?\s*[:=]?\s*["']?(\d+(?:\.\d+)?)/i, "ms"],
-  /retry[- _]?after["']?\s*[:=]?\s*["']?(\d+(?:\.\d+)?)\s*(ms|milliseconds?|s|secs?|seconds?|m|mins?|minutes?|h|hrs?|hours?)?\b/i,
+  /retry[- _]?after["']?\s*[:=]?\s*["']?(\d+(?:\.\d+)?)(?![\d.:-])\s*(ms|milliseconds?|s|secs?|seconds?|m|mins?|minutes?|h|hrs?|hours?)?\b/i,
   /(?:try again|retry|resets?|available again)\s+in\s+(\d+(?:\.\d+)?)\s*(ms|milliseconds?|s|secs?|seconds?|m|mins?|minutes?|h|hrs?|hours?)\b/i,
 ];
-const ABSOLUTE = /(?:resets?|reset_at|retry)\s*(?:at|on|after|time)?["']?\s*[:=]?\s*["']?(\d{4}-\d{2}-\d{2}[T ][0-9:.]+(?:Z|[+-]\d{2}:?\d{2})?)/i;
-const EPOCH = /(?:resets?|reset_at|x-ratelimit-reset)["']?\s*[:=]\s*["']?(\d{10}(?:\d{3})?)\b/i;
+const KEYWORD = String.raw`(?:resets?|reset_at|x-ratelimit-reset|retry[- _]?after|retry|available again)`;
+const ABSOLUTE = new RegExp(
+  String.raw`${KEYWORD}\s*(?:at|on|after|time)?["']?\s*[:=]?\s*["']?(\d{4}-\d{2}-\d{2}[T ][0-9:.]+(?:Z|[+-]\d{2}:?\d{2})?)`,
+  "i",
+);
+const HTTP_DATE = new RegExp(
+  String.raw`${KEYWORD}\s*(?:at|on)?["']?\s*[:=]?\s*["']?((?:Mon|Tue|Wed|Thu|Fri|Sat|Sun),\s+\d{1,2}\s+[A-Za-z]{3}\s+\d{4}\s+\d{2}:\d{2}:\d{2}\s+GMT)`,
+  "i",
+);
+const EPOCH = new RegExp(String.raw`${KEYWORD}\s*(?:at|on)?["']?\s*[:=]?\s*["']?(\d{10}(?:\d{3})?)(?![\d.])`, "i");
 
 /**
- * The reset time a quota message states, if any: a relative wait ("retry
- * after 30s", "try again in 2 minutes"), an ISO timestamp, or a Unix epoch.
- * A bare number after "retry-after" is seconds, as in the HTTP header.
+ * The reset time a quota message states, if any: an ISO or HTTP date, a Unix
+ * epoch (10 or 13 digits), or a relative wait ("retry after 30s", "try again
+ * in 2 minutes"). Absolute forms are matched first, so a timestamp is never
+ * read as a count of seconds. Another bare number after "retry-after" is
+ * seconds, as in the HTTP header.
  */
 export function retryAtFromMessage(message: string, now: number): string | undefined {
-  for (const entry of RELATIVE) {
-    const [pattern, fixedUnit] = Array.isArray(entry) ? entry : [entry, undefined];
-    const m = pattern.exec(message);
-    if (m?.[1] === undefined) continue;
-    const unit = (fixedUnit ?? m[2] ?? "s").toLowerCase();
-    const ms = Number.parseFloat(m[1]) * (UNIT_MS[unit] ?? 1_000);
-    if (Number.isFinite(ms) && ms >= 0) return new Date(now + Math.ceil(ms)).toISOString();
-  }
-  const absolute = ABSOLUTE.exec(message)?.[1];
-  if (absolute !== undefined) {
-    const at = Date.parse(absolute);
+  for (const pattern of [ABSOLUTE, HTTP_DATE]) {
+    const stamp = pattern.exec(message)?.[1];
+    if (stamp === undefined) continue;
+    const at = Date.parse(stamp);
     if (Number.isFinite(at)) return new Date(at).toISOString();
   }
   const epoch = EPOCH.exec(message)?.[1];
@@ -159,6 +162,14 @@ export function retryAtFromMessage(message: string, now: number): string | undef
     const value = Number(epoch);
     const at = epoch.length > 10 ? value : value * 1_000;
     if (Number.isFinite(at)) return new Date(at).toISOString();
+  }
+  for (const entry of RELATIVE) {
+    const [pattern, fixedUnit] = Array.isArray(entry) ? entry : [entry, undefined];
+    const m = pattern.exec(message);
+    if (m?.[1] === undefined) continue;
+    const unit = (fixedUnit ?? m[2] ?? "s").toLowerCase();
+    const ms = Number.parseFloat(m[1]) * (UNIT_MS[unit] ?? 1_000);
+    if (Number.isFinite(ms) && ms >= 0) return new Date(now + Math.ceil(ms)).toISOString();
   }
   return undefined;
 }

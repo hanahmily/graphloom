@@ -66,7 +66,7 @@ These are operator-local files, not portable repository configuration.
 The CLI reads the operator's supervisor config from `$GRAPHLOOM_SUPERVISOR_CONFIG`,
 or `~/.config/graphloom/supervisor.json` when unset: initial `provider` and
 `modelId`, the other `models` it may switch to (`"provider/model"`), an optional
-Pi `agentDir`, and `promptTimeoutMs`. The file never holds credentials (`apiKey` is
+Pi `agentDir`, `promptTimeoutMs`, and `quotaRetryMs` (see Provider failures). The file never holds credentials (`apiKey` is
 refused). Without it, `graphloom run` has no supervisor. The run's Pi transcript
 lives under `<stateDir>/supervisor`, and `resume` reopens it with the config's
 current model list.
@@ -287,7 +287,18 @@ reset time waits until then (at most three waits a turn, only within the
 `maxWaitMs` the controller passes from the run's `waitMs`) and retries the turn;
 an overflow compacts the session and retries once; an empty reply is re-asked
 once with "call exactly one tool". Every retried call and compaction counts
-against the turn's provider-call allowance. `drainRemedies()` reports what was
+against the turn's provider-call allowance. The compaction honors the run's Stop
+and the prompt timeout: either aborts Pi's summarization request and fails the
+remedy.
+
+Some providers give no reset time; MiniMax's quota 429 `(2056)` is one. For
+those, the operator may set `quotaRetryMs` in the supervisor config
+(`~/.config/graphloom/supervisor.json`, or `GRAPHLOOM_SUPERVISOR_CONFIG`), for
+example `"quotaRetryMs": 300000`. A quota error with no parsed reset time then
+waits that long and retries the turn. The wait has the same bounds as a
+provider-stated one: the run's remaining `waitMs` and at most three waits a turn.
+The remedy is recorded with `waitBasis: "operator"`. Without `quotaRetryMs`, such
+an error stops the run. `drainRemedies()` reports what was
 done; the controller charges the waits to `waitMs` and records each remedy in the
 run's `remedies` (shown by `inspect`). A failure with no remedy left stops the
 run with `stopReason` `supervisor provider <class>: <provider message>`, and the

@@ -801,4 +801,40 @@ describe("supervisor provider failures and deterministic remedies (controller)",
     expect(report).toMatchObject({ status: "stopped", stopReason: "upstream down" });
     expect(triggers).toEqual([expect.stringMatching(/failed \(after 1 retries, the executor's limit\): upstream 503$/)]);
   });
+
+  it("never retries a failure the controller found, even when the executor declared it retryable", async () => {
+    const env = await makeEnv();
+    const triggers: string[] = [];
+    let jobs = 0;
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({ definition, advances: [writeWork] }),
+      validators,
+      supervisor: createScriptedSupervisor({
+        decisions: [
+          (input) => {
+            triggers.push(`${input.trigger.code}: ${input.trigger.message}`);
+            return stop({ reason: "wrote outside its scope", blocker: "scope" }, "stop");
+          },
+        ],
+      }),
+      runner: createScriptedRunner({
+        jobs: [
+          async (_job, ctx) => {
+            jobs += 1;
+            await writeFile(path.join(ctx.worktreePath, "OTHER.txt"), "nope\n", "utf8");
+            return { status: "failed" as const, summary: "upstream 503", retryLimit: 3 };
+          },
+        ],
+      }),
+      stateRoot: env.stateRoot,
+      runId: "scope-no-retry-1",
+    });
+    expect(report).toMatchObject({ status: "stopped", stopReason: "wrote outside its scope" });
+    expect(jobs).toBe(1);
+    expect(triggers).toEqual([expect.stringMatching(/^executor_failed: .*changed paths outside the job's write scope: OTHER\.txt/)]);
+    const state = await loadRunState(report.stateDir);
+    expect(state.remedies ?? []).toEqual([]);
+    expect(state.executorRetry).toBeUndefined();
+  });
 });

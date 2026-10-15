@@ -105,8 +105,10 @@ export interface PiSupervisorSession {
   /**
    * Compact the session's history now (overflow recovery). Its provider
    * requests are charged to the turn count like any other model call.
+   * `signal` (the run's Stop) and the deadline (default: the prompt timeout)
+   * abort the summarization and reject.
    */
-  compact?(): Promise<void>;
+  compact?(options?: { signal?: AbortSignal; timeoutMs?: number }): Promise<void>;
   /**
    * Switch the active model on this logical session, and its reasoning level
    * (default "off" when the target does not specify one, even if the previous
@@ -427,16 +429,37 @@ export function wrapPiAgentSession(args: {
     lastReplyFailure() {
       return lastReply;
     },
-    async compact() {
+    async compact(compactOptions) {
       if (closed) {
         throw new Error("supervisor session is closed");
       }
+      const signal = compactOptions?.signal;
+      if (signal?.aborted) throw new Error("supervisor compaction aborted");
       if (!(await settleIdle(session, settleTimeoutMs(promptTimeoutMs)))) {
         throw new Error(STILL_ACTIVE);
       }
+      const timeoutMs = compactOptions?.timeoutMs ?? promptTimeoutMs;
       // Charged before the request: a compaction that fails still spent its calls.
       turns += COMPACTION_PROVIDER_CALLS;
-      await session.compact();
+      // Stop and the deadline both cancel Pi's summarization request; the
+      // race also releases the caller when a provider ignores the abort.
+      let cancel: (reason: Error) => void = () => undefined;
+      const cancelled = new Promise<never>((_resolve, reject) => {
+        cancel = reject;
+      });
+      const stop = (reason: Error) => {
+        session.abortCompaction();
+        cancel(reason);
+      };
+      const onAbort = () => stop(new Error("supervisor compaction aborted"));
+      const timer = setTimeout(() => stop(new Error(`supervisor compaction timed out after ${timeoutMs}ms`)), timeoutMs);
+      signal?.addEventListener("abort", onAbort, { once: true });
+      try {
+        await Promise.race([session.compact(), cancelled]);
+      } finally {
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", onAbort);
+      }
     },
     async grantCandidateCoding(candidateRoot: string) {
       if (closed) {

@@ -73,6 +73,12 @@ export interface CreatePiSupervisorOptions {
   initialSwitchJournal?: ModelSwitchRecord[];
   /** Timeout for one candidate patch episode, which may span many tool turns. Default 600_000. */
   patchTimeoutMs?: number;
+  /**
+   * Operator fallback: how long to wait before retrying a quota error whose
+   * message states no reset time. Omitted means such an error stops the run.
+   * Still bounded by the turn's `maxWaitMs` and the per-turn wait limit.
+   */
+  quotaRetryMs?: number;
 }
 
 const MAX_PATCH_SUMMARY_CHARS = 2_000;
@@ -115,6 +121,10 @@ export function createPiSupervisor(options: CreatePiSupervisorOptions): PiSuperv
   let closed = false;
   let codingRoot: string | undefined;
   const patchTimeoutMs = options.patchTimeoutMs ?? 600_000;
+  const quotaRetryMs =
+    options.quotaRetryMs !== undefined && Number.isFinite(options.quotaRetryMs) && options.quotaRetryMs > 0
+      ? Math.ceil(options.quotaRetryMs)
+      : undefined;
 
   /**
    * Settle the model calls of one prompt: the turns that actually started, so
@@ -188,25 +198,37 @@ export function createPiSupervisor(options: CreatePiSupervisorOptions): PiSuperv
       if (callsLeft < 1 && (failure.failureClass === "quota" || failure.failureClass === "empty")) {
         throw last.withUnremedied("no provider calls left in the run's budget to retry");
       }
-      const remedy = (kind: SupervisorRemedy["remedy"], waitedMs?: number): void => {
+      const remedy = (
+        kind: SupervisorRemedy["remedy"],
+        waitedMs?: number,
+        waitBasis?: SupervisorRemedy["waitBasis"],
+      ): void => {
         remedies.push({
           at: new Date().toISOString(),
           failureClass: failure.failureClass,
           remedy: kind,
           message: failure.message,
           ...(waitedMs !== undefined ? { waitedMs } : {}),
+          ...(waitBasis !== undefined ? { waitBasis } : {}),
         });
       };
       switch (failure.failureClass) {
         case "quota": {
-          if (failure.retryAt === undefined) throw last.withUnremedied("the provider gave no reset time to wait for");
+          if (failure.retryAt === undefined && quotaRetryMs === undefined) {
+            throw last.withUnremedied("the provider gave no reset time to wait for");
+          }
           if (quotaWaits >= MAX_QUOTA_WAITS) {
             throw last.withUnremedied(`still over quota after ${MAX_QUOTA_WAITS} waits in this turn`);
           }
-          const waitMs = Math.max(0, Date.parse(failure.retryAt) - Date.now());
+          const waitBasis = failure.retryAt !== undefined ? ("provider" as const) : ("operator" as const);
+          const waitMs =
+            failure.retryAt !== undefined ? Math.max(0, Date.parse(failure.retryAt) - Date.now()) : quotaRetryMs!;
           if (waitMs > waitLeft) {
             throw last.withUnremedied(
-              `the reset at ${failure.retryAt} is ${Math.ceil(waitMs / 1000)}s away; ${Math.floor(waitLeft / 1000)}s of the run's wait budget remain`,
+              (waitBasis === "provider"
+                ? `the reset at ${failure.retryAt} is ${Math.ceil(waitMs / 1000)}s away`
+                : `the provider gave no reset time, and the operator's quotaRetryMs wait is ${Math.ceil(waitMs / 1000)}s`) +
+                `; ${Math.floor(waitLeft / 1000)}s of the run's wait budget remain`,
             );
           }
           const started = Date.now();
@@ -215,7 +237,7 @@ export function createPiSupervisor(options: CreatePiSupervisorOptions): PiSuperv
           const waited = Math.min(waitLeft, input.signal?.aborted === true ? elapsed : Math.max(waitMs, elapsed));
           waitLeft -= waited;
           quotaWaits += 1;
-          remedy("wait_and_retry", waited);
+          remedy("wait_and_retry", waited, waitBasis);
           if (input.signal?.aborted) throw new Error("supervisor prompt aborted");
           next = prompt;
           continue;
@@ -229,7 +251,7 @@ export function createPiSupervisor(options: CreatePiSupervisorOptions): PiSuperv
           }
           compacted = true;
           try {
-            await session.compact();
+            await session.compact(input.signal !== undefined ? { signal: input.signal } : undefined);
           } catch (err) {
             throw last.withUnremedied(`compaction failed: ${err instanceof Error ? err.message : String(err)}`);
           } finally {
