@@ -136,14 +136,23 @@ graph: banyandb-fix
 repo: ../../skywalking-banyandb
 request: "Fix apache/skywalking#14111."
 budgets:
-  agentInvocations: 600
-  activeMs: 28800000
+  agentInvocations: 2000
+  jobs: 1024
+  decisions: 2048
+  corrections: 16
+  activeMs: 43200000
 ```
 
 `budgets` replaces the controller's defaults. The default of 64 model requests
 per run is too few for BanyanDB: every agent turn counts, a plan alone can
 spend 64 while reading the code, and a failing review round can run four
 passes and four verifications.
+
+These numbers come from a real run (apache/skywalking#14092, run
+`9bfa446d-4ea`): it used 1,924 agent invocations (fix 1,656, review 268)
+across one failed review round and one fix reentry, so 2,000 covers a
+comparable fix with modest headroom. `jobs`, `decisions`, and `corrections`
+are scaled to the same run; `activeMs` allows 12 hours of execution time.
 
 The runner config must enable all three harnesses and the GitHub reads, and
 give command jobs room for BanyanDB's checks:

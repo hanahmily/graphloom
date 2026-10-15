@@ -1,7 +1,6 @@
 import type { EvidenceRecord } from "@graphloom/sdk";
 import { CODING_AGENT, GET_ISSUE, LIST_ISSUE_COMMENTS } from "./constants.js";
 import { packageOutput } from "./gotest.js";
-import { PRIOR_STATUSES, type PriorStatus } from "./review-common.js";
 
 /** Who produced a piece of evidence; the controller attaches it to job evidence. */
 export interface Producer {
@@ -34,6 +33,14 @@ export interface CheckoutRecord {
   prepared: boolean;
   mutations: string[];
   phase: "prepare" | "run";
+  /** True when a `from: "candidate"` checkout's own revert patch was applied. */
+  reverted?: boolean;
+  /** Paths the revert patch touches, present whenever `reverted` is true. */
+  revertedPaths?: string[];
+  /** Git's message when the revert patch did not apply to the candidate; no command ran. */
+  revertError?: string;
+  /** The revert patch text that did not apply. */
+  revertPatch?: string;
 }
 
 export interface CommandRun {
@@ -55,16 +62,6 @@ export interface IssueComment {
   author: string | null;
   createdAt: string | null;
   body: string;
-}
-
-export interface ReviewVerdict {
-  record: EvidenceRecord;
-  verdict: string;
-  summary: string;
-  findings: Array<{ axis?: string; severity?: string; detail: string; finding?: string }>;
-  /** A status for each known finding from an earlier pass, like a code review pass's own `prior`. */
-  prior: Array<{ finding: string; status: PriorStatus; reason: string }>;
-  productDecision?: string;
 }
 
 function object(value: unknown): Record<string, unknown> | undefined {
@@ -108,7 +105,13 @@ export function environmentOutput(evidence: EvidenceRecord[], id: string): strin
   return undefined;
 }
 
-/** The latest run of `id` bound to `digest` in a checkout of `from`, after preparation. */
+/**
+ * The latest run of `id` bound to `digest` in a plain checkout of `from`,
+ * after preparation. Excludes a `from: "candidate"` checkout whose own
+ * revert patch was applied — that is a distinct kind of evidence (see
+ * `latestRevertedCheckoutRun`), and the regression command id is shared
+ * between a real GREEN run and a reverted RED retry on the same digest.
+ */
 export function latestCheckoutRun(
   evidence: EvidenceRecord[],
   id: string,
@@ -116,8 +119,35 @@ export function latestCheckoutRun(
   digest: string | undefined,
 ): CommandRun | undefined {
   return commandRuns(evidence, id)
-    .filter((r) => r.checkout?.from === from && r.checkout.phase === "run" && digest !== undefined && r.record.candidateDigest === digest)
+    .filter((r) => r.checkout?.from === from && r.checkout.reverted !== true && r.checkout.phase === "run" && digest !== undefined && r.record.candidateDigest === digest)
     .at(-1);
+}
+
+/**
+ * The latest run of `id` bound to `digest` in a checkout of the full
+ * candidate with its own revert patch applied: undoing one specific,
+ * already-identified behavioral change while keeping everything else the
+ * candidate has, including earlier-round infrastructure a later test may
+ * depend on to even build.
+ */
+export function latestRevertedCheckoutRun(evidence: EvidenceRecord[], id: string, digest: string | undefined): CommandRun | undefined {
+  return commandRuns(evidence, id)
+    .filter((r) => r.checkout?.from === "candidate" && r.checkout.reverted === true && r.checkout.phase === "run" && digest !== undefined && r.record.candidateDigest === digest)
+    .at(-1);
+}
+
+/**
+ * The latest report, bound to `digest`, that a revert patch did not apply to
+ * the candidate, with the patch text that failed.
+ */
+export function latestRevertFailure(evidence: EvidenceRecord[], digest: string | undefined): { error: string; patch: string | undefined } | undefined {
+  for (const record of [...evidence].reverse()) {
+    if (digest === undefined || record.candidateDigest !== digest) continue;
+    const checkout = object(object(record.payload)?.checkout) as CheckoutRecord | undefined;
+    if (checkout?.revertError === undefined) continue;
+    return { error: checkout.revertError, patch: checkout.revertPatch };
+  }
+  return undefined;
 }
 
 /** Runs from the same checkout job as `run` (same checkout commit and operation). */
@@ -216,54 +246,6 @@ export function issueComments(evidence: EvidenceRecord[]): { record: EvidenceRec
     };
   }
   return undefined;
-}
-
-/** Review verdicts a read-only review job in `stageId` returned, oldest first. */
-export function reviews(evidence: EvidenceRecord[], stageId: string): ReviewVerdict[] {
-  return evidence.flatMap((record) => {
-    if (record.kind !== "review") return [];
-    const p = producer(record);
-    if (p === undefined || p.stageId !== stageId || p.purpose !== "review" || !p.readOnly) return [];
-    const verdict = reviewVerdict(record);
-    return verdict !== undefined ? [verdict] : [];
-  });
-}
-
-export function latestReview(evidence: EvidenceRecord[], stageId: string): ReviewVerdict | undefined {
-  return reviews(evidence, stageId).at(-1);
-}
-
-function reviewVerdict(record: EvidenceRecord): ReviewVerdict | undefined {
-  const payload = object(record.payload);
-  if (payload === undefined) return undefined;
-  const findings = Array.isArray(payload.findings)
-    ? payload.findings.flatMap((raw) => {
-        const f = object(raw);
-        return f !== undefined && typeof f.detail === "string"
-          ? [
-              {
-                detail: f.detail,
-                ...(typeof f.axis === "string" ? { axis: f.axis } : {}),
-                ...(typeof f.severity === "string" ? { severity: f.severity } : {}),
-                ...(typeof f.finding === "string" && f.finding.trim() !== "" ? { finding: f.finding.trim() } : {}),
-              },
-            ]
-          : [];
-      })
-    : [];
-  const prior = (Array.isArray(payload.prior) ? payload.prior : []).flatMap((raw) => {
-    const p = object(raw);
-    const status = PRIOR_STATUSES.find((s) => s === p?.status);
-    return p !== undefined && typeof p.finding === "string" && status !== undefined ? [{ finding: p.finding.trim(), status, reason: String(p.reason ?? "") }] : [];
-  });
-  return {
-    record,
-    verdict: String(payload.verdict ?? ""),
-    summary: String(payload.summary ?? ""),
-    findings,
-    prior,
-    ...(typeof payload.productDecision === "string" && payload.productDecision.trim() !== "" ? { productDecision: payload.productDecision } : {}),
-  };
 }
 
 export function latestFile(evidence: EvidenceRecord[], path: string, digest: string | undefined): { record: EvidenceRecord; bytes: string } | undefined {

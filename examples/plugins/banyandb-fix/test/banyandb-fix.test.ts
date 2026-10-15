@@ -22,14 +22,11 @@ import {
   findingById,
   findingLedger,
   ginkgoSpecs,
-  MAX_FINDING_ROUNDS,
   MAX_SWEEP_PASSES,
   observablePath,
   parseCodeReview,
   parseVerification,
   pathsToObserve,
-  planFindingById,
-  planFindingLedger,
   quoteMatches,
   qualifyValidators,
   roundSummary,
@@ -39,7 +36,6 @@ import {
   requestedIssue,
   testOutcome,
   toVerify,
-  toVerifyPlan,
   validatorById,
   verificationInstruction,
   type DecisionRecord,
@@ -85,14 +81,14 @@ interface Scenario {
   candidate?: Array<Partial<Record<string, CommandResult>>>;
   candidateMutations?: string[][];
   red?: CommandResult;
-  /** The plan reviewer's verdict for each plan review, in order; the last repeats. */
-  planReviews?: Array<Record<string, unknown>>;
+  /** The regression outcome for a reverted-candidate RED retry, when the base checkout cannot build the test alone. */
+  redReverted?: CommandResult;
+  /** Whether a revert patch applies to the candidate; false reports the controller's failed-apply evidence. */
+  revertApplies?: (patch: string) => boolean;
   /** The code reviewer's result for each review, in order; the last repeats. */
   codeReviews?: Array<{ output: unknown; status?: string }>;
   /** The verifier's result for each verification, in order; the last repeats. By default it confirms every finding it is given. */
   verifications?: Array<{ output: unknown; status?: string }>;
-  /** The plan-review verifier's result for each verification, in order; the last repeats. By default it confirms every plan finding it is given. */
-  planVerifications?: Array<{ output: unknown; status?: string }>;
   /** Bytes an observation records for each path; CHANGES.md defaults to `changes`, anything else to empty. */
   files?: Record<string, string>;
   /** What the environment check printed for ocr; null records no passing check. */
@@ -142,21 +138,22 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
   let privateState: string | undefined;
   let digest = "d0";
   let planDigest = "p0";
-  // decisions-recorded/plan-reviewed anchor to the plan's own content
-  // (identityArtifactSchema in the real graph), not the workspace candidate —
-  // an implementer edit must not invalidate an already-accepted plan.
-  const identityFor = (requirementId: string): string =>
-    requirementId === "decisions-recorded" || requirementId === "plan-reviewed" ? planDigest : digest;
+  // decisions-recorded anchors to the plan's own content (identityArtifactSchema
+  // in the real graph), not the workspace candidate — an implementer edit must
+  // not invalidate an already-accepted plan.
+  const identityFor = (requirementId: string): string => (requirementId === "decisions-recorded" ? planDigest : digest);
   let implemented = 0;
   let candidates = 0;
   let planned = 0;
-  let planReviewed = 0;
   let codeReviewed = 0;
   let verified = 0;
-  let planVerified = 0;
   let reentries = scenario.reenter ?? 0;
   let seq = 0;
   let generation = 1;
+  // Only a real reentry of Fix bumps attempt, exactly like the controller
+  // (loop.ts's "reenter" case): resumeAfterFix bumps generation alone, the
+  // same fence a bare resume applies, to prove the graph tells the two apart.
+  let attempt = 1;
   const openAttempt: Record<string, boolean> = {};
   const nth = <T>(list: T[] | undefined, i: number): T | undefined => (list === undefined || list.length === 0 ? undefined : list[Math.min(i, list.length - 1)]);
   const budgets = { agentInvocations: 32, jobs: 64, decisions: 128, corrections: 8 };
@@ -202,13 +199,6 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
         record("other", { codingAgent: { harness: "claude-code", status: result.status ?? "completed", output: result.output } }, job, op);
         return;
       }
-      if (job.purpose === "verify") {
-        const ids = [...assignment(job).matchAll(/^- (P\d+) /gm)].map((m) => m[1]!);
-        const confirmAll = verdicts(...ids.map((finding) => ({ finding, verdict: "confirmed", quotes: [{ path: "pkg/timestamp/scheduler.go", line: 7, text: "s.wait(ctx)" }] })));
-        const result: { output: unknown; status?: string } = nth(scenario.planVerifications, planVerified++) ?? confirmAll;
-        record("other", { codingAgent: { harness: "claude-code", status: result.status ?? "completed", output: result.output } }, job, op);
-        return;
-      }
       if (job.purpose === "diagnostic") {
         output = nth(scenario.plans, planned++) ?? PLAN;
         // The plan's own identity, independent of the workspace candidate:
@@ -225,12 +215,6 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
         const result = nth(scenario.codeReviews, codeReviewed++) ?? reviewed();
         record("other", { codingAgent: { harness: "codex", status: result.status ?? "completed", output: result.output } }, job, op);
         return;
-      } else if (job.purpose === "review") {
-        const verdict = nth(scenario.planReviews, planReviewed++) ?? { verdict: "approved", summary: "ok" };
-        record("other", { codingAgent: { status: "completed", output: verdict } }, job, op);
-        record("review", verdict, job, op);
-        sessions.push({ operationId: op, stageId: job.stageId, attempt: 1, generation, dispatchKey: "review", executorId: job.executor!.id, status: "ok" });
-        return;
       }
       record("other", { codingAgent: { harness: "claude-code", status: "completed", output } }, job, op);
       sessions.push({
@@ -243,6 +227,28 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
         status: "ok",
         ...(job.continueFrom !== undefined ? { continuedFrom: job.continueFrom } : {}),
       });
+      return;
+    }
+    if (job.checkout?.from === "candidate" && job.checkout.revertPatch !== undefined && scenario.revertApplies?.(job.checkout.revertPatch) === false) {
+      record(
+        "other",
+        { checkout: { from: "candidate", base: "base-sha", commit: `rc-${op}`, paths: CHANGED, prepared: false, mutations: [], phase: "run", revertError: "error: patch failed: pkg/timestamp/scheduler.go:1", revertPatch: job.checkout.revertPatch } },
+        job,
+        op,
+      );
+      return;
+    }
+    if (job.checkout?.from === "candidate" && job.checkout.revertPatch !== undefined) {
+      const outcome = scenario.redReverted ?? { exitCode: 1, report: FAILED };
+      record(
+        "command",
+        {
+          ...commandPayload(COMMAND.regression, outcome),
+          checkout: { from: "candidate", base: "base-sha", commit: `rc-${op}`, paths: CHANGED, prepared: true, mutations: [], phase: "run", reverted: true, revertedPaths: ["pkg/timestamp/scheduler.go"] },
+        },
+        job,
+        op,
+      );
       return;
     }
     if (job.checkout?.from === "candidate") {
@@ -268,7 +274,7 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
     const view: RunView = {
       runId: "run",
       task: { request, repo: "../skywalking-banyandb" },
-      current: { stageId: "fix", attempt: 1 },
+      current: { stageId: "fix", attempt },
       // A receipt is valid only while the candidate it names is still the
       // accepted one — the same identity-match invalidation the controller
       // applies, simplified to one whole-candidate digest since Fix is the
@@ -292,8 +298,9 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
     if (decision.privateState !== undefined) privateState = decision.privateState;
     const action = decision.action;
     const op = `op-${step}`;
-    if (action.type === "dispatch") run(action.job, op);
-    else if (action.type === "observe") {
+    if (action.type === "dispatch") {
+      run(action.job, op);
+    } else if (action.type === "observe") {
       for (const p of action.observe.paths ?? []) {
         observed.push(p);
         record("file", { path: p, bytes: p === CHANGES_PATH ? (scenario.changes ?? CHANGES) : (scenario.files?.[p] ?? "") }, undefined, op);
@@ -318,6 +325,7 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
       reentries -= 1;
       openAttempt.fix = true;
       generation += 1;
+      attempt += 1;
     } else {
       return { decision, decisions, jobs, evidence, receipts, observed };
     }
@@ -407,11 +415,11 @@ describe("banyandb-fix graph", () => {
     }
   });
 
-  it("plans, reviews the plan, fixes, checks, reviews the code and delivers #14111", () => {
+  it("plans, fixes, checks, reviews the code and delivers #14111", () => {
     const { decision, jobs } = simulate({});
     expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
 
-    const [issue, comments, plan, planReview, implement, candidate, red, codeReview, deliver] = jobs;
+    const [issue, comments, plan, implement, candidate, red, codeReview, deliver] = jobs;
     expect(issue!.executor!.id).toBe("graphloom.github/get-issue");
     expect(issue!.input).toMatchObject({ owner: "apache", repo: "skywalking", number: ISSUE });
     expect(comments!.executor!.id).toBe("graphloom.github/list-issue-comments");
@@ -420,12 +428,6 @@ describe("banyandb-fix graph", () => {
     expect(plan!.continueFrom).toBeUndefined();
     expect(assignment(plan)).toContain("It should not be an error.");
     expect(assignment(plan)).toContain("names each caller and lifecycle path that depends on the old behaviour");
-
-    expect(planReview).toMatchObject({ stageId: "fix", kind: "agent", purpose: "review", readOnly: true, resultSchema: "review-verdict-v1", input: { harness: "pi" } });
-    expect(planReview!.jobId).toBeUndefined();
-    expect(planReview!.continueFrom).toBeUndefined();
-    expect(assignment(planReview)).toContain(PLAN.summary);
-    expect(assignment(planReview)).toContain("- reach:");
 
     expect(implement).toMatchObject({ jobId: "implementer", purpose: "work", continueFrom: "op-2", input: { harness: "claude-code" } });
     expect(implement!.writeScope).toEqual([".", "!api/proto", "!go.mod", "!go.sum", "!.github"]);
@@ -465,91 +467,12 @@ describe("banyandb-fix graph", () => {
     expect(decision.reason).toMatch(/pull request body is the report of evidence ev-\d+/);
   });
 
-  it("returns the plan reviewer's findings to the planner's session and reviews the revision afresh", () => {
-    const revised: DecisionRecord = { ...PLAN, summary: "Warn at the timeout, keep Close bounded by cancelling on shutdown." };
-    const finding = { axis: "reach", severity: "blocking", detail: "Scheduler.Close waits for trigger, which never returns for an action that ignores cancellation." };
-    const { decision, jobs } = simulate({
-      plans: [PLAN, revised],
-      planReviews: [
-        { verdict: "request_changes", summary: "the plan misses the shutdown path", findings: [finding] },
-        { verdict: "approved", summary: "ok", prior: [{ finding: "P1", status: "resolved", reason: "the revision closes the gap" }] },
-      ],
-    });
-    expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
-    const plans = jobs.filter((j) => j.purpose === "diagnostic" && j.kind === "agent");
-    const planReviews = jobs.filter((j) => j.purpose === "review" && j.stageId === "fix");
-    expect(plans).toHaveLength(2);
-    expect(planReviews).toHaveLength(2);
-    expect(plans[1]).toMatchObject({ jobId: "implementer", readOnly: true, continueFrom: "op-2" });
-    expect(assignment(plans[1])).toContain(`reach (blocking): ${finding.detail}`);
-    expect(assignment(plans[1])).not.toContain("working tree holds your previous change");
-    expect(planReviews[1]!.continueFrom).toBeUndefined();
-    // §4.3: the second pass is shown P1 (open after the first pass raised
-    // it) as a valid reference id for findings[].finding/prior[].finding, so
-    // "resolved" can name it instead of repeating its description.
-    expect(planReviews[1]!.knownReferences?.["findings[].finding"]?.ids).toContain("P1");
-    expect(planReviews[1]!.knownReferences?.["prior[].finding"]?.ids).toContain("P1");
-    expect(assignment(planReviews[1])).toContain(revised.summary);
-    expect(assignment(planReviews[1])).toContain(`The plan was revised because of:\n- The plan reviewer sent your plan back: the plan misses the shutdown path`);
-    const implement = jobs.find((j) => j.purpose === "work")!;
-    expect(implement.continueFrom).toBe("op-4");
-    expect(assignment(implement)).toContain(revised.summary);
-  });
-
-  it("hands a plan finding the reviewer keeps repeating to the supervisor, naming that finding", () => {
-    const finding = { axis: "reach", severity: "blocking", detail: "Close waits for an action that ignores cancellation." };
-    const stillPresent = { finding: "P1", status: "still_present", reason: "the revision does not address it" };
-    const { decision, jobs } = simulate({
-      planReviews: [
-        { verdict: "request_changes", summary: "misses Close", findings: [finding] },
-        { verdict: "request_changes", summary: "still misses Close", prior: [stillPresent] },
-        { verdict: "request_changes", summary: "still misses Close", prior: [stillPresent] },
-      ],
-    });
-    expect(decision.action).toMatchObject({ type: "supervise" });
-    const reason = (decision.action as { supervise: { reason: string } }).supervise.reason;
-    expect(reason).toContain("plan finding P1 is still unresolved after 2 round(s)");
-    expect(reason).toContain(finding.detail);
-    expect(jobs.filter((j) => j.purpose === "diagnostic" && j.kind === "agent")).toHaveLength(3);
-    expect(jobs.filter((j) => j.purpose === "verify")).toHaveLength(2);
-    expect(jobs.some((j) => j.purpose === "work")).toBe(false);
-  });
-
-  it("stops sweeping the plan at the overall round backstop when every pass raises a fresh finding", () => {
-    const defect = (n: number) => ({ axis: "reach" as const, severity: "blocking" as const, detail: `defect number ${n}` });
-    const { decision, jobs } = simulate({
-      planReviews: Array.from({ length: 6 }, (_, i) => ({ verdict: "request_changes", summary: `defect ${i + 1}`, findings: [defect(i + 1)] })),
-    });
-    expect(decision.action).toMatchObject({ type: "supervise" });
-    const reason = (decision.action as { supervise: { reason: string } }).supervise.reason;
-    expect(reason).toContain("the plan review has run 6 passes in this generation without converging");
-    expect(jobs.filter((j) => j.purpose === "review" && j.stageId === "fix")).toHaveLength(6);
-    expect(jobs.some((j) => j.purpose === "verify")).toBe(false);
-    expect(jobs.some((j) => j.purpose === "work")).toBe(false);
-  });
-
   it("stops at the plan with the draft question when a maintainer must decide", () => {
     const { decision, jobs } = simulate({
       plans: [{ status: "blocked", summary: "The API shape is a product decision.", decisions: [], openQuestions: ["Which API?"], draftComment: "Should the new API be X or Y?" }],
     });
     expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "needs maintainer decision", blocker: "Should the new API be X or Y?" } });
     expect(jobs.some((j) => j.purpose === "work" || j.purpose === "review")).toBe(false);
-  });
-
-  it("hands the plan reviewer's product decision to the supervisor instead of stopping directly", () => {
-    const { decision, jobs } = simulate({ planReviews: [{ verdict: "request_changes", summary: "changes the metric", productDecision: "Should the metric change?" }] });
-    expect(decision.action).toMatchObject({ type: "supervise" });
-    const reason = (decision.action as { supervise: { reason: string } }).supervise.reason;
-    expect(reason).toContain("Should the metric change?");
-    expect(jobs.some((j) => j.purpose === "work")).toBe(false);
-  });
-
-  it("delivers an approved plan and asks the reviewer's product question in the pull request", () => {
-    const question = "Should the timeout become configurable per task?";
-    const { decision, jobs } = simulate({ planReviews: [{ verdict: "approved", summary: "ok", productDecision: question }] });
-    expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
-    expect(deliverArgs(jobs).body).toContain(`- ${question}`);
-    expect(deliverArgs(jobs).message).not.toContain(question);
   });
 
   it("verifies a high comment, sweeps once more for new ones, and hands the confirmed finding to the supervisor", () => {
@@ -676,7 +599,7 @@ describe("banyandb-fix graph", () => {
     expect(deliverArgs(jobs).body).toContain("no critical or high comments; 1 lower-severity comment(s) left for the reviewer.");
   });
 
-  it("revisits the plan with the confirmed findings when the supervisor re-enters Fix, and fixes them on the new change", () => {
+  it("does not redraft an already-approved plan when the supervisor re-enters Fix, and fixes the confirmed findings with a new implementation pass", () => {
     const { decision, jobs } = simulate({
       reenter: 1,
       codeReviews: [reviewed([HANG]), priorPass({ F1: "still_present" }), priorPass({ F1: "resolved" })],
@@ -684,29 +607,25 @@ describe("banyandb-fix graph", () => {
     expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
     const plans = jobs.filter((j) => j.purpose === "diagnostic" && j.kind === "agent" && j.stageId === "fix");
     const work = jobs.filter((j) => j.purpose === "work");
-    expect(plans).toHaveLength(2);
+    // The plan is still right; nothing re-drafts it just because Fix was re-entered.
+    expect(plans).toHaveLength(1);
     expect(work).toHaveLength(2);
-    const revisit = assignment(plans[1]);
-    expect(revisit).toContain("The working tree holds your previous change");
-    expect(revisit).toContain("Code review of your previous change found 1 critical or high defect(s), each confirmed by an independent verifier:");
-    expect(revisit).toContain("F1 pkg/timestamp/scheduler.go:88-95 (high, bug): Close now waits forever");
-    expect(revisit).toContain("pkg/timestamp/scheduler.go:7 `s.wait(ctx)`");
+    // The reentry asks the implementer's own session for a fresh pass, carrying
+    // code review's confirmed findings, instead of a plan revision in between.
+    expect(work[1]!.continueFrom).toBe(`op-${jobs.indexOf(work[0]!)}`);
+    const correction = assignment(work[1]);
+    expect(correction).toContain("Code review of your previous change found 1 critical or high defect(s), each confirmed by an independent verifier:");
+    expect(correction).toContain("F1 pkg/timestamp/scheduler.go:88-95 (high, bug): Close now waits forever");
+    expect(correction).toContain("pkg/timestamp/scheduler.go:7 `s.wait(ctx)`");
     expect(deliverArgs(jobs).body).toContain("no critical or high finding left open (1 fixed during review)");
-    // The revisited plan continues the implementer's session and is reviewed again before implementing.
-    const implementOp = `op-${jobs.indexOf(work[0]!)}`;
-    expect(plans[1]!.continueFrom).toBe(implementOp);
-    const planReviews = jobs.filter((j) => j.purpose === "review" && j.stageId === "fix");
-    expect(planReviews).toHaveLength(2);
-    expect(assignment(planReviews[1])).toContain("Close now waits forever");
     const passes = jobs.filter((j) => j.purpose === "review" && j.stageId === "review");
     expect(passes).toHaveLength(3);
     // The first pass on the new change owes F1 a status and is not a sweep.
     expect(assignment(passes[2])).toContain("- F1 (confirmed) pkg/timestamp/scheduler.go:88-95");
     expect(assignment(passes[2])).not.toContain("An earlier pass");
-    expect(jobs.indexOf(planReviews[1]!)).toBeLessThan(jobs.indexOf(work[1]!));
   });
 
-  it("hands the planner and the plan reviewer a long issue whole, with its latest maintainer answer", () => {
+  it("hands the planner a long issue whole, with its latest maintainer answer", () => {
     const answer = "Maintainer answer: keep the action running and warn once.";
     const { decision, jobs } = simulate({
       issueBody: `Backups longer than five minutes are reported as action timed out.\n${"log line\n".repeat(4_000)}`,
@@ -716,12 +635,11 @@ describe("banyandb-fix graph", () => {
       ],
     });
     expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
-    for (const job of [jobs.find((j) => j.purpose === "diagnostic" && j.kind === "agent")!, jobs.find((j) => j.purpose === "review" && j.stageId === "fix")!]) {
-      const assignment = (job.input as { assignment: string }).assignment;
-      expect(assignment.length).toBeGreaterThan(36_000);
-      expect(assignment).toContain(answer);
-      expect(assignment).not.toContain("truncated");
-    }
+    const job = jobs.find((j) => j.purpose === "diagnostic" && j.kind === "agent")!;
+    const assignment = (job.input as { assignment: string }).assignment;
+    expect(assignment.length).toBeGreaterThan(36_000);
+    expect(assignment).toContain(answer);
+    expect(assignment).not.toContain("truncated");
   });
 
   it("stops before any agent when the issue snapshot cannot be handed over whole", () => {
@@ -755,7 +673,7 @@ describe("banyandb-fix graph", () => {
     expect(jobs.filter((j) => j.checkout?.from === "candidate" && j.purpose === "check")).toHaveLength(1);
     const fixReceipts = receipts.filter((r) => r.stageId === "fix" && r.valid);
     expect(fixReceipts.map((r) => r.requirementId).sort()).toEqual(
-      ["builds", "changelog-entry", "decisions-recorded", "in-scope", "passes", "plan-reviewed", "reproduces"].sort(),
+      ["builds", "changelog-entry", "decisions-recorded", "in-scope", "passes", "reproduces"].sort(),
     );
   });
 
@@ -779,7 +697,7 @@ describe("banyandb-fix graph", () => {
     expect(correction).toContain("lint exited 2");
     expect(correction).toContain("scheduler.go:12: unused variable");
     expect(work[0]!.continueFrom).toBe("op-2");
-    expect(work[1]!.continueFrom).toBe("op-4");
+    expect(work[1]!.continueFrom).toBe("op-3");
     // Checks rerun for the corrected change.
     expect(jobs.filter((j) => j.checkout?.from === "candidate" && j.purpose === "check")).toHaveLength(2);
   });
@@ -808,10 +726,62 @@ describe("banyandb-fix graph", () => {
     expect(correction).not.toContain("maxprocs");
   });
 
-  it("does not accept a RED test that fails to build on the base", () => {
+  it("asks for a patch reverting the fix when RED cannot build on the base, instead of a generic correction", () => {
     const { jobs } = simulate({ red: { exitCode: 2, report: events({ ImportPath: "p [p.test]", Action: "build-fail" }) } });
-    const correction = (jobs.filter((j) => j.purpose === "work")[1]!.input as { assignment: string }).assignment;
-    expect(correction).toContain("does not build on the base commit");
+    const ask = (jobs.filter((j) => j.purpose === "work")[1]!.input as { assignment: string }).assignment;
+    expect(ask).toContain("RED could not build");
+    expect(ask).toContain("revertPatch");
+  });
+
+  it("hands an unbuildable RED to the supervisor once the implementer never supplies a working revert patch", () => {
+    const { decision } = simulate({ red: { exitCode: 2, report: events({ ImportPath: "p [p.test]", Action: "build-fail" }) } });
+    expect(decision.action.type).toBe("supervise");
+  });
+
+  it("retries RED against the candidate with the implementer's own patch reverted, and accepts it once it fails by assertion", () => {
+    const withPatch: DecisionRecord = {
+      ...PLAN,
+      revertPatch: "diff --git a/pkg/timestamp/scheduler.go b/pkg/timestamp/scheduler.go\n--- a/pkg/timestamp/scheduler.go\n+++ b/pkg/timestamp/scheduler.go\n@@ -1 +1 @@\n-old\n+new\n",
+    };
+    const { decision, jobs, receipts } = simulate({
+      red: { exitCode: 2, report: events({ ImportPath: "p [p.test]", Action: "build-fail" }) },
+      implement: [undefined, withPatch],
+      redReverted: { exitCode: 1, report: FAILED },
+    });
+    expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+    const reverted = jobs.find((j) => j.checkout?.from === "candidate" && j.checkout.revertPatch !== undefined);
+    expect(reverted).toBeDefined();
+    expect(receipts.some((r) => r.stageId === "fix" && r.requirementId === "reproduces" && r.valid)).toBe(true);
+  });
+
+  it("asks for a fresh revert patch when the recorded one no longer applies, instead of failing the executor", () => {
+    const patch = (marker: string) => `diff --git a/pkg/timestamp/scheduler.go b/pkg/timestamp/scheduler.go\n--- a/pkg/timestamp/scheduler.go\n+++ b/pkg/timestamp/scheduler.go\n@@ -1 +1 @@\n-${marker}\n+new\n`;
+    const stale: DecisionRecord = { ...PLAN, revertPatch: patch("stale") };
+    const fresh: DecisionRecord = { ...PLAN, revertPatch: patch("fresh") };
+    const { decision, jobs, receipts } = simulate({
+      red: { exitCode: 2, report: events({ ImportPath: "p [p.test]", Action: "build-fail" }) },
+      implement: [undefined, stale, fresh],
+      revertApplies: (p) => p === fresh.revertPatch,
+    });
+    expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+    // The stale patch was tried once, then never again; the fresh one was tried.
+    const tried = jobs.filter((j) => j.checkout?.from === "candidate" && j.checkout.revertPatch !== undefined).map((j) => (j.checkout as { revertPatch: string }).revertPatch);
+    expect(tried).toEqual([stale.revertPatch, fresh.revertPatch]);
+    const ask = (jobs.filter((j) => j.purpose === "work")[2]!.input as { assignment: string }).assignment;
+    expect(ask).toContain("Your earlier revertPatch cannot be used");
+    expect(ask).toContain("does not apply");
+    expect(receipts.some((r) => r.stageId === "fix" && r.requirementId === "reproduces" && r.valid)).toBe(true);
+  });
+
+  it("retries an unchanged revert patch at most once per candidate, and hands off once corrections run out", () => {
+    const stale: DecisionRecord = { ...PLAN, revertPatch: "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n" };
+    const { decision, jobs } = simulate({
+      red: { exitCode: 2, report: events({ ImportPath: "p [p.test]", Action: "build-fail" }) },
+      implement: [undefined, stale, stale, stale],
+      revertApplies: () => false,
+    });
+    expect(decision.action.type).toBe("supervise");
+    expect(jobs.filter((j) => j.checkout?.from === "candidate" && j.checkout.revertPatch !== undefined)).toHaveLength(2);
   });
 
   it("hands the run to the supervisor after two corrections", () => {
@@ -1114,130 +1084,6 @@ describe("findings ledger", () => {
     expect(quoteMatches({ ...BOUNDED, text: "done()" }, SCHEDULER)).toBe(false);
     expect(["pkg/timestamp/scheduler.go", ".golangci.yml", "banyand/Makefile.inc"].every(observablePath)).toBe(true);
     for (const p of ["../x.go", "/etc/passwd", "pkg/./x.go", ".git/config", "pkg/timestamp", ".github", "pkg//x.go", "a b.go"]) expect(observablePath(p), p).toBe(false);
-  });
-});
-
-describe("plan findings ledger", () => {
-  let n = 0;
-  const planAgent = (purpose: string, output: unknown, digest?: string, status = "completed"): EvidenceRecord => ({
-    ref: `p-${++n}`,
-    kind: "other",
-    generation: 1,
-    ...(digest !== undefined ? { candidateDigest: digest } : {}),
-    payload: { codingAgent: { status, output }, producer: { operationId: `op-${n}`, stageId: "fix", purpose, readOnly: true, kind: "agent", executorId: "graphloom.coding-agent/run" } },
-  });
-  const planRecord = () => planAgent("diagnostic", PLAN);
-  // Unlike the plan and the verifier (read from the codingAgent wrapper via
-  // agentRuns), a review-purpose job's structured verdict is read as its own
-  // kind: "review" evidence (reviews(), reviewVerdict()), so this builds that
-  // shape directly rather than reusing planAgent.
-  const planPass = (findings: Array<Record<string, unknown>>, prior: Record<string, string> = {}): EvidenceRecord => ({
-    ref: `p-${++n}`,
-    kind: "review",
-    generation: 1,
-    payload: {
-      verdict: findings.length > 0 ? "request_changes" : "approved",
-      summary: "s",
-      findings,
-      prior: Object.entries(prior).map(([finding, status]) => ({ finding, status, reason: `${finding} is ${status}` })),
-      producer: { operationId: `op-${n}`, stageId: "fix", purpose: "review", readOnly: true, kind: "agent", executorId: "graphloom.coding-agent/run" },
-    },
-  });
-  const planVerify = (list: Parameters<typeof verdicts>, digest?: string) => planAgent("verify", verdicts(...list).output, digest);
-  const confirmP1 = (digest?: string) => planVerify([{ finding: "P1", verdict: "confirmed", quotes: [{ path: "pkg/timestamp/scheduler.go", line: 7, text: "s.wait(ctx)" }] }], digest);
-  const planFile = (digest: string, bytes: string, path = "pkg/timestamp/scheduler.go"): EvidenceRecord => ({
-    ref: `p-${++n}`,
-    kind: "file",
-    generation: 1,
-    candidateDigest: digest,
-    payload: { path, bytes },
-  });
-  const planStates = (evidence: EvidenceRecord[]) => Object.fromEntries(planFindingLedger(evidence, "fix").findings.map((f) => [f.id, `${f.state}@${f.rounds}`]));
-  const DEFECT = { axis: "reach", severity: "blocking", detail: "Close waits for an action that ignores cancellation." };
-
-  it("disputes a finding the reviewer repeats after a revision, and the verifier's confirmation blocks regardless of the pass's own verdict", () => {
-    const evidence = [planRecord(), planPass([DEFECT])];
-    expect(planStates(evidence)).toEqual({ P1: "raised@0" });
-    evidence.push(planRecord());
-    // The reviewer can even say "approved" while still flagging P1 as repeated; the
-    // dispute-then-verify cycle, not the pass's own verdict, decides whether it blocks.
-    evidence.push(planPass([], { P1: "still_present" }));
-    expect(planStates(evidence)).toEqual({ P1: "disputed@1" });
-    evidence.push(confirmP1("d1"));
-    expect(planStates(evidence)).toEqual({ P1: "confirmed@1" });
-  });
-
-  it("dismisses a repeated finding whose refutation matches the current code, and does not block approval", () => {
-    const evidence = [planRecord(), planPass([DEFECT]), planRecord(), planPass([], { P1: "still_present" })];
-    expect(planStates(evidence)).toEqual({ P1: "disputed@1" });
-    const dismissed = [...evidence, planVerify([{ finding: "P1", verdict: "refuted", quotes: [BOUNDED] }], "d1"), planFile("d1", SCHEDULER)];
-    expect(planStates(dismissed)).toEqual({ P1: "dismissed@1" });
-  });
-
-  it("does not re-raise a dismissed finding against the same plan record, only a later one", () => {
-    const evidence = [
-      planRecord(),
-      planPass([DEFECT]),
-      planRecord(),
-      planPass([], { P1: "still_present" }),
-      planVerify([{ finding: "P1", verdict: "refuted", quotes: [BOUNDED] }], "d1"),
-      planFile("d1", SCHEDULER),
-    ];
-    expect(planStates(evidence)).toEqual({ P1: "dismissed@1" });
-    // Naming P1 again on the same plan record changes nothing: it is not reopened.
-    const sameRecord = [...evidence, planPass([{ ...DEFECT, finding: "P1" }])];
-    expect(planStates(sameRecord)).toEqual({ P1: "dismissed@1" });
-    const ledger = planFindingLedger(sameRecord, "fix");
-    expect(ledger.passes.at(-1)!.raised).toEqual([]);
-    // A later plan record can still reopen it as a regression.
-    const laterRecord = [...evidence, planRecord(), planPass([{ ...DEFECT, finding: "P1" }])];
-    const laterLedger = planFindingLedger(laterRecord, "fix");
-    const p1 = planFindingById(laterLedger, "P1")!;
-    expect(p1.state).toBe("raised");
-    expect(p1.regressedOn).toBe(p1.on);
-  });
-
-  it("counts rounds per finding, not per whole-plan revision: one finding sticks while another settles after one round", () => {
-    const other = { axis: "test" as const, severity: "blocking" as const, detail: "a different, soon-resolved defect" };
-    let evidence = [planRecord(), planPass([DEFECT, other])];
-    expect(planStates(evidence)).toEqual({ P1: "raised@0", P2: "raised@0" });
-    evidence = [...evidence, planRecord(), planPass([], { P1: "still_present", P2: "resolved" })];
-    expect(planStates(evidence)).toEqual({ P1: "disputed@1", P2: "resolved@0" });
-    evidence = [...evidence, confirmP1("d1")];
-    expect(planStates(evidence)).toEqual({ P1: "confirmed@1", P2: "resolved@0" });
-    evidence = [...evidence, planRecord(), planPass([], { P1: "still_present" })];
-    expect(planStates(evidence)).toEqual({ P1: "disputed@2", P2: "resolved@0" });
-    const ledger = planFindingLedger(evidence, "fix");
-    const p1 = planFindingById(ledger, "P1")!;
-    expect(p1.rounds).toBe(MAX_FINDING_ROUNDS);
-    // P2 never had to go through a second dispute round; the cap tracks P1 alone.
-    expect(planFindingById(ledger, "P2")!.rounds).toBe(0);
-  });
-
-  it("confirms a finding with no file evidence needed, but cannot dismiss one without code to quote, before anything is implemented", () => {
-    const evidence = [planRecord(), planPass([DEFECT]), planRecord(), planPass([], { P1: "still_present" })];
-    expect(planStates(evidence)).toEqual({ P1: "disputed@1" });
-    const confirmedNoCode = [...evidence, planVerify([{ finding: "P1", verdict: "confirmed", quotes: [{ path: "x", line: 1, text: "the plan's own argument" }] }])];
-    expect(planStates(confirmedNoCode)).toEqual({ P1: "confirmed@1" });
-    // A refutation needs quotes that match real code; there is none yet, so it cannot settle as dismissed.
-    const refutedNoCode = [...evidence, planVerify([{ finding: "P1", verdict: "refuted", quotes: [{ path: "x", line: 1, text: "whatever" }] }])];
-    const ledger = planFindingLedger(refutedNoCode, "fix");
-    const p1 = planFindingById(ledger, "P1")!;
-    expect(p1.state).toBe("disputed");
-    expect(p1.dispute).toMatch(/do not match the change/);
-  });
-
-  it("consumes a verification that gives no verdict, so it is not dispatched again before the round cap", () => {
-    const evidence = [planRecord(), planPass([DEFECT]), planRecord(), planPass([], { P1: "still_present" })];
-    expect(planStates(evidence)).toEqual({ P1: "disputed@1" });
-    const noVerdict = [...evidence, planVerify([], "d1")];
-    const ledger = planFindingLedger(noVerdict, "fix");
-    expect(toVerifyPlan(ledger)).toEqual([]);
-    const p1 = planFindingById(ledger, "P1")!;
-    expect(p1.state).toBe("disputed");
-    expect(p1.rounds).toBe(1);
-    expect(p1.verdict).toMatchObject({ verdict: "uncertain" });
-    expect(p1.dispute).toBe("the verifier gave no verdict");
   });
 });
 

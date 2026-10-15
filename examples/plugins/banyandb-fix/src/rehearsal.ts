@@ -2,8 +2,8 @@
  * banyandb-fix's rehearsal scenario (docs/design-graph-rehearsal.md §4.4/§4.5):
  * recorded verbatim with `graphloom rehearse --record-from` from a real,
  * successful live run (Claude Code planned, implemented and confirmed the
- * fix; Pi reviewed the plan; Codex reviewed the code in open-code-review's
- * delegation mode), not hand-written — the real models' own replies are the
+ * fix; Codex reviewed the code in open-code-review's delegation mode), not
+ * hand-written — the real models' own replies are the
  * most realistic stand-in data available, and CI rehearses on exactly this,
  * never a hand-authored guess at what a model would say. The real review
  * first hit a transient open-code-review misconfiguration (excluding the new
@@ -166,47 +166,6 @@ export const rehearsal: GraphRehearsal = {
               { path: "pkg/timestamp/scheduler_test.go", bytes: SCHEDULER_TEST },
               { path: "CHANGES.md", bytes: CHANGES_AFTER },
             ],
-          },
-        ],
-        "review-verdict-v1": [
-          {
-            output: {
-              verdict: "approved",
-              summary:
-                "The plan is approved. The fixture contains a single function `Status(minutes int, running bool) string` in `pkg/timestamp/scheduler.go` that currently ignores its `running` parameter and returns `\"timed out\"` whenever `minutes >= generatedLimit (5)`. The plan's chosen fix — return `\"running\"` when the `running` flag is true and the elapsed time is past the limit — is the smallest possible change, maps onto the already-present-but-unused parameter (so callers already pass `running`), directly matches the bot comment on apache/skywalking#14111, and changes nothing the issue does not name. All three decisions are correctly tiered (two implementation, one behaviour) and conservative. The function is pure (no goroutines, contexts, cancellation, cleanup, or shutdown paths), so the reach analysis is trivially satisfied: the only behaviour change is the returned string, with no lifecycle or resource implications in the fixture. The plan correctly flags the \"genuine hang\" risk and the unknown external surface of the status string as openQuestions/followUps without letting them block the fix. The planned regression test (assert that a still-executing, non-errored action past the interval is reported as \"running\") has its expected value sourced from the issue/bot comment and fits Go's standard `pkg/timestamp/scheduler_test.go` location. No blocking findings on any of the four axes.",
-              findings: [
-                {
-                  axis: "spec",
-                  severity: "minor",
-                  detail:
-                    'pkg/timestamp/scheduler.go: Status already accepts a `running bool` parameter that is ignored — the plan\'s chosen fix (return "running" when the flag is true) is the direct, minimal mapping the issue requests and changes nothing outside the issue\'s scope.',
-                  finding: "",
-                },
-                {
-                  axis: "decisions",
-                  severity: "minor",
-                  detail:
-                    "All three decisions are correctly tiered: decision 1 is the only behaviour decision (conservative, matches bot comment), decisions 2 and 3 are implementation-level. No product decision is taken; status-string vocabulary is internal scheduler labelling, not a public API/flag change.",
-                  finding: "",
-                },
-                {
-                  axis: "reach",
-                  severity: "minor",
-                  detail:
-                    "Status is a pure function in this fixture: no goroutines, contexts, cancellation, retries, resources, shutdown, or Close paths to audit. The only behaviour change is the returned string for the (currently ignored) `running==true && minutes>=limit` case. The plan correctly notes open risks (hang detection, external status surfaces, other caller behaviours) as openQuestions/followUps rather than letting them block.",
-                  finding: "",
-                },
-                {
-                  axis: "test",
-                  severity: "minor",
-                  detail:
-                    'Planned test in pkg/timestamp asserts Status returns "running" for a still-executing action past the interval; expected value ("running") is sourced from the bot comment on apache/skywalking#14111, not from the new code, and fits the standard Go test convention next to scheduler.go. Fixture has no tests today, but the planned test\'s existence-claim ("or fits the repository\'s conventions") is satisfied.',
-                  finding: "",
-                },
-              ],
-              prior: [],
-              productDecision: "",
-            },
           },
         ],
         "code-review-v2": [

@@ -34,6 +34,14 @@ export interface DecisionRecord {
   scopeExceptions?: Array<{ path: string; reason: string }>;
   needsE2E?: boolean;
   draftComment?: string;
+  /**
+   * A unified diff (as `git diff` produces) undoing just this round's
+   * behavioral change in the production code, supplied only when RED's
+   * plain base-commit checkout could not even build the named test alone
+   * (it depends on something this round's change added). Must not touch the
+   * test file itself.
+   */
+  revertPatch?: string;
 }
 
 const strings = { type: "array", items: { type: "string" } };
@@ -78,6 +86,7 @@ export const DECISION_RECORD_SCHEMA = JSON.stringify({
     },
     needsE2E: { type: "boolean" },
     draftComment: { type: "string" },
+    revertPatch: { type: "string" },
   },
   required: ["status", "summary", "decisions", "openQuestions"],
 });
@@ -120,6 +129,9 @@ export function decisionProblems(record: DecisionRecord): string[] {
     if (typeof test.expectedValueSource !== "string" || test.expectedValueSource.trim() === "") problems.push("the test's expected value has no source");
   }
   if (typeof record.productionCaller !== "string" || record.productionCaller.trim() === "") problems.push("no production caller is named");
+  if (record.revertPatch !== undefined && (typeof record.revertPatch !== "string" || record.revertPatch.trim() === "")) {
+    problems.push("revertPatch, when given, must be a non-empty unified diff");
+  }
   record.decisions.forEach((d, i) => {
     const label = `decision ${i + 1}${typeof d?.point === "string" ? ` (${d.point})` : ""}`;
     if (d === null || typeof d !== "object") {

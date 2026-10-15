@@ -9,7 +9,6 @@ export const REQUIREMENT_PASSES = "passes";
 export const REQUIREMENT_BUILDS = "builds";
 export const REQUIREMENT_SCOPE = "in-scope";
 export const REQUIREMENT_CHANGELOG = "changelog-entry";
-export const REQUIREMENT_PLAN_REVIEW = "plan-reviewed";
 export const REQUIREMENT_REVIEW = "code-review";
 
 /** Issues live in apache/skywalking; the code lives in the task's repository. */
@@ -23,7 +22,6 @@ export const PROTECTED_PATHS = ["api/proto", "go.mod", "go.sum", ".github"] as c
 /** Plan, implement and corrections share this key, so each continues the previous session. */
 export const IMPLEMENTER_JOB = "implementer";
 export const IMPLEMENTER_HARNESS = "claude-code";
-export const REVIEWER_HARNESS = "pi";
 /** Reviews the code in open-code-review's delegation mode; the harness runs it read-only. */
 export const CODE_REVIEWER_HARNESS = "codex";
 /** Verifies critical and high findings: another model family than the code reviewer, in a fresh read-only session. */
@@ -35,10 +33,6 @@ export const LIST_ISSUE_COMMENTS: ExecutorPin = { id: "graphloom.github/list-iss
 
 /** Corrections the graph dispatches itself in Fix before it asks the supervisor. */
 export const MAX_FIX_CORRECTIONS = 2;
-/** Rounds a single plan-review finding may go unresolved (planner answers, reviewer repeats it) before the supervisor decides that finding. */
-export const MAX_FINDING_ROUNDS = 2;
-/** Plan-review passes on one generation overall, as a backstop: unlike work dispatches, these are never charged against the corrections budget. */
-export const MAX_PLAN_REVIEW_ROUNDS = 6;
 /** Code review passes on one change in one generation; a sweep that reaches it has not saturated. */
 export const MAX_SWEEP_PASSES = 4;
 
@@ -146,5 +140,5 @@ export const ENVIRONMENT: EnvironmentDeclaration = {
     },
   ],
   prepare: [{ id: "generate", argv: ["make", "generate"], timeoutMs: 30 * MINUTE }],
-  pinnedFiles: [{ path: "CONTRIBUTING.md", sha256: "c5d43a0272accb597b1ddc502bd5ce374b233fe327e80f3420b84a4ac67f2f71" }],
+  pinnedFiles: [{ path: "CONTRIBUTING.md", sha256: "c2a935cb901b9d6d5d73eafb9465f22005efb49e625dd01997427d7ce7e7ee2d" }],
 };
