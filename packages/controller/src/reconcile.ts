@@ -64,7 +64,20 @@ export async function reconcilePendingDispatch(
     };
   }
 
-  // Non-write jobs (e.g. review): cannot safely infer completion from worktree.
+  // A read-only job with no write scope cannot have changed anything, so an
+  // interrupted one is safe to run again: drop the intent and let the graph
+  // dispatch it afresh. Its result was never recorded, so nothing is lost.
+  if (job.readOnly === true) {
+    const { pendingDispatch: _p, ...rest } = state;
+    void _p;
+    return {
+      state: { ...rest, outstanding: state.outstanding.filter((o) => o.operationId !== opId) },
+      settled: true,
+      reason: `pending ${opId} cleared: read-only ${job.purpose} job has no effect to reconcile; retry allowed`,
+    };
+  }
+
+  // Other non-write jobs: cannot safely infer completion from worktree.
   return {
     state,
     settled: false,

@@ -1083,9 +1083,69 @@ describe("qualified repair + same-run activation (#29)", () => {
     expect(report.status).toBe("stopped");
     expect(report.stopReason).toBe("activate_repair missing qualified artifact");
     const state = await loadRunState(report.stateDir);
-    expect(state.repairCandidates?.[0]).toMatchObject({ status: "rejected", rejectionReason: reason });
+    expect(state.repairCandidates?.[0]?.status).toBe("rejected");
+    // An always-rejecting independent reviewer gets re-prompted for a few
+    // revision rounds before this settles, appending that to the reason;
+    // a preflight rejection (not retried) matches it exactly.
+    expect(state.repairCandidates?.[0]?.rejectionReason).toContain(reason);
     expect(state.activeVersion).toBe("hello@0.1.0");
     expect(state.receipts).toEqual([]);
+  });
+
+  it("sends the independent reviewer's rejection back to the same patch session, converging within one qualify_repair call", async () => {
+    const env = await makeEnv();
+    const feedbackSeen: Array<string | undefined> = [];
+    let reviewCalls = 0;
+    const repair: RepairDeps = {
+      patchAuthor: {
+        sessionId: "sup-converge",
+        async patch({ candidateRoot, reviewFeedback }) {
+          feedbackSeen.push(reviewFeedback);
+          await writeFile(path.join(candidateRoot, "p.txt"), `patched ${feedbackSeen.length}\n`, "utf8");
+          return { summary: `patch round ${feedbackSeen.length}` };
+        },
+      },
+      reviewer: {
+        sessionId: "sup-converge-reviewer",
+        async review() {
+          reviewCalls += 1;
+          return reviewCalls === 1
+            ? { approved: false, reason: "missing a regression test" }
+            : { approved: true, reason: "looks good now" };
+        },
+      },
+      async preflight() {
+        return { ok: true, summary: "ok" };
+      },
+      materializeValidators: () => ({ ...goodValidators, "exact-greeting": alwaysPasses }),
+    };
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: escalatingPlugin(),
+      validators: { ...goodValidators, "exact-greeting": defectiveGreeting },
+      supervisor: createScriptedSupervisor({
+        sessionId: "sup-converge",
+        decisions: [
+          qualifyRepair({ target: "validator", reason: "defective gate" }, "q"),
+          stop({ reason: "done", blocker: "test" }, "s"),
+        ],
+      }),
+      repair,
+      runner: createScriptedRunner({ jobs: [] }),
+      stateRoot: env.stateRoot,
+      runId: "repair-converge",
+    });
+    expect(report.status, report.blocker).toBe("stopped");
+    expect(report.stopReason).toBe("done");
+    const state = await loadRunState(report.stateDir);
+    // One candidate, not two: the rejection was fed back into the same patch
+    // session instead of forcing the supervisor to start a fresh qualify_repair.
+    expect(state.repairCandidates).toHaveLength(1);
+    expect(state.repairCandidates?.[0]).toMatchObject({ status: "qualified", reviewReason: "looks good now" });
+    expect(feedbackSeen).toEqual([undefined, "missing a regression test"]);
+    expect(reviewCalls).toBe(2);
+    // Both rounds cost one correction in total, not one per round.
+    expect(state.budgets.corrections).toBe(7);
   });
 
   it("moves the cursor back to Write when the Write validator is replaced while Review is active", async () => {

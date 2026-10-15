@@ -41,6 +41,19 @@ describe("unreviewedEntries", () => {
     ]);
     expect(await unreviewedEntries(path.join(candidate, "src"))).toEqual([]);
   });
+
+  it("ignores vitest's own cache directories inside a linked node_modules", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "gl-unreviewed-"));
+    temps.push(root);
+    const target = path.join(root, "installed");
+    await mkdir(target, { recursive: true });
+    const candidate = path.join(root, "candidate");
+    await mkdir(path.join(candidate, "node_modules", ".vite"), { recursive: true });
+    await mkdir(path.join(candidate, "node_modules", ".vite-temp"), { recursive: true });
+    await symlink(target, path.join(candidate, "node_modules", "linked"), "dir");
+
+    expect(await unreviewedEntries(candidate, { linkedDependencies: true })).toEqual([]);
+  });
 });
 
 describe("repair snapshot", () => {

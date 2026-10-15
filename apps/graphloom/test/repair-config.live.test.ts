@@ -48,6 +48,7 @@ describe("piRepairDeps reviewer (live MiniMax)", () => {
       const deps = piRepairDeps(CONFIG, "/unused");
       const result = await deps.reviewer.review({
         candidateRoot: root,
+        baseRoot: "/unused",
         baseDigest: "base",
         candidateDigest: "candidate",
         target: "validator",

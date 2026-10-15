@@ -12,8 +12,7 @@ import {
   describeCommand,
   latestCheckoutRun,
   latestFile,
-  producer,
-  reviews,
+  latestRevertedCheckoutRun,
   sameCheckoutJob,
   succeeded,
   type AgentRun,
@@ -22,7 +21,6 @@ import {
 import { describeFinding, findingById, findingLedger } from "./findings.js";
 import { ginkgoSpecs, regressionOutcome } from "./gotest.js";
 import { describeCoverage, isBlocking, reviewComplete } from "./ocr.js";
-import { describePlanFinding, pathsToObservePlan, planFindingById, planFindingLedger, toVerifyPlan } from "./plan-findings.js";
 
 const passed = (reason: string): ValidationResult => ({ status: "passed", reason });
 const failed = (reason: string): ValidationResult => ({ status: "failed", reason });
@@ -54,7 +52,7 @@ function cleanRun(run: CommandRun): string | undefined {
   return undefined;
 }
 
-const reportText = (run: CommandRun): string => run.command.report?.text ?? run.command.stdoutTail;
+export const reportText = (run: CommandRun): string => run.command.report?.text ?? run.command.stdoutTail;
 
 /** The regression test as messages name it: the suite and its focused spec for Ginkgo. */
 const testLabel = (record: DecisionRecord): string =>
@@ -66,7 +64,11 @@ export const reproduces: Validator = {
   evaluate(input) {
     const { record } = implementerRecord(input.evidence);
     if (record?.test === undefined) return inconclusive("no regression test is named");
-    const red = latestCheckoutRun(input.evidence, COMMAND.regression, "base", input.candidateDigest);
+    // A reverted-candidate retry, when present, is the authoritative RED
+    // evidence: it exists only because the plain base checkout could not
+    // even build the test alone (see graph.ts), so the base run's own
+    // build-failed result no longer speaks for the current RED attempt.
+    const red = latestRevertedCheckoutRun(input.evidence, COMMAND.regression, input.candidateDigest) ?? latestCheckoutRun(input.evidence, COMMAND.regression, "base", input.candidateDigest);
     if (red === undefined) {
       const candidate = latestCheckoutRun(input.evidence, COMMAND.regression, "candidate", input.candidateDigest);
       if (candidate !== undefined && !candidate.checkout!.paths.some(isTestPath)) return failed("the change adds or edits no test files");
@@ -74,18 +76,26 @@ export const reproduces: Validator = {
     }
     const unclean = cleanRun(red);
     if (unclean !== undefined) return failed(unclean);
-    if (red.checkout!.paths.length === 0 || !red.checkout!.paths.every(isTestPath)) return failed("the RED checkout must apply only test files");
+    const reverted = red.checkout!.reverted === true;
+    if (reverted) {
+      const touched = red.checkout!.revertedPaths ?? [];
+      if (touched.length === 0) return failed("the RED checkout's revert patch reverted no file");
+      if (touched.some(isTestPath)) return failed("the RED checkout's revert patch must not touch test files");
+    } else if (red.checkout!.paths.length === 0 || !red.checkout!.paths.every(isTestPath)) {
+      return failed("the RED checkout must apply only test files");
+    }
     if (red.command.timedOut === true || red.command.aborted === true || red.command.spawnError !== undefined) {
       return failed(`the RED check did not finish (${describeCommand(red.command)})`);
     }
     const name = testLabel(record);
+    const where = reverted ? "on the candidate with this round's behavioral fix reverted" : "on the base commit with only the test files applied";
     const outcome = regressionOutcome(reportText(red), record.test);
-    if (outcome === "failed" && !succeeded(red.command)) return passed(`${name} fails on the base commit with only the test files applied`);
-    if (outcome === "build-failed") return failed(`${name} does not build on the base commit; RED must fail by assertion`);
-    if (outcome === "setup-failed") return failed(`${name} fails in its setup on the base commit, not in the spec; RED must fail by assertion`);
-    if (outcome === "panicked") return failed(`${name} panics on the base commit instead of failing an assertion; RED must fail by assertion`);
-    if (outcome === "passed") return failed(`${name} passes on the base commit, so it does not reproduce the bug`);
-    return failed(`${name} has no result on the base commit (${describeCommand(red.command)})`);
+    if (outcome === "failed" && !succeeded(red.command)) return passed(`${name} fails ${where}`);
+    if (outcome === "build-failed") return failed(`${name} does not build ${where}; RED must fail by assertion`);
+    if (outcome === "setup-failed") return failed(`${name} fails in its setup ${where}, not in the spec; RED must fail by assertion`);
+    if (outcome === "panicked") return failed(`${name} panics ${where} instead of failing an assertion; RED must fail by assertion`);
+    if (outcome === "passed") return failed(`${name} passes ${where}, so it does not reproduce the bug`);
+    return failed(`${name} has no result ${where} (${describeCommand(red.command)})`);
   },
 };
 
@@ -100,6 +110,10 @@ export const passes: Validator = {
     const name = testLabel(record);
     const outcome = regressionOutcome(reportText(green), record.test);
     if (outcome !== "passed" || !succeeded(green.command)) return failed(`${name} does not pass on the change (${outcome}, ${describeCommand(green.command)})`);
+    // Only the plain base RED carries Ginkgo spec names to cross-check; a
+    // reverted-candidate RED (used when the base checkout cannot build the
+    // test alone) has none here, so this secondary per-spec check is simply
+    // skipped then, same as when no RED has run at all.
     const red = latestCheckoutRun(input.evidence, COMMAND.regression, "base", input.candidateDigest);
     const failedOnBase = red !== undefined ? (ginkgoSpecs(reportText(red)) ?? []).filter((s) => s.node === "It" && s.state !== "passed").map((s) => s.text) : [];
     const passedHere = new Set((ginkgoSpecs(reportText(green)) ?? []).filter((s) => s.state === "passed").map((s) => s.text));
@@ -179,61 +193,6 @@ export const changelogEntry: Validator = {
   },
 };
 
-/**
- * The plan the implementer followed was approved by the latest read-only
- * review of the current plan record; every finding that review raised was
- * dismissed or resolved, and none of the run's plan findings is confirmed or
- * disputed. The plan and its review both predate the implementer's own edit,
- * so the fix stage's one combined validate call — which happens after that
- * edit changed the live candidate — finds them in history, not evidence
- * (candidateEvidence scopes "evidence" to the now-current candidate).
- */
-export const planReviewed: Validator = {
-  evaluate(input: ValidationInput) {
-    const raw = [...(input.history ?? []), ...input.evidence];
-    const plan = agentRuns(raw, FIX_STAGE, "diagnostic").filter((r) => r.status === "completed").at(-1);
-    if (plan === undefined) return inconclusive("no plan in this generation");
-    // A reentry starts a fresh plan dialogue (fix()'s own generation-scoped
-    // view agrees): scope to the plan's own generation, not every generation
-    // history ever carried, so a resolved or still-open finding from a
-    // superseded dialogue cannot block or pass this one.
-    const seen = raw.filter((e) => e.generation === plan.record.generation);
-    const pass = reviews(seen, FIX_STAGE).at(-1);
-    if (pass === undefined) return inconclusive("the plan has not been reviewed");
-    if (seen.indexOf(pass.record) < seen.indexOf(plan.record)) return failed("the latest plan was not reviewed");
-    if (producer(pass.record)?.readOnly !== true) return failed("the plan review must come from a read-only review job");
-    const ledger = planFindingLedger(seen, FIX_STAGE);
-    const planPass = ledger.passes.find((p) => p.record.ref === pass.record.ref)!;
-    if (planPass.missingStatus.length > 0) return failed(`the plan review gave no status for open finding(s) ${planPass.missingStatus.join(", ")}`);
-    const awaiting = pathsToObservePlan(ledger);
-    if (awaiting.length > 0) return inconclusive(`quoted path(s) await observation: ${awaiting.join(", ")}`);
-    const pending = toVerifyPlan(ledger);
-    if (pending.length > 0) return inconclusive(`finding(s) ${pending.map((f) => f.id).join(", ")} await verification`);
-    const blocking = ledger.findings.filter((f) => f.state === "confirmed" || f.state === "disputed");
-    if (blocking.length > 0) {
-      return failed(`${blocking.length} plan finding(s) confirmed or disputed: ${blocking.slice(0, 3).map(describePlanFinding).join("; ")}`);
-    }
-    const survived = planPass.raised.filter((id) => {
-      const s = planFindingById(ledger, id)?.state;
-      return s !== "dismissed" && s !== "resolved";
-    });
-    if (survived.length > 0) return failed(`the latest plan review raised finding(s) ${survived.join(", ")} that are not settled`);
-    if (planPass.verdict === "approved") return passed("the reviewer approved the plan");
-    // Design §4.4: the pass passes when it approves or raises only dismissed
-    // findings. planPass.raised alone cannot tell "raises only dismissed
-    // findings" from "raises nothing": a finding this very pass newly raises
-    // is always "raised", never simultaneously dismissed, so survived (just
-    // above) already fails on any fresh raise before this is reached — the
-    // repeat of an already-open finding via `prior` is what later settles as
-    // dismissed, so check whether the pass named anything there instead.
-    if (planPass.verdict === "request_changes") {
-      if (pass.prior.length > 0) return passed(`the reviewer's finding(s) were all settled by verification: ${planPass.summary}`);
-      return failed(`the reviewer sent the plan back: ${planPass.summary}`);
-    }
-    return inconclusive(`unknown verdict ${JSON.stringify(pass.verdict)}`);
-  },
-};
-
 /** The latest code review pass on the change `digest` names. */
 export function latestCodeReview(evidence: EvidenceRecord[], digest: string | undefined): AgentRun | undefined {
   return agentRuns(evidence, REVIEW_STAGE, "review").filter((r) => digest !== undefined && r.record.candidateDigest === digest).at(-1);
@@ -283,7 +242,6 @@ const VALIDATORS: Record<string, Validator> = {
   "build-checks": builds,
   "write-scope": inScope,
   "changes-entry": changelogEntry,
-  "plan-reviewer": planReviewed,
   "open-code-review": codeReview,
 };
 

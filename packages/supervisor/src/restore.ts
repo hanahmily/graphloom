@@ -7,6 +7,7 @@ import {
 } from "./pi-session.js";
 import {
   createPiSupervisor,
+  findConfigured,
   type ModelSwitchRecord,
   type PiSupervisor,
   type SupervisorBinding,
@@ -42,6 +43,15 @@ export async function restorePiSupervisorFromBinding(
   }
   const sessionDir = options.sessionDir ?? path.dirname(binding.sessionFile);
 
+  const configured =
+    options.configuredModels ??
+    binding.configuredModels ??
+    configuredModelsFromBinding(binding);
+  // The bound model may require a reasoning level other than the "off" default
+  // (e.g. a model that rejects thinking disabled); look it up before the
+  // session is created, since that is where the level actually takes effect.
+  const boundThinkingLevel = findConfigured(configured, binding)?.thinkingLevel;
+
   const sessionOpts: CreatePiSupervisorSessionOptions = {
     runId: options.runId,
     sessionDir,
@@ -49,6 +59,7 @@ export async function restorePiSupervisorFromBinding(
     provider: binding.provider,
     modelId: binding.modelId,
   };
+  if (boundThinkingLevel !== undefined) sessionOpts.thinkingLevel = boundThinkingLevel;
   if (options.agentDir !== undefined) sessionOpts.agentDir = options.agentDir;
   if (options.apiKey !== undefined) sessionOpts.apiKey = options.apiKey;
   if (options.promptTimeoutMs !== undefined) {
@@ -64,13 +75,9 @@ export async function restorePiSupervisorFromBinding(
     await session.setModel({
       provider: binding.provider,
       modelId: binding.modelId,
+      ...(boundThinkingLevel !== undefined ? { thinkingLevel: boundThinkingLevel } : {}),
     });
   }
-
-  const configured =
-    options.configuredModels ??
-    binding.configuredModels ??
-    configuredModelsFromBinding(binding);
 
   return createPiSupervisor({
     session,

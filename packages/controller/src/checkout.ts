@@ -1,6 +1,8 @@
 import { execFile } from "node:child_process";
-import { chmod, copyFile, lstat, mkdir, readdir, readlink, rm, symlink } from "node:fs/promises";
+import { chmod, copyFile, lstat, mkdir, readdir, readlink, rm, symlink, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { promisify } from "node:util";
 import type { CheckoutSpec, EnvironmentCommand, JobSpec } from "@graphloom/sdk";
 import { writeScopeAllows } from "@graphloom/sdk";
@@ -14,7 +16,7 @@ export interface CheckoutRecord {
   from: CheckoutSpec["from"];
   /** The pinned base commit the checkout started from. */
   base: string;
-  /** The checkout's commit: the base plus the applied paths. */
+  /** The checkout's commit: the base plus the applied paths (and the reverted patch, if any). */
   commit: string;
   /** Changed paths copied from the worktree. */
   paths: string[];
@@ -23,6 +25,18 @@ export interface CheckoutRecord {
   /** Files the preparation (phase `prepare`) or the job (phase `run`) changed in the checkout. */
   mutations: string[];
   phase: "prepare" | "run";
+  /** True when a `from: "candidate"` checkout's `revertPatch` was applied. */
+  reverted?: boolean;
+  /** Paths `revertPatch` touches, present whenever `reverted` is true. */
+  revertedPaths?: string[];
+  /**
+   * Set (with phase `run`, and no commands run) when `revertPatch` did not
+   * apply to the candidate: git's message. The patch is stale or malformed;
+   * the graph decides what to do, so this is evidence, not a failed job.
+   */
+  revertError?: string;
+  /** The `revertPatch` text that failed to apply, to tell it from a later, corrected patch. */
+  revertPatch?: string;
 }
 
 export function checkoutsDir(stateDir: string): string {
@@ -74,13 +88,56 @@ export async function runInCheckout(args: {
   const evidence: JobEvidenceItem[] = [];
   let applied: string[];
   let commit = args.pinnedHead;
+  let reverted = false;
+  let revertedPaths: string[] = [];
   const apply = async () => {
     commit = await commitPaths(args.worktreePath, dir, applied);
   };
   try {
     applied = selectPaths(checkout, [...change.fingerprints.keys()]);
     await cloneAt(args.repoPath, args.pinnedHead, dir);
-    if (checkout.from === "candidate") await apply();
+    if (checkout.from === "candidate") {
+      await apply();
+      if (checkout.revertPatch !== undefined) {
+        try {
+          await applyRevertPatch(dir, checkout.revertPatch);
+        } catch (err) {
+          // A patch that no longer applies (the candidate moved on since it was
+          // written) is an ordinary, repairable answer, not an executor failure.
+          const message = err instanceof Error ? err.message : String(err);
+          await removeTree(dir);
+          return {
+            result: {
+              status: "ok",
+              summary: `revertPatch does not apply to the candidate: ${message.slice(0, 500)}`,
+              ...identity,
+              evidence: [
+                {
+                  kind: "other",
+                  payload: {
+                    checkout: {
+                      from: "candidate",
+                      base: args.pinnedHead,
+                      commit,
+                      paths: applied,
+                      prepared: false,
+                      mutations: [],
+                      phase: "run",
+                      revertError: message.slice(0, 2000),
+                      revertPatch: checkout.revertPatch,
+                    } satisfies CheckoutRecord,
+                  },
+                },
+              ],
+            },
+            candidateDigest: change.digest,
+          };
+        }
+        commit = await commitCheckoutState(dir, "GraphLoom candidate, reverted");
+        reverted = true;
+        revertedPaths = revertPatchPaths(checkout.revertPatch);
+      }
+    }
   } catch (err) {
     await removeTree(dir);
     return failed(`checkout failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -101,6 +158,7 @@ export async function runInCheckout(args: {
       commit,
       paths: applied,
       prepared,
+      ...(reverted ? { reverted: true, revertedPaths } : {}),
       mutations,
       phase,
     });
@@ -207,6 +265,11 @@ async function commitPaths(worktreePath: string, dir: string, paths: string[]): 
   for (const rel of paths) {
     await applyPath(worktreePath, dir, rel);
   }
+  return commitCheckoutState(dir, "GraphLoom candidate");
+}
+
+/** Stage everything in the checkout and commit it with an isolated identity. Returns the commit. */
+async function commitCheckoutState(dir: string, message: string): Promise<string> {
   await git(dir, ["add", "--all"]);
   await git(dir, [
     "-c",
@@ -220,9 +283,35 @@ async function commitPaths(worktreePath: string, dir: string, paths: string[]): 
     "--no-verify",
     "--allow-empty",
     "-m",
-    "GraphLoom candidate",
+    message,
   ]);
   return (await git(dir, ["rev-parse", "HEAD"])).trim();
+}
+
+/**
+ * Apply `patch` (a unified diff, as `git diff` produces) in reverse to the
+ * checkout — undoing exactly what it describes. Throws (surfaced as a
+ * "checkout failed" result by the caller) if the patch does not apply
+ * cleanly, e.g. because the described change is not actually present.
+ */
+async function applyRevertPatch(dir: string, patch: string): Promise<void> {
+  const file = path.join(os.tmpdir(), `graphloom-revert-${randomUUID()}.patch`);
+  await writeFile(file, patch, "utf8");
+  try {
+    await git(dir, ["apply", "-R", "--whitespace=nowarn", file]);
+  } finally {
+    await rm(file, { force: true });
+  }
+}
+
+/** Paths a unified diff's headers name, both sides of a rename included. */
+export function revertPatchPaths(patch: string): string[] {
+  const paths = new Set<string>();
+  for (const match of patch.matchAll(/^diff --git a\/(.+) b\/(.+)$/gm)) {
+    paths.add(match[1]!);
+    paths.add(match[2]!);
+  }
+  return [...paths].sort();
 }
 
 /**

@@ -530,6 +530,12 @@ describe("executor repair (#41)", () => {
     const installed = await readFile(mirror.entry, "utf8");
     const installedDigest = await digestExecutorSource(mirror.dir);
     const controller = createController();
+    // The reviewer's own diff must compare the candidate against the mirror
+    // executor's own package, not some other root (e.g. the plugin bundle) —
+    // otherwise an unrelated-looking diff could make a correct patch look
+    // like it replaced an entire other package.
+    const seenBaseRoots: string[] = [];
+    const deps = repairDeps(editEntry("const BROKEN = true", "const BROKEN = false"));
     const report = await controller.run({
       taskPath: env.taskPath,
       plugin: graph(MIRROR),
@@ -547,7 +553,16 @@ describe("executor repair (#41)", () => {
           giveBack,
         ],
       }),
-      repair: repairDeps(editEntry("const BROKEN = true", "const BROKEN = false")),
+      repair: {
+        ...deps,
+        reviewer: {
+          ...deps.reviewer,
+          async review(args) {
+            seenBaseRoots.push(args.baseRoot);
+            return deps.reviewer.review(args);
+          },
+        },
+      },
       stateRoot: env.stateRoot,
       runId: "exec-repair",
     });
@@ -555,6 +570,7 @@ describe("executor repair (#41)", () => {
     expect(report.stopReason, report.blocker).toBe("read done");
     expect(await readFile(mirror.entry, "utf8")).toBe(installed);
     expect(await digestExecutorSource(mirror.dir)).toBe(installedDigest);
+    expect(seenBaseRoots).toEqual([mirror.dir]);
 
     const state = await loadRunState(report.stateDir);
     expect(payloads(state.evidence, "mirror")).toEqual([{ number: 1, sdk: "function" }]);

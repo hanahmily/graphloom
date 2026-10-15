@@ -28,6 +28,13 @@ export interface SupervisorInput {
   lastSettlement?: SupervisorSettlement;
   /** Provider calls this turn may spend; a turn beyond it is aborted before its request. */
   maxProviderCalls?: number;
+  /**
+   * True only on the first turn after `resume()`. The process may now run
+   * different controller or plugin code, or carry newly granted repair
+   * authority, than whatever rejected a past proposal still sitting in this
+   * session's own history — nothing else tells the supervisor that.
+   */
+  resumed?: boolean;
   /** Aborted when the run stops; the session aborts its request and settles idle. */
   signal?: AbortSignal;
 }
@@ -106,6 +113,12 @@ export interface CandidatePatchRequest {
   candidateRoot: string;
   target: RepairTarget;
   reason: string;
+  /**
+   * The independent reviewer's own reason from rejecting the previous round's
+   * patch in this same qualification, present from the second round on: fix
+   * these specific issues, keeping what the reviewer did not object to.
+   */
+  reviewFeedback?: string;
   /** Provider calls the controller reserved for this patch; stop before exceeding it. */
   maxProviderCalls?: number;
   /** Aborted when the run stops. */

@@ -64,6 +64,8 @@ interface RunOptions {
   stageId?: string;
   purpose?: string;
   timedOut?: boolean;
+  reverted?: boolean;
+  revertedPaths?: string[];
 }
 
 const command = (id: string, exitCode: number, o: RunOptions = {}): EvidenceRecord => ({
@@ -91,6 +93,7 @@ const command = (id: string, exitCode: number, o: RunOptions = {}): EvidenceReco
       prepared: o.prepared ?? true,
       mutations: o.mutations ?? [],
       phase: "run",
+      ...(o.reverted ? { reverted: true, revertedPaths: o.revertedPaths ?? [] } : {}),
     },
     producer: { operationId: o.op ?? `op-${o.from ?? "candidate"}`, stageId: o.stageId ?? FIX_STAGE, purpose: o.purpose ?? "check", readOnly: true, kind: "command" },
   },
@@ -120,6 +123,9 @@ const FOCUSED = "scheduler warns while an action runs";
 
 const red = (report: string, exitCode = 1, o: RunOptions = {}) =>
   command(COMMAND.regression, exitCode, { from: "base", paths: ["pkg/timestamp/scheduler_test.go"], report, ...o });
+/** RED retried against the candidate with the implementer's own patch undoing the behavioral fix. */
+const redReverted = (report: string, exitCode = 1, o: RunOptions = {}) =>
+  command(COMMAND.regression, exitCode, { from: "candidate", reverted: true, revertedPaths: ["pkg/timestamp/scheduler.go"], report, ...o });
 const green = (report = passedReport, exitCode = 0, o: RunOptions = {}) => command(COMMAND.regression, exitCode, { report, ...o });
 const candidate = (overrides: Partial<Record<string, number>> = {}, o: RunOptions = {}): EvidenceRecord[] => [
   green(passedReport, overrides[COMMAND.regression] ?? 0, o),
@@ -129,23 +135,6 @@ const candidate = (overrides: Partial<Record<string, number>> = {}, o: RunOption
 const CHANGES = "# Changes by Version\n\nRelease Notes.\n\n## 0.12.0\n\n### Bug Fixes\n\n- Warn instead of reporting a timeout for long scheduled actions.\n\n## 0.11.0\n\n- Older.\n";
 const file = (bytes: string, digest = DIGEST): EvidenceRecord => ({ ref: ref(), kind: "file", candidateDigest: digest, payload: { path: CHANGES_PATH, bytes }, fingerprint: `fp-${seq}` });
 const diff = (added: string): EvidenceRecord => command(COMMAND.changesDiff, 0, { stdout: `diff --git a/CHANGES.md b/CHANGES.md\n+++ b/CHANGES.md\n@@ -9,0 +10 @@\n+${added}\n` });
-
-const plan = (): EvidenceRecord => ({
-  ref: ref(),
-  kind: "other",
-  candidateDigest: DIGEST,
-  payload: {
-    codingAgent: { harness: "claude-code", status: "completed", output: READY },
-    producer: { operationId: "op-plan", stageId: FIX_STAGE, purpose: "diagnostic", readOnly: true, kind: "agent", executorId: CODING_AGENT.id },
-  },
-});
-
-const review = (verdict: string, stageId: string = FIX_STAGE, extra: Record<string, unknown> = {}): EvidenceRecord => ({
-  ref: ref(),
-  kind: "review",
-  candidateDigest: DIGEST,
-  payload: { verdict, summary: "s", ...extra, producer: { operationId: "op-review", stageId, purpose: "review", readOnly: true, kind: "agent" } },
-});
 
 const comment = (severity: string | undefined) => ({
   path: "pkg/timestamp/scheduler.go",
@@ -191,16 +180,6 @@ const verification = (verdict: string, quotes: object[] = [], digest = DIGEST): 
 const confirmed = (digest = DIGEST) => verification("confirmed", [{ path: SCHEDULER_PATH, line: 6, text: "s.wait(ctx)" }], digest);
 const refuted = (quotes: object[] = [BOUNDED]) => verification("refuted", quotes);
 const scheduler = (bytes = SCHEDULER, digest = DIGEST): EvidenceRecord => ({ ref: ref(), kind: "file", candidateDigest: digest, payload: { path: SCHEDULER_PATH, bytes }, fingerprint: `fp-${seq}` });
-/** The plan-review verifier's verdict on P1: a fresh read-only session at {FIX_STAGE, "verify"}. */
-const planVerification = (verdict: string, quotes: object[] = []): EvidenceRecord => ({
-  ref: ref(),
-  kind: "other",
-  candidateDigest: DIGEST,
-  payload: {
-    codingAgent: { harness: "claude-code", status: "completed", output: { verdicts: [{ finding: "P1", verdict, reason: `${verdict} by the verifier`, quotes }] } },
-    producer: { operationId: "op-plan-verify", stageId: FIX_STAGE, purpose: "verify", readOnly: true, kind: "agent", executorId: CODING_AGENT.id },
-  },
-});
 /** F1, raised and confirmed on an earlier change in an earlier generation. */
 const confirmedEarlier = () => [codeReviewRun(reviewed([comment("high")]), { digest: OTHER }), confirmed(OTHER)];
 
@@ -240,6 +219,16 @@ export const QUALIFICATION_CASES: readonly QualificationCase[] = [
   c("red-reproduces", "only a spec other than the focused one fails", [implementer(SUITE_READY), red(suite(failedByAssertion, [spec("scheduler stops cleanly", "failed"), spec(FOCUSED, "passed")]))], "failed"),
   c("red-reproduces", "the RED check timed out", [implementer(READY), red(failedByAssertion, 1, { timedOut: true })], "failed"),
   c("red-reproduces", "RED ran on an older change", [implementer(READY), red(failedByAssertion, 1, { digest: OTHER })], "inconclusive"),
+  c("red-reproduces", "fails by assertion on the candidate with the fix reverted", [implementer(READY), redReverted(failedByAssertion)], "passed"),
+  c("red-reproduces", "still does not build with the fix reverted", [implementer(READY), redReverted(buildFailed)], "failed"),
+  c("red-reproduces", "the revert patch touches the test file", [implementer(READY), redReverted(failedByAssertion, 1, { revertedPaths: ["pkg/timestamp/scheduler_test.go"] })], "failed"),
+  c("red-reproduces", "the revert patch reverted no file", [implementer(READY), redReverted(failedByAssertion, 1, { revertedPaths: [] })], "failed"),
+  c(
+    "red-reproduces",
+    "a reverted retry supersedes an earlier unbuildable plain RED",
+    [implementer(READY), red(buildFailed), redReverted(failedByAssertion)],
+    "passed",
+  ),
 
   c("green-passes", "test and packages pass", [implementer(READY), ...candidate()], "passed"),
   c("green-passes", "the regression fails", [implementer(READY), green(failedByAssertion, 1), command(COMMAND.testCi, 0)], "failed"),
@@ -268,76 +257,6 @@ export const QUALIFICATION_CASES: readonly QualificationCase[] = [
   c("changes-entry", "no new entry", [file(CHANGES), green(), command(COMMAND.changesDiff, 0, { stdout: "" })], "failed"),
   c("changes-entry", "no release section", [file("# Changes\n\n- Warn.\n"), green(), diff("- Warn.")], "failed"),
   c("changes-entry", "CHANGES.md not observed for this change", [file(CHANGES, OTHER), green(), diff("- Warn instead of reporting a timeout for long scheduled actions.")], "inconclusive"),
-
-  c("plan-reviewer", "the plan was approved", [plan(), review("approved")], "passed"),
-  c("plan-reviewer", "the plan was sent back", [plan(), review("request_changes")], "failed"),
-  c("plan-reviewer", "the approval is older than the plan", [review("approved"), plan()], "failed"),
-  c("plan-reviewer", "the review came from another stage", [plan(), review("approved", REVIEW_STAGE)], "inconclusive"),
-  c("plan-reviewer", "no review", [plan()], "inconclusive"),
-  c("plan-reviewer", "no plan in this generation", [review("approved")], "inconclusive"),
-  c("plan-reviewer", "unknown verdict", [plan(), review("lgtm")], "inconclusive"),
-  c(
-    "plan-reviewer",
-    "a repeated plan finding not yet verified defers acceptance",
-    [plan(), review("request_changes", FIX_STAGE, { findings: [{ axis: "reach", severity: "blocking", detail: "Close waits forever" }] }), plan(), review("approved", FIX_STAGE, { prior: [{ finding: "P1", status: "still_present", reason: "still there" }] })],
-    "inconclusive",
-  ),
-  c(
-    "plan-reviewer",
-    "a plan finding the verifier confirms blocks an otherwise-approved plan",
-    [
-      plan(),
-      review("request_changes", FIX_STAGE, { findings: [{ axis: "reach", severity: "blocking", detail: "Close waits forever" }] }),
-      plan(),
-      review("approved", FIX_STAGE, { prior: [{ finding: "P1", status: "still_present", reason: "still there" }] }),
-      planVerification("confirmed", [{ path: SCHEDULER_PATH, line: 6, text: "s.wait(ctx)" }]),
-    ],
-    "failed",
-  ),
-  c(
-    "plan-reviewer",
-    "a plan finding the verifier dismisses with matching quotes does not block approval, even when the pass itself still says request_changes",
-    [
-      plan(),
-      review("request_changes", FIX_STAGE, { findings: [{ axis: "reach", severity: "blocking", detail: "Close waits forever" }] }),
-      plan(),
-      review("request_changes", FIX_STAGE, { prior: [{ finding: "P1", status: "still_present", reason: "still there" }] }),
-      planVerification("refuted", [BOUNDED]),
-      scheduler(),
-    ],
-    "passed",
-  ),
-  c(
-    "plan-reviewer",
-    "a plan finding the verifier dismisses does not block an approved plan",
-    [
-      plan(),
-      review("request_changes", FIX_STAGE, { findings: [{ axis: "reach", severity: "blocking", detail: "Close waits forever" }] }),
-      plan(),
-      review("approved", FIX_STAGE, { prior: [{ finding: "P1", status: "still_present", reason: "still there" }] }),
-      planVerification("refuted", [BOUNDED]),
-      scheduler(),
-    ],
-    "passed",
-  ),
-  c(
-    "plan-reviewer",
-    "a plan finding the verifier cannot decide blocks approval",
-    [
-      plan(),
-      review("request_changes", FIX_STAGE, { findings: [{ axis: "reach", severity: "blocking", detail: "Close waits forever" }] }),
-      plan(),
-      review("approved", FIX_STAGE, { prior: [{ finding: "P1", status: "still_present", reason: "still there" }] }),
-      planVerification("uncertain"),
-    ],
-    "failed",
-  ),
-  c(
-    "plan-reviewer",
-    "the latest plan review gives an answered finding no status",
-    [plan(), review("request_changes", FIX_STAGE, { findings: [{ axis: "reach", severity: "blocking", detail: "Close waits forever" }] }), plan(), review("approved")],
-    "failed",
-  ),
 
   c("open-code-review", "no comments", [codeReviewRun(reviewed([]))], "passed"),
   c("open-code-review", "only low and medium comments", [codeReviewRun(reviewed([comment("low"), comment("medium")]))], "passed"),

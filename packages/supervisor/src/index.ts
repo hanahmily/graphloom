@@ -18,6 +18,7 @@ export {
   isMiniMaxProvider,
   type CreatePiSupervisorSessionOptions,
   type PiSupervisorSession,
+  type ThinkingLevel,
 } from "./pi-session.js";
 
 export {

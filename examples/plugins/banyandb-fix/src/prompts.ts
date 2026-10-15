@@ -3,7 +3,6 @@ import { CHANGES_PATH, COMMAND, ISSUE_REPO, PROTECTED_PATHS } from "./constants.
 import type { DecisionRecord } from "./decision-record.js";
 import { writeScopeFor } from "./decision-record.js";
 import type { Issue, IssueComment } from "./evidence.js";
-import type { KnownPlanFindings } from "./plan-findings.js";
 import { regressionArgv } from "./gotest.js";
 
 const MINUTE = 60_000;
@@ -71,7 +70,7 @@ export function planInstruction(args: { issue: number; request: string; snapshot
 const REACH =
   "Reach: for every behaviour the fix changes, the basis of that decision names each caller and lifecycle path that depends on the old behaviour (shutdown and Close, context cancellation, error returns, panics, retries, concurrency, resource release), starting with the changed type's own Close, Stop and shutdown paths, and the test that covers it; a path no test covers is stated there as a risk. For a wait the fix makes longer or unbounded, say what happens when the awaited code ignores cancellation or never returns.";
 
-/** The plan went back to the planner: the plan reviewer's findings, or the code review's after the supervisor re-entered Fix. */
+/** The plan went back to the planner: the code review's confirmed findings, after the supervisor re-entered Fix. */
 export function planRevisionInstruction(args: { issue: number; feedback: string[]; changed: boolean }): string {
   return [
     `Revise your plan for ${issueRef(args.issue)}. Do not modify any file.`,
@@ -83,48 +82,6 @@ export function planRevisionInstruction(args: { issue: number; feedback: string[
     REACH,
     "",
     "Return the full decision-record-v1 result again, with every required field.",
-  ].join("\n");
-}
-
-export function planReviewInstruction(args: { issue: number; snapshot: string; record: DecisionRecord; previous?: string[]; known?: KnownPlanFindings }): string {
-  const open = args.known?.open ?? [];
-  const settled = args.known?.settled ?? [];
-  const known = [
-    ...(open.length > 0
-      ? [
-          "",
-          "Open findings from an earlier pass. The planner has had a chance to answer each one (in a decision's basis, or by changing the plan). Give each one a status in `prior`: `resolved` (the plan no longer has the defect), `still_present`, or `withdrawn` (it was never a defect), with a reason. Do not report them again as findings.",
-          ...open.map((f) => `- ${f.id} (${f.state}) ${f.description}`),
-        ]
-      : []),
-    ...(settled.length > 0
-      ? [
-          "",
-          "Settled findings. Do not report them again unless the defect is back in the plan; then report it again with its name in `finding`.",
-          ...settled.map((f) => `- ${f.id} (${f.state}) ${f.description}`),
-        ]
-      : []),
-  ];
-  return [
-    `You are an independent read-only reviewer of a plan to fix ${issueRef(args.issue)} in this repository (apache/skywalking-banyandb). Nothing is implemented yet${args.previous !== undefined ? " beyond the change already in the working tree" : ""}. Do not modify anything.`,
-    "",
-    "Issue snapshot:",
-    args.snapshot,
-    "",
-    "The plan (decision record):",
-    JSON.stringify(args.record, null, 2),
-    ...(args.previous !== undefined && args.previous.length > 0 ? ["", "The plan was revised because of:", ...args.previous.map((f) => `- ${f}`)] : []),
-    "",
-    "Read the code the plan names, its callers and its tests before judging. Judge four axes:",
-    "- spec: the plan fixes the issue's expected behaviour at its root cause, and changes nothing the issue does not name.",
-    "- decisions: every unclear point has the right tier and a basis in the issue, a maintainer comment or the repository; behaviour points take the most conservative option; no product point is decided.",
-    "- reach: for every behaviour the plan changes, search for each caller and lifecycle path that depends on the old behaviour: shutdown and Close, context cancellation, error returns, panics, retries, concurrency, resource release. Start with the changed type's own Close, Stop and shutdown paths, then its callers. For every wait the plan makes longer or unbounded, ask what happens when the awaited code ignores cancellation or never returns, and find such code among the callers. A path the plan does not name, a removed guarantee (a bound, a timeout, a cleanup, a cancellation) that other code or comments rely on, or a changed path no planned test covers is blocking.",
-    "- test: the regression test's expected value comes from the issue, not from the new code; it fails by assertion on the base commit; its package and name exist or fit the repository's conventions.",
-    "",
-    UNCLEAR_POLICY,
-    ...known,
-    "",
-    'Return verdict "approved" or "request_changes", a summary, and findings (axis spec, decisions, reach or test; severity blocking or minor; detail naming the file and function, finding set to a known finding\'s name when it reports that finding again and "" otherwise). Request changes only for blocking findings. prior gives a status for every open finding listed above (empty when there are none). If the plan decides or depends on a product question, set productDecision to the question for the maintainers; a question the plan leaves open, with that behaviour unchanged, is a finding, not a productDecision.',
   ].join("\n");
 }
 

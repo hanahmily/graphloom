@@ -6,8 +6,11 @@ import {
   createPiSupervisor,
   createPiSupervisorSession,
   restorePiSupervisorFromBinding,
-  type ModelRef,
+  type SupervisorModelRef,
+  type ThinkingLevel,
 } from "@graphloom/supervisor";
+
+const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 
 /**
  * Operator-owned supervisor settings. Credentials never live here: Pi resolves
@@ -16,8 +19,10 @@ import {
 export interface SupervisorConfig {
   provider: string;
   modelId: string;
+  /** Reasoning level for `provider`/`modelId`; omit for the "off" default. */
+  thinkingLevel?: ThinkingLevel;
   /** Every model the supervisor may switch to, including the initial one. */
-  models: ModelRef[];
+  models: SupervisorModelRef[];
   agentDir?: string;
   promptTimeoutMs?: number;
 }
@@ -25,7 +30,8 @@ export interface SupervisorConfig {
 export function supervisorConfigPath(env: NodeJS.ProcessEnv = process.env): { file: string; explicit: boolean } {
   const explicit = env.GRAPHLOOM_SUPERVISOR_CONFIG;
   if (explicit !== undefined && explicit !== "") return { file: path.resolve(explicit), explicit: true };
-  return { file: path.join(os.homedir(), ".config", "graphloom", "supervisor.json"), explicit: false };
+  const home = env.HOME || env.USERPROFILE || os.homedir();
+  return { file: path.join(home, ".config", "graphloom", "supervisor.json"), explicit: false };
 }
 
 /** Without a config file (at the default path) runs have no supervisor. */
@@ -51,14 +57,19 @@ export function parseSupervisorConfig(value: unknown, source = "supervisor confi
   }
   const provider = requireString(obj.provider, `${source}: provider`);
   const modelId = requireString(obj.modelId, `${source}: modelId`);
+  const thinkingLevel =
+    obj.thinkingLevel !== undefined ? parseThinkingLevel(obj.thinkingLevel, `${source}: thinkingLevel`) : undefined;
   const listed = obj.models === undefined ? [] : obj.models;
-  if (!Array.isArray(listed)) throw new Error(`${source}: models must be an array of "provider/model" strings`);
-  const models: ModelRef[] = [{ provider, modelId }];
+  if (!Array.isArray(listed)) {
+    throw new Error(`${source}: models must be an array of "provider/model" strings or {provider, modelId, thinkingLevel?} objects`);
+  }
+  const models: SupervisorModelRef[] = [{ provider, modelId, ...(thinkingLevel !== undefined ? { thinkingLevel } : {}) }];
   for (const entry of listed) {
-    const ref = parseModelRef(requireString(entry, `${source}: models entry`));
+    const ref = parseModelRefEntry(entry, `${source}: models entry`);
     if (!models.some((m) => m.provider === ref.provider && m.modelId === ref.modelId)) models.push(ref);
   }
   const config: SupervisorConfig = { provider, modelId, models };
+  if (thinkingLevel !== undefined) config.thinkingLevel = thinkingLevel;
   if (obj.agentDir !== undefined) config.agentDir = expandHome(requireString(obj.agentDir, `${source}: agentDir`));
   if (obj.promptTimeoutMs !== undefined) {
     if (typeof obj.promptTimeoutMs !== "number" || !(obj.promptTimeoutMs > 0)) {
@@ -70,12 +81,32 @@ export function parseSupervisorConfig(value: unknown, source = "supervisor confi
 }
 
 /** `provider/model`; the model id may itself contain slashes. */
-export function parseModelRef(text: string): ModelRef {
+export function parseModelRef(text: string): SupervisorModelRef {
   const slash = text.indexOf("/");
   if (slash <= 0 || slash === text.length - 1) {
     throw new Error(`expected provider/model, got "${text}"`);
   }
   return { provider: text.slice(0, slash), modelId: text.slice(slash + 1) };
+}
+
+/** A `models` array entry: a plain "provider/model" string, or an object naming its own thinkingLevel. */
+function parseModelRefEntry(entry: unknown, what: string): SupervisorModelRef {
+  if (typeof entry === "string") return parseModelRef(entry);
+  if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+    throw new Error(`${what} must be a "provider/model" string or {provider, modelId, thinkingLevel?} object`);
+  }
+  const obj = entry as Record<string, unknown>;
+  const ref = parseModelRef(`${requireString(obj.provider, `${what}: provider`)}/${requireString(obj.modelId, `${what}: modelId`)}`);
+  if (obj.thinkingLevel !== undefined) ref.thinkingLevel = parseThinkingLevel(obj.thinkingLevel, `${what}: thinkingLevel`);
+  return ref;
+}
+
+function parseThinkingLevel(value: unknown, what: string): ThinkingLevel {
+  const text = requireString(value, what);
+  if (!(THINKING_LEVELS as readonly string[]).includes(text)) {
+    throw new Error(`${what} must be one of ${THINKING_LEVELS.join(", ")}, got "${text}"`);
+  }
+  return text as ThinkingLevel;
 }
 
 /** A fresh Pi supervisor whose transcript lives in the run's state directory. */
@@ -87,6 +118,7 @@ export function piSupervisorFactory(config: SupervisorConfig): NonNullable<RunRe
       provider: config.provider,
       modelId: config.modelId,
       repairsDir: path.join(stateDir, "repairs"),
+      ...(config.thinkingLevel !== undefined ? { thinkingLevel: config.thinkingLevel } : {}),
       ...(config.agentDir !== undefined ? { agentDir: config.agentDir } : {}),
       ...(config.promptTimeoutMs !== undefined ? { promptTimeoutMs: config.promptTimeoutMs } : {}),
     });

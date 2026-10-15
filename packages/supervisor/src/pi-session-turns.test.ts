@@ -111,6 +111,67 @@ describe("Pi supervisor session", () => {
     }
   });
 
+  it("charges compaction's provider requests to the turn allowance and skips it when they do not fit", async () => {
+    const ai = await loadPiAi();
+    const dir = await mkdtemp(path.join(os.tmpdir(), "gl-pi-compact-"));
+    temps.push(dir);
+    const modelRuntime = await ModelRuntime.create({
+      authPath: path.join(dir, "auth.json"),
+      modelsPath: path.join(dir, "models.json"),
+    });
+    const faux = ai.fauxProvider({ provider: "faux-compact" });
+    modelRuntime.registerNativeProvider(faux.provider as never);
+    faux.setResponses(Array.from({ length: 12 }, (_, i) => ai.fauxAssistantMessage(`reply ${i}`)));
+
+    const { session } = await createAgentSession({
+      cwd: dir,
+      agentDir: dir,
+      model: faux.getModel() as never,
+      thinkingLevel: "off",
+      modelRuntime,
+      noTools: "all",
+      tools: [],
+      sessionManager: SessionManager.inMemory(dir),
+      settingsManager: SettingsManager.inMemory({
+        compaction: { enabled: false, keepRecentTokens: 1 },
+        retry: { enabled: false },
+      }),
+    });
+    const wrapped = wrapPiAgentSession({
+      session,
+      modelRuntime,
+      runId: "run-compact",
+      provider: "faux-compact",
+      modelId: "faux",
+      agentDir: dir,
+      credentialSource: "pi-stored",
+      promptTimeoutMs: 10_000,
+      repairsDir: path.join(dir, "repairs"),
+    });
+
+    try {
+      // Build some history, then report a nearly full context so the next
+      // prompt compacts first.
+      for (let i = 0; i < 3; i += 1) await wrapped.prompt(`turn ${i} ${"x".repeat(200)}`);
+      expect(wrapped.drainTurnCount!()).toBe(3);
+      const full = { tokens: 1_000_000, contextWindow: 1_000_000, percent: 100 };
+      (session as unknown as { getContextUsage: () => unknown }).getContextUsage = () => full;
+
+      // One turn allowed: compaction (charged as 2) does not fit, so no
+      // summarization request is sent and only the prompt's own turn runs.
+      const before = faux.state.callCount;
+      await wrapped.prompt("capped", { maxTurns: 1 });
+      expect(faux.state.callCount - before).toBe(1);
+      expect(wrapped.drainTurnCount!()).toBe(1);
+
+      // Uncapped: compaction runs and is charged.
+      await wrapped.prompt("uncapped");
+      expect(wrapped.drainTurnCount!()).toBe(3);
+    } finally {
+      await wrapped.close();
+    }
+  });
+
   it("runs shell commands in the granted candidate root and drops them on revoke", async () => {
     const ai = await loadPiAi();
     const dir = await mkdtemp(path.join(os.tmpdir(), "gl-pi-shell-"));

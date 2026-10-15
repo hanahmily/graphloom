@@ -1,4 +1,4 @@
-import { cp, mkdir, realpath } from "node:fs/promises";
+import { cp, mkdir, realpath, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { QualifyRepairSpec } from "@graphloom/sdk";
 import { describeExecutorModule, digestExecutorSource, type DescribedExecutor } from "@graphloom/runner";
@@ -10,6 +10,7 @@ import {
   assertDependenciesUnchanged,
   linkDependencies,
   type QualifiedRepairArtifact,
+  type RepairSnapshot,
 } from "./repair.js";
 import type { RepairSubject } from "./repair-lifecycle.js";
 import { saveRunState, type DurableRunState, type ExecutorCatalogEntry } from "./state.js";
@@ -49,6 +50,7 @@ export async function executorRepairSubject(
   const sandbox = entry.isolation === "sandbox";
   return {
     label: `executor package ${base.root}`,
+    baseRoot: base.root,
     baseDigest,
     liveDigest: () => digestExecutorSource(base.root),
     async snapshot({ repairsDir, artifactId }) {
@@ -64,11 +66,21 @@ export async function executorRepairSubject(
         },
       });
       await linkDependencies(baseReal, candidateRoot);
-      return {
+      const candidateEntryModule = path.join(candidateRoot, path.relative(base.root, base.entryModule));
+      const snapshotDigest = await digestExecutorSource(base.root);
+      const snapshot: RepairSnapshot = {
+        artifactId,
         candidateRoot,
-        baseDigest: await digestExecutorSource(base.root),
-        candidateEntryModule: path.join(candidateRoot, path.relative(base.root, base.entryModule)),
+        baseDigest: snapshotDigest,
+        baseActiveVersion: state.activeVersion,
+        target: "executor",
+        executorId: entry.id,
+        candidateEntryModule,
+        reason: qualify.reason,
+        createdAt: new Date().toISOString(),
       };
+      await writeFile(path.join(repairsDir, artifactId, "snapshot.json"), JSON.stringify(snapshot, null, 2), "utf8");
+      return { candidateRoot, baseDigest: snapshotDigest, candidateEntryModule };
     },
     async checkCandidate({ candidateRoot, candidateEntryModule }) {
       if (candidateEntryModule === undefined) throw new Error("executor candidate has no entry module");

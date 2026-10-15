@@ -24,6 +24,12 @@ import {
 export const DEFAULT_SUPERVISOR_PROVIDER = "minimax-cn";
 export const DEFAULT_SUPERVISOR_MODEL = "MiniMax-M3";
 
+/**
+ * Mirrors `@earendil-works/pi-agent-core`'s own `ThinkingLevel` (not re-exported
+ * from the package's public surface), so callers need no deeper import path.
+ */
+export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+
 export function isMiniMaxProvider(provider: string): boolean {
   return provider === "minimax-cn" || provider === "minimax";
 }
@@ -42,6 +48,13 @@ export interface CreatePiSupervisorSessionOptions {
   provider?: string;
   /** Model id. Default: MiniMax-M3 */
   modelId?: string;
+  /**
+   * Reasoning level for the initial model. Default: "off", since the supervisor
+   * keeps decisions concise and must not expose chain-of-thought. Some models
+   * (e.g. ones requiring adaptive thinking) reject "off" outright; set this to
+   * whatever that model requires.
+   */
+  thinkingLevel?: ThinkingLevel;
   /** Absolute Pi agent dir (auth.json / models.json). Default: ~/.pi/agent */
   agentDir?: string;
   /**
@@ -83,10 +96,12 @@ export interface PiSupervisorSession {
   /** Provider turns (model calls) started since the last drain, including tool turns. */
   drainTurnCount?(): number;
   /**
-   * Switch the active model on this logical session.
+   * Switch the active model on this logical session, and its reasoning level
+   * (default "off" when the target does not specify one, even if the previous
+   * model ran with thinking enabled).
    * Caller must ensure the target is operator-configured and idle.
    */
-  setModel(ref: { provider: string; modelId: string }): Promise<void>;
+  setModel(ref: { provider: string; modelId: string; thinkingLevel?: ThinkingLevel }): Promise<void>;
   /**
    * Enable Pi's full coding toolset, rooted at a controller-issued QualifyRepair
    * candidate root. Session identity must not change across repair rounds.
@@ -131,7 +146,12 @@ export async function createPiSupervisorSession(
   }
 
   const settingsManager = SettingsManager.inMemory({
-    compaction: { enabled: false },
+    // A long-running recovery session (a real run can span days and dozens
+    // of repair cycles) otherwise grows past the model's context window with
+    // no warning until the next prompt hard-fails; auto-compaction keeps it
+    // bounded the same way manual compaction already recovers a session that
+    // already overflowed.
+    compaction: { enabled: true },
     retry: { enabled: false },
     cacheWarming: "off",
   });
@@ -155,7 +175,7 @@ export async function createPiSupervisorSession(
     cwd,
     agentDir,
     model,
-    thinkingLevel: "off",
+    thinkingLevel: options.thinkingLevel ?? "off",
     modelRuntime,
     resourceLoader,
     noTools: "all",
@@ -263,7 +283,7 @@ export function wrapPiAgentSession(args: {
       if (closed) {
         throw new Error("supervisor session is closed");
       }
-      if (!(await settleIdle(session))) {
+      if (!(await settleIdle(session, settleTimeoutMs(promptTimeoutMs)))) {
         throw new Error("cannot switch model: session still active after abort");
       }
       // Validate/prepare target credentials before mutating the active model.
@@ -280,6 +300,10 @@ export function wrapPiAgentSession(args: {
         throw new Error(`Pi model not found: ${ref.provider}/${ref.modelId}`);
       }
       await session.setModel(model, { persist: false });
+      // Reset every switch, even to the session's own current level: a prior
+      // model may have required thinking enabled, and the new one may reject
+      // it just as strictly as this one rejected "off".
+      session.setThinkingLevel(ref.thinkingLevel ?? "off", { persist: false });
       provider = ref.provider;
       modelId = ref.modelId;
     },
@@ -288,7 +312,7 @@ export function wrapPiAgentSession(args: {
         throw new Error("supervisor session is closed");
       }
       // An earlier abort may not have settled; never overlap provider requests.
-      if (!(await settleIdle(session))) {
+      if (!(await settleIdle(session, settleTimeoutMs(promptTimeoutMs)))) {
         throw new Error(STILL_ACTIVE);
       }
       const timeoutMs = promptOptions?.timeoutMs ?? promptTimeoutMs;
@@ -297,7 +321,18 @@ export function wrapPiAgentSession(args: {
       let turnCapHit = false;
       let collected: string[] = [];
       const unsubscribe = session.subscribe((event) => {
-        if (event.type === "turn_start") {
+        if (event.type === "compaction_start") {
+          // Compaction (manual or Pi's own) makes summarization requests outside
+          // turn_start, so charge them here. Pi emits this synchronously after
+          // arming its abort controller and before any request, so aborting
+          // here sends nothing.
+          if (maxTurns !== undefined && promptTurns + COMPACTION_PROVIDER_CALLS > maxTurns) {
+            session.abortCompaction();
+            return;
+          }
+          promptTurns += COMPACTION_PROVIDER_CALLS;
+          turns += COMPACTION_PROVIDER_CALLS;
+        } else if (event.type === "turn_start") {
           // Pi awaits listeners before streaming, so aborting here cancels the
           // turn before its provider request is sent.
           if (maxTurns !== undefined && promptTurns >= maxTurns) {
@@ -332,6 +367,7 @@ export function wrapPiAgentSession(args: {
         if (promptOptions?.signal?.aborted) {
           throw new Error("supervisor prompt aborted");
         }
+        await compactBeforePrompt(session, text);
         await session.prompt(text);
         const idleDeadline = Date.now() + timeoutMs;
         while (!session.isIdle && Date.now() < idleDeadline) {
@@ -339,14 +375,14 @@ export function wrapPiAgentSession(args: {
         }
         if (promptOptions?.signal?.aborted) {
           throw new Error(
-            (await settleIdle(session)) ? "supervisor prompt aborted" : `supervisor prompt aborted; ${STILL_ACTIVE}`,
+            (await settleIdle(session, settleTimeoutMs(promptTimeoutMs))) ? "supervisor prompt aborted" : `supervisor prompt aborted; ${STILL_ACTIVE}`,
           );
         }
         if (turnCapHit) {
           throw new Error(`supervisor prompt exceeded its ${maxTurns}-turn allowance`);
         }
         if (timedOut || !session.isIdle) {
-          const settled = await settleIdle(session);
+          const settled = await settleIdle(session, settleTimeoutMs(promptTimeoutMs));
           throw new Error(
             `supervisor prompt timed out after ${timeoutMs}ms` + (settled ? "" : `; ${STILL_ACTIVE}`),
           );
@@ -436,13 +472,42 @@ function setSessionTools(session: AgentSession, tools: ToolDefinition[]): void {
   host.setActiveToolsByName(names);
 }
 
+/**
+ * Provider requests one compaction may make: a history summary plus, when the
+ * cut splits a turn, a summary of that turn's prefix. Charged as the upper
+ * bound, since an undercount would break the finite budget.
+ */
+const COMPACTION_PROVIDER_CALLS = 2;
+/** Fraction of the model's context window a prompt may fill before the session is compacted first. */
+const PROACTIVE_COMPACTION_FRACTION = 0.7;
+/** Pessimistic characters per token, so a large prompt is never underestimated. */
+const CHARS_PER_TOKEN = 3;
+
+/**
+ * Pi compacts on its own only after a response reports usage or after a
+ * provider overflow error, and the overflow retry resends the same oversized
+ * prompt. A long recovery session whose next prompt (a large run view) tips
+ * it past the window therefore hard-fails, so compact before sending when
+ * the known context plus this prompt would cross the fraction above.
+ */
+export async function compactBeforePrompt(session: AgentSession, text: string): Promise<void> {
+  const usage = session.getContextUsage();
+  if (usage?.tokens == null || !(usage.contextWindow > 0)) return;
+  const projected = usage.tokens + Math.ceil(text.length / CHARS_PER_TOKEN);
+  if (projected <= usage.contextWindow * PROACTIVE_COMPACTION_FRACTION) return;
+  // A compaction refused by the turn allowance, or one that fails, still lets
+  // the prompt go out: the provider's own overflow error is then the failure
+  // the caller sees, not a compaction error that hides it.
+  await session.compact().catch(() => undefined);
+}
+
 const STILL_ACTIVE = "supervisor session still active after abort; refusing to reuse it";
 
 /** Abort any active request and wait briefly for idle; false if it never settled. */
-async function settleIdle(session: AgentSession): Promise<boolean> {
+async function settleIdle(session: AgentSession, timeoutMs: number): Promise<boolean> {
   if (session.isIdle) return true;
   await session.abort().catch(() => undefined);
-  const settleDeadline = Date.now() + 5_000;
+  const settleDeadline = Date.now() + timeoutMs;
   while (!session.isIdle && Date.now() < settleDeadline) {
     await sleep(25);
   }
@@ -451,4 +516,9 @@ async function settleIdle(session: AgentSession): Promise<boolean> {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** The settle wait honors the configured prompt timeout, capped at the 5s default. */
+function settleTimeoutMs(promptTimeoutMs: number): number {
+  return Math.max(0, Math.min(5_000, promptTimeoutMs));
 }

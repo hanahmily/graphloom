@@ -24,20 +24,16 @@ import {
   IMPLEMENTER_JOB,
   ISSUE_REPO,
   LIST_ISSUE_COMMENTS,
-  MAX_FINDING_ROUNDS,
   MAX_FIX_CORRECTIONS,
-  MAX_PLAN_REVIEW_ROUNDS,
   MAX_SWEEP_PASSES,
   REQUIREMENT_BUILDS,
   REQUIREMENT_CHANGELOG,
   REQUIREMENT_DECISIONS,
   REQUIREMENT_PASSES,
-  REQUIREMENT_PLAN_REVIEW,
   REQUIREMENT_REPRODUCES,
   REQUIREMENT_REVIEW,
   REQUIREMENT_SCOPE,
   REVIEW_STAGE,
-  REVIEWER_HARNESS,
   VERIFIER_HARNESS,
 } from "./constants.js";
 import { DECISION_RECORD_SCHEMA, parseDecisionRecord, writeScopeFor, type DecisionRecord } from "./decision-record.js";
@@ -51,12 +47,12 @@ import {
   issueSnapshot,
   latestCheckoutRun,
   latestFile,
-  latestReview,
+  latestRevertFailure,
+  latestRevertedCheckoutRun,
   outputTail,
-  reviews,
   sameCheckoutJob,
   succeeded,
-  type ReviewVerdict,
+  type CommandRun,
 } from "./evidence.js";
 import {
   describeFinding,
@@ -72,37 +68,32 @@ import {
 } from "./findings.js";
 import { CODE_REVIEW_SCHEMA, codeReviewInstruction, describeCoverage, isBlocking, reviewBackground } from "./ocr.js";
 import {
-  describePlanFinding,
-  knownPlanFindings,
-  pathsToObservePlan,
-  planFindingLedger,
-  planFindingReferenceSet,
-  planVerificationInstruction,
-  PLAN_REVIEW_SCHEMA,
-  toVerifyPlan,
-  type KnownPlanFindings,
-  type PlanLedger,
-  type PlanReviewPass,
-} from "./plan-findings.js";
-import {
   candidateCommands,
   commitMessage,
   deliverCommands,
   implementInstruction,
   issueRef,
   planInstruction,
-  planReviewInstruction,
   planRevisionInstruction,
   pullRequestDescription,
   redCommands,
   snapshotText,
 } from "./prompts.js";
-import { codeReview, implementerRecord, isTestPath, planReviewed, validatorById } from "./validators.js";
+import { regressionOutcome } from "./gotest.js";
+import { codeReview, implementerRecord, isTestPath, reportText, validatorById } from "./validators.js";
 
 /** Graph bookkeeping; everything else is read back from recorded evidence. */
 export interface FixPrivateState {
-  generation: number;
-  /** Corrections the graph dispatched in Fix in this generation. */
+  /** `view.current.attempt` as of the last call: unchanged by a resume, only by a reentry of Fix. */
+  attempt: number;
+  /** The generation this attempt actually started at (design-run-convergence.md
+   * §4.1): no longer a fence on which evidence is visible — evidence is scoped
+   * by candidate identity (`forIdentity`) so a reentry does not re-earn what an
+   * unchanged candidate already earned — only a marker of when *this* attempt
+   * began, to tell an implementer run that predates a reentry (stale: it ran
+   * before the reentry asked for anything new) from one that answers it. */
+  attemptGeneration: number;
+  /** Corrections the graph dispatched in Fix in this attempt. */
   corrections: number;
 }
 
@@ -110,16 +101,10 @@ const asSchema = (text: string): Record<string, unknown> => JSON.parse(text) as 
 
 const definition: GraphDefinition = {
   graphId: "banyandb-fix",
-  version: "0.4.0",
+  version: "0.5.0",
   privateStateSchema: "banyandb-fix-private-v1",
   resultContracts: [
     { name: "decision-record-v1", schema: asSchema(DECISION_RECORD_SCHEMA), evidenceKind: "other" },
-    {
-      name: "review-verdict-v1",
-      schema: asSchema(PLAN_REVIEW_SCHEMA),
-      evidenceKind: "review",
-      references: ["findings[].finding", "prior[].finding"],
-    },
     { name: "finding-verification-v1", schema: asSchema(VERIFICATION_SCHEMA), evidenceKind: "other" },
     { name: "code-review-v2", schema: asSchema(CODE_REVIEW_SCHEMA), evidenceKind: "review" },
   ],
@@ -128,7 +113,6 @@ const definition: GraphDefinition = {
       id: FIX_STAGE,
       name: "Fix",
       requirementIds: [
-        REQUIREMENT_PLAN_REVIEW,
         REQUIREMENT_DECISIONS,
         REQUIREMENT_REPRODUCES,
         REQUIREMENT_PASSES,
@@ -141,15 +125,6 @@ const definition: GraphDefinition = {
   ],
   requirements: [
     {
-      id: REQUIREMENT_PLAN_REVIEW,
-      statement:
-        "A fresh read-only reviewer reviewed the current plan record, following the plan the implementer followed, on the spec, decisions, reach and test axes, and gave a status for every finding the planner had a chance to answer; every finding that pass raised was dismissed or resolved; no plan finding of this generation is confirmed or disputed; and the reviewer approved.",
-      evidenceSchema: "review-verdict-v1",
-      // The plan itself, not this requirement's own review-verdict evidence:
-      // a revised plan must be reviewed again even with unchanged workspace bytes.
-      identityArtifactSchema: "decision-record-v1",
-    },
-    {
       id: REQUIREMENT_DECISIONS,
       statement:
         "The implementer's decision record is ready, names the regression test and the production caller, gives every unclear point a tier and a basis, takes an option for every behaviour point, and marks no product point chosen.",
@@ -159,7 +134,7 @@ const definition: GraphDefinition = {
     {
       id: REQUIREMENT_REPRODUCES,
       statement:
-        "In a prepared checkout of the base commit with only the change's test files applied, the named regression test fails by assertion (go test -json reports it failed, and the package built), and the check changed no file.",
+        "In a prepared checkout of the base commit with only the change's test files applied, the named regression test fails by assertion (go test -json reports it failed, and the package built), and the check changed no file. When that checkout cannot even build the test alone, a prepared checkout of the full candidate with the implementer's own patch reverting just the behavioral change applied instead — the revert touching no test file — stands in, and the same build-and-fail-by-assertion rule applies there.",
       evidenceSchema: "checkout-command-v1",
     },
     {
@@ -192,7 +167,6 @@ const definition: GraphDefinition = {
     },
   ],
   defaultValidators: [
-    { requirementId: REQUIREMENT_PLAN_REVIEW, validatorId: "plan-reviewer", version: "2", independence: "separate-reviewer" },
     { requirementId: REQUIREMENT_DECISIONS, validatorId: "decisions-recorded", version: "1" },
     { requirementId: REQUIREMENT_REPRODUCES, validatorId: "red-reproduces", version: "1" },
     { requirementId: REQUIREMENT_PASSES, validatorId: "green-passes", version: "1" },
@@ -247,19 +221,15 @@ function fix(view: RunView, issue: number, state: FixPrivateState): GraphDecisio
   const snapshotResult = snapshotText(snapshot.issue, comments.comments, comments.complete);
   if ("problem" in snapshotResult) return partialSnapshot(snapshotResult.problem, [snapshot.record.ref, comments.record.ref]);
   const snapshotBody = snapshotResult.text;
-  // Scoped to this attempt (generation), not the live candidate digest: the
-  // plan and its review predate any workspace change (the implementer has
-  // not run yet when they are accepted), and the later command checks
-  // already scope themselves to `digest` explicitly (latestCheckoutRun,
-  // latestFile, correctionFeedback). Filtering by candidateDigest here would
-  // exclude the plan's own evidence the moment the implementer's first edit
-  // changes it, making Fix look like it has no plan yet on every pass; not
-  // filtering at all would instead carry a stale, already-superseded plan
-  // and its approval straight through a reentry. Generation is exactly the
-  // fence between this attempt and a prior one it needs here.
-  const current = view.evidence.filter((e) => e.generation === view.generation);
+  // The plan and the implementer's decision record are their own artifacts,
+  // not workspace bytes (design-run-convergence.md §4.1): they stay on
+  // record, unscoped by generation or candidate, until an explicit new
+  // diagnostic or work dispatch supersedes them — a reentry alone does not
+  // invalidate either, so it does not re-earn a plan or implementation that
+  // is already right.
+  const reopened = view.openAttempt?.[FIX_STAGE] === true;
 
-  const planRun = agentRuns(current, FIX_STAGE, "diagnostic").filter((r) => r.status === "completed").at(-1);
+  const planRun = agentRuns(view.evidence, FIX_STAGE, "diagnostic").filter((r) => r.status === "completed").at(-1);
   if (planRun === undefined) {
     const revisit = agentRuns(view.evidence, FIX_STAGE, "diagnostic").some((r) => r.status === "completed");
     const assignment = revisit
@@ -274,82 +244,19 @@ function fix(view: RunView, issue: number, state: FixPrivateState): GraphDecisio
   const blocked = notReady(plan.record, [planRun.record.ref], "the plan");
   if (blocked !== undefined) return blocked;
 
-  const ledger = planFindingLedger(current, FIX_STAGE);
-  const planReviews = reviews(current, FIX_STAGE);
-  const reviewed = planReviews.filter((r) => current.indexOf(r.record) > current.indexOf(planRun.record)).at(-1);
-  if (reviewed === undefined) {
-    const earlier = planReviews.at(-1);
-    const earlierPass = earlier !== undefined ? ledger.passes.find((p) => p.record.ref === earlier.record.ref) : undefined;
-    const previous = earlierPass !== undefined ? planFeedback(ledger, earlierPass) : agentRuns(view.evidence, FIX_STAGE, "work").length > 0 ? reentryFeedback(view) : undefined;
-    const known = knownPlanFindings(ledger);
+  const implemented = agentRuns(view.evidence, FIX_STAGE, "work").at(-1);
+  // A reentry whose own implementer run predates it answers nothing new:
+  // the same candidate that sent Fix back here is still the one on record.
+  const stalePreReentry = reopened && implemented !== undefined && (implemented.record.generation ?? 0) < state.attemptGeneration;
+  if (implemented === undefined || implemented.status !== "completed" || stalePreReentry) {
     return dispatchAgent(
       view,
-      planReviewJob(planReviewInstruction({ issue, snapshot: snapshotBody, record: plan.record, known, ...(previous !== undefined ? { previous } : {}) }), known),
-      "dispatch a fresh read-only reviewer for the plan",
+      implementJob(view, issue, plan.record, stalePreReentry ? reentryFeedback(view) : undefined),
+      implemented === undefined ? "implement the reviewed plan, continuing the plan session" : stalePreReentry ? "answer why Fix was re-entered with a fresh implementation pass" : "retry the implementation",
       state,
     );
   }
-  const planPass = ledger.passes.find((p) => p.record.ref === reviewed.record.ref)!;
-  if (planPass.productDecision !== undefined && planPass.verdict !== "approved") {
-    return supervise(
-      { reason: `the plan reviewer named a product decision an agent must not make: ${planPass.productDecision}`, evidenceRefs: [planPass.record.ref] },
-      "hand a reviewer's product decision to the supervisor",
-      JSON.stringify(state),
-    );
-  }
-  const planAwaiting = pathsToObservePlan(ledger);
-  if (planAwaiting.length > 0) return withPrivate(observe({ paths: planAwaiting }, "observe the lines a plan-review refutation quotes"), state);
-  const pendingPlanVerification = toVerifyPlan(ledger);
-  if (pendingPlanVerification.length > 0) {
-    const background = reviewBackground(snapshot.issue, plan.record);
-    const assignment = planVerificationInstruction({ findings: pendingPlanVerification, background, changed: [] });
-    return dispatchAgent(
-      view,
-      planVerificationJob(assignment),
-      `verify plan finding(s) ${pendingPlanVerification.map((f) => f.id).join(", ")} with a fresh read-only session`,
-      state,
-    );
-  }
-  const stuckPlanFinding = ledger.findings.find((f) => (f.state === "confirmed" || f.state === "disputed") && f.rounds >= MAX_FINDING_ROUNDS);
-  if (stuckPlanFinding !== undefined || planReviews.length >= MAX_PLAN_REVIEW_ROUNDS) {
-    return supervise(
-      {
-        reason:
-          stuckPlanFinding !== undefined
-            ? `plan finding ${stuckPlanFinding.id} is still unresolved after ${stuckPlanFinding.rounds} round(s): ${describePlanFinding(stuckPlanFinding)}`
-            : `the plan review has run ${planReviews.length} passes in this generation without converging`,
-        evidenceRefs: [...planReviews.map((r) => r.record.ref), ...ledger.verifications.map((v) => v.record.ref)].slice(-10),
-      },
-      "hand the disputed plan to the supervisor",
-      JSON.stringify(state),
-    );
-  }
-  const planReviewStatement = definition.requirements.find((r) => r.id === REQUIREMENT_PLAN_REVIEW)!.statement;
-  const planResult = planReviewed.evaluate({
-    requirementId: REQUIREMENT_PLAN_REVIEW,
-    statement: planReviewStatement,
-    evidence: current,
-    ...(view.candidateDigest !== undefined ? { candidateDigest: view.candidateDigest } : {}),
-  }) as ValidationResult;
-  if (planResult.status !== "passed") {
-    return dispatchAgent(
-      view,
-      planJob(view, planRevisionInstruction({ issue, feedback: planFeedback(ledger, planPass), changed: agentRuns(view.evidence, FIX_STAGE, "work").length > 0 })),
-      "revise the plan with the reviewer's findings",
-      state,
-    );
-  }
-
-  const implemented = agentRuns(current, FIX_STAGE, "work").at(-1);
-  if (implemented === undefined || implemented.status !== "completed") {
-    return dispatchAgent(
-      view,
-      implementJob(view, issue, plan.record, undefined),
-      implemented === undefined ? "implement the reviewed plan, continuing the plan session" : "retry the implementation",
-      state,
-    );
-  }
-  const record = implementerRecord(current).record;
+  const record = implementerRecord(view.evidence).record;
   if (record !== undefined) {
     const stopped = notReady(record, [implemented.record.ref], "the implementer");
     if (stopped !== undefined) return stopped;
@@ -359,6 +266,10 @@ function fix(view: RunView, issue: number, state: FixPrivateState): GraphDecisio
   if (digest === undefined) {
     return supervise({ reason: "the controller reports no candidate digest for the worktree" }, "escalate a missing candidate digest", JSON.stringify(state));
   }
+  // The checks below are genuinely candidate-anchored: RED, GREEN, the build
+  // suite and the changelog entry are all earned once per workspace change
+  // and stay valid, unscoped by generation, until the candidate changes again.
+  const current = forIdentity(view.evidence, digest);
   const test = record?.test;
   const results = evaluateFix(current, digest);
   const decisions = results.find((r) => r.requirementId === REQUIREMENT_DECISIONS)!;
@@ -374,11 +285,49 @@ function fix(view: RunView, issue: number, state: FixPrivateState): GraphDecisio
       );
     }
     const tests = green.checkout!.paths.filter(isTestPath);
-    if (tests.length > 0 && latestCheckoutRun(current, COMMAND.regression, "base", digest) === undefined) {
-      return withPrivate(
-        dispatch(checkJob("RED check", { from: "base", paths: tests }, redCommands(test), false), "run RED on the base commit with only the test files"),
-        state,
-      );
+    if (tests.length > 0) {
+      const baseRed = latestCheckoutRun(current, COMMAND.regression, "base", digest);
+      if (baseRed === undefined) {
+        return withPrivate(
+          dispatch(checkJob("RED check", { from: "base", paths: tests }, redCommands(test), false), "run RED on the base commit with only the test files"),
+          state,
+        );
+      }
+      // The base commit plus only the test files could not even build it:
+      // the test depends on something this round's change added. Ask for a
+      // patch undoing just the behavioral fix, then retry RED against the
+      // full candidate with that patch reverted, instead of looping the
+      // implementer on a generic "fix your code" correction that misdiagnoses
+      // a structurally unfair check as a real defect.
+      if (regressionBlocked(baseRed, test)) {
+        // A patch is only good for the candidate it was written against: the
+        // implementer's record names a digest, and a patch the controller
+        // already reported as not applying is dead until replaced.
+        const stalePatch = staleRevertPatch(record, implemented.record.candidateDigest, digest, current);
+        if (record.revertPatch === undefined || stalePatch !== undefined) {
+          // Bounded exactly like a generic correction, so an implementer that
+          // never supplies a working patch still lands on the supervisor
+          // instead of looping forever: once exhausted, fall through below.
+          if (state.corrections < MAX_FIX_CORRECTIONS && view.budgets.corrections > 0) {
+            return dispatchAgent(
+              view,
+              implementJob(view, issue, record, revertPatchAsk(test, stalePatch)),
+              stalePatch === undefined
+                ? "ask the implementer for a patch reverting just this round's behavioral fix, since RED's base-commit checkout cannot build the test alone"
+                : "ask the implementer for a fresh revert patch, since the recorded one does not fit the current candidate",
+              { ...state, corrections: state.corrections + 1 },
+            );
+          }
+        } else if (latestRevertedCheckoutRun(current, COMMAND.regression, digest) === undefined) {
+          return withPrivate(
+            dispatch(
+              checkJob("RED check (reverted)", { from: "candidate", revertPatch: record.revertPatch }, redCommands(test), false),
+              "run RED against the candidate with this round's behavioral fix reverted",
+            ),
+            state,
+          );
+        }
+      }
     }
   }
 
@@ -470,15 +419,12 @@ function deliver(view: RunView, issue: number, state: FixPrivateState): GraphDec
   const branch = `fix/${issue}`;
   if (delivered === undefined) {
     const record = implementerRecord(view.evidence).record!;
-    // An approved plan does not depend on the answer; the pull request asks it.
-    const asked = latestReview(view.evidence, FIX_STAGE)?.productDecision;
-    const openQuestions = asked !== undefined && !record.openQuestions.includes(asked) ? [...record.openQuestions, asked] : record.openQuestions;
     const green = latestCheckoutRun(view.evidence, COMMAND.regression, "candidate", view.candidateDigest);
     const issueTitle = issueSnapshot(view.evidence, issue)?.issue.title ?? issueRef(issue);
     const body = pullRequestDescription({
       issue,
       issueTitle,
-      record: { ...record, openQuestions },
+      record,
       base: green?.checkout?.base ?? "",
       ...reviewSummary(view),
     });
@@ -535,13 +481,6 @@ function reviewSummary(view: RunView): { review: string; dismissed: string[] } {
   };
 }
 
-/** What a plan review pass's open findings ask the planner to change. */
-function planFeedback(ledger: PlanLedger, pass: PlanReviewPass): string[] {
-  const header = pass.verdict === "request_changes" ? `The plan reviewer sent your plan back: ${pass.summary}` : `The plan reviewer's findings on your plan: ${pass.summary}`;
-  const relevant = ledger.findings.filter((f) => pass.raised.includes(f.id) || ((f.state === "confirmed" || f.state === "disputed") && f.on === pass.planRef));
-  return [header, ...relevant.map(describePlanFinding)];
-}
-
 /** Why the run is back in Fix: the confirmed findings of the code review, when there are any. Dismissed and disputed ones never reach the implementer. */
 function reentryFeedback(view: RunView): string[] {
   const confirmed = findingLedger(view.evidence).findings.filter((f) => f.state === "confirmed");
@@ -560,6 +499,32 @@ function notReady(record: DecisionRecord, refs: string[], who: string): GraphDec
   const reason = record.status === "blocked" ? "needs maintainer decision" : "cannot reproduce";
   const question = record.draftComment?.trim() || record.openQuestions[0] || record.summary;
   return stop({ reason, blocker: question.slice(0, 1_000), evidenceRefs: refs }, `${who} returned ${record.status}: ${record.summary.slice(0, 200)}`);
+}
+
+/** RED's checkout did not even run the named test: a reason to ask for a revert patch, not a generic correction. */
+function regressionBlocked(run: CommandRun, test: NonNullable<DecisionRecord["test"]>): boolean {
+  const outcome = regressionOutcome(reportText(run), test);
+  return outcome === "build-failed" || outcome === "setup-failed";
+}
+
+/** Why the record's revertPatch cannot be used for the candidate at `digest`, or undefined when it can. */
+function staleRevertPatch(record: DecisionRecord, recordedDigest: string | undefined, digest: string, current: EvidenceRecord[]): string | undefined {
+  if (record.revertPatch === undefined) return undefined;
+  if (recordedDigest !== undefined && recordedDigest !== digest) return "it was written against an earlier version of the candidate, which has changed since";
+  const failure = latestRevertFailure(current, digest);
+  if (failure !== undefined && failure.patch === record.revertPatch) {
+    return `it does not apply (in reverse) to the current candidate: ${failure.error.slice(0, 300)}`;
+  }
+  return undefined;
+}
+
+/** Feedback asking the implementer for a patch undoing just this round's behavioral change. */
+function revertPatchAsk(test: NonNullable<DecisionRecord["test"]>, stale?: string): string[] {
+  return [
+    ...(stale !== undefined ? [`Your earlier revertPatch cannot be used: ${stale}. Write a new one against the current candidate (the files as they are now) and include it in your decision record.`] : []),
+    `RED could not build ${test.name} on the base commit with only the test file(s) applied: the test depends on something this change added to the production code (e.g. a new parameter, type or helper), which a bare test-file checkout does not have.`,
+    'Add a "revertPatch" field to your decision record: a unified diff (`git diff` format, applying cleanly in reverse to the full candidate) that undoes only this round\'s specific behavioral change in the production code, keeping everything else — including anything the test itself depends on. Do not revert the test file; RED will apply this patch in reverse on the full candidate and expect the named test to then fail by assertion.',
+  ];
 }
 
 function evaluateFix(evidence: EvidenceRecord[], digest: string): Array<{ requirementId: string; result: ValidationResult }> {
@@ -606,44 +571,6 @@ function planJob(view: RunView, assignment: string): JobSpec {
     executor: CODING_AGENT,
     input: { assignment, harness: IMPLEMENTER_HARNESS },
     ...(from !== undefined ? { continueFrom: from } : {}),
-  };
-}
-
-/** A fresh session each time: the plan reviewer carries nothing from an earlier review. */
-function planReviewJob(assignment: string, known: KnownPlanFindings): JobSpec {
-  return {
-    stageId: FIX_STAGE,
-    kind: "agent",
-    purpose: "review",
-    readOnly: true,
-    instruction: "Review the plan",
-    resultSchema: "review-verdict-v1",
-    executor: CODING_AGENT,
-    input: { assignment, harness: REVIEWER_HARNESS },
-    knownReferences: {
-      "findings[].finding": planFindingReferenceSet(known),
-      "prior[].finding": planFindingReferenceSet(known),
-    },
-  };
-}
-
-/**
- * A fresh read-only session, distinct from both the planner's and the plan
- * reviewer's, that judges a plan finding the reviewer repeated after the
- * planner had a chance to answer it. Purpose `verify`, not `diagnostic`: the
- * plan itself is looked up by {FIX_STAGE, "diagnostic"}, and this job's own
- * {verdicts:[...]} result must never be misread as a plan.
- */
-function planVerificationJob(assignment: string): JobSpec {
-  return {
-    stageId: FIX_STAGE,
-    kind: "agent",
-    purpose: "verify",
-    readOnly: true,
-    instruction: "Verify the plan review findings",
-    resultSchema: "finding-verification-v1",
-    executor: CODING_AGENT,
-    input: { assignment, harness: VERIFIER_HARNESS },
   };
 }
 
@@ -718,11 +645,16 @@ function checkJob(instruction: string, checkout: NonNullable<JobSpec["checkout"]
 }
 
 function readPrivate(view: RunView): FixPrivateState {
-  const blank: FixPrivateState = { generation: view.generation, corrections: 0 };
+  const blank: FixPrivateState = { attempt: view.current.attempt, attemptGeneration: view.generation, corrections: 0 };
   if (!view.privateState) return blank;
   try {
     const saved = JSON.parse(view.privateState) as Partial<FixPrivateState>;
-    return saved.generation === view.generation ? { ...blank, ...saved } : blank;
+    // Same attempt as last observed: a resume may have bumped view.generation
+    // since, but Fix was not reentered, so attemptGeneration (and corrections
+    // count) carry forward unchanged rather than re-pinning to the new one.
+    return saved.attempt === view.current.attempt && saved.attemptGeneration !== undefined
+      ? { attempt: view.current.attempt, attemptGeneration: saved.attemptGeneration, corrections: saved.corrections ?? 0 }
+      : blank;
   } catch {
     return blank;
   }

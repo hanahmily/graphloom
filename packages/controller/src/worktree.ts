@@ -174,9 +174,34 @@ export function changedPaths(before: Map<string, string>, after: Map<string, str
   return [...after].filter(([rel, fp]) => before.get(rel) !== fp).map(([rel]) => rel).sort();
 }
 
-/** Changed paths a job was not allowed to write: all of them when read-only, else those outside `writeScope`. */
-export function pathsOutsideWriteScope(changed: string[], job: { readOnly?: boolean; writeScope?: string[] }): string[] {
-  if (job.readOnly === true) return changed;
+/**
+ * The subset of `paths` tracked at HEAD. A path missing from the pre-job
+ * status snapshot may still have existed before the job (any clean tracked
+ * file), so "new" also requires that HEAD does not track it.
+ */
+export async function trackedAtHead(worktreePath: string, paths: string[]): Promise<Set<string>> {
+  if (paths.length === 0) return new Set();
+  const { stdout } = await execFileAsync("git", ["ls-tree", "-r", "-z", "--name-only", "HEAD", "--", ...paths], {
+    cwd: worktreePath,
+    maxBuffer: 64 * 1024 * 1024,
+  });
+  return new Set(stdout.split("\0").filter((p) => p.length > 0));
+}
+
+/**
+ * Changed paths a job was not allowed to write: for a read-only job, any path
+ * that existed before and was modified or removed (a path `isNewPath` reports
+ * as new — one that did not exist before the job ran — is not a violation: a
+ * read-only reviewer may leave its own scratch artifacts behind, it may not
+ * touch what was already there); for any other job, those outside
+ * `writeScope`.
+ */
+export function pathsOutsideWriteScope(
+  changed: string[],
+  job: { readOnly?: boolean; writeScope?: string[] },
+  isNewPath?: (rel: string) => boolean,
+): string[] {
+  if (job.readOnly === true) return isNewPath === undefined ? changed : changed.filter((rel) => !isNewPath(rel));
   return changed.filter((rel) => !writeScopeAllows(rel, job.writeScope ?? []));
 }
 

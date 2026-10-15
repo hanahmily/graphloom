@@ -161,11 +161,13 @@ a session). Run for real against this machine's installed, logged-in
 stand-in one — the question is the same one the gate in `run` will ask: would
 a live run find what its adapters need).
 
-Everything proposed in §3-§4 is now built and verified: the gate in `run`
-(§3.5), `--record-from` (§4.5), `--offline` (§4.6), `--synthesized` (§4.4),
-`--adversarial` (§4.4), and B3's per-job call-log provenance check (§4.1,
-§4.7), scoped down to the identity tuple that is actually tractable to thread
-end to end (below).
+Everything proposed in §3-§4 is now built and verified: `--record-from`
+(§4.5), `--offline` (§4.6), `--synthesized` (§4.4), `--adversarial` (§4.4), and
+B3's per-job call-log provenance check (§4.1, §4.7), scoped down to the
+identity tuple that is actually tractable to thread end to end (below). The
+gate in `run` (§3.5) was also built, then reverted the same day: it hard-blocks
+every real run against a plugin's real target, not only a broken one (§3.5,
+§8).
 
 B3's provenance check is narrower than the text's own "job identity" framing
 of (`operationId`, contract, stage, purpose): it cross-checks `operationId`
@@ -557,18 +559,32 @@ result out — and the only one that catches "the model writes the description
 where the id goes" before a live run does. Opt-in; `run` never probes, and
 `probe` refuses to run against a stand-in.
 
-### 3.5 The gate in `run`
+### 3.5 The gate in `run` — reverted 2026-10-04
 
-`graphloom run` performs L0, then L1 quick, before intaking the live run. Both
-are keyed by a fingerprint: bundle digests, runner config, environment check
-outputs, GraphLoom version, and the harness binaries' capability probe (§3.1),
-so a binary upgrade that changes what the adapter can ask for re-rehearses. A
-`ready` report with the same fingerprint is reused, so the second run on an
-unchanged machine pays nothing. `not-ready` stops before any provider call,
-with the rehearsal report as the run report. `inconclusive` proceeds — a thin
-scenario must not block a run — but is printed and recorded in the intake pin.
-`--skip-rehearsal` overrides and is recorded the same way, so `inspect` shows
-the run was not rehearsed.
+`graphloom run` briefly performed L0, then L1 quick, before intaking the live
+run, keyed by a fingerprint (bundle digests, runner config, environment check
+outputs, GraphLoom version, the harness binaries' capability probe (§3.1)),
+with `not-ready` stopping before any provider call and `inconclusive`
+proceeding with a note. It was reverted the same day it shipped: the first
+real run attempted against a plugin's actual target (banyandb-fix against the
+real `apache/skywalking-banyandb`, not its own CI fixture) reported
+`not-ready` and stopped before any provider call — not because anything was
+broken, but because L1's replay is a literal recording of one historical
+interaction with a tiny synthetic fixture repo (§4.4-§4.5), and the stand-in's
+finite, fixed replies can never satisfy a graph's real requirements against a
+repo they were not recorded against. Against the real target this is not an
+occasional false positive; it is the outcome for every real request, every
+time, since no repo other than the one recorded ever converges. A check that
+fails 100% of real use while passing 100% of CI is not a pre-flight gate, it
+is a wall — see §8 for the fuller account and the rejected alternative (making
+`not-ready` degrade to `inconclusive` on a repo-identity mismatch) that was
+considered and set aside in favor of simply not gating `run` at all.
+`check`/`rehearse`/`replay`/`probe` are unaffected: run only when an operator
+or CI explicitly invokes them, against the fixture they were built for, they
+are exactly what §2's goals describe. `apps/graphloom/src/gate.ts` (`runGate`,
+the L0+L1-quick-plus-fingerprint combinator this section used) stays, tested
+directly, in case a future explicit, opt-in command wants it; it is no longer
+reachable from `run`.
 
 ## 4. Design
 
@@ -856,7 +872,8 @@ verdict is read next to the list of what it did not prove.
 | `GraphRehearsal` types, `synthesizeFromSchema`, adversarial mutations, fidelity word match | `packages/sdk` | sdk |
 | `RehearsalReport`, evaluation from `DurableRunState`, verdict rules, fingerprint, replay stepping | `packages/controller/src/rehearsal.ts` | controller |
 | Rehearsal wrappers, stand-in binaries (moved from `test/`), seam guard, per-adapter `requiredFlags` for the capability probe | `executors/coding-agent/src/rehearsal/` | executors |
-| `check`, `rehearse`, `replay`, `probe`; gate, `--skip-rehearsal`, `--offline`, `--commands`; hermetic setup | `apps/graphloom` | cli |
+| `check`, `rehearse`, `replay`, `probe`; `--offline`, `--commands`; hermetic setup | `apps/graphloom` | cli |
+| `gate.ts` (`runGate`: L0+L1-quick, fingerprint cache), built for `run` then reverted (§3.5) — tested directly, wired to no command | `apps/graphloom` | cli |
 | `entryPoints.rehearsal`, scenarios, unit simulation reading them | hello, release, banyandb-fix | plugins |
 
 ## 5. Interfaces and seams
@@ -866,9 +883,9 @@ verdict is read next to the list of what it did not prove.
 | Bundle manifest | `entryPoints.rehearsal` (optional) | sdk, plugins |
 | `RunnerConfig` | `standIn?: true`: stand-in modules and commands, credential refusal, isolated dirs, rehearsal timeouts | cli |
 | Harness adapters | each exports `requiredFlags` (the CLI flags it passes) for the capability probe | executors |
-| `RunRequest`/`IntakePin` | `rehearsalGate?: { fingerprint: string; verdict: "ready" \| "not-ready" \| "inconclusive" \| "skipped"; notes: string[] }` recorded at intake | controller |
+| `RunRequest`/`IntakePin` | `rehearsalGate?: { fingerprint: string; verdict: "ready" \| "not-ready" \| "inconclusive" \| "skipped"; notes: string[] }`, optional; the controller still accepts and records it, but `run` no longer supplies it (§3.5) | controller |
 | `createCliRunner` | module and command overrides become a supported parameter, not a test hook | cli |
-| `RunReport`/`InspectReport` | `rehearsalGate` summary, present whenever the run was gated | controller |
+| `RunReport`/`InspectReport` | `rehearsalGate` summary, present whenever a caller supplied one; `run` no longer does (§3.5) | controller |
 | Stand-in binaries | shipped under `@graphloom/executor-coding-agent/rehearsal`, same protocols as today's fakes, refuse to run without a scenario | executors |
 | `@graphloom/executor-github` | `githubRehearsalModule`: `--offline`'s stand-in, serving read-only ids from `scenario.reads`; runs unrestricted (§4.6), unlike the real sandboxed package | executors |
 | `packages/sdk/src/rehearsal-client.ts` | `nextRead`/`recordUnverifiedRead`/`readUnverifiedReads`, the `reads` analog of `nextReply`/`nextCommandOutcome`; `synthesizedRepliesOnly()`/`REHEARSAL_SYNTHESIZED_ENV` for `--synthesized`; `adversarialMutationOnly()`/`REHEARSAL_ADVERSARIAL_ENV` for `--adversarial` | sdk |
@@ -901,10 +918,11 @@ verdict is read next to the list of what it did not prove.
 5. `replay` of `879ee04f-e57`, committed as a fixture under
    `examples/plugins/banyandb-fix/test/fixtures/runs/`, reports six valid
    review results and pass 2's two reconciled repeats.
-6. The gate: `run` with a `not-ready` rehearsal stops before live intake and
-   returns the rehearsal report; `inconclusive` proceeds and is visible in
-   `inspect`; a second `run` with the same fingerprint does not rehearse
-   again; `--skip-rehearsal` is visible in `inspect`.
+6. The gate (`apps/graphloom/src/gate.ts`'s `runGate`, tested directly, no
+   longer reachable from `run` — §3.5): a `not-ready` rehearsal stops before
+   live intake and returns the rehearsal report; `inconclusive` proceeds and
+   is visible in `inspect`; a second call with the same fingerprint does not
+   rehearse again; `skip: true` is visible in `inspect`.
 7. `probe` against a faux provider standing in for a real one spends ≤ 3 calls
    and reports the contract check and usage; `probe` against `standIn: true`
    refuses.
@@ -957,8 +975,11 @@ verdict is read next to the list of what it did not prove.
    banyandb-fix's own e2e test stays: its real value is exact delivery-text
    and evidence-shape assertions `rehearse`'s deliberately generic evaluator
    never inspects, not happy-path convergence alone.
-4. Turn on the gate in `run`, cached by fingerprint. Add `probe` last; it is
-   the only rung that costs anything to try.
+4. Turn on the gate in `run`, cached by fingerprint. Done 2026-10-04, then
+   reverted the same day (§3.5, §8): the first real run against a plugin's
+   actual target reported `not-ready` for a reason that had nothing to do with
+   the plugin being broken, and would have for every real request. Add `probe`
+   last; it is the only rung that costs anything to try.
 
 ## 8. Decisions and open questions
 
@@ -1031,6 +1052,61 @@ Decided 2026-10-04:
   B-boundary assertion for "specifically a scope violation" is a smaller,
   separate addition left for whenever `--adversarial`'s own verdict handling
   needs it.
+
+Decided 2026-10-04 (reverting an earlier decision from the same day):
+
+- The gate in `run` (§3.5) is reverted; `run` goes back to its pre-rollout-
+  step-4 behavior, with no automatic rehearsal. Dispatching a real run of
+  banyandb-fix against issue apache/skywalking#14067, in the real
+  `apache/skywalking-banyandb` checkout, was the first time anything in this
+  design ran against a plugin's actual target rather than its own CI fixture.
+  `run` reported `not-ready` and refused to start. Root cause, confirmed by
+  reproducing it directly through `rehearse` (same failure with the scenario's
+  own original issue number against the real repo; same failure regardless of
+  which issue the request named): the committed `happy` scenario is a literal
+  recording of one run against a 3-file synthetic Go module
+  (`apps/graphloom/test/banyandb-fix-rehearsal.test.ts`'s `makeEnv()`), with a
+  finite, fixed sequence of canned plan/review replies written for that one
+  planted defect. `rehearse` correctly runs this scenario through the real
+  controller against the live task's own real repo (§4.1's "the real graph
+  logic sees the same task it would on a live run" is working as designed).
+  Pointed at the real upstream repo, with real GitHub reads, the canned
+  replies cannot satisfy the real requirement set; `fix` never mints a
+  receipt, hits its dispatch ceiling, and enters recovery; the scripted
+  supervisor — recorded from a run that needed no recovery at all — has no
+  decision for it, and `run` stops.
+  - `evaluateRehearsal`'s B7 check (unscripted recovery → `not-ready`) is
+    working exactly as its own unit tests require (`packages/controller/src/
+    rehearsal.test.ts`, "fails B7-9 when recovery was entered for a trigger
+    the scenario did not name") and was not touched — weakening it would
+    break the one thing this whole design exists to catch (Vajra's "a
+    mis-wired stand-in looks like a slow run, not a broken one," §4.2).
+  - A narrower fix was considered and rejected: tag a recorded scenario with
+    the identity of the repo it was captured against (cheapest candidate: the
+    recording run's own `pinnedHead`) and degrade a `not-ready` caused by
+    unscripted recovery to `inconclusive` when the live task's repo doesn't
+    match. This would have kept `run`'s gate alive for the common case (CI,
+    or an operator re-running the exact fixture) while not hard-blocking a
+    genuinely different real target. Not built: it only patches the one
+    symptom this run exposed (B7); B5 (a contract-valid result that never
+    mints a receipt, §3.1) and others can fail the same way for the same
+    underlying reason, each would need its own mismatch-aware carve-out, and
+    every carve-out weakens exactly the regression-catching property §4.2
+    was written to protect. The simpler, more honest fix is to not use a
+    fixture-bound recording to gate production use at all.
+  - This also corrects an un-costed assumption in §2's own goals: "an
+    operator, or `graphloom run` itself, learns... whether this graph... can
+    carry a run from intake to receipts" was written assuming a scenario's
+    convergence says something general about the graph; in this
+    implementation a scenario is a recording of one specific historical
+    interaction, so the goal as wired only ever answered "does this one
+    historical interaction still replay," which is a materially weaker claim
+    that happens to equal the intended one only when rehearsing against the
+    exact fixture the scenario was recorded from.
+  - `check`/`rehearse`/`replay`/`probe` keep working exactly as before: they
+    are invoked explicitly, by an operator or CI, against the fixture they
+    were built and recorded for, which is precisely what §2's goals describe
+    and what §6's verification items test. Nothing about them changes.
 
 Not borrowed from Vajra, on purpose: its edge-coverage generation builds one
 case per branch from a workflow's declarative predicates and gates on 100%.

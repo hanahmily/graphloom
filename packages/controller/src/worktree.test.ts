@@ -132,6 +132,16 @@ describe("write-scope change detection", () => {
     expect(pathsOutsideWriteScope(changed, { writeScope: [".", "!api/proto/", "!go.mod"] })).toEqual(["api/proto/v1/a.proto", "go.mod"]);
     expect(pathsOutsideWriteScope(changed, { writeScope: ["pkg", "!pkg/x.go"] })).toEqual(["README.md", "api/proto/v1/a.proto", "api/protox.go", "go.mod", "pkg/x.go"]);
   });
+
+  it("a read-only job may add its own new files, but not touch a path that already existed", () => {
+    const changed = ["scratch/verify_test.go", "README.md"];
+    // No isNewPath function supplied: every changed path is still a violation (today's existing callers).
+    expect(pathsOutsideWriteScope(changed, { readOnly: true })).toEqual(changed);
+    // Only "README.md" pre-existed; the new scratch file is not a violation.
+    expect(pathsOutsideWriteScope(changed, { readOnly: true }, (rel) => rel !== "README.md")).toEqual(["README.md"]);
+    // Every changed path is new: nothing is a violation.
+    expect(pathsOutsideWriteScope(changed, { readOnly: true }, () => true)).toEqual([]);
+  });
 });
 
 describe("candidate change", () => {

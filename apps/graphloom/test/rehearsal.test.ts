@@ -145,10 +145,16 @@ describe("graphloom replay (L2)", () => {
     // recorded it; replay reads the bundle's current code, which is wherever
     // this checkout actually has it installed, not that frozen absolute path.
     const report = await replay(stateDir, { bundlePath: path.join(root, "examples/plugins/banyandb-fix") });
-    expect(report.contracts.valid).toBeGreaterThanOrEqual(5);
-    const planReviewed = report.requirements.find((r) => r.requirementId === "plan-reviewed");
-    expect(planReviewed?.hadReceipt).toBe(false);
-    expect(planReviewed?.now.status).not.toBe("passed");
+    // Plan review no longer exists in the current plugin: its review-verdict-v1
+    // evidence (most of what this run recorded) reclassifies to no contract at
+    // all, leaving only the plan's own decision-record-v1 valid.
+    expect(report.contracts.valid).toBe(1);
+    expect(report.contracts.byName["decision-record-v1"]).toMatchObject({ valid: 1, invalid: 0 });
+    expect(report.requirements.some((r) => r.requirementId === "plan-reviewed")).toBe(false);
+    // Freed from plan review, the current graph would go straight to
+    // implementing the plan — but this run's own recorded budget was already
+    // spent on the real plan-review churn before it ever reached that point.
+    expect(report.nextDecision).toMatchObject({ decision: { action: { type: "stop", stop: { reason: "budgets exhausted" } } } });
   });
 });
 
