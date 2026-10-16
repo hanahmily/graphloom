@@ -58,9 +58,17 @@ export interface ChildPluginHostOptions {
   workerModule?: string;
   env?: NodeJS.ProcessEnv;
   cwd?: string;
+  /**
+   * The run's pinned task config, attached to every describe, advance
+   * (`RunView.config`), evaluate (`ValidationInput.config`) and rehearsal
+   * request. Opaque: the host never reads a field of it.
+   */
+  config?: unknown;
 }
 
 export interface InProcessPluginHostOptions {
   activeVersion: string;
   generation?: number;
+  /** The run's pinned task config, passed to describe and attached to every advance view. */
+  config?: unknown;
 }

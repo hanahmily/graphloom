@@ -115,6 +115,10 @@ crashes; filesystem and execution scopes require host enforcement.
   static check, zero-token rehearsal on stand-in models through the real
   harnesses, replay of recorded runs, a bounded real-model probe — and the
   gate `run` climbs before spending a live run's budget.
+- [Issue-fix graph](docs/design-issue-fix-graph.md): one bug-fix graph for any
+  repository, driven by a JSON profile the task names with `config:`; ships
+  profiles for BanyanDB and for GraphLoom itself. It generalizes the
+  [BanyanDB fix graph](docs/design-banyandb-fix-graph.md).
 - [Example task](examples/task.yaml) and [example guide](examples/README.md).
 - [Loopx gate-repair study](docs/research/loopx-gate-defect-handling.md) and
   [issue-fix study](docs/research/loopx-issue-fix-example.md).

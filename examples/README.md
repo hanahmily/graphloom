@@ -105,3 +105,15 @@ job, and proves each fix in disposable checkouts: the regression test fails on
 the base and passes, with the build checks, on the committed change. The
 [plugin README](plugins/banyandb-fix/README.md) shows the task and runner
 config for a real run.
+
+## Any repository: issue-fix
+
+[`plugins/issue-fix`](plugins/issue-fix/) is the same graph for any
+repository (`@graphloom/plugin-issue-fix`). A task names a repository profile
+with `config:`, a JSON file relative to the task file that intake pins with
+its digest and hands to the plugin; the controller reads none of its fields.
+[`issue-fix-banyandb-task.yaml`](issue-fix-banyandb-task.yaml) runs it on
+BanyanDB with the profile that reproduces banyandb-fix, and
+[`issue-fix-graphloom-task.yaml`](issue-fix-graphloom-task.yaml) on GraphLoom
+itself. See the [plugin README](plugins/issue-fix/README.md) and the
+[design](../docs/design-issue-fix-graph.md).

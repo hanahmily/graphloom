@@ -103,6 +103,8 @@ export async function runGate(taskPath: string, options: GateOptions = {}): Prom
     repoPath: intake.repoPath,
     pinnedHead: intake.pinnedHead,
     request: intake.task.request,
+    // The task config changes what the graph describes and decides.
+    ...(intake.config !== undefined ? { taskConfig: intake.config.sha256 } : {}),
     runnerConfig,
     environmentOutputs: checkReport.environmentOutputs,
     helpText: checkReport.capabilities?.helpText ?? {},

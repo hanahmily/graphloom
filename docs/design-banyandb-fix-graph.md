@@ -5,7 +5,10 @@ Status: implemented, 2026-09-28, as
 GraphLoom gaps listed at the end are closed except where the table says
 otherwise; no live run on BanyanDB has been made yet.
 [Review convergence](#review-convergence) is implemented except its second
-phase, executable confirmations. This applies the
+phase, executable confirmations. The generic
+[issue-fix graph](design-issue-fix-graph.md) runs this design on any
+repository from a profile; its banyandb profile reproduces this graph, and
+new BanyanDB runs should use it. This applies the
 [TypeScript core design](design-typescript-core.md) and the
 [executor design](design-executors.md) to a real repository.
 

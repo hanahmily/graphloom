@@ -30,7 +30,7 @@ export function createInProcessPluginHost(
         };
       }
       try {
-        return { ok: true, value: plugin.describe() };
+        return { ok: true, value: options.config !== undefined ? plugin.describe(options.config) : plugin.describe() };
       } catch (err) {
         return {
           ok: false,
@@ -54,7 +54,7 @@ export function createInProcessPluginHost(
         };
       }
       try {
-        return { ok: true, value: plugin.advance(view) };
+        return { ok: true, value: plugin.advance(withConfig(view, options.config)) };
       } catch (err) {
         return {
           ok: false,
@@ -70,6 +70,11 @@ export function createInProcessPluginHost(
       closed = true;
     },
   };
+}
+
+/** The view with the run's config attached; unchanged when the run has none. */
+function withConfig(view: RunView, config: unknown): RunView {
+  return config !== undefined ? { ...view, config } : view;
 }
 
 /** Convenience: scripted GraphPlugin behind the in-process host. */

@@ -1,0 +1,75 @@
+# issue-fix graph plugin
+
+Source-repairable Fix → Review bundle that fixes one bug issue in any
+repository, written only against the public `@graphloom/sdk`. Everything
+repository-specific comes from a *profile*: a JSON file the task names with
+`config:`. The graph is [banyandb-fix](../banyandb-fix/README.md)'s, with its
+plan, implementation, RED/GREEN proof, scope check, optional changelog check,
+open-code-review sweep with independent verification, and local `fix/<issue>`
+delivery. The [design](../../../docs/design-issue-fix-graph.md) gives the
+profile schema and how the config reaches the plugin.
+
+## Profiles
+
+| Profile | Repository | Regression runner | Build checks | Changelog |
+|---|---|---|---|---|
+| [`profiles/banyandb.json`](profiles/banyandb.json) | apache/skywalking-banyandb, issues in apache/skywalking | `go-test` | `make test-ci` for the changed packages, license-check, build, lint, check | `CHANGES.md` |
+| [`profiles/graphloom.json`](profiles/graphloom.json) | hanahmily/graphloom (this repository) | `vitest` | `npm run typecheck`, `npm run build`, `npm test` | none |
+
+The banyandb profile reproduces banyandb-fix exactly: same requirements,
+statements, environment checks, prompts and commands. See banyandb-fix's
+README for its environment table and runner configuration; they apply as they
+are.
+
+## Run it
+
+From `examples`:
+
+```yaml
+graph: issue-fix
+repo: skywalking-banyandb
+config: plugins/issue-fix/profiles/banyandb.json
+request: "Fix apache/skywalking#14092."
+budgets:
+  agentInvocations: 2000
+  jobs: 1024
+  decisions: 2048
+  corrections: 16
+  activeMs: 43200000
+```
+
+[`../../issue-fix-banyandb-task.yaml`](../../issue-fix-banyandb-task.yaml) and
+[`../../issue-fix-graphloom-task.yaml`](../../issue-fix-graphloom-task.yaml)
+are ready to use; the GraphLoom one runs on the checkout it lives in
+(`repo: .`). Intake pins the profile's bytes and digest; editing the file
+later does not change a running or resumed run.
+
+The runner config is banyandb-fix's: Claude Code, Codex and Pi enabled, the
+GitHub reads, and command jobs long enough for the profile's checks. For the
+graphloom profile the full suite takes about ten minutes; its commands allow
+45.
+
+```sh
+GRAPHLOOM_GITHUB_LIVE_TOKEN="$(gh auth token)" node ../apps/graphloom/dist/main.js run issue-fix-graphloom-task.yaml
+```
+
+## Another repository
+
+Copy a profile beside your task, adjust it, and name it with `config:`. A
+profile selects one of the built-in regression runners (`go-test`, `vitest`);
+another test framework needs a new runner in `src/runners/`.
+
+## Build and repair
+
+```sh
+npm run build -w @graphloom/plugin-issue-fix
+npm test -w @graphloom/plugin-issue-fix
+npm run manifest -w @graphloom/plugin-issue-fix   # after build
+node <installed>/scripts/qualify.mjs <candidateRoot>  # repair preflight
+```
+
+The manifest declares `taskConfig: "required"` and pins the source,
+profile, test and lock digests, but no requirements: they depend on the
+profile, and each run pins the ones `describe(config)` returns.
+`src/qualification.ts` holds positive and negative cases for every validator
+under both shipped profiles.

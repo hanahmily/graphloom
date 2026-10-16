@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { RunView } from "@graphloom/sdk";
 import {
   createChildPluginHost,
+  createInProcessPluginHost,
   createScriptedPluginHost,
   dispatch,
   type CallContext,
@@ -310,5 +311,61 @@ describe("createScriptedPluginHost", () => {
     expect(a.ok).toBe(true);
     if (!a.ok) throw new Error("expected ok");
     expect(a.value.action.type).toBe("dispatch");
+  });
+});
+
+describe("task config", () => {
+  const configured = (config?: unknown) =>
+    track(
+      createChildPluginHost({
+        entryModule: fixture("configured", "graph.mjs"),
+        activeVersion: "configured@1",
+        generation: 1,
+        workerModule: workerJs,
+        callbackTimeoutMs: 3_000,
+        ...(config !== undefined ? { config } : {}),
+      }),
+    );
+
+  it("attaches the run's config to describe, advance, evaluate and rehearsal, unread", async () => {
+    const config = { profile: { nested: [1, "two", null] }, graph: "not-the-task-graph" };
+    const host = await configured(config);
+    const described = await host.describe(ctx("op-describe"));
+    expect(described.ok && described.value.requirements[0]!.statement).toBe(`describe saw ${JSON.stringify(config)}`);
+    const advanced = await host.advance(ctx("op-advance"), view());
+    expect(advanced.ok && advanced.value.action).toEqual({ type: "stop", stop: { reason: "echo", blocker: JSON.stringify(config) } });
+    const evaluated = await host.evaluate!(ctx("op-evaluate"), "echo", { requirementId: "r", statement: "s", evidence: [] });
+    expect(evaluated.ok && evaluated.value.reason).toBe(JSON.stringify(config));
+    const rehearsal = await host.rehearsal!(ctx("op-rehearsal"), fixture("configured", "graph.mjs"));
+    expect(rehearsal.ok && rehearsal.value?.scenarios.happy!.expect.stopReason).toBe(JSON.stringify(config));
+  });
+
+  it("sends no config when the run has none", async () => {
+    const host = await configured();
+    const described = await host.describe(ctx("op-describe"));
+    expect(described.ok && described.value.requirements[0]!.statement).toBe("describe saw null");
+    const advanced = await host.advance(ctx("op-advance"), view());
+    expect(advanced.ok && advanced.value.action).toEqual({ type: "stop", stop: { reason: "echo", blocker: "null" } });
+  });
+
+  it("passes the config to an in-process plugin's describe and advance", async () => {
+    const seen: unknown[] = [];
+    const host = createInProcessPluginHost(
+      {
+        describe: (config?: unknown) => {
+          seen.push(config);
+          return { graphId: "g", version: "1", stages: [], requirements: [], defaultValidators: [] };
+        },
+        advance: (v) => {
+          seen.push(v.config);
+          return { action: { type: "stop", stop: { reason: "r", blocker: "b" } }, reason: "r" };
+        },
+      },
+      { activeVersion: "g@1", config: [42] },
+    );
+    hosts.push(host);
+    await host.describe(ctx("d"));
+    await host.advance(ctx("a"), view());
+    expect(seen).toEqual([[42], [42]]);
   });
 });

@@ -1,0 +1,178 @@
+{
+  "name": "graphloom",
+  "project": "hanahmily/graphloom",
+  "issues": {
+    "owner": "hanahmily",
+    "repo": "graphloom"
+  },
+  "environment": {
+    "checks": [
+      {
+        "id": "node",
+        "argv": [
+          "sh",
+          "-c",
+          "v=$(node --version 2>/dev/null) || { echo \"Node.js >= 22 is required\" >&2; exit 127; }; maj=$(echo \"$v\" | sed -n \"s/^v\\([0-9]*\\)\\..*/\\1/p\"); [ \"${maj:-0}\" -ge 22 ] || { echo \"Node.js >= 22 required, found $v\" >&2; exit 1; }"
+        ]
+      },
+      {
+        "id": "npm",
+        "argv": [
+          "sh",
+          "-c",
+          "npm --version >/dev/null 2>&1 || { echo \"npm is required\" >&2; exit 127; }"
+        ]
+      },
+      {
+        "id": "flock",
+        "argv": [
+          "sh",
+          "-c",
+          "command -v flock >/dev/null 2>&1 || { echo \"util-linux flock is required (the controller and its tests take kernel locks with it)\" >&2; exit 127; }"
+        ]
+      },
+      {
+        "id": "git",
+        "argv": [
+          "sh",
+          "-c",
+          "v=$(git --version | sed -n \"s/^git version \\([0-9]*\\)\\.\\([0-9]*\\).*/\\1 \\2/p\"); set -- $v; [ \"${1:-0}\" -gt 2 ] || { [ \"${1:-0}\" -eq 2 ] && [ \"${2:-0}\" -ge 41 ]; } || { echo \"git >= 2.41 required; found $(git --version)\" >&2; exit 1; }"
+        ]
+      },
+      {
+        "id": "ocr",
+        "argv": [
+          "sh",
+          "-c",
+          "p=$(command -v ocr) || { echo \"open-code-review (ocr) is not installed\" >&2; exit 127; }; case \"$p\" in /*) ;; *) p=\"$(pwd)/$p\" ;; esac; \"$p\" delegate preview --help >/dev/null 2>&1 || { echo \"$p has no delegation mode; install open-code-review 1.9 or later\" >&2; exit 1; }; printf '%s\\n' \"$p\""
+        ],
+        "timeoutMs": 120000
+      },
+      {
+        "id": "codex",
+        "argv": [
+          "sh",
+          "-c",
+          "c=\"${GRAPHLOOM_CODEX_BIN:-codex}\"; h=\"${GRAPHLOOM_CODEX_HOME:-${CODEX_HOME:-}}\"; [ -z \"$h\" ] || export CODEX_HOME=\"$h\"; \"$c\" --version >/dev/null 2>&1 || { echo \"Codex ($c) is not installed\" >&2; exit 127; }; \"$c\" login status >/dev/null 2>&1 || { echo \"Codex is not logged in${h:+ for $h}: run $c login\" >&2; exit 1; }"
+        ],
+        "timeoutMs": 120000
+      },
+      {
+        "id": "claude",
+        "argv": [
+          "sh",
+          "-c",
+          "c=\"${GRAPHLOOM_CLAUDE_BIN:-claude}\"; d=\"${GRAPHLOOM_CLAUDE_CONFIG_DIR:-${CLAUDE_CONFIG_DIR:-}}\"; [ -z \"$d\" ] || export CLAUDE_CONFIG_DIR=\"$d\"; \"$c\" --version >/dev/null 2>&1 || { echo \"Claude Code ($c) is not installed\" >&2; exit 127; }; \"$c\" auth status >/dev/null 2>&1 || { echo \"Claude Code is not logged in${d:+ for $d}: run $c auth login\" >&2; exit 1; }"
+        ],
+        "timeoutMs": 120000
+      }
+    ],
+    "prepare": [
+      {
+        "id": "npm-ci",
+        "argv": [
+          "npm",
+          "ci",
+          "--include=dev"
+        ],
+        "timeoutMs": 1200000
+      },
+      {
+        "id": "prebuild",
+        "argv": [
+          "npm",
+          "run",
+          "build"
+        ],
+        "timeoutMs": 1200000
+      }
+    ]
+  },
+  "regression": {
+    "runner": "vitest",
+    "timeoutMs": 1200000
+  },
+  "commands": [
+    {
+      "id": "typecheck",
+      "argv": [
+        "npm",
+        "run",
+        "typecheck"
+      ],
+      "timeoutMs": 1800000,
+      "requirement": "builds"
+    },
+    {
+      "id": "build",
+      "argv": [
+        "npm",
+        "run",
+        "build"
+      ],
+      "timeoutMs": 1200000,
+      "requirement": "builds"
+    },
+    {
+      "id": "test",
+      "argv": [
+        "npm",
+        "test"
+      ],
+      "timeoutMs": 2700000,
+      "requirement": "builds"
+    }
+  ],
+  "testPaths": {
+    "suffixes": [
+      ".test.ts"
+    ],
+    "directories": [
+      "test",
+      "fixtures"
+    ]
+  },
+  "protectedPaths": [
+    "package-lock.json",
+    ".github",
+    "legacy"
+  ],
+  "planning": {
+    "reach": "Reach: for every behaviour the fix changes, the basis of that decision names each caller and lifecycle path that depends on the old behaviour (resume and restart from durable state, stop and AbortSignal cancellation, thrown errors and rejected promises, retries, concurrent runs and locks, child-process and resource cleanup), starting with the changed module's own close, stop and shutdown paths, and the test that covers it; a path no test covers is stated there as a risk. For a wait the fix makes longer or unbounded, say what happens when the awaited promise never settles or ignores its abort signal.",
+    "e2e": "the live-provider tests (the *.live.test.ts and *-live tests, which need real credentials)",
+    "notes": [
+      "Issues here are often enhancements rather than bug reports. Treat an enhancement the same way as a bug: the regression test is a new test of the behaviour the issue asks for, and it must fail without your change (RED) and pass with it (GREEN). Its expected value comes from the issue's acceptance criteria, not from your implementation.",
+      "The public surface an enhancement issue itself specifies (a new export, option, field or CLI flag) is what was asked for, not an open product decision: record it as a behaviour decision with the issue as its basis. Points the issue leaves open stay product decisions.",
+      "A new test usually calls code the base commit does not have, so in RED's base checkout it fails to load (a missing export or module) instead of failing an assertion. Then put a revertPatch in your decision record: a diff that, applied in reverse to your change, keeps the new names and signatures the test imports but restores the old behaviour behind them (for example a stub that returns what the code did before), so the test fails by assertion.",
+      "Use cannot_reproduce only when the issue does not say what the new behaviour must be, so no test's expected value can be written from it; ask in draftComment."
+    ]
+  },
+  "implementation": {
+    "conventions": "Follow AGENTS.md: work in the TypeScript packages, keep the controller, SDK and CLI free of any plugin's own notions, and do not touch legacy/ or .local/. Follow the repository's conventions."
+  },
+  "review": {
+    "language": "TypeScript",
+    "testFiles": "TypeScript test files (`*.test.ts`) and test fixtures",
+    "rules": [
+      "Beyond the diff's own correctness, review what the change breaks.",
+      "For every behaviour the change alters, search for each caller and lifecycle path that depends on the old behaviour: resume and restart from durable state, stop and AbortSignal cancellation, thrown errors and rejected promises, retries, concurrent runs and locks, and child-process and resource cleanup.",
+      "Report at high severity: a path whose behaviour changes without a test in this change covering it; a removed guarantee (a bound, a timeout, a cleanup, a lock, a cancellation) that other code or comments still rely on; a comment that describes a guarantee the change removed; a test whose expected value is derived from the new code rather than from the issue; a change to persisted run state or a wire protocol without a compatibility path; controller, SDK or CLI code that reads a plugin's own notions.",
+      "Report at medium severity a promise that is neither awaited nor handled, and a child process or timer started without the cleanup the package's existing helpers give.",
+      "Do not report style."
+    ]
+  },
+  "pullRequest": {
+    "checklist": [
+      "- [x] Adds a regression test that fails before the fix and passes with it."
+    ],
+    "footer": [
+      "Fixes {issue}."
+    ],
+    "e2eNote": "The live-provider tests were not run; this change needs them."
+  },
+  "harnesses": {
+    "implementer": "claude-code",
+    "reviewer": "codex",
+    "verifier": "claude-code"
+  }
+}

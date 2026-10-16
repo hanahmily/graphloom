@@ -27,6 +27,10 @@ Thumbs.db
 # Disposable example repository
 /examples/test-repo/
 
+# Run worktrees and state of examples/issue-fix-graphloom-task.yaml (repo: .)
+/examples/graphloom/
+/examples/graphloom-state/
+
 # Generated plugin build outputs
 /examples/plugins/**/*.so
 /examples/plugins/**/dist/

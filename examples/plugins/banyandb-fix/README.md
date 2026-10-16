@@ -12,6 +12,11 @@ request body is the delivery command's report in the run's evidence.
 Publishing stays with you. The
 [design](../../../docs/design-banyandb-fix-graph.md) explains the choices.
 
+The generic [issue-fix](../issue-fix/README.md) graph runs this graph from a
+repository profile; its `profiles/banyandb.json` reproduces this bundle, and
+new BanyanDB runs should use it. This bundle stays as it is so runs pinned to
+it can resume.
+
 ## Environment
 
 The graph declares BanyanDB's contributor checklist, and the controller runs it
