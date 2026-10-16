@@ -33,6 +33,13 @@ export interface CaseDependency {
   candidateDigest?: string | null;
   /** The run's active plugin version when the finding was recorded. */
   activeVersion?: string;
+  /**
+   * Content identity of the pinned plugin bundle when the finding was
+   * recorded. An operator's plugin update replaces the bundle's code while
+   * the active version stays the same; this catches it. Recorded together
+   * with `activeVersion`; absent in entries from before it existed.
+   */
+  pluginDigest?: string;
 }
 
 export interface CaseStaleness {

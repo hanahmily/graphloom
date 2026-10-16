@@ -91,6 +91,9 @@ export function settleProposal(state: DurableRunState): SupervisorSettlement | u
   if (mark.candidateDigest !== undefined && mark.candidateDigest !== (state.candidateDigest ?? null)) {
     facts.push("the workspace candidate changed");
   }
+  if (state.status !== "running") {
+    facts.push(`the run ${state.status}${state.stopReason !== undefined ? `: ${state.stopReason}` : ""}`);
+  }
   if (facts.length === 0) facts.push("no new evidence, receipts, or repair-candidate changes");
 
   const shown = facts.slice(0, MAX_FACTS).map(bounded);

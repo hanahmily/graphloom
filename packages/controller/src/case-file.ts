@@ -11,6 +11,7 @@ import {
   type CaseFinding,
   type CaseFindingOutcome,
 } from "@graphloom/sdk";
+import { stableHash } from "@graphloom/sdk";
 import type { SupervisorSettlement } from "@graphloom/supervisor";
 import type { DurableRunState } from "./state.js";
 
@@ -56,7 +57,16 @@ function staleReason(dependsOn: CaseDependency, state: DurableRunState): string 
   if (dependsOn.activeVersion !== undefined && dependsOn.activeVersion !== state.activeVersion) {
     return `the active plugin version changed from ${dependsOn.activeVersion} to ${state.activeVersion}`;
   }
+  if (dependsOn.pluginDigest !== undefined && dependsOn.pluginDigest !== pluginDigest(state)) {
+    return "the pinned plugin bundle was updated";
+  }
   return undefined;
+}
+
+/** The pinned bundle's content identity: what an operator plugin update replaces. */
+export function pluginDigest(state: DurableRunState): string {
+  const { manifestDigest, entryDigest } = state.intake.bundle;
+  return stableHash([manifestDigest, entryDigest]);
 }
 
 /** The part a supervisor sees: stale facts and refutations removed. */
@@ -116,7 +126,7 @@ export function recordFinding(
   }
   const dependsOn: CaseDependency = {
     ...(scopes.includes("candidate") ? { candidateDigest: refreshed.candidateDigest ?? null } : {}),
-    ...(scopes.includes("plugin") ? { activeVersion: refreshed.activeVersion } : {}),
+    ...(scopes.includes("plugin") ? { activeVersion: refreshed.activeVersion, pluginDigest: pluginDigest(refreshed) } : {}),
   };
   const seq = (refreshed.caseFileSeq ?? 0) + 1;
 

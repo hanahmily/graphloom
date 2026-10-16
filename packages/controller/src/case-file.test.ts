@@ -1,4 +1,5 @@
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -7,6 +8,7 @@ import {
   dispatch,
   MAX_CASE_FACTS,
   observe,
+  returnToNormal,
   stop,
   supervise,
   type CaseFile,
@@ -75,11 +77,17 @@ afterEach(async () => {
   }
 });
 
-async function makeEnv(budgets = ""): Promise<{ taskPath: string; stateRoot: string }> {
+async function makeEnv(
+  budgets = "",
+  options: { copyBundle?: boolean } = {},
+): Promise<{ taskPath: string; stateRoot: string; bundle: string }> {
   const { execFile } = await import("node:child_process");
   const { promisify } = await import("node:util");
   const run = promisify(execFile);
-  built ??= run("npm", ["run", "build", "-w", "@graphloom/plugin-hello"], { cwd: repoRoot });
+  // Rebuilding rewrites dist/ under test files that run in parallel; `npm test` builds it first.
+  if (!existsSync(path.join(helloBundle, "dist", "index.js"))) {
+    built ??= run("npm", ["run", "build", "-w", "@graphloom/plugin-hello"], { cwd: repoRoot });
+  }
   await built;
   const taskDir = await mkdtemp(path.join(os.tmpdir(), "gl-case-file-"));
   temps.push(taskDir);
@@ -93,10 +101,15 @@ async function makeEnv(budgets = ""): Promise<{ taskPath: string; stateRoot: str
   await run("git", ["commit", "-m", "init"], { cwd: repoPath });
   const pluginsDir = path.join(taskDir, "plugins");
   await mkdir(pluginsDir, { recursive: true });
-  await symlink(helloBundle, path.join(pluginsDir, "hello"));
+  let bundle = helloBundle;
+  if (options.copyBundle === true) {
+    bundle = path.join(taskDir, "hello-bundle");
+    await cp(helloBundle, bundle, { recursive: true, dereference: true });
+  }
+  await symlink(bundle, path.join(pluginsDir, "hello"));
   const taskPath = path.join(taskDir, "task.yaml");
   await writeFile(taskPath, `graph: hello\nrepo: ./test-repo\nrequest: write the greeting\n${budgets}`, "utf8");
-  return { taskPath, stateRoot: path.join(taskDir, "state") };
+  return { taskPath, stateRoot: path.join(taskDir, "state"), bundle };
 }
 
 const workJob = (content: string) => ({
@@ -127,6 +140,7 @@ function baseState(over: Partial<DurableRunState> = {}): DurableRunState {
     activeVersion: "hello@0.1.0",
     candidateDigest: "digest-a",
     evidence: [{ ref: "ev-1", kind: "other" }, { ref: "ev-2", kind: "other" }],
+    intake: { bundle: { manifestDigest: "manifest-a", entryDigest: "entry-a" } },
     ...over,
   } as DurableRunState;
 }
@@ -150,7 +164,7 @@ describe("case file (unit)", () => {
         evidence: ["ev-1"],
         since: 1,
         episodeId: "ep-1",
-        dependsOn: { candidateDigest: "digest-a", activeVersion: "hello@0.1.0" },
+        dependsOn: { candidateDigest: "digest-a", activeVersion: "hello@0.1.0", pluginDigest: expect.any(String) },
       },
     ]);
     const refuted = recordFinding(kept.state, { kind: "refuted", text: "the wrapper corrupts arguments", evidence: ["ev-404"] }, "ep-1");
@@ -169,6 +183,14 @@ describe("case file (unit)", () => {
     });
     expect(liveCaseFile(state).facts.map((f) => f.text)).toEqual(["plugin fact", "task fact"]);
 
+    // An operator plugin update keeps the version but replaces the bundle's code.
+    const updated = refreshCaseFile({
+      ...state,
+      intake: { ...state.intake, bundle: { ...state.intake.bundle, entryDigest: "entry-b" } },
+    });
+    expect(updated.caseFile?.facts.find((f) => f.text === "plugin fact")?.stale?.reason).toBe(
+      "the pinned plugin bundle was updated",
+    );
     state = refreshCaseFile({ ...state, activeVersion: "hello@candidate-r1" });
     expect(liveCaseFile(state).facts.map((f) => f.text)).toEqual(["task fact"]);
     // Changing back does not revive a finding made against other code.
@@ -268,6 +290,105 @@ describe("case file through the controller", () => {
       ["fact-1", true],
       ["fact-2", false],
     ]);
+  });
+
+  it("marks a plugin-dependent fact stale when the operator resumes with a plugin update", async () => {
+    const env = await makeEnv("", { copyBundle: true });
+    const controller = createController();
+    const paused = await controller.run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph([observe({ paths: ["README.md"] }, "look"), supervise({ reason: "help" }, "escalate")]),
+      validators,
+      supervisor: createScriptedSupervisor({
+        decisions: [
+          async (input) => {
+            const ref = input.view.evidence[0]!.ref;
+            await input.recordFinding!({ kind: "fact", text: "the graph routes review first", evidence: [ref], dependsOn: ["plugin"] });
+            await input.recordFinding!({ kind: "fact", text: "README.md says repo", evidence: [ref], dependsOn: ["candidate"] });
+            return stop({ reason: "pause", blocker: "operator" }, "pause");
+          },
+        ],
+      }),
+      runner: createScriptedRunner({ jobs: [] }),
+      stateRoot: env.stateRoot,
+      runId: "case-file-plugin-update",
+    });
+    expect(paused.stopReason).toBe("pause");
+
+    const entry = path.join(env.bundle, "dist", "index.js");
+    await writeFile(entry, `${await readFile(entry, "utf8")}\n// a fix to the graph's routing\n`, "utf8");
+    const seen: string[][] = [];
+    const resumed = await controller.resume({
+      runRef: paused.stateDir,
+      plugin: createScriptedGraph([]),
+      validators,
+      updatePlugin: true,
+      supervisor: createScriptedSupervisor({
+        decisions: [
+          (input) => {
+            seen.push(input.caseFile!.facts.map((f) => f.text));
+            return stop({ reason: "done", blocker: "test ends here" }, "stop");
+          },
+        ],
+      }),
+      runner: createScriptedRunner({ jobs: [] }),
+    });
+
+    expect(resumed.stopReason).toBe("done");
+    const state = await loadRunState(paused.stateDir);
+    expect(state.activeVersion).toBe("hello@0.1.0");
+    expect(seen).toEqual([["README.md says repo"]]);
+    expect(state.caseFile?.facts.find((f) => f.text === "the graph routes review first")?.stale?.reason).toBe(
+      "the pinned plugin bundle was updated",
+    );
+  });
+
+  it("records the settlement of the supervisor's last proposal when the run ends before another decision", async () => {
+    // A stop the supervisor proposed.
+    const env = await makeEnv();
+    const stopped = await createController().run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph([supervise({ reason: "help" }, "escalate")]),
+      validators,
+      supervisor: createScriptedSupervisor({ decisions: [stop({ reason: "no remedy", blocker: "none left" }, "give up")] }),
+      runner: createScriptedRunner({ jobs: [] }),
+      stateRoot: env.stateRoot,
+      runId: "case-file-final-stop",
+    });
+    expect(stopped.stopReason).toBe("no remedy");
+    const afterStop = await createController().inspect(stopped.stateDir);
+    expect(afterStop.caseFile.attempts).toEqual([
+      expect.objectContaining({ trigger: "supervise", action: "stop: give up", outcome: expect.stringContaining("the run stopped: no remedy") }),
+    ]);
+
+    // A return, after which the graph finishes the run.
+    let advanced = 0;
+    const finishing: GraphPlugin = {
+      describe: () => definition,
+      advance() {
+        advanced += 1;
+        return advanced === 1
+          ? supervise({ reason: "help" }, "escalate")
+          : stop({ reason: "graph finished", blocker: "none" }, "finish");
+      },
+    };
+    const returned = await createController().run({
+      taskPath: env.taskPath,
+      plugin: finishing,
+      validators,
+      supervisor: createScriptedSupervisor({ decisions: [returnToNormal({ summary: "nothing to fix" }, "hand back")] }),
+      runner: createScriptedRunner({ jobs: [] }),
+      stateRoot: env.stateRoot,
+      runId: "case-file-final-return",
+    });
+    expect(returned.stopReason).toBe("graph finished");
+    const afterReturn = await createController().inspect(returned.stateDir);
+    expect(afterReturn.caseFile.attempts).toEqual([
+      expect.objectContaining({ action: "return: hand back", outcome: expect.stringContaining("the run stopped: graph finished") }),
+    ]);
+    // Resuming does not record it a second time.
+    const state = await loadRunState(returned.stateDir);
+    expect(state.supervisorMark?.attemptRecorded).toBe(true);
   });
 
   it("keeps every one of 50 episode prompts under a fixed bound, one fresh session per episode", async () => {

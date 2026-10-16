@@ -149,12 +149,15 @@ siblings:
 - **Facts** and **refuted claims**, added with the `record_finding` tool (which does
   not end the turn). The controller keeps one only when it cites at least one
   evidence ref and every cited ref names evidence the run recorded; otherwise the
-  tool answers why. Each records the candidate digest and active plugin version it
-  depends on (both by default; `dependsOn` narrows that), and the controller marks
-  it stale for good when either changes. Stale entries stay in run state for replay
+  tool answers why. Each records the candidate digest and the plugin (active version
+  and pinned bundle digest) it depends on (both by default; `dependsOn` narrows
+  that), and the controller marks it stale for good when either changes, including
+  when an operator's `resume --update-plugin` replaces the bundle under the same
+  version. Stale entries stay in run state for replay
   but never reach the model; the oldest stale ones are dropped first at the bound.
 - **Attempts**, written by the controller from its settlement of each proposal, never
-  by the model.
+  by the model: before the next decision, or when the controller's loop ends first
+  (a stop the supervisor proposed, or a run its graph finished after a return).
 - **Open questions** an episode leaves, newest last.
 
 `SupervisorInput.caseFile` carries only the live part. An episode's prompt is the

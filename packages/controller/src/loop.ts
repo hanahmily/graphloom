@@ -153,6 +153,7 @@ export async function runNormalLoop(
   let final: DurableRunState | undefined;
   try {
     final = await runNormalLoopSteps(state, deps, timing);
+    final = await recordFinalAttempt(final);
   } finally {
     if (timing.clock !== undefined) {
       // Also on a throw: the time spent must not be given back on resume.
@@ -164,6 +165,21 @@ export async function runNormalLoop(
   }
   await wipeAgentSessions(final);
   return final;
+}
+
+/**
+ * The supervisor's last proposal is otherwise settled into the case file only
+ * before its next decision. When the loop ends first (a stop it proposed, or a
+ * return after which the graph finished), settle it here, once, so the
+ * durable case file and `inspect` show what came of it.
+ */
+async function recordFinalAttempt(state: DurableRunState): Promise<DurableRunState> {
+  if (state.supervisorMark === undefined || state.supervisorMark.attemptRecorded === true) return state;
+  return withRunLock(state.stateDir, async () => {
+    const next = recordAttempt(state, settleProposal(state));
+    await saveRunState(next);
+    return next;
+  });
 }
 
 function chargeActiveTime(state: DurableRunState, deps: LoopDeps): DurableRunState {

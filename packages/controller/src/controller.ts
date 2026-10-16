@@ -18,6 +18,7 @@ import {
 import type { Supervisor, SupervisorBinding } from "@graphloom/supervisor";
 import { reconcileSupervisorBinding, restorePiSupervisorFromBinding } from "@graphloom/supervisor";
 import { writeSwitchRequest, type ModelSwitchOrder } from "./supervisor-switch.js";
+import { refreshCaseFile } from "./case-file.js";
 import {
   activeRepairValidators,
   reconcileRepairJournal,
@@ -657,10 +658,12 @@ export function createController(): Controller {
             validators,
           );
           const reason = `operator plugin update: manifest ${state.intake.bundle.manifestDigest.slice(0, 12)} -> ${pluginUpdate.manifestDigest.slice(0, 12)}${updated.note}`;
-          state = {
+          // Findings the supervisor made about the old plugin code go stale here.
+          state = refreshCaseFile({
             ...updated.state,
+            intake: { ...updated.state.intake, bundle: pluginUpdate },
             versionHistory: [...(state.versionHistory ?? []), { activeVersion: state.activeVersion, generation: state.generation, reason, at: new Date().toISOString() }],
-          };
+          });
           revisionBridge.current = state.stateRevision;
           await saveRunState(state);
         }
