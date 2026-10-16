@@ -67,7 +67,8 @@ These are operator-local files, not portable repository configuration.
 The CLI reads the operator's supervisor config from `$GRAPHLOOM_SUPERVISOR_CONFIG`,
 or `~/.config/graphloom/supervisor.json` when unset: initial `provider` and
 `modelId`, the other `models` it may switch to (`"provider/model"`), an optional
-Pi `agentDir`, `promptTimeoutMs`, and `quotaRetryMs` (see Provider failures). The file never holds credentials (`apiKey` is
+Pi `agentDir`, `promptTimeoutMs` and `promptTotalTimeoutMs` (see Prompt
+timeouts), and `quotaRetryMs` (see Provider failures). The file never holds credentials (`apiKey` is
 refused). Without it, `graphloom run` has no supervisor. The run's Pi transcripts,
 one per episode session, live under `<stateDir>/supervisor`; `resume` restores the
 logical supervisor on its bound model with the config's current model list and
@@ -170,7 +171,12 @@ guard that a normal run does not reach.
 
 Resume needs no preamble: the restored supervisor opens a fresh session even when
 the run stopped mid-episode, and anything a code or plugin change made untrue is
-already marked stale. `supervisorBinding.sessionFile` names the latest episode's
+already marked stale. A run resumed in recovery is not handed to the supervisor on
+its old trigger. The controller returns it to normal mode first, so the graph
+retries what failed. Only a recurrence opens a new episode, with a fresh trigger
+and post-resume evidence. That episode's settlement says the operator's resume
+overtook the last proposal. The controller's own step-limit pause is the one
+exception and continues the episode. See the core design, section 8. `supervisorBinding.sessionFile` names the latest episode's
 transcript; it is used to reconcile an interrupted model switch and to locate the
 transcript directory, never reopened. A run recorded before episode sessions still
 loads: its binding's run-long transcript is left on disk, a missing `caseFile`
@@ -317,6 +323,35 @@ left, and caps each decision prompt at the invocations remaining. A Stop during 
 decision or a candidate patch aborts that prompt; the run records an operator stop.
 [SDK events and cancellation](https://pi.dev/docs/latest/sdk).
 
+### Prompt timeouts
+
+A prompt has two limits, and neither one cuts off a model that is still producing
+output:
+
+- **Inactivity** (`promptTimeoutMs`, default 120000): the prompt is aborted once
+  the session has emitted no Pi event for this long. Events include a text or
+  thinking delta, a tool call, a turn, and a compaction. Each one re-arms the
+  timer. Time a local tool spends executing, such as a candidate build, does not
+  count. This field used to be a single wall-clock limit (60000 by default). It now
+  sets the inactivity limit, so a thinking model that streams slowly is never
+  killed mid-reply.
+- **Total** (`promptTotalTimeoutMs`, default 900000): a backstop for a reply that
+  streams but never finishes. A candidate patch prompt uses its own total cap
+  (`patchTimeoutMs`, default 600000).
+
+A standalone compaction keeps a single deadline, by default `promptTimeoutMs`.
+Stop interrupts a prompt immediately, under either limit.
+
+A prompt that reaches either limit fails with class `timeout`. Its message is
+`no output for 120s` or `no complete reply within 900s`. The first timeout in a
+decision turn retries the turn once in a fresh episode session, opened the same way
+as for a new episode, because the aborted session may still be busy and refuse
+reuse. The fresh session receives the turn's full recovery prompt, followed by any
+re-ask or rejection that was pending. The retry is charged to the turn's
+provider-call allowance and recorded as the remedy `fresh_session_retry`. A second
+timeout in the same turn stops the run, for example with
+`supervisor provider timeout: no output for 120s (not remedied: already retried once)`.
+
 ### Provider failures
 
 A decision turn that yields no proposal is classified from the provider's last
@@ -324,7 +359,8 @@ assistant message (`stopReason`, `errorMessage`), not from the missing JSON:
 `quota` (429 and rate/usage limits; any reset time the message states becomes
 `retryAt`), `overflow` (Pi's own `isContextOverflow`), `auth` (401/403 and
 credential refusals), `empty` (no tool call and no text, including thinking-only
-replies), `malformed` (text that is not a GraphDecision), or `unknown`. The host
+replies), `malformed` (text that is not a GraphDecision), `timeout` (see Prompt
+timeouts), or `unknown`. The host
 applies a fixed remedy without asking the model what to do: a quota error with a
 reset time waits until then (at most three waits a turn, only within the
 `maxWaitMs` the controller passes from the run's `waitMs`) and retries the turn;
@@ -350,7 +386,7 @@ done; the controller charges the waits to `waitMs` and records each remedy in th
 run's `remedies` (shown by `inspect`). A failure with no remedy left stops the
 run with `stopReason` `supervisor provider <class>: <provider message>`, and the
 blocker adds why no remedy applied (for example, no reset time, wait budget,
-already compacted once).
+already compacted once, already retried once).
 
 ## Implementation and verification gaps
 
@@ -369,5 +405,7 @@ and the next episode opens on the switched model; a credential failure (Anthropi
 Stop during a decision prompt or candidate patch settles as an operator stop; a
 crash between switch intent and outcome reconciles from the session file; decisions
 are capped at the remaining invocations and refused at zero; admission tools reject
-malformed specs and end the turn on a valid one; and settlements reach the next
+malformed specs and end the turn on a valid one; a slowly streaming reply outlives
+the inactivity limit, while a silent provider is retried once in a fresh session
+and then stops by name; and settlements reach the next
 prompt. The MiniMax connectivity check above remains the only live check.

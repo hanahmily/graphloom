@@ -9,9 +9,11 @@ import { isContextOverflow, type AssistantMessage } from "@earendil-works/pi-ai"
  * - `auth`: the provider refused the credentials (HTTP 401/403 and equivalents).
  * - `empty`: the reply had no tool call and no text (including thinking-only replies).
  * - `malformed`: the reply had text, but it was not a GraphDecision.
+ * - `timeout`: the prompt produced no output for the inactivity limit, or no
+ *   complete reply within its total cap (raised by the session, not read from a message).
  * - `unknown`: any other provider error.
  */
-export type ProviderFailureClass = "quota" | "overflow" | "auth" | "empty" | "malformed" | "unknown";
+export type ProviderFailureClass = "quota" | "overflow" | "auth" | "empty" | "malformed" | "timeout" | "unknown";
 
 export interface ProviderFailure {
   failureClass: ProviderFailureClass;

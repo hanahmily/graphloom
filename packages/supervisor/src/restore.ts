@@ -24,7 +24,10 @@ export interface RestorePiSupervisorOptions {
   agentDir?: string;
   apiKey?: string;
   configuredModels?: SupervisorModelRef[];
+  /** Inactivity limit of one prompt (see CreatePiSupervisorSessionOptions). */
   promptTimeoutMs?: number;
+  /** Total cap of one prompt (see CreatePiSupervisorSessionOptions). */
+  promptTotalTimeoutMs?: number;
   systemPrompt?: string;
   cwd?: string;
   /** Controller repairs directory; required for candidate coding grants. */
@@ -61,6 +64,7 @@ export async function restorePiSupervisorFromBinding(
     ...(options.agentDir !== undefined ? { agentDir: options.agentDir } : {}),
     ...(options.apiKey !== undefined ? { apiKey: options.apiKey } : {}),
     ...(options.promptTimeoutMs !== undefined ? { promptTimeoutMs: options.promptTimeoutMs } : {}),
+    ...(options.promptTotalTimeoutMs !== undefined ? { promptTotalTimeoutMs: options.promptTotalTimeoutMs } : {}),
     ...(options.systemPrompt !== undefined ? { systemPrompt: options.systemPrompt } : {}),
     ...(options.cwd !== undefined ? { cwd: options.cwd } : {}),
     ...(options.repairsDir !== undefined ? { repairsDir: options.repairsDir } : {}),

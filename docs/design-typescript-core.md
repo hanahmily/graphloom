@@ -630,6 +630,18 @@ switch, rollback is another recorded compatible transition under admission and
 remaining limits; it never resurrects invalidated receipts or treats a known-bad
 gate as valid. Stop/resume preserves both failed and successful transitions.
 
+A run resumed while in recovery first returns to normal mode, so the graph's own
+`advance()` retries what failed. Resume exists because the operator changed
+something (code, config, environment, grants), so the trigger recorded before the
+stop is not current evidence. If the failure recurs, recovery starts again with a
+fresh trigger and post-resume evidence. This applies whatever stopped the run,
+including the supervisor's own stop and a run with no supervisor. The one exception
+is the controller's own step-limit pause, which continues the episode. Resume
+first reconciles the pending dispatch, repair, and model-switch journals. It keeps
+budgets, correction trials, handoffs, repeated-proposal tracking, repair
+candidates, and the case file. The return is recorded as a remedy and as a
+settlement fact for the next episode.
+
 ## 9. Worktree, communication, and durable state
 
 The controller creates `graphloom/<run-id>` from pinned source HEAD in an isolated

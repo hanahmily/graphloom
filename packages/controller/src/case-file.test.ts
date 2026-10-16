@@ -320,7 +320,8 @@ describe("case file through the controller", () => {
     const seen: string[][] = [];
     const resumed = await controller.resume({
       runRef: paused.stateDir,
-      plugin: createScriptedGraph([]),
+      // Resume hands the run back to its graph first; it escalates again.
+      plugin: createScriptedGraph([supervise({ reason: "help again" }, "escalate")]),
       validators,
       updatePlugin: true,
       supervisor: createScriptedSupervisor({

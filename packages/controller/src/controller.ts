@@ -71,6 +71,7 @@ import {
   type SupervisorOutcomeRecord,
   type VersionRecord,
 } from "./state.js";
+import { returnToGraphOnResume } from "./resume-recovery.js";
 import {
   assertWorktreeMatches,
   createRunWorktree,
@@ -541,6 +542,9 @@ export function createController(): Controller {
         state = reconcileRepairJournal(state);
         state = await reconcileSwitchJournal(state);
         state = await reassessAcceptedWorkspace(state);
+        // A trigger recorded before the stop is not current evidence: the
+        // graph retries first, and recovery fires afresh if the failure recurs.
+        state = returnToGraphOnResume(state);
         // The operator's resume restarts the graph, so its replayed decisions are not repeats.
         const { noProgress: _repeats, ...resumed } = state;
         void _repeats;

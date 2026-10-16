@@ -32,6 +32,12 @@ export interface RemedyRecord {
   waitedMs?: number;
 }
 
+/**
+ * The stop reason of the controller's own pause after a bounded number of loop
+ * steps: nothing failed, and resume continues where the run was.
+ */
+export const STEP_LIMIT_STOP_REASON = "step limit";
+
 /** Remedy records kept in run state; older ones are dropped. */
 export const MAX_REMEDY_RECORDS = 100;
 
