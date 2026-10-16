@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -130,9 +131,10 @@ async function makeEnv(): Promise<{ taskPath: string; stateRoot: string }> {
   const { promisify } = await import("node:util");
   const execFileAsync = promisify(execFile);
 
-  await execFileAsync("npm", ["run", "build", "-w", "@graphloom/plugin-hello"], {
-    cwd: repoRoot,
-  });
+  // Rebuilding rewrites dist/ under test files that run in parallel; `npm test` builds it first.
+  if (!existsSync(path.join(repoRoot, "examples/plugins/hello/dist/index.js"))) {
+    await execFileAsync("npm", ["run", "build", "-w", "@graphloom/plugin-hello"], { cwd: repoRoot });
+  }
 
   const taskDir = await mkdtemp(path.join(os.tmpdir(), "gl-pi-sup-"));
   temps.push(taskDir);
@@ -404,44 +406,56 @@ describe("Pi supervisor recovery (controller)", () => {
     expect(factoryCalls).toEqual(["fresh-supervisor", "fresh-supervisor"]);
   });
 
-  it("tells the supervisor it was resumed only on its first decide() call, not on later turns in the same process", async () => {
+  it("carries no resume flag; a resumed run's supervisor sees the case file the earlier process kept", async () => {
     const env = await makeEnv();
     const controller = createController();
-    const resumedFlags: Array<boolean | undefined> = [];
+    const seen: Array<{ keys: string[]; facts: string[] }> = [];
+    const look = (input: Parameters<Supervisor["decide"]>[0]) => {
+      seen.push({ keys: Object.keys(input), facts: (input.caseFile?.facts ?? []).map((f) => f.text) });
+    };
 
     const paused = await controller.run({
       taskPath: env.taskPath,
-      plugin: createScriptedGraph({ definition, advances: [stop({ reason: "paused", blocker: "operator" }, "pause")] }),
-      validators,
-      runner: createScriptedRunner({ jobs: [] }),
-      stateRoot: env.stateRoot,
-      runId: "resumed-flag",
-    });
-
-    const resumed = await controller.resume({
-      runRef: paused.stateDir,
       plugin: createScriptedGraph({
         definition,
-        advances: [dispatch({ stageId: "write", kind: "agent", purpose: "work", instruction: "write", writeScope: [GREETING_PATH] }, "write")],
+        advances: [observe({ paths: ["README.md"] }, "look"), supervise({ reason: "help" }, "escalate")],
       }),
       validators,
       supervisor: createScriptedSupervisor({
         decisions: [
-          (input) => {
-            resumedFlags.push(input.resumed);
-            return observe({ paths: [GREETING_PATH] }, "look again");
+          async (input) => {
+            look(input);
+            const ref = input.view.evidence[0]!.ref;
+            await input.recordFinding!({ kind: "fact", text: "README.md is unchanged", evidence: [ref] });
+            return stop({ reason: "pause", blocker: "operator" }, "pause");
           },
+        ],
+      }),
+      runner: createScriptedRunner({ jobs: [] }),
+      stateRoot: env.stateRoot,
+      runId: "case-file-resume",
+    });
+    expect(paused.stopReason).toBe("pause");
+
+    const resumed = await controller.resume({
+      runRef: paused.stateDir,
+      plugin: createScriptedGraph({ definition, advances: [supervise({ reason: "help again" }, "escalate")] }),
+      validators,
+      supervisor: createScriptedSupervisor({
+        decisions: [
           (input) => {
-            resumedFlags.push(input.resumed);
+            look(input);
             return stop({ reason: "done looking", blocker: "test ends here" }, "stop");
           },
         ],
       }),
-      runner: createScriptedRunner({ jobs: [async () => ({ status: "failed" as const, summary: "agent finished without a result" })] }),
+      runner: createScriptedRunner({ jobs: [] }),
     });
 
     expect(resumed.stopReason).toBe("done looking");
-    expect(resumedFlags).toEqual([true, undefined]);
+    expect(seen.map((s) => s.keys.includes("resumed"))).toEqual([false, false]);
+    // Nothing changed the candidate or the plugin version across the resume, so the fact is still live.
+    expect(seen.map((s) => s.facts)).toEqual([[], ["README.md is unchanged"]]);
   });
 
   it("restores supervisor from durable binding on resume via restoreSupervisor", async () => {

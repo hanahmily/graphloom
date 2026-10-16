@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { execFile } from "node:child_process";
 import { lstat, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
@@ -161,9 +162,10 @@ function hostRunner(server: FakeGitHub, mirror?: Mirror, sandbox = true): Runner
 function recorder(steps: ScriptedRecoveryStep[]) {
   const inputs: SupervisorInput[] = [];
   const decisions = steps.map((step): ScriptedRecoveryStep => async (input, index) => {
-    // The controller's admission check is a function, not recorded data.
-    const { admission: _admission, ...recorded } = input;
+    // The controller's admission check and case-file sink are functions, not recorded data.
+    const { admission: _admission, recordFinding: _recordFinding, ...recorded } = input;
     void _admission;
+    void _recordFinding;
     inputs.push(structuredClone(recorded));
     return typeof step === "function" ? step(input, index) : structuredClone(step);
   });
@@ -746,7 +748,10 @@ describe("executor repair (#41)", () => {
 });
 
 async function makeEnv(opts: { executorRepair?: boolean } = {}): Promise<{ taskPath: string; stateRoot: string; taskDir: string }> {
-  await execFileAsync("npm", ["run", "build", "-w", "@graphloom/plugin-hello"], { cwd: repoRoot });
+  // Rebuilding rewrites dist/ under test files that run in parallel; `npm test` builds it first.
+  if (!existsSync(path.join(repoRoot, "examples/plugins/hello/dist/index.js"))) {
+    await execFileAsync("npm", ["run", "build", "-w", "@graphloom/plugin-hello"], { cwd: repoRoot });
+  }
   const taskDir = await mkdtemp(path.join(os.tmpdir(), "gl-exec-recovery-"));
   cleanups.push(async () => {
     await execFileAsync("git", ["worktree", "prune"], { cwd: taskDir }).catch(() => undefined);

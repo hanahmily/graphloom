@@ -19,11 +19,13 @@ export function markProposal(
     action: isModelSwitchRequest(proposal) ? "switch_model" : proposal.action.type,
     reason: bounded(proposal.reason),
     ...(state.recoveryEpisodeId !== undefined ? { episodeId: state.recoveryEpisodeId } : {}),
+    ...(state.recoveryTrigger !== undefined ? { triggerCode: state.recoveryTrigger.code } : {}),
     stageId: state.current.stageId,
     attempt: state.current.attempt,
     generation: state.generation,
     evidenceRefs: state.evidence.map((e) => e.ref),
     receiptIds: state.receipts.map((r) => r.id),
+    candidateDigest: state.candidateDigest ?? null,
     candidates: Object.fromEntries((state.repairCandidates ?? []).map((c) => [c.artifactId, c.status])),
     notes: [],
     ...(repeat !== undefined ? { repeat } : {}),
@@ -85,6 +87,13 @@ export function settleProposal(state: DurableRunState): SupervisorSettlement | u
     facts.push(`current stage is ${state.current.stageId}, attempt ${state.current.attempt}`);
   }
   if (state.generation !== mark.generation) facts.push(`generation is now ${state.generation}`);
+  // Marks from before #120 do not record the candidate.
+  if (mark.candidateDigest !== undefined && mark.candidateDigest !== (state.candidateDigest ?? null)) {
+    facts.push("the workspace candidate changed");
+  }
+  if (state.status !== "running") {
+    facts.push(`the run ${state.status}${state.stopReason !== undefined ? `: ${state.stopReason}` : ""}`);
+  }
   if (facts.length === 0) facts.push("no new evidence, receipts, or repair-candidate changes");
 
   const shown = facts.slice(0, MAX_FACTS).map(bounded);

@@ -41,6 +41,7 @@ export {
 } from "./candidate-tools.js";
 
 export {
+  piEpisodeSessionOpener,
   reconcileSupervisorBinding,
   restorePiSupervisorFromBinding,
   type RestorePiSupervisorOptions,
@@ -50,6 +51,7 @@ export {
   createAdmissionTools,
   offeredActions,
   GRAPHLOOM_SUPERVISOR_ACTIONS,
+  RECORD_FINDING_TOOL,
   SWITCH_MODEL_TOOL,
   type AdmissionToolbox,
   type GraphLoomSupervisorAction,

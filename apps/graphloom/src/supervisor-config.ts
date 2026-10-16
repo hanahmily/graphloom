@@ -4,7 +4,7 @@ import path from "node:path";
 import type { ResumeRequest, RunRequest } from "@graphloom/controller";
 import {
   createPiSupervisor,
-  createPiSupervisorSession,
+  piEpisodeSessionOpener,
   restorePiSupervisorFromBinding,
   type SupervisorModelRef,
   type ThinkingLevel,
@@ -121,28 +121,38 @@ function parseThinkingLevel(value: unknown, what: string): ThinkingLevel {
   return text as ThinkingLevel;
 }
 
-/** A fresh Pi supervisor whose transcript lives in the run's state directory. */
+/**
+ * A fresh Pi supervisor whose transcripts live in the run's state directory,
+ * one Pi session per recovery episode.
+ */
 export function piSupervisorFactory(config: SupervisorConfig): NonNullable<RunRequest["supervisorFactory"]> {
   return async ({ runId, stateDir }) => {
-    const session = await createPiSupervisorSession({
+    const openSession = piEpisodeSessionOpener({
       runId,
       sessionDir: path.join(stateDir, "supervisor"),
-      provider: config.provider,
-      modelId: config.modelId,
       repairsDir: path.join(stateDir, "repairs"),
-      ...(config.thinkingLevel !== undefined ? { thinkingLevel: config.thinkingLevel } : {}),
       ...(config.agentDir !== undefined ? { agentDir: config.agentDir } : {}),
       ...(config.promptTimeoutMs !== undefined ? { promptTimeoutMs: config.promptTimeoutMs } : {}),
     });
+    const session = await openSession({
+      provider: config.provider,
+      modelId: config.modelId,
+      ...(config.thinkingLevel !== undefined ? { thinkingLevel: config.thinkingLevel } : {}),
+    });
     return createPiSupervisor({
       session,
+      openSession,
       configuredModels: config.models,
       ...(config.quotaRetryMs !== undefined ? { quotaRetryMs: config.quotaRetryMs } : {}),
     });
   };
 }
 
-/** Reopen the run's own Pi session; the operator's current model list applies. */
+/**
+ * Restore the run's logical supervisor on its bound model, with the
+ * operator's current model list. The first episode after resume starts a
+ * fresh session; earlier transcripts stay on disk but are never reopened.
+ */
 export function piSupervisorRestore(config: SupervisorConfig): NonNullable<ResumeRequest["restoreSupervisor"]> {
   return async (binding, { runId, stateDir }) =>
     restorePiSupervisorFromBinding({
@@ -154,6 +164,7 @@ export function piSupervisorRestore(config: SupervisorConfig): NonNullable<Resum
         modelId: binding.modelId,
         switchJournal: binding.switchJournal,
       },
+      sessionDir: path.join(stateDir, "supervisor"),
       configuredModels: config.models,
       repairsDir: path.join(stateDir, "repairs"),
       ...(config.agentDir !== undefined ? { agentDir: config.agentDir } : {}),

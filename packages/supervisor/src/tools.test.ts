@@ -264,3 +264,27 @@ describe("locally detected rejections count toward the controller's allowance (#
     expect(toolbox.exhausted()).toBeUndefined();
   });
 });
+
+describe("record_finding", () => {
+  it("is offered only with a case-file sink, and reports the controller's answer without ending the turn", async () => {
+    expect(createAdmissionTools([{ provider: "p", modelId: "m" }]).tools.map((t) => t.name)).not.toContain("record_finding");
+
+    const submitted: unknown[] = [];
+    const toolbox = createAdmissionTools([{ provider: "p", modelId: "m" }], [], 1, undefined, {}, undefined, async (finding) => {
+      submitted.push(finding);
+      return finding.evidence?.includes("ev-1") === true
+        ? { kept: true, id: "fact-1" }
+        : { kept: false, reason: "no recorded evidence has ref ev-9" };
+    });
+    const tool = toolbox.tools.find((t) => t.name === "record_finding")!;
+    const execute = (tool as unknown as { execute: Execute }).execute;
+
+    const kept = await execute("1", { kind: "fact", text: "the fix is on disk", evidence: ["ev-1"] });
+    expect(kept.content[0]!.text).toBe("Kept as fact-1.");
+    expect(kept.terminate).toBeUndefined();
+    const refused = await execute("2", { kind: "fact", text: "invented", evidence: ["ev-9"] });
+    expect(refused.content[0]!.text).toBe("Not kept: no recorded evidence has ref ev-9.");
+    expect(toolbox.proposal()).toBeUndefined();
+    expect(submitted).toHaveLength(2);
+  });
+});

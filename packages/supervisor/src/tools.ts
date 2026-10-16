@@ -1,7 +1,14 @@
 import path from "node:path";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { ACTION_SPEC_KEYS, assertGraphDecision, stableHash, type AgentSessionView, type GraphAction } from "@graphloom/sdk";
-import type { AdmissionFacts, ModelRef, SupervisorAdmission, SupervisorProposal, SupervisorRejection } from "./types.js";
+import type {
+  AdmissionFacts,
+  ModelRef,
+  SupervisorAdmission,
+  SupervisorInput,
+  SupervisorProposal,
+  SupervisorRejection,
+} from "./types.js";
 
 /**
  * GraphLoom-owned admission tools. Each proposes one controller action; the
@@ -22,6 +29,9 @@ export const GRAPHLOOM_SUPERVISOR_ACTIONS = [
 export type GraphLoomSupervisorAction = (typeof GRAPHLOOM_SUPERVISOR_ACTIONS)[number];
 
 export const SWITCH_MODEL_TOOL = "switch_model";
+
+/** Adds to the controller's case file; unlike the action tools it does not end the turn. */
+export const RECORD_FINDING_TOOL = "record_finding";
 
 interface ActionTool {
   specKey: string;
@@ -258,6 +268,7 @@ export function createAdmissionTools(
   triggerCode?: string,
   repeatedProposals: Record<string, { count: number }> = {},
   admission?: SupervisorAdmission,
+  recordFinding?: SupervisorInput["recordFinding"],
 ): AdmissionToolbox {
   let proposal: SupervisorProposal | undefined;
   let exhausted: SupervisorRejection | undefined;
@@ -352,7 +363,44 @@ export function createAdmissionTools(
     },
   } as ToolDefinition;
 
-  return { tools: [...actionTools, switchTool], offered, proposal: () => proposal, exhausted: () => exhausted };
+  const findingTools: ToolDefinition[] = [];
+  if (recordFinding !== undefined) {
+    findingTools.push({
+      name: RECORD_FINDING_TOOL,
+      label: RECORD_FINDING_TOOL,
+      description:
+        "Record what you verified for later episodes, which start without this conversation. kind fact: a statement the cited evidence shows. kind refuted: a claim the cited evidence disproves. kind open: a question left for later. The controller keeps a fact or refutation only when every evidence ref exists, and drops it once the workspace candidate or plugin version it depends on changes. Does not end your turn.",
+      parameters: {
+        type: "object",
+        required: ["kind", "text"],
+        properties: {
+          kind: { type: "string", enum: ["fact", "refuted", "open"] },
+          text: { type: "string", description: "The fact, the refuted claim, or the question, in one sentence." },
+          evidence: { ...STRINGS, description: "Evidence refs from the run view that show it. Required for fact and refuted." },
+          dependsOn: {
+            type: "array",
+            items: { type: "string", enum: ["candidate", "plugin"] },
+            description:
+              "What it holds only for: the current workspace candidate, the active plugin version, or both (the default). [] for facts about the task itself.",
+          },
+        },
+      } as unknown as ToolDefinition["parameters"],
+      async execute(_toolCallId: string, params: Record<string, unknown>) {
+        const outcome = await recordFinding(params as unknown as Parameters<typeof recordFinding>[0]);
+        const text = outcome.kept
+          ? `Kept${outcome.id !== undefined ? ` as ${outcome.id}` : ""}.`
+          : `Not kept: ${outcome.reason ?? "refused"}.`;
+        return { content: [{ type: "text" as const, text }], details: undefined };
+      },
+    } as ToolDefinition);
+  }
+
+  return {
+    tools: [...actionTools, switchTool, ...findingTools],
+    offered,
+    proposal: () => proposal,
+    exhausted: () => exhausted,
+  };
 }
 
 /** How a controller rejection reads to the model: the failed precondition and current value, and what is left this turn. */

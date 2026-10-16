@@ -91,6 +91,23 @@ describe("createChildPluginHost", () => {
     expect(advanced.value.action.type).toBe("dispatch");
   });
 
+  it("reports why the plugin entry failed to load, not the error envelope's missing run id", async () => {
+    const host = await track(
+      createChildPluginHost({
+        entryModule: fixture("empty", "graph.mjs"),
+        activeVersion: "empty@1",
+        generation: 1,
+        workerModule: workerJs,
+        callbackTimeoutMs: 3_000,
+      }),
+    );
+    const described = await host.describe(ctx("op-describe"));
+    expect(described.ok).toBe(false);
+    if (described.ok) throw new Error("expected a failure");
+    expect(described.observation.message).toMatch(/failed to load plugin: plugin entry must export createGraph\(\) or default GraphPlugin/);
+    expect(described.observation.message).not.toMatch(/runId must be a non-empty string/);
+  });
+
   it("attributes an oversized advance request to its real run, not a malformed-response failure", async () => {
     const host = await track(
       createChildPluginHost({

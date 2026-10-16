@@ -198,13 +198,15 @@ export interface DurableRunState {
   /** Last successful work-purpose dispatch; used for separate-reviewer checks. */
   lastWorkOperationId?: string;
   /**
-   * Set by `resume()`; consumed and cleared by the supervisor's next decide()
-   * call. A resumed process may run different controller or plugin code, or
-   * carry newly granted repair authority, than whatever rejected a past
-   * proposal still sitting in the supervisor's own conversation history —
-   * this tells it to re-verify rather than trust that history as settled.
+   * The supervisor's memory across recovery episodes (case-file.ts): verified
+   * facts, refuted claims, settled attempts, open questions. Absent in runs
+   * that never recorded one. (Older runs may also carry a
+   * `resumedSinceLastDecision` flag; it is no longer read: every episode, and
+   * the first one after resume, starts a fresh supervisor session instead.)
    */
-  resumedSinceLastDecision?: boolean;
+  caseFile?: import("@graphloom/sdk").CaseFile;
+  /** Last id number given to a case-file fact or refutation. */
+  caseFileSeq?: number;
   /** Per stage, whether a work-purpose dispatch has ever been admitted for it. Never cleared. */
   workDispatched?: Record<string, true>;
   /**
@@ -330,6 +332,12 @@ export interface SupervisorMark {
   notes: string[];
   /** Set when this proposal repeated an earlier one with no progress since. */
   repeat?: { count: number; triggerCode: string };
+  /** The recovery trigger the proposal answered. */
+  triggerCode?: string;
+  /** The run's candidate digest when it was taken (`null`: no candidate change yet). */
+  candidateDigest?: string | null;
+  /** Set once its settlement was written to the case file's attempts. */
+  attemptRecorded?: true;
 }
 
 /**

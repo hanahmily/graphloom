@@ -219,8 +219,11 @@ controllers enforce and apply both.** A plugin defines required outcomes and the
 evidence contracts. It need not anticipate every failure or implement a handler
 for every repair. Plugin repair suggestions are context, not a capability allowlist.
 
-There is one logical supervisor session per run, created lazily and continued for
-later recovery episodes. It receives pinned task requirements, stage/check
+There is one logical supervisor per run, created lazily and kept for later
+recovery episodes. Each episode runs in a fresh model session; what earlier
+episodes verified reaches it through a controller-owned case file, not through
+chat history ([Pi supervisor](design-pi-supervisor.md#episode-sessions-and-the-case-file)).
+It receives pinned task requirements, stage/check
 contracts, observed errors, job specifications, artifacts, prior corrections,
 remaining budgets, and the host's available authorized capabilities. Happy-path
 worker calls do not require a supervisor round trip.

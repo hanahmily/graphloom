@@ -3,7 +3,9 @@ import path from "node:path";
 import { parseSessionEntries } from "@earendil-works/pi-coding-agent";
 import {
   createPiSupervisorSession,
+  isMiniMaxProvider,
   type CreatePiSupervisorSessionOptions,
+  type PiSupervisorSession,
 } from "./pi-session.js";
 import {
   createPiSupervisor,
@@ -33,61 +35,72 @@ export interface RestorePiSupervisorOptions {
 }
 
 /**
- * Reopen a durable Pi supervisor session from a persisted binding and
- * re-apply the recorded provider/model.
+ * Restore the run's logical Pi supervisor from a persisted binding, on the
+ * recorded provider/model. The earlier transcript is never reopened: the
+ * first episode after a restart starts a fresh session with no prior chat,
+ * like every episode, and learns what earlier episodes established from the
+ * controller's case file. Each later episode opens its own session too.
  */
 export async function restorePiSupervisorFromBinding(
   options: RestorePiSupervisorOptions,
 ): Promise<PiSupervisor> {
   const { binding } = options;
-  if (!binding.sessionFile) {
-    throw new Error("cannot restore supervisor: binding has no sessionFile");
+  const sessionDir =
+    options.sessionDir ?? (binding.sessionFile !== undefined ? path.dirname(binding.sessionFile) : undefined);
+  if (sessionDir === undefined) {
+    throw new Error("cannot restore supervisor: binding has no sessionFile and no sessionDir was given");
   }
-  const sessionDir = options.sessionDir ?? path.dirname(binding.sessionFile);
 
   const configured =
     options.configuredModels ??
     binding.configuredModels ??
     configuredModelsFromBinding(binding);
-  // The bound model may require a reasoning level other than the "off" default
-  // (e.g. a model that rejects thinking disabled); look it up before the
-  // session is created, since that is where the level actually takes effect.
-  const boundThinkingLevel = findConfigured(configured, binding)?.thinkingLevel;
-
-  const sessionOpts: CreatePiSupervisorSessionOptions = {
+  const openSession = piEpisodeSessionOpener({
     runId: options.runId,
     sessionDir,
-    sessionFile: binding.sessionFile,
-    provider: binding.provider,
-    modelId: binding.modelId,
-  };
-  if (boundThinkingLevel !== undefined) sessionOpts.thinkingLevel = boundThinkingLevel;
-  if (options.agentDir !== undefined) sessionOpts.agentDir = options.agentDir;
-  if (options.apiKey !== undefined) sessionOpts.apiKey = options.apiKey;
-  if (options.promptTimeoutMs !== undefined) {
-    sessionOpts.promptTimeoutMs = options.promptTimeoutMs;
-  }
-  if (options.systemPrompt !== undefined) sessionOpts.systemPrompt = options.systemPrompt;
-  if (options.cwd !== undefined) sessionOpts.cwd = options.cwd;
-  if (options.repairsDir !== undefined) sessionOpts.repairsDir = options.repairsDir;
-
-  const session = await createPiSupervisorSession(sessionOpts);
-
-  if (session.provider !== binding.provider || session.modelId !== binding.modelId) {
-    await session.setModel({
-      provider: binding.provider,
-      modelId: binding.modelId,
-      ...(boundThinkingLevel !== undefined ? { thinkingLevel: boundThinkingLevel } : {}),
-    });
-  }
+    ...(options.agentDir !== undefined ? { agentDir: options.agentDir } : {}),
+    ...(options.apiKey !== undefined ? { apiKey: options.apiKey } : {}),
+    ...(options.promptTimeoutMs !== undefined ? { promptTimeoutMs: options.promptTimeoutMs } : {}),
+    ...(options.systemPrompt !== undefined ? { systemPrompt: options.systemPrompt } : {}),
+    ...(options.cwd !== undefined ? { cwd: options.cwd } : {}),
+    ...(options.repairsDir !== undefined ? { repairsDir: options.repairsDir } : {}),
+  });
+  // The bound model may require a reasoning level other than the "off" default
+  // (e.g. a model that rejects thinking disabled); it takes effect when the
+  // session is created.
+  const session = await openSession(
+    findConfigured(configured, binding) ?? { provider: binding.provider, modelId: binding.modelId },
+  );
 
   return createPiSupervisor({
     session,
+    openSession,
+    logicalSessionId: binding.sessionId,
     configuredModels: configured,
     initialSwitchJournal: binding.switchJournal as ModelSwitchRecord[],
     ...(options.patchTimeoutMs !== undefined ? { patchTimeoutMs: options.patchTimeoutMs } : {}),
     ...(options.quotaRetryMs !== undefined ? { quotaRetryMs: options.quotaRetryMs } : {}),
   });
+}
+
+/**
+ * Opens a new durable Pi session in `sessionDir` on a given model, for one
+ * recovery episode. Every session the run's supervisor uses comes from here.
+ */
+export function piEpisodeSessionOpener(
+  base: Omit<CreatePiSupervisorSessionOptions, "provider" | "modelId" | "thinkingLevel" | "sessionFile">,
+): (model: SupervisorModelRef) => Promise<PiSupervisorSession> {
+  // The explicit key is MiniMax's only: after a switch to another provider,
+  // later episodes open on that provider's own Pi-stored credential.
+  const { apiKey, ...shared } = base;
+  return (model) =>
+    createPiSupervisorSession({
+      ...shared,
+      ...(apiKey !== undefined && isMiniMaxProvider(model.provider) ? { apiKey } : {}),
+      provider: model.provider,
+      modelId: model.modelId,
+      ...(model.thinkingLevel !== undefined ? { thinkingLevel: model.thinkingLevel } : {}),
+    });
 }
 
 /**

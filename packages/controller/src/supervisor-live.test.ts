@@ -1,4 +1,6 @@
-import { access, mkdir, mkdtemp, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { access, appendFile, mkdir, mkdtemp, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -8,6 +10,7 @@ import { createScriptedRunner } from "@graphloom/runner";
 import {
   createPiSupervisor,
   createScriptedSupervisor,
+  reconcileSupervisorBinding,
   type PiSupervisorSessionPort,
   type SupervisorSettlement,
 } from "@graphloom/supervisor";
@@ -72,7 +75,10 @@ async function makeEnv(): Promise<{ taskPath: string; stateRoot: string }> {
   const { execFile } = await import("node:child_process");
   const { promisify } = await import("node:util");
   const run = promisify(execFile);
-  built ??= run("npm", ["run", "build", "-w", "@graphloom/plugin-hello"], { cwd: repoRoot });
+  // Rebuilding rewrites dist/ under test files that run in parallel; `npm test` builds it first.
+  if (!existsSync(path.join(helloBundle, "dist", "index.js"))) {
+    built ??= run("npm", ["run", "build", "-w", "@graphloom/plugin-hello"], { cwd: repoRoot });
+  }
   await built;
 
   const taskDir = await mkdtemp(path.join(os.tmpdir(), "gl-sup-live-"));
@@ -351,6 +357,69 @@ describe("live supervisor recovery through the controller (#43)", () => {
       switchJournal: [{ from: DEEPSEEK, to: MINIMAX, reason: "deepseek outage", status: "committed" }],
     });
     await expect(access(path.join(report.stateDir, "supervisor-switch.json"))).rejects.toThrow();
+  });
+
+  it("journals a pending operator switch on resume against the restored session's transcript, so a crash reconciles as applied", async () => {
+    const env = await makeEnv();
+    const controller = createController();
+    const dir = await mkdtemp(path.join(os.tmpdir(), "gl-switch-crash-"));
+    temps.push(dir);
+    const modelChange = (ref: { provider: string; modelId: string }) =>
+      `${JSON.stringify({ type: "model_change", id: randomUUID(), parentId: null, timestamp: new Date().toISOString(), ...ref })}\n`;
+    const oldFile = path.join(dir, "episode-old.jsonl");
+    const newFile = path.join(dir, "episode-new.jsonl");
+    await writeFile(oldFile, modelChange(DEEPSEEK), "utf8");
+    await writeFile(newFile, modelChange(DEEPSEEK), "utf8");
+
+    const before = scriptedSession([stopTool]);
+    (before as { sessionFile: string }).sessionFile = oldFile;
+    const first = await controller.run({
+      taskPath: env.taskPath,
+      plugin: escalate(),
+      validators,
+      supervisor: createPiSupervisor({ session: before, configuredModels: [DEEPSEEK, MINIMAX] }),
+      runner: createScriptedRunner({ jobs: [] }),
+      stateRoot: env.stateRoot,
+      runId: "operator-switch-crash",
+    });
+    expect((await loadRunState(first.stateDir)).supervisorBinding?.sessionFile).toBe(oldFile);
+    await controller.switchModel("operator-switch-crash", { ...MINIMAX, reason: "deepseek outage" }, { stateRoot: env.stateRoot });
+
+    // The restored session records the model change in its own transcript;
+    // the run state on disk at that moment is what a crash would leave.
+    let crashState: Awaited<ReturnType<typeof loadRunState>> | undefined;
+    const restored = scriptedSession([stopTool], DEEPSEEK, async (ref) => {
+      await appendFile(newFile, modelChange(ref), "utf8");
+      crashState = await loadRunState(first.stateDir);
+      return undefined;
+    });
+    (restored as { sessionFile: string }).sessionFile = newFile;
+    const report = await controller.resume({
+      runRef: first.stateDir,
+      runner: createScriptedRunner({ jobs: [] }),
+      validators,
+      plugin: escalate(),
+      restoreSupervisor: async (binding) =>
+        createPiSupervisor({
+          session: restored,
+          configuredModels: binding.configuredModels!,
+          initialSwitchJournal: binding.switchJournal,
+          logicalSessionId: binding.sessionId,
+        }),
+    });
+    expect(report.status).toBe("stopped");
+
+    const crashed = crashState!.supervisorBinding!;
+    expect(crashed.sessionFile).toBe(newFile);
+    expect(crashed.switchJournal).toMatchObject([{ from: DEEPSEEK, to: MINIMAX, status: "intent" }]);
+    const reconciled = await reconcileSupervisorBinding({
+      sessionId: crashed.sessionId,
+      sessionFile: crashed.sessionFile,
+      provider: crashed.provider,
+      modelId: crashed.modelId,
+      switchJournal: crashed.switchJournal,
+    });
+    expect(reconciled).toMatchObject({ ...MINIMAX, switchJournal: [{ status: "committed" }] });
   });
 
   it("journals an operator switch to an unconfigured model as failed and keeps going", async () => {

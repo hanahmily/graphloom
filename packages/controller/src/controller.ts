@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { access, writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
+  emptyCaseFile,
   PROTOCOL_VERSION,
   type BudgetRemaining,
   type GraphDefinition,
@@ -16,7 +17,8 @@ import {
 } from "@graphloom/plugin-host";
 import type { Supervisor, SupervisorBinding } from "@graphloom/supervisor";
 import { reconcileSupervisorBinding, restorePiSupervisorFromBinding } from "@graphloom/supervisor";
-import { writeSwitchRequest, type ModelSwitchOrder } from "./supervisor-switch.js";
+import { readBinding, writeSwitchRequest, type ModelSwitchOrder } from "./supervisor-switch.js";
+import { refreshCaseFile } from "./case-file.js";
 import {
   activeRepairValidators,
   reconcileRepairJournal,
@@ -218,6 +220,8 @@ export interface InspectReport {
   remedies: RemedyRecord[];
   /** Supervisor turns that ended without an admitted proposal (#117), such as `supervisor_inadmissible`. */
   supervisorOutcomes: SupervisorOutcomeRecord[];
+  /** The supervisor's case file (#120), stale entries included and marked; empty when none was kept. */
+  caseFile: import("@graphloom/sdk").CaseFile;
   /** The gate in `run` (docs/design-graph-rehearsal.md §3.5): whether (and how) this run was rehearsed before it was intaken. Absent for runs intaken un-gated. */
   rehearsalGate?: IntakePin["rehearsalGate"];
 }
@@ -460,9 +464,14 @@ export function createController(): Controller {
           return;
         }
         // Evidence belongs to the stop being resumed; any stop from here on is a new one.
-        const { stopEvidenceRefs: _staleEvidence, ...resumable } = state;
+        // A pre-#120 run may carry `resumedSinceLastDecision`; nothing reads it
+        // now, since the supervisor's first episode after resume starts a fresh
+        // session and the case file marks what the resume made stale.
+        const { stopEvidenceRefs: _staleEvidence, resumedSinceLastDecision: _resumed, ...resumable } =
+          state as DurableRunState & { resumedSinceLastDecision?: boolean };
         void _staleEvidence;
-        state = { ...resumable, resumedSinceLastDecision: true };
+        void _resumed;
+        state = resumable;
 
         try {
           await assertWorktreeMatches(
@@ -649,10 +658,12 @@ export function createController(): Controller {
             validators,
           );
           const reason = `operator plugin update: manifest ${state.intake.bundle.manifestDigest.slice(0, 12)} -> ${pluginUpdate.manifestDigest.slice(0, 12)}${updated.note}`;
-          state = {
+          // Findings the supervisor made about the old plugin code go stale here.
+          state = refreshCaseFile({
             ...updated.state,
+            intake: { ...updated.state.intake, bundle: pluginUpdate },
             versionHistory: [...(state.versionHistory ?? []), { activeVersion: state.activeVersion, generation: state.generation, reason, at: new Date().toISOString() }],
-          };
+          });
           revisionBridge.current = state.stateRevision;
           await saveRunState(state);
         }
@@ -660,6 +671,25 @@ export function createController(): Controller {
         const supervisor = await resolveResumeSupervisor(request, state, stateDir);
         if (supervisor && !request.supervisor) {
           restoredSupervisor = supervisor;
+        }
+        // A restored supervisor runs in a new episode session with its own
+        // transcript. Record it before anything (a pending operator model
+        // switch) journals against the binding: reconciling a crash reads the
+        // transcript the switch actually changed.
+        const restoredBinding = supervisor !== undefined ? readBinding(supervisor) : undefined;
+        if (restoredBinding !== undefined && state.supervisorBinding !== undefined) {
+          state = {
+            ...state,
+            supervisorBinding: {
+              ...state.supervisorBinding,
+              sessionId: restoredBinding.sessionId,
+              provider: restoredBinding.provider,
+              modelId: restoredBinding.modelId,
+              ...(restoredBinding.sessionFile !== undefined ? { sessionFile: restoredBinding.sessionFile } : {}),
+              ...(restoredBinding.configuredModels !== undefined ? { configuredModels: restoredBinding.configuredModels } : {}),
+            },
+          };
+          await saveRunState(state);
         }
 
         state = await runNormalLoop(state, {
@@ -1057,6 +1087,7 @@ function toInspect(state: DurableRunState): InspectReport {
     dispatchesSinceReceipt: structuredClone(state.dispatchesSinceReceipt ?? {}),
     remedies: structuredClone(state.remedies ?? []),
     supervisorOutcomes: structuredClone(state.supervisorOutcomes ?? []),
+    caseFile: structuredClone(state.caseFile ?? emptyCaseFile()),
   };
   if (state.stopReason !== undefined) {
     report.stopReason = state.stopReason;

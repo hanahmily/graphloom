@@ -500,23 +500,73 @@ describe("buildRecoveryPrompt", () => {
     expect(prompt).not.toContain("Prefer reenter then return over re-dispatching");
   });
 
-  it("only names older-generation evidence by ref, keeping full detail to the current generation", () => {
+  it("counts older-generation evidence without listing it, keeping detail to the current generation", () => {
     const input = sampleInput();
     input.view.generation = 2;
     input.view.evidence = [review("approved", "ev-old"), { ...review("approved", "ev-new"), generation: 2 }];
     const prompt = buildRecoveryPrompt(input);
-    expect(prompt).toContain('"ev-old"');
-    expect(prompt).not.toContain("ev-old (fix/review)");
+    expect(prompt).not.toContain("ev-old");
+    expect(prompt).toContain('"total": 2');
     expect(prompt).toContain("ev-new (fix/review): approved, looks fine");
   });
 
-  it("tells the supervisor to re-verify stale rejections only on the first turn after a resume", () => {
-    const resumedInput = sampleInput();
-    resumedInput.resumed = true;
-    expect(buildRecoveryPrompt(resumedInput)).toContain("This run was just resumed");
+  it("does not grow with the run's total evidence, receipts, sessions, or candidates", () => {
+    const sized = (n: number): number => {
+      const input = sampleInput();
+      input.view.generation = 3;
+      input.view.evidence = Array.from({ length: n }, (_, i) => ({
+        ...review("approved", `ev-${String(i).padStart(4, "0")}`),
+        generation: i < n - 30 ? 1 : 3,
+      }));
+      input.view.receipts = Array.from({ length: n }, (_, i) => ({
+        id: `rc-${String(i).padStart(4, "0")}`,
+        stageId: "fix",
+        requirementId: "r",
+        valid: false,
+        evidenceRefs: [],
+        validatorId: "v",
+        validatorVersion: "1",
+        generation: 1,
+        acceptedAt: "2026-01-01T00:00:00.000Z",
+      })) as unknown as typeof input.view.receipts;
+      input.view.agentSessions = Array.from({ length: n }, (_, i) => ({
+        operationId: `op-${String(i).padStart(4, "0")}`,
+        stageId: "fix",
+        attempt: 1,
+        generation: 1,
+        dispatchKey: "work:graphloom.agent/run",
+        executorId: "graphloom.agent/run",
+        status: "ok" as const,
+        settledAt: "2026-01-01T00:00:00.000Z",
+      }));
+      input.view.repairCandidates = Array.from({ length: n }, (_, i) => ({
+        artifactId: `art-${String(i).padStart(4, "0")}`,
+        status: "rejected",
+        target: "plugin" as const,
+        reason: "x".repeat(2_000),
+      }));
+      return buildRecoveryPrompt(input).length;
+    };
+    // Only the counts of older items differ (a few digits).
+    expect(sized(500) - sized(60)).toBeLessThan(40);
+  });
 
-    const laterInput = sampleInput();
-    expect(buildRecoveryPrompt(laterInput)).not.toContain("This run was just resumed");
+  it("has no resume preamble; it carries the live case file and offers record_finding", () => {
+    const input = sampleInput();
+    input.caseFile = {
+      facts: [{ id: "fact-1", text: "the fix is on disk", evidence: ["ev-diff"], since: 1, dependsOn: {} }],
+      refuted: [{ id: "refuted-2", claim: "the wrapper corrupts arguments", by: ["ev-call"], since: 1, dependsOn: {} }],
+      attempts: [{ episodeId: "ep-0", trigger: "stalled", action: "reenter: retry", outcome: "generation is now 2", generation: 1 }],
+      open: [{ text: "why does the review time out?", since: 1 }],
+    };
+    input.recordFinding = async () => ({ kept: true });
+    const prompt = buildRecoveryPrompt(input);
+    expect(prompt).not.toContain("just resumed");
+    expect(prompt).toContain("- fact fact-1 (generation 1; ev-diff): the fix is on disk");
+    expect(prompt).toContain("- refuted refuted-2 (generation 1; ev-call): the wrapper corrupts arguments");
+    expect(prompt).toContain("- attempt in ep-0 (stalled, generation 1): reenter: retry -> generation is now 2");
+    expect(prompt).toContain("- open question: why does the review time out?");
+    expect(prompt).toContain("call record_finding");
   });
 });
 
