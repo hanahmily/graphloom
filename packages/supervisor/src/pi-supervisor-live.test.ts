@@ -14,7 +14,12 @@ import {
 import type { RunView } from "@graphloom/sdk";
 import { afterEach, describe, expect, it } from "vitest";
 import { wrapPiAgentSession } from "./pi-session.js";
-import { createPiSupervisor, type ModelSwitchRecord, type PiSupervisor } from "./pi-supervisor.js";
+import {
+  createPiSupervisor,
+  type ModelSwitchRecord,
+  type PiSupervisor,
+  type PiSupervisorSessionPort,
+} from "./pi-supervisor.js";
 import { reconcileSupervisorBinding } from "./restore.js";
 import type { SupervisorInput } from "./types.js";
 
@@ -104,14 +109,15 @@ async function fauxWorld(options: { openaiTokensPerSecond?: number } = {}): Prom
   return { ai, dir, sessionDir: path.join(dir, "sessions"), modelRuntime, faux };
 }
 
-async function openSupervisor(
+/** One wrapped Pi session on `model`; `sessionFile` reopens an earlier transcript instead of starting a new one. */
+async function openSession(
   world: World,
   model: { provider: string; modelId: string },
-  restore?: { sessionFile: string; switchJournal: ModelSwitchRecord[] },
-): Promise<PiSupervisor> {
+  sessionFile?: string,
+): Promise<PiSupervisorSessionPort> {
   const sessionManager =
-    restore !== undefined
-      ? SessionManager.open(restore.sessionFile, world.sessionDir, world.dir)
+    sessionFile !== undefined
+      ? SessionManager.open(sessionFile, world.sessionDir, world.dir)
       : SessionManager.create(world.dir, world.sessionDir);
   const { session } = await createAgentSession({
     cwd: world.dir,
@@ -124,7 +130,7 @@ async function openSupervisor(
     sessionManager,
     settingsManager: SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } }),
   });
-  const wrapped = wrapPiAgentSession({
+  return wrapPiAgentSession({
     session,
     modelRuntime: world.modelRuntime,
     runId: "run-live",
@@ -134,10 +140,23 @@ async function openSupervisor(
     credentialSource: "pi-stored",
     promptTimeoutMs: 10_000,
   });
+}
+
+/**
+ * A supervisor that opens a fresh session per episode, as the CLI's does.
+ * `restore` builds it the way restorePiSupervisorFromBinding does: the same
+ * logical id and journal, a new session, no earlier transcript.
+ */
+async function openSupervisor(
+  world: World,
+  model: { provider: string; modelId: string },
+  restore?: { sessionId: string; switchJournal: ModelSwitchRecord[] },
+): Promise<PiSupervisor> {
   return createPiSupervisor({
-    session: wrapped,
+    session: await openSession(world, model),
+    openSession: (m) => openSession(world, m),
     configuredModels: CONFIGURED,
-    ...(restore !== undefined ? { initialSwitchJournal: restore.switchJournal } : {}),
+    ...(restore !== undefined ? { initialSwitchJournal: restore.switchJournal, logicalSessionId: restore.sessionId } : {}),
   });
 }
 
@@ -318,50 +337,64 @@ describe("Pi supervisor on a live session (faux providers)", () => {
     }
   });
 
-  it("keeps one session file across episodes and a restart", async () => {
+  it("opens a fresh session per episode, and after a restart, with no prior chat", async () => {
     const world = await fauxWorld();
     const seen: string[] = [];
-    world.faux.deepseek.setResponses([recordingStop(world, seen), recordingStop(world, seen), recordingStop(world, seen)]);
+    world.faux.deepseek.setResponses([
+      recordingStop(world, seen),
+      recordingStop(world, seen),
+      recordingStop(world, seen),
+      recordingStop(world, seen),
+    ]);
     const first = await openSupervisor(world, DEEPSEEK);
     await first.decide(input("ep-first"));
+    const firstFile = first.binding.sessionFile;
+    // A second turn of the same episode stays in its session.
+    await first.decide(input("ep-first"));
+    expect(first.binding.sessionFile).toBe(firstFile);
     await first.decide(input("ep-second"));
     const binding = first.binding;
+    expect(binding.sessionFile).not.toBe(firstFile);
     await first.close?.();
 
-    const restored = await openSupervisor(world, DEEPSEEK, {
-      sessionFile: binding.sessionFile!,
-      switchJournal: binding.switchJournal,
-    });
+    const restored = await openSupervisor(world, DEEPSEEK, { sessionId: binding.sessionId, switchJournal: binding.switchJournal });
     try {
-      await restored.decide(input("ep-third"));
+      // The resumed run is still in ep-second, yet its first prompt carries no earlier chat.
+      await restored.decide(input("ep-second"));
       expect(restored.binding.sessionId).toBe(binding.sessionId);
+      expect(restored.sessionId).toBe(first.sessionId);
       expect(seen[1]).toContain("ep-first");
-      expect(seen[2]).toContain("ep-first");
-      expect(seen[2]).toContain("ep-second");
-      expect(await sessionFiles(world)).toEqual([path.basename(binding.sessionFile!)]);
+      expect(seen[2]).not.toContain("ep-first");
+      expect(seen[3]).not.toContain("ep-first");
+      // Only the system prompt and this one recovery prompt.
+      expect((JSON.parse(seen[3]!) as Array<{ role: string }>).map((m) => m.role)).toEqual(["system", "user"]);
+      expect(await sessionFiles(world)).toHaveLength(3);
     } finally {
       await restored.close?.();
     }
   });
 
-  it("switches deepseek to minimax-cn to openai in the same session with history intact", async () => {
+  it("switches deepseek to minimax-cn to openai within one episode's session, and opens the next episode on the switched model", async () => {
     const world = await fauxWorld();
     const seen: string[] = [];
     world.faux.deepseek.setResponses([recordingStop(world, seen)]);
     world.faux["minimax-cn"].setResponses([recordingStop(world, seen)]);
-    world.faux.openai.setResponses([recordingStop(world, seen)]);
+    world.faux.openai.setResponses([recordingStop(world, seen), recordingStop(world, seen)]);
     const supervisor = await openSupervisor(world, DEEPSEEK);
     try {
-      await supervisor.decide(input("ep-deepseek"));
+      await supervisor.decide(input("ep-1", { trigger: { code: "supervise", message: "turn deepseek" } }));
       await supervisor.switchModel({ ...MINIMAX, reason: "operator" });
-      await supervisor.decide(input("ep-minimax"));
+      await supervisor.decide(input("ep-1", { trigger: { code: "supervise", message: "turn minimax" } }));
       await supervisor.switchModel({ ...OPENAI, reason: "supervisor" });
-      await supervisor.decide(input("ep-openai"));
+      await supervisor.decide(input("ep-1", { trigger: { code: "supervise", message: "turn openai" } }));
+      const episodeFile = supervisor.binding.sessionFile!;
+      await supervisor.decide(input("ep-2"));
 
-      expect([world.faux.deepseek, world.faux["minimax-cn"], world.faux.openai].map((f) => f.state.callCount)).toEqual([1, 1, 1]);
-      expect(seen[1]).toContain("ep-deepseek");
-      expect(seen[2]).toContain("ep-deepseek");
-      expect(seen[2]).toContain("ep-minimax");
+      expect([world.faux.deepseek, world.faux["minimax-cn"], world.faux.openai].map((f) => f.state.callCount)).toEqual([1, 1, 2]);
+      expect(seen[1]).toContain("turn deepseek");
+      expect(seen[2]).toContain("turn deepseek");
+      expect(seen[2]).toContain("turn minimax");
+      expect(seen[3]).not.toContain("turn deepseek");
 
       const binding = supervisor.binding;
       expect(binding).toMatchObject({ ...OPENAI, configuredModels: CONFIGURED });
@@ -369,8 +402,8 @@ describe("Pi supervisor on a live session (faux providers)", () => {
         ["deepseek", "minimax-cn", "committed"],
         ["minimax-cn", "openai", "committed"],
       ]);
-      expect(await sessionFiles(world)).toHaveLength(1);
-      const entries = parseSessionEntries(await readFile(binding.sessionFile!, "utf8"));
+      expect(await sessionFiles(world)).toHaveLength(2);
+      const entries = parseSessionEntries(await readFile(episodeFile, "utf8"));
       expect(entries.filter((e) => e.type === "model_change").map((e) => (e as { provider: string }).provider)).toEqual([
         "deepseek",
         "minimax-cn",

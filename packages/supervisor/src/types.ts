@@ -1,4 +1,4 @@
-import type { GraphDecision, RepairTarget, RunView } from "@graphloom/sdk";
+import type { CaseFile, CaseFinding, CaseFindingOutcome, GraphDecision, RepairTarget, RunView } from "@graphloom/sdk";
 import type { ProviderFailureClass } from "./provider-failure.js";
 
 /** Why the controller entered recovery for this episode. */
@@ -36,12 +36,18 @@ export interface SupervisorInput {
    */
   maxWaitMs?: number;
   /**
-   * True only on the first turn after `resume()`. The process may now run
-   * different controller or plugin code, or carry newly granted repair
-   * authority, than whatever rejected a past proposal still sitting in this
-   * session's own history — nothing else tells the supervisor that.
+   * The live part of the controller's case file: facts and refutations whose
+   * candidate digest and active plugin version still hold, the controller's
+   * settled attempts, and open questions. It is the supervisor's only memory
+   * of earlier episodes; each episode starts a fresh model session.
    */
-  resumed?: boolean;
+  caseFile?: CaseFile;
+  /**
+   * Submit a finding to the case file. The controller keeps a fact or a
+   * refutation only when every evidence ref it cites exists, and says why
+   * otherwise. Does not end the turn.
+   */
+  recordFinding?: (finding: CaseFinding) => Promise<CaseFindingOutcome>;
   /** Aborted when the run stops; the session aborts its request and settles idle. */
   signal?: AbortSignal;
   /**
@@ -149,7 +155,8 @@ export function isModelSwitchRequest(value: unknown): value is ModelSwitchReques
 /**
  * Run-wide recovery decision source.
  * Implementations may be scripted (CI) or Pi-backed (live).
- * One logical session identity is reused for every repair round in a run.
+ * One logical supervisor identity is reused for every repair round in a run;
+ * a Pi-backed one opens a fresh model session per recovery episode.
  */
 export interface Supervisor {
   decide(input: SupervisorInput): Promise<SupervisorProposal>;

@@ -159,3 +159,24 @@ export { createScriptedGraph, type ScriptedAdvance, type ScriptedGraphOptions } 
 export { writeScopeAllows, writeScopeExcludes, writeScopeIncludes, writeScopeProblem } from "./scope.js";
 
 export { stableHash, stableJson } from "./stable-hash.js";
+
+export type {
+  CaseAttempt,
+  CaseDependency,
+  CaseFact,
+  CaseFile,
+  CaseFinding,
+  CaseFindingOutcome,
+  CaseOpenQuestion,
+  CaseRefutation,
+  CaseStaleness,
+} from "./case-file.js";
+export {
+  emptyCaseFile,
+  MAX_CASE_ATTEMPTS,
+  MAX_CASE_FACTS,
+  MAX_CASE_OPEN,
+  MAX_CASE_REFS,
+  MAX_CASE_REFUTED,
+  MAX_CASE_TEXT,
+} from "./case-file.js";

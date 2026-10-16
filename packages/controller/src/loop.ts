@@ -2,6 +2,8 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import type {
+  CaseFinding,
+  CaseFindingOutcome,
   EvidenceRecord,
   ExecutorSession,
   GraphDecision,
@@ -34,6 +36,7 @@ import {
   type SupervisorProposal,
 } from "@graphloom/supervisor";
 import { markProposal, noteOutcome, settleProposal } from "./settlement.js";
+import { liveCaseFile, recordAttempt, recordFinding, refreshCaseFile } from "./case-file.js";
 import {
   applyModelSwitch,
   clearSwitchRequest,
@@ -386,13 +389,24 @@ async function runNormalLoopSteps(
           return { done: true as const, state };
         }
 
-        // One-shot: a resumed process may run different controller or plugin
-        // code, or carry newly granted authority, than whatever rejected a
-        // past proposal still sitting in the supervisor's own history.
-        const resumed = state.resumedSinceLastDecision === true;
-        if (resumed) state = { ...state, resumedSinceLastDecision: false };
+        // The case file is the supervisor's only memory of earlier episodes
+        // (each episode, and the first after a resume, starts a fresh model
+        // session): findings made against a since-changed candidate or plugin
+        // version are marked stale here, and the last proposal's settlement
+        // becomes an attempt, written by the controller, not the model.
         const view = toRunView(state);
         const lastSettlement = settleProposal(state);
+        state = recordAttempt(refreshCaseFile(state), lastSettlement);
+        const caseFile = liveCaseFile(state);
+        const recordCaseFinding = async (finding: CaseFinding): Promise<CaseFindingOutcome> => {
+          const kept = recordFinding(state, finding, episodeId);
+          if (kept.outcome.kept) {
+            state = { ...kept.state, stateRevision: state.stateRevision + 1 };
+            await saveRunState(state);
+            syncRevision(deps, state);
+          }
+          return kept.outcome;
+        };
         // Admission feedback within the turn: the controller's own check, run
         // by the supervisor's tools before a proposal ends the turn and again
         // here on whatever decide() returns. Nothing in the run changes during
@@ -450,7 +464,8 @@ async function runNormalLoopSteps(
               ...(lastSettlement !== undefined ? { lastSettlement } : {}),
               ...(metered ? { maxProviderCalls: state.budgets.agentInvocations } : {}),
               maxWaitMs: state.budgets.waitMs ?? 0,
-              ...(resumed && rejection === undefined ? { resumed: true } : {}),
+              caseFile,
+              recordFinding: recordCaseFinding,
             });
             decided = isModelSwitchRequest(proposal) ? proposal : assertGraphDecision(proposal);
           } catch (err) {
@@ -918,9 +933,10 @@ function withCandidateDigest(state: DurableRunState, digest: string | undefined)
   if (digest === undefined) {
     const { candidateDigest: _dropped, ...rest } = state;
     void _dropped;
-    return rest;
+    return refreshCaseFile(rest);
   }
-  return { ...state, candidateDigest: digest };
+  // A finding the supervisor made against the previous candidate goes stale now.
+  return refreshCaseFile({ ...state, candidateDigest: digest });
 }
 
 /**

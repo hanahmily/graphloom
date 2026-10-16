@@ -161,9 +161,10 @@ function hostRunner(server: FakeGitHub, mirror?: Mirror, sandbox = true): Runner
 function recorder(steps: ScriptedRecoveryStep[]) {
   const inputs: SupervisorInput[] = [];
   const decisions = steps.map((step): ScriptedRecoveryStep => async (input, index) => {
-    // The controller's admission check is a function, not recorded data.
-    const { admission: _admission, ...recorded } = input;
+    // The controller's admission check and case-file sink are functions, not recorded data.
+    const { admission: _admission, recordFinding: _recordFinding, ...recorded } = input;
     void _admission;
+    void _recordFinding;
     inputs.push(structuredClone(recorded));
     return typeof step === "function" ? step(input, index) : structuredClone(step);
   });

@@ -1,4 +1,4 @@
-import type { AgentSessionView, EvidenceRecord, GraphAction } from "@graphloom/sdk";
+import type { AgentSessionView, CaseFile, EvidenceRecord, GraphAction } from "@graphloom/sdk";
 import { parseSupervisorDecision } from "./decision.js";
 import type { PiSupervisorSession, ThinkingLevel } from "./pi-session.js";
 import { SupervisorProviderError, type ProviderFailure } from "./provider-failure.js";
@@ -68,7 +68,20 @@ export interface PiSupervisor extends Supervisor {
 }
 
 export interface CreatePiSupervisorOptions {
+  /** The first episode's session; it may not have been prompted yet. */
   session: PiSupervisorSessionPort;
+  /**
+   * Open a fresh session on `model` for a new recovery episode. Each episode
+   * then starts with no earlier chat: its memory of past episodes is the
+   * controller's case file in the prompt. Omitted (tests, hosts that cannot
+   * open sessions), every episode shares `session`.
+   */
+  openSession?: (model: SupervisorModelRef) => Promise<PiSupervisorSessionPort>;
+  /**
+   * The logical supervisor identity, stable across episode sessions and
+   * restarts. Default: the first session's id.
+   */
+  logicalSessionId?: string;
   /** Models the operator has configured; switches outside this set are rejected. */
   configuredModels?: SupervisorModelRef[];
   /** Rehydrate journal when restoring a durable binding. */
@@ -105,12 +118,16 @@ function abortableSleep(ms: number, signal: AbortSignal | undefined): Promise<vo
 }
 
 /**
- * Pi-backed recovery supervisor: one logical session, one admission tool call per
- * decision (JSON reply as fallback), explicit model switching, and provider-call
- * accounting for controller budgets.
+ * Pi-backed recovery supervisor: one logical supervisor with a fresh Pi session
+ * per recovery episode, one admission tool call per decision (JSON reply as
+ * fallback), explicit model switching, and provider-call accounting for
+ * controller budgets.
  */
 export function createPiSupervisor(options: CreatePiSupervisorOptions): PiSupervisor {
-  const { session } = options;
+  let session = options.session;
+  /** The episode the current session belongs to, once it has been prompted for one. */
+  let sessionEpisode: string | undefined;
+  const logicalSessionId = options.logicalSessionId ?? session.sessionId;
   const configured = options.configuredModels ?? [
     { provider: session.provider, modelId: session.modelId },
   ];
@@ -140,7 +157,7 @@ export function createPiSupervisor(options: CreatePiSupervisorOptions): PiSuperv
   let remedies: SupervisorRemedy[] = [];
 
   const binding: SupervisorBinding = {
-    sessionId: session.sessionId,
+    sessionId: logicalSessionId,
     sessionFile: session.sessionFile,
     provider: session.provider,
     modelId: session.modelId,
@@ -151,12 +168,30 @@ export function createPiSupervisor(options: CreatePiSupervisorOptions): PiSuperv
   function syncBindingModel(): void {
     binding.provider = session.provider;
     binding.modelId = session.modelId;
-    binding.sessionId = session.sessionId;
     binding.sessionFile = session.sessionFile;
   }
 
+  /**
+   * Give `episodeId` its own session: the first episode keeps the session it
+   * was created with; a later one opens a fresh session on the current model,
+   * so no chat from an earlier episode (or an earlier process) reaches it.
+   */
+  async function enterEpisode(episodeId: string): Promise<void> {
+    if (sessionEpisode === episodeId) return;
+    if (sessionEpisode !== undefined && options.openSession !== undefined) {
+      const model = findConfigured(configured, binding) ?? { provider: binding.provider, modelId: binding.modelId };
+      const next = await options.openSession(model);
+      if (codingRoot !== undefined) await next.grantCandidateCoding?.(codingRoot);
+      const previous = session;
+      session = next;
+      syncBindingModel();
+      await previous.close().catch(() => undefined);
+    }
+    sessionEpisode = episodeId;
+  }
+
   return {
-    sessionId: session.sessionId,
+    sessionId: logicalSessionId,
     get binding() {
       return {
         ...binding,
@@ -204,6 +239,7 @@ export function createPiSupervisor(options: CreatePiSupervisorOptions): PiSuperv
       if (input.maxProviderCalls !== undefined && input.maxProviderCalls < 1) {
         throw new Error("decide has no provider-call allowance");
       }
+      await enterEpisode(input.episodeId);
       const toolsFor = () =>
         createAdmissionTools(
           configured,
@@ -212,6 +248,7 @@ export function createPiSupervisor(options: CreatePiSupervisorOptions): PiSuperv
           input.trigger.code,
           input.view.escalation?.repeatedProposals,
           input.admission,
+          input.recordFinding,
         );
       const callsBefore = providerCalls;
       // Every prompt of this turn shares the controller's one allowance:
@@ -623,33 +660,66 @@ export function buildRecoveryPrompt(
 ): string {
   const offered = models?.offered ?? offeredActions(input.admission?.facts);
   const currentGeneration = currentGenerationEvidence(input.view.evidence, input.view.generation);
+  // Every list below is capped so the prompt stays the same size however long
+  // the run has been going: the case file carries what earlier episodes
+  // established, and evidence is described for the current generation only.
+  const receipts = input.view.receipts;
+  const sessions = continuableSessions(input.view.agentSessions ?? []);
+  const candidates = input.view.repairCandidates ?? [];
+  const repeated = Object.entries(input.view.escalation?.repeatedProposals ?? {});
   const viewSummary = {
     runId: input.runId,
     episodeId: input.episodeId,
-    trigger: input.trigger,
+    trigger: {
+      code: input.trigger.code,
+      message: clipText(input.trigger.message, MAX_TRIGGER_MESSAGE_CHARS),
+      ...(input.trigger.evidenceRefs !== undefined
+        ? { evidenceRefs: input.trigger.evidenceRefs.slice(0, MAX_PROMPT_TRIGGER_REFS) }
+        : {}),
+    },
     current: input.view.current,
     recoveryEpisodeId: input.view.recoveryEpisodeId,
     budgets: input.view.budgets,
-    outstanding: input.view.outstanding,
-    receipts: input.view.receipts.map((r) => ({
+    outstanding: input.view.outstanding.slice(-MAX_PROMPT_LIST),
+    receipts: receipts.slice(-MAX_PROMPT_RECEIPTS).map((r) => ({
+      id: r.id,
       stageId: r.stageId,
       valid: r.valid,
       requirementId: r.requirementId,
     })),
-    // Older generations are named here by ref only: a long recovery history
-    // should not force every past episode's full detail into every prompt.
-    evidenceRefs: input.view.evidence.map((e) => e.ref),
-    // The current generation's own evidence, described rather than just named:
-    // across many recovery episodes this session's own memory of what an older
-    // evidence ref actually contained gets less reliable than reading it fresh.
-    currentGenerationEvidence: currentGeneration.map((e) => describeRecoveryEvidence(e)),
+    ...(receipts.length > MAX_PROMPT_RECEIPTS ? { olderReceipts: receipts.length - MAX_PROMPT_RECEIPTS } : {}),
+    evidence: {
+      total: input.view.evidence.length,
+      currentGeneration: currentGeneration.length,
+    },
+    // The current generation's own evidence, described rather than just named;
+    // older generations are counted only, and a fact an earlier episode
+    // verified about them reaches this one through the case file.
+    currentGenerationEvidence: currentGeneration.slice(-MAX_CURRENT_GENERATION_EVIDENCE).map((e) => describeRecoveryEvidence(e)),
     generation: input.view.generation,
     stateRevision: input.view.stateRevision,
     activeVersion: input.view.activeVersion,
-    repairCandidates: input.view.repairCandidates ?? [],
-    agentSessions: input.view.agentSessions ?? [],
+    ...(input.view.candidateDigest !== undefined ? { candidateDigest: input.view.candidateDigest } : {}),
+    repairCandidates: candidates.slice(-MAX_PROMPT_CANDIDATES).map((c) => ({
+      ...c,
+      ...(c.preflightSummary !== undefined ? { preflightSummary: clipText(c.preflightSummary, MAX_SUMMARY_CHARS) } : {}),
+      ...(c.patchSummary !== undefined ? { patchSummary: clipText(c.patchSummary, MAX_SUMMARY_CHARS) } : {}),
+      ...(c.rejectionReason !== undefined ? { rejectionReason: clipText(c.rejectionReason, MAX_SUMMARY_CHARS) } : {}),
+      reason: clipText(c.reason, MAX_SUMMARY_CHARS),
+    })),
+    ...(candidates.length > MAX_PROMPT_CANDIDATES ? { olderRepairCandidates: candidates.length - MAX_PROMPT_CANDIDATES } : {}),
+    // Only sessions a dispatch may still continue (none has continued them yet).
+    agentSessions: sessions.slice(-MAX_PROMPT_LIST),
     ...(input.view.repairAuthority !== undefined ? { repairAuthority: input.view.repairAuthority } : {}),
-    ...(input.view.escalation !== undefined ? { escalation: input.view.escalation } : {}),
+    ...(input.view.escalation !== undefined
+      ? {
+          escalation: {
+            correctionTrials: input.view.escalation.correctionTrials,
+            handoff: input.view.escalation.handoff,
+            repeatedProposals: Object.fromEntries(repeated.slice(-MAX_PROMPT_LIST)),
+          },
+        }
+      : {}),
   };
   const workThisGeneration = currentGeneration.some((e) => producerOf(e)?.purpose === "work");
   const latestReviewVerdict = [...currentGeneration].reverse().map((e) => verdictOf(e)).find((v) => v !== undefined);
@@ -663,9 +733,10 @@ export function buildRecoveryPrompt(
     "If tools are unavailable, reply with one GraphDecision as JSON ({\"reason\", \"action\": {\"type\", ...}}), optionally in a ```json fence.",
     "Never propose Accept. Never add, remove, rename, or reorder graph steps.",
     "Prefer further authorized remedies over Stop while budgets and authority remain.",
-    ...(input.resumed === true
+    "This session holds this episode only. What earlier episodes verified is the case file below, kept by the controller: a fact or refutation is listed only while the workspace candidate and plugin version it was established against are current, and attempts are the controller's own settlements of earlier proposals.",
+    ...(input.recordFinding !== undefined
       ? [
-          "This run was just resumed: the process may now run different controller or plugin code, or carry newly granted repair authority, than whatever rejected a proposal earlier in this conversation. Do not treat an earlier rejection as still true. Before repeating a past conclusion or proposing stop, re-attempt at least one previously-rejected action (qualify_repair, dispatch, etc.) if one exists, or re-check the specific condition that caused it to fail.",
+          "Before you propose, call record_finding for anything you verified that a later episode should know, citing the evidence refs that show it; it does not end your turn.",
         ]
       : []),
     ...(offered.includes("activate_repair")
@@ -696,6 +767,7 @@ export function buildRecoveryPrompt(
         ]
       : []),
     `Episode: ${input.episodeId}`,
+    ...caseFileLines(input.caseFile),
     "Recovery context:",
     "```json",
     JSON.stringify(viewSummary, null, 2),
@@ -703,11 +775,41 @@ export function buildRecoveryPrompt(
   ].join("\n");
 }
 
-const MAX_CURRENT_GENERATION_EVIDENCE = 40;
+const MAX_CURRENT_GENERATION_EVIDENCE = 24;
 const MAX_EVIDENCE_DETAIL_CHARS = 160;
+const MAX_PROMPT_RECEIPTS = 20;
+const MAX_PROMPT_CANDIDATES = 6;
+const MAX_PROMPT_LIST = 10;
+const MAX_PROMPT_TRIGGER_REFS = 10;
+const MAX_TRIGGER_MESSAGE_CHARS = 1_000;
+const MAX_SUMMARY_CHARS = 400;
 
 function currentGenerationEvidence(evidence: EvidenceRecord[], generation: number): EvidenceRecord[] {
-  return evidence.filter((e) => e.generation === generation).slice(-MAX_CURRENT_GENERATION_EVIDENCE);
+  return evidence.filter((e) => e.generation === generation);
+}
+
+/** Agent sessions no later dispatch has continued: the only ones `continueFrom` accepts. */
+function continuableSessions(sessions: readonly AgentSessionView[]): AgentSessionView[] {
+  const continued = new Set(sessions.map((s) => s.continuedFrom).filter((id): id is string => id !== undefined));
+  return sessions.filter((s) => !continued.has(s.operationId));
+}
+
+function clipText(text: string, max: number): string {
+  return text.length <= max ? text : `${text.slice(0, max)}…`;
+}
+
+/** The live case file, compactly; nothing when it is empty. */
+function caseFileLines(file: CaseFile | undefined): string[] {
+  if (file === undefined) return [];
+  const { facts, refuted, attempts, open } = file;
+  if (facts.length + refuted.length + attempts.length + open.length === 0) return [];
+  return [
+    "Case file:",
+    ...facts.map((f) => `- fact ${f.id} (generation ${f.since}; ${f.evidence.join(", ")}): ${f.text}`),
+    ...refuted.map((r) => `- refuted ${r.id} (generation ${r.since}; ${r.by.join(", ")}): ${r.claim}`),
+    ...attempts.map((a) => `- attempt in ${a.episodeId} (${a.trigger}, generation ${a.generation}): ${a.action} -> ${a.outcome}`),
+    ...open.map((q) => `- open question: ${q.text}`),
+  ];
 }
 
 function producerOf(record: EvidenceRecord): { stageId?: string; purpose?: string } | undefined {
@@ -752,9 +854,9 @@ function clipDetail(text: string): string {
 }
 
 /**
- * Candidate patch instruction for the same supervisor session that proposed the
- * QualifyRepair. The earlier recovery turns in this session carry the failure
- * evidence; this prompt fixes the scope and the rules.
+ * Candidate patch instruction for the episode session that proposed the
+ * QualifyRepair. That episode's recovery turns carry the failure evidence;
+ * this prompt fixes the scope and the rules.
  */
 export function buildRepairPrompt(args: CandidatePatchRequest): string {
   return [

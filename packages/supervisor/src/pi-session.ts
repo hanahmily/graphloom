@@ -39,8 +39,8 @@ export interface CreatePiSupervisorSessionOptions {
   /** Run id for logging / durable binding. */
   runId: string;
   /**
-   * Directory for this run's durable Pi transcript.
-   * Required so restart can reopen the same logical session.
+   * Directory for this run's durable Pi transcripts, one file per episode
+   * session; kept for the operator, never reopened by GraphLoom itself.
    */
   sessionDir: string;
   /** Existing Pi session file to restore; omit to start a new durable session. */
@@ -127,7 +127,7 @@ export interface PiSupervisorSession {
 }
 
 /**
- * Create one Pi AgentSession for the run-wide supervisor.
+ * Create one Pi AgentSession; the supervisor opens one per recovery episode.
  * Uses MiniMax by default; credentials never appear in prompts or activity.
  * The raw AgentSession stays private — only mediated prompt/close are exposed.
  */
@@ -160,11 +160,10 @@ export async function createPiSupervisorSession(
   }
 
   const settingsManager = SettingsManager.inMemory({
-    // A long-running recovery session (a real run can span days and dozens
-    // of repair cycles) otherwise grows past the model's context window with
-    // no warning until the next prompt hard-fails; auto-compaction keeps it
-    // bounded the same way manual compaction already recovers a session that
-    // already overflowed.
+    // A guard only: each recovery episode gets its own session seeded with a
+    // bounded prompt, so a normal run never comes near the context window.
+    // An unusually long episode (many rejected proposals, a long patch) is
+    // compacted rather than left to hard-fail on its next prompt.
     compaction: { enabled: true },
     retry: { enabled: false },
     cacheWarming: "off",

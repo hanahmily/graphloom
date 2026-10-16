@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { access, writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
+  emptyCaseFile,
   PROTOCOL_VERSION,
   type BudgetRemaining,
   type GraphDefinition,
@@ -218,6 +219,8 @@ export interface InspectReport {
   remedies: RemedyRecord[];
   /** Supervisor turns that ended without an admitted proposal (#117), such as `supervisor_inadmissible`. */
   supervisorOutcomes: SupervisorOutcomeRecord[];
+  /** The supervisor's case file (#120), stale entries included and marked; empty when none was kept. */
+  caseFile: import("@graphloom/sdk").CaseFile;
   /** The gate in `run` (docs/design-graph-rehearsal.md §3.5): whether (and how) this run was rehearsed before it was intaken. Absent for runs intaken un-gated. */
   rehearsalGate?: IntakePin["rehearsalGate"];
 }
@@ -460,9 +463,14 @@ export function createController(): Controller {
           return;
         }
         // Evidence belongs to the stop being resumed; any stop from here on is a new one.
-        const { stopEvidenceRefs: _staleEvidence, ...resumable } = state;
+        // A pre-#120 run may carry `resumedSinceLastDecision`; nothing reads it
+        // now, since the supervisor's first episode after resume starts a fresh
+        // session and the case file marks what the resume made stale.
+        const { stopEvidenceRefs: _staleEvidence, resumedSinceLastDecision: _resumed, ...resumable } =
+          state as DurableRunState & { resumedSinceLastDecision?: boolean };
         void _staleEvidence;
-        state = { ...resumable, resumedSinceLastDecision: true };
+        void _resumed;
+        state = resumable;
 
         try {
           await assertWorktreeMatches(
@@ -1057,6 +1065,7 @@ function toInspect(state: DurableRunState): InspectReport {
     dispatchesSinceReceipt: structuredClone(state.dispatchesSinceReceipt ?? {}),
     remedies: structuredClone(state.remedies ?? []),
     supervisorOutcomes: structuredClone(state.supervisorOutcomes ?? []),
+    caseFile: structuredClone(state.caseFile ?? emptyCaseFile()),
   };
   if (state.stopReason !== undefined) {
     report.stopReason = state.stopReason;

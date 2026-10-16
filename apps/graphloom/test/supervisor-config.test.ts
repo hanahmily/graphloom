@@ -8,6 +8,7 @@ import {
   parseModelRef,
   parseSupervisorConfig,
   piSupervisorFactory,
+  piSupervisorRestore,
 } from "../src/supervisor-config.js";
 
 const temps: string[] = [];
@@ -114,6 +115,31 @@ describe("operator supervisor config", () => {
         { provider: "minimax-cn", modelId: "MiniMax-M3" },
         { provider: "deepseek", modelId: "deepseek-chat" },
       ]);
+    } finally {
+      await supervisor.close?.();
+    }
+  });
+});
+
+describe("operator supervisor restore", () => {
+  it("restores the logical supervisor with a fresh session, never reopening the earlier transcript", async () => {
+    const dir = await tempDir();
+    process.env.MINIMAX_CN_API_KEY = "test-key-not-used";
+    const stateDir = path.join(dir, "state", "run-1");
+    // A pre-#120 binding: the run-long transcript it names is never read.
+    const oldFile = path.join(stateDir, "supervisor", "old-run-long-session.jsonl");
+    const restore = piSupervisorRestore(
+      parseSupervisorConfig({ provider: "minimax-cn", modelId: "MiniMax-M3", agentDir: path.join(dir, "agent") }),
+    );
+    const supervisor = (await restore(
+      { sessionId: "logical-1", sessionFile: oldFile, provider: "minimax-cn", modelId: "MiniMax-M3", switchJournal: [] },
+      { runId: "run-1", stateDir },
+    )) as PiSupervisor;
+    try {
+      expect(supervisor.sessionId).toBe("logical-1");
+      expect(supervisor.binding.sessionId).toBe("logical-1");
+      expect(supervisor.binding.sessionFile).not.toBe(oldFile);
+      expect(supervisor.binding.sessionFile).toMatch(new RegExp(`^${path.join(stateDir, "supervisor")}`));
     } finally {
       await supervisor.close?.();
     }
