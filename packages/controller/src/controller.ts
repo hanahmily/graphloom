@@ -17,7 +17,7 @@ import {
 } from "@graphloom/plugin-host";
 import type { Supervisor, SupervisorBinding } from "@graphloom/supervisor";
 import { reconcileSupervisorBinding, restorePiSupervisorFromBinding } from "@graphloom/supervisor";
-import { writeSwitchRequest, type ModelSwitchOrder } from "./supervisor-switch.js";
+import { readBinding, writeSwitchRequest, type ModelSwitchOrder } from "./supervisor-switch.js";
 import { refreshCaseFile } from "./case-file.js";
 import {
   activeRepairValidators,
@@ -671,6 +671,25 @@ export function createController(): Controller {
         const supervisor = await resolveResumeSupervisor(request, state, stateDir);
         if (supervisor && !request.supervisor) {
           restoredSupervisor = supervisor;
+        }
+        // A restored supervisor runs in a new episode session with its own
+        // transcript. Record it before anything (a pending operator model
+        // switch) journals against the binding: reconciling a crash reads the
+        // transcript the switch actually changed.
+        const restoredBinding = supervisor !== undefined ? readBinding(supervisor) : undefined;
+        if (restoredBinding !== undefined && state.supervisorBinding !== undefined) {
+          state = {
+            ...state,
+            supervisorBinding: {
+              ...state.supervisorBinding,
+              sessionId: restoredBinding.sessionId,
+              provider: restoredBinding.provider,
+              modelId: restoredBinding.modelId,
+              ...(restoredBinding.sessionFile !== undefined ? { sessionFile: restoredBinding.sessionFile } : {}),
+              ...(restoredBinding.configuredModels !== undefined ? { configuredModels: restoredBinding.configuredModels } : {}),
+            },
+          };
+          await saveRunState(state);
         }
 
         state = await runNormalLoop(state, {

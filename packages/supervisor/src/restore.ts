@@ -3,6 +3,7 @@ import path from "node:path";
 import { parseSessionEntries } from "@earendil-works/pi-coding-agent";
 import {
   createPiSupervisorSession,
+  isMiniMaxProvider,
   type CreatePiSupervisorSessionOptions,
   type PiSupervisorSession,
 } from "./pi-session.js";
@@ -89,9 +90,13 @@ export async function restorePiSupervisorFromBinding(
 export function piEpisodeSessionOpener(
   base: Omit<CreatePiSupervisorSessionOptions, "provider" | "modelId" | "thinkingLevel" | "sessionFile">,
 ): (model: SupervisorModelRef) => Promise<PiSupervisorSession> {
+  // The explicit key is MiniMax's only: after a switch to another provider,
+  // later episodes open on that provider's own Pi-stored credential.
+  const { apiKey, ...shared } = base;
   return (model) =>
     createPiSupervisorSession({
-      ...base,
+      ...shared,
+      ...(apiKey !== undefined && isMiniMaxProvider(model.provider) ? { apiKey } : {}),
       provider: model.provider,
       modelId: model.modelId,
       ...(model.thinkingLevel !== undefined ? { thinkingLevel: model.thinkingLevel } : {}),
