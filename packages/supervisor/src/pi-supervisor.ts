@@ -182,15 +182,375 @@ export function createPiSupervisor(options: CreatePiSupervisorOptions): PiSuperv
     sessionEpisode = episodeId;
   }
 
-  /** Swap in a new session on the current model, keeping any candidate coding grant, and close the old one. */
+  /**
+   * The episode session a turn set aside while one of its attempts runs on
+   * another configured model (the last remedy for an empty or malformed
+   * reply). Set only inside one decide(); the binding keeps the bound model.
+   */
+  let boundSession: PiSupervisorSessionPort | undefined;
+
+  /**
+   * Swap in a new session on the current session's model, keeping any
+   * candidate coding grant, and close the old one.
+   */
   async function replaceSession(open: NonNullable<CreatePiSupervisorOptions["openSession"]>): Promise<void> {
-    const model = findConfigured(configured, binding) ?? { provider: binding.provider, modelId: binding.modelId };
-    const next = await open(model);
+    const current = { provider: session.provider, modelId: session.modelId };
+    const next = await open(findConfigured(configured, current) ?? current);
     if (codingRoot !== undefined) await next.grantCandidateCoding?.(codingRoot);
     const previous = session;
     session = next;
-    syncBindingModel();
+    if (boundSession === undefined) syncBindingModel();
     await previous.close().catch(() => undefined);
+  }
+
+  /** Run the rest of this turn on `model`, in its own session, setting the bound session aside. */
+  async function enterTransientModel(
+    open: NonNullable<CreatePiSupervisorOptions["openSession"]>,
+    model: SupervisorModelRef,
+  ): Promise<void> {
+    const next = await open(model);
+    if (codingRoot !== undefined) await next.grantCandidateCoding?.(codingRoot);
+    if (boundSession === undefined) boundSession = session;
+    else await session.close().catch(() => undefined);
+    session = next;
+  }
+
+  /** Back to the bound session once the turn that set it aside is over. */
+  async function leaveTransientModel(): Promise<void> {
+    if (boundSession === undefined) return;
+    const transient = session;
+    session = boundSession;
+    boundSession = undefined;
+    syncBindingModel();
+    await transient.close().catch(() => undefined);
+  }
+
+  /** One decision turn, on the episode's session (see decide). */
+  async function decideTurn(input: SupervisorInput): Promise<SupervisorProposal> {
+    const toolsFor = () =>
+      createAdmissionTools(
+        configured,
+        input.view.agentSessions ?? [],
+        input.view.generation,
+        input.trigger.code,
+        input.view.escalation?.repeatedProposals,
+        input.admission,
+        input.recordFinding,
+      );
+    const callsBefore = providerCalls;
+    // Every prompt of this turn shares the controller's one allowance:
+    // re-asks, rejection re-asks, provider-failure retries and compaction.
+    const remainingCalls = () =>
+      input.maxProviderCalls === undefined ? undefined : input.maxProviderCalls - (providerCalls - callsBefore);
+    // Provider-failure remedies (design-supervisor-robustness.md §4.3) share
+    // one wait budget and one compaction across the whole turn.
+    let waitLeft = Math.max(0, input.maxWaitMs ?? 0);
+    let quotaWaits = 0;
+    let compacted = false;
+    let timeoutRetried = false;
+    const remedy = (
+      failure: ProviderFailure,
+      kind: SupervisorRemedy["remedy"],
+      waitedMs?: number,
+      waitBasis?: SupervisorRemedy["waitBasis"],
+      model?: SupervisorModelRef,
+    ): void => {
+      remedies.push({
+        at: new Date().toISOString(),
+        failureClass: failure.failureClass,
+        remedy: kind,
+        message: failure.message,
+        ...(waitedMs !== undefined ? { waitedMs } : {}),
+        ...(waitBasis !== undefined ? { waitBasis } : {}),
+        ...(model !== undefined ? { model: { provider: model.provider, modelId: model.modelId } } : {}),
+      });
+    };
+
+    /** This turn's full recovery prompt; a fresh session needs it before any follow-up. */
+    let opening = "";
+    /**
+     * The controller's latest rejection prompt this turn, if any: a fresh
+     * session is sent the opening and then this, never a re-ask's correction.
+     */
+    let followUp: string | undefined;
+    /** What a session with no chat is sent to retry this turn. */
+    const freshPrompt = () => (followUp === undefined ? opening : `${opening}\n\n${followUp}`);
+
+    /**
+     * One prompt. A provider error (quota, overflow, auth, unknown) is
+     * remedied here without asking the model what to do, or thrown as a
+     * SupervisorProviderError; it never reaches admission, so it is never
+     * counted as an inadmissible proposal. A reply that arrived but is empty
+     * or unreadable is returned for the caller's bounded slip remedies.
+     */
+    const ask = async (text: string, toolbox: ReturnType<typeof toolsFor>): Promise<string> => {
+      let last: SupervisorProviderError | undefined;
+      let sent = text;
+      for (;;) {
+        const maxTurns = remainingCalls();
+        if (maxTurns !== undefined && maxTurns < 1) {
+          if (last !== undefined) throw last.withUnremedied("no provider calls left in the run's budget to retry");
+          throw new Error("decide has no provider-call allowance left this turn");
+        }
+        let reply = "";
+        let timedOut: SupervisorProviderError | undefined;
+        try {
+          reply = await session.prompt(sent, {
+            tools: toolbox.tools,
+            // Once a proposal is admitted (or the rejection allowance is spent)
+            // the turn is over: no further provider request for a summary.
+            done: () => toolbox.proposal() !== undefined || toolbox.exhausted() !== undefined,
+            ...(input.signal !== undefined ? { signal: input.signal } : {}),
+            ...(maxTurns !== undefined ? { maxTurns } : {}),
+          });
+        } catch (err) {
+          // Stop always wins: an aborted prompt is never a timeout to remedy.
+          if (input.signal?.aborted === true || !isSupervisorProviderError(err) || err.failureClass !== "timeout") throw err;
+          timedOut = err;
+        } finally {
+          // Charged to the session that made the calls, before any replacement.
+          settleTurns();
+        }
+        if (timedOut !== undefined) {
+          // A provider that went silent (or never finished) is retried once,
+          // in a fresh episode session: the aborted one may still be busy and
+          // refuse reuse, and its partial turn is no context worth keeping.
+          last = timedOut;
+          if (timeoutRetried) throw last.withUnremedied("already retried once");
+          if ((remainingCalls() ?? 1) < 1) throw last.withUnremedied("no provider calls left in the run's budget to retry");
+          if (options.openSession === undefined) throw last.withUnremedied("the host cannot open a fresh session");
+          timeoutRetried = true;
+          try {
+            await replaceSession(options.openSession);
+          } catch (err) {
+            throw last.withUnremedied(`opening a fresh session failed: ${err instanceof Error ? err.message : String(err)}`);
+          }
+          remedy({ failureClass: "timeout", message: last.providerMessage }, "fresh_session_retry");
+          // The fresh session has no chat: a re-ask or rejection follows the full prompt.
+          sent = text.startsWith(opening) ? text : `${opening}\n\n${text}`;
+          continue;
+        }
+        if (toolbox.proposal() !== undefined || toolbox.exhausted() !== undefined) return reply;
+        const failure = session.lastReplyFailure?.();
+        if (failure === undefined || failure.failureClass === "empty" || failure.failureClass === "malformed") return reply;
+        last = new SupervisorProviderError(failure);
+        switch (failure.failureClass) {
+          case "quota": {
+            if (failure.retryAt === undefined && quotaRetryMs === undefined) {
+              throw last.withUnremedied("the provider gave no reset time to wait for");
+            }
+            if (quotaWaits >= MAX_QUOTA_WAITS) {
+              throw last.withUnremedied(`still over quota after ${MAX_QUOTA_WAITS} waits in this turn`);
+            }
+            if ((remainingCalls() ?? 1) < 1) throw last.withUnremedied("no provider calls left in the run's budget to retry");
+            const waitBasis = failure.retryAt !== undefined ? ("provider" as const) : ("operator" as const);
+            const waitMs =
+              failure.retryAt !== undefined ? Math.max(0, Date.parse(failure.retryAt) - Date.now()) : quotaRetryMs!;
+            if (waitMs > waitLeft) {
+              throw last.withUnremedied(
+                (waitBasis === "provider"
+                  ? `the reset at ${failure.retryAt} is ${Math.ceil(waitMs / 1000)}s away`
+                  : `the provider gave no reset time, and the operator's quotaRetryMs wait is ${Math.ceil(waitMs / 1000)}s`) +
+                  `; ${Math.floor(waitLeft / 1000)}s of the run's wait budget remain`,
+              );
+            }
+            const started = Date.now();
+            await abortableSleep(waitMs, input.signal);
+            const elapsed = Date.now() - started;
+            const waited = Math.min(waitLeft, input.signal?.aborted === true ? elapsed : Math.max(waitMs, elapsed));
+            waitLeft -= waited;
+            quotaWaits += 1;
+            remedy(failure, "wait_and_retry", waited, waitBasis);
+            if (input.signal?.aborted) throw new Error("supervisor prompt aborted");
+            continue;
+          }
+          case "overflow": {
+            if (compacted) throw last.withUnremedied("already compacted and retried once in this turn");
+            if (session.compact === undefined) throw last.withUnremedied("the session cannot compact");
+            const left = remainingCalls();
+            if (left !== undefined && left < COMPACT_AND_RETRY_CALLS) {
+              throw last.withUnremedied(`compacting and retrying needs ${COMPACT_AND_RETRY_CALLS} provider calls; ${left} remain`);
+            }
+            compacted = true;
+            try {
+              await session.compact(input.signal !== undefined ? { signal: input.signal } : undefined);
+            } catch (err) {
+              throw last.withUnremedied(`compaction failed: ${err instanceof Error ? err.message : String(err)}`);
+            } finally {
+              if (session.drainTurnCount !== undefined) {
+                settleTurns();
+              } else {
+                // A session that cannot count turns is charged compaction's upper bound.
+                providerCalls += COMPACTION_PROVIDER_CALLS;
+              }
+            }
+            remedy(failure, "compact_and_retry");
+            continue;
+          }
+          default:
+            throw last;
+        }
+      }
+    };
+
+    /** A reply with no admitted tool call: a JSON decision, or why it is not one (empty or malformed). */
+    const readReply = (reply: string): { proposal: SupervisorProposal } | { failure: ProviderFailure } => {
+      const classified = session.lastReplyFailure?.();
+      if (classified?.failureClass === "empty") return { failure: classified };
+      if (reply.trim() === "") return { failure: { failureClass: "empty", message: "the reply had no tool call or text" } };
+      try {
+        return { proposal: parseSupervisorDecision(reply) };
+      } catch (err) {
+        return {
+          failure: {
+            failureClass: "malformed",
+            message: `${err instanceof Error ? err.message : String(err)}; reply began: ${JSON.stringify(reply.slice(0, 160))}`,
+          },
+        };
+      }
+    };
+
+    let toolbox = toolsFor();
+    opening = buildRecoveryPrompt(input, {
+      current: { provider: binding.provider, modelId: binding.modelId },
+      configured,
+      offered: toolbox.offered,
+    });
+    if (input.rejection !== undefined) followUp = buildRejectionPrompt(input.rejection, toolbox.offered);
+    let text = await ask(followUp ?? opening, toolbox);
+
+    // Empty (e.g. thinking-only) and malformed replies are model slips, not
+    // provider errors: each gets the next of three bounded remedies, then the
+    // turn stops naming what was tried. Every attempt is charged to the
+    // turn's allowance like any other call.
+    const slipTried: string[] = [];
+    const slipSkipped: string[] = [];
+    let reasked = false;
+    let slipFresh = false;
+    let slipModel = false;
+    /** Apply the next slip remedy and return its reply, or throw once none is left. */
+    const remedySlip = async (failure: ProviderFailure): Promise<string> => {
+      const stop = (why?: string) =>
+        new SupervisorProviderError(
+          failure,
+          [...(slipTried.length > 0 ? [`already ${slipTried.join(", then ")} in this turn`] : []), ...slipSkipped, ...(why !== undefined ? [why] : [])].join("; "),
+        );
+      if (input.signal?.aborted === true) throw new SupervisorProviderError(failure, "the run stopped");
+      if ((remainingCalls() ?? 1) < 1) throw stop("no provider calls left in the run's budget to retry");
+      if (!reasked) {
+        // 1. Ask again in the same session, saying what was wrong.
+        reasked = true;
+        slipTried.push("re-asked once");
+        remedy(failure, "reask");
+        toolbox = toolsFor();
+        return ask(buildReaskPrompt(failure.message, toolbox.offered), toolbox);
+      }
+      const open = options.openSession;
+      if (!slipFresh) {
+        // 2. Retry the turn in a fresh episode session: none of the slipped
+        // replies is context worth keeping.
+        slipFresh = true;
+        if (open === undefined) {
+          slipSkipped.push("the host cannot open a fresh session");
+        } else {
+          let opened = false;
+          try {
+            await replaceSession(open);
+            opened = true;
+          } catch (err) {
+            slipSkipped.push(`opening a fresh session failed: ${err instanceof Error ? err.message : String(err)}`);
+          }
+          if (opened) {
+            slipTried.push("retried in a fresh session");
+            remedy(failure, "fresh_session_retry");
+            toolbox = toolsFor();
+            return ask(freshPrompt(), toolbox);
+          }
+        }
+      }
+      if (!slipModel && open !== undefined) {
+        // 3. Retry on the next operator-configured model, for this turn only.
+        slipModel = true;
+        const current = { provider: session.provider, modelId: session.modelId };
+        const next = nextConfiguredModel(configured, current);
+        if (next === undefined) {
+          slipSkipped.push("no other configured model to try");
+        } else {
+          const name = `${next.provider}/${next.modelId}`;
+          let entered = false;
+          try {
+            await enterTransientModel(open, next);
+            entered = true;
+          } catch (err) {
+            slipSkipped.push(`opening a session on ${name} failed: ${err instanceof Error ? err.message : String(err)}`);
+          }
+          if (entered) {
+            slipTried.push(`retried on ${name}`);
+            remedy(failure, "model_retry", undefined, undefined, next);
+            toolbox = toolsFor();
+            opening = buildRecoveryPrompt(input, { current: next, configured, offered: toolbox.offered });
+            return ask(freshPrompt(), toolbox);
+          }
+        }
+      }
+      throw stop();
+    };
+    for (;;) {
+      const exhausted = toolbox.exhausted();
+      if (exhausted !== undefined) {
+        throw new Error(`inadmissible proposal limit reached this turn: ${exhausted.action}: ${exhausted.reason}`);
+      }
+      // Models without tool calling may still reply with the decision as
+      // JSON, bypassing the admission tools' in-turn checks; that path gets
+      // the same chances to self-correct within this decide().
+      let proposal = toolbox.proposal();
+      if (proposal === undefined) {
+        const read = readReply(text);
+        if ("failure" in read) {
+          // An empty or unreadable reply gets the next slip remedy before it
+          // counts as a failed turn. It is not an inadmissible proposal:
+          // nothing was proposed.
+          text = await remedySlip(read.failure);
+          continue;
+        }
+        proposal = read.proposal;
+      }
+      if (!("action" in proposal)) return proposal;
+      if (input.admission !== undefined) {
+        // Admitted tool calls already passed these checks; a JSON reply has
+        // not. The original proposal is judged, never a sanitized rewrite:
+        // a local refusal is charged to the turn's allowance like the
+        // controller's own, and the model is asked again in this decide().
+        const local = localRefusal(proposal.action, input.view.agentSessions ?? [], input.view.generation);
+        const rejection =
+          local !== undefined
+            ? await input.admission.refuse(proposal.action.type, local)
+            : await input.admission.check(proposal);
+        if (rejection === undefined) return proposal;
+        if (rejection.remaining <= 0 || input.signal?.aborted === true || (remainingCalls() ?? 1) < 1) {
+          throw new Error(`inadmissible proposal: ${rejection.action}: ${rejection.reason}`);
+        }
+        toolbox = toolsFor();
+        followUp = buildRejectionPrompt(rejection, toolbox.offered);
+        text = await ask(followUp, toolbox);
+        continue;
+      }
+      // Without the controller's check (legacy path), repair what the tools
+      // would have refused rather than let it reach admission.
+      const sanitized = sanitizeProposal(proposal, input.view.agentSessions ?? [], input.view.generation);
+      if (!("action" in sanitized)) return sanitized;
+      // A JSON-only reply never went through the admission tools' own
+      // repeated-proposal rejection: reject it here instead of letting a
+      // repeated no-progress proposal through.
+      const key = supervisorProposalKey(input.trigger.code, sanitized.action);
+      const already = input.view.escalation?.repeatedProposals[key]?.count ?? 0;
+      if (already + 1 >= 3) {
+        throw new Error(
+          `this exact ${sanitized.action.type} proposal would be the ${already + 1 === 3 ? "3rd" : `${already + 1}th`} time with no progress since the controller last checked; propose something that would change the outcome, or stop`,
+        );
+      }
+      return sanitized;
+    }
   }
 
   return {
@@ -243,252 +603,11 @@ export function createPiSupervisor(options: CreatePiSupervisorOptions): PiSuperv
         throw new Error("decide has no provider-call allowance");
       }
       await enterEpisode(input.episodeId);
-      const toolsFor = () =>
-        createAdmissionTools(
-          configured,
-          input.view.agentSessions ?? [],
-          input.view.generation,
-          input.trigger.code,
-          input.view.escalation?.repeatedProposals,
-          input.admission,
-          input.recordFinding,
-        );
-      const callsBefore = providerCalls;
-      // Every prompt of this turn shares the controller's one allowance:
-      // re-asks, rejection re-asks, provider-failure retries and compaction.
-      const remainingCalls = () =>
-        input.maxProviderCalls === undefined ? undefined : input.maxProviderCalls - (providerCalls - callsBefore);
-      // Provider-failure remedies (design-supervisor-robustness.md §4.3) share
-      // one wait budget and one compaction across the whole turn.
-      let waitLeft = Math.max(0, input.maxWaitMs ?? 0);
-      let quotaWaits = 0;
-      let compacted = false;
-      let timeoutRetried = false;
-      const remedy = (
-        failure: ProviderFailure,
-        kind: SupervisorRemedy["remedy"],
-        waitedMs?: number,
-        waitBasis?: SupervisorRemedy["waitBasis"],
-      ): void => {
-        remedies.push({
-          at: new Date().toISOString(),
-          failureClass: failure.failureClass,
-          remedy: kind,
-          message: failure.message,
-          ...(waitedMs !== undefined ? { waitedMs } : {}),
-          ...(waitBasis !== undefined ? { waitBasis } : {}),
-        });
-      };
-
-      /**
-       * One prompt. A provider error (quota, overflow, auth, unknown) is
-       * remedied here without asking the model what to do, or thrown as a
-       * SupervisorProviderError; it never reaches admission, so it is never
-       * counted as an inadmissible proposal. A reply that arrived but is empty
-       * or unreadable is returned for the caller's single re-ask.
-       */
-      /** This turn's full recovery prompt; a fresh session needs it before any follow-up. */
-      let opening = "";
-      const ask = async (text: string, toolbox: ReturnType<typeof toolsFor>): Promise<string> => {
-        let last: SupervisorProviderError | undefined;
-        let sent = text;
-        for (;;) {
-          const maxTurns = remainingCalls();
-          if (maxTurns !== undefined && maxTurns < 1) {
-            if (last !== undefined) throw last.withUnremedied("no provider calls left in the run's budget to retry");
-            throw new Error("decide has no provider-call allowance left this turn");
-          }
-          let reply = "";
-          let timedOut: SupervisorProviderError | undefined;
-          try {
-            reply = await session.prompt(sent, {
-              tools: toolbox.tools,
-              ...(input.signal !== undefined ? { signal: input.signal } : {}),
-              ...(maxTurns !== undefined ? { maxTurns } : {}),
-            });
-          } catch (err) {
-            // Stop always wins: an aborted prompt is never a timeout to remedy.
-            if (input.signal?.aborted === true || !isSupervisorProviderError(err) || err.failureClass !== "timeout") throw err;
-            timedOut = err;
-          } finally {
-            // Charged to the session that made the calls, before any replacement.
-            settleTurns();
-          }
-          if (timedOut !== undefined) {
-            // A provider that went silent (or never finished) is retried once,
-            // in a fresh episode session: the aborted one may still be busy and
-            // refuse reuse, and its partial turn is no context worth keeping.
-            last = timedOut;
-            if (timeoutRetried) throw last.withUnremedied("already retried once");
-            if ((remainingCalls() ?? 1) < 1) throw last.withUnremedied("no provider calls left in the run's budget to retry");
-            if (options.openSession === undefined) throw last.withUnremedied("the host cannot open a fresh session");
-            timeoutRetried = true;
-            try {
-              await replaceSession(options.openSession);
-            } catch (err) {
-              throw last.withUnremedied(`opening a fresh session failed: ${err instanceof Error ? err.message : String(err)}`);
-            }
-            remedy({ failureClass: "timeout", message: last.providerMessage }, "fresh_session_retry");
-            // The fresh session has no chat: a re-ask or rejection follows the full prompt.
-            sent = text === opening ? opening : `${opening}\n\n${text}`;
-            continue;
-          }
-          if (toolbox.proposal() !== undefined || toolbox.exhausted() !== undefined) return reply;
-          const failure = session.lastReplyFailure?.();
-          if (failure === undefined || failure.failureClass === "empty" || failure.failureClass === "malformed") return reply;
-          last = new SupervisorProviderError(failure);
-          switch (failure.failureClass) {
-            case "quota": {
-              if (failure.retryAt === undefined && quotaRetryMs === undefined) {
-                throw last.withUnremedied("the provider gave no reset time to wait for");
-              }
-              if (quotaWaits >= MAX_QUOTA_WAITS) {
-                throw last.withUnremedied(`still over quota after ${MAX_QUOTA_WAITS} waits in this turn`);
-              }
-              if ((remainingCalls() ?? 1) < 1) throw last.withUnremedied("no provider calls left in the run's budget to retry");
-              const waitBasis = failure.retryAt !== undefined ? ("provider" as const) : ("operator" as const);
-              const waitMs =
-                failure.retryAt !== undefined ? Math.max(0, Date.parse(failure.retryAt) - Date.now()) : quotaRetryMs!;
-              if (waitMs > waitLeft) {
-                throw last.withUnremedied(
-                  (waitBasis === "provider"
-                    ? `the reset at ${failure.retryAt} is ${Math.ceil(waitMs / 1000)}s away`
-                    : `the provider gave no reset time, and the operator's quotaRetryMs wait is ${Math.ceil(waitMs / 1000)}s`) +
-                    `; ${Math.floor(waitLeft / 1000)}s of the run's wait budget remain`,
-                );
-              }
-              const started = Date.now();
-              await abortableSleep(waitMs, input.signal);
-              const elapsed = Date.now() - started;
-              const waited = Math.min(waitLeft, input.signal?.aborted === true ? elapsed : Math.max(waitMs, elapsed));
-              waitLeft -= waited;
-              quotaWaits += 1;
-              remedy(failure, "wait_and_retry", waited, waitBasis);
-              if (input.signal?.aborted) throw new Error("supervisor prompt aborted");
-              continue;
-            }
-            case "overflow": {
-              if (compacted) throw last.withUnremedied("already compacted and retried once in this turn");
-              if (session.compact === undefined) throw last.withUnremedied("the session cannot compact");
-              const left = remainingCalls();
-              if (left !== undefined && left < COMPACT_AND_RETRY_CALLS) {
-                throw last.withUnremedied(`compacting and retrying needs ${COMPACT_AND_RETRY_CALLS} provider calls; ${left} remain`);
-              }
-              compacted = true;
-              try {
-                await session.compact(input.signal !== undefined ? { signal: input.signal } : undefined);
-              } catch (err) {
-                throw last.withUnremedied(`compaction failed: ${err instanceof Error ? err.message : String(err)}`);
-              } finally {
-                if (session.drainTurnCount !== undefined) {
-                  settleTurns();
-                } else {
-                  // A session that cannot count turns is charged compaction's upper bound.
-                  providerCalls += COMPACTION_PROVIDER_CALLS;
-                }
-              }
-              remedy(failure, "compact_and_retry");
-              continue;
-            }
-            default:
-              throw last;
-          }
-        }
-      };
-
-      /** A reply with no admitted tool call: a JSON decision, or why it is not one (empty or malformed). */
-      const readReply = (reply: string): { proposal: SupervisorProposal } | { failure: ProviderFailure } => {
-        const classified = session.lastReplyFailure?.();
-        if (classified?.failureClass === "empty") return { failure: classified };
-        if (reply.trim() === "") return { failure: { failureClass: "empty", message: "the reply had no tool call or text" } };
-        try {
-          return { proposal: parseSupervisorDecision(reply) };
-        } catch (err) {
-          return {
-            failure: {
-              failureClass: "malformed",
-              message: `${err instanceof Error ? err.message : String(err)}; reply began: ${JSON.stringify(reply.slice(0, 160))}`,
-            },
-          };
-        }
-      };
-
-      let toolbox = toolsFor();
-      opening = buildRecoveryPrompt(input, {
-        current: { provider: binding.provider, modelId: binding.modelId },
-        configured,
-        offered: toolbox.offered,
-      });
-      let text = await ask(
-        input.rejection !== undefined ? buildRejectionPrompt(input.rejection, toolbox.offered) : opening,
-        toolbox,
-      );
-      let reasked = false;
-      for (;;) {
-        const exhausted = toolbox.exhausted();
-        if (exhausted !== undefined) {
-          throw new Error(`inadmissible proposal limit reached this turn: ${exhausted.action}: ${exhausted.reason}`);
-        }
-        // Models without tool calling may still reply with the decision as
-        // JSON, bypassing the admission tools' in-turn checks; that path gets
-        // the same chances to self-correct within this decide().
-        let proposal = toolbox.proposal();
-        if (proposal === undefined) {
-          const read = readReply(text);
-          if ("failure" in read) {
-            // An empty or unreadable reply is asked again once, with what was
-            // wrong, before it counts as a failed turn. It is not an
-            // inadmissible proposal: nothing was proposed.
-            const unremedied = reasked
-              ? "already re-asked once in this turn"
-              : input.signal?.aborted === true
-                ? "the run stopped"
-                : (remainingCalls() ?? 1) < 1
-                  ? "no provider calls left in the run's budget to retry"
-                  : undefined;
-            if (unremedied !== undefined) throw new SupervisorProviderError(read.failure, unremedied);
-            reasked = true;
-            remedy(read.failure, "reask");
-            toolbox = toolsFor();
-            text = await ask(buildReaskPrompt(read.failure.message, toolbox.offered), toolbox);
-            continue;
-          }
-          proposal = read.proposal;
-        }
-        if (!("action" in proposal)) return proposal;
-        if (input.admission !== undefined) {
-          // Admitted tool calls already passed these checks; a JSON reply has
-          // not. The original proposal is judged, never a sanitized rewrite:
-          // a local refusal is charged to the turn's allowance like the
-          // controller's own, and the model is asked again in this decide().
-          const local = localRefusal(proposal.action, input.view.agentSessions ?? [], input.view.generation);
-          const rejection =
-            local !== undefined
-              ? await input.admission.refuse(proposal.action.type, local)
-              : await input.admission.check(proposal);
-          if (rejection === undefined) return proposal;
-          if (rejection.remaining <= 0 || input.signal?.aborted === true || (remainingCalls() ?? 1) < 1) {
-            throw new Error(`inadmissible proposal: ${rejection.action}: ${rejection.reason}`);
-          }
-          toolbox = toolsFor();
-          text = await ask(buildRejectionPrompt(rejection, toolbox.offered), toolbox);
-          continue;
-        }
-        // Without the controller's check (legacy path), repair what the tools
-        // would have refused rather than let it reach admission.
-        const sanitized = sanitizeProposal(proposal, input.view.agentSessions ?? [], input.view.generation);
-        if (!("action" in sanitized)) return sanitized;
-        // A JSON-only reply never went through the admission tools' own
-        // repeated-proposal rejection: reject it here instead of letting a
-        // repeated no-progress proposal through.
-        const key = supervisorProposalKey(input.trigger.code, sanitized.action);
-        const already = input.view.escalation?.repeatedProposals[key]?.count ?? 0;
-        if (already + 1 >= 3) {
-          throw new Error(
-            `this exact ${sanitized.action.type} proposal would be the ${already + 1 === 3 ? "3rd" : `${already + 1}th`} time with no progress since the controller last checked; propose something that would change the outcome, or stop`,
-          );
-        }
-        return sanitized;
+      try {
+        return await decideTurn(input);
+      } finally {
+        // A turn that ended on a transient model leaves the episode on its bound one.
+        await leaveTransientModel();
       }
     },
 
@@ -558,6 +677,22 @@ export function createPiSupervisor(options: CreatePiSupervisorOptions): PiSuperv
 
 function isConfigured(configured: SupervisorModelRef[], ref: SupervisorModelRef): boolean {
   return findConfigured(configured, ref) !== undefined;
+}
+
+/**
+ * The configured model after `current` in the operator's order (wrapping), or
+ * undefined when no other model is configured.
+ */
+export function nextConfiguredModel(
+  configured: readonly SupervisorModelRef[],
+  current: { provider: string; modelId: string },
+): SupervisorModelRef | undefined {
+  const at = configured.findIndex((m) => m.provider === current.provider && m.modelId === current.modelId);
+  for (let i = 1; i <= configured.length; i += 1) {
+    const m = configured[(at + i + configured.length) % configured.length]!;
+    if (m.provider !== current.provider || m.modelId !== current.modelId) return m;
+  }
+  return undefined;
 }
 
 /** The operator's own configured entry for `ref` (carries its thinkingLevel), or undefined if not configured. */

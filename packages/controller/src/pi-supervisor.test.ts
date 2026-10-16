@@ -307,7 +307,7 @@ describe("Pi supervisor recovery (controller)", () => {
     expect(report.status).toBe("stopped");
     expect(report.stopReason).toMatch(/^supervisor provider malformed: the reply is neither a tool call nor GraphDecision JSON/);
     // Re-asked once with what was wrong (charged like any call), then named; not counted as inadmissible.
-    expect(report.blocker).toMatch(/\(not remedied: already re-asked once in this turn\)$/);
+    expect(report.blocker).toMatch(/\(not remedied: already re-asked once in this turn; the host cannot open a fresh session\)$/);
     const state = await loadRunState(report.stateDir);
     expect(state.remedies).toMatchObject([{ condition: "supervisor provider malformed", remedy: expect.stringMatching(/re-asked/) }]);
     expect(state.supervisorOutcomes ?? []).toEqual([]);
