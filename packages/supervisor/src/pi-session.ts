@@ -1,4 +1,5 @@
 import { mkdir } from "node:fs/promises";
+import { captureRawStream } from "./raw-stream.js";
 import os from "node:os";
 import path from "node:path";
 import {
@@ -78,6 +79,12 @@ export interface CreatePiSupervisorSessionOptions {
   cwd?: string;
   /** Optional system prompt override. */
   systemPrompt?: string;
+  /**
+   * Record every provider request and its raw response under
+   * `<sessionDir>/raw/<sessionId>.raw.jsonl` (see raw-stream.ts). Off by
+   * default; request headers, which carry credentials, are never written.
+   */
+  rawStreamCapture?: boolean;
   /**
    * Inactivity limit of a single prompt (ms): the prompt is aborted as a
    * provider timeout once no Pi event (stream delta, tool call, turn) has
@@ -220,6 +227,7 @@ export async function createPiSupervisorSession(
     sessionManager,
     settingsManager,
   });
+  if (options.rawStreamCapture === true) captureRawStream(session, path.join(sessionDir, "raw"));
 
   return wrapPiAgentSession({
     session,

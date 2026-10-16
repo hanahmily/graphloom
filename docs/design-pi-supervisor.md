@@ -409,3 +409,21 @@ malformed specs and end the turn on a valid one; a slowly streaming reply outliv
 the inactivity limit, while a silent provider is retried once in a fresh session
 and then stops by name; and settlements reach the next
 prompt. The MiniMax connectivity check above remains the only live check.
+
+## Raw provider stream capture
+
+`rawStreamCapture: true` in the supervisor config records every supervisor
+provider request and its response bytes, one JSON line per request, in
+`<stateDir>/supervisor/raw/<sessionId>.raw.jsonl`
+(`packages/supervisor/src/raw-stream.ts`). Each record holds the request
+payload (model, messages, tools, thinking), the status, the content-block
+types and stop reasons the stream carried, the block types Pi's
+Anthropic-messages parser does not turn into message content
+(`unknownBlockTypes`), and the raw body. Request headers, which carry
+credentials, are never written. It is off by default: it exists to show where
+a model's output went when the recorded message lacks it — Pi's own
+transcript cannot, because its parser skips block types it does not
+recognize without an error. The capture wraps the session agent's stream
+function and passes a teeing `fetch` through Pi's per-request options; it
+fails loudly if a Pi upgrade removes that hook.
+
