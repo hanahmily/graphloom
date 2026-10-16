@@ -76,6 +76,17 @@ describe("operator supervisor config", () => {
     }
   });
 
+  it("reads the prompt's inactivity limit and an optional total cap, rejecting non-positive ones", () => {
+    const config = parseSupervisorConfig({ provider: "minimax-cn", modelId: "MiniMax-M3", promptTimeoutMs: 180_000, promptTotalTimeoutMs: 1_200_000 });
+    expect(config).toMatchObject({ promptTimeoutMs: 180_000, promptTotalTimeoutMs: 1_200_000 });
+    expect(parseSupervisorConfig({ provider: "minimax-cn", modelId: "MiniMax-M3" }).promptTotalTimeoutMs).toBeUndefined();
+    for (const bad of [0, -1, "15m", Number.POSITIVE_INFINITY]) {
+      expect(() => parseSupervisorConfig({ provider: "minimax-cn", modelId: "MiniMax-M3", promptTotalTimeoutMs: bad })).toThrow(
+        /promptTotalTimeoutMs must be a positive number/,
+      );
+    }
+  });
+
   it("refuses credentials in the config file", () => {
     expect(() => parseSupervisorConfig({ provider: "deepseek", modelId: "x", apiKey: "sk-test" })).toThrow(
       /apiKey is not accepted/,

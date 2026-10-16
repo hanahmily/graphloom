@@ -19,11 +19,22 @@ import {
   assertAdmittedCandidateRoot,
   createCandidateCodingTools,
 } from "./candidate-tools.js";
-import { classifyAssistantMessage, type ProviderFailure } from "./provider-failure.js";
+import { classifyAssistantMessage, SupervisorProviderError, type ProviderFailure } from "./provider-failure.js";
 
 /** Default initial supervisor model (design-pi-supervisor.md). */
 export const DEFAULT_SUPERVISOR_PROVIDER = "minimax-cn";
 export const DEFAULT_SUPERVISOR_MODEL = "MiniMax-M3";
+
+/**
+ * Default inactivity limit of one prompt: how long the session may go without
+ * any Pi event (a streamed text or thinking delta, a tool call, a turn) before
+ * the prompt is aborted as a provider timeout. Thinking models can take a while
+ * to their first token, so this is generous; a model that is still streaming
+ * is never cut off by it.
+ */
+export const DEFAULT_PROMPT_INACTIVITY_MS = 120_000;
+/** Default total cap of one prompt, a backstop for a reply that streams forever. */
+export const DEFAULT_PROMPT_TOTAL_TIMEOUT_MS = 900_000;
 
 /**
  * Mirrors `@earendil-works/pi-agent-core`'s own `ThinkingLevel` (not re-exported
@@ -67,8 +78,18 @@ export interface CreatePiSupervisorSessionOptions {
   cwd?: string;
   /** Optional system prompt override. */
   systemPrompt?: string;
-  /** Abort / settle timeout for a single prompt (ms). Default 60_000. */
+  /**
+   * Inactivity limit of a single prompt (ms): the prompt is aborted as a
+   * provider timeout once no Pi event (stream delta, tool call, turn) has
+   * arrived for this long. Time a local tool spends executing does not count.
+   * Also the default deadline of a standalone compaction. Default 120_000.
+   */
   promptTimeoutMs?: number;
+  /**
+   * Total cap of a single prompt (ms), however steadily it streams; a backstop
+   * behind the inactivity limit. Default 900_000.
+   */
+  promptTotalTimeoutMs?: number;
   /**
    * Controller repairs directory (`<stateDir>/repairs`). Candidate coding grants
    * are only accepted for snapshots issued under it.
@@ -86,8 +107,10 @@ export interface PiSupervisorSession {
   readonly credentialSource: MiniMaxCredentialSource;
   /**
    * Send a prompt and wait until idle. Returns the final turn's assistant text
-   * only (no thinking / tool internals). Times out if the session does not settle.
-   * With `maxTurns`, a turn beyond the cap is aborted before its provider request
+   * only (no thinking / tool internals). Rejects with a `timeout`
+   * SupervisorProviderError when no session event arrives for the inactivity
+   * limit, or when the prompt outlasts its total cap (`timeoutMs`, default the
+   * session's total cap). With `maxTurns`, a turn beyond the cap is aborted before its provider request
    * and the prompt rejects. `tools` are active for this prompt only.
    */
   prompt(
@@ -138,7 +161,8 @@ export async function createPiSupervisorSession(
   const modelId = options.modelId ?? DEFAULT_SUPERVISOR_MODEL;
   const agentDir = options.agentDir ?? path.join(os.homedir(), ".pi", "agent");
   const cwd = options.cwd ?? process.cwd();
-  const promptTimeoutMs = options.promptTimeoutMs ?? 60_000;
+  const promptTimeoutMs = options.promptTimeoutMs ?? DEFAULT_PROMPT_INACTIVITY_MS;
+  const promptTotalTimeoutMs = options.promptTotalTimeoutMs ?? DEFAULT_PROMPT_TOTAL_TIMEOUT_MS;
   const sessionDir = path.resolve(options.sessionDir);
   await mkdir(sessionDir, { recursive: true });
 
@@ -206,6 +230,7 @@ export async function createPiSupervisorSession(
     agentDir,
     credentialSource,
     promptTimeoutMs,
+    promptTotalTimeoutMs,
     ...(options.apiKey !== undefined ? { apiKey: options.apiKey } : {}),
     ...(options.repairsDir !== undefined ? { repairsDir: options.repairsDir } : {}),
   });
@@ -270,11 +295,15 @@ export function wrapPiAgentSession(args: {
   modelId: string;
   agentDir: string;
   credentialSource: MiniMaxCredentialSource;
+  /** Inactivity limit of one prompt (see CreatePiSupervisorSessionOptions.promptTimeoutMs). */
   promptTimeoutMs: number;
+  /** Total cap of one prompt. Default DEFAULT_PROMPT_TOTAL_TIMEOUT_MS. */
+  promptTotalTimeoutMs?: number;
   apiKey?: string;
   repairsDir?: string;
 }): PiSupervisorSession {
   const { session, modelRuntime, agentDir, promptTimeoutMs } = args;
+  const promptTotalTimeoutMs = args.promptTotalTimeoutMs ?? DEFAULT_PROMPT_TOTAL_TIMEOUT_MS;
   let closed = false;
   let provider = args.provider;
   let modelId = args.modelId;
@@ -329,14 +358,40 @@ export function wrapPiAgentSession(args: {
       if (!(await settleIdle(session, settleTimeoutMs(promptTimeoutMs)))) {
         throw new Error(STILL_ACTIVE);
       }
-      const timeoutMs = promptOptions?.timeoutMs ?? promptTimeoutMs;
+      const totalMs = promptOptions?.timeoutMs ?? promptTotalTimeoutMs;
+      const inactivityMs = promptTimeoutMs;
       const maxTurns = promptOptions?.maxTurns;
       let promptTurns = 0;
       let turnCapHit = false;
       let collected: string[] = [];
       let lastAssistant: Parameters<typeof classifyAssistantMessage>[0] | undefined;
       lastReply = undefined;
+
+      // Two limits, neither of which cuts off a model that is still producing
+      // output: inactivity (no session event for `inactivityMs`, re-armed by
+      // every event, paused while a local tool runs) and a total cap.
+      let timedOut: string | undefined;
+      let toolsRunning = 0;
+      let inactivity: ReturnType<typeof setTimeout> | undefined;
+      const expire = (why: string) => {
+        if (timedOut !== undefined) return;
+        timedOut = why;
+        clearTimeout(inactivity);
+        session.abortCompaction();
+        void session.abort().catch(() => undefined);
+      };
+      const armInactivity = () => {
+        clearTimeout(inactivity);
+        inactivity =
+          timedOut === undefined && toolsRunning === 0
+            ? setTimeout(() => expire(`no output for ${seconds(inactivityMs)}`), inactivityMs)
+            : undefined;
+      };
+
       const unsubscribe = session.subscribe((event) => {
+        if (event.type === "tool_execution_start") toolsRunning += 1;
+        else if (event.type === "tool_execution_end") toolsRunning = Math.max(0, toolsRunning - 1);
+        armInactivity();
         if (event.type === "message_end" && event.message.role === "assistant") {
           lastAssistant = event.message;
         } else if (event.type === "compaction_start") {
@@ -370,11 +425,8 @@ export function wrapPiAgentSession(args: {
         }
       });
 
-      let timedOut = false;
-      const timeout = setTimeout(() => {
-        timedOut = true;
-        void session.abort().catch(() => undefined);
-      }, timeoutMs);
+      armInactivity();
+      const total = setTimeout(() => expire(`no complete reply within ${seconds(totalMs)}`), totalMs);
       const onOuterAbort = () => {
         void session.abort().catch(() => undefined);
       };
@@ -386,9 +438,18 @@ export function wrapPiAgentSession(args: {
           throw new Error("supervisor prompt aborted");
         }
         await compactBeforePrompt(session, text);
-        await session.prompt(text);
-        const idleDeadline = Date.now() + timeoutMs;
-        while (!session.isIdle && Date.now() < idleDeadline) {
+        // A timeout during that compaction must not still send the prompt.
+        if (timedOut === undefined) {
+          try {
+            await session.prompt(text);
+          } catch (err) {
+            // However Pi surfaces the abort a limit caused, it is that timeout.
+            if (timedOut === undefined) throw err;
+          }
+        }
+        // Follow-up work may keep the session busy after prompt() returns;
+        // the same two limits bound it.
+        while (!session.isIdle && timedOut === undefined && promptOptions?.signal?.aborted !== true) {
           await sleep(25);
         }
         if (promptOptions?.signal?.aborted) {
@@ -399,11 +460,12 @@ export function wrapPiAgentSession(args: {
         if (turnCapHit) {
           throw new Error(`supervisor prompt exceeded its ${maxTurns}-turn allowance`);
         }
-        if (timedOut || !session.isIdle) {
+        if (timedOut !== undefined || !session.isIdle) {
           const settled = await settleIdle(session, settleTimeoutMs(promptTimeoutMs));
-          throw new Error(
-            `supervisor prompt timed out after ${timeoutMs}ms` + (settled ? "" : `; ${STILL_ACTIVE}`),
-          );
+          throw new SupervisorProviderError({
+            failureClass: "timeout",
+            message: (timedOut ?? "the session did not settle") + (settled ? "" : `; ${STILL_ACTIVE}`),
+          });
         }
         const contextWindow = session.model?.contextWindow;
         lastReply =
@@ -412,7 +474,8 @@ export function wrapPiAgentSession(args: {
             : undefined;
         return collected.join("").trim();
       } finally {
-        clearTimeout(timeout);
+        clearTimeout(total);
+        clearTimeout(inactivity);
         promptOptions?.signal?.removeEventListener("abort", onOuterAbort);
         unsubscribe();
         if (promptOptions?.tools !== undefined) {
@@ -574,6 +637,10 @@ async function settleIdle(session: AgentSession, timeoutMs: number): Promise<boo
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function seconds(ms: number): string {
+  return ms % 1_000 === 0 ? `${ms / 1_000}s` : `${ms}ms`;
 }
 
 /** The settle wait honors the configured prompt timeout, capped at the 5s default. */

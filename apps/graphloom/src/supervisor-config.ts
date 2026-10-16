@@ -24,7 +24,18 @@ export interface SupervisorConfig {
   /** Every model the supervisor may switch to, including the initial one. */
   models: SupervisorModelRef[];
   agentDir?: string;
+  /**
+   * Inactivity limit of one supervisor prompt: it is aborted as a provider
+   * timeout once no output (stream delta, tool call, turn) has arrived for
+   * this long. A model that is still streaming is never cut off by it.
+   * Default 120000 (DEFAULT_PROMPT_INACTIVITY_MS).
+   */
   promptTimeoutMs?: number;
+  /**
+   * Total cap of one supervisor prompt however steadily it streams, a
+   * backstop behind `promptTimeoutMs`. Default 900000 (DEFAULT_PROMPT_TOTAL_TIMEOUT_MS).
+   */
+  promptTotalTimeoutMs?: number;
   /**
    * Fixed wait before retrying a provider quota error that states no reset
    * time (MiniMax's 429 `(2056)` gives none). Still bounded by the run's
@@ -83,6 +94,12 @@ export function parseSupervisorConfig(value: unknown, source = "supervisor confi
     }
     config.promptTimeoutMs = obj.promptTimeoutMs;
   }
+  if (obj.promptTotalTimeoutMs !== undefined) {
+    if (typeof obj.promptTotalTimeoutMs !== "number" || !Number.isFinite(obj.promptTotalTimeoutMs) || !(obj.promptTotalTimeoutMs > 0)) {
+      throw new Error(`${source}: promptTotalTimeoutMs must be a positive number`);
+    }
+    config.promptTotalTimeoutMs = obj.promptTotalTimeoutMs;
+  }
   if (obj.quotaRetryMs !== undefined) {
     if (typeof obj.quotaRetryMs !== "number" || !Number.isFinite(obj.quotaRetryMs) || !(obj.quotaRetryMs > 0)) {
       throw new Error(`${source}: quotaRetryMs must be a positive number`);
@@ -133,6 +150,7 @@ export function piSupervisorFactory(config: SupervisorConfig): NonNullable<RunRe
       repairsDir: path.join(stateDir, "repairs"),
       ...(config.agentDir !== undefined ? { agentDir: config.agentDir } : {}),
       ...(config.promptTimeoutMs !== undefined ? { promptTimeoutMs: config.promptTimeoutMs } : {}),
+      ...(config.promptTotalTimeoutMs !== undefined ? { promptTotalTimeoutMs: config.promptTotalTimeoutMs } : {}),
     });
     const session = await openSession({
       provider: config.provider,
@@ -169,6 +187,7 @@ export function piSupervisorRestore(config: SupervisorConfig): NonNullable<Resum
       repairsDir: path.join(stateDir, "repairs"),
       ...(config.agentDir !== undefined ? { agentDir: config.agentDir } : {}),
       ...(config.promptTimeoutMs !== undefined ? { promptTimeoutMs: config.promptTimeoutMs } : {}),
+      ...(config.promptTotalTimeoutMs !== undefined ? { promptTotalTimeoutMs: config.promptTotalTimeoutMs } : {}),
       ...(config.quotaRetryMs !== undefined ? { quotaRetryMs: config.quotaRetryMs } : {}),
     });
 }

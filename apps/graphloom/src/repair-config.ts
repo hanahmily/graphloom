@@ -64,6 +64,7 @@ export function piRepairDeps(config: SupervisorConfig, bundlePath: string): Repa
         ...(config.thinkingLevel !== undefined ? { thinkingLevel: config.thinkingLevel } : {}),
         ...(config.agentDir !== undefined ? { agentDir: config.agentDir } : {}),
         ...(config.promptTimeoutMs !== undefined ? { promptTimeoutMs: config.promptTimeoutMs } : {}),
+        ...(config.promptTotalTimeoutMs !== undefined ? { promptTotalTimeoutMs: config.promptTotalTimeoutMs } : {}),
       });
       resolvedSession = s;
       return s;

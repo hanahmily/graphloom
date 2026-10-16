@@ -1,7 +1,7 @@
 import type { AgentSessionView, CaseFile, EvidenceRecord, GraphAction } from "@graphloom/sdk";
 import { parseSupervisorDecision } from "./decision.js";
 import type { PiSupervisorSession, ThinkingLevel } from "./pi-session.js";
-import { SupervisorProviderError, type ProviderFailure } from "./provider-failure.js";
+import { isSupervisorProviderError, SupervisorProviderError, type ProviderFailure } from "./provider-failure.js";
 import {
   continuationRefusal,
   createAdmissionTools,
@@ -178,16 +178,19 @@ export function createPiSupervisor(options: CreatePiSupervisorOptions): PiSuperv
    */
   async function enterEpisode(episodeId: string): Promise<void> {
     if (sessionEpisode === episodeId) return;
-    if (sessionEpisode !== undefined && options.openSession !== undefined) {
-      const model = findConfigured(configured, binding) ?? { provider: binding.provider, modelId: binding.modelId };
-      const next = await options.openSession(model);
-      if (codingRoot !== undefined) await next.grantCandidateCoding?.(codingRoot);
-      const previous = session;
-      session = next;
-      syncBindingModel();
-      await previous.close().catch(() => undefined);
-    }
+    if (sessionEpisode !== undefined && options.openSession !== undefined) await replaceSession(options.openSession);
     sessionEpisode = episodeId;
+  }
+
+  /** Swap in a new session on the current model, keeping any candidate coding grant, and close the old one. */
+  async function replaceSession(open: NonNullable<CreatePiSupervisorOptions["openSession"]>): Promise<void> {
+    const model = findConfigured(configured, binding) ?? { provider: binding.provider, modelId: binding.modelId };
+    const next = await open(model);
+    if (codingRoot !== undefined) await next.grantCandidateCoding?.(codingRoot);
+    const previous = session;
+    session = next;
+    syncBindingModel();
+    await previous.close().catch(() => undefined);
   }
 
   return {
@@ -260,6 +263,7 @@ export function createPiSupervisor(options: CreatePiSupervisorOptions): PiSuperv
       let waitLeft = Math.max(0, input.maxWaitMs ?? 0);
       let quotaWaits = 0;
       let compacted = false;
+      let timeoutRetried = false;
       const remedy = (
         failure: ProviderFailure,
         kind: SupervisorRemedy["remedy"],
@@ -283,23 +287,51 @@ export function createPiSupervisor(options: CreatePiSupervisorOptions): PiSuperv
        * counted as an inadmissible proposal. A reply that arrived but is empty
        * or unreadable is returned for the caller's single re-ask.
        */
+      /** This turn's full recovery prompt; a fresh session needs it before any follow-up. */
+      let opening = "";
       const ask = async (text: string, toolbox: ReturnType<typeof toolsFor>): Promise<string> => {
         let last: SupervisorProviderError | undefined;
+        let sent = text;
         for (;;) {
           const maxTurns = remainingCalls();
           if (maxTurns !== undefined && maxTurns < 1) {
             if (last !== undefined) throw last.withUnremedied("no provider calls left in the run's budget to retry");
             throw new Error("decide has no provider-call allowance left this turn");
           }
-          let reply: string;
+          let reply = "";
+          let timedOut: SupervisorProviderError | undefined;
           try {
-            reply = await session.prompt(text, {
+            reply = await session.prompt(sent, {
               tools: toolbox.tools,
               ...(input.signal !== undefined ? { signal: input.signal } : {}),
               ...(maxTurns !== undefined ? { maxTurns } : {}),
             });
+          } catch (err) {
+            // Stop always wins: an aborted prompt is never a timeout to remedy.
+            if (input.signal?.aborted === true || !isSupervisorProviderError(err) || err.failureClass !== "timeout") throw err;
+            timedOut = err;
           } finally {
+            // Charged to the session that made the calls, before any replacement.
             settleTurns();
+          }
+          if (timedOut !== undefined) {
+            // A provider that went silent (or never finished) is retried once,
+            // in a fresh episode session: the aborted one may still be busy and
+            // refuse reuse, and its partial turn is no context worth keeping.
+            last = timedOut;
+            if (timeoutRetried) throw last.withUnremedied("already retried once");
+            if ((remainingCalls() ?? 1) < 1) throw last.withUnremedied("no provider calls left in the run's budget to retry");
+            if (options.openSession === undefined) throw last.withUnremedied("the host cannot open a fresh session");
+            timeoutRetried = true;
+            try {
+              await replaceSession(options.openSession);
+            } catch (err) {
+              throw last.withUnremedied(`opening a fresh session failed: ${err instanceof Error ? err.message : String(err)}`);
+            }
+            remedy({ failureClass: "timeout", message: last.providerMessage }, "fresh_session_retry");
+            // The fresh session has no chat: a re-ask or rejection follows the full prompt.
+            sent = text === opening ? opening : `${opening}\n\n${text}`;
+            continue;
           }
           if (toolbox.proposal() !== undefined || toolbox.exhausted() !== undefined) return reply;
           const failure = session.lastReplyFailure?.();
@@ -382,14 +414,13 @@ export function createPiSupervisor(options: CreatePiSupervisorOptions): PiSuperv
       };
 
       let toolbox = toolsFor();
+      opening = buildRecoveryPrompt(input, {
+        current: { provider: binding.provider, modelId: binding.modelId },
+        configured,
+        offered: toolbox.offered,
+      });
       let text = await ask(
-        input.rejection !== undefined
-          ? buildRejectionPrompt(input.rejection, toolbox.offered)
-          : buildRecoveryPrompt(input, {
-              current: { provider: binding.provider, modelId: binding.modelId },
-              configured,
-              offered: toolbox.offered,
-            }),
+        input.rejection !== undefined ? buildRejectionPrompt(input.rejection, toolbox.offered) : opening,
         toolbox,
       );
       let reasked = false;

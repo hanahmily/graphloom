@@ -172,6 +172,56 @@ describe("Pi supervisor session", () => {
     }
   });
 
+  it("does not count a long-running local tool against the prompt's inactivity limit", async () => {
+    const ai = await loadPiAi();
+    const dir = await mkdtemp(path.join(os.tmpdir(), "gl-pi-tool-idle-"));
+    temps.push(dir);
+    const repairsDir = path.join(dir, "repairs");
+    const candidateRoot = path.join(repairsDir, "repair-1", "candidate");
+    await mkdir(candidateRoot, { recursive: true });
+    await writeFile(path.join(repairsDir, "repair-1", "snapshot.json"), "{}\n", "utf8");
+    const modelRuntime = await ModelRuntime.create({
+      authPath: path.join(dir, "auth.json"),
+      modelsPath: path.join(dir, "models.json"),
+    });
+    const faux = ai.fauxProvider({ provider: "faux-tool-idle" });
+    modelRuntime.registerNativeProvider(faux.provider as never);
+    faux.setResponses([
+      ai.fauxAssistantMessage(ai.fauxToolCall("bash", { command: "sleep 1 && printf built > built.txt" }), { stopReason: "toolUse" }),
+      ai.fauxAssistantMessage("built"),
+    ]);
+    const { session } = await createAgentSession({
+      cwd: dir,
+      agentDir: dir,
+      model: faux.getModel() as never,
+      thinkingLevel: "off",
+      modelRuntime,
+      noTools: "all",
+      tools: [],
+      sessionManager: SessionManager.inMemory(dir),
+      settingsManager: SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } }),
+    });
+    const wrapped = wrapPiAgentSession({
+      session,
+      modelRuntime,
+      runId: "run-tool-idle",
+      provider: "faux-tool-idle",
+      modelId: "faux",
+      agentDir: dir,
+      credentialSource: "pi-stored",
+      // The silent one-second build is longer than this, but it is local work, not provider silence.
+      promptTimeoutMs: 300,
+      repairsDir,
+    });
+    try {
+      await wrapped.grantCandidateCoding!(candidateRoot);
+      expect(await wrapped.prompt("build it")).toBe("built");
+      expect(await readFile(path.join(candidateRoot, "built.txt"), "utf8")).toBe("built");
+    } finally {
+      await wrapped.close();
+    }
+  });
+
   it("runs shell commands in the granted candidate root and drops them on revoke", async () => {
     const ai = await loadPiAi();
     const dir = await mkdtemp(path.join(os.tmpdir(), "gl-pi-shell-"));

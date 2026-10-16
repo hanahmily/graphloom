@@ -113,12 +113,13 @@ export interface SupervisorSettlement {
 /**
  * A deterministic remedy the supervisor host applied to a failed provider
  * turn without asking the model what to do: wait out a quota reset and retry,
- * compact and retry after an overflow, or re-ask once after an empty reply.
+ * compact and retry after an overflow, re-ask once after an empty reply, or
+ * retry once in a fresh session after a prompt timed out.
  */
 export interface SupervisorRemedy {
   at: string;
   failureClass: ProviderFailureClass;
-  remedy: "wait_and_retry" | "compact_and_retry" | "reask";
+  remedy: "wait_and_retry" | "compact_and_retry" | "reask" | "fresh_session_retry";
   /** The provider's message (or what the reply lacked), bounded. */
   message: string;
   /** Wall-clock milliseconds spent waiting; charged to the run's waitMs. */
