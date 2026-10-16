@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -156,5 +156,20 @@ describe("task config", () => {
     const report = await createController().run({ taskPath: env.taskPath, runner: runner(), stateRoot: env.stateRoot, runId: "cfg-saved" });
     const saved = JSON.parse(await readFile(path.join(report.stateDir, "state.json"), "utf8")) as { intake: { config?: { path: string; text: string } } };
     expect(saved.intake.config).toMatchObject({ path: "profile.json", text: '{"label":"A"}' });
+  });
+
+  it("pins the repository's top level when repo names a directory inside it", async () => {
+    const env = await makeEnv();
+    await mkdir(path.join(env.repo, "examples"));
+    await writeFile(env.taskPath, `graph: configured\nrepo: ./repo/examples\nrequest: "Echo the config."\n`);
+    const intake = await intakeTask(env.taskPath);
+    expect(intake.repoPath).toBe(await realpath(env.repo));
+  });
+
+  it("refuses a repo that is not inside a git repository", async () => {
+    const env = await makeEnv();
+    await mkdir(path.join(env.dir, "plain"));
+    await writeFile(env.taskPath, `graph: configured\nrepo: ./plain\nrequest: "Echo the config."\n`);
+    await expect(intakeTask(env.taskPath)).rejects.toThrow(/not inside a git repository/);
   });
 });

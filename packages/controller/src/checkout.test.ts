@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -49,7 +49,7 @@ function catJob(path_: string): JobSpec & { checkout: { from: "candidate"; rever
   };
 }
 
-async function run(dir: string, pinnedHead: string, job: JobSpec & { checkout: { from: "candidate"; revertPatch?: string } }) {
+async function run(dir: string, pinnedHead: string, job: JobSpec & { checkout: { from: "candidate"; revertPatch?: string } }, repoPath = dir) {
   const stateDir = await mkdtemp(path.join(os.tmpdir(), "graphloom-checkout-state-"));
   cleanup.push(stateDir);
   const runner = createBuiltinExecutorRunner({
@@ -65,7 +65,7 @@ async function run(dir: string, pinnedHead: string, job: JobSpec & { checkout: {
     operationId: "op-1",
     generation: 1,
     runId: "run-1",
-    repoPath: dir,
+    repoPath,
     worktreePath: dir,
     pinnedHead,
     stateDir,
@@ -112,6 +112,15 @@ describe("runInCheckout: revertPatch", () => {
   it("runs the full candidate unchanged when no revertPatch is given", async () => {
     const { dir, pinnedHead } = await candidateRepo();
     const { result } = await run(dir, pinnedHead, catJob("calc.go"));
+    expect(result.status).toBe("ok");
+    expect(stdout(result.evidence ?? [])).toBe(CANDIDATE);
+  });
+
+  it("clones the repository a run pinned as one of its subdirectories", async () => {
+    const { dir, pinnedHead } = await candidateRepo();
+    const sub = path.join(dir, "examples");
+    await mkdir(sub);
+    const { result } = await run(dir, pinnedHead, catJob("calc.go"), sub);
     expect(result.status).toBe("ok");
     expect(stdout(result.evidence ?? [])).toBe(CANDIDATE);
   });

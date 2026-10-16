@@ -27,7 +27,11 @@ Thumbs.db
 # Disposable example repository
 /examples/test-repo/
 
-# Run worktrees and state of examples/issue-fix-graphloom-task.yaml (repo: .)
+# Run worktrees and state of examples/issue-fix-graphloom-task.yaml (repo: .
+# pins the repository's top level, so they live at its root; the examples/
+# paths hold runs pinned before that)
+/graphloom/
+/graphloom-state/
 /examples/graphloom/
 /examples/graphloom-state/
 
