@@ -21,7 +21,7 @@ The core has three modules:
 | Module | Owns |
 |---|---|
 | Graph/plugin | Required stages and outcomes, normal task construction and routing, executor implementations, default validators, convenient corrections for known failures |
-| Supervisor | One logical session per run; drive the graph to successful completion under failure—investigate, reenter, repair, and exhaust authorized remedies before stopping |
+| Supervisor | One logical supervisor per run, a fresh model session per recovery episode; drive the graph to successful completion under failure—investigate, reenter, repair, and exhaust authorized remedies before stopping |
 | Controller | Execution admission and lifecycle, state, artifacts, validation scheduling, accepted receipts, worktrees, budgets, and version transitions |
 
 Plugins own execution logic; the controller owns its durable lifecycle. GraphLoom
@@ -409,7 +409,8 @@ verification; live recovery/provider qualification remains outstanding. See the
 [verified MiniMax setup](design-pi-supervisor.md#initial-minimax-configuration).
 
 Model changes among configured DeepSeek, MiniMax, OpenAI, and Anthropic providers preserve one
-logical run-wide supervisor session. The controller owns model-switch admission,
+logical run-wide supervisor; each recovery episode opens its own Pi session on the
+current model. The controller owns model-switch admission,
 actual-request accounting, recovery decisions, and the fixed plugin steps.
 
 The [Pi integration design](design-pi-supervisor.md) defines explicit tools,

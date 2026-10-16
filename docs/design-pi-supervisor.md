@@ -1,8 +1,9 @@
 # Pi SDK supervisor integration
 
-Status (2026-09-25, #43): Pi-backed `createPiSupervisor` decides recovery through
-GraphLoom admission tools on one durable session per run, with durable session
-binding, per-decision turn caps settled against `agentInvocations`, operator Stop
+Status (2026-09-25, #43; episode sessions #120): Pi-backed `createPiSupervisor`
+decides recovery through GraphLoom admission tools, one logical supervisor per run
+with a fresh Pi session per recovery episode and a controller-owned case file as
+its memory, with durable session binding, per-decision turn caps settled against `agentInvocations`, operator Stop
 during a prompt or patch, and journaled model switching with crash reconciliation.
 The supervisor's Pi session writes qualified repairs itself into admitted
 candidate trees through candidate-scoped coding tools; unconstrained edit/write on
@@ -67,9 +68,10 @@ The CLI reads the operator's supervisor config from `$GRAPHLOOM_SUPERVISOR_CONFI
 or `~/.config/graphloom/supervisor.json` when unset: initial `provider` and
 `modelId`, the other `models` it may switch to (`"provider/model"`), an optional
 Pi `agentDir`, `promptTimeoutMs`, and `quotaRetryMs` (see Provider failures). The file never holds credentials (`apiKey` is
-refused). Without it, `graphloom run` has no supervisor. The run's Pi transcript
-lives under `<stateDir>/supervisor`, and `resume` reopens it with the config's
-current model list.
+refused). Without it, `graphloom run` has no supervisor. The run's Pi transcripts,
+one per episode session, live under `<stateDir>/supervisor`; `resume` restores the
+logical supervisor on its bound model with the config's current model list and
+starts a fresh session, never reopening a transcript.
 
 The adapter receives an explicit operator credential-store path and
 provider/model selection rather than discovering credentials from the target repo.
@@ -128,21 +130,56 @@ endpoint and credential that match the account. An account usable in another
 coding tool is not proof that its subscription includes this API traffic.
 [Provider authentication reference](https://pi.dev/docs/latest/providers).
 
-## One logical session, multiple models
+## Episode sessions and the case file
 
-Create one Pi `AgentSession` for the run-wide supervisor using
-`createAgentSession`, with explicit `ModelRuntime`, `SessionManager`, settings,
-resource loader, and tools. Keep it in a dedicated supervisor process controlled
-by the controller. The process can be restarted; the logical session and durable
-history remain associated with the same GraphLoom run.
+One logical supervisor serves the run; its identity (`supervisorBinding.sessionId`),
+budgets and switch journal are run-wide. Each **recovery episode** runs in its own
+Pi `AgentSession` (`createAgentSession` with explicit `ModelRuntime`,
+`SessionManager`, settings, resource loader, and tools): `createPiSupervisor`
+opens a fresh session on the current model when `decide` sees a new episode id.
+Every turn of that episode, including a qualified repair's `patchCandidate`, runs
+in that session; the next episode starts with no chat at all. A run-long chat grew
+past the model's window in a dogfood run (about 926k input tokens) and carried
+conclusions about earlier code across resumes; per-episode sessions remove both.
 
-Pi's SessionManager owns its finalized conversational context; GraphLoom's store
-owns run progress and accepted evidence. Persist session ID/file and active branch
-alongside GraphLoom's supervisor metadata. Restore through SessionManager rather
-than assigning an in-memory messages array. Reinject current pinned requirements,
-fixed steps, remaining budgets, and admitted state after recovery; conversation
-history cannot override those facts.
+Memory across episodes is the controller-owned **case file** (`CaseFile` in
+`@graphloom/sdk`, `caseFile` in run state), bounded by `MAX_CASE_FACTS` and its
+siblings:
+
+- **Facts** and **refuted claims**, added with the `record_finding` tool (which does
+  not end the turn). The controller keeps one only when it cites at least one
+  evidence ref and every cited ref names evidence the run recorded; otherwise the
+  tool answers why. Each records the candidate digest and active plugin version it
+  depends on (both by default; `dependsOn` narrows that), and the controller marks
+  it stale for good when either changes. Stale entries stay in run state for replay
+  but never reach the model; the oldest stale ones are dropped first at the bound.
+- **Attempts**, written by the controller from its settlement of each proposal, never
+  by the model.
+- **Open questions** an episode leaves, newest last.
+
+`SupervisorInput.caseFile` carries only the live part. An episode's prompt is the
+trigger, a short state summary (budgets, current stage, receipts and agent sessions
+a dispatch may continue, counts of older evidence, descriptions of the current
+generation's evidence, the latest repair candidates, each list capped), the live
+case file, the settlement of the previous proposal, and the tool list. Its size
+does not grow with the run's total evidence, so Pi's compaction remains only a
+guard that a normal run does not reach.
+
+Resume needs no preamble: the restored supervisor opens a fresh session even when
+the run stopped mid-episode, and anything a code or plugin change made untrue is
+already marked stale. `supervisorBinding.sessionFile` names the latest episode's
+transcript; it is used to reconcile an interrupted model switch and to locate the
+transcript directory, never reopened. A run recorded before episode sessions still
+loads: its binding's run-long transcript is left on disk, a missing `caseFile`
+reads as empty, and its `resumedSinceLastDecision` flag is ignored.
+
+Pi's SessionManager owns each session's conversational context; GraphLoom's store
+owns run progress, accepted evidence and the case file. Every prompt reinjects
+current pinned requirements, fixed steps, remaining budgets, and admitted state;
+conversation cannot override those facts.
 [Session lifecycle and storage](https://pi.dev/docs/latest/sdk).
+
+## Multiple models
 
 Model selection uses `ModelRuntime.getModel(provider, id)` and configured-model
 discovery. Pi's `session.setModel(model, { persist: false })` checks configured
@@ -163,9 +200,10 @@ For each switch:
 4. Commit the actual selection before another prompt. On restart, reconcile Pi's
    transcript model-change record with the controller's intent. A partial switch
    must not result in silent fallback or a second logical supervisor session.
-5. Preserve history, tool results, fixed steps, and all counters. If the target
-   cannot consume the current context, use an explicitly budgeted compaction or
-   report incompatibility. Do not silently drop evidence or reset the conversation.
+5. Preserve the episode's history, tool results, fixed steps, and all counters.
+   If the target cannot consume the current context, use an explicitly budgeted
+   compaction or report incompatibility. Do not silently drop evidence or reset
+   the conversation mid-episode; the next episode opens on the switched model.
 
 A switch alone does not spend a correction attempt, but its decision and subsequent
 model calls spend their applicable allowances. Authorized automatic fallback may
@@ -187,8 +225,9 @@ session file's last `model_change` entry names its target, and failed otherwise.
 
 Each recovery prompt opens with the controller's settlement of the previous
 proposal: new evidence (including executor failures), receipts, repair-candidate
-transitions, stage, generation, and switch outcomes. These are controller
-observations, not the supervisor's claims.
+transitions, stage, generation, a changed workspace candidate, and switch
+outcomes. These are controller observations, not the supervisor's claims; the
+controller also writes each one to the case file as an attempt.
 Pi documents persistent model changes and calls out cross-provider handoff as a
 provider test requirement.
 [Model selection](https://pi.dev/docs/latest/models),
@@ -203,7 +242,8 @@ bash/edit/write against the user run worktree or live plugin install.
 Tooling has two layers:
 
 1. **GraphLoom-owned admission tools** — observe, dispatch, validate, reenter,
-   qualify_repair, activate_repair, return, stop, plus switch_model. Each tool's
+   qualify_repair, activate_repair, return, stop, plus switch_model, and
+   record_finding for the case file (the only one that does not end the turn). Each tool's
    parameters are a JSON Schema of its action spec, so Pi returns malformed calls
    to the model for correction. The first valid call ends the turn and becomes the
    proposal; the controller admits it and reports its settlement at the start of
@@ -214,7 +254,7 @@ Tooling has two layers:
    original prompt. Overrides remain bound to task, evidence contract, write
    scope, and reviewer independence.
 2. **Pi coding tools for qualified repair** — after the controller admits
-   `QualifyRepair` and materializes a candidate tree, the **same** supervisor
+   `QualifyRepair` and materializes a candidate tree, the episode's supervisor
    `AgentSession` gets Pi's full coding toolset (read, bash, edit, write, grep,
    find, ls) with the candidate root as its working directory, so it can
    investigate, edit, and build and run the candidate's tests while patching.
@@ -319,9 +359,10 @@ already compacted once).
 | Live provider qualification | DeepSeek, MiniMax, and OpenAI accounts in the user's authorized scope (#30) |
 | Claude included subscription allowance | Not supplied by direct Pi integration; separate genuine Claude Code backend if needed |
 
-Faux-provider tests cover: two recovery episodes and a restart share one session
-file; switching DeepSeek → MiniMax → OpenAI keeps prior history in the same
-session; a credential failure (Anthropic without a key) keeps the current model;
+Faux-provider tests cover: each recovery episode, and the first turn after a
+restart, opens a fresh session with no prior chat while the logical id stays;
+switching DeepSeek → MiniMax → OpenAI keeps the episode's history in its session
+and the next episode opens on the switched model; a credential failure (Anthropic without a key) keeps the current model;
 Stop during a decision prompt or candidate patch settles as an operator stop; a
 crash between switch intent and outcome reconciles from the session file; decisions
 are capped at the remaining invocations and refused at zero; admission tools reject
