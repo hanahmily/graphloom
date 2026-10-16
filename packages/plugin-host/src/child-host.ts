@@ -379,12 +379,12 @@ class ChildSession implements PluginHost {
     extract: (res: WireResponse) => T,
   ): HostResult<T> {
     let response: WireResponse;
+    let raw: unknown;
     try {
-      const raw = parseJsonBounded(line);
+      raw = parseJsonBounded(line);
       response = assertWireResponse(raw);
     } catch (err) {
-      const obs = wireErrorToObservation(err);
-      return { ok: false, observation: obs };
+      return { ok: false, observation: startupFailure(raw) ?? wireErrorToObservation(err) };
     }
 
     if (response.operationId !== ctx.operationId) {
@@ -502,6 +502,23 @@ function resolveEntryPath(entry: string): string {
     return path.resolve(entry);
   }
   return entry;
+}
+
+/**
+ * A child that failed before it read any request (it could not load the
+ * plugin entry) answers with an error whose envelope has no run id. That
+ * envelope fails wire validation, which would otherwise hide the child's own
+ * reason behind "runId must be a non-empty string".
+ */
+function startupFailure(raw: unknown): ChildObservation | undefined {
+  if (raw === null || typeof raw !== "object") return undefined;
+  const obj = raw as Record<string, unknown>;
+  if (obj.kind !== "error" || obj.runId !== "" || typeof obj.message !== "string" || obj.message === "") return undefined;
+  return {
+    kind: "child_observation",
+    code: typeof obj.code === "string" ? mapWireErrorCode(obj.code) : "internal",
+    message: obj.message,
+  };
 }
 
 function wireErrorToObservation(err: unknown): ChildObservation {

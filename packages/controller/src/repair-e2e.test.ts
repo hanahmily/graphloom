@@ -166,9 +166,10 @@ async function makeEnv(
     manifest?: (manifest: Record<string, unknown>) => Record<string, unknown>;
   } = {},
 ): Promise<{ taskPath: string; stateRoot: string; taskDir: string }> {
-  await execFileAsync("npm", ["run", "build", "-w", "@graphloom/plugin-hello"], {
-    cwd: repoRoot,
-  });
+  // Rebuilding rewrites dist/ under test files that run in parallel; `npm test` builds it first.
+  if (!existsSync(path.join(repoRoot, "examples/plugins/hello/dist/index.js"))) {
+    await execFileAsync("npm", ["run", "build", "-w", "@graphloom/plugin-hello"], { cwd: repoRoot });
+  }
   const taskDir = await mkdtemp(path.join(os.tmpdir(), "gl-repair-e2e-"));
   temps.push(taskDir);
   const repoPath = path.join(taskDir, "test-repo");

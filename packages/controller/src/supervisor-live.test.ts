@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { access, mkdir, mkdtemp, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -72,7 +73,10 @@ async function makeEnv(): Promise<{ taskPath: string; stateRoot: string }> {
   const { execFile } = await import("node:child_process");
   const { promisify } = await import("node:util");
   const run = promisify(execFile);
-  built ??= run("npm", ["run", "build", "-w", "@graphloom/plugin-hello"], { cwd: repoRoot });
+  // Rebuilding rewrites dist/ under test files that run in parallel; `npm test` builds it first.
+  if (!existsSync(path.join(helloBundle, "dist", "index.js"))) {
+    built ??= run("npm", ["run", "build", "-w", "@graphloom/plugin-hello"], { cwd: repoRoot });
+  }
   await built;
 
   const taskDir = await mkdtemp(path.join(os.tmpdir(), "gl-sup-live-"));

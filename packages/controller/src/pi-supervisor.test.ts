@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -130,9 +131,10 @@ async function makeEnv(): Promise<{ taskPath: string; stateRoot: string }> {
   const { promisify } = await import("node:util");
   const execFileAsync = promisify(execFile);
 
-  await execFileAsync("npm", ["run", "build", "-w", "@graphloom/plugin-hello"], {
-    cwd: repoRoot,
-  });
+  // Rebuilding rewrites dist/ under test files that run in parallel; `npm test` builds it first.
+  if (!existsSync(path.join(repoRoot, "examples/plugins/hello/dist/index.js"))) {
+    await execFileAsync("npm", ["run", "build", "-w", "@graphloom/plugin-hello"], { cwd: repoRoot });
+  }
 
   const taskDir = await mkdtemp(path.join(os.tmpdir(), "gl-pi-sup-"));
   temps.push(taskDir);

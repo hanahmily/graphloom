@@ -756,7 +756,10 @@ describe("the Claude Code harness in the coding-agent executor process", () => {
 });
 
 async function makeEnv(): Promise<{ taskPath: string; stateRoot: string }> {
-  await execFileAsync("npm", ["run", "build", "-w", "@graphloom/plugin-hello"], { cwd: repoRoot });
+  // Rebuilding rewrites dist/ under test files that run in parallel; `npm test` builds it first.
+  if (!existsSync(path.join(repoRoot, "examples/plugins/hello/dist/index.js"))) {
+    await execFileAsync("npm", ["run", "build", "-w", "@graphloom/plugin-hello"], { cwd: repoRoot });
+  }
   const taskDir = await mkdtemp(path.join(os.tmpdir(), "gl-agent-e2e-"));
   cleanups.push(async () => {
     await execFileAsync("git", ["worktree", "prune"], { cwd: taskDir }).catch(() => undefined);
