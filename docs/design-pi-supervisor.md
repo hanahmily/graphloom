@@ -83,6 +83,17 @@ For key rotation, reopen the runtime so its cached credential-command result is
 refreshed. Keep secrets outside the durable run record; record only the provider,
 model, and nonsecret credential reference.
 
+MiniMax returns its thinking blocks with an empty signature (`signature: ""`).
+Pi's `anthropic-messages` request builder keeps such a block as thinking only when
+the model's `compat.allowEmptySignature` is true; otherwise it replays the block as
+a plain `text` block of the assistant turn, so the model reads its own private
+reasoning as something it said. Neither Pi's built-in `minimax-cn` entries nor an
+operator's custom entry in `models.json` set the flag, so the supervisor host sets
+it on every session model it uses for `minimax` and `minimax-cn`: when a session
+is created (including each episode session and the first one after a restart) and
+on every model switch. The host sets it on a copy of the registry's model, never
+on the shared registry object.
+
 ### Verified setup and limits of the check
 
 On 2026-09-23, a real `createAgentSession` request using that credential reference
@@ -256,7 +267,13 @@ Tooling has two layers:
    parameters are a JSON Schema of its action spec, so Pi returns malformed calls
    to the model for correction. The first valid call ends the turn and becomes the
    proposal; the controller admits it and reports its settlement at the start of
-   the next prompt. A plain JSON decision reply remains a fallback for models
+   the next prompt. Pi ends a tool batch on its own only when every result in it
+   terminates, so a batch that pairs `record_finding` with an admitted action would
+   go back to the model for a summary nobody reads (and could yield a second
+   action). The prompt therefore takes a `done()` predicate: once a proposal is
+   admitted, or the turn's rejection allowance is spent, the next turn is aborted
+   at `turn_start`, before its provider request. That end is neither a failure nor
+   a timeout, and the aborted turn is not charged. A plain JSON decision reply remains a fallback for models
    without tool calling. Pi cannot mint Accept or alter pinned steps/requirements.
    After `Reenter` (or on a recovery `Dispatch`), the supervisor **supplies the
    job instruction** for that trial; it does not have to reuse the plugin's
@@ -347,7 +364,7 @@ A prompt that reaches either limit fails with class `timeout`. Its message is
 decision turn retries the turn once in a fresh episode session, opened the same way
 as for a new episode, because the aborted session may still be busy and refuse
 reuse. The fresh session receives the turn's full recovery prompt, followed by any
-re-ask or rejection that was pending. The retry is charged to the turn's
+re-ask or rejection that was pending (never the opening twice). The retry is charged to the turn's
 provider-call allowance and recorded as the remedy `fresh_session_retry`. A second
 timeout in the same turn stops the run, for example with
 `supervisor provider timeout: no output for 120s (not remedied: already retried once)`.
@@ -364,11 +381,36 @@ timeouts), or `unknown`. The host
 applies a fixed remedy without asking the model what to do: a quota error with a
 reset time waits until then (at most three waits a turn, only within the
 `maxWaitMs` the controller passes from the run's `waitMs`) and retries the turn;
-an overflow compacts the session and retries once. An empty or malformed reply
-gets the turn's single re-ask: one for both kinds together, not one each. The
-re-ask says what was wrong; a second unreadable reply stops the run, naming its
-class. Every retried call, compaction, re-ask and rejection re-ask counts against
-the turn's provider-call allowance. A provider failure is never sent to admission,
+an overflow compacts the session and retries once.
+
+An empty or malformed reply is a model slip, not a provider error. Live replays
+against MiniMax show it is rare (about one first reply in 20, one re-ask in 10),
+so one slip must not stop the run. Each slip in a turn gets the next of three
+remedies, shared by both kinds:
+
+1. Re-ask once in the same session, saying what was wrong (`reask`).
+2. Retry the turn in a fresh episode session, opened as for a timeout, with the
+   turn's full recovery prompt and any pending rejection (`fresh_session_retry`).
+   This step is shared with, but counted apart from, the timeout retry.
+3. When another model is configured, retry once on the next configured model in
+   the operator's order, in its own session (`model_retry`, naming the model).
+   This change applies to that attempt only: the episode's bound session is set
+   aside, not closed, and the turn returns to it when `decide` ends, whatever the
+   outcome. The binding never names the transient model, so the switch journal,
+   which exists to reconcile a binding change interrupted by a crash, has
+   nothing to record. A crash mid-attempt restores on the bound model, which is
+   the correct state. The remedy record names the model for the operator.
+
+A further slip stops the run, naming its class and what was tried, for example
+`(not remedied: already re-asked once, then retried in a fresh session, then
+retried on minimax-cn/MiniMax-M3 in this turn)`. A step that cannot run is named
+too: `the host cannot open a fresh session` or `no other configured model to try`.
+Each attempt is checked against the allowance first. With no calls left the
+turn stops (`no provider calls left in the run's budget to retry`), and Stop
+always wins. A provider error class (quota, overflow, auth, timeout, unknown)
+keeps its own handling and never counts as a slip. Every retried call,
+compaction, re-ask, slip retry and rejection re-ask counts against the turn's
+provider-call allowance. A provider failure is never sent to admission,
 so it is not counted as an inadmissible proposal and is not charged to
 `decisions`. The compaction honors the run's Stop
 and the prompt timeout: either aborts Pi's summarization request and fails the
@@ -407,5 +449,9 @@ crash between switch intent and outcome reconciles from the session file; decisi
 are capped at the remaining invocations and refused at zero; admission tools reject
 malformed specs and end the turn on a valid one; a slowly streaming reply outlives
 the inactivity limit, while a silent provider is retried once in a fresh session
-and then stops by name; and settlements reach the next
-prompt. The MiniMax connectivity check above remains the only live check.
+and then stops by name; a `[record_finding, reenter]` batch is one provider call;
+a thinking-only reply and re-ask recover in a fresh session, a third slip
+recovers on the next configured model for that turn only, and exhausted remedies
+or allowance stop by name; a `minimax-cn` session replays an empty-signature
+thinking block as thinking (through a local Anthropic-compatible endpoint); and
+settlements reach the next prompt. The MiniMax connectivity check above remains the only live check.
