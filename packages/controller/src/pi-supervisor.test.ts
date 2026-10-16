@@ -23,6 +23,7 @@ import {
   createScriptedSupervisor,
   type PiSupervisorSessionPort,
   type ProviderFailure,
+  SupervisorProviderError,
   type Supervisor,
 } from "@graphloom/supervisor";
 import { createController, loadRunState } from "./index.js";
@@ -576,7 +577,7 @@ describe("Pi supervisor recovery (controller)", () => {
 });
 
 /** A reply, or a classified failure; `retryInMs` sets the failure's reset time relative to when the turn runs. */
-type ScriptedTurn = { reply: string } | { failure: ProviderFailure; retryInMs?: number };
+type ScriptedTurn = { reply: string } | { failure: ProviderFailure; retryInMs?: number } | { timeout: string };
 
 /** A session whose turns fail the way a provider would, as the Pi host classifies them. */
 function failingSession(turns: ScriptedTurn[]): PiSupervisorSessionPort & { prompts: number; compactions: number } {
@@ -597,6 +598,8 @@ function failingSession(turns: ScriptedTurn[]): PiSupervisorSessionPort & { prom
       if (current === undefined) throw new Error("scripted session exhausted");
       port.prompts += 1;
       undrained += 1;
+      // As the Pi session reports a provider that went silent.
+      if ("timeout" in current) throw new SupervisorProviderError({ failureClass: "timeout", message: current.timeout });
       return "reply" in current ? current.reply : "";
     },
     lastReplyFailure() {
@@ -978,5 +981,204 @@ describe("supervisor provider failures and deterministic remedies (controller)",
     const state = await loadRunState(report.stateDir);
     expect(state.remedies ?? []).toEqual([]);
     expect(state.executorRetry).toBeUndefined();
+  });
+
+  it("retries a timed-out supervisor turn once in a fresh session and completes with one decide", async () => {
+    const opened: string[] = [];
+    const first = failingSession([{ timeout: "no output for 120s" }]);
+    const counted = countingDecides(
+      createPiSupervisor({
+        session: first,
+        openSession: async () => {
+          opened.push("fresh");
+          return failingSession([returnReply]);
+        },
+      }),
+    );
+    const env = await makeEnv();
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({ definition, advances: [supervise({ reason: "unfamiliar" }, "escalate"), ...finishingAdvances] }),
+      validators,
+      supervisor: counted.supervisor,
+      runner: createScriptedRunner({ jobs: [writeJob, reviewJob] }),
+      stateRoot: env.stateRoot,
+      runId: "pi-timeout-1",
+    });
+    expect(report, `${report.stopReason}: ${report.blocker}`).toMatchObject({ status: "succeeded" });
+    expect(counted.decides()).toBe(1);
+    expect(opened).toEqual(["fresh"]);
+    const state = await loadRunState(report.stateDir);
+    expect(state.remedies).toMatchObject([
+      { condition: "supervisor provider timeout", detail: "no output for 120s", remedy: "retried the turn once in a fresh supervisor session" },
+    ]);
+  });
+
+  it("stops naming the timeout when the retried turn times out too", async () => {
+    const counted = countingDecides(
+      createPiSupervisor({
+        session: failingSession([{ timeout: "no output for 120s" }]),
+        openSession: async () => failingSession([{ timeout: "no output for 120s" }]),
+      }),
+    );
+    const env = await makeEnv();
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({ definition, advances: [supervise({ reason: "unfamiliar" }, "escalate")] }),
+      validators,
+      supervisor: counted.supervisor,
+      runner: createScriptedRunner({ jobs: [] }),
+      stateRoot: env.stateRoot,
+      runId: "pi-timeout-2",
+    });
+    expect(report.status).toBe("stopped");
+    expect(counted.decides()).toBe(1);
+    expect(report.stopReason).toBe("supervisor provider timeout: no output for 120s");
+    expect(report.blocker).toBe("supervisor provider timeout: no output for 120s (not remedied: already retried once)");
+  });
+});
+
+describe("resume after a stop in recovery (controller)", () => {
+  const writeWork = dispatch(
+    { stageId: "write", kind: "agent", purpose: "work", instruction: "write", writeScope: [GREETING_PATH] },
+    "write",
+  );
+  const finishingAdvances = [
+    writeWork,
+    observe({ paths: [GREETING_PATH], includeWorkspaceManifest: true }, "obs"),
+    validate({ stageId: "write", requirementIds: ["greeting-bytes"] }, "val"),
+    dispatch({ stageId: "review", kind: "agent", purpose: "review", instruction: "review", readOnly: true }, "review"),
+    validate({ stageId: "review", requirementIds: ["independent-review"] }, "val review"),
+    stop({ reason: "complete", blocker: "none" }, "done"),
+  ];
+  const writeJob = async (_job: unknown, ctx: { worktreePath: string }) => {
+    await writeFile(path.join(ctx.worktreePath, GREETING_PATH), GREETING, "utf8");
+    return { status: "ok" as const, summary: "wrote" };
+  };
+  const reviewJob = async () => ({
+    status: "ok" as const,
+    summary: "approved",
+    evidence: [{ kind: "review" as const, payload: { verdict: "approved", summary: "ok" } }],
+  });
+  const brokenCheckout = (summary: string) => async () => ({ status: "failed" as const, summary });
+
+  /** A run whose write job failed (the executor's checkout was broken) and whose supervisor stopped on it, citing the failure. */
+  async function stoppedInRecovery(runId: string) {
+    const env = await makeEnv();
+    const controller = createController();
+    const triggers: string[] = [];
+    const paused = await controller.run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({ definition, advances: [writeWork] }),
+      validators,
+      supervisor: createScriptedSupervisor({
+        decisions: [
+          (input) => {
+            triggers.push(`${input.trigger.code}: ${input.trigger.message}`);
+            const refs = input.view.evidence.map((e) => e.ref);
+            return stop({ reason: "checkout is broken", blocker: "executor cannot clone the repo", evidenceRefs: refs }, "stop");
+          },
+        ],
+      }),
+      runner: createScriptedRunner({ jobs: [brokenCheckout("checkout failed: not a git top level")] }),
+      stateRoot: env.stateRoot,
+      runId,
+    });
+    expect(paused).toMatchObject({ status: "stopped", stopReason: "checkout is broken" });
+    expect(triggers).toEqual([expect.stringMatching(/^executor_failed: .*checkout failed: not a git top level/)]);
+    const before = await loadRunState(paused.stateDir);
+    expect(before).toMatchObject({ mode: "recovery", recoveryTrigger: { code: "executor_failed" } });
+    return { controller, stateDir: paused.stateDir, before };
+  }
+
+  it("gives the graph a fresh attempt once the operator fixed the executor, without asking the supervisor", async () => {
+    const { controller, stateDir, before } = await stoppedInRecovery("resume-retry-1");
+    const counted = countingDecides(createScriptedSupervisor({ decisions: [] }));
+    const resumed = await controller.resume({
+      runRef: stateDir,
+      plugin: createScriptedGraph({ definition, advances: finishingAdvances }),
+      validators,
+      supervisor: counted.supervisor,
+      runner: createScriptedRunner({ jobs: [writeJob, reviewJob] }),
+    });
+    expect(resumed, `${resumed.stopReason}: ${resumed.blocker}`).toMatchObject({ status: "succeeded" });
+    expect(counted.decides()).toBe(0);
+
+    const after = await loadRunState(stateDir);
+    expect(after.mode).toBe("normal");
+    expect(after.recoveryTrigger).toBeUndefined();
+    expect(after.remedies).toMatchObject([
+      {
+        condition: "resumed in recovery (executor_failed)",
+        remedy: "resumed: returned to normal so the graph retries what failed before the resume",
+        detail: expect.stringContaining("checkout failed: not a git top level"),
+        episodeId: before.recoveryEpisodeId,
+      },
+    ]);
+    // Budgets never reset: everything the run spent before the stop stays spent.
+    for (const key of ["agentInvocations", "jobs", "decisions", "corrections"] as const) {
+      expect(after.budgets[key]).toBeLessThanOrEqual(before.budgets[key]!);
+    }
+    expect(after.budgets.jobs).toBeLessThan(before.budgets.jobs);
+    expect(after.correctionTrials ?? {}).toEqual(before.correctionTrials ?? {});
+  });
+
+  it("enters recovery afresh, on post-resume evidence, when the failure recurs after the resume", async () => {
+    const { controller, stateDir, before } = await stoppedInRecovery("resume-retry-2");
+    const preResumeRefs = new Set(before.evidence.map((e) => e.ref));
+    const seen: Array<Parameters<Supervisor["decide"]>[0]> = [];
+    const resumed = await controller.resume({
+      runRef: stateDir,
+      plugin: createScriptedGraph({ definition, advances: [writeWork] }),
+      validators,
+      supervisor: createScriptedSupervisor({
+        decisions: [
+          (input) => {
+            seen.push(input);
+            return stop({ reason: "still broken", blocker: "checkout" }, "stop");
+          },
+        ],
+      }),
+      runner: createScriptedRunner({ jobs: [brokenCheckout("checkout failed again after the resume")] }),
+    });
+    expect(resumed).toMatchObject({ status: "stopped", stopReason: "still broken" });
+    expect(seen).toHaveLength(1);
+    const input = seen[0]!;
+    expect(input.trigger).toMatchObject({ code: "executor_failed", message: expect.stringContaining("checkout failed again after the resume") });
+    expect(input.episodeId).not.toBe(before.recoveryEpisodeId);
+    // The failure the supervisor is shown was recorded after the resume.
+    const fresh = input.view.evidence.filter((e) => !preResumeRefs.has(e.ref));
+    expect(fresh.length).toBeGreaterThan(0);
+    expect(fresh.every((e) => (e.generation ?? 0) > before.generation)).toBe(true);
+    expect(JSON.stringify(fresh.map((e) => e.payload))).toContain("checkout failed again after the resume");
+    // The last proposal's settlement says the operator's resume overtook it.
+    expect(input.lastSettlement?.facts).toEqual(
+      expect.arrayContaining([expect.stringMatching(/^the operator resumed the run; the controller returned it to its graph/)]),
+    );
+    const after = await loadRunState(stateDir);
+    expect(after.recoveryEpisodeId).toBe(input.episodeId);
+    expect(after.budgets.decisions).toBeLessThan(before.budgets.decisions);
+  });
+
+  it("resumes a run that stopped in recovery with no supervisor configured by retrying the graph", async () => {
+    const env = await makeEnv();
+    const controller = createController();
+    const paused = await controller.run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({ definition, advances: [supervise({ reason: "the checkout looks broken" }, "escalate")] }),
+      validators,
+      runner: createScriptedRunner({ jobs: [] }),
+      stateRoot: env.stateRoot,
+      runId: "resume-retry-nosup",
+    });
+    expect(paused).toMatchObject({ status: "stopped", blocker: "no supervisor configured" });
+    expect((await loadRunState(paused.stateDir)).mode).toBe("recovery");
+    const resumed = await controller.resume({
+      runRef: paused.stateDir,
+      plugin: createScriptedGraph({ definition, advances: finishingAdvances }),
+      validators,
+      runner: createScriptedRunner({ jobs: [writeJob, reviewJob] }),
+    });
+    expect(resumed, `${resumed.stopReason}: ${resumed.blocker}`).toMatchObject({ status: "succeeded" });
   });
 });

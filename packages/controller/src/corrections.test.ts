@@ -1684,7 +1684,9 @@ describe("controller-started recovery for stalls and repeated corrections", () =
     let handedOffTrigger: { code: string; message: string } | undefined;
     const resumed = await controller.resume({
       runRef: paused.stateDir,
-      plugin: createScriptedGraph({ definition, advances: [] }),
+      // Resume hands the run back to its graph first. Its next correction
+      // trial is still refused: the handoff and its trial count survived.
+      plugin: createScriptedGraph({ definition, advances: [writeJob("fix 3")] }),
       validators,
       supervisor: createScriptedSupervisor({
         decisions: [
@@ -1703,7 +1705,9 @@ describe("controller-started recovery for stalls and repeated corrections", () =
     });
     const after = await loadRunState(paused.stateDir);
     expect(after.handoff).toMatchObject({ write: { trials: 2 } });
-    expect(after.noProgress).toBeUndefined();
+    // Only the graph's one decision since the resume is counted: the same
+    // dispatch was already counted once before the stop, and is not a repeat.
+    expect(Object.values(after.noProgress?.counts ?? {})).toEqual([1]);
   });
 
   it("starts counting correction trials again once the stage is accepted", async () => {

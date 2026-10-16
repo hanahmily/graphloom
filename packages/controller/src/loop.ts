@@ -73,7 +73,7 @@ import {
 import { isUnsettled, reconcilePendingDispatch } from "./reconcile.js";
 import { createChildPort, reconcileChildOperations } from "./children.js";
 import { agentSessionViews, continuationRefusal, recordAgentSession, sessionForDispatch, wipeAgentSessions } from "./agent-sessions.js";
-import { citedEvidence, loadRunState, recordRemedy, type DurableRunState, saveRunState } from "./state.js";
+import { citedEvidence, loadRunState, recordRemedy, STEP_LIMIT_STOP_REASON, type DurableRunState, saveRunState } from "./state.js";
 import { bumpGeneration } from "./generation.js";
 import { noteGraphDecision, noteSupervisorProposal, progressMark, settleCorrectionTrial, settleSupervisorCorrection } from "./escalation.js";
 import {
@@ -870,7 +870,7 @@ async function runNormalLoopSteps(
     state = {
       ...state,
       status: "stopped",
-      stopReason: "step limit",
+      stopReason: STEP_LIMIT_STOP_REASON,
       blocker: `exceeded ${MAX_STEPS} controller steps`,
     };
     await saveRunState(state);
@@ -1345,7 +1345,9 @@ function settleSupervisorRemedies(state: DurableRunState, supervisor: Supervisor
             : `waited ${Math.ceil((waitedMs ?? 0) / 1000)}s for the provider's reset and retried the turn`
           : r.remedy === "compact_and_retry"
             ? "compacted the supervisor session and retried the turn"
-            : "re-asked the supervisor once to call exactly one tool",
+            : r.remedy === "fresh_session_retry"
+              ? "retried the turn once in a fresh supervisor session"
+              : "re-asked the supervisor once to call exactly one tool",
       detail: boundText(r.message),
       episodeId,
       ...(waitedMs !== undefined ? { waitedMs } : {}),
