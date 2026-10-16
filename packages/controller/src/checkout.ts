@@ -253,7 +253,10 @@ export function selectPaths(spec: CheckoutSpec, changed: string[]): string[] {
 async function cloneAt(repoPath: string, pinnedHead: string, dir: string): Promise<void> {
   await removeTree(dir);
   await mkdir(path.dirname(dir), { recursive: true });
-  await git(path.dirname(dir), ["clone", "--quiet", "--no-checkout", "--shared", repoPath, dir]);
+  // Runs pinned before intake resolved `repo` to its top level may name a
+  // subdirectory, which `git clone` refuses; clone the repository it is in.
+  const top = (await git(repoPath, ["rev-parse", "--show-toplevel"])).trim();
+  await git(path.dirname(dir), ["clone", "--quiet", "--no-checkout", "--shared", top, dir]);
   await git(dir, ["-c", "advice.detachedHead=false", "checkout", "--quiet", "--detach", pinnedHead]);
 }
 
