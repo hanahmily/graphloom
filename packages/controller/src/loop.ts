@@ -1426,7 +1426,8 @@ function settleSupervisorUsage(
 
 /**
  * Record the remedies the supervisor host applied to failed provider turns,
- * charging any time it spent waiting out a quota reset to `waitMs`.
+ * charging any time it spent waiting out a quota reset or a transient-error
+ * backoff to `waitMs`.
  */
 function settleSupervisorRemedies(state: DurableRunState, supervisor: Supervisor, episodeId: string): DurableRunState {
   const applied = supervisor.drainRemedies?.() ?? [];
@@ -1444,6 +1445,10 @@ function settleSupervisorRemedies(state: DurableRunState, supervisor: Supervisor
           ? r.waitBasis === "operator"
             ? `waited ${Math.ceil((waitedMs ?? 0) / 1000)}s (the operator's quotaRetryMs; the provider gave no reset time) and retried the turn`
             : `waited ${Math.ceil((waitedMs ?? 0) / 1000)}s for the provider's reset and retried the turn`
+          : r.remedy === "backoff_and_retry"
+            ? r.waitBasis === "provider"
+              ? `waited ${Math.ceil((waitedMs ?? 0) / 1000)}s for the provider's stated retry time after a transient error and retried the turn`
+              : `backed off ${Math.ceil((waitedMs ?? 0) / 1000)}s after a transient provider error and retried the turn`
           : r.remedy === "compact_and_retry"
             ? "compacted the supervisor session and retried the turn"
             : r.remedy === "fresh_session_retry"

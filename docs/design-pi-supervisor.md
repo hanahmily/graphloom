@@ -375,13 +375,32 @@ A decision turn that yields no proposal is classified from the provider's last
 assistant message (`stopReason`, `errorMessage`), not from the missing JSON:
 `quota` (429 and rate/usage limits; any reset time the message states becomes
 `retryAt`), `overflow` (Pi's own `isContextOverflow`), `auth` (401/403 and
-credential refusals), `interrupted` (see below), `empty` (no tool call and no
+credential refusals), `transient` (see below), `interrupted` (see below), `empty` (no tool call and no
 text, including thinking-only replies), `malformed` (text that is not a GraphDecision), `timeout` (see Prompt
 timeouts), or `unknown`. The host
 applies a fixed remedy without asking the model what to do: a quota error with a
 reset time waits until then (at most three waits a turn, only within the
 `maxWaitMs` the controller passes from the run's `waitMs`) and retries the turn;
 an overflow compacts the session and retries once.
+
+A provider error is `transient` when the provider failed on its side and the
+request can simply be sent again: a leading HTTP status of 500, 502, 503, 504
+or 529, an Anthropic-style error type `api_error` or `overloaded_error`, or a
+message saying "internal server error", "overloaded", "service unavailable",
+"bad gateway", "gateway timeout", "temporarily unavailable" or "please retry"
+(case-insensitive). Quota (429), overflow and auth are checked first, so a 429
+that says "please retry" stays `quota`. Live run cbef664d-c46 stopped on one:
+`{"type":"error","error":{"type":"api_error","message":"Internal server error.
+Please retry your request. (500)"}}`. The host backs off and retries the turn,
+at most three times a turn: 2s, then 4s, then 8s (the supervisor option
+`transientRetryBaseMs` sets the first backoff), or until a retry time the
+message states, parsed as for quota. Each wait is charged to the same
+`maxWaitMs` as quota waits, each retry to the turn's provider-call allowance,
+and each is recorded as the remedy `backoff_and_retry` (`waitBasis` `backoff`
+or `provider`). Stop interrupts the wait. A fourth transient failure stops the
+run, for example `supervisor provider transient: ... (not remedied: still
+failing after 3 retries in this turn)`; so does a backoff longer than the
+remaining wait budget, or no provider call left.
 
 A reply is `interrupted` when it ended normally (`stopReason` `stop`, the
 provider's `end_turn`), carries no tool call and no non-empty text, and its usage
@@ -437,7 +456,7 @@ retried on minimax-cn/MiniMax-M3 in this turn)`. A step that cannot run is named
 too: `the host cannot open a fresh session` or `no other configured model to try`.
 Each attempt is checked against the allowance first. With no calls left the
 turn stops (`no provider calls left in the run's budget to retry`), and Stop
-always wins. A provider error class (quota, overflow, auth, timeout, unknown)
+always wins. A provider error class (quota, transient, overflow, auth, timeout, unknown)
 keeps its own handling and never counts as a slip. Every retried call,
 compaction, re-ask, slip retry and rejection re-ask counts against the turn's
 provider-call allowance. A provider failure is never sent to admission,
@@ -458,7 +477,7 @@ done; the controller charges the waits to `waitMs` and records each remedy in th
 run's `remedies` (shown by `inspect`). A failure with no remedy left stops the
 run with `stopReason` `supervisor provider <class>: <provider message>`, and the
 blocker adds why no remedy applied (for example, no reset time, wait budget,
-already compacted once, already retried once).
+already compacted once, already retried once, still failing after 3 retries).
 
 ## Implementation and verification gaps
 
