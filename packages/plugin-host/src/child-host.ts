@@ -26,6 +26,9 @@ import type {
 
 const DEFAULT_TIMEOUT_MS = 10_000;
 
+/** How long a call waits after the child exits for stdout lines it wrote just before. */
+const TRAILING_OUTPUT_GRACE_MS = 250;
+
 export async function createChildPluginHost(
   options: ChildPluginHostOptions,
 ): Promise<PluginHost> {
@@ -90,6 +93,8 @@ class ChildSession implements PluginHost {
   private exitCode: number | null = null;
   private spawnError: Error | null = null;
   private readonly exitPromise: Promise<number | null>;
+  /** Resolves after exit once the lines written before it were read, or a short grace passed. */
+  private readonly drainedPromise: Promise<number | null>;
   private readonly spawnErrorPromise: Promise<Error>;
 
   constructor(args: {
@@ -122,18 +127,27 @@ class ChildSession implements PluginHost {
       });
     });
 
-    this.child.on("exit", (code) => {
-      this.exitCode = code;
-    });
-    // "close" fires once the child's stdio has ended, so every line it wrote
-    // (a load failure is written just before it exits) has been read first;
-    // "exit" can fire before the last stdout line is delivered.
-    this.exitPromise = new Promise((resolve) => {
-      this.child.on("close", (code) => {
-        if (this.exitCode === null) this.exitCode = code;
-        resolve(code);
-        this.rejectAllPending(new Error(`plugin child exited during pending call`));
+    // Termination is the child's own exit: shutdown and the callback timeout
+    // must not wait on a descendant that inherited the pipes. A call's
+    // outcome, though, waits briefly for the stdout lines written just before
+    // exit (a load failure), since "exit" can fire before they are read.
+    let stdoutEnded = false;
+    const stdoutDone = new Promise<void>((resolve) => {
+      this.stdout.once("close", () => {
+        stdoutEnded = true;
+        resolve();
       });
+    });
+    this.exitPromise = new Promise((resolve) => {
+      this.child.on("exit", (code) => {
+        this.exitCode = code;
+        resolve(code);
+      });
+    });
+    this.drainedPromise = this.exitPromise.then(async (code) => {
+      if (!stdoutEnded) await Promise.race([stdoutDone, sleep(TRAILING_OUTPUT_GRACE_MS)]);
+      this.rejectAllPending(new Error(`plugin child exited during pending call`));
+      return code;
     });
 
     this.stdout.on("line", (line) => {
@@ -282,6 +296,9 @@ class ChildSession implements PluginHost {
   ): Promise<HostResult<T>> {
     // A child that already exited may have left the reason it failed (a load
     // error written before any request); report that instead of "not running".
+    // An exited child's last lines may still be in flight; wait the short,
+    // bounded grace for them before deciding it left nothing to report.
+    if (this.exitCode !== null && this.unclaimedLine === undefined) await this.drainedPromise.catch(() => null);
     const early = this.unclaimedLine;
     if (this.closed || this.spawnError !== null || (this.exitCode !== null && early === undefined)) {
       return {
@@ -345,7 +362,7 @@ class ChildSession implements PluginHost {
         sleep(this.timeoutMs).then(() => {
           throw new TimeoutError(`plugin callback timed out after ${this.timeoutMs}ms`);
         }),
-        this.exitPromise.then((code) => {
+        this.drainedPromise.then((code) => {
           throw new CrashError(
             `plugin child exited (code=${String(code)})`,
             code,
