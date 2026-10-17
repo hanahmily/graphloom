@@ -1,3 +1,5 @@
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
@@ -106,6 +108,45 @@ describe("createChildPluginHost", () => {
     if (described.ok) throw new Error("expected a failure");
     expect(described.observation.message).toMatch(/failed to load plugin: plugin entry must export createGraph\(\) or default GraphPlugin/);
     expect(described.observation.message).not.toMatch(/runId must be a non-empty string/);
+  });
+
+  it("reports a load failure the child wrote and exited on before any call was made", async () => {
+    const host = await track(
+      createChildPluginHost({
+        entryModule: fixture("empty", "graph.mjs"),
+        activeVersion: "empty@1",
+        generation: 1,
+        workerModule: workerJs,
+        callbackTimeoutMs: 3_000,
+      }),
+    );
+    // Let the worker fail to load, write its error and exit before the first
+    // call registers: the order CI hit, where the line used to be dropped.
+    await new Promise((r) => setTimeout(r, 1_500));
+    const described = await host.describe(ctx("op-describe-late"));
+    expect(described.ok).toBe(false);
+    if (described.ok) throw new Error("expected a failure");
+    expect(described.observation.message).toMatch(/failed to load plugin: plugin entry must export createGraph\(\) or default GraphPlugin/);
+  });
+
+  it("bounds shutdown by the child's exit even when a descendant keeps its pipes open", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "gl-host-descendant-"));
+    const entry = path.join(dir, "graph.mjs");
+    // The plugin starts a descendant that inherits stdout/stderr and outlives it.
+    await writeFile(
+      entry,
+      `import { spawn } from "node:child_process";\n` +
+        `spawn(process.execPath, ["-e", "setTimeout(() => {}, 5000)"], { stdio: ["ignore", "inherit", "inherit"] }).unref();\n` +
+        `setTimeout(() => process.exit(0), 100);\n` +
+        `export function createGraph() { return { describe() { return {}; }, advance() { return {}; } }; }\n`,
+      "utf8",
+    );
+    const host = await createChildPluginHost({ entryModule: entry, activeVersion: "d@1", generation: 1, workerModule: workerJs, callbackTimeoutMs: 3_000 });
+    await new Promise((r) => setTimeout(r, 300));
+    const started = Date.now();
+    await host.close();
+    expect(Date.now() - started).toBeLessThan(1_500);
+    await rm(dir, { recursive: true, force: true });
   });
 
   it("attributes an oversized advance request to its real run, not a malformed-response failure", async () => {
