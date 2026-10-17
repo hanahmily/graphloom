@@ -1347,7 +1347,11 @@ function settleSupervisorRemedies(state: DurableRunState, supervisor: Supervisor
             ? "compacted the supervisor session and retried the turn"
             : r.remedy === "fresh_session_retry"
               ? "retried the turn once in a fresh supervisor session"
-              : "re-asked the supervisor once to call exactly one tool",
+              : r.remedy === "resend_interrupted"
+                ? "resent the identical prompt after the provider dropped the reply's output"
+                : r.remedy === "model_retry"
+                  ? `retried the turn once on the next configured model${r.model !== undefined ? ` ${r.model.provider}/${r.model.modelId}` : ""}`
+                  : "re-asked the supervisor once to call exactly one tool",
       detail: boundText(r.message),
       episodeId,
       ...(waitedMs !== undefined ? { waitedMs } : {}),

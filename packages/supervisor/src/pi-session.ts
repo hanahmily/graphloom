@@ -47,6 +47,32 @@ export function isMiniMaxProvider(provider: string): boolean {
   return provider === "minimax-cn" || provider === "minimax";
 }
 
+/** A model as Pi's registry returns it. */
+type RegistryModel = NonNullable<ReturnType<ModelRuntime["getModel"]>>;
+
+/**
+ * Providers whose thinking blocks carry an empty signature (`signature: ""`)
+ * and accept them back. Without `compat.allowEmptySignature`, Pi's
+ * anthropic-messages request builder replays such a block as a plain `text`
+ * block of the assistant turn, so the model reads its own private reasoning
+ * as something it said.
+ */
+export function emitsEmptyThinkingSignatures(provider: string): boolean {
+  return isMiniMaxProvider(provider);
+}
+
+/**
+ * The model a supervisor session runs on: the registry's entry, with the
+ * provider compat flags the supervisor needs. A copy, so the registry's own
+ * object (shared by whatever else resolves that model) is never mutated.
+ */
+export function supervisorSessionModel<M extends RegistryModel>(model: M): M {
+  if (!emitsEmptyThinkingSignatures(model.provider)) return model;
+  const compat = (model as unknown as { compat?: Record<string, unknown> }).compat;
+  if (compat?.allowEmptySignature === true) return model;
+  return { ...model, compat: { ...compat, allowEmptySignature: true } } as M;
+}
+
 export interface CreatePiSupervisorSessionOptions {
   /** Run id for logging / durable binding. */
   runId: string;
@@ -118,11 +144,21 @@ export interface PiSupervisorSession {
    * SupervisorProviderError when no session event arrives for the inactivity
    * limit, or when the prompt outlasts its total cap (`timeoutMs`, default the
    * session's total cap). With `maxTurns`, a turn beyond the cap is aborted before its provider request
-   * and the prompt rejects. `tools` are active for this prompt only.
+   * and the prompt rejects. `tools` are active for this prompt only. With
+   * `done`, a turn that would start once `done()` is true is aborted before its
+   * provider request and the prompt resolves normally: the caller already has
+   * what it asked for (an admitted proposal), so that turn is neither sent nor
+   * charged, and it is no failure or timeout.
    */
   prompt(
     text: string,
-    options?: { signal?: AbortSignal; timeoutMs?: number; maxTurns?: number; tools?: ToolDefinition[] },
+    options?: {
+      signal?: AbortSignal;
+      timeoutMs?: number;
+      maxTurns?: number;
+      tools?: ToolDefinition[];
+      done?: () => boolean;
+    },
   ): Promise<string>;
   /** Provider turns (model calls) started since the last drain, including tool turns. */
   drainTurnCount?(): number;
@@ -132,6 +168,15 @@ export interface PiSupervisorSession {
    * when it carried a tool call or text, or when no reply was recorded.
    */
   lastReplyFailure?(): ProviderFailure | undefined;
+  /**
+   * Take the last prompt out of the model's context so the identical prompt
+   * can be sent again: its user message and its reply are omitted through
+   * Pi's own context-edit mechanism (the transcript keeps them, the model no
+   * longer sees them). Only for a prompt answered in one turn, whose reply is
+   * still the session's latest message; a prompt that ran tool turns first
+   * cannot be resent without repeating them. Returns whether it was omitted.
+   */
+  omitLastExchange?(): boolean;
   /**
    * Compact the session's history now (overflow recovery). Its provider
    * requests are charged to the turn count like any other model call.
@@ -185,10 +230,11 @@ export async function createPiSupervisorSession(
     ...(options.apiKey !== undefined ? { apiKey: options.apiKey } : {}),
   });
 
-  const model = modelRuntime.getModel(provider, modelId);
-  if (!model) {
+  const registered = modelRuntime.getModel(provider, modelId);
+  if (!registered) {
     throw new Error(`Pi model not found: ${provider}/${modelId}`);
   }
+  const model = supervisorSessionModel(registered);
 
   const settingsManager = SettingsManager.inMemory({
     // A guard only: each recovery episode gets its own session seeded with a
@@ -318,6 +364,8 @@ export function wrapPiAgentSession(args: {
   let codingRoot: string | undefined;
   let turns = 0;
   let lastReply: ProviderFailure | undefined;
+  /** The last completed prompt's own user message and single reply, while it can still be omitted. */
+  let lastExchange: { user: unknown; reply: unknown } | undefined;
 
   return {
     runId: args.runId,
@@ -350,7 +398,7 @@ export function wrapPiAgentSession(args: {
       if (!model) {
         throw new Error(`Pi model not found: ${ref.provider}/${ref.modelId}`);
       }
-      await session.setModel(model, { persist: false });
+      await session.setModel(supervisorSessionModel(model), { persist: false });
       // Reset every switch, even to the session's own current level: a prior
       // model may have required thinking enabled, and the new one may reject
       // it just as strictly as this one rejected "off".
@@ -371,9 +419,12 @@ export function wrapPiAgentSession(args: {
       const maxTurns = promptOptions?.maxTurns;
       let promptTurns = 0;
       let turnCapHit = false;
+      let endedDone = false;
       let collected: string[] = [];
       let lastAssistant: Parameters<typeof classifyAssistantMessage>[0] | undefined;
+      let promptUser: unknown;
       lastReply = undefined;
+      lastExchange = undefined;
 
       // Two limits, neither of which cuts off a model that is still producing
       // output: inactivity (no session event for `inactivityMs`, re-armed by
@@ -402,6 +453,8 @@ export function wrapPiAgentSession(args: {
         armInactivity();
         if (event.type === "message_end" && event.message.role === "assistant") {
           lastAssistant = event.message;
+        } else if (event.type === "message_end" && event.message.role === "user") {
+          promptUser ??= event.message;
         } else if (event.type === "compaction_start") {
           // Compaction (manual or Pi's own) makes summarization requests outside
           // turn_start, so charge them here. Pi emits this synchronously after
@@ -415,7 +468,15 @@ export function wrapPiAgentSession(args: {
           turns += COMPACTION_PROVIDER_CALLS;
         } else if (event.type === "turn_start") {
           // Pi awaits listeners before streaming, so aborting here cancels the
-          // turn before its provider request is sent.
+          // turn before its provider request is sent. Pi ends a tool batch on
+          // its own only when every result in it terminates, so a batch that
+          // pairs record_finding with an admitted action would otherwise go
+          // back to the model for a reply nobody reads.
+          if (endedDone || promptOptions?.done?.() === true) {
+            endedDone = true;
+            void session.abort().catch(() => undefined);
+            return;
+          }
           if (maxTurns !== undefined && promptTurns >= maxTurns) {
             turnCapHit = true;
             void session.abort().catch(() => undefined);
@@ -451,8 +512,9 @@ export function wrapPiAgentSession(args: {
           try {
             await session.prompt(text);
           } catch (err) {
-            // However Pi surfaces the abort a limit caused, it is that timeout.
-            if (timedOut === undefined) throw err;
+            // However Pi surfaces the abort a limit caused, it is that timeout
+            // (or the done() end, which is no failure).
+            if (timedOut === undefined && !endedDone) throw err;
           }
         }
         // Follow-up work may keep the session busy after prompt() returns;
@@ -464,6 +526,12 @@ export function wrapPiAgentSession(args: {
           throw new Error(
             (await settleIdle(session, settleTimeoutMs(promptTimeoutMs))) ? "supervisor prompt aborted" : `supervisor prompt aborted; ${STILL_ACTIVE}`,
           );
+        }
+        if (endedDone) {
+          // The abort that ended the turn is ours; let it settle so the next
+          // prompt finds the session idle, and report the reply already read.
+          if (!(await settleIdle(session, settleTimeoutMs(promptTimeoutMs)))) throw new Error(STILL_ACTIVE);
+          return collected.join("").trim();
         }
         if (turnCapHit) {
           throw new Error(`supervisor prompt exceeded its ${maxTurns}-turn allowance`);
@@ -480,6 +548,9 @@ export function wrapPiAgentSession(args: {
           lastAssistant !== undefined
             ? classifyAssistantMessage(lastAssistant, contextWindow !== undefined ? { contextWindow } : {})
             : undefined;
+        if (promptTurns === 1 && promptUser !== undefined && lastAssistant !== undefined) {
+          lastExchange = { user: promptUser, reply: lastAssistant };
+        }
         return collected.join("").trim();
       } finally {
         clearTimeout(total);
@@ -498,6 +569,20 @@ export function wrapPiAgentSession(args: {
     },
     lastReplyFailure() {
       return lastReply;
+    },
+    omitLastExchange() {
+      const exchange = lastExchange;
+      lastExchange = undefined;
+      if (closed || exchange === undefined || !session.isIdle) return false;
+      const messages = session.messages;
+      if (messages.at(-1) !== exchange.reply) return false;
+      try {
+        asRecoverableSession(session)._omitRecoveryAttempt(exchange.reply, [exchange.user]);
+      } catch {
+        return false;
+      }
+      lastReply = undefined;
+      return !session.messages.includes(exchange.reply as never) && !session.messages.includes(exchange.user as never);
     },
     async compact(compactOptions) {
       if (closed) {
@@ -585,6 +670,19 @@ interface MutableToolSession {
 
 function asMutableToolSession(session: AgentSession): MutableToolSession {
   return session as unknown as MutableToolSession;
+}
+
+/**
+ * Pi AgentSession's own omission of a failed attempt (what its auto-retry
+ * uses): appends a durable `context_edit` that hides each message from the
+ * model's context while the raw transcript keeps it, then refreshes state.
+ */
+interface RecoverableSession {
+  _omitRecoveryAttempt(message: unknown, toolResults?: unknown[]): void;
+}
+
+function asRecoverableSession(session: AgentSession): RecoverableSession {
+  return session as unknown as RecoverableSession;
 }
 
 /**
