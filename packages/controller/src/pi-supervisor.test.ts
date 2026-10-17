@@ -663,9 +663,9 @@ describe("supervisor provider failures and deterministic remedies (controller)",
   });
   const returnReply = { reply: JSON.stringify(returnToNormal({ summary: "carry on" }, "return")) };
 
-  async function runWith(session: PiSupervisorSessionPort, runId: string) {
+  async function runWith(session: PiSupervisorSessionPort, runId: string, options: { transientRetryBaseMs?: number } = {}) {
     const env = await makeEnv();
-    const counted = countingDecides(createPiSupervisor({ session }));
+    const counted = countingDecides(createPiSupervisor({ session, ...options }));
     const report = await createController().run({
       taskPath: env.taskPath,
       plugin: createScriptedGraph({
@@ -699,6 +699,40 @@ describe("supervisor provider failures and deterministic remedies (controller)",
     expect(state.budgets.waitMs).toBeLessThanOrEqual(state.intake.budgets.waitMs! - waited);
     const inspected = await createController().inspect(report.stateDir);
     expect(inspected.remedies.map((r) => r.condition)).toEqual(["supervisor provider quota"]);
+  });
+
+  const LIVE_500 = '{"type":"error","error":{"type":"api_error","message":"Internal server error. Please retry your request. (500)"}}';
+
+  it("backs off after a transient 500, charges waitMs, and completes with one decide", async () => {
+    const session = failingSession([{ failure: { failureClass: "transient", message: LIVE_500 } }, returnReply]);
+    const { report, decides, state } = await runWith(session, "pi-transient-1", { transientRetryBaseMs: 200 });
+    expect(report, `${report.stopReason}: ${report.blocker}`).toMatchObject({ status: "succeeded" });
+    expect(decides).toBe(1);
+    expect(session.prompts).toBe(2);
+    expect(state.remedies).toMatchObject([
+      {
+        condition: "supervisor provider transient",
+        detail: LIVE_500,
+        remedy: expect.stringMatching(/^backed off \d+s after a transient provider error and retried the turn$/),
+      },
+    ]);
+    const waited = state.remedies![0]!.waitedMs!;
+    expect(waited).toBeGreaterThanOrEqual(200);
+    expect(state.budgets.waitMs).toBeLessThanOrEqual(state.intake.budgets.waitMs! - waited);
+  });
+
+  it("stops naming transient once the turn's retries are spent", async () => {
+    const failing = { failure: { failureClass: "transient" as const, message: LIVE_500 } };
+    const session = failingSession([failing, failing, failing, failing, returnReply]);
+    const { report, decides, state } = await runWith(session, "pi-transient-stop-1", { transientRetryBaseMs: 10 });
+    expect(report.status).toBe("stopped");
+    expect(decides).toBe(1);
+    expect(session.prompts).toBe(4);
+    expect(report.stopReason).toBe(`supervisor provider transient: ${LIVE_500}`);
+    expect(report.blocker).toBe(
+      `supervisor provider transient: ${LIVE_500} (not remedied: still failing after 3 retries in this turn)`,
+    );
+    expect(state.remedies?.map((r) => r.condition)).toEqual(Array.from({ length: 3 }, () => "supervisor provider transient"));
   });
 
   it("compacts after an overflow and retries the turn", async () => {

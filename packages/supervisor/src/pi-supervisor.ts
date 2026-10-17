@@ -95,6 +95,12 @@ export interface CreatePiSupervisorOptions {
    */
   quotaRetryMs?: number;
   /**
+   * First backoff before retrying a transient provider error (5xx, overloaded,
+   * "please retry"); each further retry in the turn doubles it. Default 2_000
+   * (2s, 4s, 8s). A retry time the provider states replaces the backoff.
+   */
+  transientRetryBaseMs?: number;
+  /**
    * Hold this supervisor's `stop`, `reenter` and validator- or executor-blaming
    * repairs to citing evidence or an episode probe (default true). Turn it off
    * only for a session that cannot call tools and so cannot probe or list evidence.
@@ -105,6 +111,9 @@ export interface CreatePiSupervisorOptions {
 const MAX_PATCH_SUMMARY_CHARS = 2_000;
 /** Quota waits one decision turn may take before the failure stops the run. */
 const MAX_QUOTA_WAITS = 3;
+/** Transient-error retries one decision turn may make before the failure stops the run. */
+const MAX_TRANSIENT_RETRIES = 3;
+const DEFAULT_TRANSIENT_RETRY_BASE_MS = 2_000;
 /** Upper bound of one compaction's provider requests (mirrors pi-session.ts). */
 const COMPACTION_PROVIDER_CALLS = 2;
 /** A compaction plus at least one retried turn. */
@@ -150,6 +159,10 @@ export function createPiSupervisor(options: CreatePiSupervisorOptions): PiSuperv
     options.quotaRetryMs !== undefined && Number.isFinite(options.quotaRetryMs) && options.quotaRetryMs > 0
       ? Math.ceil(options.quotaRetryMs)
       : undefined;
+  const transientRetryBaseMs =
+    options.transientRetryBaseMs !== undefined && Number.isFinite(options.transientRetryBaseMs) && options.transientRetryBaseMs >= 0
+      ? Math.ceil(options.transientRetryBaseMs)
+      : DEFAULT_TRANSIENT_RETRY_BASE_MS;
 
   /**
    * Settle the model calls of one prompt: the turns that actually started, so
@@ -255,6 +268,7 @@ export function createPiSupervisor(options: CreatePiSupervisorOptions): PiSuperv
     // one wait budget and one compaction across the whole turn.
     let waitLeft = Math.max(0, input.maxWaitMs ?? 0);
     let quotaWaits = 0;
+    let transientRetries = 0;
     let compacted = false;
     let timeoutRetried = false;
     let resends = 0;
@@ -287,7 +301,7 @@ export function createPiSupervisor(options: CreatePiSupervisorOptions): PiSuperv
     const freshPrompt = () => (followUp === undefined ? opening : `${opening}\n\n${followUp}`);
 
     /**
-     * One prompt. A provider error (quota, overflow, auth, unknown) is
+     * One prompt. A provider error (quota, transient, overflow, auth, unknown) is
      * remedied here without asking the model what to do, or thrown as a
      * SupervisorProviderError; it never reaches admission, so it is never
      * counted as an inadmissible proposal. A reply that arrived but is empty
@@ -393,6 +407,36 @@ export function createPiSupervisor(options: CreatePiSupervisorOptions): PiSuperv
             waitLeft -= waited;
             quotaWaits += 1;
             remedy(failure, "wait_and_retry", waited, waitBasis);
+            if (input.signal?.aborted) throw new Error("supervisor prompt aborted");
+            continue;
+          }
+          case "transient": {
+            // A provider-side failure (5xx, overloaded, "please retry"): back
+            // off exponentially, or until the retry time the provider states.
+            if (transientRetries >= MAX_TRANSIENT_RETRIES) {
+              throw last.withUnremedied(`still failing after ${MAX_TRANSIENT_RETRIES} retries in this turn`);
+            }
+            if ((remainingCalls() ?? 1) < 1) throw last.withUnremedied("no provider calls left in the run's budget to retry");
+            const waitBasis = failure.retryAt !== undefined ? ("provider" as const) : ("backoff" as const);
+            const waitMs =
+              failure.retryAt !== undefined
+                ? Math.max(0, Date.parse(failure.retryAt) - Date.now())
+                : transientRetryBaseMs * 2 ** transientRetries;
+            if (waitMs > waitLeft) {
+              throw last.withUnremedied(
+                (waitBasis === "provider"
+                  ? `the provider's retry time ${failure.retryAt} is ${Math.ceil(waitMs / 1000)}s away`
+                  : `retry ${transientRetries + 1} needs a ${Math.ceil(waitMs / 1000)}s backoff`) +
+                  `; ${Math.floor(waitLeft / 1000)}s of the run's wait budget remain`,
+              );
+            }
+            const started = Date.now();
+            await abortableSleep(waitMs, input.signal);
+            const elapsed = Date.now() - started;
+            const waited = Math.min(waitLeft, input.signal?.aborted === true ? elapsed : Math.max(waitMs, elapsed));
+            waitLeft -= waited;
+            transientRetries += 1;
+            remedy(failure, "backoff_and_retry", waited, waitBasis);
             if (input.signal?.aborted) throw new Error("supervisor prompt aborted");
             continue;
           }
