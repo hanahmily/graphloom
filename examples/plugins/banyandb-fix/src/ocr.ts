@@ -1,4 +1,5 @@
 import type { DecisionRecord } from "./decision-record.js";
+import { MAX_DISCOVERY_ROUNDS } from "./constants.js";
 import type { Issue } from "./evidence.js";
 import { issueRef } from "./prompts.js";
 import { clip, PRIOR_STATUSES, type PriorStatus } from "./review-common.js";
@@ -99,10 +100,12 @@ export function reviewBackground(issue: Issue, record: DecisionRecord): string {
  * reviews. `ocr` is the absolute path the environment check found, since the
  * agent's shell may not have it on PATH.
  */
-export function codeReviewInstruction(args: { ocr: string; base: string; background: string; known?: KnownFindings; sweep?: boolean }): string {
+export function codeReviewInstruction(args: { ocr: string; base: string; background: string; known?: KnownFindings; sweep?: boolean; round?: number }): string {
   const ocr = shellQuote(args.ocr);
   const open = args.known?.open ?? [];
   const settled = args.known?.settled ?? [];
+  // After the discovery rounds the pass verifies the known findings only.
+  const verifying = args.round !== undefined && args.round > MAX_DISCOVERY_ROUNDS;
   const known = [
     ...(open.length > 0
       ? [
@@ -118,8 +121,17 @@ export function codeReviewInstruction(args: { ocr: string; base: string; backgro
           ...settled.map((f) => `- ${f.id} (${f.state}) ${f.description}`),
         ]
       : []),
-    ...(args.sweep === true
+    ...(args.sweep === true && !verifying
       ? ["", "An earlier pass on this same change reported the findings above, and they are being handled. Review every file on your list again and look for critical or high issues that are not on the list."]
+      : []),
+    ...(verifying
+      ? [
+          "",
+          `This is review round ${args.round}, a verification round. The first ${MAX_DISCOVERY_ROUNDS} rounds of this run's review were for finding issues, and that search is closed: do not look for new issues and do not raise new findings. Your job is to verify the known findings against the current code:`,
+          "- give every open finding listed above a status in `prior`, with a reason that names the current file:line you checked;",
+          "- check that each fixed finding listed above stays fixed, and report one by name in `finding` only if its defect is back.",
+          "Still go through every file on your list, so your coverage summary is complete. If you cannot leave a new critical defect unmentioned, you may report it as a comment with `finding` \"\": it will not block this change and is not verified; the pull request lists it as a follow-up.",
+        ]
       : []),
   ];
   return [
@@ -128,11 +140,14 @@ export function codeReviewInstruction(args: { ocr: string; base: string; backgro
     "1. Run `" + `${ocr} delegate preview --format json` + "`. It lists the reviewable files (workspace mode: tracked changes and new untracked files) and the files it excluded, with reasons.",
     "2. The change's Go test files (`_test.go`) are reviewable too, even when preview excludes them as tests: add them to your list. Leave out other excluded files.",
     "3. Run `" + `${ocr} delegate rule --format json <path>...` + "` with every file on your list. Its output groups the files by the review rules that apply to them.",
-    "4. For each file, read its diff (`git diff HEAD -- <path>`; read a new untracked file whole) and review it against its rule group and the extra rule below, reading any other code you need. Check every file off as reviewed, or as skipped with a concrete reason. Do not stop at the first serious finding.",
-    "5. Report each finding once, with the path, the line range in the new file, a category, a severity, and in `evidence` the concrete failure: the input or sequence of calls and what goes wrong, with file:line. An independent verifier checks every critical and high finding against the code. Drop likely false positives. Check that every file on your list is accounted for.",
-    "",
-    "Extra rule for Go files:",
-    ...REVIEW_RULE.map((r) => `- ${r}`),
+    verifying
+      ? "4. For each file, read its diff (`git diff HEAD -- <path>`; read a new untracked file whole) and check the known findings below against it, reading any other code you need. Check every file off as reviewed, or as skipped with a concrete reason."
+      : "4. For each file, read its diff (`git diff HEAD -- <path>`; read a new untracked file whole) and review it against its rule group and the extra rule below, reading any other code you need. Check every file off as reviewed, or as skipped with a concrete reason. Do not stop at the first serious finding.",
+    verifying
+      ? "5. Give every open finding its status in `prior`; a fixed finding whose defect is back is a comment naming it in `finding`, with the path, the line range in the new file, a severity and in `evidence` the concrete failure, with file:line. Check that every file on your list is accounted for."
+      : "5. Report each finding once, with the path, the line range in the new file, a category, a severity, and in `evidence` the concrete failure: the input or sequence of calls and what goes wrong, with file:line. An independent verifier checks every critical and high finding against the code. Drop likely false positives. Check that every file on your list is accounted for.",
+    // The extra rule asks for new findings; a verification round raises none.
+    ...(verifying ? [] : ["", "Extra rule for Go files:", ...REVIEW_RULE.map((r) => `- ${r}`)]),
     ...known,
     "",
     "What the change is for:",

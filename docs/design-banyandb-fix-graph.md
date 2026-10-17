@@ -369,6 +369,52 @@ which saves round trips. A passing round needs only one pass, since its first
 pass raises nothing that survives verification. A resume starts a new
 generation, so the first pass after it runs again with the ledger intact.
 
+### Discovery rounds
+
+New findings may be raised for at most three rounds (`MAX_DISCOVERY_ROUNDS`).
+After that, the reviewer only verifies that the findings already raised are
+fixed.
+
+- A round is the review of one candidate: the passes on one candidate digest,
+  sweep passes included. The round of a pass is the number of distinct
+  candidates reviewed so far, this one included, counted from the review
+  passes in the ledger. Rounds only move forward: a candidate reviewed before
+  (the implementer returned to it) stays in the latest round. Counting needs
+  no private state, so it survives a resume, a reentry and a plugin update.
+- Rounds 1 to 3 are discovery rounds and work as described above.
+- From round 4 on, rounds are verify-only:
+  1. The pass's assignment says it is a verification round. It must not look
+     for new issues; it gives every open finding a status in `prior` and
+     checks that the fixed ones stay fixed. It still checks off every file on
+     its list, and the result schema is unchanged.
+  2. A critical or high comment that names no known finding does not become a
+     finding: it neither blocks nor goes to the verifier. The ledger keeps it
+     as a follow-up, and the pull request lists it under "Follow-ups".
+  3. Known findings work as before. One reported still present keeps
+     blocking and returns to Fix with the reviewer's latest note; a fixed one
+     named again reopens as a regression and is verified.
+  4. There is no sweep: one usable pass per candidate is enough. An unusable
+     pass, for example one that left an open finding without a status, is
+     retried up to the sweep cap.
+- Medium and low comments are unchanged in every round.
+
+So a verify-only round passes once every finding raised in the discovery
+rounds is fixed or dismissed. The rule comes from the #119 dogfood run
+(`4c70ff66-dd9`). It had 24 high findings over 11 review attempts on nine
+candidates. Each was fixed in the next Fix round, but each review round raised
+new P1s in code the previous fix had just written (F13 to F16, F17 to F19, F20
+to F22, F23, F24). The run needed 11 Fix-to-Review round trips to converge.
+Under this rule, F17 to F24, all raised from round 4 on, would have been
+follow-ups.
+
+The `code-review` statement and the validator binding are unchanged, so a
+running run can move to this version with `resume --update-plugin`
+(`assertDefinitionUnchanged` refuses changed requirements or bindings). The
+statement still holds as written, because a verify-only round raises no
+findings. A run that adopts the rule after round 3 rebuilds its ledger under
+the rule: high comments it first raised in round 4 or later become
+follow-ups, even ones already confirmed.
+
 ### Acceptance
 
 The code review requirement passes when all of these hold:
@@ -396,8 +442,9 @@ pass on that candidate.
 4. Delivery needs saturation: the last pass on the delivered candidate raised
    nothing that survived verification, and nothing confirmed is still open.
 5. Each failed round reports its progress to the supervisor, for example:
-   "passes on this change: 2 (sweep saturated); 2 fixed, 1 dismissed, 1 new
-   confirmed, 0 regressions, 0 disputed". A round that fixed nothing and ended
+   "review round 2 (discovery round, 3 at most); passes on this change: 2
+   (sweep saturated); 2 fixed, 1 dismissed, 1 new confirmed, 0 regressions,
+   0 disputed". A verify-only round also counts its follow-ups. A round that fixed nothing and ended
    without saturating is reported as not converging.
 
 The supervisor still decides whether to reenter Fix or stop, and the

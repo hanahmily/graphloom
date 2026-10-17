@@ -22,7 +22,11 @@ import {
   findingById,
   findingLedger,
   ginkgoSpecs,
+  MAX_DISCOVERY_ROUNDS,
   MAX_SWEEP_PASSES,
+  reviewPhase,
+  reviewRound,
+  verifyOnly,
   observablePath,
   parseCodeReview,
   parseVerification,
@@ -284,7 +288,7 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
   }
 
   const definition = createGraph().describe(BANYANDB);
-  for (let step = 0; step < 60; step += 1) {
+  for (let step = 0; step < 100; step += 1) {
     const view: RunView = {
       runId: "run",
       task: { request, repo: "../skywalking-banyandb" },
@@ -345,7 +349,7 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
       return { decision, decisions, jobs, evidence, receipts, observed };
     }
   }
-  throw new Error("the graph did not finish in 60 steps");
+  throw new Error("the graph did not finish in 100 steps");
 }
 
 /** What the controller shows validators: this accepted candidate, with only the latest review and the latest observation of each file. */
@@ -1173,6 +1177,143 @@ describe("findings ledger", () => {
     expect(quoteMatches({ ...BOUNDED, text: "done()" }, SCHEDULER)).toBe(false);
     expect(["pkg/timestamp/scheduler.go", ".golangci.yml", "banyand/Makefile.inc"].every(observablePath)).toBe(true);
     for (const p of ["../x.go", "/etc/passwd", "pkg/./x.go", ".git/config", "pkg/timestamp", ".github", "pkg//x.go", "a b.go"]) expect(observablePath(p), p).toBe(false);
+  });
+});
+
+describe("review discovery rounds", () => {
+  const defect = (line: number) => ({ ...HANG, start_line: line, end_line: line, content: `defect at ${line}` });
+  const verifyRound = /This is review round \d+, a verification round/;
+
+  it("raises new findings for three rounds, then only verifies the known ones and lists new comments as follow-ups", () => {
+    const { decision, jobs } = simulate({
+      reenter: 4,
+      codeReviews: [
+        // Round 1 (d1): F1, verified, and a sweep pass that finds nothing more.
+        reviewed([defect(1)]),
+        priorPass({ F1: "still_present" }),
+        // Round 2 (d2): F1 fixed, F2 new.
+        priorPass({ F1: "resolved" }, [defect(2)]),
+        priorPass({ F2: "still_present" }),
+        // Round 3 (d3): F2 fixed, F3 new.
+        priorPass({ F2: "resolved" }, [defect(3)]),
+        priorPass({ F3: "still_present" }),
+        // Round 4 (d4): verification only. F3 is still there; the new high comment is a follow-up.
+        priorPass({ F3: "still_present" }, [defect(4)]),
+        // Round 5 (d5): F3 fixed, another new comment kept as a follow-up.
+        priorPass({ F3: "resolved" }, [defect(5)]),
+      ],
+    });
+    expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+    const passes = jobs.filter((j) => j.stageId === "review" && j.purpose === "review");
+    // Two passes (a pass and its sweep) in each discovery round, one in each verification round.
+    expect(passes).toHaveLength(8);
+    for (const p of passes.slice(0, 6)) expect(assignment(p)).not.toMatch(verifyRound);
+    expect(assignment(passes[6])).toContain(`This is review round 4, a verification round. The first ${MAX_DISCOVERY_ROUNDS} rounds`);
+    expect(assignment(passes[6])).toContain("do not look for new issues and do not raise new findings");
+    expect(assignment(passes[6])).toContain("- F3 (confirmed) pkg/timestamp/scheduler.go:3 (high, bug): defect at 3");
+    expect(assignment(passes[6])).not.toContain("An earlier pass on this same change");
+    expect(assignment(passes[6])).not.toContain("Extra rule for");
+    expect(assignment(passes[5])).toContain("Extra rule for");
+    expect(assignment(passes[7])).toContain("This is review round 5, a verification round");
+    // Only the discovery rounds' findings went to the verifier.
+    const verifications = jobs.filter((j) => j.stageId === "review" && j.purpose === "diagnostic" && j.kind === "agent");
+    expect(verifications.map((j) => [...assignment(j).matchAll(/^- (F\d+) /gm)].map((m) => m[1]))).toEqual([["F1"], ["F2"], ["F3"]]);
+    // F3, still present in round 4, went back to Fix with the reviewer's latest note.
+    const work = jobs.filter((j) => j.purpose === "work");
+    expect(work).toHaveLength(5);
+    expect(assignment(work[4])).toMatch(/F3 Reviewer, latest pass on the current candidate \(ev-\d+\): still present — F3 is still_present\./);
+    expect(assignment(work[4])).not.toContain("defect at 4");
+    const { body } = deliverArgs(jobs);
+    expect(body).toContain("no critical or high finding left open (3 fixed during review); 2 critical or high comment(s) raised after the 3 discovery rounds, listed as follow-ups.");
+    expect(body).toContain("## Follow-ups");
+    expect(body).toContain("- Code review: pkg/timestamp/scheduler.go:4 (high, bug): defect at 4 (raised in review round 4, after the 3 discovery rounds; not verified or fixed in this change)");
+    expect(body).toContain("- Code review: pkg/timestamp/scheduler.go:5 (high, bug): defect at 5 (raised in review round 5");
+  });
+
+  it("hands a known finding still present in a verification round to the supervisor, without a sweep or a verifier", () => {
+    const { decision, jobs } = simulate({
+      reenter: 3,
+      codeReviews: [
+        reviewed([defect(1)]),
+        priorPass({ F1: "still_present" }),
+        priorPass({ F1: "still_present" }),
+        priorPass({ F1: "still_present" }),
+        priorPass({ F1: "still_present" }, [defect(9), { ...defect(10), severity: "critical" }]),
+      ],
+    });
+    expect(decision.action).toMatchObject({ type: "supervise" });
+    const reason = (decision.action as { supervise: { reason: string } }).supervise.reason;
+    expect(reason).toContain("1 critical or high finding(s) confirmed or disputed: F1 ");
+    expect(reason).toContain("review round 4 (verify-only after 3 discovery rounds); passes on this change: 1");
+    expect(reason).toContain("2 new comment(s) kept as follow-ups");
+    expect(jobs.filter((j) => j.stageId === "review" && j.purpose === "review")).toHaveLength(5);
+    expect(jobs.filter((j) => j.stageId === "review" && j.purpose === "diagnostic" && j.kind === "agent")).toHaveLength(1);
+  });
+
+  describe("round counting", () => {
+    let n = 0;
+    const pass = (digest: string, comments: Array<Record<string, unknown>> = [], statuses: Record<string, string> = {}, generation = 1): EvidenceRecord => ({
+      ref: `rr-${++n}`,
+      kind: "other",
+      generation,
+      candidateDigest: digest,
+      payload: {
+        codingAgent: { status: "completed", output: priorPass(statuses, comments).output },
+        producer: { operationId: `op-${n}`, stageId: "review", purpose: "review", readOnly: true, kind: "agent", executorId: "graphloom.coding-agent/run" },
+      },
+    });
+
+    it("groups the sweep's passes on one candidate into one round, and never moves a round back", () => {
+      const evidence = [pass("d1"), pass("d1"), pass("d1"), pass("d2"), pass("d3"), pass("d3"), pass("d4"), pass("d2")];
+      const ledger = findingLedger(evidence);
+      expect(ledger.passes.map((p) => p.round)).toEqual([1, 1, 1, 2, 3, 3, 4, 4]);
+      expect(reviewRound(ledger, "d2")).toBe(4);
+      expect(reviewRound(ledger, "d5")).toBe(5);
+      expect([3, 4].map(verifyOnly)).toEqual([false, true]);
+      expect(reviewPhase(ledger, "d4")).toEqual({ round: 4, phase: "verify-only" });
+      expect(reviewPhase(findingLedger(evidence.slice(0, 6)), "d3")).toEqual({ round: 3, phase: "discovery" });
+    });
+
+    it("counts rounds from evidence alone, so a resume or a validator's history view sees the same round", () => {
+      const evidence = [pass("d1", [defect(1)]), pass("d2", [], { F1: "resolved" }), pass("d3"), pass("d4", [defect(4)], {}, 7), pass("d4", [defect(5)], {}, 9)];
+      const ledger = findingLedger(evidence);
+      expect(ledger.findings.map((f) => f.id)).toEqual(["F1"]);
+      expect(ledger.followUps.map((f) => [f.comment.content, f.round])).toEqual([["defect at 4", 4], ["defect at 5", 4]]);
+      expect(ledger.passes.at(-1)!.raised).toEqual([]);
+      // The validator reads other candidates as history and only the latest pass on the current one.
+      const validatorView = findingLedger([...evidence.slice(0, 3), evidence[4]!]);
+      expect(validatorView.passes.at(-1)!.round).toBe(4);
+      expect(validatorView.followUps.map((f) => f.comment.content)).toEqual(["defect at 5"]);
+    });
+
+    it("still reopens a fixed finding the reviewer names again in a verification round", () => {
+      const evidence = [pass("d1", [defect(1)]), pass("d2", [], { F1: "resolved" }), pass("d3"), pass("d4", [{ ...defect(1), finding: "F1" }])];
+      const ledger = findingLedger(evidence);
+      expect(ledger.findings[0]).toMatchObject({ id: "F1", state: "pending", regressedOn: "d4" });
+      expect(ledger.followUps).toEqual([]);
+    });
+  });
+
+  it("passes the code review requirement in a verification round that raises only new comments", () => {
+    let n = 0;
+    const pass = (digest: string, comments: Array<Record<string, unknown>> = []): EvidenceRecord => ({
+      ref: `rv-${++n}`,
+      kind: "review",
+      generation: 1,
+      candidateDigest: digest,
+      payload: {
+        codingAgent: { status: "completed", output: priorPass({}, comments).output },
+        producer: { operationId: `op-${n}`, stageId: "review", purpose: "review", readOnly: true, kind: "agent", executorId: "graphloom.coding-agent/run" },
+      },
+    });
+    const history = [pass("d1"), pass("d2"), pass("d3")];
+    const evaluate = (current: EvidenceRecord[], earlier: EvidenceRecord[], digest: string) =>
+      validatorById("open-code-review")!.evaluate({ requirementId: "code-review", statement: "s", evidence: current, history: earlier, candidateDigest: digest }) as { status: string; reason: string };
+    const later = evaluate([pass("d4", [defect(4)])], history, "d4");
+    expect(later.status).toBe("passed");
+    expect(later.reason).toContain("1 follow-up(s) raised after the discovery rounds");
+    // The same comment in round 3 is a finding and must be verified first.
+    expect(evaluate([pass("d3", [defect(4)])], history.slice(0, 2), "d3").status).toBe("inconclusive");
   });
 });
 

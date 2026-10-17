@@ -85,8 +85,9 @@ invalidates it.
 | Review, no pass on the current change in this generation | Dispatch a fresh read-only Codex reviewer with open-code-review's delegation workflow, the `ocr` path from the environment check, the review rule, the issue and plan, and the known findings by name |
 | Review, but no `ocr` path was recorded | Supervise |
 | A pass raised critical or high findings | Dispatch one fresh read-only Claude Code verifier for every finding pending on the change, then observe the files its refutations quote |
-| A finding the pass raised was confirmed or disputed | Another pass, told every known finding, looks for new ones; at most four passes per change |
-| Code review passes | Validate Review, then deliver; the PR body lists dismissed findings |
+| A finding the pass raised was confirmed or disputed | Another pass, told every known finding, looks for new ones; at most four passes per change, and only in the first three review rounds |
+| Review round 4 or later (a round is one reviewed candidate) | One verification pass: statuses for the known findings only. A new critical or high comment becomes a non-blocking follow-up, listed in the PR body, and is not verified |
+| Code review passes | Validate Review, then deliver; the PR body lists dismissed findings and review follow-ups |
 | Code review fails, misses or skips a file, or leaves a finding confirmed or disputed | Supervise with the round's progress; if it re-enters Fix, the planner revisits its plan with the confirmed findings only |
 | Delivered | Stop complete; the branch has a short commit message, and the delivery report holds the PR body |
 | Request names no issue | Stop incompatible |

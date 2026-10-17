@@ -1,5 +1,5 @@
 import type { EvidenceRecord } from "@graphloom/sdk";
-import { MAX_SWEEP_PASSES, REVIEW_STAGE } from "./constants.js";
+import { MAX_DISCOVERY_ROUNDS, MAX_SWEEP_PASSES, REVIEW_STAGE } from "./constants.js";
 import { agentRuns, type AgentRun } from "./evidence.js";
 import {
   clip,
@@ -84,12 +84,28 @@ export interface ReviewerNote {
 export interface ReviewPass {
   run: AgentRun;
   digest: string;
+  /** The review round the pass belongs to: how many distinct candidates had been reviewed, this one included. */
+  round: number;
   report?: CodeReviewReport;
   problem?: string;
   /** Findings this pass raised: new ones, regressions and dismissed ones raised again. */
   raised: string[];
   /** Open findings the pass was shown and gave no status. */
   missingStatus: string[];
+  /** New critical or high comments of a verify-only round, recorded as follow-ups instead of findings. */
+  followUps: number;
+}
+
+/**
+ * A critical or high comment a pass raised after the discovery rounds closed:
+ * not a finding, so it neither blocks nor goes to the verifier, but the pull
+ * request lists it so a maintainer can follow it up.
+ */
+export interface FollowUp {
+  comment: ReviewComment;
+  digest: string;
+  round: number;
+  ref: string;
 }
 
 export interface Verification {
@@ -104,6 +120,9 @@ export interface FindingLedger {
   findings: Finding[];
   passes: ReviewPass[];
   verifications: Verification[];
+  followUps: FollowUp[];
+  /** The candidates reviewed so far, in the order their first pass appears: round n reviewed `reviewed[n - 1]`. */
+  reviewed: string[];
 }
 
 const OPEN: ReadonlySet<FindingState> = new Set(["pending", "confirmed", "disputed"]);
@@ -111,7 +130,7 @@ export const isOpen = (f: Finding | undefined): f is Finding => f !== undefined 
 
 export function findingLedger(evidence: EvidenceRecord[]): FindingLedger {
   const files = fileIndex(evidence);
-  const ledger: FindingLedger = { findings: [], passes: [], verifications: [] };
+  const ledger: FindingLedger = { findings: [], passes: [], verifications: [], followUps: [], reviewed: [] };
   for (const record of evidence) {
     const digest = record.candidateDigest;
     if (digest === undefined) continue;
@@ -121,6 +140,31 @@ export function findingLedger(evidence: EvidenceRecord[]): FindingLedger {
     if (verification !== undefined) applyVerification(ledger, verification, digest, files);
   }
   return ledger;
+}
+
+/**
+ * The review round a pass on `digest` belongs to. Rounds only move forward: a
+ * new candidate starts the next one, and a candidate reviewed before (the
+ * implementer went back to it) stays in the latest round rather than reopening
+ * discovery.
+ */
+export function reviewRound(ledger: FindingLedger, digest: string): number {
+  return ledger.reviewed.includes(digest) ? ledger.reviewed.length : ledger.reviewed.length + 1;
+}
+
+/** After the discovery rounds the reviewer only verifies the findings already raised. */
+export const verifyOnly = (round: number): boolean => round > MAX_DISCOVERY_ROUNDS;
+
+export type ReviewPhase = "discovery" | "verify-only";
+
+/**
+ * The one decision on how a candidate is reviewed: its round, and whether
+ * the reviewer may still raise new findings on it. The graph, the ledger's
+ * summary and the assignment all ask here.
+ */
+export function reviewPhase(ledger: FindingLedger, digest: string): { round: number; phase: ReviewPhase } {
+  const round = reviewRound(ledger, digest);
+  return { round, phase: verifyOnly(round) ? "verify-only" : "discovery" };
 }
 
 /** The pass read every file on its list, skipped none, and gave every status it owed. */
@@ -155,6 +199,9 @@ export function findingById(ledger: FindingLedger, id: string): Finding | undefi
 
 /** A round's progress for the supervisor: passes on the candidate and what they settled. */
 export function roundSummary(ledger: FindingLedger, digest: string, passes: ReviewPass[]): string {
+  const { round, phase } = reviewPhase(ledger, digest);
+  const mode = phase === "verify-only" ? `verify-only after ${MAX_DISCOVERY_ROUNDS} discovery rounds` : `discovery round, ${MAX_DISCOVERY_ROUNDS} at most`;
+  const followUps = ledger.followUps.filter((f) => f.digest === digest).length;
   const last = passes.at(-1);
   const done = last !== undefined && saturated(ledger, last);
   const sweep = done ? "sweep saturated" : passes.length >= MAX_SWEEP_PASSES ? `sweep stopped at the ${MAX_SWEEP_PASSES}-pass limit` : "sweep not saturated";
@@ -165,7 +212,8 @@ export function roundSummary(ledger: FindingLedger, digest: string, passes: Revi
   const regressions = count((f) => f.regressedOn === digest);
   const disputed = count((f) => f.state === "disputed");
   return (
-    `passes on this change: ${passes.length} (${sweep}); ${fixed} fixed, ${dismissed} dismissed, ${confirmed} new confirmed, ${regressions} regression(s), ${disputed} disputed` +
+    `review round ${round} (${mode}); passes on this change: ${passes.length} (${sweep}); ${fixed} fixed, ${dismissed} dismissed, ${confirmed} new confirmed, ${regressions} regression(s), ${disputed} disputed` +
+    (followUps > 0 ? `, ${followUps} new comment(s) kept as follow-ups` : "") +
     (fixed === 0 && !done ? "; not converging" : "")
   );
 }
@@ -208,7 +256,9 @@ function reviewerLead(note: ReviewerNote, current: string | undefined): string {
 
 function applyPass(ledger: FindingLedger, run: AgentRun, digest: string, files: FileIndex): void {
   const parsed = run.status === "completed" ? parseCodeReview(run.output) : { problem: `the code reviewer did not finish (${run.status})` };
-  const pass: ReviewPass = { run, digest, raised: [], missingStatus: [], ...("report" in parsed ? { report: parsed.report } : { problem: parsed.problem }) };
+  const { round, phase } = reviewPhase(ledger, digest);
+  if (!ledger.reviewed.includes(digest)) ledger.reviewed.push(digest);
+  const pass: ReviewPass = { run, digest, round, raised: [], missingStatus: [], followUps: 0, ...("report" in parsed ? { report: parsed.report } : { problem: parsed.problem }) };
   ledger.passes.push(pass);
   if (pass.report === undefined) return;
   const report = pass.report;
@@ -258,10 +308,24 @@ function applyPass(ledger: FindingLedger, run: AgentRun, digest: string, files: 
       pass.raised.push(known.id);
       continue;
     }
+    // Discovery is closed: a new comment is a follow-up, not a finding.
+    if (phase === "verify-only") {
+      pass.followUps += 1;
+      const key = followUpKey(c);
+      if (!ledger.followUps.some((f) => followUpKey(f.comment) === key)) ledger.followUps.push({ comment: c, digest, round, ref: run.record.ref });
+      continue;
+    }
     const f: Finding = { id: `F${ledger.findings.length + 1}`, comment: c, state: "pending", on: digest, raisedOn: digest };
     ledger.findings.push(f);
     pass.raised.push(f.id);
   }
+}
+
+const followUpKey = (c: ReviewComment): string => `${c.path}:${c.start_line}:${c.content.trim()}`;
+
+/** A follow-up for the pull request: where and what, and the round that raised it. */
+export function describeFollowUp(f: FollowUp): string {
+  return `${describeComment(f.comment)} (raised in review round ${f.round}, after the ${MAX_DISCOVERY_ROUNDS} discovery rounds; not verified or fixed in this change)`;
 }
 
 /** How a pass's status for an open finding changes it; fixing needs a candidate other than the one it was last seen on. */

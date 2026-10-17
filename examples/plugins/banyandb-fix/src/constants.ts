@@ -35,6 +35,14 @@ export const LIST_ISSUE_COMMENTS: ExecutorPin = { id: "graphloom.github/list-iss
 export const MAX_FIX_CORRECTIONS = 2;
 /** Code review passes on one change in one generation; a sweep that reaches it has not saturated. */
 export const MAX_SWEEP_PASSES = 4;
+/**
+ * Review rounds in which the code reviewer may raise new findings. A round is
+ * the review of one candidate (one distinct candidate digest); the sweep's
+ * passes on that candidate belong to it. From the next round on the reviewer
+ * only verifies the findings already raised: a new critical or high comment
+ * becomes a non-blocking follow-up for the pull request.
+ */
+export const MAX_DISCOVERY_ROUNDS = 3;
 
 /** Command ids the validators read. */
 export const COMMAND = {
