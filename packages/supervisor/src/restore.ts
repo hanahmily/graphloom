@@ -26,6 +26,8 @@ export interface RestorePiSupervisorOptions {
   configuredModels?: SupervisorModelRef[];
   /** Inactivity limit of one prompt (see CreatePiSupervisorSessionOptions). */
   promptTimeoutMs?: number;
+  /** Record raw provider streams (see CreatePiSupervisorSessionOptions). */
+  rawStreamCapture?: boolean;
   /** Total cap of one prompt (see CreatePiSupervisorSessionOptions). */
   promptTotalTimeoutMs?: number;
   systemPrompt?: string;
@@ -65,6 +67,7 @@ export async function restorePiSupervisorFromBinding(
     ...(options.apiKey !== undefined ? { apiKey: options.apiKey } : {}),
     ...(options.promptTimeoutMs !== undefined ? { promptTimeoutMs: options.promptTimeoutMs } : {}),
     ...(options.promptTotalTimeoutMs !== undefined ? { promptTotalTimeoutMs: options.promptTotalTimeoutMs } : {}),
+    ...(options.rawStreamCapture !== undefined ? { rawStreamCapture: options.rawStreamCapture } : {}),
     ...(options.systemPrompt !== undefined ? { systemPrompt: options.systemPrompt } : {}),
     ...(options.cwd !== undefined ? { cwd: options.cwd } : {}),
     ...(options.repairsDir !== undefined ? { repairsDir: options.repairsDir } : {}),

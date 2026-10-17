@@ -488,3 +488,28 @@ recovers on the next configured model for that turn only, and exhausted remedies
 or allowance stop by name; a `minimax-cn` session replays an empty-signature
 thinking block as thinking (through a local Anthropic-compatible endpoint); and
 settlements reach the next prompt. The MiniMax connectivity check above remains the only live check.
+
+## Raw provider stream capture
+
+`rawStreamCapture: true` in the supervisor config records every supervisor
+provider request and its response bytes, one JSON line per request, in
+`<stateDir>/supervisor/raw/<sessionId>.raw.jsonl`
+(`packages/supervisor/src/raw-stream.ts`). Each record holds the request
+payload (model, messages, tools, thinking), the status, the content-block
+types and stop reasons the stream carried, the block types Pi's
+Anthropic-messages parser does not turn into message content
+(`unknownBlockTypes`), and the raw body. Request headers, which carry
+credentials, are never written. It is off by default: it exists to show where
+a model's output went when the recorded message lacks it — Pi's own
+transcript cannot, because its parser skips block types it does not
+recognize without an error. The capture wraps the session agent's stream
+function and passes a teeing `fetch` through Pi's per-request options; it
+fails loudly if a Pi upgrade removes that hook. Only Pi APIs whose adapters
+pass a per-request `fetch` through are captured; Google Generative AI and
+Google Vertex reject a custom `fetch`, so their requests are left untouched
+and the log records once that they are not captured. Codex's adapter tries
+a WebSocket first and uses `fetch` only on its SSE path, so capture selects
+the SSE transport for `openai-codex-responses` requests. A response that breaks
+off part-way (a dropped connection, an aborted prompt) is still recorded,
+with the bytes that arrived and a `readError`.
+

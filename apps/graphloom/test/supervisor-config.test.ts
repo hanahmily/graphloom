@@ -66,6 +66,12 @@ describe("operator supervisor config", () => {
     );
   });
 
+  it("reads an optional rawStreamCapture flag and rejects a non-boolean one", () => {
+    expect(parseSupervisorConfig({ provider: "minimax-cn", modelId: "MiniMax-M3" }).rawStreamCapture).toBeUndefined();
+    expect(parseSupervisorConfig({ provider: "minimax-cn", modelId: "MiniMax-M3", rawStreamCapture: true }).rawStreamCapture).toBe(true);
+    expect(() => parseSupervisorConfig({ provider: "minimax-cn", modelId: "MiniMax-M3", rawStreamCapture: "yes" })).toThrow(/rawStreamCapture must be a boolean/);
+  });
+
   it("reads an optional quotaRetryMs fallback and rejects a non-positive one", () => {
     expect(parseSupervisorConfig({ provider: "minimax-cn", modelId: "MiniMax-M3" }).quotaRetryMs).toBeUndefined();
     expect(parseSupervisorConfig({ provider: "minimax-cn", modelId: "MiniMax-M3", quotaRetryMs: 300_000 }).quotaRetryMs).toBe(300_000);

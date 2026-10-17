@@ -37,6 +37,13 @@ export interface SupervisorConfig {
    */
   promptTotalTimeoutMs?: number;
   /**
+   * Record every supervisor provider request and its raw response under
+   * `<stateDir>/supervisor/raw/` (one JSON line per request; request headers,
+   * which carry credentials, are never written). Off by default; turn it on to
+   * see where a model's output went when its recorded message lacks it.
+   */
+  rawStreamCapture?: boolean;
+  /**
    * Fixed wait before retrying a provider quota error that states no reset
    * time (MiniMax's 429 `(2056)` gives none). Still bounded by the run's
    * `waitMs` budget and the per-turn wait limit. Omitted: such errors stop.
@@ -93,6 +100,10 @@ export function parseSupervisorConfig(value: unknown, source = "supervisor confi
       throw new Error(`${source}: promptTimeoutMs must be a positive number`);
     }
     config.promptTimeoutMs = obj.promptTimeoutMs;
+  }
+  if (obj.rawStreamCapture !== undefined) {
+    if (typeof obj.rawStreamCapture !== "boolean") throw new Error(`${source}: rawStreamCapture must be a boolean`);
+    config.rawStreamCapture = obj.rawStreamCapture;
   }
   if (obj.promptTotalTimeoutMs !== undefined) {
     if (typeof obj.promptTotalTimeoutMs !== "number" || !Number.isFinite(obj.promptTotalTimeoutMs) || !(obj.promptTotalTimeoutMs > 0)) {
@@ -151,6 +162,7 @@ export function piSupervisorFactory(config: SupervisorConfig): NonNullable<RunRe
       ...(config.agentDir !== undefined ? { agentDir: config.agentDir } : {}),
       ...(config.promptTimeoutMs !== undefined ? { promptTimeoutMs: config.promptTimeoutMs } : {}),
       ...(config.promptTotalTimeoutMs !== undefined ? { promptTotalTimeoutMs: config.promptTotalTimeoutMs } : {}),
+      ...(config.rawStreamCapture === true ? { rawStreamCapture: true } : {}),
     });
     const session = await openSession({
       provider: config.provider,
@@ -188,6 +200,7 @@ export function piSupervisorRestore(config: SupervisorConfig): NonNullable<Resum
       ...(config.agentDir !== undefined ? { agentDir: config.agentDir } : {}),
       ...(config.promptTimeoutMs !== undefined ? { promptTimeoutMs: config.promptTimeoutMs } : {}),
       ...(config.promptTotalTimeoutMs !== undefined ? { promptTotalTimeoutMs: config.promptTotalTimeoutMs } : {}),
+      ...(config.rawStreamCapture === true ? { rawStreamCapture: true } : {}),
       ...(config.quotaRetryMs !== undefined ? { quotaRetryMs: config.quotaRetryMs } : {}),
     });
 }
