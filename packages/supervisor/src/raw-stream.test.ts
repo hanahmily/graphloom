@@ -5,7 +5,8 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createPiSupervisorSession } from "./pi-session.js";
-import { summarize, type RawStreamRecord } from "./raw-stream.js";
+import { captureRawStream, summarize, type RawStreamRecord } from "./raw-stream.js";
+import type { AgentSession } from "@earendil-works/pi-coding-agent";
 
 const temps: string[] = [];
 const servers: Server[] = [];
@@ -115,3 +116,66 @@ describe("summarize", () => {
     expect(summarize(REPLY)).toEqual({ blockTypes: ["thinking", "vendor_tool_call"], unknownBlockTypes: ["vendor_tool_call"], stopReasons: ["end_turn"] });
   });
 });
+
+/** A stand-in session: its agent's stream function records the options it was called with. */
+function fakeSession(calls: Array<Record<string, unknown> | undefined>): AgentSession {
+  return {
+    sessionId: "fake",
+    agent: { streamFunction: (_m: unknown, _c: unknown, o?: Record<string, unknown>) => (calls.push(o), "stream") },
+  } as unknown as AgentSession;
+}
+
+async function readLines(file: string): Promise<string[]> {
+  for (let i = 0; i < 50; i++) {
+    const text = await readFile(file, "utf8").catch(() => "");
+    if (text.trim() !== "") return text.trim().split("\n");
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  return [];
+}
+
+describe("captureRawStream", () => {
+  it("leaves requests of APIs that reject a custom fetch untouched, and says so once", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "gl-raw-unsupported-"));
+    temps.push(dir);
+    const calls: Array<Record<string, unknown> | undefined> = [];
+    const session = fakeSession(calls);
+    captureRawStream(session, dir);
+    const stream = (session as unknown as { agent: { streamFunction: (m: unknown, c: unknown, o?: Record<string, unknown>) => unknown } }).agent.streamFunction;
+    stream({ api: "google-generative-ai" }, {}, { timeoutMs: 1 });
+    stream({ api: "google-generative-ai" }, {}, { timeoutMs: 1 });
+    stream({ api: "anthropic-messages" }, {}, { timeoutMs: 1 });
+    expect(calls[0]).toEqual({ timeoutMs: 1 });
+    expect(calls[1]).toEqual({ timeoutMs: 1 });
+    expect(typeof calls[2]?.fetch).toBe("function");
+    const lines = await readLines(path.join(dir, "fake.raw.jsonl"));
+    expect(lines).toHaveLength(1);
+    expect(JSON.parse(lines[0]!).note).toMatch(/not supported for api google-generative-ai/);
+  });
+
+  it("keeps the bytes that arrived when a response breaks off part-way", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "gl-raw-partial-"));
+    temps.push(dir);
+    const server = createServer((_req, res) => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.write("event: message_start\ndata: {}\n\n");
+      setTimeout(() => res.socket?.destroy(), 20);
+    });
+    servers.push(server);
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/v1/messages`;
+    const calls: Array<Record<string, unknown> | undefined> = [];
+    const session = fakeSession(calls);
+    captureRawStream(session, dir);
+    (session as unknown as { agent: { streamFunction: (m: unknown, c: unknown, o?: Record<string, unknown>) => unknown } }).agent.streamFunction({ api: "anthropic-messages" }, {}, {});
+    const capturing = calls[0]!.fetch as typeof fetch;
+    const response = await capturing(url, { method: "POST", body: JSON.stringify({ model: "m" }) });
+    await response.text().catch(() => undefined);
+    const lines = await readLines(path.join(dir, "fake.raw.jsonl"));
+    expect(lines).toHaveLength(1);
+    const record = JSON.parse(lines[0]!) as RawStreamRecord;
+    expect(record.body).toBe("event: message_start\ndata: {}\n\n");
+    expect(record.readError).toBeTruthy();
+  });
+});
+

@@ -20,8 +20,10 @@ export interface RawStreamRecord {
   unknownBlockTypes: string[];
   /** `stop_reason` values the stream carried. */
   stopReasons: string[];
-  /** The response body exactly as received. */
+  /** The response body exactly as received (up to where reading failed, if it did). */
   body: string;
+  /** Why reading the response stopped early, when it did; `body` then holds what arrived. */
+  readError?: string;
 }
 
 /**
@@ -39,9 +41,38 @@ export function captureRawStream(session: AgentSession, dir: string): void {
   if (typeof original !== "function") throw new Error("raw stream capture: this Pi version's agent has no streamFunction to wrap");
   const file = path.join(dir, `${session.sessionId}.raw.jsonl`);
   let seq = 0;
-  agent.streamFunction = (model, context, options) =>
-    original(model, context, { ...options, fetch: capturingFetch(file, () => (seq += 1), options?.fetch) });
+  const noted = new Set<string>();
+  agent.streamFunction = (model, context, options) => {
+    const api = (model as { api?: unknown } | undefined)?.api;
+    if (typeof api !== "string" || !FETCH_CAPABLE_APIS.has(api)) {
+      // Some Pi adapters (Google Generative AI, Google Vertex) reject a custom
+      // fetch outright; capturing there would break the call itself. Leave
+      // such requests untouched and say once that they are not captured.
+      const key = String(api);
+      if (!noted.has(key)) {
+        noted.add(key);
+        void writeLine(file, { at: new Date().toISOString(), note: `raw stream capture is not supported for api ${key}; its requests are not recorded` }).catch(() => undefined);
+      }
+      return original(model, context, options);
+    }
+    return original(model, context, { ...options, fetch: capturingFetch(file, () => (seq += 1), options?.fetch) });
+  };
 }
+
+/**
+ * Pi APIs whose adapters pass a per-request `fetch` through to their HTTP
+ * client (checked against the pinned pi-ai: each reads `options.fetch`).
+ * google-generative-ai and google-vertex read it only to throw.
+ */
+const FETCH_CAPABLE_APIS: ReadonlySet<string> = new Set([
+  "anthropic-messages",
+  "azure-openai-responses",
+  "mistral-conversations",
+  "openai-codex-responses",
+  "openai-completions",
+  "openai-responses",
+  "pi-messages",
+]);
 
 type StreamFn = (model: unknown, context: unknown, options?: { fetch?: typeof fetch } & Record<string, unknown>) => unknown;
 
@@ -55,12 +86,44 @@ function capturingFetch(file: string, next: () => number, inner: typeof fetch | 
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
     const method = init?.method ?? (input instanceof Request ? input.method : "GET");
     const request = parseBody(init?.body);
-    void new Response(forLog)
-      .text()
-      .then((body) => writeRecord(file, { at: new Date().toISOString(), seq, url, method, status: response.status, request, ...summarize(body), body }))
+    void readAll(forLog)
+      .then(({ body, readError }) =>
+        writeLine(file, {
+          at: new Date().toISOString(),
+          seq,
+          url,
+          method,
+          status: response.status,
+          request,
+          ...summarize(body),
+          body,
+          ...(readError !== undefined ? { readError } : {}),
+        } satisfies RawStreamRecord),
+      )
       .catch(() => undefined);
     return new Response(forPi, { status: response.status, statusText: response.statusText, headers: response.headers });
   };
+}
+
+/**
+ * Read a stream to its end, keeping what arrived if it fails part-way (a
+ * dropped connection, or the supervisor aborting a stalled prompt): those are
+ * exactly the requests a raw record is wanted for.
+ */
+async function readAll(stream: ReadableStream<Uint8Array>): Promise<{ body: string; readError?: string }> {
+  const reader = stream.getReader();
+  const decoder = new TextDecoder();
+  let body = "";
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      body += decoder.decode(value, { stream: true });
+    }
+    return { body: body + decoder.decode() };
+  } catch (err) {
+    return { body: body + decoder.decode(), readError: err instanceof Error ? err.message : String(err) };
+  }
 }
 
 function parseBody(body: unknown): unknown {
@@ -90,7 +153,7 @@ export function summarize(body: string): Pick<RawStreamRecord, "blockTypes" | "u
   return { blockTypes, unknownBlockTypes: [...new Set(blockTypes.filter((t) => !KNOWN_BLOCK_TYPES.has(t)))], stopReasons };
 }
 
-async function writeRecord(file: string, record: RawStreamRecord): Promise<void> {
+async function writeLine(file: string, line: RawStreamRecord | { at: string; note: string }): Promise<void> {
   await mkdir(path.dirname(file), { recursive: true });
-  await appendFile(file, `${JSON.stringify(record)}\n`, "utf8");
+  await appendFile(file, `${JSON.stringify(line)}\n`, "utf8");
 }

@@ -504,5 +504,10 @@ a model's output went when the recorded message lacks it — Pi's own
 transcript cannot, because its parser skips block types it does not
 recognize without an error. The capture wraps the session agent's stream
 function and passes a teeing `fetch` through Pi's per-request options; it
-fails loudly if a Pi upgrade removes that hook.
+fails loudly if a Pi upgrade removes that hook. Only Pi APIs whose adapters
+pass a per-request `fetch` through are captured; Google Generative AI and
+Google Vertex reject a custom `fetch`, so their requests are left untouched
+and the log records once that they are not captured. A response that breaks
+off part-way (a dropped connection, an aborted prompt) is still recorded,
+with the bytes that arrived and a `readError`.
 
