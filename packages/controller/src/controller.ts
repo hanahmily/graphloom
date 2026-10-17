@@ -594,7 +594,7 @@ export function createController(): Controller {
         }
         try {
           assertDefinitionMatchesPin(described.value, pluginUpdate !== undefined ? { ...state.intake, bundle: pluginUpdate } : state.intake);
-          assertDefinitionUnchanged(described.value, state.definition);
+          assertDefinitionUnchanged(described.value, state.definition, pluginUpdate !== undefined);
           if (pluginUpdate !== undefined && described.value.privateStateSchema !== state.definition.privateStateSchema) {
             // Saved private state was written for the pinned schema.
             throw new Error("plugin privateStateSchema changed since run start");
@@ -662,11 +662,15 @@ export function createController(): Controller {
             },
             validators,
           );
-          const reason = `operator plugin update: manifest ${state.intake.bundle.manifestDigest.slice(0, 12)} -> ${pluginUpdate.manifestDigest.slice(0, 12)}${updated.note}`;
+          const versionNote =
+            pluginUpdate.version !== state.intake.bundle.version ? `, version ${state.intake.bundle.version} -> ${pluginUpdate.version}` : "";
+          const reason = `operator plugin update: manifest ${state.intake.bundle.manifestDigest.slice(0, 12)} -> ${pluginUpdate.manifestDigest.slice(0, 12)}${versionNote}${updated.note}`;
           // Findings the supervisor made about the old plugin code go stale here.
           state = refreshCaseFile({
             ...updated.state,
             intake: { ...updated.state.intake, bundle: pluginUpdate },
+            activeVersion: `${pluginUpdate.graphId}@${pluginUpdate.version}`,
+            definition: { ...updated.state.definition, version: pluginUpdate.version },
             versionHistory: [...(state.versionHistory ?? []), { activeVersion: state.activeVersion, generation: state.generation, reason, at: new Date().toISOString() }],
           });
           revisionBridge.current = state.stateRevision;
@@ -1144,8 +1148,10 @@ function assertDefinitionMatchesPin(definition: GraphDefinition, intake: IntakeP
   }
 }
 
-function assertDefinitionUnchanged(live: GraphDefinition, pinned: GraphDefinition): void {
-  if (live.graphId !== pinned.graphId || live.version !== pinned.version) {
+function assertDefinitionUnchanged(live: GraphDefinition, pinned: GraphDefinition, updating = false): void {
+  // An operator plugin update may move to a new version of the same graph
+  // (its version is checked against the newly pinned bundle instead).
+  if (live.graphId !== pinned.graphId || (!updating && live.version !== pinned.version)) {
     throw new Error("plugin graphId/version changed since run start");
   }
   if (JSON.stringify(live.stages) !== JSON.stringify(pinned.stages)) {
