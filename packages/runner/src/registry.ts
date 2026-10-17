@@ -18,7 +18,7 @@ import {
 } from "@graphloom/sdk";
 import { digestExecutorSource } from "./digest.js";
 import { assertSandboxSupported, sandboxNodeArgs } from "./sandbox.js";
-import type { ExecutorDescriptor, JobContext, JobEvidenceItem, JobResult, Runner } from "./types.js";
+import type { ExecutorDescriptor, ExecutorSourceOverride, JobContext, JobEvidenceItem, JobResult, Runner } from "./types.js";
 
 /** Qualified ids under this namespace belong to GraphLoom built-in packages. */
 export const BUILTIN_EXECUTOR_NAMESPACE = "graphloom.";
@@ -296,9 +296,13 @@ export function createTrustedInProcessRunner(
       const pin = pinned.executor as ExecutorPin;
       const def = byId.get(pin.id);
       if (!def) return options.fallback.checkJob?.(pinned, ctx);
+      // The refusals runJob gives, in its order.
+      if (ctx?.executorSource !== undefined) return `executor ${def.id} runs in-process and cannot be served from a run-local copy`;
       if (pin.version !== undefined && pin.version !== def.version) {
         return `executor ${def.id} pinned version ${pin.version} but installed ${def.version ?? "(unversioned)"}`;
       }
+      const digestError = digestMismatch(pin, digests.get(def.id)!);
+      if (digestError) return digestError;
       const mismatch = effectMismatch(def, pinned);
       if (mismatch) return mismatch;
       try {
@@ -386,6 +390,31 @@ export function createChildExecutorRunner(
     options.sandbox === true ? sandboxNodeArgs([workerModule, entry], extraCa ? [extraCa] : []) : [];
   if (options.sandbox === true) assertSandboxSupported();
   const nodeArgs = sandboxArgs(entryModule);
+  /**
+   * The entry module a job's pin may load, or why it may not: a run-local copy
+   * needs a pinned digest and must stay inside its root, and pinned bytes must
+   * still match. Read before any executor code is imported.
+   */
+  const servingSource = async (pin: ExecutorPin, override: ExecutorSourceOverride | undefined): Promise<{ entry: string } | { refusal: string }> => {
+    if (override !== undefined && pin.digest === undefined) {
+      return { refusal: `executor ${pin.id}: a run-local copy runs only under a pinned digest` };
+    }
+    const entry = override !== undefined ? path.resolve(override.entryModule) : entryModule;
+    if (override !== undefined && !(await containedIn(override.root, entry))) {
+      return { refusal: `executor ${pin.id}: run-local entry module ${entry} is outside its root ${override.root}` };
+    }
+    if (pin.digest !== undefined) {
+      let serving: string;
+      try {
+        serving = await digestExecutorSource(override !== undefined ? override.root : (sourceRoot ?? entryModule));
+      } catch (err) {
+        return { refusal: `executor ${pin.id} source unreadable: ${err instanceof Error ? err.message : String(err)}` };
+      }
+      const mismatch = digestMismatch(pin, serving);
+      if (mismatch) return { refusal: mismatch };
+    }
+    return { entry };
+  };
 
   return {
     async describeExecutors() {
@@ -405,9 +434,11 @@ export function createChildExecutorRunner(
       const pin = pinned.executor as ExecutorPin;
       if (!served.has(pin.id)) return options.fallback.checkJob?.(pinned, ctx);
       const override = ctx?.executorSource;
-      const entry = override !== undefined ? path.resolve(override.entryModule) : entryModule;
-      // runJob refuses an override outside its root; there is nothing to ask.
-      if (override !== undefined && !(await containedIn(override.root, entry))) return undefined;
+      // The same source-pin checks runJob makes, before any module is loaded:
+      // bytes that no longer match the pin are refused, never imported.
+      const source = await servingSource(pin, override);
+      if ("refusal" in source) return source.refusal;
+      const { entry } = source;
       return checkInWorker({
         args: override !== undefined ? sandboxArgs(entry) : nodeArgs,
         workerModule,
@@ -448,23 +479,9 @@ export function createChildExecutorRunner(
         ctx = withoutSession;
       }
       const override = ctx.executorSource;
-      if (override !== undefined && pin.digest === undefined) {
-        return failed(`executor ${pin.id}: a run-local copy runs only under a pinned digest`);
-      }
-      const entry = override !== undefined ? path.resolve(override.entryModule) : entryModule;
-      if (override !== undefined && !(await containedIn(override.root, entry))) {
-        return failed(`executor ${pin.id}: run-local entry module ${entry} is outside its root ${override.root}`);
-      }
-      if (pin.digest !== undefined) {
-        let serving: string;
-        try {
-          serving = await digestExecutorSource(override !== undefined ? override.root : (sourceRoot ?? entryModule));
-        } catch (err) {
-          return failed(`executor ${pin.id} source unreadable: ${err instanceof Error ? err.message : String(err)}`);
-        }
-        const mismatch = digestMismatch(pin, serving);
-        if (mismatch) return failed(mismatch);
-      }
+      const source = await servingSource(pin, override);
+      if ("refusal" in source) return failed(source.refusal);
+      const { entry } = source;
       const args = override !== undefined ? sandboxArgs(entry) : nodeArgs;
 
       return await new Promise<JobResult>((resolve) => {

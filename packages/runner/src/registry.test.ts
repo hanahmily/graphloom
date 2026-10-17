@@ -817,6 +817,47 @@ describe("executor pins and run-local copies", () => {
     );
   });
 
+  it("checks only pinned bytes: a package changed after pinning is refused without importing its module", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "gl-check-pin-"));
+    const marker = path.join(dir, "imported.txt");
+    const entryModule = path.join(dir, "executor.mjs");
+    // Importing the module leaves a mark: the test can see whether it was loaded.
+    const source = (summary: string) =>
+      [
+        `import { appendFileSync } from "node:fs";`,
+        `appendFileSync(${JSON.stringify(marker)}, "imported\\n");`,
+        `export const executors = [{ id: "acme.pin/echo", version: "2", effect: "read",`,
+        `  inputSchema: (v) => typeof v === "object" && v !== null && typeof v.msg === "string",`,
+        `  async execute() { return { status: "ok", summary: ${JSON.stringify(summary)} }; } }];`,
+      ].join("\n");
+    await writeFile(entryModule, source("pinned"));
+    const runner = createChildExecutorRunner({ entryModule, executorIds: ["acme.pin/echo"], fallback: createScriptedRunner({ jobs: [] }), workerModule, env: {} });
+    const pinned = await digestExecutorSource(entryModule);
+    const job = (input: unknown, digest = pinned) => ({ ...echoJob(digest), executor: { id: "acme.pin/echo", version: "2", digest }, input });
+    const imports = async () => (await readFile(marker, "utf8").catch(() => "")).split("\n").filter(Boolean).length;
+
+    // Matching bytes: the check loads the module and runs only its schema.
+    expect(await runner.checkJob!(job({ other: 1 }))).toBe("executor acme.pin/echo: input failed schema validation");
+    expect(await imports()).toBe(1);
+
+    // The package changes after pinning: the check gives runJob's refusal and loads nothing.
+    await writeFile(entryModule, source("changed"));
+    const changed = await digestExecutorSource(entryModule);
+    const refusal = `executor acme.pin/echo digest ${changed.slice(0, 12)} does not match pinned ${pinned.slice(0, 12)}`;
+    expect(await runner.checkJob!(job({ msg: "hi" }))).toBe(refusal);
+    expect(await runner.checkJob!(job({ other: 1 }))).toBe(refusal);
+    expect((await runner.runJob(job({ msg: "hi" }), ctx)).summary).toBe(refusal);
+    expect(await imports()).toBe(1);
+
+    // A run-local copy without a pin, or outside its root, is refused the same way, before any import.
+    expect(await runner.checkJob!({ ...job({ msg: "hi" }), executor: { id: "acme.pin/echo", version: "2" } }, { executorSource: { root: dir, entryModule } }))
+      .toBe("executor acme.pin/echo: a run-local copy runs only under a pinned digest");
+    const elsewhere = await mkdtemp(path.join(os.tmpdir(), "gl-check-root-"));
+    expect(await runner.checkJob!(job({ msg: "hi" }, changed), { executorSource: { root: elsewhere, entryModule } }))
+      .toBe(`executor acme.pin/echo: run-local entry module ${entryModule} is outside its root ${elsewhere}`);
+    expect(await imports()).toBe(1);
+  });
+
   it("refuses digest mismatches and run-local copies for in-process executors", async () => {
     const noop = defineExecutor({ id: "acme.inproc/noop", effect: "read", execute: async () => ({ status: "ok" as const, summary: "noop" }) });
     const runner = createTrustedInProcessRunner({ executors: [noop], fallback: createScriptedRunner({ jobs: [] }) });
@@ -826,6 +867,11 @@ describe("executor pins and run-local copies", () => {
     expect((await runner.runJob(job("f".repeat(64)), ctx)).summary).toMatch(/does not match pinned ffffffffffff$/);
     const copied = await runner.runJob(job(described!.digest), { ...ctx, executorSource: { root: "/tmp", entryModule: "/tmp/x.mjs" } });
     expect(copied.summary).toBe("executor acme.inproc/noop runs in-process and cannot be served from a run-local copy");
+    // checkJob gives the same refusals.
+    expect(await runner.checkJob!(job(described!.digest))).toBeUndefined();
+    expect(await runner.checkJob!(job("f".repeat(64)))).toMatch(/does not match pinned ffffffffffff$/);
+    expect(await runner.checkJob!(job(described!.digest), { executorSource: { root: "/tmp", entryModule: "/tmp/x.mjs" } }))
+      .toBe("executor acme.inproc/noop runs in-process and cannot be served from a run-local copy");
   });
 
   it("passes a failed executor's retryAfterMs through, and drops it from successes", async () => {
