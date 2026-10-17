@@ -507,7 +507,9 @@ function and passes a teeing `fetch` through Pi's per-request options; it
 fails loudly if a Pi upgrade removes that hook. Only Pi APIs whose adapters
 pass a per-request `fetch` through are captured; Google Generative AI and
 Google Vertex reject a custom `fetch`, so their requests are left untouched
-and the log records once that they are not captured. A response that breaks
+and the log records once that they are not captured. Codex's adapter tries
+a WebSocket first and uses `fetch` only on its SSE path, so capture selects
+the SSE transport for `openai-codex-responses` requests. A response that breaks
 off part-way (a dropped connection, an aborted prompt) is still recorded,
 with the bytes that arrived and a `readError`.
 

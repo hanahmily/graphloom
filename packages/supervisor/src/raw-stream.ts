@@ -55,9 +55,18 @@ export function captureRawStream(session: AgentSession, dir: string): void {
       }
       return original(model, context, options);
     }
-    return original(model, context, { ...options, fetch: capturingFetch(file, () => (seq += 1), options?.fetch) });
+    return original(model, context, {
+      ...options,
+      // Codex's adapter tries a WebSocket first and uses fetch only on its SSE
+      // path; capture is a diagnostic mode, so it asks for SSE to be recorded.
+      ...(SSE_ONLY_WHEN_CAPTURED.has(api) ? { transport: "sse" } : {}),
+      fetch: capturingFetch(file, () => (seq += 1), options?.fetch),
+    });
   };
 }
+
+/** APIs whose default transport bypasses fetch; capture selects their SSE transport. */
+const SSE_ONLY_WHEN_CAPTURED: ReadonlySet<string> = new Set(["openai-codex-responses"]);
 
 /**
  * Pi APIs whose adapters pass a per-request `fetch` through to their HTTP

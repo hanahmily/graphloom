@@ -148,6 +148,10 @@ describe("captureRawStream", () => {
     expect(calls[0]).toEqual({ timeoutMs: 1 });
     expect(calls[1]).toEqual({ timeoutMs: 1 });
     expect(typeof calls[2]?.fetch).toBe("function");
+    expect(calls[2]?.transport).toBeUndefined();
+    stream({ api: "openai-codex-responses" }, {}, { transport: "auto" });
+    expect(calls[3]?.transport).toBe("sse");
+    expect(typeof calls[3]?.fetch).toBe("function");
     const lines = await readLines(path.join(dir, "fake.raw.jsonl"));
     expect(lines).toHaveLength(1);
     expect(JSON.parse(lines[0]!).note).toMatch(/not supported for api google-generative-ai/);
