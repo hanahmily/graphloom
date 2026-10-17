@@ -103,6 +103,8 @@ const MAX_QUOTA_WAITS = 3;
 const COMPACTION_PROVIDER_CALLS = 2;
 /** A compaction plus at least one retried turn. */
 const COMPACT_AND_RETRY_CALLS = COMPACTION_PROVIDER_CALLS + 1;
+/** Identical resends of an interrupted reply one decision turn may make before the slip remedies apply. */
+const MAX_INTERRUPTED_RESENDS = 2;
 
 function abortableSleep(ms: number, signal: AbortSignal | undefined): Promise<void> {
   if (!(ms > 0) || signal?.aborted) return Promise.resolve();
@@ -248,6 +250,7 @@ export function createPiSupervisor(options: CreatePiSupervisorOptions): PiSuperv
     let quotaWaits = 0;
     let compacted = false;
     let timeoutRetried = false;
+    let resends = 0;
     const remedy = (
       failure: ProviderFailure,
       kind: SupervisorRemedy["remedy"],
@@ -332,7 +335,29 @@ export function createPiSupervisor(options: CreatePiSupervisorOptions): PiSuperv
         }
         if (toolbox.proposal() !== undefined || toolbox.exhausted() !== undefined) return reply;
         const failure = session.lastReplyFailure?.();
-        if (failure === undefined || failure.failureClass === "empty" || failure.failureClass === "malformed") return reply;
+        if (
+          failure?.failureClass === "interrupted" &&
+          resends < MAX_INTERRUPTED_RESENDS &&
+          input.signal?.aborted !== true &&
+          (remainingCalls() ?? 1) >= 1 &&
+          session.omitLastExchange?.() === true
+        ) {
+          // The provider dropped output the model generated (billed, never
+          // delivered). The model did not choose to stop, so nothing is wrong
+          // with what it was asked: the half turn is taken out of its context
+          // and the identical prompt is sent again, with no correction text.
+          resends += 1;
+          remedy(failure, "resend_interrupted");
+          continue;
+        }
+        if (
+          failure === undefined ||
+          failure.failureClass === "interrupted" ||
+          failure.failureClass === "empty" ||
+          failure.failureClass === "malformed"
+        ) {
+          return reply;
+        }
         last = new SupervisorProviderError(failure);
         switch (failure.failureClass) {
           case "quota": {
@@ -396,7 +421,7 @@ export function createPiSupervisor(options: CreatePiSupervisorOptions): PiSuperv
     /** A reply with no admitted tool call: a JSON decision, or why it is not one (empty or malformed). */
     const readReply = (reply: string): { proposal: SupervisorProposal } | { failure: ProviderFailure } => {
       const classified = session.lastReplyFailure?.();
-      if (classified?.failureClass === "empty") return { failure: classified };
+      if (classified?.failureClass === "empty" || classified?.failureClass === "interrupted") return { failure: classified };
       if (reply.trim() === "") return { failure: { failureClass: "empty", message: "the reply had no tool call or text" } };
       try {
         return { proposal: parseSupervisorDecision(reply) };

@@ -39,6 +39,22 @@ describe("classifyAssistantMessage", () => {
     expect(classifyAssistantMessage({ stopReason: "aborted", content: [] })).toBeUndefined();
   });
 
+  it("classifies a thinking-only reply billed for undelivered output as interrupted", () => {
+    const thinking = [{ type: "thinking" as const, thinking: "Let me write it." }];
+    const usage = (output: number, reasoning?: number) =>
+      ({ input: 1, output, cacheRead: 0, cacheWrite: 0, totalTokens: output + 1, ...(reasoning !== undefined ? { reasoning } : {}), cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }) as never;
+    // Live MiniMax failure: 3694 output tokens billed, 3118 of them thinking.
+    expect(classifyAssistantMessage({ stopReason: "stop", content: thinking, usage: usage(3694, 3118) })).toEqual({
+      failureClass: "interrupted",
+      message: "the reply ended (stopReason stop) with only thinking, but the provider billed 576 output tokens beyond thinking that never arrived",
+      undeliveredTokens: 576,
+    });
+    // No surplus beyond the threshold, no reasoning breakdown, or another stop reason: still empty.
+    expect(classifyAssistantMessage({ stopReason: "stop", content: thinking, usage: usage(832, 800) })?.failureClass).toBe("empty");
+    expect(classifyAssistantMessage({ stopReason: "stop", content: thinking, usage: usage(3694) })?.failureClass).toBe("empty");
+    expect(classifyAssistantMessage({ stopReason: "length", content: thinking, usage: usage(3694, 3118) })?.failureClass).toBe("empty");
+  });
+
   it("exposes the reset time a quota error states", () => {
     expect(classifyAssistantMessage(error("429 rate limit; retry after 30s"), { now: NOW })?.retryAt).toBe(
       "2026-10-15T00:00:30.000Z",

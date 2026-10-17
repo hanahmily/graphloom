@@ -162,6 +162,15 @@ export interface PiSupervisorSession {
    */
   lastReplyFailure?(): ProviderFailure | undefined;
   /**
+   * Take the last prompt out of the model's context so the identical prompt
+   * can be sent again: its user message and its reply are omitted through
+   * Pi's own context-edit mechanism (the transcript keeps them, the model no
+   * longer sees them). Only for a prompt answered in one turn, whose reply is
+   * still the session's latest message; a prompt that ran tool turns first
+   * cannot be resent without repeating them. Returns whether it was omitted.
+   */
+  omitLastExchange?(): boolean;
+  /**
    * Compact the session's history now (overflow recovery). Its provider
    * requests are charged to the turn count like any other model call.
    * `signal` (the run's Stop) and the deadline (default: the prompt timeout)
@@ -347,6 +356,8 @@ export function wrapPiAgentSession(args: {
   let codingRoot: string | undefined;
   let turns = 0;
   let lastReply: ProviderFailure | undefined;
+  /** The last completed prompt's own user message and single reply, while it can still be omitted. */
+  let lastExchange: { user: unknown; reply: unknown } | undefined;
 
   return {
     runId: args.runId,
@@ -403,7 +414,9 @@ export function wrapPiAgentSession(args: {
       let endedDone = false;
       let collected: string[] = [];
       let lastAssistant: Parameters<typeof classifyAssistantMessage>[0] | undefined;
+      let promptUser: unknown;
       lastReply = undefined;
+      lastExchange = undefined;
 
       // Two limits, neither of which cuts off a model that is still producing
       // output: inactivity (no session event for `inactivityMs`, re-armed by
@@ -432,6 +445,8 @@ export function wrapPiAgentSession(args: {
         armInactivity();
         if (event.type === "message_end" && event.message.role === "assistant") {
           lastAssistant = event.message;
+        } else if (event.type === "message_end" && event.message.role === "user") {
+          promptUser ??= event.message;
         } else if (event.type === "compaction_start") {
           // Compaction (manual or Pi's own) makes summarization requests outside
           // turn_start, so charge them here. Pi emits this synchronously after
@@ -525,6 +540,9 @@ export function wrapPiAgentSession(args: {
           lastAssistant !== undefined
             ? classifyAssistantMessage(lastAssistant, contextWindow !== undefined ? { contextWindow } : {})
             : undefined;
+        if (promptTurns === 1 && promptUser !== undefined && lastAssistant !== undefined) {
+          lastExchange = { user: promptUser, reply: lastAssistant };
+        }
         return collected.join("").trim();
       } finally {
         clearTimeout(total);
@@ -543,6 +561,20 @@ export function wrapPiAgentSession(args: {
     },
     lastReplyFailure() {
       return lastReply;
+    },
+    omitLastExchange() {
+      const exchange = lastExchange;
+      lastExchange = undefined;
+      if (closed || exchange === undefined || !session.isIdle) return false;
+      const messages = session.messages;
+      if (messages.at(-1) !== exchange.reply) return false;
+      try {
+        asRecoverableSession(session)._omitRecoveryAttempt(exchange.reply, [exchange.user]);
+      } catch {
+        return false;
+      }
+      lastReply = undefined;
+      return !session.messages.includes(exchange.reply as never) && !session.messages.includes(exchange.user as never);
     },
     async compact(compactOptions) {
       if (closed) {
@@ -630,6 +662,19 @@ interface MutableToolSession {
 
 function asMutableToolSession(session: AgentSession): MutableToolSession {
   return session as unknown as MutableToolSession;
+}
+
+/**
+ * Pi AgentSession's own omission of a failed attempt (what its auto-retry
+ * uses): appends a durable `context_edit` that hides each message from the
+ * model's context while the raw transcript keeps it, then refreshes state.
+ */
+interface RecoverableSession {
+  _omitRecoveryAttempt(message: unknown, toolResults?: unknown[]): void;
+}
+
+function asRecoverableSession(session: AgentSession): RecoverableSession {
+  return session as unknown as RecoverableSession;
 }
 
 /**

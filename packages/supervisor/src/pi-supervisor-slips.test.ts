@@ -58,6 +58,9 @@ afterEach(async () => {
 });
 
 const PROVIDER = "faux-slip";
+/** Markers a faux reply carries so the session gives it real-provider usage (see World.open). */
+const BILLED = "#billed-undelivered";
+const NO_SURPLUS = "#no-surplus";
 const PRIMARY: SupervisorModelRef = { provider: PROVIDER, modelId: "faux" };
 const SECONDARY: SupervisorModelRef = { provider: PROVIDER, modelId: "faux-2" };
 
@@ -95,6 +98,15 @@ async function world(): Promise<World> {
         tools: [],
         sessionManager: SessionManager.inMemory(dir),
         settingsManager: SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } }),
+      });
+      // The faux provider estimates usage from the delivered content; give a
+      // marked reply the usage a real provider reports (reasoning within output).
+      session.subscribe((event) => {
+        if (event.type !== "message_end" || event.message.role !== "assistant") return;
+        const message = event.message as { content: Array<{ type: string; thinking?: string }>; usage: { output: number; reasoning?: number } };
+        const thinking = message.content.find((c) => c.type === "thinking")?.thinking ?? "";
+        if (thinking.includes(BILLED)) Object.assign(message.usage, { output: 3694, reasoning: 3118 });
+        else if (thinking.includes(NO_SURPLUS)) Object.assign(message.usage, { output: 800, reasoning: 790 });
       });
       return wrapPiAgentSession({
         session,
@@ -343,6 +355,136 @@ describe("Pi supervisor: bounded remedies for empty and malformed replies (faux 
       expect(err).toBeInstanceOf(Error);
       expect(w.faux.state.callCount).toBe(1);
       expect(w.opened).toEqual(["faux"]);
+      expect(supervisor.drainRemedies()).toEqual([]);
+    } finally {
+      await supervisor.close!();
+    }
+  });
+});
+
+describe("Pi supervisor: interrupted replies are resent unchanged (faux provider)", () => {
+  /** MiniMax's failure: thinking only, end_turn, but billed for output (the dropped tool calls) it never sent. */
+  const interrupted = (w: World) => w.ai.fauxAssistantMessage([w.ai.fauxThinking(`Let me write it. ${BILLED}`)]);
+  const reenterTurn = (w: World) => w.ai.fauxAssistantMessage(reenterCall(w), { stopReason: "toolUse" });
+  /** What the model sees of a request: each non-system message's role and content (timestamps differ on a resend). */
+  const visible = (context: FauxContext | undefined) =>
+    (context?.messages ?? []).filter((m) => m.role !== "system").map((m) => ({ role: m.role, content: m.content }));
+
+  it("resends the identical prompt once, without the broken reply or any re-ask text", async () => {
+    const w = await world();
+    let first: string | undefined;
+    let resent: FauxContext | undefined;
+    w.faux.setResponses([
+      (context: FauxContext) => {
+        first = JSON.stringify(visible(context));
+        return interrupted(w);
+      },
+      (context: FauxContext) => {
+        resent = context;
+        return reenterTurn(w);
+      },
+    ]);
+    const supervisor = createPiSupervisor({ session: await w.open(), openSession: (m) => w.open(m) });
+    try {
+      expect(await supervisor.decide(input())).toMatchObject({ action: { type: "reenter" } });
+      expect(w.faux.state.callCount).toBe(2);
+      expect(w.opened).toEqual(["faux"]);
+      expect(visible(resent).map((m) => m.role)).toEqual(["user"]);
+      const sent = JSON.stringify(visible(resent));
+      expect(sent).toBe(first);
+      expect(sent).not.toContain(BILLED);
+      expect(sent).not.toContain("could not be read as a decision");
+      expect(supervisor.drainProviderCalls()).toBe(2);
+      expect(supervisor.drainRemedies()).toMatchObject([
+        { failureClass: "interrupted", remedy: "resend_interrupted", message: expect.stringMatching(/billed 576 output tokens beyond thinking/) },
+      ]);
+    } finally {
+      await supervisor.close!();
+    }
+  });
+
+  it("resends twice, then succeeds", async () => {
+    const w = await world();
+    w.faux.setResponses([interrupted(w), interrupted(w), reenterTurn(w)]);
+    const supervisor = createPiSupervisor({ session: await w.open(), openSession: (m) => w.open(m) });
+    try {
+      expect(await supervisor.decide(input())).toMatchObject({ action: { type: "reenter" } });
+      expect(w.faux.state.callCount).toBe(3);
+      expect(supervisor.drainRemedies().map((r) => r.remedy)).toEqual(["resend_interrupted", "resend_interrupted"]);
+    } finally {
+      await supervisor.close!();
+    }
+  });
+
+  it("falls into the slip remedies after a third interrupted reply", async () => {
+    const w = await world();
+    let reasked: string | undefined;
+    w.faux.setResponses([
+      interrupted(w),
+      interrupted(w),
+      interrupted(w),
+      (context: FauxContext) => {
+        reasked = JSON.stringify(visible(context));
+        return reenterTurn(w);
+      },
+    ]);
+    const supervisor = createPiSupervisor({ session: await w.open(), openSession: (m) => w.open(m) });
+    try {
+      expect(await supervisor.decide(input())).toMatchObject({ action: { type: "reenter" } });
+      expect(w.faux.state.callCount).toBe(4);
+      expect(reasked).toContain("could not be read as a decision");
+      expect(supervisor.drainRemedies()).toMatchObject([
+        { failureClass: "interrupted", remedy: "resend_interrupted" },
+        { failureClass: "interrupted", remedy: "resend_interrupted" },
+        { failureClass: "interrupted", remedy: "reask" },
+      ]);
+    } finally {
+      await supervisor.close!();
+    }
+  });
+
+  it("still classifies a thinking-only reply with no undelivered output as empty and re-asks", async () => {
+    const w = await world();
+    w.faux.setResponses([w.ai.fauxAssistantMessage([w.ai.fauxThinking(`Thinking. ${NO_SURPLUS}`)]), reenterTurn(w)]);
+    const supervisor = createPiSupervisor({ session: await w.open(), openSession: (m) => w.open(m) });
+    try {
+      expect(await supervisor.decide(input())).toMatchObject({ action: { type: "reenter" } });
+      expect(w.faux.state.callCount).toBe(2);
+      expect(supervisor.drainRemedies()).toMatchObject([{ failureClass: "empty", remedy: "reask" }]);
+    } finally {
+      await supervisor.close!();
+    }
+  });
+
+  it("does not resend without a provider call left in the turn's allowance", async () => {
+    const w = await world();
+    w.faux.setResponses([interrupted(w), reenterTurn(w)]);
+    const supervisor = createPiSupervisor({ session: await w.open(), openSession: (m) => w.open(m) });
+    try {
+      const err = await failure(supervisor.decide(input({ maxProviderCalls: 1 })));
+      expect(err.failureClass).toBe("interrupted");
+      expect(err.unremedied).toBe("no provider calls left in the run's budget to retry");
+      expect(w.faux.state.callCount).toBe(1);
+      expect(supervisor.drainRemedies()).toEqual([]);
+    } finally {
+      await supervisor.close!();
+    }
+  });
+
+  it("lets Stop win over a resend", async () => {
+    const w = await world();
+    const abort = new AbortController();
+    w.faux.setResponses([
+      () => {
+        abort.abort();
+        return interrupted(w);
+      },
+      reenterTurn(w),
+    ]);
+    const supervisor = createPiSupervisor({ session: await w.open(), openSession: (m) => w.open(m) });
+    try {
+      await expect(supervisor.decide(input({ signal: abort.signal }))).rejects.toThrow();
+      expect(w.faux.state.callCount).toBe(1);
       expect(supervisor.drainRemedies()).toEqual([]);
     } finally {
       await supervisor.close!();

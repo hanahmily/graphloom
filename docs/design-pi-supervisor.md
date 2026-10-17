@@ -375,15 +375,45 @@ A decision turn that yields no proposal is classified from the provider's last
 assistant message (`stopReason`, `errorMessage`), not from the missing JSON:
 `quota` (429 and rate/usage limits; any reset time the message states becomes
 `retryAt`), `overflow` (Pi's own `isContextOverflow`), `auth` (401/403 and
-credential refusals), `empty` (no tool call and no text, including thinking-only
-replies), `malformed` (text that is not a GraphDecision), `timeout` (see Prompt
+credential refusals), `interrupted` (see below), `empty` (no tool call and no
+text, including thinking-only replies), `malformed` (text that is not a GraphDecision), `timeout` (see Prompt
 timeouts), or `unknown`. The host
 applies a fixed remedy without asking the model what to do: a quota error with a
 reset time waits until then (at most three waits a turn, only within the
 `maxWaitMs` the controller passes from the run's `waitMs`) and retries the turn;
 an overflow compacts the session and retries once.
 
-An empty or malformed reply is a model slip, not a provider error. Live replays
+A reply is `interrupted` when it ended normally (`stopReason` `stop`, the
+provider's `end_turn`), carries no tool call and no non-empty text, and its usage
+bills more than 32 output tokens beyond thinking (`usage.output -
+usage.reasoning`; Pi records `reasoning` as a subset of `output`). Raw stream
+captures from 28 replays of the failing prompt on live
+`minimax-cn/MiniMax-M3.1-Flash-Preview` show why. In both thinking-only failures,
+the stream held only a `thinking` block and `end_turn`, yet usage billed
+non-thinking output that was never delivered: `output_tokens` 3694 with
+`thinking_tokens` 3118 (576 undelivered), and 2374 with 1796 (578). Successful
+replies spend 220 to 780 non-thinking tokens on their `tool_use` blocks. The
+failures' thinking is indistinguishable from the successes', and it ends by
+committing to the calls ("Let me write it."). The model generated the tool calls
+and MiniMax's server dropped them, about 7% of the time on this prompt. The
+threshold is small enough to catch a dropped call and large enough to ignore a
+few tokens of framing. A reply with no reasoning breakdown, or with no surplus,
+stays `empty`.
+
+The model did not choose to stop, so nothing about the prompt needs correcting.
+An interrupted reply gets up to two identical resends a turn, before the slip
+remedies below. Each resend omits the prompt's user message and the broken
+reply from the model's context, using Pi's own context-edit omission (the
+mechanism behind its auto-retry; the transcript keeps both). It then sends the
+same prompt text again, with no re-ask wording, so the request the model sees is
+the one it was first sent. Each resend is charged to the turn's provider-call
+allowance and recorded as the remedy `resend_interrupted`, whose message gives
+the undelivered token count. A prompt that ran tool turns before the interrupted
+reply is not resent, because resending it would repeat those turns; it goes to
+the slip remedies, as does a third interrupted reply. Stop still wins over a
+resend, and with no provider call left the turn stops by name.
+
+An empty, malformed, or still-interrupted reply is a model slip, not a provider error. Live replays
 against MiniMax show it is rare (about one first reply in 20, one re-ask in 10),
 so one slip must not stop the run. Each slip in a turn gets the next of three
 remedies, shared by both kinds:
@@ -450,6 +480,9 @@ are capped at the remaining invocations and refused at zero; admission tools rej
 malformed specs and end the turn on a valid one; a slowly streaming reply outlives
 the inactivity limit, while a silent provider is retried once in a fresh session
 and then stops by name; a `[record_finding, reenter]` batch is one provider call;
+an interrupted reply is resent once or twice with the identical request and
+none of the broken reply, then falls into the slip remedies, while a
+thinking-only reply with no undelivered output still re-asks;
 a thinking-only reply and re-ask recover in a fresh session, a third slip
 recovers on the next configured model for that turn only, and exhausted remedies
 or allowance stop by name; a `minimax-cn` session replays an empty-signature
