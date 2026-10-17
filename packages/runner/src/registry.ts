@@ -291,6 +291,23 @@ export function createTrustedInProcessRunner(
       }));
       return [...own, ...(await describeFallback(options.fallback, byId))];
     },
+    async checkJob(job, ctx) {
+      const pinned = pinJobExecutor(job);
+      const pin = pinned.executor as ExecutorPin;
+      const def = byId.get(pin.id);
+      if (!def) return options.fallback.checkJob?.(pinned, ctx);
+      if (pin.version !== undefined && pin.version !== def.version) {
+        return `executor ${def.id} pinned version ${pin.version} but installed ${def.version ?? "(unversioned)"}`;
+      }
+      const mismatch = effectMismatch(def, pinned);
+      if (mismatch) return mismatch;
+      try {
+        validateExecutorInput(def, pinned.input);
+      } catch (err) {
+        return err instanceof Error ? err.message : String(err);
+      }
+      return undefined;
+    },
     async runJob(job: JobSpec, ctx: JobContext): Promise<JobResult> {
       const pinned = pinJobExecutor(job);
       const pin = pinned.executor as ExecutorPin;
@@ -382,6 +399,31 @@ export function createChildExecutorRunner(
         builtin: options.builtin === true,
       }));
       return [...own, ...(await describeFallback(options.fallback, served))];
+    },
+    async checkJob(job, ctx) {
+      const pinned = pinJobExecutor(job);
+      const pin = pinned.executor as ExecutorPin;
+      if (!served.has(pin.id)) return options.fallback.checkJob?.(pinned, ctx);
+      const override = ctx?.executorSource;
+      const entry = override !== undefined ? path.resolve(override.entryModule) : entryModule;
+      // runJob refuses an override outside its root; there is nothing to ask.
+      if (override !== undefined && !(await containedIn(override.root, entry))) return undefined;
+      return checkInWorker({
+        args: override !== undefined ? sandboxArgs(entry) : nodeArgs,
+        workerModule,
+        entry,
+        cwd: options.cwd ?? path.dirname(entry),
+        env: options.env ?? process.env,
+        timeoutMs: Math.min(timeoutMs, CHECK_TIMEOUT_MS),
+        request: {
+          kind: "check",
+          id: pin.id,
+          ...(pin.version !== undefined ? { version: pin.version } : {}),
+          ...(pinned.effect !== undefined ? { effect: pinned.effect } : {}),
+          input: pinned.input,
+          ...(options.allowedEffects !== undefined ? { allowedEffects: [...options.allowedEffects] } : {}),
+        },
+      });
     },
     async runJob(job: JobSpec, ctx: JobContext): Promise<JobResult> {
       const pinned = pinJobExecutor(job);
@@ -566,6 +608,57 @@ export function createChildExecutorRunner(
       });
     },
   };
+}
+
+/** Bound on a pre-admission check; it loads the module and runs only the schema. */
+const CHECK_TIMEOUT_MS = 10_000;
+
+/**
+ * Ask a worker for the refusal its executor would give a job, without running
+ * it. A check that cannot be made answers undefined: the executor still
+ * enforces its schema when the job runs.
+ */
+async function checkInWorker(options: {
+  args: string[];
+  workerModule: string;
+  entry: string;
+  cwd: string;
+  env: NodeJS.ProcessEnv;
+  timeoutMs: number;
+  request: Record<string, unknown>;
+}): Promise<string | undefined> {
+  return await new Promise<string | undefined>((resolve) => {
+    let settled = false;
+    const child = spawn(process.execPath, [...options.args, options.workerModule, options.entry], {
+      stdio: ["pipe", "pipe", "ignore"],
+      cwd: options.cwd,
+      env: options.env,
+    });
+    const done = (refusal: string | undefined) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      rl.close();
+      child.kill("SIGKILL");
+      resolve(refusal);
+    };
+    const timer = setTimeout(() => done(undefined), options.timeoutMs);
+    const rl = createInterface({ input: child.stdout, crlfDelay: Infinity });
+    rl.on("line", (line) => {
+      let msg: Record<string, unknown> & { kind: string };
+      try {
+        msg = parseExecutorReply(line);
+      } catch {
+        done(undefined);
+        return;
+      }
+      done(msg.kind === "checked" && typeof msg.refusal === "string" ? msg.refusal : undefined);
+    });
+    child.on("error", () => done(undefined));
+    child.on("exit", () => done(undefined));
+    child.stdin.on("error", () => undefined);
+    child.stdin.end(`${JSON.stringify(options.request)}\n`);
+  });
 }
 
 export interface DescribedExecutor {

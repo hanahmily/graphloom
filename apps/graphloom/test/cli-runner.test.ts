@@ -169,6 +169,25 @@ describe("configured CLI runner", () => {
     expect(state.receipts.some((r) => r.stageId === "review" && r.valid)).toBe(false);
   });
 
+  it("checks a coding-agent job's input against the real executor's schema, as runJob would shape it, without running it", async () => {
+    // Run 4c70ff66-dd9: supervisor-authored coding-agent jobs without an
+    // assignment failed only inside the executor.
+    const f = await fixture();
+    vi.stubEnv("CLAUDE_CONFIG_DIR", path.join(f.dir, "claude"));
+    const runner = createCliRunner(await loadRunnerConfig({ GRAPHLOOM_RUNNER_CONFIG: f.config }));
+    const job = (input: Record<string, unknown>) => ({
+      stageId: "fix", kind: "agent" as const, purpose: "work" as const, instruction: "unused", writeScope: ["GREETING.txt"],
+      executor: { id: "graphloom.coding-agent/run", version: "1" }, input,
+    });
+    expect(await runner.checkJob!(job({ harness: "claude-code", instruction: "fix it" }))).toBe("executor graphloom.coding-agent/run: input failed schema validation");
+    // `harness` is the runner's to strip, so a valid job passes with it.
+    expect(await runner.checkJob!(job({ assignment: "Create GREETING.txt", harness: "claude-code" }))).toBeUndefined();
+    expect(await runner.checkJob!(job({ assignment: "Create GREETING.txt", harness: "pi" }))).toBe(
+      'agent job asks for harness "pi", which the runner config does not enable (harnesses: claude-code)',
+    );
+    expect(await readdir(f.repo)).not.toContain("GREETING.txt");
+  });
+
   it("runs each agent job on the harness it names, and refuses one the config does not enable", async () => {
     const f = await fixture();
     vi.stubEnv("CLAUDE_CONFIG_DIR", path.join(f.dir, "claude"));

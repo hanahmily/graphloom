@@ -292,6 +292,44 @@ describe("createChildExecutorRunner", () => {
     expect(result.evidence?.[0]?.payload).toEqual({ seen: "[REDACTED]", env: null });
   });
 
+  it("checks a job against the executor's own schema, pin and grant without running it", async () => {
+    const runner = createChildExecutorRunner({
+      entryModule: credentialFixture,
+      executorIds: ["acme.cred/echo", "acme.cred/post"],
+      fallback: createScriptedRunner({ jobs: [] }),
+      workerModule,
+      env: {},
+      allowedEffects: ["read"],
+    });
+    expect(await runner.checkJob!(job("acme.cred/echo", { msg: "hi" }))).toBeUndefined();
+    expect(await runner.checkJob!(job("acme.cred/echo", { other: 1 }))).toBe("executor acme.cred/echo: input failed schema validation");
+    expect(await runner.checkJob!(job("acme.cred/echo", { msg: "hi" }, "1"))).toBe("executor acme.cred/echo pinned version 1 but installed 2");
+    expect(await runner.checkJob!(job("acme.cred/post", {}))).toBe("executor acme.cred/post effect write is not granted");
+    // An executor this runner does not serve, with no fallback check: it cannot tell.
+    expect(await runner.checkJob!(job("acme.other/read", {}))).toBeUndefined();
+  });
+
+  it("checks a trusted in-process executor's schema without executing it", async () => {
+    let executions = 0;
+    const echo = defineExecutor({
+      id: "acme.echo/ping",
+      effect: "read",
+      inputSchema: (v): v is { msg: string } => typeof v === "object" && v !== null && typeof (v as { msg?: unknown }).msg === "string",
+      async execute() {
+        executions += 1;
+        return { status: "ok" as const, summary: "ran" };
+      },
+    });
+    const child = createChildExecutorRunner({ entryModule: credentialFixture, executorIds: ["acme.cred/echo"], fallback: createScriptedRunner({ jobs: [] }), workerModule, env: {} });
+    const runner = createTrustedInProcessRunner({ executors: [echo], fallback: child });
+    const unversioned = (input: unknown) => ({ ...job("acme.echo/ping", input), executor: { id: "acme.echo/ping" } });
+    expect(await runner.checkJob!(unversioned({ msg: 9 }))).toBe("executor acme.echo/ping: input failed schema validation");
+    expect(await runner.checkJob!(unversioned({ msg: "x" }))).toBeUndefined();
+    // Jobs it does not serve go to the fallback's check.
+    expect(await runner.checkJob!(job("acme.cred/echo", {}))).toBe("executor acme.cred/echo: input failed schema validation");
+    expect(executions).toBe(0);
+  });
+
   it("redacts short credentials without corrupting the result, and rejects empty ones", async () => {
     const runner = createChildExecutorRunner({
       entryModule: credentialFixture,

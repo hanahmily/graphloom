@@ -1,5 +1,5 @@
 import path from "node:path";
-import { BUILTIN_AGENT_EXECUTOR_ID, pinJobExecutor } from "@graphloom/sdk";
+import { BUILTIN_AGENT_EXECUTOR_ID, pinJobExecutor, type JobSpec } from "@graphloom/sdk";
 import { createBuiltinExecutorRunner, type JobResult, type Runner } from "@graphloom/runner";
 import {
   CLAUDE_BIN_ENV,
@@ -126,30 +126,41 @@ export function createCliRunner(
           environmentCommands ?? new Map(),
         );
   const defaultAgent = agents.get(config.harness)!;
+  /** The runner a job goes to and the job as its executor sees it, or why no runner serves it. */
+  const route = (job: JobSpec): { runner: Runner; job: JobSpec } | { refusal: string } => {
+    const pinned = pinJobExecutor(job);
+    const id = pinned.executor!.id;
+    if (id !== BUILTIN_AGENT_EXECUTOR_ID && id !== CODING_AGENT_RUN_ID) return { runner: others, job: pinned };
+    const legacy = id === BUILTIN_AGENT_EXECUTOR_ID;
+    // The schema a plugin's resultSchema names (if any) reaches the
+    // executor through ctx.resultContract, resolved by the controller from
+    // the run's own declared contracts; this runner forwards only the
+    // harness choice and the assignment text.
+    const { harness: chosen, ...input } = legacy ? { assignment: pinned.instruction } : (object(pinned.input) ?? {});
+    const agent = chosen === undefined ? defaultAgent : agents.get(chosen as HarnessName);
+    if (agent === undefined) {
+      return { refusal: `agent job asks for harness ${JSON.stringify(chosen)}, which the runner config does not enable (harnesses: ${[...agents.keys()].join(", ")})` };
+    }
+    // stageId/purpose travel only as far as the job's own identity for B3's
+    // provenance check (docs/design-graph-rehearsal.md §4.1, §4.7); a
+    // plugin never declares either itself, and the legacy executor has no
+    // use for them.
+    const finalInput = legacy ? input : { ...input, stageId: job.stageId, purpose: job.purpose };
+    return { runner: agent, job: { ...pinned, input: finalInput } };
+  };
   return {
     async describeExecutors() {
       return [...(await defaultAgent.describeExecutors!()), ...(await others.describeExecutors!())];
     },
+    // The same routing and input shaping runJob applies, so the executor checks
+    // exactly the input it would be given.
+    async checkJob(job, ctx) {
+      const routed = route(job);
+      return "refusal" in routed ? routed.refusal : routed.runner.checkJob?.(routed.job, ctx);
+    },
     async runJob(job, ctx) {
-      const pinned = pinJobExecutor(job);
-      const id = pinned.executor!.id;
-      if (id !== BUILTIN_AGENT_EXECUTOR_ID && id !== CODING_AGENT_RUN_ID) return others.runJob(pinned, ctx);
-      const legacy = id === BUILTIN_AGENT_EXECUTOR_ID;
-      // The schema a plugin's resultSchema names (if any) reaches the
-      // executor through ctx.resultContract, resolved by the controller from
-      // the run's own declared contracts; this runner forwards only the
-      // harness choice and the assignment text.
-      const { harness: chosen, ...input } = legacy ? { assignment: pinned.instruction } : (object(pinned.input) ?? {});
-      const agent = chosen === undefined ? defaultAgent : agents.get(chosen as HarnessName);
-      if (agent === undefined) {
-        return failure(ctx, `agent job asks for harness ${JSON.stringify(chosen)}, which the runner config does not enable (harnesses: ${[...agents.keys()].join(", ")})`);
-      }
-      // stageId/purpose travel only as far as the job's own identity for B3's
-      // provenance check (docs/design-graph-rehearsal.md §4.1, §4.7); a
-      // plugin never declares either itself, and the legacy executor has no
-      // use for them.
-      const finalInput = legacy ? input : { ...input, stageId: job.stageId, purpose: job.purpose };
-      return agent.runJob({ ...pinned, input: finalInput }, ctx);
+      const routed = route(job);
+      return "refusal" in routed ? failure(ctx, routed.refusal) : routed.runner.runJob(routed.job, ctx);
     },
   };
 }
@@ -193,6 +204,9 @@ function routeEnvironmentChecks(real: Runner, standIn: Runner, environmentComman
     },
     async runJob(job, ctx) {
       return (isEnvironmentDispatch(job, environmentCommands) ? real : standIn).runJob(job, ctx);
+    },
+    async checkJob(job, ctx) {
+      return (isEnvironmentDispatch(job, environmentCommands) ? real : standIn).checkJob?.(job, ctx);
     },
   };
 }

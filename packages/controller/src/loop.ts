@@ -452,7 +452,9 @@ async function runNormalLoopSteps(
           return rejection;
         };
         const check: AdmissionCheck = async (candidate) => {
-          const refusal = supervisorAdmissionRefusal(admittedAgainst, candidate, deps, trigger.code);
+          const refusal =
+            supervisorAdmissionRefusal(admittedAgainst, candidate, deps, trigger.code) ??
+            (await executorInputRefusal(admittedAgainst, candidate, deps.runner));
           return refusal === undefined ? undefined : refuse(candidate.action.type, describeInadmissible(refusal));
         };
         const admission = { facts: admissionFacts(state, deps.repair !== undefined), check, refuse };
@@ -1969,6 +1971,35 @@ export function supervisorAdmissionRefusal(
     default:
       return { precondition: "unsupported action", detail: `${action.type} is not a supervisor action in ${state.mode} mode` };
   }
+}
+
+/**
+ * A supervisor dispatch whose pinned executor would refuse it (its input
+ * fails the executor's own schema, say) is inadmissible in-turn, instead of
+ * being admitted and failing inside the executor as executor_failed. The
+ * runner asks the executor, so the controller learns no executor field
+ * names; a runner that cannot tell admits the job as before, and the
+ * executor still checks its input when the job runs.
+ */
+export async function executorInputRefusal(
+  state: DurableRunState,
+  decision: GraphDecision,
+  runner: Runner,
+): Promise<Inadmissible | undefined> {
+  if (decision.action.type !== "dispatch" || runner.checkJob === undefined) return undefined;
+  const admitted = dispatchPreconditions(state, decision.action.job);
+  if ("precondition" in admitted) return undefined;
+  let refused: string | undefined;
+  try {
+    refused = await runner.checkJob(admitted.job, admitted.source !== undefined ? { executorSource: admitted.source } : {});
+  } catch {
+    return undefined;
+  }
+  if (refused === undefined) return undefined;
+  return {
+    precondition: "executor input rejected",
+    detail: `${refused}; the job was not run: compose its input as ${admitted.job.executor!.id} requires`,
+  };
 }
 
 /**
