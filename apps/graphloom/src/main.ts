@@ -279,7 +279,8 @@ Delete removes a stopped or finished run's worktree, graphloom/<runId> branch, a
 state directory. --force also discards uncommitted changes and branch commits.
 
 Resume --update-plugin pins the installed plugin bundle when its bytes changed
-since the run started. It is refused unless the graph keeps its stages,
+since the run started, including a new version of the same graph (the run's
+active version moves with it). It is refused unless the graph keeps its id, stages,
 requirements, validator bindings and private-state schema. Each accepted receipt
 is rechecked with the updated validators on the evidence it was accepted on; the
 first that no longer passes sends the run back to its stage.

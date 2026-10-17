@@ -538,6 +538,45 @@ describe("release scenarios (#60)", () => {
         advances: [stop({ reason: "resumed", blocker: "none" }, "stop")],
       });
 
+    it("moves the run to a new version of the same graph", async () => {
+      const paused = await acceptedWrite("update-version");
+      const manifestPath = path.join((await loadRunState(paused.stateDir)).intake.bundle.bundlePath, "graphloom.manifest.json");
+      const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as { version: string };
+      const from = manifest.version;
+      await writeFile(manifestPath, JSON.stringify({ ...manifest, version: "9.9.9" }, null, 2), "utf8");
+      const resumed = await createController().resume({
+        runRef: paused.stateDir,
+        plugin: createScriptedGraph({ definition: { ...definition, version: "9.9.9" }, advances: [stop({ reason: "resumed", blocker: "none" }, "stop")] }),
+        runner: createScriptedRunner({ jobs: [] }),
+        validators,
+        updatePlugin: true,
+      });
+      expect(resumed.stopReason, resumed.blocker).toBe("resumed");
+      const state = await loadRunState(paused.stateDir);
+      expect(state.activeVersion).toBe(`${state.intake.bundle.graphId}@9.9.9`);
+      expect(state.intake.bundle.version).toBe("9.9.9");
+      expect(state.definition.version).toBe("9.9.9");
+      expect(state.versionHistory!.at(-1)!.reason).toContain(`version ${from} -> 9.9.9`);
+      // Same stages and requirements, so the accepted Write receipt still stands.
+      expect(resumed.receipts.filter((r) => r.valid).map((r) => r.stageId)).toEqual(["write"]);
+    });
+
+    it("refuses an update that installs a different graph", async () => {
+      const paused = await acceptedWrite("update-other-graph");
+      const manifestPath = path.join((await loadRunState(paused.stateDir)).intake.bundle.bundlePath, "graphloom.manifest.json");
+      const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as Record<string, unknown>;
+      await writeFile(manifestPath, JSON.stringify({ ...manifest, graphId: "other-graph" }, null, 2), "utf8");
+      const resumed = await createController().resume({
+        runRef: paused.stateDir,
+        plugin: resumedStop(),
+        runner: createScriptedRunner({ jobs: [] }),
+        validators,
+        updatePlugin: true,
+      });
+      expect(resumed).toMatchObject({ status: "stopped", stopReason: "pin mismatch" });
+      expect(resumed.blocker).toMatch(/not this run's .*a plugin update keeps the graph/);
+    });
+
     it("keeps a receipt the updated validator still accepts on the same evidence", async () => {
       const paused = await acceptedWrite("update-keeps");
       const resumed = await createController().resume({
