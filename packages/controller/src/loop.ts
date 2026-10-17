@@ -972,18 +972,28 @@ const STOP_POLL_MS = 200;
 
 /** Resolve at `until`, or as soon as the run stops. */
 function sleepUntil(until: string, signal: AbortSignal): Promise<void> {
-  const ms = Date.parse(until) - Date.now();
-  if (!(ms > 0) || signal.aborted) return Promise.resolve();
+  const target = Date.parse(until);
+  if (!(target - Date.now() > 0) || signal.aborted) return Promise.resolve();
   return new Promise((resolve) => {
+    let timer: NodeJS.Timeout;
     const done = () => {
       clearTimeout(timer);
       signal.removeEventListener("abort", done);
       resolve();
     };
-    const timer = setTimeout(done, ms);
+    // Sleep in steps no longer than MAX_TIMER_MS: Node fires a longer timer after 1ms.
+    const arm = () => {
+      const left = target - Date.now();
+      if (!(left > 0)) return done();
+      timer = setTimeout(arm, Math.min(left, MAX_TIMER_MS));
+    };
+    arm();
     signal.addEventListener("abort", done, { once: true });
   });
 }
+
+/** The longest delay setTimeout honours; a longer one is replaced by 1ms. */
+export const MAX_TIMER_MS = 2 ** 31 - 1;
 
 /**
  * Mark an admitted dispatch as handed to the runner, while it is still the
@@ -1153,7 +1163,9 @@ function watchForStop(stateDir: string, deps: LoopDeps, abort: AbortController):
   const armDeadline = (clock: ActiveClock) => {
     const left = clock.remaining();
     if (left === 0) return abort.abort();
-    deadline = setTimeout(() => armDeadline(clock), left + 1);
+    // Node fires a timer whose delay exceeds MAX_TIMER_MS after 1ms; a long
+    // budget re-arms in steps instead (the clock is rechecked each time).
+    deadline = setTimeout(() => armDeadline(clock), Math.min(left + 1, MAX_TIMER_MS));
     deadline.unref();
   };
   if (deps.activeClock !== undefined) armDeadline(deps.activeClock);
