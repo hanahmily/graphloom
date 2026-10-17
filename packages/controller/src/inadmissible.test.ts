@@ -965,6 +965,60 @@ describe("supervisor evidence and probes", () => {
     expect(reviewed.map((e) => e.ref)).toEqual([cited]);
   });
 
+  it("hands the independent reviewer the result of a probe a repair cites as its only evidence", async () => {
+    const env = await makeEnv();
+    let reviewed: Array<{ ref: string; kind: string; payload?: unknown }> = [];
+    let probe: { probeId: string; accepted: boolean; reason: string } | undefined;
+    const session = toolCallingSession("sup-119-probe-review", [
+      async (_prompt, tools) => {
+        probe = JSON.parse(await call(tools, "check_validate", { stageId: "write", requirementIds: ["greeting-bytes"] }));
+        // Cited only by probe id: no recorded evidence ref anywhere on the proposal.
+        expect(
+          await call(tools, "qualify_repair", {
+            reason: "defective gate",
+            qualify: { target: "validator", reason: "write gate always fails" },
+            evidence: [probe!.probeId],
+          }),
+        ).toMatch(/^Submitted/);
+        return "";
+      },
+      async () => JSON.stringify(returnToNormal({ summary: "done" }, "return")),
+    ]);
+    const repair = approvingRepair("sup-119-probe-review");
+    const reviewer = {
+      sessionId: "sup-119-probe-review-independent",
+      async review(args: { evidence: Array<{ ref: string; kind: string; payload?: unknown }> }) {
+        reviewed = args.evidence;
+        return { approved: false, reason: "reviewed" };
+      },
+    };
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({
+        definition,
+        advances: [...wroteGreeting(), validate({ stageId: "write", requirementIds: ["greeting-bytes"] }, "val write"), supervise({ reason: "gate defective" }, "escalate"), ...finish.slice(-1)],
+      }),
+      validators: { "exact-greeting": defectiveGreeting, "independent-reviewer": independentReview },
+      supervisor: createPiSupervisor({ session }),
+      repair: { ...repair, reviewer } as RepairDeps,
+      runner: runner(),
+      stateRoot: env.stateRoot,
+      runId: "issue-119-probe-review",
+    });
+    expect(probe).toMatchObject({ accepted: false });
+    // The reviewer got the probe's own result, not an empty evidence list.
+    expect(reviewed).toEqual([
+      {
+        ref: probe!.probeId,
+        kind: "other",
+        payload: { probe: expect.objectContaining({ check: "check_validate", accepted: false, reason: probe!.reason }) },
+      },
+    ]);
+    // The result is kept durably with the probe log.
+    const state = await loadRunState(report.stateDir);
+    expect(state.probeLog?.results?.[probe!.probeId]).toMatchObject({ check: "check_validate", accepted: false });
+  });
+
   it("keeps probe reservations when a finding and a rejection are saved at the same time", async () => {
     const env = await makeEnv("budgets:\n  probes: 3\n");
     const session = toolCallingSession("sup-119-writers", [

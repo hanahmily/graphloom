@@ -73,7 +73,7 @@ import {
 import { isUnsettled, reconcilePendingDispatch } from "./reconcile.js";
 import { createChildPort, reconcileChildOperations } from "./children.js";
 import { agentSessionViews, continuationRefusal, recordAgentSession, sessionForDispatch, wipeAgentSessions } from "./agent-sessions.js";
-import { citedEvidence, loadRunState, nextStageAttempt, recordRemedy, STEP_LIMIT_STOP_REASON, type DurableRunState, saveRunState } from "./state.js";
+import { citedEvidence, loadRunState, nextStageAttempt, type ProbeRecord, recordRemedy, STEP_LIMIT_STOP_REASON, type DurableRunState, saveRunState } from "./state.js";
 import { bumpGeneration } from "./generation.js";
 import { noteGraphDecision, noteSupervisorProposal, progressMark, settleCorrectionTrial, settleSupervisorCorrection } from "./escalation.js";
 import {
@@ -91,7 +91,15 @@ import {
   worktreeChangeFingerprints,
 } from "./worktree.js";
 import { clearCheckouts, runInCheckout } from "./checkout.js";
-import { createRecoveryFence, createSupervisorInspection, DEFAULT_EPISODE_PROBES, episodeProbeAttempts, episodeProbeIds } from "./inspection.js";
+import {
+  createRecoveryFence,
+  createSupervisorInspection,
+  DEFAULT_EPISODE_PROBES,
+  episodeProbeAttempts,
+  episodeProbeIds,
+  episodeProbeResults,
+  keepProbeResult,
+} from "./inspection.js";
 import { checkEnvironment, declaresEnvironment, type EnvironmentOutcome } from "./environment.js";
 import {
   activateRefusal,
@@ -482,16 +490,17 @@ async function runNormalLoopSteps(
           state = {
             ...state,
             ...(left !== undefined ? { budgets: { ...state.budgets, probes: left - 1 } } : {}),
-            probeLog: { episodeId, ids: [...episodeProbeIds(state, episodeId)], attempts: attempts + 1 },
+            probeLog: { episodeId, ids: [...episodeProbeIds(state, episodeId)], attempts: attempts + 1, ...episodeProbeResults(state, episodeId) },
           };
           await saveLatest();
           return { id };
         };
         // The log is durable (without a revision bump) so a later turn of the
         // episode, or a resume, can still cite what an earlier turn probed.
-        const recordProbe = async (id: string): Promise<void> => {
+        const recordProbe = async (id: string, record: ProbeRecord): Promise<void> => {
           const ids = [...episodeProbeIds(state, episodeId), id];
-          state = { ...state, probeLog: { episodeId, ids, attempts: episodeProbeAttempts(state, episodeId) } };
+          const results = keepProbeResult(episodeProbeResults(state, episodeId).results, id, record);
+          state = { ...state, probeLog: { episodeId, ids, attempts: episodeProbeAttempts(state, episodeId), results } };
           await saveLatest();
         };
         const inspection = createSupervisorInspection({

@@ -5,7 +5,7 @@ import type { EvidenceFilter, ProbeResult, SupervisorInspection } from "@graphlo
 import { admitValidation, AdmissionError, type AdmissionValidator } from "./admit.js";
 import { HostObservationError } from "./host-validators.js";
 import { activateRefusal, checkoutSpecRefusal, describeInadmissible } from "./inadmissible.js";
-import type { DurableRunState } from "./state.js";
+import type { DurableRunState, ProbeRecord } from "./state.js";
 import { selectPaths } from "./checkout.js";
 import { candidateChange, readWorktreeFile, withGitCancellation } from "./worktree.js";
 
@@ -33,8 +33,8 @@ export interface InspectionHooks {
    * succeeds. The id to cite, or why no probe is left.
    */
   reserveProbe(): Promise<{ id: string } | { refused: string }>;
-  /** Record that the reserved probe ran, so a proposal may cite its id. */
-  recordProbe(id: string): Promise<void>;
+  /** Record that the reserved probe ran, and what it found, so a proposal may cite its id. */
+  recordProbe(id: string, record: ProbeRecord): Promise<void>;
   /** The signal of the decide turn now running; aborted when the run stops. */
   signal(): AbortSignal | undefined;
   /**
@@ -49,9 +49,66 @@ export interface SupervisorInspectionHandle {
   inspection: SupervisorInspection;
 }
 
+/** Longest probe reason kept durably; the supervisor saw the full text in its turn. */
+export const MAX_PROBE_REASON_CHARS = 2_000;
+/** Requirement outcomes kept per probe. */
+export const MAX_PROBE_REQUIREMENTS = 32;
+/** Probe results kept per episode (the latest); an older probe stays citable by id. */
+export const MAX_KEPT_PROBE_RESULTS = 64;
+
+const clip = (text: string): string =>
+  text.length <= MAX_PROBE_REASON_CHARS ? text : `${text.slice(0, MAX_PROBE_REASON_CHARS)}… [truncated]`;
+
+/** The bounded record of a probe's result that the run keeps. */
+export function probeRecord(check: ProbeRecord["check"], result: Omit<ProbeResult, "probeId">): ProbeRecord {
+  return {
+    check,
+    accepted: result.accepted,
+    reason: clip(result.reason),
+    stateRevision: result.stateRevision,
+    ...(result.evaluated !== undefined ? { evaluated: result.evaluated } : {}),
+    ...(result.requirements !== undefined
+      ? { requirements: result.requirements.slice(0, MAX_PROBE_REQUIREMENTS).map((r) => ({ requirementId: r.requirementId, status: r.status, reason: clip(r.reason) })) }
+      : {}),
+  };
+}
+
+/** `results` with `id` added, keeping only the latest MAX_KEPT_PROBE_RESULTS. */
+export function keepProbeResult(results: Record<string, ProbeRecord> | undefined, id: string, record: ProbeRecord): Record<string, ProbeRecord> {
+  const entries = [...Object.entries(results ?? {}).filter(([k]) => k !== id), [id, record] as const];
+  return Object.fromEntries(entries.slice(-MAX_KEPT_PROBE_RESULTS));
+}
+
+/**
+ * The probes of the current recovery episode that `refs` cite, as evidence
+ * records (ref = probe id, kind "other", payload = what the probe found), so a
+ * probe-backed proposal reaches whoever judges it with the probe's output.
+ */
+export function citedProbeEvidence(state: DurableRunState, refs: readonly string[] | undefined): EvidenceRecord[] {
+  const episodeId = state.recoveryEpisodeId;
+  if (episodeId === undefined || state.probeLog?.episodeId !== episodeId) return [];
+  const ran = new Set(state.probeLog.ids);
+  return [...new Set(refs ?? [])]
+    .filter((ref) => ran.has(ref))
+    .map((ref) => {
+      const found = state.probeLog!.results?.[ref];
+      return {
+        ref,
+        kind: "other" as const,
+        payload: { probe: found ?? { reason: "this probe ran in the episode, but its result is no longer kept" } },
+      };
+    });
+}
+
 /** Probes that ran in `episodeId`, across its turns and a resume: the only probe ids a proposal may cite. */
 export function episodeProbeIds(state: DurableRunState, episodeId: string): ReadonlySet<string> {
   return new Set(state.probeLog?.episodeId === episodeId ? state.probeLog.ids : []);
+}
+
+/** The kept probe results of `episodeId`, as a spreadable `{ results }` (empty for another episode). */
+export function episodeProbeResults(state: DurableRunState, episodeId: string): { results?: Record<string, ProbeRecord> } {
+  const results = state.probeLog?.episodeId === episodeId ? state.probeLog.results : undefined;
+  return results !== undefined ? { results } : {};
 }
 
 /** Probes started in `episodeId`, including any that failed. */
@@ -183,6 +240,7 @@ export function createSupervisorInspection(hooks: InspectionHooks): SupervisorIn
       [hooks.signal(), callSignal, AbortSignal.timeout(INSPECTION_TIMEOUT_MS)].filter((s): s is AbortSignal => s !== undefined),
     );
   const probe = async (
+    check: ProbeRecord["check"],
     callSignal: AbortSignal | undefined,
     run: (state: DurableRunState, signal: AbortSignal) => Promise<Omit<ProbeResult, "probeId" | "stateRevision">>,
   ): Promise<ProbeResult> => {
@@ -193,8 +251,9 @@ export function createSupervisorInspection(hooks: InspectionHooks): SupervisorIn
     // The revision names the snapshot the result is about, not whatever the run has become since.
     const snapshot = structuredClone(hooks.state());
     const result = await raceAbort(() => run(snapshot, signal), signal);
-    await hooks.recordProbe(reserved.id);
-    return { probeId: reserved.id, stateRevision: snapshot.stateRevision, ...result };
+    const found = { stateRevision: snapshot.stateRevision, ...result };
+    await hooks.recordProbe(reserved.id, probeRecord(check, found));
+    return { probeId: reserved.id, ...found };
   };
 
   const inspection: SupervisorInspection = {
@@ -240,7 +299,7 @@ export function createSupervisorInspection(hooks: InspectionHooks): SupervisorIn
     },
 
     checkValidate: (spec, callSignal) =>
-      probe(callSignal, async (state, signal) => {
+      probe("check_validate", callSignal, async (state, signal) => {
         const stage = state.definition.stages.find((s) => s.id === spec.stageId);
         if (stage === undefined) return { accepted: false, reason: `stage ${spec.stageId} is not in the pinned graph definition`, evaluated: false };
         try {
@@ -277,7 +336,7 @@ export function createSupervisorInspection(hooks: InspectionHooks): SupervisorIn
       }),
 
     checkActivation: (artifactId, callSignal) =>
-      probe(callSignal, async (state) => {
+      probe("check_activation", callSignal, async (state) => {
         const refusal = activateRefusal(state, { qualifiedArtifactId: artifactId, reason: "probe" }, hooks.hasRepairHooks);
         return refusal === undefined
           ? {
@@ -288,7 +347,7 @@ export function createSupervisorInspection(hooks: InspectionHooks): SupervisorIn
       }),
 
     checkCheckout: (spec: CheckoutSpec, callSignal) =>
-      probe(callSignal, async (state, signal) => {
+      probe("check_checkout", callSignal, async (state, signal) => {
         const refusal = checkoutSpecRefusal(spec);
         if (refusal !== undefined) return { accepted: false, reason: refusal };
         // The paths a real checkout would apply: a base path that is not part of the workspace change fails there.
