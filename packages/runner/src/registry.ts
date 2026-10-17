@@ -18,7 +18,7 @@ import {
 } from "@graphloom/sdk";
 import { digestExecutorSource } from "./digest.js";
 import { assertSandboxSupported, sandboxNodeArgs } from "./sandbox.js";
-import type { ExecutorDescriptor, JobContext, JobEvidenceItem, JobResult, Runner } from "./types.js";
+import type { ExecutorDescriptor, ExecutorSourceOverride, JobContext, JobEvidenceItem, JobResult, Runner } from "./types.js";
 
 /** Qualified ids under this namespace belong to GraphLoom built-in packages. */
 export const BUILTIN_EXECUTOR_NAMESPACE = "graphloom.";
@@ -291,6 +291,27 @@ export function createTrustedInProcessRunner(
       }));
       return [...own, ...(await describeFallback(options.fallback, byId))];
     },
+    async checkJob(job, ctx) {
+      const pinned = pinJobExecutor(job);
+      const pin = pinned.executor as ExecutorPin;
+      const def = byId.get(pin.id);
+      if (!def) return options.fallback.checkJob?.(pinned, ctx);
+      // The refusals runJob gives, in its order.
+      if (ctx?.executorSource !== undefined) return `executor ${def.id} runs in-process and cannot be served from a run-local copy`;
+      if (pin.version !== undefined && pin.version !== def.version) {
+        return `executor ${def.id} pinned version ${pin.version} but installed ${def.version ?? "(unversioned)"}`;
+      }
+      const digestError = digestMismatch(pin, digests.get(def.id)!);
+      if (digestError) return digestError;
+      const mismatch = effectMismatch(def, pinned);
+      if (mismatch) return mismatch;
+      try {
+        validateExecutorInput(def, pinned.input);
+      } catch (err) {
+        return err instanceof Error ? err.message : String(err);
+      }
+      return undefined;
+    },
     async runJob(job: JobSpec, ctx: JobContext): Promise<JobResult> {
       const pinned = pinJobExecutor(job);
       const pin = pinned.executor as ExecutorPin;
@@ -369,6 +390,31 @@ export function createChildExecutorRunner(
     options.sandbox === true ? sandboxNodeArgs([workerModule, entry], extraCa ? [extraCa] : []) : [];
   if (options.sandbox === true) assertSandboxSupported();
   const nodeArgs = sandboxArgs(entryModule);
+  /**
+   * The entry module a job's pin may load, or why it may not: a run-local copy
+   * needs a pinned digest and must stay inside its root, and pinned bytes must
+   * still match. Read before any executor code is imported.
+   */
+  const servingSource = async (pin: ExecutorPin, override: ExecutorSourceOverride | undefined): Promise<{ entry: string } | { refusal: string }> => {
+    if (override !== undefined && pin.digest === undefined) {
+      return { refusal: `executor ${pin.id}: a run-local copy runs only under a pinned digest` };
+    }
+    const entry = override !== undefined ? path.resolve(override.entryModule) : entryModule;
+    if (override !== undefined && !(await containedIn(override.root, entry))) {
+      return { refusal: `executor ${pin.id}: run-local entry module ${entry} is outside its root ${override.root}` };
+    }
+    if (pin.digest !== undefined) {
+      let serving: string;
+      try {
+        serving = await digestExecutorSource(override !== undefined ? override.root : (sourceRoot ?? entryModule));
+      } catch (err) {
+        return { refusal: `executor ${pin.id} source unreadable: ${err instanceof Error ? err.message : String(err)}` };
+      }
+      const mismatch = digestMismatch(pin, serving);
+      if (mismatch) return { refusal: mismatch };
+    }
+    return { entry };
+  };
 
   return {
     async describeExecutors() {
@@ -382,6 +428,33 @@ export function createChildExecutorRunner(
         builtin: options.builtin === true,
       }));
       return [...own, ...(await describeFallback(options.fallback, served))];
+    },
+    async checkJob(job, ctx) {
+      const pinned = pinJobExecutor(job);
+      const pin = pinned.executor as ExecutorPin;
+      if (!served.has(pin.id)) return options.fallback.checkJob?.(pinned, ctx);
+      const override = ctx?.executorSource;
+      // The same source-pin checks runJob makes, before any module is loaded:
+      // bytes that no longer match the pin are refused, never imported.
+      const source = await servingSource(pin, override);
+      if ("refusal" in source) return source.refusal;
+      const { entry } = source;
+      return checkInWorker({
+        args: override !== undefined ? sandboxArgs(entry) : nodeArgs,
+        workerModule,
+        entry,
+        cwd: options.cwd ?? path.dirname(entry),
+        env: options.env ?? process.env,
+        timeoutMs: Math.min(timeoutMs, CHECK_TIMEOUT_MS),
+        request: {
+          kind: "check",
+          id: pin.id,
+          ...(pin.version !== undefined ? { version: pin.version } : {}),
+          ...(pinned.effect !== undefined ? { effect: pinned.effect } : {}),
+          input: pinned.input,
+          ...(options.allowedEffects !== undefined ? { allowedEffects: [...options.allowedEffects] } : {}),
+        },
+      });
     },
     async runJob(job: JobSpec, ctx: JobContext): Promise<JobResult> {
       const pinned = pinJobExecutor(job);
@@ -406,23 +479,9 @@ export function createChildExecutorRunner(
         ctx = withoutSession;
       }
       const override = ctx.executorSource;
-      if (override !== undefined && pin.digest === undefined) {
-        return failed(`executor ${pin.id}: a run-local copy runs only under a pinned digest`);
-      }
-      const entry = override !== undefined ? path.resolve(override.entryModule) : entryModule;
-      if (override !== undefined && !(await containedIn(override.root, entry))) {
-        return failed(`executor ${pin.id}: run-local entry module ${entry} is outside its root ${override.root}`);
-      }
-      if (pin.digest !== undefined) {
-        let serving: string;
-        try {
-          serving = await digestExecutorSource(override !== undefined ? override.root : (sourceRoot ?? entryModule));
-        } catch (err) {
-          return failed(`executor ${pin.id} source unreadable: ${err instanceof Error ? err.message : String(err)}`);
-        }
-        const mismatch = digestMismatch(pin, serving);
-        if (mismatch) return failed(mismatch);
-      }
+      const source = await servingSource(pin, override);
+      if ("refusal" in source) return failed(source.refusal);
+      const { entry } = source;
       const args = override !== undefined ? sandboxArgs(entry) : nodeArgs;
 
       return await new Promise<JobResult>((resolve) => {
@@ -566,6 +625,57 @@ export function createChildExecutorRunner(
       });
     },
   };
+}
+
+/** Bound on a pre-admission check; it loads the module and runs only the schema. */
+const CHECK_TIMEOUT_MS = 10_000;
+
+/**
+ * Ask a worker for the refusal its executor would give a job, without running
+ * it. A check that cannot be made answers undefined: the executor still
+ * enforces its schema when the job runs.
+ */
+async function checkInWorker(options: {
+  args: string[];
+  workerModule: string;
+  entry: string;
+  cwd: string;
+  env: NodeJS.ProcessEnv;
+  timeoutMs: number;
+  request: Record<string, unknown>;
+}): Promise<string | undefined> {
+  return await new Promise<string | undefined>((resolve) => {
+    let settled = false;
+    const child = spawn(process.execPath, [...options.args, options.workerModule, options.entry], {
+      stdio: ["pipe", "pipe", "ignore"],
+      cwd: options.cwd,
+      env: options.env,
+    });
+    const done = (refusal: string | undefined) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      rl.close();
+      child.kill("SIGKILL");
+      resolve(refusal);
+    };
+    const timer = setTimeout(() => done(undefined), options.timeoutMs);
+    const rl = createInterface({ input: child.stdout, crlfDelay: Infinity });
+    rl.on("line", (line) => {
+      let msg: Record<string, unknown> & { kind: string };
+      try {
+        msg = parseExecutorReply(line);
+      } catch {
+        done(undefined);
+        return;
+      }
+      done(msg.kind === "checked" && typeof msg.refusal === "string" ? msg.refusal : undefined);
+    });
+    child.on("error", () => done(undefined));
+    child.on("exit", () => done(undefined));
+    child.stdin.on("error", () => undefined);
+    child.stdin.end(`${JSON.stringify(options.request)}\n`);
+  });
 }
 
 export interface DescribedExecutor {

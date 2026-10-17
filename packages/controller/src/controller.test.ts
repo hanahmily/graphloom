@@ -12,8 +12,10 @@ import {
   reenter,
   stop,
   validate,
+  type GraphDecision,
   type GraphDefinition,
   type GraphPlugin,
+  type RunView,
   type Validator,
 } from "@graphloom/sdk";
 import { createScriptedRunner, type Runner } from "@graphloom/runner";
@@ -536,6 +538,45 @@ describe("release scenarios (#60)", () => {
         advances: [stop({ reason: "resumed", blocker: "none" }, "stop")],
       });
 
+    it("moves the run to a new version of the same graph", async () => {
+      const paused = await acceptedWrite("update-version");
+      const manifestPath = path.join((await loadRunState(paused.stateDir)).intake.bundle.bundlePath, "graphloom.manifest.json");
+      const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as { version: string };
+      const from = manifest.version;
+      await writeFile(manifestPath, JSON.stringify({ ...manifest, version: "9.9.9" }, null, 2), "utf8");
+      const resumed = await createController().resume({
+        runRef: paused.stateDir,
+        plugin: createScriptedGraph({ definition: { ...definition, version: "9.9.9" }, advances: [stop({ reason: "resumed", blocker: "none" }, "stop")] }),
+        runner: createScriptedRunner({ jobs: [] }),
+        validators,
+        updatePlugin: true,
+      });
+      expect(resumed.stopReason, resumed.blocker).toBe("resumed");
+      const state = await loadRunState(paused.stateDir);
+      expect(state.activeVersion).toBe(`${state.intake.bundle.graphId}@9.9.9`);
+      expect(state.intake.bundle.version).toBe("9.9.9");
+      expect(state.definition.version).toBe("9.9.9");
+      expect(state.versionHistory!.at(-1)!.reason).toContain(`version ${from} -> 9.9.9`);
+      // Same stages and requirements, so the accepted Write receipt still stands.
+      expect(resumed.receipts.filter((r) => r.valid).map((r) => r.stageId)).toEqual(["write"]);
+    });
+
+    it("refuses an update that installs a different graph", async () => {
+      const paused = await acceptedWrite("update-other-graph");
+      const manifestPath = path.join((await loadRunState(paused.stateDir)).intake.bundle.bundlePath, "graphloom.manifest.json");
+      const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as Record<string, unknown>;
+      await writeFile(manifestPath, JSON.stringify({ ...manifest, graphId: "other-graph" }, null, 2), "utf8");
+      const resumed = await createController().resume({
+        runRef: paused.stateDir,
+        plugin: resumedStop(),
+        runner: createScriptedRunner({ jobs: [] }),
+        validators,
+        updatePlugin: true,
+      });
+      expect(resumed).toMatchObject({ status: "stopped", stopReason: "pin mismatch" });
+      expect(resumed.blocker).toMatch(/not this run's .*a plugin update keeps the graph/);
+    });
+
     it("keeps a receipt the updated validator still accepts on the same evidence", async () => {
       const paused = await acceptedWrite("update-keeps");
       const resumed = await createController().resume({
@@ -628,6 +669,46 @@ describe("release scenarios (#60)", () => {
     expect(report.receipts.filter((r) => r.valid).map((r) => r.stageId)).toEqual(["write"]);
     expect(report.evidence.filter((e) => e.kind === "review")).toEqual([]);
     expect(report.evidence.find((e) => e.kind === "other")?.payload).toMatchObject({ selfReported: "review" });
+  });
+
+  it("gives a stage re-entered from a later stage its next attempt number", async () => {
+    const env = await makeEnv();
+    const seen: Array<{ stageId: string; attempt: number }> = [];
+    const record = (decision: GraphDecision) => (view: RunView) => {
+      seen.push({ ...view.current });
+      return decision;
+    };
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({
+        definition,
+        advances: [
+          record(dispatch({ stageId: "write", kind: "agent", purpose: "work", instruction: "write", writeScope: [GREETING_PATH] }, "write")),
+          record(observe({ paths: [GREETING_PATH], includeWorkspaceManifest: true }, "observe")),
+          record(validate({ stageId: "write", requirementIds: ["greeting-bytes"] }, "validate write")),
+          record(dispatch({ stageId: "review", kind: "agent", purpose: "review", instruction: "review", readOnly: true }, "review")),
+          // Review found a problem: send the run back to Write.
+          record(reenter({ stageId: "write", reason: "review asked for changes" }, "back to write")),
+          record(stop({ reason: "paused", blocker: "test pause" }, "pause")),
+        ],
+      }),
+      runner: createScriptedRunner({
+        jobs: [
+          async (_job, ctx) => {
+            await writeFile(path.join(ctx.worktreePath, GREETING_PATH), GREETING, "utf8");
+            return { status: "ok" as const, summary: "wrote" };
+          },
+          async () => ({ status: "ok" as const, summary: "changes requested", evidence: [{ kind: "review" as const, payload: { verdict: "changes_requested", summary: "no" } }] }),
+        ],
+      }),
+      validators,
+      stateRoot: env.stateRoot,
+      runId: "reenter-attempt",
+    });
+    expect(report.status).toBe("stopped");
+    // Write ran as attempt 1; arriving back from Review it is attempt 2, not 1 again.
+    expect(seen.at(-1)).toEqual({ stageId: "write", attempt: 2 });
+    expect((await loadRunState(report.stateDir)).stageAttempts?.write).toBe(2);
   });
 
   it.each([
@@ -729,3 +810,15 @@ request: |
   const stateRoot = path.join(taskDir, "state");
   return { taskDir, taskPath, repoPath, stateRoot };
 }
+
+describe("nextStageAttempt", () => {
+  const base = { current: { stageId: "review", attempt: 1 } } as unknown as import("./state.js").DurableRunState;
+  it("falls back to the attempts a stage's agent sessions recorded, for runs saved before stageAttempts", async () => {
+    const { nextStageAttempt } = await import("./state.js");
+    const old = { ...base, agentSessions: [{ operationId: "op-1", stageId: "fix", attempt: 1 }, { operationId: "op-2", stageId: "review", attempt: 1 }] } as unknown as import("./state.js").DurableRunState;
+    expect(nextStageAttempt(old, "fix")).toBe(2);
+    expect(nextStageAttempt(old, "review")).toBe(2);
+    expect(nextStageAttempt(base, "fix")).toBe(1);
+    expect(nextStageAttempt({ ...old, stageAttempts: { fix: 3 } }, "fix")).toBe(4);
+  });
+});

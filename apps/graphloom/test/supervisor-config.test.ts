@@ -66,12 +66,29 @@ describe("operator supervisor config", () => {
     );
   });
 
+  it("reads an optional rawStreamCapture flag and rejects a non-boolean one", () => {
+    expect(parseSupervisorConfig({ provider: "minimax-cn", modelId: "MiniMax-M3" }).rawStreamCapture).toBeUndefined();
+    expect(parseSupervisorConfig({ provider: "minimax-cn", modelId: "MiniMax-M3", rawStreamCapture: true }).rawStreamCapture).toBe(true);
+    expect(() => parseSupervisorConfig({ provider: "minimax-cn", modelId: "MiniMax-M3", rawStreamCapture: "yes" })).toThrow(/rawStreamCapture must be a boolean/);
+  });
+
   it("reads an optional quotaRetryMs fallback and rejects a non-positive one", () => {
     expect(parseSupervisorConfig({ provider: "minimax-cn", modelId: "MiniMax-M3" }).quotaRetryMs).toBeUndefined();
     expect(parseSupervisorConfig({ provider: "minimax-cn", modelId: "MiniMax-M3", quotaRetryMs: 300_000 }).quotaRetryMs).toBe(300_000);
     for (const bad of [0, -1, "60s"]) {
       expect(() => parseSupervisorConfig({ provider: "minimax-cn", modelId: "MiniMax-M3", quotaRetryMs: bad })).toThrow(
         /quotaRetryMs must be a positive number/,
+      );
+    }
+  });
+
+  it("reads the prompt's inactivity limit and an optional total cap, rejecting non-positive ones", () => {
+    const config = parseSupervisorConfig({ provider: "minimax-cn", modelId: "MiniMax-M3", promptTimeoutMs: 180_000, promptTotalTimeoutMs: 1_200_000 });
+    expect(config).toMatchObject({ promptTimeoutMs: 180_000, promptTotalTimeoutMs: 1_200_000 });
+    expect(parseSupervisorConfig({ provider: "minimax-cn", modelId: "MiniMax-M3" }).promptTotalTimeoutMs).toBeUndefined();
+    for (const bad of [0, -1, "15m", Number.POSITIVE_INFINITY]) {
+      expect(() => parseSupervisorConfig({ provider: "minimax-cn", modelId: "MiniMax-M3", promptTotalTimeoutMs: bad })).toThrow(
+        /promptTotalTimeoutMs must be a positive number/,
       );
     }
   });

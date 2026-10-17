@@ -64,6 +64,7 @@ import {
 } from "./stop-request.js";
 import {
   loadRunState,
+  nextStageAttempt,
   saveRunState,
   type DurableRunState,
   type RemedyRecord,
@@ -71,6 +72,7 @@ import {
   type SupervisorOutcomeRecord,
   type VersionRecord,
 } from "./state.js";
+import { returnToGraphOnResume } from "./resume-recovery.js";
 import {
   assertWorktreeMatches,
   createRunWorktree,
@@ -541,6 +543,9 @@ export function createController(): Controller {
         state = reconcileRepairJournal(state);
         state = await reconcileSwitchJournal(state);
         state = await reassessAcceptedWorkspace(state);
+        // A trigger recorded before the stop is not current evidence: the
+        // graph retries first, and recovery fires afresh if the failure recurs.
+        state = returnToGraphOnResume(state);
         // The operator's resume restarts the graph, so its replayed decisions are not repeats.
         const { noProgress: _repeats, ...resumed } = state;
         void _repeats;
@@ -589,7 +594,7 @@ export function createController(): Controller {
         }
         try {
           assertDefinitionMatchesPin(described.value, pluginUpdate !== undefined ? { ...state.intake, bundle: pluginUpdate } : state.intake);
-          assertDefinitionUnchanged(described.value, state.definition);
+          assertDefinitionUnchanged(described.value, state.definition, pluginUpdate !== undefined);
           if (pluginUpdate !== undefined && described.value.privateStateSchema !== state.definition.privateStateSchema) {
             // Saved private state was written for the pinned schema.
             throw new Error("plugin privateStateSchema changed since run start");
@@ -657,11 +662,15 @@ export function createController(): Controller {
             },
             validators,
           );
-          const reason = `operator plugin update: manifest ${state.intake.bundle.manifestDigest.slice(0, 12)} -> ${pluginUpdate.manifestDigest.slice(0, 12)}${updated.note}`;
+          const versionNote =
+            pluginUpdate.version !== state.intake.bundle.version ? `, version ${state.intake.bundle.version} -> ${pluginUpdate.version}` : "";
+          const reason = `operator plugin update: manifest ${state.intake.bundle.manifestDigest.slice(0, 12)} -> ${pluginUpdate.manifestDigest.slice(0, 12)}${versionNote}${updated.note}`;
           // Findings the supervisor made about the old plugin code go stale here.
           state = refreshCaseFile({
             ...updated.state,
             intake: { ...updated.state.intake, bundle: pluginUpdate },
+            activeVersion: `${pluginUpdate.graphId}@${pluginUpdate.version}`,
+            definition: { ...updated.state.definition, version: pluginUpdate.version },
             versionHistory: [...(state.versionHistory ?? []), { activeVersion: state.activeVersion, generation: state.generation, reason, at: new Date().toISOString() }],
           });
           revisionBridge.current = state.stateRevision;
@@ -774,10 +783,8 @@ async function reassessAcceptedWorkspace(state: DurableRunState): Promise<Durabl
       void _privateState;
       return {
         ...next,
-        current: {
-          stageId: stage.id,
-          attempt: state.current.stageId === stage.id ? state.current.attempt + 1 : 1,
-        },
+        current: { stageId: stage.id, attempt: nextStageAttempt(state, stage.id) },
+        stageAttempts: { ...state.stageAttempts, [stage.id]: nextStageAttempt(state, stage.id) },
       };
     }
   }
@@ -787,7 +794,8 @@ async function reassessAcceptedWorkspace(state: DurableRunState): Promise<Durabl
     void _privateState;
     return {
       ...next,
-      current: { stageId: last.id, attempt: state.current.stageId === last.id ? state.current.attempt + 1 : 1 },
+      current: { stageId: last.id, attempt: nextStageAttempt(state, last.id) },
+      stageAttempts: { ...state.stageAttempts, [last.id]: nextStageAttempt(state, last.id) },
     };
   }
   return state;
@@ -829,7 +837,8 @@ async function recheckReceipts(
       return {
         state: {
           ...next,
-          current: { stageId: stage.id, attempt: state.current.stageId === stage.id ? state.current.attempt + 1 : 1 },
+          current: { stageId: stage.id, attempt: nextStageAttempt(state, stage.id) },
+          stageAttempts: { ...state.stageAttempts, [stage.id]: nextStageAttempt(state, stage.id) },
         },
         note: `; invalidated from ${stage.id}: ${receipt.requirementId} ${failure}`,
       };
@@ -1139,8 +1148,10 @@ function assertDefinitionMatchesPin(definition: GraphDefinition, intake: IntakeP
   }
 }
 
-function assertDefinitionUnchanged(live: GraphDefinition, pinned: GraphDefinition): void {
-  if (live.graphId !== pinned.graphId || live.version !== pinned.version) {
+function assertDefinitionUnchanged(live: GraphDefinition, pinned: GraphDefinition, updating = false): void {
+  // An operator plugin update may move to a new version of the same graph
+  // (its version is checked against the newly pinned bundle instead).
+  if (live.graphId !== pinned.graphId || (!updating && live.version !== pinned.version)) {
     throw new Error("plugin graphId/version changed since run start");
   }
   if (JSON.stringify(live.stages) !== JSON.stringify(pinned.stages)) {

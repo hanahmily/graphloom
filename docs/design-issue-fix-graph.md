@@ -211,8 +211,9 @@ The example tasks are
 and
 [`examples/issue-fix-graphloom-task.yaml`](../examples/issue-fix-graphloom-task.yaml),
 with banyandb-fix's budgets. The GraphLoom task uses `repo: .`, the checkout
-it lives in; the run's worktree and state then sit under `examples/graphloom/`
-and `examples/graphloom-state/`, which Git ignores.
+it lives in. Intake pins the top level of the repository `repo` names, so the
+run's worktree and state sit under `graphloom/` and `graphloom-state/` at the
+repository root, which Git ignores.
 
 ## Migration from banyandb-fix
 

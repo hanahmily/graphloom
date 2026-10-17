@@ -1,6 +1,6 @@
 {
   "graphId": "banyandb-fix",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "sdkProtocol": 1,
   "entryPoints": {
     "createGraph": "./dist/index.js",
@@ -15,26 +15,26 @@
     "vitest": "^3.0.9"
   },
   "digests": {
-    "sourceTree": "f995f2a04000b4fda3e8f02598488d07c3d5c9f90bba0b7d46590278a2f7e9d3",
-    "packageLock": "3a10a234ba1253d9b918e329819c06a9f2e18a73ea4d9e414a96ab9e2db15492",
+    "sourceTree": "77cb9f9edcbb760c5d2e0d291c7b49190ee121da76c3414c8cdb139fddf57f28",
+    "packageLock": "e7ba437932ceabd9f91057cd3aef0cc10a8ddd00e86b9a8882cce6c5ce23a4c6",
     "files": {
-      "package.json": "59a9f38685a9dbba9b12e9670e3d2581ac7bce95c06855cba550df4a098e4ade",
-      "package-lock.json": "3a10a234ba1253d9b918e329819c06a9f2e18a73ea4d9e414a96ab9e2db15492",
+      "package.json": "24b8060228bfab8b28715b5623229ea558997ae4c91fd76e706676a783043aa9",
+      "package-lock.json": "e7ba437932ceabd9f91057cd3aef0cc10a8ddd00e86b9a8882cce6c5ce23a4c6",
       "tsconfig.json": "ffed4b469e52e0642fabcb6a20f4ba178fce44e5e37567a0ee96571a150a1109",
       "src/constants.ts": "63dbf7a7ccabfc98d0bafee75e0affe7d0ab1bc5ceb5029d433b204b5b3171e4",
       "src/decision-record.ts": "79a2a22cbbeeb10253418f8d867b692c94950502b4fe4191705b6928129505e0",
       "src/evidence.ts": "ed1c517bef93788533dc026cf33d29ed34614c75e8b72e1c7ace4c0402954313",
-      "src/findings.ts": "bdc70d112b921cfac296f802fdf74832b870e2161fad4c3fae19a60ca36009fd",
+      "src/findings.ts": "7ba6ca1d3d610779531190f09845b039d0e0d606fb173a42236ff03bb8f388aa",
       "src/gotest.ts": "15c7e7a85c860549461bf3e2d5f9d9482f93c3c57bab369c137878b2a0ef00a3",
-      "src/graph.ts": "a0a1934c1d31b8d926cec3dee8f9890573dccf9eb24e77bb7b0c251bd098f8f6",
+      "src/graph.ts": "a5f9aa4253e07d695f7cc7d2692fa8c90ea81a66aaab9aad2164d2adcfb12e5e",
       "src/index.ts": "144b09db44976adb99de9fa56924ca61932a6cc0b4e80742f8a50162227634c6",
       "src/ocr.ts": "af062bcc2352d947f70789a36de0bc4cda0fd11c2a8de8cec25df873628fc287",
       "src/prompts.ts": "af85744b437099eb83029eccca04641841c7510e97dc3b127f756e75f7596dfa",
       "src/qualification.ts": "91acf2d4e4438aaaea1aa83bcea7051f2b61c56ce685bb0921aed5ada6ff7842",
       "src/rehearsal.ts": "573891b5d0328d8e7e0467aea90aae492b9cbd3cb3820b4b1bd823775b6cb6ce",
       "src/review-common.ts": "2b711248d1b227c01f8ed36bfa2399791fbcf9543a92e89414c74f119b20323c",
-      "src/validators.ts": "7e5899a6e9c4c3d0209567cba3eaa45b66be41906a697d8e39824dd1a6782042",
-      "test/banyandb-fix.test.ts": "a95f3a32600e009d2c34757da99c4f890f6ab71f1daecd6a3ed69a9f2752c03f"
+      "src/validators.ts": "15959fcd08646ca8aafefd09418b9cd1491759496756a3c71e26cd249ed37fb2",
+      "test/banyandb-fix.test.ts": "7087088850282ae1a924899b12c73830b73ef548fac3a23e70dd489ba8e83e19"
     }
   },
   "requirements": [

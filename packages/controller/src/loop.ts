@@ -73,7 +73,7 @@ import {
 import { isUnsettled, reconcilePendingDispatch } from "./reconcile.js";
 import { createChildPort, reconcileChildOperations } from "./children.js";
 import { agentSessionViews, continuationRefusal, recordAgentSession, sessionForDispatch, wipeAgentSessions } from "./agent-sessions.js";
-import { citedEvidence, loadRunState, recordRemedy, type DurableRunState, saveRunState } from "./state.js";
+import { citedEvidence, loadRunState, nextStageAttempt, recordRemedy, STEP_LIMIT_STOP_REASON, type DurableRunState, saveRunState } from "./state.js";
 import { bumpGeneration } from "./generation.js";
 import { noteGraphDecision, noteSupervisorProposal, progressMark, settleCorrectionTrial, settleSupervisorCorrection } from "./escalation.js";
 import {
@@ -512,13 +512,16 @@ async function runNormalLoopSteps(
           },
         });
         const check: AdmissionCheck = async (candidate) => {
-          const refusal = supervisorAdmissionRefusal(
-            admittedAgainst,
-            candidate,
-            deps,
-            trigger.code,
-            supervisor.requiresCitedEvidence === true ? episodeProbeIds(state, episodeId) : undefined,
-          );
+          // The grounding rule (#119) and the executor-input pre-check (#132)
+          // share this one check, so either refusal is charged the same way.
+          const refusal =
+            supervisorAdmissionRefusal(
+              admittedAgainst,
+              candidate,
+              deps,
+              trigger.code,
+              supervisor.requiresCitedEvidence === true ? episodeProbeIds(state, episodeId) : undefined,
+            ) ?? (await executorInputRefusal(admittedAgainst, candidate, deps.runner));
           return refusal === undefined ? undefined : refuse(candidate.action.type, describeInadmissible(refusal));
         };
         const admission = { facts: admissionFacts(state, deps.repair !== undefined), check, refuse };
@@ -947,7 +950,7 @@ async function runNormalLoopSteps(
     state = {
       ...state,
       status: "stopped",
-      stopReason: "step limit",
+      stopReason: STEP_LIMIT_STOP_REASON,
       blocker: `exceeded ${MAX_STEPS} controller steps`,
     };
     await saveRunState(state);
@@ -1422,7 +1425,13 @@ function settleSupervisorRemedies(state: DurableRunState, supervisor: Supervisor
             : `waited ${Math.ceil((waitedMs ?? 0) / 1000)}s for the provider's reset and retried the turn`
           : r.remedy === "compact_and_retry"
             ? "compacted the supervisor session and retried the turn"
-            : "re-asked the supervisor once to call exactly one tool",
+            : r.remedy === "fresh_session_retry"
+              ? "retried the turn once in a fresh supervisor session"
+              : r.remedy === "resend_interrupted"
+                ? "resent the identical prompt after the provider dropped the reply's output"
+                : r.remedy === "model_retry"
+                  ? `retried the turn once on the next configured model${r.model !== undefined ? ` ${r.model.provider}/${r.model.modelId}` : ""}`
+                  : "re-asked the supervisor once to call exactly one tool",
       detail: boundText(r.message),
       episodeId,
       ...(waitedMs !== undefined ? { waitedMs } : {}),
@@ -1621,10 +1630,8 @@ async function applyDecision(
           ...withoutRev.budgets,
           corrections: withoutRev.budgets.corrections - 1,
         },
-        current: {
-          stageId,
-          attempt: state.current.stageId === stageId ? state.current.attempt + 1 : 1,
-        },
+        current: { stageId, attempt: nextStageAttempt(state, stageId) },
+        stageAttempts: { ...withoutRev.stageAttempts, [stageId]: nextStageAttempt(state, stageId) },
         // Reentry means this stage's execution needs another attempt,
         // regardless of whether anything above actually invalidated — stage
         // selection must dispatch its work again rather than trust an
@@ -1932,6 +1939,7 @@ async function prepareDispatch(
       ...(retry !== undefined ? { retry: { ...retry } } : {}),
     },
     current: { stageId: job.stageId, attempt: state.current.attempt },
+    stageAttempts: { ...state.stageAttempts, [job.stageId]: Math.max(state.stageAttempts?.[job.stageId] ?? 0, state.current.attempt) },
     ...(job.purpose === "work" ? { workDispatched: { ...state.workDispatched, [job.stageId]: true as const } } : {}),
   };
 
@@ -2050,6 +2058,35 @@ export function supervisorAdmissionRefusal(
     default:
       return { precondition: "unsupported action", detail: `${action.type} is not a supervisor action in ${state.mode} mode` };
   }
+}
+
+/**
+ * A supervisor dispatch whose pinned executor would refuse it (its input
+ * fails the executor's own schema, say) is inadmissible in-turn, instead of
+ * being admitted and failing inside the executor as executor_failed. The
+ * runner asks the executor, so the controller learns no executor field
+ * names; a runner that cannot tell admits the job as before, and the
+ * executor still checks its input when the job runs.
+ */
+export async function executorInputRefusal(
+  state: DurableRunState,
+  decision: GraphDecision,
+  runner: Runner,
+): Promise<Inadmissible | undefined> {
+  if (decision.action.type !== "dispatch" || runner.checkJob === undefined) return undefined;
+  const admitted = dispatchPreconditions(state, decision.action.job);
+  if ("precondition" in admitted) return undefined;
+  let refused: string | undefined;
+  try {
+    refused = await runner.checkJob(admitted.job, admitted.source !== undefined ? { executorSource: admitted.source } : {});
+  } catch {
+    return undefined;
+  }
+  if (refused === undefined) return undefined;
+  return {
+    precondition: "executor input rejected",
+    detail: `${refused}; the job was not run: compose its input as ${admitted.job.executor!.id} requires`,
+  };
 }
 
 /**

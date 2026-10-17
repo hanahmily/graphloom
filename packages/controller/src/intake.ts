@@ -288,8 +288,12 @@ export async function intakeTask(taskPath: string): Promise<IntakePin> {
   const taskDir = path.dirname(absoluteTask);
   const task = parseTaskYaml(await readFile(absoluteTask, "utf8"));
 
-  const repoPath = resolveUnderBase(taskDir, task.repo, "repo");
-  await assertExists(repoPath, "directory");
+  const named = resolveUnderBase(taskDir, task.repo, "repo");
+  await assertExists(named, "directory");
+  // `repo` may name any directory inside the repository (e.g. `repo: .` from
+  // a task file in a subdirectory); the run works on the whole repository, and
+  // a `git clone` of a subdirectory fails, so pin its top level.
+  const repoPath = await gitTopLevel(named);
 
   const bundlePath = resolveUnderBase(
     path.join(taskDir, "plugins"),
@@ -461,6 +465,15 @@ async function assertExists(p: string, _kind: "file" | "directory"): Promise<voi
     await access(p);
   } catch {
     throw new IntakeError(`missing ${_kind}: ${p}`);
+  }
+}
+
+async function gitTopLevel(dir: string): Promise<string> {
+  try {
+    const { stdout } = await execFileAsync("git", ["rev-parse", "--show-toplevel"], { cwd: dir });
+    return stdout.trim();
+  } catch {
+    throw new IntakeError(`repo is not inside a git repository: ${dir}`);
   }
 }
 

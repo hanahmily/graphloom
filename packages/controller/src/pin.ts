@@ -14,9 +14,16 @@ export async function digestBundleEntry(intake: IntakePin): Promise<string> {
 /** The installed bundle's pin, read the way intake reads it. */
 export async function readInstalledBundlePin(previous: IntakePin["bundle"]): Promise<IntakePin["bundle"]> {
   const manifestRaw = await readFile(path.join(previous.bundlePath, "graphloom.manifest.json"), "utf8");
-  const manifest = JSON.parse(manifestRaw) as { digests?: Record<string, unknown> };
+  const manifest = JSON.parse(manifestRaw) as { graphId?: unknown; version?: unknown; digests?: Record<string, unknown> };
+  if (manifest.graphId !== previous.graphId) {
+    throw new Error(`the installed bundle is graph ${String(manifest.graphId)}, not this run's ${previous.graphId}; a plugin update keeps the graph`);
+  }
   const bundle = {
     ...previous,
+    // An update may carry a new version of the same graph; the definition
+    // checks on resume still require the same stages, requirements,
+    // validator bindings and private-state schema.
+    ...(typeof manifest.version === "string" ? { version: manifest.version } : {}),
     digests: manifest.digests ?? {},
     manifestRaw,
     manifestDigest: createHash("sha256").update(manifestRaw, "utf8").digest("hex"),

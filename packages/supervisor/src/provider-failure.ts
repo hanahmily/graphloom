@@ -7,16 +7,40 @@ import { isContextOverflow, type AssistantMessage } from "@earendil-works/pi-ai"
  * - `quota`: rate limit or usage cap (HTTP 429 and provider equivalents).
  * - `overflow`: the request exceeded the model's context window.
  * - `auth`: the provider refused the credentials (HTTP 401/403 and equivalents).
- * - `empty`: the reply had no tool call and no text (including thinking-only replies).
+ * - `interrupted`: the reply ended normally with no tool call and no text, but
+ *   the provider billed output beyond its thinking that never arrived: the
+ *   server dropped what the model generated (MiniMax drops tool calls this way).
+ * - `empty`: the reply had no tool call and no text (including thinking-only
+ *   replies with no undelivered output).
  * - `malformed`: the reply had text, but it was not a GraphDecision.
+ * - `timeout`: the prompt produced no output for the inactivity limit, or no
+ *   complete reply within its total cap (raised by the session, not read from a message).
  * - `unknown`: any other provider error.
  */
-export type ProviderFailureClass = "quota" | "overflow" | "auth" | "empty" | "malformed" | "unknown";
+export type ProviderFailureClass =
+  | "quota"
+  | "overflow"
+  | "auth"
+  | "interrupted"
+  | "empty"
+  | "malformed"
+  | "timeout"
+  | "unknown";
+
+/**
+ * Billed non-thinking output tokens above which a reply with no tool call and
+ * no text counts as `interrupted`. Small enough to catch a dropped tool call
+ * (live MiniMax failures billed ~576 such tokens; successful tool calls spend
+ * 220-780), large enough to ignore a few tokens of framing or rounding.
+ */
+export const INTERRUPTED_OUTPUT_THRESHOLD = 32;
 
 export interface ProviderFailure {
   failureClass: ProviderFailureClass;
   /** The provider's own message (bounded), or a description of what the reply lacked. */
   message: string;
+  /** Interrupted only: output tokens billed beyond thinking that the reply did not carry. */
+  undeliveredTokens?: number;
   /** Quota only: when the provider said the limit resets, if it said so. */
   retryAt?: string;
 }
@@ -97,12 +121,30 @@ export function classifyAssistantMessage(
   const hasText = content.some((c) => c.type === "text" && c.text.trim() !== "");
   if (hasToolCall || hasText) return undefined;
   const thinkingOnly = content.some((c) => c.type === "thinking");
+  const undelivered = undeliveredOutput(message);
+  if (message.stopReason === "stop" && undelivered !== undefined && undelivered > INTERRUPTED_OUTPUT_THRESHOLD) {
+    return {
+      failureClass: "interrupted",
+      message: `the reply ended (stopReason stop) with ${thinkingOnly ? "only thinking" : "no content"}, but the provider billed ${undelivered} output tokens beyond thinking that never arrived`,
+      undeliveredTokens: undelivered,
+    };
+  }
   return {
     failureClass: "empty",
     message: thinkingOnly
       ? `the reply had only thinking, no tool call or text (stopReason ${message.stopReason})`
       : `the reply had no tool call or text (stopReason ${message.stopReason})`,
   };
+}
+
+/**
+ * Output tokens billed beyond reasoning, when the provider reports both
+ * (Pi's `usage.reasoning` is a subset of `usage.output`); undefined otherwise.
+ */
+function undeliveredOutput(message: Partial<AssistantMessage>): number | undefined {
+  const usage = message.usage;
+  if (usage === undefined || typeof usage.output !== "number" || typeof usage.reasoning !== "number") return undefined;
+  return usage.output - usage.reasoning;
 }
 
 const UNIT_MS: Record<string, number> = {

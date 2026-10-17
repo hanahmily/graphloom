@@ -13,6 +13,8 @@ export {
 export {
   createPiSupervisorSession,
   ensureProviderCredentials,
+  DEFAULT_PROMPT_INACTIVITY_MS,
+  DEFAULT_PROMPT_TOTAL_TIMEOUT_MS,
   DEFAULT_SUPERVISOR_MODEL,
   DEFAULT_SUPERVISOR_PROVIDER,
   isMiniMaxProvider,

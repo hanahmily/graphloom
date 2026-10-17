@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   activateRepair,
   createScriptedGraph,
+  defineExecutor,
   dispatch,
   observe,
   reenter,
@@ -20,7 +21,7 @@ import {
   type GraphDefinition,
   type Validator,
 } from "@graphloom/sdk";
-import { createScriptedRunner } from "@graphloom/runner";
+import { createScriptedRunner, createTrustedInProcessRunner } from "@graphloom/runner";
 import { createPiSupervisor, createScriptedSupervisor, type PiSupervisorSessionPort } from "@graphloom/supervisor";
 import { createController, loadRunState, type RepairDeps } from "./index.js";
 
@@ -398,6 +399,61 @@ describe("inadmissible supervisor proposals (#117)", () => {
     expect(state.supervisorOutcomes?.[0]?.rejections[0]).toMatch(/^dispatch: a work job needs a non-empty writeScope/);
   });
 
+  it("rejects in-turn a supervisor dispatch whose input fails the pinned executor's schema, and admits a valid one", async () => {
+    // Run 4c70ff66-dd9: the supervisor composed graphloom.coding-agent/run jobs
+    // without an assignment; they were admitted and failed inside the executor
+    // as executor_failed instead of being refused within the turn.
+    const env = await makeEnv("budgets:\n  decisions: 20\n");
+    const inputs: unknown[] = [];
+    const agentRun = defineExecutor({
+      id: "acme.agent/run",
+      effect: "write",
+      inputSchema: (v): v is { assignment: string } => typeof v === "object" && v !== null && typeof (v as { assignment?: unknown }).assignment === "string",
+      async execute(input) {
+        inputs.push(input);
+        return { status: "ok" as const, summary: "ran" };
+      },
+    });
+    const rejections: Array<string | undefined> = [];
+    const work = (input: Record<string, unknown>) =>
+      dispatch({ stageId: "write", kind: "agent", purpose: "work", instruction: "write", writeScope: [GREETING_PATH], executor: { id: "acme.agent/run" }, input }, "redo the write");
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({ definition, advances: [supervise({ reason: "unfamiliar" }, "escalate"), ...finish] }),
+      validators: goodValidators,
+      supervisor: createScriptedSupervisor({
+        decisions: [
+          (input: { rejection?: { reason: string } }) => {
+            rejections.push(input.rejection?.reason);
+            return work({ harness: "claude-code" });
+          },
+          (input: { rejection?: { reason: string } }) => {
+            rejections.push(input.rejection?.reason);
+            return work({ assignment: "Write GREETING.txt." });
+          },
+          returnToNormal({ summary: "the write ran" }, "hand back"),
+        ],
+      }),
+      runner: createTrustedInProcessRunner({ executors: [agentRun], fallback: runner() }),
+      stateRoot: env.stateRoot,
+      runId: "executor-input-rejected",
+    });
+
+    expect(report.status, report.blocker).toBe("succeeded");
+    // The second ask, in the same turn, carries the rejection naming the executor and its schema.
+    expect(rejections[0]).toBeUndefined();
+    expect(rejections[1]).toBe(
+      "executor input rejected: executor acme.agent/run: input failed schema validation; the job was not run: compose its input as acme.agent/run requires",
+    );
+    // Only the valid dispatch reached the executor.
+    expect(inputs).toEqual([{ assignment: "Write GREETING.txt." }]);
+    const state = await loadRunState(report.stateDir);
+    expect(state.evidence.some((e) => JSON.stringify(e.payload).includes("executorFailure"))).toBe(false);
+    expect(state.supervisorOutcomes).toBeUndefined();
+    // 20 - 1 (the graph's supervise) - 1 (the rejection) - 2 (the admitted dispatch and return) - 6 (finish): the rejection is charged.
+    expect(state.budgets.decisions).toBe(10);
+  });
+
   it("charges each rejection to the decisions budget: two rejections and an admitted stop spend three", async () => {
     const env = await makeEnv("budgets:\n  decisions: 10\n");
     const report = await createController().run({
@@ -604,7 +660,10 @@ describe("supervisor evidence and probes", () => {
     expect(report.stopEvidenceRefs).toEqual([probeId]);
   });
 
-  it("still accepts a probe cited after a resume, and counts every probe started toward the episode's cap", async () => {
+  // A resume in recovery returns the run to its graph (#128), so recovery after
+  // it is a new episode: probes from before the resume ran on evidence the
+  // operator's change overtook and are not citable; the new episode's are.
+  it("counts every probe started toward the episode's cap, and after a resume accepts only the new episode's probes", async () => {
     const env = await makeEnv();
     let probeId = "";
     const failing: Validator = {
@@ -636,11 +695,11 @@ describe("supervisor evidence and probes", () => {
 
     const second = toolCallingSession("sup-119-resume-2", [
       async (_prompt, tools) => {
-        // A fresh process: the earlier probe failed to run, so its id cannot be cited ...
+        // A new episode: nothing probed before the resume can be cited ...
         expect(await call(tools, "stop", stopArgs(["probe-1"]))).toMatch(/^Rejected: .*unknown evidence/);
-        // ... a probe run now can, and the cap keeps counting from the attempt before the restart.
+        // ... a probe run now can, counted against this episode's own cap.
         probeId = (JSON.parse(await call(tools, "check_validate", { stageId: "write" })) as { probeId: string }).probeId;
-        expect(probeId).toBe("probe-2");
+        expect(probeId).toBe("probe-1");
         return call(tools, "stop", stopArgs([probeId]));
       },
     ]);
@@ -653,7 +712,9 @@ describe("supervisor evidence and probes", () => {
     });
     expect(resumed.stopReason).toBe("blocked");
     expect(resumed.stopEvidenceRefs).toEqual([probeId]);
-    expect((await loadRunState(resumed.stateDir)).probeLog).toMatchObject({ ids: ["probe-2"], attempts: 2 });
+    const after = await loadRunState(resumed.stateDir);
+    expect(after.probeLog).toMatchObject({ ids: ["probe-1"], attempts: 1 });
+    expect(after.probeLog!.episodeId).not.toBe(saved.probeLog!.episodeId);
   });
 
   it("returns an uncited reenter, an uncited executor repair, an unresolved citation and a malformed one in-turn", async () => {
@@ -740,7 +801,7 @@ describe("supervisor evidence and probes", () => {
     expect(probes[5]!.reason).toMatch(/^revertPatch could not be read/);
   });
 
-  it("spends an explicit probes budget across a resume, refusing at zero while earlier probes stay citable", async () => {
+  it("spends an explicit probes budget across a resume, refusing at zero; the probes before the resume are not citable after it", async () => {
     const env = await makeEnv("budgets:\n  probes: 2\n");
     const plugin = () => createScriptedGraph({ definition, advances: [...wroteGreeting(), supervise({ reason: "unfamiliar" }, "escalate")] });
     const first = toolCallingSession("sup-119-budget-1", [
@@ -765,10 +826,16 @@ describe("supervisor evidence and probes", () => {
     expect(saved.budgets.agentInvocations).toBeGreaterThan(0);
     expect(saved.probeLog).toMatchObject({ ids: ["probe-1", "probe-2"], attempts: 2 });
 
+    let evidenceRef = "";
     const second = toolCallingSession("sup-119-budget-2", [
       async (_prompt, tools) => {
         expect(await call(tools, "check_validate", { stageId: "write" })).toBe("Error: probe refused: the run's probes budget is exhausted");
-        return call(tools, "stop", stopArgs(["probe-2"]));
+        // The resume opened a new episode: the earlier episode's probe is not current evidence.
+        expect(await call(tools, "stop", stopArgs(["probe-2"]))).toMatch(/^Rejected: .*unknown evidence: probe-2/);
+        // Recorded evidence of the retried work still grounds the stop.
+        const listed = JSON.parse(await call(tools, "list_evidence", {})) as { records: Array<{ ref: string }> };
+        evidenceRef = listed.records.at(-1)!.ref;
+        return call(tools, "stop", stopArgs([evidenceRef]));
       },
     ]);
     const resumed = await createController().resume({
@@ -779,7 +846,7 @@ describe("supervisor evidence and probes", () => {
       runner: runner(),
     });
     expect(resumed.stopReason).toBe("blocked");
-    expect(resumed.stopEvidenceRefs).toEqual(["probe-2"]);
+    expect(resumed.stopEvidenceRefs).toEqual([evidenceRef]);
     expect((await loadRunState(resumed.stateDir)).budgets.probes).toBe(0);
   });
 
@@ -928,5 +995,65 @@ describe("supervisor evidence and probes", () => {
     expect(saved.caseFile?.open.map((q) => q.text)).toEqual(["is the gate right?"]);
     // The rejection was charged too, as one decision beyond the graph's own.
     expect(saved.budgets.decisions).toBeLessThan(512 - 1);
+  });
+
+  it("charges an executor-input refusal and an uncited stop the same way in one turn, and never counts a probe as a provider call", async () => {
+    const env = await makeEnv("budgets:\n  decisions: 20\n  agentInvocations: 10\n  probes: 5\n");
+    const agentRun = defineExecutor({
+      id: "acme.agent/run",
+      effect: "write",
+      inputSchema: (v): v is { assignment: string } => typeof v === "object" && v !== null && typeof (v as { assignment?: unknown }).assignment === "string",
+      async execute() {
+        return { status: "ok" as const, summary: "ran" };
+      },
+    });
+    const replies: string[] = [];
+    let modelTurns = 0;
+    const base = toolCallingSession("sup-119-compose", [
+      async (_prompt, tools) => {
+        // Three model requests in this prompt, whatever the tools do between them.
+        modelTurns = 3;
+        replies.push(
+          await call(tools, "dispatch", {
+            reason: "redo",
+            job: { stageId: "write", kind: "agent", purpose: "work", instruction: "write", writeScope: [GREETING_PATH], executor: { id: "acme.agent/run" }, input: { harness: "x" } },
+          }),
+        );
+        replies.push(await call(tools, "stop", stopArgs()));
+        const probe = JSON.parse(await call(tools, "check_validate", { stageId: "write" })) as { probeId: string };
+        await call(tools, "check_validate", { stageId: "write" });
+        replies.push(await call(tools, "stop", stopArgs([probe.probeId])));
+        return "";
+      },
+    ]);
+    const session = {
+      ...base,
+      drainTurnCount() {
+        const n = modelTurns;
+        modelTurns = 0;
+        return n;
+      },
+    };
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({ definition, advances: [...wroteGreeting(), supervise({ reason: "unfamiliar" }, "escalate")] }),
+      validators: goodValidators,
+      supervisor: createPiSupervisor({ session }),
+      runner: createTrustedInProcessRunner({ executors: [agentRun], fallback: runner() }),
+      stateRoot: env.stateRoot,
+      runId: "issue-119-compose",
+    });
+    expect(replies[0]).toMatch(/^Rejected: .*executor input rejected: executor acme\.agent\/run/);
+    expect(replies[1]).toMatch(/^Rejected: .*stop requires cited evidence/);
+    expect(replies[2]).toMatch(/^Submitted/);
+    expect(report.stopReason).toBe("blocked");
+    const state = await loadRunState(report.stateDir);
+    // Both refusals were charged to the decisions budget, like the admitted stop:
+    // 20 - 3 (the graph's write, observe and supervise) - 2 (the refusals) - 1 (the stop).
+    expect(state.budgets.decisions).toBe(14);
+    // The probes spent their own budget, not the provider allowance: 10 - 1 (the
+    // graph's agent write) - 3 (the supervisor's model requests).
+    expect(state.budgets.probes).toBe(3);
+    expect(state.budgets.agentInvocations).toBe(6);
   });
 });
