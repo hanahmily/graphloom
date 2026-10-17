@@ -6,8 +6,12 @@ repository-specific comes from a *profile*: a JSON file the task names with
 `config:`. The graph is [banyandb-fix](../banyandb-fix/README.md)'s, with its
 plan, implementation, RED/GREEN proof, scope check, optional changelog check,
 open-code-review sweep with independent verification, and local `fix/<issue>`
-delivery. The [design](../../../docs/design-issue-fix-graph.md) gives the
-profile schema and how the config reaches the plugin.
+delivery. The reviewer may raise new findings in the first three review
+rounds only; after that it verifies the known findings, and new comments
+become follow-ups in the pull request. The
+[design](../../../docs/design-issue-fix-graph.md) gives the profile schema,
+how the config reaches the plugin, and the
+[discovery rounds](../../../docs/design-issue-fix-graph.md#review-discovery-rounds).
 
 ## Profiles
 

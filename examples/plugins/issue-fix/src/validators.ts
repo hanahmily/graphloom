@@ -229,8 +229,10 @@ export const codeReview: Validator = {
     const dismissed = ledger.findings.filter((f) => f.state === "dismissed").length;
     const lower = report.comments.filter((c) => !isBlocking(c)).length;
     const settled = [...(fixed > 0 ? [`${fixed} fixed`] : []), ...(dismissed > 0 ? [`${dismissed} dismissed`] : [])];
+    // Comments raised after the discovery rounds are follow-ups, not findings: they never block.
+    const later = ledger.followUps.length;
     return passed(
-      `the code review ${describeCoverage(report)} and left no critical or high finding open${settled.length > 0 ? ` (${settled.join(", ")})` : ""}${lower > 0 ? `; ${lower} lower-severity comment(s)` : ""}`,
+      `the code review ${describeCoverage(report)} and left no critical or high finding open${settled.length > 0 ? ` (${settled.join(", ")})` : ""}${later > 0 ? `; ${later} follow-up(s) raised after the discovery rounds` : ""}${lower > 0 ? `; ${lower} lower-severity comment(s)` : ""}`,
     );
   },
 };

@@ -182,6 +182,8 @@ const refuted = (quotes: object[] = [BOUNDED]) => verification("refuted", quotes
 const scheduler = (bytes = SCHEDULER, digest = DIGEST): EvidenceRecord => ({ ref: ref(), kind: "file", candidateDigest: digest, payload: { path: SCHEDULER_PATH, bytes }, fingerprint: `fp-${seq}` });
 /** F1, raised and confirmed on an earlier change in an earlier generation. */
 const confirmedEarlier = () => [codeReviewRun(reviewed([comment("high")]), { digest: OTHER }), confirmed(OTHER)];
+/** Clean review rounds on `n` earlier changes. */
+const earlierRounds = (n: number) => Array.from({ length: n }, (_, i) => codeReviewRun(reviewed([]), { digest: `${OTHER}-${i + 1}` }));
 
 const c = (validatorId: string, name: string, evidence: EvidenceRecord[], expected: ValidationStatus, history?: EvidenceRecord[]): QualificationCase => ({
   validatorId,
@@ -274,6 +276,8 @@ export const QUALIFICATION_CASES: readonly QualificationCase[] = [
   c("open-code-review", "the latest pass on the change it was confirmed on calls it resolved", [codeReviewRun(reviewed([comment("high")])), confirmed(), codeReviewRun(reviewed([], undefined, { F1: "resolved" }))], "failed"),
   c("open-code-review", "a finding confirmed on an earlier change and resolved on this one", [codeReviewRun(reviewed([], undefined, { F1: "resolved" }))], "passed", confirmedEarlier()),
   c("open-code-review", "a finding confirmed on an earlier change and still present", [codeReviewRun(reviewed([], undefined, { F1: "still_present" }))], "failed", confirmedEarlier()),
+  c("open-code-review", "a new high comment after the three discovery rounds", [codeReviewRun(reviewed([comment("high")]))], "passed", earlierRounds(3)),
+  c("open-code-review", "a known finding still present after the three discovery rounds", [codeReviewRun(reviewed([comment("high")], undefined, { F1: "still_present" }))], "failed", [...confirmedEarlier(), ...earlierRounds(2).map((e) => ({ ...e, payload: { ...(e.payload as object), codingAgent: { harness: "codex", status: "completed", output: reviewed([], undefined, { F1: "still_present" }) } } }))]),
   c("open-code-review", "a pass that gives an open finding no status", [codeReviewRun(reviewed([]))], "failed", confirmedEarlier()),
   c("open-code-review", "a clean pass only in an earlier generation", [], "inconclusive", [codeReviewRun(reviewed([]))]),
   c("open-code-review", "some files were not reviewed", [codeReviewRun(reviewed([], { total_files: 3, reviewed_files: 2, skipped: [] }))], "failed"),

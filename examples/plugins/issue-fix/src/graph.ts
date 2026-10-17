@@ -21,6 +21,7 @@ import {
   GET_ISSUE,
   IMPLEMENTER_JOB,
   LIST_ISSUE_COMMENTS,
+  MAX_DISCOVERY_ROUNDS,
   MAX_FIX_CORRECTIONS,
   MAX_SWEEP_PASSES,
   REQUIREMENT_BUILDS,
@@ -52,11 +53,13 @@ import {
 } from "./evidence.js";
 import {
   describeFinding,
+  describeFollowUp,
   findingById,
   findingLedger,
   knownFindings,
   passUsable,
   pathsToObserve,
+  reviewPhase,
   roundSummary,
   shortDigest,
   stillPresentNote,
@@ -91,7 +94,7 @@ import {
 import { codeReview, implementerRecord, reportText, validatorById } from "./validators.js";
 
 export const GRAPH_ID = "issue-fix";
-export const GRAPH_VERSION = "0.2.0";
+export const GRAPH_VERSION = "0.3.0";
 
 /** Graph bookkeeping; everything else is read back from recorded evidence. */
 export interface FixPrivateState {
@@ -408,6 +411,9 @@ function review(ctx: Context, view: RunView, issue: number, state: FixPrivateSta
   const ledger = findingLedger(view.evidence);
   const passes = ledger.passes.filter((p) => p.digest === digest && currentRefs.has(p.run.record.ref));
   const last = passes.at(-1);
+  // Rounds 1..MAX_DISCOVERY_ROUNDS may raise new findings; later rounds only verify the known ones.
+  const { round, phase } = reviewPhase(ledger, digest);
+  const verifying = phase === "verify-only";
   // Fix was accepted for this candidate, possibly before a resume moved the generation on.
   const record = implementerRecord(view.evidence).record!;
   const background = reviewBackground(profile, issueSnapshot(view.evidence, issue)!.issue, record);
@@ -420,8 +426,10 @@ function review(ctx: Context, view: RunView, issue: number, state: FixPrivateSta
       return supervise({ reason: "the environment check recorded no open-code-review path for the code reviewer" }, "escalate a missing ocr path", JSON.stringify(state));
     }
     const base = green?.checkout?.base ?? "the run's base commit";
-    const assignment = codeReviewInstruction(profile, { ocr, base, background, known: knownFindings(ledger), sweep });
-    const summary = sweep
+    const assignment = codeReviewInstruction(profile, { ocr, base, background, known: knownFindings(ledger), sweep, round });
+    const summary = verifying
+      ? `verify the known findings on the change in review round ${round}, after the ${MAX_DISCOVERY_ROUNDS} discovery rounds (read-only)`
+      : sweep
       ? `review the change again for critical or high issues the ${passes.length} earlier pass(es) missed (read-only)`
       : `review the change with ${reviewer} in open-code-review's delegation mode (read-only)`;
     return dispatchAgent(view, codeReviewJob(profile, assignment), summary, state);
@@ -449,7 +457,8 @@ function review(ctx: Context, view: RunView, issue: number, state: FixPrivateSta
     const s = findingById(ledger, id)?.state;
     return s === "confirmed" || s === "disputed";
   });
-  if (passUsable(last) && survived && passes.length < MAX_SWEEP_PASSES) return pass(true);
+  // A verification round makes one usable pass per candidate: there is nothing new to sweep for.
+  if (passUsable(last) && survived && !verifying && passes.length < MAX_SWEEP_PASSES) return pass(true);
 
   const statement = definition.requirements.find((r) => r.id === REQUIREMENT_REVIEW)!.statement;
   const history = view.evidence.filter((e) => e.candidateDigest !== undefined && e.candidateDigest !== view.candidateDigest);
@@ -516,10 +525,10 @@ function partialSnapshot(problem: string, refs: string[]): GraphDecision {
 }
 
 /** The test plan's line for the code review, and the dismissed findings a maintainer can overrule. */
-function reviewSummary(profile: Profile, view: RunView): { review: string; dismissed: string[] } {
+function reviewSummary(profile: Profile, view: RunView): { review: string; dismissed: string[]; reviewFollowUps: string[] } {
   const ledger = findingLedger(view.evidence);
   const last = ledger.passes.filter((p) => p.digest === view.candidateDigest).at(-1);
-  if (last?.report === undefined) return { review: "Code review did not produce a result.", dismissed: [] };
+  if (last?.report === undefined) return { review: "Code review did not produce a result.", dismissed: [], reviewFollowUps: [] };
   const { report } = last;
   const dismissed = ledger.findings.filter((f) => f.state === "dismissed");
   const fixed = ledger.findings.filter((f) => f.state === "fixed").length;
@@ -529,10 +538,13 @@ function reviewSummary(profile: Profile, view: RunView): { review: string; dismi
     ...(fixed > 0 ? [`${fixed} fixed during review`] : []),
     ...(dismissed.length > 0 ? [`${dismissed.length} refuted by an independent verifier, listed below`] : []),
   ];
-  const open = settled.length > 0 ? `no critical or high finding left open (${settled.join("; ")})` : "no critical or high comments";
+  const later = ledger.followUps.length > 0 ? `; ${ledger.followUps.length} critical or high comment(s) raised after the ${MAX_DISCOVERY_ROUNDS} discovery rounds, listed as follow-ups` : "";
+  const open =
+    settled.length > 0 ? `no critical or high finding left open (${settled.join("; ")})` : later !== "" ? "no critical or high finding left open" : "no critical or high comments";
   return {
-    review: report.comments.length === 0 && settled.length === 0 ? `Reviewed by ${by}: no comments.` : `Reviewed by ${by}: ${open}${lower > 0 ? `; ${lower} lower-severity comment(s) left for the reviewer` : ""}.`,
+    review: report.comments.length === 0 && settled.length === 0 && later === "" ? `Reviewed by ${by}: no comments.` : `Reviewed by ${by}: ${open}${later}${lower > 0 ? `; ${lower} lower-severity comment(s) left for the reviewer` : ""}.`,
     dismissed: dismissed.map((f) => describeFinding(f)),
+    reviewFollowUps: ledger.followUps.map(describeFollowUp),
   };
 }
 

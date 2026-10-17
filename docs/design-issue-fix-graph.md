@@ -27,7 +27,8 @@ The graph keeps, in code:
   rule (prepared, no file changed);
 - the write scope with protected paths and recorded exceptions;
 - the open-code-review delegation workflow, the findings ledger, independent
-  verification, the sweep and its acceptance rule;
+  verification, the sweep, the [discovery rounds](#review-discovery-rounds)
+  and the acceptance rule;
 - corrections, supervisor handoffs, and delivery to a local `fix/<issue>`
   branch with a pull request body.
 
@@ -137,6 +138,34 @@ the implementer that:
   behaviour must be.
 
 The example task requests `Fix hanahmily/graphloom#119.`
+
+## Review discovery rounds
+
+The reviewer may raise new findings for at most three rounds
+(`MAX_DISCOVERY_ROUNDS`). After that, it only verifies that the findings
+already raised are fixed. banyandb-fix follows the same rule; its design
+section on [discovery rounds](design-banyandb-fix-graph.md#discovery-rounds)
+gives the full rules.
+
+- A **round** is the review of one candidate digest. The sweep's passes on
+  that candidate belong to the same round. The round of a pass is the number
+  of reviewed candidates the run had reached by then, this one included. Each
+  candidate counts from its first record, ordered by generation, so the graph
+  and the validator agree on the round when the run returns to an earlier
+  candidate. The round never goes back, and it needs no private state.
+- **Discovery rounds** are rounds 1 to 3. They behave as before.
+- **Verify-only rounds** are round 4 onward. The assignment says the round is
+  a verification round: report a status for every open finding, check that
+  fixed ones stay fixed, and raise nothing new. A new critical or high
+  comment becomes a non-blocking follow-up: it is not verified, and the pull
+  request lists it under "Follow-ups". A known finding still present blocks
+  and returns to Fix with the reviewer's latest note. A fixed finding named
+  again reopens as a regression. There is no sweep. The round passes once
+  every finding from the discovery rounds is fixed or dismissed.
+
+Medium and low comments are unchanged. The requirement statement, the
+validator binding and the private state are unchanged, so a running run can
+adopt the rule with `resume --update-plugin`.
 
 ## How the config is pinned and passed
 

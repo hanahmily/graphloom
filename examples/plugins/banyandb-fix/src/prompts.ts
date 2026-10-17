@@ -167,6 +167,8 @@ export function pullRequestDescription(args: {
   review: string;
   /** Critical or high review findings an independent verifier refuted. */
   dismissed?: string[];
+  /** Critical or high review comments raised after the discovery rounds closed. */
+  reviewFollowUps?: string[];
 }): string {
   const { record } = args;
   const decided = record.decisions.filter((d) => d.chosen?.trim());
@@ -181,7 +183,9 @@ export function pullRequestDescription(args: {
       ? ["", "## Decisions", ...decided.map((d) => `- ${d.point}: ${d.chosen!.trim()}. ${d.basis.trim()}${d.options.length > 1 ? ` Alternatives: ${d.options.filter((o) => o !== d.chosen).join("; ")}.` : ""}`)]
       : []),
     ...(record.openQuestions.length > 0 ? ["", "## Open questions", "This change leaves these behaviours unchanged:", ...record.openQuestions.map((q) => `- ${q}`)] : []),
-    ...((record.followUps ?? []).length > 0 ? ["", "## Follow-ups", ...record.followUps!.map((f) => `- ${f}`)] : []),
+    ...((record.followUps ?? []).length > 0 || (args.reviewFollowUps ?? []).length > 0
+      ? ["", "## Follow-ups", ...(record.followUps ?? []).map((f) => `- ${f}`), ...(args.reviewFollowUps ?? []).map((f) => `- Code review: ${f}`)]
+      : []),
     "",
     "## Test plan",
     `- ${record.test?.name ?? "The regression test"} in \`${record.test?.package ?? "?"}\` fails by assertion on ${args.base.slice(0, 12) || "the base commit"} with only the test files applied, and passes with the fix.`,
