@@ -4,6 +4,7 @@ Status: implemented, 2026-10-15, as
 [`examples/plugins/issue-fix`](../examples/plugins/issue-fix/). No live run has
 been made with it yet; its banyandb profile reproduces
 [banyandb-fix](design-banyandb-fix-graph.md), whose live runs it inherits.
+Version 0.4.0, 2026-10-17, adds the [issues file](#the-issues-file).
 
 ## Purpose
 
@@ -27,8 +28,8 @@ The graph keeps, in code:
   rule (prepared, no file changed);
 - the write scope with protected paths and recorded exceptions;
 - the open-code-review delegation workflow, the findings ledger, independent
-  verification, the sweep, the [discovery rounds](#review-discovery-rounds)
-  and the acceptance rule;
+  verification, the sweep, the [discovery rounds](#review-discovery-rounds),
+  the [issues file](#the-issues-file) and the acceptance rule;
 - corrections, supervisor handoffs, and delivery to a local `fix/<issue>`
   branch with a pull request body.
 
@@ -72,7 +73,10 @@ refuses a missing or unusable profile, so a run cannot start on one.
 The banyandb profile gives exactly banyandb-fix's stages, requirements,
 statements, validator bindings, result contracts and environment, and the
 same prompts and commands; a test compares them with banyandb-fix's own
-build. Only the graph id, version and private-state schema differ.
+build. Only the graph id, version and private-state schema differ, and the
+[issues file](#the-issues-file), which banyandb-fix does not have. The file
+adds to the review and implementer prompts and to the pull request only
+through arguments the comparison leaves out.
 
 ### Regression runners
 
@@ -166,6 +170,174 @@ gives the full rules.
 Medium and low comments are unchanged. The requirement statement, the
 validator binding and the private state are unchanged, so a running run can
 adopt the rule with `resume --update-plugin`.
+
+## The issues file
+
+Since 0.4.0 the run tracks its critical and high findings as issues in a
+file: the reviewer reports new issues, the fixer marks them fixed, and the
+reviewer verifies each one and either closes it or reopens it. Only issue-fix
+knows the file. The controller, the SDK and the CLI read none of it, and
+banyandb-fix does not have it.
+
+### Where it lives and how it stays out of the change
+
+The graph writes `.graphloom/issues.json` in the run's worktree, and a
+readable copy, `.graphloom/issues.md`, beside it. In the same command it
+writes `.graphloom/.gitignore` containing `*`, so Git ignores the directory
+in any repository, whatever the repository's own `.gitignore` says. Every
+controller view of the change follows Git's ignore rules:
+
+- the candidate digest (`candidateChange`) hashes `git diff` against the base
+  and `git ls-files --others --exclude-standard`;
+- the per-job scope check (`worktreeChangeFingerprints`, used for read-only
+  jobs and write scopes) reads `git status --porcelain -uall` without
+  `--ignored`;
+- checkouts for RED and GREEN, and the `in-scope` validator, use the same
+  change list.
+
+The file therefore never changes the candidate digest, never counts as a
+change by a read-only job, and never reaches a checkout. The deliver command
+also adds the change with `git add -A -- . ':(exclude).graphloom'`, so the
+directory stays out of the delivered commit even if the fixer deletes its
+`.gitignore`. The next read puts the `.gitignore` back.
+
+### Entries
+
+```json
+{
+  "schema": "graphloom-issues-v1",
+  "protocol": ["…the rules below, for the agents…"],
+  "round": 2,
+  "phase": "discovery",
+  "issues": [
+    {
+      "id": "I1",
+      "severity": "P1",
+      "location": { "path": "pkg/timestamp/scheduler.go", "startLine": 88, "endLine": 95 },
+      "title": "Close now waits forever for an action that ignores cancellation.",
+      "description": "…the reviewer's comment and failure scenario…",
+      "status": "fixed",
+      "round": 1,
+      "history": [
+        { "actor": "verifier", "from": null, "to": "open", "note": "…", "round": 1, "candidate": "<digest>", "evidence": "ev-41" },
+        { "actor": "fixer", "from": "open", "to": "fixed", "note": "Bounded Close's wait (scheduler.go:5).", "round": 2, "candidate": "<digest>", "evidence": "ev-57" }
+      ]
+    }
+  ]
+}
+```
+
+- `id`: issue `In` tracks finding `Fn` of the findings ledger. The numbers are
+  the same, so the mapping needs no state and every view of the evidence
+  agrees on it. Findings that never reach a verdict (a disputed one, or one
+  resolved before verification) have no issue, so the ids can have gaps. The
+  reviewer is told the `I` ids and may answer with either form. A run
+  recorded before 0.4.0 used `F` ids, and they still work.
+- `severity`: `P0` critical, `P1` high or unlabelled (an unlabelled comment
+  blocks), `P2` medium, `P3` low. Only critical and high findings are tracked,
+  because only they are findings in the ledger. Medium and low comments stay
+  as they were: counted in the pull request and left for the maintainers.
+  Numbering them would shift the `F` numbers of runs already recorded.
+- `round`: the review round the finding was raised in. The history's `round`
+  is the round of the candidate each event applies to.
+- `history`: every move, with the actor (`reviewer`, `fixer`, `verifier` or
+  `graph`), the statuses, a note, the candidate digest and the evidence
+  record it comes from.
+
+### The flow
+
+| From | To | Actor | When |
+|---|---|---|---|
+| (new) | `open` | verifier | the verifier confirms a finding the reviewer raised in a discovery round |
+| (new) | `dismissed` | verifier | the verifier refutes it with quotes that match the change |
+| `open`, `reopened` | `fixed` | fixer | the fixer's edit to the file, with a history entry saying what it changed |
+| `fixed` | `done` | reviewer | the reviewer's `resolved` on a later candidate, which also makes the ledger's finding fixed |
+| `fixed` | `reopened` | reviewer | the reviewer's `still_present`, with its reason as the note |
+| `open`, `reopened` | `fixed`, then `done` | graph, then reviewer | the reviewer finds an issue resolved that the fixer did not mark; the graph records the missing `fixed` step so no state is skipped |
+| `fixed`, `done`, `dismissed` | `reopened` | verifier | the verifier confirms the finding again: a regression the reviewer reported, a withdrawn confirmation, or a dismissal whose quotes no longer match |
+| `open`, `reopened`, `fixed` | `dismissed` | verifier | the verifier refutes a finding the reviewer withdrew |
+
+A refuted regression of a `done` issue leaves it `done`. Verify-only rounds
+add no issues: a new comment there becomes a follow-up, and `issues.md` and
+the pull request list it.
+
+### Who writes what
+
+**The reviewer reports in its result and never edits the file.** The review
+job stays read-only for every file. The controller's read-only check
+(`packages/controller/src/loop.ts`, `pathsOutsideWriteScope`) fails a
+read-only job that modifies a file that existed before it ran. An ignored
+file is exempt only because the fingerprint skips ignored paths. Letting the
+reviewer edit the file would rest the review's integrity on that exemption
+and on the `.gitignore` the reviewer could itself remove. The reviewer
+already gives a status for every open finding in its `code-review-v2` result
+(`resolved`, `still_present`, `withdrawn`) and reports new findings as
+comments, so the graph applies those to the file. Its assignment points at
+the file and explains the protocol, and it shows each issue's id and status,
+with the fixer's note on a `fixed` one. The result contract does not change.
+
+**The fixer edits the file.** It is a writer anyway. Its assignment explains
+the protocol: set an `open` or `reopened` issue's `status` to `fixed` and
+append one history entry `{"actor": "fixer", "from": …, "to": "fixed",
+"note": …}`. Its feedback on reentry is driven by the file: the open and
+reopened issues first, each with the reviewer's latest note, then the ones it
+marked fixed that the reviewer has yet to verify. The decision record does
+not change.
+
+### How the graph validates and restores it
+
+The table is rebuilt from evidence on every call, in the same pass as the
+findings ledger. Verifications, review passes and fixer reads move it in
+evidence order. It needs no private state.
+
+- **Write.** Before every implementer job, every review pass and the
+  delivery, the graph writes the file unless the newest issues command in
+  this generation, after the last implementer run, already shows the table's
+  exact JSON. The write is a read-only command job in the worktree,
+  `issues-write`. Its argv carries the whole JSON and markdown, so the last
+  accepted version is itself evidence.
+- **Read.** After every implementer run, once the graph has written the file
+  at least once, a read-only command job, `issues-read`, copies the file into
+  the command's report. The graph does not use `observe`, because the
+  controller's admission requires every observed file to still match its
+  observation when a stage is validated. A file the graph rewrites without a
+  change to the candidate would make every later validation fail with
+  "workspace file changed since observe".
+- **Diff.** The read is compared with what the graph last wrote, which is
+  what the fixer started from. An `open` or `reopened` issue moved to
+  `fixed` with a new fixer history entry is accepted. Everything else is
+  rejected: any other status (done, dismissed, reopened, open), `fixed`
+  without a note, a deleted issue, a new issue, a changed `severity`,
+  `location`, `title`, `description` or `round`, a deleted file, a file that
+  is not JSON, and a file larger than the 64 KiB a command report keeps. A
+  legal move on an issue is kept even when another field of the same issue is
+  rejected. A rejection goes on the issue's history as a `graph` event, and
+  the next implementer assignment lists it. The next write restores the
+  accepted file.
+- **Resume, reentry and `--update-plugin`.** A resume or a reentry starts a
+  new generation, so the next agent job is preceded by a write from evidence,
+  whatever the worktree holds. The same evidence always gives the same file.
+  A run moved onto 0.4.0 has no issues commands yet. Its first write builds
+  the table from the findings it already has, and its first read comes after
+  the next implementer run.
+- **Size.** A table that would not fit in a read is written with shorter
+  descriptions and notes, then with only each issue's latest events. The
+  evidence and `issues.md` keep the full text.
+
+### Acceptance
+
+The code review requirement passes when no P0 or P1 issue is `open`,
+`reopened` or `fixed` but not yet verified. This is the ledger's existing
+rule: an issue is `done` exactly when the ledger counts its finding fixed, so
+an issue the fixer marked fixed still blocks until the reviewer verifies it.
+The validator also checks the issues explicitly and names any that are not
+done. The stages, requirement ids and statements, validator bindings, result
+contracts and private-state schema are unchanged, so a running run can move
+onto 0.4.0 with `resume --update-plugin`.
+
+The pull request body gets a "Review issues" section with the table: every
+tracked issue, `done` or `dismissed`, with its latest note. Follow-ups stay
+under "Follow-ups".
 
 ## How the config is pinned and passed
 
@@ -278,6 +450,21 @@ built-in runner in the bundle, a source change qualified like any other.
   from a task config; controller and plugin-host tests cover pinning, the
   calls the config reaches, resume with a changed file, a tampered pin, a
   plugin without config, and config fields never becoming task settings.
+- The issues file: graph tests run a finding through `open`, `fixed` (the
+  fixer's edit) and `done`. They reopen a fixed issue with the reviewer's
+  note and show that note to the fixer. They reject a fixer marking an issue
+  `done` and restore the file, and they record the `fixed` step when the
+  fixer did not mark it. A dismissed issue is listed, a verify-only round
+  adds no issue, and a resume rewrites the file from evidence before the
+  implementer. Unit tests reject each illegal edit. Tests with real Git, in a
+  repository that does not ignore `.graphloom/`, show that the write leaves
+  the digest's and the scope check's view of the change unchanged. They also
+  show that the delivered commit leaves the file out even after its
+  `.gitignore` is deleted. A replay of run 4c70ff66-dd9's evidence (#119,
+  recorded on 0.2.0) builds 16 issues, 15 `done` and 1 `dismissed`, each
+  history moving one state at a time. The test runs when that run's state is
+  present; set `ISSUE_FIX_REPLAY_STATE` to point at it.
 
-Not yet verified: a live run with either profile, and a full rehearsal (L1)
-of the graphloom profile, which would run its real commands.
+Not yet verified: a live run with either profile, a live run with the issues
+file, and a full rehearsal (L1) of the graphloom profile, which would run its
+real commands.
