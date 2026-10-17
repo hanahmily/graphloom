@@ -76,6 +76,8 @@ class ChildSession implements PluginHost {
   private readonly stderrChunks: string[];
   /** The run's pinned task config; opaque, attached to every request. */
   private readonly config: unknown;
+  /** A line the child wrote while no call was pending (its load failure), kept for the next call. */
+  private unclaimedLine: string | undefined;
   private readonly pending = new Map<
     string,
     {
@@ -120,9 +122,15 @@ class ChildSession implements PluginHost {
       });
     });
 
+    this.child.on("exit", (code) => {
+      this.exitCode = code;
+    });
+    // "close" fires once the child's stdio has ended, so every line it wrote
+    // (a load failure is written just before it exits) has been read first;
+    // "exit" can fire before the last stdout line is delivered.
     this.exitPromise = new Promise((resolve) => {
-      this.child.on("exit", (code) => {
-        this.exitCode = code;
+      this.child.on("close", (code) => {
+        if (this.exitCode === null) this.exitCode = code;
         resolve(code);
         this.rejectAllPending(new Error(`plugin child exited during pending call`));
       });
@@ -239,6 +247,12 @@ class ChildSession implements PluginHost {
   }
 
   private deliverToSolePending(line: string): void {
+    if (this.pending.size === 0) {
+      // The worker writes a load failure as soon as it starts, before any
+      // request reaches it; keep it for the first call instead of dropping it.
+      this.unclaimedLine ??= line;
+      return;
+    }
     if (this.pending.size !== 1) {
       return;
     }
@@ -266,7 +280,10 @@ class ChildSession implements PluginHost {
       | { kind: "rehearsal"; entry: string; config?: unknown },
     extract: (res: WireResponse) => T,
   ): Promise<HostResult<T>> {
-    if (this.closed || this.exitCode !== null || this.spawnError !== null) {
+    // A child that already exited may have left the reason it failed (a load
+    // error written before any request); report that instead of "not running".
+    const early = this.unclaimedLine;
+    if (this.closed || this.spawnError !== null || (this.exitCode !== null && early === undefined)) {
       return {
         ok: false,
         observation: {
@@ -301,9 +318,13 @@ class ChildSession implements PluginHost {
         generation: this.generation,
       });
     });
+    if (early !== undefined) {
+      this.unclaimedLine = undefined;
+      this.deliverToSolePending(early);
+    }
 
     try {
-      this.child.stdin.write(`${JSON.stringify(request)}\n`);
+      if (this.exitCode === null) this.child.stdin.write(`${JSON.stringify(request)}\n`);
     } catch (err) {
       this.pending.delete(ctx.operationId);
       return {

@@ -108,6 +108,25 @@ describe("createChildPluginHost", () => {
     expect(described.observation.message).not.toMatch(/runId must be a non-empty string/);
   });
 
+  it("reports a load failure the child wrote and exited on before any call was made", async () => {
+    const host = await track(
+      createChildPluginHost({
+        entryModule: fixture("empty", "graph.mjs"),
+        activeVersion: "empty@1",
+        generation: 1,
+        workerModule: workerJs,
+        callbackTimeoutMs: 3_000,
+      }),
+    );
+    // Let the worker fail to load, write its error and exit before the first
+    // call registers: the order CI hit, where the line used to be dropped.
+    await new Promise((r) => setTimeout(r, 1_500));
+    const described = await host.describe(ctx("op-describe-late"));
+    expect(described.ok).toBe(false);
+    if (described.ok) throw new Error("expected a failure");
+    expect(described.observation.message).toMatch(/failed to load plugin: plugin entry must export createGraph\(\) or default GraphPlugin/);
+  });
+
   it("attributes an oversized advance request to its real run, not a malformed-response failure", async () => {
     const host = await track(
       createChildPluginHost({
