@@ -1279,6 +1279,39 @@ describe("review discovery rounds", () => {
       expect(validatorView.followUps.map((f) => f.comment.content)).toEqual(["defect at 5"]);
     });
 
+    it("agrees with the validator on round and phase when the run returns to an earlier candidate", () => {
+      // Codex review of #135: the controller shows the validator the other
+      // candidates as history first, and only the latest pass on the current one.
+      const reviewPass = (digest: string, generation: number, comments: Array<Record<string, unknown>> = []): EvidenceRecord => ({ ...pass(digest, comments, {}, generation), kind: "review" });
+      const work = (digest: string, generation: number): EvidenceRecord => ({
+        ref: `rw-${++n}`,
+        kind: "other",
+        generation,
+        candidateDigest: digest,
+        payload: { codingAgent: { status: "completed", output: {} }, producer: { operationId: `op-${n}`, stageId: "fix", purpose: "work", readOnly: false, kind: "agent", executorId: "graphloom.coding-agent/run" } },
+      });
+      const evidence = [
+        work("d1", 1), reviewPass("d1", 1),
+        work("d2", 2), reviewPass("d2", 2),
+        work("d3", 3), reviewPass("d3", 3),
+        work("d4", 4), reviewPass("d4", 4, [defect(4)]),
+        work("d1", 5), reviewPass("d1", 5),
+      ];
+      const graph = findingLedger(evidence);
+      const history = evidence.filter((e) => e.candidateDigest !== "d1");
+      const current = [...evidence.filter((e) => e.candidateDigest === "d1" && e.kind !== "review"), evidence.at(-1)!];
+      const validator = findingLedger([...history, ...current]);
+      for (const ledger of [graph, validator]) {
+        expect(ledger.findings).toEqual([]);
+        expect(ledger.followUps.map((f) => [f.comment.content, f.round])).toEqual([["defect at 4", 4]]);
+        expect(ledger.passes.at(-1)!.round).toBe(4);
+        expect(reviewPhase(ledger, "d1")).toEqual({ round: 4, phase: "verify-only" });
+      }
+      expect(graph.passes.filter((p) => p.digest === "d4").map((p) => p.round)).toEqual(validator.passes.filter((p) => p.digest === "d4").map((p) => p.round));
+      const result = validatorById("open-code-review")!.evaluate({ requirementId: "code-review", statement: "s", evidence: current, history, candidateDigest: "d1" }) as { status: string; reason: string };
+      expect(result.status).toBe("passed");
+    });
+
     it("still reopens a fixed finding the reviewer names again in a verification round", () => {
       const evidence = [pass("d1", [defect(1)]), pass("d2", [], { F1: "resolved" }), pass("d3"), pass("d4", [{ ...defect(1), finding: "F1" }])];
       const ledger = findingLedger(evidence);

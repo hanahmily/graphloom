@@ -376,11 +376,18 @@ After that, the reviewer only verifies that the findings already raised are
 fixed.
 
 - A round is the review of one candidate: the passes on one candidate digest,
-  sweep passes included. The round of a pass is the number of distinct
-  candidates reviewed so far, this one included, counted from the review
-  passes in the ledger. Rounds only move forward: a candidate reviewed before
-  (the implementer returned to it) stays in the latest round. Counting needs
-  no private state, so it survives a resume, a reentry and a plugin update.
+  sweep passes included. The round of a pass is the number of reviewed
+  candidates the run had reached by then, this one included. A candidate
+  counts from its first record of any kind, such as the implementer run that
+  produced it, ordered by generation. It does not count from its first review
+  pass, because the controller shows a validator only the current
+  candidate's latest pass, after the other candidates' history. Ordering by
+  first record and generation gives the graph and the validator the same
+  rounds when the run returns to an earlier candidate. Rounds only move
+  forward: a candidate reviewed before stays in the latest round. Counting
+  needs no private state, so it survives a resume, a reentry and a plugin
+  update. One edge case: a candidate that Fix reached but did not hand to
+  review counts from its first record once a later return gets it reviewed.
 - Rounds 1 to 3 are discovery rounds and work as described above.
 - From round 4 on, rounds are verify-only:
   1. The pass's assignment says it is a verification round. It must not look

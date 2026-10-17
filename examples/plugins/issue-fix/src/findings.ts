@@ -122,7 +122,7 @@ export interface FindingLedger {
   passes: ReviewPass[];
   verifications: Verification[];
   followUps: FollowUp[];
-  /** The candidates reviewed so far, in the order their first pass appears: round n reviewed `reviewed[n - 1]`. */
+  /** The candidates with a review pass, in the order the run first reached them: round n reviewed `reviewed[n - 1]`. */
   reviewed: string[];
 }
 
@@ -131,23 +131,55 @@ export const isOpen = (f: Finding | undefined): f is Finding => f !== undefined 
 
 export function findingLedger(evidence: EvidenceRecord[]): FindingLedger {
   const files = fileIndex(evidence);
-  const ledger: FindingLedger = { findings: [], passes: [], verifications: [], followUps: [], reviewed: [] };
-  for (const record of evidence) {
+  const entered = reviewedCandidates(evidence);
+  const ledger: FindingLedger = { findings: [], passes: [], verifications: [], followUps: [], reviewed: entered.map((c) => c.digest) };
+  for (const [i, record] of evidence.entries()) {
     const digest = record.candidateDigest;
     if (digest === undefined) continue;
     const pass = agentRuns([record], REVIEW_STAGE, "review")[0];
-    if (pass !== undefined) applyPass(ledger, pass, digest, files);
+    if (pass !== undefined) {
+      const at = position(record, i);
+      applyPass(ledger, pass, digest, files, entered.filter((c) => !after(c.at, at)).length);
+    }
     const verification = agentRuns([record], REVIEW_STAGE, "diagnostic")[0];
     if (verification !== undefined) applyVerification(ledger, verification, digest, files);
   }
   return ledger;
 }
 
+/** Where a record falls in the run: its generation first, then its place in the list. */
+type Position = readonly [generation: number, index: number];
+const position = (record: EvidenceRecord, index: number): Position => [record.generation ?? 0, index];
+const after = (a: Position, b: Position): boolean => a[0] > b[0] || (a[0] === b[0] && a[1] > b[1]);
+
 /**
- * The review round a pass on `digest` belongs to. Rounds only move forward: a
+ * The candidates with a review pass, each at its first record of any kind, in
+ * that order. The first record, not the first pass: the controller shows a
+ * validator the other candidates as history before the current one, and only
+ * the current candidate's latest pass, so a candidate the run returned to
+ * would otherwise look new and later than every other. Its Fix records keep
+ * their generation, and generations order the run the same way in either view.
+ */
+function reviewedCandidates(evidence: EvidenceRecord[]): Array<{ digest: string; at: Position }> {
+  const first = new Map<string, Position>();
+  const reviewed = new Set<string>();
+  for (const [i, record] of evidence.entries()) {
+    const digest = record.candidateDigest;
+    if (digest === undefined) continue;
+    const at = position(record, i);
+    const seen = first.get(digest);
+    if (seen === undefined || after(seen, at)) first.set(digest, at);
+    if (agentRuns([record], REVIEW_STAGE, "review").length > 0) reviewed.add(digest);
+  }
+  return [...reviewed].map((digest) => ({ digest, at: first.get(digest)! })).sort((a, b) => (after(a.at, b.at) ? 1 : after(b.at, a.at) ? -1 : 0));
+}
+
+/**
+ * The review round a pass on `digest` belongs to: how many reviewed candidates
+ * the run had reached by then, this one included. Rounds only move forward: a
  * new candidate starts the next one, and a candidate reviewed before (the
  * implementer went back to it) stays in the latest round rather than reopening
- * discovery.
+ * discovery. This is the round of the next pass, after every recorded one.
  */
 export function reviewRound(ledger: FindingLedger, digest: string): number {
   return ledger.reviewed.includes(digest) ? ledger.reviewed.length : ledger.reviewed.length + 1;
@@ -255,10 +287,9 @@ function reviewerLead(note: ReviewerNote, current: string | undefined): string {
   return `Reviewer, latest pass ${on} (${note.ref}): still present — ${clip(note.reason, 1_500).replace(/\.$/, "")}.`;
 }
 
-function applyPass(ledger: FindingLedger, run: AgentRun, digest: string, files: FileIndex): void {
+function applyPass(ledger: FindingLedger, run: AgentRun, digest: string, files: FileIndex, round: number): void {
   const parsed = run.status === "completed" ? parseCodeReview(run.output) : { problem: `the code reviewer did not finish (${run.status})` };
-  const { round, phase } = reviewPhase(ledger, digest);
-  if (!ledger.reviewed.includes(digest)) ledger.reviewed.push(digest);
+  const phase: ReviewPhase = verifyOnly(round) ? "verify-only" : "discovery";
   const pass: ReviewPass = { run, digest, round, raised: [], missingStatus: [], followUps: 0, ...("report" in parsed ? { report: parsed.report } : { problem: parsed.problem }) };
   ledger.passes.push(pass);
   if (pass.report === undefined) return;

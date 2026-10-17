@@ -149,8 +149,10 @@ gives the full rules.
 
 - A **round** is the review of one candidate digest. The sweep's passes on
   that candidate belong to the same round. The round of a pass is the number
-  of distinct candidates reviewed so far, this one included, counted from the
-  ledger's review passes. It never goes back, and it needs no private state.
+  of reviewed candidates the run had reached by then, this one included. Each
+  candidate counts from its first record, ordered by generation, so the graph
+  and the validator agree on the round when the run returns to an earlier
+  candidate. The round never goes back, and it needs no private state.
 - **Discovery rounds** are rounds 1 to 3. They behave as before.
 - **Verify-only rounds** are round 4 onward. The assignment says the round is
   a verification round: report a status for every open finding, check that
