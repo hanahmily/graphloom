@@ -94,6 +94,12 @@ export interface CreatePiSupervisorOptions {
    * Still bounded by the turn's `maxWaitMs` and the per-turn wait limit.
    */
   quotaRetryMs?: number;
+  /**
+   * Hold this supervisor's `stop`, `reenter` and validator- or executor-blaming
+   * repairs to citing evidence or an episode probe (default true). Turn it off
+   * only for a session that cannot call tools and so cannot probe or list evidence.
+   */
+  requireCitedEvidence?: boolean;
 }
 
 const MAX_PATCH_SUMMARY_CHARS = 2_000;
@@ -192,6 +198,7 @@ export function createPiSupervisor(options: CreatePiSupervisorOptions): PiSuperv
 
   return {
     sessionId: logicalSessionId,
+    requiresCitedEvidence: options.requireCitedEvidence !== false,
     get binding() {
       return {
         ...binding,
@@ -249,6 +256,7 @@ export function createPiSupervisor(options: CreatePiSupervisorOptions): PiSuperv
           input.view.escalation?.repeatedProposals,
           input.admission,
           input.recordFinding,
+          input.inspect,
         );
       const callsBefore = providerCalls;
       // Every prompt of this turn shares the controller's one allowance:
@@ -741,6 +749,11 @@ export function buildRecoveryPrompt(
       : []),
     ...(offered.includes("activate_repair")
       ? ["For activate_repair, use a qualifiedArtifactId from repairCandidates with status qualified."]
+      : []),
+    ...(input.inspect !== undefined
+      ? [
+          "Claims must be checkable. get_evidence, list_evidence, list_receipts, read_candidate and diff_candidate read the run without changing it, and check_validate, check_activation and check_checkout dry-run the controller's own checks on a copy of state (each returns a probeId; probes are limited). A stop, a reenter, or a qualify_repair that blames a validator or executor is refused unless its evidence lists an evidence ref or a probe id from this episode that supports it; check before you claim that validate cannot pass.",
+        ]
       : []),
     "A proposal the controller would not admit is returned to you in this same turn with the failed precondition and the current value; correct it and propose again.",
     "repairAuthority shows what the operator granted and whether the graph bundle's code can be patched. An opaque bundle's code cannot be: retry the work or repair its environment instead. Substitute a validator (qualify_repair target validator with requirementId, adding files without editing existing ones) only when validatorSubstitution is granted and that requirement has a readable statement. Otherwise stop, citing the failing validation's evidenceRefs; never invent a replacement criterion.",

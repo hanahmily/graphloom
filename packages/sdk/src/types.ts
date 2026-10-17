@@ -164,6 +164,8 @@ export interface BudgetRemaining {
   waitMs?: number;
   /** Milliseconds of execution the run has left; it runs down only while a controller is running the run. */
   activeMs?: number;
+  /** Dry-run probes the supervisor may still run; absent when the task sets no probe budget. */
+  probes?: number;
 }
 
 export interface RunView {
@@ -400,6 +402,12 @@ export interface GraphDecision {
   action: GraphAction;
   reason: string;
   privateState?: string;
+  /**
+   * Evidence refs and probe ids this decision rests on. A supervisor's `stop`,
+   * `reenter`, or repair that blames a validator or executor must cite at
+   * least one; the controller checks that each exists (or ran this episode).
+   */
+  evidence?: string[];
 }
 
 export interface ValidationInput {

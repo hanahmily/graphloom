@@ -91,11 +91,14 @@ import {
   worktreeChangeFingerprints,
 } from "./worktree.js";
 import { clearCheckouts, runInCheckout } from "./checkout.js";
+import { createRecoveryFence, createSupervisorInspection, DEFAULT_EPISODE_PROBES, episodeProbeAttempts, episodeProbeIds } from "./inspection.js";
 import { checkEnvironment, declaresEnvironment, type EnvironmentOutcome } from "./environment.js";
 import {
   activateRefusal,
   admissionFacts,
+  checkoutSpecRefusal,
   describeInadmissible,
+  groundingRefusal,
   inadmissible,
   MAX_INADMISSIBLE_PER_TURN,
   qualifyRefusal,
@@ -414,11 +417,20 @@ async function runNormalLoopSteps(
         const lastSettlement = settleProposal(state);
         state = recordAttempt(refreshCaseFile(state), lastSettlement);
         const caseFile = liveCaseFile(state);
+        // Every save during the supervisor's turn writes the latest state, one save after
+        // another: probes, findings and rejections can overlap, and a save that runs late
+        // must never put an older snapshot over a newer reservation.
+        let turnSaves: Promise<void> = Promise.resolve();
+        const saveLatest = (): Promise<void> => {
+          const next = turnSaves.then(() => saveRunState(state));
+          turnSaves = next.catch(() => undefined);
+          return next;
+        };
         const recordCaseFinding = async (finding: CaseFinding): Promise<CaseFindingOutcome> => {
           const kept = recordFinding(state, finding, episodeId);
           if (kept.outcome.kept) {
             state = { ...kept.state, stateRevision: state.stateRevision + 1 };
-            await saveRunState(state);
+            await saveLatest();
             syncRevision(deps, state);
           }
           return kept.outcome;
@@ -440,7 +452,7 @@ async function runNormalLoopSteps(
             budgets: { ...state.budgets, decisions: Math.max(0, state.budgets.decisions - 1) },
             stateRevision: state.stateRevision + 1,
           };
-          await saveRunState(state);
+          await saveLatest();
           syncRevision(deps, state);
           if (state.budgets.decisions <= 0) decisionsExhausted = true;
           const rejection: SupervisorRejection = {
@@ -451,8 +463,62 @@ async function runNormalLoopSteps(
           rejections.push(rejection);
           return rejection;
         };
+        // Dry-run probes: each runs the real admission code on a copy of state.
+        // Charged to budgets.probes when the task sets one (saved without a
+        // revision bump: the probe itself changes nothing else), otherwise
+        // capped per episode.
+        let turnSignal: AbortSignal | undefined;
+        let recoveryFence = createRecoveryFence();
+        // The reservation is durable before the probe runs, so a probe that
+        // throws still counts against the episode's cap and the run's budget.
+        const reserveProbe = async (): Promise<{ id: string } | { refused: string }> => {
+          const attempts = episodeProbeAttempts(state, episodeId);
+          const left = state.budgets.probes;
+          if (left === undefined && attempts >= DEFAULT_EPISODE_PROBES) {
+            return { refused: `${DEFAULT_EPISODE_PROBES} probes already started this episode` };
+          }
+          if (left !== undefined && left <= 0) return { refused: "the run's probes budget is exhausted" };
+          const id = `probe-${attempts + 1}`;
+          state = {
+            ...state,
+            ...(left !== undefined ? { budgets: { ...state.budgets, probes: left - 1 } } : {}),
+            probeLog: { episodeId, ids: [...episodeProbeIds(state, episodeId)], attempts: attempts + 1 },
+          };
+          await saveLatest();
+          return { id };
+        };
+        // The log is durable (without a revision bump) so a later turn of the
+        // episode, or a resume, can still cite what an earlier turn probed.
+        const recordProbe = async (id: string): Promise<void> => {
+          const ids = [...episodeProbeIds(state, episodeId), id];
+          state = { ...state, probeLog: { episodeId, ids, attempts: episodeProbeAttempts(state, episodeId) } };
+          await saveLatest();
+        };
+        const inspection = createSupervisorInspection({
+          state: () => state,
+          validators: deps.validators,
+          hasRepairHooks: deps.repair !== undefined,
+          reserveProbe,
+          recordProbe,
+          signal: () => turnSignal,
+          recoverHost: async (code) => {
+            // Only while the supervisor's turn is running, and finished before the turn is
+            // torn down: the fence is closed (and drained) when the turn ends.
+            const running = recoveryFence.runOnce("plugin-host", async () => {
+              const restarted = await restartDeadChildHost(state, deps, mapHostFailureCode(code));
+              return restarted.ok ? undefined : restarted.blocker;
+            });
+            return running ?? "the supervisor's turn is over";
+          },
+        });
         const check: AdmissionCheck = async (candidate) => {
-          const refusal = supervisorAdmissionRefusal(admittedAgainst, candidate, deps, trigger.code);
+          const refusal = supervisorAdmissionRefusal(
+            admittedAgainst,
+            candidate,
+            deps,
+            trigger.code,
+            supervisor.requiresCitedEvidence === true ? episodeProbeIds(state, episodeId) : undefined,
+          );
           return refusal === undefined ? undefined : refuse(candidate.action.type, describeInadmissible(refusal));
         };
         const admission = { facts: admissionFacts(state, deps.repair !== undefined), check, refuse };
@@ -461,6 +527,11 @@ async function runNormalLoopSteps(
         let rejection: SupervisorRejection | undefined;
         for (;;) {
           const abort = new AbortController();
+          // Ends with the run's stop and with this turn, so a probe still running afterwards is cancelled.
+          const turnEnded = new AbortController();
+          turnSignal = AbortSignal.any([abort.signal, turnEnded.signal]);
+          recoveryFence = createRecoveryFence();
+          const fence = recoveryFence;
           const stopWatch = watchForStop(state.stateDir, deps, abort);
           decided = undefined;
           decideError = undefined;
@@ -482,11 +553,17 @@ async function runNormalLoopSteps(
               maxWaitMs: state.budgets.waitMs ?? 0,
               caseFile,
               recordFinding: recordCaseFinding,
+              inspect: inspection.inspection,
             });
             decided = isModelSwitchRequest(proposal) ? proposal : assertGraphDecision(proposal);
           } catch (err) {
             decideError = err;
           } finally {
+            turnEnded.abort();
+            // A host replacement the supervisor's probe began is finished before anything tears the run down.
+            await fence.close();
+            // Saves a probe or finding began are finished before the turn's own saves follow.
+            await turnSaves;
             stopWatch();
             state = settleSupervisorUsage(state, supervisor);
             state = settleSupervisorRemedies(state, supervisor, episodeId);
@@ -1599,7 +1676,9 @@ async function applyDecision(
       if (!deps.repair) {
         return inadmissible(state, { precondition: "qualify_repair requires repair hooks", detail: "this controller has no repair hooks configured" });
       }
-      return applyQualifyRepair(state, action.qualify, {
+      // What the supervisor cited anywhere on the proposal reaches the independent reviewer.
+      const cited = [...new Set([...(Array.isArray(action.qualify.evidenceRefs) ? action.qualify.evidenceRefs : []), ...(decision.evidence ?? [])])];
+      return applyQualifyRepair(state, cited.length > 0 ? { ...action.qualify, evidenceRefs: cited } : action.qualify, {
         ...(deps.supervisor !== undefined ? { supervisor: deps.supervisor } : {}),
         repair: deps.repair,
         validators: deps.validators,
@@ -1638,7 +1717,10 @@ async function applyDecision(
         state.definition.stages.every((s) =>
           stageRequirementsMet(state, s.id, s.requirementIds),
         );
-      const cited = citedEvidence(state, action.stop.evidenceRefs);
+      // What admitted the stop is what the report shows: recorded evidence and probes of this episode.
+      const named = [...(Array.isArray(action.stop.evidenceRefs) ? action.stop.evidenceRefs : []), ...(decision.evidence ?? [])];
+      const probed = new Set(state.probeLog?.episodeId === state.recoveryEpisodeId ? state.probeLog?.ids : []);
+      const cited = [...new Set([...citedEvidence(state, named), ...named.filter((ref) => probed.has(ref))])];
       const drift = complete ? await deliveryDrift(state) : undefined;
       if (drift !== undefined) {
         return {
@@ -1932,9 +2014,13 @@ export function supervisorAdmissionRefusal(
   decision: GraphDecision,
   deps: Pick<LoopDeps, "repair">,
   triggerCode: string,
+  /** The probes that ran this episode; given only for a supervisor that must ground its claims. */
+  probeIds?: ReadonlySet<string>,
 ): Inadmissible | undefined {
   const repeated = repeatRefusal(state, triggerCode, decision);
   if (repeated !== undefined) return repeated;
+  const ungrounded = probeIds !== undefined ? groundingRefusal(state, decision, probeIds) : undefined;
+  if (ungrounded !== undefined) return ungrounded;
   const action = decision.action;
   const hasRepair = deps.repair !== undefined;
   switch (action.type) {
@@ -1990,19 +2076,10 @@ function recoveryDispatchRefusal(state: DurableRunState, job: JobSpec): string |
 
 /** Only read-only command jobs run in a disposable checkout; agents and tools stay in the worktree. */
 function checkoutRefusal(job: JobSpec): string | undefined {
-  const checkout = job.checkout as unknown;
   if (job.kind !== "command" || job.readOnly !== true || job.tools !== undefined || job.continueFrom !== undefined) {
     return "only read-only command jobs without tools or continuations may run in a checkout";
   }
-  if (typeof checkout !== "object" || checkout === null) return "checkout must be an object";
-  const spec = checkout as { from?: unknown; paths?: unknown };
-  if (spec.from === "candidate") return spec.paths === undefined ? undefined : "a candidate checkout takes no paths";
-  if (spec.from !== "base") return `checkout.from must be "candidate" or "base"`;
-  if (!Array.isArray(spec.paths) || spec.paths.length === 0 || !spec.paths.every((p) => typeof p === "string")) {
-    return "a base checkout must list the changed paths to apply";
-  }
-  const problem = writeScopeProblem(spec.paths as string[]);
-  return problem === undefined ? undefined : `checkout paths: ${problem}`;
+  return checkoutSpecRefusal(job.checkout);
 }
 
 /** A job that changed paths it was not allowed to write fails, whatever it reported; the changes stay for recovery to handle. */

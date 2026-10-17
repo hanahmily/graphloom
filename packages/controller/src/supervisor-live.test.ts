@@ -214,7 +214,7 @@ describe("live supervisor recovery through the controller (#43)", () => {
       taskPath: env.taskPath,
       plugin: escalate(),
       validators,
-      supervisor: createPiSupervisor({ session }),
+      supervisor: createPiSupervisor({ session, requireCitedEvidence: false }),
       runner: createScriptedRunner({
         jobs: [
           async (_job, ctx) => {

@@ -3,9 +3,11 @@ import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { ACTION_SPEC_KEYS, assertGraphDecision, stableHash, type AgentSessionView, type GraphAction } from "@graphloom/sdk";
 import type {
   AdmissionFacts,
+  EvidenceFilter,
   ModelRef,
   SupervisorAdmission,
   SupervisorInput,
+  SupervisorInspection,
   SupervisorProposal,
   SupervisorRejection,
 } from "./types.js";
@@ -32,6 +34,22 @@ export const SWITCH_MODEL_TOOL = "switch_model";
 
 /** Adds to the controller's case file; unlike the action tools it does not end the turn. */
 export const RECORD_FINDING_TOOL = "record_finding";
+
+/** Read-only evidence tools and dry-run probes; none ends the turn or changes the run. */
+export const INSPECTION_TOOL_NAMES = [
+  "get_evidence",
+  "list_evidence",
+  "list_receipts",
+  "read_candidate",
+  "diff_candidate",
+  "check_validate",
+  "check_activation",
+  "check_checkout",
+] as const;
+
+/** Upper bound of one inspection tool's reply, so a large payload never floods the session. */
+const MAX_INSPECTION_CHARS = 8_000;
+const MAX_LISTED = 50;
 
 interface ActionTool {
   specKey: string;
@@ -269,6 +287,7 @@ export function createAdmissionTools(
   repeatedProposals: Record<string, { count: number }> = {},
   admission?: SupervisorAdmission,
   recordFinding?: SupervisorInput["recordFinding"],
+  inspect?: SupervisorInspection,
 ): AdmissionToolbox {
   let proposal: SupervisorProposal | undefined;
   let exhausted: SupervisorRejection | undefined;
@@ -300,10 +319,19 @@ export function createAdmissionTools(
       name: action,
       label: action,
       description,
-      parameters: schema({
-        reason: { type: "string", description: "Concise decision summary shown to the operator." },
-        [specKey]: specSchema,
-      }),
+      parameters: {
+        type: "object",
+        required: ["reason", specKey],
+        properties: {
+          reason: { type: "string", description: "Concise decision summary shown to the operator." },
+          [specKey]: specSchema,
+          evidence: {
+            ...STRINGS,
+            description:
+              "Evidence refs and probe ids (from check_* tools this episode) that support this proposal. A stop, a reenter, or a repair blaming a validator or executor is refused without one.",
+          },
+        },
+      } as unknown as ToolDefinition["parameters"],
       async execute(_toolCallId: string, params: Record<string, unknown>) {
         if (proposal !== undefined || exhausted !== undefined) return duplicate();
         // With a controller, a rejection found here counts toward the same
@@ -324,7 +352,11 @@ export function createAdmissionTools(
         if (escaping !== undefined) return refuse(`observe paths are relative to the run worktree; ${escaping} is not`);
         let candidate: SupervisorProposal;
         try {
-          candidate = assertGraphDecision({ reason: params.reason, action: { type: action, [specKey]: params[specKey] } });
+          candidate = assertGraphDecision({
+            reason: params.reason,
+            action: { type: action, [specKey]: params[specKey] },
+            ...(params.evidence !== undefined ? { evidence: params.evidence } : {}),
+          });
         } catch (err) {
           return refuse(err instanceof Error ? err.message : String(err));
         }
@@ -395,12 +427,140 @@ export function createAdmissionTools(
     } as ToolDefinition);
   }
 
+  const inspectionTools = inspect !== undefined ? createInspectionTools(inspect) : [];
+
   return {
-    tools: [...actionTools, switchTool, ...findingTools],
+    tools: [...actionTools, switchTool, ...findingTools, ...inspectionTools],
     offered,
     proposal: () => proposal,
     exhausted: () => exhausted,
   };
+}
+
+function boundedText(value: unknown): string {
+  const text = typeof value === "string" ? value : JSON.stringify(value, null, 2);
+  return text.length <= MAX_INSPECTION_CHARS
+    ? text
+    : `${text.slice(0, MAX_INSPECTION_CHARS)}\n[truncated: ${text.length - MAX_INSPECTION_CHARS} more characters]`;
+}
+
+/** Read-only tools over the controller's inspection port; each returns bounded text and never ends the turn. */
+function createInspectionTools(inspect: SupervisorInspection): ToolDefinition[] {
+  const text = (value: unknown) => ({ content: [{ type: "text" as const, text: boundedText(value) }], details: undefined });
+  const guarded =
+    (run: (params: Record<string, unknown>, signal?: AbortSignal) => unknown | Promise<unknown>) =>
+    async (_toolCallId: string, params: Record<string, unknown>, signal?: AbortSignal) => {
+      try {
+        return text(await run(params, signal));
+      } catch (err) {
+        return text(`Error: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    };
+  const tool = (
+    name: (typeof INSPECTION_TOOL_NAMES)[number],
+    description: string,
+    properties: Record<string, unknown>,
+    required: string[],
+    run: (params: Record<string, unknown>, signal?: AbortSignal) => unknown | Promise<unknown>,
+  ) =>
+    ({
+      name,
+      label: name,
+      description,
+      parameters: { type: "object", required, properties } as unknown as ToolDefinition["parameters"],
+      execute: guarded(run),
+    }) as ToolDefinition;
+  const str = (params: Record<string, unknown>, key: string): string => {
+    const value = params[key];
+    if (typeof value !== "string" || value === "") throw new Error(`${key} must be a non-empty string`);
+    return value;
+  };
+  const probeNote = "Runs the controller's real check on a copy of state: nothing is persisted. Cite the returned probeId on a proposal.";
+  return [
+    tool("get_evidence", "Read one recorded evidence record by ref. The payload is bounded.", { ref: STRING }, ["ref"], (p) => {
+      const ref = str(p, "ref");
+      return inspect.getEvidence(ref) ?? `no evidence ${ref} in this run`;
+    }),
+    tool(
+      "list_evidence",
+      `List evidence records (ref, kind, stage, generation, candidate digest), newest last, at most ${MAX_LISTED}. Every filter given must match.`,
+      {
+        stageId: STRING,
+        kind: { type: "string", enum: ["file", "command", "workspace", "review", "other"] },
+        generation: { type: "number" },
+        candidateDigest: STRING,
+      },
+      [],
+      (p) => {
+        const filter: EvidenceFilter = {
+          ...(typeof p.stageId === "string" ? { stageId: p.stageId } : {}),
+          ...(typeof p.kind === "string" ? { kind: p.kind as NonNullable<EvidenceFilter["kind"]> } : {}),
+          ...(typeof p.generation === "number" ? { generation: p.generation } : {}),
+          ...(typeof p.candidateDigest === "string" ? { candidateDigest: p.candidateDigest } : {}),
+        };
+        const matched = inspect.listEvidence(filter);
+        const stage = (r: { payload?: unknown }) => (r.payload as { producer?: { stageId?: string } } | undefined)?.producer?.stageId;
+        return {
+          total: matched.length,
+          records: matched.slice(-MAX_LISTED).map((r) => ({
+            ref: r.ref,
+            kind: r.kind,
+            ...(stage(r) !== undefined ? { stageId: stage(r) } : {}),
+            ...(r.generation !== undefined ? { generation: r.generation } : {}),
+            ...(r.candidateDigest !== undefined ? { candidateDigest: r.candidateDigest } : {}),
+          })),
+        };
+      },
+    ),
+    tool("list_receipts", "List the run's receipts: id, stage, requirement, validity.", {}, [], () =>
+      inspect.listReceipts().map((r) => ({ id: r.id, stageId: r.stageId, requirementId: r.requirementId, valid: r.valid })),
+    ),
+    tool(
+      "read_candidate",
+      "Read a file of the workspace candidate (relative to the run worktree), optionally lines start..end (1-based, inclusive).",
+      { path: STRING, range: { type: "object", properties: { start: { type: "number" }, end: { type: "number" } } } },
+      ["path"],
+      async (p, signal) => {
+        const read = await inspect.readCandidate(str(p, "path"), signal);
+        if ("error" in read) return `Error: ${read.error}`;
+        const range = p.range as { start?: number; end?: number } | undefined;
+        if (range === undefined) return read.text;
+        const lines = read.text.split("\n");
+        const start = Math.max(1, Math.floor(range.start ?? 1));
+        const end = Math.min(lines.length, Math.floor(range.end ?? lines.length));
+        return lines.slice(start - 1, end).join("\n");
+      },
+    ),
+    tool("diff_candidate", "The workspace candidate as a unified diff against the pinned base commit.", {}, [], async (_p, signal) => {
+      const read = await inspect.diffCandidate(signal);
+      return "error" in read ? `Error: ${read.error}` : read.diff === "" ? "(no changes)" : read.diff;
+    }),
+    tool(
+      "check_validate",
+      `Would validate for this stage be accepted now? Returns accepted, evaluated and each requirement's outcome, as a real validate would. ${probeNote}`,
+      { stageId: STRING, requirementIds: STRINGS },
+      ["stageId"],
+      (p, signal) =>
+        inspect.checkValidate(
+          { stageId: str(p, "stageId"), ...(Array.isArray(p.requirementIds) ? { requirementIds: p.requirementIds as string[] } : {}) },
+          signal,
+        ),
+    ),
+    tool(
+      "check_activation",
+      `Would activate_repair for this artifact be admitted, and if not why? ${probeNote}`,
+      { artifactId: STRING },
+      ["artifactId"],
+      (p, signal) => inspect.checkActivation(str(p, "artifactId"), signal),
+    ),
+    tool(
+      "check_checkout",
+      `Would a job's checkout spec ({from:"candidate", revertPatch?} or {from:"base", paths}) apply, and if not why? ${probeNote}`,
+      { spec: { type: "object", additionalProperties: true } },
+      ["spec"],
+      (p, signal) => inspect.checkCheckout(p.spec as Parameters<SupervisorInspection["checkCheckout"]>[0], signal),
+    ),
+  ];
 }
 
 /** How a controller rejection reads to the model: the failed precondition and current value, and what is left this turn. */

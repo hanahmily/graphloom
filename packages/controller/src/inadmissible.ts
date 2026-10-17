@@ -1,4 +1,4 @@
-import type { ActivateRepairSpec, GraphDecision, QualifyRepairSpec } from "@graphloom/sdk";
+import { writeScopeProblem, type ActivateRepairSpec, type GraphDecision, type QualifyRepairSpec } from "@graphloom/sdk";
 import type { AdmissionFacts } from "@graphloom/supervisor";
 import { supervisorProposalKey, progressMark } from "./escalation.js";
 import { manifestRepairContract } from "./intake.js";
@@ -224,4 +224,69 @@ export function safeDefault(state: DurableRunState, triggerCode: string): "retur
     state.budgets.jobs > 0 &&
     state.budgets.decisions > 0;
   return canDispatch ? "return" : "stop";
+}
+
+/** Why a checkout spec is malformed, or undefined. The job-level rules (read-only command, no tools) are the caller's. */
+export function checkoutSpecRefusal(checkout: unknown): string | undefined {
+  if (typeof checkout !== "object" || checkout === null) return "checkout must be an object";
+  const spec = checkout as { from?: unknown; paths?: unknown };
+  if (spec.from === "candidate") return spec.paths === undefined ? undefined : "a candidate checkout takes no paths";
+  if (spec.from !== "base") return `checkout.from must be "candidate" or "base"`;
+  if (!Array.isArray(spec.paths) || spec.paths.length === 0 || !spec.paths.every((p) => typeof p === "string")) {
+    return "a base checkout must list the changed paths to apply";
+  }
+  const problem = writeScopeProblem(spec.paths as string[]);
+  return problem === undefined ? undefined : `checkout paths: ${problem}`;
+}
+
+/** Supervisor proposals that assert a fault must say what shows it. */
+const CITATION_BLAME_TARGETS: ReadonlySet<string> = new Set(["validator", "executor"]);
+
+/**
+ * A supervisor's `stop`, `reenter`, or `qualify_repair` that blames a
+ * validator or executor is admissible only with a citation: an evidence ref
+ * recorded in this run, or a probe that ran in this episode. Every citation
+ * must resolve, whatever the action.
+ */
+export function groundingRefusal(
+  state: DurableRunState,
+  decision: GraphDecision,
+  probeIds: ReadonlySet<string>,
+): Inadmissible | undefined {
+  const { action } = decision;
+  const own =
+    action.type === "stop"
+      ? action.stop.evidenceRefs
+      : action.type === "reenter"
+        ? action.reenter.evidenceRefs
+        : action.type === "qualify_repair"
+          ? action.qualify.evidenceRefs
+          : undefined;
+  // A citation list that is not an array of strings is returned for correction, not thrown at the loop.
+  for (const [name, list] of [["evidence", decision.evidence], ["evidenceRefs", own]] as const) {
+    if (list !== undefined && (!Array.isArray(list) || !list.every((ref) => typeof ref === "string"))) {
+      return { precondition: `${action.type} cites malformed evidence`, detail: `${name} must be an array of evidence refs or probe ids` };
+    }
+  }
+  const cited = [...(decision.evidence ?? []), ...(own ?? [])];
+  const known = new Set(state.evidence.map((e) => e.ref));
+  const unknown = cited.filter((ref) => !known.has(ref) && !probeIds.has(ref));
+  if (unknown.length > 0) {
+    return {
+      precondition: `${action.type} cites unknown evidence`,
+      detail: `${unknown.join(", ")} is neither recorded evidence in this run nor a probe that ran in this episode; probes this episode: ${probeIds.size > 0 ? [...probeIds].join(", ") : "none"}`,
+    };
+  }
+  const needsCitation =
+    action.type === "stop" ||
+    action.type === "reenter" ||
+    (action.type === "qualify_repair" && CITATION_BLAME_TARGETS.has(action.qualify.target));
+  if (needsCitation && cited.length === 0) {
+    return {
+      precondition: `${action.type} requires cited evidence`,
+      detail:
+        "list in evidence the evidence refs (list_evidence, get_evidence) or probe ids (check_validate, check_activation, check_checkout) from this episode that show why; check before you claim",
+    };
+  }
+  return undefined;
 }

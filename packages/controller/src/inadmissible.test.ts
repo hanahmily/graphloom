@@ -12,6 +12,7 @@ import {
   dispatch,
   observe,
   reenter,
+  returnToNormal,
   stop,
   supervise,
   validate,
@@ -259,7 +260,16 @@ describe("inadmissible supervisor proposals (#117)", () => {
     const session = toolCallingSession("sup-117", [
       // Turn 1: no qualified candidate yet, so activate_repair is not offered.
       async (_prompt, tools) => {
-        submitted.push(await call(tools, "qualify_repair", { reason: "defective gate", qualify: { target: "validator", reason: "write gate always fails" } }));
+        // Blaming the validator needs a probe that shows it: the write gate refuses a valid greeting.
+        const probe = JSON.parse(await call(tools, "check_validate", { stageId: "write" })) as { probeId: string; accepted: boolean };
+        expect(probe.accepted).toBe(false);
+        submitted.push(
+          await call(tools, "qualify_repair", {
+            reason: "defective gate",
+            qualify: { target: "validator", reason: "write gate always fails" },
+            evidence: [probe.probeId],
+          }),
+        );
         return "";
       },
       // Turn 2: activate the qualified candidate.
@@ -507,5 +517,416 @@ describe("inadmissible supervisor proposals (#117)", () => {
     expect(report.status).toBe("stopped");
     expect(report.stopReason).toBe("corrections budget exhausted");
     expect((await loadRunState(report.stateDir)).supervisorOutcomes).toBeUndefined();
+  });
+});
+
+describe("supervisor evidence and probes", () => {
+  it("returns an uncited stop in-turn, then admits it after check_validate shows the stage would validate with state unchanged", async () => {
+    const env = await makeEnv();
+    const probe = (text: string) => JSON.parse(text) as { probeId: string; accepted: boolean; evaluated: boolean; reason: string; stateRevision: number };
+    const replies: string[] = [];
+    const probes: Array<ReturnType<typeof probe>> = [];
+    const session = toolCallingSession("sup-119", [
+      async (_prompt, tools) => {
+        // The Fix stage would validate: the supervisor checks it twice, then stops.
+        probes.push(probe(await call(tools, "check_validate", { stageId: "write" })));
+        probes.push(probe(await call(tools, "check_validate", { stageId: "write" })));
+        const stopArgs = { reason: "blocked", stop: { reason: "blocked", blocker: "cannot proceed" } };
+        replies.push(await call(tools, "stop", stopArgs));
+        replies.push(await call(tools, "stop", { ...stopArgs, evidence: [probes[0]!.probeId] }));
+        return "";
+      },
+    ]);
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({
+        definition,
+        advances: [
+          dispatch({ stageId: "write", kind: "agent", purpose: "work", instruction: "write", writeScope: [GREETING_PATH] }, "write"),
+          observe({ paths: [GREETING_PATH], includeWorkspaceManifest: true }, "obs"),
+          supervise({ reason: "unfamiliar" }, "escalate"),
+        ],
+      }),
+      validators: goodValidators,
+      supervisor: createPiSupervisor({ session }),
+      runner: runner(),
+      stateRoot: env.stateRoot,
+      runId: "issue-119",
+    });
+
+    // The probe saw what a real validate would do, and changed nothing.
+    expect(probes[0]).toMatchObject({ accepted: true, evaluated: true });
+    expect(probes[0]!.probeId).not.toBe(probes[1]!.probeId);
+    expect(probes[1]!.stateRevision).toBe(probes[0]!.stateRevision);
+    expect((await loadRunState(report.stateDir)).receipts).toEqual([]);
+    // A stop with no cited evidence came back in-turn; the cited one was admitted.
+    expect(replies[0]).toMatch(/^Rejected: .*stop.*evidence/);
+    expect(replies[1]).toMatch(/^Submitted/);
+    expect(report.status).toBe("stopped");
+    expect(report.stopReason).toBe("blocked");
+    expect(session.prompts).toHaveLength(1);
+  });
+  const wroteGreeting = () => [
+    dispatch({ stageId: "write", kind: "agent", purpose: "work", instruction: "write", writeScope: [GREETING_PATH] }, "write"),
+    observe({ paths: [GREETING_PATH], includeWorkspaceManifest: true }, "obs"),
+  ];
+  const stopArgs = (evidence?: unknown[]) => ({
+    reason: "blocked",
+    stop: { reason: "blocked", blocker: "none" },
+    ...(evidence !== undefined ? { evidence } : {}),
+  });
+
+  it("accepts a probe cited on a later turn of the same episode, and keeps what justified the stop", async () => {
+    const env = await makeEnv();
+    let probeId = "";
+    const session = toolCallingSession("sup-119-later", [
+      async (_prompt, tools) => {
+        probeId = (JSON.parse(await call(tools, "check_validate", { stageId: "write" })) as { probeId: string }).probeId;
+        await call(tools, "observe", { reason: "look", observe: { paths: [GREETING_PATH] } });
+        return "";
+      },
+      // The probe ran on the previous turn of this same episode.
+      async (_prompt, tools) => call(tools, "stop", stopArgs([probeId])),
+    ]);
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({ definition, advances: [...wroteGreeting(), supervise({ reason: "unfamiliar" }, "escalate")] }),
+      validators: goodValidators,
+      supervisor: createPiSupervisor({ session }),
+      runner: runner(),
+      stateRoot: env.stateRoot,
+      runId: "issue-119-later",
+    });
+    expect(session.prompts).toHaveLength(2);
+    expect(report.stopReason).toBe("blocked");
+    expect((await loadRunState(report.stateDir)).supervisorOutcomes).toBeUndefined();
+    // The citation that admitted the stop is what the report shows.
+    expect(report.stopEvidenceRefs).toEqual([probeId]);
+  });
+
+  it("still accepts a probe cited after a resume, and counts every probe started toward the episode's cap", async () => {
+    const env = await makeEnv();
+    let probeId = "";
+    const failing: Validator = {
+      evaluate() {
+        throw new Error("validator crashed");
+      },
+    };
+    const first = toolCallingSession("sup-119-resume-1", [
+      async (_prompt, tools) => {
+        // A probe whose validator throws is still a probe started.
+        expect(await call(tools, "check_validate", { stageId: "write" })).toMatch(/^Error: validator crashed/);
+        throw new Error("the model session died");
+      },
+    ]);
+    const plugin = () => createScriptedGraph({ definition, advances: [...wroteGreeting(), supervise({ reason: "unfamiliar" }, "escalate")] });
+    const paused = await createController().run({
+      taskPath: env.taskPath,
+      plugin: plugin(),
+      validators: { ...goodValidators, "exact-greeting": failing },
+      supervisor: createPiSupervisor({ session: first }),
+      runner: runner(),
+      stateRoot: env.stateRoot,
+      runId: "issue-119-resume",
+    });
+    expect(paused.status).toBe("stopped");
+    const saved = await loadRunState(paused.stateDir);
+    expect(saved.probeLog).toMatchObject({ ids: [], attempts: 1 });
+    expect(saved.mode).toBe("recovery");
+
+    const second = toolCallingSession("sup-119-resume-2", [
+      async (_prompt, tools) => {
+        // A fresh process: the earlier probe failed to run, so its id cannot be cited ...
+        expect(await call(tools, "stop", stopArgs(["probe-1"]))).toMatch(/^Rejected: .*unknown evidence/);
+        // ... a probe run now can, and the cap keeps counting from the attempt before the restart.
+        probeId = (JSON.parse(await call(tools, "check_validate", { stageId: "write" })) as { probeId: string }).probeId;
+        expect(probeId).toBe("probe-2");
+        return call(tools, "stop", stopArgs([probeId]));
+      },
+    ]);
+    const resumed = await createController().resume({
+      runRef: paused.stateDir,
+      plugin: plugin(),
+      validators: goodValidators,
+      supervisor: createPiSupervisor({ session: second }),
+      runner: runner(),
+    });
+    expect(resumed.stopReason).toBe("blocked");
+    expect(resumed.stopEvidenceRefs).toEqual([probeId]);
+    expect((await loadRunState(resumed.stateDir)).probeLog).toMatchObject({ ids: ["probe-2"], attempts: 2 });
+  });
+
+  it("returns an uncited reenter, an uncited executor repair, an unresolved citation and a malformed one in-turn", async () => {
+    const env = await makeEnv();
+    const replies: string[] = [];
+    const session = toolCallingSession("sup-119-grounding", [
+      async (_prompt, tools) => {
+        replies.push(await call(tools, "reenter", { reason: "retry", reenter: { stageId: "write", reason: "retry" } }));
+        replies.push(
+          await call(tools, "qualify_repair", {
+            reason: "executor is wrong",
+            qualify: { target: "executor", executorId: "graphloom.agent/run", reason: "it fails" },
+          }),
+        );
+        replies.push(await call(tools, "observe", { reason: "look", observe: { paths: [GREETING_PATH] }, evidence: ["ev-nope"] }));
+        return "";
+      },
+      async (_prompt, tools) => {
+        replies.push(await call(tools, "reenter", { reason: "retry", reenter: { stageId: "write", reason: "retry", evidenceRefs: 42 } }));
+        replies.push(await call(tools, "stop", stopArgs(["probe-1"])));
+        return "";
+      },
+    ]);
+    await createController().run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({
+        definition,
+        advances: [...wroteGreeting(), supervise({ reason: "unfamiliar" }, "escalate"), supervise({ reason: "again" }, "escalate again"), ...finish.slice(-1)],
+      }),
+      validators: goodValidators,
+      supervisor: createPiSupervisor({ session }),
+      repair: approvingRepair("sup-119-grounding"),
+      runner: runner(),
+      stateRoot: env.stateRoot,
+      runId: "issue-119-grounding",
+    });
+    expect(replies[0]).toMatch(/^Rejected: .*reenter requires cited evidence/);
+    expect(replies[1]).toMatch(/^Rejected: .*qualify_repair requires cited evidence/);
+    expect(replies[2]).toMatch(/^Rejected: .*observe cites unknown evidence: ev-nope/);
+    // A malformed citation is a correction, not a failed turn.
+    expect(replies[3]).toMatch(/^Rejected: .*reenter cites malformed evidence/);
+    expect(replies[4]).toMatch(/^Rejected: .*stop cites unknown evidence: probe-1/);
+  });
+
+  it("checks a base checkout's paths against the candidate's real changes, as a checkout would", async () => {
+    const env = await makeEnv();
+    const probes: Array<{ accepted: boolean; reason: string }> = [];
+    const session = toolCallingSession("sup-119-checkout", [
+      async (_prompt, tools) => {
+        const addsGreeting = `diff --git a/${GREETING_PATH} b/${GREETING_PATH}\nnew file mode 100644\n--- /dev/null\n+++ b/${GREETING_PATH}\n@@ -0,0 +1 @@\n+Hello, GraphLoom!\n`;
+        for (const spec of [
+          { from: "base", paths: [GREETING_PATH] },
+          { from: "base", paths: ["README.md"] },
+          { from: "candidate" },
+          // The change this patch undoes is in the candidate, so it applies in reverse ...
+          { from: "candidate", revertPatch: addsGreeting },
+          // ... one that undoes a change the candidate does not have does not ...
+          { from: "candidate", revertPatch: addsGreeting.replace("+Hello, GraphLoom!", "+Goodbye") },
+          // ... and a large malformed one, which git may stop reading early, is an answer, not a crash.
+          { from: "candidate", revertPatch: "x".repeat(1024 * 1024) },
+        ]) {
+          probes.push(JSON.parse(await call(tools, "check_checkout", { spec })));
+        }
+        return call(tools, "stop", stopArgs(["probe-1"]));
+      },
+    ]);
+    await createController().run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({ definition, advances: [...wroteGreeting(), supervise({ reason: "unfamiliar" }, "escalate")] }),
+      validators: goodValidators,
+      supervisor: createPiSupervisor({ session }),
+      runner: runner(),
+      stateRoot: env.stateRoot,
+      runId: "issue-119-checkout",
+    });
+    expect(probes[0]).toMatchObject({ accepted: true });
+    expect(probes[1]).toMatchObject({ accepted: false });
+    expect(probes[1]!.reason).toMatch(/base checkout paths are not part of the workspace change: README\.md/);
+    expect(probes[2]).toMatchObject({ accepted: true });
+    expect(probes[3]).toMatchObject({ accepted: true });
+    expect(probes[4]).toMatchObject({ accepted: false });
+    expect(probes[4]!.reason).toMatch(/^revertPatch does not apply in reverse to the candidate/);
+    expect(probes[5]).toMatchObject({ accepted: false });
+    expect(probes[5]!.reason).toMatch(/^revertPatch could not be read/);
+  });
+
+  it("spends an explicit probes budget across a resume, refusing at zero while earlier probes stay citable", async () => {
+    const env = await makeEnv("budgets:\n  probes: 2\n");
+    const plugin = () => createScriptedGraph({ definition, advances: [...wroteGreeting(), supervise({ reason: "unfamiliar" }, "escalate")] });
+    const first = toolCallingSession("sup-119-budget-1", [
+      async (_prompt, tools) => {
+        await call(tools, "check_validate", { stageId: "write" });
+        await call(tools, "check_validate", { stageId: "write" });
+        expect(await call(tools, "check_validate", { stageId: "write" })).toBe("Error: probe refused: the run's probes budget is exhausted");
+        throw new Error("the model session died");
+      },
+    ]);
+    const paused = await createController().run({
+      taskPath: env.taskPath,
+      plugin: plugin(),
+      validators: goodValidators,
+      supervisor: createPiSupervisor({ session: first }),
+      runner: runner(),
+      stateRoot: env.stateRoot,
+      runId: "issue-119-budget",
+    });
+    const saved = await loadRunState(paused.stateDir);
+    expect(saved.budgets.probes).toBe(0);
+    expect(saved.budgets.agentInvocations).toBeGreaterThan(0);
+    expect(saved.probeLog).toMatchObject({ ids: ["probe-1", "probe-2"], attempts: 2 });
+
+    const second = toolCallingSession("sup-119-budget-2", [
+      async (_prompt, tools) => {
+        expect(await call(tools, "check_validate", { stageId: "write" })).toBe("Error: probe refused: the run's probes budget is exhausted");
+        return call(tools, "stop", stopArgs(["probe-2"]));
+      },
+    ]);
+    const resumed = await createController().resume({
+      runRef: paused.stateDir,
+      plugin: plugin(),
+      validators: goodValidators,
+      supervisor: createPiSupervisor({ session: second }),
+      runner: runner(),
+    });
+    expect(resumed.stopReason).toBe("blocked");
+    expect(resumed.stopEvidenceRefs).toEqual(["probe-2"]);
+    expect((await loadRunState(resumed.stateDir)).budgets.probes).toBe(0);
+  });
+
+  it("probes an activation against the real candidate status: unknown, qualified, then activated", async () => {
+    const env = await makeEnv();
+    const answers: Array<{ accepted: boolean; reason: string }> = [];
+    let artifactId = "";
+    const probe = async (tools: Tool[], id: string) => answers.push(JSON.parse(await call(tools, "check_activation", { artifactId: id })));
+    const session = toolCallingSession("sup-119-activation", [
+      async (_prompt, tools) => {
+        const failing = JSON.parse(await call(tools, "check_validate", { stageId: "write" })) as { probeId: string };
+        await call(tools, "qualify_repair", {
+          reason: "defective gate",
+          qualify: { target: "validator", reason: "write gate always fails" },
+          evidence: [failing.probeId],
+        });
+        return "";
+      },
+      async (prompt, tools) => {
+        artifactId = /"artifactId": "(repair-[^"]+)"/.exec(prompt)![1]!;
+        await probe(tools, "repair-missing");
+        await probe(tools, artifactId);
+        await call(tools, "activate_repair", { reason: "activate", activate: { qualifiedArtifactId: artifactId, reason: "fixed gate" } });
+        return "";
+      },
+      async (_prompt, tools) => {
+        await probe(tools, artifactId);
+        return call(tools, "return", { reason: "repair active", return: { summary: "active" } });
+      },
+    ]);
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({
+        definition,
+        advances: [...wroteGreeting(), validate({ stageId: "write", requirementIds: ["greeting-bytes"] }, "val write"), supervise({ reason: "gate defective" }, "escalate"), ...finish],
+      }),
+      validators: { "exact-greeting": defectiveGreeting, "independent-reviewer": independentReview },
+      supervisor: createPiSupervisor({ session }),
+      repair: approvingRepair("sup-119-activation"),
+      runner: runner(),
+      stateRoot: env.stateRoot,
+      runId: "issue-119-activation",
+    });
+    expect(report.status, report.blocker).toBe("succeeded");
+    expect(answers[0]).toMatchObject({ accepted: false });
+    expect(answers[0]!.reason).toMatch(/^activate_repair missing qualified artifact: no repair candidate repair-missing/);
+    expect(answers[1]).toMatchObject({ accepted: true });
+    expect(answers[2]).toMatchObject({ accepted: false });
+    expect(answers[2]!.reason).toMatch(/is `activated`, not `qualified`/);
+  });
+
+  it("keeps every reservation when probes run concurrently, on disk as well as in memory", async () => {
+    const env = await makeEnv("budgets:\n  probes: 3\n");
+    const session = toolCallingSession("sup-119-concurrent", [
+      async (_prompt, tools) => {
+        const answers = await Promise.all([1, 2, 3].map(() => call(tools, "check_validate", { stageId: "write" })));
+        expect(new Set(answers.map((a) => (JSON.parse(a) as { probeId: string }).probeId)).size).toBe(3);
+        throw new Error("the model session died");
+      },
+    ]);
+    const paused = await createController().run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({ definition, advances: [...wroteGreeting(), supervise({ reason: "unfamiliar" }, "escalate")] }),
+      validators: goodValidators,
+      supervisor: createPiSupervisor({ session }),
+      runner: runner(),
+      stateRoot: env.stateRoot,
+      runId: "issue-119-concurrent",
+    });
+    const saved = await loadRunState(paused.stateDir);
+    expect(saved.budgets.probes).toBe(0);
+    expect(saved.probeLog?.attempts).toBe(3);
+    expect([...(saved.probeLog?.ids ?? [])].sort()).toEqual(["probe-1", "probe-2", "probe-3"]);
+  });
+
+  it("hands the independent reviewer the evidence a repair cites at the top level of the proposal", async () => {
+    const env = await makeEnv();
+    let reviewed: Array<{ ref: string }> = [];
+    let cited = "";
+    const session = toolCallingSession("sup-119-reviewer", [
+      async (_prompt, tools) => {
+        const listed = JSON.parse(await call(tools, "list_evidence", {})) as { records: Array<{ ref: string }> };
+        cited = listed.records[0]!.ref;
+        // Cited in `evidence` only; the repair spec itself names none.
+        await call(tools, "qualify_repair", {
+          reason: "defective gate",
+          qualify: { target: "validator", reason: "write gate always fails" },
+          evidence: [cited],
+        });
+        return "";
+      },
+      async () => JSON.stringify(returnToNormal({ summary: "done" }, "return")),
+    ]);
+    const repair = approvingRepair("sup-119-reviewer");
+    const reviewer = {
+      sessionId: "sup-119-reviewer-independent",
+      async review(args: { evidence: Array<{ ref: string }> }) {
+        reviewed = args.evidence;
+        return { approved: false, reason: "reviewed" };
+      },
+    };
+    await createController().run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({
+        definition,
+        advances: [...wroteGreeting(), validate({ stageId: "write", requirementIds: ["greeting-bytes"] }, "val write"), supervise({ reason: "gate defective" }, "escalate"), ...finish.slice(-1)],
+      }),
+      validators: { "exact-greeting": defectiveGreeting, "independent-reviewer": independentReview },
+      supervisor: createPiSupervisor({ session }),
+      repair: { ...repair, reviewer } as RepairDeps,
+      runner: runner(),
+      stateRoot: env.stateRoot,
+      runId: "issue-119-reviewer",
+    });
+    expect(cited).not.toBe("");
+    expect(reviewed.map((e) => e.ref)).toEqual([cited]);
+  });
+
+  it("keeps probe reservations when a finding and a rejection are saved at the same time", async () => {
+    const env = await makeEnv("budgets:\n  probes: 3\n");
+    const session = toolCallingSession("sup-119-writers", [
+      async (_prompt, tools) => {
+        await Promise.all([
+          call(tools, "check_validate", { stageId: "write" }),
+          call(tools, "record_finding", { kind: "open", text: "is the gate right?" }),
+          call(tools, "validate", { reason: "undeclared", validate: { stageId: "nope" } }),
+          call(tools, "check_validate", { stageId: "write" }),
+          call(tools, "check_validate", { stageId: "write" }),
+        ]);
+        throw new Error("the model session died");
+      },
+    ]);
+    const paused = await createController().run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({ definition, advances: [...wroteGreeting(), supervise({ reason: "unfamiliar" }, "escalate")] }),
+      validators: goodValidators,
+      supervisor: createPiSupervisor({ session }),
+      runner: runner(),
+      stateRoot: env.stateRoot,
+      runId: "issue-119-writers",
+    });
+    const saved = await loadRunState(paused.stateDir);
+    expect(saved.budgets.probes).toBe(0);
+    expect(saved.probeLog?.attempts).toBe(3);
+    expect(saved.probeLog?.ids).toHaveLength(3);
+    expect(saved.caseFile?.open.map((q) => q.text)).toEqual(["is the gate right?"]);
+    // The rejection was charged too, as one decision beyond the graph's own.
+    expect(saved.budgets.decisions).toBeLessThan(512 - 1);
   });
 });

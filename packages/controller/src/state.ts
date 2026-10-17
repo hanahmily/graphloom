@@ -195,6 +195,12 @@ export interface DurableRunState {
    * match: normal jobs stay blocked until a repair changes the active version.
    */
   environmentBlock?: { activeVersion: string; reason: string };
+  /**
+   * Probes the supervisor has run in its current recovery episode, so a proposal
+   * may cite one across turns of the episode and after a resume. Replaced when
+   * a new episode runs its first probe; never counted in `stateRevision`.
+   */
+  probeLog?: { episodeId: string; /** Probes that ran. */ ids: string[]; /** Probes started, run or not: the episode cap counts these. */ attempts: number };
   /** Last successful work-purpose dispatch; used for separate-reviewer checks. */
   lastWorkOperationId?: string;
   /**

@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash } from "node:crypto";
 import { lstat, mkdir, readFile, readlink, realpath } from "node:fs/promises";
 import path from "node:path";
@@ -7,7 +8,22 @@ import { writeScopeAllows } from "@graphloom/sdk";
 import { assertSafeRunId } from "./ids.js";
 import { withDirectoryLock } from "./lock.js";
 
-const execFileAsync = promisify(execFile);
+const execFileRaw = promisify(execFile);
+const gitCancellation = new AsyncLocalStorage<AbortSignal>();
+
+/**
+ * Run `work` so that every git subprocess this module starts inside it is
+ * killed when `signal` aborts. Lets a caller cancel a multi-step check (such
+ * as a dry-run validation) without threading a signal through each helper.
+ */
+export function withGitCancellation<T>(signal: AbortSignal, work: () => Promise<T>): Promise<T> {
+  return gitCancellation.run(signal, work);
+}
+
+function execFileAsync(file: string, args: string[], options: { cwd?: string; maxBuffer?: number }) {
+  const signal = gitCancellation.getStore();
+  return execFileRaw(file, args, { ...options, encoding: "utf8", ...(signal !== undefined ? { signal } : {}) });
+}
 
 export interface WorktreeResult {
   worktreePath: string;
