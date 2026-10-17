@@ -57,6 +57,8 @@ export interface RunBudgets {
   activeMs: number;
   /** Agent invocations reserved for recovery-mode calls once normal-mode dispatch is denied. Default: max(8, 5% of agentInvocations). */
   recoveryReserve?: number;
+  /** Dry-run probes the supervisor may run in total. Absent: probes are not metered, only capped per episode. */
+  probes?: number;
 }
 
 const BUDGET_KEYS: ReadonlySet<string> = new Set([
@@ -67,6 +69,7 @@ const BUDGET_KEYS: ReadonlySet<string> = new Set([
   "waitMs",
   "activeMs",
   "recoveryReserve",
+  "probes",
 ]);
 
 export interface RepairGrants {
@@ -123,6 +126,8 @@ export interface IntakePin {
     activeMs?: number;
     /** Agent invocations reserved for recovery-mode calls; absent in runs saved before it existed. */
     recoveryReserve?: number;
+    /** Supervisor dry-run probes left; absent when the task sets none. */
+    probes?: number;
   };
   /**
    * The gate in `run` (docs/design-graph-rehearsal.md §3.5): whether this run

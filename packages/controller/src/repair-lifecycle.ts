@@ -30,6 +30,7 @@ import type { DurableRunState } from "./state.js";
 import { bumpGeneration } from "./generation.js";
 import { activateExecutorRepair, executorRepairSubject } from "./executor-repair.js";
 import { citedEvidence, saveRunState } from "./state.js";
+import { citedProbeEvidence } from "./inspection.js";
 import { worktreeChangeFingerprints } from "./worktree.js";
 
 export interface RepairPatchAuthor {
@@ -371,7 +372,11 @@ export async function applyQualifyRepair(
         qualify.requirementId !== undefined
           ? state.definition.requirements.find((r) => r.id === qualify.requirementId)?.statement
           : undefined;
-      const evidence: EvidenceRecord[] = state.evidence.filter((e) => (qualify.evidenceRefs ?? []).includes(e.ref));
+      // Recorded evidence the proposal cites, and the results of the episode's probes it cites.
+      const evidence: EvidenceRecord[] = [
+        ...state.evidence.filter((e) => (qualify.evidenceRefs ?? []).includes(e.ref)),
+        ...citedProbeEvidence(state, qualify.evidenceRefs),
+      ];
       const review = await deps.repair.reviewer.review({
         candidateRoot: snap.candidateRoot,
         baseRoot: subject.baseRoot,
@@ -427,9 +432,10 @@ export async function applyQualifyRepair(
   }
 }
 
-/** The refs the supervisor cited, plus those the escalation into recovery cited. */
+/** The refs the supervisor cited (recorded evidence or this episode's probes), plus those the escalation into recovery cited. */
 function opaqueGateEvidence(state: DurableRunState, qualify: QualifyRepairSpec): string[] {
-  return citedEvidence(state, [...(qualify.evidenceRefs ?? []), ...(state.recoveryTrigger?.evidenceRefs ?? [])]);
+  const named = [...(qualify.evidenceRefs ?? []), ...(state.recoveryTrigger?.evidenceRefs ?? [])];
+  return [...new Set([...citedEvidence(state, named), ...citedProbeEvidence(state, named).map((e) => e.ref)])];
 }
 
 /** What the patch author must leave alone: the run worktree and the saved run state. */

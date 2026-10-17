@@ -168,7 +168,16 @@ export async function admitValidation(
   state: DurableRunState,
   spec: ValidateSpec,
   validators: Record<string, AdmissionValidator>,
-): Promise<{ state: DurableRunState; accepted: boolean; reason: string; evaluated: boolean }> {
+  /** Checked before each validator starts; a caller that gives up (a dry run) stops the rest from running. */
+  signal?: AbortSignal,
+): Promise<{
+  state: DurableRunState;
+  accepted: boolean;
+  reason: string;
+  evaluated: boolean;
+  /** What each requirement the validators actually evaluated reported, in order; admission stops at the first that does not pass. */
+  requirements?: Array<{ requirementId: string; status: string; reason: string }>;
+}> {
   const stage = state.definition.stages.find((s) => s.id === spec.stageId);
   if (!stage) {
     throw new AdmissionError(`unknown stage ${spec.stageId}`);
@@ -251,8 +260,10 @@ export async function admitValidation(
   }
 
   const newReceipts: Receipt[] = [];
+  const outcomes: Array<{ requirementId: string; status: string; reason: string }> = [];
   let working = { ...state, receiptSeq: state.receiptSeq };
   for (const requirementId of reqIds) {
+    if (signal?.aborted) throw new Error("validation stopped before every requirement was evaluated");
     const requirement = working.definition.requirements.find((r) => r.id === requirementId);
     if (!requirement) {
       throw new AdmissionError(`unknown requirement ${requirementId}`);
@@ -277,6 +288,7 @@ export async function admitValidation(
           accepted: false,
           reason: independenceError,
           evaluated: false,
+          requirements: outcomes,
         };
       }
     }
@@ -290,6 +302,7 @@ export async function admitValidation(
       ...(liveDigest !== undefined ? { candidateDigest: liveDigest } : {}),
     });
     const resolved = await Promise.resolve(result);
+    outcomes.push({ requirementId, status: resolved.status, reason: resolved.reason });
 
     if (resolved.status !== "passed") {
       return {
@@ -297,6 +310,7 @@ export async function admitValidation(
         accepted: false,
         reason: `validation ${resolved.status}: ${resolved.reason}`,
         evaluated: true,
+        requirements: outcomes,
       };
     }
 
@@ -366,6 +380,7 @@ export async function admitValidation(
     accepted: true,
     reason: `accepted ${spec.stageId}`,
     evaluated: true,
+    requirements: outcomes,
   };
 }
 

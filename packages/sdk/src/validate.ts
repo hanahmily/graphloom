@@ -294,6 +294,10 @@ export function assertGraphDecision(value: unknown): GraphDecision {
   const obj = asObject(value, "decision");
   requireString(obj, "reason");
   assertGraphAction(obj["action"]);
+  const evidence = obj["evidence"];
+  if (evidence !== undefined && (!Array.isArray(evidence) || !evidence.every((e) => typeof e === "string"))) {
+    throw new WireValidationError("malformed", "decision.evidence must be an array of strings");
+  }
   return obj as unknown as GraphDecision;
 }
 

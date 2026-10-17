@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { AgentSessionView, GraphAction } from "@graphloom/sdk";
-import { createAdmissionTools, GRAPHLOOM_SUPERVISOR_ACTIONS, offeredActions, supervisorProposalKey } from "./tools.js";
+import { createAdmissionTools, GRAPHLOOM_SUPERVISOR_ACTIONS, INSPECTION_TOOL_NAMES, offeredActions, supervisorProposalKey } from "./tools.js";
+import type { SupervisorInspection } from "./types.js";
 
 type Execute = (id: string, params: Record<string, unknown>) => Promise<{ content: { text: string }[]; terminate?: boolean }>;
 
@@ -286,5 +287,85 @@ describe("record_finding", () => {
     expect(refused.content[0]!.text).toBe("Not kept: no recorded evidence has ref ev-9.");
     expect(toolbox.proposal()).toBeUndefined();
     expect(submitted).toHaveLength(2);
+  });
+});
+
+describe("evidence and probe tools (#119)", () => {
+  const record = { ref: "ev-1", kind: "other" as const, payload: { big: "x".repeat(20_000) } };
+  const inspect: SupervisorInspection = {
+    getEvidence: (ref) => (ref === "ev-1" ? record : undefined),
+    listEvidence: () => [record],
+    listReceipts: () => [],
+    readCandidate: async () => ({ text: "a\nb\nc" }),
+    diffCandidate: async () => ({ diff: "" }),
+    checkValidate: async () => ({ probeId: "probe-1", accepted: true, evaluated: true, reason: "accepted fix", stateRevision: 3 }),
+    checkActivation: async () => ({ probeId: "probe-2", accepted: false, reason: "no such artifact", stateRevision: 3 }),
+    checkCheckout: async () => ({ probeId: "probe-3", accepted: true, reason: "would apply", stateRevision: 3 }),
+  };
+  const toolbox = createAdmissionTools([{ provider: "p", modelId: "m" }], [], 1, undefined, {}, undefined, undefined, inspect);
+  const run = async (name: string, params: Record<string, unknown>) => {
+    const tool = toolbox.tools.find((t) => t.name === name)!;
+    return (tool as unknown as { execute: Execute }).execute("1", params);
+  };
+
+  it("is offered only with an inspection port, and none of it ends the turn", async () => {
+    const without = createAdmissionTools([{ provider: "p", modelId: "m" }]).tools.map((t) => t.name);
+    for (const name of INSPECTION_TOOL_NAMES) {
+      expect(without).not.toContain(name);
+      expect(toolbox.tools.map((t) => t.name)).toContain(name);
+    }
+    const probe = await run("check_validate", { stageId: "fix" });
+    expect(JSON.parse(probe.content[0]!.text)).toMatchObject({ probeId: "probe-1", accepted: true });
+    expect(probe.terminate).toBeUndefined();
+    expect(toolbox.proposal()).toBeUndefined();
+  });
+
+  it("bounds an evidence payload and reads a line range of a candidate file", async () => {
+    const evidence = (await run("get_evidence", { ref: "ev-1" })).content[0]!.text;
+    expect(evidence.length).toBeLessThan(9_000);
+    expect(evidence).toContain("[truncated:");
+    expect((await run("get_evidence", { ref: "ev-9" })).content[0]!.text).toBe("no evidence ev-9 in this run");
+    expect((await run("read_candidate", { path: "f.txt", range: { start: 2, end: 3 } })).content[0]!.text).toBe("b\nc");
+  });
+
+  it("carries a proposal's cited evidence into the decision", async () => {
+    const stopTool = toolbox.tools.find((t) => t.name === "stop")!;
+    await (stopTool as unknown as { execute: Execute }).execute("1", {
+      reason: "blocked",
+      stop: { reason: "blocked", blocker: "none" },
+      evidence: ["probe-1"],
+    });
+    expect(toolbox.proposal()).toMatchObject({ evidence: ["probe-1"], action: { type: "stop" } });
+  });
+});
+
+describe("list_evidence (#119)", () => {
+  it("forwards only the filters given, reports the total, and returns the newest 50 in order", async () => {
+    const seen: unknown[] = [];
+    const records = Array.from({ length: 60 }, (_, i) => ({
+      ref: `ev-${i + 1}`,
+      kind: "file" as const,
+      generation: 2,
+      candidateDigest: "d2",
+      payload: { producer: { stageId: "fix" } },
+    }));
+    const inspect = {
+      listEvidence: (filter: unknown) => {
+        seen.push(filter);
+        return records;
+      },
+    } as unknown as SupervisorInspection;
+    const toolbox = createAdmissionTools([{ provider: "p", modelId: "m" }], [], 1, undefined, {}, undefined, undefined, inspect);
+    const list = (toolbox.tools.find((t) => t.name === "list_evidence") as unknown as { execute: Execute }).execute;
+
+    const all = JSON.parse((await list("1", {})).content[0]!.text) as { total: number; records: Array<{ ref: string; stageId?: string; generation?: number; candidateDigest?: string }> };
+    expect(seen[0]).toEqual({});
+    expect(all.total).toBe(60);
+    expect(all.records).toHaveLength(50);
+    expect(all.records[0]).toEqual({ ref: "ev-11", kind: "file", stageId: "fix", generation: 2, candidateDigest: "d2" });
+    expect(all.records.at(-1)!.ref).toBe("ev-60");
+
+    await list("2", { stageId: "fix", kind: "command", generation: 1, candidateDigest: "d1", ignored: "x" });
+    expect(seen[1]).toEqual({ stageId: "fix", kind: "command", generation: 1, candidateDigest: "d1" });
   });
 });
