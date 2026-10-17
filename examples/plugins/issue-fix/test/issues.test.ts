@@ -6,7 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
-import type { EvidenceRecord } from "@graphloom/sdk";
+import { assertBoundedJson, MAX_EXECUTOR_INPUT_BYTES, type EvidenceRecord } from "@graphloom/sdk";
 import {
   applyFixerRead,
   createIssue,
@@ -177,7 +177,7 @@ describe("the issues file in a Git worktree", () => {
       const t = table();
       const json = issueFileJson(t, { round: 2, phase: "discovery" });
       const before = await visible(dir);
-      const write = writeIssuesCommand(json, issueMarkdown(t));
+      const write = writeIssuesCommand(json, issueMarkdown(t))!;
       expect(writtenJson(write.argv)).toBe(json);
       expect((await run(dir, write.argv)).stdout).toBe("written\n");
       expect(await readFile(path.join(dir, ".graphloom/issues.json"), "utf8")).toBe(json);
@@ -192,11 +192,42 @@ describe("the issues file in a Git worktree", () => {
     }
   });
 
+  it("bounds the write command by the executor's input bytes, cutting the markdown, never the JSON, with multi-byte notes", async () => {
+    // 40 issues, four updates each, with Chinese notes and an emoji: a small JSON, but markdown with every note in full.
+    const t = emptyIssueTable();
+    const note = `关闭时等待没有超时，调度器会一直阻塞 🚧 ${"在动作忽略取消时永远等待。".repeat(40)}`;
+    for (let n = 1; n <= 40; n += 1) {
+      const i = createIssue(t, { id: `F${n}`, comment: { ...HANG, content: `第${n}个问题：${note}` } }, { status: "open", actor: "verifier", note, raisedIn: 1, ctx: ctx("ev-1") });
+      for (let k = 0; k < 4; k += 1) moveIssue(i, k % 2 === 0 ? "fixer" : "reviewer", k % 2 === 0 ? "fixed" : "reopened", note, ctx("ev-2"));
+    }
+    const json = issueFileJson(t);
+    const markdown = issueMarkdown(t);
+    expect(Buffer.byteLength(markdown)).toBeGreaterThan(MAX_EXECUTOR_INPUT_BYTES);
+    const write = writeIssuesCommand(json, markdown)!;
+    // What the controller checks before it dispatches the job.
+    expect(() => assertBoundedJson({ commands: [write] })).not.toThrow();
+    expect(write.argv.length).toBeLessThanOrEqual(64);
+    expect(write.argv.every((a) => a.length <= 4_096 && !/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/.test(a))).toBe(true);
+    expect(writtenJson(write.argv)).toBe(json);
+    const { root, dir } = await repo();
+    try {
+      await run(dir, write.argv);
+      expect(await readFile(path.join(dir, ".graphloom/issues.json"), "utf8")).toBe(json);
+      const md = await readFile(path.join(dir, ".graphloom/issues.md"), "utf8");
+      expect(markdown.startsWith(md.slice(0, md.indexOf("\n… (cut short")))).toBe(true);
+      expect(md).toContain("… (cut short; see .graphloom/issues.json)");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+    // A JSON that cannot fit at all is refused, not dispatched.
+    expect(writeIssuesCommand("x".repeat(MAX_EXECUTOR_INPUT_BYTES), "")).toBeUndefined();
+  });
+
   it("keeps the file out of the delivered commit even when the fixer deleted its .gitignore, and the next read hides it again", async () => {
     const { root, dir } = await repo();
     try {
       const t = table();
-      await run(dir, writeIssuesCommand(issueFileJson(t), issueMarkdown(t)).argv);
+      await run(dir, writeIssuesCommand(issueFileJson(t), issueMarkdown(t))!.argv);
       await unlink(path.join(dir, ".graphloom/.gitignore"));
       expect(await visible(dir)).toContain(".graphloom/issues.json");
       const [deliver] = deliverCommands("fix/1", "Fix it", "Body");

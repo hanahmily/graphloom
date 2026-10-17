@@ -116,6 +116,8 @@ interface Scenario {
   reenter?: number;
   /** What each implement pass (by index) does to the worktree's .graphloom/issues.json. */
   fixerEdits?: Array<((file: string | undefined) => string | undefined) | undefined>;
+  /** The first this many issues-read commands fail (exit 1), as a crashed or timed-out read does. */
+  failReads?: number;
 }
 
 const OCR = "/opt/open code review/bin/ocr";
@@ -169,6 +171,7 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
   let reentries = scenario.reenter ?? 0;
   let issuesFile: string | undefined;
   let issuesMarkdown: string | undefined;
+  let failedReads = 0;
   let seq = 0;
   let generation = 1;
   // Only a real reentry of Fix bumps attempt, exactly like the controller
@@ -297,6 +300,9 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
         issuesFile = writtenJson(c.argv);
         issuesMarkdown = c.argv.slice(5 + Number(c.argv[4])).join("");
         record("command", commandPayload(c.id, { stdout: "written\n" }, c.argv), job, op);
+      } else if (c.id === "issues-read" && failedReads < (scenario.failReads ?? 0)) {
+        failedReads += 1;
+        record("command", commandPayload(c.id, { exitCode: 1, stderr: "sh: cat: I/O error\n" }, c.argv), job, op);
       } else if (c.id === "issues-read") {
         record("command", commandPayload(c.id, issuesFile === undefined ? { stdout: "missing\n" } : { stdout: "present\n", report: issuesFile }, c.argv), job, op);
       } else {
@@ -1490,6 +1496,38 @@ describe("the issues file", () => {
     const i1 = parse(issuesFile).issues[0]!;
     expect(i1.history.map((h) => `${h.actor}:${h.from}->${h.to}`)).toEqual(["verifier:null->open", "graph:open->open", "fixer:open->fixed", "reviewer:fixed->done"]);
     expect(i1.history[1]!.note).toContain("rejected the fixer's edit: the fixer moved I1 from open to done");
+  });
+
+  it("retries a failed read of the fixer's edits instead of writing over them, and keeps the edits it reads", () => {
+    const { decision, jobs, issuesFile } = simulate({
+      reenter: 1,
+      failReads: 1,
+      codeReviews: [reviewed([HANG]), priorPass({ I1: "still_present" }), notedPass("I1", "resolved", "bounded")],
+      fixerEdits: [undefined, markFixed("I1", FIX_NOTE)],
+    });
+    expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+    const work = jobs.filter((j) => j.purpose === "work");
+    const after = jobs.slice(jobs.indexOf(work[1]!) + 1).filter((j) => commandIds(j).some((id) => id.startsWith("issues-")));
+    // The failed read is retried before any write; nothing overwrote the fixer's edit unread.
+    expect(after.slice(0, 3).map((j) => commandIds(j)[0])).toEqual(["issues-read", "issues-read", "issues-write"]);
+    const i1 = parse(issuesFile).issues[0]!;
+    expect(i1.history.map((h) => `${h.actor}:${h.from}->${h.to}`)).toEqual(["verifier:null->open", "fixer:open->fixed", "reviewer:fixed->done"]);
+    expect(i1.history[1]!.note).toBe(FIX_NOTE);
+  });
+
+  it("hands an issues file it cannot read back to the supervisor, leaving the fixer's edit in place", () => {
+    const { decision, jobs, issuesFile } = simulate({
+      reenter: 1,
+      failReads: 99,
+      codeReviews: [reviewed([HANG]), priorPass({ I1: "still_present" })],
+      fixerEdits: [undefined, markFixed("I1", FIX_NOTE)],
+    });
+    expect(decision.action).toMatchObject({ type: "supervise", supervise: { reason: expect.stringContaining("could not read .graphloom/issues.json back after the fixer's last run (2 failed reads)") } });
+    const work = jobs.filter((j) => j.purpose === "work");
+    const after = jobs.slice(jobs.indexOf(work[1]!) + 1);
+    expect(after.map((j) => commandIds(j)[0])).toEqual(["issues-read", "issues-read"]);
+    // The worktree still holds the fixer's edit: the graph never restored over it.
+    expect(parse(issuesFile).issues[0]!).toMatchObject({ status: "fixed" });
   });
 
   it("records the fixed step itself when the fixer forgot to mark an issue the reviewer finds resolved", () => {

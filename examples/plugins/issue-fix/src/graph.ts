@@ -71,7 +71,6 @@ import {
   type FindingLedger,
 } from "./findings.js";
 import {
-  fitsWriteCommand,
   issueById,
   issueCommand,
   issueFileJson,
@@ -312,7 +311,10 @@ function fix(ctx: Context, view: RunView, issue: number, state: FixPrivateState)
   // the same candidate that sent Fix back here is still the one on record.
   const stalePreReentry = reopened && implemented !== undefined && (implemented.record.generation ?? 0) < state.attemptGeneration;
   // The fixer may have marked issues fixed: read the file back before anything else.
-  if (implemented !== undefined && issuesReadDue(view)) return withPrivate(dispatch(issuesJob(FIX_STAGE, "read"), "read back the fixer's edits to the review issues file"), state);
+  if (implemented !== undefined) {
+    const read = issuesReadStep(view, FIX_STAGE, state);
+    if (read !== undefined) return read;
+  }
   // Every implementer job starts from the file as the graph last accepted it.
   const restore = issuesRestore(view, findingLedger(view.evidence), FIX_STAGE, state);
   const implementer = (job: JobSpec, summary: string, next: FixPrivateState): GraphDecision => restore ?? dispatchAgent(view, job, summary, next);
@@ -431,7 +433,8 @@ function review(ctx: Context, view: RunView, issue: number, state: FixPrivateSta
   const current = forIdentity(view.evidence, view.candidateDigest);
   const currentRefs = new Set(current.map((e) => e.ref));
   // An implementer run the graph has not read the issues file after (a resume onto this version, a recovery dispatch).
-  if (issuesReadDue(view)) return withPrivate(dispatch(issuesJob(REVIEW_STAGE, "read"), "read back the fixer's edits to the review issues file"), state);
+  const unread = issuesReadStep(view, REVIEW_STAGE, state);
+  if (unread !== undefined) return unread;
   const ledger = findingLedger(view.evidence);
   const passes = ledger.passes.filter((p) => p.digest === digest && currentRefs.has(p.run.record.ref));
   const last = passes.at(-1);
@@ -792,9 +795,35 @@ const lastWork = (view: RunView): number => indexOf(view, agentRuns(view.evidenc
 function issuesReadDue(view: RunView): boolean {
   const written = lastIndexWhere(view.evidence, (e) => issueCommand(e, ISSUES_COMMAND.write)?.ok === true);
   if (written < 0) return false;
-  const read = lastIndexWhere(view.evidence, (e) => issueCommand(e, ISSUES_COMMAND.read) !== undefined);
+  // Only a read that succeeded consumed the fixer's edits; a failed or timed-out one did not.
+  const read = lastIndexWhere(view.evidence, (e) => issueCommand(e, ISSUES_COMMAND.read)?.ok === true);
   const work = lastWork(view);
   return work > written && work > read;
+}
+
+/** Failed reads after the last implementer run before the graph stops retrying. */
+const MAX_FAILED_ISSUE_READS = 2;
+
+/**
+ * The read the fixer's last run still needs, or nothing: a failed read is
+ * retried, and after MAX_FAILED_ISSUE_READS the supervisor decides, since
+ * writing the accepted table over the unread file would lose the fixer's edits.
+ */
+function issuesReadStep(view: RunView, stageId: string, state: FixPrivateState): GraphDecision | undefined {
+  if (!issuesReadDue(view)) return undefined;
+  const work = lastWork(view);
+  const failed = view.evidence.filter((e, i) => i > work && issueCommand(e, ISSUES_COMMAND.read)?.ok === false);
+  if (failed.length >= MAX_FAILED_ISSUE_READS) {
+    return supervise(
+      { reason: `the graph could not read ${ISSUES_FILE} back after the fixer's last run (${failed.length} failed reads); it will not overwrite the fixer's unread edits`, evidenceRefs: failed.map((e) => e.ref) },
+      "escalate an issues file the graph cannot read back",
+      JSON.stringify(state),
+    );
+  }
+  return withPrivate(
+    dispatch(issuesJob(stageId, "read"), failed.length > 0 ? "retry reading back the fixer's edits to the review issues file" : "read back the fixer's edits to the review issues file"),
+    state,
+  );
 }
 
 /**
@@ -805,6 +834,9 @@ function issuesReadDue(view: RunView): boolean {
  * is always rewritten from evidence before the next agent job.
  */
 function issuesRestore(view: RunView, ledger: FindingLedger, stageId: string, state: FixPrivateState): GraphDecision | undefined {
+  // Never write over fixer edits the graph has not read back.
+  const unread = issuesReadStep(view, stageId, state);
+  if (unread !== undefined) return unread;
   if (ledger.issues.issues.length === 0) return undefined;
   const { round, phase } = reviewPhase(ledger, view.candidateDigest ?? "");
   const json = issueFileJson(ledger.issues, { round, phase });
@@ -814,11 +846,12 @@ function issuesRestore(view: RunView, ledger: FindingLedger, stageId: string, st
   if (fresh && !last.ok && last.kind === "write" && last.content === json) {
     return supervise({ reason: `the graph could not write ${ISSUES_FILE}`, evidenceRefs: [last.record.ref] }, "escalate a failed write of the issues file", JSON.stringify(state));
   }
-  if (!fitsWriteCommand(json)) {
+  const markdown = issueMarkdown(ledger.issues, { round, phase, followUps: ledger.followUps.map(describeFollowUp) });
+  const command = writeIssuesCommand(json, markdown);
+  if (command === undefined) {
     return supervise({ reason: `${ISSUES_FILE} has grown larger than one command can write` }, "escalate an issues file too large to write", JSON.stringify(state));
   }
-  const markdown = issueMarkdown(ledger.issues, { round, phase, followUps: ledger.followUps.map(describeFollowUp) });
-  const job = issuesJob(stageId, "write", writeIssuesCommand(json, markdown));
+  const job = issuesJob(stageId, "write", command);
   const why =
     last === undefined
       ? "write the review issues file"
@@ -842,7 +875,7 @@ function issuesJob(stageId: string, what: "write" | "read", command: Environment
 
 /** The rejections the latest read recorded, when no implementer has run since. */
 function rejectedSinceLastWork(view: RunView, table: IssueTable): Rejection[] {
-  const read = lastIndexWhere(view.evidence, (e) => issueCommand(e, ISSUES_COMMAND.read) !== undefined);
+  const read = lastIndexWhere(view.evidence, (e) => issueCommand(e, ISSUES_COMMAND.read)?.ok === true);
   if (read < 0 || read < lastWork(view)) return [];
   const ref = view.evidence[read]!.ref;
   return table.rejections.filter((r) => r.evidence === ref);

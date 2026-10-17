@@ -1,4 +1,4 @@
-import type { EnvironmentCommand, EvidenceRecord } from "@graphloom/sdk";
+import { MAX_EXECUTOR_INPUT_BYTES, type EnvironmentCommand, type EvidenceRecord } from "@graphloom/sdk";
 import type { ReviewComment } from "./ocr.js";
 import { clip } from "./review-common.js";
 
@@ -251,11 +251,28 @@ const CHUNK = 4_000;
 /** The command executor allows 64 arguments: sh, -c, the script, $0, the chunk count, and the chunks. */
 const MAX_CHUNKS = 59;
 
+/**
+ * Every executor input, the whole `{ commands: [...] }` object serialized, must
+ * fit the SDK's byte bound; a little room stays for the job's other fields.
+ */
+const MAX_COMMAND_INPUT_BYTES = MAX_EXECUTOR_INPUT_BYTES - 4_096;
+
+/** Chunks of at most CHUNK UTF-16 units that never split a surrogate pair, so each argv element stays valid text. */
 function chunked(text: string): string[] {
   const chunks: string[] = [];
-  for (let i = 0; i < text.length; i += CHUNK) chunks.push(text.slice(i, i + CHUNK));
+  let i = 0;
+  while (i < text.length) {
+    let end = Math.min(i + CHUNK, text.length);
+    const last = text.charCodeAt(end - 1);
+    if (end < text.length && last >= 0xd800 && last <= 0xdbff) end -= 1;
+    chunks.push(text.slice(i, end));
+    i = end;
+  }
   return chunks;
 }
+
+/** The bytes the command adds to its job's input, as the controller serializes it. */
+const inputBytes = (command: EnvironmentCommand): number => Buffer.byteLength(JSON.stringify({ commands: [command] }), "utf8");
 
 const IGNORE = `mkdir -p ${ISSUES_DIR}; printf '*\\n' > ${ISSUES_DIR}/.gitignore; `;
 
@@ -266,17 +283,25 @@ const WRITE =
 
 const READ = `set -eu; if [ -d ${ISSUES_DIR} ]; then printf '*\\n' > ${ISSUES_DIR}/.gitignore; fi; if [ -f ${ISSUES_FILE} ]; then cat ${ISSUES_FILE} > "$GRAPHLOOM_REPORT_FILE"; echo present; else echo missing; fi`;
 
-/** Write the file and its markdown copy; markdown that does not fit is cut short, the JSON never is. */
-export function writeIssuesCommand(json: string, markdown: string): EnvironmentCommand {
+/**
+ * Write the file and its markdown copy, or undefined when the JSON alone does
+ * not fit one command: the argument count and the executor's input byte bound,
+ * measured on the serialized input. The markdown is optional; whatever does not
+ * fit is cut short, the JSON never is.
+ */
+export function writeIssuesCommand(json: string, markdown: string): EnvironmentCommand | undefined {
   const parts = chunked(json);
-  const room = Math.max(0, MAX_CHUNKS - parts.length);
-  let md = chunked(markdown);
-  if (md.length > room) md = room > 0 ? [...md.slice(0, room - 1), `\n… (cut short; see ${ISSUES_FILE})\n`] : [];
-  return { id: ISSUES_COMMAND.write, argv: ["sh", "-c", WRITE, ISSUES_COMMAND.write, String(parts.length), ...parts, ...md] };
+  const build = (md: string[]): EnvironmentCommand => ({ id: ISSUES_COMMAND.write, argv: ["sh", "-c", WRITE, ISSUES_COMMAND.write, String(parts.length), ...parts, ...md] });
+  const fits = (command: EnvironmentCommand) => command.argv.length - 5 <= MAX_CHUNKS && inputBytes(command) <= MAX_COMMAND_INPUT_BYTES;
+  if (!fits(build([]))) return undefined;
+  const md = chunked(markdown);
+  if (fits(build(md))) return build(md);
+  const cut = `\n… (cut short; see ${ISSUES_FILE})\n`;
+  // The longest prefix of whole chunks that fits with the note.
+  let kept = 0;
+  while (kept < md.length && fits(build([...md.slice(0, kept + 1), cut]))) kept += 1;
+  return build(fits(build([...md.slice(0, kept), cut])) ? [...md.slice(0, kept), cut] : md.slice(0, kept));
 }
-
-/** Whether the file fits in one write command. */
-export const fitsWriteCommand = (json: string): boolean => chunked(json).length <= MAX_CHUNKS;
 
 /** Read the file into the command's report; the directory's .gitignore is restored first. */
 export function readIssuesCommand(): EnvironmentCommand {

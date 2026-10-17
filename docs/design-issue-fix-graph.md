@@ -302,7 +302,11 @@ evidence order. It needs no private state.
   controller's admission requires every observed file to still match its
   observation when a stage is validated. A file the graph rewrites without a
   change to the candidate would make every later validation fail with
-  "workspace file changed since observe".
+  "workspace file changed since observe". Only a read that succeeded
+  consumes the fixer's run. A read that fails or times out is retried once.
+  After two failed reads the graph hands the run to the supervisor. Until a
+  read succeeds the graph never writes the file, because a write would
+  replace the fixer's unread edits with the previously accepted table.
 - **Diff.** The read is compared with what the graph last wrote, which is
   what the fixer started from. An `open` or `reopened` issue moved to
   `fixed` with a new fixer history entry is accepted. Everything else is
@@ -322,7 +326,13 @@ evidence order. It needs no private state.
   the next implementer run.
 - **Size.** A table that would not fit in a read is written with shorter
   descriptions and notes, then with only each issue's latest events. The
-  evidence and `issues.md` keep the full text.
+  evidence keeps the full text. The write command must also fit the SDK's
+  256,000-byte executor input bound. The graph measures the serialized
+  command input in bytes, so multi-byte text counts in full. It splits the
+  text into argv chunks that never break a UTF-16 surrogate pair. When the
+  command would not fit, it cuts `issues.md` short and never the JSON. A JSON
+  that cannot fit on its own goes to the supervisor instead of being
+  dispatched.
 
 ### Acceptance
 
