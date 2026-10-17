@@ -208,7 +208,8 @@ describe("the release example plugin through the controller", () => {
 
     expect(resumed, `${resumed.stopReason}: ${resumed.blocker}`).toMatchObject({ stopReason: "paused", blocker: "rewrote bump" });
     const state = await loadRunState(paused.stateDir);
-    expect(state.current).toEqual({ stageId: "bump", attempt: 1 });
+    // Bump ran as attempt 1; re-opened by the resume's invalidation it runs as attempt 2.
+    expect(state.current).toEqual({ stageId: "bump", attempt: 2 });
     expect(validReceipts(state.receipts)).toEqual([]);
     expect(state.budgets.corrections).toBe(7);
   }, 60_000);

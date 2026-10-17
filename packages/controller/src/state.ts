@@ -253,6 +253,14 @@ export interface DurableRunState {
    */
   openAttempt?: Record<string, boolean>;
   /**
+   * Per stage, the highest attempt number it has run under. A stage that is
+   * re-opened (reentry, or invalidation sending the run back to it) takes the
+   * next number even when the run arrives from another stage, so a plugin
+   * that tells a fresh attempt by its number sees the change. Absent in runs
+   * saved before it existed; see nextStageAttempt for the fallback.
+   */
+  stageAttempts?: Record<string, number>;
+  /**
    * Per stage, dispatches settled since its last receipt (agent dispatches
    * counted separately from the total of every kind). Reset to `{agent: 0,
    * total: 0, since: <now>}` when admit.ts mints a receipt for that stage.
@@ -412,4 +420,17 @@ export async function loadRunState(stateDir: string): Promise<DurableRunState> {
 export async function removeStaleTmp(stateDir: string): Promise<void> {
   // no-op helper reserved for cleanup hooks
   void unlink;
+}
+
+/**
+ * The attempt number a re-opened stage runs under: one past the highest it
+ * has run before. A run saved before `stageAttempts` existed falls back to the
+ * attempts its agent sessions recorded for the stage, and to the current
+ * attempt when the run is still on that stage.
+ */
+export function nextStageAttempt(state: DurableRunState, stageId: string): number {
+  const recorded = state.stageAttempts?.[stageId] ?? 0;
+  const fromSessions = Math.max(0, ...(state.agentSessions ?? []).filter((r) => r.stageId === stageId).map((r) => r.attempt));
+  const current = state.current.stageId === stageId ? state.current.attempt : 0;
+  return Math.max(recorded, fromSessions, current) + 1;
 }

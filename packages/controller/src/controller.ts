@@ -64,6 +64,7 @@ import {
 } from "./stop-request.js";
 import {
   loadRunState,
+  nextStageAttempt,
   saveRunState,
   type DurableRunState,
   type RemedyRecord,
@@ -778,10 +779,8 @@ async function reassessAcceptedWorkspace(state: DurableRunState): Promise<Durabl
       void _privateState;
       return {
         ...next,
-        current: {
-          stageId: stage.id,
-          attempt: state.current.stageId === stage.id ? state.current.attempt + 1 : 1,
-        },
+        current: { stageId: stage.id, attempt: nextStageAttempt(state, stage.id) },
+        stageAttempts: { ...state.stageAttempts, [stage.id]: nextStageAttempt(state, stage.id) },
       };
     }
   }
@@ -791,7 +790,8 @@ async function reassessAcceptedWorkspace(state: DurableRunState): Promise<Durabl
     void _privateState;
     return {
       ...next,
-      current: { stageId: last.id, attempt: state.current.stageId === last.id ? state.current.attempt + 1 : 1 },
+      current: { stageId: last.id, attempt: nextStageAttempt(state, last.id) },
+      stageAttempts: { ...state.stageAttempts, [last.id]: nextStageAttempt(state, last.id) },
     };
   }
   return state;
@@ -833,7 +833,8 @@ async function recheckReceipts(
       return {
         state: {
           ...next,
-          current: { stageId: stage.id, attempt: state.current.stageId === stage.id ? state.current.attempt + 1 : 1 },
+          current: { stageId: stage.id, attempt: nextStageAttempt(state, stage.id) },
+          stageAttempts: { ...state.stageAttempts, [stage.id]: nextStageAttempt(state, stage.id) },
         },
         note: `; invalidated from ${stage.id}: ${receipt.requirementId} ${failure}`,
       };
