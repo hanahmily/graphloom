@@ -25,6 +25,22 @@ import {
   type Quote,
   type Verdict,
 } from "./review-common.js";
+import {
+  applyFixerRead,
+  createIssue,
+  fixerNote,
+  emptyIssueTable,
+  findingIdOf,
+  issueById,
+  issueCommand,
+  issueIdOf,
+  ISSUES_COMMAND,
+  moveIssue,
+  writtenIssues,
+  writtenJson,
+  type EventContext,
+  type IssueTable,
+} from "./issues.js";
 
 export {
   MAX_REFUTATION_QUOTES,
@@ -71,6 +87,8 @@ export interface Finding {
   verifiedOn?: string;
   /** The code reviewer's latest word on this finding: its `prior` status and reason, or a comment naming it. */
   note?: ReviewerNote;
+  /** The review round the pass that raised it belongs to. */
+  round?: number;
 }
 
 /** What a review pass last said about a known finding, on which candidate, in which evidence record. */
@@ -124,6 +142,8 @@ export interface FindingLedger {
   followUps: FollowUp[];
   /** The candidates with a review pass, in the order the run first reached them: round n reviewed `reviewed[n - 1]`. */
   reviewed: string[];
+  /** The issues file's content, rebuilt from the same evidence (issues.ts). */
+  issues: IssueTable;
 }
 
 const OPEN: ReadonlySet<FindingState> = new Set(["pending", "confirmed", "disputed"]);
@@ -132,17 +152,28 @@ export const isOpen = (f: Finding | undefined): f is Finding => f !== undefined 
 export function findingLedger(evidence: EvidenceRecord[]): FindingLedger {
   const files = fileIndex(evidence);
   const entered = reviewedCandidates(evidence);
-  const ledger: FindingLedger = { findings: [], passes: [], verifications: [], followUps: [], reviewed: entered.map((c) => c.digest) };
+  const ledger: FindingLedger = { findings: [], passes: [], verifications: [], followUps: [], reviewed: entered.map((c) => c.digest), issues: emptyIssueTable() };
   for (const [i, record] of evidence.entries()) {
     const digest = record.candidateDigest;
     if (digest === undefined) continue;
+    const at = position(record, i);
+    const round = entered.filter((c) => !after(c.at, at)).length;
+    const ctx: EventContext = { round, digest, ref: record.ref };
     const pass = agentRuns([record], REVIEW_STAGE, "review")[0];
-    if (pass !== undefined) {
-      const at = position(record, i);
-      applyPass(ledger, pass, digest, files, entered.filter((c) => !after(c.at, at)).length);
-    }
+    if (pass !== undefined) applyPass(ledger, pass, digest, files, round);
     const verification = agentRuns([record], REVIEW_STAGE, "diagnostic")[0];
-    if (verification !== undefined) applyVerification(ledger, verification, digest, files);
+    if (verification !== undefined) applyVerification(ledger, verification, digest, files, ctx);
+    const written = issueCommand(record, ISSUES_COMMAND.write);
+    if (written?.ok === true) {
+      const json = writtenJson(written.argv);
+      const issues = json !== undefined ? writtenIssues(json) : undefined;
+      if (issues !== undefined) ledger.issues.written = issues;
+    }
+    const read = issueCommand(record, ISSUES_COMMAND.read);
+    if (read?.ok === true) {
+      const present = read.stdout.trim().split("\n").at(-1)?.trim() === "present";
+      applyFixerRead(ledger.issues, { present, ...(read.report !== undefined ? { text: read.report.text, truncated: read.report.truncated } : {}) }, ctx);
+    }
   }
   return ledger;
 }
@@ -217,7 +248,13 @@ export function pathsToObserve(ledger: FindingLedger, digest: string): string[] 
 
 /** What a review pass is told: open findings need a status, settled ones must not come back unnamed. */
 export function knownFindings(ledger: FindingLedger): KnownFindings {
-  const known = (f: Finding) => ({ id: f.id, state: f.state, description: describeComment(f.comment) });
+  // By issue id and issue status once the verifier has judged a finding; before that it awaits verification.
+  const known = (f: Finding) => {
+    const issue = issueById(ledger.issues, issueIdOf(f.id));
+    const fixer = issue !== undefined && issue.status === "fixed" ? fixerNote(issue) : undefined;
+    const state = f.state === "pending" ? "awaiting verification" : (issue?.status ?? f.state);
+    return { id: issueIdOf(f.id), state, description: `${describeComment(f.comment)}${fixer !== undefined ? ` Fixer's note: ${clip(fixer.note, 800)}` : ""}` };
+  };
   return { open: ledger.findings.filter(isOpen).map(known), settled: ledger.findings.filter((f) => !isOpen(f)).map(known) };
 }
 
@@ -264,12 +301,12 @@ export function describeFinding(f: Finding, current?: string): string {
   const why = verdict !== undefined && verdict.reason.trim() !== "" ? ` Verifier: ${clip(verdict.reason, 600)}` : "";
   const report = `${describeComment(f.comment)}${why}${quotes.length > 0 ? ` (${quotes.join("; ")})` : ""}`;
   const note = stillPresentNote(f);
-  if (note === undefined) return `${f.id} ${report}`;
+  if (note === undefined) return `${issueIdOf(f.id)} ${report}`;
   const reportedOn = f.verifiedOn ?? f.raisedOn;
   // Reported and re-checked on the same candidate: nothing in the report is stale.
-  if (reportedOn === note.digest) return `${f.id} ${report.replace(/\.$/, "")}. ${reviewerLead(note, current)}`;
+  if (reportedOn === note.digest) return `${issueIdOf(f.id)} ${report.replace(/\.$/, "")}. ${reviewerLead(note, current)}`;
   return (
-    `${f.id} ${reviewerLead(note, current)} Background, the original report ` +
+    `${issueIdOf(f.id)} ${reviewerLead(note, current)} Background, the original report ` +
     `(it describes an earlier revision, candidate ${shortDigest(reportedOn)}; its line numbers and quotes may no longer match the code): ${report}`
   );
 }
@@ -293,7 +330,14 @@ function applyPass(ledger: FindingLedger, run: AgentRun, digest: string, files: 
   const pass: ReviewPass = { run, digest, round, raised: [], missingStatus: [], followUps: 0, ...("report" in parsed ? { report: parsed.report } : { problem: parsed.problem }) };
   ledger.passes.push(pass);
   if (pass.report === undefined) return;
-  const report = pass.report;
+  // The reviewer names findings by their issue ids (I3 is F3); earlier runs used F3.
+  const report: CodeReviewReport = {
+    ...pass.report,
+    comments: pass.report.comments.map((c) => (c.finding !== undefined ? { ...c, finding: findingIdOf(c.finding) } : c)),
+    prior: pass.report.prior.map((p) => ({ ...p, finding: findingIdOf(p.finding) })),
+  };
+  pass.report = report;
+  const before = new Map(ledger.findings.map((f) => [f.id, f.state]));
   const open = ledger.findings.filter(isOpen);
   // A named comment carries the finding's current occurrence, so the verifier and the
   // pull request describe where and how it manifests now, not where it first appeared.
@@ -347,9 +391,33 @@ function applyPass(ledger: FindingLedger, run: AgentRun, digest: string, files: 
       if (!ledger.followUps.some((f) => followUpKey(f.comment) === key)) ledger.followUps.push({ comment: c, digest, round, ref: run.record.ref });
       continue;
     }
-    const f: Finding = { id: `F${ledger.findings.length + 1}`, comment: c, state: "pending", on: digest, raisedOn: digest };
+    const f: Finding = { id: `F${ledger.findings.length + 1}`, comment: c, state: "pending", on: digest, raisedOn: digest, round };
     ledger.findings.push(f);
     pass.raised.push(f.id);
+  }
+  syncIssuesAfterPass(ledger, before, status, { round, digest, ref: run.record.ref });
+}
+
+/**
+ * The code reviewer's statuses on the issues: a finding the ledger now counts
+ * fixed is `done` (the graph records the `fixed` step when the fixer did not
+ * mark it), and a `fixed` issue the reviewer still sees is `reopened` with its
+ * note. Nothing else a pass says moves an issue: new findings and withdrawals
+ * wait for the verifier.
+ */
+function syncIssuesAfterPass(ledger: FindingLedger, before: Map<string, FindingState>, status: Map<string, PriorStatus>, ctx: EventContext): void {
+  for (const f of ledger.findings) {
+    const issue = issueById(ledger.issues, issueIdOf(f.id));
+    if (issue === undefined) continue;
+    const said = status.get(f.id);
+    const reason = f.note?.ref === ctx.ref && f.note.status === said ? f.note.reason : "";
+    if (f.state === "fixed" && before.get(f.id) !== "fixed") {
+      if (issue.status === "done") continue;
+      if (issue.status !== "fixed") moveIssue(issue, "graph", "fixed", "the fixer did not mark it fixed; the code reviewer reports it resolved on a changed candidate", ctx);
+      moveIssue(issue, "reviewer", "done", reason || "resolved", ctx);
+    } else if (f.state === "confirmed" && issue.status === "fixed" && said === "still_present") {
+      moveIssue(issue, "reviewer", "reopened", reason || "still present", ctx);
+    }
   }
 }
 
@@ -393,8 +461,9 @@ function recheckDismissal(f: Finding, digest: string, files: FileIndex): void {
   }
 }
 
-function applyVerification(ledger: FindingLedger, run: AgentRun, digest: string, files: FileIndex): void {
+function applyVerification(ledger: FindingLedger, run: AgentRun, digest: string, files: FileIndex, ctx: EventContext): void {
   const covered = toVerify(ledger, digest);
+  const before = new Map(covered.map((f) => [f.id, f.state]));
   const parsed = run.status === "completed" ? parseVerification(run.output) : { problem: `the verifier did not finish (${run.status})` };
   ledger.verifications.push({ run, digest, covered: covered.map((f) => f.id), ...("problem" in parsed ? { problem: parsed.problem } : {}) });
   for (const f of covered) {
@@ -424,6 +493,28 @@ function applyVerification(ledger: FindingLedger, run: AgentRun, digest: string,
       f.refutation = { reason: v.reason, quotes, digest };
       if (check === "match") settle(f, "dismissed", digest);
       else f.awaiting = check;
+    }
+  }
+  syncIssuesAfterVerification(ledger, covered, before, ctx);
+}
+
+/**
+ * The verifier's verdicts on the issues: a confirmed finding becomes an `open`
+ * issue, or reopens one that was fixed, done or dismissed; a dismissed one
+ * becomes a `dismissed` issue. A refuted regression of a done issue leaves it
+ * done. Disputed findings wait.
+ */
+function syncIssuesAfterVerification(ledger: FindingLedger, covered: Finding[], before: Map<string, FindingState>, ctx: EventContext): void {
+  for (const f of covered) {
+    if (f.state === before.get(f.id)) continue;
+    const issue = issueById(ledger.issues, issueIdOf(f.id));
+    const reason = f.state === "dismissed" ? (f.refutation?.reason ?? "") : (f.verdict?.reason ?? "");
+    if (f.state === "confirmed") {
+      if (issue === undefined) createIssue(ledger.issues, f, { status: "open", actor: "verifier", note: reason || "confirmed", raisedIn: f.round ?? ctx.round, ctx });
+      else if (issue.status === "fixed" || issue.status === "done" || issue.status === "dismissed") moveIssue(issue, "verifier", "reopened", `confirmed again: ${reason}`, ctx);
+    } else if (f.state === "dismissed") {
+      if (issue === undefined) createIssue(ledger.issues, f, { status: "dismissed", actor: "verifier", note: reason || "refuted", raisedIn: f.round ?? ctx.round, ctx });
+      else if (issue.status !== "done" && issue.status !== "dismissed") moveIssue(issue, "verifier", "dismissed", reason || "refuted", ctx);
     }
   }
 }

@@ -13,6 +13,7 @@ import {
   type CommandRun,
 } from "./evidence.js";
 import { describeFinding, findingById, findingLedger } from "./findings.js";
+import { isUnsettled, issueIdOf } from "./issues.js";
 import { describeCoverage, isBlocking, reviewComplete } from "./ocr.js";
 import { commandsFor, isTestPath, parseProfile, ProfileError, type Profile } from "./profile.js";
 
@@ -216,15 +217,18 @@ export const codeReview: Validator = {
     if (pass.report === undefined) return failed(pass.problem!);
     const { report } = pass;
     if (!reviewComplete(report)) return failed(`the code review did not cover every file: ${describeCoverage(report)}`);
-    if (pass.missingStatus.length > 0) return failed(`the code review gave no status for open finding(s) ${pass.missingStatus.join(", ")}`);
+    if (pass.missingStatus.length > 0) return failed(`the code review gave no status for open finding(s) ${pass.missingStatus.map(issueIdOf).join(", ")}`);
     const waiting = ledger.findings.filter((f) => f.state === "pending");
-    if (waiting.length > 0) return inconclusive(`finding(s) ${waiting.map((f) => f.id).join(", ")} await verification`);
+    if (waiting.length > 0) return inconclusive(`finding(s) ${waiting.map((f) => issueIdOf(f.id)).join(", ")} await verification`);
     const blocking = ledger.findings.filter((f) => f.state === "confirmed" || f.state === "disputed");
     if (blocking.length > 0) {
       return failed(`${blocking.length} critical or high finding(s) confirmed or disputed: ${blocking.slice(0, 3).map((f) => describeFinding(f, input.candidateDigest)).join("; ")}`);
     }
+    // The issues file's rule, which the ledger's implies: no P0 or P1 issue open, reopened, or fixed but not verified.
+    const unsettled = ledger.issues.issues.filter(isUnsettled);
+    if (unsettled.length > 0) return failed(`${unsettled.length} critical or high issue(s) not done: ${unsettled.map((i) => `${i.id} ${i.status}`).join(", ")}`);
     const survived = pass.raised.filter((id) => findingById(ledger, id)?.state !== "dismissed");
-    if (survived.length > 0) return failed(`the latest pass raised finding(s) ${survived.join(", ")} that verification did not dismiss`);
+    if (survived.length > 0) return failed(`the latest pass raised finding(s) ${survived.map(issueIdOf).join(", ")} that verification did not dismiss`);
     const fixed = ledger.findings.filter((f) => f.state === "fixed").length;
     const dismissed = ledger.findings.filter((f) => f.state === "dismissed").length;
     const lower = report.comments.filter((c) => !isBlocking(c)).length;
