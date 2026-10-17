@@ -88,7 +88,10 @@ export function reviewBackground(profile: Profile, issue: Issue, record: Decisio
  * reviews. `ocr` is the absolute path the environment check found, since the
  * agent's shell may not have it on PATH.
  */
-export function codeReviewInstruction(profile: Profile, args: { ocr: string; base: string; background: string; known?: KnownFindings; sweep?: boolean; round?: number }): string {
+export function codeReviewInstruction(
+  profile: Profile,
+  args: { ocr: string; base: string; background: string; known?: KnownFindings; sweep?: boolean; round?: number; issues?: IssuesFileRef },
+): string {
   const ocr = shellQuote(args.ocr);
   const open = args.known?.open ?? [];
   const settled = args.known?.settled ?? [];
@@ -98,15 +101,25 @@ export function codeReviewInstruction(profile: Profile, args: { ocr: string; bas
     ...(open.length > 0
       ? [
           "",
-          "Open findings from earlier review passes. Give each one a status in `prior`: `resolved` (the current code no longer has the defect), `still_present`, or `withdrawn` (it was never a defect), with a reason. Do not report them again as comments.",
+          args.issues !== undefined
+            ? `Issues from earlier review passes, tracked in \`${args.issues.file}\` (readable copy \`${args.issues.markdown}\`). The graph maintains both files and applies your result to them: do not edit them. Give each issue below a status in \`prior\`, by its id, with a reason: \`resolved\` when the current code no longer has the defect (a \`fixed\` issue becomes \`done\`); \`still_present\` when it does, with a reason naming the current file:line of what is still wrong (a \`fixed\` issue is \`reopened\` and the fixer gets your reason); \`withdrawn\` when it was never a defect (an independent verifier judges it again). A \`fixed\` issue carries the fixer's note on what it changed: verify the fix against the code, not the note. Do not report these issues again as comments.`
+            : "Open findings from earlier review passes. Give each one a status in `prior`: `resolved` (the current code no longer has the defect), `still_present`, or `withdrawn` (it was never a defect), with a reason. Do not report them again as comments.",
           ...open.map((f) => `- ${f.id} (${f.state}) ${f.description}`),
         ]
       : []),
     ...(settled.length > 0
       ? [
           "",
-          "Settled findings. Do not report them again unless the defect is back in the current code; then report it with its name in `finding`.",
+          args.issues !== undefined
+            ? "Settled issues (done or dismissed). Do not report them again unless the defect is back in the current code; then report it with its id in `finding`."
+            : "Settled findings. Do not report them again unless the defect is back in the current code; then report it with its name in `finding`.",
           ...settled.map((f) => `- ${f.id} (${f.state}) ${f.description}`),
+        ]
+      : []),
+    ...(args.issues !== undefined && !verifying
+      ? [
+          "",
+          `The run tracks critical and high findings as issues in \`${args.issues.file}\`: each one you report in \`comments\` becomes an \`open\` issue once an independent verifier confirms it. The graph writes that file from your result; do not edit it.`,
         ]
       : []),
     ...(args.sweep === true && !verifying
@@ -143,6 +156,12 @@ export function codeReviewInstruction(profile: Profile, args: { ocr: string; bas
     "",
     "Your result: `comments` with your findings (empty when there are none), each with `finding` set to a known finding's name when it reports that finding again and \"\" otherwise; `prior` with a status for every open finding listed above (empty when there are none); and `summary` with `total_files` (the files on your list), `reviewed_files`, and `skipped` (each skipped file with its reason).",
   ].join("\n");
+}
+
+/** The issues file a pass is pointed at: the JSON the graph maintains and its readable copy. */
+export interface IssuesFileRef {
+  file: string;
+  markdown: string;
 }
 
 /** Findings a review pass is shown by name; `description` says where and what. */

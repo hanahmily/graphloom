@@ -374,7 +374,13 @@ describe.skipIf(GO === undefined)("issue-fix with the banyandb profile on a Go r
     expect(body).toContain(
       "Reviewed by Codex in open-code-review's delegation mode (reviewed 3 of 3 file(s)): no critical or high finding left open (1 refuted by an independent verifier, listed below); 1 lower-severity comment(s) left for the reviewer.",
     );
-    expect(body).toContain("  - F1 pkg/timestamp/scheduler.go:10-12 (high, bug): A running action past the limit is still reported as timed out. Verifier: Status returns running before it checks the limit.");
+    expect(body).toContain("  - I1 pkg/timestamp/scheduler.go:10-12 (high, bug): A running action past the limit is still reported as timed out. Verifier: Status returns running before it checks the limit.");
+    // The plugin's issues file: written in the worktree by a read-only command job, ignored by Git, left out of the commit.
+    expect(body).toContain("| I1 | P1 (high) | dismissed | `pkg/timestamp/scheduler.go:10-12` |");
+    const issues = JSON.parse(await readFile(path.join(report.worktreePath, ".graphloom/issues.json"), "utf8")) as { issues: Array<{ id: string; status: string }> };
+    expect(issues.issues.map((i) => `${i.id}:${i.status}`)).toEqual(["I1:dismissed"]);
+    expect(git("ls-tree", "-r", "--name-only", `fix/${ISSUE}`)).not.toContain(".graphloom");
+    expect(execFileSync("git", ["status", "--porcelain", "-uall"], { cwd: report.worktreePath, encoding: "utf8" })).not.toContain(".graphloom");
     expect(body).not.toMatch(/rcpt|receipt/);
     expect(execFileSync("git", ["status", "--porcelain"], { cwd: report.worktreePath, encoding: "utf8" })).toContain("M pkg/timestamp/scheduler.go");
     expect(await readFile(path.join(report.worktreePath, "pkg/timestamp/mock_limit.go"), "utf8")).toContain("generatedLimit");

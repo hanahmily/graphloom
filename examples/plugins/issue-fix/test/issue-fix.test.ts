@@ -42,6 +42,7 @@ import {
   toVerify,
   validatorById,
   verificationInstruction,
+  writtenJson,
   type DecisionRecord,
   type GinkgoSpec,
 } from "../src/index.js";
@@ -113,6 +114,10 @@ interface Scenario {
   commentsComplete?: boolean;
   /** Supervise decisions the supervisor answers by re-entering Fix. */
   reenter?: number;
+  /** What each implement pass (by index) does to the worktree's .graphloom/issues.json. */
+  fixerEdits?: Array<((file: string | undefined) => string | undefined) | undefined>;
+  /** The first this many issues-read commands fail (exit 1), as a crashed or timed-out read does. */
+  failReads?: number;
 }
 
 const OCR = "/opt/open code review/bin/ocr";
@@ -164,6 +169,9 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
   let codeReviewed = 0;
   let verified = 0;
   let reentries = scenario.reenter ?? 0;
+  let issuesFile: string | undefined;
+  let issuesMarkdown: string | undefined;
+  let failedReads = 0;
   let seq = 0;
   let generation = 1;
   // Only a real reentry of Fix bumps attempt, exactly like the controller
@@ -223,6 +231,8 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
         planDigest = `p${planned}`;
       } else if (job.purpose === "work") {
         output = scenario.implement?.[implemented] ?? nth(scenario.plans, planned - 1) ?? PLAN;
+        const edit = scenario.fixerEdits?.[implemented];
+        if (edit !== undefined) issuesFile = edit(issuesFile);
         implemented += 1;
         // An implementer pass that edits nothing leaves the candidate byte-identical.
         if (!(scenario.unchangedWork ?? []).includes(implemented)) digest = `d${++changed}`;
@@ -284,7 +294,21 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
       record("command", { ...commandPayload(COMMAND.regression, scenario.red ?? { exitCode: 1, report: FAILED }, input!.commands![0]!.argv), checkout: { from: "base", base: "base-sha", commit: `b-${op}`, paths: job.checkout.paths, prepared: true, mutations: [], phase: "run" } }, job, op);
       return;
     }
-    for (const c of input!.commands!) record("command", commandPayload(c.id, { stdout: "abc123\n" }), job, op);
+    for (const c of input!.commands!) {
+      // The worktree's issues file: the write command's JSON, read back as its report.
+      if (c.id === "issues-write") {
+        issuesFile = writtenJson(c.argv);
+        issuesMarkdown = c.argv.slice(5 + Number(c.argv[4])).join("");
+        record("command", commandPayload(c.id, { stdout: "written\n" }, c.argv), job, op);
+      } else if (c.id === "issues-read" && failedReads < (scenario.failReads ?? 0)) {
+        failedReads += 1;
+        record("command", commandPayload(c.id, { exitCode: 1, stderr: "sh: cat: I/O error\n" }, c.argv), job, op);
+      } else if (c.id === "issues-read") {
+        record("command", commandPayload(c.id, issuesFile === undefined ? { stdout: "missing\n" } : { stdout: "present\n", report: issuesFile }, c.argv), job, op);
+      } else {
+        record("command", commandPayload(c.id, { stdout: "abc123\n" }), job, op);
+      }
+    }
   }
 
   const definition = createGraph().describe(BANYANDB);
@@ -346,7 +370,7 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
       generation += 1;
       attempt += 1;
     } else {
-      return { decision, decisions, jobs, evidence, receipts, observed };
+      return { decision, decisions, jobs, evidence, receipts, observed, issuesFile, issuesMarkdown };
     }
   }
   throw new Error("the graph did not finish in 100 steps");
@@ -498,12 +522,12 @@ describe("issue-fix graph under the banyandb profile", () => {
     const { decision, jobs } = simulate({ codeReviews: [reviewed([HANG]), priorPass({ F1: "still_present" })] });
     expect(decision.action).toMatchObject({ type: "supervise" });
     const reason = (decision.action as { supervise: { reason: string } }).supervise.reason;
-    expect(reason).toContain("1 critical or high finding(s) confirmed or disputed: F1 pkg/timestamp/scheduler.go:88-95 (high, bug): Close now waits forever");
+    expect(reason).toContain("1 critical or high finding(s) confirmed or disputed: I1 pkg/timestamp/scheduler.go:88-95 (high, bug): Close now waits forever");
     expect(reason).toContain("passes on this change: 2 (sweep saturated); 0 fixed, 0 dismissed, 1 new confirmed, 0 regression(s), 0 disputed");
     expect(reason).toMatch(/\d+ agent invocation\(s\) left/);
     expect(jobs.some((j) => (j.input as { commands?: Array<{ id: string }> }).commands?.[0]?.id === COMMAND.deliver)).toBe(false);
 
-    const review = jobs.filter((j) => j.stageId === "review");
+    const review = jobs.filter((j) => j.stageId === "review" && j.kind === "agent");
     expect(review.map((j) => `${j.purpose}:${(j.input as { harness: string }).harness}`)).toEqual(["review:codex", "diagnostic:claude-code", "review:codex"]);
     const verification = review[1]!;
     expect(verification).toMatchObject({ kind: "agent", readOnly: true, resultSchema: "finding-verification-v1" });
@@ -512,7 +536,7 @@ describe("issue-fix graph under the banyandb profile", () => {
     expect(assignment(verification)).toContain("- F1 pkg/timestamp/scheduler.go:88-95 (high, bug): Close now waits forever");
     expect(assignment(verification)).toContain("- pkg/timestamp/scheduler_test.go");
     // The sweep pass knows F1 by name, owes it a status, and looks for issues beyond it.
-    expect(assignment(review[2])).toContain("- F1 (confirmed) pkg/timestamp/scheduler.go:88-95");
+    expect(assignment(review[2])).toContain("- I1 (open) pkg/timestamp/scheduler.go:88-95");
     expect(assignment(review[2])).toContain("An earlier pass on this same change reported the findings above");
     expect(assignment(review[0])).not.toContain("An earlier pass");
   });
@@ -531,7 +555,7 @@ describe("issue-fix graph under the banyandb profile", () => {
     const { body } = deliverArgs(jobs);
     expect(body).toContain("no critical or high finding left open (1 refuted by an independent verifier, listed below)");
     expect(body).toContain("- Critical or high review findings an independent verifier refuted; overrule any that is wrong:");
-    expect(body).toContain("  - F1 pkg/timestamp/scheduler.go:88-95 (high, bug): Close now waits forever for an action that ignores cancellation. Verifier: Close bounds the wait with closeTimeout.");
+    expect(body).toContain("  - I1 pkg/timestamp/scheduler.go:88-95 (high, bug): Close now waits forever for an action that ignores cancellation. Verifier: Close bounds the wait with closeTimeout.");
   });
 
   it("disputes a refutation whose quotes do not match or leave the worktree, and never observes such a path", () => {
@@ -549,8 +573,8 @@ describe("issue-fix graph under the banyandb profile", () => {
     expect(decision.action).toMatchObject({ type: "supervise" });
     const reason = (decision.action as { supervise: { reason: string } }).supervise.reason;
     expect(reason).toContain("2 critical or high finding(s) confirmed or disputed");
-    expect(reason).toContain("F1 pkg/timestamp/scheduler.go:88-95 (high, bug): Close now waits forever for an action that ignores cancellation. Verifier: the timeout may not cover wait");
-    expect(reason).toContain("F2 pkg/timestamp/scheduler.go:120-121 (high, bug): trigger leaks the timer. Verifier: the verifier gave no verdict");
+    expect(reason).toContain("I1 pkg/timestamp/scheduler.go:88-95 (high, bug): Close now waits forever for an action that ignores cancellation. Verifier: the timeout may not cover wait");
+    expect(reason).toContain("I2 pkg/timestamp/scheduler.go:120-121 (high, bug): trigger leaks the timer. Verifier: the verifier gave no verdict");
     expect(reason).toContain("0 fixed, 0 dismissed, 0 new confirmed, 0 regression(s), 2 disputed");
     expect(observed).toEqual(["CHANGES.md", "pkg/timestamp/scheduler.go"]);
     // Disputed findings sent the sweep on; the second pass raised nothing new, and both findings, still present, were verified again.
@@ -634,13 +658,13 @@ describe("issue-fix graph under the banyandb profile", () => {
     expect(work[1]!.continueFrom).toBe(`op-${jobs.indexOf(work[0]!)}`);
     const correction = assignment(work[1]);
     expect(correction).toContain("Code review of your previous change found 1 critical or high defect(s), each confirmed by an independent verifier:");
-    expect(correction).toContain("F1 pkg/timestamp/scheduler.go:88-95 (high, bug): Close now waits forever");
+    expect(correction).toContain("I1 [open] pkg/timestamp/scheduler.go:88-95 (high, bug): Close now waits forever");
     expect(correction).toContain("pkg/timestamp/scheduler.go:7 `s.wait(ctx)`");
     expect(deliverArgs(jobs).body).toContain("no critical or high finding left open (1 fixed during review)");
     const passes = jobs.filter((j) => j.purpose === "review" && j.stageId === "review");
     expect(passes).toHaveLength(3);
     // The first pass on the new change owes F1 a status and is not a sweep.
-    expect(assignment(passes[2])).toContain("- F1 (confirmed) pkg/timestamp/scheduler.go:88-95");
+    expect(assignment(passes[2])).toContain("- I1 (open) pkg/timestamp/scheduler.go:88-95");
     expect(assignment(passes[2])).not.toContain("An earlier pass");
   });
 
@@ -654,7 +678,7 @@ describe("issue-fix graph under the banyandb profile", () => {
     expect(work).toHaveLength(3);
     const latest = assignment(work[2]);
     // The note the reviewer wrote on the candidate the implementer now holds, verbatim with its location, comes first.
-    expect(latest).toMatch(/- F1 Reviewer, latest pass on the current candidate \(ev-\d+\): still present — Partially fixed: Close now bounds its wait, but trigger still blocks on the action \(pkg\/timestamp\/scheduler\.go:101-104\)\./);
+    expect(latest).toMatch(/- I1 \[open\] Reviewer, latest pass on the current candidate \(ev-\d+\): still present — Partially fixed: Close now bounds its wait, but trigger still blocks on the action \(pkg\/timestamp\/scheduler\.go:101-104\)\./);
     expect(latest).toContain("Background, the original report (it describes an earlier revision, candidate d1; its line numbers and quotes may no longer match the code): pkg/timestamp/scheduler.go:88-95 (high, bug)");
     expect(latest.indexOf("scheduler.go:101-104")).toBeLessThan(latest.indexOf("scheduler.go:88-95"));
     expect(latest).not.toContain(FIRST_NOTE);
@@ -678,10 +702,10 @@ describe("issue-fix graph under the banyandb profile", () => {
     expect(assignment(work[2])).not.toContain("Your last pass changed nothing");
     const after = assignment(work[3]);
     expect(after).toContain(
-      "- Your last pass changed nothing: the candidate is byte-identical (digest d2) to the code the reviewer re-checked. The reviewer re-checked the current code and still reports F1 as present",
+      "- Your last pass changed nothing: the candidate is byte-identical (digest d2) to the code the reviewer re-checked. The reviewer re-checked the current code and still reports I1 as present",
     );
     expect(after.indexOf("Your last pass changed nothing")).toBeLessThan(after.indexOf(LATEST_NOTE));
-    expect(after).toContain(`F1 Reviewer, latest pass on the current candidate`);
+    expect(after).toContain(`I1 [open] Reviewer, latest pass on the current candidate`);
     expect(after).toContain(LATEST_NOTE);
     // The feedback is not the previous pass's verbatim.
     const feedback = (a: string) => a.slice(a.indexOf("Your last change did not pass"), a.indexOf("Implement the fix"));
@@ -1159,7 +1183,7 @@ describe("findings ledger", () => {
     const f1 = findingById(findingLedger(evidence), "F1")!;
     expect(f1).toMatchObject({ state: "confirmed", verifiedOn: "e98132c9", note: { status: "still_present", reason: LIVE_NOTE, digest: "285e2902", ref: stillPresent.ref } });
     const text = describeFinding(f1, "285e2902");
-    expect(text.startsWith(`F1 Reviewer, latest pass on the current candidate (${stillPresent.ref}): still present — ${LIVE_NOTE}`)).toBe(true);
+    expect(text.startsWith(`I1 Reviewer, latest pass on the current candidate (${stillPresent.ref}): still present — ${LIVE_NOTE}`)).toBe(true);
     expect(text).toContain("inspection.ts:143-147");
     expect(text).toContain("Background, the original report (it describes an earlier revision, candidate e98132c9;");
     expect(text.indexOf("inspection.ts:143-147")).toBeLessThan(text.indexOf("loop.ts:483"));
@@ -1185,7 +1209,7 @@ describe("review discovery rounds", () => {
   const verifyRound = /This is review round \d+, a verification round/;
 
   it("raises new findings for three rounds, then only verifies the known ones and lists new comments as follow-ups", () => {
-    const { decision, jobs } = simulate({
+    const { decision, jobs, issuesFile, issuesMarkdown } = simulate({
       reenter: 4,
       codeReviews: [
         // Round 1 (d1): F1, verified, and a sweep pass that finds nothing more.
@@ -1210,7 +1234,7 @@ describe("review discovery rounds", () => {
     for (const p of passes.slice(0, 6)) expect(assignment(p)).not.toMatch(verifyRound);
     expect(assignment(passes[6])).toContain(`This is review round 4, a verification round. The first ${MAX_DISCOVERY_ROUNDS} rounds`);
     expect(assignment(passes[6])).toContain("do not look for new issues and do not raise new findings");
-    expect(assignment(passes[6])).toContain("- F3 (confirmed) pkg/timestamp/scheduler.go:3 (high, bug): defect at 3");
+    expect(assignment(passes[6])).toContain("- I3 (open) pkg/timestamp/scheduler.go:3 (high, bug): defect at 3");
     expect(assignment(passes[6])).not.toContain("An earlier pass on this same change");
     expect(assignment(passes[6])).not.toContain("Extra rule for");
     expect(assignment(passes[5])).toContain("Extra rule for");
@@ -1221,13 +1245,20 @@ describe("review discovery rounds", () => {
     // F3, still present in round 4, went back to Fix with the reviewer's latest note.
     const work = jobs.filter((j) => j.purpose === "work");
     expect(work).toHaveLength(5);
-    expect(assignment(work[4])).toMatch(/F3 Reviewer, latest pass on the current candidate \(ev-\d+\): still present — F3 is still_present\./);
+    expect(assignment(work[4])).toMatch(/I3 \[open\] Reviewer, latest pass on the current candidate \(ev-\d+\): still present — F3 is still_present\./);
     expect(assignment(work[4])).not.toContain("defect at 4");
     const { body } = deliverArgs(jobs);
     expect(body).toContain("no critical or high finding left open (3 fixed during review); 2 critical or high comment(s) raised after the 3 discovery rounds, listed as follow-ups.");
     expect(body).toContain("## Follow-ups");
     expect(body).toContain("- Code review: pkg/timestamp/scheduler.go:4 (high, bug): defect at 4 (raised in review round 4, after the 3 discovery rounds; not verified or fixed in this change)");
     expect(body).toContain("- Code review: pkg/timestamp/scheduler.go:5 (high, bug): defect at 5 (raised in review round 5");
+    // The reviewer cannot add an issue in a verification round: the issues file holds the discovery rounds' three, all done.
+    const file = JSON.parse(issuesFile!) as { issues: Array<{ id: string; status: string; round: number }> };
+    expect(file.issues.map((i) => `${i.id}:${i.status}:r${i.round}`)).toEqual(["I1:done:r1", "I2:done:r2", "I3:done:r3"]);
+    expect(issuesMarkdown).toContain("## Follow-ups");
+    expect(issuesMarkdown).toContain("defect at 4");
+    expect(body).toContain("## Review issues");
+    expect(body).not.toMatch(/\| I4 /);
   });
 
   it("hands a known finding still present in a verification round to the supervisor, without a sweep or a verifier", () => {
@@ -1243,7 +1274,7 @@ describe("review discovery rounds", () => {
     });
     expect(decision.action).toMatchObject({ type: "supervise" });
     const reason = (decision.action as { supervise: { reason: string } }).supervise.reason;
-    expect(reason).toContain("1 critical or high finding(s) confirmed or disputed: F1 ");
+    expect(reason).toContain("1 critical or high finding(s) confirmed or disputed: I1 ");
     expect(reason).toContain("review round 4 (verify-only after 3 discovery rounds); passes on this change: 1");
     expect(reason).toContain("2 new comment(s) kept as follow-ups");
     expect(jobs.filter((j) => j.stageId === "review" && j.purpose === "review")).toHaveLength(5);
@@ -1347,6 +1378,217 @@ describe("review discovery rounds", () => {
     expect(later.reason).toContain("1 follow-up(s) raised after the discovery rounds");
     // The same comment in round 3 is a finding and must be verified first.
     expect(evaluate([pass("d3", [defect(4)])], history.slice(0, 2), "d3").status).toBe("inconclusive");
+  });
+});
+
+describe("the issues file", () => {
+  interface FileIssue {
+    id: string;
+    severity: string;
+    status: string;
+    round: number;
+    location: { path: string; startLine: number; endLine: number };
+    history: Array<{ actor: string; from: string | null; to: string; note: string; round: number; candidate: string; evidence: string }>;
+  }
+  const parse = (text: string | undefined) => JSON.parse(text!) as { schema: string; issues: FileIssue[] };
+  /** The fixer's edit: mark `id` fixed with a note, as the protocol asks. */
+  const markFixed = (id: string, note: string) => (file: string | undefined) => {
+    const f = parse(file);
+    const i = f.issues.find((x) => x.id === id)!;
+    i.history.push({ actor: "fixer", from: i.status, to: "fixed", note } as FileIssue["history"][number]);
+    i.status = "fixed";
+    return JSON.stringify(f, null, 2);
+  };
+  const setStatus = (id: string, status: string) => (file: string | undefined) => {
+    const f = parse(file);
+    f.issues.find((x) => x.id === id)!.status = status;
+    return JSON.stringify(f);
+  };
+  const FIX_NOTE = "Close now waits with s.closeTimeout (pkg/timestamp/scheduler.go:5).";
+  const REOPEN_NOTE = "Close bounds its wait, but trigger still blocks on the action (pkg/timestamp/scheduler.go:101-104).";
+  const commandIds = (job: JobSpec) => (job.input as { commands?: Array<{ id: string }> }).commands?.map((c) => c.id) ?? [];
+  const writtenBefore = (jobs: JobSpec[], job: JobSpec) => {
+    const write = jobs.slice(0, jobs.indexOf(job)).filter((j) => commandIds(j).includes("issues-write")).at(-1)!;
+    return parse(writtenJson((write.input as { commands: Array<{ argv: string[] }> }).commands[0]!.argv));
+  };
+
+  it("tracks a high finding from the reviewer's report to done: verified open, marked fixed by the fixer, verified done by the reviewer, listed in the pull request", () => {
+    const { decision, jobs, evidence, issuesFile, issuesMarkdown } = simulate({
+      reenter: 1,
+      codeReviews: [reviewed([HANG]), priorPass({ I1: "still_present" }), notedPass("I1", "resolved", "Close bounds its wait now (pkg/timestamp/scheduler.go:5).")],
+      fixerEdits: [undefined, markFixed("I1", FIX_NOTE)],
+    });
+    expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+    const issueJobs = jobs.filter((j) => commandIds(j).some((id) => id.startsWith("issues-")));
+    // The first review round wrote no file; the fixer got it before its second pass, and the graph read it back after.
+    expect(issueJobs.map((j) => `${j.stageId}:${commandIds(j)[0]}`)).toEqual(["review:issues-write", "fix:issues-write", "fix:issues-read", "review:issues-write", "review:issues-write"]);
+    for (const j of issueJobs) expect(j).toMatchObject({ kind: "command", readOnly: true, purpose: "diagnostic" });
+    for (const j of issueJobs) expect(j.checkout).toBeUndefined();
+
+    const work = jobs.filter((j) => j.purpose === "work");
+    expect(work).toHaveLength(2);
+    expect(assignment(work[0])).not.toContain(".graphloom/issues.json");
+    const fixer = assignment(work[1]);
+    expect(writtenBefore(jobs, work[1]!).issues.map((i) => `${i.id}:${i.status}`)).toEqual(["I1:open"]);
+    expect(fixer).toContain("I1 [open] pkg/timestamp/scheduler.go:88-95 (high, bug): Close now waits forever");
+    expect(fixer).toContain("They are the open, reopened and fixed issues in .graphloom/issues.json");
+    expect(fixer).toContain('set its `status` to `fixed` and append to its `history` one entry {"actor": "fixer"');
+
+    // The reviewer verifies the fixed issue by its id, with the fixer's note in front of it.
+    const passes = jobs.filter((j) => j.purpose === "review" && j.stageId === "review");
+    expect(assignment(passes[2])).toContain(`- I1 (fixed) pkg/timestamp/scheduler.go:88-95 (high, bug): Close now waits forever for an action that ignores cancellation. Fixer's note: ${FIX_NOTE}`);
+    expect(assignment(passes[2])).toContain("tracked in `.graphloom/issues.json`");
+    expect(assignment(passes[2])).toContain("do not edit them");
+
+    const file = parse(issuesFile);
+    expect(file.schema).toBe("graphloom-issues-v1");
+    expect(file.issues).toHaveLength(1);
+    const i1 = file.issues[0]!;
+    expect(i1).toMatchObject({ id: "I1", severity: "P1", status: "done", round: 1, location: { path: "pkg/timestamp/scheduler.go", startLine: 88, endLine: 95 } });
+    expect(i1.history.map((h) => `${h.actor}:${h.from}->${h.to}@r${h.round}`)).toEqual(["verifier:null->open@r1", "fixer:open->fixed@r2", "reviewer:fixed->done@r2"]);
+    expect(i1.history[1]).toMatchObject({ note: FIX_NOTE, candidate: "d2" });
+    expect(i1.history[2]!.note).toBe("Close bounds its wait now (pkg/timestamp/scheduler.go:5).");
+    // Each event names the evidence it rests on.
+    for (const h of i1.history) expect(evidence.some((e) => e.ref === h.evidence)).toBe(true);
+    expect(issuesMarkdown).toContain("| I1 | P1 (high) | done | `pkg/timestamp/scheduler.go:88-95` |");
+
+    const { body } = deliverArgs(jobs);
+    expect(body).toContain("## Review issues");
+    expect(body).toContain("| I1 | P1 (high) | done | `pkg/timestamp/scheduler.go:88-95` | Close now waits forever for an action that ignores cancellation. | reviewer: Close bounds its wait now");
+    const deliver = jobs.find((j) => commandIds(j).includes(COMMAND.deliver))!;
+    expect((deliver.input as { commands: Array<{ argv: string[] }> }).commands[0]!.argv[2]).toContain("git add -A -- . ':(exclude).graphloom'");
+  });
+
+  it("reopens a fixed issue with the reviewer's note, hands that note to the fixer, and accepts the next fix", () => {
+    const { decision, jobs, issuesFile } = simulate({
+      reenter: 2,
+      codeReviews: [reviewed([HANG]), priorPass({ I1: "still_present" }), notedPass("I1", "still_present", REOPEN_NOTE), notedPass("I1", "resolved", "trigger no longer blocks.")],
+      fixerEdits: [undefined, markFixed("I1", "Bounded Close's wait."), markFixed("I1", "trigger now runs the action in its own goroutine (scheduler.go:101).")],
+    });
+    expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+    const work = jobs.filter((j) => j.purpose === "work");
+    expect(work).toHaveLength(3);
+    expect(writtenBefore(jobs, work[2]!).issues.map((i) => `${i.id}:${i.status}`)).toEqual(["I1:reopened"]);
+    const latest = assignment(work[2]);
+    expect(latest).toMatch(/- I1 \[reopened\] Reviewer, latest pass on the current candidate \(ev-\d+\): still present — Close bounds its wait, but trigger still blocks/);
+    expect(latest).toContain(REOPEN_NOTE);
+    const i1 = parse(issuesFile).issues[0]!;
+    expect(i1.status).toBe("done");
+    expect(i1.history.map((h) => `${h.actor}:${h.from}->${h.to}`)).toEqual(["verifier:null->open", "fixer:open->fixed", "reviewer:fixed->reopened", "fixer:reopened->fixed", "reviewer:fixed->done"]);
+    expect(i1.history[2]!.note).toBe(REOPEN_NOTE);
+  });
+
+  it("rejects the fixer marking an issue done, restores the file, tells the fixer, and still lets only the reviewer close it", () => {
+    const { decision, jobs, issuesFile } = simulate({
+      reenter: 2,
+      codeReviews: [reviewed([HANG]), priorPass({ I1: "still_present" }), notedPass("I1", "still_present", REOPEN_NOTE), notedPass("I1", "resolved", "fixed now")],
+      fixerEdits: [undefined, setStatus("I1", "done"), markFixed("I1", FIX_NOTE)],
+    });
+    expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+    const work = jobs.filter((j) => j.purpose === "work");
+    // The rejected edit was undone before the reviewer and the next fixer pass saw the file.
+    const passes = jobs.filter((j) => j.purpose === "review" && j.stageId === "review");
+    expect(writtenBefore(jobs, passes[2]!).issues.map((i) => `${i.id}:${i.status}`)).toEqual(["I1:open"]);
+    expect(assignment(passes[2])).toContain("- I1 (open) ");
+    expect(assignment(work[2])).toContain(
+      "- .graphloom/issues.json: the graph rejected your edit and restored the file: the fixer moved I1 from open to done: only the code reviewer marks an issue done.",
+    );
+    const i1 = parse(issuesFile).issues[0]!;
+    expect(i1.history.map((h) => `${h.actor}:${h.from}->${h.to}`)).toEqual(["verifier:null->open", "graph:open->open", "fixer:open->fixed", "reviewer:fixed->done"]);
+    expect(i1.history[1]!.note).toContain("rejected the fixer's edit: the fixer moved I1 from open to done");
+  });
+
+  it("retries a failed read of the fixer's edits instead of writing over them, and keeps the edits it reads", () => {
+    const { decision, jobs, issuesFile } = simulate({
+      reenter: 1,
+      failReads: 1,
+      codeReviews: [reviewed([HANG]), priorPass({ I1: "still_present" }), notedPass("I1", "resolved", "bounded")],
+      fixerEdits: [undefined, markFixed("I1", FIX_NOTE)],
+    });
+    expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+    const work = jobs.filter((j) => j.purpose === "work");
+    const after = jobs.slice(jobs.indexOf(work[1]!) + 1).filter((j) => commandIds(j).some((id) => id.startsWith("issues-")));
+    // The failed read is retried before any write; nothing overwrote the fixer's edit unread.
+    expect(after.slice(0, 3).map((j) => commandIds(j)[0])).toEqual(["issues-read", "issues-read", "issues-write"]);
+    const i1 = parse(issuesFile).issues[0]!;
+    expect(i1.history.map((h) => `${h.actor}:${h.from}->${h.to}`)).toEqual(["verifier:null->open", "fixer:open->fixed", "reviewer:fixed->done"]);
+    expect(i1.history[1]!.note).toBe(FIX_NOTE);
+  });
+
+  it("hands an issues file it cannot read back to the supervisor, leaving the fixer's edit in place", () => {
+    const { decision, jobs, issuesFile } = simulate({
+      reenter: 1,
+      failReads: 99,
+      codeReviews: [reviewed([HANG]), priorPass({ I1: "still_present" })],
+      fixerEdits: [undefined, markFixed("I1", FIX_NOTE)],
+    });
+    expect(decision.action).toMatchObject({ type: "supervise", supervise: { reason: expect.stringContaining("could not read .graphloom/issues.json back after the fixer's last run (2 failed reads)") } });
+    const work = jobs.filter((j) => j.purpose === "work");
+    const after = jobs.slice(jobs.indexOf(work[1]!) + 1);
+    expect(after.map((j) => commandIds(j)[0])).toEqual(["issues-read", "issues-read"]);
+    // The worktree still holds the fixer's edit: the graph never restored over it.
+    expect(parse(issuesFile).issues[0]!).toMatchObject({ status: "fixed" });
+  });
+
+  it("records the fixed step itself when the fixer forgot to mark an issue the reviewer finds resolved", () => {
+    const { decision, issuesFile } = simulate({ reenter: 1, codeReviews: [reviewed([HANG]), priorPass({ I1: "still_present" }), priorPass({ I1: "resolved" })] });
+    expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+    const i1 = parse(issuesFile).issues[0]!;
+    expect(i1.history.map((h) => `${h.actor}:${h.from}->${h.to}`)).toEqual(["verifier:null->open", "graph:open->fixed", "reviewer:fixed->done"]);
+  });
+
+  it("lists a refuted finding as dismissed", () => {
+    const { decision, jobs, issuesFile } = simulate({
+      codeReviews: [reviewed([HANG])],
+      verifications: [verdicts({ finding: "F1", verdict: "refuted", reason: "Close bounds the wait with closeTimeout.", quotes: [BOUNDED] })],
+      files: { "pkg/timestamp/scheduler.go": SCHEDULER },
+    });
+    expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+    expect(parse(issuesFile).issues.map((i) => `${i.id}:${i.status}:${i.history[0]!.actor}`)).toEqual(["I1:dismissed:verifier"]);
+    expect(deliverArgs(jobs).body).toContain("| I1 | P1 (high) | dismissed |");
+  });
+
+  it("restores the file from evidence before the next agent job after a resume, whatever the worktree holds", () => {
+    const run = simulate({ codeReviews: [reviewed([HANG]), priorPass({ I1: "still_present" })] });
+    expect(run.decision.action).toMatchObject({ type: "supervise" });
+    const definition = createGraph().describe(BANYANDB);
+    const receipts = run.receipts.filter((r) => r.stageId === "fix");
+    const view = (generation: number, evidence: EvidenceRecord[]): RunView => ({
+      runId: "run",
+      task: { request: `Fix apache/skywalking#${ISSUE}.`, repo: "../skywalking-banyandb" },
+      current: { stageId: "fix", attempt: 2 },
+      receipts,
+      evidence: structuredClone(evidence),
+      outstanding: [],
+      budgets: { agentInvocations: 8, jobs: 8, decisions: 8, corrections: 8 },
+      validatorBindings: definition.defaultValidators,
+      generation,
+      stateRevision: 1,
+      activeVersion: "issue-fix@0.4.0",
+      config: BANYANDB,
+      candidateDigest: "d1",
+      openAttempt: { fix: true },
+    });
+    // Resumed into a reentered Fix at a new generation: the file is written, from evidence, before the implementer runs.
+    const resumed = advanceFix(view(5, run.evidence));
+    expect(resumed.action).toMatchObject({ type: "dispatch", job: { kind: "command", readOnly: true } });
+    const job = (resumed.action as { job: JobSpec }).job;
+    expect(commandIds(job)).toEqual(["issues-write"]);
+    const json = writtenJson((job.input as { commands: Array<{ argv: string[] }> }).commands[0]!.argv)!;
+    expect(parse(json).issues.map((i) => `${i.id}:${i.status}`)).toEqual(["I1:open"]);
+    expect(resumed.reason).toContain("restore the review issues file from evidence after a resume or reentry");
+    // The same evidence always gives the same file, so a replay restores it byte for byte.
+    const again = advanceFix(view(6, run.evidence));
+    expect(writtenJson(((again.action as { job: JobSpec }).job.input as { commands: Array<{ argv: string[] }> }).commands[0]!.argv)).toBe(json);
+    // Once written in this generation, the implementer runs next.
+    const written: EvidenceRecord = {
+      ref: "ev-written",
+      kind: "command",
+      generation: 5,
+      candidateDigest: "d1",
+      payload: { command: { id: "issues-write", argv: (job.input as { commands: Array<{ argv: string[] }> }).commands[0]!.argv, exitCode: 0, stdoutTail: "written\n", stderrTail: "" }, producer: { operationId: "op-w", stageId: "fix", purpose: "diagnostic", readOnly: true, kind: "command" } },
+    };
+    expect(advanceFix(view(5, [...run.evidence, written])).action).toMatchObject({ type: "dispatch", job: { purpose: "work" } });
   });
 });
 

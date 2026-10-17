@@ -8,10 +8,16 @@ plan, implementation, RED/GREEN proof, scope check, optional changelog check,
 open-code-review sweep with independent verification, and local `fix/<issue>`
 delivery. The reviewer may raise new findings in the first three review
 rounds only; after that it verifies the known findings, and new comments
-become follow-ups in the pull request. The
+become follow-ups in the pull request. Since 0.4.0 the run tracks its
+critical and high findings as issues in `.graphloom/issues.json` in the run's
+worktree, with a readable `.graphloom/issues.md`: the verifier opens or
+dismisses them, the fixer marks them fixed, and the reviewer verifies each one
+done or reopens it. The graph owns the file and rejects any other edit, Git
+ignores it, and the pull request lists the table. The
 [design](../../../docs/design-issue-fix-graph.md) gives the profile schema,
-how the config reaches the plugin, and the
-[discovery rounds](../../../docs/design-issue-fix-graph.md#review-discovery-rounds).
+how the config reaches the plugin, the
+[discovery rounds](../../../docs/design-issue-fix-graph.md#review-discovery-rounds)
+and the [issues file](../../../docs/design-issue-fix-graph.md#the-issues-file).
 
 ## Profiles
 
@@ -20,8 +26,9 @@ how the config reaches the plugin, and the
 | [`profiles/banyandb.json`](profiles/banyandb.json) | apache/skywalking-banyandb, issues in apache/skywalking | `go-test` | `make test-ci` for the changed packages, license-check, build, lint, check | `CHANGES.md` |
 | [`profiles/graphloom.json`](profiles/graphloom.json) | hanahmily/graphloom (this repository) | `vitest` | `npm run typecheck`, `npm run build`, `npm test` | none |
 
-The banyandb profile reproduces banyandb-fix exactly: same requirements,
-statements, environment checks, prompts and commands. See banyandb-fix's
+The banyandb profile reproduces banyandb-fix's requirements, statements,
+environment checks, prompts and commands. The issues file is the one
+difference; banyandb-fix does not have it. See banyandb-fix's
 README for its environment table and runner configuration; they apply as they
 are.
 

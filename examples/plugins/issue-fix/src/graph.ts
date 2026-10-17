@@ -4,6 +4,7 @@ import {
   stop,
   supervise,
   validate,
+  type EnvironmentCommand,
   type EvidenceRecord,
   type GraphDecision,
   type GraphDefinition,
@@ -66,7 +67,25 @@ import {
   toVerify,
   VERIFICATION_SCHEMA,
   verificationInstruction,
+  type Finding,
+  type FindingLedger,
 } from "./findings.js";
+import {
+  issueById,
+  issueCommand,
+  issueFileJson,
+  issueIdOf,
+  issueMarkdown,
+  ISSUES_COMMAND,
+  ISSUES_FILE,
+  ISSUES_MARKDOWN,
+  issueTableRows,
+  readIssuesCommand,
+  writeIssuesCommand,
+  writtenJson,
+  type IssueTable,
+  type Rejection,
+} from "./issues.js";
 import { CODE_REVIEW_SCHEMA, codeReviewInstruction, describeCoverage, isBlocking, reviewBackground } from "./ocr.js";
 import {
   commandLabel,
@@ -94,7 +113,7 @@ import {
 import { codeReview, implementerRecord, reportText, validatorById } from "./validators.js";
 
 export const GRAPH_ID = "issue-fix";
-export const GRAPH_VERSION = "0.3.0";
+export const GRAPH_VERSION = "0.4.0";
 
 /** Graph bookkeeping; everything else is read back from recorded evidence. */
 export interface FixPrivateState {
@@ -291,9 +310,16 @@ function fix(ctx: Context, view: RunView, issue: number, state: FixPrivateState)
   // A reentry whose own implementer run predates it answers nothing new:
   // the same candidate that sent Fix back here is still the one on record.
   const stalePreReentry = reopened && implemented !== undefined && (implemented.record.generation ?? 0) < state.attemptGeneration;
+  // The fixer may have marked issues fixed: read the file back before anything else.
+  if (implemented !== undefined) {
+    const read = issuesReadStep(view, FIX_STAGE, state);
+    if (read !== undefined) return read;
+  }
+  // Every implementer job starts from the file as the graph last accepted it.
+  const restore = issuesRestore(view, findingLedger(view.evidence), FIX_STAGE, state);
+  const implementer = (job: JobSpec, summary: string, next: FixPrivateState): GraphDecision => restore ?? dispatchAgent(view, job, summary, next);
   if (implemented === undefined || implemented.status !== "completed" || stalePreReentry) {
-    return dispatchAgent(
-      view,
+    return implementer(
       implementJob(ctx, view, issue, plan.record, stalePreReentry ? reentryFeedback(view) : undefined),
       implemented === undefined ? "implement the reviewed plan, continuing the plan session" : stalePreReentry ? "answer why Fix was re-entered with a fresh implementation pass" : "retry the implementation",
       state,
@@ -355,8 +381,7 @@ function fix(ctx: Context, view: RunView, issue: number, state: FixPrivateState)
           // never supplies a working patch still lands on the supervisor
           // instead of looping forever: once exhausted, fall through below.
           if (state.corrections < MAX_FIX_CORRECTIONS && view.budgets.corrections > 0) {
-            return dispatchAgent(
-              view,
+            return implementer(
               implementJob(ctx, view, issue, record, revertPatchAsk(test, stalePatch)),
               stalePatch === undefined
                 ? "ask the implementer for a patch reverting just this round's behavioral fix, since RED's base-commit checkout cannot build the test alone"
@@ -382,8 +407,7 @@ function fix(ctx: Context, view: RunView, issue: number, state: FixPrivateState)
   }
   const feedback = correctionFeedback(profile, current, digest, results);
   if (state.corrections < MAX_FIX_CORRECTIONS && view.budgets.corrections > 0) {
-    return dispatchAgent(
-      view,
+    return implementer(
       implementJob(ctx, view, issue, record ?? plan.record, feedback),
       "correct the change with the failing evidence",
       { ...state, corrections: state.corrections + 1 },
@@ -408,6 +432,9 @@ function review(ctx: Context, view: RunView, issue: number, state: FixPrivateSta
   }
   const current = forIdentity(view.evidence, view.candidateDigest);
   const currentRefs = new Set(current.map((e) => e.ref));
+  // An implementer run the graph has not read the issues file after (a resume onto this version, a recovery dispatch).
+  const unread = issuesReadStep(view, REVIEW_STAGE, state);
+  if (unread !== undefined) return unread;
   const ledger = findingLedger(view.evidence);
   const passes = ledger.passes.filter((p) => p.digest === digest && currentRefs.has(p.run.record.ref));
   const last = passes.at(-1);
@@ -426,7 +453,10 @@ function review(ctx: Context, view: RunView, issue: number, state: FixPrivateSta
       return supervise({ reason: "the environment check recorded no open-code-review path for the code reviewer" }, "escalate a missing ocr path", JSON.stringify(state));
     }
     const base = green?.checkout?.base ?? "the run's base commit";
-    const assignment = codeReviewInstruction(profile, { ocr, base, background, known: knownFindings(ledger), sweep, round });
+    // The reviewer may read the issues file; it reports in its result, and the graph applies that.
+    const restore = issuesRestore(view, ledger, REVIEW_STAGE, state);
+    if (restore !== undefined) return restore;
+    const assignment = codeReviewInstruction(profile, { ocr, base, background, known: knownFindings(ledger), sweep, round, issues: { file: ISSUES_FILE, markdown: ISSUES_MARKDOWN } });
     const summary = verifying
       ? `verify the known findings on the change in review round ${round}, after the ${MAX_DISCOVERY_ROUNDS} discovery rounds (read-only)`
       : sweep
@@ -478,6 +508,10 @@ function deliver(ctx: Context, view: RunView, issue: number, state: FixPrivateSt
   const delivered = commandRuns(current, COMMAND.deliver).filter((r) => r.record.candidateDigest === view.candidateDigest).at(-1);
   const branch = `fix/${issue}`;
   if (delivered === undefined) {
+    // Leave the final table in the worktree for the operator; it stays out of the commit.
+    const ledger = findingLedger(view.evidence);
+    const restore = issuesRestore(view, ledger, REVIEW_STAGE, state);
+    if (restore !== undefined) return restore;
     const record = implementerRecord(view.evidence).record!;
     const green = latestCheckoutRun(view.evidence, COMMAND.regression, "candidate", view.candidateDigest);
     const issueTitle = issueSnapshot(view.evidence, issue)?.issue.title ?? issueRef(profile, issue);
@@ -487,6 +521,7 @@ function deliver(ctx: Context, view: RunView, issue: number, state: FixPrivateSt
       record,
       base: green?.checkout?.base ?? "",
       ...reviewSummary(profile, view),
+      ...(ledger.issues.issues.length > 0 ? { issues: issueTableRows(ledger.issues.issues) } : {}),
     });
     return withPrivate(
       dispatch(
@@ -550,12 +585,22 @@ function reviewSummary(profile: Profile, view: RunView): { review: string; dismi
 
 /** Why the run is back in Fix: the confirmed findings of the code review, when there are any. Dismissed and disputed ones never reach the implementer. */
 function reentryFeedback(view: RunView): string[] {
-  const confirmed = findingLedger(view.evidence).findings.filter((f) => f.state === "confirmed");
+  const ledger = findingLedger(view.evidence);
+  // Driven by the issues file: open and reopened issues first, then the ones marked fixed that the reviewer has yet to verify.
+  const status = (f: Finding) => issueById(ledger.issues, issueIdOf(f.id))?.status ?? "open";
+  const unsettled = ledger.findings.filter((f) => f.state === "confirmed");
+  const confirmed = [...unsettled.filter((f) => status(f) !== "fixed"), ...unsettled.filter((f) => status(f) === "fixed")];
   if (confirmed.length === 0) {
     return ["The run returned to Fix after a resume or a supervisor decision. Check the plan against the current code and the change in the working tree."];
   }
   const current = view.candidateDigest;
   const shown = confirmed.slice(0, 10);
+  const tracked = ledger.issues.issues.length > 0;
+  const line = (f: Finding) => {
+    const s = status(f);
+    const label = s === "fixed" ? "fixed by you, not yet verified by the reviewer" : s;
+    return tracked ? describeFinding(f, current).replace(/^(I\d+) /, `$1 [${label}] `) : describeFinding(f, current);
+  };
   // The implementer's last pass left the candidate byte-identical while the
   // reviewer, reading that very code, still reports findings: repeating the
   // same feedback would get the same "already fixed" answer (live run
@@ -565,10 +610,11 @@ function reentryFeedback(view: RunView): string[] {
     `Code review of your previous change found ${confirmed.length} critical or high defect(s), each confirmed by an independent verifier:`,
     ...(recheckedHere.length > 0
       ? [
-          `Your last pass changed nothing: the candidate is byte-identical (digest ${shortDigest(current!)}) to the code the reviewer re-checked. The reviewer re-checked the current code and still reports ${listAnd(recheckedHere.map((f) => f.id))} as present, so its latest note below describes the code in your working tree, not an earlier revision. Fix what that note names; if you are sure a finding is wrong, say why in your decision record with file:line evidence from the current tree.`,
+          `Your last pass changed nothing: the candidate is byte-identical (digest ${shortDigest(current!)}) to the code the reviewer re-checked. The reviewer re-checked the current code and still reports ${listAnd(recheckedHere.map((f) => issueIdOf(f.id)))} as present, so its latest note below describes the code in your working tree, not an earlier revision. Fix what that note names; if you are sure a finding is wrong, say why in your decision record with file:line evidence from the current tree.`,
         ]
       : []),
-    ...shown.map((f) => describeFinding(f, current)),
+    ...(tracked ? [`They are the open, reopened and fixed issues in ${ISSUES_FILE}; when you fix one, mark it there as described below.`] : []),
+    ...shown.map(line),
   ];
 }
 
@@ -696,6 +742,10 @@ function verificationJob(profile: Profile, assignment: string): JobSpec {
 function implementJob(ctx: Context, view: RunView, issue: number, record: DecisionRecord, feedback: string[] | undefined): JobSpec {
   const { profile } = ctx;
   const from = implementerSession(view);
+  const table = findingLedger(view.evidence).issues;
+  // The fixer's last edits to the issues file the graph refused, so it does not repeat them.
+  const rejected = rejectedSinceLastWork(view, table).map((r) => `${ISSUES_FILE}: the graph rejected your edit and restored the file: ${r.note}.`);
+  const all = [...rejected, ...(feedback ?? [])];
   return {
     jobId: IMPLEMENTER_JOB,
     stageId: FIX_STAGE,
@@ -706,11 +756,129 @@ function implementJob(ctx: Context, view: RunView, issue: number, record: Decisi
     writeScope: writeScopeFor(record, profile),
     executor: CODING_AGENT,
     input: {
-      assignment: implementInstruction(profile, { issue, plan: record, ...(feedback !== undefined ? { feedback } : {}) }),
+      assignment: implementInstruction(profile, { issue, plan: record, ...(all.length > 0 ? { feedback: all } : {}), ...(table.issues.length > 0 ? { issues: true } : {}) }),
       harness: profile.roles.implementer,
     },
     ...(from !== undefined ? { continueFrom: from } : {}),
   };
+}
+
+/** Where a record sits in the run's evidence, or -1. */
+const indexOf = (view: RunView, record: EvidenceRecord | undefined): number => (record === undefined ? -1 : view.evidence.findIndex((e) => e.ref === record.ref));
+
+function lastIndexWhere(evidence: EvidenceRecord[], keep: (e: EvidenceRecord) => boolean): number {
+  for (let i = evidence.length - 1; i >= 0; i -= 1) if (keep(evidence[i]!)) return i;
+  return -1;
+}
+
+/** The newest record of an issues command, with what it says the worktree's file holds. */
+function latestIssuesCommand(view: RunView): { record: EvidenceRecord; index: number; kind: "write" | "read"; ok: boolean; content: string | undefined } | undefined {
+  for (let i = view.evidence.length - 1; i >= 0; i -= 1) {
+    const record = view.evidence[i]!;
+    const write = issueCommand(record, ISSUES_COMMAND.write);
+    if (write !== undefined) return { record, index: i, kind: "write", ok: write.ok, content: writtenJson(write.argv) };
+    const read = issueCommand(record, ISSUES_COMMAND.read);
+    if (read !== undefined) {
+      const present = read.stdout.trim().split("\n").at(-1)?.trim() === "present";
+      return { record, index: i, kind: "read", ok: read.ok, content: present && read.report?.truncated !== true ? read.report?.text : undefined };
+    }
+  }
+  return undefined;
+}
+
+const lastWork = (view: RunView): number => indexOf(view, agentRuns(view.evidence, FIX_STAGE, "work").at(-1)?.record);
+
+/**
+ * The graph handed the file out and an implementer ran since the last time it
+ * read the file back: the fixer may have marked issues fixed.
+ */
+function issuesReadDue(view: RunView): boolean {
+  const written = lastIndexWhere(view.evidence, (e) => issueCommand(e, ISSUES_COMMAND.write)?.ok === true);
+  if (written < 0) return false;
+  // Only a read that succeeded consumed the fixer's edits; a failed or timed-out one did not.
+  const read = lastIndexWhere(view.evidence, (e) => issueCommand(e, ISSUES_COMMAND.read)?.ok === true);
+  const work = lastWork(view);
+  return work > written && work > read;
+}
+
+/** Failed reads after the last implementer run before the graph stops retrying. */
+const MAX_FAILED_ISSUE_READS = 2;
+
+/**
+ * The read the fixer's last run still needs, or nothing: a failed read is
+ * retried, and after MAX_FAILED_ISSUE_READS the supervisor decides, since
+ * writing the accepted table over the unread file would lose the fixer's edits.
+ */
+function issuesReadStep(view: RunView, stageId: string, state: FixPrivateState): GraphDecision | undefined {
+  if (!issuesReadDue(view)) return undefined;
+  const work = lastWork(view);
+  const failed = view.evidence.filter((e, i) => i > work && issueCommand(e, ISSUES_COMMAND.read)?.ok === false);
+  if (failed.length >= MAX_FAILED_ISSUE_READS) {
+    return supervise(
+      { reason: `the graph could not read ${ISSUES_FILE} back after the fixer's last run (${failed.length} failed reads); it will not overwrite the fixer's unread edits`, evidenceRefs: failed.map((e) => e.ref) },
+      "escalate an issues file the graph cannot read back",
+      JSON.stringify(state),
+    );
+  }
+  return withPrivate(
+    dispatch(issuesJob(stageId, "read"), failed.length > 0 ? "retry reading back the fixer's edits to the review issues file" : "read back the fixer's edits to the review issues file"),
+    state,
+  );
+}
+
+/**
+ * The job that brings the worktree's issues file in line with the table, before
+ * an agent works from it, or undefined when it already is: the newest issues
+ * command in this generation, after the last implementer run, shows exactly
+ * the table's JSON. A resume or a reentry starts a new generation, so the file
+ * is always rewritten from evidence before the next agent job.
+ */
+function issuesRestore(view: RunView, ledger: FindingLedger, stageId: string, state: FixPrivateState): GraphDecision | undefined {
+  // Never write over fixer edits the graph has not read back.
+  const unread = issuesReadStep(view, stageId, state);
+  if (unread !== undefined) return unread;
+  if (ledger.issues.issues.length === 0) return undefined;
+  const { round, phase } = reviewPhase(ledger, view.candidateDigest ?? "");
+  const json = issueFileJson(ledger.issues, { round, phase });
+  const last = latestIssuesCommand(view);
+  const fresh = last !== undefined && last.index > lastWork(view) && (last.record.generation ?? 0) === view.generation;
+  if (fresh && last.ok && last.content === json) return undefined;
+  if (fresh && !last.ok && last.kind === "write" && last.content === json) {
+    return supervise({ reason: `the graph could not write ${ISSUES_FILE}`, evidenceRefs: [last.record.ref] }, "escalate a failed write of the issues file", JSON.stringify(state));
+  }
+  const markdown = issueMarkdown(ledger.issues, { round, phase, followUps: ledger.followUps.map(describeFollowUp) });
+  const command = writeIssuesCommand(json, markdown);
+  if (command === undefined) {
+    return supervise({ reason: `${ISSUES_FILE} has grown larger than one command can write` }, "escalate an issues file too large to write", JSON.stringify(state));
+  }
+  const job = issuesJob(stageId, "write", command);
+  const why =
+    last === undefined
+      ? "write the review issues file"
+      : (last.record.generation ?? 0) !== view.generation
+      ? "restore the review issues file from evidence after a resume or reentry"
+      : "write the review issues file as the graph accepted it";
+  return withPrivate(dispatch(job, `${why} (${ISSUES_FILE})`), state);
+}
+
+/** A read-only command job in the worktree that writes or reads the issues file; Git ignores the files it touches. */
+function issuesJob(stageId: string, what: "write" | "read", command: EnvironmentCommand = readIssuesCommand()): JobSpec {
+  return {
+    stageId,
+    kind: "command",
+    purpose: "diagnostic",
+    readOnly: true,
+    instruction: what === "write" ? "Write the review issues file" : "Read back the review issues file",
+    input: { commands: [command] },
+  };
+}
+
+/** The rejections the latest read recorded, when no implementer has run since. */
+function rejectedSinceLastWork(view: RunView, table: IssueTable): Rejection[] {
+  const read = lastIndexWhere(view.evidence, (e) => issueCommand(e, ISSUES_COMMAND.read)?.ok === true);
+  if (read < 0 || read < lastWork(view)) return [];
+  const ref = view.evidence[read]!.ref;
+  return table.rejections.filter((r) => r.evidence === ref);
 }
 
 /** The newest implementer session, which no later job has continued. */
