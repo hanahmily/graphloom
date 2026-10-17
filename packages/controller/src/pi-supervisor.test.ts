@@ -341,7 +341,8 @@ describe("Pi supervisor recovery (controller)", () => {
       prompts.push(text);
       return prompt(text, options);
     };
-    const supervisor = createPiSupervisor({ session });
+    // A JSON-reply session cannot call the probe tools, so it cannot cite one.
+    const supervisor = createPiSupervisor({ session, requireCitedEvidence: false });
 
     const plugin = createScriptedGraph({
       definition,
@@ -380,6 +381,7 @@ describe("Pi supervisor recovery (controller)", () => {
       factoryCalls.push(ctx.runId);
       return createPiSupervisor({
         session: fakeSession([JSON.stringify(stop({ reason: "supervisor stopped", blocker: "the implementer keeps failing" }, "stop"))]),
+        requireCitedEvidence: false,
       });
     };
     const work = dispatch({ stageId: "write", kind: "agent", purpose: "work", instruction: "write", writeScope: [GREETING_PATH] }, "write");

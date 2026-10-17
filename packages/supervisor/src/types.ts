@@ -1,4 +1,14 @@
-import type { CaseFile, CaseFinding, CaseFindingOutcome, GraphDecision, RepairTarget, RunView } from "@graphloom/sdk";
+import type {
+  CaseFile,
+  CaseFinding,
+  CaseFindingOutcome,
+  CheckoutSpec,
+  EvidenceRecord,
+  GraphDecision,
+  Receipt,
+  RepairTarget,
+  RunView,
+} from "@graphloom/sdk";
 import type { ProviderFailureClass } from "./provider-failure.js";
 
 /** Why the controller entered recovery for this episode. */
@@ -48,6 +58,11 @@ export interface SupervisorInput {
    * otherwise. Does not end the turn.
    */
   recordFinding?: (finding: CaseFinding) => Promise<CaseFindingOutcome>;
+  /**
+   * Read-only access to the run's evidence, receipts and candidate, and
+   * dry-run probes of controller checks. None of it changes the run.
+   */
+  inspect?: SupervisorInspection;
   /** Aborted when the run stops; the session aborts its request and settles idle. */
   signal?: AbortSignal;
   /**
@@ -62,6 +77,49 @@ export interface SupervisorInput {
    * themselves). Nothing in the run changed since that proposal.
    */
   rejection?: SupervisorRejection;
+}
+
+/** Narrows `list_evidence`; every field given must match. */
+export interface EvidenceFilter {
+  /** The stage whose job produced the record. */
+  stageId?: string;
+  kind?: EvidenceRecord["kind"];
+  generation?: number;
+  candidateDigest?: string;
+}
+
+/** What a probe found. The probe ran the controller's real check on a copy of state; nothing was persisted. */
+export interface ProbeResult {
+  /** Cite this on a proposal; valid only in the episode that ran it. */
+  probeId: string;
+  /** Whether the checked action would be admitted (or, for a checkout, would apply). */
+  accepted: boolean;
+  /** Why not, or what was found. */
+  reason: string;
+  /** State revision the probe read; a probe never changes it. */
+  stateRevision: number;
+  /** `check_validate` only: whether a validator ran, and each requirement's outcome. */
+  evaluated?: boolean;
+  requirements?: Array<{ requirementId: string; status: "passed" | "failed" | "inconclusive" | "not_evaluated"; reason: string }>;
+}
+
+/**
+ * The controller's evidence and probe surface for one recovery turn. Generic:
+ * it reads recorded evidence by ref, kind, stage and generation and never
+ * interprets a payload. A probe that cannot run says why in `reason`.
+ */
+export interface SupervisorInspection {
+  getEvidence(ref: string): EvidenceRecord | undefined;
+  listEvidence(filter: EvidenceFilter): EvidenceRecord[];
+  listReceipts(): Receipt[];
+  /** The candidate workspace file at `path`, or why it cannot be read. */
+  readCandidate(path: string, signal?: AbortSignal): Promise<{ text: string } | { error: string }>;
+  /** The workspace candidate as a unified diff against the pinned base. */
+  diffCandidate(signal?: AbortSignal): Promise<{ diff: string } | { error: string }>;
+  /** `signal` is the tool call's; a probe also stops when the run does. */
+  checkValidate(spec: { stageId: string; requirementIds?: string[] }, signal?: AbortSignal): Promise<ProbeResult>;
+  checkActivation(artifactId: string, signal?: AbortSignal): Promise<ProbeResult>;
+  checkCheckout(spec: CheckoutSpec, signal?: AbortSignal): Promise<ProbeResult>;
 }
 
 /** What the controller can tell a supervisor before admission, so tools that cannot hold are not offered. */
@@ -187,6 +245,13 @@ export interface Supervisor {
    * Required for qualified repair so every patch round binds to the same session.
    */
   sessionId?: string;
+  /**
+   * Set by a supervisor that can read evidence and run probes (`input.inspect`):
+   * the controller then refuses its `stop`, `reenter` and validator- or
+   * executor-blaming `qualify_repair` unless they cite evidence or a probe from
+   * the episode. A scripted supervisor, which cannot look, is not held to it.
+   */
+  requiresCitedEvidence?: boolean;
   /**
    * Grant Pi coding tools scoped to an admitted repair candidate tree.
    * Must not change session identity; revoke after the qualification episode.

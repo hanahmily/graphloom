@@ -201,6 +201,24 @@ export interface DurableRunState {
    * match: normal jobs stay blocked until a repair changes the active version.
    */
   environmentBlock?: { activeVersion: string; reason: string };
+  /**
+   * Probes the supervisor has run in its current recovery episode, so a proposal
+   * may cite one across turns of the episode and after a resume. Replaced when
+   * a new episode runs its first probe; never counted in `stateRevision`.
+   */
+  probeLog?: {
+    episodeId: string;
+    /** Probes that ran. */
+    ids: string[];
+    /** Probes started, run or not: the episode cap counts these. */
+    attempts: number;
+    /**
+     * What each probe that ran found, bounded (see inspection.ts), so a
+     * proposal citing a probe id carries its result to whoever judges it,
+     * such as the independent repair reviewer. Only the latest are kept.
+     */
+    results?: Record<string, ProbeRecord>;
+  };
   /** Last successful work-purpose dispatch; used for separate-reviewer checks. */
   lastWorkOperationId?: string;
   /**
@@ -380,6 +398,16 @@ export interface VersionRecord {
 }
 
 /** The cited refs that name evidence this run recorded, deduplicated in order. */
+/** A probe's durable result: the check it ran and what it found. */
+export interface ProbeRecord {
+  check: "check_validate" | "check_activation" | "check_checkout";
+  accepted: boolean;
+  reason: string;
+  stateRevision: number;
+  evaluated?: boolean;
+  requirements?: Array<{ requirementId: string; status: string; reason: string }>;
+}
+
 export function citedEvidence(state: DurableRunState, refs: readonly string[] | undefined): string[] {
   const known = new Set(state.evidence.map((e) => e.ref));
   return [...new Set((refs ?? []).filter((ref) => known.has(ref)))];

@@ -1515,7 +1515,7 @@ describe("qualified repair + same-run activation (#29)", () => {
         /* no-op */
       },
     };
-    const supervisor = createPiSupervisor({ session });
+    const supervisor = createPiSupervisor({ session, requireCitedEvidence: false });
 
     const repair: RepairDeps = {
       reviewer: {

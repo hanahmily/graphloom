@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   PROTOCOL_VERSION,
   assertGraphAction,
+  assertGraphDecision,
   assertGraphDefinition,
   assertRunView,
   assertValidationInput,
@@ -264,5 +265,15 @@ describe("wire validation", () => {
     ).toThrow(/unique/);
     expect(() => assertGraphDefinition(withEnv({ pinnedFiles: [{ path: "../x", sha256: sha }] }))).toThrow(/inside/);
     expect(() => assertGraphDefinition(withEnv({ pinnedFiles: [{ path: "x", sha256: "abc" }] }))).toThrow(/SHA-256/);
+  });
+});
+
+describe("GraphDecision.evidence (#119)", () => {
+  it("accepts cited refs and rejects anything but an array of strings", () => {
+    const base = { reason: "r", action: { type: "stop", stop: { reason: "r", blocker: "b" } } };
+    expect(assertGraphDecision({ ...base, evidence: ["ev-1", "probe-1"] }).evidence).toEqual(["ev-1", "probe-1"]);
+    expect(assertGraphDecision(base).evidence).toBeUndefined();
+    expect(() => assertGraphDecision({ ...base, evidence: "ev-1" })).toThrow(/evidence must be an array of strings/);
+    expect(() => assertGraphDecision({ ...base, evidence: [1] })).toThrow(/evidence must be an array of strings/);
   });
 });
