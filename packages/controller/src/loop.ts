@@ -73,7 +73,7 @@ import {
 import { isUnsettled, reconcilePendingDispatch } from "./reconcile.js";
 import { createChildPort, reconcileChildOperations } from "./children.js";
 import { agentSessionViews, continuationRefusal, recordAgentSession, sessionForDispatch, wipeAgentSessions } from "./agent-sessions.js";
-import { citedEvidence, loadRunState, recordRemedy, STEP_LIMIT_STOP_REASON, type DurableRunState, saveRunState } from "./state.js";
+import { citedEvidence, loadRunState, nextStageAttempt, recordRemedy, STEP_LIMIT_STOP_REASON, type DurableRunState, saveRunState } from "./state.js";
 import { bumpGeneration } from "./generation.js";
 import { noteGraphDecision, noteSupervisorProposal, progressMark, settleCorrectionTrial, settleSupervisorCorrection } from "./escalation.js";
 import {
@@ -1550,10 +1550,8 @@ async function applyDecision(
           ...withoutRev.budgets,
           corrections: withoutRev.budgets.corrections - 1,
         },
-        current: {
-          stageId,
-          attempt: state.current.stageId === stageId ? state.current.attempt + 1 : 1,
-        },
+        current: { stageId, attempt: nextStageAttempt(state, stageId) },
+        stageAttempts: { ...withoutRev.stageAttempts, [stageId]: nextStageAttempt(state, stageId) },
         // Reentry means this stage's execution needs another attempt,
         // regardless of whether anything above actually invalidated — stage
         // selection must dispatch its work again rather than trust an
@@ -1856,6 +1854,7 @@ async function prepareDispatch(
       ...(retry !== undefined ? { retry: { ...retry } } : {}),
     },
     current: { stageId: job.stageId, attempt: state.current.attempt },
+    stageAttempts: { ...state.stageAttempts, [job.stageId]: Math.max(state.stageAttempts?.[job.stageId] ?? 0, state.current.attempt) },
     ...(job.purpose === "work" ? { workDispatched: { ...state.workDispatched, [job.stageId]: true as const } } : {}),
   };
 
