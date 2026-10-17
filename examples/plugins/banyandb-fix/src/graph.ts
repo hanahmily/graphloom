@@ -62,6 +62,8 @@ import {
   passUsable,
   pathsToObserve,
   roundSummary,
+  shortDigest,
+  stillPresentNote,
   toVerify,
   VERIFICATION_SCHEMA,
   verificationInstruction,
@@ -101,7 +103,7 @@ const asSchema = (text: string): Record<string, unknown> => JSON.parse(text) as 
 
 const definition: GraphDefinition = {
   graphId: "banyandb-fix",
-  version: "0.5.0",
+  version: "0.6.0",
   privateStateSchema: "banyandb-fix-private-v1",
   resultContracts: [
     { name: "decision-record-v1", schema: asSchema(DECISION_RECORD_SCHEMA), evidenceKind: "other" },
@@ -477,7 +479,7 @@ function reviewSummary(view: RunView): { review: string; dismissed: string[] } {
   const open = settled.length > 0 ? `no critical or high finding left open (${settled.join("; ")})` : "no critical or high comments";
   return {
     review: report.comments.length === 0 && settled.length === 0 ? `Reviewed by ${by}: no comments.` : `Reviewed by ${by}: ${open}${lower > 0 ? `; ${lower} lower-severity comment(s) left for the reviewer` : ""}.`,
-    dismissed: dismissed.map(describeFinding),
+    dismissed: dismissed.map((f) => describeFinding(f)),
   };
 }
 
@@ -487,10 +489,29 @@ function reentryFeedback(view: RunView): string[] {
   if (confirmed.length === 0) {
     return ["The run returned to Fix after a resume or a supervisor decision. Check the plan against the current code and the change in the working tree."];
   }
+  const current = view.candidateDigest;
+  const shown = confirmed.slice(0, 10);
+  // The implementer's last pass left the candidate byte-identical while the
+  // reviewer, reading that very code, still reports findings: repeating the
+  // same feedback would get the same "already fixed" answer (live run
+  // 4c70ff66-dd9, gens 12 and 14), so say plainly that nothing changed.
+  const recheckedHere = current !== undefined && lastPassChangedNothing(view) ? shown.filter((f) => stillPresentNote(f)?.digest === current) : [];
   return [
     `Code review of your previous change found ${confirmed.length} critical or high defect(s), each confirmed by an independent verifier:`,
-    ...confirmed.slice(0, 10).map(describeFinding),
+    ...(recheckedHere.length > 0
+      ? [
+          `Your last pass changed nothing: the candidate is byte-identical (digest ${shortDigest(current!)}) to the code the reviewer re-checked. The reviewer re-checked the current code and still reports ${recheckedHere.map((f) => f.id).join(", ")} as present, so its latest note below describes the code in your working tree, not an earlier revision. Fix what that note names; if you are sure a finding is wrong, say why in your decision record with file:line evidence from the current tree.`,
+        ]
+      : []),
+    ...shown.map((f) => describeFinding(f, current)),
   ];
+}
+
+/** The newest completed implementer pass left the candidate as the one before it did. */
+function lastPassChangedNothing(view: RunView): boolean {
+  const work = agentRuns(view.evidence, FIX_STAGE, "work").filter((r) => r.status === "completed");
+  const [before, last] = work.slice(-2);
+  return before !== undefined && last !== undefined && last.record.candidateDigest !== undefined && last.record.candidateDigest === before.record.candidateDigest;
 }
 
 /** A plan or implementer that cannot proceed stops the run with its question. */

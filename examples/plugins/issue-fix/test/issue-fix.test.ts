@@ -82,6 +82,8 @@ interface Scenario {
   plans?: DecisionRecord[];
   /** The implementer's result for each implement job, in order. */
   implement?: Array<DecisionRecord | undefined>;
+  /** Implement passes (1-based) that change nothing: the candidate digest stays as it was. */
+  unchangedWork?: number[];
   /** Command outcomes in the candidate checkout for each candidate job, by command id. */
   candidate?: Array<Partial<Record<string, CommandResult>>>;
   candidateMutations?: string[][];
@@ -119,6 +121,10 @@ const SUMMARY = { total_files: 3, reviewed_files: 3, skipped: [] };
 const priorPass = (statuses: Record<string, string>, comments: Array<Record<string, unknown>> = []): { output: unknown } => ({
   output: { comments, prior: Object.entries(statuses).map(([finding, status]) => ({ finding, status, reason: `${finding} is ${status}` })), summary: SUMMARY },
 });
+/** A pass that gives `finding` `status` with the reviewer's own `reason`. */
+const notedPass = (finding: string, status: string, reason: string): { output: unknown } => ({ output: { comments: [], prior: [{ finding, status, reason }], summary: SUMMARY } });
+const FIRST_NOTE = "Close still waits on s.wait(ctx) with no deadline (pkg/timestamp/scheduler.go:88-95).";
+const LATEST_NOTE = "Partially fixed: Close now bounds its wait, but trigger still blocks on the action (pkg/timestamp/scheduler.go:101-104).";
 const verdicts = (...list: Array<{ finding: string; verdict: string; reason?: string; quotes?: Array<{ path: string; line: number; text: string }> }>) => ({
   output: { verdicts: list.map((v) => ({ reason: `${v.verdict} by the verifier`, quotes: [], ...v })) },
 });
@@ -148,6 +154,7 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
   // not invalidate an already-accepted plan.
   const identityFor = (requirementId: string): string => (requirementId === "decisions-recorded" ? planDigest : digest);
   let implemented = 0;
+  let changed = 0;
   let candidates = 0;
   let planned = 0;
   let codeReviewed = 0;
@@ -213,7 +220,8 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
       } else if (job.purpose === "work") {
         output = scenario.implement?.[implemented] ?? nth(scenario.plans, planned - 1) ?? PLAN;
         implemented += 1;
-        digest = `d${implemented}`;
+        // An implementer pass that edits nothing leaves the candidate byte-identical.
+        if (!(scenario.unchangedWork ?? []).includes(implemented)) digest = `d${++changed}`;
         // A work dispatch settling is this attempt's chance at the stage's
         // own work; reentry's openAttempt has done its job once that happens.
         openAttempt[job.stageId] = false;
@@ -630,6 +638,50 @@ describe("issue-fix graph under the banyandb profile", () => {
     // The first pass on the new change owes F1 a status and is not a sweep.
     expect(assignment(passes[2])).toContain("- F1 (confirmed) pkg/timestamp/scheduler.go:88-95");
     expect(assignment(passes[2])).not.toContain("An earlier pass");
+  });
+
+  it("hands the implementer the reviewer's latest still-present note verbatim, ahead of the original report", () => {
+    const { decision, jobs } = simulate({
+      reenter: 2,
+      codeReviews: [reviewed([HANG]), notedPass("F1", "still_present", FIRST_NOTE), notedPass("F1", "still_present", LATEST_NOTE), notedPass("F1", "resolved", "bounded now")],
+    });
+    expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+    const work = jobs.filter((j) => j.purpose === "work");
+    expect(work).toHaveLength(3);
+    const latest = assignment(work[2]);
+    // The note the reviewer wrote on the candidate the implementer now holds, verbatim with its location, comes first.
+    expect(latest).toMatch(/- F1 Reviewer, latest pass on the current candidate \(ev-\d+\): still present — Partially fixed: Close now bounds its wait, but trigger still blocks on the action \(pkg\/timestamp\/scheduler\.go:101-104\)\./);
+    expect(latest).toContain("Background, the original report (it describes an earlier revision, candidate d1; its line numbers and quotes may no longer match the code): pkg/timestamp/scheduler.go:88-95 (high, bug)");
+    expect(latest.indexOf("scheduler.go:101-104")).toBeLessThan(latest.indexOf("scheduler.go:88-95"));
+    expect(latest).not.toContain(FIRST_NOTE);
+    // The candidate changed since the last pass, so no "changed nothing" note.
+    expect(latest).not.toContain("Your last pass changed nothing");
+  });
+
+  it("tells the implementer plainly that its last pass changed nothing while the reviewer still reports the finding", () => {
+    const { decision, jobs } = simulate({
+      reenter: 3,
+      unchangedWork: [3],
+      codeReviews: [reviewed([HANG]), notedPass("F1", "still_present", FIRST_NOTE), notedPass("F1", "still_present", LATEST_NOTE), notedPass("F1", "resolved", "bounded now")],
+    });
+    // Live run 4c70ff66-dd9 (gens 12 and 14): the implementer answered the
+    // same stale feedback with "already fixed, made no change", the candidate
+    // stayed byte-identical, and review kept the finding open.
+    expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+    const work = jobs.filter((j) => j.purpose === "work");
+    expect(work).toHaveLength(4);
+    // The third pass changed something earlier (d1 -> d2), so its feedback carries no such line.
+    expect(assignment(work[2])).not.toContain("Your last pass changed nothing");
+    const after = assignment(work[3]);
+    expect(after).toContain(
+      "- Your last pass changed nothing: the candidate is byte-identical (digest d2) to the code the reviewer re-checked. The reviewer re-checked the current code and still reports F1 as present",
+    );
+    expect(after.indexOf("Your last pass changed nothing")).toBeLessThan(after.indexOf(LATEST_NOTE));
+    expect(after).toContain(`F1 Reviewer, latest pass on the current candidate`);
+    expect(after).toContain(LATEST_NOTE);
+    // The feedback is not the previous pass's verbatim.
+    const feedback = (a: string) => a.slice(a.indexOf("Your last change did not pass"), a.indexOf("Implement the fix"));
+    expect(feedback(after)).not.toBe(feedback(assignment(work[2])));
   });
 
   it("hands the planner a long issue whole, with its latest maintainer answer", () => {
@@ -1083,6 +1135,36 @@ describe("findings ledger", () => {
     expect(states([two, verify("d1", { finding: "F1", verdict: "confirmed" }, { finding: "F2", verdict: "refuted" })])).toEqual({ F1: "disputed@d1", F2: "disputed@d1" });
     const ledger = findingLedger([two, verify("d1")]);
     expect(ledger.findings[0]!.dispute).toBe("the verifier gave no verdict");
+  });
+
+  it("keeps the reviewer's latest still-present reason and leads with it once the code has moved on (run 4c70ff66-dd9)", () => {
+    // Trimmed from run 4c70ff66-dd9: F1 was raised and confirmed against
+    // loop.ts:483 on e98132c9; the gen-7 review pass (ev-g7-124) and later
+    // ones kept it still_present with a new reason naming other code.
+    const raised = { path: "packages/controller/src/loop.ts", start_line: 483, end_line: 483, category: "bug", severity: "high", content: "createSupervisorInspection is built without a signal, so inspection calls outlive the turn." };
+    const confirmed = verify("e98132c9", {
+      finding: "F1",
+      verdict: "confirmed",
+      reason: "loop.ts builds the inspection without the turn's signal.",
+      quotes: [{ path: "packages/controller/src/loop.ts", line: 483, text: "const inspection = createSupervisorInspection({ state: () => state });" }],
+    });
+    const LIVE_NOTE =
+      "Partially fixed: composed signals and raceAbort bound caller waiting, but checkValidate discards the signal (inspection.ts:143-147), and candidateChange launches Git without cancellation or timeout (worktree.ts:144-148). Aborted work can continue and retain resources.";
+    const stillPresent = agent("review", "285e2902", { comments: [], prior: [{ finding: "F1", status: "still_present", reason: LIVE_NOTE }], summary: SUMMARY });
+    const evidence = [pass("e98132c9", [raised]), confirmed, stillPresent];
+    const f1 = findingById(findingLedger(evidence), "F1")!;
+    expect(f1).toMatchObject({ state: "confirmed", verifiedOn: "e98132c9", note: { status: "still_present", reason: LIVE_NOTE, digest: "285e2902", ref: stillPresent.ref } });
+    const text = describeFinding(f1, "285e2902");
+    expect(text.startsWith(`F1 Reviewer, latest pass on the current candidate (${stillPresent.ref}): still present — ${LIVE_NOTE}`)).toBe(true);
+    expect(text).toContain("inspection.ts:143-147");
+    expect(text).toContain("Background, the original report (it describes an earlier revision, candidate e98132c9;");
+    expect(text.indexOf("inspection.ts:143-147")).toBeLessThan(text.indexOf("loop.ts:483"));
+    // Read on a later candidate, the note says it predates that change.
+    expect(describeFinding(f1, "9f00aa11")).toContain("Reviewer, latest pass on candidate 285e2902, before your latest change");
+    // A resolved status ends the lead: the finding is fixed and its note no longer applies.
+    const fixed = findingById(findingLedger([...evidence, agent("review", "9f00aa11", { comments: [], prior: [{ finding: "F1", status: "resolved", reason: "signal passed" }], summary: SUMMARY })]), "F1")!;
+    expect(fixed.state).toBe("fixed");
+    expect(describeFinding(fixed)).not.toContain("Reviewer, latest pass");
   });
 
   it("matches a quote within three lines with whitespace collapsed, and observes only safe file paths", () => {

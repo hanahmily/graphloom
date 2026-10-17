@@ -9,9 +9,11 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   activateRepair,
   createScriptedGraph,
+  defineExecutor,
   dispatch,
   observe,
   reenter,
+  returnToNormal,
   stop,
   supervise,
   validate,
@@ -19,7 +21,7 @@ import {
   type GraphDefinition,
   type Validator,
 } from "@graphloom/sdk";
-import { createScriptedRunner } from "@graphloom/runner";
+import { createScriptedRunner, createTrustedInProcessRunner } from "@graphloom/runner";
 import { createPiSupervisor, createScriptedSupervisor, type PiSupervisorSessionPort } from "@graphloom/supervisor";
 import { createController, loadRunState, type RepairDeps } from "./index.js";
 
@@ -386,6 +388,61 @@ describe("inadmissible supervisor proposals (#117)", () => {
     ]);
     expect(state.supervisorOutcomes?.[0]?.rejections).toHaveLength(3);
     expect(state.supervisorOutcomes?.[0]?.rejections[0]).toMatch(/^dispatch: a work job needs a non-empty writeScope/);
+  });
+
+  it("rejects in-turn a supervisor dispatch whose input fails the pinned executor's schema, and admits a valid one", async () => {
+    // Run 4c70ff66-dd9: the supervisor composed graphloom.coding-agent/run jobs
+    // without an assignment; they were admitted and failed inside the executor
+    // as executor_failed instead of being refused within the turn.
+    const env = await makeEnv("budgets:\n  decisions: 20\n");
+    const inputs: unknown[] = [];
+    const agentRun = defineExecutor({
+      id: "acme.agent/run",
+      effect: "write",
+      inputSchema: (v): v is { assignment: string } => typeof v === "object" && v !== null && typeof (v as { assignment?: unknown }).assignment === "string",
+      async execute(input) {
+        inputs.push(input);
+        return { status: "ok" as const, summary: "ran" };
+      },
+    });
+    const rejections: Array<string | undefined> = [];
+    const work = (input: Record<string, unknown>) =>
+      dispatch({ stageId: "write", kind: "agent", purpose: "work", instruction: "write", writeScope: [GREETING_PATH], executor: { id: "acme.agent/run" }, input }, "redo the write");
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({ definition, advances: [supervise({ reason: "unfamiliar" }, "escalate"), ...finish] }),
+      validators: goodValidators,
+      supervisor: createScriptedSupervisor({
+        decisions: [
+          (input: { rejection?: { reason: string } }) => {
+            rejections.push(input.rejection?.reason);
+            return work({ harness: "claude-code" });
+          },
+          (input: { rejection?: { reason: string } }) => {
+            rejections.push(input.rejection?.reason);
+            return work({ assignment: "Write GREETING.txt." });
+          },
+          returnToNormal({ summary: "the write ran" }, "hand back"),
+        ],
+      }),
+      runner: createTrustedInProcessRunner({ executors: [agentRun], fallback: runner() }),
+      stateRoot: env.stateRoot,
+      runId: "executor-input-rejected",
+    });
+
+    expect(report.status, report.blocker).toBe("succeeded");
+    // The second ask, in the same turn, carries the rejection naming the executor and its schema.
+    expect(rejections[0]).toBeUndefined();
+    expect(rejections[1]).toBe(
+      "executor input rejected: executor acme.agent/run: input failed schema validation; the job was not run: compose its input as acme.agent/run requires",
+    );
+    // Only the valid dispatch reached the executor.
+    expect(inputs).toEqual([{ assignment: "Write GREETING.txt." }]);
+    const state = await loadRunState(report.stateDir);
+    expect(state.evidence.some((e) => JSON.stringify(e.payload).includes("executorFailure"))).toBe(false);
+    expect(state.supervisorOutcomes).toBeUndefined();
+    // 20 - 1 (the graph's supervise) - 1 (the rejection) - 2 (the admitted dispatch and return) - 6 (finish): the rejection is charged.
+    expect(state.budgets.decisions).toBe(10);
   });
 
   it("charges each rejection to the decisions budget: two rejections and an admitted stop spend three", async () => {

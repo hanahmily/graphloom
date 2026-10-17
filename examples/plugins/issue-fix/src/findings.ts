@@ -67,6 +67,19 @@ export interface Finding {
   refutation?: { reason: string; quotes: Quote[]; digest: string };
   /** Quoted paths to observe on `on` before a refutation or a dismissal settles. */
   awaiting?: string[];
+  /** The candidate the verifier's latest verdict judged. */
+  verifiedOn?: string;
+  /** The code reviewer's latest word on this finding: its `prior` status and reason, or a comment naming it. */
+  note?: ReviewerNote;
+}
+
+/** What a review pass last said about a known finding, on which candidate, in which evidence record. */
+export interface ReviewerNote {
+  status: PriorStatus;
+  /** The reviewer's reason verbatim, with any file:line locations it names. */
+  reason: string;
+  digest: string;
+  ref: string;
 }
 
 export interface ReviewPass {
@@ -158,12 +171,40 @@ export function roundSummary(ledger: FindingLedger, digest: string, passes: Revi
   );
 }
 
-/** A finding with the verifier's argument, for the implementer, the supervisor or the pull request. */
-export function describeFinding(f: Finding): string {
+/**
+ * A finding with the verifier's argument, for the implementer, the supervisor
+ * or the pull request. A finding the reviewer last saw still present on a
+ * later candidate than the one it was reported on leads with that note: the
+ * original report and the verifier's quotes may describe code that has since
+ * been rewritten. `current` is the candidate the reader works on, when known.
+ */
+export function describeFinding(f: Finding, current?: string): string {
   const verdict = f.state === "dismissed" ? f.refutation : f.state === "disputed" ? { reason: f.dispute ?? "", quotes: [] } : f.verdict;
   const quotes = (verdict?.quotes ?? []).slice(0, 4).map((q) => `${q.path}:${q.line} \`${clip(q.text, 160)}\``);
   const why = verdict !== undefined && verdict.reason.trim() !== "" ? ` Verifier: ${clip(verdict.reason, 600)}` : "";
-  return `${f.id} ${describeComment(f.comment)}${why}${quotes.length > 0 ? ` (${quotes.join("; ")})` : ""}`;
+  const report = `${describeComment(f.comment)}${why}${quotes.length > 0 ? ` (${quotes.join("; ")})` : ""}`;
+  const note = stillPresentNote(f);
+  if (note === undefined) return `${f.id} ${report}`;
+  const reportedOn = f.verifiedOn ?? f.raisedOn;
+  // Reported and re-checked on the same candidate: nothing in the report is stale.
+  if (reportedOn === note.digest) return `${f.id} ${report.replace(/\.$/, "")}. ${reviewerLead(note, current)}`;
+  return (
+    `${f.id} ${reviewerLead(note, current)} Background, the original report ` +
+    `(it describes an earlier revision, candidate ${shortDigest(reportedOn)}; its line numbers and quotes may no longer match the code): ${report}`
+  );
+}
+
+/** The reviewer's latest note on an open finding, when its last status was still present. */
+export function stillPresentNote(f: Finding): ReviewerNote | undefined {
+  return isOpen(f) && f.note?.status === "still_present" ? f.note : undefined;
+}
+
+export const shortDigest = (digest: string): string => digest.slice(0, 8);
+
+function reviewerLead(note: ReviewerNote, current: string | undefined): string {
+  const on =
+    current === undefined ? `on candidate ${shortDigest(note.digest)}` : note.digest === current ? "on the current candidate" : `on candidate ${shortDigest(note.digest)}, before your latest change`;
+  return `Reviewer, latest pass ${on} (${note.ref}): still present — ${clip(note.reason, 1_500).replace(/\.$/, "")}.`;
 }
 
 function applyPass(ledger: FindingLedger, run: AgentRun, digest: string, files: FileIndex): void {
@@ -181,10 +222,23 @@ function applyPass(ledger: FindingLedger, run: AgentRun, digest: string, files: 
     if (known !== undefined) updateComment(known, c);
   }
   const status = new Map<string, PriorStatus>();
-  for (const p of report.prior) if (!status.has(p.finding)) status.set(p.finding, p.status);
+  const note = (id: string, s: PriorStatus, reason: string) => {
+    const known = findingById(ledger, id);
+    if (known !== undefined && reason.trim() !== "") known.note = { status: s, reason: reason.trim(), digest, ref: run.record.ref };
+  };
+  for (const p of report.prior) {
+    if (status.has(p.finding)) continue;
+    status.set(p.finding, p.status);
+    // The reviewer's latest reason, not only its status: the implementer must
+    // read what the reviewer saw on this candidate, not the original report.
+    note(p.finding, p.status, p.reason);
+  }
   // A comment that names an open finding says it is still there.
   for (const c of report.comments) {
-    if (c.finding !== undefined && open.some((f) => f.id === c.finding) && !status.has(c.finding)) status.set(c.finding, "still_present");
+    if (c.finding !== undefined && open.some((f) => f.id === c.finding) && !status.has(c.finding)) {
+      status.set(c.finding, "still_present");
+      note(c.finding, "still_present", [describeComment(c), ...(c.evidence !== undefined ? [clip(c.evidence, 1_200)] : [])].join(" "));
+    }
   }
   for (const f of open) {
     const s = status.get(f.id);
@@ -255,6 +309,7 @@ function applyVerification(ledger: FindingLedger, run: AgentRun, digest: string,
       continue;
     }
     f.verdict = v;
+    f.verifiedOn = digest;
     if (v.verdict === "uncertain") {
       dispute(f, digest, v.reason || "the verifier could not decide");
     } else if (v.verdict === "confirmed") {

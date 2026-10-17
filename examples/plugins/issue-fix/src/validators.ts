@@ -221,7 +221,7 @@ export const codeReview: Validator = {
     if (waiting.length > 0) return inconclusive(`finding(s) ${waiting.map((f) => f.id).join(", ")} await verification`);
     const blocking = ledger.findings.filter((f) => f.state === "confirmed" || f.state === "disputed");
     if (blocking.length > 0) {
-      return failed(`${blocking.length} critical or high finding(s) confirmed or disputed: ${blocking.slice(0, 3).map(describeFinding).join("; ")}`);
+      return failed(`${blocking.length} critical or high finding(s) confirmed or disputed: ${blocking.slice(0, 3).map((f) => describeFinding(f, input.candidateDigest)).join("; ")}`);
     }
     const survived = pass.raised.filter((id) => findingById(ledger, id)?.state !== "dismissed");
     if (survived.length > 0) return failed(`the latest pass raised finding(s) ${survived.join(", ")} that verification did not dismiss`);

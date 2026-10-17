@@ -102,4 +102,13 @@ export interface Runner {
   runJob(job: JobSpec, ctx: JobContext): Promise<JobResult>;
   /** Executors this runner (and its fallbacks) serve, for pinning at intake and checking on resume. */
   describeExecutors?(): Promise<ExecutorDescriptor[]>;
+  /**
+   * Whether the job's executor would refuse the job before running it: its
+   * pinned version, declared effect, or input schema, exactly as the executor
+   * would check them at run time. Returns the executor's refusal, or
+   * undefined when it would accept the job or this runner cannot tell (an
+   * executor it does not serve, a check that could not be made). Runs no
+   * executor code beyond the executor's own declared schema, and no job.
+   */
+  checkJob?(job: JobSpec, ctx?: Pick<JobContext, "executorSource">): Promise<string | undefined>;
 }

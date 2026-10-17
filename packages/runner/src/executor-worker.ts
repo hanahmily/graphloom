@@ -3,6 +3,7 @@
  *
  * Protocol (one JSON object per line on stdin/stdout, one execute per process):
  *   → { kind: "describe" }                                  ← { kind: "described", executors: [{ id, version?, effect }] }
+ *   → { kind: "check", id, version?, effect?, input, allowedEffects? } ← { kind: "checked", refusal? }
  *   → { kind: "execute", id, version?, effect?, input, ctx, credentials?, allowedEffects?, tools?, usage? }
  *   ← { kind: "tool_call", seq, toolCallId, tool, input }   → { kind: "tool_result", seq, result }
  *   ← { kind: "model_call", seq }                           → { kind: "model_call_result", seq, granted }
@@ -160,6 +161,14 @@ for await (const line of rl) {
       kind: "described",
       executors: [...byId.values()].map((d) => ({ id: d.id, version: d.version, effect: d.effect })),
     });
+    continue;
+  }
+  if (msg?.kind === "check" && typeof msg.id === "string") {
+    // The refusal execute would give, without executing: lets the host reject
+    // a job before admitting it.
+    const def = byId.get(msg.id);
+    const refused = def ? refusal(def, msg) : `unknown executor ${msg.id}`;
+    reply({ kind: "checked", ...(refused !== undefined ? { refusal: refused } : {}) });
     continue;
   }
   if (msg?.kind !== "execute" || typeof msg.id !== "string" || running !== undefined) {
