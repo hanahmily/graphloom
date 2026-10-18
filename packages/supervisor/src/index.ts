@@ -91,3 +91,36 @@ export {
   type ProviderFailure,
   type ProviderFailureClass,
 } from "./provider-failure.js";
+
+export {
+  boundValue,
+  shrinkJson,
+  boundRejections,
+  buildEpisodeRecord,
+  fitEpisodeRecord,
+  createEpisodeRecorder,
+  inspectionToolInput,
+  toolInputKey,
+  MAX_EPISODE_RECORDS,
+  MAX_EPISODE_RECORD_CHARS,
+  MAX_EPISODE_TOOL_CALLS,
+  MAX_EPISODE_TOOL_RESULT_CHARS,
+  type EpisodeAdmission,
+  type EpisodeOutcome,
+  type EpisodeRecorder,
+  type EpisodeToolCall,
+  type SupervisorEpisodeRecord,
+} from "./episode.js";
+
+export {
+  isAcceptable,
+  replayRefusal,
+  loadReplayFixtures,
+  replayEpisodes,
+  DEFAULT_FIXTURE_DIR,
+  type AcceptableAction,
+  type EpisodeLabel,
+  type ReplayEpisodeResult,
+  type ReplayOptions,
+  type ReplayScore,
+} from "./episode-replay.js";

@@ -1,0 +1,148 @@
+[
+  {
+    "episodeId": "ep-1",
+    "acceptable": [
+      {
+        "type": "validate",
+        "stageId": "fix"
+      }
+    ],
+    "note": "Fix is complete per admitValidation but the supervisor believes otherwise: validate(fix). Reconstructed from issue #122's description of run 9bfa446d-4ea (apache/skywalking#14092); the run's raw state was not available."
+  },
+  {
+    "episodeId": "ep-2",
+    "acceptable": [
+      {
+        "type": "validate",
+        "stageId": "fix"
+      }
+    ],
+    "note": "Validation would pass; stalled run needs the receipt: validate(fix). Reconstructed from issue #122's description of run 9bfa446d-4ea (apache/skywalking#14092); the run's raw state was not available."
+  },
+  {
+    "episodeId": "ep-3",
+    "acceptable": [
+      {
+        "type": "return"
+      }
+    ],
+    "note": "Candidate is already active: return to the graph. Reconstructed from issue #122's description of run 9bfa446d-4ea (apache/skywalking#14092); the run's raw state was not available."
+  },
+  {
+    "episodeId": "ep-4",
+    "acceptable": [
+      {
+        "type": "return"
+      }
+    ],
+    "note": "Candidate already active and the run advanced: return. Reconstructed from issue #122's description of run 9bfa446d-4ea (apache/skywalking#14092); the run's raw state was not available."
+  },
+  {
+    "episodeId": "ep-5",
+    "acceptable": [
+      {
+        "type": "reenter",
+        "stageId": "fix"
+      },
+      {
+        "type": "dispatch",
+        "stageId": "fix",
+        "purpose": "work"
+      }
+    ],
+    "note": "Review confirmed findings: reenter(fix) or dispatch(work). Reconstructed from issue #122's description of run 9bfa446d-4ea (apache/skywalking#14092); the run's raw state was not available."
+  },
+  {
+    "episodeId": "ep-6",
+    "acceptable": [
+      {
+        "type": "reenter",
+        "stageId": "fix"
+      },
+      {
+        "type": "dispatch",
+        "stageId": "fix",
+        "purpose": "work"
+      }
+    ],
+    "note": "Review confirmed findings on the current candidate: reenter(fix) or dispatch(work). Reconstructed from issue #122's description of run 9bfa446d-4ea (apache/skywalking#14092); the run's raw state was not available."
+  },
+  {
+    "episodeId": "ep-7",
+    "acceptable": [
+      {
+        "type": "dispatch",
+        "stageId": "revert",
+        "purpose": "work"
+      },
+      {
+        "type": "reenter",
+        "stageId": "revert"
+      }
+    ],
+    "note": "Revert patch no longer applies: ask for a fresh revert, not a controller repair. Reconstructed from issue #122's description of run 9bfa446d-4ea (apache/skywalking#14092); the run's raw state was not available."
+  },
+  {
+    "episodeId": "ep-8",
+    "acceptable": [
+      {
+        "type": "dispatch",
+        "stageId": "revert",
+        "purpose": "work"
+      },
+      {
+        "type": "reenter",
+        "stageId": "revert"
+      }
+    ],
+    "note": "Stale revert patch: a fresh revert is requested; qualify_repair is not acceptable. Reconstructed from issue #122's description of run 9bfa446d-4ea (apache/skywalking#14092); the run's raw state was not available."
+  },
+  {
+    "episodeId": "ep-9",
+    "acceptable": [
+      {
+        "type": "return"
+      },
+      {
+        "type": "observe"
+      }
+    ],
+    "note": "Host restarted after a plugin crash: return to the graph or observe. Reconstructed from issue #122's description of run 9bfa446d-4ea (apache/skywalking#14092); the run's raw state was not available."
+  },
+  {
+    "episodeId": "ep-10",
+    "acceptable": [
+      {
+        "type": "observe"
+      },
+      {
+        "type": "qualify_repair"
+      },
+      {
+        "type": "stop"
+      }
+    ],
+    "note": "Environment drift needs observation, a repair, or a stop. Reconstructed from issue #122's description of run 9bfa446d-4ea (apache/skywalking#14092); the run's raw state was not available."
+  },
+  {
+    "episodeId": "ep-11",
+    "acceptable": [
+      {
+        "type": "activate_repair"
+      }
+    ],
+    "note": "A qualified candidate exists and activation would be admitted: activate_repair. Reconstructed from issue #122's description of run 9bfa446d-4ea (apache/skywalking#14092); the run's raw state was not available."
+  },
+  {
+    "episodeId": "ep-12",
+    "acceptable": [
+      {
+        "type": "return"
+      },
+      {
+        "type": "observe"
+      }
+    ],
+    "note": "Malformed plugin reply, no repair offered: return or observe. Reconstructed from issue #122's description of run 9bfa446d-4ea (apache/skywalking#14092); the run's raw state was not available."
+  }
+]

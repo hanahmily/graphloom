@@ -10,6 +10,7 @@ import type {
   StageAttempt,
   ValidatorBinding,
 } from "@graphloom/sdk";
+import type { SupervisorEpisodeRecord } from "@graphloom/supervisor";
 import type { IntakePin } from "./intake.js";
 import { withDirectoryLock } from "./lock.js";
 
@@ -337,6 +338,13 @@ export interface DurableRunState {
   supervisorMark?: SupervisorMark;
   /** Supervisor turns that ended without an admitted proposal, newest last (bounded). */
   supervisorOutcomes?: SupervisorOutcomeRecord[];
+  /**
+   * One record per supervisor decide() call: its input, the tool calls and
+   * results, the proposal and the admission outcome (see @graphloom/supervisor
+   * episode.ts). Newest last, bounded in count and in each record's size; the
+   * input of a replay (`replayEpisodes`).
+   */
+  supervisorEpisodes?: SupervisorEpisodeRecord[];
   /** Isolated repair candidates for this run (never the live install). */
   repairCandidates?: import("./repair.js").QualifiedRepairArtifact[];
   /** Crash-safe activation journal; cleared after successful switch. */

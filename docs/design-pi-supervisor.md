@@ -508,6 +508,46 @@ or allowance stop by name; a `minimax-cn` session replays an empty-signature
 thinking block as thinking (through a local Anthropic-compatible endpoint); and
 settlements reach the next prompt. The MiniMax connectivity check above remains the only live check.
 
+## Episode records and replay scoring (#122)
+
+Every `decide()` call leaves one record in `DurableRunState.supervisorEpisodes`
+(newest 50 kept): the trigger, the run view, the case file, the last settlement, the rejection and the
+provider-call and wait allowances the call ran under, every inspection or `record_finding`
+call with its result, the proposal, the error if it failed, the controller's
+admission outcome (`admitted`, `inadmissible`, `model_switch`, `error`,
+`aborted`) with the turn's rejections, and the provider calls spent. Tool results
+are bounded at 8,000 characters and a record at 64 KB (`truncated: true`): what
+does not fit is shrunk field by field, long strings cut and long arrays reduced
+to their newest entries, so every field keeps its shape. The
+controller wraps `input.inspect` and `input.recordFinding`, so any supervisor is
+recorded the same way.
+
+`replayEpisodes` (`@graphloom/supervisor`) feeds recorded episodes to a supervisor
+configuration. Tool results come from the record, and admission is judged against
+the facts recorded for the episode. The score is the share of proposals inside
+each episode's labeled acceptable set, plus inadmissible proposals, probes
+(`check_*` calls), provider calls and tokens per episode. A label is keyed by episode id and turn and lists acceptable actions, each
+with an optional stage and, for `dispatch`, a purpose. A proposal the recorded
+facts refuse (by type or by a parameter such as an unqualified artifact id), or a
+turn that spent its three-rejection allowance, counts as an inadmissible stop.
+A record keeps the call's rejection feedback and its provider-call and wait
+allowances, and replay restores them. A tool call that threw live rejects in
+replay, and one the record does not hold is reported as not recorded, never
+answered with another call's result. The `Supervisor` interface reports
+provider calls, not tokens, so tokens come from an optional `tokens` callback
+(0 when absent). An episode whose `decide()` does not settle within the timeout is
+aborted and scored as failed.
+
+The 12 fixtures in `packages/supervisor/fixtures/episodes/9bfa446d-4ea/` are
+reconstructed from the issue's description of run 9bfa446d-4ea; each label's note
+says so. CI (`npm test`) scores a scripted baseline over them with no provider
+calls. To score a live configuration (opt-in, spends provider calls):
+
+```sh
+GRAPHLOOM_REPLAY_LIVE=1 npm run replay:live -w @graphloom/supervisor -- \
+  --provider minimax-cn --model MiniMax-M3
+```
+
 ## Raw provider stream capture
 
 `rawStreamCapture: true` in the supervisor config records every supervisor

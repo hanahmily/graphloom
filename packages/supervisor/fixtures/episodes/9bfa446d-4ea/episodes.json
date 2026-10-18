@@ -1,0 +1,723 @@
+[
+  {
+    "episodeId": "ep-1",
+    "turn": 1,
+    "runId": "9bfa446d-4ea",
+    "at": "2026-10-01T00:00:00.000Z",
+    "input": {
+      "trigger": {
+        "code": "supervise",
+        "message": "fix looks incomplete; no receipt for the fix stage"
+      },
+      "view": {
+        "runId": "9bfa446d-4ea",
+        "task": {
+          "request": "Fix apache/skywalking#14092",
+          "repo": "."
+        },
+        "current": {
+          "stageId": "fix",
+          "attempt": 2
+        },
+        "receipts": [],
+        "evidence": [],
+        "outstanding": [],
+        "budgets": {
+          "agentInvocations": 40,
+          "jobs": 40,
+          "decisions": 20,
+          "corrections": 4
+        },
+        "validatorBindings": [],
+        "generation": 1,
+        "stateRevision": 30,
+        "activeVersion": "banyandb-fix@0.1.0",
+        "recoveryEpisodeId": "ep-1"
+      }
+    },
+    "toolCalls": [
+      {
+        "name": "check_validate",
+        "input": {
+          "stageId": "fix"
+        },
+        "result": {
+          "probeId": "probe-1",
+          "accepted": true,
+          "reason": "fix requirements pass under admitValidation",
+          "stateRevision": 30,
+          "evaluated": true
+        }
+      }
+    ],
+    "admission": {
+      "facts": {
+        "inRecovery": true,
+        "canQualify": true,
+        "qualifiedArtifactIds": []
+      },
+      "rejections": [],
+      "outcome": "admitted"
+    },
+    "providerCalls": 1
+  },
+  {
+    "episodeId": "ep-2",
+    "turn": 1,
+    "runId": "9bfa446d-4ea",
+    "at": "2026-10-01T00:00:00.000Z",
+    "input": {
+      "trigger": {
+        "code": "stalled",
+        "message": "no progress since the last decision"
+      },
+      "view": {
+        "runId": "9bfa446d-4ea",
+        "task": {
+          "request": "Fix apache/skywalking#14092",
+          "repo": "."
+        },
+        "current": {
+          "stageId": "fix",
+          "attempt": 2
+        },
+        "receipts": [],
+        "evidence": [],
+        "outstanding": [],
+        "budgets": {
+          "agentInvocations": 40,
+          "jobs": 40,
+          "decisions": 20,
+          "corrections": 4
+        },
+        "validatorBindings": [],
+        "generation": 1,
+        "stateRevision": 30,
+        "activeVersion": "banyandb-fix@0.1.0",
+        "recoveryEpisodeId": "ep-2"
+      }
+    },
+    "toolCalls": [
+      {
+        "name": "check_validate",
+        "input": {
+          "stageId": "fix"
+        },
+        "result": {
+          "probeId": "probe-1",
+          "accepted": true,
+          "reason": "all fix requirements passed",
+          "stateRevision": 30,
+          "evaluated": true
+        }
+      }
+    ],
+    "admission": {
+      "facts": {
+        "inRecovery": true,
+        "canQualify": true,
+        "qualifiedArtifactIds": []
+      },
+      "rejections": [],
+      "outcome": "admitted"
+    },
+    "providerCalls": 1
+  },
+  {
+    "episodeId": "ep-3",
+    "turn": 1,
+    "runId": "9bfa446d-4ea",
+    "at": "2026-10-01T00:00:00.000Z",
+    "input": {
+      "trigger": {
+        "code": "supervise",
+        "message": "repair candidate qualified earlier"
+      },
+      "view": {
+        "runId": "9bfa446d-4ea",
+        "task": {
+          "request": "Fix apache/skywalking#14092",
+          "repo": "."
+        },
+        "current": {
+          "stageId": "fix",
+          "attempt": 2
+        },
+        "receipts": [],
+        "evidence": [],
+        "outstanding": [],
+        "budgets": {
+          "agentInvocations": 40,
+          "jobs": 40,
+          "decisions": 20,
+          "corrections": 4
+        },
+        "validatorBindings": [],
+        "generation": 1,
+        "stateRevision": 30,
+        "activeVersion": "banyandb-fix@0.1.0",
+        "recoveryEpisodeId": "ep-3",
+        "repairCandidates": [
+          {
+            "artifactId": "cand-1",
+            "status": "active",
+            "target": "plugin",
+            "reason": "repair",
+            "candidateDigest": "d1"
+          }
+        ]
+      }
+    },
+    "toolCalls": [
+      {
+        "name": "check_activation",
+        "input": {
+          "artifactId": "cand-1"
+        },
+        "result": {
+          "probeId": "probe-1",
+          "accepted": false,
+          "reason": "cand-1 is already active",
+          "stateRevision": 30
+        }
+      }
+    ],
+    "admission": {
+      "facts": {
+        "inRecovery": true,
+        "canQualify": true,
+        "qualifiedArtifactIds": []
+      },
+      "rejections": [],
+      "outcome": "admitted"
+    },
+    "providerCalls": 1
+  },
+  {
+    "episodeId": "ep-4",
+    "turn": 1,
+    "runId": "9bfa446d-4ea",
+    "at": "2026-10-01T00:00:00.000Z",
+    "input": {
+      "trigger": {
+        "code": "stalled",
+        "message": "recovery stalled after activation"
+      },
+      "view": {
+        "runId": "9bfa446d-4ea",
+        "task": {
+          "request": "Fix apache/skywalking#14092",
+          "repo": "."
+        },
+        "current": {
+          "stageId": "fix",
+          "attempt": 2
+        },
+        "receipts": [],
+        "evidence": [],
+        "outstanding": [],
+        "budgets": {
+          "agentInvocations": 40,
+          "jobs": 40,
+          "decisions": 20,
+          "corrections": 4
+        },
+        "validatorBindings": [],
+        "generation": 1,
+        "stateRevision": 30,
+        "activeVersion": "banyandb-fix@0.1.0",
+        "recoveryEpisodeId": "ep-4",
+        "repairCandidates": [
+          {
+            "artifactId": "cand-2",
+            "status": "active",
+            "target": "plugin",
+            "reason": "repair",
+            "candidateDigest": "d2"
+          }
+        ]
+      }
+    },
+    "toolCalls": [],
+    "admission": {
+      "facts": {
+        "inRecovery": true,
+        "canQualify": true,
+        "qualifiedArtifactIds": []
+      },
+      "rejections": [],
+      "outcome": "admitted"
+    },
+    "providerCalls": 1
+  },
+  {
+    "episodeId": "ep-5",
+    "turn": 1,
+    "runId": "9bfa446d-4ea",
+    "at": "2026-10-01T00:00:00.000Z",
+    "input": {
+      "trigger": {
+        "code": "correction_limit",
+        "message": "stage fix is still unresolved"
+      },
+      "view": {
+        "runId": "9bfa446d-4ea",
+        "task": {
+          "request": "Fix apache/skywalking#14092",
+          "repo": "."
+        },
+        "current": {
+          "stageId": "fix",
+          "attempt": 2
+        },
+        "receipts": [],
+        "evidence": [],
+        "outstanding": [],
+        "budgets": {
+          "agentInvocations": 40,
+          "jobs": 40,
+          "decisions": 20,
+          "corrections": 4
+        },
+        "validatorBindings": [],
+        "generation": 1,
+        "stateRevision": 30,
+        "activeVersion": "banyandb-fix@0.1.0",
+        "recoveryEpisodeId": "ep-5"
+      }
+    },
+    "toolCalls": [
+      {
+        "name": "list_evidence",
+        "input": {
+          "stageId": "fix",
+          "kind": "review"
+        },
+        "result": [
+          {
+            "ref": "ev-9",
+            "kind": "review",
+            "stageId": "fix"
+          }
+        ]
+      }
+    ],
+    "admission": {
+      "facts": {
+        "inRecovery": true,
+        "canQualify": true,
+        "qualifiedArtifactIds": []
+      },
+      "rejections": [],
+      "outcome": "admitted"
+    },
+    "providerCalls": 1
+  },
+  {
+    "episodeId": "ep-6",
+    "turn": 1,
+    "runId": "9bfa446d-4ea",
+    "at": "2026-10-01T00:00:00.000Z",
+    "input": {
+      "trigger": {
+        "code": "correction_limit",
+        "message": "review confirmed 2 findings"
+      },
+      "view": {
+        "runId": "9bfa446d-4ea",
+        "task": {
+          "request": "Fix apache/skywalking#14092",
+          "repo": "."
+        },
+        "current": {
+          "stageId": "fix",
+          "attempt": 2
+        },
+        "receipts": [],
+        "evidence": [],
+        "outstanding": [],
+        "budgets": {
+          "agentInvocations": 40,
+          "jobs": 40,
+          "decisions": 20,
+          "corrections": 4
+        },
+        "validatorBindings": [],
+        "generation": 1,
+        "stateRevision": 30,
+        "activeVersion": "banyandb-fix@0.1.0",
+        "recoveryEpisodeId": "ep-6"
+      }
+    },
+    "toolCalls": [
+      {
+        "name": "get_evidence",
+        "input": {
+          "ref": "ev-9"
+        },
+        "result": {
+          "ref": "ev-9",
+          "kind": "review",
+          "stageId": "fix"
+        }
+      }
+    ],
+    "admission": {
+      "facts": {
+        "inRecovery": true,
+        "canQualify": true,
+        "qualifiedArtifactIds": []
+      },
+      "rejections": [],
+      "outcome": "admitted"
+    },
+    "providerCalls": 1
+  },
+  {
+    "episodeId": "ep-7",
+    "turn": 1,
+    "runId": "9bfa446d-4ea",
+    "at": "2026-10-01T00:00:00.000Z",
+    "input": {
+      "trigger": {
+        "code": "contract_violation",
+        "message": "revert patch no longer applies to the workspace"
+      },
+      "view": {
+        "runId": "9bfa446d-4ea",
+        "task": {
+          "request": "Fix apache/skywalking#14092",
+          "repo": "."
+        },
+        "current": {
+          "stageId": "revert",
+          "attempt": 1
+        },
+        "receipts": [],
+        "evidence": [],
+        "outstanding": [],
+        "budgets": {
+          "agentInvocations": 40,
+          "jobs": 40,
+          "decisions": 20,
+          "corrections": 4
+        },
+        "validatorBindings": [],
+        "generation": 1,
+        "stateRevision": 30,
+        "activeVersion": "banyandb-fix@0.1.0",
+        "recoveryEpisodeId": "ep-7"
+      }
+    },
+    "toolCalls": [
+      {
+        "name": "check_checkout",
+        "input": {
+          "files": []
+        },
+        "result": {
+          "probeId": "probe-1",
+          "accepted": false,
+          "reason": "the revert patch does not apply",
+          "stateRevision": 30
+        }
+      }
+    ],
+    "admission": {
+      "facts": {
+        "inRecovery": true,
+        "canQualify": true,
+        "qualifiedArtifactIds": []
+      },
+      "rejections": [],
+      "outcome": "admitted"
+    },
+    "providerCalls": 1
+  },
+  {
+    "episodeId": "ep-8",
+    "turn": 1,
+    "runId": "9bfa446d-4ea",
+    "at": "2026-10-01T00:00:00.000Z",
+    "input": {
+      "trigger": {
+        "code": "executor_failed",
+        "message": "git apply -R failed on the recorded revert patch"
+      },
+      "view": {
+        "runId": "9bfa446d-4ea",
+        "task": {
+          "request": "Fix apache/skywalking#14092",
+          "repo": "."
+        },
+        "current": {
+          "stageId": "revert",
+          "attempt": 2
+        },
+        "receipts": [],
+        "evidence": [],
+        "outstanding": [],
+        "budgets": {
+          "agentInvocations": 40,
+          "jobs": 40,
+          "decisions": 20,
+          "corrections": 4
+        },
+        "validatorBindings": [],
+        "generation": 1,
+        "stateRevision": 30,
+        "activeVersion": "banyandb-fix@0.1.0",
+        "recoveryEpisodeId": "ep-8"
+      }
+    },
+    "toolCalls": [
+      {
+        "name": "diff_candidate",
+        "input": {},
+        "result": {
+          "diff": "diff --git a/x b/x\n"
+        }
+      }
+    ],
+    "admission": {
+      "facts": {
+        "inRecovery": true,
+        "canQualify": true,
+        "qualifiedArtifactIds": []
+      },
+      "rejections": [],
+      "outcome": "admitted"
+    },
+    "providerCalls": 1
+  },
+  {
+    "episodeId": "ep-9",
+    "turn": 1,
+    "runId": "9bfa446d-4ea",
+    "at": "2026-10-01T00:00:00.000Z",
+    "input": {
+      "trigger": {
+        "code": "plugin_crash",
+        "message": "plugin child exited; host restarted"
+      },
+      "view": {
+        "runId": "9bfa446d-4ea",
+        "task": {
+          "request": "Fix apache/skywalking#14092",
+          "repo": "."
+        },
+        "current": {
+          "stageId": "fix",
+          "attempt": 2
+        },
+        "receipts": [],
+        "evidence": [],
+        "outstanding": [],
+        "budgets": {
+          "agentInvocations": 40,
+          "jobs": 40,
+          "decisions": 20,
+          "corrections": 4
+        },
+        "validatorBindings": [],
+        "generation": 1,
+        "stateRevision": 30,
+        "activeVersion": "banyandb-fix@0.1.0",
+        "recoveryEpisodeId": "ep-9"
+      }
+    },
+    "toolCalls": [],
+    "admission": {
+      "facts": {
+        "inRecovery": true,
+        "canQualify": true,
+        "qualifiedArtifactIds": []
+      },
+      "rejections": [],
+      "outcome": "admitted"
+    },
+    "providerCalls": 1
+  },
+  {
+    "episodeId": "ep-10",
+    "turn": 1,
+    "runId": "9bfa446d-4ea",
+    "at": "2026-10-01T00:00:00.000Z",
+    "input": {
+      "trigger": {
+        "code": "environment_changed",
+        "message": "pinned environment files changed"
+      },
+      "view": {
+        "runId": "9bfa446d-4ea",
+        "task": {
+          "request": "Fix apache/skywalking#14092",
+          "repo": "."
+        },
+        "current": {
+          "stageId": "fix",
+          "attempt": 2
+        },
+        "receipts": [],
+        "evidence": [],
+        "outstanding": [],
+        "budgets": {
+          "agentInvocations": 40,
+          "jobs": 40,
+          "decisions": 20,
+          "corrections": 4
+        },
+        "validatorBindings": [],
+        "generation": 1,
+        "stateRevision": 30,
+        "activeVersion": "banyandb-fix@0.1.0",
+        "recoveryEpisodeId": "ep-10"
+      }
+    },
+    "toolCalls": [
+      {
+        "name": "check_validate",
+        "input": {
+          "stageId": "fix"
+        },
+        "result": {
+          "probeId": "probe-1",
+          "accepted": false,
+          "reason": "environment block",
+          "stateRevision": 30,
+          "evaluated": true
+        }
+      }
+    ],
+    "admission": {
+      "facts": {
+        "inRecovery": true,
+        "canQualify": true,
+        "qualifiedArtifactIds": []
+      },
+      "rejections": [],
+      "outcome": "admitted"
+    },
+    "providerCalls": 1
+  },
+  {
+    "episodeId": "ep-11",
+    "turn": 1,
+    "runId": "9bfa446d-4ea",
+    "at": "2026-10-01T00:00:00.000Z",
+    "input": {
+      "trigger": {
+        "code": "supervise",
+        "message": "qualified candidate waiting"
+      },
+      "view": {
+        "runId": "9bfa446d-4ea",
+        "task": {
+          "request": "Fix apache/skywalking#14092",
+          "repo": "."
+        },
+        "current": {
+          "stageId": "fix",
+          "attempt": 2
+        },
+        "receipts": [],
+        "evidence": [],
+        "outstanding": [],
+        "budgets": {
+          "agentInvocations": 40,
+          "jobs": 40,
+          "decisions": 20,
+          "corrections": 4
+        },
+        "validatorBindings": [],
+        "generation": 1,
+        "stateRevision": 30,
+        "activeVersion": "banyandb-fix@0.1.0",
+        "recoveryEpisodeId": "ep-11",
+        "repairCandidates": [
+          {
+            "artifactId": "cand-3",
+            "status": "qualified",
+            "target": "plugin",
+            "reason": "repair",
+            "candidateDigest": "d3"
+          }
+        ]
+      }
+    },
+    "toolCalls": [
+      {
+        "name": "check_activation",
+        "input": {
+          "artifactId": "cand-3"
+        },
+        "result": {
+          "probeId": "probe-1",
+          "accepted": true,
+          "reason": "cand-3 would activate",
+          "stateRevision": 30
+        }
+      }
+    ],
+    "admission": {
+      "facts": {
+        "inRecovery": true,
+        "canQualify": true,
+        "qualifiedArtifactIds": [
+          "cand-3"
+        ]
+      },
+      "rejections": [],
+      "outcome": "admitted"
+    },
+    "providerCalls": 1
+  },
+  {
+    "episodeId": "ep-12",
+    "turn": 1,
+    "runId": "9bfa446d-4ea",
+    "at": "2026-10-01T00:00:00.000Z",
+    "input": {
+      "trigger": {
+        "code": "plugin_malformed",
+        "message": "decision failed schema validation"
+      },
+      "view": {
+        "runId": "9bfa446d-4ea",
+        "task": {
+          "request": "Fix apache/skywalking#14092",
+          "repo": "."
+        },
+        "current": {
+          "stageId": "fix",
+          "attempt": 2
+        },
+        "receipts": [],
+        "evidence": [],
+        "outstanding": [],
+        "budgets": {
+          "agentInvocations": 40,
+          "jobs": 40,
+          "decisions": 20,
+          "corrections": 4
+        },
+        "validatorBindings": [],
+        "generation": 1,
+        "stateRevision": 30,
+        "activeVersion": "banyandb-fix@0.1.0",
+        "recoveryEpisodeId": "ep-12"
+      }
+    },
+    "toolCalls": [],
+    "admission": {
+      "facts": {
+        "inRecovery": true,
+        "canQualify": false,
+        "qualifiedArtifactIds": []
+      },
+      "rejections": [],
+      "outcome": "admitted"
+    },
+    "providerCalls": 1
+  }
+]
