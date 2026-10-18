@@ -1456,7 +1456,7 @@ describe("the issues file", () => {
     expect(body).toContain("## Review issues");
     expect(body).toContain("| I1 | P1 (high) | done | `pkg/timestamp/scheduler.go:88-95` | Close now waits forever for an action that ignores cancellation. | reviewer: Close bounds its wait now");
     const deliver = jobs.find((j) => commandIds(j).includes(COMMAND.deliver))!;
-    expect((deliver.input as { commands: Array<{ argv: string[] }> }).commands[0]!.argv[2]).toContain("git add -A -- . ':(exclude).graphloom'");
+    expect((deliver.input as { commands: Array<{ argv: string[] }> }).commands[0]!.argv[2]).toContain("git rm -r -q --cached --ignore-unmatch -- .graphloom");
   });
 
   it("reopens a fixed issue with the reviewer's note, hands that note to the fixer, and accepts the next fix", () => {

@@ -148,7 +148,10 @@ const DELIVER =
   'if git show-ref --verify --quiet "refs/heads/$branch"; then echo "branch $branch already exists" >&2; exit 1; fi; ' +
   'index="$(mktemp -u)"; trap \'rm -f "$index"\' EXIT; ' +
   // The issues file is the graph's, never part of the change, even where the repository does not ignore it.
-  `GIT_INDEX_FILE="$index" git read-tree HEAD; GIT_INDEX_FILE="$index" git add -A -- . ':(exclude)${ISSUES_DIR}'; tree="$(GIT_INDEX_FILE="$index" git write-tree)"; ` +
+  // It is dropped from the index after staging rather than excluded in the pathspec: naming a path the
+  // repository already ignores (GraphLoom's own .gitignore has .graphloom/) makes `git add` exit 1.
+  `GIT_INDEX_FILE="$index" git read-tree HEAD; GIT_INDEX_FILE="$index" git add -A -- .; ` +
+  `GIT_INDEX_FILE="$index" git rm -r -q --cached --ignore-unmatch -- ${ISSUES_DIR}; tree="$(GIT_INDEX_FILE="$index" git write-tree)"; ` +
   'commit="$(printf "%s\\n" "$message" | git commit-tree "$tree" -p HEAD)"; git branch "$branch" "$commit"; ' +
   'printf "%s\\n" "$body" > "$GRAPHLOOM_REPORT_FILE"; echo "$commit"';
 
