@@ -144,7 +144,28 @@ export function boundValue<T>(value: T, maxChars: number): { value: T; truncated
     const shrunk = shrinkJson(value, level);
     if (jsonLength(shrunk) <= maxChars) return { value: shrunk, truncated: true };
   }
-  return { value: shrinkJson(value, SHRINK_LEVELS[SHRINK_LEVELS.length - 1]!), truncated: true };
+  // Shallow objects keep every key at each level, so a very wide value may still not fit:
+  // fall back to a bounded preview so the limit always holds.
+  return { value: boundedPreview(value, maxChars) as T, truncated: true };
+}
+
+/** A string preview of `value` whose JSON encoding is at most `maxChars` characters. */
+function boundedPreview(value: unknown, maxChars: number): string {
+  let text: string;
+  try {
+    text = JSON.stringify(value) ?? "null";
+  } catch {
+    text = String(value);
+  }
+  const marker = `…[truncated ${text.length} chars]`;
+  let keep = Math.max(0, maxChars - marker.length - 2);
+  let preview = `${text.slice(0, keep)}${marker}`;
+  // JSON escaping can lengthen the preview; shorten until its encoding fits.
+  while (jsonLength(preview) > maxChars && keep > 0) {
+    keep = Math.max(0, keep - Math.max(16, jsonLength(preview) - maxChars));
+    preview = `${text.slice(0, keep)}${marker}`;
+  }
+  return jsonLength(preview) <= maxChars ? preview : marker.slice(0, Math.max(0, maxChars - 2));
 }
 
 /** The tool input a recorded call is keyed by, for the inspection method `name` called with `args`. */
