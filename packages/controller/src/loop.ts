@@ -27,6 +27,8 @@ import {
 import type { ExecutorSourceOverride, JobContext, Runner } from "@graphloom/runner";
 import type { PluginHost } from "@graphloom/plugin-host";
 import {
+  buildEpisodeRecord,
+  createEpisodeRecorder,
   isModelSwitchRequest,
   isSupervisorProviderError,
   type AdmissionCheck,
@@ -37,6 +39,7 @@ import {
   type SupervisorProposal,
 } from "@graphloom/supervisor";
 import { markProposal, noteOutcome, settleProposal } from "./settlement.js";
+import { appendEpisode, nextEpisodeTurn, settleEpisode } from "./episodes.js";
 import { liveCaseFile, recordAttempt, recordFinding, refreshCaseFile } from "./case-file.js";
 import {
   applyModelSwitch,
@@ -696,7 +699,14 @@ async function runNormalLoopSteps(
         let decided: SupervisorProposal | undefined;
         let decideError: unknown;
         let rejection: SupervisorRejection | undefined;
+        // The decide() call being recorded (see episodes.ts); 0 until the first returns.
+        let episodeTurn = 0;
+        const episodeRejections = (from: number) => rejections.slice(from).map((r) => `${r.action}: ${r.reason}`);
         for (;;) {
+          const recorder = createEpisodeRecorder();
+          const rejectedBefore = rejections.length;
+          const budgetBefore = state.budgets.agentInvocations;
+          const waitBefore = state.budgets.waitMs ?? 0;
           const abort = new AbortController();
           // Ends with the run's stop and with this turn, so a probe still running afterwards is cancelled.
           const turnEnded = new AbortController();
@@ -727,8 +737,8 @@ async function runNormalLoopSteps(
               ...(metered ? { maxProviderCalls: state.budgets.agentInvocations } : {}),
               maxWaitMs: state.budgets.waitMs ?? 0,
               caseFile,
-              recordFinding: recordCaseFinding,
-              inspect: inspection.inspection,
+              recordFinding: recorder.recordFinding(recordCaseFinding),
+              inspect: recorder.inspect(inspection.inspection),
             });
             decided = isModelSwitchRequest(proposal) ? proposal : assertGraphDecision(proposal);
           } catch (err) {
@@ -743,12 +753,49 @@ async function runNormalLoopSteps(
             stopWatch();
             state = settleSupervisorUsage(state, supervisor);
             state = settleSupervisorRemedies(state, supervisor, episodeId);
+            // Recorded for every decide() call, however it ended; the controller's
+            // admission outcome is settled onto the record below.
+            episodeTurn = nextEpisodeTurn(state, episodeId);
+            state = appendEpisode(
+              state,
+              buildEpisodeRecord({
+                episodeId,
+                turn: episodeTurn,
+                runId: state.runId,
+                trigger: { code: trigger.code as RecoveryTrigger["code"], message: trigger.message, ...(trigger.evidenceRefs !== undefined ? { evidenceRefs: [...trigger.evidenceRefs] } : {}) },
+                view,
+                ...(caseFile !== undefined ? { caseFile } : {}),
+                ...(lastSettlement !== undefined ? { lastSettlement } : {}),
+                ...(rejection !== undefined ? { rejection } : {}),
+                ...(metered ? { maxProviderCalls: budgetBefore } : {}),
+                maxWaitMs: waitBefore,
+                recorder,
+                ...(decided !== undefined ? { proposal: decided } : {}),
+                ...(decideError !== undefined ? { error: decideError } : {}),
+                admission: {
+                  facts: admission.facts,
+                  rejections: episodeRejections(rejectedBefore),
+                  outcome:
+                    decided !== undefined
+                      ? isModelSwitchRequest(decided)
+                        ? "model_switch"
+                        : "pending"
+                      : abort.signal.aborted
+                        ? "aborted"
+                        : rejections.length > rejectedBefore
+                          ? "inadmissible"
+                          : "error",
+                },
+                providerCalls: metered ? Math.max(0, budgetBefore - state.budgets.agentInvocations - reviewSpent) : 0,
+              }),
+            );
             const binding = readBinding(supervisor);
             if (binding) {
               state = { ...state, supervisorBinding: binding };
             }
           }
           if (abort.signal.aborted || (await stopRequested(deps))) {
+            state = settleEpisode(state, episodeId, episodeTurn, "aborted", episodeRejections(rejectedBefore));
             state = {
               ...state,
               status: "stopped",
@@ -766,6 +813,7 @@ async function runNormalLoopSteps(
           // A review in this check must end with the operator's stop too, so the watch outlives decide().
           const reviewWatch = watchForStop(state.stateDir, deps, abort);
           const refused = await check(decided).finally(reviewWatch);
+          state = settleEpisode(state, episodeId, episodeTurn, refused === undefined ? "admitted" : "inadmissible", episodeRejections(rejectedBefore));
           if (refused === undefined || refused.remaining <= 0) break;
           rejection = refused;
           if (metered && state.budgets.agentInvocations <= 0) {
@@ -779,6 +827,12 @@ async function runNormalLoopSteps(
             syncRevision(deps, state);
             return { done: true as const, state };
           }
+        }
+        // A turn that ended before the fallback check ran (the rejection limit, an
+        // exhausted decisions budget, an unavailable reviewer) admitted nothing.
+        if (episodeTurn > 0 && (decisionsExhausted || reviewBlocker !== undefined || rejections.length >= MAX_INADMISSIBLE_PER_TURN)) {
+          const last = state.supervisorEpisodes?.find((r) => r.episodeId === episodeId && r.turn === episodeTurn);
+          if (last?.admission.outcome === "pending") state = settleEpisode(state, episodeId, episodeTurn, "inadmissible");
         }
         if (reviewBlocker !== undefined && ((await stopRequested(deps)) || reviewSignal?.aborted === true)) {
           // The operator's stop cancelled the review: the run is stopped, not blocked on a reviewer.

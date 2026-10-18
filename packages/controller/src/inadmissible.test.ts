@@ -24,6 +24,7 @@ import {
 import { createScriptedRunner, createTrustedInProcessRunner } from "@graphloom/runner";
 import { createPiSupervisor, createScriptedSupervisor, type PiSupervisorSessionPort } from "@graphloom/supervisor";
 import { createController, loadRunState, type RepairDeps } from "./index.js";
+import { readOwnerClaim } from "./owner.js";
 
 /**
  * #117: an inadmissible supervisor proposal never stops the run by itself.
@@ -362,6 +363,102 @@ describe("inadmissible supervisor proposals (#117)", () => {
     ]);
     expect(inspected.supervisorOutcomes[0]!.rejections).toHaveLength(3);
     expect(inspected.supervisorOutcomes[0]!.rejections[2]).toMatch(/^dispatch: undeclared stage: stageId invented/);
+  });
+
+  it("records one bounded episode per decide() call with its tool calls, proposal and admission outcome", async () => {
+    const env = await makeEnv();
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({ definition, advances: [supervise({ reason: "unfamiliar" }, "escalate"), ...finish] }),
+      validators: goodValidators,
+      supervisor: createScriptedSupervisor({
+        decisions: [
+          async (input) => {
+            await input.inspect!.checkValidate({ stageId: "write" });
+            return validate({ stageId: "nope" }, "validate a stage that is not declared");
+          },
+          returnToNormal({ summary: "done" }, "return"),
+        ],
+      }),
+      runner: runner(),
+      stateRoot: env.stateRoot,
+      runId: "episode-records",
+    });
+    expect(report.status, report.blocker).toBe("succeeded");
+    const state = await loadRunState(report.stateDir);
+    const episodes = state.supervisorEpisodes ?? [];
+    expect(episodes.map((e) => [e.turn, e.proposal && "action" in e.proposal ? e.proposal.action.type : undefined, e.admission.outcome])).toEqual([
+      [1, "validate", "inadmissible"],
+      [2, "return", "admitted"],
+    ]);
+    expect(episodes[0]!.episodeId).toBe(episodes[1]!.episodeId);
+    expect(episodes[0]!.toolCalls.map((c) => c.name)).toEqual(["check_validate"]);
+    expect(episodes[0]!.admission.rejections[0]).toMatch(/^validate: undeclared stage/);
+    expect(episodes[0]!.input.trigger).toMatchObject({ code: "supervise" });
+    expect(JSON.stringify(episodes[0]).length).toBeLessThanOrEqual(65_536);
+  });
+
+  it("records a failed decide() with its error and tool calls, and stops the run on it", async () => {
+    const env = await makeEnv();
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({ definition, advances: [supervise({ reason: "unfamiliar" }, "escalate"), ...finish] }),
+      validators: goodValidators,
+      supervisor: createScriptedSupervisor({
+        decisions: [
+          async (input) => {
+            await input.inspect!.checkValidate({ stageId: "write" });
+            throw new Error("provider exploded");
+          },
+        ],
+      }),
+      runner: runner(),
+      stateRoot: env.stateRoot,
+      runId: "episode-error",
+    });
+    expect(report.status).toBe("stopped");
+    expect(report.stopReason).toBe("supervisor decide failed");
+    const episodes = (await loadRunState(report.stateDir)).supervisorEpisodes ?? [];
+    expect(episodes).toHaveLength(1);
+    expect(episodes[0]).toMatchObject({ turn: 1, error: "provider exploded", admission: { outcome: "error", rejections: [] } });
+    expect(episodes[0]!.proposal).toBeUndefined();
+    expect(episodes[0]!.toolCalls.map((c) => c.name)).toEqual(["check_validate"]);
+    expect(episodes[0]!.toolCalls[0]!.pending).toBeUndefined();
+  });
+
+  it("settles a decide() cancelled by the operator's stop as aborted, keeps its tool calls and releases the run", async () => {
+    const env = await makeEnv();
+    const controller = createController();
+    const stateDir = path.join(env.stateRoot, "episode-aborted");
+    let stopping: Promise<unknown> | undefined;
+    const report = await controller.run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({ definition, advances: [supervise({ reason: "unfamiliar" }, "escalate"), ...finish] }),
+      validators: goodValidators,
+      supervisor: createScriptedSupervisor({
+        decisions: [
+          async (input) => {
+            await input.inspect!.checkValidate({ stageId: "write" });
+            stopping = controller.stop(stateDir);
+            await new Promise<void>((resolve) => {
+              if (input.signal!.aborted) resolve();
+              input.signal!.addEventListener("abort", () => resolve(), { once: true });
+            });
+            throw new Error("supervisor prompt aborted");
+          },
+        ],
+      }),
+      runner: runner(),
+      stateRoot: env.stateRoot,
+      runId: "episode-aborted",
+    });
+    await stopping;
+    expect(report.status).toBe("stopped");
+    const episodes = (await loadRunState(stateDir)).supervisorEpisodes ?? [];
+    expect(episodes).toHaveLength(1);
+    expect(episodes[0]).toMatchObject({ error: "supervisor prompt aborted", admission: { outcome: "aborted" } });
+    expect(episodes[0]!.toolCalls.map((c) => c.name)).toEqual(["check_validate"]);
+    expect(await readOwnerClaim(stateDir)).toBeUndefined();
   });
 
   it("counts tool-detected rejections (invalid write scope) toward the same allowance and applies the safe default", async () => {
