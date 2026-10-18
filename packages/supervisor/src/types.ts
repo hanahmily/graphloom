@@ -149,6 +149,12 @@ export type AdmissionCheck = (decision: GraphDecision) => Promise<SupervisorReje
 
 export interface SupervisorAdmission {
   facts: AdmissionFacts;
+  /**
+   * Provider calls others (an independent reviewer) have spent against the
+   * input's `maxProviderCalls` so far this turn; read live, so a running
+   * prompt's cap shrinks as they are spent.
+   */
+  reservedProviderCalls?(): number;
   check: AdmissionCheck;
   /**
    * Charge a rejection the supervisor found itself (malformed spec, bad
@@ -234,6 +240,11 @@ export interface Supervisor {
    * Controller deducts from agentInvocations when present.
    */
   drainProviderCalls?(): number;
+  /**
+   * Optional: provider calls a running prompt has started but not yet settled
+   * through `drainProviderCalls`. Non-destructive; the controller reserves them.
+   */
+  outstandingProviderCalls?(): number;
   /**
    * Optional: deterministic remedies the host applied to failed provider
    * turns since the last drain (waits, compactions, re-asks). The controller

@@ -156,12 +156,16 @@ export interface PiSupervisorSession {
       signal?: AbortSignal;
       timeoutMs?: number;
       maxTurns?: number;
+      /** Provider calls others spent against `maxTurns` during this prompt (read at each turn); shrinks the cap. */
+      reservedTurns?: () => number;
       tools?: ToolDefinition[];
       done?: () => boolean;
     },
   ): Promise<string>;
   /** Provider turns (model calls) started since the last drain, including tool turns. */
   drainTurnCount?(): number;
+  /** Non-destructive count of provider turns started and not yet drained. */
+  peekTurnCount?(): number;
   /**
    * Why the last prompt's final assistant message carries no usable reply,
    * classified from the provider's own stopReason and errorMessage; undefined
@@ -416,7 +420,10 @@ export function wrapPiAgentSession(args: {
       }
       const totalMs = promptOptions?.timeoutMs ?? promptTotalTimeoutMs;
       const inactivityMs = promptTimeoutMs;
-      const maxTurns = promptOptions?.maxTurns;
+      const baseMaxTurns = promptOptions?.maxTurns;
+      const reserved = () => Math.max(0, promptOptions?.reservedTurns?.() ?? 0);
+      // The cap as it stands now: a reviewer's calls during this prompt count against it.
+      const turnCap = () => (baseMaxTurns === undefined ? undefined : baseMaxTurns - reserved());
       let promptTurns = 0;
       let turnCapHit = false;
       let endedDone = false;
@@ -460,7 +467,8 @@ export function wrapPiAgentSession(args: {
           // turn_start, so charge them here. Pi emits this synchronously after
           // arming its abort controller and before any request, so aborting
           // here sends nothing.
-          if (maxTurns !== undefined && promptTurns + COMPACTION_PROVIDER_CALLS > maxTurns) {
+          const compactionCap = turnCap();
+          if (compactionCap !== undefined && promptTurns + COMPACTION_PROVIDER_CALLS > compactionCap) {
             session.abortCompaction();
             return;
           }
@@ -477,7 +485,8 @@ export function wrapPiAgentSession(args: {
             void session.abort().catch(() => undefined);
             return;
           }
-          if (maxTurns !== undefined && promptTurns >= maxTurns) {
+          const cap = turnCap();
+          if (cap !== undefined && promptTurns >= cap) {
             turnCapHit = true;
             void session.abort().catch(() => undefined);
             return;
@@ -534,7 +543,7 @@ export function wrapPiAgentSession(args: {
           return collected.join("").trim();
         }
         if (turnCapHit) {
-          throw new Error(`supervisor prompt exceeded its ${maxTurns}-turn allowance`);
+          throw new Error(`supervisor prompt exceeded its ${turnCap() ?? baseMaxTurns}-turn allowance`);
         }
         if (timedOut !== undefined || !session.isIdle) {
           const settled = await settleIdle(session, settleTimeoutMs(promptTimeoutMs));
@@ -566,6 +575,9 @@ export function wrapPiAgentSession(args: {
       const n = turns;
       turns = 0;
       return n;
+    },
+    peekTurnCount() {
+      return turns;
     },
     lastReplyFailure() {
       return lastReply;

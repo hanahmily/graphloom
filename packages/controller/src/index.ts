@@ -43,6 +43,8 @@ export type {
   RecreateHostFn,
 } from "./controller.js";
 export { defaultRepairPreflight } from "./controller.js";
+export { needsReview, DEFAULT_REVIEW_TIMEOUT_MS } from "./proposal-review.js";
+export type { ProposalReviewer, ProposalReviewRequest, ProposalVerdict } from "./proposal-review.js";
 export type { Boundary, BoundaryResult, BoundaryStatus, EvidenceProducerInfo, RehearsalConvergence, RehearsalReport } from "./rehearsal.js";
 export { checkB3, evaluateRehearsal, producerOf } from "./rehearsal.js";
 export type { ReclassifiedRecord, ReplayReport, ReplayRequirementResult } from "./replay.js";

@@ -33,6 +33,7 @@ import {
   type RecoveryTrigger,
   type SupervisorRejection,
   type Supervisor,
+  type SupervisorInspection,
   type SupervisorProposal,
 } from "@graphloom/supervisor";
 import { markProposal, noteOutcome, settleProposal } from "./settlement.js";
@@ -92,6 +93,7 @@ import {
 } from "./worktree.js";
 import { clearCheckouts, runInCheckout } from "./checkout.js";
 import {
+  citedProbeEvidence,
   createRecoveryFence,
   createSupervisorInspection,
   DEFAULT_EPISODE_PROBES,
@@ -116,6 +118,7 @@ import {
   safeDefault,
   type Inadmissible,
 } from "./inadmissible.js";
+import { citedRefs, needsReview, runReview, type OpenReviewInspection, type ProposalReviewer, type ReviewOutcome } from "./proposal-review.js";
 
 const MAX_STEPS = 64;
 
@@ -128,6 +131,8 @@ export interface LoopDeps {
   supervisor?: Supervisor;
   /** Qualified repair patch/review hooks (same supervisor session for patches). */
   repair?: RepairDeps;
+  /** Independent review of a `stop` or validator/executor `qualify_repair` before admission (#121). */
+  proposalReviewer?: ProposalReviewer;
   /**
    * Replace a dead child plugin process after crash/timeout, or after
    * ActivateRepair points the run at a candidate bundle.
@@ -503,7 +508,9 @@ async function runNormalLoopSteps(
           state = { ...state, probeLog: { episodeId, ids, attempts: episodeProbeAttempts(state, episodeId), results } };
           await saveLatest();
         };
-        const inspection = createSupervisorInspection({
+        // Alive until the run is stopped, through the fallback check after decide() returns.
+        let reviewSignal: AbortSignal | undefined;
+        const inspectionHooks: Parameters<typeof createSupervisorInspection>[0] = {
           state: () => state,
           validators: deps.validators,
           hasRepairHooks: deps.repair !== undefined,
@@ -519,8 +526,134 @@ async function runNormalLoopSteps(
             });
             return running ?? "the supervisor's turn is over";
           },
-        });
+        };
+        const inspection = createSupervisorInspection(inspectionHooks);
+        // The reviewer's tools are opened per review: they end with the run's stop, the review's
+        // timeout and the review itself (not with the supervisor's turn: the fallback check runs
+        // after decide() has returned), and every call is drained before the review returns.
+        const openReviewInspection: OpenReviewInspection = (signal) => {
+          const reviewFence = createRecoveryFence();
+          const handle = createSupervisorInspection({
+            ...inspectionHooks,
+            signal: () => signal,
+            // The supervisor's fence while its turn runs (so one dead host is replaced once);
+            // this review's own once that turn is over, as in the fallback check.
+            recoverHost: async (code) => {
+              const replace = async () => {
+                const restarted = await restartDeadChildHost(state, deps, mapHostFailureCode(code));
+                return restarted.ok ? undefined : restarted.blocker;
+              };
+              const running = recoveryFence.runOnce("plugin-host", replace) ?? reviewFence.runOnce("plugin-host", replace);
+              return running ?? "the review is over";
+            },
+          });
+          const inFlight = new Set<Promise<unknown>>();
+          const tracked = Object.fromEntries(
+            Object.entries(handle.inspection).map(([name, fn]) => [
+              name,
+              (...args: unknown[]) => {
+                const result = (fn as (...a: unknown[]) => unknown)(...args);
+                if (result instanceof Promise) {
+                  inFlight.add(result);
+                  const done = () => inFlight.delete(result);
+                  result.then(done, done);
+                }
+                return result;
+              },
+            ]),
+          ) as unknown as SupervisorInspection;
+          return {
+            inspect: tracked,
+            drain: async () => {
+              while (inFlight.size > 0) await Promise.allSettled([...inFlight]);
+              await reviewFence.close();
+            },
+          };
+        };
+        // Whether the supervisor's prompt is still running: its calls are settled only when it ends.
+        let turnRunning = false;
+        // Confirmations are noted once the proposal is marked, which resets the notes.
+        const confirmations: string[] = [];
+        const noteConfirmations = () => {
+          for (const note of confirmations.splice(0)) state = noteOutcome(state, note);
+        };
+        // #121: a high-impact proposal is reviewed once per turn (the supervisor's tools and
+        // this loop both run the check), and a reviewer that cannot answer ends the turn.
+        const reviews = new Map<string, Promise<ReviewOutcome>>();
+        let reviewBlocker: string | undefined;
+        // Provider calls reviews spent this turn: the running prompt's cap shrinks by them.
+        let reviewSpent = 0;
+        const review = async (candidate: GraphDecision): Promise<Inadmissible | { blocker: string } | undefined> => {
+          const reviewer = deps.proposalReviewer;
+          if (reviewer === undefined || !needsReview(candidate)) return undefined;
+          const key = JSON.stringify([candidate.reason, candidate.action, candidate.evidence ?? []]);
+          let pending = reviews.get(key);
+          if (pending === undefined) {
+            const refs = citedRefs(candidate);
+            const cited = new Set(refs);
+            const metered = reviewer.drainProviderCalls !== undefined;
+            pending = (async (): Promise<ReviewOutcome> => {
+              if (metered) {
+                // What the supervisor has spent so far is charged first, so the reviewer is
+                // never granted an invocation the supervisor already used this turn.
+                const settled = settleSupervisorUsage(state, supervisor);
+                if (settled !== state) {
+                  state = settled;
+                  await saveLatest();
+                  syncRevision(deps, state);
+                }
+              }
+              // A prompt still running has spent calls it has not reported yet; after settling,
+              // only what is still outstanding is reserved, never also granted to the reviewer.
+              const outstanding =
+                metered && turnRunning && supervisor.drainProviderCalls !== undefined
+                  ? Math.max(0, supervisor.outstandingProviderCalls?.() ?? 1)
+                  : 0;
+              const allowance = state.budgets.agentInvocations - outstanding;
+              if (metered && allowance <= 0) {
+                return { kind: "unavailable", reason: "no agentInvocations left in the run's budget for a review" };
+              }
+              const outcome = await runReview(
+                reviewer,
+                {
+                  runId: state.runId,
+                  episodeId,
+                  triggerCode: trigger.code,
+                  decision: candidate,
+                  evidence: [...state.evidence.filter((e) => cited.has(e.ref)), ...citedProbeEvidence(state, refs)],
+                  openInspection: openReviewInspection,
+                  ...(metered ? { maxProviderCalls: allowance } : {}),
+                },
+                reviewSignal,
+                supervisor.sessionId,
+              );
+              const spent = metered ? Math.max(0, reviewer.drainProviderCalls!()) : 0;
+              reviewSpent += spent;
+              if (spent > 0) {
+                state = {
+                  ...state,
+                  budgets: { ...state.budgets, agentInvocations: Math.max(0, state.budgets.agentInvocations - spent) },
+                  stateRevision: state.stateRevision + 1,
+                };
+                await saveLatest();
+                syncRevision(deps, state);
+              }
+              return outcome;
+            })();
+            reviews.set(key, pending);
+          }
+          const outcome = await pending;
+          if (outcome.kind === "unavailable") return { blocker: outcome.reason };
+          const by = outcome.model !== undefined ? ` (${outcome.model})` : "";
+          if (outcome.kind === "confirmed") {
+            confirmations.push(`reviewer${by} confirmed ${candidate.action.type}: ${outcome.reason}`);
+            return undefined;
+          }
+          const refs = outcome.evidenceRefs.length > 0 ? `; evidence: ${outcome.evidenceRefs.join(", ")}` : "";
+          return { precondition: `${candidate.action.type} refuted by the independent reviewer${by}`, detail: `${outcome.reason}${refs}` };
+        };
         const check: AdmissionCheck = async (candidate) => {
+          if (reviewBlocker !== undefined) return { action: candidate.action.type, reason: reviewBlocker, remaining: 0 };
           // The grounding rule (#119) and the executor-input pre-check (#132)
           // share this one check, so either refusal is charged the same way.
           const refusal =
@@ -531,9 +664,35 @@ async function runNormalLoopSteps(
               trigger.code,
               supervisor.requiresCitedEvidence === true ? episodeProbeIds(state, episodeId) : undefined,
             ) ?? (await executorInputRefusal(admittedAgainst, candidate, deps.runner));
-          return refusal === undefined ? undefined : refuse(candidate.action.type, describeInadmissible(refusal));
+          if (refusal !== undefined) return refuse(candidate.action.type, describeInadmissible(refusal));
+          const reviewed = await review(candidate);
+          if (reviewed === undefined) return undefined;
+          if ("blocker" in reviewed) {
+            reviewBlocker = reviewed.blocker;
+            return { action: candidate.action.type, reason: reviewBlocker, remaining: 0 };
+          }
+          const refused = await refuse(candidate.action.type, describeInadmissible(reviewed));
+          // The running prompt cannot be told its allowance shrank, so a refute that spent the
+          // last of it ends the turn here (`remaining: 0`) instead of inviting another call.
+          if (
+            refused.remaining > 0 &&
+            turnRunning &&
+            deps.proposalReviewer?.drainProviderCalls !== undefined &&
+            supervisor.drainProviderCalls !== undefined &&
+            state.budgets.agentInvocations - Math.max(0, supervisor.outstandingProviderCalls?.() ?? 1) <= 0
+          ) {
+            const ended = { ...refused, remaining: 0 };
+            rejections[rejections.length - 1] = ended;
+            return ended;
+          }
+          return refused;
         };
-        const admission = { facts: admissionFacts(state, deps.repair !== undefined), check, refuse };
+        const admission = {
+          facts: admissionFacts(state, deps.repair !== undefined),
+          check,
+          refuse,
+          reservedProviderCalls: () => reviewSpent,
+        };
         let decided: SupervisorProposal | undefined;
         let decideError: unknown;
         let rejection: SupervisorRejection | undefined;
@@ -542,11 +701,15 @@ async function runNormalLoopSteps(
           // Ends with the run's stop and with this turn, so a probe still running afterwards is cancelled.
           const turnEnded = new AbortController();
           turnSignal = AbortSignal.any([abort.signal, turnEnded.signal]);
+          reviewSignal = abort.signal;
           recoveryFence = createRecoveryFence();
           const fence = recoveryFence;
           const stopWatch = watchForStop(state.stateDir, deps, abort);
           decided = undefined;
           decideError = undefined;
+          // maxProviderCalls below is the balance now, which already has earlier reviews' spend.
+          reviewSpent = 0;
+          turnRunning = true;
           try {
             const proposal = await supervisor.decide({
               runId: state.runId,
@@ -571,6 +734,7 @@ async function runNormalLoopSteps(
           } catch (err) {
             decideError = err;
           } finally {
+            turnRunning = false;
             turnEnded.abort();
             // A host replacement the supervisor's probe began is finished before anything tears the run down.
             await fence.close();
@@ -599,7 +763,9 @@ async function runNormalLoopSteps(
           // A supervisor that ran the check in its tools only returns proposals
           // that passed it; any other (scripted, or one ignoring the check) is
           // re-asked here, within the same turn, with the rejection.
-          const refused = await check(decided);
+          // A review in this check must end with the operator's stop too, so the watch outlives decide().
+          const reviewWatch = watchForStop(state.stateDir, deps, abort);
+          const refused = await check(decided).finally(reviewWatch);
           if (refused === undefined || refused.remaining <= 0) break;
           rejection = refused;
           if (metered && state.budgets.agentInvocations <= 0) {
@@ -613,6 +779,25 @@ async function runNormalLoopSteps(
             syncRevision(deps, state);
             return { done: true as const, state };
           }
+        }
+        if (reviewBlocker !== undefined && ((await stopRequested(deps)) || reviewSignal?.aborted === true)) {
+          // The operator's stop cancelled the review: the run is stopped, not blocked on a reviewer.
+          state = { ...state, status: "stopped", ...stopCause(deps) };
+          await saveRunState(state);
+          syncRevision(deps, state);
+          return { done: true as const, state };
+        }
+        if (reviewBlocker !== undefined) {
+          // Never a silent approval: with no verdict the proposal is not admitted and the run stops.
+          state = {
+            ...state,
+            status: "stopped",
+            stopReason: "reviewer_unavailable",
+            blocker: boundText(`independent reviewer unavailable, proposal not admitted: ${reviewBlocker}`),
+          };
+          await saveRunState(state);
+          syncRevision(deps, state);
+          return { done: true as const, state };
         }
         if (decisionsExhausted) {
           // A blocking stop: the rejections spent the last of the decisions budget.
@@ -656,13 +841,17 @@ async function runNormalLoopSteps(
           };
           state = markProposal({ ...state, lastEpisodeMark: progressMark(state) }, decided);
           for (const r of rejections) state = noteOutcome(state, `inadmissible, not applied: ${r.action}: ${r.reason}`);
+          noteConfirmations();
           decision = decided;
         } else {
           if (decideError !== undefined || decided === undefined) {
             state = {
               ...state,
               status: "stopped",
-              ...decideFailureStop(decideError),
+              // A refuted review that spent the turn's last call ends it without a decision.
+              ...(metered && state.budgets.agentInvocations <= 0 && rejections.length > 0
+                ? { stopReason: "agentInvocations budget exhausted", blocker: "supervisor decide" }
+                : decideFailureStop(decideError)),
             };
             await saveRunState(state);
             syncRevision(deps, state);
@@ -683,6 +872,7 @@ async function runNormalLoopSteps(
           );
           // The next turn's settlement says what this turn refused before admitting it.
           for (const r of rejections) state = noteOutcome(state, `refused earlier this turn: ${r.action}: ${r.reason}`);
+          noteConfirmations();
           decision = decided;
         }
       } else {

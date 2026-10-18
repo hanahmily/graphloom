@@ -616,3 +616,69 @@ describe("findConfigured", () => {
     expect(findConfigured(configured, { provider: "anthropic", modelId: "claude-sonnet-4-5" })).toBeUndefined();
   });
 });
+
+describe("calls others spend against a turn's allowance", () => {
+  it("caps a prompt by what a reviewer had spent, and lets it shrink while the prompt runs", async () => {
+    let reserved = 2;
+    const seen: Array<{ maxTurns?: number; during: number | undefined }> = [];
+    const session = fakeSession({ replies: [JSON.stringify(stop({ reason: "blocked", blocker: "external" }, "stop"))] });
+    const prompt = session.prompt.bind(session);
+    session.prompt = async (text, options) => {
+      reserved = 3;
+      seen.push({ ...(options?.maxTurns !== undefined ? { maxTurns: options.maxTurns } : {}), during: options?.reservedTurns?.() });
+      return prompt(text, options);
+    };
+    const supervisor = createPiSupervisor({ session });
+    await supervisor.decide({
+      ...sampleInput(),
+      maxProviderCalls: 5,
+      admission: { facts: { inRecovery: true, canQualify: false, qualifiedArtifactIds: [] }, check: async () => undefined, refuse: async () => ({ action: "stop", reason: "", remaining: 0 }), reservedProviderCalls: () => reserved },
+    });
+    // Two were already spent when the prompt began; one more was spent while it ran.
+    expect(seen).toEqual([{ maxTurns: 3, during: 1 }]);
+  });
+});
+
+describe("a mid-decide drain of the settlement counter", () => {
+  it("never restores the turn's allowance for the JSON-refutation retry", async () => {
+    const maxProviderCalls = 3;
+    let started = 0;
+    let pending = 0;
+    let reserved = 0;
+    const maxTurnsSeen: Array<number | undefined> = [];
+    const proposal = JSON.stringify(stop({ reason: "blocked", blocker: "external" }, "stop"));
+    const session = fakeSession({ replies: [proposal, proposal, proposal, proposal] });
+    const prompt = session.prompt.bind(session);
+    session.prompt = async (text, options) => {
+      maxTurnsSeen.push(options?.maxTurns);
+      started += 1;
+      pending += 1;
+      return prompt(text, options);
+    };
+    session.drainTurnCount = () => {
+      const n = pending;
+      pending = 0;
+      return n;
+    };
+    const supervisor = createPiSupervisor({ session });
+    await expect(
+      supervisor.decide({
+        ...sampleInput(),
+        maxProviderCalls,
+        admission: {
+          facts: { inRecovery: true, canQualify: false, qualifiedArtifactIds: [] },
+          check: async (p) => {
+            // What loop.ts does while the prompt is running: settle the supervisor, then a reviewer's call is reserved.
+            supervisor.drainProviderCalls();
+            reserved = 1;
+            return { action: p.action.type, reason: "refused", remaining: 5 };
+          },
+          refuse: async (action, reason) => ({ action, reason, remaining: 5 }),
+          reservedProviderCalls: () => reserved,
+        },
+      }),
+    ).rejects.toThrow(/inadmissible proposal/);
+    expect(started).toBeLessThanOrEqual(maxProviderCalls);
+    expect(maxTurnsSeen.at(-1)).toBeLessThanOrEqual(1);
+  });
+});
