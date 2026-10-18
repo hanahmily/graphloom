@@ -118,6 +118,10 @@ interface Scenario {
   fixerEdits?: Array<((file: string | undefined) => string | undefined) | undefined>;
   /** The first this many issues-read commands fail (exit 1), as a crashed or timed-out read does. */
   failReads?: number;
+  /** The first this many deliver commands fail (exit 1), as an unusable deliver command does. */
+  failDeliveries?: number;
+  /** After the run stops on a failed delivery, resume once (a new generation), as an operator does after fixing it. */
+  resumeAfterFailedDelivery?: boolean;
 }
 
 const OCR = "/opt/open code review/bin/ocr";
@@ -172,6 +176,8 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
   let issuesFile: string | undefined;
   let issuesMarkdown: string | undefined;
   let failedReads = 0;
+  let failedDeliveries = 0;
+  let resumedDelivery = false;
   let seq = 0;
   let generation = 1;
   // Only a real reentry of Fix bumps attempt, exactly like the controller
@@ -303,6 +309,9 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
       } else if (c.id === "issues-read" && failedReads < (scenario.failReads ?? 0)) {
         failedReads += 1;
         record("command", commandPayload(c.id, { exitCode: 1, stderr: "sh: cat: I/O error\n" }, c.argv), job, op);
+      } else if (c.id === COMMAND.deliver && failedDeliveries < (scenario.failDeliveries ?? 0)) {
+        failedDeliveries += 1;
+        record("command", commandPayload(c.id, { exitCode: 1, stderr: "The following paths are ignored by one of your .gitignore files:\n.graphloom\n" }, c.argv), job, op);
       } else if (c.id === "issues-read") {
         record("command", commandPayload(c.id, issuesFile === undefined ? { stdout: "missing\n" } : { stdout: "present\n", report: issuesFile }, c.argv), job, op);
       } else {
@@ -369,6 +378,11 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
       openAttempt.fix = true;
       generation += 1;
       attempt += 1;
+    } else if (
+      action.type === "stop" && action.stop.reason === "delivery failed" && scenario.resumeAfterFailedDelivery === true && !resumedDelivery
+    ) {
+      resumedDelivery = true;
+      generation += 1;
     } else {
       return { decision, decisions, jobs, evidence, receipts, observed, issuesFile, issuesMarkdown };
     }
@@ -762,6 +776,16 @@ describe("issue-fix graph under the banyandb profile", () => {
     expect(fixReceipts.map((r) => r.requirementId).sort()).toEqual(
       ["builds", "changelog-entry", "decisions-recorded", "in-scope", "passes", "reproduces"].sort(),
     );
+  });
+
+  it("stops on a failed delivery, and tries it again after a resume", () => {
+    const delivers = (jobs: JobSpec[]) => jobs.filter((j) => (j.input as { commands?: Array<{ id: string }> }).commands?.[0]?.id === COMMAND.deliver);
+    const failed = simulate({ failDeliveries: 1 });
+    expect(failed.decision.action).toMatchObject({ type: "stop", stop: { reason: "delivery failed" } });
+    expect(delivers(failed.jobs)).toHaveLength(1);
+    const resumed = simulate({ failDeliveries: 1, resumeAfterFailedDelivery: true });
+    expect(resumed.decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+    expect(delivers(resumed.jobs)).toHaveLength(2);
   });
 
   it("reviews and delivers the accepted fix after a resume", () => {
