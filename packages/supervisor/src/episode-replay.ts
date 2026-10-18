@@ -240,11 +240,15 @@ async function replayOne(
   const rejections: SupervisorRejection[] = [];
   // The allowance is the turn's, not the call's: a retried call starts with what its rejection left (`remaining`).
   const priorRejections = Math.min(REPLAY_REJECTION_LIMIT, Math.max(0, REPLAY_REJECTION_LIMIT - (episode.input.rejection?.remaining ?? REPLAY_REJECTION_LIMIT)));
+  // Each refusal also spends one of the run's decisions, as the live controller charges it
+  // (loop.ts): when that budget runs out the turn ends, whatever the rejection allowance says.
+  const decisionsAtStart = finiteOrUndefined(episode.input.view.budgets?.decisions);
+  const decisionsLeft = () => (decisionsAtStart === undefined ? Number.POSITIVE_INFINITY : decisionsAtStart - rejections.length);
   const reject = (action: string, reason: string): SupervisorRejection => {
     const rejection: SupervisorRejection = {
       action,
       reason,
-      remaining: Math.max(0, REPLAY_REJECTION_LIMIT - priorRejections - rejections.length - 1),
+      remaining: Math.max(0, Math.min(REPLAY_REJECTION_LIMIT - priorRejections - rejections.length - 1, decisionsLeft() - 1)),
     };
     rejections.push(rejection);
     return rejection;
@@ -310,7 +314,7 @@ async function replayOne(
     finalRefused = judge(proposal) !== undefined;
   }
   // The controller ends the turn with its safe default once the allowance is spent, whatever came after.
-  const exhausted = priorRejections + rejections.length >= REPLAY_REJECTION_LIMIT;
+  const exhausted = priorRejections + rejections.length >= REPLAY_REJECTION_LIMIT || decisionsLeft() <= 0;
   const failedOnInadmissible = error !== undefined && /inadmissible/i.test(error);
   // Closing is bounded too: a supervisor whose abort never finishes must not hold the replay.
   if (supervisor.close !== undefined) {
@@ -351,4 +355,8 @@ export async function loadReplayFixtures(dir: string | URL = DEFAULT_FIXTURE_DIR
     episodes: (await read("episodes.json")) as SupervisorEpisodeRecord[],
     labels: (await read("labels.json")) as EpisodeLabel[],
   };
+}
+
+function finiteOrUndefined(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }

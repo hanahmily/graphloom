@@ -104,6 +104,29 @@ describe("replayEpisodes", () => {
     expect(score.inadmissibleStops).toBe(1);
   });
 
+  it("ends the turn when a refusal spends the recorded run's last decision, as the live controller does", async () => {
+    const closed = { inRecovery: true, canQualify: false, qualifiedArtifactIds: [] as string[] };
+    // A supervisor that first proposes something the facts refuse, then a labeled-acceptable action.
+    const retrying = (): Supervisor => ({
+      sessionId: "s",
+      async decide(input) {
+        const refused = await input.admission!.check({ action: { type: "qualify_repair", qualify: { target: "plugin", reason: "r" } }, reason: "repair" });
+        expect(refused).toBeDefined();
+        return returnToNormal({ summary: "carry on" }, "return");
+      },
+    });
+    const withDecisions = (n: number): SupervisorEpisodeRecord => {
+      const e = episode("ep-1", closed);
+      return { ...e, input: { ...e.input, view: { ...e.input.view, budgets: { ...e.input.view.budgets, decisions: n } } } };
+    };
+    const label: EpisodeLabel = { episodeId: "ep-1", acceptable: [{ type: "return" }] };
+    const plenty = await replayEpisodes({ episodes: [withDecisions(10)], labels: [label], createSupervisor: retrying });
+    expect(plenty.results[0]).toMatchObject({ correct: true, inadmissible: 1, inadmissibleStop: false });
+    // With one decision left, the refusal spends it: the live controller stops, so replay must not score the return.
+    const last = await replayEpisodes({ episodes: [withDecisions(1)], labels: [label], createSupervisor: retrying });
+    expect(last.results[0]).toMatchObject({ correct: false, inadmissible: 1, inadmissibleStop: true });
+  });
+
   it("fails an episode whose decide() never settles and aborts its signal", async () => {
     let signal: AbortSignal | undefined;
     const score = await replayEpisodes({
