@@ -177,6 +177,7 @@ export interface SupervisorSettlement {
 /**
  * A deterministic remedy the supervisor host applied to a failed provider
  * turn without asking the model what to do: wait out a quota reset and retry,
+ * back off and retry (at most three times) after a transient provider error,
  * compact and retry after an overflow, retry once in a fresh session after a
  * prompt timed out, resend the identical prompt (at most twice) after a reply
  * the provider cut off, or, for an empty or malformed reply, re-ask once, then
@@ -185,15 +186,26 @@ export interface SupervisorSettlement {
 export interface SupervisorRemedy {
   at: string;
   failureClass: ProviderFailureClass;
-  remedy: "wait_and_retry" | "compact_and_retry" | "resend_interrupted" | "reask" | "fresh_session_retry" | "model_retry";
+  remedy:
+    | "wait_and_retry"
+    | "backoff_and_retry"
+    | "compact_and_retry"
+    | "resend_interrupted"
+    | "reask"
+    | "fresh_session_retry"
+    | "model_retry";
   /** The model a `model_retry` ran the turn's next attempt on (this turn only; the binding is unchanged). */
   model?: ModelRef;
   /** The provider's message (or what the reply lacked), bounded. */
   message: string;
   /** Wall-clock milliseconds spent waiting; charged to the run's waitMs. */
   waitedMs?: number;
-  /** What a wait followed: the provider's stated reset, or the operator's `quotaRetryMs` fallback. */
-  waitBasis?: "provider" | "operator";
+  /**
+   * What a wait followed: the provider's stated reset or retry time, the
+   * operator's `quotaRetryMs` fallback, or the host's exponential backoff
+   * for a transient error.
+   */
+  waitBasis?: "provider" | "operator" | "backoff";
 }
 
 export interface ModelRef {

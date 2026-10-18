@@ -64,7 +64,9 @@ interface World {
   wrapped: ReturnType<typeof wrapPiAgentSession>;
 }
 
-async function world(options: { quotaRetryMs?: number; promptTimeoutMs?: number } = {}): Promise<World> {
+async function world(
+  options: { quotaRetryMs?: number; promptTimeoutMs?: number; transientRetryBaseMs?: number } = {},
+): Promise<World> {
   const ai = await loadPiAi();
   const dir = await mkdtemp(path.join(os.tmpdir(), "gl-pi-fail-"));
   temps.push(dir);
@@ -102,6 +104,7 @@ async function world(options: { quotaRetryMs?: number; promptTimeoutMs?: number 
   const supervisor = createPiSupervisor({
     session: wrapped,
     ...(options.quotaRetryMs !== undefined ? { quotaRetryMs: options.quotaRetryMs } : {}),
+    ...(options.transientRetryBaseMs !== undefined ? { transientRetryBaseMs: options.transientRetryBaseMs } : {}),
   });
   return {
     ai,
@@ -138,6 +141,9 @@ const QUOTA_NO_RESET =
   '429 {"type":"error","error":{"type":"rate_limit_error","message":"已达到 Token Plan 用量上限：请升级 Token Plan 套餐或购买积分补充用量。 (2056)"}}';
 const OVERFLOW =
   '400 {"type":"error","error":{"type":"invalid_request_error","message":"invalid params, context window exceeds limit (2013)"}}';
+
+/** The error that stopped live run cbef664d-c46. */
+const LIVE_500 = '{"type":"error","error":{"type":"api_error","message":"Internal server error. Please retry your request. (500)"}}';
 
 function errorTurn(w: World, errorMessage: string): Step {
   return w.ai.fauxAssistantMessage([], { stopReason: "error", errorMessage });
@@ -271,7 +277,7 @@ describe("Pi supervisor provider failures (faux provider)", () => {
   it("names auth and unknown failures without retrying them, and does not count them as inadmissible", async () => {
     const cases: Array<[string, Step[] | ((w: World) => Step[])]> = [
       ["auth", (w) => [errorTurn(w, "401 Unauthorized: invalid api key"), stopTurn(w)]],
-      ["unknown", (w) => [errorTurn(w, "500 internal server error"), stopTurn(w)]],
+      ["unknown", (w) => [errorTurn(w, "418 I am a teapot"), stopTurn(w)]],
     ];
     for (const [cls, steps] of cases) {
       const w = await world();
@@ -388,6 +394,86 @@ describe("Pi supervisor provider failures (faux provider)", () => {
       expect(aborted).toBe(1);
       expect(w.wrapped.drainTurnCount!()).toBe(2);
     }
+  });
+
+  it("backs off 2s and retries the turn after the 500 that stopped run cbef664d-c46", async () => {
+    const w = await world();
+    w.faux.setResponses([errorTurn(w, LIVE_500), stopTurn(w)]);
+    const started = Date.now();
+    const proposal = await w.supervisor.decide(input({ maxWaitMs: 60_000 }));
+    expect(proposal).toMatchObject({ action: { type: "stop" } });
+    expect(Date.now() - started).toBeGreaterThanOrEqual(1_900);
+    expect(w.faux.state.callCount).toBe(2);
+    expect(w.supervisor.drainProviderCalls()).toBe(2);
+    const [remedy, ...more] = w.supervisor.drainRemedies();
+    expect(more).toEqual([]);
+    expect(remedy).toMatchObject({ failureClass: "transient", remedy: "backoff_and_retry", waitBasis: "backoff", message: LIVE_500 });
+    expect(remedy!.waitedMs).toBeGreaterThanOrEqual(1_900);
+  });
+
+  it("stops naming transient after three retries with exponential backoff", async () => {
+    const w = await world({ transientRetryBaseMs: 20 });
+    w.faux.setResponses(Array.from({ length: 5 }, () => errorTurn(w, LIVE_500)));
+    const err = await failure(w.supervisor.decide(input({ maxWaitMs: 60_000 })));
+    expect(err.failureClass).toBe("transient");
+    expect(err.message).toBe(`supervisor provider transient: ${LIVE_500}`);
+    expect(err.unremedied).toBe("still failing after 3 retries in this turn");
+    expect(w.faux.state.callCount).toBe(4);
+    expect(w.supervisor.drainProviderCalls()).toBe(4);
+    const remedies = w.supervisor.drainRemedies();
+    expect(remedies.map((r) => r.remedy)).toEqual(["backoff_and_retry", "backoff_and_retry", "backoff_and_retry"]);
+    const waits = remedies.map((r) => r.waitedMs!);
+    expect(waits[0]).toBeGreaterThanOrEqual(20);
+    expect(waits[1]).toBeGreaterThanOrEqual(40);
+    expect(waits[2]).toBeGreaterThanOrEqual(80);
+  });
+
+  it("honours a retry time the transient error states, and bounds backoff by the wait budget and call allowance", async () => {
+    const stated = await world({ transientRetryBaseMs: 10 });
+    stated.faux.setResponses([errorTurn(stated, "503 service unavailable; retry after 1s"), stopTurn(stated)]);
+    const started = Date.now();
+    await expect(stated.supervisor.decide(input({ maxWaitMs: 60_000 }))).resolves.toMatchObject({ action: { type: "stop" } });
+    expect(Date.now() - started).toBeGreaterThanOrEqual(900);
+    const [remedy] = stated.supervisor.drainRemedies();
+    expect(remedy).toMatchObject({ failureClass: "transient", remedy: "backoff_and_retry", waitBasis: "provider" });
+    expect(remedy!.waitedMs).toBeGreaterThanOrEqual(900);
+
+    const overBudget = await world({ transientRetryBaseMs: 5_000 });
+    overBudget.faux.setResponses([errorTurn(overBudget, LIVE_500), stopTurn(overBudget)]);
+    const err = await failure(overBudget.supervisor.decide(input({ maxWaitMs: 1_000 })));
+    expect(err.unremedied).toBe("retry 1 needs a 5s backoff; 1s of the run's wait budget remain");
+    expect(overBudget.faux.state.callCount).toBe(1);
+
+    const noCalls = await world({ transientRetryBaseMs: 10 });
+    noCalls.faux.setResponses([errorTurn(noCalls, LIVE_500), stopTurn(noCalls)]);
+    const spent = await failure(noCalls.supervisor.decide(input({ maxWaitMs: 60_000, maxProviderCalls: 1 })));
+    expect(spent.unremedied).toMatch(/no provider calls left/);
+    expect(noCalls.faux.state.callCount).toBe(1);
+  });
+
+  it("lets the stop signal interrupt a transient backoff", async () => {
+    const w = await world({ transientRetryBaseMs: 30_000 });
+    w.faux.setResponses([errorTurn(w, LIVE_500), stopTurn(w)]);
+    const stop = new AbortController();
+    const started = Date.now();
+    const pending = w.supervisor.decide(input({ maxWaitMs: 60_000, signal: stop.signal }));
+    setTimeout(() => stop.abort(), 100);
+    await expect(pending).rejects.toThrow(/aborted/);
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(w.faux.state.callCount).toBe(1);
+    const [remedy] = w.supervisor.drainRemedies();
+    expect(remedy).toMatchObject({ failureClass: "transient", remedy: "backoff_and_retry" });
+    expect(remedy!.waitedMs).toBeLessThan(5_000);
+  });
+
+  it("keeps a 429 that says please retry as quota", async () => {
+    const w = await world({ transientRetryBaseMs: 10 });
+    w.faux.setResponses([errorTurn(w, "429 Too Many Requests. Please retry your request."), stopTurn(w)]);
+    const err = await failure(w.supervisor.decide(input({ maxWaitMs: 60_000 })));
+    expect(err.failureClass).toBe("quota");
+    expect(err.unremedied).toMatch(/no reset time/);
+    expect(w.faux.state.callCount).toBe(1);
+    expect(w.supervisor.drainRemedies()).toEqual([]);
   });
 
   it("passes the run's stop signal to overflow compaction in decide", async () => {

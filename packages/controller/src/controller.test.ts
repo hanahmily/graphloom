@@ -671,6 +671,44 @@ describe("release scenarios (#60)", () => {
     expect(report.evidence.find((e) => e.kind === "other")?.payload).toMatchObject({ selfReported: "review" });
   });
 
+  it("runs with an active-time budget longer than setTimeout's limit without overflowing its timers", async () => {
+    const env = await makeEnv();
+    await writeFile(env.taskPath, `${await readFile(env.taskPath, "utf8")}budgets:\n  activeMs: 2592000000\n`, "utf8");
+    const warnings: string[] = [];
+    const onWarning = (w: Error) => warnings.push(w.name);
+    process.on("warning", onWarning);
+    try {
+      const report = await createController().run({
+        taskPath: env.taskPath,
+        plugin: createScriptedGraph({
+          definition,
+          advances: [
+            dispatch({ stageId: "write", kind: "agent", purpose: "work", instruction: "write", writeScope: [GREETING_PATH] }, "write"),
+            stop({ reason: "paused", blocker: "test pause" }, "pause"),
+          ],
+        }),
+        runner: createScriptedRunner({
+          jobs: [
+            async (_job, ctx) => {
+              // Long enough for an overflowed (1ms) deadline timer to have re-armed many times.
+              await new Promise((r) => setTimeout(r, 200));
+              await writeFile(path.join(ctx.worktreePath, GREETING_PATH), GREETING, "utf8");
+              return { status: "ok" as const, summary: "wrote" };
+            },
+          ],
+        }),
+        validators,
+        stateRoot: env.stateRoot,
+        runId: "long-active-budget",
+      });
+      await new Promise((r) => setImmediate(r));
+      expect(report.stopReason).toBe("paused");
+      expect(warnings.filter((w) => w === "TimeoutOverflowWarning")).toEqual([]);
+    } finally {
+      process.off("warning", onWarning);
+    }
+  });
+
   it("gives a stage re-entered from a later stage its next attempt number", async () => {
     const env = await makeEnv();
     const seen: Array<{ stageId: string; attempt: number }> = [];

@@ -113,7 +113,7 @@ import {
 import { codeReview, implementerRecord, reportText, validatorById } from "./validators.js";
 
 export const GRAPH_ID = "issue-fix";
-export const GRAPH_VERSION = "0.4.0";
+export const GRAPH_VERSION = "0.4.2";
 
 /** Graph bookkeeping; everything else is read back from recorded evidence. */
 export interface FixPrivateState {
@@ -505,7 +505,12 @@ function review(ctx: Context, view: RunView, issue: number, state: FixPrivateSta
 function deliver(ctx: Context, view: RunView, issue: number, state: FixPrivateState): GraphDecision {
   const { profile } = ctx;
   const current = forIdentity(view.evidence, view.candidateDigest);
-  const delivered = commandRuns(current, COMMAND.deliver).filter((r) => r.record.candidateDigest === view.candidateDigest).at(-1);
+  // A delivery that failed before a resume or plugin update is tried again: the operator resumed
+  // because something changed (the deliver command, the repository, its environment). Only a
+  // failure in this generation stops the run, so a failing delivery cannot loop.
+  const delivered = commandRuns(current, COMMAND.deliver)
+    .filter((r) => r.record.candidateDigest === view.candidateDigest && (succeeded(r.command) || r.record.generation === view.generation))
+    .at(-1);
   const branch = `fix/${issue}`;
   if (delivered === undefined) {
     // Leave the final table in the worktree for the operator; it stays out of the commit.

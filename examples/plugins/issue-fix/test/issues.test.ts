@@ -223,6 +223,45 @@ describe("the issues file in a Git worktree", () => {
     expect(writeIssuesCommand("x".repeat(MAX_EXECUTOR_INPUT_BYTES), "")).toBeUndefined();
   });
 
+  it("delivers in a repository whose own .gitignore already ignores .graphloom/ (GraphLoom's does)", async () => {
+    const { root, dir } = await repo();
+    try {
+      await writeFile(path.join(dir, ".gitignore"), ".graphloom/\n", "utf8");
+      await git(dir, "add", ".gitignore");
+      await git(dir, "commit", "-q", "-m", "ignore .graphloom");
+      const t = table();
+      await run(dir, writeIssuesCommand(issueFileJson(t), issueMarkdown(t))!.argv);
+      const [deliver] = deliverCommands("fix/1", "Fix it", "Body");
+      await run(dir, deliver!.argv);
+      const files = (await git(dir, "show", "--name-only", "--format=", "fix/1")).stdout.split("\n").filter(Boolean);
+      expect(files).toEqual(["a.go"]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps files the repository itself tracks under .graphloom/ unchanged in the delivered commit", async () => {
+    const { root, dir } = await repo();
+    try {
+      await import("node:fs/promises").then((fs) => fs.mkdir(path.join(dir, ".graphloom"), { recursive: true }));
+      await writeFile(path.join(dir, ".graphloom/README.md"), "the repository's own file\n", "utf8");
+      await git(dir, "add", "-f", ".graphloom/README.md");
+      await git(dir, "commit", "-q", "-m", "track a file under .graphloom");
+      const t = table();
+      await run(dir, writeIssuesCommand(issueFileJson(t), issueMarkdown(t))!.argv);
+      const [deliver] = deliverCommands("fix/1", "Fix it", "Body");
+      await run(dir, deliver!.argv);
+      // Only the change is new; the tracked file is still there, and the issues file is not.
+      const changed = (await git(dir, "diff", "--name-only", "HEAD", "fix/1")).stdout.split("\n").filter(Boolean);
+      expect(changed).toEqual(["a.go"]);
+      const tree = (await git(dir, "ls-tree", "-r", "--name-only", "fix/1")).stdout.split("\n").filter(Boolean);
+      expect(tree).toContain(".graphloom/README.md");
+      expect(tree).not.toContain(".graphloom/issues.json");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("keeps the file out of the delivered commit even when the fixer deleted its .gitignore, and the next read hides it again", async () => {
     const { root, dir } = await repo();
     try {

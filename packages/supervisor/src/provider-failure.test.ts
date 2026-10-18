@@ -21,9 +21,44 @@ describe("classifyAssistantMessage", () => {
   it("classifies auth and unknown errors, and does not mistake a throttle for an overflow", () => {
     expect(classifyAssistantMessage(error("401 Unauthorized"))?.failureClass).toBe("auth");
     expect(classifyAssistantMessage(error("403 forbidden: invalid API key"))?.failureClass).toBe("auth");
-    expect(classifyAssistantMessage(error("503 service unavailable"))?.failureClass).toBe("unknown");
+    expect(classifyAssistantMessage(error("418 I'm a teapot"))?.failureClass).toBe("unknown");
     expect(classifyAssistantMessage(error("ThrottlingException: Too many tokens, please wait"))?.failureClass).toBe("quota");
     expect(classifyAssistantMessage(error(""))).toMatchObject({ failureClass: "unknown", message: "provider error with no message" });
+  });
+
+  it("classifies the transient provider error that stopped run cbef664d-c46", () => {
+    const live = '{"type":"error","error":{"type":"api_error","message":"Internal server error. Please retry your request. (500)"}}';
+    expect(classifyAssistantMessage(error(live))).toEqual({ failureClass: "transient", message: live });
+  });
+
+  it("classifies 5xx statuses and provider-side failure messages as transient", () => {
+    for (const status of ["500", "502", "503", "504", "529"]) {
+      expect(classifyAssistantMessage(error(`${status} upstream error`))?.failureClass, status).toBe("transient");
+    }
+    for (const message of [
+      "Internal Server Error",
+      "the model is OVERLOADED",
+      "Service Unavailable",
+      "bad gateway",
+      "upstream temporarily unavailable",
+      "something went wrong, please retry",
+      '{"type":"error","error":{"type":"overloaded_error","message":"busy"}}',
+      '{"type": "api_error", "message": "boom"}',
+    ]) {
+      expect(classifyAssistantMessage(error(message))?.failureClass, message).toBe("transient");
+    }
+    // 501 is not a retryable status; 429 stays quota and 401 auth even when they say "please retry".
+    expect(classifyAssistantMessage(error("501 not implemented"))?.failureClass).toBe("unknown");
+    expect(classifyAssistantMessage(error("429 too many requests, please retry"))?.failureClass).toBe("quota");
+    expect(classifyAssistantMessage(error("401 Unauthorized, please retry"))?.failureClass).toBe("auth");
+  });
+
+  it("exposes the retry time a transient error states", () => {
+    expect(classifyAssistantMessage(error("503 service unavailable; retry after 7s"), { now: NOW })).toMatchObject({
+      failureClass: "transient",
+      retryAt: "2026-10-15T00:00:07.000Z",
+    });
+    expect(classifyAssistantMessage(error("529 overloaded"), { now: NOW })?.retryAt).toBeUndefined();
   });
 
   it("classifies empty and thinking-only replies, and accepts replies with a tool call or text", () => {

@@ -7,6 +7,9 @@ import { isContextOverflow, type AssistantMessage } from "@earendil-works/pi-ai"
  * - `quota`: rate limit or usage cap (HTTP 429 and provider equivalents).
  * - `overflow`: the request exceeded the model's context window.
  * - `auth`: the provider refused the credentials (HTTP 401/403 and equivalents).
+ * - `transient`: the provider failed on its side and asked for a retry (HTTP
+ *   500/502/503/504/529, Anthropic-style `api_error`/`overloaded_error`,
+ *   "internal server error", "overloaded", "please retry" and equivalents).
  * - `interrupted`: the reply ended normally with no tool call and no text, but
  *   the provider billed output beyond its thinking that never arrived: the
  *   server dropped what the model generated (MiniMax drops tool calls this way).
@@ -21,6 +24,7 @@ export type ProviderFailureClass =
   | "quota"
   | "overflow"
   | "auth"
+  | "transient"
   | "interrupted"
   | "empty"
   | "malformed"
@@ -41,7 +45,7 @@ export interface ProviderFailure {
   message: string;
   /** Interrupted only: output tokens billed beyond thinking that the reply did not carry. */
   undeliveredTokens?: number;
-  /** Quota only: when the provider said the limit resets, if it said so. */
+  /** Quota or transient: when the provider said to retry, if it said so. */
   retryAt?: string;
 }
 
@@ -88,6 +92,9 @@ export function isSupervisorProviderError(value: unknown): value is SupervisorPr
 }
 
 const QUOTA = /rate.?limit|too many requests|quota|usage limit|insufficient.?(?:balance|credit)|resource.?exhausted|throttl|用量上限|限流/i;
+const TRANSIENT_STATUS = new Set(["500", "502", "503", "504", "529"]);
+const TRANSIENT =
+  /internal server error|overloaded|service unavailable|bad gateway|gateway time-?out|temporarily unavailable|please retry|"type"\s*:\s*"(?:api_error|overloaded_error)"/i;
 const AUTH = /unauthori[sz]ed|forbidden|invalid.{0,20}api.?key|api.?key.{0,20}invalid|authentication|permission denied|access denied/i;
 
 /**
@@ -113,6 +120,10 @@ export function classifyAssistantMessage(
     }
     if (status === "401" || status === "403" || AUTH.test(raw)) {
       return { failureClass: "auth", message: text };
+    }
+    if ((status !== undefined && TRANSIENT_STATUS.has(status)) || TRANSIENT.test(raw)) {
+      const retryAt = retryAtFromMessage(raw, options.now ?? Date.now());
+      return { failureClass: "transient", message: text, ...(retryAt !== undefined ? { retryAt } : {}) };
     }
     return { failureClass: "unknown", message: text };
   }
