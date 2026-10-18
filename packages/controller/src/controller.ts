@@ -17,6 +17,7 @@ import {
 } from "@graphloom/plugin-host";
 import type { Supervisor, SupervisorBinding } from "@graphloom/supervisor";
 import { reconcileSupervisorBinding, restorePiSupervisorFromBinding } from "@graphloom/supervisor";
+import type { ProposalReviewer } from "./proposal-review.js";
 import { readBinding, writeSwitchRequest, type ModelSwitchOrder } from "./supervisor-switch.js";
 import { refreshCaseFile } from "./case-file.js";
 import {
@@ -109,6 +110,11 @@ export interface RunRequest {
   /** Qualified repair patch author + independent reviewer hooks. */
   repair?: RepairDeps;
   /**
+   * Independent reviewer of a supervisor `stop` or validator/executor
+   * `qualify_repair`: a refute returns the proposal in-turn, no verdict blocks the run.
+   */
+  proposalReviewer?: ProposalReviewer;
+  /**
    * Replace a dead child host after crash/timeout, or after ActivateRepair.
    * Defaults to spawning a fresh child for controller-owned bundles; pass
    * explicitly for custom hosts. Receives the current intake pin so activation
@@ -138,6 +144,7 @@ export interface ResumeRequest {
   host?: PluginHost;
   supervisor?: Supervisor;
   repair?: RepairDeps;
+  proposalReviewer?: ProposalReviewer;
   /**
    * When `supervisor` is omitted and durable `supervisorBinding` exists,
    * restore the logical Pi session. Defaults to `restorePiSupervisorFromBinding`.
@@ -247,7 +254,7 @@ export interface Controller {
   /** @deprecated Prefer resume(); retained for #25 tests. */
   continueAfterRestart(
     stateDir: string,
-    deps: Pick<RunRequest, "plugin" | "host" | "runner" | "validators" | "supervisor">,
+    deps: Pick<RunRequest, "plugin" | "host" | "runner" | "validators" | "supervisor" | "proposalReviewer">,
   ): Promise<RunReport>;
 }
 
@@ -342,6 +349,7 @@ export function createController(): Controller {
           revisionBridge,
           ...(supervisor !== undefined ? { supervisor } : {}),
           ...(request.repair !== undefined ? { repair: request.repair } : {}),
+          ...(request.proposalReviewer !== undefined ? { proposalReviewer: request.proposalReviewer } : {}),
           ...resolveCandidateHost(request),
           ...resolveRecreateHost(session, {
             intake,
@@ -709,6 +717,7 @@ export function createController(): Controller {
           revisionBridge,
           ...(supervisor !== undefined ? { supervisor } : {}),
           ...(request.repair !== undefined ? { repair: request.repair } : {}),
+          ...(request.proposalReviewer !== undefined ? { proposalReviewer: request.proposalReviewer } : {}),
           ...resolveCandidateHost(request),
           ...resolveRecreateHost(session, {
             intake: state.intake,
@@ -753,6 +762,9 @@ export function createController(): Controller {
       }
       if (deps.supervisor !== undefined) {
         resumeReq.supervisor = deps.supervisor;
+      }
+      if (deps.proposalReviewer !== undefined) {
+        resumeReq.proposalReviewer = deps.proposalReviewer;
       }
       return this.resume(resumeReq);
     },

@@ -54,6 +54,8 @@ export interface PiSupervisor extends Supervisor {
   readonly binding: SupervisorBinding;
   /** Provider/model calls since the last drain (turns that started). */
   drainProviderCalls(): number;
+  /** Calls started by the running prompt and not yet settled; 1 when the session cannot count. */
+  outstandingProviderCalls(): number;
   /** Deterministic remedies applied to failed provider turns since the last drain. */
   drainRemedies(): SupervisorRemedy[];
   switchModel(args: {
@@ -151,7 +153,11 @@ export function createPiSupervisor(options: CreatePiSupervisorOptions): PiSuperv
   const switchJournal: ModelSwitchRecord[] = [
     ...(options.initialSwitchJournal ?? []).map((r) => ({ ...r })),
   ];
+  // Settlement counter: the controller drains it to charge the run budget.
   let providerCalls = 0;
+  // Cumulative per-decision usage is tracked independently of the drainable
+  // settlement counter, so a mid-decide drain never restores a turn's allowance.
+  let totalProviderCalls = 0;
   let closed = false;
   let codingRoot: string | undefined;
   const patchTimeoutMs = options.patchTimeoutMs ?? 600_000;
@@ -172,6 +178,7 @@ export function createPiSupervisor(options: CreatePiSupervisorOptions): PiSuperv
   function settleTurns(): number {
     const n = session.drainTurnCount !== undefined ? session.drainTurnCount() : 1;
     providerCalls += n;
+    totalProviderCalls += n;
     return n;
   }
 
@@ -259,11 +266,13 @@ export function createPiSupervisor(options: CreatePiSupervisorOptions): PiSuperv
         input.recordFinding,
         input.inspect,
       );
-    const callsBefore = providerCalls;
+    const totalBefore = totalProviderCalls;
     // Every prompt of this turn shares the controller's one allowance:
     // re-asks, rejection re-asks, provider-failure retries and compaction.
     const remainingCalls = () =>
-      input.maxProviderCalls === undefined ? undefined : input.maxProviderCalls - (providerCalls - callsBefore);
+      input.maxProviderCalls === undefined
+        ? undefined
+        : input.maxProviderCalls - (totalProviderCalls - totalBefore) - Math.max(0, input.admission?.reservedProviderCalls?.() ?? 0);
     // Provider-failure remedies (design-supervisor-robustness.md §4.3) share
     // one wait budget and one compaction across the whole turn.
     let waitLeft = Math.max(0, input.maxWaitMs ?? 0);
@@ -318,6 +327,7 @@ export function createPiSupervisor(options: CreatePiSupervisorOptions): PiSuperv
         }
         let reply = "";
         let timedOut: SupervisorProviderError | undefined;
+        const reservedAtStart = input.admission?.reservedProviderCalls?.() ?? 0;
         try {
           reply = await session.prompt(sent, {
             tools: toolbox.tools,
@@ -326,6 +336,8 @@ export function createPiSupervisor(options: CreatePiSupervisorOptions): PiSuperv
             done: () => toolbox.proposal() !== undefined || toolbox.exhausted() !== undefined,
             ...(input.signal !== undefined ? { signal: input.signal } : {}),
             ...(maxTurns !== undefined ? { maxTurns } : {}),
+            // What a reviewer spends while this prompt runs; what it had spent before is already in maxTurns.
+            ...(input.admission?.reservedProviderCalls !== undefined ? { reservedTurns: () => input.admission!.reservedProviderCalls!() - reservedAtStart } : {}),
           });
         } catch (err) {
           // Stop always wins: an aborted prompt is never a timeout to remedy.
@@ -458,6 +470,7 @@ export function createPiSupervisor(options: CreatePiSupervisorOptions): PiSuperv
               } else {
                 // A session that cannot count turns is charged compaction's upper bound.
                 providerCalls += COMPACTION_PROVIDER_CALLS;
+                totalProviderCalls += COMPACTION_PROVIDER_CALLS;
               }
             }
             remedy(failure, "compact_and_retry");
@@ -643,6 +656,10 @@ export function createPiSupervisor(options: CreatePiSupervisorOptions): PiSuperv
       const n = providerCalls;
       providerCalls = 0;
       return n;
+    },
+
+    outstandingProviderCalls() {
+      return session.peekTurnCount !== undefined ? session.peekTurnCount() : 1;
     },
 
     drainRemedies() {
