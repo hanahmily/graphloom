@@ -7,7 +7,7 @@ afterEach(() => scope.dispose());
 
 // The provider-fault conditions of the issue-fix matrix (see issue-fix.test.ts).
 describe.skipIf(goVersion() === undefined)("issue-fix end to end under each supervisor provider fault (#144)", () => {
-  it.each(CONDITIONS.filter((c) => c.supervisor !== undefined).map((c) => [c.id, c] as const))("%s", async (_id, condition) => {
+  it.each(CONDITIONS.filter((c) => c.supervisor !== undefined && (c.graphs?.includes("issue-fix") ?? true)).map((c) => [c.id, c] as const))("%s", async (_id, condition) => {
     await runCell(scope, "issue-fix", condition);
   }, 120_000);
 });

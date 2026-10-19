@@ -98,6 +98,8 @@ export interface FakeAgentConfig {
 }
 
 export interface IssueFixFixtureOptions extends Omit<TaskWorkspaceOptions, "graph" | "request" | "files" | "config"> {
+  /** The task's request (default: fix the fixture's issue). */
+  request?: string;
   /** CONTRIBUTING.md bytes; the profile pins whatever is used. */
   contributing?: string | Buffer;
 }
@@ -139,7 +141,7 @@ export async function createIssueFixFixture(scope: TestScope, options: IssueFixF
     ...options,
     graph: "issue-fix",
     repoName: options.repoName ?? "banyandb",
-    request: `Fix apache/skywalking#${ISSUE_FIX_ISSUE}.`,
+    request: options.request ?? `Fix apache/skywalking#${ISSUE_FIX_ISSUE}.`,
     files,
     config: { name: "banyandb-fixture.json", value: profile },
   });
