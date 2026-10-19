@@ -1,91 +1,37 @@
-import { execFile, execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import os from "node:os";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
-import { promisify } from "node:util";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { JobSpec } from "@graphloom/sdk";
 import type { JobResult } from "@graphloom/runner";
 import { GITHUB_API_URL_ENV } from "@graphloom/executor-github";
 import { startFakeGitHub, type FakeGitHub } from "@graphloom/executor-github/testing";
+import { createScope, createTaskWorkspace, goVersion, issueFixRepoFiles, ISSUE_FIX_ISSUE as ISSUE, repoRoot as root } from "@graphloom/testkit";
 import { check, probe, rehearse, REHEARSAL_GITHUB_TOKEN_ENV } from "../src/rehearsal.js";
 import { RUNNER_CONFIG_ENV } from "../src/runner-config.js";
 import { fakeRunnerConfig, writeFakeCodingAgents } from "./fixtures/fake-coding-agents.js";
 
-const execFileAsync = promisify(execFile);
-const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
-const ISSUE = 14111;
-
-function goVersion(): string | undefined {
-  try {
-    return execFileSync("go", ["env", "GOVERSION"], { encoding: "utf8" }).trim().replace(/^go/, "");
-  } catch {
-    return undefined;
-  }
-}
 const GO = goVersion();
-
-const LICENSE = "// Licensed under the Apache License, Version 2.0.\n\n";
-const BUGGY = `${LICENSE}package timestamp\n\n// Status reports a scheduled action after it has run for minutes.\nfunc Status(minutes int, running bool) string {\n\tif minutes >= generatedLimit {\n\t\treturn "timed out"\n\t}\n\treturn "ok"\n}\n`;
-const CHANGES = "# Changes by Version\n\n## 0.12.0\n\n### Bug Fixes\n\n- Older fix.\n\n## 0.11.0\n\n- Old.\n";
-const CHECK_MAKEFILE = [".PHONY: test", "test:", "\t@go version >/dev/null", ""].join("\n");
-const MAKEFILE = [
-  ".PHONY: generate test-ci license-check build lint check",
-  // Like BanyanDB's mocks: generated, gitignored, and needed by the tests.
-  "generate:",
-  "\t@printf 'package timestamp\\n\\nconst generatedLimit = 5\\n' > pkg/timestamp/mock_limit.go",
-  "test-ci:",
-  "\tgo test -count=1 $(PKG)",
-  "license-check:",
-  "\t@for f in $$(git ls-files '*.go'); do head -1 $$f | grep -q '^// Licensed' || { echo \"$$f: no license header\" >&2; exit 1; }; done",
-  "build:",
-  "\tgo build ./...",
-  "lint:",
-  "\tgo vet ./...",
-  "check:",
-  "\tgofmt -w $$(git ls-files '*.go')",
-  "\t@test -z \"$$(git status --porcelain)\" || { git status --porcelain >&2; exit 1; }",
-  "",
-].join("\n");
+const scope = createScope();
 
 /**
- * A Go module shaped like BanyanDB where it matters to the graph, with the
- * #14111 defect — the same fixture `issue-fix-e2e.test.ts` builds, except
+ * The testkit's Go module shaped like BanyanDB where it matters to the graph,
+ * with the #14111 defect, the same one `issue-fix-e2e.test.ts` uses, except
  * CONTRIBUTING.md is the real repository's file, byte for byte: the shipped
  * banyandb profile (examples/plugins/issue-fix/profiles/banyandb.json) pins
  * that file's real sha256, and the task names that profile unmodified, so a
  * rehearsal runs the bundle's own `describe(config)`, pin included.
  */
 async function makeEnv() {
-  const dir = await mkdtemp(path.join(os.tmpdir(), "gl-issue-fix-rehearsal-"));
-  const repo = path.join(dir, "banyandb");
-  await mkdir(path.join(repo, "pkg", "timestamp"), { recursive: true });
-  await mkdir(path.join(repo, "scripts", "ci", "check"), { recursive: true });
   const contributing = await readFile(path.join(root, "examples/skywalking-banyandb/CONTRIBUTING.md"));
-  const files: Record<string, string | Buffer> = {
-    "go.mod": `module example.com/banyandb\n\ngo ${GO}\n`,
-    ".gitignore": "mock_*.go\n",
-    Makefile: MAKEFILE,
-    "scripts/ci/check/Makefile": CHECK_MAKEFILE,
-    "CONTRIBUTING.md": contributing,
-    "CHANGES.md": CHANGES,
-    "pkg/timestamp/scheduler.go": BUGGY,
-  };
-  for (const [name, bytes] of Object.entries(files)) await writeFile(path.join(repo, name), bytes);
-  const git = (...args: string[]) => execFileAsync("git", args, { cwd: repo });
-  await git("init", "-q", "-b", "main");
-  await git("config", "user.email", "maintainer@example.com");
-  await git("config", "user.name", "Maintainer");
-  await git("add", ".");
-  await git("commit", "-q", "-m", "init");
-
-  const taskPath = path.join(dir, "task.yaml");
   // The config is the bundle's own shipped profile, as examples/issue-fix-banyandb-task.yaml names it.
-  await writeFile(taskPath, `graph: issue-fix\nrepo: ./banyandb\nconfig: plugins/issue-fix/profiles/banyandb.json\nrequest: ${JSON.stringify(`Fix apache/skywalking#${ISSUE}.`)}\n`);
-  await mkdir(path.join(dir, "plugins"));
-  await execFileAsync("ln", ["-s", path.join(root, "examples/plugins/issue-fix"), path.join(dir, "plugins", "issue-fix")]);
-  return { dir, repo, taskPath };
+  const env = await createTaskWorkspace(scope, {
+    graph: "issue-fix",
+    repoName: "banyandb",
+    files: issueFixRepoFiles(GO!, contributing),
+    config: { name: "plugins/issue-fix/profiles/banyandb.json" },
+    request: `Fix apache/skywalking#${ISSUE}.`,
+  });
+  return { dir: env.dir, repo: env.repo.path, taskPath: env.taskPath };
 }
 
 /**
@@ -119,7 +65,6 @@ async function fakeOcr(dir: string): Promise<string> {
   return bin;
 }
 
-const temps: string[] = [];
 let github: FakeGitHub | undefined;
 let savedPath: string | undefined;
 afterEach(async () => {
@@ -128,13 +73,12 @@ afterEach(async () => {
   savedPath = undefined;
   await github?.close();
   github = undefined;
-  while (temps.length > 0) await rm(temps.pop()!, { recursive: true, force: true });
+  await scope.dispose();
 });
 
 /** The fixture both tests share: a real environment, a fake GitHub, and the issue the banyandb profile's example is modeled on. */
 async function ready() {
   const env = await makeEnv();
-  temps.push(env.dir);
   github = await startFakeGitHub({
     issues: [{ number: ISSUE, title: "Scheduler reports long actions as timed out", state: "open", labels: ["bug"], body: "Backups over five minutes log action timed out." }],
   });

@@ -1,34 +1,32 @@
-import { execFile, execFileSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
-import os from "node:os";
+import { readFile, realpath } from "node:fs/promises";
 import path from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
-import { promisify } from "node:util";
+import { pathToFileURL } from "node:url";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { stop, type GraphPlugin, type JobSpec, type Validator } from "@graphloom/sdk";
-import { createBuiltinExecutorRunner, type JobContext, type JobResult, type Runner } from "@graphloom/runner";
+import { createBuiltinExecutorRunner } from "@graphloom/runner";
 import { createController, intakeTask, loadRunState, resolveBundleEntry, taskConfigValue } from "@graphloom/controller";
 import { createChildPluginHost } from "@graphloom/plugin-host";
 import { commandBinding, commandExecutorPackage } from "@graphloom/executor-command";
 import { githubBinding, githubExecutorPackage } from "@graphloom/executor-github";
-import { startFakeGitHub, type FakeGitHub } from "@graphloom/executor-github/testing";
+import {
+  ISSUE_FIX_FIXED as FIXED,
+  ISSUE_FIX_ISSUE as ISSUE,
+  ISSUE_FIX_PLAN as PLAN,
+  createIssueFixFixture,
+  createScope,
+  exampleBundle,
+  execFileAsync,
+  goVersion,
+  prependPath,
+  repoRoot,
+  type IssueFixFixture,
+} from "@graphloom/testkit";
 import { commandOptions } from "../dist/cli-runner.js";
 import type { RunnerConfig } from "../src/runner-config.js";
 
-const execFileAsync = promisify(execFile);
-const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
-const bundle = path.join(repoRoot, "examples/plugins/issue-fix");
-const ISSUE = 14111;
-const TEST = "TestStatusWhileRunning";
-
-function goVersion(): string | undefined {
-  try {
-    return execFileSync("go", ["env", "GOVERSION"], { encoding: "utf8" }).trim().replace(/^go/, "");
-  } catch {
-    return undefined;
-  }
-}
+const bundle = exampleBundle("issue-fix");
 const GO = goVersion();
 
 interface FixPlugin {
@@ -36,86 +34,26 @@ interface FixPlugin {
   validatorsFor(config: unknown): Record<string, Validator>;
 }
 let plugin: FixPlugin;
-let banyandbProfile: Record<string, unknown>;
 
 beforeAll(async () => {
   await execFileAsync("npm", ["run", "build", "-w", "@graphloom/plugin-issue-fix"], { cwd: repoRoot });
   plugin = (await import(pathToFileURL(path.join(bundle, "dist", "index.js")).href)) as FixPlugin;
-  banyandbProfile = JSON.parse(await readFile(path.join(bundle, "profiles", "banyandb.json"), "utf8")) as Record<string, unknown>;
 }, 120_000);
 
-const temps: string[] = [];
-let github: FakeGitHub | undefined;
-afterEach(async () => {
-  await github?.close();
-  github = undefined;
-  while (temps.length > 0) await rm(temps.pop()!, { recursive: true, force: true });
-});
+const scope = createScope();
+afterEach(() => scope.dispose());
 
-const LICENSE = "// Licensed under the Apache License, Version 2.0.\n\n";
-const BUGGY = `${LICENSE}package timestamp\n\n// Status reports a scheduled action after it has run for minutes.\nfunc Status(minutes int, running bool) string {\n\tif minutes >= generatedLimit {\n\t\treturn "timed out"\n\t}\n\treturn "ok"\n}\n`;
-const FIXED = BUGGY.replace("\tif minutes >= generatedLimit {", "\tif running {\n\t\treturn \"running\"\n\t}\n\tif minutes >= generatedLimit {");
-const REGRESSION = `${LICENSE}package timestamp\n\nimport "testing"\n\nfunc ${TEST}(t *testing.T) {\n\tif got := Status(generatedLimit, true); got != "running" {\n\t\tt.Fatalf("Status = %q, want running", got)\n\t}\n}\n`;
-const CHANGES = "# Changes by Version\n\n## 0.12.0\n\n### Bug Fixes\n\n- Older fix.\n\n## 0.11.0\n\n- Old.\n";
-const CHECK_MAKEFILE = [".PHONY: test", "test:", "\t@go version >/dev/null", ""].join("\n");
-const MAKEFILE = [
-  ".PHONY: generate test-ci license-check build lint check",
-  // Like BanyanDB's mocks: generated, gitignored, and needed by the tests.
-  "generate:",
-  "\t@printf 'package timestamp\\n\\nconst generatedLimit = 5\\n' > pkg/timestamp/mock_limit.go",
-  "test-ci:",
-  "\tgo test -count=1 $(PKG)",
-  "license-check:",
-  "\t@for f in $$(git ls-files '*.go'); do head -1 $$f | grep -q '^// Licensed' || { echo \"$$f: no license header\" >&2; exit 1; }; done",
-  "build:",
-  "\tgo build ./...",
-  "lint:",
-  "\tgo vet ./...",
-  "check:",
-  "\tgofmt -w $$(git ls-files '*.go')",
-  "\t@test -z \"$$(git status --porcelain)\" || { git status --porcelain >&2; exit 1; }",
-  "",
-].join("\n");
-
-/** A Go module shaped like BanyanDB where it matters to the graph, with the #14111 defect. */
-async function makeEnv() {
-  const dir = await mkdtemp(path.join(os.tmpdir(), "gl-issue-fix-"));
-  temps.push(dir);
-  const repo = path.join(dir, "banyandb");
-  await mkdir(path.join(repo, "pkg", "timestamp"), { recursive: true });
-  await mkdir(path.join(repo, "scripts", "ci", "check"), { recursive: true });
-  const files: Record<string, string> = {
-    "go.mod": `module example.com/banyandb\n\ngo ${GO}\n`,
-    ".gitignore": "mock_*.go\n",
-    Makefile: MAKEFILE,
-    "scripts/ci/check/Makefile": CHECK_MAKEFILE,
-    "CONTRIBUTING.md": "# Contributing\n\nRun make check-req, then make generate.\n",
-    "CHANGES.md": CHANGES,
-    "pkg/timestamp/scheduler.go": BUGGY,
-  };
-  for (const [name, bytes] of Object.entries(files)) await writeFile(path.join(repo, name), bytes);
-  const git = (...args: string[]) => execFileAsync("git", args, { cwd: repo });
-  await git("init", "-q", "-b", "main");
-  // Delivery commits as the repository's own identity, not a global one.
-  await git("config", "user.email", "maintainer@example.com");
-  await git("config", "user.name", "Maintainer");
-  await git("add", ".");
-  await git("commit", "-q", "-m", "init");
-
-  const contributing = createHash("sha256").update(files["CONTRIBUTING.md"]!).digest("hex");
-  // The shipped banyandb profile, with its checklist pinned to the fixture's
-  // CONTRIBUTING.md instead of BanyanDB's: a profile edit, not a code change.
-  const environment = banyandbProfile.environment as Record<string, unknown>;
-  const config = { ...banyandbProfile, environment: { ...environment, pinnedFiles: [{ path: "CONTRIBUTING.md", sha256: contributing }] } };
-  const configPath = path.join(dir, "banyandb-fixture.json");
-  await writeFile(configPath, JSON.stringify(config, null, 2));
-  const taskPath = path.join(dir, "task.yaml");
-  await writeFile(taskPath, `graph: issue-fix\nrepo: ./banyandb\nconfig: banyandb-fixture.json\nrequest: ${JSON.stringify(`Fix apache/skywalking#${ISSUE}.`)}\n`);
-  await mkdir(path.join(dir, "plugins"));
-  await execFileAsync("ln", ["-s", bundle, path.join(dir, "plugins", "issue-fix")]);
-  return { dir, repo, taskPath, configPath, config, stateRoot: path.join(dir, "state"), contributing };
+/**
+ * The testkit's issue-fix fixture (a Go module shaped like BanyanDB where it
+ * matters to the graph, with the #14111 defect; a fake GitHub with the issue;
+ * stand-ins for open-code-review, Claude Code and Codex), the stand-ins
+ * first on PATH.
+ */
+async function makeEnv(): Promise<IssueFixFixture> {
+  const env = await createIssueFixFixture(scope);
+  prependPath(scope, env.binDir);
+  return env;
 }
-
 
 /**
  * The real graph, stopped cleanly in normal mode the instant it is about to
@@ -139,178 +77,42 @@ function pauseBeforeWork(): GraphPlugin {
   };
 }
 
-const PLAN = {
-  status: "ready",
-  summary: "Report a running action as running at the timeout instead of timed out.",
-  title: "Report long scheduled actions as running, not timed out",
-  test: { package: "./pkg/timestamp", name: TEST, expectedValueSource: "the issue: a running backup is not an error" },
-  productionCaller: "pkg/timestamp.Status",
-  decisions: [
-    { point: "What to report at the timeout", tier: "behaviour", options: ["timed out", "running"], chosen: "running", basis: "the maintainer's comment" },
-    { point: "Whether the timeout metric still counts running actions", tier: "product", options: ["keep", "stop"], basis: "changes alerting" },
-  ],
-  openQuestions: ["Should the timeout metric keep counting running actions?"],
-};
-
 /**
- * Stands in for open-code-review on PATH: it has a delegation mode, and
- * `delegate preview` records where it ran, its arguments, and the files the
- * worktree change touches. Also shadows `node` with a version the environment
- * check accepts, since real CI runners are not guaranteed to have one that is
- * new enough, and this fixture's own Makefile never actually invokes Node.
+ * Real command and GitHub executors, as the CLI composes them, with the
+ * fixture's scripted Claude Code and Codex agents: the plan, an
+ * implementation that writes the fix, test and changelog entry, and a code
+ * review that runs the ocr its assignment names in the worktree.
  */
-async function fakeOcr(dir: string): Promise<{ bin: string; calls: string }> {
-  const bin = path.join(dir, "bin");
-  const calls = path.join(dir, "ocr-calls");
-  await mkdir(bin);
-  await writeFile(
-    path.join(bin, "ocr"),
-    [
-      "#!/bin/sh",
-      '[ "$1 $2" = "delegate preview" ] || exit 1',
-      '[ "$3" = --help ] && exit 0',
-      `{ echo "cwd=$(pwd)"; echo "args=$*"; echo "changed=$(git status --porcelain | awk '{print $2}' | sort | tr '\\n' ' ')"; } >> "${calls}"`,
-      'echo \'{"mode":"workspace","reviewable_files":[]}\'',
-      "",
-    ].join("\n"),
-    { mode: 0o755 },
-  );
-  await writeFile(path.join(bin, "node"), '#!/bin/sh\necho "v24.6.0"\n', { mode: 0o755 });
-  return { bin, calls };
-}
-
-/**
- * The agents are scripted, but the preflight still needs Claude Code and Codex
- * installed and logged in. They sit off PATH, as runner.json names them, and
- * are logged in only in the login directories runner.json names.
- */
-async function fakeAgents(dir: string): Promise<{ config: RunnerConfig; calls: string }> {
-  const bin = path.join(dir, "agents");
-  const calls = path.join(dir, "agent-calls");
-  await mkdir(bin);
-  const claudeConfig = path.join(dir, "claude-config");
-  const codexHome = path.join(dir, "codex-home");
-  const fake = (name: string, loginVar: string, loginDir: string) =>
-    writeFile(
-      path.join(bin, name),
-      `#!/bin/sh\necho "${name} $* ${loginVar}=$${loginVar}" >> "${calls}"\n[ "$1" = --version ] || [ "$${loginVar}" = "${loginDir}" ]\n`,
-      { mode: 0o755 },
-    );
-  await fake("claude", "CLAUDE_CONFIG_DIR", claudeConfig);
-  await fake("codex", "CODEX_HOME", codexHome);
-  return {
-    config: {
-      harness: "claude-code",
-      harnesses: ["claude-code", "codex"],
-      allowUnrestricted: true,
-      claude: { command: path.join(bin, "claude"), configDir: claudeConfig },
-      codex: { command: path.join(bin, "codex"), codexHome },
-    },
-    calls,
-  };
-}
-
-const LOW = { path: "pkg/timestamp/scheduler.go", start_line: 5, end_line: 5, category: "style", severity: "low", content: "Name the constant." };
-/** A false positive: the fix returns "running" before the limit check. */
-const FALSE_POSITIVE = {
-  path: "pkg/timestamp/scheduler.go",
-  start_line: 10,
-  end_line: 12,
-  category: "bug",
-  severity: "high",
-  content: "A running action past the limit is still reported as timed out.",
-  finding: "",
-  evidence: "Status(generatedLimit, true) reaches the limit check.",
-};
-
-/**
- * Real command and GitHub executors, as the CLI composes them, with scripted
- * Claude Code and Codex agents: the plan, an implementation that writes the
- * fix, test and changelog entry, and a code review that runs the ocr its
- * assignment names in the worktree.
- */
-function fixRunner(baseUrl: string, config: RunnerConfig) {
-  const agentJobs: JobSpec[] = [];
-  let session = 0;
-  const agent: Runner = {
-    async describeExecutors() {
-      return [{ id: "graphloom.coding-agent/run", digest: "scripted", source: "in-process", isolation: "in-process", builtin: false }];
-    },
-    async runJob(job: JobSpec, ctx: JobContext): Promise<JobResult> {
-      agentJobs.push(job);
-      const identity = { runId: ctx.runId, operationId: ctx.operationId, generation: ctx.generation };
-      const done = (output: unknown, extra: JobResult["evidence"] = []): JobResult => ({
-        status: "ok",
-        summary: "done",
-        sessionRef: `session-${++session}`,
-        evidence: [{ kind: "other", payload: { codingAgent: { harness: (job.input as { harness: string }).harness, status: "completed", output } } }, ...extra],
-        ...identity,
-      });
-      if (job.purpose === "review" && job.stageId === "review") {
-        const ocr = /`(\S+) delegate preview --format json`/.exec((job.input as { assignment: string }).assignment)![1]!;
-        await execFileAsync(ocr, ["delegate", "preview", "--format", "json"], { cwd: ctx.worktreePath });
-        return done({ comments: [LOW, FALSE_POSITIVE], prior: [], summary: { total_files: 3, reviewed_files: 3, skipped: [] } });
-      }
-      if (job.purpose === "diagnostic" && job.stageId === "review") {
-        const quotes = [
-          { path: "pkg/timestamp/scheduler.go", line: 7, text: "if running {" },
-          { path: "pkg/timestamp/scheduler.go", line: 8, text: 'return "running"' },
-        ];
-        return done({ verdicts: [{ finding: "F1", verdict: "refuted", reason: "Status returns running before it checks the limit.", quotes }] });
-      }
-      if (job.purpose === "work") {
-        const at = (p: string) => path.join(ctx.worktreePath, p);
-        await writeFile(at("pkg/timestamp/scheduler.go"), FIXED);
-        await writeFile(at("pkg/timestamp/status_test.go"), REGRESSION);
-        await writeFile(at("CHANGES.md"), CHANGES.replace("- Older fix.\n", "- Older fix.\n- Report scheduled actions that are still running as running, not timed out.\n"));
-      }
-      return done(PLAN);
-    },
-  };
+function fixRunner(env: IssueFixFixture) {
+  const agents = env.agents();
   const runner = createBuiltinExecutorRunner({
     packages: [
-      { manifest: commandExecutorPackage, ...commandBinding(commandOptions(config)) },
-      { manifest: githubExecutorPackage, ...githubBinding({ baseUrl, token: "fake" }) },
+      { manifest: commandExecutorPackage, ...commandBinding(commandOptions(env.agentConfig as RunnerConfig)) },
+      { manifest: githubExecutorPackage, ...githubBinding({ baseUrl: env.github.baseUrl, token: "fake" }) },
     ],
-    fallback: agent,
+    fallback: agents,
   });
-  return { runner, agentJobs };
+  return { runner, agentJobs: agents.jobs as JobSpec[] };
 }
 
 describe.skipIf(GO === undefined)("issue-fix with the banyandb profile on a Go repository", () => {
   it("checks the environment, plans and fixes the issue with RED and GREEN proof, reviews the code, and delivers a local branch", async () => {
     const env = await makeEnv();
-    github = await startFakeGitHub({
-      issues: [{ number: ISSUE, title: "Scheduler reports long actions as timed out", state: "open", labels: ["bug"], body: "Backups over five minutes log action timed out." }],
+    const { runner, agentJobs } = fixRunner(env);
+    // No plugin or validators: the controller loads the bundle in its own
+    // child host, which hands the pinned profile to every call.
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      runner,
+      stateRoot: env.stateRoot,
+      runId: "bydb-14111",
     });
-    github.comments.set(ISSUE, [{ id: 1, body: "A running backup is not an error; report it as running." }]);
-    const ocr = await fakeOcr(env.dir);
-    const agents = await fakeAgents(env.dir);
-    const savedPath = process.env.PATH;
-    process.env.PATH = `${ocr.bin}:${savedPath}`;
-    let report: Awaited<ReturnType<ReturnType<typeof createController>["run"]>>;
-    let agentJobs: JobSpec[];
-    try {
-      const composed = fixRunner(github.baseUrl, agents.config);
-      agentJobs = composed.agentJobs;
-      const runner = composed.runner;
-      // No plugin or validators: the controller loads the bundle in its own
-      // child host, which hands the pinned profile to every call.
-      report = await createController().run({
-        taskPath: env.taskPath,
-        runner,
-        stateRoot: env.stateRoot,
-        runId: "bydb-14111",
-      });
-    } finally {
-      process.env.PATH = savedPath;
-    }
 
     expect(report.status, `${report.stopReason}: ${report.blocker}`).toBe("succeeded");
     const state = await loadRunState(report.stateDir);
     // The run pinned the profile it was given; its definition came from it.
-    expect(state.intake.config).toMatchObject({ path: "banyandb-fixture.json", sha256: createHash("sha256").update(await readFile(env.configPath)).digest("hex") });
-    expect(state.definition.environment!.pinnedFiles).toEqual([{ path: "CONTRIBUTING.md", sha256: env.contributing }]);
+    expect(state.intake.config).toMatchObject({ path: "banyandb-fixture.json", sha256: createHash("sha256").update(await readFile(env.configPath!)).digest("hex") });
+    expect(state.definition.environment!.pinnedFiles).toEqual([{ path: "CONTRIBUTING.md", sha256: env.contributingSha256 }]);
     expect(state.receipts.filter((r) => r.valid).map((r) => `${r.stageId}/${r.requirementId}`)).toEqual([
       "fix/decisions-recorded",
       "fix/reproduces",
@@ -322,11 +124,11 @@ describe.skipIf(GO === undefined)("issue-fix with the banyandb profile on a Go r
     ]);
     expect(new Set(state.receipts.map((r) => r.candidateDigest))).toEqual(new Set([state.candidateDigest]));
     // The preflight checked the agents runner.json names, in the login directories it names.
-    expect([...new Set((await readFile(agents.calls, "utf8")).trim().split("\n"))]).toEqual([
-      `codex --version CODEX_HOME=${agents.config.codex!.codexHome}`,
-      `codex login status CODEX_HOME=${agents.config.codex!.codexHome}`,
-      `claude --version CLAUDE_CONFIG_DIR=${agents.config.claude!.configDir}`,
-      `claude auth status CLAUDE_CONFIG_DIR=${agents.config.claude!.configDir}`,
+    expect([...new Set((await readFile(env.agentCalls, "utf8")).trim().split("\n"))]).toEqual([
+      `codex --version CODEX_HOME=${env.agentConfig.codex.codexHome}`,
+      `codex login status CODEX_HOME=${env.agentConfig.codex.codexHome}`,
+      `claude --version CLAUDE_CONFIG_DIR=${env.agentConfig.claude.configDir}`,
+      `claude auth status CLAUDE_CONFIG_DIR=${env.agentConfig.claude.configDir}`,
     ]);
 
     // The plan saw the issue and its comments; the implementer continued the plan's session.
@@ -343,7 +145,7 @@ describe.skipIf(GO === undefined)("issue-fix with the banyandb profile on a Go r
 
     // Codex reviewed read-only, running the ocr the preflight found, in the worktree holding the uncommitted change.
     expect(agentJobs[2]).toMatchObject({ stageId: "review", kind: "agent", purpose: "review", readOnly: true, input: { harness: "codex" } });
-    const calls = (await readFile(ocr.calls, "utf8")).trim().split("\n");
+    const calls = (await readFile(env.ocrCalls, "utf8")).trim().split("\n");
     expect(calls).toEqual([
       `cwd=${await realpath(report.worktreePath)}`,
       "args=delegate preview --format json",
@@ -361,7 +163,7 @@ describe.skipIf(GO === undefined)("issue-fix with the banyandb profile on a Go r
     }
 
     // Delivery: a local branch with the whole change and a short message, the PR body in the evidence, and the worktree untouched.
-    const git = (...args: string[]) => execFileSync("git", args, { cwd: env.repo, encoding: "utf8" });
+    const git = (...args: string[]) => execFileSync("git", args, { cwd: env.repo.path, encoding: "utf8" });
     expect(git("show", `fix/${ISSUE}:pkg/timestamp/scheduler.go`)).toBe(FIXED);
     expect(git("ls-tree", "-r", "--name-only", `fix/${ISSUE}`).split("\n")).not.toContain("pkg/timestamp/mock_limit.go");
     expect(git("log", "-1", "--format=%an <%ae>", `fix/${ISSUE}`).trim()).toBe("Maintainer <maintainer@example.com>");
@@ -384,7 +186,7 @@ describe.skipIf(GO === undefined)("issue-fix with the banyandb profile on a Go r
     expect(body).not.toMatch(/rcpt|receipt/);
     expect(execFileSync("git", ["status", "--porcelain"], { cwd: report.worktreePath, encoding: "utf8" })).toContain("M pkg/timestamp/scheduler.go");
     expect(await readFile(path.join(report.worktreePath, "pkg/timestamp/mock_limit.go"), "utf8")).toContain("generatedLimit");
-    expect(github.requests.every((r) => r.method === "GET")).toBe(true);
+    expect(env.github.requests.every((r) => r.method === "GET")).toBe(true);
   }, 600_000);
 
   // This is the real-world shape of the bug a run-convergence investigation
@@ -397,53 +199,41 @@ describe.skipIf(GO === undefined)("issue-fix with the banyandb profile on a Go r
   // real graph and the real validator, not a hand-rolled simulation.
   it("goes straight to implementing an already-approved plan after a resume, instead of redrafting it", async () => {
     const env = await makeEnv();
-    github = await startFakeGitHub({
-      issues: [{ number: ISSUE, title: "Scheduler reports long actions as timed out", state: "open", labels: ["bug"], body: "Backups over five minutes log action timed out." }],
+    // In-process this time, so the graph can be paused: the in-process host
+    // passes the pinned config to describe and advance, and validatorsFor
+    // binds it for the validators the controller calls directly.
+    const validators = plugin.validatorsFor(env.profile);
+    const first = fixRunner(env);
+
+    // The real graph's own plan, paused in normal mode the instant it is
+    // about to implement — the plan already on record and zero Fix
+    // receipts yet, the gap no existing resume test covered.
+    const paused = await createController().run({
+      taskPath: env.taskPath,
+      plugin: pauseBeforeWork(),
+      validators,
+      runner: first.runner,
+      stateRoot: env.stateRoot,
+      runId: "issue-fix-resume",
     });
-    github.comments.set(ISSUE, [{ id: 1, body: "A running backup is not an error; report it as running." }]);
-    const ocr = await fakeOcr(env.dir);
-    const agents = await fakeAgents(env.dir);
-    const savedPath = process.env.PATH;
-    process.env.PATH = `${ocr.bin}:${savedPath}`;
-    try {
-      // In-process this time, so the graph can be paused: the in-process host
-      // passes the pinned config to describe and advance, and validatorsFor
-      // binds it for the validators the controller calls directly.
-      const validators = plugin.validatorsFor(env.config);
-      const first = fixRunner(github.baseUrl, agents.config);
+    expect(paused, `${paused.stopReason}: ${paused.blocker}`).toMatchObject({ status: "stopped", stopReason: "paused", blocker: "before implementing" });
+    expect(first.agentJobs.map((j) => j.purpose)).toEqual(["diagnostic"]);
+    expect(paused.receipts.filter((r) => r.valid)).toEqual([]);
 
-      // The real graph's own plan, paused in normal mode the instant it is
-      // about to implement — the plan already on record and zero Fix
-      // receipts yet, the gap no existing resume test covered.
-      const paused = await createController().run({
-        taskPath: env.taskPath,
-        plugin: pauseBeforeWork(),
-        validators,
-        runner: first.runner,
-        stateRoot: env.stateRoot,
-        runId: "issue-fix-resume",
-      });
-      expect(paused, `${paused.stopReason}: ${paused.blocker}`).toMatchObject({ status: "stopped", stopReason: "paused", blocker: "before implementing" });
-      expect(first.agentJobs.map((j) => j.purpose)).toEqual(["diagnostic"]);
-      expect(paused.receipts.filter((r) => r.valid)).toEqual([]);
+    const second = fixRunner(env);
+    const resumed = await createController().resume({
+      runRef: paused.stateDir,
+      plugin: plugin.createGraph(),
+      validators,
+      runner: second.runner,
+    });
 
-      const second = fixRunner(github.baseUrl, agents.config);
-      const resumed = await createController().resume({
-        runRef: paused.stateDir,
-        plugin: plugin.createGraph(),
-        validators,
-        runner: second.runner,
-      });
-
-      expect(resumed.status, `${resumed.stopReason}: ${resumed.blocker}`).toBe("succeeded");
-      // Straight to implementing the plan already on record: no second
-      // diagnostic/review pair redrafting it from scratch.
-      expect(second.agentJobs[0]).toMatchObject({ stageId: "fix", purpose: "work" });
-      expect(second.agentJobs.filter((j) => j.stageId === "fix" && j.purpose === "diagnostic")).toEqual([]);
-      expect(second.agentJobs.filter((j) => j.stageId === "fix" && j.purpose === "review")).toEqual([]);
-    } finally {
-      process.env.PATH = savedPath;
-    }
+    expect(resumed.status, `${resumed.stopReason}: ${resumed.blocker}`).toBe("succeeded");
+    // Straight to implementing the plan already on record: no second
+    // diagnostic/review pair redrafting it from scratch.
+    expect(second.agentJobs[0]).toMatchObject({ stageId: "fix", purpose: "work" });
+    expect(second.agentJobs.filter((j) => j.stageId === "fix" && j.purpose === "diagnostic")).toEqual([]);
+    expect(second.agentJobs.filter((j) => j.stageId === "fix" && j.purpose === "review")).toEqual([]);
   }, 60_000);
 });
 
