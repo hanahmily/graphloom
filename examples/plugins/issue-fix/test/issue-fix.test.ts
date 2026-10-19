@@ -180,6 +180,12 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
   let resumedDelivery = false;
   let seq = 0;
   let generation = 1;
+  // What the controller tells the graph about the operator's latest resume.
+  let resume: RunView["resume"];
+  const resumeAt = (previousStopReason?: string) => {
+    generation += 1;
+    resume = { generation, at: "2026-10-19T00:00:00.000Z", pluginUpdated: false, ...(previousStopReason !== undefined ? { previousStopReason, previousStopRetryable: true } : {}) };
+  };
   // Only a real reentry of Fix bumps attempt, exactly like the controller
   // (loop.ts's "reenter" case): resumeAfterFix bumps generation alone, the
   // same fence a bare resume applies, to prove the graph tells the two apart.
@@ -341,6 +347,7 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
       activeVersion: "issue-fix@0.1.0",
       config: BANYANDB,
       candidateDigest: digest,
+      ...(resume !== undefined ? { resume } : {}),
       ...(sessions.length > 0 ? { agentSessions: structuredClone(sessions) } : {}),
       ...(privateState !== undefined ? { privateState } : {}),
       ...(Object.values(openAttempt).some(Boolean) ? { openAttempt: { ...openAttempt } } : {}),
@@ -368,7 +375,7 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
       const failure = results.find((r) => r.result.status !== "passed");
       if (failure !== undefined) throw new Error(`validate ${stage.id} failed: ${failure.requirementId}: ${failure.result.reason}`);
       for (const r of results) receipts.push({ id: `rcpt-${receipts.length + 1}`, stageId: stage.id, requirementId: r.requirementId, validatorBinding: r.binding, candidateFingerprint: "fp", evidenceRefs: [], valid: true, candidateDigest: identityFor(r.requirementId) });
-      if (scenario.resumeAfterFix === true && stage.id === "fix") generation += 1;
+      if (scenario.resumeAfterFix === true && stage.id === "fix") resumeAt();
     } else if (action.type === "supervise" && reentries > 0) {
       // The supervisor re-enters Fix: its execution needs another attempt,
       // regardless of whether the candidate has changed yet (it has not, so
@@ -382,7 +389,7 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
       action.type === "stop" && action.stop.reason === "delivery failed" && scenario.resumeAfterFailedDelivery === true && !resumedDelivery
     ) {
       resumedDelivery = true;
-      generation += 1;
+      resumeAt("delivery failed");
     } else {
       return { decision, decisions, jobs, evidence, receipts, observed, issuesFile, issuesMarkdown };
     }
@@ -786,6 +793,10 @@ describe("issue-fix graph under the banyandb profile", () => {
     const resumed = simulate({ failDeliveries: 1, resumeAfterFailedDelivery: true });
     expect(resumed.decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
     expect(delivers(resumed.jobs)).toHaveLength(2);
+    // A delivery that fails again after the resume stops the run: no loop.
+    const again = simulate({ failDeliveries: 2, resumeAfterFailedDelivery: true });
+    expect(again.decision.action).toMatchObject({ type: "stop", stop: { reason: "delivery failed", retryable: true } });
+    expect(delivers(again.jobs)).toHaveLength(2);
   });
 
   it("reviews and delivers the accepted fix after a resume", () => {

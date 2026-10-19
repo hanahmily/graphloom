@@ -339,6 +339,49 @@ describe("known corrections", () => {
     const d = advanceHello(view);
     expect(d.action.type).toBe("supervise");
   });
+
+  it("retries a reviewer that failed before the latest resume, and supervises one that failed since", () => {
+    const failed = (generation: number) => ({
+      ref: `fail-g${generation}`,
+      kind: "other" as const,
+      generation,
+      payload: { executorFailure: { operationId: "op-r", stageId: "review", attempt: 1, executor: null, status: "failed", summary: "agent finished without a result" } },
+    });
+    const reviewing = (generation: number, resumedAt?: number) =>
+      baseView({
+        current: { stageId: "review", attempt: 1 },
+        generation,
+        privateState: JSON.stringify({ writeCorrections: 0, writerDispatched: true, observedWrite: true, reviewerDispatched: true, reviewEvidenceFromIndex: 0 }),
+        receipts: [
+          {
+            id: "r-write",
+            stageId: "write",
+            requirementId: "greeting-bytes",
+            validatorBinding: { requirementId: "greeting-bytes", validatorId: "exact-greeting", version: "1" },
+            candidateFingerprint: "fp1",
+            evidenceRefs: [],
+            valid: true,
+          },
+        ],
+        evidence: [failed(2)],
+        ...(resumedAt !== undefined ? { resume: { generation: resumedAt, at: "t", pluginUpdated: false, previousStopReason: "executor failed", previousStopRetryable: true } } : {}),
+      });
+    // Not resumed since the failure: the supervisor gets it.
+    expect(advanceHello(reviewing(2)).action.type).toBe("supervise");
+    // Resumed after it: the reviewer runs again.
+    const retried = advanceHello(reviewing(3, 3)).action;
+    expect(retried).toMatchObject({ type: "dispatch", job: { stageId: "review", purpose: "review", readOnly: true } });
+    // Failed again since the resume: the supervisor gets it, so a failing reviewer cannot loop.
+    const again = reviewing(3, 3);
+    expect(advanceHello({ ...again, evidence: [failed(2), failed(3)] }).action.type).toBe("supervise");
+  });
+
+  it("marks the stops no retry can clear as final", () => {
+    const incompatible = advanceHello(baseView({ task: { request: "Write a poem." } })).action;
+    expect(incompatible).toMatchObject({ type: "stop", stop: { reason: "incompatible task", retryable: false } });
+    const spent = advanceHello(baseView({ budgets: { agentInvocations: 0, jobs: 1, decisions: 1, corrections: 0 } })).action;
+    expect(spent).toMatchObject({ type: "stop", stop: { reason: "budgets exhausted", retryable: false } });
+  });
 });
 
 describe("validators", () => {

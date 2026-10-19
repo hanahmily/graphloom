@@ -77,7 +77,7 @@ describe.skipIf(!existsSync(path.join(banyandbFixDist, "index.js")))("the banyan
     const ours = createGraph().describe(BANYANDB);
     const strip = ({ graphId: _g, version: _v, privateStateSchema: _p, ...rest }: GraphDefinition) => rest;
     expect(strip(ours)).toEqual(strip(theirs));
-    expect(ours).toMatchObject({ graphId: "issue-fix", version: "0.4.2", privateStateSchema: "issue-fix-private-v1" });
+    expect(ours).toMatchObject({ graphId: "issue-fix", version: "0.4.3", privateStateSchema: "issue-fix-private-v1" });
   });
 
   it("gives the agents and the checks the same instructions and commands", async () => {

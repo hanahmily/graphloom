@@ -287,7 +287,7 @@ describe("release graph routing", () => {
     const approved = view({ receipts: logged, evidence: [review("approved", "matches")], privateState: reviewing, budgets: spent });
     expect(advanceRelease(approved).action).toEqual({ type: "validate", validate: { stageId: "review", requirementIds: ["release-review"] } });
 
-    const exhausted = { type: "stop", stop: { reason: "budgets exhausted", blocker: "no agent invocations left" } };
+    const exhausted = { type: "stop", stop: { reason: "budgets exhausted", blocker: "no agent invocations left", retryable: false } };
     expect(advanceRelease(view({ budgets: spent })).action).toEqual(exhausted);
     expect(advanceRelease(view({ receipts: logged, budgets: spent })).action).toEqual(exhausted);
     const bumping = JSON.stringify({ stageId: "bump", generation: 1, dispatched: true, observed: true, corrections: 0, ran: ["bump"] });
@@ -298,7 +298,7 @@ describe("release graph routing", () => {
   it("stops on a request that names no version to release", () => {
     expect(advanceRelease(view({ task: { request: "Write release notes." } })).action).toEqual({
       type: "stop",
-      stop: { reason: "incompatible task", blocker: "the request names no MAJOR.MINOR.PATCH version to release" },
+      stop: { reason: "incompatible task", blocker: "the request names no MAJOR.MINOR.PATCH version to release", retryable: false },
     });
   });
 });

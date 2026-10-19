@@ -102,6 +102,10 @@ interface Scenario {
   changes?: string;
   /** Bump the generation once Fix is accepted, as an operator's resume does. */
   resumeAfterFix?: boolean;
+  /** Fail this many deliveries (the deliver command exits 1). */
+  failDeliveries?: number;
+  /** After the run stops on a failed delivery, resume once, as an operator does after fixing it. */
+  resumeAfterFailedDelivery?: boolean;
   issueBody?: string;
   comments?: Array<{ author: string; createdAt: string; body: string }>;
   /** Whether the comment listing reached its last page. */
@@ -159,8 +163,16 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
   let codeReviewed = 0;
   let verified = 0;
   let reentries = scenario.reenter ?? 0;
+  let failedDeliveries = 0;
+  let resumedDelivery = false;
   let seq = 0;
   let generation = 1;
+  // What the controller tells the graph about the operator's latest resume.
+  let resume: RunView["resume"];
+  const resumeAt = (previousStopReason?: string) => {
+    generation += 1;
+    resume = { generation, at: "2026-10-19T00:00:00.000Z", pluginUpdated: false, ...(previousStopReason !== undefined ? { previousStopReason, previousStopRetryable: true } : {}) };
+  };
   // Only a real reentry of Fix bumps attempt, exactly like the controller
   // (loop.ts's "reenter" case): resumeAfterFix bumps generation alone, the
   // same fence a bare resume applies, to prove the graph tells the two apart.
@@ -278,7 +290,14 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
       record("command", { ...commandPayload(COMMAND.regression, scenario.red ?? { exitCode: 1, report: FAILED }), checkout: { from: "base", base: "base-sha", commit: `b-${op}`, paths: job.checkout.paths, prepared: true, mutations: [], phase: "run" } }, job, op);
       return;
     }
-    for (const c of input!.commands!) record("command", commandPayload(c.id, { stdout: "abc123\n" }), job, op);
+    for (const c of input!.commands!) {
+      if (c.id === COMMAND.deliver && failedDeliveries < (scenario.failDeliveries ?? 0)) {
+        failedDeliveries += 1;
+        record("command", commandPayload(c.id, { exitCode: 1, stderr: "branch fix/14111 already exists\n" }), job, op);
+      } else {
+        record("command", commandPayload(c.id, { stdout: "abc123\n" }), job, op);
+      }
+    }
   }
 
   const definition = createGraph().describe();
@@ -301,6 +320,7 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
       stateRevision: step,
       activeVersion: "banyandb-fix@0.3.0",
       candidateDigest: digest,
+      ...(resume !== undefined ? { resume } : {}),
       ...(sessions.length > 0 ? { agentSessions: structuredClone(sessions) } : {}),
       ...(privateState !== undefined ? { privateState } : {}),
       ...(Object.values(openAttempt).some(Boolean) ? { openAttempt: { ...openAttempt } } : {}),
@@ -328,7 +348,7 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
       const failure = results.find((r) => r.result.status !== "passed");
       if (failure !== undefined) throw new Error(`validate ${stage.id} failed: ${failure.requirementId}: ${failure.result.reason}`);
       for (const r of results) receipts.push({ id: `rcpt-${receipts.length + 1}`, stageId: stage.id, requirementId: r.requirementId, validatorBinding: r.binding, candidateFingerprint: "fp", evidenceRefs: [], valid: true, candidateDigest: identityFor(r.requirementId) });
-      if (scenario.resumeAfterFix === true && stage.id === "fix") generation += 1;
+      if (scenario.resumeAfterFix === true && stage.id === "fix") resumeAt();
     } else if (action.type === "supervise" && reentries > 0) {
       // The supervisor re-enters Fix: its execution needs another attempt,
       // regardless of whether the candidate has changed yet (it has not, so
@@ -338,6 +358,9 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
       openAttempt.fix = true;
       generation += 1;
       attempt += 1;
+    } else if (action.type === "stop" && action.stop.reason === "delivery failed" && scenario.resumeAfterFailedDelivery === true && !resumedDelivery) {
+      resumedDelivery = true;
+      resumeAt("delivery failed");
     } else {
       return { decision, decisions, jobs, evidence, receipts, observed };
     }
@@ -731,6 +754,20 @@ describe("banyandb-fix graph", () => {
     expect(fixReceipts.map((r) => r.requirementId).sort()).toEqual(
       ["builds", "changelog-entry", "decisions-recorded", "in-scope", "passes", "reproduces"].sort(),
     );
+  });
+
+  it("stops on a failed delivery, and tries it again after a resume", () => {
+    const delivers = (jobs: JobSpec[]) => jobs.filter((j) => (j.input as { commands?: Array<{ id: string }> }).commands?.[0]?.id === COMMAND.deliver);
+    const failed = simulate({ failDeliveries: 1 });
+    expect(failed.decision.action).toMatchObject({ type: "stop", stop: { reason: "delivery failed", retryable: true } });
+    expect(delivers(failed.jobs)).toHaveLength(1);
+    const resumed = simulate({ failDeliveries: 1, resumeAfterFailedDelivery: true });
+    expect(resumed.decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+    expect(delivers(resumed.jobs)).toHaveLength(2);
+    // A delivery that fails again after the resume stops the run: no loop.
+    const again = simulate({ failDeliveries: 2, resumeAfterFailedDelivery: true });
+    expect(again.decision.action).toMatchObject({ type: "stop", stop: { reason: "delivery failed" } });
+    expect(delivers(again.jobs)).toHaveLength(2);
   });
 
   it("reviews and delivers the accepted fix after a resume", () => {

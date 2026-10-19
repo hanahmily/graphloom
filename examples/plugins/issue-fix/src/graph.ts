@@ -1,5 +1,6 @@
 import {
   dispatch,
+  isStaleFailure,
   observe,
   stop,
   supervise,
@@ -113,7 +114,7 @@ import {
 import { codeReview, implementerRecord, reportText, validatorById } from "./validators.js";
 
 export const GRAPH_ID = "issue-fix";
-export const GRAPH_VERSION = "0.4.2";
+export const GRAPH_VERSION = "0.4.3";
 
 /** Graph bookkeeping; everything else is read back from recorded evidence. */
 export interface FixPrivateState {
@@ -247,12 +248,12 @@ export function advanceFix(view: RunView): GraphDecision {
     profile = parseProfile(view.config);
   } catch (err) {
     if (!(err instanceof ProfileError)) throw err;
-    return stop({ reason: "incompatible task", blocker: err.message }, "reject a task without a usable profile");
+    return stop({ reason: "incompatible task", blocker: err.message, retryable: false }, "reject a task without a usable profile");
   }
   const ctx: Context = { profile, definition: definitionFor(profile) };
   const issue = requestedIssue(view.task.request, profile);
   if (issue === undefined) {
-    return stop({ reason: "incompatible task", blocker: `the request names no ${profile.issues.owner}/${profile.issues.repo} issue` }, "reject a request without an issue");
+    return stop({ reason: "incompatible task", blocker: `the request names no ${profile.issues.owner}/${profile.issues.repo} issue`, retryable: false }, "reject a request without an issue");
   }
   const state = readPrivate(view);
   const stage = ctx.definition.stages.find(
@@ -505,11 +506,12 @@ function review(ctx: Context, view: RunView, issue: number, state: FixPrivateSta
 function deliver(ctx: Context, view: RunView, issue: number, state: FixPrivateState): GraphDecision {
   const { profile } = ctx;
   const current = forIdentity(view.evidence, view.candidateDigest);
-  // A delivery that failed before a resume or plugin update is tried again: the operator resumed
-  // because something changed (the deliver command, the repository, its environment). Only a
-  // failure in this generation stops the run, so a failing delivery cannot loop.
+  // A resume retries what failed (design-typescript-core.md §8): a delivery that failed before the
+  // operator's latest resume is tried again, since the operator resumed because something changed
+  // (the deliver command, the repository, its environment). A failure since the resume stops the
+  // run, so a failing delivery cannot loop.
   const delivered = commandRuns(current, COMMAND.deliver)
-    .filter((r) => r.record.candidateDigest === view.candidateDigest && (succeeded(r.command) || r.record.generation === view.generation))
+    .filter((r) => r.record.candidateDigest === view.candidateDigest && (succeeded(r.command) || !isStaleFailure(r.record, view)))
     .at(-1);
   const branch = `fix/${issue}`;
   if (delivered === undefined) {
@@ -549,6 +551,7 @@ function deliver(ctx: Context, view: RunView, issue: number, state: FixPrivateSt
         reason: "delivery failed",
         blocker: `${describeCommand(delivered.command)}: ${outputTail(delivered.command, 500, profile.runner.reportOutput)}`,
         evidenceRefs: [delivered.record.ref],
+        retryable: true,
       },
       `could not create ${branch}`,
     );
@@ -561,7 +564,7 @@ function deliver(ctx: Context, view: RunView, issue: number, state: FixPrivateSt
 
 /** Agents act only on the whole issue snapshot; when it cannot be supplied, the run stops rather than work from part of it. */
 function partialSnapshot(problem: string, refs: string[]): GraphDecision {
-  return stop({ reason: "incompatible task", blocker: problem, evidenceRefs: refs }, "stop: the issue snapshot cannot be handed to the agents whole");
+  return stop({ reason: "incompatible task", blocker: problem, evidenceRefs: refs, retryable: false }, "stop: the issue snapshot cannot be handed to the agents whole");
 }
 
 /** The test plan's line for the code review, and the dismissed findings a maintainer can overrule. */
@@ -635,7 +638,7 @@ function notReady(record: DecisionRecord, refs: string[], who: string): GraphDec
   if (record.status === "ready") return undefined;
   const reason = record.status === "blocked" ? "needs maintainer decision" : "cannot reproduce";
   const question = record.draftComment?.trim() || record.openQuestions[0] || record.summary;
-  return stop({ reason, blocker: question.slice(0, 1_000), evidenceRefs: refs }, `${who} returned ${record.status}: ${record.summary.slice(0, 200)}`);
+  return stop({ reason, blocker: question.slice(0, 1_000), evidenceRefs: refs, retryable: false }, `${who} returned ${record.status}: ${record.summary.slice(0, 200)}`);
 }
 
 /** RED's checkout did not even run the named test: a reason to ask for a revert patch, not a generic correction. */
@@ -928,7 +931,7 @@ function readPrivate(view: RunView): FixPrivateState {
 /** Only agent work spends an invocation; checks and validation stay open after the last one. */
 function dispatchAgent(view: RunView, job: JobSpec, summary: string, state: FixPrivateState): GraphDecision {
   if (view.budgets.agentInvocations <= 0) {
-    return stop({ reason: "budgets exhausted", blocker: "no agent invocations left" }, `cannot ${summary}`);
+    return stop({ reason: "budgets exhausted", blocker: "no agent invocations left", retryable: false }, `cannot ${summary}`);
   }
   return withPrivate(dispatch(job, summary), state);
 }
