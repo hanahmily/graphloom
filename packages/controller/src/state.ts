@@ -12,6 +12,7 @@ import type {
 } from "@graphloom/sdk";
 import type { SupervisorEpisodeRecord } from "@graphloom/supervisor";
 import type { IntakePin } from "./intake.js";
+import { bookBudgetUsage, rebaseBudgetUsage, type BudgetUsage } from "./budget-usage.js";
 import { withDirectoryLock } from "./lock.js";
 
 export type RunStatus = "running" | "succeeded" | "stopped" | "failed";
@@ -210,7 +211,14 @@ export interface DurableRunState {
   privateState?: string;
   definition: GraphDefinition;
   validatorBindings: ValidatorBinding[];
+  /** What the run has left of each budget; an operator raises one by editing it while the run is stopped. */
   budgets: IntakePin["budgets"];
+  /**
+   * What the run has used of each budget, booked by saveRunState and re-based
+   * on operator edits by loadRunState (budget-usage.ts). Absent in runs saved
+   * before it existed; loading one estimates it.
+   */
+  budgetUsage?: BudgetUsage;
   intake: IntakePin;
   worktreePath: string;
   worktreeBranch: string;
@@ -447,7 +455,14 @@ export function citedEvidence(state: DurableRunState, refs: readonly string[] | 
   return [...new Set((refs ?? []).filter((ref) => known.has(ref)))];
 }
 
-export async function saveRunState(state: DurableRunState): Promise<void> {
+/**
+ * Persist `state`. Any change in its remaining budgets since it was loaded or
+ * created is booked as the controller's own spending (or refund) in
+ * `budgetUsage`; an operator who raises a budget edits state.json instead,
+ * which loadRunState books as a raise.
+ */
+export async function saveRunState(input: DurableRunState): Promise<void> {
+  const state = bookBudgetUsage(input);
   await withDirectoryLock(state.stateDir, "state.lock", async () => {
     await mkdir(state.stateDir, { recursive: true });
     const target = path.join(state.stateDir, "state.json");
@@ -475,7 +490,7 @@ export async function saveRunState(state: DurableRunState): Promise<void> {
 export async function loadRunState(stateDir: string): Promise<DurableRunState> {
   return withDirectoryLock(stateDir, "state.lock", async () => {
     const raw = await readFile(path.join(stateDir, "state.json"), "utf8");
-    return JSON.parse(raw) as DurableRunState;
+    return rebaseBudgetUsage(JSON.parse(raw) as DurableRunState);
   });
 }
 

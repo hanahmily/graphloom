@@ -40,6 +40,7 @@ import {
 } from "@graphloom/supervisor";
 import { markProposal, noteOutcome, settleProposal } from "./settlement.js";
 import { appendEpisode, nextEpisodeTurn, settleEpisode } from "./episodes.js";
+import { budgetGranted, freshBudgetUsage } from "./budget-usage.js";
 import { liveCaseFile, recordAttempt, recordFinding, refreshCaseFile } from "./case-file.js";
 import {
   applyModelSwitch,
@@ -2643,7 +2644,9 @@ const STAGE_BUDGET_SHARE = 0.5;
 
 /** §4.7 pacing: a stage spending more than its share of the run's whole agent budget with nothing accepted, while budget remains to act on it. */
 function stagePacingMessage(state: DurableRunState, job: JobSpec): string | undefined {
-  const total = state.intake.budgets.agentInvocations;
+  // The run's agent budget as it stands — used plus left, so an operator's
+  // raise counts — not the intake copy it started with.
+  const total = budgetGranted(state, "agentInvocations") ?? state.intake.budgets.agentInvocations;
   const spent = state.agentInvocationsByStage?.[job.stageId] ?? 0;
   if (total <= 0 || spent <= total * STAGE_BUDGET_SHARE) return undefined;
   const receipts = state.receipts.filter((r) => r.stageId === job.stageId && r.valid).length;
@@ -2709,7 +2712,7 @@ function contractAdmissionRefusal(state: DurableRunState, job: JobSpec): string 
 /** What spent the stage's share of the run's agent budget, for a budget-exhaustion stop. */
 function budgetExhaustionBlocker(state: DurableRunState, stageId: string, purpose?: string): string {
   const spent = state.agentInvocationsByStage?.[stageId] ?? 0;
-  const total = state.intake.budgets.agentInvocations;
+  const total = budgetGranted(state, "agentInvocations") ?? state.intake.budgets.agentInvocations;
   const dispatches = state.dispatchesSinceReceipt?.[stageId]?.agent ?? 0;
   const receipts = state.receipts.filter((r) => r.stageId === stageId && r.valid).length;
   const kind = purpose !== undefined ? `${purpose} dispatches` : "agent dispatches";
@@ -2932,6 +2935,7 @@ export function initialState(args: {
     definition: args.definition,
     validatorBindings: structuredClone(args.definition.defaultValidators),
     budgets: { ...args.intake.budgets },
+    budgetUsage: freshBudgetUsage(args.intake.budgets),
     intake: args.intake,
     worktreePath: args.worktreePath,
     worktreeBranch: args.worktreeBranch,
