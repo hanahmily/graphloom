@@ -1,9 +1,12 @@
+# banyandb-fix has no profile to carry budget defaults, so the task names
+# them: the banyandb profile's, derived from this very run (9bfa446d-4ea, see
+# docs/budgets.md). New BanyanDB runs should use issue-fix-banyandb-task.yaml.
 graph: banyandb-fix
 repo: skywalking-banyandb
 request: "Fix apache/skywalking#14092."
 budgets:
-  agentInvocations: 2000
-  jobs: 1024
-  decisions: 2048
-  corrections: 16
-  activeMs: 43200000
+  agentInvocations: 6000
+  jobs: 250
+  decisions: 500
+  corrections: 100
+  activeMs: 72000000

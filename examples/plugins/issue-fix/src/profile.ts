@@ -5,7 +5,7 @@
  * (the regression runners and their report parsers) is selected by name.
  * See docs/design-issue-fix-graph.md for the schema.
  */
-import type { EnvironmentCommand, EnvironmentDeclaration } from "@graphloom/sdk";
+import { GRAPH_BUDGET_KEYS, type EnvironmentCommand, type EnvironmentDeclaration, type GraphBudgetDefaults } from "@graphloom/sdk";
 import { COMMAND } from "./constants.js";
 import { runnerById, RUNNERS, type RegressionRunner, type RunnerId } from "./runners/index.js";
 
@@ -83,6 +83,13 @@ export interface ProfileData {
   };
   /** Harnesses for each role; defaults: Claude Code implements and verifies, Codex reviews. */
   harnesses?: { implementer?: string; reviewer?: string; verifier?: string };
+  /**
+   * What a run on this repository is expected to need, from measured runs
+   * (docs/budgets.md). The graph declares them as its `defaultBudgets`;
+   * intake applies them over the controller's defaults, and the task's own
+   * `budgets` override them key by key.
+   */
+  budgets?: GraphBudgetDefaults;
 }
 
 /** A checked profile, with its runner resolved and defaults applied. */
@@ -136,6 +143,21 @@ function checkEnvironment(env: unknown): void {
   }
   const checks = (e.checks as Array<{ id: string }> | undefined) ?? [];
   need(checks.some((c) => c.id === "ocr"), 'environment.checks must include an "ocr" check that prints the path of open-code-review, which the code reviewer runs');
+}
+
+const BUDGET_NAMES: ReadonlySet<string> = new Set(GRAPH_BUDGET_KEYS);
+
+function checkBudgets(raw: unknown): void {
+  if (raw === undefined) return;
+  need(isObject(raw), "budgets must be an object");
+  const b = raw as Record<string, unknown>;
+  for (const [key, value] of Object.entries(b)) {
+    need(BUDGET_NAMES.has(key), `budgets.${key} is not a budget; budgets are ${GRAPH_BUDGET_KEYS.join(", ")}`);
+    need(Number.isSafeInteger(value) && (value as number) > 0, `budgets.${key} must be a positive integer`);
+  }
+  if (b.recoveryReserve !== undefined && b.agentInvocations !== undefined) {
+    need((b.recoveryReserve as number) < (b.agentInvocations as number), "budgets.recoveryReserve must be less than budgets.agentInvocations");
+  }
 }
 
 /**
@@ -198,6 +220,7 @@ export function parseProfile(config: unknown): Profile {
   }
   // A verifier from the reviewer's own family would judge its own findings.
   need(roles.verifier !== roles.reviewer, "harnesses.verifier must differ from harnesses.reviewer");
+  checkBudgets(p.budgets);
   const data = structuredClone(config) as unknown as ProfileData;
   return {
     ...data,

@@ -64,9 +64,11 @@ git init test-repo
 git -C test-repo -c user.name=GraphLoom -c user.email=graphloom@example.invalid commit --allow-empty -m "Initialize hello fixture"
 node ../apps/graphloom/dist/main.js run task.yaml
 node ../apps/graphloom/dist/main.js inspect <runId> --state-root test-repo/graphloom-state
+node ../apps/graphloom/dist/main.js stats <runId> --state-root test-repo/graphloom-state
 ```
 
-`inspect` lists each stage's completion and the validation receipts behind it.
+`inspect` lists each stage's completion and the validation receipts behind it;
+`stats` shows what the run used against its budgets ([budgets](../docs/budgets.md)).
 Write requires exact bytes `Hello, GraphLoom!\n` at `GREETING.txt` only. Review
 is an independent read-only job, and its structured result is the verdict. See
 [design §11](../docs/design-typescript-core.md#11-minimal-example-and-verification).
