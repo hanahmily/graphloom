@@ -141,7 +141,17 @@ const ACTION_TOOLS: Record<GraphLoomSupervisorAction, ActionTool> = {
   stop: {
     specKey: "stop",
     description: "Stop the run. Prefer other authorized remedies while budget and authority remain.",
-    spec: spec({ reason: STRING, blocker: STRING }, { evidenceRefs: EVIDENCE_REFS }),
+    spec: spec(
+      { reason: STRING, blocker: STRING },
+      {
+        evidenceRefs: EVIDENCE_REFS,
+        retryable: {
+          type: "boolean",
+          description:
+            "Whether an operator's resume should retry (default true). false only for a blocker no retry can clear, such as a decision only a maintainer can make: a resume then reports the same blocker until the plugin, the workspace change or a budget changes.",
+        },
+      },
+    ),
   },
 };
 

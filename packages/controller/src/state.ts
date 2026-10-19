@@ -134,6 +134,16 @@ export interface ChildOperationRecord {
   settledAt?: string;
 }
 
+/** The state a final stop depends on, recorded when the run stopped (stop-class.ts). */
+export interface StopMark {
+  activeVersion: string;
+  manifestDigest: string;
+  entryDigest: string;
+  /** The live workspace change when the run stopped. */
+  candidateDigest?: string;
+  budgets: IntakePin["budgets"];
+}
+
 export interface DurableRunState {
   runId: string;
   status: RunStatus;
@@ -141,6 +151,20 @@ export interface DurableRunState {
   blocker?: string;
   /** Recorded evidence the stop cites, such as the failing validation of an opaque gate. */
   stopEvidenceRefs?: string[];
+  /**
+   * How the graph or supervisor classified its own stop (`StopSpec.retryable`,
+   * default retryable). Absent when the controller stopped the run: its own
+   * reasons are classified by stop-class.ts. Cleared when the run runs again.
+   */
+  stopClass?: { by: "graph" | "supervisor"; retryable: boolean };
+  /**
+   * What a final stop depends on, as it was when the run stopped: a resume
+   * surfaces the same blocker until one of these changes (stop-class.ts).
+   * Absent in runs that stopped before it existed; they are retried.
+   */
+  stopMark?: StopMark;
+  /** The operator's latest resume, shown to the graph as `RunView.resume`. Absent until the first resume. */
+  lastResume?: import("@graphloom/sdk").ResumeView;
   generation: number;
   stateRevision: number;
   activeVersion: string;
