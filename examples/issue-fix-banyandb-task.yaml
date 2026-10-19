@@ -1,12 +1,8 @@
 # issue-fix with the banyandb profile: the same run as banyandb-fix-task.yaml.
 # The profile is the bundle's own; copy it beside this file to adjust it.
+# Budgets come from the profile's `budgets`, measured from real runs (see
+# docs/budgets.md); add a `budgets:` block here only to override one.
 graph: issue-fix
 repo: skywalking-banyandb
 config: plugins/issue-fix/profiles/banyandb.json
 request: "Fix apache/skywalking#14092."
-budgets:
-  agentInvocations: 2000
-  jobs: 1024
-  decisions: 2048
-  corrections: 16
-  activeMs: 43200000

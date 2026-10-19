@@ -6,7 +6,7 @@ import { pathToFileURL } from "node:url";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { stop, type GraphPlugin, type JobSpec, type Validator } from "@graphloom/sdk";
 import { createBuiltinExecutorRunner } from "@graphloom/runner";
-import { createController, intakeTask, loadRunState, resolveBundleEntry, taskConfigValue } from "@graphloom/controller";
+import { applyGraphDefaultBudgets, createController, intakeTask, loadRunState, resolveBundleEntry, taskConfigValue } from "@graphloom/controller";
 import { createChildPluginHost } from "@graphloom/plugin-host";
 import { commandBinding, commandExecutorPackage } from "@graphloom/executor-command";
 import { githubBinding, githubExecutorPackage } from "@graphloom/executor-github";
@@ -237,6 +237,23 @@ describe.skipIf(GO === undefined)("issue-fix with the banyandb profile on a Go r
   }, 60_000);
 });
 
+describe("profile budgets under task budgets (#151 review)", () => {
+  it("checks a profile's recoveryReserve against the run's final agentInvocations, after the task overrides it", async () => {
+    const intake = await intakeTask(path.join(repoRoot, "examples", "issue-fix-graphloom-task.yaml"));
+    const profile = { ...(taskConfigValue(intake) as Record<string, unknown>), budgets: { agentInvocations: 100, recoveryReserve: 100 } };
+    // The plugin describes itself with the tight profile: per-value checks pass.
+    const definition = plugin.createGraph().describe(profile);
+    expect(definition.defaultBudgets).toEqual({ agentInvocations: 100, recoveryReserve: 100 });
+    // A task raising agentInvocations makes the final budgets valid ...
+    const overridden = { ...intake, task: { ...intake.task, budgets: { agentInvocations: 1800 } } };
+    expect(applyGraphDefaultBudgets(overridden, definition).budgets).toMatchObject({ agentInvocations: 1800, recoveryReserve: 100 });
+    // ... and without it, the controller's final check refuses them.
+    expect(() => applyGraphDefaultBudgets(intake, definition)).toThrow(
+      "budgets.recoveryReserve (100) must be less than budgets.agentInvocations (100), leaving room for at least one normal-mode agent call",
+    );
+  });
+});
+
 describe("the shipped issue-fix example tasks", () => {
   it.each([
     ["issue-fix-banyandb-task.yaml", "banyandb.json", ["decisions-recorded", "reproduces", "passes", "builds", "in-scope", "changelog-entry"]],
@@ -255,6 +272,10 @@ describe("the shipped issue-fix example tasks", () => {
     try {
       const described = await host.describe({ runId: "example", operationId: "describe", expectedStateRevision: 0 });
       expect(described.ok && described.value.stages[0]!.requirementIds).toEqual(fix);
+      // The task names no budgets: the run starts with the profile's own (#150).
+      expect(intake.task.budgets).toBeUndefined();
+      const shipped = (JSON.parse(intake.config!.text) as { budgets: Record<string, number> }).budgets;
+      expect(described.ok && applyGraphDefaultBudgets(intake, described.value).budgets).toMatchObject(shipped);
     } finally {
       await host.close();
     }

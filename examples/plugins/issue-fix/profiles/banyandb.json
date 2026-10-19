@@ -202,5 +202,12 @@
     "implementer": "claude-code",
     "reviewer": "codex",
     "verifier": "claude-code"
+  },
+  "budgets": {
+    "agentInvocations": 6000,
+    "jobs": 250,
+    "decisions": 500,
+    "corrections": 100,
+    "activeMs": 72000000
   }
 }

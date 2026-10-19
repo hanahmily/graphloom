@@ -54,6 +54,7 @@ export type {
   Fingerprint,
   GraphAction,
   GraphDecision,
+  GraphBudgetDefaults,
   GraphDefinition,
   GraphPlugin,
   JobId,
@@ -110,7 +111,7 @@ export type {
   ToolCallResult,
 } from "./executor.js";
 
-export { PROTOCOL_VERSION } from "./types.js";
+export { GRAPH_BUDGET_KEYS, PROTOCOL_VERSION } from "./types.js";
 
 export {
   BUILTIN_AGENT_EXECUTOR_ID,

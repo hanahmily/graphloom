@@ -3,7 +3,7 @@ import { access, readFile } from "node:fs/promises";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { PROTOCOL_VERSION } from "@graphloom/sdk";
+import { PROTOCOL_VERSION, type GraphBudgetDefaults, type GraphDefinition } from "@graphloom/sdk";
 import { assertSafeGraphId } from "./ids.js";
 import { resolveBundleEntryFromManifest } from "./bundle.js";
 
@@ -14,6 +14,92 @@ export const DEFAULT_WAIT_BUDGET_MS = 15 * 60_000;
 
 /** Default execution time a run may spend while a controller is running it (4 hours). */
 export const DEFAULT_ACTIVE_BUDGET_MS = 4 * 60 * 60_000;
+
+/**
+ * The controller's own budgets, used for whatever neither the graph's
+ * `defaultBudgets` nor the task's `budgets` sets. Small on purpose: a graph
+ * whose runs need more says so (see docs/budgets.md).
+ */
+export const CONTROLLER_DEFAULT_BUDGETS = {
+  agentInvocations: 64,
+  jobs: 128,
+  decisions: 512,
+  corrections: 8,
+  waitMs: DEFAULT_WAIT_BUDGET_MS,
+  activeMs: DEFAULT_ACTIVE_BUDGET_MS,
+};
+
+/** The recovery reserve when no layer sets one: max(8, 5% of agentInvocations). */
+export function defaultRecoveryReserve(agentInvocations: number): number {
+  return Math.max(8, Math.ceil(agentInvocations * 0.05));
+}
+
+/** Each value a layer sets must name a budget and be a finite positive integer; checked per layer, on its own. */
+function assertBudgetValues(layer: string, values: Record<string, unknown> | undefined): void {
+  for (const [key, value] of Object.entries(values ?? {})) {
+    if (!BUDGET_KEYS.has(key)) throw new IntakeError(`unknown ${layer} key: ${key}`);
+    if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) {
+      throw new IntakeError(`${layer} ${key} must be a positive integer, got ${JSON.stringify(value)}`);
+    }
+  }
+}
+
+/**
+ * The checks that relate one budget to another. They hold only for the final
+ * budgets, once every layer is merged: a task that sets only
+ * `recoveryReserve` is judged against the graph's agentInvocations, not the
+ * controller's. (Long `waitMs`/`activeMs` need no limit here: timers are
+ * armed in steps no longer than MAX_TIMER_MS, #138.)
+ */
+function assertFinalBudgets(budgets: { agentInvocations: number; recoveryReserve: number }): void {
+  // A reserve that is not strictly smaller than the total leaves no room for
+  // even one normal-mode agent call: children.ts's own floor (0 in recovery,
+  // this reserve otherwise) would then refuse the run's very first dispatch.
+  // Unreachable from the 5%-with-an-8-floor default alone once agentInvocations
+  // is large enough, but explicit layers (either number) are not bound by that
+  // formula, so this is checked after merging them all.
+  if (budgets.recoveryReserve >= budgets.agentInvocations) {
+    throw new IntakeError(
+      `budgets.recoveryReserve (${budgets.recoveryReserve}) must be less than budgets.agentInvocations (${budgets.agentInvocations}), leaving room for at least one normal-mode agent call`,
+    );
+  }
+}
+
+type ResolvedBudgets = IntakePin["budgets"] & { waitMs: number; activeMs: number; recoveryReserve: number };
+
+function mergeBudgets(taskBudgets?: Partial<RunBudgets>, graphDefaults?: GraphBudgetDefaults): ResolvedBudgets {
+  assertBudgetValues("graph defaultBudgets", graphDefaults as Record<string, unknown> | undefined);
+  assertBudgetValues("task budgets", taskBudgets as Record<string, unknown> | undefined);
+  const merged = { ...CONTROLLER_DEFAULT_BUDGETS, ...graphDefaults, ...taskBudgets };
+  return { ...merged, recoveryReserve: merged.recoveryReserve ?? defaultRecoveryReserve(merged.agentInvocations) };
+}
+
+/**
+ * A run's final starting budgets, by layer: the controller's defaults, then
+ * the graph's `defaultBudgets` (what its `describe(config)` declared, so a
+ * task config such as a repository profile can carry them), then the task's
+ * own `budgets`. `recoveryReserve` defaults from the resulting
+ * agentInvocations. Every value is a finite positive integer, and the
+ * cross-budget checks run once, on the merged result.
+ */
+export function resolveRunBudgets(taskBudgets?: Partial<RunBudgets>, graphDefaults?: GraphBudgetDefaults): ResolvedBudgets {
+  const budgets = mergeBudgets(taskBudgets, graphDefaults);
+  assertFinalBudgets(budgets);
+  return budgets;
+}
+
+/**
+ * The intake with its final budgets: the graph's declared `defaultBudgets`
+ * applied under the task's own, and the cross-budget checks run on the
+ * result. Called once, after the plugin first describes itself, whether or
+ * not it declares any; a resumed run keeps the budgets it was intaken with.
+ */
+export function applyGraphDefaultBudgets(intake: IntakePin, definition: Pick<GraphDefinition, "defaultBudgets">): IntakePin {
+  const defaults = definition.defaultBudgets;
+  const declared = defaults !== undefined && Object.keys(defaults).length > 0;
+  const budgets = resolveRunBudgets(intake.task.budgets, declared ? defaults : undefined);
+  return { ...intake, ...(declared ? { graphDefaultBudgets: { ...defaults } } : {}), budgets };
+}
 
 export interface TaskFile {
   graph: string;
@@ -115,6 +201,12 @@ export interface IntakePin {
   /** The task's config, pinned; absent when the task names none. */
   config?: TaskConfigPin;
   grants: RepairGrants;
+  /**
+   * As intakeTask returns them, provisional: controller defaults under the
+   * task's budgets, each value checked. A run's are final once
+   * applyGraphDefaultBudgets has added the graph's layer and run the
+   * cross-budget checks.
+   */
   budgets: {
     agentInvocations: number;
     jobs: number;
@@ -129,6 +221,12 @@ export interface IntakePin {
     /** Supervisor dry-run probes left; absent when the task sets none. */
     probes?: number;
   };
+  /**
+   * The budgets the graph's definition declared (`defaultBudgets`) and intake
+   * applied under the task's own; absent when it declared none, and in runs
+   * saved before graphs could.
+   */
+  graphDefaultBudgets?: GraphBudgetDefaults;
   /**
    * The gate in `run` (docs/design-graph-rehearsal.md §3.5): whether this run
    * was checked/rehearsed before it was intaken, and what that found. Absent
@@ -344,28 +442,10 @@ export async function intakeTask(taskPath: string): Promise<IntakePin> {
     throw new IntakeError(`missing bundle entry: ${entryPath}`);
   }
 
-  const agentInvocations = task.budgets?.agentInvocations ?? 64;
-  const budgets = {
-    agentInvocations,
-    jobs: 128,
-    decisions: 512,
-    corrections: 8,
-    waitMs: DEFAULT_WAIT_BUDGET_MS,
-    activeMs: DEFAULT_ACTIVE_BUDGET_MS,
-    recoveryReserve: Math.max(8, Math.ceil(agentInvocations * 0.05)),
-    ...task.budgets,
-  };
-  // A reserve that is not strictly smaller than the total leaves no room for
-  // even one normal-mode agent call: children.ts's own floor (0 in recovery,
-  // this reserve otherwise) would then refuse the run's very first dispatch.
-  // Unreachable from the 5%-with-an-8-floor default alone once agentInvocations
-  // is large enough, but task.yaml's own explicit budgets (either number) are
-  // not bound by that formula, so this is checked after merging both.
-  if (budgets.recoveryReserve >= budgets.agentInvocations) {
-    throw new IntakeError(
-      `budgets.recoveryReserve (${budgets.recoveryReserve}) must be less than budgets.agentInvocations (${budgets.agentInvocations}), leaving room for at least one normal-mode agent call`,
-    );
-  }
+  // Provisional: each value is checked here, but the cross-budget checks wait
+  // for the graph's defaultBudgets, which only describe() supplies
+  // (applyGraphDefaultBudgets).
+  const budgets = mergeBudgets(task.budgets);
 
   return {
     taskPath: absoluteTask,

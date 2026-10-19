@@ -11,7 +11,9 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import {
+  applyGraphDefaultBudgets,
   checkB3,
+  defaultRecoveryReserve,
   classifyAgentResult,
   createController,
   evaluateRehearsal,
@@ -73,6 +75,25 @@ const execFileAsync = promisify(execFile);
 
 /** Default rehearsal budgets (§3.2): small enough that a non-converging graph surfaces in seconds, not minutes. */
 const DEFAULT_REHEARSAL_BUDGETS = { agentInvocations: 24, jobs: 64, decisions: 256, corrections: 4 };
+
+/**
+ * The budgets a rehearsal's generated task names: the defaults above, the
+ * scenario's own over them, and a `recoveryReserve` that fits the
+ * rehearsal's own agent allowance when the scenario sets none. Without it
+ * the run would inherit the reserve a graph declares for live runs (such as
+ * 90 of 1,800) and the final check would refuse 24 calls with a reserve of
+ * 90 before anything ran. The reserve follows the controller's own rule,
+ * kept below the allowance; an explicit scenario reserve is used as is.
+ */
+export function rehearsalBudgets(scenarioBudgets?: RehearsalScenario["budgets"]): Record<string, number> {
+  const budgets: Record<string, number> = { ...DEFAULT_REHEARSAL_BUDGETS, ...scenarioBudgets };
+  if (budgets.recoveryReserve === undefined) {
+    const allowance = budgets.agentInvocations!;
+    const reserve = Math.min(defaultRecoveryReserve(allowance), allowance - 1);
+    if (reserve >= 1) budgets.recoveryReserve = reserve;
+  }
+  return budgets;
+}
 /**
  * §3.4: a probe spends at most this many real provider calls. Not "one
  * assignment in, one result out, plus a little correction room" for every
@@ -201,6 +222,12 @@ export async function check(taskPath: string): Promise<CheckReport> {
   const intake = await intakeTask(taskPath);
   const problems: string[] = [];
   const definition = await describeBundle(intake);
+  // The run's final budgets: the graph's defaultBudgets under the task's, checked across budgets.
+  try {
+    applyGraphDefaultBudgets(intake, definition);
+  } catch (err) {
+    problems.push(`budgets: ${err instanceof Error ? err.message : String(err)}`);
+  }
 
   const contracts = definition.resultContracts ?? [];
   const byName = new Map(contracts.map((c) => [c.name, c]));
@@ -396,7 +423,7 @@ async function performRehearsal(
   await writeFile(scenarioPath, JSON.stringify(scenario), "utf8");
 
   const tempTaskPath = path.join(taskDir, `.graphloom-rehearsal-${randomUUID().slice(0, 8)}.yaml`);
-  const budgets = { ...DEFAULT_REHEARSAL_BUDGETS, ...scenario.budgets };
+  const budgets = rehearsalBudgets(scenario.budgets);
   const budgetLines = Object.entries(budgets).map(([k, v]) => `  ${k}: ${v}`).join("\n");
   // The graph's own request text, verbatim (as a block scalar: a plugin may
   // read it for compatibility checks or prompt content) — never synthesized,

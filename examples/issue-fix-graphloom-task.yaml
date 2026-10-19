@@ -5,13 +5,9 @@
 # root (both ignored by Git).
 # GraphLoom's issues are mostly enhancements: the profile tells the agents to
 # treat one like a bug, with a new test that fails without the change.
+# Budgets come from the profile's `budgets`, measured from real runs (see
+# docs/budgets.md); add a `budgets:` block here only to override one.
 graph: issue-fix
 repo: .
 config: plugins/issue-fix/profiles/graphloom.json
 request: "Fix hanahmily/graphloom#119."
-budgets:
-  agentInvocations: 2000
-  jobs: 1024
-  decisions: 2048
-  corrections: 16
-  activeMs: 43200000

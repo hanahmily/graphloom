@@ -266,6 +266,20 @@ describe("wire validation", () => {
     expect(() => assertGraphDefinition(withEnv({ pinnedFiles: [{ path: "../x", sha256: sha }] }))).toThrow(/inside/);
     expect(() => assertGraphDefinition(withEnv({ pinnedFiles: [{ path: "x", sha256: "abc" }] }))).toThrow(/SHA-256/);
   });
+
+  it("checks declared default budgets (#150)", () => {
+    const withBudgets = (defaultBudgets: unknown) => ({ ...helloDefinition, defaultBudgets });
+    expect(assertGraphDefinition(withBudgets({ agentInvocations: 1800, activeMs: 36_000_000 })).defaultBudgets).toEqual({
+      agentInvocations: 1800,
+      activeMs: 36_000_000,
+    });
+    expect(assertGraphDefinition(helloDefinition).defaultBudgets).toBeUndefined();
+    expect(() => assertGraphDefinition(withBudgets([]))).toThrow(/defaultBudgets/);
+    expect(() => assertGraphDefinition(withBudgets({ tokens: 5 }))).toThrow(/tokens is not a budget/);
+    expect(() => assertGraphDefinition(withBudgets({ jobs: 0 }))).toThrow(/positive integer/);
+    expect(() => assertGraphDefinition(withBudgets({ jobs: 1.5 }))).toThrow(/positive integer/);
+    expect(() => assertGraphDefinition(withBudgets({ jobs: "10" }))).toThrow(/positive integer/);
+  });
 });
 
 describe("GraphDecision.evidence (#119)", () => {

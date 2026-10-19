@@ -30,7 +30,7 @@ import { admitValidation, assertLiveWorkspaceMatchesEvidence, deliveryDrift, inv
 import type { AdmissionValidator } from "./admit.js";
 import { resolveBundleEntry } from "./bundle.js";
 import { createHostValidators } from "./host-validators.js";
-import { intakeTask, taskConfigValue, type IntakePin } from "./intake.js";
+import { applyGraphDefaultBudgets, intakeTask, taskConfigValue, type IntakePin } from "./intake.js";
 import { assertSafeRunId } from "./ids.js";
 import { withDirectoryLock } from "./lock.js";
 import { deleteRun, type DeleteReport } from "./delete-run.js";
@@ -308,6 +308,8 @@ export function createController(): Controller {
         }
         const definition = described.value;
         assertDefinitionMatchesPin(definition, intake);
+        // Controller defaults < the graph's declared defaultBudgets < task budgets.
+        const budgeted = applyGraphDefaultBudgets(intake, definition);
 
         const revisionBridge = { current: 0 };
         const validators = resolveValidators(
@@ -330,7 +332,7 @@ export function createController(): Controller {
 
         let state = initialState({
           runId,
-          intake,
+          intake: budgeted,
           definition,
           worktreePath,
           worktreeBranch: branchName,
@@ -1275,7 +1277,7 @@ function toReport(state: DurableRunState, sourceDirtyAfter: string[]): RunReport
   return report;
 }
 
-export { intakeTask, parseTaskYaml, resolveUnderBase, taskConfigValue, IntakeError, MAX_TASK_CONFIG_BYTES } from "./intake.js";
+export { applyGraphDefaultBudgets, CONTROLLER_DEFAULT_BUDGETS, defaultRecoveryReserve, intakeTask, parseTaskYaml, resolveRunBudgets, resolveUnderBase, taskConfigValue, IntakeError, MAX_TASK_CONFIG_BYTES } from "./intake.js";
 export { admitValidation, freshEvidence } from "./admit.js";
 export { toRunView, bumpGeneration, classifyAgentResult } from "./loop.js";
 export type { ContractOutcome } from "./loop.js";

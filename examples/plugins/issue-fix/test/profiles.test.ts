@@ -76,9 +76,10 @@ describe.skipIf(!existsSync(path.join(banyandbFixDist, "index.js")))("the banyan
   it("describes the same stages, requirements, validators, contracts and environment", async () => {
     const theirs = ((await load("index.js")).createGraph as () => { describe(): GraphDefinition })().describe();
     const ours = createGraph().describe(BANYANDB);
-    const strip = ({ graphId: _g, version: _v, privateStateSchema: _p, ...rest }: GraphDefinition) => rest;
+    // Budgets are what a run may spend, not behaviour: banyandb-fix predates them.
+    const strip = ({ graphId: _g, version: _v, privateStateSchema: _p, defaultBudgets: _b, ...rest }: GraphDefinition) => rest;
     expect(strip(ours)).toEqual(strip(theirs));
-    expect(ours).toMatchObject({ graphId: "issue-fix", version: "0.5.0", privateStateSchema: "issue-fix-private-v1" });
+    expect(ours).toMatchObject({ graphId: "issue-fix", version: "0.6.0", privateStateSchema: "issue-fix-private-v1" });
   });
 
   it("gives the agents and the checks the same instructions and commands", async () => {
@@ -266,6 +267,21 @@ describe("profiles", () => {
     expect(broken({ environment: { checks: [] } })).toThrow(/"ocr" check/);
     expect(broken({ harnesses: { reviewer: "claude-code" } })).toThrow(/verifier must differ/);
     expect(broken({ changelog: { path: "CHANGES.md", rule: "anywhere" } })).toThrow(/changelog.rule/);
+    expect(broken({ budgets: [] })).toThrow(/budgets must be an object/);
+    expect(broken({ budgets: { tokens: 10 } })).toThrow(/budgets.tokens is not a budget/);
+    expect(broken({ budgets: { jobs: 0 } })).toThrow(/budgets.jobs must be a positive integer/);
+  });
+
+  it("declares the profile's measured budgets as the graph's default budgets (#150)", () => {
+    expect(definitionFor(graphloom).defaultBudgets).toEqual({ agentInvocations: 1800, jobs: 250, decisions: 350, corrections: 30, activeMs: 36_000_000 });
+    expect(definitionFor(banyandb).defaultBudgets).toEqual({ agentInvocations: 6000, jobs: 250, decisions: 500, corrections: 100, activeMs: 72_000_000 });
+    const { budgets: _b, ...unbudgeted } = GRAPHLOOM as Record<string, unknown>;
+    void _b;
+    expect(definitionFor(parseProfile(unbudgeted)).defaultBudgets).toBeUndefined();
+    // Budgets are checked one by one here; how they relate is the controller's
+    // check on the run's final budgets, after the task's own override them.
+    const tight = parseProfile({ ...(GRAPHLOOM as object), budgets: { agentInvocations: 100, recoveryReserve: 100 } });
+    expect(definitionFor(tight).defaultBudgets).toEqual({ agentInvocations: 100, recoveryReserve: 100 });
   });
 
   it("stops a run whose view carries no usable profile, instead of guessing one", () => {

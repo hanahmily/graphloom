@@ -61,7 +61,39 @@ export interface GraphDefinition {
    * controller carry these opaquely; see docs/design-agent-contract-robustness.md.
    */
   resultContracts?: import("./result-contract.js").ResultContract[];
+  /**
+   * Budgets this graph (or the task config it was described with) expects a
+   * run to need. Intake applies them over the controller's defaults and
+   * under the task's own `budgets`; each stays finite and is validated the
+   * same way. Not compared on resume or repair: a run keeps the budgets it
+   * was intaken with.
+   */
+  defaultBudgets?: GraphBudgetDefaults;
 }
+
+/** Run budget defaults a graph may declare; every value is a positive safe integer. */
+export interface GraphBudgetDefaults {
+  agentInvocations?: number;
+  jobs?: number;
+  decisions?: number;
+  corrections?: number;
+  waitMs?: number;
+  activeMs?: number;
+  recoveryReserve?: number;
+  probes?: number;
+}
+
+/** The budget names a graph's `defaultBudgets` may set. */
+export const GRAPH_BUDGET_KEYS = [
+  "agentInvocations",
+  "jobs",
+  "decisions",
+  "corrections",
+  "waitMs",
+  "activeMs",
+  "recoveryReserve",
+  "probes",
+] as const satisfies ReadonlyArray<keyof GraphBudgetDefaults>;
 
 /** A command the controller runs with the built-in command executor. */
 export interface EnvironmentCommand {

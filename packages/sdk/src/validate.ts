@@ -1,5 +1,5 @@
 import type { GraphRehearsal, RehearsalExpectation, RehearsalReply, RehearsalScenario } from "./rehearsal.js";
-import { PROTOCOL_VERSION, type GraphAction, type GraphDecision, type GraphDefinition, type RunView, type ValidationInput, type ValidationResult, type WireRequest, type WireResponse } from "./types.js";
+import { GRAPH_BUDGET_KEYS, PROTOCOL_VERSION, type GraphAction, type GraphDecision, type GraphDefinition, type RunView, type ValidationInput, type ValidationResult, type WireRequest, type WireResponse } from "./types.js";
 
 /**
  * A run's RunView grows with its evidence (command stdout/stderr tails, file
@@ -221,7 +221,20 @@ export function assertGraphDefinition(value: unknown): GraphDefinition {
   }
   if (obj["environment"] !== undefined) assertEnvironment(obj["environment"]);
   if (obj["resultContracts"] !== undefined) assertResultContracts(obj["resultContracts"]);
+  if (obj["defaultBudgets"] !== undefined) assertDefaultBudgets(obj["defaultBudgets"]);
   return obj as unknown as GraphDefinition;
+}
+
+const DEFAULT_BUDGET_KEYS: ReadonlySet<string> = new Set(GRAPH_BUDGET_KEYS);
+
+function assertDefaultBudgets(value: unknown): void {
+  const obj = asObject(value, "definition.defaultBudgets");
+  for (const [key, v] of Object.entries(obj)) {
+    if (!DEFAULT_BUDGET_KEYS.has(key)) throw new WireValidationError("malformed", `definition.defaultBudgets.${key} is not a budget`);
+    if (typeof v !== "number" || !Number.isSafeInteger(v) || v <= 0) {
+      throw new WireValidationError("malformed", `definition.defaultBudgets.${key} must be a positive integer`);
+    }
+  }
 }
 
 const EVIDENCE_KINDS = new Set(["file", "command", "workspace", "review", "other"]);

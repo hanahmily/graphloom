@@ -6,8 +6,8 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { JobResult } from "@graphloom/runner";
-import { intakeTask, IntakeError, type DurableRunState } from "@graphloom/controller";
-import { check, checkProvenance, probe, recordScenario, rehearse, replay } from "../src/rehearsal.js";
+import { applyGraphDefaultBudgets, intakeTask, IntakeError, resolveRunBudgets, type DurableRunState } from "@graphloom/controller";
+import { check, checkProvenance, probe, recordScenario, rehearsalBudgets, rehearse, replay } from "../src/rehearsal.js";
 import { RUNNER_CONFIG_ENV } from "../src/runner-config.js";
 import { fakeRunnerConfig, writeFakeCodingAgents } from "./fixtures/fake-coding-agents.js";
 
@@ -57,17 +57,41 @@ describe("graphloom check (L0)", () => {
   });
 });
 
+describe("rehearsal budgets (#151 review)", () => {
+  it("names a recoveryReserve that fits the rehearsal's own allowance, so a graph's live reserve is not inherited", () => {
+    expect(rehearsalBudgets()).toEqual({ agentInvocations: 24, jobs: 64, decisions: 256, corrections: 4, recoveryReserve: 8 });
+    // Merged under a graph that declares 1,800 calls with a reserve of 90: valid.
+    expect(resolveRunBudgets(rehearsalBudgets(), { agentInvocations: 1800, recoveryReserve: 90 })).toMatchObject({ agentInvocations: 24, recoveryReserve: 8 });
+    // Kept below a small allowance; none at all when no call could be left.
+    expect(rehearsalBudgets({ agentInvocations: 4 }).recoveryReserve).toBe(3);
+    expect(rehearsalBudgets({ agentInvocations: 1 }).recoveryReserve).toBeUndefined();
+  });
+
+  it("honours an explicit scenario reserve as is", () => {
+    expect(rehearsalBudgets({ agentInvocations: 40, recoveryReserve: 3 })).toMatchObject({ agentInvocations: 40, recoveryReserve: 3 });
+    // Even one the final check will refuse: the scenario said so.
+    expect(rehearsalBudgets({ recoveryReserve: 30 }).recoveryReserve).toBe(30);
+    expect(() => resolveRunBudgets(rehearsalBudgets({ recoveryReserve: 30 }))).toThrow(/recoveryReserve \(30\) must be less than budgets.agentInvocations \(24\)/);
+  });
+});
+
 describe("intake budgets", () => {
   // Regression: recoveryReserve's own default (at least 8, or 5% of
   // agentInvocations) can meet or exceed a small agentInvocations total —
   // children.ts's own floor (this reserve, outside recovery mode) would then
   // refuse the run's very first normal-mode agent call, with no agent
   // invocation ever possible at all.
+  // The cross-budget check runs once on the final budgets, after describe()
+  // adds the graph's defaultBudgets (#151): intake alone only checks values.
   it("refuses a budget whose recoveryReserve leaves no room for a normal-mode agent call", async () => {
     const f = await fixture("hello", "Create GREETING.txt.");
     await writeFile(f.taskPath, `graph: hello\nrepo: ./repo\nrequest: Create GREETING.txt.\nbudgets:\n  agentInvocations: 4\n`);
-    await expect(intakeTask(f.taskPath)).rejects.toThrow(IntakeError);
-    await expect(intakeTask(f.taskPath)).rejects.toThrow(/recoveryReserve/);
+    const intake = await intakeTask(f.taskPath);
+    expect(() => applyGraphDefaultBudgets(intake, {})).toThrow(IntakeError);
+    expect(() => applyGraphDefaultBudgets(intake, {})).toThrow(/recoveryReserve/);
+    const report = await check(f.taskPath);
+    expect(report.ok).toBe(false);
+    expect(report.problems).toContainEqual(expect.stringMatching(/^budgets: budgets.recoveryReserve \(8\) must be less than budgets.agentInvocations \(4\)/));
   });
 
   it("refuses an explicit recoveryReserve at or above an explicit agentInvocations too", async () => {
@@ -76,6 +100,13 @@ describe("intake budgets", () => {
       f.taskPath,
       `graph: hello\nrepo: ./repo\nrequest: Create GREETING.txt.\nbudgets:\n  agentInvocations: 20\n  recoveryReserve: 20\n`,
     );
+    const intake = await intakeTask(f.taskPath);
+    expect(() => applyGraphDefaultBudgets(intake, {})).toThrow(IntakeError);
+  });
+
+  it("still refuses a value that is not a positive integer at intake", async () => {
+    const f = await fixture("hello", "Create GREETING.txt.");
+    await writeFile(f.taskPath, `graph: hello\nrepo: ./repo\nrequest: Create GREETING.txt.\nbudgets:\n  jobs: 0\n`);
     await expect(intakeTask(f.taskPath)).rejects.toThrow(IntakeError);
   });
 
@@ -86,7 +117,7 @@ describe("intake budgets", () => {
       `graph: hello\nrepo: ./repo\nrequest: Create GREETING.txt.\nbudgets:\n  agentInvocations: 4\n  recoveryReserve: 1\n`,
     );
     const intake = await intakeTask(f.taskPath);
-    expect(intake.budgets).toMatchObject({ agentInvocations: 4, recoveryReserve: 1 });
+    expect(applyGraphDefaultBudgets(intake, {}).budgets).toMatchObject({ agentInvocations: 4, recoveryReserve: 1 });
   });
 });
 

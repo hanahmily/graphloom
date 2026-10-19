@@ -127,6 +127,10 @@ The operator installation policy records whether local source
 repair or validator substitution is authorized, avoiding repeated approval for
 repairs already within that scope. Plugin metadata alone grants no authority.
 
+Intake applies budgets in layers, after the plugin first describes itself:
+the controller's defaults, then the graph's declared `defaultBudgets`, then
+the task's own `budgets` ([finite limits](#10-finite-limits)).
+
 Inspect shows the required stages, current attempt, normal/recovery mode, active
 job and phase, validation evidence, concise decision reasons, correction allowance,
 plugin version history, and the evidence a stop cites. Show build/test/review/activation
@@ -772,6 +776,17 @@ progress fields. No automatic commit, push, merge, or external publication occur
 | Individual job or agent invocation | 20 minutes |
 | Plugin protocol callback | 10 seconds |
 | Active run execution time | 4 hours |
+
+These are the controller's own defaults, the bottom layer of three: a graph
+may declare `defaultBudgets` in its definition (issue-fix takes them from its
+repository profile), and the task's `budgets` override both, key by key. Each
+value stays a finite positive integer, and `recoveryReserve` stays below
+`agentInvocations`. `defaultBudgets` is not compared on resume or repair: a
+run keeps the budgets it was intaken with. What a run used is kept apart from
+what it has left (`budgetUsage`), so the run's budget is always used plus
+left, including any budget an operator raised by hand; `graphloom stats`
+reports it per stage. See [budgets](budgets.md) for the measured runs the
+profile defaults come from.
 
 These are standalone defaults. Agent-host mode preserves correction, job, decision,
 and active-run limits while using separate coding/proposal deadlines, adding a

@@ -43,13 +43,13 @@ graph: issue-fix
 repo: skywalking-banyandb
 config: plugins/issue-fix/profiles/banyandb.json
 request: "Fix apache/skywalking#14092."
-budgets:
-  agentInvocations: 2000
-  jobs: 1024
-  decisions: 2048
-  corrections: 16
-  activeMs: 43200000
 ```
+
+The run's budgets come from the profile's `budgets`, which the graph declares
+as its default budgets (since 0.6.0): about twice what the measured runs
+used, per [docs/budgets.md](../../../docs/budgets.md). A `budgets:` block in
+the task overrides them key by key; `graphloom stats <run>` shows what a run
+used against them.
 
 [`../../issue-fix-banyandb-task.yaml`](../../issue-fix-banyandb-task.yaml) and
 [`../../issue-fix-graphloom-task.yaml`](../../issue-fix-graphloom-task.yaml)
