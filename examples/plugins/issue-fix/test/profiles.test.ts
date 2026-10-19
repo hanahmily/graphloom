@@ -12,6 +12,7 @@ import {
   advanceFix,
   candidateCommands,
   codeReviewInstruction,
+  WHOLE_CHANGE_CHECK,
   commitMessage,
   createGraph,
   decisionProblems,
@@ -77,7 +78,7 @@ describe.skipIf(!existsSync(path.join(banyandbFixDist, "index.js")))("the banyan
     const ours = createGraph().describe(BANYANDB);
     const strip = ({ graphId: _g, version: _v, privateStateSchema: _p, ...rest }: GraphDefinition) => rest;
     expect(strip(ours)).toEqual(strip(theirs));
-    expect(ours).toMatchObject({ graphId: "issue-fix", version: "0.4.3", privateStateSchema: "issue-fix-private-v1" });
+    expect(ours).toMatchObject({ graphId: "issue-fix", version: "0.5.0", privateStateSchema: "issue-fix-private-v1" });
   });
 
   it("gives the agents and the checks the same instructions and commands", async () => {
@@ -102,7 +103,14 @@ describe.skipIf(!existsSync(path.join(banyandbFixDist, "index.js")))("the banyan
     const background = reviewBackground(banyandb, ISSUE, GO_PLAN);
     expect(background).toBe(call(ocr.reviewBackground, ISSUE, GO_PLAN));
     const review = { ocr: "/opt/ocr", base: "abc", background, known: { open: [{ id: "F1", state: "confirmed", description: "x" }], settled: [] }, sweep: true };
-    expect(codeReviewInstruction(banyandb, review)).toBe(call(ocr.codeReviewInstruction, review));
+    // The one deliberate difference (#148): issue-fix reviews every changed file, not only the files
+    // preview keeps plus the test files, and then checks the change as a whole.
+    const theirs = call<string>(ocr.codeReviewInstruction, review).split("\n");
+    const ours = codeReviewInstruction(banyandb, review).split("\n");
+    const step2 = (lines: string[]) => lines.findIndex((l) => l.startsWith("2. "));
+    expect(theirs[step2(theirs)]).toBe("2. The change's Go test files (`_test.go`) are reviewable too, even when preview excludes them as tests: add them to your list. Leave out other excluded files.");
+    expect(ours[step2(ours)]).toContain("2. Your list is every changed file. Add back every file preview excluded");
+    expect(ours.filter((l, i) => i !== step2(ours) && l !== WHOLE_CHANGE_CHECK)).toEqual(theirs.filter((_, i) => i !== step2(theirs)));
     expect(verificationInstruction(banyandb, { findings: [], background, changed: ["a.go"] })).toBe(call(findings.verificationInstruction, { findings: [], background, changed: ["a.go"] }));
     const record = { ...GO_PLAN, scopeExceptions: [{ path: "go.mod", reason: "a new dependency" }, { path: "Makefile", reason: "x" }] };
     expect(decisionProblems(record, banyandb)).toEqual(call(decisions.decisionProblems, record));
@@ -145,7 +153,7 @@ describe("the graphloom profile", () => {
     expect(implement).toContain("Do not change package-lock.json, .github, legacy.");
     expect(implement).toContain("the full change must pass the test and `npm run typecheck`, `npm run build` and `npm test`");
     const review = codeReviewInstruction(graphloom, { ocr: "ocr", base: "b", background: "" });
-    expect(review).toContain("TypeScript test files (`*.test.ts`) and test fixtures are reviewable too");
+    expect(review).toContain("the change's TypeScript test files (`*.test.ts`) and test fixtures, other tests, docs, fixtures, generated files");
     expect(review).toContain("Extra rule for TypeScript files:");
     const body = pullRequestDescription(graphloom, { issue: 7, issueTitle: "t", record: TS_PLAN, base: "abc", review: "Reviewed." });
     expect(body).toContain("### Fix hanahmily/graphloom#7: t");

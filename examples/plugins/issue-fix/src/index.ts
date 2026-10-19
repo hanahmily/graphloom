@@ -94,6 +94,7 @@ export {
   parseCodeReview,
   reviewBackground,
   reviewComplete,
+  WHOLE_CHANGE_CHECK,
   type CodeReviewReport,
   type ReviewComment,
 } from "./ocr.js";
