@@ -187,7 +187,11 @@ its old trigger. The controller returns it to normal mode first, so the graph
 retries what failed. Only a recurrence opens a new episode, with a fresh trigger
 and post-resume evidence. That episode's settlement says the operator's resume
 overtook the last proposal. The controller's own step-limit pause is the one
-exception and continues the episode. See the core design, section 8. `supervisorBinding.sessionFile` names the latest episode's
+exception and continues the episode. The supervisor's `stop` tool takes an
+optional `retryable` (default `true`): `false` marks a blocker no retry can
+clear, and a resume then surfaces the same blocker until the plugin, the
+workspace change or a budget changes. See the core design, section 8
+("Resume retries what failed"). `supervisorBinding.sessionFile` names the latest episode's
 transcript; it is used to reconcile an interrupted model switch and to locate the
 transcript directory, never reopened. A run recorded before episode sessions still
 loads: its binding's run-long transcript is left on disk, a missing `caseFile`

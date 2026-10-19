@@ -630,17 +630,101 @@ switch, rollback is another recorded compatible transition under admission and
 remaining limits; it never resurrects invalidated receipts or treats a known-bad
 gate as valid. Stop/resume preserves both failed and successful transitions.
 
+### Resume retries what failed
+
+An operator resumes because something changed (code, config, environment,
+grants, budgets), so a failure recorded before the resume is not by itself a
+reason to stop again. That is one rule for the whole run, not a decision each
+part makes on its own: the controller classifies every stop as *retryable* or
+*final*, tells the graph about the resume, and plugins count only failures from
+after it.
+
+Every stop is classified when the run stops. The controller classifies its own
+stop reasons by a fixed table (`stop-class.ts`); a graph or supervisor stop
+carries its own class as data, `StopSpec.retryable` (default `true`), so the
+controller never learns a plugin's reason strings. On resume:
+
+- after a **retryable** stop, the run runs again: the graph's `advance()` decides
+  from current evidence and retries what failed;
+- after a **final** stop, the resume surfaces the same stop reason, blocker and
+  cited evidence without asking the graph, unless something the stop depends on
+  changed: the operator updated the plugin (`--update-plugin`), the active version
+  or bundle changed, the workspace change differs from the one the run stopped on,
+  or a budget was raised. The held resume is recorded as a remedy; it does not
+  start a generation. A resume after a change records what lifted the stop.
+
+| Class | Stop | Who classifies | On resume |
+|---|---|---|---|
+| retryable | job/executor failure (`job failed: …`, `stale job result identity`, a recovery trigger with no supervisor) | controller | graph retries |
+| retryable | delivery failure (`delivery failed`) | plugin (`retryable: true`) | graph retries; a failure since the resume stops again |
+| retryable | provider failure (`supervisor provider …`, `supervisor decide failed`, `reviewer_unavailable`, `supervisor_inadmissible`) | controller | graph retries; recovery starts afresh if the failure recurs |
+| retryable | plugin host failure (`plugin host: …`, `plugin host restart failed`) | controller | graph retries |
+| retryable | step limit | controller | the recovery episode continues |
+| retryable | environment (`environment check failed`, `environment preparation failed`, `environment changed`) | controller | checked again before the graph runs |
+| retryable | rechecked on resume (`worktree mismatch`, `pin mismatch`, `executor pin mismatch`, `reconcile required`, `repair rehydration required`, `delivery changed after acceptance`) | controller | resume checks it again first |
+| retryable | any other stop, and a graph or supervisor stop that does not say | controller / default | graph retries |
+| final | needs maintainer decision, cannot reproduce, incompatible task | plugin (`retryable: false`) | same blocker until a change |
+| final | budget exhausted (`budgets exhausted`, `<budget> budget exhausted`) | controller, or plugin (`retryable: false`) | same blocker until a budget is raised (or another change) |
+| final | `unsupported action in …` (a plugin defect) | controller | same blocker until the plugin changes |
+| final | operator stop | controller | the resume is the operator's answer: the run runs again |
+
+A stop's class is visible as `stopRetryable` in `run`/`resume` reports and
+`inspect`. What a final stop depends on is recorded when the run stops
+(`stopMark`); a run that stopped before stop marks existed has none and is
+retried, as before.
+
+On every resume that runs, the controller fills `RunView.resume`:
+`{ generation, at, pluginUpdated, previousStopReason, previousStopRetryable }`,
+kept in durable state as `lastResume` (absent until the first resume; older
+states load without it). `generation` is the generation the resume started, so
+evidence from an earlier generation predates the resume.
+
 A run resumed while in recovery first returns to normal mode, so the graph's own
-`advance()` retries what failed. Resume exists because the operator changed
-something (code, config, environment, grants), so the trigger recorded before the
-stop is not current evidence. If the failure recurs, recovery starts again with a
-fresh trigger and post-resume evidence. This applies whatever stopped the run,
-including the supervisor's own stop and a run with no supervisor. The one exception
-is the controller's own step-limit pause, which continues the episode. Resume
-first reconciles the pending dispatch, repair, and model-switch journals. It keeps
-budgets, correction trials, handoffs, repeated-proposal tracking, repair
+`advance()` retries what failed. The trigger recorded before the stop is not
+current evidence. If the failure recurs, recovery starts again with a fresh
+trigger and post-resume evidence. This applies to every retryable stop, including
+the supervisor's own retryable stop and a run with no supervisor. The one
+exception is the controller's own step-limit pause, which continues the episode.
+Resume first reconciles the pending dispatch, repair, and model-switch journals.
+It keeps budgets, correction trials, handoffs, repeated-proposal tracking, repair
 candidates, and the case file. The return is recorded as a remedy and as a
-settlement fact for the next episode.
+settlement fact for the next episode. A re-opened stage runs as its next attempt
+(`nextStageAttempt`), so a plugin can tell a reentry from a resume.
+
+### Writing plugins: resume
+
+A decision that ends the run because something failed only uses failures from
+after the operator's latest resume. A failure recorded before it is stale: retry
+what failed instead of stopping on it. A failure that recurs after the resume
+still ends the run, so a failing step cannot loop.
+
+- `isStaleFailure(record, view)`: whether `record` predates `view.resume`
+  (always `false` in a run never resumed).
+- `failuresSinceResume(evidence, view, isFailure?)`: the failures recorded since
+  the latest resume. By default the job failures the controller records
+  (`executorFailureOf`); pass `isFailure` for a failure the plugin reads from its
+  own evidence, such as a command that ran but exited non-zero.
+- Mark a stop no retry can clear `retryable: false` (a maintainer must decide, the
+  task is incompatible, the plugin's own budget check). Leave failure stops
+  retryable (the default), or say `retryable: true`.
+
+For example, issue-fix's delivery:
+
+```ts
+const delivered = commandRuns(current, COMMAND.deliver)
+  .filter((r) => succeeded(r.command) || !isStaleFailure(r.record, view))
+  .at(-1);
+if (delivered === undefined) return dispatch(deliverJob, "put the change on its branch");
+if (!succeeded(delivered.command)) return stop({ reason: "delivery failed", blocker, retryable: true }, "…");
+```
+
+Keep the definition, requirements and private-state schema unchanged when
+applying this to an existing plugin, so a running run can adopt it with
+`resume --update-plugin`. The conformance cells in
+`apps/graphloom/test/matrix/` (hello, issue-fix) and the resume tests in
+`apps/graphloom/test/release-e2e.test.ts` and `banyandb-fix-e2e.test.ts` inject
+each retryable stop a plugin can produce, resume once, and assert it retries;
+a final stop resumes to the same blocker.
 
 ## 9. Worktree, communication, and durable state
 
