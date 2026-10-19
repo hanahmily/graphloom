@@ -155,9 +155,9 @@ function checkBudgets(raw: unknown): void {
     need(BUDGET_NAMES.has(key), `budgets.${key} is not a budget; budgets are ${GRAPH_BUDGET_KEYS.join(", ")}`);
     need(Number.isSafeInteger(value) && (value as number) > 0, `budgets.${key} must be a positive integer`);
   }
-  if (b.recoveryReserve !== undefined && b.agentInvocations !== undefined) {
-    need((b.recoveryReserve as number) < (b.agentInvocations as number), "budgets.recoveryReserve must be less than budgets.agentInvocations");
-  }
+  // Per value only: how one budget relates to another (recoveryReserve below
+  // agentInvocations) holds for the run's final budgets, once the task's own
+  // override them, so the controller checks it after merging every layer.
 }
 
 /**

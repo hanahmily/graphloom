@@ -270,7 +270,6 @@ describe("profiles", () => {
     expect(broken({ budgets: [] })).toThrow(/budgets must be an object/);
     expect(broken({ budgets: { tokens: 10 } })).toThrow(/budgets.tokens is not a budget/);
     expect(broken({ budgets: { jobs: 0 } })).toThrow(/budgets.jobs must be a positive integer/);
-    expect(broken({ budgets: { agentInvocations: 10, recoveryReserve: 10 } })).toThrow(/recoveryReserve must be less/);
   });
 
   it("declares the profile's measured budgets as the graph's default budgets (#150)", () => {
@@ -279,6 +278,10 @@ describe("profiles", () => {
     const { budgets: _b, ...unbudgeted } = GRAPHLOOM as Record<string, unknown>;
     void _b;
     expect(definitionFor(parseProfile(unbudgeted)).defaultBudgets).toBeUndefined();
+    // Budgets are checked one by one here; how they relate is the controller's
+    // check on the run's final budgets, after the task's own override them.
+    const tight = parseProfile({ ...(GRAPHLOOM as object), budgets: { agentInvocations: 100, recoveryReserve: 100 } });
+    expect(definitionFor(tight).defaultBudgets).toEqual({ agentInvocations: 100, recoveryReserve: 100 });
   });
 
   it("stops a run whose view carries no usable profile, instead of guessing one", () => {

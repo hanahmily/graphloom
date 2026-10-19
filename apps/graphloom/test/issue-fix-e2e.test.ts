@@ -237,6 +237,23 @@ describe.skipIf(GO === undefined)("issue-fix with the banyandb profile on a Go r
   }, 60_000);
 });
 
+describe("profile budgets under task budgets (#151 review)", () => {
+  it("checks a profile's recoveryReserve against the run's final agentInvocations, after the task overrides it", async () => {
+    const intake = await intakeTask(path.join(repoRoot, "examples", "issue-fix-graphloom-task.yaml"));
+    const profile = { ...(taskConfigValue(intake) as Record<string, unknown>), budgets: { agentInvocations: 100, recoveryReserve: 100 } };
+    // The plugin describes itself with the tight profile: per-value checks pass.
+    const definition = plugin.createGraph().describe(profile);
+    expect(definition.defaultBudgets).toEqual({ agentInvocations: 100, recoveryReserve: 100 });
+    // A task raising agentInvocations makes the final budgets valid ...
+    const overridden = { ...intake, task: { ...intake.task, budgets: { agentInvocations: 1800 } } };
+    expect(applyGraphDefaultBudgets(overridden, definition).budgets).toMatchObject({ agentInvocations: 1800, recoveryReserve: 100 });
+    // ... and without it, the controller's final check refuses them.
+    expect(() => applyGraphDefaultBudgets(intake, definition)).toThrow(
+      "budgets.recoveryReserve (100) must be less than budgets.agentInvocations (100), leaving room for at least one normal-mode agent call",
+    );
+  });
+});
+
 describe("the shipped issue-fix example tasks", () => {
   it.each([
     ["issue-fix-banyandb-task.yaml", "banyandb.json", ["decisions-recorded", "reproduces", "passes", "builds", "in-scope", "changelog-entry"]],
