@@ -37,6 +37,13 @@ export interface BudgetUsage {
    * its intake budgets and records.
    */
   since: string;
+  /**
+   * Set when `agentInvocationsByStage` has counted every call a stage job
+   * made since intake (reserved per request, or charged at settlement), so
+   * what the run used beyond it is the supervisor's, reviewer's and repairs'.
+   * Absent in runs whose stage counts missed settlement-charged calls.
+   */
+  stageCallsComplete?: true;
 }
 
 type Budgets = DurableRunState["budgets"];
@@ -54,7 +61,7 @@ function amounts(budgets: Budgets): BudgetAmounts {
 
 /** A new run's ledger: nothing spent, booked against its starting budgets. */
 export function freshBudgetUsage(budgets: Budgets): BudgetUsage {
-  return { used: {}, saved: amounts(budgets), since: "intake" };
+  return { used: {}, saved: amounts(budgets), since: "intake", stageCallsComplete: true };
 }
 
 /**
@@ -115,8 +122,8 @@ export function budgetGranted(state: UsageView, key: MeteredBudgetKey): number |
 /** The state as saveRunState writes it: the ledger booked up to its current budgets. */
 export function bookBudgetUsage(state: DurableRunState): DurableRunState {
   if (state.budgets === null || typeof state.budgets !== "object") return state;
-  const since = state.budgetUsage?.since ?? legacyBudgetUsage(state).since;
-  return { ...state, budgetUsage: { used: budgetsUsed(state), saved: amounts(state.budgets), since } };
+  const ledger = state.budgetUsage ?? legacyBudgetUsage(state);
+  return { ...state, budgetUsage: { ...ledger, used: budgetsUsed(state), saved: amounts(state.budgets) } };
 }
 
 /**

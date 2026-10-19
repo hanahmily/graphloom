@@ -28,8 +28,12 @@ episodes, turns and provider calls; and remedies.
 Every number says how far it can be trusted:
 
 - **exact**: the run kept the usage ledger (below) from intake, or the count
-  comes from records the run keeps whole (`agentInvocationsByStage`, receipts,
-  version history, remedies under their bound).
+  comes from records the run keeps whole (receipts, version history, remedies
+  under their bound). A stage's agent calls (`agentInvocationsByStage`) are
+  exact for runs that kept the ledger from intake: every call a stage job
+  makes counts for its stage, whether reserved per request or charged once at
+  settlement (a runner that reserves no model calls). Older runs did not
+  count settlement-charged calls, so their stage counts are a lower bound.
 - **estimate**: a run saved before the ledger existed, with no visible edit:
   use is its intake budget less what remains.
 - **unknown**: a run saved before the ledger whose numbers show a hand edit
@@ -38,8 +42,14 @@ Every number says how far it can be trusted:
 - **lower bound**: counts from bounded or partial records: jobs (a job that
   failed before recording evidence leaves no trace), supervisor episodes
   (older runs keep only the episode ids their newest marks and case file
-  name; `supervisorEpisodes` keeps the newest 50), and a run's agent calls
-  when its agent budget was edited.
+  name; `supervisorEpisodes` keeps the newest 50; a run that predates the
+  records counts its recorded episodes together with every id its state
+  still names), and a run's agent calls when its agent budget was edited.
+
+The agent calls beyond the stages' are reported as the supervisor's, reviewer's
+and repairs' only when the total is exact and the stage counts are complete;
+otherwise `stats` reports them as *not attributed*, since they may include
+stage calls the run never counted per stage.
 
 ## Measured usage
 
@@ -53,7 +63,7 @@ per provider call), and are marked as such.
 |---|---|---|---|---|
 | Graph, issue | issue-fix@0.2.0, graphloom#119 | issue-fix@0.4.2, graphloom#121 | issue-fix@0.4.2, graphloom#122 | banyandb-fix@0.4.0 (repaired in-run), skywalking#14092 |
 | Budgets | edited mid-run, then 10⁶ | 10⁶ from intake, never edited | 10⁶ from intake, never edited | edited several times |
-| Agent calls, stage jobs (fix / review) | 803 (182 / 621), exact | 491 (187 / 304), exact | 306 (91 / 215), exact | 1,924 (1,656 / 268), exact |
+| Agent calls, stage jobs (fix / review) | 803 (182 / 621), lower bound | 491 (187 / 304), complete (Pi log accounts for the rest) | 306 (91 / 215), complete (Pi log accounts for the rest) | 1,924 (1,656 / 268), lower bound |
 | Agent calls, supervisor and reviewer | ~92 (bak segments) / 98 (Pi log), estimate | 100, exact (Pi log agrees) | 17, exact (Pi log agrees) | ~995 (Pi log), estimate |
 | Agent calls, total | ~895, estimate | 591, exact | 323, exact | ~2,920, estimate |
 | Jobs charged | ~113 (86 + 27 over two bak segments), estimate; 81 recorded | 94, exact; 75 recorded | 64, exact; 49 recorded | ~122 (11 + 111), estimate; 94 recorded |

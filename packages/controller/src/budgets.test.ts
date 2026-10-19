@@ -173,6 +173,25 @@ describe("budget layers (#150)", () => {
   }, 60_000);
 });
 
+describe("per-stage agent calls (#151 review)", () => {
+  it("counts a call charged at settlement (a runner that reserves none) for its stage, so the stages add up to the total", async () => {
+    const env = await makeEnv({ agentInvocations: 30 });
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({ definition, advances: completes }),
+      validators,
+      runner: agents(),
+      stateRoot: env.stateRoot,
+      runId: "stage-calls",
+    });
+    expect(report.status, `${report.stopReason}: ${report.blocker}`).toBe("succeeded");
+    const state = await loadRunState(report.stateDir);
+    expect(state.agentInvocationsByStage).toEqual({ write: 1, review: 1 });
+    expect(budgetsUsed(state).agentInvocations).toBe(2);
+    expect(state.budgetUsage).toMatchObject({ since: "intake", stageCallsComplete: true });
+  }, 60_000);
+});
+
 describe("budget usage ledger (#150)", () => {
   it("books the controller's charges and refunds on save, and an operator's hand edit on load as a raise", async () => {
     const env = await makeEnv({ agentInvocations: 40 });
@@ -228,9 +247,10 @@ describe("budget usage ledger (#150)", () => {
 
 describe("stage pacing reads the run's current agent budget (#150)", () => {
   /**
-   * The run has spent 12 of a 20-call agent budget in its write stage (over
-   * half) and stops; `raise` is what the operator adds to what is left
-   * before resuming. Returns the recovery triggers the resumed run raised.
+   * The run has spent 11 of a 20-call agent budget in its write stage and
+   * stops; `raise` is what the operator adds to what is left before
+   * resuming. The resumed write job's own call makes it 12 (over half of
+   * 20). Returns the recovery triggers the resumed run raised.
    */
   async function resumeAfterSpending(raise: number): Promise<{ triggers: Array<{ code: string; message: string }>; status: string }> {
     const env = await makeEnv({ agentInvocations: 20, recoveryReserve: 2 });
@@ -243,8 +263,8 @@ describe("stage pacing reads the run's current agent budget (#150)", () => {
     const state = await loadRunState(report.stateDir);
     await saveRunState({
       ...state,
-      agentInvocationsByStage: { write: 12 },
-      budgets: { ...state.budgets, agentInvocations: state.budgets.agentInvocations - 12 },
+      agentInvocationsByStage: { write: 11 },
+      budgets: { ...state.budgets, agentInvocations: state.budgets.agentInvocations - 11 },
     });
     if (raise > 0) {
       await editByHand(report.stateDir, (raw) => {

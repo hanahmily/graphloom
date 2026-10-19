@@ -58,10 +58,18 @@ export interface RunStats {
   budgets: BudgetLine[];
   stages: StageStats[];
   agentInvocations: {
-    /** Reserved by the stages' jobs: exact for every run that records it. */
+    /** Counted for the stages' jobs (`agentInvocationsByStage`). */
     stages: number;
-    /** Supervisor, proposal reviewer and repair calls: the run's total less the stages'. */
+    /**
+     * `exact` when the run counted every stage-job call per stage since
+     * intake; older runs missed calls charged at settlement (a runner that
+     * reserves no model calls), so theirs are a lower bound.
+     */
+    stagesExactness: Exactness;
+    /** Supervisor, proposal reviewer and repair calls: set only when every source is accounted for. */
     outsideStages?: number;
+    /** The total less the stages' when not every source is accounted for: outside calls, or stage calls never counted per stage. */
+    unattributed?: number;
     total?: number;
     exactness: Exactness;
   };
@@ -72,7 +80,7 @@ export interface RunStats {
     episodes: number;
     turns?: number;
     providerCalls?: number;
-    source: "episode records" | "episode ids referenced in run state";
+    source: "episode records" | "episode ids referenced in run state" | "episode records and episode ids referenced in run state";
     exactness: Exactness;
   };
   remedies: { count: number; byCondition: Record<string, number>; waitedMs: number; exactness: Exactness };
@@ -159,9 +167,15 @@ export function runStats(state: DurableRunState): RunStats {
 
   const stageCalls = stages.reduce((a, s) => a + s.agentInvocations, 0);
   const totalCalls = !exactLedger && edited.has("agentInvocations") ? undefined : used.agentInvocations;
+  // The remainder is the supervisor's, reviewer's and repairs' only when the
+  // total is exact and the stages counted every call of theirs.
+  const stagesComplete = exactLedger && state.budgetUsage?.stageCallsComplete === true;
+  const remainder = totalCalls !== undefined ? Math.max(0, totalCalls - stageCalls) : undefined;
   const agentInvocations: RunStats["agentInvocations"] = {
     stages: stageCalls,
-    ...(totalCalls !== undefined ? { total: totalCalls, outsideStages: Math.max(0, totalCalls - stageCalls) } : {}),
+    stagesExactness: stagesComplete ? "exact" : "lower bound",
+    ...(totalCalls !== undefined ? { total: totalCalls } : {}),
+    ...(remainder !== undefined ? (stagesComplete ? { outsideStages: remainder } : { unattributed: remainder }) : {}),
     // Without the ledger the total is intake less what remains, or the
     // stages' own count when an edit made that smaller: at least the stages'.
     exactness: exactLedger ? "exact" : !edited.has("agentInvocations") && totalCalls !== undefined && totalCalls > stageCalls ? "estimate" : "lower bound",
@@ -233,23 +247,11 @@ function editedBudgets(state: DurableRunState): Set<MeteredBudgetKey> {
 }
 
 function supervisorStats(state: DurableRunState): RunStats["supervisor"] {
-  const records = state.supervisorEpisodes;
-  if (records !== undefined && records.length > 0) {
-    // Kept to the newest MAX_EPISODE_RECORDS: a full list may have dropped older ones.
-    const bounded = records.length >= MAX_EPISODE_RECORDS;
-    return {
-      episodes: new Set(records.map((r) => r.episodeId)).size,
-      turns: records.length,
-      providerCalls: records.reduce((a, r) => a + (r.providerCalls ?? 0), 0),
-      source: "episode records",
-      exactness: bounded ? "lower bound" : "exact",
-    };
-  }
-  // Older runs: every episode id the state still names (newest marks, case
-  // file entries, probes, outcomes, remedies) — at least that many episodes.
-  const ids = new Set<string>();
+  // Every episode id the state names (newest marks, case file entries,
+  // probes, outcomes, remedies), whether or not a record of it survives.
+  const referenced = new Set<string>();
   const add = (v: unknown) => {
-    if (typeof v === "string" && v !== "") ids.add(v);
+    if (typeof v === "string" && v !== "") referenced.add(v);
   };
   add(state.recoveryEpisodeId);
   add(state.supervisorMark?.episodeId);
@@ -262,7 +264,24 @@ function supervisorStats(state: DurableRunState): RunStats["supervisor"] {
       if (Array.isArray(list)) for (const entry of list) if (isRecord(entry)) add(entry.episodeId);
     }
   }
-  return { episodes: ids.size, source: "episode ids referenced in run state", exactness: "lower bound" };
+  const records = state.supervisorEpisodes ?? [];
+  if (records.length === 0) {
+    return { episodes: referenced.size, source: "episode ids referenced in run state", exactness: "lower bound" };
+  }
+  const recorded = new Set(records.map((r) => r.episodeId));
+  const all = new Set([...recorded, ...referenced]);
+  // Exact only when the records cover the run's whole history: kept since
+  // intake, under their bound, and naming every episode the state references.
+  // A run that predates the records (or dropped old ones) is a lower bound.
+  const covered =
+    state.budgetUsage?.since === "intake" && records.length < MAX_EPISODE_RECORDS && [...referenced].every((id) => recorded.has(id));
+  return {
+    episodes: all.size,
+    turns: records.length,
+    providerCalls: records.reduce((a, r) => a + (r.providerCalls ?? 0), 0),
+    source: covered ? "episode records" : "episode records and episode ids referenced in run state",
+    exactness: covered ? "exact" : "lower bound",
+  };
 }
 
 function spanOf(state: DurableRunState): { span: NonNullable<RunStats["span"]> } | Record<string, never> {
@@ -351,10 +370,12 @@ export function formatRunStats(stats: RunStats): string {
   lines.push("");
   const a = stats.agentInvocations;
   lines.push(
-    `agent calls: ${a.stages} by stage jobs (exact)` +
-      (a.total !== undefined
-        ? `, ${a.outsideStages} by the supervisor, reviewer and repairs, ${a.total} in total (${a.exactness})`
-        : ", calls outside the stages unknown (the agent budget was edited by hand)"),
+    `agent calls: ${a.stages} by stage jobs (${a.stagesExactness})` +
+      (a.total === undefined
+        ? ", calls outside the stages unknown (the agent budget was edited by hand)"
+        : a.outsideStages !== undefined
+          ? `, ${a.outsideStages} by the supervisor, reviewer and repairs, ${a.total} in total (${a.exactness})`
+          : `, ${a.unattributed} not attributed (the supervisor, reviewer and repairs, or stage calls the run did not count per stage), ${a.total} in total (${a.exactness})`),
   );
   lines.push(
     `jobs: ${stats.jobs.recorded} recorded (${stats.jobs.exactness})` +
@@ -368,7 +389,7 @@ export function formatRunStats(stats: RunStats): string {
   const sup = stats.supervisor;
   lines.push(
     `supervisor: ${sup.episodes} episodes` +
-      (sup.turns !== undefined ? `, ${sup.turns} turns, ${sup.providerCalls} provider calls` : "") +
+      (sup.turns !== undefined ? `, ${sup.turns} recorded turns, ${sup.providerCalls} recorded provider calls` : "") +
       ` (${sup.exactness}, from ${sup.source})`,
   );
   const conditions = Object.entries(stats.remedies.byCondition)

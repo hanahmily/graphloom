@@ -2469,16 +2469,19 @@ function applyDispatchResult(
     };
   }
 
+  // Jobs that reserved their actual model requests were charged per request
+  // (and counted for their stage then); any other agent job costs one call
+  // here, which is its stage's too, so per-stage counts stay complete.
+  const settlementCall = job.kind === "agent" && !((next.pendingDispatch?.modelCalls ?? 0) > 0);
   next = {
     ...next,
+    ...(settlementCall
+      ? { agentInvocationsByStage: { ...next.agentInvocationsByStage, [job.stageId]: (next.agentInvocationsByStage?.[job.stageId] ?? 0) + 1 } }
+      : {}),
     budgets: {
       ...next.budgets,
       jobs: next.budgets.jobs - jobCost(next, job),
-      // Jobs that reserved their actual model requests were charged per request.
-      agentInvocations:
-        job.kind === "agent" && !((next.pendingDispatch?.modelCalls ?? 0) > 0)
-          ? next.budgets.agentInvocations - 1
-          : next.budgets.agentInvocations,
+      agentInvocations: settlementCall ? next.budgets.agentInvocations - 1 : next.budgets.agentInvocations,
       corrections: isCorrection
         ? next.budgets.corrections - 1
         : next.budgets.corrections,

@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { createScriptedGraph, dispatch, observe, stop, validate, type EvidenceRecord, type GraphDefinition, type JobSpec, type Validator } from "@graphloom/sdk";
 import { createScriptedRunner, type JobContext } from "@graphloom/runner";
-import { createController, loadRunState } from "@graphloom/controller";
+import { createController, loadRunState, type DurableRunState } from "@graphloom/controller";
 import { formatRunStats, loadRunStats, runStats } from "../src/stats.js";
 import { execFileAsync, makeCliEnv, repoRoot } from "./cli-env.js";
 
@@ -29,7 +29,8 @@ describe("graphloom stats on recorded runs (#150)", () => {
       expect.objectContaining({ stageId: "review", attempts: 4, agentInvocations: 215, receipts: { valid: 1, invalidated: 0 } }),
     ]);
     expect(stats.stages[1]!.jobs).toMatchObject({ total: 22, agent: 13, command: 9, byPurpose: { review: 8 } });
-    expect(stats.agentInvocations).toEqual({ stages: 306, outsideStages: 17, total: 323, exactness: "estimate" });
+    // Its stage counts predate counting settlement-charged calls: the rest is not attributed to anyone.
+    expect(stats.agentInvocations).toEqual({ stages: 306, stagesExactness: "lower bound", unattributed: 17, total: 323, exactness: "estimate" });
     expect(stats.budgets.find((b) => b.budget === "jobs")).toMatchObject({ used: 64, exactness: "estimate" });
     expect(stats.budgets.find((b) => b.budget === "activeMs")).toMatchObject({ used: 5_445_466 });
     expect(stats.jobs).toMatchObject({ recorded: 49, budgetUsed: 64, environmentChecks: 2, exactness: "lower bound" });
@@ -41,7 +42,7 @@ describe("graphloom stats on recorded runs (#150)", () => {
   it("does not trust budget deltas a hand edit made meaningless", async () => {
     // Trimmed from run 4c70ff66-dd9 (#119): intake budgets were raised to 1,000,000 by hand mid-run.
     const stats = await loadRunStats(path.join(fixtures, "4c70ff66-dd9"));
-    expect(stats.agentInvocations).toEqual({ stages: 803, exactness: "lower bound" });
+    expect(stats.agentInvocations).toEqual({ stages: 803, stagesExactness: "lower bound", exactness: "lower bound" });
     for (const budget of ["jobs", "decisions", "corrections", "activeMs"]) {
       const line = stats.budgets.find((b) => b.budget === budget)!;
       expect(line.exactness, budget).toBe("unknown");
@@ -54,6 +55,24 @@ describe("graphloom stats on recorded runs (#150)", () => {
     ]);
     expect(stats.remedies.count).toBe(9);
     expect(formatRunStats(stats)).toContain("calls outside the stages unknown (the agent budget was edited by hand)");
+  });
+
+  it("counts a resumed legacy run's historical episodes with its newly recorded one, as a lower bound (#151 review)", async () => {
+    // 4c70ff66-dd9 predates episode records: its state names 23 episodes.
+    const legacy = await loadRunState(path.join(fixtures, "4c70ff66-dd9"));
+    expect(runStats(legacy).supervisor).toMatchObject({ episodes: 23, exactness: "lower bound" });
+    // It resumes and records its first supervisor turn, in a new episode.
+    const record = { episodeId: "ep-new00001", turn: 1, runId: legacy.runId, at: "2026-10-19T00:00:00Z", providerCalls: 3 } as never;
+    const resumed = { ...legacy, supervisorEpisodes: [record] } as DurableRunState;
+    const stats = runStats(resumed);
+    expect(stats.supervisor).toEqual({
+      episodes: 24,
+      turns: 1,
+      providerCalls: 3,
+      source: "episode records and episode ids referenced in run state",
+      exactness: "lower bound",
+    });
+    expect(formatRunStats(stats)).toContain("supervisor: 24 episodes, 1 recorded turns, 3 recorded provider calls (lower bound");
   });
 
   it("handles a state missing every optional field", () => {
@@ -92,7 +111,9 @@ describe("graphloom stats on recorded runs (#150)", () => {
     expect(table.stdout).toMatch(/^stage\s+attempts\s+agent calls\s+jobs/m);
     expect(table.stdout).toMatch(/^review\s+4\s+215\s+22\s+13\s+9\s+8\s+1\/0$/m);
     expect(table.stdout).toMatch(/^agentInvocations\s+323\s+999677\s+1000000\s+1000000\s+estimate$/m);
-    expect(table.stdout).toContain("agent calls: 306 by stage jobs (exact), 17 by the supervisor, reviewer and repairs, 323 in total (estimate)");
+    expect(table.stdout).toContain(
+      "agent calls: 306 by stage jobs (lower bound), 17 not attributed (the supervisor, reviewer and repairs, or stage calls the run did not count per stage), 323 in total (estimate)",
+    );
 
     const json = await execFileAsync(process.execPath, [cli, "stats", "395ec998-6e4", "--state-root", root, "--json"]);
     const parsed = JSON.parse(json.stdout) as { runId: string; agentInvocations: { total: number } };
@@ -115,11 +136,17 @@ describe("graphloom stats on recorded runs (#150)", () => {
     const state = await loadRunState(report.stateDir);
     const stats = runStats(state);
     expect(stats.usageSource).toEqual({ kind: "ledger", exactness: "exact" });
-    // Two scripted agent jobs, each charged one call at settlement; none reserved per stage.
+    // Two scripted agent jobs, each charged one call at settlement (the runner
+    // reserves none): both count for their stages, and nothing is the supervisor's.
     expect(stats.budgets.find((b) => b.budget === "agentInvocations")).toMatchObject({ used: 2, left: 28, granted: 30, intake: 30, exactness: "exact" });
     expect(stats.budgets.find((b) => b.budget === "jobs")).toMatchObject({ used: 2, exactness: "exact" });
     expect(stats.budgets.find((b) => b.budget === "decisions")?.used).toBe(6);
-    expect(stats.agentInvocations).toEqual({ stages: 0, outsideStages: 2, total: 2, exactness: "exact" });
+    expect(stats.stages.map((s) => [s.stageId, s.agentInvocations])).toEqual([
+      ["write", 1],
+      ["review", 1],
+    ]);
+    expect(stats.agentInvocations).toEqual({ stages: 2, stagesExactness: "exact", outsideStages: 0, total: 2, exactness: "exact" });
+    expect(stats.supervisor).toMatchObject({ episodes: 0 });
   }, 60_000);
 });
 
