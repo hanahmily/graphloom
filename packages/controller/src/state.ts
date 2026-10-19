@@ -136,6 +136,8 @@ export interface ChildOperationRecord {
 
 /** The state a final stop depends on, recorded when the run stopped (stop-class.ts). */
 export interface StopMark {
+  /** The stop reason it was recorded for; a different current reason ignores it. */
+  stopReason?: string;
   activeVersion: string;
   manifestDigest: string;
   entryDigest: string;
@@ -156,7 +158,7 @@ export interface DurableRunState {
    * default retryable). Absent when the controller stopped the run: its own
    * reasons are classified by stop-class.ts. Cleared when the run runs again.
    */
-  stopClass?: { by: "graph" | "supervisor"; retryable: boolean };
+  stopClass?: { by: "graph" | "supervisor"; retryable: boolean; /** The stop reason it classifies; a different current reason ignores it. */ reason?: string };
   /**
    * What a final stop depends on, as it was when the run stopped: a resume
    * surfaces the same blocker until one of these changes (stop-class.ts).

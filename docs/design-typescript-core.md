@@ -671,7 +671,10 @@ controller never learns a plugin's reason strings. On resume:
 A stop's class is visible as `stopRetryable` in `run`/`resume` reports and
 `inspect`. What a final stop depends on is recorded when the run stops
 (`stopMark`); a run that stopped before stop marks existed has none and is
-retried, as before.
+retried, as before. A class and mark belong to the stop reason they were recorded
+for: a resume sets them aside, so a new stop it records (a preflight `pin
+mismatch`) is classified on its own, and restores them only when it holds the
+original final stop.
 
 On every resume that runs, the controller fills `RunView.resume`:
 `{ generation, at, pluginUpdated, previousStopReason, previousStopRetryable }`,

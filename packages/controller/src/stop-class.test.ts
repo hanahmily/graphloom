@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -172,7 +172,7 @@ describe("resume after a stop (§8)", () => {
     const report = await controller.run({ taskPath: env.taskPath, plugin: first.plugin, validators, runner: agents(), stateRoot: env.stateRoot, runId: "final" });
     expect(report).toMatchObject({ status: "stopped", stopReason: "needs maintainer decision", stopRetryable: false });
     const before = await loadRunState(report.stateDir);
-    expect(before.stopClass).toEqual({ by: "graph", retryable: false });
+    expect(before.stopClass).toEqual({ by: "graph", retryable: false, reason: "needs maintainer decision" });
     expect(before.stopMark).toMatchObject({ activeVersion: before.activeVersion, budgets: before.budgets });
 
     // Nothing changed: the graph is not asked again.
@@ -198,6 +198,40 @@ describe("resume after a stop (§8)", () => {
     expect(state.remedies?.at(-1)?.remedy).toMatch(/^ran the graph again: the agentInvocations budget was raised/);
     expect(state.stopClass).toBeUndefined();
   }, 60_000);
+
+  it("classifies a preflight failure during a resume on its own, so the next resume retries once it is fixed", async () => {
+    const env = await makeEnv({}, { copyBundle: true });
+    const controller = createController();
+    const first = graph([stop({ reason: "needs maintainer decision", blocker: "Which metric should count?", retryable: false }, "ask")]);
+    const report = await controller.run({ taskPath: env.taskPath, plugin: first.plugin, validators, runner: agents(), stateRoot: env.stateRoot, runId: "preflight" });
+    expect(report).toMatchObject({ status: "stopped", stopRetryable: false });
+
+    // The operator edits the installed bundle: the resume's pin check stops the run anew.
+    const manifest = path.join(env.bundlePath, "graphloom.manifest.json");
+    const pinned = await readFile(manifest, "utf8");
+    await writeFile(manifest, `${pinned}\n`);
+    const idle = graph([]);
+    const mismatch = await controller.resume({ runRef: report.stateDir, plugin: idle.plugin, validators, runner: agents() });
+    expect(mismatch).toMatchObject({ status: "stopped", stopReason: "pin mismatch", stopRetryable: true });
+    const state = await loadRunState(report.stateDir);
+    expect(state.stopClass).toBeUndefined();
+    expect(state.stopMark).toBeUndefined();
+
+    // Fixed: the next resume retries rather than holding the old, already answered blocker.
+    await writeFile(manifest, pinned);
+    const resumed = graph(completes);
+    const done = await controller.resume({ runRef: report.stateDir, plugin: resumed.plugin, validators, runner: agents() });
+    expect(done.status, `${done.stopReason}: ${done.blocker}`).toBe("succeeded");
+    expect(resumed.views[0]!.resume).toMatchObject({ previousStopReason: "pin mismatch", previousStopRetryable: true });
+  }, 60_000);
+
+  it("ignores a class or mark recorded for a different stop reason", () => {
+    const mark = { stopReason: "needs maintainer decision", activeVersion: "g@1", manifestDigest: "m", entryDigest: "e", budgets: { agentInvocations: 1, jobs: 1, decisions: 1, corrections: 1 } } as StopMark;
+    const overwritten = { status: "stopped", stopReason: "pin mismatch", stopClass: { by: "graph", retryable: false, reason: "needs maintainer decision" }, stopMark: mark } as DurableRunState;
+    expect(classifyStop(overwritten)).toMatchObject({ by: "controller", retryable: true });
+    const budget = { status: "stopped", stopReason: "budgets exhausted", stopMark: mark } as DurableRunState;
+    expect(decideResume(budget, { pluginUpdated: false, mark })).toMatchObject({ run: true });
+  });
 
   it("asks the graph again after a stop it did not mark final, and says which generation the resume began", async () => {
     const env = await makeEnv();
@@ -237,7 +271,7 @@ describe("resume after a stop (§8)", () => {
   }, 60_000);
 });
 
-async function makeEnv(budgets: Record<string, number> = {}): Promise<{ taskPath: string; stateRoot: string }> {
+async function makeEnv(budgets: Record<string, number> = {}, options: { copyBundle?: boolean } = {}): Promise<{ taskPath: string; stateRoot: string; bundlePath: string }> {
   const taskDir = await mkdtemp(path.join(os.tmpdir(), "gl-stopclass-"));
   temps.push(taskDir);
   const repoPath = path.join(taskDir, "test-repo");
@@ -250,7 +284,9 @@ async function makeEnv(budgets: Record<string, number> = {}): Promise<{ taskPath
   await git("add", "README.md");
   await git("commit", "-q", "-m", "init");
   await mkdir(path.join(taskDir, "plugins"), { recursive: true });
-  await symlink(helloBundle, path.join(taskDir, "plugins/hello"));
+  const bundlePath = path.join(taskDir, "plugins/hello");
+  if (options.copyBundle === true) await cp(helloBundle, bundlePath, { recursive: true, filter: (src) => path.basename(src) !== "node_modules" });
+  else await symlink(helloBundle, bundlePath);
   const taskPath = path.join(taskDir, "task.yaml");
   const budgetLines = Object.entries(budgets).map(([k, v]) => `  ${k}: ${v}\n`).join("");
   await writeFile(
@@ -258,5 +294,5 @@ async function makeEnv(budgets: Record<string, number> = {}): Promise<{ taskPath
     `graph: hello\nrepo: ./test-repo\nrequest: |\n  Create GREETING.txt containing exactly "Hello, GraphLoom!" followed by\n  one newline. Do not modify other files.\n${budgetLines.length > 0 ? `budgets:\n${budgetLines}` : ""}`,
     "utf8",
   );
-  return { taskPath, stateRoot: path.join(taskDir, "state") };
+  return { taskPath, stateRoot: path.join(taskDir, "state"), bundlePath };
 }

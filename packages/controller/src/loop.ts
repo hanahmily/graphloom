@@ -2040,7 +2040,7 @@ async function applyDecision(
         blocker: action.stop.blocker,
         ...(cited.length > 0 ? { stopEvidenceRefs: cited } : {}),
         // §8: the graph or supervisor classifies its own stop; unmarked, it is retryable.
-        ...(complete ? {} : { stopClass: { by: state.mode === "recovery" ? ("supervisor" as const) : ("graph" as const), retryable: action.stop.retryable !== false } }),
+        ...(complete ? {} : { stopClass: { by: state.mode === "recovery" ? ("supervisor" as const) : ("graph" as const), retryable: action.stop.retryable !== false, reason: action.stop.reason } }),
       };
     }
     default: {

@@ -57,7 +57,8 @@ export const CONTROLLER_STOP_CLASSES: readonly ControllerStopClass[] = [
 /** How a stopped run's stop is classified; undefined for a run that is not stopped. */
 export function classifyStop(state: Pick<DurableRunState, "status" | "stopReason" | "stopClass">): StopClassification | undefined {
   if (state.status !== "stopped") return undefined;
-  if (state.stopClass !== undefined) {
+  // A class recorded for another reason belongs to an earlier stop: the reason was overwritten since.
+  if (state.stopClass !== undefined && (state.stopClass.reason === undefined || state.stopClass.reason === state.stopReason)) {
     const { by, retryable } = state.stopClass;
     return { by, retryable, kind: `${by} stop (${retryable ? "retryable" : "final"})` };
   }
@@ -72,6 +73,7 @@ const BUDGET_KEYS = ["agentInvocations", "jobs", "decisions", "corrections", "wa
 /** What a final stop depends on, as it is now. */
 export function stopMarkOf(state: DurableRunState, candidateDigest: string | undefined): StopMark {
   return {
+    ...(state.stopReason !== undefined ? { stopReason: state.stopReason } : {}),
     activeVersion: state.activeVersion,
     manifestDigest: state.intake.bundle.manifestDigest,
     entryDigest: state.intake.bundle.entryDigest,
@@ -110,10 +112,12 @@ export type ResumeDecision =
  */
 export function decideResume(state: DurableRunState, now: { pluginUpdated: boolean; mark: StopMark }): ResumeDecision {
   const previous = classifyStop(state);
-  if (previous === undefined || previous.retryable || previous.liftedByResume === true || state.stopMark === undefined) {
+  const mark = state.stopMark;
+  const markApplies = mark !== undefined && (mark.stopReason === undefined || mark.stopReason === state.stopReason);
+  if (previous === undefined || previous.retryable || previous.liftedByResume === true || !markApplies) {
     return { run: true, ...(previous !== undefined ? { previous } : {}) };
   }
-  const lifted = changeSinceStop(state.stopMark, now);
+  const lifted = changeSinceStop(mark!, now);
   return lifted !== undefined ? { run: true, previous, lifted } : { run: false, previous };
 }
 

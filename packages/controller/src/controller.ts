@@ -485,10 +485,20 @@ export function createController(): Controller {
         // A pre-#120 run may carry `resumedSinceLastDecision`; nothing reads it
         // now, since the supervisor's first episode after resume starts a fresh
         // session and the case file marks what the resume made stale.
-        const heldEvidenceRefs = state.stopEvidenceRefs;
-        const { stopEvidenceRefs: _staleEvidence, resumedSinceLastDecision: _resumed, ...resumable } =
-          state as DurableRunState & { resumedSinceLastDecision?: boolean };
+        // So are its class and mark (§8): a stop recorded from here on (a
+        // preflight mismatch) is a new one, classified on its own, and they come
+        // back only if this resume holds the original final stop.
+        const heldStop = { stopEvidenceRefs: state.stopEvidenceRefs, stopClass: state.stopClass, stopMark: state.stopMark };
+        const {
+          stopEvidenceRefs: _staleEvidence,
+          stopClass: _staleClass,
+          stopMark: _staleMark,
+          resumedSinceLastDecision: _resumed,
+          ...resumable
+        } = state as DurableRunState & { resumedSinceLastDecision?: boolean };
         void _staleEvidence;
+        void _staleClass;
+        void _staleMark;
         void _resumed;
         state = resumable;
 
@@ -564,10 +574,15 @@ export function createController(): Controller {
         // blocker until something it depends on changed.
         const pluginUpdated = pluginUpdate !== undefined;
         const live = await liveCandidateDigest(state).catch(() => state.candidateDigest);
-        const decided = decideResume(state, { pluginUpdated, mark: stopMarkOf(state, live) });
+        const asStopped: DurableRunState = {
+          ...state,
+          ...(heldStop.stopClass !== undefined ? { stopClass: heldStop.stopClass } : {}),
+          ...(heldStop.stopMark !== undefined ? { stopMark: heldStop.stopMark } : {}),
+        };
+        const decided = decideResume(asStopped, { pluginUpdated, mark: stopMarkOf(state, live) });
         if (!decided.run) {
           state = recordRemedy(
-            { ...state, ...(heldEvidenceRefs !== undefined ? { stopEvidenceRefs: heldEvidenceRefs } : {}) },
+            { ...asStopped, ...(heldStop.stopEvidenceRefs !== undefined ? { stopEvidenceRefs: heldStop.stopEvidenceRefs } : {}) },
             {
               condition: `resumed after a final stop (${decided.previous.kind}: ${state.stopReason ?? "stopped"})`,
               remedy: FINAL_STOP_HELD_REMEDY,
