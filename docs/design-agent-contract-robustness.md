@@ -293,7 +293,9 @@ budget pacing, plugin round caps and the finite budgets.
   down to zero. `supervisor.decide()` can always run at least once.
 - Pacing: when one stage has consumed more than `STAGE_BUDGET_SHARE` (50%) of
   the run's agent budget without a receipt, enter recovery (`stalled`, same
-  message family as §4.6) while budget remains to act on it.
+  message family as §4.6) while budget remains to act on it. The run's agent
+  budget is what it has used plus what it has left, so a budget the operator
+  raised mid-run counts, not the intake copy ([budgets](budgets.md)).
 - A `stalled` episode whose run has produced new evidence (its progress mark
   moved) since the last recovery episode decided anything returns to normal
   on its first turn without a model call, and the remedy is recorded in the

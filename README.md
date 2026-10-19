@@ -119,6 +119,9 @@ crashes; filesystem and execution scopes require host enforcement.
   repository, driven by a JSON profile the task names with `config:`; ships
   profiles for BanyanDB and for GraphLoom itself. It generalizes the
   [BanyanDB fix graph](docs/design-banyandb-fix-graph.md).
+- [Run budgets](docs/budgets.md): what recorded runs used (`graphloom stats`),
+  the profile defaults derived from them, budget layers, and what a raised
+  budget means.
 - [Example task](examples/task.yaml) and [example guide](examples/README.md).
 - [Loopx gate-repair study](docs/research/loopx-gate-defect-handling.md) and
   [issue-fix study](docs/research/loopx-issue-fix-example.md).

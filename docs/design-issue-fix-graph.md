@@ -7,6 +7,8 @@ been made with it yet; its banyandb profile reproduces
 Version 0.4.0, 2026-10-17, adds the [issues file](#the-issues-file).
 Version 0.5.0, 2026-10-19, has the code reviewer review [every changed
 file and the change as a whole](#every-changed-file-and-the-change-as-a-whole).
+Version 0.6.0, 2026-10-19, declares the profile's measured `budgets` as the
+graph's default budgets ([budgets](budgets.md)).
 
 ## Purpose
 
@@ -52,6 +54,7 @@ The profile supplies, as data:
 | `review` | `language`, `testFiles` and `rules`: the extra "what does the change break" rule | the Go rule | the same questions for TypeScript: resume, AbortSignal, rejected promises, locks, persisted state and wire formats, plugin notions in the controller |
 | `pullRequest` | `checklist` after the title, `footer` (`{issue}` becomes the reference), optional `e2eNote` | BanyanDB's template | a short checklist and `Fixes {issue}.` |
 | `harnesses` | Optional `implementer`, `reviewer`, `verifier`; the verifier must differ from the reviewer | Claude Code, Codex, Claude Code | same |
+| `budgets` | Optional run budgets (`agentInvocations`, `jobs`, `decisions`, `corrections`, `waitMs`, `activeMs`, `recoveryReserve`, `probes`), positive integers. `describe` declares them as `defaultBudgets`; intake applies them over the controller's defaults and under the task's own `budgets` ([budgets](budgets.md)) | 6,000 agent calls, 250 jobs, 500 decisions, 100 corrections, 20 h active | 1,800, 250, 350, 30, 10 h |
 
 `parseProfile` checks every field and names the first problem; `describe`
 refuses a missing or unusable profile, so a run cannot start on one.
@@ -452,7 +455,7 @@ The example tasks are
 [`examples/issue-fix-banyandb-task.yaml`](../examples/issue-fix-banyandb-task.yaml)
 and
 [`examples/issue-fix-graphloom-task.yaml`](../examples/issue-fix-graphloom-task.yaml),
-with banyandb-fix's budgets. The GraphLoom task uses `repo: .`, the checkout
+with no budgets of their own: the profile's apply. The GraphLoom task uses `repo: .`, the checkout
 it lives in. Intake pins the top level of the repository `repo` names, so the
 run's worktree and state sit under `graphloom/` and `graphloom-state/` at the
 repository root, which Git ignores.
