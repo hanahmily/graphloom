@@ -8,7 +8,7 @@
  */
 import { realpath } from "node:fs/promises";
 import { expect } from "vitest";
-import { createController, loadRunState, type RunReport, type RunRequest } from "@graphloom/controller";
+import { createController, FINAL_STOP_HELD_REMEDY, loadRunState, saveRunState, type RunReport, type RunRequest } from "@graphloom/controller";
 import { createBuiltinExecutorRunner, type Runner } from "@graphloom/runner";
 import { commandBinding, commandExecutorPackage } from "@graphloom/executor-command";
 import { githubBinding, githubExecutorPackage } from "@graphloom/executor-github";
@@ -48,12 +48,12 @@ export type GraphName = "hello" | "issue-fix";
 interface Fixture {
   workspace: TaskWorkspace;
   /** A fresh runner (and the agents behind it) for one run or resume. */
-  runner(options?: { failWork?: number; onJob?: (seen: number) => Promise<void> }): { runner: Runner; agents: ScriptedAgents };
+  runner(options?: { failWork?: number; failReview?: number; onJob?: (seen: number) => Promise<void> }): { runner: Runner; agents: ScriptedAgents };
   /** Graph-specific checks on a completed run. */
   verifyCompleted(report: RunReport): Promise<void>;
 }
 
-type WorkspaceShape = Pick<TaskWorkspaceOptions, "layout" | "budgets" | "bundle">;
+type WorkspaceShape = Pick<TaskWorkspaceOptions, "layout" | "budgets" | "bundle"> & { request?: string };
 
 async function fixture(scope: TestScope, graph: GraphName, shape: WorkspaceShape): Promise<Fixture> {
   if (graph === "hello") {
@@ -63,6 +63,7 @@ async function fixture(scope: TestScope, graph: GraphName, shape: WorkspaceShape
       runner(options = {}) {
         const agents = helloAgents({
           ...(options.failWork !== undefined ? { failWork: options.failWork } : {}),
+          ...(options.failReview !== undefined ? { failReview: options.failReview } : {}),
           ...(options.onJob !== undefined ? { onJob: (_job, _ctx, seen) => options.onJob!(seen) } : {}),
         });
         return { runner: agents, agents };
@@ -81,6 +82,7 @@ async function fixture(scope: TestScope, graph: GraphName, shape: WorkspaceShape
     runner(options = {}) {
       const agents = f.agents({
         ...(options.failWork !== undefined ? { failWork: options.failWork } : {}),
+        ...(options.failReview !== undefined ? { failReview: options.failReview } : {}),
         ...(options.onJob !== undefined ? { onJob: (_job, _ctx, seen) => options.onJob!(seen) } : {}),
       });
       // As the CLI composes it: the real command and GitHub executors, coding agents behind them.
@@ -117,6 +119,8 @@ export interface Condition {
   id: string;
   /** The dogfood bug (fix PR) this condition reproduces. */
   bug: string;
+  /** The graphs this condition applies to (default: every graph). */
+  graphs?: GraphName[];
   /** Expected result, as it reads in the matrix. */
   expected: string;
   shape?: (scope: TestScope, graph: GraphName) => Promise<WorkspaceShape>;
@@ -303,10 +307,153 @@ export const CONDITIONS: Condition[] = [
       expect(provider!.served).toEqual(["http-error:429", "decide:return"]);
     },
   },
+  ...RESUME_CONDITIONS(),
 ];
 
-function runOnce(f: Fixture, options: { failWork?: number; supervisorFactory?: RunRequest["supervisorFactory"] } = {}): Promise<RunReport> {
-  const { runner } = f.runner(options.failWork !== undefined ? { failWork: options.failWork } : {});
+/**
+ * Resume conformance (#145): a resume retries what failed. For each
+ * retryable stop a graph can produce, inject the failure, resume once, and
+ * the graph retries instead of stopping on the evidence recorded before the
+ * resume; a failure that recurs after the resume stops the run again, so
+ * nothing loops. A final stop resumes to the same blocker until something it
+ * depends on changes. No supervisor runs here: a supervisor would answer the
+ * failure itself, and the rule must hold for a run without one.
+ */
+function RESUME_CONDITIONS(): Condition[] {
+  return [
+    {
+      id: "resume: a work job failed (job/executor failure)",
+      bug: "#128/#145",
+      expected: "stops (retryable); the resume retries the work and completes",
+      completes: true,
+      async drive(_scope, _graph, f) {
+        const stopped = await runOnce(f, { failWork: 1 });
+        expectRetryableStop(stopped);
+        return resumeOnce(f, stopped, "work");
+      },
+      async verify({ report }) {
+        await expectResumedAfter(report, true);
+      },
+    },
+    {
+      id: "resume: a review job failed (job/executor failure)",
+      bug: "#145",
+      expected: "stops (retryable); the resume re-runs the review and completes",
+      completes: true,
+      async drive(_scope, _graph, f) {
+        const stopped = await runOnce(f, { failReview: 1 });
+        expectRetryableStop(stopped);
+        return resumeOnce(f, stopped, "review");
+      },
+      async verify({ report }) {
+        await expectResumedAfter(report, true);
+      },
+    },
+    {
+      id: "resume: delivery failed (the branch already exists)",
+      bug: "#141/#145",
+      expected: "stops on delivery failed (retryable); a resume with the cause still there stops on the new failure; once the operator clears it, the resume delivers",
+      graphs: ["issue-fix"],
+      completes: true,
+      setup: async (f) => {
+        await f.workspace.repo.git("branch", `fix/${ISSUE_FIX_ISSUE}`);
+      },
+      async drive(_scope, _graph, f) {
+        const controller = createController();
+        const stopped = await runOnce(f);
+        expect(stopped, `${stopped.stopReason}: ${stopped.blocker}`).toMatchObject({ status: "stopped", stopReason: "delivery failed", stopRetryable: true });
+        expect(await deliveries(stopped)).toBe(1);
+        // Nothing fixed yet: the resume tries again and stops on its own, new failure.
+        const again = await controller.resume({ runRef: stopped.stateDir, runner: f.runner().runner });
+        expect(again, `${again.stopReason}: ${again.blocker}`).toMatchObject({ status: "stopped", stopReason: "delivery failed" });
+        expect(await deliveries(again), "deliveries after the first resume").toBe(2);
+        // The operator removes the stale branch: the resume delivers.
+        await f.workspace.repo.git("branch", "-D", `fix/${ISSUE_FIX_ISSUE}`);
+        const resumed = await controller.resume({ runRef: stopped.stateDir, runner: f.runner().runner });
+        expect(await deliveries(resumed), "deliveries after the second resume").toBe(3);
+        return resumed;
+      },
+      async verify({ report }) {
+        await expectResumedAfter(report, true, "delivery failed");
+      },
+    },
+    {
+      id: "resume: final stop (incompatible task)",
+      bug: "#145",
+      expected: "stops (final); a resume surfaces the same blocker without asking the graph; a plugin update lets it decide again",
+      completes: false,
+      shape: async (scope, graph) => ({ request: "Tidy up the repository.", bundle: await copyBundle(scope, exampleBundle(graph)) }),
+      async drive(_scope, _graph, f) {
+        const controller = createController();
+        const stopped = await runOnce(f);
+        expect(stopped, `${stopped.stopReason}: ${stopped.blocker}`).toMatchObject({ status: "stopped", stopReason: "incompatible task", stopRetryable: false });
+        const held = await controller.resume({ runRef: stopped.stateDir, runner: f.runner().runner });
+        expect(held).toMatchObject({ status: "stopped", stopReason: "incompatible task", blocker: stopped.blocker, generation: stopped.generation });
+        const state = await loadRunState(held.stateDir);
+        expect(state.remedies?.at(-1)?.remedy).toBe(FINAL_STOP_HELD_REMEDY);
+        expect(state.lastResume).toBeUndefined();
+        // A plugin update is a change the stop depends on: the graph decides again (and still refuses the task).
+        await bumpBundleVersion(await realpath(f.workspace.bundlePath), "9.9.9");
+        const updated = await controller.resume({ runRef: stopped.stateDir, runner: f.runner().runner, updatePlugin: true });
+        expect(updated).toMatchObject({ status: "stopped", stopReason: "incompatible task" });
+        expect(updated.generation).toBeGreaterThan(stopped.generation);
+        expect((await loadRunState(updated.stateDir)).lastResume).toMatchObject({ pluginUpdated: true, previousStopReason: "incompatible task", previousStopRetryable: false });
+        return updated;
+      },
+      async verify() {},
+    },
+    {
+      id: "resume: final stop (decisions budget exhausted)",
+      bug: "#145",
+      expected: "stops (final); a resume surfaces the same blocker; once the operator raises the budget, the resume completes",
+      completes: true,
+      shape: async () => ({ budgets: { decisions: 3 } }),
+      async drive(_scope, _graph, f) {
+        const controller = createController();
+        const stopped = await runOnce(f);
+        expect(stopped, `${stopped.stopReason}: ${stopped.blocker}`).toMatchObject({ status: "stopped", stopReason: "decisions budget exhausted", stopRetryable: false });
+        const held = await controller.resume({ runRef: stopped.stateDir, runner: f.runner().runner });
+        expect(held).toMatchObject({ status: "stopped", stopReason: "decisions budget exhausted", generation: stopped.generation });
+        const state = await loadRunState(held.stateDir);
+        await saveRunState({ ...state, budgets: { ...state.budgets, decisions: 512 } });
+        return controller.resume({ runRef: stopped.stateDir, runner: f.runner().runner });
+      },
+      async verify({ report }) {
+        await expectResumedAfter(report, false, "decisions budget exhausted");
+      },
+    },
+  ];
+}
+
+function expectRetryableStop(report: RunReport): void {
+  expect(report.status, `${report.stopReason}: ${report.blocker}`).toBe("stopped");
+  expect(report.stopRetryable, `${report.stopReason}: ${report.blocker}`).toBe(true);
+}
+
+/** Resume once with fresh agents; the graph must run the failed job again rather than stop on the old failure. */
+async function resumeOnce(f: Fixture, stopped: RunReport, purpose: "work" | "review"): Promise<RunReport> {
+  const { runner, agents } = f.runner();
+  const resumed = await createController().resume({ runRef: stopped.stateDir, runner });
+  expect(agents.jobs.map((j) => j.purpose), "jobs after the resume").toContain(purpose);
+  return resumed;
+}
+
+async function expectResumedAfter(report: RunReport, retryable: boolean, reason?: string): Promise<void> {
+  const state = await loadRunState(report.stateDir);
+  expect(state.lastResume).toMatchObject({ pluginUpdated: false, previousStopRetryable: retryable, ...(reason !== undefined ? { previousStopReason: reason } : {}) });
+}
+
+/** Deliver commands the run has recorded. */
+async function deliveries(report: RunReport): Promise<number> {
+  const state = await loadRunState(report.stateDir);
+  return state.evidence.filter((e) => e.kind === "command" && (e.payload as { command?: { id?: string } }).command?.id === "deliver").length;
+}
+
+function runOnce(f: Fixture, options: { failWork?: number; failReview?: number; supervisorFactory?: RunRequest["supervisorFactory"] } = {}): Promise<RunReport> {
+  const { runner } = f.runner({
+    ...(options.failWork !== undefined ? { failWork: options.failWork } : {}),
+    ...(options.failReview !== undefined ? { failReview: options.failReview } : {}),
+  });
   return createController().run({
     taskPath: f.workspace.taskPath,
     runner,

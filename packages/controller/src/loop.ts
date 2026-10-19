@@ -78,6 +78,7 @@ import { isUnsettled, reconcilePendingDispatch } from "./reconcile.js";
 import { createChildPort, reconcileChildOperations } from "./children.js";
 import { agentSessionViews, continuationRefusal, recordAgentSession, sessionForDispatch, wipeAgentSessions } from "./agent-sessions.js";
 import { citedEvidence, loadRunState, nextStageAttempt, type ProbeRecord, recordRemedy, STEP_LIMIT_STOP_REASON, type DurableRunState, saveRunState } from "./state.js";
+import { stopMarkOf } from "./stop-class.js";
 import { bumpGeneration } from "./generation.js";
 import { noteGraphDecision, noteSupervisorProposal, progressMark, settleCorrectionTrial, settleSupervisorCorrection } from "./escalation.js";
 import {
@@ -180,10 +181,27 @@ export async function runNormalLoop(
       if (final !== undefined && recorded !== undefined) final = recorded;
       await timing.clock.close();
     }
+    if (final !== undefined) final = await recordStopMark(final);
     await clearOwnerClaim(state.stateDir);
   }
   await wipeAgentSessions(final);
   return final;
+}
+
+/**
+ * §8: what a stop depends on, recorded once the run has stopped, so a resume
+ * can tell whether anything changed since a final stop.
+ */
+async function recordStopMark(state: DurableRunState): Promise<DurableRunState> {
+  if (state.status !== "stopped" || state.stopMark !== undefined) return state;
+  return withRunLock(state.stateDir, async () => {
+    const saved = await loadRunState(state.stateDir).catch(() => undefined);
+    if (saved === undefined || saved.status !== "stopped" || saved.stopMark !== undefined) return state;
+    const live = await liveCandidateDigest(saved).catch(() => saved.candidateDigest);
+    const stopMark = stopMarkOf(saved, live);
+    await saveRunState({ ...saved, stopMark });
+    return { ...state, stopMark };
+  });
 }
 
 /**
@@ -1611,6 +1629,9 @@ export function toRunView(state: DurableRunState): RunView {
   if (state.openAttempt !== undefined && Object.keys(state.openAttempt).length > 0) {
     view.openAttempt = { ...state.openAttempt };
   }
+  if (state.lastResume !== undefined) {
+    view.resume = { ...state.lastResume };
+  }
   const correctionTrials = state.correctionTrials ?? {};
   const handoff = state.handoff ?? {};
   const mark = progressMark(state);
@@ -1936,8 +1957,12 @@ async function applyDecision(
         stopReason: _sr,
         blocker: _bl,
         stopEvidenceRefs: _se,
+        stopClass: _sc,
+        stopMark: _sm,
         ...rest
       } = state;
+      void _sc;
+      void _sm;
       void _ep;
       void _tr;
       void _sr;
@@ -2014,6 +2039,8 @@ async function applyDecision(
         stopReason: action.stop.reason,
         blocker: action.stop.blocker,
         ...(cited.length > 0 ? { stopEvidenceRefs: cited } : {}),
+        // §8: the graph or supervisor classifies its own stop; unmarked, it is retryable.
+        ...(complete ? {} : { stopClass: { by: state.mode === "recovery" ? ("supervisor" as const) : ("graph" as const), retryable: action.stop.retryable !== false, reason: action.stop.reason } }),
       };
     }
     default: {

@@ -1,5 +1,7 @@
 import {
   dispatch,
+  executorFailureOf,
+  isStaleFailure,
   observe,
   reenter,
   stop,
@@ -115,7 +117,7 @@ export function advanceRelease(view: RunView): GraphDecision {
   const version = requestedVersion(view.task.request);
   if (version === undefined) {
     return stop(
-      { reason: "incompatible task", blocker: "the request names no MAJOR.MINOR.PATCH version to release" },
+      { reason: "incompatible task", blocker: "the request names no MAJOR.MINOR.PATCH version to release", retryable: false },
       "reject a request without a release version",
     );
   }
@@ -127,13 +129,19 @@ export function advanceRelease(view: RunView): GraphDecision {
   if (stage === undefined) {
     return stop({ reason: "complete", blocker: "none" }, "every stage has valid receipts");
   }
-  const state = enterStage(readPrivate(view), stage.id, view.generation);
-  return stage.id === REVIEW_STAGE ? advanceReview(view, state, version) : advanceWork(view, state, version);
+  const prior = readPrivate(view);
+  // The first decision since the operator's latest resume (each decision records its generation).
+  const resumed = view.resume !== undefined && prior.generation < view.resume.generation;
+  const state = enterStage(prior, stage.id, view.generation);
+  return stage.id === REVIEW_STAGE ? advanceReview(view, state, version) : advanceWork(view, state, version, resumed);
 }
 
-function advanceWork(view: RunView, state: ReleasePrivateState, version: string): GraphDecision {
+function advanceWork(view: RunView, state: ReleasePrivateState, version: string, resumed: boolean): GraphDecision {
   const stageId = state.stageId;
-  if (!state.dispatched) {
+  // A resume retries what failed (design-typescript-core.md §8): a writer
+  // whose last run failed before the operator's latest resume runs again,
+  // rather than having the files it never wrote observed and validated.
+  if (!state.dispatched || (resumed && failedBeforeResume(view, stageId))) {
     return dispatchAgent(
       view,
       workJob(stageId, workInstruction(stageId, view.task.request, version, state.feedback)),
@@ -217,6 +225,18 @@ function advanceReview(view: RunView, state: ReleasePrivateState, version: strin
     "escalate the review stage",
     JSON.stringify(state),
   );
+}
+
+/** The stage's last work job failed before the latest resume, and nothing of the stage was recorded since. */
+function failedBeforeResume(view: RunView, stageId: string): boolean {
+  let last = view.evidence.length - 1;
+  while (last >= 0) {
+    const failure = executorFailureOf(view.evidence[last]!);
+    if (failure?.stageId === stageId && failure.purpose === "work") break;
+    last -= 1;
+  }
+  if (last < 0 || !isStaleFailure(view.evidence[last]!, view)) return false;
+  return !view.evidence.slice(last + 1).some((e) => e.kind === "file" || e.kind === "workspace");
 }
 
 /** Carry the state into `stageId` at `generation`, resetting what no longer holds. */
@@ -311,7 +331,7 @@ function addOnce(list: string[], item: string): string[] {
 /** Only agent work spends an invocation; observing and validating stay open after the last one. */
 function dispatchAgent(view: RunView, job: JobSpec, summary: string, state: ReleasePrivateState): GraphDecision {
   if (view.budgets.agentInvocations <= 0) {
-    return stop({ reason: "budgets exhausted", blocker: "no agent invocations left" }, `cannot ${summary}`);
+    return stop({ reason: "budgets exhausted", blocker: "no agent invocations left", retryable: false }, `cannot ${summary}`);
   }
   return withPrivate(dispatch(job, summary), state);
 }

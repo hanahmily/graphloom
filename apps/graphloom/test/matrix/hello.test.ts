@@ -6,7 +6,7 @@ const scope = createScope();
 afterEach(() => scope.dispose());
 
 describe("hello end to end under each realistic condition (#144)", () => {
-  it.each(CONDITIONS.map((c) => [c.id, c] as const))("%s", async (_id, condition) => {
+  it.each(CONDITIONS.filter((c) => c.graphs?.includes("hello") ?? true).map((c) => [c.id, c] as const))("%s", async (_id, condition) => {
     await runCell(scope, "hello", condition);
   }, 60_000);
 });

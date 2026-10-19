@@ -326,6 +326,10 @@ export function assertGraphAction(value: unknown): GraphAction {
   if (spec === null || typeof spec !== "object" || Array.isArray(spec)) {
     throw new WireValidationError("malformed", `${type} action needs a ${key} object`);
   }
+  const retryable = (spec as Record<string, unknown>)["retryable"];
+  if (type === "stop" && retryable !== undefined && typeof retryable !== "boolean") {
+    throw new WireValidationError("malformed", "stop.retryable must be boolean");
+  }
   return obj as unknown as GraphAction;
 }
 
@@ -357,6 +361,12 @@ export function assertRunView(value: unknown): RunView {
   requireString(obj, "activeVersion");
   if (obj["agentSessions"] !== undefined) assertAgentSessions(requireArray(obj, "agentSessions"));
   if (obj["repairAuthority"] !== undefined) assertRepairAuthority(obj["repairAuthority"]);
+  if (obj["resume"] !== undefined) {
+    const resume = asObject(obj["resume"], "resume");
+    requireNumber(resume, "generation");
+    requireString(resume, "at");
+    if (typeof resume["pluginUpdated"] !== "boolean") throw new WireValidationError("malformed", "resume.pluginUpdated must be boolean");
+  }
   return obj as unknown as RunView;
 }
 

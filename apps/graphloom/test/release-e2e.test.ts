@@ -20,7 +20,7 @@ import {
 } from "@graphloom/sdk";
 import { createScriptedRunner, type JobContext } from "@graphloom/runner";
 import { createScriptedSupervisor } from "@graphloom/supervisor";
-import { createController, loadRunState, type RepairDeps } from "@graphloom/controller";
+import { createController, FINAL_STOP_HELD_REMEDY, loadRunState, type RepairDeps } from "@graphloom/controller";
 
 const execFileAsync = promisify(execFile);
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
@@ -46,7 +46,7 @@ beforeAll(async () => {
  * node_modules provides the SDK. `defective` installs it with a changelog
  * validator that rejects dated headings.
  */
-async function makeEnv(opts: { defective?: boolean; grants?: boolean } = {}) {
+async function makeEnv(opts: { defective?: boolean; grants?: boolean; request?: string } = {}) {
   const dir = await mkdtemp(path.join(os.tmpdir(), "gl-release-"));
   temps.push(dir);
   const repo = path.join(dir, "test-repo");
@@ -73,7 +73,7 @@ async function makeEnv(opts: { defective?: boolean; grants?: boolean } = {}) {
   const taskPath = path.join(dir, "task.yaml");
   await writeFile(
     taskPath,
-    `graph: release\nrepo: ./test-repo\nrequest: ${JSON.stringify(REQUEST)}\n` +
+    `graph: release\nrepo: ./test-repo\nrequest: ${JSON.stringify(opts.request ?? REQUEST)}\n` +
       (opts.grants ? "grants:\n  sourceRepair: false\n  validatorSubstitution: true\n" : ""),
   );
   return { dir, installed, taskPath, stateRoot: path.join(dir, "state") };
@@ -147,6 +147,58 @@ function repairDeps(installed: string, supervisorSessionId: string, patch: (cand
   };
   return { deps, reviewed };
 }
+
+/**
+ * Resume conformance (#145), through the controller and the installed bundle
+ * in its child host, with no supervisor: a resume retries what failed, and a
+ * final stop resumes to the same blocker.
+ */
+describe("the release example plugin on resume", () => {
+  const failed: Job = async () => ({ status: "failed", summary: "agent finished without a result" }) as unknown as Awaited<ReturnType<Job>>;
+
+  it("re-runs a reviewer that failed before the resume, and completes", async () => {
+    const env = await makeEnv();
+    const first = runner([bump, changelog("Export command"), failed]);
+    const stopped = await createController().run({ taskPath: env.taskPath, runner: first.runner, stateRoot: env.stateRoot, runId: "release-review-failed" });
+    expect(stopped, `${stopped.stopReason}: ${stopped.blocker}`).toMatchObject({ status: "stopped", stopRetryable: true });
+
+    // The resume re-opens Bump and Changelog too (their accepted workspace
+    // manifests no longer match once both files changed), so their writers
+    // run again before the reviewer does.
+    const second = runner([bump, changelog("Export command"), reviewer("approved", "VERSION and the 1.2.0 entry match the request.")]);
+    const resumed = await createController().resume({ runRef: stopped.stateDir, runner: second.runner });
+    expect(resumed.status, `${resumed.stopReason}: ${resumed.blocker}`).toBe("succeeded");
+    expect(second.seen.at(-1)).toMatchObject({ stageId: "review", purpose: "review" });
+    expect((await loadRunState(resumed.stateDir)).lastResume).toMatchObject({ previousStopRetryable: true, pluginUpdated: false });
+  }, 60_000);
+
+  it("re-runs a writer that failed before the resume, and completes", async () => {
+    const env = await makeEnv();
+    const first = runner([failed]);
+    const stopped = await createController().run({ taskPath: env.taskPath, runner: first.runner, stateRoot: env.stateRoot, runId: "release-work-failed" });
+    expect(stopped, `${stopped.stopReason}: ${stopped.blocker}`).toMatchObject({ status: "stopped", stopRetryable: true });
+
+    const second = runner([bump, changelog("Export command"), reviewer("approved", "VERSION and the 1.2.0 entry match the request.")]);
+    const resumed = await createController().resume({ runRef: stopped.stateDir, runner: second.runner });
+    expect(resumed.status, `${resumed.stopReason}: ${resumed.blocker}`).toBe("succeeded");
+    // The failed writer runs again; its unwritten VERSION is not observed and accepted.
+    expect(second.seen.map((j) => [j.stageId, j.purpose])).toEqual([
+      ["bump", "work"],
+      ["changelog", "work"],
+      ["review", "review"],
+    ]);
+    expect(await readFile(path.join(resumed.worktreePath, "VERSION"), "utf8")).toBe("1.2.0\n");
+  }, 60_000);
+
+  it("surfaces the same blocker after a final stop, without asking the graph", async () => {
+    const env = await makeEnv({ request: "Release the next version with a CHANGELOG.md entry." });
+    const stopped = await createController().run({ taskPath: env.taskPath, runner: runner([]).runner, stateRoot: env.stateRoot, runId: "release-final" });
+    expect(stopped, `${stopped.stopReason}: ${stopped.blocker}`).toMatchObject({ status: "stopped", stopReason: "incompatible task", stopRetryable: false });
+    const held = await createController().resume({ runRef: stopped.stateDir, runner: runner([]).runner });
+    expect(held).toMatchObject({ status: "stopped", stopReason: "incompatible task", blocker: stopped.blocker, generation: stopped.generation });
+    expect((await loadRunState(held.stateDir)).remedies?.at(-1)?.remedy).toBe(FINAL_STOP_HELD_REMEDY);
+  }, 60_000);
+});
 
 describe("the release example plugin through the controller", () => {
   it("charges a Bump rewrite after resume sends the run back past an accepted Changelog", async () => {

@@ -1,5 +1,7 @@
 import {
   dispatch,
+  executorFailureOf,
+  isStaleFailure,
   observe,
   reenter,
   stop,
@@ -132,7 +134,7 @@ export function createGraph(): GraphPlugin {
 export function advanceHello(view: RunView): GraphDecision {
   if (view.budgets.corrections <= 0 && view.budgets.agentInvocations <= 0) {
     return stop(
-      { reason: "budgets exhausted", blocker: "finite limits reached" },
+      { reason: "budgets exhausted", blocker: "finite limits reached", retryable: false },
       "cannot continue without budget",
     );
   }
@@ -142,6 +144,7 @@ export function advanceHello(view: RunView): GraphDecision {
       {
         reason: "incompatible task",
         blocker: "request is not a GREETING.txt hello exercise",
+        retryable: false,
       },
       "reject unrelated request",
     );
@@ -266,8 +269,13 @@ function advanceWrite(view: RunView, state: HelloPrivateState): GraphDecision {
 
 function advanceReview(view: RunView, state: HelloPrivateState): GraphDecision {
   const review = latestReviewSinceCutoff(view, state);
+  // A resume retries what failed (design-typescript-core.md §8): a reviewer
+  // that failed before the operator's latest resume runs again, while one
+  // that failed since the resume goes to the supervisor.
+  const reviewerFailures = view.evidence.slice(state.reviewEvidenceFromIndex).filter((e) => executorFailureOf(e)?.stageId === REVIEW_STAGE);
+  const retryReviewer = reviewerFailures.length > 0 && reviewerFailures.every((e) => isStaleFailure(e, view));
 
-  if (!state.reviewerDispatched && !review) {
+  if ((!state.reviewerDispatched || retryReviewer) && !review) {
     return withPrivate(
       dispatch(
         {

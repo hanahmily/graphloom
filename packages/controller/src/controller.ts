@@ -26,7 +26,7 @@ import {
   type RecreateHostFn,
   type RepairDeps,
 } from "./repair-lifecycle.js";
-import { admitValidation, assertLiveWorkspaceMatchesEvidence, deliveryDrift, invalidateStageAndAfter } from "./admit.js";
+import { admitValidation, assertLiveWorkspaceMatchesEvidence, deliveryDrift, invalidateStageAndAfter, liveCandidateDigest } from "./admit.js";
 import type { AdmissionValidator } from "./admit.js";
 import { resolveBundleEntry } from "./bundle.js";
 import { createHostValidators } from "./host-validators.js";
@@ -66,6 +66,7 @@ import {
 import {
   loadRunState,
   nextStageAttempt,
+  recordRemedy,
   saveRunState,
   type DurableRunState,
   type RemedyRecord,
@@ -74,6 +75,7 @@ import {
   type VersionRecord,
 } from "./state.js";
 import { returnToGraphOnResume } from "./resume-recovery.js";
+import { classifyStop, decideResume, FINAL_STOP_HELD_REMEDY, resumeView, stopMarkOf } from "./stop-class.js";
 import {
   assertWorktreeMatches,
   createRunWorktree,
@@ -175,6 +177,8 @@ export interface RunReport {
   status: RunStatus;
   stopReason?: string;
   blocker?: string;
+  /** The stop's class (docs §8): retryable, so a resume runs the graph again, or final, so a resume surfaces the same blocker until something it depends on changes (the operator's own stop is final, and the resume answers it). */
+  stopRetryable?: boolean;
   /** Recorded evidence the stop cites. */
   stopEvidenceRefs?: string[];
   receipts: DurableRunState["receipts"];
@@ -212,8 +216,12 @@ export interface InspectReport {
   stateDir: string;
   stopReason?: string;
   blocker?: string;
+  /** The stop's class (docs §8): retryable, so a resume runs the graph again, or final, so a resume surfaces the same blocker until something it depends on changes (the operator's own stop is final, and the resume answers it). */
+  stopRetryable?: boolean;
   /** Recorded evidence the stop cites. */
   stopEvidenceRefs?: string[];
+  /** The operator's latest resume, as the graph sees it (`RunView.resume`). */
+  lastResume?: import("@graphloom/sdk").ResumeView;
   /** Agent results checked against a declared result contract (§4.1), by outcome and by contract name. */
   contracts: {
     valid: number;
@@ -477,9 +485,20 @@ export function createController(): Controller {
         // A pre-#120 run may carry `resumedSinceLastDecision`; nothing reads it
         // now, since the supervisor's first episode after resume starts a fresh
         // session and the case file marks what the resume made stale.
-        const { stopEvidenceRefs: _staleEvidence, resumedSinceLastDecision: _resumed, ...resumable } =
-          state as DurableRunState & { resumedSinceLastDecision?: boolean };
+        // So are its class and mark (§8): a stop recorded from here on (a
+        // preflight mismatch) is a new one, classified on its own, and they come
+        // back only if this resume holds the original final stop.
+        const heldStop = { stopEvidenceRefs: state.stopEvidenceRefs, stopClass: state.stopClass, stopMark: state.stopMark };
+        const {
+          stopEvidenceRefs: _staleEvidence,
+          stopClass: _staleClass,
+          stopMark: _staleMark,
+          resumedSinceLastDecision: _resumed,
+          ...resumable
+        } = state as DurableRunState & { resumedSinceLastDecision?: boolean };
         void _staleEvidence;
+        void _staleClass;
+        void _staleMark;
         void _resumed;
         state = resumable;
 
@@ -551,13 +570,52 @@ export function createController(): Controller {
         state = reconcileRepairJournal(state);
         state = await reconcileSwitchJournal(state);
         state = await reassessAcceptedWorkspace(state);
+        // §8: a retryable stop runs again; a final one surfaces the same
+        // blocker until something it depends on changed.
+        const pluginUpdated = pluginUpdate !== undefined;
+        const live = await liveCandidateDigest(state).catch(() => state.candidateDigest);
+        const asStopped: DurableRunState = {
+          ...state,
+          ...(heldStop.stopClass !== undefined ? { stopClass: heldStop.stopClass } : {}),
+          ...(heldStop.stopMark !== undefined ? { stopMark: heldStop.stopMark } : {}),
+        };
+        const decided = decideResume(asStopped, { pluginUpdated, mark: stopMarkOf(state, live) });
+        if (!decided.run) {
+          state = recordRemedy(
+            { ...asStopped, ...(heldStop.stopEvidenceRefs !== undefined ? { stopEvidenceRefs: heldStop.stopEvidenceRefs } : {}) },
+            {
+              condition: `resumed after a final stop (${decided.previous.kind}: ${state.stopReason ?? "stopped"})`,
+              remedy: FINAL_STOP_HELD_REMEDY,
+              ...(state.blocker !== undefined ? { detail: state.blocker.slice(0, 500) } : {}),
+            },
+          );
+          await saveRunState(state);
+          return;
+        }
+        if (decided.lifted !== undefined && decided.previous !== undefined) {
+          state = recordRemedy(state, {
+            condition: `resumed after a final stop (${decided.previous.kind}: ${state.stopReason ?? "stopped"})`,
+            remedy: `ran the graph again: ${decided.lifted}`,
+          });
+        }
+        const stopped = state;
         // A trigger recorded before the stop is not current evidence: the
         // graph retries first, and recovery fires afresh if the failure recurs.
         state = returnToGraphOnResume(state);
         // The operator's resume restarts the graph, so its replayed decisions are not repeats.
-        const { noProgress: _repeats, ...resumed } = state;
+        const { noProgress: _repeats, stopClass: _class, stopMark: _mark, ...resumed } = state;
         void _repeats;
+        void _class;
+        void _mark;
         state = bumpGeneration({ ...resumed, status: "running" }, "resume");
+        state = {
+          ...state,
+          lastResume: resumeView(stopped, {
+            generation: state.generation,
+            pluginUpdated,
+            ...(decided.previous !== undefined ? { previous: decided.previous } : {}),
+          }),
+        };
         await clearStopRequest(stateDir);
         await saveRunState(state);
 
@@ -1113,11 +1171,18 @@ function toInspect(state: DurableRunState): InspectReport {
   if (state.stopReason !== undefined) {
     report.stopReason = state.stopReason;
   }
+  const stopClass = classifyStop(state);
+  if (stopClass !== undefined) {
+    report.stopRetryable = stopClass.retryable;
+  }
   if (state.blocker !== undefined) {
     report.blocker = state.blocker;
   }
   if (state.stopEvidenceRefs !== undefined) {
     report.stopEvidenceRefs = [...state.stopEvidenceRefs];
+  }
+  if (state.lastResume !== undefined) {
+    report.lastResume = { ...state.lastResume };
   }
   if (state.intake.config !== undefined) {
     report.config = { path: state.intake.config.path, sha256: state.intake.config.sha256 };
@@ -1193,6 +1258,10 @@ function toReport(state: DurableRunState, sourceDirtyAfter: string[]): RunReport
   };
   if (state.stopReason !== undefined) {
     report.stopReason = state.stopReason;
+  }
+  const stopClass = classifyStop(state);
+  if (stopClass !== undefined) {
+    report.stopRetryable = stopClass.retryable;
   }
   if (state.blocker !== undefined) {
     report.blocker = state.blocker;

@@ -383,6 +383,56 @@ describe.skipIf(GO === undefined)("banyandb-fix on a Go repository", () => {
     expect(github.requests.every((r) => r.method === "GET")).toBe(true);
   }, 600_000);
 
+  // Resume conformance (#145): a delivery that failed before the resume is
+  // tried again; one that fails again after it stops the run, so nothing loops.
+  it("stops on a failed delivery and delivers after a resume once the operator clears the cause", async () => {
+    const env = await makeEnv();
+    github = await startFakeGitHub({
+      issues: [{ number: ISSUE, title: "Scheduler reports long actions as timed out", state: "open", labels: ["bug"], body: "Backups over five minutes log action timed out." }],
+    });
+    github.comments.set(ISSUE, [{ id: 1, body: "A running backup is not an error; report it as running." }]);
+    const ocr = await fakeOcr(env.dir);
+    const agents = await fakeAgents(env.dir);
+    // A stale branch from an earlier attempt: delivery refuses to overwrite it.
+    await execFileAsync("git", ["branch", `fix/${ISSUE}`], { cwd: env.repo });
+    const savedPath = process.env.PATH;
+    process.env.PATH = `${ocr.bin}:${savedPath}`;
+    try {
+      const definition = fixtureGraph(env.contributing).describe();
+      const validators = Object.fromEntries(definition.defaultValidators.map((b) => [b.validatorId, plugin.validatorById(b.validatorId)!]));
+      const deliveries = async (stateDir: string) =>
+        (await loadRunState(stateDir)).evidence.filter((e) => (e.payload as { command?: { id?: string } }).command?.id === "deliver").length;
+      const resume = (stateDir: string) =>
+        createController().resume({ runRef: stateDir, plugin: fixtureGraph(env.contributing), validators, runner: fixRunner(github!.baseUrl, agents.config).runner });
+
+      const stopped = await createController().run({
+        taskPath: env.taskPath,
+        plugin: fixtureGraph(env.contributing),
+        validators,
+        runner: fixRunner(github.baseUrl, agents.config).runner,
+        stateRoot: env.stateRoot,
+        runId: "bydb-deliver",
+      });
+      expect(stopped, `${stopped.stopReason}: ${stopped.blocker}`).toMatchObject({ status: "stopped", stopReason: "delivery failed", stopRetryable: true });
+      expect(stopped.blocker).toContain("already exists");
+      expect(await deliveries(stopped.stateDir)).toBe(1);
+
+      // Resumed with the cause still there: delivery runs again and stops on its own, new failure.
+      const again = await resume(stopped.stateDir);
+      expect(again, `${again.stopReason}: ${again.blocker}`).toMatchObject({ status: "stopped", stopReason: "delivery failed" });
+      expect(await deliveries(stopped.stateDir)).toBe(2);
+
+      await execFileAsync("git", ["branch", "-D", `fix/${ISSUE}`], { cwd: env.repo });
+      const delivered = await resume(stopped.stateDir);
+      expect(delivered.status, `${delivered.stopReason}: ${delivered.blocker}`).toBe("succeeded");
+      expect(await deliveries(stopped.stateDir)).toBe(3);
+      expect(execFileSync("git", ["show", `fix/${ISSUE}:pkg/timestamp/scheduler.go`], { cwd: env.repo, encoding: "utf8" })).toBe(FIXED);
+      expect((await loadRunState(stopped.stateDir)).lastResume).toMatchObject({ previousStopReason: "delivery failed", previousStopRetryable: true });
+    } finally {
+      process.env.PATH = savedPath;
+    }
+  }, 600_000);
+
   // This is the real-world shape of the bug a run-convergence investigation
   // this design is named for: a live run (a23b53b8-5df, fixing
   // apache/skywalking#14075) issued zero receipts across 45 generations

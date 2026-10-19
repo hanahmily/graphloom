@@ -60,6 +60,12 @@ to normal graph execution or stopping with an unresolved blocker.
 A return to a required stage that invalidates affected downstream evidence and
 creates new attempts while preserving prior history.
 
+**Retryable stop / final stop**:
+How a stop answers an operator's resume. After a retryable stop the resume runs
+the graph again and it retries what failed; after a final stop the resume
+surfaces the same blocker until something the stop depends on changes (plugin,
+workspace change, budgets). Failures recorded before the resume are stale.
+
 **Qualified repair**:
 A proposed implementation change with reproduced defect evidence, regression
 checks, and independent review, eligible for an authorized version transition.

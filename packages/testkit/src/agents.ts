@@ -17,6 +17,8 @@ export interface ScriptedAgentsOptions {
    * supervisor. Default 0.
    */
   failWork?: number;
+  /** Fail this many `review` jobs first, the same way. Default 0. */
+  failReview?: number;
   /** Called before each job is answered (e.g. to request an operator stop mid-run). */
   onJob?: (job: JobSpec, ctx: JobContext, seen: number) => void | Promise<void>;
 }
@@ -34,6 +36,7 @@ export interface ScriptedAgents extends Runner {
 export function scriptedAgents(options: ScriptedAgentsOptions): ScriptedAgents {
   const jobs: JobSpec[] = [];
   let failures = options.failWork ?? 0;
+  let reviewFailures = options.failReview ?? 0;
   return {
     jobs,
     ...(options.executors !== undefined ? { describeExecutors: async () => options.executors! } : {}),
@@ -44,6 +47,9 @@ export function scriptedAgents(options: ScriptedAgentsOptions): ScriptedAgents {
       let reply: AgentReply;
       if (job.purpose === "work" && failures > 0) {
         failures -= 1;
+        reply = { status: "failed", summary: "agent finished without a result" };
+      } else if (job.purpose === "review" && reviewFailures > 0) {
+        reviewFailures -= 1;
         reply = { status: "failed", summary: "agent finished without a result" };
       } else {
         reply = await options.reply(job, ctx, seen);
