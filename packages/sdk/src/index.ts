@@ -69,6 +69,7 @@ export type {
   ReenterSpec,
   Requirement,
   RequirementId,
+  ResumeView,
   ReturnSpec,
   RunView,
   StageAttempt,
@@ -153,6 +154,8 @@ export {
   assertValidationResult,
   parseJsonBounded,
 } from "./validate.js";
+
+export { executorFailureOf, failuresSinceResume, isStaleFailure, type ExecutorFailureEvidence } from "./resume.js";
 
 export { createScriptedGraph, type ScriptedAdvance, type ScriptedGraphOptions } from "./scripted.js";
 

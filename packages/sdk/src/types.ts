@@ -228,6 +228,27 @@ export interface RunView {
     handoff: Record<string, CorrectionHandoff>;
     repeatedProposals: Record<string, SupervisorRepeatEntry>;
   };
+  /**
+   * The operator's latest resume of this run, filled by the controller on
+   * every resume and absent in a run never resumed. Evidence recorded at an
+   * earlier generation than `generation` predates it: a failure there is
+   * not by itself a reason to stop again (see `isStaleFailure`).
+   */
+  resume?: ResumeView;
+}
+
+/** What the controller tells a graph about the operator's latest resume (docs/design-typescript-core.md §8). */
+export interface ResumeView {
+  /** The generation the resume started; evidence from an earlier one predates it. */
+  generation: number;
+  /** When the resume happened (ISO 8601). */
+  at: string;
+  /** The operator updated the installed plugin bundle with this resume (`--update-plugin`). */
+  pluginUpdated: boolean;
+  /** Why the run had stopped before this resume; absent when it had not stopped cleanly (a crash). */
+  previousStopReason?: string;
+  /** How the controller classified that stop: retryable, or final with something since changed. */
+  previousStopRetryable?: boolean;
 }
 
 /** Why a stage's correction trials are handed off to the supervisor. */
@@ -385,6 +406,18 @@ export interface StopSpec {
   reason: string;
   blocker: string;
   evidenceRefs?: EvidenceRef[];
+  /**
+   * What an operator's resume does with this stop (docs/design-typescript-core.md §8).
+   * `true` (the default): the stop is retryable, so a resume asks the graph
+   * again and it decides from current evidence; a decision made because
+   * something failed should then count only failures since the resume
+   * (`failuresSinceResume`, `isStaleFailure`). `false`: the stop is final
+   * (a maintainer must decide, the task is incompatible, a budget is spent),
+   * so a resume surfaces the same blocker without asking the graph until
+   * something the stop depends on changes: the plugin bundle or active
+   * version, the workspace change, or a budget the operator raised.
+   */
+  retryable?: boolean;
 }
 
 export type GraphAction =
