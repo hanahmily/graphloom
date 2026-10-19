@@ -1,0 +1,27 @@
+{
+  "name": "@graphloom/testkit",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Unpublished test fixtures: realistic repositories, tasks, plugin bundles, scripted agents and a fake model provider",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.test.json",
+    "test": "tsc -p tsconfig.json && vitest run"
+  },
+  "dependencies": {
+    "@graphloom/executor-github": "0.1.0",
+    "@graphloom/runner": "0.0.0",
+    "@graphloom/sdk": "0.0.0"
+  },
+  "devDependencies": {
+    "@graphloom/plugin-host": "0.0.0",
+    "@graphloom/supervisor": "0.0.0"
+  }
+}

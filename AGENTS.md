@@ -15,6 +15,7 @@ are superseded. Historical Go code lives under `legacy/go/` and is not built by 
 | `packages/plugin-host` | `@graphloom/plugin-host` | Isolated child process adapter (scaffold) |
 | `packages/supervisor` | `@graphloom/supervisor` | Pi SDK recovery session (`minimax-cn`/`MiniMax-M3` default) |
 | `packages/runner` | `@graphloom/runner` | Jobs and scopes (scaffold) |
+| `packages/testkit` | `@graphloom/testkit` | Unpublished test fixtures (repos, tasks, bundles, scripted agents, fake provider); tests only |
 | `apps/graphloom` | `@graphloom/cli` | CLI composition root (stub) |
 
 ```sh
