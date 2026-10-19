@@ -21,5 +21,8 @@
     "@graphloom/runner": "0.0.0",
     "@graphloom/sdk": "0.0.0",
     "@graphloom/supervisor": "0.0.0"
+  },
+  "devDependencies": {
+    "@graphloom/testkit": "0.0.0"
   }
 }

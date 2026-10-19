@@ -11,7 +11,7 @@
     "examples/plugins/*"
   ],
   "scripts": {
-    "build": "npm run build -w @graphloom/sdk && npm run build -w @graphloom/runner && npm run build -w @graphloom/plugin-host && npm run build -w @graphloom/supervisor && npm run build -w @graphloom/controller -w @graphloom/plugin-hello -w @graphloom/plugin-release -w @graphloom/plugin-banyandb-fix -w @graphloom/plugin-issue-fix -w @graphloom/executor-github -w @graphloom/executor-coding-agent -w @graphloom/executor-command && npm run build -w @graphloom/cli",
+    "build": "npm run build -w @graphloom/sdk && npm run build -w @graphloom/runner && npm run build -w @graphloom/plugin-host && npm run build -w @graphloom/supervisor && npm run build -w @graphloom/controller -w @graphloom/plugin-hello -w @graphloom/plugin-release -w @graphloom/plugin-banyandb-fix -w @graphloom/plugin-issue-fix -w @graphloom/executor-github -w @graphloom/executor-coding-agent -w @graphloom/executor-command && npm run build -w @graphloom/cli -w @graphloom/testkit",
     "typecheck": "npm run build && npm run typecheck --workspaces --if-present",
     "test": "npm run build && npm run test --workspaces --if-present",
     "lint": "npm run typecheck"

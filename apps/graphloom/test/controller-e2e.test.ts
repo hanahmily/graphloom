@@ -1,10 +1,5 @@
-import { existsSync } from "node:fs";
-import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
-import os from "node:os";
+import { readdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
-import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   createScriptedGraph,
@@ -19,11 +14,9 @@ import {
 import { createScriptedRunner } from "@graphloom/runner";
 import { createController, loadRunState } from "@graphloom/controller";
 import { startFakeGitHub, type FakeGitHub } from "@graphloom/executor-github/testing";
+import { createScope, createTaskWorkspace, HELLO_REQUEST } from "@graphloom/testkit";
 import { githubRunner as hostGitHubRunner } from "./github-runner.js";
 
-const execFileAsync = promisify(execFile);
-const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
-const helloBundle = path.join(repoRoot, "examples/plugins/hello");
 const GREETING = "Hello, GraphLoom!\n";
 const TOKEN = "ghp_controller_e2e_secret";
 
@@ -225,36 +218,9 @@ describe("controller runs graphloom.github through the executor protocol", () =>
   });
 });
 
+/** A scratch repository with a hello task beside it and the hello bundle installed. */
 async function makeEnv(): Promise<{ taskPath: string; stateRoot: string }> {
-  // Rebuilding rewrites dist/ under test files that run in parallel; `npm test` builds it first.
-  if (!existsSync(path.join(repoRoot, "examples/plugins/hello/dist/index.js"))) {
-    await execFileAsync("npm", ["run", "build", "-w", "@graphloom/plugin-hello"], { cwd: repoRoot });
-  }
-  const taskDir = await mkdtemp(path.join(os.tmpdir(), "gl-gh-e2e-"));
-  cleanups.push(async () => {
-    await execFileAsync("git", ["worktree", "prune"], { cwd: taskDir }).catch(() => undefined);
-    await rm(taskDir, { recursive: true, force: true });
-  });
-  const repoPath = path.join(taskDir, "test-repo");
-  await mkdir(repoPath, { recursive: true });
-  await execFileAsync("git", ["init"], { cwd: repoPath });
-  await execFileAsync("git", ["config", "user.email", "test@example.com"], { cwd: repoPath });
-  await execFileAsync("git", ["config", "user.name", "Test"], { cwd: repoPath });
-  await writeFile(path.join(repoPath, "README.md"), "repo\n", "utf8");
-  await execFileAsync("git", ["add", "README.md"], { cwd: repoPath });
-  await execFileAsync("git", ["commit", "-m", "init"], { cwd: repoPath });
-  await mkdir(path.join(taskDir, "plugins"), { recursive: true });
-  await symlink(helloBundle, path.join(taskDir, "plugins/hello"));
-  const taskPath = path.join(taskDir, "task.yaml");
-  await writeFile(
-    taskPath,
-    `graph: hello
-repo: ./test-repo
-request: |
-  Create GREETING.txt containing exactly "Hello, GraphLoom!" followed by
-  one newline. Do not modify other files.
-`,
-    "utf8",
-  );
-  return { taskPath, stateRoot: path.join(taskDir, "state") };
+  const scope = createScope();
+  cleanups.push(() => scope.dispose());
+  return createTaskWorkspace(scope, { graph: "hello", request: HELLO_REQUEST });
 }
