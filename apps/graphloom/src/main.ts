@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * GraphLoom CLI: run | inspect | stop | resume | switch-model | delete | version
+ * GraphLoom CLI: run | inspect | stats | stop | resume | switch-model | delete | version
  */
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -10,6 +10,7 @@ import { createCliRunner } from "./cli-runner.js";
 import { piRepairDeps, resolveBundlePath, resolveBundlePathForResume } from "./repair-config.js";
 import { check, probe, recordScenario, rehearse, replay } from "./rehearsal.js";
 import { requireRunnerConfig } from "./runner-config.js";
+import { formatRunStats, loadRunStats } from "./stats.js";
 import {
   loadSupervisorConfig,
   parseModelRef,
@@ -61,6 +62,14 @@ async function main(): Promise<void> {
       stateRoot ? { stateRoot: path.resolve(stateRoot) } : undefined,
     );
     console.log(JSON.stringify(report, null, 2));
+    return;
+  }
+
+  if (cmd === "stats") {
+    const runRef = requireRunRef(args[1], "stats <stateDir|runId> [--state-root <dir>] [--json]");
+    const stateRoot = flagValue(args, "--state-root");
+    const stats = await loadRunStats(runRef, stateRoot ? path.resolve(stateRoot) : undefined);
+    console.log(args.includes("--json") ? JSON.stringify(stats, null, 2) : formatRunStats(stats));
     return;
   }
 
@@ -245,6 +254,7 @@ Usage:
   graphloom replay <stateDir|runId> [--state-root <dir>]
   graphloom probe <task.yaml> --contract <name> [--scenario <name>] [--commands <stub|run>] [--offline]
   graphloom inspect <stateDir|runId> [--state-root <dir>]
+  graphloom stats <stateDir|runId> [--state-root <dir>] [--json]
   graphloom stop <stateDir|runId> [--state-root <dir>]
   graphloom resume <stateDir|runId> [--state-root <dir>] [--update-plugin]
   graphloom switch-model <stateDir|runId> <provider/model> --reason <text> [--state-root <dir>]
@@ -274,6 +284,11 @@ instead, verifying the toolchain, build and tests too — slower, but the
 full verdict. A plugin whose validators need the same command id to behave
 differently per checkout (RED failing, GREEN passing) cannot be fully
 rehearsed in quick mode; run it with --commands run.
+
+Stats reports what a run used, per stage and in total: agent calls, jobs,
+budgets (used, left, the run's budget with operator raises, and intake's),
+generations, supervisor episodes and remedies. Runs saved before the usage
+ledger existed are estimated, and say so (docs/budgets.md).
 
 Delete removes a stopped or finished run's worktree, graphloom/<runId> branch, and
 state directory. --force also discards uncommitted changes and branch commits.

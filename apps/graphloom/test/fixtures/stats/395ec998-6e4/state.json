@@ -1,0 +1,3325 @@
+{
+ "runId": "395ec998-6e4",
+ "status": "succeeded",
+ "stopReason": "complete",
+ "blocker": "none",
+ "generation": 5,
+ "stateRevision": 455,
+ "activeVersion": "issue-fix@0.4.2",
+ "mode": "normal",
+ "current": {
+  "stageId": "review",
+  "attempt": 4
+ },
+ "budgets": {
+  "agentInvocations": 999677,
+  "jobs": 999936,
+  "decisions": 999936,
+  "corrections": 99996,
+  "waitMs": 604800000,
+  "activeMs": 2586554534,
+  "recoveryReserve": 50000
+ },
+ "agentInvocationsByStage": {
+  "fix": 91,
+  "review": 215
+ },
+ "stageAttempts": {
+  "fix": 4,
+  "review": 4
+ },
+ "dispatchesSinceReceipt": {
+  "review": {
+   "agent": 0,
+   "total": 2,
+   "since": "2026-10-18T06:04:37.772Z"
+  }
+ },
+ "evidenceSeq": 187,
+ "receiptSeq": 21,
+ "receipts": [
+  {
+   "id": "rcpt-1",
+   "stageId": "fix",
+   "requirementId": "decisions-recorded",
+   "valid": false
+  },
+  {
+   "id": "rcpt-2",
+   "stageId": "fix",
+   "requirementId": "reproduces",
+   "valid": false
+  },
+  {
+   "id": "rcpt-3",
+   "stageId": "fix",
+   "requirementId": "passes",
+   "valid": false
+  },
+  {
+   "id": "rcpt-4",
+   "stageId": "fix",
+   "requirementId": "builds",
+   "valid": false
+  },
+  {
+   "id": "rcpt-5",
+   "stageId": "fix",
+   "requirementId": "in-scope",
+   "valid": false
+  },
+  {
+   "id": "rcpt-6",
+   "stageId": "fix",
+   "requirementId": "decisions-recorded",
+   "valid": false
+  },
+  {
+   "id": "rcpt-7",
+   "stageId": "fix",
+   "requirementId": "reproduces",
+   "valid": false
+  },
+  {
+   "id": "rcpt-8",
+   "stageId": "fix",
+   "requirementId": "passes",
+   "valid": false
+  },
+  {
+   "id": "rcpt-9",
+   "stageId": "fix",
+   "requirementId": "builds",
+   "valid": false
+  },
+  {
+   "id": "rcpt-10",
+   "stageId": "fix",
+   "requirementId": "in-scope",
+   "valid": false
+  },
+  {
+   "id": "rcpt-11",
+   "stageId": "fix",
+   "requirementId": "decisions-recorded",
+   "valid": false
+  },
+  {
+   "id": "rcpt-12",
+   "stageId": "fix",
+   "requirementId": "reproduces",
+   "valid": false
+  },
+  {
+   "id": "rcpt-13",
+   "stageId": "fix",
+   "requirementId": "passes",
+   "valid": false
+  },
+  {
+   "id": "rcpt-14",
+   "stageId": "fix",
+   "requirementId": "builds",
+   "valid": false
+  },
+  {
+   "id": "rcpt-15",
+   "stageId": "fix",
+   "requirementId": "in-scope",
+   "valid": false
+  },
+  {
+   "id": "rcpt-16",
+   "stageId": "fix",
+   "requirementId": "decisions-recorded",
+   "valid": true
+  },
+  {
+   "id": "rcpt-17",
+   "stageId": "fix",
+   "requirementId": "reproduces",
+   "valid": true
+  },
+  {
+   "id": "rcpt-18",
+   "stageId": "fix",
+   "requirementId": "passes",
+   "valid": true
+  },
+  {
+   "id": "rcpt-19",
+   "stageId": "fix",
+   "requirementId": "builds",
+   "valid": true
+  },
+  {
+   "id": "rcpt-20",
+   "stageId": "fix",
+   "requirementId": "in-scope",
+   "valid": true
+  },
+  {
+   "id": "rcpt-21",
+   "stageId": "review",
+   "requirementId": "code-review",
+   "valid": true
+  }
+ ],
+ "evidence": [
+  {
+   "ref": "ev-g1-1-2c84086b",
+   "kind": "command",
+   "generation": 1,
+   "payload": {
+    "producer": {
+     "operationId": "env-0-cd6c6d6f",
+     "stageId": "fix",
+     "purpose": "diagnostic",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    },
+    "environment": {
+     "phase": "preflight"
+    }
+   }
+  },
+  {
+   "ref": "ev-g1-2-7b1d55b1",
+   "kind": "command",
+   "generation": 1,
+   "payload": {
+    "producer": {
+     "operationId": "env-0-cd6c6d6f",
+     "stageId": "fix",
+     "purpose": "diagnostic",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    },
+    "environment": {
+     "phase": "preflight"
+    }
+   }
+  },
+  {
+   "ref": "ev-g1-3-91bc32a0",
+   "kind": "command",
+   "generation": 1,
+   "payload": {
+    "producer": {
+     "operationId": "env-0-cd6c6d6f",
+     "stageId": "fix",
+     "purpose": "diagnostic",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    },
+    "environment": {
+     "phase": "preflight"
+    }
+   }
+  },
+  {
+   "ref": "ev-g1-4-0f533ac5",
+   "kind": "command",
+   "generation": 1,
+   "payload": {
+    "producer": {
+     "operationId": "env-0-cd6c6d6f",
+     "stageId": "fix",
+     "purpose": "diagnostic",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    },
+    "environment": {
+     "phase": "preflight"
+    }
+   }
+  },
+  {
+   "ref": "ev-g1-5-609b9ac9",
+   "kind": "command",
+   "generation": 1,
+   "payload": {
+    "producer": {
+     "operationId": "env-0-cd6c6d6f",
+     "stageId": "fix",
+     "purpose": "diagnostic",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    },
+    "environment": {
+     "phase": "preflight"
+    }
+   }
+  },
+  {
+   "ref": "ev-g1-6-8c6788f2",
+   "kind": "command",
+   "generation": 1,
+   "payload": {
+    "producer": {
+     "operationId": "env-0-cd6c6d6f",
+     "stageId": "fix",
+     "purpose": "diagnostic",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    },
+    "environment": {
+     "phase": "preflight"
+    }
+   }
+  },
+  {
+   "ref": "ev-g1-7-4787288c",
+   "kind": "command",
+   "generation": 1,
+   "payload": {
+    "producer": {
+     "operationId": "env-0-cd6c6d6f",
+     "stageId": "fix",
+     "purpose": "diagnostic",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    },
+    "environment": {
+     "phase": "preflight"
+    }
+   }
+  },
+  {
+   "ref": "ev-g1-8-53ae21fb",
+   "kind": "command",
+   "generation": 1,
+   "payload": {
+    "producer": {
+     "operationId": "env-0-cd6c6d6f",
+     "stageId": "fix",
+     "purpose": "diagnostic",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    },
+    "environment": {
+     "phase": "preflight"
+    }
+   }
+  },
+  {
+   "ref": "ev-g1-9-b94fe241",
+   "kind": "command",
+   "generation": 1,
+   "payload": {
+    "producer": {
+     "operationId": "env-0-cd6c6d6f",
+     "stageId": "fix",
+     "purpose": "diagnostic",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    },
+    "environment": {
+     "phase": "preflight"
+    }
+   }
+  },
+  {
+   "ref": "ev-g1-10-7ac31027",
+   "kind": "other",
+   "generation": 1,
+   "payload": {
+    "producer": {
+     "operationId": "op-3-80ac5a00",
+     "stageId": "fix",
+     "purpose": "diagnostic",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.github/get-issue"
+    }
+   }
+  },
+  {
+   "ref": "ev-g1-11-ec573943",
+   "kind": "other",
+   "generation": 1,
+   "payload": {
+    "producer": {
+     "operationId": "op-5-72e84fac",
+     "stageId": "fix",
+     "purpose": "diagnostic",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.github/list-issue-comments"
+    }
+   }
+  },
+  {
+   "ref": "ev-g1-12-65ff11e7",
+   "kind": "other",
+   "generation": 1,
+   "payload": {
+    "producer": {
+     "operationId": "op-7-20fdebaa",
+     "stageId": "fix",
+     "purpose": "diagnostic",
+     "readOnly": true,
+     "kind": "agent",
+     "executorId": "graphloom.coding-agent/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g1-13-89dc5c3a",
+   "kind": "other",
+   "generation": 1,
+   "payload": {
+    "producer": {
+     "operationId": "op-36-92469b48",
+     "stageId": "fix",
+     "purpose": "work",
+     "readOnly": false,
+     "kind": "agent",
+     "executorId": "graphloom.coding-agent/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g1-14-e92e8a84",
+   "kind": "command",
+   "generation": 1,
+   "payload": {
+    "producer": {
+     "operationId": "op-62-09b7e230",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g1-15-9dd2c29a",
+   "kind": "command",
+   "generation": 1,
+   "payload": {
+    "producer": {
+     "operationId": "op-62-09b7e230",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g1-16-1c8bffbc",
+   "kind": "command",
+   "generation": 1,
+   "payload": {
+    "producer": {
+     "operationId": "op-62-09b7e230",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g1-17-97e625d9",
+   "kind": "command",
+   "generation": 1,
+   "payload": {
+    "producer": {
+     "operationId": "op-62-09b7e230",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g1-18-91b4d6a2",
+   "kind": "command",
+   "generation": 1,
+   "payload": {
+    "producer": {
+     "operationId": "op-62-09b7e230",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g1-19-befefbba",
+   "kind": "command",
+   "generation": 1,
+   "payload": {
+    "producer": {
+     "operationId": "op-62-09b7e230",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g1-20-b3ab9395",
+   "kind": "command",
+   "generation": 1,
+   "payload": {
+    "producer": {
+     "operationId": "op-62-09b7e230",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g1-21-31627cc3",
+   "kind": "command",
+   "generation": 1,
+   "payload": {
+    "producer": {
+     "operationId": "op-62-09b7e230",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g1-22-33e30073",
+   "kind": "command",
+   "generation": 1,
+   "payload": {
+    "producer": {
+     "operationId": "op-62-09b7e230",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g1-23-f6b14ff5",
+   "kind": "command",
+   "generation": 1,
+   "payload": {
+    "producer": {
+     "operationId": "op-62-09b7e230",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g1-24-40d92acf",
+   "kind": "command",
+   "generation": 1,
+   "payload": {
+    "producer": {
+     "operationId": "op-62-09b7e230",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g1-25-2b261fe2",
+   "kind": "command",
+   "generation": 1,
+   "payload": {
+    "producer": {
+     "operationId": "op-62-09b7e230",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g1-26-0f35e126",
+   "kind": "command",
+   "generation": 1,
+   "payload": {
+    "producer": {
+     "operationId": "op-62-09b7e230",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g1-27-d0e88e7b",
+   "kind": "command",
+   "generation": 1,
+   "payload": {
+    "producer": {
+     "operationId": "op-64-b0550a5a",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g1-28-c230c4fb",
+   "kind": "command",
+   "generation": 1,
+   "payload": {
+    "producer": {
+     "operationId": "op-64-b0550a5a",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g1-29-968d47da",
+   "kind": "command",
+   "generation": 1,
+   "payload": {
+    "producer": {
+     "operationId": "op-64-b0550a5a",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g1-30-1336e438",
+   "kind": "command",
+   "generation": 1,
+   "payload": {
+    "producer": {
+     "operationId": "op-64-b0550a5a",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g1-31-5a655546",
+   "kind": "command",
+   "generation": 1,
+   "payload": {
+    "producer": {
+     "operationId": "op-64-b0550a5a",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g1-32-0b25e38e",
+   "kind": "command",
+   "generation": 1,
+   "payload": {
+    "producer": {
+     "operationId": "op-64-b0550a5a",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g1-33-00c884bf",
+   "kind": "command",
+   "generation": 1,
+   "payload": {
+    "producer": {
+     "operationId": "op-64-b0550a5a",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g1-34-4e253a71",
+   "kind": "command",
+   "generation": 1,
+   "payload": {
+    "producer": {
+     "operationId": "op-64-b0550a5a",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g1-35-d253191e",
+   "kind": "command",
+   "generation": 1,
+   "payload": {
+    "producer": {
+     "operationId": "op-64-b0550a5a",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g1-36-5bcbd100",
+   "kind": "command",
+   "generation": 1,
+   "payload": {
+    "producer": {
+     "operationId": "op-64-b0550a5a",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g1-37-3e4412fb",
+   "kind": "other",
+   "generation": 1,
+   "payload": {
+    "producer": {
+     "operationId": "op-66-a42bec91",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g1-38-33a793d5",
+   "kind": "other",
+   "generation": 1,
+   "payload": {
+    "producer": {
+     "operationId": "op-68-56ee6002",
+     "stageId": "fix",
+     "purpose": "work",
+     "readOnly": false,
+     "kind": "agent",
+     "executorId": "graphloom.coding-agent/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g1-39-954b90dd",
+   "kind": "command",
+   "generation": 1,
+   "payload": {
+    "producer": {
+     "operationId": "op-74-7e23aed2",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g1-40-96b33a4d",
+   "kind": "command",
+   "generation": 1,
+   "payload": {
+    "producer": {
+     "operationId": "op-74-7e23aed2",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g1-41-338e3cef",
+   "kind": "command",
+   "generation": 1,
+   "payload": {
+    "producer": {
+     "operationId": "op-74-7e23aed2",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g1-42-106cb8a1",
+   "kind": "command",
+   "generation": 1,
+   "payload": {
+    "producer": {
+     "operationId": "op-74-7e23aed2",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g1-43-261e81e4",
+   "kind": "command",
+   "generation": 1,
+   "payload": {
+    "producer": {
+     "operationId": "op-74-7e23aed2",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g1-44-817a696b",
+   "kind": "command",
+   "generation": 1,
+   "payload": {
+    "producer": {
+     "operationId": "op-74-7e23aed2",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g1-45-c4d98ee0",
+   "kind": "command",
+   "generation": 1,
+   "payload": {
+    "producer": {
+     "operationId": "op-74-7e23aed2",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g1-46-7906c7a6",
+   "kind": "command",
+   "generation": 1,
+   "payload": {
+    "producer": {
+     "operationId": "op-74-7e23aed2",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g1-47-2d409e03",
+   "kind": "command",
+   "generation": 1,
+   "payload": {
+    "producer": {
+     "operationId": "op-74-7e23aed2",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g1-48-8dbdd471",
+   "kind": "command",
+   "generation": 1,
+   "payload": {
+    "producer": {
+     "operationId": "op-74-7e23aed2",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g1-49-de62e15a",
+   "kind": "review",
+   "generation": 1,
+   "payload": {
+    "producer": {
+     "operationId": "op-79-1dc4c1b5",
+     "stageId": "review",
+     "purpose": "review",
+     "readOnly": true,
+     "kind": "agent",
+     "executorId": "graphloom.coding-agent/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g1-50-1bead376",
+   "kind": "other",
+   "generation": 1,
+   "payload": {
+    "producer": {
+     "operationId": "op-117-7759aad3",
+     "stageId": "review",
+     "purpose": "diagnostic",
+     "readOnly": true,
+     "kind": "agent",
+     "executorId": "graphloom.coding-agent/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g1-51-8c6e3eeb",
+   "kind": "command",
+   "generation": 1,
+   "payload": {
+    "producer": {
+     "operationId": "op-124-ee162852",
+     "stageId": "review",
+     "purpose": "diagnostic",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g1-52-2d6c3b86",
+   "kind": "review",
+   "generation": 1,
+   "payload": {
+    "producer": {
+     "operationId": "op-126-ece4f855",
+     "stageId": "review",
+     "purpose": "review",
+     "readOnly": true,
+     "kind": "agent",
+     "executorId": "graphloom.coding-agent/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g1-53-1cda5090",
+   "kind": "other",
+   "generation": 1,
+   "payload": {
+    "producer": {
+     "operationId": "op-151-87432e9e",
+     "stageId": "review",
+     "purpose": "diagnostic",
+     "readOnly": true,
+     "kind": "agent",
+     "executorId": "graphloom.coding-agent/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g1-54-45b18c29",
+   "kind": "command",
+   "generation": 1,
+   "payload": {
+    "producer": {
+     "operationId": "op-158-a698576f",
+     "stageId": "review",
+     "purpose": "diagnostic",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g1-55-c3d2263b",
+   "kind": "review",
+   "generation": 1,
+   "payload": {
+    "producer": {
+     "operationId": "op-160-bc1ed249",
+     "stageId": "review",
+     "purpose": "review",
+     "readOnly": true,
+     "kind": "agent",
+     "executorId": "graphloom.coding-agent/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g1-56-4b473788",
+   "kind": "other",
+   "generation": 1,
+   "payload": {
+    "producer": {
+     "operationId": "op-183-cc0f7d4c",
+     "stageId": "review",
+     "purpose": "diagnostic",
+     "readOnly": true,
+     "kind": "agent",
+     "executorId": "graphloom.coding-agent/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g1-57-07754738",
+   "kind": "command",
+   "generation": 1,
+   "payload": {
+    "producer": {
+     "operationId": "op-190-1b68b4b6",
+     "stageId": "review",
+     "purpose": "diagnostic",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g1-58-e6c728e0",
+   "kind": "review",
+   "generation": 1,
+   "payload": {
+    "producer": {
+     "operationId": "op-192-4d9dbedc",
+     "stageId": "review",
+     "purpose": "review",
+     "readOnly": true,
+     "kind": "agent",
+     "executorId": "graphloom.coding-agent/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g1-59-7994c31f",
+   "kind": "other",
+   "generation": 1,
+   "payload": {
+    "producer": {
+     "operationId": "op-211-78cd4d06",
+     "stageId": "review",
+     "purpose": "diagnostic",
+     "readOnly": true,
+     "kind": "agent",
+     "executorId": "graphloom.coding-agent/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g2-60-ea987dc2",
+   "kind": "command",
+   "generation": 2,
+   "payload": {
+    "producer": {
+     "operationId": "op-228-272d32a2",
+     "stageId": "fix",
+     "purpose": "diagnostic",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g2-61-99c5753a",
+   "kind": "other",
+   "generation": 2,
+   "payload": {
+    "producer": {
+     "operationId": "op-230-51d3f5bb",
+     "stageId": "fix",
+     "purpose": "work",
+     "readOnly": false,
+     "kind": "agent",
+     "executorId": "graphloom.coding-agent/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g2-62-817f489e",
+   "kind": "command",
+   "generation": 2,
+   "payload": {
+    "producer": {
+     "operationId": "op-248-3232f1a8",
+     "stageId": "fix",
+     "purpose": "diagnostic",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g2-63-e45ca21a",
+   "kind": "command",
+   "generation": 2,
+   "payload": {
+    "producer": {
+     "operationId": "op-250-c37b7185",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g2-64-14a87ddb",
+   "kind": "command",
+   "generation": 2,
+   "payload": {
+    "producer": {
+     "operationId": "op-250-c37b7185",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g2-65-79ce1a84",
+   "kind": "command",
+   "generation": 2,
+   "payload": {
+    "producer": {
+     "operationId": "op-250-c37b7185",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g2-66-c8168dee",
+   "kind": "command",
+   "generation": 2,
+   "payload": {
+    "producer": {
+     "operationId": "op-250-c37b7185",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g2-67-bc22f678",
+   "kind": "command",
+   "generation": 2,
+   "payload": {
+    "producer": {
+     "operationId": "op-250-c37b7185",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g2-68-bc3f95ee",
+   "kind": "command",
+   "generation": 2,
+   "payload": {
+    "producer": {
+     "operationId": "op-250-c37b7185",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g2-69-3c7291f7",
+   "kind": "command",
+   "generation": 2,
+   "payload": {
+    "producer": {
+     "operationId": "op-250-c37b7185",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g2-70-cad9e0c5",
+   "kind": "command",
+   "generation": 2,
+   "payload": {
+    "producer": {
+     "operationId": "op-250-c37b7185",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g2-71-b59cd131",
+   "kind": "command",
+   "generation": 2,
+   "payload": {
+    "producer": {
+     "operationId": "op-250-c37b7185",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g2-72-2f995802",
+   "kind": "command",
+   "generation": 2,
+   "payload": {
+    "producer": {
+     "operationId": "op-250-c37b7185",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g2-73-3ba21e8b",
+   "kind": "command",
+   "generation": 2,
+   "payload": {
+    "producer": {
+     "operationId": "op-250-c37b7185",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g2-74-3225e166",
+   "kind": "command",
+   "generation": 2,
+   "payload": {
+    "producer": {
+     "operationId": "op-250-c37b7185",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g2-75-506f137c",
+   "kind": "command",
+   "generation": 2,
+   "payload": {
+    "producer": {
+     "operationId": "op-250-c37b7185",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g2-76-8bb167d0",
+   "kind": "command",
+   "generation": 2,
+   "payload": {
+    "producer": {
+     "operationId": "op-252-47848069",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g2-77-12630e02",
+   "kind": "command",
+   "generation": 2,
+   "payload": {
+    "producer": {
+     "operationId": "op-252-47848069",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g2-78-b67d6092",
+   "kind": "command",
+   "generation": 2,
+   "payload": {
+    "producer": {
+     "operationId": "op-252-47848069",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g2-79-9d4dc004",
+   "kind": "command",
+   "generation": 2,
+   "payload": {
+    "producer": {
+     "operationId": "op-252-47848069",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g2-80-2f6cd425",
+   "kind": "command",
+   "generation": 2,
+   "payload": {
+    "producer": {
+     "operationId": "op-252-47848069",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g2-81-2b675b2b",
+   "kind": "command",
+   "generation": 2,
+   "payload": {
+    "producer": {
+     "operationId": "op-252-47848069",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g2-82-6f06ef3a",
+   "kind": "command",
+   "generation": 2,
+   "payload": {
+    "producer": {
+     "operationId": "op-252-47848069",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g2-83-2de6f3b4",
+   "kind": "command",
+   "generation": 2,
+   "payload": {
+    "producer": {
+     "operationId": "op-252-47848069",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g2-84-ce2aa93f",
+   "kind": "command",
+   "generation": 2,
+   "payload": {
+    "producer": {
+     "operationId": "op-252-47848069",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g2-85-91915ed6",
+   "kind": "command",
+   "generation": 2,
+   "payload": {
+    "producer": {
+     "operationId": "op-252-47848069",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g2-86-4918fcb7",
+   "kind": "command",
+   "generation": 2,
+   "payload": {
+    "producer": {
+     "operationId": "op-254-d5d05ff3",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g2-87-df4e6522",
+   "kind": "command",
+   "generation": 2,
+   "payload": {
+    "producer": {
+     "operationId": "op-254-d5d05ff3",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g2-88-b30cd6cd",
+   "kind": "command",
+   "generation": 2,
+   "payload": {
+    "producer": {
+     "operationId": "op-254-d5d05ff3",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g2-89-9fd72b58",
+   "kind": "command",
+   "generation": 2,
+   "payload": {
+    "producer": {
+     "operationId": "op-254-d5d05ff3",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g2-90-c05b4360",
+   "kind": "command",
+   "generation": 2,
+   "payload": {
+    "producer": {
+     "operationId": "op-254-d5d05ff3",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g2-91-dc00d29c",
+   "kind": "command",
+   "generation": 2,
+   "payload": {
+    "producer": {
+     "operationId": "op-254-d5d05ff3",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g2-92-40dda297",
+   "kind": "command",
+   "generation": 2,
+   "payload": {
+    "producer": {
+     "operationId": "op-254-d5d05ff3",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g2-93-fd27fd97",
+   "kind": "command",
+   "generation": 2,
+   "payload": {
+    "producer": {
+     "operationId": "op-254-d5d05ff3",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g2-94-04b2d0cd",
+   "kind": "command",
+   "generation": 2,
+   "payload": {
+    "producer": {
+     "operationId": "op-254-d5d05ff3",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g2-95-94d183d1",
+   "kind": "command",
+   "generation": 2,
+   "payload": {
+    "producer": {
+     "operationId": "op-254-d5d05ff3",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g2-96-1adbdc5f",
+   "kind": "command",
+   "generation": 2,
+   "payload": {
+    "producer": {
+     "operationId": "op-259-380ba02a",
+     "stageId": "review",
+     "purpose": "diagnostic",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g2-97-751e4900",
+   "kind": "review",
+   "generation": 2,
+   "payload": {
+    "producer": {
+     "operationId": "op-261-9cb2a41b",
+     "stageId": "review",
+     "purpose": "review",
+     "readOnly": true,
+     "kind": "agent",
+     "executorId": "graphloom.coding-agent/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g3-98-8ab2b7dc",
+   "kind": "command",
+   "generation": 3,
+   "payload": {
+    "producer": {
+     "operationId": "op-295-1576859b",
+     "stageId": "fix",
+     "purpose": "diagnostic",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g3-99-3e3c1aae",
+   "kind": "other",
+   "generation": 3,
+   "payload": {
+    "producer": {
+     "operationId": "op-297-c9e3a363",
+     "stageId": "fix",
+     "purpose": "work",
+     "readOnly": false,
+     "kind": "agent",
+     "executorId": "graphloom.coding-agent/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g3-100-669a5c56",
+   "kind": "command",
+   "generation": 3,
+   "payload": {
+    "producer": {
+     "operationId": "op-308-ad877877",
+     "stageId": "fix",
+     "purpose": "diagnostic",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g3-101-feeefed2",
+   "kind": "command",
+   "generation": 3,
+   "payload": {
+    "producer": {
+     "operationId": "op-310-656dc25c",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g3-102-38a64a2e",
+   "kind": "command",
+   "generation": 3,
+   "payload": {
+    "producer": {
+     "operationId": "op-310-656dc25c",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g3-103-5dec8a58",
+   "kind": "command",
+   "generation": 3,
+   "payload": {
+    "producer": {
+     "operationId": "op-310-656dc25c",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g3-104-c7e46d02",
+   "kind": "command",
+   "generation": 3,
+   "payload": {
+    "producer": {
+     "operationId": "op-310-656dc25c",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g3-105-0e2261c7",
+   "kind": "command",
+   "generation": 3,
+   "payload": {
+    "producer": {
+     "operationId": "op-310-656dc25c",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g3-106-74e00214",
+   "kind": "command",
+   "generation": 3,
+   "payload": {
+    "producer": {
+     "operationId": "op-310-656dc25c",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g3-107-55232866",
+   "kind": "command",
+   "generation": 3,
+   "payload": {
+    "producer": {
+     "operationId": "op-310-656dc25c",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g3-108-57e86bef",
+   "kind": "command",
+   "generation": 3,
+   "payload": {
+    "producer": {
+     "operationId": "op-310-656dc25c",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g3-109-997c3722",
+   "kind": "command",
+   "generation": 3,
+   "payload": {
+    "producer": {
+     "operationId": "op-310-656dc25c",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g3-110-bb3b3370",
+   "kind": "command",
+   "generation": 3,
+   "payload": {
+    "producer": {
+     "operationId": "op-310-656dc25c",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g3-111-f52a0cc0",
+   "kind": "command",
+   "generation": 3,
+   "payload": {
+    "producer": {
+     "operationId": "op-310-656dc25c",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g3-112-a015a536",
+   "kind": "command",
+   "generation": 3,
+   "payload": {
+    "producer": {
+     "operationId": "op-310-656dc25c",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g3-113-6bd6b874",
+   "kind": "command",
+   "generation": 3,
+   "payload": {
+    "producer": {
+     "operationId": "op-310-656dc25c",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g3-114-51de546b",
+   "kind": "command",
+   "generation": 3,
+   "payload": {
+    "producer": {
+     "operationId": "op-312-2063931a",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g3-115-8fc9810f",
+   "kind": "command",
+   "generation": 3,
+   "payload": {
+    "producer": {
+     "operationId": "op-312-2063931a",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g3-116-ad99998f",
+   "kind": "command",
+   "generation": 3,
+   "payload": {
+    "producer": {
+     "operationId": "op-312-2063931a",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g3-117-8133dcca",
+   "kind": "command",
+   "generation": 3,
+   "payload": {
+    "producer": {
+     "operationId": "op-312-2063931a",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g3-118-bee79002",
+   "kind": "command",
+   "generation": 3,
+   "payload": {
+    "producer": {
+     "operationId": "op-312-2063931a",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g3-119-e5e4a284",
+   "kind": "command",
+   "generation": 3,
+   "payload": {
+    "producer": {
+     "operationId": "op-312-2063931a",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g3-120-52529f6a",
+   "kind": "command",
+   "generation": 3,
+   "payload": {
+    "producer": {
+     "operationId": "op-312-2063931a",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g3-121-84e4572e",
+   "kind": "command",
+   "generation": 3,
+   "payload": {
+    "producer": {
+     "operationId": "op-312-2063931a",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g3-122-bc70dc6a",
+   "kind": "command",
+   "generation": 3,
+   "payload": {
+    "producer": {
+     "operationId": "op-312-2063931a",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g3-123-71d01bd7",
+   "kind": "command",
+   "generation": 3,
+   "payload": {
+    "producer": {
+     "operationId": "op-312-2063931a",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g3-124-8f0d980d",
+   "kind": "command",
+   "generation": 3,
+   "payload": {
+    "producer": {
+     "operationId": "op-314-347480cb",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g3-125-c0cc5fb5",
+   "kind": "command",
+   "generation": 3,
+   "payload": {
+    "producer": {
+     "operationId": "op-314-347480cb",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g3-126-fdca6d97",
+   "kind": "command",
+   "generation": 3,
+   "payload": {
+    "producer": {
+     "operationId": "op-314-347480cb",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g3-127-dceb82e2",
+   "kind": "command",
+   "generation": 3,
+   "payload": {
+    "producer": {
+     "operationId": "op-314-347480cb",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g3-128-1e523d63",
+   "kind": "command",
+   "generation": 3,
+   "payload": {
+    "producer": {
+     "operationId": "op-314-347480cb",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g3-129-1b386dbc",
+   "kind": "command",
+   "generation": 3,
+   "payload": {
+    "producer": {
+     "operationId": "op-314-347480cb",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g3-130-8b7705ef",
+   "kind": "command",
+   "generation": 3,
+   "payload": {
+    "producer": {
+     "operationId": "op-314-347480cb",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g3-131-6d74b4f9",
+   "kind": "command",
+   "generation": 3,
+   "payload": {
+    "producer": {
+     "operationId": "op-314-347480cb",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g3-132-0d5e6827",
+   "kind": "command",
+   "generation": 3,
+   "payload": {
+    "producer": {
+     "operationId": "op-314-347480cb",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g3-133-0614cbbd",
+   "kind": "command",
+   "generation": 3,
+   "payload": {
+    "producer": {
+     "operationId": "op-314-347480cb",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g3-134-09861b10",
+   "kind": "command",
+   "generation": 3,
+   "payload": {
+    "producer": {
+     "operationId": "op-319-d0703b80",
+     "stageId": "review",
+     "purpose": "diagnostic",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g3-135-af777dd1",
+   "kind": "review",
+   "generation": 3,
+   "payload": {
+    "producer": {
+     "operationId": "op-321-e64c7e05",
+     "stageId": "review",
+     "purpose": "review",
+     "readOnly": true,
+     "kind": "agent",
+     "executorId": "graphloom.coding-agent/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g3-136-d52ee48f",
+   "kind": "other",
+   "generation": 3,
+   "payload": {
+    "producer": {
+     "operationId": "op-351-711d74c0",
+     "stageId": "review",
+     "purpose": "diagnostic",
+     "readOnly": true,
+     "kind": "agent",
+     "executorId": "graphloom.coding-agent/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g3-137-dd10e9f7",
+   "kind": "command",
+   "generation": 3,
+   "payload": {
+    "producer": {
+     "operationId": "op-357-1fef5184",
+     "stageId": "review",
+     "purpose": "diagnostic",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g3-138-c5eb75c5",
+   "kind": "review",
+   "generation": 3,
+   "payload": {
+    "producer": {
+     "operationId": "op-359-51538d48",
+     "stageId": "review",
+     "purpose": "review",
+     "readOnly": true,
+     "kind": "agent",
+     "executorId": "graphloom.coding-agent/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g4-139-fe0ed221",
+   "kind": "command",
+   "generation": 4,
+   "payload": {
+    "producer": {
+     "operationId": "op-395-dcdf3244",
+     "stageId": "fix",
+     "purpose": "diagnostic",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g4-140-317a242d",
+   "kind": "other",
+   "generation": 4,
+   "payload": {
+    "producer": {
+     "operationId": "op-397-9a7f9692",
+     "stageId": "fix",
+     "purpose": "work",
+     "readOnly": false,
+     "kind": "agent",
+     "executorId": "graphloom.coding-agent/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g4-141-2478dabf",
+   "kind": "command",
+   "generation": 4,
+   "payload": {
+    "producer": {
+     "operationId": "op-410-6744d57f",
+     "stageId": "fix",
+     "purpose": "diagnostic",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g4-142-9559b696",
+   "kind": "command",
+   "generation": 4,
+   "payload": {
+    "producer": {
+     "operationId": "op-412-536f524a",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g4-143-1ab8b05c",
+   "kind": "command",
+   "generation": 4,
+   "payload": {
+    "producer": {
+     "operationId": "op-412-536f524a",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g4-144-924ad3e7",
+   "kind": "command",
+   "generation": 4,
+   "payload": {
+    "producer": {
+     "operationId": "op-412-536f524a",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g4-145-f743c489",
+   "kind": "command",
+   "generation": 4,
+   "payload": {
+    "producer": {
+     "operationId": "op-412-536f524a",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g4-146-f1392976",
+   "kind": "command",
+   "generation": 4,
+   "payload": {
+    "producer": {
+     "operationId": "op-412-536f524a",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g4-147-129ebbf8",
+   "kind": "command",
+   "generation": 4,
+   "payload": {
+    "producer": {
+     "operationId": "op-412-536f524a",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g4-148-846d853e",
+   "kind": "command",
+   "generation": 4,
+   "payload": {
+    "producer": {
+     "operationId": "op-412-536f524a",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g4-149-bdfcd837",
+   "kind": "command",
+   "generation": 4,
+   "payload": {
+    "producer": {
+     "operationId": "op-412-536f524a",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g4-150-eb8b6f00",
+   "kind": "command",
+   "generation": 4,
+   "payload": {
+    "producer": {
+     "operationId": "op-412-536f524a",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g4-151-eff41ec5",
+   "kind": "command",
+   "generation": 4,
+   "payload": {
+    "producer": {
+     "operationId": "op-412-536f524a",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g4-152-e116ec7f",
+   "kind": "command",
+   "generation": 4,
+   "payload": {
+    "producer": {
+     "operationId": "op-412-536f524a",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g4-153-e3982669",
+   "kind": "command",
+   "generation": 4,
+   "payload": {
+    "producer": {
+     "operationId": "op-412-536f524a",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g4-154-bfb6964c",
+   "kind": "command",
+   "generation": 4,
+   "payload": {
+    "producer": {
+     "operationId": "op-412-536f524a",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g4-155-c086cc40",
+   "kind": "command",
+   "generation": 4,
+   "payload": {
+    "producer": {
+     "operationId": "op-414-e57fdc45",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g4-156-0a7cc379",
+   "kind": "command",
+   "generation": 4,
+   "payload": {
+    "producer": {
+     "operationId": "op-414-e57fdc45",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g4-157-75b1d266",
+   "kind": "command",
+   "generation": 4,
+   "payload": {
+    "producer": {
+     "operationId": "op-414-e57fdc45",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g4-158-aaa66f05",
+   "kind": "command",
+   "generation": 4,
+   "payload": {
+    "producer": {
+     "operationId": "op-414-e57fdc45",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g4-159-76b22f6c",
+   "kind": "command",
+   "generation": 4,
+   "payload": {
+    "producer": {
+     "operationId": "op-414-e57fdc45",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g4-160-81cf4e82",
+   "kind": "command",
+   "generation": 4,
+   "payload": {
+    "producer": {
+     "operationId": "op-414-e57fdc45",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g4-161-e0744ffa",
+   "kind": "command",
+   "generation": 4,
+   "payload": {
+    "producer": {
+     "operationId": "op-414-e57fdc45",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g4-162-4805d73b",
+   "kind": "command",
+   "generation": 4,
+   "payload": {
+    "producer": {
+     "operationId": "op-414-e57fdc45",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g4-163-219d30e3",
+   "kind": "command",
+   "generation": 4,
+   "payload": {
+    "producer": {
+     "operationId": "op-414-e57fdc45",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g4-164-82305ed6",
+   "kind": "command",
+   "generation": 4,
+   "payload": {
+    "producer": {
+     "operationId": "op-414-e57fdc45",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g4-165-72d0d380",
+   "kind": "command",
+   "generation": 4,
+   "payload": {
+    "producer": {
+     "operationId": "op-416-44e09eec",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g4-166-10c23757",
+   "kind": "command",
+   "generation": 4,
+   "payload": {
+    "producer": {
+     "operationId": "op-416-44e09eec",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g4-167-e8fc97ec",
+   "kind": "command",
+   "generation": 4,
+   "payload": {
+    "producer": {
+     "operationId": "op-416-44e09eec",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g4-168-1a316398",
+   "kind": "command",
+   "generation": 4,
+   "payload": {
+    "producer": {
+     "operationId": "op-416-44e09eec",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g4-169-51020b10",
+   "kind": "command",
+   "generation": 4,
+   "payload": {
+    "producer": {
+     "operationId": "op-416-44e09eec",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g4-170-f5f24ffa",
+   "kind": "command",
+   "generation": 4,
+   "payload": {
+    "producer": {
+     "operationId": "op-416-44e09eec",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g4-171-15553163",
+   "kind": "command",
+   "generation": 4,
+   "payload": {
+    "producer": {
+     "operationId": "op-416-44e09eec",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g4-172-c5857e47",
+   "kind": "command",
+   "generation": 4,
+   "payload": {
+    "producer": {
+     "operationId": "op-416-44e09eec",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g4-173-7d9a5176",
+   "kind": "command",
+   "generation": 4,
+   "payload": {
+    "producer": {
+     "operationId": "op-416-44e09eec",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g4-174-3f8e152f",
+   "kind": "command",
+   "generation": 4,
+   "payload": {
+    "producer": {
+     "operationId": "op-416-44e09eec",
+     "stageId": "fix",
+     "purpose": "check",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g4-175-ecc145c9",
+   "kind": "command",
+   "generation": 4,
+   "payload": {
+    "producer": {
+     "operationId": "op-421-6cc05096",
+     "stageId": "review",
+     "purpose": "diagnostic",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g4-176-8a538671",
+   "kind": "review",
+   "generation": 4,
+   "payload": {
+    "producer": {
+     "operationId": "op-423-b4754147",
+     "stageId": "review",
+     "purpose": "review",
+     "readOnly": true,
+     "kind": "agent",
+     "executorId": "graphloom.coding-agent/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g4-177-36c215be",
+   "kind": "command",
+   "generation": 4,
+   "payload": {
+    "producer": {
+     "operationId": "op-448-c8e4e0a3",
+     "stageId": "review",
+     "purpose": "diagnostic",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g4-178-335769bf",
+   "kind": "command",
+   "generation": 4,
+   "payload": {
+    "producer": {
+     "operationId": "op-450-c6f13151",
+     "stageId": "review",
+     "purpose": "diagnostic",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    }
+   }
+  },
+  {
+   "ref": "ev-g5-179-4743d4dc",
+   "kind": "command",
+   "generation": 5,
+   "payload": {
+    "producer": {
+     "operationId": "env-452-20b5abc7",
+     "stageId": "review",
+     "purpose": "diagnostic",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    },
+    "environment": {
+     "phase": "preflight"
+    }
+   }
+  },
+  {
+   "ref": "ev-g5-180-7e759757",
+   "kind": "command",
+   "generation": 5,
+   "payload": {
+    "producer": {
+     "operationId": "env-452-20b5abc7",
+     "stageId": "review",
+     "purpose": "diagnostic",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    },
+    "environment": {
+     "phase": "preflight"
+    }
+   }
+  },
+  {
+   "ref": "ev-g5-181-d8ee6f17",
+   "kind": "command",
+   "generation": 5,
+   "payload": {
+    "producer": {
+     "operationId": "env-452-20b5abc7",
+     "stageId": "review",
+     "purpose": "diagnostic",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    },
+    "environment": {
+     "phase": "preflight"
+    }
+   }
+  },
+  {
+   "ref": "ev-g5-182-a04fb499",
+   "kind": "command",
+   "generation": 5,
+   "payload": {
+    "producer": {
+     "operationId": "env-452-20b5abc7",
+     "stageId": "review",
+     "purpose": "diagnostic",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    },
+    "environment": {
+     "phase": "preflight"
+    }
+   }
+  },
+  {
+   "ref": "ev-g5-183-74f2a559",
+   "kind": "command",
+   "generation": 5,
+   "payload": {
+    "producer": {
+     "operationId": "env-452-20b5abc7",
+     "stageId": "review",
+     "purpose": "diagnostic",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    },
+    "environment": {
+     "phase": "preflight"
+    }
+   }
+  },
+  {
+   "ref": "ev-g5-184-3d166654",
+   "kind": "command",
+   "generation": 5,
+   "payload": {
+    "producer": {
+     "operationId": "env-452-20b5abc7",
+     "stageId": "review",
+     "purpose": "diagnostic",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    },
+    "environment": {
+     "phase": "preflight"
+    }
+   }
+  },
+  {
+   "ref": "ev-g5-185-1d73f1a4",
+   "kind": "command",
+   "generation": 5,
+   "payload": {
+    "producer": {
+     "operationId": "env-452-20b5abc7",
+     "stageId": "review",
+     "purpose": "diagnostic",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    },
+    "environment": {
+     "phase": "preflight"
+    }
+   }
+  },
+  {
+   "ref": "ev-g5-186-43cf45c0",
+   "kind": "command",
+   "generation": 5,
+   "payload": {
+    "producer": {
+     "operationId": "env-452-20b5abc7",
+     "stageId": "review",
+     "purpose": "diagnostic",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    },
+    "environment": {
+     "phase": "preflight"
+    }
+   }
+  },
+  {
+   "ref": "ev-g5-187-77006c1e",
+   "kind": "command",
+   "generation": 5,
+   "payload": {
+    "producer": {
+     "operationId": "env-452-20b5abc7",
+     "stageId": "review",
+     "purpose": "diagnostic",
+     "readOnly": true,
+     "kind": "command",
+     "executorId": "graphloom.command/run"
+    },
+    "environment": {
+     "phase": "preflight"
+    }
+   }
+  }
+ ],
+ "outstanding": [],
+ "definition": {
+  "graphId": "issue-fix",
+  "version": "0.4.2",
+  "stages": [
+   {
+    "id": "fix",
+    "name": "Fix",
+    "requirementIds": [
+     "decisions-recorded",
+     "reproduces",
+     "passes",
+     "builds",
+     "in-scope"
+    ]
+   },
+   {
+    "id": "review",
+    "name": "Review",
+    "requirementIds": [
+     "code-review"
+    ]
+   }
+  ],
+  "requirements": [],
+  "defaultValidators": []
+ },
+ "validatorBindings": [],
+ "intake": {
+  "task": {
+   "graph": "issue-fix",
+   "repo": ".",
+   "request": "Fix hanahmily/graphloom#122.",
+   "budgets": {
+    "agentInvocations": 1000000,
+    "jobs": 1000000,
+    "decisions": 1000000,
+    "corrections": 100000,
+    "waitMs": 604800000,
+    "activeMs": 2592000000
+   }
+  },
+  "bundle": {
+   "graphId": "issue-fix",
+   "version": "0.4.2",
+   "sdkProtocol": 1
+  },
+  "grants": {
+   "sourceRepair": false,
+   "validatorSubstitution": false
+  },
+  "budgets": {
+   "agentInvocations": 1000000,
+   "jobs": 1000000,
+   "decisions": 1000000,
+   "corrections": 100000,
+   "waitMs": 604800000,
+   "activeMs": 2592000000,
+   "recoveryReserve": 50000
+  }
+ },
+ "agentSessions": [
+  {
+   "operationId": "op-7-20fdebaa",
+   "stageId": "fix",
+   "attempt": 1,
+   "generation": 1,
+   "dispatchKey": "implementer",
+   "executorId": "graphloom.coding-agent/run",
+   "status": "ok",
+   "settledAt": "2026-10-18T04:36:19.486Z"
+  },
+  {
+   "operationId": "op-36-92469b48",
+   "stageId": "fix",
+   "attempt": 1,
+   "generation": 1,
+   "dispatchKey": "implementer",
+   "executorId": "graphloom.coding-agent/run",
+   "status": "ok",
+   "settledAt": "2026-10-18T04:46:48.253Z"
+  },
+  {
+   "operationId": "op-68-56ee6002",
+   "stageId": "fix",
+   "attempt": 1,
+   "generation": 1,
+   "dispatchKey": "implementer",
+   "executorId": "graphloom.coding-agent/run",
+   "status": "ok",
+   "settledAt": "2026-10-18T04:53:22.397Z"
+  },
+  {
+   "operationId": "op-117-7759aad3",
+   "stageId": "review",
+   "attempt": 1,
+   "generation": 1,
+   "dispatchKey": "diagnostic:graphloom.coding-agent/run",
+   "executorId": "graphloom.coding-agent/run",
+   "status": "ok",
+   "settledAt": "2026-10-18T04:58:47.129Z"
+  },
+  {
+   "operationId": "op-151-87432e9e",
+   "stageId": "review",
+   "attempt": 1,
+   "generation": 1,
+   "dispatchKey": "diagnostic:graphloom.coding-agent/run",
+   "executorId": "graphloom.coding-agent/run",
+   "status": "ok",
+   "settledAt": "2026-10-18T05:01:58.642Z"
+  },
+  {
+   "operationId": "op-183-cc0f7d4c",
+   "stageId": "review",
+   "attempt": 1,
+   "generation": 1,
+   "dispatchKey": "diagnostic:graphloom.coding-agent/run",
+   "executorId": "graphloom.coding-agent/run",
+   "status": "ok",
+   "settledAt": "2026-10-18T05:05:30.810Z"
+  },
+  {
+   "operationId": "op-211-78cd4d06",
+   "stageId": "review",
+   "attempt": 1,
+   "generation": 1,
+   "dispatchKey": "diagnostic:graphloom.coding-agent/run",
+   "executorId": "graphloom.coding-agent/run",
+   "status": "ok",
+   "settledAt": "2026-10-18T05:08:33.473Z"
+  },
+  {
+   "operationId": "op-230-51d3f5bb",
+   "stageId": "fix",
+   "attempt": 2,
+   "generation": 2,
+   "dispatchKey": "implementer",
+   "executorId": "graphloom.coding-agent/run",
+   "status": "ok",
+   "settledAt": "2026-10-18T05:18:27.688Z"
+  },
+  {
+   "operationId": "op-297-c9e3a363",
+   "stageId": "fix",
+   "attempt": 3,
+   "generation": 3,
+   "dispatchKey": "implementer",
+   "executorId": "graphloom.coding-agent/run",
+   "status": "ok",
+   "settledAt": "2026-10-18T05:35:37.257Z"
+  },
+  {
+   "operationId": "op-351-711d74c0",
+   "stageId": "review",
+   "attempt": 3,
+   "generation": 3,
+   "dispatchKey": "diagnostic:graphloom.coding-agent/run",
+   "executorId": "graphloom.coding-agent/run",
+   "status": "ok",
+   "settledAt": "2026-10-18T05:46:28.486Z"
+  },
+  {
+   "operationId": "op-397-9a7f9692",
+   "stageId": "fix",
+   "attempt": 4,
+   "generation": 4,
+   "dispatchKey": "implementer",
+   "executorId": "graphloom.coding-agent/run",
+   "status": "ok",
+   "settledAt": "2026-10-18T05:55:59.144Z"
+  }
+ ],
+ "versionHistory": [
+  {
+   "activeVersion": "issue-fix@0.4.2",
+   "generation": 1,
+   "reason": "intake",
+   "at": "2026-10-18T04:34:24.311Z"
+  },
+  {
+   "activeVersion": "issue-fix@0.4.2",
+   "generation": 2,
+   "reason": "reenter",
+   "at": "2026-10-18T05:09:10.834Z"
+  },
+  {
+   "activeVersion": "issue-fix@0.4.2",
+   "generation": 3,
+   "reason": "reenter",
+   "at": "2026-10-18T05:29:24.392Z"
+  },
+  {
+   "activeVersion": "issue-fix@0.4.2",
+   "generation": 4,
+   "reason": "reenter",
+   "at": "2026-10-18T05:49:38.713Z"
+  },
+  {
+   "activeVersion": "issue-fix@0.4.2",
+   "generation": 5,
+   "reason": "resume",
+   "at": "2026-10-18T11:43:22.301Z"
+  }
+ ],
+ "remedies": [],
+ "supervisorMark": {
+  "action": "return",
+  "episodeId": "ep-f9d5f791",
+  "triggerCode": "supervise",
+  "stageId": "fix",
+  "attempt": 4,
+  "generation": 4
+ },
+ "probeLog": {
+  "episodeId": "ep-9734a947",
+  "ids": [],
+  "attempts": 0,
+  "results": {}
+ },
+ "caseFile": {
+  "facts": [
+   {
+    "id": "fact-1",
+    "episodeId": "ep-9734a947",
+    "since": 1
+   },
+   {
+    "id": "fact-2",
+    "episodeId": "ep-9734a947",
+    "since": 1
+   },
+   {
+    "id": "fact-3",
+    "episodeId": "ep-6f981dea",
+    "since": 2
+   },
+   {
+    "id": "fact-4",
+    "episodeId": "ep-6f981dea",
+    "since": 2
+   },
+   {
+    "id": "fact-5",
+    "episodeId": "ep-6f981dea",
+    "since": 2
+   },
+   {
+    "id": "fact-6",
+    "episodeId": "ep-f9d5f791",
+    "since": 3
+   },
+   {
+    "id": "fact-7",
+    "episodeId": "ep-f9d5f791",
+    "since": 3
+   },
+   {
+    "id": "fact-8",
+    "episodeId": "ep-f9d5f791",
+    "since": 3
+   },
+   {
+    "id": "fact-9",
+    "episodeId": "ep-f9d5f791",
+    "since": 3
+   }
+  ],
+  "refuted": [],
+  "attempts": [
+   {
+    "episodeId": "ep-9734a947"
+   },
+   {
+    "episodeId": "ep-9734a947"
+   },
+   {
+    "episodeId": "ep-6f981dea"
+   },
+   {
+    "episodeId": "ep-6f981dea"
+   },
+   {
+    "episodeId": "ep-f9d5f791"
+   },
+   {
+    "episodeId": "ep-f9d5f791"
+   }
+  ],
+  "open": []
+ },
+ "worktreePath": "/fixture/worktree",
+ "worktreeBranch": "graphloom/395ec998-6e4",
+ "artifactDir": "/fixture/state/artifacts",
+ "stateDir": "/fixture/state",
+ "sourceDirtyBefore": []
+}
