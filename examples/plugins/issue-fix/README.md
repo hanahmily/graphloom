@@ -27,8 +27,10 @@ and the [issues file](../../../docs/design-issue-fix-graph.md#the-issues-file).
 | [`profiles/graphloom.json`](profiles/graphloom.json) | hanahmily/graphloom (this repository) | `vitest` | `npm run typecheck`, `npm run build`, `npm test` | none |
 
 The banyandb profile reproduces banyandb-fix's requirements, statements,
-environment checks, prompts and commands. The issues file is the one
-difference; banyandb-fix does not have it. See banyandb-fix's
+environment checks, prompts and commands, with two differences: the issues
+file, which banyandb-fix does not have, and, since 0.5.0, a code review that
+covers every changed file (ocr's exclusions put back, `.graphloom/` left out)
+and then checks the change as a whole across files. See banyandb-fix's
 README for its environment table and runner configuration; they apply as they
 are.
 

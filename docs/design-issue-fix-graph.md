@@ -5,6 +5,8 @@ Status: implemented, 2026-10-15, as
 been made with it yet; its banyandb profile reproduces
 [banyandb-fix](design-banyandb-fix-graph.md), whose live runs it inherits.
 Version 0.4.0, 2026-10-17, adds the [issues file](#the-issues-file).
+Version 0.5.0, 2026-10-19, has the code reviewer review [every changed
+file and the change as a whole](#every-changed-file-and-the-change-as-a-whole).
 
 ## Purpose
 
@@ -76,7 +78,10 @@ same prompts and commands; a test compares them with banyandb-fix's own
 build. Only the graph id, version and private-state schema differ, and the
 [issues file](#the-issues-file), which banyandb-fix does not have. The file
 adds to the review and implementer prompts and to the pull request only
-through arguments the comparison leaves out.
+through arguments the comparison leaves out. Since 0.5.0 the code review
+assignment differs on purpose: it [reviews every changed
+file](#every-changed-file-and-the-change-as-a-whole) and then the change as
+a whole; the comparison checks that this is the only difference.
 
 ### Regression runners
 
@@ -170,6 +175,32 @@ gives the full rules.
 Medium and low comments are unchanged. The requirement statement, the
 validator binding and the private state are unchanged, so a running run can
 adopt the rule with `resume --update-plugin`.
+
+### Every changed file, and the change as a whole
+
+Since 0.5.0 the code reviewer reviews every changed file, under every
+profile. After `ocr delegate preview`, it adds back every file preview
+excluded, whatever the reason: tests, docs, fixtures, generated files. It
+leaves out only `.graphloom/`, the run's own bookkeeping. It then runs
+`ocr delegate rule` on the whole list. Before 0.5.0 only the profile's test
+files went back on the list. In #143, ocr's default selection reviewed 8 of
+16 changed files; the tests, a doc and the fixtures were left out.
+
+In a discovery round the same pass, after the per-file review, checks the
+change as a whole, across files:
+
+- data passed between modules;
+- promises one file makes that another breaks;
+- budget and limit invariants on every path, resume, retry and replay
+  included;
+- changed paths that no test in the change covers.
+
+That is where the bugs were that a review of the delivered pull request still
+found after the graph's own review had passed (#134, #143). Verify-only
+rounds still cover every file and raise nothing new, and the profile's extra
+rule is kept. The stages, requirements and statements, validator bindings,
+result contracts and private-state schema are unchanged, so a running run can
+adopt this with `resume --update-plugin`.
 
 ## The issues file
 
@@ -460,6 +491,11 @@ built-in runner in the bundle, a source change qualified like any other.
   from a task config; controller and plugin-host tests cover pinning, the
   calls the config reaches, resume with a changed file, a tampered pin, a
   plugin without config, and config fields never becoming task settings.
+- The code review assignment, under both profiles, puts every file ocr's
+  preview excluded back on the list, never `.graphloom/`, runs the rules on
+  the whole list, and asks for the whole-change check in discovery rounds
+  only; the banyandb comparison checks that this is its only difference from
+  banyandb-fix's assignment.
 - The issues file: graph tests run a finding through `open`, `fixed` (the
   fixer's edit) and `done`. They reopen a fixed issue with the reviewer's
   note and show that note to the fixer. They reject a fixer marking an issue

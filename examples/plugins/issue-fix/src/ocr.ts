@@ -1,6 +1,7 @@
 import type { DecisionRecord } from "./decision-record.js";
 import { MAX_DISCOVERY_ROUNDS } from "./constants.js";
 import type { Issue } from "./evidence.js";
+import { ISSUES_DIR } from "./issues.js";
 import { issueRef, type Profile } from "./profile.js";
 import { clip, PRIOR_STATUSES, type PriorStatus } from "./review-common.js";
 
@@ -64,6 +65,14 @@ export const CODE_REVIEW_SCHEMA = JSON.stringify({
     },
   },
 });
+
+/**
+ * After the per-file review, the change as a whole. The defects a delivered
+ * pull request's review still found after the graph's review passed were all
+ * across files (#134, #143), which a file-by-file review does not look for.
+ */
+export const WHOLE_CHANGE_CHECK =
+  "Then, with every file's diff read, check the change as a whole, across files: data passed between modules (a value one module produces with a shape, unit, order, size or guarantee another does not expect; a field written but never read, or read on a path where nothing wrote it); promises one file makes that another breaks (a doc comment, type, name, error contract or invariant stated in one place and violated in another, including code the change left as it was); budget and limit invariants (every bound, cap, size limit, timeout, retry count and budget the change adds or relies on, enforced on every path that can exceed it, resume, retry and replay included); and changed paths that no test in the change covers.";
 
 /** What the reviewer is told about the change: the issue and the plan, bounded. */
 export function reviewBackground(profile: Profile, issue: Issue, record: DecisionRecord): string {
@@ -139,11 +148,13 @@ export function codeReviewInstruction(
     `Review the uncommitted change in this worktree against HEAD (the base commit ${args.base}) with open-code-review's delegation mode: open-code-review selects the files and resolves their rules; you do the review. Run open-code-review as ${ocr}. Do not change any file, and do not run git commands that write.`,
     "",
     "1. Run `" + `${ocr} delegate preview --format json` + "`. It lists the reviewable files (workspace mode: tracked changes and new untracked files) and the files it excluded, with reasons.",
-    `2. The change's ${profile.review.testFiles} are reviewable too, even when preview excludes them as tests: add them to your list. Leave out other excluded files.`,
+    `2. Your list is every changed file. Add back every file preview excluded, whatever its reason: the change's ${profile.review.testFiles}, other tests, docs, fixtures, generated files and anything else it left out. Leave out only \`${ISSUES_DIR}/\`, the run's own bookkeeping, which is not part of the change.`,
     "3. Run `" + `${ocr} delegate rule --format json <path>...` + "` with every file on your list. Its output groups the files by the review rules that apply to them.",
     verifying
       ? "4. For each file, read its diff (`git diff HEAD -- <path>`; read a new untracked file whole) and check the known findings below against it, reading any other code you need. Check every file off as reviewed, or as skipped with a concrete reason."
       : "4. For each file, read its diff (`git diff HEAD -- <path>`; read a new untracked file whole) and review it against its rule group and the extra rule below, reading any other code you need. Check every file off as reviewed, or as skipped with a concrete reason. Do not stop at the first serious finding.",
+    // Cross-module defects are what a file-by-file review missed (#134, #143); a verification round raises nothing new.
+    ...(verifying ? [] : [WHOLE_CHANGE_CHECK]),
     verifying
       ? "5. Give every open finding its status in `prior`; a fixed finding whose defect is back is a comment naming it in `finding`, with the path, the line range in the new file, a severity and in `evidence` the concrete failure, with file:line. Check that every file on your list is accounted for."
       : "5. Report each finding once, with the path, the line range in the new file, a category, a severity, and in `evidence` the concrete failure: the input or sequence of calls and what goes wrong, with file:line. An independent verifier checks every critical and high finding against the code. Drop likely false positives. Check that every file on your list is accounted for.",

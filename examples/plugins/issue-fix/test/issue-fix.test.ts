@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 import type { AgentSessionView, EvidenceRecord, GraphDecision, JobSpec, Receipt, RunView, Validator } from "@graphloom/sdk";
 import {
   CODE_REVIEW_SCHEMA,
+  WHOLE_CHANGE_CHECK,
   COMMAND,
   candidateCommands,
   parseProfile,
@@ -1044,10 +1045,40 @@ describe("code review in open-code-review's delegation mode", () => {
     expect(text).toContain("`/home/me/.nvm/bin/ocr delegate preview --format json`");
     expect(text).toContain("`/home/me/.nvm/bin/ocr delegate rule --format json <path>...`");
     expect(text).toContain("against HEAD (the base commit abc123)");
-    expect(text).toContain("Go test files (`_test.go`) are reviewable too");
+    expect(text).toContain("the change's Go test files (`_test.go`), other tests");
     expect(text).toContain("a test whose expected value is derived from the new code rather than from the issue");
     expect(text).toContain(background);
     expect(codeReviewInstruction(PROFILE, { ocr: "/it's/ocr", base: "b", background: "" })).toContain(`'/it'\\''s/ocr' delegate preview`);
+  });
+
+  it("reviews every changed file under every profile, ocr's exclusions included, but never .graphloom/, and checks the change as a whole (#148)", () => {
+    for (const profile of [PROFILE, parseProfile(shippedProfile("graphloom"))]) {
+      const text = codeReviewInstruction(profile, { ocr: "ocr", base: "b", background: "" });
+      const lines = text.split("\n");
+      const list = lines.find((l) => l.startsWith("2. "))!;
+      // Every file preview excluded goes back on the list, whatever the profile and whatever the reason.
+      expect(list).toContain("Your list is every changed file. Add back every file preview excluded, whatever its reason");
+      expect(list).toContain(`the change's ${profile.review.testFiles}, other tests, docs, fixtures, generated files and anything else it left out`);
+      expect(list).not.toContain("Leave out other excluded files");
+      // Only the run's own bookkeeping stays out.
+      expect(list).toContain("Leave out only `.graphloom/`");
+      // ocr resolves the rules for the whole list.
+      expect(lines.find((l) => l.startsWith("3. "))).toContain("`ocr delegate rule --format json <path>...` with every file on your list");
+      // The per-file review stays, then the change as a whole.
+      const perFile = lines.findIndex((l) => l.startsWith("4. "));
+      expect(lines[perFile]).toContain("For each file, read its diff");
+      expect(lines[perFile + 1]).toBe(WHOLE_CHANGE_CHECK);
+      for (const focus of ["data passed between modules", "promises one file makes that another breaks", "budget and limit invariants", "changed paths that no test in the change covers"]) {
+        expect(WHOLE_CHANGE_CHECK).toContain(focus);
+      }
+      // The profile's own extra rule is kept.
+      expect(text).toContain(`Extra rule for ${profile.review.language} files:`);
+      // A verification round still covers every file but raises nothing new: no whole-change search.
+      const verifying = codeReviewInstruction(profile, { ocr: "ocr", base: "b", background: "", round: MAX_DISCOVERY_ROUNDS + 1 });
+      expect(verifying).toContain("Leave out only `.graphloom/`");
+      expect(verifying).not.toContain(WHOLE_CHANGE_CHECK);
+      expect(verifying).toContain("a verification round");
+    }
   });
 
   it("asks for a result Codex's structured output accepts: every property required, none extra", () => {
