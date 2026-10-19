@@ -124,9 +124,12 @@ controller defaults  <  the graph's defaultBudgets  <  the task's budgets
 ```
 
 `recoveryReserve` defaults from the resulting `agentInvocations`
-(max(8, 5%)). Every value from either layer must be a positive safe integer,
-and the reserve must stay below `agentInvocations`; a violation refuses the
-run before it starts. Long `activeMs` and `waitMs` values are fine: timers
+(max(8, 5%)). Intake checks that each value the task sets is a positive
+safe integer, and `describe` checks the graph's; the cross-budget check (the
+reserve must stay below `agentInvocations`) runs once, on the final merged
+budgets, so a task that sets only `recoveryReserve: 100` under a graph
+defaulting to 1,800 calls is valid. A violation refuses the run before any
+state is written, and `graphloom check` reports it. Long `activeMs` and `waitMs` values are fine: timers
 are armed in steps no longer than Node's limit (#138).
 
 The controller never reads the task config: the plugin turns its own config

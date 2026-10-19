@@ -11,6 +11,7 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import {
+  applyGraphDefaultBudgets,
   checkB3,
   classifyAgentResult,
   createController,
@@ -201,6 +202,12 @@ export async function check(taskPath: string): Promise<CheckReport> {
   const intake = await intakeTask(taskPath);
   const problems: string[] = [];
   const definition = await describeBundle(intake);
+  // The run's final budgets: the graph's defaultBudgets under the task's, checked across budgets.
+  try {
+    applyGraphDefaultBudgets(intake, definition);
+  } catch (err) {
+    problems.push(`budgets: ${err instanceof Error ? err.message : String(err)}`);
+  }
 
   const contracts = definition.resultContracts ?? [];
   const byName = new Map(contracts.map((c) => [c.name, c]));

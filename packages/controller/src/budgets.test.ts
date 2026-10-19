@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -20,7 +21,7 @@ import {
 } from "@graphloom/sdk";
 import { createScriptedRunner, type JobContext } from "@graphloom/runner";
 import { createScriptedSupervisor } from "@graphloom/supervisor";
-import { CONTROLLER_DEFAULT_BUDGETS, IntakeError, createController, loadRunState, resolveRunBudgets, saveRunState } from "./index.js";
+import { applyGraphDefaultBudgets, CONTROLLER_DEFAULT_BUDGETS, IntakeError, createController, intakeTask, loadRunState, resolveRunBudgets, saveRunState } from "./index.js";
 import { budgetGranted, budgetsUsed, legacyBudgetUsage } from "./budget-usage.js";
 import type { DurableRunState } from "./state.js";
 
@@ -107,6 +108,32 @@ describe("budget layers (#150)", () => {
     expect(() => resolveRunBudgets(undefined, { jobs: Number.POSITIVE_INFINITY })).toThrow(/positive integer/);
     expect(() => resolveRunBudgets(undefined, { tokens: 3 } as never)).toThrow(/unknown graph defaultBudgets key: tokens/);
   });
+
+  it("judges a task's recoveryReserve against the graph's agentInvocations, not the controller's (#151 review)", async () => {
+    const env = await makeEnv({ recoveryReserve: 100 });
+    // Intake alone checks each value; the controller's 64 calls are only provisional.
+    const intake = await intakeTask(env.taskPath);
+    expect(intake.budgets).toMatchObject({ agentInvocations: 64, recoveryReserve: 100 });
+    expect(applyGraphDefaultBudgets(intake, { defaultBudgets: { agentInvocations: 1800 } }).budgets).toMatchObject({ agentInvocations: 1800, recoveryReserve: 100 });
+    expect(() => applyGraphDefaultBudgets(intake, { defaultBudgets: { agentInvocations: 50 } })).toThrow(
+      "budgets.recoveryReserve (100) must be less than budgets.agentInvocations (50), leaving room for at least one normal-mode agent call",
+    );
+    // A graph that declares no defaults leaves the controller's, checked the same way.
+    expect(() => applyGraphDefaultBudgets(intake, {})).toThrow(/recoveryReserve \(100\) must be less than budgets.agentInvocations \(64\)/);
+
+    // Through a real run: accepted with 1800/100 ...
+    const controller = createController();
+    const plugin = (agentInvocations: number) =>
+      createScriptedGraph({ definition: { ...definition, defaultBudgets: { agentInvocations } }, advances: [stop({ reason: "paused", blocker: "none" }, "pause")] });
+    const report = await controller.run({ taskPath: env.taskPath, plugin: plugin(1800), validators, runner: agents(), stateRoot: env.stateRoot, runId: "reserve-ok" });
+    expect(report.status).toBe("stopped");
+    expect((await loadRunState(report.stateDir)).budgets).toMatchObject({ agentInvocations: 1800, recoveryReserve: 100 });
+    // ... and refused, before any state is written, under a graph defaulting to 50.
+    await expect(
+      controller.run({ taskPath: env.taskPath, plugin: plugin(50), validators, runner: agents(), stateRoot: env.stateRoot, runId: "reserve-refused" }),
+    ).rejects.toThrow("budgets.recoveryReserve (100) must be less than budgets.agentInvocations (50)");
+    expect(existsSync(path.join(env.stateRoot, "reserve-refused", "state.json"))).toBe(false);
+  }, 60_000);
 
   it("starts a run with the graph's declared defaults under the task's budgets, and resumes it under a plugin that declares others", async () => {
     const env = await makeEnv({ jobs: 40 });
