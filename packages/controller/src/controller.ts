@@ -1277,7 +1277,7 @@ function toReport(state: DurableRunState, sourceDirtyAfter: string[]): RunReport
   return report;
 }
 
-export { applyGraphDefaultBudgets, CONTROLLER_DEFAULT_BUDGETS, intakeTask, parseTaskYaml, resolveRunBudgets, resolveUnderBase, taskConfigValue, IntakeError, MAX_TASK_CONFIG_BYTES } from "./intake.js";
+export { applyGraphDefaultBudgets, CONTROLLER_DEFAULT_BUDGETS, defaultRecoveryReserve, intakeTask, parseTaskYaml, resolveRunBudgets, resolveUnderBase, taskConfigValue, IntakeError, MAX_TASK_CONFIG_BYTES } from "./intake.js";
 export { admitValidation, freshEvidence } from "./admit.js";
 export { toRunView, bumpGeneration, classifyAgentResult } from "./loop.js";
 export type { ContractOutcome } from "./loop.js";

@@ -11,6 +11,7 @@ export {
   defaultStateRoot,
   applyGraphDefaultBudgets,
   CONTROLLER_DEFAULT_BUDGETS,
+  defaultRecoveryReserve,
   intakeTask,
   parseTaskYaml,
   resolveRunBudgets,

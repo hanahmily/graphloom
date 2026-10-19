@@ -139,7 +139,11 @@ safe integer, and `describe` checks the graph's; the cross-budget check (the
 reserve must stay below `agentInvocations`) runs once, on the final merged
 budgets, so a task that sets only `recoveryReserve: 100` under a graph
 defaulting to 1,800 calls is valid. A violation refuses the run before any
-state is written, and `graphloom check` reports it. Long `activeMs` and `waitMs` values are fine: timers
+state is written, and `graphloom check` reports it. A rehearsal (and a probe,
+which rehearses first) runs with small budgets of its own; when its scenario
+names no `recoveryReserve`, it names one that fits its own allowance (the
+controller's rule, kept below it) rather than inheriting a live reserve such
+as 90 of 1,800. An explicit scenario reserve is used as is. Long `activeMs` and `waitMs` values are fine: timers
 are armed in steps no longer than Node's limit (#138).
 
 The controller never reads the task config: the plugin turns its own config

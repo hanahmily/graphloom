@@ -6,8 +6,8 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { JobResult } from "@graphloom/runner";
-import { applyGraphDefaultBudgets, intakeTask, IntakeError, type DurableRunState } from "@graphloom/controller";
-import { check, checkProvenance, probe, recordScenario, rehearse, replay } from "../src/rehearsal.js";
+import { applyGraphDefaultBudgets, intakeTask, IntakeError, resolveRunBudgets, type DurableRunState } from "@graphloom/controller";
+import { check, checkProvenance, probe, recordScenario, rehearsalBudgets, rehearse, replay } from "../src/rehearsal.js";
 import { RUNNER_CONFIG_ENV } from "../src/runner-config.js";
 import { fakeRunnerConfig, writeFakeCodingAgents } from "./fixtures/fake-coding-agents.js";
 
@@ -54,6 +54,24 @@ describe("graphloom check (L0)", () => {
     expect(report).toMatchObject({ ok: true, problems: [] });
     expect(report.rehearsal?.scenarios.happy).toBeDefined();
     expect(report.definition?.resultContracts?.map((c) => c.name).sort()).toEqual(["review-verdict-v1", "writer-result-v1"]);
+  });
+});
+
+describe("rehearsal budgets (#151 review)", () => {
+  it("names a recoveryReserve that fits the rehearsal's own allowance, so a graph's live reserve is not inherited", () => {
+    expect(rehearsalBudgets()).toEqual({ agentInvocations: 24, jobs: 64, decisions: 256, corrections: 4, recoveryReserve: 8 });
+    // Merged under a graph that declares 1,800 calls with a reserve of 90: valid.
+    expect(resolveRunBudgets(rehearsalBudgets(), { agentInvocations: 1800, recoveryReserve: 90 })).toMatchObject({ agentInvocations: 24, recoveryReserve: 8 });
+    // Kept below a small allowance; none at all when no call could be left.
+    expect(rehearsalBudgets({ agentInvocations: 4 }).recoveryReserve).toBe(3);
+    expect(rehearsalBudgets({ agentInvocations: 1 }).recoveryReserve).toBeUndefined();
+  });
+
+  it("honours an explicit scenario reserve as is", () => {
+    expect(rehearsalBudgets({ agentInvocations: 40, recoveryReserve: 3 })).toMatchObject({ agentInvocations: 40, recoveryReserve: 3 });
+    // Even one the final check will refuse: the scenario said so.
+    expect(rehearsalBudgets({ recoveryReserve: 30 }).recoveryReserve).toBe(30);
+    expect(() => resolveRunBudgets(rehearsalBudgets({ recoveryReserve: 30 }))).toThrow(/recoveryReserve \(30\) must be less than budgets.agentInvocations \(24\)/);
   });
 });
 

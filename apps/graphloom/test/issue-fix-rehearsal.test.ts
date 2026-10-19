@@ -21,14 +21,23 @@ const scope = createScope();
  * that file's real sha256, and the task names that profile unmodified, so a
  * rehearsal runs the bundle's own `describe(config)`, pin included.
  */
-async function makeEnv() {
+async function makeEnv(profileBudgets?: Record<string, number>) {
   const contributing = await readFile(path.join(root, "examples/skywalking-banyandb/CONTRIBUTING.md"));
-  // The config is the bundle's own shipped profile, as examples/issue-fix-banyandb-task.yaml names it.
+  // The config is the bundle's own shipped profile, as examples/issue-fix-banyandb-task.yaml names it;
+  // with `profileBudgets`, a copy of it beside the task with those budgets instead.
+  const shipped = "plugins/issue-fix/profiles/banyandb.json";
+  const config =
+    profileBudgets === undefined
+      ? { name: shipped }
+      : {
+          name: "banyandb-budgets.json",
+          value: { ...(JSON.parse(await readFile(path.join(root, "examples", shipped), "utf8")) as object), budgets: profileBudgets },
+        };
   const env = await createTaskWorkspace(scope, {
     graph: "issue-fix",
     repoName: "banyandb",
     files: issueFixRepoFiles(GO!, contributing),
-    config: { name: "plugins/issue-fix/profiles/banyandb.json" },
+    config,
     request: `Fix apache/skywalking#${ISSUE}.`,
   });
   return { dir: env.dir, repo: env.repo.path, taskPath: env.taskPath };
@@ -77,8 +86,8 @@ afterEach(async () => {
 });
 
 /** The fixture both tests share: a real environment, a fake GitHub, and the issue the banyandb profile's example is modeled on. */
-async function ready() {
-  const env = await makeEnv();
+async function ready(profileBudgets?: Record<string, number>) {
+  const env = await makeEnv(profileBudgets);
   github = await startFakeGitHub({
     issues: [{ number: ISSUE, title: "Scheduler reports long actions as timed out", state: "open", labels: ["bug"], body: "Backups over five minutes log action timed out." }],
   });
@@ -131,6 +140,34 @@ describe.skipIf(GO === undefined)("graphloom rehearse (L1) on issue-fix with the
     expect(report.boundaries.B2.status).toBe("unverified");
     expect(report.boundaries.B2.notes.some((n) => n.startsWith("offline: no recorded read for graphloom.github/"))).toBe(true);
   }, 30_000);
+});
+
+describe.skipIf(GO === undefined)("rehearsal under a profile that declares a live recoveryReserve (#151 review)", () => {
+  // A live run's reserve (90 of 1,800) does not fit a rehearsal's 24 calls:
+  // the generated task names a reserve of its own.
+  const LIVE = { agentInvocations: 1800, recoveryReserve: 90 };
+
+  it("checks, rehearses and probes successfully", async () => {
+    const env = await ready(LIVE);
+    const checked = await check(env.taskPath);
+    expect(checked.ok, JSON.stringify(checked.problems)).toBe(true);
+    const report = await rehearse(env.taskPath, { commands: "run" });
+    expect(report.verdict, JSON.stringify({ blocker: report.blocker, convergence: report.convergence })).toBe("ready");
+    const fakeRunner = {
+      async runJob(): Promise<JobResult> {
+        return {
+          status: "ok",
+          summary: "stubbed",
+          runId: "probe",
+          operationId: "op",
+          generation: 1,
+          evidence: [{ kind: "other", payload: { codingAgent: { output: { comments: [], prior: [], summary: { total_files: 0, reviewed_files: 0, skipped: [] } } } } }],
+        };
+      },
+    };
+    const probed = await probe(env.taskPath, { contract: "code-review-v2", commands: "run" }, fakeRunner);
+    expect(probed.status).toBe("ok");
+  }, 240_000);
 });
 
 describe.skipIf(GO === undefined)("graphloom probe (L3) on issue-fix with the banyandb profile", () => {
