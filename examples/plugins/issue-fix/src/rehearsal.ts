@@ -34,11 +34,12 @@ const GO_TEST_REHEARSAL: GraphRehearsal = {
   scenarios: {
     happy: {
       results: {
-        "decision-record-v1": [
+        "decision-record-v2": [
           {
             output: {
               title: 'scheduler: report long-running scheduled actions as "running" instead of "timed out"',
               status: "ready",
+              change: 'The scheduler no longer reports a scheduled action as "timed out" merely because it ran past the check interval: an action that has not errored or been cancelled is reported as "running", and "timed out" is kept for an action that actually timed out.',
               summary:
                 "BanyanDB's scheduler runs periodic/background actions (the mechanism backing scheduled backups) and polls each action's completion on a fixed check interval. When that interval elapses before the action's goroutine has returned, the monitor currently treats elapsed wall-clock time alone as proof of failure and logs/reports the action as \"timed out\", even though the action has not errored or been cancelled and is simply still executing. Because real backups routinely run past five minutes, every such backup trips this false-positive and gets logged as a timeout while it continues running to completion in the background. The fix is to stop conflating \"still executing past the check interval\" with \"timed out\": when the interval elapses and the action has not returned an error and has not been cancelled, the monitor should classify/log it as \"running\" (matching whatever existing in-progress status vocabulary the scheduler already uses), and reserve \"timed out\" for cases where the action actually returns a timeout/cancellation-class error or an explicit deadline on the action itself expires.",
               productionCaller:
@@ -103,6 +104,7 @@ const GO_TEST_REHEARSAL: GraphRehearsal = {
             output: {
               title: 'scheduler: report long-running scheduled actions as "running" instead of "timed out"',
               status: "ready",
+              change: '`Status` in `pkg/timestamp/scheduler.go` now returns "running" when the time limit is reached while the action is still running, instead of "timed out". It still returns "timed out" when the action is no longer running. Backups that run past five minutes are therefore no longer logged as timeouts. A regression test covers the three cases.',
               summary:
                 'In `pkg/timestamp/scheduler.go`, `Status(minutes int, running bool) string` ignored its `running` parameter entirely: once elapsed minutes reached `generatedLimit` (5), it always returned "timed out", even when the action was still executing without error. This is exactly the bug in apache/skywalking#14111 — a backup running past five minutes was logged as timed out purely because of elapsed time, never because it actually failed or was cancelled. The fix adds a branch so that when the limit is reached and the action is still running, `Status` returns "running"; it only returns "timed out" when the action is no longer running (i.e., it was actually aborted/stopped without completing), per the issue\'s bot comment: "A running backup is not an error; report it as running."',
               productionCaller:
@@ -211,6 +213,7 @@ const SCOPE_TEST_BYTES = `import { describe, expect, it } from "vitest";\nimport
 const VITEST_RECORD = {
   title: "Forbid paths below an excluded directory",
   status: "ready",
+  change: "A write scope that excludes a directory now forbids every path below it, not only the directory itself. A regression test pins that.",
   summary: "An excluded directory in a write scope must forbid every path below it; the regression test pins that.",
   test: { package: SCOPE_TEST, name: SCOPE_TEST_NAME, expectedValueSource: "the issue: an excluded directory covers everything below it" },
   productionCaller: "packages/sdk/src/scope.ts writeScopeAllows",
@@ -231,7 +234,7 @@ const VITEST_REHEARSAL: GraphRehearsal = {
   scenarios: {
     happy: {
       results: {
-        "decision-record-v1": [{ output: VITEST_RECORD, effects: [{ path: SCOPE_TEST, bytes: SCOPE_TEST_BYTES }] }],
+        "decision-record-v2": [{ output: VITEST_RECORD, effects: [{ path: SCOPE_TEST, bytes: SCOPE_TEST_BYTES }] }],
         "code-review-v2": [{ output: { comments: [], prior: [], summary: { total_files: 1, reviewed_files: 1, skipped: [] } } }],
       },
       expect: { status: "succeeded", receipts: [FIX_STAGE, REVIEW_STAGE] },

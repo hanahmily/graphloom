@@ -3,10 +3,14 @@ import { COMMAND } from "./constants.js";
 import type { DecisionRecord } from "./decision-record.js";
 import { writeScopeFor } from "./decision-record.js";
 import type { Issue, IssueComment } from "./evidence.js";
-import { commandsFor, commandSummary, issueRef, listAnd, type Profile } from "./profile.js";
+import { commandLabel, commandsFor, commandSummary, issueRef, listAnd, type Profile } from "./profile.js";
 import { ISSUES_DIR, ISSUES_FILE, ISSUES_MARKDOWN } from "./issues.js";
 
 export const MAX_SNAPSHOT_CHARS = 200_000;
+
+/** What the planner and the implementer are asked for `change`, so the delivered text describes the whole change. */
+const CHANGE_FIELD =
+  "- change: what the change as a whole does and why, against the base commit, in a few sentences for a reviewer who has not seen this run. It becomes the commit message and the pull request summary, so keep it current every round: describe the end state, not this round's edits. Leave out review issue ids, files under .graphloom/, what you did or did not run, and first-person narration.";
 
 export const UNCLEAR_POLICY = [
   "Unclear points (issue descriptions are often incomplete):",
@@ -54,8 +58,9 @@ export function planInstruction(profile: Profile, args: { issue: number; request
     "",
     UNCLEAR_POLICY,
     "",
-    "Return a decision-record-v1 result. Every required field must be present, decisions and openQuestions too (empty arrays when there are none):",
+    "Return a decision-record-v2 result. Every required field must be present, decisions and openQuestions too (empty arrays when there are none):",
     "- summary: the root cause and the fix in at most five sentences; details go in the fields below.",
+    CHANGE_FIELD,
     "- status: ready; blocked when a product decision or missing information stops the fix; cannot_reproduce when no failing test can be written from the sources. When not ready, include draftComment: a short issue comment asking the maintainers the question.",
     `- test: the regression test to add. ${profile.runner.testFieldHelp}; expectedValueSource says where the expected value comes from, independent of the fix.`,
     "- productionCaller: the production code path the fix changes.",
@@ -84,7 +89,7 @@ export function planRevisionInstruction(profile: Profile, args: { issue: number;
     profile.planning.reach,
     ...notes(profile),
     "",
-    "Return the full decision-record-v1 result again, with every required field.",
+    "Return the full decision-record-v2 result again, with every required field.",
   ].join("\n");
 }
 
@@ -124,7 +129,9 @@ export function implementInstruction(profile: Profile, args: { issue: number; pl
     "",
     UNCLEAR_POLICY,
     "",
-    "Return the decision-record-v1 result again, updated with any decision you made while implementing.",
+    "Return the decision-record-v2 result again, updated with any decision you made while implementing.",
+    "- summary is your report on this pass and goes to the graph only; it may say what you fixed or ran.",
+    CHANGE_FIELD,
   ].join("\n");
 }
 
@@ -174,9 +181,57 @@ export function deliverCommands(branch: string, message: string, body: string): 
   return [{ id: COMMAND.deliver, argv: ["sh", "-c", DELIVER, "deliver", branch, String(messageChunks.length), ...messageChunks, ...chunked(body).slice(0, 54)] }];
 }
 
-/** The commit message: the title, the summary and the issue it fixes. */
-export function commitMessage(profile: Profile, args: { issue: number; issueTitle: string; record: DecisionRecord }): string {
-  return [args.record.title?.trim() || `Fix ${args.issueTitle}`, "", args.record.summary.trim(), "", `Fixes ${issueRef(profile, args.issue)}`].join("\n");
+/**
+ * Text that belongs to a run's own bookkeeping rather than to the change: a
+ * review issue or finding id (I3, F1), the graph's private directory, or first
+ * person narration of a round. Sentences with any of these are dropped; the
+ * decision record is asked to keep them out, this is the net under that.
+ */
+const BOOKKEEPING = /\.graphloom\b|\b[IF]\d+\b|\b(?:I|I'm|I've|I'll|I'd|my)\b/;
+
+/** `text` without the sentences that carry bookkeeping; empty when nothing is left. */
+export function withoutBookkeeping(text: string): string {
+  return text
+    .split("\n")
+    .map((line) => line.split(/(?<=[.!?])\s+/).filter((sentence) => !BOOKKEEPING.test(sentence)).join(" "))
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+/**
+ * The change as the commit and the pull request describe it. The decision
+ * record's `change` is current every round; the round's `summary` is never
+ * delivered when a `change` exists, because after a correction it reports only
+ * that round's delta. A v1 record has no `change`: the plan's `change` or
+ * summary (written before any round) stands in, then the record's own
+ * summary, then the title.
+ */
+export function changeDescription(record: DecisionRecord, plan?: DecisionRecord): string {
+  for (const text of [record.change, plan?.change, plan?.summary, record.summary]) {
+    const clean = typeof text === "string" ? withoutBookkeeping(text) : "";
+    if (clean !== "") return clean;
+  }
+  return record.title?.trim() ?? "";
+}
+
+/**
+ * Whether a follow-up belongs in the pull request. The implementer's notes
+ * about the environment it ran in, or about re-running a check the graph pins
+ * and ran itself, are dropped: the run's evidence already answers them, and
+ * they go stale once the environment is fixed. Conservative on purpose: only a
+ * note that names a pinned command or says "re-run", "disk", "sandbox" or
+ * "environment" goes.
+ */
+export function deliverableFollowUp(profile: Profile, note: string): boolean {
+  if (withoutBookkeeping(note) === "") return false;
+  if (/\b(?:re-?run(?:ning)?|disk|sandbox|environment)\b/i.test(note)) return false;
+  return !profile.commands.some((c) => note.includes(commandLabel(c)) || note.includes(c.id));
+}
+
+/** The commit message: the title, the change and the issue it fixes. */
+export function commitMessage(profile: Profile, args: { issue: number; issueTitle: string; record: DecisionRecord; plan?: DecisionRecord }): string {
+  return [args.record.title?.trim() || `Fix ${args.issueTitle}`, "", changeDescription(args.record, args.plan), "", `Fixes ${issueRef(profile, args.issue)}`].join("\n");
 }
 
 /** The pull request body, following the profile's pull request template. */
@@ -186,6 +241,10 @@ export function pullRequestDescription(
     issue: number;
     issueTitle: string;
     record: DecisionRecord;
+    /** The planner's record, for a `record` without `change`. */
+    plan?: DecisionRecord;
+    /** The pinned checks the run's evidence shows passed on the delivered candidate (`commandSummary`); the profile's own list when absent. */
+    verified?: string[];
     base: string;
     review: string;
     /** Critical or high review findings an independent verifier refuted. */
@@ -199,19 +258,20 @@ export function pullRequestDescription(
   const { record } = args;
   const ref = issueRef(profile, args.issue);
   const decided = record.decisions.filter((d) => d.chosen?.trim());
-  const checks = [...commandsFor(profile, "passes"), ...commandsFor(profile, "builds")].map(commandSummary);
+  const checks = args.verified ?? [...commandsFor(profile, "passes"), ...commandsFor(profile, "builds")].map(commandSummary);
+  const followUps = (record.followUps ?? []).filter((f) => deliverableFollowUp(profile, f));
   const lines = [
     `### Fix ${ref}: ${args.issueTitle}`,
     ...profile.pullRequest.checklist,
     "",
     "## Summary",
-    record.summary.trim(),
+    changeDescription(record, args.plan),
     ...(decided.length > 0
       ? ["", "## Decisions", ...decided.map((d) => `- ${d.point}: ${d.chosen!.trim()}. ${d.basis.trim()}${d.options.length > 1 ? ` Alternatives: ${d.options.filter((o) => o !== d.chosen).join("; ")}.` : ""}`)]
       : []),
     ...(record.openQuestions.length > 0 ? ["", "## Open questions", "This change leaves these behaviours unchanged:", ...record.openQuestions.map((q) => `- ${q}`)] : []),
-    ...((record.followUps ?? []).length > 0 || (args.reviewFollowUps ?? []).length > 0
-      ? ["", "## Follow-ups", ...(record.followUps ?? []).map((f) => `- ${f}`), ...(args.reviewFollowUps ?? []).map((f) => `- Code review: ${f}`)]
+    ...(followUps.length > 0 || (args.reviewFollowUps ?? []).length > 0
+      ? ["", "## Follow-ups", ...followUps.map((f) => `- ${f}`), ...(args.reviewFollowUps ?? []).map((f) => `- Code review: ${f}`)]
       : []),
     "",
     "## Test plan",

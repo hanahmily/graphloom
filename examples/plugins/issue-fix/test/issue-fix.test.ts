@@ -10,6 +10,11 @@ import {
   WHOLE_CHANGE_CHECK,
   COMMAND,
   candidateCommands,
+  commandsFor,
+  commandSummary,
+  commitMessage,
+  listAnd,
+  pullRequestDescription,
   parseProfile,
   shippedProfile,
   MAX_SNAPSHOT_CHARS,
@@ -992,6 +997,73 @@ describe("issue-fix graph under the banyandb profile", () => {
     });
     expect(decision.action.type).toBe("supervise");
     expect(jobs.filter((j) => j.checkout?.from === "candidate" && j.checkout.revertPatch !== undefined)).toHaveLength(2);
+  });
+
+  describe("what the commit and the pull request say (#161)", () => {
+    const CHANGE = "`Scheduler.trigger` now warns when an action runs past five minutes and logs its real outcome when it ends, instead of reporting it as timed out.";
+    const round = (summary: string, extra: Partial<DecisionRecord> = {}): DecisionRecord => ({ ...PLAN, change: CHANGE, summary, ...extra });
+    const LAST_ROUND =
+      "I fixed the two reopened findings I3 and I5 and marked them fixed in .graphloom/issues.json. I did not re-run make test-ci, build and check in this attempt.";
+
+    it("describes the change from `change`, not from the last correction round's report, and names only the checks the evidence shows passed", () => {
+      const { decision, jobs } = simulate({
+        implement: [
+          round("I wrote the test and the fix."),
+          round("I fixed lint findings I1 and I2."),
+          round(LAST_ROUND, { followUps: ["Re-run make test-ci in a checkout with free disk.", "Consider a metric for actions that outlive the warning."] }),
+        ],
+        candidate: [{ lint: { exitCode: 2, stderr: "unused" } }, { build: { exitCode: 1, stderr: "undefined: x" } }, {}],
+      });
+      expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+      expect(jobs.filter((j) => j.purpose === "work")).toHaveLength(3);
+      const { message, body } = deliverArgs(jobs);
+      expect(message).toBe(`${PLAN.title}\n\n${CHANGE}\n\nFixes apache/skywalking#${ISSUE}`);
+      expect(body).toContain(`## Summary\n${CHANGE}\n`);
+      for (const text of [message, body]) {
+        expect(text).not.toContain(".graphloom");
+        expect(text).not.toMatch(/\bI\d+\b/);
+        expect(text).not.toMatch(/I did not|I fixed|I wrote/);
+      }
+      // The graph's pinned checks passed on the delivered candidate: the Test plan says so from evidence.
+      const plan = body.slice(body.indexOf("## Test plan"));
+      const checks = [...commandsFor(PROFILE, "passes"), ...commandsFor(PROFILE, "builds")].map(commandSummary);
+      expect(plan).toContain(`- ${listAnd(checks)} pass.`);
+      // An environment note about a check the graph ran itself is dropped; a real follow-up stays.
+      expect(body).not.toMatch(/free disk|Re-run/);
+      expect(body).toContain("- Consider a metric for actions that outlive the warning.");
+    });
+
+    it("lists as passed only the pinned checks whose evidence shows them passing", () => {
+      const verified = [commandSummary(commandsFor(PROFILE, "builds")[0]!)];
+      const body = pullRequestDescription(PROFILE, { issue: ISSUE, issueTitle: "t", record: round("x"), base: "abc", review: "Reviewed.", verified });
+      expect(body).toContain(`- ${verified[0]} pass.`);
+      const further = commandSummary(commandsFor(PROFILE, "passes")[0]!);
+      expect(body).not.toContain(further);
+      expect(pullRequestDescription(PROFILE, { issue: ISSUE, issueTitle: "t", record: round("x"), base: "abc", review: "Reviewed.", verified: [] })).not.toMatch(/ pass\.\n/);
+    });
+
+    it("strips bookkeeping from a `change` that carries it anyway", () => {
+      const record = round("s", { change: "Actions past five minutes are reported as running. Fixed I3 and I5 in .graphloom/issues.json. I did not run make test-ci." });
+      expect(commitMessage(PROFILE, { issue: ISSUE, issueTitle: "t", record })).toContain("\n\nActions past five minutes are reported as running.\n\n");
+    });
+
+    it("delivers a legacy record without `change` from the plan, then its own summary, without the round's narrative", () => {
+      const legacy: DecisionRecord = { ...PLAN, summary: LAST_ROUND };
+      const plan = { ...PLAN, summary: "Warn at the timeout while the action is still running." };
+      expect(commitMessage(PROFILE, { issue: ISSUE, issueTitle: "t", record: legacy, plan })).toBe(`${PLAN.title}\n\n${plan.summary}\n\nFixes apache/skywalking#${ISSUE}`);
+      // With no plan to fall back on, nothing but bookkeeping remains in the summary, so the title stands in.
+      expect(commitMessage(PROFILE, { issue: ISSUE, issueTitle: "t", record: legacy })).toBe(`${PLAN.title}\n\n${PLAN.title}\n\nFixes apache/skywalking#${ISSUE}`);
+    });
+
+    it("asks the planner and the implementer for `change` apart from the round's summary", () => {
+      const { jobs } = simulate({});
+      const [plan, implement] = [jobs.find((j) => j.purpose === "diagnostic" && j.kind === "agent"), jobs.find((j) => j.purpose === "work")];
+      for (const job of [plan, implement]) {
+        expect(assignment(job)).toContain("- change: what the change as a whole does and why");
+        expect(job!.resultSchema).toBe("decision-record-v2");
+      }
+      expect(assignment(implement)).toContain("summary is your report on this pass");
+    });
   });
 
   it("hands the run to the supervisor after two corrections", () => {

@@ -15,7 +15,7 @@ import {
 import { describeFinding, findingById, findingLedger } from "./findings.js";
 import { isUnsettled, issueIdOf } from "./issues.js";
 import { describeCoverage, isBlocking, reviewComplete } from "./ocr.js";
-import { commandsFor, isTestPath, parseProfile, ProfileError, type Profile } from "./profile.js";
+import { commandsFor, isTestPath, parseProfile, ProfileError, type Profile, type ProfileCommand } from "./profile.js";
 
 const passed = (reason: string): ValidationResult => ({ status: "passed", reason });
 const failed = (reason: string): ValidationResult => ({ status: "failed", reason });
@@ -45,6 +45,13 @@ export function implementerRecord(evidence: EvidenceRecord[]): { record?: Decisi
   return "record" in parsed ? { record: parsed.record } : { problem: `the implementer's decision record is invalid: ${parsed.problem}` };
 }
 
+/** The planner's latest decision record: the plan, before any round of implementation. */
+export function plannerRecord(evidence: EvidenceRecord[]): DecisionRecord | undefined {
+  const run = agentRuns(evidence, FIX_STAGE, "diagnostic").filter((r) => r.status === "completed").at(-1);
+  const parsed = run === undefined ? undefined : parseDecisionRecord(run.output);
+  return parsed !== undefined && "record" in parsed ? parsed.record : undefined;
+}
+
 export const decisionsRecorded: Validator = profiled((input, profile) => {
   const { record, problem } = implementerRecord(input.evidence);
   if (record === undefined) return inconclusive(problem!);
@@ -59,6 +66,20 @@ function cleanRun(run: CommandRun): string | undefined {
     return `the checks in the ${run.checkout.from} checkout that ran ${run.command.id} left files changed: ${run.checkout.mutations.slice(0, 10).join(", ")}`;
   }
   return undefined;
+}
+
+/**
+ * The profile's pinned checks (`passes` and `builds` commands) that ran clean
+ * and succeeded next to the GREEN run on the candidate `digest`: what the pull
+ * request may say was verified, from evidence rather than from anyone's prose.
+ */
+export function verifiedChecks(evidence: EvidenceRecord[], profile: Profile, digest: string | undefined): ProfileCommand[] {
+  const green = latestCheckoutRun(evidence, COMMAND.regression, "candidate", digest);
+  if (green === undefined) return [];
+  return [...commandsFor(profile, "passes"), ...commandsFor(profile, "builds")].filter((c) => {
+    const run = sameCheckoutJob(evidence, green, c.id);
+    return run !== undefined && cleanRun(run) === undefined && succeeded(run.command);
+  });
 }
 
 export const reportText = (run: CommandRun): string => run.command.report?.text ?? run.command.stdoutTail;

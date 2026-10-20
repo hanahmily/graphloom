@@ -9,6 +9,9 @@ Version 0.5.0, 2026-10-19, has the code reviewer review [every changed
 file and the change as a whole](#every-changed-file-and-the-change-as-a-whole).
 Version 0.6.0, 2026-10-19, declares the profile's measured `budgets` as the
 graph's default budgets ([budgets](budgets.md)).
+Version 0.7.0, 2026-10-20, delivers the decision record's `change`, not the
+implementer's last-round `summary`, as the commit message and pull request
+summary ([#161](https://github.com/hanahmily/graphloom/issues/161)).
 
 ## Purpose
 

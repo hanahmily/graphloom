@@ -63,6 +63,15 @@ once, instead of sending the implementer a correction for a fault that may
 have been the environment. Checks that passed stay valid, and a failure
 recorded after the resume is corrected as before.
 
+The commit message and the pull request summary come from the decision
+record's `change` (since 0.7.0, contract `decision-record-v2`): what the change
+does against the base, kept current every round. The round's `summary` is the
+implementer's report to the graph and is never delivered. Sentences naming
+review issue ids, `.graphloom/` or the implementer in the first person are
+dropped, the Test plan names only the pinned checks the evidence shows passed,
+and follow-ups about the environment or a pinned check are left out. A record
+without `change` falls back to the plan's text.
+
 The runner config is banyandb-fix's: Claude Code, Codex and Pi enabled, the
 GitHub reads, and command jobs long enough for the profile's checks. For the
 graphloom profile the full suite takes about ten minutes; its commands allow
