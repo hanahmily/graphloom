@@ -661,9 +661,12 @@ function regressionBlocked(profile: Profile, run: CommandRun, test: NonNullable<
   return outcome === "build-failed" || outcome === "setup-failed";
 }
 
-/** A RED run that could not run, from before the operator's latest resume: run it again. */
+/** A RED run that could not run (it did not execute, or the test never ran), from before the operator's latest resume: run it again. */
 function blockedBeforeResume(profile: Profile, run: CommandRun, test: NonNullable<DecisionRecord["test"]>, view: RunView): boolean {
-  return isStaleFailure(run.record, view) && regressionBlocked(profile, run, test);
+  if (!isStaleFailure(run.record, view)) return false;
+  // A RED that timed out, was aborted or could not start recorded nothing about the test.
+  const { timedOut, aborted, spawnError } = run.command;
+  return timedOut === true || aborted === true || spawnError !== undefined || regressionBlocked(profile, run, test) || profile.runner.outcome(reportText(run), test) === "not-run";
 }
 
 /** Whether a command of the candidate-checks job that produced `green` failed before the operator's latest resume. */

@@ -81,6 +81,9 @@ interface CommandResult {
   report?: string;
   stdout?: string;
   stderr?: string;
+  timedOut?: boolean;
+  aborted?: boolean;
+  spawnError?: string;
 }
 
 interface Scenario {
@@ -102,6 +105,10 @@ interface Scenario {
   resumeAfterRed?: number;
   /** The regression outcome for a reverted-candidate RED retry, when the base checkout cannot build the test alone. */
   redReverted?: CommandResult;
+  /** The reverted RED outcome for each such run, in order; the last repeats. Overrides `redReverted`. */
+  revertedReds?: CommandResult[];
+  /** Resume right after this reverted RED run (1-based). */
+  resumeAfterReverted?: number;
   /** Whether a revert patch applies to the candidate; false reports the controller's failed-apply evidence. */
   revertApplies?: (patch: string) => boolean;
   /** The code reviewer's result for each review, in order; the last repeats. */
@@ -177,6 +184,7 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
   let changed = 0;
   let candidates = 0;
   let redRuns = 0;
+  let revertedRuns = 0;
   let planned = 0;
   let codeReviewed = 0;
   let verified = 0;
@@ -220,7 +228,7 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
   }
   // The argv the job asked for: a regression run names its test only there.
   const commandPayload = (id: string, r: CommandResult, argv: string[] = [id]) => ({
-    command: { id, argv, exitCode: r.exitCode ?? 0, stdoutTail: r.stdout ?? "", stderrTail: r.stderr ?? "", ...(r.report !== undefined ? { report: { text: r.report, truncated: false } } : {}) },
+    command: { id, argv, exitCode: r.exitCode ?? 0, ...(r.timedOut === true ? { timedOut: true } : {}), ...(r.aborted === true ? { aborted: true } : {}), ...(r.spawnError !== undefined ? { spawnError: r.spawnError } : {}), stdoutTail: r.stdout ?? "", stderrTail: r.stderr ?? "", ...(r.report !== undefined ? { report: { text: r.report, truncated: false } } : {}) },
   });
 
   function run(job: JobSpec, op: string): void {
@@ -287,7 +295,8 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
       return;
     }
     if (job.checkout?.from === "candidate" && job.checkout.revertPatch !== undefined) {
-      const outcome = scenario.redReverted ?? { exitCode: 1, report: FAILED };
+      const outcome = nth(scenario.revertedReds, revertedRuns) ?? scenario.redReverted ?? { exitCode: 1, report: FAILED };
+      revertedRuns += 1;
       record(
         "command",
         {
@@ -297,6 +306,7 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
         job,
         op,
       );
+      if (scenario.resumeAfterReverted === revertedRuns) resumeAt();
       return;
     }
     if (job.checkout?.from === "candidate") {
@@ -872,6 +882,27 @@ describe("issue-fix graph under the banyandb profile", () => {
       expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
       expect(jobs.filter((j) => j.purpose === "work")).toHaveLength(1);
       expect(baseRuns(jobs)).toHaveLength(2);
+    });
+
+    it("runs a RED that timed out or never started before the resume again", () => {
+      for (const failure of [{ exitCode: 1, timedOut: true }, { exitCode: 1, aborted: true }, { exitCode: 1, spawnError: "ENOSPC" }, { exitCode: 1, report: "" }] as CommandResult[]) {
+        const { decision, jobs } = simulate({ reds: [failure, { exitCode: 1, report: FAILED }], resumeAfterRed: 1 });
+        expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+        expect(jobs.filter((j) => j.purpose === "work")).toHaveLength(1);
+        expect(baseRuns(jobs)).toHaveLength(2);
+      }
+    });
+
+    it("runs a reverted RED that never ran before the resume again", () => {
+      const withPatch: DecisionRecord = { ...PLAN, revertPatch: "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n-old\n+new\n" };
+      const { decision, jobs } = simulate({
+        implement: [withPatch],
+        red: blocked,
+        revertedReds: [{ exitCode: 1, timedOut: true }, { exitCode: 1, report: FAILED }],
+        resumeAfterReverted: 1,
+      });
+      expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+      expect(jobs.filter((j) => (j.checkout as { revertPatch?: string } | undefined)?.revertPatch !== undefined).length).toBeGreaterThanOrEqual(2);
     });
 
     it("asks for a revert patch when RED cannot build after the resume either", () => {
