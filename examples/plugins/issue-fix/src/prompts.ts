@@ -228,8 +228,10 @@ export function changeDescription(record: DecisionRecord, plan?: DecisionRecord)
  * as written, or its id in backticks) AND talks about re-running or the
  * environment. A bare word such as "build" or "disk" never drops a follow-up.
  */
-export function deliverableFollowUp(profile: Profile, note: string): boolean {
-  if (withoutBookkeeping(note) === "") return false;
+export function deliverableFollowUp(profile: Profile, note: string): string | undefined {
+  // What is rendered is the sanitized text, never the original note.
+  const clean = withoutBookkeeping(note);
+  if (clean === "") return undefined;
   // Explicit references: the label or the command as the Test plan names it in backticks (`make test-ci`),
   // the id in backticks, or the id after the tool that runs it ("make lint"). Never a bare substring.
   const namesPinned = profile.commands.some((c) => {
@@ -237,7 +239,7 @@ export function deliverableFollowUp(profile: Profile, note: string): boolean {
     return named.some((n) => note.includes(n)) || new RegExp(`\\b(?:make|npm run|npx)\\s+${c.id.replace(/[^\w-]/g, "")}\\b`).test(note);
   });
   const staleCheck = /\b(?:re-?run(?:ning)?|run\s+again|free\s+disk|disk\s+space|sandbox|environment|checkout)\b/i.test(note);
-  return !(namesPinned && staleCheck);
+  return namesPinned && staleCheck ? undefined : clean;
 }
 
 /** The commit message: the title, the change and the issue it fixes. */
@@ -270,7 +272,9 @@ export function pullRequestDescription(
   const ref = issueRef(profile, args.issue);
   const decided = record.decisions.filter((d) => d.chosen?.trim());
   const checks = args.verified ?? [...commandsFor(profile, "passes"), ...commandsFor(profile, "builds")].map(commandSummary);
-  const followUps = (record.followUps ?? []).filter((f) => deliverableFollowUp(profile, f));
+  // Everything the implementer wrote that the body repeats goes through withoutBookkeeping.
+  const followUps = (record.followUps ?? []).flatMap((f) => deliverableFollowUp(profile, f) ?? []);
+  const questions = record.openQuestions.map(withoutBookkeeping).filter((q) => q !== "");
   const lines = [
     `### Fix ${ref}: ${args.issueTitle}`,
     ...profile.pullRequest.checklist,
@@ -278,9 +282,13 @@ export function pullRequestDescription(
     "## Summary",
     changeDescription(record, args.plan),
     ...(decided.length > 0
-      ? ["", "## Decisions", ...decided.map((d) => `- ${d.point}: ${d.chosen!.trim()}. ${d.basis.trim()}${d.options.length > 1 ? ` Alternatives: ${d.options.filter((o) => o !== d.chosen).join("; ")}.` : ""}`)]
+      ? ["", "## Decisions", ...decided.map((d) => {
+          const basis = withoutBookkeeping(d.basis);
+          const others = d.options.filter((o) => o !== d.chosen).map(withoutBookkeeping).filter((o) => o !== "");
+          return `- ${withoutBookkeeping(d.point) || d.point}: ${withoutBookkeeping(d.chosen!) || d.chosen!.trim()}.${basis !== "" ? ` ${basis}` : ""}${d.options.length > 1 && others.length > 0 ? ` Alternatives: ${others.join("; ")}.` : ""}`;
+        })]
       : []),
-    ...(record.openQuestions.length > 0 ? ["", "## Open questions", "This change leaves these behaviours unchanged:", ...record.openQuestions.map((q) => `- ${q}`)] : []),
+    ...(questions.length > 0 ? ["", "## Open questions", "This change leaves these behaviours unchanged:", ...questions.map((q) => `- ${q}`)] : []),
     ...(followUps.length > 0 || (args.reviewFollowUps ?? []).length > 0
       ? ["", "## Follow-ups", ...followUps.map((f) => `- ${f}`), ...(args.reviewFollowUps ?? []).map((f) => `- Code review: ${f}`)]
       : []),

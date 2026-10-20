@@ -1057,9 +1057,23 @@ describe("issue-fix graph under the banyandb profile", () => {
         "Re-running compaction after a crash may duplicate parts.",
         "Add a lint rule for this.",
       ];
-      for (const note of keep) expect(deliverableFollowUp(PROFILE, note), note).toBe(true);
+      for (const note of keep) expect(deliverableFollowUp(PROFILE, note), note).toBe(note);
       const drop = ["Re-run make test-ci in a checkout with free disk.", "Run `build` again once the sandbox has network.", "I3 still open."];
-      for (const note of drop) expect(deliverableFollowUp(PROFILE, note), note).toBe(false);
+      for (const note of drop) expect(deliverableFollowUp(PROFILE, note), note).toBeUndefined();
+    });
+
+    it("renders sanitized text for follow-ups, decisions and open questions, never the original", () => {
+      expect(deliverableFollowUp(PROFILE, "Consider a metric for long-running actions. I fixed I3 in .graphloom/issues.json.")).toBe("Consider a metric for long-running actions.");
+      const record = round("x", {
+        followUps: ["Consider a metric for long-running actions. I fixed I3 in .graphloom/issues.json."],
+        openQuestions: ["Should the metric keep counting? I left it as is for I5."],
+        decisions: [{ point: "What to do", tier: "behaviour", options: ["warn", "cancel"], chosen: "warn", basis: "The issue asks for it. I confirmed I2 against .graphloom/issues.json." }],
+      });
+      const body = pullRequestDescription(PROFILE, { issue: ISSUE, issueTitle: "t", record, base: "abc", review: "Reviewed." });
+      expect(body).toContain("- Consider a metric for long-running actions.\n");
+      expect(body).toContain("- Should the metric keep counting?\n");
+      expect(body).toContain("- What to do: warn. The issue asks for it. Alternatives: cancel.");
+      expect(body).not.toMatch(/\bI\d+\b|\.graphloom|I fixed|I left|I confirmed/);
     });
 
     it("keeps change sentences that only look like narration, and still strips narration and ids", () => {
