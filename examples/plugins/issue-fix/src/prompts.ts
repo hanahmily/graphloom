@@ -280,18 +280,23 @@ export function pullRequestDescription(
   // Everything the implementer wrote that the body repeats goes through withoutBookkeeping.
   const followUps = (record.followUps ?? []).flatMap((f) => deliverableFollowUp(profile, f) ?? []);
   const questions = record.openQuestions.map(withoutBookkeeping).filter((q) => q !== "");
+  // A decision whose point or choice is nothing but bookkeeping is left out, rather than shown as written.
+  const decisions = decided.flatMap((d) => {
+    const point = withoutBookkeeping(d.point);
+    const chosen = withoutBookkeeping(d.chosen!);
+    if (point === "" || chosen === "") return [];
+    const basis = withoutBookkeeping(d.basis);
+    const others = d.options.filter((o) => o !== d.chosen).map(withoutBookkeeping).filter((o) => o !== "");
+    return [`- ${point}: ${chosen}.${basis !== "" ? ` ${basis}` : ""}${d.options.length > 1 && others.length > 0 ? ` Alternatives: ${others.join("; ")}.` : ""}`];
+  });
   const lines = [
     `### Fix ${ref}: ${args.issueTitle}`,
     ...profile.pullRequest.checklist,
     "",
     "## Summary",
     changeDescription(record, args.plan),
-    ...(decided.length > 0
-      ? ["", "## Decisions", ...decided.map((d) => {
-          const basis = withoutBookkeeping(d.basis);
-          const others = d.options.filter((o) => o !== d.chosen).map(withoutBookkeeping).filter((o) => o !== "");
-          return `- ${withoutBookkeeping(d.point) || d.point}: ${withoutBookkeeping(d.chosen!) || d.chosen!.trim()}.${basis !== "" ? ` ${basis}` : ""}${d.options.length > 1 && others.length > 0 ? ` Alternatives: ${others.join("; ")}.` : ""}`;
-        })]
+    ...(decisions.length > 0
+      ? ["", "## Decisions", ...decisions]
       : []),
     ...(questions.length > 0 ? ["", "## Open questions", "This change leaves these behaviours unchanged:", ...questions.map((q) => `- ${q}`)] : []),
     ...(followUps.length > 0 || (args.reviewFollowUps ?? []).length > 0

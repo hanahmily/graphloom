@@ -1082,6 +1082,21 @@ describe("issue-fix graph under the banyandb profile", () => {
       expect(body).not.toMatch(/\bI\d+\b|\.graphloom|I fixed|I left|I confirmed/);
     });
 
+    it("leaves out a decision whose point or choice is nothing but bookkeeping", () => {
+      const record = round("x", {
+        decisions: [
+          { point: "Address I3 in .graphloom/issues.json", tier: "behaviour", options: ["a", "b"], chosen: "a", basis: "Keeps the order." },
+          { point: "Retry policy", tier: "behaviour", options: ["fixed", "backoff"], chosen: "I fixed I5.", basis: "Simpler." },
+          { point: "Timeout", tier: "behaviour", options: ["warn", "cancel"], chosen: "warn", basis: "The issue asks for it." },
+        ],
+      });
+      const body = pullRequestDescription(PROFILE, { issue: ISSUE, issueTitle: "t", record, base: "abc", review: "Reviewed." });
+      expect(body).toContain("- Timeout: warn. The issue asks for it. Alternatives: cancel.");
+      expect(body).not.toMatch(/\bI\d+\b|\.graphloom|I fixed|Retry policy/);
+      const onlyBookkeeping = round("x", { decisions: [{ point: "Address I3", tier: "behaviour", options: ["a"], chosen: "a", basis: "" }] });
+      expect(pullRequestDescription(PROFILE, { issue: ISSUE, issueTitle: "t", record: onlyBookkeeping, base: "abc", review: "Reviewed." })).not.toContain("## Decisions");
+    });
+
     it("keeps change sentences that only look like narration, and still strips narration and ids", () => {
       const change = 'I/O errors are now retried. The I2C probe is unchanged. The log says "I fixed it" on success.';
       expect(withoutBookkeeping(change)).toBe(change);
