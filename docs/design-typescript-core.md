@@ -634,6 +634,39 @@ switch, rollback is another recorded compatible transition under admission and
 remaining limits; it never resurrects invalidated receipts or treats a known-bad
 gate as valid. Stop/resume preserves both failed and successful transitions.
 
+### Moving a run onto upgraded executors
+
+A run pins its executor catalog at intake (id, source, isolation, built-in
+status, input shape and a digest of the code). Resume checks the pins against what
+the runner serves, so an installed executor whose bytes changed stops the run with
+`executor pin mismatch`. The blocker adds the way forward: `resume with
+--update-executors to pin the installed executor`.
+
+`graphloom resume <run> --update-executors` is the operator's explicit transition,
+the executor counterpart of `--update-plugin` (the two combine). For each pinned
+executor whose installed digest or source location changed, the controller
+replaces the catalog entry with the installed descriptor, taken as data (digest,
+input shape, source, entry module), and records the transition: old digest to new
+digest and the generation it took effect, in durable state
+(`executorTransitions`, shown by `inspect`), as an `executorUpdate` evidence
+record, and as a version-history entry. A dispatch admitted before the stop and
+not yet started carries the new digest. The run then continues; later resumes
+need no flag.
+
+The flag refuses, as an `executor pin mismatch` naming the executor, when the
+executor is no longer installed, its `isolation` or `builtin` status changed (the
+operator reconfigured how it runs; re-pinning would hide it), or its entry is an
+active run-local repair whose base the installed bytes have moved past: the
+qualified copy stays pinned and only a repair replaces it. The pinned descriptor
+carries no declared effect today, so there is no effect check; one that did would
+need to refuse on change.
+
+Accepted receipts and evidence are not rewritten. A receipt's identity binds the
+workspace change and artifact digests it was accepted on, and evidence records
+the job that produced it, never an executor digest, so evidence produced
+before the transition stays valid evidence of what ran then. Only dispatches
+after the transition run the new bytes.
+
 ### Resume retries what failed
 
 An operator resumes because something changed (code, config, environment,
@@ -665,7 +698,7 @@ controller never learns a plugin's reason strings. On resume:
 | retryable | plugin host failure (`plugin host: …`, `plugin host restart failed`) | controller | graph retries |
 | retryable | step limit | controller | the recovery episode continues |
 | retryable | environment (`environment check failed`, `environment preparation failed`, `environment changed`) | controller | checked again before the graph runs |
-| retryable | rechecked on resume (`worktree mismatch`, `pin mismatch`, `executor pin mismatch`, `reconcile required`, `repair rehydration required`, `delivery changed after acceptance`) | controller | resume checks it again first |
+| retryable | rechecked on resume (`worktree mismatch`, `pin mismatch`, `executor pin mismatch` (`--update-executors` re-pins changed executors), `reconcile required`, `repair rehydration required`, `delivery changed after acceptance`) | controller | resume checks it again first |
 | retryable | any other stop, and a graph or supervisor stop that does not say | controller / default | graph retries |
 | final | needs maintainer decision, cannot reproduce, incompatible task | plugin (`retryable: false`) | same blocker until a change |
 | final | budget exhausted (`budgets exhausted`, `<budget> budget exhausted`) | controller, or plugin (`retryable: false`) | same blocker until a budget is raised (or another change) |

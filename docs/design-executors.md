@@ -677,7 +677,10 @@ including an agent's child tool call, carries the pinned digest, and the runner
 refuses to run different bytes. A dispatch naming an executor outside the catalog
 is refused. Resume stops with `executor pin mismatch` when a pinned executor's
 digest, source, isolation, or built-in status changed, or it is no longer
-installed.
+installed. `resume --update-executors` re-pins executors whose bytes or source
+changed and records old -> new digest (core design, "Moving a run onto upgraded
+executors"); it refuses a changed isolation or built-in status, a missing
+executor, and an executor with an active run-local repair.
 
 A failed executor job records its evidence plus an `executorFailure` record
 (operation, stage, attempt, pinned executor, status, summary, and any requested

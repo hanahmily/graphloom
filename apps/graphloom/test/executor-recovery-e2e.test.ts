@@ -25,7 +25,7 @@ import {
   digestExecutorSource,
   type Runner,
 } from "@graphloom/runner";
-import { createController, loadRunState, type RepairDeps } from "@graphloom/controller";
+import { createController, loadRunState, saveRunState, type RepairDeps } from "@graphloom/controller";
 import { createScriptedSupervisor, type ScriptedRecoveryStep, type SupervisorInput } from "@graphloom/supervisor";
 import { githubBinding, githubExecutorPackage } from "@graphloom/executor-github";
 import { startFakeGitHub, type FakeGitHub } from "@graphloom/executor-github/testing";
@@ -512,6 +512,132 @@ describe("pinned executor digests (#41)", () => {
     });
     expect(missing.stopReason).toBe("executor pin mismatch");
     expect(missing.blocker).toBe("pinned executor acme.mirror/list-comments is no longer installed");
+  });
+});
+
+describe("resume --update-executors (#156)", () => {
+  async function pausedMirror(runId: string, opts: { copyBundle?: boolean } = {}) {
+    const server = await fake();
+    const env = await makeEnv();
+    const mirror = await mirrorPackage(env.taskDir, { broken: false });
+    if (opts.copyBundle) {
+      const bundle = path.join(env.taskDir, "hello-bundle");
+      await execFileAsync("cp", ["-r", helloBundle, bundle]);
+      await rm(path.join(env.taskDir, "plugins/hello"));
+      await symlink(bundle, path.join(env.taskDir, "plugins/hello"));
+    }
+    const first = await createController().run({
+      taskPath: env.taskPath,
+      plugin: graph(MIRROR, "pause"),
+      validators,
+      runner: hostRunner(server, mirror),
+      stateRoot: env.stateRoot,
+      runId,
+    });
+    expect(first.stopReason, first.blocker).toBe("pause");
+    const resume = (runner: Runner, patch: { updateExecutors?: boolean; updatePlugin?: boolean } = {}) =>
+      createController().resume({ runRef: first.stateDir, plugin: graph(MIRROR, "resumed"), validators, runner, ...patch });
+    const upgrade = async () => writeFile(mirror.entry, `${await readFile(mirror.entry, "utf8")}// upgraded\n`);
+    return { server, env, mirror, first, resume, upgrade };
+  }
+  const pinnedEntry = async (stateDir: string) => (await loadRunState(stateDir)).executorCatalog!.find((e) => e.id === MIRROR)!;
+
+  it("re-pins an executor whose bytes changed and records old -> new digest at its generation", async () => {
+    const { server, mirror, first, resume, upgrade } = await pausedMirror("update-executors");
+    const before = await pinnedEntry(first.stateDir);
+    const receiptsBefore = (await loadRunState(first.stateDir)).receipts;
+    await upgrade();
+    const upgraded = await digestExecutorSource(mirror.dir);
+
+    const resumed = await resume(hostRunner(server, mirror), { updateExecutors: true });
+    expect(resumed.stopReason, resumed.blocker).toBe("resumed");
+
+    const state = await loadRunState(first.stateDir);
+    expect(await pinnedEntry(first.stateDir)).toMatchObject({ digest: upgraded, isolation: "sandbox", builtin: false });
+    expect(upgraded).not.toBe(before.digest);
+    // Only the changed executor moved: the built-in GitHub pin is untouched.
+    expect(state.executorTransitions).toEqual([
+      { id: MIRROR, fromDigest: before.digest, toDigest: upgraded, generation: expect.any(Number), at: expect.any(String) },
+    ]);
+    const [recorded] = payloads(state.evidence, "executorUpdate");
+    expect(recorded).toMatchObject({ transitions: [{ id: MIRROR, fromDigest: before.digest, toDigest: upgraded }] });
+    expect(state.versionHistory.map((v) => v.reason)).toContain(
+      `operator executor update: ${MIRROR} ${before.digest.slice(0, 12)} -> ${upgraded.slice(0, 12)}`,
+    );
+    expect(state.receipts).toEqual(receiptsBefore);
+    const inspected = await createController().inspect(first.stateDir);
+    expect(inspected.executorTransitions).toEqual(state.executorTransitions);
+
+    // Later resumes need no flag: the new digest is the pin.
+    const again = await resume(hostRunner(server, mirror));
+    expect(again.stopReason, again.blocker).toBe("resumed");
+    expect((await loadRunState(first.stateDir)).executorTransitions).toHaveLength(1);
+  });
+
+  it("stops without the flag and says how to proceed", async () => {
+    const { server, mirror, first, resume, upgrade } = await pausedMirror("update-executors-hint");
+    const before = await pinnedEntry(first.stateDir);
+    await upgrade();
+    const stopped = await resume(hostRunner(server, mirror));
+    expect(stopped.stopReason).toBe("executor pin mismatch");
+    expect(stopped.blocker).toMatch(
+      /^pinned executor acme\.mirror\/list-comments changed: digest [0-9a-f]{12} != pinned [0-9a-f]{12}; resume with --update-executors to pin the installed executor$/,
+    );
+    expect(await pinnedEntry(first.stateDir)).toEqual(before);
+    expect((await loadRunState(first.stateDir)).executorTransitions).toBeUndefined();
+  });
+
+  it("refuses a changed isolation, an executor no longer installed, and a repaired entry, naming the executor", async () => {
+    const { server, mirror, first, resume, upgrade } = await pausedMirror("update-executors-refused");
+    await upgrade();
+    const unsandboxed = await resume(hostRunner(server, mirror, false), { updateExecutors: true });
+    expect(unsandboxed.stopReason).toBe("executor pin mismatch");
+    expect(unsandboxed.blocker).toBe("pinned executor acme.mirror/list-comments changed: isolation unrestricted != pinned sandbox");
+
+    const missing = await resume(hostRunner(server), { updateExecutors: true });
+    expect(missing.stopReason).toBe("executor pin mismatch");
+    expect(missing.blocker).toBe("pinned executor acme.mirror/list-comments is no longer installed");
+
+    // An active run-local repair: the qualified copy stays pinned, and the installed bytes moving past its base is not adopted.
+    const state = await loadRunState(first.stateDir);
+    const entry = state.executorCatalog!.find((e) => e.id === MIRROR)!;
+    const root = path.join(path.dirname(mirror.dir), "acme-mirror-repair");
+    await execFileAsync("cp", ["-r", mirror.dir, root]);
+    await writeFile(path.join(root, "index.mjs"), (await readFile(path.join(root, "index.mjs"), "utf8")).replace("// upgraded\n", "// repaired\n"));
+    const repairedDigest = await digestExecutorSource(root);
+    await saveRunState({
+      ...state,
+      executorCatalog: state.executorCatalog!.map((e) =>
+        e.id === MIRROR
+          ? { ...entry, digest: repairedDigest, repair: { artifactId: "repair-1", root, entryModule: path.join(root, "index.mjs"), baseDigest: entry.digest } }
+          : e,
+      ),
+    });
+    const repaired = await resume(hostRunner(server, mirror), { updateExecutors: true });
+    expect(repaired.stopReason).toBe("executor pin mismatch");
+    expect(repaired.blocker).toMatch(/^pinned executor acme\.mirror\/list-comments has an active repair repair-1; --update-executors does not replace it/);
+    const after = await loadRunState(first.stateDir);
+    expect(after.executorCatalog!.find((e) => e.id === MIRROR)).toMatchObject({ digest: repairedDigest, repair: { artifactId: "repair-1" } });
+    expect(after.executorTransitions).toBeUndefined();
+  });
+
+  it("combines with --update-plugin", async () => {
+    const { server, env, mirror, first, resume, upgrade } = await pausedMirror("update-both", { copyBundle: true });
+    const pinned = (await loadRunState(first.stateDir)).intake.bundle;
+    const before = await pinnedEntry(first.stateDir);
+    await upgrade();
+    const entry = path.join(env.taskDir, "hello-bundle/dist/index.js");
+    await writeFile(entry, `${await readFile(entry, "utf8")}\n// a fix to the graph's routing\n`);
+
+    expect(await resume(hostRunner(server, mirror), { updatePlugin: true })).toMatchObject({ stopReason: "executor pin mismatch" });
+    expect(await resume(hostRunner(server, mirror), { updateExecutors: true })).toMatchObject({ stopReason: "pin mismatch" });
+
+    const both = await resume(hostRunner(server, mirror), { updatePlugin: true, updateExecutors: true });
+    expect(both.stopReason, both.blocker).toBe("resumed");
+    const state = await loadRunState(first.stateDir);
+    expect(state.intake.bundle.entryDigest).not.toBe(pinned.entryDigest);
+    expect((await pinnedEntry(first.stateDir)).digest).not.toBe(before.digest);
+    expect(state.versionHistory.map((v) => v.reason).filter((r) => r.startsWith("operator "))).toHaveLength(2);
   });
 });
 

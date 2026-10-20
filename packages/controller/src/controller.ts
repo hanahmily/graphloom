@@ -51,7 +51,7 @@ import {
 import { isUnsettled, reconcilePendingDispatch } from "./reconcile.js";
 import { reconcileChildOperations } from "./children.js";
 import { wipeAgentSessions } from "./agent-sessions.js";
-import { pinExecutorCatalog, verifyExecutorCatalog } from "./executor-catalog.js";
+import { applyExecutorRepin, pinExecutorCatalog, verifyExecutorCatalog, type ExecutorRepin } from "./executor-catalog.js";
 import {
   getSession,
   registerSession,
@@ -72,6 +72,8 @@ import {
   type RemedyRecord,
   type RunStatus,
   type SupervisorOutcomeRecord,
+  type ExecutorCatalogEntry,
+  type ExecutorTransitionRecord,
   type VersionRecord,
 } from "./state.js";
 import { returnToGraphOnResume } from "./resume-recovery.js";
@@ -170,6 +172,14 @@ export interface ResumeRequest {
    * validators.
    */
   updatePlugin?: boolean;
+  /**
+   * Pin the installed executors whose bytes changed since the run started,
+   * recording each old -> new digest. Refused for an executor that is no
+   * longer installed, whose isolation or built-in status changed, or whose
+   * active repair the installed bytes moved past. Accepted receipts and
+   * evidence are not changed.
+   */
+  updateExecutors?: boolean;
 }
 
 export interface RunReport {
@@ -210,6 +220,8 @@ export interface InspectReport {
   evidenceRefs: string[];
   budgets: BudgetRemaining;
   versionHistory: VersionRecord[];
+  /** Executors the operator re-pinned to installed code (`resume --update-executors`): old -> new digest at the generation it took effect. */
+  executorTransitions: ExecutorTransitionRecord[];
   activeVersion: string;
   generation: number;
   worktreePath: string;
@@ -677,14 +689,15 @@ export function createController(): Controller {
           await saveRunState(state);
           return toReport(state, await listDirtyPaths(state.intake.repoPath));
         }
-        const executorBlocker = await verifyExecutorCatalog(state, request.runner).catch(
-          (err: unknown) => `executor catalog unreadable: ${err instanceof Error ? err.message : String(err)}`,
+        const executorCheck = await verifyExecutorCatalog(state, request.runner, request.updateExecutors === true).catch(
+          (err: unknown) => ({ blocker: `executor catalog unreadable: ${err instanceof Error ? err.message : String(err)}` }),
         );
-        if (executorBlocker !== undefined) {
-          state = { ...state, status: "stopped", stopReason: "executor pin mismatch", blocker: executorBlocker };
+        if (executorCheck !== undefined && "blocker" in executorCheck) {
+          state = { ...state, status: "stopped", stopReason: "executor pin mismatch", blocker: executorCheck.blocker };
           await saveRunState(state);
           return toReport(state, await listDirtyPaths(state.intake.repoPath));
         }
+        const executorUpdate: { catalog: ExecutorCatalogEntry[]; repins: ExecutorRepin[] } | undefined = executorCheck;
 
         // Host-backed validators already evaluate in the active (repaired) bundle;
         // explicit in-process validators must be rebound to the repaired candidate.
@@ -741,6 +754,12 @@ export function createController(): Controller {
             definition: { ...updated.state.definition, version: pluginUpdate.version },
             versionHistory: [...(state.versionHistory ?? []), { activeVersion: state.activeVersion, generation: state.generation, reason, at: new Date().toISOString() }],
           });
+          revisionBridge.current = state.stateRevision;
+          await saveRunState(state);
+        }
+
+        if (executorUpdate !== undefined && executorUpdate.repins.length > 0) {
+          state = applyExecutorRepin(state, executorUpdate.catalog, executorUpdate.repins);
           revisionBridge.current = state.stateRevision;
           await saveRunState(state);
         }
@@ -1160,6 +1179,7 @@ function toInspect(state: DurableRunState): InspectReport {
     evidenceRefs: state.evidence.map((e) => e.ref),
     budgets: { ...state.budgets },
     versionHistory: structuredClone(state.versionHistory ?? []),
+    executorTransitions: structuredClone(state.executorTransitions ?? []),
     activeVersion: state.activeVersion,
     generation: state.generation,
     worktreePath: state.worktreePath,
@@ -1282,7 +1302,7 @@ export { admitValidation, freshEvidence } from "./admit.js";
 export { toRunView, bumpGeneration, classifyAgentResult } from "./loop.js";
 export type { ContractOutcome } from "./loop.js";
 export { loadRunState, saveRunState } from "./state.js";
-export type { DurableRunState, RemedyRecord, RunStatus, SupervisorOutcomeRecord, VersionRecord } from "./state.js";
+export type { DurableRunState, ExecutorTransitionRecord, RemedyRecord, RunStatus, SupervisorOutcomeRecord, VersionRecord } from "./state.js";
 export type { DeleteReport } from "./delete-run.js";
 export type { IntakePin, TaskConfigPin } from "./intake.js";
 export type {
