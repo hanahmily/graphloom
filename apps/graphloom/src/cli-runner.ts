@@ -1,6 +1,6 @@
 import path from "node:path";
 import { BUILTIN_AGENT_EXECUTOR_ID, pinJobExecutor, type JobSpec } from "@graphloom/sdk";
-import { createBuiltinExecutorRunner, type JobResult, type Runner } from "@graphloom/runner";
+import { createBuiltinExecutorRunner, type ExecutorDescriptor, type JobResult, type Runner } from "@graphloom/runner";
 import {
   CLAUDE_BIN_ENV,
   CLAUDE_CONFIG_DIR_ENV,
@@ -150,7 +150,16 @@ export function createCliRunner(
   };
   return {
     async describeExecutors() {
-      return [...(await defaultAgent.describeExecutors!()), ...(await others.describeExecutors!())];
+      // The shape shown for the coding agent is what a job's input must carry; route() takes
+      // the harness choice out of it before the executor sees it, so it is added here.
+      const withHarness = (d: ExecutorDescriptor): ExecutorDescriptor => {
+        const schema = d.inputShape?.schema;
+        const properties = schema?.["properties"];
+        if (d.id !== CODING_AGENT_RUN_ID || d.inputShape === undefined || schema === undefined || properties === null || typeof properties !== "object") return d;
+        const harness = { type: "string", enum: [...agents.keys()], description: `Optional; default ${config.harness}.` };
+        return { ...d, inputShape: { ...d.inputShape, schema: { ...schema, properties: { ...properties, harness } } } };
+      };
+      return [...(await defaultAgent.describeExecutors!()).map(withHarness), ...(await others.describeExecutors!())];
     },
     // The same routing and input shaping runJob applies, so the executor checks
     // exactly the input it would be given.

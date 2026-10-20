@@ -1,4 +1,4 @@
-import { defineExecutor, type ExecutorContext, type ExecutorDefinition, type ToolCallResult } from "@graphloom/sdk";
+import { defineExecutor, jsonSchemaProblem, type ExecutorContext, type ExecutorDefinition, type ToolCallResult } from "@graphloom/sdk";
 import type { CodingHarness, CodingSession, CodingTool } from "./harness.js";
 
 export const CODING_AGENT_RUN_ID = "graphloom.coding-agent/run";
@@ -28,6 +28,27 @@ interface ToolCallSummary {
   status: ToolCallResult["status"];
   childOperationId: string | null;
   replayed: boolean;
+}
+
+/**
+ * The input a job names as `input`, as data. A harness choice and the job's own
+ * stageId/purpose are the router's, not part of this shape.
+ */
+export const CODING_AGENT_INPUT_SHAPE = {
+  schema: {
+    type: "object",
+    required: ["assignment"],
+    properties: {
+      assignment: { type: "string", minLength: 1, maxLength: MAX_ASSIGNMENT_CHARS, description: "The instruction the agent works from; there is no prompt or instruction field." },
+      resultSchema: { type: "string", description: "Name of a result contract the graph declared." },
+      harnessOptions: { type: "object", description: "Passed to the harness session unchanged." },
+    },
+  },
+  example: { assignment: "Create GREETING.txt containing the greeting." },
+} as const;
+
+function inputProblem(v: unknown): string | undefined {
+  return jsonSchemaProblem(CODING_AGENT_INPUT_SHAPE.schema, v);
 }
 
 function isInput(v: unknown): v is CodingAgentInput {
@@ -60,6 +81,8 @@ export function createCodingAgentExecutor(
     version: "1",
     effect: "write",
     inputSchema: isInput,
+    inputProblem,
+    inputShape: CODING_AGENT_INPUT_SHAPE,
     async execute(input, ctx: ExecutorContext) {
       const h = typeof harness === "function" ? await harness() : harness;
       const toolCalls: ToolCallSummary[] = [];

@@ -57,41 +57,99 @@ export function commandSucceeded(outcome: CommandOutcome): boolean {
   return outcome.exitCode === 0 && outcome.spawnError === undefined && !outcome.timedOut && !outcome.aborted;
 }
 
-export function isCommandInput(v: unknown): v is CommandInput {
-  if (v === null || typeof v !== "object" || Array.isArray(v)) return false;
+/**
+ * Why `v` is not a valid command input: the first failing path and its rule,
+ * or undefined when it is valid. `isCommandInput` is defined in terms of it.
+ */
+export function commandInputProblem(v: unknown): string | undefined {
+  if (v === null || typeof v !== "object" || Array.isArray(v)) return "input: must be an object";
   const o = v as Record<string, unknown>;
-  if (!Array.isArray(o.commands) || o.commands.length === 0 || o.commands.length > MAX_COMMANDS) return false;
+  if (o.commands === undefined) {
+    const keys = Object.keys(o);
+    return `commands: required, an array of 1-${MAX_COMMANDS} {id, argv} objects${keys.length > 0 ? ` (got only: ${keys.slice(0, 5).join(", ")})` : ""}`;
+  }
+  if (!Array.isArray(o.commands) || o.commands.length === 0 || o.commands.length > MAX_COMMANDS) {
+    return `commands: must be an array of 1-${MAX_COMMANDS} {id, argv} objects`;
+  }
   const ids = new Set<string>();
-  for (const raw of o.commands as unknown[]) {
-    if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return false;
+  for (const [i, raw] of (o.commands as unknown[]).entries()) {
+    const at = `commands[${i}]`;
+    if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return `${at}: must be an object {id, argv}`;
     const c = raw as Record<string, unknown>;
-    if (typeof c.id !== "string" || !COMMAND_ID.test(c.id) || ids.has(c.id)) return false;
+    if (typeof c.id !== "string") return `${at}.id: required string`;
+    if (!COMMAND_ID.test(c.id)) return `${at}.id: must match ${COMMAND_ID.source}`;
+    if (ids.has(c.id)) return `${at}.id: duplicate id ${JSON.stringify(c.id)}; ids are unique within the job`;
     ids.add(c.id);
-    if (
-      !Array.isArray(c.argv) ||
-      c.argv.length === 0 ||
-      c.argv.length > MAX_ARGS ||
-      !c.argv.every((a) => typeof a === "string" && a.length <= MAX_ARG_CHARS) ||
-      (c.argv[0] as string).length === 0
-    ) {
-      return false;
-    }
+    if (!Array.isArray(c.argv)) return `${at}.argv: must be an array of strings, e.g. ["go","env"] (got ${describeType(c.argv)})`;
+    if (c.argv.length === 0 || c.argv.length > MAX_ARGS) return `${at}.argv: must hold 1-${MAX_ARGS} strings`;
+    const bad = c.argv.findIndex((a) => typeof a !== "string" || a.length > MAX_ARG_CHARS);
+    if (bad >= 0) return `${at}.argv[${bad}]: must be a string of at most ${MAX_ARG_CHARS} characters`;
+    if ((c.argv[0] as string).length === 0) return `${at}.argv[0]: the program must not be empty`;
     if (
       c.timeoutMs !== undefined &&
       (typeof c.timeoutMs !== "number" || !Number.isSafeInteger(c.timeoutMs) || c.timeoutMs < 1 || c.timeoutMs > MAX_COMMAND_TIMEOUT_MS)
     ) {
-      return false;
+      return `${at}.timeoutMs: must be an integer from 1 to ${MAX_COMMAND_TIMEOUT_MS}`;
     }
   }
-  if (o.continueOnFailure !== undefined && typeof o.continueOnFailure !== "boolean") return false;
+  if (o.continueOnFailure !== undefined && typeof o.continueOnFailure !== "boolean") return "continueOnFailure: must be a boolean";
   if (o.env !== undefined) {
-    if (o.env === null || typeof o.env !== "object" || Array.isArray(o.env)) return false;
+    if (o.env === null || typeof o.env !== "object" || Array.isArray(o.env)) return "env: must be an object of string values";
     for (const [name, value] of Object.entries(o.env)) {
-      if (!ENV_NAME.test(name) || name === REPORT_FILE_ENV || typeof value !== "string") return false;
+      if (!ENV_NAME.test(name)) return `env.${name}: name must match ${ENV_NAME.source}`;
+      if (name === REPORT_FILE_ENV) return `env.${name}: reserved, the executor sets it`;
+      if (typeof value !== "string") return `env.${name}: must be a string`;
     }
   }
-  return true;
+  return undefined;
 }
+
+export function isCommandInput(v: unknown): v is CommandInput {
+  return commandInputProblem(v) === undefined;
+}
+
+function describeType(v: unknown): string {
+  if (v === null) return "null";
+  return Array.isArray(v) ? "array" : typeof v;
+}
+
+/** The input shape as data: a JSON Schema matching `isCommandInput` where a schema can say it, and a minimal example. */
+export const COMMAND_INPUT_SHAPE = {
+  schema: {
+    type: "object",
+    required: ["commands"],
+    properties: {
+      commands: {
+        type: "array",
+        minItems: 1,
+        maxItems: MAX_COMMANDS,
+        items: {
+          type: "object",
+          required: ["id", "argv"],
+          properties: {
+            id: { type: "string", pattern: COMMAND_ID.source, description: "Unique within the job." },
+            argv: {
+              type: "array",
+              minItems: 1,
+              maxItems: MAX_ARGS,
+              items: { type: "string", maxLength: MAX_ARG_CHARS },
+              description: "Program then arguments, a plain array of strings; no shell unless argv names one.",
+            },
+            timeoutMs: { type: "integer", minimum: 1, maximum: MAX_COMMAND_TIMEOUT_MS },
+          },
+        },
+      },
+      continueOnFailure: { type: "boolean" },
+      env: {
+        type: "object",
+        propertyNames: { pattern: ENV_NAME.source },
+        additionalProperties: { type: "string" },
+        description: `Not ${REPORT_FILE_ENV}.`,
+      },
+    },
+  },
+  example: { commands: [{ id: "go-env", argv: ["go", "env", "GOCACHE"] }] },
+} as const;
 
 /**
  * The command executor: runs each command in the job's workspace, in order,
@@ -105,6 +163,8 @@ export function createCommandExecutor(): ExecutorDefinition<CommandInput> {
     version: "1",
     effect: "write",
     inputSchema: isCommandInput,
+    inputProblem: commandInputProblem,
+    inputShape: COMMAND_INPUT_SHAPE,
     async execute(input, ctx: ExecutorContext) {
       const outcomes: CommandOutcome[] = [];
       for (const spec of input.commands) {

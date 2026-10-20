@@ -6,12 +6,14 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import {
   MAX_SESSION_REF_CHARS,
+  boundedInputShape,
   parseJsonBounded,
   pinJobExecutor,
   validateExecutorInput,
   type ExecutorContext,
   type ExecutorDefinition,
   type ExecutorEffect,
+  type ExecutorInputShape,
   type ExecutorPin,
   type JobSpec,
   type ToolCallResult,
@@ -282,13 +284,17 @@ export function createTrustedInProcessRunner(
 
   return {
     async describeExecutors() {
-      const own = [...byId.keys()].map((id) => ({
-        id,
-        digest: digests.get(id)!,
-        source: "in-process",
-        isolation: "in-process" as const,
-        builtin: options.builtin === true,
-      }));
+      const own = [...byId.values()].map((def) => {
+        const inputShape = boundedInputShape(def.inputShape);
+        return {
+          id: def.id,
+          digest: digests.get(def.id)!,
+          source: "in-process",
+          isolation: "in-process" as const,
+          builtin: options.builtin === true,
+          ...(inputShape !== undefined ? { inputShape } : {}),
+        };
+      });
       return [...own, ...(await describeFallback(options.fallback, byId))];
     },
     async checkJob(job, ctx) {
@@ -416,9 +422,37 @@ export function createChildExecutorRunner(
     return { entry };
   };
 
+  // Declared input shapes by the digest of the code that declares them: the module is
+  // loaded in an executor process once per digest, and a failed read is retried later.
+  const shapeCache = new Map<string, Map<string, ExecutorInputShape>>();
+  const declaredShapes = async (digest: string): Promise<Map<string, ExecutorInputShape>> => {
+    const known = shapeCache.get(digest);
+    if (known !== undefined) return known;
+    try {
+      const described = await describeExecutorModule({
+        entryModule,
+        ...(options.sandbox === true ? { sandbox: true } : {}),
+        workerModule,
+        // The scoped environment and sandbox every other worker of this runner gets.
+        env: options.env ?? process.env,
+        ...(extraCa ? { readPaths: [extraCa] } : {}),
+      });
+      const shapes = new Map<string, ExecutorInputShape>();
+      for (const d of described) {
+        const shape = boundedInputShape(d.inputShape);
+        if (shape !== undefined) shapes.set(d.id, shape);
+      }
+      shapeCache.set(digest, shapes);
+      return shapes;
+    } catch {
+      return new Map();
+    }
+  };
+
   return {
     async describeExecutors() {
       const digest = await digestExecutorSource(sourceRoot ?? entryModule);
+      const shapes = await declaredShapes(digest);
       const own: ExecutorDescriptor[] = options.executorIds.map((id) => ({
         id,
         digest,
@@ -426,6 +460,7 @@ export function createChildExecutorRunner(
         ...(sourceRoot !== undefined ? { entryModule } : {}),
         isolation: options.sandbox === true ? "sandbox" : "unrestricted",
         builtin: options.builtin === true,
+        ...(shapes.has(id) ? { inputShape: shapes.get(id)! } : {}),
       }));
       return [...own, ...(await describeFallback(options.fallback, served))];
     },
@@ -682,6 +717,8 @@ export interface DescribedExecutor {
   id: string;
   version?: string;
   effect: ExecutorEffect;
+  /** Unvalidated: whatever the executor process declared. */
+  inputShape?: unknown;
 }
 
 /**
@@ -694,14 +731,19 @@ export async function describeExecutorModule(options: {
   sandbox?: boolean;
   workerModule?: string;
   timeoutMs?: number;
+  /** The worker's environment. Default: the caller's, as for check and execute workers. */
+  env?: NodeJS.ProcessEnv;
+  /** Extra paths the sandboxed worker may read, e.g. a CA bundle. */
+  readPaths?: string[];
 }): Promise<DescribedExecutor[]> {
   const workerModule = options.workerModule ?? fileURLToPath(new URL("./executor-worker.js", import.meta.url));
   const entry = path.resolve(options.entryModule);
   if (options.sandbox === true) assertSandboxSupported();
-  const args = options.sandbox === true ? sandboxNodeArgs([workerModule, entry]) : [];
+  const args = options.sandbox === true ? sandboxNodeArgs([workerModule, entry], options.readPaths ?? []) : [];
   const child = spawn(process.execPath, [...args, workerModule, entry], {
     stdio: ["pipe", "pipe", "pipe"],
     cwd: path.dirname(entry),
+    ...(options.env !== undefined ? { env: options.env } : {}),
   });
   const stderr: string[] = [];
   child.stderr.setEncoding("utf8");

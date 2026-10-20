@@ -1,5 +1,6 @@
 /** Public value contracts for GraphLoom plugins. No Accept operation exists. */
 
+import type { ExecutorInputShape } from "./executor.js";
 import type { GraphRehearsal } from "./rehearsal.js";
 
 export const PROTOCOL_VERSION = 1 as const;
@@ -234,6 +235,12 @@ export interface RunView {
   }>;
   /** Settled dispatches whose agent session a later job of the same stage may continue. */
   agentSessions?: AgentSessionView[];
+  /**
+   * Executors the run pinned that declare an input shape. Carried to the
+   * supervisor only (a graph composes its own input), as declared data the
+   * controller does not read.
+   */
+  executors?: ExecutorView[];
   /** What repair the operator authorized and the bundle's code permits. */
   repairAuthority?: RepairAuthorityView;
   /**
@@ -302,6 +309,11 @@ export interface RepairAuthorityView {
   /** `opaque`: the bundle's code cannot be patched; only validator substitution may apply. */
   contract: "source-repairable" | "opaque";
   grants: { sourceRepair: boolean; validatorSubstitution: boolean; executorRepair: boolean };
+}
+
+export interface ExecutorView {
+  id: string;
+  inputShape: ExecutorInputShape;
 }
 
 export interface AgentSessionView {

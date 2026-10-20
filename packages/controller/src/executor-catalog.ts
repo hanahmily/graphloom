@@ -1,7 +1,9 @@
 import {
   BUILTIN_AGENT_EXECUTOR_ID,
   BUILTIN_COMMAND_EXECUTOR_ID,
+  type ExecutorInputShape,
   type ExecutorPin,
+  type ExecutorView,
 } from "@graphloom/sdk";
 import {
   digestExecutorSource,
@@ -27,9 +29,24 @@ export async function pinExecutorCatalog(runner: Runner): Promise<ExecutorCatalo
         ...(d.entryModule !== undefined ? { entryModule: d.entryModule } : {}),
         isolation: d.isolation,
         builtin: d.builtin,
+        ...(d.inputShape !== undefined ? { inputShape: d.inputShape } : {}),
       },
     ];
   });
+}
+
+/** The declared input shapes of the run's pinned executors, for the supervisor to compose dispatch input against. */
+export function executorViews(state: DurableRunState): ExecutorView[] | undefined {
+  const views = (state.executorCatalog ?? []).flatMap((e) =>
+    e.inputShape !== undefined ? [{ id: e.id, inputShape: structuredClone(e.inputShape) }] : [],
+  );
+  return views.length > 0 ? views : undefined;
+}
+
+/** A declared input shape as JSON, cut to `limit` characters. */
+export function describeInputShape(shape: ExecutorInputShape, limit: number): string {
+  const text = JSON.stringify(shape);
+  return text.length <= limit ? text : `${text.slice(0, limit)}... (cut)`;
 }
 
 /**

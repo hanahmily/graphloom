@@ -4,5 +4,7 @@ import { executors as codingExecutors } from "./executors.js";
 
 export const executors = [
   ...codingExecutors,
-  ...codingExecutors.map((executor) => ({ ...executor, id: BUILTIN_AGENT_EXECUTOR_ID })),
+  // The alias takes its assignment from the job's instruction (the CLI router ignores its input),
+  // so it advertises no input shape.
+  ...codingExecutors.map(({ inputShape: _shape, ...executor }) => ({ ...executor, id: BUILTIN_AGENT_EXECUTOR_ID })),
 ];

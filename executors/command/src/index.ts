@@ -4,6 +4,8 @@ export {
   REPORT_FILE_ENV,
   commandSucceeded,
   createCommandExecutor,
+  COMMAND_INPUT_SHAPE,
+  commandInputProblem,
   isCommandInput,
   type CommandInput,
   type CommandOutcome,

@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { QualifyRepairSpec } from "@graphloom/sdk";
 import { assertAdmittedCandidateRoot } from "@graphloom/supervisor";
 import { digestExecutorSource } from "@graphloom/runner";
-import { executorRepairSubject } from "./executor-repair.js";
+import { activateExecutorRepair, executorRepairSubject } from "./executor-repair.js";
 import type { DurableRunState, ExecutorCatalogEntry } from "./state.js";
 
 const cleanup: string[] = [];
@@ -59,5 +59,71 @@ describe("executorRepairSubject", () => {
     // executor repair goes through) always failed with "no controller
     // snapshot record" — making the "executor" repair target entirely unusable.
     await expect(assertAdmittedCandidateRoot(repairsDir, snap.candidateRoot)).resolves.toBe(snap.candidateRoot);
+  });
+});
+
+describe("activateExecutorRepair input shapes", () => {
+  const moduleWith = (shape: string | undefined) =>
+    `export const executors = [{ id: "test.executor/run", version: "1", effect: "read", ${shape !== undefined ? `inputShape: ${shape},` : ""} async execute() { return { status: "ok", summary: "ran" }; } }];\n`;
+  async function packageWith(shape: string | undefined): Promise<{ root: string; entryModule: string }> {
+    const pkg = await fakeExecutorPackage();
+    await writeFile(pkg.entryModule, moduleWith(shape));
+    return pkg;
+  }
+  async function activated(candidateShape: string | undefined) {
+    const base = await packageWith('{ schema: { type: "object", description: "base" } }');
+    const candidate = await packageWith(candidateShape);
+    const digest = await digestExecutorSource(base.root);
+    const entry: ExecutorCatalogEntry = {
+      id: "test.executor/run",
+      digest,
+      source: base.root,
+      entryModule: base.entryModule,
+      isolation: "unrestricted",
+      builtin: false,
+      inputShape: { schema: { type: "object", description: "base" } },
+    };
+    const artifact = {
+      artifactId: "repair-1",
+      status: "qualified" as const,
+      target: "executor" as const,
+      executorId: entry.id,
+      candidateRoot: candidate.root,
+      candidateEntryModule: candidate.entryModule,
+      baseDigest: digest,
+      baseActiveVersion: "test-graph@0.1.0",
+      reason: "test",
+      createdAt: new Date().toISOString(),
+      candidateDigest: await digestExecutorSource(candidate.root),
+    };
+    const state = {
+      activeVersion: "test-graph@0.1.0",
+      generation: 1,
+      stateDir: await mkdtemp(path.join(os.tmpdir(), "graphloom-activate-state-")),
+      executorCatalog: [entry],
+      repairCandidates: [artifact],
+      current: { stageId: "s" },
+      definition: { graphId: "g", version: "1", stages: [{ id: "s", name: "S", requirementIds: [] }], requirements: [], defaultValidators: [] },
+      receipts: [],
+      evidence: [],
+      outstanding: [],
+      validatorBindings: [],
+      budgets: {},
+      stateRevision: 1,
+    } as unknown as DurableRunState;
+    cleanup.push(state.stateDir);
+    return activateExecutorRepair(state, [artifact], 0, artifact);
+  }
+
+  it("takes the repaired executor's input shape from the admitted candidate", async () => {
+    const next = await activated('{ schema: { type: "object", description: "repaired" } }');
+    expect(next.executorCatalog?.[0]?.repair).toBeDefined();
+    expect(next.executorCatalog?.[0]?.inputShape).toEqual({ schema: { type: "object", description: "repaired" } });
+  });
+
+  it("drops the base shape when the candidate declares none", async () => {
+    const next = await activated(undefined);
+    expect(next.executorCatalog?.[0]?.repair).toBeDefined();
+    expect(next.executorCatalog?.[0]?.inputShape).toBeUndefined();
   });
 });

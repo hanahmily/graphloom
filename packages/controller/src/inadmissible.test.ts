@@ -21,7 +21,8 @@ import {
   type GraphDefinition,
   type Validator,
 } from "@graphloom/sdk";
-import { createScriptedRunner, createTrustedInProcessRunner } from "@graphloom/runner";
+import { createBuiltinExecutorRunner, createScriptedRunner, createTrustedInProcessRunner } from "@graphloom/runner";
+import { commandBinding, commandExecutorPackage } from "@graphloom/executor-command";
 import { createPiSupervisor, createScriptedSupervisor, type PiSupervisorSessionPort } from "@graphloom/supervisor";
 import { createController, loadRunState, type RepairDeps } from "./index.js";
 import { readOwnerClaim } from "./owner.js";
@@ -1206,5 +1207,107 @@ describe("supervisor evidence and probes", () => {
     // graph's agent write) - 3 (the supervisor's model requests).
     expect(state.budgets.probes).toBe(3);
     expect(state.budgets.agentInvocations).toBe(6);
+  });
+});
+
+describe("executor input shape (#152)", () => {
+  // Run 0011bbe9-01b: the supervisor's command-job input was refused three times with
+  // only "input failed schema validation". These are its three proposals.
+  const BAD_INPUTS: Array<[string, Record<string, unknown>]> = [
+    ["command with argv.item", { command: { id: "go-env", argv: { item: ["go", "env"] } } }],
+    ["top-level argv.item", { argv: { item: ["go", "env"] } }],
+    ["nested item.item", { command: { argv: { item: { item: ["go", "env"] } } } }],
+  ];
+  const GOOD_INPUT = { commands: [{ id: "go-env", argv: ["true"] }] };
+  const commandJob = (input: Record<string, unknown>) => ({
+    stageId: "write",
+    kind: "command" as const,
+    purpose: "diagnostic" as const,
+    instruction: "show the go environment",
+    readOnly: true,
+    executor: { id: "graphloom.command/run" },
+    input,
+  });
+  const commandRunner = () =>
+    createBuiltinExecutorRunner({ packages: [{ manifest: commandExecutorPackage, ...commandBinding() }], fallback: runner() });
+
+  it.each(BAD_INPUTS)("refuses %s naming the failing field and the declared shape, then admits the documented shape", async (_name, bad) => {
+    const env = await makeEnv("budgets:\n  decisions: 20\n");
+    const rejections: Array<string | undefined> = [];
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({ definition, advances: [supervise({ reason: "unfamiliar" }, "escalate"), ...finish] }),
+      validators: goodValidators,
+      supervisor: createScriptedSupervisor({
+        decisions: [
+          (input: { rejection?: { reason: string } }) => {
+            rejections.push(input.rejection?.reason);
+            return dispatch(commandJob(bad), "show env");
+          },
+          (input: { rejection?: { reason: string } }) => {
+            rejections.push(input.rejection?.reason);
+            return dispatch(commandJob(GOOD_INPUT), "show env");
+          },
+          returnToNormal({ summary: "checked" }, "hand back"),
+        ],
+      }),
+      runner: commandRunner(),
+      stateRoot: env.stateRoot,
+      runId: "executor-input-shape",
+    });
+    expect(report.status, report.blocker).toBe("succeeded");
+    const refusal = rejections[1]!;
+    expect(refusal).toMatch(/^executor input rejected: executor graphloom\.command\/run: input failed schema validation: commands: required/);
+    // The failing field, and the shape and example the executor declares.
+    expect(refusal).toContain("Declared input shape: ");
+    expect(refusal).toContain('"required":["id","argv"]');
+    expect(refusal).toContain('{"commands":[{"id":"go-env","argv":["go","env","GOCACHE"]}]}');
+    expect(refusal.length).toBeLessThan(3_000);
+    // The documented shape was admitted and ran.
+    const state = await loadRunState(report.stateDir);
+    const ran = state.evidence.find((e) => e.kind === "command" && JSON.stringify(e.payload).includes('"go-env"'));
+    expect(ran).toBeDefined();
+  });
+
+  it("names the failing path inside an otherwise well-formed command", async () => {
+    const refused = await commandRunner().checkJob!(commandJob({ commands: [{ id: "go-env", argv: "go env" }] }) as never);
+    expect(refused).toBe(
+      'executor graphloom.command/run: input failed schema validation: commands[0].argv: must be an array of strings, e.g. ["go","env"] (got string)',
+    );
+  });
+
+  it("shows the supervisor each executor's declared input shape before it proposes, and lets it correct a refusal in the same turn", async () => {
+    const env = await makeEnv("budgets:\n  decisions: 20\n");
+    const replies: string[] = [];
+    const session = toolCallingSession("sup-152-shape", [
+      async (_prompt, tools) => {
+        // The model's real mistake: the array wrapped as {item: [...]}.
+        replies.push(await call(tools, "dispatch", { reason: "show env", job: commandJob({ argv: { item: ["go", "env"] } }) }));
+        // Corrected from the declared shape the refusal carried.
+        replies.push(await call(tools, "dispatch", { reason: "show env", job: commandJob(GOOD_INPUT) }));
+        return "";
+      },
+      async () => JSON.stringify(returnToNormal({ summary: "checked" }, "return")),
+    ]);
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({ definition, advances: [supervise({ reason: "unfamiliar" }, "escalate"), ...finish] }),
+      validators: goodValidators,
+      supervisor: createPiSupervisor({ session }),
+      runner: commandRunner(),
+      stateRoot: env.stateRoot,
+      runId: "executor-input-shape-pi",
+    });
+    expect(report.status, report.blocker).toBe("succeeded");
+    // Before proposing, the prompt already listed the command executor's schema and example.
+    const prompt = session.prompts[0]!;
+    expect(prompt).toContain('"executors"');
+    expect(prompt).toContain("graphloom.command/run");
+    expect(prompt).toContain('"go-env"');
+    expect(replies[0]).toMatch(/^Rejected: .*commands: required, .*\(got only: argv\).*Declared input shape: /s);
+    expect(replies[1]).toMatch(/^Submitted/);
+    const state = await loadRunState(report.stateDir);
+    expect(state.supervisorOutcomes).toBeUndefined();
+    expect(state.evidence.some((e) => e.kind === "command" && JSON.stringify(e.payload).includes('"go-env"'))).toBe(true);
   });
 });

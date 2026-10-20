@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { defineExecutor, type ExecutorContext } from "@graphloom/sdk";
+import { defineExecutor, jsonSchemaProblem, type ExecutorContext, type ExecutorInputShape } from "@graphloom/sdk";
 import {
   DEFAULT_GITHUB_API_URL,
   GITHUB_API_URL_ENV,
@@ -177,6 +177,28 @@ interface RawComment {
   created_at?: string;
 }
 
+// Declared input shapes of the read executors, shown to whoever composes a job.
+const REPO_PROPERTIES = {
+  owner: { type: "string", pattern: "^[A-Za-z0-9_.-]{1,100}$" },
+  repo: { type: "string", pattern: "^[A-Za-z0-9_.-]{1,100}$" },
+};
+const PAGE_PROPERTIES = {
+  perPage: { type: "integer", minimum: 1, maximum: 100 },
+  maxPages: { type: "integer", minimum: 1, maximum: MAX_PAGES_PER_CALL },
+  cursor: { type: "string", pattern: "^[1-9][0-9]{0,6}$", description: "The nextCursor of an earlier incomplete page." },
+};
+const STATE = { type: "string", enum: ["open", "closed", "all"] };
+const NUMBER = { type: "integer", minimum: 1 };
+const EXAMPLE_REPO = { owner: "apache", repo: "skywalking-banyandb" };
+
+function readShape(required: string[], properties: Record<string, unknown>, example: Record<string, unknown>): {
+  inputShape: ExecutorInputShape;
+  inputProblem: (v: unknown) => string | undefined;
+} {
+  const schema = { type: "object", required: ["owner", "repo", ...required], properties: { ...REPO_PROPERTIES, ...properties } };
+  return { inputShape: { schema, example: { ...EXAMPLE_REPO, ...example } }, inputProblem: (v) => jsonSchemaProblem(schema, v) };
+}
+
 // ---------------------------------------------------------------------------
 // Reads
 
@@ -185,6 +207,7 @@ export const listIssues = defineExecutor<ListIssuesInput, JobOutput>({
   version: GITHUB_EXECUTOR_VERSION,
   effect: "read",
   capabilities: ["network:github"],
+  ...readShape([], { state: STATE, labels: { type: "array", maxItems: 20, items: { type: "string", maxLength: 100 } }, ...PAGE_PROPERTIES }, { state: "open" }),
   inputSchema: (v): v is ListIssuesInput =>
     isRepoInput(v) &&
     optionalEnum(v, "state", ["open", "closed", "all"]) &&
@@ -225,6 +248,7 @@ export const listPulls = defineExecutor<ListPullsInput, JobOutput>({
   version: GITHUB_EXECUTOR_VERSION,
   effect: "read",
   capabilities: ["network:github"],
+  ...readShape([], { state: STATE, base: { type: "string", maxLength: 255 }, ...PAGE_PROPERTIES }, { state: "open" }),
   inputSchema: (v): v is ListPullsInput =>
     isRepoInput(v) &&
     optionalEnum(v, "state", ["open", "closed", "all"]) &&
@@ -258,6 +282,7 @@ export const getIssue = defineExecutor<NumberInput, JobOutput>({
   version: GITHUB_EXECUTOR_VERSION,
   effect: "read",
   capabilities: ["network:github"],
+  ...readShape(["number"], { number: NUMBER }, { number: 1 }),
   inputSchema: (v): v is NumberInput => isRepoInput(v) && isPositiveInt(field(v, "number")),
   async execute(input, ctx) {
     const query = { owner: input.owner, repo: input.repo, number: input.number };
@@ -280,6 +305,7 @@ export const getPull = defineExecutor<NumberInput, JobOutput>({
   version: GITHUB_EXECUTOR_VERSION,
   effect: "read",
   capabilities: ["network:github"],
+  ...readShape(["number"], { number: NUMBER }, { number: 1 }),
   inputSchema: (v): v is NumberInput => isRepoInput(v) && isPositiveInt(field(v, "number")),
   async execute(input, ctx) {
     const query = { owner: input.owner, repo: input.repo, number: input.number };
@@ -302,6 +328,7 @@ export const listIssueComments = defineExecutor<ListCommentsInput, JobOutput>({
   version: GITHUB_EXECUTOR_VERSION,
   effect: "read",
   capabilities: ["network:github"],
+  ...readShape(["number"], { number: NUMBER, ...PAGE_PROPERTIES }, { number: 1 }),
   inputSchema: (v): v is ListCommentsInput =>
     isRepoInput(v) && isPositiveInt(field(v, "number")) && isPageInput(v),
   async execute(input, ctx) {
@@ -760,6 +787,7 @@ export const listLabels = defineExecutor<RepoInput & PageInput, JobOutput>({
   version: GITHUB_EXECUTOR_VERSION,
   effect: "read",
   capabilities: ["network:github"],
+  ...readShape([], { ...PAGE_PROPERTIES }, {}),
   inputSchema: (v): v is RepoInput & PageInput => isRepoInput(v) && isPageInput(v),
   async execute(input, ctx) {
     const query = { owner: input.owner, repo: input.repo, perPage: input.perPage ?? 100 };
@@ -785,6 +813,7 @@ export const listMilestones = defineExecutor<ListMilestonesInput, JobOutput>({
   version: GITHUB_EXECUTOR_VERSION,
   effect: "read",
   capabilities: ["network:github"],
+  ...readShape([], { state: STATE, ...PAGE_PROPERTIES }, { state: "open" }),
   inputSchema: (v): v is ListMilestonesInput =>
     isRepoInput(v) && optionalEnum(v, "state", ["open", "closed", "all"]) && isPageInput(v),
   async execute(input, ctx) {
@@ -1121,6 +1150,7 @@ function readPackageIdentity(): { package: string; version: string } {
 // Input guards
 
 const NAME = /^[A-Za-z0-9_.-]{1,100}$/;
+
 const REF = /^[A-Za-z0-9_.\/:-]{1,255}$/;
 const KEY = /^[A-Za-z0-9._:-]{1,100}$/;
 

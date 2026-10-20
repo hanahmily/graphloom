@@ -3,8 +3,8 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createBuiltinExecutorRunner } from "@graphloom/runner";
-import type { ExecutorContext } from "@graphloom/sdk";
-import { COMMAND_RUN_ID, commandSucceeded, createCommandExecutor, type CommandOutcome } from "./run.js";
+import { boundedInputShape, type ExecutorContext } from "@graphloom/sdk";
+import { COMMAND_INPUT_SHAPE, COMMAND_RUN_ID, commandInputProblem, commandSucceeded, createCommandExecutor, isCommandInput, type CommandOutcome } from "./run.js";
 
 let dir: string;
 let ctx: ExecutorContext;
@@ -195,6 +195,34 @@ describe("command executor", () => {
   });
 });
 
+describe("command input problems and declared shape", () => {
+  it("reports the first failing path and its rule", () => {
+    expect(commandInputProblem({ commands: [{ id: "a", argv: ["true"] }] })).toBeUndefined();
+    expect(commandInputProblem(null)).toBe("input: must be an object");
+    expect(commandInputProblem({ argv: { item: ["go"] } })).toBe("commands: required, an array of 1-16 {id, argv} objects (got only: argv)");
+    expect(commandInputProblem({ commands: [] })).toBe("commands: must be an array of 1-16 {id, argv} objects");
+    expect(commandInputProblem({ commands: [{ argv: ["true"] }] })).toBe("commands[0].id: required string");
+    expect(commandInputProblem({ commands: [{ id: "a", argv: { item: ["go"] } }] })).toBe(
+      'commands[0].argv: must be an array of strings, e.g. ["go","env"] (got object)',
+    );
+    expect(commandInputProblem({ commands: [{ id: "a", argv: ["go", 1] }] })).toMatch(/^commands\[0\]\.argv\[1\]: must be a string/);
+    expect(commandInputProblem({ commands: [{ id: "a", argv: ["x"] }, { id: "a", argv: ["x"] }] })).toMatch(/^commands\[1\]\.id: duplicate/);
+    expect(commandInputProblem({ commands: [{ id: "a", argv: ["x"] }], env: { GRAPHLOOM_REPORT_FILE: "x" } })).toMatch(/^env\.GRAPHLOOM_REPORT_FILE: reserved/);
+  });
+
+  it("agrees with the predicate, which stays authoritative", () => {
+    for (const v of [{}, { commands: [] }, { commands: [{ id: "a", argv: ["true"] }] }, { commands: "x" }]) {
+      expect(isCommandInput(v)).toBe(commandInputProblem(v) === undefined);
+    }
+  });
+
+  it("declares a schema and an example that the predicate accepts", () => {
+    expect(isCommandInput(COMMAND_INPUT_SHAPE.example)).toBe(true);
+    expect(COMMAND_INPUT_SHAPE.schema.required).toEqual(["commands"]);
+    expect(boundedInputShape(COMMAND_INPUT_SHAPE)).toEqual(COMMAND_INPUT_SHAPE);
+  });
+});
+
 describe("command executor package", () => {
   it("is served in its own executor process by the built-in runner", async () => {
     // The executor process loads the built entry module, so use the built manifest.
@@ -219,6 +247,8 @@ describe("command executor package", () => {
     expect(outcome.stdoutTail.trim()).toBe(await realpath(dir));
     const described = await runner.describeExecutors!();
     expect(described.map((d) => d.id)).toContain(COMMAND_RUN_ID);
+    // The input shape the executor process declared reaches the catalog as data.
+    expect(described.find((d) => d.id === COMMAND_RUN_ID)?.inputShape).toEqual(COMMAND_INPUT_SHAPE);
   });
 
   it("gives every command the agent locations it is bound with, and nothing else", async () => {

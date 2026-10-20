@@ -871,7 +871,7 @@ const TRIGGER_GUIDANCE: Partial<Record<string, string>> = {
   stalled:
     "This episode's trigger is stalled: the graph proposed the exact same decision twice with no progress since it last proposed it. Propose something that would actually change the outcome, not the same action again; reenter or dispatch new work for the stage are usually more useful than return.",
   executor_failed:
-    "This episode's trigger is executor_failed: an executor reported failure or an abnormal result. Check this stage's own agentSessions entries' executorId first: only when it shows the default built-in agent executor, graphloom.agent/run, does a plain instruction-only dispatch (no input needed) retry safely yourself. For any other pinned executor — the usual case for a plugin's own work/review stages — its input shape (e.g. input.assignment, a harness choice) is plugin-specific and not visible to you, so a guessed dispatch usually fails the executor's own input schema validation rather than retrying anything; return instead, so the graph's own advance() reissues the dispatch with the input shape it already knows. Repairing the executor's package, or stopping, are the remedies when return does not change the outcome.",
+    "This episode's trigger is executor_failed: an executor reported failure or an abnormal result. Check this stage's own agentSessions entries' executorId first: only when it shows the default built-in agent executor, graphloom.agent/run, does a plain instruction-only dispatch (no input needed) retry safely yourself. For any other pinned executor — the usual case for a plugin's own work/review stages — its input shape (e.g. input.assignment, a harness choice) is plugin-specific and visible to you only when executors lists it, so a guessed dispatch usually fails the executor's own input schema validation rather than retrying anything; return instead, so the graph's own advance() reissues the dispatch with the input shape it already knows. Repairing the executor's package, or stopping, are the remedies when return does not change the outcome.",
   environment_changed:
     "This episode's trigger is environment_changed: a file the graph's environment declaration pins no longer matches what it was written against. A repair that updates the declaration (qualify_repair target plugin, when the bundle is source-repairable) is usually the fix; the run stays blocked otherwise.",
   plugin_crash:
@@ -970,6 +970,15 @@ export function buildRecoveryPrompt(
     ...(candidates.length > MAX_PROMPT_CANDIDATES ? { olderRepairCandidates: candidates.length - MAX_PROMPT_CANDIDATES } : {}),
     // Only sessions a dispatch may still continue (none has continued them yet).
     agentSessions: sessions.slice(-MAX_PROMPT_LIST),
+    // Each executor's declared input shape, so a dispatch's job.input can be composed before it is refused.
+    ...(input.view.executors !== undefined && input.view.executors.length > 0
+      ? {
+          executors: input.view.executors.slice(0, MAX_PROMPT_LIST).map((e) => {
+            const text = JSON.stringify(e.inputShape);
+            return { id: e.id, inputShape: text.length <= MAX_SHAPE_CHARS ? e.inputShape : clipText(text, MAX_SHAPE_CHARS) };
+          }),
+        }
+      : {}),
     ...(input.view.repairAuthority !== undefined ? { repairAuthority: input.view.repairAuthority } : {}),
     ...(input.view.escalation !== undefined
       ? {
@@ -1010,6 +1019,11 @@ export function buildRecoveryPrompt(
     "A proposal the controller would not admit is returned to you in this same turn with the failed precondition and the current value; correct it and propose again.",
     "repairAuthority shows what the operator granted and whether the graph bundle's code can be patched. An opaque bundle's code cannot be: retry the work or repair its environment instead. Substitute a validator (qualify_repair target validator with requirementId, adding files without editing existing ones) only when validatorSubstitution is granted and that requirement has a readable statement. Otherwise stop, citing the failing validation's evidenceRefs; never invent a replacement criterion.",
     "reenter starts a new attempt but runs nothing. To have the graph run that attempt's own jobs (its instructions, result schemas and write scopes), return after reentering; dispatch only work the graph would not run itself.",
+    ...(input.view.executors !== undefined && input.view.executors.length > 0
+      ? [
+          "executors lists the input shape (a JSON Schema and an example) each listed executor declares. Compose job.input for that executor exactly as its schema says: arrays are plain JSON arrays, never wrapped in an object.",
+        ]
+      : []),
     "To retry a stage's agent work with the context of its earlier session, dispatch with job.kind \"agent\" and job.continueFrom set to an operationId from agentSessions of that stage and dispatch key; start fresh instead when that context is misleading. continueFrom only works on an agent job: a command job has no session to resume.",
     ...(triggerGuidance !== undefined ? [triggerGuidance] : []),
     ...(triggerGuidance === undefined && latestReviewVerdict === "approved" && !workThisGeneration
@@ -1048,6 +1062,7 @@ const MAX_PROMPT_LIST = 10;
 const MAX_PROMPT_TRIGGER_REFS = 10;
 const MAX_TRIGGER_MESSAGE_CHARS = 1_000;
 const MAX_SUMMARY_CHARS = 400;
+const MAX_SHAPE_CHARS = 3_000;
 
 function currentGenerationEvidence(evidence: EvidenceRecord[], generation: number): EvidenceRecord[] {
   return evidence.filter((e) => e.generation === generation);

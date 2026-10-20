@@ -106,6 +106,27 @@ describe("configured CLI runner", () => {
     }
   }, 40_000);
 
+  it("shows the supervisor what a coding-agent job's input must carry, and refuses {prompt} naming the field", async () => {
+    // A live supervisor sent input {prompt: "..."} and was refused with no reason.
+    const f = await fixture();
+    vi.stubEnv("CLAUDE_CONFIG_DIR", path.join(f.dir, "claude"));
+    const runner = createCliRunner(await loadRunnerConfig({ GRAPHLOOM_RUNNER_CONFIG: f.config }));
+    const coding = (await runner.describeExecutors!()).find((entry) => entry.id === "graphloom.coding-agent/run")!;
+    const schema = coding.inputShape!.schema as { required: string[]; properties: Record<string, { enum?: string[] }> };
+    expect(schema.required).toEqual(["assignment"]);
+    // The harness choice is the router's to take out, so it is part of what the job sends.
+    expect(schema.properties.harness?.enum).toContain("claude-code");
+    expect(coding.inputShape!.example).toEqual({ assignment: expect.any(String) });
+    const job = (input: unknown) => ({
+      stageId: "write", kind: "agent" as const, purpose: "work" as const, instruction: "unused",
+      executor: { id: coding.id, version: "1", digest: coding.digest }, input,
+    });
+    expect(await runner.checkJob!(job({ prompt: "Create GREETING.txt" }))).toBe(
+      "executor graphloom.coding-agent/run: input failed schema validation: assignment: required",
+    );
+    expect(await runner.checkJob!(job({ harness: "claude-code", assignment: "Create GREETING.txt" }))).toBeUndefined();
+  });
+
   it("serves an explicit coding-agent pin and refuses unknown IDs and changed pinned bytes", async () => {
     const f = await fixture();
     vi.stubEnv("CLAUDE_CONFIG_DIR", path.join(f.dir, "claude"));
@@ -115,6 +136,9 @@ describe("configured CLI runner", () => {
     expect(coding.isolation).toBe("unrestricted");
     expect(coding.source).toBe(path.join(root, "executors/coding-agent"));
     expect(catalog.find((entry) => entry.id === "graphloom.agent/run")?.source).toBe(coding.source);
+    // The alias takes its assignment from the instruction, so it advertises no input shape.
+    expect(catalog.find((entry) => entry.id === "graphloom.agent/run")?.inputShape).toBeUndefined();
+    expect(coding.inputShape).toBeDefined();
     let calls = 0;
     const context = {
       runId: "direct", operationId: "op", generation: 1, worktreePath: f.repo, artifactDir: f.dir,
@@ -179,7 +203,7 @@ describe("configured CLI runner", () => {
       stageId: "fix", kind: "agent" as const, purpose: "work" as const, instruction: "unused", writeScope: ["GREETING.txt"],
       executor: { id: "graphloom.coding-agent/run", version: "1" }, input,
     });
-    expect(await runner.checkJob!(job({ harness: "claude-code", instruction: "fix it" }))).toBe("executor graphloom.coding-agent/run: input failed schema validation");
+    expect(await runner.checkJob!(job({ harness: "claude-code", instruction: "fix it" }))).toBe("executor graphloom.coding-agent/run: input failed schema validation: assignment: required");
     // `harness` is the runner's to strip, so a valid job passes with it.
     expect(await runner.checkJob!(job({ assignment: "Create GREETING.txt", harness: "claude-code" }))).toBeUndefined();
     expect(await runner.checkJob!(job({ assignment: "Create GREETING.txt", harness: "pi" }))).toBe(

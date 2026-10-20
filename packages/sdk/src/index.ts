@@ -44,6 +44,7 @@ export {
 export type {
   ActivateRepairSpec,
   AgentSessionView,
+  ExecutorView,
   BudgetRemaining,
   CheckoutSpec,
   CorrectionHandoff,
@@ -99,6 +100,7 @@ export type {
   ExecutorDefinition,
   ExecutorEffect,
   ExecutorId,
+  ExecutorInputShape,
   ExecutorPackageManifest,
   ExecutorPin,
   ExecutorSession,
@@ -127,7 +129,11 @@ export {
   defineExecutor,
   pinJobExecutor,
   validateExecutorInput,
+  checkExecutorInput,
+  boundedInputShape,
+  MAX_INPUT_SHAPE_BYTES,
 } from "./executor.js";
+export { jsonSchemaProblem } from "./input-problem.js";
 
 export {
   activateRepair,
