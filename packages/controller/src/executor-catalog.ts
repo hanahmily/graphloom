@@ -175,8 +175,8 @@ export function applyExecutorRepin(
     versionHistory: [...(state.versionHistory ?? []), { activeVersion: state.activeVersion, generation: state.generation, reason, at }],
     stateRevision: state.stateRevision + 1,
   };
-  // A dispatch admitted before the stop and not yet started runs on the new bytes.
-  if (state.pendingDispatch !== undefined) {
+  // A dispatch admitted before the stop that never reached the runner runs on the new bytes; one that started or settled keeps the pins it ran under.
+  if (state.pendingDispatch !== undefined && state.pendingDispatch.status === "waiting") {
     const { pendingDispatch } = state;
     next.pendingDispatch = {
       ...pendingDispatch,

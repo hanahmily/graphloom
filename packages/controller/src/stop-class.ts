@@ -83,8 +83,9 @@ export function stopMarkOf(state: DurableRunState, candidateDigest: string | und
 }
 
 /** What changed since `mark` that a final stop depends on, or undefined when nothing did. */
-export function changeSinceStop(mark: StopMark, now: { pluginUpdated: boolean; mark: StopMark }): string | undefined {
+export function changeSinceStop(mark: StopMark, now: { pluginUpdated: boolean; executorsUpdated?: boolean; mark: StopMark }): string | undefined {
   if (now.pluginUpdated) return "the operator updated the plugin";
+  if (now.executorsUpdated === true) return "the operator updated the executors";
   if (now.mark.activeVersion !== mark.activeVersion) return `the active version changed from ${mark.activeVersion} to ${now.mark.activeVersion}`;
   if (now.mark.manifestDigest !== mark.manifestDigest || now.mark.entryDigest !== mark.entryDigest) return "the plugin bundle changed";
   if (now.mark.candidateDigest !== mark.candidateDigest) return "the workspace change differs from the one the run stopped on";
@@ -97,7 +98,7 @@ export function changeSinceStop(mark: StopMark, now: { pluginUpdated: boolean; m
 }
 
 export const FINAL_STOP_HELD_REMEDY =
-  "kept stopped on the same blocker: nothing the stop depends on (plugin, active version, workspace change, budgets) changed since";
+  "kept stopped on the same blocker: nothing the stop depends on (plugin, executors, active version, workspace change, budgets) changed since";
 
 export type ResumeDecision =
   /** Run again: the stop was retryable, answered by the resume, or something it depends on changed. */
@@ -110,7 +111,10 @@ export type ResumeDecision =
  * after resume reconciled its journals. A final stop without a mark (a run
  * that stopped before marks existed) is retried, as it was before.
  */
-export function decideResume(state: DurableRunState, now: { pluginUpdated: boolean; mark: StopMark }): ResumeDecision {
+export function decideResume(
+  state: DurableRunState,
+  now: { pluginUpdated: boolean; executorsUpdated?: boolean; mark: StopMark },
+): ResumeDecision {
   const previous = classifyStop(state);
   const mark = state.stopMark;
   const markApplies = mark !== undefined && (mark.stopReason === undefined || mark.stopReason === state.stopReason);

@@ -598,6 +598,44 @@ describe("resume --update-executors (#156)", () => {
     expect(again.stopReason, again.blocker).toBe("resumed");
   });
 
+  it("lifts a final stop when the upgraded executors are pinned, and holds it otherwise", async () => {
+    const server = await fake();
+    const env = await makeEnv();
+    const mirror = await mirrorPackage(env.taskDir, { broken: false });
+    const finalStop = (reason: string) =>
+      createScriptedGraph({
+        definition,
+        advances: [dispatch(readJob(MIRROR), "read"), stop({ reason, blocker: "the mirror is defective", retryable: false }, "done")],
+      });
+    const first = await createController().run({
+      taskPath: env.taskPath,
+      plugin: finalStop("mirror defect"),
+      validators,
+      runner: hostRunner(server, mirror),
+      stateRoot: env.stateRoot,
+      runId: "update-executors-final",
+    });
+    expect(first.stopReason, first.blocker).toBe("mirror defect");
+    await writeFile(mirror.entry, `${await readFile(mirror.entry, "utf8")}// fixed\n`);
+    const resume = (updateExecutors?: boolean) =>
+      createController().resume({
+        runRef: first.stateDir,
+        plugin: graph(MIRROR, "resumed"),
+        validators,
+        runner: hostRunner(server, mirror),
+        ...(updateExecutors !== undefined ? { updateExecutors } : {}),
+      });
+
+    // The bytes changed but nothing was adopted: the final stop holds (the plugin's own stop, surfaced again).
+    const held = await resume();
+    expect(held.stopReason).not.toBe("resumed");
+    expect((await loadRunState(first.stateDir)).executorTransitions).toBeUndefined();
+
+    const lifted = await resume(true);
+    expect(lifted.stopReason, lifted.blocker).toBe("resumed");
+    expect((await loadRunState(first.stateDir)).executorTransitions).toHaveLength(1);
+  });
+
   it("stops without the flag and says how to proceed", async () => {
     const { server, mirror, first, resume, upgrade } = await pausedMirror("update-executors-hint");
     const before = await pinnedEntry(first.stateDir);

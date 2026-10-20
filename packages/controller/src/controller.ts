@@ -587,13 +587,20 @@ export function createController(): Controller {
         // §8: a retryable stop runs again; a final one surfaces the same
         // blocker until something it depends on changed.
         const pluginUpdated = pluginUpdate !== undefined;
+        // An executor update that would re-pin something answers a final stop like a plugin update does.
+        const executorsUpdated =
+          request.updateExecutors === true &&
+          (await verifyExecutorCatalog(state, request.runner, true).then(
+            (check) => check !== undefined && !("blocker" in check) && check.repins.length > 0,
+            () => false,
+          ));
         const live = await liveCandidateDigest(state).catch(() => state.candidateDigest);
         const asStopped: DurableRunState = {
           ...state,
           ...(heldStop.stopClass !== undefined ? { stopClass: heldStop.stopClass } : {}),
           ...(heldStop.stopMark !== undefined ? { stopMark: heldStop.stopMark } : {}),
         };
-        const decided = decideResume(asStopped, { pluginUpdated, mark: stopMarkOf(state, live) });
+        const decided = decideResume(asStopped, { pluginUpdated, executorsUpdated, mark: stopMarkOf(state, live) });
         if (!decided.run) {
           state = recordRemedy(
             { ...asStopped, ...(heldStop.stopEvidenceRefs !== undefined ? { stopEvidenceRefs: heldStop.stopEvidenceRefs } : {}) },
