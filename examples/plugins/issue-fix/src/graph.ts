@@ -340,6 +340,10 @@ function fix(ctx: Context, view: RunView, issue: number, state: FixPrivateState)
   // The checks below are genuinely candidate-anchored: RED, GREEN, the build
   // suite and the changelog entry are all earned once per workspace change
   // and stay valid, unscoped by generation, until the candidate changes again.
+  // A check that failed (or, for RED, could not run) before the operator's latest
+  // resume is the exception: the operator resumed because something changed
+  // (often the environment), so it runs again, once. A failure recorded since
+  // the resume is acted on below, so a failing check cannot loop.
   const current = forIdentity(view.evidence, digest);
   const test = record?.test;
   const results = evaluateFix(ctx, view, current, digest);
@@ -352,18 +356,24 @@ function fix(ctx: Context, view: RunView, issue: number, state: FixPrivateState)
     // Runs of this test only: the record may rename it without changing the candidate.
     const argv = profile.runner.argv(test);
     const green = latestCheckoutRun(current, COMMAND.regression, "candidate", digest, argv);
-    if (green === undefined) {
+    if (green === undefined || failedBeforeResume(profile, current, green, view)) {
       return withPrivate(
-        dispatch(checkJob("Candidate checks", { from: "candidate" }, candidateCommands(profile, test), true), "run GREEN and the build checks on the committed change"),
+        dispatch(
+          checkJob("Candidate checks", { from: "candidate" }, candidateCommands(profile, test), true),
+          green === undefined ? "run GREEN and the build checks on the committed change" : "run GREEN and the build checks again: they failed before the operator's resume",
+        ),
         state,
       );
     }
     const tests = green.checkout!.paths.filter((p) => isTestPath(profile, p));
     if (tests.length > 0) {
       const baseRed = latestCheckoutRun(current, COMMAND.regression, "base", digest, argv);
-      if (baseRed === undefined) {
+      if (baseRed === undefined || blockedBeforeResume(profile, baseRed, test, view)) {
         return withPrivate(
-          dispatch(checkJob("RED check", { from: "base", paths: tests }, redCommands(profile, test), false), "run RED on the base commit with only the test files"),
+          dispatch(
+            checkJob("RED check", { from: "base", paths: tests }, redCommands(profile, test), false),
+            baseRed === undefined ? "run RED on the base commit with only the test files" : "run RED on the base commit again: it could not run before the operator's resume",
+          ),
           state,
         );
       }
@@ -391,14 +401,17 @@ function fix(ctx: Context, view: RunView, issue: number, state: FixPrivateState)
               { ...state, corrections: state.corrections + 1 },
             );
           }
-        } else if (latestRevertedCheckoutRun(current, COMMAND.regression, digest, argv) === undefined) {
-          return withPrivate(
-            dispatch(
-              checkJob("RED check (reverted)", { from: "candidate", revertPatch: record.revertPatch }, redCommands(profile, test), false),
-              "run RED against the candidate with this round's behavioral fix reverted",
-            ),
-            state,
-          );
+        } else {
+          const reverted = latestRevertedCheckoutRun(current, COMMAND.regression, digest, argv);
+          if (reverted === undefined || blockedBeforeResume(profile, reverted, test, view)) {
+            return withPrivate(
+              dispatch(
+                checkJob("RED check (reverted)", { from: "candidate", revertPatch: record.revertPatch }, redCommands(profile, test), false),
+                reverted === undefined ? "run RED against the candidate with this round's behavioral fix reverted" : "run RED against the reverted candidate again: it could not run before the operator's resume",
+              ),
+              state,
+            );
+          }
         }
       }
     }
@@ -646,6 +659,16 @@ function notReady(record: DecisionRecord, refs: string[], who: string): GraphDec
 function regressionBlocked(profile: Profile, run: CommandRun, test: NonNullable<DecisionRecord["test"]>): boolean {
   const outcome = profile.runner.outcome(reportText(run), test);
   return outcome === "build-failed" || outcome === "setup-failed";
+}
+
+/** A RED run that could not run, from before the operator's latest resume: run it again. */
+function blockedBeforeResume(profile: Profile, run: CommandRun, test: NonNullable<DecisionRecord["test"]>, view: RunView): boolean {
+  return isStaleFailure(run.record, view) && regressionBlocked(profile, run, test);
+}
+
+/** Whether a command of the candidate-checks job that produced `green` failed before the operator's latest resume. */
+function failedBeforeResume(profile: Profile, evidence: EvidenceRecord[], green: CommandRun, view: RunView): boolean {
+  return [green, ...profile.commands.map((c) => sameCheckoutJob(evidence, green, c.id))].some((run) => run !== undefined && !succeeded(run.command) && isStaleFailure(run.record, view));
 }
 
 /** Why the record's revertPatch cannot be used for the candidate at `digest`, or undefined when it can. */

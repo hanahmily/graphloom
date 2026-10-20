@@ -94,6 +94,12 @@ interface Scenario {
   candidate?: Array<Partial<Record<string, CommandResult>>>;
   candidateMutations?: string[][];
   red?: CommandResult;
+  /** The base RED outcome for each RED run, in order; the last repeats. Overrides `red`. */
+  reds?: CommandResult[];
+  /** Resume (a new generation) right after this candidate-checks run (1-based), as an operator does once the environment is fixed. */
+  resumeAfterCandidate?: number;
+  /** Resume right after this base RED run (1-based). */
+  resumeAfterRed?: number;
   /** The regression outcome for a reverted-candidate RED retry, when the base checkout cannot build the test alone. */
   redReverted?: CommandResult;
   /** Whether a revert patch applies to the candidate; false reports the controller's failed-apply evidence. */
@@ -170,6 +176,7 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
   let implemented = 0;
   let changed = 0;
   let candidates = 0;
+  let redRuns = 0;
   let planned = 0;
   let codeReviewed = 0;
   let verified = 0;
@@ -301,10 +308,14 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
           c.id === COMMAND.regression ? { report: PASSED } : c.id === COMMAND.changesDiff ? { stdout: "+- Warn while a scheduled action is still running.\n" } : {};
         record("command", { ...commandPayload(c.id, { ...defaults, ...results[c.id] }, c.argv), checkout: { from: "candidate", base: "base-sha", commit: `c-${op}`, paths: CHANGED, prepared: true, mutations, phase: "run" } }, job, op);
       }
+      if (scenario.resumeAfterCandidate === candidates) resumeAt();
       return;
     }
     if (job.checkout?.from === "base") {
-      record("command", { ...commandPayload(COMMAND.regression, scenario.red ?? { exitCode: 1, report: FAILED }, input!.commands![0]!.argv), checkout: { from: "base", base: "base-sha", commit: `b-${op}`, paths: job.checkout.paths, prepared: true, mutations: [], phase: "run" } }, job, op);
+      const red = nth(scenario.reds, redRuns) ?? scenario.red ?? { exitCode: 1, report: FAILED };
+      redRuns += 1;
+      record("command", { ...commandPayload(COMMAND.regression, red, input!.commands![0]!.argv), checkout: { from: "base", base: "base-sha", commit: `b-${op}`, paths: job.checkout.paths, prepared: true, mutations: [], phase: "run" } }, job, op);
+      if (scenario.resumeAfterRed === redRuns) resumeAt();
       return;
     }
     for (const c of input!.commands!) {
@@ -823,6 +834,51 @@ describe("issue-fix graph under the banyandb profile", () => {
     expect(work[1]!.continueFrom).toBe("op-3");
     // Checks rerun for the corrected change.
     expect(jobs.filter((j) => j.checkout?.from === "candidate" && j.purpose === "check")).toHaveLength(2);
+  });
+
+  describe("checks that failed before a resume (#154)", () => {
+    const checks = (jobs: JobSpec[]) => jobs.filter((j) => j.checkout?.from === "candidate" && j.purpose === "check");
+    const baseRuns = (jobs: JobSpec[]) => jobs.filter((j) => j.checkout?.from === "base");
+    const lintFails = { ["lint"]: { exitCode: 2, stderr: "no space left on device" } };
+    const blocked = { exitCode: 2, report: events({ ImportPath: "p [p.test]", Action: "build-fail" }) };
+
+    it("runs the candidate checks again after a resume instead of correcting the implementer", () => {
+      const { decision, jobs } = simulate({ candidate: [lintFails, {}], resumeAfterCandidate: 1 });
+      expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+      expect(jobs.filter((j) => j.purpose === "work")).toHaveLength(1);
+      expect(checks(jobs)).toHaveLength(2);
+    });
+
+    it("keeps checks that passed across a resume, running nothing again", () => {
+      const { decision, jobs } = simulate({ resumeAfterCandidate: 1 });
+      expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+      expect(jobs.filter((j) => j.purpose === "work")).toHaveLength(1);
+      expect(checks(jobs)).toHaveLength(1);
+    });
+
+    it("corrects the implementer when the checks fail again after the resume", () => {
+      const { decision, jobs } = simulate({ candidate: [lintFails, lintFails, {}], resumeAfterCandidate: 1 });
+      expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+      expect(checks(jobs)).toHaveLength(3);
+      const work = jobs.filter((j) => j.purpose === "work");
+      expect(work).toHaveLength(2);
+      expect(assignment(work[1])).toContain("lint exited 2");
+      // The correction came after the re-run, not before it.
+      expect(jobs.indexOf(work[1]!)).toBeGreaterThan(jobs.indexOf(checks(jobs)[1]!));
+    });
+
+    it("runs a RED that could not build before the resume again, instead of asking for a revert patch", () => {
+      const { decision, jobs } = simulate({ reds: [blocked, { exitCode: 1, report: FAILED }], resumeAfterRed: 1 });
+      expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+      expect(jobs.filter((j) => j.purpose === "work")).toHaveLength(1);
+      expect(baseRuns(jobs)).toHaveLength(2);
+    });
+
+    it("asks for a revert patch when RED cannot build after the resume either", () => {
+      const { jobs } = simulate({ reds: [blocked], resumeAfterRed: 1 });
+      expect(baseRuns(jobs).length).toBeGreaterThanOrEqual(2);
+      expect(assignment(jobs.filter((j) => j.purpose === "work")[1])).toContain("revertPatch");
+    });
   });
 
   it("fails a change that make check reformats, even when the command exits 0", () => {
