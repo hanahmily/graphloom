@@ -57,6 +57,12 @@ are ready to use; the GraphLoom one runs on the checkout it lives in
 (`repo: .`). Intake pins the profile's bytes and digest; editing the file
 later does not change a running or resumed run.
 
+A resume retries what failed (since 0.6.1): candidate checks that failed, and a
+RED that could not build or run, before the operator's latest resume run again
+once, instead of sending the implementer a correction for a fault that may
+have been the environment. Checks that passed stay valid, and a failure
+recorded after the resume is corrected as before.
+
 The runner config is banyandb-fix's: Claude Code, Codex and Pi enabled, the
 GitHub reads, and command jobs long enough for the profile's checks. For the
 graphloom profile the full suite takes about ten minutes; its commands allow
