@@ -926,3 +926,17 @@ describe("declared input shapes are read with the runner's scoped environment", 
     }
   });
 });
+
+describe("a shape that cannot be serialized", () => {
+  it("is left out of describe without losing the other executors", async () => {
+    const here = path.dirname(fileURLToPath(import.meta.url));
+    const described = await describeExecutorModule({
+      entryModule: path.join(here, "../test/fixtures/bad-shape-executor.mjs"),
+      workerModule: path.join(here, "../dist/executor-worker.js"),
+    });
+    expect(described.map((d) => [d.id, d.inputShape])).toEqual([
+      ["acme.shape/circular", undefined],
+      ["acme.shape/fine", { schema: { type: "object" }, example: {} }],
+    ]);
+  });
+});

@@ -136,6 +136,9 @@ describe("configured CLI runner", () => {
     expect(coding.isolation).toBe("unrestricted");
     expect(coding.source).toBe(path.join(root, "executors/coding-agent"));
     expect(catalog.find((entry) => entry.id === "graphloom.agent/run")?.source).toBe(coding.source);
+    // The alias takes its assignment from the instruction, so it advertises no input shape.
+    expect(catalog.find((entry) => entry.id === "graphloom.agent/run")?.inputShape).toBeUndefined();
+    expect(coding.inputShape).toBeDefined();
     let calls = 0;
     const context = {
       runId: "direct", operationId: "op", generation: 1, worktreePath: f.repo, artifactDir: f.dir,

@@ -73,6 +73,19 @@ function refusal(def: {
   return undefined;
 }
 
+/** A declared input shape that serializes within the bound, or undefined: one bad shape must not lose the whole reply. */
+function wireShape(shape: unknown): unknown {
+  if (shape === null || typeof shape !== "object" || Array.isArray(shape)) return undefined;
+  const schema = (shape as { schema?: unknown }).schema;
+  if (schema === null || typeof schema !== "object" || Array.isArray(schema)) return undefined;
+  try {
+    const raw = JSON.stringify(shape);
+    return raw !== undefined && Buffer.byteLength(raw, "utf8") <= 8_192 ? JSON.parse(raw) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 let seq = 0;
 const waiting = new Map<number, (value: unknown) => void>();
 
@@ -166,7 +179,7 @@ for await (const line of rl) {
   if (msg?.kind === "describe") {
     reply({
       kind: "described",
-      executors: [...byId.values()].map((d) => ({ id: d.id, version: d.version, effect: d.effect, inputShape: d.inputShape })),
+      executors: [...byId.values()].map((d) => ({ id: d.id, version: d.version, effect: d.effect, inputShape: wireShape(d.inputShape) })),
     });
     continue;
   }
