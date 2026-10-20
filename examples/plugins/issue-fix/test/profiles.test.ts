@@ -79,7 +79,7 @@ describe.skipIf(!existsSync(path.join(banyandbFixDist, "index.js")))("the banyan
     // Budgets are what a run may spend, not behaviour: banyandb-fix predates them.
     const strip = ({ graphId: _g, version: _v, privateStateSchema: _p, defaultBudgets: _b, ...rest }: GraphDefinition) => rest;
     expect(strip(ours)).toEqual(strip(theirs));
-    expect(ours).toMatchObject({ graphId: "issue-fix", version: "0.6.0", privateStateSchema: "issue-fix-private-v1" });
+    expect(ours).toMatchObject({ graphId: "issue-fix", version: "0.6.1", privateStateSchema: "issue-fix-private-v1" });
   });
 
   it("gives the agents and the checks the same instructions and commands", async () => {
