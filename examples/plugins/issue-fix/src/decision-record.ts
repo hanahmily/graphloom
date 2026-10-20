@@ -21,10 +21,17 @@ export interface RegressionTest {
   expectedValueSource: string;
 }
 
-/** The plan and implementer's result (`decision-record-v1`). */
+/** The plan and implementer's result (`decision-record-v2`). */
 export interface DecisionRecord {
   status: "ready" | "blocked" | "cannot_reproduce";
+  /** This round's report to the graph: the root cause and fix when planning, what the pass did when implementing. Never delivered. */
   summary: string;
+  /**
+   * The change as a whole against the base, written for a reviewer and kept
+   * current every round. It is what the commit message and the pull request's
+   * summary say. Absent in v1 records, which delivery reads around.
+   */
+  change?: string;
   title?: string;
   test?: RegressionTest;
   productionCaller?: string;
@@ -52,6 +59,7 @@ export const DECISION_RECORD_SCHEMA = JSON.stringify({
   properties: {
     status: { type: "string", enum: ["ready", "blocked", "cannot_reproduce"] },
     summary: { type: "string" },
+    change: { type: "string" },
     title: { type: "string" },
     test: {
       type: "object",
@@ -88,7 +96,7 @@ export const DECISION_RECORD_SCHEMA = JSON.stringify({
     draftComment: { type: "string" },
     revertPatch: { type: "string" },
   },
-  required: ["status", "summary", "decisions", "openQuestions"],
+  required: ["status", "summary", "change", "decisions", "openQuestions"],
 });
 
 /** The record, or why the value is not one. */

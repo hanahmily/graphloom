@@ -91,6 +91,7 @@ import { CODE_REVIEW_SCHEMA, codeReviewInstruction, describeCoverage, isBlocking
 import {
   commandLabel,
   commandsFor,
+  commandSummary,
   commandStatement,
   harnessName,
   isTestPath,
@@ -111,10 +112,10 @@ import {
   redCommands,
   snapshotText,
 } from "./prompts.js";
-import { codeReview, implementerRecord, reportText, validatorById } from "./validators.js";
+import { codeReview, implementerRecord, plannerRecord, reportText, validatorById, verifiedChecks } from "./validators.js";
 
 export const GRAPH_ID = "issue-fix";
-export const GRAPH_VERSION = "0.6.1";
+export const GRAPH_VERSION = "0.7.0";
 
 /** Graph bookkeeping; everything else is read back from recorded evidence. */
 export interface FixPrivateState {
@@ -153,8 +154,8 @@ export function definitionFor(profile: Profile): GraphDefinition {
       id: REQUIREMENT_DECISIONS,
       statement:
         "The implementer's decision record is ready, names the regression test and the production caller, gives every unclear point a tier and a basis, takes an option for every behaviour point, and marks no product point chosen.",
-      evidenceSchema: "decision-record-v1",
-      identityArtifactSchema: "decision-record-v1",
+      evidenceSchema: "decision-record-v2",
+      identityArtifactSchema: "decision-record-v2",
     },
     {
       id: REQUIREMENT_REPRODUCES,
@@ -213,7 +214,7 @@ export function definitionFor(profile: Profile): GraphDefinition {
     version: GRAPH_VERSION,
     privateStateSchema: "issue-fix-private-v1",
     resultContracts: [
-      { name: "decision-record-v1", schema: asSchema(DECISION_RECORD_SCHEMA), evidenceKind: "other" },
+      { name: "decision-record-v2", schema: asSchema(DECISION_RECORD_SCHEMA), evidenceKind: "other" },
       { name: "finding-verification-v1", schema: asSchema(VERIFICATION_SCHEMA), evidenceKind: "other" },
       { name: "code-review-v2", schema: asSchema(CODE_REVIEW_SCHEMA), evidenceKind: "review" },
     ],
@@ -536,10 +537,13 @@ function deliver(ctx: Context, view: RunView, issue: number, state: FixPrivateSt
     const record = implementerRecord(view.evidence).record!;
     const green = latestCheckoutRun(view.evidence, COMMAND.regression, "candidate", view.candidateDigest);
     const issueTitle = issueSnapshot(view.evidence, issue)?.issue.title ?? issueRef(profile, issue);
+    const plan = plannerRecord(view.evidence);
     const body = pullRequestDescription(profile, {
       issue,
       issueTitle,
       record,
+      ...(plan !== undefined ? { plan } : {}),
+      verified: verifiedChecks(view.evidence, profile, view.candidateDigest).map(commandSummary),
       base: green?.checkout?.base ?? "",
       ...reviewSummary(profile, view),
       ...(ledger.issues.issues.length > 0 ? { issues: issueTableRows(ledger.issues.issues) } : {}),
@@ -552,7 +556,7 @@ function deliver(ctx: Context, view: RunView, issue: number, state: FixPrivateSt
           purpose: "diagnostic",
           readOnly: true,
           instruction: `Put the change on ${branch}`,
-          input: { commands: deliverCommands(branch, commitMessage(profile, { issue, issueTitle, record }), body) },
+          input: { commands: deliverCommands(branch, commitMessage(profile, { issue, issueTitle, record, ...(plan !== undefined ? { plan } : {}) }), body) },
         },
         `put the change on the local branch ${branch} and write the pull request body`,
       ),
@@ -739,7 +743,7 @@ function planJob(ctx: Context, view: RunView, assignment: string): JobSpec {
     purpose: "diagnostic",
     readOnly: true,
     instruction: "Plan the fix",
-    resultSchema: "decision-record-v1",
+    resultSchema: "decision-record-v2",
     executor: CODING_AGENT,
     input: { assignment, harness: ctx.profile.roles.implementer },
     ...(from !== undefined ? { continueFrom: from } : {}),
@@ -787,7 +791,7 @@ function implementJob(ctx: Context, view: RunView, issue: number, record: Decisi
     kind: "agent",
     purpose: "work",
     instruction: "Implement the fix",
-    resultSchema: "decision-record-v1",
+    resultSchema: "decision-record-v2",
     writeScope: writeScopeFor(record, profile),
     executor: CODING_AGENT,
     input: {

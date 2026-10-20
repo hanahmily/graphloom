@@ -78,8 +78,16 @@ describe.skipIf(!existsSync(path.join(banyandbFixDist, "index.js")))("the banyan
     const ours = createGraph().describe(BANYANDB);
     // Budgets are what a run may spend, not behaviour: banyandb-fix predates them.
     const strip = ({ graphId: _g, version: _v, privateStateSchema: _p, defaultBudgets: _b, ...rest }: GraphDefinition) => rest;
-    expect(strip(ours)).toEqual(strip(theirs));
-    expect(ours).toMatchObject({ graphId: "issue-fix", version: "0.6.1", privateStateSchema: "issue-fix-private-v1" });
+    // The one deliberate difference (#161): decision-record-v2 adds `change`, which banyandb-fix never had.
+    const v1 = (definition: object) =>
+      JSON.parse(
+        JSON.stringify(definition)
+          .replaceAll("decision-record-v2", "decision-record-v1")
+          .replace('"change":{"type":"string"},', "")
+          .replace('"summary","change",', '"summary",'),
+      ) as Omit<GraphDefinition, "graphId" | "version" | "privateStateSchema" | "defaultBudgets">;
+    expect(v1(strip(ours))).toEqual(strip(theirs));
+    expect(ours).toMatchObject({ graphId: "issue-fix", version: "0.7.0", privateStateSchema: "issue-fix-private-v1" });
   });
 
   it("gives the agents and the checks the same instructions and commands", async () => {
@@ -88,13 +96,15 @@ describe.skipIf(!existsSync(path.join(banyandbFixDist, "index.js")))("the banyan
     const findings = await load("findings.js");
     const decisions = await load("decision-record.js");
     const call = <T>(f: unknown, ...args: unknown[]) => (f as (...a: unknown[]) => T)(...args);
+    // The one deliberate difference (#161): the planner and the implementer are also asked for `change`.
+    const v1 = (text: string) => text.split("\n").filter((l) => !l.startsWith("- change: ") && !l.startsWith("- summary is your report")).join("\n").replaceAll("decision-record-v2", "decision-record-v1");
     const snapshot = "# apache/skywalking#14111: Scheduler\n\nBody.";
-    expect(planInstruction(banyandb, { issue: 14111, request: "Fix apache/skywalking#14111.", snapshot })).toBe(
+    expect(v1(planInstruction(banyandb, { issue: 14111, request: "Fix apache/skywalking#14111.", snapshot }))).toBe(
       call(prompts.planInstruction, { issue: 14111, request: "Fix apache/skywalking#14111.", snapshot }),
     );
     for (const feedback of [undefined, ["passes: make test-ci failed"]]) {
       const args = { issue: 14111, plan: GO_PLAN, ...(feedback !== undefined ? { feedback } : {}) };
-      expect(implementInstruction(banyandb, args)).toBe(call(prompts.implementInstruction, args));
+      expect(v1(implementInstruction(banyandb, args))).toBe(call(prompts.implementInstruction, args));
     }
     expect(candidateCommands(banyandb, GO_PLAN.test!)).toEqual(call(prompts.candidateCommands, GO_PLAN.test));
     expect(redCommands(banyandb, GO_PLAN.test!)).toEqual(call(prompts.redCommands, GO_PLAN.test));
@@ -305,9 +315,9 @@ describe("profiles", () => {
 
   it("hands the rehearsal the scenario for the profile's runner, and its replies satisfy that profile", () => {
     expect(Object.keys(rehearsal(BANYANDB).scenarios)).toEqual(["happy"]);
-    const record = rehearsal(GRAPHLOOM).scenarios.happy!.results["decision-record-v1"]![0]!.output as DecisionRecord;
+    const record = rehearsal(GRAPHLOOM).scenarios.happy!.results["decision-record-v2"]![0]!.output as DecisionRecord;
     expect(decisionProblems(record, graphloom)).toEqual([]);
-    const goRecord = rehearsal(BANYANDB).scenarios.happy!.results["decision-record-v1"]!.at(-1)!.output as DecisionRecord;
+    const goRecord = rehearsal(BANYANDB).scenarios.happy!.results["decision-record-v2"]!.at(-1)!.output as DecisionRecord;
     expect(decisionProblems(goRecord, banyandb)).toEqual([]);
   });
 });

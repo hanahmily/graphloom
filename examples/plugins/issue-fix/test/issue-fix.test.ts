@@ -10,6 +10,13 @@ import {
   WHOLE_CHANGE_CHECK,
   COMMAND,
   candidateCommands,
+  commandsFor,
+  commandSummary,
+  commitMessage,
+  deliverableFollowUp,
+  withoutBookkeeping,
+  listAnd,
+  pullRequestDescription,
   parseProfile,
   shippedProfile,
   MAX_SNAPSHOT_CHARS,
@@ -992,6 +999,128 @@ describe("issue-fix graph under the banyandb profile", () => {
     });
     expect(decision.action.type).toBe("supervise");
     expect(jobs.filter((j) => j.checkout?.from === "candidate" && j.checkout.revertPatch !== undefined)).toHaveLength(2);
+  });
+
+  describe("what the commit and the pull request say (#161)", () => {
+    const CHANGE = "`Scheduler.trigger` now warns when an action runs past five minutes and logs its real outcome when it ends, instead of reporting it as timed out.";
+    const round = (summary: string, extra: Partial<DecisionRecord> = {}): DecisionRecord => ({ ...PLAN, change: CHANGE, summary, ...extra });
+    const LAST_ROUND =
+      "I fixed the two reopened findings I3 and I5 and marked them fixed in .graphloom/issues.json. I did not re-run make test-ci, build and check in this attempt.";
+
+    it("describes the change from `change`, not from the last correction round's report, and names only the checks the evidence shows passed", () => {
+      const { decision, jobs } = simulate({
+        implement: [
+          round("I wrote the test and the fix."),
+          round("I fixed lint findings I1 and I2."),
+          round(LAST_ROUND, { followUps: ["Re-run make test-ci in a checkout with free disk.", "Consider a metric for actions that outlive the warning."] }),
+        ],
+        candidate: [{ lint: { exitCode: 2, stderr: "unused" } }, { build: { exitCode: 1, stderr: "undefined: x" } }, {}],
+      });
+      expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+      expect(jobs.filter((j) => j.purpose === "work")).toHaveLength(3);
+      const { message, body } = deliverArgs(jobs);
+      expect(message).toBe(`${PLAN.title}\n\n${CHANGE}\n\nFixes apache/skywalking#${ISSUE}`);
+      expect(body).toContain(`## Summary\n${CHANGE}\n`);
+      for (const text of [message, body]) {
+        expect(text).not.toContain(".graphloom");
+        expect(text).not.toMatch(/\bI\d+\b/);
+        expect(text).not.toMatch(/I did not|I fixed|I wrote/);
+      }
+      // The graph's pinned checks passed on the delivered candidate: the Test plan says so from evidence.
+      const plan = body.slice(body.indexOf("## Test plan"));
+      const checks = [...commandsFor(PROFILE, "passes"), ...commandsFor(PROFILE, "builds")].map(commandSummary);
+      expect(plan).toContain(`- ${listAnd(checks)} pass.`);
+      // An environment note about a check the graph ran itself is dropped; a real follow-up stays.
+      expect(body).not.toMatch(/free disk|Re-run/);
+      expect(body).toContain("- Consider a metric for actions that outlive the warning.");
+    });
+
+    it("lists as passed only the pinned checks whose evidence shows them passing", () => {
+      const verified = [commandSummary(commandsFor(PROFILE, "builds")[0]!)];
+      const body = pullRequestDescription(PROFILE, { issue: ISSUE, issueTitle: "t", record: round("x"), base: "abc", review: "Reviewed.", verified });
+      expect(body).toContain(`- ${verified[0]} pass.`);
+      const further = commandSummary(commandsFor(PROFILE, "passes")[0]!);
+      expect(body).not.toContain(further);
+      expect(pullRequestDescription(PROFILE, { issue: ISSUE, issueTitle: "t", record: round("x"), base: "abc", review: "Reviewed.", verified: [] })).not.toMatch(/ pass\.\n/);
+    });
+
+    it("strips bookkeeping from a `change` that carries it anyway", () => {
+      const record = round("s", { change: "Actions past five minutes are reported as running. Fixed I3 and I5 in .graphloom/issues.json. I did not run make test-ci." });
+      expect(commitMessage(PROFILE, { issue: ISSUE, issueTitle: "t", record })).toContain("\n\nActions past five minutes are reported as running.\n\n");
+    });
+
+    it("keeps follow-ups that merely contain a pinned command's id or a word like disk, and drops re-runs of pinned checks", () => {
+      const keep = [
+        "Consider persisting checkpoints across restarts.",
+        "Look at rebuilding the index lazily.",
+        "Disk usage of the cache grows with the number of environments.",
+        "Re-running compaction after a crash may duplicate parts.",
+        "Add a lint rule for this.",
+      ];
+      for (const note of keep) expect(deliverableFollowUp(PROFILE, note), note).toBe(note);
+      const drop = ["Re-run make test-ci in a checkout with free disk.", "Run `build` again once the sandbox has network.", "I3 still open."];
+      for (const note of drop) expect(deliverableFollowUp(PROFILE, note), note).toBeUndefined();
+    });
+
+    it("keeps the useful sentence of a follow-up whose other sentence is a re-run of a pinned check", () => {
+      expect(deliverableFollowUp(PROFILE, "Consider a metric for long-running actions. I did not re-run make test-ci.")).toBe("Consider a metric for long-running actions.");
+      expect(deliverableFollowUp(PROFILE, "Consider a metric for long-running actions. Re-run make test-ci with free disk.")).toBe("Consider a metric for long-running actions.");
+      expect(deliverableFollowUp(PROFILE, "Re-run make test-ci with free disk. I did not run it.")).toBeUndefined();
+    });
+
+    it("renders sanitized text for follow-ups, decisions and open questions, never the original", () => {
+      expect(deliverableFollowUp(PROFILE, "Consider a metric for long-running actions. I fixed I3 in .graphloom/issues.json.")).toBe("Consider a metric for long-running actions.");
+      const record = round("x", {
+        followUps: ["Consider a metric for long-running actions. I fixed I3 in .graphloom/issues.json."],
+        openQuestions: ["Should the metric keep counting? I left it as is for I5."],
+        decisions: [{ point: "What to do", tier: "behaviour", options: ["warn", "cancel"], chosen: "warn", basis: "The issue asks for it. I confirmed I2 against .graphloom/issues.json." }],
+      });
+      const body = pullRequestDescription(PROFILE, { issue: ISSUE, issueTitle: "t", record, base: "abc", review: "Reviewed." });
+      expect(body).toContain("- Consider a metric for long-running actions.\n");
+      expect(body).toContain("- Should the metric keep counting?\n");
+      expect(body).toContain("- What to do: warn. The issue asks for it. Alternatives: cancel.");
+      expect(body).not.toMatch(/\bI\d+\b|\.graphloom|I fixed|I left|I confirmed/);
+    });
+
+    it("leaves out a decision whose point or choice is nothing but bookkeeping", () => {
+      const record = round("x", {
+        decisions: [
+          { point: "Address I3 in .graphloom/issues.json", tier: "behaviour", options: ["a", "b"], chosen: "a", basis: "Keeps the order." },
+          { point: "Retry policy", tier: "behaviour", options: ["fixed", "backoff"], chosen: "I fixed I5.", basis: "Simpler." },
+          { point: "Timeout", tier: "behaviour", options: ["warn", "cancel"], chosen: "warn", basis: "The issue asks for it." },
+        ],
+      });
+      const body = pullRequestDescription(PROFILE, { issue: ISSUE, issueTitle: "t", record, base: "abc", review: "Reviewed." });
+      expect(body).toContain("- Timeout: warn. The issue asks for it. Alternatives: cancel.");
+      expect(body).not.toMatch(/\bI\d+\b|\.graphloom|I fixed|Retry policy/);
+      const onlyBookkeeping = round("x", { decisions: [{ point: "Address I3", tier: "behaviour", options: ["a"], chosen: "a", basis: "" }] });
+      expect(pullRequestDescription(PROFILE, { issue: ISSUE, issueTitle: "t", record: onlyBookkeeping, base: "abc", review: "Reviewed." })).not.toContain("## Decisions");
+    });
+
+    it("keeps change sentences that only look like narration, and still strips narration and ids", () => {
+      const change = 'I/O errors are now retried. The I2C probe is unchanged. The log says "I fixed it" on success.';
+      expect(withoutBookkeeping(change)).toBe(change);
+      const narrated = "Retries are bounded. I fixed the hang. We saw it twice and I did not run make test-ci. I'm done. Closes I3, F1 and .graphloom/issues.json.";
+      expect(withoutBookkeeping(narrated)).toBe("Retries are bounded.");
+    });
+
+    it("delivers a legacy record without `change` from the plan, then its own summary, without the round's narrative", () => {
+      const legacy: DecisionRecord = { ...PLAN, summary: LAST_ROUND };
+      const plan = { ...PLAN, summary: "Warn at the timeout while the action is still running." };
+      expect(commitMessage(PROFILE, { issue: ISSUE, issueTitle: "t", record: legacy, plan })).toBe(`${PLAN.title}\n\n${plan.summary}\n\nFixes apache/skywalking#${ISSUE}`);
+      // With no plan to fall back on, nothing but bookkeeping remains in the summary, so the title stands in.
+      expect(commitMessage(PROFILE, { issue: ISSUE, issueTitle: "t", record: legacy })).toBe(`${PLAN.title}\n\n${PLAN.title}\n\nFixes apache/skywalking#${ISSUE}`);
+    });
+
+    it("asks the planner and the implementer for `change` apart from the round's summary", () => {
+      const { jobs } = simulate({});
+      const [plan, implement] = [jobs.find((j) => j.purpose === "diagnostic" && j.kind === "agent"), jobs.find((j) => j.purpose === "work")];
+      for (const job of [plan, implement]) {
+        expect(assignment(job)).toContain("- change: what the change as a whole does and why");
+        expect(job!.resultSchema).toBe("decision-record-v2");
+      }
+      expect(assignment(implement)).toContain("summary is your report on this pass");
+    });
   });
 
   it("hands the run to the supervisor after two corrections", () => {
