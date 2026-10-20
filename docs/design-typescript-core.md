@@ -647,7 +647,7 @@ the executor counterpart of `--update-plugin` (the two combine). For each pinned
 executor whose installed digest or source location changed, the controller
 replaces the catalog entry with the installed descriptor, taken as data (digest,
 input shape, source, entry module), and records the transition: old digest to new
-digest and the generation it took effect, in durable state
+digest (and source, when it moved) and the generation it took effect, in durable state
 (`executorTransitions`, shown by `inspect`), as an `executorUpdate` evidence
 record, and as a version-history entry. A dispatch admitted before the stop and
 not yet started carries the new digest. The run then continues; later resumes

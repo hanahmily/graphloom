@@ -556,7 +556,7 @@ describe("resume --update-executors (#156)", () => {
     expect(await pinnedEntry(first.stateDir)).toMatchObject({ digest: upgraded, isolation: "sandbox", builtin: false });
     expect(upgraded).not.toBe(before.digest);
     // Only the changed executor moved: the built-in GitHub pin is untouched.
-    expect(state.executorTransitions).toEqual([
+    expect(state.executorTransitions).toMatchObject([
       { id: MIRROR, fromDigest: before.digest, toDigest: upgraded, generation: expect.any(Number), at: expect.any(String) },
     ]);
     const [recorded] = payloads(state.evidence, "executorUpdate");
@@ -572,6 +572,30 @@ describe("resume --update-executors (#156)", () => {
     const again = await resume(hostRunner(server, mirror));
     expect(again.stopReason, again.blocker).toBe("resumed");
     expect((await loadRunState(first.stateDir)).executorTransitions).toHaveLength(1);
+  });
+
+  it("re-pins an executor that only moved to another location, so a later plain resume needs no flag", async () => {
+    const { server, mirror, first, resume } = await pausedMirror("update-executors-moved");
+    const before = await pinnedEntry(first.stateDir);
+    const dir = path.join(path.dirname(mirror.dir), "acme-mirror-moved");
+    await execFileAsync("cp", ["-r", mirror.dir, dir]);
+    const moved = { dir, entry: path.join(dir, "index.mjs") };
+    expect(await digestExecutorSource(dir)).toBe(before.digest);
+
+    const stopped = await resume(hostRunner(server, moved));
+    expect(stopped.stopReason).toBe("executor pin mismatch");
+    expect(stopped.blocker).toContain("--update-executors");
+
+    const resumed = await resume(hostRunner(server, moved), { updateExecutors: true });
+    expect(resumed.stopReason, resumed.blocker).toBe("resumed");
+    const pinned = await pinnedEntry(first.stateDir);
+    expect(pinned.source).not.toBe(before.source);
+    expect((await loadRunState(first.stateDir)).executorTransitions).toMatchObject([
+      { id: MIRROR, fromDigest: before.digest, toDigest: before.digest, fromSource: before.source, toSource: pinned.source },
+    ]);
+
+    const again = await resume(hostRunner(server, moved));
+    expect(again.stopReason, again.blocker).toBe("resumed");
   });
 
   it("stops without the flag and says how to proceed", async () => {

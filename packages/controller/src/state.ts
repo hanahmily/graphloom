@@ -115,6 +115,9 @@ export interface ExecutorTransitionRecord {
   id: string;
   fromDigest: string;
   toDigest: string;
+  /** Where it was served from before and after (absent in records made before location moves were recorded). */
+  fromSource?: string;
+  toSource?: string;
   generation: number;
   at: string;
 }

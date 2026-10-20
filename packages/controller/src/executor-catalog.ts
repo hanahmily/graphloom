@@ -56,6 +56,9 @@ export interface ExecutorRepin {
   id: string;
   fromDigest: string;
   toDigest: string;
+  /** Where the executor was served from, before and after; the digest may be the same when only the location moved. */
+  fromSource: string;
+  toSource: string;
 }
 
 /** What checking the pinned catalog found: a blocker, or the catalog to continue with and the executors re-pinned in it. */
@@ -116,7 +119,7 @@ export async function verifyExecutorCatalog(
     }
     if (!update) return { blocker: `pinned executor ${entry.id} changed: ${moved}; ${UPDATE_EXECUTORS_HINT}` };
     catalog.push(installedEntry(current));
-    if (current.digest !== entry.digest) repins.push({ id: entry.id, fromDigest: entry.digest, toDigest: current.digest });
+    repins.push({ id: entry.id, fromDigest: entry.digest, toDigest: current.digest, fromSource: entry.source, toSource: current.source });
   }
   return { catalog, repins };
 }
@@ -160,7 +163,7 @@ export function applyExecutorRepin(
     ...(j.executor !== undefined ? { executor: pin(j.executor) } : {}),
     ...(j.tools !== undefined ? { tools: j.tools.map((t) => ({ ...t, executor: pin(t.executor) })) } : {}),
   });
-  const reason = `operator executor update: ${repins.map((r) => `${r.id} ${r.fromDigest.slice(0, 12)} -> ${r.toDigest.slice(0, 12)}`).join(", ")}`;
+  const reason = `operator executor update: ${repins.map((r) => `${r.id} ${r.fromDigest.slice(0, 12)} -> ${r.toDigest.slice(0, 12)}${r.fromSource !== r.toSource ? ` (${r.fromSource} -> ${r.toSource})` : ""}`).join(", ")}`;
   const next: DurableRunState = {
     ...state,
     executorCatalog: catalog,
