@@ -2,7 +2,7 @@
  * Child-process worker for executor packages (built-in or user-authored).
  *
  * Protocol (one JSON object per line on stdin/stdout, one execute per process):
- *   → { kind: "describe" }                                  ← { kind: "described", executors: [{ id, version?, effect }] }
+ *   → { kind: "describe" }                                  ← { kind: "described", executors: [{ id, version?, effect, inputShape? }] }
  *   → { kind: "check", id, version?, effect?, input, allowedEffects? } ← { kind: "checked", refusal? }
  *   → { kind: "execute", id, version?, effect?, input, ctx, credentials?, allowedEffects?, tools?, usage? }
  *   ← { kind: "tool_call", seq, toolCallId, tool, input }   → { kind: "tool_result", seq, result }
@@ -50,6 +50,7 @@ function refusal(def: {
   version?: string;
   effect?: string;
   inputSchema?: (v: unknown) => boolean;
+  inputProblem?: (v: unknown) => string | undefined;
 }, req: { version?: unknown; effect?: unknown; allowedEffects?: unknown; input?: unknown }): string | undefined {
   if (req.version !== undefined && req.version !== def.version) {
     return `executor ${def.id} pinned version ${String(req.version)} but installed ${def.version ?? "(unversioned)"}`;
@@ -61,7 +62,13 @@ function refusal(def: {
     return `executor ${def.id} effect ${String(def.effect)} is not granted`;
   }
   if (def.inputSchema && !def.inputSchema(req.input)) {
-    return `executor ${def.id}: input failed schema validation`;
+    let problem: string | undefined;
+    try {
+      problem = def.inputProblem?.(req.input);
+    } catch {
+      problem = undefined;
+    }
+    return `executor ${def.id}: input failed schema validation${problem ? `: ${problem}` : ""}`;
   }
   return undefined;
 }
@@ -159,7 +166,7 @@ for await (const line of rl) {
   if (msg?.kind === "describe") {
     reply({
       kind: "described",
-      executors: [...byId.values()].map((d) => ({ id: d.id, version: d.version, effect: d.effect })),
+      executors: [...byId.values()].map((d) => ({ id: d.id, version: d.version, effect: d.effect, inputShape: d.inputShape })),
     });
     continue;
   }

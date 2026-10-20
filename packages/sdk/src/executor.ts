@@ -115,12 +115,30 @@ export const MAX_SESSION_REF_CHARS = 256;
 
 export type JsonSchemaValidator<T> = (value: unknown) => value is T;
 
+/**
+ * An executor's input shape declared as data, for whoever composes a job's
+ * input. `schema` is a plain JSON Schema object; `example` is a compact valid
+ * input. Documentation only: the executor's `inputSchema` predicate stays
+ * authoritative, and a shape that is looser than it can still be refused.
+ */
+export interface ExecutorInputShape {
+  schema: Record<string, unknown>;
+  example?: unknown;
+}
+
+/** Most UTF-8 bytes of a declared input shape the host will carry and show. */
+export const MAX_INPUT_SHAPE_BYTES = 8_192;
+
 export interface ExecutorDefinition<TInput = unknown, TOutput = unknown> {
   readonly id: ExecutorId;
   readonly version?: string;
   readonly effect: ExecutorEffect;
   readonly capabilities?: readonly string[];
   readonly inputSchema?: JsonSchemaValidator<TInput>;
+  /** Why `input` fails `inputSchema` (first failing path and rule), or undefined when it does not. Only explains a refusal. */
+  readonly inputProblem?: (input: unknown) => string | undefined;
+  /** The input shape as data, shown to whoever proposes a job for this executor. */
+  readonly inputShape?: ExecutorInputShape;
   readonly outputSchema?: JsonSchemaValidator<TOutput>;
   execute(input: TInput, ctx: ExecutorContext): Promise<TOutput> | TOutput;
 }
@@ -131,6 +149,8 @@ export interface DefineExecutorOptions<TInput, TOutput> {
   effect: ExecutorEffect;
   capabilities?: readonly string[];
   inputSchema?: JsonSchemaValidator<TInput>;
+  inputProblem?: (input: unknown) => string | undefined;
+  inputShape?: ExecutorInputShape;
   outputSchema?: JsonSchemaValidator<TOutput>;
   execute: (input: TInput, ctx: ExecutorContext) => Promise<TOutput> | TOutput;
 }
@@ -255,6 +275,8 @@ export function defineExecutor<TInput, TOutput>(
       ? { capabilities: Object.freeze([...options.capabilities]) }
       : {}),
     ...(options.inputSchema !== undefined ? { inputSchema: options.inputSchema } : {}),
+    ...(options.inputProblem !== undefined ? { inputProblem: options.inputProblem } : {}),
+    ...(options.inputShape !== undefined ? { inputShape: options.inputShape } : {}),
     ...(options.outputSchema !== undefined ? { outputSchema: options.outputSchema } : {}),
   });
 }
@@ -347,15 +369,40 @@ export function assertToolBindings(value: unknown): ToolBinding[] {
   });
 }
 
+/**
+ * The refusal for an input the executor's schema rejects, with the reason when
+ * the executor can give one; undefined when the input is accepted.
+ */
+export function checkExecutorInput(def: ExecutorDefinition, input: unknown): string | undefined {
+  if (!def.inputSchema || def.inputSchema(input)) return undefined;
+  let problem: string | undefined;
+  try {
+    problem = def.inputProblem?.(input);
+  } catch {
+    problem = undefined;
+  }
+  return `executor ${def.id}: input failed schema validation${problem ? `: ${problem}` : ""}`;
+}
+
 /** Validate executor input against a definition's schema when present. */
 export function validateExecutorInput(
   def: ExecutorDefinition,
   input: unknown,
 ): void {
-  if (!def.inputSchema) {
-    return;
-  }
-  if (!def.inputSchema(input)) {
-    throw new Error(`executor ${def.id}: input failed schema validation`);
+  const refusal = checkExecutorInput(def, input);
+  if (refusal !== undefined) throw new Error(refusal);
+}
+
+/** An input shape that is plain JSON within the size bound, or undefined. */
+export function boundedInputShape(value: unknown): ExecutorInputShape | undefined {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const schema = (value as { schema?: unknown }).schema;
+  if (schema === null || typeof schema !== "object" || Array.isArray(schema)) return undefined;
+  try {
+    const raw = JSON.stringify(value);
+    if (raw === undefined || Buffer.byteLength(raw, "utf8") > MAX_INPUT_SHAPE_BYTES) return undefined;
+    return JSON.parse(raw) as ExecutorInputShape;
+  } catch {
+    return undefined;
   }
 }

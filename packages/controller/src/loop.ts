@@ -49,7 +49,7 @@ import {
   readSwitchRequest,
   type PendingSwitchRequest,
 } from "./supervisor-switch.js";
-import { catalogEntry, isKindDefaultExecutor, resolveExecutorPin } from "./executor-catalog.js";
+import { catalogEntry, describeInputShape, executorViews, isKindDefaultExecutor, resolveExecutorPin } from "./executor-catalog.js";
 import { recordExecutorFailure } from "./executor-failure.js";
 import {
   admitValidation,
@@ -448,7 +448,8 @@ async function runNormalLoopSteps(
         // session): findings made against a since-changed candidate or plugin
         // version are marked stale here, and the last proposal's settlement
         // becomes an attempt, written by the controller, not the model.
-        const view = toRunView(state);
+        const executors = executorViews(state);
+        const view = { ...toRunView(state), ...(executors !== undefined ? { executors } : {}) };
         const lastSettlement = settleProposal(state);
         state = recordAttempt(refreshCaseFile(state), lastSettlement);
         const caseFile = liveCaseFile(state);
@@ -2358,6 +2359,9 @@ export function supervisorAdmissionRefusal(
   }
 }
 
+/** Most characters of a declared input shape a refusal repeats. */
+const MAX_REFUSAL_SHAPE_CHARS = 2_000;
+
 /**
  * A supervisor dispatch whose pinned executor would refuse it (its input
  * fails the executor's own schema, say) is inadmissible in-turn, instead of
@@ -2381,9 +2385,14 @@ export async function executorInputRefusal(
     return undefined;
   }
   if (refused === undefined) return undefined;
+  // The executor's own reason (first failing path and rule), then the shape it
+  // declared at intake, passed through as data: the controller reads no field of it.
+  const shape = catalogEntry(state, admitted.job.executor!.id)?.inputShape;
   return {
     precondition: "executor input rejected",
-    detail: `${refused}; the job was not run: compose its input as ${admitted.job.executor!.id} requires`,
+    detail: `${refused}; the job was not run: compose its input as ${admitted.job.executor!.id} requires${
+      shape !== undefined ? `. Declared input shape: ${describeInputShape(shape, MAX_REFUSAL_SHAPE_CHARS)}` : ""
+    }`,
   };
 }
 

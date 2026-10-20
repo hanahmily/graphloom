@@ -13,7 +13,7 @@
  * about checkouts at all.
  */
 import { defineExecutor, nextCommandOutcome, requireScenario, type ExecutorContext, type ExecutorDefinition } from "@graphloom/sdk";
-import { commandSucceeded, isCommandInput, COMMAND_RUN_ID, type CommandInput, type CommandOutcome } from "../run.js";
+import { COMMAND_INPUT_SHAPE, commandInputProblem, commandSucceeded, isCommandInput, COMMAND_RUN_ID, type CommandInput, type CommandOutcome } from "../run.js";
 
 const STAND_IN_NAME = "command";
 
@@ -23,6 +23,8 @@ export function createCommandRehearsalExecutor(): ExecutorDefinition<CommandInpu
     version: "1",
     effect: "write",
     inputSchema: isCommandInput,
+    inputProblem: commandInputProblem,
+    inputShape: COMMAND_INPUT_SHAPE,
     async execute(input, ctx: ExecutorContext) {
       // Seam guard (§4.2): refuse before touching anything else.
       const scenario = requireScenario(STAND_IN_NAME);

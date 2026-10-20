@@ -3,6 +3,7 @@ import { mkdir, open, readFile, rename, unlink } from "node:fs/promises";
 import path from "node:path";
 import type {
   EvidenceRecord,
+  ExecutorInputShape,
   GraphDefinition,
   JobSpec,
   OutstandingOperation,
@@ -103,6 +104,8 @@ export interface ExecutorCatalogEntry {
   entryModule?: string;
   isolation: "sandbox" | "unrestricted" | "in-process";
   builtin: boolean;
+  /** The input shape the executor declared at intake, carried as data for the supervisor; never read by the controller. */
+  inputShape?: ExecutorInputShape;
   /** Set once a qualified repair of this executor's package is activated; `digest` is then the copy's. */
   repair?: { artifactId: string; root: string; entryModule: string; baseDigest: string };
 }

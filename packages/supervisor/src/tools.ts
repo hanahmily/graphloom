@@ -89,7 +89,10 @@ const ACTION_TOOLS: Record<GraphLoomSupervisorAction, ActionTool> = {
         writeScope: STRINGS,
         readOnly: { type: "boolean" },
         executor: spec({ id: STRING }, { version: STRING }),
-        input: { description: "Bounded JSON input for the pinned executor." },
+        input: {
+          description:
+            "Bounded JSON input for the pinned executor, shaped as that executor's inputShape in the prompt's executors list. A refusal reports the failing field and the declared shape.",
+        },
         continueFrom: {
           type: "string",
           description:

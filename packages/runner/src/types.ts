@@ -1,4 +1,4 @@
-import type { ExecutorSession, JobSpec, ToolCallRequest, ToolCallResult } from "@graphloom/sdk";
+import type { ExecutorInputShape, ExecutorSession, JobSpec, ToolCallRequest, ToolCallResult } from "@graphloom/sdk";
 
 /**
  * Controller services for a running job: admitted tool calls become child
@@ -96,6 +96,8 @@ export interface ExecutorDescriptor {
   entryModule?: string;
   isolation: "sandbox" | "unrestricted" | "in-process";
   builtin: boolean;
+  /** The executor's declared input shape, passed through as data; absent when it declares none or could not be read. */
+  inputShape?: ExecutorInputShape;
 }
 
 export interface Runner {
