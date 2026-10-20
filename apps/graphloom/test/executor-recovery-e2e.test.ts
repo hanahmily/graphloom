@@ -631,6 +631,17 @@ describe("resume --update-executors (#156)", () => {
     expect(held.stopReason).not.toBe("resumed");
     expect((await loadRunState(first.stateDir)).executorTransitions).toBeUndefined();
 
+    // An update the check refuses surfaces its refusal, not the stop it was meant to lift.
+    const refused = await createController().resume({
+      runRef: first.stateDir,
+      plugin: graph(MIRROR, "resumed"),
+      validators,
+      runner: hostRunner(server, mirror, false),
+      updateExecutors: true,
+    });
+    expect(refused.stopReason).toBe("executor pin mismatch");
+    expect(refused.blocker).toBe("pinned executor acme.mirror/list-comments changed: isolation unrestricted != pinned sandbox");
+
     const lifted = await resume(true);
     expect(lifted.stopReason, lifted.blocker).toBe("resumed");
     expect((await loadRunState(first.stateDir)).executorTransitions).toHaveLength(1);

@@ -588,11 +588,12 @@ export function createController(): Controller {
         // blocker until something it depends on changed.
         const pluginUpdated = pluginUpdate !== undefined;
         // An executor update that would re-pin something answers a final stop like a plugin update does.
+        // One the check refuses runs on too, so the executor pin mismatch naming the executor surfaces instead of the old stop.
         const executorsUpdated =
           request.updateExecutors === true &&
           (await verifyExecutorCatalog(state, request.runner, true).then(
-            (check) => check !== undefined && !("blocker" in check) && check.repins.length > 0,
-            () => false,
+            (check) => check !== undefined && ("blocker" in check || check.repins.length > 0),
+            () => true,
           ));
         const live = await liveCandidateDigest(state).catch(() => state.candidateDigest);
         const asStopped: DurableRunState = {
