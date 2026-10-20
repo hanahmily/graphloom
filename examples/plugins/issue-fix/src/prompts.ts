@@ -224,22 +224,27 @@ export function changeDescription(record: DecisionRecord, plan?: DecisionRecord)
  * Whether a follow-up belongs in the pull request. A note about re-running a
  * check the graph pins and ran itself, or about the host it ran on, goes stale
  * once the environment is fixed, and the run's evidence already answers it. So
- * a note is dropped only when it names a pinned command explicitly (its argv
+ * a sentence is dropped only when it names a pinned command explicitly (its argv
  * as written, or its id in backticks) AND talks about re-running or the
- * environment. A bare word such as "build" or "disk" never drops a follow-up.
+ * environment; the rest of the note stays, and the note goes only when
+ * nothing is left. A bare word such as "build" or "disk" never drops one.
  */
 export function deliverableFollowUp(profile: Profile, note: string): string | undefined {
-  // What is rendered is the sanitized text, never the original note.
-  const clean = withoutBookkeeping(note);
-  if (clean === "") return undefined;
   // Explicit references: the label or the command as the Test plan names it in backticks (`make test-ci`),
   // the id in backticks, or the id after the tool that runs it ("make lint"). Never a bare substring.
-  const namesPinned = profile.commands.some((c) => {
-    const named = [commandLabel(c), ...(commandSummary(c).match(/`[^`]+`/g) ?? []).map((t) => t.slice(1, -1)), `\`${c.id}\``];
-    return named.some((n) => note.includes(n)) || new RegExp(`\\b(?:make|npm run|npx)\\s+${c.id.replace(/[^\w-]/g, "")}\\b`).test(note);
-  });
-  const staleCheck = /\b(?:re-?run(?:ning)?|run\s+again|free\s+disk|disk\s+space|sandbox|environment|checkout)\b/i.test(note);
-  return namesPinned && staleCheck ? undefined : clean;
+  const namesPinned = (sentence: string): boolean =>
+    profile.commands.some((c) => {
+      const named = [commandLabel(c), ...(commandSummary(c).match(/`[^`]+`/g) ?? []).map((t) => t.slice(1, -1)), `\`${c.id}\``];
+      return named.some((n) => sentence.includes(n)) || new RegExp(`\\b(?:make|npm run|npx)\\s+${c.id.replace(/[^\w-]/g, "")}\\b`).test(sentence);
+    });
+  const staleCheck = /\b(?:re-?run(?:ning)?|run\s+again|free\s+disk|disk\s+space|sandbox|environment|checkout)\b/i;
+  // Judged sentence by sentence, on the sanitized text, so a useful sentence survives a stale one beside it.
+  const kept = withoutBookkeeping(note)
+    .split("\n")
+    .map((line) => line.split(/(?<=[.!?])\s+/).filter((sentence) => !(namesPinned(sentence) && staleCheck.test(sentence))).join(" "))
+    .join("\n")
+    .trim();
+  return kept === "" ? undefined : kept;
 }
 
 /** The commit message: the title, the change and the issue it fixes. */

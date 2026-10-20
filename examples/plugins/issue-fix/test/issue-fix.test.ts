@@ -1062,6 +1062,12 @@ describe("issue-fix graph under the banyandb profile", () => {
       for (const note of drop) expect(deliverableFollowUp(PROFILE, note), note).toBeUndefined();
     });
 
+    it("keeps the useful sentence of a follow-up whose other sentence is a re-run of a pinned check", () => {
+      expect(deliverableFollowUp(PROFILE, "Consider a metric for long-running actions. I did not re-run make test-ci.")).toBe("Consider a metric for long-running actions.");
+      expect(deliverableFollowUp(PROFILE, "Consider a metric for long-running actions. Re-run make test-ci with free disk.")).toBe("Consider a metric for long-running actions.");
+      expect(deliverableFollowUp(PROFILE, "Re-run make test-ci with free disk. I did not run it.")).toBeUndefined();
+    });
+
     it("renders sanitized text for follow-ups, decisions and open questions, never the original", () => {
       expect(deliverableFollowUp(PROFILE, "Consider a metric for long-running actions. I fixed I3 in .graphloom/issues.json.")).toBe("Consider a metric for long-running actions.");
       const record = round("x", {
