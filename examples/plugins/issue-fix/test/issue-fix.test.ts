@@ -13,6 +13,8 @@ import {
   commandsFor,
   commandSummary,
   commitMessage,
+  deliverableFollowUp,
+  withoutBookkeeping,
   listAnd,
   pullRequestDescription,
   parseProfile,
@@ -1045,6 +1047,26 @@ describe("issue-fix graph under the banyandb profile", () => {
     it("strips bookkeeping from a `change` that carries it anyway", () => {
       const record = round("s", { change: "Actions past five minutes are reported as running. Fixed I3 and I5 in .graphloom/issues.json. I did not run make test-ci." });
       expect(commitMessage(PROFILE, { issue: ISSUE, issueTitle: "t", record })).toContain("\n\nActions past five minutes are reported as running.\n\n");
+    });
+
+    it("keeps follow-ups that merely contain a pinned command's id or a word like disk, and drops re-runs of pinned checks", () => {
+      const keep = [
+        "Consider persisting checkpoints across restarts.",
+        "Look at rebuilding the index lazily.",
+        "Disk usage of the cache grows with the number of environments.",
+        "Re-running compaction after a crash may duplicate parts.",
+        "Add a lint rule for this.",
+      ];
+      for (const note of keep) expect(deliverableFollowUp(PROFILE, note), note).toBe(true);
+      const drop = ["Re-run make test-ci in a checkout with free disk.", "Run `build` again once the sandbox has network.", "I3 still open."];
+      for (const note of drop) expect(deliverableFollowUp(PROFILE, note), note).toBe(false);
+    });
+
+    it("keeps change sentences that only look like narration, and still strips narration and ids", () => {
+      const change = 'I/O errors are now retried. The I2C probe is unchanged. The log says "I fixed it" on success.';
+      expect(withoutBookkeeping(change)).toBe(change);
+      const narrated = "Retries are bounded. I fixed the hang. We saw it twice and I did not run make test-ci. I'm done. Closes I3, F1 and .graphloom/issues.json.";
+      expect(withoutBookkeeping(narrated)).toBe("Retries are bounded.");
     });
 
     it("delivers a legacy record without `change` from the plan, then its own summary, without the round's narrative", () => {

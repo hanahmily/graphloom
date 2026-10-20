@@ -183,17 +183,22 @@ export function deliverCommands(branch: string, message: string, body: string): 
 
 /**
  * Text that belongs to a run's own bookkeeping rather than to the change: a
- * review issue or finding id (I3, F1), the graph's private directory, or first
- * person narration of a round. Sentences with any of these are dropped; the
- * decision record is asked to keep them out, this is the net under that.
+ * review issue or finding id (I3, F1, whole words), the graph's private
+ * directory, or first person narration of a round. Sentences with any of these
+ * are dropped; the decision record is asked to keep them out, this is the net
+ * under that. Narration is a sentence that starts with "I" and a word ("I
+ * fixed", "I'm", "I did not"), or says "I did not/ran/verified..." mid-sentence;
+ * "I/O errors are retried", "I2C" and quoted or backticked text are not.
  */
-const BOOKKEEPING = /\.graphloom\b|\b[IF]\d+\b|\b(?:I|I'm|I've|I'll|I'd|my)\b/;
+const TRACKER_OR_PRIVATE = /\.graphloom\b|\b[IF]\d+\b/;
+const NARRATION = /^(?:[-*]\s+)?(?:I\s+[a-z]|I['’](?:m|ve|ll|d)\b)|\bI\s+(?:did\s+not|didn['’]t|have\s+not|haven['’]t|ran|re-ran|confirmed|verified|fixed|added|checked)\b/;
+const isBookkeeping = (sentence: string): boolean => TRACKER_OR_PRIVATE.test(sentence) || NARRATION.test(sentence.replace(/"[^"]*"|`[^`]*`/g, ""));
 
 /** `text` without the sentences that carry bookkeeping; empty when nothing is left. */
 export function withoutBookkeeping(text: string): string {
   return text
     .split("\n")
-    .map((line) => line.split(/(?<=[.!?])\s+/).filter((sentence) => !BOOKKEEPING.test(sentence)).join(" "))
+    .map((line) => line.split(/(?<=[.!?])\s+/).filter((sentence) => !isBookkeeping(sentence)).join(" "))
     .join("\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
@@ -216,17 +221,23 @@ export function changeDescription(record: DecisionRecord, plan?: DecisionRecord)
 }
 
 /**
- * Whether a follow-up belongs in the pull request. The implementer's notes
- * about the environment it ran in, or about re-running a check the graph pins
- * and ran itself, are dropped: the run's evidence already answers them, and
- * they go stale once the environment is fixed. Conservative on purpose: only a
- * note that names a pinned command or says "re-run", "disk", "sandbox" or
- * "environment" goes.
+ * Whether a follow-up belongs in the pull request. A note about re-running a
+ * check the graph pins and ran itself, or about the host it ran on, goes stale
+ * once the environment is fixed, and the run's evidence already answers it. So
+ * a note is dropped only when it names a pinned command explicitly (its argv
+ * as written, or its id in backticks) AND talks about re-running or the
+ * environment. A bare word such as "build" or "disk" never drops a follow-up.
  */
 export function deliverableFollowUp(profile: Profile, note: string): boolean {
   if (withoutBookkeeping(note) === "") return false;
-  if (/\b(?:re-?run(?:ning)?|disk|sandbox|environment)\b/i.test(note)) return false;
-  return !profile.commands.some((c) => note.includes(commandLabel(c)) || note.includes(c.id));
+  // Explicit references: the label or the command as the Test plan names it in backticks (`make test-ci`),
+  // the id in backticks, or the id after the tool that runs it ("make lint"). Never a bare substring.
+  const namesPinned = profile.commands.some((c) => {
+    const named = [commandLabel(c), ...(commandSummary(c).match(/`[^`]+`/g) ?? []).map((t) => t.slice(1, -1)), `\`${c.id}\``];
+    return named.some((n) => note.includes(n)) || new RegExp(`\\b(?:make|npm run|npx)\\s+${c.id.replace(/[^\w-]/g, "")}\\b`).test(note);
+  });
+  const staleCheck = /\b(?:re-?run(?:ning)?|run\s+again|free\s+disk|disk\s+space|sandbox|environment|checkout)\b/i.test(note);
+  return !(namesPinned && staleCheck);
 }
 
 /** The commit message: the title, the change and the issue it fixes. */
