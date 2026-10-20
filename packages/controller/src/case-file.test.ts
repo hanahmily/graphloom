@@ -458,8 +458,8 @@ describe("case file through the controller", () => {
       stateRoot: env.stateRoot,
       runId: "bounded-episodes",
     });
-    // One controller loop runs a bounded number of steps; the operator resumes
-    // past each, and the run's logical supervisor is restored with a fresh session.
+    // A run saved with the retired step limit resumes as before; the loop below also covers
+    // the logical supervisor restored with a fresh session.
     let resumes = 0;
     while (report.stopReason === "step limit" && resumes < 6) {
       resumes += 1;

@@ -696,7 +696,8 @@ controller never learns a plugin's reason strings. On resume:
 | retryable | delivery failure (`delivery failed`) | plugin (`retryable: true`) | graph retries; a failure since the resume stops again |
 | retryable | provider failure (`supervisor provider …`, `supervisor decide failed`, `reviewer_unavailable`, `supervisor_inadmissible`) | controller | graph retries; recovery starts afresh if the failure recurs |
 | retryable | plugin host failure (`plugin host: …`, `plugin host restart failed`) | controller | graph retries |
-| retryable | step limit | controller | the recovery episode continues |
+| retryable | no-progress loop (`no-progress loop`: 16 consecutive controller steps charged no finite budget; the blocker names the last action) | controller | graph retries |
+| retryable | step limit (retired: a run saved with it by an earlier controller) | controller | the recovery episode continues |
 | retryable | environment (`environment check failed`, `environment preparation failed`, `environment changed`) | controller | checked again before the graph runs |
 | retryable | rechecked on resume (`worktree mismatch`, `pin mismatch`, `executor pin mismatch` (`--update-executors` re-pins changed executors), `reconcile required`, `repair rehydration required`, `delivery changed after acceptance`) | controller | resume checks it again first |
 | retryable | any other stop, and a graph or supervisor stop that does not say | controller / default | graph retries |
@@ -724,7 +725,7 @@ A run resumed while in recovery first returns to normal mode, so the graph's own
 current evidence. If the failure recurs, recovery starts again with a fresh
 trigger and post-resume evidence. This applies to every retryable stop, including
 the supervisor's own retryable stop and a run with no supervisor. The one
-exception is the controller's own step-limit pause, which continues the episode.
+exception is a run saved with the retired step-limit pause, which continues the episode.
 Resume first reconciles the pending dispatch, repair, and model-switch journals.
 It keeps budgets, correction trials, handoffs, repeated-proposal tracking, repair
 candidates, and the case file. The return is recorded as a remedy and as a

@@ -185,8 +185,40 @@ after the operator raises what is left by 40, the same 12 are under half of
 60 and the run continues. Lowering a budget by hand lowers what the run has
 been given the same way.
 
+## No fixed step cap
+
+The controller loop has no per-invocation step cap (it once stopped every 64
+steps with `step limit`, whatever the budgets held; #159). The finite budgets
+bound a run because every step that does anything charges one:
+
+| Step | Charges |
+|---|---|
+| graph `advance()` and its decision (dispatch, observe, validate, wait, accept, stop, supervise, ...) | `decisions` |
+| a dispatch's job | `jobs`, and `agentInvocations` for the agent calls it reserves or settles; a correction also `corrections` |
+| a supervisor turn | `decisions` for the proposal it returns or for each proposal refused, `agentInvocations` for a metered supervisor's and reviewer's provider calls, `probes` when the task sets them |
+| a retry of a retryable executor failure | `decisions` and `jobs` |
+| a return to the graph without a model call, a safe default after refused proposals | `decisions` |
+| a wait | `decisions`, then `waitMs` |
+| the environment check | `jobs` when it runs setup commands, otherwise nothing (once per active version) |
+| a plugin host failure that enters recovery | nothing |
+| a supervisor model switch | `agentInvocations` for a metered supervisor, otherwise nothing |
+| every step | `activeMs`, by the clock |
+
+The last three steps, and the environment check without setup, charge no count
+budget. A run can only chain a few of them, so the loop stops after 16
+consecutive steps that lowered none of `agentInvocations`, `jobs`, `decisions`,
+`corrections` and `probes`: `no-progress loop` (retryable), with the last
+action in the blocker. A resume starts the count over. Time budgets do not
+count for the guard: they tick with the clock. A run saved with the retired
+`step limit` still resumes and continues where it was.
+
 ## Verification
 
+- `packages/controller/src/loop.test.ts` ("the loop is bounded by the run's budgets"): a run of 80 charged
+  steps completes in one invocation; the decisions budget still stops a
+  longer one; an uncharged loop (40 supervisor model switches) stops with
+  `no-progress loop` naming its last action; a run saved with `step limit`
+  resumes.
 - `packages/controller/src/budgets.test.ts`: layer order and validation;
   the ledger booking charges, refunds and a hand edit; the legacy estimate;
   pacing tripping on the original budget and not after a mid-run raise
