@@ -110,6 +110,18 @@ export interface ExecutorCatalogEntry {
   repair?: { artifactId: string; root: string; entryModule: string; baseDigest: string };
 }
 
+/** An operator re-pin of an executor to its installed bytes, at the generation it took effect. */
+export interface ExecutorTransitionRecord {
+  id: string;
+  fromDigest: string;
+  toDigest: string;
+  /** Where it was served from before and after (absent in records made before location moves were recorded). */
+  fromSource?: string;
+  toSource?: string;
+  generation: number;
+  at: string;
+}
+
 /**
  * A tool call an agent job made, admitted as a child operation. Recorded
  * before the child runs; settled results are replayed for the same stage
@@ -184,6 +196,8 @@ export interface DurableRunState {
   agentSessions?: AgentSessionRecord[];
   /** Executors pinned at intake (absent for runs whose runner cannot describe its executors). */
   executorCatalog?: ExecutorCatalogEntry[];
+  /** Executors the operator moved onto installed code with `resume --update-executors`, oldest first. */
+  executorTransitions?: ExecutorTransitionRecord[];
   /** Earliest time each executor may run again, from a failure's retry timing. */
   executorRetryAt?: Record<string, string>;
   /**

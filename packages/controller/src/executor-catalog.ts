@@ -3,6 +3,7 @@ import {
   BUILTIN_COMMAND_EXECUTOR_ID,
   type ExecutorInputShape,
   type ExecutorPin,
+  type JobSpec,
   type ExecutorView,
 } from "@graphloom/sdk";
 import {
@@ -11,6 +12,7 @@ import {
   type ExecutorSourceOverride,
   type Runner,
 } from "@graphloom/runner";
+import { newEvidenceRef } from "./admit.js";
 import type { DurableRunState, ExecutorCatalogEntry } from "./state.js";
 
 /** Pin every executor the runner serves, with the digest of the code it would run. */
@@ -49,38 +51,141 @@ export function describeInputShape(shape: ExecutorInputShape, limit: number): st
   return text.length <= limit ? text : `${text.slice(0, limit)}... (cut)`;
 }
 
+/** One executor the operator moved onto the installed code with `--update-executors`. */
+export interface ExecutorRepin {
+  id: string;
+  fromDigest: string;
+  toDigest: string;
+  /** Where the executor was served from, before and after; the digest may be the same when only the location moved. */
+  fromSource: string;
+  toSource: string;
+}
+
+/** What checking the pinned catalog found: a blocker, or the catalog to continue with and the executors re-pinned in it. */
+export type ExecutorCatalogCheck = { blocker: string } | { catalog: ExecutorCatalogEntry[]; repins: ExecutorRepin[] };
+
+/** Appended to a digest mismatch so the operator knows the way forward. */
+export const UPDATE_EXECUTORS_HINT = "resume with --update-executors to pin the installed executor";
+
 /**
  * Check the executors a run pinned against what the runner serves now. An
  * activated repair is checked against its run-local copy. Returns a blocker,
- * or undefined when every pin still resolves to the same code.
+ * or the catalog to continue with. With `update`, an executor whose installed
+ * bytes (or source location) changed is re-pinned to the installed descriptor
+ * instead of blocking; one whose isolation or built-in status changed, that is
+ * no longer installed, or whose active repair the installed bytes moved past
+ * is refused.
  */
-export async function verifyExecutorCatalog(state: DurableRunState, runner: Runner): Promise<string | undefined> {
+export async function verifyExecutorCatalog(
+  state: DurableRunState,
+  runner: Runner,
+  update = false,
+): Promise<ExecutorCatalogCheck | undefined> {
   const pinned = state.executorCatalog;
   if (pinned === undefined || pinned.length === 0) return undefined;
   const live = await runner.describeExecutors?.();
-  if (live === undefined) return "the runner cannot describe the executors this run pinned";
+  if (live === undefined) return { blocker: "the runner cannot describe the executors this run pinned" };
   const byId = new Map(live.map((d) => [d.id, d]));
+  const repins: ExecutorRepin[] = [];
+  const catalog: ExecutorCatalogEntry[] = [];
   for (const entry of pinned) {
     const current = byId.get(entry.id);
     if (entry.repair !== undefined) {
       const digest = await digestExecutorSource(entry.repair.root).catch(() => undefined);
       if (digest !== entry.digest) {
-        return `run-local repair ${entry.repair.artifactId} of executor ${entry.id} is missing or changed`;
+        return { blocker: `run-local repair ${entry.repair.artifactId} of executor ${entry.id} is missing or changed` };
       }
-      if (current === undefined) return `pinned executor ${entry.id} is no longer served`;
+      if (current === undefined) return { blocker: `pinned executor ${entry.id} is no longer served` };
       // The copy runs under the runner's current configuration for that executor.
       const changed = changedAttribute(entry, current, ["isolation", "builtin"]);
-      if (changed) return `pinned executor ${entry.id} changed: ${changed}`;
+      if (changed) return { blocker: `pinned executor ${entry.id} changed: ${changed}` };
+      // The installed bytes moved past what the repair was made from: the qualified copy stays, and only a repair replaces it.
+      if (update && current.digest !== entry.repair.baseDigest) {
+        return {
+          blocker: `pinned executor ${entry.id} has an active repair ${entry.repair.artifactId}; --update-executors does not replace it (installed digest ${current.digest.slice(0, 12)} != its base ${entry.repair.baseDigest.slice(0, 12)})`,
+        };
+      }
+      catalog.push(entry);
       continue;
     }
-    if (current === undefined) return `pinned executor ${entry.id} is no longer installed`;
-    if (current.digest !== entry.digest) {
-      return `pinned executor ${entry.id} changed: digest ${current.digest.slice(0, 12)} != pinned ${entry.digest.slice(0, 12)}`;
+    if (current === undefined) return { blocker: `pinned executor ${entry.id} is no longer installed` };
+    const kept = changedAttribute(entry, current, ["isolation", "builtin"]);
+    if (kept) return { blocker: `pinned executor ${entry.id} changed: ${kept}` };
+    const moved =
+      current.digest !== entry.digest ? `digest ${current.digest.slice(0, 12)} != pinned ${entry.digest.slice(0, 12)}` : changedAttribute(entry, current, ["source", "entryModule"]);
+    if (moved === undefined) {
+      catalog.push(entry);
+      continue;
     }
-    const changed = changedAttribute(entry, current, ["source", "entryModule", "isolation", "builtin"]);
-    if (changed) return `pinned executor ${entry.id} changed: ${changed}`;
+    if (!update) return { blocker: `pinned executor ${entry.id} changed: ${moved}; ${UPDATE_EXECUTORS_HINT}` };
+    catalog.push(installedEntry(current));
+    repins.push({ id: entry.id, fromDigest: entry.digest, toDigest: current.digest, fromSource: entry.source, toSource: current.source });
   }
-  return undefined;
+  return { catalog, repins };
+}
+
+/** An entry pinned from what the runner serves, as at intake. */
+function installedEntry(d: ExecutorDescriptor): ExecutorCatalogEntry {
+  return {
+    id: d.id,
+    digest: d.digest,
+    source: d.source,
+    ...(d.entryModule !== undefined ? { entryModule: d.entryModule } : {}),
+    isolation: d.isolation,
+    builtin: d.builtin,
+    ...(d.inputShape !== undefined ? { inputShape: d.inputShape } : {}),
+  };
+}
+
+/**
+ * Record an operator's executor update in the run: the new catalog, each
+ * old -> new digest at the generation it took effect (state, version history
+ * and an evidence record), and the digest on work not yet started. Accepted
+ * receipts and the evidence behind them are untouched: they bind the workspace
+ * and artifacts they were accepted on, never an executor's digest, so earlier
+ * evidence stays valid evidence of what ran then.
+ */
+export function applyExecutorRepin(
+  state: DurableRunState,
+  catalog: ExecutorCatalogEntry[],
+  repins: ExecutorRepin[],
+): DurableRunState {
+  if (repins.length === 0) return { ...state, executorCatalog: catalog };
+  const at = new Date().toISOString();
+  const transitions = repins.map((r) => ({ ...r, generation: state.generation, at }));
+  const toDigest = new Map(repins.map((r) => [r.id, r.toDigest]));
+  const pin = (p: ExecutorPin): ExecutorPin => {
+    const digest = toDigest.get(p.id);
+    return digest !== undefined && p.digest !== undefined ? { ...p, digest } : p;
+  };
+  const job = (j: JobSpec): JobSpec => ({
+    ...j,
+    ...(j.executor !== undefined ? { executor: pin(j.executor) } : {}),
+    ...(j.tools !== undefined ? { tools: j.tools.map((t) => ({ ...t, executor: pin(t.executor) })) } : {}),
+  });
+  const reason = `operator executor update: ${repins.map((r) => `${r.id} ${r.fromDigest.slice(0, 12)} -> ${r.toDigest.slice(0, 12)}${r.fromSource !== r.toSource ? ` (${r.fromSource} -> ${r.toSource})` : ""}`).join(", ")}`;
+  const next: DurableRunState = {
+    ...state,
+    executorCatalog: catalog,
+    executorTransitions: [...(state.executorTransitions ?? []), ...transitions],
+    evidence: [
+      ...state.evidence,
+      { ref: newEvidenceRef(state), kind: "other", generation: state.generation, payload: { executorUpdate: { transitions } } },
+    ],
+    versionHistory: [...(state.versionHistory ?? []), { activeVersion: state.activeVersion, generation: state.generation, reason, at }],
+    stateRevision: state.stateRevision + 1,
+  };
+  // A dispatch admitted before the stop that never reached the runner runs on the new bytes; one that started or settled keeps the pins it ran under.
+  if (state.pendingDispatch !== undefined && state.pendingDispatch.status === "waiting") {
+    const { pendingDispatch } = state;
+    next.pendingDispatch = {
+      ...pendingDispatch,
+      job: job(pendingDispatch.job),
+      ...(pendingDispatch.executor !== undefined ? { executor: pin(pendingDispatch.executor) } : {}),
+    };
+  }
+  if (state.executorRetry !== undefined) next.executorRetry = { ...state.executorRetry, job: job(state.executorRetry.job) };
+  return next;
 }
 
 type PinnedAttribute = "source" | "entryModule" | "isolation" | "builtin";

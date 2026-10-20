@@ -86,7 +86,7 @@ async function main(): Promise<void> {
 
   if (cmd === "resume") {
     const runner = createCliRunner(await requireRunnerConfig());
-    const runRef = requireRunRef(args[1], "resume <stateDir|runId> [--state-root <dir>] [--update-plugin]");
+    const runRef = requireRunRef(args[1], "resume <stateDir|runId> [--state-root <dir>] [--update-plugin] [--update-executors]");
     const stateRoot = flagValue(args, "--state-root");
     const config = await loadSupervisorConfig();
     const report = await controller.resume({
@@ -94,6 +94,7 @@ async function main(): Promise<void> {
       runner,
       ...(stateRoot ? { stateRoot: path.resolve(stateRoot) } : {}),
       ...(args.includes("--update-plugin") ? { updatePlugin: true } : {}),
+      ...(args.includes("--update-executors") ? { updateExecutors: true } : {}),
       ...(config !== undefined
         ? {
             restoreSupervisor: piSupervisorRestore(config),
@@ -256,7 +257,7 @@ Usage:
   graphloom inspect <stateDir|runId> [--state-root <dir>]
   graphloom stats <stateDir|runId> [--state-root <dir>] [--json]
   graphloom stop <stateDir|runId> [--state-root <dir>]
-  graphloom resume <stateDir|runId> [--state-root <dir>] [--update-plugin]
+  graphloom resume <stateDir|runId> [--state-root <dir>] [--update-plugin] [--update-executors]
   graphloom switch-model <stateDir|runId> <provider/model> --reason <text> [--state-root <dir>]
   graphloom delete <stateDir|runId> [--state-root <dir>] [--force]
   graphloom version
@@ -299,6 +300,15 @@ active version moves with it). It is refused unless the graph keeps its id, stag
 requirements, validator bindings and private-state schema. Each accepted receipt
 is rechecked with the updated validators on the evidence it was accepted on; the
 first that no longer passes sends the run back to its stage.
+
+Resume --update-executors pins the installed executors whose bytes changed since
+the run started (a GraphLoom upgrade that touches a built-in executor, say),
+recording each old -> new digest and the generation in the run (graphloom inspect
+shows executorTransitions). It is refused, naming the executor, when one is no
+longer installed, its isolation or built-in status changed, or the installed bytes
+moved past an active run-local repair of it. Accepted receipts and evidence are
+not changed. Without it, a changed executor stops the run with "executor pin
+mismatch". It combines with --update-plugin.
 
 Agent runner: run and resume refuse to start without $GRAPHLOOM_RUNNER_CONFIG or
 ~/.config/graphloom/runner.json:
