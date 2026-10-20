@@ -78,7 +78,7 @@ import {
 import { isUnsettled, reconcilePendingDispatch } from "./reconcile.js";
 import { createChildPort, reconcileChildOperations } from "./children.js";
 import { agentSessionViews, continuationRefusal, recordAgentSession, sessionForDispatch, wipeAgentSessions } from "./agent-sessions.js";
-import { citedEvidence, loadRunState, nextStageAttempt, type ProbeRecord, recordRemedy, STEP_LIMIT_STOP_REASON, type DurableRunState, saveRunState } from "./state.js";
+import { citedEvidence, loadRunState, nextStageAttempt, type ProbeRecord, NO_PROGRESS_STOP_REASON, recordRemedy, type DurableRunState, saveRunState } from "./state.js";
 import { stopMarkOf } from "./stop-class.js";
 import { bumpGeneration } from "./generation.js";
 import { noteGraphDecision, noteSupervisorProposal, progressMark, settleCorrectionTrial, settleSupervisorCorrection } from "./escalation.js";
@@ -125,7 +125,23 @@ import {
 } from "./inadmissible.js";
 import { citedRefs, needsReview, runReview, type OpenReviewInspection, type ProposalReviewer, type ReviewOutcome } from "./proposal-review.js";
 
-const MAX_STEPS = 64;
+/**
+ * Consecutive controller steps that charge no finite budget before the loop
+ * stops itself. Every step that asks the graph or the supervisor for a decision
+ * charges `decisions`, and every job charges `jobs` and `agentInvocations`, so
+ * the finite budgets bound a healthy run and there is no cap on charged steps.
+ * The steps that charge nothing are the environment check (no setup commands),
+ * a plugin host failure that enters recovery, and a supervisor model switch;
+ * a legitimate run strings together two or three of them (a host failure, then
+ * a switch, then the restarted episode's first decision). 16 leaves several
+ * times that room and still ends a real loop within moments.
+ */
+const MAX_UNCHARGED_STEPS = 16;
+
+/** What the count budgets still hold; a step that charged one lowers it. Time budgets tick with the clock, so they do not count. */
+function chargeableRemaining(budgets: DurableRunState["budgets"]): number {
+  return budgets.agentInvocations + budgets.jobs + budgets.decisions + budgets.corrections + (budgets.probes ?? 0);
+}
 
 export interface LoopDeps {
   /** Plugin decisions go through the host seam (in-process scripted or child). */
@@ -306,13 +322,33 @@ async function runNormalLoopSteps(
   // The environment is checked once per loop and active version: at the start
   // of a run, on every resume, and after a repair changes the version.
   let environmentReadyFor: string | undefined;
-  for (let step = 0; step < MAX_STEPS; step += 1) {
+  let lastRemaining: number | undefined;
+  let unchargedSteps = 0;
+  let lastAction = "start";
+  for (let step = 0; ; step += 1) {
+    const remaining = chargeableRemaining(state.budgets);
+    unchargedSteps = lastRemaining !== undefined && remaining >= lastRemaining ? unchargedSteps + 1 : 0;
+    lastRemaining = remaining;
+    if (unchargedSteps >= MAX_UNCHARGED_STEPS) {
+      return withRunLock(state.stateDir, async () => {
+        state = {
+          ...state,
+          status: "stopped",
+          stopReason: NO_PROGRESS_STOP_REASON,
+          blocker: `${unchargedSteps} consecutive controller steps charged no budget; last action: ${lastAction}`,
+        };
+        await saveRunState(state);
+        syncRevision(deps, state);
+        return state;
+      });
+    }
     if (
       state.status === "running" &&
       state.mode === "normal" &&
       environmentReadyFor !== state.activeVersion &&
       declaresEnvironment(state.definition.environment)
     ) {
+      lastAction = "environment check";
       state = await preflightEnvironment(state, deps);
       if (state.status !== "running") return state;
       if (state.mode === "normal") environmentReadyFor = state.activeVersion;
@@ -932,6 +968,7 @@ async function runNormalLoopSteps(
             return { done: true as const, state };
           }
           if (isModelSwitchRequest(decided)) {
+            lastAction = "supervisor switch_model";
             state = markProposal(state, decided);
             state = await applyModelSwitch(state, supervisor, decided, "supervisor");
             await saveRunState(state);
@@ -960,6 +997,7 @@ async function runNormalLoopSteps(
           view,
         );
         if (!advanced.ok) {
+          lastAction = `plugin host failure (${advanced.observation.code})`;
           const contained = await containHostFailure(
             state,
             deps,
@@ -989,6 +1027,7 @@ async function runNormalLoopSteps(
         }
       }
 
+      lastAction = `${state.mode === "recovery" ? "supervisor" : "graph"} ${decision.action.type}`;
       // The callback that proposed this decision may have used up the time left.
       if (activeTimeExhausted(deps)) {
         state = { ...chargeActiveTime(state, deps), status: "stopped", ...stopCause(deps) };
@@ -1218,18 +1257,6 @@ async function runNormalLoopSteps(
       }
     }
   }
-
-  state = await withRunLock(state.stateDir, async () => {
-    state = {
-      ...state,
-      status: "stopped",
-      stopReason: STEP_LIMIT_STOP_REASON,
-      blocker: `exceeded ${MAX_STEPS} controller steps`,
-    };
-    await saveRunState(state);
-    return state;
-  });
-  return state;
 }
 
 const STOP_POLL_MS = 200;

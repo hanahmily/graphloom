@@ -186,7 +186,7 @@ already marked stale. A run resumed in recovery is not handed to the supervisor 
 its old trigger. The controller returns it to normal mode first, so the graph
 retries what failed. Only a recurrence opens a new episode, with a fresh trigger
 and post-resume evidence. That episode's settlement says the operator's resume
-overtook the last proposal. The controller's own step-limit pause is the one
+overtook the last proposal. A run saved with the retired step-limit pause is the one
 exception and continues the episode. The supervisor's `stop` tool takes an
 optional `retryable` (default `true`): `false` marks a blocker no retry can
 clear, and a resume then surfaces the same blocker until the plugin, the

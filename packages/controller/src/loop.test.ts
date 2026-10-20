@@ -20,7 +20,7 @@ import {
 } from "@graphloom/sdk";
 import { createScriptedRunner } from "@graphloom/runner";
 import { createScriptedSupervisor, type Supervisor, type SupervisorInput } from "@graphloom/supervisor";
-import { createController, loadRunState, type ProposalReviewer } from "./index.js";
+import { createController, loadRunState, saveRunState, type ProposalReviewer } from "./index.js";
 
 /**
  * I4: a provider call the proposal reviewer spends during a running supervisor
@@ -251,5 +251,91 @@ describe("reviewer calls reduce the running supervisor prompt's allowance", () =
     expect(supervisorCalls + reviewerCalls).toBeLessThanOrEqual(2);
     expect(report.status).toBe("stopped");
     expect((await loadRunState(report.stateDir)).stopReason).toMatch(/budgets? exhausted/);
+  });
+});
+
+describe("the loop is bounded by the run's budgets, not by a step count", () => {
+  // Observing the workspace charges one decision and nothing else; each step reads a different path.
+  const observes = (n: number): GraphDecision[] =>
+    Array.from({ length: n }, (_, i) => observe({ paths: [`path-${i}.txt`] }, `observe ${i}`));
+
+  it("completes a run of more than 64 charged steps in one invocation", async () => {
+    const env = await makeEnv();
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({ definition, advances: [...observes(80), ...finish] }),
+      validators,
+      runner: runner(),
+      stateRoot: env.stateRoot,
+      runId: "long-run-past-64-steps",
+    });
+    const state = await loadRunState(report.stateDir);
+    expect(report.blocker).toBe("none");
+    expect(state.stopReason).toBe("complete");
+    expect(state.budgets.decisions).toBeLessThan(512 - 80);
+  });
+
+  it("still stops on the decisions budget, with that reason", async () => {
+    const env = await makeEnv("budgets:\n  decisions: 70\n");
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({ definition, advances: [...observes(100), ...finish] }),
+      validators,
+      runner: runner(),
+      stateRoot: env.stateRoot,
+      runId: "long-run-decisions-exhausted",
+    });
+    const state = await loadRunState(report.stateDir);
+    expect(state.stopReason).toBe("decisions budget exhausted");
+    expect(state.budgets.decisions).toBe(0);
+  });
+
+  it("stops a loop that charges nothing, naming the last action", async () => {
+    const env = await makeEnv();
+    const switches = Array.from({ length: 40 }, (_, i) => ({
+      type: "switch_model" as const,
+      provider: "minimax-cn",
+      modelId: "MiniMax-M3",
+      reason: `try ${i}`,
+    }));
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({ definition, advances: [supervise({ reason: "needs a decision" }, "escalate")] }),
+      validators,
+      supervisor: createScriptedSupervisor({ decisions: switches }),
+      runner: runner(),
+      stateRoot: env.stateRoot,
+      runId: "uncharged-loop",
+    });
+    const state = await loadRunState(report.stateDir);
+    expect(state.status).toBe("stopped");
+    expect(state.stopReason).toBe("no-progress loop");
+    expect(state.blocker).toMatch(/16 consecutive controller steps charged no budget; last action: supervisor switch_model/);
+    expect(report.stopRetryable).toBe(true);
+  });
+
+  it("lets a resume proceed on a run saved with the retired step limit", async () => {
+    const env = await makeEnv();
+    const controller = createController();
+    const first = await controller.run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({ definition, advances: [...observes(2), ...finish] }),
+      validators,
+      runner: runner(),
+      stateRoot: env.stateRoot,
+      runId: "saved-step-limit",
+    });
+    const saved = await loadRunState(first.stateDir);
+    const { stopClass: _class, stopMark: _mark, ...rest } = saved;
+    void _class;
+    void _mark;
+    await saveRunState({ ...rest, status: "stopped", stopReason: "step limit", blocker: "exceeded 64 controller steps" });
+    const resumed = await controller.resume({
+      runRef: first.stateDir,
+      plugin: createScriptedGraph({ definition, advances: finish }),
+      validators,
+      runner: runner(),
+    });
+    expect(resumed.stopReason).toBe("complete");
   });
 });

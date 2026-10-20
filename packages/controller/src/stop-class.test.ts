@@ -21,7 +21,7 @@ import {
 import { createScriptedRunner, type JobContext } from "@graphloom/runner";
 import { createController, loadRunState, saveRunState } from "./index.js";
 import { changeSinceStop, classifyStop, decideResume, FINAL_STOP_HELD_REMEDY, type StopClassification } from "./stop-class.js";
-import { STEP_LIMIT_STOP_REASON, type DurableRunState, type StopMark } from "./state.js";
+import { NO_PROGRESS_STOP_REASON, STEP_LIMIT_STOP_REASON, type DurableRunState, type StopMark } from "./state.js";
 
 const execFileAsync = promisify(execFile);
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -53,6 +53,7 @@ describe("stop classification (§8)", () => {
       "supervisor decide failed",
       "reviewer_unavailable",
       STEP_LIMIT_STOP_REASON,
+      NO_PROGRESS_STOP_REASON,
       // A recovery trigger's own message, when no supervisor was configured.
       "executor graphloom.agent/run failed: agent finished without a result",
     ]) {

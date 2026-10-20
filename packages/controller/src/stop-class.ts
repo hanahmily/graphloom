@@ -10,7 +10,7 @@
  * so the controller never learns a plugin's reason strings.
  */
 import type { ResumeView } from "@graphloom/sdk";
-import { STEP_LIMIT_STOP_REASON, type DurableRunState, type StopMark } from "./state.js";
+import { NO_PROGRESS_STOP_REASON, STEP_LIMIT_STOP_REASON, type DurableRunState, type StopMark } from "./state.js";
 
 export type StopSource = "graph" | "supervisor" | "controller";
 
@@ -51,7 +51,9 @@ export const CONTROLLER_STOP_CLASSES: readonly ControllerStopClass[] = [
     kind: "rechecked on resume",
   },
   { reason: /^(?:supervisor provider |supervisor decide failed$|reviewer_unavailable$|supervisor_inadmissible$)/, retryable: true, kind: "provider failure" },
+  // Runs saved by an earlier controller can carry this; the controller no longer produces it.
   { reason: STEP_LIMIT_STOP_REASON, retryable: true, kind: "step limit" },
+  { reason: NO_PROGRESS_STOP_REASON, retryable: true, kind: "no-progress loop" },
 ];
 
 /** How a stopped run's stop is classified; undefined for a run that is not stopped. */

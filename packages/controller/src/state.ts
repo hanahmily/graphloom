@@ -41,6 +41,12 @@ export interface RemedyRecord {
  */
 export const STEP_LIMIT_STOP_REASON = "step limit";
 
+/**
+ * The stop reason of the controller's guard against a loop that spends nothing:
+ * consecutive steps that charged no finite budget. Retryable; resume starts over.
+ */
+export const NO_PROGRESS_STOP_REASON = "no-progress loop";
+
 /** Remedy records kept in run state; older ones are dropped. */
 export const MAX_REMEDY_RECORDS = 100;
 
