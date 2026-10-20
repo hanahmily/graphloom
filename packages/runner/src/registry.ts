@@ -433,6 +433,9 @@ export function createChildExecutorRunner(
         entryModule,
         ...(options.sandbox === true ? { sandbox: true } : {}),
         workerModule,
+        // The scoped environment and sandbox every other worker of this runner gets.
+        env: options.env ?? process.env,
+        ...(extraCa ? { readPaths: [extraCa] } : {}),
       });
       const shapes = new Map<string, ExecutorInputShape>();
       for (const d of described) {
@@ -728,14 +731,19 @@ export async function describeExecutorModule(options: {
   sandbox?: boolean;
   workerModule?: string;
   timeoutMs?: number;
+  /** The worker's environment. Default: the caller's, as for check and execute workers. */
+  env?: NodeJS.ProcessEnv;
+  /** Extra paths the sandboxed worker may read, e.g. a CA bundle. */
+  readPaths?: string[];
 }): Promise<DescribedExecutor[]> {
   const workerModule = options.workerModule ?? fileURLToPath(new URL("./executor-worker.js", import.meta.url));
   const entry = path.resolve(options.entryModule);
   if (options.sandbox === true) assertSandboxSupported();
-  const args = options.sandbox === true ? sandboxNodeArgs([workerModule, entry]) : [];
+  const args = options.sandbox === true ? sandboxNodeArgs([workerModule, entry], options.readPaths ?? []) : [];
   const child = spawn(process.execPath, [...args, workerModule, entry], {
     stdio: ["pipe", "pipe", "pipe"],
     cwd: path.dirname(entry),
+    ...(options.env !== undefined ? { env: options.env } : {}),
   });
   const stderr: string[] = [];
   child.stderr.setEncoding("utf8");

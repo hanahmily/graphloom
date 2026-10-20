@@ -562,3 +562,26 @@ describe("graphloom.github labels and edits", () => {
     expect(server.requests).toHaveLength(0);
   });
 });
+describe("read executors declare their input shape", () => {
+  const reads = executors.filter((e) =>
+    ["list-issues", "list-pulls", "get-issue", "get-pull", "list-issue-comments", "list-labels", "list-milestones"].includes(e.id.split("/")[1]!),
+  ) as ExecutorDefinition[];
+
+  it("declares a shape, with an example its predicate accepts, for every read", () => {
+    expect(reads).toHaveLength(7);
+    for (const def of reads) {
+      expect(def.inputShape?.schema, def.id).toBeDefined();
+      expect(def.inputSchema!(def.inputShape!.example), def.id).toBe(true);
+      expect(def.inputProblem!(def.inputShape!.example), def.id).toBeUndefined();
+    }
+  });
+
+  it("names the failing field of a refused input", () => {
+    const get = reads.find((e) => e.id === "graphloom.github/get-issue")!;
+    expect(get.inputProblem!({ owner: "o", repo: "r", number: "7" })).toBe("number: must be an integer");
+    expect(get.inputProblem!({ owner: "o" })).toBe("repo: required");
+    const list = reads.find((e) => e.id === "graphloom.github/list-issues")!;
+    expect(list.inputProblem!({ owner: "o", repo: "r", state: "merged" })).toBe('state: must be one of "open", "closed", "all"');
+    expect(list.inputProblem!({ owner: "o", repo: "r", labels: ["a", 1] })).toBe("labels[1]: must be a string");
+  });
+});

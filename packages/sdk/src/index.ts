@@ -133,6 +133,7 @@ export {
   boundedInputShape,
   MAX_INPUT_SHAPE_BYTES,
 } from "./executor.js";
+export { jsonSchemaProblem } from "./input-problem.js";
 
 export {
   activateRepair,

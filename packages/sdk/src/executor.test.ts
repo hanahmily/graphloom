@@ -14,6 +14,7 @@ import {
   BUILTIN_COMMAND_EXECUTOR_ID,
   MAX_EXECUTOR_INPUT_BYTES,
 } from "./executor.js";
+import { jsonSchemaProblem } from "./input-problem.js";
 import type { JobSpec } from "./types.js";
 
 describe("defineExecutor", () => {
@@ -168,5 +169,33 @@ describe("executor input reasons and declared shape", () => {
     expect(boundedInputShape({ schema: [] })).toBeUndefined();
     expect(boundedInputShape("x")).toBeUndefined();
     expect(boundedInputShape({ schema: { big: "x".repeat(MAX_INPUT_SHAPE_BYTES) } })).toBeUndefined();
+  });
+});
+
+describe("jsonSchemaProblem", () => {
+  const schema = {
+    type: "object",
+    required: ["commands"],
+    properties: {
+      commands: {
+        type: "array",
+        minItems: 1,
+        items: { type: "object", required: ["id", "argv"], properties: { id: { type: "string", pattern: "^[a-z]+$" }, argv: { type: "array", items: { type: "string" } } } },
+      },
+      mode: { enum: ["a", "b"] },
+      n: { type: "integer", minimum: 1, maximum: 5 },
+    },
+  };
+
+  it("reports the first failing path and its rule", () => {
+    expect(jsonSchemaProblem(schema, { commands: [{ id: "x", argv: ["go"] }] })).toBeUndefined();
+    expect(jsonSchemaProblem(schema, 1)).toBe("input: must be an object");
+    expect(jsonSchemaProblem(schema, {})).toBe("commands: required");
+    expect(jsonSchemaProblem(schema, { commands: [] })).toBe("commands: must hold at least 1 item(s)");
+    expect(jsonSchemaProblem(schema, { commands: [{ id: "x" }] })).toBe("commands[0].argv: required");
+    expect(jsonSchemaProblem(schema, { commands: [{ id: "x", argv: { item: ["go"] } }] })).toBe("commands[0].argv: must be an array");
+    expect(jsonSchemaProblem(schema, { commands: [{ id: "X", argv: [] }] })).toBe("commands[0].id: must match ^[a-z]+$");
+    expect(jsonSchemaProblem(schema, { commands: [{ id: "x", argv: [] }], mode: "c" })).toBe('mode: must be one of "a", "b"');
+    expect(jsonSchemaProblem(schema, { commands: [{ id: "x", argv: [] }], n: 9 })).toBe("n: must be at most 5");
   });
 });

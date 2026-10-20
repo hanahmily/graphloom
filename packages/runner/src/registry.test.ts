@@ -903,3 +903,26 @@ describe("assertBoundedJson", () => {
     expect(() => assertBoundedJson(huge)).toThrow(/exceeds/);
   });
 });
+
+describe("declared input shapes are read with the runner's scoped environment", () => {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const fixture = path.join(here, "../test/fixtures/env-shape-executor.mjs");
+  const workerModule = path.join(here, "../dist/executor-worker.js");
+
+  it("does not leak the caller's ambient variables into describe, and passes the bound ones", async () => {
+    process.env.GL_AMBIENT = "secret-token";
+    try {
+      const runner = createChildExecutorRunner({
+        entryModule: fixture,
+        executorIds: ["acme.env/shape"],
+        fallback: createScriptedRunner({ jobs: [] }),
+        workerModule,
+        env: { GL_BOUND: "configured" },
+      });
+      const [described] = await runner.describeExecutors!();
+      expect(described?.inputShape?.schema.description).toBe("leak=none bound=configured");
+    } finally {
+      delete process.env.GL_AMBIENT;
+    }
+  });
+});

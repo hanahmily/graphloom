@@ -150,6 +150,14 @@ describe("graphloom.coding-agent/run", () => {
     expect(executor.inputSchema?.({ assignment: "ok" })).toBe(true);
   });
 
+  it("explains a refusal and declares a shape its own predicate accepts", () => {
+    expect(executor.inputProblem?.({ prompt: "do it" })).toBe("assignment: required");
+    expect(executor.inputProblem?.({ assignment: "" })).toBe("assignment: must be at least 1 character(s)");
+    expect(executor.inputProblem?.({ assignment: "ok", harnessOptions: [] })).toBe("harnessOptions: must be an object");
+    expect(executor.inputProblem?.({ assignment: "ok" })).toBeUndefined();
+    expect(executor.inputSchema?.(executor.inputShape?.example)).toBe(true);
+  });
+
   it("declares an unrestricted package that the operator binding consents to", () => {
     expect(codingAgentExecutorPackage).toMatchObject({
       executorIds: [CODING_AGENT_RUN_ID],

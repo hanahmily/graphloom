@@ -1,6 +1,6 @@
 import { cp, mkdir, realpath, writeFile } from "node:fs/promises";
 import path from "node:path";
-import type { QualifyRepairSpec } from "@graphloom/sdk";
+import { boundedInputShape, type ExecutorInputShape, type QualifyRepairSpec } from "@graphloom/sdk";
 import { describeExecutorModule, digestExecutorSource, type DescribedExecutor } from "@graphloom/runner";
 import { invalidateStageAndAfter } from "./admit.js";
 import { catalogEntry } from "./executor-catalog.js";
@@ -156,6 +156,16 @@ export async function activateExecutorRepair(
   await saveRunState({ ...state, activationIntent: intent });
 
   const replaced = new Set(packageEntries(state, base.root).map((e) => e.id));
+  // The copy declares its own input shapes; the base package's no longer describe what runs.
+  // Read with no inherited environment, and dropped when they cannot be read.
+  const declared = await describeExecutorModule({
+    entryModule: artifact.candidateEntryModule,
+    env: {},
+    ...(entry.isolation === "sandbox" ? { sandbox: true } : {}),
+  }).then(
+    (described) => new Map(described.map((d) => [d.id, boundedInputShape(d.inputShape)])),
+    () => new Map<string, ExecutorInputShape | undefined>(),
+  );
   const repair = {
     artifactId: artifact.artifactId,
     root: artifact.candidateRoot,
@@ -168,13 +178,27 @@ export async function activateExecutorRepair(
     ...state,
     repairCandidates: nextCandidates,
     executorCatalog: (state.executorCatalog ?? []).map((e) =>
-      replaced.has(e.id)
-        ? { ...e, digest: liveCandidate, repair: { ...repair, baseDigest: e.repair?.baseDigest ?? e.digest } }
-        : e,
+      replaced.has(e.id) ? repaired(e, liveCandidate, repair, declared.get(e.id)) : e,
     ),
     activationIntent: { ...intent, status: "committed" },
   };
   // Work already accepted stays; the stage that hit the failure is checked again.
   next = invalidateStageAndAfter(next, next.current.stageId, next.definition);
   return bumpGeneration(next, `activate_repair:${artifact.artifactId}`);
+}
+
+function repaired(
+  entry: ExecutorCatalogEntry,
+  digest: string,
+  repair: { artifactId: string; root: string; entryModule: string },
+  inputShape: ExecutorInputShape | undefined,
+): ExecutorCatalogEntry {
+  const { inputShape: _base, ...rest } = entry;
+  void _base;
+  return {
+    ...rest,
+    digest,
+    repair: { ...repair, baseDigest: entry.repair?.baseDigest ?? entry.digest },
+    ...(inputShape !== undefined ? { inputShape } : {}),
+  };
 }
