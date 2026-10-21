@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import os from "node:os";
-import { realpath } from "node:fs/promises";
+import { mkdir, realpath } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -549,7 +549,10 @@ export function createChildExecutorRunner(
         if (unsupported !== undefined) {
           return failed(`executor ${pin.id} runs with the user's permissions and cannot be confined to the run, so the job was not run: ${unsupported}`);
         }
-        launch = confineWorker({
+        // Run-owned directories the job writes (a fresh agent session, the artifacts) must exist to be mounted.
+        for (const dir of [ctx.artifactDir, ...(ctx.session !== undefined ? [ctx.session.dir] : [])]) await mkdir(dir, { recursive: true });
+        try {
+          launch = confineWorker({
           ...launch,
           cwd,
           scratchDir: ctx.confinement.scratchDir,
@@ -561,7 +564,10 @@ export function createChildExecutorRunner(
           ],
           readPaths: [process.execPath, workerModule, entry, ...(sourceRoot !== undefined ? [sourceRoot] : []), ...(override !== undefined ? [override.root] : []), cwd],
           keepUserState: options.ownState !== undefined,
-        });
+          });
+        } catch (err) {
+          return failed(`executor ${pin.id} cannot be confined to the run, so the job was not run: ${err instanceof Error ? err.message : String(err)}`);
+        }
       }
 
       return await new Promise<JobResult>((resolve) => {

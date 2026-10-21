@@ -88,7 +88,10 @@ export function confineWorker(options: {
   }
   env.GOENV = goEnv;
 
-  const binds = [...new Set([...options.writable, ...dirs].map((p) => path.resolve(p)))].filter((p) => existsSync(p));
+  const binds = [...new Set([...options.writable, ...dirs].map((p) => path.resolve(p)))];
+  // A writable path that is missing would silently stay read-only, so the job fails later and obscurely.
+  const missing = binds.filter((p) => !existsSync(p));
+  if (missing.length > 0) throw new Error(`confined job needs writable paths that do not exist: ${missing.join(", ")}`);
   // A private /tmp hides everything under it but the writable paths rebound below, so it is
   // used only when nothing the job reads lives there; otherwise /tmp stays read-only.
   const needed = [...(options.readPaths ?? []), ...options.writable.flatMap(sharedGitDir), options.cwd];
