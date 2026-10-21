@@ -455,6 +455,14 @@ describe("buildRecoveryPrompt", () => {
     },
   });
 
+  it("tells the supervisor that environment faults outside the run are the operator's, reported as a blocker (#165)", () => {
+    const prompt = buildRecoveryPrompt(sampleInput());
+    expect(prompt).toContain("Environment faults outside the run (a full disk, a missing tool");
+    expect(prompt).toContain("not yours to repair");
+    expect(prompt).toContain("Report them to the operator as a blocker (stop, retryable false) with the evidence");
+    expect(prompt).toContain("repairAuthority.grants.hostRepair");
+  });
+
   it("describes the current generation's own evidence by producer and verdict, not just its ref", () => {
     const input = sampleInput();
     input.view.evidence = [review("approved")];

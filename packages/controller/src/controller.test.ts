@@ -134,6 +134,13 @@ request: |
     expect(task.request).toContain("GREETING.txt");
   });
 
+  it("takes the hostRepair grant from the task, off unless granted (#165)", () => {
+    const yaml = (grants: string) => `graph: hello\nrepo: ./r\n${grants}request: fix it\n`;
+    expect(parseTaskYaml(yaml("grants:\n  hostRepair: true\n")).grants).toEqual({ sourceRepair: false, validatorSubstitution: false, hostRepair: true });
+    expect(parseTaskYaml(yaml("grants:\n  sourceRepair: true\n")).grants?.hostRepair).toBeUndefined();
+    expect(parseTaskYaml(yaml("")).grants).toBeUndefined();
+  });
+
   it("takes operator budgets from the task and rejects unbounded or unknown ones", async () => {
     const task = parseTaskYaml(`graph: hello
 repo: ./test-repo

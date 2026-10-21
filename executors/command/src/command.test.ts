@@ -273,3 +273,26 @@ describe("command executor package", () => {
     expect(() => commandBinding({ env: { GITHUB_TOKEN: "t" } })).toThrow('does not accept configuration "GITHUB_TOKEN"');
   });
 });
+
+describe("command host effect (#165)", () => {
+  const scope = { writablePaths: ["/runs/w", "/runs/state/scratch"] };
+  const effect = (...argv: string[]) => executor.hostEffect?.({ commands: [{ id: "c", argv }] }, scope);
+
+  it("names a global configuration write and a mutation aimed outside the scope", () => {
+    expect(effect("go", "env", "-w", "GOCACHE=/x")).toContain("global Go configuration");
+    expect(effect("git", "config", "--global", "user.name", "x")).toContain("global git configuration");
+    expect(effect("npm", "config", "set", "cache", "/x", "-g")).toContain("global npm configuration");
+    expect(effect("rm", "-rf", "/home/u/.cache/go-build")).toContain("/home/u/.cache/go-build");
+    expect(effect("mkdir", "-p", "~/x")).toContain("~/x");
+    expect(effect("sh", "-c", "echo x > /etc/motd")).toContain("/etc/motd");
+    expect(effect("bash", "-c", "cd /runs/w && true; rm -rf /var/cache/x")).toContain("/var/cache/x");
+  });
+
+  it("leaves commands that stay in scope, or only read, alone", () => {
+    expect(effect("go", "env", "GOCACHE")).toBeUndefined();
+    expect(effect("rm", "-rf", "/runs/w/build")).toBeUndefined();
+    expect(effect("rm", "build/out")).toBeUndefined();
+    expect(effect("cat", "/etc/hosts")).toBeUndefined();
+    expect(effect("sh", "-c", "echo x > /runs/state/scratch/out")).toBeUndefined();
+  });
+});

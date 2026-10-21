@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { execFile } from "node:child_process";
-import { cp, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -1309,5 +1309,163 @@ describe("executor input shape (#152)", () => {
     const state = await loadRunState(report.stateDir);
     expect(state.supervisorOutcomes).toBeUndefined();
     expect(state.evidence.some((e) => e.kind === "command" && JSON.stringify(e.payload).includes('"go-env"'))).toBe(true);
+  });
+});
+
+describe("supervisor jobs stay inside the run's scope (#165)", () => {
+  // Run 0011bbe9-01b: the supervisor proposed `rm -rf` on a user cache and `go env -w` on the
+  // operator's Go configuration. A job the supervisor originates may write only the run's
+  // worktree and run-scoped directories, unless the operator granted `hostRepair`.
+  const writeFileJob = (file: string, text: string) => ({
+    stageId: "write",
+    kind: "command" as const,
+    purpose: "work" as const,
+    instruction: "write a file",
+    writeScope: ["inside.txt"],
+    executor: { id: "graphloom.command/run" },
+    // Plain node, so the static pre-check cannot see the path: only the confinement stops it.
+    input: { commands: [{ id: "write", argv: [process.execPath, "-e", `require("fs").writeFileSync(${JSON.stringify(file)}, ${JSON.stringify(text)})`] }] },
+  });
+  // Writes inside the worktree, prints what it wrote, and leaves nothing behind for the graph's own checks.
+  const insideJob = () => ({
+    ...writeFileJob("unused", ""),
+    input: {
+      commands: [
+        { id: "inside", argv: ["sh", "-c", 'echo inside > inside.txt && cat inside.txt && rm inside.txt && echo "$TMPDIR" && echo scratch > "$TMPDIR/t.txt"'] },
+      ],
+    },
+  });
+  const commandRunner = () =>
+    createBuiltinExecutorRunner({ packages: [{ manifest: commandExecutorPackage, ...commandBinding() }], fallback: runner() });
+  const hostDir = async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "gl-host-"));
+    temps.push(dir);
+    return dir;
+  };
+  const supervised = async (taskExtra: string, jobs: unknown[], runId: string) => {
+    const env = await makeEnv(`${taskExtra}budgets:\n  decisions: 20\n`);
+    const rejections: Array<string | undefined> = [];
+    const decisions = jobs.map((job) => (input: { rejection?: { reason: string } }) => {
+      rejections.push(input.rejection?.reason);
+      return dispatch(job as never, "supervisor job");
+    });
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({ definition, advances: [supervise({ reason: "unfamiliar" }, "escalate"), ...finish] }),
+      validators: goodValidators,
+      supervisor: createScriptedSupervisor({ decisions: [...decisions, returnToNormal({ summary: "checked" }, "hand back")] }),
+      runner: commandRunner(),
+      stateRoot: env.stateRoot,
+      runId,
+    });
+    return { report, rejections, state: await loadRunState(report.stateDir) };
+  };
+  const outcomeOf = (state: Awaited<ReturnType<typeof loadRunState>>) =>
+    state.evidence.flatMap((e) => (e.kind === "command" ? [(e.payload as { command: { exitCode: number | null; stdoutTail: string } }).command] : []));
+
+  it("refuses a supervisor command that visibly changes the host in-turn, naming the blocker route, and leaves the target alone", async () => {
+    const host = await hostDir();
+    const victim = path.join(host, "cache");
+    await mkdir(victim);
+    const rm = { ...writeFileJob(victim, ""), input: { commands: [{ id: "rm", argv: ["rm", "-rf", victim] }] } };
+    const { report, rejections, state } = await supervised("", [rm, insideJob()], "host-scope-refused");
+    expect(report.status, report.blocker).toBe("succeeded");
+    expect(rejections[1]).toMatch(/^host change needs the operator: .*`rm` changes .*outside the run's worktree and run-scoped directories; the job was not run/);
+    expect(rejections[1]).toContain("Report this as a blocker");
+    expect(existsSync(victim)).toBe(true);
+    expect(state.hostChanges).toBeUndefined();
+  });
+
+  it("confines a supervisor command that writes outside the worktree: it fails and the target is unchanged", async () => {
+    const host = await hostDir();
+    const target = path.join(host, "escaped.txt");
+    const { report, state } = await supervised("", [writeFileJob(target, "escaped")], "host-scope-enforced");
+    expect(report.status, report.blocker).toBe("succeeded");
+    expect(existsSync(target)).toBe(false);
+    expect(outcomeOf(state)[0]?.exitCode).not.toBe(0);
+  });
+
+  it("lets a supervisor command write inside the worktree", async () => {
+    const { report, state } = await supervised("", [insideJob()], "host-scope-inside");
+    expect(report.status, report.blocker).toBe("succeeded");
+    const [outcome] = outcomeOf(state);
+    expect(outcome?.exitCode).toBe(0);
+    expect(outcome?.stdoutTail).toContain("inside\n");
+    // The run-scoped temp dir is writable too.
+    const scratchTmp = outcome!.stdoutTail.split("\n")[1]!;
+    expect(scratchTmp.startsWith(path.join(report.stateDir, "scratch"))).toBe(true);
+    expect(await readFile(path.join(scratchTmp, "t.txt"), "utf8")).toBe("scratch\n");
+    expect(state.hostChanges).toBeUndefined();
+  });
+
+  it("redirects a supervisor command's user-level state into the run, so a write to GOENV cannot touch the operator's go env file", async () => {
+    const host = await hostDir();
+    const operatorGoEnv = path.join(host, "go-env");
+    await writeFile(operatorGoEnv, "GOPROXY=https://operator.example\n", "utf8");
+    const previous = process.env.GOENV;
+    process.env.GOENV = operatorGoEnv;
+    try {
+      const probe = {
+        ...writeFileJob("unused", ""),
+        input: {
+          commands: [
+            {
+              id: "env",
+              argv: [
+                "sh",
+                "-c",
+                // What `go env -w` does: append to the file GOENV names. Also record where state points.
+                'echo GOFLAGS=-x >> "$GOENV"; echo "$GOENV|$GOCACHE|$GOTMPDIR|$TMPDIR|$npm_config_cache|$XDG_CONFIG_HOME"',
+              ],
+            },
+          ],
+        },
+      };
+      const { report, state } = await supervised("", [probe], "host-scope-goenv");
+      expect(report.status, report.blocker).toBe("succeeded");
+      expect(await readFile(operatorGoEnv, "utf8")).toBe("GOPROXY=https://operator.example\n");
+      const scratch = path.join(report.stateDir, "scratch");
+      const [goenv, ...others] = outcomeOf(state)[0]!.stdoutTail.trim().split("|");
+      for (const value of [goenv, ...others]) expect(value!.startsWith(`${scratch}${path.sep}`), value).toBe(true);
+      // The operator's setting carried over once; the write landed in the run.
+      const scoped = await readFile(goenv!, "utf8");
+      expect(scoped).toContain("GOPROXY=https://operator.example");
+      expect(scoped).toContain("GOFLAGS=-x");
+    } finally {
+      if (previous === undefined) delete process.env.GOENV;
+      else process.env.GOENV = previous;
+    }
+  });
+
+  it("refuses `go env -w` from a supervisor job in-turn and leaves the operator's go env file untouched", async () => {
+    const host = await hostDir();
+    const operatorGoEnv = path.join(host, "go-env");
+    await writeFile(operatorGoEnv, "GOPROXY=https://operator.example\n", "utf8");
+    const previous = process.env.GOENV;
+    process.env.GOENV = operatorGoEnv;
+    try {
+      const goEnvW = { ...writeFileJob("unused", ""), input: { commands: [{ id: "go-env", argv: ["go", "env", "-w", "GOCACHE=/mnt/d/graphloom-go/cache"] }] } };
+      const { rejections, state } = await supervised("", [goEnvW, insideJob()], "host-scope-go-env-w");
+      expect(rejections[1]).toMatch(/^host change needs the operator: .*rewrites the operator's global Go configuration/);
+      expect(await readFile(operatorGoEnv, "utf8")).toBe("GOPROXY=https://operator.example\n");
+      expect(state.hostChanges).toBeUndefined();
+    } finally {
+      if (previous === undefined) delete process.env.GOENV;
+      else process.env.GOENV = previous;
+    }
+  });
+
+  it("admits a host-changing job when the operator granted hostRepair, runs it unconfined, and records it", async () => {
+    const host = await hostDir();
+    const target = path.join(host, "changed-under-grant.txt");
+    const { report, state } = await supervised("  hostRepair: true\n", [writeFileJob(target, "granted")], "host-scope-granted");
+    expect(report.status, report.blocker).toBe("succeeded");
+    expect(await readFile(target, "utf8")).toBe("granted");
+    expect(state.intake.grants.hostRepair).toBe(true);
+    expect(state.hostChanges).toHaveLength(1);
+    expect(state.hostChanges?.[0]).toMatchObject({ stageId: "write", executorId: "graphloom.command/run" });
+    expect(state.evidence.some((e) => e.kind === "other" && JSON.stringify(e.payload).includes('"hostChange"'))).toBe(true);
+    const inspected = await createController().inspect(report.stateDir);
+    expect(inspected.hostChanges).toHaveLength(1);
   });
 });

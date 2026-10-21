@@ -163,6 +163,11 @@ export interface RepairGrants {
   validatorSubstitution: boolean;
   /** Qualify and activate run-local copies of executor packages. */
   executorRepair?: boolean;
+  /**
+   * Let jobs the supervisor originates change the operator's machine outside
+   * the run's worktree and run-scoped directories. Off by default.
+   */
+  hostRepair?: boolean;
 }
 
 /** How far a bundle's code may be repaired; grants decide whether it may be at all. */
@@ -257,6 +262,7 @@ export function parseTaskYaml(text: string): TaskFile {
   let sourceRepair: boolean | undefined;
   let validatorSubstitution: boolean | undefined;
   let executorRepair: boolean | undefined;
+  let hostRepair: boolean | undefined;
   let inGrants = false;
   let inBudgets = false;
   const budgets: Partial<RunBudgets> = {};
@@ -300,6 +306,7 @@ export function parseTaskYaml(text: string): TaskFile {
         if (key === "sourceRepair") sourceRepair = value;
         else if (key === "validatorSubstitution") validatorSubstitution = value;
         else if (key === "executorRepair") executorRepair = value;
+        else if (key === "hostRepair") hostRepair = value;
         else throw new IntakeError(`unknown grants key: ${key}`);
         continue;
       }
@@ -359,11 +366,12 @@ export function parseTaskYaml(text: string): TaskFile {
     throw new IntakeError(err instanceof Error ? err.message : String(err));
   }
   const task: TaskFile = { graph, repo, request };
-  if (sourceRepair !== undefined || validatorSubstitution !== undefined || executorRepair !== undefined) {
+  if (sourceRepair !== undefined || validatorSubstitution !== undefined || executorRepair !== undefined || hostRepair !== undefined) {
     task.grants = {
       sourceRepair: sourceRepair ?? false,
       validatorSubstitution: validatorSubstitution ?? false,
       ...(executorRepair !== undefined ? { executorRepair } : {}),
+      ...(hostRepair !== undefined ? { hostRepair } : {}),
     };
   }
   if (Object.keys(budgets).length > 0) task.budgets = budgets;

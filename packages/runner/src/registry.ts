@@ -1,5 +1,7 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
+import os from "node:os";
 import { realpath } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
@@ -18,6 +20,7 @@ import {
   type JobSpec,
   type ToolCallResult,
 } from "@graphloom/sdk";
+import { confineWorker, confinementUnsupported } from "./confine.js";
 import { digestExecutorSource } from "./digest.js";
 import { assertSandboxSupported, sandboxNodeArgs } from "./sandbox.js";
 import type { ExecutorDescriptor, ExecutorSourceOverride, JobContext, JobEvidenceItem, JobResult, Runner } from "./types.js";
@@ -105,6 +108,11 @@ export interface ChildExecutorRunnerOptions {
    * repairable from a run-local copy. Default: the entry module file alone.
    */
   sourceRoot?: string;
+  /**
+   * State the executor keeps writing even when a job is confined to the run
+   * (see `ExecutorPackageManifest.ownState`).
+   */
+  ownState?: { env: readonly string[]; homeRelative: readonly string[] };
 }
 
 /** Replace every bound credential value in a value before it can become durable. */
@@ -449,6 +457,14 @@ export function createChildExecutorRunner(
     }
   };
 
+  /** Directories the executor keeps its own state in (an agent's login and history), which stay writable when confined. */
+  const ownStateDirs = (): string[] => {
+    const own = options.ownState;
+    if (own === undefined) return [];
+    const configured = own.env.map((name) => options.env?.[name]).filter((v): v is string => typeof v === "string" && v.length > 0);
+    return [...configured, ...own.homeRelative.map((rel) => path.join(os.homedir(), rel))].filter((dir) => existsSync(dir));
+  };
+
   return {
     async describeExecutors() {
       const digest = await digestExecutorSource(sourceRoot ?? entryModule);
@@ -468,6 +484,12 @@ export function createChildExecutorRunner(
       const pinned = pinJobExecutor(job);
       const pin = pinned.executor as ExecutorPin;
       if (!served.has(pin.id)) return options.fallback.checkJob?.(pinned, ctx);
+      // A sandboxed executor cannot write at all, so it is confined already.
+      const confinement = options.sandbox === true ? undefined : ctx?.confinement;
+      if (confinement !== undefined) {
+        const unsupported = await confinementUnsupported();
+        if (unsupported !== undefined) return `executor ${pin.id} runs with the user's permissions and cannot be confined to the run: ${unsupported}`;
+      }
       const override = ctx?.executorSource;
       // The same source-pin checks runJob makes, before any module is loaded:
       // bytes that no longer match the pin are refused, never imported.
@@ -488,6 +510,7 @@ export function createChildExecutorRunner(
           ...(pinned.effect !== undefined ? { effect: pinned.effect } : {}),
           input: pinned.input,
           ...(options.allowedEffects !== undefined ? { allowedEffects: [...options.allowedEffects] } : {}),
+          ...(confinement !== undefined ? { scope: { writablePaths: [...confinement.writablePaths, confinement.scratchDir] } } : {}),
         },
       });
     },
@@ -519,15 +542,36 @@ export function createChildExecutorRunner(
       const { entry } = source;
       const args = override !== undefined ? sandboxArgs(entry) : nodeArgs;
 
+      const cwd = options.cwd ?? path.dirname(entry);
+      let launch = { command: process.execPath, args: [...args, workerModule, entry], env: options.env ?? process.env };
+      if (ctx.confinement !== undefined && options.sandbox !== true) {
+        const unsupported = await confinementUnsupported();
+        if (unsupported !== undefined) {
+          return failed(`executor ${pin.id} runs with the user's permissions and cannot be confined to the run, so the job was not run: ${unsupported}`);
+        }
+        launch = confineWorker({
+          ...launch,
+          cwd,
+          scratchDir: ctx.confinement.scratchDir,
+          writable: [
+            ...ctx.confinement.writablePaths,
+            ctx.artifactDir,
+            ...(ctx.session !== undefined ? [ctx.session.dir] : []),
+            ...ownStateDirs(),
+          ],
+          keepUserState: options.ownState !== undefined,
+        });
+      }
+
       return await new Promise<JobResult>((resolve) => {
         if (ctx.signal?.aborted) {
           resolve(failed("executor cancelled before start"));
           return;
         }
-        const child = spawn(process.execPath, [...args, workerModule, entry], {
+        const child = spawn(launch.command, launch.args, {
           stdio: ["pipe", "pipe", "pipe"],
-          cwd: options.cwd ?? path.dirname(entry),
-          env: options.env ?? process.env,
+          cwd,
+          env: launch.env,
         });
         const stderr: string[] = [];
         child.stderr.setEncoding("utf8");

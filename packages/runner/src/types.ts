@@ -21,6 +21,19 @@ export interface ExecutorSourceOverride {
   entryModule: string;
 }
 
+/**
+ * Where a confined job may write: these paths and nothing else on the host
+ * (plus a private /tmp). Reads stay open so toolchains and their caches work.
+ * The runner enforces it for executors that run with the user's permissions
+ * and refuses the job where it cannot.
+ */
+export interface JobConfinement {
+  /** Run-scoped temp and cache directory; user-level state (TMPDIR, GOCACHE, ...) points into it. */
+  scratchDir: string;
+  /** Other paths the job may write, e.g. its worktree. */
+  writablePaths: readonly string[];
+}
+
 export interface JobContext {
   runId: string;
   operationId: string;
@@ -32,6 +45,8 @@ export interface JobContext {
   signal?: AbortSignal;
   /** Present for jobs the controller can service tool calls and model usage for. */
   children?: ChildOperationPort;
+  /** Present for a job that must not write outside the run's scope. */
+  confinement?: JobConfinement;
   /** Serve the job's executor from a repaired run-local copy instead of the installed package. */
   executorSource?: ExecutorSourceOverride;
   /** Where the job's agent may keep a resumable session, and the session to continue. */
@@ -109,8 +124,10 @@ export interface Runner {
    * pinned version, declared effect, or input schema, exactly as the executor
    * would check them at run time. Returns the executor's refusal, or
    * undefined when it would accept the job or this runner cannot tell (an
-   * executor it does not serve, a check that could not be made). Runs no
+   * executor it does not serve, a check that could not be made). With
+   * `confinement`, it also refuses a job this runner cannot confine, or whose
+   * input names a change outside the confinement. Runs no
    * executor code beyond the executor's own declared schema, and no job.
    */
-  checkJob?(job: JobSpec, ctx?: Pick<JobContext, "executorSource">): Promise<string | undefined>;
+  checkJob?(job: JobSpec, ctx?: Pick<JobContext, "executorSource" | "confinement">): Promise<string | undefined>;
 }

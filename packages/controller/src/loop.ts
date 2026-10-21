@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import type {
   CaseFinding,
@@ -24,7 +24,7 @@ import {
   type CheckoutSpec,
   type EnvironmentDeclaration,
 } from "@graphloom/sdk";
-import type { ExecutorSourceOverride, JobContext, Runner } from "@graphloom/runner";
+import type { ExecutorSourceOverride, JobConfinement, JobContext, Runner } from "@graphloom/runner";
 import type { PluginHost } from "@graphloom/plugin-host";
 import {
   buildEpisodeRecord,
@@ -78,7 +78,7 @@ import {
 import { isUnsettled, reconcilePendingDispatch } from "./reconcile.js";
 import { createChildPort, reconcileChildOperations } from "./children.js";
 import { agentSessionViews, continuationRefusal, recordAgentSession, sessionForDispatch, wipeAgentSessions } from "./agent-sessions.js";
-import { citedEvidence, loadRunState, nextStageAttempt, type ProbeRecord, NO_PROGRESS_STOP_REASON, recordRemedy, type DurableRunState, saveRunState } from "./state.js";
+import { citedEvidence, loadRunState, nextStageAttempt, type ProbeRecord, NO_PROGRESS_STOP_REASON, MAX_HOST_CHANGE_RECORDS, recordRemedy, type DurableRunState, saveRunState } from "./state.js";
 import { stopMarkOf } from "./stop-class.js";
 import { bumpGeneration } from "./generation.js";
 import { noteGraphDecision, noteSupervisorProposal, progressMark, settleCorrectionTrial, settleSupervisorCorrection } from "./escalation.js";
@@ -722,7 +722,9 @@ async function runNormalLoopSteps(
               deps,
               trigger.code,
               supervisor.requiresCitedEvidence === true ? episodeProbeIds(state, episodeId) : undefined,
-            ) ?? (await executorInputRefusal(admittedAgainst, candidate, deps.runner));
+            ) ??
+            (await executorInputRefusal(admittedAgainst, candidate, deps.runner)) ??
+            (await hostScopeRefusal(admittedAgainst, candidate, deps.runner));
           if (refusal !== undefined) return refuse(candidate.action.type, describeInadmissible(refusal));
           const reviewed = await review(candidate);
           if (reviewed === undefined) return undefined;
@@ -1096,7 +1098,7 @@ async function runNormalLoopSteps(
     }
 
     if (turn.pendingJob) {
-      const { job, operationId, generation, isCorrection, graphCorrectionTrial, supervisorWorkDispatch, source, notBefore, session } =
+      const { job, operationId, generation, isCorrection, graphCorrectionTrial, supervisorWorkDispatch, confined, hostChange, source, notBefore, session } =
         turn.pendingJob;
       const abort = new AbortController();
       const stopWatch = watchForStop(state.stateDir, deps, abort);
@@ -1136,6 +1138,7 @@ async function runNormalLoopSteps(
               pinnedHead: state.intake.pinnedHead,
               stateDir: state.stateDir,
               artifactDir: state.artifactDir,
+              ...(confined ? { scratchDir: scratchDirOf(state) } : {}),
               checks: state.definition.environment?.checks ?? [],
               prepare: state.definition.environment?.prepare ?? [],
               runner: deps.runner,
@@ -1154,6 +1157,7 @@ async function runNormalLoopSteps(
               worktreePath: state.worktreePath,
               artifactDir: state.artifactDir,
               signal: abort.signal,
+              ...(confined ? { confinement: await jobConfinement(state) } : {}),
               ...(children !== undefined ? { children } : {}),
               ...(source !== undefined ? { executorSource: source } : {}),
               ...(session !== undefined ? { session } : {}),
@@ -1165,6 +1169,20 @@ async function runNormalLoopSteps(
         // A parent that stopped, timed out, or returned early can leave a child running.
         await children?.close();
         stopWatch();
+      }
+      if (hostChange) {
+        result = {
+          ...result,
+          evidence: [
+            ...(result.evidence ?? []),
+            {
+              kind: "other",
+              payload: {
+                hostChange: { operationId, executorId: job.executor?.id ?? job.kind, reason: "ran outside the run's scope under the operator's hostRepair grant" },
+              },
+            },
+          ],
+        };
       }
       // Executors may run unconfined, so scope is checked against what actually changed.
       let outOfScope: string[] = [];
@@ -1695,6 +1713,7 @@ export function toRunView(state: DurableRunState): RunView {
       sourceRepair: grants.sourceRepair,
       validatorSubstitution: grants.validatorSubstitution,
       executorRepair: grants.executorRepair === true,
+      hostRepair: grants.hostRepair === true,
     },
   };
   return view;
@@ -2093,6 +2112,10 @@ interface PendingJob {
   graphCorrectionTrial: boolean;
   /** Was a supervisor-authored work dispatch at admission. */
   supervisorWorkDispatch: boolean;
+  /** The supervisor originated it without a `hostRepair` grant: the runner confines its writes to the run's scope. */
+  confined: boolean;
+  /** The supervisor originated it under the `hostRepair` grant: it runs unconfined and is recorded as a host change. */
+  hostChange: boolean;
   source?: ExecutorSourceOverride;
   notBefore?: string;
   session?: ExecutorSession;
@@ -2241,6 +2264,10 @@ async function prepareDispatch(
     return { state: enterRecovery(restored, "correction_limit", handoff.reason, observed.slice(-10)) };
   }
   const supervisorWorkDispatch = retry?.supervisorWorkDispatch ?? (job.purpose === "work" && state.mode === "recovery");
+  // Recovery is the supervisor's, so every job dispatched in it is the supervisor's, whatever its purpose.
+  const supervisorOriginated = state.mode === "recovery";
+  const hostGranted = state.intake.grants.hostRepair === true;
+  const hostChange = supervisorOriginated && hostGranted;
 
   const shapeProblem = jobShapeRefusal(job);
   if (shapeProblem !== undefined) return { state: inadmissible(state, shapeProblem) };
@@ -2267,6 +2294,20 @@ async function prepareDispatch(
     current: { stageId: job.stageId, attempt: state.current.attempt },
     stageAttempts: { ...state.stageAttempts, [job.stageId]: Math.max(state.stageAttempts?.[job.stageId] ?? 0, state.current.attempt) },
     ...(job.purpose === "work" ? { workDispatched: { ...state.workDispatched, [job.stageId]: true as const } } : {}),
+    ...(hostChange
+      ? {
+          hostChanges: [
+            ...(state.hostChanges ?? []),
+            {
+              operationId,
+              stageId: job.stageId,
+              ...(job.executor !== undefined ? { executorId: job.executor.id } : {}),
+              at: new Date().toISOString(),
+              reason: "supervisor-originated job ran outside the run's scope under the hostRepair grant",
+            },
+          ].slice(-MAX_HOST_CHANGE_RECORDS),
+        }
+      : {}),
   };
 
   return {
@@ -2278,6 +2319,8 @@ async function prepareDispatch(
       isCorrection,
       graphCorrectionTrial: graphCorrection,
       supervisorWorkDispatch,
+      confined: supervisorOriginated && !hostGranted,
+      hostChange,
       ...(source !== undefined ? { source } : {}),
       ...(notBefore !== undefined ? { notBefore } : {}),
       ...(session !== undefined ? { session } : {}),
@@ -2384,6 +2427,59 @@ export function supervisorAdmissionRefusal(
     default:
       return { precondition: "unsupported action", detail: `${action.type} is not a supervisor action in ${state.mode} mode` };
   }
+}
+
+/** Run-scoped temp and cache directory every confined job of the run shares. */
+function scratchDirOf(state: DurableRunState): string {
+  return path.join(state.stateDir, "scratch");
+}
+
+/**
+ * Where a supervisor-originated job may write: the run's worktree (and the git
+ * administrative directory of that worktree, so git works in it) and the
+ * run's scratch directory. Everything else stays read-only for it.
+ */
+async function jobConfinement(state: DurableRunState): Promise<JobConfinement> {
+  const writablePaths = [state.worktreePath];
+  try {
+    const pointer = /^gitdir:\s*(.+)$/m.exec(await readFile(path.join(state.worktreePath, ".git"), "utf8"));
+    if (pointer?.[1] !== undefined) writablePaths.push(path.resolve(state.worktreePath, pointer[1].trim()));
+  } catch {
+    /* not a linked worktree: nothing beyond the worktree itself */
+  }
+  return { scratchDir: scratchDirOf(state), writablePaths };
+}
+
+/**
+ * A supervisor dispatch whose effect would leave the run's scope is
+ * inadmissible in-turn unless the operator granted `hostRepair`: the runner
+ * says whether it can confine the job and the executor whether its input names
+ * a change outside the scope, so the controller reads no executor field. Even
+ * without this check the runner confines the job when it runs.
+ */
+export async function hostScopeRefusal(
+  state: DurableRunState,
+  decision: GraphDecision,
+  runner: Runner,
+): Promise<Inadmissible | undefined> {
+  if (state.mode !== "recovery" || state.intake.grants.hostRepair === true) return undefined;
+  if (decision.action.type !== "dispatch" || runner.checkJob === undefined) return undefined;
+  const admitted = dispatchPreconditions(state, decision.action.job);
+  if ("precondition" in admitted) return undefined;
+  let refused: string | undefined;
+  try {
+    refused = await runner.checkJob(admitted.job, {
+      confinement: await jobConfinement(state),
+      ...(admitted.source !== undefined ? { executorSource: admitted.source } : {}),
+    });
+  } catch {
+    return undefined;
+  }
+  if (refused === undefined) return undefined;
+  return {
+    precondition: "host change needs the operator",
+    detail: `${refused}; the job was not run. Jobs you originate may change only the run's worktree and run-scoped directories. Report this as a blocker with evidence (stop with retryable false) instead of repairing the host: the operator may grant hostRepair.`,
+  };
 }
 
 /** Most characters of a declared input shape a refusal repeats. */

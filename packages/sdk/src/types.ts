@@ -308,7 +308,13 @@ export interface SupervisorRepeatEntry {
 export interface RepairAuthorityView {
   /** `opaque`: the bundle's code cannot be patched; only validator substitution may apply. */
   contract: "source-repairable" | "opaque";
-  grants: { sourceRepair: boolean; validatorSubstitution: boolean; executorRepair: boolean };
+  grants: {
+    sourceRepair: boolean;
+    validatorSubstitution: boolean;
+    executorRepair: boolean;
+    /** Supervisor-originated jobs may change the operator's machine outside the run's scope. */
+    hostRepair?: boolean;
+  };
 }
 
 export interface ExecutorView {

@@ -73,6 +73,8 @@ export async function runInCheckout(args: {
   runner: Runner;
   signal: AbortSignal;
   source?: ExecutorSourceOverride;
+  /** Confine the job's writes to its checkout and this run-scoped directory. */
+  scratchDir?: string;
 }): Promise<{ result: JobResult; candidateDigest: string; staleIdentity?: string }> {
   const { job, operationId, generation, runId } = args;
   const change = await candidateChange(args.worktreePath, args.pinnedHead);
@@ -150,6 +152,7 @@ export async function runInCheckout(args: {
       worktreePath: dir,
       artifactDir: args.artifactDir,
       signal: args.signal,
+      ...(args.scratchDir !== undefined ? { confinement: { scratchDir: args.scratchDir, writablePaths: [dir] } } : {}),
       ...(args.source !== undefined ? { executorSource: args.source } : {}),
     });
     const record = (phase: CheckoutRecord["phase"], prepared: boolean, mutations: string[]): CheckoutRecord => ({

@@ -1,7 +1,13 @@
 import { spawn } from "node:child_process";
 import { mkdir, open } from "node:fs/promises";
 import path from "node:path";
-import { BUILTIN_COMMAND_EXECUTOR_ID, defineExecutor, type ExecutorContext, type ExecutorDefinition } from "@graphloom/sdk";
+import {
+  BUILTIN_COMMAND_EXECUTOR_ID,
+  defineExecutor,
+  type ExecutorContext,
+  type ExecutorDefinition,
+  type ExecutorScope,
+} from "@graphloom/sdk";
 
 export const COMMAND_RUN_ID = BUILTIN_COMMAND_EXECUTOR_ID;
 
@@ -165,6 +171,7 @@ export function createCommandExecutor(): ExecutorDefinition<CommandInput> {
     inputSchema: isCommandInput,
     inputProblem: commandInputProblem,
     inputShape: COMMAND_INPUT_SHAPE,
+    hostEffect: (input, scope) => (isCommandInput(input) ? commandHostEffect(input, scope) : undefined),
     async execute(input, ctx: ExecutorContext) {
       const outcomes: CommandOutcome[] = [];
       for (const spec of input.commands) {
@@ -185,6 +192,66 @@ export function createCommandExecutor(): ExecutorDefinition<CommandInput> {
       };
     },
   });
+}
+
+const MUTATING_PROGRAMS = new Set(["rm", "rmdir", "mv", "cp", "mkdir", "touch", "ln", "chmod", "chown", "tee", "truncate", "install", "rsync", "unlink", "shred"]);
+const SHELLS = new Set(["sh", "bash", "zsh", "dash", "ksh"]);
+const OUTSIDE_SCOPE = "outside the run's worktree and run-scoped directories";
+
+/**
+ * The first change a command visibly makes outside the confined scope: a
+ * mutating program aimed at a path outside it, or a tool setting that rewrites
+ * the operator's user-level configuration. A heuristic that only explains a
+ * refusal early; the runner's confinement is what enforces the scope.
+ */
+export function commandHostEffect(input: CommandInput, scope: ExecutorScope): string | undefined {
+  const roots = [...scope.writablePaths.map((p) => path.resolve(p)), "/dev"];
+  const outside = (token: string): boolean => {
+    if (token.startsWith("~")) return true;
+    if (!token.startsWith("/")) return false;
+    const abs = path.resolve(token);
+    return !roots.some((root) => abs === root || abs.startsWith(`${root}${path.sep}`));
+  };
+  const scan = (tokens: string[], shown: string): string | undefined => {
+    for (let i = 0; i < tokens.length; i += 1) {
+      const program = path.basename(tokens[i]!);
+      const rest: string[] = [];
+      for (let j = i + 1; j < tokens.length && !/^[;&|]+$/.test(tokens[j]!); j += 1) rest.push(tokens[j]!);
+      if (program === "go" && rest[0] === "env" && rest.some((a) => a === "-w" || a === "-u")) {
+        return `\`${shown}\` rewrites the operator's global Go configuration`;
+      }
+      if (program === "git" && rest[0] === "config" && rest.some((a) => a === "--global" || a === "--system")) {
+        return `\`${shown}\` rewrites the operator's global git configuration`;
+      }
+      if (
+        program === "npm" &&
+        ["config", "set"].includes(rest[0] ?? "") &&
+        rest.some((a) => a === "-g" || a === "--global" || a === "--location=user" || a === "--location=global")
+      ) {
+        return `\`${shown}\` rewrites the operator's global npm configuration`;
+      }
+      if (MUTATING_PROGRAMS.has(program)) {
+        const target = rest.find((a) => outside(a.replace(/^--?[\w-]+=/, "")));
+        if (target !== undefined) return `\`${program}\` changes ${target}, ${OUTSIDE_SCOPE}`;
+      }
+      if ((tokens[i] === ">" || tokens[i] === ">>") && outside(tokens[i + 1] ?? "")) {
+        return `output redirected to ${tokens[i + 1]}, ${OUTSIDE_SCOPE}`;
+      }
+    }
+    return undefined;
+  };
+  for (const spec of input.commands) {
+    const direct = scan(spec.argv, spec.argv.join(" ").slice(0, 120));
+    if (direct !== undefined) return direct;
+    const flag = spec.argv.indexOf("-c");
+    if (SHELLS.has(path.basename(spec.argv[0]!)) && flag > 0 && spec.argv[flag + 1] !== undefined) {
+      const script = spec.argv[flag + 1]!;
+      const tokens = script.replace(/([;&|]+)/g, " $1 ").replace(/(>>?)/g, " $1 ").split(/\s+/).filter(Boolean);
+      const inner = scan(tokens, script.slice(0, 120));
+      if (inner !== undefined) return inner;
+    }
+  }
+  return undefined;
 }
 
 function describeFailure(o: CommandOutcome): string {

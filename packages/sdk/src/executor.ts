@@ -140,7 +140,19 @@ export interface ExecutorDefinition<TInput = unknown, TOutput = unknown> {
   /** The input shape as data, shown to whoever proposes a job for this executor. */
   readonly inputShape?: ExecutorInputShape;
   readonly outputSchema?: JsonSchemaValidator<TOutput>;
+  /**
+   * What `input` would change outside `scope.writablePaths`, if the executor can
+   * tell from the input alone (a command that rewrites a user-level config
+   * file, say), or undefined. Asked before a supervisor-originated job is
+   * admitted; the runner separately enforces the scope when the job runs.
+   */
+  readonly hostEffect?: (input: unknown, scope: ExecutorScope) => string | undefined;
   execute(input: TInput, ctx: ExecutorContext): Promise<TOutput> | TOutput;
+}
+
+/** The only places a confined job may write. */
+export interface ExecutorScope {
+  writablePaths: readonly string[];
 }
 
 export interface DefineExecutorOptions<TInput, TOutput> {
@@ -152,6 +164,7 @@ export interface DefineExecutorOptions<TInput, TOutput> {
   inputProblem?: (input: unknown) => string | undefined;
   inputShape?: ExecutorInputShape;
   outputSchema?: JsonSchemaValidator<TOutput>;
+  hostEffect?: (input: unknown, scope: ExecutorScope) => string | undefined;
   execute: (input: TInput, ctx: ExecutorContext) => Promise<TOutput> | TOutput;
 }
 
@@ -176,6 +189,13 @@ export interface ExecutorPackageManifest {
    * worktree and runs commands. The host requires explicit operator consent.
    */
   isolation?: "sandbox" | "unrestricted";
+  /**
+   * State the executor itself must keep writing when its job is confined to the
+   * run's scope, such as an agent's login and history: the directory each
+   * listed env name holds, else the home-relative default. Without it, a
+   * confined job's user-level state (XDG_*) is redirected into the run too.
+   */
+  ownState?: { env: readonly string[]; homeRelative: readonly string[] };
 }
 
 /** Operator-supplied grants for one executor package. */
@@ -278,6 +298,7 @@ export function defineExecutor<TInput, TOutput>(
     ...(options.inputProblem !== undefined ? { inputProblem: options.inputProblem } : {}),
     ...(options.inputShape !== undefined ? { inputShape: options.inputShape } : {}),
     ...(options.outputSchema !== undefined ? { outputSchema: options.outputSchema } : {}),
+    ...(options.hostEffect !== undefined ? { hostEffect: options.hostEffect } : {}),
   });
 }
 

@@ -103,6 +103,7 @@ export type {
   ExecutorInputShape,
   ExecutorPackageManifest,
   ExecutorPin,
+  ExecutorScope,
   ExecutorSession,
   ExecutorTools,
   ExecutorUsage,

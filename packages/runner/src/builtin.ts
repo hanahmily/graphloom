@@ -70,6 +70,7 @@ export function createBuiltinExecutorRunner(options: BuiltinExecutorRunnerOption
       builtin: true,
       sandbox: !unrestricted,
       sourceRoot: packageRootOf(pkg.manifest.entryModule),
+      ...(pkg.manifest.ownState !== undefined ? { ownState: pkg.manifest.ownState } : {}),
       fallback,
       env,
       allowedEffects: pkg.allowedEffects ?? ["read"],

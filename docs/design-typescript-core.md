@@ -189,6 +189,22 @@ the run with reason `opaque gate`. The blocker says what is missing, and the sto
 cites the evidence the escalation and the supervisor referenced. No snapshot is
 taken and no correction is spent.
 
+Jobs the supervisor originates (every dispatch made in recovery) are confined to
+the run's scope: the runner mounts the filesystem read-only except the job's
+worktree, its linked-worktree administrative directory, the run's scratch directory
+(`<stateDir>/scratch`), and a private `/tmp`, using bubblewrap, and points `TMPDIR`,
+`GOCACHE`, `GOTMPDIR`, `GOENV`, `npm_config_cache` and (for executors that keep no
+state of their own) `XDG_*` into the scratch directory. A runner that cannot confine
+a job (no bubblewrap, or a non-Linux host) refuses it, in-turn and again at run time,
+rather than running it unconfined. This holds whatever `allowUnrestricted` says for
+the graph's own jobs. An agent executor's own login and history directories stay
+writable. A proposal that visibly changes the host (a `go env -w`, an `rm` of a path
+outside the scope) is refused in-turn with "host change needs the operator: report it
+as a blocker". The operator's `hostRepair` task grant (off by default) lifts the
+confinement; each such job is then recorded in `state.hostChanges`, in `inspect`, and
+as `hostChange` evidence. Environment faults outside the run are the operator's: the
+supervisor reports them as a blocker with evidence.
+
 Plugins, validators, builders, workers, and reviewers run outside the controller
 process. A plugin crash or hang becomes an observed child failure; the controller
 can terminate the process and ask the supervisor to investigate. Start a fresh
