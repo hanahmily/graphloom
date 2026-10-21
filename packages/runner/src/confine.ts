@@ -47,6 +47,8 @@ export interface OperatorGo {
   modCache: string;
   proxy: string;
   flags: string;
+  /** False when the operator has private-module settings: the job keeps their cache read-only and unredirected. */
+  redirect: boolean;
 }
 
 /** The operator's module cache, proxy, and flags as `go env` reports them for `env`; undefined when Go is not available. */
@@ -56,7 +58,7 @@ export function operatorGoSettings(env: NodeJS.ProcessEnv): OperatorGo | undefin
     // module or workspace lookup, and a neutral directory instead of whatever checkout the runner sits in.
     const probeEnv: NodeJS.ProcessEnv = { ...env, GOTOOLCHAIN: "local", GOWORK: "off", GO111MODULE: "off" };
     delete probeEnv.GOFLAGS;
-    const res = spawnSync("go", ["env", "-json", "GOMODCACHE", "GOPROXY", "GOFLAGS"], {
+    const res = spawnSync("go", ["env", "-json", "GOMODCACHE", "GOPROXY", "GOFLAGS", "GOPRIVATE", "GONOPROXY"], {
       env: probeEnv,
       cwd: os.tmpdir(),
       encoding: "utf8",
@@ -66,7 +68,12 @@ export function operatorGoSettings(env: NodeJS.ProcessEnv): OperatorGo | undefin
     if (res.status !== 0) return undefined;
     const parsed = JSON.parse(res.stdout) as Record<string, string>;
     if (!parsed.GOMODCACHE || !path.isAbsolute(parsed.GOMODCACHE)) return undefined;
-    return { modCache: parsed.GOMODCACHE, proxy: parsed.GOPROXY ?? "", flags: env.GOFLAGS ?? parsed.GOFLAGS ?? "" };
+    // GOPRIVATE/GONOPROXY make Go bypass every proxy for matching modules, the file:// one over the operator's
+    // cache included, and a private module path must never be routed through a proxy. Such an operator keeps
+    // the pre-run-scoped behavior: their cache read-only and unredirected, so cached modules still resolve
+    // and an uncached download is not available inside confinement.
+    const redirect = (parsed.GOPRIVATE ?? "") === "" && (parsed.GONOPROXY ?? "") === "";
+    return { modCache: parsed.GOMODCACHE, proxy: parsed.GOPROXY ?? "", flags: env.GOFLAGS ?? parsed.GOFLAGS ?? "", redirect };
   } catch {
     return undefined;
   }
@@ -128,7 +135,7 @@ export function confineWorker(options: {
   // Everything below `scratch` was writable by earlier jobs, so none of it is trusted: each component is
   // checked without following links, and a link or file in the way is removed, never written through.
   ensureRealDir(scratch);
-  for (const rel of [...subdirs, "go", ...(options.operatorGo !== undefined ? ["go/mod"] : [])]) ensureRealDirBelow(scratch, rel);
+  for (const rel of [...subdirs, "go", ...(options.operatorGo?.redirect === true ? ["go/mod"] : [])]) ensureRealDirBelow(scratch, rel);
   // The operator's Go settings (GOPROXY and the like) carry over once; a later `go env -w` stays in the run.
   const goEnv = path.join(scratch, "go", "env");
   const operatorGoEnv =
@@ -143,7 +150,7 @@ export function confineWorker(options: {
   }
   env.GOENV = goEnv;
   const go = options.operatorGo;
-  if (go !== undefined) {
+  if (go?.redirect === true) {
     // Cached modules are copied from the operator's cache through a file:// proxy, uncached ones download
     // into the run's cache; -modcacherw keeps the copies deletable. Nothing is written to the operator's cache.
     env.GOMODCACHE = path.join(scratch, "go", "mod");

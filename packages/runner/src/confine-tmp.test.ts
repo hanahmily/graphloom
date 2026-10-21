@@ -90,7 +90,7 @@ describe.skipIf(spawnSync("go", ["version"]).status !== 0)("the host-side Go pro
     process.chdir(checkout);
     try {
       const settings = operatorGoSettings({ ...process.env, GOMODCACHE: cache, GOPROXY: "off", GOFLAGS: "-mod=mod", GOTOOLCHAIN: "auto", GOENV: "off" });
-      expect(settings).toEqual({ modCache: cache, proxy: "off", flags: "-mod=mod" });
+      expect(settings).toEqual({ modCache: cache, proxy: "off", flags: "-mod=mod", redirect: true });
     } finally {
       process.chdir(cwd);
     }

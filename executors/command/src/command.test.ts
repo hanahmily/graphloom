@@ -465,7 +465,7 @@ describe.skipIf(confinementUnavailable !== undefined || spawnSync("go", ["versio
     process.env.GOTOOLCHAIN = "local";
   });
   afterEach(() => {
-    for (const name of ["GOMODCACHE", "GOSUMDB", "GOFLAGS", "GOENV", "GOPROXY", "GOTOOLCHAIN"]) {
+    for (const name of ["GOMODCACHE", "GOSUMDB", "GOFLAGS", "GOENV", "GOPROXY", "GOTOOLCHAIN", "GOPRIVATE"]) {
       if (saved[name] === undefined) delete process.env[name];
       else process.env[name] = saved[name];
     }
@@ -518,6 +518,27 @@ describe.skipIf(confinementUnavailable !== undefined || spawnSync("go", ["versio
     const { scratch, outcome } = await confinedGo(`go mod download ${mod}@${version}`);
     expect(outcome.exitCode, outcome.stderrTail).toBe(0);
     expect(listing(path.join(scratch, "go", "mod")).some((p) => p.endsWith(`${mod}@${version}/hello.go`))).toBe(true);
+    expect(listing(operatorCache)).toEqual(before);
+  }, 60_000);
+
+  it("leaves the operator's cache as it was when GOPRIVATE is set, so a cached private module still resolves", async () => {
+    // The consumer's go.mod and go.sum come from a host-side build while the module is still reachable.
+    // The worktree is where the confined job reads them from, and /tmp may be private to the job.
+    const app = path.join(dir, "wt");
+    await mkdir(app, { recursive: true });
+    await writeFile(path.join(app, "go.mod"), `module example.com/app\n\ngo 1.20\n\nrequire ${mod} ${version}\n`);
+    await writeFile(path.join(app, "main.go"), `package main\n\nimport hello "${mod}"\n\nfunc main() { _ = hello.Hi() }\n`);
+    process.env.GOPROXY = pathToFileURL(proxy).href;
+    sh("go build -buildvcs=false ./...", app);
+    const before = listing(operatorCache);
+    process.env.GOPRIVATE = "example.com/*";
+    process.env.GOPROXY = "off";
+    const { scratch, outcome } = await confinedGo(`go build -buildvcs=false ./... && go env GOMODCACHE GOPROXY`);
+    expect(outcome.exitCode, outcome.stderrTail).toBe(0);
+    // No proxy was put in front of the private path, and the run's cache was not used.
+    expect(outcome.stdoutTail).toContain(operatorCache);
+    expect(outcome.stdoutTail).not.toContain("file://");
+    expect(listing(path.join(scratch, "go", "mod"))).toEqual([]);
     expect(listing(operatorCache)).toEqual(before);
   }, 60_000);
 });
