@@ -1090,6 +1090,18 @@ describe("issue-fix graph under the banyandb profile", () => {
       expect(assignment(work[1])).toContain("test-ci exited 2");
     });
 
+    it("does not dispatch the full tier when GREEN exits 0 without running the named test, and corrects the implementer", () => {
+      const { decision, jobs } = simulate({ candidate: [{ [COMMAND.regression]: { exitCode: 0, report: "" } }, {}] });
+      expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+      const rounds = candidateJobs(jobs);
+      expect(rounds.map(jobTier)).toEqual(["cheap", "cheap", "full"]);
+      const work = jobs.filter((j) => j.purpose === "work");
+      expect(work).toHaveLength(2);
+      // The correction follows the first cheap job directly: no RED, no full tier in between.
+      expect(jobs.indexOf(work[1]!)).toBe(jobs.indexOf(rounds[0]!) + 1);
+      expect(assignment(work[1])).toContain("does not pass on the change");
+    });
+
     it("runs every check in one job when a profile declares no cheap command", () => {
       const flat = structuredClone(BANYANDB) as { commands: Array<{ tier?: string }> };
       for (const c of flat.commands) delete c.tier;

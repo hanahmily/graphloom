@@ -377,7 +377,7 @@ function fix(ctx: Context, view: RunView, issue: number, state: FixPrivateState)
       );
     }
     // The cheap tier failing sends the correction back with that evidence; neither RED nor the full tier is paid for.
-    const cheapFailed = tiered && !tierPassed(current, green, firstCommands);
+    const cheapFailed = tiered && !tierPassed(current, green, firstCommands, profile, test);
     const tests = green.checkout!.paths.filter((p) => isTestPath(profile, p));
     if (!cheapFailed && tests.length > 0) {
       const baseRed = latestCheckoutRun(current, COMMAND.regression, "base", digest, argv);
@@ -441,7 +441,7 @@ function fix(ctx: Context, view: RunView, issue: number, state: FixPrivateState)
       const runs = full.map((c) => sameCheckoutJob(current, green, c.id));
       // `passes` and `builds` judge commands of both tiers: they fail while the full tier has not run, which is no reason to hold it back.
       const failedElsewhere = results.some((r) => r.requirementId !== REQUIREMENT_BUILDS && r.requirementId !== REQUIREMENT_PASSES && r.result.status === "failed");
-      if (!tierPassed(current, green, commandsInTier(profile, "cheap")) || failedElsewhere) {
+      if (!tierPassed(current, green, commandsInTier(profile, "cheap"), profile, test) || failedElsewhere) {
         skipped = full.filter((_, i) => runs[i] === undefined).map((c) => c.id);
       } else if (runs.some((r) => r === undefined) || failedBeforeResume(current, green, full, view)) {
         return withPrivate(
@@ -711,9 +711,14 @@ function blockedBeforeResume(profile: Profile, run: CommandRun, test: NonNullabl
   return timedOut === true || aborted === true || spawnError !== undefined || regressionBlocked(profile, run, test) || profile.runner.outcome(reportText(run), test) === "not-run";
 }
 
-/** Whether GREEN and every one of `commands` ran clean and succeeded in the same checkout; a command that did not run did not pass. */
-function tierPassed(evidence: EvidenceRecord[], green: CommandRun, commands: ProfileCommand[]): boolean {
-  return [green, ...commands.map((c) => sameCheckoutJob(evidence, green, c.id))].every((run) => run !== undefined && cleanRun(run) === undefined && succeeded(run.command));
+/**
+ * Whether GREEN and every one of `commands` ran clean and succeeded in the same checkout, and the runner's own
+ * reading of GREEN's report says the named test passed (an exit 0 that never ran it does not count); a command
+ * that did not run did not pass.
+ */
+function tierPassed(evidence: EvidenceRecord[], green: CommandRun, commands: ProfileCommand[], profile: Profile, test: NonNullable<DecisionRecord["test"]>): boolean {
+  const ran = [green, ...commands.map((c) => sameCheckoutJob(evidence, green, c.id))].every((run) => run !== undefined && cleanRun(run) === undefined && succeeded(run.command));
+  return ran && profile.runner.outcome(reportText(green), test) === "passed";
 }
 
 /** Whether a command of the candidate-checks job that produced `green` failed before the operator's latest resume. */
