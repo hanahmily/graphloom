@@ -344,3 +344,98 @@ describe("matchFiles", () => {
     expect(await matchFiles(root, ["a/link/**"])).toEqual([]);
   });
 });
+
+describe("runInCheckout: prepare cache ordering and symlinks (#174)", () => {
+  async function repo() {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "graphloom-prep2-"));
+    const counter = path.join(dir, "..", `${path.basename(dir)}.count`);
+    cleanup.push(dir, counter);
+    const sh = (...args: string[]) => execFileAsync("git", args, { cwd: dir });
+    await sh("init", "-q");
+    await sh("config", "user.email", "test@example.com");
+    await sh("config", "user.name", "Test");
+    await writeFile(path.join(dir, ".gitignore"), "gen/\n");
+    await writeFile(path.join(dir, "in.txt"), "one\n");
+    await sh("add", ".");
+    await sh("commit", "-q", "-m", "init");
+    const pinnedHead = (await sh("rev-parse", "HEAD")).stdout.trim();
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "graphloom-prep2-state-"));
+    cleanup.push(stateDir);
+    const runner = createBuiltinExecutorRunner({
+      packages: [{ manifest: commandExecutorPackage, ...commandBinding() }],
+      fallback: {
+        runJob() {
+          throw new Error("no non-command job expected in this test");
+        },
+      },
+    });
+    let n = 0;
+    const checkout = async (prepare: Array<Record<string, unknown>>) => {
+      n += 1;
+      const job: JobSpec & { checkout: { from: "candidate" } } = {
+        stageId: "fix",
+        kind: "command",
+        purpose: "check",
+        instruction: "cat",
+        readOnly: true,
+        checkout: { from: "candidate" },
+        input: { commands: [{ id: "cat", argv: ["cat", "gen/out.txt"] }] },
+      };
+      return runInCheckout({
+        job,
+        operationId: `op-${n}`,
+        generation: 1,
+        runId: "run-1",
+        repoPath: dir,
+        worktreePath: dir,
+        pinnedHead,
+        stateDir,
+        artifactDir: stateDir,
+        checks: [],
+        prepare: prepare as never,
+        runner,
+        signal: new AbortController().signal,
+      });
+    };
+    const runs = async () => ((await readFile(counter, "utf8").catch(() => "")).match(/run/g) ?? []).length;
+    return { dir, counter, checkout, runs };
+  }
+
+  it("processes prepare commands in declaration order: an uncached cleanup before a cached generator does not delete what was restored", async () => {
+    const t = await repo();
+    const clean = { id: "clean", argv: ["sh", "-c", "rm -rf gen"] };
+    const generate = {
+      id: "generate",
+      argv: ["sh", "-c", `echo run >> ${t.counter}; mkdir -p gen && cp in.txt gen/out.txt`],
+      inputs: ["in.txt"],
+      outputs: ["gen/**"],
+    };
+    const first = await t.checkout([clean, generate]);
+    const second = await t.checkout([clean, generate]);
+    expect(first.result.status, first.result.summary).toBe("ok");
+    expect(second.result.status, second.result.summary).toBe("ok");
+    expect(await t.runs()).toBe(1);
+    expect(catOut(second.result.evidence ?? [])).toBe("one\n");
+    const ids = (second.result.evidence ?? []).map((e) => (e.payload as { command?: { id?: string } }).command?.id);
+    expect(ids.indexOf("clean")).toBeLessThan(ids.indexOf("generate"));
+  });
+
+  it("bypasses the cache when a declared input is a symbolic link, and says why", async () => {
+    const t = await repo();
+    await symlink("in.txt", path.join(t.dir, "link.txt"));
+    const generate = {
+      id: "generate",
+      argv: ["sh", "-c", `echo run >> ${t.counter}; mkdir -p gen && cp link.txt gen/out.txt`],
+      inputs: ["link.txt"],
+      outputs: ["gen/**"],
+    };
+    const first = await t.checkout([generate]);
+    await writeFile(path.join(t.dir, "in.txt"), "two\n");
+    const second = await t.checkout([generate]);
+    expect(await t.runs()).toBe(2);
+    expect(catOut(first.result.evidence ?? [])).toBe("one\n");
+    expect(catOut(second.result.evidence ?? [])).toBe("two\n");
+    const bypass = (second.result.evidence ?? []).map((e) => (e.payload as { cache?: { reason?: string } }).cache?.reason);
+    expect(bypass.find((r) => r !== undefined)).toMatch(/link\.txt is a symbolic link/);
+  });
+});

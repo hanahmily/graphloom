@@ -981,15 +981,18 @@ and [issue-fix study](research/loopx-issue-fix-example.md).
 ## 14. Prepare cache
 
 A prepare command (never a check) may declare `inputs` and `outputs`, together,
-as repository-relative globs (`**`, `*`, `?`; a leading `!` excludes). Before a
-checkout runs its preparation, the controller reads the declared input files in
-the checkout and keys the command by the digest of their paths and contents,
-its argv and its declared globs. On a hit the outputs are copied into the
+as repository-relative globs (`**`, `*`, `?`; a leading `!` excludes). Preparation
+commands are processed strictly in declaration order. For each cacheable one the
+controller reads the declared input files in the checkout as they stand at that
+point (earlier commands have run or been restored) and keys the command by the
+digest of their paths and contents, its argv and its declared globs. On a hit the outputs are copied into the
 checkout, the command does not run, and the evidence carries `restored from
 cache <key>`. On a miss the command runs; after the whole preparation succeeds,
-its outputs are saved under that key. A failed preparation caches nothing, a
-command without both declarations always runs, and a command whose inputs match
-no file always runs.
+its outputs are saved under that key. A failed preparation caches nothing (and entries saved by a
+preparation that then left tracked files changed are dropped). A command without
+both declarations always runs. So does one whose inputs match no file or include
+a symbolic link, because a link's target content cannot be hashed without
+crossing the no-follow boundary; the evidence records that bypass and why.
 
 The cache is `prepare-cache/` in the run's state directory, so it is removed with
 the run and is never writable by a job. Saving and restoring use lstat and

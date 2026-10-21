@@ -138,21 +138,31 @@ async function digestFile(file: string): Promise<string> {
 
 /**
  * The cache key for `command` in `root`: a digest of its argv, its declared
- * globs and the content of every input file. Undefined when no input file
- * exists, so a command that reads nothing the declaration names always runs.
+ * globs and the content of every input file. `bypass` (with the reason) when
+ * the command must run: no input file exists, or an input is a symbolic link,
+ * whose target's content cannot be hashed without crossing the no-follow
+ * boundary and would otherwise let a changed target restore stale output.
  */
-export async function cacheKey(root: string, command: EnvironmentCommand & { inputs: string[]; outputs: string[] }): Promise<string | undefined> {
+export async function cacheKey(
+  root: string,
+  command: EnvironmentCommand & { inputs: string[]; outputs: string[] },
+): Promise<{ key: string } | { bypass: string }> {
   const files = await matchFiles(root, command.inputs);
-  if (files.length === 0) return undefined;
+  if (files.length === 0) return { bypass: "no declared input file exists" };
   const hash = createHash("sha256");
   hash.update(JSON.stringify({ v: 1, argv: command.argv, inputs: command.inputs, outputs: command.outputs }));
   for (const rel of files) {
     const abs = path.join(root, rel);
     const stat = await lstat(abs);
-    const content = stat.isSymbolicLink() ? `link:${await readlink(abs)}` : await digestFile(abs);
-    hash.update(`\0${rel}\0${content}`);
+    if (stat.isSymbolicLink()) return { bypass: `declared input ${rel} is a symbolic link` };
+    hash.update(`\0${rel}\0${await digestFile(abs)}`);
   }
-  return hash.digest("hex");
+  return { key: hash.digest("hex") };
+}
+
+/** Remove one saved entry, e.g. when the preparation it came from turned out not to be clean. */
+export async function dropEntry(stateDir: string, id: string, key: string): Promise<void> {
+  await rm(entryDir(stateDir, id, key), { recursive: true, force: true }).catch(() => undefined);
 }
 
 function entryDir(stateDir: string, id: string, key: string): string {

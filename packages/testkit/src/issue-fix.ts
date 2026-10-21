@@ -29,6 +29,8 @@ export const ISSUE_FIX_FIXED = ISSUE_FIX_BUGGY.replace("\tif minutes >= generate
 export const ISSUE_FIX_REGRESSION = `${LICENSE}package timestamp\n\nimport "testing"\n\nfunc ${ISSUE_FIX_TEST}(t *testing.T) {\n\tif got := Status(generatedLimit, true); got != "running" {\n\t\tt.Fatalf("Status = %q, want running", got)\n\t}\n}\n`;
 export const ISSUE_FIX_CHANGES = "# Changes by Version\n\n## 0.12.0\n\n### Bug Fixes\n\n- Older fix.\n\n## 0.11.0\n\n- Old.\n";
 const CHECK_MAKEFILE = [".PHONY: test", "test:", "\t@go version >/dev/null", ""].join("\n");
+const NOOP_GENERATE = [".PHONY: generate", "generate:", "\t@true", ""].join("\n");
+const PKG_GENERATE = [".PHONY: generate", "generate:", "\t@printf 'package timestamp\\n\\nconst generatedLimit = 5\\n' > timestamp/mock_limit.go", ""].join("\n");
 const MAKEFILE = [
   ".PHONY: generate test-ci license-check build lint check",
   // Like BanyanDB's mocks: generated, gitignored, and needed by the tests.
@@ -54,6 +56,11 @@ export function issueFixRepoFiles(go: string, contributing: string | Buffer = "#
     "go.mod": `module example.com/banyandb\n\ngo ${go}\n`,
     ".gitignore": "mock_*.go\n",
     Makefile: MAKEFILE,
+    // The banyandb profile runs generate per project (api, mcp, mocks in banyand and pkg), as BanyanDB's own `make generate` does.
+    "api/Makefile": NOOP_GENERATE,
+    "mcp/Makefile": NOOP_GENERATE,
+    "banyand/Makefile": NOOP_GENERATE,
+    "pkg/Makefile": PKG_GENERATE,
     "scripts/ci/check/Makefile": CHECK_MAKEFILE,
     "CONTRIBUTING.md": contributing,
     "CHANGES.md": ISSUE_FIX_CHANGES,

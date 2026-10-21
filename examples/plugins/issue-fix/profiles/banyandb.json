@@ -80,9 +80,11 @@
     ],
     "prepare": [
       {
-        "id": "generate",
+        "id": "generate-proto",
         "argv": [
           "make",
+          "-C",
+          "api",
           "generate"
         ],
         "timeoutMs": 1800000,
@@ -92,36 +94,77 @@
           "api/buf.work.yaml",
           "api/proto/buf.yaml",
           "api/proto/buf.lock",
-          "go.mod",
-          "go.sum",
-          "Makefile",
           "api/Makefile",
-          "pkg/Makefile",
-          "banyand/Makefile",
-          "bydbctl/Makefile",
-          "mcp/Makefile",
-          "fodc/**/Makefile",
           "scripts/build/**",
-          "banyand/**/*.go",
-          "pkg/**/*.go",
-          "bydbctl/**/*.go",
-          "fodc/**/*.go",
-          "!**/*_test.go",
-          "!**/*mock.go",
-          "mcp/package.json",
-          "mcp/package-lock.json"
+          "go.mod",
+          "go.sum"
         ],
         "outputs": [
           "api/proto/**/*.pb.go",
           "api/proto/**/*.pb.validate.go",
           "api/proto/**/*.pb.gw.go",
           "api/proto/openapi/**",
-          "api/proto/api-reference.md",
-          "banyand/**/*mock.go",
-          "pkg/**/*mock.go",
-          "bydbctl/**/*mock.go",
-          "fodc/**/*mock.go",
+          "api/proto/api-reference.md"
+        ]
+      },
+      {
+        "id": "generate-mcp",
+        "argv": [
+          "make",
+          "-C",
+          "mcp",
+          "generate"
+        ],
+        "timeoutMs": 1800000,
+        "inputs": [
+          "mcp/package.json",
+          "mcp/package-lock.json",
+          "mcp/Makefile"
+        ],
+        "outputs": [
           "mcp/node_modules/**"
+        ]
+      },
+      {
+        "id": "generate-directives",
+        "argv": [
+          "sh",
+          "-c",
+          "want=\" banyand/metadata/metadata.go banyand/metadata/schema/schema.go banyand/queue/queue.go pkg/flow/types.go pkg/meter/meter.go pkg/node/interface.go \"; bad=\"\"; for f in $(grep -rl \"go:generate\" --include=\"*.go\" api banyand bydbctl fodc pkg 2>/dev/null | sort); do case \"$want\" in *\" $f \"*) ;; *) bad=\"$bad $f\";; esac; done; [ -z \"$bad\" ] || { echo \"go:generate directives in files the generate-mocks inputs do not cover:$bad; update this profile\" >&2; exit 1; }"
+        ],
+        "timeoutMs": 120000
+      },
+      {
+        "id": "generate-mocks",
+        "argv": [
+          "sh",
+          "-c",
+          "make -C banyand generate && make -C pkg generate"
+        ],
+        "timeoutMs": 1800000,
+        "inputs": [
+          "banyand/queue/*.go",
+          "banyand/metadata/*.go",
+          "banyand/metadata/schema/*.go",
+          "pkg/node/*.go",
+          "pkg/meter/*.go",
+          "pkg/flow/*.go",
+          "pkg/bus/*.go",
+          "pkg/run/*.go",
+          "banyand/liaison/grpc/route/*.go",
+          "api/common/*.go",
+          "!**/*_test.go",
+          "!**/*mock.go",
+          "api/proto/**/*.proto",
+          "go.mod",
+          "go.sum",
+          "banyand/Makefile",
+          "pkg/Makefile",
+          "scripts/build/**"
+        ],
+        "outputs": [
+          "banyand/**/*mock.go",
+          "pkg/**/*mock.go"
         ]
       }
     ],
