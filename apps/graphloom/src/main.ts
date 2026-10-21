@@ -42,8 +42,7 @@ async function main(): Promise<void> {
     const stateRootFlag = flagValue(args, "--state-root");
     const stateRoot = stateRootFlag ? path.resolve(stateRootFlag) : undefined;
     const stopHook = armStopHook(args);
-    const runnerConfig = await requireRunnerConfig();
-    stopHook.useConfig(runnerConfig.notify);
+    const runnerConfig = await requireRunnerConfig(process.env, (loaded) => stopHook.useConfig(loaded.notify));
     const runner = createCliRunner(runnerConfig);
     const config = await loadSupervisorConfig();
     const report = await controller.run({
@@ -122,8 +121,7 @@ async function main(): Promise<void> {
       runId: path.basename(runRef),
       stateDir: resolveStateDir(runRef, stateRoot ? path.resolve(stateRoot) : undefined).catch(() => ""),
     });
-    const runnerConfig = await requireRunnerConfig();
-    stopHook.useConfig(runnerConfig.notify);
+    const runnerConfig = await requireRunnerConfig(process.env, (loaded) => stopHook.useConfig(loaded.notify));
     const runner = createCliRunner(runnerConfig);
     const config = await loadSupervisorConfig();
     const report = await controller.resume({

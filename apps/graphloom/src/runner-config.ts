@@ -77,8 +77,13 @@ export async function loadRunnerConfig(env: NodeJS.ProcessEnv = process.env): Pr
  * executable. A command given as a path is bound to the absolute path that
  * passed the check, since the agent starts in the run's worktree.
  */
-export async function requireRunnerConfig(env: NodeJS.ProcessEnv = process.env): Promise<RunnerConfig> {
+export async function requireRunnerConfig(
+  env: NodeJS.ProcessEnv = process.env,
+  /** Called with the parsed config before the harness availability checks, which can throw. */
+  onLoaded?: (config: RunnerConfig) => void,
+): Promise<RunnerConfig> {
   const loaded = await loadRunnerConfig(env);
+  if (loaded !== undefined) onLoaded?.(loaded);
   if (loaded === undefined) {
     throw new Error(
       `no agent runner configured: create ~/.config/graphloom/runner.json (or point ${RUNNER_CONFIG_ENV} at one) with {"harness": "claude-code", "allowUnrestricted": true}`,

@@ -208,6 +208,27 @@ describe("--on-stop", () => {
     expect(calls[1]!.env.GRAPHLOOM_STOP_REASON).toContain("invalid JSON");
   }, 60_000);
 
+  it("fires the configured notify.onStop when the harness executable is unavailable", async () => {
+    const env = await makeCliEnv(cleanups);
+    const hook = await installHook(env);
+    await writeFile(
+      path.join(env.dir, "runner.json"),
+      JSON.stringify({ harness: "claude-code", allowUnrestricted: true, claude: { command: "/no/such/claude" }, notify: { onStop: hook.command } }),
+    );
+    env.env.GRAPHLOOM_RUNNER_CONFIG = path.join(env.dir, "runner.json");
+    const run = await env.graphloom("run", "task.yaml");
+    expect(run.code).toBe(1);
+    expect(run.stderr).toContain("was not found");
+    let calls = await hook.calls();
+    expect(calls.map((c) => c.env.GRAPHLOOM_STATUS)).toEqual(["crashed"]);
+    expect(calls[0]!.env.GRAPHLOOM_STOP_REASON).toContain("was not found");
+
+    const resume = await env.graphloom("resume", "nope", "--state-root", env.stateRoot);
+    expect(resume.code).toBe(1);
+    calls = await hook.calls();
+    expect(calls.map((c) => c.env.GRAPHLOOM_RUN_ID)).toEqual(["", "nope"]);
+  }, 60_000);
+
   it("gives a crash after the run exists its run id and state dir", async () => {
     const env = await makeCliEnv(cleanups);
     await env.fakeClaude(happy);
