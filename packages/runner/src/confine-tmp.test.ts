@@ -3,7 +3,7 @@ import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, realpathSyn
 import os from "node:os";
 import path from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
-import { confineWorker, confinementUnsupported } from "./confine.js";
+import { confineWorker, confinementUnsupported, operatorGoSettings } from "./confine.js";
 
 const unsupported = await confinementUnsupported();
 const root = realpathSync(mkdtempSync(path.join(os.tmpdir(), "gl-confine-")));
@@ -74,5 +74,27 @@ describe.skipIf(unsupported !== undefined)("a job cannot use what it leaves behi
     expect(() =>
       confineWorker({ command: "true", args: [], env: {}, cwd: root, scratchDir: path.join(root, "scratch-link"), writable: [link], keepUserState: false }),
     ).toThrow(/is a symbolic link/);
+  });
+});
+
+describe.skipIf(spawnSync("go", ["version"]).status !== 0)("the host-side Go probe writes nothing (#171)", () => {
+  it("does not switch toolchains from a checkout that needs a newer Go, and still reports the settings", () => {
+    const checkout = path.join(root, "newer-go");
+    const cache = path.join(root, "probe-cache");
+    mkdirSync(checkout);
+    mkdirSync(cache);
+    writeFileSync(path.join(checkout, "go.mod"), "module example.com/x\n\ngo 1.99\ntoolchain go1.99.0\n");
+    const listing = () => spawnSync("find", [cache, "-mindepth", "1", "-printf", "%p %s %T@\\n"], { encoding: "utf8" }).stdout;
+    const before = listing();
+    const cwd = process.cwd();
+    process.chdir(checkout);
+    try {
+      const settings = operatorGoSettings({ ...process.env, GOMODCACHE: cache, GOPROXY: "off", GOFLAGS: "-mod=mod", GOTOOLCHAIN: "auto", GOENV: "off" });
+      expect(settings).toEqual({ modCache: cache, proxy: "off", flags: "-mod=mod" });
+    } finally {
+      process.chdir(cwd);
+    }
+    expect(listing()).toBe(before);
+    expect(before).toBe("");
   });
 });

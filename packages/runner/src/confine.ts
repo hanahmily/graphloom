@@ -1,5 +1,6 @@
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -51,11 +52,21 @@ export interface OperatorGo {
 /** The operator's module cache, proxy, and flags as `go env` reports them for `env`; undefined when Go is not available. */
 export function operatorGoSettings(env: NodeJS.ProcessEnv): OperatorGo | undefined {
   try {
-    const res = spawnSync("go", ["env", "-json", "GOMODCACHE", "GOPROXY", "GOFLAGS"], { env, encoding: "utf8", timeout: 10_000, stdio: ["ignore", "pipe", "ignore"] });
+    // The probe must write nothing: no toolchain switch (which downloads into the operator's cache), no
+    // module or workspace lookup, and a neutral directory instead of whatever checkout the runner sits in.
+    const probeEnv: NodeJS.ProcessEnv = { ...env, GOTOOLCHAIN: "local", GOWORK: "off", GO111MODULE: "off" };
+    delete probeEnv.GOFLAGS;
+    const res = spawnSync("go", ["env", "-json", "GOMODCACHE", "GOPROXY", "GOFLAGS"], {
+      env: probeEnv,
+      cwd: os.tmpdir(),
+      encoding: "utf8",
+      timeout: 10_000,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
     if (res.status !== 0) return undefined;
     const parsed = JSON.parse(res.stdout) as Record<string, string>;
     if (!parsed.GOMODCACHE || !path.isAbsolute(parsed.GOMODCACHE)) return undefined;
-    return { modCache: parsed.GOMODCACHE, proxy: parsed.GOPROXY ?? "", flags: parsed.GOFLAGS ?? "" };
+    return { modCache: parsed.GOMODCACHE, proxy: parsed.GOPROXY ?? "", flags: env.GOFLAGS ?? parsed.GOFLAGS ?? "" };
   } catch {
     return undefined;
   }
