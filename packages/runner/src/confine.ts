@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -157,6 +157,8 @@ export function confineWorker(options: {
     const operatorProxy = go.proxy === "" ? "https://proxy.golang.org,direct" : go.proxy;
     env.GOPROXY = `${pathToFileURL(path.join(go.modCache, "cache", "download")).href.replaceAll(",", "%2C")},${operatorProxy}`;
     env.GOFLAGS = `${go.flags} -modcacherw`.trim();
+    // Checksum verification needs the operator's checksum-database evidence, which lives in their cache.
+    seedSumdb(path.join(go.modCache, "cache", "download", "sumdb"), scratch, path.join("go", "mod", "cache", "download", "sumdb"));
   }
 
   for (const dir of options.writable) {
@@ -191,6 +193,47 @@ export function confineWorker(options: {
     env,
     infoFd: 3,
   };
+}
+
+/**
+ * Copy the operator's checksum-database cache (small) into the run's module cache, so an offline job can
+ * verify modules whose go.sum entries are missing. Copies, never links; links in the source are skipped;
+ * each destination component is checked without following links, and what a job left in the way is
+ * replaced. A file already there is kept.
+ */
+function seedSumdb(source: string, scratch: string, rel: string): void {
+  const walk = (from: string, to: string): void => {
+    let entries;
+    try {
+      entries = readdirSync(from, { withFileTypes: true });
+    } catch {
+      return; // no checksum evidence cached
+    }
+    ensureRealDirBelow(scratch, to);
+    for (const entry of entries) {
+      const src = path.join(from, entry.name);
+      const dstRel = path.join(to, entry.name);
+      if (entry.isSymbolicLink()) continue;
+      if (entry.isDirectory()) {
+        walk(src, dstRel);
+      } else if (entry.isFile()) {
+        const dst = path.join(scratch, dstRel);
+        const stat = lstatOrUndefined(dst);
+        if (stat?.isFile()) continue;
+        try {
+          if (stat !== undefined) {
+            if (stat.isDirectory()) rmSync(dst, { recursive: true, force: true });
+            else unlinkSync(dst);
+          }
+          // `wx` never opens an existing path, and never follows a link at it.
+          writeFileSync(dst, readFileSync(src), { flag: "wx" });
+        } catch {
+          /* unreadable evidence: the job verifies against the network instead */
+        }
+      }
+    }
+  };
+  walk(source, rel);
 }
 
 function underTmp(p: string): boolean {

@@ -198,7 +198,9 @@ state of their own) `XDG_*` into the scratch directory. When Go is installed, th
 also gets a run-scoped `GOMODCACHE` in scratch that reads through the operator's cache
 without writing it: the runner reads the operator's effective `go env GOMODCACHE GOPROXY
 GOFLAGS` once, host-side, then sets `GOPROXY` to `file://<operator cache>/cache/download`
-followed by the operator's proxy list, and adds `-modcacherw` to `GOFLAGS`. An operator
+followed by the operator's proxy list, and adds `-modcacherw` to `GOFLAGS`. The
+operator's checksum-database cache (`cache/download/sumdb`, small) is copied into the run
+cache (never linked, links in it skipped) so checksum verification works offline. An operator
 with `GOPRIVATE` or `GONOPROXY` set keeps the pre-existing behavior instead (their cache
 read-only and unredirected, so cached private modules resolve and uncached downloads are
 not available), because Go would bypass every proxy for those paths. The private

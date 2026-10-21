@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
@@ -96,5 +96,41 @@ describe.skipIf(spawnSync("go", ["version"]).status !== 0)("the host-side Go pro
     }
     expect(listing()).toBe(before);
     expect(before).toBe("");
+  });
+});
+
+describe("a redirected module cache carries the operator's checksum evidence (#171)", () => {
+  it("copies the sumdb tree, skips links in it, and replaces a link a job left at the destination", () => {
+    const cache = path.join(root, "sumdb-op");
+    const sumdb = path.join(cache, "cache", "download", "sumdb", "sum.golang.org");
+    mkdirSync(path.join(sumdb, "lookup"), { recursive: true });
+    mkdirSync(path.join(sumdb, "tile", "8", "0"), { recursive: true });
+    writeFileSync(path.join(sumdb, "latest"), "go.sum database tree\n1\nhash\n");
+    writeFileSync(path.join(sumdb, "tile", "8", "0", "000"), "tile");
+    writeFileSync(path.join(sumdb, "lookup", "mod@v1.0.0"), "record");
+    symlinkSync("/etc/hostname", path.join(sumdb, "lookup", "linked"));
+    const scratch = path.join(root, "sumdb-scratch");
+    const outside = path.join(root, "sumdb-outside");
+    mkdirSync(outside);
+    const seeded = path.join(scratch, "go", "mod", "cache", "download", "sumdb", "sum.golang.org");
+    const wt = path.join(root, "sumdb-wt");
+    mkdirSync(wt);
+    const launch = () =>
+      confineWorker({
+        command: "true", args: [], env: { ...process.env }, cwd: wt, scratchDir: scratch, writable: [wt], keepUserState: false,
+        operatorGo: { modCache: cache, proxy: "", flags: "", redirect: true },
+      });
+    expect(launch().env.GOMODCACHE).toBe(path.join(scratch, "go", "mod"));
+    expect(readFileSync(path.join(seeded, "latest"), "utf8")).toBe(readFileSync(path.join(sumdb, "latest"), "utf8"));
+    expect(readFileSync(path.join(seeded, "tile", "8", "0", "000"), "utf8")).toBe("tile");
+    expect(readFileSync(path.join(seeded, "lookup", "mod@v1.0.0"), "utf8")).toBe("record");
+    expect(existsSync(path.join(seeded, "lookup", "linked"))).toBe(false);
+    // A job swaps a seeded file for a link out of the run; the next launch replaces it without writing through.
+    rmSync(path.join(seeded, "latest"));
+    symlinkSync(path.join(outside, "stolen"), path.join(seeded, "latest"));
+    launch();
+    expect(lstatSync(path.join(seeded, "latest")).isSymbolicLink()).toBe(false);
+    expect(existsSync(path.join(outside, "stolen"))).toBe(false);
+    expect(readFileSync(path.join(sumdb, "latest"), "utf8")).toContain("go.sum database");
   });
 });
