@@ -438,4 +438,42 @@ describe("runInCheckout: prepare cache ordering and symlinks (#174)", () => {
     const bypass = (second.result.evidence ?? []).map((e) => (e.payload as { cache?: { reason?: string } }).cache?.reason);
     expect(bypass.find((r) => r !== undefined)).toMatch(/link\.txt is a symbolic link/);
   });
+  it("saves a cached command's outputs before a later uncached command modifies them", async () => {
+    const t = await repo();
+    const generate = {
+      id: "generate",
+      argv: ["sh", "-c", `echo run >> ${t.counter}; mkdir -p gen && cp in.txt gen/out.txt`],
+      inputs: ["in.txt"],
+      outputs: ["gen/**"],
+    };
+    const append = { id: "append", argv: ["sh", "-c", "echo extra >> gen/out.txt"] };
+    const first = await t.checkout([generate, append]);
+    const second = await t.checkout([generate, append]);
+    expect(first.result.status, first.result.summary).toBe("ok");
+    expect(second.result.status, second.result.summary).toBe("ok");
+    expect(await t.runs()).toBe(1);
+    expect(catOut(first.result.evidence ?? [])).toBe("one\nextra\n");
+    expect(catOut(second.result.evidence ?? [])).toBe("one\nextra\n");
+  });
+
+  it("bypasses the cache when a declared input lies behind a symbolic-link directory", async () => {
+    const t = await repo();
+    await mkdir(path.join(t.dir, "real"));
+    await writeFile(path.join(t.dir, "real", "input"), "a\n");
+    await symlink("real", path.join(t.dir, "linked"));
+    const generate = {
+      id: "generate",
+      argv: ["sh", "-c", `echo run >> ${t.counter}; mkdir -p gen && cat in.txt linked/input > gen/out.txt`],
+      inputs: ["in.txt", "linked/input"],
+      outputs: ["gen/**"],
+    };
+    const first = await t.checkout([generate]);
+    await writeFile(path.join(t.dir, "real", "input"), "b\n");
+    const second = await t.checkout([generate]);
+    expect(await t.runs()).toBe(2);
+    expect(catOut(first.result.evidence ?? [])).toBe("one\na\n");
+    expect(catOut(second.result.evidence ?? [])).toBe("one\nb\n");
+    const reasons = (second.result.evidence ?? []).map((e) => (e.payload as { cache?: { reason?: string } }).cache?.reason);
+    expect(reasons.find((r) => r !== undefined)).toMatch(/linked is a symbolic link/);
+  });
 });

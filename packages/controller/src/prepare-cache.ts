@@ -42,7 +42,7 @@ const COMMAND_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const KEEP_ENTRIES_PER_COMMAND = 4;
 
 /** A glob over `/`-separated repository-relative paths: `**`, `*`, `?`; a leading `!` excludes. */
-function compile(pattern: string): { negate: boolean; regex: RegExp; prefix: string } {
+function compile(pattern: string): { negate: boolean; regex: RegExp; prefix: string; segments: string[] } {
   const negate = pattern.startsWith("!");
   const glob = negate ? pattern.slice(1) : pattern;
   let source = "";
@@ -69,36 +69,58 @@ function compile(pattern: string): { negate: boolean; regex: RegExp; prefix: str
     fixed.push(segment);
   }
   const wild = segments.every((s) => !/[*?]/.test(s));
-  return { negate, regex: new RegExp(`^${source}$`), prefix: wild ? glob : fixed.join("/") };
+  return { negate, regex: new RegExp(`^${source}$`), prefix: wild ? glob : fixed.join("/"), segments };
 }
 
 function assertSafeRel(rel: string): void {
   if (rel === "" || path.isAbsolute(rel) || rel.split("/").some((s) => s === ".." || s === "" || s === ".")) throw new Error(`unsafe path ${rel}`);
 }
 
+function segmentRegex(segment: string): RegExp {
+  return compile(segment).regex;
+}
+
+/** True when the glob could match something strictly below the directory `rel`. */
+function couldMatchBelow(globSegments: string[], rel: string): boolean {
+  const parts = rel.split("/");
+  for (const [i, part] of parts.entries()) {
+    const g = globSegments[i];
+    if (g === undefined) return false;
+    if (g === "**") return true;
+    if (!segmentRegex(g).test(part)) return false;
+  }
+  return globSegments.length > parts.length;
+}
+
 /**
- * Files and symbolic links under `root` the patterns select, sorted. Walks
- * with lstat only: a symbolic link to a directory is listed, never entered.
+ * Files and symbolic links under `root` the patterns select, sorted, and the
+ * symbolic links met on any path that could match an include pattern (the
+ * link itself, a linked directory, or a linked parent of a literal path).
+ * Walks with lstat only: a symbolic link to a directory is never entered, so
+ * what lies behind it is not in the result and the caller must not trust the
+ * result as complete when `symlinks` is not empty.
  */
-export async function matchFiles(root: string, patterns: string[]): Promise<string[]> {
+export async function scanFiles(root: string, patterns: string[]): Promise<{ files: string[]; symlinks: string[] }> {
   const compiled = patterns.map(compile);
   const include = compiled.filter((c) => !c.negate);
   const exclude = compiled.filter((c) => c.negate);
   const found = new Set<string>();
+  const links = new Set<string>();
   const roots = new Set(include.map((c) => c.prefix));
   const visit = async (rel: string): Promise<void> => {
     const abs = rel === "" ? root : path.join(root, rel);
     const stat = await lstat(abs).catch(() => undefined);
     if (stat === undefined) return;
     if (stat.isDirectory()) {
-      if (rel === "" || rel !== ".git") {
-        for (const entry of await readdir(abs)) {
-          const child = rel === "" ? entry : `${rel}/${entry}`;
-          if (child === ".git") continue;
-          await visit(child);
-        }
+      for (const entry of await readdir(abs)) {
+        const child = rel === "" ? entry : `${rel}/${entry}`;
+        if (child === ".git") continue;
+        await visit(child);
       }
       return;
+    }
+    if (stat.isSymbolicLink()) {
+      if (include.some((c) => c.regex.test(rel) || couldMatchBelow(c.segments, rel))) links.add(rel);
     }
     if (!stat.isFile() && !stat.isSymbolicLink()) return;
     if (include.some((c) => c.regex.test(rel)) && !exclude.some((c) => c.regex.test(rel))) found.add(rel);
@@ -106,21 +128,36 @@ export async function matchFiles(root: string, patterns: string[]): Promise<stri
   for (const start of roots) {
     if (start !== "") assertSafeRel(start);
     // A parent that is itself a symlink must not be walked through.
-    if (start !== "" && (await hasSymlinkParent(root, start))) continue;
+    const through = start === "" ? undefined : await symlinkParent(root, start);
+    if (through !== undefined) {
+      links.add(through);
+      continue;
+    }
     await visit(start);
   }
-  return [...found].sort();
+  return { files: [...found].sort(), symlinks: [...links].sort() };
+}
+
+export async function matchFiles(root: string, patterns: string[]): Promise<string[]> {
+  return (await scanFiles(root, patterns)).files;
+}
+
+/** The first symbolic link among the parent directories of `rel`, if any. */
+async function symlinkParent(root: string, rel: string): Promise<string | undefined> {
+  let current = root;
+  const walked: string[] = [];
+  for (const part of rel.split("/").slice(0, -1)) {
+    current = path.join(current, part);
+    walked.push(part);
+    const stat = await lstat(current).catch(() => undefined);
+    if (stat === undefined) return undefined;
+    if (stat.isSymbolicLink()) return walked.join("/");
+  }
+  return undefined;
 }
 
 async function hasSymlinkParent(root: string, rel: string): Promise<boolean> {
-  let current = root;
-  for (const part of rel.split("/").slice(0, -1)) {
-    current = path.join(current, part);
-    const stat = await lstat(current).catch(() => undefined);
-    if (stat === undefined) return false;
-    if (stat.isSymbolicLink()) return true;
-  }
-  return false;
+  return (await symlinkParent(root, rel)) !== undefined;
 }
 
 async function readNoFollow(file: string): Promise<Buffer> {
@@ -147,7 +184,8 @@ export async function cacheKey(
   root: string,
   command: EnvironmentCommand & { inputs: string[]; outputs: string[] },
 ): Promise<{ key: string } | { bypass: string }> {
-  const files = await matchFiles(root, command.inputs);
+  const { files, symlinks } = await scanFiles(root, command.inputs);
+  if (symlinks.length > 0) return { bypass: `declared input ${symlinks[0]} is a symbolic link` };
   if (files.length === 0) return { bypass: "no declared input file exists" };
   const hash = createHash("sha256");
   hash.update(JSON.stringify({ v: 1, argv: command.argv, inputs: command.inputs, outputs: command.outputs }));

@@ -229,6 +229,8 @@ export async function runInCheckout(args: {
         } else {
           pending.push(command);
           pendingSave.push({ command, key: keyed.key });
+          // Run it now, so its outputs are saved before any later command can change them.
+          await flush();
         }
       }
       await flush();
