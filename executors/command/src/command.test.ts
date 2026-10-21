@@ -317,7 +317,9 @@ describe("command host effect (#165)", () => {
   });
 });
 
-describe("stopping a confined command job (#165)", () => {
+const confinementUnavailable = await confinementUnsupported();
+
+describe.skipIf(confinementUnavailable !== undefined)("stopping a confined command job (#165)", () => {
   const detachedWriter = (file: string, marker: string) => ({
     stageId: "s",
     kind: "command" as const,
@@ -342,8 +344,6 @@ describe("stopping a confined command job (#165)", () => {
     ["the run stops", { stop: true }],
     ["the job times out", { stop: false }],
   ])("leaves no descendant writing to the worktree after %s", async (_name, { stop }) => {
-    const unsupported = await confinementUnsupported();
-    if (unsupported !== undefined) return;
     const { commandBinding, commandExecutorPackage } = await import("../dist/package.js");
     const marker = `gl-detached-${Date.now()}-${stop ? "stop" : "timeout"}`;
     const scratch = path.join(dir, "scratch");

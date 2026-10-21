@@ -21,7 +21,7 @@ import {
   type GraphDefinition,
   type Validator,
 } from "@graphloom/sdk";
-import { createBuiltinExecutorRunner, createScriptedRunner, createTrustedInProcessRunner, type Runner } from "@graphloom/runner";
+import { confinementUnsupported, createBuiltinExecutorRunner, createScriptedRunner, createTrustedInProcessRunner, type Runner } from "@graphloom/runner";
 import { commandBinding, commandExecutorPackage } from "@graphloom/executor-command";
 import { createPiSupervisor, createScriptedSupervisor, type PiSupervisorSessionPort } from "@graphloom/supervisor";
 import { createController, loadRunState, type RepairDeps } from "./index.js";
@@ -1210,6 +1210,9 @@ describe("supervisor evidence and probes", () => {
   });
 });
 
+// These tests are about input shapes, not confinement: the grant keeps their recovery jobs unconfined, so they behave the same on any host.
+const NO_CONFINEMENT = "  hostRepair: true\n";
+
 describe("executor input shape (#152)", () => {
   // Run 0011bbe9-01b: the supervisor's command-job input was refused three times with
   // only "input failed schema validation". These are its three proposals.
@@ -1232,7 +1235,7 @@ describe("executor input shape (#152)", () => {
     createBuiltinExecutorRunner({ packages: [{ manifest: commandExecutorPackage, ...commandBinding() }], fallback: runner() });
 
   it.each(BAD_INPUTS)("refuses %s naming the failing field and the declared shape, then admits the documented shape", async (_name, bad) => {
-    const env = await makeEnv("budgets:\n  decisions: 20\n");
+    const env = await makeEnv(NO_CONFINEMENT + "budgets:\n  decisions: 20\n");
     const rejections: Array<string | undefined> = [];
     const report = await createController().run({
       taskPath: env.taskPath,
@@ -1277,7 +1280,7 @@ describe("executor input shape (#152)", () => {
   });
 
   it("shows the supervisor each executor's declared input shape before it proposes, and lets it correct a refusal in the same turn", async () => {
-    const env = await makeEnv("budgets:\n  decisions: 20\n");
+    const env = await makeEnv(NO_CONFINEMENT + "budgets:\n  decisions: 20\n");
     const replies: string[] = [];
     const session = toolCallingSession("sup-152-shape", [
       async (_prompt, tools) => {
@@ -1312,7 +1315,10 @@ describe("executor input shape (#152)", () => {
   });
 });
 
-describe("supervisor jobs stay inside the run's scope (#165)", () => {
+// Real confinement needs bubblewrap and unprivileged user namespaces; hosts without them refuse such jobs (see runner confine.test.ts).
+const confinementUnavailable = await confinementUnsupported();
+
+describe.skipIf(confinementUnavailable !== undefined)("supervisor jobs stay inside the run's scope (#165)", () => {
   // Run 0011bbe9-01b: the supervisor proposed `rm -rf` on a user cache and `go env -w` on the
   // operator's Go configuration. A job the supervisor originates may write only the run's
   // worktree and run-scoped directories, unless the operator granted `hostRepair`.
