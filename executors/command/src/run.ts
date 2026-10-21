@@ -194,15 +194,21 @@ export function createCommandExecutor(): ExecutorDefinition<CommandInput> {
   });
 }
 
-const MUTATING_PROGRAMS = new Set(["rm", "rmdir", "mv", "cp", "mkdir", "touch", "ln", "chmod", "chown", "tee", "truncate", "install", "rsync", "unlink", "shred"]);
+/** Programs whose every path operand is something they create, change or remove. */
+const WRITES_ALL_OPERANDS = new Set(["rm", "rmdir", "unlink", "shred", "mv", "mkdir", "touch", "chmod", "chown", "truncate", "tee"]);
+/** Programs that write only their destination: the last operand, or the one `-t` names. */
+const WRITES_DESTINATION = new Set(["cp", "install", "ln", "rsync"]);
 const SHELLS = new Set(["sh", "bash", "zsh", "dash", "ksh"]);
+const CONFIG_READ_FLAGS = new Set(["--get", "--get-all", "--get-regexp", "--get-urlmatch", "--list", "-l", "--show-origin", "--show-scope"]);
 const OUTSIDE_SCOPE = "outside the run's worktree and run-scoped directories";
 
 /**
  * The first change a command visibly makes outside the confined scope: a
  * mutating program aimed at a path outside it, or a tool setting that rewrites
- * the operator's user-level configuration. A heuristic that only explains a
- * refusal early; the runner's confinement is what enforces the scope.
+ * the operator's user-level configuration. Only command positions and real
+ * write destinations are inspected, so reads (`cp /etc/hosts here`,
+ * `git config --global --get x`) pass. A heuristic that only explains a
+ * refusal early: the runner's confinement is what enforces the scope.
  */
 export function commandHostEffect(input: CommandInput, scope: ExecutorScope): string | undefined {
   const roots = [...scope.writablePaths.map((p) => path.resolve(p)), "/dev"];
@@ -212,42 +218,78 @@ export function commandHostEffect(input: CommandInput, scope: ExecutorScope): st
     const abs = path.resolve(token);
     return !roots.some((root) => abs === root || abs.startsWith(`${root}${path.sep}`));
   };
-  const scan = (tokens: string[], shown: string): string | undefined => {
-    for (let i = 0; i < tokens.length; i += 1) {
-      const program = path.basename(tokens[i]!);
-      const rest: string[] = [];
-      for (let j = i + 1; j < tokens.length && !/^[;&|]+$/.test(tokens[j]!); j += 1) rest.push(tokens[j]!);
-      if (program === "go" && rest[0] === "env" && rest.some((a) => a === "-w" || a === "-u")) {
-        return `\`${shown}\` rewrites the operator's global Go configuration`;
+  const unquote = (t: string) => t.replace(/^(["'])(.*)\1$/, "$2");
+  const escapes = (target: string | undefined, program: string): string | undefined =>
+    target !== undefined && outside(unquote(target)) ? `\`${program}\` changes ${unquote(target)}, ${OUTSIDE_SCOPE}` : undefined;
+
+  /** One simple command: tokens with no separator among them. */
+  const simple = (words: string[], shown: string): string | undefined => {
+    const tokens: string[] = [];
+    for (let i = 0; i < words.length; i += 1) {
+      if (words[i] === ">" || words[i] === ">>") {
+        if (words[i + 1] !== undefined && outside(unquote(words[i + 1]!))) return `output redirected to ${unquote(words[i + 1]!)}, ${OUTSIDE_SCOPE}`;
+        i += 1;
+      } else {
+        tokens.push(words[i]!);
       }
-      if (program === "git" && rest[0] === "config" && rest.some((a) => a === "--global" || a === "--system")) {
-        return `\`${shown}\` rewrites the operator's global git configuration`;
+    }
+    while (tokens.length > 0 && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[0]!)) tokens.shift();
+    if (tokens.length === 0) return undefined;
+    const program = path.basename(tokens[0]!);
+    const args = tokens.slice(1);
+    const operands = args.filter((a) => !a.startsWith("-"));
+    if (program === "go" && args[0] === "env" && args.some((a) => a === "-w" || a === "-u")) {
+      return `\`${shown}\` rewrites the operator's global Go configuration`;
+    }
+    if (program === "git" && args[0] === "config" && args.some((a) => a === "--global" || a === "--system") && !args.some((a) => CONFIG_READ_FLAGS.has(a))) {
+      return `\`${shown}\` rewrites the operator's global git configuration`;
+    }
+    if (
+      program === "npm" &&
+      ["set", "config"].includes(args[0] ?? "") &&
+      (args[0] === "set" || ["set", "delete", "edit"].includes(args[1] ?? "")) &&
+      args.some((a) => a === "-g" || a === "--global" || a === "--location=user" || a === "--location=global")
+    ) {
+      return `\`${shown}\` rewrites the operator's global npm configuration`;
+    }
+    if (WRITES_ALL_OPERANDS.has(program)) {
+      for (const operand of operands) {
+        const found = escapes(operand, program);
+        if (found !== undefined) return found;
       }
-      if (
-        program === "npm" &&
-        ["config", "set"].includes(rest[0] ?? "") &&
-        rest.some((a) => a === "-g" || a === "--global" || a === "--location=user" || a === "--location=global")
-      ) {
-        return `\`${shown}\` rewrites the operator's global npm configuration`;
-      }
-      if (MUTATING_PROGRAMS.has(program)) {
-        const target = rest.find((a) => outside(a.replace(/^--?[\w-]+=/, "")));
-        if (target !== undefined) return `\`${program}\` changes ${target}, ${OUTSIDE_SCOPE}`;
-      }
-      if ((tokens[i] === ">" || tokens[i] === ">>") && outside(tokens[i + 1] ?? "")) {
-        return `output redirected to ${tokens[i + 1]}, ${OUTSIDE_SCOPE}`;
+    }
+    if (WRITES_DESTINATION.has(program)) {
+      const flagged = args.findIndex((a) => a === "-t" || a === "--target-directory");
+      const target =
+        flagged >= 0
+          ? args[flagged + 1]
+          : (args.find((a) => a.startsWith("--target-directory="))?.slice("--target-directory=".length) ?? (operands.length >= 2 ? operands[operands.length - 1] : undefined));
+      return escapes(target, program);
+    }
+    return undefined;
+  };
+
+  const scanShell = (script: string): string | undefined => {
+    const padded = script.replace(/(&&|\|\||[;&|\n])/g, " $1 ").replace(/(>>?)/g, " $1 ");
+    let words: string[] = [];
+    for (const word of [...padded.split(/\s+/).filter(Boolean), ";"]) {
+      if (/^(&&|\|\||[;&|])$/.test(word)) {
+        const found = simple(words, script.slice(0, 120));
+        if (found !== undefined) return found;
+        words = [];
+      } else {
+        words.push(word);
       }
     }
     return undefined;
   };
+
   for (const spec of input.commands) {
-    const direct = scan(spec.argv, spec.argv.join(" ").slice(0, 120));
+    const direct = simple(spec.argv, spec.argv.join(" ").slice(0, 120));
     if (direct !== undefined) return direct;
     const flag = spec.argv.indexOf("-c");
     if (SHELLS.has(path.basename(spec.argv[0]!)) && flag > 0 && spec.argv[flag + 1] !== undefined) {
-      const script = spec.argv[flag + 1]!;
-      const tokens = script.replace(/([;&|]+)/g, " $1 ").replace(/(>>?)/g, " $1 ").split(/\s+/).filter(Boolean);
-      const inner = scan(tokens, script.slice(0, 120));
+      const inner = scanShell(spec.argv[flag + 1]!);
       if (inner !== undefined) return inner;
     }
   }

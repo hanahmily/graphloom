@@ -284,6 +284,9 @@ describe("command host effect (#165)", () => {
     expect(effect("npm", "config", "set", "cache", "/x", "-g")).toContain("global npm configuration");
     expect(effect("rm", "-rf", "/home/u/.cache/go-build")).toContain("/home/u/.cache/go-build");
     expect(effect("mkdir", "-p", "~/x")).toContain("~/x");
+    expect(effect("cp", "/runs/w/a", "/etc/a")).toContain("/etc/a");
+    expect(effect("mv", "/runs/w/a", "/var/a")).toContain("/var/a");
+    expect(effect("cp", "-t", "/etc", "/runs/w/a")).toContain("/etc");
     expect(effect("sh", "-c", "echo x > /etc/motd")).toContain("/etc/motd");
     expect(effect("bash", "-c", "cd /runs/w && true; rm -rf /var/cache/x")).toContain("/var/cache/x");
   });
@@ -293,6 +296,15 @@ describe("command host effect (#165)", () => {
     expect(effect("rm", "-rf", "/runs/w/build")).toBeUndefined();
     expect(effect("rm", "build/out")).toBeUndefined();
     expect(effect("cat", "/etc/hosts")).toBeUndefined();
+    // Reads are not writes, whatever the paths.
+    expect(effect("cp", "/etc/hosts", "/runs/w/hosts")).toBeUndefined();
+    expect(effect("git", "config", "--global", "--get", "user.name")).toBeUndefined();
+    expect(effect("git", "config", "--global", "--list")).toBeUndefined();
+    expect(effect("npm", "config", "get", "cache", "-g")).toBeUndefined();
+    // A path that merely appears as an argument is not a command or a destination.
+    expect(effect("cat", "/tmp/rm", "/etc/hosts")).toBeUndefined();
+    expect(effect("sh", "-c", "cat /etc/hosts | grep x > /runs/w/out; ls /var")).toBeUndefined();
+    expect(effect("sh", "-c", "cp /etc/hosts /runs/w/hosts && grep -q rm /etc/hosts")).toBeUndefined();
     expect(effect("sh", "-c", "echo x > /runs/state/scratch/out")).toBeUndefined();
   });
 });

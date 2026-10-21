@@ -21,7 +21,7 @@ import {
   type GraphDefinition,
   type Validator,
 } from "@graphloom/sdk";
-import { createBuiltinExecutorRunner, createScriptedRunner, createTrustedInProcessRunner } from "@graphloom/runner";
+import { createBuiltinExecutorRunner, createScriptedRunner, createTrustedInProcessRunner, type Runner } from "@graphloom/runner";
 import { commandBinding, commandExecutorPackage } from "@graphloom/executor-command";
 import { createPiSupervisor, createScriptedSupervisor, type PiSupervisorSessionPort } from "@graphloom/supervisor";
 import { createController, loadRunState, type RepairDeps } from "./index.js";
@@ -1467,5 +1467,64 @@ describe("supervisor jobs stay inside the run's scope (#165)", () => {
     expect(state.evidence.some((e) => e.kind === "other" && JSON.stringify(e.payload).includes('"hostChange"'))).toBe(true);
     const inspected = await createController().inspect(report.stateDir);
     expect(inspected.hostChanges).toHaveLength(1);
+  });
+});
+
+describe("a confined parent's tool calls (#165)", () => {
+  // The controller launches a tool call's child job itself, so it must carry the parent's confinement.
+  const run = async (taskExtra: string) => {
+    const env = await makeEnv(taskExtra);
+    const seen: Array<{ executor?: string; confined: boolean }> = [];
+    const agent = defineExecutor({
+      id: "acme.agent/code",
+      effect: "write",
+      async execute(_input, ctx) {
+        await ctx.tools!.call({ toolCallId: "t1", tool: "read_it", input: {} });
+        return { status: "ok" as const, summary: "ran" };
+      },
+    });
+    const reader = defineExecutor({ id: "acme.tool/read", effect: "read", async execute() { return { status: "ok" as const, summary: "read" }; } });
+    const inner = createTrustedInProcessRunner({ executors: [agent, reader], fallback: runner() });
+    const spying: Runner = {
+      ...inner,
+      runJob(job, ctx) {
+        seen.push({ ...(job.executor !== undefined ? { executor: job.executor.id } : {}), confined: ctx.confinement !== undefined });
+        return inner.runJob(job, ctx);
+      },
+    };
+    const job = {
+      stageId: "write",
+      kind: "agent" as const,
+      purpose: "work" as const,
+      instruction: "work with a tool",
+      writeScope: [GREETING_PATH],
+      executor: { id: "acme.agent/code" },
+      tools: [{ name: "read_it", effect: "read" as const, executor: { id: "acme.tool/read" } }],
+      input: {},
+    };
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({ definition, advances: [supervise({ reason: "unfamiliar" }, "escalate"), ...finish] }),
+      validators: goodValidators,
+      supervisor: createScriptedSupervisor({ decisions: [dispatch(job, "work"), returnToNormal({ summary: "checked" }, "hand back")] }),
+      runner: spying,
+      stateRoot: env.stateRoot,
+      runId: "child-confinement",
+    });
+    return { report, seen: seen.filter((s) => s.executor === "acme.agent/code" || s.executor === "acme.tool/read") };
+  };
+
+  it("runs the child tool job confined along with its parent", async () => {
+    const { report, seen } = await run("budgets:\n  decisions: 20\n");
+    expect(report.status, report.blocker).toBe("succeeded");
+    expect(seen).toEqual([
+      { executor: "acme.agent/code", confined: true },
+      { executor: "acme.tool/read", confined: true },
+    ]);
+  });
+
+  it("leaves both unconfined under the hostRepair grant", async () => {
+    const { seen } = await run("  hostRepair: true\nbudgets:\n  decisions: 20\n");
+    expect(seen.map((s) => s.confined)).toEqual([false, false]);
   });
 });

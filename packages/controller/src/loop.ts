@@ -1115,6 +1115,7 @@ async function runNormalLoopSteps(
           result = { status: "failed", summary: "executor cancelled before start", runId: state.runId, operationId, generation };
         } else {
           before = unchanged;
+          const confinement = confined ? await jobConfinement(state) : undefined;
           children =
             job.kind === "agent" || job.tools !== undefined
               ? createChildPort(
@@ -1124,6 +1125,7 @@ async function runNormalLoopSteps(
                     runner: deps.runner,
                     shouldStop: () => stopRequested(deps),
                     signal: abort.signal,
+                    ...(confinement !== undefined ? { confinement } : {}),
                   },
                 )
               : undefined;
@@ -1157,7 +1159,7 @@ async function runNormalLoopSteps(
               worktreePath: state.worktreePath,
               artifactDir: state.artifactDir,
               signal: abort.signal,
-              ...(confined ? { confinement: await jobConfinement(state) } : {}),
+              ...(confinement !== undefined ? { confinement } : {}),
               ...(children !== undefined ? { children } : {}),
               ...(source !== undefined ? { executorSource: source } : {}),
               ...(session !== undefined ? { session } : {}),

@@ -7,7 +7,7 @@ import {
   type ToolCallRequest,
   type ToolCallResult,
 } from "@graphloom/sdk";
-import type { ChildOperationPort, JobResult, Runner } from "@graphloom/runner";
+import type { ChildOperationPort, JobConfinement, JobResult, Runner } from "@graphloom/runner";
 import { newEvidenceRef, type EvidenceProducer } from "./admit.js";
 import { continuedOperations, earlierToolCallRefusal } from "./agent-sessions.js";
 import { resolveExecutorPin } from "./executor-catalog.js";
@@ -29,6 +29,8 @@ export interface ChildPortDeps {
   shouldStop: () => Promise<boolean>;
   /** Aborted when the run stops; forwarded to child jobs. */
   signal: AbortSignal;
+  /** The parent's confinement: its tool calls run confined to the same scope, never a broader one. */
+  confinement?: JobConfinement;
 }
 
 function failed(summary: string): ToolCallResult {
@@ -337,6 +339,7 @@ export function createChildPort(parent: ParentJob, deps: ChildPortDeps): Control
           worktreePath: state.worktreePath,
           artifactDir: state.artifactDir,
           signal: cancel.signal,
+          ...(deps.confinement !== undefined ? { confinement: deps.confinement } : {}),
           ...(resolved.source !== undefined ? { executorSource: resolved.source } : {}),
         });
         cutShort = cancel.signal.aborted;
