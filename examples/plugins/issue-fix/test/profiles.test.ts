@@ -86,8 +86,22 @@ describe.skipIf(!existsSync(path.join(banyandbFixDist, "index.js")))("the banyan
           .replace('"change":{"type":"string"},', "")
           .replace('"summary","change",', '"summary",'),
       ) as Omit<GraphDefinition, "graphId" | "version" | "privateStateSchema" | "defaultBudgets">;
-    expect(v1(strip(ours))).toEqual(strip(theirs));
-    expect(ours).toMatchObject({ graphId: "issue-fix", version: "0.7.0", privateStateSchema: "issue-fix-private-v1" });
+    // And #174: the profile declares what `make generate` reads and writes so a run reuses it; banyandb-fix always runs it.
+    const uncached = (definition: ReturnType<typeof v1>) => ({
+      ...definition,
+      environment: {
+        ...definition.environment,
+        prepare: definition.environment?.prepare?.map(({ inputs: _i, outputs: _o, ...command }) => command),
+      },
+    });
+    expect(uncached(v1(strip(ours)))).toEqual(strip(theirs));
+    expect(ours).toMatchObject({ graphId: "issue-fix", version: "0.7.1", privateStateSchema: "issue-fix-private-v1" });
+  });
+
+  it("declares make generate's inputs and outputs, so a run restores its output (#174)", () => {
+    const generate = banyandb.environment.prepare?.find((c) => c.id === "generate");
+    expect(generate?.inputs).toEqual(expect.arrayContaining(["api/proto/**/*.proto", "go.mod", "go.sum", "mcp/package-lock.json"]));
+    expect(generate?.outputs).toEqual(expect.arrayContaining(["api/proto/**/*.pb.go", "banyand/**/*mock.go", "mcp/node_modules/**"]));
   });
 
   it("gives the agents and the checks the same instructions and commands", async () => {

@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 import type { CheckoutSpec, EnvironmentCommand, JobSpec } from "@graphloom/sdk";
 import { writeScopeAllows } from "@graphloom/sdk";
 import type { ExecutorSourceOverride, JobEvidenceItem, JobResult, Runner } from "@graphloom/runner";
+import { cacheKey, commandSpec, isCacheable, restoreOutputs, saveOutputs } from "./prepare-cache.js";
 import { candidateChange } from "./worktree.js";
 
 const execFileAsync = promisify(execFile);
@@ -172,13 +173,31 @@ export async function runInCheckout(args: {
     });
     const setup = [...args.checks, ...args.prepare];
     if (setup.length > 0) {
+      // A prepare command that declares inputs and outputs is restored from the
+      // run's cache when its inputs (read here, before anything runs) are
+      // unchanged; otherwise it runs, and on success its outputs are saved.
+      const restored: Array<{ command: EnvironmentCommand; key: string; count: number }> = [];
+      const toSave: Array<{ command: EnvironmentCommand & { inputs: string[]; outputs: string[] }; key: string }> = [];
+      for (const command of args.prepare) {
+        if (!isCacheable(command)) continue;
+        const key = await cacheKey(dir, command).catch(() => undefined);
+        if (key === undefined) continue;
+        const count = await restoreOutputs({ stateDir: args.stateDir, root: dir, command, key }).catch(() => undefined);
+        if (count !== undefined) restored.push({ command, key, count });
+        else toSave.push({ command, key });
+      }
+      const skip = new Set(restored.map((r) => r.command.id));
+      const toRun = setup.filter((c) => !skip.has(c.id));
       const prepContext = context(`${operationId}-prepare`);
-      const prep = await args.runner.runJob({ ...plain, input: { commands: setup.map((c) => ({ ...c })) } }, prepContext);
+      const prep: JobResult =
+        toRun.length > 0
+          ? await args.runner.runJob({ ...plain, input: { commands: toRun.map(commandSpec) } }, prepContext)
+          : { status: "ok", summary: "restored from cache", ...identity, operationId: prepContext.operationId };
       const prepMismatch = identityMismatch(prep, prepContext);
       if (prepMismatch !== undefined) return stale(prepMismatch);
       const mutations = await checkoutMutations(dir, commit);
       const reported = new Set((prep.evidence ?? []).map((item) => commandOutcome(item)?.id).filter((id) => id !== undefined));
-      const unreported = setup.filter((c) => !reported.has(c.id)).map((c) => c.id);
+      const unreported = toRun.filter((c) => !reported.has(c.id)).map((c) => c.id);
       const failures = [
         ...(prep.status === "ok" ? [] : [`${prep.status}: ${prep.summary}`]),
         ...failedCommands(prep.evidence ?? []),
@@ -186,10 +205,17 @@ export async function runInCheckout(args: {
         ...(mutations.length > 0 ? [`changed tracked files: ${mutations.slice(0, 10).join(", ")}`] : []),
       ];
       const prepared = failures.length === 0;
+      for (const r of restored) {
+        evidence.push(withCheckout(restoredEvidence(r.command, r.key, r.count), record("prepare", prepared, mutations)));
+      }
       for (const item of prep.evidence ?? []) {
         evidence.push(withCheckout(item, record("prepare", prepared, mutations)));
       }
       if (!prepared) return failed(`preparation failed in the checkout: ${failures.join("; ")}`, evidence);
+      // Only a fully successful preparation is worth keeping.
+      for (const entry of toSave) {
+        await saveOutputs({ stateDir: args.stateDir, root: dir, command: entry.command, key: entry.key });
+      }
     }
     if (checkout.from === "base") {
       try {
@@ -370,6 +396,22 @@ async function assertNoSymlinkParent(root: string, rel: string): Promise<void> {
     if (stat === undefined) return;
     if (stat.isSymbolicLink()) throw new Error(`cannot copy ${rel}: ${path.relative(root, current)} is a symlink`);
   }
+}
+
+/** Evidence that a prepare command's output was copied from the run's cache instead of produced. */
+function restoredEvidence(command: EnvironmentCommand, key: string, count: number): JobEvidenceItem {
+  return {
+    kind: "command",
+    payload: {
+      command: {
+        id: command.id,
+        argv: command.argv,
+        exitCode: 0,
+        stdoutTail: `restored from cache ${key}`,
+        cache: { restored: true, key, files: count },
+      },
+    },
+  };
 }
 
 function withCheckout(item: JobEvidenceItem, checkout: CheckoutRecord): JobEvidenceItem {

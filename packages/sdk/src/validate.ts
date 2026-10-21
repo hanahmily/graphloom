@@ -285,6 +285,7 @@ function assertEnvironment(value: unknown): void {
       if (c["timeoutMs"] !== undefined && (typeof c["timeoutMs"] !== "number" || !Number.isSafeInteger(c["timeoutMs"]) || c["timeoutMs"] < 1)) {
         throw new WireValidationError("malformed", `${label}.timeoutMs must be a positive integer`);
       }
+      assertCacheGlobs(c, label, key === "prepare");
     });
   }
   if (ids.size > 16) throw new WireValidationError("malformed", "environment declares more than 16 commands");
@@ -298,6 +299,35 @@ function assertEnvironment(value: unknown): void {
       }
       if (!SHA256.test(requireString(f, "sha256"))) {
         throw new WireValidationError("malformed", `${label}.sha256 must be a lowercase hex SHA-256`);
+      }
+    });
+  }
+}
+
+/** `inputs` and `outputs` on a prepare command: both or neither, each a list of safe relative globs. */
+export function assertCacheGlobs(c: Record<string, unknown>, label: string, allowed: boolean): void {
+  if (c["inputs"] === undefined && c["outputs"] === undefined) return;
+  if (!allowed) throw new WireValidationError("malformed", `${label}: only a prepare command may declare inputs and outputs`);
+  if (c["inputs"] === undefined || c["outputs"] === undefined) {
+    throw new WireValidationError("malformed", `${label}: inputs and outputs are declared together`);
+  }
+  for (const field of ["inputs", "outputs"] as const) {
+    const globs = requireArray(c, field);
+    const positive = globs.filter((g) => typeof g === "string" && !g.startsWith("!"));
+    if (globs.length === 0 || globs.length > 64 || positive.length === 0) {
+      throw new WireValidationError("malformed", `${label}.${field} must list 1-64 globs, at least one not starting with "!"`);
+    }
+    globs.forEach((g, j) => {
+      const glob = typeof g === "string" && g.startsWith("!") ? g.slice(1) : g;
+      if (
+        typeof glob !== "string" ||
+        glob.length === 0 ||
+        glob.length > 512 ||
+        glob.startsWith("/") ||
+        glob.endsWith("/") ||
+        glob.split("/").some((part) => part === ".." || part === "." || part === "")
+      ) {
+        throw new WireValidationError("malformed", `${label}.${field}[${j}] must be a repository-relative glob without "..", "." or empty segments`);
       }
     });
   }

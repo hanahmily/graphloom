@@ -863,7 +863,11 @@ reservation; a revised patch or repeated failed trial requires another. Diagnost
 steps, independent review, and activation also consume applicable job/invocation/
 decision limits, without counting the same correction twice. The graph's
 environment checks and preparation count as a job, reserved before they run; a
-checkout job that repeats them counts as two. Reentry, activation,
+checkout job that repeats them counts as two. A prepare command may declare
+`inputs` and `outputs` globs; a checkout then restores its saved output instead of
+running it when the digest of the input files' contents and the command's argv
+match an earlier success in the same run
+([prepare cache](#14-prepare-cache)). Reentry, activation,
 mode changes, session replacement, and resume never reset counters. Exhaustion
 preserves the run with attempted remedies, evidence, and an exact remaining blocker.
 Until those limits or hard blockers apply, the supervisor treats unfinished required
@@ -973,3 +977,25 @@ establish arbitrary automatic validator replacement in a running graph. GraphLoo
 source bundle contract, independent repair qualification, and same-run activation
 are design decisions here. See the [source findings](research/loopx-gate-defect-handling.md)
 and [issue-fix study](research/loopx-issue-fix-example.md).
+
+## 14. Prepare cache
+
+A prepare command (never a check) may declare `inputs` and `outputs`, together,
+as repository-relative globs (`**`, `*`, `?`; a leading `!` excludes). Before a
+checkout runs its preparation, the controller reads the declared input files in
+the checkout and keys the command by the digest of their paths and contents,
+its argv and its declared globs. On a hit the outputs are copied into the
+checkout, the command does not run, and the evidence carries `restored from
+cache <key>`. On a miss the command runs; after the whole preparation succeeds,
+its outputs are saved under that key. A failed preparation caches nothing, a
+command without both declarations always runs, and a command whose inputs match
+no file always runs.
+
+The cache is `prepare-cache/` in the run's state directory, so it is removed with
+the run and is never writable by a job. Saving and restoring use lstat and
+`O_NOFOLLOW`, never enter a symbolic link, accept only regular files and
+relative symbolic links that stay inside the checkout, verify each stored file's
+SHA-256 before restoring, and copy rather than link. An entry that fails
+verification is a miss. Each command keeps its four newest entries. The plugin
+owns correctness of the declaration: an input it omits can leave stale output
+restored, so it lists everything the command reads.

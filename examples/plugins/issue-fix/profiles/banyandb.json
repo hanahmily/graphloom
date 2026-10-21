@@ -85,7 +85,44 @@
           "make",
           "generate"
         ],
-        "timeoutMs": 1800000
+        "timeoutMs": 1800000,
+        "inputs": [
+          "api/proto/**/*.proto",
+          "api/buf.gen.yaml",
+          "api/buf.work.yaml",
+          "api/proto/buf.yaml",
+          "api/proto/buf.lock",
+          "go.mod",
+          "go.sum",
+          "Makefile",
+          "api/Makefile",
+          "pkg/Makefile",
+          "banyand/Makefile",
+          "bydbctl/Makefile",
+          "mcp/Makefile",
+          "fodc/**/Makefile",
+          "scripts/build/**",
+          "banyand/**/*.go",
+          "pkg/**/*.go",
+          "bydbctl/**/*.go",
+          "fodc/**/*.go",
+          "!**/*_test.go",
+          "!**/*mock.go",
+          "mcp/package.json",
+          "mcp/package-lock.json"
+        ],
+        "outputs": [
+          "api/proto/**/*.pb.go",
+          "api/proto/**/*.pb.validate.go",
+          "api/proto/**/*.pb.gw.go",
+          "api/proto/openapi/**",
+          "api/proto/api-reference.md",
+          "banyand/**/*mock.go",
+          "pkg/**/*mock.go",
+          "bydbctl/**/*mock.go",
+          "fodc/**/*mock.go",
+          "mcp/node_modules/**"
+        ]
       }
     ],
     "pinnedFiles": [
