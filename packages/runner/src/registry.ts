@@ -20,7 +20,7 @@ import {
   type JobSpec,
   type ToolCallResult,
 } from "@graphloom/sdk";
-import { confineWorker, confinementUnsupported } from "./confine.js";
+import { confineWorker, confinementUnsupported, findSandboxWorker } from "./confine.js";
 import { digestExecutorSource } from "./digest.js";
 import { assertSandboxSupported, sandboxNodeArgs } from "./sandbox.js";
 import type { ExecutorDescriptor, ExecutorSourceOverride, JobContext, JobEvidenceItem, JobResult, Runner } from "./types.js";
@@ -574,11 +574,29 @@ export function createChildExecutorRunner(
           resolve(failed("executor cancelled before start"));
           return;
         }
+        const confinedLaunch = "infoFd" in launch;
         const child = spawn(launch.command, launch.args, {
-          stdio: ["pipe", "pipe", "pipe"],
+          stdio: confinedLaunch ? ["pipe", "pipe", "pipe", "pipe"] : ["pipe", "pipe", "pipe"],
           cwd,
           env: launch.env,
         });
+        // bubblewrap's init is pid 1 of the sandbox and reaps what the worker leaves behind; the worker is its child.
+        let sandboxInit: number | undefined;
+        if (confinedLaunch) {
+          const info = child.stdio[3];
+          if (info !== null && info !== undefined && "setEncoding" in info) {
+            const infoLines = createInterface({ input: info as NodeJS.ReadableStream, crlfDelay: Infinity });
+            infoLines.once("line", (line) => {
+              try {
+                const pid = (JSON.parse(line) as { "child-pid"?: unknown })["child-pid"];
+                if (typeof pid === "number") sandboxInit = pid;
+              } catch {
+                /* the stop then falls back to the grace kill */
+              }
+              infoLines.close();
+            });
+          }
+        }
         const stderr: string[] = [];
         child.stderr.setEncoding("utf8");
         child.stderr.on("data", (c: string) => {
@@ -598,8 +616,18 @@ export function createChildExecutorRunner(
           ctx.signal?.removeEventListener("abort", onAbort);
           child.stdin.end();
           const settle = () => resolve(redactCredentials(result, options.credentials));
-          if (!executing || child.exitCode !== null || child.signalCode !== null) {
+          const gone = () => child.exitCode !== null || child.signalCode !== null;
+          if (!executing || gone()) {
             child.kill("SIGKILL");
+            // Killing the sandbox kills its whole pid namespace; settle only once it has gone.
+            if (confinedLaunch && !gone()) {
+              const cap = setTimeout(settle, stopGraceMs);
+              child.once("exit", () => {
+                clearTimeout(cap);
+                settle();
+              });
+              return;
+            }
             settle();
             return;
           }
@@ -609,7 +637,14 @@ export function createChildExecutorRunner(
             clearTimeout(kill);
             settle();
           });
-          child.kill("SIGTERM");
+          // bubblewrap does not forward signals, so a confined worker is signalled directly.
+          try {
+            const worker = sandboxInit !== undefined ? findSandboxWorker(sandboxInit, workerModule) : undefined;
+            if (worker !== undefined) process.kill(worker, "SIGTERM");
+            else child.kill("SIGTERM");
+          } catch {
+            child.kill("SIGTERM");
+          }
         };
         ctx.signal?.addEventListener("abort", onAbort, { once: true });
 

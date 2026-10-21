@@ -1,8 +1,9 @@
-import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createBuiltinExecutorRunner } from "@graphloom/runner";
+import { spawnSync } from "node:child_process";
+import { confinementUnsupported, createBuiltinExecutorRunner } from "@graphloom/runner";
 import { boundedInputShape, type ExecutorContext } from "@graphloom/sdk";
 import { COMMAND_INPUT_SHAPE, COMMAND_RUN_ID, commandInputProblem, commandSucceeded, createCommandExecutor, isCommandInput, type CommandOutcome } from "./run.js";
 
@@ -314,4 +315,67 @@ describe("command host effect (#165)", () => {
     expect(effect("sh", "-c", "echo hi >/runs/w/out 2>&1")).toBeUndefined();
     expect(effect("sh", "-c", "echo x > /runs/state/scratch/out")).toBeUndefined();
   });
+});
+
+describe("stopping a confined command job (#165)", () => {
+  const detachedWriter = (file: string, marker: string) => ({
+    stageId: "s",
+    kind: "command" as const,
+    purpose: "work" as const,
+    instruction: "start a detached writer and wait",
+    writeScope: ["grow.txt"],
+    executor: { id: COMMAND_RUN_ID },
+    input: {
+      commands: [
+        {
+          id: "grow",
+          // The writer leaves the command's process group (setsid) and ignores hangup, as a daemon would.
+          argv: ["sh", "-c", `setsid nohup sh -c 'while true; do echo x >> ${file}; sleep 0.05; done # ${marker}' >/dev/null 2>&1 & sleep 60`],
+        },
+      ],
+    },
+  });
+  const sizeOf = async (file: string) => (await readFile(file, "utf8").catch(() => "")).length;
+  const alive = (marker: string) => spawnSync("pgrep", ["-f", marker], { encoding: "utf8" }).stdout.trim() !== "";
+
+  it.each([
+    ["the run stops", { stop: true }],
+    ["the job times out", { stop: false }],
+  ])("leaves no descendant writing to the worktree after %s", async (_name, { stop }) => {
+    const unsupported = await confinementUnsupported();
+    if (unsupported !== undefined) return;
+    const { commandBinding, commandExecutorPackage } = await import("../dist/package.js");
+    const marker = `gl-detached-${Date.now()}-${stop ? "stop" : "timeout"}`;
+    const scratch = path.join(dir, "scratch");
+    const worktree = path.join(dir, "wt");
+    await mkdir(worktree, { recursive: true });
+    const file = path.join(worktree, "grow.txt");
+    const runner = createBuiltinExecutorRunner({
+      packages: [{ manifest: commandExecutorPackage, ...commandBinding({ timeoutMs: 1_500 }) }],
+      fallback: { runJob: async () => Promise.reject(new Error("fallback must not run")) },
+      timeoutMs: 1_500,
+    });
+    const abort = new AbortController();
+    const running = runner.runJob(detachedWriter(file, marker) as never, {
+      runId: "r",
+      operationId: "op-1",
+      generation: 1,
+      worktreePath: worktree,
+      artifactDir: path.join(dir, "artifacts"),
+      signal: abort.signal,
+      confinement: { scratchDir: scratch, writablePaths: [worktree] },
+    });
+    // Wait until the detached writer is really writing.
+    for (let i = 0; i < 100 && (await sizeOf(file)) === 0; i += 1) await new Promise((r) => setTimeout(r, 50));
+    expect(await sizeOf(file)).toBeGreaterThan(0);
+    if (stop) abort.abort();
+    const result = await running;
+    expect(result.status).toBe("failed");
+    const settledSize = await sizeOf(file);
+    await new Promise((r) => setTimeout(r, 600));
+    expect(await sizeOf(file)).toBe(settledSize);
+    await new Promise((r) => setTimeout(r, 600));
+    expect(await sizeOf(file)).toBe(settledSize);
+    expect(alive(marker)).toBe(false);
+  }, 30_000);
 });

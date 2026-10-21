@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 /** Run-scoped locations a confined job's user-level state is redirected to, under its scratch directory. */
@@ -32,7 +32,7 @@ async function probeBubblewrap(): Promise<string | undefined> {
     return `write confinement needs Linux bubblewrap and is not available on ${process.platform}`;
   }
   return await new Promise<string | undefined>((resolve) => {
-    const child = spawn("bwrap", ["--ro-bind", "/", "/", "--dev", "/dev", "true"], { stdio: "ignore" });
+    const child = spawn("bwrap", ["--ro-bind", "/", "/", "--dev", "/dev", "--unshare-pid", "--proc", "/proc", "true"], { stdio: "ignore" });
     child.once("error", () => resolve("write confinement needs bubblewrap (bwrap) on PATH, and it was not found"));
     child.once("exit", (code) =>
       resolve(code === 0 ? undefined : "bubblewrap (bwrap) cannot create a mount namespace here (unprivileged user namespaces may be disabled)"),
@@ -44,6 +44,12 @@ export interface ConfinedWorker {
   command: string;
   args: string[];
   env: NodeJS.ProcessEnv;
+  /**
+   * bubblewrap reports (--json-status-fd) the sandbox's init process on this extra file descriptor as one JSON line
+   * (`{ "child-pid": n }`, its pid outside the sandbox), so the host can signal the worker itself:
+   * bubblewrap does not forward signals, and the worker is pid 1 of a pid namespace.
+   */
+  infoFd: number;
 }
 
 /**
@@ -111,7 +117,12 @@ export function confineWorker(options: {
       "--ro-bind", "/", "/",
       "--dev", "/dev",
       ...(privateTmp ? ["--tmpfs", "/tmp"] : []),
+      // The worker is pid 1 of its own pid namespace: when it exits, or bubblewrap is killed
+      // (--die-with-parent), the kernel kills every process left in it, detached ones included.
+      "--unshare-pid",
+      "--proc", "/proc",
       "--die-with-parent",
+      "--json-status-fd", "3",
       ...binds.flatMap((p) => ["--bind", p, p]),
       "--chdir", options.cwd,
       "--",
@@ -119,6 +130,7 @@ export function confineWorker(options: {
       ...options.args,
     ],
     env,
+    infoFd: 3,
   };
 }
 
@@ -155,4 +167,27 @@ function ensureRealDirBelow(root: string, rel: string): void {
     else if (stat !== undefined) continue;
     mkdirSync(current);
   }
+}
+
+/**
+ * The host pid of the worker bubblewrap started: a child of the sandbox's init process whose command
+ * line names `workerModule` (processes the worker orphaned are children of the init too). bubblewrap
+ * does not forward signals, and its init ignores SIGTERM, so a stop signal must reach the worker itself.
+ */
+export function findSandboxWorker(init: number, workerModule: string): number | undefined {
+  try {
+    for (const entry of readdirSync("/proc")) {
+      if (!/^\d+$/.test(entry)) continue;
+      try {
+        const stat = readFileSync(`/proc/${entry}/stat`, "utf8");
+        const parent = Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[1]);
+        if (parent === init && readFileSync(`/proc/${entry}/cmdline`, "utf8").includes(workerModule)) return Number(entry);
+      } catch {
+        /* the process went away while it was being read */
+      }
+    }
+  } catch {
+    /* no /proc: the stop falls back to the grace kill */
+  }
+  return undefined;
 }

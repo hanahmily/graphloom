@@ -12,7 +12,7 @@ afterAll(() => rmSync(root, { recursive: true, force: true }));
 describe.skipIf(unsupported !== undefined)("confinement when what the job needs lives under /tmp (#165)", () => {
   const run = (command: string, args: string[], cwd: string, writable: string[], readPaths: string[]) => {
     const launch = confineWorker({ command, args, env: { ...process.env }, cwd, scratchDir: path.join(root, "scratch"), writable, readPaths, keepUserState: false });
-    return spawnSync(launch.command, launch.args, { env: launch.env, cwd, encoding: "utf8" });
+    return spawnSync(launch.command, launch.args, { env: launch.env, cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe", "pipe"] });
   };
 
   it("still loads a module that lives under /tmp, and still keeps writes to the rest of /tmp out", () => {
@@ -53,7 +53,7 @@ describe.skipIf(unsupported !== undefined)("a job cannot use what it leaves behi
       const l = confineWorker({
         command: "sh", args: ["-c", script], env: { ...process.env }, cwd: wt, scratchDir: scratch, writable: [wt], keepUserState: false,
       });
-      return spawnSync(l.command, l.args, { env: l.env, cwd: wt, encoding: "utf8" });
+      return spawnSync(l.command, l.args, { env: l.env, cwd: wt, encoding: "utf8", stdio: ["ignore", "pipe", "pipe", "pipe"] });
     };
     // Job 1 swaps scratch/go, scratch/tmp and the Go env file for links to a directory outside the run.
     const first = launch(`rm -rf "${scratch}/go" "${scratch}/tmp" "${scratch}/npm" && ln -s "${outside}" "${scratch}/go" && ln -s "${outside}" "${scratch}/tmp" && ln -s "${outside}/stolen" "${scratch}/npm"`);
