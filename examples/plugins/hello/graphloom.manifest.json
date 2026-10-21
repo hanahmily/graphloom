@@ -15,12 +15,12 @@
     "vitest": "^3.0.9"
   },
   "digests": {
-    "sourceTree": "0e906d11d6e72d8c3b39a510664f8acbe025958fccb9aeef04d9ff205023d7b7",
+    "sourceTree": "be946714f9f6d7ab02bce5bc9365e60efa3d049d7203058a30420e657eb5d28d",
     "packageLock": "b8602594cf71784eff3f42f6a35e1716f8d1697dea86a7eda497d71ed97e5b87",
     "files": {
       "package.json": "b1093f184d87e3085f79e2ba6ac3bf388a915442211b513119110fb598eca2fe",
       "package-lock.json": "b8602594cf71784eff3f42f6a35e1716f8d1697dea86a7eda497d71ed97e5b87",
-      "tsconfig.json": "6c095d082835cbe84c047862b0f6d42fb292b310be8e5f2b58c009def9407d69",
+      "tsconfig.json": "d166142bd5d917d1eb7d3011cf6423c652f30e2989881deec6147a997bf41597",
       "src/constants.ts": "be9ca3e1047f5613f4c3a580d73bbe9aadf7a7eb8c3f0fff56a31ffc3267a98b",
       "src/graph.ts": "3c5f29ac237b9af07e1951c9d6991a49e8c44111c9d06cfd14f4769ccfae3e1e",
       "src/index.ts": "73323338d0a5be46de553f5bbd0bd9aa902b4599e4cc911138994e00af68038a",
