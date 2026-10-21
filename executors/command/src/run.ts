@@ -223,15 +223,10 @@ export function commandHostEffect(input: CommandInput, scope: ExecutorScope): st
     target !== undefined && outside(unquote(target)) ? `\`${program}\` changes ${unquote(target)}, ${OUTSIDE_SCOPE}` : undefined;
 
   /** One simple command: tokens with no separator among them. */
-  const simple = (words: string[], shown: string): string | undefined => {
-    const tokens: string[] = [];
-    for (let i = 0; i < words.length; i += 1) {
-      if (words[i] === ">" || words[i] === ">>") {
-        if (words[i + 1] !== undefined && outside(unquote(words[i + 1]!))) return `output redirected to ${unquote(words[i + 1]!)}, ${OUTSIDE_SCOPE}`;
-        i += 1;
-      } else {
-        tokens.push(words[i]!);
-      }
+  const simple = (given: string[], redirects: string[], shown: string): string | undefined => {
+    const tokens = [...given];
+    for (const target of redirects) {
+      if (outside(target)) return `output redirected to ${target}, ${OUTSIDE_SCOPE}`;
     }
     while (tokens.length > 0 && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[0]!)) tokens.shift();
     if (tokens.length === 0) return undefined;
@@ -269,28 +264,68 @@ export function commandHostEffect(input: CommandInput, scope: ExecutorScope): st
     return undefined;
   };
 
-  const scanShell = (script: string): string | undefined => {
-    const padded = script.replace(/(&&|\|\||[;&|\n])/g, " $1 ").replace(/(>>?)/g, " $1 ");
+  /**
+   * The simple commands of a shell script, with quoting respected: words, and the
+   * targets of `>` and `>>`, split at `;`, `&`, `|` and newlines. Not a full shell
+   * parser (no expansions, heredocs or subshells), only enough to find commands and redirects.
+   */
+  const shellCommands = (script: string): Array<{ words: string[]; redirects: string[] }> => {
+    const commands: Array<{ words: string[]; redirects: string[] }> = [];
     let words: string[] = [];
-    for (const word of [...padded.split(/\s+/).filter(Boolean), ";"]) {
-      if (/^(&&|\|\||[;&|])$/.test(word)) {
-        const found = simple(words, script.slice(0, 120));
-        if (found !== undefined) return found;
-        words = [];
+    let redirects: string[] = [];
+    let word: string | undefined;
+    let redirecting = false;
+    const endWord = () => {
+      if (word === undefined) return;
+      if (redirecting) redirects.push(word);
+      else words.push(word);
+      redirecting = false;
+      word = undefined;
+    };
+    const endCommand = () => {
+      endWord();
+      redirecting = false;
+      if (words.length > 0 || redirects.length > 0) commands.push({ words, redirects });
+      words = [];
+      redirects = [];
+    };
+    for (let i = 0; i < script.length; i += 1) {
+      const c = script[i]!;
+      if (c === "'" || c === '"') {
+        const close = script.indexOf(c, i + 1);
+        const end = close < 0 ? script.length : close;
+        word = (word ?? "") + script.slice(i + 1, end);
+        i = end;
+      } else if (c === "\\" && i + 1 < script.length) {
+        word = (word ?? "") + script[i + 1]!;
+        i += 1;
+      } else if (/\s/.test(c) && c !== "\n") {
+        endWord();
+      } else if (c === ">") {
+        endWord();
+        if (script[i + 1] === ">") i += 1;
+        redirecting = true;
+      } else if (c === ";" || c === "&" || c === "|" || c === "\n") {
+        endCommand();
       } else {
-        words.push(word);
+        word = (word ?? "") + c;
       }
     }
-    return undefined;
+    endCommand();
+    return commands;
   };
 
   for (const spec of input.commands) {
-    const direct = simple(spec.argv, spec.argv.join(" ").slice(0, 120));
+    // Redirection exists only in a shell script: in a plain argv `>` is just an argument.
+    const direct = simple(spec.argv, [], spec.argv.join(" ").slice(0, 120));
     if (direct !== undefined) return direct;
     const flag = spec.argv.indexOf("-c");
     if (SHELLS.has(path.basename(spec.argv[0]!)) && flag > 0 && spec.argv[flag + 1] !== undefined) {
-      const inner = scanShell(spec.argv[flag + 1]!);
-      if (inner !== undefined) return inner;
+      const script = spec.argv[flag + 1]!;
+      for (const command of shellCommands(script)) {
+        const inner = simple(command.words, command.redirects, script.slice(0, 120));
+        if (inner !== undefined) return inner;
+      }
     }
   }
   return undefined;

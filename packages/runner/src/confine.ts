@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync } from "node:fs";
 import path from "node:path";
 
 /** Run-scoped locations a confined job's user-level state is redirected to, under its scratch directory. */
@@ -94,7 +94,7 @@ export function confineWorker(options: {
   if (missing.length > 0) throw new Error(`confined job needs writable paths that do not exist: ${missing.join(", ")}`);
   // A private /tmp hides everything under it but the writable paths rebound below, so it is
   // used only when nothing the job reads lives there; otherwise /tmp stays read-only.
-  const needed = [...(options.readPaths ?? []), ...options.writable.flatMap(sharedGitDir), options.cwd];
+  const needed = [...(options.readPaths ?? []), options.cwd];
   const privateTmp = !needed.some(underTmp);
   return {
     command: "bwrap",
@@ -116,17 +116,4 @@ export function confineWorker(options: {
 function underTmp(p: string): boolean {
   const abs = path.resolve(p);
   return abs === "/tmp" || abs.startsWith("/tmp/");
-}
-
-/** The common git directory a linked worktree at `dir` shares with its repository, which the job reads. */
-function sharedGitDir(dir: string): string[] {
-  try {
-    const pointer = /^gitdir:\s*(.+)$/m.exec(readFileSync(path.join(dir, ".git"), "utf8"));
-    if (pointer?.[1] === undefined) return [];
-    const admin = path.resolve(dir, pointer[1].trim());
-    const common = readFileSync(path.join(admin, "commondir"), "utf8").trim();
-    return [path.resolve(admin, common)];
-  } catch {
-    return [];
-  }
 }

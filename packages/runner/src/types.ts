@@ -32,6 +32,8 @@ export interface JobConfinement {
   scratchDir: string;
   /** Other paths the job may write, e.g. its worktree. */
   writablePaths: readonly string[];
+  /** Paths outside `writablePaths` the job still reads, such as a worktree's shared repository directory. */
+  readPaths?: readonly string[];
 }
 
 export interface JobContext {

@@ -288,6 +288,8 @@ describe("command host effect (#165)", () => {
     expect(effect("mv", "/runs/w/a", "/var/a")).toContain("/var/a");
     expect(effect("cp", "-t", "/etc", "/runs/w/a")).toContain("/etc");
     expect(effect("sh", "-c", "echo x > /etc/motd")).toContain("/etc/motd");
+    expect(effect("sh", "-c", "echo x >>/etc/motd")).toContain("/etc/motd");
+    expect(effect("sh", "-c", "echo '>' && echo x > '/etc/quoted'")).toContain("/etc/quoted");
     expect(effect("bash", "-c", "cd /runs/w && true; rm -rf /var/cache/x")).toContain("/var/cache/x");
   });
 
@@ -305,6 +307,11 @@ describe("command host effect (#165)", () => {
     expect(effect("cat", "/tmp/rm", "/etc/hosts")).toBeUndefined();
     expect(effect("sh", "-c", "cat /etc/hosts | grep x > /runs/w/out; ls /var")).toBeUndefined();
     expect(effect("sh", "-c", "cp /etc/hosts /runs/w/hosts && grep -q rm /etc/hosts")).toBeUndefined();
+    // `>` is a literal argument in a plain argv, and stays literal inside quotes in a script.
+    expect(effect("echo", ">", "/etc/hosts")).toBeUndefined();
+    expect(effect("echo", ">>", "/etc/hosts")).toBeUndefined();
+    expect(effect("sh", "-c", "echo '> /etc/hosts' \"a > /etc/b\"")).toBeUndefined();
+    expect(effect("sh", "-c", "echo hi >/runs/w/out 2>&1")).toBeUndefined();
     expect(effect("sh", "-c", "echo x > /runs/state/scratch/out")).toBeUndefined();
   });
 });

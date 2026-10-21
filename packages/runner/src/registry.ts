@@ -562,7 +562,7 @@ export function createChildExecutorRunner(
             ...(ctx.session !== undefined ? [ctx.session.dir] : []),
             ...ownStateDirs(),
           ],
-          readPaths: [process.execPath, workerModule, entry, ...(sourceRoot !== undefined ? [sourceRoot] : []), ...(override !== undefined ? [override.root] : []), cwd],
+          readPaths: [...(ctx.confinement.readPaths ?? []), process.execPath, workerModule, entry, ...(sourceRoot !== undefined ? [sourceRoot] : []), ...(override !== undefined ? [override.root] : []), cwd],
           keepUserState: options.ownState !== undefined,
           });
         } catch (err) {

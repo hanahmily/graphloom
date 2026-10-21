@@ -1342,8 +1342,9 @@ describe("supervisor jobs stay inside the run's scope (#165)", () => {
     temps.push(dir);
     return dir;
   };
-  const supervised = async (taskExtra: string, jobs: unknown[], runId: string) => {
+  const supervised = async (taskExtra: string, jobsOf: unknown[] | ((env: { taskPath: string }) => unknown[]), runId: string) => {
     const env = await makeEnv(`${taskExtra}budgets:\n  decisions: 20\n`);
+    const jobs = typeof jobsOf === "function" ? jobsOf(env) : jobsOf;
     const rejections: Array<string | undefined> = [];
     const decisions = jobs.map((job) => (input: { rejection?: { reason: string } }) => {
       rejections.push(input.rejection?.reason);
@@ -1468,6 +1469,41 @@ describe("supervisor jobs stay inside the run's scope (#165)", () => {
     const inspected = await createController().inspect(report.stateDir);
     expect(inspected.hostChanges).toHaveLength(1);
   });
+  it("does not follow a rewritten worktree .git pointer to make the source repository writable", async () => {
+    let victim = "";
+    const jobs = (env: { taskPath: string }) => {
+      const repoGit = path.join(path.dirname(env.taskPath), "test-repo", ".git");
+      victim = path.join(repoGit, "pwned");
+      const node = (id: string, script: string) => ({
+        stageId: "write",
+        kind: "command" as const,
+        purpose: "work" as const,
+        instruction: id,
+        writeScope: ["unused.txt"],
+        executor: { id: "graphloom.command/run" },
+        input: { commands: [{ id, argv: [process.execPath, "-e", script] }] },
+      });
+      return [
+        // The job may rewrite its own worktree's pointer (the worktree is writable); it keeps the original in scratch.
+        node(
+          "repoint",
+          `const fs=require("fs");const p=".git";fs.writeFileSync(process.env.TMPDIR+"/orig",fs.readFileSync(p));fs.writeFileSync(p,"gitdir: ${repoGit}\\n")`,
+        ),
+        // The next confined job must not get the new target as a writable mount; it also puts the pointer back.
+        node(
+          "probe",
+          `const fs=require("fs");let r="denied";try{fs.writeFileSync(${JSON.stringify(victim)},"x");r="wrote"}catch{};fs.writeFileSync(".git",fs.readFileSync(process.env.TMPDIR+"/orig"));console.log(r)`,
+        ),
+      ];
+    };
+    const { report, state } = await supervised("", jobs, "host-scope-gitdir");
+    expect(report.status, report.blocker).toBe("succeeded");
+    const outcomes = state.evidence.flatMap((e) => (e.kind === "command" ? [(e.payload as { command: { exitCode: number | null; stdoutTail: string } }).command] : []));
+    expect(outcomes.map((o) => o.exitCode)).toEqual([0, 0]);
+    expect(outcomes[1]?.stdoutTail.trim()).toBe("denied");
+    expect(existsSync(victim)).toBe(false);
+  });
+
 });
 
 describe("a confined parent's tool calls (#165)", () => {

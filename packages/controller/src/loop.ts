@@ -1,6 +1,8 @@
+import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readFile } from "node:fs/promises";
+import { mkdir, readFile, realpath } from "node:fs/promises";
 import path from "node:path";
+import { promisify } from "node:util";
 import type {
   CaseFinding,
   CaseFindingOutcome,
@@ -2431,6 +2433,8 @@ export function supervisorAdmissionRefusal(
   }
 }
 
+const execFileAsync = promisify(execFile);
+
 /** Run-scoped temp and cache directory every confined job of the run shares. */
 function scratchDirOf(state: DurableRunState): string {
   return path.join(state.stateDir, "scratch");
@@ -2443,13 +2447,27 @@ function scratchDirOf(state: DurableRunState): string {
  */
 async function jobConfinement(state: DurableRunState): Promise<JobConfinement> {
   const writablePaths = [state.worktreePath];
+  const dirs = await worktreeGitDirs(state.intake.repoPath, state.worktreePath);
+  if (dirs !== undefined) writablePaths.push(dirs.admin);
+  return { scratchDir: scratchDirOf(state), writablePaths, ...(dirs !== undefined ? { readPaths: [dirs.common] } : {}) };
+}
+
+/**
+ * The administrative directory of the run's linked worktree, derived from the
+ * source repository and the worktree path the controller chose, never from the
+ * worktree's own `.git` file, which a job can rewrite to point anywhere. It
+ * must be `<commonDir>/worktrees/<name>` and name this worktree back.
+ */
+async function worktreeGitDirs(repoPath: string, worktreePath: string): Promise<{ admin: string; common: string } | undefined> {
   try {
-    const pointer = /^gitdir:\s*(.+)$/m.exec(await readFile(path.join(state.worktreePath, ".git"), "utf8"));
-    if (pointer?.[1] !== undefined) writablePaths.push(path.resolve(state.worktreePath, pointer[1].trim()));
+    const { stdout } = await execFileAsync("git", ["rev-parse", "--git-common-dir"], { cwd: repoPath });
+    const common = await realpath(path.resolve(repoPath, stdout.trim()));
+    const admin = path.join(common, "worktrees", path.basename(worktreePath));
+    const owner = (await readFile(path.join(admin, "gitdir"), "utf8")).trim();
+    return (await realpath(owner)) === (await realpath(path.join(worktreePath, ".git"))) ? { admin, common } : undefined;
   } catch {
-    /* not a linked worktree: nothing beyond the worktree itself */
+    return undefined;
   }
-  return { scratchDir: scratchDirOf(state), writablePaths };
 }
 
 /**

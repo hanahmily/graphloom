@@ -36,7 +36,7 @@ describe.skipIf(unsupported !== undefined)("confinement when what the job needs 
     const wt = path.join(root, "wt");
     sh("worktree", "add", "-q", "-b", "run", wt);
     const adminLine = execFileSync("cat", [path.join(wt, ".git")], { encoding: "utf8" }).replace(/^gitdir:\s*/, "").trim();
-    const res = run("git", ["log", "--oneline", "-1"], wt, [wt, adminLine], []);
+    const res = run("git", ["log", "--oneline", "-1"], wt, [wt, adminLine], [path.join(repo, ".git")]);
     expect(res.status, res.stderr).toBe(0);
     expect(res.stdout).toContain("init");
   });
