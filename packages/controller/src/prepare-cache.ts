@@ -1,6 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import { chmod, constants as fsConstants, copyFile, lstat, mkdir, open, readFile, readdir, readlink, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
 import path from "node:path";
+import { promisify } from "node:util";
 import type { EnvironmentCommand } from "@graphloom/sdk";
 
 /**
@@ -16,6 +18,8 @@ import type { EnvironmentCommand } from "@graphloom/sdk";
  * checkout is checked with lstat and never followed through a symbolic link,
  * because a job (possibly confined, possibly not) controls that tree.
  */
+
+const execFileAsync = promisify(execFile);
 
 export function prepareCacheDir(stateDir: string): string {
   return path.join(stateDir, "prepare-cache");
@@ -209,24 +213,48 @@ function entryDir(stateDir: string, id: string, key: string): string {
 }
 
 /**
+ * Why `command`'s declared outputs cannot be cached faithfully in `root`, or
+ * undefined: a symbolic link hides part of what an output glob selects (its
+ * subtree is never entered, so it could be neither saved nor cleared), or a
+ * declared output is a file the repository tracks.
+ */
+export async function outputsBlocked(root: string, command: { outputs: string[] }): Promise<string | undefined> {
+  const { files, symlinks } = await scanFiles(root, command.outputs);
+  const hidden = symlinks.find((link) => !files.includes(link));
+  if (hidden !== undefined) return `declared output ${hidden} is behind a symbolic link`;
+  if (files.length === 0) return undefined;
+  const { stdout } = await execFileAsync("git", ["ls-files", "-z"], { cwd: root, maxBuffer: 256 * 1024 * 1024 });
+  const tracked = new Set(stdout.split("\0"));
+  const hit = files.find((rel) => tracked.has(rel));
+  return hit !== undefined ? `declared output ${hit} is tracked by the repository` : undefined;
+}
+
+/**
  * Save the outputs of a successful run of `command` in `root` under `key`.
- * Returns false (and saves nothing) when an output is missing, is not a
- * regular file or a contained relative symbolic link, or the entry could not
- * be written; the command then simply runs again next time.
+ * Returns `saved: false` with a reason when nothing could be saved faithfully
+ * (no output, an output that is not a regular file or a contained relative
+ * symbolic link, a symbolic link hiding part of an output glob, a tracked
+ * output); the command then simply runs again next time.
  */
 export async function saveOutputs(args: {
   stateDir: string;
   root: string;
   command: EnvironmentCommand & { inputs: string[]; outputs: string[] };
   key: string;
-}): Promise<boolean> {
+}): Promise<{ saved: boolean; reason?: string }> {
   const { stateDir, root, command, key } = args;
   const final = entryDir(stateDir, command.id, key);
   const parent = path.dirname(final);
   const tmp = path.join(parent, `.tmp-${randomUUID()}`);
+  const skip = async (reason: string) => {
+    await rm(tmp, { recursive: true, force: true }).catch(() => undefined);
+    return { saved: false, reason };
+  };
   try {
+    const blocked = await outputsBlocked(root, command);
+    if (blocked !== undefined) return await skip(blocked);
     const files = await matchFiles(root, command.outputs);
-    if (files.length === 0) return false;
+    if (files.length === 0) return await skip("the command wrote none of its declared outputs");
     await mkdir(path.join(tmp, "files"), { recursive: true });
     const entries: Entry[] = [];
     for (const [i, rel] of files.entries()) {
@@ -235,14 +263,14 @@ export async function saveOutputs(args: {
       const stat = await lstat(abs);
       if (stat.isSymbolicLink()) {
         const target = await readlink(abs);
-        if (!linkStaysInside(rel, target)) return await discard(tmp);
+        if (!linkStaysInside(rel, target)) return await skip(`output ${rel} is a symbolic link that leaves the checkout`);
         entries.push({ path: rel, type: "link", target });
       } else if (stat.isFile()) {
         const content = await readNoFollow(abs);
         await writeFile(path.join(tmp, "files", String(i)), content, { mode: 0o600 });
         entries.push({ path: rel, type: "file", mode: stat.mode & 0o777, sha256: createHash("sha256").update(content).digest("hex") });
       } else {
-        return await discard(tmp);
+        return await skip(`output ${rel} is not a regular file`);
       }
     }
     const manifest: Manifest = { version: 1, entries };
@@ -254,10 +282,9 @@ export async function saveOutputs(args: {
       await rm(tmp, { recursive: true, force: true });
     }
     await prune(parent);
-    return true;
-  } catch {
-    await rm(tmp, { recursive: true, force: true }).catch(() => undefined);
-    return false;
+    return { saved: true };
+  } catch (err) {
+    return await skip(`could not save: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
 
@@ -305,6 +332,12 @@ export async function restoreOutputs(args: { stateDir: string; root: string; com
       } else if (entry.type !== "link" || !linkStaysInside(entry.path, entry.target)) {
         throw new Error("bad entry");
       }
+    }
+    // Leave exactly what a real run would: clear whatever already matches the declared outputs first.
+    const existing = await scanFiles(root, command.outputs ?? []);
+    for (const rel of existing.files) {
+      assertSafeRel(rel);
+      await rm(path.join(root, rel), { force: true });
     }
     for (const [i, entry] of manifest.entries.entries()) {
       if (await hasSymlinkParent(root, entry.path)) throw new Error(`${entry.path} is under a symbolic link`);

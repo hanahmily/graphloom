@@ -7,7 +7,7 @@ import { promisify } from "node:util";
 import type { CheckoutSpec, EnvironmentCommand, JobSpec } from "@graphloom/sdk";
 import { writeScopeAllows } from "@graphloom/sdk";
 import type { ExecutorSourceOverride, JobEvidenceItem, JobResult, Runner } from "@graphloom/runner";
-import { cacheKey, commandSpec, dropEntry, isCacheable, restoreOutputs, saveOutputs } from "./prepare-cache.js";
+import { cacheKey, commandSpec, dropEntry, isCacheable, outputsBlocked, restoreOutputs, saveOutputs } from "./prepare-cache.js";
 import { candidateChange } from "./worktree.js";
 
 const execFileAsync = promisify(execFile);
@@ -206,7 +206,9 @@ export async function runInCheckout(args: {
         );
         if (failures.length > 0) return;
         for (const entry of saves) {
-          if (await saveOutputs({ stateDir: args.stateDir, root: dir, command: entry.command, key: entry.key })) saved.push({ id: entry.command.id, key: entry.key });
+          const outcome = await saveOutputs({ stateDir: args.stateDir, root: dir, command: entry.command, key: entry.key });
+          if (outcome.saved) saved.push({ id: entry.command.id, key: entry.key });
+          else collected.push({ kind: "other", payload: { cache: { bypassed: entry.command.id, reason: `not saved: ${outcome.reason ?? "unknown"}` } } });
         }
       };
       for (const command of setup) {
@@ -217,6 +219,12 @@ export async function runInCheckout(args: {
         }
         await flush();
         if (failures.length > 0 || mismatch !== undefined) break;
+        const blocked = await outputsBlocked(dir, command).catch((err: unknown) => `outputs unreadable: ${err instanceof Error ? err.message : String(err)}`);
+        if (blocked !== undefined) {
+          collected.push({ kind: "other", payload: { cache: { bypassed: command.id, reason: blocked } } });
+          pending.push(command);
+          continue;
+        }
         const keyed = await cacheKey(dir, command).catch((err: unknown) => ({ bypass: `inputs unreadable: ${err instanceof Error ? err.message : String(err)}` }));
         if ("bypass" in keyed) {
           collected.push({ kind: "other", payload: { cache: { bypassed: command.id, reason: keyed.bypass } } });

@@ -398,7 +398,7 @@ describe("runInCheckout: prepare cache ordering and symlinks (#174)", () => {
       });
     };
     const runs = async () => ((await readFile(counter, "utf8").catch(() => "")).match(/run/g) ?? []).length;
-    return { dir, counter, checkout, runs };
+    return { dir, counter, stateDir, checkout, runs };
   }
 
   it("processes prepare commands in declaration order: an uncached cleanup before a cached generator does not delete what was restored", async () => {
@@ -475,5 +475,58 @@ describe("runInCheckout: prepare cache ordering and symlinks (#174)", () => {
     expect(catOut(second.result.evidence ?? [])).toBe("one\nb\n");
     const reasons = (second.result.evidence ?? []).map((e) => (e.payload as { cache?: { reason?: string } }).cache?.reason);
     expect(reasons.find((r) => r !== undefined)).toMatch(/linked is a symbolic link/);
+  });
+  it("does not cache outputs when a symbolic-link directory hides part of an output glob", async () => {
+    const t = await repo();
+    await mkdir(path.join(t.dir, "real"));
+    await symlink("real", path.join(t.dir, "linked"));
+    const generate = {
+      id: "generate",
+      argv: ["sh", "-c", `echo run >> ${t.counter}; mkdir -p gen && cp in.txt gen/out.txt`],
+      inputs: ["in.txt"],
+      outputs: ["gen/out.txt", "linked/**"],
+    };
+    const first = await t.checkout([generate]);
+    const second = await t.checkout([generate]);
+    expect(first.result.status, first.result.summary).toBe("ok");
+    expect(second.result.status, second.result.summary).toBe("ok");
+    expect(await t.runs()).toBe(2);
+    expect(await readdir(path.join(t.stateDir, "prepare-cache")).catch(() => [])).toEqual([]);
+    const reasons = (second.result.evidence ?? []).map((e) => (e.payload as { cache?: { reason?: string } }).cache?.reason);
+    expect(reasons.find((r) => r !== undefined)).toMatch(/linked is behind a symbolic link/);
+  });
+
+  it("leaves exactly the snapshot on a hit: a stale file matching an output glob is removed", async () => {
+    const t = await repo();
+    const listing = `${t.counter}.ls`;
+    cleanup.push(listing);
+    const generate = {
+      id: "generate",
+      argv: ["sh", "-c", `echo run >> ${t.counter}; mkdir -p gen && cp in.txt gen/out.txt`],
+      inputs: ["in.txt"],
+      outputs: ["gen/**"],
+    };
+    const stale = { id: "stale", argv: ["sh", "-c", "mkdir -p gen && echo old > gen/stale.txt"] };
+    const list = { id: "list", argv: ["sh", "-c", `ls gen >> ${listing}`] };
+    await t.checkout([generate]);
+    const second = await t.checkout([stale, generate, list]);
+    expect(second.result.status, second.result.summary).toBe("ok");
+    expect(await t.runs()).toBe(1);
+    expect((await readFile(listing, "utf8")).trim()).toBe("out.txt");
+  });
+
+  it("treats a declared output that the repository tracks as uncacheable", async () => {
+    const t = await repo();
+    const generate = {
+      id: "generate",
+      argv: ["sh", "-c", `echo run >> ${t.counter}; mkdir -p gen && cp in.txt gen/out.txt`],
+      inputs: ["in.txt"],
+      outputs: ["in.txt", "gen/**"],
+    };
+    await t.checkout([generate]);
+    const second = await t.checkout([generate]);
+    expect(await t.runs()).toBe(2);
+    const reasons = (second.result.evidence ?? []).map((e) => (e.payload as { cache?: { reason?: string } }).cache?.reason);
+    expect(reasons.find((r) => r !== undefined)).toMatch(/in\.txt is tracked/);
   });
 });
