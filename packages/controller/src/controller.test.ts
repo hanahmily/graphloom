@@ -428,6 +428,40 @@ describe("release scenarios (#60)", () => {
     return paused;
   }
 
+  it("does not carry the previous stop's reason and blocker on a resumed running run (#166)", async () => {
+    const env = await makeEnv();
+    const paused = await pausedRun(env, "stale-stop-reason");
+    expect(await loadRunState(paused.stateDir)).toMatchObject({ status: "stopped", stopReason: "paused", blocker: "test pause" });
+
+    let during: Awaited<ReturnType<typeof loadRunState>> | undefined;
+    let inspectedDuring: Awaited<ReturnType<ReturnType<typeof createController>["inspect"]>> | undefined;
+    const resumed = await createController().resume({
+      runRef: paused.stateDir,
+      plugin: createScriptedGraph({ definition, advances: [writeJob, stop({ reason: "paused again", blocker: "second pause" }, "pause")] }),
+      runner: createScriptedRunner({
+        jobs: [
+          async (job, ctx) => {
+            // The run is running here, and its saved state is what stats and inspect read.
+            during = await loadRunState(paused.stateDir);
+            inspectedDuring = await createController().inspect(paused.stateDir);
+            return writeGreeting(job, ctx);
+          },
+        ],
+      }),
+      validators,
+    });
+    expect(during?.status).toBe("running");
+    expect(during).not.toHaveProperty("stopReason");
+    expect(during).not.toHaveProperty("blocker");
+    expect(inspectedDuring).toMatchObject({ status: "running" });
+    expect(inspectedDuring).not.toHaveProperty("stopReason");
+    expect(inspectedDuring).not.toHaveProperty("blocker");
+    // The previous stop stays recorded as history.
+    expect(during?.lastResume).toMatchObject({ previousStopReason: "paused" });
+    // A new stop shows its own reason.
+    expect(resumed).toMatchObject({ status: "stopped", stopReason: "paused again", blocker: "second pause" });
+  });
+
   it("stops resume when the run's worktree is gone", async () => {
     const env = await makeEnv();
     const paused = await pausedRun(env, "lost-worktree");

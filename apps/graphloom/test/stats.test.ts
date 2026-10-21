@@ -150,6 +150,58 @@ describe("graphloom stats on recorded runs (#150)", () => {
   }, 60_000);
 });
 
+describe("graphloom stats and inspect on a resumed run (#166)", () => {
+  const stoppedState = async (): Promise<DurableRunState> => ({
+    ...(await loadRunState(path.join(fixtures, "395ec998-6e4"))),
+    status: "stopped",
+    stopReason: "executor pin mismatch",
+    blocker: "pinned executor claude changed",
+  });
+
+  it("shows a stopped run's reason in the table and JSON", async () => {
+    const stats = runStats(await stoppedState());
+    expect(stats.stopReason).toBe("executor pin mismatch");
+    expect(formatRunStats(stats)).toContain("stopped (executor pin mismatch)");
+    expect(JSON.parse(JSON.stringify(stats))).toMatchObject({ stopReason: "executor pin mismatch" });
+  });
+
+  it("shows no previous stop reason as current once the run is running", async () => {
+    // A resume now clears the reason; a state saved before that still carries it.
+    const stats = runStats({ ...(await stoppedState()), status: "running" });
+    expect(stats).not.toHaveProperty("stopReason");
+    expect(JSON.parse(JSON.stringify(stats))).not.toHaveProperty("stopReason");
+    const text = formatRunStats(stats);
+    expect(text).toMatch(/^run 395ec998-6e4 .* running$/m);
+    expect(text).not.toContain("executor pin mismatch");
+  });
+
+  it("inspect shows the reason for a stopped run and none for a running one", async () => {
+    const env = await makeCliEnv(cleanups);
+    await writeFile(path.join(env.dir, "task.yaml"), `graph: hello\nrepo: ./test-repo\nrequest: "Write the greeting."\n`);
+    const report = await createController().run({
+      taskPath: path.join(env.dir, "task.yaml"),
+      plugin: createScriptedGraph({ definition: helloDefinition, advances: completes }),
+      validators,
+      runner: createScriptedRunner({ jobs: [agent, agent] }),
+      stateRoot: env.stateRoot,
+      runId: "inspect-stale",
+    });
+    const dir = report.stateDir;
+    const base = await loadRunState(dir);
+    const write = async (state: DurableRunState) => writeFile(path.join(dir, "state.json"), JSON.stringify(state));
+    const inspect = async () => JSON.parse((await execFileAsync(process.execPath, [cli, "inspect", dir])).stdout) as Record<string, unknown>;
+
+    const stopped: DurableRunState = { ...base, status: "stopped", stopReason: "executor pin mismatch", blocker: "pinned executor claude changed" };
+    await write(stopped);
+    expect(await inspect()).toMatchObject({ status: "stopped", stopReason: "executor pin mismatch", blocker: "pinned executor claude changed" });
+    await write({ ...stopped, status: "running" });
+    const running = await inspect();
+    expect(running).toMatchObject({ status: "running" });
+    expect(running).not.toHaveProperty("stopReason");
+    expect(running).not.toHaveProperty("blocker");
+  });
+});
+
 const helloDefinition: GraphDefinition = {
   graphId: "hello",
   version: "0.1.0",
