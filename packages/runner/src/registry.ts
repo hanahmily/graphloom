@@ -20,7 +20,7 @@ import {
   type JobSpec,
   type ToolCallResult,
 } from "@graphloom/sdk";
-import { confineWorker, confinementUnsupported, findSandboxWorker } from "./confine.js";
+import { confineWorker, confinementUnsupported, findSandboxWorker, hasPrivateTmp, operatorGoSettings } from "./confine.js";
 import { digestExecutorSource } from "./digest.js";
 import { assertSandboxSupported, sandboxNodeArgs } from "./sandbox.js";
 import type { ExecutorDescriptor, ExecutorSourceOverride, JobContext, JobEvidenceItem, JobResult, Runner } from "./types.js";
@@ -496,11 +496,26 @@ export function createChildExecutorRunner(
       const source = await servingSource(pin, override);
       if ("refusal" in source) return source.refusal;
       const { entry } = source;
+      const checkCwd = options.cwd ?? path.dirname(entry);
+      // The same launch scope runJob will use: whether the job's /tmp is private decides what admission accepts there.
+      const operatorGo = confinement !== undefined ? operatorGoSettings(options.env ?? process.env) : undefined;
+      const privateTmp =
+        confinement !== undefined &&
+        hasPrivateTmp([
+          ...(confinement.readPaths ?? []),
+          process.execPath,
+          workerModule,
+          entry,
+          ...(sourceRoot !== undefined ? [sourceRoot] : []),
+          ...(override !== undefined ? [override.root] : []),
+          checkCwd,
+          ...(operatorGo !== undefined ? [operatorGo.modCache] : []),
+        ]);
       return checkInWorker({
         args: override !== undefined ? sandboxArgs(entry) : nodeArgs,
         workerModule,
         entry,
-        cwd: options.cwd ?? path.dirname(entry),
+        cwd: checkCwd,
         env: options.env ?? process.env,
         timeoutMs: Math.min(timeoutMs, CHECK_TIMEOUT_MS),
         request: {
@@ -510,7 +525,7 @@ export function createChildExecutorRunner(
           ...(pinned.effect !== undefined ? { effect: pinned.effect } : {}),
           input: pinned.input,
           ...(options.allowedEffects !== undefined ? { allowedEffects: [...options.allowedEffects] } : {}),
-          ...(confinement !== undefined ? { scope: { writablePaths: [...confinement.writablePaths, confinement.scratchDir] } } : {}),
+          ...(confinement !== undefined ? { scope: { writablePaths: [...confinement.writablePaths, confinement.scratchDir], privateTmp } } : {}),
         },
       });
     },
@@ -555,6 +570,7 @@ export function createChildExecutorRunner(
           for (const dir of [ctx.artifactDir, ...(ctx.session !== undefined ? [ctx.session.dir] : [])]) {
             if (!(await lstat(dir).catch(() => undefined))) await mkdir(dir, { recursive: true });
           }
+          const goSettings = operatorGoSettings(launch.env);
           launch = confineWorker({
             ...launch,
             cwd,
@@ -563,6 +579,7 @@ export function createChildExecutorRunner(
             trustedWritable: ownStateDirs(),
             readPaths: [...(ctx.confinement.readPaths ?? []), process.execPath, workerModule, entry, ...(sourceRoot !== undefined ? [sourceRoot] : []), ...(override !== undefined ? [override.root] : []), cwd],
             keepUserState: options.ownState !== undefined,
+            ...(goSettings !== undefined ? { operatorGo: goSettings } : {}),
           });
         } catch (err) {
           return failed(`executor ${pin.id} cannot be confined to the run, so the job was not run: ${err instanceof Error ? err.message : String(err)}`);

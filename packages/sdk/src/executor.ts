@@ -153,6 +153,8 @@ export interface ExecutorDefinition<TInput = unknown, TOutput = unknown> {
 /** The only places a confined job may write. */
 export interface ExecutorScope {
   writablePaths: readonly string[];
+  /** The launch mounts a private writable /tmp, so writes under /tmp stay inside the job. */
+  privateTmp?: boolean;
 }
 
 export interface DefineExecutorOptions<TInput, TOutput> {

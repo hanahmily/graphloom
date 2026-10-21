@@ -211,7 +211,7 @@ const OUTSIDE_SCOPE = "outside the run's worktree and run-scoped directories";
  * refusal early: the runner's confinement is what enforces the scope.
  */
 export function commandHostEffect(input: CommandInput, scope: ExecutorScope): string | undefined {
-  const roots = [...scope.writablePaths.map((p) => path.resolve(p)), "/dev"];
+  const roots = [...scope.writablePaths.map((p) => path.resolve(p)), "/dev", ...(scope.privateTmp === true ? ["/tmp"] : [])];
   const outside = (token: string): boolean => {
     if (token.startsWith("~")) return true;
     if (!token.startsWith("/")) return false;

@@ -194,7 +194,14 @@ the run's scope: the runner mounts the filesystem read-only except the job's
 worktree, its linked-worktree administrative directory, the run's scratch directory
 (`<stateDir>/scratch`), and a private `/tmp`, using bubblewrap, and points `TMPDIR`,
 `GOCACHE`, `GOTMPDIR`, `GOENV`, `npm_config_cache` and (for executors that keep no
-state of their own) `XDG_*` into the scratch directory. A runner that cannot confine
+state of their own) `XDG_*` into the scratch directory. When Go is installed, the job
+also gets a run-scoped `GOMODCACHE` in scratch that reads through the operator's cache
+without writing it: the runner reads the operator's effective `go env GOMODCACHE GOPROXY
+GOFLAGS` once, host-side, then sets `GOPROXY` to `file://<operator cache>/cache/download`
+followed by the operator's proxy list, and adds `-modcacherw` to `GOFLAGS`. The private
+`/tmp` is used only when nothing the job reads lives under `/tmp`; the runner passes that
+launch scope to admission, which accepts a write under `/tmp` only when it is private.
+A runner that cannot confine
 a job (no bubblewrap, or a non-Linux host) refuses it, in-turn and again at run time,
 rather than running it unconfined. This holds whatever `allowUnrestricted` says for
 the graph's own jobs. An agent executor's own login and history directories stay
