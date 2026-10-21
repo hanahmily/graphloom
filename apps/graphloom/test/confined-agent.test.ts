@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, symlink } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -54,5 +54,35 @@ describe.skipIf((await confinementUnsupported()) !== undefined)("a confined codi
     // The agent-run command saw the redirected values, not the operator's.
     expect(summary).toContain(`${path.join(scratch, "go", "cache")}|${path.join(scratch, "go", "env")}|${path.join(scratch, "go", "tmp")}|${path.join(scratch, "npm")}`);
     expect(existsSync(path.join(root, "agent-sessions"))).toBe(true);
+  });
+
+  it("refuses a session directory that is a link, instead of mounting what it points at", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "gl-confined-link-"));
+    dirs.push(root);
+    const worktree = path.join(root, "worktree");
+    const outside = path.join(root, "outside");
+    const sessionDir = path.join(root, "agent-sessions-op");
+    await mkdir(worktree, { recursive: true });
+    await mkdir(outside);
+    await symlink(outside, sessionDir);
+    const runner = createBuiltinExecutorRunner({
+      packages: [{ manifest: codingAgentExecutorPackage, ...codingAgentBinding({ harness }) }],
+      fallback: createScriptedRunner({ jobs: [] }),
+    });
+    const result = await runner.runJob(
+      { stageId: "s", kind: "agent", purpose: "diagnostic", instruction: "x", readOnly: true, executor: { id: CODING_AGENT_RUN_ID }, input: { assignment: "x" } },
+      {
+        runId: "r",
+        operationId: "op-1",
+        generation: 1,
+        worktreePath: worktree,
+        artifactDir: path.join(root, "artifacts"),
+        session: { dir: sessionDir },
+        confinement: { scratchDir: path.join(root, "scratch"), writablePaths: [worktree] },
+      },
+    );
+    expect(result.status).toBe("failed");
+    expect(result.summary).toMatch(/is a symbolic link/);
+    expect(await readdir(outside)).toEqual([]);
   });
 });

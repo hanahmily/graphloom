@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
@@ -39,5 +39,40 @@ describe.skipIf(unsupported !== undefined)("confinement when what the job needs 
     const res = run("git", ["log", "--oneline", "-1"], wt, [wt, adminLine], [path.join(repo, ".git")]);
     expect(res.status, res.stderr).toBe(0);
     expect(res.stdout).toContain("init");
+  });
+});
+
+describe.skipIf(unsupported !== undefined)("a job cannot use what it leaves behind to make the next launch write outside the run (#165)", () => {
+  it("replaces links a job planted in scratch instead of writing through them", () => {
+    const scratch = path.join(root, "scratch-escape");
+    const outside = path.join(root, "outside");
+    mkdirSync(outside);
+    const wt = path.join(root, "wt-escape");
+    mkdirSync(wt);
+    const launch = (script: string) => {
+      const l = confineWorker({
+        command: "sh", args: ["-c", script], env: { ...process.env }, cwd: wt, scratchDir: scratch, writable: [wt], keepUserState: false,
+      });
+      return spawnSync(l.command, l.args, { env: l.env, cwd: wt, encoding: "utf8" });
+    };
+    // Job 1 swaps scratch/go, scratch/tmp and the Go env file for links to a directory outside the run.
+    const first = launch(`rm -rf "${scratch}/go" "${scratch}/tmp" "${scratch}/npm" && ln -s "${outside}" "${scratch}/go" && ln -s "${outside}" "${scratch}/tmp" && ln -s "${outside}/stolen" "${scratch}/npm"`);
+    expect(first.status, first.stderr).toBe(0);
+    expect(lstatSync(path.join(scratch, "go")).isSymbolicLink()).toBe(true);
+    // Job 2's preparation runs on the host, outside the sandbox.
+    const second = launch("true");
+    expect(second.status, second.stderr).toBe(0);
+    expect(readdirSync(outside)).toEqual([]);
+    for (const rel of ["go", "tmp", "npm"]) expect(lstatSync(path.join(scratch, rel)).isSymbolicLink(), rel).toBe(false);
+  });
+
+  it("refuses a writable directory that is a link", () => {
+    const real = path.join(root, "real-dir");
+    const link = path.join(root, "linked-dir");
+    mkdirSync(real);
+    symlinkSync(real, link);
+    expect(() =>
+      confineWorker({ command: "true", args: [], env: {}, cwd: root, scratchDir: path.join(root, "scratch-link"), writable: [link], keepUserState: false }),
+    ).toThrow(/is a symbolic link/);
   });
 });

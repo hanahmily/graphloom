@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 /** Run-scoped locations a confined job's user-level state is redirected to, under its scratch directory. */
@@ -59,36 +59,45 @@ export function confineWorker(options: {
   cwd: string;
   scratchDir: string;
   writable: readonly string[];
+  /** Writable directories that are the executor's own state (an agent's login), which may legitimately be links. */
+  trustedWritable?: readonly string[];
   /** Paths the job reads that must stay visible (the worker and executor modules, the runtime). */
   readPaths?: readonly string[];
   keepUserState: boolean;
 }): ConfinedWorker {
   const scratch = path.resolve(options.scratchDir);
-  const dirs = [scratch];
   const env: NodeJS.ProcessEnv = { ...options.env };
-  const redirect = (name: string, dir: string) => {
-    env[name] = dir;
-    dirs.push(dir);
+  const subdirs: string[] = [];
+  const redirect = (name: string, rel: string) => {
+    env[name] = path.join(scratch, rel);
+    subdirs.push(rel);
   };
-  for (const [name, rel] of Object.entries(SCOPED_ENV_DIRS)) redirect(name, path.join(scratch, rel));
+  for (const [name, rel] of Object.entries(SCOPED_ENV_DIRS)) redirect(name, rel);
   if (!options.keepUserState) {
-    for (const [name, rel] of Object.entries(XDG_DIRS)) redirect(name, path.join(scratch, "xdg", rel));
+    for (const [name, rel] of Object.entries(XDG_DIRS)) redirect(name, path.join("xdg", rel));
   }
-  for (const dir of dirs) mkdirSync(dir, { recursive: true });
+  // Everything below `scratch` was writable by earlier jobs, so none of it is trusted: each component is
+  // checked without following links, and a link or file in the way is removed, never written through.
+  ensureRealDir(scratch);
+  for (const rel of [...subdirs, "go"]) ensureRealDirBelow(scratch, rel);
   // The operator's Go settings (GOPROXY and the like) carry over once; a later `go env -w` stays in the run.
   const goEnv = path.join(scratch, "go", "env");
   const operatorGoEnv =
     options.env.GOENV ?? path.join(options.env.XDG_CONFIG_HOME ?? path.join(options.env.HOME ?? "", ".config"), "go", "env");
-  if (!existsSync(goEnv) && operatorGoEnv !== "off" && existsSync(operatorGoEnv)) {
+  if (!lstatOrUndefined(goEnv) && operatorGoEnv !== "off" && existsSync(operatorGoEnv)) {
     try {
-      copyFileSync(operatorGoEnv, goEnv);
+      // `wx` never opens an existing path, and never follows a link at it.
+      writeFileSync(goEnv, readFileSync(operatorGoEnv), { flag: "wx" });
     } catch {
       /* unreadable settings: the run starts with Go's defaults */
     }
   }
   env.GOENV = goEnv;
 
-  const binds = [...new Set([...options.writable, ...dirs].map((p) => path.resolve(p)))];
+  for (const dir of options.writable) {
+    if (lstatSync(dir).isSymbolicLink()) throw new Error(`${dir} is a symbolic link; a confined job's writable path must be a real directory`);
+  }
+  const binds = [...new Set([...options.writable, ...(options.trustedWritable ?? []), scratch].map((p) => path.resolve(p)))];
   // A writable path that is missing would silently stay read-only, so the job fails later and obscurely.
   const missing = binds.filter((p) => !existsSync(p));
   if (missing.length > 0) throw new Error(`confined job needs writable paths that do not exist: ${missing.join(", ")}`);
@@ -116,4 +125,34 @@ export function confineWorker(options: {
 function underTmp(p: string): boolean {
   const abs = path.resolve(p);
   return abs === "/tmp" || abs.startsWith("/tmp/");
+}
+
+function lstatOrUndefined(p: string): ReturnType<typeof lstatSync> | undefined {
+  try {
+    return lstatSync(p);
+  } catch {
+    return undefined;
+  }
+}
+
+/** `dir` exists as a real directory (not a link), created if absent; its parents are the runner's own. */
+function ensureRealDir(dir: string): void {
+  const stat = lstatOrUndefined(dir);
+  if (stat === undefined) {
+    mkdirSync(dir, { recursive: true });
+    return;
+  }
+  if (stat.isSymbolicLink() || !stat.isDirectory()) throw new Error(`${dir} must be a real directory the runner owns`);
+}
+
+/** Make `rel` below `root` real directories one component at a time, replacing any link or file a job left in the way. */
+function ensureRealDirBelow(root: string, rel: string): void {
+  let current = root;
+  for (const part of rel.split(path.sep)) {
+    current = path.join(current, part);
+    const stat = lstatOrUndefined(current);
+    if (stat !== undefined && !stat.isDirectory()) unlinkSync(current);
+    else if (stat !== undefined) continue;
+    mkdirSync(current);
+  }
 }

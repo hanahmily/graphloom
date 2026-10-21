@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import os from "node:os";
-import { mkdir, realpath } from "node:fs/promises";
+import { lstat, mkdir, realpath } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -549,21 +549,20 @@ export function createChildExecutorRunner(
         if (unsupported !== undefined) {
           return failed(`executor ${pin.id} runs with the user's permissions and cannot be confined to the run, so the job was not run: ${unsupported}`);
         }
-        // Run-owned directories the job writes (a fresh agent session, the artifacts) must exist to be mounted.
-        for (const dir of [ctx.artifactDir, ...(ctx.session !== undefined ? [ctx.session.dir] : [])]) await mkdir(dir, { recursive: true });
         try {
+          // Run-owned directories the job writes (a fresh agent session, the artifacts) must exist to be mounted,
+          // and must be real directories: a link there would mount whatever it points at.
+          for (const dir of [ctx.artifactDir, ...(ctx.session !== undefined ? [ctx.session.dir] : [])]) {
+            if (!(await lstat(dir).catch(() => undefined))) await mkdir(dir, { recursive: true });
+          }
           launch = confineWorker({
-          ...launch,
-          cwd,
-          scratchDir: ctx.confinement.scratchDir,
-          writable: [
-            ...ctx.confinement.writablePaths,
-            ctx.artifactDir,
-            ...(ctx.session !== undefined ? [ctx.session.dir] : []),
-            ...ownStateDirs(),
-          ],
-          readPaths: [...(ctx.confinement.readPaths ?? []), process.execPath, workerModule, entry, ...(sourceRoot !== undefined ? [sourceRoot] : []), ...(override !== undefined ? [override.root] : []), cwd],
-          keepUserState: options.ownState !== undefined,
+            ...launch,
+            cwd,
+            scratchDir: ctx.confinement.scratchDir,
+            writable: [...ctx.confinement.writablePaths, ctx.artifactDir, ...(ctx.session !== undefined ? [ctx.session.dir] : [])],
+            trustedWritable: ownStateDirs(),
+            readPaths: [...(ctx.confinement.readPaths ?? []), process.execPath, workerModule, entry, ...(sourceRoot !== undefined ? [sourceRoot] : []), ...(override !== undefined ? [override.root] : []), cwd],
+            keepUserState: options.ownState !== undefined,
           });
         } catch (err) {
           return failed(`executor ${pin.id} cannot be confined to the run, so the job was not run: ${err instanceof Error ? err.message : String(err)}`);

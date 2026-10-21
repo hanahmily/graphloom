@@ -49,7 +49,7 @@ function catJob(path_: string): JobSpec & { checkout: { from: "candidate"; rever
   };
 }
 
-async function run(dir: string, pinnedHead: string, job: JobSpec & { checkout: { from: "candidate"; revertPatch?: string } }, repoPath = dir) {
+async function run(dir: string, pinnedHead: string, job: JobSpec & { checkout: { from: "candidate"; revertPatch?: string } }, repoPath = dir, scratchDir?: string) {
   const stateDir = await mkdtemp(path.join(os.tmpdir(), "graphloom-checkout-state-"));
   cleanup.push(stateDir);
   const runner = createBuiltinExecutorRunner({
@@ -74,6 +74,7 @@ async function run(dir: string, pinnedHead: string, job: JobSpec & { checkout: {
     prepare: [],
     runner,
     signal: new AbortController().signal,
+    ...(scratchDir !== undefined ? { scratchDir } : {}),
   });
 }
 
@@ -114,6 +115,16 @@ describe("runInCheckout: revertPatch", () => {
     const { result } = await run(dir, pinnedHead, catJob("calc.go"));
     expect(result.status).toBe("ok");
     expect(stdout(result.evidence ?? [])).toBe(CANDIDATE);
+  });
+
+  it("lets a confined checkout job read the source repository's objects, with the repository under /tmp (#165)", async () => {
+    const { dir, pinnedHead } = await candidateRepo();
+    const scratch = await mkdtemp(path.join(os.tmpdir(), "graphloom-checkout-scratch-"));
+    cleanup.push(scratch);
+    const job = { ...catJob("calc.go"), input: { commands: [{ id: "log", argv: ["git", "log", "--oneline"] }] } };
+    const { result } = await run(dir, pinnedHead, job, dir, scratch);
+    expect(result.status, result.summary).toBe("ok");
+    expect(stdout(result.evidence ?? [])).toContain("init");
   });
 
   it("clones the repository a run pinned as one of its subdirectories", async () => {
