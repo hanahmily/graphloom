@@ -12,8 +12,17 @@ import { runnerById, RUNNERS, type RegressionRunner, type RunnerId } from "./run
 /** Which Fix requirement a profile command's result counts toward. */
 export type CommandRequirement = "passes" | "builds";
 
+/**
+ * When a command runs among a candidate's checks. `cheap` commands run in the
+ * first job beside GREEN; `full` commands (the default) run in a second job
+ * only once every cheap command and GREEN passed on the same candidate.
+ */
+export type CommandTier = "cheap" | "full";
+
 export interface ProfileCommand extends EnvironmentCommand {
   requirement: CommandRequirement;
+  /** Default `full`. A profile declaring no `cheap` command runs every check in one job. */
+  tier?: CommandTier;
   /** The command as a requirement statement names it; default its argv joined by spaces. */
   label?: string;
   /** For a `passes` command, the clause the `passes` statement uses; default `<label> passes`. */
@@ -62,6 +71,13 @@ export interface ProfileData {
     conventions: string;
     /** What the implementer is told the controller checks; generated from the commands when absent. */
     checks?: string;
+    /**
+     * Cheap commands (shell text, as the implementer would type them) it runs
+     * before returning `ready`, besides the regression test, and reports in
+     * its record's `selfChecks`. The graph runs its own checks and does not
+     * trust the report.
+     */
+    selfCheck?: string[];
     /** How to fix a check that rewrote a tracked file, such as `make check reformats Go code; run make format`. */
     cleanCheckHint?: string;
   };
@@ -187,6 +203,7 @@ export function parseProfile(config: unknown): Profile {
     need(!ids.has(c.id as string), `commands[${i}].id ${JSON.stringify(c.id)} is repeated`);
     ids.add(c.id as string);
     for (const key of ["label", "statement", "summary"]) need(c[key] === undefined || isString(c[key]), `commands[${i}].${key} must be text`);
+    need(c.tier === undefined || c.tier === "cheap" || c.tier === "full", `commands[${i}].tier must be cheap or full`);
     need(c.statement === undefined || c.requirement === "passes", `commands[${i}].statement applies only to a passes command`);
   });
   need(isObject(p.testPaths) && isStrings(p.testPaths.suffixes) && (p.testPaths.suffixes as string[]).length > 0, "testPaths.suffixes must be a non-empty list");
@@ -204,6 +221,8 @@ export function parseProfile(config: unknown): Profile {
     const v = (p.implementation as Record<string, unknown>)[key];
     need(v === undefined || isString(v), `implementation.${key} must be text`);
   }
+  const selfCheck = (p.implementation as Record<string, unknown>).selfCheck;
+  need(selfCheck === undefined || (isStrings(selfCheck) && selfCheck.every((s) => s.trim() !== "")), "implementation.selfCheck must be a list of commands");
   need(isObject(p.review) && isString(p.review.language) && isString(p.review.testFiles) && isStrings(p.review.rules), "review needs language, testFiles and rules");
   need(isObject(p.pullRequest) && isStrings(p.pullRequest.checklist) && isStrings(p.pullRequest.footer), "pullRequest needs checklist and footer lists");
   const e2eNote = (p.pullRequest as Record<string, unknown>).e2eNote;
@@ -245,6 +264,14 @@ export function isTestPath(profile: Profile, path: string): boolean {
 export function commandsFor(profile: Profile, requirement: CommandRequirement): ProfileCommand[] {
   return profile.commands.filter((c) => c.requirement === requirement);
 }
+
+export const commandTier = (c: ProfileCommand): CommandTier => c.tier ?? "full";
+
+/** Whether the profile splits its checks into two jobs: only when some command is declared `cheap`. */
+export const isTiered = (profile: Profile): boolean => profile.commands.some((c) => commandTier(c) === "cheap");
+
+/** The profile's commands in one tier; an untiered profile has every command in `full`. */
+export const commandsInTier = (profile: Profile, tier: CommandTier): ProfileCommand[] => profile.commands.filter((c) => commandTier(c) === tier);
 
 export const commandLabel = (c: ProfileCommand): string => c.label ?? c.argv.join(" ");
 export const commandStatement = (c: ProfileCommand): string => c.statement ?? `${commandLabel(c)} passes`;

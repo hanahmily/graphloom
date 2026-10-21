@@ -108,18 +108,10 @@
         "pkgs=$(git diff --name-only --diff-filter=d HEAD~1 HEAD -- \"*.go\" | while read -r f; do d=$(dirname \"$f\"); [ -d \"$d\" ] && echo \"./$d\"; done | sort -u | tr \"\\n\" \" \"); [ -n \"$pkgs\" ] || { echo \"the change touches no Go package\" >&2; exit 1; }; exec make test-ci PKG=\"$pkgs\""
       ],
       "timeoutMs": 3600000,
+      "tier": "cheap",
       "requirement": "passes",
       "statement": "make test-ci passes for the changed Go packages",
       "summary": "`make test-ci` for the changed packages"
-    },
-    {
-      "id": "license-check",
-      "argv": [
-        "make",
-        "license-check"
-      ],
-      "timeoutMs": 600000,
-      "requirement": "builds"
     },
     {
       "id": "build",
@@ -137,6 +129,7 @@
         "lint"
       ],
       "timeoutMs": 1800000,
+      "tier": "cheap",
       "requirement": "builds"
     },
     {
@@ -146,7 +139,9 @@
         "check"
       ],
       "timeoutMs": 1800000,
-      "requirement": "builds"
+      "requirement": "builds",
+      "label": "make check (which includes license-check and check-format)",
+      "summary": "`make check`"
     }
   ],
   "testPaths": {
@@ -173,7 +168,11 @@
   },
   "implementation": {
     "conventions": "Use run.Go rather than raw goroutines, and follow the repository's conventions.",
-    "checks": "The controller checks your change in clean checkouts: the base commit with only your test files must fail the test by assertion; the full change must pass the test, `make test-ci` for the changed packages, and make license-check, build, lint and check. `make check` must leave no file changed, so run `make format` if you touch Go code.",
+    "checks": "The controller checks your change in clean checkouts: the base commit with only your test files must fail the test by assertion; the full change must pass the test, `make test-ci` for the changed packages, and make lint, build and check (`make check` includes license-check and check-format). The cheap checks (the test, `make test-ci` and `make lint`) run first and the build and check only when they pass. `make check` must leave no file changed, so run `make format` if you touch Go code.",
+    "selfCheck": [
+      "go vet $(git ls-files -m -o --exclude-standard -- '*.go' | xargs -r -n1 dirname | sort -u | sed 's|^|./|')",
+      "golangci-lint run $(git ls-files -m -o --exclude-standard -- '*.go' | xargs -r -n1 dirname | sort -u | sed 's|^|./|')"
+    ],
     "cleanCheckHint": "make check reformats Go code; run make format"
   },
   "review": {

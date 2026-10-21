@@ -48,12 +48,12 @@ The profile supplies, as data:
 | `issues` | Where issues live; the request names `owner/repo#N` | `apache/skywalking` | `hanahmily/graphloom` |
 | `environment` | The SDK `EnvironmentDeclaration`: checks, preparation, pinned files. Must include an `ocr` check that prints open-code-review's path | BanyanDB's checklist, `make generate`, `CONTRIBUTING.md` pinned | Node.js 22+, npm, flock, git, ocr, codex, claude; `npm ci --include=dev`, `npm run build`; nothing pinned |
 | `regression` | `runner` (a built-in, below) and `timeoutMs` | `go-test`, 30 min | `vitest`, 20 min |
-| `commands` | GREEN's further checks and the build checks, run in order in the committed candidate checkout. Each has `id`, `argv`, `timeoutMs`, `requirement` (`passes` or `builds`), and optional `label`, `statement` and `summary` wording | `test-ci` (passes); `license-check`, `build`, `lint`, `check` (builds) | `npm run typecheck`, `npm run build`, `npm test` (builds; the full suite takes about ten minutes, so 45 min) |
+| `commands` | GREEN's further checks and the build checks, run in order in the committed candidate checkout. Each has `id`, `argv`, `timeoutMs`, `requirement` (`passes` or `builds`), and optional `tier` (`cheap` or `full`, default `full`; once any command is `cheap`, GREEN and the cheap commands run first in one checkout job and the full commands run in a second job only after those passed on the same candidate digest, and Fix needs both) and optional `label`, `statement` and `summary` wording | `test-ci` (passes); `build`, `lint`, `check` (builds; `make check` already runs license-check); `test-ci` and `lint` are cheap | `npm run typecheck`, `npm run build`, `npm test` (builds; the full suite takes about ten minutes, so 45 min) |
 | `testPaths` | `suffixes`, and `directories` whose contents count as test files; RED applies only these | `_test.go`, `testdata/` | `.test.ts`, `test/`, `fixtures/` |
 | `protectedPaths` | Excluded from the write scope unless the record justifies one | `api/proto`, `go.mod`, `go.sum`, `.github` | `package-lock.json`, `.github`, `legacy` |
 | `changelog` | Optional `{ path, rule }`; absent means no `changelog-entry` requirement. The one rule, `first-release-section-entry`, needs a new list entry inside the first `## ` section | `CHANGES.md` | none: the repository keeps no changelog |
 | `planning` | `reach` (the reach question for the plan), optional `e2e` (what `needsE2E` means) and optional `notes` (guidance the planner and implementer both get) | Go lifecycle wording, Kind tests, no notes | TypeScript lifecycle wording, live-provider tests, [enhancement issues](#enhancement-issues) |
-| `implementation` | `conventions`, optional `checks` (what the implementer is told is checked; generated from the commands when absent) and `cleanCheckHint` | `run.Go`, `make format` | AGENTS.md rules; generated checks text |
+| `implementation` | `conventions`, optional `selfCheck` (cheap commands the implementer runs and reports in `selfChecks` before returning ready; the graph still runs its own checks), optional `checks` (what the implementer is told is checked; generated from the commands when absent) and `cleanCheckHint` | `run.Go`, `make format` | AGENTS.md rules; generated checks text |
 | `review` | `language`, `testFiles` and `rules`: the extra "what does the change break" rule | the Go rule | the same questions for TypeScript: resume, AbortSignal, rejected promises, locks, persisted state and wire formats, plugin notions in the controller |
 | `pullRequest` | `checklist` after the title, `footer` (`{issue}` becomes the reference), optional `e2eNote` | BanyanDB's template | a short checklist and `Fixes {issue}.` |
 | `harnesses` | Optional `implementer`, `reviewer`, `verifier`; the verifier must differ from the reviewer | Claude Code, Codex, Claude Code | same |
@@ -87,7 +87,10 @@ adds to the review and implementer prompts and to the pull request only
 through arguments the comparison leaves out. Since 0.5.0 the code review
 assignment differs on purpose: it [reviews every changed
 file](#every-changed-file-and-the-change-as-a-whole) and then the change as
-a whole; the comparison checks that this is the only difference.
+a whole; the comparison checks that this is the only difference. Since 0.8.0
+the banyandb profile also drops banyandb-fix's separate `license-check`
+command, which `make check` already runs, so the comparison removes that one
+command from banyandb-fix's side. banyandb-fix itself is unchanged.
 
 ### Regression runners
 

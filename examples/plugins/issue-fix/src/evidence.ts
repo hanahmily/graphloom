@@ -160,10 +160,23 @@ export function latestRevertFailure(evidence: EvidenceRecord[], digest: string |
   return undefined;
 }
 
-/** Runs from the same checkout job as `run` (same checkout commit and operation). */
+/**
+ * The latest run of `id` in the same checkout as `run`: the same candidate
+ * digest and checkout base. A profile's checks may run as more than one job
+ * (the cheap tier, then the full tier), so the job's operation does not
+ * identify them; the candidate does.
+ */
 export function sameCheckoutJob(evidence: EvidenceRecord[], run: CommandRun, id: string): CommandRun | undefined {
-  const op = producer(run.record)?.operationId;
-  return commandRuns(evidence, id).find((r) => producer(r.record)?.operationId === op && r.checkout?.commit === run.checkout?.commit);
+  return commandRuns(evidence, id)
+    .filter(
+      (r) =>
+        r.record.candidateDigest === run.record.candidateDigest &&
+        r.checkout?.base === run.checkout?.base &&
+        r.checkout?.from === run.checkout?.from &&
+        r.checkout?.reverted !== true &&
+        r.checkout?.phase === "run",
+    )
+    .at(-1);
 }
 
 export function succeeded(command: CommandOutcome): boolean {
