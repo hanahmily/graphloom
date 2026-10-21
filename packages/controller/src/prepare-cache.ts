@@ -332,6 +332,11 @@ export async function restoreOutputs(args: { stateDir: string; root: string; com
       } else if (entry.type !== "link" || !linkStaysInside(entry.path, entry.target)) {
         throw new Error("bad entry");
       }
+      // A destination that is now a directory (or a parent that is now a file) would need a
+      // recursive removal that can reach tracked files: treat the entry as a miss, before
+      // anything in the checkout is touched.
+      const st = await lstat(path.join(root, entry.path)).catch(() => undefined);
+      if (st?.isDirectory()) throw new Error(`${entry.path} is a directory in this checkout`);
     }
     // Leave exactly what a real run would: clear whatever already matches the declared outputs first.
     const existing = await scanFiles(root, command.outputs ?? []);
@@ -342,7 +347,7 @@ export async function restoreOutputs(args: { stateDir: string; root: string; com
     for (const [i, entry] of manifest.entries.entries()) {
       if (await hasSymlinkParent(root, entry.path)) throw new Error(`${entry.path} is under a symbolic link`);
       const dst = path.join(root, entry.path);
-      await rm(dst, { recursive: true, force: true });
+      await rm(dst, { force: true });
       await mkdir(path.dirname(dst), { recursive: true });
       if (entry.type === "link") {
         await symlink(entry.target, dst);

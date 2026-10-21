@@ -515,6 +515,25 @@ describe("runInCheckout: prepare cache ordering and symlinks (#174)", () => {
     expect((await readFile(listing, "utf8")).trim()).toBe("out.txt");
   });
 
+  it("treats a cached file whose destination is now a directory as a miss, and removes nothing under it", async () => {
+    const t = await repo();
+    const listing = `${t.counter}.ls`;
+    cleanup.push(listing);
+    const generate = {
+      id: "generate",
+      argv: ["sh", "-c", `echo run >> ${t.counter}; mkdir -p gen; [ -d gen/out ] || cp in.txt gen/out`],
+      inputs: ["in.txt"],
+      outputs: ["gen/out"],
+    };
+    const dir = { id: "dir", argv: ["sh", "-c", "mkdir -p gen/out && echo keep > gen/out/keep.txt"] };
+    const list = { id: "list", argv: ["sh", "-c", `ls gen/out >> ${listing}`] };
+    await t.checkout([generate]);
+    const second = await t.checkout([dir, generate, list]);
+    expect(second.result.status, second.result.summary).toBe("ok");
+    expect(await t.runs()).toBe(2);
+    expect((await readFile(listing, "utf8")).trim()).toBe("keep.txt");
+  });
+
   it("treats a declared output that the repository tracks as uncacheable", async () => {
     const t = await repo();
     const generate = {
