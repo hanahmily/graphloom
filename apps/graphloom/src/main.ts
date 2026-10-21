@@ -1,15 +1,17 @@
 #!/usr/bin/env node
 /**
- * GraphLoom CLI: run | inspect | stats | stop | resume | switch-model | delete | version
+ * GraphLoom CLI: run | inspect | stats | wait | stop | resume | switch-model | delete | version
  */
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
-import { createController } from "@graphloom/controller";
+import { createController, resolveStateDir } from "@graphloom/controller";
 import type { GraphRehearsal } from "@graphloom/sdk";
+import type { RunReport } from "@graphloom/controller";
 import { createCliRunner } from "./cli-runner.js";
 import { piRepairDeps, resolveBundlePath, resolveBundlePathForResume } from "./repair-config.js";
 import { check, probe, recordScenario, rehearse, replay } from "./rehearsal.js";
-import { requireRunnerConfig } from "./runner-config.js";
+import { requireRunnerConfig, type RunnerConfig } from "./runner-config.js";
+import { onceStopHook, parseDuration, waitForRun, type StopNotice } from "./notify.js";
 import { formatRunStats, loadRunStats } from "./stats.js";
 import {
   loadSupervisorConfig,
@@ -39,8 +41,10 @@ async function main(): Promise<void> {
     const taskPath = path.resolve(args[1] ?? "task.yaml");
     const stateRootFlag = flagValue(args, "--state-root");
     const stateRoot = stateRootFlag ? path.resolve(stateRootFlag) : undefined;
-    const runner = createCliRunner(await requireRunnerConfig());
+    const runnerConfig = await requireRunnerConfig();
+    const runner = createCliRunner(runnerConfig);
     const config = await loadSupervisorConfig();
+    const stopHook = armStopHook(args, runnerConfig);
     const report = await controller.run({
       taskPath,
       runner,
@@ -51,6 +55,7 @@ async function main(): Promise<void> {
     });
     console.log(JSON.stringify(report, null, 2));
     process.exitCode = report.status === "succeeded" ? 0 : 1;
+    await stopHook.fire(stopNotice(report));
     return;
   }
 
@@ -73,6 +78,30 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (cmd === "wait") {
+    const usage = "wait <stateDir|runId> [--state-root <dir>] [--timeout <dur>] [--json]";
+    const runRef = requireRunRef(args[1], usage);
+    const stateRootFlag = flagValue(args, "--state-root");
+    const stateRoot = stateRootFlag ? path.resolve(stateRootFlag) : undefined;
+    const timeout = flagValue(args, "--timeout");
+    const result = await waitForRun(runRef, {
+      ...(stateRoot !== undefined ? { stateRoot } : {}),
+      ...(timeout !== undefined ? { timeoutMs: parseDuration(timeout) } : {}),
+    });
+    if (result.outcome === "timeout") {
+      console.error(`timed out: run is still running (${result.stateDir})`);
+      process.exitCode = 2;
+      return;
+    }
+    const stats = await loadRunStats(result.stateDir);
+    console.log(args.includes("--json") ? JSON.stringify(stats, null, 2) : formatRunStats(stats));
+    if (result.outcome === "orphaned") {
+      console.error(`run is recorded as running but ${result.detail}; the controller died without recording a stop. \`graphloom resume\` takes it over.`);
+      process.exitCode = 3;
+    }
+    return;
+  }
+
   if (cmd === "stop") {
     const runRef = requireRunRef(args[1], "stop <stateDir|runId>");
     const stateRoot = flagValue(args, "--state-root");
@@ -85,10 +114,15 @@ async function main(): Promise<void> {
   }
 
   if (cmd === "resume") {
-    const runner = createCliRunner(await requireRunnerConfig());
-    const runRef = requireRunRef(args[1], "resume <stateDir|runId> [--state-root <dir>] [--update-plugin] [--update-executors]");
+    const runnerConfig = await requireRunnerConfig();
+    const runner = createCliRunner(runnerConfig);
+    const runRef = requireRunRef(args[1], "resume <stateDir|runId> [--state-root <dir>] [--update-plugin] [--update-executors] [--on-stop <command>]");
     const stateRoot = flagValue(args, "--state-root");
     const config = await loadSupervisorConfig();
+    const stopHook = armStopHook(args, runnerConfig, {
+      runId: path.basename(runRef),
+      stateDir: resolveStateDir(runRef, stateRoot ? path.resolve(stateRoot) : undefined).catch(() => ""),
+    });
     const report = await controller.resume({
       runRef,
       runner,
@@ -105,6 +139,7 @@ async function main(): Promise<void> {
     });
     console.log(JSON.stringify(report, null, 2));
     process.exitCode = report.status === "succeeded" ? 0 : 1;
+    await stopHook.fire(stopNotice(report));
     return;
   }
 
@@ -218,6 +253,52 @@ async function main(): Promise<void> {
   process.exitCode = 1;
 }
 
+interface CrashContext {
+  runId: string;
+  stateDir: Promise<string>;
+}
+
+let crashHook: { fire(notice: StopNotice): Promise<void> } | undefined;
+let crashContext: CrashContext | undefined;
+
+/** The hook for this `run`/`resume`: `--on-stop` wins over `notify.onStop`; also armed for a crash. */
+function armStopHook(args: string[], config: RunnerConfig, context?: CrashContext): { fire(notice: StopNotice): Promise<void> } {
+  const flag = flagValue(args, "--on-stop");
+  if (args.includes("--on-stop") && (flag === undefined || flag.startsWith("--") || flag.trim() === "")) {
+    throw new Error("--on-stop needs a command");
+  }
+  const hook = onceStopHook(flag ?? config.notify?.onStop, config.notify?.timeoutMs);
+  crashHook = hook;
+  crashContext = context;
+  return hook;
+}
+
+function stopNotice(report: RunReport): StopNotice {
+  return {
+    runId: report.runId,
+    status: report.status,
+    ...(report.stopReason !== undefined ? { stopReason: report.stopReason } : report.blocker !== undefined ? { stopReason: report.blocker } : {}),
+    ...(report.stopRetryable !== undefined ? { stopRetryable: report.stopRetryable } : {}),
+    stateDir: report.stateDir,
+    report,
+  };
+}
+
+/** Best effort: tell the on-stop hook the CLI died. Never throws. */
+async function notifyCrash(err: unknown): Promise<void> {
+  if (crashHook === undefined) return;
+  const message = err instanceof Error ? err.message : String(err);
+  const stateDir = (await crashContext?.stateDir.catch(() => "")) ?? "";
+  const runId = crashContext?.runId ?? "";
+  await crashHook.fire({
+    runId,
+    status: "crashed",
+    stopReason: message,
+    stateDir,
+    report: { runId, status: "crashed", stopReason: message, ...(stateDir ? { stateDir } : {}) },
+  });
+}
+
 /** Bare run IDs stay bare so --state-root is honored; path-like refs are resolved. */
 function requireRunRef(value: string | undefined, usage: string): string {
   if (!value) {
@@ -248,7 +329,7 @@ function printHelp(): void {
   console.log(`graphloom — TypeScript harness
 
 Usage:
-  graphloom run <task.yaml> [--state-root <dir>]
+  graphloom run <task.yaml> [--state-root <dir>] [--on-stop <command>]
   graphloom check <task.yaml>
   graphloom rehearse <task.yaml> [--scenario <name>] [--commands <stub|run>] [--offline] [--synthesized] [--adversarial] [--keep]
   graphloom rehearse --record-from <stateDir|runId> [--state-root <dir>] [--name <name>] [--out <path>]
@@ -256,8 +337,9 @@ Usage:
   graphloom probe <task.yaml> --contract <name> [--scenario <name>] [--commands <stub|run>] [--offline]
   graphloom inspect <stateDir|runId> [--state-root <dir>]
   graphloom stats <stateDir|runId> [--state-root <dir>] [--json]
+  graphloom wait <stateDir|runId> [--state-root <dir>] [--timeout <dur>] [--json]
   graphloom stop <stateDir|runId> [--state-root <dir>]
-  graphloom resume <stateDir|runId> [--state-root <dir>] [--update-plugin] [--update-executors]
+  graphloom resume <stateDir|runId> [--state-root <dir>] [--update-plugin] [--update-executors] [--on-stop <command>]
   graphloom switch-model <stateDir|runId> <provider/model> --reason <text> [--state-root <dir>]
   graphloom delete <stateDir|runId> [--state-root <dir>] [--force]
   graphloom version
@@ -290,6 +372,23 @@ Stats reports what a run used, per stage and in total: agent calls, jobs,
 budgets (used, left, the run's budget with operator raises, and intake's),
 generations, supervisor episodes and remedies. Runs saved before the usage
 ledger existed are estimated, and say so (docs/budgets.md).
+
+Notifications: run and resume --on-stop <command> (or "notify": { "onStop":
+"<command>", "timeoutMs": 60000 } in the runner config; the flag wins) run the
+command through sh -c once, when the run leaves running (succeeded, stopped or
+failed), or with status "crashed" when the CLI itself dies with an error. It
+gets GRAPHLOOM_RUN_ID, GRAPHLOOM_STATUS, GRAPHLOOM_STOP_REASON,
+GRAPHLOOM_STOP_RETRYABLE ("true", "false", or empty) and GRAPHLOOM_STATE_DIR in
+its environment and the report JSON on stdin; its stdout goes to stderr. It is
+killed after 60s. Its failure is logged to stderr and never changes the run
+or the exit code. A SIGKILLed or power-lost CLI cannot fire it.
+
+Wait blocks until the run's durable state is no longer running (it reads the
+state and the controller's owner claim, never the process table), then prints
+what stats prints. --timeout takes 90s, 10m, 2h (bare numbers are seconds).
+Exit 0: the run left running, whatever it became (read the status line). Exit
+2: timed out, still running. Exit 3: the state says running but its controller
+died without recording a stop (resume takes it over).
 
 Delete removes a stopped or finished run's worktree, graphloom/<runId> branch, and
 state directory. --force also discards uncommitted changes and branch commits.
@@ -330,7 +429,17 @@ Credentials come from Pi's agent dir or the provider's environment variable.
 `);
 }
 
+function crash(err: unknown): void {
+  console.error(err instanceof Error ? err.message : err);
+  process.exitCode = 1;
+  void notifyCrash(err).finally(() => process.exit(1));
+}
+
+process.on("uncaughtException", crash);
+process.on("unhandledRejection", crash);
+
 main().catch((err: unknown) => {
   console.error(err instanceof Error ? err.message : err);
   process.exitCode = 1;
+  return notifyCrash(err);
 });

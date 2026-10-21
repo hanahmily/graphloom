@@ -73,6 +73,30 @@ file mutations to the job scope and deny shell commands for read-only jobs;
 writer shell commands still require trust. See the
 [permission and cancellation design](docs/design-claude-live-mode.md).
 
+### Knowing when a run stops
+
+`graphloom run` and `graphloom resume` take `--on-stop <command>` (or set
+`"notify": { "onStop": "<command>", "timeoutMs": 60000 }` in the runner config;
+the flag wins). The command runs through `sh -c` once, when the run leaves
+`running` (`succeeded`, `stopped` or `failed`), or with status `crashed` when the
+CLI itself dies with an error (a SIGKILL or power loss cannot fire it). It gets
+`GRAPHLOOM_RUN_ID`, `GRAPHLOOM_STATUS`, `GRAPHLOOM_STOP_REASON`,
+`GRAPHLOOM_STOP_RETRYABLE` (`true`, `false`, or empty) and `GRAPHLOOM_STATE_DIR`
+in its environment and the report JSON on stdin, and is killed after 60 seconds.
+Its failure is logged to stderr and never changes the run or the exit code.
+
+```sh
+graphloom run task.yaml --on-stop 'notify-send "graphloom $GRAPHLOOM_RUN_ID: $GRAPHLOOM_STATUS"'
+```
+
+From another shell, `graphloom wait <stateDir|runId> [--state-root <dir>]
+[--timeout <dur>] [--json]` blocks until the run is no longer `running`, reading
+its durable state and owner claim rather than the process table, then prints what
+`graphloom stats` prints. Exit 0: the run left `running` (read its status line).
+Exit 2: `--timeout` (`90s`, `10m`, `2h`) elapsed first. Exit 3: the state says
+`running` but its controller died without recording a stop; `graphloom resume`
+takes it over.
+
 ## Agent-host mode (proposed)
 
 An existing coding-agent session can be the primary worker and supervisor, using
