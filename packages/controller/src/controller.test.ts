@@ -27,6 +27,7 @@ import {
   resolveUnderBase,
   tryAdmit,
 } from "./index.js";
+import { isClaimStale, readOwnerClaim } from "./owner.js";
 import { intakeTask, manifestRepairContract } from "./intake.js";
 import { readWorktreeFile, workspaceChangeManifest } from "./worktree.js";
 
@@ -434,6 +435,43 @@ describe("release scenarios (#60)", () => {
     expect(paused.status).toBe("stopped");
     return paused;
   }
+
+  it("claims the run before its state says running, on run and on resume, so a slow startup is not orphaned (#175)", async () => {
+    const env = await makeEnv();
+    let atCreated: { status: string; claimed: boolean; alive: boolean } | undefined;
+    const graph = (advances: Parameters<typeof createScriptedGraph>[0]["advances"]) => createScriptedGraph({ definition, advances });
+    const first = await createController().run({
+      taskPath: env.taskPath,
+      plugin: graph([writeJob, stop({ reason: "paused", blocker: "test pause" }, "pause")]),
+      runner: createScriptedRunner({ jobs: [writeGreeting] }),
+      validators,
+      stateRoot: env.stateRoot,
+      runId: "claim-before-running",
+      onRunCreated: async ({ runId, stateDir }) => {
+        expect(runId).toBe("claim-before-running");
+        const claim = await readOwnerClaim(stateDir);
+        atCreated = { status: (await loadRunState(stateDir)).status, claimed: claim !== undefined, alive: claim !== undefined && !isClaimStale(claim) };
+      },
+    });
+    expect(atCreated).toEqual({ status: "running", claimed: true, alive: true });
+    expect(await readOwnerClaim(first.stateDir)).toBeUndefined();
+
+    // Resume saves `running` before the loop starts; the supervisor is built in that window.
+    let atStartup: { status: string; alive: boolean } | undefined;
+    await createController().resume({
+      runRef: first.stateDir,
+      plugin: graph([writeJob, stop({ reason: "paused again", blocker: "second pause" }, "pause")]),
+      runner: createScriptedRunner({ jobs: [writeGreeting] }),
+      validators,
+      supervisorFactory: async () => {
+        const claim = await readOwnerClaim(first.stateDir);
+        atStartup = { status: (await loadRunState(first.stateDir)).status, alive: claim !== undefined && !isClaimStale(claim) };
+        return { decide: async () => { throw new Error("unused"); } } as never;
+      },
+    });
+    expect(atStartup).toEqual({ status: "running", alive: true });
+    expect(await readOwnerClaim(first.stateDir)).toBeUndefined();
+  });
 
   it("does not carry the previous stop's reason and blocker on a resumed running run (#166)", async () => {
     const env = await makeEnv();

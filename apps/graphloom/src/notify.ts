@@ -68,12 +68,22 @@ export async function runStopHook(
   }
 }
 
-/** Fires the hook at most once per process, whichever of the stop and crash paths gets there first. */
-export function onceStopHook(command: string | undefined, timeoutMs?: number): {
+/**
+ * Fires the hook at most once per process, whichever of the stop and crash
+ * paths gets there first. An explicit command wins; `useConfig` supplies the
+ * runner config's command and timeout once the config has loaded and validated.
+ */
+export function onceStopHook(command: string | undefined): {
+  useConfig(notify: { onStop?: string; timeoutMs?: number } | undefined): void;
   fire(notice: StopNotice): Promise<void>;
 } {
   let fired: Promise<void> | undefined;
+  let timeoutMs: number | undefined;
   return {
+    useConfig(notify) {
+      command ??= notify?.onStop;
+      timeoutMs = notify?.timeoutMs;
+    },
     fire(notice) {
       if (command === undefined) return Promise.resolve();
       fired ??= runStopHook(command, notice, timeoutMs);
@@ -100,30 +110,29 @@ export interface WaitOptions {
   stateRoot?: string;
   timeoutMs?: number;
   pollMs?: number;
-  /** How long a run must look ownerless before it is called orphaned (a starting or finishing controller briefly has no claim). */
-  orphanGraceMs?: number;
 }
 
-/** Blocks until the run's durable state is no longer `running`. */
+/**
+ * Blocks until the run's durable state is no longer `running`. A controller
+ * claims the run before state says `running` and clears the claim only after
+ * the final state is saved, so a running run with no live claim, confirmed by
+ * a second read of the state, has lost its controller.
+ */
 export async function waitForRun(runRef: string, options: WaitOptions = {}): Promise<WaitResult> {
   const stateDir = await resolveStateDir(runRef, options.stateRoot);
   const pollMs = options.pollMs ?? 1_000;
-  const grace = options.orphanGraceMs ?? 5_000;
   const deadline = options.timeoutMs === undefined ? Infinity : Date.now() + options.timeoutMs;
-  let ownerlessSince: number | undefined;
-  let detail = "";
   for (;;) {
     const state = await loadRunState(stateDir);
     if (state.status !== "running") return { outcome: "finished", status: state.status, stateDir };
     const owner = await readOwnerClaim(stateDir).catch(() => undefined);
     if (owner === undefined || isClaimStale(owner)) {
-      ownerlessSince ??= Date.now();
-      detail = owner === undefined
+      const again = await loadRunState(stateDir);
+      if (again.status !== "running") return { outcome: "finished", status: again.status, stateDir };
+      const detail = owner === undefined
         ? "no controller owns it"
         : `its controller (pid ${owner.controllerPid}) is no longer running`;
-      if (Date.now() - ownerlessSince >= grace) return { outcome: "orphaned", stateDir, detail };
-    } else {
-      ownerlessSince = undefined;
+      return { outcome: "orphaned", stateDir, detail };
     }
     if (Date.now() >= deadline) return { outcome: "timeout", stateDir };
     await new Promise((resolve) => setTimeout(resolve, Math.min(pollMs, Math.max(1, deadline - Date.now()))));

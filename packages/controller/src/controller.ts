@@ -43,6 +43,7 @@ import {
 import { sanitizedPluginEnv } from "./plugin-env.js";
 import { assertPinnedBundleUnchanged, readInstalledBundlePin } from "./pin.js";
 import {
+  claimRunOwner,
   clearOwnerClaim,
   isClaimStale,
   readOwnerClaim,
@@ -138,6 +139,8 @@ export interface RunRequest {
    * runs un-gated, same as always.
    */
   rehearsalGate?: IntakePin["rehearsalGate"];
+  /** Called once the run's id and state directory are durable, before the first job. */
+  onRunCreated?: (run: { runId: string; stateDir: string }) => void | Promise<void>;
 }
 
 export interface ResumeRequest {
@@ -361,7 +364,11 @@ export function createController(): Controller {
         registerSession(session);
         await ensureArtifactDir(state);
         await clearStopRequest(state.stateDir);
+        // Own the run before durable state says `running`, so a reader never sees
+        // a running run without a live owner claim, however slow startup is.
+        await claimRunOwner(state.stateDir);
         await saveRunState(state);
+        await request.onRunCreated?.({ runId, stateDir: state.stateDir });
         if (supervisor === undefined && request.supervisorFactory !== undefined) {
           supervisor = await request.supervisorFactory({ runId, stateDir: state.stateDir });
         }
@@ -653,6 +660,8 @@ export function createController(): Controller {
           }),
         };
         await clearStopRequest(stateDir);
+        // Own the run before durable state says `running` again (see `run`).
+        await claimRunOwner(stateDir);
         await saveRunState(state);
 
         // Placeholder host until openHost completes after the lock is released.

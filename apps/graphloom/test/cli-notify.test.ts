@@ -22,7 +22,7 @@ const happy = {
 };
 
 interface HookCall {
-  env: Record<string, string>;
+  env: Record<string, string | undefined>;
   stdin: { runId: string; status: string };
 }
 
@@ -190,6 +190,40 @@ describe("--on-stop", () => {
     expect(calls[0]!.env).toMatchObject({ GRAPHLOOM_RUN_ID: "no-such-run", GRAPHLOOM_STATUS: "crashed" });
     expect(calls[0]!.env.GRAPHLOOM_STOP_REASON).not.toBe("");
     expect(calls[0]!.stdin.status).toBe("crashed");
+  }, 60_000);
+
+  it("fires an explicit --on-stop even when the runner config is missing or malformed", async () => {
+    const env = await makeCliEnv(cleanups);
+    const hook = await installHook(env);
+    const missing = await env.graphloom("run", "task.yaml", "--on-stop", hook.command);
+    expect(missing.code).toBe(1);
+    expect((await hook.calls()).map((c) => c.env.GRAPHLOOM_STATUS)).toEqual(["crashed"]);
+
+    await writeFile(path.join(env.dir, "bad.json"), "{ not json");
+    env.env.GRAPHLOOM_RUNNER_CONFIG = path.join(env.dir, "bad.json");
+    const bad = await env.graphloom("run", "task.yaml", "--on-stop", hook.command);
+    expect(bad.code).toBe(1);
+    const calls = await hook.calls();
+    expect(calls).toHaveLength(2);
+    expect(calls[1]!.env.GRAPHLOOM_STOP_REASON).toContain("invalid JSON");
+  }, 60_000);
+
+  it("gives a crash after the run exists its run id and state dir", async () => {
+    const env = await makeCliEnv(cleanups);
+    await env.fakeClaude(happy);
+    // The supervisor is built after the run's state is durable; a model that cannot be built crashes the CLI there.
+    await writeFile(path.join(env.dir, "supervisor.json"), JSON.stringify({ provider: "no-such-provider", modelId: "none", agentDir: path.join(env.dir, "agent") }));
+    env.env.GRAPHLOOM_SUPERVISOR_CONFIG = path.join(env.dir, "supervisor.json");
+    const hook = await installHook(env);
+    const run = await env.graphloom("run", "task.yaml", "--on-stop", hook.command);
+    expect(run.code).toBe(1);
+    const calls = await hook.calls();
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.env.GRAPHLOOM_STATUS).toBe("crashed");
+    const stateDir = calls[0]!.env.GRAPHLOOM_STATE_DIR!;
+    expect(stateDir).toContain("graphloom-state");
+    expect(path.basename(stateDir)).toBe(calls[0]!.env.GRAPHLOOM_RUN_ID);
+    expect((await loadRunState(stateDir)).runId).toBe(calls[0]!.env.GRAPHLOOM_RUN_ID);
   }, 60_000);
 });
 

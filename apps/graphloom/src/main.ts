@@ -10,7 +10,7 @@ import type { RunReport } from "@graphloom/controller";
 import { createCliRunner } from "./cli-runner.js";
 import { piRepairDeps, resolveBundlePath, resolveBundlePathForResume } from "./repair-config.js";
 import { check, probe, recordScenario, rehearse, replay } from "./rehearsal.js";
-import { requireRunnerConfig, type RunnerConfig } from "./runner-config.js";
+import { requireRunnerConfig } from "./runner-config.js";
 import { onceStopHook, parseDuration, waitForRun, type StopNotice } from "./notify.js";
 import { formatRunStats, loadRunStats } from "./stats.js";
 import {
@@ -41,12 +41,14 @@ async function main(): Promise<void> {
     const taskPath = path.resolve(args[1] ?? "task.yaml");
     const stateRootFlag = flagValue(args, "--state-root");
     const stateRoot = stateRootFlag ? path.resolve(stateRootFlag) : undefined;
+    const stopHook = armStopHook(args);
     const runnerConfig = await requireRunnerConfig();
+    stopHook.useConfig(runnerConfig.notify);
     const runner = createCliRunner(runnerConfig);
     const config = await loadSupervisorConfig();
-    const stopHook = armStopHook(args, runnerConfig);
     const report = await controller.run({
       taskPath,
+      onRunCreated: ({ runId, stateDir }) => { crashContext = { runId, stateDir }; },
       runner,
       ...(stateRoot !== undefined ? { stateRoot } : {}),
       ...(config !== undefined
@@ -114,15 +116,16 @@ async function main(): Promise<void> {
   }
 
   if (cmd === "resume") {
-    const runnerConfig = await requireRunnerConfig();
-    const runner = createCliRunner(runnerConfig);
     const runRef = requireRunRef(args[1], "resume <stateDir|runId> [--state-root <dir>] [--update-plugin] [--update-executors] [--on-stop <command>]");
     const stateRoot = flagValue(args, "--state-root");
-    const config = await loadSupervisorConfig();
-    const stopHook = armStopHook(args, runnerConfig, {
+    const stopHook = armStopHook(args, {
       runId: path.basename(runRef),
       stateDir: resolveStateDir(runRef, stateRoot ? path.resolve(stateRoot) : undefined).catch(() => ""),
     });
+    const runnerConfig = await requireRunnerConfig();
+    stopHook.useConfig(runnerConfig.notify);
+    const runner = createCliRunner(runnerConfig);
+    const config = await loadSupervisorConfig();
     const report = await controller.resume({
       runRef,
       runner,
@@ -255,19 +258,23 @@ async function main(): Promise<void> {
 
 interface CrashContext {
   runId: string;
-  stateDir: Promise<string>;
+  stateDir: string | Promise<string>;
 }
 
-let crashHook: { fire(notice: StopNotice): Promise<void> } | undefined;
+let crashHook: ReturnType<typeof onceStopHook> | undefined;
 let crashContext: CrashContext | undefined;
 
-/** The hook for this `run`/`resume`: `--on-stop` wins over `notify.onStop`; also armed for a crash. */
-function armStopHook(args: string[], config: RunnerConfig, context?: CrashContext): { fire(notice: StopNotice): Promise<void> } {
+/**
+ * The hook for this `run`/`resume`, armed before any config is read so an
+ * explicit `--on-stop` also covers a config failure; `notify.onStop` fills in
+ * through `useConfig` once the config validates. Also armed for a crash.
+ */
+function armStopHook(args: string[], context?: CrashContext): ReturnType<typeof onceStopHook> {
   const flag = flagValue(args, "--on-stop");
   if (args.includes("--on-stop") && (flag === undefined || flag.startsWith("--") || flag.trim() === "")) {
     throw new Error("--on-stop needs a command");
   }
-  const hook = onceStopHook(flag ?? config.notify?.onStop, config.notify?.timeoutMs);
+  const hook = onceStopHook(flag);
   crashHook = hook;
   crashContext = context;
   return hook;
@@ -288,7 +295,7 @@ function stopNotice(report: RunReport): StopNotice {
 async function notifyCrash(err: unknown): Promise<void> {
   if (crashHook === undefined) return;
   const message = err instanceof Error ? err.message : String(err);
-  const stateDir = (await crashContext?.stateDir.catch(() => "")) ?? "";
+  const stateDir = (await Promise.resolve(crashContext?.stateDir).catch(() => "")) ?? "";
   const runId = crashContext?.runId ?? "";
   await crashHook.fire({
     runId,
