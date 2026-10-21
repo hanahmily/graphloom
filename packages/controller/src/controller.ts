@@ -625,7 +625,18 @@ export function createController(): Controller {
         // graph retries first, and recovery fires afresh if the failure recurs.
         state = returnToGraphOnResume(state);
         // The operator's resume restarts the graph, so its replayed decisions are not repeats.
-        const { noProgress: _repeats, stopClass: _class, stopMark: _mark, ...resumed } = state;
+        // The previous stop's reason and blocker are history once the run runs again (lastResume
+        // keeps previousStopReason; remedies keep the condition), so they are not shown as current.
+        const {
+          noProgress: _repeats,
+          stopClass: _class,
+          stopMark: _mark,
+          stopReason: _stopReason,
+          blocker: _blocker,
+          ...resumed
+        } = state;
+        void _stopReason;
+        void _blocker;
         void _repeats;
         void _class;
         void _mark;
@@ -1198,14 +1209,14 @@ function toInspect(state: DurableRunState): InspectReport {
     supervisorOutcomes: structuredClone(state.supervisorOutcomes ?? []),
     caseFile: structuredClone(state.caseFile ?? emptyCaseFile()),
   };
-  if (state.stopReason !== undefined) {
+  if (state.status !== "running" && state.stopReason !== undefined) {
     report.stopReason = state.stopReason;
   }
   const stopClass = classifyStop(state);
   if (stopClass !== undefined) {
     report.stopRetryable = stopClass.retryable;
   }
-  if (state.blocker !== undefined) {
+  if (state.status !== "running" && state.blocker !== undefined) {
     report.blocker = state.blocker;
   }
   if (state.stopEvidenceRefs !== undefined) {

@@ -198,7 +198,7 @@ export function runStats(state: DurableRunState): RunStats {
     graphId: state.intake?.bundle?.graphId ?? state.definition?.graphId ?? "unknown",
     activeVersion: state.activeVersion,
     status: state.status,
-    ...(state.stopReason !== undefined ? { stopReason: state.stopReason } : {}),
+    ...(state.status !== "running" && state.stopReason !== undefined ? { stopReason: state.stopReason } : {}),
     ...spanOf(state),
     usageSource: exactLedger
       ? { kind: "ledger", exactness: "exact" }
