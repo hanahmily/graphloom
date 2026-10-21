@@ -55,6 +55,11 @@ export const codingAgentExecutorPackage: ExecutorPackageManifest = {
   ],
   // The agent edits the worktree and runs commands as the user.
   isolation: "unrestricted",
+  // Jobs the supervisor originates run confined to the run, but the harness still keeps its login and history.
+  ownState: {
+    env: [CLAUDE_CONFIG_DIR_ENV, CODEX_HOME_ENV, PI_AGENT_DIR_ENV],
+    homeRelative: [".claude", ".codex", path.join(".pi", "agent")],
+  },
 };
 
 /** Absolute path of the Claude Code harness module, for `codingAgentBinding({ harness })`. */

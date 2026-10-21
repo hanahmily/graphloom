@@ -20,6 +20,16 @@ jobs:
           node-version: "22"
           cache: npm
 
+      # Supervisor-originated jobs run confined with bubblewrap (docs/design-typescript-core.md);
+      # the tests that exercise the real confinement need it, and Ubuntu 24.04 runners restrict
+      # the unprivileged user namespaces it uses.
+      - name: Install bubblewrap
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          bwrap --ro-bind / / --dev /dev --unshare-pid --proc /proc true
+
       - name: Install
         run: npm ci
 

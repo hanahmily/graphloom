@@ -1,7 +1,13 @@
 import { spawn } from "node:child_process";
 import { mkdir, open } from "node:fs/promises";
 import path from "node:path";
-import { BUILTIN_COMMAND_EXECUTOR_ID, defineExecutor, type ExecutorContext, type ExecutorDefinition } from "@graphloom/sdk";
+import {
+  BUILTIN_COMMAND_EXECUTOR_ID,
+  defineExecutor,
+  type ExecutorContext,
+  type ExecutorDefinition,
+  type ExecutorScope,
+} from "@graphloom/sdk";
 
 export const COMMAND_RUN_ID = BUILTIN_COMMAND_EXECUTOR_ID;
 
@@ -165,6 +171,7 @@ export function createCommandExecutor(): ExecutorDefinition<CommandInput> {
     inputSchema: isCommandInput,
     inputProblem: commandInputProblem,
     inputShape: COMMAND_INPUT_SHAPE,
+    hostEffect: (input, scope) => (isCommandInput(input) ? commandHostEffect(input, scope) : undefined),
     async execute(input, ctx: ExecutorContext) {
       const outcomes: CommandOutcome[] = [];
       for (const spec of input.commands) {
@@ -185,6 +192,143 @@ export function createCommandExecutor(): ExecutorDefinition<CommandInput> {
       };
     },
   });
+}
+
+/** Programs whose every path operand is something they create, change or remove. */
+const WRITES_ALL_OPERANDS = new Set(["rm", "rmdir", "unlink", "shred", "mv", "mkdir", "touch", "chmod", "chown", "truncate", "tee"]);
+/** Programs that write only their destination: the last operand, or the one `-t` names. */
+const WRITES_DESTINATION = new Set(["cp", "install", "ln", "rsync"]);
+const SHELLS = new Set(["sh", "bash", "zsh", "dash", "ksh"]);
+const CONFIG_READ_FLAGS = new Set(["--get", "--get-all", "--get-regexp", "--get-urlmatch", "--list", "-l", "--show-origin", "--show-scope"]);
+const OUTSIDE_SCOPE = "outside the run's worktree and run-scoped directories";
+
+/**
+ * The first change a command visibly makes outside the confined scope: a
+ * mutating program aimed at a path outside it, or a tool setting that rewrites
+ * the operator's user-level configuration. Only command positions and real
+ * write destinations are inspected, so reads (`cp /etc/hosts here`,
+ * `git config --global --get x`) pass. A heuristic that only explains a
+ * refusal early: the runner's confinement is what enforces the scope.
+ */
+export function commandHostEffect(input: CommandInput, scope: ExecutorScope): string | undefined {
+  const roots = [...scope.writablePaths.map((p) => path.resolve(p)), "/dev"];
+  const outside = (token: string): boolean => {
+    if (token.startsWith("~")) return true;
+    if (!token.startsWith("/")) return false;
+    const abs = path.resolve(token);
+    return !roots.some((root) => abs === root || abs.startsWith(`${root}${path.sep}`));
+  };
+  const unquote = (t: string) => t.replace(/^(["'])(.*)\1$/, "$2");
+  const escapes = (target: string | undefined, program: string): string | undefined =>
+    target !== undefined && outside(unquote(target)) ? `\`${program}\` changes ${unquote(target)}, ${OUTSIDE_SCOPE}` : undefined;
+
+  /** One simple command: tokens with no separator among them. */
+  const simple = (given: string[], redirects: string[], shown: string): string | undefined => {
+    const tokens = [...given];
+    for (const target of redirects) {
+      if (outside(target)) return `output redirected to ${target}, ${OUTSIDE_SCOPE}`;
+    }
+    while (tokens.length > 0 && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[0]!)) tokens.shift();
+    if (tokens.length === 0) return undefined;
+    const program = path.basename(tokens[0]!);
+    const args = tokens.slice(1);
+    const operands = args.filter((a) => !a.startsWith("-"));
+    if (program === "go" && args[0] === "env" && args.some((a) => a === "-w" || a === "-u")) {
+      return `\`${shown}\` rewrites the operator's global Go configuration`;
+    }
+    if (program === "git" && args[0] === "config" && args.some((a) => a === "--global" || a === "--system") && !args.some((a) => CONFIG_READ_FLAGS.has(a))) {
+      return `\`${shown}\` rewrites the operator's global git configuration`;
+    }
+    if (
+      program === "npm" &&
+      ["set", "config"].includes(args[0] ?? "") &&
+      (args[0] === "set" || ["set", "delete", "edit"].includes(args[1] ?? "")) &&
+      args.some((a) => a === "-g" || a === "--global" || a === "--location=user" || a === "--location=global")
+    ) {
+      return `\`${shown}\` rewrites the operator's global npm configuration`;
+    }
+    if (WRITES_ALL_OPERANDS.has(program)) {
+      for (const operand of operands) {
+        const found = escapes(operand, program);
+        if (found !== undefined) return found;
+      }
+    }
+    if (WRITES_DESTINATION.has(program)) {
+      const flagged = args.findIndex((a) => a === "-t" || a === "--target-directory");
+      const target =
+        flagged >= 0
+          ? args[flagged + 1]
+          : (args.find((a) => a.startsWith("--target-directory="))?.slice("--target-directory=".length) ?? (operands.length >= 2 ? operands[operands.length - 1] : undefined));
+      return escapes(target, program);
+    }
+    return undefined;
+  };
+
+  /**
+   * The simple commands of a shell script, with quoting respected: words, and the
+   * targets of `>` and `>>`, split at `;`, `&`, `|` and newlines. Not a full shell
+   * parser (no expansions, heredocs or subshells), only enough to find commands and redirects.
+   */
+  const shellCommands = (script: string): Array<{ words: string[]; redirects: string[] }> => {
+    const commands: Array<{ words: string[]; redirects: string[] }> = [];
+    let words: string[] = [];
+    let redirects: string[] = [];
+    let word: string | undefined;
+    let redirecting = false;
+    const endWord = () => {
+      if (word === undefined) return;
+      if (redirecting) redirects.push(word);
+      else words.push(word);
+      redirecting = false;
+      word = undefined;
+    };
+    const endCommand = () => {
+      endWord();
+      redirecting = false;
+      if (words.length > 0 || redirects.length > 0) commands.push({ words, redirects });
+      words = [];
+      redirects = [];
+    };
+    for (let i = 0; i < script.length; i += 1) {
+      const c = script[i]!;
+      if (c === "'" || c === '"') {
+        const close = script.indexOf(c, i + 1);
+        const end = close < 0 ? script.length : close;
+        word = (word ?? "") + script.slice(i + 1, end);
+        i = end;
+      } else if (c === "\\" && i + 1 < script.length) {
+        word = (word ?? "") + script[i + 1]!;
+        i += 1;
+      } else if (/\s/.test(c) && c !== "\n") {
+        endWord();
+      } else if (c === ">") {
+        endWord();
+        if (script[i + 1] === ">") i += 1;
+        redirecting = true;
+      } else if (c === ";" || c === "&" || c === "|" || c === "\n") {
+        endCommand();
+      } else {
+        word = (word ?? "") + c;
+      }
+    }
+    endCommand();
+    return commands;
+  };
+
+  for (const spec of input.commands) {
+    // Redirection exists only in a shell script: in a plain argv `>` is just an argument.
+    const direct = simple(spec.argv, [], spec.argv.join(" ").slice(0, 120));
+    if (direct !== undefined) return direct;
+    const flag = spec.argv.indexOf("-c");
+    if (SHELLS.has(path.basename(spec.argv[0]!)) && flag > 0 && spec.argv[flag + 1] !== undefined) {
+      const script = spec.argv[flag + 1]!;
+      for (const command of shellCommands(script)) {
+        const inner = simple(command.words, command.redirects, script.slice(0, 120));
+        if (inner !== undefined) return inner;
+      }
+    }
+  }
+  return undefined;
 }
 
 function describeFailure(o: CommandOutcome): string {

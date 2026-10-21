@@ -1,6 +1,8 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { realpath } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import os from "node:os";
+import { lstat, mkdir, realpath } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -18,6 +20,7 @@ import {
   type JobSpec,
   type ToolCallResult,
 } from "@graphloom/sdk";
+import { confineWorker, confinementUnsupported, findSandboxWorker } from "./confine.js";
 import { digestExecutorSource } from "./digest.js";
 import { assertSandboxSupported, sandboxNodeArgs } from "./sandbox.js";
 import type { ExecutorDescriptor, ExecutorSourceOverride, JobContext, JobEvidenceItem, JobResult, Runner } from "./types.js";
@@ -105,6 +108,11 @@ export interface ChildExecutorRunnerOptions {
    * repairable from a run-local copy. Default: the entry module file alone.
    */
   sourceRoot?: string;
+  /**
+   * State the executor keeps writing even when a job is confined to the run
+   * (see `ExecutorPackageManifest.ownState`).
+   */
+  ownState?: { env: readonly string[]; homeRelative: readonly string[] };
 }
 
 /** Replace every bound credential value in a value before it can become durable. */
@@ -449,6 +457,14 @@ export function createChildExecutorRunner(
     }
   };
 
+  /** Directories the executor keeps its own state in (an agent's login and history), which stay writable when confined. */
+  const ownStateDirs = (): string[] => {
+    const own = options.ownState;
+    if (own === undefined) return [];
+    const configured = own.env.map((name) => options.env?.[name]).filter((v): v is string => typeof v === "string" && v.length > 0);
+    return [...configured, ...own.homeRelative.map((rel) => path.join(os.homedir(), rel))].filter((dir) => existsSync(dir));
+  };
+
   return {
     async describeExecutors() {
       const digest = await digestExecutorSource(sourceRoot ?? entryModule);
@@ -468,6 +484,12 @@ export function createChildExecutorRunner(
       const pinned = pinJobExecutor(job);
       const pin = pinned.executor as ExecutorPin;
       if (!served.has(pin.id)) return options.fallback.checkJob?.(pinned, ctx);
+      // A sandboxed executor cannot write at all, so it is confined already.
+      const confinement = options.sandbox === true ? undefined : ctx?.confinement;
+      if (confinement !== undefined) {
+        const unsupported = await confinementUnsupported();
+        if (unsupported !== undefined) return `executor ${pin.id} runs with the user's permissions and cannot be confined to the run: ${unsupported}`;
+      }
       const override = ctx?.executorSource;
       // The same source-pin checks runJob makes, before any module is loaded:
       // bytes that no longer match the pin are refused, never imported.
@@ -488,6 +510,7 @@ export function createChildExecutorRunner(
           ...(pinned.effect !== undefined ? { effect: pinned.effect } : {}),
           input: pinned.input,
           ...(options.allowedEffects !== undefined ? { allowedEffects: [...options.allowedEffects] } : {}),
+          ...(confinement !== undefined ? { scope: { writablePaths: [...confinement.writablePaths, confinement.scratchDir] } } : {}),
         },
       });
     },
@@ -519,16 +542,61 @@ export function createChildExecutorRunner(
       const { entry } = source;
       const args = override !== undefined ? sandboxArgs(entry) : nodeArgs;
 
+      const cwd = options.cwd ?? path.dirname(entry);
+      let launch = { command: process.execPath, args: [...args, workerModule, entry], env: options.env ?? process.env };
+      if (ctx.confinement !== undefined && options.sandbox !== true) {
+        const unsupported = await confinementUnsupported();
+        if (unsupported !== undefined) {
+          return failed(`executor ${pin.id} runs with the user's permissions and cannot be confined to the run, so the job was not run: ${unsupported}`);
+        }
+        try {
+          // Run-owned directories the job writes (a fresh agent session, the artifacts) must exist to be mounted,
+          // and must be real directories: a link there would mount whatever it points at.
+          for (const dir of [ctx.artifactDir, ...(ctx.session !== undefined ? [ctx.session.dir] : [])]) {
+            if (!(await lstat(dir).catch(() => undefined))) await mkdir(dir, { recursive: true });
+          }
+          launch = confineWorker({
+            ...launch,
+            cwd,
+            scratchDir: ctx.confinement.scratchDir,
+            writable: [...ctx.confinement.writablePaths, ctx.artifactDir, ...(ctx.session !== undefined ? [ctx.session.dir] : [])],
+            trustedWritable: ownStateDirs(),
+            readPaths: [...(ctx.confinement.readPaths ?? []), process.execPath, workerModule, entry, ...(sourceRoot !== undefined ? [sourceRoot] : []), ...(override !== undefined ? [override.root] : []), cwd],
+            keepUserState: options.ownState !== undefined,
+          });
+        } catch (err) {
+          return failed(`executor ${pin.id} cannot be confined to the run, so the job was not run: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+
       return await new Promise<JobResult>((resolve) => {
         if (ctx.signal?.aborted) {
           resolve(failed("executor cancelled before start"));
           return;
         }
-        const child = spawn(process.execPath, [...args, workerModule, entry], {
-          stdio: ["pipe", "pipe", "pipe"],
-          cwd: options.cwd ?? path.dirname(entry),
-          env: options.env ?? process.env,
+        const confinedLaunch = "infoFd" in launch;
+        const child = spawn(launch.command, launch.args, {
+          stdio: confinedLaunch ? ["pipe", "pipe", "pipe", "pipe"] : ["pipe", "pipe", "pipe"],
+          cwd,
+          env: launch.env,
         });
+        // bubblewrap's init is pid 1 of the sandbox and reaps what the worker leaves behind; the worker is its child.
+        let sandboxInit: number | undefined;
+        if (confinedLaunch) {
+          const info = child.stdio[3];
+          if (info !== null && info !== undefined && "setEncoding" in info) {
+            const infoLines = createInterface({ input: info as NodeJS.ReadableStream, crlfDelay: Infinity });
+            infoLines.once("line", (line) => {
+              try {
+                const pid = (JSON.parse(line) as { "child-pid"?: unknown })["child-pid"];
+                if (typeof pid === "number") sandboxInit = pid;
+              } catch {
+                /* the stop then falls back to the grace kill */
+              }
+              infoLines.close();
+            });
+          }
+        }
         const stderr: string[] = [];
         child.stderr.setEncoding("utf8");
         child.stderr.on("data", (c: string) => {
@@ -548,8 +616,18 @@ export function createChildExecutorRunner(
           ctx.signal?.removeEventListener("abort", onAbort);
           child.stdin.end();
           const settle = () => resolve(redactCredentials(result, options.credentials));
-          if (!executing || child.exitCode !== null || child.signalCode !== null) {
+          const gone = () => child.exitCode !== null || child.signalCode !== null;
+          if (!executing || gone()) {
             child.kill("SIGKILL");
+            // Killing the sandbox kills its whole pid namespace; settle only once it has gone.
+            if (confinedLaunch && !gone()) {
+              const cap = setTimeout(settle, stopGraceMs);
+              child.once("exit", () => {
+                clearTimeout(cap);
+                settle();
+              });
+              return;
+            }
             settle();
             return;
           }
@@ -559,7 +637,14 @@ export function createChildExecutorRunner(
             clearTimeout(kill);
             settle();
           });
-          child.kill("SIGTERM");
+          // bubblewrap does not forward signals, so a confined worker is signalled directly.
+          try {
+            const worker = sandboxInit !== undefined ? findSandboxWorker(sandboxInit, workerModule) : undefined;
+            if (worker !== undefined) process.kill(worker, "SIGTERM");
+            else child.kill("SIGTERM");
+          } catch {
+            child.kill("SIGTERM");
+          }
         };
         ctx.signal?.addEventListener("abort", onAbort, { once: true });
 

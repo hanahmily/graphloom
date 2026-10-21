@@ -70,6 +70,7 @@ import {
   saveRunState,
   type DurableRunState,
   type RemedyRecord,
+  type HostChangeRecord,
   type RunStatus,
   type SupervisorOutcomeRecord,
   type ExecutorCatalogEntry,
@@ -222,6 +223,8 @@ export interface InspectReport {
   versionHistory: VersionRecord[];
   /** Executors the operator re-pinned to installed code (`resume --update-executors`): old -> new digest at the generation it took effect. */
   executorTransitions: ExecutorTransitionRecord[];
+  /** Supervisor jobs run with the operator's `hostRepair` grant, outside the run's scope, oldest first. */
+  hostChanges: HostChangeRecord[];
   activeVersion: string;
   generation: number;
   worktreePath: string;
@@ -1199,6 +1202,7 @@ function toInspect(state: DurableRunState): InspectReport {
     budgets: { ...state.budgets },
     versionHistory: structuredClone(state.versionHistory ?? []),
     executorTransitions: structuredClone(state.executorTransitions ?? []),
+    hostChanges: structuredClone(state.hostChanges ?? []),
     activeVersion: state.activeVersion,
     generation: state.generation,
     worktreePath: state.worktreePath,
@@ -1321,7 +1325,7 @@ export { admitValidation, freshEvidence } from "./admit.js";
 export { toRunView, bumpGeneration, classifyAgentResult } from "./loop.js";
 export type { ContractOutcome } from "./loop.js";
 export { loadRunState, saveRunState } from "./state.js";
-export type { DurableRunState, ExecutorTransitionRecord, RemedyRecord, RunStatus, SupervisorOutcomeRecord, VersionRecord } from "./state.js";
+export type { DurableRunState, ExecutorTransitionRecord, HostChangeRecord, RemedyRecord, RunStatus, SupervisorOutcomeRecord, VersionRecord } from "./state.js";
 export type { DeleteReport } from "./delete-run.js";
 export type { IntakePin, TaskConfigPin } from "./intake.js";
 export type {

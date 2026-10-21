@@ -394,6 +394,9 @@ function assertRepairAuthority(value: unknown): void {
       throw new WireValidationError("malformed", `repairAuthority.grants.${key} must be boolean`);
     }
   }
+  if (grants["hostRepair"] !== undefined && typeof grants["hostRepair"] !== "boolean") {
+    throw new WireValidationError("malformed", "repairAuthority.grants.hostRepair must be boolean");
+  }
 }
 
 const SESSION_STATUSES = ["ok", "failed", "conflict"];

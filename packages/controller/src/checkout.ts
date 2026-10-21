@@ -73,6 +73,8 @@ export async function runInCheckout(args: {
   runner: Runner;
   signal: AbortSignal;
   source?: ExecutorSourceOverride;
+  /** Confine the job's writes to its checkout and this run-scoped directory. */
+  scratchDir?: string;
 }): Promise<{ result: JobResult; candidateDigest: string; staleIdentity?: string }> {
   const { job, operationId, generation, runId } = args;
   const change = await candidateChange(args.worktreePath, args.pinnedHead);
@@ -143,6 +145,11 @@ export async function runInCheckout(args: {
     return failed(`checkout failed: ${err instanceof Error ? err.message : String(err)}`);
   }
   try {
+    // The shared clone reads its objects from the source repository (alternates), so a confined job must still see it.
+    const sourceGitDir =
+      args.scratchDir !== undefined
+        ? path.resolve(args.repoPath, (await git(args.repoPath, ["rev-parse", "--git-common-dir"])).trim())
+        : undefined;
     const context = (id: string) => ({
       runId,
       operationId: id,
@@ -150,6 +157,7 @@ export async function runInCheckout(args: {
       worktreePath: dir,
       artifactDir: args.artifactDir,
       signal: args.signal,
+      ...(args.scratchDir !== undefined ? { confinement: { scratchDir: args.scratchDir, writablePaths: [dir], ...(sourceGitDir !== undefined ? { readPaths: [sourceGitDir] } : {}) } } : {}),
       ...(args.source !== undefined ? { executorSource: args.source } : {}),
     });
     const record = (phase: CheckoutRecord["phase"], prepared: boolean, mutations: string[]): CheckoutRecord => ({

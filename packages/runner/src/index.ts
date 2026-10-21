@@ -2,6 +2,7 @@ export type {
   ChildOperationPort,
   ExecutorDescriptor,
   ExecutorSourceOverride,
+  JobConfinement,
   JobContext,
   JobEvidenceItem,
   JobResult,
@@ -26,6 +27,7 @@ export {
 } from "./registry.js";
 export { digestExecutorSource } from "./digest.js";
 export { assertSandboxSupported, packageRootOf } from "./sandbox.js";
+export { confineWorker, confinementUnsupported, type ConfinedWorker } from "./confine.js";
 export {
   createBuiltinExecutorRunner,
   type BuiltinExecutorPackage,

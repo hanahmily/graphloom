@@ -18,6 +18,13 @@ const BASE_ENV = new Set([
   "XDG_DATA_HOME",
   "XDG_STATE_HOME",
   "XDG_RUNTIME_DIR",
+  // Where the runner points toolchain state when it confines the job to the run (see runner confine.ts).
+  "GOENV",
+  "GOCACHE",
+  "GOTMPDIR",
+  "npm_config_cache",
+  "YARN_CACHE_FOLDER",
+  "PIP_CACHE_DIR",
   "HTTP_PROXY",
   "HTTPS_PROXY",
   "NO_PROXY",

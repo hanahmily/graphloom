@@ -5,7 +5,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 import type { JobSpec } from "@graphloom/sdk";
-import { createBuiltinExecutorRunner } from "@graphloom/runner";
+import { confinementUnsupported, createBuiltinExecutorRunner } from "@graphloom/runner";
 import { commandBinding, commandExecutorPackage } from "@graphloom/executor-command";
 import { revertPatchPaths, runInCheckout } from "./checkout.js";
 
@@ -49,7 +49,7 @@ function catJob(path_: string): JobSpec & { checkout: { from: "candidate"; rever
   };
 }
 
-async function run(dir: string, pinnedHead: string, job: JobSpec & { checkout: { from: "candidate"; revertPatch?: string } }, repoPath = dir) {
+async function run(dir: string, pinnedHead: string, job: JobSpec & { checkout: { from: "candidate"; revertPatch?: string } }, repoPath = dir, scratchDir?: string) {
   const stateDir = await mkdtemp(path.join(os.tmpdir(), "graphloom-checkout-state-"));
   cleanup.push(stateDir);
   const runner = createBuiltinExecutorRunner({
@@ -74,6 +74,7 @@ async function run(dir: string, pinnedHead: string, job: JobSpec & { checkout: {
     prepare: [],
     runner,
     signal: new AbortController().signal,
+    ...(scratchDir !== undefined ? { scratchDir } : {}),
   });
 }
 
@@ -108,12 +109,25 @@ describe("revertPatchPaths", () => {
   });
 });
 
+// Real confinement needs bubblewrap and unprivileged user namespaces; hosts without them refuse such jobs.
+const confinementUnavailable = await confinementUnsupported();
+
 describe("runInCheckout: revertPatch", () => {
   it("runs the full candidate unchanged when no revertPatch is given", async () => {
     const { dir, pinnedHead } = await candidateRepo();
     const { result } = await run(dir, pinnedHead, catJob("calc.go"));
     expect(result.status).toBe("ok");
     expect(stdout(result.evidence ?? [])).toBe(CANDIDATE);
+  });
+
+  it.skipIf(confinementUnavailable !== undefined)("lets a confined checkout job read the source repository's objects, with the repository under /tmp (#165)", async () => {
+    const { dir, pinnedHead } = await candidateRepo();
+    const scratch = await mkdtemp(path.join(os.tmpdir(), "graphloom-checkout-scratch-"));
+    cleanup.push(scratch);
+    const job = { ...catJob("calc.go"), input: { commands: [{ id: "log", argv: ["git", "log", "--oneline"] }] } };
+    const { result } = await run(dir, pinnedHead, job, dir, scratch);
+    expect(result.status, result.summary).toBe("ok");
+    expect(stdout(result.evidence ?? [])).toContain("init");
   });
 
   it("clones the repository a run pinned as one of its subdirectories", async () => {

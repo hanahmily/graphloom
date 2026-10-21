@@ -78,6 +78,19 @@ export interface PendingDispatch {
   retry?: { attempt: number; limit: number; graphCorrectionTrial: boolean; supervisorWorkDispatch: boolean };
 }
 
+/** A supervisor-originated job that was allowed to change the host beyond the run's scope. */
+export interface HostChangeRecord {
+  operationId: string;
+  stageId: string;
+  executorId?: string;
+  at: string;
+  /** Why it was unconfined: the grant that allowed it. */
+  reason: string;
+}
+
+/** Most host-change records a run keeps. */
+export const MAX_HOST_CHANGE_RECORDS = 50;
+
 /**
  * An agent session a settled dispatch returned. A later dispatch of the same
  * stage and dispatch key may continue it with `continueFrom`.
@@ -204,6 +217,11 @@ export interface DurableRunState {
   executorCatalog?: ExecutorCatalogEntry[];
   /** Executors the operator moved onto installed code with `resume --update-executors`, oldest first. */
   executorTransitions?: ExecutorTransitionRecord[];
+  /**
+   * Jobs the supervisor ran with the operator's `hostRepair` grant, outside the
+   * run's confinement, oldest first (bounded). Recorded before the job starts.
+   */
+  hostChanges?: HostChangeRecord[];
   /** Earliest time each executor may run again, from a failure's retry timing. */
   executorRetryAt?: Record<string, string>;
   /**

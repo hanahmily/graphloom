@@ -1,8 +1,9 @@
-import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createBuiltinExecutorRunner } from "@graphloom/runner";
+import { spawnSync } from "node:child_process";
+import { confinementUnsupported, createBuiltinExecutorRunner } from "@graphloom/runner";
 import { boundedInputShape, type ExecutorContext } from "@graphloom/sdk";
 import { COMMAND_INPUT_SHAPE, COMMAND_RUN_ID, commandInputProblem, commandSucceeded, createCommandExecutor, isCommandInput, type CommandOutcome } from "./run.js";
 
@@ -272,4 +273,109 @@ describe("command executor package", () => {
     expect((result.evidence![0]!.payload as { command: CommandOutcome }).command.stdoutTail).toBe("/opt/codex/bin/codex /srv/codex-home");
     expect(() => commandBinding({ env: { GITHUB_TOKEN: "t" } })).toThrow('does not accept configuration "GITHUB_TOKEN"');
   });
+});
+
+describe("command host effect (#165)", () => {
+  const scope = { writablePaths: ["/runs/w", "/runs/state/scratch"] };
+  const effect = (...argv: string[]) => executor.hostEffect?.({ commands: [{ id: "c", argv }] }, scope);
+
+  it("names a global configuration write and a mutation aimed outside the scope", () => {
+    expect(effect("go", "env", "-w", "GOCACHE=/x")).toContain("global Go configuration");
+    expect(effect("git", "config", "--global", "user.name", "x")).toContain("global git configuration");
+    expect(effect("npm", "config", "set", "cache", "/x", "-g")).toContain("global npm configuration");
+    expect(effect("rm", "-rf", "/home/u/.cache/go-build")).toContain("/home/u/.cache/go-build");
+    expect(effect("mkdir", "-p", "~/x")).toContain("~/x");
+    expect(effect("cp", "/runs/w/a", "/etc/a")).toContain("/etc/a");
+    expect(effect("mv", "/runs/w/a", "/var/a")).toContain("/var/a");
+    expect(effect("cp", "-t", "/etc", "/runs/w/a")).toContain("/etc");
+    expect(effect("sh", "-c", "echo x > /etc/motd")).toContain("/etc/motd");
+    expect(effect("sh", "-c", "echo x >>/etc/motd")).toContain("/etc/motd");
+    expect(effect("sh", "-c", "echo '>' && echo x > '/etc/quoted'")).toContain("/etc/quoted");
+    expect(effect("bash", "-c", "cd /runs/w && true; rm -rf /var/cache/x")).toContain("/var/cache/x");
+  });
+
+  it("leaves commands that stay in scope, or only read, alone", () => {
+    expect(effect("go", "env", "GOCACHE")).toBeUndefined();
+    expect(effect("rm", "-rf", "/runs/w/build")).toBeUndefined();
+    expect(effect("rm", "build/out")).toBeUndefined();
+    expect(effect("cat", "/etc/hosts")).toBeUndefined();
+    // Reads are not writes, whatever the paths.
+    expect(effect("cp", "/etc/hosts", "/runs/w/hosts")).toBeUndefined();
+    expect(effect("git", "config", "--global", "--get", "user.name")).toBeUndefined();
+    expect(effect("git", "config", "--global", "--list")).toBeUndefined();
+    expect(effect("npm", "config", "get", "cache", "-g")).toBeUndefined();
+    // A path that merely appears as an argument is not a command or a destination.
+    expect(effect("cat", "/tmp/rm", "/etc/hosts")).toBeUndefined();
+    expect(effect("sh", "-c", "cat /etc/hosts | grep x > /runs/w/out; ls /var")).toBeUndefined();
+    expect(effect("sh", "-c", "cp /etc/hosts /runs/w/hosts && grep -q rm /etc/hosts")).toBeUndefined();
+    // `>` is a literal argument in a plain argv, and stays literal inside quotes in a script.
+    expect(effect("echo", ">", "/etc/hosts")).toBeUndefined();
+    expect(effect("echo", ">>", "/etc/hosts")).toBeUndefined();
+    expect(effect("sh", "-c", "echo '> /etc/hosts' \"a > /etc/b\"")).toBeUndefined();
+    expect(effect("sh", "-c", "echo hi >/runs/w/out 2>&1")).toBeUndefined();
+    expect(effect("sh", "-c", "echo x > /runs/state/scratch/out")).toBeUndefined();
+  });
+});
+
+const confinementUnavailable = await confinementUnsupported();
+
+describe.skipIf(confinementUnavailable !== undefined)("stopping a confined command job (#165)", () => {
+  const detachedWriter = (file: string, marker: string) => ({
+    stageId: "s",
+    kind: "command" as const,
+    purpose: "work" as const,
+    instruction: "start a detached writer and wait",
+    writeScope: ["grow.txt"],
+    executor: { id: COMMAND_RUN_ID },
+    input: {
+      commands: [
+        {
+          id: "grow",
+          // The writer leaves the command's process group (setsid) and ignores hangup, as a daemon would.
+          argv: ["sh", "-c", `setsid nohup sh -c 'while true; do echo x >> ${file}; sleep 0.05; done # ${marker}' >/dev/null 2>&1 & sleep 60`],
+        },
+      ],
+    },
+  });
+  const sizeOf = async (file: string) => (await readFile(file, "utf8").catch(() => "")).length;
+  const alive = (marker: string) => spawnSync("pgrep", ["-f", marker], { encoding: "utf8" }).stdout.trim() !== "";
+
+  it.each([
+    ["the run stops", { stop: true }],
+    ["the job times out", { stop: false }],
+  ])("leaves no descendant writing to the worktree after %s", async (_name, { stop }) => {
+    const { commandBinding, commandExecutorPackage } = await import("../dist/package.js");
+    const marker = `gl-detached-${Date.now()}-${stop ? "stop" : "timeout"}`;
+    const scratch = path.join(dir, "scratch");
+    const worktree = path.join(dir, "wt");
+    await mkdir(worktree, { recursive: true });
+    const file = path.join(worktree, "grow.txt");
+    const runner = createBuiltinExecutorRunner({
+      packages: [{ manifest: commandExecutorPackage, ...commandBinding({ timeoutMs: 1_500 }) }],
+      fallback: { runJob: async () => Promise.reject(new Error("fallback must not run")) },
+      timeoutMs: 1_500,
+    });
+    const abort = new AbortController();
+    const running = runner.runJob(detachedWriter(file, marker) as never, {
+      runId: "r",
+      operationId: "op-1",
+      generation: 1,
+      worktreePath: worktree,
+      artifactDir: path.join(dir, "artifacts"),
+      signal: abort.signal,
+      confinement: { scratchDir: scratch, writablePaths: [worktree] },
+    });
+    // Wait until the detached writer is really writing.
+    for (let i = 0; i < 100 && (await sizeOf(file)) === 0; i += 1) await new Promise((r) => setTimeout(r, 50));
+    expect(await sizeOf(file)).toBeGreaterThan(0);
+    if (stop) abort.abort();
+    const result = await running;
+    expect(result.status).toBe("failed");
+    const settledSize = await sizeOf(file);
+    await new Promise((r) => setTimeout(r, 600));
+    expect(await sizeOf(file)).toBe(settledSize);
+    await new Promise((r) => setTimeout(r, 600));
+    expect(await sizeOf(file)).toBe(settledSize);
+    expect(alive(marker)).toBe(false);
+  }, 30_000);
 });

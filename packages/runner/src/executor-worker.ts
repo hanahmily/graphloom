@@ -3,7 +3,7 @@
  *
  * Protocol (one JSON object per line on stdin/stdout, one execute per process):
  *   → { kind: "describe" }                                  ← { kind: "described", executors: [{ id, version?, effect, inputShape? }] }
- *   → { kind: "check", id, version?, effect?, input, allowedEffects? } ← { kind: "checked", refusal? }
+ *   → { kind: "check", id, version?, effect?, input, allowedEffects?, scope? } ← { kind: "checked", refusal? }
  *   → { kind: "execute", id, version?, effect?, input, ctx, credentials?, allowedEffects?, tools?, usage? }
  *   ← { kind: "tool_call", seq, toolCallId, tool, input }   → { kind: "tool_result", seq, result }
  *   ← { kind: "model_call", seq }                           → { kind: "model_call_result", seq, granted }
@@ -187,7 +187,16 @@ for await (const line of rl) {
     // The refusal execute would give, without executing: lets the host reject
     // a job before admitting it.
     const def = byId.get(msg.id);
-    const refused = def ? refusal(def, msg) : `unknown executor ${msg.id}`;
+    let refused = def ? refusal(def, msg) : `unknown executor ${msg.id}`;
+    // A confined job is also refused for a change its input names outside the scope.
+    if (refused === undefined && def?.hostEffect && msg.scope && typeof msg.scope === "object") {
+      try {
+        const effect = def.hostEffect(msg.input, msg.scope);
+        if (effect !== undefined) refused = `executor ${def.id}: ${effect}`;
+      } catch {
+        /* an executor that cannot tell leaves the job to the enforced confinement */
+      }
+    }
     reply({ kind: "checked", ...(refused !== undefined ? { refusal: refused } : {}) });
     continue;
   }
