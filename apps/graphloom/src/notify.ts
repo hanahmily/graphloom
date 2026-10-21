@@ -125,7 +125,10 @@ export async function waitForRun(runRef: string, options: WaitOptions = {}): Pro
   for (;;) {
     const state = await loadRunState(stateDir);
     if (state.status !== "running") return { outcome: "finished", status: state.status, stateDir };
-    const owner = await readOwnerClaim(stateDir).catch(() => undefined);
+    // A missing claim is `undefined`; any other failure is not evidence the controller is gone.
+    const owner = await readOwnerClaim(stateDir).catch((err: unknown) => {
+      throw new Error(`cannot read owner claim in ${stateDir}: ${err instanceof Error ? err.message : String(err)}`);
+    });
     if (owner === undefined || isClaimStale(owner)) {
       const again = await loadRunState(stateDir);
       if (again.status !== "running") return { outcome: "finished", status: again.status, stateDir };

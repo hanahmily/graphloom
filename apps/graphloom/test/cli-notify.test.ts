@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { loadRunState, saveRunState } from "@graphloom/controller";
 import { afterEach, describe, expect, it } from "vitest";
@@ -291,6 +291,19 @@ describe("graphloom wait", () => {
     const waited = await env.graphloom("wait", report.stateDir, "--json");
     expect(waited.code).toBe(0);
     expect(JSON.parse(waited.stdout)).toMatchObject({ status: "succeeded" });
+  }, 60_000);
+
+  it("fails distinctly, not as orphaned, when the owner claim cannot be read", async () => {
+    const env = await makeCliEnv(cleanups);
+    await env.fakeClaude(happy);
+    const report = JSON.parse((await env.graphloom("run", "task.yaml")).stdout) as { stateDir: string };
+    await saveRunState({ ...(await loadRunState(report.stateDir)), status: "running" });
+    // A directory where the claim file belongs: reading it fails with something other than ENOENT.
+    await mkdir(path.join(report.stateDir, "run.owner.json"));
+    const waited = await env.graphloom("wait", report.stateDir, "--timeout", "10s");
+    expect(waited.code).toBe(1);
+    expect(waited.stderr).toContain("cannot read owner claim");
+    expect(waited.stderr).not.toContain("controller died");
   }, 60_000);
 
   it("reports a run whose controller died with state still running as orphaned, distinct from timeout", async () => {

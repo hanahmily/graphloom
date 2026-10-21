@@ -662,7 +662,13 @@ export function createController(): Controller {
         await clearStopRequest(stateDir);
         // Own the run before durable state says `running` again (see `run`).
         await claimRunOwner(stateDir);
-        await saveRunState(state);
+        try {
+          await saveRunState(state);
+        } catch (err) {
+          // No later cleanup scope exists yet; a live claim would fence this process's later resumes.
+          await clearOwnerClaim(stateDir);
+          throw err;
+        }
 
         // Placeholder host until openHost completes after the lock is released.
         session = {
