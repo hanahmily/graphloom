@@ -439,7 +439,8 @@ function fix(ctx: Context, view: RunView, issue: number, state: FixPrivateState)
     const full = commandsInTier(profile, "full");
     if (green !== undefined && full.length > 0) {
       const runs = full.map((c) => sameCheckoutJob(current, green, c.id));
-      const failedElsewhere = results.some((r) => r.requirementId !== REQUIREMENT_BUILDS && r.result.status === "failed");
+      // `passes` and `builds` judge commands of both tiers: they fail while the full tier has not run, which is no reason to hold it back.
+      const failedElsewhere = results.some((r) => r.requirementId !== REQUIREMENT_BUILDS && r.requirementId !== REQUIREMENT_PASSES && r.result.status === "failed");
       if (!tierPassed(current, green, commandsInTier(profile, "cheap")) || failedElsewhere) {
         skipped = full.filter((_, i) => runs[i] === undefined).map((c) => c.id);
       } else if (runs.some((r) => r === undefined) || failedBeforeResume(current, green, full, view)) {

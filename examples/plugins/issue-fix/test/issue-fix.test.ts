@@ -111,6 +111,8 @@ interface Scenario {
   resumeAfterCandidate?: number;
   /** Outcomes for each full-tier job in order (the last repeats), instead of the round's `candidate` entry. */
   fullChecks?: Array<Partial<Record<string, CommandResult>>>;
+  /** The profile config the run uses, instead of the banyandb profile. */
+  profile?: unknown;
   /** Resume after this many full-tier check jobs. */
   resumeAfterFullChecks?: number;
   /** Resume right after this base RED run (1-based). */
@@ -364,7 +366,7 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
     }
   }
 
-  const definition = createGraph().describe(BANYANDB);
+  const definition = createGraph().describe(scenario.profile ?? BANYANDB);
   for (let step = 0; step < 100; step += 1) {
     const view: RunView = {
       runId: "run",
@@ -383,7 +385,7 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
       generation,
       stateRevision: step,
       activeVersion: "issue-fix@0.1.0",
-      config: BANYANDB,
+      config: scenario.profile ?? BANYANDB,
       candidateDigest: digest,
       ...(resume !== undefined ? { resume } : {}),
       ...(sessions.length > 0 ? { agentSessions: structuredClone(sessions) } : {}),
@@ -408,7 +410,7 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
       const history = evidence.filter((e) => e.candidateDigest !== undefined && e.candidateDigest !== digest);
       const results = stage.requirementIds.map((requirementId) => {
         const binding = definition.defaultValidators.find((b) => b.requirementId === requirementId)!;
-        return { requirementId, binding, result: validatorById(binding.validatorId)!.evaluate({ requirementId, statement: "s", evidence: visible, history, candidateDigest: digest, config: BANYANDB }) };
+        return { requirementId, binding, result: validatorById(binding.validatorId)!.evaluate({ requirementId, statement: "s", evidence: visible, history, candidateDigest: digest, config: scenario.profile ?? BANYANDB }) };
       });
       const failure = results.find((r) => r.result.status !== "passed");
       if (failure !== undefined) throw new Error(`validate ${stage.id} failed: ${failure.requirementId}: ${failure.result.reason}`);
@@ -1061,6 +1063,31 @@ describe("issue-fix graph under the banyandb profile", () => {
       const plain = structuredClone(BANYANDB) as { implementation: { selfCheck?: string[] } };
       delete plain.implementation.selfCheck;
       expect(implementInstruction(parseProfile(plain), { issue: 1, plan: PLAN })).not.toContain("Before you return status ready");
+    });
+
+    it("dispatches the full tier when a passes command (test-ci) belongs to it, and accepts Fix once it passes", () => {
+      const profile = structuredClone(BANYANDB) as { commands: Array<{ id: string; tier?: string }> };
+      for (const c of profile.commands) c.tier = c.id === "lint" ? "cheap" : "full";
+      const { decision, jobs, receipts } = simulate({ profile });
+      expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+      const rounds = candidateJobs(jobs);
+      expect(rounds.map(jobTier)).toEqual(["cheap", "full"]);
+      expect(ranIds(rounds[0]!)).toEqual(["changes-diff", "regression", "lint"]);
+      expect(ranIds(rounds[1]!)).toEqual(["test-ci", "build", "check"]);
+      // No correction was spent waiting for evidence that had not been asked for yet.
+      expect(jobs.filter((j) => j.purpose === "work")).toHaveLength(1);
+      const valid = receipts.filter((r) => r.stageId === "fix" && r.valid).map((r) => r.requirementId);
+      expect(valid).toEqual(expect.arrayContaining(["passes", "builds"]));
+    });
+
+    it("corrects the implementer when that full-tier test-ci fails", () => {
+      const profile = structuredClone(BANYANDB) as { commands: Array<{ id: string; tier?: string }> };
+      for (const c of profile.commands) c.tier = c.id === "lint" ? "cheap" : "full";
+      const { decision, jobs } = simulate({ profile, candidate: [{ "test-ci": { exitCode: 2, stderr: "FAIL pkg/timestamp" } }, {}] });
+      expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+      const work = jobs.filter((j) => j.purpose === "work");
+      expect(work).toHaveLength(2);
+      expect(assignment(work[1])).toContain("test-ci exited 2");
     });
 
     it("runs every check in one job when a profile declares no cheap command", () => {
