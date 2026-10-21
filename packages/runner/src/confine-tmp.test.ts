@@ -1,9 +1,9 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
-import { confineWorker, confinementUnsupported } from "./confine.js";
+import { confineWorker, confinementUnsupported, operatorGoSettings } from "./confine.js";
 
 const unsupported = await confinementUnsupported();
 const root = realpathSync(mkdtempSync(path.join(os.tmpdir(), "gl-confine-")));
@@ -74,5 +74,63 @@ describe.skipIf(unsupported !== undefined)("a job cannot use what it leaves behi
     expect(() =>
       confineWorker({ command: "true", args: [], env: {}, cwd: root, scratchDir: path.join(root, "scratch-link"), writable: [link], keepUserState: false }),
     ).toThrow(/is a symbolic link/);
+  });
+});
+
+describe.skipIf(spawnSync("go", ["version"]).status !== 0)("the host-side Go probe writes nothing (#171)", () => {
+  it("does not switch toolchains from a checkout that needs a newer Go, and still reports the settings", () => {
+    const checkout = path.join(root, "newer-go");
+    const cache = path.join(root, "probe-cache");
+    mkdirSync(checkout);
+    mkdirSync(cache);
+    writeFileSync(path.join(checkout, "go.mod"), "module example.com/x\n\ngo 1.99\ntoolchain go1.99.0\n");
+    const listing = () => spawnSync("find", [cache, "-mindepth", "1", "-printf", "%p %s %T@\\n"], { encoding: "utf8" }).stdout;
+    const before = listing();
+    const cwd = process.cwd();
+    process.chdir(checkout);
+    try {
+      const settings = operatorGoSettings({ ...process.env, GOMODCACHE: cache, GOPROXY: "off", GOFLAGS: "-mod=mod", GOTOOLCHAIN: "auto", GOENV: "off" });
+      expect(settings).toEqual({ modCache: cache, proxy: "off", flags: "-mod=mod", redirect: true });
+    } finally {
+      process.chdir(cwd);
+    }
+    expect(listing()).toBe(before);
+    expect(before).toBe("");
+  });
+});
+
+describe("a redirected module cache carries the operator's checksum evidence (#171)", () => {
+  it("copies the sumdb tree, skips links in it, and replaces a link a job left at the destination", () => {
+    const cache = path.join(root, "sumdb-op");
+    const sumdb = path.join(cache, "cache", "download", "sumdb", "sum.golang.org");
+    mkdirSync(path.join(sumdb, "lookup"), { recursive: true });
+    mkdirSync(path.join(sumdb, "tile", "8", "0"), { recursive: true });
+    writeFileSync(path.join(sumdb, "latest"), "go.sum database tree\n1\nhash\n");
+    writeFileSync(path.join(sumdb, "tile", "8", "0", "000"), "tile");
+    writeFileSync(path.join(sumdb, "lookup", "mod@v1.0.0"), "record");
+    symlinkSync("/etc/hostname", path.join(sumdb, "lookup", "linked"));
+    const scratch = path.join(root, "sumdb-scratch");
+    const outside = path.join(root, "sumdb-outside");
+    mkdirSync(outside);
+    const seeded = path.join(scratch, "go", "mod", "cache", "download", "sumdb", "sum.golang.org");
+    const wt = path.join(root, "sumdb-wt");
+    mkdirSync(wt);
+    const launch = () =>
+      confineWorker({
+        command: "true", args: [], env: { ...process.env }, cwd: wt, scratchDir: scratch, writable: [wt], keepUserState: false,
+        operatorGo: { modCache: cache, proxy: "", flags: "", redirect: true },
+      });
+    expect(launch().env.GOMODCACHE).toBe(path.join(scratch, "go", "mod"));
+    expect(readFileSync(path.join(seeded, "latest"), "utf8")).toBe(readFileSync(path.join(sumdb, "latest"), "utf8"));
+    expect(readFileSync(path.join(seeded, "tile", "8", "0", "000"), "utf8")).toBe("tile");
+    expect(readFileSync(path.join(seeded, "lookup", "mod@v1.0.0"), "utf8")).toBe("record");
+    expect(existsSync(path.join(seeded, "lookup", "linked"))).toBe(false);
+    // A job swaps a seeded file for a link out of the run; the next launch replaces it without writing through.
+    rmSync(path.join(seeded, "latest"));
+    symlinkSync(path.join(outside, "stolen"), path.join(seeded, "latest"));
+    launch();
+    expect(lstatSync(path.join(seeded, "latest")).isSymbolicLink()).toBe(false);
+    expect(existsSync(path.join(outside, "stolen"))).toBe(false);
+    expect(readFileSync(path.join(sumdb, "latest"), "utf8")).toContain("go.sum database");
   });
 });

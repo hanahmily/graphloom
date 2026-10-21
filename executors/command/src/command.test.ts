@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { spawnSync } from "node:child_process";
+import { pathToFileURL } from "node:url";
 import { confinementUnsupported, createBuiltinExecutorRunner } from "@graphloom/runner";
 import { boundedInputShape, type ExecutorContext } from "@graphloom/sdk";
 import { COMMAND_INPUT_SHAPE, COMMAND_RUN_ID, commandInputProblem, commandSucceeded, createCommandExecutor, isCommandInput, type CommandOutcome } from "./run.js";
@@ -378,4 +379,166 @@ describe.skipIf(confinementUnavailable !== undefined)("stopping a confined comma
     expect(await sizeOf(file)).toBe(settledSize);
     expect(alive(marker)).toBe(false);
   }, 30_000);
+});
+
+describe("command host effect and the job's /tmp (#171)", () => {
+  const effectIn = (scope: { writablePaths: string[]; privateTmp?: boolean }, ...argv: string[]) => executor.hostEffect?.({ commands: [{ id: "c", argv }] }, scope);
+  const writes: string[][] = [
+    ["sh", "-c", "echo x > /tmp/f"],
+    ["mkdir", "-p", "/tmp/x"],
+    ["cp", "/runs/w/a", "/tmp/b"],
+  ];
+
+  it("accepts writes under /tmp when the launch mounts a private /tmp, but still refuses the rest of the host", () => {
+    for (const argv of writes) expect(effectIn({ writablePaths: ["/runs/w"], privateTmp: true }, ...argv)).toBeUndefined();
+    expect(effectIn({ writablePaths: ["/runs/w"], privateTmp: true }, "sh", "-c", "echo x > /etc/motd")).toContain("/etc/motd");
+    expect(effectIn({ writablePaths: ["/runs/w"], privateTmp: true }, "mkdir", "/var/tmp/x")).toContain("/var/tmp/x");
+  });
+
+  it("refuses writes under /tmp when the host's /tmp stays read-only", () => {
+    for (const argv of writes) expect(effectIn({ writablePaths: ["/runs/w"], privateTmp: false }, ...argv)).toContain("/tmp");
+    for (const argv of writes) expect(effectIn({ writablePaths: ["/runs/w"] }, ...argv)).toContain("/tmp");
+  });
+
+  describe.skipIf(confinementUnavailable !== undefined)("as admitted by the runner", () => {
+    const job = {
+      stageId: "s",
+      kind: "command" as const,
+      purpose: "work" as const,
+      instruction: "write a temp file",
+      writeScope: ["x"],
+      executor: { id: COMMAND_RUN_ID },
+      input: { commands: [{ id: "t", argv: ["sh", "-c", "echo x > /tmp/f"] }] },
+    };
+    const makeRunner = async () => {
+      const { commandBinding, commandExecutorPackage } = await import("../dist/package.js");
+      return createBuiltinExecutorRunner({
+        packages: [{ manifest: commandExecutorPackage, ...commandBinding({}) }],
+        fallback: { runJob: async () => Promise.reject(new Error("fallback must not run")) },
+      });
+    };
+
+    it("takes the write while /tmp is private, and refuses it when something the job reads lives under /tmp", async () => {
+      const runner = await makeRunner();
+      const base = { scratchDir: path.join(dir, "scratch"), writablePaths: [path.join(dir, "wt")] };
+      expect(await runner.checkJob!(job as never, { confinement: base })).toBeUndefined();
+      expect(await runner.checkJob!(job as never, { confinement: { ...base, readPaths: [path.join(dir, "shared-git")] } })).toMatch(/\/tmp\/f, outside the run's worktree/);
+    });
+  });
+});
+
+describe.skipIf(confinementUnavailable !== undefined || spawnSync("go", ["version"]).status !== 0)("a confined job's Go module cache (#171)", () => {
+  const version = "v1.0.0";
+  const mod = "example.com/hello";
+  const saved = { ...process.env };
+  let proxy: string;
+  let operatorCache: string;
+
+  const listing = (root: string): string[] => {
+    const out = spawnSync("find", [root, "-mindepth", "1"], { encoding: "utf8" }).stdout.trim();
+    return out === "" ? [] : out.split("\n").sort();
+  };
+  const sh = (cmd: string, cwd: string) => {
+    const res = spawnSync("sh", ["-c", cmd], { cwd, encoding: "utf8" });
+    expect(res.status, res.stderr).toBe(0);
+  };
+
+  beforeEach(async () => {
+    // A local module proxy, so no network is needed.
+    proxy = path.join(dir, "proxy");
+    const vdir = path.join(proxy, mod, "@v");
+    const src = path.join(dir, "src", `${mod}@${version}`);
+    await mkdir(vdir, { recursive: true });
+    await mkdir(src, { recursive: true });
+    await writeFile(path.join(src, "go.mod"), `module ${mod}\n\ngo 1.20\n`);
+    await writeFile(path.join(src, "hello.go"), 'package hello\n\nfunc Hi() string { return "hi" }\n');
+    await writeFile(path.join(vdir, "list"), `${version}\n`);
+    await writeFile(path.join(vdir, `${version}.info`), JSON.stringify({ Version: version, Time: "2024-01-01T00:00:00Z" }));
+    await writeFile(path.join(vdir, `${version}.mod`), `module ${mod}\n\ngo 1.20\n`);
+    sh(`zip -qrD ${path.join(vdir, `${version}.zip`)} example.com`, path.join(dir, "src"));
+    operatorCache = path.join(dir, "operator-cache");
+    await mkdir(operatorCache, { recursive: true });
+    process.env.GOMODCACHE = operatorCache;
+    process.env.GOSUMDB = "off";
+    process.env.GOFLAGS = "-mod=mod";
+    process.env.GOENV = "off";
+    process.env.GOTOOLCHAIN = "local";
+  });
+  afterEach(() => {
+    for (const name of ["GOMODCACHE", "GOSUMDB", "GOFLAGS", "GOENV", "GOPROXY", "GOTOOLCHAIN", "GOPRIVATE"]) {
+      if (saved[name] === undefined) delete process.env[name];
+      else process.env[name] = saved[name];
+    }
+    // Module caches are read-only trees; the directory must be removable.
+    spawnSync("chmod", ["-R", "u+w", dir]);
+  });
+
+  const confinedGo = async (script: string) => {
+    const { commandBinding, commandExecutorPackage } = await import("../dist/package.js");
+    const runner = createBuiltinExecutorRunner({
+      packages: [{ manifest: commandExecutorPackage, ...commandBinding({}) }],
+      fallback: { runJob: async () => Promise.reject(new Error("fallback must not run")) },
+      timeoutMs: 60_000,
+    });
+    const scratch = path.join(dir, "scratch");
+    const worktree = path.join(dir, "wt");
+    await mkdir(worktree, { recursive: true });
+    const result = await runner.runJob(
+      {
+        stageId: "s",
+        kind: "command",
+        purpose: "work",
+        instruction: "use a module",
+        writeScope: ["x"],
+        executor: { id: COMMAND_RUN_ID },
+        input: { commands: [{ id: "go", argv: ["sh", "-c", script] }] },
+      } as never,
+      { runId: "r", operationId: "op-go", generation: 1, worktreePath: worktree, artifactDir: path.join(dir, "artifacts"), confinement: { scratchDir: scratch, writablePaths: [worktree] } },
+    );
+    const outcome = (result.evidence![0]!.payload as { command: CommandOutcome }).command;
+    return { scratch, outcome };
+  };
+
+  it("downloads an uncached module into run scratch and leaves the operator's cache untouched", async () => {
+    process.env.GOPROXY = pathToFileURL(proxy).href;
+    const before = listing(operatorCache);
+    const { scratch, outcome } = await confinedGo(`go mod download ${mod}@${version}`);
+    expect(outcome.exitCode, outcome.stderrTail).toBe(0);
+    expect(listing(path.join(scratch, "go", "mod")).some((p) => p.endsWith(`${mod}@${version}/hello.go`))).toBe(true);
+    expect(listing(operatorCache)).toEqual(before);
+  }, 60_000);
+
+  it("copies a module the operator already cached, reading it through the operator's cache", async () => {
+    process.env.GOPROXY = pathToFileURL(proxy).href;
+    sh(`go mod download ${mod}@${version}`, dir);
+    const before = listing(operatorCache);
+    expect(before.length).toBeGreaterThan(0);
+    // The real proxy is gone: only the operator's cache can supply the module.
+    process.env.GOPROXY = "off";
+    const { scratch, outcome } = await confinedGo(`go mod download ${mod}@${version}`);
+    expect(outcome.exitCode, outcome.stderrTail).toBe(0);
+    expect(listing(path.join(scratch, "go", "mod")).some((p) => p.endsWith(`${mod}@${version}/hello.go`))).toBe(true);
+    expect(listing(operatorCache)).toEqual(before);
+  }, 60_000);
+
+  it("leaves the operator's cache as it was when GOPRIVATE is set, so a cached private module still resolves", async () => {
+    // The consumer's go.mod and go.sum come from a host-side build while the module is still reachable.
+    // The worktree is where the confined job reads them from, and /tmp may be private to the job.
+    const app = path.join(dir, "wt");
+    await mkdir(app, { recursive: true });
+    await writeFile(path.join(app, "go.mod"), `module example.com/app\n\ngo 1.20\n\nrequire ${mod} ${version}\n`);
+    await writeFile(path.join(app, "main.go"), `package main\n\nimport hello "${mod}"\n\nfunc main() { _ = hello.Hi() }\n`);
+    process.env.GOPROXY = pathToFileURL(proxy).href;
+    sh("go build -buildvcs=false ./...", app);
+    const before = listing(operatorCache);
+    process.env.GOPRIVATE = "example.com/*";
+    process.env.GOPROXY = "off";
+    const { scratch, outcome } = await confinedGo(`go build -buildvcs=false ./... && go env GOMODCACHE GOPROXY`);
+    expect(outcome.exitCode, outcome.stderrTail).toBe(0);
+    // No proxy was put in front of the private path, and the run's cache was not used.
+    expect(outcome.stdoutTail).toContain(operatorCache);
+    expect(outcome.stdoutTail).not.toContain("file://");
+    expect(listing(path.join(scratch, "go", "mod"))).toEqual([]);
+    expect(listing(operatorCache)).toEqual(before);
+  }, 60_000);
 });

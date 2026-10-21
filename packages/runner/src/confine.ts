@@ -1,6 +1,8 @@
-import { spawn } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 
 /** Run-scoped locations a confined job's user-level state is redirected to, under its scratch directory. */
 const SCOPED_ENV_DIRS = {
@@ -40,6 +42,52 @@ async function probeBubblewrap(): Promise<string | undefined> {
   });
 }
 
+/** The operator's effective Go module settings, read once host-side with `go env` (which writes nothing). */
+export interface OperatorGo {
+  modCache: string;
+  proxy: string;
+  flags: string;
+  /** False when the operator has private-module settings: the job keeps their cache read-only and unredirected. */
+  redirect: boolean;
+}
+
+/** The operator's module cache, proxy, and flags as `go env` reports them for `env`; undefined when Go is not available. */
+export function operatorGoSettings(env: NodeJS.ProcessEnv): OperatorGo | undefined {
+  try {
+    // The probe must write nothing: no toolchain switch (which downloads into the operator's cache), no
+    // module or workspace lookup, and a neutral directory instead of whatever checkout the runner sits in.
+    const probeEnv: NodeJS.ProcessEnv = { ...env, GOTOOLCHAIN: "local", GOWORK: "off", GO111MODULE: "off" };
+    delete probeEnv.GOFLAGS;
+    const res = spawnSync("go", ["env", "-json", "GOMODCACHE", "GOPROXY", "GOFLAGS", "GOPRIVATE", "GONOPROXY"], {
+      env: probeEnv,
+      cwd: os.tmpdir(),
+      encoding: "utf8",
+      timeout: 10_000,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    if (res.status !== 0) return undefined;
+    const parsed = JSON.parse(res.stdout) as Record<string, string>;
+    if (!parsed.GOMODCACHE || !path.isAbsolute(parsed.GOMODCACHE)) return undefined;
+    // GOPRIVATE/GONOPROXY make Go bypass every proxy for matching modules, the file:// one over the operator's
+    // cache included, and a private module path must never be routed through a proxy. Such an operator keeps
+    // the pre-run-scoped behavior: their cache read-only and unredirected, so cached modules still resolve
+    // and an uncached download is not available inside confinement.
+    const redirect = (parsed.GOPRIVATE ?? "") === "" && (parsed.GONOPROXY ?? "") === "";
+    return { modCache: parsed.GOMODCACHE, proxy: parsed.GOPROXY ?? "", flags: env.GOFLAGS ?? parsed.GOFLAGS ?? "", redirect };
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Whether the launch gets a private writable /tmp: only when nothing the job reads lives under it
+ * (`needed`), since a private /tmp hides everything below it but the writable paths. Admission
+ * asks the same question, so a write it accepts under /tmp is one the sandbox allows.
+ */
+export function hasPrivateTmp(needed: readonly string[]): boolean {
+  return !needed.some(underTmp);
+}
+
 export interface ConfinedWorker {
   command: string;
   args: string[];
@@ -70,6 +118,8 @@ export function confineWorker(options: {
   /** Paths the job reads that must stay visible (the worker and executor modules, the runtime). */
   readPaths?: readonly string[];
   keepUserState: boolean;
+  /** The operator's Go settings, when known; the job then gets a run-scoped module cache reading through the operator's. */
+  operatorGo?: OperatorGo;
 }): ConfinedWorker {
   const scratch = path.resolve(options.scratchDir);
   const env: NodeJS.ProcessEnv = { ...options.env };
@@ -85,7 +135,7 @@ export function confineWorker(options: {
   // Everything below `scratch` was writable by earlier jobs, so none of it is trusted: each component is
   // checked without following links, and a link or file in the way is removed, never written through.
   ensureRealDir(scratch);
-  for (const rel of [...subdirs, "go"]) ensureRealDirBelow(scratch, rel);
+  for (const rel of [...subdirs, "go", ...(options.operatorGo?.redirect === true ? ["go/mod"] : [])]) ensureRealDirBelow(scratch, rel);
   // The operator's Go settings (GOPROXY and the like) carry over once; a later `go env -w` stays in the run.
   const goEnv = path.join(scratch, "go", "env");
   const operatorGoEnv =
@@ -99,6 +149,17 @@ export function confineWorker(options: {
     }
   }
   env.GOENV = goEnv;
+  const go = options.operatorGo;
+  if (go?.redirect === true) {
+    // Cached modules are copied from the operator's cache through a file:// proxy, uncached ones download
+    // into the run's cache; -modcacherw keeps the copies deletable. Nothing is written to the operator's cache.
+    env.GOMODCACHE = path.join(scratch, "go", "mod");
+    const operatorProxy = go.proxy === "" ? "https://proxy.golang.org,direct" : go.proxy;
+    env.GOPROXY = `${pathToFileURL(path.join(go.modCache, "cache", "download")).href.replaceAll(",", "%2C")},${operatorProxy}`;
+    env.GOFLAGS = `${go.flags} -modcacherw`.trim();
+    // Checksum verification needs the operator's checksum-database evidence, which lives in their cache.
+    seedSumdb(path.join(go.modCache, "cache", "download", "sumdb"), scratch, path.join("go", "mod", "cache", "download", "sumdb"));
+  }
 
   for (const dir of options.writable) {
     if (lstatSync(dir).isSymbolicLink()) throw new Error(`${dir} is a symbolic link; a confined job's writable path must be a real directory`);
@@ -109,8 +170,8 @@ export function confineWorker(options: {
   if (missing.length > 0) throw new Error(`confined job needs writable paths that do not exist: ${missing.join(", ")}`);
   // A private /tmp hides everything under it but the writable paths rebound below, so it is
   // used only when nothing the job reads lives there; otherwise /tmp stays read-only.
-  const needed = [...(options.readPaths ?? []), options.cwd];
-  const privateTmp = !needed.some(underTmp);
+  const needed = [...(options.readPaths ?? []), options.cwd, ...(go !== undefined ? [go.modCache] : [])];
+  const privateTmp = hasPrivateTmp(needed);
   return {
     command: "bwrap",
     args: [
@@ -132,6 +193,47 @@ export function confineWorker(options: {
     env,
     infoFd: 3,
   };
+}
+
+/**
+ * Copy the operator's checksum-database cache (small) into the run's module cache, so an offline job can
+ * verify modules whose go.sum entries are missing. Copies, never links; links in the source are skipped;
+ * each destination component is checked without following links, and what a job left in the way is
+ * replaced. A file already there is kept.
+ */
+function seedSumdb(source: string, scratch: string, rel: string): void {
+  const walk = (from: string, to: string): void => {
+    let entries;
+    try {
+      entries = readdirSync(from, { withFileTypes: true });
+    } catch {
+      return; // no checksum evidence cached
+    }
+    ensureRealDirBelow(scratch, to);
+    for (const entry of entries) {
+      const src = path.join(from, entry.name);
+      const dstRel = path.join(to, entry.name);
+      if (entry.isSymbolicLink()) continue;
+      if (entry.isDirectory()) {
+        walk(src, dstRel);
+      } else if (entry.isFile()) {
+        const dst = path.join(scratch, dstRel);
+        const stat = lstatOrUndefined(dst);
+        if (stat?.isFile()) continue;
+        try {
+          if (stat !== undefined) {
+            if (stat.isDirectory()) rmSync(dst, { recursive: true, force: true });
+            else unlinkSync(dst);
+          }
+          // `wx` never opens an existing path, and never follows a link at it.
+          writeFileSync(dst, readFileSync(src), { flag: "wx" });
+        } catch {
+          /* unreadable evidence: the job verifies against the network instead */
+        }
+      }
+    }
+  };
+  walk(source, rel);
 }
 
 function underTmp(p: string): boolean {
