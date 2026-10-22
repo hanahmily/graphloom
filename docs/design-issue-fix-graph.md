@@ -16,6 +16,10 @@ Version 0.8.1 splits the BanyanDB profile's `make generate` into separately
 cached steps (proto, mcp npm install, mocks) with declared inputs and outputs,
 so checkouts of a run reuse each output while its own inputs are unchanged
 ([#174](https://github.com/hanahmily/graphloom/issues/174)).
+Version 0.9.0 adds the [`canopy` profile](../examples/plugins/issue-fix/README.md#the-canopy-profile)
+for Node/TypeScript changes under `canopy/` in skywalking-banyandb, and makes the
+`vitest` runner force `NODE_ENV=test` and work with vitest 5
+([#179](https://github.com/hanahmily/graphloom/issues/179)).
 
 ## Purpose
 

@@ -25,6 +25,7 @@ and the [issues file](../../../docs/design-issue-fix-graph.md#the-issues-file).
 |---|---|---|---|---|
 | [`profiles/banyandb.json`](profiles/banyandb.json) | apache/skywalking-banyandb, issues in apache/skywalking | `go-test` | `make test-ci` for the changed packages, lint (cheap tier); build, check (full tier; `make check` includes license-check) | `CHANGES.md` |
 | [`profiles/graphloom.json`](profiles/graphloom.json) | hanahmily/graphloom (this repository) | `vitest` | `npm run typecheck`, `npm run build`, `npm test` | none |
+| [`profiles/canopy.json`](profiles/canopy.json) | apache/skywalking-banyandb, issues in apache/skywalking; Node/TypeScript changes under `canopy/` | `vitest` | the changed workspaces' tests, typecheck, lint (cheap tier); build, `npm test`, `make license-dep` (full tier) | `CHANGES.md` |
 
 The banyandb profile reproduces banyandb-fix's requirements, statements,
 environment checks, prompts and commands, with two differences: the issues
@@ -96,6 +97,54 @@ graphloom profile the full suite takes about ten minutes; its commands allow
 ```sh
 GRAPHLOOM_GITHUB_LIVE_TOKEN="$(gh auth token)" node ../apps/graphloom/dist/main.js run issue-fix-graphloom-task.yaml
 ```
+
+## The canopy profile
+
+[`profiles/canopy.json`](profiles/canopy.json) (since 0.9.0) checks changes
+under `canopy/` in apache/skywalking-banyandb, an npm workspace (`web`,
+`server`, `shared`) tested with Vitest. Select it with
+`config: plugins/issue-fix/profiles/canopy.json` and a request such as
+`Fix apache/skywalking#14001.`; [`../../issue-fix-canopy-task.yaml`](../../issue-fix-canopy-task.yaml)
+is a ready task. The banyandb profile cannot check such a change: its
+`make test-ci` command fails when the change touches no Go package.
+
+- **Environment.** `node` must equal `canopy/package.json`'s `engines.node` (an
+  exact pin, as the repository's `make check-node-version` requires), plus
+  `git`, `license-tools` (`make`, and `go` or `bin/license-eye`, for
+  `make license-dep`), `ocr`, `codex` and `claude`. Prepare runs
+  `npm ci --include=dev` in `canopy/` (dev dependencies matter: an agent shell
+  often has `NODE_ENV=production`), cached on the lock file and the
+  workspaces' `package.json` files, with the `node_modules` directories as its
+  outputs.
+- **Cheap tier**, run beside GREEN: `test-changed` runs `npm run -w <ws> test`
+  for each workspace the change touches (`shared/` and canopy's root files run
+  both; a change touching no workspace fails), then `npm run typecheck` and
+  `npm run lint`, each in `canopy/`.
+- **Full tier**, only once the cheap tier and GREEN passed: `npm run build`,
+  `npm test` for all workspaces, and `make license-dep` with
+  `make check-license-outputs` from the repository root. `license-dep`
+  reinstalls the canopy dependencies it prunes, and runs last. The Playwright
+  tests (`canopy/e2e`, `npm run e2e`) are not run; the planner marks a change
+  that needs them `needsE2E`.
+- **Self check.** The implementer runs `npm run -w <ws> typecheck` and `lint`
+  for the workspaces it changed (all three when `shared/` changed).
+- **Regression test.** A Vitest test, named by its path from the repository
+  root (`canopy/server/test/config.test.ts`,
+  `canopy/web/src/components/Pager.test.tsx`) and its full name. The `vitest`
+  runner runs it from the nearest `package.json` (the workspace) with the
+  hoisted `canopy/node_modules/.bin/vitest`, so nothing in the profile selects
+  a directory. Two changes to the runner came with the profile and apply to
+  every `vitest` profile. It forces `NODE_ENV=test`: under `production`, React
+  loads its production build and every component test fails in setup (the
+  profile's test commands set it too). And its reporter and name pattern work
+  with vitest 5, which canopy uses: vitest 5 no longer calls `onFinished`, and
+  joins a test's titles with ` > ` where vitest 3 uses a space.
+- **Budgets** are banyandb's scaled down for a single-workspace UI change
+  (3,000 agent invocations, 150 jobs, 250 decisions, 50 corrections, 10 hours of
+  active time). They are unmeasured: no live run has used this profile yet.
+  Measure one with `graphloom stats` and revise them ([budgets](../../../docs/budgets.md)).
+- Not run: `license-check` (the license-header scan, slow on the whole
+  repository). A new source file still needs the Apache header.
 
 ## Another repository
 

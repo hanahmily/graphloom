@@ -50,6 +50,10 @@ const real = (p) => { try { return fs.realpathSync(p); } catch { return p; } };
 const text = (e) => (e && typeof e === "object" ? (e.name ? String(e.name) : "Error") + ": " + String(e.message ?? "") : String(e)).slice(0, 600);
 const failedHooks = (r) => Object.entries((r && r.hooks) || {}).filter(([, s]) => s !== "pass").map(([h]) => h);
 export default class GraphLoomRegressionReporter {
+  // vitest 5 calls only onTestRunEnd (its test modules carry the raw file task); vitest 3 and 4 call onFinished too.
+  onTestRunEnd(modules = [], errors = []) {
+    this.onFinished(modules.map((m) => m.task ?? m), errors);
+  }
   onFinished(files = [], errors = []) {
     const want = real(env.GRAPHLOOM_VITEST_TARGET);
     const name = env.GRAPHLOOM_VITEST_NAME;
@@ -89,6 +93,10 @@ export default class GraphLoomRegressionReporter {
 `;
 
 /**
+ * Runs with NODE_ENV=test whatever the caller's is: vitest only defaults it, and a
+ * production NODE_ENV (as a deployed agent shell often has) makes React load its production
+ * build, which has no `act`, so every component test fails in setup.
+ *
  * Finds the test file's package (the nearest directory with a package.json)
  * and the nearest installed vitest, and runs only the named test there with
  * the reporter above. Exits with the target test's own status, not vitest's:
@@ -105,7 +113,7 @@ const SCRIPT = [
   'a="$(cd "$(dirname "$f")" && pwd -P)/$(basename "$f")"',
   'r="$GRAPHLOOM_REPORT_FILE"; rm -f "$r" "$r.status"',
   'tmp="$(mktemp -d)"; printf \'%s\' "$4" > "$tmp/graphloom-regression-reporter.mjs"',
-  '(cd "$d" && GRAPHLOOM_VITEST_TARGET="$a" GRAPHLOOM_VITEST_NAME="$t" GRAPHLOOM_VITEST_FILE="$f" "$bin" run "$a" --testNamePattern "$p" --reporter="$tmp/graphloom-regression-reporter.mjs")',
+  '(cd "$d" && NODE_ENV=test GRAPHLOOM_VITEST_TARGET="$a" GRAPHLOOM_VITEST_NAME="$t" GRAPHLOOM_VITEST_FILE="$f" "$bin" run "$a" --testNamePattern "$p" --reporter="$tmp/graphloom-regression-reporter.mjs")',
   "rc=$?",
   'rm -rf "$tmp"',
   `[ -s "$r" ] || echo '{"${MARKER}":{"missing":true}}' > "$r"`,
@@ -121,9 +129,19 @@ export function escapeRegExp(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+/**
+ * `--testNamePattern` matches a test's titles joined by a space in vitest 3 and by " > " in vitest 5,
+ * so each space of the name matches either: the name's own spaces and the join are not told apart.
+ * The reporter compares the title path itself, so a looser pattern can only run extra tests, never
+ * report one as the target.
+ */
+export function namePattern(name: string): string {
+  return `^${escapeRegExp(name).replace(/ /g, "(?: > | )")}$`;
+}
+
 /** The argv that runs exactly the named test in its file and writes the reduced report. */
 export function vitestArgv(test: RegressionTestRef): string[] {
-  return ["sh", "-c", SCRIPT, "regression", test.package, test.name, `^${escapeRegExp(test.name)}$`, REPORTER];
+  return ["sh", "-c", SCRIPT, "regression", test.package, test.name, namePattern(test.name), REPORTER];
 }
 
 /** The reduced report, or undefined when the run wrote none. */
