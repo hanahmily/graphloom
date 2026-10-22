@@ -41,6 +41,8 @@ export interface RunnerConfig {
   github?: { tokenEnv?: string; baseUrl?: string };
   /** Settings for command jobs, which run as the user in the job's workspace. */
   command?: { timeoutMs?: number };
+  /** Shell command run once when a run leaves `running`; `run --on-stop` and `resume --on-stop` override it. */
+  notify?: { onStop?: string; timeoutMs?: number };
 }
 
 /** Every harness a job of this run may use. */
@@ -75,8 +77,13 @@ export async function loadRunnerConfig(env: NodeJS.ProcessEnv = process.env): Pr
  * executable. A command given as a path is bound to the absolute path that
  * passed the check, since the agent starts in the run's worktree.
  */
-export async function requireRunnerConfig(env: NodeJS.ProcessEnv = process.env): Promise<RunnerConfig> {
+export async function requireRunnerConfig(
+  env: NodeJS.ProcessEnv = process.env,
+  /** Called with the parsed config before the harness availability checks, which can throw. */
+  onLoaded?: (config: RunnerConfig) => void,
+): Promise<RunnerConfig> {
   const loaded = await loadRunnerConfig(env);
+  if (loaded !== undefined) onLoaded?.(loaded);
   if (loaded === undefined) {
     throw new Error(
       `no agent runner configured: create ~/.config/graphloom/runner.json (or point ${RUNNER_CONFIG_ENV} at one) with {"harness": "claude-code", "allowUnrestricted": true}`,
@@ -126,7 +133,7 @@ function expandHome(p: string): string {
 }
 
 export function parseRunnerConfig(value: unknown, source = "runner config"): RunnerConfig {
-  const obj = settings(value, source, ["harness", "harnesses", "allowUnrestricted", "timeoutMs", "claude", "codex", "pi", "github", "command"]);
+  const obj = settings(value, source, ["harness", "harnesses", "allowUnrestricted", "timeoutMs", "claude", "codex", "pi", "github", "command", "notify"]);
   if (!isHarness(obj.harness)) throw new Error(`${source}: harness must be one of ${HARNESS_NAMES.join(", ")}`);
   if (obj.allowUnrestricted !== true) throw new Error(`${source}: allowUnrestricted must be true to run an agent with your user permissions`);
   const config: RunnerConfig = { harness: obj.harness, allowUnrestricted: true };
@@ -151,6 +158,13 @@ export function parseRunnerConfig(value: unknown, source = "runner config"): Run
   if (obj.command !== undefined) {
     const c = settings(obj.command, `${source}: command`, ["timeoutMs"]);
     config.command = c.timeoutMs !== undefined ? { timeoutMs: milliseconds(c.timeoutMs, `${source}: command.timeoutMs`, false) } : {};
+  }
+  if (obj.notify !== undefined) {
+    const n = settings(obj.notify, `${source}: notify`, ["onStop", "timeoutMs"]);
+    config.notify = {
+      ...(n.onStop !== undefined ? { onStop: nonempty(n.onStop, `${source}: notify.onStop`) } : {}),
+      ...(n.timeoutMs !== undefined ? { timeoutMs: milliseconds(n.timeoutMs, `${source}: notify.timeoutMs`, false) } : {}),
+    };
   }
   if (obj.claude !== undefined) {
     const nested = `${source}: claude`;

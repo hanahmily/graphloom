@@ -48,6 +48,9 @@ omits them. Other settings:
 - `claude`, `pi` and `codex` take `passEnv`, extra environment variable names
   the agent's commands may see. `timeoutMs` at the top level limits each job
   (default one hour).
+- `notify.onStop` (a shell command) and `notify.timeoutMs` (default 60 seconds):
+  run once when a run leaves `running`, like `run --on-stop <command>`, which
+  overrides it. See "Knowing when a run stops" in the main README.
 
 Credentials never go in this file, and `graphloom` refuses one that holds them.
 Claude Code uses the login in its config dir. Pi uses the keys in its agent dir
