@@ -1,6 +1,6 @@
 {
   "graphId": "issue-fix",
-  "version": "0.7.1",
+  "version": "0.8.1",
   "sdkProtocol": 1,
   "taskConfig": "required",
   "entryPoints": {
@@ -16,35 +16,35 @@
     "vitest": "^3.0.9"
   },
   "digests": {
-    "sourceTree": "d9796a7d10600de2f24854c747ac1e1d9c0bedfd01bbf0c3da30d7f373b67345",
-    "packageLock": "ada6cc032aadd76ae930a75ec21801500e6a5d2a34da24d2d77dfd5a22289c91",
+    "sourceTree": "6ccc575897d782501452ff6cab9eb646be5f8cf9ddbd96b2d8f871fcbaa474ba",
+    "packageLock": "d216abc18b14ac4882edbc6cf0c1c95010a319e46dd036fba16b8071e76454c1",
     "files": {
-      "package.json": "ab22caca097a1105ce7b974c2a9b9b86133c333b948dfe66f5045cc9434a02f0",
-      "package-lock.json": "ada6cc032aadd76ae930a75ec21801500e6a5d2a34da24d2d77dfd5a22289c91",
+      "package.json": "e231b469da9541d5f5e564cabd11691bbfc0ccd317685454fd1ecc8c676649c4",
+      "package-lock.json": "d216abc18b14ac4882edbc6cf0c1c95010a319e46dd036fba16b8071e76454c1",
       "tsconfig.json": "3bafb75902b6084b621c996ae838dbfb87088cf095ce411be9809ce79bf3916b",
-      "profiles/banyandb.json": "8b50ed9b7b1fed4fac3c5a32f86835500b190e167684992d4d8922b821a55c93",
+      "profiles/banyandb.json": "225553ab08b48c396caf2eafe9adf8926dbbf42d12a5254a7d3f9180790dde64",
       "profiles/graphloom.json": "0f0e668071d8b01bd5cad642a68c752ed3bf6f11fdcd55ac927d97c68fbaa095",
       "src/constants.ts": "efac89075dc9cf7f7ac3f7309547bdd694976e1640dff6f769420e1d1be76eb3",
-      "src/decision-record.ts": "c6483fe6c602eae5f18f687b6712d0df29e0055fde4fab4b83518d3e4709a2bb",
-      "src/evidence.ts": "7aee0fc739b9f01918f06b946f5acf134059390e6674154e1db4271741ad4f94",
+      "src/decision-record.ts": "c0adf046b07bf753561afe69a395e22eb35b43441bf39d51d0537f04dfffaf11",
+      "src/evidence.ts": "0bb167ad61727aaddee5a339e1ed25644fd706f9070327c8be74e37a7b22e109",
       "src/findings.ts": "69162e218700ac76f8c52d6f44bd222c1e383f9b022ef0c25a280517b93fe8f4",
-      "src/graph.ts": "a9587b61d7e49d6ebe325207cded40dc0851cd33379c201ff6d3653062a965a9",
+      "src/graph.ts": "eb6990b65857eff5b628d0b630e712e6419c68e172c79472cf01006fed706024",
       "src/index.ts": "37a937ec98d937bddbe18dbfa9e1279174e78ee7dcaf89c09a5334e797cb3f43",
       "src/issues.ts": "499140416319615e5a2908fa04424638e07ec2937bea10f0cfc987d35b9d13bf",
       "src/ocr.ts": "ca58a7bff4493c8d09b3b409fa8ac515386a411e001bcedab3804849eb6f41f5",
-      "src/profile.ts": "32d394c97cdfcdf49c893dc7371f2af12e92fcdef60af49b57c26c19925b1d5f",
-      "src/prompts.ts": "6a92a549dd006c6913c446b881358be0731232960c11f295aae0ae93bf88b17d",
-      "src/qualification.ts": "02af456708dac8e91fef1bebce10233920daafb791105913837685578aca7e95",
+      "src/profile.ts": "7545871a04f0d084ef9e8024da0500294aefc6beaaea34923c45f310000864f8",
+      "src/prompts.ts": "54d17813839aa0455d1f67707ed302c3a9f17cde3288b2b20c8a34da01597dbb",
+      "src/qualification.ts": "65ee42265383fe59ec6d3c0b92e0a6a4beeaeafcf274f53539af8fac6674918a",
       "src/rehearsal.ts": "da0ea804ef706e93449f98613bc11879ee1437c293f45e27ff5c271a0d94e47e",
       "src/review-common.ts": "2b711248d1b227c01f8ed36bfa2399791fbcf9543a92e89414c74f119b20323c",
       "src/runners/go-test.ts": "321eddf6923ca422c6b2be6511a337aead0887ec9245cd77a7a6ceec59994128",
       "src/runners/index.ts": "8bef945520b8015089f28e50256ded20b47d7d7666e94942b3fc373db592359e",
       "src/runners/types.ts": "a85674b56aee33dcd1c74e45721afab82c5ee50e5f6aa5267df65032789c5900",
       "src/runners/vitest.ts": "c7eb7671e25fec4eb771890eb3b28fbd23ef6bd5754bfe84fef195de963dd0cc",
-      "src/validators.ts": "35df4181437f503a817959c5b7c6c200c147f6f75188d06d03996156e2a80433",
-      "test/issue-fix.test.ts": "dd94cb6ead8126d10f92c045a5c91ae4e3a9615fb885d92ef8773fcc7a40cd9b",
+      "src/validators.ts": "d5553a262b053b4e3a9a5f7ea93238c2416b52806d72a61100eb23d505954439",
+      "test/issue-fix.test.ts": "a6055e8147e2619e0aab31520d7a92903e33015ba75b090f4052c8d8925d6a2f",
       "test/issues.test.ts": "a436e9f769173105669114c8e320258d2b72bf2a66424ca4219f354a58942d72",
-      "test/profiles.test.ts": "c3c9c2c4bc463e2419c9d31cb8c088b62b88567c22229b8d40eafdb8c919b960"
+      "test/profiles.test.ts": "af6c740816cc531d963f16ca37b84a522306ca148822c9ebc3f000530df785b4"
     }
   }
 }

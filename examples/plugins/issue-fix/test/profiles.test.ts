@@ -75,6 +75,10 @@ const load = async (module: string) => (await import(pathToFileURL(path.join(ban
 describe.skipIf(!existsSync(path.join(banyandbFixDist, "index.js")))("the banyandb profile reproduces banyandb-fix", () => {
   it("describes the same stages, requirements, validators, contracts and environment", async () => {
     const theirs = ((await load("index.js")).createGraph as () => { describe(): GraphDefinition })().describe();
+    // The deliberate differences (#173): no separate license-check command (`make check` runs it), and the
+    // implementer's record may carry `selfChecks`.
+    const withoutLicense = (definition: object) =>
+      JSON.parse(JSON.stringify(definition).replace("make license-check, make build, make lint and make check all pass", "make build, make lint and make check (which includes license-check and check-format) all pass")) as GraphDefinition;
     const ours = createGraph().describe(BANYANDB);
     // Budgets are what a run may spend, not behaviour: banyandb-fix predates them.
     const strip = ({ graphId: _g, version: _v, privateStateSchema: _p, defaultBudgets: _b, ...rest }: GraphDefinition) => rest;
@@ -84,16 +88,17 @@ describe.skipIf(!existsSync(path.join(banyandbFixDist, "index.js")))("the banyan
         JSON.stringify(definition)
           .replaceAll("decision-record-v2", "decision-record-v1")
           .replace('"change":{"type":"string"},', "")
-          .replace('"summary","change",', '"summary",'),
+          .replace('"summary","change",', '"summary",')
+          .replace(',"selfChecks":{"type":"array","items":{"type":"string"}}', ""),
       ) as Omit<GraphDefinition, "graphId" | "version" | "privateStateSchema" | "defaultBudgets">;
     // And #174: banyandb-fix runs one `make generate`; the profile runs it per project so each output is cached on its own inputs.
     const monolithic = (definition: ReturnType<typeof v1>) => ({
       ...definition,
       environment: { ...definition.environment, prepare: theirs.environment?.prepare },
     });
-    expect(monolithic(v1(strip(ours)))).toEqual(strip(theirs));
+    expect(monolithic(v1(strip(ours)))).toEqual(strip(withoutLicense(theirs)));
     expect(theirs.environment?.prepare?.map((c) => c.argv.join(" "))).toEqual(["make generate"]);
-    expect(ours).toMatchObject({ graphId: "issue-fix", version: "0.7.1", privateStateSchema: "issue-fix-private-v1" });
+    expect(ours).toMatchObject({ graphId: "issue-fix", version: "0.8.1", privateStateSchema: "issue-fix-private-v1" });
   });
 
   it("splits make generate into separately cached steps with narrow inputs (#174)", () => {
@@ -118,7 +123,16 @@ describe.skipIf(!existsSync(path.join(banyandbFixDist, "index.js")))("the banyan
     const decisions = await load("decision-record.js");
     const call = <T>(f: unknown, ...args: unknown[]) => (f as (...a: unknown[]) => T)(...args);
     // The one deliberate difference (#161): the planner and the implementer are also asked for `change`.
-    const v1 = (text: string) => text.split("\n").filter((l) => !l.startsWith("- change: ") && !l.startsWith("- summary is your report")).join("\n").replaceAll("decision-record-v2", "decision-record-v1");
+    // The deliberate differences (#173): the checks text no longer names license-check and says the cheap checks go first,
+    // and the implementer is asked to run the profile's self-check commands.
+    const theirChecks = "The controller checks your change in clean checkouts: the base commit with only your test files must fail the test by assertion; the full change must pass the test, `make test-ci` for the changed packages, and make license-check, build, lint and check. `make check` must leave no file changed, so run `make format` if you touch Go code.";
+    const v1 = (text: string) =>
+      text
+        .split("\n")
+        .filter((l) => !l.startsWith("- change: ") && !l.startsWith("- summary is your report") && !l.startsWith("- Before you return status ready"))
+        .map((l) => (l === `- ${banyandb.implementation.checks}` ? `- ${theirChecks}` : l))
+        .join("\n")
+        .replaceAll("decision-record-v2", "decision-record-v1");
     const snapshot = "# apache/skywalking#14111: Scheduler\n\nBody.";
     expect(v1(planInstruction(banyandb, { issue: 14111, request: "Fix apache/skywalking#14111.", snapshot }))).toBe(
       call(prompts.planInstruction, { issue: 14111, request: "Fix apache/skywalking#14111.", snapshot }),
@@ -127,11 +141,11 @@ describe.skipIf(!existsSync(path.join(banyandbFixDist, "index.js")))("the banyan
       const args = { issue: 14111, plan: GO_PLAN, ...(feedback !== undefined ? { feedback } : {}) };
       expect(v1(implementInstruction(banyandb, args))).toBe(call(prompts.implementInstruction, args));
     }
-    expect(candidateCommands(banyandb, GO_PLAN.test!)).toEqual(call(prompts.candidateCommands, GO_PLAN.test));
+    expect(candidateCommands(banyandb, GO_PLAN.test!)).toEqual(call<Array<{ id: string }>>(prompts.candidateCommands, GO_PLAN.test).filter((c) => c.id !== "license-check"));
     expect(redCommands(banyandb, GO_PLAN.test!)).toEqual(call(prompts.redCommands, GO_PLAN.test));
     expect(commitMessage(banyandb, { issue: 14111, issueTitle: ISSUE.title, record: GO_PLAN })).toBe(call(prompts.commitMessage, { issue: 14111, issueTitle: ISSUE.title, record: GO_PLAN }));
     const pr = { issue: 14111, issueTitle: ISSUE.title, record: GO_PLAN, base: "0123456789abcdef", review: "Reviewed by Codex: no comments.", dismissed: ["F1 refuted"] };
-    expect(pullRequestDescription(banyandb, pr)).toBe(call(prompts.pullRequestDescription, pr));
+    expect(pullRequestDescription(banyandb, pr)).toBe(call<string>(prompts.pullRequestDescription, pr).replace("`make license-check`, ", ""));
     const background = reviewBackground(banyandb, ISSUE, GO_PLAN);
     expect(background).toBe(call(ocr.reviewBackground, ISSUE, GO_PLAN));
     const review = { ocr: "/opt/ocr", base: "abc", background, known: { open: [{ id: "F1", state: "confirmed", description: "x" }], settled: [] }, sweep: true };

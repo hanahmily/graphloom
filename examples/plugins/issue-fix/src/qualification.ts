@@ -16,7 +16,7 @@ const BANYANDB = shippedProfile("banyandb");
 const GRAPHLOOM = shippedProfile("graphloom");
 const CHANGES_PATH = "CHANGES.md";
 /** The banyandb profile's own command ids. */
-const BYDB = { testCi: "test-ci", license: "license-check", build: "build", lint: "lint", check: "check" } as const;
+const BYDB = { testCi: "test-ci", build: "build", lint: "lint", check: "check" } as const;
 
 /** One expected outcome, derived from a requirement statement rather than from any validator's code. */
 export interface QualificationCase {
@@ -148,7 +148,7 @@ const redReverted = (report: string, exitCode = 1, o: RunOptions = {}) =>
 const green = (report = passedReport, exitCode = 0, o: RunOptions = {}) => command(COMMAND.regression, exitCode, { report, ...o });
 const candidate = (overrides: Partial<Record<string, number>> = {}, o: RunOptions = {}): EvidenceRecord[] => [
   green(passedReport, overrides[COMMAND.regression] ?? 0, o),
-  ...[BYDB.testCi, BYDB.license, BYDB.build, BYDB.lint, BYDB.check].map((id) => command(id, overrides[id] ?? 0, o)),
+  ...[BYDB.testCi, BYDB.build, BYDB.lint, BYDB.check].map((id) => command(id, overrides[id] ?? 0, o)),
 ];
 
 const CHANGES = "# Changes by Version\n\nRelease Notes.\n\n## 0.12.0\n\n### Bug Fixes\n\n- Warn instead of reporting a timeout for long scheduled actions.\n\n## 0.11.0\n\n- Older.\n";
@@ -311,8 +311,11 @@ export const QUALIFICATION_CASES: readonly QualificationCase[] = [
 
   c("build-checks", "all build checks pass", [...candidate()], "passed"),
   c("build-checks", "lint fails", [...candidate({ [BYDB.lint]: 2 })], "failed"),
-  c("build-checks", "make check reformatted a file", [green(), ...[BYDB.testCi, BYDB.license, BYDB.build, BYDB.lint].map((id) => command(id, 0)), command(BYDB.check, 0, { mutations: ["pkg/timestamp/scheduler.go"] })], "failed"),
-  c("build-checks", "make check did not run", [green(), ...[BYDB.testCi, BYDB.license, BYDB.build, BYDB.lint].map((id) => command(id, 0))], "failed"),
+  c("build-checks", "make check reformatted a file", [green(), ...[BYDB.testCi, BYDB.build, BYDB.lint].map((id) => command(id, 0)), command(BYDB.check, 0, { mutations: ["pkg/timestamp/scheduler.go"] })], "failed"),
+  c("build-checks", "make check did not run", [green(), ...[BYDB.testCi, BYDB.build, BYDB.lint].map((id) => command(id, 0))], "failed"),
+  c("build-checks", "only the cheap tier ran, so the full tier's build and check did not", [green(), command(BYDB.testCi, 0), command(BYDB.lint, 0)], "failed"),
+  c("build-checks", "the full tier ran as its own job on the same change", [green(), command(BYDB.testCi, 0), command(BYDB.lint, 0), command(BYDB.build, 0, { op: "op-full" }), command(BYDB.check, 0, { op: "op-full" })], "passed"),
+  c("build-checks", "the full tier passed on an older change", [green(), command(BYDB.testCi, 0), command(BYDB.lint, 0), command(BYDB.build, 0, { digest: OTHER }), command(BYDB.check, 0, { digest: OTHER })], "failed"),
   c("build-checks", "no candidate checks", [], "inconclusive"),
 
   c("write-scope", "code, test and changelog", [implementer(READY), green()], "passed"),
