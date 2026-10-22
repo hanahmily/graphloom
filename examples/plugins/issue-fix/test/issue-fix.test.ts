@@ -12,6 +12,7 @@ import {
   candidateCommands,
   commandsFor,
   commandSummary,
+  implementInstruction,
   commitMessage,
   deliverableFollowUp,
   withoutBookkeeping,
@@ -108,6 +109,12 @@ interface Scenario {
   reds?: CommandResult[];
   /** Resume (a new generation) right after this candidate-checks run (1-based), as an operator does once the environment is fixed. */
   resumeAfterCandidate?: number;
+  /** Outcomes for each full-tier job in order (the last repeats), instead of the round's `candidate` entry. */
+  fullChecks?: Array<Partial<Record<string, CommandResult>>>;
+  /** The profile config the run uses, instead of the banyandb profile. */
+  profile?: unknown;
+  /** Resume after this many full-tier check jobs. */
+  resumeAfterFullChecks?: number;
   /** Resume right after this base RED run (1-based). */
   resumeAfterRed?: number;
   /** The regression outcome for a reverted-candidate RED retry, when the base checkout cannot build the test alone. */
@@ -190,6 +197,7 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
   let implemented = 0;
   let changed = 0;
   let candidates = 0;
+  let fullJobs = 0;
   let redRuns = 0;
   let revertedRuns = 0;
   let planned = 0;
@@ -317,15 +325,18 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
       return;
     }
     if (job.checkout?.from === "candidate") {
-      const results = scenario.candidate?.[candidates] ?? {};
-      const mutations = scenario.candidateMutations?.[candidates] ?? [];
-      candidates += 1;
+      // A round of candidate checks is one job, or two when the profile is tiered: the full job belongs to the round the cheap job opened.
+      const greenJob = input!.commands!.some((c) => c.id === COMMAND.regression);
+      const round = greenJob ? candidates++ : candidates - 1;
+      const results = (!greenJob && scenario.fullChecks !== undefined ? nth(scenario.fullChecks, fullJobs) : undefined) ?? scenario.candidate?.[round] ?? {};
+      const mutations = scenario.candidateMutations?.[round] ?? [];
       for (const c of input!.commands!) {
         const defaults: CommandResult =
           c.id === COMMAND.regression ? { report: PASSED } : c.id === COMMAND.changesDiff ? { stdout: "+- Warn while a scheduled action is still running.\n" } : {};
         record("command", { ...commandPayload(c.id, { ...defaults, ...results[c.id] }, c.argv), checkout: { from: "candidate", base: "base-sha", commit: `c-${op}`, paths: CHANGED, prepared: true, mutations, phase: "run" } }, job, op);
       }
-      if (scenario.resumeAfterCandidate === candidates) resumeAt();
+      if (greenJob && scenario.resumeAfterCandidate === candidates) resumeAt();
+      if (!greenJob && scenario.resumeAfterFullChecks === ++fullJobs) resumeAt();
       return;
     }
     if (job.checkout?.from === "base") {
@@ -355,7 +366,7 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
     }
   }
 
-  const definition = createGraph().describe(BANYANDB);
+  const definition = createGraph().describe(scenario.profile ?? BANYANDB);
   for (let step = 0; step < 100; step += 1) {
     const view: RunView = {
       runId: "run",
@@ -374,7 +385,7 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
       generation,
       stateRevision: step,
       activeVersion: "issue-fix@0.1.0",
-      config: BANYANDB,
+      config: scenario.profile ?? BANYANDB,
       candidateDigest: digest,
       ...(resume !== undefined ? { resume } : {}),
       ...(sessions.length > 0 ? { agentSessions: structuredClone(sessions) } : {}),
@@ -399,7 +410,7 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
       const history = evidence.filter((e) => e.candidateDigest !== undefined && e.candidateDigest !== digest);
       const results = stage.requirementIds.map((requirementId) => {
         const binding = definition.defaultValidators.find((b) => b.requirementId === requirementId)!;
-        return { requirementId, binding, result: validatorById(binding.validatorId)!.evaluate({ requirementId, statement: "s", evidence: visible, history, candidateDigest: digest, config: BANYANDB }) };
+        return { requirementId, binding, result: validatorById(binding.validatorId)!.evaluate({ requirementId, statement: "s", evidence: visible, history, candidateDigest: digest, config: scenario.profile ?? BANYANDB }) };
       });
       const failure = results.find((r) => r.result.status !== "passed");
       if (failure !== undefined) throw new Error(`validate ${stage.id} failed: ${failure.requirementId}: ${failure.result.reason}`);
@@ -448,6 +459,20 @@ const deliverArgs = (jobs: JobSpec[]) => {
   const n = Number(argv[5]);
   return { branch: argv[4], message: argv.slice(6, 6 + n).join(""), body: argv.slice(6 + n).join("") };
 };
+/** Candidate-checkout results for `ids`, all successful, bound to `digest`, as separate jobs of one candidate would leave them. */
+function candidateEvidenceFor(ids: string[], digest = "d1"): EvidenceRecord[] {
+  return ids.map((id, i) => ({
+    ref: `t-${digest}-${id}-${i}`,
+    kind: "command" as const,
+    candidateDigest: digest,
+    payload: {
+      command: { id, argv: [id], exitCode: 0, stdoutTail: "", stderrTail: "", ...(id === COMMAND.regression ? { report: { text: PASSED, truncated: false } } : {}) },
+      checkout: { from: "candidate", base: "base-sha", commit: `c-${id}`, paths: CHANGED, prepared: true, mutations: [], phase: "run" },
+      producer: { operationId: `op-${id}`, stageId: "fix", purpose: "check", readOnly: true, kind: "command" },
+    },
+  }));
+}
+
 const assignment = (job: JobSpec | undefined) => (job!.input as { assignment: string }).assignment;
 
 describe("issue-fix graph under the banyandb profile", () => {
@@ -512,7 +537,7 @@ describe("issue-fix graph under the banyandb profile", () => {
     const { decision, jobs } = simulate({});
     expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
 
-    const [issue, comments, plan, implement, candidate, red, codeReview, deliver] = jobs;
+    const [issue, comments, plan, implement, candidate, red, full, codeReview, deliver] = jobs;
     expect(issue!.executor!.id).toBe("graphloom.github/get-issue");
     expect(issue!.input).toMatchObject({ owner: "apache", repo: "skywalking", number: ISSUE });
     expect(comments!.executor!.id).toBe("graphloom.github/list-issue-comments");
@@ -527,7 +552,10 @@ describe("issue-fix graph under the banyandb profile", () => {
 
     expect(candidate).toMatchObject({ kind: "command", readOnly: true, checkout: { from: "candidate" } });
     const ids = (candidate!.input as { commands: Array<{ id: string }> }).commands.map((c) => c.id);
-    expect(ids).toEqual(["changes-diff", "regression", "test-ci", "license-check", "build", "lint", "check"]);
+    // The cheap tier first (GREEN and the cheap commands), then RED, then the full tier.
+    expect(ids).toEqual(["changes-diff", "regression", "test-ci", "lint"]);
+    expect(full).toMatchObject({ kind: "command", readOnly: true, checkout: { from: "candidate" } });
+    expect((full!.input as { commands: Array<{ id: string }> }).commands.map((c) => c.id)).toEqual(["build", "check"]);
     expect(red).toMatchObject({ checkout: { from: "base", paths: ["pkg/timestamp/scheduler_test.go"] } });
     const redArgv = (red!.input as { commands: Array<{ argv: string[] }> }).commands[0]!.argv;
     expect(redArgv).toEqual(regressionArgv({ package: "./pkg/timestamp", name: TEST }));
@@ -807,7 +835,7 @@ describe("issue-fix graph under the banyandb profile", () => {
     // rechecking, unlike the live run's 45 generations and 0 receipts.
     expect(jobs.filter((j) => j.purpose === "diagnostic" && j.kind === "agent")).toHaveLength(1);
     expect(jobs.filter((j) => j.purpose === "work")).toHaveLength(1);
-    expect(jobs.filter((j) => j.checkout?.from === "candidate" && j.purpose === "check")).toHaveLength(1);
+    expect(jobs.filter((j) => j.checkout?.from === "candidate" && j.purpose === "check")).toHaveLength(2);
     const fixReceipts = receipts.filter((r) => r.stageId === "fix" && r.valid);
     expect(fixReceipts.map((r) => r.requirementId).sort()).toEqual(
       ["builds", "changelog-entry", "decisions-recorded", "in-scope", "passes", "reproduces"].sort(),
@@ -837,6 +865,10 @@ describe("issue-fix graph under the banyandb profile", () => {
     expect(deliverArgs(jobs).body).toContain(`- ${TEST} in \`./pkg/timestamp\` fails by assertion on base-sha`);
   });
 
+  const candidateJobs = (jobs: JobSpec[]) => jobs.filter((j) => j.checkout?.from === "candidate" && j.purpose === "check");
+  const jobTier = (job: JobSpec) => ((job.input as { commands: Array<{ id: string }> }).commands.some((c) => c.id === COMMAND.regression) ? "cheap" : "full");
+  const ranIds = (job: JobSpec) => (job.input as { commands: Array<{ id: string }> }).commands.map((c) => c.id);
+
   it("returns a failing check's output to the implementer, who continues its session", () => {
     const { decision, jobs } = simulate({
       candidate: [{ ["lint"]: { exitCode: 2, stderr: "scheduler.go:12: unused variable" } }, {}],
@@ -849,12 +881,13 @@ describe("issue-fix graph under the banyandb profile", () => {
     expect(correction).toContain("scheduler.go:12: unused variable");
     expect(work[0]!.continueFrom).toBe("op-2");
     expect(work[1]!.continueFrom).toBe("op-3");
-    // Checks rerun for the corrected change.
-    expect(jobs.filter((j) => j.checkout?.from === "candidate" && j.purpose === "check")).toHaveLength(2);
+    // The cheap tier failed, so the first round never reached the full tier; the corrected change runs both.
+    expect(candidateJobs(jobs).map(jobTier)).toEqual(["cheap", "cheap", "full"]);
   });
 
   describe("checks that failed before a resume (#154)", () => {
-    const checks = (jobs: JobSpec[]) => jobs.filter((j) => j.checkout?.from === "candidate" && j.purpose === "check");
+    // One per round of checks: the cheap job, which opens it.
+    const checks = (jobs: JobSpec[]) => candidateJobs(jobs).filter((j) => jobTier(j) === "cheap");
     const baseRuns = (jobs: JobSpec[]) => jobs.filter((j) => j.checkout?.from === "base");
     const lintFails = { ["lint"]: { exitCode: 2, stderr: "no space left on device" } };
     const blocked = { exitCode: 2, report: events({ ImportPath: "p [p.test]", Action: "build-fail" }) };
@@ -916,6 +949,164 @@ describe("issue-fix graph under the banyandb profile", () => {
       const { jobs } = simulate({ reds: [blocked], resumeAfterRed: 1 });
       expect(baseRuns(jobs).length).toBeGreaterThanOrEqual(2);
       expect(assignment(jobs.filter((j) => j.purpose === "work")[1])).toContain("revertPatch");
+    });
+  });
+
+
+  describe("two-tier candidate checks (#173)", () => {
+    const buildFails = { build: { exitCode: 2, stderr: "undefined: warnAction" } };
+    const lintFailsNow = { lint: { exitCode: 2, stderr: "scheduler.go:12: unused variable" } };
+
+    it("declares no license-check in the banyandb profile: make check runs it", () => {
+      const ids = (BANYANDB as { commands: Array<{ id: string }> }).commands.map((c) => c.id);
+      expect(ids).toEqual(["test-ci", "build", "lint", "check"]);
+      const statement = createGraph().describe(BANYANDB).requirements.find((r) => r.id === "builds")!.statement;
+      expect(statement).not.toContain("make license-check");
+      expect(statement).toContain("make check (which includes license-check and check-format)");
+    });
+
+    it("declares the cheap and full tiers, and rejects an unknown one", () => {
+      const tiers = Object.fromEntries((BANYANDB as { commands: Array<{ id: string; tier?: string }> }).commands.map((c) => [c.id, c.tier ?? "full"]));
+      expect(tiers).toEqual({ "test-ci": "cheap", build: "full", lint: "cheap", check: "full" });
+      const bad = structuredClone(BANYANDB) as { commands: Array<{ tier?: string }> };
+      bad.commands[0]!.tier = "fast";
+      expect(() => parseProfile(bad)).toThrow(/commands\[0\]\.tier must be cheap or full/);
+    });
+
+    it("dispatches no full-tier command when the cheap tier fails, and corrects the implementer with that evidence", () => {
+      const { decision, jobs } = simulate({ candidate: [lintFailsNow, {}] });
+      expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+      const rounds = candidateJobs(jobs);
+      // Round 1: the cheap job only; the correction follows it directly.
+      expect(ranIds(rounds[0]!)).toEqual(["changes-diff", "regression", "test-ci", "lint"]);
+      const afterFirst = jobs.slice(jobs.indexOf(rounds[0]!) + 1);
+      expect(afterFirst[0]).toMatchObject({ purpose: "work" });
+      expect(afterFirst.slice(0, 1).some((j) => j.checkout !== undefined)).toBe(false);
+      const correction = assignment(afterFirst[0]);
+      expect(correction).toContain("lint exited 2");
+      expect(correction).toContain("scheduler.go:12: unused variable");
+      expect(correction).toContain("the full checks (build, check) did not run");
+      // The failing round cost no RED or full-tier job.
+      expect(jobs.slice(0, jobs.indexOf(afterFirst[0]!)).filter((j) => j.checkout?.from === "base")).toHaveLength(0);
+      const full = rounds.filter((j) => jobTier(j) === "full").flatMap(ranIds);
+      expect(full).toEqual(["build", "check"]);
+      expect(jobs.filter((j) => j.purpose === "work")).toHaveLength(2);
+    });
+
+    it("runs the full tier only after the cheap tier passed, and a full-tier failure corrects the implementer", () => {
+      const { decision, jobs } = simulate({ candidate: [buildFails, {}] });
+      expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+      expect(candidateJobs(jobs).map(jobTier)).toEqual(["cheap", "full", "cheap", "full"]);
+      const work = jobs.filter((j) => j.purpose === "work");
+      expect(work).toHaveLength(2);
+      expect(assignment(work[1])).toContain("build exited 2");
+      expect(assignment(work[1])).toContain("undefined: warnAction");
+    });
+
+    it("does not accept Fix before both tiers passed on the same candidate digest", () => {
+      const { decision, evidence, receipts } = simulate({ candidate: [buildFails, {}] });
+      expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+      const digestOf = (id: string) => evidence.filter((e) => (e.payload as { command?: { id?: string } }).command?.id === id && (e.payload as { checkout?: { from?: string } }).checkout?.from === "candidate").map((e) => e.candidateDigest);
+      // The first digest's full tier failed; the receipt for builds is bound to the corrected digest, where every command ran.
+      const builds = receipts.filter((r) => r.requirementId === "builds" && r.valid);
+      expect(builds).toHaveLength(1);
+      for (const id of ["regression", "test-ci", "lint", "build", "check"]) expect(digestOf(id)).toContain(builds[0]!.candidateDigest);
+      expect(digestOf("build").length).toBe(2);
+    });
+
+    it("does not count a command that did not run as passed", () => {
+      const evidence = candidateEvidenceFor(["regression", "test-ci", "lint"]);
+      const builds = validatorById("build-checks")!.evaluate({ requirementId: "builds", statement: "s", evidence, candidateDigest: "d1", config: BANYANDB });
+      expect(builds).toMatchObject({ status: "failed" });
+      expect(builds.reason).toContain("build did not run");
+      expect(builds.reason).toContain("check did not run");
+      const full = candidateEvidenceFor(["regression", "test-ci", "lint", "build", "check"]);
+      expect(validatorById("build-checks")!.evaluate({ requirementId: "builds", statement: "s", evidence: full, candidateDigest: "d1", config: BANYANDB })).toMatchObject({ status: "passed" });
+      // A full tier earned on another digest does not stand for this one.
+      const other = [...candidateEvidenceFor(["regression", "test-ci", "lint"]), ...candidateEvidenceFor(["build", "check"], "d0")];
+      expect(validatorById("build-checks")!.evaluate({ requirementId: "builds", statement: "s", evidence: other, candidateDigest: "d1", config: BANYANDB })).toMatchObject({ status: "failed" });
+    });
+
+    it("runs a cheap tier that failed before a resume again, and then the full tier", () => {
+      const { decision, jobs } = simulate({ candidate: [lintFailsNow, {}], resumeAfterCandidate: 1 });
+      expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+      expect(jobs.filter((j) => j.purpose === "work")).toHaveLength(1);
+      expect(candidateJobs(jobs).map(jobTier)).toEqual(["cheap", "cheap", "full"]);
+    });
+
+    it("runs a full tier that failed before a resume again, instead of correcting the implementer", () => {
+      const { decision, jobs } = simulate({ fullChecks: [buildFails, {}], resumeAfterFullChecks: 1 });
+      expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+      expect(jobs.filter((j) => j.purpose === "work")).toHaveLength(1);
+      // The cheap tier passed and stays valid across the resume: only the full tier runs again.
+      expect(candidateJobs(jobs).map(jobTier)).toEqual(["cheap", "full", "full"]);
+    });
+
+    it("corrects the implementer when the full tier fails again after the resume", () => {
+      const { jobs } = simulate({ fullChecks: [buildFails, buildFails, {}], resumeAfterFullChecks: 1 });
+      expect(candidateJobs(jobs).map(jobTier).slice(0, 3)).toEqual(["cheap", "full", "full"]);
+      const work = jobs.filter((j) => j.purpose === "work");
+      expect(work.length).toBeGreaterThanOrEqual(2);
+      expect(jobs.indexOf(work[1]!)).toBeGreaterThan(jobs.indexOf(candidateJobs(jobs)[2]!));
+    });
+
+    it("lists the self-check commands in the implementer assignment, and asks for a report of what ran", () => {
+      const { jobs } = simulate({});
+      const first = assignment(jobs.find((j) => j.purpose === "work"));
+      const selfCheck = (BANYANDB as { implementation: { selfCheck: string[] } }).implementation.selfCheck;
+      expect(selfCheck.length).toBeGreaterThan(0);
+      for (const command of selfCheck) expect(first).toContain(`\`${command}\``);
+      expect(first).toContain(`the regression test (${TEST}`);
+      expect(first).toContain("Before you return status ready, run these yourself");
+      expect(first).toContain("selfChecks");
+      // A profile without selfCheck adds no such line.
+      const plain = structuredClone(BANYANDB) as { implementation: { selfCheck?: string[] } };
+      delete plain.implementation.selfCheck;
+      expect(implementInstruction(parseProfile(plain), { issue: 1, plan: PLAN })).not.toContain("Before you return status ready");
+    });
+
+    it("dispatches the full tier when a passes command (test-ci) belongs to it, and accepts Fix once it passes", () => {
+      const profile = structuredClone(BANYANDB) as { commands: Array<{ id: string; tier?: string }> };
+      for (const c of profile.commands) c.tier = c.id === "lint" ? "cheap" : "full";
+      const { decision, jobs, receipts } = simulate({ profile });
+      expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+      const rounds = candidateJobs(jobs);
+      expect(rounds.map(jobTier)).toEqual(["cheap", "full"]);
+      expect(ranIds(rounds[0]!)).toEqual(["changes-diff", "regression", "lint"]);
+      expect(ranIds(rounds[1]!)).toEqual(["test-ci", "build", "check"]);
+      // No correction was spent waiting for evidence that had not been asked for yet.
+      expect(jobs.filter((j) => j.purpose === "work")).toHaveLength(1);
+      const valid = receipts.filter((r) => r.stageId === "fix" && r.valid).map((r) => r.requirementId);
+      expect(valid).toEqual(expect.arrayContaining(["passes", "builds"]));
+    });
+
+    it("corrects the implementer when that full-tier test-ci fails", () => {
+      const profile = structuredClone(BANYANDB) as { commands: Array<{ id: string; tier?: string }> };
+      for (const c of profile.commands) c.tier = c.id === "lint" ? "cheap" : "full";
+      const { decision, jobs } = simulate({ profile, candidate: [{ "test-ci": { exitCode: 2, stderr: "FAIL pkg/timestamp" } }, {}] });
+      expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+      const work = jobs.filter((j) => j.purpose === "work");
+      expect(work).toHaveLength(2);
+      expect(assignment(work[1])).toContain("test-ci exited 2");
+    });
+
+    it("does not dispatch the full tier when GREEN exits 0 without running the named test, and corrects the implementer", () => {
+      const { decision, jobs } = simulate({ candidate: [{ [COMMAND.regression]: { exitCode: 0, report: "" } }, {}] });
+      expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+      const rounds = candidateJobs(jobs);
+      expect(rounds.map(jobTier)).toEqual(["cheap", "cheap", "full"]);
+      const work = jobs.filter((j) => j.purpose === "work");
+      expect(work).toHaveLength(2);
+      // The correction follows the first cheap job directly: no RED, no full tier in between.
+      expect(jobs.indexOf(work[1]!)).toBe(jobs.indexOf(rounds[0]!) + 1);
+      expect(assignment(work[1])).toContain("does not pass on the change");
+    });
+
+    it("runs every check in one job when a profile declares no cheap command", () => {
+      const flat = structuredClone(BANYANDB) as { commands: Array<{ tier?: string }> };
+      for (const c of flat.commands) delete c.tier;
+      const profile = parseProfile(flat);
+      expect(candidateCommands(profile, PLAN.test!).map((c) => c.id)).toEqual(["changes-diff", "regression", "test-ci", "build", "lint", "check"]);
     });
   });
 

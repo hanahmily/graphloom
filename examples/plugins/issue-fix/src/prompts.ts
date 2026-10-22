@@ -3,7 +3,7 @@ import { COMMAND } from "./constants.js";
 import type { DecisionRecord } from "./decision-record.js";
 import { writeScopeFor } from "./decision-record.js";
 import type { Issue, IssueComment } from "./evidence.js";
-import { commandLabel, commandsFor, commandSummary, issueRef, listAnd, type Profile } from "./profile.js";
+import { commandLabel, commandsFor, commandSummary, commandTier, issueRef, listAnd, type CommandTier, type Profile, type ProfileCommand } from "./profile.js";
 import { ISSUES_DIR, ISSUES_FILE, ISSUES_MARKDOWN } from "./issues.js";
 
 export const MAX_SNAPSHOT_CHARS = 200_000;
@@ -100,6 +100,21 @@ function checksNote(profile: Profile): string {
   return `- The controller checks your change in clean checkouts: the base commit with only your test files must fail the test by assertion; the full change must pass the test${further.length > 0 ? ` and ${listAnd(further)}` : ""}, and the checks must leave no file changed.`;
 }
 
+/**
+ * The cheap checks the implementer runs itself before returning `ready`: the
+ * regression test, then the profile's `implementation.selfCheck` commands.
+ * What ran is reported in the record's `selfChecks`; the graph still runs its
+ * own checks and does not take the report as proof.
+ */
+function selfCheckNote(profile: Profile, plan: DecisionRecord): string[] {
+  const commands = profile.implementation.selfCheck ?? [];
+  if (commands.length === 0) return [];
+  const test = plan.test !== undefined ? [`the regression test (${profile.runner.label(plan.test)})`] : [];
+  return [
+    `- Before you return status ready, run these yourself and fix what they report: ${[...test, ...commands.map((c) => `\`${c}\``)].join("; ")}. The controller runs its own checks afterwards and does not take your word for it, but a failure it finds costs a full round of checks. List each command you ran, with its result, in the record's selfChecks.`,
+  ]
+}
+
 /** How the implementer marks a review issue fixed; only given once the run has issues. */
 export function issuesProtocol(): string {
   return (
@@ -124,6 +139,7 @@ export function implementInstruction(profile: Profile, args: { issue: number; pl
     ...(profile.changelog !== undefined ? [`- Add an entry for the fix under the current release (the first "## " section) of ${profile.changelog.path}, in the matching subsection.`] : []),
     `- ${excluded.length > 0 ? `Do not change ${excluded.join(", ")}. ` : ""}Do not commit, push, create branches or edit generated files.`,
     checksNote(profile),
+    ...selfCheckNote(profile, plan),
     ...(args.issues === true ? [issuesProtocol()] : []),
     ...notes(profile),
     "",
@@ -141,11 +157,15 @@ export function redCommands(profile: Profile, test: NonNullable<DecisionRecord["
 }
 
 /** GREEN and the profile's further and build checks, in its order, on the committed candidate. */
-export function candidateCommands(profile: Profile, test: NonNullable<DecisionRecord["test"]>): EnvironmentCommand[] {
+export function candidateCommands(profile: Profile, test: NonNullable<DecisionRecord["test"]>, tier?: CommandTier): EnvironmentCommand[] {
+  const command = (c: ProfileCommand) => ({ id: c.id, argv: [...c.argv], ...(c.timeoutMs !== undefined ? { timeoutMs: c.timeoutMs } : {}) });
+  // Without a tier, every command in one job; with one, the cheap job carries
+  // GREEN and the changelog diff, and the full job only the full commands.
+  const first = tier === undefined || tier === "cheap";
   return [
-    ...(profile.changelog !== undefined ? [{ id: COMMAND.changesDiff, argv: ["git", "diff", "--unified=0", "HEAD~1", "HEAD", "--", profile.changelog.path] }] : []),
-    { id: COMMAND.regression, argv: profile.runner.argv(test), timeoutMs: profile.regressionTimeoutMs },
-    ...profile.commands.map((c) => ({ id: c.id, argv: [...c.argv], ...(c.timeoutMs !== undefined ? { timeoutMs: c.timeoutMs } : {}) })),
+    ...(first && profile.changelog !== undefined ? [{ id: COMMAND.changesDiff, argv: ["git", "diff", "--unified=0", "HEAD~1", "HEAD", "--", profile.changelog.path] }] : []),
+    ...(first ? [{ id: COMMAND.regression, argv: profile.runner.argv(test), timeoutMs: profile.regressionTimeoutMs }] : []),
+    ...profile.commands.filter((c) => tier === undefined || commandTier(c) === tier).map(command),
   ];
 }
 

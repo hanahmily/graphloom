@@ -23,7 +23,7 @@ and the [issues file](../../../docs/design-issue-fix-graph.md#the-issues-file).
 
 | Profile | Repository | Regression runner | Build checks | Changelog |
 |---|---|---|---|---|
-| [`profiles/banyandb.json`](profiles/banyandb.json) | apache/skywalking-banyandb, issues in apache/skywalking | `go-test` | `make test-ci` for the changed packages, license-check, build, lint, check | `CHANGES.md` |
+| [`profiles/banyandb.json`](profiles/banyandb.json) | apache/skywalking-banyandb, issues in apache/skywalking | `go-test` | `make test-ci` for the changed packages, lint (cheap tier); build, check (full tier; `make check` includes license-check) | `CHANGES.md` |
 | [`profiles/graphloom.json`](profiles/graphloom.json) | hanahmily/graphloom (this repository) | `vitest` | `npm run typecheck`, `npm run build`, `npm test` | none |
 
 The banyandb profile reproduces banyandb-fix's requirements, statements,
@@ -33,6 +33,22 @@ covers every changed file (ocr's exclusions put back, `.graphloom/` left out)
 and then checks the change as a whole across files. See banyandb-fix's
 README for its environment table and runner configuration; they apply as they
 are.
+
+Since 0.8.0 the banyandb profile differs in two more ways. It no longer runs
+`license-check` as a command of its own, because `make check` already runs it
+and `check-format`. And it checks in two tiers: a command's `tier` is `cheap`
+or `full` (default `full`). When a profile declares any `cheap` command, one
+checkout job runs GREEN and the cheap commands (banyandb: `make test-ci`,
+`make lint`); the full commands (`make build`, `make check`) run in a second
+job only when the cheap tier passed on the same candidate digest and no other
+requirement already fails. A cheap failure goes back to the implementer with
+its evidence and skips RED and the full tier. A command that did not run never
+counts as passed, and Fix is accepted only when both tiers passed on the same
+digest. A profile with no `cheap` command runs every check in one job, as
+before. The profile's `implementation.selfCheck` lists the commands the
+implementer runs before returning `ready` (banyandb: `go vet` and
+`golangci-lint run` on the changed packages) and lists in the record's
+`selfChecks`; the graph does not trust that report.
 
 ## Run it
 

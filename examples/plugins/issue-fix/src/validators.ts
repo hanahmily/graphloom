@@ -60,7 +60,7 @@ export const decisionsRecorded: Validator = profiled((input, profile) => {
 });
 
 /** A checkout run that can count: prepared, and it changed no file. */
-function cleanRun(run: CommandRun): string | undefined {
+export function cleanRun(run: CommandRun): string | undefined {
   if (run.checkout?.prepared !== true) return `${run.command.id} ran in an unprepared checkout`;
   if (run.checkout.mutations.length > 0) {
     return `the checks in the ${run.checkout.from} checkout that ran ${run.command.id} left files changed: ${run.checkout.mutations.slice(0, 10).join(", ")}`;

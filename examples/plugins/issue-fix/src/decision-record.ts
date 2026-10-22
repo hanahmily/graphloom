@@ -49,6 +49,8 @@ export interface DecisionRecord {
    * test file itself.
    */
   revertPatch?: string;
+  /** What the implementer ran itself before returning ready, as "command: result" lines; the graph does not trust it. */
+  selfChecks?: string[];
 }
 
 const strings = { type: "array", items: { type: "string" } };
@@ -95,6 +97,7 @@ export const DECISION_RECORD_SCHEMA = JSON.stringify({
     needsE2E: { type: "boolean" },
     draftComment: { type: "string" },
     revertPatch: { type: "string" },
+    selfChecks: strings,
   },
   required: ["status", "summary", "change", "decisions", "openQuestions"],
 });

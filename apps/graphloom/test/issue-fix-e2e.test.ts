@@ -158,7 +158,7 @@ describe.skipIf(GO === undefined)("issue-fix with the banyandb profile on a Go r
     const [red] = command("regression").filter((e) => (e.payload as { checkout: { from: string } }).checkout.from === "base");
     expect(red!.payload).toMatchObject({ command: { exitCode: 1 }, checkout: { paths: ["pkg/timestamp/status_test.go"], prepared: true, mutations: [] } });
     expect((red!.payload as { command: { report: { text: string } } }).command.report.text).toContain('Status = \\"timed out\\", want running');
-    for (const id of ["test-ci", "license-check", "build", "lint", "check"]) {
+    for (const id of ["test-ci", "build", "lint", "check"]) {
       expect(command(id).at(-1)!.payload, id).toMatchObject({ command: { exitCode: 0 }, checkout: { from: "candidate", mutations: [] } });
     }
 

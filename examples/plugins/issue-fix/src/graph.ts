@@ -91,6 +91,9 @@ import { CODE_REVIEW_SCHEMA, codeReviewInstruction, describeCoverage, isBlocking
 import {
   commandLabel,
   commandsFor,
+  commandsInTier,
+  isTiered,
+  type ProfileCommand,
   commandSummary,
   commandStatement,
   harnessName,
@@ -112,10 +115,10 @@ import {
   redCommands,
   snapshotText,
 } from "./prompts.js";
-import { codeReview, implementerRecord, plannerRecord, reportText, validatorById, verifiedChecks } from "./validators.js";
+import { cleanRun, codeReview, implementerRecord, plannerRecord, reportText, validatorById, verifiedChecks } from "./validators.js";
 
 export const GRAPH_ID = "issue-fix";
-export const GRAPH_VERSION = "0.7.0";
+export const GRAPH_VERSION = "0.8.0";
 
 /** Graph bookkeeping; everything else is read back from recorded evidence. */
 export interface FixPrivateState {
@@ -357,17 +360,26 @@ function fix(ctx: Context, view: RunView, issue: number, state: FixPrivateState)
     // Runs of this test only: the record may rename it without changing the candidate.
     const argv = profile.runner.argv(test);
     const green = latestCheckoutRun(current, COMMAND.regression, "candidate", digest, argv);
-    if (green === undefined || failedBeforeResume(profile, current, green, view)) {
+    // A profile with cheap commands checks in two jobs: GREEN and the cheap
+    // commands first, the full commands only once those passed.
+    const tiered = isTiered(profile);
+    const first = tiered ? "cheap" : undefined;
+    const firstCommands = tiered ? commandsInTier(profile, "cheap") : profile.commands;
+    if (green === undefined || failedBeforeResume(current, green, firstCommands, view)) {
       return withPrivate(
         dispatch(
-          checkJob("Candidate checks", { from: "candidate" }, candidateCommands(profile, test), true),
-          green === undefined ? "run GREEN and the build checks on the committed change" : "run GREEN and the build checks again: they failed before the operator's resume",
+          checkJob(tiered ? "Cheap candidate checks" : "Candidate checks", { from: "candidate" }, candidateCommands(profile, test, first), true),
+          green === undefined
+            ? tiered ? "run GREEN and the cheap checks on the committed change" : "run GREEN and the build checks on the committed change"
+            : "run GREEN and the " + (tiered ? "cheap" : "build") + " checks again: they failed before the operator's resume",
         ),
         state,
       );
     }
+    // The cheap tier failing sends the correction back with that evidence; neither RED nor the full tier is paid for.
+    const cheapFailed = tiered && !tierPassed(current, green, firstCommands, profile, test);
     const tests = green.checkout!.paths.filter((p) => isTestPath(profile, p));
-    if (tests.length > 0) {
+    if (!cheapFailed && tests.length > 0) {
       const baseRed = latestCheckoutRun(current, COMMAND.regression, "base", digest, argv);
       if (baseRed === undefined || blockedBeforeResume(profile, baseRed, test, view)) {
         return withPrivate(
@@ -418,10 +430,36 @@ function fix(ctx: Context, view: RunView, issue: number, state: FixPrivateState)
     }
   }
 
+  // The full tier runs once, on a candidate whose cheap tier passed and whose
+  // other requirements do not already fail; Fix is accepted only when the
+  // validators find both tiers' commands passed on this same digest.
+  let skipped: string[] = [];
+  if (record !== undefined && test !== undefined && decisions.result.status === "passed" && isTiered(profile)) {
+    const green = latestCheckoutRun(current, COMMAND.regression, "candidate", digest, profile.runner.argv(test));
+    const full = commandsInTier(profile, "full");
+    if (green !== undefined && full.length > 0) {
+      const runs = full.map((c) => sameCheckoutJob(current, green, c.id));
+      // `passes` and `builds` judge commands of both tiers: they fail while the full tier has not run, which is no reason to hold it back.
+      const failedElsewhere = results.some((r) => r.requirementId !== REQUIREMENT_BUILDS && r.requirementId !== REQUIREMENT_PASSES && r.result.status === "failed");
+      if (!tierPassed(current, green, commandsInTier(profile, "cheap"), profile, test) || failedElsewhere) {
+        skipped = full.filter((_, i) => runs[i] === undefined).map((c) => c.id);
+      } else if (runs.some((r) => r === undefined) || failedBeforeResume(current, green, full, view)) {
+        return withPrivate(
+          dispatch(
+            checkJob("Full candidate checks", { from: "candidate" }, candidateCommands(profile, test, "full"), true),
+            runs.some((r) => r === undefined) ? "run the full checks: the cheap tier passed on this change" : "run the full checks again: they failed before the operator's resume",
+          ),
+          state,
+        );
+      }
+    }
+  }
+
   if (results.every((r) => r.result.status === "passed")) {
     return withPrivate(validate({ stageId: FIX_STAGE }, "validate Fix from the checks bound to the current change"), state);
   }
-  const feedback = correctionFeedback(profile, current, digest, results);
+  const feedback = correctionFeedback(profile, current, digest, skipped.length > 0 ? results.filter((r) => r.result.status === "failed") : results);
+  if (skipped.length > 0) feedback.push(`the full checks (${skipped.join(", ")}) did not run, because the cheap checks or another requirement failed on this change; they run once those pass`);
   if (state.corrections < MAX_FIX_CORRECTIONS && view.budgets.corrections > 0) {
     return implementer(
       implementJob(ctx, view, issue, record ?? plan.record, feedback),
@@ -673,9 +711,19 @@ function blockedBeforeResume(profile: Profile, run: CommandRun, test: NonNullabl
   return timedOut === true || aborted === true || spawnError !== undefined || regressionBlocked(profile, run, test) || profile.runner.outcome(reportText(run), test) === "not-run";
 }
 
+/**
+ * Whether GREEN and every one of `commands` ran clean and succeeded in the same checkout, and the runner's own
+ * reading of GREEN's report says the named test passed (an exit 0 that never ran it does not count); a command
+ * that did not run did not pass.
+ */
+function tierPassed(evidence: EvidenceRecord[], green: CommandRun, commands: ProfileCommand[], profile: Profile, test: NonNullable<DecisionRecord["test"]>): boolean {
+  const ran = [green, ...commands.map((c) => sameCheckoutJob(evidence, green, c.id))].every((run) => run !== undefined && cleanRun(run) === undefined && succeeded(run.command));
+  return ran && profile.runner.outcome(reportText(green), test) === "passed";
+}
+
 /** Whether a command of the candidate-checks job that produced `green` failed before the operator's latest resume. */
-function failedBeforeResume(profile: Profile, evidence: EvidenceRecord[], green: CommandRun, view: RunView): boolean {
-  return [green, ...profile.commands.map((c) => sameCheckoutJob(evidence, green, c.id))].some((run) => run !== undefined && !succeeded(run.command) && isStaleFailure(run.record, view));
+function failedBeforeResume(evidence: EvidenceRecord[], green: CommandRun, commands: ProfileCommand[], view: RunView): boolean {
+  return [green, ...commands.map((c) => sameCheckoutJob(evidence, green, c.id))].some((run) => run !== undefined && !succeeded(run.command) && isStaleFailure(run.record, view));
 }
 
 /** Why the record's revertPatch cannot be used for the candidate at `digest`, or undefined when it can. */
