@@ -1,0 +1,8 @@
+# issue-fix with the canopy profile: Node/TypeScript changes under canopy/ in
+# skywalking-banyandb. The profile is the bundle's own; copy it beside this file
+# to adjust it. Budgets come from the profile's `budgets` (scaled down from
+# banyandb's and not yet measured); add a `budgets:` block here only to override one.
+graph: issue-fix
+repo: skywalking-banyandb
+config: plugins/issue-fix/profiles/canopy.json
+request: "Fix apache/skywalking#14001."

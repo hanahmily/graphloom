@@ -3,10 +3,12 @@ export { advanceFix, createGraph, definitionFor, GRAPH_ID, GRAPH_VERSION, reques
 export {
   commandLabel,
   commandsFor,
+  commandsInTier,
   commandStatement,
   commandSummary,
   harnessName,
   isTestPath,
+  isTiered,
   issueRef,
   listAnd,
   parseProfile,
@@ -19,7 +21,7 @@ export {
 } from "./profile.js";
 export { RUNNERS, runnerById, type RegressionOutcome, type RegressionRunner, type RegressionTestRef, type RunnerId, type TestOutcome } from "./runners/index.js";
 export { ginkgoSpecs, goTestRunner, packageOutput, quoteRegexp, regressionArgv, regressionOutcome, testOutcome, type GinkgoSpec } from "./runners/go-test.js";
-export { escapeRegExp, vitestArgv, vitestOutcome, vitestOutput, vitestRunner, vitestSummary } from "./runners/vitest.js";
+export { escapeRegExp, namePattern, vitestArgv, vitestOutcome, vitestOutput, vitestRunner, vitestSummary } from "./runners/vitest.js";
 export {
   DECISION_RECORD_SCHEMA,
   decisionProblems,

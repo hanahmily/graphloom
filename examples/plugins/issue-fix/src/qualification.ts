@@ -8,7 +8,7 @@ import { goTestRunner } from "./runners/go-test.js";
 import { vitestRunner } from "./runners/vitest.js";
 
 /** A profile shipped in the bundle's `profiles/` directory, as JSON: the cases judge against these exact files. */
-export function shippedProfile(name: "banyandb" | "graphloom"): unknown {
+export function shippedProfile(name: "banyandb" | "graphloom" | "canopy"): unknown {
   return JSON.parse(readFileSync(new URL(`../profiles/${name}.json`, import.meta.url), "utf8")) as unknown;
 }
 

@@ -18,6 +18,10 @@ import {
   decisionProblems,
   definitionFor,
   implementInstruction,
+  isTestPath,
+  isTiered,
+  commandsFor,
+  commandsInTier,
   parseProfile,
   planInstruction,
   ProfileError,
@@ -28,6 +32,7 @@ import {
   validatorById,
   validatorsFor,
   verificationInstruction,
+  namePattern,
   vitestArgv,
   vitestOutcome,
   vitestOutput,
@@ -44,6 +49,8 @@ const BANYANDB = shippedProfile("banyandb");
 const GRAPHLOOM = shippedProfile("graphloom");
 const banyandb = parseProfile(BANYANDB);
 const graphloom = parseProfile(GRAPHLOOM);
+const CANOPY = shippedProfile("canopy");
+const canopy = parseProfile(CANOPY);
 
 const temps: string[] = [];
 afterEach(async () => {
@@ -98,7 +105,7 @@ describe.skipIf(!existsSync(path.join(banyandbFixDist, "index.js")))("the banyan
     });
     expect(monolithic(v1(strip(ours)))).toEqual(strip(withoutLicense(theirs)));
     expect(theirs.environment?.prepare?.map((c) => c.argv.join(" "))).toEqual(["make generate"]);
-    expect(ours).toMatchObject({ graphId: "issue-fix", version: "0.8.1", privateStateSchema: "issue-fix-private-v1" });
+    expect(ours).toMatchObject({ graphId: "issue-fix", version: "0.9.0", privateStateSchema: "issue-fix-private-v1" });
   });
 
   it("splits make generate into separately cached steps with narrow inputs (#174)", () => {
@@ -405,10 +412,10 @@ async function vitestProject() {
   return root;
 }
 
-async function runRegression(root: string, file: string, name: string) {
+async function runRegression(root: string, file: string, name: string, env: NodeJS.ProcessEnv = {}) {
   const report = path.join(root, `report-${Math.random().toString(36).slice(2)}`);
   const [cmd, ...args] = vitestArgv({ package: file, name });
-  const exit = await execFileAsync(cmd!, args, { cwd: root, env: { ...process.env, GRAPHLOOM_REPORT_FILE: report } }).then(
+  const exit = await execFileAsync(cmd!, args, { cwd: root, env: { ...process.env, ...env, GRAPHLOOM_REPORT_FILE: report } }).then(
     () => 0,
     (err: { code: number }) => err.code,
   );
@@ -496,4 +503,159 @@ describe("vitest regression runner", () => {
     expect(missing).toMatchObject({ exit: 127, outcome: "not-run" });
     expect((await runRegression(root, "../a.test.ts", "a")).exit).toBe(2);
   }, 60_000);
+});
+
+/** A canopy-shaped project: a workspace root with hoisted vitest and a test in each workspace, as the runner finds them. */
+async function canopyProject() {
+  const root = await mkdtemp(path.join(os.tmpdir(), "issue-fix-canopy-"));
+  temps.push(root);
+  const vitest = vitestPackage();
+  await mkdir(path.join(root, "canopy/node_modules/.bin"), { recursive: true });
+  await symlink(vitest, path.join(root, "canopy/node_modules/vitest"));
+  await symlink(path.join(vitest, "vitest.mjs"), path.join(root, "canopy/node_modules/.bin/vitest"));
+  await writeFile(path.join(root, "canopy/package.json"), JSON.stringify({ name: "canopy", private: true, workspaces: ["web", "server"] }));
+  for (const [ws, dir] of [["server", "test"], ["web", "src/components"]] as const) {
+    await mkdir(path.join(root, "canopy", ws, dir), { recursive: true });
+    await writeFile(path.join(root, "canopy", ws, "package.json"), JSON.stringify({ name: `canopy-${ws}`, type: "module" }));
+    await writeFile(
+      path.join(root, "canopy", ws, dir, "env.test.ts"),
+      [
+        'import { describe, expect, it } from "vitest";',
+        `describe("${ws} env", () => {`,
+        `  it("runs in the workspace under NODE_ENV=test", () => { expect(process.cwd().endsWith("/canopy/${ws}")).toBe(true); expect(process.env.NODE_ENV).toBe("test"); });`,
+        '  it("is wrong", () => { expect(1).toBe(2); });',
+        "});",
+        "",
+      ].join("\n"),
+    );
+  }
+  return root;
+}
+
+describe("vitest regression runner in a workspace repository (canopy)", () => {
+  it("runs a test of each workspace from that workspace, with the hoisted vitest, whatever NODE_ENV the caller has", async () => {
+    const root = await canopyProject();
+    for (const file of ["canopy/server/test/env.test.ts", "canopy/web/src/components/env.test.ts"]) {
+      const ws = file.includes("/server/") ? "server" : "web";
+      const passing = await runRegression(root, file, `${ws} env runs in the workspace under NODE_ENV=test`, { NODE_ENV: "production" });
+      expect(passing).toMatchObject({ exit: 0, outcome: "passed" });
+      const wrong = await runRegression(root, file, `${ws} env is wrong`, { NODE_ENV: "production" });
+      expect(wrong.outcome).toBe("failed");
+      expect(vitestSummary(wrong.text)?.target?.file).toBe(file);
+    }
+  }, 120_000);
+
+  it("matches a name whether vitest joins titles with a space or with ' > '", () => {
+    const pattern = new RegExp(namePattern("Pager renders nothing when total <= pageSize (a.b)"));
+    expect(pattern.test("Pager renders nothing when total <= pageSize (a.b)")).toBe(true);
+    expect(pattern.test("Pager > renders nothing when total <= pageSize (a.b)")).toBe(true);
+    expect(pattern.test("Pager > renders > nothing when total <= pageSize (a.b)")).toBe(true);
+    expect(pattern.test("Pager renders nothing when total <= pageSize (axb)")).toBe(false);
+    expect(pattern.test("Other Pager renders nothing when total <= pageSize (a.b)")).toBe(false);
+  });
+});
+
+describe("the canopy profile", () => {
+  it("targets BanyanDB's repository and issue tracker, selects vitest and checks canopy changes", () => {
+    expect(canopy.project).toBe("apache/skywalking-banyandb");
+    expect(canopy.issues).toEqual(banyandb.issues);
+    expect(canopy.changelog).toEqual(banyandb.changelog);
+    expect(canopy.runner.id).toBe("vitest");
+    expect(canopy.harnesses).toEqual(banyandb.harnesses);
+    for (const p of ["canopy/server/test/bff.test.ts", "canopy/web/src/components/Pager.test.tsx", "canopy/web/src/x.test.ts", "canopy/e2e/tests/auth.spec.ts", "canopy/e2e/fixtures/skywalking/Tracing.proto"]) {
+      expect(isTestPath(canopy, p), p).toBe(true);
+    }
+    for (const p of ["canopy/server/src/config.ts", "canopy/web/src/components/Pager.tsx", "banyand/liaison/grpc/server.go"]) {
+      expect(isTestPath(canopy, p), p).toBe(false);
+    }
+    expect(canopy.protectedPaths).toEqual(expect.arrayContaining(["canopy/package-lock.json", "canopy/licenses", ".github"]));
+  });
+
+  it("checks in two tiers: the cheap commands first, then build, the full suite and the license artifacts", () => {
+    expect(isTiered(canopy)).toBe(true);
+    expect(commandsInTier(canopy, "cheap").map((c) => c.id)).toEqual(["test-changed", "typecheck", "lint"]);
+    expect(commandsInTier(canopy, "full").map((c) => c.id)).toEqual(["build", "test", "license-dep"]);
+    expect(commandsFor(canopy, "passes").map((c) => c.id)).toEqual(["test-changed", "test"]);
+    const statement = (id: string) => createGraph().describe(CANOPY).requirements.find((r) => r.id === id)!.statement;
+    expect(statement("passes")).toContain("the tests of the changed canopy workspaces pass");
+    expect(statement("passes")).toContain("npm test passes for all canopy workspaces");
+    expect(statement("builds")).toContain("make license-dep (with check-license-outputs)");
+    for (const c of canopy.commands.filter((c) => c.id !== "license-dep")) expect(c.argv.join(" ")).toMatch(/cd canopy &&/);
+    expect(canopy.commands.find((c) => c.id === "test")!.argv.join(" ")).toContain("NODE_ENV=test");
+  });
+
+  it("checks Node against canopy's engines.node, the VCS, ocr, codex and claude, and prepares with a cached npm ci", () => {
+    expect(canopy.environment.checks!.map((c) => c.id)).toEqual(["node", "git", "license-tools", "ocr", "codex", "claude"]);
+    const prepare = canopy.environment.prepare ?? [];
+    expect(prepare.map((c) => c.id)).toEqual(["npm-ci"]);
+    expect(prepare[0]!.argv.join(" ")).toContain("npm ci --include=dev");
+    expect(prepare[0]!.inputs).toEqual(["canopy/package.json", "canopy/package-lock.json", "canopy/web/package.json", "canopy/server/package.json", "canopy/shared/package.json"]);
+    expect(prepare[0]!.outputs).toEqual(["canopy/node_modules/**", "canopy/web/node_modules/**", "canopy/server/node_modules/**", "canopy/shared/node_modules/**"]);
+    expect(canopy.environment.checks!.find((c) => c.id === "ocr")).toEqual(banyandb.environment.checks!.find((c) => c.id === "ocr"));
+  });
+
+  it("lists the typecheck and lint of the changed workspaces as the implementer's self check, and scales budgets down from banyandb's", () => {
+    expect(canopy.implementation.selfCheck).toHaveLength(1);
+    expect(canopy.implementation.selfCheck![0]).toContain('npm run -w "$w" typecheck');
+    expect(canopy.implementation.selfCheck![0]).toContain('npm run -w "$w" lint');
+    for (const key of ["agentInvocations", "jobs", "decisions", "corrections", "activeMs"] as const) {
+      expect(canopy.budgets![key]!, key).toBeLessThan(banyandb.budgets![key]!);
+    }
+  });
+
+  async function canopyRepo(engines: string) {
+    const root = await mkdtemp(path.join(os.tmpdir(), "issue-fix-canopy-cmd-"));
+    temps.push(root);
+    for (const ws of ["web", "server", "shared"]) await mkdir(path.join(root, "canopy", ws), { recursive: true });
+    await writeFile(path.join(root, "canopy/package.json"), JSON.stringify({ name: "canopy", private: true, engines: { node: engines }, workspaces: ["web", "server", "shared"] }));
+    for (const ws of ["web", "server"]) {
+      await writeFile(path.join(root, "canopy", ws, "package.json"), JSON.stringify({ name: `canopy-${ws}`, scripts: { test: `node -e "console.log('ran ${ws} with ' + process.env.NODE_ENV)"` } }));
+    }
+    await writeFile(path.join(root, "canopy/shared/package.json"), JSON.stringify({ name: "canopy-shared" }));
+    return root;
+  }
+  const run = (root: string, id: string) => {
+    const command = [...canopy.commands, ...canopy.environment.checks!].find((c) => c.id === id)!;
+    const [cmd, ...args] = command.argv;
+    return execFileAsync(cmd!, args, { cwd: root, env: { ...process.env, NODE_ENV: "production" } }).then(
+      (r) => ({ code: 0, out: r.stdout + r.stderr }),
+      (err: { code: number; stdout: string; stderr: string }) => ({ code: err.code, out: err.stdout + err.stderr }),
+    );
+  };
+  const vcs = (root: string, ...args: string[]) => execFileAsync("git", ["-c", "user.name=t", "-c", "user.email=t@example.com", ...args], { cwd: root });
+
+  it("accepts exactly the Node version canopy/package.json pins", async () => {
+    const same = await canopyRepo(process.versions.node);
+    expect((await run(same, "node")).code).toBe(0);
+    const other = await canopyRepo("1.2.3");
+    const failed = await run(other, "node");
+    expect(failed.code).toBe(1);
+    expect(failed.out).toContain("Node.js 1.2.3 required (canopy/package.json engines.node)");
+  });
+
+  it("runs the tests of exactly the workspaces the change touches, under NODE_ENV=test", async () => {
+    const root = await canopyRepo(process.versions.node);
+    await vcs(root, "init", "-q");
+    await vcs(root, "add", "-A");
+    await vcs(root, "commit", "-q", "-m", "base");
+    const commit = async (file: string) => {
+      await mkdir(path.dirname(path.join(root, file)), { recursive: true });
+      await writeFile(path.join(root, file), `${Math.random()}\n`);
+      await vcs(root, "add", "-A");
+      await vcs(root, "commit", "-q", "-m", file);
+    };
+    await commit("canopy/web/src/a.ts");
+    const web = await run(root, "test-changed");
+    expect(web.code).toBe(0);
+    expect(web.out).toContain("ran web with test");
+    expect(web.out).not.toContain("ran server");
+    await commit("canopy/shared/src/a.ts");
+    const shared = await run(root, "test-changed");
+    expect(shared.out).toContain("ran web with test");
+    expect(shared.out).toContain("ran server with test");
+    await commit("canopy/e2e/tests/a.spec.ts");
+    const none = await run(root, "test-changed");
+    expect(none.code).toBe(1);
+    expect(none.out).toContain("the change touches no canopy workspace");
+  }, 120_000);
 });

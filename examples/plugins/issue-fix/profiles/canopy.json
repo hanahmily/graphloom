@@ -1,0 +1,249 @@
+{
+  "name": "canopy",
+  "project": "apache/skywalking-banyandb",
+  "issues": {
+    "owner": "apache",
+    "repo": "skywalking"
+  },
+  "environment": {
+    "checks": [
+      {
+        "id": "node",
+        "argv": [
+          "sh",
+          "-c",
+          "have=$(node --version 2>/dev/null) || { echo \"Node.js is required (canopy/package.json engines.node pins the version)\" >&2; exit 127; }; want=$(node -p \"require('./canopy/package.json').engines.node\" 2>/dev/null) || { echo \"cannot read engines.node from canopy/package.json\" >&2; exit 1; }; [ \"$have\" = \"v$want\" ] || { echo \"Node.js $want required (canopy/package.json engines.node), found $have\" >&2; exit 1; }"
+        ],
+        "timeoutMs": 120000
+      },
+      {
+        "id": "git",
+        "argv": [
+          "sh",
+          "-c",
+          "v=$(git --version | sed -n \"s/^git version \\([0-9]*\\)\\.\\([0-9]*\\).*/\\1 \\2/p\"); set -- $v; [ \"${1:-0}\" -gt 2 ] || { [ \"${1:-0}\" -eq 2 ] && [ \"${2:-0}\" -ge 41 ]; } || { echo \"git >= 2.41 required; found $(git --version)\" >&2; exit 1; }"
+        ]
+      },
+      {
+        "id": "license-tools",
+        "argv": [
+          "sh",
+          "-c",
+          "command -v make >/dev/null 2>&1 || { echo \"make is required (make license-dep)\" >&2; exit 127; }; command -v go >/dev/null 2>&1 || [ -x bin/license-eye ] || { echo \"go is required to install license-eye for make license-dep (or bin/license-eye must exist)\" >&2; exit 127; }"
+        ],
+        "timeoutMs": 120000
+      },
+      {
+        "id": "ocr",
+        "argv": [
+          "sh",
+          "-c",
+          "p=$(command -v ocr) || { echo \"open-code-review (ocr) is not installed\" >&2; exit 127; }; case \"$p\" in /*) ;; *) p=\"$(pwd)/$p\" ;; esac; \"$p\" delegate preview --help >/dev/null 2>&1 || { echo \"$p has no delegation mode; install open-code-review 1.9 or later\" >&2; exit 1; }; printf '%s\\n' \"$p\""
+        ],
+        "timeoutMs": 120000
+      },
+      {
+        "id": "codex",
+        "argv": [
+          "sh",
+          "-c",
+          "c=\"${GRAPHLOOM_CODEX_BIN:-codex}\"; h=\"${GRAPHLOOM_CODEX_HOME:-${CODEX_HOME:-}}\"; [ -z \"$h\" ] || export CODEX_HOME=\"$h\"; \"$c\" --version >/dev/null 2>&1 || { echo \"Codex ($c) is not installed\" >&2; exit 127; }; \"$c\" login status >/dev/null 2>&1 || { echo \"Codex is not logged in${h:+ for $h}: run $c login\" >&2; exit 1; }"
+        ],
+        "timeoutMs": 120000
+      },
+      {
+        "id": "claude",
+        "argv": [
+          "sh",
+          "-c",
+          "c=\"${GRAPHLOOM_CLAUDE_BIN:-claude}\"; d=\"${GRAPHLOOM_CLAUDE_CONFIG_DIR:-${CLAUDE_CONFIG_DIR:-}}\"; [ -z \"$d\" ] || export CLAUDE_CONFIG_DIR=\"$d\"; \"$c\" --version >/dev/null 2>&1 || { echo \"Claude Code ($c) is not installed\" >&2; exit 127; }; \"$c\" auth status >/dev/null 2>&1 || { echo \"Claude Code is not logged in${d:+ for $d}: run $c auth login\" >&2; exit 1; }"
+        ],
+        "timeoutMs": 120000
+      }
+    ],
+    "prepare": [
+      {
+        "id": "npm-ci",
+        "argv": [
+          "sh",
+          "-c",
+          "cd canopy && npm ci --include=dev"
+        ],
+        "timeoutMs": 1200000,
+        "inputs": [
+          "canopy/package.json",
+          "canopy/package-lock.json",
+          "canopy/web/package.json",
+          "canopy/server/package.json",
+          "canopy/shared/package.json"
+        ],
+        "outputs": [
+          "canopy/node_modules/**",
+          "canopy/web/node_modules/**",
+          "canopy/server/node_modules/**",
+          "canopy/shared/node_modules/**"
+        ]
+      }
+    ]
+  },
+  "regression": {
+    "runner": "vitest",
+    "timeoutMs": 1200000
+  },
+  "commands": [
+    {
+      "id": "test-changed",
+      "argv": [
+        "sh",
+        "-c",
+        "cd canopy && ws=\"\"; for f in $(git diff --relative --name-only HEAD~1 HEAD -- .); do case \"$f\" in web/*) ws=\"$ws web\";; server/*) ws=\"$ws server\";; shared/*|package.json|package-lock.json|tsconfig*.json) ws=\"$ws web server\";; esac; done; [ -n \"$ws\" ] || { echo \"the change touches no canopy workspace (web, server or shared)\" >&2; exit 1; }; for w in $(printf \"%s\\n\" $ws | sort -u); do NODE_ENV=test npm run -w \"$w\" test || exit 1; done"
+      ],
+      "timeoutMs": 1800000,
+      "tier": "cheap",
+      "requirement": "passes",
+      "statement": "the tests of the changed canopy workspaces pass",
+      "summary": "`npm run -w <workspace> test` for each changed canopy workspace"
+    },
+    {
+      "id": "typecheck",
+      "argv": [
+        "sh",
+        "-c",
+        "cd canopy && npm run typecheck"
+      ],
+      "timeoutMs": 1200000,
+      "tier": "cheap",
+      "requirement": "builds",
+      "label": "npm run typecheck in canopy",
+      "summary": "`npm run typecheck` in `canopy/`"
+    },
+    {
+      "id": "lint",
+      "argv": [
+        "sh",
+        "-c",
+        "cd canopy && npm run lint"
+      ],
+      "timeoutMs": 1200000,
+      "tier": "cheap",
+      "requirement": "builds",
+      "label": "npm run lint in canopy",
+      "summary": "`npm run lint` in `canopy/`"
+    },
+    {
+      "id": "build",
+      "argv": [
+        "sh",
+        "-c",
+        "cd canopy && npm run build"
+      ],
+      "timeoutMs": 1800000,
+      "requirement": "builds",
+      "label": "npm run build in canopy",
+      "summary": "`npm run build` in `canopy/`"
+    },
+    {
+      "id": "test",
+      "argv": [
+        "sh",
+        "-c",
+        "cd canopy && NODE_ENV=test npm test"
+      ],
+      "timeoutMs": 2700000,
+      "requirement": "passes",
+      "label": "npm test in canopy",
+      "statement": "npm test passes for all canopy workspaces",
+      "summary": "`npm test` in `canopy/` (all workspaces)"
+    },
+    {
+      "id": "license-dep",
+      "argv": [
+        "sh",
+        "-c",
+        "make license-dep check-license-outputs; rc=$?; (cd canopy && npm ci --include=dev >/dev/null 2>&1) || rc=1; exit $rc"
+      ],
+      "timeoutMs": 1800000,
+      "requirement": "builds",
+      "label": "make license-dep (with check-license-outputs)",
+      "summary": "`make license-dep` and `make check-license-outputs`"
+    }
+  ],
+  "testPaths": {
+    "suffixes": [
+      ".test.ts",
+      ".test.tsx",
+      ".spec.ts"
+    ],
+    "directories": [
+      "test",
+      "e2e",
+      "fixtures",
+      "__tests__"
+    ]
+  },
+  "protectedPaths": [
+    "canopy/package-lock.json",
+    "canopy/licenses",
+    "canopy/LICENSE",
+    "canopy/e2e/tests/query.spec.ts-snapshots",
+    ".github",
+    "api/proto",
+    "go.mod",
+    "go.sum"
+  ],
+  "changelog": {
+    "path": "CHANGES.md",
+    "rule": "first-release-section-entry"
+  },
+  "planning": {
+    "reach": "Reach: for every behaviour the fix changes, the basis of that decision names each caller and lifecycle path that depends on the old behaviour (server request handlers, session and auth hooks, the BFF proxy to BanyanDB, startup and graceful shutdown, React effects and their cleanup on unmount, query-cache invalidation, thrown errors and rejected promises, timers and retries), starting with the changed module's own startup, shutdown and cleanup paths, and the test that covers it; a path no test covers is stated there as a risk. For a wait the fix makes longer or unbounded, say what happens when the awaited promise never settles or the request is aborted.",
+    "e2e": "the Playwright end-to-end tests (canopy/e2e, `npm run e2e`)",
+    "notes": [
+      "Canopy is an npm workspace under canopy/ (web, server, shared); every command runs from canopy/. The regression test is a Vitest test in canopy/server/test/ or beside the code in canopy/web/src/ (`*.test.tsx`); give its path from the repository root, as in canopy/server/test/config.test.ts, and its full name (its describe titles and its own title, joined by single spaces). Playwright specs under canopy/e2e are not run as the regression test.",
+      "Tests run with NODE_ENV=test; React's test utilities fail under NODE_ENV=production, so do not run a test with the environment's own NODE_ENV.",
+      "A change to canopy/shared affects both web and server: the checks run both workspaces' tests."
+    ]
+  },
+  "implementation": {
+    "conventions": "Follow canopy's conventions: strict TypeScript, ESLint as configured per workspace, React function components with hooks, Fastify plugins in the server, and the Apache license header on every new source file. Keep changes under canopy/.",
+    "checks": "The controller checks your change in clean checkouts: the base commit with only your test files must fail the test by assertion; the full change must pass the test, the tests of every changed canopy workspace, `npm run typecheck` and `npm run lint` in canopy/ (the cheap checks, which run first), and only then `npm run build`, `npm test` for all workspaces and `make license-dep` with `make check-license-outputs`. Do not change canopy/package-lock.json or canopy/licenses unless you add a dependency, and then name them in your record's scope exceptions.",
+    "selfCheck": [
+      "cd canopy && ws=$(git ls-files -m -o --exclude-standard | cut -d/ -f1 | sort -u | tr \"\\n\" \" \"); case \" $ws \" in *\" shared \"*) ws=\"shared web server\";; esac; for w in $ws; do case \"$w\" in web|server|shared) npm run -w \"$w\" typecheck || exit 1;; esac; case \"$w\" in web|server) npm run -w \"$w\" lint || exit 1;; esac; done"
+    ],
+    "cleanCheckHint": "make license-dep regenerates canopy/licenses; after a dependency change run it and commit the result"
+  },
+  "review": {
+    "language": "TypeScript",
+    "testFiles": "Vitest test files (`*.test.ts`, `*.test.tsx`) and Playwright specs and fixtures under `canopy/e2e`",
+    "rules": [
+      "Beyond the diff's own correctness, review what the change breaks.",
+      "For every behaviour the change alters, search for each caller and lifecycle path that depends on the old behaviour: request handlers and hooks, session and authentication, startup and shutdown, React effects and their cleanup, cache invalidation, thrown errors and rejected promises, timers and retries.",
+      "Report at high severity: a path whose behaviour changes without a test in this change covering it; a removed guarantee (a bound, a timeout, a cleanup, an authorization check, a cancellation) that other code or comments still rely on; a comment that describes a guarantee the change removed; a test whose expected value is derived from the new code rather than from the issue; a change to a session, cookie or API contract between canopy/web and canopy/server without both sides updated.",
+      "Report at medium severity a promise that is neither awaited nor handled, an effect or timer without cleanup, and a dependency added without its license artifacts.",
+      "Do not report style."
+    ]
+  },
+  "pullRequest": {
+    "checklist": [
+      "- [x] Add a unit test to verify that the fix works.",
+      "- [x] Explain briefly why the bug exists and how to fix it."
+    ],
+    "footer": [
+      "- [x] If this pull request closes/resolves/fixes an existing issue, replace the issue number. Fixes {issue}.",
+      "- [x] Update the [`CHANGES` log](https://github.com/apache/skywalking-banyandb/blob/main/CHANGES.md)."
+    ],
+    "e2eNote": "The Playwright end-to-end tests (canopy/e2e) were not run; this change needs them."
+  },
+  "harnesses": {
+    "implementer": "claude-code",
+    "reviewer": "codex",
+    "verifier": "claude-code"
+  },
+  "budgets": {
+    "agentInvocations": 3000,
+    "jobs": 150,
+    "decisions": 250,
+    "corrections": 50,
+    "activeMs": 36000000
+  }
+}

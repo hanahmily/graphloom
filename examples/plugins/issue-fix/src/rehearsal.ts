@@ -242,6 +242,58 @@ const VITEST_REHEARSAL: GraphRehearsal = {
   },
 };
 
+const CANOPY_TEST = "canopy/server/test/rehearsal-marker.test.ts";
+const CANOPY_TEST_NAME = "rehearsal marker exists beside the server sources";
+const CANOPY_SOURCE = "canopy/server/src/rehearsal-marker.ts";
+const CANOPY_TEST_BYTES = `import { existsSync } from 'node:fs';\nimport { join } from 'node:path';\nimport { describe, expect, it } from 'vitest';\n\n// Vitest runs from the server workspace, also for the compiled copy of this test under dist/.\ndescribe('rehearsal marker', () => {\n  it('exists beside the server sources', () => {\n    expect(existsSync(join(process.cwd(), 'src/rehearsal-marker.ts'))).toBe(true);\n  });\n});\n`;
+const CANOPY_SOURCE_BYTES = "export const REHEARSAL_MARKER = 'canopy-issue-fix-rehearsal';\n";
+const CANOPY_CHANGES = "# Changes by Version\n\nRelease Notes.\n\n## 0.0.0\n\n### Chores\n\n- Add the canopy rehearsal marker module.\n";
+const CANOPY_RECORD = {
+  title: "Add the canopy rehearsal marker module",
+  status: "ready",
+  change: "The canopy server gains a rehearsal marker module. A regression test pins that it exists.",
+  summary: "The marker module exists beside the server sources; the regression test pins that.",
+  test: { package: CANOPY_TEST, name: CANOPY_TEST_NAME, expectedValueSource: "the rehearsal's own premise: the marker module must exist" },
+  productionCaller: `${CANOPY_SOURCE} REHEARSAL_MARKER`,
+  decisions: [],
+  openQuestions: [],
+  followUps: [],
+  needsE2E: false,
+  scopeExceptions: [],
+};
+
+/**
+ * The canopy profile's scenario: hand-written, and self-contained so it runs
+ * in a real checkout of skywalking-banyandb with `--commands run`. The test
+ * asserts a new module exists (relative to the working directory, which is
+ * the server workspace for both the test and its compiled copy in dist/), so it fails by assertion on the base commit
+ * (RED) and passes with the change (GREEN) whatever else the checkout holds;
+ * the module is a one-line constant that typechecks, lints and builds. The
+ * CHANGES.md bytes replace the file in the rehearsal's own checkout only.
+ */
+const CANOPY_REHEARSAL: GraphRehearsal = {
+  scenarios: {
+    happy: {
+      results: {
+        "decision-record-v2": [
+          // The plan is a read-only job: it must leave CHANGES.md as the checkout has it.
+          { output: CANOPY_RECORD },
+          {
+            output: CANOPY_RECORD,
+            effects: [
+              { path: CANOPY_TEST, bytes: CANOPY_TEST_BYTES },
+              { path: CANOPY_SOURCE, bytes: CANOPY_SOURCE_BYTES },
+              { path: "CHANGES.md", bytes: CANOPY_CHANGES },
+            ],
+          },
+        ],
+        "code-review-v2": [{ output: { comments: [], prior: [], summary: { total_files: 3, reviewed_files: 3, skipped: [] } } }],
+      },
+      expect: { status: "succeeded", receipts: [FIX_STAGE, REVIEW_STAGE] },
+    },
+  },
+};
+
 /**
  * The rehearsal for the run's profile (the task's config): the plugin host
  * calls this with the pinned config. A config that is not a usable profile
@@ -249,10 +301,15 @@ const VITEST_REHEARSAL: GraphRehearsal = {
  */
 export function rehearsal(config: unknown): GraphRehearsal {
   let runner: string;
+  let name: string;
   try {
-    runner = parseProfile(config).runner.id;
+    const profile = parseProfile(config);
+    runner = profile.runner.id;
+    name = profile.name;
   } catch {
     runner = "go-test";
+    name = "";
   }
+  if (name === "canopy" && runner === "vitest") return CANOPY_REHEARSAL;
   return runner === "vitest" ? VITEST_REHEARSAL : GO_TEST_REHEARSAL;
 }
