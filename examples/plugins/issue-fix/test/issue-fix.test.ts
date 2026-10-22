@@ -481,7 +481,9 @@ describe("issue-fix graph under the banyandb profile", () => {
     expect(definition.stages.map((s) => s.id)).toEqual(["fix", "review"]);
     expect(definition.environment).toEqual(ENVIRONMENT);
     expect(ENVIRONMENT.checks!.map((c) => c.id)).toEqual(["go", "git", "ocr", "codex", "claude", "make", "check-req", "node"]);
-    expect(ENVIRONMENT.prepare!.map((c) => c.argv.join(" "))).toEqual(["make generate"]);
+    // `make generate` split per project so each output is cached on its own inputs (#174).
+    expect(ENVIRONMENT.prepare!.map((c) => c.id)).toEqual(["generate-proto", "generate-mcp", "generate-directives", "generate-mocks"]);
+    expect(ENVIRONMENT.prepare!.slice(0, 2).map((c) => c.argv.join(" "))).toEqual(["make -C api generate", "make -C mcp generate"]);
     expect(ENVIRONMENT.pinnedFiles![0]!.path).toBe("CONTRIBUTING.md");
   });
 

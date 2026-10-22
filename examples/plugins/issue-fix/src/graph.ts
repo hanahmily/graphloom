@@ -118,7 +118,7 @@ import {
 import { cleanRun, codeReview, implementerRecord, plannerRecord, reportText, validatorById, verifiedChecks } from "./validators.js";
 
 export const GRAPH_ID = "issue-fix";
-export const GRAPH_VERSION = "0.8.0";
+export const GRAPH_VERSION = "0.8.1";
 
 /** Graph bookkeeping; everything else is read back from recorded evidence. */
 export interface FixPrivateState {

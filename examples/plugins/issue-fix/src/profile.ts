@@ -143,13 +143,33 @@ function checkCommand(raw: unknown, where: string): void {
   need(c.timeoutMs === undefined || (Number.isSafeInteger(c.timeoutMs) && (c.timeoutMs as number) > 0), `${where}.timeoutMs must be a positive integer`);
 }
 
+function checkCacheGlobs(c: Record<string, unknown>, where: string, allowed: boolean): void {
+  if (c.inputs === undefined && c.outputs === undefined) return;
+  need(allowed, `${where}: only a prepare command may declare inputs and outputs`);
+  need(c.inputs !== undefined && c.outputs !== undefined, `${where}: inputs and outputs are declared together`);
+  for (const field of ["inputs", "outputs"] as const) {
+    const globs = c[field];
+    need(isStrings(globs) && globs.length > 0 && globs.some((g) => !g.startsWith("!")), `${where}.${field} must list globs, at least one not starting with "!"`);
+    for (const g of globs as string[]) {
+      const glob = g.startsWith("!") ? g.slice(1) : g;
+      need(
+        glob.length > 0 && !glob.startsWith("/") && !glob.endsWith("/") && !glob.split("/").some((part) => part === ".." || part === "." || part === ""),
+        `${where}.${field} glob "${g}" must be repository-relative, without "..", "." or empty segments`,
+      );
+    }
+  }
+}
+
 function checkEnvironment(env: unknown): void {
   need(isObject(env), "environment must be an object");
   const e = env as Record<string, unknown>;
   for (const key of ["checks", "prepare"] as const) {
     if (e[key] === undefined) continue;
     need(Array.isArray(e[key]), `environment.${key} must be a list`);
-    (e[key] as unknown[]).forEach((c, i) => checkCommand(c, `environment.${key}[${i}]`));
+    (e[key] as unknown[]).forEach((c, i) => {
+      checkCommand(c, `environment.${key}[${i}]`);
+      checkCacheGlobs(c as Record<string, unknown>, `environment.${key}[${i}]`, key === "prepare");
+    });
   }
   if (e.pinnedFiles !== undefined) {
     need(Array.isArray(e.pinnedFiles), "environment.pinnedFiles must be a list");

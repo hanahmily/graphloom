@@ -101,6 +101,21 @@ export interface EnvironmentCommand {
   id: string;
   argv: string[];
   timeoutMs?: number;
+  /**
+   * Prepare commands only; declared together with `outputs`. Repository-relative
+   * globs (`**`, `*`, `?`; a leading `!` excludes) of the files the command's
+   * output depends on. The controller keys a run-scoped cache by the digest of
+   * these files' contents in the checkout plus `argv`, so list everything the
+   * command reads: a file missing from here can leave stale output restored.
+   */
+  inputs?: string[];
+  /**
+   * Globs of the files and relative symbolic links the command writes. After a
+   * successful run they are saved; a later checkout whose inputs are unchanged
+   * gets them copied back and the command does not run. List only what the
+   * command writes, and only files the repository ignores.
+   */
+  outputs?: string[];
 }
 
 export interface EnvironmentDeclaration {

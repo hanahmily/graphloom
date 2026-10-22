@@ -91,8 +91,29 @@ describe.skipIf(!existsSync(path.join(banyandbFixDist, "index.js")))("the banyan
           .replace('"summary","change",', '"summary",')
           .replace(',"selfChecks":{"type":"array","items":{"type":"string"}}', ""),
       ) as Omit<GraphDefinition, "graphId" | "version" | "privateStateSchema" | "defaultBudgets">;
-    expect(v1(strip(ours))).toEqual(strip(withoutLicense(theirs)));
-    expect(ours).toMatchObject({ graphId: "issue-fix", version: "0.8.0", privateStateSchema: "issue-fix-private-v1" });
+    // And #174: banyandb-fix runs one `make generate`; the profile runs it per project so each output is cached on its own inputs.
+    const monolithic = (definition: ReturnType<typeof v1>) => ({
+      ...definition,
+      environment: { ...definition.environment, prepare: theirs.environment?.prepare },
+    });
+    expect(monolithic(v1(strip(ours)))).toEqual(strip(withoutLicense(theirs)));
+    expect(theirs.environment?.prepare?.map((c) => c.argv.join(" "))).toEqual(["make generate"]);
+    expect(ours).toMatchObject({ graphId: "issue-fix", version: "0.8.1", privateStateSchema: "issue-fix-private-v1" });
+  });
+
+  it("splits make generate into separately cached steps with narrow inputs (#174)", () => {
+    const step = (id: string) => banyandb.environment.prepare?.find((c) => c.id === id);
+    expect(banyandb.environment.prepare?.map((c) => c.id)).toEqual(["generate-proto", "generate-mcp", "generate-directives", "generate-mocks"]);
+    expect(step("generate-proto")?.inputs).toEqual(expect.arrayContaining(["api/proto/**/*.proto", "api/Makefile"]));
+    expect(step("generate-proto")?.outputs).toEqual(expect.arrayContaining(["api/proto/**/*.pb.go"]));
+    expect(step("generate-mcp")?.inputs).toEqual(["mcp/package.json", "mcp/package-lock.json", "mcp/Makefile"]);
+    expect(step("generate-mcp")?.outputs).toEqual(["mcp/node_modules/**"]);
+    // Mocks depend on the packages their go:generate directives name, not on every Go file, so a candidate's edits elsewhere still hit.
+    const mocks = step("generate-mocks");
+    expect(mocks?.inputs).toEqual(expect.arrayContaining(["banyand/queue/*.go", "pkg/bus/*.go", "go.mod", "!**/*_test.go"]));
+    expect(mocks?.inputs?.some((g) => g === "banyand/**/*.go" || g === "pkg/**/*.go")).toBe(false);
+    // The directive guard has no inputs: it always runs.
+    expect(step("generate-directives")?.inputs).toBeUndefined();
   });
 
   it("gives the agents and the checks the same instructions and commands", async () => {

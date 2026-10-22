@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 import type { CheckoutSpec, EnvironmentCommand, JobSpec } from "@graphloom/sdk";
 import { writeScopeAllows } from "@graphloom/sdk";
 import type { ExecutorSourceOverride, JobEvidenceItem, JobResult, Runner } from "@graphloom/runner";
+import { cacheKey, commandSpec, dropEntry, isCacheable, outputsBlocked, restoreOutputs, saveOutputs } from "./prepare-cache.js";
 import { candidateChange } from "./worktree.js";
 
 const execFileAsync = promisify(execFile);
@@ -172,24 +173,85 @@ export async function runInCheckout(args: {
     });
     const setup = [...args.checks, ...args.prepare];
     if (setup.length > 0) {
-      const prepContext = context(`${operationId}-prepare`);
-      const prep = await args.runner.runJob({ ...plain, input: { commands: setup.map((c) => ({ ...c })) } }, prepContext);
-      const prepMismatch = identityMismatch(prep, prepContext);
-      if (prepMismatch !== undefined) return stale(prepMismatch);
-      const mutations = await checkoutMutations(dir, commit);
-      const reported = new Set((prep.evidence ?? []).map((item) => commandOutcome(item)?.id).filter((id) => id !== undefined));
-      const unreported = setup.filter((c) => !reported.has(c.id)).map((c) => c.id);
-      const failures = [
-        ...(prep.status === "ok" ? [] : [`${prep.status}: ${prep.summary}`]),
-        ...failedCommands(prep.evidence ?? []),
-        ...(unreported.length > 0 ? [`no result for ${unreported.join(", ")}`] : []),
-        ...(mutations.length > 0 ? [`changed tracked files: ${mutations.slice(0, 10).join(", ")}`] : []),
-      ];
-      const prepared = failures.length === 0;
-      for (const item of prep.evidence ?? []) {
-        evidence.push(withCheckout(item, record("prepare", prepared, mutations)));
+      // Commands go strictly in declaration order. A prepare command that
+      // declares inputs and outputs is keyed by its inputs as they stand in the
+      // checkout at that point (earlier commands have run or been restored),
+      // then restored from the run's cache or run; a run's outputs are saved
+      // once it succeeded.
+      const collected: JobEvidenceItem[] = [];
+      const failures: string[] = [];
+      const saved: Array<{ id: string; key: string }> = [];
+      let pending: EnvironmentCommand[] = [];
+      let pendingSave: Array<{ command: EnvironmentCommand & { inputs: string[]; outputs: string[] }; key: string }> = [];
+      let jobs = 0;
+      let mismatch: string | undefined;
+      const flush = async () => {
+        if (pending.length === 0 || failures.length > 0 || mismatch !== undefined) return;
+        const prepContext = context(jobs === 0 ? `${operationId}-prepare` : `${operationId}-prepare-${jobs}`);
+        jobs += 1;
+        const batch = pending;
+        const saves = pendingSave;
+        pending = [];
+        pendingSave = [];
+        const prep = await args.runner.runJob({ ...plain, input: { commands: batch.map(commandSpec) } }, prepContext);
+        mismatch = identityMismatch(prep, prepContext);
+        if (mismatch !== undefined) return;
+        collected.push(...(prep.evidence ?? []));
+        const reported = new Set((prep.evidence ?? []).map((item) => commandOutcome(item)?.id).filter((id) => id !== undefined));
+        const unreported = batch.filter((c) => !reported.has(c.id)).map((c) => c.id);
+        failures.push(
+          ...(prep.status === "ok" ? [] : [`${prep.status}: ${prep.summary}`]),
+          ...failedCommands(prep.evidence ?? []),
+          ...(unreported.length > 0 ? [`no result for ${unreported.join(", ")}`] : []),
+        );
+        if (failures.length > 0) return;
+        for (const entry of saves) {
+          const outcome = await saveOutputs({ stateDir: args.stateDir, root: dir, command: entry.command, key: entry.key });
+          if (outcome.saved) saved.push({ id: entry.command.id, key: entry.key });
+          else collected.push({ kind: "other", payload: { cache: { bypassed: entry.command.id, reason: `not saved: ${outcome.reason ?? "unknown"}` } } });
+        }
+      };
+      for (const command of setup) {
+        if (failures.length > 0 || mismatch !== undefined) break;
+        if (!args.prepare.includes(command) || !isCacheable(command)) {
+          pending.push(command);
+          continue;
+        }
+        await flush();
+        if (failures.length > 0 || mismatch !== undefined) break;
+        const blocked = await outputsBlocked(dir, command).catch((err: unknown) => `outputs unreadable: ${err instanceof Error ? err.message : String(err)}`);
+        if (blocked !== undefined) {
+          collected.push({ kind: "other", payload: { cache: { bypassed: command.id, reason: blocked } } });
+          pending.push(command);
+          continue;
+        }
+        const keyed = await cacheKey(dir, command).catch((err: unknown) => ({ bypass: `inputs unreadable: ${err instanceof Error ? err.message : String(err)}` }));
+        if ("bypass" in keyed) {
+          collected.push({ kind: "other", payload: { cache: { bypassed: command.id, reason: keyed.bypass } } });
+          pending.push(command);
+          continue;
+        }
+        const count = await restoreOutputs({ stateDir: args.stateDir, root: dir, command, key: keyed.key }).catch(() => undefined);
+        if (count !== undefined) {
+          collected.push(restoredEvidence(command, keyed.key, count));
+        } else {
+          pending.push(command);
+          pendingSave.push({ command, key: keyed.key });
+          // Run it now, so its outputs are saved before any later command can change them.
+          await flush();
+        }
       }
-      if (!prepared) return failed(`preparation failed in the checkout: ${failures.join("; ")}`, evidence);
+      await flush();
+      if (mismatch !== undefined) return stale(mismatch);
+      const mutations = await checkoutMutations(dir, commit);
+      if (mutations.length > 0) failures.push(`changed tracked files: ${mutations.slice(0, 10).join(", ")}`);
+      const prepared = failures.length === 0;
+      for (const item of collected) evidence.push(withCheckout(item, record("prepare", prepared, mutations)));
+      if (!prepared) {
+        // A preparation that left the checkout unclean is not worth keeping.
+        for (const entry of saved) await dropEntry(args.stateDir, entry.id, entry.key);
+        return failed(`preparation failed in the checkout: ${failures.join("; ")}`, evidence);
+      }
     }
     if (checkout.from === "base") {
       try {
@@ -370,6 +432,22 @@ async function assertNoSymlinkParent(root: string, rel: string): Promise<void> {
     if (stat === undefined) return;
     if (stat.isSymbolicLink()) throw new Error(`cannot copy ${rel}: ${path.relative(root, current)} is a symlink`);
   }
+}
+
+/** Evidence that a prepare command's output was copied from the run's cache instead of produced. */
+function restoredEvidence(command: EnvironmentCommand, key: string, count: number): JobEvidenceItem {
+  return {
+    kind: "command",
+    payload: {
+      command: {
+        id: command.id,
+        argv: command.argv,
+        exitCode: 0,
+        stdoutTail: `restored from cache ${key}`,
+        cache: { restored: true, key, files: count },
+      },
+    },
+  };
 }
 
 function withCheckout(item: JobEvidenceItem, checkout: CheckoutRecord): JobEvidenceItem {

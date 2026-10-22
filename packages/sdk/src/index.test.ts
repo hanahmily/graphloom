@@ -267,6 +267,17 @@ describe("wire validation", () => {
     expect(() => assertGraphDefinition(withEnv({ pinnedFiles: [{ path: "x", sha256: "abc" }] }))).toThrow(/SHA-256/);
   });
 
+  it("checks prepare inputs and outputs (#174)", () => {
+    const withPrepare = (extra: unknown) => ({ ...helloDefinition, environment: { prepare: [{ id: "generate", argv: ["make"], ...(extra as object) }] } });
+    const ok = { inputs: ["api/**/*.proto", "!**/skip.proto"], outputs: ["gen/**"] };
+    expect(assertGraphDefinition(withPrepare(ok)).environment?.prepare?.[0]?.outputs).toEqual(["gen/**"]);
+    expect(() => assertGraphDefinition(withPrepare({ inputs: ["a"] }))).toThrow(/together/);
+    expect(() => assertGraphDefinition(withPrepare({ inputs: ["../a"], outputs: ["b"] }))).toThrow(/glob/);
+    expect(() => assertGraphDefinition(withPrepare({ inputs: ["a"], outputs: ["/b"] }))).toThrow(/glob/);
+    expect(() => assertGraphDefinition(withPrepare({ inputs: ["!a"], outputs: ["b"] }))).toThrow(/at least one/);
+    expect(() => assertGraphDefinition({ ...helloDefinition, environment: { checks: [{ id: "c", argv: ["x"], ...ok }] } })).toThrow(/only a prepare/);
+  });
+
   it("checks declared default budgets (#150)", () => {
     const withBudgets = (defaultBudgets: unknown) => ({ ...helloDefinition, defaultBudgets });
     expect(assertGraphDefinition(withBudgets({ agentInvocations: 1800, activeMs: 36_000_000 })).defaultBudgets).toEqual({

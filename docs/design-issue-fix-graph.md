@@ -12,6 +12,10 @@ graph's default budgets ([budgets](budgets.md)).
 Version 0.7.0, 2026-10-20, delivers the decision record's `change`, not the
 implementer's last-round `summary`, as the commit message and pull request
 summary ([#161](https://github.com/hanahmily/graphloom/issues/161)).
+Version 0.8.1 splits the BanyanDB profile's `make generate` into separately
+cached steps (proto, mcp npm install, mocks) with declared inputs and outputs,
+so checkouts of a run reuse each output while its own inputs are unchanged
+([#174](https://github.com/hanahmily/graphloom/issues/174)).
 
 ## Purpose
 
