@@ -1,5 +1,6 @@
 import { defineExecutor, jsonSchemaProblem, type ExecutorContext, type ExecutorDefinition, type ToolCallResult } from "@graphloom/sdk";
-import type { CodingHarness, CodingSession, CodingTool } from "./harness.js";
+import type { CodingHarness, CodingRunResult, CodingSession, CodingTool } from "./harness.js";
+import { abortableSleep, backoffMs, classifyTransient, resolveRetryPolicy, worktreeDigest, type TransientRetryPolicy } from "./transient.js";
 
 export const CODING_AGENT_RUN_ID = "graphloom.coding-agent/run";
 
@@ -66,6 +67,23 @@ function isInput(v: unknown): v is CodingAgentInput {
   );
 }
 
+export interface CodingAgentExecutorOptions {
+  /** Bounds for retrying transient harness failures; unset fields fall back to the GRAPHLOOM_CODING_RETRY_* environment, then the defaults (3 tries, 10s to 60s). */
+  retry?: Partial<TransientRetryPolicy>;
+  /** Wait between tries; resolves false when the job's signal aborted first. Tests replace it; the default is a real timer. */
+  sleep?: (ms: number, signal: AbortSignal | undefined) => Promise<boolean>;
+}
+
+/** One transient failure the executor waited out, recorded in the job's evidence. */
+interface RetryRecord {
+  /** The try that failed (1-based). */
+  attempt: number;
+  reason: string;
+  delayMs: number;
+  /** The harness's own failure text for that try. */
+  failure: string;
+}
+
 /**
  * The coding-agent executor: opens a harness session in the run worktree with
  * the job's admitted tools (or restores the one `ctx.session.resume` names),
@@ -75,6 +93,7 @@ function isInput(v: unknown): v is CodingAgentInput {
  */
 export function createCodingAgentExecutor(
   harness: CodingHarness | (() => Promise<CodingHarness>),
+  executorOptions: CodingAgentExecutorOptions = {},
 ): ExecutorDefinition<CodingAgentInput> {
   return defineExecutor<CodingAgentInput, unknown>({
     id: CODING_AGENT_RUN_ID,
@@ -154,7 +173,7 @@ export function createCodingAgentExecutor(
           ...(input.stageId !== undefined ? { stageId: input.stageId } : {}),
           ...(input.purpose !== undefined ? { purpose: input.purpose } : {}),
         };
-        const result = await session.run({
+        const request = {
           assignment: resume !== undefined ? `${CONTINUATION_NOTICE}\n\n${input.assignment}` : input.assignment,
           ...(resultContract !== undefined
             ? { resultContract }
@@ -162,7 +181,42 @@ export function createCodingAgentExecutor(
               ? { resultSchema: input.resultSchema }
               : {}),
           identity,
-        });
+        };
+        const policy = resolveRetryPolicy(executorOptions.retry);
+        const sleep = executorOptions.sleep ?? abortableSleep;
+        const retries: RetryRecord[] = [];
+        let result: CodingRunResult;
+        for (let attempt = 1; ; attempt++) {
+          // A retry re-runs the whole assignment, so it needs proof the failed
+          // try changed nothing: an unchanged worktree and no write tool call.
+          // Without a readable digest only a fresh session retries; a continued
+          // one is not repeated blind.
+          const before = policy.maxAttempts > 1 ? await worktreeDigest(ctx.worktreePath) : undefined;
+          const callsBefore = toolCalls.length;
+          result = await session.run(request);
+          const transient = result.status === "failed" ? classifyTransient(h.name, result.summary) : undefined;
+          if (transient === undefined) break;
+          const wrote = toolCalls.slice(callsBefore).some((c) => tools.find((t) => t.name === c.tool)?.effect !== "read");
+          const unchanged = wrote
+            ? false
+            : before === undefined
+              ? resume === undefined
+              : (await worktreeDigest(ctx.worktreePath)) === before;
+          if (attempt >= policy.maxAttempts || !unchanged) {
+            const why =
+              attempt >= policy.maxAttempts
+                ? `retries exhausted after ${attempt} ${attempt === 1 ? "try" : "tries"}`
+                : "not retried: the failed try may have changed the worktree or called a write tool";
+            result = { ...result, summary: `Transient harness failure (${transient.reason}); ${why}: ${result.summary}` };
+            break;
+          }
+          const delayMs = backoffMs(policy, attempt, transient.retryAfterMs);
+          retries.push({ attempt, reason: transient.reason, delayMs, failure: result.summary });
+          if (!(await sleep(delayMs, ctx.signal))) {
+            result = { status: "failed", summary: `agent session aborted while waiting to retry after a transient harness failure (${transient.reason})` };
+            break;
+          }
+        }
         const sessionRef = ctx.session !== undefined ? result.sessionRef : undefined;
         return {
           status: result.status === "completed" ? "ok" : "failed",
@@ -179,6 +233,8 @@ export function createCodingAgentExecutor(
                   output: result.output ?? null,
                   toolCalls,
                   modelCalls,
+                  attempts: retries.length + 1,
+                  retries,
                   usage: result.usage ?? null,
                   sessionRef: sessionRef ?? null,
                   continued: resume !== undefined,

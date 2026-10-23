@@ -7,7 +7,15 @@ export type {
   CodingTool,
   CodingUsage,
 } from "./harness.js";
-export { CODING_AGENT_RUN_ID, CONTINUATION_NOTICE, createCodingAgentExecutor, type CodingAgentInput } from "./run.js";
+export { CODING_AGENT_RUN_ID, CONTINUATION_NOTICE, createCodingAgentExecutor, type CodingAgentExecutorOptions, type CodingAgentInput } from "./run.js";
+export {
+  classifyTransient,
+  DEFAULT_TRANSIENT_RETRY,
+  RETRY_BASE_DELAY_ENV,
+  RETRY_MAX_ATTEMPTS_ENV,
+  RETRY_MAX_DELAY_ENV,
+  type TransientRetryPolicy,
+} from "./transient.js";
 export { CODING_HARNESS_ENV } from "./executors.js";
 export {
   claudeCodeHarnessModule,

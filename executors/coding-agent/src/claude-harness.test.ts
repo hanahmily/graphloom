@@ -810,6 +810,7 @@ describe("Claude Code harness", () => {
   });
 
   it("reports a failed or crashed Claude Code run", async () => {
+    vi.stubEnv("GRAPHLOOM_CODING_RETRY_MAX_ATTEMPTS", "1"); // this test asserts the raw failure text, so no transient retry
     const h = await setup();
     await h.script([{ error: "API Error: overloaded" }]);
     const failed = await h.executor.execute({ assignment: "work" }, h.ctx());
@@ -817,7 +818,7 @@ describe("Claude Code harness", () => {
     const crashed = await h.executor.execute({ assignment: "work" }, h.ctx());
     const missing = await (await setup({ command: path.join(h.dir, "no-such-claude") })).executor.execute({ assignment: "work" }, h.ctx());
 
-    expect(failed).toMatchObject({ status: "failed", summary: "Claude Code run failed (error_during_execution): API Error: overloaded" });
+    expect(failed).toMatchObject({ status: "failed", summary: expect.stringContaining("Claude Code run failed (error_during_execution): API Error: overloaded") });
     expect(payload(failed).usage).toEqual({ inputTokens: 7, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 });
     expect(payload(crashed).usage).toBeNull();
     expect(crashed).toMatchObject({ status: "failed", summary: "Claude Code exited with code 3 and no result: segfault in the agent" });
