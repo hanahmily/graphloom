@@ -8,8 +8,15 @@ export interface QuotaFailure {
   resetAt?: string;
 }
 
-const QUOTA =
-  /\b(?:session|usage|weekly|daily|monthly|5-hour|five-hour|opus|sonnet)[ -]limit\b|usage limit|quota (?:exceeded|exhausted|has been exceeded)|exceeded your (?:current )?quota|insufficient_quota|RESOURCE_EXHAUSTED/i;
+/** Wording of an allowance that renews on a schedule (a session, a billing period, a plan): quota on its own. */
+const ALLOWANCE =
+  /\b(?:session|usage|weekly|daily|monthly|5-hour|five-hour|opus|sonnet)[ -]limit\b|usage limit|insufficient_quota|exceeded your (?:current )?quota/i;
+/** Wording that only says a quota or resource ran out: a per-minute rate limit says it too, so it needs more evidence. */
+const AMBIGUOUS = /quota (?:exceeded|exhausted|has been exceeded)|RESOURCE_EXHAUSTED/i;
+/** A short-window rate limit, which the transient backoff handles. */
+const RATE_WINDOW = /per[ -]?(?:minute|second)|\b(?:rpm|tpm)\b|rate[ _-]?limit/i;
+/** An ambiguous failure is a usage allowance only when its stated reset is farther than a backoff could wait. */
+const FAR_RESET_MS = 5 * 60_000;
 
 const MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
 const DAY_MS = 86_400_000;
@@ -135,8 +142,12 @@ export function parseResetAt(text: string, now: Date = new Date()): Date | undef
 /** Classifies a failed run's summary as a usage-limit failure, per harness; undefined when it is not one. */
 export function classifyQuota(harness: string, summary: string, now: Date = new Date()): QuotaFailure | undefined {
   const shape = FAILURE_SHAPE[harness];
-  if (shape === undefined || !shape.test(summary) || !QUOTA.test(summary)) return undefined;
-  const reason = /insufficient_quota|exceeded your (?:current )?quota|quota|RESOURCE_EXHAUSTED/i.test(summary) ? "provider quota" : "usage limit";
+  if (shape === undefined || !shape.test(summary)) return undefined;
+  const allowance = ALLOWANCE.test(summary);
+  if (!allowance && (!AMBIGUOUS.test(summary) || RATE_WINDOW.test(summary))) return undefined;
   const at = parseResetAt(summary, now);
-  return at !== undefined && Number.isFinite(at.getTime()) ? { reason, resetAt: at.toISOString() } : { reason };
+  const resetAt = at !== undefined && Number.isFinite(at.getTime()) ? at.toISOString() : undefined;
+  if (!allowance && (at === undefined || at.getTime() - now.getTime() < FAR_RESET_MS)) return undefined;
+  const reason = /insufficient_quota|quota|RESOURCE_EXHAUSTED/i.test(summary) ? "provider quota" : "usage limit";
+  return resetAt !== undefined ? { reason, resetAt } : { reason };
 }

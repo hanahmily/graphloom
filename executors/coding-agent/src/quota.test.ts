@@ -79,6 +79,23 @@ describe("classifyQuota", () => {
     expect(classifyQuota("unknown-harness", "Codex run failed: usage limit reached", now)).toBeUndefined();
   });
 
+  it("leaves a short-window 429 to the transient backoff, and takes billing or plan quota as a usage allowance", () => {
+    const rpm = "agent request failed: 429 RESOURCE_EXHAUSTED: Quota exceeded for quota metric 'requests per minute'";
+    expect(classifyQuota("pi", rpm, now)).toBeUndefined();
+    expect(classifyTransient("pi", rpm)).toMatchObject({ reason: "rate limited (429)" });
+    expect(classifyQuota("pi", "agent request failed: 429 RESOURCE_EXHAUSTED", now)).toBeUndefined();
+    expect(classifyTransient("pi", "agent request failed: 429 RESOURCE_EXHAUSTED")).toMatchObject({ reason: "rate limited (429)" });
+    expect(classifyQuota("pi", "agent request failed: 429 insufficient_quota", now)).toEqual({ reason: "provider quota" });
+    expect(classifyQuota("pi", "agent request failed: You exceeded your current quota, please check your plan and billing", now)).toEqual({ reason: "provider quota" });
+    expect(classifyQuota("claude-code", "Claude Code run failed (success): You've hit your session limit", now)).toEqual({ reason: "usage limit" });
+    // A bare quota failure is an allowance only when it names a reset far beyond a backoff.
+    expect(classifyQuota("pi", "agent request failed: RESOURCE_EXHAUSTED quota will reset after 30s", now)).toBeUndefined();
+    expect(classifyQuota("pi", "agent request failed: RESOURCE_EXHAUSTED quota will reset after 2 hours", now)).toEqual({
+      reason: "provider quota",
+      resetAt: "2026-10-23T13:07:00.000Z",
+    });
+  });
+
   it("is never a transient failure to retry, even when it says to try again", () => {
     expect(classifyTransient("codex", "Codex run failed: You've hit your usage limit. Please try again later.")).toBeUndefined();
   });
