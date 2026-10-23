@@ -18,6 +18,10 @@ export interface ExecutorFailure {
   status: string;
   summary: string;
   retryAfterMs: number | undefined;
+  /** The executor's own failure category, when it named one. */
+  failureKind?: string | undefined;
+  /** With `failureKind: "quota"`: when the allowance renews. */
+  resetAt?: string | undefined;
 }
 
 /**
@@ -42,6 +46,8 @@ export function recordExecutorFailure(state: DurableRunState, failure: ExecutorF
         status: failure.status,
         summary: failure.summary,
         ...(retryAt !== undefined ? { retryAfterMs, retryAt } : {}),
+        ...(failure.failureKind !== undefined ? { failureKind: failure.failureKind } : {}),
+        ...(failure.resetAt !== undefined ? { resetAt: failure.resetAt } : {}),
       },
       producer: failure.producer,
     },

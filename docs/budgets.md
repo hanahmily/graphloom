@@ -115,10 +115,16 @@ the controller.
 | `decisions` | 165 → **350** | ~248 → **500** | 512 |
 | `corrections` | 15 → **30** | ~55 → **100** | 8 |
 | `activeMs` | 4 h 45 min → **10 h** | ~10 h → **20 h** | 4 h |
-| `waitMs` | 0 → controller's 15 min | 0 → controller's 15 min | 15 min |
+| `waitMs` | 0 → **6 h** | 0 → **6 h** | 15 min |
 | `recoveryReserve` | 5% → 90 | 5% → 300 | max(8, 5%) |
 
-No run waited, so `waitMs` keeps the controller's default. The banyandb
+No run waited, but a harness usage limit now pauses the run until its reset
+([design-executors.md](design-executors.md)), and a Claude Code session limit
+resets within 5 hours: 15 minutes cannot absorb one, so all three profiles
+declare 6 h (the 5 h window plus margin; the canopy profile follows the same
+numbers). A weekly or longer reset exceeds it and stops the run retryable
+instead, so `graphloom resume` after the reset continues. Waiting is idle time,
+not spend. The banyandb
 numbers rest on one banyandb-fix run, whose many repairs drove its corrections
 and supervisor calls; issue-fix on BanyanDB has not run live yet, so measure
 its first runs with `stats` and adjust. banyandb-fix, which has no profile,

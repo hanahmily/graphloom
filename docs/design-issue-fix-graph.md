@@ -29,6 +29,7 @@ planner's `acceptance` items ([#183](https://github.com/hanahmily/graphloom/issu
 Version 0.10.3 reads the latest valid decision record in review and delivery, so a
 supervisor-dispatched work run without one no longer crashes the graph
 ([#191](https://github.com/hanahmily/graphloom/issues/191)).
+Version 0.10.4 declares a 6 h `waitMs` in every profile, so a coding-agent harness's usage-limit reset can be waited out instead of stopping the run ([#189](https://github.com/hanahmily/graphloom/issues/189)).
 
 ## Purpose
 

@@ -1,5 +1,6 @@
 import { defineExecutor, jsonSchemaProblem, type ExecutorContext, type ExecutorDefinition, type ToolCallResult } from "@graphloom/sdk";
 import type { CodingHarness, CodingRunResult, CodingUsage, CodingSession, CodingTool } from "./harness.js";
+import { classifyQuota, type QuotaFailure } from "./quota.js";
 import { abortableSleep, backoffMs, classifyTransient, resolveRetryPolicy, worktreeDigest, type TransientRetryPolicy } from "./transient.js";
 
 export const CODING_AGENT_RUN_ID = "graphloom.coding-agent/run";
@@ -205,16 +206,34 @@ export function createCodingAgentExecutor(
         let executed = 0;
         let result: CodingRunResult;
         let usage: CodingUsage | undefined;
+        let quota: QuotaFailure | undefined;
+        let effects: "none" | "some" | "unknown" = "unknown";
         for (let attempt = 1; ; attempt++) {
           // A retry re-runs the whole assignment, so it needs proof the failed
           // try had no effect: no graph tool call attempted, no native tool use
           // in the harness's own report (which must be available), and a
           // readable worktree fingerprint identical before and after.
-          const before = policy.maxAttempts > 1 ? await worktreeDigest(ctx.worktreePath) : undefined;
+          const before = await worktreeDigest(ctx.worktreePath);
           const attemptsBefore = toolAttempts;
           executed += 1;
           result = await session.run(request);
           usage = addUsage(usage, result.usage);
+          // A usage limit is the controller's to wait out (it knows the run's wait budget); retrying here only burns tries.
+          quota = result.status === "failed" ? classifyQuota(h.name, result.summary) : undefined;
+          if (quota !== undefined) {
+            // The controller re-dispatches after the reset; it needs to know whether that could repeat an effect.
+            effects =
+              toolAttempts > attemptsBefore
+                ? "some"
+                : result.nativeTools === undefined
+                  ? "unknown"
+                  : result.nativeTools.length > 0
+                    ? "some"
+                    : before === undefined
+                      ? "unknown"
+                      : await worktreeDigest(ctx.worktreePath).then((after) => (after === undefined ? "unknown" : after === before ? "none" : "some"));
+            break;
+          }
           const transient = result.status === "failed" ? classifyTransient(h.name, result.summary) : undefined;
           if (transient === undefined) break;
           const calledGraphTool = toolAttempts > attemptsBefore;
@@ -255,7 +274,11 @@ export function createCodingAgentExecutor(
           status: result.status === "completed" ? "ok" : "failed",
           summary: result.summary,
           ...(sessionRef !== undefined ? { sessionRef } : {}),
-          ...(result.failureKind !== undefined ? { failureKind: result.failureKind } : {}),
+          ...(quota !== undefined
+            ? { failureKind: "quota", effects, ...(quota.resetAt !== undefined ? { resetAt: quota.resetAt } : {}) }
+            : result.failureKind !== undefined
+              ? { failureKind: result.failureKind }
+              : {}),
           evidence: [
             {
               kind: "other",

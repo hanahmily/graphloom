@@ -98,9 +98,19 @@ export interface JobResult {
    * Coarse reason category a recovery trigger can read instead of parsing
    * `summary`. "contract_violation": the job failed after its agent could
    * not produce a result satisfying its declared contract within the
-   * in-turn correction bound.
+   * in-turn correction bound. "quota": the executor's harness refused the
+   * work until its usage allowance renews (`resetAt`, when it said when). A
+   * waiting condition of the environment, not something recovery can fix.
    */
-  failureKind?: "contract_violation";
+  failureKind?: "contract_violation" | "quota";
+  /** With `failureKind: "quota"`: the absolute time (ISO 8601) the allowance renews, when the executor knows it. */
+  resetAt?: string;
+  /**
+   * With `failureKind: "quota"`: whether the failed try may have had effects
+   * (graph tool calls, native tool use, worktree changes) a re-run from the
+   * original assignment would repeat. Absent means unknown.
+   */
+  effects?: "none" | "some" | "unknown";
 }
 
 /** An executor a runner serves, identified by the digest of the code it would run. */

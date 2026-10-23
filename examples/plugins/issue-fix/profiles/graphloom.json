@@ -180,6 +180,7 @@
     "jobs": 250,
     "decisions": 350,
     "corrections": 30,
-    "activeMs": 36000000
+    "activeMs": 36000000,
+    "waitMs": 21600000
   }
 }

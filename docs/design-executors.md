@@ -714,6 +714,36 @@ that retry, before the graph or the supervisor is called. A failure the
 controller finds itself, such as a write outside the job's scope, is never
 retried.
 
+A harness that has run out of its usage allowance is an environment condition,
+not something recovery can fix. The coding-agent executor recognizes each
+harness's own usage-limit text (Claude Code's "You've hit your session limit
+· resets 12:20pm (UTC)", Codex's usage-limit message, a Pi provider's quota
+error) and returns `failureKind: "quota"` with `resetAt` (an ISO time parsed
+from the stated clock time and zone; a clock time already past means
+tomorrow) when the text gives one. It does not retry such a failure itself.
+The controller reads only those two fields, never the harness text. It
+records the `executorFailure` evidence but opens no recovery episode:
+
+- `resetAt` plus a 30 s margin fits the run's remaining `waitMs`: the job runs
+  again unchanged after the reset, the wait charged to `waitMs` and
+  interrupted by stop, recorded as a `harness quota` remedy (shown by
+  `inspect` and `stats`). At most three consecutive pauses per job.
+- It does not fit, no reset was stated, or the limit persists after the
+  pauses: the run stops retryable with `harness quota exhausted until
+  <resetAt>` (`unknown` when none was stated). `--on-stop` fires as for any
+  stop, and `graphloom resume` after the reset continues.
+
+A usage limit can cut a job off after effects (graph tool calls, native tool
+use, worktree changes; the executor reports `effects` as `none`, `some` or
+`unknown`). After the reset the job runs again unchanged only for `none`. With
+possible effects it continues the failed agent session when one is saved;
+otherwise the controller records `reconciliationRequired` in the run state and
+opens one `quota_partial` recovery episode (or, with no supervisor, stops
+retryable). The record survives a stop: `resume` with a supervisor re-enters that
+episode instead of running the graph, which would replay the job; without one it
+stops again until the operator reconciles and passes `graphloom resume --reconciled`.
+The record is cleared when the supervisor returns the run to its graph.
+
 A failed tool call from an agent writes the same `executorFailure` record and
 sets the same retry time. The agent receives the failure, including
 `retryAfterMs`, as its tool result. Further calls to that executor are refused
