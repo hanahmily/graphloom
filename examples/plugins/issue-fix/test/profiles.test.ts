@@ -13,6 +13,7 @@ import {
   candidateCommands,
   codeReviewInstruction,
   WHOLE_CHANGE_CHECK,
+  DEDUPE_RULE,
   commitMessage,
   createGraph,
   decisionProblems,
@@ -98,7 +99,10 @@ describe.skipIf(!existsSync(path.join(banyandbFixDist, "index.js")))("the banyan
           .replaceAll("decision-record-v2", "decision-record-v1")
           .replace('"change":{"type":"string"},', "")
           .replace('"summary","change",', '"summary",')
-          .replace(',"selfChecks":{"type":"array","items":{"type":"string"}}', ""),
+          .replace(',"selfChecks":{"type":"array","items":{"type":"string"}}', "")
+          // #182: a code review comment may be marked `distinct`, which banyandb-fix never had.
+          .replace(',"distinct":{"type":"boolean"}', "")
+          .replace('"finding","evidence","distinct"]', '"finding","evidence"]'),
       ) as Omit<GraphDefinition, "graphId" | "version" | "privateStateSchema" | "defaultBudgets">;
     // And #174: banyandb-fix runs one `make generate`; the profile runs it per project so each output is cached on its own inputs.
     const monolithic = (definition: ReturnType<typeof v1>) => ({
@@ -159,13 +163,13 @@ describe.skipIf(!existsSync(path.join(banyandbFixDist, "index.js")))("the banyan
     expect(background).toBe(call(ocr.reviewBackground, ISSUE, GO_PLAN));
     const review = { ocr: "/opt/ocr", base: "abc", background, known: { open: [{ id: "F1", state: "confirmed", description: "x" }], settled: [] }, sweep: true };
     // The one deliberate difference (#148): issue-fix reviews every changed file, not only the files
-    // preview keeps plus the test files, and then checks the change as a whole.
+    // preview keeps plus the test files, and then checks the change as a whole (#148); and (#182) is told to report each problem once.
     const theirs = call<string>(ocr.codeReviewInstruction, review).split("\n");
     const ours = codeReviewInstruction(banyandb, review).split("\n");
     const step2 = (lines: string[]) => lines.findIndex((l) => l.startsWith("2. "));
     expect(theirs[step2(theirs)]).toBe("2. The change's Go test files (`_test.go`) are reviewable too, even when preview excludes them as tests: add them to your list. Leave out other excluded files.");
     expect(ours[step2(ours)]).toContain("2. Your list is every changed file. Add back every file preview excluded");
-    expect(ours.filter((l, i) => i !== step2(ours) && l !== WHOLE_CHANGE_CHECK)).toEqual(theirs.filter((_, i) => i !== step2(theirs)));
+    expect(ours.filter((l, i) => i !== step2(ours) && l !== WHOLE_CHANGE_CHECK && l !== DEDUPE_RULE)).toEqual(theirs.filter((_, i) => i !== step2(theirs)));
     expect(verificationInstruction(banyandb, { findings: [], background, changed: ["a.go"] })).toBe(call(findings.verificationInstruction, { findings: [], background, changed: ["a.go"] }));
     const record = { ...GO_PLAN, scopeExceptions: [{ path: "go.mod", reason: "a new dependency" }, { path: "Makefile", reason: "x" }] };
     expect(decisionProblems(record, banyandb)).toEqual(call(decisions.decisionProblems, record));

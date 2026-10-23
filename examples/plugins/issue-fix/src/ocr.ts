@@ -24,7 +24,7 @@ export const CODE_REVIEW_SCHEMA = JSON.stringify({
       items: {
         type: "object",
         additionalProperties: false,
-        required: ["path", "start_line", "end_line", "category", "severity", "content", "finding", "evidence"],
+        required: ["path", "start_line", "end_line", "category", "severity", "content", "finding", "evidence", "distinct"],
         properties: {
           path: { type: "string" },
           start_line: { type: "integer" },
@@ -34,6 +34,7 @@ export const CODE_REVIEW_SCHEMA = JSON.stringify({
           content: { type: "string" },
           finding: { type: "string" },
           evidence: { type: "string" },
+          distinct: { type: "boolean" },
         },
       },
     },
@@ -73,6 +74,16 @@ export const CODE_REVIEW_SCHEMA = JSON.stringify({
  */
 export const WHOLE_CHANGE_CHECK =
   "Then, with every file's diff read, check the change as a whole, across files: data passed between modules (a value one module produces with a shape, unit, order, size or guarantee another does not expect; a field written but never read, or read on a path where nothing wrote it); promises one file makes that another breaks (a doc comment, type, name, error contract or invariant stated in one place and violated in another, including code the change left as it was); budget and limit invariants (every bound, cap, size limit, timeout, retry count and budget the change adds or relies on, enforced on every path that can exceed it, resume, retry and replay included); and changed paths that no test in the change covers.";
+
+/**
+ * One review pass reports a problem once. The cross-file check comes after the
+ * per-file review of the same pass, and a sweep pass follows earlier passes of
+ * the round: both see what was already raised and must not raise it again
+ * (run c44b4ae7-5d1 recorded about 8 problems as 14 findings). The graph also
+ * merges, by path and overlapping lines, whatever still comes back twice.
+ */
+export const DEDUPE_RULE =
+  "Report each problem once. The cross-file check adds only problems that none of your per-file comments of this pass and none of the issues listed below (this round's earlier passes included) already describes. When it finds one of those again, either add no comment, or report it with `finding` set to that issue's id (a duplicate of I<n>) and the cross-file evidence. Comments on one file with overlapping lines are merged into one issue by the graph; when two of them are different problems, set `distinct` to true on each.";
 
 /** What the reviewer is told about the change: the issue and the plan, bounded. */
 export function reviewBackground(profile: Profile, issue: Issue, record: DecisionRecord): string {
@@ -154,7 +165,7 @@ export function codeReviewInstruction(
       ? "4. For each file, read its diff (`git diff HEAD -- <path>`; read a new untracked file whole) and check the known findings below against it, reading any other code you need. Check every file off as reviewed, or as skipped with a concrete reason."
       : "4. For each file, read its diff (`git diff HEAD -- <path>`; read a new untracked file whole) and review it against its rule group and the extra rule below, reading any other code you need. Check every file off as reviewed, or as skipped with a concrete reason. Do not stop at the first serious finding.",
     // Cross-module defects are what a file-by-file review missed (#134, #143); a verification round raises nothing new.
-    ...(verifying ? [] : [WHOLE_CHANGE_CHECK]),
+    ...(verifying ? [] : [WHOLE_CHANGE_CHECK, DEDUPE_RULE]),
     verifying
       ? "5. Give every open finding its status in `prior`; a fixed finding whose defect is back is a comment naming it in `finding`, with the path, the line range in the new file, a severity and in `evidence` the concrete failure, with file:line. Check that every file on your list is accounted for."
       : "5. Report each finding once, with the path, the line range in the new file, a category, a severity, and in `evidence` the concrete failure: the input or sequence of calls and what goes wrong, with file:line. An independent verifier checks every critical and high finding against the code. Drop likely false positives. Check that every file on your list is accounted for.",
@@ -202,6 +213,8 @@ export interface ReviewComment {
   finding?: string;
   /** The concrete failure the reviewer describes. */
   evidence?: string;
+  /** The reviewer says this is a different problem from an overlapping comment on the same file: do not merge them. */
+  distinct?: boolean;
 }
 
 export interface PriorFinding {
@@ -247,6 +260,7 @@ export function parseCodeReview(output: unknown): { report: CodeReviewReport } |
       content: c.content,
       ...(typeof c.finding === "string" && c.finding.trim() !== "" ? { finding: c.finding.trim() } : {}),
       ...(typeof c.evidence === "string" && c.evidence.trim() !== "" ? { evidence: c.evidence } : {}),
+      ...(c.distinct === true ? { distinct: true } : {}),
     });
   }
   const prior: PriorFinding[] = (Array.isArray(result.prior) ? result.prior : []).flatMap((raw) => {

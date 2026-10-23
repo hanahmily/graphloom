@@ -28,6 +28,7 @@ import {
 import {
   applyFixerRead,
   createIssue,
+  descriptionOf,
   fixerNote,
   emptyIssueTable,
   findingIdOf,
@@ -89,6 +90,19 @@ export interface Finding {
   note?: ReviewerNote;
   /** The review round the pass that raised it belongs to. */
   round?: number;
+  /**
+   * Later comments of the same round on the same lines, merged into this
+   * finding rather than recorded as findings of their own; the history keeps
+   * their texts.
+   */
+  merged?: MergedComment[];
+}
+
+/** A comment merged into an earlier finding of its round, and where it came from. */
+export interface MergedComment {
+  comment: ReviewComment;
+  digest: string;
+  ref: string;
 }
 
 /** What a review pass last said about a known finding, on which candidate, in which evidence record. */
@@ -333,7 +347,14 @@ function applyPass(ledger: FindingLedger, run: AgentRun, digest: string, files: 
   // The reviewer names findings by their issue ids (I3 is F3); earlier runs used F3.
   const report: CodeReviewReport = {
     ...pass.report,
-    comments: pass.report.comments.map((c) => (c.finding !== undefined ? { ...c, finding: findingIdOf(c.finding) } : c)),
+    // A new comment on the lines of an earlier finding of this round names it: the same problem, found twice.
+    comments: pass.report.comments
+      .map((c) => (c.finding !== undefined ? { ...c, finding: findingIdOf(c.finding) } : c))
+      .map((c) => {
+        if (!mergeable(c) || (c.finding !== undefined && findingById(ledger, c.finding) !== undefined)) return c;
+        const twin = mergeTarget(ledger.findings, c, round);
+        return twin !== undefined ? { ...c, finding: twin.id } : c;
+      }),
     prior: pass.report.prior.map((p) => ({ ...p, finding: findingIdOf(p.finding) })),
   };
   pass.report = report;
@@ -344,7 +365,7 @@ function applyPass(ledger: FindingLedger, run: AgentRun, digest: string, files: 
   for (const c of report.comments) {
     if (c.finding === undefined) continue;
     const known = findingById(ledger, c.finding);
-    if (known !== undefined) updateComment(known, c);
+    if (known !== undefined) updateComment(known, c, round, { digest, ref: run.record.ref });
   }
   const status = new Map<string, PriorStatus>();
   const note = (id: string, s: PriorStatus, reason: string) => {
@@ -391,9 +412,20 @@ function applyPass(ledger: FindingLedger, run: AgentRun, digest: string, files: 
       if (!ledger.followUps.some((f) => followUpKey(f.comment) === key)) ledger.followUps.push({ comment: c, digest, round, ref: run.record.ref });
       continue;
     }
+    // The same problem raised twice in this pass (per-file and cross-file) is one finding.
+    const twin = mergeable(c) ? mergeTarget(ledger.findings, c, round) : undefined;
+    if (twin !== undefined) {
+      mergeInto(twin, c, { digest, ref: run.record.ref });
+      continue;
+    }
     const f: Finding = { id: `F${ledger.findings.length + 1}`, comment: c, state: "pending", on: digest, raisedOn: digest, round };
     ledger.findings.push(f);
     pass.raised.push(f.id);
+  }
+  // A twin merged after the issue exists adds its text to the issue's description.
+  for (const f of ledger.findings) {
+    const issue = f.merged !== undefined ? issueById(ledger.issues, issueIdOf(f.id)) : undefined;
+    if (issue !== undefined) issue.description = descriptionOf(f);
   }
   syncIssuesAfterPass(ledger, before, status, { round, digest, ref: run.record.ref });
 }
@@ -519,10 +551,36 @@ function syncIssuesAfterVerification(ledger: FindingLedger, covered: Finding[], 
   }
 }
 
-/** Replace a finding's comment with its latest occurrence, keeping the first for history. */
-function updateComment(f: Finding, c: ReviewComment): void {
+/**
+ * A comment naming a finding. In the finding's own round it is the same
+ * occurrence found again, so its text joins the finding's history; in a later
+ * round it replaces the comment with the latest occurrence, keeping the first.
+ */
+function updateComment(f: Finding, c: ReviewComment, round: number, at: { digest: string; ref: string }): void {
+  if (f.round === round) {
+    mergeInto(f, c, at);
+    return;
+  }
   if (f.original === undefined) f.original = f.comment;
   f.comment = c;
+}
+
+/** A new blocking comment the reviewer did not mark distinct and that says where it is: the merge default applies. */
+const mergeable = (c: ReviewComment): boolean => isBlocking(c) && c.distinct !== true && c.start_line > 0;
+
+const occurrences = (f: Finding): ReviewComment[] => [f.comment, ...(f.original !== undefined ? [f.original] : []), ...(f.merged ?? []).map((m) => m.comment)];
+const overlaps = (a: ReviewComment, b: ReviewComment): boolean => a.path === b.path && a.start_line > 0 && a.start_line <= Math.max(b.end_line, b.start_line) && b.start_line <= Math.max(a.end_line, a.start_line);
+
+/** The first finding of `round` (in raised order) whose lines overlap the comment's, unless it is already fixed. */
+function mergeTarget(findings: Finding[], c: ReviewComment, round: number): Finding | undefined {
+  return findings.find((f) => f.round === round && f.state !== "fixed" && occurrences(f).some((o) => overlaps(o, c)));
+}
+
+function mergeInto(f: Finding, c: ReviewComment, at: { digest: string; ref: string }): void {
+  const text = c.content.trim();
+  if (occurrences(f).some((o) => o.content.trim() === text)) return;
+  const { finding: _named, ...comment } = c;
+  (f.merged ??= []).push({ comment, digest: at.digest, ref: at.ref });
 }
 
 function settle(f: Finding, state: FindingState, digest: string): void {
@@ -556,6 +614,7 @@ export function verificationInstruction(profile: Profile, args: { findings: Find
     ...args.findings.flatMap((f) => [
       `- ${f.id} ${describeComment(f.comment)}`,
       ...(f.comment.evidence !== undefined ? [`  Reviewer's failure scenario: ${clip(f.comment.evidence, 1_200)}`] : []),
+      ...(f.merged ?? []).map((m) => `  The same problem, raised again on the same lines: ${describeComment(m.comment)}`),
     ]),
     "",
     "Judge whether each defect exists in the current code, not how severe it is. For each finding return one verdict:",

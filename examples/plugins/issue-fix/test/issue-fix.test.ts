@@ -1611,7 +1611,7 @@ describe("findings ledger", () => {
   });
 
   it("reads a comment that names an open finding as its status, and one naming an unknown finding as new", () => {
-    const evidence = [pass("d1", [HANG, { ...HANG, severity: "medium", content: "naming" }]), confirm("d1"), pass("d1", [{ ...HANG, finding: "F1" }, { ...HANG, finding: "F9" }])];
+    const evidence = [pass("d1", [HANG, { ...HANG, severity: "medium", content: "naming" }]), confirm("d1"), pass("d1", [{ ...HANG, finding: "F1" }, { ...HANG, start_line: 200, end_line: 210, finding: "F9" }])];
     const ledger = findingLedger(evidence);
     expect(states(evidence)).toEqual({ F1: "confirmed@d1", F2: "pending@d1" });
     expect(ledger.passes[1]!.missingStatus).toEqual([]);

@@ -99,6 +99,7 @@ export {
   reviewBackground,
   reviewComplete,
   WHOLE_CHANGE_CHECK,
+  DEDUPE_RULE,
   type CodeReviewReport,
   type ReviewComment,
 } from "./ocr.js";
