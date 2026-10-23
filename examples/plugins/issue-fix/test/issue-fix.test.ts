@@ -773,7 +773,7 @@ describe("issue-fix graph under the banyandb profile", () => {
       expect(decisions.some((d) => d.action.type === "supervise")).toBe(false);
       expect(reenterDecisions).toBe(2);
       const reasons = reentered(decisions).map((d) => (d.action as unknown as { reenter: { reason: string } }).reenter.reason);
-      expect(reasons[1]).toContain("round 2 confirmed 1 critical or high finding(s) (2 the round before)");
+      expect(reasons[1]).toContain("round 2 confirmed 1 critical or high finding(s) (2 before the last correction)");
       expect(reasons[1]).toContain("review reentry 2 of 4");
     });
 
@@ -820,6 +820,26 @@ describe("issue-fix graph under the banyandb profile", () => {
         codeReviews: [reviewed([HANG, TIMER]), priorPass({ F1: "still_present", F2: "still_present" }), priorPass({ F1: "resolved", F2: "still_present" })],
       });
       // Round 2 has fewer findings, but the one allowed reentry is spent.
+      expect(reenterDecisions).toBe(1);
+      expect(decision.action).toMatchObject({ type: "supervise" });
+    });
+
+    it("hands the next failure to the supervisor when the implementer returns the same candidate after a reentry", () => {
+      const { decision, reenterDecisions } = simulate({
+        graphReenters: { maxReentries: 4 },
+        unchangedWork: [2],
+        codeReviews: [reviewed([HANG]), priorPass({ F1: "still_present" }), priorPass({ F1: "still_present" })],
+      });
+      // One reentry; the correction changed nothing, so the same finding stays open: not converging, however far below the cap.
+      expect(reenterDecisions).toBe(1);
+      expect(decision.action).toMatchObject({ type: "supervise" });
+    });
+
+    it("allows one reentry under a cap of 1 and supervises the second failure even as the candidate changes", () => {
+      const { decision, reenterDecisions } = simulate({
+        graphReenters: { maxReentries: 1 },
+        codeReviews: [reviewed([HANG, { ...HANG, start_line: 120, end_line: 121, content: "trigger leaks the timer." }]), priorPass({ F1: "still_present", F2: "still_present" }), priorPass({ F1: "resolved", F2: "still_present" })],
+      });
       expect(reenterDecisions).toBe(1);
       expect(decision.action).toMatchObject({ type: "supervise" });
     });

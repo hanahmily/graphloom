@@ -641,22 +641,26 @@ function reviewReentry(profile: Profile, view: RunView, ledger: FindingLedger, l
   const ids = new Set(confirmed.map((f) => issueIdOf(f.id)));
   if (ledger.issues.issues.some((i) => isUnsettled(i) && !ids.has(i.id))) return undefined;
 
-  // Every candidate reviewed after the first followed a correction; the count comes from evidence, so a resume keeps it.
-  const reentries = Math.max(0, ledger.reviewed.length - 1);
+  // A reentry is an implementer work run after the first review pass, whoever asked for it (graph or supervisor); the
+  // count comes from evidence, so a resume keeps it, and a pass that leaves the candidate unchanged still counts.
+  const firstReview = view.evidence.findIndex((e) => agentRuns([e], REVIEW_STAGE, "review").length > 0);
+  const refs = new Set(agentRuns(view.evidence, FIX_STAGE, "work").map((r) => r.record.ref));
+  const corrections = view.evidence.map((e, i) => ({ e, i })).filter(({ e, i }) => i > firstReview && refs.has(e.ref));
+  const reentries = firstReview < 0 ? 0 : corrections.length;
   const cap = profile.review.maxReentries ?? DEFAULT_MAX_REVIEW_REENTRIES;
   if (reentries >= cap) return undefined;
   // The supervisor keeps one correction for what the graph cannot settle.
   if (view.budgets.corrections < 2) return undefined;
 
-  // Converging: the first failing round, or fewer confirmed findings than the round before, read from the evidence that preceded this candidate.
-  const firstOfDigest = view.evidence.findIndex((e) => e.candidateDigest === digest);
-  const before = firstOfDigest > 0 ? findingLedger(view.evidence.slice(0, firstOfDigest)) : undefined;
-  const previous = before === undefined || before.passes.length === 0 ? undefined : before.findings.filter((f) => f.state === "confirmed").length;
-  if (ledger.reviewed.length > 1 && (previous === undefined || confirmed.length >= previous)) return undefined;
+  // Converging: the first failing round, or fewer confirmed findings than when the last correction was asked for, read
+  // from the evidence before that correction. A correction that changed nothing leaves the same findings: not converging.
+  const lastCorrection = corrections.at(-1);
+  const previous = lastCorrection === undefined ? undefined : findingLedger(view.evidence.slice(0, lastCorrection.i)).findings.filter((f) => f.state === "confirmed").length;
+  if (previous !== undefined && confirmed.length >= previous) return undefined;
 
   const named = confirmed.slice(0, 3).map((f) => `${issueIdOf(f.id)} ${f.comment.path}:${f.comment.start_line}-${f.comment.end_line} ${clip(f.comment.content, 100)}`);
   const more = confirmed.length > named.length ? `; and ${confirmed.length - named.length} more` : "";
-  const reason = `code review round ${reviewRound(ledger, digest)} confirmed ${confirmed.length} critical or high finding(s)${previous !== undefined ? ` (${previous} the round before)` : ""}: ${named.join("; ")}${more}; send Fix back with them (review reentry ${reentries + 1} of ${cap})`;
+  const reason = `code review round ${reviewRound(ledger, digest)} confirmed ${confirmed.length} critical or high finding(s)${previous !== undefined ? ` (${previous} before the last correction)` : ""}: ${named.join("; ")}${more}; send Fix back with them (review reentry ${reentries + 1} of ${cap})`;
   return reenter({ stageId: FIX_STAGE, reason, evidenceRefs: [last.run.record.ref] }, `send the confirmed code review findings back to Fix (review reentry ${reentries + 1} of ${cap})`, JSON.stringify(state));
 }
 

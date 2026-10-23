@@ -204,11 +204,13 @@ or incomplete passes, missing statuses, issues-file problems, contract
 problems). Reentering is a graph decision inside the existing stages; no
 step, stage or requirement changes.
 
-The reentry count is not private state. It is the number of reviewed
-candidates after the first (every one followed a correction, whoever asked for
-it), read from evidence, so a resume or a changed generation cannot reset it.
-The previous round's count is read from the findings ledger rebuilt on the
-evidence that preceded the current candidate.
+The reentry count is not private state. It is the number of implementer work
+runs after the first review pass (graph or supervisor reentries alike), read
+from evidence, so a resume cannot reset it and a pass that leaves the candidate
+unchanged still counts. The previous count is the confirmed findings in the
+findings ledger rebuilt on the evidence before the last correction, so a
+correction that changed nothing, with the same findings open, is not converging
+and goes to the supervisor.
 
 ## Review discovery rounds
 

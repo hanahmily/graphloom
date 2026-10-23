@@ -102,7 +102,7 @@ GRAPHLOOM_GITHUB_LIVE_TOKEN="$(gh auth token)" node ../apps/graphloom/dist/main.
 
 When code review fails only because findings are confirmed, the graph
 reenters Fix itself instead of starting a supervisor episode: on the first
-failing round, or when this round has fewer confirmed findings than the last,
+failing round, or when this round has fewer confirmed findings than before the last correction,
 and while fewer than `review.maxReentries` (default 4) review reentries have
 happened and the run has at least two corrections left. A disputed finding, a
 round that is not converging, the cap, a low corrections budget, or any other
