@@ -18,8 +18,8 @@ const agent = (purpose: string, digest: string, output: unknown): EvidenceRecord
     producer: { operationId: `op-${n}`, stageId: "review", purpose, readOnly: true, kind: "agent", executorId: "graphloom.coding-agent/run" },
   },
 });
-const pass = (digest: string, comments: Array<Record<string, unknown>>, statuses: Record<string, string> = {}) =>
-  agent("review", digest, { comments, prior: Object.entries(statuses).map(([finding, status]) => ({ finding, status, reason: `${finding} ${status}` })), summary: SUMMARY });
+const pass = (digest: string, comments: Array<Record<string, unknown>>, statuses: Record<string, string> = {}, contract: string | null = "dedupe-1") =>
+  agent("review", digest, { ...(contract !== null ? { contract } : {}), comments, prior: Object.entries(statuses).map(([finding, status]) => ({ finding, status, reason: `${finding} ${status}` })), summary: SUMMARY });
 const confirm = (digest: string, ...ids: string[]) =>
   agent("diagnostic", digest, {
     verdicts: ids.map((finding) => ({ finding, verdict: "confirmed", reason: `${finding} is real`, quotes: [{ path: "canopy/server/src/x.ts", line: 1, text: "x" }] })),
@@ -102,6 +102,31 @@ describe("code review records one entry per problem (issue 182)", () => {
     expect(later.findings.map((f) => [f.id, f.merged?.length ?? 0])).toEqual([["F1", 1], ["F2", 0]]);
   });
 
+  it("keeps ids and verdicts of evidence recorded before 0.10.0: only passes carrying the contract merge", () => {
+    const dup = comment("a.ts", 10, 12, "first problem");
+    const legacy = [
+      pass("d1", [dup, comment("a.ts", 11, 12, "same problem, other words"), comment("b.ts", 1, 2, "independent defect")], {}, null),
+      agent("diagnostic", "d1", {
+        verdicts: [
+          { finding: "F1", verdict: "confirmed", reason: "real", quotes: [{ path: "a.ts", line: 10, text: "x" }] },
+          { finding: "F2", verdict: "refuted", reason: "not real", quotes: [{ path: "a.ts", line: 11, text: "unmatched text for the file" }] },
+          { finding: "F3", verdict: "confirmed", reason: "real", quotes: [{ path: "b.ts", line: 1, text: "y" }] },
+        ],
+      }),
+    ];
+    const ledger = findingLedger(legacy);
+    expect(ledger.findings.map((f) => [f.id, f.comment.path, f.merged])).toEqual([["F1", "a.ts", undefined], ["F2", "a.ts", undefined], ["F3", "b.ts", undefined]]);
+    expect(ledger.findings[2]!.state).toBe("confirmed");
+    expect(ledger.findings[0]!.state).toBe("confirmed");
+    expect(ledger.issues.issues.find((i) => i.id === "I3")!.status).toBe("open");
+    // The same comments in a pass that carries the contract are one finding.
+    const current = findingLedger([pass("d1", [dup, comment("a.ts", 11, 12, "same problem, other words"), comment("b.ts", 1, 2, "independent defect")])]);
+    expect(current.findings.map((f) => f.id)).toEqual(["F1", "F2"]);
+    // A later pass with the contract does not renumber what older passes assigned.
+    const mixed = findingLedger([...legacy, pass("d1", [comment("a.ts", 11, 12, "again")])]);
+    expect(mixed.findings.map((f) => f.id)).toEqual(["F1", "F2", "F3"]);
+  });
+
   it("does not merge across rounds, and a repeat of the same text adds nothing", () => {
     const rounds = findingLedger([pass("d1", [comment("a.ts", 10, 12, "first problem")]), pass("d2", [comment("a.ts", 10, 12, "first problem, again")])]);
     expect(rounds.findings).toHaveLength(2);
@@ -134,13 +159,11 @@ describe("code review records one entry per problem (issue 182)", () => {
 // The real run's evidence, when the state file is on this machine: round 1 recorded 14 entries for about 8 problems.
 const REPLAY = process.env.ISSUE_FIX_REPLAY_C44B4AE7 ?? "/mnt/d/skywalking-banyandb/graphloom-state/c44b4ae7-5d1/state.json";
 describe.skipIf(!existsSync(REPLAY))("replay of run c44b4ae7-5d1 (issue 182)", () => {
-  it("merges the pairs that share a path and lines, and leaves the two the reviewer saw from the test file", () => {
+  it("replays the pre-0.10 evidence as it was: no merging, ids and verdicts untouched", () => {
     const state = JSON.parse(readFileSync(REPLAY, "utf8")) as { evidence: EvidenceRecord[] };
     const ledger = findingLedger(state.evidence);
-    const round1 = ledger.findings.filter((f) => f.round === 1);
-    // Four of the six pairs (I1/I7, I2/I8, I3/I9, I5/I11) are one entry each now.
-    expect(round1.filter((f) => (f.merged ?? []).length > 0).map((f) => f.id)).toEqual(["F1", "F2", "F3", "F5"]);
-    expect(round1.length).toBeLessThan(14);
+    expect(ledger.findings.some((f) => f.merged !== undefined)).toBe(false);
+    expect(ledger.findings.filter((f) => f.round === 1).length).toBeGreaterThanOrEqual(12);
     expect(new Set(ledger.issues.issues.map((i) => i.id)).size).toBe(ledger.issues.issues.length);
   });
 });

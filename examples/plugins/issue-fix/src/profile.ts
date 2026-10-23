@@ -319,6 +319,12 @@ export function enforcedProtectedPaths(profile: Pick<ProfileData, "commands" | "
   return profile.protectedPaths.filter((p) => !regenerated.some((w) => p === w || p.startsWith(`${w}/`)));
 }
 
+/** Declared `writes` paths inside a protected directory the implementer is still held to: `+` scope entries re-allowing them. */
+export function regeneratedExceptions(profile: Pick<ProfileData, "commands" | "protectedPaths">): string[] {
+  const held = enforcedProtectedPaths(profile);
+  return regeneratedPaths(profile).filter((w) => held.some((p) => w.startsWith(`${p}/`))).map((w) => `+${w}`);
+}
+
 export const commandTier = (c: ProfileCommand): CommandTier => c.tier ?? "full";
 
 /** Whether the profile splits its checks into two jobs: only when some command is declared `cheap`. */

@@ -182,6 +182,7 @@ const GO_TEST_REHEARSAL: GraphRehearsal = {
             // pass below is the real recovery after an operator fix, not a
             // hand-smoothed retry.
             output: {
+              contract: "dedupe-1",
               comments: [],
               prior: [],
               summary: {
@@ -198,7 +199,7 @@ const GO_TEST_REHEARSAL: GraphRehearsal = {
             },
           },
           {
-            output: { comments: [], prior: [], summary: { total_files: 2, reviewed_files: 2, skipped: [] } },
+            output: { contract: "dedupe-1", comments: [], prior: [], summary: { total_files: 2, reviewed_files: 2, skipped: [] } },
           },
         ],
       },
@@ -241,7 +242,7 @@ const VITEST_REHEARSAL: GraphRehearsal = {
           { output: VITEST_RECORD },
           { output: { ...VITEST_RECORD, coverage: VITEST_COVERAGE }, effects: [{ path: SCOPE_TEST, bytes: SCOPE_TEST_BYTES }] },
         ],
-        "code-review-v2": [{ output: { comments: [], prior: [], summary: { total_files: 1, reviewed_files: 1, skipped: [] } } }],
+        "code-review-v2": [{ output: { contract: "dedupe-1", comments: [], prior: [], summary: { total_files: 1, reviewed_files: 1, skipped: [] } } }],
       },
       expect: { status: "succeeded", receipts: [FIX_STAGE, REVIEW_STAGE] },
     },
@@ -295,7 +296,7 @@ const CANOPY_REHEARSAL: GraphRehearsal = {
             ],
           },
         ],
-        "code-review-v2": [{ output: { comments: [], prior: [], summary: { total_files: 3, reviewed_files: 3, skipped: [] } } }],
+        "code-review-v2": [{ output: { contract: "dedupe-1", comments: [], prior: [], summary: { total_files: 3, reviewed_files: 3, skipped: [] } } }],
       },
       expect: { status: "succeeded", receipts: [FIX_STAGE, REVIEW_STAGE] },
     },

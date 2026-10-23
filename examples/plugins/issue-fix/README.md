@@ -104,14 +104,29 @@ GRAPHLOOM_GITHUB_LIVE_TOKEN="$(gh auth token)" node ../apps/graphloom/dist/main.
   canopy's `canopy/LICENSE` and `canopy/licenses/**` for `make license-dep`.
   The implementer's write scope covers them even when `protectedPaths` lists
   them, so a correction for a failed license check is not refused for scope.
+  A `writes` path below a protected directory is a `+path` exception in the
+  scope (the rest of the directory stays excluded).
 - A problem the code reviewer raises twice (per file and in the whole-change
   check or a sweep pass) is one finding when the lines overlap on the same
-  path in the same round; a comment marked `distinct` stays separate.
+  path in the same round; a comment marked `distinct` stays separate. Only
+  passes whose result carries `contract: "dedupe-1"` merge, so evidence from
+  before 0.10.0 replays with its original finding ids.
 - The planner lists the issue's acceptance items (`acceptance`) and the
   implementer maps each to files and tests (`coverage`); the graph checks the
   map before code review and sends the change back for anything uncovered. A
   plan without `acceptance` runs as before. The contract is
   `decision-record-v2` with these two optional fields.
+
+### Refreshing the pinned CONTRIBUTING.md
+
+The banyandb profile pins `CONTRIBUTING.md` by sha256 (`environment.pinnedFiles`),
+and a different file in the repository stops a run with `environment_changed`.
+When BanyanDB changes it, refresh the pin and the fixture the tests use:
+`git -C <skywalking-banyandb> show origin/main:CONTRIBUTING.md | sha256sum` gives
+the digest; put it in `profiles/banyandb.json` and in
+`examples/plugins/banyandb-fix/src/constants.ts`, copy the file to
+`examples/skywalking-banyandb/CONTRIBUTING.md`, rebuild, and regenerate both
+manifests (`npm run manifest` in each plugin). The pin was refreshed in 0.10.0.
 
 ## The canopy profile
 

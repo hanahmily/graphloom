@@ -9,6 +9,7 @@ export {
   commandSummary,
   enforcedProtectedPaths,
   regeneratedPaths,
+  regeneratedExceptions,
   harnessName,
   isTestPath,
   isTiered,

@@ -19,6 +19,18 @@ describe("write scope", () => {
     expect(writeScopeAllows("pkg/a.go", ["!pkg/a.go", "pkg"])).toBe(false);
   });
 
+  it("lets a + exception re-allow a path below an excluded directory, and only below it", () => {
+    const scope = [".", "!generated", "+generated/licenses"];
+    expect(writeScopeAllows("generated/licenses/foo.txt", scope)).toBe(true);
+    expect(writeScopeAllows("generated/licenses", scope)).toBe(true);
+    expect(writeScopeAllows("generated/other.txt", scope)).toBe(false);
+    expect(writeScopeAllows("generated", scope)).toBe(false);
+    // An exclusion deeper than the exception still wins.
+    expect(writeScopeAllows("generated/licenses/secret/x", [...scope, "!generated/licenses/secret"])).toBe(false);
+    expect(writeScopeIncludes(scope)).toEqual([".", "generated/licenses"]);
+    expect(writeScopeProblem(["+"])).toMatch(/names no path/);
+  });
+
   it("matches entries written with dot segments or repeated slashes", () => {
     expect(writeScopeAllows("go.mod", [".", "!./go.mod"])).toBe(false);
     expect(writeScopeAllows("api/proto/x.proto", [".", "!api//proto/"])).toBe(false);

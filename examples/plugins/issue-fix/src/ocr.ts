@@ -14,12 +14,21 @@ const MAX_BACKGROUND_CHARS = 2_000;
 const CATEGORIES = ["bug", "security", "performance", "maintainability", "test", "style", "documentation", "other"];
 const SEVERITIES = ["critical", "high", "medium", "low"];
 
+/**
+ * What a pass records in its result's `contract` when it was told to report each
+ * problem once (issue-fix 0.10.0). The ledger merges duplicates only in passes
+ * that carry it: evidence recorded before keeps its finding ids, which verdicts,
+ * reviewer references and the issues file name.
+ */
+export const DEDUPE_CONTRACT = "dedupe-1";
+
 /** The code reviewer's result (code-review-v2), strict enough for Codex's structured output: every property required, none extra. */
 export const CODE_REVIEW_SCHEMA = JSON.stringify({
   type: "object",
   additionalProperties: false,
-  required: ["comments", "prior", "summary"],
+  required: ["comments", "prior", "summary", "contract"],
   properties: {
+    contract: { type: "string", enum: [DEDUPE_CONTRACT] },
     comments: {
       type: "array",
       items: {
@@ -84,7 +93,7 @@ export const WHOLE_CHANGE_CHECK =
  * merges, by path and overlapping lines, whatever still comes back twice.
  */
 export const DEDUPE_RULE =
-  "Report each problem once. The cross-file check adds only problems that none of your per-file comments of this pass and none of the issues listed below (this round's earlier passes included) already describes. When it finds one of those again, either add no comment, or report it with `finding` set to that issue's id (a duplicate of I<n>) and the cross-file evidence. Comments on one file with overlapping lines are merged into one issue by the graph; when two of them are different problems, set `distinct` to true on each.";
+  "Report each problem once. The cross-file check adds only problems that none of your per-file comments of this pass and none of the issues listed below (this round's earlier passes included) already describes. When it finds one of those again, either add no comment, or report it with `finding` set to that issue's id (a duplicate of I<n>) and the cross-file evidence. Comments on one file with overlapping lines are merged into one issue by the graph; when two of them are different problems, set `distinct` to true on each. Set the result's `contract` to \"" + DEDUPE_CONTRACT + "\"." ;
 
 /** What the reviewer is told about the change: the issue and the plan, bounded. */
 export function reviewBackground(profile: Profile, issue: Issue, record: DecisionRecord): string {
@@ -240,6 +249,8 @@ export interface CodeReviewReport {
   prior: PriorFinding[];
   totalFiles: number;
   reviewedFiles: number;
+  /** The pass was told to report each problem once and says so: the ledger may merge its duplicates. */
+  dedupe: boolean;
   skipped: Array<{ path: string; reason: string }>;
 }
 
@@ -285,7 +296,7 @@ export function parseCodeReview(output: unknown): { report: CodeReviewReport } |
     return { path: String(s?.path ?? ""), reason: String(s?.reason ?? "") };
   });
   const rank = (c: ReviewComment) => { const i = SEVERITIES.indexOf(c.severity ?? ""); return i < 0 ? 1.5 : i; };
-  return { report: { comments: comments.sort((a, b) => rank(a) - rank(b)), prior, totalFiles, reviewedFiles, skipped } };
+  return { report: { comments: comments.sort((a, b) => rank(a) - rank(b)), prior, totalFiles, reviewedFiles, skipped, dedupe: result.contract === DEDUPE_CONTRACT } };
 }
 
 /** Every file on the reviewer's list was reviewed, and none skipped. */

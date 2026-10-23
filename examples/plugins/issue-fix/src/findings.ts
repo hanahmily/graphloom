@@ -345,13 +345,14 @@ function applyPass(ledger: FindingLedger, run: AgentRun, digest: string, files: 
   ledger.passes.push(pass);
   if (pass.report === undefined) return;
   // The reviewer names findings by their issue ids (I3 is F3); earlier runs used F3.
+  const report0 = pass.report;
   const report: CodeReviewReport = {
     ...pass.report,
     // A new comment on the lines of an earlier finding of this round names it: the same problem, found twice.
     comments: pass.report.comments
       .map((c) => (c.finding !== undefined ? { ...c, finding: findingIdOf(c.finding) } : c))
       .map((c) => {
-        if (!mergeable(c) || (c.finding !== undefined && findingById(ledger, c.finding) !== undefined)) return c;
+        if (!report0.dedupe || !mergeable(c) || (c.finding !== undefined && findingById(ledger, c.finding) !== undefined)) return c;
         const twin = mergeTarget(ledger.findings, c, round);
         return twin !== undefined ? { ...c, finding: twin.id } : c;
       }),
@@ -365,7 +366,7 @@ function applyPass(ledger: FindingLedger, run: AgentRun, digest: string, files: 
   for (const c of report.comments) {
     if (c.finding === undefined) continue;
     const known = findingById(ledger, c.finding);
-    if (known !== undefined) updateComment(known, c, round, { digest, ref: run.record.ref });
+    if (known !== undefined) updateComment(known, c, report.dedupe ? round : undefined, { digest, ref: run.record.ref });
   }
   const status = new Map<string, PriorStatus>();
   const note = (id: string, s: PriorStatus, reason: string) => {
@@ -413,7 +414,7 @@ function applyPass(ledger: FindingLedger, run: AgentRun, digest: string, files: 
       continue;
     }
     // The same problem raised twice in this pass (per-file and cross-file) is one finding.
-    const twin = mergeable(c) ? mergeTarget(ledger.findings, c, round) : undefined;
+    const twin = pass.report!.dedupe && mergeable(c) ? mergeTarget(ledger.findings, c, round) : undefined;
     if (twin !== undefined) {
       mergeInto(twin, c, { digest, ref: run.record.ref });
       continue;
@@ -556,8 +557,8 @@ function syncIssuesAfterVerification(ledger: FindingLedger, covered: Finding[], 
  * occurrence found again, so its text joins the finding's history; in a later
  * round it replaces the comment with the latest occurrence, keeping the first.
  */
-function updateComment(f: Finding, c: ReviewComment, round: number, at: { digest: string; ref: string }): void {
-  if (f.round === round) {
+function updateComment(f: Finding, c: ReviewComment, round: number | undefined, at: { digest: string; ref: string }): void {
+  if (round !== undefined && f.round === round) {
     mergeInto(f, c, at);
     return;
   }

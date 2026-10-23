@@ -106,6 +106,8 @@ describe.skipIf(!existsSync(path.join(banyandbFixDist, "index.js")))("the banyan
           .replace(',"selfChecks":{"type":"array","items":{"type":"string"}}', "")
           // #182: a code review comment may be marked `distinct`, which banyandb-fix never had.
           .replace(',"distinct":{"type":"boolean"}', "")
+          .replace('"contract":{"type":"string","enum":["dedupe-1"]},', "")
+          .replace('"summary","contract"]', '"summary"]')
           .replace('"finding","evidence","distinct"]', '"finding","evidence"]'),
       ) as Omit<GraphDefinition, "graphId" | "version" | "privateStateSchema" | "defaultBudgets">;
     // And #174: banyandb-fix runs one `make generate`; the profile runs it per project so each output is cached on its own inputs.
@@ -712,5 +714,17 @@ describe("generated artifacts a check regenerates (issue 181)", () => {
       const commands = raw.commands.map((c) => (c.id === "license-dep" ? { ...c, writes } : c));
       expect(() => parseProfile({ ...raw, commands }), JSON.stringify(writes)).toThrow(ProfileError);
     }
+  });
+
+  it("lets a declared child of a protected directory be written while the rest of the directory stays out of scope", () => {
+    const raw = CANOPY as { commands: Array<{ id: string; writes?: string[] }>; protectedPaths: string[] };
+    const nested = parseProfile({
+      ...raw,
+      protectedPaths: ["generated"],
+      commands: raw.commands.map((c) => (c.id === "license-dep" ? { ...c, writes: ["generated/licenses/**"] } : c)),
+    });
+    expect(outOfScope(["generated/licenses/foo.txt", "generated/licenses/deep/bar.txt"], undefined, nested)).toEqual([]);
+    expect(outOfScope(["generated/other.txt", "generated/licenses.txt"], undefined, nested)).toEqual(["generated/other.txt", "generated/licenses.txt"]);
+    expect(writeScopeFor(undefined, nested)).toEqual([".", "!generated", "+generated/licenses"]);
   });
 });

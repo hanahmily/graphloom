@@ -1,5 +1,5 @@
 import { writeScopeAllows } from "@graphloom/sdk";
-import { enforcedProtectedPaths, isTestPath, type Profile } from "./profile.js";
+import { enforcedProtectedPaths, isTestPath, regeneratedExceptions, type Profile } from "./profile.js";
 
 export type Tier = "implementation" | "behaviour" | "product";
 
@@ -211,7 +211,7 @@ export function decisionProblems(record: DecisionRecord, profile: Profile): stri
 /** The implementer's write scope: the repository except protected paths the record does not justify. */
 export function writeScopeFor(record: DecisionRecord | undefined, profile: Profile): string[] {
   const allowed = new Set((record?.scopeExceptions ?? []).filter((e) => typeof e.reason === "string" && e.reason.trim() !== "").map((e) => e.path));
-  return [".", ...enforcedProtectedPaths(profile).filter((p) => !allowed.has(p)).map((p) => `!${p}`)];
+  return [".", ...enforcedProtectedPaths(profile).filter((p) => !allowed.has(p)).map((p) => `!${p}`), ...regeneratedExceptions(profile)];
 }
 
 export function outOfScope(paths: string[], record: DecisionRecord | undefined, profile: Profile): string[] {
