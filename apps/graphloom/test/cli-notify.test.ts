@@ -149,6 +149,28 @@ describe("--on-stop", () => {
     expect(calls[1]!.env).toMatchObject({ GRAPHLOOM_STATUS: "succeeded", GRAPHLOOM_RUN_ID: report.runId });
   }, 90_000);
 
+  it("stops retryable on a Claude Code session limit past the wait budget, fires the hook, opens no supervisor episode, and resume continues", async () => {
+    const env = await makeCliEnv(cleanups);
+    const reset = new Date(Date.now() + 3 * 3_600_000);
+    reset.setUTCSeconds(0, 0);
+    const clock = `${reset.getUTCHours() % 12 || 12}:${String(reset.getUTCMinutes()).padStart(2, "0")}${reset.getUTCHours() >= 12 ? "pm" : "am"}`;
+    await env.fakeClaude({ byPrompt: [{ match: "GREETING.txt", steps: [{ limit: `You've hit your session limit · resets ${clock} (UTC)` }] }] });
+    const hook = await installHook(env);
+    const run = await env.graphloom("run", "task.yaml", "--on-stop", hook.command);
+    const report = JSON.parse(run.stdout) as { runId: string; status: string; stopReason: string; stopRetryable?: boolean; stateDir: string };
+    expect(report.status).toBe("stopped");
+    expect(report.stopReason).toBe(`harness quota exhausted until ${reset.toISOString()}`);
+    expect(report.stopRetryable).toBe(true);
+    const calls = await hook.calls();
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.env).toMatchObject({ GRAPHLOOM_STATUS: "stopped", GRAPHLOOM_STOP_RETRYABLE: "true", GRAPHLOOM_STOP_REASON: report.stopReason });
+    expect((await loadRunState(report.stateDir)).supervisorEpisodes ?? []).toEqual([]);
+
+    await env.fakeClaude(happy);
+    const resumed = await env.graphloom("resume", report.runId, "--state-root", env.stateRoot);
+    expect(JSON.parse(resumed.stdout).status).toBe("succeeded");
+  }, 90_000);
+
   it("fires when another process stops the run", async () => {
     const env = await makeCliEnv(cleanups);
     await env.fakeClaude({ byPrompt: [{ match: "GREETING.txt", steps: [{ hang: true }] }] });

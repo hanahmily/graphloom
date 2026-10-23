@@ -1,5 +1,6 @@
 import { defineExecutor, jsonSchemaProblem, type ExecutorContext, type ExecutorDefinition, type ToolCallResult } from "@graphloom/sdk";
 import type { CodingHarness, CodingRunResult, CodingUsage, CodingSession, CodingTool } from "./harness.js";
+import { classifyQuota, type QuotaFailure } from "./quota.js";
 import { abortableSleep, backoffMs, classifyTransient, resolveRetryPolicy, worktreeDigest, type TransientRetryPolicy } from "./transient.js";
 
 export const CODING_AGENT_RUN_ID = "graphloom.coding-agent/run";
@@ -205,6 +206,7 @@ export function createCodingAgentExecutor(
         let executed = 0;
         let result: CodingRunResult;
         let usage: CodingUsage | undefined;
+        let quota: QuotaFailure | undefined;
         for (let attempt = 1; ; attempt++) {
           // A retry re-runs the whole assignment, so it needs proof the failed
           // try had no effect: no graph tool call attempted, no native tool use
@@ -215,6 +217,9 @@ export function createCodingAgentExecutor(
           executed += 1;
           result = await session.run(request);
           usage = addUsage(usage, result.usage);
+          // A usage limit is the controller's to wait out (it knows the run's wait budget); retrying here only burns tries.
+          quota = result.status === "failed" ? classifyQuota(h.name, result.summary) : undefined;
+          if (quota !== undefined) break;
           const transient = result.status === "failed" ? classifyTransient(h.name, result.summary) : undefined;
           if (transient === undefined) break;
           const calledGraphTool = toolAttempts > attemptsBefore;
@@ -255,7 +260,11 @@ export function createCodingAgentExecutor(
           status: result.status === "completed" ? "ok" : "failed",
           summary: result.summary,
           ...(sessionRef !== undefined ? { sessionRef } : {}),
-          ...(result.failureKind !== undefined ? { failureKind: result.failureKind } : {}),
+          ...(quota !== undefined
+            ? { failureKind: "quota", ...(quota.resetAt !== undefined ? { resetAt: quota.resetAt } : {}) }
+            : result.failureKind !== undefined
+              ? { failureKind: result.failureKind }
+              : {}),
           evidence: [
             {
               kind: "other",

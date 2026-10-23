@@ -3,7 +3,8 @@ import { mkdir, mkdtemp, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
+import { setTimeout as realSleep } from "node:timers/promises";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createScriptedGraph,
   dispatch,
@@ -27,6 +28,7 @@ import {
   type Supervisor,
 } from "@graphloom/supervisor";
 import { createController, loadRunState } from "./index.js";
+import { classifyStop } from "./stop-class.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, "../../..");
@@ -981,6 +983,113 @@ describe("supervisor provider failures and deterministic remedies (controller)",
     expect(resumedJobs).toEqual(["write/work", "review/review"]);
     const state = await loadRunState(stateDir);
     expect(state.remedies?.map((r) => r.remedy)).toEqual([expect.stringMatching(/^retry 1 of 2 after/)]);
+  });
+
+  const quotaFailure = (resetAt?: string) => async () => ({
+    status: "failed" as const,
+    summary: "executor failed: Claude Code run failed (success): You've hit your session limit",
+    failureKind: "quota" as const,
+    ...(resetAt !== undefined ? { resetAt } : {}),
+  });
+
+  it("waits out a harness quota reset on a fake clock, charges waitMs, and re-dispatches the same job without a supervisor episode", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    try {
+      const env = await makeEnv();
+      const counted = countingDecides(createScriptedSupervisor({ decisions: [] }));
+      const started = Date.now();
+      const resetAt = new Date(started + 10 * 60_000).toISOString();
+      const ran: number[] = [];
+      const timed = (run: (j: JobSpec, c: { worktreePath: string }) => Promise<Record<string, unknown>>) => async (j: JobSpec, c: { worktreePath: string }) => {
+        ran.push(Date.now() - started);
+        return run(j, c) as never;
+      };
+      let settled = false;
+      const running = createController()
+        .run({
+          taskPath: env.taskPath,
+          plugin: createScriptedGraph({ definition, advances: finishingAdvances }),
+          validators,
+          supervisor: counted.supervisor,
+          runner: createScriptedRunner({ jobs: [timed(quotaFailure(resetAt)), timed(writeJob), timed(reviewJob)] }),
+          stateRoot: env.stateRoot,
+          runId: "quota-wait-1",
+        })
+        .finally(() => {
+          settled = true;
+        });
+      // Time moves only once the run is waiting out the reset; real timers pace the polling.
+      const real = (ms: number) => new Promise((resolve) => realSleep(ms, undefined, undefined).then(resolve));
+      while (ran.length === 0) await real(10);
+      for (let i = 0; i < 2_000 && !settled; i += 1) {
+        await real(10);
+        await vi.advanceTimersByTimeAsync(15_000);
+      }
+      const report = await running;
+      expect(report, `${report.stopReason}: ${report.blocker}`).toMatchObject({ status: "succeeded" });
+      expect(counted.decides()).toBe(0);
+      // The same write job ran again, only once the reset and the margin had passed.
+      expect(ran).toHaveLength(3);
+      expect(ran[1]!).toBeGreaterThanOrEqual(10 * 60_000 + 30_000);
+      const state = await loadRunState(report.stateDir);
+      expect(state.supervisorEpisodes ?? []).toEqual([]);
+      expect(state.remedies).toMatchObject([
+        { condition: "harness quota (executor graphloom.agent/run)", remedy: expect.stringContaining(`resets at ${resetAt}`) },
+      ]);
+      const waited = state.remedies![0]!.waitedMs!;
+      expect(waited).toBeGreaterThan(8 * 60_000); // the fake clock also ran while the first job settled
+      // Charged when the retry was admitted, for what was still left to wait by then.
+      const charged = state.intake.budgets.waitMs! - state.budgets.waitMs!;
+      expect(charged).toBeGreaterThan(0);
+      expect(charged).toBeLessThanOrEqual(waited);
+      const failure = state.evidence.map((e) => (e.payload as { executorFailure?: Record<string, unknown> }).executorFailure).find((f) => f !== undefined);
+      expect(failure).toMatchObject({ failureKind: "quota", resetAt });
+      const inspected = await createController().inspect(report.stateDir);
+      expect(inspected.remedies.map((r) => r.condition)).toEqual(["harness quota (executor graphloom.agent/run)"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stops retryable with the reset time when the wait exceeds the remaining waitMs, opening no supervisor episode", async () => {
+    const env = await makeEnv();
+    const counted = countingDecides(createScriptedSupervisor({ decisions: [] }));
+    const resetAt = new Date(Date.now() + 3 * 3_600_000).toISOString();
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({ definition, advances: finishingAdvances }),
+      validators,
+      supervisor: counted.supervisor,
+      runner: createScriptedRunner({ jobs: [quotaFailure(resetAt)] }),
+      stateRoot: env.stateRoot,
+      runId: "quota-stop-1",
+    });
+    expect(report).toMatchObject({ status: "stopped", stopReason: `harness quota exhausted until ${resetAt}` });
+    expect(counted.decides()).toBe(0);
+    const state = await loadRunState(report.stateDir);
+    expect(state.supervisorEpisodes ?? []).toEqual([]);
+    expect(state.budgets.waitMs).toBe(state.intake.budgets.waitMs);
+    expect(state.executorRetry).toBeUndefined();
+    expect(classifyStop(state)).toMatchObject({ retryable: true, kind: "harness quota" });
+  });
+
+  it("stops retryable with an unknown reset when the message states none, without a supervisor loop", async () => {
+    const env = await makeEnv();
+    const counted = countingDecides(createScriptedSupervisor({ decisions: [] }));
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({ definition, advances: finishingAdvances }),
+      validators,
+      supervisor: counted.supervisor,
+      runner: createScriptedRunner({ jobs: [quotaFailure()] }),
+      stateRoot: env.stateRoot,
+      runId: "quota-unknown-1",
+    });
+    expect(report).toMatchObject({ status: "stopped", stopReason: "harness quota exhausted until unknown" });
+    expect(counted.decides()).toBe(0);
+    const state = await loadRunState(report.stateDir);
+    expect(state.supervisorEpisodes ?? []).toEqual([]);
+    expect(classifyStop(state)).toMatchObject({ retryable: true, kind: "harness quota" });
   });
 
   it("never retries a failure the controller found, even when the executor declared it retryable", async () => {

@@ -2,7 +2,7 @@
 // FAKE_CLAUDE_SCRIPT names a JSON file `{ start: Step[], resume: Step[] }`; each
 // step is one model response:
 //   { text } | { tool, args } | { parallel: [{ tool, args } | { bash }] } | { bash }
-//   | { structured } | { think: ms } | { hang: true } | { error } | { crash }
+//   | { structured } | { think: ms } | { hang: true } | { error } | { limit } | { crash }
 //   | { agent: Step[], background?: true } | { spawnChild: { pidFile, ignoreTerm } }
 // A `spawnChild` step starts a descendant in the CLI's process group with its
 // stdio redirected, which writes its pid once ready and then runs forever.
@@ -349,6 +349,10 @@ async function respond(step, parent) {
       session_id: sessionId,
       usage: { input_tokens: 7, output_tokens: 0 },
     });
+    process.exit(1);
+  } else if (step.limit !== undefined) {
+    // Claude Code reports a session/usage limit as an error result with subtype "success".
+    emit({ type: "result", subtype: "success", is_error: true, result: step.limit, session_id: sessionId, usage: { input_tokens: 0, output_tokens: 0 } });
     process.exit(1);
   } else if (step.crash !== undefined) {
     process.stderr.write(`${step.crash}\n`);

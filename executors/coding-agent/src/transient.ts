@@ -4,6 +4,8 @@ import { stat } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 
+import { classifyQuota } from "./quota.js";
+
 const execFileAsync = promisify(execFile);
 
 /** Bounds on retrying a transient harness failure (capacity, 429/5xx, connection reset). */
@@ -65,7 +67,7 @@ const TRANSIENT: Array<[RegExp, string]> = [
 ];
 
 /** Where each harness puts a provider failure in its summary; start-up, stall and protocol failures fall outside these shapes and are never transient. */
-const FAILURE_SHAPE: Record<string, RegExp> = {
+export const FAILURE_SHAPE: Record<string, RegExp> = {
   codex: /^Codex run failed:/,
   "claude-code": /^Claude Code (?:run failed|exited with code)/,
   // Pi reports a provider error as `agent request failed:`, and a request that throws as the bare message.
@@ -89,6 +91,8 @@ export function classifyTransient(harness: string, summary: string): TransientFa
   // A harness without a known failure shape is never retried: its summaries cannot be told apart from contract failures.
   const shape = FAILURE_SHAPE[harness];
   if (shape === undefined || !shape.test(summary)) return undefined;
+  // A usage limit renews at a reset time; a backoff retry only burns tries (see quota.ts).
+  if (classifyQuota(harness, summary) !== undefined) return undefined;
   if (PERMANENT.test(summary)) return undefined;
   for (const [pattern, reason] of TRANSIENT) {
     if (pattern.test(summary)) {

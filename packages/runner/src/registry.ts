@@ -153,6 +153,7 @@ function resultFromOutput(
       retryLimit?: unknown;
       sessionRef?: unknown;
       failureKind?: unknown;
+      resetAt?: unknown;
     };
     const resultStatus = o.status === "failed" || o.status === "conflict" ? o.status : status;
     const retryAfterMs =
@@ -171,7 +172,12 @@ function resultFromOutput(
       o.sessionRef.length <= MAX_SESSION_REF_CHARS
         ? o.sessionRef
         : undefined;
-    const failureKind = resultStatus !== "ok" && o.failureKind === "contract_violation" ? "contract_violation" as const : undefined;
+    const failureKind =
+      resultStatus !== "ok" && (o.failureKind === "contract_violation" || o.failureKind === "quota") ? o.failureKind : undefined;
+    const resetAt =
+      failureKind === "quota" && typeof o.resetAt === "string" && Number.isFinite(Date.parse(o.resetAt))
+        ? new Date(o.resetAt).toISOString()
+        : undefined;
     return {
       status: resultStatus,
       summary: typeof o.summary === "string" ? o.summary : "executor completed",
@@ -183,6 +189,7 @@ function resultFromOutput(
       ...(retryLimit !== undefined ? { retryLimit } : {}),
       ...(sessionRef !== undefined ? { sessionRef } : {}),
       ...(failureKind !== undefined ? { failureKind } : {}),
+      ...(resetAt !== undefined ? { resetAt } : {}),
     };
   }
   return {

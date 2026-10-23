@@ -41,6 +41,7 @@ export const CONTROLLER_STOP_CLASSES: readonly ControllerStopClass[] = [
   },
   { reason: /^unsupported action in /, retryable: false, kind: "plugin defect" },
   // Retryable.
+  { reason: /^harness quota exhausted until /, retryable: true, kind: "harness quota" },
   { reason: /^job failed: /, retryable: true, kind: "job/executor failure" },
   { reason: "stale job result identity", retryable: true, kind: "job/executor failure" },
   { reason: /^plugin host(?::| restart failed)/, retryable: true, kind: "plugin host failure" },

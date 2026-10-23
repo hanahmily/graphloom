@@ -1866,23 +1866,85 @@ function scheduleExecutorRetry(
       cleared,
     };
   }
+  const queued = queueRetry(state, job, operationId, { key, attempt, limit, executorId, retryAt, flags });
+  return {
+    cleared,
+    state: recordRemedy(queued, {
+      condition: `executor ${executorId} ${result.status} (declared retryable)`,
+      remedy: `retry ${attempt} of ${limit} after ${Math.ceil(waitMs / 1000)}s, without a model call`,
+      detail: boundText(result.summary),
+      ...(state.recoveryEpisodeId !== undefined ? { episodeId: state.recoveryEpisodeId } : {}),
+      ...(waitMs > 0 ? { waitedMs: waitMs } : {}),
+    }),
+  };
+}
+
+/** Queue `job` to run again unchanged, no earlier than `retryAt` (charged to `waitMs` when it is admitted). */
+function queueRetry(
+  state: DurableRunState,
+  job: JobSpec,
+  operationId: string,
+  q: { key: string; attempt: number; limit: number; executorId: string; retryAt: string; flags: Omit<RetryFlags, "attempt" | "limit"> },
+): DurableRunState {
   // A continued agent job that failed with a session of its own became that
   // session's successor; continuing the same predecessor again would fork the
   // chain, so the retry continues the failed attempt's session instead.
   const continuedByFailure =
     job.continueFrom !== undefined && (state.agentSessions ?? []).some((r) => r.operationId === operationId);
   const retryJob: JobSpec = continuedByFailure ? { ...job, continueFrom: operationId } : job;
-  const queued: DurableRunState = {
+  return {
     ...state,
-    executorRetryCounts: { ...state.executorRetryCounts, [key]: attempt },
-    executorRetry: { job: retryJob, attempt, limit, ...flags },
-    executorRetryAt: { ...state.executorRetryAt, [executorId]: retryAt },
+    executorRetryCounts: { ...state.executorRetryCounts, [q.key]: q.attempt },
+    executorRetry: { job: retryJob, attempt: q.attempt, limit: q.limit, ...q.flags },
+    executorRetryAt: { ...state.executorRetryAt, [q.executorId]: q.retryAt },
   };
+}
+
+/** Slack after a stated reset time before the job runs again. */
+const QUOTA_RESET_MARGIN_MS = 30_000;
+/** Consecutive pauses for one job; a reset that keeps passing without relief is not the environment waiting. */
+const QUOTA_PAUSE_LIMIT = 3;
+export const QUOTA_STOP_PREFIX = "harness quota exhausted until ";
+
+/**
+ * A harness out of usage allowance is a condition of the environment, not
+ * something recovery can fix: the executor reports `failureKind: "quota"` and
+ * when it renews (as data). The job runs again unchanged after the reset if
+ * the run's remaining `waitMs` covers the wait; otherwise the run stops
+ * retryable, so a resume after the reset continues. No supervisor episode.
+ */
+function pauseForQuota(
+  state: DurableRunState,
+  job: JobSpec,
+  result: Awaited<ReturnType<Runner["runJob"]>>,
+  operationId: string,
+  flags: Omit<RetryFlags, "attempt" | "limit">,
+): { state?: DurableRunState; stop?: { stopReason: string; blocker: string }; cleared: DurableRunState } {
+  const key = retryKey(job);
+  const done = state.executorRetryCounts?.[key] ?? 0;
+  const cleared = clearRetryCount(state, job);
+  const executorId = job.executor?.id ?? job.kind;
+  const resetAt = result.resetAt;
+  const stopReason = `${QUOTA_STOP_PREFIX}${resetAt ?? "unknown"}`;
+  if (resetAt === undefined) {
+    return { cleared, stop: { stopReason, blocker: boundText(`executor ${executorId} reported a usage limit with no reset time: ${result.summary}`) } };
+  }
+  const retryAt = new Date(Date.parse(resetAt) + QUOTA_RESET_MARGIN_MS).toISOString();
+  const waitMs = Math.max(0, Date.parse(retryAt) - Date.now());
+  const remaining = state.budgets.waitMs ?? 0;
+  if (done >= QUOTA_PAUSE_LIMIT || waitMs > remaining) {
+    const why =
+      done >= QUOTA_PAUSE_LIMIT
+        ? `still limited after ${done} waits`
+        : `the ${Math.ceil(waitMs / 1000)}s wait exceeds the ${Math.floor(remaining / 1000)}s of waitMs left`;
+    return { cleared, stop: { stopReason, blocker: boundText(`executor ${executorId} usage limit (${why}): ${result.summary}`) } };
+  }
+  const queued = queueRetry(state, job, operationId, { key, attempt: done + 1, limit: QUOTA_PAUSE_LIMIT, executorId, retryAt, flags });
   return {
     cleared,
     state: recordRemedy(queued, {
-      condition: `executor ${executorId} ${result.status} (declared retryable)`,
-      remedy: `retry ${attempt} of ${limit} after ${Math.ceil(waitMs / 1000)}s, without a model call`,
+      condition: `harness quota (executor ${executorId})`,
+      remedy: `waiting ${Math.ceil(waitMs / 1000)}s until the harness quota resets at ${resetAt}, then running the job again, without a model call`,
       detail: boundText(result.summary),
       ...(state.recoveryEpisodeId !== undefined ? { episodeId: state.recoveryEpisodeId } : {}),
       ...(waitMs > 0 ? { waitedMs: waitMs } : {}),
@@ -2684,13 +2746,24 @@ function applyDispatchResult(
       status: result.status,
       summary: result.summary,
       retryAfterMs: result.retryAfterMs,
+      failureKind: result.failureKind,
+      resetAt: result.resetAt,
     });
     next = recordContractStreak(next, job, result.evidence);
     const { pendingDispatch, ...unsettled } = next;
-    const retried = scheduleExecutorRetry(unsettled, job, result, operationId, {
-      graphCorrectionTrial: args.graphCorrectionTrial,
-      supervisorWorkDispatch: args.supervisorWorkDispatch,
-    });
+    const retryFlags = { graphCorrectionTrial: args.graphCorrectionTrial, supervisorWorkDispatch: args.supervisorWorkDispatch };
+    if (result.failureKind === "quota") {
+      const paused = pauseForQuota(unsettled, job, result, operationId, retryFlags);
+      if (paused.state !== undefined) return paused.state;
+      return {
+        ...paused.cleared,
+        ...(pendingDispatch ? { pendingDispatch: { ...pendingDispatch, status: "failed" as const } } : {}),
+        status: "stopped",
+        stopReason: paused.stop!.stopReason,
+        blocker: paused.stop!.blocker,
+      };
+    }
+    const retried = scheduleExecutorRetry(unsettled, job, result, operationId, retryFlags);
     if (retried.state !== undefined) return retried.state;
     const rest = retried.cleared;
     if (args.canRecover) {

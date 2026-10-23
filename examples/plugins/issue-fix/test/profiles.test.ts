@@ -117,7 +117,7 @@ describe.skipIf(!existsSync(path.join(banyandbFixDist, "index.js")))("the banyan
     });
     expect(monolithic(v1(strip(ours)))).toEqual(strip(withoutLicense(theirs)));
     expect(theirs.environment?.prepare?.map((c) => c.argv.join(" "))).toEqual(["make generate"]);
-    expect(ours).toMatchObject({ graphId: "issue-fix", version: "0.10.1", privateStateSchema: "issue-fix-private-v1" });
+    expect(ours).toMatchObject({ graphId: "issue-fix", version: "0.10.2", privateStateSchema: "issue-fix-private-v1" });
   });
 
   it("splits make generate into separately cached steps with narrow inputs (#174)", () => {
@@ -337,8 +337,8 @@ describe("profiles", () => {
   });
 
   it("declares the profile's measured budgets as the graph's default budgets (#150)", () => {
-    expect(definitionFor(graphloom).defaultBudgets).toEqual({ agentInvocations: 1800, jobs: 250, decisions: 350, corrections: 30, activeMs: 36_000_000 });
-    expect(definitionFor(banyandb).defaultBudgets).toEqual({ agentInvocations: 6000, jobs: 250, decisions: 500, corrections: 100, activeMs: 72_000_000 });
+    expect(definitionFor(graphloom).defaultBudgets).toEqual({ agentInvocations: 1800, jobs: 250, decisions: 350, corrections: 30, activeMs: 36_000_000, waitMs: 21_600_000 });
+    expect(definitionFor(banyandb).defaultBudgets).toEqual({ agentInvocations: 6000, jobs: 250, decisions: 500, corrections: 100, activeMs: 72_000_000, waitMs: 21_600_000 });
     const { budgets: _b, ...unbudgeted } = GRAPHLOOM as Record<string, unknown>;
     void _b;
     expect(definitionFor(parseProfile(unbudgeted)).defaultBudgets).toBeUndefined();
