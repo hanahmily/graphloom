@@ -53,6 +53,8 @@ import {
   testOutcome,
   toVerify,
   validatorById,
+  implementerRecord,
+  latestImplementerRecord,
   verificationInstruction,
   writtenJson,
   type DecisionRecord,
@@ -139,6 +141,12 @@ interface Scenario {
   changes?: string;
   /** Bump the generation once Fix is accepted, as an operator's resume does. */
   resumeAfterFix?: boolean;
+  /**
+   * Once Fix is accepted, a supervisor-dispatched work job settles with no
+   * decision-record contract: completed, output null, no resultSchema (the
+   * shape of op-571 in run 4e89a0e1-a16, issue #191).
+   */
+  supervisorWorkAfterFix?: boolean;
   issueBody?: string;
   comments?: Array<{ author: string; createdAt: string; body: string }>;
   /** Whether the comment listing reached its last page. */
@@ -421,6 +429,10 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
       if (failure !== undefined) throw new Error(`validate ${stage.id} failed: ${failure.requirementId}: ${failure.result.reason}`);
       for (const r of results) receipts.push({ id: `rcpt-${receipts.length + 1}`, stageId: stage.id, requirementId: r.requirementId, validatorBinding: r.binding, candidateFingerprint: "fp", evidenceRefs: [], valid: true, candidateDigest: identityFor(r.requirementId) });
       if (scenario.resumeAfterFix === true && stage.id === "fix") resumeAt();
+      if (scenario.supervisorWorkAfterFix === true && stage.id === "fix") {
+        const free: JobSpec = { stageId: "fix", kind: "agent", purpose: "work", instruction: "supervisor work", readOnly: false };
+        record("other", { codingAgent: { harness: "claude-code", status: "completed", output: null } }, free, `op-sup-${step}`);
+      }
     } else if (action.type === "supervise" && reentries > 0) {
       // The supervisor re-enters Fix: its execution needs another attempt,
       // regardless of whether the candidate has changed yet (it has not, so
@@ -861,6 +873,34 @@ describe("issue-fix graph under the banyandb profile", () => {
     const again = simulate({ failDeliveries: 2, resumeAfterFailedDelivery: true });
     expect(again.decision.action).toMatchObject({ type: "stop", stop: { reason: "delivery failed", retryable: true } });
     expect(delivers(again.jobs)).toHaveLength(2);
+  });
+
+  it("reviews and delivers with the latest valid decision record when a later work run carries none (#191)", () => {
+    const { decision, jobs, evidence } = simulate({ supervisorWorkAfterFix: true });
+    // The free-form work run is the latest work run in the evidence...
+    const work = evidence.filter((e) => (e.payload as { producer?: { purpose?: string } }).producer?.purpose === "work");
+    expect(work.at(-1)?.resultSchema).toBeUndefined();
+    expect((work.at(-1)?.payload as { codingAgent: { output: unknown } }).codingAgent.output).toBeNull();
+    // ...and neither review nor delivery reads it as the implementer's answer.
+    expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+    expect(jobs.some((j) => j.stageId === "review" && j.purpose === "review")).toBe(true);
+    expect(deliverArgs(jobs).body).toContain(`- ${TEST} in \`./pkg/timestamp\` fails by assertion on base-sha`);
+  });
+
+  it("picks the latest valid decision record, and reports a problem rather than a record when none is valid (#191)", () => {
+    const run = (output: unknown, resultSchema?: string): EvidenceRecord => ({
+      ref: "ev-1",
+      kind: "other",
+      generation: 1,
+      ...(resultSchema !== undefined ? { resultSchema } : {}),
+      payload: { codingAgent: { harness: "claude-code", status: "completed", output }, producer: { operationId: "op-1", stageId: "fix", purpose: "work", readOnly: false, kind: "agent" } },
+    });
+    expect(latestImplementerRecord([run(null)])).toBeUndefined();
+    expect(implementerRecord([run(null)]).problem).toMatch(/invalid/);
+    // A later free-form run is skipped; a later contract-bound invalid one is the problem.
+    expect(implementerRecord([run(PLAN), run(null)]).record).toBeDefined();
+    expect(implementerRecord([run(PLAN), run(null, "decision-record-v2")]).record).toBeUndefined();
+    expect(latestImplementerRecord([run(PLAN), run(null, "decision-record-v2")])).toBeDefined();
   });
 
   it("reviews and delivers the accepted fix after a resume", () => {

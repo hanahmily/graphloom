@@ -117,10 +117,10 @@ import {
   redCommands,
   snapshotText,
 } from "./prompts.js";
-import { cleanRun, codeReview, implementerRecord, plannerRecord, reportText, validatorById, verifiedChecks } from "./validators.js";
+import { cleanRun, codeReview, implementerRecord, latestImplementerRecord, plannerRecord, reportText, validatorById, verifiedChecks } from "./validators.js";
 
 export const GRAPH_ID = "issue-fix";
-export const GRAPH_VERSION = "0.10.2";
+export const GRAPH_VERSION = "0.10.4";
 
 /** Graph bookkeeping; everything else is read back from recorded evidence. */
 export interface FixPrivateState {
@@ -543,7 +543,10 @@ function review(ctx: Context, view: RunView, issue: number, state: FixPrivateSta
   const { round, phase } = reviewPhase(ledger, digest);
   const verifying = phase === "verify-only";
   // Fix was accepted for this candidate, possibly before a resume moved the generation on.
-  const record = implementerRecord(view.evidence).record!;
+  const record = latestImplementerRecord(view.evidence);
+  if (record === undefined) {
+    return supervise({ reason: "no work run recorded a valid decision record to review against; one is needed before code review" }, "ask for the implementer's decision record", JSON.stringify(state));
+  }
   const background = reviewBackground(profile, issueSnapshot(view.evidence, issue)!.issue, record);
   const green = latestCheckoutRun(view.evidence, COMMAND.regression, "candidate", digest);
   const reviewer = harnessName(profile.roles.reviewer);
@@ -629,7 +632,10 @@ function deliver(ctx: Context, view: RunView, issue: number, state: FixPrivateSt
     const ledger = findingLedger(view.evidence);
     const restore = issuesRestore(view, ledger, REVIEW_STAGE, state);
     if (restore !== undefined) return restore;
-    const record = implementerRecord(view.evidence).record!;
+    const record = latestImplementerRecord(view.evidence);
+    if (record === undefined) {
+      return supervise({ reason: "no work run recorded a valid decision record for the pull request description; one is needed before delivery" }, "ask for the implementer's decision record", JSON.stringify(state));
+    }
     const green = latestCheckoutRun(view.evidence, COMMAND.regression, "candidate", view.candidateDigest);
     const issueTitle = issueSnapshot(view.evidence, issue)?.issue.title ?? issueRef(profile, issue);
     const plan = plannerRecord(view.evidence);
