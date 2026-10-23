@@ -221,15 +221,7 @@
       "timeoutMs": 1800000,
       "requirement": "builds",
       "label": "make check (which includes license-check and check-format)",
-      "summary": "`make check`",
-      "writes": [
-        "dist/LICENSE",
-        "dist/licenses/**",
-        "mcp/LICENSE",
-        "mcp/licenses/**",
-        "canopy/LICENSE",
-        "canopy/licenses/**"
-      ]
+      "summary": "`make check`"
     }
   ],
   "testPaths": {

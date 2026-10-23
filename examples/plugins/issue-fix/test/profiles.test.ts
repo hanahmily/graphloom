@@ -691,7 +691,8 @@ describe("generated artifacts a check regenerates (issue 181)", () => {
 
   it("declares the license artifacts that make license-dep regenerates", () => {
     expect(regeneratedPaths(canopy)).toEqual(["canopy/LICENSE", "canopy/licenses"]);
-    expect(regeneratedPaths(banyandb)).toEqual(expect.arrayContaining(["dist/LICENSE", "dist/licenses", "mcp/LICENSE", "mcp/licenses", "canopy/LICENSE", "canopy/licenses"]));
+    // banyandb protects none of its license artifacts, so it declares nothing: its scope already allows them.
+    expect(regeneratedPaths(banyandb)).toEqual([]);
     expect(canopy.commands.find((c) => c.id === "license-dep")!.writes).toEqual(["canopy/LICENSE", "canopy/licenses/**"]);
   });
 
@@ -726,5 +727,21 @@ describe("generated artifacts a check regenerates (issue 181)", () => {
     expect(outOfScope(["generated/licenses/foo.txt", "generated/licenses/deep/bar.txt"], undefined, nested)).toEqual([]);
     expect(outOfScope(["generated/other.txt", "generated/licenses.txt"], undefined, nested)).toEqual(["generated/other.txt", "generated/licenses.txt"]);
     expect(writeScopeFor(undefined, nested)).toEqual([".", "!generated", "+generated/licenses"]);
+  });
+
+  it("tells the implementer which generated paths it may write, and how", () => {
+    const text = implementInstruction(canopy, { issue: 7, plan: TS_PLAN });
+    expect(text).toContain("Do not change canopy/package-lock.json, canopy/e2e/tests/query.spec.ts-snapshots, .github, api/proto, go.mod, go.sum.");
+    expect(text).not.toContain("Do not change canopy/LICENSE");
+    expect(text).toContain("Do not edit generated files by hand, except what a check regenerates, which you may write by running it:");
+    expect(text).toContain("canopy/LICENSE, canopy/licenses/** (regenerate with make license-dep (with check-license-outputs))");
+    // A profile that regenerates nothing keeps the blanket prohibition.
+    expect(implementInstruction(banyandb, { issue: 7, plan: GO_PLAN })).toContain("Do not commit, push, create branches or edit generated files.");
+    // A declared child of a protected directory: the exclusion names the exception.
+    const raw = CANOPY as { commands: Array<{ id: string; writes?: string[] }> };
+    const nested = parseProfile({ ...raw, protectedPaths: ["generated"], commands: raw.commands.map((c) => (c.id === "license-dep" ? { ...c, writes: ["generated/licenses/**"] } : c)) });
+    const child = implementInstruction(nested, { issue: 7, plan: TS_PLAN });
+    expect(child).toContain("Do not change generated, except generated/licenses, which a check regenerates.");
+    expect(child).toContain("generated/licenses/** (regenerate with make license-dep (with check-license-outputs))");
   });
 });

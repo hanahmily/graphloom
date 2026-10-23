@@ -167,7 +167,7 @@ export { executorFailureOf, failuresSinceResume, isStaleFailure, type ExecutorFa
 
 export { createScriptedGraph, type ScriptedAdvance, type ScriptedGraphOptions } from "./scripted.js";
 
-export { writeScopeAllows, writeScopeExcludes, writeScopeIncludes, writeScopeProblem } from "./scope.js";
+export { writeScopeAllows, writeScopeExceptions, writeScopeExcludes, writeScopeIncludes, writeScopeProblem } from "./scope.js";
 
 export { stableHash, stableJson } from "./stable-hash.js";
 

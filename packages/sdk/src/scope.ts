@@ -56,6 +56,11 @@ export function writeScopeExcludes(scope: readonly string[]): string[] {
   return scope.filter((entry) => entry.startsWith("!")).map((entry) => normalize(entry.slice(1)));
 }
 
+/** `+` entries: paths an exclusion above them does not cover. */
+export function writeScopeExceptions(scope: readonly string[]): string[] {
+  return scope.filter((entry) => entry.startsWith("+")).map((entry) => normalize(entry.slice(1)));
+}
+
 /** Why a scope is malformed, or undefined when it is usable. */
 export function writeScopeProblem(scope: readonly string[]): string | undefined {
   for (const raw of scope) {

@@ -127,6 +127,20 @@ describe("code review records one entry per problem (issue 182)", () => {
     expect(mixed.findings.map((f) => f.id)).toEqual(["F1", "F2", "F3"]);
   });
 
+  it("never merges a distinct comment, whichever of two overlapping comments comes first", () => {
+    const plain = comment("a.ts", 10, 12, "plain problem");
+    const apart = comment("a.ts", 11, 13, "different problem", { distinct: true });
+    for (const order of [[plain, apart], [apart, plain]]) {
+      expect(findingLedger([pass("d1", order)]).findings, JSON.stringify(order.map((c) => c.content))).toHaveLength(2);
+    }
+    // Across passes too: a later plain comment does not join an earlier distinct finding, nor the reverse.
+    expect(findingLedger([pass("d1", [apart]), pass("d1", [plain])]).findings).toHaveLength(2);
+    expect(findingLedger([pass("d1", [plain]), pass("d1", [apart])]).findings).toHaveLength(2);
+    // Severity sorting puts the critical one first: still two.
+    const critical = comment("a.ts", 11, 12, "critical one", { severity: "critical", distinct: true });
+    expect(findingLedger([pass("d1", [plain, critical])]).findings).toHaveLength(2);
+  });
+
   it("does not merge across rounds, and a repeat of the same text adds nothing", () => {
     const rounds = findingLedger([pass("d1", [comment("a.ts", 10, 12, "first problem")]), pass("d2", [comment("a.ts", 10, 12, "first problem, again")])]);
     expect(rounds.findings).toHaveLength(2);

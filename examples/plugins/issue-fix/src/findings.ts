@@ -572,9 +572,14 @@ const mergeable = (c: ReviewComment): boolean => isBlocking(c) && c.distinct !==
 const occurrences = (f: Finding): ReviewComment[] => [f.comment, ...(f.original !== undefined ? [f.original] : []), ...(f.merged ?? []).map((m) => m.comment)];
 const overlaps = (a: ReviewComment, b: ReviewComment): boolean => a.path === b.path && a.start_line > 0 && a.start_line <= Math.max(b.end_line, b.start_line) && b.start_line <= Math.max(a.end_line, a.start_line);
 
-/** The first finding of `round` (in raised order) whose lines overlap the comment's, unless it is already fixed. */
+/**
+ * The first finding of `round` (in raised order) whose lines overlap the comment's, unless it is already
+ * fixed. A comment the reviewer marked `distinct` never merges, and nothing merges into one, whichever
+ * order the comments come in.
+ */
 function mergeTarget(findings: Finding[], c: ReviewComment, round: number): Finding | undefined {
-  return findings.find((f) => f.round === round && f.state !== "fixed" && occurrences(f).some((o) => overlaps(o, c)));
+  if (c.distinct === true) return undefined;
+  return findings.find((f) => f.round === round && f.state !== "fixed" && occurrences(f).some((o) => o.distinct !== true && overlaps(o, c)));
 }
 
 function mergeInto(f: Finding, c: ReviewComment, at: { digest: string; ref: string }): void {

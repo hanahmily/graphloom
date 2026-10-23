@@ -1,4 +1,4 @@
-import type { EnvironmentCommand } from "@graphloom/sdk";
+import { writeScopeExceptions, writeScopeExcludes, type EnvironmentCommand } from "@graphloom/sdk";
 import { COMMAND } from "./constants.js";
 import type { DecisionRecord } from "./decision-record.js";
 import { acceptanceItems } from "./acceptance.js";
@@ -77,6 +77,15 @@ export function planInstruction(profile: Profile, args: { issue: number; request
   ].join("\n");
 }
 
+/**
+ * The generated files a check regenerates, which the implementer may write: by
+ * running the command, not by hand. Empty when no command declares `writes`.
+ */
+function regeneratedNote(profile: Profile): string {
+  const lines = profile.commands.filter((c) => (c.writes ?? []).length > 0).map((c) => `${c.writes!.join(", ")} (regenerate with ${commandLabel(c)})`);
+  return lines.length > 0 ? `, except what a check regenerates, which you may write by running it: ${lines.join("; ")}` : "";
+}
+
 /** The profile's planning notes, as a block of the prompt; nothing when it has none. */
 function notes(profile: Profile): string[] {
   const list = profile.planning.notes ?? [];
@@ -144,7 +153,10 @@ export function issuesProtocol(): string {
 
 export function implementInstruction(profile: Profile, args: { issue: number; plan: DecisionRecord; feedback?: string[]; issues?: boolean }): string {
   const { plan } = args;
-  const excluded = writeScopeFor(plan, profile).filter((p) => p.startsWith("!")).map((p) => p.slice(1));
+  const scope = writeScopeFor(plan, profile);
+  const excluded = writeScopeExcludes(scope);
+  const exceptions = writeScopeExceptions(scope);
+  const regenerated = regeneratedNote(profile);
   return [
     ...(args.feedback !== undefined && args.feedback.length > 0
       ? ["Your last change did not pass. Fix these and keep everything that already passes:", ...args.feedback.map((f) => `- ${f}`), ""]
@@ -155,7 +167,7 @@ export function implementInstruction(profile: Profile, args: { issue: number; pl
     `- Write the regression test ${plan.test?.name ?? "(name it)"} in ${plan.test?.package ?? "(the affected package)"} first. Its expected value must come from ${plan.test?.expectedValueSource ?? "the issue"}, not from the new code's output.`,
     `- Change the production caller (${plan.productionCaller ?? "name it"}) so the test passes. ${profile.implementation.conventions}`,
     ...(profile.changelog !== undefined ? [`- Add an entry for the fix under the current release (the first "## " section) of ${profile.changelog.path}, in the matching subsection.`] : []),
-    `- ${excluded.length > 0 ? `Do not change ${excluded.join(", ")}. ` : ""}Do not commit, push, create branches or edit generated files.`,
+    `- ${excluded.length > 0 ? `Do not change ${excluded.join(", ")}${exceptions.length > 0 ? `, except ${exceptions.join(", ")}, which a check regenerates` : ""}. ` : ""}${regenerated === "" ? "Do not commit, push, create branches or edit generated files." : `Do not commit, push or create branches. Do not edit generated files by hand${regenerated}.`}`,
     checksNote(profile),
     ...selfCheckNote(profile, plan),
     ...coverageNote(plan),
