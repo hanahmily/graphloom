@@ -98,6 +98,20 @@ graphloom profile the full suite takes about ten minutes; its commands allow
 GRAPHLOOM_GITHUB_LIVE_TOKEN="$(gh auth token)" node ../apps/graphloom/dist/main.js run issue-fix-graphloom-task.yaml
 ```
 
+## Review failures reenter Fix (0.11.0)
+
+When code review fails only because findings are confirmed, the graph
+reenters Fix itself instead of starting a supervisor episode: on the first
+failing round, or when this round has fewer confirmed findings than the last,
+and while fewer than `review.maxReentries` (default 4) review reentries have
+happened and the run has at least two corrections left. A disputed finding, a
+round that is not converging, the cap, a low corrections budget, or any other
+failure (incomplete passes, missing statuses, issues-file or contract
+problems) still goes to the supervisor
+([#193](https://github.com/hanahmily/graphloom/issues/193); see
+[the design](../../../docs/design-issue-fix-graph.md#review-failures-the-graph-reenters-fix-or-the-supervisor-decides)).
+The rehearsal scenario `review-reenters` (go-test profiles) covers it.
+
 ## Work runs without a decision record (0.10.3)
 
 Review and delivery use the latest *valid* decision record from any work run. A

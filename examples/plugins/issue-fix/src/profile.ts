@@ -95,6 +95,8 @@ export interface ProfileData {
     testFiles: string;
     /** The extra rule: what the change breaks outside its diff. */
     rules: string[];
+    /** How many times the graph itself sends a converging review failure back to Fix before the supervisor decides; default 4. */
+    maxReentries?: number;
   };
   pullRequest: {
     /** Lines after the title, such as the template's checklist. */
@@ -261,6 +263,8 @@ export function parseProfile(config: unknown): Profile {
   const selfCheck = (p.implementation as Record<string, unknown>).selfCheck;
   need(selfCheck === undefined || (isStrings(selfCheck) && selfCheck.every((s) => s.trim() !== "")), "implementation.selfCheck must be a list of commands");
   need(isObject(p.review) && isString(p.review.language) && isString(p.review.testFiles) && isStrings(p.review.rules), "review needs language, testFiles and rules");
+  const maxReentries = (p.review as Record<string, unknown>).maxReentries;
+  need(maxReentries === undefined || (typeof maxReentries === "number" && Number.isInteger(maxReentries) && maxReentries >= 0), "review.maxReentries must be a whole number, 0 or more");
   need(isObject(p.pullRequest) && isStrings(p.pullRequest.checklist) && isStrings(p.pullRequest.footer), "pullRequest needs checklist and footer lists");
   const e2eNote = (p.pullRequest as Record<string, unknown>).e2eNote;
   need(e2eNote === undefined || isString(e2eNote), "pullRequest.e2eNote must be text");

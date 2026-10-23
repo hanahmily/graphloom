@@ -30,6 +30,7 @@ Version 0.10.3 reads the latest valid decision record in review and delivery, so
 supervisor-dispatched work run without one no longer crashes the graph
 ([#191](https://github.com/hanahmily/graphloom/issues/191)).
 Version 0.10.4 declares a 6 h `waitMs` in every profile, so a coding-agent harness's usage-limit reset can be waited out instead of stopping the run ([#189](https://github.com/hanahmily/graphloom/issues/189)).
+Version 0.11.0 reenters Fix itself when code review fails only on confirmed findings and the loop is converging, instead of handing every such failure to the supervisor ([#193](https://github.com/hanahmily/graphloom/issues/193); see [review failures](#review-failures-the-graph-reenters-fix-or-the-supervisor-decides)).
 
 ## Purpose
 
@@ -174,6 +175,40 @@ the implementer that:
   behaviour must be.
 
 The example task requests `Fix hanahmily/graphloom#119.`
+
+## Review failures: the graph reenters Fix, or the supervisor decides
+
+A failing code review is usually the normal Fix and Review loop, a known
+correction, and the design assigns that to the graph (the core design's
+[operations table](design-typescript-core.md#4-public-interface-and-process-protocol):
+"Reenter: graph for known correction"). Since 0.11.0, when review fails the
+graph returns `reenter` for Fix, with a reason naming the confirmed findings
+and the review pass as evidence. The controller invalidates the receipts,
+charges one `corrections` and bumps the generation. Fix's assignment is built
+from the same confirmed findings as after a supervisor reentry, so the
+implementer sees no difference. The graph reenters only when all of these hold:
+
+- the failure is **only** confirmed findings: the last pass is usable, every
+  open finding is confirmed (none disputed or awaiting verification), and the
+  issues file has no unsettled issue beyond those findings;
+- the loop is **converging**: it is the first failing round, or this round's
+  open confirmed findings are fewer than the previous round's;
+- the **reentry cap** is not reached: `review.maxReentries` in the profile
+  (default 4) against the review reentries so far;
+- the run still has at least two `corrections`, so the supervisor keeps one.
+
+Otherwise the graph hands the run to the supervisor as before: any disputed
+finding, a round with as many or more confirmed findings, the cap reached or
+the corrections budget low, and any other reason review did not pass (missing
+or incomplete passes, missing statuses, issues-file problems, contract
+problems). Reentering is a graph decision inside the existing stages; no
+step, stage or requirement changes.
+
+The reentry count is not private state. It is the number of reviewed
+candidates after the first (every one followed a correction, whoever asked for
+it), read from evidence, so a resume or a changed generation cannot reset it.
+The previous round's count is read from the findings ledger rebuilt on the
+evidence that preceded the current candidate.
 
 ## Review discovery rounds
 

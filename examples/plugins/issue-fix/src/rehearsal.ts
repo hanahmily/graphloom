@@ -214,6 +214,63 @@ const SCOPE_SOURCE = "packages/sdk/src/rehearsal-marker.ts";
 // Self-contained: the test asserts that a new module exists, so it fails by assertion on the base commit
 // and passes with the change, whatever else the repository's own code does now or later.
 const SCOPE_TEST_BYTES = `import { existsSync } from "node:fs";\nimport { dirname, join } from "node:path";\nimport { fileURLToPath } from "node:url";\nimport { describe, expect, it } from "vitest";\n\ndescribe("rehearsal marker", () => {\n  it("exists beside the sdk sources", () => {\n    expect(existsSync(join(dirname(fileURLToPath(import.meta.url)), "rehearsal-marker.ts"))).toBe(true);\n  });\n});\n`;
+const HAPPY = GO_TEST_REHEARSAL.scenarios.happy!;
+const [GO_PLAN, GO_IMPLEMENTATION] = HAPPY.results["decision-record-v2"]!;
+/** A high finding the first review round raises; its lines are inside the fixture's scheduler.go. */
+const REENTRY_FINDING = {
+  path: "pkg/timestamp/scheduler.go",
+  start_line: 6,
+  end_line: 12,
+  category: "bug",
+  severity: "high",
+  finding: "",
+  evidence: "A caller that reads the status string during a long backup sees an error label for work that is still progressing.",
+  distinct: false,
+  content: "Status reports an action still running at the limit as timed out when the caller cannot tell it is running.",
+};
+const REENTRY_SUMMARY = { total_files: 2, reviewed_files: 2, skipped: [] };
+
+/**
+ * Hand-written on top of the recorded happy path: code review confirms one
+ * high finding in its first round, and the graph itself sends Fix back with
+ * it (review reentry, no supervisor episode: the scenario scripts no
+ * supervisor decision, so a supervisor call is a finding). The corrected
+ * change then passes review.
+ */
+const GO_TEST_WITH_REENTRY: GraphRehearsal = {
+  scenarios: {
+    ...GO_TEST_REHEARSAL.scenarios,
+    "review-reenters": {
+      results: {
+        "decision-record-v2": [
+          GO_PLAN!,
+          GO_IMPLEMENTATION!,
+          {
+            // The correction: the same record, and a changed scheduler.go.
+            output: GO_IMPLEMENTATION!.output,
+            effects: [
+              { path: "pkg/timestamp/scheduler.go", bytes: `${SCHEDULER_FIXED}\n// Status is evaluated per call; a running action is never reported as timed out.\n` },
+              { path: "pkg/timestamp/scheduler_test.go", bytes: SCHEDULER_TEST },
+              { path: "CHANGES.md", bytes: CHANGES_AFTER },
+            ],
+          },
+        ],
+        "code-review-v2": [
+          { output: { contract: "dedupe-1", comments: [REENTRY_FINDING], prior: [], summary: REENTRY_SUMMARY } },
+          // The sweep on the same change raises nothing new and keeps the finding open.
+          { output: { contract: "dedupe-1", comments: [], prior: [{ finding: "F1", status: "still_present", reason: "Unchanged: the change is the one the finding was raised on." }], summary: REENTRY_SUMMARY } },
+          // After the graph's own reentry the correction resolves it, and the review passes.
+          { output: { contract: "dedupe-1", comments: [], prior: [{ finding: "F1", status: "resolved", reason: "The corrected change no longer does this." }], summary: REENTRY_SUMMARY } },
+        ],
+        "finding-verification-v1": [
+          { output: { verdicts: [{ finding: "F1", verdict: "confirmed", reason: "The reported behavior is present in the change.", quotes: [{ path: "pkg/timestamp/scheduler.go", line: 8, text: "if running {" }] }] } },
+        ],
+      },
+      expect: { status: "succeeded", receipts: [FIX_STAGE, REVIEW_STAGE] },
+    },
+  },
+};
+
 const SCOPE_SOURCE_BYTES = 'export const REHEARSAL_MARKER = "graphloom-issue-fix-rehearsal";\n';
 // The implementer's map for the planner's acceptance item; the plan itself carries none.
 const VITEST_COVERAGE = [{ id: "A1", files: [SCOPE_SOURCE], tests: [{ file: SCOPE_TEST, name: "exists beside the sdk sources" }] }];
@@ -330,5 +387,5 @@ export function rehearsal(config: unknown): GraphRehearsal {
     name = "";
   }
   if (name === "canopy" && runner === "vitest") return CANOPY_REHEARSAL;
-  return runner === "vitest" ? VITEST_REHEARSAL : GO_TEST_REHEARSAL;
+  return runner === "vitest" ? VITEST_REHEARSAL : GO_TEST_WITH_REENTRY;
 }
