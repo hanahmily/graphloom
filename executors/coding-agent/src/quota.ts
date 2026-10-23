@@ -60,10 +60,10 @@ function validZone(tz: string): string | undefined {
 }
 
 const DURATION_UNITS: Array<[RegExp, number]> = [
-  [/(\d+(?:\.\d+)?)\s*(?:days?|d)\b/i, DAY_MS],
-  [/(\d+(?:\.\d+)?)\s*(?:hours?|hrs?|h)\b/i, 3_600_000],
+  [/(\d+(?:\.\d+)?)\s*(?:days?|d)(?![a-z])/i, DAY_MS],
+  [/(\d+(?:\.\d+)?)\s*(?:hours?|hrs?|h)(?![a-z])/i, 3_600_000],
   [/(\d+(?:\.\d+)?)\s*(?:minutes?|mins?|m)(?![a-z])/i, 60_000],
-  [/(\d+(?:\.\d+)?)\s*(?:seconds?|secs?|s)\b/i, 1_000],
+  [/(\d+(?:\.\d+)?)\s*(?:seconds?|secs?|s)(?![a-z])/i, 1_000],
 ];
 
 /** "3 days 4 hours 5 minutes", "1h30m", "34.5s" as milliseconds. */

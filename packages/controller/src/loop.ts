@@ -2642,9 +2642,13 @@ function scopeViolation(
   const reported = result.status === "ok" ? "" : `; the executor also reported ${result.status}: ${result.summary}`;
   // The controller found this failure, not the executor: whatever the
   // executor declared retryable, rerunning the job unchanged would repeat it.
-  const { retryLimit: _declared, ...rest } = result;
+  // A usage limit the agent hit after the violation is not what stopped the job either: scope recovery comes first.
+  const { retryLimit: _declared, resetAt: _reset, ...kept } = result;
   void _declared;
-  return { ...rest, status: "failed", summary: boundText(`${violation}${reported}`) };
+  void _reset;
+  const { failureKind, ...rest } = kept;
+  const failure = failureKind === "quota" ? {} : failureKind !== undefined ? { failureKind } : {};
+  return { ...rest, ...failure, status: "failed", summary: boundText(`${violation}${reported}`) };
 }
 
 function applyDispatchResult(

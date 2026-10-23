@@ -1128,6 +1128,47 @@ describe("supervisor provider failures and deterministic remedies (controller)",
     expect(state.executorRetry).toBeUndefined();
   });
 
+  it("recovers from a scope violation instead of pausing for a usage limit the agent hit after it", async () => {
+    const env = await makeEnv();
+    const triggers: string[] = [];
+    let jobs = 0;
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({ definition, advances: [writeWork] }),
+      validators,
+      supervisor: createScriptedSupervisor({
+        decisions: [
+          (input) => {
+            triggers.push(`${input.trigger.code}: ${input.trigger.message}`);
+            return stop({ reason: "wrote outside its scope", blocker: "scope" }, "stop");
+          },
+        ],
+      }),
+      runner: createScriptedRunner({
+        jobs: [
+          async (_job, ctx) => {
+            jobs += 1;
+            await writeFile(path.join(ctx.worktreePath, "OTHER.txt"), "nope\n", "utf8");
+            return {
+              status: "failed" as const,
+              summary: "Claude Code run failed (success): You've hit your session limit",
+              failureKind: "quota" as const,
+              resetAt: new Date(Date.now() + 60_000).toISOString(),
+            };
+          },
+        ],
+      }),
+      stateRoot: env.stateRoot,
+      runId: "scope-over-quota-1",
+    });
+    expect(report).toMatchObject({ status: "stopped", stopReason: "wrote outside its scope" });
+    expect(jobs).toBe(1);
+    expect(triggers).toEqual([expect.stringMatching(/^executor_failed: .*changed paths outside the job's write scope: OTHER\.txt/)]);
+    const state = await loadRunState(report.stateDir);
+    expect(state.remedies ?? []).toEqual([]);
+    expect(state.executorRetry).toBeUndefined();
+  });
+
   it("retries a timed-out supervisor turn once in a fresh session and completes with one decide", async () => {
     const opened: string[] = [];
     const first = failingSession([{ timeout: "no output for 120s" }]);

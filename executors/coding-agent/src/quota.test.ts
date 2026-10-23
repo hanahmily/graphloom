@@ -36,6 +36,16 @@ describe("parseResetAt", () => {
     expect(parseResetAt("Claude AI usage limit reached|1792000000", at("2026-10-23T00:00:00Z"))?.getTime()).toBe(1_792_000_000_000);
   });
 
+  it("reads compact and compound durations without losing a component", () => {
+    const base = at("2026-10-23T00:00:00Z");
+    const after = (text: string) => (parseResetAt(text, base)!.getTime() - base.getTime()) / 60_000;
+    expect(after("try again in 1h30m")).toBe(90);
+    expect(after("try again in 2d3h")).toBe(2 * 1440 + 180);
+    expect(after("try again in 1h 30m")).toBe(90);
+    expect(after("try again in 90m")).toBe(90);
+    expect(after("try again in 45s")).toBe(0.75);
+  });
+
   it("gives no time for text that states none or names an unknown zone", () => {
     expect(parseResetAt("You've hit your session limit", at("2026-10-23T00:00:00Z"))).toBeUndefined();
     expect(parseResetAt("resets 3pm (Mars/Olympus)", at("2026-10-23T00:00:00Z"))).toBeUndefined();
