@@ -67,7 +67,7 @@ const TRANSIENT: Array<[RegExp, string]> = [
 /** Where each harness puts a provider failure in its summary; start-up, stall and protocol failures fall outside these shapes and are never transient. */
 const FAILURE_SHAPE: Record<string, RegExp> = {
   codex: /^Codex run failed:/,
-  claude: /^Claude Code (?:run failed|exited with code)/,
+  "claude-code": /^Claude Code (?:run failed|exited with code)/,
   // Pi reports a provider error as `agent request failed:`, and a request that throws as the bare message.
   pi: /^(?:agent request failed:|(?!agent |could not|Pi ))/,
 };
@@ -86,8 +86,9 @@ export function retryAfterMs(text: string): number | undefined {
 
 /** Classifies a failed run's summary; undefined means the failure is not worth retrying. */
 export function classifyTransient(harness: string, summary: string): TransientFailure | undefined {
+  // A harness without a known failure shape is never retried: its summaries cannot be told apart from contract failures.
   const shape = FAILURE_SHAPE[harness];
-  if (shape !== undefined && !shape.test(summary)) return undefined;
+  if (shape === undefined || !shape.test(summary)) return undefined;
   if (PERMANENT.test(summary)) return undefined;
   for (const [pattern, reason] of TRANSIENT) {
     if (pattern.test(summary)) {

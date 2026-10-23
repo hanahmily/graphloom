@@ -158,13 +158,16 @@ describe("transient retry safety and abort", () => {
     expect(result).toMatchObject({ status: "failed" });
     expect((result as { summary: string }).summary).toContain("aborted while waiting to retry");
     expect(h.runs()).toBe(1);
+    // The scheduled retry never ran, so the evidence counts one try.
+    const agent = ((result as { evidence?: Array<{ payload: { codingAgent?: { attempts?: number } } }> }).evidence ?? [])[0]?.payload.codingAgent;
+    expect(agent?.attempts).toBe(1);
   });
 
   it("does not retry a failed continuation whose worktree changed", async () => {
     const worktree = await mkdtemp(path.join(os.tmpdir(), "gl-transient-git-"));
     temps.push(worktree);
     execFileSync("git", ["-C", worktree, "init", "-q"]);
-    const h = flaky("claude", [
+    const h = flaky("claude-code", [
       async () => {
         await writeFile(path.join(worktree, "partial.txt"), "half done");
         return failed("Claude Code run failed (error_during_execution): API Error: 529 overloaded_error");
@@ -185,7 +188,7 @@ describe("transient retry safety and abort", () => {
     const worktree = await mkdtemp(path.join(os.tmpdir(), "gl-transient-git-"));
     temps.push(worktree);
     execFileSync("git", ["-C", worktree, "init", "-q"]);
-    const h = flaky("claude", [failed("Claude Code exited with code 1 and no result: 503 Service Unavailable"), ok]);
+    const h = flaky("claude-code", [failed("Claude Code exited with code 1 and no result: 503 Service Unavailable"), ok]);
     const executor = createCodingAgentExecutor(h, { retry: { maxAttempts: 3, baseDelayMs: 1, maxDelayMs: 2 } });
     const result = await executor.execute(
       { assignment: "continue" },
@@ -311,7 +314,7 @@ describe("graph tool calls and aborted backoff", () => {
   });
 
   it("keeps the saved sessionRef when the backoff is aborted", async () => {
-    const h = flaky("claude", [{ ...failed("Claude Code run failed (error_during_execution): 529 overloaded_error"), sessionRef: "claude-abc" }, ok]);
+    const h = flaky("claude-code", [{ ...failed("Claude Code run failed (error_during_execution): 529 overloaded_error"), sessionRef: "claude-abc" }, ok]);
     const result = await createCodingAgentExecutor(h, { retry, sleep: async () => false }).execute(
       { assignment: "x" },
       await plainCtx({ session: { dir: os.tmpdir() } }),
@@ -341,8 +344,8 @@ describe("classifyTransient", () => {
   it.each([
     ["codex", `Codex run failed: ${CAPACITY}`, "model at capacity"],
     ["codex", "Codex run failed: stream disconnected: ECONNRESET", "connection failure"],
-    ["claude", "Claude Code run failed (success): API Error: 529 overloaded_error", "model overloaded"],
-    ["claude", "Claude Code exited with code 1 and no result: API Error: 429 rate limit", "rate limited (429)"],
+    ["claude-code", "Claude Code run failed (success): API Error: 529 overloaded_error", "model overloaded"],
+    ["claude-code", "Claude Code exited with code 1 and no result: API Error: 429 rate limit", "rate limited (429)"],
     ["pi", "agent request failed: 503 Service Unavailable", "provider server error (5xx)"],
     ["pi", "fetch failed: socket hang up", "connection failure"],
   ])("%s: %s", (harness, summary, reason) => {
@@ -351,14 +354,18 @@ describe("classifyTransient", () => {
 
   it.each([
     ["codex", "Codex run failed: 401 unauthorized"],
-    ["claude", "Claude Code run failed (error): Invalid API key"],
-    ["claude", "Claude Code run failed (error): 400 invalid_request_error: overloaded prompt"],
+    ["claude-code", "Claude Code run failed (error): Invalid API key"],
+    ["claude-code", "Claude Code run failed (error): 400 invalid_request_error: overloaded prompt"],
     ["pi", "agent request failed: 403 forbidden"],
     ["codex", "Codex stalled: no activity for 600s"],
     ["codex", "could not start Codex (codex): spawn ENOENT"],
-    ["claude", "Claude Code could not connect to the GraphLoom tool server"],
+    ["claude-code", "Claude Code could not connect to the GraphLoom tool server"],
     ["pi", "agent session aborted"],
     ["codex", "Codex run failed: write outside the write scope: 503.txt"],
+    // A missing structured result named like a provider error is a contract failure, not a rate limit.
+    ["claude-code", "Claude Code returned no structured result: rate_limit"],
+    // The harness names the executor actually reports; an unknown one is never retried.
+    ["claude", "Claude Code run failed (success): API Error: 529 overloaded_error"],
   ])("never retries %s: %s", (harness, summary) => {
     expect(classifyTransient(harness, summary)).toBeUndefined();
   });

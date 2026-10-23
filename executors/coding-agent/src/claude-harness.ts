@@ -191,7 +191,13 @@ export function createClaudeCodeHarness(harnessOptions: ClaudeCodeHarnessOptions
           if (options.sessionDir === undefined) {
             // Claude Code rejects a reused --session-id, so a later run of this
             // session (a transient retry) must resume the transcript it wrote.
-            if (await transcriptExists(configDir, saved.sessionId)) saved.started = true;
+            // Its usage totals are cumulative, so the resumed run's are measured from this point.
+            const transcript = await localTranscript(configDir, saved.sessionId);
+            if (transcript !== undefined) {
+              saved.started = true;
+              const baseline = costState(transcript);
+              if (baseline !== undefined) saved.baseline = baseline;
+            }
             return { ...result, summary };
           }
           if (!(await saveTranscript(configDir, options.sessionDir, saved, settings))) return { ...result, summary };
@@ -281,13 +287,16 @@ async function openSession(options: CodingSessionOptions, configDir: string, set
 }
 
 /** True when Claude Code has written a transcript for the session under `configDir`. */
-async function transcriptExists(configDir: string, sessionId: string): Promise<boolean> {
+/** The transcript Claude Code wrote for this session, when it wrote one. */
+async function localTranscript(configDir: string, sessionId: string): Promise<string | undefined> {
   const projects = path.join(configDir, "projects");
   for (const project of await readdir(projects).catch(() => [] as string[])) {
     if (!PROJECT_DIR.test(project)) continue;
-    if ((await lstat(path.join(projects, project, `${sessionId}.jsonl`)).catch(() => undefined))?.isFile()) return true;
+    const file = path.join(projects, project, `${sessionId}.jsonl`);
+    const info = await lstat(file, { bigint: true }).catch(() => undefined);
+    if (info?.isFile()) return (await readScanned(file, info)).toString("utf8");
   }
-  return false;
+  return undefined;
 }
 
 /** Copy Claude Code's transcript into the controller's session directory; false when it wrote none. */

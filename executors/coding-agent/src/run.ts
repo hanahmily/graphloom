@@ -201,6 +201,8 @@ export function createCodingAgentExecutor(
         const policy = resolveRetryPolicy(executorOptions.retry);
         const sleep = executorOptions.sleep ?? abortableSleep;
         const retries: RetryRecord[] = [];
+        // Tries actually run: a retry scheduled but cancelled during its backoff never ran.
+        let executed = 0;
         let result: CodingRunResult;
         let usage: CodingUsage | undefined;
         for (let attempt = 1; ; attempt++) {
@@ -210,6 +212,7 @@ export function createCodingAgentExecutor(
           // readable worktree fingerprint identical before and after.
           const before = policy.maxAttempts > 1 ? await worktreeDigest(ctx.worktreePath) : undefined;
           const attemptsBefore = toolAttempts;
+          executed += 1;
           result = await session.run(request);
           usage = addUsage(usage, result.usage);
           const transient = result.status === "failed" ? classifyTransient(h.name, result.summary) : undefined;
@@ -263,7 +266,7 @@ export function createCodingAgentExecutor(
                   output: result.output ?? null,
                   toolCalls,
                   modelCalls,
-                  attempts: retries.length + 1,
+                  attempts: executed,
                   retries,
                   usage: result.usage ?? null,
                   sessionRef: sessionRef ?? null,
