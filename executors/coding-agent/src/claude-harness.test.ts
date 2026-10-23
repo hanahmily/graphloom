@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
@@ -810,6 +811,7 @@ describe("Claude Code harness", () => {
   });
 
   it("reports a failed or crashed Claude Code run", async () => {
+    vi.stubEnv("GRAPHLOOM_CODING_RETRY_MAX_ATTEMPTS", "1"); // this test asserts the raw failure text, so no transient retry
     const h = await setup();
     await h.script([{ error: "API Error: overloaded" }]);
     const failed = await h.executor.execute({ assignment: "work" }, h.ctx());
@@ -817,7 +819,7 @@ describe("Claude Code harness", () => {
     const crashed = await h.executor.execute({ assignment: "work" }, h.ctx());
     const missing = await (await setup({ command: path.join(h.dir, "no-such-claude") })).executor.execute({ assignment: "work" }, h.ctx());
 
-    expect(failed).toMatchObject({ status: "failed", summary: "Claude Code run failed (error_during_execution): API Error: overloaded" });
+    expect(failed).toMatchObject({ status: "failed", summary: expect.stringContaining("Claude Code run failed (error_during_execution): API Error: overloaded") });
     expect(payload(failed).usage).toEqual({ inputTokens: 7, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 });
     expect(payload(crashed).usage).toBeNull();
     expect(crashed).toMatchObject({ status: "failed", summary: "Claude Code exited with code 3 and no result: segfault in the agent" });
@@ -900,5 +902,57 @@ describe("MCP tool bridge", () => {
     } finally {
       await bridge.close();
     }
+  });
+});
+
+describe("transient retry and native tools (Claude Code)", () => {
+  async function attempt(steps: Step[]) {
+    vi.stubEnv("GRAPHLOOM_CODING_RETRY_MAX_ATTEMPTS", "2");
+    vi.stubEnv("GRAPHLOOM_CODING_RETRY_BASE_DELAY_MS", "1");
+    vi.stubEnv("GRAPHLOOM_CODING_RETRY_MAX_DELAY_MS", "2");
+    const h = await setup();
+    execFileSync("git", ["-C", h.worktree, "init", "-q"]);
+    await h.script(steps);
+    const result = await h.executor.execute({ assignment: "work" }, h.ctx());
+    return { result: result as { summary: string }, runs: (await h.invocations()).length };
+  }
+  const overloaded = { error: "API Error: 529 overloaded_error" };
+
+  it("retries a capacity failure when the failed try ran no tools", async () => {
+    const { result, runs } = await attempt([overloaded]);
+    expect(runs).toBe(2);
+  });
+
+  it("does not retry after a Bash call", async () => {
+    const { result, runs } = await attempt([{ bash: "echo hi" }, overloaded]);
+    expect(runs).toBe(1);
+    expect(result.summary).toContain("not retried: the failed try ran a native tool (Bash)");
+  });
+
+  it("does not retry after only Read and Grep", async () => {
+    const { result, runs } = await attempt([{ native: "Read" }, { native: "Grep" }, overloaded]);
+    expect(runs).toBe(1);
+    expect(result.summary).toContain("not retried: the failed try ran a native tool (Read)");
+  });
+
+  it("resumes the transcript the failed try wrote when the job has no controller session", async () => {
+    vi.stubEnv("GRAPHLOOM_CODING_RETRY_MAX_ATTEMPTS", "2");
+    vi.stubEnv("GRAPHLOOM_CODING_RETRY_BASE_DELAY_MS", "1");
+    vi.stubEnv("GRAPHLOOM_CODING_RETRY_MAX_DELAY_MS", "2");
+    const h = await setup();
+    execFileSync("git", ["-C", h.worktree, "init", "-q"]);
+    await h.script([{ text: "partial" }, overloaded], [{ text: "all done" }]);
+    const result = await h.executor.execute({ assignment: "work" }, h.ctx());
+    expect(result).toMatchObject({ status: "ok" });
+    const [first, second] = await h.invocations();
+    expect(first!.argv).toContain("--session-id");
+    expect(second!.argv).toContain("--resume");
+    expect(second!.argv).not.toContain("--session-id");
+  });
+
+  it("does not retry when the transcript is unparseable", async () => {
+    const { result, runs } = await attempt([{ raw: "this is not json" }, overloaded]);
+    expect(runs).toBe(1);
+    expect(result.summary).toContain("did not report which native tools");
   });
 });

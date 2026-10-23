@@ -34,8 +34,13 @@ appendFileSync(
     schema: schemaFile !== undefined ? JSON.parse(readFileSync(schemaFile, "utf8")) : null,
   })}\n`,
 );
-const steps = JSON.parse(readFileSync(process.env.FAKE_CODEX_SCRIPT, "utf8"));
+// A script of {sequence: [steps, ...]} plays one step list per invocation (the last repeats).
+const script = JSON.parse(readFileSync(process.env.FAKE_CODEX_SCRIPT, "utf8"));
+const steps = Array.isArray(script)
+  ? script
+  : script.sequence[Math.min(readFileSync(process.env.FAKE_CODEX_LOG, "utf8").split("\n").filter(Boolean).length - 1, script.sequence.length - 1)];
 for (const step of steps) {
+  if (step.raw !== undefined) process.stdout.write(`${step.raw}\n`);
   if (step.event !== undefined) process.stdout.write(`${JSON.stringify(step.event)}\n`);
   if (step.sleepMs !== undefined) await new Promise((r) => setTimeout(r, step.sleepMs));
   if (step.hang === true) await new Promise(() => setInterval(() => undefined, 1_000));

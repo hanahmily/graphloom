@@ -282,6 +282,13 @@ async function respond(step, parent) {
     assistant(msgId, parent, [{ type: "text", text: step.text }]);
   } else if (step.tool !== undefined || step.bash !== undefined) {
     await runTool(msgId, step, parent);
+  } else if (step.native !== undefined) {
+    // A built-in tool call (Read, Grep, ...) the fake answers without a permission round trip.
+    const id = `toolu_${(toolUses += 1)}`;
+    assistant(msgId, parent, [{ type: "tool_use", id, name: step.native, input: step.args ?? {} }]);
+    toolResult(parent, id, "ok");
+  } else if (step.raw !== undefined) {
+    process.stdout.write(`${step.raw}\n`);
   } else if (step.parallel !== undefined) {
     for (const call of step.parallel) await runTool(msgId, call, parent);
   } else if (step.agent !== undefined) {

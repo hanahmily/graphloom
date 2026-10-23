@@ -1,5 +1,6 @@
 import { defineExecutor, jsonSchemaProblem, type ExecutorContext, type ExecutorDefinition, type ToolCallResult } from "@graphloom/sdk";
-import type { CodingHarness, CodingSession, CodingTool } from "./harness.js";
+import type { CodingHarness, CodingRunResult, CodingUsage, CodingSession, CodingTool } from "./harness.js";
+import { abortableSleep, backoffMs, classifyTransient, resolveRetryPolicy, worktreeDigest, type TransientRetryPolicy } from "./transient.js";
 
 export const CODING_AGENT_RUN_ID = "graphloom.coding-agent/run";
 
@@ -66,6 +67,36 @@ function isInput(v: unknown): v is CodingAgentInput {
   );
 }
 
+export interface CodingAgentExecutorOptions {
+  /** Bounds for retrying transient harness failures; unset fields fall back to the GRAPHLOOM_CODING_RETRY_* environment, then the defaults (3 tries, 10s to 60s). */
+  retry?: Partial<TransientRetryPolicy>;
+  /** Wait between tries; resolves false when the job's signal aborted first. Tests replace it; the default is a real timer. */
+  sleep?: (ms: number, signal: AbortSignal | undefined) => Promise<boolean>;
+}
+
+function addUsage(total: CodingUsage | undefined, next: CodingUsage | undefined): CodingUsage | undefined {
+  if (next === undefined) return total;
+  if (total === undefined) return { ...next };
+  const costUsd = total.costUsd === undefined && next.costUsd === undefined ? undefined : (total.costUsd ?? 0) + (next.costUsd ?? 0);
+  return {
+    inputTokens: total.inputTokens + next.inputTokens,
+    outputTokens: total.outputTokens + next.outputTokens,
+    cacheReadTokens: total.cacheReadTokens + next.cacheReadTokens,
+    cacheWriteTokens: total.cacheWriteTokens + next.cacheWriteTokens,
+    ...(costUsd !== undefined ? { costUsd } : {}),
+  };
+}
+
+/** One transient failure the executor waited out, recorded in the job's evidence. */
+interface RetryRecord {
+  /** The try that failed (1-based). */
+  attempt: number;
+  reason: string;
+  delayMs: number;
+  /** The harness's own failure text for that try. */
+  failure: string;
+}
+
 /**
  * The coding-agent executor: opens a harness session in the run worktree with
  * the job's admitted tools (or restores the one `ctx.session.resume` names),
@@ -75,6 +106,7 @@ function isInput(v: unknown): v is CodingAgentInput {
  */
 export function createCodingAgentExecutor(
   harness: CodingHarness | (() => Promise<CodingHarness>),
+  executorOptions: CodingAgentExecutorOptions = {},
 ): ExecutorDefinition<CodingAgentInput> {
   return defineExecutor<CodingAgentInput, unknown>({
     id: CODING_AGENT_RUN_ID,
@@ -86,12 +118,15 @@ export function createCodingAgentExecutor(
     async execute(input, ctx: ExecutorContext) {
       const h = typeof harness === "function" ? await harness() : harness;
       const toolCalls: ToolCallSummary[] = [];
+      let toolAttempts = 0;
       let modelCalls = 0;
       const tools: CodingTool[] = (ctx.tools?.bindings ?? []).map((b) => ({
         name: b.name,
         effect: b.effect,
         ...(b.description !== undefined ? { description: b.description } : {}),
         async call(toolCallId, toolInput) {
+          // Counted before dispatch: a call that throws may still have had its effect.
+          toolAttempts += 1;
           const result = await ctx.tools!.call({ toolCallId, tool: b.name, input: toolInput });
           toolCalls.push({
             toolCallId,
@@ -154,7 +189,7 @@ export function createCodingAgentExecutor(
           ...(input.stageId !== undefined ? { stageId: input.stageId } : {}),
           ...(input.purpose !== undefined ? { purpose: input.purpose } : {}),
         };
-        const result = await session.run({
+        const request = {
           assignment: resume !== undefined ? `${CONTINUATION_NOTICE}\n\n${input.assignment}` : input.assignment,
           ...(resultContract !== undefined
             ? { resultContract }
@@ -162,7 +197,59 @@ export function createCodingAgentExecutor(
               ? { resultSchema: input.resultSchema }
               : {}),
           identity,
-        });
+        };
+        const policy = resolveRetryPolicy(executorOptions.retry);
+        const sleep = executorOptions.sleep ?? abortableSleep;
+        const retries: RetryRecord[] = [];
+        // Tries actually run: a retry scheduled but cancelled during its backoff never ran.
+        let executed = 0;
+        let result: CodingRunResult;
+        let usage: CodingUsage | undefined;
+        for (let attempt = 1; ; attempt++) {
+          // A retry re-runs the whole assignment, so it needs proof the failed
+          // try had no effect: no graph tool call attempted, no native tool use
+          // in the harness's own report (which must be available), and a
+          // readable worktree fingerprint identical before and after.
+          const before = policy.maxAttempts > 1 ? await worktreeDigest(ctx.worktreePath) : undefined;
+          const attemptsBefore = toolAttempts;
+          executed += 1;
+          result = await session.run(request);
+          usage = addUsage(usage, result.usage);
+          const transient = result.status === "failed" ? classifyTransient(h.name, result.summary) : undefined;
+          if (transient === undefined) break;
+          const calledGraphTool = toolAttempts > attemptsBefore;
+          const nativeUse = result.nativeTools === undefined ? undefined : result.nativeTools[0]?.name;
+          const blocked =
+            attempt >= policy.maxAttempts
+              ? `retries exhausted after ${attempt} ${attempt === 1 ? "try" : "tries"}`
+              : calledGraphTool
+                ? "not retried: the failed try called a graph tool"
+                : result.nativeTools === undefined
+                  ? "not retried: the harness did not report which native tools the failed try ran"
+                  : nativeUse !== undefined
+                    ? `not retried: the failed try ran a native tool (${nativeUse})`
+                    : before === undefined
+                      ? "not retried: the worktree cannot be fingerprinted (not a readable git worktree), so changes by the failed try cannot be ruled out"
+                      : (await worktreeDigest(ctx.worktreePath)) === undefined
+                        ? "not retried: the worktree could not be fingerprinted after the failed try"
+                        : undefined;
+          const changed = blocked === undefined && before !== undefined && (await worktreeDigest(ctx.worktreePath)) !== before;
+          if (blocked !== undefined || changed) {
+            result = { ...result, summary: `Transient harness failure (${transient.reason}); ${blocked ?? "not retried: the failed try changed the worktree"}: ${result.summary}` };
+            break;
+          }
+          const delayMs = backoffMs(policy, attempt, transient.retryAfterMs);
+          retries.push({ attempt, reason: transient.reason, delayMs, failure: result.summary });
+          if (!(await sleep(delayMs, ctx.signal))) {
+            result = {
+              status: "failed",
+              summary: `agent session aborted while waiting to retry after a transient harness failure (${transient.reason})`,
+              ...(result.sessionRef !== undefined ? { sessionRef: result.sessionRef } : {}),
+            };
+            break;
+          }
+        }
+        result = usage !== undefined ? { ...result, usage } : result;
         const sessionRef = ctx.session !== undefined ? result.sessionRef : undefined;
         return {
           status: result.status === "completed" ? "ok" : "failed",
@@ -179,6 +266,8 @@ export function createCodingAgentExecutor(
                   output: result.output ?? null,
                   toolCalls,
                   modelCalls,
+                  attempts: executed,
+                  retries,
                   usage: result.usage ?? null,
                   sessionRef: sessionRef ?? null,
                   continued: resume !== undefined,

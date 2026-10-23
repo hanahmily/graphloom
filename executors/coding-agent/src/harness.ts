@@ -111,6 +111,11 @@ export interface CodingUsage {
   costUsd?: number;
 }
 
+/** A tool the harness ran on its own (not through graph tools), as seen in its output for one run. Any such tool, read-only or not, blocks a transient retry. */
+export interface NativeToolUse {
+  name: string;
+}
+
 export interface CodingRunResult {
   status: "completed" | "failed";
   summary: string;
@@ -120,6 +125,13 @@ export interface CodingRunResult {
   sessionRef?: string;
   /** Token usage, when the harness can report it. */
   usage?: CodingUsage;
+  /**
+   * Native tools (shell, edit, ...) the harness ran during this run, from its
+   * own output. Absent when the harness cannot tell or its output could not be
+   * parsed; a transient failure is retried only when this is present and
+   * empty (any native tool, read-only or not, blocks a retry).
+   */
+  nativeTools?: NativeToolUse[];
   /** Set when `status: "failed"` because the model could not produce a contract-valid result within the §4.2 retry bound. */
   failureKind?: "contract_violation";
 }

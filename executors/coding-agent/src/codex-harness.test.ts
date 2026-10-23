@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
@@ -238,5 +239,42 @@ describe("Codex harness", () => {
     });
     expect(() => codingAgentBinding({ harness: codexHarnessModule, codex: { codexHome: "rel" } })).toThrow("absolute");
     expect(() => codingAgentBinding({ harness: codexHarnessModule, timeoutMs: 1_000 })).toThrow("codex.responseTimeoutMs");
+  });
+});
+
+describe("transient retry and native tools (Codex)", () => {
+  async function attempt(steps: Step[]) {
+    vi.stubEnv("GRAPHLOOM_CODING_RETRY_MAX_ATTEMPTS", "2");
+    vi.stubEnv("GRAPHLOOM_CODING_RETRY_BASE_DELAY_MS", "1");
+    vi.stubEnv("GRAPHLOOM_CODING_RETRY_MAX_DELAY_MS", "2");
+    const h = await setup();
+    execFileSync("git", ["-C", h.worktree, "init", "-q"]);
+    await h.script([...steps, { event: { type: "turn.failed", error: { message: "Selected model is at capacity." } } }, { exit: 1 }]);
+    const result = await h.executor.execute({ assignment: "work" }, h.ctx());
+    return { result: result as { summary: string }, runs: (await h.invocations()).length };
+  }
+  const exec = (command: string) => ({ event: { type: "item.started", item: { id: "c1", type: "command_execution", command } } });
+
+  it("retries a capacity failure when the failed try ran no tools", async () => {
+    expect((await attempt([])).runs).toBe(2);
+  });
+
+  it("does not retry after any shell command, even a plain read", async () => {
+    const { result, runs } = await attempt([exec('/bin/bash -lc "touch done.txt"')]);
+    expect(runs).toBe(1);
+    expect(result.summary).toContain("not retried: the failed try ran a native tool (command_execution)");
+    expect((await attempt([exec("cat a.txt")])).runs).toBe(1);
+    expect((await attempt([exec("ls\nrm /tmp/example")])).runs).toBe(1);
+  });
+
+  it("does not retry after an apply_patch or web search item either", async () => {
+    expect((await attempt([{ event: { type: "item.started", item: { id: "p1", type: "file_change" } } }])).runs).toBe(1);
+    expect((await attempt([{ event: { type: "item.started", item: { id: "w1", type: "web_search" } } }])).runs).toBe(1);
+  });
+
+  it("does not retry when the event stream is unparseable", async () => {
+    const { result, runs } = await attempt([{ raw: "garbage {" }]);
+    expect(runs).toBe(1);
+    expect(result.summary).toContain("did not report which native tools");
   });
 });
