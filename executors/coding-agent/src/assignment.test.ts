@@ -12,6 +12,9 @@ describe("scope notes", () => {
     expect(scopeNotes({ ...base, writeScope: ["pkg", "!pkg/gen"] })).toEqual([
       "Change only these paths: pkg, except these, which you must not change: pkg/gen.",
     ]);
+    expect(scopeNotes({ ...base, writeScope: [".", "!generated", "+generated/licenses"] })).toEqual([
+      "You may change files anywhere in the worktree, except these, which you must not change: generated. Inside them you may still change: generated/licenses.",
+    ]);
     expect(scopeNotes({ ...base, writeScope: ["notes.md"] })).toEqual(["Change only these paths: notes.md."]);
   });
 });

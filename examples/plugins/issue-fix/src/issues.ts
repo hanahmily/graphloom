@@ -119,10 +119,27 @@ function titleOf(content: string): string {
   return clip(sentence, MAX_TITLE);
 }
 
+/** An issue's description: the finding's first report, and any later comment of the round merged into it. */
+export function descriptionOf(finding: { comment: ReviewComment; original?: ReviewComment; merged?: Array<{ comment: ReviewComment }> }): string {
+  const c = finding.original ?? finding.comment;
+  return clip(
+    [
+      c.content.trim(),
+      ...(c.evidence !== undefined ? [`Failure: ${c.evidence.trim()}`] : []),
+      // The same problem raised again in the round (another pass, or the cross-file check): one issue keeps both texts.
+      ...(finding.merged ?? []).map(
+        (m) =>
+          `Also raised at ${where({ path: m.comment.path, startLine: m.comment.start_line, endLine: m.comment.end_line })}: ${m.comment.content.trim()}${m.comment.evidence !== undefined ? ` Failure: ${m.comment.evidence.trim()}` : ""}`,
+      ),
+    ].join("\n"),
+    MAX_DESCRIPTION,
+  );
+}
+
 /** A new issue for a finding the verifier judged. */
 export function createIssue(
   table: IssueTable,
-  finding: { id: string; comment: ReviewComment; original?: ReviewComment },
+  finding: { id: string; comment: ReviewComment; original?: ReviewComment; merged?: Array<{ comment: ReviewComment }> },
   args: { status: IssueStatus; actor: IssueActor; note: string; raisedIn: number; ctx: EventContext },
 ): Issue {
   const c = finding.original ?? finding.comment;
@@ -131,7 +148,7 @@ export function createIssue(
     severity: severityOf(c),
     location: { path: c.path, startLine: c.start_line, endLine: Math.max(c.end_line, c.start_line) },
     title: titleOf(c.content),
-    description: clip([c.content.trim(), ...(c.evidence !== undefined ? [`Failure: ${c.evidence.trim()}`] : [])].join("\n"), MAX_DESCRIPTION),
+    description: descriptionOf(finding),
     status: args.status,
     round: args.raisedIn,
     history: [],

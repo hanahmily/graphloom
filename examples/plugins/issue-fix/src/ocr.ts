@@ -1,4 +1,5 @@
-import type { DecisionRecord } from "./decision-record.js";
+import { coverageBlock } from "./acceptance.js";
+import type { AcceptanceItem, CoverageEntry, DecisionRecord } from "./decision-record.js";
 import { MAX_DISCOVERY_ROUNDS } from "./constants.js";
 import type { Issue } from "./evidence.js";
 import { ISSUES_DIR } from "./issues.js";
@@ -13,18 +14,27 @@ const MAX_BACKGROUND_CHARS = 2_000;
 const CATEGORIES = ["bug", "security", "performance", "maintainability", "test", "style", "documentation", "other"];
 const SEVERITIES = ["critical", "high", "medium", "low"];
 
+/**
+ * What a pass records in its result's `contract` when it was told to report each
+ * problem once (issue-fix 0.10.0). The ledger merges duplicates only in passes
+ * that carry it: evidence recorded before keeps its finding ids, which verdicts,
+ * reviewer references and the issues file name.
+ */
+export const DEDUPE_CONTRACT = "dedupe-1";
+
 /** The code reviewer's result (code-review-v2), strict enough for Codex's structured output: every property required, none extra. */
 export const CODE_REVIEW_SCHEMA = JSON.stringify({
   type: "object",
   additionalProperties: false,
-  required: ["comments", "prior", "summary"],
+  required: ["comments", "prior", "summary", "contract"],
   properties: {
+    contract: { type: "string", enum: [DEDUPE_CONTRACT] },
     comments: {
       type: "array",
       items: {
         type: "object",
         additionalProperties: false,
-        required: ["path", "start_line", "end_line", "category", "severity", "content", "finding", "evidence"],
+        required: ["path", "start_line", "end_line", "category", "severity", "content", "finding", "evidence", "distinct"],
         properties: {
           path: { type: "string" },
           start_line: { type: "integer" },
@@ -34,6 +44,7 @@ export const CODE_REVIEW_SCHEMA = JSON.stringify({
           content: { type: "string" },
           finding: { type: "string" },
           evidence: { type: "string" },
+          distinct: { type: "boolean" },
         },
       },
     },
@@ -74,6 +85,16 @@ export const CODE_REVIEW_SCHEMA = JSON.stringify({
 export const WHOLE_CHANGE_CHECK =
   "Then, with every file's diff read, check the change as a whole, across files: data passed between modules (a value one module produces with a shape, unit, order, size or guarantee another does not expect; a field written but never read, or read on a path where nothing wrote it); promises one file makes that another breaks (a doc comment, type, name, error contract or invariant stated in one place and violated in another, including code the change left as it was); budget and limit invariants (every bound, cap, size limit, timeout, retry count and budget the change adds or relies on, enforced on every path that can exceed it, resume, retry and replay included); and changed paths that no test in the change covers.";
 
+/**
+ * One review pass reports a problem once. The cross-file check comes after the
+ * per-file review of the same pass, and a sweep pass follows earlier passes of
+ * the round: both see what was already raised and must not raise it again
+ * (run c44b4ae7-5d1 recorded about 8 problems as 14 findings). The graph also
+ * merges, by path and overlapping lines, whatever still comes back twice.
+ */
+export const DEDUPE_RULE =
+  "Report each problem once. The cross-file check adds only problems that none of your per-file comments of this pass and none of the issues listed below (this round's earlier passes included) already describes. When it finds one of those again, either add no comment, or report it with `finding` set to that issue's id (a duplicate of I<n>) and the cross-file evidence. Comments on one file with overlapping lines are merged into one issue by the graph; when two of them are different problems, set `distinct` to true on each. Set the result's `contract` to \"" + DEDUPE_CONTRACT + "\"." ;
+
 /** What the reviewer is told about the change: the issue and the plan, bounded. */
 export function reviewBackground(profile: Profile, issue: Issue, record: DecisionRecord): string {
   const head = [
@@ -99,7 +120,17 @@ export function reviewBackground(profile: Profile, issue: Issue, record: Decisio
  */
 export function codeReviewInstruction(
   profile: Profile,
-  args: { ocr: string; base: string; background: string; known?: KnownFindings; sweep?: boolean; round?: number; issues?: IssuesFileRef },
+  args: {
+    ocr: string;
+    base: string;
+    background: string;
+    known?: KnownFindings;
+    sweep?: boolean;
+    round?: number;
+    issues?: IssuesFileRef;
+    /** What the issue asks for and where the implementer says each item is done; the reviewer verifies it. */
+    acceptance?: { items: AcceptanceItem[]; coverage: CoverageEntry[] };
+  },
 ): string {
   const ocr = shellQuote(args.ocr);
   const open = args.known?.open ?? [];
@@ -154,13 +185,14 @@ export function codeReviewInstruction(
       ? "4. For each file, read its diff (`git diff HEAD -- <path>`; read a new untracked file whole) and check the known findings below against it, reading any other code you need. Check every file off as reviewed, or as skipped with a concrete reason."
       : "4. For each file, read its diff (`git diff HEAD -- <path>`; read a new untracked file whole) and review it against its rule group and the extra rule below, reading any other code you need. Check every file off as reviewed, or as skipped with a concrete reason. Do not stop at the first serious finding.",
     // Cross-module defects are what a file-by-file review missed (#134, #143); a verification round raises nothing new.
-    ...(verifying ? [] : [WHOLE_CHANGE_CHECK]),
+    ...(verifying ? [] : [WHOLE_CHANGE_CHECK, DEDUPE_RULE]),
     verifying
       ? "5. Give every open finding its status in `prior`; a fixed finding whose defect is back is a comment naming it in `finding`, with the path, the line range in the new file, a severity and in `evidence` the concrete failure, with file:line. Check that every file on your list is accounted for."
       : "5. Report each finding once, with the path, the line range in the new file, a category, a severity, and in `evidence` the concrete failure: the input or sequence of calls and what goes wrong, with file:line. An independent verifier checks every critical and high finding against the code. Drop likely false positives. Check that every file on your list is accounted for.",
     // The extra rule asks for new findings; a verification round raises none.
     ...(verifying ? [] : ["", `Extra rule for ${profile.review.language} files:`, ...profile.review.rules.map((r) => `- ${r}`)]),
     ...known,
+    ...(args.acceptance !== undefined ? coverageBlock(args.acceptance.items, args.acceptance.coverage) : []),
     "",
     "What the change is for:",
     args.background,
@@ -202,6 +234,8 @@ export interface ReviewComment {
   finding?: string;
   /** The concrete failure the reviewer describes. */
   evidence?: string;
+  /** The reviewer says this is a different problem from an overlapping comment on the same file: do not merge them. */
+  distinct?: boolean;
 }
 
 export interface PriorFinding {
@@ -215,6 +249,8 @@ export interface CodeReviewReport {
   prior: PriorFinding[];
   totalFiles: number;
   reviewedFiles: number;
+  /** The pass was told to report each problem once and says so: the ledger may merge its duplicates. */
+  dedupe: boolean;
   skipped: Array<{ path: string; reason: string }>;
 }
 
@@ -247,6 +283,7 @@ export function parseCodeReview(output: unknown): { report: CodeReviewReport } |
       content: c.content,
       ...(typeof c.finding === "string" && c.finding.trim() !== "" ? { finding: c.finding.trim() } : {}),
       ...(typeof c.evidence === "string" && c.evidence.trim() !== "" ? { evidence: c.evidence } : {}),
+      ...(c.distinct === true ? { distinct: true } : {}),
     });
   }
   const prior: PriorFinding[] = (Array.isArray(result.prior) ? result.prior : []).flatMap((raw) => {
@@ -259,7 +296,7 @@ export function parseCodeReview(output: unknown): { report: CodeReviewReport } |
     return { path: String(s?.path ?? ""), reason: String(s?.reason ?? "") };
   });
   const rank = (c: ReviewComment) => { const i = SEVERITIES.indexOf(c.severity ?? ""); return i < 0 ? 1.5 : i; };
-  return { report: { comments: comments.sort((a, b) => rank(a) - rank(b)), prior, totalFiles, reviewedFiles, skipped } };
+  return { report: { comments: comments.sort((a, b) => rank(a) - rank(b)), prior, totalFiles, reviewedFiles, skipped, dedupe: result.contract === DEDUPE_CONTRACT } };
 }
 
 /** Every file on the reviewer's list was reviewed, and none skipped. */

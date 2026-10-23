@@ -148,5 +148,5 @@ export const ENVIRONMENT: EnvironmentDeclaration = {
     },
   ],
   prepare: [{ id: "generate", argv: ["make", "generate"], timeoutMs: 30 * MINUTE }],
-  pinnedFiles: [{ path: "CONTRIBUTING.md", sha256: "c2a935cb901b9d6d5d73eafb9465f22005efb49e625dd01997427d7ce7e7ee2d" }],
+  pinnedFiles: [{ path: "CONTRIBUTING.md", sha256: "e62fb86881f70d710f9571c2063b9fd89ebaad4f8e35a0c6e3185900cad21172" }],
 };

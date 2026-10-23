@@ -1,5 +1,5 @@
 import { writeScopeAllows } from "@graphloom/sdk";
-import { isTestPath, type Profile } from "./profile.js";
+import { enforcedProtectedPaths, isTestPath, regeneratedExceptions, type Profile } from "./profile.js";
 
 export type Tier = "implementation" | "behaviour" | "product";
 
@@ -51,6 +51,33 @@ export interface DecisionRecord {
   revertPatch?: string;
   /** What the implementer ran itself before returning ready, as "command: result" lines; the graph does not trust it. */
   selfChecks?: string[];
+  /**
+   * The planner's list of what the issue asks for: one item per acceptance
+   * criterion checkbox and per oracle line (a planner may group lines one
+   * change covers together). Absent in records from before issue-fix 0.10.0,
+   * which get no coverage check.
+   */
+  acceptance?: AcceptanceItem[];
+  /** The implementer's map from each acceptance item to the code and tests that satisfy it. */
+  coverage?: CoverageEntry[];
+}
+
+export interface AcceptanceItem {
+  id: string;
+  text: string;
+}
+
+/** A test that covers an item: the test file, and the test's own title as written in that file (an `it("...")` string, a Go `TestXxx` name). */
+export interface CoveredTest {
+  file: string;
+  name: string;
+}
+
+export interface CoverageEntry {
+  id: string;
+  /** The production files that implement the item, relative to the repository root. */
+  files: string[];
+  tests: CoveredTest[];
 }
 
 const strings = { type: "array", items: { type: "string" } };
@@ -98,6 +125,22 @@ export const DECISION_RECORD_SCHEMA = JSON.stringify({
     draftComment: { type: "string" },
     revertPatch: { type: "string" },
     selfChecks: strings,
+    acceptance: {
+      type: "array",
+      items: { type: "object", properties: { id: { type: "string" }, text: { type: "string" } }, required: ["id", "text"] },
+    },
+    coverage: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          id: { type: "string" },
+          files: strings,
+          tests: { type: "array", items: { type: "object", properties: { file: { type: "string" }, name: { type: "string" } }, required: ["file", "name"] } },
+        },
+        required: ["id", "files", "tests"],
+      },
+    },
   },
   required: ["status", "summary", "change", "decisions", "openQuestions"],
 });
@@ -168,7 +211,7 @@ export function decisionProblems(record: DecisionRecord, profile: Profile): stri
 /** The implementer's write scope: the repository except protected paths the record does not justify. */
 export function writeScopeFor(record: DecisionRecord | undefined, profile: Profile): string[] {
   const allowed = new Set((record?.scopeExceptions ?? []).filter((e) => typeof e.reason === "string" && e.reason.trim() !== "").map((e) => e.path));
-  return [".", ...profile.protectedPaths.filter((p) => !allowed.has(p)).map((p) => `!${p}`)];
+  return [".", ...enforcedProtectedPaths(profile).filter((p) => !allowed.has(p)).map((p) => `!${p}`), ...regeneratedExceptions(profile)];
 }
 
 export function outOfScope(paths: string[], record: DecisionRecord | undefined, profile: Profile): string[] {

@@ -20,6 +20,12 @@ Version 0.9.0 adds the [`canopy` profile](../examples/plugins/issue-fix/README.m
 for Node/TypeScript changes under `canopy/` in skywalking-banyandb, and makes the
 `vitest` runner force `NODE_ENV=test` and work with vitest 5
 ([#179](https://github.com/hanahmily/graphloom/issues/179)).
+Version 0.10.0 lets a profile command declare `writes`, the files it regenerates,
+which the implementer may then write even under a protected path
+([#181](https://github.com/hanahmily/graphloom/issues/181)); records one review
+finding per problem across passes ([#182](https://github.com/hanahmily/graphloom/issues/182));
+and checks, before code review, that the implementer's `coverage` covers each of the
+planner's `acceptance` items ([#183](https://github.com/hanahmily/graphloom/issues/183)).
 
 ## Purpose
 
@@ -56,9 +62,9 @@ The profile supplies, as data:
 | `issues` | Where issues live; the request names `owner/repo#N` | `apache/skywalking` | `hanahmily/graphloom` |
 | `environment` | The SDK `EnvironmentDeclaration`: checks, preparation, pinned files. Must include an `ocr` check that prints open-code-review's path | BanyanDB's checklist, `make generate`, `CONTRIBUTING.md` pinned | Node.js 22+, npm, flock, git, ocr, codex, claude; `npm ci --include=dev`, `npm run build`; nothing pinned |
 | `regression` | `runner` (a built-in, below) and `timeoutMs` | `go-test`, 30 min | `vitest`, 20 min |
-| `commands` | GREEN's further checks and the build checks, run in order in the committed candidate checkout. Each has `id`, `argv`, `timeoutMs`, `requirement` (`passes` or `builds`), and optional `tier` (`cheap` or `full`, default `full`; once any command is `cheap`, GREEN and the cheap commands run first in one checkout job and the full commands run in a second job only after those passed on the same candidate digest, and Fix needs both) and optional `label`, `statement` and `summary` wording | `test-ci` (passes); `build`, `lint`, `check` (builds; `make check` already runs license-check); `test-ci` and `lint` are cheap | `npm run typecheck`, `npm run build`, `npm test` (builds; the full suite takes about ten minutes, so 45 min) |
+| `commands` | GREEN's further checks and the build checks, run in order in the committed candidate checkout. Each has `id`, `argv`, `timeoutMs`, `requirement` (`passes` or `builds`), and optional `tier` (`cheap` or `full`, default `full`; once any command is `cheap`, GREEN and the cheap commands run first in one checkout job and the full commands run in a second job only after those passed on the same candidate digest, and Fix needs both) and optional `label`, `statement` and `summary` wording, and optional `writes` (repository-relative files or directories, a trailing `/**` allowed, that the command regenerates and a failure tells the author to commit, such as license artifacts: the implementer's write scope covers them even under a protected path) | `test-ci` (passes); `build`, `lint`, `check` (builds; `make check` already runs license-check); `test-ci` and `lint` are cheap | `npm run typecheck`, `npm run build`, `npm test` (builds; the full suite takes about ten minutes, so 45 min) |
 | `testPaths` | `suffixes`, and `directories` whose contents count as test files; RED applies only these | `_test.go`, `testdata/` | `.test.ts`, `test/`, `fixtures/` |
-| `protectedPaths` | Excluded from the write scope unless the record justifies one | `api/proto`, `go.mod`, `go.sum`, `.github` | `package-lock.json`, `.github`, `legacy` |
+| `protectedPaths` | Excluded from the write scope unless the record justifies one, or a command's `writes` declares it regenerated (since 0.10.0) | `api/proto`, `go.mod`, `go.sum`, `.github` | `package-lock.json`, `.github`, `legacy` |
 | `changelog` | Optional `{ path, rule }`; absent means no `changelog-entry` requirement. The one rule, `first-release-section-entry`, needs a new list entry inside the first `## ` section | `CHANGES.md` | none: the repository keeps no changelog |
 | `planning` | `reach` (the reach question for the plan), optional `e2e` (what `needsE2E` means) and optional `notes` (guidance the planner and implementer both get) | Go lifecycle wording, Kind tests, no notes | TypeScript lifecycle wording, live-provider tests, [enhancement issues](#enhancement-issues) |
 | `implementation` | `conventions`, optional `selfCheck` (cheap commands the implementer runs and reports in `selfChecks` before returning ready; the graph still runs its own checks), optional `checks` (what the implementer is told is checked; generated from the commands when absent) and `cleanCheckHint` | `run.Go`, `make format` | AGENTS.md rules; generated checks text |
@@ -218,6 +224,51 @@ rounds still cover every file and raise nothing new, and the profile's extra
 rule is kept. The stages, requirements and statements, validator bindings,
 result contracts and private-state schema are unchanged, so a running run can
 adopt this with `resume --update-plugin`.
+
+### One entry per problem
+
+Since 0.10.0 a problem the code reviewer raises twice is one finding. Run
+c44b4ae7-5d1 recorded about 8 problems as 14 entries: the whole-change check and
+the sweep pass raised again, in other words, what the first pass had, and the
+twins were verified, fixed and re-verified separately. Now:
+
+- The reviewer is told to report each problem once: the cross-file check adds
+  only problems that no per-file comment of the pass and no issue listed (the
+  round's earlier passes included) describes, or reports one again with
+  `finding` set to that issue's id, a duplicate of I<n>.
+- The ledger merges deterministically. A new critical or high comment on the
+  same path with an overlapping line range as a finding of the same round (not
+  already fixed) joins that finding, and its text is kept in the finding's
+  `merged` list, in the issue's description and in the verifier's assignment.
+  The default is to merge; a comment the reviewer marks `distinct` (a field of
+  the result, since 0.10.0) is a different problem and stays its own finding.
+  Comments in later rounds are not merged: they name the finding or are new.
+- One finding is one verdict, one issue and one row in `issues.json` and the
+  pull request's table. A pair that sits in different files (run
+  c44b4ae7-5d1's I4/I10, a source file and its test, and I6/I12) is not merged by
+  location; the reviewer names the earlier issue instead.
+
+## Acceptance coverage
+
+Since 0.10.0 the planner's decision record may carry `acceptance`, `[{id,
+text}]`, one item per acceptance-criteria checkbox and oracle line of the issue
+(a planner may group); the implementer's record carries `coverage`, `[{id,
+files, tests: [{file, name}]}]`, where `name` is the test's own title as written
+in its file. Both are additive to `decision-record-v2`: a record without them
+(from before 0.10.0, or for an issue that states no criteria) is judged as
+before.
+
+When every Fix requirement passes and the plan lists acceptance items, the
+graph checks, without a model, before it accepts Fix and so before code review:
+each item has a coverage entry naming a file or a test; every named file exists
+in the candidate (observed from the worktree; a file the controller cannot
+observe must be among the change's paths); every named test file exists and
+contains the test's title. A gap sends the implementer a correction naming the
+items, counted as a normal correction (`MAX_FIX_CORRECTIONS`, then the
+supervisor), and code review does not run. The code reviewer then receives the
+acceptance list and the coverage map, so it verifies what the items demand
+rather than rediscovering them (run c44b4ae7-5d1: about 9 of round 1's 14
+findings were requirements the implementer had skipped).
 
 ## The issues file
 

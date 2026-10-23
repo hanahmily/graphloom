@@ -1,4 +1,5 @@
 export * from "./constants.js";
+export { acceptanceItems, coverageEntries, coverageProblems, MAX_COVERAGE_FILES } from "./acceptance.js";
 export { advanceFix, createGraph, definitionFor, GRAPH_ID, GRAPH_VERSION, requestedIssue, type FixPrivateState } from "./graph.js";
 export {
   commandLabel,
@@ -6,6 +7,9 @@ export {
   commandsInTier,
   commandStatement,
   commandSummary,
+  enforcedProtectedPaths,
+  regeneratedPaths,
+  regeneratedExceptions,
   harnessName,
   isTestPath,
   isTiered,
@@ -97,6 +101,7 @@ export {
   reviewBackground,
   reviewComplete,
   WHOLE_CHANGE_CHECK,
+  DEDUPE_RULE,
   type CodeReviewReport,
   type ReviewComment,
 } from "./ocr.js";

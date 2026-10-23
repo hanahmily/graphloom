@@ -13,6 +13,8 @@ import {
   candidateCommands,
   codeReviewInstruction,
   WHOLE_CHANGE_CHECK,
+  DEDUPE_RULE,
+  DECISION_RECORD_SCHEMA,
   commitMessage,
   createGraph,
   decisionProblems,
@@ -40,6 +42,8 @@ import {
   writeScopeFor,
   type DecisionRecord,
 } from "../src/index.js";
+import { outOfScope } from "../src/decision-record.js";
+import { regeneratedPaths } from "../src/profile.js";
 import { rehearsal } from "../src/rehearsal.js";
 
 const execFileAsync = promisify(execFile);
@@ -76,6 +80,7 @@ const TS_PLAN: DecisionRecord = {
 };
 const ISSUE = { number: 14111, title: "Scheduler reports long actions as timed out", state: "open", url: "u", labels: ["bug"], body: "Backups longer than five minutes are reported as timed out." };
 
+const RECORD_PROPERTIES = (JSON.parse(DECISION_RECORD_SCHEMA) as { properties: Record<string, unknown> }).properties;
 const banyandbFixDist = path.join(repoRoot, "examples/plugins/banyandb-fix/dist");
 const load = async (module: string) => (await import(pathToFileURL(path.join(banyandbFixDist, module)).href)) as Record<string, (...args: never[]) => unknown>;
 
@@ -96,7 +101,14 @@ describe.skipIf(!existsSync(path.join(banyandbFixDist, "index.js")))("the banyan
           .replaceAll("decision-record-v2", "decision-record-v1")
           .replace('"change":{"type":"string"},', "")
           .replace('"summary","change",', '"summary",')
-          .replace(',"selfChecks":{"type":"array","items":{"type":"string"}}', ""),
+          // #183: the planner's `acceptance` and the implementer's `coverage`, additive to decision-record-v2.
+          .replace(`,"acceptance":${JSON.stringify(RECORD_PROPERTIES.acceptance)},"coverage":${JSON.stringify(RECORD_PROPERTIES.coverage)}`, "")
+          .replace(',"selfChecks":{"type":"array","items":{"type":"string"}}', "")
+          // #182: a code review comment may be marked `distinct`, which banyandb-fix never had.
+          .replace(',"distinct":{"type":"boolean"}', "")
+          .replace('"contract":{"type":"string","enum":["dedupe-1"]},', "")
+          .replace('"summary","contract"]', '"summary"]')
+          .replace('"finding","evidence","distinct"]', '"finding","evidence"]'),
       ) as Omit<GraphDefinition, "graphId" | "version" | "privateStateSchema" | "defaultBudgets">;
     // And #174: banyandb-fix runs one `make generate`; the profile runs it per project so each output is cached on its own inputs.
     const monolithic = (definition: ReturnType<typeof v1>) => ({
@@ -105,7 +117,7 @@ describe.skipIf(!existsSync(path.join(banyandbFixDist, "index.js")))("the banyan
     });
     expect(monolithic(v1(strip(ours)))).toEqual(strip(withoutLicense(theirs)));
     expect(theirs.environment?.prepare?.map((c) => c.argv.join(" "))).toEqual(["make generate"]);
-    expect(ours).toMatchObject({ graphId: "issue-fix", version: "0.9.0", privateStateSchema: "issue-fix-private-v1" });
+    expect(ours).toMatchObject({ graphId: "issue-fix", version: "0.10.0", privateStateSchema: "issue-fix-private-v1" });
   });
 
   it("splits make generate into separately cached steps with narrow inputs (#174)", () => {
@@ -136,7 +148,7 @@ describe.skipIf(!existsSync(path.join(banyandbFixDist, "index.js")))("the banyan
     const v1 = (text: string) =>
       text
         .split("\n")
-        .filter((l) => !l.startsWith("- change: ") && !l.startsWith("- summary is your report") && !l.startsWith("- Before you return status ready"))
+        .filter((l) => !l.startsWith("- change: ") && !l.startsWith("- summary is your report") && !l.startsWith("- Before you return status ready") && !l.startsWith("- acceptance: "))
         .map((l) => (l === `- ${banyandb.implementation.checks}` ? `- ${theirChecks}` : l))
         .join("\n")
         .replaceAll("decision-record-v2", "decision-record-v1");
@@ -157,13 +169,13 @@ describe.skipIf(!existsSync(path.join(banyandbFixDist, "index.js")))("the banyan
     expect(background).toBe(call(ocr.reviewBackground, ISSUE, GO_PLAN));
     const review = { ocr: "/opt/ocr", base: "abc", background, known: { open: [{ id: "F1", state: "confirmed", description: "x" }], settled: [] }, sweep: true };
     // The one deliberate difference (#148): issue-fix reviews every changed file, not only the files
-    // preview keeps plus the test files, and then checks the change as a whole.
+    // preview keeps plus the test files, and then checks the change as a whole (#148); and (#182) is told to report each problem once.
     const theirs = call<string>(ocr.codeReviewInstruction, review).split("\n");
     const ours = codeReviewInstruction(banyandb, review).split("\n");
     const step2 = (lines: string[]) => lines.findIndex((l) => l.startsWith("2. "));
     expect(theirs[step2(theirs)]).toBe("2. The change's Go test files (`_test.go`) are reviewable too, even when preview excludes them as tests: add them to your list. Leave out other excluded files.");
     expect(ours[step2(ours)]).toContain("2. Your list is every changed file. Add back every file preview excluded");
-    expect(ours.filter((l, i) => i !== step2(ours) && l !== WHOLE_CHANGE_CHECK)).toEqual(theirs.filter((_, i) => i !== step2(theirs)));
+    expect(ours.filter((l, i) => i !== step2(ours) && l !== WHOLE_CHANGE_CHECK && l !== DEDUPE_RULE)).toEqual(theirs.filter((_, i) => i !== step2(theirs)));
     expect(verificationInstruction(banyandb, { findings: [], background, changed: ["a.go"] })).toBe(call(findings.verificationInstruction, { findings: [], background, changed: ["a.go"] }));
     const record = { ...GO_PLAN, scopeExceptions: [{ path: "go.mod", reason: "a new dependency" }, { path: "Makefile", reason: "x" }] };
     expect(decisionProblems(record, banyandb)).toEqual(call(decisions.decisionProblems, record));
@@ -658,4 +670,78 @@ describe("the canopy profile", () => {
     expect(none.code).toBe(1);
     expect(none.out).toContain("the change touches no canopy workspace");
   }, 120_000);
+});
+
+describe("generated artifacts a check regenerates (issue 181)", () => {
+  const anyProfile = [
+    ["banyandb", banyandb],
+    ["canopy", canopy],
+    ["graphloom", graphloom],
+  ] as const;
+  const sample = (w: string) => (w.endsWith("/**") ? `${w.slice(0, -3)}/deep/sample.txt` : w);
+
+  it.each(anyProfile)("%s: every path a check declares it writes lies inside the implementer's write scope", (_name, profile) => {
+    const declared = profile.commands.flatMap((c) => c.writes ?? []);
+    for (const w of declared) {
+      expect(outOfScope([sample(w)], GO_PLAN, profile), w).toEqual([]);
+      expect(outOfScope([sample(w)], undefined, profile), w).toEqual([]);
+    }
+    expect(regeneratedPaths(profile).length).toBe(new Set(declared.map((w) => w.replace(/\/\*\*$/, ""))).size);
+  });
+
+  it("declares the license artifacts that make license-dep regenerates", () => {
+    expect(regeneratedPaths(canopy)).toEqual(["canopy/LICENSE", "canopy/licenses"]);
+    // banyandb protects none of its license artifacts, so it declares nothing: its scope already allows them.
+    expect(regeneratedPaths(banyandb)).toEqual([]);
+    expect(canopy.commands.find((c) => c.id === "license-dep")!.writes).toEqual(["canopy/LICENSE", "canopy/licenses/**"]);
+  });
+
+  it("replays run c44b4ae7-5d1: adding a dependency and regenerating the license files is not refused for scope", () => {
+    const record = { ...GO_PLAN, scopeExceptions: [{ path: "canopy/package-lock.json", reason: "API tokens need a new dependency" }] };
+    const changed = ["canopy/server/src/auth.ts", "canopy/package-lock.json", "canopy/LICENSE", "canopy/licenses/argon2-LICENSE.txt"];
+    expect(outOfScope(changed, record, canopy)).toEqual([]);
+    // The lock file is still protected without its exception, and so is everything else protected.
+    expect(outOfScope(changed, undefined, canopy)).toEqual(["canopy/package-lock.json"]);
+    expect(outOfScope([".github/workflows/ci.yml", "go.mod"], record, canopy)).toEqual([".github/workflows/ci.yml", "go.mod"]);
+    expect(writeScopeFor(undefined, canopy)).not.toContain("!canopy/LICENSE");
+    expect(writeScopeFor(undefined, canopy)).not.toContain("!canopy/licenses");
+  });
+
+  it("without a declaration a protected path stays out of scope, and a malformed writes list is refused", () => {
+    const raw = CANOPY as { commands: Array<{ id: string; writes?: string[] }> };
+    const bare = parseProfile({ ...raw, commands: raw.commands.map(({ writes: _w, ...c }) => c) });
+    expect(outOfScope(["canopy/LICENSE"], undefined, bare)).toEqual(["canopy/LICENSE"]);
+    for (const writes of [[], ["../x"], ["/abs"], [""], ["a//b"]]) {
+      const commands = raw.commands.map((c) => (c.id === "license-dep" ? { ...c, writes } : c));
+      expect(() => parseProfile({ ...raw, commands }), JSON.stringify(writes)).toThrow(ProfileError);
+    }
+  });
+
+  it("lets a declared child of a protected directory be written while the rest of the directory stays out of scope", () => {
+    const raw = CANOPY as { commands: Array<{ id: string; writes?: string[] }>; protectedPaths: string[] };
+    const nested = parseProfile({
+      ...raw,
+      protectedPaths: ["generated"],
+      commands: raw.commands.map((c) => (c.id === "license-dep" ? { ...c, writes: ["generated/licenses/**"] } : c)),
+    });
+    expect(outOfScope(["generated/licenses/foo.txt", "generated/licenses/deep/bar.txt"], undefined, nested)).toEqual([]);
+    expect(outOfScope(["generated/other.txt", "generated/licenses.txt"], undefined, nested)).toEqual(["generated/other.txt", "generated/licenses.txt"]);
+    expect(writeScopeFor(undefined, nested)).toEqual([".", "!generated", "+generated/licenses"]);
+  });
+
+  it("tells the implementer which generated paths it may write, and how", () => {
+    const text = implementInstruction(canopy, { issue: 7, plan: TS_PLAN });
+    expect(text).toContain("Do not change canopy/package-lock.json, canopy/e2e/tests/query.spec.ts-snapshots, .github, api/proto, go.mod, go.sum.");
+    expect(text).not.toContain("Do not change canopy/LICENSE");
+    expect(text).toContain("Do not edit generated files by hand, except what a check regenerates, which you may write by running it:");
+    expect(text).toContain("canopy/LICENSE, canopy/licenses/** (regenerate with make license-dep (with check-license-outputs))");
+    // A profile that regenerates nothing keeps the blanket prohibition.
+    expect(implementInstruction(banyandb, { issue: 7, plan: GO_PLAN })).toContain("Do not commit, push, create branches or edit generated files.");
+    // A declared child of a protected directory: the exclusion names the exception.
+    const raw = CANOPY as { commands: Array<{ id: string; writes?: string[] }> };
+    const nested = parseProfile({ ...raw, protectedPaths: ["generated"], commands: raw.commands.map((c) => (c.id === "license-dep" ? { ...c, writes: ["generated/licenses/**"] } : c)) });
+    const child = implementInstruction(nested, { issue: 7, plan: TS_PLAN });
+    expect(child).toContain("Do not change generated, except generated/licenses, which a check regenerates.");
+    expect(child).toContain("generated/licenses/** (regenerate with make license-dep (with check-license-outputs))");
+  });
 });

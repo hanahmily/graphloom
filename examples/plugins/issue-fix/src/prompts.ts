@@ -1,9 +1,10 @@
-import type { EnvironmentCommand } from "@graphloom/sdk";
+import { writeScopeExceptions, writeScopeExcludes, type EnvironmentCommand } from "@graphloom/sdk";
 import { COMMAND } from "./constants.js";
 import type { DecisionRecord } from "./decision-record.js";
+import { acceptanceItems } from "./acceptance.js";
 import { writeScopeFor } from "./decision-record.js";
 import type { Issue, IssueComment } from "./evidence.js";
-import { commandLabel, commandsFor, commandSummary, commandTier, issueRef, listAnd, type CommandTier, type Profile, type ProfileCommand } from "./profile.js";
+import { commandLabel, commandsFor, commandSummary, commandTier, enforcedProtectedPaths, issueRef, listAnd, type CommandTier, type Profile, type ProfileCommand } from "./profile.js";
 import { ISSUES_DIR, ISSUES_FILE, ISSUES_MARKDOWN } from "./issues.js";
 
 export const MAX_SNAPSHOT_CHARS = 200_000;
@@ -41,6 +42,10 @@ export function snapshotText(profile: Profile, issue: Issue, comments: IssueComm
   return { text };
 }
 
+/** The planner's acceptance list (decision-record-v2, since issue-fix 0.10.0); the implementer's coverage answers it. */
+const ACCEPTANCE_FIELD =
+  "- acceptance: what the issue asks for, as [{id, text}]: one item for each checkbox of its acceptance criteria and each line of its oracle, in the issue's own words (ids A1, A2, …). You may group lines that one change covers together; say so in the text. Leave it empty only when the issue states no criteria. The implementer must cover every item before it returns ready, and a controller check sends the change back when one is not covered.";
+
 export function planInstruction(profile: Profile, args: { issue: number; request: string; snapshot: string }): string {
   const e2e = profile.planning.e2e !== undefined ? `needsE2E when the behaviour needs ${profile.planning.e2e}, ` : "";
   return [
@@ -67,8 +72,18 @@ export function planInstruction(profile: Profile, args: { issue: number; request
     "- decisions: each unclear point with tier, options, chosen (empty for product points) and basis.",
     `- ${profile.planning.reach}`,
     `- openQuestions for maintainers, followUps, ${e2e}and title for the pull request.`,
-    ...(profile.protectedPaths.length > 0 ? [`- scopeExceptions: only when the fix must change ${profile.protectedPaths.join(", ")}, with the reason.`] : []),
+    ACCEPTANCE_FIELD,
+    ...(enforcedProtectedPaths(profile).length > 0 ? [`- scopeExceptions: only when the fix must change ${enforcedProtectedPaths(profile).join(", ")}, with the reason.`] : []),
   ].join("\n");
+}
+
+/**
+ * The generated files a check regenerates, which the implementer may write: by
+ * running the command, not by hand. Empty when no command declares `writes`.
+ */
+function regeneratedNote(profile: Profile): string {
+  const lines = profile.commands.filter((c) => (c.writes ?? []).length > 0).map((c) => `${c.writes!.join(", ")} (regenerate with ${commandLabel(c)})`);
+  return lines.length > 0 ? `, except what a check regenerates, which you may write by running it: ${lines.join("; ")}` : "";
 }
 
 /** The profile's planning notes, as a block of the prompt; nothing when it has none. */
@@ -115,6 +130,18 @@ function selfCheckNote(profile: Profile, plan: DecisionRecord): string[] {
   ]
 }
 
+/**
+ * What the implementer owes for the plan's acceptance list: finish every item
+ * and map it to code and tests. Nothing for a plan without a list.
+ */
+function coverageNote(plan: DecisionRecord): string[] {
+  const items = acceptanceItems(plan);
+  if (items.length === 0) return [];
+  return [
+    `- The record's acceptance lists ${items.length} item(s): ${items.map((i) => i.id).join(", ")}. Finish every one before you return status ready; a change that skips an item is sent back before code review. In the record's coverage give one entry per item, {id, files, tests}: files are the production files that implement it, and tests are {file, name} for each test that covers it, name being the test's own title as written in that file (the string passed to it() or test(), or the Go TestXxx name). Name only files that exist in your change and titles that appear in their file: the controller checks each.`,
+  ];
+}
+
 /** How the implementer marks a review issue fixed; only given once the run has issues. */
 export function issuesProtocol(): string {
   return (
@@ -126,7 +153,10 @@ export function issuesProtocol(): string {
 
 export function implementInstruction(profile: Profile, args: { issue: number; plan: DecisionRecord; feedback?: string[]; issues?: boolean }): string {
   const { plan } = args;
-  const excluded = writeScopeFor(plan, profile).filter((p) => p.startsWith("!")).map((p) => p.slice(1));
+  const scope = writeScopeFor(plan, profile);
+  const excluded = writeScopeExcludes(scope);
+  const exceptions = writeScopeExceptions(scope);
+  const regenerated = regeneratedNote(profile);
   return [
     ...(args.feedback !== undefined && args.feedback.length > 0
       ? ["Your last change did not pass. Fix these and keep everything that already passes:", ...args.feedback.map((f) => `- ${f}`), ""]
@@ -137,9 +167,10 @@ export function implementInstruction(profile: Profile, args: { issue: number; pl
     `- Write the regression test ${plan.test?.name ?? "(name it)"} in ${plan.test?.package ?? "(the affected package)"} first. Its expected value must come from ${plan.test?.expectedValueSource ?? "the issue"}, not from the new code's output.`,
     `- Change the production caller (${plan.productionCaller ?? "name it"}) so the test passes. ${profile.implementation.conventions}`,
     ...(profile.changelog !== undefined ? [`- Add an entry for the fix under the current release (the first "## " section) of ${profile.changelog.path}, in the matching subsection.`] : []),
-    `- ${excluded.length > 0 ? `Do not change ${excluded.join(", ")}. ` : ""}Do not commit, push, create branches or edit generated files.`,
+    `- ${excluded.length > 0 ? `Do not change ${excluded.join(", ")}${exceptions.length > 0 ? `, except ${exceptions.join(", ")}, which a check regenerates` : ""}. ` : ""}${regenerated === "" ? "Do not commit, push, create branches or edit generated files." : `Do not commit, push or create branches. Do not edit generated files by hand${regenerated}.`}`,
     checksNote(profile),
     ...selfCheckNote(profile, plan),
+    ...coverageNote(plan),
     ...(args.issues === true ? [issuesProtocol()] : []),
     ...notes(profile),
     "",
