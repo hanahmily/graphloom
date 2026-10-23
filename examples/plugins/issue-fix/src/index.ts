@@ -125,6 +125,8 @@ export {
   changelogEntry,
   codeReview,
   decisionsRecorded,
+  implementerRecord,
+  latestImplementerRecord,
   inScope,
   passes,
   reproduces,

@@ -2685,7 +2685,9 @@ function applyDispatchResult(
       summary: result.summary,
       retryAfterMs: result.retryAfterMs,
     });
-    next = recordContractStreak(next, job, result.evidence);
+    // A run that failed outright (a quota stop, a crash) produced no result to
+    // judge: its null output is the executor's failure, handled below, not a
+    // contract-invalid answer, so it neither extends nor clears the streak.
     const { pendingDispatch, ...unsettled } = next;
     const retried = scheduleExecutorRetry(unsettled, job, result, operationId, {
       graphCorrectionTrial: args.graphCorrectionTrial,
@@ -2788,10 +2790,13 @@ const CONTRACT_VIOLATION_STREAK_LIMIT = 2;
 
 function contractViolationStreakMessage(state: DurableRunState, job: JobSpec): string | undefined {
   const key = `${job.stageId}:${job.purpose}`;
+  // Only a job held to a contract can be the one that just broke it; a command
+  // or free-form job settling in the same stage and purpose proves nothing.
+  if (job.resultSchema === undefined) return undefined;
   const streak = state.contractViolationStreak?.[key];
   if (streak === undefined || streak < CONTRACT_VIOLATION_STREAK_LIMIT) return undefined;
   return boundText(
-    `stage ${job.stageId}: ${streak} consecutive contract-invalid results for purpose ${job.purpose} (contract ${job.resultSchema ?? "unknown"})`,
+    `stage ${job.stageId}: ${streak} consecutive contract-invalid results for purpose ${job.purpose} (contract ${job.resultSchema})`,
   );
 }
 
