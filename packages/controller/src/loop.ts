@@ -356,6 +356,23 @@ async function runNormalLoopSteps(
       if (state.mode === "normal") environmentReadyFor = state.activeVersion;
       continue;
     }
+    if (state.status === "running" && state.quotaHold !== undefined) {
+      // A recovery episode held for a harness quota reset: wait it out (stop interrupts), then open it.
+      lastAction = "quota hold";
+      const abort = new AbortController();
+      const stopWatch = watchForStop(state.stateDir, deps, abort);
+      try {
+        await sleepUntil(state.quotaHold.until, abort.signal);
+      } finally {
+        stopWatch();
+      }
+      if (!abort.signal.aborted) {
+        const { quotaHold: _held, ...released } = state;
+        void _held;
+        state = { ...released, stateRevision: state.stateRevision + 1 };
+        await saveRunState(state);
+      }
+    }
     const turn = await withRunLock(state.stateDir, async () => {
       // Reload before renewing: Stop may have cleared the owner claim and
       // persisted stopped while a runner job held no lock.
@@ -1884,7 +1901,7 @@ function queueRetry(
   state: DurableRunState,
   job: JobSpec,
   operationId: string,
-  q: { key: string; attempt: number; limit: number; executorId: string; retryAt: string; flags: Omit<RetryFlags, "attempt" | "limit"> },
+  q: { key: string; attempt: number; limit: number; executorId: string; retryAt?: string; flags: Omit<RetryFlags, "attempt" | "limit"> },
 ): DurableRunState {
   // A continued agent job that failed with a session of its own became that
   // session's successor; continuing the same predecessor again would fork the
@@ -1896,7 +1913,7 @@ function queueRetry(
     ...state,
     executorRetryCounts: { ...state.executorRetryCounts, [q.key]: q.attempt },
     executorRetry: { job: retryJob, attempt: q.attempt, limit: q.limit, ...q.flags },
-    executorRetryAt: { ...state.executorRetryAt, [q.executorId]: q.retryAt },
+    ...(q.retryAt !== undefined ? { executorRetryAt: { ...state.executorRetryAt, [q.executorId]: q.retryAt } } : {}),
   };
 }
 
@@ -1906,12 +1923,23 @@ const QUOTA_RESET_MARGIN_MS = 30_000;
 const QUOTA_PAUSE_LIMIT = 3;
 export const QUOTA_STOP_PREFIX = "harness quota exhausted until ";
 
+/** Opens the instruction of a job continued after a usage limit. */
+export const QUOTA_CONTINUATION_NOTE =
+  "You hit the harness usage limit partway through this job, and it has since reset. Continue where you stopped: observe the worktree and re-check external state before relying on earlier results.";
+
+type QuotaPause = { state?: DurableRunState; stop?: { stopReason: string; blocker: string }; cleared: DurableRunState };
+
 /**
  * A harness out of usage allowance is a condition of the environment, not
- * something recovery can fix: the executor reports `failureKind: "quota"` and
- * when it renews (as data). The job runs again unchanged after the reset if
- * the run's remaining `waitMs` covers the wait; otherwise the run stops
- * retryable, so a resume after the reset continues. No supervisor episode.
+ * something recovery can fix: the executor reports `failureKind: "quota"`,
+ * when it renews and whether the failed try may have had effects (as data).
+ * After the reset (when the run's remaining `waitMs` covers it) the job:
+ * - no effects: runs again unchanged;
+ * - possible effects, agent session resumable: continues that session, not
+ *   its original assignment;
+ * - possible effects, not resumable: one recovery episode (`quota_partial`).
+ * Otherwise the run stops retryable and a resume applies the same rule. No
+ * supervisor episode is opened for the limit itself.
  */
 function pauseForQuota(
   state: DurableRunState,
@@ -1919,15 +1947,32 @@ function pauseForQuota(
   result: Awaited<ReturnType<Runner["runJob"]>>,
   operationId: string,
   flags: Omit<RetryFlags, "attempt" | "limit">,
-): { state?: DurableRunState; stop?: { stopReason: string; blocker: string }; cleared: DurableRunState } {
+  canRecover: boolean,
+): QuotaPause {
   const key = retryKey(job);
   const done = state.executorRetryCounts?.[key] ?? 0;
   const cleared = clearRetryCount(state, job);
   const executorId = job.executor?.id ?? job.kind;
   const resetAt = result.resetAt;
   const stopReason = `${QUOTA_STOP_PREFIX}${resetAt ?? "unknown"}`;
+  const clean = (result.effects ?? "unknown") === "none";
+  const resumable = !clean && job.kind === "agent" && (state.agentSessions ?? []).some((r) => r.operationId === operationId);
+  const continued: JobSpec = { ...job, continueFrom: operationId, instruction: `${QUOTA_CONTINUATION_NOTE}\n\n${job.instruction}` };
+  // A partial effect with no session to continue goes to the supervisor once; never again for the same limit.
+  const recovers = !clean && !resumable && canRecover && state.mode !== "recovery";
+  const partial = `executor ${executorId} hit a usage limit after a try that ${result.effects === "some" ? "had" : "may have had"} effects, and its session cannot be continued: ${result.summary}`;
+  const stopWith = (blocker: string): QuotaPause => {
+    const base = { stopReason, blocker: boundText(blocker) };
+    // A resume applies the same rule to the partial effects, with no wait: the operator resumes when ready.
+    if (resumable) {
+      const queued = queueRetry(cleared, continued, operationId, { key, attempt: 1, limit: QUOTA_PAUSE_LIMIT, executorId, flags });
+      return { cleared, stop: base, state: { ...queued, status: "stopped", ...base } };
+    }
+    if (recovers) return { cleared, stop: base, state: { ...enterRecovery(cleared, "quota_partial", boundText(partial)), status: "stopped", ...base } };
+    return { cleared, stop: base };
+  };
   if (resetAt === undefined) {
-    return { cleared, stop: { stopReason, blocker: boundText(`executor ${executorId} reported a usage limit with no reset time: ${result.summary}`) } };
+    return stopWith(`executor ${executorId} reported a usage limit with no reset time: ${result.summary}`);
   }
   const retryAt = new Date(Date.parse(resetAt) + QUOTA_RESET_MARGIN_MS).toISOString();
   const waitMs = Math.max(0, Date.parse(retryAt) - Date.now());
@@ -1937,19 +1982,27 @@ function pauseForQuota(
       done >= QUOTA_PAUSE_LIMIT
         ? `still limited after ${done} waits`
         : `the ${Math.ceil(waitMs / 1000)}s wait exceeds the ${Math.floor(remaining / 1000)}s of waitMs left`;
-    return { cleared, stop: { stopReason, blocker: boundText(`executor ${executorId} usage limit (${why}): ${result.summary}`) } };
+    return stopWith(`executor ${executorId} usage limit (${why}): ${result.summary}`);
   }
-  const queued = queueRetry(state, job, operationId, { key, attempt: done + 1, limit: QUOTA_PAUSE_LIMIT, executorId, retryAt, flags });
-  return {
-    cleared,
-    state: recordRemedy(queued, {
+  const remedy = (what: string, next: DurableRunState): DurableRunState =>
+    recordRemedy(next, {
       condition: `harness quota (executor ${executorId})`,
-      remedy: `waiting ${Math.ceil(waitMs / 1000)}s until the harness quota resets at ${resetAt}, then running the job again, without a model call`,
+      remedy: `waiting ${Math.ceil(waitMs / 1000)}s until the harness quota resets at ${resetAt}, then ${what}, without a model call`,
       detail: boundText(result.summary),
       ...(state.recoveryEpisodeId !== undefined ? { episodeId: state.recoveryEpisodeId } : {}),
       ...(waitMs > 0 ? { waitedMs: waitMs } : {}),
-    }),
-  };
+    });
+  if (recovers) {
+    // The episode starts once the loop has waited out the reset.
+    const held = enterRecovery(
+      { ...cleared, quotaHold: { until: retryAt }, budgets: { ...cleared.budgets, waitMs: remaining - waitMs } },
+      "quota_partial",
+      boundText(partial),
+    );
+    return { cleared, state: remedy("opening one recovery episode (the try's effects are unknown and its session cannot be continued)", held) };
+  }
+  const queued = queueRetry(state, resumable ? continued : job, operationId, { key, attempt: done + 1, limit: QUOTA_PAUSE_LIMIT, executorId, retryAt, flags });
+  return { cleared, state: remedy(resumable ? "continuing the agent session" : "running the job again", queued) };
 }
 
 /** Apply a pending operator model switch before the next supervisor prompt. */
@@ -2757,7 +2810,7 @@ function applyDispatchResult(
     const { pendingDispatch, ...unsettled } = next;
     const retryFlags = { graphCorrectionTrial: args.graphCorrectionTrial, supervisorWorkDispatch: args.supervisorWorkDispatch };
     if (result.failureKind === "quota") {
-      const paused = pauseForQuota(unsettled, job, result, operationId, retryFlags);
+      const paused = pauseForQuota(unsettled, job, result, operationId, retryFlags, args.canRecover);
       if (paused.state !== undefined) return paused.state;
       return {
         ...paused.cleared,

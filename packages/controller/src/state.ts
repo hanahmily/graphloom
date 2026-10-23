@@ -224,6 +224,8 @@ export interface DurableRunState {
   hostChanges?: HostChangeRecord[];
   /** Earliest time each executor may run again, from a failure's retry timing. */
   executorRetryAt?: Record<string, string>;
+  /** A recovery episode that opens only once this time has passed (a harness quota reset); cleared when it does. */
+  quotaHold?: { until: string };
   /**
    * A failed job its executor declared retryable (`retryLimit`), queued to run
    * again unchanged before the graph or supervisor is asked anything.

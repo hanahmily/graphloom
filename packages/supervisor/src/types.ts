@@ -23,6 +23,7 @@ export interface RecoveryTrigger {
     | "correction_limit"
     | "environment_changed"
     | "contract_violation"
+    | "quota_partial"
     | "recovery_budget_reached"
     | "unhandled";
   message: string;

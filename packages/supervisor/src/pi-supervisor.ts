@@ -880,6 +880,8 @@ const TRIGGER_GUIDANCE: Partial<Record<string, string>> = {
     "This episode's trigger is plugin_timeout: the graph plugin did not respond in time. Reentering rarely helps if the plugin itself is hanging; prefer a plugin repair when the bundle is source-repairable, or stop.",
   plugin_malformed:
     "This episode's trigger is plugin_malformed: the graph returned a decision the controller could not validate. A plugin repair (qualify_repair target plugin) may fix it when the bundle is source-repairable; otherwise stop, citing what was malformed.",
+  quota_partial:
+    "This episode's trigger is quota_partial: the harness hit its usage limit in the middle of a job that may already have changed the worktree or called tools, and that job's agent session cannot be continued. The controller waited out the limit's reset before this episode. Observe the worktree and the stage's evidence first, then dispatch the stage's remaining work from what is actually there (not the original assignment blindly), or return when the graph can decide from the current state.",
   contract_violation:
     "This episode's trigger is contract_violation: an agent result repeatedly failed to match its job's declared result contract (a missing/mis-typed field, or a reference id outside the set it was shown) even after the harness gave it a chance to correct it in-turn. Re-dispatch the stage's work with a more explicit instruction about the required shape, or switch to another pinned executor for it, if the contract itself looks right. If the trigger message shows the contract's own schema or reference set is wrong for what the stage actually needs, qualify_repair target plugin instead (when the bundle is source-repairable) rather than repeating the same dispatch.",
 };

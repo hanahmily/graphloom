@@ -29,6 +29,7 @@ import {
 } from "@graphloom/supervisor";
 import { createController, loadRunState } from "./index.js";
 import { classifyStop } from "./stop-class.js";
+import { QUOTA_CONTINUATION_NOTE } from "./loop.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, "../../..");
@@ -985,11 +986,199 @@ describe("supervisor provider failures and deterministic remedies (controller)",
     expect(state.remedies?.map((r) => r.remedy)).toEqual([expect.stringMatching(/^retry 1 of 2 after/)]);
   });
 
-  const quotaFailure = (resetAt?: string) => async () => ({
+  const quotaFailure = (resetAt?: string, effects: "none" | "some" | "unknown" = "none", sessionRef?: string) => async () => ({
     status: "failed" as const,
     summary: "executor failed: Claude Code run failed (success): You've hit your session limit",
     failureKind: "quota" as const,
+    effects,
     ...(resetAt !== undefined ? { resetAt } : {}),
+    ...(sessionRef !== undefined ? { sessionRef } : {}),
+  });
+
+  /** Runs `start` on a fake clock that moves only once `waiting()` says the run has reached its wait. */
+  async function onFakeClock<T>(start: () => Promise<T>, waiting: () => boolean): Promise<T> {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    try {
+      let settled = false;
+      const running = start().finally(() => {
+        settled = true;
+      });
+      const real = (ms: number) => new Promise((resolve) => realSleep(ms, undefined, undefined).then(resolve));
+      while (!waiting()) await real(10);
+      for (let i = 0; i < 2_000 && !settled; i += 1) {
+        await real(10);
+        await vi.advanceTimersByTimeAsync(15_000);
+      }
+      return await running;
+    } finally {
+      vi.useRealTimers();
+    }
+  }
+
+  const sessionGraph = (): GraphPlugin => {
+    let proposals = 0;
+    return {
+      describe: () => structuredClone(definition),
+      advance() {
+        proposals += 1;
+        return proposals === 1 ? writeWork : stop({ reason: "settled", blocker: "none" }, "done");
+      },
+    };
+  };
+
+  it("continues the failed agent session after a usage limit that may have had effects, instead of repeating the assignment", async () => {
+    const env = await makeEnv();
+    const started = Date.now();
+    const resetAt = new Date(started + 10 * 60_000).toISOString();
+    const seen: Array<{ continueFrom?: string; instruction: string; resume?: string; operationId: string; at: number }> = [];
+    const job = (reply: () => Promise<Record<string, unknown>>) => async (j: JobSpec, ctx: { operationId: string; session?: { resume?: string } }) => {
+      seen.push({
+        operationId: ctx.operationId,
+        instruction: j.instruction,
+        at: Date.now() - started,
+        ...(j.continueFrom !== undefined ? { continueFrom: j.continueFrom } : {}),
+        ...(ctx.session?.resume !== undefined ? { resume: ctx.session.resume } : {}),
+      });
+      return reply() as never;
+    };
+    const counted = countingDecides(createScriptedSupervisor({ decisions: [] }));
+    const report = await onFakeClock(
+      () =>
+        createController().run({
+          taskPath: env.taskPath,
+          plugin: sessionGraph(),
+          validators,
+          supervisor: counted.supervisor,
+          runner: createScriptedRunner({
+            jobs: [job(quotaFailure(resetAt, "some", "s1")), job(async () => ({ status: "ok" as const, summary: "done", sessionRef: "s2" }))],
+          }),
+          stateRoot: env.stateRoot,
+          runId: "quota-continue-1",
+        }),
+      () => seen.length > 0,
+    );
+    expect(report, `${report.stopReason}: ${report.blocker}`).toMatchObject({ stopReason: "settled" });
+    expect(counted.decides()).toBe(0);
+    const [failed, continued] = seen;
+    expect(continued).toMatchObject({ continueFrom: failed!.operationId, resume: "s1" });
+    expect(continued!.instruction.startsWith(QUOTA_CONTINUATION_NOTE)).toBe(true);
+    expect(continued!.instruction).toContain(failed!.instruction);
+    expect(continued!.at).toBeGreaterThanOrEqual(10 * 60_000 + 30_000);
+    const state = await loadRunState(report.stateDir);
+    expect(state.supervisorEpisodes ?? []).toEqual([]);
+    expect(state.remedies).toMatchObject([{ remedy: expect.stringContaining("continuing the agent session") }]);
+  });
+
+  it("opens one quota_partial recovery episode after the reset when the try may have had effects and its session cannot be continued", async () => {
+    const env = await makeEnv();
+    const started = Date.now();
+    const resetAt = new Date(started + 10 * 60_000).toISOString();
+    let ran = 0;
+    const decided: Array<{ code: string; at: number }> = [];
+    const report = await onFakeClock(
+      () =>
+        createController().run({
+          taskPath: env.taskPath,
+          plugin: sessionGraph(),
+          validators,
+          supervisor: createScriptedSupervisor({
+            decisions: [
+              (input) => {
+                decided.push({ code: input.trigger.code, at: Date.now() - started });
+                return stop({ reason: "inspected the partial work", blocker: "none" }, "stop");
+              },
+            ],
+          }),
+          runner: createScriptedRunner({
+            jobs: [
+              async () => {
+                ran += 1;
+                return quotaFailure(resetAt, "unknown")();
+              },
+            ],
+          }),
+          stateRoot: env.stateRoot,
+          runId: "quota-partial-1",
+        }),
+      () => ran > 0,
+    );
+    expect(report).toMatchObject({ status: "stopped", stopReason: "inspected the partial work" });
+    expect(ran).toBe(1);
+    expect(decided).toHaveLength(1);
+    expect(decided[0]!.code).toBe("quota_partial");
+    expect(decided[0]!.at).toBeGreaterThanOrEqual(10 * 60_000 + 30_000);
+    const state = await loadRunState(report.stateDir);
+    expect(state.quotaHold).toBeUndefined();
+    expect(state.supervisorEpisodes ?? []).toHaveLength(1);
+  });
+
+  it("re-dispatches a job whose limited try had no effects unchanged (the plain wait)", async () => {
+    const env = await makeEnv();
+    const started = Date.now();
+    const resetAt = new Date(started + 10 * 60_000).toISOString();
+    const seen: Array<{ continueFrom?: string; instruction: string }> = [];
+    const report = await onFakeClock(
+      () =>
+        createController().run({
+          taskPath: env.taskPath,
+          plugin: sessionGraph(),
+          validators,
+          supervisor: createScriptedSupervisor({ decisions: [] }),
+          runner: createScriptedRunner({
+            jobs: [
+              async (j) => {
+                seen.push({ instruction: j.instruction });
+                return quotaFailure(resetAt, "none", "s1")();
+              },
+              async (j) => {
+                seen.push({ instruction: j.instruction, ...(j.continueFrom !== undefined ? { continueFrom: j.continueFrom } : {}) });
+                return { status: "ok" as const, summary: "done" };
+              },
+            ],
+          }),
+          stateRoot: env.stateRoot,
+          runId: "quota-none-1",
+        }),
+      () => seen.length > 0,
+    );
+    expect(report).toMatchObject({ stopReason: "settled" });
+    expect(seen[1]).toEqual({ instruction: seen[0]!.instruction });
+  });
+
+  it("applies the same rule on resume after a retryable quota stop: continues the failed session", async () => {
+    const env = await makeEnv();
+    const controller = createController();
+    const resetAt = new Date(Date.now() + 3 * 3_600_000).toISOString();
+    const stopped = await controller.run({
+      taskPath: env.taskPath,
+      plugin: sessionGraph(),
+      validators,
+      supervisor: createScriptedSupervisor({ decisions: [] }),
+      runner: createScriptedRunner({ jobs: [quotaFailure(resetAt, "some", "s1")] }),
+      stateRoot: env.stateRoot,
+      runId: "quota-resume-1",
+    });
+    expect(stopped).toMatchObject({ status: "stopped", stopReason: `harness quota exhausted until ${resetAt}` });
+    const seen: Array<{ continueFrom?: string; resume?: string; instruction: string }> = [];
+    const resumed = await controller.resume({
+      runRef: stopped.stateDir,
+      // The graph's write dispatch was already made before the stop.
+      plugin: createScriptedGraph({ definition, advances: [stop({ reason: "settled", blocker: "none" }, "done")] }),
+      validators,
+      supervisor: createScriptedSupervisor({ decisions: [] }),
+      runner: createScriptedRunner({
+        jobs: [
+          async (j, ctx) => {
+            seen.push({ instruction: j.instruction, ...(j.continueFrom !== undefined ? { continueFrom: j.continueFrom } : {}), ...(ctx.session?.resume !== undefined ? { resume: ctx.session.resume } : {}) });
+            return { status: "ok" as const, summary: "done" };
+          },
+        ],
+      }),
+    });
+    expect(resumed, `${resumed.stopReason}: ${resumed.blocker}`).toMatchObject({ status: "stopped", stopReason: "settled" });
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toMatchObject({ resume: "s1" });
+    expect(seen[0]!.instruction.startsWith(QUOTA_CONTINUATION_NOTE)).toBe(true);
   });
 
   it("waits out a harness quota reset on a fake clock, charges waitMs, and re-dispatches the same job without a supervisor episode", async () => {

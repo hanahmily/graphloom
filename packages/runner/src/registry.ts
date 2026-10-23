@@ -154,6 +154,7 @@ function resultFromOutput(
       sessionRef?: unknown;
       failureKind?: unknown;
       resetAt?: unknown;
+      effects?: unknown;
     };
     const resultStatus = o.status === "failed" || o.status === "conflict" ? o.status : status;
     const retryAfterMs =
@@ -178,6 +179,8 @@ function resultFromOutput(
       failureKind === "quota" && typeof o.resetAt === "string" && Number.isFinite(Date.parse(o.resetAt))
         ? new Date(o.resetAt).toISOString()
         : undefined;
+    const effects =
+      failureKind === "quota" && (o.effects === "none" || o.effects === "some" || o.effects === "unknown") ? o.effects : undefined;
     return {
       status: resultStatus,
       summary: typeof o.summary === "string" ? o.summary : "executor completed",
@@ -190,6 +193,7 @@ function resultFromOutput(
       ...(sessionRef !== undefined ? { sessionRef } : {}),
       ...(failureKind !== undefined ? { failureKind } : {}),
       ...(resetAt !== undefined ? { resetAt } : {}),
+      ...(effects !== undefined ? { effects } : {}),
     };
   }
   return {

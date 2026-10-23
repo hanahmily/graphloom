@@ -105,6 +105,12 @@ export interface JobResult {
   failureKind?: "contract_violation" | "quota";
   /** With `failureKind: "quota"`: the absolute time (ISO 8601) the allowance renews, when the executor knows it. */
   resetAt?: string;
+  /**
+   * With `failureKind: "quota"`: whether the failed try may have had effects
+   * (graph tool calls, native tool use, worktree changes) a re-run from the
+   * original assignment would repeat. Absent means unknown.
+   */
+  effects?: "none" | "some" | "unknown";
 }
 
 /** An executor a runner serves, identified by the digest of the code it would run. */

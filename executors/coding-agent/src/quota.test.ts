@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
@@ -108,18 +109,19 @@ describe("coding-agent executor on a usage limit (fake Claude Code)", () => {
     while (temps.length > 0) await rm(temps.pop()!, { recursive: true, force: true });
   });
 
-  async function run(message: string) {
+  async function run(message: string, opts: { git?: boolean; before?: Array<Record<string, unknown>> } = {}) {
     const dir = await mkdtemp(path.join(os.tmpdir(), "gl-quota-"));
     temps.push(dir);
     const worktree = path.join(dir, "worktree");
     await mkdir(worktree);
+    if (opts.git === true) execFileSync("git", ["-C", worktree, "init", "-q"]);
     const scriptFile = path.join(dir, "script.json");
     const logFile = path.join(dir, "log.jsonl");
     const bin = path.join(dir, "claude");
     await writeFile(bin, `#!/bin/sh\nexport FAKE_CLAUDE_SCRIPT="${scriptFile}" FAKE_CLAUDE_LOG="${logFile}"\nexec "${process.execPath}" "${fakeClaude}" "$@"\n`, "utf8");
     await chmod(bin, 0o755);
     vi.stubEnv("CLAUDE_CONFIG_DIR", path.join(dir, "claude-config"));
-    await writeFile(scriptFile, JSON.stringify({ start: [{ limit: message }], resume: [] }), "utf8");
+    await writeFile(scriptFile, JSON.stringify({ start: [...(opts.before ?? []), { limit: message }], resume: [] }), "utf8");
     const sleeps: number[] = [];
     const executor = createCodingAgentExecutor(createClaudeCodeHarness({ command: bin, killGraceMs: 500 }), {
       retry: { maxAttempts: 3, baseDelayMs: 1, maxDelayMs: 2 },
@@ -153,5 +155,13 @@ describe("coding-agent executor on a usage limit (fake Claude Code)", () => {
     const { result } = await run("You've hit your session limit");
     expect(result).toMatchObject({ status: "failed", failureKind: "quota" });
     expect(result).not.toHaveProperty("resetAt");
+  });
+
+  it("reports whether the failed try may have had effects, so the controller does not repeat them", async () => {
+    const limit = "You've hit your session limit";
+    expect((await run(limit, { git: true })).result).toMatchObject({ failureKind: "quota", effects: "none" });
+    expect((await run(limit, { git: true, before: [{ bash: "echo partial > PARTIAL.txt" }] })).result).toMatchObject({ failureKind: "quota", effects: "some" });
+    // Not a git worktree: a change cannot be ruled out.
+    expect((await run(limit)).result).toMatchObject({ failureKind: "quota", effects: "unknown" });
   });
 });
