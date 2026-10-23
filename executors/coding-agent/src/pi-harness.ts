@@ -425,8 +425,6 @@ function output(submitted: { value: unknown } | undefined): { output?: unknown }
   return submitted !== undefined ? { output: submitted.value } : {};
 }
 
-const PI_READ_ONLY_TOOLS = new Set(["read", "grep", "find", "ls"]);
-
 /** Built-in tool calls in the messages one run added; undefined when the messages are not in a readable shape. */
 export function piNativeTools(messages: readonly unknown[] | undefined, from: number, mediated: Set<string>): NativeToolUse[] | undefined {
   if (!Array.isArray(messages)) return undefined;
@@ -438,7 +436,7 @@ export function piNativeTools(messages: readonly unknown[] | undefined, from: nu
     for (const block of m.content as { type?: unknown; name?: unknown }[]) {
       if (block?.type !== "toolCall") continue;
       if (typeof block.name !== "string") return undefined;
-      if (!mediated.has(block.name)) used.push({ name: block.name, readOnly: PI_READ_ONLY_TOOLS.has(block.name) });
+      if (!mediated.has(block.name)) used.push({ name: block.name });
     }
   }
   return used;

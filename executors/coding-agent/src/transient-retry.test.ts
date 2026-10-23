@@ -278,6 +278,49 @@ describe("transient retry: fail closed and usage", () => {
   });
 });
 
+describe("graph tool calls and aborted backoff", () => {
+  const retry = { maxAttempts: 3, baseDelayMs: 1, maxDelayMs: 2 };
+
+  it("does not retry after any graph tool call, even a read, or one that threw", async () => {
+    for (const call of [async () => ({ status: "ok" as const, summary: "read" }), async () => Promise.reject(new Error("boom"))]) {
+      const h: CodingHarness = {
+        name: "codex",
+        async createSession(options) {
+          return {
+            async run() {
+              await options.tools[0]!.call("c1", {}).catch(() => undefined);
+              return failed(`Codex run failed: ${CAPACITY}`);
+            },
+          };
+        },
+      };
+      const result = await createCodingAgentExecutor(h, { retry }).execute(
+        { assignment: "x" },
+        await plainCtx({ tools: { bindings: [{ name: "read_comments", effect: "read" }], call } }),
+      );
+      expect(result).toMatchObject({ status: "failed" });
+      expect((result as { summary: string }).summary).toContain("not retried: the failed try called a graph tool");
+    }
+  });
+
+  it("does not retry when the harness reports no native tool list", async () => {
+    const h = flaky("codex", [{ status: "failed", summary: `Codex run failed: ${CAPACITY}` }, ok]);
+    const result = await createCodingAgentExecutor(h, { retry }).execute({ assignment: "x" }, await plainCtx());
+    expect((result as { summary: string }).summary).toContain("did not report which native tools");
+    expect(h.runs()).toBe(1);
+  });
+
+  it("keeps the saved sessionRef when the backoff is aborted", async () => {
+    const h = flaky("claude", [{ ...failed("Claude Code run failed (error_during_execution): 529 overloaded_error"), sessionRef: "claude-abc" }, ok]);
+    const result = await createCodingAgentExecutor(h, { retry, sleep: async () => false }).execute(
+      { assignment: "x" },
+      await plainCtx({ session: { dir: os.tmpdir() } }),
+    );
+    expect(result).toMatchObject({ status: "failed", sessionRef: "claude-abc" });
+    expect(payload(result).sessionRef).toBe("claude-abc");
+  });
+});
+
 describe("worktreeDigest", () => {
   it("changes when an edited file is re-staged in an unborn repo", async () => {
     const worktree = await mkdtemp(path.join(os.tmpdir(), "gl-transient-unborn-"));

@@ -921,18 +921,33 @@ describe("transient retry and native tools (Claude Code)", () => {
   it("retries a capacity failure when the failed try ran no tools", async () => {
     const { result, runs } = await attempt([overloaded]);
     expect(runs).toBe(2);
-    expect(result.summary).toContain("retries exhausted after 2 tries");
   });
 
   it("does not retry after a Bash call", async () => {
     const { result, runs } = await attempt([{ bash: "echo hi" }, overloaded]);
     expect(runs).toBe(1);
-    expect(result.summary).toContain("not retried: the failed try ran a native tool that is not known to be read-only (Bash)");
+    expect(result.summary).toContain("not retried: the failed try ran a native tool (Bash)");
   });
 
-  it("retries after only Read and Grep", async () => {
-    const { runs } = await attempt([{ native: "Read" }, { native: "Grep" }, overloaded]);
-    expect(runs).toBe(2);
+  it("does not retry after only Read and Grep", async () => {
+    const { result, runs } = await attempt([{ native: "Read" }, { native: "Grep" }, overloaded]);
+    expect(runs).toBe(1);
+    expect(result.summary).toContain("not retried: the failed try ran a native tool (Read)");
+  });
+
+  it("resumes the transcript the failed try wrote when the job has no controller session", async () => {
+    vi.stubEnv("GRAPHLOOM_CODING_RETRY_MAX_ATTEMPTS", "2");
+    vi.stubEnv("GRAPHLOOM_CODING_RETRY_BASE_DELAY_MS", "1");
+    vi.stubEnv("GRAPHLOOM_CODING_RETRY_MAX_DELAY_MS", "2");
+    const h = await setup();
+    execFileSync("git", ["-C", h.worktree, "init", "-q"]);
+    await h.script([{ text: "partial" }, overloaded], [{ text: "all done" }]);
+    const result = await h.executor.execute({ assignment: "work" }, h.ctx());
+    expect(result).toMatchObject({ status: "ok" });
+    const [first, second] = await h.invocations();
+    expect(first!.argv).toContain("--session-id");
+    expect(second!.argv).toContain("--resume");
+    expect(second!.argv).not.toContain("--session-id");
   });
 
   it("does not retry when the transcript is unparseable", async () => {

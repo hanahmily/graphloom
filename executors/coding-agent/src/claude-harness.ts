@@ -188,9 +188,13 @@ export function createClaudeCodeHarness(harnessOptions: ClaudeCodeHarnessOptions
             saved,
           });
           const summary = redact(result.summary);
-          if (options.sessionDir === undefined || !(await saveTranscript(configDir, options.sessionDir, saved, settings))) {
+          if (options.sessionDir === undefined) {
+            // Claude Code rejects a reused --session-id, so a later run of this
+            // session (a transient retry) must resume the transcript it wrote.
+            if (await transcriptExists(configDir, saved.sessionId)) saved.started = true;
             return { ...result, summary };
           }
+          if (!(await saveTranscript(configDir, options.sessionDir, saved, settings))) return { ...result, summary };
           saved.started = true;
           return { ...result, summary, sessionRef: saved.ref };
         },
@@ -274,6 +278,16 @@ async function openSession(options: CodingSessionOptions, configDir: string, set
   if (side !== undefined) await copyFiles(savedSide, side.files, storeSide);
   const baseline = costState(transcript);
   return { sessionId, ref, started: true, ...(baseline !== undefined ? { baseline } : {}) };
+}
+
+/** True when Claude Code has written a transcript for the session under `configDir`. */
+async function transcriptExists(configDir: string, sessionId: string): Promise<boolean> {
+  const projects = path.join(configDir, "projects");
+  for (const project of await readdir(projects).catch(() => [] as string[])) {
+    if (!PROJECT_DIR.test(project)) continue;
+    if ((await lstat(path.join(projects, project, `${sessionId}.jsonl`)).catch(() => undefined))?.isFile()) return true;
+  }
+  return false;
 }
 
 /** Copy Claude Code's transcript into the controller's session directory; false when it wrote none. */
@@ -568,7 +582,7 @@ async function runClaude(args: RunArgs): Promise<CodingRunResult> {
               if (block?.type !== "tool_use") continue;
               const name = typeof block.name === "string" ? block.name : "unknown";
               // Graph tools reach Claude through the MCP bridge and are accounted by the controller.
-              if (!name.startsWith("mcp__")) nativeTools.push({ name, readOnly: CLAUDE_READ_ONLY_TOOLS.has(name) });
+              if (!name.startsWith("mcp__")) nativeTools.push({ name });
             }
           }
           if (Array.isArray(event.message?.content)) {
@@ -715,9 +729,6 @@ async function runClaude(args: RunArgs): Promise<CodingRunResult> {
 function seconds(ms: number): string {
   return `${ms / 1000}s`;
 }
-
-/** Claude Code's own tools that cannot change anything outside the transcript. */
-const CLAUDE_READ_ONLY_TOOLS = new Set(["Read", "Grep", "Glob", "LS"]);
 
 /** Track tool calls still running: a `tool_use` starts one, its `tool_result` ends it. */
 function trackTools(content: unknown, running: Set<string>): void {

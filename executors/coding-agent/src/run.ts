@@ -118,12 +118,15 @@ export function createCodingAgentExecutor(
     async execute(input, ctx: ExecutorContext) {
       const h = typeof harness === "function" ? await harness() : harness;
       const toolCalls: ToolCallSummary[] = [];
+      let toolAttempts = 0;
       let modelCalls = 0;
       const tools: CodingTool[] = (ctx.tools?.bindings ?? []).map((b) => ({
         name: b.name,
         effect: b.effect,
         ...(b.description !== undefined ? { description: b.description } : {}),
         async call(toolCallId, toolInput) {
+          // Counted before dispatch: a call that throws may still have had its effect.
+          toolAttempts += 1;
           const result = await ctx.tools!.call({ toolCallId, tool: b.name, input: toolInput });
           toolCalls.push({
             toolCallId,
@@ -202,43 +205,44 @@ export function createCodingAgentExecutor(
         let usage: CodingUsage | undefined;
         for (let attempt = 1; ; attempt++) {
           // A retry re-runs the whole assignment, so it needs proof the failed
-          // try changed nothing: a readable worktree fingerprint (HEAD, ref,
-          // status, contents) identical before and after, and no write tool
-          // call. Without that proof, fresh or continued, it is not repeated.
+          // try had no effect: no graph tool call attempted, no native tool use
+          // in the harness's own report (which must be available), and a
+          // readable worktree fingerprint identical before and after.
           const before = policy.maxAttempts > 1 ? await worktreeDigest(ctx.worktreePath) : undefined;
-          const callsBefore = toolCalls.length;
+          const attemptsBefore = toolAttempts;
           result = await session.run(request);
           usage = addUsage(usage, result.usage);
           const transient = result.status === "failed" ? classifyTransient(h.name, result.summary) : undefined;
           if (transient === undefined) break;
-          const wrote = toolCalls.slice(callsBefore).some((c) => tools.find((t) => t.name === c.tool)?.effect !== "read");
-          const unsafeNative =
-            result.nativeTools === undefined
-              ? "the harness did not report which native tools the failed try ran"
-              : result.nativeTools.find((t) => !t.readOnly)?.name;
-          const after = wrote || unsafeNative !== undefined || attempt >= policy.maxAttempts || before === undefined ? undefined : await worktreeDigest(ctx.worktreePath);
-          if (attempt >= policy.maxAttempts || wrote || unsafeNative !== undefined || before === undefined || after !== before) {
-            const why =
-              attempt >= policy.maxAttempts
-                ? `retries exhausted after ${attempt} ${attempt === 1 ? "try" : "tries"}`
-                : wrote
-                  ? "not retried: the failed try called a write tool"
-                  : unsafeNative !== undefined
-                    ? result.nativeTools === undefined
-                      ? `not retried: ${unsafeNative}`
-                      : `not retried: the failed try ran a native tool that is not known to be read-only (${unsafeNative})`
+          const calledGraphTool = toolAttempts > attemptsBefore;
+          const nativeUse = result.nativeTools === undefined ? undefined : result.nativeTools[0]?.name;
+          const blocked =
+            attempt >= policy.maxAttempts
+              ? `retries exhausted after ${attempt} ${attempt === 1 ? "try" : "tries"}`
+              : calledGraphTool
+                ? "not retried: the failed try called a graph tool"
+                : result.nativeTools === undefined
+                  ? "not retried: the harness did not report which native tools the failed try ran"
+                  : nativeUse !== undefined
+                    ? `not retried: the failed try ran a native tool (${nativeUse})`
                     : before === undefined
-                    ? "not retried: the worktree cannot be fingerprinted (not a readable git worktree), so changes by the failed try cannot be ruled out"
-                    : after === undefined
-                      ? "not retried: the worktree could not be fingerprinted after the failed try"
-                      : "not retried: the failed try changed the worktree";
-            result = { ...result, summary: `Transient harness failure (${transient.reason}); ${why}: ${result.summary}` };
+                      ? "not retried: the worktree cannot be fingerprinted (not a readable git worktree), so changes by the failed try cannot be ruled out"
+                      : (await worktreeDigest(ctx.worktreePath)) === undefined
+                        ? "not retried: the worktree could not be fingerprinted after the failed try"
+                        : undefined;
+          const changed = blocked === undefined && before !== undefined && (await worktreeDigest(ctx.worktreePath)) !== before;
+          if (blocked !== undefined || changed) {
+            result = { ...result, summary: `Transient harness failure (${transient.reason}); ${blocked ?? "not retried: the failed try changed the worktree"}: ${result.summary}` };
             break;
           }
           const delayMs = backoffMs(policy, attempt, transient.retryAfterMs);
           retries.push({ attempt, reason: transient.reason, delayMs, failure: result.summary });
           if (!(await sleep(delayMs, ctx.signal))) {
-            result = { status: "failed", summary: `agent session aborted while waiting to retry after a transient harness failure (${transient.reason})` };
+            result = {
+              status: "failed",
+              summary: `agent session aborted while waiting to retry after a transient harness failure (${transient.reason})`,
+              ...(result.sessionRef !== undefined ? { sessionRef: result.sessionRef } : {}),
+            };
             break;
           }
         }

@@ -373,12 +373,7 @@ function count(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) ? value : 0;
 }
 
-/**
- * Codex has no read-only tool to allowlist: every command, patch or other item
- * counts as a side effect, and parsing shell text to prove a command harmless is
- * not reliable. Only a web search is treated as read-only.
- */
+/** Every command, patch, search or other item counts: nothing Codex runs on its own is proven side-effect free. */
 function codexToolUse(item: { type?: unknown }): NativeToolUse {
-  const type = typeof item.type === "string" ? item.type : "unknown";
-  return { name: type, readOnly: type === "web_search" };
+  return { name: typeof item.type === "string" ? item.type : "unknown" };
 }

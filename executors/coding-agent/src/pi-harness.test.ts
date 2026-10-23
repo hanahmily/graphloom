@@ -494,12 +494,12 @@ describe("transient retry and native tools (Pi)", () => {
   it("does not retry after a bash call", async () => {
     const { result, attempts } = await attempt((h) => [h.use("bash", { command: "echo hi" })]);
     expect(attempts).toBe(1);
-    expect(result.summary).toContain("not retried: the failed try ran a native tool that is not known to be read-only (bash)");
+    expect(result.summary).toContain("not retried: the failed try ran a native tool (bash)");
   });
 
-  it("retries after only read and grep", async () => {
+  it("does not retry after only read and grep", async () => {
     const { attempts } = await attempt((h) => [h.use("read", { path: "a.txt" }), h.use("grep", { pattern: "x" })]);
-    expect(attempts).toBe(2);
+    expect(attempts).toBe(1);
   });
 
   it("does not retry when a thrown error follows a bash call", async () => {
