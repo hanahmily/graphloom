@@ -1112,6 +1112,121 @@ describe("supervisor provider failures and deterministic remedies (controller)",
     expect(state.supervisorEpisodes ?? []).toHaveLength(1);
   });
 
+  it("returns a limited try with possible effects to the recovery episode it ran in, after the reset, without replaying it", async () => {
+    const env = await makeEnv();
+    const started = Date.now();
+    const resetAt = new Date(started + 10 * 60_000).toISOString();
+    let ran = 0;
+    const decided: Array<{ code: string; at: number }> = [];
+    const report = await onFakeClock(
+      () =>
+        createController().run({
+          taskPath: env.taskPath,
+          plugin: createScriptedGraph({ definition, advances: [supervise({ reason: "unfamiliar" }, "escalate")] }),
+          validators,
+          supervisor: createScriptedSupervisor({
+            decisions: [
+              (input) => {
+                decided.push({ code: input.trigger.code, at: Date.now() - started });
+                return dispatch({ stageId: "write", kind: "agent", purpose: "work", instruction: "write", writeScope: [GREETING_PATH] }, "write it");
+              },
+              (input) => {
+                decided.push({ code: input.trigger.code, at: Date.now() - started });
+                return stop({ reason: "reconciled", blocker: "none" }, "stop");
+              },
+            ],
+          }),
+          runner: createScriptedRunner({
+            jobs: [
+              async () => {
+                ran += 1;
+                return quotaFailure(resetAt, "some")();
+              },
+            ],
+          }),
+          stateRoot: env.stateRoot,
+          runId: "quota-in-recovery-1",
+        }),
+      () => ran > 0,
+    );
+    expect(report).toMatchObject({ status: "stopped", stopReason: "reconciled" });
+    expect(ran).toBe(1);
+    expect(decided.map((d) => d.code)).toEqual(["supervise", "quota_partial"]);
+    expect(decided[1]!.at).toBeGreaterThanOrEqual(10 * 60_000 + 30_000);
+  });
+
+  it("stops retryable for reconciliation, without replaying, when a limited try with possible effects has no supervisor to hand it to", async () => {
+    const env = await makeEnv();
+    let ran = 0;
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({ definition, advances: finishingAdvances }),
+      validators,
+      runner: createScriptedRunner({
+        jobs: [
+          async () => {
+            ran += 1;
+            return quotaFailure(new Date(Date.now() + 60_000).toISOString(), "some")();
+          },
+        ],
+      }),
+      stateRoot: env.stateRoot,
+      runId: "quota-no-supervisor-1",
+    });
+    expect(report).toMatchObject({ status: "stopped", stopReason: "harness quota hit after possible effects; reconcile before resuming" });
+    expect(ran).toBe(1);
+    const state = await loadRunState(report.stateDir);
+    expect(state.executorRetry).toBeUndefined();
+    expect(classifyStop(state)).toMatchObject({ retryable: true, kind: "harness quota" });
+  });
+
+  it("keeps a stop that arrives during the quota hold: the hold does not overwrite it with a running state", async () => {
+    const env = await makeEnv();
+    const controller = createController();
+    const stateDir = path.join(env.stateRoot, "quota-hold-stop-1");
+    const resetAt = new Date(Date.now() + 10 * 60_000).toISOString();
+    let ran = 0;
+    let decides = 0;
+    const report = await onFakeClock(
+      async () => {
+        const running = controller.run({
+          taskPath: env.taskPath,
+          plugin: sessionGraph(),
+          validators,
+          supervisor: createScriptedSupervisor({
+            decisions: [
+              () => {
+                decides += 1;
+                return stop({ reason: "should not run", blocker: "none" }, "stop");
+              },
+            ],
+          }),
+          runner: createScriptedRunner({
+            jobs: [
+              async () => {
+                ran += 1;
+                return quotaFailure(resetAt, "unknown")();
+              },
+            ],
+          }),
+          stateRoot: env.stateRoot,
+          runId: "quota-hold-stop-1",
+        });
+        for (let i = 0; i < 500; i += 1) {
+          if ((await loadRunState(stateDir).catch(() => undefined))?.quotaHold !== undefined) break;
+          await realSleep(20);
+        }
+        await controller.stop(stateDir);
+        return running;
+      },
+      () => ran > 0,
+    );
+    expect(report.status).toBe("stopped");
+    expect(decides).toBe(0);
+    const state = await loadRunState(stateDir);
+    expect(state).toMatchObject({ status: "stopped", stopReason: "operator stop" });
+  });
+
   it("re-dispatches a job whose limited try had no effects unchanged (the plain wait)", async () => {
     const env = await makeEnv();
     const started = Date.now();

@@ -356,6 +356,7 @@ async function runNormalLoopSteps(
       if (state.mode === "normal") environmentReadyFor = state.activeVersion;
       continue;
     }
+    let holdElapsed = false;
     if (state.status === "running" && state.quotaHold !== undefined) {
       // A recovery episode held for a harness quota reset: wait it out (stop interrupts), then open it.
       lastAction = "quota hold";
@@ -366,12 +367,7 @@ async function runNormalLoopSteps(
       } finally {
         stopWatch();
       }
-      if (!abort.signal.aborted) {
-        const { quotaHold: _held, ...released } = state;
-        void _held;
-        state = { ...released, stateRevision: state.stateRevision + 1 };
-        await saveRunState(state);
-      }
+      holdElapsed = !abort.signal.aborted;
     }
     const turn = await withRunLock(state.stateDir, async () => {
       // Reload before renewing: Stop may have cleared the owner claim and
@@ -405,6 +401,14 @@ async function runNormalLoopSteps(
       }
       owner = renewed;
       await updateOwnerChildPid(state.stateDir, owner.ownerId, deps.host.childPid);
+
+      // The quota wait is over: release the hold from the reloaded state, which a stop that arrived meanwhile has already ended.
+      if (holdElapsed && state.quotaHold !== undefined) {
+        const { quotaHold: _held, ...released } = state;
+        void _held;
+        state = { ...released, stateRevision: state.stateRevision + 1 };
+        await saveRunState(state);
+      }
 
       // A finite decisions budget: once it is spent, neither the graph nor the
       // supervisor is asked for another decision.
@@ -1922,6 +1926,7 @@ const QUOTA_RESET_MARGIN_MS = 30_000;
 /** Consecutive pauses for one job; a reset that keeps passing without relief is not the environment waiting. */
 const QUOTA_PAUSE_LIMIT = 3;
 export const QUOTA_STOP_PREFIX = "harness quota exhausted until ";
+export const QUOTA_RECONCILE_STOP_REASON = "harness quota hit after possible effects; reconcile before resuming";
 
 /** Opens the instruction of a job continued after a usage limit. */
 export const QUOTA_CONTINUATION_NOTE =
@@ -1958,8 +1963,9 @@ function pauseForQuota(
   const clean = (result.effects ?? "unknown") === "none";
   const resumable = !clean && job.kind === "agent" && (state.agentSessions ?? []).some((r) => r.operationId === operationId);
   const continued: JobSpec = { ...job, continueFrom: operationId, instruction: `${QUOTA_CONTINUATION_NOTE}\n\n${job.instruction}` };
-  // A partial effect with no session to continue goes to the supervisor once; never again for the same limit.
-  const recovers = !clean && !resumable && canRecover && state.mode !== "recovery";
+  // A partial effect with no session to continue goes to the supervisor (a run already in recovery returns it to that
+  // episode as the settlement); the job is never replayed from its original assignment.
+  const recovers = !clean && !resumable && canRecover;
   const partial = `executor ${executorId} hit a usage limit after a try that ${result.effects === "some" ? "had" : "may have had"} effects, and its session cannot be continued: ${result.summary}`;
   const stopWith = (blocker: string): QuotaPause => {
     const base = { stopReason, blocker: boundText(blocker) };
@@ -1971,6 +1977,15 @@ function pauseForQuota(
     if (recovers) return { cleared, stop: base, state: { ...enterRecovery(cleared, "quota_partial", boundText(partial)), status: "stopped", ...base } };
     return { cleared, stop: base };
   };
+  if (!clean && !resumable && !canRecover) {
+    return {
+      cleared,
+      stop: {
+        stopReason: QUOTA_RECONCILE_STOP_REASON,
+        blocker: boundText(`executor ${executorId} hit a usage limit after a try that may have had effects (reset ${resetAt ?? "unknown"}): ${result.summary}`),
+      },
+    };
+  }
   if (resetAt === undefined) {
     return stopWith(`executor ${executorId} reported a usage limit with no reset time: ${result.summary}`);
   }
