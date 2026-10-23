@@ -95,10 +95,11 @@ export function createPiHarness(harnessOptions: PiHarnessOptions = {}): CodingHa
 
       let disposed: (() => void) | undefined;
       // Native tools the latest run's own turns called; undefined when they could not be read.
-      let attemptTools: NativeToolUse[] | undefined = [];
+      // Read lazily by finish(), so no return path can report tools before they are collected.
+      let readTools: () => NativeToolUse[] | undefined = () => [];
       const session: CodingSession = {
         async run(request) {
-          attemptTools = [];
+          readTools = () => [];
           if (options.signal?.aborted) return finish({ status: "failed", summary: "agent session aborted" });
           let submitted: { value: unknown } | undefined;
           let contractFailure: string[] | undefined;
@@ -144,13 +145,13 @@ export function createPiHarness(harnessOptions: PiHarnessOptions = {}): CodingHa
           const onAbort = () => void agent.abort().catch(() => undefined);
           options.signal?.addEventListener("abort", onAbort, { once: true });
           const firstNew = agent.messages.length;
+          readTools = () => piNativeTools(agent.messages, firstNew, new Set(tools.map((t) => t.name)));
           try {
             await agent.prompt(promptText(request, options), { expandPromptTemplates: false });
             await agent.waitForIdle();
           } catch (err) {
             return finish({ status: "failed", summary: bounded(err instanceof Error ? err.message : String(err)) });
           } finally {
-            attemptTools = piNativeTools(agent.messages, firstNew, new Set(tools.map((t) => t.name)));
             options.signal?.removeEventListener("abort", onAbort);
           }
 
@@ -189,6 +190,7 @@ export function createPiHarness(harnessOptions: PiHarnessOptions = {}): CodingHa
       };
 
       async function finish(result: CodingRunResult): Promise<CodingRunResult> {
+        const attemptTools = readTools();
         const tooled: CodingRunResult = attemptTools !== undefined ? { ...result, nativeTools: attemptTools } : result;
         if (saved.ref === undefined || !existsSync(saved.file)) return tooled;
         await writeAtomic(settingsFile(saved.file), JSON.stringify(settings));

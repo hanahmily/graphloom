@@ -70,7 +70,7 @@ export const CODEX_ADAPTER_FLAGS: readonly string[] = [
 
 interface CodexEvent {
   type?: string;
-  item?: { id?: unknown; type?: unknown; command?: unknown };
+  item?: { id?: unknown; type?: unknown };
   usage?: Record<string, unknown>;
   error?: { message?: unknown };
   message?: unknown;
@@ -373,14 +373,12 @@ function count(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) ? value : 0;
 }
 
-/** Shell commands Codex may run on a retry-safe basis: plain reads, no pipes, redirects, substitution or chaining. */
-const READ_ONLY_COMMAND = /^(?:cat|ls|head|tail|wc|pwd|grep)(?:\s[^;&|<>`$()\n\\]*)?$/;
-
-function codexToolUse(item: { type?: unknown; command?: unknown }): NativeToolUse {
+/**
+ * Codex has no read-only tool to allowlist: every command, patch or other item
+ * counts as a side effect, and parsing shell text to prove a command harmless is
+ * not reliable. Only a web search is treated as read-only.
+ */
+function codexToolUse(item: { type?: unknown }): NativeToolUse {
   const type = typeof item.type === "string" ? item.type : "unknown";
-  if (type === "web_search") return { name: type, readOnly: true };
-  if (type !== "command_execution" || typeof item.command !== "string") return { name: type, readOnly: false };
-  const wrapped = /^(?:\/\S*)?(?:ba|z|da)?sh\s+-l?c\s+(['"])([\s\S]*)\1$/.exec(item.command.trim());
-  const command = (wrapped?.[2] ?? item.command).trim();
-  return { name: `command_execution: ${command.slice(0, 80)}`, readOnly: READ_ONLY_COMMAND.test(command) };
+  return { name: type, readOnly: type === "web_search" };
 }

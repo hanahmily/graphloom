@@ -502,6 +502,21 @@ describe("transient retry and native tools (Pi)", () => {
     expect(attempts).toBe(2);
   });
 
+  it("does not retry when a thrown error follows a bash call", async () => {
+    vi.stubEnv("GRAPHLOOM_CODING_RETRY_MAX_ATTEMPTS", "2");
+    vi.stubEnv("GRAPHLOOM_CODING_RETRY_BASE_DELAY_MS", "1");
+    vi.stubEnv("GRAPHLOOM_CODING_RETRY_MAX_DELAY_MS", "2");
+    const h = await setup();
+    execFileSync("git", ["-C", h.worktree, "init", "-q"]);
+    const boom = () => {
+      throw new Error("503 Service Unavailable");
+    };
+    h.faux.setResponses([h.use("bash", { command: "echo hi" }), boom, h.use("bash", { command: "echo hi" }), boom]);
+    const result = await h.executor.execute({ assignment: "work" }, h.ctx());
+    expect(payload(result).attempts).toBe(1);
+    expect((result as { summary: string }).summary).toContain("not retried");
+  });
+
   it("does not report native tools from messages it cannot read", () => {
     expect(piNativeTools(undefined, 0, new Set())).toBeUndefined();
     expect(piNativeTools([{ role: "assistant", content: "oops" }], 0, new Set())).toBeUndefined();

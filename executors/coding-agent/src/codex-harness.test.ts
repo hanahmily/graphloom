@@ -259,15 +259,17 @@ describe("transient retry and native tools (Codex)", () => {
     expect((await attempt([])).runs).toBe(2);
   });
 
-  it("does not retry after a shell command that is not a plain read", async () => {
+  it("does not retry after any shell command, even a plain read", async () => {
     const { result, runs } = await attempt([exec('/bin/bash -lc "touch done.txt"')]);
     expect(runs).toBe(1);
-    expect(result.summary).toContain("not retried: the failed try ran a native tool that is not known to be read-only");
-    expect((await attempt([exec("cat a.txt | sh")])).runs).toBe(1);
+    expect(result.summary).toContain("not retried: the failed try ran a native tool that is not known to be read-only (command_execution)");
+    expect((await attempt([exec("cat a.txt")])).runs).toBe(1);
+    expect((await attempt([exec("ls\nrm /tmp/example")])).runs).toBe(1);
   });
 
-  it("retries after only plain read commands", async () => {
-    expect((await attempt([exec('/bin/bash -lc "cat a.txt"'), exec("ls -la")])).runs).toBe(2);
+  it("does not retry after an apply_patch item, but retries after only a web search", async () => {
+    expect((await attempt([{ event: { type: "item.started", item: { id: "p1", type: "file_change" } } }])).runs).toBe(1);
+    expect((await attempt([{ event: { type: "item.started", item: { id: "w1", type: "web_search" } } }])).runs).toBe(2);
   });
 
   it("does not retry when the event stream is unparseable", async () => {
