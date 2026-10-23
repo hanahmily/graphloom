@@ -1,4 +1,5 @@
-import type { DecisionRecord } from "./decision-record.js";
+import { coverageBlock } from "./acceptance.js";
+import type { AcceptanceItem, CoverageEntry, DecisionRecord } from "./decision-record.js";
 import { MAX_DISCOVERY_ROUNDS } from "./constants.js";
 import type { Issue } from "./evidence.js";
 import { ISSUES_DIR } from "./issues.js";
@@ -110,7 +111,17 @@ export function reviewBackground(profile: Profile, issue: Issue, record: Decisio
  */
 export function codeReviewInstruction(
   profile: Profile,
-  args: { ocr: string; base: string; background: string; known?: KnownFindings; sweep?: boolean; round?: number; issues?: IssuesFileRef },
+  args: {
+    ocr: string;
+    base: string;
+    background: string;
+    known?: KnownFindings;
+    sweep?: boolean;
+    round?: number;
+    issues?: IssuesFileRef;
+    /** What the issue asks for and where the implementer says each item is done; the reviewer verifies it. */
+    acceptance?: { items: AcceptanceItem[]; coverage: CoverageEntry[] };
+  },
 ): string {
   const ocr = shellQuote(args.ocr);
   const open = args.known?.open ?? [];
@@ -172,6 +183,7 @@ export function codeReviewInstruction(
     // The extra rule asks for new findings; a verification round raises none.
     ...(verifying ? [] : ["", `Extra rule for ${profile.review.language} files:`, ...profile.review.rules.map((r) => `- ${r}`)]),
     ...known,
+    ...(args.acceptance !== undefined ? coverageBlock(args.acceptance.items, args.acceptance.coverage) : []),
     "",
     "What the change is for:",
     args.background,

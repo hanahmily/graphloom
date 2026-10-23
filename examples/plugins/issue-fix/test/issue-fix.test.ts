@@ -6,7 +6,10 @@ import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 import type { AgentSessionView, EvidenceRecord, GraphDecision, JobSpec, Receipt, RunView, Validator } from "@graphloom/sdk";
 import {
+  acceptanceItems,
   CODE_REVIEW_SCHEMA,
+  DECISION_RECORD_SCHEMA,
+  parseDecisionRecord,
   WHOLE_CHANGE_CHECK,
   COMMAND,
   candidateCommands,
@@ -130,7 +133,7 @@ interface Scenario {
   /** The verifier's result for each verification, in order; the last repeats. By default it confirms every finding it is given. */
   verifications?: Array<{ output: unknown; status?: string }>;
   /** Bytes an observation records for each path; CHANGES.md defaults to `changes`, anything else to empty. */
-  files?: Record<string, string>;
+  files?: Record<string, string | null>;
   /** What the environment check printed for ocr; null records no passing check. */
   ocrPath?: string | null;
   changes?: string;
@@ -402,7 +405,9 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
     } else if (action.type === "observe") {
       for (const p of action.observe.paths ?? []) {
         observed.push(p);
-        record("file", { path: p, bytes: p === CHANGES_PATH ? (scenario.changes ?? CHANGES) : (scenario.files?.[p] ?? "") }, undefined, op);
+        const file = record("file", { path: p, bytes: p === CHANGES_PATH ? (scenario.changes ?? CHANGES) : (scenario.files?.[p] ?? "") }, undefined, op);
+        // A null file is one the worktree does not have: the controller records it as missing.
+        if (scenario.files?.[p] === null) file.fingerprint = "missing";
       }
     } else if (action.type === "validate") {
       const stage = definition.stages.find((s) => s.id === action.validate.stageId)!;
@@ -2084,5 +2089,101 @@ describe("qualification", () => {
     const fixed = qualifyValidators(validatorById, (id) => (id === "build-checks" ? lenient : validatorById(id)));
     expect(fixed.ok).toBe(true);
     expect(qualifyValidators(validatorById, validatorById).ok).toBe(false);
+  });
+});
+
+describe("acceptance coverage before code review (#183)", () => {
+  const SRC = "pkg/timestamp/scheduler.go";
+  const SRC_TEST = "pkg/timestamp/scheduler_test.go";
+  const ITEMS = [
+    { id: "A1", text: "A running action is not reported as timed out." },
+    { id: "A2", text: "The action's real outcome is logged when it ends." },
+  ];
+  const PLANNED: DecisionRecord = { ...PLAN, acceptance: ITEMS };
+  const COVERED: DecisionRecord = {
+    ...PLANNED,
+    coverage: [
+      { id: "A1", files: [SRC], tests: [{ file: SRC_TEST, name: TEST }] },
+      { id: "A2", files: [SRC], tests: [{ file: SRC_TEST, name: "TestSchedulerLogsOutcome" }] },
+    ],
+  };
+  const FILES = { [SRC]: "package timestamp\n", [SRC_TEST]: `func ${TEST}(t *testing.T) {}\nfunc TestSchedulerLogsOutcome(t *testing.T) {}\n` };
+  const implementerJobs = (jobs: JobSpec[]) => jobs.filter((j) => j.jobId === "implementer" && j.purpose === "work");
+  const reviewJobs = (jobs: JobSpec[]) => jobs.filter((j) => j.stageId === "review" && j.purpose === "review");
+
+  it("sends an implementer record that skips an item back before code review, naming the item", () => {
+    const partial: DecisionRecord = { ...PLANNED, coverage: [COVERED.coverage![0]!] };
+    const { decision, jobs, observed } = simulate({ plans: [PLANNED], implement: [partial, COVERED], files: FILES });
+    expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+    const work = implementerJobs(jobs);
+    expect(work).toHaveLength(2);
+    expect(assignment(work[1])).toContain("acceptance-coverage");
+    expect(assignment(work[1])).toContain("A2 (The action's real outcome is logged when it ends.) has no entry in the record's coverage");
+    expect(assignment(work[1])).not.toContain("A1 (A running");
+    expect(observed).toEqual(expect.arrayContaining([SRC, SRC_TEST]));
+    // The correction came first: no review job precedes the second implementer pass.
+    expect(jobs.indexOf(reviewJobs(jobs)[0]!)).toBeGreaterThan(jobs.indexOf(work[1]!));
+  });
+
+  it("sends a record that names a file, or a test file, the change does not have back before code review", () => {
+    const noFile: DecisionRecord = { ...COVERED, coverage: [{ ...COVERED.coverage![0]!, files: ["pkg/timestamp/missing.go"] }, COVERED.coverage![1]!] };
+    const first = simulate({ plans: [PLANNED], implement: [noFile, COVERED], files: { ...FILES, "pkg/timestamp/missing.go": null } });
+    expect(first.decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+    expect(assignment(implementerJobs(first.jobs)[1])).toContain("file pkg/timestamp/missing.go does not exist in the change");
+    const noTestFile: DecisionRecord = { ...COVERED, coverage: [{ ...COVERED.coverage![0]!, tests: [{ file: "pkg/timestamp/nope_test.go", name: TEST }] }, COVERED.coverage![1]!] };
+    const second = simulate({ plans: [PLANNED], implement: [noTestFile, COVERED], files: { ...FILES, "pkg/timestamp/nope_test.go": null } });
+    expect(assignment(implementerJobs(second.jobs)[1])).toContain("test file pkg/timestamp/nope_test.go does not exist in the change");
+    expect(reviewJobs(second.jobs).length).toBeGreaterThan(0);
+  });
+
+  it("sends a record whose test title is not in its file, or has no title, back before code review", () => {
+    const wrongName: DecisionRecord = { ...COVERED, coverage: [COVERED.coverage![0]!, { ...COVERED.coverage![1]!, tests: [{ file: SRC_TEST, name: "TestNeverWritten" }] }] };
+    const { jobs } = simulate({ plans: [PLANNED], implement: [wrongName, COVERED], files: FILES });
+    expect(assignment(implementerJobs(jobs)[1])).toContain(`test "TestNeverWritten" does not appear in ${SRC_TEST}`);
+    const empty: DecisionRecord = { ...COVERED, coverage: [{ id: "A1", files: [], tests: [] }, COVERED.coverage![1]!] };
+    expect(assignment(implementerJobs(simulate({ plans: [PLANNED], implement: [empty, COVERED], files: FILES }).jobs)[1])).toContain("A1 (A running action is not reported as timed out.) names no file and no test");
+  });
+
+  it("dispatches review for a complete record, with the acceptance list and the coverage map", () => {
+    const { decision, jobs } = simulate({ plans: [PLANNED], implement: [COVERED], files: FILES });
+    expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+    expect(implementerJobs(jobs)).toHaveLength(1);
+    const text = assignment(reviewJobs(jobs)[0]);
+    expect(text).toContain("The issue's acceptance items, and where the implementer says each is implemented and tested");
+    expect(text).toContain(`- A1: A running action is not reported as timed out. (files: ${SRC}; tests: ${SRC_TEST}: ${TEST})`);
+    expect(text).toContain("- A2: The action's real outcome is logged when it ends.");
+    // The implementer was told the list and what it owes.
+    expect(assignment(implementerJobs(jobs)[0])).toContain("The record's acceptance lists 2 item(s): A1, A2");
+  });
+
+  it("runs as before for a plan without an acceptance list: no check, no observation, no acceptance block", () => {
+    const { decision, jobs, observed } = simulate({ files: FILES });
+    expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+    expect(implementerJobs(jobs)).toHaveLength(1);
+    expect(observed).toEqual([CHANGES_PATH]);
+    expect(assignment(reviewJobs(jobs)[0])).not.toContain("acceptance items");
+    expect(assignment(implementerJobs(jobs)[0])).not.toContain("acceptance lists");
+  });
+
+  it("counts the correction against the normal budget and hands a persistent gap to the supervisor, never reviewing", () => {
+    const { decision, jobs } = simulate({ plans: [PLANNED], implement: [PLANNED, PLANNED, PLANNED], files: FILES });
+    expect(decision.action.type).toBe("supervise");
+    expect(implementerJobs(jobs)).toHaveLength(3);
+    expect(reviewJobs(jobs)).toHaveLength(0);
+    expect(decision.reason).toContain("hand the unresolved acceptance coverage to the supervisor");
+  });
+
+  it("keeps the planner's list when the implementer's record drops it, and reads the contract as additive", () => {
+    const { acceptance: _planned, ...dropped } = COVERED;
+    const { decision, jobs } = simulate({ plans: [PLANNED], implement: [dropped], files: FILES });
+    expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+    expect(implementerJobs(jobs)).toHaveLength(1);
+    const schema = JSON.parse(DECISION_RECORD_SCHEMA) as { required: string[]; properties: Record<string, unknown> };
+    expect(Object.keys(schema.properties)).toEqual(expect.arrayContaining(["acceptance", "coverage"]));
+    // Additive: neither is required, so a record from before 0.10.0 still parses and runs.
+    expect(schema.required).not.toContain("acceptance");
+    expect(schema.required).not.toContain("coverage");
+    expect(parseDecisionRecord(JSON.stringify(PLAN))).toHaveProperty("record");
+    expect(acceptanceItems(PLAN)).toEqual([]);
   });
 });

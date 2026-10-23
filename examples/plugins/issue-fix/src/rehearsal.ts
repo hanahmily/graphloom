@@ -210,6 +210,8 @@ const GO_TEST_REHEARSAL: GraphRehearsal = {
 const SCOPE_TEST = "packages/sdk/src/scope-exclusion.test.ts";
 const SCOPE_TEST_NAME = "writeScopeAllows forbids a path below an excluded directory";
 const SCOPE_TEST_BYTES = `import { describe, expect, it } from "vitest";\nimport { writeScopeAllows } from "./scope.js";\n\ndescribe("writeScopeAllows", () => {\n  it("forbids a path below an excluded directory", () => {\n    expect(writeScopeAllows("legacy/go/main.go", [".", "!legacy"])).toBe(false);\n  });\n});\n`;
+// The implementer's map for the planner's acceptance item; the plan itself carries none.
+const VITEST_COVERAGE = [{ id: "A1", files: ["packages/sdk/src/scope.ts"], tests: [{ file: SCOPE_TEST, name: "forbids a path below an excluded directory" }] }];
 const VITEST_RECORD = {
   title: "Forbid paths below an excluded directory",
   status: "ready",
@@ -217,6 +219,7 @@ const VITEST_RECORD = {
   summary: "An excluded directory in a write scope must forbid every path below it; the regression test pins that.",
   test: { package: SCOPE_TEST, name: SCOPE_TEST_NAME, expectedValueSource: "the issue: an excluded directory covers everything below it" },
   productionCaller: "packages/sdk/src/scope.ts writeScopeAllows",
+  acceptance: [{ id: "A1", text: "An excluded directory in a write scope forbids every path below it." }],
   decisions: [],
   openQuestions: [],
   followUps: [],
@@ -234,7 +237,10 @@ const VITEST_REHEARSAL: GraphRehearsal = {
   scenarios: {
     happy: {
       results: {
-        "decision-record-v2": [{ output: VITEST_RECORD, effects: [{ path: SCOPE_TEST, bytes: SCOPE_TEST_BYTES }] }],
+        "decision-record-v2": [
+          { output: VITEST_RECORD },
+          { output: { ...VITEST_RECORD, coverage: VITEST_COVERAGE }, effects: [{ path: SCOPE_TEST, bytes: SCOPE_TEST_BYTES }] },
+        ],
         "code-review-v2": [{ output: { comments: [], prior: [], summary: { total_files: 1, reviewed_files: 1, skipped: [] } } }],
       },
       expect: { status: "succeeded", receipts: [FIX_STAGE, REVIEW_STAGE] },
@@ -248,6 +254,7 @@ const CANOPY_SOURCE = "canopy/server/src/rehearsal-marker.ts";
 const CANOPY_TEST_BYTES = `import { existsSync } from 'node:fs';\nimport { join } from 'node:path';\nimport { describe, expect, it } from 'vitest';\n\n// Vitest runs from the server workspace, also for the compiled copy of this test under dist/.\ndescribe('rehearsal marker', () => {\n  it('exists beside the server sources', () => {\n    expect(existsSync(join(process.cwd(), 'src/rehearsal-marker.ts'))).toBe(true);\n  });\n});\n`;
 const CANOPY_SOURCE_BYTES = "export const REHEARSAL_MARKER = 'canopy-issue-fix-rehearsal';\n";
 const CANOPY_CHANGES = "# Changes by Version\n\nRelease Notes.\n\n## 0.0.0\n\n### Chores\n\n- Add the canopy rehearsal marker module.\n";
+const CANOPY_COVERAGE = [{ id: "A1", files: [CANOPY_SOURCE], tests: [{ file: CANOPY_TEST, name: "exists beside the server sources" }] }];
 const CANOPY_RECORD = {
   title: "Add the canopy rehearsal marker module",
   status: "ready",
@@ -255,6 +262,7 @@ const CANOPY_RECORD = {
   summary: "The marker module exists beside the server sources; the regression test pins that.",
   test: { package: CANOPY_TEST, name: CANOPY_TEST_NAME, expectedValueSource: "the rehearsal's own premise: the marker module must exist" },
   productionCaller: `${CANOPY_SOURCE} REHEARSAL_MARKER`,
+  acceptance: [{ id: "A1", text: "The canopy server has a rehearsal marker module beside its sources." }],
   decisions: [],
   openQuestions: [],
   followUps: [],
@@ -279,7 +287,7 @@ const CANOPY_REHEARSAL: GraphRehearsal = {
           // The plan is a read-only job: it must leave CHANGES.md as the checkout has it.
           { output: CANOPY_RECORD },
           {
-            output: CANOPY_RECORD,
+            output: { ...CANOPY_RECORD, coverage: CANOPY_COVERAGE },
             effects: [
               { path: CANOPY_TEST, bytes: CANOPY_TEST_BYTES },
               { path: CANOPY_SOURCE, bytes: CANOPY_SOURCE_BYTES },

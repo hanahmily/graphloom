@@ -14,6 +14,7 @@ import {
   codeReviewInstruction,
   WHOLE_CHANGE_CHECK,
   DEDUPE_RULE,
+  DECISION_RECORD_SCHEMA,
   commitMessage,
   createGraph,
   decisionProblems,
@@ -79,6 +80,7 @@ const TS_PLAN: DecisionRecord = {
 };
 const ISSUE = { number: 14111, title: "Scheduler reports long actions as timed out", state: "open", url: "u", labels: ["bug"], body: "Backups longer than five minutes are reported as timed out." };
 
+const RECORD_PROPERTIES = (JSON.parse(DECISION_RECORD_SCHEMA) as { properties: Record<string, unknown> }).properties;
 const banyandbFixDist = path.join(repoRoot, "examples/plugins/banyandb-fix/dist");
 const load = async (module: string) => (await import(pathToFileURL(path.join(banyandbFixDist, module)).href)) as Record<string, (...args: never[]) => unknown>;
 
@@ -99,6 +101,8 @@ describe.skipIf(!existsSync(path.join(banyandbFixDist, "index.js")))("the banyan
           .replaceAll("decision-record-v2", "decision-record-v1")
           .replace('"change":{"type":"string"},', "")
           .replace('"summary","change",', '"summary",')
+          // #183: the planner's `acceptance` and the implementer's `coverage`, additive to decision-record-v2.
+          .replace(`,"acceptance":${JSON.stringify(RECORD_PROPERTIES.acceptance)},"coverage":${JSON.stringify(RECORD_PROPERTIES.coverage)}`, "")
           .replace(',"selfChecks":{"type":"array","items":{"type":"string"}}', "")
           // #182: a code review comment may be marked `distinct`, which banyandb-fix never had.
           .replace(',"distinct":{"type":"boolean"}', "")
@@ -111,7 +115,7 @@ describe.skipIf(!existsSync(path.join(banyandbFixDist, "index.js")))("the banyan
     });
     expect(monolithic(v1(strip(ours)))).toEqual(strip(withoutLicense(theirs)));
     expect(theirs.environment?.prepare?.map((c) => c.argv.join(" "))).toEqual(["make generate"]);
-    expect(ours).toMatchObject({ graphId: "issue-fix", version: "0.9.0", privateStateSchema: "issue-fix-private-v1" });
+    expect(ours).toMatchObject({ graphId: "issue-fix", version: "0.10.0", privateStateSchema: "issue-fix-private-v1" });
   });
 
   it("splits make generate into separately cached steps with narrow inputs (#174)", () => {
@@ -142,7 +146,7 @@ describe.skipIf(!existsSync(path.join(banyandbFixDist, "index.js")))("the banyan
     const v1 = (text: string) =>
       text
         .split("\n")
-        .filter((l) => !l.startsWith("- change: ") && !l.startsWith("- summary is your report") && !l.startsWith("- Before you return status ready"))
+        .filter((l) => !l.startsWith("- change: ") && !l.startsWith("- summary is your report") && !l.startsWith("- Before you return status ready") && !l.startsWith("- acceptance: "))
         .map((l) => (l === `- ${banyandb.implementation.checks}` ? `- ${theirChecks}` : l))
         .join("\n")
         .replaceAll("decision-record-v2", "decision-record-v1");

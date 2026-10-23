@@ -35,6 +35,7 @@ import {
   REQUIREMENT_SCOPE,
   REVIEW_STAGE,
 } from "./constants.js";
+import { acceptanceItems, coverageEntries, coverageFeedback, coverageFiles, coverageProblems, MAX_COVERAGE_FILES, observableCoverageFiles } from "./acceptance.js";
 import { DECISION_RECORD_SCHEMA, parseDecisionRecord, writeScopeFor, type DecisionRecord } from "./decision-record.js";
 import {
   agentRuns,
@@ -119,7 +120,7 @@ import {
 import { cleanRun, codeReview, implementerRecord, plannerRecord, reportText, validatorById, verifiedChecks } from "./validators.js";
 
 export const GRAPH_ID = "issue-fix";
-export const GRAPH_VERSION = "0.9.0";
+export const GRAPH_VERSION = "0.10.0";
 
 /** Graph bookkeeping; everything else is read back from recorded evidence. */
 export interface FixPrivateState {
@@ -457,6 +458,9 @@ function fix(ctx: Context, view: RunView, issue: number, state: FixPrivateState)
   }
 
   if (results.every((r) => r.result.status === "passed")) {
+    // Before the change is accepted, and so before code review is paid for: every acceptance item is covered.
+    const uncovered = acceptanceStep(ctx, view, issue, state, plan.record, record, current, digest, implementer);
+    if (uncovered !== undefined) return uncovered;
     return withPrivate(validate({ stageId: FIX_STAGE }, "validate Fix from the checks bound to the current change"), state);
   }
   const feedback = correctionFeedback(profile, current, digest, skipped.length > 0 ? results.filter((r) => r.result.status === "failed") : results);
@@ -471,6 +475,48 @@ function fix(ctx: Context, view: RunView, issue: number, state: FixPrivateState)
   return supervise(
     { reason: `Fix still fails after ${state.corrections} corrections: ${feedback.slice(0, 3).join("; ")}`, evidenceRefs: current.map((e) => e.ref).slice(-10) },
     "hand the unresolved Fix stage to the supervisor",
+    JSON.stringify(state),
+  );
+}
+
+/**
+ * The acceptance-coverage check (acceptance.ts): when the plan lists the
+ * issue's acceptance items, the implementer's record must cover each with
+ * files and tests that exist in the candidate. Reads the named files into the
+ * evidence first, then judges without a model; a gap is a normal correction.
+ * Undefined when the plan lists nothing or the change is covered.
+ */
+function acceptanceStep(
+  ctx: Context,
+  view: RunView,
+  issue: number,
+  state: FixPrivateState,
+  plan: DecisionRecord,
+  record: DecisionRecord | undefined,
+  current: EvidenceRecord[],
+  digest: string,
+  implementer: (job: JobSpec, summary: string, next: FixPrivateState) => GraphDecision,
+): GraphDecision | undefined {
+  const items = acceptanceItems(plan);
+  if (items.length === 0 || record === undefined) return undefined;
+  const entries = coverageEntries(record);
+  const unread = coverageFiles(entries).length > MAX_COVERAGE_FILES ? [] : observableCoverageFiles(entries).filter((p) => latestFile(current, p, digest) === undefined);
+  if (unread.length > 0) return withPrivate(observe({ paths: unread }, "observe the files the implementer's coverage map names, for the acceptance-coverage check"), state);
+  const read = (path: string) => {
+    const file = latestFile(current, path, digest);
+    if (file === undefined) return undefined;
+    return file.record.fingerprint === "missing" ? { exists: false as const } : { exists: true as const, bytes: file.bytes };
+  };
+  const green = latestCheckoutRun(current, COMMAND.regression, "candidate", digest);
+  const problems = coverageProblems(items, entries, read, green?.checkout?.paths ?? []);
+  if (problems.length === 0) return undefined;
+  const feedback = [coverageFeedback(problems)];
+  if (state.corrections < MAX_FIX_CORRECTIONS && view.budgets.corrections > 0) {
+    return implementer(implementJob(ctx, view, issue, record, feedback), "send the change back: the acceptance items are not all covered, so code review does not run", { ...state, corrections: state.corrections + 1 });
+  }
+  return supervise(
+    { reason: `the change still does not cover every acceptance item after ${state.corrections} corrections: ${problems.slice(0, 3).join("; ")}`, evidenceRefs: current.map((e) => e.ref).slice(-10) },
+    "hand the unresolved acceptance coverage to the supervisor",
     JSON.stringify(state),
   );
 }
@@ -511,7 +557,17 @@ function review(ctx: Context, view: RunView, issue: number, state: FixPrivateSta
     // The reviewer may read the issues file; it reports in its result, and the graph applies that.
     const restore = issuesRestore(view, ledger, REVIEW_STAGE, state);
     if (restore !== undefined) return restore;
-    const assignment = codeReviewInstruction(profile, { ocr, base, background, known: knownFindings(ledger), sweep, round, issues: { file: ISSUES_FILE, markdown: ISSUES_MARKDOWN } });
+    const items = acceptanceItems(plannerRecord(view.evidence));
+    const assignment = codeReviewInstruction(profile, {
+      ocr,
+      base,
+      background,
+      known: knownFindings(ledger),
+      sweep,
+      round,
+      issues: { file: ISSUES_FILE, markdown: ISSUES_MARKDOWN },
+      ...(items.length > 0 ? { acceptance: { items, coverage: coverageEntries(record) } } : {}),
+    });
     const summary = verifying
       ? `verify the known findings on the change in review round ${round}, after the ${MAX_DISCOVERY_ROUNDS} discovery rounds (read-only)`
       : sweep
@@ -827,8 +883,11 @@ function verificationJob(profile: Profile, assignment: string): JobSpec {
   };
 }
 
-function implementJob(ctx: Context, view: RunView, issue: number, record: DecisionRecord, feedback: string[] | undefined): JobSpec {
+function implementJob(ctx: Context, view: RunView, issue: number, given: DecisionRecord, feedback: string[] | undefined): JobSpec {
   const { profile } = ctx;
+  // The implementer's own record may have dropped the planner's acceptance list; the list is the planner's.
+  const planned = plannerRecord(view.evidence)?.acceptance;
+  const record: DecisionRecord = given.acceptance === undefined && planned !== undefined ? { ...given, acceptance: planned } : given;
   const from = implementerSession(view);
   const table = findingLedger(view.evidence).issues;
   // The fixer's last edits to the issues file the graph refused, so it does not repeat them.

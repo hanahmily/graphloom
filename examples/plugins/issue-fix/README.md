@@ -98,6 +98,21 @@ graphloom profile the full suite takes about ten minutes; its commands allow
 GRAPHLOOM_GITHUB_LIVE_TOKEN="$(gh auth token)" node ../apps/graphloom/dist/main.js run issue-fix-graphloom-task.yaml
 ```
 
+## Generated files, duplicate findings and acceptance coverage (0.10.0)
+
+- A profile command may declare `writes`: the files it regenerates, such as
+  canopy's `canopy/LICENSE` and `canopy/licenses/**` for `make license-dep`.
+  The implementer's write scope covers them even when `protectedPaths` lists
+  them, so a correction for a failed license check is not refused for scope.
+- A problem the code reviewer raises twice (per file and in the whole-change
+  check or a sweep pass) is one finding when the lines overlap on the same
+  path in the same round; a comment marked `distinct` stays separate.
+- The planner lists the issue's acceptance items (`acceptance`) and the
+  implementer maps each to files and tests (`coverage`); the graph checks the
+  map before code review and sends the change back for anything uncovered. A
+  plan without `acceptance` runs as before. The contract is
+  `decision-record-v2` with these two optional fields.
+
 ## The canopy profile
 
 [`profiles/canopy.json`](profiles/canopy.json) (since 0.9.0) checks changes
