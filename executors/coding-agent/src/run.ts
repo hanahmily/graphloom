@@ -1,5 +1,5 @@
 import { defineExecutor, jsonSchemaProblem, type ExecutorContext, type ExecutorDefinition, type ToolCallResult } from "@graphloom/sdk";
-import type { CodingHarness, CodingRunResult, CodingSession, CodingTool } from "./harness.js";
+import type { CodingHarness, CodingRunResult, CodingUsage, CodingSession, CodingTool } from "./harness.js";
 import { abortableSleep, backoffMs, classifyTransient, resolveRetryPolicy, worktreeDigest, type TransientRetryPolicy } from "./transient.js";
 
 export const CODING_AGENT_RUN_ID = "graphloom.coding-agent/run";
@@ -72,6 +72,19 @@ export interface CodingAgentExecutorOptions {
   retry?: Partial<TransientRetryPolicy>;
   /** Wait between tries; resolves false when the job's signal aborted first. Tests replace it; the default is a real timer. */
   sleep?: (ms: number, signal: AbortSignal | undefined) => Promise<boolean>;
+}
+
+function addUsage(total: CodingUsage | undefined, next: CodingUsage | undefined): CodingUsage | undefined {
+  if (next === undefined) return total;
+  if (total === undefined) return { ...next };
+  const costUsd = total.costUsd === undefined && next.costUsd === undefined ? undefined : (total.costUsd ?? 0) + (next.costUsd ?? 0);
+  return {
+    inputTokens: total.inputTokens + next.inputTokens,
+    outputTokens: total.outputTokens + next.outputTokens,
+    cacheReadTokens: total.cacheReadTokens + next.cacheReadTokens,
+    cacheWriteTokens: total.cacheWriteTokens + next.cacheWriteTokens,
+    ...(costUsd !== undefined ? { costUsd } : {}),
+  };
 }
 
 /** One transient failure the executor waited out, recorded in the job's evidence. */
@@ -186,27 +199,31 @@ export function createCodingAgentExecutor(
         const sleep = executorOptions.sleep ?? abortableSleep;
         const retries: RetryRecord[] = [];
         let result: CodingRunResult;
+        let usage: CodingUsage | undefined;
         for (let attempt = 1; ; attempt++) {
           // A retry re-runs the whole assignment, so it needs proof the failed
-          // try changed nothing: an unchanged worktree and no write tool call.
-          // Without a readable digest only a fresh session retries; a continued
-          // one is not repeated blind.
+          // try changed nothing: a readable worktree fingerprint (HEAD, ref,
+          // status, contents) identical before and after, and no write tool
+          // call. Without that proof, fresh or continued, it is not repeated.
           const before = policy.maxAttempts > 1 ? await worktreeDigest(ctx.worktreePath) : undefined;
           const callsBefore = toolCalls.length;
           result = await session.run(request);
+          usage = addUsage(usage, result.usage);
           const transient = result.status === "failed" ? classifyTransient(h.name, result.summary) : undefined;
           if (transient === undefined) break;
           const wrote = toolCalls.slice(callsBefore).some((c) => tools.find((t) => t.name === c.tool)?.effect !== "read");
-          const unchanged = wrote
-            ? false
-            : before === undefined
-              ? resume === undefined
-              : (await worktreeDigest(ctx.worktreePath)) === before;
-          if (attempt >= policy.maxAttempts || !unchanged) {
+          const after = wrote || attempt >= policy.maxAttempts || before === undefined ? undefined : await worktreeDigest(ctx.worktreePath);
+          if (attempt >= policy.maxAttempts || wrote || before === undefined || after !== before) {
             const why =
               attempt >= policy.maxAttempts
                 ? `retries exhausted after ${attempt} ${attempt === 1 ? "try" : "tries"}`
-                : "not retried: the failed try may have changed the worktree or called a write tool";
+                : wrote
+                  ? "not retried: the failed try called a write tool"
+                  : before === undefined
+                    ? "not retried: the worktree cannot be fingerprinted (not a readable git worktree), so changes by the failed try cannot be ruled out"
+                    : after === undefined
+                      ? "not retried: the worktree could not be fingerprinted after the failed try"
+                      : "not retried: the failed try changed the worktree";
             result = { ...result, summary: `Transient harness failure (${transient.reason}); ${why}: ${result.summary}` };
             break;
           }
@@ -217,6 +234,7 @@ export function createCodingAgentExecutor(
             break;
           }
         }
+        result = usage !== undefined ? { ...result, usage } : result;
         const sessionRef = ctx.session !== undefined ? result.sessionRef : undefined;
         return {
           status: result.status === "completed" ? "ok" : "failed",

@@ -37,6 +37,7 @@ async function setupCodex(sequence: unknown[], retry = { maxAttempts: 3, baseDel
   temps.push(dir);
   const worktree = path.join(dir, "worktree");
   await mkdir(worktree);
+  execFileSync("git", ["-C", worktree, "init", "-q"]);
   const scriptFile = path.join(dir, "script.json");
   const logFile = path.join(dir, "log.jsonl");
   const bin = path.join(dir, "codex");
@@ -137,9 +138,10 @@ function flaky(name: string, outcomes: Array<CodingRunResult | (() => Promise<Co
 const failed = (summary: string): CodingRunResult => ({ status: "failed", summary });
 const ok: CodingRunResult = { status: "completed", summary: "done" };
 
-async function plainCtx(over: Partial<ExecutorContext> = {}): Promise<ExecutorContext> {
+async function plainCtx(over: Partial<ExecutorContext> = {}, git = true): Promise<ExecutorContext> {
   const dir = await mkdtemp(path.join(os.tmpdir(), "gl-transient-ctx-"));
   temps.push(dir);
+  if (git) execFileSync("git", ["-C", dir, "init", "-q"]);
   return { runId: "r1", operationId: "op1", generation: 1, worktreePath: dir, artifactDir: dir, ...over };
 }
 
@@ -196,7 +198,7 @@ describe("transient retry safety and abort", () => {
   it("does not retry a continuation when the worktree cannot be fingerprinted", async () => {
     const h = flaky("pi", [failed("agent request failed: 502 Bad Gateway"), ok]);
     const executor = createCodingAgentExecutor(h, { retry: { maxAttempts: 3, baseDelayMs: 1, maxDelayMs: 2 } });
-    const result = await executor.execute({ assignment: "continue" }, await plainCtx({ session: { dir: os.tmpdir(), resume: "ref-1" } }));
+    const result = await executor.execute({ assignment: "continue" }, await plainCtx({ session: { dir: os.tmpdir(), resume: "ref-1" } }, false));
     expect(result).toMatchObject({ status: "failed" });
     expect(h.runs()).toBe(1);
   });
@@ -222,6 +224,57 @@ describe("transient retry safety and abort", () => {
     );
     expect(result).toMatchObject({ status: "failed" });
     expect((result as { summary: string }).summary).toContain("not retried");
+  });
+});
+
+describe("transient retry: fail closed and usage", () => {
+  it("does not retry when the failed try committed its changes (clean tree, new HEAD)", async () => {
+    const worktree = await mkdtemp(path.join(os.tmpdir(), "gl-transient-git-"));
+    temps.push(worktree);
+    const git = (...args: string[]) => execFileSync("git", ["-C", worktree, "-c", "user.name=t", "-c", "user.email=t@t", ...args]);
+    git("init", "-q");
+    git("commit", "-q", "--allow-empty", "-m", "base");
+    const h = flaky("codex", [
+      async () => {
+        await writeFile(path.join(worktree, "a.txt"), "x");
+        git("add", "a.txt");
+        git("commit", "-q", "-m", "agent work");
+        return failed(`Codex run failed: ${CAPACITY}`);
+      },
+      ok,
+    ]);
+    const executor = createCodingAgentExecutor(h, { retry: { maxAttempts: 3, baseDelayMs: 1, maxDelayMs: 2 } });
+    const result = await executor.execute({ assignment: "work" }, await plainCtx({ worktreePath: worktree }, false));
+    expect(result).toMatchObject({ status: "failed" });
+    expect((result as { summary: string }).summary).toContain("not retried: the failed try changed the worktree");
+    expect(h.runs()).toBe(1);
+  });
+
+  it("does not retry a fresh job in a non-git worktree, and says why", async () => {
+    const h = flaky("codex", [failed(`Codex run failed: ${CAPACITY}`), ok]);
+    const executor = createCodingAgentExecutor(h, { retry: { maxAttempts: 3, baseDelayMs: 1, maxDelayMs: 2 } });
+    const result = await executor.execute({ assignment: "work" }, await plainCtx({}, false));
+    expect(result).toMatchObject({ status: "failed" });
+    expect((result as { summary: string }).summary).toMatch(/model at capacity.*cannot be fingerprinted/);
+    expect(h.runs()).toBe(1);
+  });
+
+  it("sums usage across attempts and keeps it when the backoff is aborted", async () => {
+    const usage = (n: number) => ({ inputTokens: n, outputTokens: n * 2, cacheReadTokens: 1, cacheWriteTokens: 0 });
+    const h = flaky("codex", [{ ...failed(`Codex run failed: ${CAPACITY}`), usage: usage(10) }, { ...ok, usage: usage(5) }]);
+    const executor = createCodingAgentExecutor(h, { retry: { maxAttempts: 3, baseDelayMs: 1, maxDelayMs: 2 } });
+    const result = await executor.execute({ assignment: "work" }, await plainCtx());
+    expect(result).toMatchObject({ status: "ok" });
+    expect(payload(result).usage).toEqual({ inputTokens: 15, outputTokens: 30, cacheReadTokens: 2, cacheWriteTokens: 0 });
+
+    const aborting = flaky("codex", [{ ...failed(`Codex run failed: ${CAPACITY}`), usage: usage(10) }, ok]);
+    const controller = new AbortController();
+    const aborted = await createCodingAgentExecutor(aborting, {
+      retry: { maxAttempts: 3, baseDelayMs: 1, maxDelayMs: 2 },
+      sleep: async () => (controller.abort(), false),
+    }).execute({ assignment: "work" }, await plainCtx({ signal: controller.signal }));
+    expect(aborted).toMatchObject({ status: "failed" });
+    expect(payload(aborted).usage).toEqual(usage(10));
   });
 });
 

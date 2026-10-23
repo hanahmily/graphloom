@@ -124,18 +124,26 @@ export function abortableSleep(ms: number, signal: AbortSignal | undefined): Pro
  * Fingerprints the worktree (tracked changes plus untracked file sizes and
  * mtimes). A retry re-runs the whole assignment, so it is safe only when the
  * failed attempt left the worktree as it found it. undefined when the
- * directory is not a git worktree: a change cannot be ruled out.
+ * directory is not a git worktree or any git read fails: a change cannot be ruled out.
  */
 export async function worktreeDigest(cwd: string): Promise<string | undefined> {
   const git = (args: string[]) => execFileAsync("git", ["-C", cwd, ...args], { maxBuffer: 256 * 1024 * 1024, encoding: "buffer" });
   try {
     const hash = createHash("sha256");
+    const ref = (await git(["symbolic-ref", "-q", "HEAD"]).catch(() => ({ stdout: Buffer.from("(detached)") }))).stdout;
+    // An unborn branch has no commit; any other failure to read HEAD fails closed.
+    const head = await git(["rev-parse", "--verify", "-q", "HEAD"]).then(
+      (r) => ({ id: r.stdout.toString().trim(), unborn: false }),
+      () => (ref.toString().startsWith("refs/") ? { id: "", unborn: true } : undefined),
+    );
+    if (head === undefined) return undefined;
+    hash.update(`${ref.toString().trim()}\0${head.id}\0`);
     hash.update((await git(["status", "--porcelain=v1", "-z", "--untracked-files=all"])).stdout);
-    hash.update((await git(["diff", "HEAD", "--binary"]).catch(() => ({ stdout: Buffer.alloc(0) }))).stdout);
+    hash.update((await git(head.unborn ? ["diff", "--binary"] : ["diff", "HEAD", "--binary"])).stdout);
     const untracked = (await git(["ls-files", "-o", "--exclude-standard", "-z"])).stdout.toString("utf8").split("\0").filter(Boolean);
     for (const file of untracked) {
-      const s = await stat(path.join(cwd, file)).catch(() => undefined);
-      hash.update(`${file}\0${s?.size ?? -1}\0${s?.mtimeMs ?? -1}\0`);
+      const s = await stat(path.join(cwd, file));
+      hash.update(`${file}\0${s.size}\0${s.mtimeMs}\0`);
     }
     return hash.digest("hex");
   } catch {
