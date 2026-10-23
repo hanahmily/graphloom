@@ -208,19 +208,23 @@ const GO_TEST_REHEARSAL: GraphRehearsal = {
   },
 };
 
-const SCOPE_TEST = "packages/sdk/src/scope-exclusion.test.ts";
-const SCOPE_TEST_NAME = "writeScopeAllows forbids a path below an excluded directory";
-const SCOPE_TEST_BYTES = `import { describe, expect, it } from "vitest";\nimport { writeScopeAllows } from "./scope.js";\n\ndescribe("writeScopeAllows", () => {\n  it("forbids a path below an excluded directory", () => {\n    expect(writeScopeAllows("legacy/go/main.go", [".", "!legacy"])).toBe(false);\n  });\n});\n`;
+const SCOPE_TEST = "packages/sdk/src/rehearsal-marker.test.ts";
+const SCOPE_TEST_NAME = "rehearsal marker exists beside the sdk sources";
+const SCOPE_SOURCE = "packages/sdk/src/rehearsal-marker.ts";
+// Self-contained: the test asserts that a new module exists, so it fails by assertion on the base commit
+// and passes with the change, whatever else the repository's own code does now or later.
+const SCOPE_TEST_BYTES = `import { existsSync } from "node:fs";\nimport { dirname, join } from "node:path";\nimport { fileURLToPath } from "node:url";\nimport { describe, expect, it } from "vitest";\n\ndescribe("rehearsal marker", () => {\n  it("exists beside the sdk sources", () => {\n    expect(existsSync(join(dirname(fileURLToPath(import.meta.url)), "rehearsal-marker.ts"))).toBe(true);\n  });\n});\n`;
+const SCOPE_SOURCE_BYTES = 'export const REHEARSAL_MARKER = "graphloom-issue-fix-rehearsal";\n';
 // The implementer's map for the planner's acceptance item; the plan itself carries none.
-const VITEST_COVERAGE = [{ id: "A1", files: ["packages/sdk/src/scope.ts"], tests: [{ file: SCOPE_TEST, name: "forbids a path below an excluded directory" }] }];
+const VITEST_COVERAGE = [{ id: "A1", files: [SCOPE_SOURCE], tests: [{ file: SCOPE_TEST, name: "exists beside the sdk sources" }] }];
 const VITEST_RECORD = {
-  title: "Forbid paths below an excluded directory",
+  title: "Add the sdk rehearsal marker module",
   status: "ready",
-  change: "A write scope that excludes a directory now forbids every path below it, not only the directory itself. A regression test pins that.",
-  summary: "An excluded directory in a write scope must forbid every path below it; the regression test pins that.",
-  test: { package: SCOPE_TEST, name: SCOPE_TEST_NAME, expectedValueSource: "the issue: an excluded directory covers everything below it" },
-  productionCaller: "packages/sdk/src/scope.ts writeScopeAllows",
-  acceptance: [{ id: "A1", text: "An excluded directory in a write scope forbids every path below it." }],
+  change: "The sdk gains a rehearsal marker module. A regression test pins that it exists.",
+  summary: "The marker module exists beside the sdk sources; the regression test pins that.",
+  test: { package: SCOPE_TEST, name: SCOPE_TEST_NAME, expectedValueSource: "the rehearsal's own premise: the marker module must exist" },
+  productionCaller: `${SCOPE_SOURCE} REHEARSAL_MARKER`,
+  acceptance: [{ id: "A1", text: "The sdk has a rehearsal marker module beside its sources." }],
   decisions: [],
   openQuestions: [],
   followUps: [],
@@ -229,7 +233,9 @@ const VITEST_RECORD = {
 };
 
 /**
- * Hand-written, not recorded: no live run of a vitest profile exists yet. Its
+ * Hand-written, not recorded: no live run of a vitest profile exists yet, and
+ * self-contained (it adds its own marker module and test, never editing real
+ * repository code, so a repository change cannot stale it). Its
  * replies satisfy the contracts and the vitest runner's rules, so the static
  * check (L0) walks them through the real validators; a full rehearsal (L1)
  * would also run the profile's real commands in the target repository.
@@ -240,9 +246,13 @@ const VITEST_REHEARSAL: GraphRehearsal = {
       results: {
         "decision-record-v2": [
           { output: VITEST_RECORD },
-          { output: { ...VITEST_RECORD, coverage: VITEST_COVERAGE }, effects: [{ path: SCOPE_TEST, bytes: SCOPE_TEST_BYTES }] },
+          { output: { ...VITEST_RECORD, coverage: VITEST_COVERAGE }, effects: [
+              { path: SCOPE_TEST, bytes: SCOPE_TEST_BYTES },
+              { path: SCOPE_SOURCE, bytes: SCOPE_SOURCE_BYTES },
+            ],
+          },
         ],
-        "code-review-v2": [{ output: { contract: "dedupe-1", comments: [], prior: [], summary: { total_files: 1, reviewed_files: 1, skipped: [] } } }],
+        "code-review-v2": [{ output: { contract: "dedupe-1", comments: [], prior: [], summary: { total_files: 2, reviewed_files: 2, skipped: [] } } }],
       },
       expect: { status: "succeeded", receipts: [FIX_STAGE, REVIEW_STAGE] },
     },

@@ -33,12 +33,15 @@ export {
   recordUnverifiedRead,
   rehearsalHomeDir,
   REHEARSAL_ADVERSARIAL_ENV,
+  REHEARSAL_GITHUB_TOKEN_ENV,
   REHEARSAL_HOME_ENV,
+  REHEARSAL_ONLY_ENV,
   REHEARSAL_SCENARIO_ENV,
   REHEARSAL_SYNTHESIZED_ENV,
   requireScenario,
   resetRehearsalScenarioCache,
   synthesizedRepliesOnly,
+  withoutRehearsalEnv,
 } from "./rehearsal-client.js";
 
 export type {

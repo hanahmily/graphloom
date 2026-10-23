@@ -56,6 +56,8 @@ async function fakeOcr(dir: string): Promise<string> {
     path.join(bin, "ocr"),
     [
       "#!/bin/sh",
+      // Records the environment every invocation sees, for the leak test (#187).
+      `env >> ${JSON.stringify(path.join(dir, "ocr-env.txt"))}`,
       '[ "$1 $2" = "delegate preview" ] || exit 1',
       '[ "$3" = --help ] && exit 0',
       'echo \'{"mode":"workspace","reviewable_files":[]}\'',
@@ -121,6 +123,15 @@ describe.skipIf(GO === undefined)("graphloom rehearse (L1) on issue-fix with the
     const report = await rehearse(env.taskPath, { commands: "run" });
     expect(report.verdict, JSON.stringify({ blocker: report.blocker, convergence: report.convergence })).toBe("ready");
     expect(report.convergence.actual.receipts.sort()).toEqual(["fix", "review"]);
+  }, 120_000);
+
+  it("never lets a command the graph runs see the variables that configure the stand-ins (#187)", async () => {
+    const env = await ready();
+    const report = await rehearse(env.taskPath, { commands: "run" });
+    expect(report.verdict, JSON.stringify({ blocker: report.blocker, convergence: report.convergence })).toBe("ready");
+    const seen = await readFile(path.join(env.dir, "ocr-env.txt"), "utf8");
+    expect(seen).toMatch(/^PATH=/m); // the check really ran, and with the operator's environment
+    expect(seen).not.toMatch(/GRAPHLOOM_REHEARSAL/);
   }, 120_000);
 
   it("walks the banyandb profile's recorded replies through its real validators at L0, finding nothing a real dispatch would not", async () => {

@@ -30,6 +30,32 @@ export const REHEARSAL_SYNTHESIZED_ENV = "GRAPHLOOM_REHEARSAL_SYNTHESIZED";
 /** `--adversarial` (§4.4): set to `"1"` to make every agent stand-in corrupt its reply via `mutateAdversarially` before submitting it. */
 export const REHEARSAL_ADVERSARIAL_ENV = "GRAPHLOOM_REHEARSAL_ADVERSARIAL";
 
+/** The fake GitHub token a rehearsal hands the GitHub executor (`--offline` or a faked base URL) so it never needs a real one. */
+export const REHEARSAL_GITHUB_TOKEN_ENV = "GRAPHLOOM_REHEARSAL_GITHUB_TOKEN";
+
+/**
+ * Every variable that exists only to configure a rehearsal's stand-ins. The
+ * single list: a rehearsal sets these in its own process so the stand-in
+ * executors it spawns read them, and anything that runs the repository's own
+ * commands (environment checks, prepare, candidate checks) strips them with
+ * `withoutRehearsalEnv`, so a repository's tests never run as if a scenario
+ * were configured. Stand-ins keep reading them: they are not commands.
+ */
+export const REHEARSAL_ONLY_ENV: readonly string[] = [
+  REHEARSAL_SCENARIO_ENV,
+  REHEARSAL_HOME_ENV,
+  REHEARSAL_SYNTHESIZED_ENV,
+  REHEARSAL_ADVERSARIAL_ENV,
+  REHEARSAL_GITHUB_TOKEN_ENV,
+];
+
+/** A copy of `env` without the rehearsal-only variables. */
+export function withoutRehearsalEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const kept = { ...env };
+  for (const name of REHEARSAL_ONLY_ENV) delete kept[name];
+  return kept;
+}
+
 /** Whether this process should ignore scripted replies and always synthesize (`--synthesized`, §4.4). */
 export function synthesizedRepliesOnly(): boolean {
   return process.env[REHEARSAL_SYNTHESIZED_ENV] === "1";

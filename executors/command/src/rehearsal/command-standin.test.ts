@@ -2,7 +2,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { REHEARSAL_SCENARIO_ENV, resetRehearsalScenarioCache, type RehearsalScenario } from "@graphloom/sdk";
+import { REHEARSAL_ONLY_ENV, REHEARSAL_SCENARIO_ENV, resetRehearsalScenarioCache, type RehearsalScenario } from "@graphloom/sdk";
 import type { ExecutorContext } from "@graphloom/sdk";
 import { commandSucceeded, type CommandOutcome } from "../run.js";
 import { createCommandRehearsalExecutor } from "./command-standin.js";
@@ -11,6 +11,8 @@ let dir: string;
 let ctx: ExecutorContext;
 
 beforeEach(async () => {
+  for (const name of REHEARSAL_ONLY_ENV) vi.stubEnv(name, undefined);
+  resetRehearsalScenarioCache();
   dir = await mkdtemp(path.join(os.tmpdir(), "gl-command-rehearsal-"));
   ctx = { runId: "r1", operationId: "op-1", generation: 1, worktreePath: dir, artifactDir: path.join(dir, ".artifacts") };
 });

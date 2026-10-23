@@ -39,6 +39,7 @@ import {
   readCallLog,
   readUnverifiedReads,
   REHEARSAL_ADVERSARIAL_ENV,
+  REHEARSAL_GITHUB_TOKEN_ENV,
   REHEARSAL_SYNTHESIZED_ENV,
   unsupportedSchemaKeywords,
   validateResultShape,
@@ -111,7 +112,7 @@ const MAX_PROBE_MODEL_CALLS = 10;
  * real GitHub base URL still answers unless the caller also points
  * GRAPHLOOM_GITHUB_API_URL at a fake one.
  */
-export const REHEARSAL_GITHUB_TOKEN_ENV = "GRAPHLOOM_REHEARSAL_GITHUB_TOKEN";
+export { REHEARSAL_GITHUB_TOKEN_ENV };
 
 export interface CheckReport {
   ok: boolean;
