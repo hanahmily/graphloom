@@ -138,7 +138,10 @@ crashes; filesystem and execution scopes require host enforcement.
 - [Graph rehearsal](docs/design-graph-rehearsal.md): a verification ladder —
   static check, zero-token rehearsal on stand-in models through the real
   harnesses, replay of recorded runs, a bounded real-model probe — and the
-  gate `run` climbs before spending a live run's budget.
+  gate `run` climbs before spending a live run's budget. A rehearsal that is
+  kept (`--keep`, or any verdict other than `ready`) leaves
+  `$TMPDIR/graphloom-rehearsal-*`; `graphloom rehearse --help` says how to
+  remove it.
 - [Issue-fix graph](docs/design-issue-fix-graph.md): one bug-fix graph for any
   repository, driven by a JSON profile the task names with `config:`; ships
   profiles for BanyanDB and for GraphLoom itself. It generalizes the

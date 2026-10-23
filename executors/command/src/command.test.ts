@@ -1,11 +1,11 @@
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { spawnSync } from "node:child_process";
-import { pathToFileURL } from "node:url";
-import { confinementUnsupported, createBuiltinExecutorRunner } from "@graphloom/runner";
-import { boundedInputShape, type ExecutorContext } from "@graphloom/sdk";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { confinementUnsupported, createBuiltinExecutorRunner, hasPrivateTmp } from "@graphloom/runner";
+import { boundedInputShape, REHEARSAL_ONLY_ENV, type ExecutorContext } from "@graphloom/sdk";
 import { COMMAND_INPUT_SHAPE, COMMAND_RUN_ID, commandInputProblem, commandSucceeded, createCommandExecutor, isCommandInput, type CommandOutcome } from "./run.js";
 
 let dir: string;
@@ -17,6 +17,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  vi.unstubAllEnvs();
   await rm(dir, { recursive: true, force: true });
 });
 
@@ -59,6 +60,17 @@ describe("command executor", () => {
       ctx,
     );
     expect(outcomes(result).map((o) => [o.id, o.exitCode])).toEqual([["fail", 1], ["after", 0]]);
+  });
+
+  it("never hands a command the variables that configure a rehearsal's stand-ins (#187)", async () => {
+    for (const name of REHEARSAL_ONLY_ENV) vi.stubEnv(name, "hostile");
+    vi.stubEnv("GRAPHLOOM_CLAUDE_BIN", "/bin/claude");
+    const [seen] = outcomes(await executor.execute({ commands: [{ id: "env", argv: ["env"] }], env: { GRAPHLOOM_CODEX_HOME: "/codex" } }, ctx));
+    expect(seen!.stdoutTail).not.toMatch(/GRAPHLOOM_REHEARSAL/);
+    // What environment checks legitimately read still arrives, from the host and from the binding.
+    expect(seen!.stdoutTail).toContain("GRAPHLOOM_CLAUDE_BIN=/bin/claude");
+    expect(seen!.stdoutTail).toContain("GRAPHLOOM_CODEX_HOME=/codex");
+    expect(seen!.stdoutTail).toContain("GRAPHLOOM_REPORT_FILE=");
   });
 
   it("records a program that is not installed", async () => {
@@ -421,7 +433,13 @@ describe("command host effect and the job's /tmp (#171)", () => {
     it("takes the write while /tmp is private, and refuses it when something the job reads lives under /tmp", async () => {
       const runner = await makeRunner();
       const base = { scratchDir: path.join(dir, "scratch"), writablePaths: [path.join(dir, "wt")] };
-      expect(await runner.checkJob!(job as never, { confinement: base })).toBeUndefined();
+      // The launch keeps /tmp read-only when the executor's own code lives under it (a checkout in /tmp,
+      // as a rehearsal's is), so what this run's launch can promise depends on where the repository is.
+      const here = path.dirname(fileURLToPath(import.meta.url));
+      const privateHere = hasPrivateTmp([process.execPath, here, path.dirname(here), path.dirname(path.dirname(here))]);
+      const taken = await runner.checkJob!(job as never, { confinement: base });
+      if (privateHere) expect(taken).toBeUndefined();
+      else expect(taken).toMatch(/\/tmp\/f, outside the run's worktree/);
       expect(await runner.checkJob!(job as never, { confinement: { ...base, readPaths: [path.join(dir, "shared-git")] } })).toMatch(/\/tmp\/f, outside the run's worktree/);
     });
   });

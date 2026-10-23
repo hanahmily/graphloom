@@ -4,6 +4,7 @@ import path from "node:path";
 import {
   BUILTIN_COMMAND_EXECUTOR_ID,
   defineExecutor,
+  withoutRehearsalEnv,
   type ExecutorContext,
   type ExecutorDefinition,
   type ExecutorScope,
@@ -359,7 +360,9 @@ async function runCommand(spec: CommandSpec, extraEnv: Record<string, string>, c
     try {
       child = spawn(spec.argv[0]!, spec.argv.slice(1), {
         cwd: ctx.worktreePath,
-        env: { ...process.env, ...extraEnv, [REPORT_FILE_ENV]: reportFile },
+        // A command is the repository's own code: it never sees the variables that
+        // configure a rehearsal's stand-ins (they would make its tests run as if a scenario were set).
+        env: { ...withoutRehearsalEnv(process.env), ...extraEnv, [REPORT_FILE_ENV]: reportFile },
         stdio: ["ignore", "pipe", "pipe"],
         // Its own process group, so a stop reaches everything the command started.
         detached: true,

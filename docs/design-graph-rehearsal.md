@@ -510,6 +510,18 @@ than running long. The rehearsal runs hermetically (§4.6) in its own worktree
 and state directory under `<stateRoot>/rehearsals/<fingerprint>/`, removed on
 a `ready` verdict unless `--keep`.
 
+A kept rehearsal (`--keep`, or any `not-ready`/`inconclusive` verdict) leaves
+`$TMPDIR/graphloom-rehearsal-<random>/` (default `/tmp`) holding the scenario,
+the stand-ins' home and `state/rehearsal-<id>`, plus its git worktree on the
+repository. Remove one with `graphloom delete <dir>/state/rehearsal-<id>
+--force` and then `rm -rf <dir>`; `graphloom rehearse --help` prints a loop for
+all of them. The rehearsal configures its stand-ins through
+`GRAPHLOOM_REHEARSAL_*` variables in its own process
+(`REHEARSAL_ONLY_ENV` in `@graphloom/sdk` is the one list); the command
+executor strips that list from every command's environment, so the
+repository's own checks (environment checks, prepare, candidate checks) never
+run as if a scenario were configured, while stand-ins keep reading them.
+
 What L1 would have reported for the three live-run defects, before their fixes:
 
 1. Evidence kind: the stand-in's review reply records as `kind: "other"`; the

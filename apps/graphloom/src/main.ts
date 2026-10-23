@@ -371,7 +371,19 @@ machine must have. --commands run executes every command job for real
 instead, verifying the toolchain, build and tests too — slower, but the
 full verdict. A plugin whose validators need the same command id to behave
 differently per checkout (RED failing, GREEN passing) cannot be fully
-rehearsed in quick mode; run it with --commands run.
+rehearsed in quick mode; run it with --commands run. Commands a rehearsal runs
+never see the variables that configure its stand-ins (GRAPHLOOM_REHEARSAL_*).
+
+A rehearsal's scratch directory is /tmp/graphloom-rehearsal-<random> (under
+$TMPDIR): the scenario, the stand-ins' home, and the rehearsal run's state
+(<dir>/state/rehearsal-<id>, with its git worktree on the repository). --keep
+leaves it after a ready verdict; not-ready and inconclusive verdicts leave it
+too, for inspection. Remove one with
+  graphloom delete <dir>/state/rehearsal-<id> --force && rm -rf <dir>
+(delete also removes the worktree; plain rm leaves it registered, and
+git worktree prune clears that). To clear every kept rehearsal:
+  for d in "\${TMPDIR:-/tmp}"/graphloom-rehearsal-*; do
+    graphloom delete "$d"/state/rehearsal-* --force; rm -rf "$d"; done
 
 Stats reports what a run used, per stage and in total: agent calls, jobs,
 budgets (used, left, the run's budget with operator raises, and intake's),

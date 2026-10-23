@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   readUnverifiedReads,
+  REHEARSAL_ONLY_ENV,
   REHEARSAL_SCENARIO_ENV,
   resetRehearsalScenarioCache,
   type RehearsalScenario,
@@ -18,6 +19,8 @@ let scenarioFile: string;
 let ctx: ExecutorContext;
 
 beforeEach(async () => {
+  for (const name of REHEARSAL_ONLY_ENV) vi.stubEnv(name, undefined);
+  resetRehearsalScenarioCache();
   dir = await mkdtemp(path.join(os.tmpdir(), "gl-github-rehearsal-"));
   scenarioFile = path.join(dir, "scenario.json");
   ctx = { runId: "r1", operationId: "op-1", generation: 1, worktreePath: dir, artifactDir: path.join(dir, ".artifacts") };

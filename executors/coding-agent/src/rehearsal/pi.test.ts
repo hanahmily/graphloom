@@ -1,13 +1,19 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { REHEARSAL_ADVERSARIAL_ENV, REHEARSAL_SYNTHESIZED_ENV, type ExecutorContext, type RehearsalScenario } from "@graphloom/sdk";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { REHEARSAL_ADVERSARIAL_ENV, REHEARSAL_ONLY_ENV, REHEARSAL_SYNTHESIZED_ENV, type ExecutorContext, type RehearsalScenario } from "@graphloom/sdk";
 import { createCodingAgentExecutor } from "../index.js";
 import { REHEARSAL_HOME_ENV, REHEARSAL_SCENARIO_ENV, resetRehearsalScenarioCache } from "./scenario.js";
 import { createPiRehearsalHarness } from "./pi.js";
 
 const temps: string[] = [];
+// Hermetic: whatever rehearsal variables the caller's environment holds (a
+// rehearsal's own repository checks run this suite), each test starts clear.
+beforeEach(() => {
+  for (const name of REHEARSAL_ONLY_ENV) vi.stubEnv(name, undefined);
+  resetRehearsalScenarioCache();
+});
 afterEach(async () => {
   vi.unstubAllEnvs();
   resetRehearsalScenarioCache();
