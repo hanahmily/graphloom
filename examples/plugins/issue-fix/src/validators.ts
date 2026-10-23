@@ -37,12 +37,32 @@ function profiled(evaluate: (input: ValidationInput, profile: Profile) => Valida
   };
 }
 
-/** The implementer's latest decision record in this evidence. */
+/**
+ * The implementer's latest decision record in this evidence. A work run that
+ * was never held to the decision-record contract (a supervisor's free-form
+ * work dispatch carries no `resultSchema`) is not an implementer answer and is
+ * skipped; the latest contract-bound run that fails to parse is the problem.
+ */
 export function implementerRecord(evidence: EvidenceRecord[]): { record?: DecisionRecord; problem?: string } {
-  const run = agentRuns(evidence, FIX_STAGE, "work").at(-1);
-  if (run === undefined) return { problem: "the implementer has not run" };
-  const parsed = parseDecisionRecord(run.output);
-  return "record" in parsed ? { record: parsed.record } : { problem: `the implementer's decision record is invalid: ${parsed.problem}` };
+  const runs = agentRuns(evidence, FIX_STAGE, "work");
+  if (runs.length === 0) return { problem: "the implementer has not run" };
+  let freeForm: string | undefined;
+  for (const run of [...runs].reverse()) {
+    const parsed = parseDecisionRecord(run.output);
+    if ("record" in parsed) return { record: parsed.record };
+    if (run.record.resultSchema !== undefined) return { problem: `the implementer's decision record is invalid: ${parsed.problem}` };
+    freeForm ??= parsed.problem;
+  }
+  return { problem: `the implementer's decision record is invalid: ${freeForm ?? "none was recorded"}` };
+}
+
+/** The latest valid decision record from any work run, however later runs answered: what later stages may rely on. */
+export function latestImplementerRecord(evidence: EvidenceRecord[]): DecisionRecord | undefined {
+  for (const run of [...agentRuns(evidence, FIX_STAGE, "work")].reverse()) {
+    const parsed = parseDecisionRecord(run.output);
+    if ("record" in parsed) return parsed.record;
+  }
+  return undefined;
 }
 
 /** The planner's latest decision record: the plan, before any round of implementation. */

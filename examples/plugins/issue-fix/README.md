@@ -98,6 +98,14 @@ graphloom profile the full suite takes about ten minutes; its commands allow
 GRAPHLOOM_GITHUB_LIVE_TOKEN="$(gh auth token)" node ../apps/graphloom/dist/main.js run issue-fix-graphloom-task.yaml
 ```
 
+## Work runs without a decision record (0.10.3)
+
+Review and delivery use the latest *valid* decision record from any work run. A
+work job that carries no decision-record contract, such as one a supervisor
+dispatches, is not the implementer's answer; when no work run recorded a valid
+record the graph asks the supervisor for one instead of failing
+([#191](https://github.com/hanahmily/graphloom/issues/191)).
+
 ## Generated files, duplicate findings and acceptance coverage (0.10.0)
 
 - A profile command may declare `writes`: the files it regenerates, such as
