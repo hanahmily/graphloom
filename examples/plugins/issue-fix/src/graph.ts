@@ -96,6 +96,7 @@ import {
   type ProfileCommand,
   commandSummary,
   commandStatement,
+  enforcedProtectedPaths,
   harnessName,
   isTestPath,
   issueRef,
@@ -182,8 +183,8 @@ export function definitionFor(profile: Profile): GraphDefinition {
     {
       id: REQUIREMENT_SCOPE,
       statement:
-        profile.protectedPaths.length > 0
-          ? `Every changed path is inside the repository and outside ${listAnd(profile.protectedPaths)}, except those the decision record names with a reason.`
+        enforcedProtectedPaths(profile).length > 0
+          ? `Every changed path is inside the repository and outside ${listAnd(enforcedProtectedPaths(profile))}, except those the decision record names with a reason.`
           : "Every changed path is inside the repository.",
       evidenceSchema: "checkout-command-v1",
     },

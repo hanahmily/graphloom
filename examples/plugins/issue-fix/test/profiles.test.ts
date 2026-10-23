@@ -40,6 +40,8 @@ import {
   writeScopeFor,
   type DecisionRecord,
 } from "../src/index.js";
+import { outOfScope } from "../src/decision-record.js";
+import { regeneratedPaths } from "../src/profile.js";
 import { rehearsal } from "../src/rehearsal.js";
 
 const execFileAsync = promisify(execFile);
@@ -658,4 +660,49 @@ describe("the canopy profile", () => {
     expect(none.code).toBe(1);
     expect(none.out).toContain("the change touches no canopy workspace");
   }, 120_000);
+});
+
+describe("generated artifacts a check regenerates (issue 181)", () => {
+  const anyProfile = [
+    ["banyandb", banyandb],
+    ["canopy", canopy],
+    ["graphloom", graphloom],
+  ] as const;
+  const sample = (w: string) => (w.endsWith("/**") ? `${w.slice(0, -3)}/deep/sample.txt` : w);
+
+  it.each(anyProfile)("%s: every path a check declares it writes lies inside the implementer's write scope", (_name, profile) => {
+    const declared = profile.commands.flatMap((c) => c.writes ?? []);
+    for (const w of declared) {
+      expect(outOfScope([sample(w)], GO_PLAN, profile), w).toEqual([]);
+      expect(outOfScope([sample(w)], undefined, profile), w).toEqual([]);
+    }
+    expect(regeneratedPaths(profile).length).toBe(new Set(declared.map((w) => w.replace(/\/\*\*$/, ""))).size);
+  });
+
+  it("declares the license artifacts that make license-dep regenerates", () => {
+    expect(regeneratedPaths(canopy)).toEqual(["canopy/LICENSE", "canopy/licenses"]);
+    expect(regeneratedPaths(banyandb)).toEqual(expect.arrayContaining(["dist/LICENSE", "dist/licenses", "mcp/LICENSE", "mcp/licenses", "canopy/LICENSE", "canopy/licenses"]));
+    expect(canopy.commands.find((c) => c.id === "license-dep")!.writes).toEqual(["canopy/LICENSE", "canopy/licenses/**"]);
+  });
+
+  it("replays run c44b4ae7-5d1: adding a dependency and regenerating the license files is not refused for scope", () => {
+    const record = { ...GO_PLAN, scopeExceptions: [{ path: "canopy/package-lock.json", reason: "API tokens need a new dependency" }] };
+    const changed = ["canopy/server/src/auth.ts", "canopy/package-lock.json", "canopy/LICENSE", "canopy/licenses/argon2-LICENSE.txt"];
+    expect(outOfScope(changed, record, canopy)).toEqual([]);
+    // The lock file is still protected without its exception, and so is everything else protected.
+    expect(outOfScope(changed, undefined, canopy)).toEqual(["canopy/package-lock.json"]);
+    expect(outOfScope([".github/workflows/ci.yml", "go.mod"], record, canopy)).toEqual([".github/workflows/ci.yml", "go.mod"]);
+    expect(writeScopeFor(undefined, canopy)).not.toContain("!canopy/LICENSE");
+    expect(writeScopeFor(undefined, canopy)).not.toContain("!canopy/licenses");
+  });
+
+  it("without a declaration a protected path stays out of scope, and a malformed writes list is refused", () => {
+    const raw = CANOPY as { commands: Array<{ id: string; writes?: string[] }> };
+    const bare = parseProfile({ ...raw, commands: raw.commands.map(({ writes: _w, ...c }) => c) });
+    expect(outOfScope(["canopy/LICENSE"], undefined, bare)).toEqual(["canopy/LICENSE"]);
+    for (const writes of [[], ["../x"], ["/abs"], [""], ["a//b"]]) {
+      const commands = raw.commands.map((c) => (c.id === "license-dep" ? { ...c, writes } : c));
+      expect(() => parseProfile({ ...raw, commands }), JSON.stringify(writes)).toThrow(ProfileError);
+    }
+  });
 });

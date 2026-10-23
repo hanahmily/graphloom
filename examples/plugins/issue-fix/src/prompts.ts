@@ -3,7 +3,7 @@ import { COMMAND } from "./constants.js";
 import type { DecisionRecord } from "./decision-record.js";
 import { writeScopeFor } from "./decision-record.js";
 import type { Issue, IssueComment } from "./evidence.js";
-import { commandLabel, commandsFor, commandSummary, commandTier, issueRef, listAnd, type CommandTier, type Profile, type ProfileCommand } from "./profile.js";
+import { commandLabel, commandsFor, commandSummary, commandTier, enforcedProtectedPaths, issueRef, listAnd, type CommandTier, type Profile, type ProfileCommand } from "./profile.js";
 import { ISSUES_DIR, ISSUES_FILE, ISSUES_MARKDOWN } from "./issues.js";
 
 export const MAX_SNAPSHOT_CHARS = 200_000;
@@ -67,7 +67,7 @@ export function planInstruction(profile: Profile, args: { issue: number; request
     "- decisions: each unclear point with tier, options, chosen (empty for product points) and basis.",
     `- ${profile.planning.reach}`,
     `- openQuestions for maintainers, followUps, ${e2e}and title for the pull request.`,
-    ...(profile.protectedPaths.length > 0 ? [`- scopeExceptions: only when the fix must change ${profile.protectedPaths.join(", ")}, with the reason.`] : []),
+    ...(enforcedProtectedPaths(profile).length > 0 ? [`- scopeExceptions: only when the fix must change ${enforcedProtectedPaths(profile).join(", ")}, with the reason.`] : []),
   ].join("\n");
 }
 

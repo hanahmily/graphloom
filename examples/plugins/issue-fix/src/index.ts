@@ -6,6 +6,8 @@ export {
   commandsInTier,
   commandStatement,
   commandSummary,
+  enforcedProtectedPaths,
+  regeneratedPaths,
   harnessName,
   isTestPath,
   isTiered,

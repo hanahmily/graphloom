@@ -29,6 +29,13 @@ export interface ProfileCommand extends EnvironmentCommand {
   statement?: string;
   /** The command as the pull request's test plan names it; default the label in backquotes. */
   summary?: string;
+  /**
+   * Repository-relative files or directories (a trailing `/**` is allowed) the
+   * command regenerates and a failure tells the author to commit, such as the
+   * license artifacts. The implementer's write scope always covers them, even
+   * under a protected path.
+   */
+  writes?: string[];
 }
 
 /** The only changelog rule so far: a new list entry inside the first `## ` section. */
@@ -225,6 +232,16 @@ export function parseProfile(config: unknown): Profile {
     for (const key of ["label", "statement", "summary"]) need(c[key] === undefined || isString(c[key]), `commands[${i}].${key} must be text`);
     need(c.tier === undefined || c.tier === "cheap" || c.tier === "full", `commands[${i}].tier must be cheap or full`);
     need(c.statement === undefined || c.requirement === "passes", `commands[${i}].statement applies only to a passes command`);
+    if (c.writes !== undefined) {
+      need(isStrings(c.writes) && c.writes.length > 0, `commands[${i}].writes must be a non-empty list of paths`);
+      for (const w of c.writes as string[]) {
+        const body = writePath(w);
+        need(
+          body.length > 0 && !body.startsWith("/") && !body.startsWith("!") && !body.split("/").some((part) => part === ".." || part === "." || part === ""),
+          `commands[${i}].writes path "${w}" must be repository-relative, without "..", "." or empty segments`,
+        );
+      }
+    }
   });
   need(isObject(p.testPaths) && isStrings(p.testPaths.suffixes) && (p.testPaths.suffixes as string[]).length > 0, "testPaths.suffixes must be a non-empty list");
   need((p.testPaths as Record<string, unknown>).directories === undefined || isStrings((p.testPaths as Record<string, unknown>).directories), "testPaths.directories must be a list of names");
@@ -283,6 +300,23 @@ export function isTestPath(profile: Profile, path: string): boolean {
 
 export function commandsFor(profile: Profile, requirement: CommandRequirement): ProfileCommand[] {
   return profile.commands.filter((c) => c.requirement === requirement);
+}
+
+/** A `writes` entry as a path: a trailing `/**` or `/` names the directory itself. */
+const writePath = (w: string): string => w.replace(/\/\*\*$/, "").replace(/\/$/, "");
+
+/** Every path some command's `writes` declares, as plain paths. */
+export function regeneratedPaths(profile: Pick<ProfileData, "commands">): string[] {
+  return [...new Set(profile.commands.flatMap((c) => (c.writes ?? []).map(writePath)))];
+}
+
+/**
+ * The protected paths the implementer is held to: those no command regenerates.
+ * A protected path inside a declared `writes` path is writable by design.
+ */
+export function enforcedProtectedPaths(profile: Pick<ProfileData, "commands" | "protectedPaths">): string[] {
+  const regenerated = regeneratedPaths(profile);
+  return profile.protectedPaths.filter((p) => !regenerated.some((w) => p === w || p.startsWith(`${w}/`)));
 }
 
 export const commandTier = (c: ProfileCommand): CommandTier => c.tier ?? "full";
