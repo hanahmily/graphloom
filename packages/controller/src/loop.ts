@@ -356,22 +356,18 @@ async function runNormalLoopSteps(
       if (state.mode === "normal") environmentReadyFor = state.activeVersion;
       continue;
     }
-    // A supervisor that returned the run to its graph has settled the partial job a usage limit left.
-    if (state.status === "running" && state.mode === "normal" && state.reconciliationRequired !== undefined) {
-      const { reconciliationRequired: _settled, ...settled } = state;
-      void _settled;
-      state = { ...settled, stateRevision: state.stateRevision + 1 };
-      await saveRunState(state);
-    }
     let holdElapsed = false;
     if (state.status === "running" && state.quotaHold !== undefined) {
       // A recovery episode held for a harness quota reset: wait it out (stop interrupts), then open it.
       lastAction = "quota hold";
       const abort = new AbortController();
       const stopWatch = watchForStop(state.stateDir, deps, abort);
+      // The wait is charged to waitMs, not to the active-time budget.
+      const resumeClock = deps.activeClock?.pause();
       try {
         await sleepUntil(state.quotaHold.until, abort.signal);
       } finally {
+        resumeClock?.();
         stopWatch();
       }
       holdElapsed = !abort.signal.aborted;
@@ -409,6 +405,14 @@ async function runNormalLoopSteps(
       owner = renewed;
       await updateOwnerChildPid(state.stateDir, owner.ownerId, deps.host.childPid);
 
+      // A supervisor that returned the run to its graph has settled the partial job a usage limit left;
+      // cleared from the reloaded state, so a stop that arrived meanwhile is not overwritten.
+      if (state.mode === "normal" && state.reconciliationRequired !== undefined) {
+        const { reconciliationRequired: _settled, ...settled } = state;
+        void _settled;
+        state = { ...settled, stateRevision: state.stateRevision + 1 };
+        await saveRunState(state);
+      }
       // The quota wait is over: release the hold from the reloaded state, which a stop that arrived meanwhile has already ended.
       if (holdElapsed && state.quotaHold !== undefined) {
         const { quotaHold: _held, ...released } = state;
@@ -1138,7 +1142,15 @@ async function runNormalLoopSteps(
       let checkedDigest: string | undefined;
       let staleIdentity: string | undefined;
       try {
-        if (notBefore !== undefined) await sleepUntil(notBefore, abort.signal);
+        if (notBefore !== undefined) {
+          // A wait on the clock is charged to waitMs when admitted, not to active time.
+          const resumeClock = deps.activeClock?.pause();
+          try {
+            await sleepUntil(notBefore, abort.signal);
+          } finally {
+            resumeClock?.();
+          }
+        }
         const unchanged = abort.signal.aborted ? undefined : await worktreeChangeFingerprints(state.worktreePath);
         if (!abort.signal.aborted && !(await startDispatch(state, operationId, deps))) abort.abort();
         if (abort.signal.aborted) {

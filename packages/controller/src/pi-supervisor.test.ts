@@ -996,8 +996,8 @@ describe("supervisor provider failures and deterministic remedies (controller)",
   });
 
   /** Runs `start` on a fake clock that moves only once `waiting()` says the run has reached its wait. */
-  async function onFakeClock<T>(start: () => Promise<T>, waiting: () => boolean): Promise<T> {
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+  async function onFakeClock<T>(start: () => Promise<T>, waiting: () => boolean, also: Array<"performance"> = []): Promise<T> {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date", ...also] });
     try {
       let settled = false;
       const running = start().finally(() => {
@@ -1260,6 +1260,47 @@ describe("supervisor provider failures and deterministic remedies (controller)",
     });
     expect(acknowledged).toMatchObject({ status: "stopped", stopReason: "graph ran" });
     expect((await loadRunState(stopped.stateDir)).reconciliationRequired).toBeUndefined();
+  });
+
+  it("does not charge a quota wait to active time: a reset past the remaining activeMs but within waitMs still waits and continues", async () => {
+    const env = await makeEnv();
+    const { appendFile } = await import("node:fs/promises");
+    await appendFile(env.taskPath, "budgets:\n  activeMs: 3600000\n  waitMs: 21600000\n", "utf8");
+    const started = Date.now();
+    const resetAt = new Date(started + 2 * 3_600_000).toISOString();
+    let ran = 0;
+    const report = await onFakeClock(
+      async () => {
+        const before = performance.now();
+        await vi.advanceTimersByTimeAsync(1_000);
+        // The active-time budget reads this clock, so it must move with the fake one.
+        expect(performance.now() - before).toBeGreaterThanOrEqual(1_000);
+        return createController().run({
+          taskPath: env.taskPath,
+          plugin: sessionGraph(),
+          validators,
+          supervisor: createScriptedSupervisor({ decisions: [] }),
+          runner: createScriptedRunner({
+            jobs: [
+              async () => {
+                ran += 1;
+                return quotaFailure(resetAt, "none")();
+              },
+              async () => ({ status: "ok" as const, summary: "done" }),
+            ],
+          }),
+          stateRoot: env.stateRoot,
+          runId: "quota-active-time-1",
+        });
+      },
+      () => ran > 0,
+      ["performance"],
+    );
+    expect(report, `${report.stopReason}: ${report.blocker}`).toMatchObject({ stopReason: "settled" });
+    const state = await loadRunState(report.stateDir);
+    // The 2 h wait is charged to waitMs only; the 1 h of active time is nearly untouched.
+    expect(state.intake.budgets.waitMs! - state.budgets.waitMs!).toBeGreaterThan(110 * 60_000);
+    expect(state.budgets.activeMs!).toBeGreaterThan(3_600_000 - 20 * 60_000);
   });
 
   it("keeps a stop that arrives during the quota hold: the hold does not overwrite it with a running state", async () => {
