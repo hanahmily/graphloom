@@ -2,6 +2,7 @@ import {
   dispatch,
   isStaleFailure,
   observe,
+  reenter,
   stop,
   supervise,
   validate,
@@ -20,6 +21,7 @@ import {
   CODING_AGENT,
   COMMAND,
   FIX_STAGE,
+  DEFAULT_MAX_REVIEW_REENTRIES,
   GET_ISSUE,
   IMPLEMENTER_JOB,
   LIST_ISSUE_COMMENTS,
@@ -59,10 +61,12 @@ import {
   describeFollowUp,
   findingById,
   findingLedger,
+  isOpen,
   knownFindings,
   passUsable,
   pathsToObserve,
   reviewPhase,
+  reviewRound,
   roundSummary,
   shortDigest,
   stillPresentNote,
@@ -71,12 +75,14 @@ import {
   verificationInstruction,
   type Finding,
   type FindingLedger,
+  type ReviewPass,
 } from "./findings.js";
 import {
   issueById,
   issueCommand,
   issueFileJson,
   issueIdOf,
+  isUnsettled,
   issueMarkdown,
   ISSUES_COMMAND,
   ISSUES_FILE,
@@ -88,7 +94,7 @@ import {
   type IssueTable,
   type Rejection,
 } from "./issues.js";
-import { CODE_REVIEW_SCHEMA, codeReviewInstruction, describeCoverage, isBlocking, reviewBackground } from "./ocr.js";
+import { CODE_REVIEW_SCHEMA, clip, codeReviewInstruction, describeCoverage, isBlocking, reviewBackground } from "./ocr.js";
 import {
   commandLabel,
   commandsFor,
@@ -120,7 +126,7 @@ import {
 import { cleanRun, codeReview, implementerRecord, latestImplementerRecord, plannerRecord, reportText, validatorById, verifiedChecks } from "./validators.js";
 
 export const GRAPH_ID = "issue-fix";
-export const GRAPH_VERSION = "0.10.4";
+export const GRAPH_VERSION = "0.11.0";
 
 /** Graph bookkeeping; everything else is read back from recorded evidence. */
 export interface FixPrivateState {
@@ -609,11 +615,53 @@ function review(ctx: Context, view: RunView, issue: number, state: FixPrivateSta
   const result = codeReview.evaluate({ requirementId: REQUIREMENT_REVIEW, statement, evidence: current, history, candidateDigest: digest }) as ValidationResult;
   if (result.status === "passed") return withPrivate(validate({ stageId: REVIEW_STAGE }, "validate the reviewed change"), state);
   const refs = [...passes.map((p) => p.run.record.ref), ...ledger.verifications.filter((v) => v.digest === digest && currentRefs.has(v.run.record.ref)).map((v) => v.run.record.ref)];
+  const back = reviewReentry(profile, view, ledger, last, digest, state);
+  if (back !== undefined) return back;
   return supervise(
     { reason: `code review did not pass: ${result.reason}. ${roundSummary(ledger, digest, passes)}; ${view.budgets.agentInvocations} agent invocation(s) left`, evidenceRefs: refs.slice(-10) },
     "hand the code review findings to the supervisor",
     JSON.stringify(state),
   );
+}
+
+/**
+ * A review that failed only because findings are confirmed is a known
+ * correction: the graph sends Fix back itself (design-typescript-core.md,
+ * "Reenter"), without a supervisor episode. Judgment cases stay with the
+ * supervisor: a disputed or pending finding, a failure that is not about
+ * findings (an unusable pass, issues-file state), a loop that is not
+ * converging, the reentry cap, or a corrections budget the supervisor needs.
+ */
+function reviewReentry(profile: Profile, view: RunView, ledger: FindingLedger, last: ReviewPass, digest: string, state: FixPrivateState): GraphDecision | undefined {
+  if (!passUsable(last)) return undefined;
+  const open = ledger.findings.filter(isOpen);
+  const confirmed = open.filter((f) => f.state === "confirmed");
+  if (confirmed.length === 0 || confirmed.length !== open.length) return undefined;
+  // The issues file must agree: nothing but the confirmed findings' issues is unsettled.
+  const ids = new Set(confirmed.map((f) => issueIdOf(f.id)));
+  if (ledger.issues.issues.some((i) => isUnsettled(i) && !ids.has(i.id))) return undefined;
+
+  // A reentry is an implementer work run after the first review pass, whoever asked for it (graph or supervisor); the
+  // count comes from evidence, so a resume keeps it, and a pass that leaves the candidate unchanged still counts.
+  const firstReview = view.evidence.findIndex((e) => agentRuns([e], REVIEW_STAGE, "review").length > 0);
+  const refs = new Set(agentRuns(view.evidence, FIX_STAGE, "work").map((r) => r.record.ref));
+  const corrections = view.evidence.map((e, i) => ({ e, i })).filter(({ e, i }) => i > firstReview && refs.has(e.ref));
+  const reentries = firstReview < 0 ? 0 : corrections.length;
+  const cap = profile.review.maxReentries ?? DEFAULT_MAX_REVIEW_REENTRIES;
+  if (reentries >= cap) return undefined;
+  // The supervisor keeps one correction for what the graph cannot settle.
+  if (view.budgets.corrections < 2) return undefined;
+
+  // Converging: the first failing round, or fewer confirmed findings than when the last correction was asked for, read
+  // from the evidence before that correction. A correction that changed nothing leaves the same findings: not converging.
+  const lastCorrection = corrections.at(-1);
+  const previous = lastCorrection === undefined ? undefined : findingLedger(view.evidence.slice(0, lastCorrection.i)).findings.filter((f) => f.state === "confirmed").length;
+  if (previous !== undefined && confirmed.length >= previous) return undefined;
+
+  const named = confirmed.slice(0, 3).map((f) => `${issueIdOf(f.id)} ${f.comment.path}:${f.comment.start_line}-${f.comment.end_line} ${clip(f.comment.content, 100)}`);
+  const more = confirmed.length > named.length ? `; and ${confirmed.length - named.length} more` : "";
+  const reason = `code review round ${reviewRound(ledger, digest)} confirmed ${confirmed.length} critical or high finding(s)${previous !== undefined ? ` (${previous} before the last correction)` : ""}: ${named.join("; ")}${more}; send Fix back with them (review reentry ${reentries + 1} of ${cap})`;
+  return reenter({ stageId: FIX_STAGE, reason, evidenceRefs: [last.run.record.ref] }, `send the confirmed code review findings back to Fix (review reentry ${reentries + 1} of ${cap})`, JSON.stringify(state));
 }
 
 function deliver(ctx: Context, view: RunView, issue: number, state: FixPrivateState): GraphDecision {

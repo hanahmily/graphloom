@@ -99,6 +99,13 @@ interface CommandResult {
   spawnError?: string;
 }
 
+/** The profile, with the review's reentry cap set; scenarios that do not opt in get 0, so the graph hands every failure over. */
+function withReentries(profile: unknown, graphReenters: Scenario["graphReenters"]): unknown {
+  const p = structuredClone(profile) as { review: Record<string, unknown> };
+  p.review.maxReentries = graphReenters === undefined ? 0 : (graphReenters.maxReentries ?? 4);
+  return p;
+}
+
 interface Scenario {
   /** The planner's result for each plan job, in order; the last repeats. */
   plans?: DecisionRecord[];
@@ -153,6 +160,14 @@ interface Scenario {
   commentsComplete?: boolean;
   /** Supervise decisions the supervisor answers by re-entering Fix. */
   reenter?: number;
+  /**
+   * Let the graph reenter Fix itself on a converging review failure (the real
+   * routing). Off by default so scenarios written for supervisor reentry keep
+   * handing the failure over; `maxReentries` sets the profile's cap.
+   */
+  graphReenters?: { maxReentries?: number };
+  /** The corrections budget the run starts with; default 8. */
+  corrections?: number;
   /** What each implement pass (by index) does to the worktree's .graphloom/issues.json. */
   fixerEdits?: Array<((file: string | undefined) => string | undefined) | undefined>;
   /** The first this many issues-read commands fail (exit 1), as a crashed or timed-out read does. */
@@ -215,6 +230,7 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
   let codeReviewed = 0;
   let verified = 0;
   let reentries = scenario.reenter ?? 0;
+  let reenterDecisions = 0;
   let issuesFile: string | undefined;
   let issuesMarkdown: string | undefined;
   let failedReads = 0;
@@ -234,7 +250,8 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
   let attempt = 1;
   const openAttempt: Record<string, boolean> = {};
   const nth = <T>(list: T[] | undefined, i: number): T | undefined => (list === undefined || list.length === 0 ? undefined : list[Math.min(i, list.length - 1)]);
-  const budgets = { agentInvocations: 32, jobs: 64, decisions: 128, corrections: 8 };
+  const budgets = { agentInvocations: 32, jobs: 64, decisions: 128, corrections: scenario.corrections ?? 8 };
+  const config = withReentries(scenario.profile ?? BANYANDB, scenario.graphReenters);
 
   const record = (kind: EvidenceRecord["kind"], payload: Record<string, unknown>, job: JobSpec | undefined, op: string): EvidenceRecord => {
     const e: EvidenceRecord = {
@@ -377,7 +394,7 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
     }
   }
 
-  const definition = createGraph().describe(scenario.profile ?? BANYANDB);
+  const definition = createGraph().describe(config);
   for (let step = 0; step < 100; step += 1) {
     const view: RunView = {
       runId: "run",
@@ -396,7 +413,7 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
       generation,
       stateRevision: step,
       activeVersion: "issue-fix@0.1.0",
-      config: scenario.profile ?? BANYANDB,
+      config,
       candidateDigest: digest,
       ...(resume !== undefined ? { resume } : {}),
       ...(sessions.length > 0 ? { agentSessions: structuredClone(sessions) } : {}),
@@ -423,7 +440,7 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
       const history = evidence.filter((e) => e.candidateDigest !== undefined && e.candidateDigest !== digest);
       const results = stage.requirementIds.map((requirementId) => {
         const binding = definition.defaultValidators.find((b) => b.requirementId === requirementId)!;
-        return { requirementId, binding, result: validatorById(binding.validatorId)!.evaluate({ requirementId, statement: "s", evidence: visible, history, candidateDigest: digest, config: scenario.profile ?? BANYANDB }) };
+        return { requirementId, binding, result: validatorById(binding.validatorId)!.evaluate({ requirementId, statement: "s", evidence: visible, history, candidateDigest: digest, config }) };
       });
       const failure = results.find((r) => r.result.status !== "passed");
       if (failure !== undefined) throw new Error(`validate ${stage.id} failed: ${failure.requirementId}: ${failure.result.reason}`);
@@ -433,6 +450,13 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
         const free: JobSpec = { stageId: "fix", kind: "agent", purpose: "work", instruction: "supervisor work", readOnly: false };
         record("other", { codingAgent: { harness: "claude-code", status: "completed", output: null } }, free, `op-sup-${step}`);
       }
+    } else if (action.type === "reenter") {
+      // The controller's "reenter": a correction spent, the attempt bumped, Fix's work dispatched again.
+      budgets.corrections -= 1;
+      reenterDecisions += 1;
+      openAttempt.fix = true;
+      generation += 1;
+      attempt += 1;
     } else if (action.type === "supervise" && reentries > 0) {
       // The supervisor re-enters Fix: its execution needs another attempt,
       // regardless of whether the candidate has changed yet (it has not, so
@@ -448,7 +472,7 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
       resumedDelivery = true;
       resumeAt("delivery failed");
     } else {
-      return { decision, decisions, jobs, evidence, receipts, observed, issuesFile, issuesMarkdown };
+      return { decision, decisions, jobs, evidence, receipts, observed, issuesFile, issuesMarkdown, reenterDecisions };
     }
   }
   throw new Error("the graph did not finish in 100 steps");
@@ -712,6 +736,145 @@ describe("issue-fix graph under the banyandb profile", () => {
       expect(decision.action).toMatchObject({ type: "supervise" });
       expect(jobs.filter((j) => j.stageId === "review" && j.purpose === "review")).toHaveLength(MAX_SWEEP_PASSES);
     }
+  });
+
+  describe("graph reentry of Fix on a review failure", () => {
+    const TIMER = { ...HANG, start_line: 120, end_line: 121, content: "trigger leaks the timer." };
+    const reentered = (decisions: Array<{ action: { type: string } }>) => decisions.filter((d) => d.action.type === "reenter");
+
+    it("reenters Fix itself in the first failing round, names the findings, and gives the implementer the confirmed findings", () => {
+      const { decision, decisions, jobs, reenterDecisions } = simulate({
+        graphReenters: {},
+        codeReviews: [reviewed([HANG]), priorPass({ F1: "still_present" }), priorPass({ F1: "resolved" })],
+      });
+      expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+      expect(decisions.some((d) => d.action.type === "supervise")).toBe(false);
+      expect(reenterDecisions).toBe(1);
+      const [reentry] = reentered(decisions) as unknown as Array<{ action: { reenter: { stageId: string; reason: string; evidenceRefs?: string[] } } }>;
+      expect(reentry!.action.reenter.stageId).toBe("fix");
+      expect(reentry!.action.reenter.reason).toContain("confirmed 1 critical or high finding(s): I1 pkg/timestamp/scheduler.go:88-95 Close now waits forever");
+      expect(reentry!.action.reenter.reason).toContain("review reentry 1 of 4");
+      expect(reentry!.action.reenter.evidenceRefs).toHaveLength(1);
+      // The same assignment the supervisor's reentry produces.
+      const work = jobs.filter((j) => j.purpose === "work");
+      expect(work).toHaveLength(2);
+      const correction = assignment(work[1]);
+      expect(correction).toContain("Code review of your previous change found 1 critical or high defect(s), each confirmed by an independent verifier:");
+      expect(correction).toContain("I1 [open] pkg/timestamp/scheduler.go:88-95 (high, bug): Close now waits forever");
+      expect(correction).toContain("pkg/timestamp/scheduler.go:7 `s.wait(ctx)`");
+    });
+
+    it("reenters again in round 2 when fewer findings are open than in round 1", () => {
+      const { decision, decisions, reenterDecisions } = simulate({
+        graphReenters: {},
+        codeReviews: [reviewed([HANG, TIMER]), priorPass({ F1: "still_present", F2: "still_present" }), priorPass({ F1: "resolved", F2: "still_present" }), priorPass({ F1: "resolved", F2: "resolved" })],
+      });
+      expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+      expect(decisions.some((d) => d.action.type === "supervise")).toBe(false);
+      expect(reenterDecisions).toBe(2);
+      const reasons = reentered(decisions).map((d) => (d.action as unknown as { reenter: { reason: string } }).reenter.reason);
+      expect(reasons[1]).toContain("round 2 confirmed 1 critical or high finding(s) (2 before the last correction)");
+      expect(reasons[1]).toContain("review reentry 2 of 4");
+    });
+
+    it("hands round 2 to the supervisor when as many findings stay open as before", () => {
+      const { decision, reenterDecisions } = simulate({
+        graphReenters: {},
+        codeReviews: [reviewed([HANG]), priorPass({ F1: "still_present" }), priorPass({ F1: "still_present" })],
+      });
+      expect(reenterDecisions).toBe(1);
+      expect(decision.action).toMatchObject({ type: "supervise" });
+      expect((decision.action as { supervise: { reason: string } }).supervise.reason).toContain("code review did not pass");
+    });
+
+    it("hands round 2 to the supervisor when it has more open findings than before", () => {
+      const { decision, reenterDecisions } = simulate({
+        graphReenters: {},
+        codeReviews: [reviewed([HANG]), priorPass({ F1: "still_present" }), priorPass({ F1: "still_present" }, [TIMER]), priorPass({ F1: "still_present", F2: "still_present" })],
+      });
+      expect(reenterDecisions).toBe(1);
+      expect(decision.action).toMatchObject({ type: "supervise" });
+    });
+
+    it("hands any disputed finding to the supervisor, even in the first round", () => {
+      const { decision, reenterDecisions } = simulate({
+        graphReenters: {},
+        codeReviews: [reviewed([HANG, TIMER]), priorPass({ F1: "still_present", F2: "still_present" })],
+        verifications: [
+          verdicts(
+            { finding: "F1", verdict: "refuted", quotes: [{ ...BOUNDED, text: "ctx, done := context.WithTimeout(ctx, time.Minute)" }] },
+            { finding: "F2", verdict: "confirmed", quotes: [BOUNDED] },
+          ),
+          verdicts({ finding: "F1", verdict: "uncertain", reason: "the timeout may not cover wait" }, { finding: "F2", verdict: "confirmed", quotes: [BOUNDED] }),
+        ],
+        files: { "pkg/timestamp/scheduler.go": SCHEDULER },
+      });
+      expect(reenterDecisions).toBe(0);
+      expect(decision.action).toMatchObject({ type: "supervise" });
+      expect((decision.action as { supervise: { reason: string } }).supervise.reason).toContain("confirmed or disputed");
+    });
+
+    it("hands the failure to the supervisor once the review reentry cap is reached", () => {
+      const { decision, reenterDecisions } = simulate({
+        graphReenters: { maxReentries: 1 },
+        codeReviews: [reviewed([HANG, TIMER]), priorPass({ F1: "still_present", F2: "still_present" }), priorPass({ F1: "resolved", F2: "still_present" })],
+      });
+      // Round 2 has fewer findings, but the one allowed reentry is spent.
+      expect(reenterDecisions).toBe(1);
+      expect(decision.action).toMatchObject({ type: "supervise" });
+    });
+
+    it("hands the next failure to the supervisor when the implementer returns the same candidate after a reentry", () => {
+      const { decision, reenterDecisions } = simulate({
+        graphReenters: { maxReentries: 4 },
+        unchangedWork: [2],
+        codeReviews: [reviewed([HANG]), priorPass({ F1: "still_present" }), priorPass({ F1: "still_present" })],
+      });
+      // One reentry; the correction changed nothing, so the same finding stays open: not converging, however far below the cap.
+      expect(reenterDecisions).toBe(1);
+      expect(decision.action).toMatchObject({ type: "supervise" });
+    });
+
+    it("allows one reentry under a cap of 1 and supervises the second failure even as the candidate changes", () => {
+      const { decision, reenterDecisions } = simulate({
+        graphReenters: { maxReentries: 1 },
+        codeReviews: [reviewed([HANG, { ...HANG, start_line: 120, end_line: 121, content: "trigger leaks the timer." }]), priorPass({ F1: "still_present", F2: "still_present" }), priorPass({ F1: "resolved", F2: "still_present" })],
+      });
+      expect(reenterDecisions).toBe(1);
+      expect(decision.action).toMatchObject({ type: "supervise" });
+    });
+
+    it("does not reenter at all when the profile's cap is 0", () => {
+      const { decision, reenterDecisions } = simulate({ graphReenters: { maxReentries: 0 }, codeReviews: [reviewed([HANG]), priorPass({ F1: "still_present" })] });
+      expect(reenterDecisions).toBe(0);
+      expect(decision.action).toMatchObject({ type: "supervise" });
+    });
+
+    it("hands the failure to the supervisor when the corrections budget is nearly spent", () => {
+      const { decision, reenterDecisions } = simulate({ graphReenters: {}, corrections: 1, codeReviews: [reviewed([HANG]), priorPass({ F1: "still_present" })] });
+      expect(reenterDecisions).toBe(0);
+      expect(decision.action).toMatchObject({ type: "supervise" });
+    });
+
+    it("keeps the supervisor for a review that failed for a reason other than confirmed findings", () => {
+      // A confirmed finding exists, but the sweep pass never covered every file: not a known correction.
+      const { decision, reenterDecisions } = simulate({
+        graphReenters: {},
+        codeReviews: [reviewed([HANG]), reviewed([], { total_files: 3, reviewed_files: 2, skipped: [] })],
+      });
+      expect(reenterDecisions).toBe(0);
+      expect(decision.action).toMatchObject({ type: "supervise" });
+    });
+
+    it("counts reentries from evidence, so a resume does not reset the cap", () => {
+      const { decision, reenterDecisions } = simulate({
+        graphReenters: { maxReentries: 2 },
+        resumeAfterFix: true,
+        codeReviews: [reviewed([HANG, TIMER]), priorPass({ F1: "still_present", F2: "still_present" }), priorPass({ F1: "resolved", F2: "still_present" }), priorPass({ F1: "resolved", F2: "still_present" })],
+      });
+      expect(reenterDecisions).toBe(2);
+      expect(decision.action).toMatchObject({ type: "supervise" });
+    });
   });
 
   it("does not pass a code review that completed but left a finding unresolved", () => {

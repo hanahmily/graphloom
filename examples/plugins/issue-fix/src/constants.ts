@@ -20,6 +20,8 @@ export const LIST_ISSUE_COMMENTS: ExecutorPin = { id: "graphloom.github/list-iss
 
 /** Corrections the graph dispatches itself in Fix before it asks the supervisor. */
 export const MAX_FIX_CORRECTIONS = 2;
+/** Times the graph itself sends a converging review failure back to Fix when the profile does not say (`review.maxReentries`). */
+export const DEFAULT_MAX_REVIEW_REENTRIES = 4;
 /** Code review passes on one change in one generation; a sweep that reaches it has not saturated. */
 export const MAX_SWEEP_PASSES = 4;
 /**

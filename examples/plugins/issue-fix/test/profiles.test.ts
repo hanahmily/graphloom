@@ -117,7 +117,7 @@ describe.skipIf(!existsSync(path.join(banyandbFixDist, "index.js")))("the banyan
     });
     expect(monolithic(v1(strip(ours)))).toEqual(strip(withoutLicense(theirs)));
     expect(theirs.environment?.prepare?.map((c) => c.argv.join(" "))).toEqual(["make generate"]);
-    expect(ours).toMatchObject({ graphId: "issue-fix", version: "0.10.4", privateStateSchema: "issue-fix-private-v1" });
+    expect(ours).toMatchObject({ graphId: "issue-fix", version: "0.11.0", privateStateSchema: "issue-fix-private-v1" });
   });
 
   it("splits make generate into separately cached steps with narrow inputs (#174)", () => {
@@ -368,7 +368,7 @@ describe("profiles", () => {
   });
 
   it("hands the rehearsal the scenario for the profile's runner, and its replies satisfy that profile", () => {
-    expect(Object.keys(rehearsal(BANYANDB).scenarios)).toEqual(["happy"]);
+    expect(Object.keys(rehearsal(BANYANDB).scenarios)).toEqual(["happy", "review-reenters"]);
     const record = rehearsal(GRAPHLOOM).scenarios.happy!.results["decision-record-v2"]![0]!.output as DecisionRecord;
     expect(decisionProblems(record, graphloom)).toEqual([]);
     const goRecord = rehearsal(BANYANDB).scenarios.happy!.results["decision-record-v2"]!.at(-1)!.output as DecisionRecord;
