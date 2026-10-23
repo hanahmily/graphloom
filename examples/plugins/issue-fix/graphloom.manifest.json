@@ -1,6 +1,6 @@
 {
   "graphId": "issue-fix",
-  "version": "0.10.0",
+  "version": "0.10.1",
   "sdkProtocol": 1,
   "taskConfig": "required",
   "entryPoints": {
@@ -16,11 +16,11 @@
     "vitest": "^3.0.9"
   },
   "digests": {
-    "sourceTree": "3632d9d3b157fe291a9cf2467c2947e74fb5fd1e7b89878a1d6e07ba1ecb9dfc",
-    "packageLock": "8c70c589b56678725f66c7e64c1e1f38c806a139ef23e030d341fbe530b88903",
+    "sourceTree": "9ee2c2060050e0050566c577723b018e8bdbeb1b2b8d629bf01b16b0f8d597e2",
+    "packageLock": "d5140cd2a534499143e49147f1ad3f4c33c0afec7f8c0e7c13785b0df21c963c",
     "files": {
-      "package.json": "9fb19fbadc47458ad308bae7b5b7e038df9a98f4b5c6cf53783f73278977cb28",
-      "package-lock.json": "8c70c589b56678725f66c7e64c1e1f38c806a139ef23e030d341fbe530b88903",
+      "package.json": "5817b8010e262dca50b647cea70e23c58bdf10cab06880283b1e787ff871aef1",
+      "package-lock.json": "d5140cd2a534499143e49147f1ad3f4c33c0afec7f8c0e7c13785b0df21c963c",
       "tsconfig.json": "3bafb75902b6084b621c996ae838dbfb87088cf095ce411be9809ce79bf3916b",
       "profiles/banyandb.json": "3b6baa0c9c90f08eab057c304f0885f2d908d459257196a01797684452ce136a",
       "profiles/canopy.json": "e5343a1a89945bc34fd839ea819454a721fcf3391d6da60e359e168bf0d7e2f9",
@@ -30,14 +30,14 @@
       "src/decision-record.ts": "659e7bac0192e46831f2d4e0562c54d62e300a2b913a7cfd4bba43efab5ff6af",
       "src/evidence.ts": "0bb167ad61727aaddee5a339e1ed25644fd706f9070327c8be74e37a7b22e109",
       "src/findings.ts": "a12fdab255e85e7e1fb9c7e83ab2bb56dc099f9abfe95c8fb6e7ee4ee0bad6e9",
-      "src/graph.ts": "fd24a4d5c5af82735e2664c057195d0cbe68d478605008f26b57353f84766fac",
+      "src/graph.ts": "d72e3e78c094e18b4c0ea403e32cae2f982f5a342c44cdf7d6c76bc9c5e21948",
       "src/index.ts": "9646e812cb8c4114531426cfcb7fa27bc095ab6c17636857472956fa0e67c8c9",
       "src/issues.ts": "b6dde402f4c1a13df1b43ad7751259076c340c6d636bb6abe8c0c31a23db24df",
       "src/ocr.ts": "309f8cf19d878e8b5d4161466860f84a7e178d8205c0a1c940010a1c500eb8cc",
       "src/profile.ts": "3c9edacc351977a5d720547f76ec9974d6c43d92e0a072efab64bf59f4af107a",
       "src/prompts.ts": "a82f07285aaef6a3288f2bef38f8bc1412357c147537c45a6683eb976a87d9ea",
       "src/qualification.ts": "8ff52270bb8ae482b08e83d9ec189980f6c46696890de8a9d333b8a7bb3c0798",
-      "src/rehearsal.ts": "41bcfcab2182231a4804675ba307e6380f5040ced38fea655c583c86cd8b6fdf",
+      "src/rehearsal.ts": "b5449e1e4009431beb6a0f69fc082e780fac5a5989f28e56fedd5e94df69f479",
       "src/review-common.ts": "2b711248d1b227c01f8ed36bfa2399791fbcf9543a92e89414c74f119b20323c",
       "src/runners/go-test.ts": "321eddf6923ca422c6b2be6511a337aead0887ec9245cd77a7a6ceec59994128",
       "src/runners/index.ts": "8bef945520b8015089f28e50256ded20b47d7d7666e94942b3fc373db592359e",
@@ -46,7 +46,7 @@
       "src/validators.ts": "d5553a262b053b4e3a9a5f7ea93238c2416b52806d72a61100eb23d505954439",
       "test/issue-fix.test.ts": "fc654aad4a6e790935a0cef1bfc3e3ee30d360b3e155eca7cfe32fa96de7d7dc",
       "test/issues.test.ts": "a436e9f769173105669114c8e320258d2b72bf2a66424ca4219f354a58942d72",
-      "test/profiles.test.ts": "c2cc7bedd80a25051af7dbe3905b0e5e47b812cadae62699a6250efabd63c00f",
+      "test/profiles.test.ts": "337652a63b3934c034c58272d7a1fd1d2085953e3cd1787292f0902215401d40",
       "test/review-dedupe.test.ts": "6df8323d0339f1f68a059902bf9a91a8cda25b0acedb369a7f043a2f734dd89b"
     }
   }
