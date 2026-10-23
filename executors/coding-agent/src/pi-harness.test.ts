@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
@@ -8,6 +9,7 @@ import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ExecutorContext, ToolCallRequest, ToolCallResult } from "@graphloom/sdk";
 import { CONTINUATION_NOTICE, createCodingAgentExecutor } from "./index.js";
+import { piNativeTools } from "./pi-harness.js";
 import { createPiHarness, PI_MODEL_ENV, PI_PROVIDER_ENV, type PiHarnessOptions } from "./pi.js";
 
 interface FauxContext {
@@ -21,7 +23,7 @@ interface FauxModule {
     state: { callCount: number };
     setResponses(responses: FauxStep[]): void;
   };
-  fauxAssistantMessage(content: unknown, options?: { stopReason?: string }): unknown;
+  fauxAssistantMessage(content: unknown, options?: { stopReason?: string; errorMessage?: string }): unknown;
   fauxToolCall(name: string, args: Record<string, unknown>): unknown;
 }
 
@@ -468,5 +470,41 @@ describe("Pi coding harness", () => {
     await expect(
       h.executor.execute({ assignment: "work", harnessOptions: { modelId: "not-a-model" } }, h.ctx()),
     ).rejects.toThrow(`Pi model not found: ${h.provider}/not-a-model`);
+  });
+});
+
+describe("transient retry and native tools (Pi)", () => {
+  async function attempt(first: (h: Awaited<ReturnType<typeof setup>>) => unknown[]) {
+    vi.stubEnv("GRAPHLOOM_CODING_RETRY_MAX_ATTEMPTS", "2");
+    vi.stubEnv("GRAPHLOOM_CODING_RETRY_BASE_DELAY_MS", "1");
+    vi.stubEnv("GRAPHLOOM_CODING_RETRY_MAX_DELAY_MS", "2");
+    const h = await setup();
+    execFileSync("git", ["-C", h.worktree, "init", "-q"]);
+    const fail = h.ai.fauxAssistantMessage("", { stopReason: "error", errorMessage: "503 Service Unavailable" });
+    const steps = [...first(h), fail];
+    h.faux.setResponses([...steps, ...steps]);
+    const result = await h.executor.execute({ assignment: "work" }, h.ctx());
+    return { result: result as { summary: string }, attempts: payload(result).attempts as number };
+  }
+
+  it("retries a 503 when the failed try ran no tools", async () => {
+    expect((await attempt(() => [])).attempts).toBe(2);
+  });
+
+  it("does not retry after a bash call", async () => {
+    const { result, attempts } = await attempt((h) => [h.use("bash", { command: "echo hi" })]);
+    expect(attempts).toBe(1);
+    expect(result.summary).toContain("not retried: the failed try ran a native tool that is not known to be read-only (bash)");
+  });
+
+  it("retries after only read and grep", async () => {
+    const { attempts } = await attempt((h) => [h.use("read", { path: "a.txt" }), h.use("grep", { pattern: "x" })]);
+    expect(attempts).toBe(2);
+  });
+
+  it("does not report native tools from messages it cannot read", () => {
+    expect(piNativeTools(undefined, 0, new Set())).toBeUndefined();
+    expect(piNativeTools([{ role: "assistant", content: "oops" }], 0, new Set())).toBeUndefined();
+    expect(piNativeTools([{ role: "assistant", content: [{ type: "toolCall", name: 7 }] }], 0, new Set())).toBeUndefined();
   });
 });

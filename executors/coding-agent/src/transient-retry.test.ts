@@ -9,7 +9,7 @@ import type { ExecutorContext } from "@graphloom/sdk";
 import { createCodexHarness } from "./codex.js";
 import type { CodingHarness, CodingRunResult } from "./harness.js";
 import { createCodingAgentExecutor } from "./run.js";
-import { backoffMs, classifyTransient, resolveRetryPolicy, retryAfterMs, RETRY_MAX_ATTEMPTS_ENV } from "./transient.js";
+import { backoffMs, classifyTransient, resolveRetryPolicy, retryAfterMs, RETRY_MAX_ATTEMPTS_ENV, worktreeDigest } from "./transient.js";
 
 const fakeCodex = fileURLToPath(new URL("../test/fake-codex.mjs", import.meta.url));
 const CAPACITY = "Selected model is at capacity. Please try a different model.";
@@ -135,7 +135,7 @@ function flaky(name: string, outcomes: Array<CodingRunResult | (() => Promise<Co
     },
   };
 }
-const failed = (summary: string): CodingRunResult => ({ status: "failed", summary });
+const failed = (summary: string): CodingRunResult => ({ status: "failed", summary, nativeTools: [] });
 const ok: CodingRunResult = { status: "completed", summary: "done" };
 
 async function plainCtx(over: Partial<ExecutorContext> = {}, git = true): Promise<ExecutorContext> {
@@ -275,6 +275,22 @@ describe("transient retry: fail closed and usage", () => {
     }).execute({ assignment: "work" }, await plainCtx({ signal: controller.signal }));
     expect(aborted).toMatchObject({ status: "failed" });
     expect(payload(aborted).usage).toEqual(usage(10));
+  });
+});
+
+describe("worktreeDigest", () => {
+  it("changes when an edited file is re-staged in an unborn repo", async () => {
+    const worktree = await mkdtemp(path.join(os.tmpdir(), "gl-transient-unborn-"));
+    temps.push(worktree);
+    const git = (...args: string[]) => execFileSync("git", ["-C", worktree, ...args]);
+    git("init", "-q");
+    await writeFile(path.join(worktree, "a.txt"), "one");
+    git("add", "a.txt");
+    const staged = await worktreeDigest(worktree);
+    expect(staged).toBeDefined();
+    await writeFile(path.join(worktree, "a.txt"), "two");
+    git("add", "a.txt");
+    expect(await worktreeDigest(worktree)).not.toBe(staged);
   });
 });
 

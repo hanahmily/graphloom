@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
@@ -901,5 +902,42 @@ describe("MCP tool bridge", () => {
     } finally {
       await bridge.close();
     }
+  });
+});
+
+describe("transient retry and native tools (Claude Code)", () => {
+  async function attempt(steps: Step[]) {
+    vi.stubEnv("GRAPHLOOM_CODING_RETRY_MAX_ATTEMPTS", "2");
+    vi.stubEnv("GRAPHLOOM_CODING_RETRY_BASE_DELAY_MS", "1");
+    vi.stubEnv("GRAPHLOOM_CODING_RETRY_MAX_DELAY_MS", "2");
+    const h = await setup();
+    execFileSync("git", ["-C", h.worktree, "init", "-q"]);
+    await h.script(steps);
+    const result = await h.executor.execute({ assignment: "work" }, h.ctx());
+    return { result: result as { summary: string }, runs: (await h.invocations()).length };
+  }
+  const overloaded = { error: "API Error: 529 overloaded_error" };
+
+  it("retries a capacity failure when the failed try ran no tools", async () => {
+    const { result, runs } = await attempt([overloaded]);
+    expect(runs).toBe(2);
+    expect(result.summary).toContain("retries exhausted after 2 tries");
+  });
+
+  it("does not retry after a Bash call", async () => {
+    const { result, runs } = await attempt([{ bash: "echo hi" }, overloaded]);
+    expect(runs).toBe(1);
+    expect(result.summary).toContain("not retried: the failed try ran a native tool that is not known to be read-only (Bash)");
+  });
+
+  it("retries after only Read and Grep", async () => {
+    const { runs } = await attempt([{ native: "Read" }, { native: "Grep" }, overloaded]);
+    expect(runs).toBe(2);
+  });
+
+  it("does not retry when the transcript is unparseable", async () => {
+    const { result, runs } = await attempt([{ raw: "this is not json" }, overloaded]);
+    expect(runs).toBe(1);
+    expect(result.summary).toContain("did not report which native tools");
   });
 });

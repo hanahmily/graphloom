@@ -139,6 +139,8 @@ export async function worktreeDigest(cwd: string): Promise<string | undefined> {
     if (head === undefined) return undefined;
     hash.update(`${ref.toString().trim()}\0${head.id}\0`);
     hash.update((await git(["status", "--porcelain=v1", "-z", "--untracked-files=all"])).stdout);
+    // Staged blob ids: in an unborn repo re-staging an edit changes neither status nor diff.
+    hash.update((await git(["ls-files", "-s", "-z"])).stdout);
     hash.update((await git(head.unborn ? ["diff", "--binary"] : ["diff", "HEAD", "--binary"])).stdout);
     const untracked = (await git(["ls-files", "-o", "--exclude-standard", "-z"])).stdout.toString("utf8").split("\0").filter(Boolean);
     for (const file of untracked) {

@@ -14,7 +14,7 @@ import {
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { checkReferences, validateResultShape } from "@graphloom/sdk";
-import type { CodingHarness, CodingResultContract, CodingRunRequest, CodingRunResult, CodingSession, CodingSessionOptions, CodingTool } from "./harness.js";
+import type { CodingHarness, CodingResultContract, CodingRunRequest, CodingRunResult, CodingSession, CodingSessionOptions, CodingTool, NativeToolUse } from "./harness.js";
 import { bounded, inlineObjectSchema, scopeNotes } from "./assignment.js";
 import { envList, minimalEnv } from "./child-env.js";
 import { PI_AGENT_DIR_ENV, PI_API_KEY_CREDENTIAL, PI_MODEL_ENV, PI_PASS_ENV_ENV, PI_PROVIDER_ENV } from "./pi-config.js";
@@ -94,8 +94,11 @@ export function createPiHarness(harnessOptions: PiHarnessOptions = {}): CodingHa
       }) as unknown as ToolDefinition;
 
       let disposed: (() => void) | undefined;
+      // Native tools the latest run's own turns called; undefined when they could not be read.
+      let attemptTools: NativeToolUse[] | undefined = [];
       const session: CodingSession = {
         async run(request) {
+          attemptTools = [];
           if (options.signal?.aborted) return finish({ status: "failed", summary: "agent session aborted" });
           let submitted: { value: unknown } | undefined;
           let contractFailure: string[] | undefined;
@@ -140,12 +143,14 @@ export function createPiHarness(harnessOptions: PiHarnessOptions = {}): CodingHa
           };
           const onAbort = () => void agent.abort().catch(() => undefined);
           options.signal?.addEventListener("abort", onAbort, { once: true });
+          const firstNew = agent.messages.length;
           try {
             await agent.prompt(promptText(request, options), { expandPromptTemplates: false });
             await agent.waitForIdle();
           } catch (err) {
             return finish({ status: "failed", summary: bounded(err instanceof Error ? err.message : String(err)) });
           } finally {
+            attemptTools = piNativeTools(agent.messages, firstNew, new Set(tools.map((t) => t.name)));
             options.signal?.removeEventListener("abort", onAbort);
           }
 
@@ -184,9 +189,10 @@ export function createPiHarness(harnessOptions: PiHarnessOptions = {}): CodingHa
       };
 
       async function finish(result: CodingRunResult): Promise<CodingRunResult> {
-        if (saved.ref === undefined || !existsSync(saved.file)) return result;
+        const tooled: CodingRunResult = attemptTools !== undefined ? { ...result, nativeTools: attemptTools } : result;
+        if (saved.ref === undefined || !existsSync(saved.file)) return tooled;
         await writeAtomic(settingsFile(saved.file), JSON.stringify(settings));
-        return { ...result, sessionRef: saved.ref };
+        return { ...tooled, sessionRef: saved.ref };
       }
       return session;
     },
@@ -415,4 +421,23 @@ function submittedSummary(submitted: { value: unknown } | undefined): string | u
 
 function output(submitted: { value: unknown } | undefined): { output?: unknown } {
   return submitted !== undefined ? { output: submitted.value } : {};
+}
+
+const PI_READ_ONLY_TOOLS = new Set(["read", "grep", "find", "ls"]);
+
+/** Built-in tool calls in the messages one run added; undefined when the messages are not in a readable shape. */
+export function piNativeTools(messages: readonly unknown[] | undefined, from: number, mediated: Set<string>): NativeToolUse[] | undefined {
+  if (!Array.isArray(messages)) return undefined;
+  const used: NativeToolUse[] = [];
+  for (const m of messages.slice(from) as { role?: unknown; content?: unknown }[]) {
+    if (m === null || typeof m !== "object") return undefined;
+    if (m.role !== "assistant") continue;
+    if (!Array.isArray(m.content)) return undefined;
+    for (const block of m.content as { type?: unknown; name?: unknown }[]) {
+      if (block?.type !== "toolCall") continue;
+      if (typeof block.name !== "string") return undefined;
+      if (!mediated.has(block.name)) used.push({ name: block.name, readOnly: PI_READ_ONLY_TOOLS.has(block.name) });
+    }
+  }
+  return used;
 }

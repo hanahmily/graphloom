@@ -26,6 +26,7 @@ import {
   type CodingRunResult,
   type CodingSessionOptions,
   type CodingUsage,
+  type NativeToolUse,
 } from "./harness.js";
 import { drainOnExit, signalGroup } from "./process-group.js";
 import { envList, minimalEnv } from "./child-env.js";
@@ -493,6 +494,8 @@ async function runClaude(args: RunArgs): Promise<CodingRunResult> {
     arm(args.startupTimeoutMs, `no model output within ${seconds(args.startupTimeoutMs)} of starting`);
 
     let reaped = false;
+    const nativeTools: NativeToolUse[] = [];
+    let unparsed = false;
     try {
       for await (const line of createInterface({ input: child.stdout })) {
         let event: {
@@ -510,9 +513,13 @@ async function runClaude(args: RunArgs): Promise<CodingRunResult> {
         try {
           event = JSON.parse(line) as typeof event;
         } catch {
+          if (line.trim() !== "") unparsed = true;
           continue;
         }
-        if (event === null || typeof event !== "object" || Array.isArray(event)) continue;
+        if (event === null || typeof event !== "object" || Array.isArray(event)) {
+          unparsed = true;
+          continue;
+        }
         if (event.type === "control_response") {
           if (event.response?.request_id === initializeId && !initialized) {
             if (event.response.subtype !== "success") {
@@ -556,6 +563,14 @@ async function runClaude(args: RunArgs): Promise<CodingRunResult> {
         }
         if (event.type === "assistant" || event.type === "user" || (event.type === "system" && event.subtype === "thinking_tokens")) {
           trackTools(event.message?.content, running);
+          if (event.type === "assistant" && Array.isArray(event.message?.content)) {
+            for (const block of event.message.content as { type?: unknown; name?: unknown }[]) {
+              if (block?.type !== "tool_use") continue;
+              const name = typeof block.name === "string" ? block.name : "unknown";
+              // Graph tools reach Claude through the MCP bridge and are accounted by the controller.
+              if (!name.startsWith("mcp__")) nativeTools.push({ name, readOnly: CLAUDE_READ_ONLY_TOOLS.has(name) });
+            }
+          }
           if (Array.isArray(event.message?.content)) {
             for (const block of event.message.content) {
               if (block?.type === "tool_use" && ["Agent", "Task"].includes(block.name) &&
@@ -678,7 +693,8 @@ async function runClaude(args: RunArgs): Promise<CodingRunResult> {
         return { status: "completed", summary: bounded(result.result?.trim() || "Claude Code completed") };
       })();
       const usage = usageOf(results, saved.baseline);
-      return usage !== undefined ? { ...outcome, usage } : outcome;
+      const tooled: CodingRunResult = unparsed ? outcome : { ...outcome, nativeTools };
+      return usage !== undefined ? { ...tooled, usage } : tooled;
     } finally {
       clearTimeout(watchdog);
       clearTimeout(interruptTimer);
@@ -699,6 +715,9 @@ async function runClaude(args: RunArgs): Promise<CodingRunResult> {
 function seconds(ms: number): string {
   return `${ms / 1000}s`;
 }
+
+/** Claude Code's own tools that cannot change anything outside the transcript. */
+const CLAUDE_READ_ONLY_TOOLS = new Set(["Read", "Grep", "Glob", "LS"]);
 
 /** Track tool calls still running: a `tool_use` starts one, its `tool_result` ends it. */
 function trackTools(content: unknown, running: Set<string>): void {

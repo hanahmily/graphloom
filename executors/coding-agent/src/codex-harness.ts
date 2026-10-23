@@ -24,6 +24,7 @@ import {
   type CodingRunResult,
   type CodingSessionOptions,
   type CodingUsage,
+  type NativeToolUse,
 } from "./harness.js";
 import { drainOnExit, signalGroup } from "./process-group.js";
 
@@ -69,7 +70,7 @@ export const CODEX_ADAPTER_FLAGS: readonly string[] = [
 
 interface CodexEvent {
   type?: string;
-  item?: { id?: unknown; type?: unknown };
+  item?: { id?: unknown; type?: unknown; command?: unknown };
   usage?: Record<string, unknown>;
   error?: { message?: unknown };
   message?: unknown;
@@ -217,6 +218,9 @@ async function runCodex(args: RunArgs): Promise<CodingRunResult> {
     };
     arm();
 
+    const nativeTools: NativeToolUse[] = [];
+    const toolIds = new Set<unknown>();
+    let unparsed = false;
     let completed = false;
     let closeTimer: NodeJS.Timeout | undefined;
     let closedAfterTurn = false;
@@ -229,10 +233,20 @@ async function runCodex(args: RunArgs): Promise<CodingRunResult> {
         try {
           event = JSON.parse(line) as CodexEvent;
         } catch {
+          if (line.trim() !== "") unparsed = true;
           continue;
         }
-        if (event === null || typeof event !== "object" || Array.isArray(event)) continue;
+        if (event === null || typeof event !== "object" || Array.isArray(event)) {
+          unparsed = true;
+          continue;
+        }
         const item = event.item;
+        if (item !== undefined && item !== null && (event.type === "item.started" || event.type === "item.completed") && !toolIds.has(item.id)) {
+          if (item.type !== "agent_message" && item.type !== "reasoning") {
+            toolIds.add(item.id);
+            nativeTools.push(codexToolUse(item));
+          }
+        }
         if (event.type === "item.started" && item?.type === "command_execution") running.add(item.id);
         if (event.type === "item.completed" && item?.type === "command_execution") {
           running.delete(item.id);
@@ -309,7 +323,8 @@ async function runCodex(args: RunArgs): Promise<CodingRunResult> {
           output,
         };
       })();
-      return usage !== undefined ? { ...outcome, usage } : outcome;
+      const tooled: CodingRunResult = unparsed ? outcome : { ...outcome, nativeTools };
+      return usage !== undefined ? { ...tooled, usage } : tooled;
     } finally {
       clearTimeout(watchdog);
       clearTimeout(closeTimer);
@@ -356,4 +371,16 @@ function usageOf(usage: Record<string, unknown> | undefined): CodingUsage | unde
 
 function count(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+/** Shell commands Codex may run on a retry-safe basis: plain reads, no pipes, redirects, substitution or chaining. */
+const READ_ONLY_COMMAND = /^(?:cat|ls|head|tail|wc|pwd|grep)(?:\s[^;&|<>`$()\n\\]*)?$/;
+
+function codexToolUse(item: { type?: unknown; command?: unknown }): NativeToolUse {
+  const type = typeof item.type === "string" ? item.type : "unknown";
+  if (type === "web_search") return { name: type, readOnly: true };
+  if (type !== "command_execution" || typeof item.command !== "string") return { name: type, readOnly: false };
+  const wrapped = /^(?:\/\S*)?(?:ba|z|da)?sh\s+-l?c\s+(['"])([\s\S]*)\1$/.exec(item.command.trim());
+  const command = (wrapped?.[2] ?? item.command).trim();
+  return { name: `command_execution: ${command.slice(0, 80)}`, readOnly: READ_ONLY_COMMAND.test(command) };
 }

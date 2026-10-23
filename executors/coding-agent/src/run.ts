@@ -212,14 +212,22 @@ export function createCodingAgentExecutor(
           const transient = result.status === "failed" ? classifyTransient(h.name, result.summary) : undefined;
           if (transient === undefined) break;
           const wrote = toolCalls.slice(callsBefore).some((c) => tools.find((t) => t.name === c.tool)?.effect !== "read");
-          const after = wrote || attempt >= policy.maxAttempts || before === undefined ? undefined : await worktreeDigest(ctx.worktreePath);
-          if (attempt >= policy.maxAttempts || wrote || before === undefined || after !== before) {
+          const unsafeNative =
+            result.nativeTools === undefined
+              ? "the harness did not report which native tools the failed try ran"
+              : result.nativeTools.find((t) => !t.readOnly)?.name;
+          const after = wrote || unsafeNative !== undefined || attempt >= policy.maxAttempts || before === undefined ? undefined : await worktreeDigest(ctx.worktreePath);
+          if (attempt >= policy.maxAttempts || wrote || unsafeNative !== undefined || before === undefined || after !== before) {
             const why =
               attempt >= policy.maxAttempts
                 ? `retries exhausted after ${attempt} ${attempt === 1 ? "try" : "tries"}`
                 : wrote
                   ? "not retried: the failed try called a write tool"
-                  : before === undefined
+                  : unsafeNative !== undefined
+                    ? result.nativeTools === undefined
+                      ? `not retried: ${unsafeNative}`
+                      : `not retried: the failed try ran a native tool that is not known to be read-only (${unsafeNative})`
+                    : before === undefined
                     ? "not retried: the worktree cannot be fingerprinted (not a readable git worktree), so changes by the failed try cannot be ruled out"
                     : after === undefined
                       ? "not retried: the worktree could not be fingerprinted after the failed try"
