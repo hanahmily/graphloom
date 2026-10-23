@@ -356,6 +356,13 @@ async function runNormalLoopSteps(
       if (state.mode === "normal") environmentReadyFor = state.activeVersion;
       continue;
     }
+    // A supervisor that returned the run to its graph has settled the partial job a usage limit left.
+    if (state.status === "running" && state.mode === "normal" && state.reconciliationRequired !== undefined) {
+      const { reconciliationRequired: _settled, ...settled } = state;
+      void _settled;
+      state = { ...settled, stateRevision: state.stateRevision + 1 };
+      await saveRunState(state);
+    }
     let holdElapsed = false;
     if (state.status === "running" && state.quotaHold !== undefined) {
       // A recovery episode held for a harness quota reset: wait it out (stop interrupts), then open it.
@@ -1956,13 +1963,26 @@ function pauseForQuota(
 ): QuotaPause {
   const key = retryKey(job);
   const done = state.executorRetryCounts?.[key] ?? 0;
-  const cleared = clearRetryCount(state, job);
   const executorId = job.executor?.id ?? job.kind;
   const resetAt = result.resetAt;
   const stopReason = `${QUOTA_STOP_PREFIX}${resetAt ?? "unknown"}`;
   const clean = (result.effects ?? "unknown") === "none";
   const resumable = !clean && job.kind === "agent" && (state.agentSessions ?? []).some((r) => r.operationId === operationId);
   const continued: JobSpec = { ...job, continueFrom: operationId, instruction: `${QUOTA_CONTINUATION_NOTE}\n\n${job.instruction}` };
+  // What a resume must not replay: recorded durably wherever the job cannot be continued.
+  const cleared: DurableRunState = {
+    ...clearRetryCount(state, job),
+    ...(!clean && !resumable
+      ? {
+          reconciliationRequired: {
+            operationId,
+            stageId: job.stageId,
+            reason: boundText(`executor ${executorId} hit a usage limit after a try that may have had effects: ${result.summary}`),
+            since: new Date().toISOString(),
+          },
+        }
+      : {}),
+  };
   // A partial effect with no session to continue goes to the supervisor (a run already in recovery returns it to that
   // episode as the settlement); the job is never replayed from its original assignment.
   const recovers = !clean && !resumable && canRecover;
@@ -3026,7 +3046,7 @@ function budgetExhaustionBlocker(state: DurableRunState, stageId: string, purpos
 
 const MAX_TRIGGER_CHARS = 500;
 
-function boundText(text: string): string {
+export function boundText(text: string): string {
   return text.length <= MAX_TRIGGER_CHARS ? text : `${text.slice(0, MAX_TRIGGER_CHARS - 1)}…`;
 }
 

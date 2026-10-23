@@ -1180,6 +1180,88 @@ describe("supervisor provider failures and deterministic remedies (controller)",
     expect(classifyStop(state)).toMatchObject({ retryable: true, kind: "harness quota" });
   });
 
+  it("resumes a quota-limited job with possible effects into a quota_partial episode, not the graph, and does not replay it", async () => {
+    const env = await makeEnv();
+    const controller = createController();
+    const resetAt = new Date(Date.now() + 3 * 3_600_000).toISOString();
+    const stopped = await controller.run({
+      taskPath: env.taskPath,
+      plugin: sessionGraph(),
+      validators,
+      supervisor: createScriptedSupervisor({ decisions: [] }),
+      runner: createScriptedRunner({ jobs: [quotaFailure(resetAt, "some")] }),
+      stateRoot: env.stateRoot,
+      runId: "quota-resume-episode-1",
+    });
+    expect(stopped).toMatchObject({ status: "stopped", stopReason: `harness quota exhausted until ${resetAt}` });
+    expect((await loadRunState(stopped.stateDir)).reconciliationRequired).toMatchObject({ stageId: "write" });
+    const triggers: string[] = [];
+    let replayed = 0;
+    const resumed = await controller.resume({
+      runRef: stopped.stateDir,
+      // A graph that would replay the write if the resume ran it.
+      plugin: createScriptedGraph({ definition, advances: [writeWork, stop({ reason: "graph ran", blocker: "none" }, "done")] }),
+      validators,
+      supervisor: createScriptedSupervisor({
+        decisions: [
+          (input) => {
+            triggers.push(input.trigger.code);
+            return returnToNormal({ summary: "reconciled by inspection" }, "return");
+          },
+        ],
+      }),
+      runner: createScriptedRunner({
+        jobs: [
+          async () => {
+            replayed += 1;
+            return { status: "ok" as const, summary: "replayed" };
+          },
+        ],
+      }),
+    });
+    expect(triggers).toEqual(["quota_partial"]);
+    // The episode settled the job; only then does the graph run (and its own dispatch is the graph's, not a replay).
+    expect(replayed).toBe(1);
+    expect(resumed).toMatchObject({ status: "stopped", stopReason: "graph ran" });
+    expect((await loadRunState(stopped.stateDir)).reconciliationRequired).toBeUndefined();
+  });
+
+  it("without a supervisor, a plain resume stops again for reconciliation and --reconciled lets the graph run", async () => {
+    const env = await makeEnv();
+    const controller = createController();
+    const stopped = await controller.run({
+      taskPath: env.taskPath,
+      plugin: sessionGraph(),
+      validators,
+      runner: createScriptedRunner({ jobs: [quotaFailure(new Date(Date.now() + 60_000).toISOString(), "some")] }),
+      stateRoot: env.stateRoot,
+      runId: "quota-resume-plain-1",
+    });
+    expect(stopped.stopReason).toBe("harness quota hit after possible effects; reconcile before resuming");
+    let ran = 0;
+    const counting = createScriptedRunner({
+      jobs: [
+        async () => {
+          ran += 1;
+          return { status: "ok" as const, summary: "ran" };
+        },
+      ],
+    });
+    const again = await controller.resume({ runRef: stopped.stateDir, plugin: sessionGraph(), validators, runner: counting });
+    expect(again).toMatchObject({ status: "stopped", stopReason: "harness quota hit after possible effects; reconcile before resuming" });
+    expect(again.blocker).toContain("--reconciled");
+    expect(ran).toBe(0);
+    const acknowledged = await controller.resume({
+      runRef: stopped.stateDir,
+      plugin: createScriptedGraph({ definition, advances: [stop({ reason: "graph ran", blocker: "none" }, "done")] }),
+      validators,
+      runner: counting,
+      reconciled: true,
+    });
+    expect(acknowledged).toMatchObject({ status: "stopped", stopReason: "graph ran" });
+    expect((await loadRunState(stopped.stateDir)).reconciliationRequired).toBeUndefined();
+  });
+
   it("keeps a stop that arrives during the quota hold: the hold does not overwrite it with a running state", async () => {
     const env = await makeEnv();
     const controller = createController();

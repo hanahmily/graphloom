@@ -37,7 +37,9 @@ import { deleteRun, type DeleteReport } from "./delete-run.js";
 import {
   bumpGeneration,
   ensureArtifactDir,
+  boundText,
   initialState,
+  QUOTA_RECONCILE_STOP_REASON,
   runNormalLoop,
 } from "./loop.js";
 import { sanitizedPluginEnv } from "./plugin-env.js";
@@ -144,6 +146,11 @@ export interface RunRequest {
 }
 
 export interface ResumeRequest {
+  /**
+   * The operator reconciled the job a harness usage limit cut off after possible effects:
+   * the run's graph may run again. Without a supervisor, a resume refuses to otherwise.
+   */
+  reconciled?: boolean;
   /** Absolute state directory, or runId under stateRoot. */
   runRef: string;
   runner: Runner;
@@ -629,6 +636,26 @@ export function createController(): Controller {
             condition: `resumed after a final stop (${decided.previous.kind}: ${state.stopReason ?? "stopped"})`,
             remedy: `ran the graph again: ${decided.lifted}`,
           });
+        }
+        if (state.reconciliationRequired !== undefined) {
+          const owed = state.reconciliationRequired;
+          if (request.reconciled === true) {
+            const { reconciliationRequired: _owed, ...rest } = state;
+            void _owed;
+            state = recordRemedy(rest, {
+              condition: "harness quota hit after possible effects",
+              remedy: `the operator reconciled job ${owed.operationId} (stage ${owed.stageId}) and resumed the graph`,
+            });
+          } else if (request.supervisor === undefined && request.supervisorFactory === undefined && state.supervisorBinding?.sessionFile === undefined) {
+            state = {
+              ...state,
+              status: "stopped",
+              stopReason: QUOTA_RECONCILE_STOP_REASON,
+              blocker: boundText(`job ${owed.operationId} (stage ${owed.stageId}) may have had effects before the usage limit; reconcile it, then \`graphloom resume --reconciled\`: ${owed.reason}`),
+            };
+            await saveRunState(state);
+            return;
+          }
         }
         const stopped = state;
         // A trigger recorded before the stop is not current evidence: the

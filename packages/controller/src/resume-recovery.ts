@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { noteOutcome } from "./settlement.js";
 import { recordRemedy, STEP_LIMIT_STOP_REASON, type DurableRunState } from "./state.js";
 
@@ -27,6 +28,18 @@ export const RESUME_RETRY_REMEDY = "resumed: returned to normal so the graph ret
  * changed environment re-enters recovery from that check.
  */
 export function returnToGraphOnResume(state: DurableRunState): DurableRunState {
+  // A job a usage limit cut off after possible effects is settled by an episode, never by the graph replaying it.
+  const owed = state.reconciliationRequired;
+  if (owed !== undefined) {
+    return state.mode === "recovery" && state.recoveryTrigger !== undefined
+      ? state
+      : {
+          ...state,
+          mode: "recovery",
+          recoveryEpisodeId: `ep-${randomUUID().slice(0, 8)}`,
+          recoveryTrigger: { code: "quota_partial", message: `${owed.reason} (job ${owed.operationId}, stage ${owed.stageId})` },
+        };
+  }
   if (state.mode !== "recovery" || state.stopReason === STEP_LIMIT_STOP_REASON) return state;
   const trigger = state.recoveryTrigger;
   const {

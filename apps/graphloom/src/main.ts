@@ -115,7 +115,7 @@ async function main(): Promise<void> {
   }
 
   if (cmd === "resume") {
-    const runRef = requireRunRef(args[1], "resume <stateDir|runId> [--state-root <dir>] [--update-plugin] [--update-executors] [--on-stop <command>]");
+    const runRef = requireRunRef(args[1], "resume <stateDir|runId> [--state-root <dir>] [--update-plugin] [--update-executors] [--reconciled] [--on-stop <command>]");
     const stateRoot = flagValue(args, "--state-root");
     const stopHook = armStopHook(args, {
       runId: path.basename(runRef),
@@ -130,6 +130,7 @@ async function main(): Promise<void> {
       ...(stateRoot ? { stateRoot: path.resolve(stateRoot) } : {}),
       ...(args.includes("--update-plugin") ? { updatePlugin: true } : {}),
       ...(args.includes("--update-executors") ? { updateExecutors: true } : {}),
+      ...(args.includes("--reconciled") ? { reconciled: true } : {}),
       ...(config !== undefined
         ? {
             restoreSupervisor: piSupervisorRestore(config),
@@ -344,7 +345,7 @@ Usage:
   graphloom stats <stateDir|runId> [--state-root <dir>] [--json]
   graphloom wait <stateDir|runId> [--state-root <dir>] [--timeout <dur>] [--json]
   graphloom stop <stateDir|runId> [--state-root <dir>]
-  graphloom resume <stateDir|runId> [--state-root <dir>] [--update-plugin] [--update-executors] [--on-stop <command>]
+  graphloom resume <stateDir|runId> [--state-root <dir>] [--update-plugin] [--update-executors] [--reconciled] [--on-stop <command>]
   graphloom switch-model <stateDir|runId> <provider/model> --reason <text> [--state-root <dir>]
   graphloom delete <stateDir|runId> [--state-root <dir>] [--force]
   graphloom version
@@ -425,6 +426,13 @@ longer installed, its isolation or built-in status changed, or the installed byt
 moved past an active run-local repair of it. Accepted receipts and evidence are
 not changed. Without it, a changed executor stops the run with "executor pin
 mismatch". It combines with --update-plugin.
+
+Resume --reconciled acknowledges a job a harness usage limit cut off after possible
+effects whose agent session could not be continued. With a supervisor, a plain
+resume opens a quota_partial recovery episode for it; without one, a plain resume
+stops again ("harness quota hit after possible effects; reconcile before resuming")
+until you have reconciled the worktree and external state yourself and pass
+--reconciled, which lets the graph run again.
 
 Agent runner: run and resume refuse to start without $GRAPHLOOM_RUNNER_CONFIG or
 ~/.config/graphloom/runner.json:

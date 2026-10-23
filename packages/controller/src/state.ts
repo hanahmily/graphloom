@@ -227,6 +227,13 @@ export interface DurableRunState {
   /** A recovery episode that opens only once this time has passed (a harness quota reset); cleared when it does. */
   quotaHold?: { until: string };
   /**
+   * A job a harness usage limit cut off after possible effects, with no
+   * session to continue: a resume must not run the graph (which would replay
+   * it) until a supervisor episode settled it or the operator acknowledged it
+   * (`resume --reconciled`).
+   */
+  reconciliationRequired?: { operationId: string; stageId: string; reason: string; since: string };
+  /**
    * A failed job its executor declared retryable (`retryLimit`), queued to run
    * again unchanged before the graph or supervisor is asked anything.
    */
