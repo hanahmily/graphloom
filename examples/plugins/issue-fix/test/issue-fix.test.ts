@@ -127,6 +127,10 @@ interface Scenario {
   fullChecks?: Array<Partial<Record<string, CommandResult>>>;
   /** The profile config the run uses, instead of the banyandb profile. */
   profile?: unknown;
+  /** Outcomes for each final-tier job in order, by command id (the last repeats); a command not listed succeeds. */
+  finals?: Array<Partial<Record<string, CommandResult>>>;
+  /** Resume right after this final-tier job (1-based). */
+  resumeAfterFinal?: number;
   /** Resume after this many full-tier check jobs. */
   resumeAfterFullChecks?: number;
   /** Resume right after this base RED run (1-based). */
@@ -228,6 +232,7 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
   let changed = 0;
   let candidates = 0;
   let fullJobs = 0;
+  let finalJobs = 0;
   let redRuns = 0;
   let revertedRuns = 0;
   let planned = 0;
@@ -366,6 +371,16 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
         op,
       );
       if (scenario.resumeAfterReverted === revertedRuns) resumeAt();
+      return;
+    }
+    if (job.checkout?.from === "candidate" && job.stageId === "review") {
+      // The final tier: one job in Review, a checkout of the reviewed candidate.
+      const results = nth(scenario.finals, finalJobs) ?? {};
+      finalJobs += 1;
+      for (const c of input!.commands!) {
+        record("command", { ...commandPayload(c.id, { ...results[c.id] }, c.argv), checkout: { from: "candidate", base: "base-sha", commit: `f-${op}`, paths: CHANGED, prepared: true, mutations: [], phase: "run" } }, job, op);
+      }
+      if (scenario.resumeAfterFinal === finalJobs) resumeAt();
       return;
     }
     if (job.checkout?.from === "candidate") {
@@ -1196,7 +1211,7 @@ describe("issue-fix graph under the banyandb profile", () => {
       expect(tiers).toEqual({ "test-ci": "cheap", build: "full", lint: "cheap", check: "full" });
       const bad = structuredClone(BANYANDB) as { commands: Array<{ tier?: string }> };
       bad.commands[0]!.tier = "fast";
-      expect(() => parseProfile(bad)).toThrow(/commands\[0\]\.tier must be cheap or full/);
+      expect(() => parseProfile(bad)).toThrow(/commands\[0\]\.tier must be cheap, full or final/);
     });
 
     it("dispatches no full-tier command when the cheap tier fails, and corrects the implementer with that evidence", () => {
@@ -2520,5 +2535,174 @@ describe("context documents (#195)", () => {
     expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
     expect(getFiles(jobs)).toEqual([]);
     expect(assignment(agents(jobs, "diagnostic", "fix")[0])).not.toContain("Context document");
+  });
+});
+
+describe("the final command tier (#196)", () => {
+  const SMOKE = { id: "smoke", argv: ["make", "smoke"], timeoutMs: 600_000, requirement: "final-checks", tier: "final", label: "make smoke", section: "Smoke test" };
+  const withFinal = (...commands: object[]): unknown => {
+    const profile = structuredClone(BANYANDB) as { commands: object[] };
+    profile.commands.push(...(commands.length > 0 ? commands : [SMOKE]));
+    return profile;
+  };
+  const FINAL = withFinal();
+  const finalJobs = (jobs: JobSpec[]) => jobs.filter((j) => j.stageId === "review" && j.purpose === "check");
+  const reviewJobs = (jobs: JobSpec[]) => jobs.filter((j) => j.stageId === "review" && j.purpose === "review" && j.kind === "agent");
+  const cheapJobs = (jobs: JobSpec[]) => jobs.filter((j) => j.stageId === "fix" && j.purpose === "check" && j.instruction === "Cheap candidate checks");
+  const fullJobs = (jobs: JobSpec[]) => jobs.filter((j) => j.stageId === "fix" && j.purpose === "check" && j.instruction === "Full candidate checks");
+  const SMOKE_FAILED: CommandResult = { exitCode: 2, stderr: "smoke: the join returned 3 rows, want 4\n" };
+
+  it("declares a Review requirement only for a profile with final commands", () => {
+    const plain = createGraph().describe(BANYANDB);
+    expect(plain.stages.find((s) => s.id === "review")!.requirementIds).toEqual(["code-review"]);
+    const final = createGraph().describe(FINAL);
+    expect(final.stages.find((s) => s.id === "review")!.requirementIds).toEqual(["code-review", "final-checks"]);
+    expect(final.stages.find((s) => s.id === "fix")!.requirementIds).toEqual(plain.stages.find((s) => s.id === "fix")!.requirementIds);
+    expect(final.requirements.find((r) => r.id === "final-checks")!.statement).toBe("In a prepared checkout of the reviewed change, make smoke all pass and change no file.");
+    expect(final.defaultValidators.find((b) => b.requirementId === "final-checks")).toMatchObject({ validatorId: "final-checks" });
+    // The final command is not part of the candidate checks, in any tier.
+    const profile = parseProfile(FINAL);
+    for (const tier of [undefined, "cheap", "full"] as const) {
+      expect(candidateCommands(profile, PLAN.test!, tier).map((c) => c.id)).not.toContain("smoke");
+    }
+  });
+
+  it("runs once, after code review passes, in a checkout of the candidate, and reports it in the pull request", () => {
+    const { decision, jobs, receipts } = simulate({ profile: FINAL, finals: [{ smoke: { report: JSON.stringify({ summary: ["| size | ns/op |", "|---|---|", "| 1,024 | 812 |"] }) } }] });
+    expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+    const runs = finalJobs(jobs);
+    expect(runs).toHaveLength(1);
+    expect(runs[0]).toMatchObject({ stageId: "review", kind: "command", purpose: "check", readOnly: true, checkout: { from: "candidate" } });
+    expect((runs[0]!.input as { commands: Array<{ id: string; argv: string[]; timeoutMs: number }> }).commands).toEqual([{ id: "smoke", argv: ["make", "smoke"], timeoutMs: 600_000 }]);
+    // After the review that passed, never before it, and before delivery.
+    expect(jobs.indexOf(runs[0]!)).toBeGreaterThan(jobs.indexOf(reviewJobs(jobs).at(-1)!));
+    const delivery = jobs.find((j) => (j.input as { commands?: Array<{ id: string }> }).commands?.[0]?.id === COMMAND.deliver)!;
+    expect(jobs.indexOf(delivery)).toBeGreaterThan(jobs.indexOf(runs[0]!));
+    expect(receipts.filter((r) => r.stageId === "review").map((r) => r.requirementId)).toEqual(["code-review", "final-checks"]);
+    // The pull request names the command in its test plan and shows the report's summary, labelled as reported.
+    const { body } = deliverArgs(jobs);
+    expect(body).toContain("`make smoke`");
+    expect(body).toContain("## Smoke test\nReported by `make smoke`; the run gated only on its exit status.\n\n| size | ns/op |\n|---|---|\n| 1,024 | 812 |");
+  });
+
+  it("runs once even when review needs several passes on the candidate", () => {
+    // The first pass does not cover every file, so a second pass is needed.
+    const { decision, jobs } = simulate({ profile: FINAL, codeReviews: [reviewed([], { total_files: 3, reviewed_files: 2, skipped: [] }), reviewed()] });
+    expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+    expect(reviewJobs(jobs)).toHaveLength(2);
+    expect(finalJobs(jobs)).toHaveLength(1);
+    expect(jobs.indexOf(finalJobs(jobs)[0]!)).toBeGreaterThan(jobs.indexOf(reviewJobs(jobs)[1]!));
+    // A report without a summary still gets its section, saying what was gated.
+    expect(deliverArgs(jobs).body).toContain("## Smoke test\nReported by `make smoke`; the run gated only on its exit status.");
+  });
+
+  it("does not run when review does not pass: the supervisor gets the review failure, no final job ran", () => {
+    const finding = { path: "pkg/timestamp/scheduler.go", start_line: 88, end_line: 95, category: "bug", severity: "high", content: "Close now waits forever for an action that ignores cancellation." };
+    const { decision, jobs } = simulate({ profile: FINAL, codeReviews: [reviewed([finding])] });
+    expect(decision.action).toMatchObject({ type: "supervise" });
+    expect(finalJobs(jobs)).toEqual([]);
+  });
+
+  it("sends Fix back with the failing final command's output, and the next candidate runs every tier again", () => {
+    const { decision, jobs, reenterDecisions, decisions } = simulate({ profile: FINAL, graphReenters: {}, finals: [{ smoke: SMOKE_FAILED }, {}] });
+    expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+    expect(reenterDecisions).toBe(1);
+    const reenter = decisions.find((d) => d.action.type === "reenter")!;
+    expect(reenter.action).toMatchObject({ type: "reenter", reenter: { stageId: "fix", reason: expect.stringContaining("the final checks failed on the reviewed change") } });
+    expect((reenter.action as { reenter: { reason: string } }).reenter.reason).toContain("smoke exited 2");
+    expect((reenter.action as { reenter: { reason: string } }).reenter.reason).toContain("(reentry 1 of 4)");
+    // The implementer is told what failed, with the output.
+    const work = jobs.filter((j) => j.kind === "agent" && j.purpose === "work");
+    expect(work).toHaveLength(2);
+    expect(assignment(work[1])).toContain("Code review passed, but the final checks, which run once on the reviewed change, failed");
+    expect(assignment(work[1])).toContain("smoke exited 2 in the candidate checkout");
+    expect(assignment(work[1])).toContain("the join returned 3 rows, want 4");
+    // The correction is a new candidate: both check tiers, code review and the final tier run again, in that order.
+    expect(cheapJobs(jobs)).toHaveLength(2);
+    expect(fullJobs(jobs)).toHaveLength(2);
+    expect(reviewJobs(jobs).length).toBeGreaterThanOrEqual(2);
+    expect(finalJobs(jobs)).toHaveLength(2);
+    expect(jobs.indexOf(finalJobs(jobs)[0]!)).toBeLessThan(jobs.indexOf(work[1]!));
+    expect(jobs.indexOf(work[1]!)).toBeLessThan(jobs.indexOf(cheapJobs(jobs)[1]!));
+    expect(jobs.indexOf(cheapJobs(jobs)[1]!)).toBeLessThan(jobs.indexOf(finalJobs(jobs)[1]!));
+  });
+
+  it("counts a final failure against the review reentry cap, then hands the failure to the supervisor", () => {
+    const { decision, jobs, reenterDecisions } = simulate({ profile: FINAL, graphReenters: { maxReentries: 1 }, finals: [{ smoke: SMOKE_FAILED }] });
+    expect(reenterDecisions).toBe(1);
+    expect(finalJobs(jobs)).toHaveLength(2);
+    expect(decision.action).toMatchObject({ type: "supervise", supervise: { reason: expect.stringContaining("the final checks failed on the reviewed change: final-checks: smoke exited 2") } });
+    // With no reentries allowed the first failure goes straight to the supervisor.
+    const none = simulate({ profile: FINAL, finals: [{ smoke: SMOKE_FAILED }] });
+    expect(none.reenterDecisions).toBe(0);
+    expect(none.decision.action).toMatchObject({ type: "supervise" });
+  });
+
+  it("hands over a final failure that a reentry did not change, instead of running it again", () => {
+    const { decision, jobs, reenterDecisions } = simulate({ profile: FINAL, graphReenters: {}, unchangedWork: [2], finals: [{ smoke: SMOKE_FAILED }] });
+    expect(reenterDecisions).toBe(1);
+    expect(decision.action).toMatchObject({ type: "supervise" });
+    // The unchanged candidate already has its one final run.
+    expect(finalJobs(jobs)).toHaveLength(1);
+  });
+
+  it("fails a final command that leaves a file changed, even when it exits 0", () => {
+    const profile = parseProfile(FINAL);
+    const run = (mutations: string[]): EvidenceRecord => ({
+      ref: "f1",
+      kind: "command",
+      candidateDigest: "d1",
+      payload: { command: { id: "smoke", argv: ["make", "smoke"], exitCode: 0, stdoutTail: "", stderrTail: "" }, checkout: { from: "candidate", base: "b", commit: "c", paths: CHANGED, prepared: true, mutations, phase: "run" }, producer: { operationId: "op-f", stageId: "review", purpose: "check", readOnly: true, kind: "command" } },
+    });
+    const evaluate = (evidence: EvidenceRecord[]) => validatorById("final-checks")!.evaluate({ requirementId: "final-checks", statement: "s", evidence, candidateDigest: "d1", config: FINAL });
+    expect(evaluate([run([])])).toMatchObject({ status: "passed" });
+    expect(evaluate([run(["build/out.txt"])])).toMatchObject({ status: "failed", reason: expect.stringContaining("left files changed: build/out.txt") });
+    expect(evaluate([])).toMatchObject({ status: "inconclusive" });
+    // A run on another candidate is no evidence for this one.
+    expect(evaluate([{ ...run([]), candidateDigest: "d0" }])).toMatchObject({ status: "inconclusive" });
+    expect(profile.commands.at(-1)).toMatchObject({ id: "smoke", tier: "final" });
+  });
+
+  it("runs a profile without final commands exactly as before: no final job, no Review requirement, no section", () => {
+    const { decision, jobs, receipts } = simulate({});
+    expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+    expect(finalJobs(jobs)).toEqual([]);
+    expect(receipts.filter((r) => r.stageId === "review").map((r) => r.requirementId)).toEqual(["code-review"]);
+    expect(deliverArgs(jobs).body).not.toContain("Reported by");
+  });
+
+  describe("after a resume (#154)", () => {
+    it("runs a final failure from before the latest resume once more, and passes", () => {
+      const { decision, jobs, reenterDecisions } = simulate({ profile: FINAL, finals: [{ smoke: SMOKE_FAILED }, {}], resumeAfterFinal: 1 });
+      expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+      expect(finalJobs(jobs)).toHaveLength(2);
+      // The stale failure was not acted on: no reentry, no second implementer pass.
+      expect(reenterDecisions).toBe(0);
+      expect(jobs.filter((j) => j.kind === "agent" && j.purpose === "work")).toHaveLength(1);
+    });
+
+    it("acts on a failure recorded since the resume, so a failing command cannot loop", () => {
+      const { decision, jobs } = simulate({ profile: FINAL, finals: [{ smoke: SMOKE_FAILED }], resumeAfterFinal: 1 });
+      expect(finalJobs(jobs)).toHaveLength(2);
+      expect(decision.action).toMatchObject({ type: "supervise", supervise: { reason: expect.stringContaining("smoke exited 2") } });
+    });
+
+    it("does not run a final command that passed before the resume again", () => {
+      const { decision, jobs } = simulate({ profile: FINAL, resumeAfterFinal: 1 });
+      expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+      expect(finalJobs(jobs)).toHaveLength(1);
+    });
+  });
+
+  it("checks the tier and requirement a profile declares for a command", () => {
+    const broken = (command: object) => () => parseProfile(withFinal(command));
+    expect(broken({ ...SMOKE, requirement: "passes" })).toThrow(/a final tier command counts toward final-checks/);
+    expect(broken({ ...SMOKE, tier: "full" })).toThrow(/only a final tier command may/);
+    expect(broken({ ...SMOKE, tier: "last" })).toThrow(/tier must be cheap, full or final/);
+    expect(broken({ ...SMOKE, requirement: "bench" })).toThrow(/requirement must be passes, builds or final-checks/);
+    expect(broken({ ...SMOKE, section: "" })).toThrow(/section is a pull request heading/);
+    expect(broken({ ...SMOKE, tier: undefined, requirement: "builds", section: "X" })).toThrow(/section is a pull request heading, for a final tier command only/);
+    expect(broken(SMOKE)).not.toThrow();
+    expect(broken({ ...SMOKE, section: undefined })).not.toThrow();
   });
 });

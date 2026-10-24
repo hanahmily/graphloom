@@ -31,7 +31,7 @@ supervisor-dispatched work run without one no longer crashes the graph
 ([#191](https://github.com/hanahmily/graphloom/issues/191)).
 Version 0.10.4 declares a 6 h `waitMs` in every profile, so a coding-agent harness's usage-limit reset can be waited out instead of stopping the run ([#189](https://github.com/hanahmily/graphloom/issues/189)).
 Version 0.11.0 reenters Fix itself when code review fails only on confirmed findings and the loop is converging, instead of handing every such failure to the supervisor ([#193](https://github.com/hanahmily/graphloom/issues/193); see [review failures](#review-failures-the-graph-reenters-fix-or-the-supervisor-decides)).
-Version 0.12.0 reads the profile's [context documents](#context-documents) once and gives them to the planner, the implementer and the code reviewers ([#195](https://github.com/hanahmily/graphloom/issues/195)).
+Version 0.12.0 reads the profile's [context documents](#context-documents) once and gives them to the planner, the implementer and the code reviewers ([#195](https://github.com/hanahmily/graphloom/issues/195)), and runs a profile's [`final` tier commands](#the-final-command-tier) once after review converged ([#196](https://github.com/hanahmily/graphloom/issues/196)).
 
 ## Purpose
 
@@ -68,7 +68,7 @@ The profile supplies, as data:
 | `issues` | Where issues live; the request names `owner/repo#N`. Optional `context`: [documents](#context-documents) the issue defers to | `apache/skywalking` | `hanahmily/graphloom` |
 | `environment` | The SDK `EnvironmentDeclaration`: checks, preparation, pinned files. Must include an `ocr` check that prints open-code-review's path | BanyanDB's checklist, `make generate`, `CONTRIBUTING.md` pinned | Node.js 22+, npm, flock, git, ocr, codex, claude; `npm ci --include=dev`, `npm run build`; nothing pinned |
 | `regression` | `runner` (a built-in, below) and `timeoutMs` | `go-test`, 30 min | `vitest`, 20 min |
-| `commands` | GREEN's further checks and the build checks, run in order in the committed candidate checkout. Each has `id`, `argv`, `timeoutMs`, `requirement` (`passes` or `builds`), and optional `tier` (`cheap` or `full`, default `full`; once any command is `cheap`, GREEN and the cheap commands run first in one checkout job and the full commands run in a second job only after those passed on the same candidate digest, and Fix needs both) and optional `label`, `statement` and `summary` wording, and optional `writes` (repository-relative files or directories, a trailing `/**` allowed, that the command regenerates and a failure tells the author to commit, such as license artifacts: the implementer's write scope covers them even under a protected path) | `test-ci` (passes); `build`, `lint`, `check` (builds; `make check` already runs license-check); `test-ci` and `lint` are cheap | `npm run typecheck`, `npm run build`, `npm test` (builds; the full suite takes about ten minutes, so 45 min) |
+| `commands` | GREEN's further checks and the build checks, run in order in the committed candidate checkout. Each has `id`, `argv`, `timeoutMs`, `requirement` (`passes`, `builds`, or `final-checks` for a `final` tier command), and optional `tier` (`cheap`, `full` or `final`, default `full`; a `final` command runs once, after review, see [the final tier](#the-final-command-tier), and has optional `section`; once any command is `cheap`, GREEN and the cheap commands run first in one checkout job and the full commands run in a second job only after those passed on the same candidate digest, and Fix needs both) and optional `label`, `statement` and `summary` wording, and optional `writes` (repository-relative files or directories, a trailing `/**` allowed, that the command regenerates and a failure tells the author to commit, such as license artifacts: the implementer's write scope covers them even under a protected path) | `test-ci` (passes); `build`, `lint`, `check` (builds; `make check` already runs license-check); `test-ci` and `lint` are cheap | `npm run typecheck`, `npm run build`, `npm test` (builds; the full suite takes about ten minutes, so 45 min) |
 | `testPaths` | `suffixes`, and `directories` whose contents count as test files; RED applies only these | `_test.go`, `testdata/` | `.test.ts`, `test/`, `fixtures/` |
 | `protectedPaths` | Excluded from the write scope unless the record justifies one, or a command's `writes` declares it regenerated (since 0.10.0) | `api/proto`, `go.mod`, `go.sum`, `.github` | `package-lock.json`, `.github`, `legacy` |
 | `changelog` | Optional `{ path, rule }`; absent means no `changelog-entry` requirement. The one rule, `first-release-section-entry`, needs a new list entry inside the first `## ` section | `CHANGES.md` | none: the repository keeps no changelog |
@@ -88,7 +88,7 @@ refuses a missing or unusable profile, so a run cannot start on one.
 
 - Fix always has `decisions-recorded`, `reproduces`, `passes` and `in-scope`;
   `builds` when the profile has `builds` commands; `changelog-entry` when it
-  names a changelog. Review has `code-review`.
+  names a changelog. Review has `code-review`, and `final-checks` when the profile has `final` tier commands.
 - Statements name what is checked for this repository, built from the profile:
   the runner's evidence for `reproduces` ("go test -json reports it failed, and
   the package built", or "vitest reports it failed with an assertion error in
@@ -176,6 +176,44 @@ the implementer that:
   behaviour must be.
 
 The example task requests `Fix hanahmily/graphloom#119.`
+
+## The final command tier
+
+Some checks are too slow for the cheap and full tiers, which run again for every
+candidate: a benchmark that takes an hour is paid once per round. A profile
+command may declare `tier: "final"`, and then its `requirement` is
+`final-checks` (a final command cannot count toward Fix's `passes` or `builds`,
+which Fix needs before review, and only a final command may count toward
+`final-checks`). Review gains the requirement `final-checks` only when the
+profile has such commands; a profile without them has the definition and the
+behaviour it had before.
+
+Final commands run in one job, in a prepared checkout of the candidate, once
+per candidate digest, at the moment code review has converged on that digest
+(the review's own acceptance rule passed) and before the Review stage is
+validated, so before delivery. The `final-checks` validator passes when every
+final command ran in a prepared checkout of this candidate, succeeded and
+changed no file; a command that did not run is not a pass.
+
+- **Failure.** A final failure is a defect, not a flake. The graph reenters Fix
+  itself with the failing requirement and the command's output, drawing on the
+  same cap (`review.maxReentries`, default 4) and corrections budget as a
+  [review reentry](#review-failures-the-graph-reenters-fix-or-the-supervisor-decides),
+  since both count the implementer runs after the first review pass. If the
+  last implementer pass left the candidate unchanged, the same candidate would
+  fail the same way, so the supervisor gets it instead, as it does at the cap.
+  The implementer is told that review passed and the final checks failed. The
+  corrected candidate is a new digest, so the cheap tier, RED, the full tier,
+  code review and the final tier all run again.
+- **Resume.** As for every check ([#154](https://github.com/hanahmily/graphloom/issues/154)),
+  a final failure recorded before the operator's latest resume is run once
+  more; a failure recorded since then is acted on, so a failing command cannot
+  loop. A final run that passed before the resume stands.
+- **Pull request.** A final command's optional `section` names a pull request
+  heading. The graph puts the `summary` of the command's JSON report there (a
+  line, or a list of markdown lines), under a line saying it is reported and the
+  run gated only on the exit status. The command's summary also joins the test
+  plan's list of checks that passed.
 
 ## Context documents
 

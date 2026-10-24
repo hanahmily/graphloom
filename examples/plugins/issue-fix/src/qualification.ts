@@ -257,6 +257,14 @@ const tsGreen = (report = tsPassed, exitCode = 0, o: RunOptions = {}) => command
 const tsBuilds = (overrides: Partial<Record<string, number>> = {}, skip: string[] = []) =>
   ["typecheck", "build", "test"].filter((id) => !skip.includes(id)).map((id) => command(id, overrides[id] ?? 0, { paths: TS_PATHS }));
 
+/** The graphloom profile with one `final` tier command, for the final-checks cases. */
+const FINAL_PROFILE: unknown = {
+  ...(GRAPHLOOM as object),
+  commands: [...(GRAPHLOOM as { commands: object[] }).commands, { id: "smoke", argv: ["npm", "run", "smoke"], requirement: "final-checks", tier: "final" }],
+};
+const f = (name: string, evidence: EvidenceRecord[], expected: ValidationStatus): QualificationCase => c("final-checks", name, evidence, expected, undefined, FINAL_PROFILE);
+const finalCommand = (exitCode: number, o: RunOptions = {}): EvidenceRecord => command("smoke", exitCode, { stageId: REVIEW_STAGE, ...o });
+
 /** Positive and negative cases for every shipped validator. */
 export const QUALIFICATION_CASES: readonly QualificationCase[] = [
   c("decisions-recorded", "complete ready record", [implementer(READY)], "passed"),
@@ -394,6 +402,15 @@ export const QUALIFICATION_CASES: readonly QualificationCase[] = [
   g("write-scope", "the lockfile without a reason", [implementer(TS_READY), tsGreen(tsPassed, 0, { paths: ["package-lock.json", TS_SOURCE] })], "failed"),
   g("write-scope", "the frozen legacy tree", [implementer(TS_READY), tsGreen(tsPassed, 0, { paths: ["legacy/go/main.go"] })], "failed"),
   g("write-scope", "the lockfile with a recorded reason", [implementer({ ...TS_READY, scopeExceptions: [{ path: "package-lock.json", reason: "the fix needs a new dependency" }] }), tsGreen(tsPassed, 0, { paths: ["package-lock.json"] })], "passed"),
+
+  f("final run passed", [finalCommand(0)], "passed"),
+  f("final run exited non-zero", [finalCommand(1)], "failed"),
+  f("final run timed out", [finalCommand(0, { timedOut: true })], "failed"),
+  f("final run left a file changed", [finalCommand(0, { mutations: ["build/out.json"] })], "failed"),
+  f("final run in an unprepared checkout", [finalCommand(0, { prepared: false })], "failed"),
+  f("no final run", [], "inconclusive"),
+  f("final run on an older change", [finalCommand(0, { digest: OTHER })], "inconclusive"),
+  f("final command run in the base checkout", [finalCommand(0, { from: "base" })], "inconclusive"),
 
   g("open-code-review", "no comments", [codeReviewRun(reviewed([]))], "passed"),
 ];

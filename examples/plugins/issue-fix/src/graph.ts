@@ -33,6 +33,7 @@ import {
   REQUIREMENT_BUILDS,
   REQUIREMENT_CHANGELOG,
   REQUIREMENT_DECISIONS,
+  REQUIREMENT_FINAL,
   REQUIREMENT_PASSES,
   REQUIREMENT_REPRODUCES,
   REQUIREMENT_REVIEW,
@@ -99,6 +100,7 @@ import {
 } from "./issues.js";
 import { CODE_REVIEW_SCHEMA, clip, codeReviewInstruction, describeCoverage, isBlocking, reviewBackground } from "./ocr.js";
 import {
+  checkCommands,
   commandLabel,
   commandsFor,
   commandsInTier,
@@ -107,6 +109,7 @@ import {
   commandSummary,
   commandStatement,
   enforcedProtectedPaths,
+  finalCommands,
   harnessName,
   isTestPath,
   contextName,
@@ -121,6 +124,7 @@ import {
   candidateCommands,
   commitMessage,
   deliverCommands,
+  finalJobCommands,
   implementInstruction,
   planInstruction,
   planRevisionInstruction,
@@ -128,7 +132,8 @@ import {
   redCommands,
   snapshotText,
 } from "./prompts.js";
-import { cleanRun, codeReview, implementerRecord, latestImplementerRecord, plannerRecord, reportText, validatorById, verifiedChecks } from "./validators.js";
+import { finalSections } from "./final.js";
+import { cleanRun, codeReview, finalRun, implementerRecord, latestImplementerRecord, plannerRecord, reportText, validatorById, verifiedChecks } from "./validators.js";
 
 export const GRAPH_ID = "issue-fix";
 export const GRAPH_VERSION = "0.12.0";
@@ -214,8 +219,19 @@ export function definitionFor(profile: Profile): GraphDefinition {
       statement: `The latest read-only ${harnessName(profile.roles.reviewer)} review pass on the current change, following open-code-review's delegation workflow in this generation, reviewed every changed file, test files included, skipped none, and gave a status for every open finding; every critical or high finding it raised was refuted by an independent read-only verifier with quotes that match the change; and no finding of the run is confirmed and unfixed, disputed, or awaiting verification.`,
       evidenceSchema: "code-review-v2",
     },
+    // Review's further requirements: the profile's `final` tier, run once after code review converged.
+    ...(commandsFor(profile, "final-checks").length > 0
+      ? [
+          {
+            id: REQUIREMENT_FINAL,
+            statement: `In a prepared checkout of the reviewed change, ${listAnd(commandsFor(profile, "final-checks").map(commandLabel))} all pass and change no file.`,
+            evidenceSchema: "checkout-command-v1",
+          },
+        ]
+      : []),
   ];
   const bindings: Record<string, ValidatorBinding> = {
+    [REQUIREMENT_FINAL]: { requirementId: REQUIREMENT_FINAL, validatorId: "final-checks", version: "1" },
     [REQUIREMENT_DECISIONS]: { requirementId: REQUIREMENT_DECISIONS, validatorId: "decisions-recorded", version: "1" },
     [REQUIREMENT_REPRODUCES]: { requirementId: REQUIREMENT_REPRODUCES, validatorId: "red-reproduces", version: "1" },
     [REQUIREMENT_PASSES]: { requirementId: REQUIREMENT_PASSES, validatorId: "green-passes", version: "1" },
@@ -224,7 +240,8 @@ export function definitionFor(profile: Profile): GraphDefinition {
     [REQUIREMENT_CHANGELOG]: { requirementId: REQUIREMENT_CHANGELOG, validatorId: "changes-entry", version: "1" },
     [REQUIREMENT_REVIEW]: { requirementId: REQUIREMENT_REVIEW, validatorId: "open-code-review", version: "2" },
   };
-  const fixRequirements = requirements.map((r) => r.id).filter((id) => id !== REQUIREMENT_REVIEW);
+  const reviewRequirements: string[] = requirements.map((r) => r.id).filter((id) => id === REQUIREMENT_REVIEW || id === REQUIREMENT_FINAL);
+  const fixRequirements = requirements.map((r) => r.id).filter((id) => !reviewRequirements.includes(id));
   return {
     graphId: GRAPH_ID,
     version: GRAPH_VERSION,
@@ -236,7 +253,7 @@ export function definitionFor(profile: Profile): GraphDefinition {
     ],
     stages: [
       { id: FIX_STAGE, name: "Fix", requirementIds: fixRequirements },
-      { id: REVIEW_STAGE, name: "Review", requirementIds: [REQUIREMENT_REVIEW] },
+      { id: REVIEW_STAGE, name: "Review", requirementIds: reviewRequirements },
     ],
     requirements,
     defaultValidators: requirements.map((r) => bindings[r.id]!),
@@ -317,7 +334,7 @@ function fix(ctx: Context, view: RunView, issue: number, state: FixPrivateState)
   if (planRun === undefined) {
     const revisit = agentRuns(view.evidence, FIX_STAGE, "diagnostic").some((r) => r.status === "completed");
     const assignment = revisit
-      ? planRevisionInstruction(profile, { issue, feedback: reentryFeedback(view), changed: agentRuns(view.evidence, FIX_STAGE, "work").length > 0 })
+      ? planRevisionInstruction(profile, { issue, feedback: reentryFeedback(ctx, view), changed: agentRuns(view.evidence, FIX_STAGE, "work").length > 0 })
       : planInstruction(profile, { issue, request: view.task.request, snapshot: snapshotBody, context: context.docs });
     return dispatchAgent(view, planJob(ctx, view, assignment), revisit ? "revisit the plan after returning to Fix (read-only)" : "plan the fix (read-only)", state);
   }
@@ -342,7 +359,7 @@ function fix(ctx: Context, view: RunView, issue: number, state: FixPrivateState)
   const implementer = (job: JobSpec, summary: string, next: FixPrivateState): GraphDecision => restore ?? dispatchAgent(view, job, summary, next);
   if (implemented === undefined || implemented.status !== "completed" || stalePreReentry) {
     return implementer(
-      implementJob(ctx, view, issue, plan.record, stalePreReentry ? reentryFeedback(view) : undefined),
+      implementJob(ctx, view, issue, plan.record, stalePreReentry ? reentryFeedback(ctx, view) : undefined),
       implemented === undefined ? "implement the reviewed plan, continuing the plan session" : stalePreReentry ? "answer why Fix was re-entered with a fresh implementation pass" : "retry the implementation",
       state,
     );
@@ -380,7 +397,7 @@ function fix(ctx: Context, view: RunView, issue: number, state: FixPrivateState)
     // commands first, the full commands only once those passed.
     const tiered = isTiered(profile);
     const first = tiered ? "cheap" : undefined;
-    const firstCommands = tiered ? commandsInTier(profile, "cheap") : profile.commands;
+    const firstCommands = tiered ? commandsInTier(profile, "cheap") : checkCommands(profile);
     if (green === undefined || failedBeforeResume(current, green, firstCommands, view)) {
       return withPrivate(
         dispatch(
@@ -622,7 +639,12 @@ function review(ctx: Context, view: RunView, issue: number, state: FixPrivateSta
   const statement = definition.requirements.find((r) => r.id === REQUIREMENT_REVIEW)!.statement;
   const history = view.evidence.filter((e) => e.candidateDigest !== undefined && e.candidateDigest !== view.candidateDigest);
   const result = codeReview.evaluate({ requirementId: REQUIREMENT_REVIEW, statement, evidence: current, history, candidateDigest: digest }) as ValidationResult;
-  if (result.status === "passed") return withPrivate(validate({ stageId: REVIEW_STAGE }, "validate the reviewed change"), state);
+  if (result.status === "passed") {
+    // The final tier runs once, here: review converged, delivery has not happened.
+    const final = finalStep(ctx, view, state, digest, current);
+    if (final !== undefined) return final;
+    return withPrivate(validate({ stageId: REVIEW_STAGE }, "validate the reviewed change"), state);
+  }
   const refs = [...passes.map((p) => p.run.record.ref), ...ledger.verifications.filter((v) => v.digest === digest && currentRefs.has(v.run.record.ref)).map((v) => v.run.record.ref)];
   const back = reviewReentry(profile, view, ledger, last, digest, state);
   if (back !== undefined) return back;
@@ -650,12 +672,7 @@ function reviewReentry(profile: Profile, view: RunView, ledger: FindingLedger, l
   const ids = new Set(confirmed.map((f) => issueIdOf(f.id)));
   if (ledger.issues.issues.some((i) => isUnsettled(i) && !ids.has(i.id))) return undefined;
 
-  // A reentry is an implementer work run after the first review pass, whoever asked for it (graph or supervisor); the
-  // count comes from evidence, so a resume keeps it, and a pass that leaves the candidate unchanged still counts.
-  const firstReview = view.evidence.findIndex((e) => agentRuns([e], REVIEW_STAGE, "review").length > 0);
-  const refs = new Set(agentRuns(view.evidence, FIX_STAGE, "work").map((r) => r.record.ref));
-  const corrections = view.evidence.map((e, i) => ({ e, i })).filter(({ e, i }) => i > firstReview && refs.has(e.ref));
-  const reentries = firstReview < 0 ? 0 : corrections.length;
+  const { corrections, reentries } = reentryCount(view);
   const cap = profile.review.maxReentries ?? DEFAULT_MAX_REVIEW_REENTRIES;
   if (reentries >= cap) return undefined;
   // The supervisor keeps one correction for what the graph cannot settle.
@@ -671,6 +688,117 @@ function reviewReentry(profile: Profile, view: RunView, ledger: FindingLedger, l
   const more = confirmed.length > named.length ? `; and ${confirmed.length - named.length} more` : "";
   const reason = `code review round ${reviewRound(ledger, digest)} confirmed ${confirmed.length} critical or high finding(s)${previous !== undefined ? ` (${previous} before the last correction)` : ""}: ${named.join("; ")}${more}; send Fix back with them (review reentry ${reentries + 1} of ${cap})`;
   return reenter({ stageId: FIX_STAGE, reason, evidenceRefs: [last.run.record.ref] }, `send the confirmed code review findings back to Fix (review reentry ${reentries + 1} of ${cap})`, JSON.stringify(state));
+}
+
+/**
+ * The reentries so far: implementer work runs after the first review pass,
+ * whoever asked for them (graph or supervisor). The count comes from evidence,
+ * so a resume keeps it, and a pass that leaves the candidate unchanged still
+ * counts. Review failures and final-check failures draw on the same cap.
+ */
+function reentryCount(view: RunView): { corrections: Array<{ e: EvidenceRecord; i: number }>; reentries: number } {
+  const firstReview = view.evidence.findIndex((e) => agentRuns([e], REVIEW_STAGE, "review").length > 0);
+  const refs = new Set(agentRuns(view.evidence, FIX_STAGE, "work").map((r) => r.record.ref));
+  const corrections = view.evidence.map((e, i) => ({ e, i })).filter(({ e, i }) => i > firstReview && refs.has(e.ref));
+  return { corrections, reentries: firstReview < 0 ? 0 : corrections.length };
+}
+
+/** The job that runs the final tier's commands, once, in a checkout of the reviewed candidate. */
+function finalJob(profile: Profile): JobSpec {
+  return {
+    stageId: REVIEW_STAGE,
+    kind: "command",
+    purpose: "check",
+    readOnly: true,
+    instruction: "Final candidate checks",
+    checkout: { from: "candidate" },
+    input: { commands: finalJobCommands(profile), continueOnFailure: true },
+  };
+}
+
+/**
+ * The final tier, when the profile has one: its commands run once per
+ * candidate digest, after code review passed on it. Undefined when there is none or every
+ * final requirement holds, so the Review stage can be validated. A failure
+ * that predates the operator's latest resume is run again, once (design
+ * #154); a failure since then is a defect: the graph sends Fix back with the
+ * evidence under the review reentry rules and cap, and the next candidate runs
+ * every tier again. Otherwise the supervisor decides.
+ */
+function finalStep(ctx: Context, view: RunView, state: FixPrivateState, digest: string, current: EvidenceRecord[]): GraphDecision | undefined {
+  const { profile } = ctx;
+  const finals = finalCommands(profile);
+  if (finals.length === 0) return undefined;
+  const results = evaluateFinal(ctx, view, current, digest);
+  const runs = finals.map((c) => finalRun(current, c.id, digest));
+  const missing = runs.some((r) => r === undefined);
+  const failed = results.filter((r) => r.result.status !== "passed");
+  const stale = !missing && failed.length > 0 && runs.some((r) => r !== undefined && isStaleFailure(r.record, view));
+  if (missing || stale) {
+    return withPrivate(
+      dispatch(finalJob(profile), missing ? "run the final checks once on the reviewed change: code review passed" : "run the final checks again: they failed before the operator's resume"),
+      state,
+    );
+  }
+  if (failed.length === 0) return undefined;
+  const feedback = finalFeedback(profile, current, digest, results);
+  const refs = runs.map((r) => r!.record.ref);
+  const back = finalReentry(profile, view, state, feedback, refs);
+  if (back !== undefined) return back;
+  return supervise(
+    { reason: `the final checks failed on the reviewed change: ${feedback.slice(0, 3).join("; ")}`, evidenceRefs: refs },
+    "hand the failed final checks to the supervisor",
+    JSON.stringify(state),
+  );
+}
+
+/**
+ * A final-check failure is a real defect, a known correction like a confirmed
+ * review finding: the same cap and corrections budget apply. Not converging,
+ * which here means the last implementer pass changed nothing, goes to the
+ * supervisor, since the same candidate would fail the same way.
+ */
+function finalReentry(profile: Profile, view: RunView, state: FixPrivateState, feedback: string[], refs: string[]): GraphDecision | undefined {
+  const { reentries } = reentryCount(view);
+  const cap = profile.review.maxReentries ?? DEFAULT_MAX_REVIEW_REENTRIES;
+  if (reentries >= cap) return undefined;
+  if (view.budgets.corrections < 2) return undefined;
+  if (lastPassChangedNothing(view)) return undefined;
+  const reason = `the final checks failed on the reviewed change: ${feedback.slice(0, 3).map((f) => clip(f, 300)).join("; ")}; send Fix back with them (reentry ${reentries + 1} of ${cap})`;
+  return reenter({ stageId: FIX_STAGE, reason, evidenceRefs: refs }, `send the failed final checks back to Fix (reentry ${reentries + 1} of ${cap})`, JSON.stringify(state));
+}
+
+/** What the implementer needs to fix after a failed final run: each unmet requirement, with the failing command's output. */
+function finalFeedback(profile: Profile, evidence: EvidenceRecord[], digest: string, results: Array<{ requirementId: string; result: ValidationResult }>): string[] {
+  const feedback = results.filter((r) => r.result.status !== "passed").map((r) => `${r.requirementId}: ${r.result.reason}`);
+  const hint = profile.implementation.cleanCheckHint !== undefined ? ` (${profile.implementation.cleanCheckHint})` : "";
+  for (const c of finalCommands(profile)) {
+    const run = finalRun(evidence, c.id, digest);
+    if (run === undefined) continue;
+    if (run.checkout !== undefined && run.checkout.mutations.length > 0) {
+      feedback.push(`${c.id} left ${run.checkout.mutations.join(", ")} changed in its checkout${hint}; make the change so the checks leave it unchanged`);
+    }
+    if (!succeeded(run.command)) feedback.push(`${describeCommand(run.command)} in the candidate checkout:\n${outputTail(run.command, undefined, profile.runner.reportOutput)}`);
+  }
+  return feedback;
+}
+
+/** Why the run is back in Fix when the newest evidence is a failed final run, after the review that passed it; undefined otherwise. */
+function latestFinalFailure(ctx: Context, view: RunView): string[] | undefined {
+  const { profile } = ctx;
+  const runs = finalCommands(profile).flatMap((c) => commandRuns(view.evidence, c.id).filter((r) => r.checkout?.from === "candidate" && r.checkout.phase === "run"));
+  const last = runs.reduce<{ run: CommandRun; at: number } | undefined>((best, run) => {
+    const at = view.evidence.findIndex((e) => e.ref === run.record.ref);
+    return best === undefined || at > best.at ? { run, at } : best;
+  }, undefined);
+  if (last === undefined) return undefined;
+  // A review pass after the final run means the candidate has moved on, and review has not passed it yet.
+  if (lastIndexWhere(view.evidence, (e) => agentRuns([e], REVIEW_STAGE, "review").length > 0) > last.at) return undefined;
+  const digest = last.run.record.candidateDigest;
+  if (digest === undefined) return undefined;
+  const evidence = forIdentity(view.evidence, digest);
+  const results = evaluateFinal(ctx, view, evidence, digest);
+  return results.every((r) => r.result.status === "passed") ? undefined : finalFeedback(profile, evidence, digest, results);
 }
 
 function deliver(ctx: Context, view: RunView, issue: number, state: FixPrivateState): GraphDecision {
@@ -704,6 +832,7 @@ function deliver(ctx: Context, view: RunView, issue: number, state: FixPrivateSt
       verified: verifiedChecks(view.evidence, profile, view.candidateDigest).map(commandSummary),
       base: green?.checkout?.base ?? "",
       ...reviewSummary(profile, view),
+      sections: finalSections(profile, view.evidence, view.candidateDigest),
       ...(ledger.issues.issues.length > 0 ? { issues: issueTableRows(ledger.issues.issues) } : {}),
     });
     return withPrivate(
@@ -813,12 +942,16 @@ function reviewSummary(profile: Profile, view: RunView): { review: string; dismi
 }
 
 /** Why the run is back in Fix: the confirmed findings of the code review, when there are any. Dismissed and disputed ones never reach the implementer. */
-function reentryFeedback(view: RunView): string[] {
+function reentryFeedback(ctx: Context, view: RunView): string[] {
   const ledger = findingLedger(view.evidence);
   // Driven by the issues file: open and reopened issues first, then the ones marked fixed that the reviewer has yet to verify.
   const status = (f: Finding) => issueById(ledger.issues, issueIdOf(f.id))?.status ?? "open";
   const unsettled = ledger.findings.filter((f) => f.state === "confirmed");
   const confirmed = [...unsettled.filter((f) => status(f) !== "fixed"), ...unsettled.filter((f) => status(f) === "fixed")];
+  const final = confirmed.length === 0 ? latestFinalFailure(ctx, view) : undefined;
+  if (final !== undefined) {
+    return ["Code review passed, but the final checks, which run once on the reviewed change, failed. Fix what they report and keep everything that already passes:", ...final];
+  }
   if (confirmed.length === 0) {
     return ["The run returned to Fix after a resume or a supervisor decision. Check the plan against the current code and the change in the working tree."];
   }
@@ -912,9 +1045,18 @@ function revertPatchAsk(test: NonNullable<DecisionRecord["test"]>, stale?: strin
 }
 
 function evaluateFix(ctx: Context, view: RunView, evidence: EvidenceRecord[], digest: string): Array<{ requirementId: string; result: ValidationResult }> {
+  return evaluateStage(ctx, view, ctx.definition.stages.find((s) => s.id === FIX_STAGE)!.requirementIds, evidence, digest);
+}
+
+/** The requirements of Review other than code review: the `final` tier's, judged on `evidence`. */
+function evaluateFinal(ctx: Context, view: RunView, evidence: EvidenceRecord[], digest: string): Array<{ requirementId: string; result: ValidationResult }> {
+  const ids = ctx.definition.stages.find((s) => s.id === REVIEW_STAGE)!.requirementIds.filter((id) => id !== REQUIREMENT_REVIEW);
+  return evaluateStage(ctx, view, ids, evidence, digest);
+}
+
+function evaluateStage(ctx: Context, view: RunView, requirementIds: string[], evidence: EvidenceRecord[], digest: string): Array<{ requirementId: string; result: ValidationResult }> {
   const { definition } = ctx;
-  const stage = definition.stages.find((s) => s.id === FIX_STAGE)!;
-  return stage.requirementIds.map((requirementId) => {
+  return requirementIds.map((requirementId) => {
     const binding = definition.defaultValidators.find((b) => b.requirementId === requirementId)!;
     const statement = definition.requirements.find((r) => r.id === requirementId)!.statement;
     const input = { requirementId, statement, evidence, candidateDigest: digest, config: view.config };
@@ -928,7 +1070,7 @@ function correctionFeedback(profile: Profile, evidence: EvidenceRecord[], digest
   const runs = [latestCheckoutRun(evidence, COMMAND.regression, "base", digest), latestCheckoutRun(evidence, COMMAND.regression, "candidate", digest)];
   const green = runs[1];
   if (green !== undefined) {
-    for (const c of profile.commands) runs.push(sameCheckoutJob(evidence, green, c.id));
+    for (const c of checkCommands(profile)) runs.push(sameCheckoutJob(evidence, green, c.id));
   }
   const hint = profile.implementation.cleanCheckHint !== undefined ? ` (${profile.implementation.cleanCheckHint})` : "";
   const reported = new Set<string>();

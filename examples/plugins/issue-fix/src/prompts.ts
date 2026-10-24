@@ -5,7 +5,7 @@ import { acceptanceItems } from "./acceptance.js";
 import { contextBlock, contextIntro, type ContextDocument } from "./context.js";
 import { writeScopeFor } from "./decision-record.js";
 import type { Issue, IssueComment } from "./evidence.js";
-import { commandLabel, commandsFor, commandSummary, commandTier, enforcedProtectedPaths, issueRef, listAnd, type CommandTier, type Profile, type ProfileCommand } from "./profile.js";
+import { checkCommands, commandLabel, commandsFor, commandSummary, commandTier, enforcedProtectedPaths, finalCommands, issueRef, listAnd, type CommandTier, type Profile, type ProfileCommand } from "./profile.js";
 import { ISSUES_DIR, ISSUES_FILE, ISSUES_MARKDOWN } from "./issues.js";
 
 export const MAX_SNAPSHOT_CHARS = 200_000;
@@ -118,8 +118,9 @@ export function planRevisionInstruction(profile: Profile, args: { issue: number;
 /** What the implementer is told the controller checks: the profile's own words, or one sentence built from its commands. */
 function checksNote(profile: Profile): string {
   if (profile.implementation.checks !== undefined) return `- ${profile.implementation.checks}`;
-  const further = profile.commands.map(commandSummary);
-  return `- The controller checks your change in clean checkouts: the base commit with only your test files must fail the test by assertion; the full change must pass the test${further.length > 0 ? ` and ${listAnd(further)}` : ""}, and the checks must leave no file changed.`;
+  const further = checkCommands(profile).map(commandSummary);
+  const final = finalCommands(profile).map(commandSummary);
+  return `- The controller checks your change in clean checkouts: the base commit with only your test files must fail the test by assertion; the full change must pass the test${further.length > 0 ? ` and ${listAnd(further)}` : ""}, and the checks must leave no file changed.${final.length > 0 ? ` Once code review has passed it runs ${listAnd(final)} once on the reviewed change, and sends the change back to you when that fails.` : ""}`;
 }
 
 /**
@@ -204,8 +205,13 @@ export function candidateCommands(profile: Profile, test: NonNullable<DecisionRe
   return [
     ...(first && profile.changelog !== undefined ? [{ id: COMMAND.changesDiff, argv: ["git", "diff", "--unified=0", "HEAD~1", "HEAD", "--", profile.changelog.path] }] : []),
     ...(first ? [{ id: COMMAND.regression, argv: profile.runner.argv(test), timeoutMs: profile.regressionTimeoutMs }] : []),
-    ...profile.commands.filter((c) => tier === undefined || commandTier(c) === tier).map(command),
+    ...checkCommands(profile).filter((c) => tier === undefined || commandTier(c) === tier).map(command),
   ];
+}
+
+/** The `final` tier commands, in the profile's order: one job in a checkout of the candidate whose code review converged. */
+export function finalJobCommands(profile: Profile): EnvironmentCommand[] {
+  return finalCommands(profile).map((c) => ({ id: c.id, argv: [...c.argv], ...(c.timeoutMs !== undefined ? { timeoutMs: c.timeoutMs } : {}) }));
 }
 
 const DELIVER =
@@ -330,6 +336,8 @@ export function pullRequestDescription(
     reviewFollowUps?: string[];
     /** The review issues table's rows (issues.ts issueTableRows), when the run tracked any. */
     issues?: string[];
+    /** What the final tier's commands reported, one section each (final.ts finalSections). */
+    sections?: Array<{ heading: string; lines: string[] }>;
   },
 ): string {
   const { record } = args;
@@ -370,6 +378,7 @@ export function pullRequestDescription(
       ? ["- Critical or high review findings an independent verifier refuted; overrule any that is wrong:", ...args.dismissed!.map((d) => `  - ${d}`)]
       : []),
     ...(record.needsE2E === true && profile.pullRequest.e2eNote !== undefined ? [`- ${profile.pullRequest.e2eNote}`] : []),
+    ...(args.sections ?? []).flatMap((s) => ["", `## ${s.heading}`, ...s.lines]),
     ...((args.issues ?? []).length > 0
       ? ["", "## Review issues", "Critical and high code review findings, as the run tracked them: done ones the reviewer verified fixed, dismissed ones an independent verifier refuted.", "", ...args.issues!]
       : []),

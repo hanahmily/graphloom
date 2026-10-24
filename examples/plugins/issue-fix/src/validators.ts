@@ -15,7 +15,7 @@ import {
 import { describeFinding, findingById, findingLedger } from "./findings.js";
 import { isUnsettled, issueIdOf } from "./issues.js";
 import { describeCoverage, isBlocking, reviewComplete } from "./ocr.js";
-import { commandsFor, isTestPath, parseProfile, ProfileError, type Profile, type ProfileCommand } from "./profile.js";
+import { commandsFor, finalCommands, isTestPath, parseProfile, ProfileError, type Profile, type ProfileCommand } from "./profile.js";
 
 const passed = (reason: string): ValidationResult => ({ status: "passed", reason });
 const failed = (reason: string): ValidationResult => ({ status: "failed", reason });
@@ -96,10 +96,13 @@ export function cleanRun(run: CommandRun): string | undefined {
 export function verifiedChecks(evidence: EvidenceRecord[], profile: Profile, digest: string | undefined): ProfileCommand[] {
   const green = latestCheckoutRun(evidence, COMMAND.regression, "candidate", digest);
   if (green === undefined) return [];
-  return [...commandsFor(profile, "passes"), ...commandsFor(profile, "builds")].filter((c) => {
+  const fix = [...commandsFor(profile, "passes"), ...commandsFor(profile, "builds")].filter((c) => {
     const run = sameCheckoutJob(evidence, green, c.id);
     return run !== undefined && cleanRun(run) === undefined && succeeded(run.command);
   });
+  // The final tier's commands ran in their own checkout of the same candidate, after review.
+  const final = finalCommands(profile).filter((c) => finalRunProblem(finalRun(evidence, c.id, digest), c.id) === undefined);
+  return [...fix, ...final];
 }
 
 export const reportText = (run: CommandRun): string => run.command.report?.text ?? run.command.stdoutTail;
@@ -198,6 +201,38 @@ export const inScope: Validator = profiled((input, profile) => {
   return outside.length === 0 ? passed(`${green.checkout!.paths.length} changed paths are within the write scope`) : failed(`changed outside the write scope: ${outside.join(", ")}`);
 });
 
+/**
+ * The latest run of the `final` tier command `id` on the candidate `digest`: in a
+ * plain checkout of the candidate, after preparation. Final commands are not
+ * part of GREEN's checkout job, so no other run of them is evidence.
+ */
+export function finalRun(evidence: EvidenceRecord[], id: string, digest: string | undefined): CommandRun | undefined {
+  return latestCheckoutRun(evidence, id, "candidate", digest);
+}
+
+/** Why a final run does not count as passed: it did not run, ran dirty, or did not succeed; undefined when it passed. */
+export function finalRunProblem(run: CommandRun | undefined, id: string): string | undefined {
+  if (run === undefined) return `${id} did not run on the reviewed change`;
+  const unclean = cleanRun(run);
+  if (unclean !== undefined) return unclean;
+  return succeeded(run.command) ? undefined : describeCommand(run.command);
+}
+
+export const finalChecks: Validator = profiled((input, profile) => {
+  const commands = commandsFor(profile, "final-checks");
+  if (commands.length === 0) return inconclusive(`the ${profile.name} profile has no final-checks command`);
+  const problems: string[] = [];
+  let ran = 0;
+  for (const c of commands) {
+    const run = finalRun(input.evidence, c.id, input.candidateDigest);
+    if (run !== undefined) ran += 1;
+    const problem = finalRunProblem(run, c.id);
+    if (problem !== undefined) problems.push(problem);
+  }
+  if (ran === 0) return inconclusive("the final checks have not run on the current change");
+  return problems.length === 0 ? passed(`${commands.map((c) => c.id).join(", ")} pass on the reviewed change`) : failed(problems.join("; "));
+});
+
 /** Lines a unified diff adds as list items, without the leading `+`. */
 export function addedBullets(diff: string): string[] {
   return diff
@@ -290,6 +325,7 @@ const VALIDATORS: Record<string, Validator> = {
   "write-scope": inScope,
   "changes-entry": changelogEntry,
   "open-code-review": codeReview,
+  "final-checks": finalChecks,
 };
 
 /** A shipped validator; it reads the run's profile from `ValidationInput.config`. */

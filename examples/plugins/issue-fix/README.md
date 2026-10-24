@@ -98,6 +98,25 @@ graphloom profile the full suite takes about ten minutes; its commands allow
 GRAPHLOOM_GITHUB_LIVE_TOKEN="$(gh auth token)" node ../apps/graphloom/dist/main.js run issue-fix-graphloom-task.yaml
 ```
 
+## The final command tier (0.12.0)
+
+A command may declare `tier: "final"` with `requirement: "final-checks"` (the
+two go together). Final commands are for checks too slow to repeat every
+round, such as a benchmark. They run once per candidate digest, in a checkout
+of the candidate, after code review has converged on it and before delivery,
+and Review's `final-checks` requirement is met only when every one passed and
+changed no file. A failure is a real defect: the graph reenters Fix with the
+failing output, under the same cap and corrections budget as a review
+reentry (`review.maxReentries`; a candidate that the last pass left unchanged
+goes to the supervisor instead), and the next candidate runs the cheap tier,
+RED, the full tier, code review and the final tier again. A final failure from
+before the operator's latest resume is run once more, as for any check. A
+final command's optional `section` names a pull request section that shows
+the `summary` its JSON report carries (a line or a list of lines), labelled as
+reported. Profiles without final commands behave as before
+([#196](https://github.com/hanahmily/graphloom/issues/196); see
+[the design](../../../docs/design-issue-fix-graph.md#the-final-command-tier)).
+
 ## Context documents (0.12.0)
 
 A profile may declare `issues.context`, a list of `{ repo?, path, ref? }`:

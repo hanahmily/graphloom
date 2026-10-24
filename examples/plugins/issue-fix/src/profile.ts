@@ -9,20 +9,34 @@ import { GRAPH_BUDGET_KEYS, type EnvironmentCommand, type EnvironmentDeclaration
 import { COMMAND } from "./constants.js";
 import { runnerById, RUNNERS, type RegressionRunner, type RunnerId } from "./runners/index.js";
 
-/** Which Fix requirement a profile command's result counts toward. */
-export type CommandRequirement = "passes" | "builds";
+/**
+ * Which requirement a profile command's result counts toward: `passes` and
+ * `builds` are Fix's; `final-checks` is Review's, for a `final` tier command
+ * judged by its own success.
+ */
+export type CommandRequirement = "passes" | "builds" | "final-checks";
 
 /**
  * When a command runs among a candidate's checks. `cheap` commands run in the
  * first job beside GREEN; `full` commands (the default) run in a second job
- * only once every cheap command and GREEN passed on the same candidate.
+ * only once every cheap command and GREEN passed on the same candidate;
+ * `final` commands run once, in a checkout of the candidate, after code review
+ * has converged and before delivery, and count toward a Review requirement
+ * (`final-checks`), never Fix's.
  */
-export type CommandTier = "cheap" | "full";
+export type CommandTier = "cheap" | "full" | "final";
 
 export interface ProfileCommand extends EnvironmentCommand {
   requirement: CommandRequirement;
   /** Default `full`. A profile declaring no `cheap` command runs every check in one job. */
   tier?: CommandTier;
+  /**
+   * For a `final` command, the pull request section its report summary goes
+   * under, such as `Benchmark`. The report file may be JSON with a `summary`
+   * (a line, or a list of lines) the graph copies there; the section says the
+   * controller gated only on the command's exit status.
+   */
+  section?: string;
   /** The command as a requirement statement names it; default its argv joined by spaces. */
   label?: string;
   /** For a `passes` command, the clause the `passes` statement uses; default `<label> passes`. */
@@ -279,12 +293,15 @@ export function parseProfile(config: unknown): Profile {
   (p.commands as unknown[]).forEach((raw, i) => {
     checkCommand(raw, `commands[${i}]`);
     const c = raw as Record<string, unknown>;
-    need(c.requirement === "passes" || c.requirement === "builds", `commands[${i}].requirement must be passes or builds`);
+    need(c.requirement === "passes" || c.requirement === "builds" || c.requirement === "final-checks", `commands[${i}].requirement must be passes, builds or final-checks`);
+    need(c.tier === undefined || c.tier === "cheap" || c.tier === "full" || c.tier === "final", `commands[${i}].tier must be cheap, full or final`);
+    // A final command runs after Fix is accepted, so a Fix requirement would never be met; a Review requirement is met only by a final run.
+    need((c.tier === "final") === (c.requirement === "final-checks"), `commands[${i}]: a final tier command counts toward final-checks, and only a final tier command may (tier ${c.tier ?? "full"}, requirement ${String(c.requirement)})`);
+    need(c.section === undefined || (c.tier === "final" && isString(c.section)), `commands[${i}].section is a pull request heading, for a final tier command only`);
     need(!RESERVED_COMMANDS.has(c.id as string), `commands[${i}].id ${JSON.stringify(c.id)} is reserved`);
     need(!ids.has(c.id as string), `commands[${i}].id ${JSON.stringify(c.id)} is repeated`);
     ids.add(c.id as string);
     for (const key of ["label", "statement", "summary"]) need(c[key] === undefined || isString(c[key]), `commands[${i}].${key} must be text`);
-    need(c.tier === undefined || c.tier === "cheap" || c.tier === "full", `commands[${i}].tier must be cheap or full`);
     need(c.statement === undefined || c.requirement === "passes", `commands[${i}].statement applies only to a passes command`);
     if (c.writes !== undefined) {
       need(isStrings(c.writes) && c.writes.length > 0, `commands[${i}].writes must be a non-empty list of paths`);
@@ -391,6 +408,12 @@ export const isTiered = (profile: Profile): boolean => profile.commands.some((c)
 
 /** The profile's commands in one tier; an untiered profile has every command in `full`. */
 export const commandsInTier = (profile: Profile, tier: CommandTier): ProfileCommand[] => profile.commands.filter((c) => commandTier(c) === tier);
+
+/** The commands of a candidate's Fix checks: every command that is not `final`. */
+export const checkCommands = (profile: Pick<ProfileData, "commands">): ProfileCommand[] => profile.commands.filter((c) => commandTier(c) !== "final");
+
+/** The commands that run once, after code review converged: the `final` tier. */
+export const finalCommands = (profile: Pick<ProfileData, "commands">): ProfileCommand[] => profile.commands.filter((c) => commandTier(c) === "final");
 
 export const commandLabel = (c: ProfileCommand): string => c.label ?? c.argv.join(" ");
 export const commandStatement = (c: ProfileCommand): string => c.statement ?? `${commandLabel(c)} passes`;

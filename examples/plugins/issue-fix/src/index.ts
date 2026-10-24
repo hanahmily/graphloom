@@ -2,7 +2,9 @@ export * from "./constants.js";
 export { acceptanceItems, coverageEntries, coverageProblems, MAX_COVERAGE_FILES } from "./acceptance.js";
 export { advanceFix, createGraph, definitionFor, GRAPH_ID, GRAPH_VERSION, requestedIssue, type FixPrivateState } from "./graph.js";
 export { contextBlock, contextDocuments, contextIntro, describeContext, MAX_CONTEXT_BYTES, readContext, type ContextDocument, type ContextRead } from "./context.js";
+export { finalSections, reportSummaryLines, type FinalSection } from "./final.js";
 export {
+  checkCommands,
   commandLabel,
   contextName,
   contextRefs,
@@ -11,6 +13,7 @@ export {
   commandStatement,
   commandSummary,
   enforcedProtectedPaths,
+  finalCommands,
   regeneratedPaths,
   regeneratedExceptions,
   harnessName,
@@ -112,6 +115,7 @@ export {
 export {
   MAX_SNAPSHOT_CHARS,
   candidateCommands,
+  finalJobCommands,
   changeDescription,
   commitMessage,
   deliverCommands,
@@ -127,6 +131,9 @@ export { QUALIFICATION_CASES, qualifyValidators, shippedProfile, type Qualificat
 export {
   builds,
   changelogEntry,
+  finalChecks,
+  finalRun,
+  finalRunProblem,
   codeReview,
   decisionsRecorded,
   implementerRecord,
