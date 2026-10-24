@@ -1,4 +1,11 @@
-import type { ExecutorPin } from "@graphloom/sdk";
+import { MAX_EXECUTOR_INPUT_BYTES, type ExecutorPin } from "@graphloom/sdk";
+
+/**
+ * Most bytes of issue snapshot plus context documents the planner's prompt
+ * carries: an executor's input is bounded, and the rest of the prompt (the
+ * instructions and the request) needs room.
+ */
+export const MAX_PROMPT_DOCUMENT_BYTES = MAX_EXECUTOR_INPUT_BYTES - 16_000;
 
 export const FIX_STAGE = "fix";
 export const REVIEW_STAGE = "review";
@@ -17,6 +24,7 @@ export const IMPLEMENTER_JOB = "implementer";
 export const CODING_AGENT: ExecutorPin = { id: "graphloom.coding-agent/run", version: "1" };
 export const GET_ISSUE: ExecutorPin = { id: "graphloom.github/get-issue", version: "1" };
 export const LIST_ISSUE_COMMENTS: ExecutorPin = { id: "graphloom.github/list-issue-comments", version: "1" };
+export const GET_FILE: ExecutorPin = { id: "graphloom.github/get-file", version: "1" };
 
 /** Corrections the graph dispatches itself in Fix before it asks the supervisor. */
 export const MAX_FIX_CORRECTIONS = 2;

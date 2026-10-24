@@ -98,6 +98,20 @@ graphloom profile the full suite takes about ten minutes; its commands allow
 GRAPHLOOM_GITHUB_LIVE_TOKEN="$(gh auth token)" node ../apps/graphloom/dist/main.js run issue-fix-graphloom-task.yaml
 ```
 
+## Context documents (0.12.0)
+
+A profile may declare `issues.context`, a list of `{ repo?, path, ref? }`:
+documents the issue defers to, such as a design kept in another repository.
+The graph reads each once, in the Fix step that reads the issue, records it as
+evidence (path, blob sha, bytes) and gives it to the planner, the implementer
+and the code reviewers under a heading naming its source. A document with
+`repo` comes from the read-only `graphloom.github/get-file` executor; one
+without is a file of the target repository at the base commit. Later edits do
+not change a running or resumed run; a missing document, or more than 200,000
+bytes of them, stops the run before any agent
+([#195](https://github.com/hanahmily/graphloom/issues/195); see
+[the design](../../../docs/design-issue-fix-graph.md#context-documents)).
+
 ## Review failures reenter Fix (0.11.0)
 
 When code review fails only because findings are confirmed, the graph

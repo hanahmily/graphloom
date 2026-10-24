@@ -31,6 +31,7 @@ supervisor-dispatched work run without one no longer crashes the graph
 ([#191](https://github.com/hanahmily/graphloom/issues/191)).
 Version 0.10.4 declares a 6 h `waitMs` in every profile, so a coding-agent harness's usage-limit reset can be waited out instead of stopping the run ([#189](https://github.com/hanahmily/graphloom/issues/189)).
 Version 0.11.0 reenters Fix itself when code review fails only on confirmed findings and the loop is converging, instead of handing every such failure to the supervisor ([#193](https://github.com/hanahmily/graphloom/issues/193); see [review failures](#review-failures-the-graph-reenters-fix-or-the-supervisor-decides)).
+Version 0.12.0 reads the profile's [context documents](#context-documents) once and gives them to the planner, the implementer and the code reviewers ([#195](https://github.com/hanahmily/graphloom/issues/195)).
 
 ## Purpose
 
@@ -64,7 +65,7 @@ The profile supplies, as data:
 | Field | Meaning | banyandb | graphloom |
 |---|---|---|---|
 | `name`, `project` | Names for messages; the repository agents are told they work in | `apache/skywalking-banyandb` | `hanahmily/graphloom` |
-| `issues` | Where issues live; the request names `owner/repo#N` | `apache/skywalking` | `hanahmily/graphloom` |
+| `issues` | Where issues live; the request names `owner/repo#N`. Optional `context`: [documents](#context-documents) the issue defers to | `apache/skywalking` | `hanahmily/graphloom` |
 | `environment` | The SDK `EnvironmentDeclaration`: checks, preparation, pinned files. Must include an `ocr` check that prints open-code-review's path | BanyanDB's checklist, `make generate`, `CONTRIBUTING.md` pinned | Node.js 22+, npm, flock, git, ocr, codex, claude; `npm ci --include=dev`, `npm run build`; nothing pinned |
 | `regression` | `runner` (a built-in, below) and `timeoutMs` | `go-test`, 30 min | `vitest`, 20 min |
 | `commands` | GREEN's further checks and the build checks, run in order in the committed candidate checkout. Each has `id`, `argv`, `timeoutMs`, `requirement` (`passes` or `builds`), and optional `tier` (`cheap` or `full`, default `full`; once any command is `cheap`, GREEN and the cheap commands run first in one checkout job and the full commands run in a second job only after those passed on the same candidate digest, and Fix needs both) and optional `label`, `statement` and `summary` wording, and optional `writes` (repository-relative files or directories, a trailing `/**` allowed, that the command regenerates and a failure tells the author to commit, such as license artifacts: the implementer's write scope covers them even under a protected path) | `test-ci` (passes); `build`, `lint`, `check` (builds; `make check` already runs license-check); `test-ci` and `lint` are cheap | `npm run typecheck`, `npm run build`, `npm test` (builds; the full suite takes about ten minutes, so 45 min) |
@@ -175,6 +176,36 @@ the implementer that:
   behaviour must be.
 
 The example task requests `Fix hanahmily/graphloom#119.`
+
+## Context documents
+
+An issue sometimes defers to a design or a plan kept elsewhere, in a repository
+the agents cannot be relied on to read. A profile declares them as
+`issues.context`: a list of `{ repo?, path, ref? }`. Without `repo` the path is a
+file of the target repository, observed in the run's worktree at the base
+commit; with `repo` (`owner/name`) it is read from GitHub at `ref` (default: the
+repository's default branch) by the read-only `graphloom.github/get-file`
+executor, under the same read scope and token handling as the other GitHub
+reads. The executor returns the text whole with git's blob sha and its size; a
+path that is missing, a directory, too large for the contents API or not UTF-8
+text is an `ok` result with `found: false` and a reason, so the graph can name
+the problem instead of entering a recovery episode.
+
+Fix reads the documents in the same step that reads the issue snapshot and its
+comments, once, before the first agent job: one observation for the target
+repository's files, one `get-file` job per file of another repository. The
+evidence is the pin: it records each document's path, blob sha (or SHA-256 for
+an observed file) and bytes, and every later step, a resume and a reentry
+included, reads the documents back from it, so an edit to a document never
+changes a running run. The planner, the implementer and the code reviewer get
+each document under a heading that names its source, and the planner is told an
+acceptance item may cite a document by that name.
+
+Two bounds apply, each a stop with reason "incompatible task" before any agent
+runs: the documents together may be at most 200,000 bytes, and the issue
+snapshot plus the documents must fit the planner's prompt within an executor
+input (256,000 bytes less room for the instructions). A document that cannot be
+read is the same kind of stop, naming it and why.
 
 ## Review failures: the graph reenters Fix, or the supervisor decides
 

@@ -24,6 +24,8 @@ import {
   parseProfile,
   shippedProfile,
   MAX_SNAPSHOT_CHARS,
+  MAX_CONTEXT_BYTES,
+  readContext,
   QUALIFICATION_CASES,
   VERIFICATION_SCHEMA,
   advanceFix,
@@ -155,6 +157,8 @@ interface Scenario {
    */
   supervisorWorkAfterFix?: boolean;
   issueBody?: string;
+  /** What a fake GitHub serves for a context document, by "owner/name:path"; a file not listed (or null) is not found. */
+  contextFiles?: Record<string, string | null>;
   comments?: Array<{ author: string; createdAt: string; body: string }>;
   /** Whether the comment listing reached its last page. */
   commentsComplete?: boolean;
@@ -279,6 +283,18 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
     const input = job.input as { commands?: Array<{ id: string; argv: string[] }>; number?: number } | undefined;
     if (job.executor?.id === "graphloom.github/get-issue") {
       record("other", { github: { item: { number: input!.number, title: "Scheduler reports long actions as timed out", state: "open", url: "u", labels: [], body: scenario.issueBody ?? "Backups longer than five minutes are reported as action timed out." } } }, job, op);
+      return;
+    }
+    if (job.executor?.id === "graphloom.github/get-file") {
+      // A fake GitHub serving `contextFiles` by "owner/name:path"; a file it does not serve is not found.
+      const asked = job.input as { owner: string; repo: string; path: string; ref?: string };
+      const served = scenario.contextFiles?.[`${asked.owner}/${asked.repo}:${asked.path}`];
+      const query = { owner: asked.owner, repo: asked.repo, path: asked.path, ref: asked.ref ?? null };
+      const item =
+        served === undefined || served === null
+          ? { found: false, path: asked.path, ref: asked.ref ?? null, reason: "not-found" }
+          : { found: true, path: asked.path, ref: asked.ref ?? null, sha: `blob-${asked.path}`.padEnd(40, "0"), size: Buffer.byteLength(served), text: served };
+      record("other", { github: { operation: "get-file", query, item } }, job, op);
       return;
     }
     if (job.executor?.id === "graphloom.github/list-issue-comments") {
@@ -2388,5 +2404,121 @@ describe("acceptance coverage before code review (#183)", () => {
     expect(schema.required).not.toContain("coverage");
     expect(parseDecisionRecord(JSON.stringify(PLAN))).toHaveProperty("record");
     expect(acceptanceItems(PLAN)).toEqual([]);
+  });
+});
+
+describe("context documents (#195)", () => {
+  const DESIGN = "# Relational design\n\nA join keeps duplicate matches.\n";
+  const TICKETS = "# Tickets\n\nR01 is a bounded INNER JOIN.\n";
+  const LOCAL = "# Local contract\n\nThe change documents its grammar.\n";
+  const withContext = (context: unknown[]): unknown => {
+    const profile = structuredClone(BANYANDB) as { issues: Record<string, unknown> };
+    profile.issues.context = context;
+    return profile;
+  };
+  const CROSS = withContext([
+    { repo: "acme/private-design", path: "docs/relational-design.md", ref: "main" },
+    { repo: "acme/private-design", path: "docs/relational-tickets.md" },
+  ]);
+  const SERVED = { "acme/private-design:docs/relational-design.md": DESIGN, "acme/private-design:docs/relational-tickets.md": TICKETS };
+  const getFiles = (jobs: JobSpec[]) => jobs.filter((j) => j.executor?.id === "graphloom.github/get-file");
+  const agents = (jobs: JobSpec[], purpose: string, stage: string) => jobs.filter((j) => j.kind === "agent" && j.purpose === purpose && j.stageId === stage);
+
+  it("reads a cross-repository context once, in Fix, before any agent, and gives both documents to the planner, the implementer and the reviewer", () => {
+    const { decision, jobs, evidence } = simulate({ profile: CROSS, contextFiles: SERVED });
+    expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+    // One read job per document, read-only, in the profile's order, after the issue and its comments and before the plan.
+    const reads = getFiles(jobs);
+    expect(reads.map((j) => j.input)).toEqual([
+      { owner: "acme", repo: "private-design", path: "docs/relational-design.md", ref: "main" },
+      { owner: "acme", repo: "private-design", path: "docs/relational-tickets.md" },
+    ]);
+    for (const read of reads) expect(read).toMatchObject({ stageId: "fix", kind: "command", purpose: "diagnostic", readOnly: true });
+    const firstAgent = jobs.findIndex((j) => j.kind === "agent");
+    expect(jobs.indexOf(reads[1]!)).toBeLessThan(firstAgent);
+    // The documents are evidence, with the blob sha and size the executor reported.
+    const item = (evidence.find((e) => (e.payload as { github?: { operation?: string } }).github?.operation === "get-file")!.payload as { github: { item: Record<string, unknown> } }).github.item;
+    expect(item).toMatchObject({ found: true, path: "docs/relational-design.md", size: Buffer.byteLength(DESIGN) });
+
+    const plan = assignment(agents(jobs, "diagnostic", "fix")[0]);
+    const work = assignment(agents(jobs, "work", "fix")[0]);
+    const review = assignment(agents(jobs, "review", "review")[0]);
+    for (const [who, text] of [["planner", plan], ["implementer", work], ["reviewer", review]] as const) {
+      expect(text, who).toContain("## Context document: acme/private-design:docs/relational-design.md@main (");
+      expect(text, who).toContain(DESIGN.trim());
+      expect(text, who).toContain("## Context document: acme/private-design:docs/relational-tickets.md (");
+      expect(text, who).toContain(TICKETS.trim());
+    }
+    // The planner may cite them in its acceptance items.
+    expect(plan).toContain("an item's text may cite the document by its name");
+    // The issue snapshot still comes first, and the planner is told whose authority wins.
+    expect(plan.indexOf("Issue snapshot")).toBeLessThan(plan.indexOf("## Context document"));
+    expect(plan).toContain("the issue's own acceptance criteria and maintainer comments still come first");
+  });
+
+  it("reads a document of the target repository from the worktree, once, and keeps the first reading when the file changes", () => {
+    const profile = withContext([{ path: "docs/local.md" }]);
+    const { decision, jobs, observed } = simulate({ profile, files: { "docs/local.md": LOCAL } });
+    expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+    expect(getFiles(jobs)).toEqual([]);
+    expect(observed.filter((p) => p === "docs/local.md")).toHaveLength(1);
+    expect(assignment(agents(jobs, "diagnostic", "fix")[0])).toContain(`## Context document: docs/local.md (`);
+    expect(assignment(agents(jobs, "review", "review")[0])).toContain(LOCAL.trim());
+
+    // A later observation of the same path (the implementer's own edit) never replaces the pinned one.
+    const before: EvidenceRecord = { ref: "e1", kind: "file", generation: 1, candidateDigest: "d0", fingerprint: "a".repeat(64), payload: { path: "docs/local.md", bytes: LOCAL } };
+    const after: EvidenceRecord = { ref: "e2", kind: "file", generation: 2, candidateDigest: "d1", fingerprint: "b".repeat(64), payload: { path: "docs/local.md", bytes: "# Edited\n" } };
+    expect(readContext([before, after], { path: "docs/local.md" })).toMatchObject({ kind: "read", doc: { text: LOCAL, digest: "a".repeat(64), bytes: Buffer.byteLength(LOCAL) } });
+  });
+
+  it("does not read the documents again after a resume or a reentry", () => {
+    const resumed = simulate({ profile: CROSS, contextFiles: SERVED, resumeAfterCandidate: 1 });
+    expect(resumed.decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+    expect(getFiles(resumed.jobs)).toHaveLength(2);
+    const afterFix = simulate({ profile: CROSS, contextFiles: SERVED, resumeAfterFix: true });
+    expect(getFiles(afterFix.jobs)).toHaveLength(2);
+    // The pinned documents also reach a correction pass after the graph sends Fix back.
+    const finding = { path: "pkg/timestamp/scheduler.go", start_line: 88, end_line: 95, category: "bug", severity: "high", content: "Close now waits forever for an action that ignores cancellation." };
+    const back = simulate({ profile: CROSS, contextFiles: SERVED, graphReenters: {}, codeReviews: [reviewed([finding]), priorPass({ F1: "still_present" }), priorPass({ F1: "resolved" })] });
+    expect(back.reenterDecisions).toBe(1);
+    expect(getFiles(back.jobs)).toHaveLength(2);
+    const work = agents(back.jobs, "work", "fix");
+    expect(work).toHaveLength(2);
+    expect(assignment(work[1])).toContain(DESIGN.trim());
+  });
+
+  it("stops with an incompatible-task reason, before any agent, when a document is missing", () => {
+    const missing = simulate({ profile: CROSS, contextFiles: { "acme/private-design:docs/relational-design.md": DESIGN } });
+    expect(missing.decision.action).toMatchObject({
+      type: "stop",
+      stop: { reason: "incompatible task", blocker: expect.stringContaining("the context document acme/private-design:docs/relational-tickets.md cannot be used: it does not exist at that ref"), retryable: false },
+    });
+    expect(missing.jobs.filter((j) => j.kind === "agent")).toEqual([]);
+    const local = simulate({ profile: withContext([{ path: "docs/nope.md" }]), files: { "docs/nope.md": null } });
+    expect(local.decision.action).toMatchObject({ type: "stop", stop: { reason: "incompatible task", blocker: expect.stringContaining("docs/nope.md cannot be used: the target repository has no such file at the base commit") } });
+    expect(local.jobs.filter((j) => j.kind === "agent")).toEqual([]);
+  });
+
+  it("enforces the size bound on the documents together, naming them", () => {
+    const big = "x".repeat(MAX_CONTEXT_BYTES / 2 + 1);
+    const over = simulate({ profile: CROSS, contextFiles: { "acme/private-design:docs/relational-design.md": big, "acme/private-design:docs/relational-tickets.md": big } });
+    expect(over.decision.action).toMatchObject({ type: "stop", stop: { reason: "incompatible task", blocker: expect.stringMatching(new RegExp(`more than the ${MAX_CONTEXT_BYTES} a run carries`)), retryable: false } });
+    expect((over.decision.action as { stop: { blocker: string } }).stop.blocker).toContain("docs/relational-design.md");
+    expect(over.jobs.filter((j) => j.kind === "agent")).toEqual([]);
+    // Exactly the bound is fine.
+    const half = { "acme/private-design:docs/relational-design.md": "y".repeat(MAX_CONTEXT_BYTES / 2), "acme/private-design:docs/relational-tickets.md": "z".repeat(MAX_CONTEXT_BYTES / 2) };
+    const exact = simulate({ profile: CROSS, contextFiles: half });
+    expect(exact.decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+    // Documents that fit the bound but leave no room for the issue in one prompt stop too.
+    const crowded = simulate({ profile: CROSS, issueBody: "w".repeat(80_000), contextFiles: half });
+    expect(crowded.decision.action).toMatchObject({ type: "stop", stop: { reason: "incompatible task", blocker: expect.stringContaining("an agent prompt carries whole") } });
+    expect(crowded.jobs.filter((j) => j.kind === "agent")).toEqual([]);
+  });
+
+  it("runs as before for a profile without context: no read, no block", () => {
+    const { jobs, decision } = simulate({});
+    expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+    expect(getFiles(jobs)).toEqual([]);
+    expect(assignment(agents(jobs, "diagnostic", "fix")[0])).not.toContain("Context document");
   });
 });

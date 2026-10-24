@@ -22,11 +22,13 @@ import {
   COMMAND,
   FIX_STAGE,
   DEFAULT_MAX_REVIEW_REENTRIES,
+  GET_FILE,
   GET_ISSUE,
   IMPLEMENTER_JOB,
   LIST_ISSUE_COMMENTS,
   MAX_DISCOVERY_ROUNDS,
   MAX_FIX_CORRECTIONS,
+  MAX_PROMPT_DOCUMENT_BYTES,
   MAX_SWEEP_PASSES,
   REQUIREMENT_BUILDS,
   REQUIREMENT_CHANGELOG,
@@ -38,6 +40,7 @@ import {
   REVIEW_STAGE,
 } from "./constants.js";
 import { acceptanceItems, coverageEntries, coverageFeedback, coverageFiles, coverageProblems, MAX_COVERAGE_FILES, observableCoverageFiles } from "./acceptance.js";
+import { contextDocuments, describeContext, MAX_CONTEXT_BYTES, readContext, type ContextDocument } from "./context.js";
 import { DECISION_RECORD_SCHEMA, parseDecisionRecord, writeScopeFor, type DecisionRecord } from "./decision-record.js";
 import {
   agentRuns,
@@ -106,6 +109,8 @@ import {
   enforcedProtectedPaths,
   harnessName,
   isTestPath,
+  contextName,
+  contextRefs,
   issueRef,
   listAnd,
   parseProfile,
@@ -126,7 +131,7 @@ import {
 import { cleanRun, codeReview, implementerRecord, latestImplementerRecord, plannerRecord, reportText, validatorById, verifiedChecks } from "./validators.js";
 
 export const GRAPH_ID = "issue-fix";
-export const GRAPH_VERSION = "0.11.0";
+export const GRAPH_VERSION = "0.12.0";
 
 /** Graph bookkeeping; everything else is read back from recorded evidence. */
 export interface FixPrivateState {
@@ -297,6 +302,9 @@ function fix(ctx: Context, view: RunView, issue: number, state: FixPrivateState)
   const snapshotResult = snapshotText(profile, snapshot.issue, comments.comments, comments.complete);
   if ("problem" in snapshotResult) return partialSnapshot(snapshotResult.problem, [snapshot.record.ref, comments.record.ref]);
   const snapshotBody = snapshotResult.text;
+  // The context documents are read in this same step, once; every later step finds them in the evidence.
+  const context = contextStep(profile, view, state, snapshotBody);
+  if ("decision" in context) return context.decision;
   // The plan and the implementer's decision record are their own artifacts,
   // not workspace bytes (design-run-convergence.md §4.1): they stay on
   // record, unscoped by generation or candidate, until an explicit new
@@ -310,7 +318,7 @@ function fix(ctx: Context, view: RunView, issue: number, state: FixPrivateState)
     const revisit = agentRuns(view.evidence, FIX_STAGE, "diagnostic").some((r) => r.status === "completed");
     const assignment = revisit
       ? planRevisionInstruction(profile, { issue, feedback: reentryFeedback(view), changed: agentRuns(view.evidence, FIX_STAGE, "work").length > 0 })
-      : planInstruction(profile, { issue, request: view.task.request, snapshot: snapshotBody });
+      : planInstruction(profile, { issue, request: view.task.request, snapshot: snapshotBody, context: context.docs });
     return dispatchAgent(view, planJob(ctx, view, assignment), revisit ? "revisit the plan after returning to Fix (read-only)" : "plan the fix (read-only)", state);
   }
   const plan = parseDecisionRecord(planRun.output);
@@ -571,6 +579,7 @@ function review(ctx: Context, view: RunView, issue: number, state: FixPrivateSta
       ocr,
       base,
       background,
+      context: contextDocuments(view.evidence, profile),
       known: knownFindings(ledger),
       sweep,
       round,
@@ -732,6 +741,51 @@ function deliver(ctx: Context, view: RunView, issue: number, state: FixPrivateSt
 /** Agents act only on the whole issue snapshot; when it cannot be supplied, the run stops rather than work from part of it. */
 function partialSnapshot(problem: string, refs: string[]): GraphDecision {
   return stop({ reason: "incompatible task", blocker: problem, evidenceRefs: refs, retryable: false }, "stop: the issue snapshot cannot be handed to the agents whole");
+}
+
+/**
+ * The profile's context documents, read into the evidence one step at a time:
+ * the target repository's own files in one observation, each file of another
+ * repository by its own GitHub read. Once read they are never read again, so
+ * a resumed run, or a run whose documents were edited meanwhile, still works
+ * from what it first saw. A document that cannot be read whole, or documents
+ * that together do not fit an agent's prompt, stop the run before any agent.
+ */
+function contextStep(profile: Profile, view: RunView, state: FixPrivateState, snapshot: string): { docs: ContextDocument[] } | { decision: GraphDecision } {
+  const refs = contextRefs(profile);
+  if (refs.length === 0) return { docs: [] };
+  const reads = refs.map((ref) => ({ ref, read: readContext(view.evidence, ref) }));
+  for (const { ref, read } of reads) {
+    if (read.kind === "missing") {
+      return { decision: stop({ reason: "incompatible task", blocker: `the context document ${contextName(ref)} cannot be used: ${read.reason}`, evidenceRefs: [read.record.ref], retryable: false }, `stop: the context document ${contextName(ref)} is not available`) };
+    }
+  }
+  const docs = reads.flatMap(({ read }) => (read.kind === "read" ? [read.doc] : []));
+  const bytes = docs.reduce((sum, d) => sum + d.bytes, 0);
+  if (bytes > MAX_CONTEXT_BYTES) {
+    return { decision: stop({ reason: "incompatible task", blocker: `the context documents are ${bytes} bytes (${describeContext(docs)}), more than the ${MAX_CONTEXT_BYTES} a run carries`, evidenceRefs: docs.map((d) => d.record.ref), retryable: false }, "stop: the context documents are too large") };
+  }
+  const unread = reads.filter(({ read }) => read.kind === "unread").map(({ ref }) => ref);
+  if (unread.length === 0) {
+    // The planner's prompt carries the issue and the documents whole, within what an executor's input allows.
+    const prompt = Buffer.byteLength(snapshot, "utf8") + bytes;
+    if (prompt > MAX_PROMPT_DOCUMENT_BYTES) {
+      return { decision: stop({ reason: "incompatible task", blocker: `the issue snapshot and the context documents are ${prompt} bytes together, more than the ${MAX_PROMPT_DOCUMENT_BYTES} an agent prompt carries whole`, evidenceRefs: docs.map((d) => d.record.ref), retryable: false }, "stop: the issue and its context documents do not fit one prompt") };
+    }
+    return { docs };
+  }
+  const local = unread.filter((ref) => ref.repo === undefined);
+  if (local.length > 0) {
+    return { decision: withPrivate(observe({ paths: local.map((ref) => ref.path) }, `observe the context documents of the target repository (${local.map((ref) => ref.path).join(", ")})`), state) };
+  }
+  const next = unread[0]!;
+  const [owner, repo] = next.repo!.split("/");
+  return {
+    decision: withPrivate(
+      dispatch(githubJob(GET_FILE, `Read the context document ${contextName(next)}`, { owner, repo, path: next.path, ...(next.ref !== undefined ? { ref: next.ref } : {}) }), `read the context document ${contextName(next)}`),
+      state,
+    ),
+  };
 }
 
 /** The test plan's line for the code review, and the dismissed findings a maintainer can overrule. */
@@ -957,7 +1011,7 @@ function implementJob(ctx: Context, view: RunView, issue: number, given: Decisio
     writeScope: writeScopeFor(record, profile),
     executor: CODING_AGENT,
     input: {
-      assignment: implementInstruction(profile, { issue, plan: record, ...(all.length > 0 ? { feedback: all } : {}), ...(table.issues.length > 0 ? { issues: true } : {}) }),
+      assignment: implementInstruction(profile, { issue, plan: record, context: contextDocuments(view.evidence, profile), ...(all.length > 0 ? { feedback: all } : {}), ...(table.issues.length > 0 ? { issues: true } : {}) }),
       harness: profile.roles.implementer,
     },
     ...(from !== undefined ? { continueFrom: from } : {}),

@@ -1,6 +1,7 @@
 import { coverageBlock } from "./acceptance.js";
 import type { AcceptanceItem, CoverageEntry, DecisionRecord } from "./decision-record.js";
 import { MAX_DISCOVERY_ROUNDS } from "./constants.js";
+import { contextBlock, contextIntro, type ContextDocument } from "./context.js";
 import type { Issue } from "./evidence.js";
 import { ISSUES_DIR } from "./issues.js";
 import { issueRef, type Profile } from "./profile.js";
@@ -124,6 +125,8 @@ export function codeReviewInstruction(
     ocr: string;
     base: string;
     background: string;
+    /** The profile's pinned context documents; the change is reviewed against them too. */
+    context?: ContextDocument[];
     known?: KnownFindings;
     sweep?: boolean;
     round?: number;
@@ -196,6 +199,7 @@ export function codeReviewInstruction(
     "",
     "What the change is for:",
     args.background,
+    ...(args.context !== undefined && args.context.length > 0 ? ["", contextIntro(args.context), "", contextBlock(args.context)] : []),
     "",
     "Your result: `comments` with your findings (empty when there are none), each with `finding` set to a known finding's name when it reports that finding again and \"\" otherwise; `prior` with a status for every open finding listed above (empty when there are none); and `summary` with `total_files` (the files on your list), `reviewed_files`, and `skipped` (each skipped file with its reason).",
   ].join("\n");

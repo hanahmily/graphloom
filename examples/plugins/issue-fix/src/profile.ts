@@ -41,14 +41,33 @@ export interface ProfileCommand extends EnvironmentCommand {
 /** The only changelog rule so far: a new list entry inside the first `## ` section. */
 export type ChangelogRule = "first-release-section-entry";
 
+/**
+ * A document the run reads once and hands to the planner, the implementer and
+ * the code reviewers next to the issue. With `repo` it is read from GitHub
+ * (`ref` defaults to that repository's default branch); without, it is a file
+ * of the target repository, read from the run's worktree at the base commit.
+ */
+export interface ContextDocumentRef {
+  /** `owner/name`; absent means a path in the target repository. */
+  repo?: string;
+  path: string;
+  /** Branch, tag or commit, for a document from another repository. */
+  ref?: string;
+}
+
 /** The profile JSON, as the task's config file holds it. */
 export interface ProfileData {
   /** A short name for messages, such as `banyandb`. */
   name: string;
   /** The repository the code lives in, as agents are told, such as `apache/skywalking-banyandb`. */
   project: string;
-  /** Where the issues live; the request names one as `owner/repo#N`. */
-  issues: { owner: string; repo: string };
+  /**
+   * Where the issues live; the request names one as `owner/repo#N`. `context`
+   * lists documents the issue defers to (a design, a plan): the graph reads
+   * them once, pins them as evidence and gives them to the planner, the
+   * implementer and the code reviewers.
+   */
+  issues: { owner: string; repo: string; context?: ContextDocumentRef[] };
   /** What the run's workspace needs, checked by the controller; must include an `ocr` check printing open-code-review's path. */
   environment: EnvironmentDeclaration;
   /** The built-in regression runner, and how long one regression run may take. */
@@ -169,6 +188,38 @@ function checkCacheGlobs(c: Record<string, unknown>, where: string, allowed: boo
   }
 }
 
+const REPO_NAME = /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/;
+const REF_NAME = /^[A-Za-z0-9_.\/:-]{1,255}$/;
+
+/** The name a context document goes by in prompts and messages. */
+export function contextName(doc: ContextDocumentRef): string {
+  return `${doc.repo !== undefined ? `${doc.repo}:` : ""}${doc.path}${doc.ref !== undefined ? `@${doc.ref}` : ""}`;
+}
+
+function checkContext(raw: unknown): void {
+  if (raw === undefined) return;
+  need(Array.isArray(raw), "issues.context must be a list of documents");
+  const seen = new Set<string>();
+  (raw as unknown[]).forEach((entry, i) => {
+    const where = `issues.context[${i}]`;
+    need(isObject(entry), `${where} must be an object`);
+    const d = entry as Record<string, unknown>;
+    for (const key of Object.keys(d)) need(key === "repo" || key === "path" || key === "ref", `${where}.${key} is not a context document field; they are repo, path and ref`);
+    need(isString(d.path), `${where}.path is required`);
+    const path = d.path as string;
+    need(
+      path.length <= 1_000 && !path.includes("\u0000") && path.split("/").every((part) => part !== "" && part !== "." && part !== ".."),
+      `${where}.path "${path}" must be repository-relative, without "..", "." or empty segments`,
+    );
+    need(d.repo === undefined || (typeof d.repo === "string" && REPO_NAME.test(d.repo)), `${where}.repo must be "owner/name"`);
+    need(d.ref === undefined || (typeof d.ref === "string" && REF_NAME.test(d.ref)), `${where}.ref must be a branch, tag or commit name`);
+    need(d.ref === undefined || d.repo !== undefined, `${where}.ref applies only to a document from another repository (set repo)`);
+    const name = contextName(d as unknown as ContextDocumentRef);
+    need(!seen.has(name), `${where} repeats ${name}`);
+    seen.add(name);
+  });
+}
+
 function checkEnvironment(env: unknown): void {
   need(isObject(env), "environment must be an object");
   const e = env as Record<string, unknown>;
@@ -216,6 +267,7 @@ export function parseProfile(config: unknown): Profile {
   need(isString(p.name), "name is required");
   need(isString(p.project), "project is required");
   need(isObject(p.issues) && isString(p.issues.owner) && isString(p.issues.repo), "issues needs owner and repo");
+  checkContext((p.issues as Record<string, unknown>).context);
   checkEnvironment(p.environment);
   need(isObject(p.regression), "regression is required");
   const regression = p.regression as Record<string, unknown>;
@@ -289,6 +341,9 @@ export function parseProfile(config: unknown): Profile {
     roles: roles as Profile["roles"],
   };
 }
+
+/** The context documents the profile declares, in order. */
+export const contextRefs = (profile: Pick<ProfileData, "issues">): ContextDocumentRef[] => profile.issues.context ?? [];
 
 /** `owner/repo#N`. */
 export function issueRef(profile: Profile, issue: number): string {

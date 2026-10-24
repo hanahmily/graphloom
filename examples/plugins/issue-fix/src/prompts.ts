@@ -2,6 +2,7 @@ import { writeScopeExceptions, writeScopeExcludes, type EnvironmentCommand } fro
 import { COMMAND } from "./constants.js";
 import type { DecisionRecord } from "./decision-record.js";
 import { acceptanceItems } from "./acceptance.js";
+import { contextBlock, contextIntro, type ContextDocument } from "./context.js";
 import { writeScopeFor } from "./decision-record.js";
 import type { Issue, IssueComment } from "./evidence.js";
 import { commandLabel, commandsFor, commandSummary, commandTier, enforcedProtectedPaths, issueRef, listAnd, type CommandTier, type Profile, type ProfileCommand } from "./profile.js";
@@ -46,13 +47,19 @@ export function snapshotText(profile: Profile, issue: Issue, comments: IssueComm
 const ACCEPTANCE_FIELD =
   "- acceptance: what the issue asks for, as [{id, text}]: one item for each checkbox of its acceptance criteria and each line of its oracle, in the issue's own words (ids A1, A2, …). You may group lines that one change covers together; say so in the text. Leave it empty only when the issue states no criteria. The implementer must cover every item before it returns ready, and a controller check sends the change back when one is not covered.";
 
-export function planInstruction(profile: Profile, args: { issue: number; request: string; snapshot: string }): string {
+/** The context documents as a block of a prompt, under the heading that says what they are; nothing when there are none. */
+function contextSection(context: ContextDocument[] | undefined): string[] {
+  return context !== undefined && context.length > 0 ? ["", contextIntro(context), "", contextBlock(context)] : [];
+}
+
+export function planInstruction(profile: Profile, args: { issue: number; request: string; snapshot: string; context?: ContextDocument[] }): string {
   const e2e = profile.planning.e2e !== undefined ? `needsE2E when the behaviour needs ${profile.planning.e2e}, ` : "";
   return [
     `Plan a fix for ${issueRef(profile, args.issue)} in this repository (${profile.project}). Do not modify any file.`,
     "",
     "Issue snapshot, the authority for this run (comments posted later are not part of it):",
     args.snapshot,
+    ...contextSection(args.context),
     "",
     "Operator request (it may add answers in a Decisions: block; the issue stays the authority):",
     args.request.trim(),
@@ -72,7 +79,7 @@ export function planInstruction(profile: Profile, args: { issue: number; request
     "- decisions: each unclear point with tier, options, chosen (empty for product points) and basis.",
     `- ${profile.planning.reach}`,
     `- openQuestions for maintainers, followUps, ${e2e}and title for the pull request.`,
-    ACCEPTANCE_FIELD,
+    ACCEPTANCE_FIELD + ((args.context ?? []).length > 0 ? " Where the issue defers to a context document, one item per requirement of that document the issue assigns to this change; an item's text may cite the document by its name." : ""),
     ...(enforcedProtectedPaths(profile).length > 0 ? [`- scopeExceptions: only when the fix must change ${enforcedProtectedPaths(profile).join(", ")}, with the reason.`] : []),
   ].join("\n");
 }
@@ -151,7 +158,7 @@ export function issuesProtocol(): string {
   );
 }
 
-export function implementInstruction(profile: Profile, args: { issue: number; plan: DecisionRecord; feedback?: string[]; issues?: boolean }): string {
+export function implementInstruction(profile: Profile, args: { issue: number; plan: DecisionRecord; feedback?: string[]; issues?: boolean; context?: ContextDocument[] }): string {
   const { plan } = args;
   const scope = writeScopeFor(plan, profile);
   const excluded = writeScopeExcludes(scope);
@@ -163,6 +170,7 @@ export function implementInstruction(profile: Profile, args: { issue: number; pl
       : []),
     `Implement the fix for ${issueRef(profile, args.issue)} following this decision record:`,
     JSON.stringify(plan, null, 2),
+    ...contextSection(args.context),
     "",
     `- Write the regression test ${plan.test?.name ?? "(name it)"} in ${plan.test?.package ?? "(the affected package)"} first. Its expected value must come from ${plan.test?.expectedValueSource ?? "the issue"}, not from the new code's output.`,
     `- Change the production caller (${plan.productionCaller ?? "name it"}) so the test passes. ${profile.implementation.conventions}`,

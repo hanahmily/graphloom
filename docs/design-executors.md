@@ -122,7 +122,7 @@ described below, but not effects elsewhere on the machine.
 `@graphloom/executor-github` (`executors/github`) is the first built-in package:
 
 - Reads (effect `read`): `graphloom.github/list-issues`, `list-pulls`,
-  `get-issue`, `get-pull`, `list-issue-comments`, `list-labels`, and
+  `get-issue`, `get-pull`, `get-file`, `list-issue-comments`, `list-labels`, and
   `list-milestones`.
 - Writes (effect `write`): `create-issue-comment`, `create-pull`,
   `create-pull-review` (request changes, comment, or approve, with optional

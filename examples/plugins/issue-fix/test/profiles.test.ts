@@ -117,7 +117,7 @@ describe.skipIf(!existsSync(path.join(banyandbFixDist, "index.js")))("the banyan
     });
     expect(monolithic(v1(strip(ours)))).toEqual(strip(withoutLicense(theirs)));
     expect(theirs.environment?.prepare?.map((c) => c.argv.join(" "))).toEqual(["make generate"]);
-    expect(ours).toMatchObject({ graphId: "issue-fix", version: "0.11.0", privateStateSchema: "issue-fix-private-v1" });
+    expect(ours).toMatchObject({ graphId: "issue-fix", version: "0.12.0", privateStateSchema: "issue-fix-private-v1" });
   });
 
   it("splits make generate into separately cached steps with narrow inputs (#174)", () => {
@@ -334,6 +334,23 @@ describe("profiles", () => {
     expect(broken({ budgets: [] })).toThrow(/budgets must be an object/);
     expect(broken({ budgets: { tokens: 10 } })).toThrow(/budgets.tokens is not a budget/);
     expect(broken({ budgets: { jobs: 0 } })).toThrow(/budgets.jobs must be a positive integer/);
+  });
+
+  it("checks the context documents a profile declares (#195)", () => {
+    const issues = (context: unknown) => () => parseProfile({ ...(GRAPHLOOM as object), issues: { owner: "hanahmily", repo: "graphloom", context } });
+    expect(issues([{ path: "docs/a.md" }, { repo: "acme/design", path: "docs/b.md", ref: "main" }])).not.toThrow();
+    expect(issues(undefined)).not.toThrow();
+    expect(issues("docs/a.md")).toThrow(/issues.context must be a list/);
+    expect(issues([{ repo: "acme/design" }])).toThrow(/issues.context\[0\].path is required/);
+    expect(issues([{ path: "../secrets" }])).toThrow(/must be repository-relative/);
+    expect(issues([{ path: "/etc/passwd" }])).toThrow(/must be repository-relative/);
+    expect(issues([{ path: "a//b" }])).toThrow(/must be repository-relative/);
+    expect(issues([{ repo: "design", path: "a.md" }])).toThrow(/repo must be "owner\/name"/);
+    expect(issues([{ path: "a.md", ref: "main" }])).toThrow(/ref applies only to a document from another repository/);
+    expect(issues([{ path: "a.md", url: "x" }])).toThrow(/url is not a context document field/);
+    expect(issues([{ path: "a.md" }, { path: "a.md" }])).toThrow(/repeats a.md/);
+    // The same path at another ref, or in another repository, is another document.
+    expect(issues([{ repo: "acme/design", path: "a.md" }, { repo: "acme/design", path: "a.md", ref: "next" }, { repo: "acme/other", path: "a.md" }])).not.toThrow();
   });
 
   it("declares the profile's measured budgets as the graph's default budgets (#150)", () => {
