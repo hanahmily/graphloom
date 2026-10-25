@@ -5,6 +5,7 @@
  * of its own, on that validator); a report's contents are shown as reported.
  */
 import type { EvidenceRecord } from "@graphloom/sdk";
+import { benchSectionLines, parseBenchReport } from "./bench.js";
 import { commandSummary, finalCommands, type Profile } from "./profile.js";
 import { finalRun, finalRunProblem, reportText } from "./validators.js";
 
@@ -34,12 +35,18 @@ export function reportSummaryLines(report: string): string[] {
 export function finalSections(profile: Profile, evidence: EvidenceRecord[], digest: string | undefined): FinalSection[] {
   const sections: FinalSection[] = [];
   for (const c of finalCommands(profile)) {
-    if (c.section === undefined) continue;
+    // A benchmark command's section is rendered from its report's own schema, under "Benchmark" unless the profile names it.
+    if (c.section === undefined && c.requirement !== "bench-gates") continue;
     const run = finalRun(evidence, c.id, digest);
     if (run === undefined || finalRunProblem(run, c.id) !== undefined) continue;
+    if (c.requirement === "bench-gates") {
+      const parsed = parseBenchReport(reportText(run));
+      if (!("problem" in parsed)) sections.push({ heading: c.section ?? "Benchmark", lines: benchSectionLines(commandSummary(c), parsed) });
+      continue;
+    }
     const summary = reportSummaryLines(reportText(run));
     sections.push({
-      heading: c.section,
+      heading: c.section ?? "Final checks",
       lines: [`Reported by ${commandSummary(c)}; the run gated only on its exit status.`, ...(summary.length > 0 ? ["", ...summary] : [])],
     });
   }

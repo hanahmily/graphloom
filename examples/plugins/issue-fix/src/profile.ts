@@ -11,10 +11,15 @@ import { runnerById, RUNNERS, type RegressionRunner, type RunnerId } from "./run
 
 /**
  * Which requirement a profile command's result counts toward: `passes` and
- * `builds` are Fix's; `final-checks` is Review's, for a `final` tier command
- * judged by its own success.
+ * `builds` are Fix's; `final-checks` and `bench-gates` are Review's, for a
+ * `final` tier command: `final-checks` judged by its own success, `bench-gates`
+ * by its success and the hard gates of the benchmark report it writes
+ * (bench.ts).
  */
-export type CommandRequirement = "passes" | "builds" | "final-checks";
+export type CommandRequirement = "passes" | "builds" | "final-checks" | "bench-gates";
+
+/** The requirements a `final` tier command counts toward, and the only ones it may. */
+export const FINAL_REQUIREMENTS: readonly CommandRequirement[] = ["final-checks", "bench-gates"];
 
 /**
  * When a command runs among a candidate's checks. `cheap` commands run in the
@@ -22,7 +27,7 @@ export type CommandRequirement = "passes" | "builds" | "final-checks";
  * only once every cheap command and GREEN passed on the same candidate;
  * `final` commands run once, in a checkout of the candidate, after code review
  * has converged and before delivery, and count toward a Review requirement
- * (`final-checks`), never Fix's.
+ * (`final-checks` or `bench-gates`), never Fix's.
  */
 export type CommandTier = "cheap" | "full" | "final";
 
@@ -134,8 +139,19 @@ export interface ProfileData {
   pullRequest: {
     /** Lines after the title, such as the template's checklist. */
     checklist: string[];
-    /** Closing lines; `{issue}` becomes the issue reference. */
+    /** Closing lines; `{issue}` becomes the issue reference (not allowed with `reference`, which keeps the issue out of the text). */
     footer: string[];
+    /**
+     * How the commit and the pull request refer to the issue. Absent: they
+     * say `Fixes <owner>/<repo>#N` and the heading names the issue. With
+     * `{ "style": "implements", "subject": "the Measure QL" }` they say
+     * "Implements the Measure QL <issue title>" and carry no reference to the
+     * issue's repository at all, for an issue tracked somewhere private: the
+     * footer may not use `{issue}`, and any mention of that repository the
+     * agents wrote (a reference, a link, a context document's name) is
+     * dropped from the commit message and the body.
+     */
+    reference?: { style: "implements"; subject: string };
     /** The test plan's line when the record says `needsE2E`. */
     e2eNote?: string;
   };
@@ -293,10 +309,13 @@ export function parseProfile(config: unknown): Profile {
   (p.commands as unknown[]).forEach((raw, i) => {
     checkCommand(raw, `commands[${i}]`);
     const c = raw as Record<string, unknown>;
-    need(c.requirement === "passes" || c.requirement === "builds" || c.requirement === "final-checks", `commands[${i}].requirement must be passes, builds or final-checks`);
+    need(c.requirement === "passes" || c.requirement === "builds" || c.requirement === "final-checks" || c.requirement === "bench-gates", `commands[${i}].requirement must be passes, builds, final-checks or bench-gates`);
     need(c.tier === undefined || c.tier === "cheap" || c.tier === "full" || c.tier === "final", `commands[${i}].tier must be cheap, full or final`);
     // A final command runs after Fix is accepted, so a Fix requirement would never be met; a Review requirement is met only by a final run.
-    need((c.tier === "final") === (c.requirement === "final-checks"), `commands[${i}]: a final tier command counts toward final-checks, and only a final tier command may (tier ${c.tier ?? "full"}, requirement ${String(c.requirement)})`);
+    need(
+      (c.tier === "final") === FINAL_REQUIREMENTS.includes(c.requirement as CommandRequirement),
+      `commands[${i}]: a final tier command counts toward final-checks or bench-gates, and only a final tier command may (tier ${c.tier ?? "full"}, requirement ${String(c.requirement)})`,
+    );
     need(c.section === undefined || (c.tier === "final" && isString(c.section)), `commands[${i}].section is a pull request heading, for a final tier command only`);
     need(!RESERVED_COMMANDS.has(c.id as string), `commands[${i}].id ${JSON.stringify(c.id)} is reserved`);
     need(!ids.has(c.id as string), `commands[${i}].id ${JSON.stringify(c.id)} is repeated`);
@@ -337,6 +356,14 @@ export function parseProfile(config: unknown): Profile {
   need(isObject(p.pullRequest) && isStrings(p.pullRequest.checklist) && isStrings(p.pullRequest.footer), "pullRequest needs checklist and footer lists");
   const e2eNote = (p.pullRequest as Record<string, unknown>).e2eNote;
   need(e2eNote === undefined || isString(e2eNote), "pullRequest.e2eNote must be text");
+  const reference = (p.pullRequest as Record<string, unknown>).reference;
+  if (reference !== undefined) {
+    need(isObject(reference) && reference.style === "implements" && isString(reference.subject), 'pullRequest.reference must be { "style": "implements", "subject": "<what is implemented>" }');
+    need(
+      [...(p.pullRequest as { checklist: string[] }).checklist, ...(p.pullRequest as { footer: string[] }).footer].every((line) => !line.includes("{issue}")),
+      "pullRequest.checklist and footer may not use {issue} when pullRequest.reference keeps the issue out of the text",
+    );
+  }
   const harnesses = p.harnesses ?? {};
   need(isObject(harnesses), "harnesses must be an object");
   const roles = {

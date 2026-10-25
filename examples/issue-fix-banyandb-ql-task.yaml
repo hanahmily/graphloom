@@ -1,0 +1,15 @@
+# issue-fix with the banyandb-ql profile: the Measure QL relational tickets
+# R01 to R06, tracked in the private hanahmily/banyandb-ql-design and
+# implemented in skywalking-banyandb. The profile is the bundle's own; copy it
+# beside this file to adjust it. It reads the three design documents of the
+# private repository once per run (the GitHub token needs read access to it),
+# keeps that repository out of the commit and the pull request, and runs the
+# ticket's benchmark once in docker after code review converged.
+#
+# `repo` is a checkout of the base the ticket builds on: for R01 apache/skywalking-banyandb#1438's
+# head (which contains #1432), for a later ticket the branch the earlier one
+# produced. Needs docker and a Go module cache (GRAPHLOOM_BENCH_GOMODCACHE, default `go env GOMODCACHE`).
+graph: issue-fix
+repo: skywalking-banyandb
+config: plugins/issue-fix/profiles/banyandb-ql.json
+request: "Implement hanahmily/banyandb-ql-design#1."

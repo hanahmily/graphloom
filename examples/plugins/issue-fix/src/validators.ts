@@ -12,6 +12,7 @@ import {
   type AgentRun,
   type CommandRun,
 } from "./evidence.js";
+import { benchGateFailures, benchIncomplete, benchPassedReason, parseBenchReport } from "./bench.js";
 import { describeFinding, findingById, findingLedger } from "./findings.js";
 import { isUnsettled, issueIdOf } from "./issues.js";
 import { describeCoverage, isBlocking, reviewComplete } from "./ocr.js";
@@ -233,6 +234,43 @@ export const finalChecks: Validator = profiled((input, profile) => {
   return problems.length === 0 ? passed(`${commands.map((c) => c.id).join(", ")} pass on the reviewed change`) : failed(problems.join("; "));
 });
 
+/**
+ * `bench-gates`: each such command ran in a prepared checkout of the candidate,
+ * succeeded and changed no file, and wrote a complete benchmark report in
+ * which every hard gate holds (bench.ts). Only the hard gates are judged; a
+ * timing in the report can neither pass nor fail it.
+ */
+export const benchGates: Validator = profiled((input, profile) => {
+  const commands = commandsFor(profile, "bench-gates");
+  if (commands.length === 0) return inconclusive(`the ${profile.name} profile has no bench-gates command`);
+  const problems: string[] = [];
+  const reasons: string[] = [];
+  let ran = 0;
+  for (const c of commands) {
+    const run = finalRun(input.evidence, c.id, input.candidateDigest);
+    if (run !== undefined) ran += 1;
+    const problem = finalRunProblem(run, c.id);
+    if (problem !== undefined) {
+      problems.push(problem);
+      continue;
+    }
+    const parsed = parseBenchReport(reportText(run!));
+    if ("problem" in parsed) {
+      problems.push(`${c.id}: ${parsed.problem}`);
+      continue;
+    }
+    const gates = benchGateFailures(parsed.report);
+    const incomplete = benchIncomplete(parsed.report);
+    if (gates.length > 0 || incomplete.length > 0) {
+      problems.push(`${c.id}: ${[...gates.map((g) => `hard gate failed, ${g}`), ...(incomplete.length > 0 ? [`the report is incomplete: ${incomplete.slice(0, 5).join("; ")}${incomplete.length > 5 ? `; and ${incomplete.length - 5} more` : ""}`] : [])].join("; ")}`);
+    } else {
+      reasons.push(`${c.id}: ${benchPassedReason(parsed.report)}`);
+    }
+  }
+  if (ran === 0) return inconclusive("the benchmark has not run on the current change");
+  return problems.length === 0 ? passed(reasons.join("; ")) : failed(problems.join("; "));
+});
+
 /** Lines a unified diff adds as list items, without the leading `+`. */
 export function addedBullets(diff: string): string[] {
   return diff
@@ -326,6 +364,7 @@ const VALIDATORS: Record<string, Validator> = {
   "changes-entry": changelogEntry,
   "open-code-review": codeReview,
   "final-checks": finalChecks,
+  "bench-gates": benchGates,
 };
 
 /** A shipped validator; it reads the run's profile from `ValidationInput.config`. */

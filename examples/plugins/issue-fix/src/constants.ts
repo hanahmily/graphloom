@@ -19,6 +19,8 @@ export const REQUIREMENT_CHANGELOG = "changelog-entry";
 export const REQUIREMENT_REVIEW = "code-review";
 /** Review requirement for the `final` tier commands judged by their own success. */
 export const REQUIREMENT_FINAL = "final-checks";
+/** Review requirement for the `final` tier commands judged by the hard gates of the benchmark report they write. */
+export const REQUIREMENT_BENCH = "bench-gates";
 
 /** Plan, implement and corrections share this key, so each continues the previous session. */
 export const IMPLEMENTER_JOB = "implementer";

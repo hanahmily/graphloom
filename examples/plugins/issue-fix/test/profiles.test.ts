@@ -10,6 +10,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { EvidenceRecord, GraphDefinition, JobSpec, RunView } from "@graphloom/sdk";
 import {
   advanceFix,
+  exampleBenchReport,
+  MAX_BENCH_REPORT_BYTES,
   candidateCommands,
   codeReviewInstruction,
   WHOLE_CHANGE_CHECK,
@@ -391,6 +393,43 @@ describe("profiles", () => {
     const goRecord = rehearsal(BANYANDB).scenarios.happy!.results["decision-record-v2"]!.at(-1)!.output as DecisionRecord;
     expect(decisionProblems(goRecord, banyandb)).toEqual([]);
   });
+
+  it("hands the banyandb-ql rehearsal a stub benchmark runner that the real validator passes, and one that fails a hard gate (#197)", () => {
+    const QL = shippedProfile("banyandb-ql");
+    const scenarios = rehearsal(QL).scenarios;
+    expect(Object.keys(scenarios)).toEqual(["happy", "bench-gate-fails"]);
+    const judge = (stdout: string) =>
+      validatorById("bench-gates")!.evaluate({
+        requirementId: "bench-gates",
+        statement: "s",
+        candidateDigest: "d1",
+        config: QL,
+        evidence: [
+          {
+            ref: "b1",
+            kind: "command",
+            candidateDigest: "d1",
+            payload: {
+              command: { id: "bench-gates", argv: ["sh"], exitCode: 0, stdoutTail: stdout, stderrTail: "" },
+              checkout: { from: "candidate", base: "b", commit: "c", paths: [], prepared: true, mutations: [], phase: "run" },
+              producer: { operationId: "op", stageId: "review", purpose: "check", readOnly: true, kind: "command" },
+            },
+          },
+        ],
+      });
+    expect(judge(scenarios.happy!.commands!["bench-gates"]!.stdout!)).toMatchObject({ status: "passed" });
+    expect(judge(scenarios["bench-gate-fails"]!.commands!["bench-gates"]!.stdout!)).toMatchObject({ status: "failed", reason: expect.stringContaining("exact results: 3 of 52224 results differ from the oracle") });
+    expect(scenarios.happy!.expect).toMatchObject({ status: "succeeded", receipts: ["fix", "review"] });
+    // The replies the scenarios give satisfy the profile, as for the other go-test profiles.
+    const goRecord = scenarios.happy!.results["decision-record-v2"]!.at(-1)!.output as DecisionRecord;
+    expect(decisionProblems(goRecord, parseProfile(QL))).toEqual([]);
+  });
+
+  it("ships the banyandb-ql profile in the manifest's pinned files and describes it under the graph's version (#197)", async () => {
+    const manifest = JSON.parse(await readFile(path.join(here, "../graphloom.manifest.json"), "utf8")) as { digests: { files: Record<string, string> } };
+    expect(Object.keys(manifest.digests.files)).toContain("profiles/banyandb-ql.json");
+    expect(createGraph().describe(shippedProfile("banyandb-ql"))).toMatchObject({ graphId: "issue-fix", version: "0.12.0" });
+  });
 });
 
 /** The installed vitest package this suite runs on, wherever the bundle is installed. */
@@ -760,5 +799,130 @@ describe("generated artifacts a check regenerates (issue 181)", () => {
     const child = implementInstruction(nested, { issue: 7, plan: TS_PLAN });
     expect(child).toContain("Do not change generated, except generated/licenses, which a check regenerates.");
     expect(child).toContain("generated/licenses/** (regenerate with make license-dep (with check-license-outputs))");
+  });
+});
+
+describe("the bench-gates command, run against a fake docker (#197)", () => {
+  const QL = parseProfile(shippedProfile("banyandb-ql"));
+  const command = QL.commands.find((c) => c.id === "bench-gates")!;
+  const REPORT = JSON.stringify(exampleBenchReport());
+
+  /** A git checkout with go.mod, a Makefile with or without the target, a `docker` on PATH that logs its arguments and plays the container, and a module cache. */
+  async function setup(o: { target?: boolean; report?: string; rc?: number } = {}) {
+    const dir = await realpath(await mkdtemp(path.join(os.tmpdir(), "issue-fix-bench-")));
+    temps.push(dir);
+    const repo = path.join(dir, "repo");
+    const bin = path.join(dir, "bin");
+    const cache = path.join(dir, "modcache");
+    await mkdir(repo);
+    await mkdir(bin);
+    await mkdir(cache);
+    await writeFile(path.join(repo, "go.mod"), "module example.com/x\n\ngo 1.26.10\n");
+    await writeFile(path.join(repo, "Makefile"), o.target === false ? ".PHONY: other\nother:\n\ttrue\n" : ".PHONY: bench-ql-report\nbench-ql-report:\n\ttrue\n");
+    await writeFile(path.join(dir, "report.json"), o.report ?? REPORT);
+    const log = path.join(dir, "docker.log");
+    await writeFile(
+      path.join(bin, "docker"),
+      [
+        "#!/bin/sh",
+        `echo "$@" >> ${JSON.stringify(log)}`,
+        '[ "$1" = info ] && exit 0',
+        'for a in "$@"; do prev="$last"; last="$a"; done',
+        '[ "$prev $last" = "go version" ] && { echo "go version go1.26.10 linux/amd64"; exit 0; }',
+        // The container's `make bench-ql-report`: writes into the checkout it was given as /src.
+        'if [ "$last" = bench-ql-report ]; then for a in "$@"; do case "$a" in *:/src) src="${a%:/src}" ;; esac; done; mkdir -p "$src/build/bench"; cp ' + JSON.stringify(path.join(dir, "report.json")) + ' "$src/build/bench/ql-report.json"; exit ' + (o.rc ?? 0) + "; fi",
+        "exit 0",
+        "",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+    return { dir, repo, bin, cache, log, report: path.join(dir, "report.out") };
+  }
+
+  async function exec(env: Awaited<ReturnType<typeof setup>>, extra: Record<string, string> = {}) {
+    const [cmd, ...args] = command.argv;
+    const environment: NodeJS.ProcessEnv = { ...process.env, PATH: `${env.bin}:${process.env.PATH}`, GRAPHLOOM_REPORT_FILE: env.report, GRAPHLOOM_BENCH_GOMODCACHE: env.cache, ...extra };
+    for (const key of Object.keys(extra)) if (extra[key] === "") delete environment[key];
+    try {
+      const { stdout, stderr } = await execFileAsync(cmd!, args, { cwd: env.repo, env: environment });
+      return { code: 0, stdout, stderr };
+    } catch (err) {
+      const e = err as { code: number; stdout: string; stderr: string };
+      return { code: e.code, stdout: e.stdout, stderr: e.stderr };
+    }
+  }
+
+  it("runs make bench-ql-report in the golang image of go.mod's version with the frozen resources and a read-only module cache, and wraps the report", async () => {
+    const env = await setup();
+    const result = await exec(env);
+    expect(result.code, result.stderr).toBe(0);
+    const calls = (await readFile(env.log, "utf8")).trim().split("\n");
+    const run = calls.find((l) => l.endsWith("make bench-ql-report"))!;
+    expect(run).toContain("run --rm --cpus=4 --memory=8g --memory-swap=8g");
+    expect(run).toContain(" golang:1.26.10 make bench-ql-report");
+    expect(run).toContain(`-v ${env.repo}:/src`);
+    expect(run).toContain(`-v ${env.cache}:/go/pkg/mod:ro`);
+    expect(run).toContain("-e GOPROXY=off");
+    expect(run).toContain("-w /src");
+    const envelope = JSON.parse(await readFile(env.report, "utf8")) as { harness: Record<string, unknown>; report: unknown };
+    expect(envelope.harness).toEqual({ image: "golang:1.26.10", imageGo: "go version go1.26.10 linux/amd64", cpus: 4, memory: "8g", memorySwap: "8g" });
+    expect(envelope.report).toEqual(JSON.parse(REPORT));
+    expect(result.stdout).toContain("golang:1.26.10 (go version go1.26.10 linux/amd64)");
+  });
+
+  it("takes the image and the module cache from the environment, and finds the operator's cache behind a confined job's redirected one", async () => {
+    const env = await setup();
+    const image = await exec(env, { GRAPHLOOM_BENCH_IMAGE: "golang:1.26.10-bookworm" });
+    expect(image.code, image.stderr).toBe(0);
+    expect(await readFile(env.log, "utf8")).toContain("golang:1.26.10-bookworm make bench-ql-report");
+    // A confined job: its GOMODCACHE is a run-scoped copy, and its first GOPROXY is the operator's cache as a file:// URL.
+    const confined = await setup();
+    const result = await exec(confined, { GRAPHLOOM_BENCH_GOMODCACHE: "", GOMODCACHE: "/scratch/go/mod", GOPROXY: `${pathToFileURL(path.join(confined.cache, "cache", "download")).href},https://proxy.golang.org,direct` });
+    expect(result.code, result.stderr).toBe(0);
+    expect(await readFile(confined.log, "utf8")).toContain(`-v ${confined.cache}:/go/pkg/mod:ro`);
+  });
+
+  it("fails with an actionable message when the make target does not exist, running no container", async () => {
+    const env = await setup({ target: false });
+    const result = await exec(env);
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("this checkout has no make target bench-ql-report");
+    expect(result.stderr).toContain("writes build/bench/ql-report.json (schema ql-bench-report/v1");
+    expect(result.stderr).toContain("docker run --rm --cpus=4 --memory=8g --memory-swap=8g golang:1.26.10 make bench-ql-report");
+    expect((await readFile(env.log, "utf8")).split("\n").filter((l) => l.includes("make bench-ql-report"))).toEqual([]);
+    expect(existsSync(env.report)).toBe(false);
+  });
+
+  it("fails naming what is missing: no module cache, no report file, an invalid or oversized report", async () => {
+    const env = await setup();
+    const noCache = await exec(env, { GRAPHLOOM_BENCH_GOMODCACHE: path.join(env.dir, "absent") });
+    expect(noCache.code).toBe(1);
+    expect(noCache.stderr).toContain("no Go module cache to mount read-only");
+    expect(noCache.stderr).toContain("GRAPHLOOM_BENCH_GOMODCACHE");
+
+    const invalid = await setup({ report: "{ not json" });
+    const bad = await exec(invalid);
+    expect(bad.code).not.toBe(0);
+    expect(bad.stderr).toContain("is not valid JSON");
+
+    const huge = await setup({ report: JSON.stringify({ ...exampleBenchReport(), padding: "x".repeat(MAX_BENCH_REPORT_BYTES) }) });
+    const big = await exec(huge);
+    expect(big.code).not.toBe(0);
+    expect(big.stderr).toContain("keep the report under 60000 bytes");
+  });
+
+  it("keeps the runner's own exit status while still reporting what it wrote", async () => {
+    const env = await setup({ rc: 7 });
+    const result = await exec(env);
+    expect(result.code).toBe(7);
+    expect(JSON.parse(await readFile(env.report, "utf8")).report.schema).toBe("ql-bench-report/v1");
+  });
+
+  it("is a final tier command with a generous timeout, and the environment checks docker and a module cache before any job", () => {
+    expect(command).toMatchObject({ tier: "final", requirement: "bench-gates" });
+    expect(command.timeoutMs).toBeGreaterThanOrEqual(3 * 60 * 60 * 1000);
+    const docker = QL.environment.checks!.find((c) => c.id === "docker")!;
+    expect(docker.argv[2]).toContain("docker info");
+    expect(docker.argv[2]).toContain("GRAPHLOOM_BENCH_GOMODCACHE");
   });
 });

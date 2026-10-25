@@ -26,6 +26,7 @@ and the [issues file](../../../docs/design-issue-fix-graph.md#the-issues-file).
 | [`profiles/banyandb.json`](profiles/banyandb.json) | apache/skywalking-banyandb, issues in apache/skywalking | `go-test` | `make test-ci` for the changed packages, lint (cheap tier); build, check (full tier; `make check` includes license-check) | `CHANGES.md` |
 | [`profiles/graphloom.json`](profiles/graphloom.json) | hanahmily/graphloom (this repository) | `vitest` | `npm run typecheck`, `npm run build`, `npm test` | none |
 | [`profiles/canopy.json`](profiles/canopy.json) | apache/skywalking-banyandb, issues in apache/skywalking; Node/TypeScript changes under `canopy/` | `vitest` | the changed workspaces' tests, typecheck, lint (cheap tier); build, `npm test`, `make license-dep` (full tier) | `CHANGES.md` |
+| [`profiles/banyandb-ql.json`](profiles/banyandb-ql.json) | apache/skywalking-banyandb; the Measure QL tickets R01 to R06, tracked in the private hanahmily/banyandb-ql-design | `go-test` | banyandb's, plus the `bench-gates` final step | `CHANGES.md` |
 
 The banyandb profile reproduces banyandb-fix's requirements, statements,
 environment checks, prompts and commands, with two differences: the issues
@@ -97,6 +98,144 @@ graphloom profile the full suite takes about ten minutes; its commands allow
 ```sh
 GRAPHLOOM_GITHUB_LIVE_TOKEN="$(gh auth token)" node ../apps/graphloom/dist/main.js run issue-fix-graphloom-task.yaml
 ```
+
+## The Measure QL tickets: the banyandb-ql profile (0.12.0)
+
+[`profiles/banyandb-ql.json`](profiles/banyandb-ql.json) runs the graph on the
+Measure QL relational tickets R01 to R06 ([#197](https://github.com/hanahmily/graphloom/issues/197)).
+They are tracked in the private `hanahmily/banyandb-ql-design` and implemented
+in apache/skywalking-banyandb. The profile is banyandb's (same project,
+regression runner, build checks, budgets and harnesses; its environment adds a
+`docker` check) with three additions, each described below: the issue tracker
+and its three design documents as context, delivery text that keeps the private
+repository out, and a `bench-gates` final step.
+
+- **Issues and context.** `issues` is `hanahmily/banyandb-ql-design`, and
+  `issues.context` lists `docs/relational-design.md`,
+  `docs/relational-tickets.md` and `docs/catalog-b-context.md` of that
+  repository. The run reads them once (the GitHub token needs read access to the
+  private repository) and gives them to the planner, the implementer and the
+  reviewers, so a ticket that defers to them is planned against the real
+  contract.
+- **Delivery.** `pullRequest.reference` is `{ "style": "implements", "subject":
+  "the Measure QL" }`. The commit's last line and the pull request's heading say
+  "Implements the Measure QL <issue title>"; there is no `Fixes
+  hanahmily/banyandb-ql-design#N`, the footer has no `{issue}`, and any mention
+  of the private repository the agents wrote (a reference, a link, a context
+  document's name) is dropped from the commit message and the body. The planner
+  and implementer are also told to write public text that stands alone.
+- **The `bench-gates` final step.** One `final` tier command, requirement
+  `bench-gates`, runs once after code review converged. It
+  - picks the Go image from `go.mod`'s `go` line (`golang:<version>`; override
+    with `GRAPHLOOM_BENCH_IMAGE`);
+  - mounts the checkout read-write at `/src` and the host's Go module cache
+    read-only at `/go/pkg/mod`: `GRAPHLOOM_BENCH_GOMODCACHE`, else the
+    operator's cache named by the `file://` proxy a confined job is given (a
+    confined job's own `GOMODCACHE` is a run-scoped copy), else `go env
+    GOMODCACHE`, which on this machine is `/mnt/d/gomodcache`; module downloads
+    are off (`GOPROXY=off`, `GOTOOLCHAIN=local`);
+  - runs `make bench-ql-report` in `docker run --rm --cpus=4 --memory=8g
+    --memory-swap=8g`, as the invoking user, with every user-level directory
+    (`HOME`, `GOCACHE`) inside the container's own `/tmp`, so the step needs
+    nothing outside the checkout, the module cache and the run's report file.
+    It also runs under the bubblewrap confinement of supervisor-originated jobs
+    (whole filesystem read-only but the checkout and the run's scratch directory,
+    a private `/tmp`, a redirected module cache), reaching the docker daemon
+    through its socket; when it cannot reach the daemon or find a module cache
+    it fails saying which;
+  - expects `build/bench/ql-report.json` afterwards and wraps it in
+    `{ "harness": { image, imageGo, cpus, memory, memorySwap }, "report": ... }`
+    as the command's report file, refusing one over 60,000 bytes (a run keeps
+    at most 64 KiB of a report).
+
+  The make target is the ticket's own: its implementation adds it, together with the
+  runner behind it. A checkout without the target fails the step with a message
+  naming it, what it must write and how the step runs it, and the change goes
+  back to the implementer. The planner's and implementer's guidance (the profile's
+  `planning.notes`, which are `BENCH_GUIDANCE` in `src/bench.ts`) states the
+  target, the report schema and the benchmark rules, citing
+  `docs/relational-tickets.md`, "Benchmark rules for every ticket".
+
+### The report: `ql-bench-report/v1`
+
+```json
+{
+  "schema": "ql-bench-report/v1",
+  "ticket": "R01",
+  "environment": { "goVersion": "go1.26.10", "commit": "<sha>", "baseCommit": "<sha>", "seed": 20261024, "cpus": 4, "memoryBytes": 8589934592, "swapBytes": 0 },
+  "budgets": { "queryBytes": 268435456 },
+  "preflight": [
+    { "facts": 1024, "dimensions": 64, "fits": true, "peakAccountedBytes": 1000000, "budgetBytes": 268435456 },
+    { "facts": 16384, "dimensions": 1024, "fits": true, "peakAccountedBytes": 2000000, "budgetBytes": 268435456 }
+  ],
+  "gates": {
+    "exactResults": { "checked": 52224, "mismatches": 0 },
+    "failedTimedCalls": { "count": 0 },
+    "accountedMemory": { "peakBytes": 2000000, "budgetBytes": 268435456 },
+    "outstandingResources": { "count": 0 }
+  },
+  "cases": [
+    {
+      "name": "join-unique",
+      "size": { "facts": 1024, "dimensions": 64 },
+      "samples": [
+        { "pair": 1, "order": "AB", "variant": "operator", "nsPerOp": 803, "allocBytesPerOp": 4096, "allocsPerOp": 12, "retainedBytes": 65536, "rpcP50Ns": 900000, "rpcP95Ns": 1400000, "rpcCpuNs": 700000 }
+      ],
+      "effects": [{ "metric": "nsPerOp", "comparison": "operator-vs-reference", "estimate": -0.97, "ciLow": -0.98, "ciHigh": -0.96, "confidence": 0.95 }]
+    }
+  ]
+}
+```
+
+(`samples` lists every raw sample: five paired repetitions with alternated
+`order`, for each variant; the example shows one.) The `bench-gates` validator
+passes only when the command exited 0, changed no file, and the report is
+complete and every **hard gate** holds, read from the counts and bytes, never
+from a boolean the report carries:
+
+| Hard gate | Holds when |
+|---|---|
+| exact results | `checked` > 0 and `mismatches` = 0 |
+| zero failed timed calls | `failedTimedCalls.count` = 0 |
+| bounded accounted memory | `accountedMemory.peakBytes` <= `budgetBytes` |
+| zero outstanding owned resources | `outstandingResources.count` = 0 |
+| preflight fits both sizes | an entry for 1,024/64 and for 16,384/1,024, each with `peakAccountedBytes` <= `budgetBytes` |
+
+Complete means: the schema, the frozen environment (toolchain, commit, base
+commit, seed, CPUs, memory), the effective budgets, a case at each of the two
+sizes, at least five alternated pairs per case with `nsPerOp`,
+`allocBytesPerOp` and `retainedBytes`, and an interval (`ciLow` <= `ciHigh`) on
+each paired effect. **No latency is ever judged**: the timings (medians of the
+samples, the effect estimates with their intervals, RPC p50/p95/CPU) go in the
+pull request's `Benchmark` section, labelled reported only, and a result that
+passes every gate passes whatever its timings.
+
+### Running R01 to R06
+
+1. Check out the base the ticket builds on. R01 builds on
+   apache/skywalking-banyandb#1438's head (which contains #1432): `git fetch
+   origin pull/1438/head:pr-1438`, then a worktree or clone at that branch is
+   the task's `repo`. A later ticket stacks on the branch the earlier run
+   produced: point `repo` at a checkout of that branch (the run's `fix/<issue>`
+   branch, pushed or not), so its change is part of the base the ticket sees.
+2. Copy [`examples/issue-fix-banyandb-ql-task.yaml`](../../issue-fix-banyandb-ql-task.yaml),
+   set `repo` and name the ticket (`request: "Implement hanahmily/banyandb-ql-design#N."`).
+3. Check it, with a token that can read the private repository:
+   `GRAPHLOOM_GITHUB_LIVE_TOKEN="$(gh auth token)" graphloom check task.yaml`.
+   The environment checks need docker, a module cache, the Go toolchain `go.mod`
+   names, Node.js 24.6 and the other banyandb tools.
+4. Run it as any issue-fix task (`graphloom run task.yaml`). The pull request
+   body is the delivery command's report, with the Benchmark section.
+5. To refresh the timings on an idle machine, run the same target outside a run, in the
+   same container, from a clean checkout of the delivered branch:
+   `docker run --rm --cpus=4 --memory=8g --memory-swap=8g --user "$(id -u):$(id -g)" -e HOME=/tmp -e GOCACHE=/tmp/gocache -e GOMODCACHE=/go/pkg/mod -e GOFLAGS=-buildvcs=false -e GOPROXY=off -e GOTOOLCHAIN=local -v "$PWD:/src" -v "$(go env GOMODCACHE):/go/pkg/mod:ro" -w /src golang:<go.mod's version> make bench-ql-report`,
+   then read `build/bench/ql-report.json`. Gates are re-checked by the report; do
+   not move a threshold after seeing results.
+
+The rehearsal scenarios for this profile (`happy`, `bench-gate-fails` in
+`src/rehearsal.ts`) stub the runner with a passing report and with one that
+fails a gate; the plugin's tests walk them, and a stub runner's report, through
+the real validator, delivery and the graph's reentry.
 
 ## The final command tier (0.12.0)
 

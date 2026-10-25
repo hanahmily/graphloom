@@ -1,0 +1,343 @@
+{
+  "name": "banyandb-ql",
+  "project": "apache/skywalking-banyandb",
+  "issues": {
+    "owner": "hanahmily",
+    "repo": "banyandb-ql-design",
+    "context": [
+      {
+        "repo": "hanahmily/banyandb-ql-design",
+        "path": "docs/relational-design.md"
+      },
+      {
+        "repo": "hanahmily/banyandb-ql-design",
+        "path": "docs/relational-tickets.md"
+      },
+      {
+        "repo": "hanahmily/banyandb-ql-design",
+        "path": "docs/catalog-b-context.md"
+      }
+    ]
+  },
+  "environment": {
+    "checks": [
+      {
+        "id": "go",
+        "argv": [
+          "sh",
+          "-c",
+          "want=$(sed -n \"s/^go //p\" go.mod); have=$(go env GOVERSION) || exit 127; [ \"$have\" = \"go$want\" ] || { echo \"$have found; go.mod needs go$want\" >&2; exit 1; }"
+        ]
+      },
+      {
+        "id": "git",
+        "argv": [
+          "sh",
+          "-c",
+          "v=$(git --version | sed -n \"s/^git version \\([0-9]*\\)\\.\\([0-9]*\\).*/\\1 \\2/p\"); set -- $v; [ \"${1:-0}\" -gt 2 ] || { [ \"${1:-0}\" -eq 2 ] && [ \"${2:-0}\" -ge 41 ]; } || { echo \"git >= 2.41 required; found $(git --version)\" >&2; exit 1; }"
+        ]
+      },
+      {
+        "id": "ocr",
+        "argv": [
+          "sh",
+          "-c",
+          "p=$(command -v ocr) || { echo \"open-code-review (ocr) is not installed\" >&2; exit 127; }; case \"$p\" in /*) ;; *) p=\"$(pwd)/$p\" ;; esac; \"$p\" delegate preview --help >/dev/null 2>&1 || { echo \"$p has no delegation mode; install open-code-review 1.9 or later\" >&2; exit 1; }; printf '%s\\n' \"$p\""
+        ],
+        "timeoutMs": 120000
+      },
+      {
+        "id": "codex",
+        "argv": [
+          "sh",
+          "-c",
+          "c=\"${GRAPHLOOM_CODEX_BIN:-codex}\"; h=\"${GRAPHLOOM_CODEX_HOME:-${CODEX_HOME:-}}\"; [ -z \"$h\" ] || export CODEX_HOME=\"$h\"; \"$c\" --version >/dev/null 2>&1 || { echo \"Codex ($c) is not installed\" >&2; exit 127; }; \"$c\" login status >/dev/null 2>&1 || { echo \"Codex is not logged in${h:+ for $h}: run $c login\" >&2; exit 1; }"
+        ],
+        "timeoutMs": 120000
+      },
+      {
+        "id": "claude",
+        "argv": [
+          "sh",
+          "-c",
+          "c=\"${GRAPHLOOM_CLAUDE_BIN:-claude}\"; d=\"${GRAPHLOOM_CLAUDE_CONFIG_DIR:-${CLAUDE_CONFIG_DIR:-}}\"; [ -z \"$d\" ] || export CLAUDE_CONFIG_DIR=\"$d\"; \"$c\" --version >/dev/null 2>&1 || { echo \"Claude Code ($c) is not installed\" >&2; exit 127; }; \"$c\" auth status >/dev/null 2>&1 || { echo \"Claude Code is not logged in${d:+ for $d}: run $c auth login\" >&2; exit 1; }"
+        ],
+        "timeoutMs": 120000
+      },
+      {
+        "id": "make",
+        "argv": [
+          "sh",
+          "-c",
+          "make --version 2>/dev/null | grep -q \"GNU Make\" || { echo \"GNU make required\" >&2; exit 1; }"
+        ]
+      },
+      {
+        "id": "docker",
+        "argv": [
+          "sh",
+          "-c",
+          "docker info >/dev/null 2>&1 || { echo \"the docker daemon is not reachable: the bench-gates final step runs the benchmark in a container\" >&2; exit 1; }; c=\"${GRAPHLOOM_BENCH_GOMODCACHE:-$(go env GOMODCACHE 2>/dev/null)}\"; [ -n \"$c\" ] && [ -d \"$c\" ] || { echo \"no Go module cache to mount read-only ($c): set GRAPHLOOM_BENCH_GOMODCACHE\" >&2; exit 1; }"
+        ],
+        "timeoutMs": 120000
+      },
+      {
+        "id": "check-req",
+        "argv": [
+          "make",
+          "-C",
+          "scripts/ci/check",
+          "test"
+        ],
+        "timeoutMs": 300000
+      },
+      {
+        "id": "node",
+        "argv": [
+          "sh",
+          "-c",
+          "v=$(node --version 2>/dev/null) || { echo \"Node.js >= 24.6.0 is required (make generate and make build run npm ci for the ui and mcp projects, on every task)\" >&2; exit 127; }; n=$(echo \"$v\" | sed -n \"s/^v\\([0-9]*\\)\\.\\([0-9]*\\).*/\\1 \\2/p\"); set -- $n; maj=${1:-0}; min=${2:-0}; { [ \"$maj\" -gt 24 ] || { [ \"$maj\" -eq 24 ] && [ \"$min\" -ge 6 ]; }; } || { echo \"Node.js >= 24.6.0 required, found $v\" >&2; exit 1; }"
+        ],
+        "timeoutMs": 120000
+      }
+    ],
+    "prepare": [
+      {
+        "id": "generate-proto",
+        "argv": [
+          "make",
+          "-C",
+          "api",
+          "generate"
+        ],
+        "timeoutMs": 1800000,
+        "inputs": [
+          "api/proto/**/*.proto",
+          "api/buf.gen.yaml",
+          "api/buf.work.yaml",
+          "api/proto/buf.yaml",
+          "api/proto/buf.lock",
+          "api/Makefile",
+          "scripts/build/**",
+          "go.mod",
+          "go.sum"
+        ],
+        "outputs": [
+          "api/proto/**/*.pb.go",
+          "api/proto/**/*.pb.validate.go",
+          "api/proto/**/*.pb.gw.go",
+          "api/proto/openapi/**",
+          "api/proto/api-reference.md"
+        ]
+      },
+      {
+        "id": "generate-mcp",
+        "argv": [
+          "make",
+          "-C",
+          "mcp",
+          "generate"
+        ],
+        "timeoutMs": 1800000,
+        "inputs": [
+          "mcp/package.json",
+          "mcp/package-lock.json",
+          "mcp/Makefile"
+        ],
+        "outputs": [
+          "mcp/node_modules/**"
+        ]
+      },
+      {
+        "id": "generate-directives",
+        "argv": [
+          "sh",
+          "-c",
+          "want=\" banyand/metadata/metadata.go banyand/metadata/schema/schema.go banyand/queue/queue.go pkg/flow/types.go pkg/meter/meter.go pkg/node/interface.go \"; bad=\"\"; for f in $(grep -rl \"go:generate\" --include=\"*.go\" api banyand bydbctl fodc pkg 2>/dev/null | sort); do case \"$want\" in *\" $f \"*) ;; *) bad=\"$bad $f\";; esac; done; [ -z \"$bad\" ] || { echo \"go:generate directives in files the generate-mocks inputs do not cover:$bad; update this profile\" >&2; exit 1; }"
+        ],
+        "timeoutMs": 120000
+      },
+      {
+        "id": "generate-mocks",
+        "argv": [
+          "sh",
+          "-c",
+          "make -C banyand generate && make -C pkg generate"
+        ],
+        "timeoutMs": 1800000,
+        "inputs": [
+          "banyand/queue/*.go",
+          "banyand/metadata/*.go",
+          "banyand/metadata/schema/*.go",
+          "pkg/node/*.go",
+          "pkg/meter/*.go",
+          "pkg/flow/*.go",
+          "pkg/bus/*.go",
+          "pkg/run/*.go",
+          "banyand/liaison/grpc/route/*.go",
+          "api/common/*.go",
+          "!**/*_test.go",
+          "!**/*mock.go",
+          "api/proto/**/*.proto",
+          "go.mod",
+          "go.sum",
+          "banyand/Makefile",
+          "pkg/Makefile",
+          "scripts/build/**"
+        ],
+        "outputs": [
+          "banyand/**/*mock.go",
+          "pkg/**/*mock.go"
+        ]
+      }
+    ],
+    "pinnedFiles": [
+      {
+        "path": "CONTRIBUTING.md",
+        "sha256": "e62fb86881f70d710f9571c2063b9fd89ebaad4f8e35a0c6e3185900cad21172"
+      }
+    ]
+  },
+  "regression": {
+    "runner": "go-test",
+    "timeoutMs": 1800000
+  },
+  "commands": [
+    {
+      "id": "test-ci",
+      "argv": [
+        "sh",
+        "-c",
+        "pkgs=$(git diff --name-only --diff-filter=d HEAD~1 HEAD -- \"*.go\" | while read -r f; do d=$(dirname \"$f\"); [ -d \"$d\" ] && echo \"./$d\"; done | sort -u | tr \"\\n\" \" \"); [ -n \"$pkgs\" ] || { echo \"the change touches no Go package\" >&2; exit 1; }; exec make test-ci PKG=\"$pkgs\""
+      ],
+      "timeoutMs": 3600000,
+      "tier": "cheap",
+      "requirement": "passes",
+      "statement": "make test-ci passes for the changed Go packages",
+      "summary": "`make test-ci` for the changed packages"
+    },
+    {
+      "id": "build",
+      "argv": [
+        "make",
+        "build"
+      ],
+      "timeoutMs": 1800000,
+      "requirement": "builds"
+    },
+    {
+      "id": "lint",
+      "argv": [
+        "make",
+        "lint"
+      ],
+      "timeoutMs": 1800000,
+      "tier": "cheap",
+      "requirement": "builds"
+    },
+    {
+      "id": "check",
+      "argv": [
+        "make",
+        "check"
+      ],
+      "timeoutMs": 1800000,
+      "requirement": "builds",
+      "label": "make check (which includes license-check and check-format)",
+      "summary": "`make check`"
+    },
+    {
+      "id": "bench-gates",
+      "argv": [
+        "sh",
+        "-c",
+        "set -u\nfail() { echo \"bench-gates: $*\" >&2; exit 1; }\nwant=$(sed -n 's/^go //p' go.mod | head -n 1)\n[ -n \"$want\" ] || fail \"go.mod names no go version, so no golang image can be chosen; set GRAPHLOOM_BENCH_IMAGE\"\nimage=\"${GRAPHLOOM_BENCH_IMAGE:-golang:$want}\"\ncache=\"${GRAPHLOOM_BENCH_GOMODCACHE:-}\"\nif [ -z \"$cache\" ]; then first=\"${GOPROXY:-}\"; first=\"${first%%,*}\"; case \"$first\" in file://*/cache/download) cache=\"${first#file://}\"; cache=\"${cache%/cache/download}\" ;; esac; case \"$cache\" in *%*) cache=\"\" ;; esac; fi\n[ -n \"$cache\" ] || cache=\"$(go env GOMODCACHE 2>/dev/null)\"\n[ -n \"$cache\" ] && [ -d \"$cache\" ] || fail \"no Go module cache to mount read-only (looked for '$cache'); set GRAPHLOOM_BENCH_GOMODCACHE to the host module cache\"\ndocker info >/dev/null 2>&1 || fail \"the docker daemon is not reachable; the benchmark runs in a container (docker run --cpus=4 --memory=8g --memory-swap=8g)\"\nout=$(make -n bench-ql-report 2>&1) || { case \"$out\" in *\"make target\"*bench-ql-report*) fail \"this checkout has no make target bench-ql-report. The ticket's change must add it: it runs the ticket's benchmark runner and writes build/bench/ql-report.json (schema ql-bench-report/v1, given in the implementation guidance). The final step runs it as: docker run --rm --cpus=4 --memory=8g --memory-swap=8g $image make bench-ql-report\" ;; *) fail \"make -n bench-ql-report failed: $out\" ;; esac; }\nmkdir -p build/bench && rm -f build/bench/ql-report.json\nimagego=$(docker run --rm \"$image\" go version 2>&1 | head -n 1)\necho \"bench-gates: $image ($imagego), module cache $cache (read-only), module downloads off\"\ndocker run --rm --cpus=4 --memory=8g --memory-swap=8g --user \"$(id -u):$(id -g)\" -e HOME=/tmp -e GOCACHE=/tmp/gocache -e GOMODCACHE=/go/pkg/mod -e GOFLAGS=-buildvcs=false -e GOPROXY=off -e GOTOOLCHAIN=local -v \"$PWD:/src\" -v \"$cache:/go/pkg/mod:ro\" -w /src \"$image\" make bench-ql-report\nrc=$?\n[ -f build/bench/ql-report.json ] || fail \"make bench-ql-report exited $rc without writing build/bench/ql-report.json\"\nnode -e 'const fs=require(\"fs\");const [file,image,imageGo]=process.argv.slice(1);const raw=fs.readFileSync(file,\"utf8\");const bytes=Buffer.byteLength(raw);if(bytes>60000){console.error(\"bench-gates: \"+file+\" is \"+bytes+\" bytes; keep the report under 60000 bytes, because the run keeps at most 64 KiB of it (fewer or shorter samples, no raw logs)\");process.exit(3)}let report;try{report=JSON.parse(raw)}catch(e){console.error(\"bench-gates: \"+file+\" is not valid JSON: \"+e.message);process.exit(3)}fs.writeFileSync(process.env.GRAPHLOOM_REPORT_FILE,JSON.stringify({harness:{image,imageGo,cpus:4,memory:\"8g\",memorySwap:\"8g\"},report}))' build/bench/ql-report.json \"$image\" \"$imagego\" || exit 1\nexit $rc",
+        "bench-gates"
+      ],
+      "timeoutMs": 10800000,
+      "tier": "final",
+      "requirement": "bench-gates",
+      "label": "make bench-ql-report (in docker)",
+      "summary": "`make bench-ql-report` in docker (4 CPUs, 8 GiB, no extra swap)",
+      "section": "Benchmark"
+    }
+  ],
+  "testPaths": {
+    "suffixes": [
+      "_test.go"
+    ],
+    "directories": [
+      "testdata"
+    ]
+  },
+  "protectedPaths": [
+    "api/proto",
+    "go.mod",
+    "go.sum",
+    ".github"
+  ],
+  "changelog": {
+    "path": "CHANGES.md",
+    "rule": "first-release-section-entry"
+  },
+  "planning": {
+    "reach": "Reach: for every behaviour the fix changes, the basis of that decision names each caller and lifecycle path that depends on the old behaviour (shutdown and Close, context cancellation, error returns, panics, retries, concurrency, resource release), starting with the changed type's own Close, Stop and shutdown paths, and the test that covers it; a path no test covers is stated there as a risk. For a wait the fix makes longer or unbounded, say what happens when the awaited code ignores cancellation or never returns.",
+    "e2e": "the Kind end-to-end tests",
+    "notes": [
+      "This is a Measure QL relational ticket (R01 to R06). The context documents above are its contract: docs/relational-design.md is the design, docs/relational-tickets.md the authoritative plan (each ticket's \"Implement\", \"Generated e2e\", \"Focused benchmark\" and \"Done\" sections, the shared acceptance contract and the benchmark rules) and docs/catalog-b-context.md what Catalog B already ships. Implement exactly the ticket the issue names, to its \"Done\" criteria: a parser-only change cannot close it.",
+      "The change goes to a public repository. Write code comments, documentation, test names and the CHANGES entry so they stand on their own: do not cite the design repository, its issue numbers or its file names.",
+      "The controller's final step runs `make bench-ql-report` once, after code review has converged, in a container with 4 CPUs, 8 GiB of memory and no extra swap (docker run --cpus=4 --memory=8g --memory-swap=8g, on a golang image of go.mod's toolchain, the checkout mounted read-write and the module cache read-only, module downloads off: GOPROXY=off). This ticket's change adds that make target and the runner behind it (a repository-level Makefile target, or one the root Makefile includes); it must write the report to build/bench/ql-report.json, which the repository already ignores. A checkout without the target fails the final step with a message naming it, and the change comes back to you.",
+      "Benchmark rules (docs/relational-tickets.md, \"Benchmark rules for every ticket\", and the ticket's focused benchmark section of the same document; the context documents above hold them): freeze the toolchain, commits, fixture seed, parameters, effective admission budgets, four CPUs, 8 GiB and no extra swap; time only successful queries and keep deliberate overload and recovery apart; verify the full results against an independent oracle before accepting a timing sample (an error or a timeout is a failure, never a faster observation); use the two fixed successful sizes 1,024 facts/64 dimension rows and 16,384 facts/1,024 dimension rows, and prove in a preflight that both fit the unchanged budget; use five paired repetitions with alternated order, keep the raw samples and report paired effect estimates with uncertainty; record kernel ns/op, allocated bytes/op, retained operator bytes and RPC p50/p95/CPU where applicable; process RSS is separate from tracked memory; benchmark-only reference or disable switches must never become public language or API options. Correctness, bounded memory and cleanup are hard gates; timings are reported, never gated. Do not declare gates passed from a median or change a threshold after seeing results.",
+      "The report is JSON, schema \"ql-bench-report/v1\", under 60000 bytes (the run keeps at most 64 KiB of it): {\"schema\":\"ql-bench-report/v1\",\"ticket\":\"R01\",\"environment\":{\"goVersion\",\"commit\",\"baseCommit\",\"seed\",\"cpus\",\"memoryBytes\",\"swapBytes\"},\"budgets\":{\"<name>\":number,...},\"preflight\":[{\"facts\":1024,\"dimensions\":64,\"fits\":true,\"peakAccountedBytes\":n,\"budgetBytes\":n},{\"facts\":16384,\"dimensions\":1024,...}],\"gates\":{\"exactResults\":{\"checked\":n,\"mismatches\":0},\"failedTimedCalls\":{\"count\":0},\"accountedMemory\":{\"peakBytes\":n,\"budgetBytes\":n},\"outstandingResources\":{\"count\":0}},\"cases\":[{\"name\",\"size\":{\"facts\",\"dimensions\"},\"samples\":[{\"pair\":1,\"order\":\"AB\",\"variant\",\"nsPerOp\",\"allocBytesPerOp\",\"allocsPerOp\",\"retainedBytes\",\"rpcP50Ns\",\"rpcP95Ns\",\"rpcCpuNs\"}, ...],\"effects\":[{\"metric\",\"comparison\",\"estimate\",\"ciLow\",\"ciHigh\",\"confidence\"}]}]}.",
+      "The controller passes the ticket only when the command exits 0 and every hard gate holds in the report: results exact (checked > 0, mismatches 0), no failed timed call, accounted peak within its budget, no outstanding owned resource, and a preflight entry that fits for both sizes; and the report is complete (the environment, the budgets, a case and at least five alternated pairs at each size, and an interval for each effect). It never judges a latency, and the pull request's Benchmark section shows the timings as reported only. A benchmark that cannot meet a gate is a defect to fix, not a threshold to move."
+    ]
+  },
+  "implementation": {
+    "conventions": "Use run.Go rather than raw goroutines, and follow the repository's conventions. A benchmark-only reference or disable switch must never become a public language or API option.",
+    "checks": "The controller checks your change in clean checkouts: the base commit with only your test files must fail the test by assertion; the full change must pass the test, `make test-ci` for the changed packages, and make lint, build and check (`make check` includes license-check and check-format). The cheap checks (the test, `make test-ci` and `make lint`) run first and the build and check only when they pass. `make check` must leave no file changed, so run `make format` if you touch Go code. Once code review has passed, the controller also runs make bench-ql-report once on the reviewed change, in a container (see the benchmark notes), and sends the change back to you when a hard gate fails or the report is incomplete.",
+    "selfCheck": [
+      "go vet $(git ls-files -m -o --exclude-standard -- '*.go' | xargs -r -n1 dirname | sort -u | sed 's|^|./|')",
+      "golangci-lint run $(git ls-files -m -o --exclude-standard -- '*.go' | xargs -r -n1 dirname | sort -u | sed 's|^|./|')"
+    ],
+    "cleanCheckHint": "make check reformats Go code; run make format"
+  },
+  "review": {
+    "language": "Go",
+    "testFiles": "Go test files (`_test.go`)",
+    "rules": [
+      "Beyond the diff's own correctness, review what the change breaks.",
+      "For every behaviour the change alters, search for each caller and lifecycle path that depends on the old behaviour: shutdown and Close, context cancellation, error returns, panics, retries, concurrency and resource release.",
+      "Report at high severity: a path whose behaviour changes without a test in this change covering it; a removed guarantee (a bound, a timeout, a cleanup, a cancellation) that other code or comments still rely on; a comment that describes a guarantee the change removed; a test whose expected value is derived from the new code rather than from the issue; a change to an on-disk or wire format.",
+      "Report at medium severity a goroutine started without run.Go or the package's existing lifecycle helper.",
+      "Do not report style.",
+      "Report at high severity: a benchmark that counts an error, a timeout or a partial result as a timing sample, or times a result it did not verify against an independent oracle; a hard gate (exact results, failed timed calls, accounted memory, outstanding resources, preflight fit) computed from a median, loosened after seeing results, or skipped; a benchmark-only reference or disable switch exposed as a public language or API option; a report that does not follow the ql-bench-report/v1 schema in the planning notes."
+    ]
+  },
+  "pullRequest": {
+    "checklist": [
+      "- [x] Add unit tests and generated end-to-end cases that verify the behaviour.",
+      "- [x] Explain briefly what the change implements and how."
+    ],
+    "footer": [
+      "- [x] Update the [`CHANGES` log](https://github.com/apache/skywalking-banyandb/blob/main/CHANGES.md)."
+    ],
+    "e2eNote": "The end-to-end tests (Kind) were not run; this change needs them.",
+    "reference": {
+      "style": "implements",
+      "subject": "the Measure QL"
+    }
+  },
+  "harnesses": {
+    "implementer": "claude-code",
+    "reviewer": "codex",
+    "verifier": "claude-code"
+  },
+  "budgets": {
+    "agentInvocations": 6000,
+    "jobs": 250,
+    "decisions": 500,
+    "corrections": 100,
+    "activeMs": 72000000,
+    "waitMs": 21600000
+  }
+}

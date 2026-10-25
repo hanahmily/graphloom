@@ -3,6 +3,7 @@ export { acceptanceItems, coverageEntries, coverageProblems, MAX_COVERAGE_FILES 
 export { advanceFix, createGraph, definitionFor, GRAPH_ID, GRAPH_VERSION, requestedIssue, type FixPrivateState } from "./graph.js";
 export { contextBlock, contextDocuments, contextIntro, describeContext, MAX_CONTEXT_BYTES, readContext, type ContextDocument, type ContextRead } from "./context.js";
 export { finalSections, reportSummaryLines, type FinalSection } from "./final.js";
+export { BENCH_GUIDANCE, BENCH_SCHEMA, exampleBenchReport, BENCH_SIZES, benchGateFailures, benchIncomplete, benchSectionLines, MAX_BENCH_REPORT_BYTES, parseBenchReport } from "./bench.js";
 export {
   checkCommands,
   commandLabel,
@@ -124,6 +125,7 @@ export {
   issuesProtocol,
   planInstruction,
   pullRequestDescription,
+  withoutPrivateReferences,
   redCommands,
   withoutBookkeeping,
 } from "./prompts.js";
@@ -131,6 +133,7 @@ export { QUALIFICATION_CASES, qualifyValidators, shippedProfile, type Qualificat
 export {
   builds,
   changelogEntry,
+  benchGates,
   finalChecks,
   finalRun,
   finalRunProblem,

@@ -25,6 +25,7 @@ import {
   shippedProfile,
   MAX_SNAPSHOT_CHARS,
   MAX_CONTEXT_BYTES,
+  BENCH_GUIDANCE,
   readContext,
   QUALIFICATION_CASES,
   VERIFICATION_SCHEMA,
@@ -2699,10 +2700,295 @@ describe("the final command tier (#196)", () => {
     expect(broken({ ...SMOKE, requirement: "passes" })).toThrow(/a final tier command counts toward final-checks/);
     expect(broken({ ...SMOKE, tier: "full" })).toThrow(/only a final tier command may/);
     expect(broken({ ...SMOKE, tier: "last" })).toThrow(/tier must be cheap, full or final/);
-    expect(broken({ ...SMOKE, requirement: "bench" })).toThrow(/requirement must be passes, builds or final-checks/);
+    expect(broken({ ...SMOKE, requirement: "bench" })).toThrow(/requirement must be passes, builds, final-checks or bench-gates/);
     expect(broken({ ...SMOKE, section: "" })).toThrow(/section is a pull request heading/);
     expect(broken({ ...SMOKE, tier: undefined, requirement: "builds", section: "X" })).toThrow(/section is a pull request heading, for a final tier command only/);
     expect(broken(SMOKE)).not.toThrow();
     expect(broken({ ...SMOKE, section: undefined })).not.toThrow();
+  });
+});
+
+describe("the banyandb-ql profile and its benchmark gates (#197)", () => {
+  const QL = shippedProfile("banyandb-ql");
+  const ql = parseProfile(QL);
+  const REQUEST = "Implement hanahmily/banyandb-ql-design#7.";
+  const DOCS = ["relational-design", "relational-tickets", "catalog-b-context"];
+  const SERVED = Object.fromEntries(DOCS.map((d) => [`hanahmily/banyandb-ql-design:docs/${d}.md`, `# ${d}\n\nThe contract text of ${d}.\n`]));
+  const SIZES = [
+    { facts: 1_024, dimensions: 64 },
+    { facts: 16_384, dimensions: 1_024 },
+  ];
+  type Json = Record<string, unknown>;
+  /** A complete, passing `ql-bench-report/v1`, as a ticket's runner writes it, with `patch` applied by key. */
+  const benchReport = (patch: (report: Json) => void = () => undefined): Json => {
+    const samples = (base: number) =>
+      [1, 2, 3, 4, 5].flatMap((pair) =>
+        ["operator", "reference"].map((variant, i) => ({
+          pair,
+          order: (pair % 2 === 1) === (i === 0) ? "AB" : "BA",
+          variant,
+          nsPerOp: base * (variant === "operator" ? 1 : 40) + pair,
+          allocBytesPerOp: 4_096,
+          allocsPerOp: 12,
+          retainedBytes: 65_536,
+          rpcP50Ns: 900_000,
+          rpcP95Ns: 1_400_000,
+          rpcCpuNs: 700_000,
+        })),
+      );
+    const report: Json = {
+      schema: "ql-bench-report/v1",
+      ticket: "R01",
+      environment: { goVersion: "go1.26.10", commit: "a".repeat(40), baseCommit: "b".repeat(40), seed: 20261024, cpus: 4, memoryBytes: 8_589_934_592, swapBytes: 0 },
+      budgets: { queryBytes: 268_435_456, perOperatorBytes: 134_217_728 },
+      preflight: SIZES.map((s, i) => ({ ...s, fits: true, peakAccountedBytes: 1_000_000 * (i + 1), budgetBytes: 268_435_456 })),
+      gates: { exactResults: { checked: 52_224, mismatches: 0 }, failedTimedCalls: { count: 0 }, accountedMemory: { peakBytes: 2_000_000, budgetBytes: 268_435_456 }, outstandingResources: { count: 0 } },
+      cases: SIZES.map((size, i) => ({
+        name: "join-unique",
+        size,
+        samples: samples(800 * (i + 1)),
+        effects: [{ metric: "nsPerOp", comparison: "operator-vs-reference", estimate: -0.97, ciLow: -0.98, ciHigh: -0.96, confidence: 0.95 }],
+      })),
+    };
+    patch(report);
+    return report;
+  };
+  /** What the bench-gates command leaves as its report file: the wrapper's envelope. */
+  const envelope = (report: Json): string => JSON.stringify({ harness: { image: "golang:1.26.10", imageGo: "go version go1.26.10 linux/amd64", cpus: 4, memory: "8g", memorySwap: "8g" }, report });
+  const gates = (report: Json) => report.gates as Record<string, Record<string, number>>;
+  const bench = (report: Json, o: Partial<CommandResult> = {}): Partial<Record<string, CommandResult>> => ({ "bench-gates": { report: envelope(report), ...o } });
+  const finalRuns = (jobs: JobSpec[]) => jobs.filter((j) => j.stageId === "review" && j.purpose === "check");
+  const work = (jobs: JobSpec[]) => jobs.filter((j) => j.kind === "agent" && j.purpose === "work");
+  const run = (finals: Array<Partial<Record<string, CommandResult>>>, more: Partial<Scenario> = {}) =>
+    simulate({ profile: QL, contextFiles: SERVED, finals, ...more }, REQUEST);
+
+  it("derives from the banyandb profile: same project, environment checks, budgets and commands, plus the private tracker, the context and the benchmark", () => {
+    const base = parseProfile(BANYANDB);
+    expect(ql.name).toBe("banyandb-ql");
+    expect(ql.project).toBe(base.project);
+    expect(ql.budgets).toEqual(base.budgets);
+    expect(ql.regression).toEqual(base.regression);
+    expect(ql.harnesses).toEqual(base.harnesses);
+    expect(ql.commands.slice(0, base.commands.length)).toEqual(base.commands);
+    // The environment is banyandb's, plus one check that the benchmark's container runtime is there.
+    expect(ql.environment.checks!.filter((c) => c.id !== "docker")).toEqual(base.environment.checks);
+    expect(ql.environment.checks!.find((c) => c.id === "docker")!.argv[2]).toContain("docker info");
+    expect({ ...ql.environment, checks: undefined }).toEqual({ ...base.environment, checks: undefined });
+    expect(ql.issues).toEqual({
+      owner: "hanahmily",
+      repo: "banyandb-ql-design",
+      context: DOCS.map((d) => ({ repo: "hanahmily/banyandb-ql-design", path: `docs/${d}.md` })),
+    });
+    expect(ql.commands.at(-1)).toMatchObject({ id: "bench-gates", tier: "final", requirement: "bench-gates", section: "Benchmark" });
+    expect(createGraph().describe(QL).stages.find((s) => s.id === "review")!.requirementIds).toEqual(["code-review", "bench-gates"]);
+  });
+
+  it("runs the benchmark in docker with the frozen resources, a golang image from go.mod, a read-only module cache that the environment names", () => {
+    const argv = ql.commands.at(-1)!.argv;
+    expect(argv.slice(0, 2)).toEqual(["sh", "-c"]);
+    const script = argv[2]!;
+    expect(script).toContain("docker run --rm --cpus=4 --memory=8g --memory-swap=8g");
+    expect(script).toContain(`image="\${GRAPHLOOM_BENCH_IMAGE:-golang:$want}"`);
+    expect(script).toContain("sed -n 's/^go //p' go.mod");
+    expect(script).toContain('-v "$cache:/go/pkg/mod:ro"');
+    expect(script).toContain('-v "$PWD:/src"');
+    // The module cache is the operator's, not hard-coded.
+    expect(script).toContain("GRAPHLOOM_BENCH_GOMODCACHE");
+    expect(script).toContain("go env GOMODCACHE");
+    expect(script).not.toContain("/mnt/d/gomodcache");
+    expect(script).toContain("make bench-ql-report");
+    expect(script).toContain("build/bench/ql-report.json");
+    // A missing target is an actionable failure.
+    expect(script).toContain("this checkout has no make target bench-ql-report");
+    expect(script).toContain("GOPROXY=off");
+  });
+
+  it("gives the planner and the implementer the context documents, the benchmark rules and the report schema, citing the rules' document", () => {
+    const { jobs } = run([{}]);
+    const plan = assignment(jobs.find((j) => j.kind === "agent" && j.purpose === "diagnostic" && j.stageId === "fix"));
+    const implement = assignment(work(jobs)[0]);
+    for (const text of [plan, implement]) {
+      for (const d of DOCS) expect(text).toContain(`## Context document: hanahmily/banyandb-ql-design:docs/${d}.md (`);
+      expect(text).toContain('docs/relational-tickets.md, "Benchmark rules for every ticket"');
+      expect(text).toContain("docs/relational-tickets.md");
+      expect(text).toContain('"schema":"ql-bench-report/v1"');
+      expect(text).toContain("five paired repetitions with alternated order");
+      expect(text).toContain("1,024 facts/64 dimension rows and 16,384 facts/1,024 dimension rows");
+      expect(text).toContain("make bench-ql-report");
+      expect(text).toContain("build/bench/ql-report.json");
+      expect(text).toContain("timings are reported, never gated");
+    }
+    // The profile's notes are exactly the guidance the code documents.
+    expect(ql.planning.notes!.join("\n")).toContain(BENCH_GUIDANCE);
+    // The planner is told to keep the private design out of public text.
+    expect(plan).toContain("do not cite the design repository, its issue numbers or its file names");
+  });
+
+  it("reaches delivery on a stub runner's passing report, with a Benchmark section, and neither Fixes nor the private repository in the commit or the pull request", () => {
+    const report = benchReport();
+    const { decision, jobs, receipts } = run([bench(report)]);
+    expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+    expect(finalRuns(jobs)).toHaveLength(1);
+    expect(receipts.filter((r) => r.stageId === "review").map((r) => r.requirementId)).toEqual(["code-review", "bench-gates"]);
+    const { message, body } = deliverArgs(jobs);
+    expect(body).toContain("## Benchmark\nReported by `make bench-ql-report` in docker (4 CPUs, 8 GiB, no extra swap) in golang:1.26.10, 4 CPUs, 8g memory, 8g memory+swap.");
+    expect(body).toContain("Toolchain go1.26.10, commit aaaaaaaaaaaa on base bbbbbbbbbbbb, fixture seed 20261024.");
+    expect(body).toContain("The run gated only on the hard gates below; timings are reported and never judged.");
+    expect(body).toContain("Hard gates (all held):\n- Exact results: 52224 checked, 0 differ.\n- Failed timed calls: 0.\n- Accounted memory: peak 2000000 of a 268435456 byte budget.\n- Outstanding owned resources: 0.\n- Preflight 1,024/64 fits: peak 1000000 of 268435456 bytes.\n- Preflight 16,384/1,024 fits: peak 2000000 of 268435456 bytes.");
+    expect(body).toContain("Reported only, not gated (medians of the paired samples):");
+    expect(body).toContain("| join-unique (operator) | 1,024/64 | 5 | 803 | 4,096 | 12 | 65,536 | 900,000 | 1,400,000 | 700,000 |");
+    expect(body).toContain("| join-unique (reference) | 16,384/1,024 | 5 | 64,003 |");
+    expect(body).toContain("- join-unique, nsPerOp (operator-vs-reference): -0.97 [-0.98, -0.96] at 95%");
+    // The test plan lists the benchmark among what passed.
+    expect(body).toContain("`make bench-ql-report` in docker (4 CPUs, 8 GiB, no extra swap)");
+    // Implements, not Fixes, and nothing of the private tracker.
+    expect(message.split("\n").at(-1)).toMatch(/^Implements the Measure QL /);
+    expect(body.split("\n")[0]).toMatch(/^### Implements the Measure QL /);
+    for (const text of [message, body]) {
+      expect(text).not.toContain("Fixes");
+      expect(text).not.toContain("hanahmily");
+      expect(text).not.toContain("banyandb-ql-design");
+      expect(text).not.toMatch(/Fix hanahmily/);
+    }
+  });
+
+  it("scrubs a reference to the private repository an agent wrote into the commit or the pull request", () => {
+    const leaky: DecisionRecord = {
+      ...PLAN,
+      change: "Adds the join planner, per hanahmily/banyandb-ql-design#7 and https://github.com/hanahmily/banyandb-ql-design/blob/main/docs/relational-design.md (see hanahmily/banyandb-ql-design:docs/relational-tickets.md@main).",
+      followUps: ["Revisit the fan-out case, as hanahmily/banyandb-ql-design#9 asks."],
+    };
+    const { decision, jobs } = run([bench(benchReport())], { plans: [leaky], implement: [leaky] });
+    expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+    const { message, body } = deliverArgs(jobs);
+    for (const text of [message, body]) {
+      expect(text).not.toMatch(/hanahmily|banyandb-ql-design/);
+      expect(text).toContain("Adds the join planner, per and");
+    }
+    expect(body).toContain("- Revisit the fan-out case, as asks.");
+    // Without the option nothing is scrubbed: the profile's own references stay.
+    const kept = pullRequestDescription(parseProfile(BANYANDB), { issue: 1, issueTitle: "T", record: leaky, base: "abc", review: "r" });
+    expect(kept).toContain("hanahmily/banyandb-ql-design#7");
+  });
+
+  it("sends Fix back when a hard gate fails, with the failing gate and its numbers, even though the command exited 0; the corrected change passes", () => {
+    const failing = benchReport((r) => {
+      gates(r).exactResults!.mismatches = 3;
+    });
+    const { decision, jobs, reenterDecisions, decisions } = run([bench(failing), bench(benchReport())], { graphReenters: {} });
+    expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+    expect(reenterDecisions).toBe(1);
+    const reason = (decisions.find((d) => d.action.type === "reenter")!.action as { reenter: { reason: string } }).reenter.reason;
+    expect(reason).toContain("bench-gates: bench-gates: hard gate failed, exact results: 3 of 52224 results differ from the oracle");
+    const second = assignment(work(jobs)[1]);
+    expect(second).toContain("Code review passed, but the final checks, which run once on the reviewed change, failed");
+    expect(second).toContain("hard gate failed, exact results: 3 of 52224 results differ from the oracle");
+    expect(finalRuns(jobs)).toHaveLength(2);
+    // The next candidate ran every tier again before its benchmark.
+    expect(jobs.filter((j) => j.stageId === "fix" && j.instruction === "Cheap candidate checks")).toHaveLength(2);
+    expect(deliverArgs(jobs).body).toContain("## Benchmark");
+  });
+
+  it("names the same failure to the supervisor when the reentries run out", () => {
+    const failing = benchReport((r) => {
+      gates(r).outstandingResources!.count = 2;
+    });
+    const { decision } = run([bench(failing)]);
+    expect(decision.action).toMatchObject({ type: "supervise", supervise: { reason: expect.stringContaining("outstanding resources: 2 owned resource(s) were not released") } });
+  });
+
+  it("fails a missing make target with a message the implementer can act on", () => {
+    const missing: Partial<CommandResult> = {
+      exitCode: 1,
+      stderr: "bench-gates: this checkout has no make target bench-ql-report. The ticket's change must add it: it runs the ticket's benchmark runner and writes build/bench/ql-report.json (schema ql-bench-report/v1, given in the implementation guidance).\n",
+    };
+    const { decision, jobs } = run([{ "bench-gates": missing }, bench(benchReport())], { graphReenters: {} });
+    expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+    const second = assignment(work(jobs)[1]);
+    expect(second).toContain("bench-gates exited 1 in the candidate checkout");
+    expect(second).toContain("no make target bench-ql-report. The ticket's change must add it");
+  });
+
+  describe("the bench-gates validator", () => {
+    const run1 = (command: Partial<CommandResult>, o: { mutations?: string[]; digest?: string } = {}): EvidenceRecord => ({
+      ref: "b1",
+      kind: "command",
+      candidateDigest: o.digest ?? "d1",
+      payload: {
+        command: { id: "bench-gates", argv: ["sh"], exitCode: command.exitCode ?? 0, stdoutTail: command.stdout ?? "", stderrTail: command.stderr ?? "", ...(command.timedOut === true ? { timedOut: true } : {}), ...(command.report !== undefined ? { report: { text: command.report, truncated: false } } : {}) },
+        checkout: { from: "candidate", base: "b", commit: "c", paths: CHANGED, prepared: true, mutations: o.mutations ?? [], phase: "run" },
+        producer: { operationId: "op-b", stageId: "review", purpose: "check", readOnly: true, kind: "command" },
+      },
+    });
+    const judge = (evidence: EvidenceRecord[]) => validatorById("bench-gates")!.evaluate({ requirementId: "bench-gates", statement: "s", evidence, candidateDigest: "d1", config: QL });
+    const report = (patch?: (r: Json) => void, raw = false) => run1({ report: raw ? JSON.stringify(benchReport(patch)) : envelope(benchReport(patch)) });
+    const failsWith = (patch: (r: Json) => void, text: RegExp) => expect(judge([report(patch)])).toMatchObject({ status: "failed", reason: expect.stringMatching(text) });
+
+    it("passes a complete report whose hard gates hold, as an envelope or bare, and says timings are not judged", () => {
+      expect(judge([report()])).toMatchObject({ status: "passed", reason: expect.stringContaining("every hard gate holds (52224 results exact, no failed timed call, peak 2000000 of 268435456 accounted bytes, no outstanding resource, both sizes fit); timings are reported, not judged") });
+      expect(judge([report(undefined, true)])).toMatchObject({ status: "passed" });
+    });
+
+    it("fails each hard gate on its own, naming the numbers", () => {
+      failsWith((r) => void (gates(r).exactResults!.mismatches = 1), /hard gate failed, exact results: 1 of 52224 results differ from the oracle/);
+      failsWith((r) => void (gates(r).exactResults!.checked = 0), /no result was checked against the oracle/);
+      failsWith((r) => void (gates(r).failedTimedCalls!.count = 4), /failed timed calls: 4 timed call\(s\) failed, and a failure is never a faster observation/);
+      failsWith((r) => void (gates(r).accountedMemory!.peakBytes = 300_000_000), /accounted memory: peak 300000000 bytes exceeds the 268435456 byte budget/);
+      failsWith((r) => void (gates(r).outstandingResources!.count = 1), /outstanding resources: 1 owned resource\(s\) were not released/);
+    });
+
+    it("fails a preflight that does not fit either size, or is missing one, whatever its own `fits` says", () => {
+      failsWith((r) => void ((r.preflight as Json[])[1]!.fits = false), /preflight 16,384\/1,024: peak 2000000 bytes does not fit the 268435456 byte budget/);
+      failsWith((r) => void ((r.preflight as Json[])[0]!.peakAccountedBytes = 999_999_999), /preflight 1,024\/64: peak 999999999 bytes does not fit/);
+      failsWith((r) => void (r.preflight = (r.preflight as Json[]).slice(0, 1)), /preflight: no entry for 16,384\/1,024/);
+      failsWith((r) => void delete r.gates, /exact results: the report gives no checked and mismatches counts/);
+    });
+
+    it("never judges a latency: the slowest possible timings and a worse-than-reference effect still pass", () => {
+      const slow = (r: Json) => {
+        for (const c of r.cases as Json[]) {
+          for (const s of c.samples as Json[]) s.nsPerOp = 9e15;
+          c.effects = [{ metric: "nsPerOp", comparison: "operator-vs-reference", estimate: 5_000, ciLow: 4_000, ciHigh: 6_000, confidence: 0.95 }];
+        }
+      };
+      expect(judge([report(slow)])).toMatchObject({ status: "passed" });
+    });
+
+    it("fails an incomplete report: wrong schema, missing environment or budgets, a size without a case, fewer than five alternated pairs, an effect without an interval", () => {
+      failsWith((r) => void (r.schema = "ql-bench-report/v0"), /the report is incomplete: schema is "ql-bench-report\/v0"/);
+      failsWith((r) => void delete r.environment, /environment is missing/);
+      failsWith((r) => void ((r.environment as Json).seed = undefined), /environment.seed is missing/);
+      failsWith((r) => void (r.budgets = {}), /budgets must list the effective admission budgets/);
+      failsWith((r) => void (r.cases = (r.cases as Json[]).slice(0, 1)), /no case at 16,384\/1,024/);
+      failsWith((r) => void ((r.cases as Json[])[0]!.samples = ((r.cases as Json[])[0]!.samples as Json[]).slice(0, 6)), /join-unique: 3 paired sample\(s\), want at least 5/);
+      failsWith((r) => void ((r.cases as Json[])[0]!.samples = ((r.cases as Json[])[0]!.samples as Json[]).map((s) => ({ ...s, order: "AB" }))), /the pairs' order is not alternated/);
+      failsWith((r) => void ((r.cases as Json[])[1]!.effects = [{ metric: "nsPerOp", estimate: 1 }]), /an effect needs a metric, an estimate and an interval/);
+      failsWith((r) => void ((r.cases as Json[])[1]!.effects = []), /no paired effect estimate/);
+      failsWith((r) => void delete ((r.cases as Json[])[0]!.samples as Json[])[0]!.retainedBytes, /every sample needs nsPerOp, allocBytesPerOp and retainedBytes/);
+    });
+
+    it("fails a command that did not succeed, left a file changed, or wrote no readable report; stays inconclusive before the benchmark ran", () => {
+      expect(judge([run1({ exitCode: 2, report: envelope(benchReport()) })])).toMatchObject({ status: "failed", reason: "bench-gates exited 2" });
+      expect(judge([run1({ timedOut: true, exitCode: 0, report: envelope(benchReport()) })])).toMatchObject({ status: "failed", reason: "bench-gates timed out" });
+      expect(judge([run1({ report: envelope(benchReport()) }, { mutations: ["Makefile"] })])).toMatchObject({ status: "failed", reason: expect.stringContaining("left files changed: Makefile") });
+      expect(judge([run1({ report: "" })])).toMatchObject({ status: "failed", reason: expect.stringContaining("is not valid JSON") });
+      expect(judge([run1({ report: envelope(benchReport()).slice(0, 2_000) })])).toMatchObject({ status: "failed", reason: expect.stringContaining("is not valid JSON") });
+      expect(judge([run1({ report: "[1,2]" })])).toMatchObject({ status: "failed", reason: expect.stringContaining("not a JSON object") });
+      expect(judge([])).toMatchObject({ status: "inconclusive" });
+      expect(judge([run1({ report: envelope(benchReport()) }, { digest: "d0" })])).toMatchObject({ status: "inconclusive" });
+    });
+
+    it("reads a stubbed command's report from its stdout when the run keeps no report file", () => {
+      expect(judge([run1({ stdout: envelope(benchReport()) })])).toMatchObject({ status: "passed" });
+    });
+  });
+
+  it("runs a rehearsal scenario with stubbed commands: the stub's report from stdout reaches delivery; a failing gate in it does not", () => {
+    // `graphloom rehearse` stubs a command from the scenario's `commands` map, which carries stdout and no report file.
+    const passing = run([{ "bench-gates": { stdout: envelope(benchReport()) } }]);
+    expect(passing.decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+    expect(deliverArgs(passing.jobs).body).toContain("## Benchmark");
+    const failing = run([{ "bench-gates": { stdout: envelope(benchReport((r) => void (gates(r).failedTimedCalls!.count = 1))) } }]);
+    expect(failing.decision.action.type).toBe("supervise");
   });
 });

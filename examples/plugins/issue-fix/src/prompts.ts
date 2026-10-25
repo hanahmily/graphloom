@@ -5,7 +5,7 @@ import { acceptanceItems } from "./acceptance.js";
 import { contextBlock, contextIntro, type ContextDocument } from "./context.js";
 import { writeScopeFor } from "./decision-record.js";
 import type { Issue, IssueComment } from "./evidence.js";
-import { checkCommands, commandLabel, commandsFor, commandSummary, commandTier, enforcedProtectedPaths, finalCommands, issueRef, listAnd, type CommandTier, type Profile, type ProfileCommand } from "./profile.js";
+import { checkCommands, commandLabel, contextRefs, commandsFor, commandSummary, commandTier, enforcedProtectedPaths, finalCommands, issueRef, listAnd, type CommandTier, type Profile, type ProfileCommand } from "./profile.js";
 import { ISSUES_DIR, ISSUES_FILE, ISSUES_MARKDOWN } from "./issues.js";
 
 export const MAX_SNAPSHOT_CHARS = 200_000;
@@ -312,9 +312,34 @@ export function deliverableFollowUp(profile: Profile, note: string): string | un
   return kept === "" ? undefined : kept;
 }
 
-/** The commit message: the title, the change and the issue it fixes. */
+/**
+ * `text` without any reference to the repositories a profile keeps private
+ * when its pull requests do not link the issue (`pullRequest.reference`): the
+ * issues repository and every context document's repository, as `owner/repo#N`,
+ * `owner/repo:path@ref` or a github.com link. A line that lost one is tidied.
+ * Without `reference` the text is returned as it is.
+ */
+export function withoutPrivateReferences(profile: Profile, text: string): string {
+  if (profile.pullRequest.reference === undefined) return text;
+  const repos = [`${profile.issues.owner}/${profile.issues.repo}`, ...contextRefs(profile).flatMap((d) => (d.repo !== undefined ? [d.repo] : []))];
+  const names = [...new Set(repos)].map((r) => r.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|");
+  const found = new RegExp(`(?:https?://github\\.com/)?(?:${names})(?:[#:@/][^\\s)\\]>"'\`,;]*)?`, "i");
+  const all = new RegExp(found.source, "gi");
+  return text
+    .split("\n")
+    .map((line) => (found.test(line) ? line.replace(all, "").replace(/\((?:see|per|in|from|cf\.?|ref\.?)?\s*\)/gi, "").replace(/[ \t]+([,.;:])/g, "$1").replace(/[ \t]{2,}/g, " ").trimEnd() : line))
+    .join("\n");
+}
+
+/** What the change is for under a profile's `reference`: `Implements <subject> <title>`, with no reference to the issue. */
+const implementsLine = (profile: Profile, issueTitle: string): string => `Implements ${profile.pullRequest.reference!.subject} ${issueTitle}`;
+
+/** The commit message: the title, the change and the issue it fixes (or, under `pullRequest.reference`, what it implements, with no reference to the issue). */
 export function commitMessage(profile: Profile, args: { issue: number; issueTitle: string; record: DecisionRecord; plan?: DecisionRecord }): string {
-  return [args.record.title?.trim() || `Fix ${args.issueTitle}`, "", changeDescription(args.record, args.plan), "", `Fixes ${issueRef(profile, args.issue)}`].join("\n");
+  const { reference } = profile.pullRequest;
+  const title = args.record.title?.trim() || (reference !== undefined ? `Implement ${reference.subject} ${args.issueTitle}` : `Fix ${args.issueTitle}`);
+  const trailer = reference !== undefined ? implementsLine(profile, args.issueTitle) : `Fixes ${issueRef(profile, args.issue)}`;
+  return withoutPrivateReferences(profile, [title, "", changeDescription(args.record, args.plan), "", trailer].join("\n"));
 }
 
 /** The pull request body, following the profile's pull request template. */
@@ -357,7 +382,7 @@ export function pullRequestDescription(
     return [`- ${point}: ${chosen}.${basis !== "" ? ` ${basis}` : ""}${d.options.length > 1 && others.length > 0 ? ` Alternatives: ${others.join("; ")}.` : ""}`];
   });
   const lines = [
-    `### Fix ${ref}: ${args.issueTitle}`,
+    profile.pullRequest.reference !== undefined ? `### ${implementsLine(profile, args.issueTitle)}` : `### Fix ${ref}: ${args.issueTitle}`,
     ...profile.pullRequest.checklist,
     "",
     "## Summary",
@@ -384,5 +409,5 @@ export function pullRequestDescription(
       : []),
     ...(profile.pullRequest.footer.length > 0 ? ["", ...profile.pullRequest.footer.map((l) => l.replaceAll("{issue}", ref))] : []),
   ];
-  return lines.join("\n");
+  return withoutPrivateReferences(profile, lines.join("\n"));
 }

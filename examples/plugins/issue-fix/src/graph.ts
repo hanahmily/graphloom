@@ -30,6 +30,7 @@ import {
   MAX_FIX_CORRECTIONS,
   MAX_PROMPT_DOCUMENT_BYTES,
   MAX_SWEEP_PASSES,
+  REQUIREMENT_BENCH,
   REQUIREMENT_BUILDS,
   REQUIREMENT_CHANGELOG,
   REQUIREMENT_DECISIONS,
@@ -132,6 +133,7 @@ import {
   redCommands,
   snapshotText,
 } from "./prompts.js";
+import { BENCH_SCHEMA } from "./bench.js";
 import { finalSections } from "./final.js";
 import { cleanRun, codeReview, finalRun, implementerRecord, latestImplementerRecord, plannerRecord, reportText, validatorById, verifiedChecks } from "./validators.js";
 
@@ -229,8 +231,18 @@ export function definitionFor(profile: Profile): GraphDefinition {
           },
         ]
       : []),
+    ...(commandsFor(profile, "bench-gates").length > 0
+      ? [
+          {
+            id: REQUIREMENT_BENCH,
+            statement: `In a prepared checkout of the reviewed change, ${listAnd(commandsFor(profile, "bench-gates").map(commandLabel))} succeed${commandsFor(profile, "bench-gates").length === 1 ? "s" : ""} and change${commandsFor(profile, "bench-gates").length === 1 ? "s" : ""} no file, and the benchmark report it writes (${BENCH_SCHEMA}) is complete and every hard gate holds in it: results exact, no failed timed call, accounted memory within its budget, no outstanding owned resource, and a preflight that fits both sizes. Timings are reported only, never judged.`,
+            evidenceSchema: "checkout-command-v1",
+          },
+        ]
+      : []),
   ];
   const bindings: Record<string, ValidatorBinding> = {
+    [REQUIREMENT_BENCH]: { requirementId: REQUIREMENT_BENCH, validatorId: "bench-gates", version: "1" },
     [REQUIREMENT_FINAL]: { requirementId: REQUIREMENT_FINAL, validatorId: "final-checks", version: "1" },
     [REQUIREMENT_DECISIONS]: { requirementId: REQUIREMENT_DECISIONS, validatorId: "decisions-recorded", version: "1" },
     [REQUIREMENT_REPRODUCES]: { requirementId: REQUIREMENT_REPRODUCES, validatorId: "red-reproduces", version: "1" },
@@ -240,7 +252,7 @@ export function definitionFor(profile: Profile): GraphDefinition {
     [REQUIREMENT_CHANGELOG]: { requirementId: REQUIREMENT_CHANGELOG, validatorId: "changes-entry", version: "1" },
     [REQUIREMENT_REVIEW]: { requirementId: REQUIREMENT_REVIEW, validatorId: "open-code-review", version: "2" },
   };
-  const reviewRequirements: string[] = requirements.map((r) => r.id).filter((id) => id === REQUIREMENT_REVIEW || id === REQUIREMENT_FINAL);
+  const reviewRequirements: string[] = requirements.map((r) => r.id).filter((id) => id === REQUIREMENT_REVIEW || id === REQUIREMENT_FINAL || id === REQUIREMENT_BENCH);
   const fixRequirements = requirements.map((r) => r.id).filter((id) => !reviewRequirements.includes(id));
   return {
     graphId: GRAPH_ID,

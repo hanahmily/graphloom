@@ -22,7 +22,8 @@
  * the live run's own worktree the moment it succeeded — the real bytes an
  * agent actually wrote, not a guess at them.
  */
-import type { GraphRehearsal } from "@graphloom/sdk";
+import { stop, type GraphRehearsal } from "@graphloom/sdk";
+import { exampleBenchReport } from "./bench.js";
 import { parseProfile } from "./profile.js";
 import { FIX_STAGE, REVIEW_STAGE } from "./constants.js";
 
@@ -370,6 +371,37 @@ const CANOPY_REHEARSAL: GraphRehearsal = {
   },
 };
 
+/** What a stub `make bench-ql-report` leaves as its report file: the wrapper's envelope around an example report. */
+const benchStub = (patch?: (report: Record<string, unknown>) => void): string =>
+  JSON.stringify({ harness: { image: "golang:1.26.10", imageGo: "go version go1.26.10 linux/amd64", cpus: 4, memory: "8g", memorySwap: "8g" }, report: exampleBenchReport(patch) });
+
+/**
+ * The banyandb-ql profile's scenarios: the go-test happy path with a stub
+ * benchmark runner, in the scenario's `commands` (a stubbed command's report
+ * is its stdout, which the bench-gates validator reads when no report file
+ * is kept). `happy` has the runner write a passing report and reaches
+ * delivery with a Benchmark section. In `bench-gate-fails` the report fails a
+ * hard gate: the graph sends Fix back with it, the change comes back
+ * unchanged, so the same candidate would fail again and the scripted
+ * supervisor stops the run. The tests run both reports through the real
+ * validator.
+ */
+const QL_HAPPY = HAPPY;
+const GO_TEST_QL: GraphRehearsal = {
+  scenarios: {
+    happy: {
+      ...QL_HAPPY,
+      commands: { "bench-gates": { exitCode: 0, stdout: benchStub() } },
+    },
+    "bench-gate-fails": {
+      ...QL_HAPPY,
+      commands: { "bench-gates": { exitCode: 0, stdout: benchStub((r) => void ((r.gates as { exactResults: { mismatches: number } }).exactResults.mismatches = 3)) } },
+      supervisor: [stop({ reason: "benchmark hard gate failed", blocker: "exact results differ from the oracle on every candidate" }, "stop: the benchmark's hard gate keeps failing")],
+      expect: { status: "stopped", stopReason: "benchmark hard gate failed" },
+    },
+  },
+};
+
 /**
  * The rehearsal for the run's profile (the task's config): the plugin host
  * calls this with the pinned config. A config that is not a usable profile
@@ -387,5 +419,6 @@ export function rehearsal(config: unknown): GraphRehearsal {
     name = "";
   }
   if (name === "canopy" && runner === "vitest") return CANOPY_REHEARSAL;
+  if (name === "banyandb-ql" && runner === "go-test") return GO_TEST_QL;
   return runner === "vitest" ? VITEST_REHEARSAL : GO_TEST_WITH_REENTRY;
 }
