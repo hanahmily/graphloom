@@ -2,6 +2,7 @@ import {
   dispatch,
   MAX_EXECUTOR_INPUT_BYTES,
   isStaleFailure,
+  jsonSchemaProblem,
   observe,
   reenter,
   stop,
@@ -29,7 +30,6 @@ import {
   LIST_ISSUE_COMMENTS,
   MAX_DISCOVERY_ROUNDS,
   MAX_FIX_CORRECTIONS,
-  MAX_PROMPT_DOCUMENT_BYTES,
   MAX_SWEEP_PASSES,
   REQUIREMENT_BENCH,
   REQUIREMENT_BUILDS,
@@ -43,7 +43,7 @@ import {
   REVIEW_STAGE,
 } from "./constants.js";
 import { acceptanceItems, coverageEntries, coverageFeedback, coverageFiles, coverageProblems, MAX_COVERAGE_FILES, observableCoverageFiles } from "./acceptance.js";
-import { contextDocuments, describeContext, MAX_CONTEXT_BYTES, readContext, type ContextDocument } from "./context.js";
+import { contextCommandId, contextDocuments, contextInline, contextPath, describeContext, MAX_CONTEXT_BYTES, readContext, type ContextDocument } from "./context.js";
 import { DECISION_RECORD_SCHEMA, parseDecisionRecord, writeScopeFor, type DecisionRecord } from "./decision-record.js";
 import {
   agentRuns,
@@ -92,6 +92,9 @@ import {
   issueMarkdown,
   ISSUES_COMMAND,
   ISSUES_FILE,
+  fitsOneJob,
+  writeTextFileCommand,
+  writtenText,
   ISSUES_MARKDOWN,
   issueTableRows,
   readIssuesCommand,
@@ -333,8 +336,10 @@ function fix(ctx: Context, view: RunView, issue: number, state: FixPrivateState)
   if ("problem" in snapshotResult) return partialSnapshot(snapshotResult.problem, [snapshot.record.ref, comments.record.ref]);
   const snapshotBody = snapshotResult.text;
   // The context documents are read in this same step, once; every later step finds them in the evidence.
-  const context = contextStep(profile, view, state, snapshotBody);
+  const context = contextStep(profile, view, state);
   if ("decision" in context) return context.decision;
+  const filed = contextRestore(view, context.docs, FIX_STAGE, state);
+  if (filed !== undefined) return filed;
   // The plan and the implementer's decision record are their own artifacts,
   // not workspace bytes (design-run-convergence.md §4.1): they stay on
   // record, unscoped by generation or candidate, until an explicit new
@@ -580,6 +585,8 @@ function review(ctx: Context, view: RunView, issue: number, state: FixPrivateSta
   // An implementer run the graph has not read the issues file after (a resume onto this version, a recovery dispatch).
   const unread = issuesReadStep(view, REVIEW_STAGE, state);
   if (unread !== undefined) return unread;
+  const filed = contextRestore(view, contextDocuments(view.evidence, profile), REVIEW_STAGE, state);
+  if (filed !== undefined) return filed;
   const ledger = findingLedger(view.evidence);
   const passes = ledger.passes.filter((p) => p.digest === digest && currentRefs.has(p.run.record.ref));
   const last = passes.at(-1);
@@ -634,7 +641,7 @@ function review(ctx: Context, view: RunView, issue: number, state: FixPrivateSta
   if (paths.length > 0) return withPrivate(observe({ paths }, "observe the lines a refutation quotes on the current change"), state);
   const pending = toVerify(ledger, digest);
   if (pending.length > 0) {
-    const assignment = verificationInstruction(profile, { findings: pending, background, changed: green?.checkout?.paths ?? [] });
+    const assignment = verificationInstruction(profile, { findings: pending, background, changed: green?.checkout?.paths ?? [], context: contextDocuments(view.evidence, profile) });
     return dispatchAgent(
       view,
       verificationJob(profile, assignment),
@@ -893,7 +900,7 @@ function partialSnapshot(problem: string, refs: string[]): GraphDecision {
  * from what it first saw. A document that cannot be read whole, or documents
  * that together do not fit an agent's prompt, stop the run before any agent.
  */
-function contextStep(profile: Profile, view: RunView, state: FixPrivateState, snapshot: string): { docs: ContextDocument[] } | { decision: GraphDecision } {
+function contextStep(profile: Profile, view: RunView, state: FixPrivateState): { docs: ContextDocument[] } | { decision: GraphDecision } {
   const refs = contextRefs(profile);
   if (refs.length === 0) return { docs: [] };
   const reads = refs.map((ref) => ({ ref, read: readContext(view.evidence, ref) }));
@@ -908,14 +915,7 @@ function contextStep(profile: Profile, view: RunView, state: FixPrivateState, sn
     return { decision: stop({ reason: "incompatible task", blocker: `the context documents are ${bytes} bytes (${describeContext(docs)}), more than the ${MAX_CONTEXT_BYTES} a run carries`, evidenceRefs: docs.map((d) => d.record.ref), retryable: false }, "stop: the context documents are too large") };
   }
   const unread = reads.filter(({ read }) => read.kind === "unread").map(({ ref }) => ref);
-  if (unread.length === 0) {
-    // The planner's prompt carries the issue and the documents whole, within what an executor's input allows.
-    const prompt = Buffer.byteLength(snapshot, "utf8") + bytes;
-    if (prompt > MAX_PROMPT_DOCUMENT_BYTES) {
-      return { decision: stop({ reason: "incompatible task", blocker: `the issue snapshot and the context documents are ${prompt} bytes together, more than the ${MAX_PROMPT_DOCUMENT_BYTES} an agent prompt carries whole`, evidenceRefs: docs.map((d) => d.record.ref), retryable: false }, "stop: the issue and its context documents do not fit one prompt") };
-    }
-    return { docs };
-  }
+  if (unread.length === 0) return { docs };
   const local = unread.filter((ref) => ref.repo === undefined);
   if (local.length > 0) {
     return { decision: withPrivate(observe({ paths: local.map((ref) => ref.path) }, `observe the context documents of the target repository (${local.map((ref) => ref.path).join(", ")})`), state) };
@@ -928,6 +928,50 @@ function contextStep(profile: Profile, view: RunView, state: FixPrivateState, sn
       state,
     ),
   };
+}
+
+/**
+ * The pinned context documents as files, when they are too long to go into a
+ * prompt (context.ts): each is written, from the evidence and never fetched
+ * again, as a read-only file below `.graphloom/context/`, which Git ignores,
+ * so the delivered commit leaves it out. Every agent job of the run then reads
+ * the same copies. A file is written again after an implementer run (which may
+ * have touched it) and after a resume or reentry, like the issues file; a
+ * document that cannot be written whole (too long for one command) stops the
+ * run, and a write that failed goes to the supervisor. Undefined when the
+ * documents are inline, or every file is current.
+ */
+function contextRestore(view: RunView, docs: ContextDocument[], stageId: string, state: FixPrivateState): GraphDecision | undefined {
+  if (docs.length === 0 || contextInline(docs)) return undefined;
+  const work = lastWork(view);
+  const stale: Array<{ i: number; command: EnvironmentCommand }> = [];
+  for (const [i, doc] of docs.entries()) {
+    const command = writeTextFileCommand(contextCommandId(i), contextPath(docs, i), doc.text);
+    if (command === undefined) {
+      return stop(
+        { reason: "incompatible task", blocker: `the context document ${doc.name} (${doc.bytes} bytes) is too long to hand to the agents as a file: one command writes at most about ${MAX_EXECUTOR_INPUT_BYTES} bytes of it once serialized`, evidenceRefs: [doc.record.ref], retryable: false },
+        `stop: the context document ${doc.name} cannot be written as a file`,
+      );
+    }
+    const id = contextCommandId(i);
+    const at = lastIndexWhere(view.evidence, (e) => issueCommand(e, id) !== undefined);
+    const last = at < 0 ? undefined : { record: view.evidence[at]!, run: issueCommand(view.evidence[at]!, id)! };
+    const fresh = last !== undefined && at > work && (last.record.generation ?? 0) === view.generation;
+    if (fresh && last.run.ok && writtenText(last.run.argv, id)?.text === doc.text) continue;
+    if (fresh && !last.run.ok) {
+      return supervise({ reason: `the graph could not write the context document file ${contextPath(docs, i)}`, evidenceRefs: [last.record.ref] }, "escalate a failed write of a context document", JSON.stringify(state));
+    }
+    stale.push({ i, command });
+  }
+  if (stale.length === 0) return undefined;
+  // As many as one command job's input holds; the rest follow on the next call.
+  const batch: EnvironmentCommand[] = [];
+  for (const { command } of stale) {
+    if (batch.length > 0 && !fitsOneJob([...batch, command])) break;
+    batch.push(command);
+  }
+  const job: JobSpec = { stageId, kind: "command", purpose: "diagnostic", readOnly: true, instruction: "Write the pinned context documents", input: { commands: batch } };
+  return withPrivate(dispatch(job, `write the pinned context documents as read-only files (${batch.map((c) => c.id).join(", ")})`), state);
 }
 
 /** The test plan's line for the code review, and the dismissed findings a maintainer can overrule. */
@@ -1335,14 +1379,24 @@ function dispatchAgent(view: RunView, job: JobSpec, summary: string, state: FixP
   if (view.budgets.agentInvocations <= 0) {
     return stop({ reason: "budgets exhausted", blocker: "no agent invocations left", retryable: false }, `cannot ${summary}`);
   }
-  // An executor's input is bounded as serialized JSON, where quotes, backslashes and newlines in the
-  // issue and the context documents cost extra bytes: measure what is actually sent, so a job that
-  // cannot fit stops here, naming the cause, instead of being refused at admission.
+  // The executor declares what its input may be (an input shape: the coding agent's assignment is at
+  // most 64,000 characters); the run hands those declarations to the graph. A job that cannot fit stops
+  // here, naming the field and the limit, instead of being refused at admission.
+  const executorId = job.executor?.id ?? CODING_AGENT.id;
+  const shape = view.executors?.find((e) => e.id === executorId)?.inputShape;
+  const problem = shape !== undefined ? jsonSchemaProblem(shape.schema, job.input) : undefined;
+  if (problem !== undefined) {
+    return stop(
+      { reason: "incompatible task", blocker: `the input to ${summary} does not fit what ${executorId} declares: ${problem}; the issue, its comments and the instructions are too long together`, retryable: false },
+      `stop: the input to ${summary} does not fit ${executorId}'s declared input shape`,
+    );
+  }
+  // And the bound on any executor input, as serialized JSON, where quotes, backslashes and newlines cost extra bytes.
   const sent = Buffer.byteLength(JSON.stringify(job.input ?? null), "utf8");
   if (sent > MAX_EXECUTOR_INPUT_BYTES) {
     return stop(
-      { reason: "incompatible task", blocker: `the agent input to ${summary} is ${sent} bytes once serialized, more than the ${MAX_EXECUTOR_INPUT_BYTES} an executor input carries: the issue, its comments and the context documents are too large together`, retryable: false },
-      `stop: the assignment to ${summary} does not fit an executor input`,
+      { reason: "incompatible task", blocker: `the input to ${summary} is ${sent} bytes once serialized, more than the ${MAX_EXECUTOR_INPUT_BYTES} an executor input carries`, retryable: false },
+      `stop: the input to ${summary} does not fit an executor input`,
     );
   }
   return withPrivate(dispatch(job, summary), state);

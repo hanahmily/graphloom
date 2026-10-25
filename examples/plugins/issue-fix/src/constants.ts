@@ -1,11 +1,5 @@
-import { MAX_EXECUTOR_INPUT_BYTES, type ExecutorPin } from "@graphloom/sdk";
+import type { ExecutorPin } from "@graphloom/sdk";
 
-/**
- * Most bytes of issue snapshot plus context documents the planner's prompt
- * carries: an executor's input is bounded, and the rest of the prompt (the
- * instructions and the request) needs room.
- */
-export const MAX_PROMPT_DOCUMENT_BYTES = MAX_EXECUTOR_INPUT_BYTES - 16_000;
 
 export const FIX_STAGE = "fix";
 export const REVIEW_STAGE = "review";

@@ -89,7 +89,42 @@ export function contextBlock(docs: ContextDocument[]): string {
 
 /** The paragraph that introduces the block: what the documents are and how an acceptance item may cite one. */
 export function contextIntro(docs: ContextDocument[]): string {
-  return `Context documents the issue defers to (read once and pinned for this run; ${docs.length === 1 ? "its name is" : "their names are"} the source an acceptance item or a decision may cite, as "${docs[0]!.name}"). They are the linked design documents of the unclear-points policy: the issue's own acceptance criteria and maintainer comments still come first:`;
+  return `Context documents the issue defers to (read once and pinned for this run; ${docs.length === 1 ? "its name is" : "their names are"} the source an acceptance item or a decision may cite, as "${docs[0]!.name}"). They are the linked design documents of the unclear-points policy: the issue's own acceptance criteria and maintainer comments still come first.`;
+}
+
+/**
+ * Up to this many characters of documents go into a prompt itself. More are
+ * written as read-only files for the agent to read: an executor declares a
+ * limit on its assignment (the coding agent's is 64,000 characters, issue and
+ * instructions included), and a design document is read, not recited.
+ */
+export const INLINE_CONTEXT_CHARS = 12_000;
+/** Where the files of the documents live in the run's worktree: below `.graphloom/`, which Git ignores and the delivered commit leaves out. */
+export const CONTEXT_DIR = ".graphloom/context";
+
+export const contextInline = (docs: ContextDocument[]): boolean => docs.reduce((sum, d) => sum + d.text.length, 0) <= INLINE_CONTEXT_CHARS;
+
+/** The file of the `i`th document: numbered, so two documents of one name never meet. */
+export function contextPath(docs: ContextDocument[], i: number): string {
+  const base = (docs[i]!.ref.path.split("/").at(-1) ?? "document").replace(/[^A-Za-z0-9._-]/g, "_");
+  return `${CONTEXT_DIR}/${String(i + 1).padStart(2, "0")}-${base}`;
+}
+
+/** The id of the command that writes the `i`th document's file. */
+export const contextCommandId = (i: number): string => `context-write-${i + 1}`;
+
+/**
+ * The prompt lines that hand over the documents: the text itself when small,
+ * else the list of the files to read before starting. Empty when there are none.
+ */
+export function contextPrompt(docs: ContextDocument[] | undefined): string[] {
+  if (docs === undefined || docs.length === 0) return [];
+  if (contextInline(docs)) return ["", `${contextIntro(docs)} The text follows:`, "", contextBlock(docs)];
+  return [
+    "",
+    `${contextIntro(docs)} Read ${docs.length === 1 ? "it" : "them"} in full with your file tools before you start (${docs.length === 1 ? "it is" : "they are"} read-only copies of what the run pinned; do not edit ${docs.length === 1 ? "it" : "them"}):`,
+    ...docs.map((d, i) => `- ${contextPath(docs, i)}: ${d.name} (${d.digest.slice(0, 12) || "no digest"}, ${d.bytes} bytes)`),
+  ];
 }
 
 /** What each document contributes to the run's evidence, as the Fix stage records it. */

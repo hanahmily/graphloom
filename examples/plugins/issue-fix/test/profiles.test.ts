@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
@@ -11,6 +11,8 @@ import type { EvidenceRecord, GraphDefinition, JobSpec, RunView } from "@graphlo
 import {
   advanceFix,
   exampleBenchReport,
+  writeTextFileCommand,
+  writtenText,
   MAX_BENCH_REPORT_BYTES,
   candidateCommands,
   codeReviewInstruction,
@@ -417,8 +419,20 @@ describe("profiles", () => {
           },
         ],
       });
-    expect(judge(scenarios.happy!.commands!["bench-gates"]!.stdout!)).toMatchObject({ status: "passed" });
-    expect(judge(scenarios["bench-gate-fails"]!.commands!["bench-gates"]!.stdout!)).toMatchObject({ status: "failed", reason: expect.stringContaining("exact results: 3 of 52224 results differ from the oracle") });
+    // What the stub runner (a GNUmakefile the stand-in writes) leaves as build/bench/ql-report.json, in the wrapper's envelope.
+    const stubReport = (name: string, pass: number): string => {
+      const make = scenarios[name]!.results["decision-record-v2"]![pass]!.effects!.find((e) => e.path === "GNUmakefile")!.bytes;
+      expect(make).toContain("include Makefile");
+      expect(make).toContain("bench-ql-report:");
+      const report = /printf '%s\\n' '(.*)' > build\/bench\/ql-report\.json/.exec(make)![1]!;
+      return JSON.stringify({ harness: { image: "golang:1.26.10", cpus: 4, memory: "8g", memorySwap: "8g" }, report: JSON.parse(report) });
+    };
+    expect(judge(stubReport("happy", 1))).toMatchObject({ status: "passed" });
+    // The first candidate's runner fails a hard gate; the corrected one passes.
+    expect(judge(stubReport("bench-gate-fails", 1))).toMatchObject({ status: "failed", reason: expect.stringContaining("exact results: 3 of 52224 results differ from the oracle") });
+    expect(judge(stubReport("bench-gate-fails", 2))).toMatchObject({ status: "passed" });
+    expect(scenarios["bench-gate-fails"]!.expect).toMatchObject({ status: "succeeded", receipts: ["fix", "review"] });
+    expect(scenarios["bench-gate-fails"]!.supervisor).toBeUndefined();
     expect(scenarios.happy!.expect).toMatchObject({ status: "succeeded", receipts: ["fix", "review"] });
     // The replies the scenarios give satisfy the profile, as for the other go-test profiles.
     const goRecord = scenarios.happy!.results["decision-record-v2"]!.at(-1)!.output as DecisionRecord;
@@ -924,5 +938,45 @@ describe("the bench-gates command, run against a fake docker (#197)", () => {
     const docker = QL.environment.checks!.find((c) => c.id === "docker")!;
     expect(docker.argv[2]).toContain("docker info");
     expect(docker.argv[2]).toContain("GRAPHLOOM_BENCH_GOMODCACHE");
+  });
+});
+
+describe("the command that writes a pinned context document as a file (#195)", () => {
+  const TEXT = `# Design\n\n"quoted" and \\backslashed and $dollar and \`tick\` and 'single'\n\nunicode: ✓ 日本語 😀\n${"line\n".repeat(3_000)}\n\n`;
+
+  async function repo() {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "issue-fix-context-"));
+    temps.push(dir);
+    await execFileAsync("git", ["init", "-q", "-b", "main"], { cwd: dir });
+    await writeFile(path.join(dir, "README.md"), "x\n");
+    await execFileAsync("git", ["add", "."], { cwd: dir });
+    await execFileAsync("git", ["-c", "user.email=a@b", "-c", "user.name=x", "commit", "-q", "-m", "init"], { cwd: dir });
+    return dir;
+  }
+  const run = (dir: string, command: { argv: string[] }) => execFileAsync(command.argv[0]!, command.argv.slice(1), { cwd: dir });
+
+  it("writes the text exactly, read-only, below a directory Git ignores, and again over its own earlier copy", async () => {
+    const dir = await repo();
+    const command = writeTextFileCommand("context-write-1", ".graphloom/context/01-design.md", TEXT)!;
+    expect(command).toBeDefined();
+    expect((await run(dir, command)).stdout.trim()).toBe("written");
+    const file = path.join(dir, ".graphloom/context/01-design.md");
+    expect(await readFile(file, "utf8")).toBe(TEXT);
+    expect((await stat(file)).mode & 0o222).toBe(0);
+    expect(await readFile(path.join(dir, ".graphloom/.gitignore"), "utf8")).toBe("*\n");
+    // Git sees nothing: the delivered commit and the candidate leave the file out.
+    expect((await execFileAsync("git", ["status", "--porcelain"], { cwd: dir })).stdout).toBe("");
+    expect((await execFileAsync("git", ["check-ignore", ".graphloom/context/01-design.md"], { cwd: dir })).stdout.trim()).toBe(".graphloom/context/01-design.md");
+    // Written again over the read-only copy, from a changed text.
+    await run(dir, writeTextFileCommand("context-write-1", ".graphloom/context/01-design.md", "second\n")!);
+    expect(await readFile(file, "utf8")).toBe("second\n");
+    expect(writtenText(command.argv, "context-write-1")).toEqual({ dest: ".graphloom/context/01-design.md", text: TEXT });
+    expect(writtenText(command.argv, "context-write-2")).toBeUndefined();
+  });
+
+  it("refuses a text one command cannot carry, by argument count and by serialized size", () => {
+    expect(writeTextFileCommand("c", ".graphloom/context/x", "a".repeat(200_000))).toBeDefined();
+    expect(writeTextFileCommand("c", ".graphloom/context/x", "a".repeat(240_000))).toBeUndefined();
+    expect(writeTextFileCommand("c", ".graphloom/context/x", '"'.repeat(130_000))).toBeUndefined();
   });
 });

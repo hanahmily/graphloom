@@ -1023,7 +1023,9 @@ async function runNormalLoopSteps(
           decision = decided;
         }
       } else {
-        const view = toRunView(state);
+        // A graph may check the input it composes against the limits an executor declares.
+        const declared = executorViews(state);
+        const view = { ...toRunView(state), ...(declared !== undefined ? { executors: declared } : {}) };
         const advanced = await deps.host.advance(
           {
             runId: state.runId,

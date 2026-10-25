@@ -233,9 +233,17 @@ passes every gate passes whatever its timings.
    not move a threshold after seeing results.
 
 The rehearsal scenarios for this profile (`happy`, `bench-gate-fails` in
-`src/rehearsal.ts`) stub the runner with a passing report and with one that
-fails a gate; the plugin's tests walk them, and a stub runner's report, through
-the real validator, delivery and the graph's reentry.
+`src/rehearsal.ts`) are self-contained, so `graphloom rehearse task.yaml
+--scenario happy --commands run` works in a real checkout of the base (set
+`GRAPHLOOM_REHEARSAL_GITHUB_TOKEN` to a token that reads the private
+repository). The stand-in's change adds a marker file and a test to
+`pkg/timestamp`, and a `GNUmakefile` that includes the `Makefile` and adds a stub
+`bench-ql-report` target writing a report (GNU make reads `GNUmakefile` first;
+the rehearsal's checkout is thrown away). In `happy` the report passes and the
+run reaches delivery with the Benchmark section. In `bench-gate-fails` the first
+candidate's report fails a hard gate, the graph reenters Fix, and the corrected
+candidate's report passes. The plugin's tests walk both reports through the
+real validator.
 
 ## The final command tier (0.12.0)
 
@@ -265,8 +273,12 @@ evidence (path, blob sha, bytes) and gives it to the planner, the implementer
 and the code reviewers under a heading naming its source. A document with
 `repo` comes from the read-only `graphloom.github/get-file` executor; one
 without is a file of the target repository at the base commit. Later edits do
-not change a running or resumed run; a missing document, or more than 200,000
-bytes of them, stops the run before any agent
+not change a running or resumed run. Documents longer than 12,000 characters
+together are written as read-only files below `.graphloom/context/` (which Git
+ignores, so the delivered commit omits them) and listed in the prompts, because
+an executor's assignment is limited (the coding agent's is 64,000 characters);
+every agent job's input is checked against its executor's declared input shape.
+A missing document, or more than 200,000 bytes of them, stops the run before any agent
 ([#195](https://github.com/hanahmily/graphloom/issues/195); see
 [the design](../../../docs/design-issue-fix-graph.md#context-documents)).
 

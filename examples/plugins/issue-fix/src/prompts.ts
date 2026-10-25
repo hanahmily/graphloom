@@ -2,7 +2,7 @@ import { writeScopeExceptions, writeScopeExcludes, type EnvironmentCommand } fro
 import { COMMAND } from "./constants.js";
 import type { DecisionRecord } from "./decision-record.js";
 import { acceptanceItems } from "./acceptance.js";
-import { contextBlock, contextIntro, type ContextDocument } from "./context.js";
+import { contextPrompt, type ContextDocument } from "./context.js";
 import { writeScopeFor } from "./decision-record.js";
 import type { Issue, IssueComment } from "./evidence.js";
 import { checkCommands, commandLabel, contextRefs, commandsFor, commandSummary, commandTier, enforcedProtectedPaths, finalCommands, issueRef, listAnd, type CommandTier, type Profile, type ProfileCommand } from "./profile.js";
@@ -49,7 +49,7 @@ const ACCEPTANCE_FIELD =
 
 /** The context documents as a block of a prompt, under the heading that says what they are; nothing when there are none. */
 function contextSection(context: ContextDocument[] | undefined): string[] {
-  return context !== undefined && context.length > 0 ? ["", contextIntro(context), "", contextBlock(context)] : [];
+  return contextPrompt(context);
 }
 
 export function planInstruction(profile: Profile, args: { issue: number; request: string; snapshot: string; context?: ContextDocument[] }): string {

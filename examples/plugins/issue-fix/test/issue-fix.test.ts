@@ -27,6 +27,8 @@ import {
   MAX_CONTEXT_BYTES,
   BENCH_GUIDANCE,
   readContext,
+  contextDocuments,
+  writtenText,
   QUALIFICATION_CASES,
   VERIFICATION_SCHEMA,
   advanceFix,
@@ -181,6 +183,8 @@ interface Scenario {
   fixerEdits?: Array<((file: string | undefined) => string | undefined) | undefined>;
   /** The first this many issues-read commands fail (exit 1), as a crashed or timed-out read does. */
   failReads?: number;
+  /** Every context file write fails (exit 1). */
+  failContextWrites?: boolean;
   /** The first this many deliver commands fail (exit 1), as an unusable deliver command does. */
   failDeliveries?: number;
   /** After the run stops on a failed delivery, resume once (a new generation), as an operator does after fixing it. */
@@ -418,6 +422,8 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
       } else if (c.id === COMMAND.deliver && failedDeliveries < (scenario.failDeliveries ?? 0)) {
         failedDeliveries += 1;
         record("command", commandPayload(c.id, { exitCode: 1, stderr: "The following paths are ignored by one of your .gitignore files:\n.graphloom\n" }, c.argv), job, op);
+      } else if (c.id.startsWith("context-write-")) {
+        record("command", commandPayload(c.id, scenario.failContextWrites === true ? { exitCode: 1, stderr: "chmod: denied\n" } : { stdout: "written\n" }, c.argv), job, op);
       } else if (c.id === "issues-read") {
         record("command", commandPayload(c.id, issuesFile === undefined ? { stdout: "missing\n" } : { stdout: "present\n", report: issuesFile }, c.argv), job, op);
       } else {
@@ -442,6 +448,8 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
       outstanding: [],
       budgets,
       validatorBindings: definition.defaultValidators,
+      // What the runner hands a graph: the input shape the coding agent declares (its assignment is at most 64,000 characters).
+      executors: [{ id: "graphloom.coding-agent/run", inputShape: { schema: { type: "object", required: ["assignment"], properties: { assignment: { type: "string", minLength: 1, maxLength: 64_000 } } }, example: { assignment: "x" } } }],
       generation,
       stateRevision: step,
       activeVersion: "issue-fix@0.1.0",
@@ -2525,22 +2533,88 @@ describe("context documents (#195)", () => {
     const half = { "acme/private-design:docs/relational-design.md": "y".repeat(MAX_CONTEXT_BYTES / 2), "acme/private-design:docs/relational-tickets.md": "z".repeat(MAX_CONTEXT_BYTES / 2) };
     const exact = simulate({ profile: CROSS, contextFiles: half });
     expect(exact.decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
-    // Documents that fit the bound but leave no room for the issue in one prompt stop too.
-    const crowded = simulate({ profile: CROSS, issueBody: "w".repeat(80_000), contextFiles: half });
-    expect(crowded.decision.action).toMatchObject({ type: "stop", stop: { reason: "incompatible task", blocker: expect.stringContaining("an agent prompt carries whole") } });
-    expect(crowded.jobs.filter((j) => j.kind === "agent")).toEqual([]);
+    // Long documents are files, not prompt text, so they never crowd the issue out of the assignment.
+    expect(exact.jobs.filter((j) => j.kind === "agent").every((j) => assignment(j).length < 20_000)).toBe(true);
   });
 
-  it("measures the serialized input of every agent job, so an escape-heavy document stops the run cleanly instead of being refused at admission", () => {
-    // 142,500 bytes of quotes, backslashes and newlines: under the 200,000 byte bound raw, and twice that once JSON escapes them.
+  const writes = (jobs: JobSpec[]) => jobs.filter((j) => (j.input as { commands?: Array<{ id: string }> } | undefined)?.commands?.some((c) => c.id.startsWith("context-write-")));
+  const LONG = "L".repeat(20_000);
+  const LONG_DOCS = Object.fromEntries(DOCS_OF(LONG));
+  function DOCS_OF(text: string): Array<[string, string]> {
+    return [
+      ["acme/private-design:docs/relational-design.md", `# Design\n${text}\n"quoted" and \\backslashed\n`],
+      ["acme/private-design:docs/relational-tickets.md", `# Tickets\n${text}\n`],
+    ];
+  }
+
+  it("hands documents too long for a prompt to every agent job as read-only files, written from the evidence, and lists them in the assignment", () => {
+    const { decision, jobs } = simulate({ profile: CROSS, contextFiles: LONG_DOCS });
+    expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+    expect(getFiles(jobs)).toHaveLength(2);
+    // One command per document, in a read-only job, writing below .graphloom/context, before the first agent job.
+    const written = writes(jobs);
+    expect(written.length).toBeGreaterThan(0);
+    expect(written[0]).toMatchObject({ stageId: "fix", kind: "command", purpose: "diagnostic", readOnly: true });
+    const commands = (written[0]!.input as { commands: Array<{ id: string; argv: string[] }> }).commands;
+    expect(commands.map((c) => c.id)).toEqual(["context-write-1", "context-write-2"]);
+    expect(commands.map((c) => c.argv[4])).toEqual([".graphloom/context/01-relational-design.md", ".graphloom/context/02-relational-tickets.md"]);
+    expect(writtenText(commands[0]!.argv, "context-write-1")!.text).toBe(LONG_DOCS["acme/private-design:docs/relational-design.md"]);
+    expect(jobs.indexOf(written[0]!)).toBeLessThan(jobs.findIndex((j) => j.kind === "agent"));
+    // Planner, implementer, reviewer: the listing, never the text.
+    const plan = assignment(agents(jobs, "diagnostic", "fix")[0]);
+    for (const text of [plan, assignment(agents(jobs, "work", "fix")[0]), assignment(agents(jobs, "review", "review")[0])]) {
+      expect(text).toContain("Read them in full with your file tools before you start");
+      expect(text).toMatch(/- \.graphloom\/context\/01-relational-design\.md: acme\/private-design:docs\/relational-design\.md@main \(.+, \d+ bytes\)/);
+      expect(text).toContain("- .graphloom/context/02-relational-tickets.md: acme/private-design:docs/relational-tickets.md (");
+      expect(text).not.toContain(LONG);
+      expect(text).not.toContain("## Context document");
+    }
+    expect(plan.length).toBeLessThan(20_000);
+    // Verifiers get the same list.
+    const verifier = verificationInstruction(parseProfile(CROSS), { findings: [], background: "b", changed: [], context: contextDocuments(simulate({ profile: CROSS, contextFiles: LONG_DOCS }).evidence, parseProfile(CROSS)) });
+    expect(verifier).toContain("- .graphloom/context/01-relational-design.md:");
+    expect(verifier).not.toContain(LONG);
+  });
+
+  it("writes the files again after an implementer run and after a resume, never fetching them again", () => {
+    const base = simulate({ profile: CROSS, contextFiles: LONG_DOCS });
+    const resumed = simulate({ profile: CROSS, contextFiles: LONG_DOCS, resumeAfterCandidate: 1 });
+    expect(resumed.decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+    expect(writes(resumed.jobs).length).toBeGreaterThan(writes(base.jobs).length);
+    expect(getFiles(resumed.jobs)).toHaveLength(2);
+    // After an implementer run (which may have touched them) before the next agent job: at least the first write and one after the implementer.
+    const work = base.jobs.findIndex((j) => j.kind === "agent" && j.purpose === "work");
+    expect(writes(base.jobs).some((w) => base.jobs.indexOf(w) > work)).toBe(true);
+  });
+
+  it("hands a failed write of a context file to the supervisor, naming the file", () => {
+    const failing = simulate({ profile: CROSS, contextFiles: LONG_DOCS, failContextWrites: true });
+    expect(failing.decision.action).toMatchObject({ type: "supervise", supervise: { reason: expect.stringContaining("could not write the context document file .graphloom/context/01-relational-design.md") } });
+    expect(failing.jobs.filter((j) => j.kind === "agent")).toEqual([]);
+  });
+
+  it("stops, naming the document, when one is too long to be written as a file, whatever the escapes cost", () => {
+    // Quotes, backslashes and newlines: 142,500 bytes raw, under the bound for documents, about twice that serialized.
     const heavy = '"\\\n'.repeat(47_500);
     expect(Buffer.byteLength(heavy)).toBeLessThan(MAX_CONTEXT_BYTES);
     const { decision, jobs } = simulate({ profile: CROSS, contextFiles: { ...SERVED, "acme/private-design:docs/relational-design.md": heavy } });
-    expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "incompatible task", blocker: expect.stringMatching(/once serialized, more than the 256000 an executor input carries/), retryable: false } });
+    expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "incompatible task", blocker: expect.stringMatching(/docs\/relational-design\.md@main \(142500 bytes\) is too long to hand to the agents as a file/), retryable: false } });
     expect(jobs.filter((j) => j.kind === "agent")).toEqual([]);
     // The same bytes without escapes fit.
     const plain = simulate({ profile: CROSS, contextFiles: { ...SERVED, "acme/private-design:docs/relational-design.md": "x".repeat(Buffer.byteLength(heavy)) } });
     expect(plain.decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+  });
+
+  it("checks each agent job's input against the limits its executor declares, and stops naming the field and the limit", () => {
+    // 70,000 characters of issue: the coding agent's assignment is at most 64,000.
+    const { decision, jobs } = simulate({ issueBody: "w".repeat(70_000) });
+    expect(decision.action).toMatchObject({
+      type: "stop",
+      stop: { reason: "incompatible task", blocker: expect.stringMatching(/does not fit what graphloom\.coding-agent\/run declares: assignment: must be at most 64000 characters/), retryable: false },
+    });
+    expect(jobs.filter((j) => j.kind === "agent")).toEqual([]);
+    // Within the limit the same run proceeds.
+    expect(simulate({ issueBody: "w".repeat(40_000) }).decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
   });
 
   it("runs as before for a profile without context: no read, no block", () => {
@@ -2785,7 +2859,11 @@ describe("the banyandb-ql profile and its benchmark gates (#197)", () => {
     // The environment is banyandb's, plus one check that the benchmark's container runtime is there.
     expect(ql.environment.checks!.filter((c) => c.id !== "docker")).toEqual(base.environment.checks);
     expect(ql.environment.checks!.find((c) => c.id === "docker")!.argv[2]).toContain("docker info");
-    expect({ ...ql.environment, checks: undefined }).toEqual({ ...base.environment, checks: undefined });
+    // And one prepare output: at the base the tickets build on, `make check` formats api/ with bin/buf, which only `make generate` installs (api/Makefile defines BUF after lint-api.mk reads it, so the format target has no rule for it), so a checkout restored from the prepare cache needs the binary cached too.
+    const prepare = (profile: typeof ql) => profile.environment.prepare!.map((c) => (c.id === "generate-proto" ? { ...c, outputs: c.outputs!.filter((o) => o !== "bin/buf") } : c));
+    expect(ql.environment.prepare!.find((c) => c.id === "generate-proto")!.outputs).toContain("bin/buf");
+    expect(prepare(ql)).toEqual(prepare(base));
+    expect({ ...ql.environment, checks: undefined, prepare: undefined }).toEqual({ ...base.environment, checks: undefined, prepare: undefined });
     expect(ql.issues).toEqual({
       owner: "hanahmily",
       repo: "banyandb-ql-design",

@@ -239,11 +239,33 @@ changes a running run. The planner, the implementer and the code reviewer get
 each document under a heading that names its source, and the planner is told an
 acceptance item may cite a document by that name.
 
-Two bounds apply, each a stop with reason "incompatible task" before any agent
-runs: the documents together may be at most 200,000 bytes, and the issue
-snapshot plus the documents must fit the planner's prompt within an executor
-input (256,000 bytes less room for the instructions). A document that cannot be
-read is the same kind of stop, naming it and why.
+How a document reaches an agent depends on its length. Documents of at most
+12,000 characters together go into the prompt under those headings. Longer ones
+cannot: an executor declares what its input may be (the coding agent's
+`assignment` is at most 64,000 characters, the issue and the instructions
+included), and a design document is read, not recited. They are handed over as
+files instead. A read-only command job writes each pinned document, from the
+evidence and never fetched again, to `.graphloom/context/NN-<name>` in the run's
+worktree and makes it read-only. `.graphloom/` is ignored by Git, so the
+candidate and the delivered commit leave the files out, and a confined job
+(supervisor-originated jobs run in a bubblewrap sandbox over the worktree) reads
+them like any file of its worktree. The prompt then lists the files, with each
+document's source name, blob sha and size, and says to read them in full before
+starting. The planner, implementer, code reviewer and verifier all get the same
+list. The files are written again after an implementer run, which may have
+touched them, and after a resume or reentry, as the issues file is; a write that
+fails goes to the supervisor, and a document too long for one command to write
+(the argument count and the 256,000 byte serialized input, escapes included)
+stops the run, naming it.
+
+Three bounds apply, each a stop with reason "incompatible task" before the job
+runs: the documents together may be at most 200,000 bytes; every agent job's
+input is checked against the input shape its executor declares (the runner hands
+the declared shapes to the graph in `RunView.executors`), so an assignment over
+the executor's limit stops naming the field and the limit instead of being
+refused at admission; and the input, serialized, must fit the 256,000 byte bound
+on any executor input. A document that cannot be read is the same kind of stop,
+naming it and why.
 
 ## Review failures: the graph reenters Fix, or the supervisor decides
 
@@ -659,6 +681,11 @@ environment adds a `docker` check) plus three things that use the
   and the body, and a line that lost one is tidied.
 - One `final` command, `bench-gates` (requirement `bench-gates`), runs the
   ticket's benchmark once after review.
+- One more prepare output, `bin/buf`: at the base these tickets build on, `make
+  check` formats `api/` with `bin/buf`, which only `make generate` installs
+  (`api/Makefile` defines `BUF` after `lint-api.mk` reads it, so `format` has no
+  rule for it), so a checkout restored from the prepare cache would fail `make
+  check` without the binary cached too.
 
 `bench-gates` runs `make bench-ql-report`, a target the ticket's own
 implementation adds, in `docker run --rm --cpus=4 --memory=8g --memory-swap=8g`:
