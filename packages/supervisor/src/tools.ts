@@ -1,6 +1,7 @@
 import path from "node:path";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { ACTION_SPEC_KEYS, assertGraphDecision, stableHash, type AgentSessionView, type GraphAction } from "@graphloom/sdk";
+import { ACTION_SPEC_KEYS, assertGraphDecision, stableHash, type AgentSessionView, type ExecutorView, type GraphAction } from "@graphloom/sdk";
+import { normalizationNote, normalizeJobInput } from "./item-arrays.js";
 import type {
   AdmissionFacts,
   EvidenceFilter,
@@ -301,14 +302,15 @@ export function createAdmissionTools(
   admission?: SupervisorAdmission,
   recordFinding?: SupervisorInput["recordFinding"],
   inspect?: SupervisorInspection,
+  executors?: readonly ExecutorView[],
 ): AdmissionToolbox {
   let proposal: SupervisorProposal | undefined;
   let exhausted: SupervisorRejection | undefined;
   const offered = offeredActions(admission?.facts);
 
-  const accept = (next: SupervisorProposal) => {
+  const accept = (next: SupervisorProposal, note?: string) => {
     proposal = next;
-    return { content: [{ type: "text" as const, text: SUBMITTED }], details: undefined, terminate: true };
+    return { content: [{ type: "text" as const, text: note === undefined ? SUBMITTED : `${SUBMITTED} ${note}` }], details: undefined, terminate: true };
   };
   const reject = (message: string) => ({
     content: [{ type: "text" as const, text: `Rejected: ${message}. Call one tool with corrected arguments.` }],
@@ -351,9 +353,15 @@ export function createAdmissionTools(
         // per-turn allowance as one the controller's check finds.
         const refuse = async (message: string) =>
           admission !== undefined ? refused(await admission.refuse(action, message)) : reject(message);
-        const job = params[specKey] as
+        let job = params[specKey] as
           | ({ purpose?: unknown; readOnly?: unknown; writeScope?: unknown } & ContinuationJob)
           | undefined;
+        // Before any check: the model's {"item": …} array encoding, read against the executor's declared schema.
+        let normalized: string[] = [];
+        if (action === "dispatch" && job !== undefined && job !== null && typeof job === "object") {
+          ({ job, paths: normalized } = normalizeJobInput(job, executors));
+          if (normalized.length > 0) admission?.normalized?.(normalized);
+        }
         if (action === "dispatch" && job !== undefined) {
           const scopeRefusal = writeScopeRefusal(job);
           if (scopeRefusal !== undefined) return refuse(scopeRefusal);
@@ -367,7 +375,7 @@ export function createAdmissionTools(
         try {
           candidate = assertGraphDecision({
             reason: params.reason,
-            action: { type: action, [specKey]: params[specKey] },
+            action: { type: action, [specKey]: action === "dispatch" ? job : params[specKey] },
             ...(params.evidence !== undefined ? { evidence: params.evidence } : {}),
           });
         } catch (err) {
@@ -384,7 +392,7 @@ export function createAdmissionTools(
         }
         const rejection = "action" in candidate ? await admission?.check(candidate) : undefined;
         if (rejection !== undefined) return refused(rejection);
-        return accept(candidate);
+        return accept(candidate, normalized.length > 0 ? normalizationNote(normalized) : undefined);
       },
     } as ToolDefinition;
   });

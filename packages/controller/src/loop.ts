@@ -782,10 +782,15 @@ async function runNormalLoopSteps(
           }
           return refused;
         };
+        // Input paths the supervisor normalized this decide() call; reset with each turn.
+        let normalizedPaths: string[] = [];
         const admission = {
           facts: admissionFacts(state, deps.repair !== undefined),
           check,
           refuse,
+          normalized: (paths: string[]) => {
+            normalizedPaths.push(...paths);
+          },
           reservedProviderCalls: () => reviewSpent,
         };
         let decided: SupervisorProposal | undefined;
@@ -809,6 +814,7 @@ async function runNormalLoopSteps(
           const stopWatch = watchForStop(state.stateDir, deps, abort);
           decided = undefined;
           decideError = undefined;
+          normalizedPaths = [];
           // maxProviderCalls below is the balance now, which already has earlier reviews' spend.
           reviewSpent = 0;
           turnRunning = true;
@@ -867,6 +873,7 @@ async function runNormalLoopSteps(
                 admission: {
                   facts: admission.facts,
                   rejections: episodeRejections(rejectedBefore),
+                  ...(normalizedPaths.length > 0 ? { normalized: [...normalizedPaths] } : {}),
                   outcome:
                     decided !== undefined
                       ? isModelSwitchRequest(decided)

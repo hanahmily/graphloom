@@ -165,6 +165,8 @@ export interface SupervisorAdmission {
    * budget before it resolves. Returns the counted rejection.
    */
   refuse(action: string, reason: string): Promise<SupervisorRejection>;
+  /** The supervisor read `{"item": …}` array encodings in a dispatch's input as arrays at these paths; recorded with the episode. */
+  normalized?(paths: string[]): void;
 }
 
 /** The controller's outcome for a supervisor proposal, reported on the next turn. */

@@ -1,5 +1,6 @@
 import type { AgentSessionView, CaseFile, EvidenceRecord, GraphAction } from "@graphloom/sdk";
 import { parseSupervisorDecision } from "./decision.js";
+import { normalizeProposalInput } from "./item-arrays.js";
 import type { PiSupervisorSession, ThinkingLevel } from "./pi-session.js";
 import { isSupervisorProviderError, SupervisorProviderError, type ProviderFailure } from "./provider-failure.js";
 import {
@@ -265,6 +266,7 @@ export function createPiSupervisor(options: CreatePiSupervisorOptions): PiSuperv
         input.admission,
         input.recordFinding,
         input.inspect,
+        input.view.executors,
       );
     const totalBefore = totalProviderCalls;
     // Every prompt of this turn shares the controller's one allowance:
@@ -602,7 +604,9 @@ export function createPiSupervisor(options: CreatePiSupervisorOptions): PiSuperv
           text = await remedySlip(read.failure);
           continue;
         }
-        proposal = read.proposal;
+        const normalized = normalizeProposalInput(read.proposal, input.view.executors);
+        proposal = normalized.proposal;
+        if (normalized.paths.length > 0) input.admission?.normalized?.(normalized.paths);
       }
       if (!("action" in proposal)) return proposal;
       if (input.admission !== undefined) {
