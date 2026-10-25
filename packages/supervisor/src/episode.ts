@@ -45,6 +45,8 @@ export interface EpisodeAdmission {
   facts?: AdmissionFacts;
   /** Each rejection of this decide() call as `<action>: <reason>`, oldest first. */
   rejections: string[];
+  /** Input paths where the supervisor read `{"item": …}` as an array (see item-arrays.ts), if it did. */
+  normalized?: string[];
   outcome: EpisodeOutcome;
 }
 
@@ -376,6 +378,7 @@ export function buildEpisodeRecord(args: EpisodeRecordArgs): SupervisorEpisodeRe
     admission: {
       ...(args.admission.facts !== undefined ? { facts: args.admission.facts } : {}),
       rejections: boundRejections(args.admission.rejections),
+      ...(args.admission.normalized !== undefined && args.admission.normalized.length > 0 ? { normalized: args.admission.normalized } : {}),
       outcome: args.admission.outcome,
     },
     providerCalls: args.providerCalls,
