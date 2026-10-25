@@ -1,13 +1,20 @@
 export * from "./constants.js";
 export { acceptanceItems, coverageEntries, coverageProblems, MAX_COVERAGE_FILES } from "./acceptance.js";
 export { advanceFix, createGraph, definitionFor, GRAPH_ID, GRAPH_VERSION, requestedIssue, type FixPrivateState } from "./graph.js";
+export { contextBlock, contextCommandId, contextDocuments, contextInline, contextIntro, contextPath, contextPrompt, CONTEXT_DIR, describeContext, INLINE_CONTEXT_CHARS, MAX_CONTEXT_BYTES, readContext, type ContextDocument, type ContextRead } from "./context.js";
+export { finalSections, reportSummaryLines, type FinalSection } from "./final.js";
+export { BENCH_GUIDANCE, BENCH_SCHEMA, exampleBenchReport, BENCH_SIZES, benchGateFailures, benchIncomplete, benchSectionLines, MAX_BENCH_REPORT_BYTES, parseBenchReport } from "./bench.js";
 export {
+  checkCommands,
   commandLabel,
+  contextName,
+  contextRefs,
   commandsFor,
   commandsInTier,
   commandStatement,
   commandSummary,
   enforcedProtectedPaths,
+  finalCommands,
   regeneratedPaths,
   regeneratedExceptions,
   harnessName,
@@ -18,6 +25,7 @@ export {
   parseProfile,
   ProfileError,
   type ChangelogRule,
+  type ContextDocumentRef,
   type CommandRequirement,
   type Profile,
   type ProfileCommand,
@@ -85,6 +93,9 @@ export {
   severityOf,
   writeIssuesCommand,
   writtenJson,
+  writtenText,
+  writeTextFileCommand,
+  fitsOneJob,
   type Issue,
   type IssueActor,
   type IssueEvent,
@@ -108,6 +119,7 @@ export {
 export {
   MAX_SNAPSHOT_CHARS,
   candidateCommands,
+  finalJobCommands,
   changeDescription,
   commitMessage,
   deliverCommands,
@@ -116,6 +128,7 @@ export {
   issuesProtocol,
   planInstruction,
   pullRequestDescription,
+  withoutPrivateReferences,
   redCommands,
   withoutBookkeeping,
 } from "./prompts.js";
@@ -123,6 +136,10 @@ export { QUALIFICATION_CASES, qualifyValidators, shippedProfile, type Qualificat
 export {
   builds,
   changelogEntry,
+  benchGates,
+  finalChecks,
+  finalRun,
+  finalRunProblem,
   codeReview,
   decisionsRecorded,
   implementerRecord,

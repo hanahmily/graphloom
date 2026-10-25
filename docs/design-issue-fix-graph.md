@@ -31,6 +31,7 @@ supervisor-dispatched work run without one no longer crashes the graph
 ([#191](https://github.com/hanahmily/graphloom/issues/191)).
 Version 0.10.4 declares a 6 h `waitMs` in every profile, so a coding-agent harness's usage-limit reset can be waited out instead of stopping the run ([#189](https://github.com/hanahmily/graphloom/issues/189)).
 Version 0.11.0 reenters Fix itself when code review fails only on confirmed findings and the loop is converging, instead of handing every such failure to the supervisor ([#193](https://github.com/hanahmily/graphloom/issues/193); see [review failures](#review-failures-the-graph-reenters-fix-or-the-supervisor-decides)).
+Version 0.12.0 reads the profile's [context documents](#context-documents) once and gives them to the planner, the implementer and the code reviewers ([#195](https://github.com/hanahmily/graphloom/issues/195)), runs a profile's [`final` tier commands](#the-final-command-tier) once after review converged ([#196](https://github.com/hanahmily/graphloom/issues/196)), and ships the [banyandb-ql profile](#the-measure-ql-profile-and-benchmark-gates) with its `bench-gates` requirement and a delivery option that keeps a private tracker out of the commit and the pull request ([#197](https://github.com/hanahmily/graphloom/issues/197)).
 
 ## Purpose
 
@@ -64,17 +65,17 @@ The profile supplies, as data:
 | Field | Meaning | banyandb | graphloom |
 |---|---|---|---|
 | `name`, `project` | Names for messages; the repository agents are told they work in | `apache/skywalking-banyandb` | `hanahmily/graphloom` |
-| `issues` | Where issues live; the request names `owner/repo#N` | `apache/skywalking` | `hanahmily/graphloom` |
+| `issues` | Where issues live; the request names `owner/repo#N`. Optional `context`: [documents](#context-documents) the issue defers to | `apache/skywalking` | `hanahmily/graphloom` |
 | `environment` | The SDK `EnvironmentDeclaration`: checks, preparation, pinned files. Must include an `ocr` check that prints open-code-review's path | BanyanDB's checklist, `make generate`, `CONTRIBUTING.md` pinned | Node.js 22+, npm, flock, git, ocr, codex, claude; `npm ci --include=dev`, `npm run build`; nothing pinned |
 | `regression` | `runner` (a built-in, below) and `timeoutMs` | `go-test`, 30 min | `vitest`, 20 min |
-| `commands` | GREEN's further checks and the build checks, run in order in the committed candidate checkout. Each has `id`, `argv`, `timeoutMs`, `requirement` (`passes` or `builds`), and optional `tier` (`cheap` or `full`, default `full`; once any command is `cheap`, GREEN and the cheap commands run first in one checkout job and the full commands run in a second job only after those passed on the same candidate digest, and Fix needs both) and optional `label`, `statement` and `summary` wording, and optional `writes` (repository-relative files or directories, a trailing `/**` allowed, that the command regenerates and a failure tells the author to commit, such as license artifacts: the implementer's write scope covers them even under a protected path) | `test-ci` (passes); `build`, `lint`, `check` (builds; `make check` already runs license-check); `test-ci` and `lint` are cheap | `npm run typecheck`, `npm run build`, `npm test` (builds; the full suite takes about ten minutes, so 45 min) |
+| `commands` | GREEN's further checks and the build checks, run in order in the committed candidate checkout. Each has `id`, `argv`, `timeoutMs`, `requirement` (`passes`, `builds`, or `final-checks`/`bench-gates` for a `final` tier command), and optional `tier` (`cheap`, `full` or `final`, default `full`; a `final` command runs once, after review, see [the final tier](#the-final-command-tier), and has optional `section`; once any command is `cheap`, GREEN and the cheap commands run first in one checkout job and the full commands run in a second job only after those passed on the same candidate digest, and Fix needs both) and optional `label`, `statement` and `summary` wording, and optional `writes` (repository-relative files or directories, a trailing `/**` allowed, that the command regenerates and a failure tells the author to commit, such as license artifacts: the implementer's write scope covers them even under a protected path) | `test-ci` (passes); `build`, `lint`, `check` (builds; `make check` already runs license-check); `test-ci` and `lint` are cheap | `npm run typecheck`, `npm run build`, `npm test` (builds; the full suite takes about ten minutes, so 45 min) |
 | `testPaths` | `suffixes`, and `directories` whose contents count as test files; RED applies only these | `_test.go`, `testdata/` | `.test.ts`, `test/`, `fixtures/` |
 | `protectedPaths` | Excluded from the write scope unless the record justifies one, or a command's `writes` declares it regenerated (since 0.10.0) | `api/proto`, `go.mod`, `go.sum`, `.github` | `package-lock.json`, `.github`, `legacy` |
 | `changelog` | Optional `{ path, rule }`; absent means no `changelog-entry` requirement. The one rule, `first-release-section-entry`, needs a new list entry inside the first `## ` section | `CHANGES.md` | none: the repository keeps no changelog |
 | `planning` | `reach` (the reach question for the plan), optional `e2e` (what `needsE2E` means) and optional `notes` (guidance the planner and implementer both get) | Go lifecycle wording, Kind tests, no notes | TypeScript lifecycle wording, live-provider tests, [enhancement issues](#enhancement-issues) |
 | `implementation` | `conventions`, optional `selfCheck` (cheap commands the implementer runs and reports in `selfChecks` before returning ready; the graph still runs its own checks), optional `checks` (what the implementer is told is checked; generated from the commands when absent) and `cleanCheckHint` | `run.Go`, `make format` | AGENTS.md rules; generated checks text |
 | `review` | `language`, `testFiles` and `rules`: the extra "what does the change break" rule | the Go rule | the same questions for TypeScript: resume, AbortSignal, rejected promises, locks, persisted state and wire formats, plugin notions in the controller |
-| `pullRequest` | `checklist` after the title, `footer` (`{issue}` becomes the reference), optional `e2eNote` | BanyanDB's template | a short checklist and `Fixes {issue}.` |
+| `pullRequest` | `checklist` after the title, `footer` (`{issue}` becomes the reference), optional `e2eNote`, and optional `reference` (`{ "style": "implements", "subject": "..." }`: the commit and the pull request say "Implements <subject> <issue title>" and carry no reference to the issues repository; the footer may not use `{issue}`) | BanyanDB's template | a short checklist and `Fixes {issue}.` |
 | `harnesses` | Optional `implementer`, `reviewer`, `verifier`; the verifier must differ from the reviewer | Claude Code, Codex, Claude Code | same |
 | `budgets` | Optional run budgets (`agentInvocations`, `jobs`, `decisions`, `corrections`, `waitMs`, `activeMs`, `recoveryReserve`, `probes`), positive integers. `describe` declares them as `defaultBudgets`; intake applies them over the controller's defaults and under the task's own `budgets` ([budgets](budgets.md)) | 6,000 agent calls, 250 jobs, 500 decisions, 100 corrections, 20 h active | 1,800, 250, 350, 30, 10 h |
 
@@ -87,7 +88,7 @@ refuses a missing or unusable profile, so a run cannot start on one.
 
 - Fix always has `decisions-recorded`, `reproduces`, `passes` and `in-scope`;
   `builds` when the profile has `builds` commands; `changelog-entry` when it
-  names a changelog. Review has `code-review`.
+  names a changelog. Review has `code-review`, and `final-checks` or `bench-gates` when the profile has `final` tier commands that count toward them.
 - Statements name what is checked for this repository, built from the profile:
   the runner's evidence for `reproduces` ("go test -json reports it failed, and
   the package built", or "vitest reports it failed with an assertion error in
@@ -175,6 +176,96 @@ the implementer that:
   behaviour must be.
 
 The example task requests `Fix hanahmily/graphloom#119.`
+
+## The final command tier
+
+Some checks are too slow for the cheap and full tiers, which run again for every
+candidate: a benchmark that takes an hour is paid once per round. A profile
+command may declare `tier: "final"`, and then its `requirement` is
+`final-checks` (a final command cannot count toward Fix's `passes` or `builds`,
+which Fix needs before review, and only a final command may count toward
+`final-checks`). Review gains the requirement `final-checks` only when the
+profile has such commands; a profile without them has the definition and the
+behaviour it had before.
+
+Final commands run in one job, in a prepared checkout of the candidate, once
+per candidate digest, at the moment code review has converged on that digest
+(the review's own acceptance rule passed) and before the Review stage is
+validated, so before delivery. The `final-checks` validator passes when every
+final command ran in a prepared checkout of this candidate, succeeded and
+changed no file; a command that did not run is not a pass.
+
+- **Failure.** A final failure is a defect, not a flake. The graph reenters Fix
+  itself with the failing requirement and the command's output, drawing on the
+  same cap (`review.maxReentries`, default 4) and corrections budget as a
+  [review reentry](#review-failures-the-graph-reenters-fix-or-the-supervisor-decides),
+  since both count the implementer runs after the first review pass. If the
+  last implementer pass left the candidate unchanged, the same candidate would
+  fail the same way, so the supervisor gets it instead, as it does at the cap.
+  The implementer is told that review passed and the final checks failed. The
+  corrected candidate is a new digest, so the cheap tier, RED, the full tier,
+  code review and the final tier all run again.
+- **Resume.** As for every check ([#154](https://github.com/hanahmily/graphloom/issues/154)),
+  a final failure recorded before the operator's latest resume is run once
+  more; a failure recorded since then is acted on, so a failing command cannot
+  loop. A final run that passed before the resume stands.
+- **Pull request.** A final command's optional `section` names a pull request
+  heading. The graph puts the `summary` of the command's JSON report there (a
+  line, or a list of markdown lines), under a line saying it is reported and the
+  run gated only on the exit status. The command's summary also joins the test
+  plan's list of checks that passed.
+
+## Context documents
+
+An issue sometimes defers to a design or a plan kept elsewhere, in a repository
+the agents cannot be relied on to read. A profile declares them as
+`issues.context`: a list of `{ repo?, path, ref? }`. Without `repo` the path is a
+file of the target repository, observed in the run's worktree at the base
+commit; with `repo` (`owner/name`) it is read from GitHub at `ref` (default: the
+repository's default branch) by the read-only `graphloom.github/get-file`
+executor, under the same read scope and token handling as the other GitHub
+reads. The executor returns the text whole with git's blob sha and its size; a
+path that is missing, a directory, too large for the contents API or not UTF-8
+text is an `ok` result with `found: false` and a reason, so the graph can name
+the problem instead of entering a recovery episode.
+
+Fix reads the documents in the same step that reads the issue snapshot and its
+comments, once, before the first agent job: one observation for the target
+repository's files, one `get-file` job per file of another repository. The
+evidence is the pin: it records each document's path, blob sha (or SHA-256 for
+an observed file) and bytes, and every later step, a resume and a reentry
+included, reads the documents back from it, so an edit to a document never
+changes a running run. The planner, the implementer and the code reviewer get
+each document under a heading that names its source, and the planner is told an
+acceptance item may cite a document by that name.
+
+How a document reaches an agent depends on its length. Documents of at most
+12,000 characters together go into the prompt under those headings. Longer ones
+cannot: an executor declares what its input may be (the coding agent's
+`assignment` is at most 64,000 characters, the issue and the instructions
+included), and a design document is read, not recited. They are handed over as
+files instead. A read-only command job writes each pinned document, from the
+evidence and never fetched again, to `.graphloom/context/NN-<name>` in the run's
+worktree and makes it read-only. `.graphloom/` is ignored by Git, so the
+candidate and the delivered commit leave the files out, and a confined job
+(supervisor-originated jobs run in a bubblewrap sandbox over the worktree) reads
+them like any file of its worktree. The prompt then lists the files, with each
+document's source name, blob sha and size, and says to read them in full before
+starting. The planner, implementer, code reviewer and verifier all get the same
+list. The files are written again after an implementer run, which may have
+touched them, and after a resume or reentry, as the issues file is; a write that
+fails goes to the supervisor, and a document too long for one command to write
+(the argument count and the 256,000 byte serialized input, escapes included)
+stops the run, naming it.
+
+Three bounds apply, each a stop with reason "incompatible task" before the job
+runs: the documents together may be at most 200,000 bytes; every agent job's
+input is checked against the input shape its executor declares (the runner hands
+the declared shapes to the graph in `RunView.executors`), so an assignment over
+the executor's limit stops naming the field and the limit instead of being
+refused at admission; and the input, serialized, must fit the 256,000 byte bound
+on any executor input. A document that cannot be read is the same kind of stop,
+naming it and why.
 
 ## Review failures: the graph reenters Fix, or the supervisor decides
 
@@ -556,6 +647,8 @@ issue-fix is.
   `AGENTS.md` and `package.json` change often, and a pinned-file mismatch
   blocks every run until a qualified repair. There is no changelog, so no
   changelog requirement.
+- [`profiles/banyandb-ql.json`](../examples/plugins/issue-fix/profiles/banyandb-ql.json):
+  the Measure QL relational tickets R01 to R06, [below](#the-measure-ql-profile-and-benchmark-gates).
 
 The example tasks are
 [`examples/issue-fix-banyandb-task.yaml`](../examples/issue-fix-banyandb-task.yaml)
@@ -565,6 +658,69 @@ with no budgets of their own: the profile's apply. The GraphLoom task uses `repo
 it lives in. Intake pins the top level of the repository `repo` names, so the
 run's worktree and state sit under `graphloom/` and `graphloom-state/` at the
 repository root, which Git ignores.
+
+## The Measure QL profile and benchmark gates
+
+The Measure QL relational tickets R01 to R06 are tracked in the private
+`hanahmily/banyandb-ql-design` and implemented in apache/skywalking-banyandb;
+their design documents are the contract the tickets defer to, and their
+benchmark rules ("Benchmark rules for every ticket" in `docs/relational-tickets.md`)
+are part of every ticket's acceptance. `profiles/banyandb-ql.json` is
+`banyandb.json` (same project, runner, build checks, budgets and harnesses; the
+environment adds a `docker` check) plus three things that use the
+[context documents](#context-documents), the `reference` delivery option and the
+[final tier](#the-final-command-tier):
+
+- `issues` names the private repository and its context is the three documents.
+- `pullRequest.reference` makes the commit and the pull request say "Implements
+  the Measure QL <title>" with no `Fixes` line, no reference to the private
+  repository and no `{issue}` in the footer. Because an agent may still write
+  the repository's name into a comment or a decision, every reference to the
+  issues repository or a context document's repository (`owner/repo#N`,
+  `owner/repo:path@ref`, a github.com link) is removed from the commit message
+  and the body, and a line that lost one is tidied.
+- One `final` command, `bench-gates` (requirement `bench-gates`), runs the
+  ticket's benchmark once after review.
+- One more prepare output, `bin/buf`: at the base these tickets build on, `make
+  check` formats `api/` with `bin/buf`, which only `make generate` installs
+  (`api/Makefile` defines `BUF` after `lint-api.mk` reads it, so `format` has no
+  rule for it), so a checkout restored from the prepare cache would fail `make
+  check` without the binary cached too.
+
+`bench-gates` runs `make bench-ql-report`, a target the ticket's own
+implementation adds, in `docker run --rm --cpus=4 --memory=8g --memory-swap=8g`:
+a `golang` image matching `go.mod`'s `go` line (or `GRAPHLOOM_BENCH_IMAGE`),
+the checkout mounted read-write, the operator's module cache mounted read-only
+(`GRAPHLOOM_BENCH_GOMODCACHE`, else the cache a confined job's `file://` proxy
+names, else `go env GOMODCACHE`), module downloads and toolchain switching off,
+and only the container's `/tmp` for user-level state, so it runs the same under
+a graph job and under the confinement of a supervisor job. It expects
+`build/bench/ql-report.json` and hands the controller `{ harness, report }` as
+its report file. A checkout without the make target fails with a message that
+names the target, the report path and the schema, so the implementer can act on it.
+
+The report is `ql-bench-report/v1` (the README gives the full shape): the
+environment (toolchain, commit, base commit, seed, CPUs, memory), the effective
+budgets, a preflight entry per size, the hard gates, and per case the raw
+samples and the paired effects with intervals. The `bench-gates` validator is
+the benchmark rules' hard gates and nothing else:
+
+- exact results (`checked` > 0, `mismatches` = 0);
+- zero failed timed calls;
+- accounted peak memory within its budget;
+- zero outstanding owned resources;
+- a preflight entry for both 1,024/64 and 16,384/1,024 that fits the budget.
+
+Each is read from counts and bytes, not from a boolean in the report. The report
+must also be complete: the frozen environment, the budgets, a case at each size,
+exactly five alternated pairs per case, each holding every variant once, and an interval on each effect. The
+validator never reads a latency, so no timing can pass or fail it, and the pull
+request's `Benchmark` section shows the medians, the effects and the RPC figures
+as reported only. A gate or completeness failure is a defect in the change, so
+Fix is reentered with the failing gate and its numbers, under the final tier's
+rules. The planner's and implementer's guidance carries the schema and the rules
+(`BENCH_GUIDANCE` in `src/bench.ts`, the profile's `planning.notes`), citing the
+context document.
 
 ## Migration from banyandb-fix
 

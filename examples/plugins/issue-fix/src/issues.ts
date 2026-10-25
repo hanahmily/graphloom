@@ -344,6 +344,32 @@ export function issueCommand(record: EvidenceRecord, id: string): { argv: string
   };
 }
 
+const WRITE_FILE =
+  'set -eu; dest="$1"; n="$2"; shift 2; text=""; while [ "$n" -gt 0 ]; do text="$text$1"; shift; n=$((n - 1)); done; ' +
+  `mkdir -p "$(dirname "$dest")"; printf '*\\n' > ${ISSUES_DIR}/.gitignore; rm -f "$dest"; printf '%s' "$text" > "$dest"; chmod a-w "$dest"; echo written`;
+
+/** Whether `commands`, as one job's input, fit the executor's input bound. */
+export const fitsOneJob = (commands: EnvironmentCommand[]): boolean => Buffer.byteLength(JSON.stringify({ commands }), "utf8") <= MAX_COMMAND_INPUT_BYTES;
+
+/**
+ * A command that writes `text` to `dest` (a path below `.graphloom/`, which Git
+ * ignores) and makes it read-only, or undefined when the text alone does not
+ * fit one command: the argument count and the executor's input byte bound,
+ * measured on the serialized input.
+ */
+export function writeTextFileCommand(id: string, dest: string, text: string): EnvironmentCommand | undefined {
+  const parts = chunked(text);
+  const command: EnvironmentCommand = { id, argv: ["sh", "-c", WRITE_FILE, id, dest, String(parts.length), ...parts] };
+  return parts.length <= MAX_CHUNKS - 1 && fitsOneJob([command]) ? command : undefined;
+}
+
+/** The text a `writeTextFileCommand` for `id` wrote, and where. */
+export function writtenText(argv: string[], id: string): { dest: string; text: string } | undefined {
+  const n = Number(argv[5]);
+  if (argv[3] !== id || !Number.isSafeInteger(n) || n < 0) return undefined;
+  return { dest: argv[4] ?? "", text: argv.slice(6, 6 + n).join("") };
+}
+
 /** The JSON a write command wrote. */
 export function writtenJson(argv: string[]): string | undefined {
   const n = Number(argv[4]);

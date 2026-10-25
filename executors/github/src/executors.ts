@@ -17,6 +17,8 @@ const MAX_PAGES_PER_CALL = 10;
 /** Pages scanned for an idempotency marker before reconciliation gives up. */
 const MAX_RECONCILE_PAGES = 10;
 const MAX_BODY_CHARS = 4_000;
+/** Largest file `get-file` returns whole: what the contents API itself serves inline. */
+export const MAX_FILE_BYTES = 1_000_000;
 
 const packageIdentity = readPackageIdentity();
 
@@ -51,6 +53,13 @@ interface ListPullsInput extends RepoInput {
 
 interface NumberInput extends RepoInput {
   number: number;
+}
+
+interface GetFileInput extends RepoInput {
+  /** Repository-relative path of a text file. */
+  path: string;
+  /** Branch, tag or commit; the repository's default branch when absent. */
+  ref?: string;
 }
 
 interface ListCommentsInput extends NumberInput {
@@ -167,6 +176,14 @@ interface RawPull extends RawIssue {
   merged_at?: string | null;
   head?: { ref?: string; sha?: string; label?: string };
   base?: { ref?: string };
+}
+
+interface RawContent {
+  type?: string;
+  sha?: string;
+  size?: number;
+  encoding?: string;
+  content?: string;
 }
 
 interface RawComment {
@@ -318,6 +335,61 @@ export const getPull = defineExecutor<NumberInput, JobOutput>({
       return {
         summary: `fetched pull request #${res.data.number}`,
         github: { item: { ...summarizePull(res.data), body: boundBody(res.data.body) }, rateLimit: res.rateLimit },
+      };
+    });
+  },
+});
+
+/**
+ * One text file at a ref, whole, with its blob sha. A path that is not a
+ * readable text file is an answer, not a failed read: the item says
+ * `found: false` and why, so the caller can name the problem.
+ */
+export const getFile = defineExecutor<GetFileInput, JobOutput>({
+  id: "graphloom.github/get-file",
+  version: GITHUB_EXECUTOR_VERSION,
+  effect: "read",
+  capabilities: ["network:github"],
+  ...readShape(
+    ["path"],
+    {
+      path: { type: "string", minLength: 1, maxLength: 1_000, description: "Repository-relative path of a text file." },
+      ref: { type: "string", pattern: "^[A-Za-z0-9_.\\/:-]{1,255}$", description: "Branch, tag or commit; the default branch when absent." },
+    },
+    { path: "docs/design.md", ref: "main" },
+  ),
+  inputSchema: (v): v is GetFileInput => isRepoInput(v) && isFilePath(field(v, "path")) && optionalRef(v, "ref"),
+  async execute(input, ctx) {
+    const query = { owner: input.owner, repo: input.repo, path: input.path, ref: input.ref ?? null };
+    return runRead(ctx, "get-file", query, async (client) => {
+      const target = `/repos/${repoPath(input)}/contents/${input.path.split("/").map(encodeURIComponent).join("/")}`;
+      const answer = (reason: string, why: string, rateLimit: RateLimitSnapshot = {}) => ({
+        summary: `${input.path} was not read: ${why}`,
+        github: { item: { found: false, path: input.path, ref: input.ref ?? null, reason }, rateLimit },
+      });
+      let res: Awaited<ReturnType<typeof githubRequest<RawContent | RawContent[]>>>;
+      try {
+        res = await githubRequest<RawContent | RawContent[]>(client, "GET", input.ref !== undefined ? `${target}?ref=${encodeURIComponent(input.ref)}` : target);
+      } catch (err) {
+        if ((err as { status?: unknown }).status === 404) return answer("not-found", "no such file at that ref");
+        throw err;
+      }
+      const data = res.data;
+      if (Array.isArray(data) || data === undefined || data.type !== "file") return answer("not-a-file", "the path is not a regular file", res.rateLimit);
+      const size = data.size ?? 0;
+      if (size > MAX_FILE_BYTES || data.encoding !== "base64" || typeof data.content !== "string") {
+        return answer("too-large", `${size} bytes, more than the ${MAX_FILE_BYTES} the contents API returns inline`, res.rateLimit);
+      }
+      const bytes = Buffer.from(data.content, "base64");
+      let text: string;
+      try {
+        text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+      } catch {
+        return answer("not-text", "the file is not UTF-8 text", res.rateLimit);
+      }
+      return {
+        summary: `read ${input.path} (${bytes.length} bytes, blob ${(data.sha ?? "").slice(0, 12)})`,
+        github: { item: { found: true, path: input.path, ref: input.ref ?? null, sha: data.sha ?? null, size: bytes.length, text }, rateLimit: res.rateLimit },
       };
     });
   },
@@ -845,6 +917,7 @@ export const executors = [
   listPulls,
   getIssue,
   getPull,
+  getFile,
   listIssueComments,
   listLabels,
   listMilestones,
@@ -1187,6 +1260,11 @@ function isPositiveInt(v: unknown): v is number {
 
 function isNonEmptyString(v: unknown): v is string {
   return typeof v === "string" && v.trim().length > 0 && v.length <= 65_000;
+}
+
+/** A repository-relative file path: no leading slash, and no empty, `.` or `..` segment. */
+function isFilePath(v: unknown): v is string {
+  return typeof v === "string" && v.length > 0 && v.length <= 1_000 && !v.includes("\u0000") && v.split("/").every((part) => part !== "" && part !== "." && part !== "..");
 }
 
 function isRef(v: unknown): v is string {

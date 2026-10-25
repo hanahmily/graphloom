@@ -2,9 +2,10 @@ import { writeScopeExceptions, writeScopeExcludes, type EnvironmentCommand } fro
 import { COMMAND } from "./constants.js";
 import type { DecisionRecord } from "./decision-record.js";
 import { acceptanceItems } from "./acceptance.js";
+import { contextPrompt, type ContextDocument } from "./context.js";
 import { writeScopeFor } from "./decision-record.js";
 import type { Issue, IssueComment } from "./evidence.js";
-import { commandLabel, commandsFor, commandSummary, commandTier, enforcedProtectedPaths, issueRef, listAnd, type CommandTier, type Profile, type ProfileCommand } from "./profile.js";
+import { checkCommands, commandLabel, contextRefs, commandsFor, commandSummary, commandTier, enforcedProtectedPaths, finalCommands, issueRef, listAnd, type CommandTier, type Profile, type ProfileCommand } from "./profile.js";
 import { ISSUES_DIR, ISSUES_FILE, ISSUES_MARKDOWN } from "./issues.js";
 
 export const MAX_SNAPSHOT_CHARS = 200_000;
@@ -46,13 +47,19 @@ export function snapshotText(profile: Profile, issue: Issue, comments: IssueComm
 const ACCEPTANCE_FIELD =
   "- acceptance: what the issue asks for, as [{id, text}]: one item for each checkbox of its acceptance criteria and each line of its oracle, in the issue's own words (ids A1, A2, …). You may group lines that one change covers together; say so in the text. Leave it empty only when the issue states no criteria. The implementer must cover every item before it returns ready, and a controller check sends the change back when one is not covered.";
 
-export function planInstruction(profile: Profile, args: { issue: number; request: string; snapshot: string }): string {
+/** The context documents as a block of a prompt, under the heading that says what they are; nothing when there are none. */
+function contextSection(context: ContextDocument[] | undefined): string[] {
+  return contextPrompt(context);
+}
+
+export function planInstruction(profile: Profile, args: { issue: number; request: string; snapshot: string; context?: ContextDocument[] }): string {
   const e2e = profile.planning.e2e !== undefined ? `needsE2E when the behaviour needs ${profile.planning.e2e}, ` : "";
   return [
     `Plan a fix for ${issueRef(profile, args.issue)} in this repository (${profile.project}). Do not modify any file.`,
     "",
     "Issue snapshot, the authority for this run (comments posted later are not part of it):",
     args.snapshot,
+    ...contextSection(args.context),
     "",
     "Operator request (it may add answers in a Decisions: block; the issue stays the authority):",
     args.request.trim(),
@@ -72,7 +79,7 @@ export function planInstruction(profile: Profile, args: { issue: number; request
     "- decisions: each unclear point with tier, options, chosen (empty for product points) and basis.",
     `- ${profile.planning.reach}`,
     `- openQuestions for maintainers, followUps, ${e2e}and title for the pull request.`,
-    ACCEPTANCE_FIELD,
+    ACCEPTANCE_FIELD + ((args.context ?? []).length > 0 ? " Where the issue defers to a context document, one item per requirement of that document the issue assigns to this change; an item's text may cite the document by its name." : ""),
     ...(enforcedProtectedPaths(profile).length > 0 ? [`- scopeExceptions: only when the fix must change ${enforcedProtectedPaths(profile).join(", ")}, with the reason.`] : []),
   ].join("\n");
 }
@@ -111,8 +118,9 @@ export function planRevisionInstruction(profile: Profile, args: { issue: number;
 /** What the implementer is told the controller checks: the profile's own words, or one sentence built from its commands. */
 function checksNote(profile: Profile): string {
   if (profile.implementation.checks !== undefined) return `- ${profile.implementation.checks}`;
-  const further = profile.commands.map(commandSummary);
-  return `- The controller checks your change in clean checkouts: the base commit with only your test files must fail the test by assertion; the full change must pass the test${further.length > 0 ? ` and ${listAnd(further)}` : ""}, and the checks must leave no file changed.`;
+  const further = checkCommands(profile).map(commandSummary);
+  const final = finalCommands(profile).map(commandSummary);
+  return `- The controller checks your change in clean checkouts: the base commit with only your test files must fail the test by assertion; the full change must pass the test${further.length > 0 ? ` and ${listAnd(further)}` : ""}, and the checks must leave no file changed.${final.length > 0 ? ` Once code review has passed it runs ${listAnd(final)} once on the reviewed change, and sends the change back to you when that fails.` : ""}`;
 }
 
 /**
@@ -151,7 +159,7 @@ export function issuesProtocol(): string {
   );
 }
 
-export function implementInstruction(profile: Profile, args: { issue: number; plan: DecisionRecord; feedback?: string[]; issues?: boolean }): string {
+export function implementInstruction(profile: Profile, args: { issue: number; plan: DecisionRecord; feedback?: string[]; issues?: boolean; context?: ContextDocument[] }): string {
   const { plan } = args;
   const scope = writeScopeFor(plan, profile);
   const excluded = writeScopeExcludes(scope);
@@ -163,6 +171,7 @@ export function implementInstruction(profile: Profile, args: { issue: number; pl
       : []),
     `Implement the fix for ${issueRef(profile, args.issue)} following this decision record:`,
     JSON.stringify(plan, null, 2),
+    ...contextSection(args.context),
     "",
     `- Write the regression test ${plan.test?.name ?? "(name it)"} in ${plan.test?.package ?? "(the affected package)"} first. Its expected value must come from ${plan.test?.expectedValueSource ?? "the issue"}, not from the new code's output.`,
     `- Change the production caller (${plan.productionCaller ?? "name it"}) so the test passes. ${profile.implementation.conventions}`,
@@ -196,8 +205,13 @@ export function candidateCommands(profile: Profile, test: NonNullable<DecisionRe
   return [
     ...(first && profile.changelog !== undefined ? [{ id: COMMAND.changesDiff, argv: ["git", "diff", "--unified=0", "HEAD~1", "HEAD", "--", profile.changelog.path] }] : []),
     ...(first ? [{ id: COMMAND.regression, argv: profile.runner.argv(test), timeoutMs: profile.regressionTimeoutMs }] : []),
-    ...profile.commands.filter((c) => tier === undefined || commandTier(c) === tier).map(command),
+    ...checkCommands(profile).filter((c) => tier === undefined || commandTier(c) === tier).map(command),
   ];
+}
+
+/** The `final` tier commands, in the profile's order: one job in a checkout of the candidate whose code review converged. */
+export function finalJobCommands(profile: Profile): EnvironmentCommand[] {
+  return finalCommands(profile).map((c) => ({ id: c.id, argv: [...c.argv], ...(c.timeoutMs !== undefined ? { timeoutMs: c.timeoutMs } : {}) }));
 }
 
 const DELIVER =
@@ -298,9 +312,34 @@ export function deliverableFollowUp(profile: Profile, note: string): string | un
   return kept === "" ? undefined : kept;
 }
 
-/** The commit message: the title, the change and the issue it fixes. */
+/**
+ * `text` without any reference to the repositories a profile keeps private
+ * when its pull requests do not link the issue (`pullRequest.reference`): the
+ * issues repository and every context document's repository, as `owner/repo#N`,
+ * `owner/repo:path@ref` or a github.com link. A line that lost one is tidied.
+ * Without `reference` the text is returned as it is.
+ */
+export function withoutPrivateReferences(profile: Profile, text: string): string {
+  if (profile.pullRequest.reference === undefined) return text;
+  const repos = [`${profile.issues.owner}/${profile.issues.repo}`, ...contextRefs(profile).flatMap((d) => (d.repo !== undefined ? [d.repo] : []))];
+  const names = [...new Set(repos)].map((r) => r.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|");
+  const found = new RegExp(`(?:https?://github\\.com/)?(?:${names})(?:[#:@/][^\\s)\\]>"'\`,;]*)?`, "i");
+  const all = new RegExp(found.source, "gi");
+  return text
+    .split("\n")
+    .map((line) => (found.test(line) ? line.replace(all, "").replace(/\((?:see|per|in|from|cf\.?|ref\.?)?\s*\)/gi, "").replace(/[ \t]+([,.;:])/g, "$1").replace(/[ \t]{2,}/g, " ").trimEnd() : line))
+    .join("\n");
+}
+
+/** What the change is for under a profile's `reference`: `Implements <subject> <title>`, with no reference to the issue. */
+const implementsLine = (profile: Profile, issueTitle: string): string => `Implements ${profile.pullRequest.reference!.subject} ${issueTitle}`;
+
+/** The commit message: the title, the change and the issue it fixes (or, under `pullRequest.reference`, what it implements, with no reference to the issue). */
 export function commitMessage(profile: Profile, args: { issue: number; issueTitle: string; record: DecisionRecord; plan?: DecisionRecord }): string {
-  return [args.record.title?.trim() || `Fix ${args.issueTitle}`, "", changeDescription(args.record, args.plan), "", `Fixes ${issueRef(profile, args.issue)}`].join("\n");
+  const { reference } = profile.pullRequest;
+  const title = args.record.title?.trim() || (reference !== undefined ? `Implement ${reference.subject} ${args.issueTitle}` : `Fix ${args.issueTitle}`);
+  const trailer = reference !== undefined ? implementsLine(profile, args.issueTitle) : `Fixes ${issueRef(profile, args.issue)}`;
+  return withoutPrivateReferences(profile, [title, "", changeDescription(args.record, args.plan), "", trailer].join("\n"));
 }
 
 /** The pull request body, following the profile's pull request template. */
@@ -322,6 +361,8 @@ export function pullRequestDescription(
     reviewFollowUps?: string[];
     /** The review issues table's rows (issues.ts issueTableRows), when the run tracked any. */
     issues?: string[];
+    /** What the final tier's commands reported, one section each (final.ts finalSections). */
+    sections?: Array<{ heading: string; lines: string[] }>;
   },
 ): string {
   const { record } = args;
@@ -341,7 +382,7 @@ export function pullRequestDescription(
     return [`- ${point}: ${chosen}.${basis !== "" ? ` ${basis}` : ""}${d.options.length > 1 && others.length > 0 ? ` Alternatives: ${others.join("; ")}.` : ""}`];
   });
   const lines = [
-    `### Fix ${ref}: ${args.issueTitle}`,
+    profile.pullRequest.reference !== undefined ? `### ${implementsLine(profile, args.issueTitle)}` : `### Fix ${ref}: ${args.issueTitle}`,
     ...profile.pullRequest.checklist,
     "",
     "## Summary",
@@ -362,10 +403,11 @@ export function pullRequestDescription(
       ? ["- Critical or high review findings an independent verifier refuted; overrule any that is wrong:", ...args.dismissed!.map((d) => `  - ${d}`)]
       : []),
     ...(record.needsE2E === true && profile.pullRequest.e2eNote !== undefined ? [`- ${profile.pullRequest.e2eNote}`] : []),
+    ...(args.sections ?? []).flatMap((s) => ["", `## ${s.heading}`, ...s.lines]),
     ...((args.issues ?? []).length > 0
       ? ["", "## Review issues", "Critical and high code review findings, as the run tracked them: done ones the reviewer verified fixed, dismissed ones an independent verifier refuted.", "", ...args.issues!]
       : []),
     ...(profile.pullRequest.footer.length > 0 ? ["", ...profile.pullRequest.footer.map((l) => l.replaceAll("{issue}", ref))] : []),
   ];
-  return lines.join("\n");
+  return withoutPrivateReferences(profile, lines.join("\n"));
 }

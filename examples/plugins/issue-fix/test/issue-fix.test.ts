@@ -24,6 +24,11 @@ import {
   parseProfile,
   shippedProfile,
   MAX_SNAPSHOT_CHARS,
+  MAX_CONTEXT_BYTES,
+  BENCH_GUIDANCE,
+  readContext,
+  contextDocuments,
+  writtenText,
   QUALIFICATION_CASES,
   VERIFICATION_SCHEMA,
   advanceFix,
@@ -125,6 +130,10 @@ interface Scenario {
   fullChecks?: Array<Partial<Record<string, CommandResult>>>;
   /** The profile config the run uses, instead of the banyandb profile. */
   profile?: unknown;
+  /** Outcomes for each final-tier job in order, by command id (the last repeats); a command not listed succeeds. */
+  finals?: Array<Partial<Record<string, CommandResult>>>;
+  /** Resume right after this final-tier job (1-based). */
+  resumeAfterFinal?: number;
   /** Resume after this many full-tier check jobs. */
   resumeAfterFullChecks?: number;
   /** Resume right after this base RED run (1-based). */
@@ -155,6 +164,8 @@ interface Scenario {
    */
   supervisorWorkAfterFix?: boolean;
   issueBody?: string;
+  /** What a fake GitHub serves for a context document, by "owner/name:path"; a file not listed (or null) is not found. */
+  contextFiles?: Record<string, string | null>;
   comments?: Array<{ author: string; createdAt: string; body: string }>;
   /** Whether the comment listing reached its last page. */
   commentsComplete?: boolean;
@@ -172,6 +183,8 @@ interface Scenario {
   fixerEdits?: Array<((file: string | undefined) => string | undefined) | undefined>;
   /** The first this many issues-read commands fail (exit 1), as a crashed or timed-out read does. */
   failReads?: number;
+  /** Every context file write fails (exit 1). */
+  failContextWrites?: boolean;
   /** The first this many deliver commands fail (exit 1), as an unusable deliver command does. */
   failDeliveries?: number;
   /** After the run stops on a failed delivery, resume once (a new generation), as an operator does after fixing it. */
@@ -224,6 +237,7 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
   let changed = 0;
   let candidates = 0;
   let fullJobs = 0;
+  let finalJobs = 0;
   let redRuns = 0;
   let revertedRuns = 0;
   let planned = 0;
@@ -279,6 +293,18 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
     const input = job.input as { commands?: Array<{ id: string; argv: string[] }>; number?: number } | undefined;
     if (job.executor?.id === "graphloom.github/get-issue") {
       record("other", { github: { item: { number: input!.number, title: "Scheduler reports long actions as timed out", state: "open", url: "u", labels: [], body: scenario.issueBody ?? "Backups longer than five minutes are reported as action timed out." } } }, job, op);
+      return;
+    }
+    if (job.executor?.id === "graphloom.github/get-file") {
+      // A fake GitHub serving `contextFiles` by "owner/name:path"; a file it does not serve is not found.
+      const asked = job.input as { owner: string; repo: string; path: string; ref?: string };
+      const served = scenario.contextFiles?.[`${asked.owner}/${asked.repo}:${asked.path}`];
+      const query = { owner: asked.owner, repo: asked.repo, path: asked.path, ref: asked.ref ?? null };
+      const item =
+        served === undefined || served === null
+          ? { found: false, path: asked.path, ref: asked.ref ?? null, reason: "not-found" }
+          : { found: true, path: asked.path, ref: asked.ref ?? null, sha: `blob-${asked.path}`.padEnd(40, "0"), size: Buffer.byteLength(served), text: served };
+      record("other", { github: { operation: "get-file", query, item } }, job, op);
       return;
     }
     if (job.executor?.id === "graphloom.github/list-issue-comments") {
@@ -352,6 +378,16 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
       if (scenario.resumeAfterReverted === revertedRuns) resumeAt();
       return;
     }
+    if (job.checkout?.from === "candidate" && job.stageId === "review") {
+      // The final tier: one job in Review, a checkout of the reviewed candidate.
+      const results = nth(scenario.finals, finalJobs) ?? {};
+      finalJobs += 1;
+      for (const c of input!.commands!) {
+        record("command", { ...commandPayload(c.id, { ...results[c.id] }, c.argv), checkout: { from: "candidate", base: "base-sha", commit: `f-${op}`, paths: CHANGED, prepared: true, mutations: [], phase: "run" } }, job, op);
+      }
+      if (scenario.resumeAfterFinal === finalJobs) resumeAt();
+      return;
+    }
     if (job.checkout?.from === "candidate") {
       // A round of candidate checks is one job, or two when the profile is tiered: the full job belongs to the round the cheap job opened.
       const greenJob = input!.commands!.some((c) => c.id === COMMAND.regression);
@@ -386,6 +422,8 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
       } else if (c.id === COMMAND.deliver && failedDeliveries < (scenario.failDeliveries ?? 0)) {
         failedDeliveries += 1;
         record("command", commandPayload(c.id, { exitCode: 1, stderr: "The following paths are ignored by one of your .gitignore files:\n.graphloom\n" }, c.argv), job, op);
+      } else if (c.id.startsWith("context-write-")) {
+        record("command", commandPayload(c.id, scenario.failContextWrites === true ? { exitCode: 1, stderr: "chmod: denied\n" } : { stdout: "written\n" }, c.argv), job, op);
       } else if (c.id === "issues-read") {
         record("command", commandPayload(c.id, issuesFile === undefined ? { stdout: "missing\n" } : { stdout: "present\n", report: issuesFile }, c.argv), job, op);
       } else {
@@ -410,6 +448,8 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
       outstanding: [],
       budgets,
       validatorBindings: definition.defaultValidators,
+      // What the runner hands a graph: the input shape the coding agent declares (its assignment is at most 64,000 characters).
+      executors: [{ id: "graphloom.coding-agent/run", inputShape: { schema: { type: "object", required: ["assignment"], properties: { assignment: { type: "string", minLength: 1, maxLength: 64_000 } } }, example: { assignment: "x" } } }],
       generation,
       stateRevision: step,
       activeVersion: "issue-fix@0.1.0",
@@ -1180,7 +1220,7 @@ describe("issue-fix graph under the banyandb profile", () => {
       expect(tiers).toEqual({ "test-ci": "cheap", build: "full", lint: "cheap", check: "full" });
       const bad = structuredClone(BANYANDB) as { commands: Array<{ tier?: string }> };
       bad.commands[0]!.tier = "fast";
-      expect(() => parseProfile(bad)).toThrow(/commands\[0\]\.tier must be cheap or full/);
+      expect(() => parseProfile(bad)).toThrow(/commands\[0\]\.tier must be cheap, full or final/);
     });
 
     it("dispatches no full-tier command when the cheap tier fails, and corrects the implementer with that evidence", () => {
@@ -2388,5 +2428,663 @@ describe("acceptance coverage before code review (#183)", () => {
     expect(schema.required).not.toContain("coverage");
     expect(parseDecisionRecord(JSON.stringify(PLAN))).toHaveProperty("record");
     expect(acceptanceItems(PLAN)).toEqual([]);
+  });
+});
+
+describe("context documents (#195)", () => {
+  const DESIGN = "# Relational design\n\nA join keeps duplicate matches.\n";
+  const TICKETS = "# Tickets\n\nR01 is a bounded INNER JOIN.\n";
+  const LOCAL = "# Local contract\n\nThe change documents its grammar.\n";
+  const withContext = (context: unknown[]): unknown => {
+    const profile = structuredClone(BANYANDB) as { issues: Record<string, unknown> };
+    profile.issues.context = context;
+    return profile;
+  };
+  const CROSS = withContext([
+    { repo: "acme/private-design", path: "docs/relational-design.md", ref: "main" },
+    { repo: "acme/private-design", path: "docs/relational-tickets.md" },
+  ]);
+  const SERVED = { "acme/private-design:docs/relational-design.md": DESIGN, "acme/private-design:docs/relational-tickets.md": TICKETS };
+  const getFiles = (jobs: JobSpec[]) => jobs.filter((j) => j.executor?.id === "graphloom.github/get-file");
+  const agents = (jobs: JobSpec[], purpose: string, stage: string) => jobs.filter((j) => j.kind === "agent" && j.purpose === purpose && j.stageId === stage);
+
+  it("reads a cross-repository context once, in Fix, before any agent, and gives both documents to the planner, the implementer and the reviewer", () => {
+    const { decision, jobs, evidence } = simulate({ profile: CROSS, contextFiles: SERVED });
+    expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+    // One read job per document, read-only, in the profile's order, after the issue and its comments and before the plan.
+    const reads = getFiles(jobs);
+    expect(reads.map((j) => j.input)).toEqual([
+      { owner: "acme", repo: "private-design", path: "docs/relational-design.md", ref: "main" },
+      { owner: "acme", repo: "private-design", path: "docs/relational-tickets.md" },
+    ]);
+    for (const read of reads) expect(read).toMatchObject({ stageId: "fix", kind: "command", purpose: "diagnostic", readOnly: true });
+    const firstAgent = jobs.findIndex((j) => j.kind === "agent");
+    expect(jobs.indexOf(reads[1]!)).toBeLessThan(firstAgent);
+    // The documents are evidence, with the blob sha and size the executor reported.
+    const item = (evidence.find((e) => (e.payload as { github?: { operation?: string } }).github?.operation === "get-file")!.payload as { github: { item: Record<string, unknown> } }).github.item;
+    expect(item).toMatchObject({ found: true, path: "docs/relational-design.md", size: Buffer.byteLength(DESIGN) });
+
+    const plan = assignment(agents(jobs, "diagnostic", "fix")[0]);
+    const work = assignment(agents(jobs, "work", "fix")[0]);
+    const review = assignment(agents(jobs, "review", "review")[0]);
+    for (const [who, text] of [["planner", plan], ["implementer", work], ["reviewer", review]] as const) {
+      expect(text, who).toContain("## Context document: acme/private-design:docs/relational-design.md@main (");
+      expect(text, who).toContain(DESIGN.trim());
+      expect(text, who).toContain("## Context document: acme/private-design:docs/relational-tickets.md (");
+      expect(text, who).toContain(TICKETS.trim());
+    }
+    // The planner may cite them in its acceptance items.
+    expect(plan).toContain("an item's text may cite the document by its name");
+    // The issue snapshot still comes first, and the planner is told whose authority wins.
+    expect(plan.indexOf("Issue snapshot")).toBeLessThan(plan.indexOf("## Context document"));
+    expect(plan).toContain("the issue's own acceptance criteria and maintainer comments still come first");
+  });
+
+  it("reads a document of the target repository from the worktree, once, and keeps the first reading when the file changes", () => {
+    const profile = withContext([{ path: "docs/local.md" }]);
+    const { decision, jobs, observed } = simulate({ profile, files: { "docs/local.md": LOCAL } });
+    expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+    expect(getFiles(jobs)).toEqual([]);
+    expect(observed.filter((p) => p === "docs/local.md")).toHaveLength(1);
+    expect(assignment(agents(jobs, "diagnostic", "fix")[0])).toContain(`## Context document: docs/local.md (`);
+    expect(assignment(agents(jobs, "review", "review")[0])).toContain(LOCAL.trim());
+
+    // A later observation of the same path (the implementer's own edit) never replaces the pinned one.
+    const before: EvidenceRecord = { ref: "e1", kind: "file", generation: 1, candidateDigest: "d0", fingerprint: "a".repeat(64), payload: { path: "docs/local.md", bytes: LOCAL } };
+    const after: EvidenceRecord = { ref: "e2", kind: "file", generation: 2, candidateDigest: "d1", fingerprint: "b".repeat(64), payload: { path: "docs/local.md", bytes: "# Edited\n" } };
+    expect(readContext([before, after], { path: "docs/local.md" })).toMatchObject({ kind: "read", doc: { text: LOCAL, digest: "a".repeat(64), bytes: Buffer.byteLength(LOCAL) } });
+  });
+
+  it("does not read the documents again after a resume or a reentry", () => {
+    const resumed = simulate({ profile: CROSS, contextFiles: SERVED, resumeAfterCandidate: 1 });
+    expect(resumed.decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+    expect(getFiles(resumed.jobs)).toHaveLength(2);
+    const afterFix = simulate({ profile: CROSS, contextFiles: SERVED, resumeAfterFix: true });
+    expect(getFiles(afterFix.jobs)).toHaveLength(2);
+    // The pinned documents also reach a correction pass after the graph sends Fix back.
+    const finding = { path: "pkg/timestamp/scheduler.go", start_line: 88, end_line: 95, category: "bug", severity: "high", content: "Close now waits forever for an action that ignores cancellation." };
+    const back = simulate({ profile: CROSS, contextFiles: SERVED, graphReenters: {}, codeReviews: [reviewed([finding]), priorPass({ F1: "still_present" }), priorPass({ F1: "resolved" })] });
+    expect(back.reenterDecisions).toBe(1);
+    expect(getFiles(back.jobs)).toHaveLength(2);
+    const work = agents(back.jobs, "work", "fix");
+    expect(work).toHaveLength(2);
+    expect(assignment(work[1])).toContain(DESIGN.trim());
+  });
+
+  it("stops with an incompatible-task reason, before any agent, when a document is missing", () => {
+    const missing = simulate({ profile: CROSS, contextFiles: { "acme/private-design:docs/relational-design.md": DESIGN } });
+    expect(missing.decision.action).toMatchObject({
+      type: "stop",
+      stop: { reason: "incompatible task", blocker: expect.stringContaining("the context document acme/private-design:docs/relational-tickets.md cannot be used: it does not exist at that ref"), retryable: false },
+    });
+    expect(missing.jobs.filter((j) => j.kind === "agent")).toEqual([]);
+    const local = simulate({ profile: withContext([{ path: "docs/nope.md" }]), files: { "docs/nope.md": null } });
+    expect(local.decision.action).toMatchObject({ type: "stop", stop: { reason: "incompatible task", blocker: expect.stringContaining("docs/nope.md cannot be used: the target repository has no such file at the base commit") } });
+    expect(local.jobs.filter((j) => j.kind === "agent")).toEqual([]);
+  });
+
+  it("enforces the size bound on the documents together, naming them", () => {
+    const big = "x".repeat(MAX_CONTEXT_BYTES / 2 + 1);
+    const over = simulate({ profile: CROSS, contextFiles: { "acme/private-design:docs/relational-design.md": big, "acme/private-design:docs/relational-tickets.md": big } });
+    expect(over.decision.action).toMatchObject({ type: "stop", stop: { reason: "incompatible task", blocker: expect.stringMatching(new RegExp(`more than the ${MAX_CONTEXT_BYTES} a run carries`)), retryable: false } });
+    expect((over.decision.action as { stop: { blocker: string } }).stop.blocker).toContain("docs/relational-design.md");
+    expect(over.jobs.filter((j) => j.kind === "agent")).toEqual([]);
+    // Exactly the bound is fine.
+    const half = { "acme/private-design:docs/relational-design.md": "y".repeat(MAX_CONTEXT_BYTES / 2), "acme/private-design:docs/relational-tickets.md": "z".repeat(MAX_CONTEXT_BYTES / 2) };
+    const exact = simulate({ profile: CROSS, contextFiles: half });
+    expect(exact.decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+    // Long documents are files, not prompt text, so they never crowd the issue out of the assignment.
+    expect(exact.jobs.filter((j) => j.kind === "agent").every((j) => assignment(j).length < 20_000)).toBe(true);
+  });
+
+  const writes = (jobs: JobSpec[]) => jobs.filter((j) => (j.input as { commands?: Array<{ id: string }> } | undefined)?.commands?.some((c) => c.id.startsWith("context-write-")));
+  const LONG = "L".repeat(20_000);
+  const LONG_DOCS = Object.fromEntries(DOCS_OF(LONG));
+  function DOCS_OF(text: string): Array<[string, string]> {
+    return [
+      ["acme/private-design:docs/relational-design.md", `# Design\n${text}\n"quoted" and \\backslashed\n`],
+      ["acme/private-design:docs/relational-tickets.md", `# Tickets\n${text}\n`],
+    ];
+  }
+
+  it("hands documents too long for a prompt to every agent job as read-only files, written from the evidence, and lists them in the assignment", () => {
+    const { decision, jobs } = simulate({ profile: CROSS, contextFiles: LONG_DOCS });
+    expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+    expect(getFiles(jobs)).toHaveLength(2);
+    // One command per document, in a read-only job, writing below .graphloom/context, before the first agent job.
+    const written = writes(jobs);
+    expect(written.length).toBeGreaterThan(0);
+    expect(written[0]).toMatchObject({ stageId: "fix", kind: "command", purpose: "diagnostic", readOnly: true });
+    const commands = (written[0]!.input as { commands: Array<{ id: string; argv: string[] }> }).commands;
+    expect(commands.map((c) => c.id)).toEqual(["context-write-1", "context-write-2"]);
+    expect(commands.map((c) => c.argv[4])).toEqual([".graphloom/context/01-relational-design.md", ".graphloom/context/02-relational-tickets.md"]);
+    expect(writtenText(commands[0]!.argv, "context-write-1")!.text).toBe(LONG_DOCS["acme/private-design:docs/relational-design.md"]);
+    expect(jobs.indexOf(written[0]!)).toBeLessThan(jobs.findIndex((j) => j.kind === "agent"));
+    // Planner, implementer, reviewer: the listing, never the text.
+    const plan = assignment(agents(jobs, "diagnostic", "fix")[0]);
+    for (const text of [plan, assignment(agents(jobs, "work", "fix")[0]), assignment(agents(jobs, "review", "review")[0])]) {
+      expect(text).toContain("Read them in full with your file tools before you start");
+      expect(text).toMatch(/- \.graphloom\/context\/01-relational-design\.md: acme\/private-design:docs\/relational-design\.md@main \(.+, \d+ bytes\)/);
+      expect(text).toContain("- .graphloom/context/02-relational-tickets.md: acme/private-design:docs/relational-tickets.md (");
+      expect(text).not.toContain(LONG);
+      expect(text).not.toContain("## Context document");
+    }
+    expect(plan.length).toBeLessThan(20_000);
+    // Verifiers get the same list.
+    const verifier = verificationInstruction(parseProfile(CROSS), { findings: [], background: "b", changed: [], context: contextDocuments(simulate({ profile: CROSS, contextFiles: LONG_DOCS }).evidence, parseProfile(CROSS)) });
+    expect(verifier).toContain("- .graphloom/context/01-relational-design.md:");
+    expect(verifier).not.toContain(LONG);
+  });
+
+  it("writes the files again after an implementer run and after a resume, never fetching them again", () => {
+    const base = simulate({ profile: CROSS, contextFiles: LONG_DOCS });
+    const resumed = simulate({ profile: CROSS, contextFiles: LONG_DOCS, resumeAfterCandidate: 1 });
+    expect(resumed.decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+    expect(writes(resumed.jobs).length).toBeGreaterThan(writes(base.jobs).length);
+    expect(getFiles(resumed.jobs)).toHaveLength(2);
+    // After an implementer run (which may have touched them) before the next agent job: at least the first write and one after the implementer.
+    const work = base.jobs.findIndex((j) => j.kind === "agent" && j.purpose === "work");
+    expect(writes(base.jobs).some((w) => base.jobs.indexOf(w) > work)).toBe(true);
+  });
+
+  it("hands a failed write of a context file to the supervisor, naming the file", () => {
+    const failing = simulate({ profile: CROSS, contextFiles: LONG_DOCS, failContextWrites: true });
+    expect(failing.decision.action).toMatchObject({ type: "supervise", supervise: { reason: expect.stringContaining("could not write the context document file .graphloom/context/01-relational-design.md") } });
+    expect(failing.jobs.filter((j) => j.kind === "agent")).toEqual([]);
+  });
+
+  it("stops, naming the document, when one is too long to be written as a file, whatever the escapes cost", () => {
+    // Quotes, backslashes and newlines: 142,500 bytes raw, under the bound for documents, about twice that serialized.
+    const heavy = '"\\\n'.repeat(47_500);
+    expect(Buffer.byteLength(heavy)).toBeLessThan(MAX_CONTEXT_BYTES);
+    const { decision, jobs } = simulate({ profile: CROSS, contextFiles: { ...SERVED, "acme/private-design:docs/relational-design.md": heavy } });
+    expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "incompatible task", blocker: expect.stringMatching(/docs\/relational-design\.md@main \(142500 bytes\) is too long to hand to the agents as a file/), retryable: false } });
+    expect(jobs.filter((j) => j.kind === "agent")).toEqual([]);
+    // The same bytes without escapes fit.
+    const plain = simulate({ profile: CROSS, contextFiles: { ...SERVED, "acme/private-design:docs/relational-design.md": "x".repeat(Buffer.byteLength(heavy)) } });
+    expect(plain.decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+  });
+
+  it("checks each agent job's input against the limits its executor declares, and stops naming the field and the limit", () => {
+    // 70,000 characters of issue: the coding agent's assignment is at most 64,000.
+    const { decision, jobs } = simulate({ issueBody: "w".repeat(70_000) });
+    expect(decision.action).toMatchObject({
+      type: "stop",
+      stop: { reason: "incompatible task", blocker: expect.stringMatching(/does not fit what graphloom\.coding-agent\/run declares: assignment: must be at most 64000 characters/), retryable: false },
+    });
+    expect(jobs.filter((j) => j.kind === "agent")).toEqual([]);
+    // Within the limit the same run proceeds.
+    expect(simulate({ issueBody: "w".repeat(40_000) }).decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+  });
+
+  it("runs as before for a profile without context: no read, no block", () => {
+    const { jobs, decision } = simulate({});
+    expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+    expect(getFiles(jobs)).toEqual([]);
+    expect(assignment(agents(jobs, "diagnostic", "fix")[0])).not.toContain("Context document");
+  });
+});
+
+describe("the final command tier (#196)", () => {
+  const SMOKE = { id: "smoke", argv: ["make", "smoke"], timeoutMs: 600_000, requirement: "final-checks", tier: "final", label: "make smoke", section: "Smoke test" };
+  const withFinal = (...commands: object[]): unknown => {
+    const profile = structuredClone(BANYANDB) as { commands: object[] };
+    profile.commands.push(...(commands.length > 0 ? commands : [SMOKE]));
+    return profile;
+  };
+  const FINAL = withFinal();
+  const finalJobs = (jobs: JobSpec[]) => jobs.filter((j) => j.stageId === "review" && j.purpose === "check");
+  const reviewJobs = (jobs: JobSpec[]) => jobs.filter((j) => j.stageId === "review" && j.purpose === "review" && j.kind === "agent");
+  const cheapJobs = (jobs: JobSpec[]) => jobs.filter((j) => j.stageId === "fix" && j.purpose === "check" && j.instruction === "Cheap candidate checks");
+  const fullJobs = (jobs: JobSpec[]) => jobs.filter((j) => j.stageId === "fix" && j.purpose === "check" && j.instruction === "Full candidate checks");
+  const SMOKE_FAILED: CommandResult = { exitCode: 2, stderr: "smoke: the join returned 3 rows, want 4\n" };
+
+  it("declares a Review requirement only for a profile with final commands", () => {
+    const plain = createGraph().describe(BANYANDB);
+    expect(plain.stages.find((s) => s.id === "review")!.requirementIds).toEqual(["code-review"]);
+    const final = createGraph().describe(FINAL);
+    expect(final.stages.find((s) => s.id === "review")!.requirementIds).toEqual(["code-review", "final-checks"]);
+    expect(final.stages.find((s) => s.id === "fix")!.requirementIds).toEqual(plain.stages.find((s) => s.id === "fix")!.requirementIds);
+    expect(final.requirements.find((r) => r.id === "final-checks")!.statement).toBe("In a prepared checkout of the reviewed change, make smoke all pass and change no file.");
+    expect(final.defaultValidators.find((b) => b.requirementId === "final-checks")).toMatchObject({ validatorId: "final-checks" });
+    // The final command is not part of the candidate checks, in any tier.
+    const profile = parseProfile(FINAL);
+    for (const tier of [undefined, "cheap", "full"] as const) {
+      expect(candidateCommands(profile, PLAN.test!, tier).map((c) => c.id)).not.toContain("smoke");
+    }
+  });
+
+  it("runs once, after code review passes, in a checkout of the candidate, and reports it in the pull request", () => {
+    const { decision, jobs, receipts } = simulate({ profile: FINAL, finals: [{ smoke: { report: JSON.stringify({ summary: ["| size | ns/op |", "|---|---|", "| 1,024 | 812 |"] }) } }] });
+    expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+    const runs = finalJobs(jobs);
+    expect(runs).toHaveLength(1);
+    expect(runs[0]).toMatchObject({ stageId: "review", kind: "command", purpose: "check", readOnly: true, checkout: { from: "candidate" } });
+    expect((runs[0]!.input as { commands: Array<{ id: string; argv: string[]; timeoutMs: number }> }).commands).toEqual([{ id: "smoke", argv: ["make", "smoke"], timeoutMs: 600_000 }]);
+    // After the review that passed, never before it, and before delivery.
+    expect(jobs.indexOf(runs[0]!)).toBeGreaterThan(jobs.indexOf(reviewJobs(jobs).at(-1)!));
+    const delivery = jobs.find((j) => (j.input as { commands?: Array<{ id: string }> }).commands?.[0]?.id === COMMAND.deliver)!;
+    expect(jobs.indexOf(delivery)).toBeGreaterThan(jobs.indexOf(runs[0]!));
+    expect(receipts.filter((r) => r.stageId === "review").map((r) => r.requirementId)).toEqual(["code-review", "final-checks"]);
+    // The pull request names the command in its test plan and shows the report's summary, labelled as reported.
+    const { body } = deliverArgs(jobs);
+    expect(body).toContain("`make smoke`");
+    expect(body).toContain("## Smoke test\nReported by `make smoke`; the run gated only on its exit status.\n\n| size | ns/op |\n|---|---|\n| 1,024 | 812 |");
+  });
+
+  it("runs once even when review needs several passes on the candidate", () => {
+    // The first pass does not cover every file, so a second pass is needed.
+    const { decision, jobs } = simulate({ profile: FINAL, codeReviews: [reviewed([], { total_files: 3, reviewed_files: 2, skipped: [] }), reviewed()] });
+    expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+    expect(reviewJobs(jobs)).toHaveLength(2);
+    expect(finalJobs(jobs)).toHaveLength(1);
+    expect(jobs.indexOf(finalJobs(jobs)[0]!)).toBeGreaterThan(jobs.indexOf(reviewJobs(jobs)[1]!));
+    // A report without a summary still gets its section, saying what was gated.
+    expect(deliverArgs(jobs).body).toContain("## Smoke test\nReported by `make smoke`; the run gated only on its exit status.");
+  });
+
+  it("does not run when review does not pass: the supervisor gets the review failure, no final job ran", () => {
+    const finding = { path: "pkg/timestamp/scheduler.go", start_line: 88, end_line: 95, category: "bug", severity: "high", content: "Close now waits forever for an action that ignores cancellation." };
+    const { decision, jobs } = simulate({ profile: FINAL, codeReviews: [reviewed([finding])] });
+    expect(decision.action).toMatchObject({ type: "supervise" });
+    expect(finalJobs(jobs)).toEqual([]);
+  });
+
+  it("sends Fix back with the failing final command's output, and the next candidate runs every tier again", () => {
+    const { decision, jobs, reenterDecisions, decisions } = simulate({ profile: FINAL, graphReenters: {}, finals: [{ smoke: SMOKE_FAILED }, {}] });
+    expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+    expect(reenterDecisions).toBe(1);
+    const reenter = decisions.find((d) => d.action.type === "reenter")!;
+    expect(reenter.action).toMatchObject({ type: "reenter", reenter: { stageId: "fix", reason: expect.stringContaining("the final checks failed on the reviewed change") } });
+    expect((reenter.action as { reenter: { reason: string } }).reenter.reason).toContain("smoke exited 2");
+    expect((reenter.action as { reenter: { reason: string } }).reenter.reason).toContain("(reentry 1 of 4)");
+    // The implementer is told what failed, with the output.
+    const work = jobs.filter((j) => j.kind === "agent" && j.purpose === "work");
+    expect(work).toHaveLength(2);
+    expect(assignment(work[1])).toContain("Code review passed, but the final checks, which run once on the reviewed change, failed");
+    expect(assignment(work[1])).toContain("smoke exited 2 in the candidate checkout");
+    expect(assignment(work[1])).toContain("the join returned 3 rows, want 4");
+    // The correction is a new candidate: both check tiers, code review and the final tier run again, in that order.
+    expect(cheapJobs(jobs)).toHaveLength(2);
+    expect(fullJobs(jobs)).toHaveLength(2);
+    expect(reviewJobs(jobs).length).toBeGreaterThanOrEqual(2);
+    expect(finalJobs(jobs)).toHaveLength(2);
+    expect(jobs.indexOf(finalJobs(jobs)[0]!)).toBeLessThan(jobs.indexOf(work[1]!));
+    expect(jobs.indexOf(work[1]!)).toBeLessThan(jobs.indexOf(cheapJobs(jobs)[1]!));
+    expect(jobs.indexOf(cheapJobs(jobs)[1]!)).toBeLessThan(jobs.indexOf(finalJobs(jobs)[1]!));
+  });
+
+  it("counts a final failure against the review reentry cap, then hands the failure to the supervisor", () => {
+    const { decision, jobs, reenterDecisions } = simulate({ profile: FINAL, graphReenters: { maxReentries: 1 }, finals: [{ smoke: SMOKE_FAILED }] });
+    expect(reenterDecisions).toBe(1);
+    expect(finalJobs(jobs)).toHaveLength(2);
+    expect(decision.action).toMatchObject({ type: "supervise", supervise: { reason: expect.stringContaining("the final checks failed on the reviewed change: final-checks: smoke exited 2") } });
+    // With no reentries allowed the first failure goes straight to the supervisor.
+    const none = simulate({ profile: FINAL, finals: [{ smoke: SMOKE_FAILED }] });
+    expect(none.reenterDecisions).toBe(0);
+    expect(none.decision.action).toMatchObject({ type: "supervise" });
+  });
+
+  it("hands over a final failure that a reentry did not change, instead of running it again", () => {
+    const { decision, jobs, reenterDecisions } = simulate({ profile: FINAL, graphReenters: {}, unchangedWork: [2], finals: [{ smoke: SMOKE_FAILED }] });
+    expect(reenterDecisions).toBe(1);
+    expect(decision.action).toMatchObject({ type: "supervise" });
+    // The unchanged candidate already has its one final run.
+    expect(finalJobs(jobs)).toHaveLength(1);
+  });
+
+  it("fails a final command that leaves a file changed, even when it exits 0", () => {
+    const profile = parseProfile(FINAL);
+    const run = (mutations: string[]): EvidenceRecord => ({
+      ref: "f1",
+      kind: "command",
+      candidateDigest: "d1",
+      payload: { command: { id: "smoke", argv: ["make", "smoke"], exitCode: 0, stdoutTail: "", stderrTail: "" }, checkout: { from: "candidate", base: "b", commit: "c", paths: CHANGED, prepared: true, mutations, phase: "run" }, producer: { operationId: "op-f", stageId: "review", purpose: "check", readOnly: true, kind: "command" } },
+    });
+    const evaluate = (evidence: EvidenceRecord[]) => validatorById("final-checks")!.evaluate({ requirementId: "final-checks", statement: "s", evidence, candidateDigest: "d1", config: FINAL });
+    expect(evaluate([run([])])).toMatchObject({ status: "passed" });
+    expect(evaluate([run(["build/out.txt"])])).toMatchObject({ status: "failed", reason: expect.stringContaining("left files changed: build/out.txt") });
+    expect(evaluate([])).toMatchObject({ status: "inconclusive" });
+    // A run on another candidate is no evidence for this one.
+    expect(evaluate([{ ...run([]), candidateDigest: "d0" }])).toMatchObject({ status: "inconclusive" });
+    expect(profile.commands.at(-1)).toMatchObject({ id: "smoke", tier: "final" });
+  });
+
+  it("runs a profile without final commands exactly as before: no final job, no Review requirement, no section", () => {
+    const { decision, jobs, receipts } = simulate({});
+    expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+    expect(finalJobs(jobs)).toEqual([]);
+    expect(receipts.filter((r) => r.stageId === "review").map((r) => r.requirementId)).toEqual(["code-review"]);
+    expect(deliverArgs(jobs).body).not.toContain("Reported by");
+  });
+
+  describe("after a resume (#154)", () => {
+    it("runs a final failure from before the latest resume once more, and passes", () => {
+      const { decision, jobs, reenterDecisions } = simulate({ profile: FINAL, finals: [{ smoke: SMOKE_FAILED }, {}], resumeAfterFinal: 1 });
+      expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+      expect(finalJobs(jobs)).toHaveLength(2);
+      // The stale failure was not acted on: no reentry, no second implementer pass.
+      expect(reenterDecisions).toBe(0);
+      expect(jobs.filter((j) => j.kind === "agent" && j.purpose === "work")).toHaveLength(1);
+    });
+
+    it("acts on a failure recorded since the resume, so a failing command cannot loop", () => {
+      const { decision, jobs } = simulate({ profile: FINAL, finals: [{ smoke: SMOKE_FAILED }], resumeAfterFinal: 1 });
+      expect(finalJobs(jobs)).toHaveLength(2);
+      expect(decision.action).toMatchObject({ type: "supervise", supervise: { reason: expect.stringContaining("smoke exited 2") } });
+    });
+
+    it("does not run a final command that passed before the resume again", () => {
+      const { decision, jobs } = simulate({ profile: FINAL, resumeAfterFinal: 1 });
+      expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+      expect(finalJobs(jobs)).toHaveLength(1);
+    });
+  });
+
+  it("checks the tier and requirement a profile declares for a command", () => {
+    const broken = (command: object) => () => parseProfile(withFinal(command));
+    expect(broken({ ...SMOKE, requirement: "passes" })).toThrow(/a final tier command counts toward final-checks/);
+    expect(broken({ ...SMOKE, tier: "full" })).toThrow(/only a final tier command may/);
+    expect(broken({ ...SMOKE, tier: "last" })).toThrow(/tier must be cheap, full or final/);
+    expect(broken({ ...SMOKE, requirement: "bench" })).toThrow(/requirement must be passes, builds, final-checks or bench-gates/);
+    expect(broken({ ...SMOKE, section: "" })).toThrow(/section is a pull request heading/);
+    expect(broken({ ...SMOKE, tier: undefined, requirement: "builds", section: "X" })).toThrow(/section is a pull request heading, for a final tier command only/);
+    expect(broken(SMOKE)).not.toThrow();
+    expect(broken({ ...SMOKE, section: undefined })).not.toThrow();
+  });
+});
+
+describe("the banyandb-ql profile and its benchmark gates (#197)", () => {
+  const QL = shippedProfile("banyandb-ql");
+  const ql = parseProfile(QL);
+  const REQUEST = "Implement hanahmily/banyandb-ql-design#7.";
+  const DOCS = ["relational-design", "relational-tickets", "catalog-b-context"];
+  const SERVED = Object.fromEntries(DOCS.map((d) => [`hanahmily/banyandb-ql-design:docs/${d}.md`, `# ${d}\n\nThe contract text of ${d}.\n`]));
+  const SIZES = [
+    { facts: 1_024, dimensions: 64 },
+    { facts: 16_384, dimensions: 1_024 },
+  ];
+  type Json = Record<string, unknown>;
+  /** A complete, passing `ql-bench-report/v1`, as a ticket's runner writes it, with `patch` applied by key. */
+  const benchReport = (patch: (report: Json) => void = () => undefined): Json => {
+    const samples = (base: number) =>
+      [1, 2, 3, 4, 5].flatMap((pair) =>
+        ["operator", "reference"].map((variant) => ({
+          pair,
+          order: pair % 2 === 1 ? "AB" : "BA",
+          variant,
+          nsPerOp: base * (variant === "operator" ? 1 : 40) + pair,
+          allocBytesPerOp: 4_096,
+          allocsPerOp: 12,
+          retainedBytes: 65_536,
+          rpcP50Ns: 900_000,
+          rpcP95Ns: 1_400_000,
+          rpcCpuNs: 700_000,
+        })),
+      );
+    const report: Json = {
+      schema: "ql-bench-report/v1",
+      ticket: "R01",
+      environment: { goVersion: "go1.26.10", commit: "a".repeat(40), baseCommit: "b".repeat(40), seed: 20261024, cpus: 4, memoryBytes: 8_589_934_592, swapBytes: 0 },
+      budgets: { queryBytes: 268_435_456, perOperatorBytes: 134_217_728 },
+      preflight: SIZES.map((s, i) => ({ ...s, fits: true, peakAccountedBytes: 1_000_000 * (i + 1), budgetBytes: 268_435_456 })),
+      gates: { exactResults: { checked: 52_224, mismatches: 0 }, failedTimedCalls: { count: 0 }, accountedMemory: { peakBytes: 2_000_000, budgetBytes: 268_435_456 }, outstandingResources: { count: 0 } },
+      cases: SIZES.map((size, i) => ({
+        name: "join-unique",
+        size,
+        samples: samples(800 * (i + 1)),
+        effects: [{ metric: "nsPerOp", comparison: "operator-vs-reference", estimate: -0.97, ciLow: -0.98, ciHigh: -0.96, confidence: 0.95 }],
+      })),
+    };
+    patch(report);
+    return report;
+  };
+  /** What the bench-gates command leaves as its report file: the wrapper's envelope. */
+  const envelope = (report: Json): string => JSON.stringify({ harness: { image: "golang:1.26.10", imageGo: "go version go1.26.10 linux/amd64", cpus: 4, memory: "8g", memorySwap: "8g" }, report });
+  const gates = (report: Json) => report.gates as Record<string, Record<string, number>>;
+  const bench = (report: Json, o: Partial<CommandResult> = {}): Partial<Record<string, CommandResult>> => ({ "bench-gates": { report: envelope(report), ...o } });
+  const finalRuns = (jobs: JobSpec[]) => jobs.filter((j) => j.stageId === "review" && j.purpose === "check");
+  const work = (jobs: JobSpec[]) => jobs.filter((j) => j.kind === "agent" && j.purpose === "work");
+  const run = (finals: Array<Partial<Record<string, CommandResult>>>, more: Partial<Scenario> = {}) =>
+    simulate({ profile: QL, contextFiles: SERVED, finals, ...more }, REQUEST);
+
+  it("derives from the banyandb profile: same project, environment checks, budgets and commands, plus the private tracker, the context and the benchmark", () => {
+    const base = parseProfile(BANYANDB);
+    expect(ql.name).toBe("banyandb-ql");
+    expect(ql.project).toBe(base.project);
+    expect(ql.budgets).toEqual(base.budgets);
+    expect(ql.regression).toEqual(base.regression);
+    expect(ql.harnesses).toEqual(base.harnesses);
+    expect(ql.commands.slice(0, base.commands.length)).toEqual(base.commands);
+    // The environment is banyandb's, plus one check that the benchmark's container runtime is there.
+    expect(ql.environment.checks!.filter((c) => c.id !== "docker")).toEqual(base.environment.checks);
+    expect(ql.environment.checks!.find((c) => c.id === "docker")!.argv[2]).toContain("docker info");
+    // And one prepare output: at the base the tickets build on, `make check` formats api/ with bin/buf, which only `make generate` installs (api/Makefile defines BUF after lint-api.mk reads it, so the format target has no rule for it), so a checkout restored from the prepare cache needs the binary cached too.
+    const prepare = (profile: typeof ql) => profile.environment.prepare!.map((c) => (c.id === "generate-proto" ? { ...c, outputs: c.outputs!.filter((o) => o !== "bin/buf") } : c));
+    expect(ql.environment.prepare!.find((c) => c.id === "generate-proto")!.outputs).toContain("bin/buf");
+    expect(prepare(ql)).toEqual(prepare(base));
+    expect({ ...ql.environment, checks: undefined, prepare: undefined }).toEqual({ ...base.environment, checks: undefined, prepare: undefined });
+    expect(ql.issues).toEqual({
+      owner: "hanahmily",
+      repo: "banyandb-ql-design",
+      context: DOCS.map((d) => ({ repo: "hanahmily/banyandb-ql-design", path: `docs/${d}.md` })),
+    });
+    expect(ql.commands.at(-1)).toMatchObject({ id: "bench-gates", tier: "final", requirement: "bench-gates", section: "Benchmark" });
+    expect(createGraph().describe(QL).stages.find((s) => s.id === "review")!.requirementIds).toEqual(["code-review", "bench-gates"]);
+  });
+
+  it("runs the benchmark in docker with the frozen resources, a golang image from go.mod, a read-only module cache that the environment names", () => {
+    const argv = ql.commands.at(-1)!.argv;
+    expect(argv.slice(0, 2)).toEqual(["sh", "-c"]);
+    const script = argv[2]!;
+    expect(script).toContain("docker run --rm --cpus=4 --memory=8g --memory-swap=8g");
+    expect(script).toContain(`image="\${GRAPHLOOM_BENCH_IMAGE:-golang:$want}"`);
+    expect(script).toContain("sed -n 's/^go //p' go.mod");
+    expect(script).toContain('-v "$cache:/go/pkg/mod:ro"');
+    expect(script).toContain('-v "$PWD:/src"');
+    // The module cache is the operator's, not hard-coded.
+    expect(script).toContain("GRAPHLOOM_BENCH_GOMODCACHE");
+    expect(script).toContain("go env GOMODCACHE");
+    expect(script).not.toContain("/mnt/d/gomodcache");
+    expect(script).toContain("make bench-ql-report");
+    expect(script).toContain("build/bench/ql-report.json");
+    // A missing target is an actionable failure.
+    expect(script).toContain("this checkout has no make target bench-ql-report");
+    expect(script).toContain("GOPROXY=off");
+  });
+
+  it("gives the planner and the implementer the context documents, the benchmark rules and the report schema, citing the rules' document", () => {
+    const { jobs } = run([{}]);
+    const plan = assignment(jobs.find((j) => j.kind === "agent" && j.purpose === "diagnostic" && j.stageId === "fix"));
+    const implement = assignment(work(jobs)[0]);
+    for (const text of [plan, implement]) {
+      for (const d of DOCS) expect(text).toContain(`## Context document: hanahmily/banyandb-ql-design:docs/${d}.md (`);
+      expect(text).toContain('docs/relational-tickets.md, "Benchmark rules for every ticket"');
+      expect(text).toContain("docs/relational-tickets.md");
+      expect(text).toContain('"schema":"ql-bench-report/v1"');
+      expect(text).toContain("five paired repetitions with alternated order");
+      expect(text).toContain("1,024 facts/64 dimension rows and 16,384 facts/1,024 dimension rows");
+      expect(text).toContain("make bench-ql-report");
+      expect(text).toContain("build/bench/ql-report.json");
+      expect(text).toContain("timings are reported, never gated");
+    }
+    // The profile's notes are exactly the guidance the code documents.
+    expect(ql.planning.notes!.join("\n")).toContain(BENCH_GUIDANCE);
+    // The planner is told to keep the private design out of public text.
+    expect(plan).toContain("do not cite the design repository, its issue numbers or its file names");
+  });
+
+  it("reaches delivery on a stub runner's passing report, with a Benchmark section, and neither Fixes nor the private repository in the commit or the pull request", () => {
+    const report = benchReport();
+    const { decision, jobs, receipts } = run([bench(report)]);
+    expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+    expect(finalRuns(jobs)).toHaveLength(1);
+    expect(receipts.filter((r) => r.stageId === "review").map((r) => r.requirementId)).toEqual(["code-review", "bench-gates"]);
+    const { message, body } = deliverArgs(jobs);
+    expect(body).toContain("## Benchmark\nReported by `make bench-ql-report` in docker (4 CPUs, 8 GiB, no extra swap) in golang:1.26.10, 4 CPUs, 8g memory, 8g memory+swap.");
+    expect(body).toContain("Toolchain go1.26.10, commit aaaaaaaaaaaa on base bbbbbbbbbbbb, fixture seed 20261024.");
+    expect(body).toContain("The run gated only on the hard gates below; timings are reported and never judged.");
+    expect(body).toContain("Hard gates (all held):\n- Exact results: 52224 checked, 0 differ.\n- Failed timed calls: 0.\n- Accounted memory: peak 2000000 of a 268435456 byte budget.\n- Outstanding owned resources: 0.\n- Preflight 1,024/64 fits: peak 1000000 of 268435456 bytes.\n- Preflight 16,384/1,024 fits: peak 2000000 of 268435456 bytes.");
+    expect(body).toContain("Reported only, not gated (medians of the paired samples):");
+    expect(body).toContain("| join-unique (operator) | 1,024/64 | 5 | 803 | 4,096 | 12 | 65,536 | 900,000 | 1,400,000 | 700,000 |");
+    expect(body).toContain("| join-unique (reference) | 16,384/1,024 | 5 | 64,003 |");
+    expect(body).toContain("- join-unique, nsPerOp (operator-vs-reference): -0.97 [-0.98, -0.96] at 95%");
+    // The test plan lists the benchmark among what passed.
+    expect(body).toContain("`make bench-ql-report` in docker (4 CPUs, 8 GiB, no extra swap)");
+    // Implements, not Fixes, and nothing of the private tracker.
+    expect(message.split("\n").at(-1)).toMatch(/^Implements the Measure QL /);
+    expect(body.split("\n")[0]).toMatch(/^### Implements the Measure QL /);
+    for (const text of [message, body]) {
+      expect(text).not.toContain("Fixes");
+      expect(text).not.toContain("hanahmily");
+      expect(text).not.toContain("banyandb-ql-design");
+      expect(text).not.toMatch(/Fix hanahmily/);
+    }
+  });
+
+  it("scrubs a reference to the private repository an agent wrote into the commit or the pull request", () => {
+    const leaky: DecisionRecord = {
+      ...PLAN,
+      change: "Adds the join planner, per hanahmily/banyandb-ql-design#7 and https://github.com/hanahmily/banyandb-ql-design/blob/main/docs/relational-design.md (see hanahmily/banyandb-ql-design:docs/relational-tickets.md@main).",
+      followUps: ["Revisit the fan-out case, as hanahmily/banyandb-ql-design#9 asks."],
+    };
+    const { decision, jobs } = run([bench(benchReport())], { plans: [leaky], implement: [leaky] });
+    expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+    const { message, body } = deliverArgs(jobs);
+    for (const text of [message, body]) {
+      expect(text).not.toMatch(/hanahmily|banyandb-ql-design/);
+      expect(text).toContain("Adds the join planner, per and");
+    }
+    expect(body).toContain("- Revisit the fan-out case, as asks.");
+    // Without the option nothing is scrubbed: the profile's own references stay.
+    const kept = pullRequestDescription(parseProfile(BANYANDB), { issue: 1, issueTitle: "T", record: leaky, base: "abc", review: "r" });
+    expect(kept).toContain("hanahmily/banyandb-ql-design#7");
+  });
+
+  it("sends Fix back when a hard gate fails, with the failing gate and its numbers, even though the command exited 0; the corrected change passes", () => {
+    const failing = benchReport((r) => {
+      gates(r).exactResults!.mismatches = 3;
+    });
+    const { decision, jobs, reenterDecisions, decisions } = run([bench(failing), bench(benchReport())], { graphReenters: {} });
+    expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+    expect(reenterDecisions).toBe(1);
+    const reason = (decisions.find((d) => d.action.type === "reenter")!.action as { reenter: { reason: string } }).reenter.reason;
+    expect(reason).toContain("bench-gates: bench-gates: hard gate failed, exact results: 3 of 52224 results differ from the oracle");
+    const second = assignment(work(jobs)[1]);
+    expect(second).toContain("Code review passed, but the final checks, which run once on the reviewed change, failed");
+    expect(second).toContain("hard gate failed, exact results: 3 of 52224 results differ from the oracle");
+    expect(finalRuns(jobs)).toHaveLength(2);
+    // The next candidate ran every tier again before its benchmark.
+    expect(jobs.filter((j) => j.stageId === "fix" && j.instruction === "Cheap candidate checks")).toHaveLength(2);
+    expect(deliverArgs(jobs).body).toContain("## Benchmark");
+  });
+
+  it("names the same failure to the supervisor when the reentries run out", () => {
+    const failing = benchReport((r) => {
+      gates(r).outstandingResources!.count = 2;
+    });
+    const { decision } = run([bench(failing)]);
+    expect(decision.action).toMatchObject({ type: "supervise", supervise: { reason: expect.stringContaining("outstanding resources: 2 owned resource(s) were not released") } });
+  });
+
+  it("fails a missing make target with a message the implementer can act on", () => {
+    const missing: Partial<CommandResult> = {
+      exitCode: 1,
+      stderr: "bench-gates: this checkout has no make target bench-ql-report. The ticket's change must add it: it runs the ticket's benchmark runner and writes build/bench/ql-report.json (schema ql-bench-report/v1, given in the implementation guidance).\n",
+    };
+    const { decision, jobs } = run([{ "bench-gates": missing }, bench(benchReport())], { graphReenters: {} });
+    expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+    const second = assignment(work(jobs)[1]);
+    expect(second).toContain("bench-gates exited 1 in the candidate checkout");
+    expect(second).toContain("no make target bench-ql-report. The ticket's change must add it");
+  });
+
+  describe("the bench-gates validator", () => {
+    const run1 = (command: Partial<CommandResult>, o: { mutations?: string[]; digest?: string } = {}): EvidenceRecord => ({
+      ref: "b1",
+      kind: "command",
+      candidateDigest: o.digest ?? "d1",
+      payload: {
+        command: { id: "bench-gates", argv: ["sh"], exitCode: command.exitCode ?? 0, stdoutTail: command.stdout ?? "", stderrTail: command.stderr ?? "", ...(command.timedOut === true ? { timedOut: true } : {}), ...(command.report !== undefined ? { report: { text: command.report, truncated: false } } : {}) },
+        checkout: { from: "candidate", base: "b", commit: "c", paths: CHANGED, prepared: true, mutations: o.mutations ?? [], phase: "run" },
+        producer: { operationId: "op-b", stageId: "review", purpose: "check", readOnly: true, kind: "command" },
+      },
+    });
+    const judge = (evidence: EvidenceRecord[]) => validatorById("bench-gates")!.evaluate({ requirementId: "bench-gates", statement: "s", evidence, candidateDigest: "d1", config: QL });
+    const report = (patch?: (r: Json) => void, raw = false) => run1({ report: raw ? JSON.stringify(benchReport(patch)) : envelope(benchReport(patch)) });
+    const failsWith = (patch: (r: Json) => void, text: RegExp) => expect(judge([report(patch)])).toMatchObject({ status: "failed", reason: expect.stringMatching(text) });
+
+    it("passes a complete report whose hard gates hold, as an envelope or bare, and says timings are not judged", () => {
+      expect(judge([report()])).toMatchObject({ status: "passed", reason: expect.stringContaining("every hard gate holds (52224 results exact, no failed timed call, peak 2000000 of 268435456 accounted bytes, no outstanding resource, both sizes fit); timings are reported, not judged") });
+      expect(judge([report(undefined, true)])).toMatchObject({ status: "passed" });
+    });
+
+    it("fails each hard gate on its own, naming the numbers", () => {
+      failsWith((r) => void (gates(r).exactResults!.mismatches = 1), /hard gate failed, exact results: 1 of 52224 results differ from the oracle/);
+      failsWith((r) => void (gates(r).exactResults!.checked = 0), /no result was checked against the oracle/);
+      failsWith((r) => void (gates(r).failedTimedCalls!.count = 4), /failed timed calls: 4 timed call\(s\) failed, and a failure is never a faster observation/);
+      failsWith((r) => void (gates(r).accountedMemory!.peakBytes = 300_000_000), /accounted memory: peak 300000000 bytes exceeds the 268435456 byte budget/);
+      failsWith((r) => void (gates(r).outstandingResources!.count = 1), /outstanding resources: 1 owned resource\(s\) were not released/);
+    });
+
+    it("fails a preflight that does not fit either size, or is missing one, whatever its own `fits` says", () => {
+      failsWith((r) => void ((r.preflight as Json[])[1]!.fits = false), /preflight 16,384\/1,024: peak 2000000 bytes does not fit the 268435456 byte budget/);
+      failsWith((r) => void ((r.preflight as Json[])[0]!.peakAccountedBytes = 999_999_999), /preflight 1,024\/64: peak 999999999 bytes does not fit/);
+      failsWith((r) => void (r.preflight = (r.preflight as Json[]).slice(0, 1)), /preflight: no entry for 16,384\/1,024/);
+      failsWith((r) => void delete r.gates, /exact results: the report gives no checked and mismatches counts/);
+    });
+
+    it("never judges a latency: the slowest possible timings and a worse-than-reference effect still pass", () => {
+      const slow = (r: Json) => {
+        for (const c of r.cases as Json[]) {
+          for (const s of c.samples as Json[]) s.nsPerOp = 9e15;
+          c.effects = [{ metric: "nsPerOp", comparison: "operator-vs-reference", estimate: 5_000, ciLow: 4_000, ciHigh: 6_000, confidence: 0.95 }];
+        }
+      };
+      expect(judge([report(slow)])).toMatchObject({ status: "passed" });
+    });
+
+    it("fails an incomplete report: wrong schema, missing environment or budgets, a size without a case, fewer than five alternated pairs, an effect without an interval", () => {
+      failsWith((r) => void (r.schema = "ql-bench-report/v0"), /the report is incomplete: schema is "ql-bench-report\/v0"/);
+      failsWith((r) => void delete r.environment, /environment is missing/);
+      failsWith((r) => void ((r.environment as Json).seed = undefined), /environment.seed is missing/);
+      failsWith((r) => void (r.budgets = {}), /budgets must list the effective admission budgets/);
+      failsWith((r) => void (r.cases = (r.cases as Json[]).slice(0, 1)), /no case at 16,384\/1,024/);
+      failsWith((r) => void ((r.cases as Json[])[0]!.samples = ((r.cases as Json[])[0]!.samples as Json[]).slice(0, 6)), /join-unique: 3 paired repetition\(s\), want 5/);
+      failsWith((r) => void ((r.cases as Json[])[0]!.samples = { pairs: 5 }), /join-unique: samples must list the raw samples, not count them/);
+      failsWith((r) => void ((r.cases as Json[])[1]!.samples = { count: 10, pairs: 5, medians: {} }), /join-unique: samples must list the raw samples/);
+      failsWith((r) => void ((r.cases as Json[]).forEach((c) => void (c.samples = (c.samples as Json[]).filter((s) => s.variant !== "reference")))), /a pair needs two variants measured against each other/);
+      failsWith((r) => void ((r.cases as Json[])[0]!.samples = ((r.cases as Json[])[0]!.samples as Json[]).filter((s) => !(s.pair === 3 && s.variant === "reference"))), /pair 3 does not hold each variant exactly once/);
+      failsWith((r) => void ((r.cases as Json[])[0]!.samples = [...((r.cases as Json[])[0]!.samples as Json[]), { pair: 6, order: "BA", variant: "operator", nsPerOp: 1, allocBytesPerOp: 1, retainedBytes: 1 }, { pair: 6, order: "BA", variant: "reference", nsPerOp: 1, allocBytesPerOp: 1, retainedBytes: 1 }]), /join-unique: 6 paired repetition\(s\), want 5/);
+      failsWith((r) => void ((r.cases as Json[])[0]!.samples = ((r.cases as Json[])[0]!.samples as Json[]).map((s) => (s.pair === 2 && s.variant === "reference" ? { ...s, order: "AB" } : s))), /pair 2 has more than one order/);
+      failsWith((r) => void ((r.cases as Json[])[0]!.samples = ((r.cases as Json[])[0]!.samples as Json[]).map((s) => ({ ...s, order: "AB" }))), /the pairs' order is not alternated/);
+      failsWith((r) => void ((r.cases as Json[])[1]!.effects = [{ metric: "nsPerOp", estimate: 1 }]), /an effect needs a metric, an estimate and an interval/);
+      failsWith((r) => void ((r.cases as Json[])[1]!.effects = []), /no paired effect estimate/);
+      failsWith((r) => void delete ((r.cases as Json[])[0]!.samples as Json[])[0]!.retainedBytes, /every sample needs nsPerOp, allocBytesPerOp and retainedBytes/);
+    });
+
+    it("fails a command that did not succeed, left a file changed, or wrote no readable report; stays inconclusive before the benchmark ran", () => {
+      expect(judge([run1({ exitCode: 2, report: envelope(benchReport()) })])).toMatchObject({ status: "failed", reason: "bench-gates exited 2" });
+      expect(judge([run1({ timedOut: true, exitCode: 0, report: envelope(benchReport()) })])).toMatchObject({ status: "failed", reason: "bench-gates timed out" });
+      expect(judge([run1({ report: envelope(benchReport()) }, { mutations: ["Makefile"] })])).toMatchObject({ status: "failed", reason: expect.stringContaining("left files changed: Makefile") });
+      expect(judge([run1({ report: "" })])).toMatchObject({ status: "failed", reason: expect.stringContaining("is not valid JSON") });
+      expect(judge([run1({ report: envelope(benchReport()).slice(0, 2_000) })])).toMatchObject({ status: "failed", reason: expect.stringContaining("is not valid JSON") });
+      expect(judge([run1({ report: "[1,2]" })])).toMatchObject({ status: "failed", reason: expect.stringContaining("not a JSON object") });
+      expect(judge([])).toMatchObject({ status: "inconclusive" });
+      expect(judge([run1({ report: envelope(benchReport()) }, { digest: "d0" })])).toMatchObject({ status: "inconclusive" });
+    });
+
+    it("reads a stubbed command's report from its stdout when the run keeps no report file", () => {
+      expect(judge([run1({ stdout: envelope(benchReport()) })])).toMatchObject({ status: "passed" });
+    });
+  });
+
+  it("runs a rehearsal scenario with stubbed commands: the stub's report from stdout reaches delivery; a failing gate in it does not", () => {
+    // `graphloom rehearse` stubs a command from the scenario's `commands` map, which carries stdout and no report file.
+    const passing = run([{ "bench-gates": { stdout: envelope(benchReport()) } }]);
+    expect(passing.decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+    expect(deliverArgs(passing.jobs).body).toContain("## Benchmark");
+    const failing = run([{ "bench-gates": { stdout: envelope(benchReport((r) => void (gates(r).failedTimedCalls!.count = 1))) } }]);
+    expect(failing.decision.action.type).toBe("supervise");
   });
 });

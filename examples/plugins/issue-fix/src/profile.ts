@@ -9,20 +9,39 @@ import { GRAPH_BUDGET_KEYS, type EnvironmentCommand, type EnvironmentDeclaration
 import { COMMAND } from "./constants.js";
 import { runnerById, RUNNERS, type RegressionRunner, type RunnerId } from "./runners/index.js";
 
-/** Which Fix requirement a profile command's result counts toward. */
-export type CommandRequirement = "passes" | "builds";
+/**
+ * Which requirement a profile command's result counts toward: `passes` and
+ * `builds` are Fix's; `final-checks` and `bench-gates` are Review's, for a
+ * `final` tier command: `final-checks` judged by its own success, `bench-gates`
+ * by its success and the hard gates of the benchmark report it writes
+ * (bench.ts).
+ */
+export type CommandRequirement = "passes" | "builds" | "final-checks" | "bench-gates";
+
+/** The requirements a `final` tier command counts toward, and the only ones it may. */
+export const FINAL_REQUIREMENTS: readonly CommandRequirement[] = ["final-checks", "bench-gates"];
 
 /**
  * When a command runs among a candidate's checks. `cheap` commands run in the
  * first job beside GREEN; `full` commands (the default) run in a second job
- * only once every cheap command and GREEN passed on the same candidate.
+ * only once every cheap command and GREEN passed on the same candidate;
+ * `final` commands run once, in a checkout of the candidate, after code review
+ * has converged and before delivery, and count toward a Review requirement
+ * (`final-checks` or `bench-gates`), never Fix's.
  */
-export type CommandTier = "cheap" | "full";
+export type CommandTier = "cheap" | "full" | "final";
 
 export interface ProfileCommand extends EnvironmentCommand {
   requirement: CommandRequirement;
   /** Default `full`. A profile declaring no `cheap` command runs every check in one job. */
   tier?: CommandTier;
+  /**
+   * For a `final` command, the pull request section its report summary goes
+   * under, such as `Benchmark`. The report file may be JSON with a `summary`
+   * (a line, or a list of lines) the graph copies there; the section says the
+   * controller gated only on the command's exit status.
+   */
+  section?: string;
   /** The command as a requirement statement names it; default its argv joined by spaces. */
   label?: string;
   /** For a `passes` command, the clause the `passes` statement uses; default `<label> passes`. */
@@ -41,14 +60,33 @@ export interface ProfileCommand extends EnvironmentCommand {
 /** The only changelog rule so far: a new list entry inside the first `## ` section. */
 export type ChangelogRule = "first-release-section-entry";
 
+/**
+ * A document the run reads once and hands to the planner, the implementer and
+ * the code reviewers next to the issue. With `repo` it is read from GitHub
+ * (`ref` defaults to that repository's default branch); without, it is a file
+ * of the target repository, read from the run's worktree at the base commit.
+ */
+export interface ContextDocumentRef {
+  /** `owner/name`; absent means a path in the target repository. */
+  repo?: string;
+  path: string;
+  /** Branch, tag or commit, for a document from another repository. */
+  ref?: string;
+}
+
 /** The profile JSON, as the task's config file holds it. */
 export interface ProfileData {
   /** A short name for messages, such as `banyandb`. */
   name: string;
   /** The repository the code lives in, as agents are told, such as `apache/skywalking-banyandb`. */
   project: string;
-  /** Where the issues live; the request names one as `owner/repo#N`. */
-  issues: { owner: string; repo: string };
+  /**
+   * Where the issues live; the request names one as `owner/repo#N`. `context`
+   * lists documents the issue defers to (a design, a plan): the graph reads
+   * them once, pins them as evidence and gives them to the planner, the
+   * implementer and the code reviewers.
+   */
+  issues: { owner: string; repo: string; context?: ContextDocumentRef[] };
   /** What the run's workspace needs, checked by the controller; must include an `ocr` check printing open-code-review's path. */
   environment: EnvironmentDeclaration;
   /** The built-in regression runner, and how long one regression run may take. */
@@ -101,8 +139,19 @@ export interface ProfileData {
   pullRequest: {
     /** Lines after the title, such as the template's checklist. */
     checklist: string[];
-    /** Closing lines; `{issue}` becomes the issue reference. */
+    /** Closing lines; `{issue}` becomes the issue reference (not allowed with `reference`, which keeps the issue out of the text). */
     footer: string[];
+    /**
+     * How the commit and the pull request refer to the issue. Absent: they
+     * say `Fixes <owner>/<repo>#N` and the heading names the issue. With
+     * `{ "style": "implements", "subject": "the Measure QL" }` they say
+     * "Implements the Measure QL <issue title>" and carry no reference to the
+     * issue's repository at all, for an issue tracked somewhere private: the
+     * footer may not use `{issue}`, and any mention of that repository the
+     * agents wrote (a reference, a link, a context document's name) is
+     * dropped from the commit message and the body.
+     */
+    reference?: { style: "implements"; subject: string };
     /** The test plan's line when the record says `needsE2E`. */
     e2eNote?: string;
   };
@@ -169,6 +218,38 @@ function checkCacheGlobs(c: Record<string, unknown>, where: string, allowed: boo
   }
 }
 
+const REPO_NAME = /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/;
+const REF_NAME = /^[A-Za-z0-9_.\/:-]{1,255}$/;
+
+/** The name a context document goes by in prompts and messages. */
+export function contextName(doc: ContextDocumentRef): string {
+  return `${doc.repo !== undefined ? `${doc.repo}:` : ""}${doc.path}${doc.ref !== undefined ? `@${doc.ref}` : ""}`;
+}
+
+function checkContext(raw: unknown): void {
+  if (raw === undefined) return;
+  need(Array.isArray(raw), "issues.context must be a list of documents");
+  const seen = new Set<string>();
+  (raw as unknown[]).forEach((entry, i) => {
+    const where = `issues.context[${i}]`;
+    need(isObject(entry), `${where} must be an object`);
+    const d = entry as Record<string, unknown>;
+    for (const key of Object.keys(d)) need(key === "repo" || key === "path" || key === "ref", `${where}.${key} is not a context document field; they are repo, path and ref`);
+    need(isString(d.path), `${where}.path is required`);
+    const path = d.path as string;
+    need(
+      path.length <= 1_000 && !path.includes("\u0000") && path.split("/").every((part) => part !== "" && part !== "." && part !== ".."),
+      `${where}.path "${path}" must be repository-relative, without "..", "." or empty segments`,
+    );
+    need(d.repo === undefined || (typeof d.repo === "string" && REPO_NAME.test(d.repo)), `${where}.repo must be "owner/name"`);
+    need(d.ref === undefined || (typeof d.ref === "string" && REF_NAME.test(d.ref)), `${where}.ref must be a branch, tag or commit name`);
+    need(d.ref === undefined || d.repo !== undefined, `${where}.ref applies only to a document from another repository (set repo)`);
+    const name = contextName(d as unknown as ContextDocumentRef);
+    need(!seen.has(name), `${where} repeats ${name}`);
+    seen.add(name);
+  });
+}
+
 function checkEnvironment(env: unknown): void {
   need(isObject(env), "environment must be an object");
   const e = env as Record<string, unknown>;
@@ -216,6 +297,7 @@ export function parseProfile(config: unknown): Profile {
   need(isString(p.name), "name is required");
   need(isString(p.project), "project is required");
   need(isObject(p.issues) && isString(p.issues.owner) && isString(p.issues.repo), "issues needs owner and repo");
+  checkContext((p.issues as Record<string, unknown>).context);
   checkEnvironment(p.environment);
   need(isObject(p.regression), "regression is required");
   const regression = p.regression as Record<string, unknown>;
@@ -227,12 +309,18 @@ export function parseProfile(config: unknown): Profile {
   (p.commands as unknown[]).forEach((raw, i) => {
     checkCommand(raw, `commands[${i}]`);
     const c = raw as Record<string, unknown>;
-    need(c.requirement === "passes" || c.requirement === "builds", `commands[${i}].requirement must be passes or builds`);
+    need(c.requirement === "passes" || c.requirement === "builds" || c.requirement === "final-checks" || c.requirement === "bench-gates", `commands[${i}].requirement must be passes, builds, final-checks or bench-gates`);
+    need(c.tier === undefined || c.tier === "cheap" || c.tier === "full" || c.tier === "final", `commands[${i}].tier must be cheap, full or final`);
+    // A final command runs after Fix is accepted, so a Fix requirement would never be met; a Review requirement is met only by a final run.
+    need(
+      (c.tier === "final") === FINAL_REQUIREMENTS.includes(c.requirement as CommandRequirement),
+      `commands[${i}]: a final tier command counts toward final-checks or bench-gates, and only a final tier command may (tier ${c.tier ?? "full"}, requirement ${String(c.requirement)})`,
+    );
+    need(c.section === undefined || (c.tier === "final" && isString(c.section)), `commands[${i}].section is a pull request heading, for a final tier command only`);
     need(!RESERVED_COMMANDS.has(c.id as string), `commands[${i}].id ${JSON.stringify(c.id)} is reserved`);
     need(!ids.has(c.id as string), `commands[${i}].id ${JSON.stringify(c.id)} is repeated`);
     ids.add(c.id as string);
     for (const key of ["label", "statement", "summary"]) need(c[key] === undefined || isString(c[key]), `commands[${i}].${key} must be text`);
-    need(c.tier === undefined || c.tier === "cheap" || c.tier === "full", `commands[${i}].tier must be cheap or full`);
     need(c.statement === undefined || c.requirement === "passes", `commands[${i}].statement applies only to a passes command`);
     if (c.writes !== undefined) {
       need(isStrings(c.writes) && c.writes.length > 0, `commands[${i}].writes must be a non-empty list of paths`);
@@ -268,6 +356,14 @@ export function parseProfile(config: unknown): Profile {
   need(isObject(p.pullRequest) && isStrings(p.pullRequest.checklist) && isStrings(p.pullRequest.footer), "pullRequest needs checklist and footer lists");
   const e2eNote = (p.pullRequest as Record<string, unknown>).e2eNote;
   need(e2eNote === undefined || isString(e2eNote), "pullRequest.e2eNote must be text");
+  const reference = (p.pullRequest as Record<string, unknown>).reference;
+  if (reference !== undefined) {
+    need(isObject(reference) && reference.style === "implements" && isString(reference.subject), 'pullRequest.reference must be { "style": "implements", "subject": "<what is implemented>" }');
+    need(
+      [...(p.pullRequest as { checklist: string[] }).checklist, ...(p.pullRequest as { footer: string[] }).footer].every((line) => !line.includes("{issue}")),
+      "pullRequest.checklist and footer may not use {issue} when pullRequest.reference keeps the issue out of the text",
+    );
+  }
   const harnesses = p.harnesses ?? {};
   need(isObject(harnesses), "harnesses must be an object");
   const roles = {
@@ -289,6 +385,9 @@ export function parseProfile(config: unknown): Profile {
     roles: roles as Profile["roles"],
   };
 }
+
+/** The context documents the profile declares, in order. */
+export const contextRefs = (profile: Pick<ProfileData, "issues">): ContextDocumentRef[] => profile.issues.context ?? [];
 
 /** `owner/repo#N`. */
 export function issueRef(profile: Profile, issue: number): string {
@@ -336,6 +435,12 @@ export const isTiered = (profile: Profile): boolean => profile.commands.some((c)
 
 /** The profile's commands in one tier; an untiered profile has every command in `full`. */
 export const commandsInTier = (profile: Profile, tier: CommandTier): ProfileCommand[] => profile.commands.filter((c) => commandTier(c) === tier);
+
+/** The commands of a candidate's Fix checks: every command that is not `final`. */
+export const checkCommands = (profile: Pick<ProfileData, "commands">): ProfileCommand[] => profile.commands.filter((c) => commandTier(c) !== "final");
+
+/** The commands that run once, after code review converged: the `final` tier. */
+export const finalCommands = (profile: Pick<ProfileData, "commands">): ProfileCommand[] => profile.commands.filter((c) => commandTier(c) === "final");
 
 export const commandLabel = (c: ProfileCommand): string => c.label ?? c.argv.join(" ");
 export const commandStatement = (c: ProfileCommand): string => c.statement ?? `${commandLabel(c)} passes`;

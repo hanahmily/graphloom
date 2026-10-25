@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import type { EvidenceRecord, ValidationStatus, Validator } from "@graphloom/sdk";
+import { exampleBenchReport } from "./bench.js";
 import { CODING_AGENT, COMMAND, FIX_STAGE, REVIEW_STAGE } from "./constants.js";
 import type { DecisionRecord } from "./decision-record.js";
 import { definitionFor } from "./graph.js";
@@ -8,7 +9,7 @@ import { goTestRunner } from "./runners/go-test.js";
 import { vitestRunner } from "./runners/vitest.js";
 
 /** A profile shipped in the bundle's `profiles/` directory, as JSON: the cases judge against these exact files. */
-export function shippedProfile(name: "banyandb" | "graphloom" | "canopy"): unknown {
+export function shippedProfile(name: "banyandb" | "banyandb-ql" | "graphloom" | "canopy"): unknown {
   return JSON.parse(readFileSync(new URL(`../profiles/${name}.json`, import.meta.url), "utf8")) as unknown;
 }
 
@@ -257,6 +258,22 @@ const tsGreen = (report = tsPassed, exitCode = 0, o: RunOptions = {}) => command
 const tsBuilds = (overrides: Partial<Record<string, number>> = {}, skip: string[] = []) =>
   ["typecheck", "build", "test"].filter((id) => !skip.includes(id)).map((id) => command(id, overrides[id] ?? 0, { paths: TS_PATHS }));
 
+/** The graphloom profile with one `final` tier command, for the final-checks cases. */
+const FINAL_PROFILE: unknown = {
+  ...(GRAPHLOOM as object),
+  commands: [...(GRAPHLOOM as { commands: object[] }).commands, { id: "smoke", argv: ["npm", "run", "smoke"], requirement: "final-checks", tier: "final" }],
+};
+const f = (name: string, evidence: EvidenceRecord[], expected: ValidationStatus): QualificationCase => c("final-checks", name, evidence, expected, undefined, FINAL_PROFILE);
+const finalCommand = (exitCode: number, o: RunOptions = {}): EvidenceRecord => command("smoke", exitCode, { stageId: REVIEW_STAGE, ...o });
+
+/** The banyandb-ql profile, whose `bench-gates` command the benchmark cases judge. */
+const BANYANDB_QL = shippedProfile("banyandb-ql");
+const bg = (name: string, evidence: EvidenceRecord[], expected: ValidationStatus): QualificationCase => c("bench-gates", name, evidence, expected, undefined, BANYANDB_QL);
+const benchEnvelope = (patch?: (report: Record<string, unknown>) => void): string =>
+  JSON.stringify({ harness: { image: "golang:1.26.10", imageGo: "go version go1.26.10 linux/amd64", cpus: 4, memory: "8g", memorySwap: "8g" }, report: exampleBenchReport(patch) });
+const benchRun = (report: string, o: RunOptions & { exitCode?: number } = {}): EvidenceRecord => command("bench-gates", o.exitCode ?? 0, { stageId: REVIEW_STAGE, report, ...o });
+const gate = (report: Record<string, unknown>, name: string): Record<string, number> => (report.gates as Record<string, Record<string, number>>)[name]!;
+
 /** Positive and negative cases for every shipped validator. */
 export const QUALIFICATION_CASES: readonly QualificationCase[] = [
   c("decisions-recorded", "complete ready record", [implementer(READY)], "passed"),
@@ -394,6 +411,34 @@ export const QUALIFICATION_CASES: readonly QualificationCase[] = [
   g("write-scope", "the lockfile without a reason", [implementer(TS_READY), tsGreen(tsPassed, 0, { paths: ["package-lock.json", TS_SOURCE] })], "failed"),
   g("write-scope", "the frozen legacy tree", [implementer(TS_READY), tsGreen(tsPassed, 0, { paths: ["legacy/go/main.go"] })], "failed"),
   g("write-scope", "the lockfile with a recorded reason", [implementer({ ...TS_READY, scopeExceptions: [{ path: "package-lock.json", reason: "the fix needs a new dependency" }] }), tsGreen(tsPassed, 0, { paths: ["package-lock.json"] })], "passed"),
+
+  f("final run passed", [finalCommand(0)], "passed"),
+  f("final run exited non-zero", [finalCommand(1)], "failed"),
+  f("final run timed out", [finalCommand(0, { timedOut: true })], "failed"),
+  f("final run left a file changed", [finalCommand(0, { mutations: ["build/out.json"] })], "failed"),
+  f("final run in an unprepared checkout", [finalCommand(0, { prepared: false })], "failed"),
+  f("no final run", [], "inconclusive"),
+  f("final run on an older change", [finalCommand(0, { digest: OTHER })], "inconclusive"),
+  f("final command run in the base checkout", [finalCommand(0, { from: "base" })], "inconclusive"),
+
+  bg("complete report, every hard gate holds", [benchRun(benchEnvelope())], "passed"),
+  bg("a bare report", [benchRun(JSON.stringify(exampleBenchReport()))], "passed"),
+  bg("terrible timings are only reported", [benchRun(benchEnvelope((r) => void ((r.cases as Array<{ samples: Array<{ nsPerOp: number }> }>)[0]!.samples[0]!.nsPerOp = 9e15)))], "passed"),
+  bg("results differ from the oracle", [benchRun(benchEnvelope((r) => void (gate(r, "exactResults").mismatches = 2)))], "failed"),
+  bg("no result checked", [benchRun(benchEnvelope((r) => void (gate(r, "exactResults").checked = 0)))], "failed"),
+  bg("a timed call failed", [benchRun(benchEnvelope((r) => void (gate(r, "failedTimedCalls").count = 1)))], "failed"),
+  bg("accounted memory above its budget", [benchRun(benchEnvelope((r) => void (gate(r, "accountedMemory").peakBytes = 999_999_999)))], "failed"),
+  bg("an owned resource outstanding", [benchRun(benchEnvelope((r) => void (gate(r, "outstandingResources").count = 1)))], "failed"),
+  bg("the preflight does not fit the larger size", [benchRun(benchEnvelope((r) => void ((r.preflight as Array<{ fits: boolean }>)[1]!.fits = false)))], "failed"),
+  bg("no preflight entry for a size", [benchRun(benchEnvelope((r) => void (r.preflight = (r.preflight as unknown[]).slice(0, 1))))], "failed"),
+  bg("fewer than five pairs", [benchRun(benchEnvelope((r) => void ((r.cases as Array<{ samples: unknown[] }>)[0]!.samples = (r.cases as Array<{ samples: unknown[] }>)[0]!.samples.slice(0, 4))))], "failed"),
+  bg("no case at the larger size", [benchRun(benchEnvelope((r) => void (r.cases = (r.cases as unknown[]).slice(0, 1))))], "failed"),
+  bg("an effect without an interval", [benchRun(benchEnvelope((r) => void ((r.cases as Array<{ effects: unknown[] }>)[0]!.effects = [{ metric: "nsPerOp", estimate: 1 }])))], "failed"),
+  bg("a report that is not JSON", [benchRun("not json")], "failed"),
+  bg("the command exited non-zero", [benchRun(benchEnvelope(), { exitCode: 1 })], "failed"),
+  bg("the command left a file changed", [benchRun(benchEnvelope(), { mutations: ["Makefile"] })], "failed"),
+  bg("no benchmark run", [], "inconclusive"),
+  bg("a benchmark run on an older change", [benchRun(benchEnvelope(), { digest: OTHER })], "inconclusive"),
 
   g("open-code-review", "no comments", [codeReviewRun(reviewed([]))], "passed"),
 ];

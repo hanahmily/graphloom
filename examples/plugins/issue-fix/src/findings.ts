@@ -1,6 +1,7 @@
 import type { EvidenceRecord } from "@graphloom/sdk";
 import { MAX_DISCOVERY_ROUNDS, MAX_SWEEP_PASSES, REVIEW_STAGE } from "./constants.js";
 import { agentRuns, type AgentRun } from "./evidence.js";
+import { contextPrompt, type ContextDocument } from "./context.js";
 import type { Profile } from "./profile.js";
 import {
   clip,
@@ -608,12 +609,13 @@ function dispute(f: Finding, digest: string, why: string): void {
 }
 
 /** The verifier's assignment: judge each finding against the current code, with its own evidence. */
-export function verificationInstruction(profile: Profile, args: { findings: Finding[]; background: string; changed: string[] }): string {
+export function verificationInstruction(profile: Profile, args: { findings: Finding[]; background: string; changed: string[]; context?: ContextDocument[] }): string {
   return [
     `You are an independent verifier of code review findings on the uncommitted change in this worktree (${profile.project}). You did not write the change or the review. Do not modify any file. Read the code with your file tools; you cannot run commands.`,
     "",
     "What the change is for:",
     args.background,
+    ...contextPrompt(args.context),
     "",
     ...(args.changed.length > 0 ? ["Changed files:", ...args.changed.map((p) => `- ${p}`), ""] : []),
     "Findings to verify:",

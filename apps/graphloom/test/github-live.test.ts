@@ -73,6 +73,19 @@ describe.skipIf(token === undefined)("graphloom.github live reads", () => {
     expect(comments.status, comments.summary).toBe("ok");
   });
 
+  it("reads a file whole with its blob sha, and answers a missing one as not found", async () => {
+    const r = runner({ token: token! });
+    const file = await run(r, "get-file", { owner, repo, path: "README.md" });
+    expect(file.status, file.summary).toBe("ok");
+    const item = github(file).item as { found: boolean; text: string; sha: string; size: number };
+    expect(item.found).toBe(true);
+    expect(item.sha).toMatch(/^[0-9a-f]{40}$/);
+    expect(Buffer.byteLength(item.text)).toBe(item.size);
+    const missing = await run(r, "get-file", { owner, repo, path: "graphloom-live-nonexistent-file.md" });
+    expect(missing.status, missing.summary).toBe("ok");
+    expect(github(missing).item).toMatchObject({ found: false, reason: "not-found" });
+  });
+
   it("lists labels and milestones", async () => {
     const r = runner({ token: token! });
     const labels = await run(r, "list-labels", { owner, repo });

@@ -1,4 +1,5 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { createHash } from "node:crypto";
 import type { AddressInfo } from "node:net";
 
 export interface FakeIssue {
@@ -44,6 +45,17 @@ export interface FakeMilestone {
   state: "open" | "closed";
 }
 
+export interface FakeFile {
+  /** `owner/name`; any repository when absent. */
+  repo?: string;
+  path: string;
+  /** The ref the file exists at; every ref when absent. A request without a ref reads "main". */
+  ref?: string;
+  content: string | Buffer;
+  /** Report this size instead of the real one, as GitHub does for a file too large to return inline. */
+  size?: number;
+}
+
 export interface FakeRequest {
   method: string;
   path: string;
@@ -59,6 +71,7 @@ export interface FakeGitHub {
   reviews: Map<number, FakeReview[]>;
   labels: string[];
   milestones: FakeMilestone[];
+  files: FakeFile[];
   /** Answer the next N requests with a primary rate-limit 403. */
   rateLimitNext(count: number, resetInSeconds: number): void;
   /** Apply the next write, then drop the connection before responding. */
@@ -78,12 +91,14 @@ export async function startFakeGitHub(
     pulls?: FakePull[];
     labels?: string[];
     milestones?: FakeMilestone[];
+    files?: FakeFile[];
   } = {},
 ): Promise<FakeGitHub> {
   const issues = [...(seed.issues ?? [])];
   const pulls = [...(seed.pulls ?? [])];
   const labels = [...(seed.labels ?? [])];
   const milestones = [...(seed.milestones ?? [])];
+  const files = [...(seed.files ?? [])];
   const comments = new Map<number, FakeComment[]>();
   const reviews = new Map<number, FakeReview[]>();
   const requests: FakeRequest[] = [];
@@ -175,6 +190,22 @@ export async function startFakeGitHub(
       if (!labels.includes(id)) return send(res, 404, { message: "Not Found" });
       send(res, 200, rawLabel(id));
       return;
+    }
+    if (resource === "contents" && method === "GET") {
+      const wanted = parts.slice(4).join("/");
+      const ref = url.searchParams.get("ref") ?? "main";
+      const here = files.filter((f) => (f.repo === undefined || f.repo === `${owner}/${repo}`) && (f.ref === undefined || f.ref === ref));
+      const file = here.find((f) => f.path === wanted);
+      if (file !== undefined) {
+        const bytes = Buffer.from(file.content);
+        const sha = createHash("sha1").update(`blob ${bytes.length}\0`).update(bytes).digest("hex");
+        const size = file.size ?? bytes.length;
+        send(res, 200, { type: "file", path: file.path, sha, size, encoding: size > 1_000_000 ? "none" : "base64", content: size > 1_000_000 ? "" : bytes.toString("base64") });
+        return;
+      }
+      const inside = here.filter((f) => f.path.startsWith(`${wanted}/`));
+      if (inside.length > 0) return send(res, 200, inside.map((f) => ({ type: "file", path: f.path })));
+      return send(res, 404, { message: "Not Found" });
     }
     if (resource === "milestones" && id === undefined) {
       const state = url.searchParams.get("state") ?? "open";
@@ -350,6 +381,7 @@ export async function startFakeGitHub(
     reviews,
     labels,
     milestones,
+    files,
     rateLimitNext(count, resetInSeconds) {
       rateLimited = count;
       resetIn = resetInSeconds;

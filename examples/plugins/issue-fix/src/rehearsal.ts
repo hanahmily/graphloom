@@ -22,7 +22,9 @@
  * the live run's own worktree the moment it succeeded — the real bytes an
  * agent actually wrote, not a guess at them.
  */
+import { randomUUID } from "node:crypto";
 import type { GraphRehearsal } from "@graphloom/sdk";
+import { exampleBenchReport } from "./bench.js";
 import { parseProfile } from "./profile.js";
 import { FIX_STAGE, REVIEW_STAGE } from "./constants.js";
 
@@ -371,6 +373,108 @@ const CANOPY_REHEARSAL: GraphRehearsal = {
 };
 
 /**
+ * The banyandb-ql profile's scenarios: hand-written and self-contained, so they
+ * run in a real checkout of skywalking-banyandb with `--commands run`
+ * (the go-test scenario above belongs to its own fixture repository and cannot
+ * build there). The change adds a one-constant source file to pkg/timestamp and
+ * a plain Go test that fails by assertion until that file exists; the
+ * CHANGES.md bytes replace the file in the rehearsal's own checkout only. The
+ * stub benchmark runner is a GNUmakefile that includes the Makefile and adds
+ * the `bench-ql-report` target the ticket's implementation would: it writes
+ * the report below to build/bench/ql-report.json (GNU make reads GNUmakefile
+ * before Makefile, and the rehearsal's checkout is thrown away).
+ *
+ * `happy`: the runner writes a passing report, and the run reaches delivery
+ * with a Benchmark section. `bench-gate-fails`: the first candidate's runner
+ * writes a report that fails a hard gate, so the graph sends Fix back with it
+ * (one reentry, no supervisor episode); the stand-in's second pass writes a
+ * runner whose report passes, a new candidate, and the run reaches delivery.
+ * The tests run both reports through the real validator.
+ */
+const QL_TEST = "pkg/timestamp/rehearsal_marker_test.go";
+const QL_TEST_NAME = "TestRehearsalMarkerExists";
+const QL_SOURCE = "pkg/timestamp/rehearsal_marker.go";
+const QL_GO_HEADER = [
+  "// Licensed to Apache Software Foundation (ASF) under one or more contributor",
+  "// license agreements. See the NOTICE file distributed with",
+  "// this work for additional information regarding copyright",
+  "// ownership. Apache Software Foundation (ASF) licenses this file to you under",
+  '// the Apache License, Version 2.0 (the "License"); you may',
+  "// not use this file except in compliance with the License.",
+  "// You may obtain a copy of the License at",
+  "//",
+  "//\thttp://www.apache.org/licenses/LICENSE-2.0",
+  "//",
+  "// Unless required by applicable law or agreed to in writing,",
+  "// software distributed under the License is distributed on an",
+  '// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY',
+  "// KIND, either express or implied.  See the License for the",
+  "// specific language governing permissions and limitations",
+  "// under the License.",
+  "",
+].join("\n");
+const QL_MAKE_HEADER = QL_GO_HEADER.replaceAll("//\t", "#\t").replaceAll(/^\/\//gm, "#");
+const QL_TEST_BYTES = `${QL_GO_HEADER}\npackage timestamp\n\nimport (\n\t"os"\n\t"testing"\n)\n\nfunc ${QL_TEST_NAME}(t *testing.T) {\n\tif _, err := os.Stat("rehearsal_marker.go"); err != nil {\n\t\tt.Fatalf("the rehearsal marker source is missing: %v", err)\n\t}\n}\n`;
+const QL_SOURCE_BYTES = `${QL_GO_HEADER}\npackage timestamp\n\n// RehearsalMarker names the issue-fix rehearsal's change; nothing depends on it.\nconst RehearsalMarker = "graphloom-issue-fix-rehearsal"\n`;
+const QL_CHANGES = "# Changes by Version\n\nRelease Notes.\n\n## 0.12.0\n\n### Features\n\n- Add the pkg/timestamp rehearsal marker.\n";
+/** GNU make reads GNUmakefile before Makefile: include the real one, then add the stub benchmark target. */
+const qlStubMake = (report: string, nonce: string): string => `${QL_MAKE_HEADER}\n# Rehearsal run ${nonce}.\ninclude Makefile\n\n.PHONY: bench-ql-report\nbench-ql-report:\n\t@mkdir -p build/bench\n\t@printf '%s\\n' '${report}' > build/bench/ql-report.json\n`;
+const QL_COVERAGE = [{ id: "A1", files: [QL_SOURCE], tests: [{ file: QL_TEST, name: QL_TEST_NAME }] }];
+const QL_RECORD = {
+  title: "Add the pkg/timestamp rehearsal marker",
+  status: "ready",
+  change: "pkg/timestamp gains a one-constant rehearsal marker source file. A regression test pins that the file exists.",
+  summary: "The marker source file exists beside the timestamp sources; the regression test pins that.",
+  test: { package: "./pkg/timestamp", name: QL_TEST_NAME, expectedValueSource: "the rehearsal's own premise: the marker source file must exist" },
+  productionCaller: `${QL_SOURCE} RehearsalMarker`,
+  acceptance: [{ id: "A1", text: "pkg/timestamp has a rehearsal marker source file." }],
+  decisions: [],
+  openQuestions: [],
+  followUps: [],
+  needsE2E: false,
+  scopeExceptions: [],
+};
+/** One implementer pass per report, in order (the last repeats): the pass leaves the stub runner that writes that report. */
+const qlScenario = (nonce: string, ...reports: string[]): GraphRehearsal["scenarios"][string] => ({
+  results: {
+    "decision-record-v2": [
+      // The plan is a read-only job: it leaves the checkout as it is.
+      { output: QL_RECORD },
+      ...reports.map((report) => ({
+        output: { ...QL_RECORD, coverage: QL_COVERAGE },
+        effects: [
+          { path: QL_TEST, bytes: QL_TEST_BYTES },
+          { path: QL_SOURCE, bytes: QL_SOURCE_BYTES },
+          { path: "CHANGES.md", bytes: QL_CHANGES },
+          { path: "GNUmakefile", bytes: qlStubMake(report, nonce) },
+        ],
+      })),
+    ],
+    "code-review-v2": [{ output: { contract: "dedupe-1", comments: [], prior: [], summary: { total_files: 4, reviewed_files: 4, skipped: [] } } }],
+  },
+  expect: { status: "succeeded", receipts: [FIX_STAGE, REVIEW_STAGE] },
+});
+/** The report a stub runner writes, as JSON on one line. */
+export const qlStubReport = (patch?: (report: Record<string, unknown>) => void): string => JSON.stringify(exampleBenchReport(patch));
+const failingGate = (r: Record<string, unknown>) => void ((r.gates as { exactResults: { mismatches: number } }).exactResults.mismatches = 3);
+/**
+ * The scenarios of one rehearsal. The stub target's file carries a nonce, so each
+ * rehearsal commits a tree no earlier rehearsal wrote: a candidate whose objects
+ * already sit in the repository's shared object store (written by an earlier
+ * rehearsal's worktree) makes the license check's Git library, which reads them
+ * through the checkout's alternates, fail with "object not found".
+ */
+function goTestQl(): GraphRehearsal {
+  const nonce = randomUUID();
+  return {
+    scenarios: {
+      happy: qlScenario(nonce, qlStubReport()),
+      "bench-gate-fails": qlScenario(nonce, qlStubReport(failingGate), qlStubReport()),
+    },
+  };
+}
+
+/**
  * The rehearsal for the run's profile (the task's config): the plugin host
  * calls this with the pinned config. A config that is not a usable profile
  * gets the go-test scenario; describe() refuses such a config anyway.
@@ -387,5 +491,6 @@ export function rehearsal(config: unknown): GraphRehearsal {
     name = "";
   }
   if (name === "canopy" && runner === "vitest") return CANOPY_REHEARSAL;
+  if (name === "banyandb-ql" && runner === "go-test") return goTestQl();
   return runner === "vitest" ? VITEST_REHEARSAL : GO_TEST_WITH_REENTRY;
 }

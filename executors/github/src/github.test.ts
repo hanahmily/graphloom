@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import os from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
 import type { ExecutorDefinition } from "@graphloom/sdk";
@@ -147,6 +148,70 @@ describe("graphloom.github reads", () => {
     const result = await run(runner(server, { token: TOKEN }), "get-issue", { owner: "acme", repo: "app", number: 1 });
     expect(result.status).toBe("ok");
     expect(server.requests[0]?.authorization).toBe(`Bearer ${TOKEN}`);
+  });
+});
+
+describe("graphloom.github/get-file", () => {
+  const doc = "# Design\n\nA bounded join, 93% of it.\n";
+  const files = [
+    { repo: "acme/private", path: "docs/design.md", ref: "main", content: doc },
+    { repo: "acme/private", path: "docs/design.md", ref: "next", content: "# Next\n" },
+    { repo: "acme/private", path: "docs/binary.bin", content: Buffer.from([0xff, 0xfe, 0x00, 0x80]) },
+    { repo: "acme/private", path: "docs/huge.md", content: "x", size: 2_000_000 },
+  ];
+  const read = (server: FakeGitHub, input: Record<string, unknown>) => run(runner(server, { token: TOKEN }), "get-file", { owner: "acme", repo: "private", ...input });
+
+  it("returns the text whole with its blob sha and size, read-only", async () => {
+    const server = await fake({ files });
+    const result = await read(server, { path: "docs/design.md" });
+    expect(result.status).toBe("ok");
+    const item = github(result).item as Record<string, unknown>;
+    // The blob sha is git's: sha1 of "blob <bytes>\0<content>".
+    expect(item).toEqual({ found: true, path: "docs/design.md", ref: null, sha: createHash("sha1").update(`blob ${Buffer.byteLength(doc)}\0${doc}`).digest("hex"), size: Buffer.byteLength(doc), text: doc });
+    expect(github(result).query).toEqual({ owner: "acme", repo: "private", path: "docs/design.md", ref: null });
+    expect(server.requests.map((r) => r.method)).toEqual(["GET"]);
+    expect(server.requests[0]!.path).toBe("/repos/acme/private/contents/docs/design.md");
+    expect(server.requests[0]!.authorization).toBe(`Bearer ${TOKEN}`);
+  });
+
+  it("reads at a ref", async () => {
+    const server = await fake({ files });
+    const result = await read(server, { path: "docs/design.md", ref: "next" });
+    expect((github(result).item as { text: string }).text).toBe("# Next\n");
+    expect(server.requests[0]!.path).toBe("/repos/acme/private/contents/docs/design.md?ref=next");
+  });
+
+  it("answers a path that is not readable text as found: false with the reason, not as a failed job", async () => {
+    const server = await fake({ files });
+    const reason = async (input: Record<string, unknown>) => {
+      const result = await read(server, input);
+      expect(result.status).toBe("ok");
+      return github(result).item;
+    };
+    expect(await reason({ path: "docs/missing.md" })).toMatchObject({ found: false, reason: "not-found" });
+    expect(await reason({ path: "docs/design.md", ref: "gone" })).toMatchObject({ found: false, reason: "not-found" });
+    expect(await reason({ path: "docs" })).toMatchObject({ found: false, reason: "not-a-file" });
+    expect(await reason({ path: "docs/binary.bin" })).toMatchObject({ found: false, reason: "not-text" });
+    expect(await reason({ path: "docs/huge.md" })).toMatchObject({ found: false, reason: "too-large" });
+  });
+
+  it("refuses a path that escapes the repository, and names the failing field", async () => {
+    const server = await fake({ files });
+    const def = executors.find((e) => e.id === "graphloom.github/get-file") as ExecutorDefinition;
+    for (const bad of ["../x", "/etc/passwd", "a//b", "a/./b", ""]) {
+      expect((await read(server, { path: bad })).summary, bad).toMatch(/input failed schema validation/);
+    }
+    expect(def.inputProblem!({ owner: "o", repo: "r" })).toBe("path: required");
+    expect(def.inputProblem!({ owner: "o", repo: "r", path: 7 })).toBe("path: must be a string");
+    expect(server.requests).toHaveLength(0);
+  });
+
+  it("fails a rate limit with retry timing like the other reads", async () => {
+    const server = await fake({ files });
+    server.rateLimitNext(1, 30);
+    const result = await read(server, { path: "docs/design.md" });
+    expect(result.status).toBe("failed");
+    expect(result.summary).toMatch(/rate limited/);
   });
 });
 
@@ -564,11 +629,11 @@ describe("graphloom.github labels and edits", () => {
 });
 describe("read executors declare their input shape", () => {
   const reads = executors.filter((e) =>
-    ["list-issues", "list-pulls", "get-issue", "get-pull", "list-issue-comments", "list-labels", "list-milestones"].includes(e.id.split("/")[1]!),
+    ["list-issues", "list-pulls", "get-issue", "get-pull", "get-file", "list-issue-comments", "list-labels", "list-milestones"].includes(e.id.split("/")[1]!),
   ) as ExecutorDefinition[];
 
   it("declares a shape, with an example its predicate accepts, for every read", () => {
-    expect(reads).toHaveLength(7);
+    expect(reads).toHaveLength(8);
     for (const def of reads) {
       expect(def.inputShape?.schema, def.id).toBeDefined();
       expect(def.inputSchema!(def.inputShape!.example), def.id).toBe(true);
