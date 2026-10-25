@@ -7,7 +7,7 @@ import { promisify } from "node:util";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { JobResult } from "@graphloom/runner";
 import { applyGraphDefaultBudgets, intakeTask, IntakeError, resolveRunBudgets, type DurableRunState } from "@graphloom/controller";
-import { check, checkProvenance, probe, recordScenario, rehearsalBudgets, rehearse, replay } from "../src/rehearsal.js";
+import { check, checkProvenance, probe, recordScenario, rehearsalBudgets, rehearse, removeRehearsalBranches, replay } from "../src/rehearsal.js";
 import { RUNNER_CONFIG_ENV } from "../src/runner-config.js";
 import { fakeRunnerConfig, writeFakeCodingAgents } from "./fixtures/fake-coding-agents.js";
 
@@ -455,5 +455,22 @@ describe("B3's call-log provenance check (§4.1, §4.7)", () => {
     const state = { evidence: [evidence("ev-1", "writer-result-v1", "op-1")] } as unknown as DurableRunState;
     expect(checkProvenance(state, [])).toEqual({ status: "passed", notes: [] });
     expect(checkProvenance(state, [{ operationId: "op-2" }])).toEqual({ status: "passed", notes: [] });
+  });
+});
+
+describe("removeRehearsalBranches (#199)", () => {
+  it("removes the branches under the run's own namespace and no others", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "gl-rehearsal-branches-"));
+    dirs.push(dir);
+    const run = (...args: string[]) => execFileAsync("git", args, { cwd: dir });
+    await run("init", "-q");
+    await run("-c", "user.email=t@example.com", "-c", "user.name=T", "commit", "-q", "--allow-empty", "-m", "init");
+    for (const branch of ["rehearsal/rehearsal-aaaa1111/fix-7", "rehearsal/rehearsal-bbbb2222/fix-7", "fix/7"]) await run("branch", branch);
+    await removeRehearsalBranches(dir, "rehearsal-aaaa1111");
+    const all = (await run("for-each-ref", "--format=%(refname:short)", "refs/heads/")).stdout.split("\n");
+    expect(all.filter((b) => b.startsWith("fix/") || b.startsWith("rehearsal/")).sort()).toEqual(["fix/7", "rehearsal/rehearsal-bbbb2222/fix-7"]);
+    // Nothing to remove is fine, and so is a missing repository.
+    await removeRehearsalBranches(dir, "rehearsal-aaaa1111");
+    await removeRehearsalBranches(path.join(dir, "missing"), "rehearsal-aaaa1111");
   });
 });

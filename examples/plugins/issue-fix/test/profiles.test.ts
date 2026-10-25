@@ -121,7 +121,7 @@ describe.skipIf(!existsSync(path.join(banyandbFixDist, "index.js")))("the banyan
     });
     expect(monolithic(v1(strip(ours)))).toEqual(strip(withoutLicense(theirs)));
     expect(theirs.environment?.prepare?.map((c) => c.argv.join(" "))).toEqual(["make generate"]);
-    expect(ours).toMatchObject({ graphId: "issue-fix", version: "0.12.0", privateStateSchema: "issue-fix-private-v1" });
+    expect(ours).toMatchObject({ graphId: "issue-fix", version: "0.12.1", privateStateSchema: "issue-fix-private-v1" });
   });
 
   it("splits make generate into separately cached steps with narrow inputs (#174)", () => {
@@ -137,6 +137,18 @@ describe.skipIf(!existsSync(path.join(banyandbFixDist, "index.js")))("the banyan
     expect(mocks?.inputs?.some((g) => g === "banyand/**/*.go" || g === "pkg/**/*.go")).toBe(false);
     // The directive guard has no inputs: it always runs.
     expect(step("generate-directives")?.inputs).toBeUndefined();
+  });
+
+  it("restores every tool file the full tier reads from bin/ along with the step that installs it (#199)", () => {
+    // `make lint` and `make format` (which `make check` runs through check-format) call bin/buf from api/ without
+    // a recipe that installs it: lint-api.mk expands $(BUF) before api/Makefile defines it. Only `make generate`
+    // installs it, so a generate-proto cache hit must restore it. golangci-lint, revive, ginkgo and license-eye
+    // are prerequisites of the targets that use them, and mockgen is only used by the generate steps.
+    for (const config of [BANYANDB, shippedProfile("banyandb-ql")]) {
+      const profile = parseProfile(config);
+      const restoring = (file: string) => profile.environment.prepare?.filter((c) => c.outputs?.includes(file)).map((c) => c.id);
+      expect(restoring("bin/buf"), profile.name).toEqual(["generate-proto"]);
+    }
   });
 
   it("gives the agents and the checks the same instructions and commands", async () => {
@@ -442,7 +454,7 @@ describe("profiles", () => {
   it("ships the banyandb-ql profile in the manifest's pinned files and describes it under the graph's version (#197)", async () => {
     const manifest = JSON.parse(await readFile(path.join(here, "../graphloom.manifest.json"), "utf8")) as { digests: { files: Record<string, string> } };
     expect(Object.keys(manifest.digests.files)).toContain("profiles/banyandb-ql.json");
-    expect(createGraph().describe(shippedProfile("banyandb-ql"))).toMatchObject({ graphId: "issue-fix", version: "0.12.0" });
+    expect(createGraph().describe(shippedProfile("banyandb-ql"))).toMatchObject({ graphId: "issue-fix", version: "0.12.1" });
   });
 });
 

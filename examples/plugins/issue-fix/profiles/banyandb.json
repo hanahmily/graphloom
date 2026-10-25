@@ -104,7 +104,8 @@
           "api/proto/**/*.pb.validate.go",
           "api/proto/**/*.pb.gw.go",
           "api/proto/openapi/**",
-          "api/proto/api-reference.md"
+          "api/proto/api-reference.md",
+          "bin/buf"
         ]
       },
       {

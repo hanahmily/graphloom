@@ -22,7 +22,6 @@
  * the live run's own worktree the moment it succeeded — the real bytes an
  * agent actually wrote, not a guess at them.
  */
-import { randomUUID } from "node:crypto";
 import type { GraphRehearsal } from "@graphloom/sdk";
 import { exampleBenchReport } from "./bench.js";
 import { parseProfile } from "./profile.js";
@@ -418,7 +417,7 @@ const QL_TEST_BYTES = `${QL_GO_HEADER}\npackage timestamp\n\nimport (\n\t"os"\n\
 const QL_SOURCE_BYTES = `${QL_GO_HEADER}\npackage timestamp\n\n// RehearsalMarker names the issue-fix rehearsal's change; nothing depends on it.\nconst RehearsalMarker = "graphloom-issue-fix-rehearsal"\n`;
 const QL_CHANGES = "# Changes by Version\n\nRelease Notes.\n\n## 0.12.0\n\n### Features\n\n- Add the pkg/timestamp rehearsal marker.\n";
 /** GNU make reads GNUmakefile before Makefile: include the real one, then add the stub benchmark target. */
-const qlStubMake = (report: string, nonce: string): string => `${QL_MAKE_HEADER}\n# Rehearsal run ${nonce}.\ninclude Makefile\n\n.PHONY: bench-ql-report\nbench-ql-report:\n\t@mkdir -p build/bench\n\t@printf '%s\\n' '${report}' > build/bench/ql-report.json\n`;
+const qlStubMake = (report: string): string => `${QL_MAKE_HEADER}\ninclude Makefile\n\n.PHONY: bench-ql-report\nbench-ql-report:\n\t@mkdir -p build/bench\n\t@printf '%s\\n' '${report}' > build/bench/ql-report.json\n`;
 const QL_COVERAGE = [{ id: "A1", files: [QL_SOURCE], tests: [{ file: QL_TEST, name: QL_TEST_NAME }] }];
 const QL_RECORD = {
   title: "Add the pkg/timestamp rehearsal marker",
@@ -435,7 +434,7 @@ const QL_RECORD = {
   scopeExceptions: [],
 };
 /** One implementer pass per report, in order (the last repeats): the pass leaves the stub runner that writes that report. */
-const qlScenario = (nonce: string, ...reports: string[]): GraphRehearsal["scenarios"][string] => ({
+const qlScenario = (...reports: string[]): GraphRehearsal["scenarios"][string] => ({
   results: {
     "decision-record-v2": [
       // The plan is a read-only job: it leaves the checkout as it is.
@@ -446,7 +445,7 @@ const qlScenario = (nonce: string, ...reports: string[]): GraphRehearsal["scenar
           { path: QL_TEST, bytes: QL_TEST_BYTES },
           { path: QL_SOURCE, bytes: QL_SOURCE_BYTES },
           { path: "CHANGES.md", bytes: QL_CHANGES },
-          { path: "GNUmakefile", bytes: qlStubMake(report, nonce) },
+          { path: "GNUmakefile", bytes: qlStubMake(report) },
         ],
       })),
     ],
@@ -457,19 +456,12 @@ const qlScenario = (nonce: string, ...reports: string[]): GraphRehearsal["scenar
 /** The report a stub runner writes, as JSON on one line. */
 export const qlStubReport = (patch?: (report: Record<string, unknown>) => void): string => JSON.stringify(exampleBenchReport(patch));
 const failingGate = (r: Record<string, unknown>) => void ((r.gates as { exactResults: { mismatches: number } }).exactResults.mismatches = 3);
-/**
- * The scenarios of one rehearsal. The stub target's file carries a nonce, so each
- * rehearsal commits a tree no earlier rehearsal wrote: a candidate whose objects
- * already sit in the repository's shared object store (written by an earlier
- * rehearsal's worktree) makes the license check's Git library, which reads them
- * through the checkout's alternates, fail with "object not found".
- */
+/** The scenarios of one rehearsal. Every rehearsal commits the same stub change; a checkout keeps its objects in its own store, so a rerun is no different from the first run. */
 function goTestQl(): GraphRehearsal {
-  const nonce = randomUUID();
   return {
     scenarios: {
-      happy: qlScenario(nonce, qlStubReport()),
-      "bench-gate-fails": qlScenario(nonce, qlStubReport(failingGate), qlStubReport()),
+      happy: qlScenario(qlStubReport()),
+      "bench-gate-fails": qlScenario(qlStubReport(failingGate), qlStubReport()),
     },
   };
 }

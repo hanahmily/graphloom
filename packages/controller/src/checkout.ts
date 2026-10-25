@@ -94,7 +94,7 @@ export async function runInCheckout(args: {
   let reverted = false;
   let revertedPaths: string[] = [];
   const apply = async () => {
-    commit = await commitPaths(args.worktreePath, dir, applied);
+    commit = await commitPaths(args.worktreePath, dir, applied, args.pinnedHead);
   };
   try {
     applied = selectPaths(checkout, [...change.fingerprints.keys()]);
@@ -136,7 +136,7 @@ export async function runInCheckout(args: {
             candidateDigest: change.digest,
           };
         }
-        commit = await commitCheckoutState(dir, "GraphLoom candidate, reverted");
+        commit = await commitCheckoutState(dir, "GraphLoom candidate, reverted", args.pinnedHead);
         reverted = true;
         revertedPaths = revertPatchPaths(checkout.revertPatch);
       }
@@ -334,15 +334,18 @@ async function cloneAt(repoPath: string, pinnedHead: string, dir: string): Promi
  * Copy `paths` from the worktree into the checkout (a path missing there is
  * deleted) and commit the result with an isolated identity. Returns the commit.
  */
-async function commitPaths(worktreePath: string, dir: string, paths: string[]): Promise<string> {
+async function commitPaths(worktreePath: string, dir: string, paths: string[], base: string): Promise<string> {
   for (const rel of paths) {
     await applyPath(worktreePath, dir, rel);
   }
-  return commitCheckoutState(dir, "GraphLoom candidate");
+  return commitCheckoutState(dir, "GraphLoom candidate", base);
 }
 
-/** Stage everything in the checkout and commit it with an isolated identity. Returns the commit. */
-async function commitCheckoutState(dir: string, message: string): Promise<string> {
+/**
+ * Stage everything in the checkout and commit it with an isolated identity.
+ * Returns the commit. `base` is the commit the checkout was cloned at.
+ */
+async function commitCheckoutState(dir: string, message: string, base: string): Promise<string> {
   await git(dir, ["add", "--all"]);
   await git(dir, [
     "-c",
@@ -358,7 +361,27 @@ async function commitCheckoutState(dir: string, message: string): Promise<string
     "-m",
     message,
   ]);
+  await localizeNewObjects(dir, base);
   return (await git(dir, ["rev-parse", "HEAD"])).trim();
+}
+
+/**
+ * Write every object the checkout's commits add to `base` into the checkout's
+ * own object store. Git does not write an object another store (the shared
+ * clone's alternates) already has, so a change whose blobs or trees an earlier
+ * run left in the source repository would be committed with objects that live
+ * only there. Git reads them through alternates, but Git libraries that do not
+ * follow them (go-git, under BanyanDB's license-eye) fail with "object not
+ * found". Packing just the new objects keeps the checkout cheap and complete.
+ */
+async function localizeNewObjects(dir: string, base: string): Promise<void> {
+  const listed = await git(dir, ["rev-list", "--objects", `${base}..HEAD`]);
+  const ids = listed
+    .split("\n")
+    .map((line) => line.split(" ")[0]!)
+    .filter((id) => id !== "");
+  if (ids.length === 0) return;
+  await git(dir, ["pack-objects", "--quiet", path.join(".git", "objects", "pack", "pack")], `${ids.join("\n")}\n`);
 }
 
 /**
@@ -497,9 +520,10 @@ export function describeFailure(command: CommandOutcomeView): string {
   return tail.length > 0 ? `${command.id}: ${how}: ${tail.slice(0, 300)}` : `${command.id}: ${how}`;
 }
 
-async function git(cwd: string, args: string[]): Promise<string> {
-  const { stdout } = await execFileAsync("git", args, { cwd, maxBuffer: 64 * 1024 * 1024 });
-  return stdout;
+async function git(cwd: string, args: string[], input?: string): Promise<string> {
+  const pending = execFileAsync("git", args, { cwd, maxBuffer: 64 * 1024 * 1024 });
+  if (input !== undefined) pending.child.stdin?.end(input);
+  return (await pending).stdout;
 }
 
 /** Remove a tree, making read-only directories writable first (Go's module cache marks them so). */

@@ -131,6 +131,24 @@ describe("runInCheckout: revertPatch", () => {
     expect(stdout(result.evidence ?? [])).toContain("init");
   });
 
+  it("commits a candidate whose objects the source repository already holds with those objects in the checkout's own store (go-git cannot read alternates)", async () => {
+    const { dir, pinnedHead } = await candidateRepo();
+    // An earlier candidate's worktree (it shares the source's object store) already wrote the candidate's blob there.
+    await execFileAsync("git", ["hash-object", "-w", "calc.go"], { cwd: dir });
+    const job = {
+      ...catJob("calc.go"),
+      // Cut the checkout off from the source's store, as a Git library that ignores alternates is.
+      input: { commands: [{ id: "own", argv: ["sh", "-c", "rm .git/objects/info/alternates && git cat-file -p HEAD:calc.go && git cat-file -e HEAD^{tree}"] }] },
+    };
+    const first = await run(dir, pinnedHead, job);
+    expect(first.result.status, first.result.summary).toBe("ok");
+    expect(stdout(first.result.evidence ?? [])).toBe(CANDIDATE);
+    // The second candidate of the run finds the first one's objects in the store too.
+    const second = await run(dir, pinnedHead, job);
+    expect(second.result.status, second.result.summary).toBe("ok");
+    expect(stdout(second.result.evidence ?? [])).toBe(CANDIDATE);
+  });
+
   it("clones the repository a run pinned as one of its subdirectories", async () => {
     const { dir, pinnedHead } = await candidateRepo();
     const sub = path.join(dir, "examples");
