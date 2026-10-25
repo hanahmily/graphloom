@@ -822,17 +822,33 @@ describe("the bench-gates command, run against a fake docker (#197)", () => {
   const REPORT = JSON.stringify(exampleBenchReport());
 
   /** A git checkout with go.mod, a Makefile with or without the target, a `docker` on PATH that logs its arguments and plays the container, and a module cache. */
-  async function setup(o: { target?: boolean; report?: string; rc?: number } = {}) {
+  async function setup(o: { target?: boolean; report?: string; rc?: number; shared?: boolean } = {}) {
     const dir = await realpath(await mkdtemp(path.join(os.tmpdir(), "issue-fix-bench-")));
     temps.push(dir);
     const repo = path.join(dir, "repo");
     const bin = path.join(dir, "bin");
     const cache = path.join(dir, "modcache");
-    await mkdir(repo);
+    const source = path.join(dir, "source");
     await mkdir(bin);
     await mkdir(cache);
-    await writeFile(path.join(repo, "go.mod"), "module example.com/x\n\ngo 1.26.10\n");
-    await writeFile(path.join(repo, "Makefile"), o.target === false ? ".PHONY: other\nother:\n\ttrue\n" : ".PHONY: bench-ql-report\nbench-ql-report:\n\ttrue\n");
+    // A real git checkout; with `shared`, a `git clone --shared` of a source repository, as the controller's candidate checkouts are.
+    const author = ["-c", "user.email=t@example.com", "-c", "user.name=T"];
+    const files = async (at: string) => {
+      await writeFile(path.join(at, "go.mod"), "module example.com/x\n\ngo 1.26.10\n");
+      await writeFile(path.join(at, "Makefile"), o.target === false ? ".PHONY: other\nother:\n\ttrue\n" : ".PHONY: bench-ql-report\nbench-ql-report:\n\ttrue\n");
+    };
+    if (o.shared) {
+      await mkdir(source);
+      await execFileAsync("git", ["init", "-q", source]);
+      await files(source);
+      await execFileAsync("git", ["-C", source, "add", "."]);
+      await execFileAsync("git", ["-C", source, ...author, "commit", "-q", "-m", "init"]);
+      await execFileAsync("git", ["clone", "-q", "--shared", source, repo]);
+    } else {
+      await mkdir(repo);
+      await execFileAsync("git", ["init", "-q", repo]);
+      await files(repo);
+    }
     await writeFile(path.join(dir, "report.json"), o.report ?? REPORT);
     const log = path.join(dir, "docker.log");
     await writeFile(
@@ -850,7 +866,7 @@ describe("the bench-gates command, run against a fake docker (#197)", () => {
       ].join("\n"),
       { mode: 0o755 },
     );
-    return { dir, repo, bin, cache, log, report: path.join(dir, "report.out") };
+    return { dir, repo, source, bin, cache, log, report: path.join(dir, "report.out") };
   }
 
   async function exec(env: Awaited<ReturnType<typeof setup>>, extra: Record<string, string> = {}) {
@@ -882,6 +898,17 @@ describe("the bench-gates command, run against a fake docker (#197)", () => {
     expect(envelope.harness).toEqual({ image: "golang:1.26.10", imageGo: "go version go1.26.10 linux/amd64", cpus: 4, memory: "8g", memorySwap: "8g" });
     expect(envelope.report).toEqual(JSON.parse(REPORT));
     expect(result.stdout).toContain("golang:1.26.10 (go version go1.26.10 linux/amd64)");
+  });
+
+  it("mounts a shared clone's alternate object store read-only at its own path, so the runner can read the base revision", async () => {
+    const env = await setup({ shared: true });
+    const result = await exec(env);
+    expect(result.code, result.stderr).toBe(0);
+    const run = (await readFile(env.log, "utf8")).trim().split("\n").find((l) => l.endsWith("make bench-ql-report"))!;
+    const objects = path.join(env.source, ".git", "objects");
+    expect(run).toContain(`-v ${objects}:${objects}:ro`);
+    // The checkout's own .git lies inside the mounted checkout, so it is not mounted again.
+    expect(run).not.toContain(`-v ${path.join(env.repo, ".git")}:`);
   });
 
   it("takes the image and the module cache from the environment, and finds the operator's cache behind a confined job's redirected one", async () => {

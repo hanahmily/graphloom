@@ -16,13 +16,13 @@
     "vitest": "^3.0.9"
   },
   "digests": {
-    "sourceTree": "920e1dba29e15452ea85b0765bec678a1ca4e561c4e8b04fe53e034e088caae8",
+    "sourceTree": "c32f9e629d3ee03c4017685bbb5eac2d0be41b3b8a2a4406265c91bccb49ee9e",
     "packageLock": "1a7d767913fa467db13adb3f495e4fe8aada7691e5dec901af9b4b2765b7fb2e",
     "files": {
       "package.json": "1fb2dda6bca401cf6ec704e7a647c9d24102f6e04422634f0bad78ce09692760",
       "package-lock.json": "1a7d767913fa467db13adb3f495e4fe8aada7691e5dec901af9b4b2765b7fb2e",
       "tsconfig.json": "3bafb75902b6084b621c996ae838dbfb87088cf095ce411be9809ce79bf3916b",
-      "profiles/banyandb-ql.json": "13cd0610d7295e46456c2272f83e676d391e1e4949734a3bf39d6700233d6f9b",
+      "profiles/banyandb-ql.json": "aacadede554f9615af0cf635aeb83eb8e8597c652d60225fc0d88a04799cb6a5",
       "profiles/banyandb.json": "ead89cdd4f56e93247f1851665eaaa5c2afd005ef529acfc6a5aabd46fffc963",
       "profiles/canopy.json": "b6ab770918bca51570fe308e992c39eb42ce78564379f5d83ea6996a922697de",
       "profiles/graphloom.json": "b2975f38d2b6c6495a75b128f070d2318ea2aa0c4870ab13f44de75053e0b969",
@@ -50,7 +50,7 @@
       "src/validators.ts": "af42eeb2d2ab79cd79ffcf534dd5fd71d69738b8ba7895319f82c57bfc91effb",
       "test/issue-fix.test.ts": "80eaf15533d2243a8ced2c72dd7fc24b10c82eebd948c09d4d4469fb19149187",
       "test/issues.test.ts": "a436e9f769173105669114c8e320258d2b72bf2a66424ca4219f354a58942d72",
-      "test/profiles.test.ts": "9f58c8e70c640e8a998841180211a06f68483c38c48920d3b073b87a056beb23",
+      "test/profiles.test.ts": "907609d69dd6250486a6c1b773410d81b753f206440d3778ef66c0ba3c0ab109",
       "test/review-dedupe.test.ts": "6df8323d0339f1f68a059902bf9a91a8cda25b0acedb369a7f043a2f734dd89b"
     }
   }
