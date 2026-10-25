@@ -189,6 +189,8 @@ interface Scenario {
   failDeliveries?: number;
   /** After the run stops on a failed delivery, resume once (a new generation), as an operator does after fixing it. */
   resumeAfterFailedDelivery?: boolean;
+  /** The run's id; default "run". */
+  runId?: string;
 }
 
 const OCR = "/opt/open code review/bin/ocr";
@@ -435,7 +437,7 @@ function simulate(scenario: Scenario, request = `Fix apache/skywalking#${ISSUE}.
   const definition = createGraph().describe(config);
   for (let step = 0; step < 100; step += 1) {
     const view: RunView = {
-      runId: "run",
+      runId: scenario.runId ?? "run",
       task: { request, repo: "../skywalking-banyandb" },
       current: { stageId: "fix", attempt },
       // A receipt is valid only while the candidate it names is still the
@@ -614,6 +616,16 @@ describe("issue-fix graph under the banyandb profile", () => {
     } finally {
       await rm(root, { recursive: true, force: true });
     }
+  });
+
+  it("delivers a rehearsal's run to a branch of its own, so a rerun finds fix/<issue> and its own branch free (#199)", () => {
+    expect(deliverArgs(simulate({}).jobs).branch).toBe(`fix/${ISSUE}`);
+    const first = deliverArgs(simulate({ runId: "rehearsal-0a1b2c3d" }).jobs).branch;
+    const second = deliverArgs(simulate({ runId: "rehearsal-4e5f6a7b" }).jobs).branch;
+    expect(first).toBe(`rehearsal/rehearsal-0a1b2c3d/fix-${ISSUE}`);
+    expect(second).not.toBe(first);
+    // A ref cannot also be a directory: the run's worktree branch is graphloom/<runId>, so neither may sit under it.
+    expect(first!.startsWith("graphloom/")).toBe(false);
   });
 
   it("plans, fixes, checks, reviews the code and delivers #14111", () => {

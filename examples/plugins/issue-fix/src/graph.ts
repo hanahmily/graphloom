@@ -8,6 +8,8 @@ import {
   stop,
   supervise,
   validate,
+  isRehearsalRunId,
+  rehearsalBranchScope,
   type EnvironmentCommand,
   type EvidenceRecord,
   type GraphDecision,
@@ -142,7 +144,7 @@ import { finalSections } from "./final.js";
 import { cleanRun, codeReview, finalRun, implementerRecord, latestImplementerRecord, plannerRecord, reportText, validatorById, verifiedChecks } from "./validators.js";
 
 export const GRAPH_ID = "issue-fix";
-export const GRAPH_VERSION = "0.12.0";
+export const GRAPH_VERSION = "0.12.1";
 
 /** Graph bookkeeping; everything else is read back from recorded evidence. */
 export interface FixPrivateState {
@@ -831,7 +833,8 @@ function deliver(ctx: Context, view: RunView, issue: number, state: FixPrivateSt
   const delivered = commandRuns(current, COMMAND.deliver)
     .filter((r) => r.record.candidateDigest === view.candidateDigest && (succeeded(r.command) || !isStaleFailure(r.record, view)))
     .at(-1);
-  const branch = `fix/${issue}`;
+  // A rehearsal delivers under its own run's namespace: it never takes the real run's `fix/<issue>`, and a rerun finds its branch free.
+  const branch = isRehearsalRunId(view.runId) ? `${rehearsalBranchScope(view.runId)}/fix-${issue}` : `fix/${issue}`;
   if (delivered === undefined) {
     // Leave the final table in the worktree for the operator; it stays out of the commit.
     const ledger = findingLedger(view.evidence);

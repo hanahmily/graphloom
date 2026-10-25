@@ -1,6 +1,6 @@
 {
   "graphId": "issue-fix",
-  "version": "0.12.0",
+  "version": "0.12.1",
   "sdkProtocol": 1,
   "taskConfig": "required",
   "entryPoints": {
@@ -16,14 +16,14 @@
     "vitest": "^3.0.9"
   },
   "digests": {
-    "sourceTree": "c32f9e629d3ee03c4017685bbb5eac2d0be41b3b8a2a4406265c91bccb49ee9e",
-    "packageLock": "1a7d767913fa467db13adb3f495e4fe8aada7691e5dec901af9b4b2765b7fb2e",
+    "sourceTree": "2bd05048657d668e966c323423a9951b60dff71adfda9628944c4b72cdc426ca",
+    "packageLock": "caf7081223808be47ee3cdbbabe21d385ed21203ed99ae06f64f23ab147f1e37",
     "files": {
-      "package.json": "1fb2dda6bca401cf6ec704e7a647c9d24102f6e04422634f0bad78ce09692760",
-      "package-lock.json": "1a7d767913fa467db13adb3f495e4fe8aada7691e5dec901af9b4b2765b7fb2e",
+      "package.json": "22cca7a6d0a6a2d614731b3f050bea6bb4caead24f3be3d5b4f22a18beff9323",
+      "package-lock.json": "caf7081223808be47ee3cdbbabe21d385ed21203ed99ae06f64f23ab147f1e37",
       "tsconfig.json": "3bafb75902b6084b621c996ae838dbfb87088cf095ce411be9809ce79bf3916b",
       "profiles/banyandb-ql.json": "aacadede554f9615af0cf635aeb83eb8e8597c652d60225fc0d88a04799cb6a5",
-      "profiles/banyandb.json": "ead89cdd4f56e93247f1851665eaaa5c2afd005ef529acfc6a5aabd46fffc963",
+      "profiles/banyandb.json": "8ceb94ac063a293d4eaa03c0f27a29fe221f694d47d458e81e1e400bb6218e1a",
       "profiles/canopy.json": "b6ab770918bca51570fe308e992c39eb42ce78564379f5d83ea6996a922697de",
       "profiles/graphloom.json": "b2975f38d2b6c6495a75b128f070d2318ea2aa0c4870ab13f44de75053e0b969",
       "src/acceptance.ts": "0686d91f27c32915eed1b7d2a78c737629227db867355a5fb6a4bd446f319c76",
@@ -34,23 +34,23 @@
       "src/evidence.ts": "0bb167ad61727aaddee5a339e1ed25644fd706f9070327c8be74e37a7b22e109",
       "src/final.ts": "2e7d03b05433cc34b5b894403434cc445a0942c2ab704ea7f695a992dfa033bd",
       "src/findings.ts": "ac447652c7c32bb6f2c2386d573fa7bd293361c3fe63094c504d551923dbaace",
-      "src/graph.ts": "c57d26fd82320c342298bd67abe3e2996b5da6e1656633d5793548627dd3cf6c",
+      "src/graph.ts": "5a545e8888d6f9ac51db7becbc73125020b6ebfb3b38def7edbe76b86c02dbf1",
       "src/index.ts": "f9baadf435d0c4e74ca3d5c5ab560ba165a926832419ba10df58d8fdcbf442d5",
       "src/issues.ts": "f283c18373d5a6cf8c88413214bdafb503ef63b0edb52a24d347fa7551990cbf",
       "src/ocr.ts": "24a3c72fe23243e9a2e21cfe7949ce880d6f95c41a817babd371d6b097cb48a2",
       "src/profile.ts": "b67d1f1f1f53bb3036fe962e5a2f9659aa3e278800d3f533c28bcdf0d35b6384",
       "src/prompts.ts": "080aaf5138e8aed9904eaebe0b11b8d8718658138bf6f300d307b0baa53d732c",
       "src/qualification.ts": "6ba067c0133b7bc61ea1f004d21a1a676198f4d9f800c72d1f065059b1d379a2",
-      "src/rehearsal.ts": "c616c7fd70d60c2bcf6caa9425c1eec54e1132e82d301437639d0023f0c3ffc9",
+      "src/rehearsal.ts": "b84be04703a509259e212aea44a7d126deb5e86a183805c597eeda5b4a5874c5",
       "src/review-common.ts": "2b711248d1b227c01f8ed36bfa2399791fbcf9543a92e89414c74f119b20323c",
       "src/runners/go-test.ts": "321eddf6923ca422c6b2be6511a337aead0887ec9245cd77a7a6ceec59994128",
       "src/runners/index.ts": "8bef945520b8015089f28e50256ded20b47d7d7666e94942b3fc373db592359e",
       "src/runners/types.ts": "a85674b56aee33dcd1c74e45721afab82c5ee50e5f6aa5267df65032789c5900",
       "src/runners/vitest.ts": "fa76eeeba1c194bd2794d5eaaafd805a6589a1901f88cecc8e6e607f93801e95",
       "src/validators.ts": "af42eeb2d2ab79cd79ffcf534dd5fd71d69738b8ba7895319f82c57bfc91effb",
-      "test/issue-fix.test.ts": "80eaf15533d2243a8ced2c72dd7fc24b10c82eebd948c09d4d4469fb19149187",
+      "test/issue-fix.test.ts": "75162c88262522618a07864c1c88f3896d9ba991a535a8514fc05a829c55cfa3",
       "test/issues.test.ts": "a436e9f769173105669114c8e320258d2b72bf2a66424ca4219f354a58942d72",
-      "test/profiles.test.ts": "907609d69dd6250486a6c1b773410d81b753f206440d3778ef66c0ba3c0ab109",
+      "test/profiles.test.ts": "414580444bd77d769636068088fa36484120cef139c462ad452a5a46fc07dbf0",
       "test/review-dedupe.test.ts": "6df8323d0339f1f68a059902bf9a91a8cda25b0acedb369a7f043a2f734dd89b"
     }
   }

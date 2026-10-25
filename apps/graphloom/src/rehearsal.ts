@@ -40,6 +40,8 @@ import {
   readUnverifiedReads,
   REHEARSAL_ADVERSARIAL_ENV,
   REHEARSAL_GITHUB_TOKEN_ENV,
+  REHEARSAL_RUN_ID_PREFIX,
+  rehearsalBranchScope,
   REHEARSAL_SYNTHESIZED_ENV,
   unsupportedSchemaKeywords,
   validateResultShape,
@@ -492,7 +494,7 @@ async function performRehearsal(
       taskPath: tempTaskPath,
       runner,
       stateRoot,
-      runId: `rehearsal-${randomUUID().slice(0, 8)}`,
+      runId: `${REHEARSAL_RUN_ID_PREFIX}${randomUUID().slice(0, 8)}`,
       supervisorFactory: async () => createScriptedSupervisor({ decisions: scenario.supervisor ?? [] }),
     });
     const state = await loadRunState(report.stateDir);
@@ -543,9 +545,20 @@ async function performRehearsal(
 /** A rehearsal's worktree/branch live in the real repo, not its scratch root; both are removed together. */
 async function cleanUpRehearsal(run: RehearsalRun): Promise<void> {
   if (run.stateDir !== undefined) {
+    const state = await loadRunState(run.stateDir).catch(() => undefined);
     await createController().delete(run.stateDir, { force: true }).catch(() => undefined);
+    if (state !== undefined) await removeRehearsalBranches(state.intake.repoPath, state.runId);
   }
   await rm(run.rehearsalRoot, { recursive: true, force: true });
+}
+
+/** The branches the rehearsal's run made under its own namespace (a plugin's delivery), which the run's delete does not know. */
+export async function removeRehearsalBranches(repoPath: string, runId: string): Promise<void> {
+  const scope = `refs/heads/${rehearsalBranchScope(runId)}/`;
+  const listed = await execFileAsync("git", ["for-each-ref", "--format=%(refname)", scope], { cwd: repoPath }).catch(() => undefined);
+  for (const ref of (listed?.stdout ?? "").split("\n").filter((line) => line.startsWith(scope))) {
+    await execFileAsync("git", ["update-ref", "-d", ref], { cwd: repoPath }).catch(() => undefined);
+  }
 }
 
 export interface RehearseOptions {

@@ -282,6 +282,19 @@ A missing document, or more than 200,000 bytes of them, stops the run before any
 ([#195](https://github.com/hanahmily/graphloom/issues/195); see
 [the design](../../../docs/design-issue-fix-graph.md#context-documents)).
 
+## Rehearsal findings (0.12.1)
+
+- `bin/buf` is an output of the BanyanDB profiles' `generate-proto` step. `make lint` and
+  `make format` (under `make check`) run it from `api/` without installing it, so a prepare-cache
+  hit must restore it. The other tools in `bin/` install themselves where they are used.
+- Candidate checkouts commit their changes with the new objects in their own store (the
+  controller packs them), because an object the shared source repository already holds is
+  otherwise left there, and BanyanDB's `license-eye` (go-git) cannot read it through alternates
+  ("object not found"). The banyandb-ql rehearsal no longer needs a per-run nonce.
+- A rehearsal's run (id `rehearsal-<id>`) delivers to `rehearsal/<run id>/fix-<issue>`, which the CLI
+  removes when it discards a `ready` rehearsal; a real run still delivers to `fix/<issue>`
+  ([#199](https://github.com/hanahmily/graphloom/issues/199)).
+
 ## Review failures reenter Fix (0.11.0)
 
 When code review fails only because findings are confirmed, the graph

@@ -17,7 +17,15 @@ export type {
   RehearsalReply,
   RehearsalScenario,
 } from "./rehearsal.js";
-export { assignmentNamesField, checkAssignmentFidelity, mutateAdversarially, synthesizeFromSchema } from "./rehearsal.js";
+export {
+  assignmentNamesField,
+  checkAssignmentFidelity,
+  isRehearsalRunId,
+  mutateAdversarially,
+  REHEARSAL_RUN_ID_PREFIX,
+  rehearsalBranchScope,
+  synthesizeFromSchema,
+} from "./rehearsal.js";
 
 export type { RecordedAssignment, RecordedCall } from "./rehearsal-client.js";
 export {

@@ -11,6 +11,25 @@
 import { parsePath, type PathSegment, type ReferenceSet } from "./result-contract.js";
 import type { GraphDecision } from "./types.js";
 
+/** The id prefix of a run the CLI's `rehearse` starts: its runs are disposable, and so is whatever they put in the repository. */
+export const REHEARSAL_RUN_ID_PREFIX = "rehearsal-";
+
+/** Whether `runId` names a rehearsal's run. */
+export function isRehearsalRunId(runId: string): boolean {
+  return runId.startsWith(REHEARSAL_RUN_ID_PREFIX);
+}
+
+/**
+ * The branch namespace a rehearsal's run owns, for any ref it must create in
+ * the repository: a rehearsal that wrote a real run's name (`fix/<issue>`)
+ * would block its own rerun, and would shadow the real run's branch. It is not
+ * under `graphloom/<runId>`, the run's worktree branch, which a ref cannot also
+ * be a directory of. The CLI removes the namespace when it discards the run.
+ */
+export function rehearsalBranchScope(runId: string): string {
+  return `rehearsal/${runId}`;
+}
+
 /** Budget overrides a scenario needs beyond the rehearsal's small defaults. */
 export interface RehearsalBudgets {
   agentInvocations?: number;
