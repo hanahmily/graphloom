@@ -1,5 +1,6 @@
 import {
   dispatch,
+  MAX_EXECUTOR_INPUT_BYTES,
   isStaleFailure,
   observe,
   reenter,
@@ -1333,6 +1334,16 @@ function readPrivate(view: RunView): FixPrivateState {
 function dispatchAgent(view: RunView, job: JobSpec, summary: string, state: FixPrivateState): GraphDecision {
   if (view.budgets.agentInvocations <= 0) {
     return stop({ reason: "budgets exhausted", blocker: "no agent invocations left", retryable: false }, `cannot ${summary}`);
+  }
+  // An executor's input is bounded as serialized JSON, where quotes, backslashes and newlines in the
+  // issue and the context documents cost extra bytes: measure what is actually sent, so a job that
+  // cannot fit stops here, naming the cause, instead of being refused at admission.
+  const sent = Buffer.byteLength(JSON.stringify(job.input ?? null), "utf8");
+  if (sent > MAX_EXECUTOR_INPUT_BYTES) {
+    return stop(
+      { reason: "incompatible task", blocker: `the agent input to ${summary} is ${sent} bytes once serialized, more than the ${MAX_EXECUTOR_INPUT_BYTES} an executor input carries: the issue, its comments and the context documents are too large together`, retryable: false },
+      `stop: the assignment to ${summary} does not fit an executor input`,
+    );
   }
   return withPrivate(dispatch(job, summary), state);
 }

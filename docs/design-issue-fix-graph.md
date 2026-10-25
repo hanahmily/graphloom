@@ -686,7 +686,7 @@ the benchmark rules' hard gates and nothing else:
 
 Each is read from counts and bytes, not from a boolean in the report. The report
 must also be complete: the frozen environment, the budgets, a case at each size,
-at least five alternated pairs per case, and an interval on each effect. The
+exactly five alternated pairs per case, each holding every variant once, and an interval on each effect. The
 validator never reads a latency, so no timing can pass or fail it, and the pull
 request's `Benchmark` section shows the medians, the effects and the RPC figures
 as reported only. A gate or completeness failure is a defect in the change, so

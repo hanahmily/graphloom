@@ -203,7 +203,7 @@ from a boolean the report carries:
 
 Complete means: the schema, the frozen environment (toolchain, commit, base
 commit, seed, CPUs, memory), the effective budgets, a case at each of the two
-sizes, at least five alternated pairs per case with `nsPerOp`,
+sizes, exactly five alternated pairs per case (each holding every variant once, one `order` per pair, alternating) with `nsPerOp`,
 `allocBytesPerOp` and `retainedBytes`, and an interval (`ciLow` <= `ciHigh`) on
 each paired effect. **No latency is ever judged**: the timings (medians of the
 samples, the effect estimates with their intervals, RPC p50/p95/CPU) go in the

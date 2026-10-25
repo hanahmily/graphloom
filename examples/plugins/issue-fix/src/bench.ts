@@ -75,11 +75,31 @@ export function parseBenchReport(raw: string): BenchParsed | { problem: string }
   return { report, ...(wrapped !== undefined && harness !== undefined ? { harness: harness as BenchHarness } : {}) };
 }
 
-/** How many paired samples a case holds, whether it lists them or only counts them. */
-function sampleCount(samples: unknown): number | undefined {
-  if (Array.isArray(samples)) return new Set(samples.map((s) => object(s)?.pair)).size;
-  const counted = object(samples);
-  return counted !== undefined && count(counted.pairs) ? counted.pairs : undefined;
+/**
+ * What a case's raw samples lack to be BENCH_PAIRS paired, alternated
+ * repetitions: a list of samples (a bare count is not evidence), exactly
+ * BENCH_PAIRS distinct `pair` numbers, at least two variants with every pair
+ * holding every variant once, one `order` per pair, and that order alternating
+ * from one pair to the next.
+ */
+function pairProblems(samples: unknown): string[] {
+  if (!Array.isArray(samples)) return ["samples must list the raw samples, not count them"];
+  const rows = samples.map(object);
+  if (rows.some((r) => r === undefined || !count(r.pair) || !text(r.variant) || !text(r.order))) return ["every sample needs pair, variant and order"];
+  const list = rows as Json[];
+  const problems: string[] = [];
+  const pairs = [...new Set(list.map((r) => r.pair as number))].sort((a, b) => a - b);
+  if (pairs.length !== BENCH_PAIRS) problems.push(`${pairs.length} paired repetition(s), want ${BENCH_PAIRS}`);
+  const variants = [...new Set(list.map((r) => r.variant as string))];
+  if (variants.length < 2) problems.push("a pair needs two variants measured against each other");
+  for (const pair of pairs) {
+    const mine = list.filter((r) => r.pair === pair);
+    if (variants.some((v) => mine.filter((r) => r.variant === v).length !== 1)) problems.push(`pair ${pair} does not hold each variant exactly once`);
+    if (new Set(mine.map((r) => r.order)).size !== 1) problems.push(`pair ${pair} has more than one order`);
+  }
+  const order = (pair: number) => list.find((r) => r.pair === pair)?.order;
+  if (pairs.some((pair, i) => i > 0 && order(pair) === order(pairs[i - 1]!))) problems.push("the pairs' order is not alternated");
+  return problems;
 }
 
 const sizeName = (s: { facts: number; dimensions: number }): string => `${s.facts.toLocaleString("en-US")}/${s.dimensions.toLocaleString("en-US")}`;
@@ -116,12 +136,9 @@ export function benchIncomplete(report: Json): string[] {
     const size = sizeOf(c?.size);
     if (size === undefined) missing.push(`${name}: size needs facts and dimensions`);
     else seen.push(size);
-    const pairs = sampleCount(c?.samples);
-    if (pairs === undefined || pairs < BENCH_PAIRS) missing.push(`${name}: ${pairs ?? 0} paired sample(s), want at least ${BENCH_PAIRS}`);
-    if (Array.isArray(c?.samples)) {
-      const samples = c!.samples as unknown[];
-      if (!samples.every((s) => num(object(s)?.nsPerOp) && num(object(s)?.allocBytesPerOp) && num(object(s)?.retainedBytes))) missing.push(`${name}: every sample needs nsPerOp, allocBytesPerOp and retainedBytes`);
-      if (samples.length > 1 && new Set(samples.map((s) => object(s)?.order)).size < 2) missing.push(`${name}: the pairs' order is not alternated`);
+    for (const problem of pairProblems(c?.samples)) missing.push(`${name}: ${problem}`);
+    if (Array.isArray(c?.samples) && !c.samples.every((s) => num(object(s)?.nsPerOp) && num(object(s)?.allocBytesPerOp) && num(object(s)?.retainedBytes))) {
+      missing.push(`${name}: every sample needs nsPerOp, allocBytesPerOp and retainedBytes`);
     }
     const effects = Array.isArray(c?.effects) ? (c!.effects as unknown[]) : [];
     if (effects.length === 0) missing.push(`${name}: no paired effect estimate`);
@@ -244,9 +261,9 @@ export function benchSectionLines(label: string, parsed: BenchParsed): string[] 
 /** What the planner and the implementer are told about the benchmark runner and its report: the schema and the rules. */
 export const BENCH_GUIDANCE = [
   "The controller's final step runs `make bench-ql-report` once, after code review has converged, in a container with 4 CPUs, 8 GiB of memory and no extra swap (docker run --cpus=4 --memory=8g --memory-swap=8g, on a golang image of go.mod's toolchain, the checkout mounted read-write and the module cache read-only, module downloads off: GOPROXY=off). This ticket's change adds that make target and the runner behind it (a repository-level Makefile target, or one the root Makefile includes); it must write the report to build/bench/ql-report.json, which the repository already ignores. A checkout without the target fails the final step with a message naming it, and the change comes back to you.",
-  `Benchmark rules (docs/relational-tickets.md, "Benchmark rules for every ticket", and the ticket's focused benchmark section of the same document; the context documents above hold them): freeze the toolchain, commits, fixture seed, parameters, effective admission budgets, four CPUs, 8 GiB and no extra swap; time only successful queries and keep deliberate overload and recovery apart; verify the full results against an independent oracle before accepting a timing sample (an error or a timeout is a failure, never a faster observation); use the two fixed successful sizes 1,024 facts/64 dimension rows and 16,384 facts/1,024 dimension rows, and prove in a preflight that both fit the unchanged budget; use five paired repetitions with alternated order, keep the raw samples and report paired effect estimates with uncertainty; record kernel ns/op, allocated bytes/op, retained operator bytes and RPC p50/p95/CPU where applicable; process RSS is separate from tracked memory; benchmark-only reference or disable switches must never become public language or API options. Correctness, bounded memory and cleanup are hard gates; timings are reported, never gated. Do not declare gates passed from a median or change a threshold after seeing results.`,
+  `Benchmark rules (docs/relational-tickets.md, "Benchmark rules for every ticket", and the ticket's focused benchmark section of the same document; the context documents above hold them): freeze the toolchain, commits, fixture seed, parameters, effective admission budgets, four CPUs, 8 GiB and no extra swap; time only successful queries and keep deliberate overload and recovery apart; verify the full results against an independent oracle before accepting a timing sample (an error or a timeout is a failure, never a faster observation); use the two fixed successful sizes 1,024 facts/64 dimension rows and 16,384 facts/1,024 dimension rows, and prove in a preflight that both fit the unchanged budget; use five paired repetitions with alternated order (one \`order\` per pair, odd pairs "AB", even "BA", both variants in each pair), keep the raw samples as a list and report paired effect estimates with uncertainty; record kernel ns/op, allocated bytes/op, retained operator bytes and RPC p50/p95/CPU where applicable; process RSS is separate from tracked memory; benchmark-only reference or disable switches must never become public language or API options. Correctness, bounded memory and cleanup are hard gates; timings are reported, never gated. Do not declare gates passed from a median or change a threshold after seeing results.`,
   `The report is JSON, schema "${BENCH_SCHEMA}", under ${MAX_BENCH_REPORT_BYTES} bytes (the run keeps at most 64 KiB of it): {"schema":"${BENCH_SCHEMA}","ticket":"R01","environment":{"goVersion","commit","baseCommit","seed","cpus","memoryBytes","swapBytes"},"budgets":{"<name>":number,...},"preflight":[{"facts":1024,"dimensions":64,"fits":true,"peakAccountedBytes":n,"budgetBytes":n},{"facts":16384,"dimensions":1024,...}],"gates":{"exactResults":{"checked":n,"mismatches":0},"failedTimedCalls":{"count":0},"accountedMemory":{"peakBytes":n,"budgetBytes":n},"outstandingResources":{"count":0}},"cases":[{"name","size":{"facts","dimensions"},"samples":[{"pair":1,"order":"AB","variant","nsPerOp","allocBytesPerOp","allocsPerOp","retainedBytes","rpcP50Ns","rpcP95Ns","rpcCpuNs"}, ...],"effects":[{"metric","comparison","estimate","ciLow","ciHigh","confidence"}]}]}.`,
-  "The controller passes the ticket only when the command exits 0 and every hard gate holds in the report: results exact (checked > 0, mismatches 0), no failed timed call, accounted peak within its budget, no outstanding owned resource, and a preflight entry that fits for both sizes; and the report is complete (the environment, the budgets, a case and at least five alternated pairs at each size, and an interval for each effect). It never judges a latency, and the pull request's Benchmark section shows the timings as reported only. A benchmark that cannot meet a gate is a defect to fix, not a threshold to move.",
+  "The controller passes the ticket only when the command exits 0 and every hard gate holds in the report: results exact (checked > 0, mismatches 0), no failed timed call, accounted peak within its budget, no outstanding owned resource, and a preflight entry that fits for both sizes; and the report is complete (the environment, the budgets, a case at each size with exactly five alternated pairs, each holding every variant once, and an interval for each effect). It never judges a latency, and the pull request's Benchmark section shows the timings as reported only. A benchmark that cannot meet a gate is a defect to fix, not a threshold to move.",
 ].join("\n");
 
 /**
@@ -257,9 +274,9 @@ export const BENCH_GUIDANCE = [
 export function exampleBenchReport(patch: (report: Record<string, unknown>) => void = () => undefined): Record<string, unknown> {
   const samples = (base: number) =>
     Array.from({ length: BENCH_PAIRS }, (_, i) => i + 1).flatMap((pair) =>
-      ["operator", "reference"].map((variant, v) => ({
+      ["operator", "reference"].map((variant) => ({
         pair,
-        order: (pair % 2 === 1) === (v === 0) ? "AB" : "BA",
+        order: pair % 2 === 1 ? "AB" : "BA",
         variant,
         nsPerOp: base * (variant === "operator" ? 1 : 40) + pair,
         allocBytesPerOp: 4_096,

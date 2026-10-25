@@ -2531,6 +2531,18 @@ describe("context documents (#195)", () => {
     expect(crowded.jobs.filter((j) => j.kind === "agent")).toEqual([]);
   });
 
+  it("measures the serialized input of every agent job, so an escape-heavy document stops the run cleanly instead of being refused at admission", () => {
+    // 142,500 bytes of quotes, backslashes and newlines: under the 200,000 byte bound raw, and twice that once JSON escapes them.
+    const heavy = '"\\\n'.repeat(47_500);
+    expect(Buffer.byteLength(heavy)).toBeLessThan(MAX_CONTEXT_BYTES);
+    const { decision, jobs } = simulate({ profile: CROSS, contextFiles: { ...SERVED, "acme/private-design:docs/relational-design.md": heavy } });
+    expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "incompatible task", blocker: expect.stringMatching(/once serialized, more than the 256000 an executor input carries/), retryable: false } });
+    expect(jobs.filter((j) => j.kind === "agent")).toEqual([]);
+    // The same bytes without escapes fit.
+    const plain = simulate({ profile: CROSS, contextFiles: { ...SERVED, "acme/private-design:docs/relational-design.md": "x".repeat(Buffer.byteLength(heavy)) } });
+    expect(plain.decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+  });
+
   it("runs as before for a profile without context: no read, no block", () => {
     const { jobs, decision } = simulate({});
     expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
@@ -2723,9 +2735,9 @@ describe("the banyandb-ql profile and its benchmark gates (#197)", () => {
   const benchReport = (patch: (report: Json) => void = () => undefined): Json => {
     const samples = (base: number) =>
       [1, 2, 3, 4, 5].flatMap((pair) =>
-        ["operator", "reference"].map((variant, i) => ({
+        ["operator", "reference"].map((variant) => ({
           pair,
-          order: (pair % 2 === 1) === (i === 0) ? "AB" : "BA",
+          order: pair % 2 === 1 ? "AB" : "BA",
           variant,
           nsPerOp: base * (variant === "operator" ? 1 : 40) + pair,
           allocBytesPerOp: 4_096,
@@ -2960,7 +2972,13 @@ describe("the banyandb-ql profile and its benchmark gates (#197)", () => {
       failsWith((r) => void ((r.environment as Json).seed = undefined), /environment.seed is missing/);
       failsWith((r) => void (r.budgets = {}), /budgets must list the effective admission budgets/);
       failsWith((r) => void (r.cases = (r.cases as Json[]).slice(0, 1)), /no case at 16,384\/1,024/);
-      failsWith((r) => void ((r.cases as Json[])[0]!.samples = ((r.cases as Json[])[0]!.samples as Json[]).slice(0, 6)), /join-unique: 3 paired sample\(s\), want at least 5/);
+      failsWith((r) => void ((r.cases as Json[])[0]!.samples = ((r.cases as Json[])[0]!.samples as Json[]).slice(0, 6)), /join-unique: 3 paired repetition\(s\), want 5/);
+      failsWith((r) => void ((r.cases as Json[])[0]!.samples = { pairs: 5 }), /join-unique: samples must list the raw samples, not count them/);
+      failsWith((r) => void ((r.cases as Json[])[1]!.samples = { count: 10, pairs: 5, medians: {} }), /join-unique: samples must list the raw samples/);
+      failsWith((r) => void ((r.cases as Json[]).forEach((c) => void (c.samples = (c.samples as Json[]).filter((s) => s.variant !== "reference")))), /a pair needs two variants measured against each other/);
+      failsWith((r) => void ((r.cases as Json[])[0]!.samples = ((r.cases as Json[])[0]!.samples as Json[]).filter((s) => !(s.pair === 3 && s.variant === "reference"))), /pair 3 does not hold each variant exactly once/);
+      failsWith((r) => void ((r.cases as Json[])[0]!.samples = [...((r.cases as Json[])[0]!.samples as Json[]), { pair: 6, order: "BA", variant: "operator", nsPerOp: 1, allocBytesPerOp: 1, retainedBytes: 1 }, { pair: 6, order: "BA", variant: "reference", nsPerOp: 1, allocBytesPerOp: 1, retainedBytes: 1 }]), /join-unique: 6 paired repetition\(s\), want 5/);
+      failsWith((r) => void ((r.cases as Json[])[0]!.samples = ((r.cases as Json[])[0]!.samples as Json[]).map((s) => (s.pair === 2 && s.variant === "reference" ? { ...s, order: "AB" } : s))), /pair 2 has more than one order/);
       failsWith((r) => void ((r.cases as Json[])[0]!.samples = ((r.cases as Json[])[0]!.samples as Json[]).map((s) => ({ ...s, order: "AB" }))), /the pairs' order is not alternated/);
       failsWith((r) => void ((r.cases as Json[])[1]!.effects = [{ metric: "nsPerOp", estimate: 1 }]), /an effect needs a metric, an estimate and an interval/);
       failsWith((r) => void ((r.cases as Json[])[1]!.effects = []), /no paired effect estimate/);
