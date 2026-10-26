@@ -13,6 +13,7 @@ import {
   assertCandidateFullyReviewed,
   assertDependenciesUnchanged,
   linkDependencies,
+  makeTreeWritable,
   type QualifiedRepairArtifact,
   type RepairSnapshot,
 } from "./repair.js";
@@ -69,6 +70,7 @@ export async function executorRepairSubject(
           return name !== "node_modules" && name !== ".git";
         },
       });
+      await makeTreeWritable(candidateRoot);
       await linkDependencies(baseReal, candidateRoot);
       const candidateEntryModule = path.join(candidateRoot, path.relative(base.root, base.entryModule));
       const snapshotDigest = await digestExecutorSource(base.root);

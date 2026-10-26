@@ -37,6 +37,10 @@ procedure) follow the proposed [release design](docs/design-release.md).
 `scripts/release.sh build <version>` builds the release assets locally into
 `release-out/<version>/` (gate on the pinned Node, license and content checks,
 smoke tests with no `node` on `PATH`); it publishes nothing.
+`scripts/install.sh` (installer, `upgrade`, `self ...`) and `scripts/shim.sh`
+(the user shim and the daily update trigger) are POSIX sh; their tests
+(`apps/graphloom/test/install.test.ts`, `auto-update.test.ts`) use a temporary
+`HOME` and a stub `gh`, never the real install home or the network.
 
 ## Principles
 

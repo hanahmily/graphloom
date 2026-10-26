@@ -31,7 +31,10 @@ export const GATE = ["NODE_ENV=development npm ci --include=dev", "npm run build
 /** Run-state format the release writes (§5.2); run state has no recorded format before R3, which reads it as 1. */
 export const STATE_FORMAT = 1;
 
-const ROOT_FILES = ["package.json", "package-lock.json", "README.md", "CHANGELOG.md", "LICENSE", "NOTICE", "install.sh"];
+const ROOT_FILES = ["package.json", "package-lock.json", "README.md", "CHANGELOG.md", "LICENSE", "NOTICE"];
+
+/** The installer and the user shim (§4.2, §4.3), copied from `scripts/` to the tree's root, executable. */
+const INSTALL_FILES = [["scripts/install.sh", "install.sh"], ["scripts/shim.sh", "shim.sh"]];
 
 /** Never copied from a source-repairable package: dependencies, run state, caches, local secrets. */
 function skipInPackage(name) {
@@ -82,7 +85,17 @@ export async function assemble({ src, out, nodeDir, nodePin, version, commit, ep
 
   for (const file of ROOT_FILES) {
     if (existsSync(path.join(src, file))) await copyFile(path.join(src, file), path.join(dest, file));
-    else if (!["CHANGELOG.md", "install.sh"].includes(file)) throw new Error(`staging tree has no ${file}`);
+    else if (file !== "CHANGELOG.md") throw new Error(`staging tree has no ${file}`);
+  }
+  for (const [from, to] of INSTALL_FILES) {
+    if (!existsSync(path.join(src, from))) throw new Error(`staging tree has no ${from}`);
+    await copyFile(path.join(src, from), path.join(dest, to));
+    await chmod(path.join(dest, to), 0o755);
+  }
+  // The release signing key's allowed_signers (§2.5), committed with R5: install.sh verifies later releases against it.
+  if (existsSync(path.join(src, "release", "allowed_signers"))) {
+    await mkdir(path.join(dest, "release"), { recursive: true });
+    await copyFile(path.join(src, "release", "allowed_signers"), path.join(dest, "release", "allowed_signers"));
   }
 
   await cp(path.join(src, "node_modules"), path.join(dest, "node_modules"), { recursive: true, verbatimSymlinks: true, filter: filtered(skipInModules) });

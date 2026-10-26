@@ -51,6 +51,8 @@ export interface RunnerConfig {
   command?: { timeoutMs?: number };
   /** Shell command run once when a run leaves `running`; `run --on-stop` and `resume --on-stop` override it. */
   notify?: { onStop?: string; timeoutMs?: number };
+  /** Automatic updates of the install (docs/design-release.md §5.4). Default `auto`. */
+  autoUpdate?: "auto" | "notify" | "off";
 }
 
 /** Every harness a job of this run may use. */
@@ -141,7 +143,7 @@ function expandHome(p: string): string {
 }
 
 export function parseRunnerConfig(value: unknown, source = "runner config"): RunnerConfig {
-  const obj = settings(value, source, ["harness", "harnesses", "allowUnrestricted", "timeoutMs", "maxTimeoutMs", "claude", "codex", "pi", "github", "command", "notify"]);
+  const obj = settings(value, source, ["harness", "harnesses", "allowUnrestricted", "timeoutMs", "maxTimeoutMs", "claude", "codex", "pi", "github", "command", "notify", "autoUpdate"]);
   if (!isHarness(obj.harness)) throw new Error(`${source}: harness must be one of ${HARNESS_NAMES.join(", ")}`);
   if (obj.allowUnrestricted !== true) throw new Error(`${source}: allowUnrestricted must be true to run an agent with your user permissions`);
   const config: RunnerConfig = { harness: obj.harness, allowUnrestricted: true };
@@ -158,6 +160,12 @@ export function parseRunnerConfig(value: unknown, source = "runner config"): Run
     if (config.maxTimeoutMs < (config.timeoutMs ?? DEFAULT_CODING_TIMEOUT_MS)) {
       throw new Error(`${source}: maxTimeoutMs must be at least timeoutMs (${config.timeoutMs ?? DEFAULT_CODING_TIMEOUT_MS} ms)`);
     }
+  }
+  if (obj.autoUpdate !== undefined) {
+    if (obj.autoUpdate !== "auto" && obj.autoUpdate !== "notify" && obj.autoUpdate !== "off") {
+      throw new Error(`${source}: autoUpdate must be auto, notify, or off`);
+    }
+    config.autoUpdate = obj.autoUpdate;
   }
   if (obj.github !== undefined) {
     const nested = `${source}: github`;
