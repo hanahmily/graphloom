@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 // Stands in for `codex exec --json`: logs its invocation, prints the scripted
 // JSONL events, and writes the scripted last message to --output-last-message.
 // Steps: {event}, {sleepMs}, {hang: true}, {last: "..."}, {stderr: "..."}, {exit: code},

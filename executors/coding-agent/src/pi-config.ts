@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 /** Credential binding name for the Pi provider API key. */
 export const PI_API_KEY_CREDENTIAL = "pi-api-key";
 /** Operator config for the Pi harness module (`@graphloom/executor-coding-agent/pi`). */

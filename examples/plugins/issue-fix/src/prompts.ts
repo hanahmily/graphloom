@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 import { writeScopeExceptions, writeScopeExcludes, type EnvironmentCommand } from "@graphloom/sdk";
 import { COMMAND } from "./constants.js";
 import type { DecisionRecord } from "./decision-record.js";

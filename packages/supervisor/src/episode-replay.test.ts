@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 import { describe, expect, it } from "vitest";
 import { dispatch, reenter, returnToNormal, stop, validate, type GraphDecision, type RunView } from "@graphloom/sdk";
 import { buildEpisodeRecord, createEpisodeRecorder, MAX_EPISODE_RECORD_CHARS, type SupervisorEpisodeRecord } from "./episode.js";

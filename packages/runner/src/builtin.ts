@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 import type { ExecutorBinding, ExecutorPackageManifest } from "@graphloom/sdk";
 import { BUILTIN_EXECUTOR_NAMESPACE, createChildExecutorRunner } from "./registry.js";
 import { assertSandboxSupported, packageRootOf } from "./sandbox.js";

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 import { fileURLToPath } from "node:url";
 import type { ExecutorBinding, ExecutorPackageManifest } from "@graphloom/sdk";
 import { COMMAND_RUN_ID } from "./run.js";

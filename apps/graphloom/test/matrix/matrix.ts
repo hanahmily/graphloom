@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 /**
  * The end-to-end condition matrix (#144): each graph runs through the real
  * controller, its real child plugin host and the CLI's own runner and

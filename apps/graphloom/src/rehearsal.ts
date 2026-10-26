@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 /**
  * `graphloom check` (L0), `graphloom rehearse` (L1), `graphloom replay` (L2)
  * and `graphloom probe` (L3), per docs/design-graph-rehearsal.md. All four

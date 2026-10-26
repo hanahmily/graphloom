@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 /**
  * A plugin-declared shape for one kind of agent result. The SDK ships no
  * names and no schemas: a plugin lists its own contracts in its

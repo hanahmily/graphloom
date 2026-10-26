@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 import { FAILURE_SHAPE } from "./transient.js";
 
 /** A harness refusing work until its usage allowance renews; waiting out a backoff cannot fix it. */

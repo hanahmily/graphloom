@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 import { existsSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { access, appendFile, mkdir, mkdtemp, readdir, rm, symlink, writeFile } from "node:fs/promises";

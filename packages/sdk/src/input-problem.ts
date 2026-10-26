@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 /**
  * The first way `value` fails a JSON Schema, as a path and a rule, or undefined
  * when it satisfies it. Covers the subset executors declare their inputs with:

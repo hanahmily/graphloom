@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 import type { CaseFinding, CaseFile, RunView } from "@graphloom/sdk";
 import type {
   AdmissionFacts,

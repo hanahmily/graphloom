@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 /**
  * A regression runner: the code that runs exactly one named regression test
  * and reads its report. Runners are the part of a repository profile that

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 import { mkdir } from "node:fs/promises";
 import { captureRawStream } from "./raw-stream.js";
 import os from "node:os";

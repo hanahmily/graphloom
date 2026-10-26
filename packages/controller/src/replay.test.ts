@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 import { describe, expect, it } from "vitest";
 import type { EvidenceRecord, GraphDefinition, GraphDecision, ValidationInput, ValidationResult } from "@graphloom/sdk";
 import type { CallContext, HostResult, PluginHost } from "@graphloom/plugin-host";

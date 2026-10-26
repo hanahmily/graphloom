@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 /** Operator config for the Codex harness module (`@graphloom/executor-coding-agent/codex`). Codex uses its own login. */
 export const CODEX_BIN_ENV = "GRAPHLOOM_CODEX_BIN";
 export const CODEX_MODEL_ENV = "GRAPHLOOM_CODEX_MODEL";

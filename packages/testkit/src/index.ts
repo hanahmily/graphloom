@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 export { createScope, type TestScope } from "./scope.js";
 export { createGitRepo, exampleBundle, execFileAsync, repoRoot, type GitRepo, type GitRepoOptions } from "./git.js";
 export { createTaskWorkspace, type TaskBudgets, type TaskLayout, type TaskWorkspace, type TaskWorkspaceOptions } from "./task.js";

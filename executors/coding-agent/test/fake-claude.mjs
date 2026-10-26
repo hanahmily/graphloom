@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 // A stand-in for the Claude Code CLI in headless stream-json mode, for tests.
 // FAKE_CLAUDE_SCRIPT names a JSON file `{ start: Step[], resume: Step[] }`; each
 // step is one model response:

@@ -27,6 +27,10 @@ npm run build
 
 `npm run typecheck` checks test files too, through each workspace's
 `tsconfig.test.json`; builds use `tsconfig.json`, so `dist/` never contains tests.
+`npm test` also runs `npm run check:headers`: hand-written `.ts`, `.js`, `.mjs`,
+and `.sh` files start with the two-line SPDX header (after any shebang); run
+`node scripts/check-headers.mjs --fix` to add it to new files. After editing an
+example plugin's sources, regenerate its manifest with `npm run manifest -w <plugin>`.
 
 Installable releases (tarball, install layout, upgrade, local release
 procedure) follow the proposed [release design](docs/design-release.md).

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 /**
  * What a `go test -json` report says about one top-level test:
  * - `failed`: the test ran and failed (an assertion, not a build error or a panic);

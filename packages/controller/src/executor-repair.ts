@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 import { cp, mkdir, realpath, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { boundedInputShape, type ExecutorInputShape, type QualifyRepairSpec } from "@graphloom/sdk";

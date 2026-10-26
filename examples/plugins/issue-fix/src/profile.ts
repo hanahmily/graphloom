@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 /**
  * The repository profile: everything repository-specific about fixing an
  * issue, as JSON data the task's `config:` file supplies. The controller

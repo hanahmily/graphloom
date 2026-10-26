@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 import { writeScopeProblem, type ActivateRepairSpec, type GraphDecision, type QualifyRepairSpec } from "@graphloom/sdk";
 import type { AdmissionFacts } from "@graphloom/supervisor";
 import { supervisorProposalKey, progressMark } from "./escalation.js";

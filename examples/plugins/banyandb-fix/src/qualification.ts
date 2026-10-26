@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 import type { EvidenceRecord, ValidationStatus, Validator } from "@graphloom/sdk";
 import { CHANGES_PATH, CODING_AGENT, COMMAND, FIX_STAGE, REVIEW_STAGE } from "./constants.js";
 import type { DecisionRecord } from "./decision-record.js";

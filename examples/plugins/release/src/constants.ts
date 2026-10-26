@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 export const VERSION_PATH = "VERSION";
 export const CHANGELOG_PATH = "CHANGELOG.md";
 

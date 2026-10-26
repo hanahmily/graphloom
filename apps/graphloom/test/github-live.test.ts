@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 import { describe, expect, it } from "vitest";
 import type { JobResult, Runner } from "@graphloom/runner";
 import { githubEvidence as github, githubRunner as runner, runGitHub } from "./github-runner.js";

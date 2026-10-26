@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 import { createPiHarness } from "./pi-harness.js";
 
 export { createPiHarness, type PiHarnessOptions } from "./pi-harness.js";

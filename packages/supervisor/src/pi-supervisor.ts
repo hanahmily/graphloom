@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 import type { AgentSessionView, CaseFile, EvidenceRecord, GraphAction } from "@graphloom/sdk";
 import { parseSupervisorDecision } from "./decision.js";
 import { normalizeProposalInput } from "./item-arrays.js";

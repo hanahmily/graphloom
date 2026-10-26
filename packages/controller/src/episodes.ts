@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 import { boundRejections, fitEpisodeRecord, MAX_EPISODE_RECORDS, type EpisodeOutcome, type SupervisorEpisodeRecord } from "@graphloom/supervisor";
 import type { DurableRunState } from "./state.js";
 

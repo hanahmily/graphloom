@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 /**
  * L2 replay (docs/design-graph-rehearsal.md §3.3): would a recorded run's
  * real outputs be accepted under the current code and plugin, for zero

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 import { randomUUID } from "node:crypto";
 import { noteOutcome } from "./settlement.js";
 import { recordRemedy, STEP_LIMIT_STOP_REASON, type DurableRunState } from "./state.js";

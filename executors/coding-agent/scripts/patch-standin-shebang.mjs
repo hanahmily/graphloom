@@ -1,4 +1,7 @@
 #!/usr/bin/env node
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 /**
  * Replaces the compiled rehearsal stand-ins' `#!/usr/bin/env node` shebang
  * with the absolute path of the Node that built them. `createCodexHarness`/

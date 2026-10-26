@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 /**
  * Release's rehearsal scenario (docs/design-graph-rehearsal.md §4.4/§4.5):
  * recorded verbatim with `graphloom rehearse --record-from` from a real,

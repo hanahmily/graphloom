@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 import { describe, expect, it } from "vitest";
 import { reconcileRepairJournal } from "./repair-lifecycle.js";
 import { RESUME_RETRY_REMEDY, returnToGraphOnResume } from "./resume-recovery.js";

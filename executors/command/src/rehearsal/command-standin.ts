@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 /**
  * The command executor's rehearsal stand-in (docs/design-graph-rehearsal.md
  * §3.2, §4.1): quick mode's default. Loaded in place of `../executors.js`,

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 import os from "node:os";
 import type { ExecutorPackageManifest } from "@graphloom/sdk";
 import { createBuiltinExecutorRunner, createScriptedRunner, type JobResult, type Runner } from "@graphloom/runner";

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 export const DEFAULT_GITHUB_API_URL = "https://api.github.com";
 
 /** Non-secret operator configuration read by the executor process. */

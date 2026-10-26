@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 import type { EvidenceRecord } from "@graphloom/sdk";
 import { CODING_AGENT, GET_ISSUE, LIST_ISSUE_COMMENTS } from "./constants.js";
 

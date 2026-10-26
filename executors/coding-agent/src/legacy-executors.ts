@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 /** Child entry for the CLI: legacy agent jobs keep their admitted executor identity. */
 import { BUILTIN_AGENT_EXECUTOR_ID } from "@graphloom/sdk";
 import { executors as codingExecutors } from "./executors.js";

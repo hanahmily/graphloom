@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 /**
  * B2's capability probe (docs/design-graph-rehearsal.md §3.1): each enabled
  * spawned-CLI harness (Claude Code, Codex; Pi is in-process, nothing to

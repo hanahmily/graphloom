@@ -1,4 +1,7 @@
 #!/usr/bin/env node
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 /**
  * Opt-in live scoring: replays the committed episodes of run 9bfa446d-4ea
  * against a real provider and prints the score. Never run by CI.

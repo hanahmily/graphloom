@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 import type { EnvironmentCommand } from "@graphloom/sdk";
 import { CHANGES_PATH, COMMAND, ISSUE_REPO, PROTECTED_PATHS } from "./constants.js";
 import type { DecisionRecord } from "./decision-record.js";

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 import { access, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import {

@@ -1,4 +1,7 @@
 #!/usr/bin/env node
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 /**
  * Regenerates graphloom.manifest.json from the built graph, with digests of
  * the source, profile and lock inputs. Run after `npm run build`:

@@ -1,4 +1,7 @@
 #!/usr/bin/env node
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 /**
  * Qualifies a repair candidate's built validators against this copy's cases,
  * and requires this copy's own validators to reproduce the defect. Run it from

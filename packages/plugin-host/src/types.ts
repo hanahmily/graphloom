@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 import type { GraphDecision, GraphDefinition, GraphRehearsal, RunView, ValidationInput, ValidationResult } from "@graphloom/sdk";
 
 /** Non-durable observation returned instead of applying a plugin result. */

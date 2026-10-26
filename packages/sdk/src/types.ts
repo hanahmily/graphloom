@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 /** Public value contracts for GraphLoom plugins. No Accept operation exists. */
 
 import type { ExecutorInputShape } from "./executor.js";

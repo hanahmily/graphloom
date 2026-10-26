@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 /**
  * Stage-agnostic pieces shared by the code-review ledger (findings.ts) and the
  * plan-review ledger (plan-findings.ts): quote verification against observed
