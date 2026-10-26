@@ -2,6 +2,7 @@
   "name": "@graphloom/executor-github",
   "version": "0.1.0",
   "description": "Built-in GitHub executors (graphloom.github/*) run through the common executor protocol",
+  "license": "Apache-2.0",
   "type": "module",
   "exports": {
     ".": {

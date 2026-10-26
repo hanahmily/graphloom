@@ -2,6 +2,7 @@
   "name": "@graphloom/supervisor",
   "version": "0.0.0",
   "description": "Run-wide supervisor session and recovery protocol",
+  "license": "Apache-2.0",
   "type": "module",
   "exports": {
     ".": {

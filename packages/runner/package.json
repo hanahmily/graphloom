@@ -2,6 +2,7 @@
   "name": "@graphloom/runner",
   "version": "0.0.0",
   "description": "Job execution and enforced scopes",
+  "license": "Apache-2.0",
   "type": "module",
   "exports": {
     ".": {
