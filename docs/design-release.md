@@ -30,6 +30,8 @@ a release asset.
 | Version | One product version for the release and the SDK; executors and plugin bundles keep their own versions, recorded in the release manifest (§3) |
 | Install layout | Immutable version directories plus a `current` symlink; a run stays on the version it started with (§4, §5) |
 | Upgrading a run | `resume --upgrade` moves a run forward across minor versions within a major, through ordered state migrations (§5.2) |
+| Upgrading the install | `graphloom upgrade [<version>]` installs a release beside the others and switches `current`; `self upgrade` is dropped (§5.3) |
+| Automatic updates | On by default (`autoUpdate: "auto"`). A detached check at most once a day installs non-breaking releases and only announces breaking ones. It never moves a run (§5.4) |
 | Hosted service | Out of scope. A hosted controller could be a later phase built on the same artifact |
 
 ### Current state
@@ -384,12 +386,16 @@ $GRAPHLOOM_HOME  (default ${XDG_DATA_HOME:-~/.local/share}/graphloom)
   current -> versions/<version>
   previous                     # text file: the version current pointed to before the last switch
   runs/<runId>.json            # {version, stateDir}: which installed version owns a run
+  install.lock                 # flock held by every install, switch, and prune
+  update/                      # automatic-update state (§5.4): last-check, skip, notice, last-failure, log
+  .staging/                    # downloads and extractions in progress; never selectable
 ~/.local/bin/graphloom         # user shim (POSIX sh), stable across versions
 ~/.config/graphloom/           # operator config, unchanged location (runner.json, supervisor.json)
 ```
 
 XDG paths are chosen to match the existing `~/.config/graphloom/` location. The
-shim handles `graphloom self ...` itself (§4.3). Every other command runs
+shim handles `graphloom upgrade` and `graphloom self ...` itself (§4.3), and
+starts the daily update check (§5.4). Every other command runs
 `exec "$GRAPHLOOM_HOME/current/bin/graphloom" "$@"`. That launcher starts the
 version's bundled Node with the real path of `main.js`. As a result, a process
 loads every module from `versions/<version>/` even if `current` changes while it
@@ -400,8 +406,14 @@ point into the version directory too.
 
 ```text
 install.sh [--version <v> | --from <tarball>] [--home <dir>] [--bin-dir <dir>]
-           [--require-signature] [--no-switch]
+           [--require-signature] [--no-switch] [--auto]
 ```
+
+Every run of the installer holds `install.lock` (`flock`) from download to
+switch. `self use`, `self rollback`, and `self prune` take the same lock.
+`--auto` is the unattended mode the update check uses (§5.4): it does not wait
+for the lock, requires the signature, skips step 6, and writes its outcome to
+`update/` instead of the terminal.
 
 1. Download the release assets for `<v>`, defaulting to the latest release,
    with `gh release download -R hanahmily/graphloom`. This uses the operator's
@@ -412,35 +424,43 @@ install.sh [--version <v> | --from <tarball>] [--home <dir>] [--bin-dir <dir>]
    way. A `curl` download from public release URLs is a later option, added
    only if the repository becomes public.
 2. Verify the checksums and signature (§2.5).
-3. Extract to `versions/.<v>.tmp-XXXX` and check that `release.json` names `<v>`
-   and this platform. Check that `node/bin/node --version` matches
-   `release.json`. Then run `chmod -R a-w` and rename the directory to
-   `versions/<v>`. An existing `versions/<v>` is never overwritten. Reinstalling
-   the same version is a no-op after checksum comparison.
+3. Download into and extract to `.staging/<v>-XXXX`, and check that
+   `release.json` names `<v>` and this platform. Check that
+   `node/bin/node --version` matches `release.json`. Then run `chmod -R a-w` and
+   rename the directory to `versions/<v>`. Only that rename makes a version
+   visible, so an interrupted download or extraction is never listed or
+   selectable; the next install removes stale `.staging/` entries under the
+   lock. An existing `versions/<v>` is never overwritten. Reinstalling the same
+   version is a no-op after checksum comparison.
 4. Unless `--no-switch` is set, record `current` in `previous`. Then switch
    `current` atomically by creating a temporary symlink and renaming it over
    `current`.
-5. Write the shim if it is absent or older, and tell the operator if
-   `--bin-dir` is not on `PATH`.
+5. Write the shim if it is absent or older, by writing a temporary file and
+   renaming it over the old one; a running `sh` that is reading the old shim
+   is never affected. Tell the operator if `--bin-dir` is not on `PATH`.
 6. Run `graphloom doctor`. Its failures are reported but do not undo the
    install.
 
-The installer needs only POSIX sh, `tar`, `gzip`, `sha256sum`, and an
+The installer needs only POSIX sh, `tar`, `gzip`, `sha256sum`, `flock`, and an
 authenticated `gh` (not needed with `--from`). It never writes operator configuration or credentials, and never
 needs root.
 
-### 4.3 Shim commands (`graphloom self`)
+### 4.3 Shim commands (`graphloom upgrade`, `graphloom self`)
 
-These commands are in sh so that rollback still works when the current version
-cannot start.
+These commands are in sh so that upgrade and rollback still work when the
+current version cannot start.
 
 | Command | Behavior |
 |---|---|
-| `self list` | Installed versions, marking `current`, `previous`, and versions owned by runs |
-| `self upgrade [<v>]` | `install.sh --version <v>` (default latest), then list runs owned by older versions (§5) |
-| `self use <v>` / `self rollback` | Switch `current` to an installed version, or to `previous` |
+| `upgrade [<v>] [--no-switch]` | Install `<v>` (default latest) and switch `current`, then list runs owned by older versions (§5.3) |
+| `self list` | Installed versions, marking `current`, `previous`, versions owned by runs, and a skipped version (§5.4) |
+| `self use <v>` / `self rollback` | Switch `current` to an installed version, or to `previous`. Switching to an older version records the version left as skipped by automatic updates (§5.4) |
 | `self prune [--dry-run] [--force]` | Remove versions that are not `current`, not `previous`, and not owned by any `runs/<runId>.json` whose state directory still exists; `--force` is needed to override ownership |
 | `self uninstall [--purge-config]` | Remove the shim and `$GRAPHLOOM_HOME`; `--purge-config` also removes `~/.config/graphloom`. Never touches run state or worktrees under target repositories, or harness logins |
+
+There is no `self upgrade`. No release has shipped, so no operator depends on
+it, and one spelling avoids two documented paths. The shim answers
+`self upgrade` by naming `graphloom upgrade` and exiting non-zero.
 
 ### 4.4 `graphloom doctor`
 
@@ -459,6 +479,7 @@ runtime (§2.7).
 | Harnesses | For each enabled harness: Claude Code or Codex on `PATH` (or at its configured command) with the capability probe from `apps/graphloom/src/capability-probe.ts`; Codex `login status`; Pi model resolvable and `agentDir` present. Login state that cannot be checked without spending a call is a `warn` |
 | Supervisor config | Optional; if present, it parses and each model's provider has a credential source (presence only) |
 | GitHub | If `github.tokenEnv` is configured, that variable is set (presence only) |
+| Updates | The effective `autoUpdate` mode and where it came from, the last check, the skipped version, and the last failure from `update/` (§5.4). Unless the mode is `off`: `gh` on `PATH`, `gh auth status`, and read access to the repository. A problem here is a `warn` that names why automatic updates are a no-op, never a `fail` |
 
 Graph-specific prerequisites are not built into the doctor. These include a Node
 toolchain for a Node target repository, Docker for bench gates, the Go toolchain
@@ -526,8 +547,8 @@ operator explicitly moves it.**
   digests then match without any flag.
 - **Missing owner.** If the owning version was pruned, the run-scoped commands
   refuse with `run <id> belongs to GraphLoom <v>, which is not installed`. The
-  ways forward are `self upgrade <v>`, which reinstalls that version, or
-  `resume --upgrade`.
+  ways forward are `graphloom upgrade <v> --no-switch`, which reinstalls that
+  version without changing `current`, or `resume --upgrade`.
 - **Runs from a clone.** Runs created before release installs have no `install`
   record and are treated as `stateFormat` 1. Their pinned executor `source`
   paths point into the clone, so a resume from the install stops with
@@ -601,7 +622,8 @@ migrators in `packages/controller/src/state-migrations/`:
 
 **Rollback** (`self rollback`) switches `current` back. Runs created under, or
 moved to, the newer version stay owned by it, and dispatch still finds that
-version. Downgrading a run is never supported.
+version. Downgrading a run is never supported. Rollback also pauses automatic
+updates for the version left (§5.4).
 
 **Pruning and repair candidates.** A run-local repair candidate links
 dependencies into the owning version's `node_modules`. Pruning that version
@@ -611,6 +633,115 @@ links.
 **Uninstall.** See `self uninstall` (§4.3). Run state stays under each target
 repository. It is removed with `graphloom delete` before uninstalling, or
 manually afterward.
+
+### 5.3 Upgrading the install: `graphloom upgrade`
+
+`graphloom upgrade [<version>] [--no-switch]` is the one command that installs a
+newer release. It is handled by the shim in sh (§4.3) and runs the `install.sh`
+of `current`, falling back to that of `previous` when `current` is missing.
+
+1. Resolve `<version>`, defaulting to the latest published release, and
+   download its assets with the operator's `gh` login (§4.2). A missing,
+   logged-out, or unauthorized `gh` stops the command with the reason.
+2. Verify `SHA256SUMS` and its signature (§2.5). A mismatch stops the command
+   before anything is extracted.
+3. Install into a new `versions/<v>/` and switch `current` atomically, under
+   `install.lock`, exactly as `install.sh` steps 3 and 4 do. `--no-switch`
+   installs without switching; it is how an operator restores a pruned owner
+   (§5.1). Naming a version older than `current` implies `--no-switch`.
+4. Clear the skipped version in `update/` (§5.4).
+5. List each run still owned by an older installed version, with its status,
+   and print the hint `graphloom resume <run> --upgrade` (§5.2). Nothing is
+   migrated.
+
+Upgrading the install never moves a run. Live runs continue on the version
+that loaded them, and every run-scoped command still dispatches to the owner
+(§5.1).
+
+### 5.4 Automatic updates
+
+Automatic updates follow the background updater of tools such as Claude Code:
+installs stay current without the operator asking, and nothing in the
+foreground waits for it.
+
+**Trigger.** On every invocation, before its `exec`, the shim checks
+`update/last-check`. If the file is missing or older than 24 hours, and updates
+are not disabled by the environment, the shim touches it and starts
+`current/bin/graphloom __auto-update` detached: in a new session, with stdin
+from `/dev/null`, and output appended to `update/log`. The shim does not wait
+for it. The foreground command's output and exit code are unchanged. The worker
+is a hidden command of the Node CLI, so it reads the runner config with the
+same lookup and parser as `run`. It bounds the release query to 15 seconds and
+the whole job to 10 minutes.
+
+**Notice.** The worker's result for the operator is a one-line `update/notice`.
+The next invocation prints it once to stderr, then deletes it, but only when
+stdout and stderr are both terminals, no argument is `--json`, and
+`GRAPHLOOM_RUN_ID` is unset, which is the case inside an `--on-stop` hook. A
+notice never appears in machine output or a hook.
+
+**Policy.** The worker lists published releases (no drafts or prereleases) and
+compares the newest with `current`:
+
+| Newest release | `auto` | `notify` |
+|---|---|---|
+| Not newer, or equal to the skipped version | Nothing | Nothing |
+| Non-breaking: same major from 1.0; before 1.0, same minor | Install with `install.sh --version <v> --auto` and switch `current`; the next invocation uses it. Notice: updated, and the runs that stay on older versions | Notice: available, `graphloom upgrade` |
+| Breaking: a new major, or before 1.0 a new minor | Notice only | Notice only |
+
+Before 1.0, a minor release can break CLI flags and configuration (§3), so it
+is announced rather than installed. An unattended install requires the
+signature: without `ssh-keygen`, the worker announces the release instead.
+
+**Failure.** Every failure is silent in the foreground and retried at the next
+daily check. This includes no network, a `gh` problem, a held lock, and an
+unreadable runner config. A failed checksum or signature check never extracts
+or switches. The worker records the version, the reason, and the time in
+`update/last-failure`, and `doctor` reports it.
+
+**Configuration.** `"autoUpdate": "auto" | "notify" | "off"` in the runner
+config. The default is `auto`. Precedence, highest first:
+
+1. `GRAPHLOOM_DISABLE_AUTOUPDATE=1` in the environment: no check is started,
+   which is the same as `off`.
+2. `autoUpdate` in the runner config, found as `run` finds it:
+   `$GRAPHLOOM_RUNNER_CONFIG`, otherwise `~/.config/graphloom/runner.json`.
+3. `auto`, when there is no runner config or it has no `autoUpdate`.
+
+`off` stops the worker before any network access. The shim cannot parse JSON,
+so it still starts the worker once a day when only the config says `off`.
+`parseRunnerConfig` accepts the new key from the first release that ships the
+updater, so every installed version accepts a runner config that sets it.
+
+**Concurrency.** The worker takes `install.lock` without waiting and exits if
+another install holds it. Two invocations that both see a stale
+`update/last-check` therefore cannot install twice. The second finds the
+version already installed, which is a no-op. The switch is the atomic symlink
+rename in §4.2, and only a complete, verified, read-only version directory is
+ever renamed into `versions/` (§4.2 step 3).
+
+**Long runs.** Switching `current` never affects a live controller. It loads
+every module, executor, and worker from the real path of its own version
+directory (§4.1). `resume`, `stop`, `wait`, `inspect`, and the other run-scoped
+commands dispatch to the owning version (§5.1), including when an `--on-stop`
+hook calls `graphloom` through the shim. Automatic updates never migrate run
+state; only an explicit `resume --upgrade` does.
+
+**Pruning.** After each automatic install, the worker prunes under the same
+lock. It keeps the three newest installed versions, `current`, `previous`, and
+every version that `self prune` would keep for run ownership or plugin links.
+It never uses `--force`. A manual `graphloom upgrade` does not prune.
+
+**Private repository.** The query and the download use the operator's `gh`
+login. Without `gh`, a login, or read access, automatic updates do nothing,
+and `doctor` names which of these is missing (§4.4). If the repository becomes
+public, the worker can query and download from public release URLs with the
+same checks.
+
+**Rollback.** `self rollback`, and `self use` to an older version, write the
+version left to `update/skip`. The worker does not reinstall or switch back to
+the skipped version. A release newer than it is handled by the policy as
+usual, and `graphloom upgrade` clears the skip.
 
 ## 6. Release procedure (local)
 
@@ -720,7 +851,9 @@ scripts/release.sh publish <version>   # steps 9-10, after the maintainer confir
     `SHA256SUMS` and its signature again. Finally, test the primary install
     path: in a fresh temporary `HOME`, using the maintainer's `gh` login, run
     the published `install.sh --version <version>` and then
-    `graphloom version`.
+    `graphloom version`. From the second release, also install the previous
+    release in a fresh `HOME`, run `graphloom upgrade`, and check that
+    `graphloom version` names the new release.
 
 A release's gate is local, like every merge gate today. Its record is the
 `gate` field in `release.json` and the script's log, which is attached to the
@@ -754,7 +887,11 @@ release PR.
 - **Version directories are read-only.** A repair never writes to them. The
   executor design already requires run-local copies.
 - **The install is user-level only.** It needs no root and starts no service or
-  listener.
+  listener. The daily update check is a short-lived process started by an
+  invocation, not a daemon or timer.
+- **Unattended updates are verified and reversible.** They install only signed,
+  checksummed, non-breaking releases, never touch a live run or its state,
+  and can be undone with `self rollback` or disabled (§5.4).
 - **Integrity checks are minimal.** The checksum and SSH signature cover
   download integrity only. They say nothing about supply-chain provenance
   beyond the recorded commit, lockfile digest, and Node digest.
@@ -765,9 +902,9 @@ release PR.
 |---|---|---|
 | R0 | Apache-2.0 `LICENSE`, `NOTICE`, and `license` fields (done in this change); SPDX headers on hand-written source and `scripts/check-headers.mjs` in the gate, with the component bumps they cause; this design accepted | Gate passes; header check fails on a file without a header; manifests current |
 | R1 | Product version source of truth, `release.json`, and `graphloom version` from it. `typescript` and `vitest` as CLI dependencies. GraphLoom's own scripts spawned with `process.execPath`, and the stand-in shebang patch removed. Bundled Node fetch and verification. `notices.mjs` and the license allowlist. SDK packing. `scripts/release.sh build` producing all assets | Tests for version output. Tarball content and no-absolute-path checks. A repair preflight test on a production-pruned tree with no `node` on `PATH`. A license check that fails on a planted disallowed license. Pack file-list check |
-| R2 | `install.sh`, the shim, `self list/use/rollback/prune/uninstall`, and deterministic packing | Shell tests in a temporary `HOME` with no host Node: atomic switch, no overwrite, prune respects ownership and plugin links. Two independent builds give the same hash |
+| R2 | `install.sh`, the shim, `graphloom upgrade`, `self list/use/rollback/prune/uninstall`, automatic updates (`__auto-update`, `autoUpdate` in the runner config, `update/`, `install.lock`, the skip record, auto-prune), and deterministic packing | Shell tests in a temporary `HOME` with no host Node: atomic switch, no overwrite, prune respects ownership and plugin links, an interrupted install is never listed. `upgrade` installs, switches, lists runs on older versions, and `--no-switch` keeps `current`. Updater tests against a fake release source and a stub `gh`: at most one check per 24 hours; patch (and from 1.0, minor) installed and switched; a breaking release only announced; `notify` never installs; a bad checksum or signature records the failure and does not switch; two concurrent invocations install once; `GRAPHLOOM_DISABLE_AUTOUPDATE=1` and `off` make no network call; the notice never reaches a non-TTY, `--json`, or hook invocation, and the foreground exit code is unchanged; `self rollback` keeps the skipped version from being reinstalled until a newer release or `upgrade`; auto-prune keeps three versions plus owners; a process started from the old version keeps loading from it across a switch. Two independent builds give the same hash |
 | R3 | Run ownership (`runs/<id>.json`, `install` record, `stateFormat`), dispatch to the owning version, `resume --upgrade` with ordered migrators, the gate fingerprint including the product version, and the `rehearse --stop-at` / `resume --rehearsal` hooks | Controller and CLI tests: resume under a new `current` dispatches with no pin mismatch. `--upgrade` migrates each committed fixture and completes it on a scripted runner. Transitions are recorded. Downgrade, crossing a major, an unknown format, a missing migrator, and an unsettled repair are each refused with the run unchanged. A cached gate result is not reused across versions |
-| R4 | `doctor`, `setup` | Tests with a stubbed `PATH` and `HOME` for each check result. The doctor reuses the confinement and capability probes and never asks for a host Node |
+| R4 | `doctor` (including the updates check), `setup` | Tests with a stubbed `PATH` and `HOME` for each check result, including each reason automatic updates are a no-op. The doctor reuses the confinement and capability probes and never asks for a host Node |
 | R5 | `release.sh prepare/publish`, signing, the external-plugin smoke test, and the first release `v0.1.0` | The full procedure in §6. The upgrade matrix starts with the second release, from its first fixture |
 
 Open questions: none at present. Repository visibility is to be revisited
