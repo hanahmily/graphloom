@@ -549,11 +549,16 @@ for the lock, requires the signature, skips step 6, and writes its outcome to
    renaming it over the old one; a running `sh` that is reading the old shim
    is never affected. Tell the operator if `--bin-dir` is not on `PATH`.
 6. Run `graphloom doctor`. Its failures are reported but do not undo the
-   install.
+   install. Then, if stdin and stdout are terminals and no runner config
+   exists, ask whether to run `graphloom setup` now (§4.5), defaulting to yes.
+   With a runner config present, it prints `graphloom setup` as the way to
+   review it. A non-interactive install skips setup and prints
+   `graphloom setup --yes`.
 
 The installer needs only POSIX sh, `tar`, `gzip`, `sha256sum`, `flock`, and an
-authenticated `gh` (not needed with `--from`). It never writes operator configuration or credentials, and never
-needs root.
+authenticated `gh` (not needed with `--from`). It never writes operator
+configuration or credentials itself; only `graphloom setup`, with the
+operator's answers, writes configuration. It never needs root.
 
 ### 4.3 Shim commands (`graphloom upgrade`, `graphloom self`)
 
@@ -574,10 +579,15 @@ it, and one spelling avoids two documented paths. The shim answers
 
 ### 4.4 `graphloom doctor`
 
-The doctor checks the host core only and prints `pass`, `warn`, or `fail` per
-check, with `--json` available. It exits 1 on any `fail`. It does not print
-secret values. It does not check a host Node: GraphLoom runs on its bundled
-runtime (§2.7).
+The doctor finds what this machine can run and says how to finish setting it
+up. It prints `pass`, `warn`, or `fail` per check, with `--json` available,
+and exits 1 on any `fail`. **Every `warn` and `fail` carries a `fix:` line with
+the exact next command** (a `fix` field in `--json`), such as `claude` to log
+in, `codex login`, `gh auth login`, or `graphloom setup`. It never prints a
+secret value and never spends a model call. It does not check a host Node:
+GraphLoom runs on its bundled runtime (§2.7).
+
+**Host.**
 
 | Check | Rule |
 |---|---|
@@ -585,35 +595,153 @@ runtime (§2.7).
 | git, flock | On `PATH`; version shown (`flock` is used by `packages/controller/src/lock.ts`) |
 | Confinement | `bwrap` present and able to create a namespace, using the same probe as `confinementUnsupported()` in `packages/runner/src/confine.ts`; `fail` names the AppArmor `kernel.apparmor_restrict_unprivileged_userns` setting when the probe fails |
 | Install integrity | The version directory is read-only; its bundled Node and its `release.json` digests match the installed executors and bundles |
-| Runner config | Found at the documented location and accepted by the same parser `run` uses, which also refuses credentials. A missing file is a `fail` with a pointer to `graphloom setup` |
-| Harnesses | For each enabled harness: Claude Code or Codex on `PATH` (or at its configured command) with the capability probe from `apps/graphloom/src/capability-probe.ts`; Codex `login status`; Pi model resolvable and `agentDir` present. Login state that cannot be checked without spending a call is a `warn` |
-| Supervisor config | Optional; if present, it parses and each model's provider has a credential source (presence only) |
-| GitHub | If `github.tokenEnv` is configured, that variable is set (presence only) |
-| Updates | The effective `autoUpdate` mode and where it came from, the last check, the skipped version, and the last failure from `update/` (§5.4). Unless the mode is `off`: `gh` on `PATH`, `gh auth status`, and read access to the repository. A problem here is a `warn` that names why automatic updates are a no-op, never a `fail` |
 
-Graph-specific prerequisites are not built into the doctor. These include a Node
-toolchain for a Node target repository, Docker for bench gates, the Go toolchain
-for BanyanDB profiles, and `ocr`. They are each profile's `environment`
-declarations, and `graphloom check <task.yaml>` already runs them.
-`doctor --task <task.yaml>` appends that check. This keeps plugin notions out of
-the CLI.
+**Agents.** Each harness is discovered whether or not it is configured. The
+command is the configured one (`claude.command`, `codex.command`, or
+`GRAPHLOOM_CLAUDE_BIN` / `GRAPHLOOM_CODEX_BIN`), otherwise the name on `PATH`.
+
+| Agent | Discovery | Login or credential |
+|---|---|---|
+| Claude Code | `claude` found and executable; `--version`; the capability probe from `apps/graphloom/src/capability-probe.ts` | The CLI's own status command when its `--help` lists one (`claude auth status`); otherwise a `warn` "login not verified" with fix `claude`. GraphLoom never reads Claude Code's credential files ([supervisor harnesses §6.2](design-supervisor-harnesses.md#62-credentials)) |
+| Codex | `codex` found and executable; `--version`; the capability probe | `codex login status`; fix `codex login` |
+| Pi | In-process; nothing to find on `PATH` | Per provider, whether a credential is present: the provider's variable (for example `MINIMAX_CN_API_KEY`) is set, or Pi's auth store in `agentDir` has an entry for it. Presence only, never the value. A configured `pi.provider` and `pi.modelId` must resolve in Pi's model registry |
+| GitHub CLI | `gh` on `PATH`; `gh auth status`; read access to the release repository | Fix `gh auth login`. Used by install, `upgrade`, and automatic updates |
+
+A harness is **available** when it is found, passes its probe, and shows a
+login or credential. Claude Code and Codex also need the confinement check to
+pass. These are the conditions of the supervisor's `probe()`
+([supervisor harnesses §7.3](design-supervisor-harnesses.md#73-precedence-and-fallback)),
+so the doctor and `run` agree.
+
+**Configuration.**
+
+| Check | Rule |
+|---|---|
+| Runner config | Found as `run` finds it and accepted by the same parser, which also refuses credentials. A missing file is a `warn` with fix `graphloom setup`. A file that does not parse, or that enables a harness that is not available, is a `fail`, because `run` would refuse it |
+| Supervisor config | Optional. A missing file is a `warn` ("no automatic recovery") with fix `graphloom setup`. A present file must parse (`fail` otherwise); a listed harness that is not available is a `warn`, because selection falls back past it |
+| GitHub token | If `github.tokenEnv` is configured, that variable is set (presence only) |
+| Updates | The effective `autoUpdate` mode and where it came from, the last check, the skipped version, and the last failure from `update/` (§5.4). Unless the mode is `off`, the GitHub CLI row above applies. A problem here is a `warn` that names why automatic updates are a no-op, never a `fail` |
+
+**Viable setups.** From the available harnesses, the doctor reports which
+setups would work. Without a task it knows only generic harness capabilities,
+which are executor facts, not plugin notions:
+
+| Harness | Agent jobs | Supervisor and repair reviewer | Credential |
+|---|---|---|---|
+| Claude Code | Read and write | Yes | Its own CLI login |
+| Codex | Read-only jobs only (`executors/coding-agent/src/codex-harness.ts` refuses others) | Yes | Its own CLI login |
+| Pi | Read and write | Yes | A provider credential, plus `pi.provider` and `pi.modelId` |
+
+It names the candidates for the default harness (available and able to
+write), the other harnesses worth enabling, and the supervisor harness that
+[supervisor harnesses §7.3](design-supervisor-harnesses.md#73-precedence-and-fallback)
+resolves with no plugin preference: Pi when available, else Claude Code, else
+Codex. The repair reviewer always uses the supervisor's agent
+([§7.5](design-supervisor-harnesses.md#75-repair-reviewer-rule)). A Claude
+Code or Codex supervisor counts only from the release that ships it (phases S3
+and S4). If no available harness can write, that is a `warn` whose fix lists
+each login still missing.
+
+**Decision: the doctor learns per-graph rules only from plugin data, and only
+with `--task`.** `doctor --task <task.yaml>` loads the selected plugin as
+`check` does and appends three reports:
+
+- The plugin's `environment` checks, which `graphloom check <task.yaml>`
+  already runs. Graph-specific prerequisites belong there, such as a Node
+  toolchain for a Node target repository or Docker for bench gates. A tool
+  that a plugin bundles, such as issue-fix's `ocr`, needs no install; the
+  plugin's own check confirms it.
+- The supervisor selection that `run` would resolve from the plugin's
+  `GraphDefinition.supervisor` and the operator's configuration, including a
+  `required` refusal.
+- Each agent role that the plugin declares in a new optional
+  `GraphDefinition.agentRoles`, returned from code like `defaultBudgets`:
+
+```ts
+interface AgentRoleDeclaration {
+  role: string;            // the plugin's own name, shown as is
+  harness: string;         // the harness the resolved profile assigns
+  access: "read" | "write";
+  distinctFrom?: string[]; // roles whose harness this one must not share
+  setting?: string;        // where the operator changes it, e.g. "harnesses.verifier"
+}
+```
+
+The SDK validates the shape only, the controller never reads it, and the CLI
+treats `role` and `setting` as opaque text. For each role, the doctor reports
+whether its harness is enabled, available, and able to give the access. It
+also lists the available harnesses that satisfy `access` and `distinctFrom`,
+with the fix "set `<setting>` in `<profile>`" or the missing login. For
+example, issue-fix declares its implementer, reviewer, and verifier from the
+resolved profile (by default Claude Code, Codex, and Claude Code), with the
+verifier distinct from the reviewer. On a host with only Claude Code, the
+doctor reports that the reviewer needs Codex (`codex login`) or a profile
+change. Rules beyond these fields stay in the plugin's own validation, which
+`check` reports.
 
 ### 4.5 First-run setup
 
-`graphloom setup` writes `~/.config/graphloom/runner.json` only if it is absent.
-It uses the README's Claude Code template,
-`{ "harness": "claude-code", "allowUnrestricted": true }`, explains what
-`allowUnrestricted` means, and prints credential guidance:
+`graphloom setup` is guided. It runs the doctor's discovery (§4.4) and offers
+only choices that work on this machine, each with a recommendation:
 
-- Claude Code and Codex use their own logins (`claude`, `codex login`).
-- Pi uses its agent directory or the provider variable (for example
-  `MINIMAX_CN_API_KEY`).
-- GitHub reads use the variable that `github.tokenEnv` names. The examples use
-  `GRAPHLOOM_GITHUB_LIVE_TOKEN`.
+1. **Default harness** (`harness`): an available harness that can write.
+   Recommended: Claude Code, else Pi.
+2. **Enabled harnesses** (`harnesses`): the other available harnesses.
+   Recommended: all of them, so that a plugin role such as a Codex reviewer
+   can run.
+3. **Pi model** (`pi.provider`, `pi.modelId`), when Pi is enabled: a provider
+   whose credential is present. Recommended: `minimax-cn` and `MiniMax-M3`
+   when that credential is present.
+4. **Supervisor** (`supervisor.json`): `harnesses` lists the available
+   supervisor harnesses in the built-in order `pi`, `claude-code`, `codex`. So
+   Pi is recommended when available, then Claude Code, then Codex. Setup
+   writes no `select` unless the operator picks one, so a plugin's preference
+   still applies
+   ([supervisor harnesses §7.2](design-supervisor-harnesses.md#72-operator-configuration)).
+   Setup says that the repair reviewer uses the same agent. The operator may
+   decline a supervisor; runs then have no automatic recovery.
+5. **Consent.** Setup explains `allowUnrestricted`: coding agents run shell
+   commands with the operator's permissions, and confinement limits what they
+   write, not everything a shell can do. It writes `"allowUnrestricted": true`
+   only after the operator agrees. Declining writes nothing and exits 1.
 
-`GRAPHLOOM_REHEARSAL_GITHUB_TOKEN` is a rehearsal stand-in variable that the
-rehearsal sets itself, not an operator credential. Setup never asks for a token
-or writes one.
+Setup then writes `~/.config/graphloom/runner.json` (or the file that
+`GRAPHLOOM_RUNNER_CONFIG` names) and `supervisor.json`. Each file is checked
+by the parser `run` uses, written to a temporary file with mode `0600`, and
+renamed into place. Setup prints what remains: `claude` to log in,
+`codex login`, the Pi provider variable (for example `MINIMAX_CN_API_KEY`), or
+the variable that `github.tokenEnv` names (the examples use
+`GRAPHLOOM_GITHUB_LIVE_TOKEN`). It never asks for a token and never writes one.
+`GRAPHLOOM_REHEARSAL_GITHUB_TOKEN` is a stand-in variable that the rehearsal
+sets itself, not an operator credential. If no available harness can write,
+setup writes nothing, prints the doctor's fixes, and exits 1.
+
+- **`--yes`** accepts every recommendation without prompting and counts as the
+  operator's consent to `allowUnrestricted`. It is for scripts and CI.
+- **Re-running** shows the current configuration next to what discovery
+  recommends, and offers each change. It never overwrites silently: a file is
+  replaced only after the operator confirms, and the old file is first kept as
+  `<name>.bak-<UTC timestamp>`. Unchanged answers write nothing. When a file
+  exists, `--yes` leaves it unchanged and prints the differences.
+
+**Automatic first run.** `run`, `resume`, `probe`, `check`, and `rehearse`
+look for the runner config first. When it is missing at the default path and
+the invocation is interactive, they start the guided setup and then continue
+the original command with the new configuration. Interactive means that stdin
+and stdout are terminals, no argument is `--json`, and `GRAPHLOOM_RUN_ID` is
+unset, which excludes `--on-stop` hooks (§5.4). If setup is declined or fails,
+the command continues as it would with no configuration. A non-interactive
+invocation never prompts:
+
+- `run`, `resume`, and `probe`, which cannot work without the file, exit 1
+  with `no agent runner configured: run graphloom setup (graphloom setup --yes
+  in scripts), or point GRAPHLOOM_RUNNER_CONFIG at a runner config`.
+- `check` and `rehearse` report the missing configuration as they do today and
+  point to `graphloom setup --yes`. Offline checks and the release smoke tests
+  (§6 step 8) keep working without one.
+
+A missing file named by `GRAPHLOOM_RUNNER_CONFIG` is an error and never starts
+setup.
 
 ### 4.6 Operator plugins and profiles
 
@@ -683,7 +811,7 @@ own toolchain.
     (and still switch, unless `--no-switch`), other bytes are refused.
   - The bundled Node's version check runs that Node on `release.json`, and
     also checks `product`, `version`, and `platform`.
-  - Step 6, `graphloom doctor`, waits for R4.
+  - Step 6, `graphloom doctor` and the setup offer, waits for R4.
 - **Switching.** `current` is a relative link, `versions/<v>`, replaced with
   `mv -T` over it, which is a `rename(2)`. A switch to an older version
   writes the version left to `update/skip`. A switch to the skipped version
@@ -1251,7 +1379,7 @@ runs steps 3 to 8 on `<rev>`, which defaults to `HEAD`. It publishes nothing.
 | R1 | Product version source of truth, `release.json`, and `graphloom version` from it. `typescript` and `vitest` as CLI dependencies. GraphLoom's own scripts spawned with `process.execPath`, and the stand-in shebang patch removed. Bundled Node fetch and verification. `notices.mjs` and the license allowlist. SDK packing. `scripts/release.sh build` producing all assets (done; the assets of R1's phases, §6 "R1 as implemented") | Tests for version output. Tarball content and no-absolute-path checks. A repair preflight test on a production-pruned tree with no `node` on `PATH`. A license check that fails on a planted disallowed license. Pack file-list check (done: `apps/graphloom/test/version.test.ts`, `release-build.test.ts`, and `release.sh build`'s own step 6 and 8 checks) |
 | R2 | `install.sh`, the shim, `graphloom upgrade`, `self list/use/rollback/prune/uninstall`, automatic updates (`__auto-update`, `autoUpdate` in the runner config, `update/`, `install.lock`, the skip record, auto-prune), and deterministic packing. A read-only version directory also needs the repair snapshot (`snapshotRepairCandidate`, `packages/controller/src/repair.ts`) to make its copy writable, because `cp` keeps the read-only modes (done: §4.7, §5.5, §6 "R2 as implemented"; `makeTreeWritable` serves the plugin and executor snapshots) | Shell tests in a temporary `HOME` with no host Node: atomic switch, no overwrite, prune respects ownership and plugin links, an interrupted install is never listed. `upgrade` installs, switches, lists runs on older versions, and `--no-switch` keeps `current`. Updater tests against a fake release source and a stub `gh`: at most one check per 24 hours; patch (and from 1.0, minor) installed and switched; a breaking release only announced; `notify` never installs; a bad checksum or signature records the failure and does not switch; two concurrent invocations install once; `GRAPHLOOM_DISABLE_AUTOUPDATE=1` and `off` make no network call; the notice never reaches a non-TTY, `--json`, or hook invocation, and the foreground exit code is unchanged; `self rollback` keeps the skipped version from being reinstalled until a newer release or `upgrade`; auto-prune keeps three versions plus owners; a process started from the old version keeps loading from it across a switch. Two independent builds give the same hash (done: `apps/graphloom/test/install.test.ts`, `auto-update.test.ts`, `packages/controller/src/repair.test.ts`, and `release.sh build --compare-to`) |
 | R3 | Run ownership (`runs/<id>.json`, `install` record, `stateFormat`), dispatch to the owning version, `resume --upgrade` with ordered migrators, the gate fingerprint including the product version, and the `rehearse --stop-at` / `resume --rehearsal` hooks | Controller and CLI tests: resume under a new `current` dispatches with no pin mismatch. `--upgrade` migrates each committed fixture and completes it on a scripted runner. Transitions are recorded. Downgrade, crossing a major, an unknown format, a missing migrator, and an unsettled repair are each refused with the run unchanged. A cached gate result is not reused across versions |
-| R4 | `doctor` (including the updates check), `setup` | Tests with a stubbed `PATH` and `HOME` for each check result, including each reason automatic updates are a no-op. The doctor reuses the confinement and capability probes and never asks for a host Node |
+| R4 | `doctor` with agent discovery (Claude Code, Codex, Pi credentials, `gh`), viable-setup reporting, `fix:` commands, and the updates check; `doctor --task` with `environment`, supervisor selection, and `GraphDefinition.agentRoles` (SDK shape check; issue-fix declares its roles); guided `setup` with `--yes`, rerun, and backups; automatic first-run setup in `run`, `resume`, `probe`, `check`, and `rehearse`; the installer's setup offer (§4.2 step 6, §4.4, §4.5) | Tests with a stubbed `PATH` and `HOME` (stub `claude`, `codex`, `gh`, `bwrap`; Pi provider variables and auth store): each discovery result for each agent (missing, probe failed, logged out, login not verifiable, available), each with its `fix:` command; each reason automatic updates are a no-op. Viable setups for Claude Code only, Codex only, Pi only, and all three, including the supervisor order Pi, Claude Code, Codex. `doctor --task` on a fixture plugin's `agentRoles`: an unavailable role harness, a read-only harness on a write role, and a `distinctFrom` conflict, each with its alternatives. Setup offers only available choices with the recommendation; refusing `allowUnrestricted` writes nothing; `--yes` writes the recommendations; a rerun shows the current config, changes only confirmed answers, and keeps a `.bak-` copy, and `--yes` leaves an existing file unchanged. Under a pseudo-terminal, `run` with no config completes setup and then the run; without one, and with `--json` or `GRAPHLOOM_RUN_ID` set, `run` exits 1 naming `graphloom setup --yes` and `check` reports and continues. The installer offers setup only on a terminal. No written file contains a stub credential value. The doctor reuses the confinement and capability probes, spends no model call, and never asks for a host Node |
 | R5 | `release.sh prepare/publish`, signing, the external-plugin smoke test, and the first release `v0.1.0` | The full procedure in §6. The upgrade matrix starts with the second release, from its first fixture |
 
 Open questions: none at present. Repository visibility is to be revisited

@@ -558,6 +558,10 @@ as `{ harnesses: ["pi"], pi: { … } }`.
   A plugin hint reorders the configured models. An unconfigured hint is
   ignored, with a `check` warning; there is no silent substitution.
 
+`graphloom setup` writes this file from what `graphloom doctor` discovers, in
+the built-in order and without `select`
+([release §4.4–§4.5](design-release.md#44-graphloom-doctor)).
+
 ### 7.3 Precedence and fallback
 
 The selection is resolved once at `run` and reported by `check`. The first
