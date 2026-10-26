@@ -125,10 +125,10 @@ declare 6 h (the 5 h window plus margin; the canopy profile follows the same
 numbers). A weekly or longer reset exceeds it and stops the run retryable
 instead, so `graphloom resume` after the reset continues. Waiting is idle time,
 not spend. The banyandb
-numbers rest on one banyandb-fix run, whose many repairs drove its corrections
-and supervisor calls; issue-fix on BanyanDB has not run live yet, so measure
-its first runs with `stats` and adjust. banyandb-fix, which has no profile,
-names the same numbers in [its example task](../examples/banyandb-fix-task.yaml).
+numbers rest on one run of the former banyandb-fix graph (since removed;
+issue-fix's banyandb profile replaced it), whose many repairs drove its
+corrections and supervisor calls; issue-fix on BanyanDB has not run live yet,
+so measure its first runs with `stats` and adjust.
 
 ## Budget layers
 

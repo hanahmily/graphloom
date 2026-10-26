@@ -108,8 +108,8 @@ export function rehearsalBudgets(scenarioBudgets?: RehearsalScenario["budgets"])
  * contract: a tool-heavy assignment (a code review running open-code-review's
  * own multi-step delegation workflow, each round trip its own reservation)
  * needs several just to finish reading the change, before it can answer at
- * all. Found live: a real Codex probe of banyandb-fix's code-review-v2 was
- * terminated mid-workflow at the old bound of 3, never producing a result.
+ * all. Found live: a real Codex probe of the former banyandb-fix graph's
+ * code-review-v2 was terminated mid-workflow at the old bound of 3, never producing a result.
  */
 const MAX_PROBE_MODEL_CALLS = 10;
 /**
@@ -302,10 +302,10 @@ export async function check(taskPath: string): Promise<CheckReport> {
             // Only the last reply (§4.4: "the last reply repeats") is the
             // steady state a requirement's validator should see — an earlier
             // one can legitimately be a mid-sequence draft a different part of
-            // the same contract's own dispatch history produced (banyandb-fix's
-            // own planner draft under decision-record-v1, before the
-            // implementer's confirmation settles it), not evidence that
-            // requirement ever saw on its own.
+            // the same contract's own dispatch history produced (the former
+            // banyandb-fix graph's planner draft under decision-record-v1,
+            // before the implementer's confirmation settles it), not evidence
+            // that requirement ever saw on its own.
             if (i !== replies.length - 1) continue;
             const label = `scenario ${scenarioName}: ${contractName}[${i}] against ${requirement.id}'s validator`;
             try {

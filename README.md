@@ -148,8 +148,8 @@ crashes; filesystem and execution scopes require host enforcement.
   remove it.
 - [Issue-fix graph](docs/design-issue-fix-graph.md): one bug-fix graph for any
   repository, driven by a JSON profile the task names with `config:`; ships
-  profiles for BanyanDB and for GraphLoom itself. It generalizes the
-  [BanyanDB fix graph](docs/design-banyandb-fix-graph.md).
+  profiles for BanyanDB and for GraphLoom itself. It replaced the earlier
+  BanyanDB-only fix graph.
 - [Installable releases](docs/design-release.md) (proposed): a self-contained
   release tarball with a bundled Node runtime and the SDK tarball on GitHub
   Releases, versioned install directories with `install.sh`, `graphloom

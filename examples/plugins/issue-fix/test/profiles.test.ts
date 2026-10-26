@@ -10,19 +10,14 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
-import type { EvidenceRecord, GraphDefinition, JobSpec, RunView } from "@graphloom/sdk";
+import type { EvidenceRecord, JobSpec, RunView } from "@graphloom/sdk";
 import {
   advanceFix,
   exampleBenchReport,
   writeTextFileCommand,
   writtenText,
   MAX_BENCH_REPORT_BYTES,
-  candidateCommands,
   codeReviewInstruction,
-  WHOLE_CHANGE_CHECK,
-  DEDUPE_RULE,
-  DECISION_RECORD_SCHEMA,
-  commitMessage,
   createGraph,
   decisionProblems,
   definitionFor,
@@ -35,12 +30,9 @@ import {
   planInstruction,
   ProfileError,
   pullRequestDescription,
-  redCommands,
-  reviewBackground,
   shippedProfile,
   validatorById,
   validatorsFor,
-  verificationInstruction,
   namePattern,
   vitestArgv,
   vitestOutcome,
@@ -85,52 +77,11 @@ const TS_PLAN: DecisionRecord = {
   test: { package: TS_TEST, name: "writeScopeAllows forbids a path below an excluded directory", expectedValueSource: "the issue" },
   productionCaller: "packages/sdk/src/scope.ts writeScopeAllows",
 };
-const ISSUE = { number: 14111, title: "Scheduler reports long actions as timed out", state: "open", url: "u", labels: ["bug"], body: "Backups longer than five minutes are reported as timed out." };
 
-const RECORD_PROPERTIES = (JSON.parse(DECISION_RECORD_SCHEMA) as { properties: Record<string, unknown> }).properties;
-const banyandbFixDist = path.join(repoRoot, "examples/plugins/banyandb-fix/dist");
-const load = async (module: string) => (await import(pathToFileURL(path.join(banyandbFixDist, module)).href)) as Record<string, (...args: never[]) => unknown>;
-
-describe.skipIf(!existsSync(path.join(banyandbFixDist, "index.js")))("the banyandb profile reproduces banyandb-fix", () => {
-  it("describes the same stages, requirements, validators, contracts and environment", async () => {
-    const theirs = ((await load("index.js")).createGraph as () => { describe(): GraphDefinition })().describe();
-    // The deliberate differences (#173): no separate license-check command (`make check` runs it), and the
-    // implementer's record may carry `selfChecks`.
-    const withoutLicense = (definition: object) =>
-      JSON.parse(JSON.stringify(definition).replace("make license-check, make build, make lint and make check all pass", "make build, make lint and make check (which includes license-check and check-format) all pass")) as GraphDefinition;
+describe("the banyandb profile", () => {
+  it("describes the graph identity and finds the plugin's bundled open-code-review first", () => {
     const ours = createGraph().describe(BANYANDB);
-    // Budgets are what a run may spend, not behaviour: banyandb-fix predates them.
-    const strip = ({ graphId: _g, version: _v, privateStateSchema: _p, defaultBudgets: _b, ...rest }: GraphDefinition) => rest;
-    // The one deliberate difference (#161): decision-record-v2 adds `change`, which banyandb-fix never had.
-    const v1 = (definition: object) =>
-      JSON.parse(
-        JSON.stringify(definition)
-          .replaceAll("decision-record-v2", "decision-record-v1")
-          .replace('"change":{"type":"string"},', "")
-          .replace('"summary","change",', '"summary",')
-          // #183: the planner's `acceptance` and the implementer's `coverage`, additive to decision-record-v2.
-          .replace(`,"acceptance":${JSON.stringify(RECORD_PROPERTIES.acceptance)},"coverage":${JSON.stringify(RECORD_PROPERTIES.coverage)}`, "")
-          .replace(',"selfChecks":{"type":"array","items":{"type":"string"}}', "")
-          // #182: a code review comment may be marked `distinct`, which banyandb-fix never had.
-          .replace(',"distinct":{"type":"boolean"}', "")
-          .replace('"contract":{"type":"string","enum":["dedupe-1"]},', "")
-          .replace('"summary","contract"]', '"summary"]')
-          .replace('"finding","evidence","distinct"]', '"finding","evidence"]'),
-      ) as Omit<GraphDefinition, "graphId" | "version" | "privateStateSchema" | "defaultBudgets">;
-    // And #174: banyandb-fix runs one `make generate`; the profile runs it per project so each output is cached on its own inputs.
-    // Since 0.14.0 the ocr check finds the plugin's bundled open-code-review first; banyandb-fix's needs ocr on PATH.
-    const theirOcr = theirs.environment?.checks?.find((c) => c.id === "ocr");
-    const monolithic = (definition: ReturnType<typeof v1>) => ({
-      ...definition,
-      environment: {
-        ...definition.environment,
-        checks: definition.environment?.checks?.map((c) => (c.id === "ocr" ? theirOcr! : c)),
-        prepare: theirs.environment?.prepare,
-      },
-    });
     expect(ours.environment?.checks?.find((c) => c.id === "ocr")?.argv.join(" ")).toContain("scripts/ocr-path.sh");
-    expect(monolithic(v1(strip(ours)))).toEqual(strip(withoutLicense(theirs)));
-    expect(theirs.environment?.prepare?.map((c) => c.argv.join(" "))).toEqual(["make generate"]);
     expect(ours).toMatchObject({ graphId: "issue-fix", version: "0.14.0", privateStateSchema: "issue-fix-private-v1" });
   });
 
@@ -159,53 +110,6 @@ describe.skipIf(!existsSync(path.join(banyandbFixDist, "index.js")))("the banyan
       const restoring = (file: string) => profile.environment.prepare?.filter((c) => c.outputs?.includes(file)).map((c) => c.id);
       expect(restoring("bin/buf"), profile.name).toEqual(["generate-proto"]);
     }
-  });
-
-  it("gives the agents and the checks the same instructions and commands", async () => {
-    const prompts = await load("prompts.js");
-    const ocr = await load("ocr.js");
-    const findings = await load("findings.js");
-    const decisions = await load("decision-record.js");
-    const call = <T>(f: unknown, ...args: unknown[]) => (f as (...a: unknown[]) => T)(...args);
-    // The one deliberate difference (#161): the planner and the implementer are also asked for `change`.
-    // The deliberate differences (#173): the checks text no longer names license-check and says the cheap checks go first,
-    // and the implementer is asked to run the profile's self-check commands.
-    const theirChecks = "The controller checks your change in clean checkouts: the base commit with only your test files must fail the test by assertion; the full change must pass the test, `make test-ci` for the changed packages, and make license-check, build, lint and check. `make check` must leave no file changed, so run `make format` if you touch Go code.";
-    const v1 = (text: string) =>
-      text
-        .split("\n")
-        .filter((l) => !l.startsWith("- change: ") && !l.startsWith("- summary is your report") && !l.startsWith("- Before you return status ready") && !l.startsWith("- acceptance: "))
-        .map((l) => (l === `- ${banyandb.implementation.checks}` ? `- ${theirChecks}` : l))
-        .join("\n")
-        .replaceAll("decision-record-v2", "decision-record-v1");
-    const snapshot = "# apache/skywalking#14111: Scheduler\n\nBody.";
-    expect(v1(planInstruction(banyandb, { issue: 14111, request: "Fix apache/skywalking#14111.", snapshot }))).toBe(
-      call(prompts.planInstruction, { issue: 14111, request: "Fix apache/skywalking#14111.", snapshot }),
-    );
-    for (const feedback of [undefined, ["passes: make test-ci failed"]]) {
-      const args = { issue: 14111, plan: GO_PLAN, ...(feedback !== undefined ? { feedback } : {}) };
-      expect(v1(implementInstruction(banyandb, args))).toBe(call(prompts.implementInstruction, args));
-    }
-    expect(candidateCommands(banyandb, GO_PLAN.test!)).toEqual(call<Array<{ id: string }>>(prompts.candidateCommands, GO_PLAN.test).filter((c) => c.id !== "license-check"));
-    expect(redCommands(banyandb, GO_PLAN.test!)).toEqual(call(prompts.redCommands, GO_PLAN.test));
-    expect(commitMessage(banyandb, { issue: 14111, issueTitle: ISSUE.title, record: GO_PLAN })).toBe(call(prompts.commitMessage, { issue: 14111, issueTitle: ISSUE.title, record: GO_PLAN }));
-    const pr = { issue: 14111, issueTitle: ISSUE.title, record: GO_PLAN, base: "0123456789abcdef", review: "Reviewed by Codex: no comments.", dismissed: ["F1 refuted"] };
-    expect(pullRequestDescription(banyandb, pr)).toBe(call<string>(prompts.pullRequestDescription, pr).replace("`make license-check`, ", ""));
-    const background = reviewBackground(banyandb, ISSUE, GO_PLAN);
-    expect(background).toBe(call(ocr.reviewBackground, ISSUE, GO_PLAN));
-    const review = { ocr: "/opt/ocr", base: "abc", background, known: { open: [{ id: "F1", state: "confirmed", description: "x" }], settled: [] }, sweep: true };
-    // The one deliberate difference (#148): issue-fix reviews every changed file, not only the files
-    // preview keeps plus the test files, and then checks the change as a whole (#148); and (#182) is told to report each problem once.
-    const theirs = call<string>(ocr.codeReviewInstruction, review).split("\n");
-    const ours = codeReviewInstruction(banyandb, review).split("\n");
-    const step2 = (lines: string[]) => lines.findIndex((l) => l.startsWith("2. "));
-    expect(theirs[step2(theirs)]).toBe("2. The change's Go test files (`_test.go`) are reviewable too, even when preview excludes them as tests: add them to your list. Leave out other excluded files.");
-    expect(ours[step2(ours)]).toContain("2. Your list is every changed file. Add back every file preview excluded");
-    expect(ours.filter((l, i) => i !== step2(ours) && l !== WHOLE_CHANGE_CHECK && l !== DEDUPE_RULE)).toEqual(theirs.filter((_, i) => i !== step2(theirs)));
-    expect(verificationInstruction(banyandb, { findings: [], background, changed: ["a.go"] })).toBe(call(findings.verificationInstruction, { findings: [], background, changed: ["a.go"] }));
-    const record = { ...GO_PLAN, scopeExceptions: [{ path: "go.mod", reason: "a new dependency" }, { path: "Makefile", reason: "x" }] };
-    expect(decisionProblems(record, banyandb)).toEqual(call(decisions.decisionProblems, record));
-    expect(writeScopeFor(record, banyandb)).toEqual(call(decisions.writeScopeFor, record));
   });
 });
 

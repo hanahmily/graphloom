@@ -37,7 +37,7 @@ describe("checkContract", () => {
 });
 
 describe("checkReferences", () => {
-  // Regression: an array-wrapped path (banyandb-fix's own "findings[].finding",
+  // Regression: an array-wrapped path (the former banyandb-fix graph's "findings[].finding",
   // "prior[].finding") checked head.array against the path's own PARENT
   // object before ever navigating to the array it actually names, so
   // Array.isArray(node) was always false and every array-wrapped path was

@@ -169,7 +169,7 @@ graphloom-<version>-linux-x64/
   packages/{sdk,controller,plugin-host,supervisor,runner}/   # package.json + dist/ only
   apps/graphloom/                  # package.json + dist/ only
   executors/{coding-agent,command,github}/                   # complete source-repairable package
-  examples/plugins/{hello,release,banyandb-fix,issue-fix}/   # complete source-repairable bundles
+  examples/plugins/{hello,release,issue-fix}/   # complete source-repairable bundles
   examples/*.yaml  examples/README.md
 ```
 
