@@ -161,6 +161,8 @@ export function createCodingAgentExecutor(
           ...(input.harnessOptions !== undefined ? { options: input.harnessOptions } : {}),
           ...(ctx.session !== undefined ? { sessionDir: ctx.session.dir } : {}),
           ...(resume !== undefined ? { resume } : {}),
+          // A session saved mid-run is reported at once, so the host keeps it if the job is killed before it returns.
+          ...(ctx.session !== undefined && ctx.keepSession !== undefined ? { onSessionSaved: (ref: string) => ctx.keepSession?.(ref) } : {}),
           ...(ctx.timeoutMs !== undefined ? { timeoutMs: ctx.timeoutMs } : {}),
         });
       } catch (err) {

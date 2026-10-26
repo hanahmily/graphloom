@@ -135,9 +135,10 @@ function graph(steps: ScriptedStep[]) {
 }
 
 /** The operator's host: the coding agent runs unrestricted, GitHub sandboxed with writes granted. */
-function hostRunner(server: FakeGitHub, coding = codingAgentBinding({ harness: scriptedHarnessModule }), timeoutMs?: number) {
+function hostRunner(server: FakeGitHub, coding = codingAgentBinding({ harness: scriptedHarnessModule }), timeoutMs?: number, stopGraceMs?: number) {
   return createBuiltinExecutorRunner({
     ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+    ...(stopGraceMs !== undefined ? { stopGraceMs } : {}),
     packages: [
       { manifest: githubExecutorPackage, ...githubBinding({ token: TOKEN, baseUrl: server.baseUrl, allowWrites: true }) },
       { manifest: codingAgentExecutorPackage, ...coding },
@@ -399,6 +400,53 @@ describe("the coding agent's job timeout", () => {
     expect(turns.at(-1)!.output!.assignment).toBe(`${TIMEOUT_CONTINUATION_NOTE}\n\nWrite the greeting.`);
     expect(turns.map((t) => t!.output!.timeoutMs)).toEqual([1_500, 1_500]);
     expect(state.remedies?.map((r) => r.remedy)).toEqual(["continuing its agent session (1 of 1) instead of opening a recovery episode"]);
+  });
+
+  it("continues the session the agent saved mid-turn when it never answers within the stop grace and is killed", async () => {
+    const server = await fake();
+    const env = await makeEnv();
+    const job: JobSpec = {
+      stageId: "write",
+      kind: "agent",
+      purpose: "work",
+      instruction: "implement issue #1",
+      writeScope: ["GREETING.txt"],
+      executor: { id: "graphloom.coding-agent/run", version: "1" },
+      input: {
+        assignment: "Write the greeting.",
+        harnessOptions: {
+          // The first turn writes half the greeting and then hangs, ignoring the stop: only its process kill ends it.
+          steps: [{ write: { path: "GREETING.txt", content: "Hello" } }, { hang: true }],
+          continuedSteps: [writeGreeting],
+        },
+      },
+      timeoutContinuations: 1,
+    };
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({ definition, advances: [dispatch(job, "implement"), ...rest] }),
+      validators,
+      runner: hostRunner(server, codingAgentBinding({ harness: scriptedHarnessModule, timeoutMs: 1_000 }), undefined, 300),
+      stateRoot: env.stateRoot,
+      runId: "timeout-killed",
+    });
+    expect(report.status, report.blocker).toBe("succeeded");
+    const state = await loadRunState(report.stateDir);
+    const [first, second] = state.agentSessions!;
+    // The executor never reported a result: the session it saved as the turn began is what the host kept.
+    expect(first).toMatchObject({ status: "failed", timedOut: true, sessionRef: expect.stringMatching(/^scripted-/) });
+    expect(second).toMatchObject({ status: "ok", continuedFrom: first!.operationId, sessionRef: first!.sessionRef });
+    const failure = state.evidence
+      .map((e) => (e.payload as { executorFailure?: { summary: string; failureKind?: string } }).executorFailure)
+      .find((f) => f !== undefined);
+    expect(failure).toMatchObject({ summary: "executor child timed out after 1000ms", failureKind: "timeout" });
+    // No evidence claims the killed turn succeeded: the only coding-agent record is the continued turn's.
+    const turns = state.evidence
+      .map((e) => (e.payload as { codingAgent?: { status: string; output: { assignment: string } | null } }).codingAgent)
+      .filter((a) => a !== undefined);
+    expect(turns.map((t) => t!.status)).toEqual(["completed"]);
+    expect(turns[0]!.output!.assignment).toBe(`${TIMEOUT_CONTINUATION_NOTE}\n\nWrite the greeting.`);
+    expect(await readFile(path.join(state.worktreePath, "GREETING.txt"), "utf8")).toBe(GREETING);
   });
 });
 

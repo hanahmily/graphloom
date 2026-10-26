@@ -56,6 +56,34 @@ export const executors = [
     },
   },
   {
+    // An agent that reports its session as it saves it, then never answers again, even when stopped:
+    // a harness slower than the stop grace to save its session while stopping.
+    id: "acme.group/session-early-hang",
+    version: "1",
+    effect: "read",
+    async execute(_input, ctx) {
+      setInterval(() => undefined, 1_000);
+      ctx.keepSession?.("early-1");
+      ctx.keepSession?.("early-2");
+      return new Promise(() => undefined);
+    },
+  },
+  {
+    // An agent that reports its session early, then claims success once it is stopped.
+    id: "acme.group/late-success",
+    version: "1",
+    effect: "read",
+    async execute(_input, ctx) {
+      ctx.keepSession?.("early-1");
+      const busy = setInterval(() => undefined, 1_000);
+      await new Promise((resolve) => {
+        ctx.signal?.addEventListener("abort", resolve, { once: true });
+      });
+      clearInterval(busy);
+      return { status: "ok", summary: "all done", evidence: [{ kind: "other", payload: { claimed: "success" } }] };
+    },
+  },
+  {
     id: "acme.group/report-timeout",
     version: "1",
     effect: "read",

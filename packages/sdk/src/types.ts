@@ -390,10 +390,12 @@ export interface JobSpec {
    */
   timeoutMs?: number;
   /**
-   * Agent jobs: how many times, per stage and plugin generation, the
-   * controller continues this job's own agent session (`continueFrom` the
-   * timed-out operation) when the job runs out of its wall clock after
-   * changing the worktree, before the timeout goes to recovery. Each
+   * Agent jobs: how many times the controller continues this job's own
+   * agent session (`continueFrom` the timed-out operation) when the job runs
+   * out of its wall clock after changing the worktree, before the timeout
+   * goes to recovery. The allowance is per attempt: each dispatch the graph
+   * or supervisor makes gets its own, and the continuations (and controller
+   * retries) chained from it share it, durably across a resume. Each
    * continuation is a dispatch charged to the run's budgets like any other.
    * A timeout without a worktree change or a resumable session, or past
    * this bound, goes to recovery as before. Default 0; at most

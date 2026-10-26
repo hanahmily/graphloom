@@ -379,6 +379,61 @@ describe("Pi coding harness", () => {
     expect((await readdir(h.sessions)).sort()).toEqual([`${ref}.json`, `${ref}.jsonl`]);
   });
 
+  it("reports the session once Pi has written it mid-turn, so a job killed before it returns leaves a resumable one", async () => {
+    const h = await setup();
+    const controller = new AbortController();
+    let history = "";
+    let messages: FauxContext["messages"] = [];
+    h.faux.setResponses([
+      h.use("read_comments", { issue: 1 }),
+      (context: FauxContext) => {
+        history = JSON.stringify(context.messages);
+        messages = context.messages;
+        return h.say("resumed after the kill");
+      },
+    ]);
+    const kept: string[] = [];
+    let release: (() => void) | undefined;
+    const running = h.executor.execute(
+      { assignment: "Write the first draft" },
+      h.ctx({
+        signal: controller.signal,
+        session: { dir: h.sessions },
+        keepSession: (ref) => kept.push(ref),
+        tools: {
+          bindings: [{ name: "read_comments", effect: "read" }],
+          // The tool never answers while the job runs: the turn is mid-tool when it is killed.
+          call: () => new Promise((resolve) => (release = () => resolve({ status: "failed", summary: "stopped" }))),
+        },
+      }),
+    );
+    await expect.poll(() => kept.length, { timeout: 5_000 }).toBe(1);
+    const ref = kept[0]!;
+    expect(ref).toMatch(/^pi-[0-9a-f]{12}$/);
+    // What a host that kills the job now would be left with.
+    const killed = path.join(h.dir, "killed-sessions");
+    await mkdir(killed);
+    for (const name of await readdir(h.sessions)) await writeFile(path.join(killed, name), await readFile(path.join(h.sessions, name)));
+    expect((await readdir(killed)).sort()).toEqual([`${ref}.json`, `${ref}.jsonl`]);
+    controller.abort();
+    release?.();
+    await running;
+
+    const resumed = await h.executor.execute({ assignment: "Finish the draft" }, h.ctx({ session: { dir: killed, resume: ref } }));
+    expect(resumed).toMatchObject({ status: "ok", summary: "resumed after the kill", sessionRef: ref });
+    expect(history).toContain("Write the first draft");
+    expect(history).toContain('"name":"read_comments","arguments":{"issue":1}');
+    // The call the killed turn never answered reaches a real provider closed, not dangling:
+    // pi-ai's message transform (which every provider applies) answers it with an error result.
+    const piDir = findPackageDir(import.meta.filename, "@earendil-works/pi-coding-agent");
+    const aiDir = findPackageDir(path.join(piDir, "package.json"), "@earendil-works/pi-ai");
+    const { transformMessages } = (await import(pathToFileURL(path.join(aiDir, "dist", "api", "transform-messages.js")).href)) as {
+      transformMessages(messages: unknown[], model: unknown): Array<{ role: string; content: unknown; isError?: boolean }>;
+    };
+    const closed = transformMessages(messages, h.faux.getModel()).find((m) => m.role === "toolResult");
+    expect(closed).toMatchObject({ isError: true, content: [{ type: "text", text: "No result provided" }] });
+  });
+
   it("refuses to resume a session under a different model or system prompt, before any request", async () => {
     const h = await setup();
     h.faux.setResponses([h.say("first turn done")]);

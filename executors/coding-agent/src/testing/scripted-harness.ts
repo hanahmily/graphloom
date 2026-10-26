@@ -14,6 +14,8 @@ export type ScriptedStep =
   | { write: { path: string; content: string } }
   | { wait: "abort" }
   | { sleep: number }
+  /** Never returns, not even when the job is stopped: a harness too slow to report while it stops. */
+  | { hang: true }
   | { fail: string };
 
 export interface ScriptedOutput {
@@ -81,10 +83,15 @@ export function createScriptedHarness(): CodingHarness {
             priorAssignments: transcript.turns.map((t) => t.assignment),
             ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
           };
+          if (options.sessionDir !== undefined) {
+            // Saved before the turn's steps run, as a real harness's transcript grows during the turn,
+            // and reported at once, so a job killed mid-turn still leaves a restorable session.
+            transcript.turns.push({ assignment: request.assignment, steps });
+            await saveTranscript(options.sessionDir, transcript);
+            options.onSessionSaved?.(transcript.sessionRef);
+          }
           const result = await perform(steps, out, options);
           if (options.sessionDir === undefined) return result;
-          transcript.turns.push({ assignment: request.assignment, steps });
-          await saveTranscript(options.sessionDir, transcript);
           return { ...result, sessionRef: transcript.sessionRef };
         },
       };
@@ -115,6 +122,9 @@ async function perform(steps: ScriptedStep[], out: ScriptedOutput, options: Codi
         options.signal?.addEventListener("abort", () => resolve(), { once: true });
       });
       return { status: "failed", summary: "aborted", output: out };
+    } else if ("hang" in step) {
+      setInterval(() => undefined, 60_000);
+      await new Promise<never>(() => undefined);
     } else if ("sleep" in step) {
       await new Promise<void>((resolve) => {
         const timer = setTimeout(resolve, step.sleep);

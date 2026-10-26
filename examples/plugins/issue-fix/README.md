@@ -293,12 +293,18 @@ A profile's optional `agent` settings size the coding agents' jobs:
   three hours, because its feature tickets outgrow one; the other profiles keep
   the operator's default.
 - `timeoutContinuations` (default 1, at most 3, 0 turns it off) is how many
-  times per Fix generation the controller continues the implementer's own
+  times per implement attempt the controller continues the implementer's own
   session when its job runs out of time after changing the worktree, telling
-  the agent to check what is done and finish the rest. A timeout that changed
-  nothing, kept no session, or comes after the last continuation still opens a
-  supervisor episode. Each continuation is a dispatch charged to the run's
-  budgets, and continues, rather than repeats, the correction it belongs to.
+  the agent to check what is done and finish the rest. Each implement dispatch
+  the graph makes (a first attempt, or a reentry after review feedback) gets
+  its own allowance, which the continuations chained from it share. A timeout
+  that changed nothing, kept no session, or comes after the attempt's last
+  continuation still opens a supervisor episode. Each continuation is a
+  dispatch charged to the run's budgets, and continues, rather than repeats,
+  the correction it belongs to. The allowance became per attempt (it was per
+  Fix generation) in the controller, with no change to this plugin; the
+  harnesses now also keep the implementer's session when it is killed before
+  it can save it while stopping.
 
 ## Rehearsal findings (0.12.1)
 

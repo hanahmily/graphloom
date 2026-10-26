@@ -103,9 +103,16 @@ groups, such as an agent CLI and its commands. The job settles only when the
 process has exited, or after a 10-second grace, when it is killed. Processes an
 executor leaves behind after ignoring its signal are not tracked. A timed-out
 job settles as `failed` with `failureKind: "timeout"`, whatever the executor
-answers while it stops; a `sessionRef` and evidence it reports within the grace
-are kept, so the controller can continue the session
+answers while it stops; a `sessionRef` and the evidence of a failed try it
+reports within the grace are kept, so the controller can continue the session
 ([timeout continuation](design-typescript-core.md#job-wall-clock-and-timeout-continuation)).
+A success it reports after its wall clock ran out is not accepted: the job
+keeps its session but not its evidence. The grace is best effort for that last
+report. An executor with a session directory may also report a session as soon
+as it is saved there (`ctx.keepSession(ref)`, a `session` message from the
+executor process); the job keeps the newest one when the executor is killed
+before it reports again. The coding-agent harnesses report theirs this way
+during each turn.
 
 The process runs under Node's permission model. It may read only its own
 package and the dependencies Node resolves for it. File writes, child
@@ -291,9 +298,17 @@ configured from the environment):
   (an absolute path, `GRAPHLOOM_CLAUDE_CONFIG_DIR`) sets it per binding, so one
   workflow can use a gateway and another a first-party account. The default is
   the executor's `CLAUDE_CONFIG_DIR`, then `~/.claude`.
-- Claude Code writes transcripts under its config dir. After each run the harness copies the transcript to
+- Claude Code writes transcripts under its config dir, appending as the turn
+  goes. The harness copies the transcript to
   `<sessionDir>/<sessionRef>.jsonl`, with `<sessionRef>.json` naming its
-  project directory, model, and system prompt digest. The session's side
+  project directory, model, and system prompt digest: during the run, at once
+  on the first streamed event and then at most every two seconds while events
+  arrive (complete records only, so a line cut off mid-write is left out), and
+  after the run. The first copy reports the `sessionRef` to the host
+  (`onSessionSaved`, then `ctx.keepSession`), so a job killed mid-turn, before
+  Claude Code answers its interrupt, still leaves a session to resume; Claude
+  Code resumes a transcript cut off mid-tool, closing the unanswered call. If
+  the copy after the run fails, the copies made during it are removed. The session's side
   directory is mirrored to `<sessionDir>/<sessionRef>/`, regular files only,
   and removed there when the session no longer has one. A transcript that is a
   symlink is not saved, and a file replaced between scanning and copying (by a
@@ -329,6 +344,12 @@ module at `piHarnessModule` configured from the environment):
   is set on the provider runtime only, never in prompts or the transcript.
 - Sessions are saved as `<sessionDir>/<sessionRef>.jsonl`, with
   `<sessionRef>.json` recording the provider, model, and system prompt digest.
+  The settings record is written when the session opens, and Pi appends each
+  message to the session file as it ends, so the harness reports the
+  `sessionRef` (`onSessionSaved`) as soon as the file exists, after the first
+  assistant message: a job killed mid-turn still leaves it. On resume, Pi's
+  provider transform answers a tool call the killed turn left open with an
+  error result before the next request.
   A missing, empty, or corrupt session file fails a resume with a clear reason.
   So do a missing settings record and a different provider, model, or system
   prompt, before any provider request.
@@ -338,9 +359,11 @@ or the module at `codexHarnessModule` configured from the environment):
 
 - It serves read-only jobs without job tools, and refuses others before
   starting: Codex cannot confine writes to a write scope, and it has no bridge
-  to the controller's tools. It is not resumable.
-- Each job runs `codex exec --json --ephemeral --sandbox read-only` in the
-  worktree, with the assignment on stdin. The model, reasoning effort and
+  to the controller's tools.
+- Each job runs `codex exec --json --sandbox read-only` in the worktree, with
+  the assignment on stdin; `--ephemeral` too when the job has no session
+  directory, so Codex persists nothing that cannot be continued. The model,
+  reasoning effort and
   Codex home come from `GRAPHLOOM_CODEX_MODEL`,
   `GRAPHLOOM_CODEX_REASONING_EFFORT` and `GRAPHLOOM_CODEX_HOME` (then
   `CODEX_HOME`). Codex uses its own login. Its environment is the same minimal
@@ -357,6 +380,24 @@ or the module at `codexHarnessModule` configured from the environment):
   that emits nothing while no command runs. Cancelling the job stops its
   process group, and, as with Claude Code, the job settles only once
   everything Codex started is gone.
+- It is resumable. With a session directory, Codex keeps the thread in its
+  home (`sessions/YYYY/MM/DD/rollout-<time>-<thread id>.jsonl`) and names it
+  first, in `thread.started`. From then the harness copies the rollout to
+  `<sessionDir>/codex-<thread id>.jsonl`, with `codex-<thread id>.json`
+  recording its path in the Codex home and the model: during the run (at once,
+  then at most every two seconds while events arrive; complete records only),
+  reporting the `sessionRef` with the first copy, and after it. A resume
+  validates the saved copy, refuses another model, writes the rollout back into
+  the Codex home, replacing its own, and runs
+  `codex exec --sandbox read-only --cd <worktree> resume --json ... <thread id> -`,
+  so it works on a host whose Codex home lost the thread. Codex resumes a
+  rollout cut off mid-command, as a job killed mid-turn leaves it.
+- A Codex job never changes the worktree, so the controller's
+  [timeout continuation](design-typescript-core.md#job-wall-clock-and-timeout-continuation),
+  which requires a worktree change as its proof of progress, never applies to
+  it: a timed-out Codex job keeps its session (recorded as timed out), but goes
+  to recovery, where a supervisor or graph may still continue it with
+  `continueFrom`.
 
 ### Continuing an agent session
 

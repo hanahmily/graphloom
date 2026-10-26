@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
-import { realpath, rename, writeFile } from "node:fs/promises";
+import { mkdir, realpath, rename, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import {
@@ -93,6 +93,12 @@ export function createPiHarness(harnessOptions: PiHarnessOptions = {}): CodingHa
         spawnHook: (spawn) => ({ ...spawn, env: minimalEnv(spawn.env, passEnv) }),
       }) as unknown as ToolDefinition;
 
+      // The settings record goes first, so the session file is restorable the moment Pi writes it.
+      if (saved.ref !== undefined) {
+        await mkdir(path.dirname(saved.file), { recursive: true });
+        await writeAtomic(settingsFile(saved.file), JSON.stringify(settings));
+      }
+      let sessionReported = false;
       let disposed: (() => void) | undefined;
       // Native tools the latest run's own turns called; undefined when they could not be read.
       // Read lazily by finish(), so no return path can report tools before they are collected.
@@ -144,6 +150,17 @@ export function createPiHarness(harnessOptions: PiHarnessOptions = {}): CodingHa
           };
           const onAbort = () => void agent.abort().catch(() => undefined);
           options.signal?.addEventListener("abort", onAbort, { once: true });
+          // Pi appends each message to the session file in the session
+          // directory as it ends; once the file exists (after the first
+          // assistant message) the session is restorable, so it is reported
+          // at once and a job killed mid-turn still leaves it.
+          const reportSaved = () => {
+            if (saved.ref === undefined || sessionReported || !existsSync(saved.file)) return;
+            sessionReported = true;
+            options.onSessionSaved?.(saved.ref);
+          };
+          const unsubscribe = saved.ref !== undefined && options.onSessionSaved !== undefined ? agent.subscribe(reportSaved) : undefined;
+          reportSaved();
           const firstNew = agent.messages.length;
           readTools = () => piNativeTools(agent.messages, firstNew, new Set(tools.map((t) => t.name)));
           try {
@@ -153,6 +170,7 @@ export function createPiHarness(harnessOptions: PiHarnessOptions = {}): CodingHa
             return finish({ status: "failed", summary: bounded(err instanceof Error ? err.message : String(err)) });
           } finally {
             options.signal?.removeEventListener("abort", onAbort);
+            unsubscribe?.();
           }
 
           const last = lastAssistant(agent.messages);

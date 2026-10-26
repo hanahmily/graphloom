@@ -322,6 +322,44 @@ describe("Claude Code harness", () => {
     expect(second).toMatchObject({ status: "ok", summary: "resumed interrupted session", sessionRef: ref });
   });
 
+  it("saves and reports the session while the turn still runs, so a job killed before it returns leaves a resumable one", async () => {
+    const h = await setup();
+    const controller = new AbortController();
+    await h.script([{ tool: "read_comments", args: {} }, { hang: true }], [{ text: "resumed after the kill" }]);
+    const kept: string[] = [];
+    const running = h.executor.execute(
+      { assignment: "first assignment" },
+      h.ctx({ signal: controller.signal, session: { dir: h.sessions }, keepSession: (ref) => kept.push(ref) }),
+    );
+    // Reported while Claude Code is still mid-turn, not when it returns.
+    await expect.poll(() => kept.length, { timeout: 5_000 }).toBe(1);
+    const ref = kept[0]!;
+    expect(ref).toMatch(/^claude-/);
+    // What a host that kills the job now would be left with.
+    const killed = path.join(h.dir, "killed-sessions");
+    await mkdir(killed);
+    for (const name of await readdir(h.sessions)) await writeFile(path.join(killed, name), await readFile(path.join(h.sessions, name)));
+    expect((await readdir(killed)).sort()).toEqual([`${ref}.json`, `${ref}.jsonl`]);
+    expect(await readFile(path.join(killed, `${ref}.jsonl`), "utf8")).toContain("first assignment");
+    controller.abort();
+    await running;
+    expect(kept).toEqual([ref]);
+
+    const resumed = await h.executor.execute({ assignment: "continue" }, h.ctx({ session: { dir: killed, resume: ref } }));
+    expect(resumed).toMatchObject({ status: "ok", summary: "resumed after the kill", sessionRef: ref });
+    const last = (await h.invocations()).at(-1)!;
+    expect(last.history[0]).toContain("first assignment");
+    expect(last.history).not.toContain("interrupted turn saved");
+  });
+
+  it("keeps only complete transcript records in a copy taken mid-write", async () => {
+    const { completeJsonl } = await import("./harness.js");
+    expect(completeJsonl('{"a":1}\n{"b":2}\n')).toBe('{"a":1}\n{"b":2}\n');
+    expect(completeJsonl('{"a":1}\n{"b":')).toBe('{"a":1}\n');
+    expect(completeJsonl('{"a":1}\n{"b":2}')).toBe('{"a":1}\n{"b":2}');
+    expect(completeJsonl('{"b":')).toBe("");
+  });
+
   it.each([false, true])("falls back to signals when the CLI ignores an interrupt (ignore SIGTERM: %s)", async (ignoreTerm) => {
     const h = await setup({ interruptGraceMs: 50, killGraceMs: 50 });
     const controller = new AbortController();

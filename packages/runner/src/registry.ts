@@ -612,13 +612,31 @@ export function createChildExecutorRunner(
         (pinned.timeoutMs !== undefined && pinned.timeoutMs > maxTimeoutMs
           ? ` (the job asked for ${pinned.timeoutMs}ms; the operator allows at most ${maxTimeoutMs}ms)`
           : "");
-      /** A timed-out job, with what the executor still reported while it stopped: its session and evidence, never success. */
-      const timedOutResult = (late?: JobResult): JobResult => ({
-        ...failed(late !== undefined && late.summary !== "" ? `${timeoutSummary}; while stopping, the executor reported: ${late.summary}` : timeoutSummary),
-        failureKind: "timeout",
-        ...(late?.sessionRef !== undefined ? { sessionRef: late.sessionRef } : {}),
-        ...(late?.evidence !== undefined ? { evidence: late.evidence } : {}),
-      });
+      // The newest session the executor reported saved while it ran (`ctx.keepSession`):
+      // what a timed-out job keeps when the executor is killed before it reports one.
+      let keptSessionRef: string | undefined;
+      /**
+       * A timed-out job, with what the executor still reported while it
+       * stopped: its session (or the one it reported earlier) and the
+       * evidence of its failed try. Never success: a late "ok" keeps its
+       * session but not its evidence, which claims a result the job's wall
+       * clock did not cover.
+       */
+      const timedOutResult = (late?: JobResult): JobResult => {
+        const reported =
+          late === undefined || late.summary === ""
+            ? ""
+            : late.status === "ok"
+              ? `; the executor finished only after its wall clock ran out, which is not accepted: ${late.summary}`
+              : `; while stopping, the executor reported: ${late.summary}`;
+        const sessionRef = late?.sessionRef ?? keptSessionRef;
+        return {
+          ...failed(`${timeoutSummary}${reported}`),
+          failureKind: "timeout",
+          ...(sessionRef !== undefined ? { sessionRef } : {}),
+          ...(late?.evidence !== undefined && late.status !== "ok" ? { evidence: late.evidence } : {}),
+        };
+      };
       return await new Promise<JobResult>((resolve) => {
         if (ctx.signal?.aborted) {
           resolve(failed("executor cancelled before start"));
@@ -773,6 +791,14 @@ export function createChildExecutorRunner(
               return;
             }
             children.reserveModelCall().then(grant, () => grant(false));
+            return;
+          }
+          if (msg.kind === "session") {
+            // Only a job the controller gave a session directory can name a continuable session.
+            const ref = (msg as { sessionRef?: unknown }).sessionRef;
+            if (ctx.session !== undefined && typeof ref === "string" && ref.length > 0 && ref.length <= MAX_SESSION_REF_CHARS) {
+              keptSessionRef = ref;
+            }
             return;
           }
           if (msg.kind === "ok") {

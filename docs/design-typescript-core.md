@@ -887,25 +887,51 @@ The controller aborts any job once the run's active-time budget runs out, so no
 request outlives the run's `activeMs`. A job without a request keeps the
 operator's default.
 
-A timed-out job settles as `failureKind: "timeout"`. The runner gives the
-executor its stop grace to report what it kept, so a harness that saves its
-session while stopping (Claude Code, Pi, the scripted harness) leaves a
-resumable session. An agent job may declare `timeoutContinuations` (0 to 3,
+A timed-out job settles as `failureKind: "timeout"`, never as a success: a
+result the executor reports as `ok` after its wall clock ran out keeps its
+session but not its evidence. The session does not depend on the executor
+answering in time. Each coding-agent harness saves its session into the
+controller's session directory while the turn runs, as soon as the harness
+reveals it (Claude Code's transcript and Codex's rollout as they grow, Pi's
+session file from its first assistant message, the scripted harness's
+transcript as the turn begins), and reports it at once
+(`ExecutorContext.keepSession`). A timed-out job keeps the newest session it
+reported even when the executor is killed after the runner's stop grace
+without answering; the grace is only the executor's chance at a later save
+and a last report. Each harness resumes a session cut off mid-tool. An agent
+job may declare `timeoutContinuations` (0 to 3,
 `MAX_TIMEOUT_CONTINUATIONS`): when it times out after changing the worktree
 (the controller's own before/after fingerprints, not the executor's claim) and
 its session was kept, the controller queues the same job with `continueFrom`
 the timed-out operation instead of opening a recovery episode, and the
 executor tells the agent why (`ExecutorSession.note`): its last turn ran out of
 time and the worktree keeps its changes. At most the declared count of
-continuations runs per stage and generation (`timeoutContinuations` in run
-state, keyed `g<generation>:<stage>`). Each is admitted like a queued retry:
-it spends a decision, a job and its agent invocations through the usual budget
-checks, and continues, rather than repeats, a correction the timed-out try
-already counted. A timeout that changed nothing, kept no session, or exceeds
-the count goes to recovery as `executor_failed`, with the reason it was not
-continued. The plugin never sees the failure first: executor failures reach
-recovery from the controller, so the continuation is a generic contract
-declared on the job, not plugin code.
+continuations runs per attempt. An attempt is a dispatch the graph or the
+supervisor made; every continuation, declared-retryable retry, or quota resume
+the controller queues for it carries the attempt's operation id
+(`timeoutChain` on the queued retry and its pending dispatch) and shares its
+allowance, counted in run state under that id (`timeoutContinuations`). A later
+attempt of the same stage, such as a reentry after review in the same
+generation, gets its own allowance. The count and the chain are durable: a
+stop and resume, which bumps the generation, neither resets the count nor
+drops the chain of a queued continuation. A continuation that was running when
+the controller stopped is reconciled like any interrupted dispatch, and the
+graph's next dispatch after that is a new attempt. Each continuation is
+admitted like a queued retry: it spends a decision, a job and its agent
+invocations through the usual budget checks, and continues, rather than
+repeats, a correction the timed-out try already counted. A timeout that
+changed nothing, kept no session, or exceeds the attempt's count goes to
+recovery as `executor_failed`, with the reason it was not continued. The
+plugin never sees the failure first: executor failures reach recovery from the
+controller, so the continuation is a generic contract declared on the job, not
+plugin code.
+
+The Codex harness keeps and resumes sessions (`codex exec resume`), but it
+serves read-only jobs only, so a Codex job never changes the worktree and is
+never continued after a timeout: the worktree change is the controller's
+proof that the timed-out try made progress worth continuing, and a read-only
+job offers none. Its kept session stays available to an explicit
+`continueFrom` from the supervisor or the graph.
 
 ## 11. Minimal example and verification
 

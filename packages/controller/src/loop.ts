@@ -459,6 +459,7 @@ async function runNormalLoopSteps(
           graphCorrectionTrial: queuedRetry.graphCorrectionTrial,
           supervisorWorkDispatch: queuedRetry.supervisorWorkDispatch,
           ...(queuedRetry.reason !== undefined ? { reason: queuedRetry.reason } : {}),
+          ...(queuedRetry.timeoutChain !== undefined ? { timeoutChain: queuedRetry.timeoutChain } : {}),
         };
       } else if (state.mode === "recovery" && deps.supervisor !== undefined && stalledWithFreshEvidence(state)) {
         // §4.3: the run progressed since the last episode, so the stall the
@@ -1960,7 +1961,11 @@ function queueRetry(
  * wall clock after changing the worktree has its own agent session continued
  * (`continueFrom` the timed-out operation) instead of going to recovery: the
  * agent made progress and its transcript holds what is left. At most the
- * job's count (and `MAX_TIMEOUT_CONTINUATIONS`) per stage and generation. The
+ * job's count (and `MAX_TIMEOUT_CONTINUATIONS`) per attempt: the dispatch the
+ * graph or supervisor made and every continuation or retry the controller
+ * chained from it (`flags.timeoutChain`) share one allowance, counted in run
+ * state under the attempt's operation id, so a later attempt of the same
+ * stage gets its own and a resume never resets one. The
  * continuation is queued like a retry: it is admitted through the same
  * budget checks as any dispatch, and continues, not repeats, a correction
  * the timed-out try already counted. `declined` says why an opted-in
@@ -1977,7 +1982,7 @@ function continueAfterTimeout(
   if (result.failureKind !== "timeout" || job.kind !== "agent") return {};
   const allowed = Math.min(job.timeoutContinuations ?? 0, MAX_TIMEOUT_CONTINUATIONS);
   if (!(allowed > 0)) return {};
-  const key = `g${state.generation}:${job.stageId}`;
+  const key = flags.timeoutChain ?? operationId;
   const used = state.timeoutContinuations?.[key] ?? 0;
   if (worktreeChanged !== true) {
     return { declined: worktreeChanged === false ? "the timed-out try left the worktree unchanged" : "whether the timed-out try changed the worktree is unknown" };
@@ -1986,7 +1991,7 @@ function continueAfterTimeout(
     return { declined: "the executor kept no resumable session while it stopped" };
   }
   if (used >= allowed) {
-    return { declined: `stage ${job.stageId} already continued ${used} timed-out ${used === 1 ? "session" : "sessions"} in generation ${state.generation}, its limit` };
+    return { declined: `the attempt dispatched as ${key} already continued ${used} timed-out ${used === 1 ? "session" : "sessions"}, its limit` };
   }
   const executorId = job.executor?.id ?? job.kind;
   const attempt = used + 1;
@@ -1996,7 +2001,7 @@ function continueAfterTimeout(
       {
         ...state,
         timeoutContinuations: { ...state.timeoutContinuations, [key]: attempt },
-        executorRetry: { job: { ...job, continueFrom: operationId }, attempt, limit: allowed, ...flags, reason },
+        executorRetry: { job: { ...job, continueFrom: operationId }, attempt, limit: allowed, ...flags, timeoutChain: key, reason },
       },
       {
         condition: `executor ${executorId} timed out after changing the worktree`,
@@ -2366,6 +2371,12 @@ interface RetryFlags {
   supervisorWorkDispatch: boolean;
   /** The dispatch reason, when the controller runs the job again for another cause than a declared-retryable failure. */
   reason?: string;
+  /**
+   * The operation id of the attempt this run belongs to, for a job that may
+   * have its timed-out session continued: the continuations and retries
+   * chained from one dispatch share its `timeoutContinuations` allowance.
+   */
+  timeoutChain?: string;
 }
 
 async function prepareDispatch(
@@ -2930,7 +2941,17 @@ function applyDispatchResult(
     // judge: its null output is the executor's failure, handled below, not a
     // contract-invalid answer, so it neither extends nor clears the streak.
     const { pendingDispatch, ...unsettled } = next;
-    const retryFlags = { graphCorrectionTrial: args.graphCorrectionTrial, supervisorWorkDispatch: args.supervisorWorkDispatch };
+    // Whatever the controller queues next for this job (a continuation, a
+    // retry, a resume after a usage limit) belongs to the same attempt and
+    // shares its timeout-continuation allowance: the attempt is the dispatch
+    // the graph or supervisor made, whose operation id the chain carries.
+    const timeoutChain =
+      job.kind === "agent" && (job.timeoutContinuations ?? 0) > 0 ? (pendingDispatch?.retry?.timeoutChain ?? operationId) : undefined;
+    const retryFlags = {
+      graphCorrectionTrial: args.graphCorrectionTrial,
+      supervisorWorkDispatch: args.supervisorWorkDispatch,
+      ...(timeoutChain !== undefined ? { timeoutChain } : {}),
+    };
     if (result.failureKind === "quota") {
       const paused = pauseForQuota(unsettled, job, result, operationId, retryFlags, args.canRecover);
       if (paused.state !== undefined) return paused.state;

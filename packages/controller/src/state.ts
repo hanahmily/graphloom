@@ -75,7 +75,7 @@ export interface PendingDispatch {
    * declared retryable. A retry dropped before it reached the runner (Stop or
    * a crash during its backoff) is queued again on resume, not lost.
    */
-  retry?: { attempt: number; limit: number; graphCorrectionTrial: boolean; supervisorWorkDispatch: boolean; reason?: string };
+  retry?: { attempt: number; limit: number; graphCorrectionTrial: boolean; supervisorWorkDispatch: boolean; reason?: string; timeoutChain?: string };
 }
 
 /** A supervisor-originated job that was allowed to change the host beyond the run's scope. */
@@ -248,12 +248,17 @@ export interface DurableRunState {
     supervisorWorkDispatch: boolean;
     /** Why the controller runs it again, when not a declared-retryable failure (a timed-out session continued). */
     reason?: string;
+    /** The attempt whose timeout-continuation allowance this run shares (see `timeoutContinuations`). */
+    timeoutChain?: string;
   };
   /** Per `${stageId}:${purpose}:${executorId}`, consecutive retryable failures retried so far. */
   executorRetryCounts?: Record<string, number>;
   /**
-   * Per `g${generation}:${stageId}`, agent sessions the controller continued
-   * after a timeout that changed the worktree (`JobSpec.timeoutContinuations`).
+   * Per attempt, agent sessions the controller continued after a timeout that
+   * changed the worktree (`JobSpec.timeoutContinuations`). Keyed by the
+   * operation id of the attempt's first dispatch, the one the graph or
+   * supervisor made; the continuations and controller retries chained from it
+   * carry that id (`timeoutChain`) and share its allowance.
    */
   timeoutContinuations?: Record<string, number>;
   /**
