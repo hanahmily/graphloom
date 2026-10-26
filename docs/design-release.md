@@ -20,8 +20,9 @@ a release asset.
 
 | Decision | Choice |
 |---|---|
-| License | Apache License 2.0, as for Apache SkyWalking BanyanDB; SPDX headers on hand-written source (§2.8) |
+| License | Apache License 2.0, as for Apache SkyWalking BanyanDB; copyright "Hongtao Gao and the GraphLoom contributors" in `NOTICE` and source headers; SPDX headers on hand-written source (§2.8) |
 | Channel | A GitHub Release of `hanahmily/graphloom`. No npm registry publishing |
+| Access | The repository stays private for now. Installers and plugin authors are granted read access per user and download with an authenticated `gh` (§4.2). Public URLs are a later option, revisited with visibility |
 | Builder | A maintainer's machine. GitHub Actions is intentionally not used; the local CI gate plus release checks (§6) is the release gate |
 | Artifact form | A pruned, built workspace tree with production `node_modules` and a pinned Node runtime, not a single-file bundle (§2.2, §2.7) |
 | SDK | `npm pack` of `@graphloom/sdk` attached to every release (§3.1) |
@@ -83,7 +84,7 @@ a release asset.
   install scripts (`protobufjs`, `@google/genai`). Its declared licenses are
   MIT, Apache-2.0, BSD-3-Clause, ISC, BlueOak-1.0.0, 0BSD, and Unlicense
   (from `package-lock.json`).
-- The repository is private.
+- The repository is private, and stays private for now (§4.2).
 
 ### The operational lesson this layout encodes
 
@@ -286,7 +287,8 @@ The release runs without a host Node. The host still needs the tools in §4.4.
   runs on the SDK tarball, which has no dependencies today.
 - **Source headers.** Hand-written source files carry a two-line SPDX header,
   such as `// SPDX-License-Identifier: Apache-2.0` followed by the copyright
-  line from `NOTICE`. This covers `.ts`, `.mjs`, `.js`, and `.sh` files,
+  line from `NOTICE`, `Copyright 2026 Hongtao Gao and the GraphLoom
+  contributors`. This covers `.ts`, `.mjs`, `.js`, and `.sh` files,
   including tests. Generated files (`dist/`, manifests, lockfiles), JSON,
   Markdown, and fixtures are exempt. `scripts/check-headers.mjs` enforces this
   and joins the local gate. Headers are added in their own phase (R0) before
@@ -358,13 +360,14 @@ published to the npm registry.
 **How authors depend on it.**
 
 ```sh
-# public repository
-npm i https://github.com/hanahmily/graphloom/releases/download/v0.1.0/graphloom-sdk-0.1.0.tgz
-# while the repository is private
-gh release download v0.1.0 -R hanahmily/graphloom -p 'graphloom-sdk-*.tgz' -p SHA256SUMS
+gh release download v0.1.0 -R hanahmily/graphloom -p 'graphloom-sdk-*.tgz' -p SHA256SUMS -p SHA256SUMS.sig
 sha256sum -c --ignore-missing SHA256SUMS
 npm i ./graphloom-sdk-0.1.0.tgz
 ```
+
+This needs read access to the repository and an authenticated `gh`. If the
+repository later becomes public, `npm i <release asset URL>` also works, and npm
+records the same integrity hash.
 
 npm records the tarball's integrity hash in the plugin's `package-lock.json`. The
 plugin's manifest digests that lockfile, so the SDK a plugin was built against is
@@ -400,10 +403,14 @@ install.sh [--version <v> | --from <tarball>] [--home <dir>] [--bin-dir <dir>]
            [--require-signature] [--no-switch]
 ```
 
-1. Download the release assets for `<v>`, defaulting to the latest release. Use
-   `gh release download` while the repository is private. Use `curl` on the
-   public release URL once the repository is public. `--from` takes a local
-   tarball and its `SHA256SUMS`.
+1. Download the release assets for `<v>`, defaulting to the latest release,
+   with `gh release download -R hanahmily/graphloom`. This uses the operator's
+   `gh` login. The repository is private, so each operator is granted read
+   access individually. If `gh` is missing, not logged in, or lacks access, the
+   installer stops and names which of these it is. `--from` takes a local
+   tarball and its `SHA256SUMS`, for an operator who got the assets another
+   way. A `curl` download from public release URLs is a later option, added
+   only if the repository becomes public.
 2. Verify the checksums and signature (§2.5).
 3. Extract to `versions/.<v>.tmp-XXXX` and check that `release.json` names `<v>`
    and this platform. Check that `node/bin/node --version` matches
@@ -418,8 +425,8 @@ install.sh [--version <v> | --from <tarball>] [--home <dir>] [--bin-dir <dir>]
 6. Run `graphloom doctor`. Its failures are reported but do not undo the
    install.
 
-The installer needs only POSIX sh, `tar`, `gzip`, `sha256sum`, and either `gh`
-or `curl`. It never writes operator configuration or credentials, and never
+The installer needs only POSIX sh, `tar`, `gzip`, `sha256sum`, and an
+authenticated `gh` (not needed with `--from`). It never writes operator configuration or credentials, and never
 needs root.
 
 ### 4.3 Shim commands (`graphloom self`)
@@ -710,7 +717,10 @@ scripts/release.sh publish <version>   # steps 9-10, after the maintainer confir
 10. **Publish.** Run
     `gh release create v<version> --notes-file <changelog section> <assets>`.
     Then download the published assets into a temporary directory and verify
-    `SHA256SUMS` and its signature again.
+    `SHA256SUMS` and its signature again. Finally, test the primary install
+    path: in a fresh temporary `HOME`, using the maintainer's `gh` login, run
+    the published `install.sh --version <version>` and then
+    `graphloom version`.
 
 A release's gate is local, like every merge gate today. Its record is the
 `gate` field in `release.json` and the script's log, which is attached to the
@@ -760,11 +770,6 @@ release PR.
 | R4 | `doctor`, `setup` | Tests with a stubbed `PATH` and `HOME` for each check result. The doctor reuses the confinement and capability probes and never asks for a host Node |
 | R5 | `release.sh prepare/publish`, signing, the external-plugin smoke test, and the first release `v0.1.0` | The full procedure in §6. The upgrade matrix starts with the second release, from its first fixture |
 
-Open questions:
-
-1. **Repository visibility.** While the repository is private, installers and
-   plugin authors need `gh` access to download assets. Making it public
-   enables plain `curl` installs and `npm i <release URL>`.
-2. **The copyright line** in `NOTICE` and in source headers, currently
-   "Hongtao Gao and the GraphLoom contributors." Should it name a different
-   holder?
+Open questions: none at present. Repository visibility is to be revisited
+later. Making the repository public would add `curl` installs and
+`npm i <release asset URL>` without changing the assets or checks.
