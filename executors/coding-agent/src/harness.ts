@@ -72,8 +72,77 @@ export interface CodingSessionOptions {
    * or throws; it must never start a fresh one in its place.
    */
   resume?: string;
+  /**
+   * With `sessionDir`: called with the `sessionRef` once the session is saved
+   * there and restorable, as early in a run as the harness can save it (and
+   * again as it changes), so a job killed before it returns still leaves a
+   * session a later job can continue. The run's own `sessionRef` still
+   * reports the final save.
+   */
+  onSessionSaved?(sessionRef: string): void;
   /** The job's wall clock (ms), when the host told it: stall watchdogs are kept inside it (`fitWatchdog`). */
   timeoutMs?: number;
+}
+
+/** How often, at most, a harness copies a growing session into its session directory during a run. */
+export const SESSION_SAVE_INTERVAL_MS = 2_000;
+
+/**
+ * Saves a session while its run is still going: `poke` on activity schedules
+ * `save` (the first at once, then at most every `intervalMs`, one at a time),
+ * and the first save that reports the session restorable calls `saved`.
+ * `close` stops scheduling and waits for a save in progress, so the run's
+ * final save never races an early one.
+ */
+export function sessionSaver(save: () => Promise<boolean>, saved: () => void, intervalMs = SESSION_SAVE_INTERVAL_MS) {
+  let chain: Promise<void> = Promise.resolve();
+  let timer: NodeJS.Timeout | undefined;
+  let last = Number.NEGATIVE_INFINITY;
+  let closed = false;
+  let reported = false;
+  const run = () => {
+    timer = undefined;
+    last = Date.now();
+    chain = chain
+      .then(save)
+      .then((ok) => {
+        if (ok && !closed && !reported) {
+          reported = true;
+          saved();
+        }
+      })
+      // An early save is best effort: the run's final save reports its own failure.
+      .catch(() => undefined);
+  };
+  return {
+    poke(): void {
+      if (closed || timer !== undefined) return;
+      timer = setTimeout(run, Math.max(0, last + intervalMs - Date.now()));
+    },
+    async close(): Promise<void> {
+      closed = true;
+      clearTimeout(timer);
+      timer = undefined;
+      await chain;
+    },
+  };
+}
+
+/**
+ * The complete JSONL records of a transcript another process may still be
+ * appending to: a last line cut off mid-write is dropped, so the copy stays
+ * restorable.
+ */
+export function completeJsonl(text: string): string {
+  const end = text.lastIndexOf("\n");
+  const tail = text.slice(end + 1);
+  if (tail.trim() === "") return text;
+  try {
+    JSON.parse(tail);
+    return text;
+  } catch {
+    return text.slice(0, end + 1);
+  }
 }
 
 /**

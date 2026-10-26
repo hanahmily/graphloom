@@ -14,6 +14,8 @@ export interface BuiltinExecutorRunnerOptions {
   fallback: Runner;
   /** Per-job timeout (ms) for packages whose binding sets none. Default 30_000. */
   timeoutMs?: number;
+  /** After a timeout or stop, how long an executor gets to stop before its process is killed. Default: the child runner's (10 s). */
+  stopGraceMs?: number;
   /** Override the runner's worker entry (tests). */
   workerModule?: string;
 }
@@ -77,6 +79,7 @@ export function createBuiltinExecutorRunner(options: BuiltinExecutorRunnerOption
       ...(pkg.credentials !== undefined ? { credentials: pkg.credentials } : {}),
       ...(timeoutMs !== undefined ? { timeoutMs } : {}),
       ...(pkg.maxTimeoutMs !== undefined ? { maxTimeoutMs: pkg.maxTimeoutMs } : {}),
+      ...(options.stopGraceMs !== undefined ? { stopGraceMs: options.stopGraceMs } : {}),
       ...(options.workerModule !== undefined ? { workerModule: options.workerModule } : {}),
     });
   }, options.fallback);

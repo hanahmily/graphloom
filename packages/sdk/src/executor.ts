@@ -87,6 +87,14 @@ export interface ExecutorContext {
   /** Present for agent jobs: where a resumable session may be kept. */
   session?: ExecutorSession;
   /**
+   * With `session`, when the host can take it: report a `sessionRef` as soon
+   * as the session is saved in `session.dir` and restorable, before the job
+   * returns. A job the host stops before it returns (its wall clock ran out
+   * and the stop grace passed) still names the newest session reported here;
+   * a `sessionRef` in the result takes precedence.
+   */
+  keepSession?(sessionRef: string): void;
+  /**
    * The wall clock (ms) the host gives this job: the job's own `timeoutMs`
    * clamped to the operator's ceiling, or the operator's default. An
    * executor with its own watchdogs keeps them shorter than this.
@@ -235,7 +243,11 @@ export interface ExecutorBinding {
 /** Longest wall clock a job may ask for (one day); also keeps it a valid timer delay. */
 export const MAX_JOB_TIMEOUT_MS = 24 * 60 * 60_000;
 
-/** Most times the controller continues one stage's timed-out agent session per generation, whatever a job asks. */
+/**
+ * Most times the controller continues the timed-out agent sessions of one
+ * attempt (a work dispatch and the continuations chained from it), whatever
+ * a job asks.
+ */
 export const MAX_TIMEOUT_CONTINUATIONS = 3;
 
 /** Built-in agent executor id — legacy `kind: "agent"` jobs pin to this. */

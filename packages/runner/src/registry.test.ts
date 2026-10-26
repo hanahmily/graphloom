@@ -388,7 +388,15 @@ describe("createChildExecutorRunner", () => {
     const groupRunner = (extra: { timeoutMs?: number; maxTimeoutMs?: number; stopGraceMs?: number }) =>
       createChildExecutorRunner({
         entryModule: groupFixture,
-        executorIds: ["acme.group/stop-on-abort", "acme.group/await-tool", "acme.group/ignore-abort", "acme.group/session-on-abort", "acme.group/report-timeout"],
+        executorIds: [
+          "acme.group/stop-on-abort",
+          "acme.group/await-tool",
+          "acme.group/ignore-abort",
+          "acme.group/session-on-abort",
+          "acme.group/session-early-hang",
+          "acme.group/late-success",
+          "acme.group/report-timeout",
+        ],
         fallback: createScriptedRunner({ jobs: [] }),
         workerModule,
         ...extra,
@@ -417,6 +425,38 @@ describe("createChildExecutorRunner", () => {
       });
       // Without a controller-owned session directory, no session is kept.
       expect((await groupRunner({ timeoutMs: 300 }).runJob(job("acme.group/session-on-abort", {}, "1"), ctx)).sessionRef).toBeUndefined();
+    });
+
+    it("keeps the newest session an executor reported while it ran, when it never answers within the stop grace", async () => {
+      const dir = await mkdtemp(path.join(os.tmpdir(), "gl-session-"));
+      const started = Date.now();
+      const result = await groupRunner({ timeoutMs: 300, stopGraceMs: 300 }).runJob(job("acme.group/session-early-hang", {}, "1"), { ...ctx, session: { dir } });
+      expect(result).toEqual({
+        status: "failed",
+        summary: "executor child timed out after 300ms",
+        failureKind: "timeout",
+        sessionRef: "early-2",
+        runId: ctx.runId,
+        operationId: ctx.operationId,
+        generation: ctx.generation,
+      });
+      expect(Date.now() - started).toBeLessThan(5_000);
+      // A job without a controller-owned session directory keeps none, whatever the executor reports.
+      const bare = await groupRunner({ timeoutMs: 300, stopGraceMs: 300 }).runJob(job("acme.group/session-early-hang", {}, "1"), ctx);
+      expect(bare).toMatchObject({ failureKind: "timeout" });
+      expect(bare.sessionRef).toBeUndefined();
+    });
+
+    it("never records a success an executor claims after its wall clock ran out", async () => {
+      const dir = await mkdtemp(path.join(os.tmpdir(), "gl-session-"));
+      const result = await groupRunner({ timeoutMs: 300 }).runJob(job("acme.group/late-success", {}, "1"), { ...ctx, session: { dir } });
+      expect(result).toMatchObject({
+        status: "failed",
+        failureKind: "timeout",
+        sessionRef: "early-1",
+        summary: "executor child timed out after 300ms; the executor finished only after its wall clock ran out, which is not accepted: all done",
+      });
+      expect(result.evidence).toBeUndefined();
     });
 
     it("gives a job the wall clock it asks for, clamped to the operator's ceiling, and tells the executor", async () => {

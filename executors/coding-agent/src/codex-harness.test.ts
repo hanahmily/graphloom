@@ -1,13 +1,13 @@
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ExecutorContext } from "@graphloom/sdk";
 import { createCodexHarness, type CodexHarnessOptions } from "./codex.js";
-import { codexHarnessModule, codingAgentBinding, createCodingAgentExecutor } from "./index.js";
+import { CONTINUATION_NOTICE, codexHarnessModule, codingAgentBinding, createCodingAgentExecutor } from "./index.js";
 
 const fakeCodex = fileURLToPath(new URL("../test/fake-codex.mjs", import.meta.url));
 
@@ -241,6 +241,128 @@ describe("Codex harness", () => {
     // The default watchdog is fitted inside each job's wall clock; an explicit one must fit the default job.
     expect(() => codingAgentBinding({ harness: codexHarnessModule, timeoutMs: 1_000 })).not.toThrow();
     expect(() => codingAgentBinding({ harness: codexHarnessModule, timeoutMs: 1_000, codex: { responseTimeoutMs: 1_000 } })).toThrow("codex.responseTimeoutMs");
+  });
+});
+
+describe("Codex sessions", () => {
+  const THREAD = "01a1765e-0df0-7d32-a8d5-be19c4addf58";
+  const started = { event: { type: "thread.started", thread_id: THREAD } };
+  const answer = (text: string) => [
+    { event: { type: "turn.started" } },
+    { event: { type: "item.completed", item: { id: "item_9", type: "agent_message", text } } },
+    { last: text },
+    { event: { type: "turn.completed", usage: {} } },
+  ];
+  async function sessionSetup(overrides: CodexHarnessOptions = {}) {
+    const home = await mkdtemp(path.join(os.tmpdir(), "gl-codex-home-"));
+    temps.push(home);
+    const h = await setup({ codexHome: home, ...overrides });
+    return { ...h, home, sessions: path.join(home, "..", `${path.basename(home)}-sessions`) };
+  }
+  const rollouts = async (home: string) => {
+    const dir = path.join(home, "sessions");
+    if (!existsSync(dir)) return [];
+    return (await readdir(dir, { recursive: true })).filter((f) => f.endsWith(".jsonl"));
+  };
+
+  it("keeps the thread Codex names, saves its rollout, and resumes it with `codex exec resume`", async () => {
+    const h = await sessionSetup({ model: "gpt-test" });
+    temps.push(h.sessions);
+    await h.script([started, ...answer("first turn done")]);
+    const first = await h.executor.execute({ assignment: "Review the first draft" }, h.ctx({ session: { dir: h.sessions } }));
+    const ref = `codex-${THREAD}`;
+    expect(first).toMatchObject({ status: "ok", summary: "first turn done", sessionRef: ref });
+    const [run] = await h.invocations();
+    // Codex persists the thread only when the controller can continue it.
+    expect(run!.argv).not.toContain("--ephemeral");
+    expect((await readdir(h.sessions)).sort()).toEqual([`${ref}.json`, `${ref}.jsonl`]);
+    const meta = JSON.parse(await readFile(path.join(h.sessions, `${ref}.json`), "utf8")) as { rollout: string; model: string };
+    expect(meta).toEqual({ rollout: expect.stringMatching(new RegExp(`^sessions/\\d{4}/\\d{2}/\\d{2}/rollout-.*-${THREAD}\\.jsonl$`)), model: "gpt-test" });
+
+    // The saved copy is authoritative: the thread resumes even after Codex's own store lost it.
+    await rm(path.join(h.home, "sessions"), { recursive: true, force: true });
+    await h.script([started, ...answer("second turn done")]);
+    const second = await h.executor.execute({ assignment: "Review it again" }, h.ctx({ session: { dir: h.sessions, resume: ref } }));
+    expect(second).toMatchObject({ status: "ok", summary: "second turn done", sessionRef: ref });
+    expect(payload(second)).toMatchObject({ continued: true, sessionRef: ref });
+    const resumed = (await h.invocations()).at(-1)! as Invocation & { history: string[] };
+    expect(resumed.argv).toEqual([
+      "exec", "--sandbox", "read-only", "--cd", h.worktree,
+      "resume", "--json", "--skip-git-repo-check", "--output-last-message", expect.any(String), "--model", "gpt-test",
+      THREAD, "-",
+    ]);
+    expect(resumed.history).toEqual([expect.stringContaining("Review the first draft")]);
+    expect(resumed.prompt.startsWith(CONTINUATION_NOTICE)).toBe(true);
+    expect(await rollouts(h.home)).toEqual([meta.rollout.slice("sessions/".length)]);
+  });
+
+  it("saves and reports the thread while the turn still runs, so a job killed before it returns leaves a resumable one", async () => {
+    const h = await sessionSetup({ responseTimeoutMs: 0 });
+    temps.push(h.sessions);
+    const controller = new AbortController();
+    await h.script([started, { event: { type: "turn.started" } }, command("item_1", "started"), { hang: true }]);
+    const kept: string[] = [];
+    const running = h.executor.execute(
+      { assignment: "Review the first draft" },
+      h.ctx({ signal: controller.signal, session: { dir: h.sessions }, keepSession: (ref) => kept.push(ref) }),
+    );
+    await expect.poll(() => kept.length, { timeout: 5_000 }).toBe(1);
+    const ref = `codex-${THREAD}`;
+    expect(kept).toEqual([ref]);
+    // What a host that kills the job now would be left with.
+    const killed = `${h.sessions}-killed`;
+    temps.push(killed);
+    await mkdir(killed);
+    for (const name of await readdir(h.sessions)) await writeFile(path.join(killed, name), await readFile(path.join(h.sessions, name)));
+    expect((await readdir(killed)).sort()).toEqual([`${ref}.json`, `${ref}.jsonl`]);
+    expect(await readFile(path.join(killed, `${ref}.jsonl`), "utf8")).toContain("command_execution");
+    controller.abort();
+    expect(await running).toMatchObject({ status: "failed", summary: "agent session aborted" });
+
+    await rm(path.join(h.home, "sessions"), { recursive: true, force: true });
+    await h.script([started, ...answer("resumed after the kill")]);
+    const resumed = await h.executor.execute({ assignment: "Finish the review" }, h.ctx({ session: { dir: killed, resume: ref } }));
+    expect(resumed).toMatchObject({ status: "ok", summary: "resumed after the kill", sessionRef: ref });
+    expect(((await h.invocations()).at(-1)! as Invocation & { history: string[] }).history).toEqual([expect.stringContaining("Review the first draft")]);
+  });
+
+  it("refuses to resume a missing, corrupt, or differently configured thread instead of starting fresh", async () => {
+    const h = await sessionSetup({ model: "gpt-test" });
+    temps.push(h.sessions);
+    await h.script([started, ...answer("first turn done")]);
+    const first = await h.executor.execute({ assignment: "Review" }, h.ctx({ session: { dir: h.sessions } }));
+    const ref = (first as { sessionRef: string }).sessionRef;
+    const restore = (resume: string, executor = h.executor) => executor.execute({ assignment: "again" }, h.ctx({ session: { dir: h.sessions, resume } }));
+    const failure = (resume: string, reason: string) => ({ status: "failed", summary: `agent session ${resume} could not be restored: ${reason}` });
+    const runs = (await h.invocations()).length;
+
+    const other = createCodingAgentExecutor(createCodexHarness({ command: path.join(h.worktree, "..", "codex"), codexHome: h.home, model: "gpt-other" }));
+    expect(await restore(ref, other)).toEqual(failure(ref, `saved session ${ref} ran on model gpt-test; this job asks for model gpt-other`));
+    expect(await restore("codex-not-a-thread")).toEqual(failure("codex-not-a-thread", "malformed session ref codex-not-a-thread"));
+    expect(await restore(`codex-${"0".repeat(8)}-0000-0000-0000-${"0".repeat(12)}`)).toEqual(
+      failure(`codex-${"0".repeat(8)}-0000-0000-0000-${"0".repeat(12)}`, `no saved session for codex-${"0".repeat(8)}-0000-0000-0000-${"0".repeat(12)}`),
+    );
+    await writeFile(path.join(h.sessions, `${ref}.json`), JSON.stringify({ rollout: "../../escape.jsonl", model: "gpt-test" }), "utf8");
+    expect(await restore(ref)).toEqual(failure(ref, `saved session ${ref} is corrupt`));
+    expect((await h.invocations()).length).toBe(runs);
+  });
+
+  it("keeps no session without a session directory, and none when Codex never names its thread", async () => {
+    const bare = await sessionSetup();
+    await bare.script([started, ...answer("done")]);
+    const result = await bare.executor.execute({ assignment: "Review" }, bare.ctx());
+    expect(result).not.toHaveProperty("sessionRef");
+    expect((await bare.invocations())[0]!.argv).toContain("--ephemeral");
+    expect(await rollouts(bare.home)).toEqual([]);
+
+    const unnamed = await sessionSetup();
+    temps.push(unnamed.sessions);
+    await unnamed.script(answer("done"));
+    const kept: string[] = [];
+    const quiet = await unnamed.executor.execute({ assignment: "Review" }, unnamed.ctx({ session: { dir: unnamed.sessions }, keepSession: (ref) => kept.push(ref) }));
+    expect(quiet).toMatchObject({ status: "ok" });
+    expect(quiet).not.toHaveProperty("sessionRef");
+    expect(kept).toEqual([]);
   });
 });
 

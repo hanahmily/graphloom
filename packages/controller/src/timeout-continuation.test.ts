@@ -78,12 +78,13 @@ const validators: Record<string, Validator> = {
 /**
  * One turn of the stand-in agent, by the order the runner sees them:
  * `partial` writes half the greeting and runs out of time, `idle` runs out of
- * time without touching the worktree, `lost` writes but keeps no session, and
- * `finish` writes the greeting and succeeds.
+ * time without touching the worktree, `lost` writes but keeps no session,
+ * `retryable` fails in a way the executor declares retryable, and `finish`
+ * writes the greeting and succeeds.
  */
-type Turn = "partial" | "idle" | "lost" | "finish" | "stray";
+type Turn = "partial" | "idle" | "lost" | "finish" | "stray" | "retryable";
 
-function agentRunner(turns: Turn[]) {
+function agentRunner(turns: Turn[], options: { retryAfterMs?: number; tag?: string } = {}) {
   const runs: Array<{ operationId: string; session: ExecutorSession | undefined }> = [];
   const agent = defineExecutor<unknown, unknown>({
     id: AGENT,
@@ -94,7 +95,10 @@ function agentRunner(turns: Turn[]) {
       const turn = turns[runs.length - 1] ?? "finish";
       const sessionRef = turn === "lost" || ctx.session === undefined ? undefined : (ctx.session.resume ?? `s-${runs.length}`);
       if (turn === "stray") await writeFile(path.join(ctx.worktreePath, "OTHER.txt"), "x", "utf8");
-      else if (turn !== "idle") await writeFile(path.join(ctx.worktreePath, GREETING_PATH), turn === "finish" ? GREETING : `${"x".repeat(runs.length)}Hello`, "utf8");
+      else if (turn !== "idle" && turn !== "retryable") await writeFile(path.join(ctx.worktreePath, GREETING_PATH), turn === "finish" ? GREETING : `${options.tag ?? ""}${"x".repeat(runs.length)}Hello`, "utf8");
+      if (turn === "retryable") {
+        return { status: "failed", summary: "upstream 503", retryLimit: 2, retryAfterMs: 0, ...(sessionRef !== undefined ? { sessionRef } : {}) };
+      }
       // What the runner reports when the job's wall clock runs out and the executor saved its session while stopping.
       return turn === "finish"
         ? { status: "ok", summary: "agent done", ...(sessionRef !== undefined ? { sessionRef } : {}) }
@@ -103,6 +107,7 @@ function agentRunner(turns: Turn[]) {
             summary: "executor child timed out after 3600000ms; while stopping, the executor reported: agent session aborted",
             failureKind: "timeout",
             ...(sessionRef !== undefined ? { sessionRef } : {}),
+            ...(options.retryAfterMs !== undefined ? { retryAfterMs: options.retryAfterMs } : {}),
           };
     },
   });
@@ -186,7 +191,8 @@ describe("continuing an agent session that timed out after making progress", () 
       [first!.operationId, "failed", undefined, true],
       [continued!.operationId, "ok", first!.operationId, undefined],
     ]);
-    expect(state.timeoutContinuations).toEqual({ "g1:write": 1 });
+    // Counted against the attempt: the dispatch the graph made.
+    expect(state.timeoutContinuations).toEqual({ [first!.operationId]: 1 });
     expect(state.remedies).toEqual([
       expect.objectContaining({
         condition: `executor ${AGENT} timed out after changing the worktree`,
@@ -220,7 +226,7 @@ describe("continuing an agent session that timed out after making progress", () 
     });
   });
 
-  it("opens a recovery episode once the stage used its continuations in this generation", async () => {
+  it("opens a recovery episode once the attempt used its continuations", async () => {
     const env = await makeEnv();
     const { runner, runs } = agentRunner(["partial", "partial", "finish"]);
     const { supervisor, inputs } = recordingSupervisor();
@@ -237,8 +243,10 @@ describe("continuing an agent session that timed out after making progress", () 
     expect(runs).toHaveLength(2);
     expect(runs[1]!.session).toMatchObject({ resume: "s-1", note: TIMEOUT_CONTINUATION_NOTE });
     expect(inputs).toHaveLength(1);
-    expect(inputs[0]!.trigger.message).toContain("its session was not continued: stage write already continued 1 timed-out session in generation 1, its limit");
-    expect((await loadRunState(report.stateDir)).timeoutContinuations).toEqual({ "g1:write": 1 });
+    expect(inputs[0]!.trigger.message).toContain(
+      `its session was not continued: the attempt dispatched as ${runs[0]!.operationId} already continued 1 timed-out session, its limit`,
+    );
+    expect((await loadRunState(report.stateDir)).timeoutContinuations).toEqual({ [runs[0]!.operationId]: 1 });
   });
 
   it("continues a second time, from the newest session, when the job allows two", async () => {
@@ -256,7 +264,101 @@ describe("continuing an agent session that timed out after making progress", () 
     expect(runs).toHaveLength(3);
     const state = await loadRunState(report.stateDir);
     expect(state.agentSessions?.map((s) => s.continuedFrom)).toEqual([undefined, runs[0]!.operationId, runs[1]!.operationId]);
-    expect(state.timeoutContinuations).toEqual({ "g1:write": 2 });
+    expect(state.timeoutContinuations).toEqual({ [runs[0]!.operationId]: 2 });
+  });
+
+  it("gives each attempt of a stage its own allowance, so a later attempt in the same generation is continued too", async () => {
+    const env = await makeEnv();
+    // Attempt 1 times out and is continued to completion; the graph then
+    // dispatches the stage again, and attempt 2 times out and is continued too.
+    const { runner, runs } = agentRunner(["partial", "finish", "partial", "finish"]);
+    const { supervisor, inputs } = recordingSupervisor();
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: graph([dispatch(agentJob(), "implement"), dispatch(agentJob(), "implement again"), ...finish]),
+      validators,
+      runner,
+      supervisor,
+      stateRoot: env.stateRoot,
+      runId: "attempts1",
+    });
+    expect(report.status, report.blocker).toBe("succeeded");
+    expect(inputs).toEqual([]);
+    expect(runs).toHaveLength(4);
+    const state = await loadRunState(report.stateDir);
+    expect(state.generation).toBe(1);
+    expect(state.agentSessions?.map((s) => s.continuedFrom)).toEqual([undefined, runs[0]!.operationId, undefined, runs[2]!.operationId]);
+    expect(state.timeoutContinuations).toEqual({ [runs[0]!.operationId]: 1, [runs[2]!.operationId]: 1 });
+    expect(state.remedies?.map((r) => r.remedy)).toEqual([
+      "continuing its agent session (1 of 1) instead of opening a recovery episode",
+      "continuing its agent session (1 of 1) instead of opening a recovery episode",
+    ]);
+  });
+
+  it("charges a continuation chained after a declared-retryable failure to the same attempt", async () => {
+    const env = await makeEnv();
+    // The continuation fails transiently and is retried; the retry times out again: still the first attempt's allowance.
+    const { runner, runs } = agentRunner(["partial", "retryable", "partial", "finish"]);
+    const { supervisor, inputs } = recordingSupervisor();
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: graph([dispatch(agentJob(), "implement"), ...finish]),
+      validators,
+      runner,
+      supervisor,
+      stateRoot: env.stateRoot,
+      runId: "chain1",
+    });
+    expect(report.status).toBe("stopped");
+    expect(runs).toHaveLength(3);
+    expect(inputs).toHaveLength(1);
+    expect(inputs[0]!.trigger.message).toContain(`the attempt dispatched as ${runs[0]!.operationId} already continued 1 timed-out session, its limit`);
+    expect((await loadRunState(report.stateDir)).timeoutContinuations).toEqual({ [runs[0]!.operationId]: 1 });
+  });
+
+  it("keeps an attempt's count across a stop and resume, so a resume cannot reset it", async () => {
+    const env = await makeEnv();
+    const runId = "resume-cap1";
+    const stateDir = path.join(env.stateRoot, runId);
+    const controller = createController();
+    // The first try asks for a wait before it runs again, so the run can be stopped with its continuation queued.
+    const first = agentRunner(["partial"], { retryAfterMs: 3_000 });
+    const running = controller.run({
+      taskPath: env.taskPath,
+      plugin: graph([dispatch(agentJob(), "implement"), ...finish]),
+      validators,
+      runner: first.runner,
+      supervisor: recordingSupervisor().supervisor,
+      stateRoot: env.stateRoot,
+      runId,
+    });
+    await expect
+      .poll(async () => (await loadRunState(stateDir).catch(() => undefined))?.pendingDispatch, { timeout: 10_000, interval: 50 })
+      .toMatchObject({ status: "waiting", retry: { timeoutChain: expect.any(String) } });
+    await controller.stop(stateDir);
+    expect((await running).status).toBe("stopped");
+    const paused = await loadRunState(stateDir);
+    const root = first.runs[0]!.operationId;
+    expect(first.runs).toHaveLength(1);
+    expect(paused.timeoutContinuations).toEqual({ [root]: 1 });
+    expect(paused.pendingDispatch).toMatchObject({ status: "waiting", job: { continueFrom: root }, retry: { timeoutChain: root } });
+
+    // On resume the queued continuation runs, times out again, and is not continued a second time.
+    const second = agentRunner(["partial"], { tag: "resumed:" });
+    const { supervisor, inputs } = recordingSupervisor();
+    const resumed = await controller.resume({
+      runRef: stateDir,
+      plugin: graph([...finish]),
+      validators,
+      runner: second.runner,
+      supervisor,
+    });
+    expect(resumed.status).toBe("stopped");
+    expect(second.runs).toHaveLength(1);
+    expect(second.runs[0]!.session).toMatchObject({ resume: "s-1", note: TIMEOUT_CONTINUATION_NOTE });
+    expect(inputs).toHaveLength(1);
+    expect(inputs[0]!.trigger.message).toContain(`the attempt dispatched as ${root} already continued 1 timed-out session, its limit`);
+    expect((await loadRunState(stateDir)).timeoutContinuations).toEqual({ [root]: 1 });
   });
 
   it("goes to recovery as before when the job did not ask for continuations or kept no session", async () => {

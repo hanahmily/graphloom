@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
+import { lstat, mkdir, mkdtemp, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { createInterface } from "node:readline";
@@ -19,7 +20,9 @@ import {
   JOB_CONTRACT_ENV,
   JOB_IDENTITY_ENV,
   JOB_REFERENCES_ENV,
+  completeJsonl,
   fitWatchdog,
+  sessionSaver,
   type CodingHarness,
   type CodingRunRequest,
   type CodingRunResult,
@@ -28,6 +31,7 @@ import {
   type NativeToolUse,
 } from "./harness.js";
 import { drainOnExit, signalGroup } from "./process-group.js";
+import { readScanned } from "./session-files.js";
 
 export interface CodexHarnessOptions {
   /** Codex executable. Default: `GRAPHLOOM_CODEX_BIN`, then `codex` on PATH. */
@@ -71,21 +75,44 @@ export const CODEX_ADAPTER_FLAGS: readonly string[] = [
 
 interface CodexEvent {
   type?: string;
+  thread_id?: unknown;
   item?: { id?: unknown; type?: unknown };
   usage?: Record<string, unknown>;
   error?: { message?: unknown };
   message?: unknown;
 }
 
+const THREAD_ID = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+const SESSION_REF = /^codex-([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$/;
+/** Where Codex keeps a thread's rollout under its home: `sessions/YYYY/MM/DD/rollout-<time>-<thread id>.jsonl`. */
+const ROLLOUT_PATH = /^sessions\/\d{4}\/\d{2}\/\d{2}\/rollout-[0-9A-Za-z.:_-]+\.jsonl$/;
+
+/** What a saved Codex session ran under; a resume under another model would pass its turns off as continuity. */
+interface CodexSettings {
+  model: string | null;
+}
+
+/** The Codex thread a session continues, once Codex has named it. */
+interface CodexThread {
+  threadId?: string;
+  /** Its rollout file, relative to the Codex home, once found. */
+  rollout?: string;
+  /** True once Codex has recorded the thread, so the next run resumes it. */
+  started: boolean;
+}
+
 /**
  * A `CodingHarness` that runs the user's Codex CLI (`codex exec`) headless in
  * the worktree, in Codex's read-only sandbox. It serves read-only jobs without
- * graph tools and does not save sessions: Codex cannot confine writes to a
- * job's write scope, and its graph tools would bypass the controller.
+ * graph tools: Codex cannot confine writes to a job's write scope, and its
+ * graph tools would bypass the controller. With a session directory, Codex
+ * persists the thread (no `--ephemeral`); the harness copies its rollout file
+ * there while the turn runs and restores it before `codex exec resume`.
  */
 export function createCodexHarness(harnessOptions: CodexHarnessOptions = {}): CodingHarness {
   return {
     name: "codex",
+    resumable: true,
     async createSession(options) {
       if (!options.readOnly) throw new Error("the Codex harness runs read-only jobs only");
       if (options.tools.length > 0) throw new Error("the Codex harness cannot serve graph tools");
@@ -101,12 +128,174 @@ export function createCodexHarness(harnessOptions: CodexHarnessOptions = {}): Co
       const env = minimalEnv(process.env, harnessOptions.passEnv ?? envList(process.env[CODEX_PASS_ENV_ENV]));
       if (codexHome !== undefined) env.CODEX_HOME = codexHome;
       const responseTimeoutMs = fitWatchdog(harnessOptions.responseTimeoutMs ?? envMs(CODEX_RESPONSE_TIMEOUT_ENV, CODEX_DEFAULT_RESPONSE_TIMEOUT_MS), options.timeoutMs);
+      // Codex's own default home, where it keeps rollouts when none is set.
+      const home = codexHome ?? path.join(os.homedir(), ".codex");
+      const settings: CodexSettings = { model: model ?? null };
+      const thread = await openThread(options, home, settings);
       return {
-        run: (request) =>
-          runCodex({ command, model, reasoningEffort, env, responseTimeoutMs, killGraceMs: harnessOptions.killGraceMs ?? 5_000, request, options }),
+        async run(request) {
+          const sessionDir = options.sessionDir;
+          const spawnedAt = new Date();
+          // Codex appends to the rollout as the turn goes; a copy kept in the
+          // session directory during the run leaves a resumable session even
+          // if the job is killed before the final save below.
+          let copied = false;
+          const early =
+            sessionDir !== undefined
+              ? sessionSaver(
+                  async () => (copied = (await saveRollout(home, sessionDir, thread, settings, spawnedAt, false)) || copied),
+                  () => options.onSessionSaved?.(sessionRef(thread.threadId!)),
+                )
+              : undefined;
+          let result: CodingRunResult;
+          try {
+            result = await runCodex({
+              command,
+              model,
+              reasoningEffort,
+              env,
+              responseTimeoutMs,
+              killGraceMs: harnessOptions.killGraceMs ?? 5_000,
+              request,
+              options,
+              thread,
+              ...(early !== undefined ? { onActivity: () => early.poke() } : {}),
+            });
+          } finally {
+            await early?.close();
+          }
+          if (sessionDir === undefined) return result;
+          if (!(await saveRollout(home, sessionDir, thread, settings, spawnedAt, true))) {
+            // What it copied during the run is no longer what Codex holds, so no unreported session is left behind.
+            if (copied && options.resume === undefined && thread.threadId !== undefined) {
+              const ref = sessionRef(thread.threadId);
+              await rm(path.join(sessionDir, `${ref}.jsonl`), { force: true });
+              await rm(path.join(sessionDir, `${ref}.json`), { force: true });
+            }
+            return result;
+          }
+          // A later run of this session (a transient retry) resumes the thread instead of starting another.
+          thread.started = true;
+          return { ...result, sessionRef: sessionRef(thread.threadId!) };
+        },
       };
     },
   };
+}
+
+function sessionRef(threadId: string): string {
+  return `codex-${threadId}`;
+}
+
+/** Restore the thread `resume` names into the Codex home, or fail; never start a fresh one in its place. */
+async function openThread(options: CodingSessionOptions, home: string, settings: CodexSettings): Promise<CodexThread> {
+  if (options.resume === undefined) return { started: false };
+  const ref = options.resume;
+  const threadId = SESSION_REF.exec(ref)?.[1];
+  if (threadId === undefined) throw new Error(`malformed session ref ${ref}`);
+  if (options.sessionDir === undefined) throw new Error("no session directory to restore from");
+  const [meta, rollout] = await Promise.all([
+    readFile(path.join(options.sessionDir, `${ref}.json`), "utf8").catch(() => undefined),
+    readFile(path.join(options.sessionDir, `${ref}.jsonl`), "utf8").catch(() => undefined),
+  ]);
+  if (meta === undefined || rollout === undefined) throw new Error(`no saved session for ${ref}`);
+  if (rollout.trim() === "") throw new Error(`saved session ${ref} is empty`);
+  let recorded: { rollout?: unknown; model?: unknown };
+  try {
+    recorded = JSON.parse(meta) as typeof recorded;
+    for (const line of rollout.split("\n")) if (line.trim() !== "") JSON.parse(line);
+  } catch {
+    throw new Error(`saved session ${ref} is corrupt`);
+  }
+  const { rollout: file, model } = recorded ?? {};
+  if (typeof file !== "string" || !ROLLOUT_PATH.test(file) || !file.endsWith(`-${threadId}.jsonl`) || (model !== null && typeof model !== "string")) {
+    throw new Error(`saved session ${ref} is corrupt`);
+  }
+  if (model !== settings.model) {
+    const describe = (m: string | null) => (m === null ? "Codex's default model" : `model ${m}`);
+    throw new Error(`saved session ${ref} ran on ${describe(model)}; this job asks for ${describe(settings.model)}`);
+  }
+  // The saved copy is authoritative: Codex resumes the thread from this file.
+  await writeAtomic(path.join(home, file), rollout);
+  return { threadId, rollout: file, started: true };
+}
+
+/**
+ * Copy the thread's rollout into the controller's session directory; false
+ * until Codex has named the thread and written its rollout. Codex may still
+ * be appending (an early save during the run), so only complete records are
+ * copied. `final` also searches the whole session store for the rollout.
+ */
+async function saveRollout(
+  home: string,
+  sessionDir: string,
+  thread: CodexThread,
+  settings: CodexSettings,
+  spawnedAt: Date,
+  final: boolean,
+): Promise<boolean> {
+  if (thread.threadId === undefined) return false;
+  if (thread.rollout === undefined) {
+    const found = await findRollout(home, thread.threadId, [spawnedAt, new Date()], final);
+    if (found === undefined) return false;
+    thread.rollout = found;
+  }
+  const file = path.join(home, thread.rollout);
+  // Only a regular file Codex wrote, never a link out of its store.
+  const info = await lstat(file, { bigint: true }).catch(() => undefined);
+  if (!info?.isFile()) return false;
+  const rollout = completeJsonl((await readScanned(file, info)).toString("utf8"));
+  if (rollout.trim() === "") return false;
+  const ref = sessionRef(thread.threadId);
+  // The settings first: a rollout in the session directory is restorable once it lands.
+  await writeAtomic(path.join(sessionDir, `${ref}.json`), JSON.stringify({ rollout: thread.rollout, ...settings }));
+  await writeAtomic(path.join(sessionDir, `${ref}.jsonl`), rollout);
+  return true;
+}
+
+/**
+ * The rollout Codex keeps for `threadId`, relative to its home: looked up in
+ * the day directories of `times` (local and UTC), and, with `everywhere`, in
+ * every day directory of the store.
+ */
+async function findRollout(home: string, threadId: string, times: Date[], everywhere: boolean): Promise<string | undefined> {
+  const suffix = `-${threadId}.jsonl`;
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const days = new Set<string>();
+  for (const t of times) {
+    days.add(`${t.getFullYear()}/${pad(t.getMonth() + 1)}/${pad(t.getDate())}`);
+    days.add(`${t.getUTCFullYear()}/${pad(t.getUTCMonth() + 1)}/${pad(t.getUTCDate())}`);
+  }
+  const inDay = async (day: string): Promise<string | undefined> => {
+    const names = await readdir(path.join(home, "sessions", day)).catch(() => [] as string[]);
+    const name = names.find((n) => n.startsWith("rollout-") && n.endsWith(suffix));
+    const rel = name !== undefined ? `sessions/${day}/${name}` : undefined;
+    return rel !== undefined && ROLLOUT_PATH.test(rel) ? rel : undefined;
+  };
+  for (const day of days) {
+    const found = await inDay(day);
+    if (found !== undefined) return found;
+  }
+  if (!everywhere) return undefined;
+  const sessions = path.join(home, "sessions");
+  for (const year of await readdir(sessions).catch(() => [] as string[])) {
+    for (const month of await readdir(path.join(sessions, year)).catch(() => [] as string[])) {
+      for (const day of await readdir(path.join(sessions, year, month)).catch(() => [] as string[])) {
+        const key = `${year}/${month}/${day}`;
+        if (days.has(key)) continue;
+        const found = await inDay(key);
+        if (found !== undefined) return found;
+      }
+    }
+  }
+  return undefined;
+}
+
+async function writeAtomic(target: string, contents: string): Promise<void> {
+  await mkdir(path.dirname(target), { recursive: true });
+  const tmp = `${target}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
+  await writeFile(tmp, contents, { encoding: "utf8", mode: 0o600 });
+  await rename(tmp, target);
 }
 
 function envMs(name: string, fallback: number): number {
@@ -126,6 +315,9 @@ interface RunArgs {
   killGraceMs: number;
   request: CodingRunRequest;
   options: CodingSessionOptions;
+  thread: CodexThread;
+  /** Called on each event Codex streams, while its rollout may be growing. */
+  onActivity?: () => void;
 }
 
 async function runCodex(args: RunArgs): Promise<CodingRunResult> {
@@ -138,7 +330,13 @@ async function runCodex(args: RunArgs): Promise<CodingRunResult> {
   const scratch = await mkdtemp(path.join(os.tmpdir(), "gl-codex-"));
   try {
     const last = path.join(scratch, "last-message.txt");
-    const cli = ["exec", "--json", "--ephemeral", "--skip-git-repo-check", "--sandbox", "read-only", "--cd", options.cwd, "--output-last-message", last];
+    const { thread } = args;
+    // Without a session directory nothing is continued, so Codex persists nothing.
+    // `resume` takes the sandbox and working directory from `exec` itself, and the rest after it.
+    const cli =
+      thread.started && thread.threadId !== undefined
+        ? ["exec", "--sandbox", "read-only", "--cd", options.cwd, "resume", "--json", "--skip-git-repo-check", "--output-last-message", last]
+        : ["exec", "--json", ...(options.sessionDir === undefined ? ["--ephemeral"] : []), "--skip-git-repo-check", "--sandbox", "read-only", "--cd", options.cwd, "--output-last-message", last];
     if (args.model !== undefined) cli.push("--model", args.model);
     if (args.reasoningEffort !== undefined) cli.push("--config", `model_reasoning_effort="${args.reasoningEffort}"`);
     // Codex has no in-turn retry in this harness either, so the reference id
@@ -154,6 +352,7 @@ async function runCodex(args: RunArgs): Promise<CodingRunResult> {
       await writeFile(file, JSON.stringify(schema), { mode: 0o600 });
       cli.push("--output-schema", file);
     }
+    if (thread.started && thread.threadId !== undefined) cli.push(thread.threadId);
     cli.push("-");
     const wantsResult = request.resultContract !== undefined || request.resultSchema !== undefined;
     const prompt = [request.assignment, ...scopeNotes(options), ...(wantsResult ? [RESULT_NOTE] : [])].join("\n\n");
@@ -241,6 +440,18 @@ async function runCodex(args: RunArgs): Promise<CodingRunResult> {
           unparsed = true;
           continue;
         }
+        if (event.type === "thread.started" && typeof event.thread_id === "string" && THREAD_ID.test(event.thread_id)) {
+          // Codex names the thread first: from here its rollout can be saved and resumed.
+          if (!thread.started) {
+            // A fresh run names a new thread, whatever an earlier unsaved run of this session named.
+            if (thread.threadId !== event.thread_id) delete thread.rollout;
+            thread.threadId = event.thread_id;
+          } else if (thread.threadId?.toLowerCase() !== event.thread_id.toLowerCase()) {
+            failure = `Codex continued thread ${event.thread_id}, not the saved thread ${thread.threadId}`;
+            terminate();
+          }
+        }
+        args.onActivity?.();
         const item = event.item;
         if (item !== undefined && item !== null && (event.type === "item.started" || event.type === "item.completed") && !toolIds.has(item.id)) {
           if (item.type !== "agent_message" && item.type !== "reasoning") {

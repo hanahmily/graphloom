@@ -21,7 +21,9 @@ import {
   JOB_CONTRACT_ENV,
   JOB_IDENTITY_ENV,
   JOB_REFERENCES_ENV,
+  completeJsonl,
   fitWatchdog,
+  sessionSaver,
   type CodingHarness,
   type CodingRunRequest,
   type CodingRunResult,
@@ -176,19 +178,37 @@ export function createClaudeCodeHarness(harnessOptions: ClaudeCodeHarnessOptions
 
       return {
         async run(request) {
-          const result = await runClaude({
-            command,
-            model,
-            systemPrompt,
-            killGraceMs: harnessOptions.killGraceMs ?? 5_000,
-            interruptGraceMs: harnessOptions.interruptGraceMs ?? 1_000,
-            startupTimeoutMs,
-            responseTimeoutMs,
-            env: childEnv(passEnv, configDir, apiKey),
-            request,
-            options,
-            saved,
-          });
+          // Claude Code appends to its transcript as the turn goes; a copy kept
+          // in the session directory during the run leaves a resumable session
+          // even if the job is killed before the final save below.
+          const sessionDir = options.sessionDir;
+          let copied = false;
+          const early =
+            sessionDir !== undefined
+              ? sessionSaver(
+                  async () => (copied = (await saveTranscript(configDir, sessionDir, saved, settings, false)) || copied),
+                  () => options.onSessionSaved?.(saved.ref),
+                )
+              : undefined;
+          let result: CodingRunResult;
+          try {
+            result = await runClaude({
+              command,
+              model,
+              systemPrompt,
+              killGraceMs: harnessOptions.killGraceMs ?? 5_000,
+              interruptGraceMs: harnessOptions.interruptGraceMs ?? 1_000,
+              startupTimeoutMs,
+              responseTimeoutMs,
+              env: childEnv(passEnv, configDir, apiKey),
+              request,
+              options,
+              saved,
+              ...(early !== undefined ? { onActivity: () => early.poke() } : {}),
+            });
+          } finally {
+            await early?.close();
+          }
           const summary = redact(result.summary);
           if (options.sessionDir === undefined) {
             // Claude Code rejects a reused --session-id, so a later run of this
@@ -202,7 +222,11 @@ export function createClaudeCodeHarness(harnessOptions: ClaudeCodeHarnessOptions
             }
             return { ...result, summary };
           }
-          if (!(await saveTranscript(configDir, options.sessionDir, saved, settings))) return { ...result, summary };
+          if (!(await saveTranscript(configDir, options.sessionDir, saved, settings, true))) {
+            // What it copied during the run is no longer what Claude Code holds (the transcript went, or is no longer its own file).
+            if (copied && options.resume === undefined) await dropSaved(options.sessionDir, saved.ref);
+            return { ...result, summary };
+          }
           saved.started = true;
           return { ...result, summary, sessionRef: saved.ref };
         },
@@ -301,8 +325,14 @@ async function localTranscript(configDir: string, sessionId: string): Promise<st
   return undefined;
 }
 
-/** Copy Claude Code's transcript into the controller's session directory; false when it wrote none. */
-async function saveTranscript(configDir: string, sessionDir: string, saved: SavedSession, settings: SessionSettings): Promise<boolean> {
+/**
+ * Copy Claude Code's transcript into the controller's session directory;
+ * false when it has written none yet. Claude Code may still be appending
+ * (an early save during the run), so only complete records are copied.
+ * `final`: the run is over, so the transcript's usage totals become the
+ * baseline a later run of this session is measured from.
+ */
+async function saveTranscript(configDir: string, sessionDir: string, saved: SavedSession, settings: SessionSettings, final: boolean): Promise<boolean> {
   const projects = path.join(configDir, "projects");
   const dirs = await readdir(projects).catch(() => [] as string[]);
   for (const project of dirs) {
@@ -310,12 +340,17 @@ async function saveTranscript(configDir: string, sessionDir: string, saved: Save
     const file = path.join(projects, project, `${saved.sessionId}.jsonl`);
     const info = await lstat(file, { bigint: true }).catch(() => undefined);
     if (!info?.isFile()) continue;
-    const transcript = (await readScanned(file, info)).toString("utf8");
+    const transcript = completeJsonl((await readScanned(file, info)).toString("utf8"));
+    // A resume refuses an empty transcript, so an early save waits for the first record.
+    if (transcript.trim() === "") return false;
     await saveSide(path.join(projects, project, saved.sessionId), path.join(sessionDir, saved.ref));
-    await writeAtomic(path.join(sessionDir, `${saved.ref}.jsonl`), transcript);
+    // The settings first: a transcript in the session directory is restorable once it lands.
     await writeAtomic(path.join(sessionDir, `${saved.ref}.json`), JSON.stringify({ project, ...settings }));
-    const baseline = costState(transcript);
-    if (baseline !== undefined) saved.baseline = baseline;
+    await writeAtomic(path.join(sessionDir, `${saved.ref}.jsonl`), transcript);
+    if (final) {
+      const baseline = costState(transcript);
+      if (baseline !== undefined) saved.baseline = baseline;
+    }
     return true;
   }
   return false;
@@ -342,6 +377,13 @@ async function saveSide(source: string, target: string): Promise<void> {
   }
 }
 
+/** Remove a session saved during a run whose final save failed, so no unreported session is left behind. */
+async function dropSaved(sessionDir: string, ref: string): Promise<void> {
+  await rm(path.join(sessionDir, `${ref}.jsonl`), { force: true });
+  await rm(path.join(sessionDir, `${ref}.json`), { force: true });
+  await rm(path.join(sessionDir, ref), { recursive: true, force: true });
+}
+
 async function writeAtomic(target: string, contents: string): Promise<void> {
   await mkdir(path.dirname(target), { recursive: true });
   const tmp = `${target}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
@@ -361,6 +403,8 @@ interface RunArgs {
   request: CodingRunRequest;
   options: CodingSessionOptions;
   saved: SavedSession;
+  /** Called on each event Claude Code streams, while its transcript may be growing. */
+  onActivity?: () => void;
 }
 
 async function runClaude(args: RunArgs): Promise<CodingRunResult> {
@@ -545,6 +589,8 @@ async function runClaude(args: RunArgs): Promise<CodingRunResult> {
           unparsed = true;
           continue;
         }
+        // Any event may follow a transcript write; the session is copied while the turn goes on.
+        args.onActivity?.();
         if (event.type === "control_response") {
           if (event.response?.request_id === initializeId && !initialized) {
             if (event.response.subtype !== "success") {

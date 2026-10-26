@@ -7,6 +7,7 @@
  *   → { kind: "execute", id, version?, effect?, input, ctx, credentials?, allowedEffects?, tools?, usage? }
  *   ← { kind: "tool_call", seq, toolCallId, tool, input }   → { kind: "tool_result", seq, result }
  *   ← { kind: "model_call", seq }                           → { kind: "model_call_result", seq, granted }
+ *   ← { kind: "session", sessionRef }                       (no reply: a session saved so far, kept if the job is stopped)
  *   ← { kind: "ok", output } | { kind: "error", message }
  *   SIGTERM stops the job: `ctx.signal` aborts and unanswered requests are refused.
  *
@@ -140,6 +141,12 @@ async function execute(req: Record<string, any>): Promise<void> {
           status: "failed",
           summary: "executor stopped before the tool call was answered",
         },
+    };
+  }
+  if (req.ctx?.session !== undefined) {
+    // A session saved before the executor returns, so a job stopped before then still names it.
+    ctx.keepSession = (sessionRef: unknown) => {
+      if (typeof sessionRef === "string" && sessionRef.length > 0) reply({ kind: "session", sessionRef });
     };
   }
   if (req.usage === true) {
