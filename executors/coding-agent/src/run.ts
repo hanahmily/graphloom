@@ -3,8 +3,8 @@
 
 import { defineExecutor, jsonSchemaProblem, type ExecutorContext, type ExecutorDefinition, type ToolCallResult } from "@graphloom/sdk";
 import type { CodingHarness, CodingRunResult, CodingUsage, CodingSession, CodingTool } from "./harness.js";
-import { classifyQuota, type QuotaFailure } from "./quota.js";
-import { abortableSleep, backoffMs, classifyTransient, resolveRetryPolicy, worktreeDigest, type TransientRetryPolicy } from "./transient.js";
+import { classifyQuota, classifyTransient, type QuotaFailure } from "#agent-harness/classify";
+import { abortableSleep, backoffMs, resolveRetryPolicy, worktreeDigest, type TransientRetryPolicy } from "./transient.js";
 
 export const CODING_AGENT_RUN_ID = "graphloom.coding-agent/run";
 

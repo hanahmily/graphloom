@@ -355,14 +355,6 @@ describe("Claude Code harness", () => {
     expect(last.history).not.toContain("interrupted turn saved");
   });
 
-  it("keeps only complete transcript records in a copy taken mid-write", async () => {
-    const { completeJsonl } = await import("./harness.js");
-    expect(completeJsonl('{"a":1}\n{"b":2}\n')).toBe('{"a":1}\n{"b":2}\n');
-    expect(completeJsonl('{"a":1}\n{"b":')).toBe('{"a":1}\n');
-    expect(completeJsonl('{"a":1}\n{"b":2}')).toBe('{"a":1}\n{"b":2}');
-    expect(completeJsonl('{"b":')).toBe("");
-  });
-
   it.each([false, true])("falls back to signals when the CLI ignores an interrupt (ignore SIGTERM: %s)", async (ignoreTerm) => {
     const h = await setup({ interruptGraceMs: 50, killGraceMs: 50 });
     const controller = new AbortController();

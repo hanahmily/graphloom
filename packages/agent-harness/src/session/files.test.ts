@@ -8,7 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { promisify } from "node:util";
-import { copyFiles, filesUnder } from "./session-files.js";
+import { copyFiles, filesUnder } from "./files.js";
 
 const execFileAsync = promisify(execFile);
 

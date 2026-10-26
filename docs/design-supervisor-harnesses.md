@@ -1,6 +1,7 @@
 # Supervisor harnesses: Pi, Claude Code, and Codex
 
-Status: proposed design, 2026-10-26; not implemented. This supersedes the
+Status: proposed design, 2026-10-26; S1 (the shared harness library, §3)
+implemented, S2 to S6 not implemented. This supersedes the
 Pi-only backend choice in the [core design](design-typescript-core.md) §6
 ("Standalone Pi SDK session implementation") and in the
 [Pi supervisor design](design-pi-supervisor.md). Pi stays a supported harness,
@@ -94,9 +95,35 @@ A new workspace package, `packages/agent-harness`, owns everything about
 | `session/` | `harness.ts`, `session-files.ts` | `sessionSaver` (early capture, #204), `completeJsonl`, safe file scans and copies |
 | `process/` | `process-group.ts`, `child-env.ts` | Process groups, `drainOnExit`, `minimalEnv`, `passEnv` |
 | `classify/` | `quota.ts`, `transient.ts` | `classifyQuota` (`resetAt`), `classifyTransient`, `retryAfterMs` |
-| `launch` | — | A `launch(command, args, env, cwd, { writable, trustedWritable, readPaths })` function. Callers inject the runner's `confineWorker` (`packages/runner/src/confine.ts`); the library does not depend on the runner |
+| `launch` | — | A `launch(command, args, env, cwd, { writable, trustedWritable, readPaths })` function returning the `{ command, args, env }` to spawn. Callers inject the runner's `confineWorker` (`packages/runner/src/confine.ts`); the library does not depend on the runner. The default, `directLaunch`, spawns the command as given |
 
-Each driver exposes one neutral API:
+As built in S1, each driver exposes the turn-level functions the executor
+already had, with the executor-specific parts passed in:
+
+- **Claude Code:** `runClaudeProcess` runs one stream-json turn. The caller
+  passes its own flags (`--settings`, `--tools`, `--append-system-prompt`,
+  `--mcp-config`, `--model`, `--json-schema`), the prompt, a `toolPolicy` for
+  `can_use_tool`, `reserveModelCall` for each later provider request, and an
+  optional MCP server that must connect. The function returns a failure
+  summary or the successful `result` event, plus native tools and usage.
+  `openClaudeSession` and `captureClaudeTurn` restore, capture early, and
+  save the session.
+- **Codex:** `runCodexProcess` (with `sandbox` and `ephemeral` as options and
+  the caller's `--output-schema` as extra flags) returns a failure summary or
+  the final message. `openCodexThread` and `captureCodexTurn` handle the
+  rollout.
+- **Pi:** `createPiAgent` (the isolated loader, the tool activation, and the
+  reservation hook on `streamFunction`), `promptPiAgent`,
+  `openPiSessionManager`, `piSessionReporter`, `piBashTool`, `piNativeTools`,
+  and the session settings record. `packages/supervisor/src/pi-session.ts`
+  stays in the supervisor until S2 builds the host on the library.
+- **`classify/`, `session/`, `process/`:** moved unchanged. The executor's
+  `transient.ts` keeps only its retry loop (policy, backoff, worktree
+  fingerprint) and re-exports the classifiers.
+
+The neutral API below is the target for S3. It is built on those functions
+when its first consumer, the Claude Code supervisor harness, needs a live
+event stream. S1 does not add it: nothing would use or test it yet.
 
 ```ts
 interface AgentRun {
@@ -142,6 +169,30 @@ Decision: **the executor vendors the library.**
 into `dist/vendor/agent-harness/` and imports it from there. The executor's
 digest covers the harness code. Run-local executor repair (`executorRepair`)
 can then patch a harness defect too, in the run's copy.
+
+Mechanism (S1):
+
+- The executor imports `#agent-harness/<module>`, a Node subpath import that
+  its `package.json` maps to `./dist/vendor/agent-harness/*/index.js`.
+  TypeScript resolves the vendored `.d.ts` files the same way.
+- `executors/coding-agent/scripts/vendor-agent-harness.mjs` runs before
+  `tsc` in `build` and `test`. It copies the library's built `.js` and
+  `.d.ts` files, with their source-map comments removed, from
+  `../../packages/agent-harness/dist`.
+- A copy of the package that stands alone has no library beside it. That
+  covers a repair candidate under `<stateDir>/repairs/` and an installed
+  release. There the script keeps the vendored copy as it is, so a
+  candidate's build never overwrites the harness code under review.
+- The library is only a `devDependency` of the executor, so repair does not
+  link it into a candidate. In S1 nothing loads it at run time except through
+  the vendored copy, so the release does not ship `packages/agent-harness`.
+  S2 adds it to the release's core packages when the supervisor imports it.
+- `apps/graphloom/test/agent-harness-vendor.test.ts` checks four things:
+  - the vendored files match the built library;
+  - the executor resolves the harness only from `dist/vendor`;
+  - changing one vendored byte changes `digestExecutorSource`;
+  - rebuilding from a changed library changes it too, while a standalone
+    copy keeps its own patched vendored code.
 
 What a harness fix means:
 
@@ -605,7 +656,11 @@ All of this runs in CI with no provider calls unless marked live.
   `pi-harness`, `quota`, `transient-retry`, `session-files`, rehearsal
   stand-ins) pass unchanged against the vendored library. A test asserts
   that the executor digest covers `dist/vendor/agent-harness`: changing one
-  vendored byte changes the digest.
+  vendored byte changes the digest. Unit tests of moved code move with it.
+  That covers `session-files`, `completeJsonl`, and the pure
+  `parseResetAt`/`classifyQuota`/`classifyTransient`/`retryAfterMs` cases.
+  The library adds `sessionSaver` tests and driver tests through an injected
+  `launch`.
 - **S2 host contract:** the Pi supervisor suites (`pi-supervisor*`,
   `pi-session*`, `episode-replay*`, `restore`) pass unchanged against
   `createSupervisorHost`. A shared `harnessConformance(harness)` suite drives
