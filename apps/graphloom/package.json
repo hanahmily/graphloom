@@ -2,6 +2,7 @@
   "name": "@graphloom/cli",
   "version": "0.0.0",
   "description": "GraphLoom CLI composition root",
+  "license": "Apache-2.0",
   "type": "module",
   "bin": {
     "graphloom": "./dist/main.js"
