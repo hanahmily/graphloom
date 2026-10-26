@@ -16,6 +16,7 @@ import { check, probe, recordScenario, rehearse, replay } from "./rehearsal.js";
 import { requireRunnerConfig } from "./runner-config.js";
 import { onceStopHook, parseDuration, waitForRun, type StopNotice } from "./notify.js";
 import { formatRunStats, loadRunStats } from "./stats.js";
+import { formatVersion, installRoot } from "./version.js";
 import {
   loadSupervisorConfig,
   parseModelRef,
@@ -28,7 +29,7 @@ async function main(): Promise<void> {
   const cmd = args[0];
 
   if (cmd === "version" || cmd === "--version" || cmd === "-V") {
-    console.log("graphloom 0.0.0");
+    console.log(formatVersion(installRoot(), args.slice(1)));
     return;
   }
 
@@ -351,7 +352,7 @@ Usage:
   graphloom resume <stateDir|runId> [--state-root <dir>] [--update-plugin] [--update-executors] [--reconciled] [--on-stop <command>]
   graphloom switch-model <stateDir|runId> <provider/model> --reason <text> [--state-root <dir>]
   graphloom delete <stateDir|runId> [--state-root <dir>] [--force]
-  graphloom version
+  graphloom version [--json | --root]
 
 check, rehearse, replay and probe verify a graph can run before spending a
 live run's budget (docs/design-graph-rehearsal.md): check is a static check
@@ -410,6 +411,10 @@ what stats prints. --timeout takes 90s, 10m, 2h (bare numbers are seconds).
 Exit 0: the run left running, whatever it became (read the status line). Exit
 2: timed out, still running. Exit 3: the state says running but its controller
 died without recording a stop (resume takes it over).
+
+Version prints the product version: an installed release's version and commit
+from its release.json, or <version>-dev+<short sha> in a clone. --json prints
+the whole release.json; --root prints the real path of the installation.
 
 Delete removes a stopped or finished run's worktree, graphloom/<runId> branch, and
 state directory. --force also discards uncommitted changes and branch commits.

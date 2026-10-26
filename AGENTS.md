@@ -34,6 +34,9 @@ example plugin's sources, regenerate its manifest with `npm run manifest -w <plu
 
 Installable releases (tarball, install layout, upgrade, local release
 procedure) follow the proposed [release design](docs/design-release.md).
+`scripts/release.sh build <version>` builds the release assets locally into
+`release-out/<version>/` (gate on the pinned Node, license and content checks,
+smoke tests with no `node` on `PATH`); it publishes nothing.
 
 ## Principles
 

@@ -1,9 +1,13 @@
 # Installable releases
 
-Status: proposed design, 2026-10-26; phase R0 implemented. The repository license
-(Apache-2.0: `LICENSE`, `NOTICE`, and `license` in every `package.json`) and the
-source headers with their check (§2.8) are in place; everything else here is
-design. This covers how GraphLoom is packaged, installed, upgraded, and released
+Status: proposed design, 2026-10-26; phases R0 and R1 implemented. The repository
+license (Apache-2.0: `LICENSE`, `NOTICE`, and `license` in every `package.json`)
+and the source headers with their check (§2.8) are in place (R0). So are the
+product version and `graphloom version` (§2.4), the repair toolchain as CLI
+dependencies (§2.2), `process.execPath` for GraphLoom's own scripts and the
+pinned Node fetch (§2.7), the license check and notices (§2.8), SDK packing
+(§3.1), and `scripts/release.sh build` (§6, "R1 as implemented"); everything
+else here is design. This covers how GraphLoom is packaged, installed, upgraded, and released
 for an operator who runs it on their own Linux machine. It specializes the
 [TypeScript core design](design-typescript-core.md) (version transitions, §8) and the
 [executor design](design-executors.md#restart-versions-and-recovery). It adds no
@@ -36,12 +40,17 @@ a release asset.
 
 ### Current state
 
+This records the starting point the design was written against. Items that
+phase R1 changed say so.
+
 - Every core package and the CLI is `0.0.0` (`packages/*/package.json`,
   `apps/graphloom/package.json`); the built-in executors are `0.1.0`
   (`executors/*/package.json`); plugin bundles carry their own versions, such as
   issue-fix `0.13.0` in both `examples/plugins/issue-fix/package.json` and its
-  `graphloom.manifest.json`. `graphloom version` prints a hard-coded
-  `graphloom 0.0.0` (`apps/graphloom/src/main.ts`). There are no tags or releases.
+  `graphloom.manifest.json`. `graphloom version` printed a hard-coded
+  `graphloom 0.0.0`; since R1 it reads `release.json` or the root
+  `package.json` (§2.4, `apps/graphloom/src/version.ts`). There are no tags or
+  releases.
 - Operators run `node apps/graphloom/dist/main.js` from a built clone
   ([example guide](../examples/README.md)).
 - A task's `graph:` selects `plugins/<graph>/` beside the task file. Intake pins
@@ -67,13 +76,14 @@ a release asset.
   (`packages/controller/src/state.ts`).
 - Qualified plugin repair builds candidates with "GraphLoom's own `tsc`," resolved
   from the CLI installation (`apps/graphloom/src/repair-config.ts`). However,
-  `typescript` is only a root `devDependency`, so a production-only install
-  would break repair preflight. The CLI also runs `tsc` through its
-  `#!/usr/bin/env node` shebang, which needs a `node` on `PATH`.
-- `executors/coding-agent/scripts/patch-standin-shebang.mjs` rewrites the
+  `typescript` was only a root `devDependency`, so a production-only install
+  would break repair preflight. The CLI also ran `tsc` through its
+  `#!/usr/bin/env node` shebang, which needs a `node` on `PATH`. R1 fixed
+  both (§2.2, §2.7).
+- `executors/coding-agent/scripts/patch-standin-shebang.mjs` rewrote the
   rehearsal stand-ins' shebang to the absolute path of the Node that built them.
   In a release built on the maintainer's machine, that path would not exist on
-  the operator's machine.
+  the operator's machine. R1 removed it (§2.7).
 - Plugin bundles import `@graphloom/sdk` at runtime through a `file:` dependency
   (`"file:../../../packages/sdk"`). The import resolves only inside the workspace
   layout. The SDK has no runtime dependencies (`packages/sdk/package.json`).
@@ -135,7 +145,10 @@ bundle it with a tool such as esbuild or ncc. Reasons:
 **Repair toolchain.** The tarball keeps `typescript` and `vitest` as runtime
 dependencies. `typescript` moves into `@graphloom/cli` `dependencies`, which makes
 the `repair-config.ts` claim true. `vitest` is the test runner the bundles declare
-in `runtimeProfile`. Every other `devDependency` is pruned.
+in `runtimeProfile`. Every other `devDependency` is pruned. As implemented in
+R1, both are `@graphloom/cli` `dependencies` with the ranges they had as root
+`devDependencies`, and the root no longer lists them; the lockfile resolves
+the same versions. `npm query .prod` shows them in the production closure.
 
 ### 2.3 Tarball layout
 
@@ -202,12 +215,32 @@ Executable bits survive packing.
 directory. In a clone with no `release.json`, it prints
 `<root package.json version>-dev+<short sha>`.
 
+As implemented in R1 (`apps/graphloom/src/version.ts`):
+
+- The root `package.json` `version` is the product version's source of truth.
+  `release.sh build` refuses a version that differs from it, and it refuses a
+  core package, the SDK, or the CLI that is out of lockstep with it (§3).
+- The root is three directories above `apps/graphloom/dist/version.js`, by
+  real path. A release prints `graphloom <version> (<short commit>)`.
+- In a clone, `--json` prints
+  `{ "product": "graphloom", "version": "<v>-dev+<sha>", "git": { "commit": "<sha>" } }`.
+  The commit is that of the Git work tree whose top level is the root.
+  Without one, as in a tree extracted from a tarball, the version is
+  `<v>-dev` and no commit is printed. A tree nested inside some other
+  repository does not take that repository's commit.
+- `executors`, `plugins`, and `stateFormat` are computed when the tree is
+  assembled. `stateFormat` is the constant `1` until R3 records it in run
+  state. `node.sha256` is the digest of the nodejs.org tarball from
+  `release/node.json`.
+
 ### 2.5 Checksums, reproducibility, signing
 
 - **Checksums.** `SHA256SUMS` covers every other asset. `install.sh` refuses a
   mismatch.
-- **Reproducibility.** The tarball is built from `git archive <tag>`, not from
-  the maintainer's working tree. Entries are sorted, the mtime is
+- **Reproducibility.** The tarball is built from a clean checkout of the
+  commit, not from the maintainer's working tree. R1 stages it as a clone
+  detached at the commit rather than `git archive <tag>` (§6, "R1 as
+  implemented"). Entries are sorted, the mtime is
   `SOURCE_DATE_EPOCH`, which is the commit time, the owner is `0:0` with numeric
   IDs, and the archive is compressed with `gzip -n`. The gate and build run
   under the bundled Node, so the toolchain is pinned too. The goal is that
@@ -258,6 +291,33 @@ The release runs without a host Node. The host still needs the tools in §4.4.
   The launcher does not put the bundled Node on `PATH`. Command jobs use the
   target repository's own toolchain, which each graph's environment checks
   verify.
+- **R1 as implemented.**
+  - `release/node.json` pins Node `24.22.1`, the newest Node 24 LTS on
+    2026-10-26, with `version`, `platform`, `sha256`, and a `verified` record.
+    The record names the `SHASUMS256.txt` that the digest was checked
+    against, and the release key whose signature on it was verified with
+    `gpgv` against the `nodejs/release-keys` keyring.
+  - `scripts/release/fetch-node.mjs` does the fetch. Besides the committed
+    digest, it requires the release's own `SHASUMS256.txt` to list the same
+    digest. It caches the tarball under
+    `${XDG_CACHE_HOME:-~/.cache}/graphloom-release/node` and re-verifies the
+    cached copy on every use; a mismatched copy is discarded and fetched again.
+    It extracts the tarball and requires `bin/node --version` to name the pin.
+    `--base-url` also takes a directory or `file://` URL, which the tests use
+    with a local fixture instead of the network.
+  - The stand-ins run as `process.execPath <stand-in>` through a launcher
+    that the rehearsal writes into its own scratch directory, `bin/claude`
+    and `bin/codex` (`writeStandInLauncher`,
+    `executors/coding-agent/src/rehearsal/launcher.ts`). A launcher is
+    `#!/bin/sh` followed by `exec '<process.execPath>' '<stand-in>' "$@"`,
+    and it is bound as `claude.command` and `codex.command`.
+  - A harness option cannot carry the Node path itself, because a graph's
+    environment checks also run the bound command from a shell, as in
+    `"$GRAPHLOOM_CODEX_BIN" --version`.
+  - Unlike the removed patch, the launcher writes the absolute Node path on
+    the running machine, at rehearsal time, and it is never shipped. The
+    stand-ins are plain `tsc` output, with no executable bit and an unused
+    `#!/usr/bin/env node` line.
 - **Patching.** A Node security release that affects GraphLoom's use is shipped
   as a GraphLoom patch release within seven days of a high or critical
   advisory. The patch release changes only the Node pin and the changelog.
@@ -287,6 +347,26 @@ The release runs without a host Node. The host still needs the tools in §4.4.
   - per-package exceptions with a recorded reason
   GPL, LGPL, AGPL, SSPL, and `UNLICENSED` are never allowed. The same check
   runs on the SDK tarball, which has no dependencies today.
+- **Notices and license check as implemented (R1).**
+  - `notices.mjs` reads every package under `node_modules`, including nested
+    `node_modules`, deduplicated by name and version. Workspace links are
+    GraphLoom's own packages, which `LICENSE` and `NOTICE` cover, so they are
+    skipped. `--self` also checks the package at the root, which is how the
+    SDK tarball is checked.
+  - The declared license is `license`, or the legacy `licenses` array, read as
+    an `OR` of its entries. In an expression, `AND` needs every side allowed,
+    and `X WITH <exception>` is judged as `X`.
+  - "Never allowed" is enforced in the script, whatever the allowlist says. It
+    matches each family by prefix, so `GPL` also covers `GPL-3.0-only`.
+  - An exception is `{ "package", "version"?, "license", "reason" }`, where
+    `license` is the exact declared string, or `null` when none is declared.
+    Its reason is printed in the notices. An exception never admits a
+    never-allowed license.
+  - The license text comes from the package's `LICENSE*`, `LICENCE*`,
+    `COPYING*`, or `UNLICENSE*` files. A package without such a file is not
+    a failure, because its declared license is what the check judges. Its
+    notice says that it has no license file.
+  - The production tree of the first R1 build needs no exception.
 - **Source headers.** Hand-written source files carry a two-line SPDX header,
   such as `// SPDX-License-Identifier: Apache-2.0` followed by the copyright
   line from `NOTICE`, `Copyright 2026 Hongtao Gao and the GraphLoom
@@ -306,7 +386,7 @@ The release runs without a host Node. The host still needs the tools in §4.4.
     directory, and `legacy/`, which CI does not build. JSON, Markdown, YAML,
     and lockfiles are not covered extensions.
   - In a Git work tree, the check reads `git ls-files`. In a tree without Git
-    metadata, such as the `git archive` staging tree, it walks the files.
+    metadata, such as an extracted tarball, it walks the files.
   - Adding the headers changed every example plugin's source digests, so the
     four manifests were regenerated. It also changed every built-in executor
     digest. For the same reason as the license change below, no component
@@ -360,7 +440,9 @@ The release runs without a host Node. The host still needs the tools in §4.4.
 `@graphloom/sdk` is the public interface for plugin authors (core design §12).
 Each release attaches `graphloom-sdk-<version>.tgz`, packed from the staged and
 gated tree. It is listed in `SHA256SUMS`, which the signature covers. It is not
-published to the npm registry.
+published to the npm registry. The SDK's `files` lists `dist`, `LICENSE`, and
+`NOTICE` (R1). npm always packs `LICENSE`, but without the `NOTICE` entry it
+would drop the `NOTICE` that `release.sh` copies in.
 
 **Compatibility contract.**
 
@@ -761,8 +843,9 @@ usual, and `graphloom upgrade` clears the skip.
 
 ## 6. Release procedure (local)
 
-`scripts/release.sh` is a script specification. It is not implemented by this
-change. It runs on an otherwise idle Linux x64 machine with bubblewrap working,
+`scripts/release.sh` is a script specification; phase R1 implements `build`
+(see "R1 as implemented" at the end of this section). It runs on an otherwise
+idle Linux x64 machine with bubblewrap working,
 `gh` authenticated with push rights, and the signing key loaded. It needs no host
 Node beyond what fetches the pinned runtime. All gate, build, and smoke steps run
 on the pinned Node (§2.7). Each step stops the release on failure.
@@ -784,8 +867,9 @@ scripts/release.sh publish <version>   # steps 9-10, after the maintainer confir
    changed, require a migrator and a fixture (step 8). Commit these changes on
    `release/v<version>` and open a PR. The PR is merged through the normal
    local-gate review.
-3. **Stage and fetch.** Run `git archive <merge commit>` into an empty staging
-   directory, and set `SOURCE_DATE_EPOCH` from the commit time. Fetch the Node
+3. **Stage and fetch.** Check out the merge commit cleanly into an empty
+   staging directory (a detached clone, so the gate runs in a work tree; see
+   "R1 as implemented"), and set `SOURCE_DATE_EPOCH` from the commit time. Fetch the Node
    tarball named in `release/node.json` and verify it (§2.7).
 4. **Gate.** With the pinned Node first on `PATH`, run the same commands as local
    CI in the staging tree: `NODE_ENV=development npm ci --include=dev`,
@@ -875,6 +959,81 @@ A release's gate is local, like every merge gate today. Its record is the
 `gate` field in `release.json` and the script's log, which is attached to the
 release PR.
 
+### R1 as implemented
+
+`scripts/release.sh build <version> [--commit <rev>] [--out <dir>] [--keep-work]`
+runs steps 3 to 8 on `<rev>`, which defaults to `HEAD`. It publishes nothing.
+
+- **Inputs and output.**
+  - `<version>` must equal the root `package.json` version at `<rev>`. Until
+    `prepare` (R5) sets the first release version, that is `0.0.0`.
+  - The step 1 preconditions (on `main`, tag absent, version newer) and the
+    step 2 checks belong to `prepare` and are not run.
+  - The helpers under `scripts/release/` run from the staged commit, not the
+    working tree.
+  - The assets go to `<out>`, by default `release-out/<version>/`, which Git
+    ignores and which must be empty. The whole log is `<out>/build.log`. The
+    work directory is removed on success, and kept on failure or with
+    `--keep-work`.
+  - `prepare` and `publish` exit 2 and name phase R5.
+- **Assets.** R1 produces `graphloom-<v>-linux-x64.tar.gz`,
+  `graphloom-sdk-<v>.tgz`, `release.json`, and an unsigned `SHA256SUMS` over
+  those three. `install.sh` (R2) and `SHA256SUMS.sig` (R5) are added by their
+  phases.
+- **Steps 3 and 4.** The stage is a local `git clone` detached at `<rev>`,
+  with no remote, and it must be clean. It holds the same tracked files that
+  `git archive <rev>` would extract, because the repository has no
+  `export-ignore` attributes. It is also a work tree. The gate needs one:
+  tests intake the shipped example tasks, whose `repo: .` must be inside a
+  Git repository, so they fail in an archive extract. Nothing from `.git`
+  reaches the assembled tree. `fetch-node.mjs`
+  extracts the whole pinned Node, and its `bin` goes first on `PATH`, so the
+  gate's `npm` is the pinned Node's own. Every later step runs on the pinned
+  Node too.
+- **Step 5.** `check-pack.mjs` checks the SDK file list and its
+  `package.json` name, version, and license. `notices.mjs --self` checks the
+  license of the extracted package.
+- **Step 6.**
+  - After `npm prune --omit=dev`, the build fails unless `typescript` and
+    `vitest` are still installed.
+  - `assemble.mjs` copies the §2.3 layout. From `node_modules` it leaves out
+    the gate's tool caches (`.vite`, `.vitest`, `.cache`). From
+    source-repairable packages it leaves out `node_modules`, `.git`, run
+    state, caches, `.env*`, and `*.tsbuildinfo`.
+  - It drops links that dangle once unshipped workspaces are absent, such as
+    `node_modules/@graphloom/testkit`. `bin/graphloom` is
+    `scripts/release/launcher.sh`.
+  - `check-tree.mjs` runs the content checks. It forbids the work directory,
+    the checkout path, and `$HOME`. It allows a shebang only through
+    `/usr/bin/env` or `/bin/sh`/`bash`. The credential patterns cover GitHub
+    tokens, `sk-` keys, AWS access keys, Slack tokens, and PEM private keys.
+    A key ending in `EXAMPLE` is a vendor's documented placeholder, such as
+    the AWS SDK's `AKIAIOSFODNN7EXAMPLE`, and passes. Binary files are
+    checked for forbidden paths only. A `*.tsbuildinfo` that a dependency
+    publishes inside `node_modules` passes too.
+  - The tarball is packed with sorted names, `SOURCE_DATE_EPOCH` mtimes,
+    numeric `0:0` owners, and `gzip -n`, so step 7 has something to compare.
+    R2 still owns the claim that builds reproduce. The build prints the
+    compressed and unpacked sizes. The warning on more than 20% growth needs
+    a previous release, so it waits for the second release.
+- **Step 7** packs the same assembled tree a second time and records whether
+  the hashes match. It never fails the build. R2 compares two full builds.
+- **Step 8** in R1 runs the sub-steps that need no later phase.
+  - It runs on the extracted tarball, made read-only like an installed
+    version, in a fresh `HOME` and `TMPDIR`. `PATH` links every host tool
+    except Node and its package managers (`no-node-path.mjs`).
+  - `graphloom version --json` must equal `release.json`, and
+    `version --root` must be the extracted directory.
+  - `smoke-preflight.mjs` runs the CLI's own repair preflight on a validator
+    repair of the release example plugin. It must build the candidate with the
+    tree's `typescript` and pass `qualify.mjs`, and it refuses to start if
+    `PATH` has a `node`.
+  - Hello `check` must be `ok`, and `rehearse --offline` must not be
+    `not-ready`.
+  - Sub-step 1 waits for `install.sh` (R2) and `doctor` (R4). Sub-step 5
+    waits for R2 and sub-step 6 for R5. Sub-steps 7 and 8 wait for R3 and a
+    second release.
+
 ## 7. Compatibility, support, and security
 
 **Support.**
@@ -917,8 +1076,8 @@ release PR.
 | Phase | Deliverable | Verification |
 |---|---|---|
 | R0 | Apache-2.0 `LICENSE`, `NOTICE`, and `license` fields (done); SPDX headers on hand-written source and `scripts/check-headers.mjs` in the gate, with the component bumps they cause (done; no bumps were needed, §2.8); this design accepted | Gate passes; header check fails on a file without a header; manifests current |
-| R1 | Product version source of truth, `release.json`, and `graphloom version` from it. `typescript` and `vitest` as CLI dependencies. GraphLoom's own scripts spawned with `process.execPath`, and the stand-in shebang patch removed. Bundled Node fetch and verification. `notices.mjs` and the license allowlist. SDK packing. `scripts/release.sh build` producing all assets | Tests for version output. Tarball content and no-absolute-path checks. A repair preflight test on a production-pruned tree with no `node` on `PATH`. A license check that fails on a planted disallowed license. Pack file-list check |
-| R2 | `install.sh`, the shim, `graphloom upgrade`, `self list/use/rollback/prune/uninstall`, automatic updates (`__auto-update`, `autoUpdate` in the runner config, `update/`, `install.lock`, the skip record, auto-prune), and deterministic packing | Shell tests in a temporary `HOME` with no host Node: atomic switch, no overwrite, prune respects ownership and plugin links, an interrupted install is never listed. `upgrade` installs, switches, lists runs on older versions, and `--no-switch` keeps `current`. Updater tests against a fake release source and a stub `gh`: at most one check per 24 hours; patch (and from 1.0, minor) installed and switched; a breaking release only announced; `notify` never installs; a bad checksum or signature records the failure and does not switch; two concurrent invocations install once; `GRAPHLOOM_DISABLE_AUTOUPDATE=1` and `off` make no network call; the notice never reaches a non-TTY, `--json`, or hook invocation, and the foreground exit code is unchanged; `self rollback` keeps the skipped version from being reinstalled until a newer release or `upgrade`; auto-prune keeps three versions plus owners; a process started from the old version keeps loading from it across a switch. Two independent builds give the same hash |
+| R1 | Product version source of truth, `release.json`, and `graphloom version` from it. `typescript` and `vitest` as CLI dependencies. GraphLoom's own scripts spawned with `process.execPath`, and the stand-in shebang patch removed. Bundled Node fetch and verification. `notices.mjs` and the license allowlist. SDK packing. `scripts/release.sh build` producing all assets (done; the assets of R1's phases, §6 "R1 as implemented") | Tests for version output. Tarball content and no-absolute-path checks. A repair preflight test on a production-pruned tree with no `node` on `PATH`. A license check that fails on a planted disallowed license. Pack file-list check (done: `apps/graphloom/test/version.test.ts`, `release-build.test.ts`, and `release.sh build`'s own step 6 and 8 checks) |
+| R2 | `install.sh`, the shim, `graphloom upgrade`, `self list/use/rollback/prune/uninstall`, automatic updates (`__auto-update`, `autoUpdate` in the runner config, `update/`, `install.lock`, the skip record, auto-prune), and deterministic packing. A read-only version directory also needs the repair snapshot (`snapshotRepairCandidate`, `packages/controller/src/repair.ts`) to make its copy writable, because `cp` keeps the read-only modes | Shell tests in a temporary `HOME` with no host Node: atomic switch, no overwrite, prune respects ownership and plugin links, an interrupted install is never listed. `upgrade` installs, switches, lists runs on older versions, and `--no-switch` keeps `current`. Updater tests against a fake release source and a stub `gh`: at most one check per 24 hours; patch (and from 1.0, minor) installed and switched; a breaking release only announced; `notify` never installs; a bad checksum or signature records the failure and does not switch; two concurrent invocations install once; `GRAPHLOOM_DISABLE_AUTOUPDATE=1` and `off` make no network call; the notice never reaches a non-TTY, `--json`, or hook invocation, and the foreground exit code is unchanged; `self rollback` keeps the skipped version from being reinstalled until a newer release or `upgrade`; auto-prune keeps three versions plus owners; a process started from the old version keeps loading from it across a switch. Two independent builds give the same hash |
 | R3 | Run ownership (`runs/<id>.json`, `install` record, `stateFormat`), dispatch to the owning version, `resume --upgrade` with ordered migrators, the gate fingerprint including the product version, and the `rehearse --stop-at` / `resume --rehearsal` hooks | Controller and CLI tests: resume under a new `current` dispatches with no pin mismatch. `--upgrade` migrates each committed fixture and completes it on a scripted runner. Transitions are recorded. Downgrade, crossing a major, an unknown format, a missing migrator, and an unsettled repair are each refused with the run unchanged. A cached gate result is not reused across versions |
 | R4 | `doctor` (including the updates check), `setup` | Tests with a stubbed `PATH` and `HOME` for each check result, including each reason automatic updates are a no-op. The doctor reuses the confinement and capability probes and never asks for a host Node |
 | R5 | `release.sh prepare/publish`, signing, the external-plugin smoke test, and the first release `v0.1.0` | The full procedure in §6. The upgrade matrix starts with the second release, from its first fixture |

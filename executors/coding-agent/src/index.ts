@@ -47,6 +47,7 @@ export {
   resetRehearsalScenarioCache,
 } from "./rehearsal/scenario.js";
 export { createPiRehearsalHarness } from "./rehearsal/pi.js";
+export { writeStandInLauncher } from "./rehearsal/launcher.js";
 export {
   CLAUDE_API_KEY_CREDENTIAL,
   CLAUDE_BIN_ENV,

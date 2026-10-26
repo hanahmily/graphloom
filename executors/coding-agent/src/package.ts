@@ -78,8 +78,8 @@ export const piRehearsalModule = fileURLToPath(new URL("./rehearsal/pi.js", impo
  * Absolute path of the Codex rehearsal stand-in executable
  * (docs/design-graph-rehearsal.md §4.1): a script that speaks just enough of
  * `codex exec --json`'s wire protocol to satisfy the real, unmodified Codex
- * harness, answering from a rehearsal scenario. Bind it as `codex.command`
- * (with `codex.passEnv` naming `REHEARSAL_SCENARIO_ENV`/`REHEARSAL_HOME_ENV`,
+ * harness, answering from a rehearsal scenario. Bind its
+ * `writeStandInLauncher` launcher as `codex.command` (with `codex.passEnv` naming `REHEARSAL_SCENARIO_ENV`/`REHEARSAL_HOME_ENV`,
  * so the stand-in actually receives them) in place of a real Codex install.
  */
 export const codexRehearsalStandIn = fileURLToPath(new URL("./rehearsal/codex-standin.js", import.meta.url));
@@ -87,8 +87,8 @@ export const codexRehearsalStandIn = fileURLToPath(new URL("./rehearsal/codex-st
  * Absolute path of the Claude Code rehearsal stand-in executable
  * (docs/design-graph-rehearsal.md §4.1): a script that speaks just enough of
  * the stream-json control protocol to satisfy the real, unmodified Claude
- * Code harness, answering from a rehearsal scenario. Bind it as
- * `claude.command` (with `claude.passEnv` naming the same two variables) in
+ * Code harness, answering from a rehearsal scenario. Bind its
+ * `writeStandInLauncher` launcher as `claude.command` (with `claude.passEnv` naming the same two variables) in
  * place of a real Claude Code install.
  */
 export const claudeRehearsalStandIn = fileURLToPath(new URL("./rehearsal/claude-standin.js", import.meta.url));

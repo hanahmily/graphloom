@@ -2,7 +2,7 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 import { execFile } from "node:child_process";
-import { access, constants, mkdtemp, readFile } from "node:fs/promises";
+import { access, mkdtemp, readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
@@ -17,13 +17,16 @@ const execFileAsync = promisify(execFile);
 const REVIEWER_SESSION_ID = "graphloom-repair-reviewer";
 
 /**
- * GraphLoom's own `tsc`, not the installed plugin's: `bundlePath` is `state.intake.bundle.bundlePath`,
+ * GraphLoom's own `tsc` script, not the installed plugin's: `bundlePath` is `state.intake.bundle.bundlePath`,
  * which `applyActivateRepair` repoints at the activated repair's own candidate tree once any plugin-level
  * repair has ever been activated — and a candidate root never ships `node_modules` (reviewers must see
  * the whole tree; `linkDependencies` links only `@graphloom/*` packages beside it, never `typescript`).
  * Resolving `tsc/.bin` from `bundlePath` therefore breaks preflight for every repair after the first
  * plugin-level activation, regardless of target. GraphLoom's own installation always has `typescript` as
  * a real dependency, independent of whatever `bundlePath` currently is.
+ * It runs as `process.execPath <tsc>`, never through its `#!/usr/bin/env node`
+ * shebang: a release runs on its bundled Node, with no `node` on `PATH`
+ * (docs/design-release.md §2.7).
  */
 function resolveGraphloomTsc(): string {
   const require = createRequire(import.meta.url);
@@ -117,12 +120,17 @@ export function piRepairDeps(config: SupervisorConfig, bundlePath: string): Repa
   return {
     reviewer,
     async preflight({ candidateRoot, target }) {
-      const tsc = resolveGraphloomTsc();
-      if (!(await isExecutable(tsc))) {
+      let tsc: string;
+      try {
+        tsc = resolveGraphloomTsc();
+      } catch (err) {
+        return { ok: false, summary: `graphloom's own typescript installation cannot be resolved: ${commandOutput(err)}` };
+      }
+      if (!(await exists(tsc))) {
         return { ok: false, summary: `graphloom's own typescript installation has no bin/tsc at ${tsc}` };
       }
       try {
-        await execFileAsync(tsc, ["-p", path.join(candidateRoot, "tsconfig.json")]);
+        await execFileAsync(process.execPath, [tsc, "-p", path.join(candidateRoot, "tsconfig.json")]);
       } catch (err) {
         return { ok: false, summary: `the candidate does not build: ${commandOutput(err)}` };
       }
@@ -219,13 +227,6 @@ export function parseRepairVerdict(text: string): { approved: boolean; reason: s
 
 async function exists(p: string): Promise<boolean> {
   return access(p).then(
-    () => true,
-    () => false,
-  );
-}
-
-async function isExecutable(p: string): Promise<boolean> {
-  return access(p, constants.X_OK).then(
     () => true,
     () => false,
   );
