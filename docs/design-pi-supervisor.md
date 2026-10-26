@@ -14,6 +14,11 @@ BeforeProviderRequest interception is not implemented. Scripted supervisors stay
 the CI default.
 This document specializes the [core design](design-typescript-core.md).
 
+The proposed [supervisor harnesses design](design-supervisor-harnesses.md)
+supersedes Pi as the only supervisor backend: a harness-neutral supervisor host
+drives Pi, Claude Code, or Codex, and the plugin declares which it prefers. This
+document remains the specification of the Pi harness.
+
 ## Driver scope
 
 This document specifies the **standalone** supervisor backend. In proposed
@@ -118,7 +123,7 @@ These three cases are different:
 |---|---|---|
 | Claude through Pi with an Anthropic API key | Supported API credential path | Baseline direct-Pi route; separate provider billing |
 | Claude subscription OAuth through Pi | Pi has OAuth support, but warns that third-party usage uses paid extra usage rather than included Claude plan limits | Do not promise included-plan access or copy Claude Code tokens into GraphLoom |
-| User-authenticated, unmodified Claude Code | Anthropic documents subscription use through its genuine binary under its stated conditions | The coding-agent executor's Claude Code harness runs the user's own `claude` CLI and login ([executors](design-executors.md)); it is not a Pi model switch, and the supervisor stays on Pi |
+| User-authenticated, unmodified Claude Code | Anthropic documents subscription use through its genuine binary under its stated conditions | The coding-agent executor's Claude Code harness runs the user's own `claude` CLI and login ([executors](design-executors.md)); it is not a Pi model switch. A Claude Code supervisor harness is proposed in the [supervisor harnesses design](design-supervisor-harnesses.md) |
 
 Pi's current provider documentation recognizes Anthropic OAuth tokens. Its
 interactive-mode source explicitly distinguishes third-party extra-usage billing
@@ -491,7 +496,7 @@ already compacted once, already retried once, still failing after 3 retries).
 | Context/tool compatibility on switch | Check the target's context limits and modalities before switching; budgeted compaction or reported incompatibility |
 | Invocation accounting | Turn caps count prompt turns; interception of compaction/retry provider calls is still required (both are disabled) |
 | Live provider qualification | DeepSeek, MiniMax, and OpenAI accounts in the user's authorized scope (#30) |
-| Claude included subscription allowance | Not supplied by direct Pi integration; separate genuine Claude Code backend if needed |
+| Claude included subscription allowance | Not supplied by direct Pi integration; the proposed Claude Code supervisor harness ([supervisor harnesses](design-supervisor-harnesses.md)) |
 
 Faux-provider tests cover: each recovery episode, and the first turn after a
 restart, opens a fresh session with no prior chat while the logical id stays;
