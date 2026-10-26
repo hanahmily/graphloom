@@ -19,6 +19,7 @@ import {
   BUILTIN_COMMAND_EXECUTOR_ID,
   checkReferences,
   dispatch,
+  MAX_TIMEOUT_CONTINUATIONS,
   returnToNormal,
   pinJobExecutor,
   validateResultShape,
@@ -450,13 +451,14 @@ async function runNormalLoopSteps(
         state = rest;
         decision = dispatch(
           queuedRetry.job,
-          `retry ${queuedRetry.attempt} of ${queuedRetry.limit} after a failure the executor declared retryable`,
+          queuedRetry.reason ?? `retry ${queuedRetry.attempt} of ${queuedRetry.limit} after a failure the executor declared retryable`,
         );
         retryFlags = {
           attempt: queuedRetry.attempt,
           limit: queuedRetry.limit,
           graphCorrectionTrial: queuedRetry.graphCorrectionTrial,
           supervisorWorkDispatch: queuedRetry.supervisorWorkDispatch,
+          ...(queuedRetry.reason !== undefined ? { reason: queuedRetry.reason } : {}),
         };
       } else if (state.mode === "recovery" && deps.supervisor !== undefined && stalledWithFreshEvidence(state)) {
         // §4.3: the run progressed since the last episode, so the stall the
@@ -1239,8 +1241,11 @@ async function runNormalLoopSteps(
       }
       // Executors may run unconfined, so scope is checked against what actually changed.
       let outOfScope: string[] = [];
+      // Whether the job changed the worktree at all: a timed-out agent that did made progress worth continuing.
+      let worktreeChanged: boolean | undefined;
       if (before !== undefined) {
         const changed = changedPaths(before, await worktreeChangeFingerprints(state.worktreePath));
+        worktreeChanged = changed.length > 0;
         // New means absent before the job: neither dirty in the pre-job
         // snapshot nor a clean file tracked at HEAD.
         const tracked = job.readOnly === true ? await trackedAtHead(state.worktreePath, changed) : new Set<string>();
@@ -1310,6 +1315,7 @@ async function runNormalLoopSteps(
           result: outOfScope.length > 0 ? scopeViolation(result, job, outOfScope) : result,
           canRecover: deps.supervisor !== undefined,
           candidateDigest: checkedDigest ?? afterDigest,
+          worktreeChanged,
         });
         syncRevision(deps, state);
         if ((await stopRequested(deps)) && state.status === "running") {
@@ -1949,6 +1955,59 @@ function queueRetry(
   };
 }
 
+/**
+ * A job that asked for it (`JobSpec.timeoutContinuations`) and ran out of its
+ * wall clock after changing the worktree has its own agent session continued
+ * (`continueFrom` the timed-out operation) instead of going to recovery: the
+ * agent made progress and its transcript holds what is left. At most the
+ * job's count (and `MAX_TIMEOUT_CONTINUATIONS`) per stage and generation. The
+ * continuation is queued like a retry: it is admitted through the same
+ * budget checks as any dispatch, and continues, not repeats, a correction
+ * the timed-out try already counted. `declined` says why an opted-in
+ * timeout still goes to recovery.
+ */
+function continueAfterTimeout(
+  state: DurableRunState,
+  job: JobSpec,
+  result: Awaited<ReturnType<Runner["runJob"]>>,
+  operationId: string,
+  flags: Omit<RetryFlags, "attempt" | "limit">,
+  worktreeChanged: boolean | undefined,
+): { state?: DurableRunState; declined?: string } {
+  if (result.failureKind !== "timeout" || job.kind !== "agent") return {};
+  const allowed = Math.min(job.timeoutContinuations ?? 0, MAX_TIMEOUT_CONTINUATIONS);
+  if (!(allowed > 0)) return {};
+  const key = `g${state.generation}:${job.stageId}`;
+  const used = state.timeoutContinuations?.[key] ?? 0;
+  if (worktreeChanged !== true) {
+    return { declined: worktreeChanged === false ? "the timed-out try left the worktree unchanged" : "whether the timed-out try changed the worktree is unknown" };
+  }
+  if (!(state.agentSessions ?? []).some((r) => r.operationId === operationId)) {
+    return { declined: "the executor kept no resumable session while it stopped" };
+  }
+  if (used >= allowed) {
+    return { declined: `stage ${job.stageId} already continued ${used} timed-out ${used === 1 ? "session" : "sessions"} in generation ${state.generation}, its limit` };
+  }
+  const executorId = job.executor?.id ?? job.kind;
+  const attempt = used + 1;
+  const reason = `continue the agent session of ${operationId}, which ran out of time after changing the worktree (continuation ${attempt} of ${allowed})`;
+  return {
+    state: recordRemedy(
+      {
+        ...state,
+        timeoutContinuations: { ...state.timeoutContinuations, [key]: attempt },
+        executorRetry: { job: { ...job, continueFrom: operationId }, attempt, limit: allowed, ...flags, reason },
+      },
+      {
+        condition: `executor ${executorId} timed out after changing the worktree`,
+        remedy: `continuing its agent session (${attempt} of ${allowed}) instead of opening a recovery episode`,
+        detail: boundText(result.summary),
+        ...(state.recoveryEpisodeId !== undefined ? { episodeId: state.recoveryEpisodeId } : {}),
+      },
+    ),
+  };
+}
+
 /** Slack after a stated reset time before the job runs again. */
 const QUOTA_RESET_MARGIN_MS = 30_000;
 /** Consecutive pauses for one job; a reset that keeps passing without relief is not the environment waiting. */
@@ -2305,6 +2364,8 @@ interface RetryFlags {
   limit: number;
   graphCorrectionTrial: boolean;
   supervisorWorkDispatch: boolean;
+  /** The dispatch reason, when the controller runs the job again for another cause than a declared-retryable failure. */
+  reason?: string;
 }
 
 async function prepareDispatch(
@@ -2752,11 +2813,12 @@ function scopeViolation(
   // The controller found this failure, not the executor: whatever the
   // executor declared retryable, rerunning the job unchanged would repeat it.
   // A usage limit the agent hit after the violation is not what stopped the job either: scope recovery comes first.
+  // Nor is a timeout: a session that wrote out of scope is not continued.
   const { retryLimit: _declared, resetAt: _reset, ...kept } = result;
   void _declared;
   void _reset;
   const { failureKind, ...rest } = kept;
-  const failure = failureKind === "quota" ? {} : failureKind !== undefined ? { failureKind } : {};
+  const failure = failureKind === "quota" || failureKind === "timeout" ? {} : failureKind !== undefined ? { failureKind } : {};
   return { ...rest, ...failure, status: "failed", summary: boundText(`${violation}${reported}`) };
 }
 
@@ -2774,6 +2836,8 @@ function applyDispatchResult(
     canRecover: boolean;
     /** The workspace change the job ran against, stamped on its evidence. */
     candidateDigest?: string | undefined;
+    /** Whether the job changed the worktree; undefined when it could not be observed. */
+    worktreeChanged?: boolean | undefined;
   },
 ): DurableRunState {
   const { job, operationId, generation, isCorrection, result, candidateDigest } = args;
@@ -2878,11 +2942,20 @@ function applyDispatchResult(
         blocker: paused.stop!.blocker,
       };
     }
+    const timedOut = continueAfterTimeout(unsettled, job, result, operationId, retryFlags, args.worktreeChanged);
+    if (timedOut.state !== undefined) return timedOut.state;
     const retried = scheduleExecutorRetry(unsettled, job, result, operationId, retryFlags);
     if (retried.state !== undefined) return retried.state;
     const rest = retried.cleared;
     if (args.canRecover) {
       const executorId = job.executor?.id ?? job.kind;
+      if (timedOut.declined !== undefined) {
+        return enterRecovery(
+          rest,
+          "executor_failed",
+          boundText(`executor ${executorId} ${result.status} (its session was not continued: ${timedOut.declined}): ${result.summary}`),
+        );
+      }
       if (retried.exhausted !== undefined) {
         return enterRecovery(
           rest,

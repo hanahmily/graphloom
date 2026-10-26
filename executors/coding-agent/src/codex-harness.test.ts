@@ -238,7 +238,9 @@ describe("Codex harness", () => {
       GRAPHLOOM_CODEX_PASS_ENV: "A,B",
     });
     expect(() => codingAgentBinding({ harness: codexHarnessModule, codex: { codexHome: "rel" } })).toThrow("absolute");
-    expect(() => codingAgentBinding({ harness: codexHarnessModule, timeoutMs: 1_000 })).toThrow("codex.responseTimeoutMs");
+    // The default watchdog is fitted inside each job's wall clock; an explicit one must fit the default job.
+    expect(() => codingAgentBinding({ harness: codexHarnessModule, timeoutMs: 1_000 })).not.toThrow();
+    expect(() => codingAgentBinding({ harness: codexHarnessModule, timeoutMs: 1_000, codex: { responseTimeoutMs: 1_000 } })).toThrow("codex.responseTimeoutMs");
   });
 });
 

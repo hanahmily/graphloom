@@ -2,7 +2,7 @@ import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { claudeOptions, codexOptions, createCliRunner } from "../src/cli-runner.js";
+import { createCliRunner } from "../src/cli-runner.js";
 import { loadRunnerConfig, parseRunnerConfig, requireRunnerConfig } from "../src/runner-config.js";
 
 const dirs: string[] = [];
@@ -133,18 +133,26 @@ describe("operator runner configuration", () => {
     expect((await requireRunnerConfig({ GRAPHLOOM_RUNNER_CONFIG: file }))?.pi).toEqual({ provider: "minimax-cn", modelId: "MiniMax-M3" });
   });
 
-  it("fits Claude Code's default watchdogs inside a shorter job timeout, and keeps explicit ones", () => {
-    const claude = (config: Record<string, unknown>) => claudeOptions(parseRunnerConfig({ harness: "claude-code", allowUnrestricted: true, ...config }));
-    expect(claude({})).toEqual({});
-    expect(claude({ timeoutMs: 600_000 })).toEqual({ responseTimeoutMs: 300_000 });
-    expect(claude({ timeoutMs: 120_000 })).toEqual({ startupTimeoutMs: 60_000, responseTimeoutMs: 60_000 });
-    expect(claude({ timeoutMs: 120_000, claude: { startupTimeoutMs: 0, responseTimeoutMs: 90_000 } })).toEqual({ startupTimeoutMs: 0, responseTimeoutMs: 90_000 });
-    expect(() => createCliRunner(parseRunnerConfig({ harness: "claude-code", allowUnrestricted: true, timeoutMs: 120_000, claude: { responseTimeoutMs: 120_000 } })))
+  it("leaves default watchdogs to each job's own wall clock, and refuses explicit ones the default job would cut off", () => {
+    const parse = (config: Record<string, unknown>) => parseRunnerConfig({ harness: "claude-code", allowUnrestricted: true, ...config });
+    // A short default job no longer bakes half of it into the watchdogs: a job asking for longer keeps the full ones.
+    expect(() => createCliRunner(parse({ timeoutMs: 120_000 }))).not.toThrow();
+    expect(() => createCliRunner(parse({ timeoutMs: 120_000, claude: { startupTimeoutMs: 0, responseTimeoutMs: 90_000 } }))).not.toThrow();
+    expect(() => createCliRunner(parse({ timeoutMs: 120_000, claude: { responseTimeoutMs: 120_000 } })))
       .toThrow("claude.responseTimeoutMs (120000 ms) must be shorter than the job timeout (120000 ms)");
-    const codex = (config: Record<string, unknown>) => codexOptions(parseRunnerConfig({ harness: "codex", allowUnrestricted: true, ...config }));
-    expect(codex({})).toEqual({});
-    expect(codex({ timeoutMs: 600_000 })).toEqual({ responseTimeoutMs: 300_000 });
+    expect(() => createCliRunner(parseRunnerConfig({ harness: "codex", allowUnrestricted: true, timeoutMs: 120_000 }))).not.toThrow();
     expect(() => createCliRunner(parseRunnerConfig({ harness: "codex", allowUnrestricted: true, timeoutMs: 120_000, codex: { responseTimeoutMs: 120_000 } })))
       .toThrow("codex.responseTimeoutMs (120000 ms) must be shorter than the job timeout (120000 ms)");
+  });
+
+  it("reads the most wall clock a job may ask for, at least the default job's", () => {
+    const parse = (config: Record<string, unknown>) => parseRunnerConfig({ harness: "claude-code", allowUnrestricted: true, ...config });
+    expect(parse({ maxTimeoutMs: 6 * 3_600_000 }).maxTimeoutMs).toBe(6 * 3_600_000);
+    expect(parse({ timeoutMs: 600_000, maxTimeoutMs: 600_000 })).toMatchObject({ timeoutMs: 600_000, maxTimeoutMs: 600_000 });
+    expect(() => parse({ maxTimeoutMs: 1_800_000 })).toThrow("maxTimeoutMs must be at least timeoutMs (3600000 ms)");
+    expect(() => parse({ timeoutMs: 600_000, maxTimeoutMs: 300_000 })).toThrow("maxTimeoutMs must be at least timeoutMs (600000 ms)");
+    expect(() => parse({ maxTimeoutMs: 25 * 3_600_000 })).toThrow("maxTimeoutMs must be at most 86400000");
+    expect(() => parse({ maxTimeoutMs: 0 })).toThrow("maxTimeoutMs: expected positive integer milliseconds");
+    expect(() => createCliRunner(parse({ maxTimeoutMs: 6 * 3_600_000 }))).not.toThrow();
   });
 });

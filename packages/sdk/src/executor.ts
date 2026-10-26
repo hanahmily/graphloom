@@ -87,6 +87,12 @@ export interface ExecutorContext {
   /** Present for agent jobs: where a resumable session may be kept. */
   session?: ExecutorSession;
   /**
+   * The wall clock (ms) the host gives this job: the job's own `timeoutMs`
+   * clamped to the operator's ceiling, or the operator's default. An
+   * executor with its own watchdogs keeps them shorter than this.
+   */
+  timeoutMs?: number;
+  /**
    * The job's declared result contract, resolved by the controller from the
    * run's GraphDefinition.resultContracts: the schema to constrain and
    * validate structured output against, and any per-dispatch reference id
@@ -109,6 +115,12 @@ export interface ExecutorSession {
   dir: string;
   /** Session to continue. An executor that cannot restore it must fail, not start fresh. */
   resume?: string;
+  /**
+   * With `resume`: why the controller continues the session (its last turn
+   * ran out of time, say), for the executor to tell the agent before the
+   * assignment. Controller-authored text, never the plugin's.
+   */
+  note?: string;
 }
 
 export const MAX_SESSION_REF_CHARS = 256;
@@ -212,7 +224,19 @@ export interface ExecutorBinding {
   allowUnrestricted?: boolean;
   /** Wall-clock limit (ms) for one job in the package's executor process. Default: the runner's. */
   timeoutMs?: number;
+  /**
+   * Most wall clock (ms) a job may ask for with its own `JobSpec.timeoutMs`;
+   * a longer request is clamped to it. Default: `timeoutMs`, so a job may ask
+   * for less than the default but not more.
+   */
+  maxTimeoutMs?: number;
 }
+
+/** Longest wall clock a job may ask for (one day); also keeps it a valid timer delay. */
+export const MAX_JOB_TIMEOUT_MS = 24 * 60 * 60_000;
+
+/** Most times the controller continues one stage's timed-out agent session per generation, whatever a job asks. */
+export const MAX_TIMEOUT_CONTINUATIONS = 3;
 
 /** Built-in agent executor id — legacy `kind: "agent"` jobs pin to this. */
 export const BUILTIN_AGENT_EXECUTOR_ID = "graphloom.agent/run";
@@ -348,6 +372,19 @@ export function pinJobExecutor(job: JobSpec): JobSpec {
     (typeof job.continueFrom !== "string" || job.continueFrom.length === 0 || job.continueFrom.length > 128)
   ) {
     throw new Error("job continueFrom must be an operation id of at most 128 characters");
+  }
+  if (
+    job.timeoutMs !== undefined &&
+    (typeof job.timeoutMs !== "number" || !Number.isSafeInteger(job.timeoutMs) || job.timeoutMs < 1 || job.timeoutMs > MAX_JOB_TIMEOUT_MS)
+  ) {
+    throw new Error(`job timeoutMs must be a whole number of milliseconds from 1 to ${MAX_JOB_TIMEOUT_MS}`);
+  }
+  if (job.timeoutContinuations !== undefined) {
+    const n = job.timeoutContinuations;
+    if (typeof n !== "number" || !Number.isSafeInteger(n) || n < 0 || n > MAX_TIMEOUT_CONTINUATIONS) {
+      throw new Error(`job timeoutContinuations must be a whole number from 0 to ${MAX_TIMEOUT_CONTINUATIONS}`);
+    }
+    if (n > 0 && job.kind !== "agent") throw new Error(`only agent jobs carry sessions; a ${job.kind} job cannot set timeoutContinuations`);
   }
 
   if (job.executor) {

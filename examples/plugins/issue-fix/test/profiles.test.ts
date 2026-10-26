@@ -121,7 +121,7 @@ describe.skipIf(!existsSync(path.join(banyandbFixDist, "index.js")))("the banyan
     });
     expect(monolithic(v1(strip(ours)))).toEqual(strip(withoutLicense(theirs)));
     expect(theirs.environment?.prepare?.map((c) => c.argv.join(" "))).toEqual(["make generate"]);
-    expect(ours).toMatchObject({ graphId: "issue-fix", version: "0.12.1", privateStateSchema: "issue-fix-private-v1" });
+    expect(ours).toMatchObject({ graphId: "issue-fix", version: "0.13.0", privateStateSchema: "issue-fix-private-v1" });
   });
 
   it("splits make generate into separately cached steps with narrow inputs (#174)", () => {
@@ -352,6 +352,22 @@ describe("profiles", () => {
     expect(broken({ budgets: { jobs: 0 } })).toThrow(/budgets.jobs must be a positive integer/);
   });
 
+  it("reads the coding agents' wall clock and timeout continuations, and refuses unusable ones", () => {
+    expect(banyandb.agent).toBeUndefined();
+    expect(banyandb.timeoutContinuations).toBe(1);
+    expect(parseProfile(shippedProfile("banyandb-ql"))).toMatchObject({ agent: { timeoutMs: 10_800_000 }, timeoutContinuations: 1 });
+    for (const config of [GRAPHLOOM, CANOPY, BANYANDB]) expect(parseProfile(config).agent?.timeoutMs).toBeUndefined();
+    const agent = (value: unknown) => () => parseProfile({ ...(GRAPHLOOM as object), agent: value });
+    expect(agent({ timeoutMs: 7_200_000, timeoutContinuations: 0 })()).toMatchObject({ agent: { timeoutMs: 7_200_000 }, timeoutContinuations: 0 });
+    expect(agent({ timeoutContinuations: 3 })().timeoutContinuations).toBe(3);
+    expect(agent([])).toThrow(/agent must be an object/);
+    expect(agent({ timeout: 1 })).toThrow(/agent.timeout is not an agent setting/);
+    expect(agent({ timeoutMs: 0 })).toThrow(/agent.timeoutMs must be a positive integer/);
+    expect(agent({ timeoutMs: 25 * 3_600_000 })).toThrow(/agent.timeoutMs must be a positive integer of at most 86400000/);
+    expect(agent({ timeoutContinuations: 4 })).toThrow(/agent.timeoutContinuations must be a whole number from 0 to 3/);
+    expect(agent({ timeoutContinuations: -1 })).toThrow(/agent.timeoutContinuations/);
+  });
+
   it("checks the context documents a profile declares (#195)", () => {
     const issues = (context: unknown) => () => parseProfile({ ...(GRAPHLOOM as object), issues: { owner: "hanahmily", repo: "graphloom", context } });
     expect(issues([{ path: "docs/a.md" }, { repo: "acme/design", path: "docs/b.md", ref: "main" }])).not.toThrow();
@@ -454,7 +470,7 @@ describe("profiles", () => {
   it("ships the banyandb-ql profile in the manifest's pinned files and describes it under the graph's version (#197)", async () => {
     const manifest = JSON.parse(await readFile(path.join(here, "../graphloom.manifest.json"), "utf8")) as { digests: { files: Record<string, string> } };
     expect(Object.keys(manifest.digests.files)).toContain("profiles/banyandb-ql.json");
-    expect(createGraph().describe(shippedProfile("banyandb-ql"))).toMatchObject({ graphId: "issue-fix", version: "0.12.1" });
+    expect(createGraph().describe(shippedProfile("banyandb-ql"))).toMatchObject({ graphId: "issue-fix", version: "0.13.0" });
   });
 });
 

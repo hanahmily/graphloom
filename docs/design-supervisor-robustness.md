@@ -156,6 +156,7 @@ trigger and failure class:
 | Empty or thinking-only reply | Re-ask once with "call exactly one tool" | Once more |
 | Interrupted read-only job | Retry (already implemented in `reconcile.ts`) | No |
 | Executor transient failure (declared retryable by the executor) | Retry with backoff up to the executor's limit | No |
+| Agent job timed out after changing the worktree, with a resumable session, and the job declared `timeoutContinuations` | Continue that session, up to the job's count per stage and generation ([timeout continuation](design-typescript-core.md#job-wall-clock-and-timeout-continuation)) | No |
 | `stalled` with new evidence since the last episode | Return to normal | No |
 
 The supervisor host classifies provider errors (quota, overflow, auth, empty,

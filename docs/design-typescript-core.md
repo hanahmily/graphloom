@@ -874,6 +874,39 @@ Until those limits or hard blockers apply, the supervisor treats unfinished requ
 stages as work still owed. Broad repair authority does not guarantee success for
 every task or plugin.
 
+### Job wall clock and timeout continuation
+
+A job may ask for its own wall clock with `JobSpec.timeoutMs` (a positive
+integer of at most one day, `MAX_JOB_TIMEOUT_MS`), as data: a graph sizes long
+work, such as issue-fix's `agent.timeoutMs` profile setting. The request stays
+finite twice over. The runner clamps it to the operator's ceiling for the
+executor (`ExecutorBinding.maxTimeoutMs`; the coding agent's defaults to four
+hours, `maxTimeoutMs` in the runner config) and tells the executor the result
+(`ExecutorContext.timeoutMs`), so a harness fits its stall watchdogs inside it.
+The controller aborts any job once the run's active-time budget runs out, so no
+request outlives the run's `activeMs`. A job without a request keeps the
+operator's default.
+
+A timed-out job settles as `failureKind: "timeout"`. The runner gives the
+executor its stop grace to report what it kept, so a harness that saves its
+session while stopping (Claude Code, Pi, the scripted harness) leaves a
+resumable session. An agent job may declare `timeoutContinuations` (0 to 3,
+`MAX_TIMEOUT_CONTINUATIONS`): when it times out after changing the worktree
+(the controller's own before/after fingerprints, not the executor's claim) and
+its session was kept, the controller queues the same job with `continueFrom`
+the timed-out operation instead of opening a recovery episode, and the
+executor tells the agent why (`ExecutorSession.note`): its last turn ran out of
+time and the worktree keeps its changes. At most the declared count of
+continuations runs per stage and generation (`timeoutContinuations` in run
+state, keyed `g<generation>:<stage>`). Each is admitted like a queued retry:
+it spends a decision, a job and its agent invocations through the usual budget
+checks, and continues, rather than repeats, a correction the timed-out try
+already counted. A timeout that changed nothing, kept no session, or exceeds
+the count goes to recovery as `executor_failed`, with the reason it was not
+continued. The plugin never sees the failure first: executor failures reach
+recovery from the controller, so the continuation is a generic contract
+declared on the job, not plugin code.
+
 ## 11. Minimal example and verification
 
 Hello's required stages are Write and Review:

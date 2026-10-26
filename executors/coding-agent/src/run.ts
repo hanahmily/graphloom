@@ -161,6 +161,7 @@ export function createCodingAgentExecutor(
           ...(input.harnessOptions !== undefined ? { options: input.harnessOptions } : {}),
           ...(ctx.session !== undefined ? { sessionDir: ctx.session.dir } : {}),
           ...(resume !== undefined ? { resume } : {}),
+          ...(ctx.timeoutMs !== undefined ? { timeoutMs: ctx.timeoutMs } : {}),
         });
       } catch (err) {
         if (resume === undefined) throw err;
@@ -191,7 +192,8 @@ export function createCodingAgentExecutor(
           ...(input.purpose !== undefined ? { purpose: input.purpose } : {}),
         };
         const request = {
-          assignment: resume !== undefined ? `${CONTINUATION_NOTICE}\n\n${input.assignment}` : input.assignment,
+          // The controller says why it continues the session (a turn that ran out of time) when it is not a new attempt.
+          assignment: resume !== undefined ? `${ctx.session?.note ?? CONTINUATION_NOTICE}\n\n${input.assignment}` : input.assignment,
           ...(resultContract !== undefined
             ? { resultContract }
             : input.resultSchema !== undefined

@@ -5,8 +5,6 @@ import {
   CLAUDE_API_KEY_CREDENTIAL,
   CLAUDE_BIN_ENV,
   CLAUDE_CONFIG_DIR_ENV,
-  CLAUDE_DEFAULT_RESPONSE_TIMEOUT_MS,
-  CLAUDE_DEFAULT_STARTUP_TIMEOUT_MS,
   CLAUDE_MODEL_ENV,
   CLAUDE_PASS_ENV_ENV,
   CLAUDE_RESPONSE_TIMEOUT_ENV,
@@ -14,7 +12,6 @@ import {
 } from "./claude-config.js";
 import {
   CODEX_BIN_ENV,
-  CODEX_DEFAULT_RESPONSE_TIMEOUT_MS,
   CODEX_HOME_ENV,
   CODEX_MODEL_ENV,
   CODEX_PASS_ENV_ENV,
@@ -159,6 +156,11 @@ export interface CodingAgentBindingOptions {
   harness: string;
   /** Wall-clock limit (ms) for one coding job. Default: one hour. */
   timeoutMs?: number;
+  /**
+   * Most wall clock (ms) one coding job may ask for with its own `timeoutMs`.
+   * Default: `DEFAULT_MAX_CODING_TIMEOUT_MS` (four hours), or `timeoutMs` when that is longer.
+   */
+  maxTimeoutMs?: number;
   claude?: ClaudeCodeBindingOptions;
   codex?: CodexBindingOptions;
   pi?: PiBindingOptions;
@@ -166,6 +168,8 @@ export interface CodingAgentBindingOptions {
 
 /** A coding job runs many model turns and commands, far past the runner's default job timeout. */
 export const DEFAULT_CODING_TIMEOUT_MS = 60 * 60_000;
+/** A job may ask for up to this much by default: the controller's default active-run budget (§10). */
+export const DEFAULT_MAX_CODING_TIMEOUT_MS = 4 * 60 * 60_000;
 
 /**
  * Operator binding for the coding agent: selects the harness and consents to
@@ -177,27 +181,25 @@ export function codingAgentBinding(options: CodingAgentBindingOptions): Executor
   const codex = options.codex ?? {};
   const pi = options.pi ?? {};
   const timeoutMs = options.timeoutMs ?? DEFAULT_CODING_TIMEOUT_MS;
+  const maxTimeoutMs = options.maxTimeoutMs ?? Math.max(timeoutMs, DEFAULT_MAX_CODING_TIMEOUT_MS);
+  if (maxTimeoutMs < timeoutMs) {
+    throw new Error(`maxTimeoutMs (${maxTimeoutMs} ms) must be at least timeoutMs (${timeoutMs} ms)`);
+  }
   if (claude.configDir !== undefined && !path.isAbsolute(claude.configDir)) {
     throw new Error("claude.configDir must be an absolute path");
   }
   if (codex.codexHome !== undefined && !path.isAbsolute(codex.codexHome)) {
     throw new Error("codex.codexHome must be an absolute path");
   }
-  if (options.codex !== undefined || options.harness === codexHarnessModule) {
-    const ms = codex.responseTimeoutMs ?? CODEX_DEFAULT_RESPONSE_TIMEOUT_MS;
-    if (ms >= timeoutMs) {
-      throw new Error(`codex.responseTimeoutMs (${ms} ms) must be shorter than the job timeout (${timeoutMs} ms), or the job is killed before the stall is reported`);
-    }
+  // The harness fits a default watchdog inside each job's own wall clock
+  // (fitWatchdog); one the operator set explicitly must already fit the default job.
+  if (codex.responseTimeoutMs !== undefined && codex.responseTimeoutMs >= timeoutMs) {
+    throw new Error(`codex.responseTimeoutMs (${codex.responseTimeoutMs} ms) must be shorter than the job timeout (${timeoutMs} ms), or the job is killed before the stall is reported`);
   }
-  if (options.claude !== undefined || options.harness === claudeCodeHarnessModule) {
-    const watchdogs = {
-      startupTimeoutMs: claude.startupTimeoutMs ?? CLAUDE_DEFAULT_STARTUP_TIMEOUT_MS,
-      responseTimeoutMs: claude.responseTimeoutMs ?? CLAUDE_DEFAULT_RESPONSE_TIMEOUT_MS,
-    };
-    for (const [name, ms] of Object.entries(watchdogs)) {
-      if (ms >= timeoutMs) {
-        throw new Error(`claude.${name} (${ms} ms) must be shorter than the job timeout (${timeoutMs} ms), or the job is killed before the stall is reported`);
-      }
+  for (const name of ["startupTimeoutMs", "responseTimeoutMs"] as const) {
+    const ms = claude[name];
+    if (ms !== undefined && ms >= timeoutMs) {
+      throw new Error(`claude.${name} (${ms} ms) must be shorter than the job timeout (${timeoutMs} ms), or the job is killed before the stall is reported`);
     }
   }
   const credentials: Record<string, string> = {
@@ -208,6 +210,7 @@ export function codingAgentBinding(options: CodingAgentBindingOptions): Executor
     allowedEffects: ["read", "write"],
     allowUnrestricted: true,
     timeoutMs,
+    maxTimeoutMs,
     env: {
       [CODING_HARNESS_ENV]: options.harness,
       ...(claude.command !== undefined ? { [CLAUDE_BIN_ENV]: claude.command } : {}),

@@ -72,6 +72,18 @@ export interface CodingSessionOptions {
    * or throws; it must never start a fresh one in its place.
    */
   resume?: string;
+  /** The job's wall clock (ms), when the host told it: stall watchdogs are kept inside it (`fitWatchdog`). */
+  timeoutMs?: number;
+}
+
+/**
+ * A stall watchdog kept inside the job's own wall clock, so a stall is
+ * reported before the host kills the job: one that would outlast the job is
+ * cut to half of it. 0 (disabled) and an unknown wall clock leave it as is.
+ */
+export function fitWatchdog(ms: number, jobTimeoutMs: number | undefined): number {
+  if (jobTimeoutMs === undefined || ms <= 0 || ms < jobTimeoutMs) return ms;
+  return Math.floor(jobTimeoutMs / 2);
 }
 
 /**

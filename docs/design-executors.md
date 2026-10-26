@@ -91,13 +91,21 @@ stdin, its declared configuration, and its effect grant, which defaults to
 `read`. Every non-empty bound credential is redacted from job results, and an
 empty credential is rejected. A job that outlasts the binding's `timeoutMs`,
 or the runner's default of 30 seconds when the binding sets none, fails.
+A job may ask for its own wall clock with `JobSpec.timeoutMs`; the runner
+clamps it to the binding's `maxTimeoutMs` (default: `timeoutMs`, so a job may
+ask for less but not more) and passes the result to the executor as
+`ctx.timeoutMs`, so an executor with its own watchdogs keeps them shorter.
 
 On a timeout or a run stop, the runner sends the executor process SIGTERM.
 That aborts the executor's `signal` and refuses the tool and model requests it
 is still waiting on, so it can stop processes it started in their own process
 groups, such as an agent CLI and its commands. The job settles only when the
 process has exited, or after a 10-second grace, when it is killed. Processes an
-executor leaves behind after ignoring its signal are not tracked.
+executor leaves behind after ignoring its signal are not tracked. A timed-out
+job settles as `failed` with `failureKind: "timeout"`, whatever the executor
+answers while it stops; a `sessionRef` and evidence it reports within the grace
+are kept, so the controller can continue the session
+([timeout continuation](design-typescript-core.md#job-wall-clock-and-timeout-continuation)).
 
 The process runs under Node's permission model. It may read only its own
 package and the dependencies Node resolves for it. File writes, child
@@ -185,7 +193,8 @@ protocol:
   `codingAgentBinding({ harness })` sets it, grants read and write effects, and
   consents to the package's unrestricted isolation. It also sets the job
   timeout to one hour unless `timeoutMs` says otherwise, because a coding job
-  runs far longer than the runner's default.
+  runs far longer than the runner's default, and lets a job ask for up to
+  `maxTimeoutMs` (default four hours, the default active-run budget).
 - The job result is the agent's claim: its status, structured output, the tool
   calls it made with their child operation ids, and its model request count.
 
@@ -255,8 +264,11 @@ configured from the environment):
   (default 600 s, `GRAPHLOOM_CLAUDE_RESPONSE_TIMEOUT_MS`). The response timer
   pauses while a tool or subagent is running; 0 disables either timer. A
   stalled run still saves its session, so a later job can continue it.
-  `codingAgentBinding` refuses a timer that is not shorter than the job
-  timeout, because the runner would kill the job before the stall is reported.
+  Each job's watchdogs are fitted inside its own wall clock (`ctx.timeoutMs`):
+  one that would outlast the job is cut to half of it, so a job that asks for
+  more keeps the full watchdogs and a shorter one still reports a stall.
+  `codingAgentBinding` refuses an explicitly configured timer that is not
+  shorter than the default job timeout.
 - The run's token totals (input, output, cache read, cache write) and cost are
   reported as `usage` in the job's `codingAgent` evidence. They come from the
   last `result` event's `modelUsage` and `total_cost_usd`, which cover every

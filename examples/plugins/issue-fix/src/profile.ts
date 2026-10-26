@@ -5,7 +5,7 @@
  * (the regression runners and their report parsers) is selected by name.
  * See docs/design-issue-fix-graph.md for the schema.
  */
-import { GRAPH_BUDGET_KEYS, type EnvironmentCommand, type EnvironmentDeclaration, type GraphBudgetDefaults } from "@graphloom/sdk";
+import { GRAPH_BUDGET_KEYS, MAX_JOB_TIMEOUT_MS, MAX_TIMEOUT_CONTINUATIONS, type EnvironmentCommand, type EnvironmentDeclaration, type GraphBudgetDefaults } from "@graphloom/sdk";
 import { COMMAND } from "./constants.js";
 import { runnerById, RUNNERS, type RegressionRunner, type RunnerId } from "./runners/index.js";
 
@@ -158,6 +158,16 @@ export interface ProfileData {
   /** Harnesses for each role; defaults: Claude Code implements and verifies, Codex reviews. */
   harnesses?: { implementer?: string; reviewer?: string; verifier?: string };
   /**
+   * The coding agents' wall clock. `timeoutMs`: how long each coding-agent job
+   * (plan, implement, review, verify) asks to run, instead of the operator's
+   * default (one hour); the operator's `maxTimeoutMs` still caps it, and the
+   * run's active time bounds every job. `timeoutContinuations` (default 1, at
+   * most 3, 0 turns it off): how many times per Fix generation the controller
+   * continues the implementer's own session when it runs out of time after
+   * changing the worktree, before a recovery episode.
+   */
+  agent?: { timeoutMs?: number; timeoutContinuations?: number };
+  /**
    * What a run on this repository is expected to need, from measured runs
    * (docs/budgets.md). The graph declares them as its `defaultBudgets`;
    * intake applies them over the controller's defaults, and the task's own
@@ -171,10 +181,13 @@ export interface Profile extends ProfileData {
   runner: RegressionRunner;
   regressionTimeoutMs: number;
   roles: { implementer: string; reviewer: string; verifier: string };
+  /** `agent.timeoutContinuations`, defaulted. */
+  timeoutContinuations: number;
 }
 
 const MINUTE = 60_000;
 const DEFAULT_REGRESSION_TIMEOUT_MS = 30 * MINUTE;
+const DEFAULT_TIMEOUT_CONTINUATIONS = 1;
 const RESERVED_COMMANDS: ReadonlySet<string> = new Set(Object.values(COMMAND));
 const HARNESSES: Readonly<Record<string, string>> = { "claude-code": "Claude Code", codex: "Codex", pi: "Pi" };
 
@@ -377,12 +390,25 @@ export function parseProfile(config: unknown): Profile {
   // A verifier from the reviewer's own family would judge its own findings.
   need(roles.verifier !== roles.reviewer, "harnesses.verifier must differ from harnesses.reviewer");
   checkBudgets(p.budgets);
+  const agent = p.agent ?? {};
+  need(isObject(agent), "agent must be an object");
+  const a = agent as Record<string, unknown>;
+  for (const key of Object.keys(a)) need(key === "timeoutMs" || key === "timeoutContinuations", `agent.${key} is not an agent setting; they are timeoutMs and timeoutContinuations`);
+  need(
+    a.timeoutMs === undefined || (Number.isSafeInteger(a.timeoutMs) && (a.timeoutMs as number) > 0 && (a.timeoutMs as number) <= MAX_JOB_TIMEOUT_MS),
+    `agent.timeoutMs must be a positive integer of at most ${MAX_JOB_TIMEOUT_MS} (one day)`,
+  );
+  need(
+    a.timeoutContinuations === undefined || (Number.isSafeInteger(a.timeoutContinuations) && (a.timeoutContinuations as number) >= 0 && (a.timeoutContinuations as number) <= MAX_TIMEOUT_CONTINUATIONS),
+    `agent.timeoutContinuations must be a whole number from 0 to ${MAX_TIMEOUT_CONTINUATIONS}`,
+  );
   const data = structuredClone(config) as unknown as ProfileData;
   return {
     ...data,
     runner: runner!,
     regressionTimeoutMs: (regression.timeoutMs as number | undefined) ?? DEFAULT_REGRESSION_TIMEOUT_MS,
     roles: roles as Profile["roles"],
+    timeoutContinuations: (a.timeoutContinuations as number | undefined) ?? DEFAULT_TIMEOUT_CONTINUATIONS,
   };
 }
 

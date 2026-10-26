@@ -440,7 +440,9 @@ Agent runner: run and resume refuse to start without $GRAPHLOOM_RUNNER_CONFIG or
 Use "pi" for the Pi harness, or "codex" for Codex, which runs read-only jobs
 only. The agent runs with your user permissions; credentials come from the
 harness login. Optional claude/codex/pi settings select the executable, model,
-provider, agent or Codex home directory, and environment names.
+provider, agent or Codex home directory, and environment names. "timeoutMs"
+bounds one agent job (default 1h); "maxTimeoutMs" is the most a job may ask for
+with its own timeoutMs (default 4h).
 "harnesses": ["claude-code", "pi", "codex"] lets a job choose any of them with
 input.harness. Command jobs run as you in the job's workspace ("command":
 { "timeoutMs": ... } bounds one job). "github": { "tokenEnv": "GITHUB_TOKEN" }

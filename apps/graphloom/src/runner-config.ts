@@ -2,9 +2,11 @@ import { constants } from "node:fs";
 import { access, readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { MAX_JOB_TIMEOUT_MS } from "@graphloom/sdk";
 import {
   CLAUDE_BIN_ENV,
   CODEX_BIN_ENV,
+  DEFAULT_CODING_TIMEOUT_MS,
   PI_MODEL_ENV,
   PI_PROVIDER_ENV,
   codingAgentExecutorPackage,
@@ -32,7 +34,10 @@ export interface RunnerConfig {
   /** Harnesses a job may choose with `input.harness`. Default: only `harness`. */
   harnesses?: HarnessName[];
   allowUnrestricted: true;
+  /** Wall clock (ms) for one coding-agent job. Default one hour. */
   timeoutMs?: number;
+  /** Most wall clock (ms) a coding-agent job may ask for with its own `timeoutMs`. Default four hours, or `timeoutMs` when longer. */
+  maxTimeoutMs?: number;
   claude?: Omit<ClaudeCodeBindingOptions, "apiKey">;
   /** Codex serves read-only jobs only, with its own login. */
   codex?: CodexBindingOptions;
@@ -133,7 +138,7 @@ function expandHome(p: string): string {
 }
 
 export function parseRunnerConfig(value: unknown, source = "runner config"): RunnerConfig {
-  const obj = settings(value, source, ["harness", "harnesses", "allowUnrestricted", "timeoutMs", "claude", "codex", "pi", "github", "command", "notify"]);
+  const obj = settings(value, source, ["harness", "harnesses", "allowUnrestricted", "timeoutMs", "maxTimeoutMs", "claude", "codex", "pi", "github", "command", "notify"]);
   if (!isHarness(obj.harness)) throw new Error(`${source}: harness must be one of ${HARNESS_NAMES.join(", ")}`);
   if (obj.allowUnrestricted !== true) throw new Error(`${source}: allowUnrestricted must be true to run an agent with your user permissions`);
   const config: RunnerConfig = { harness: obj.harness, allowUnrestricted: true };
@@ -144,6 +149,13 @@ export function parseRunnerConfig(value: unknown, source = "runner config"): Run
     config.harnesses = [...new Set(obj.harnesses)];
   }
   if (obj.timeoutMs !== undefined) config.timeoutMs = milliseconds(obj.timeoutMs, `${source}: timeoutMs`, false);
+  if (obj.maxTimeoutMs !== undefined) {
+    config.maxTimeoutMs = milliseconds(obj.maxTimeoutMs, `${source}: maxTimeoutMs`, false);
+    if (config.maxTimeoutMs > MAX_JOB_TIMEOUT_MS) throw new Error(`${source}: maxTimeoutMs must be at most ${MAX_JOB_TIMEOUT_MS} (one day)`);
+    if (config.maxTimeoutMs < (config.timeoutMs ?? DEFAULT_CODING_TIMEOUT_MS)) {
+      throw new Error(`${source}: maxTimeoutMs must be at least timeoutMs (${config.timeoutMs ?? DEFAULT_CODING_TIMEOUT_MS} ms)`);
+    }
+  }
   if (obj.github !== undefined) {
     const nested = `${source}: github`;
     const g = settings(obj.github, nested, ["tokenEnv", "baseUrl"]);

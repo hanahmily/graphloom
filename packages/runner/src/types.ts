@@ -101,8 +101,10 @@ export interface JobResult {
    * in-turn correction bound. "quota": the executor's harness refused the
    * work until its usage allowance renews (`resetAt`, when it said when). A
    * waiting condition of the environment, not something recovery can fix.
+   * "timeout": the job ran out of its wall clock and was stopped; a
+   * `sessionRef` it still reported while stopping lets a later job continue it.
    */
-  failureKind?: "contract_violation" | "quota";
+  failureKind?: "contract_violation" | "quota" | "timeout";
   /** With `failureKind: "quota"`: the absolute time (ISO 8601) the allowance renews, when the executor knows it. */
   resetAt?: string;
   /**

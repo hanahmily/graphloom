@@ -42,6 +42,28 @@ export const executors = [
     },
   },
   {
+    // An agent that saves its session when stopped, as the coding-agent harnesses do.
+    id: "acme.group/session-on-abort",
+    version: "1",
+    effect: "read",
+    async execute(_input, ctx) {
+      const busy = setInterval(() => undefined, 1_000);
+      await new Promise((resolve) => {
+        ctx.signal?.addEventListener("abort", resolve, { once: true });
+      });
+      clearInterval(busy);
+      return { status: "failed", summary: "agent session aborted", sessionRef: "saved-1", evidence: [{ kind: "other", payload: { progress: "half" } }] };
+    },
+  },
+  {
+    id: "acme.group/report-timeout",
+    version: "1",
+    effect: "read",
+    async execute(_input, ctx) {
+      return { status: "ok", summary: String(ctx.timeoutMs) };
+    },
+  },
+  {
     id: "acme.group/ignore-abort",
     version: "1",
     effect: "read",

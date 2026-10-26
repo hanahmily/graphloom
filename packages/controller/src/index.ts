@@ -56,3 +56,4 @@ export { replayRun } from "./replay.js";
 export { CONTROLLER_STOP_CLASSES, classifyStop, FINAL_STOP_HELD_REMEDY, type StopClassification } from "./stop-class.js";
 export { budgetGranted, budgetsUsed, METERED_BUDGET_KEYS, type BudgetAmounts, type BudgetUsage, type MeteredBudgetKey } from "./budget-usage.js";
 export { readOwnerClaim, isClaimStale, type RunOwnerClaim } from "./owner.js";
+export { TIMEOUT_CONTINUATION_NOTE } from "./agent-sessions.js";

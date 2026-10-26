@@ -333,6 +333,9 @@
     "reviewer": "codex",
     "verifier": "claude-code"
   },
+  "agent": {
+    "timeoutMs": 10800000
+  },
   "budgets": {
     "agentInvocations": 6000,
     "jobs": 250,

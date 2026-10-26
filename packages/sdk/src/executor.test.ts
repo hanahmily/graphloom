@@ -13,6 +13,8 @@ import {
   BUILTIN_AGENT_EXECUTOR_ID,
   BUILTIN_COMMAND_EXECUTOR_ID,
   MAX_EXECUTOR_INPUT_BYTES,
+  MAX_JOB_TIMEOUT_MS,
+  MAX_TIMEOUT_CONTINUATIONS,
 } from "./executor.js";
 import { jsonSchemaProblem } from "./input-problem.js";
 import type { JobSpec } from "./types.js";
@@ -93,6 +95,23 @@ describe("pinJobExecutor", () => {
         executor: { id: "nope" },
       }),
     ).toThrow(/qualified/);
+  });
+
+  it("keeps a bounded per-job timeout and timeout continuations, and refuses malformed ones", () => {
+    const job: JobSpec = { stageId: "fix", kind: "agent", purpose: "work", instruction: "x", writeScope: ["."] };
+    expect(pinJobExecutor({ ...job, timeoutMs: 3 * 60 * 60_000, timeoutContinuations: 2 })).toMatchObject({
+      timeoutMs: 3 * 60 * 60_000,
+      timeoutContinuations: 2,
+    });
+    expect(pinJobExecutor({ ...job, timeoutMs: MAX_JOB_TIMEOUT_MS }).timeoutMs).toBe(MAX_JOB_TIMEOUT_MS);
+    for (const timeoutMs of [0, -1, 1.5, MAX_JOB_TIMEOUT_MS + 1, Number.NaN, "60000"]) {
+      expect(() => pinJobExecutor({ ...job, timeoutMs: timeoutMs as number })).toThrow(/timeoutMs must be a whole number/);
+    }
+    for (const n of [-1, 0.5, MAX_TIMEOUT_CONTINUATIONS + 1, "1"]) {
+      expect(() => pinJobExecutor({ ...job, timeoutContinuations: n as number })).toThrow(/timeoutContinuations must be a whole number/);
+    }
+    expect(() => pinJobExecutor({ ...job, kind: "command", timeoutContinuations: 1 })).toThrow(/command job cannot set timeoutContinuations/);
+    expect(pinJobExecutor({ ...job, kind: "command", timeoutContinuations: 0 }).timeoutContinuations).toBe(0);
   });
 });
 

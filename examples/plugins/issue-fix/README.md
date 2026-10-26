@@ -282,6 +282,24 @@ A missing document, or more than 200,000 bytes of them, stops the run before any
 ([#195](https://github.com/hanahmily/graphloom/issues/195); see
 [the design](../../../docs/design-issue-fix-graph.md#context-documents)).
 
+## Agent wall clock and timeout continuation (0.13.0)
+
+A profile's optional `agent` settings size the coding agents' jobs:
+
+- `timeoutMs` is the wall clock every coding-agent job (plan, implement, code
+  review, verification) asks for instead of the operator's default of one hour.
+  The runner clamps it to the operator's `maxTimeoutMs` (default four hours),
+  and the run's `activeMs` budget still bounds every job. `banyandb-ql` asks for
+  three hours, because its feature tickets outgrow one; the other profiles keep
+  the operator's default.
+- `timeoutContinuations` (default 1, at most 3, 0 turns it off) is how many
+  times per Fix generation the controller continues the implementer's own
+  session when its job runs out of time after changing the worktree, telling
+  the agent to check what is done and finish the rest. A timeout that changed
+  nothing, kept no session, or comes after the last continuation still opens a
+  supervisor episode. Each continuation is a dispatch charged to the run's
+  budgets, and continues, rather than repeats, the correction it belongs to.
+
 ## Rehearsal findings (0.12.1)
 
 - `bin/buf` is an output of the BanyanDB profiles' `generate-proto` step. `make lint` and

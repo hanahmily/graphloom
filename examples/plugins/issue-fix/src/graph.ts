@@ -144,7 +144,7 @@ import { finalSections } from "./final.js";
 import { cleanRun, codeReview, finalRun, implementerRecord, latestImplementerRecord, plannerRecord, reportText, validatorById, verifiedChecks } from "./validators.js";
 
 export const GRAPH_ID = "issue-fix";
-export const GRAPH_VERSION = "0.12.1";
+export const GRAPH_VERSION = "0.13.0";
 
 /** Graph bookkeeping; everything else is read back from recorded evidence. */
 export interface FixPrivateState {
@@ -1148,6 +1148,10 @@ function correctionFeedback(profile: Profile, evidence: EvidenceRecord[], digest
   return feedback;
 }
 
+/** The wall clock every coding-agent job asks for, when the profile sets one. */
+const agentClock = (profile: Profile): Pick<JobSpec, "timeoutMs"> =>
+  profile.agent?.timeoutMs !== undefined ? { timeoutMs: profile.agent.timeoutMs } : {};
+
 /** A plan continues the implementer's session when there is one, so a revision keeps what the planner read. */
 function planJob(ctx: Context, view: RunView, assignment: string): JobSpec {
   const from = implementerSession(view);
@@ -1161,6 +1165,7 @@ function planJob(ctx: Context, view: RunView, assignment: string): JobSpec {
     resultSchema: "decision-record-v2",
     executor: CODING_AGENT,
     input: { assignment, harness: ctx.profile.roles.implementer },
+    ...agentClock(ctx.profile),
     ...(from !== undefined ? { continueFrom: from } : {}),
   };
 }
@@ -1176,6 +1181,7 @@ function codeReviewJob(profile: Profile, assignment: string): JobSpec {
     resultSchema: "code-review-v2",
     executor: CODING_AGENT,
     input: { assignment, harness: profile.roles.reviewer },
+    ...agentClock(profile),
   };
 }
 
@@ -1190,6 +1196,7 @@ function verificationJob(profile: Profile, assignment: string): JobSpec {
     resultSchema: "finding-verification-v1",
     executor: CODING_AGENT,
     input: { assignment, harness: profile.roles.verifier },
+    ...agentClock(profile),
   };
 }
 
@@ -1216,6 +1223,9 @@ function implementJob(ctx: Context, view: RunView, issue: number, given: Decisio
       assignment: implementInstruction(profile, { issue, plan: record, context: contextDocuments(view.evidence, profile), ...(all.length > 0 ? { feedback: all } : {}), ...(table.issues.length > 0 ? { issues: true } : {}) }),
       harness: profile.roles.implementer,
     },
+    ...agentClock(profile),
+    // Out of time after changing the worktree, the implementer's own session is continued before recovery.
+    ...(profile.timeoutContinuations > 0 ? { timeoutContinuations: profile.timeoutContinuations } : {}),
     ...(from !== undefined ? { continueFrom: from } : {}),
   };
 }

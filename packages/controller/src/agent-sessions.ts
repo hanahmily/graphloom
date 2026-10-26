@@ -38,6 +38,13 @@ export function continuationRefusal(state: DurableRunState, job: JobSpec): strin
   return undefined;
 }
 
+/** What an agent continuing a session whose last turn ran out of time is told before its assignment. */
+export const TIMEOUT_CONTINUATION_NOTE = [
+  "GraphLoom is continuing your earlier session: your last turn ran out of its time limit before you finished.",
+  "The worktree keeps the changes you made. Check what is already done (for example with git status and git diff) instead of starting over, then finish the remaining work of the assignment below and report its result.",
+  "Tool calls from earlier turns are not repeated; make new calls when you need them.",
+].join(" ");
+
 /**
  * The session directory for an agent job: its own for a fresh session, the
  * continued session's otherwise. Call after `continuationRefusal` passed.
@@ -50,7 +57,7 @@ export function sessionForDispatch(
   if (job.kind !== "agent") return undefined;
   if (job.continueFrom !== undefined) {
     const record = state.agentSessions!.find((r) => r.operationId === job.continueFrom)!;
-    return { dir: record.sessionDir, resume: record.sessionRef };
+    return { dir: record.sessionDir, resume: record.sessionRef, ...(record.timedOut === true ? { note: TIMEOUT_CONTINUATION_NOTE } : {}) };
   }
   return { dir: path.join(agentSessionsDir(state.stateDir), operationId) };
 }
@@ -85,6 +92,7 @@ export function recordAgentSession(
     sessionRef: result.sessionRef,
     sessionDir: session.dir,
     ...(job.continueFrom !== undefined ? { continuedFrom: job.continueFrom } : {}),
+    ...(result.failureKind === "timeout" ? { timedOut: true as const } : {}),
     settledAt: new Date().toISOString(),
   };
   return { ...state, agentSessions: [...(state.agentSessions ?? []), record] };
