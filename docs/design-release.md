@@ -279,6 +279,15 @@ The release runs without a host Node. The host still needs the tools in §4.4.
   runtime adds about 120 MB unpacked and about 30 to 40 MB to the compressed
   tarball. The release script reports the total size and warns when it grows
   more than 20% over the previous release.
+- **Measured size (R1, `0.0.0`).** The tarball is 94.2 MB compressed and
+  348 MB unpacked:
+  - Node 24.22.1 is 122 MB.
+  - `node_modules` is 280 MB, of which pi's own shrinkwrapped
+    `node_modules` is 102 MB.
+  - GraphLoom's own packages, executors, and example bundles are under
+    10 MB.
+  Without the platform prune and the dedupe (§6, "R1 as implemented"), the
+  same build was 215 MB compressed and 672 MB unpacked.
 - **Use.** The launcher runs `node/bin/node`. GraphLoom never relies on a `node`
   on `PATH` for its own code. It spawns its own scripts as
   `process.execPath <script>`; this already happens for the plugin host,
@@ -366,7 +375,8 @@ The release runs without a host Node. The host still needs the tools in §4.4.
     `COPYING*`, or `UNLICENSE*` files. A package without such a file is not
     a failure, because its declared license is what the check judges. Its
     notice says that it has no license file.
-  - The production tree of the first R1 build needs no exception.
+  - The production tree of the first R1 build needs no exception: 192
+    packages after the platform prune and the dedupe.
 - **Source headers.** Hand-written source files carry a two-line SPDX header,
   such as `// SPDX-License-Identifier: Apache-2.0` followed by the copyright
   line from `NOTICE`, `Copyright 2026 Hongtao Gao and the GraphLoom
@@ -1000,10 +1010,36 @@ runs steps 3 to 8 on `<rev>`, which defaults to `HEAD`. It publishes nothing.
     the gate's tool caches (`.vite`, `.vitest`, `.cache`). From
     source-repairable packages it leaves out `node_modules`, `.git`, run
     state, caches, `.env*`, and `*.tsbuildinfo`.
-  - It drops links that dangle once unshipped workspaces are absent, such as
-    `node_modules/@graphloom/testkit`. `bin/graphloom` is
+  - `prune-tree.mjs` then shrinks the copied `node_modules` without changing
+    what any module loads. This happens before the links, the digests, the
+    notices, and the content checks, so each of them reflects what ships.
+    - **Platform prune.** It removes every installed package whose
+      `package.json` `os`, `cpu`, or `libc` excludes the release target,
+      `linux`/`x64`/`glibc`, by npm's rules, including `!` negations. This
+      is not a fixed list. `@earendil-works/pi-coding-agent` bundles an
+      `npm-shrinkwrap.json`, and `npm prune` reifies its tree with every
+      platform's optional esbuild binary, 26 packages and about 288 MB. Of
+      those, `@esbuild/linux-x64` stays. The top level's
+      `@rollup/rollup-linux-x64-musl` is removed too.
+    - **Exact dedupe.** It removes a nested copy only when Node, once the copy
+      is gone, would resolve the same name to a copy higher up with
+      byte-identical files. The dependency closure must also resolve to
+      identical files from both places. Removals go one at a time, each
+      judged against the tree as it then is.
+    - The shrinkwrap pins 56 packages at versions that the top level also
+      has. The dedupe removes the 44 whose closure is identical, about 35
+      MB. It keeps the rest, because sharing them would change what one of
+      their dependencies loads. The 27 nested copies at other versions, and
+      the 54 packages only pi has, stay as the shrinkwrap pins them.
+    - A smoke step (`smoke-pi.mjs`) checks the result on the bundled Node.
+  - It drops links that dangle once unshipped workspaces or pruned packages
+    are absent, such as `node_modules/@graphloom/testkit` and pi's
+    `node_modules/.bin/esbuild`. `bin/graphloom` is
     `scripts/release/launcher.sh`.
-  - `check-tree.mjs` runs the content checks. It forbids the work directory,
+  - pi's own `docs/`, `examples/`, and `CHANGELOG.md`, about 4 MB, are kept.
+    They are package content under its license, and the saving is small.
+  - `check-tree.mjs` runs the content checks. It fails on any package that
+    the platform prune would remove. It forbids the work directory,
     the checkout path, and `$HOME`. It allows a shebang only through
     `/usr/bin/env` or `/bin/sh`/`bash`. The credential patterns cover GitHub
     tokens, `sk-` keys, AWS access keys, Slack tokens, and PEM private keys.
@@ -1024,6 +1060,10 @@ runs steps 3 to 8 on `<rev>`, which defaults to `HEAD`. It publishes nothing.
     except Node and its package managers (`no-node-path.mjs`).
   - `graphloom version --json` must equal `release.json`, and
     `version --root` must be the extracted directory.
+  - `smoke-pi.mjs` imports the supervisor, the Pi harness, its rehearsal
+    stand-in, and `@earendil-works/pi-coding-agent` as the harness resolves
+    it. It then runs an esbuild transform through pi's
+    `@earendil-works/chord`, which needs the linux-x64 native binary.
   - `smoke-preflight.mjs` runs the CLI's own repair preflight on a validator
     repair of the release example plugin. It must build the candidate with the
     tree's `typescript` and pass `qualify.mjs`, and it refuses to start if

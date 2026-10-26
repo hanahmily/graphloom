@@ -294,6 +294,72 @@ describe("the release tree content checks (§2.3, §6 step 6)", () => {
   });
 });
 
+describe("pruning node_modules for the release platform (§6 step 6)", () => {
+  const modules = (root: string, ...rel: string[]) => path.join(root, "node_modules", ...rel);
+  const exists = (p: string) => readFile(path.join(p, "package.json")).then(() => true, () => false);
+
+  /** A tree where a shrinkwrapped `pi` pins every platform's binary and its own copies of top-level packages. */
+  async function platformTree() {
+    const root = await tempDir();
+    await writeFile(path.join(root, "package.json"), "{}");
+    await writePackage(modules(root, "@esbuild", "linux-x64"), { name: "@esbuild/linux-x64", version: "1.0.0", os: ["linux"], cpu: ["x64"], license: "MIT" });
+    await writePackage(modules(root, "@rollup", "rollup-linux-x64-musl"), { name: "@rollup/rollup-linux-x64-musl", version: "1.0.0", os: ["linux"], cpu: ["x64"], libc: ["musl"], license: "MIT" });
+    await writePackage(modules(root, "not-windows"), { name: "not-windows", version: "1.0.0", os: ["!win32"], license: "MIT" });
+    const pi = modules(root, "pi");
+    await writePackage(pi, { name: "pi", version: "1.0.0", license: "MIT", dependencies: { same: "1.0.0", edited: "1.0.0", pinned: "1.0.0" } });
+    for (const platform of ["darwin-arm64", "win32-x64", "linux-arm64"]) {
+      const [os, cpu] = platform.split("-");
+      await writePackage(path.join(pi, "node_modules", "@esbuild", platform), { name: `@esbuild/${platform}`, version: "1.0.0", os: [os], cpu: [cpu], license: "MIT" });
+    }
+    // Byte-identical to the top-level copy, with a dependency that resolves to the same files from both places.
+    for (const dir of [modules(root, "same"), path.join(pi, "node_modules", "same")]) {
+      await writePackage(dir, { name: "same", version: "1.0.0", license: "MIT", dependencies: { leaf: "^1.0.0" } }, { "index.js": "module.exports = 1;\n" });
+    }
+    await writePackage(modules(root, "leaf"), { name: "leaf", version: "1.0.0", license: "MIT" }, { "index.js": "module.exports = 'leaf';\n" });
+    // Same version, different bytes: not the same package to load.
+    await writePackage(modules(root, "edited"), { name: "edited", version: "1.0.0", license: "MIT" }, { "index.js": "module.exports = 'top';\n" });
+    await writePackage(path.join(pi, "node_modules", "edited"), { name: "edited", version: "1.0.0", license: "MIT" }, { "index.js": "module.exports = 'nested';\n" });
+    // Identical itself, but its own dependency resolves to another version from the top level.
+    for (const dir of [modules(root, "pinned"), path.join(pi, "node_modules", "pinned")]) {
+      await writePackage(dir, { name: "pinned", version: "1.0.0", license: "MIT", dependencies: { dep: "^2.0.0" } }, { "index.js": "module.exports = 1;\n" });
+    }
+    await writePackage(modules(root, "dep"), { name: "dep", version: "2.1.0", license: "MIT" });
+    await writePackage(path.join(pi, "node_modules", "dep"), { name: "dep", version: "2.0.0", license: "MIT" });
+    return { root, pi };
+  }
+
+  it("fails the content check on a package for another platform", async () => {
+    const { root } = await platformTree();
+    const result = script("check-tree.mjs", ["--root", root, "--platform", "linux-x64"]);
+    expect(result.status).toBe(1);
+    for (const problem of [
+      'package for another platform (os ["darwin"], release is linux-x64): node_modules/pi/node_modules/@esbuild/darwin-arm64',
+      'package for another platform (os ["win32"], release is linux-x64): node_modules/pi/node_modules/@esbuild/win32-x64',
+      'package for another platform (cpu ["arm64"], release is linux-x64): node_modules/pi/node_modules/@esbuild/linux-arm64',
+      'package for another platform (libc ["musl"], release is linux-x64): node_modules/@rollup/rollup-linux-x64-musl',
+    ]) {
+      expect(result.stderr).toContain(problem);
+    }
+    expect(result.stderr).not.toContain("@esbuild/linux-x64");
+    expect(result.stderr).not.toContain("not-windows");
+  });
+
+  it("removes other platforms' packages and nested copies an identical, identically-resolving copy above serves", async () => {
+    const { root, pi } = await platformTree();
+    const result = script("prune-tree.mjs", ["--root", root, "--platform", "linux-x64"]);
+    expect(result.status).toBe(0);
+    expect(result.stderr).toContain("removed 4 package(s) for other platforms");
+    expect(result.stderr).toContain("removed 1 nested duplicate(s)");
+    expect(await exists(modules(root, "@esbuild", "linux-x64"))).toBe(true);
+    expect(await exists(modules(root, "not-windows"))).toBe(true);
+    expect(await exists(modules(root, "@rollup", "rollup-linux-x64-musl"))).toBe(false);
+    expect(await readdir(path.join(pi, "node_modules"))).toEqual(["dep", "edited", "pinned"]);
+    // What stays is what changes behaviour if shared: other bytes, or another dependency closure.
+    expect(await readFile(path.join(pi, "node_modules", "edited", "index.js"), "utf8")).toContain("nested");
+    expect(script("check-tree.mjs", ["--root", root]).status).toBe(0);
+  });
+});
+
 describe("the SDK tarball (§3.1, §6 step 5)", () => {
   /** `npm pack` of a copy of the built SDK with LICENSE and NOTICE, as release.sh packs it. */
   async function packSdk(edit: (dir: string) => Promise<void> = async () => {}) {

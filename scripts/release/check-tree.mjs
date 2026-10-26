@@ -5,10 +5,10 @@
  * Content checks on an assembled release tree (docs/design-release.md §2.3,
  * §6 step 6).
  *
- *   node scripts/release/check-tree.mjs --root <tree> [--forbid <string>]...
+ *   node scripts/release/check-tree.mjs --root <tree> [--platform linux-x64] [--libc glibc] [--forbid <string>]...
  *
  * Fails, listing every problem, when the tree contains anything §2.3
- * excludes, a symlink that leaves the tree or dangles, a `.env*` file, a
+ * excludes, a package whose `os`/`cpu`/`libc` excludes the release platform, a symlink that leaves the tree or dangles, a `.env*` file, a
  * credential-shaped string, an absolute interpreter path in a shebang, or
  * any `--forbid` string (the staging directory, the maintainer's home, the
  * checkout path).
@@ -17,6 +17,7 @@ import { readFile, readlink, realpath } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs, runMain, walk } from "./lib.mjs";
+import { foreignPackages, parseTarget } from "./prune-tree.mjs";
 
 /** Core packages ship only `package.json` and `dist/` (§2.3). */
 export const DIST_ONLY = ["packages/sdk", "packages/controller", "packages/plugin-host", "packages/supervisor", "packages/runner", "apps/graphloom"];
@@ -47,8 +48,11 @@ const PORTABLE_SHEBANG = /^#!\s*(?:\/usr\/bin\/env\s|\/bin\/(?:ba)?sh\b|\/usr\/b
 
 const MAX_SCAN_BYTES = 256 * 1024 * 1024;
 
-export async function checkTree(root, { forbid = [] } = {}) {
+export async function checkTree(root, { forbid = [], platform = "linux-x64", libc = "glibc" } = {}) {
   const problems = [];
+  for (const { rel, reason } of foreignPackages(root, parseTarget(platform, libc))) {
+    problems.push(`package for another platform (${reason}, release is ${platform}): ${rel}`);
+  }
   const rootAbs = path.resolve(root);
   const rootReal = await realpath(rootAbs);
   const entries = await walk(rootAbs);
@@ -112,7 +116,7 @@ if (isMain) {
   runMain(async () => {
     const { flags } = parseArgs(process.argv.slice(2), { multiple: ["forbid"] });
     if (!flags.root) throw new Error("usage: check-tree.mjs --root <tree> [--forbid <string>]...");
-    const problems = await checkTree(flags.root, { forbid: flags.forbid ?? [] });
+    const problems = await checkTree(flags.root, { forbid: flags.forbid ?? [], platform: flags.platform ?? "linux-x64", libc: flags.libc ?? "glibc" });
     if (problems.length > 0) throw new Error(`release tree check failed (${problems.length}):\n  ${problems.join("\n  ")}`);
     console.error(`tree: ${path.resolve(flags.root)} passes the content checks`);
   });

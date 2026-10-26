@@ -149,7 +149,7 @@ node "$rel/notices.mjs" --root "$dest" --allowlist "$src/release/license-allowli
   --out "$dest/THIRD_PARTY_NOTICES" --node-license "$dest/node/LICENSE" --node-version "$node_version"
 forbid=(--forbid "$work" --forbid "$repo")
 if [ -n "${HOME:-}" ] && [ "${#HOME}" -gt 1 ]; then forbid+=(--forbid "$HOME"); fi
-node "$rel/check-tree.mjs" --root "$dest" "${forbid[@]}"
+node "$rel/check-tree.mjs" --root "$dest" --platform "$platform" "${forbid[@]}"
 cp "$dest/release.json" "$out/release.json"
 tarball=$out/$name.tar.gz
 pack() {
@@ -187,6 +187,7 @@ node -e 'const fs=require("fs");const a=JSON.parse(fs.readFileSync(process.argv[
 echo "version: $(in_smoke "$installed/bin/graphloom" version) (matches release.json)"
 
 in_smoke "$installed/node/bin/node" "$rel/smoke-preflight.mjs" --root "$installed"
+in_smoke "$installed/node/bin/node" "$rel/smoke-pi.mjs" --root "$installed"
 
 hello=$smoke/hello
 mkdir -p "$hello/plugins"

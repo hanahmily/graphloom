@@ -18,6 +18,7 @@ import { chmod, copyFile, cp, mkdir, readFile, readlink, realpath, rm, writeFile
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { parseArgs, readJson, runMain, sha256, sha256File, walk } from "./lib.mjs";
+import { pruneTree } from "./prune-tree.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -120,7 +121,9 @@ export async function assemble({ src, out, nodeDir, nodePin, version, commit, ep
   await copyFile(path.join(here, "launcher.sh"), path.join(dest, "bin", "graphloom"));
   await chmod(path.join(dest, "bin", "graphloom"), 0o755);
 
-  for (const link of await dropDanglingLinks(dest)) log(`assemble: dropped link to an unshipped package: ${link}`);
+  // Before the links, digests, and notices, so each reflects what ships.
+  await pruneTree(dest, { platform, log });
+  for (const link of await dropDanglingLinks(dest)) log(`assemble: dropped link to an unshipped or pruned package: ${link}`);
 
   const release = await releaseManifest({ src, dest, version, commit, epoch, sdkTgz, nodePin, platform, repairable });
   await writeFile(path.join(dest, "release.json"), `${JSON.stringify(release, null, 2)}\n`);
