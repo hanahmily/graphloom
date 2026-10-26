@@ -1,4 +1,4 @@
-# issue-fix with the banyandb profile: the same run as banyandb-fix-task.yaml.
+# issue-fix with the banyandb profile: fixes an apache/skywalking issue in BanyanDB.
 # The profile is the bundle's own; copy it beside this file to adjust it.
 # Budgets come from the profile's `budgets`, measured from real runs (see
 # docs/budgets.md); add a `budgets:` block here only to override one.

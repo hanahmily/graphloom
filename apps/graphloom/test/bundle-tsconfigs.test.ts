@@ -21,7 +21,6 @@ const bundles = [
   "examples/plugins/hello",
   "examples/plugins/release",
   "examples/plugins/issue-fix",
-  "examples/plugins/banyandb-fix",
   "executors/coding-agent",
   "executors/command",
   "executors/github",

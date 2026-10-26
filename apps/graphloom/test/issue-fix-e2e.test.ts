@@ -192,6 +192,42 @@ describe.skipIf(GO === undefined)("issue-fix with the banyandb profile on a Go r
     expect(env.github.requests.every((r) => r.method === "GET")).toBe(true);
   }, 600_000);
 
+  // Resume conformance (#145): a delivery that failed before the resume is
+  // tried again; one that fails again after it stops the run, so nothing loops.
+  it("stops on a failed delivery and delivers after a resume once the operator clears the cause", async () => {
+    const env = await makeEnv();
+    // A stale branch from an earlier attempt: delivery refuses to overwrite it.
+    await execFileAsync("git", ["branch", `fix/${ISSUE}`], { cwd: env.repo.path });
+    const validators = plugin.validatorsFor(env.profile);
+    const deliveries = async (stateDir: string) =>
+      (await loadRunState(stateDir)).evidence.filter((e) => (e.payload as { command?: { id?: string } }).command?.id === "deliver").length;
+    const resume = (stateDir: string) => createController().resume({ runRef: stateDir, plugin: plugin.createGraph(), validators, runner: fixRunner(env).runner });
+
+    const stopped = await createController().run({
+      taskPath: env.taskPath,
+      plugin: plugin.createGraph(),
+      validators,
+      runner: fixRunner(env).runner,
+      stateRoot: env.stateRoot,
+      runId: "issue-fix-deliver",
+    });
+    expect(stopped, `${stopped.stopReason}: ${stopped.blocker}`).toMatchObject({ status: "stopped", stopReason: "delivery failed", stopRetryable: true });
+    expect(stopped.blocker).toContain("already exists");
+    expect(await deliveries(stopped.stateDir)).toBe(1);
+
+    // Resumed with the cause still there: delivery runs again and stops on its own, new failure.
+    const again = await resume(stopped.stateDir);
+    expect(again, `${again.stopReason}: ${again.blocker}`).toMatchObject({ status: "stopped", stopReason: "delivery failed" });
+    expect(await deliveries(stopped.stateDir)).toBe(2);
+
+    await execFileAsync("git", ["branch", "-D", `fix/${ISSUE}`], { cwd: env.repo.path });
+    const delivered = await resume(stopped.stateDir);
+    expect(delivered.status, `${delivered.stopReason}: ${delivered.blocker}`).toBe("succeeded");
+    expect(await deliveries(stopped.stateDir)).toBe(3);
+    expect(execFileSync("git", ["show", `fix/${ISSUE}:pkg/timestamp/scheduler.go`], { cwd: env.repo.path, encoding: "utf8" })).toBe(FIXED);
+    expect((await loadRunState(stopped.stateDir)).lastResume).toMatchObject({ previousStopReason: "delivery failed", previousStopRetryable: true });
+  }, 600_000);
+
   // This is the real-world shape of the bug a run-convergence investigation
   // this design is named for: a live run (a23b53b8-5df, fixing
   // apache/skywalking#14075) issued zero receipts across 45 generations

@@ -100,25 +100,19 @@ node ../apps/graphloom/dist/main.js run release-task.yaml
 scripted jobs. One of those runs repairs a faulty validator with a qualified
 source patch and completes after activation.
 
-## A real repository: banyandb-fix
+## A real repository: issue-fix
 
-[`plugins/banyandb-fix`](plugins/banyandb-fix/) fixes bug issues in
-[Apache SkyWalking BanyanDB](https://github.com/apache/skywalking-banyandb)
-(`@graphloom/plugin-banyandb-fix`). Its two stages are Fix and Review. The graph
-declares BanyanDB's contributor checklist, which the controller runs before any
-job, and proves each fix in disposable checkouts: the regression test fails on
-the base and passes, with the build checks, on the committed change. The
-[plugin README](plugins/banyandb-fix/README.md) shows the task and runner
-config for a real run.
-
-## Any repository: issue-fix
-
-[`plugins/issue-fix`](plugins/issue-fix/) is the same graph for any
-repository (`@graphloom/plugin-issue-fix`). A task names a repository profile
-with `config:`, a JSON file relative to the task file that intake pins with
-its digest and hands to the plugin; the controller reads none of its fields.
+[`plugins/issue-fix`](plugins/issue-fix/) fixes bug issues in any repository
+(`@graphloom/plugin-issue-fix`). Its two stages are Fix and Review. The graph
+declares the repository's contributor checklist, which the controller runs
+before any job, and proves each fix in disposable checkouts: the regression
+test fails on the base and passes, with the build checks, on the committed
+change. A task names a repository profile with `config:`, a JSON file relative
+to the task file that intake pins with its digest and hands to the plugin; the
+controller reads none of its fields.
 [`issue-fix-banyandb-task.yaml`](issue-fix-banyandb-task.yaml) runs it on
-BanyanDB with the profile that reproduces banyandb-fix, and
+[Apache SkyWalking BanyanDB](https://github.com/apache/skywalking-banyandb)
+with the banyandb profile, and
 [`issue-fix-graphloom-task.yaml`](issue-fix-graphloom-task.yaml) on GraphLoom
 itself. See the [plugin README](plugins/issue-fix/README.md) and the
 [design](../docs/design-issue-fix-graph.md).

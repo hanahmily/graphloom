@@ -1,8 +1,9 @@
 # Agent–harness contract robustness
 
 Status: implemented, 2026-10-03, from the first live run of
-[`examples/plugins/banyandb-fix`](../examples/plugins/banyandb-fix/) against
-apache/skywalking#14092. The point fix in `apps/graphloom/src/cli-runner.ts`
+`examples/plugins/banyandb-fix` (since removed; the
+[issue-fix](../examples/plugins/issue-fix/) graph's banyandb profile replaced
+it) against apache/skywalking#14092. The point fix in `apps/graphloom/src/cli-runner.ts`
 that unblocked that run (§2.3) is superseded, not kept: its `REVIEW_SCHEMA`
 and `reviewEvidence()` are deleted, and hello/banyandb-fix/release each
 declare their own `resultContracts` instead. Two refinements the design

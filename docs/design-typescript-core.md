@@ -802,7 +802,7 @@ Keep the definition, requirements and private-state schema unchanged when
 applying this to an existing plugin, so a running run can adopt it with
 `resume --update-plugin`. The conformance cells in
 `apps/graphloom/test/matrix/` (hello, issue-fix) and the resume tests in
-`apps/graphloom/test/release-e2e.test.ts` and `banyandb-fix-e2e.test.ts` inject
+`apps/graphloom/test/release-e2e.test.ts` and `issue-fix-e2e.test.ts` inject
 each retryable stop a plugin can produce, resume once, and assert it retries;
 a final stop resumes to the same blocker.
 

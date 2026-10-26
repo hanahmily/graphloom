@@ -2,8 +2,8 @@
 
 Status: implemented, 2026-10-15, as
 [`examples/plugins/issue-fix`](../examples/plugins/issue-fix/). No live run has
-been made with it yet; its banyandb profile reproduces
-[banyandb-fix](design-banyandb-fix-graph.md), whose live runs it inherits.
+been made with it yet; its banyandb profile replaced the BanyanDB-only
+banyandb-fix graph, since removed, whose live runs it inherits.
 Version 0.4.0, 2026-10-17, adds the [issues file](#the-issues-file).
 Version 0.5.0, 2026-10-19, has the code reviewer review [every changed
 file and the change as a whole](#every-changed-file-and-the-change-as-a-whole).
@@ -37,11 +37,13 @@ Version 0.12.0 reads the profile's [context documents](#context-documents) once 
 
 `issue-fix` resolves one issue, a bug or an
 [enhancement](#enhancement-issues), in any repository, given a repository
-*profile*. It is [banyandb-fix](design-banyandb-fix-graph.md) with everything
+*profile*. It began as the BanyanDB-only banyandb-fix graph with everything
 BanyanDB-specific moved into the profile, so the same graph runs on BanyanDB
-and on GraphLoom itself. The stages, requirements, review convergence, RED and
-GREEN checks (including the revert patch), scope checks, delivery and
-outcomes are banyandb-fix's; that design remains their reference.
+and on GraphLoom itself. The stages, requirements, RED and GREEN checks
+(including the revert patch), scope checks, delivery and outcomes came from
+that graph, and its review rules are kept below as
+[review convergence](#review-convergence). banyandb-fix has since been
+removed.
 
 ## What is generic and what the profile supplies
 
@@ -99,19 +101,15 @@ refuses a missing or unusable profile, so a run cannot start on one.
   the reviewer's harness. Qualification derives its cases from these
   statements, so they stay meaningful per repository.
 
-The banyandb profile gives exactly banyandb-fix's stages, requirements,
-statements, validator bindings, result contracts and environment, and the
-same prompts and commands; a test compares them with banyandb-fix's own
-build. Only the graph id, version and private-state schema differ, and the
-[issues file](#the-issues-file), which banyandb-fix does not have. The file
-adds to the review and implementer prompts and to the pull request only
-through arguments the comparison leaves out. Since 0.5.0 the code review
-assignment differs on purpose: it [reviews every changed
-file](#every-changed-file-and-the-change-as-a-whole) and then the change as
-a whole; the comparison checks that this is the only difference. Since 0.8.0
-the banyandb profile also drops banyandb-fix's separate `license-check`
-command, which `make check` already runs, so the comparison removes that one
-command from banyandb-fix's side. banyandb-fix itself is unchanged.
+The banyandb profile was written to give exactly banyandb-fix's stages,
+requirements, statements, validator bindings, result contracts and
+environment, and the same prompts and commands; while banyandb-fix was in the
+repository, a test compared them with its build. Beyond the graph id, version
+and private-state schema, the differences were deliberate: the
+[issues file](#the-issues-file); since 0.5.0 a code review that [reviews every
+changed file](#every-changed-file-and-the-change-as-a-whole) and then the
+change as a whole; and since 0.8.0 no separate `license-check` command, which
+`make check` already runs.
 
 ### Regression runners
 
@@ -123,7 +121,7 @@ report's own error lines for corrections.
 
 | Runner | `test` | Outcome |
 |---|---|---|
-| `go-test` | `package` a `./` Go package, `name` a `TestXxx`, optional Ginkgo `focus` | banyandb-fix's `go test -json` and Ginkgo report parser, unchanged |
+| `go-test` | `package` a `./` Go package, `name` a `TestXxx`, optional Ginkgo `focus` | a `go test -json` and Ginkgo report parser, carried over from banyandb-fix |
 | `vitest` | `package` the test file relative to the repository root, `name` the test's full name (describe titles and title joined by spaces); no `focus` | Runs `vitest run <file> --testNamePattern ^name$` from the file's package directory with the nearest installed vitest and a small reporter the command installs, which writes one line naming the requested file and test, its result, and any failed hook, suite or file around it. A failed `beforeEach`/`afterEach` of the test, or a failed hook or error of an enclosing suite or the file (such as `afterAll`), is `setup-failed` whatever the test's own state; otherwise an `AssertionError` is `failed`; a missing export or module (`is not a function`, `Cannot find module`, …) or a file that does not load is `build-failed`, which sends RED to the revert patch as a Go build failure does; any other error is `panicked`; a skipped test with a file error is `setup-failed` |
 
 vitest's file argument is a substring filter, relative to its root even when
@@ -268,6 +266,258 @@ refused at admission; and the input, serialized, must fit the 256,000 byte bound
 on any executor input. A document that cannot be read is the same kind of stop,
 naming it and why.
 
+## Review convergence
+
+These rules come from the banyandb-fix graph's design, which issue-fix
+replaced; they apply to every profile. Without them, the loop between Fix and Review ends only through its
+limits. Every review is fresh and has no memory, so a later review can raise new
+findings, raise a finding again that earlier work settled, or block on a false
+positive that sends the run back to Fix until the budget runs out. Every
+blocking comment also went to the implementer, so a false positive could make
+it change correct code. This design makes the loop monotone and settles false
+positives with evidence. The ledger keeps its own `F1`, `F2`, … names; the
+[issues file](#the-issues-file) shows the same findings as `I1`, `I2`, ….
+
+Terms: a *P0* is a critical comment and a *P1* a high one; a comment without a
+severity counts as P1. A *round* reviews one candidate digest. A *pass* is one
+Codex review job on a candidate.
+
+### Evidence from earlier generations
+
+A reentry and a resume both start a new generation, and the controller shows
+validators only the current generation's evidence. The graph sees all of it,
+but acceptance would not. `ValidationInput.history` therefore carries the
+evidence of earlier generations, oldest first. It is context: a receipt still
+rests on current evidence, and a validator must not pass a requirement from
+history alone. The code review validator rebuilds the findings ledger from
+history and current evidence together, and still requires a pass on the
+current candidate in the current generation.
+
+### The findings ledger
+
+The ledger is a pure function of the run's review passes, verification jobs and
+file observations, in evidence order. It holds no private state, so a resume
+or a supervisor decision cannot lose it.
+
+**Identity.** The plugin names findings `F1`, `F2`, … in the order they first
+appear, so the names are the same every time the ledger is rebuilt. A pass sees
+the known findings with their names. A comment matches a known finding only
+when its `finding` field names one; anything else is a new finding and is
+verified. Nothing is matched by path, line or text, so an ambiguous comment
+never inherits a closed state. The cost is that a reviewer who repeats a known
+finding without its name creates a duplicate, which verification judges again.
+
+**States.**
+
+| State | Meaning |
+|---|---|
+| pending | Awaits verification on a named candidate |
+| confirmed | Verified as a defect; open until fixed |
+| disputed | The verifier could not decide, gave no verdict, or refuted it with quotes that do not match the candidate |
+| fixed | A pass marked it resolved on a candidate other than the one it was last confirmed on |
+| dismissed | Refuted with quotes that match the candidate |
+
+**How a pass on candidate D changes it.** The pass reports a status for each
+open finding it was shown: `resolved`, `still_present` or `withdrawn` (never a
+defect), with a reason. A comment that names an open finding counts as
+`still_present` for it. A pass that leaves an open finding without a status is
+incomplete. Only critical and high comments, and comments without a severity,
+become findings.
+
+| Finding | Pass says | Result |
+|---|---|---|
+| confirmed | resolved, on a candidate other than the one it was last confirmed on | fixed |
+| confirmed | resolved, on that same candidate | unchanged: a read-only pass cannot fix code |
+| confirmed | still_present | confirmed, last seen on D |
+| confirmed | withdrawn | pending on D: verification decides whether it was a defect |
+| pending or disputed | resolved, on another candidate | fixed |
+| pending or disputed | still_present or withdrawn | pending on D |
+| fixed | raised again with its name | pending on D, as a regression |
+| dismissed | raised again with its name | still dismissed while every line its refutation quoted matches D; otherwise pending on D |
+
+A dismissal rests on the refutation's quoted lines, the code that made the
+claim false, not on the line the comment pointed at. When a later change removes
+the lock a refutation quoted, the quote no longer matches, and the finding is
+verified again.
+
+### Searching until no new P0 or P1
+
+On each candidate, passes run until one raises nothing that survives
+verification:
+
+1. A pass reviews the whole change with open-code-review's delegation
+   workflow. Its assignment lists the open findings, which need a status, and
+   the settled ones (fixed and dismissed), which it must not report again
+   unless the defect is back, and then with its name.
+2. Every finding the pass raised, whether new, a regression, or a dismissal
+   whose quotes broke, is verified (below).
+3. When any of them was confirmed or disputed, another pass runs, in a fresh
+   Codex session. It gets every known finding as already reported, must still
+   review every changed file, and looks for P0 and P1 issues outside the list.
+4. The sweep ends at the first pass whose raised findings were all dismissed,
+   or when none were raised. It is capped at four passes per candidate. A sweep
+   that reaches the cap ends unsaturated and fails the round.
+
+The sweep collects every defect it can find before the run returns to Fix,
+which saves round trips. A passing round needs only one pass, since its first
+pass raises nothing that survives verification. A resume starts a new
+generation, so the first pass after it runs again with the ledger intact.
+
+### When the code review passes
+
+The code review requirement passes when all of these hold:
+
+1. The latest pass on the current candidate ran in the current generation,
+   read-only, finished, returned a readable result, reviewed every file on its
+   list, skipped none, and gave a status for every open finding it was shown.
+2. No finding awaits verification or a file observation.
+3. Every finding that pass raised is dismissed.
+4. No finding is confirmed or disputed: every confirmed finding became fixed
+   on a later candidate.
+
+These four conditions are the only acceptance rule; the graph calls the same
+validator before it asks the controller to validate. Because fixing needs a
+different candidate, a sweep that confirmed a new finding on a candidate cannot
+pass on that candidate.
+
+### Monotone rules
+
+1. The ledger only grows. Every finding keeps its name and history.
+2. A closed finding stays closed. A dismissal holds while its quoted lines
+   match; a fix holds until a regression is confirmed.
+3. Only confirmed and disputed findings block. A dismissed finding never blocks,
+   and it never reaches the implementer.
+4. Delivery needs saturation: the last pass on the delivered candidate raised
+   nothing that survived verification, and nothing confirmed is still open.
+5. Each failed round reports its progress to the supervisor, for example:
+   "review round 2 (discovery round, 3 at most); passes on this change: 2
+   (sweep saturated); 2 fixed, 1 dismissed, 1 new confirmed, 0 regressions,
+   0 disputed". A verify-only round also counts its follow-ups. A round that fixed nothing and ended
+   without saturating is reported as not converging.
+
+The supervisor still decides whether to reenter Fix or stop, and the
+controller's correction budget is still the hard limit. The rules guarantee
+that settled work stays settled, and that every block was confirmed or honestly
+disputed by an independent verifier. They cannot bound how many real defects a
+change has: a run that finds a new confirmed defect every round is working, and
+its budget decides how far it goes.
+
+### Verifying findings
+
+After each pass that raised findings, the graph dispatches one read-only
+verification job for every finding pending on the candidate. That covers new
+findings, regressions, withdrawn confirmations, dismissals whose quotes broke,
+findings a resume left unverified, and disputed findings on a new candidate.
+The job runs on another model family from the reviewer (Claude Code), in a
+fresh read-only session that has never written the change, uses a strict
+`finding-verification-v1` result, and is bound to the candidate digest. For
+each finding it returns:
+
+| Verdict | Must include | Effect |
+|---|---|---|
+| `confirmed` | Its own call path or reproduction with `file:line`, not the reviewer's restated | The finding blocks and goes to Fix |
+| `refuted` | Quotes of candidate lines, each copied from one line, that disprove the claim, such as the lock that is held or the caller that does not exist | Dismissed once the quotes match the candidate; listed in the pull request body |
+| `uncertain` | Both arguments | Disputed; goes to the supervisor |
+
+Nothing is downgraded. A P0 or P1 with thin evidence still goes to the
+verifier, and one it cannot decide is disputed, so a real defect cannot slip
+through on a malformed comment. A finding the verification job gives no verdict
+for is disputed too, so one verification per pass is enough and the graph never
+loops on it.
+
+A refutation pins at most three quotes, and a confirmation without a `file:line`
+witness is disputed. The graph observes the files a refutation quotes; a quote
+matches when its text, with whitespace collapsed and at least eight characters
+long, appears within three lines of the cited line. Only a relative path
+without `.` or `..` segments, outside `.git`, that names a file by its
+extension is observed, since observing a directory or an escaping path stops
+the run; any other quoted path never matches. A refutation whose quotes do not
+match is disputed.
+
+For a disputed finding the supervisor can reenter Fix, where the next pass
+gives the finding a status and a new candidate verifies it again, or stop for a
+maintainer with the finding in the pull request body. It cannot dismiss a
+finding by itself: a dismissal is always verification evidence.
+
+Only confirmed findings return to Fix, each with the verifier's witness.
+Dismissed findings never reach the planner or the implementer. The pull request
+body lists each dismissed P0 or P1 with its refutation, so a human can overrule
+a wrong dismissal.
+
+### Executable confirmations (second phase)
+
+For a behaviour defect, the verifier can write a Go test that the controller
+runs in a candidate checkout with the test file added. Such a test confirms the
+finding only under the RED contract: go test reports the named test failed by
+assertion, the package built, no panic, no timeout, and the check changed no
+file. The expected value must come from the issue or the code's documented
+contract, never from the candidate's output, and the verifier states its
+source. A confirmed reproduction becomes part of the finding: after Fix, GREEN
+runs it by name with the file's bytes pinned, so it cannot be dropped or
+weakened to close the finding. This needs the controller to add an
+agent-written file to a checkout, which it cannot do yet.
+
+**Scope of the missing controller capability.** `CheckoutSpec` (`packages/sdk/src/types.ts`)
+is `{ from: "candidate" }` or `{ from: "base"; paths: string[] }`; `selectPaths`
+and `commitPaths` (`packages/controller/src/checkout.ts`) both source bytes
+only from the *live worktree's* current change (`candidateChange`), keyed by a
+path already in `change.fingerprints`. A verifier's proposed test never
+reaches the worktree — it is read-only and returns the file as `{path, bytes}`
+in its structured result — so no existing `CheckoutSpec` variant can place it.
+Closing this needs, at minimum:
+
+- A new `CheckoutSpec` field, for example `write?: Array<{ path: string; bytes: string }>`,
+  applied in `runInCheckout` before `commitPaths` commits the checkout, for
+  both `from: "candidate"` and `from: "base"` (RED needs `base` plus the
+  verifier's test file and nothing else; a later GREEN pin needs `candidate`
+  plus that same file, unmodified).
+- The same path safety already enforced for observed quotes in [review
+  convergence](#review-convergence) (relative, no `.` or `..` segment, outside
+  `.git`, a real file extension — see `observablePath` in the plugin's
+  `findings.ts`) — worth promoting to a shared SDK guard so the controller can
+  enforce it once, not trust each plugin to. A written path must not collide
+  with a path the candidate's own change already touches, so a verifier cannot
+  overwrite production code or existing tests under the guise of adding one.
+- A stable way to "pin" the written bytes across two checkouts (RED, then
+  GREEN after Fix): the finding already carries the verifier's file as
+  evidence, so GREEN's `write` would replay that same evidence rather than
+  re-deriving it, keeping the earlier "cannot be dropped or weakened" property
+  from evidence alone, not from re-running the verifier.
+- Evidence and receipts already bind to `candidateDigest` and record
+  `checkout.paths`; a written file should appear there the same way, so a
+  refutation or a later pass can still observe it like any other checkout
+  path.
+
+This is a `packages/sdk` and `packages/controller` change, not a plugin change:
+every graph that uses checkouts would gain the capability, but only a graph
+that opts into executable confirmations (like issue-fix) would use it.
+
+### Cost and budgets
+
+A clean round costs one pass. A failed round costs up to four passes and four
+verification jobs, all read-only. The controller's `agentInvocations` budget
+counts model requests, not jobs: harnesses reserve each request, Codex once at
+the start and once after each command it runs, and supervisor calls draw from
+the same budget. A small Codex review used 7 requests at low effort; a review of
+the banyandb-fix design used about 20 at high effort. The controller's default
+64 is therefore likely to run out within one failing round with planning and
+implementation, so every profile declares its own measured `budgets`
+([budgets](budgets.md)). The round summary shows
+the remaining budget so the supervisor can stop before it runs out.
+
+### Where it lives
+
+- Controller and SDK: `ValidationInput.history`, checked on the wire like
+  `evidence`.
+- `ocr.ts`: the `code-review-v2` result (comments add `finding` and
+  `evidence`; the report adds `prior`) and the pass assignment.
+- `findings.ts`: the ledger, quote matching, the verification job's result and
+  assignment, and the round summary.
+- `validators.ts`: `code-review` evaluates the acceptance rule above.
+- `graph.ts`: passes, observations, verification and the sweep; reentry
+  feedback sends confirmed findings only; the pull request body lists
+  dismissed findings.
+
 ## Review failures: the graph reenters Fix, or the supervisor decides
 
 A failing code review is usually the normal Fix and Review loop, a known
@@ -308,9 +558,8 @@ and goes to the supervisor.
 
 The reviewer may raise new findings for at most three rounds
 (`MAX_DISCOVERY_ROUNDS`). After that, it only verifies that the findings
-already raised are fixed. banyandb-fix follows the same rule; its design
-section on [discovery rounds](design-banyandb-fix-graph.md#discovery-rounds)
-gives the full rules.
+already raised are fixed. The rule extends [review
+convergence](#review-convergence).
 
 - A **round** is the review of one candidate digest. The sweep's passes on
   that candidate belong to the same round. The round of a pass is the number
@@ -327,6 +576,21 @@ gives the full rules.
   and returns to Fix with the reviewer's latest note. A fixed finding named
   again reopens as a regression. There is no sweep. The round passes once
   every finding from the discovery rounds is fixed or dismissed.
+
+A candidate counts from its first record of any kind, such as the implementer
+run that produced it, not from its first review pass, because the controller
+shows a validator only the current candidate's latest pass, after the other
+candidates' history. A candidate that Fix reached but did not hand to review
+counts from its first record once a later return gets it reviewed.
+
+The rule comes from the #119 dogfood run (`4c70ff66-dd9`). It had 24 high
+findings over 11 review attempts on nine candidates. Each was fixed in the
+next Fix round, but each review round raised new P1s in code the previous fix
+had just written (F13 to F16, F17 to F19, F20 to F22, F23, F24). The run
+needed 11 Fix-to-Review round trips to converge. Under this rule, F17 to F24,
+all raised from round 4 on, would have been follow-ups. A run that adopts the
+rule after round 3 rebuilds its ledger under it: high comments it first
+raised in round 4 or later become follow-ups, even ones already confirmed.
 
 Medium and low comments are unchanged. The requirement statement, the
 validator binding and the private state are unchanged, so a running run can
@@ -408,8 +672,7 @@ findings were requirements the implementer had skipped).
 Since 0.4.0 the run tracks its critical and high findings as issues in a
 file: the reviewer reports new issues, the fixer marks them fixed, and the
 reviewer verifies each one and either closes it or reopens it. Only issue-fix
-knows the file. The controller, the SDK and the CLI read none of it, and
-banyandb-fix does not have it.
+knows the file. The controller, the SDK and the CLI read none of it.
 
 ### Where it lives and how it stays out of the change
 
@@ -639,8 +902,8 @@ issue-fix is.
 ## Profiles shipped
 
 - [`profiles/banyandb.json`](../examples/plugins/issue-fix/profiles/banyandb.json):
-  banyandb-fix's behaviour exactly; its environment is banyandb-fix's
-  declaration, except that the `ocr` check finds the
+  BanyanDB, with the behaviour and environment of the former banyandb-fix
+  graph, except that the `ocr` check finds the
   [bundled open-code-review](#bundled-open-code-review) first.
 - [`profiles/graphloom.json`](../examples/plugins/issue-fix/profiles/graphloom.json):
   this repository. Preparation installs and builds, because the workspaces'
@@ -768,13 +1031,13 @@ context document.
 
 ## Migration from banyandb-fix
 
-`examples/plugins/banyandb-fix` is left unchanged: runs pinned to it resume on
-it, and its recorded run stays its rehearsal and replay fixture. New BanyanDB
-runs should use `issue-fix` with the banyandb profile; the two graphs have
-different ids, so a run never switches between them. To move a task, change
+`examples/plugins/banyandb-fix` has been removed: BanyanDB runs use
+`issue-fix` with the banyandb profile. The two graphs have different ids, so a
+run never switched between them, and a stopped run pinned to banyandb-fix can
+no longer resume from this repository. To move a task, change
 `graph: banyandb-fix` to `graph: issue-fix` and add
-`config: plugins/issue-fix/profiles/banyandb.json`. banyandb-fix can be
-retired once no stopped run needs to resume on it.
+`config: plugins/issue-fix/profiles/banyandb.json`. Its recorded run under
+`examples/skywalking-banyandb/graphloom-state/` stays as replay input.
 
 To add a repository, copy a profile beside the task, adjust it, and name it
 with `config:`. A repository whose tests need another runner needs a new
@@ -782,9 +1045,6 @@ built-in runner in the bundle, a source change qualified like any other.
 
 ## Verification
 
-- banyandb-fix's unit suite runs unchanged on issue-fix under the banyandb
-  profile; another test compares the definition, prompts, commands and
-  decision rules with banyandb-fix's build.
 - The graphloom profile's requirement set (no changelog), protected paths,
   vitest test rules and its GREEN-then-RED commands are tested; the vitest
   runner runs real vitest on a scratch project and classifies passes,
@@ -803,8 +1063,7 @@ built-in runner in the bundle, a source change qualified like any other.
 - The code review assignment, under both profiles, puts every file ocr's
   preview excluded back on the list, never `.graphloom/`, runs the rules on
   the whole list, and asks for the whole-change check in discovery rounds
-  only; the banyandb comparison checks that this is its only difference from
-  banyandb-fix's assignment.
+  only.
 - The issues file: graph tests run a finding through `open`, `fixed` (the
   fixer's edit) and `done`. They reopen a fixed issue with the reviewer's
   note and show that note to the fixer. They reject a fixer marking an issue

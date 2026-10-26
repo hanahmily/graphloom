@@ -2,7 +2,10 @@
 
 Proposed, 2026-10-02; not implemented. Extends the
 [core design](design-typescript-core.md) §5, §6 and §10 and the BanyanDB graph's
-[review convergence](design-banyandb-fix-graph.md#review-convergence). It changes
+review convergence, now kept as the issue-fix graph's
+[review convergence](design-issue-fix-graph.md#review-convergence). The
+BanyanDB graph it names (banyandb-fix) has since been removed; issue-fix
+replaced it. It changes
 how freshness, correction escalation, repetition and plan review work so that a
 run whose candidate is already correct can reach acceptance instead of re-earning
 it until a budget runs out. The pinned invariants stay: the step set is fixed,
@@ -48,10 +51,10 @@ that "missing or stale evidence does not count" (§5), but never defines
 - The BanyanDB graph filters its own evidence with `inGeneration` and runs
   `evaluateFix(current, digest)` over that window only; its comment says so:
   "Validators see only this generation's evidence, so every generation plans
-  and reviews its plan" (`examples/plugins/banyandb-fix/src/graph.ts`).
+  and reviews its plan" (then `examples/plugins/banyandb-fix/src/graph.ts`).
 - `ValidationInput.history` carries earlier generations, but by the BanyanDB
   design's own rule "a validator must not pass a requirement from history
-  alone" ([evidence from earlier generations](design-banyandb-fix-graph.md#evidence-from-earlier-generations)).
+  alone" ([evidence from earlier generations](design-issue-fix-graph.md#evidence-from-earlier-generations)).
 
 So an operator resume after a budget reset, or a reentry after an unrelated
 executor failure, costs the full set: a new plan, a new plan review, a new
@@ -98,7 +101,7 @@ supervisor cannot infer the situation either.
 
 The Review stage already treats a reviewer's finding as a claim to be checked:
 an independent verifier confirms or dismisses it and a dismissed finding cannot
-block ([the findings ledger](design-banyandb-fix-graph.md#the-findings-ledger)).
+block ([the findings ledger](design-issue-fix-graph.md#the-findings-ledger)).
 Plan review has no such step. A `request_changes` verdict sends the planner
 back to revise; the planner may answer a finding it disagrees with in the
 decision record's `basis`, but nothing requires the reviewer to engage with
@@ -162,7 +165,7 @@ Controller:
   decision record's own content, not the workspace, so a planner revising it
   with unchanged workspace bytes must invalidate both). A receipt is `valid`
   while every component of its `acceptedIdentity` is unchanged. Receipts
-  already carry the candidate digest ([GraphLoom gaps](design-banyandb-fix-graph.md#graphloom-gaps)).
+  already carry the candidate digest.
 - Each receipt also records `prerequisiteBindings`: the full validator identity
   (`validatorId` and version, not version alone — a same-version swap to a
   different validator must still invalidate) of every other requirement its
@@ -340,8 +343,8 @@ handoff can be cleared by any authorized trial it dispatches.
 | `isCorrection` | derived from requirement-outcome history across candidate edits, not `attempt > 1` | controller `loop.ts` |
 | Supervisor proposal repetition | counted against `progressMark`; third repeat rejected in-turn | controller `loop.ts`, `escalation.ts` |
 | `RunView.escalation` | exposes trials, handoff, repeated proposals | sdk `types.ts`, controller `toRunView` |
-| `review-verdict-v1` findings state; plan-review verifier job | per-finding state; dispute verification | banyandb-fix `validators.ts`, `graph.ts`, `prompts.ts` |
-| `inGeneration` → `forIdentity`; `advanceFix` stage selection | identity-scoped evidence selection; selection also reads `openAttempt` | banyandb-fix `evidence.ts`, `graph.ts` |
+| `review-verdict-v1` findings state; plan-review verifier job | per-finding state; dispute verification | BanyanDB graph (now issue-fix) `validators.ts`, `graph.ts`, `prompts.ts` |
+| `inGeneration` → `forIdentity`; `advanceFix` stage selection | identity-scoped evidence selection; selection also reads `openAttempt` | BanyanDB graph (now issue-fix) `evidence.ts`, `graph.ts` |
 
 The supervisor package still depends only on `@graphloom/sdk`; everything it
 needs arrives through `RunView` and settlement facts.
@@ -374,7 +377,7 @@ Controller tests (`packages/controller`):
    Fix stage accepts at the first generation where all seven requirements hold
    receipts for one accepted identity, and the run proceeds to Review.
 
-Plugin tests (`examples/plugins/banyandb-fix`):
+Plugin tests (then `examples/plugins/banyandb-fix`, now `examples/plugins/issue-fix`):
 
 8. A plan-review finding answered in `basis` and repeated by the reviewer is
    dispatched to a verifier; a dismissed finding does not block approval; a

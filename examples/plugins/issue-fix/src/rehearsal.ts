@@ -4,7 +4,8 @@
 /**
  * issue-fix's rehearsal scenarios (docs/design-graph-rehearsal.md §4.4/§4.5).
  *
- * The go-test scenario is banyandb-fix's, unchanged, for the banyandb profile:
+ * The go-test scenario, for the banyandb profile, was carried over unchanged
+ * from the former banyandb-fix graph, which this profile replaced:
  * recorded verbatim with `graphloom rehearse --record-from` from a real,
  * successful live run (Claude Code planned, implemented and confirmed the
  * fix; Codex reviewed the code in open-code-review's delegation mode), not

@@ -51,7 +51,7 @@ describe("readWorktreeFile", () => {
   it("is undefined, not a thrown EISDIR, for a path naming a directory", async () => {
     // Regression: a real model's plan legitimately quoted a Go package path
     // ("./pkg/timestamp", a directory) in a field the controller later
-    // observed — found live, running banyandb-fix's own graph for real.
+    // observed — found live, running the former banyandb-fix graph for real.
     // Node's readFile throws EISDIR on a directory; observeWorkspace
     // (loop.ts) turned that into an unconditional run-stopping "observe
     // rejected", for a path that was never missing, just not a file.

@@ -2,6 +2,7 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -173,21 +174,38 @@ describe("graphloom rehearse (L1)", () => {
 });
 
 describe("graphloom replay (L2)", () => {
-  it("replays the recorded banyandb-fix run this design was built from, reclassifying its evidence and surfacing the unresolved findings", async () => {
-    const stateDir = path.join(root, "examples/skywalking-banyandb/graphloom-state/879ee04f-e57");
-    // The recorded run's own intake pins the bundle path of whatever machine
-    // recorded it; replay reads the bundle's current code, which is wherever
-    // this checkout actually has it installed, not that frozen absolute path.
-    const report = await replay(stateDir, { bundlePath: path.join(root, "examples/plugins/banyandb-fix") });
-    // Plan review no longer exists in the current plugin: its review-verdict-v1
-    // evidence (most of what this run recorded) reclassifies to no contract at
-    // all, leaving only the plan's own decision-record-v1 valid.
-    expect(report.contracts.valid).toBe(1);
-    expect(report.contracts.byName["decision-record-v1"]).toMatchObject({ valid: 1, invalid: 0 });
-    expect(report.requirements.some((r) => r.requirementId === "plan-reviewed")).toBe(false);
-    // Freed from plan review, the current graph would go straight to
-    // implementing the plan — but this run's own recorded budget was already
-    // spent on the real plan-review churn before it ever reached that point.
+  it("replays a recorded run against the bundle that replaced its graph, reclassifying its evidence under that bundle's contracts", async () => {
+    // The run was recorded under banyandb-fix@0.4.0, the graph issue-fix's
+    // banyandb profile has since replaced. Replay reads the bundle's current
+    // code, not the recorded intake's frozen absolute path, so the copy pins
+    // issue-fix's manifest and the profile as its task config: replay must
+    // hand the plugin that pinned config, as a run would.
+    const recorded = JSON.parse(await readFile(path.join(root, "examples/skywalking-banyandb/graphloom-state/879ee04f-e57/state.json"), "utf8")) as DurableRunState;
+    const text = await readFile(path.join(root, "examples/plugins/issue-fix/profiles/banyandb.json"), "utf8");
+    const bundlePath = path.join(root, "examples/plugins/issue-fix");
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "gl-replay-"));
+    dirs.push(stateDir);
+    const state = {
+      ...recorded,
+      stateDir,
+      intake: {
+        ...recorded.intake,
+        config: { path: "banyandb.json", sha256: createHash("sha256").update(text).digest("hex"), text },
+        bundle: { ...recorded.intake.bundle, manifestRaw: await readFile(path.join(bundlePath, "graphloom.manifest.json"), "utf8") },
+      },
+    };
+    await writeFile(path.join(stateDir, "state.json"), JSON.stringify(state), "utf8");
+    const report = await replay(stateDir, { bundlePath });
+    expect(report.activeVersion).toBe("banyandb-fix@0.4.0");
+    // The run's plan review and its decision-record-v1 plan are no contract
+    // issue-fix declares (it records decision-record-v2): none of its agent
+    // evidence reclassifies as valid, and no requirement had a receipt.
+    expect(report.contracts.valid).toBe(0);
+    expect(report.contracts.byName["decision-record-v1"]).toBeUndefined();
+    expect(report.requirements.map((r) => r.requirementId)).toEqual(["decisions-recorded", "reproduces", "passes", "builds", "in-scope", "changelog-entry", "code-review"]);
+    expect(report.requirements.every((r) => !r.hadReceipt)).toBe(true);
+    // The current graph would go on to implement the plan, but this run's
+    // own recorded budget was already spent on the real plan-review churn.
     expect(report.nextDecision).toMatchObject({ decision: { action: { type: "stop", stop: { reason: "budgets exhausted" } } } });
   });
 });
@@ -399,9 +417,9 @@ describe("graphloom rehearse --record-from (§4.5)", () => {
     // Regression: a live run's supervisor used `observe` during recovery to
     // read the files a work dispatch had already written, generations after
     // that dispatch's own review reply — found recording a real successful
-    // banyandb-fix run. Nothing reset `activeReply` across the generation gap,
-    // so the observe's file evidence landed on the stale review reply instead
-    // of nothing, and replaying it would apply the fix's own file bytes only
+    // run of the former banyandb-fix graph. Nothing reset `activeReply`
+    // across the generation gap, so the observe's file evidence landed on the
+    // stale review reply instead of nothing, and replaying it would apply the fix's own file bytes only
     // once that reply replayed — long after Fix's own checks needed them.
     const dir = await mkdtemp(path.join(os.tmpdir(), "gl-record-from-"));
     dirs.push(dir);

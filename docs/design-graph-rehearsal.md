@@ -2,7 +2,11 @@
 
 Status: rollout step 1 implemented, 2026-10-03 (§7); all three example
 plugins' `happy` scenarios genuinely recorded from real successful live runs,
-2026-10-04 (§4.5, below). All four provider-free/bounded rungs run for real:
+2026-10-04 (§4.5, below). The banyandb-fix plugin this design names
+throughout has since been removed: the issue-fix graph's banyandb profile
+replaced it and carries its recorded go-test scenario. Its mentions below
+record what was found and built at the time. All four provider-free/bounded
+rungs run for real:
 
 - `check` (L0) and `rehearse` (L1) against hello and release end to end —
   real controller, real plugin host, real Pi harness code, a scripted
@@ -365,8 +369,8 @@ already merges into B2.
 
 Follows
 [agent–harness contract robustness](design-agent-contract-robustness.md),
-which fixed what the live runs of
-[`examples/plugins/banyandb-fix`](../examples/plugins/banyandb-fix/) found. This
+which fixed what the live runs of `examples/plugins/banyandb-fix` (since
+removed) found. This
 design is about finding the next defect of that class in under a minute and for
 zero provider calls, instead of after a run has spent its budget, and about
 making the finding durable: a verdict that names the boundary, and a fixture
@@ -893,7 +897,7 @@ verdict is read next to the list of what it did not prove.
 | Rehearsal wrappers, stand-in binaries (moved from `test/`), seam guard, per-adapter `requiredFlags` for the capability probe | `executors/coding-agent/src/rehearsal/` | executors |
 | `check`, `rehearse`, `replay`, `probe`; `--offline`, `--commands`; hermetic setup | `apps/graphloom` | cli |
 | `gate.ts` (`runGate`: L0+L1-quick, fingerprint cache), built for `run` then reverted (§3.5) — tested directly, wired to no command | `apps/graphloom` | cli |
-| `entryPoints.rehearsal`, scenarios, unit simulation reading them | hello, release, banyandb-fix | plugins |
+| `entryPoints.rehearsal`, scenarios, unit simulation reading them | hello, release, issue-fix (originally banyandb-fix) | plugins |
 
 ## 5. Interfaces and seams
 
@@ -915,7 +919,7 @@ verdict is read next to the list of what it did not prove.
 
 ## 6. Verification
 
-1. `rehearse` of hello, release and banyandb-fix in CI, on each plugin's
+1. `rehearse` of hello, release and issue-fix (originally banyandb-fix) in CI, on each plugin's
    recorded scenarios where it has one and on schema synthesis otherwise,
    finishes each under 60 s with commands stubbed, with the stand-in's call
    counter asserting zero provider calls.
@@ -935,8 +939,11 @@ verdict is read next to the list of what it did not prove.
    (the happy scenario scripts no supervisor decision for it) — the expected
    result, not a failure of the mode.
 5. `replay` of `879ee04f-e57`, committed as a fixture under
-   `examples/plugins/banyandb-fix/test/fixtures/runs/`, reports six valid
-   review results and pass 2's two reconciled repeats.
+   `examples/plugins/banyandb-fix/test/fixtures/runs/`, reported six valid
+   review results and pass 2's two reconciled repeats. Since banyandb-fix's
+   removal the CLI test replays the run, from
+   `examples/skywalking-banyandb/graphloom-state/`, against issue-fix's
+   banyandb profile, under whose contracts none of its results is valid.
 6. The gate (`apps/graphloom/src/gate.ts`'s `runGate`, tested directly, no
    longer reachable from `run` — §3.5): a `not-ready` rehearsal stops before
    live intake and returns the rehearsal report; `inconclusive` proceeds and
@@ -991,7 +998,8 @@ verdict is read next to the list of what it did not prove.
    "reaches ready for release's happy scenario" exactly (same claim — clean
    convergence through bump→changelog→review — proven more cheaply by a
    genuine recording than a hand-maintained script can be) and was removed.
-   banyandb-fix's own e2e test stays: its real value is exact delivery-text
+   banyandb-fix's own e2e test stayed, and its successor
+   `issue-fix-e2e.test.ts` stays: its real value is exact delivery-text
    and evidence-shape assertions `rehearse`'s deliberately generic evaluator
    never inspects, not happy-path convergence alone.
 4. Turn on the gate in `run`, cached by fingerprint. Done 2026-10-04, then
@@ -1084,7 +1092,7 @@ Decided 2026-10-04 (reverting an earlier decision from the same day):
   own original issue number against the real repo; same failure regardless of
   which issue the request named): the committed `happy` scenario is a literal
   recording of one run against a 3-file synthetic Go module
-  (`apps/graphloom/test/banyandb-fix-rehearsal.test.ts`'s `makeEnv()`), with a
+  (`makeEnv()` in `apps/graphloom/test/banyandb-fix-rehearsal.test.ts`, since removed), with a
   finite, fixed sequence of canned plan/review replies written for that one
   planted defect. `rehearse` correctly runs this scenario through the real
   controller against the live task's own real repo (§4.1's "the real graph

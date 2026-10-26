@@ -3,12 +3,13 @@
 Source-repairable Fix → Review bundle that fixes one bug issue in any
 repository, written only against the public `@graphloom/sdk`. Everything
 repository-specific comes from a *profile*: a JSON file the task names with
-`config:`. The graph is [banyandb-fix](../banyandb-fix/README.md)'s, with its
-plan, implementation, RED/GREEN proof, scope check, optional changelog check,
+`config:`. The graph has a plan, implementation, RED/GREEN proof, scope check, optional changelog check,
 open-code-review sweep with independent verification, and local `fix/<issue>`
 delivery. The reviewer may raise new findings in the first three review
 rounds only; after that it verifies the known findings, and new comments
-become follow-ups in the pull request. Since 0.4.0 the run tracks its
+become follow-ups in the pull request. It replaced the BanyanDB-only
+banyandb-fix graph, which has been removed; its banyandb profile carries that
+graph's requirements, checks, prompts and commands. Since 0.4.0 the run tracks its
 critical and high findings as issues in `.graphloom/issues.json` in the run's
 worktree, with a readable `.graphloom/issues.md`: the verifier opens or
 dismisses them, the fixer marks them fixed, and the reviewer verifies each one
@@ -28,14 +29,29 @@ and the [issues file](../../../docs/design-issue-fix-graph.md#the-issues-file).
 | [`profiles/canopy.json`](profiles/canopy.json) | apache/skywalking-banyandb, issues in apache/skywalking; Node/TypeScript changes under `canopy/` | `vitest` | the changed workspaces' tests, typecheck, lint (cheap tier); build, `npm test`, `make license-dep` (full tier) | `CHANGES.md` |
 | [`profiles/banyandb-ql.json`](profiles/banyandb-ql.json) | apache/skywalking-banyandb; the Measure QL tickets R01 to R06, tracked in the private hanahmily/banyandb-ql-design | `go-test` | banyandb's, plus the `bench-gates` final step | `CHANGES.md` |
 
-The banyandb profile reproduces banyandb-fix's requirements, statements,
-environment checks, prompts and commands, with two differences: the issues
-file, which banyandb-fix does not have, and, since 0.5.0, a code review that
-covers every changed file (ocr's exclusions put back, `.graphloom/` left out)
-and then checks the change as a whole across files. See banyandb-fix's
-README for its environment table and runner configuration; they apply as they
-are, except that open-code-review is [bundled](#bundled-open-code-review-0140)
-since 0.14.0.
+Since 0.5.0 the code review covers every changed file (ocr's exclusions put
+back, `.graphloom/` left out) and then checks the change as a whole across
+files.
+
+The banyandb profile declares BanyanDB's contributor checklist, and the
+controller runs it before any job, on every resume, and after a repair
+activation:
+
+| Command | Checks |
+|---|---|
+| `go` | `go env GOVERSION` equals the `go` line of `go.mod` |
+| `git` | Git 2.41 or later (open-code-review needs it; BanyanDB needs 2.30) |
+| `ocr` | [`scripts/ocr-path.sh`](scripts/ocr-path.sh) finds an open-code-review with delegation mode, the [bundled](#bundled-open-code-review-0140) one first, and prints the absolute path the code reviewer is told to run |
+| `codex` | `codex --version` and `codex login status`: Codex is installed and logged in, with the command and home the runner configures for the harness (`GRAPHLOOM_CODEX_BIN`, `GRAPHLOOM_CODEX_HOME`, then `CODEX_HOME`) |
+| `claude` | `claude --version` and `claude auth status`: Claude Code is installed and logged in, with the command and config directory the runner configures for the harness (`GRAPHLOOM_CLAUDE_BIN`, `GRAPHLOOM_CLAUDE_CONFIG_DIR`, then `CLAUDE_CONFIG_DIR`) |
+| `make` | GNU make |
+| `check-req` | `make -C scripts/ci/check test`: BanyanDB's Go version and architecture test |
+| `node` | Node.js >= 24.6.0: `make generate` and `make build` need it for every task |
+| `generate-*` (prepare) | `make generate`, split into separately cached steps, leaves no tracked or unignored file changed |
+
+It also pins the SHA-256 of `CONTRIBUTING.md`. A missing tool stops the run and
+names it. A changed guide blocks normal jobs until a qualified repair updates
+the declaration; without a supervisor, the run stops.
 
 Since 0.8.0 the banyandb profile differs in two more ways. It no longer runs
 `license-check` as a command of its own, because `make check` already runs it
@@ -91,10 +107,25 @@ dropped, the Test plan names only the pinned checks the evidence shows passed,
 and follow-ups about the environment or a pinned check are left out. A record
 without `change` falls back to the plan's text.
 
-The runner config is banyandb-fix's: Claude Code, Codex and Pi enabled, the
-GitHub reads, and command jobs long enough for the profile's checks. For the
-graphloom profile the full suite takes about ten minutes; its commands allow
-45.
+The runner config enables Claude Code, Codex and Pi, the GitHub reads, and
+command jobs long enough for the profile's checks:
+
+```json
+{
+  "harness": "claude-code",
+  "harnesses": ["claude-code", "pi", "codex"],
+  "allowUnrestricted": true,
+  "pi": { "provider": "minimax-cn", "modelId": "MiniMax-M3", "agentDir": "~/.pi/agent" },
+  "codex": { "reasoningEffort": "high" },
+  "github": { "tokenEnv": "GRAPHLOOM_GITHUB_LIVE_TOKEN" },
+  "command": { "timeoutMs": 10800000 }
+}
+```
+
+Claude Code and Codex must be installed and logged in (`claude auth status`,
+`codex login status`); the environment checks stop the run before any job
+otherwise, naming the tool. For the graphloom profile the full suite takes
+about ten minutes; its commands allow 45.
 
 ```sh
 GRAPHLOOM_GITHUB_LIVE_TOKEN="$(gh auth token)" node ../apps/graphloom/dist/main.js run issue-fix-graphloom-task.yaml
@@ -107,8 +138,7 @@ You don't need to install open-code-review. The plugin depends on
 repository root installs it, and the release tree ships it. npm installs the
 native binary from the platform package, `@alibaba-group/ocr-linux-x64` and
 so on, so no install step needs the network. `npm ci --ignore-scripts` gives
-the same result. Unlike banyandb-fix's README, which still asks for a global
-`npm install -g`, every profile's `ocr` check runs
+the same result. Every profile's `ocr` check runs
 [`scripts/ocr-path.sh`](scripts/ocr-path.sh). The script prints the absolute
 path of the first open-code-review that has delegation mode, in this order:
 
@@ -393,10 +423,9 @@ The banyandb profile pins `CONTRIBUTING.md` by sha256 (`environment.pinnedFiles`
 and a different file in the repository stops a run with `environment_changed`.
 When BanyanDB changes it, refresh the pin and the fixture the tests use:
 `git -C <skywalking-banyandb> show origin/main:CONTRIBUTING.md | sha256sum` gives
-the digest; put it in `profiles/banyandb.json` and in
-`examples/plugins/banyandb-fix/src/constants.ts`, copy the file to
-`examples/skywalking-banyandb/CONTRIBUTING.md`, rebuild, and regenerate both
-manifests (`npm run manifest` in each plugin). The pin was refreshed in 0.10.0.
+the digest; put it in `profiles/banyandb.json`, copy the file to
+`examples/skywalking-banyandb/CONTRIBUTING.md`, rebuild, and regenerate the
+manifest (`npm run manifest`). The pin was refreshed in 0.10.0.
 
 ## The canopy profile
 
