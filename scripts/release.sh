@@ -4,22 +4,25 @@
 
 # Local release procedure (docs/design-release.md §6).
 #
-#   scripts/release.sh build <version> [--commit <rev>] [--out <dir>] [--keep-work]
+#   scripts/release.sh build <version> [--commit <rev>] [--out <dir>] [--keep-work] [--compare-to <dir>]
 #
 # `build` runs steps 3-8 on a committed revision (default HEAD) and publishes
 # nothing: it stages a clean checkout of <rev>, fetches and verifies the pinned
 # Node, runs the gate on that Node, packs the SDK, prunes to production
 # dependencies, assembles the tree, checks licenses and content, packs the
-# tarball, writes SHA256SUMS, and smoke-tests the result with no Node on PATH.
-# Assets land in <out> (default release-out/<version>/, which Git ignores),
-# with the whole log in <out>/build.log. `prepare` and `publish`, signing,
-# and install.sh arrive in later phases (§8).
+# tarball deterministically, writes SHA256SUMS, and smoke-tests the result,
+# installed with install.sh, with no Node on PATH. Assets land in <out>
+# (default release-out/<version>/, which Git ignores), with the whole log in
+# <out>/build.log. --compare-to <dir> names an earlier, independent build of
+# the same commit: the build fails unless its tarball and SDK hashes equal
+# that build's SHA256SUMS (§2.5, phase R2). `prepare` and `publish`, and
+# signing, arrive in phase R5 (§8).
 set -euo pipefail
 
 repo=$(cd "$(dirname "$0")/.." && pwd -P)
 
 usage() {
-  echo "usage: scripts/release.sh build <version> [--commit <rev>] [--out <dir>] [--keep-work]" >&2
+  echo "usage: scripts/release.sh build <version> [--commit <rev>] [--out <dir>] [--keep-work] [--compare-to <dir>]" >&2
   exit 2
 }
 
@@ -39,11 +42,13 @@ shift
 rev=HEAD
 out=
 keep_work=0
+compare_to=
 while [ $# -gt 0 ]; do
   case "$1" in
     --commit) rev=${2:?--commit needs a revision}; shift 2 ;;
     --out) out=${2:?--out needs a directory}; shift 2 ;;
     --keep-work) keep_work=1; shift ;;
+    --compare-to) compare_to=${2:?--compare-to needs a build output directory}; shift 2 ;;
     *) usage ;;
   esac
 done
@@ -60,6 +65,12 @@ for tool in git tar gzip xz sha256sum; do
   command -v "$tool" >/dev/null || { echo "release.sh needs $tool on PATH" >&2; exit 2; }
 done
 command -v node >/dev/null || { echo "release.sh needs a host node to fetch the pinned runtime" >&2; exit 2; }
+if [ -n "$compare_to" ]; then
+  [ -f "$compare_to/SHA256SUMS" ] || { echo "--compare-to $compare_to has no SHA256SUMS" >&2; exit 2; }
+  compare_to=$(cd "$compare_to" && pwd -P)
+fi
+# File modes in the tarball come from what the build creates; fix them (§2.5).
+umask 022
 
 commit=$(git -C "$repo" rev-parse --verify "$rev^{commit}")
 epoch=$(git -C "$repo" show -s --format=%ct "$commit")
@@ -152,39 +163,63 @@ if [ -n "${HOME:-}" ] && [ "${#HOME}" -gt 1 ]; then forbid+=(--forbid "$HOME"); 
 node "$rel/check-tree.mjs" --root "$dest" --platform "$platform" "${forbid[@]}"
 cp "$dest/release.json" "$out/release.json"
 tarball=$out/$name.tar.gz
+# Deterministic (§2.5): names sorted, every mtime SOURCE_DATE_EPOCH, numeric 0:0
+# owners, no atime/ctime or other pax records, and a gzip header without a name
+# or time, so the bytes depend only on the tree's paths, modes, and contents.
 pack() {
-  tar --sort=name --mtime="@$epoch" --owner=0 --group=0 --numeric-owner -C "$assembly" -cf - "$name" | gzip -n -9 >"$1"
+  tar --sort=name --format=gnu --mtime="@$epoch" --owner=0 --group=0 --numeric-owner \
+    --mode=go-w -C "$assembly" -cf - "$name" | gzip -n -9 >"$1"
 }
 pack "$tarball"
 echo "tarball: $(basename "$tarball"), $(stat -c %s "$tarball") bytes compressed, $(du -sb "$dest" | cut -f1) bytes unpacked"
 
-# 7. Reproducibility check (R1: a second pack of the same assembled tree; R2 compares two full builds).
-step "7. repack the same tree and compare"
+cp "$src/scripts/install.sh" "$out/install.sh"
+chmod 755 "$out/install.sh"
+# Signing SHA256SUMS arrives with publish (R5).
+(cd "$out" && sha256sum "$(basename "$tarball")" "$(basename "$sdk")" release.json install.sh >SHA256SUMS)
+
+# 7. Reproducibility: a second pack of the same tree, and with --compare-to, an independent build.
+step "7. reproducibility"
 pack "$work/repack.tar.gz"
 first=$(sha256sum "$tarball" | cut -d' ' -f1)
 second=$(sha256sum "$work/repack.tar.gz" | cut -d' ' -f1)
-if [ "$first" = "$second" ]; then
-  echo "repack: identical ($first)"
-else
-  echo "repack: differs ($first vs $second); recorded, not claimed reproducible (§2.5)"
+[ "$first" = "$second" ] || { echo "repack of the same tree differs ($first vs $second)" >&2; exit 1; }
+echo "repack: identical ($first)"
+if [ -n "$compare_to" ]; then
+  differs=0
+  for asset in "$(basename "$tarball")" "$(basename "$sdk")" release.json install.sh; do
+    mine=$(grep "  $asset\$" "$out/SHA256SUMS" | cut -d' ' -f1)
+    theirs=$(grep "  $asset\$" "$compare_to/SHA256SUMS" | cut -d' ' -f1 || true)
+    if [ "$mine" = "$theirs" ]; then
+      echo "reproduced $asset: $mine"
+    else
+      echo "NOT reproduced $asset: $mine here, ${theirs:-absent} in $compare_to" >&2
+      differs=1
+    fi
+  done
+  [ "$differs" = 0 ] || exit 1
 fi
 
 # 8. Smoke tests, with no Node on PATH.
-step "8. smoke tests on the extracted tarball, with no node on PATH"
+step "8. smoke tests on the tarball installed by install.sh, with no node on PATH"
 smoke=$work/smoke
-mkdir -p "$smoke/home" "$smoke/tmp" "$smoke/install"
+mkdir -p "$smoke/home" "$smoke/tmp"
 nonode=$(node "$rel/no-node-path.mjs" --dir "$smoke/bin")
 printf '[user]\n\tname = GraphLoom Release Smoke\n\temail = release-smoke@example.invalid\n' >"$smoke/home/.gitconfig"
-tar -xzf "$tarball" -C "$smoke/install"
-installed=$smoke/install/$name
-chmod -R a-w "$installed"
-in_smoke() { env -i HOME="$smoke/home" PATH="$nonode" TMPDIR="$smoke/tmp" LANG=C.UTF-8 "$@"; }
+# No automatic-update check from the smoke tests: it would query the real release source.
+in_smoke() { env -i HOME="$smoke/home" PATH="$nonode" TMPDIR="$smoke/tmp" LANG=C.UTF-8 GRAPHLOOM_DISABLE_AUTOUPDATE=1 "$@"; }
+in_smoke sh "$out/install.sh" --from "$tarball"
+shim=$smoke/home/.local/bin/graphloom
+installed=$(readlink -f "$smoke/home/.local/share/graphloom/current")
+[ "$installed" = "$smoke/home/.local/share/graphloom/versions/$version" ] || { echo "install.sh did not switch current to $version" >&2; exit 1; }
+[ "$(in_smoke "$shim" self list)" = "$version (current)" ] || { in_smoke "$shim" self list; echo "graphloom self list does not show $version as current" >&2; exit 1; }
+if touch "$installed/.write-probe" 2>/dev/null; then echo "the installed version directory is writable" >&2; exit 1; fi
 
-in_smoke "$installed/bin/graphloom" version --json >"$smoke/version.json"
+in_smoke "$shim" version --json >"$smoke/version.json"
 node -e 'const fs=require("fs");const a=JSON.parse(fs.readFileSync(process.argv[1]));const b=JSON.parse(fs.readFileSync(process.argv[2]));if(JSON.stringify(a)!==JSON.stringify(b)){console.error("graphloom version --json does not match release.json");process.exit(1)}' \
   "$smoke/version.json" "$out/release.json"
-[ "$(in_smoke "$installed/bin/graphloom" version --root)" = "$installed" ] || { echo "graphloom version --root is not the extracted tree" >&2; exit 1; }
-echo "version: $(in_smoke "$installed/bin/graphloom" version) (matches release.json)"
+[ "$(in_smoke "$shim" version --root)" = "$installed" ] || { echo "graphloom version --root is not the installed version directory" >&2; exit 1; }
+echo "version: $(in_smoke "$shim" version) (matches release.json), installed at $installed"
 
 in_smoke "$installed/node/bin/node" "$rel/smoke-preflight.mjs" --root "$installed"
 in_smoke "$installed/node/bin/node" "$rel/smoke-pi.mjs" --root "$installed"
@@ -195,17 +230,15 @@ cp "$installed/examples/task.yaml" "$hello/task.yaml"
 ln -s "$installed/examples/plugins/hello" "$hello/plugins/hello"
 git init -q "$hello/test-repo"
 git -C "$hello/test-repo" -c user.name=GraphLoom -c user.email=graphloom@example.invalid commit -q --allow-empty -m "Initialize hello fixture"
-(cd "$hello" && in_smoke "$installed/bin/graphloom" check task.yaml >"$smoke/check.json") || { cat "$smoke/check.json"; echo "graphloom check failed" >&2; exit 1; }
+(cd "$hello" && in_smoke "$shim" check task.yaml >"$smoke/check.json") || { cat "$smoke/check.json"; echo "graphloom check failed" >&2; exit 1; }
 echo "check: ok"
-(cd "$hello" && in_smoke "$installed/bin/graphloom" rehearse task.yaml --offline >"$smoke/rehearse.json") || { cat "$smoke/rehearse.json"; echo "graphloom rehearse --offline was not-ready" >&2; exit 1; }
+(cd "$hello" && in_smoke "$shim" rehearse task.yaml --offline >"$smoke/rehearse.json") || { cat "$smoke/rehearse.json"; echo "graphloom rehearse --offline was not-ready" >&2; exit 1; }
 verdict=$(node -p 'JSON.parse(require("fs").readFileSync(process.argv[1])).verdict' "$smoke/rehearse.json")
 echo "rehearse --offline: $verdict"
 [ "$verdict" != "not-ready" ] || exit 1
 
-# Checksums (signing arrives with publish, R5).
 step "checksums"
-(cd "$out" && sha256sum "$(basename "$tarball")" "$(basename "$sdk")" release.json >SHA256SUMS)
 cat "$out/SHA256SUMS"
 echo
 echo "release build $version done in $(($(date +%s) - started))s; assets in $out:"
-(cd "$out" && ls -l "$(basename "$tarball")" "$(basename "$sdk")" release.json SHA256SUMS)
+(cd "$out" && ls -l "$(basename "$tarball")" "$(basename "$sdk")" release.json install.sh SHA256SUMS)

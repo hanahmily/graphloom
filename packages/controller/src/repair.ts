@@ -4,6 +4,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import {
+  chmod,
   cp,
   lstat,
   mkdir,
@@ -207,6 +208,7 @@ export async function snapshotRepairCandidate(args: {
       return base !== "node_modules" && base !== ".git";
     },
   });
+  await makeTreeWritable(candidateRoot);
   const meta: RepairSnapshot = {
     artifactId,
     candidateRoot,
@@ -222,6 +224,22 @@ export async function snapshotRepairCandidate(args: {
     "utf8",
   );
   return meta;
+}
+
+/**
+ * Gives the owner write permission on every file and directory of a copied
+ * candidate. `cp` keeps the source modes, and an installed release's version
+ * directory is read-only (docs/design-release.md §4.2), so a copy of one of its
+ * bundles or executor packages would be unwritable. Symlinks are not followed.
+ */
+export async function makeTreeWritable(root: string): Promise<void> {
+  const visit = async (p: string): Promise<void> => {
+    const st = await lstat(p);
+    if (st.isSymbolicLink()) return;
+    if ((st.mode & 0o200) === 0) await chmod(p, (st.mode & 0o7777) | 0o200);
+    if (st.isDirectory()) for (const name of await readdir(p)) await visit(path.join(p, name));
+  };
+  await visit(root);
 }
 
 /** Reject patches that alter the pinned step list; stages pin is required. */

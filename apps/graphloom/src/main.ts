@@ -17,6 +17,7 @@ import { requireRunnerConfig } from "./runner-config.js";
 import { onceStopHook, parseDuration, waitForRun, type StopNotice } from "./notify.js";
 import { formatRunStats, loadRunStats } from "./stats.js";
 import { formatVersion, installRoot } from "./version.js";
+import { JOB_TIMEOUT_MS, killActiveChildren, runAutoUpdate } from "./auto-update.js";
 import {
   loadSupervisorConfig,
   parseModelRef,
@@ -30,6 +31,23 @@ async function main(): Promise<void> {
 
   if (cmd === "version" || cmd === "--version" || cmd === "-V") {
     console.log(formatVersion(installRoot(), args.slice(1)));
+    return;
+  }
+
+  // The detached daily update check the shim starts (docs/design-release.md §5.4); hidden from help.
+  if (cmd === "__auto-update") {
+    setTimeout(() => {
+      console.log(`${new Date().toISOString()} auto-update: stopped after ${JOB_TIMEOUT_MS} ms`);
+      killActiveChildren();
+      process.exit(1);
+    }, JOB_TIMEOUT_MS).unref();
+    await runAutoUpdate();
+    return;
+  }
+
+  if (cmd === "upgrade" || cmd === "self") {
+    console.error(`graphloom ${cmd} is handled by the installed shim (~/.local/bin/graphloom), which runs install.sh in sh; this tree was started directly`);
+    process.exitCode = 2;
     return;
   }
 
@@ -353,6 +371,10 @@ Usage:
   graphloom switch-model <stateDir|runId> <provider/model> --reason <text> [--state-root <dir>]
   graphloom delete <stateDir|runId> [--state-root <dir>] [--force]
   graphloom version [--json | --root]
+
+Installed releases (handled by the shim in ~/.local/bin, docs/design-release.md §4.3):
+  graphloom upgrade [<version>] [--no-switch]
+  graphloom self list | use <version> | rollback | prune [--dry-run] [--force] | uninstall [--purge-config]
 
 check, rehearse, replay and probe verify a graph can run before spending a
 live run's budget (docs/design-graph-rehearsal.md): check is a static check

@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
-import { mkdtemp, mkdir, writeFile, rm, readFile, symlink } from "node:fs/promises";
+import { chmod, lstat, mkdtemp, mkdir, writeFile, rm, readFile, symlink } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   assertCandidateStepsUnchanged,
   digestDirectoryTree,
+  makeTreeWritable,
   snapshotRepairCandidate,
   unreviewedEntries,
 } from "./repair.js";
@@ -17,7 +19,10 @@ const temps: string[] = [];
 afterEach(async () => {
   while (temps.length > 0) {
     const dir = temps.pop();
-    if (dir) await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+    if (dir) {
+      spawnSync("chmod", ["-R", "u+w", dir]);
+      await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+    }
   }
 });
 
@@ -89,6 +94,51 @@ describe("repair snapshot", () => {
       "export const bad = true;\n",
     );
     expect(await digestDirectoryTree(snap.candidateRoot)).not.toBe(snap.baseDigest);
+  });
+
+  it("makes the candidate writable when the bundle is in a read-only version directory", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "gl-repair-"));
+    temps.push(root);
+    const bundle = path.join(root, "versions", "0.1.0", "examples", "plugins", "hello");
+    const repairs = path.join(root, "repairs");
+    await mkdir(path.join(bundle, "src"), { recursive: true });
+    await writeFile(path.join(bundle, "src", "index.ts"), "export const v = 1;\n", "utf8");
+    await writeFile(path.join(bundle, "package.json"), "{}\n", "utf8");
+    await symlink("src/index.ts", path.join(root, "outside-link"));
+    // As install.sh leaves an installed version: nothing in it is writable.
+    expect(spawnSync("chmod", ["-R", "a-w", path.join(root, "versions")]).status).toBe(0);
+    await expect(writeFile(path.join(bundle, "src", "index.ts"), "x")).rejects.toThrow();
+
+    const snap = await snapshotRepairCandidate({
+      bundlePath: bundle,
+      repairsDir: repairs,
+      baseActiveVersion: "hello@0.1.0",
+      target: "plugin",
+      reason: "read-only install",
+    });
+    await writeFile(path.join(snap.candidateRoot, "src", "index.ts"), "export const v = 2;\n", "utf8");
+    await writeFile(path.join(snap.candidateRoot, "src", "new.ts"), "export {};\n", "utf8");
+    await mkdir(path.join(snap.candidateRoot, "dist"));
+    expect(await readFile(path.join(bundle, "src", "index.ts"), "utf8")).toBe("export const v = 1;\n");
+    expect((await lstat(path.join(bundle, "src"))).mode & 0o222).toBe(0);
+  });
+
+  it("makeTreeWritable adds owner write without following symlinks", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "gl-repair-"));
+    temps.push(root);
+    const target = path.join(root, "target.txt");
+    await writeFile(target, "t", "utf8");
+    await chmod(target, 0o444);
+    const tree = path.join(root, "tree");
+    await mkdir(path.join(tree, "a"), { recursive: true });
+    await writeFile(path.join(tree, "a", "f.txt"), "f", "utf8");
+    await symlink(target, path.join(tree, "a", "link"));
+    await chmod(path.join(tree, "a", "f.txt"), 0o444);
+    await chmod(path.join(tree, "a"), 0o555);
+    await makeTreeWritable(tree);
+    expect((await lstat(path.join(tree, "a"))).mode & 0o777).toBe(0o755);
+    expect((await lstat(path.join(tree, "a", "f.txt"))).mode & 0o777).toBe(0o644);
+    expect((await lstat(target)).mode & 0o777).toBe(0o444);
   });
 
   it("gives concurrent qualify attempts separate candidate trees", async () => {
