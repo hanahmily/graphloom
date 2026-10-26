@@ -491,6 +491,78 @@ describe("rehearsal stand-ins on GraphLoom's own Node (§2.7)", () => {
   });
 });
 
+describe("the issue-fix plugin's bundled open-code-review (§2.3, §2.8, §6 step 6)", () => {
+  const installed = path.join(repoRoot, "node_modules", "@alibaba-group");
+  const hostBinary = path.join(installed, "ocr-linux-x64", "bin", "opencodereview");
+  const onLinuxX64 = process.platform === "linux" && process.arch === "x64" && spawnSync("test", ["-x", hostBinary]).status === 0;
+
+  /**
+   * The shipped layout: the pinned open-code-review and its linux-x64 binary
+   * hoisted to the top-level node_modules, as `npm ci` installs them, plus two
+   * other platforms' packages a lockfile could reify, and the issue-fix
+   * bundle's lookup script and profiles.
+   */
+  async function shippedTree() {
+    const root = await tempDir();
+    await writeFile(path.join(root, "package.json"), "{}");
+    for (const name of ["open-code-review", "ocr-linux-x64"]) {
+      await cp(path.join(installed, name), path.join(root, "node_modules", "@alibaba-group", name), { recursive: true });
+    }
+    for (const [os_, cpu] of [["darwin", "arm64"], ["win32", "x64"]] as const) {
+      const dir = path.join(root, "node_modules", "@alibaba-group", `ocr-${os_}-${cpu}`);
+      await writePackage(dir, { name: `@alibaba-group/ocr-${os_}-${cpu}`, version: "1.13.3", os: [os_], cpu: [cpu], license: "Apache-2.0" });
+      await mkdir(path.join(dir, "bin"));
+      await writeFile(path.join(dir, "bin", "opencodereview"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    }
+    const plugin = path.join(root, "examples", "plugins", "issue-fix");
+    for (const rel of ["package.json", "scripts", "profiles"]) {
+      await cp(path.join(repoRoot, "examples", "plugins", "issue-fix", rel), path.join(plugin, rel), { recursive: true });
+    }
+    return { root, plugin };
+  }
+
+  it.skipIf(!onLinuxX64)("ships the pinned version, prunes other platforms' binaries, passes the license and content checks, and runs read-only with no node on PATH", async () => {
+    const { root, plugin } = await shippedTree();
+    const pkg = JSON.parse(await readFile(path.join(plugin, "package.json"), "utf8")) as { dependencies: Record<string, string> };
+    const pinned = pkg.dependencies["@alibaba-group/open-code-review"]!;
+    expect(pinned).toMatch(/^\d+\.\d+\.\d+$/);
+    const versionOf = async (name: string) =>
+      (JSON.parse(await readFile(path.join(root, "node_modules", "@alibaba-group", name, "package.json"), "utf8")) as { version: string }).version;
+    expect(await versionOf("open-code-review")).toBe(pinned);
+    expect(await versionOf("ocr-linux-x64")).toBe(pinned);
+
+    const pruned = script("prune-tree.mjs", ["--root", root, "--platform", "linux-x64"]);
+    expect(pruned.status, pruned.stderr).toBe(0);
+    expect(pruned.stderr).toContain("removed 2 package(s) for other platforms");
+    expect((await readdir(path.join(root, "node_modules", "@alibaba-group"))).sort()).toEqual(["ocr-linux-x64", "open-code-review"]);
+
+    const forbid = ["--forbid", repoRoot, ...(os.homedir().length > 1 ? ["--forbid", os.homedir()] : [])];
+    const checked = script("check-tree.mjs", ["--root", root, "--platform", "linux-x64", ...forbid]);
+    expect(checked.status, checked.stderr).toBe(0);
+
+    const out = path.join(root, "THIRD_PARTY_NOTICES");
+    const notices = script("notices.mjs", ["--root", root, "--allowlist", path.join(repoRoot, "release", "license-allowlist.json"), "--out", out]);
+    expect(notices.status, notices.stderr).toBe(0);
+    const text = await readFile(out, "utf8");
+    expect(text).toContain(`@alibaba-group/open-code-review@${pinned}\nLicense: Apache-2.0\n`);
+    expect(text).toContain(`@alibaba-group/ocr-linux-x64@${pinned}\nLicense: Apache-2.0\n`);
+
+    // As installed: read-only, no node on PATH, and the check run as the controller runs it.
+    const noNode = path.join(await tempDir(), "bin");
+    expect(script("no-node-path.mjs", ["--dir", noNode]).status).toBe(0);
+    const home = await tempDir();
+    spawnSync("chmod", ["-R", "a-w", root]);
+    const check = (JSON.parse(await readFile(path.join(plugin, "profiles", "graphloom.json"), "utf8")) as { environment: { checks: { id: string; argv: string[] }[] } })
+      .environment.checks.find((c) => c.id === "ocr")!;
+    const [cmd, ...args] = check.argv;
+    const env = { PATH: noNode, HOME: home, GRAPHLOOM_PLUGIN_ROOT: plugin };
+    const { stdout } = await execFileAsync(cmd!, args, { cwd: home, env });
+    const binary = path.join(root, "node_modules", "@alibaba-group", "ocr-linux-x64", "bin", "opencodereview");
+    expect(stdout.trim()).toBe(binary);
+    expect((await execFileAsync(binary, ["version"], { env })).stdout).toContain(`open-code-review v${pinned} `);
+  }, 120_000);
+});
+
 describe("scripts/release.sh", () => {
   const releaseSh = path.join(repoRoot, "scripts", "release.sh");
 

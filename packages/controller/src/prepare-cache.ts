@@ -7,6 +7,7 @@ import { execFile } from "node:child_process";
 import path from "node:path";
 import { promisify } from "node:util";
 import type { EnvironmentCommand } from "@graphloom/sdk";
+import { PLUGIN_ROOT_ENV } from "@graphloom/sdk";
 
 /**
  * Run-scoped cache of environment preparation output.
@@ -36,6 +37,19 @@ export function isCacheable(command: EnvironmentCommand): command is Environment
 /** The part of a command the command executor accepts. */
 export function commandSpec(command: EnvironmentCommand): { id: string; argv: string[]; timeoutMs?: number } {
   return { id: command.id, argv: [...command.argv], ...(command.timeoutMs !== undefined ? { timeoutMs: command.timeoutMs } : {}) };
+}
+
+/**
+ * The command executor input for a batch of environment checks and preparation
+ * commands: each command's spec, and `$GRAPHLOOM_PLUGIN_ROOT` set to the graph
+ * bundle's root, so a check can find what the bundle ships. The controller
+ * reads nothing else about the bundle here.
+ */
+export function environmentInput(
+  commands: readonly EnvironmentCommand[],
+  bundlePath: string,
+): { commands: Array<ReturnType<typeof commandSpec>>; env: Record<string, string> } {
+  return { commands: commands.map(commandSpec), env: { [PLUGIN_ROOT_ENV]: path.resolve(bundlePath) } };
 }
 
 type Entry = { path: string; type: "file"; mode: number; sha256: string } | { path: string; type: "link"; target: string };

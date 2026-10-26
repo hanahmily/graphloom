@@ -10,7 +10,7 @@ import { promisify } from "node:util";
 import type { CheckoutSpec, EnvironmentCommand, JobSpec } from "@graphloom/sdk";
 import { writeScopeAllows } from "@graphloom/sdk";
 import type { ExecutorSourceOverride, JobEvidenceItem, JobResult, Runner } from "@graphloom/runner";
-import { cacheKey, commandSpec, dropEntry, isCacheable, outputsBlocked, restoreOutputs, saveOutputs } from "./prepare-cache.js";
+import { cacheKey, dropEntry, environmentInput, isCacheable, outputsBlocked, restoreOutputs, saveOutputs } from "./prepare-cache.js";
 import { candidateChange } from "./worktree.js";
 
 const execFileAsync = promisify(execFile);
@@ -74,6 +74,8 @@ export async function runInCheckout(args: {
   artifactDir: string;
   checks: EnvironmentCommand[];
   prepare: EnvironmentCommand[];
+  /** The graph bundle's root, which the checks and preparation see as `$GRAPHLOOM_PLUGIN_ROOT`. */
+  bundlePath: string;
   runner: Runner;
   signal: AbortSignal;
   source?: ExecutorSourceOverride;
@@ -196,7 +198,7 @@ export async function runInCheckout(args: {
         const saves = pendingSave;
         pending = [];
         pendingSave = [];
-        const prep = await args.runner.runJob({ ...plain, input: { commands: batch.map(commandSpec) } }, prepContext);
+        const prep = await args.runner.runJob({ ...plain, input: environmentInput(batch, args.bundlePath) }, prepContext);
         mismatch = identityMismatch(prep, prepContext);
         if (mismatch !== undefined) return;
         collected.push(...(prep.evidence ?? []));

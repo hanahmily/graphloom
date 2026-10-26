@@ -1061,3 +1061,12 @@ SHA-256 before restoring, and copy rather than link. An entry that fails
 verification is a miss. Each command keeps its four newest entries. The plugin
 owns correctness of the declaration: an input it omits can leave stale output
 restored, so it lists everything the command reads.
+
+Every environment check and preparation command sees `$GRAPHLOOM_PLUGIN_ROOT`
+(`PLUGIN_ROOT_ENV` in the SDK): the absolute path of the graph bundle's root,
+the directory that holds `graphloom.manifest.json`. This holds in the worktree
+preflight, in every checkout, and under `graphloom check`. The controller passes
+it in the command executor's `env` input and reads nothing about the bundle to
+do so. Commands run in the worktree, so this is how a check finds what the
+bundle ships, such as a tool from the bundle's own dependencies. The variable
+is not part of a prepare command's cache key.

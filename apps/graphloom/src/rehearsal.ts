@@ -39,6 +39,7 @@ import { createChildPluginHost } from "@graphloom/plugin-host";
 import { createScriptedSupervisor } from "@graphloom/supervisor";
 import {
   checkContract,
+  PLUGIN_ROOT_ENV,
   readCallLog,
   readUnverifiedReads,
   REHEARSAL_ADVERSARIAL_ENV,
@@ -342,7 +343,12 @@ export async function check(taskPath: string): Promise<CheckReport> {
       continue;
     }
     try {
-      const { stdout } = await execFileAsync(cmd, args, { cwd: intake.repoPath, timeout: c.timeoutMs ?? 10_000 });
+      // The same `$GRAPHLOOM_PLUGIN_ROOT` a run's checks get (packages/controller/src/prepare-cache.ts).
+      const { stdout } = await execFileAsync(cmd, args, {
+        cwd: intake.repoPath,
+        timeout: c.timeoutMs ?? 10_000,
+        env: { ...process.env, [PLUGIN_ROOT_ENV]: path.resolve(intake.bundle.bundlePath) },
+      });
       environmentOutputs[c.id] = stdout;
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);

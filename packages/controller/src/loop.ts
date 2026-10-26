@@ -1200,6 +1200,7 @@ async function runNormalLoopSteps(
               ...(confined ? { scratchDir: scratchDirOf(state) } : {}),
               checks: state.definition.environment?.checks ?? [],
               prepare: state.definition.environment?.prepare ?? [],
+              bundlePath: state.intake.bundle.bundlePath,
               runner: deps.runner,
               signal: abort.signal,
               ...(source !== undefined ? { source } : {}),

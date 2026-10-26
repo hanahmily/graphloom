@@ -177,6 +177,14 @@ export async function createIssueFixFixture(scope: TestScope, options: IssueFixF
     ].join("\n"),
     { mode: 0o755 },
   );
+  // The plugin bundles a real open-code-review, which its check prefers to one on PATH;
+  // the operator override makes the run use this stand-in instead.
+  const savedOcr = process.env.GRAPHLOOM_OCR_BIN;
+  process.env.GRAPHLOOM_OCR_BIN = path.join(binDir, "ocr");
+  scope.defer(() => {
+    if (savedOcr === undefined) delete process.env.GRAPHLOOM_OCR_BIN;
+    else process.env.GRAPHLOOM_OCR_BIN = savedOcr;
+  });
   // Answers only the environment check's --version with a version it accepts;
   // anything else (a stand-in's own `#!/usr/bin/env node`) reaches the real interpreter.
   await writeFile(path.join(binDir, "node"), `#!/bin/sh\n[ "$1" = "--version" ] && { echo "v24.6.0"; exit 0; }\nexec "${process.execPath}" "$@"\n`, { mode: 0o755 });

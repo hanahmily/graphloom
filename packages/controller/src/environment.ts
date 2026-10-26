@@ -8,7 +8,7 @@ import type { EnvironmentDeclaration, JobSpec } from "@graphloom/sdk";
 import { builtinPinForKind } from "@graphloom/sdk";
 import type { JobEvidenceItem, Runner } from "@graphloom/runner";
 import { commandOutcome, describeFailure, identityMismatch } from "./checkout.js";
-import { commandSpec } from "./prepare-cache.js";
+import { environmentInput } from "./prepare-cache.js";
 import { resolveExecutorPin } from "./executor-catalog.js";
 import type { DurableRunState } from "./state.js";
 import { changedPaths, worktreeChangeFingerprints } from "./worktree.js";
@@ -72,7 +72,7 @@ export async function checkEnvironment(args: {
     instruction: "Check the environment the graph declares",
     readOnly: true,
     executor: resolved.pin,
-    input: { commands: [...checks, ...prepare].map(commandSpec) },
+    input: environmentInput([...checks, ...prepare], state.intake.bundle.bundlePath),
   };
   const before = await worktreeChangeFingerprints(state.worktreePath);
   const expected = { runId: state.runId, operationId, generation: state.generation };

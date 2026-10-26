@@ -66,7 +66,7 @@ The profile supplies, as data:
 |---|---|---|---|
 | `name`, `project` | Names for messages; the repository agents are told they work in | `apache/skywalking-banyandb` | `hanahmily/graphloom` |
 | `issues` | Where issues live; the request names `owner/repo#N`. Optional `context`: [documents](#context-documents) the issue defers to | `apache/skywalking` | `hanahmily/graphloom` |
-| `environment` | The SDK `EnvironmentDeclaration`: checks, preparation, pinned files. Must include an `ocr` check that prints open-code-review's path | BanyanDB's checklist, `make generate`, `CONTRIBUTING.md` pinned | Node.js 22+, npm, flock, git, ocr, codex, claude; `npm ci --include=dev`, `npm run build`; nothing pinned |
+| `environment` | The SDK `EnvironmentDeclaration`: checks, preparation, pinned files. Must include an `ocr` check that prints open-code-review's path; the shipped profiles run the plugin's `scripts/ocr-path.sh`, which finds the [bundled copy](#bundled-open-code-review) first | BanyanDB's checklist, `make generate`, `CONTRIBUTING.md` pinned | Node.js 22+, npm, flock, git, ocr, codex, claude; `npm ci --include=dev`, `npm run build`; nothing pinned |
 | `regression` | `runner` (a built-in, below) and `timeoutMs` | `go-test`, 30 min | `vitest`, 20 min |
 | `commands` | GREEN's further checks and the build checks, run in order in the committed candidate checkout. Each has `id`, `argv`, `timeoutMs`, `requirement` (`passes`, `builds`, or `final-checks`/`bench-gates` for a `final` tier command), and optional `tier` (`cheap`, `full` or `final`, default `full`; a `final` command runs once, after review, see [the final tier](#the-final-command-tier), and has optional `section`; once any command is `cheap`, GREEN and the cheap commands run first in one checkout job and the full commands run in a second job only after those passed on the same candidate digest, and Fix needs both) and optional `label`, `statement` and `summary` wording, and optional `writes` (repository-relative files or directories, a trailing `/**` allowed, that the command regenerates and a failure tells the author to commit, such as license artifacts: the implementer's write scope covers them even under a protected path) | `test-ci` (passes); `build`, `lint`, `check` (builds; `make check` already runs license-check); `test-ci` and `lint` are cheap | `npm run typecheck`, `npm run build`, `npm test` (builds; the full suite takes about ten minutes, so 45 min) |
 | `testPaths` | `suffixes`, and `directories` whose contents count as test files; RED applies only these | `_test.go`, `testdata/` | `.test.ts`, `test/`, `fixtures/` |
@@ -640,7 +640,8 @@ issue-fix is.
 
 - [`profiles/banyandb.json`](../examples/plugins/issue-fix/profiles/banyandb.json):
   banyandb-fix's behaviour exactly; its environment is banyandb-fix's
-  declaration verbatim.
+  declaration, except that the `ocr` check finds the
+  [bundled open-code-review](#bundled-open-code-review) first.
 - [`profiles/graphloom.json`](../examples/plugins/issue-fix/profiles/graphloom.json):
   this repository. Preparation installs and builds, because the workspaces'
   tests import each other's `dist/`; `--include=dev` keeps a
@@ -659,6 +660,48 @@ with no budgets of their own: the profile's apply. The GraphLoom task uses `repo
 it lives in. Intake pins the top level of the repository `repo` names, so the
 run's worktree and state sit under `graphloom/` and `graphloom-state/` at the
 repository root, which Git ignores.
+
+## Bundled open-code-review
+
+Since 0.14.0 the plugin depends on `@alibaba-group/open-code-review` at an
+exact version (1.13.3), so operators never install `ocr` themselves. npm
+installs the package's native binary from its platform package
+(`@alibaba-group/ocr-linux-x64` and so on, optional dependencies with `os` and
+`cpu`), so no install step downloads anything. The package's postinstall only
+downloads a binary when no platform package is installed, and then skips; an
+`npm ci --ignore-scripts` install works the same. The release tree ships the
+dependency in its top-level `node_modules`, the platform prune keeps only the
+linux-x64 package, and both packages are Apache-2.0 in `THIRD_PARTY_NOTICES`.
+
+Every shipped profile's `ocr` check runs
+[`scripts/ocr-path.sh`](../examples/plugins/issue-fix/scripts/ocr-path.sh) from
+`$GRAPHLOOM_PLUGIN_ROOT`, which the controller sets to the bundle's root for
+every environment check (the SDK's `PLUGIN_ROOT_ENV`). The script prints the
+absolute path of the first of these that runs `delegate preview --help`:
+
+1. A path given as its argument: a profile can name its own ocr with
+   `exec sh "$r/scripts/ocr-path.sh" /path/to/ocr`.
+2. `$GRAPHLOOM_OCR_BIN`, an operator override.
+3. The bundled native binary. The script resolves the package from the
+   plugin's real directory upward, as Node does. It then resolves the
+   platform package from the package's real directory upward. A repair
+   candidate links only the declared dependencies, so this is how its check
+   still finds the installed tree's platform package. A binary for another host
+   does not run, so the next candidate is tried. The binary that the
+   postinstall would download is the last candidate.
+4. `ocr` on `PATH`.
+
+An explicit path never falls back. When nothing is found, the check fails
+with exit code 127 and says that both the bundled copy and `ocr` on `PATH` are
+missing. The script uses only shell builtins, so a `PATH` with just `sh` is
+enough. The reviewer runs the native binary directly, not open-code-review's
+Node launcher. That needs no `node` on `PATH`, which a release does not have,
+and the launcher's background update check never runs. The binary sits in the
+installed tree, which is read-only, and the reviewer only executes it.
+A confined job sees the whole filesystem read-only, so it sees the binary too.
+The one exception is a private `/tmp`, which applies only when nothing the job
+reads is there. The executors ship in the same tree as the plugin, so a tree
+under `/tmp` keeps `/tmp` visible.
 
 ## The Measure QL profile and benchmark gates
 

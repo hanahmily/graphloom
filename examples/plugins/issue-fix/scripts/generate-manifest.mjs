@@ -37,6 +37,8 @@ const pinned = [
   "package-lock.json",
   "tsconfig.json",
   ...listFiles(path.join(root, "profiles"), "profiles"),
+  // Every profile's "ocr" environment check runs it.
+  "scripts/ocr-path.sh",
   ...listFiles(path.join(root, "src"), "src"),
   ...listFiles(path.join(root, "test"), "test"),
 ];

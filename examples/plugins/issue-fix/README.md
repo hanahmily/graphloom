@@ -34,7 +34,8 @@ file, which banyandb-fix does not have, and, since 0.5.0, a code review that
 covers every changed file (ocr's exclusions put back, `.graphloom/` left out)
 and then checks the change as a whole across files. See banyandb-fix's
 README for its environment table and runner configuration; they apply as they
-are.
+are, except that open-code-review is [bundled](#bundled-open-code-review-0140)
+since 0.14.0.
 
 Since 0.8.0 the banyandb profile differs in two more ways. It no longer runs
 `license-check` as a command of its own, because `make check` already runs it
@@ -98,6 +99,32 @@ graphloom profile the full suite takes about ten minutes; its commands allow
 ```sh
 GRAPHLOOM_GITHUB_LIVE_TOKEN="$(gh auth token)" node ../apps/graphloom/dist/main.js run issue-fix-graphloom-task.yaml
 ```
+
+## Bundled open-code-review (0.14.0)
+
+You don't need to install open-code-review. The plugin depends on
+`@alibaba-group/open-code-review` at exactly 1.13.3. `npm ci` at the
+repository root installs it, and the release tree ships it. npm installs the
+native binary from the platform package, `@alibaba-group/ocr-linux-x64` and
+so on, so no install step needs the network. `npm ci --ignore-scripts` gives
+the same result. Unlike banyandb-fix's README, which still asks for a global
+`npm install -g`, every profile's `ocr` check runs
+[`scripts/ocr-path.sh`](scripts/ocr-path.sh). The script prints the absolute
+path of the first open-code-review that has delegation mode, in this order:
+
+1. A path passed as the script's argument.
+2. `$GRAPHLOOM_OCR_BIN`.
+3. The bundled binary.
+4. `ocr` on `PATH`.
+
+The controller tells the check where the plugin is through
+`$GRAPHLOOM_PLUGIN_ROOT`. The code reviewer runs the native binary directly,
+so it needs no `node` on `PATH`. If no open-code-review is found, the check
+stops the run and says that both the bundled copy and `ocr` on `PATH` are
+missing. The
+[design](../../../docs/design-issue-fix-graph.md#bundled-open-code-review)
+gives the details. To pin another open-code-review, change the dependency and
+both lockfiles, the repository root's and this plugin's.
 
 ## The Measure QL tickets: the banyandb-ql profile (0.12.0)
 

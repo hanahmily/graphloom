@@ -76,6 +76,7 @@ async function run(dir: string, pinnedHead: string, job: JobSpec & { checkout: {
     artifactDir: stateDir,
     checks: [],
     prepare: [],
+    bundlePath: stateDir,
     runner,
     signal: new AbortController().signal,
     ...(scratchDir !== undefined ? { scratchDir } : {}),
@@ -262,6 +263,7 @@ describe("runInCheckout: prepare cache (#174)", () => {
         artifactDir: stateDir,
         checks: [],
         prepare: prepare as never,
+        bundlePath: stateDir,
         runner,
         signal: new AbortController().signal,
       });
@@ -312,6 +314,13 @@ describe("runInCheckout: prepare cache (#174)", () => {
     expect(await t.runs()).toBe(2);
     expect(t.restoredKeys(second)).toEqual([]);
     expect(await readdir(path.join(t.stateDir, "prepare-cache")).catch(() => [])).toEqual([]);
+  });
+
+  it("gives preparation the graph bundle's root as $GRAPHLOOM_PLUGIN_ROOT", async () => {
+    const t = await prepRepo();
+    const probe = { id: "plugin-root", argv: ["sh", "-c", `[ "$GRAPHLOOM_PLUGIN_ROOT" = '${t.stateDir}' ]`] };
+    const result = await t.checkout([probe], ["true"]);
+    expect(result.result.status, result.result.summary).toBe("ok");
   });
 
   it("always runs a prepare command that declares no inputs and outputs", async () => {
@@ -414,6 +423,7 @@ describe("runInCheckout: prepare cache ordering and symlinks (#174)", () => {
         artifactDir: stateDir,
         checks: [],
         prepare: prepare as never,
+        bundlePath: stateDir,
         runner,
         signal: new AbortController().signal,
       });

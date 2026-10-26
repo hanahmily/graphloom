@@ -128,7 +128,7 @@ export type {
   ToolCallResult,
 } from "./executor.js";
 
-export { GRAPH_BUDGET_KEYS, PROTOCOL_VERSION } from "./types.js";
+export { GRAPH_BUDGET_KEYS, PLUGIN_ROOT_ENV, PROTOCOL_VERSION } from "./types.js";
 
 export {
   BUILTIN_AGENT_EXECUTOR_ID,

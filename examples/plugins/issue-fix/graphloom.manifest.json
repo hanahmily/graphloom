@@ -1,6 +1,6 @@
 {
   "graphId": "issue-fix",
-  "version": "0.13.0",
+  "version": "0.14.0",
   "sdkProtocol": 1,
   "taskConfig": "required",
   "entryPoints": {
@@ -16,16 +16,17 @@
     "vitest": "^3.0.9"
   },
   "digests": {
-    "sourceTree": "6bde44f1d15069309646780e7aa2843af58b5035a9204492c7cc7f938427fd3b",
-    "packageLock": "9ab37605eb229c28518c4509929a1828df3c1892e4ee5245ed6ed969bfa24382",
+    "sourceTree": "913c4d63c4dea235c4fa453ba2333be348f4f3078566ca856addfcfce59ea390",
+    "packageLock": "66ad31024ac0fdb1a6d8f96ef0c4043b56b604e92d605541db8199654c82d233",
     "files": {
-      "package.json": "4b0e138eae10add1d6be1f6df7da99308b62b19c37932cdb7cc751cdfec7089b",
-      "package-lock.json": "9ab37605eb229c28518c4509929a1828df3c1892e4ee5245ed6ed969bfa24382",
+      "package.json": "310095f9ce54d16d56524de2d4ef2fe266b56cc82ccb1de5c4ad80498707d3fd",
+      "package-lock.json": "66ad31024ac0fdb1a6d8f96ef0c4043b56b604e92d605541db8199654c82d233",
       "tsconfig.json": "3bafb75902b6084b621c996ae838dbfb87088cf095ce411be9809ce79bf3916b",
-      "profiles/banyandb-ql.json": "9334826db7e71aa4b700f65c7b7c7ca2fcf3db16844c5310fa39dfbcc7e5b7f2",
-      "profiles/banyandb.json": "8ceb94ac063a293d4eaa03c0f27a29fe221f694d47d458e81e1e400bb6218e1a",
-      "profiles/canopy.json": "b6ab770918bca51570fe308e992c39eb42ce78564379f5d83ea6996a922697de",
-      "profiles/graphloom.json": "b2975f38d2b6c6495a75b128f070d2318ea2aa0c4870ab13f44de75053e0b969",
+      "profiles/banyandb-ql.json": "f1ffb9b5299df63145aec05446359c6471e769536549b3294c3c1a3102d9e386",
+      "profiles/banyandb.json": "d4554d37d373eea847cb450753fab75885e71b94c208daf730fe933464e9aa9b",
+      "profiles/canopy.json": "ae9a1e8773f2b3237f65fa67267fd82e016c1e6161ef56d24c295e8007641fd6",
+      "profiles/graphloom.json": "1f5da4679045fa621b8992dab34a642d92b53f6e7e74a647999a0131f943cdb6",
+      "scripts/ocr-path.sh": "93060417c7d5b7b417a2b68e9b78b49d95d63ccb7830672abab30ec78f3204c8",
       "src/acceptance.ts": "cd4cd8f3e50ec6d9a7e0e976082c497da59d32fbced51762789c4204ca69c7ed",
       "src/bench.ts": "c309834017d83bbe46359751fef44af6e6a32e25c9ffbfe3d10eff5397e8efec",
       "src/constants.ts": "05c84b1c3d3f500e9d0e782e70f7590f0b8d452ec3e4340c83c822b4be9adaf5",
@@ -34,10 +35,10 @@
       "src/evidence.ts": "93783022aa375f4ba1024da60e7cb34c4c0c2114341783e80e2db15145586a82",
       "src/final.ts": "4bc011007a06be8ec0547bfa3beb6a886bf859e685741e28c2ed7463be5a8612",
       "src/findings.ts": "93a90bafccca0a51db94620c1c886915a91c0de2aad75cbc107b61ddf408e964",
-      "src/graph.ts": "4746d99853f5f90c37659c887307d67211464ed89eb5f0dbd860308862662d2e",
+      "src/graph.ts": "4e33a1187713b9909e14a3bdc549dcb3b697e81606007aca9acd862b9f09b735",
       "src/index.ts": "96bde504da23994638b30e16e59a968351ef33629062b527a45aac68e995d52c",
       "src/issues.ts": "b0f98551a88a9ffed6d958907d1fe26f3f6658ebecb38e1ddd1bfcd4bdfb3d67",
-      "src/ocr.ts": "9f3e57ca50c92235f7e08968ef3898a6dfc67d15928d97723c916324fb8329aa",
+      "src/ocr.ts": "a5c12554b5807ebdfa161720e2e89d395db0fda22707b72b2dc612a4ff96f941",
       "src/profile.ts": "d60977df7fdc115bace7c75310c1c36c038524cf8098ca52126c27914f251c5d",
       "src/prompts.ts": "f69154a8960561c7c7605676ca19577f6ab36274b6897a3ce3f07762920ad31c",
       "src/qualification.ts": "aa10f329260fee0c3ba67856d405a51a2b253dbe00d4c6ca05564183cac4ffdf",
@@ -48,9 +49,9 @@
       "src/runners/types.ts": "c8993c827f54f377075eefd8630e144190759ac9ac5c9a8bd23efd9b580f3823",
       "src/runners/vitest.ts": "693c5722d62719505d21dee949d39a75f14e9368a11f5084f4bc36c95381171b",
       "src/validators.ts": "8e834300e241c4c7f232551adff4d4d4a8bdeae3e0d517d71274108ffb525b35",
-      "test/issue-fix.test.ts": "75eb44df22ffba7a4c8852316c8a524bce504413d5cfd10507a9756051cb41c3",
+      "test/issue-fix.test.ts": "6944cd0c89754cbb43600b86bd53cba93e8104cc6b6b9e6d9265bba9a2a0753d",
       "test/issues.test.ts": "3234213eea8f2e3833d4370e9fd4f0f1366ede09c6f674a198f3037d26a89f91",
-      "test/profiles.test.ts": "bf55cbd9afa19aebc058928c31682b22de106353b64ae468a91ced762015a291",
+      "test/profiles.test.ts": "455a6ebc3b34d422c05fee336301bad0b57363dac74a0037d65c798a3a56a919",
       "test/review-dedupe.test.ts": "9e2fc053c6be9624e950f79167b5b37c80248939afb1c41419a5c773fd4260ca"
     }
   }

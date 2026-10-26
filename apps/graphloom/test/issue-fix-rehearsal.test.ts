@@ -104,6 +104,8 @@ async function ready(profileBudgets?: Record<string, number>) {
   // PATH directly, never the operator's own runner config — a fake claude/
   // codex here is what lets it pass regardless of what is actually installed.
   process.env.PATH = `${ocrBin}:${agents.bin}:${savedPath}`;
+  // The plugin's ocr check prefers its bundled open-code-review to one on PATH; this names the stand-in.
+  vi.stubEnv("GRAPHLOOM_OCR_BIN", path.join(ocrBin, "ocr"));
   vi.stubEnv(GITHUB_API_URL_ENV, github.baseUrl);
   vi.stubEnv(REHEARSAL_GITHUB_TOKEN_ENV, "fake");
   // B2's capability probe reads the operator's own runner config separately;
