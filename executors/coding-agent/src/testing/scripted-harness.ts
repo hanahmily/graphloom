@@ -24,6 +24,8 @@ export interface ScriptedOutput {
   assignment: string;
   /** Assignments of the earlier turns in a continued session. */
   priorAssignments: string[];
+  /** The job's wall clock the host gave the harness, if any. */
+  timeoutMs?: number;
 }
 
 /** What the scripted harness saves in the session directory. */
@@ -68,13 +70,16 @@ export function createScriptedHarness(): CodingHarness {
       };
       return {
         async run(request) {
-          const steps = (options.options?.steps ?? []) as ScriptedStep[];
+          // A continued session runs `continuedSteps` when the job declares them, so a test can script a resumed turn.
+          const continued = options.options?.continuedSteps;
+          const steps = (transcript.turns.length > 0 && continued !== undefined ? continued : (options.options?.steps ?? [])) as ScriptedStep[];
           const out: ScriptedOutput = {
             toolResults: [],
             wrote: [],
             modelCalls: 0,
             assignment: request.assignment,
             priorAssignments: transcript.turns.map((t) => t.assignment),
+            ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
           };
           const result = await perform(steps, out, options);
           if (options.sessionDir === undefined) return result;

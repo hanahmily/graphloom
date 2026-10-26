@@ -11,6 +11,8 @@ import {
   claudeCodeHarnessModule,
   createCodingAgentExecutor,
   DEFAULT_CODING_TIMEOUT_MS,
+  DEFAULT_MAX_CODING_TIMEOUT_MS,
+  fitWatchdog,
   piHarnessModule,
   type CodingHarness,
 } from "./index.js";
@@ -118,6 +120,21 @@ describe("graphloom.coding-agent/run", () => {
     expect(JSON.parse(await readFile(path.join(dir, `${sessionRef}.json`), "utf8")).turns).toHaveLength(2);
   });
 
+  it("tells a continued agent the controller's reason, and gives the harness the job's wall clock", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "gl-session-"));
+    const first = await executor.execute(
+      { assignment: "Write notes.md", harnessOptions: { steps: [{ write: { path: "notes.md", content: "draft\n" } }] } },
+      await ctx({ session: { dir }, timeoutMs: 10_800_000 }),
+    );
+    expect((payload(first).output as { timeoutMs?: number }).timeoutMs).toBe(10_800_000);
+    const note = "Your last turn ran out of time; finish the remaining work.";
+    const second = await executor.execute(
+      { assignment: "Write notes.md", harnessOptions: { steps: [] } },
+      await ctx({ operationId: "op2", session: { dir, resume: (first as { sessionRef: string }).sessionRef, note } }),
+    );
+    expect((payload(second).output as { assignment: string }).assignment).toBe(`${note}\n\nWrite notes.md`);
+  });
+
   it("fails instead of starting fresh when the session cannot be restored", async () => {
     const dir = await mkdtemp(path.join(os.tmpdir(), "gl-session-"));
     const missing = await executor.execute(
@@ -189,14 +206,32 @@ describe("graphloom.coding-agent/run", () => {
       allowedEffects: ["read", "write"],
       allowUnrestricted: true,
       timeoutMs: DEFAULT_CODING_TIMEOUT_MS,
+      maxTimeoutMs: DEFAULT_MAX_CODING_TIMEOUT_MS,
       env: { GRAPHLOOM_CODING_HARNESS: "/h.js" },
     });
     expect(codingAgentBinding({ harness: "/h.js", timeoutMs: 5_000 }).timeoutMs).toBe(5_000);
   });
 
-  it("refuses Claude Code watchdogs that the job timeout would cut off", () => {
-    expect(() => codingAgentBinding({ harness: claudeCodeHarnessModule, timeoutMs: 400_000 })).toThrow(
-      "claude.responseTimeoutMs (600000 ms) must be shorter than the job timeout (400000 ms), or the job is killed before the stall is reported",
+  it("lets a job ask for up to four hours by default, or the operator's own ceiling", () => {
+    expect(codingAgentBinding({ harness: "/h.js" }).maxTimeoutMs).toBe(4 * 60 * 60_000);
+    expect(codingAgentBinding({ harness: "/h.js", timeoutMs: 5 * 60 * 60_000 }).maxTimeoutMs).toBe(5 * 60 * 60_000);
+    expect(codingAgentBinding({ harness: "/h.js", maxTimeoutMs: 8 * 60 * 60_000 }).maxTimeoutMs).toBe(8 * 60 * 60_000);
+    expect(() => codingAgentBinding({ harness: "/h.js", timeoutMs: 10_000, maxTimeoutMs: 5_000 })).toThrow("maxTimeoutMs (5000 ms) must be at least timeoutMs (10000 ms)");
+  });
+
+  it("fits a stall watchdog inside the job's own wall clock", () => {
+    expect(fitWatchdog(600_000, undefined)).toBe(600_000);
+    expect(fitWatchdog(600_000, 3 * 60 * 60_000)).toBe(600_000);
+    expect(fitWatchdog(600_000, 600_000)).toBe(300_000);
+    expect(fitWatchdog(600_000, 120_000)).toBe(60_000);
+    expect(fitWatchdog(0, 120_000)).toBe(0);
+  });
+
+  it("refuses explicit Claude Code watchdogs that the job timeout would cut off, and leaves defaults to each job", () => {
+    // Default watchdogs are fitted inside each job's own wall clock (fitWatchdog), not refused here.
+    expect(codingAgentBinding({ harness: claudeCodeHarnessModule, timeoutMs: 400_000 }).timeoutMs).toBe(400_000);
+    expect(() => codingAgentBinding({ harness: claudeCodeHarnessModule, timeoutMs: 400_000, claude: { responseTimeoutMs: 400_000 } })).toThrow(
+      "claude.responseTimeoutMs (400000 ms) must be shorter than the job timeout (400000 ms), or the job is killed before the stall is reported",
     );
     expect(() => codingAgentBinding({ harness: "/wrapper.js", timeoutMs: 1_000, claude: { startupTimeoutMs: 1_000, responseTimeoutMs: 0 } })).toThrow(
       "claude.startupTimeoutMs (1000 ms)",
@@ -210,6 +245,7 @@ describe("graphloom.coding-agent/run", () => {
       allowedEffects: ["read", "write"],
       allowUnrestricted: true,
       timeoutMs: DEFAULT_CODING_TIMEOUT_MS,
+      maxTimeoutMs: DEFAULT_MAX_CODING_TIMEOUT_MS,
       env: { GRAPHLOOM_CODING_HARNESS: claudeCodeHarnessModule },
     });
     expect(
@@ -229,6 +265,7 @@ describe("graphloom.coding-agent/run", () => {
       allowedEffects: ["read", "write"],
       allowUnrestricted: true,
       timeoutMs: DEFAULT_CODING_TIMEOUT_MS,
+      maxTimeoutMs: DEFAULT_MAX_CODING_TIMEOUT_MS,
       env: {
         GRAPHLOOM_CODING_HARNESS: claudeCodeHarnessModule,
         GRAPHLOOM_CLAUDE_BIN: "/bin/claude",
@@ -255,6 +292,7 @@ describe("graphloom.coding-agent/run", () => {
       allowedEffects: ["read", "write"],
       allowUnrestricted: true,
       timeoutMs: DEFAULT_CODING_TIMEOUT_MS,
+      maxTimeoutMs: DEFAULT_MAX_CODING_TIMEOUT_MS,
       env: {
         GRAPHLOOM_CODING_HARNESS: piHarnessModule,
         GRAPHLOOM_PI_PROVIDER: "anthropic",

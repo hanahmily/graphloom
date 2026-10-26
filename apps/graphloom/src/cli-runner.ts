@@ -4,13 +4,9 @@ import { createBuiltinExecutorRunner, type ExecutorDescriptor, type JobResult, t
 import {
   CLAUDE_BIN_ENV,
   CLAUDE_CONFIG_DIR_ENV,
-  CLAUDE_DEFAULT_RESPONSE_TIMEOUT_MS,
-  CLAUDE_DEFAULT_STARTUP_TIMEOUT_MS,
   CODEX_BIN_ENV,
-  CODEX_DEFAULT_RESPONSE_TIMEOUT_MS,
   CODEX_HOME_ENV,
   CODING_AGENT_RUN_ID,
-  DEFAULT_CODING_TIMEOUT_MS,
   claudeCodeHarnessModule,
   codexHarnessModule,
   codingAgentBinding,
@@ -21,10 +17,6 @@ import { commandBinding, commandExecutorPackage, type CommandBindingOptions } fr
 import { githubBinding, githubExecutorPackage } from "@graphloom/executor-github";
 import { enabledHarnesses, type HarnessName, type RunnerConfig } from "./runner-config.js";
 
-const WATCHDOGS = [
-  ["startupTimeoutMs", CLAUDE_DEFAULT_STARTUP_TIMEOUT_MS],
-  ["responseTimeoutMs", CLAUDE_DEFAULT_RESPONSE_TIMEOUT_MS],
-] as const;
 const INSTALLED_HARNESSES: Record<HarnessName, string> = {
   "claude-code": claudeCodeHarnessModule,
   codex: codexHarnessModule,
@@ -83,8 +75,10 @@ export function createCliRunner(
           ...codingAgentBinding({
             harness: harnessModules[harness] ?? INSTALLED_HARNESSES[harness],
             ...(config.timeoutMs !== undefined ? { timeoutMs: config.timeoutMs } : {}),
-            ...(harness === "claude-code" ? { claude: claudeOptions(config) } : {}),
-            ...(harness === "codex" ? { codex: codexOptions(config) } : {}),
+            ...(config.maxTimeoutMs !== undefined ? { maxTimeoutMs: config.maxTimeoutMs } : {}),
+            // Default watchdogs are fitted inside each job's own wall clock by the harness.
+            ...(harness === "claude-code" ? { claude: { ...config.claude } } : {}),
+            ...(harness === "codex" ? { codex: { ...config.codex } } : {}),
             ...(config.pi !== undefined ? { pi: config.pi } : {}),
           }),
         }],
@@ -240,24 +234,6 @@ export function commandOptions(config: RunnerConfig): CommandBindingOptions {
     ...(config.command?.timeoutMs !== undefined ? { timeoutMs: config.command.timeoutMs } : {}),
     ...(Object.keys(env).length > 0 ? { env } : {}),
   };
-}
-
-/** Claude Code settings, with any default watchdog that would outlast the job timeout cut to half of it. */
-export function claudeOptions(config: RunnerConfig): NonNullable<RunnerConfig["claude"]> {
-  const timeoutMs = config.timeoutMs ?? DEFAULT_CODING_TIMEOUT_MS;
-  const claude = { ...config.claude };
-  for (const [name, fallback] of WATCHDOGS) {
-    if (claude[name] === undefined && fallback >= timeoutMs) claude[name] = Math.floor(timeoutMs / 2);
-  }
-  return claude;
-}
-
-/** Codex settings, with a default watchdog that would outlast the job timeout cut to half of it. */
-export function codexOptions(config: RunnerConfig): NonNullable<RunnerConfig["codex"]> {
-  const timeoutMs = config.timeoutMs ?? DEFAULT_CODING_TIMEOUT_MS;
-  const codex = { ...config.codex };
-  if (codex.responseTimeoutMs === undefined && CODEX_DEFAULT_RESPONSE_TIMEOUT_MS >= timeoutMs) codex.responseTimeoutMs = Math.floor(timeoutMs / 2);
-  return codex;
 }
 
 function object(value: unknown): Record<string, unknown> | undefined {

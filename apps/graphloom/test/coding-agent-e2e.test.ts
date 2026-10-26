@@ -21,7 +21,7 @@ import {
   type Validator,
 } from "@graphloom/sdk";
 import { createBuiltinExecutorRunner, createScriptedRunner, type Runner } from "@graphloom/runner";
-import { createController, loadRunState } from "@graphloom/controller";
+import { createController, loadRunState, TIMEOUT_CONTINUATION_NOTE } from "@graphloom/controller";
 import { githubBinding, githubExecutorPackage } from "@graphloom/executor-github";
 import { startFakeGitHub, type FakeGitHub } from "@graphloom/executor-github/testing";
 import {
@@ -349,9 +349,56 @@ describe("the coding agent's job timeout", () => {
       stateRoot: env.stateRoot,
       runId: "slow-limited",
     });
-    expect(limited).toMatchObject({ status: "stopped", stopReason: "job failed: executor child timed out after 500ms" });
+    expect(limited).toMatchObject({ status: "stopped", stopReason: expect.stringMatching(/^job failed: executor child timed out after 500ms\b/) });
     const { worktreePath } = await loadRunState(limited.stateDir);
     expect(await readFile(path.join(worktreePath, "GREETING.txt"), "utf8").catch(() => undefined)).toBeUndefined();
+  });
+
+  it("runs a job for the wall clock it asks for, and continues its session when it runs out after changing the worktree", async () => {
+    const server = await fake();
+    const env = await makeEnv();
+    const job: JobSpec = {
+      stageId: "write",
+      kind: "agent",
+      purpose: "work",
+      instruction: "implement issue #1",
+      writeScope: ["GREETING.txt"],
+      executor: { id: "graphloom.coding-agent/run", version: "1" },
+      input: {
+        assignment: "Write the greeting.",
+        harnessOptions: {
+          // The first turn writes half the greeting and is still working when its time runs out; the continued turn finishes.
+          steps: [{ write: { path: "GREETING.txt", content: "Hello" } }, { wait: "abort" }],
+          continuedSteps: [writeGreeting],
+        },
+      },
+      // Longer than the operator's default and clamped to the ceiling.
+      timeoutMs: 60_000,
+      timeoutContinuations: 1,
+    };
+    const report = await createController().run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({ definition, advances: [dispatch(job, "implement"), ...rest] }),
+      validators,
+      runner: hostRunner(server, codingAgentBinding({ harness: scriptedHarnessModule, timeoutMs: 500, maxTimeoutMs: 1_500 })),
+      stateRoot: env.stateRoot,
+      runId: "timeout-continued",
+    });
+    expect(report.status, report.blocker).toBe("succeeded");
+    const state = await loadRunState(report.stateDir);
+    const [first, second] = state.agentSessions!;
+    expect(first).toMatchObject({ status: "failed", timedOut: true });
+    expect(second).toMatchObject({ status: "ok", continuedFrom: first!.operationId, sessionRef: first!.sessionRef });
+    const failure = state.evidence
+      .map((e) => (e.payload as { executorFailure?: { summary: string } }).executorFailure)
+      .find((f) => f !== undefined);
+    expect(failure?.summary).toMatch(/^executor child timed out after 1500ms \(the job asked for 60000ms; the operator allows at most 1500ms\)/);
+    const turns = state.evidence
+      .map((e) => (e.payload as { codingAgent?: { output: { assignment: string; timeoutMs?: number } | null } }).codingAgent)
+      .filter((a) => a !== undefined && a.output !== null);
+    expect(turns.at(-1)!.output!.assignment).toBe(`${TIMEOUT_CONTINUATION_NOTE}\n\nWrite the greeting.`);
+    expect(turns.map((t) => t!.output!.timeoutMs)).toEqual([1_500, 1_500]);
+    expect(state.remedies?.map((r) => r.remedy)).toEqual(["continuing its agent session (1 of 1) instead of opening a recovery episode"]);
   });
 });
 
@@ -665,7 +712,7 @@ describe("the Claude Code harness in the coding-agent executor process", () => {
     const pids = await hungPids(claude.dir);
     const report = await running;
 
-    expect(report).toMatchObject({ status: "stopped", stopReason: "job failed: executor child timed out after 1500ms" });
+    expect(report).toMatchObject({ status: "stopped", stopReason: expect.stringMatching(/^job failed: executor child timed out after 1500ms\b/) });
     expect(pids.filter(alive)).toEqual([]);
   });
 

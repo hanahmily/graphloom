@@ -21,6 +21,7 @@ import {
   JOB_CONTRACT_ENV,
   JOB_IDENTITY_ENV,
   JOB_REFERENCES_ENV,
+  fitWatchdog,
   type CodingHarness,
   type CodingRunRequest,
   type CodingRunResult,
@@ -165,8 +166,9 @@ export function createClaudeCodeHarness(harnessOptions: ClaudeCodeHarnessOptions
       if (passEnv.includes("ANTHROPIC_API_KEY")) {
         throw new Error(`passEnv cannot include ANTHROPIC_API_KEY; bind the ${CLAUDE_API_KEY_CREDENTIAL} credential instead`);
       }
-      const startupTimeoutMs = harnessOptions.startupTimeoutMs ?? envMs(CLAUDE_STARTUP_TIMEOUT_ENV, CLAUDE_DEFAULT_STARTUP_TIMEOUT_MS);
-      const responseTimeoutMs = harnessOptions.responseTimeoutMs ?? envMs(CLAUDE_RESPONSE_TIMEOUT_ENV, CLAUDE_DEFAULT_RESPONSE_TIMEOUT_MS);
+      // Each job's own wall clock bounds the watchdogs, so a longer job keeps the full ones and a shorter one still reports a stall.
+      const startupTimeoutMs = fitWatchdog(harnessOptions.startupTimeoutMs ?? envMs(CLAUDE_STARTUP_TIMEOUT_ENV, CLAUDE_DEFAULT_STARTUP_TIMEOUT_MS), options.timeoutMs);
+      const responseTimeoutMs = fitWatchdog(harnessOptions.responseTimeoutMs ?? envMs(CLAUDE_RESPONSE_TIMEOUT_ENV, CLAUDE_DEFAULT_RESPONSE_TIMEOUT_MS), options.timeoutMs);
       const settings: SessionSettings = { model: model ?? null, systemPromptSha256: sha256(systemPrompt) };
       const saved = await openSession(options, configDir, settings);
       const apiKey = await options.credentials?.get(CLAUDE_API_KEY_CREDENTIAL);

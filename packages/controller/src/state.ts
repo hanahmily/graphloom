@@ -75,7 +75,7 @@ export interface PendingDispatch {
    * declared retryable. A retry dropped before it reached the runner (Stop or
    * a crash during its backoff) is queued again on resume, not lost.
    */
-  retry?: { attempt: number; limit: number; graphCorrectionTrial: boolean; supervisorWorkDispatch: boolean };
+  retry?: { attempt: number; limit: number; graphCorrectionTrial: boolean; supervisorWorkDispatch: boolean; reason?: string };
 }
 
 /** A supervisor-originated job that was allowed to change the host beyond the run's scope. */
@@ -107,6 +107,8 @@ export interface AgentSessionRecord {
   sessionRef: string;
   sessionDir: string;
   continuedFrom?: string;
+  /** The job ran out of its wall clock; a continuation tells the agent so. */
+  timedOut?: true;
   settledAt: string;
 }
 
@@ -244,9 +246,16 @@ export interface DurableRunState {
     limit: number;
     graphCorrectionTrial: boolean;
     supervisorWorkDispatch: boolean;
+    /** Why the controller runs it again, when not a declared-retryable failure (a timed-out session continued). */
+    reason?: string;
   };
   /** Per `${stageId}:${purpose}:${executorId}`, consecutive retryable failures retried so far. */
   executorRetryCounts?: Record<string, number>;
+  /**
+   * Per `g${generation}:${stageId}`, agent sessions the controller continued
+   * after a timeout that changed the worktree (`JobSpec.timeoutContinuations`).
+   */
+  timeoutContinuations?: Record<string, number>;
   /**
    * Deterministic remedies applied without asking the model what to do
    * (design-supervisor-robustness.md §4.3), newest last, bounded.

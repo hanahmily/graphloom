@@ -76,6 +76,7 @@ export function createBuiltinExecutorRunner(options: BuiltinExecutorRunnerOption
       allowedEffects: pkg.allowedEffects ?? ["read"],
       ...(pkg.credentials !== undefined ? { credentials: pkg.credentials } : {}),
       ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+      ...(pkg.maxTimeoutMs !== undefined ? { maxTimeoutMs: pkg.maxTimeoutMs } : {}),
       ...(options.workerModule !== undefined ? { workerModule: options.workerModule } : {}),
     });
   }, options.fallback);

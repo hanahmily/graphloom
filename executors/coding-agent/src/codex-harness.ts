@@ -19,6 +19,7 @@ import {
   JOB_CONTRACT_ENV,
   JOB_IDENTITY_ENV,
   JOB_REFERENCES_ENV,
+  fitWatchdog,
   type CodingHarness,
   type CodingRunRequest,
   type CodingRunResult,
@@ -99,7 +100,7 @@ export function createCodexHarness(harnessOptions: CodexHarnessOptions = {}): Co
       const codexHome = harnessOptions.codexHome ?? (process.env[CODEX_HOME_ENV] || process.env.CODEX_HOME || undefined);
       const env = minimalEnv(process.env, harnessOptions.passEnv ?? envList(process.env[CODEX_PASS_ENV_ENV]));
       if (codexHome !== undefined) env.CODEX_HOME = codexHome;
-      const responseTimeoutMs = harnessOptions.responseTimeoutMs ?? envMs(CODEX_RESPONSE_TIMEOUT_ENV, CODEX_DEFAULT_RESPONSE_TIMEOUT_MS);
+      const responseTimeoutMs = fitWatchdog(harnessOptions.responseTimeoutMs ?? envMs(CODEX_RESPONSE_TIMEOUT_ENV, CODEX_DEFAULT_RESPONSE_TIMEOUT_MS), options.timeoutMs);
       return {
         run: (request) =>
           runCodex({ command, model, reasoningEffort, env, responseTimeoutMs, killGraceMs: harnessOptions.killGraceMs ?? 5_000, request, options }),

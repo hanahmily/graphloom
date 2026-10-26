@@ -79,6 +79,11 @@ export interface ChildExecutorRunnerOptions {
   /** Per-call timeout (ms). Default 30_000. */
   timeoutMs?: number;
   /**
+   * Most wall clock (ms) a job may ask for with `JobSpec.timeoutMs`; longer
+   * requests are clamped to it. Default `timeoutMs`.
+   */
+  maxTimeoutMs?: number;
+  /**
    * After a timeout or stop, how long the executor gets to stop what it
    * started (its abort signal fires) before its process is killed. The job
    * settles only once the process is gone. Default 10_000.
@@ -174,7 +179,7 @@ function resultFromOutput(
         ? o.sessionRef
         : undefined;
     const failureKind =
-      resultStatus !== "ok" && (o.failureKind === "contract_violation" || o.failureKind === "quota") ? o.failureKind : undefined;
+      resultStatus !== "ok" && (o.failureKind === "contract_violation" || o.failureKind === "quota" || o.failureKind === "timeout") ? o.failureKind : undefined;
     const resetAt =
       failureKind === "quota" && typeof o.resetAt === "string" && Number.isFinite(Date.parse(o.resetAt))
         ? new Date(o.resetAt).toISOString()
@@ -207,8 +212,9 @@ function resultFromOutput(
 }
 
 /** Serializable context fields sent to an executor process. */
-function executorCtx(job: JobSpec, ctx: JobContext) {
+function executorCtx(job: JobSpec, ctx: JobContext, timeoutMs?: number) {
   return {
+    ...(timeoutMs !== undefined ? { timeoutMs } : {}),
     runId: ctx.runId,
     operationId: ctx.operationId,
     generation: ctx.generation,
@@ -401,6 +407,8 @@ export function createChildExecutorRunner(
   assertNoBuiltinShadowing(options.executorIds, options.builtin === true);
   const served = new Set(options.executorIds);
   const timeoutMs = options.timeoutMs ?? 30_000;
+  const maxTimeoutMs = options.maxTimeoutMs ?? timeoutMs;
+  if (!(maxTimeoutMs >= timeoutMs)) throw new Error(`maxTimeoutMs (${maxTimeoutMs} ms) must be at least the default timeout (${timeoutMs} ms)`);
   const stopGraceMs = options.stopGraceMs ?? 10_000;
   const workerModule =
     options.workerModule ??
@@ -597,6 +605,20 @@ export function createChildExecutorRunner(
         }
       }
 
+      // A job may ask for its own wall clock, up to the operator's ceiling.
+      const jobTimeoutMs = pinned.timeoutMs !== undefined ? Math.min(pinned.timeoutMs, maxTimeoutMs) : timeoutMs;
+      const timeoutSummary =
+        `executor child timed out after ${jobTimeoutMs}ms` +
+        (pinned.timeoutMs !== undefined && pinned.timeoutMs > maxTimeoutMs
+          ? ` (the job asked for ${pinned.timeoutMs}ms; the operator allows at most ${maxTimeoutMs}ms)`
+          : "");
+      /** A timed-out job, with what the executor still reported while it stopped: its session and evidence, never success. */
+      const timedOutResult = (late?: JobResult): JobResult => ({
+        ...failed(late !== undefined && late.summary !== "" ? `${timeoutSummary}; while stopping, the executor reported: ${late.summary}` : timeoutSummary),
+        failureKind: "timeout",
+        ...(late?.sessionRef !== undefined ? { sessionRef: late.sessionRef } : {}),
+        ...(late?.evidence !== undefined ? { evidence: late.evidence } : {}),
+      });
       return await new Promise<JobResult>((resolve) => {
         if (ctx.signal?.aborted) {
           resolve(failed("executor cancelled before start"));
@@ -634,13 +656,27 @@ export function createChildExecutorRunner(
 
         const rl = createInterface({ input: child.stdout, crlfDelay: Infinity });
         let settled = false;
+        let timedOut = false;
+        let graceTimer: NodeJS.Timeout | undefined;
         const onAbort = () => finish(failed("executor cancelled: run stopped"));
+        /** SIGTERM aborts the executor's signal, so it can stop processes it started in their own groups. */
+        const signalWorker = () => {
+          // bubblewrap does not forward signals, so a confined worker is signalled directly.
+          try {
+            const worker = sandboxInit !== undefined ? findSandboxWorker(sandboxInit, workerModule) : undefined;
+            if (worker !== undefined) process.kill(worker, "SIGTERM");
+            else child.kill("SIGTERM");
+          } catch {
+            child.kill("SIGTERM");
+          }
+        };
         /** `executing`: the executor may still be running, so it gets the stop grace to clean up. */
         const finish = (result: JobResult, executing = true) => {
           if (settled) return;
           settled = true;
           rl.close();
           clearTimeout(timer);
+          clearTimeout(graceTimer);
           ctx.signal?.removeEventListener("abort", onAbort);
           child.stdin.end();
           const settle = () => resolve(redactCredentials(result, options.credentials));
@@ -659,26 +695,24 @@ export function createChildExecutorRunner(
             settle();
             return;
           }
-          // SIGTERM aborts the executor's signal, so it can stop processes it started in their own groups.
           const kill = setTimeout(() => child.kill("SIGKILL"), stopGraceMs);
           child.once("exit", () => {
             clearTimeout(kill);
             settle();
           });
-          // bubblewrap does not forward signals, so a confined worker is signalled directly.
-          try {
-            const worker = sandboxInit !== undefined ? findSandboxWorker(sandboxInit, workerModule) : undefined;
-            if (worker !== undefined) process.kill(worker, "SIGTERM");
-            else child.kill("SIGTERM");
-          } catch {
-            child.kill("SIGTERM");
-          }
+          signalWorker();
         };
         ctx.signal?.addEventListener("abort", onAbort, { once: true });
 
+        // Out of time, the executor is stopped like a cancelled one, but keeps
+        // the stop grace to report what it kept (a resumable agent session):
+        // the job still settles as a timeout, whatever it reports.
         const timer = setTimeout(() => {
-          finish(failed(`executor child timed out after ${timeoutMs}ms`));
-        }, timeoutMs);
+          if (settled) return;
+          timedOut = true;
+          graceTimer = setTimeout(() => finish(timedOutResult(), false), stopGraceMs);
+          signalWorker();
+        }, jobTimeoutMs);
 
         const send = (message: unknown) => {
           if (!settled) child.stdin.write(`${JSON.stringify(message)}\n`);
@@ -712,6 +746,10 @@ export function createChildExecutorRunner(
             const seq = msg.seq;
             const answer = (result: ToolCallResult) =>
               send({ kind: "tool_result", seq, result: redactCredentials(result, options.credentials) });
+            if (timedOut) {
+              answer({ status: "failed", summary: "the job ran out of time; no further tool calls are admitted" });
+              return;
+            }
             if (!children || typeof msg.toolCallId !== "string" || typeof msg.tool !== "string" || !toolNames.has(msg.tool)) {
               answer({ status: "failed", summary: `tool ${String(msg.tool)} is not admitted for this job` });
               return;
@@ -730,7 +768,7 @@ export function createChildExecutorRunner(
           if (msg.kind === "model_call") {
             const seq = msg.seq;
             const grant = (granted: boolean) => send({ kind: "model_call_result", seq, granted });
-            if (!children) {
+            if (!children || timedOut) {
               grant(false);
               return;
             }
@@ -738,7 +776,12 @@ export function createChildExecutorRunner(
             return;
           }
           if (msg.kind === "ok") {
-            finish(resultFromOutput(msg.output, ctx), false);
+            const result = resultFromOutput(msg.output, ctx);
+            finish(timedOut ? timedOutResult(result) : result, false);
+            return;
+          }
+          if (timedOut) {
+            finish(timedOutResult(), false);
             return;
           }
           finish(failed(msg.message ?? "executor child error"), msg.kind !== "error");
@@ -749,7 +792,7 @@ export function createChildExecutorRunner(
         });
         child.on("exit", (code) => {
           if (!settled) {
-            finish(failed(`executor child exited (code=${String(code)}): ${stderr.join("")}`), false);
+            finish(timedOut ? timedOutResult() : failed(`executor child exited (code=${String(code)}): ${stderr.join("")}`), false);
           }
         });
 
@@ -759,7 +802,7 @@ export function createChildExecutorRunner(
           ...(pin.version !== undefined ? { version: pin.version } : {}),
           ...(pinned.effect !== undefined ? { effect: pinned.effect } : {}),
           input: pinned.input,
-          ctx: executorCtx(pinned, ctx),
+          ctx: executorCtx(pinned, ctx, jobTimeoutMs),
           ...(options.credentials !== undefined ? { credentials: options.credentials } : {}),
           ...(options.allowedEffects !== undefined
             ? { allowedEffects: [...options.allowedEffects] }

@@ -7,6 +7,7 @@ export type {
   CodingTool,
   CodingUsage,
 } from "./harness.js";
+export { fitWatchdog } from "./harness.js";
 export { CODING_AGENT_RUN_ID, CONTINUATION_NOTICE, createCodingAgentExecutor, type CodingAgentExecutorOptions, type CodingAgentInput } from "./run.js";
 export {
   classifyTransient,
@@ -25,6 +26,7 @@ export {
   codingAgentBinding,
   codingAgentExecutorPackage,
   DEFAULT_CODING_TIMEOUT_MS,
+  DEFAULT_MAX_CODING_TIMEOUT_MS,
   piHarnessModule,
   piRehearsalModule,
   rehearsalBinding,

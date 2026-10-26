@@ -382,6 +382,25 @@ export interface JobSpec {
    */
   continueFrom?: string;
   /**
+   * Wall-clock limit (ms) this job asks for, instead of the operator's default
+   * for its executor; at most `MAX_JOB_TIMEOUT_MS`. Bounded twice: the runner
+   * clamps it to the operator's ceiling for the executor
+   * (`ExecutorBinding.maxTimeoutMs`), and the controller aborts any job when
+   * the run's active-time budget runs out. A job may also ask for less.
+   */
+  timeoutMs?: number;
+  /**
+   * Agent jobs: how many times, per stage and plugin generation, the
+   * controller continues this job's own agent session (`continueFrom` the
+   * timed-out operation) when the job runs out of its wall clock after
+   * changing the worktree, before the timeout goes to recovery. Each
+   * continuation is a dispatch charged to the run's budgets like any other.
+   * A timeout without a worktree change or a resumable session, or past
+   * this bound, goes to recovery as before. Default 0; at most
+   * `MAX_TIMEOUT_CONTINUATIONS`.
+   */
+  timeoutContinuations?: number;
+  /**
    * Run a read-only command job in a disposable checkout instead of the
    * worktree. The controller commits the checkout's contents, runs the graph's
    * environment checks and preparation there, and records any file the

@@ -385,10 +385,10 @@ describe("createChildExecutorRunner", () => {
       }
     };
     const pidIn = async (file: string) => Number(await readFile(file, "utf8"));
-    const groupRunner = (extra: { timeoutMs?: number; stopGraceMs?: number }) =>
+    const groupRunner = (extra: { timeoutMs?: number; maxTimeoutMs?: number; stopGraceMs?: number }) =>
       createChildExecutorRunner({
         entryModule: groupFixture,
-        executorIds: ["acme.group/stop-on-abort", "acme.group/await-tool", "acme.group/ignore-abort"],
+        executorIds: ["acme.group/stop-on-abort", "acme.group/await-tool", "acme.group/ignore-abort", "acme.group/session-on-abort", "acme.group/report-timeout"],
         fallback: createScriptedRunner({ jobs: [] }),
         workerModule,
         ...extra,
@@ -397,8 +397,44 @@ describe("createChildExecutorRunner", () => {
     it("aborts the executor's signal on timeout and settles once it has stopped its processes", async () => {
       const pidFile = path.join(await mkdtemp(path.join(os.tmpdir(), "gl-group-")), "pid");
       const result = await groupRunner({ timeoutMs: 500 }).runJob(job("acme.group/stop-on-abort", { pidFile }, "1"), ctx);
-      expect(result).toMatchObject({ status: "failed", summary: "executor child timed out after 500ms" });
+      expect(result).toMatchObject({
+        status: "failed",
+        failureKind: "timeout",
+        summary: "executor child timed out after 500ms; while stopping, the executor reported: stopped",
+      });
       expect(alive(await pidIn(pidFile))).toBe(false);
+    });
+
+    it("keeps the session and evidence a timed-out executor reports while stopping, as a timeout", async () => {
+      const dir = await mkdtemp(path.join(os.tmpdir(), "gl-session-"));
+      const result = await groupRunner({ timeoutMs: 300 }).runJob(job("acme.group/session-on-abort", {}, "1"), { ...ctx, session: { dir } });
+      expect(result).toMatchObject({
+        status: "failed",
+        failureKind: "timeout",
+        sessionRef: "saved-1",
+        evidence: [{ kind: "other", payload: { progress: "half" } }],
+        summary: "executor child timed out after 300ms; while stopping, the executor reported: agent session aborted",
+      });
+      // Without a controller-owned session directory, no session is kept.
+      expect((await groupRunner({ timeoutMs: 300 }).runJob(job("acme.group/session-on-abort", {}, "1"), ctx)).sessionRef).toBeUndefined();
+    });
+
+    it("gives a job the wall clock it asks for, clamped to the operator's ceiling, and tells the executor", async () => {
+      const report = (timeoutMs: number | undefined, extra: { timeoutMs?: number; maxTimeoutMs?: number }) =>
+        groupRunner(extra).runJob({ ...job("acme.group/report-timeout", {}, "1"), ...(timeoutMs !== undefined ? { timeoutMs } : {}) }, ctx);
+      expect((await report(undefined, { timeoutMs: 1_000, maxTimeoutMs: 5_000 })).summary).toBe("1000");
+      expect((await report(3_000, { timeoutMs: 1_000, maxTimeoutMs: 5_000 })).summary).toBe("3000");
+      expect((await report(9_000, { timeoutMs: 1_000, maxTimeoutMs: 5_000 })).summary).toBe("5000");
+      expect((await report(500, { timeoutMs: 1_000, maxTimeoutMs: 5_000 })).summary).toBe("500");
+      // Without a ceiling a job may ask for less than the default, never more.
+      expect((await report(3_000, { timeoutMs: 1_000 })).summary).toBe("1000");
+      const pidFile = path.join(await mkdtemp(path.join(os.tmpdir(), "gl-group-")), "pid");
+      const clamped = await groupRunner({ timeoutMs: 200, maxTimeoutMs: 300 }).runJob({ ...job("acme.group/stop-on-abort", { pidFile }, "1"), timeoutMs: 10_000 }, ctx);
+      expect(clamped).toMatchObject({
+        failureKind: "timeout",
+        summary: expect.stringMatching(/^executor child timed out after 300ms \(the job asked for 10000ms; the operator allows at most 300ms\)/),
+      });
+      expect(() => groupRunner({ timeoutMs: 1_000, maxTimeoutMs: 500 })).toThrow("maxTimeoutMs (500 ms) must be at least the default timeout (1000 ms)");
     });
 
     it("aborts the executor's signal when the run stops", async () => {
@@ -424,7 +460,7 @@ describe("createChildExecutorRunner", () => {
         },
         { ...ctx, children } as never,
       );
-      expect(result.summary).toBe("executor child timed out after 300ms");
+      expect(result.summary).toBe("executor child timed out after 300ms; while stopping, the executor reported: executor stopped before the tool call was answered");
       expect(Date.now() - started).toBeLessThan(3_000);
     });
 
@@ -432,7 +468,7 @@ describe("createChildExecutorRunner", () => {
       const pidFile = path.join(await mkdtemp(path.join(os.tmpdir(), "gl-group-")), "pid");
       const started = Date.now();
       const result = await groupRunner({ timeoutMs: 300, stopGraceMs: 400 }).runJob(job("acme.group/ignore-abort", { pidFile }, "1"), ctx);
-      expect(result.summary).toBe("executor child timed out after 300ms");
+      expect(result).toMatchObject({ summary: "executor child timed out after 300ms", failureKind: "timeout" });
       expect(Date.now() - started).toBeGreaterThanOrEqual(700);
       const pid = await pidIn(pidFile);
       process.kill(-pid, "SIGKILL");

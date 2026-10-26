@@ -683,6 +683,26 @@ describe("issue-fix graph under the banyandb profile", () => {
     expect(decision.reason).toMatch(/pull request body is the report of evidence ev-\d+/);
   });
 
+  it("asks the operator's default wall clock and lets only the implementer's session be continued after a timeout", () => {
+    const { jobs } = simulate({});
+    const agents = jobs.filter((j) => j.executor?.id === "graphloom.coding-agent/run");
+    expect(agents.length).toBeGreaterThan(2);
+    for (const job of agents) expect(job.timeoutMs).toBeUndefined();
+    expect(agents.filter((j) => j.timeoutContinuations !== undefined).map((j) => [j.purpose, j.timeoutContinuations])).toEqual([["work", 1]]);
+  });
+
+  it("asks every coding-agent job for the profile's wall clock, and continues the implementer as often as it allows", () => {
+    const { decision, jobs } = simulate({ profile: { ...(BANYANDB as object), agent: { timeoutMs: 10_800_000, timeoutContinuations: 2 } } });
+    expect(decision.action).toMatchObject({ type: "stop", stop: { reason: "complete" } });
+    const agents = jobs.filter((j) => j.executor?.id === "graphloom.coding-agent/run");
+    expect(new Set(agents.map((j) => j.purpose))).toEqual(new Set(["diagnostic", "work", "review"]));
+    for (const job of agents) expect(job.timeoutMs).toBe(10_800_000);
+    for (const job of jobs.filter((j) => j.kind === "command")) expect(job.timeoutMs).toBeUndefined();
+    expect(agents.find((j) => j.purpose === "work")!.timeoutContinuations).toBe(2);
+    const off = simulate({ profile: { ...(BANYANDB as object), agent: { timeoutContinuations: 0 } } }).jobs;
+    expect(off.filter((j) => j.timeoutContinuations !== undefined)).toEqual([]);
+  });
+
   it("stops at the plan with the draft question when a maintainer must decide", () => {
     const { decision, jobs } = simulate({
       plans: [{ status: "blocked", summary: "The API shape is a product decision.", decisions: [], openQuestions: ["Which API?"], draftComment: "Should the new API be X or Y?" }],
