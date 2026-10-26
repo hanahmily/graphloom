@@ -10,15 +10,15 @@ import type { TestScope } from "./scope.js";
 const MANIFEST = "graphloom.manifest.json";
 
 /**
- * A private copy of a built graph bundle (manifest, package.json, dist/ and
- * profiles/), so a test can change it without touching the checkout. Its
- * imports (`@graphloom/sdk`) resolve through a `node_modules` link to this
+ * A private copy of a built graph bundle (manifest, package.json, dist/,
+ * profiles/, and scripts/, which environment checks may run), so a test can
+ * change it without touching the checkout. Its imports (`@graphloom/sdk`) resolve through a `node_modules` link to this
  * checkout's.
  */
 export async function copyBundle(scope: TestScope, source: string): Promise<string> {
   if (!existsSync(path.join(source, "dist"))) throw new Error(`${source} is not built (no dist/); run npm run build first`);
   const dest = path.join(await scope.tempDir("gl-bundle-"), path.basename(source));
-  for (const entry of [MANIFEST, "package.json", "dist", "profiles"]) {
+  for (const entry of [MANIFEST, "package.json", "dist", "profiles", "scripts"]) {
     if (existsSync(path.join(source, entry))) await cp(path.join(source, entry), path.join(dest, entry), { recursive: true, dereference: true });
   }
   await symlink(path.join(repoRoot, "node_modules"), path.join(dest, "node_modules"));

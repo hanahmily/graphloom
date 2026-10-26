@@ -38,7 +38,7 @@
         "argv": [
           "sh",
           "-c",
-          "p=$(command -v ocr) || { echo \"open-code-review (ocr) is not installed\" >&2; exit 127; }; case \"$p\" in /*) ;; *) p=\"$(pwd)/$p\" ;; esac; \"$p\" delegate preview --help >/dev/null 2>&1 || { echo \"$p has no delegation mode; install open-code-review 1.9 or later\" >&2; exit 1; }; printf '%s\\n' \"$p\""
+          "r=${GRAPHLOOM_PLUGIN_ROOT:-}; [ -n \"$r\" ] || { echo \"GRAPHLOOM_PLUGIN_ROOT is not set: GraphLoom sets it to the plugin's directory for environment checks\" >&2; exit 127; }; exec sh \"$r/scripts/ocr-path.sh\""
         ],
         "timeoutMs": 120000
       },

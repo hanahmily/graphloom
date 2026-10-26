@@ -573,7 +573,7 @@ describe("issue-fix graph under the banyandb profile", () => {
     expect(ENVIRONMENT.pinnedFiles![0]!.path).toBe("CONTRIBUTING.md");
   });
 
-  it("checks that open-code-review, Codex and Claude Code are installed and ready before any job", async () => {
+  it("checks that Codex and Claude Code are installed and ready before any job", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "bydb-tools-"));
     const bin = path.join(root, "bin");
     await mkdir(bin);
@@ -587,15 +587,9 @@ describe("issue-fix graph under the banyandb profile", () => {
       );
     };
     try {
-      expect(await run("ocr")).toEqual({ code: 127, stderr: "open-code-review (ocr) is not installed" });
+      // The plugin bundles open-code-review; its check is covered in profiles.test.ts ("the ocr environment check").
       expect(await run("codex")).toEqual({ code: 127, stderr: "Codex (codex) is not installed" });
       expect(await run("claude")).toEqual({ code: 127, stderr: "Claude Code (claude) is not installed" });
-
-      // An ocr without delegation mode fails; one with it prints its absolute path for the code reviewer.
-      await tool("ocr", "exit 1");
-      expect(await run("ocr")).toEqual({ code: 1, stderr: `${bin}/ocr has no delegation mode; install open-code-review 1.9 or later` });
-      await tool("ocr", '[ "$1 $2 $3" = "delegate preview --help" ]');
-      expect(await run("ocr")).toEqual({ code: 0, stderr: "", stdout: `${bin}/ocr` });
 
       await tool("codex", `case "$1" in --version) exit 0;; login) [ "$CODEX_HOME" = "${root}/codex" ];; esac`);
       expect(await run("codex")).toEqual({ code: 1, stderr: "Codex is not logged in: run codex login" });
@@ -1741,6 +1735,9 @@ describe("code review in open-code-review's delegation mode", () => {
     expect(text).toContain("a test whose expected value is derived from the new code rather than from the issue");
     expect(text).toContain(background);
     expect(codeReviewInstruction(PROFILE, { ocr: "/it's/ocr", base: "b", background: "" })).toContain(`'/it'\\''s/ocr' delegate preview`);
+    // The bundled binary's path has a scope (`@alibaba-group`), which needs no quoting.
+    const bundled = "/opt/graphloom/node_modules/@alibaba-group/ocr-linux-x64/bin/opencodereview";
+    expect(codeReviewInstruction(PROFILE, { ocr: bundled, base: "b", background: "" })).toContain(`\`${bundled} delegate preview --format json\``);
   });
 
   it("reviews every changed file under every profile, ocr's exclusions included, but never .graphloom/, and checks the change as a whole (#148)", () => {

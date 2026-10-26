@@ -118,13 +118,20 @@ describe.skipIf(!existsSync(path.join(banyandbFixDist, "index.js")))("the banyan
           .replace('"finding","evidence","distinct"]', '"finding","evidence"]'),
       ) as Omit<GraphDefinition, "graphId" | "version" | "privateStateSchema" | "defaultBudgets">;
     // And #174: banyandb-fix runs one `make generate`; the profile runs it per project so each output is cached on its own inputs.
+    // Since 0.14.0 the ocr check finds the plugin's bundled open-code-review first; banyandb-fix's needs ocr on PATH.
+    const theirOcr = theirs.environment?.checks?.find((c) => c.id === "ocr");
     const monolithic = (definition: ReturnType<typeof v1>) => ({
       ...definition,
-      environment: { ...definition.environment, prepare: theirs.environment?.prepare },
+      environment: {
+        ...definition.environment,
+        checks: definition.environment?.checks?.map((c) => (c.id === "ocr" ? theirOcr! : c)),
+        prepare: theirs.environment?.prepare,
+      },
     });
+    expect(ours.environment?.checks?.find((c) => c.id === "ocr")?.argv.join(" ")).toContain("scripts/ocr-path.sh");
     expect(monolithic(v1(strip(ours)))).toEqual(strip(withoutLicense(theirs)));
     expect(theirs.environment?.prepare?.map((c) => c.argv.join(" "))).toEqual(["make generate"]);
-    expect(ours).toMatchObject({ graphId: "issue-fix", version: "0.13.0", privateStateSchema: "issue-fix-private-v1" });
+    expect(ours).toMatchObject({ graphId: "issue-fix", version: "0.14.0", privateStateSchema: "issue-fix-private-v1" });
   });
 
   it("splits make generate into separately cached steps with narrow inputs (#174)", () => {
@@ -473,7 +480,7 @@ describe("profiles", () => {
   it("ships the banyandb-ql profile in the manifest's pinned files and describes it under the graph's version (#197)", async () => {
     const manifest = JSON.parse(await readFile(path.join(here, "../graphloom.manifest.json"), "utf8")) as { digests: { files: Record<string, string> } };
     expect(Object.keys(manifest.digests.files)).toContain("profiles/banyandb-ql.json");
-    expect(createGraph().describe(shippedProfile("banyandb-ql"))).toMatchObject({ graphId: "issue-fix", version: "0.13.0" });
+    expect(createGraph().describe(shippedProfile("banyandb-ql"))).toMatchObject({ graphId: "issue-fix", version: "0.14.0" });
   });
 });
 
@@ -1036,5 +1043,137 @@ describe("the command that writes a pinned context document as a file (#195)", (
     expect(writeTextFileCommand("c", ".graphloom/context/x", "a".repeat(200_000))).toBeDefined();
     expect(writeTextFileCommand("c", ".graphloom/context/x", "a".repeat(240_000))).toBeUndefined();
     expect(writeTextFileCommand("c", ".graphloom/context/x", '"'.repeat(130_000))).toBeUndefined();
+  });
+});
+
+describe("the ocr environment check", () => {
+  const pluginDir = path.resolve(here, "..");
+  const names = ["banyandb", "banyandb-ql", "graphloom", "canopy"] as const;
+  const ocrCheck = (name: (typeof names)[number]) => parseProfile(shippedProfile(name)).environment.checks!.find((c) => c.id === "ocr")!;
+  const sh = ["/bin/sh", "/usr/bin/sh"].find((p) => existsSync(p))!;
+
+  /**
+   * A plugin installed below `root/examples/plugins/issue-fix` with its lookup
+   * script, as the release and a checkout lay it out (dependencies hoisted to
+   * `root/node_modules`), and a PATH directory holding only `sh`.
+   */
+  async function layout() {
+    const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "issue-fix-ocr-")));
+    temps.push(root);
+    const plugin = path.join(root, "examples/plugins/issue-fix");
+    await mkdir(path.join(plugin, "scripts"), { recursive: true });
+    await writeFile(path.join(plugin, "scripts/ocr-path.sh"), await readFile(path.join(pluginDir, "scripts/ocr-path.sh")));
+    const bin = path.join(root, "bin");
+    await mkdir(bin);
+    await symlink(sh, path.join(bin, "sh"));
+    const tool = async (file: string, body: string) => {
+      await mkdir(path.dirname(file), { recursive: true });
+      await writeFile(file, `#!${sh}\n${body}\n`, { mode: 0o755 });
+    };
+    const delegating = '[ "$1 $2 $3" = "delegate preview --help" ]';
+    const ocrPackage = path.join(root, "node_modules/@alibaba-group/open-code-review");
+    const bundle = async (platform = "linux-x64", body = delegating) => {
+      await mkdir(ocrPackage, { recursive: true });
+      await writeFile(path.join(ocrPackage, "package.json"), JSON.stringify({ name: "@alibaba-group/open-code-review", version: "1.13.3" }));
+      const binary = path.join(root, `node_modules/@alibaba-group/ocr-${platform}/bin/opencodereview`);
+      await tool(binary, body);
+      return binary;
+    };
+    const run = async (env: Record<string, string> = {}, name: (typeof names)[number] = "banyandb") => {
+      const [cmd, ...args] = ocrCheck(name).argv;
+      return execFileAsync(cmd!, args, { cwd: root, env: { PATH: bin, HOME: root, GRAPHLOOM_PLUGIN_ROOT: plugin, ...env } }).then(
+        ({ stdout }) => ({ code: 0, stderr: "", stdout: stdout.trim() }),
+        (err: { code: number; stderr: string }) => ({ code: err.code, stderr: err.stderr.trim() }),
+      );
+    };
+    return { root, plugin, bin, tool, delegating, bundle, run };
+  }
+
+  it("is the same lookup in every profile, run through the plugin's own script", () => {
+    const check = ocrCheck("banyandb");
+    for (const name of names) expect(ocrCheck(name)).toEqual(check);
+    expect(check.argv.join(" ")).toContain('"$r/scripts/ocr-path.sh"');
+  });
+
+  it("finds the plugin's bundled ocr with nothing but sh on PATH, before any ocr on PATH", async () => {
+    const t = await layout();
+    const binary = await t.bundle();
+    for (const name of names) expect(await t.run({}, name)).toEqual({ code: 0, stderr: "", stdout: binary });
+    await t.tool(path.join(t.bin, "ocr"), t.delegating);
+    expect(await t.run()).toEqual({ code: 0, stderr: "", stdout: binary });
+  });
+
+  it("finds the bundled ocr from a repair candidate, which links the package from the installed tree", async () => {
+    const t = await layout();
+    const binary = await t.bundle();
+    // A qualified repair's candidate: a copy of the bundle in the run's state, outside the installed tree,
+    // with only its declared dependencies linked (by real path), so the platform package is not beside it.
+    const state = await realpath(await mkdtemp(path.join(os.tmpdir(), "issue-fix-ocr-state-")));
+    temps.push(state);
+    const candidate = path.join(state, "repairs/r1/candidate");
+    await mkdir(path.join(candidate, "node_modules/@alibaba-group"), { recursive: true });
+    await mkdir(path.join(candidate, "scripts"));
+    await writeFile(path.join(candidate, "scripts/ocr-path.sh"), await readFile(path.join(t.plugin, "scripts/ocr-path.sh")));
+    await symlink(path.join(t.root, "node_modules/@alibaba-group/open-code-review"), path.join(candidate, "node_modules/@alibaba-group/open-code-review"), "dir");
+    expect(await t.run({ GRAPHLOOM_PLUGIN_ROOT: candidate })).toEqual({ code: 0, stderr: "", stdout: binary });
+  });
+
+  it("skips a bundled binary that does not run (another platform's) for the next one", async () => {
+    const t = await layout();
+    await t.bundle("aaa-other", "exit 126");
+    const binary = await t.bundle("linux-x64");
+    expect(await t.run()).toEqual({ code: 0, stderr: "", stdout: binary });
+  });
+
+  it("falls back to ocr on PATH when the plugin bundles none, printing its absolute path", async () => {
+    const t = await layout();
+    await t.tool(path.join(t.bin, "ocr"), t.delegating);
+    expect(await t.run()).toEqual({ code: 0, stderr: "", stdout: path.join(t.bin, "ocr") });
+    await t.tool(path.join(t.bin, "ocr"), "exit 1");
+    expect(await t.run()).toEqual({ code: 1, stderr: `${path.join(t.bin, "ocr")} has no delegation mode; install open-code-review 1.9 or later` });
+  });
+
+  it("fails with a clear message when there is neither a bundled ocr nor one on PATH", async () => {
+    const t = await layout();
+    expect(await t.run()).toEqual({
+      code: 127,
+      stderr:
+        "open-code-review (ocr) is not installed: the plugin's bundled @alibaba-group/open-code-review is missing (run npm ci where the plugin is installed), and there is no ocr on PATH",
+    });
+    const broken = await t.bundle("linux-x64", "exit 1");
+    expect(await t.run()).toEqual({ code: 1, stderr: `the plugin's bundled open-code-review (${broken}) does not run 'delegate preview --help', and there is no ocr on PATH` });
+  });
+
+  it("names the missing plugin root rather than guessing", async () => {
+    const t = await layout();
+    expect(await t.run({ GRAPHLOOM_PLUGIN_ROOT: "" })).toEqual({
+      code: 127,
+      stderr: "GRAPHLOOM_PLUGIN_ROOT is not set: GraphLoom sets it to the plugin's directory for environment checks",
+    });
+  });
+
+  it("prefers an explicit path, and never falls back from one", async () => {
+    const t = await layout();
+    await t.bundle();
+    const own = path.join(t.root, "opt/ocr");
+    await t.tool(own, t.delegating);
+    expect(await t.run({ GRAPHLOOM_OCR_BIN: own })).toEqual({ code: 0, stderr: "", stdout: own });
+    // A profile names its own path as the script's argument.
+    const explicit = await execFileAsync(sh, [path.join(t.plugin, "scripts/ocr-path.sh"), own], { cwd: t.root, env: { PATH: t.bin } });
+    expect(explicit.stdout.trim()).toBe(own);
+    expect(await t.run({ GRAPHLOOM_OCR_BIN: path.join(t.root, "missing") })).toEqual({
+      code: 127,
+      stderr: `open-code-review is not an executable file at ${path.join(t.root, "missing")}`,
+    });
+  });
+
+  it.skipIf(!(process.platform === "linux" && process.arch === "x64"))("finds the pinned open-code-review this checkout installed, which has delegation mode", async () => {
+    const [cmd, ...args] = ocrCheck("graphloom").argv;
+    const { stdout } = await execFileAsync(cmd!, args, { cwd: repoRoot, env: { PATH: path.dirname(sh), HOME: os.tmpdir(), GRAPHLOOM_PLUGIN_ROOT: pluginDir } });
+    const binary = stdout.trim();
+    expect(path.isAbsolute(binary)).toBe(true);
+    expect(binary.endsWith("/node_modules/@alibaba-group/ocr-linux-x64/bin/opencodereview")).toBe(true);
+    const pinned = (JSON.parse(await readFile(path.join(pluginDir, "package.json"), "utf8")) as { dependencies: Record<string, string> }).dependencies["@alibaba-group/open-code-review"];
+    expect((await execFileAsync(binary, ["version"])).stdout).toContain(`open-code-review v${pinned} `);
   });
 });

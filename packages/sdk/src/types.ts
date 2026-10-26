@@ -121,11 +121,21 @@ export interface EnvironmentCommand {
   outputs?: string[];
 }
 
+/**
+ * Environment variable the controller sets for every environment check and
+ * preparation command: the absolute path of the graph bundle's root directory
+ * (the directory holding `graphloom.manifest.json`). A check runs in the
+ * worktree, so this is how it finds what the bundle ships, such as a tool from
+ * the bundle's own dependencies or a script of its own.
+ */
+export const PLUGIN_ROOT_ENV = "GRAPHLOOM_PLUGIN_ROOT";
+
 export interface EnvironmentDeclaration {
   /**
    * Tools the run needs. The controller runs them in the worktree before any
    * job at the start of a run, on every resume, and after a repair is
-   * activated. A failing check stops the run.
+   * activated. A failing check stops the run. Checks and preparation see the
+   * bundle's root in `$GRAPHLOOM_PLUGIN_ROOT` (PLUGIN_ROOT_ENV).
    */
   checks?: EnvironmentCommand[];
   /**

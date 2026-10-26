@@ -227,7 +227,7 @@ export interface KnownFindings {
 }
 
 function shellQuote(value: string): string {
-  return /^[A-Za-z0-9_./-]+$/.test(value) ? value : `'${value.replaceAll("'", `'\\''`)}'`;
+  return /^[A-Za-z0-9_./@-]+$/.test(value) ? value : `'${value.replaceAll("'", `'\\''`)}'`;
 }
 
 export interface ReviewComment {
