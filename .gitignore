@@ -42,3 +42,6 @@ Thumbs.db
 # Generated digest sidecars (checked-in graphloom.manifest.json is the template)
 /examples/plugins/**/*.digest.json
 /examples/plugins/**/hello.manifest.json
+
+# Release build output (scripts/release.sh build)
+/release-out/

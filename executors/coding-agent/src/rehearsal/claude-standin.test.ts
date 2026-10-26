@@ -5,16 +5,21 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { REHEARSAL_ADVERSARIAL_ENV, REHEARSAL_SYNTHESIZED_ENV, type ExecutorContext, type RehearsalScenario } from "@graphloom/sdk";
 import { createClaudeCodeHarness } from "../claude.js";
 import { createCodingAgentExecutor } from "../index.js";
+import { writeStandInLauncher } from "./launcher.js";
 import { REHEARSAL_HOME_ENV, REHEARSAL_SCENARIO_ENV, resetRehearsalScenarioCache } from "./scenario.js";
 
-// The real, unmodified Claude Code harness spawns this compiled stand-in
-// exactly as it would spawn a real `claude` binary; `npm test`'s own script
-// builds and chmods it first (executors/coding-agent/package.json).
-const claudeStandIn = fileURLToPath(new URL("../../dist/rehearsal/claude-standin.js", import.meta.url));
+// The real, unmodified Claude Code harness spawns the compiled stand-in through the
+// launcher a rehearsal binds as its command (`writeStandInLauncher`), exactly as it
+// would spawn a real `claude` binary.
+const claudeScript = fileURLToPath(new URL("../../dist/rehearsal/claude-standin.js", import.meta.url));
+let claudeStandIn: string;
+beforeAll(async () => {
+  claudeStandIn = await writeStandInLauncher(await mkdtemp(path.join(os.tmpdir(), "gl-claude-standin-bin-")), "claude", claudeScript);
+});
 
 const temps: string[] = [];
 afterEach(async () => {

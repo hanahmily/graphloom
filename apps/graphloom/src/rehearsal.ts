@@ -64,6 +64,7 @@ import {
   claudeRehearsalStandIn,
   CODING_AGENT_RUN_ID,
   codexRehearsalStandIn,
+  writeStandInLauncher,
   piRehearsalModule,
   readRecordedAssignment,
   REHEARSAL_HOME_ENV,
@@ -427,6 +428,9 @@ async function performRehearsal(
   const standInHome = path.join(rehearsalRoot, "stand-in-home");
   const stateRoot = path.join(rehearsalRoot, "state");
   await writeFile(scenarioPath, JSON.stringify(scenario), "utf8");
+  // Stand-ins run on this process's Node through launchers in the scratch directory (§2.7 of the release design).
+  const claudeStandIn = await writeStandInLauncher(path.join(rehearsalRoot, "bin"), "claude", claudeRehearsalStandIn);
+  const codexStandIn = await writeStandInLauncher(path.join(rehearsalRoot, "bin"), "codex", codexRehearsalStandIn);
 
   const tempTaskPath = path.join(taskDir, `.graphloom-rehearsal-${randomUUID().slice(0, 8)}.yaml`);
   const budgets = rehearsalBudgets(scenario.budgets);
@@ -462,8 +466,8 @@ async function performRehearsal(
       harness: "pi",
       harnesses: ["pi", "claude-code", "codex"],
       allowUnrestricted: true,
-      claude: { command: claudeRehearsalStandIn, passEnv: standInPassEnv },
-      codex: { command: codexRehearsalStandIn, passEnv: standInPassEnv },
+      claude: { command: claudeStandIn, passEnv: standInPassEnv },
+      codex: { command: codexStandIn, passEnv: standInPassEnv },
       github: {
         tokenEnv: REHEARSAL_GITHUB_TOKEN_ENV,
         // The real GitHub executor is sandboxed (not allowUnrestricted) and

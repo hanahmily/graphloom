@@ -5,16 +5,21 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { REHEARSAL_ADVERSARIAL_ENV, REHEARSAL_SYNTHESIZED_ENV, type ExecutorContext, type RehearsalScenario } from "@graphloom/sdk";
 import { createCodexHarness } from "../codex.js";
 import { createCodingAgentExecutor } from "../index.js";
+import { writeStandInLauncher } from "./launcher.js";
 import { REHEARSAL_HOME_ENV, REHEARSAL_SCENARIO_ENV, resetRehearsalScenarioCache } from "./scenario.js";
 
-// The real, unmodified Codex harness spawns this compiled stand-in exactly as
-// it would spawn a real `codex` binary; `npm test`'s own script builds and
-// chmods it first (executors/coding-agent/package.json).
-const codexStandIn = fileURLToPath(new URL("../../dist/rehearsal/codex-standin.js", import.meta.url));
+// The real, unmodified Codex harness spawns the compiled stand-in through the
+// launcher a rehearsal binds as its command (`writeStandInLauncher`), exactly as it
+// would spawn a real `codex` binary.
+const codexScript = fileURLToPath(new URL("../../dist/rehearsal/codex-standin.js", import.meta.url));
+let codexStandIn: string;
+beforeAll(async () => {
+  codexStandIn = await writeStandInLauncher(await mkdtemp(path.join(os.tmpdir(), "gl-codex-standin-bin-")), "codex", codexScript);
+});
 
 const temps: string[] = [];
 afterEach(async () => {

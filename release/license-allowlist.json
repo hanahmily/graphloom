@@ -1,0 +1,5 @@
+{
+  "allowed": ["Apache-2.0", "MIT", "ISC", "BSD-2-Clause", "BSD-3-Clause", "0BSD", "BlueOak-1.0.0", "Unlicense", "CC0-1.0"],
+  "denied": ["GPL", "LGPL", "AGPL", "SSPL", "UNLICENSED"],
+  "exceptions": []
+}

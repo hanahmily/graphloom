@@ -220,14 +220,21 @@ a shipped entry": those fixtures are feature-rich but test-specific (subagent,
 background and resume-script formats with no `RehearsalReply` analog), and the
 real shared surface — one reply per contract, effects, assignment fidelity,
 the three `fail` kinds — was small enough to implement directly against the
-same `scenario.ts` client Pi's stand-in already used. (5) Both stand-ins'
-`#!/usr/bin/env node` shebang is rewritten at build time
-(`executors/coding-agent/scripts/patch-standin-shebang.mjs`) to the absolute
-path of the Node that built them: `createCodexHarness`/`createClaudeCodeHarness`
-spawn a stand-in as the whole command (the CLI args are fixed, so there is no
-`node <script>` wrapper to control), so it depends on its own shebang to find
-an interpreter, and `env node` resolves via `PATH` — which a rehearsed
-plugin's own environment declaration can rebind. Found live: banyandb-fix's
+same `scenario.ts` client Pi's stand-in already used. (5) Both stand-ins
+run as `process.execPath <stand-in>`, never through their
+`#!/usr/bin/env node` shebang. The rehearsal binds `claude.command` and
+`codex.command` to `sh` launchers that it writes into its own scratch
+directory, each `exec '<process.execPath>' '<stand-in>' "$@"`
+(`writeStandInLauncher`, `executors/coding-agent/src/rehearsal/launcher.ts`).
+The harnesses spawn the launcher as the whole command, and environment
+checks run it from a shell through `GRAPHLOOM_CLAUDE_BIN` and
+`GRAPHLOOM_CODEX_BIN`. `env node` resolves via `PATH`,
+which a rehearsed plugin's own environment declaration can rebind, and an
+installed release has no `node` on `PATH` at all
+([release design §2.7](design-release.md#27-bundled-node-runtime)). An
+earlier build step rewrote the shebang to the absolute path of the building
+Node instead; release phase R1 removed it, because that path does not exist
+on another machine. Found live: banyandb-fix's
 environment check (and its rehearsal fixture, matching its existing e2e
 test) installs a fake `node` satisfying only `node --version`, and once it
 shadowed the real one on `PATH`, the Claude Code stand-in "ran" (exit 0, no
