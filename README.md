@@ -146,6 +146,10 @@ crashes; filesystem and execution scopes require host enforcement.
   repository, driven by a JSON profile the task names with `config:`; ships
   profiles for BanyanDB and for GraphLoom itself. It generalizes the
   [BanyanDB fix graph](docs/design-banyandb-fix-graph.md).
+- [Installable releases](docs/design-release.md) (proposed): the release
+  tarball on GitHub Releases, versioned install directories, `graphloom doctor`,
+  upgrades that leave a run on the version it started with, and the local
+  release procedure.
 - [Run budgets](docs/budgets.md): what recorded runs used (`graphloom stats`),
   the profile defaults derived from them, budget layers, and what a raised
   budget means.
