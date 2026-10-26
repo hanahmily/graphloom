@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 /**
  * Context documents (profile `issues.context`): files the issue defers to,
  * such as a design or a plan, that the planner, the implementer and the code

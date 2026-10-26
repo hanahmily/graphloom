@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 /**
  * A resume retries what failed (docs/design-typescript-core.md §8). An
  * operator resumes because something changed, so a failure recorded before

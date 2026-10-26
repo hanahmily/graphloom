@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 /**
  * `graphloom stats`: what a run actually used, per stage and in total, from
  * its durable state and the supervisor episode records in it — never from

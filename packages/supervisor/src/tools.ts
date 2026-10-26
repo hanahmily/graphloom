@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 import path from "node:path";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { ACTION_SPEC_KEYS, assertGraphDecision, stableHash, type AgentSessionView, type ExecutorView, type GraphAction } from "@graphloom/sdk";

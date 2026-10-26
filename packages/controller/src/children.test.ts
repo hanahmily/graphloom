@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 import { execFile } from "node:child_process";
 import { copyFile, mkdir, mkdtemp, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 import type { EvidenceRecord } from "@graphloom/sdk";
 import { MAX_DISCOVERY_ROUNDS, MAX_SWEEP_PASSES, REVIEW_STAGE } from "./constants.js";
 import { agentRuns, type AgentRun } from "./evidence.js";

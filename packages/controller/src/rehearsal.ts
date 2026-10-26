@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 /**
  * Evaluates a finished rehearsal (or a replayed recorded run) against the
  * scenario it was asked to reach, reading only generic durable state — no

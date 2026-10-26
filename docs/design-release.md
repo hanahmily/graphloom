@@ -1,11 +1,11 @@
 # Installable releases
 
-Status: proposed design, 2026-10-26; not implemented. The repository license
-(Apache-2.0: `LICENSE`, `NOTICE`, and `license` in every `package.json`) is in
-place; everything else here is design. This covers how GraphLoom is packaged,
-installed, upgraded, and released for an operator who runs it on their own Linux
-machine. It specializes the [TypeScript core design](design-typescript-core.md)
-(version transitions, §8) and the
+Status: proposed design, 2026-10-26; phase R0 implemented. The repository license
+(Apache-2.0: `LICENSE`, `NOTICE`, and `license` in every `package.json`) and the
+source headers with their check (§2.8) are in place; everything else here is
+design. This covers how GraphLoom is packaged, installed, upgraded, and released
+for an operator who runs it on their own Linux machine. It specializes the
+[TypeScript core design](design-typescript-core.md) (version transitions, §8) and the
 [executor design](design-executors.md#restart-versions-and-recovery). It adds no
 graph, controller, or executor behavior beyond what installs need.
 
@@ -296,6 +296,22 @@ The release runs without a host Node. The host still needs the tools in §4.4.
   and joins the local gate. Headers are added in their own phase (R0) before
   the first release, not in this change. Adding them changes plugin and
   executor digests, so that change follows the version rule in §3.
+- **R0 as implemented.** `npm run check:headers` runs the check, and `npm test`
+  runs it after the build, so the local gate and the release gate (§6 step 4)
+  include it. `--fix` inserts missing headers.
+  - The header is the file's first two lines, or the two lines right after a
+    shebang. `.sh` files use `#`; the JavaScript and TypeScript extensions
+    (`.ts`, `.mts`, `.cts`, `.js`, `.mjs`, `.cjs`) use `//`.
+  - Exempt: `.d.ts` files, any `dist/`, `node_modules/`, or `fixtures/`
+    directory, and `legacy/`, which CI does not build. JSON, Markdown, YAML,
+    and lockfiles are not covered extensions.
+  - In a Git work tree, the check reads `git ls-files`. In a tree without Git
+    metadata, such as the `git archive` staging tree, it walks the files.
+  - Adding the headers changed every example plugin's source digests, so the
+    four manifests were regenerated. It also changed every built-in executor
+    digest. For the same reason as the license change below, no component
+    version was bumped: no previous `release.json` exists for the §3 rule to
+    compare against, and the change is comments only.
 - **The license change itself.** Adding `license` changed each plugin's
   `package.json` and `package-lock.json`, so the four example plugin manifests
   were regenerated. It also changes built-in executor digests, because they
@@ -900,7 +916,7 @@ release PR.
 
 | Phase | Deliverable | Verification |
 |---|---|---|
-| R0 | Apache-2.0 `LICENSE`, `NOTICE`, and `license` fields (done in this change); SPDX headers on hand-written source and `scripts/check-headers.mjs` in the gate, with the component bumps they cause; this design accepted | Gate passes; header check fails on a file without a header; manifests current |
+| R0 | Apache-2.0 `LICENSE`, `NOTICE`, and `license` fields (done); SPDX headers on hand-written source and `scripts/check-headers.mjs` in the gate, with the component bumps they cause (done; no bumps were needed, §2.8); this design accepted | Gate passes; header check fails on a file without a header; manifests current |
 | R1 | Product version source of truth, `release.json`, and `graphloom version` from it. `typescript` and `vitest` as CLI dependencies. GraphLoom's own scripts spawned with `process.execPath`, and the stand-in shebang patch removed. Bundled Node fetch and verification. `notices.mjs` and the license allowlist. SDK packing. `scripts/release.sh build` producing all assets | Tests for version output. Tarball content and no-absolute-path checks. A repair preflight test on a production-pruned tree with no `node` on `PATH`. A license check that fails on a planted disallowed license. Pack file-list check |
 | R2 | `install.sh`, the shim, `graphloom upgrade`, `self list/use/rollback/prune/uninstall`, automatic updates (`__auto-update`, `autoUpdate` in the runner config, `update/`, `install.lock`, the skip record, auto-prune), and deterministic packing | Shell tests in a temporary `HOME` with no host Node: atomic switch, no overwrite, prune respects ownership and plugin links, an interrupted install is never listed. `upgrade` installs, switches, lists runs on older versions, and `--no-switch` keeps `current`. Updater tests against a fake release source and a stub `gh`: at most one check per 24 hours; patch (and from 1.0, minor) installed and switched; a breaking release only announced; `notify` never installs; a bad checksum or signature records the failure and does not switch; two concurrent invocations install once; `GRAPHLOOM_DISABLE_AUTOUPDATE=1` and `off` make no network call; the notice never reaches a non-TTY, `--json`, or hook invocation, and the foreground exit code is unchanged; `self rollback` keeps the skipped version from being reinstalled until a newer release or `upgrade`; auto-prune keeps three versions plus owners; a process started from the old version keeps loading from it across a switch. Two independent builds give the same hash |
 | R3 | Run ownership (`runs/<id>.json`, `install` record, `stateFormat`), dispatch to the owning version, `resume --upgrade` with ordered migrators, the gate fingerprint including the product version, and the `rehearse --stop-at` / `resume --rehearsal` hooks | Controller and CLI tests: resume under a new `current` dispatches with no pin mismatch. `--upgrade` migrates each committed fixture and completes it on a scripted runner. Transitions are recorded. Downgrade, crossing a major, an unknown format, a missing migrator, and an unsettled repair are each refused with the run unchanged. A cached gate result is not reused across versions |

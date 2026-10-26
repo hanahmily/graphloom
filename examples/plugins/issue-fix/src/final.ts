@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 /**
  * The `final` command tier's pull request sections: what each final command
  * reported, shown under the heading its profile entry names. The controller

@@ -1,4 +1,7 @@
 #!/usr/bin/env node
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 /**
  * Regenerates graphloom.manifest.json with source/lockfile digests for pinning.
  * Run after changing sources or the package lock: `npm run manifest -w @graphloom/plugin-hello`

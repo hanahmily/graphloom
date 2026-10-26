@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 export * from "./constants.js";
 export { acceptanceItems, coverageEntries, coverageProblems, MAX_COVERAGE_FILES } from "./acceptance.js";
 export { advanceFix, createGraph, definitionFor, GRAPH_ID, GRAPH_VERSION, requestedIssue, type FixPrivateState } from "./graph.js";

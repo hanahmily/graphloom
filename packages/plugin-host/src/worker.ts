@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 /**
  * Child worker: load a plugin entry and serve NDJSON wire requests on stdin/stdout.
  * Protocol uses a private stdout write; plugin console/stdout is diverted to stderr

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 /**
  * The gate in `run` (docs/design-graph-rehearsal.md §3.5): `graphloom run`
  * performs L0 (`check`) then L1-quick (`rehearse` with stubbed commands)

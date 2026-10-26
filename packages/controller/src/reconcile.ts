@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 import { writeScopeAllows, type JobSpec } from "@graphloom/sdk";
 import type { DurableRunState, PendingDispatch } from "./state.js";
 import { worktreeChangeFingerprints } from "./worktree.js";

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 /**
  * Write scope entries, relative to the workspace root:
  * - `path` allows that file or directory and everything below it;

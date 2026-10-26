@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 /**
  * Stop notification and waiting (`--on-stop`, `notify.onStop`, `graphloom wait`).
  *

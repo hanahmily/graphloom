@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 /**
  * Credential binding for an Anthropic API key. Without it, Claude Code uses its
  * own login (for example the user's Claude subscription).

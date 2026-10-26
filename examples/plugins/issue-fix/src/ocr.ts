@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 import { coverageBlock } from "./acceptance.js";
 import type { AcceptanceItem, CoverageEntry, DecisionRecord } from "./decision-record.js";
 import { MAX_DISCOVERY_ROUNDS } from "./constants.js";

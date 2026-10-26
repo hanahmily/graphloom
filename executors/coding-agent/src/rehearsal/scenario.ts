@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 /**
  * Re-exports the shared rehearsal stand-in client (docs/design-graph-rehearsal.md
  * §4.1/§4.2), now in `@graphloom/sdk` so the command executor's own quick-mode

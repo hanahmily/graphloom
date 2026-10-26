@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 /**
  * The GitHub executor's rehearsal stand-in (docs/design-graph-rehearsal.md
  * §4.6): `--offline`'s choice, not quick mode's default — GitHub reads are

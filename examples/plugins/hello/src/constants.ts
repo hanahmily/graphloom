@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 /** Exact product bytes for the hello Write stage. */
 export const GREETING_PATH = "GREETING.txt";
 export const GREETING_BYTES = "Hello, GraphLoom!\n";

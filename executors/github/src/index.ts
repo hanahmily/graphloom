@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 export {
   GITHUB_CREDENTIAL,
   GITHUB_EXECUTOR_IDS,

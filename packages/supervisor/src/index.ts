@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 /** Supervisor package — Pi SDK session adapter and recovery protocol. */
 
 export {

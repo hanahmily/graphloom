@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 /**
  * The `go-test` regression runner: plain Go tests through `go test -json`,
  * and Ginkgo specs through a focused run and its JSON report.

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 /**
  * Plugin-declared rehearsal data (docs/design-graph-rehearsal.md §4.4): a
  * bundle's `entryPoints.rehearsal` module exports a `GraphRehearsal`, whose

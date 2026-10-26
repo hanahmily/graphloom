@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 /**
  * Shared client for a GraphLoom rehearsal stand-in (docs/design-graph-rehearsal.md
  * §4.1/§4.2): resolves the scenario a `rehearse` run handed this executor

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 /**
  * The `vitest` regression runner: one test, by its full name, in one test
  * file, through a small vitest reporter the command installs for the run.

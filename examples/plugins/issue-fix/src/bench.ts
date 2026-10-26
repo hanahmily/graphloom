@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 /**
  * The benchmark report a `bench-gates` command writes, and what the graph does
  * with it. The report is the Measure QL tickets' benchmark evidence

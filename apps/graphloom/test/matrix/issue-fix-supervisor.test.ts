@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 import { afterEach, describe, it } from "vitest";
 import { createScope, goVersion } from "@graphloom/testkit";
 import { CONDITIONS, runCell } from "./matrix.js";

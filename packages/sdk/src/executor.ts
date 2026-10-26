@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 import type { JobKind, JobSpec } from "./types.js";
 
 /** Qualified executor identity, e.g. `graphloom.agent/run` or `acme.echo/ping`. */

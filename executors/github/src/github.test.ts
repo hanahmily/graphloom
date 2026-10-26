@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 import { createHash } from "node:crypto";
 import os from "node:os";
 import { afterEach, describe, expect, it } from "vitest";

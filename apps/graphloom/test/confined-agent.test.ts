@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 import { mkdir, mkdtemp, readdir, readFile, rm, symlink } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import os from "node:os";

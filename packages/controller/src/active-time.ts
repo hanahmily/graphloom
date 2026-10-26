@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 import { DEFAULT_ACTIVE_BUDGET_MS } from "./intake.js";
 import type { DurableRunState } from "./state.js";
 

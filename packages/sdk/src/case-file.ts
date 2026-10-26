@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 /**
  * The supervisor's memory across recovery episodes (design-supervisor-robustness.md
  * §4.4). The controller owns it and stores it in run state: the supervisor adds

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 export * from "./constants.js";
 export { advanceFix, createGraph, requestedIssue, type FixPrivateState } from "./graph.js";
 export {

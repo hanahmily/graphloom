@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 import { mkdir, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { createGitRepo, exampleBundle, type GitRepo, type GitRepoOptions } from "./git.js";

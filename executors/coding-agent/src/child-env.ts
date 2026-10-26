@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 /** Environment an agent and its commands need to run, find logins, and reach the network. */
 const BASE_ENV = new Set([
   "PATH",

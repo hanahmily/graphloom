@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 import { createHash, randomUUID } from "node:crypto";
 import { chmod, constants as fsConstants, copyFile, lstat, mkdir, open, readFile, readdir, readlink, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";

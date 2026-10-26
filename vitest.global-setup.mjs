@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 // Shared vitest globalSetup for every workspace.
 //
 // Routes every temp dir the suite (and the code under test) creates through

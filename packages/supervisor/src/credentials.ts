@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 /**
  * Resolve MiniMax credentials for the Pi supervisor runtime.
  * Prefer explicit keys; never log or return values into prompts/transcripts.

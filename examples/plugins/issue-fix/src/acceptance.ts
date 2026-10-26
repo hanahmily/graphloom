@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 import type { AcceptanceItem, CoverageEntry, DecisionRecord } from "./decision-record.js";
 import { clip, observablePath } from "./review-common.js";
 

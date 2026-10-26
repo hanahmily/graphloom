@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Hongtao Gao and the GraphLoom contributors
+
 import { pathToFileURL } from "node:url";
 import type { CodingHarness } from "./harness.js";
 import { createCodingAgentExecutor } from "./run.js";
