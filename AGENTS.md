@@ -15,6 +15,7 @@ are superseded. Historical Go code lives under `legacy/go/` and is not built by 
 | `packages/plugin-host` | `@graphloom/plugin-host` | Isolated child process adapter (scaffold) |
 | `packages/supervisor` | `@graphloom/supervisor` | Recovery supervisor: Pi SDK session today (`minimax-cn`/`MiniMax-M3` default); Claude Code and Codex harnesses proposed in [supervisor harnesses](docs/design-supervisor-harnesses.md) |
 | `packages/runner` | `@graphloom/runner` | Jobs and scopes (scaffold) |
+| `packages/agent-harness` | `@graphloom/agent-harness` | Agent session drivers (Claude Code, Codex, Pi): processes, stream protocols, session capture, failure classification; vendored into `executors/coding-agent` |
 | `packages/testkit` | `@graphloom/testkit` | Unpublished test fixtures (repos, tasks, bundles, scripted agents, fake provider); tests only |
 | `apps/graphloom` | `@graphloom/cli` | CLI composition root (stub) |
 

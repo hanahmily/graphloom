@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
+import { existsSync } from "node:fs";
 import { cp, mkdir, mkdtemp, readFile, rm, symlink } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
@@ -54,6 +55,9 @@ describe("bundle tsconfigs", () => {
           recursive: true,
           filter: (src) => !["node_modules", "dist", ".git"].includes(path.basename(src)),
         });
+        // Vendored libraries (dist/vendor, docs/design-supervisor-harnesses.md §3.2) are build inputs a repair snapshot carries.
+        const vendored = path.join(repoRoot, bundle, "dist", "vendor");
+        if (existsSync(vendored)) await cp(vendored, path.join(copy, "dist", "vendor"), { recursive: true });
         await symlink(installRoot, path.join(copy, "node_modules"), "dir");
         const result = spawnSync(process.execPath, [tscBin, "-p", "tsconfig.json"], { cwd: copy, encoding: "utf8" });
         expect(result.stdout + result.stderr).toBe("");

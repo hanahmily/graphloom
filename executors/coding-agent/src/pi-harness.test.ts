@@ -12,7 +12,7 @@ import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ExecutorContext, ToolCallRequest, ToolCallResult } from "@graphloom/sdk";
 import { CONTINUATION_NOTICE, createCodingAgentExecutor } from "./index.js";
-import { piNativeTools } from "./pi-harness.js";
+import { piNativeTools } from "#agent-harness/pi";
 import { createPiHarness, PI_MODEL_ENV, PI_PROVIDER_ENV, type PiHarnessOptions } from "./pi.js";
 
 interface FauxContext {

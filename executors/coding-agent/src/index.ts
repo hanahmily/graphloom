@@ -39,7 +39,7 @@ export {
   type PiBindingOptions,
   type RehearsalBindingOptions,
 } from "./package.js";
-export { minimalEnv } from "./child-env.js";
+export { minimalEnv } from "#agent-harness/process";
 export {
   readRecordedAssignment,
   REHEARSAL_HOME_ENV,

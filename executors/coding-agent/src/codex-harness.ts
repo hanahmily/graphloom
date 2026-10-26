@@ -1,15 +1,22 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
-import { spawn } from "node:child_process";
-import { randomBytes } from "node:crypto";
-import { lstat, mkdir, mkdtemp, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { createInterface } from "node:readline";
 import { applyReferenceEnums, checkReferences, validateResultShape } from "@graphloom/sdk";
+import {
+  BUDGET_EXHAUSTED,
+  SESSION_ABORTED,
+  captureCodexTurn,
+  openCodexThread,
+  runCodexProcess,
+  type CodexSessionSettings,
+  type CodexSessionStore,
+  type CodexThread,
+} from "#agent-harness/codex";
+import { envList, minimalEnv } from "#agent-harness/process";
 import { bounded, inlineObjectSchema, scopeNotes } from "./assignment.js";
-import { envList, minimalEnv } from "./child-env.js";
 import {
   CODEX_BIN_ENV,
   CODEX_DEFAULT_RESPONSE_TIMEOUT_MS,
@@ -23,18 +30,12 @@ import {
   JOB_CONTRACT_ENV,
   JOB_IDENTITY_ENV,
   JOB_REFERENCES_ENV,
-  completeJsonl,
   fitWatchdog,
-  sessionSaver,
   type CodingHarness,
   type CodingRunRequest,
   type CodingRunResult,
   type CodingSessionOptions,
-  type CodingUsage,
-  type NativeToolUse,
 } from "./harness.js";
-import { drainOnExit, signalGroup } from "./process-group.js";
-import { readScanned } from "./session-files.js";
 
 export interface CodexHarnessOptions {
   /** Codex executable. Default: `GRAPHLOOM_CODEX_BIN`, then `codex` on PATH. */
@@ -53,16 +54,15 @@ export interface CodexHarnessOptions {
   killGraceMs?: number;
 }
 
-const BUDGET_EXHAUSTED = "model request budget exhausted";
-const MAX_STDERR_CHARS = 8_000;
 const RESULT_NOTE = "Your final message is your result: only the JSON object, with no prose and no code fence.";
 const REASONING_EFFORTS = new Set(["minimal", "low", "medium", "high", "xhigh"]);
 
 /**
- * Every flag `runCodex` below passes Codex's `exec` subcommand, for the B2
- * capability probe (docs/design-graph-rehearsal.md §3.1): a binary whose
- * `codex exec --help` is missing one of these silently lacks a feature this
- * adapter depends on. Keep this in sync with the `cli` array in `runCodex`.
+ * Every flag a job's `codex exec` run is passed (the shared driver's
+ * `CODEX_EXEC_FLAGS` plus `--output-schema`, which `runCodex` below adds),
+ * for the B2 capability probe (docs/design-graph-rehearsal.md §3.1): a binary
+ * whose `codex exec --help` is missing one of these silently lacks a feature
+ * this adapter depends on. Keep this in sync with both.
  */
 export const CODEX_ADAPTER_FLAGS: readonly string[] = [
   "--json",
@@ -75,34 +75,6 @@ export const CODEX_ADAPTER_FLAGS: readonly string[] = [
   "--config",
   "--output-schema",
 ];
-
-interface CodexEvent {
-  type?: string;
-  thread_id?: unknown;
-  item?: { id?: unknown; type?: unknown };
-  usage?: Record<string, unknown>;
-  error?: { message?: unknown };
-  message?: unknown;
-}
-
-const THREAD_ID = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
-const SESSION_REF = /^codex-([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$/;
-/** Where Codex keeps a thread's rollout under its home: `sessions/YYYY/MM/DD/rollout-<time>-<thread id>.jsonl`. */
-const ROLLOUT_PATH = /^sessions\/\d{4}\/\d{2}\/\d{2}\/rollout-[0-9A-Za-z.:_-]+\.jsonl$/;
-
-/** What a saved Codex session ran under; a resume under another model would pass its turns off as continuity. */
-interface CodexSettings {
-  model: string | null;
-}
-
-/** The Codex thread a session continues, once Codex has named it. */
-interface CodexThread {
-  threadId?: string;
-  /** Its rollout file, relative to the Codex home, once found. */
-  rollout?: string;
-  /** True once Codex has recorded the thread, so the next run resumes it. */
-  started: boolean;
-}
 
 /**
  * A `CodingHarness` that runs the user's Codex CLI (`codex exec`) headless in
@@ -133,172 +105,37 @@ export function createCodexHarness(harnessOptions: CodexHarnessOptions = {}): Co
       const responseTimeoutMs = fitWatchdog(harnessOptions.responseTimeoutMs ?? envMs(CODEX_RESPONSE_TIMEOUT_ENV, CODEX_DEFAULT_RESPONSE_TIMEOUT_MS), options.timeoutMs);
       // Codex's own default home, where it keeps rollouts when none is set.
       const home = codexHome ?? path.join(os.homedir(), ".codex");
-      const settings: CodexSettings = { model: model ?? null };
-      const thread = await openThread(options, home, settings);
+      const settings: CodexSessionSettings = { model: model ?? null };
+      const store: CodexSessionStore = { home, settings, ...(options.sessionDir !== undefined ? { sessionDir: options.sessionDir } : {}) };
+      const thread = await openCodexThread(store, options.resume);
       return {
         async run(request) {
-          const sessionDir = options.sessionDir;
-          const spawnedAt = new Date();
-          // Codex appends to the rollout as the turn goes; a copy kept in the
-          // session directory during the run leaves a resumable session even
-          // if the job is killed before the final save below.
-          let copied = false;
-          const early =
-            sessionDir !== undefined
-              ? sessionSaver(
-                  async () => (copied = (await saveRollout(home, sessionDir, thread, settings, spawnedAt, false)) || copied),
-                  () => options.onSessionSaved?.(sessionRef(thread.threadId!)),
-                )
-              : undefined;
-          let result: CodingRunResult;
-          try {
-            result = await runCodex({
-              command,
-              model,
-              reasoningEffort,
-              env,
-              responseTimeoutMs,
-              killGraceMs: harnessOptions.killGraceMs ?? 5_000,
-              request,
-              options,
-              thread,
-              ...(early !== undefined ? { onActivity: () => early.poke() } : {}),
-            });
-          } finally {
-            await early?.close();
-          }
-          if (sessionDir === undefined) return result;
-          if (!(await saveRollout(home, sessionDir, thread, settings, spawnedAt, true))) {
-            // What it copied during the run is no longer what Codex holds, so no unreported session is left behind.
-            if (copied && options.resume === undefined && thread.threadId !== undefined) {
-              const ref = sessionRef(thread.threadId);
-              await rm(path.join(sessionDir, `${ref}.jsonl`), { force: true });
-              await rm(path.join(sessionDir, `${ref}.json`), { force: true });
-            }
-            return result;
-          }
-          // A later run of this session (a transient retry) resumes the thread instead of starting another.
-          thread.started = true;
-          return { ...result, sessionRef: sessionRef(thread.threadId!) };
+          const { value: result, sessionRef } = await captureCodexTurn(
+            store,
+            thread,
+            {
+              resumed: options.resume !== undefined,
+              ...(options.onSessionSaved !== undefined ? { onSessionSaved: (ref: string) => options.onSessionSaved?.(ref) } : {}),
+            },
+            (onActivity) =>
+              runCodex({
+                command,
+                model,
+                reasoningEffort,
+                env,
+                responseTimeoutMs,
+                killGraceMs: harnessOptions.killGraceMs ?? 5_000,
+                request,
+                options,
+                thread,
+                ...(onActivity !== undefined ? { onActivity } : {}),
+              }),
+          );
+          return sessionRef !== undefined ? { ...result, sessionRef } : result;
         },
       };
     },
   };
-}
-
-function sessionRef(threadId: string): string {
-  return `codex-${threadId}`;
-}
-
-/** Restore the thread `resume` names into the Codex home, or fail; never start a fresh one in its place. */
-async function openThread(options: CodingSessionOptions, home: string, settings: CodexSettings): Promise<CodexThread> {
-  if (options.resume === undefined) return { started: false };
-  const ref = options.resume;
-  const threadId = SESSION_REF.exec(ref)?.[1];
-  if (threadId === undefined) throw new Error(`malformed session ref ${ref}`);
-  if (options.sessionDir === undefined) throw new Error("no session directory to restore from");
-  const [meta, rollout] = await Promise.all([
-    readFile(path.join(options.sessionDir, `${ref}.json`), "utf8").catch(() => undefined),
-    readFile(path.join(options.sessionDir, `${ref}.jsonl`), "utf8").catch(() => undefined),
-  ]);
-  if (meta === undefined || rollout === undefined) throw new Error(`no saved session for ${ref}`);
-  if (rollout.trim() === "") throw new Error(`saved session ${ref} is empty`);
-  let recorded: { rollout?: unknown; model?: unknown };
-  try {
-    recorded = JSON.parse(meta) as typeof recorded;
-    for (const line of rollout.split("\n")) if (line.trim() !== "") JSON.parse(line);
-  } catch {
-    throw new Error(`saved session ${ref} is corrupt`);
-  }
-  const { rollout: file, model } = recorded ?? {};
-  if (typeof file !== "string" || !ROLLOUT_PATH.test(file) || !file.endsWith(`-${threadId}.jsonl`) || (model !== null && typeof model !== "string")) {
-    throw new Error(`saved session ${ref} is corrupt`);
-  }
-  if (model !== settings.model) {
-    const describe = (m: string | null) => (m === null ? "Codex's default model" : `model ${m}`);
-    throw new Error(`saved session ${ref} ran on ${describe(model)}; this job asks for ${describe(settings.model)}`);
-  }
-  // The saved copy is authoritative: Codex resumes the thread from this file.
-  await writeAtomic(path.join(home, file), rollout);
-  return { threadId, rollout: file, started: true };
-}
-
-/**
- * Copy the thread's rollout into the controller's session directory; false
- * until Codex has named the thread and written its rollout. Codex may still
- * be appending (an early save during the run), so only complete records are
- * copied. `final` also searches the whole session store for the rollout.
- */
-async function saveRollout(
-  home: string,
-  sessionDir: string,
-  thread: CodexThread,
-  settings: CodexSettings,
-  spawnedAt: Date,
-  final: boolean,
-): Promise<boolean> {
-  if (thread.threadId === undefined) return false;
-  if (thread.rollout === undefined) {
-    const found = await findRollout(home, thread.threadId, [spawnedAt, new Date()], final);
-    if (found === undefined) return false;
-    thread.rollout = found;
-  }
-  const file = path.join(home, thread.rollout);
-  // Only a regular file Codex wrote, never a link out of its store.
-  const info = await lstat(file, { bigint: true }).catch(() => undefined);
-  if (!info?.isFile()) return false;
-  const rollout = completeJsonl((await readScanned(file, info)).toString("utf8"));
-  if (rollout.trim() === "") return false;
-  const ref = sessionRef(thread.threadId);
-  // The settings first: a rollout in the session directory is restorable once it lands.
-  await writeAtomic(path.join(sessionDir, `${ref}.json`), JSON.stringify({ rollout: thread.rollout, ...settings }));
-  await writeAtomic(path.join(sessionDir, `${ref}.jsonl`), rollout);
-  return true;
-}
-
-/**
- * The rollout Codex keeps for `threadId`, relative to its home: looked up in
- * the day directories of `times` (local and UTC), and, with `everywhere`, in
- * every day directory of the store.
- */
-async function findRollout(home: string, threadId: string, times: Date[], everywhere: boolean): Promise<string | undefined> {
-  const suffix = `-${threadId}.jsonl`;
-  const pad = (n: number) => String(n).padStart(2, "0");
-  const days = new Set<string>();
-  for (const t of times) {
-    days.add(`${t.getFullYear()}/${pad(t.getMonth() + 1)}/${pad(t.getDate())}`);
-    days.add(`${t.getUTCFullYear()}/${pad(t.getUTCMonth() + 1)}/${pad(t.getUTCDate())}`);
-  }
-  const inDay = async (day: string): Promise<string | undefined> => {
-    const names = await readdir(path.join(home, "sessions", day)).catch(() => [] as string[]);
-    const name = names.find((n) => n.startsWith("rollout-") && n.endsWith(suffix));
-    const rel = name !== undefined ? `sessions/${day}/${name}` : undefined;
-    return rel !== undefined && ROLLOUT_PATH.test(rel) ? rel : undefined;
-  };
-  for (const day of days) {
-    const found = await inDay(day);
-    if (found !== undefined) return found;
-  }
-  if (!everywhere) return undefined;
-  const sessions = path.join(home, "sessions");
-  for (const year of await readdir(sessions).catch(() => [] as string[])) {
-    for (const month of await readdir(path.join(sessions, year)).catch(() => [] as string[])) {
-      for (const day of await readdir(path.join(sessions, year, month)).catch(() => [] as string[])) {
-        const key = `${year}/${month}/${day}`;
-        if (days.has(key)) continue;
-        const found = await inDay(key);
-        if (found !== undefined) return found;
-      }
-    }
-  }
-  return undefined;
-}
-
-async function writeAtomic(target: string, contents: string): Promise<void> {
-  await mkdir(path.dirname(target), { recursive: true });
-  const tmp = `${target}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
-  await writeFile(tmp, contents, { encoding: "utf8", mode: 0o600 });
-  await rename(tmp, target);
 }
 
 function envMs(name: string, fallback: number): number {
@@ -325,23 +162,13 @@ interface RunArgs {
 
 async function runCodex(args: RunArgs): Promise<CodingRunResult> {
   const { options, request } = args;
-  if (options.signal?.aborted) return { status: "failed", summary: "agent session aborted" };
+  if (options.signal?.aborted) return { status: "failed", summary: SESSION_ABORTED };
   // Codex has no hook before each provider request: the first is reserved up
   // front, and one more after each command whose output goes back to the model.
   if (!(await options.reserveModelCall())) return { status: "failed", summary: BUDGET_EXHAUSTED };
 
   const scratch = await mkdtemp(path.join(os.tmpdir(), "gl-codex-"));
   try {
-    const last = path.join(scratch, "last-message.txt");
-    const { thread } = args;
-    // Without a session directory nothing is continued, so Codex persists nothing.
-    // `resume` takes the sandbox and working directory from `exec` itself, and the rest after it.
-    const cli =
-      thread.started && thread.threadId !== undefined
-        ? ["exec", "--sandbox", "read-only", "--cd", options.cwd, "resume", "--json", "--skip-git-repo-check", "--output-last-message", last]
-        : ["exec", "--json", ...(options.sessionDir === undefined ? ["--ephemeral"] : []), "--skip-git-repo-check", "--sandbox", "read-only", "--cd", options.cwd, "--output-last-message", last];
-    if (args.model !== undefined) cli.push("--model", args.model);
-    if (args.reasoningEffort !== undefined) cli.push("--config", `model_reasoning_effort="${args.reasoningEffort}"`);
     // Codex has no in-turn retry in this harness either, so the reference id
     // set is baked into the schema as `enum` up front (§4.3).
     const schema =
@@ -350,13 +177,12 @@ async function runCodex(args: RunArgs): Promise<CodingRunResult> {
         : request.resultSchema !== undefined
           ? inlineObjectSchema(request.resultSchema)
           : undefined;
+    const extra: string[] = [];
     if (schema !== undefined) {
       const file = path.join(scratch, "schema.json");
       await writeFile(file, JSON.stringify(schema), { mode: 0o600 });
-      cli.push("--output-schema", file);
+      extra.push("--output-schema", file);
     }
-    if (thread.started && thread.threadId !== undefined) cli.push(thread.threadId);
-    cli.push("-");
     const wantsResult = request.resultContract !== undefined || request.resultSchema !== undefined;
     const prompt = [request.assignment, ...scopeNotes(options), ...(wantsResult ? [RESULT_NOTE] : [])].join("\n\n");
 
@@ -366,198 +192,75 @@ async function runCodex(args: RunArgs): Promise<CodingRunResult> {
     if (request.identity !== undefined) childEnv[JOB_IDENTITY_ENV] = JSON.stringify(request.identity);
     if (request.resultContract?.knownReferences !== undefined) childEnv[JOB_REFERENCES_ENV] = JSON.stringify(request.resultContract.knownReferences);
 
-    // Nothing awaits between this check and the abort listener, so a stop during setup cannot miss the process.
-    if (options.signal?.aborted) return { status: "failed", summary: "agent session aborted" };
-    const child = spawn(args.command, cli, { cwd: options.cwd, env: childEnv, stdio: ["pipe", "pipe", "pipe"], detached: true });
-    const exited = new Promise<{ code: number | null; error?: Error }>((resolve) => {
-      child.once("error", (error) => resolve({ code: null, error }));
-      child.once("close", (code) => resolve({ code }));
+    const run = await runCodexProcess({
+      command: args.command,
+      thread: args.thread,
+      cwd: options.cwd,
+      env: childEnv,
+      prompt,
+      sandbox: "read-only",
+      // Without a session directory nothing is continued, so Codex persists nothing.
+      ephemeral: options.sessionDir === undefined,
+      ...(args.model !== undefined ? { model: args.model } : {}),
+      ...(args.reasoningEffort !== undefined ? { reasoningEffort: args.reasoningEffort } : {}),
+      args: extra,
+      lastMessageFile: path.join(scratch, "last-message.txt"),
+      responseTimeoutMs: args.responseTimeoutMs,
+      killGraceMs: args.killGraceMs,
+      reserveModelCall: () => options.reserveModelCall(),
+      ...(options.signal !== undefined ? { signal: options.signal } : {}),
+      ...(args.onActivity !== undefined ? { onActivity: args.onActivity } : {}),
     });
-    let terminated = false;
-    let killTimer: NodeJS.Timeout | undefined;
-    const terminate = () => {
-      if (terminated || child.pid === undefined) return;
-      terminated = true;
-      signalGroup(child.pid, "SIGTERM");
-      killTimer = setTimeout(() => signalGroup(child.pid!, "SIGKILL"), args.killGraceMs);
-    };
-    const drainGroup = drainOnExit(child, terminate, args.killGraceMs);
-    options.signal?.addEventListener("abort", terminate, { once: true });
-    let stderr = "";
-    child.stderr.setEncoding("utf8");
-    child.stderr.on("data", (chunk: string) => {
-      stderr = (stderr + chunk).slice(-MAX_STDERR_CHARS);
-    });
-    child.stdin.on("error", () => undefined);
-    child.stdin.end(prompt);
-
-    let budgetRefused = false;
-    let reservations = Promise.resolve();
-    let accountingFailed = false;
-    const reserve = () => {
-      reservations = reservations.then(async () => {
-        if (budgetRefused) return;
-        if (!(await options.reserveModelCall())) {
-          budgetRefused = true;
-          terminate();
-        }
-      }).catch(() => {
-        accountingFailed = true;
-        terminate();
-      });
-    };
-    // While a command runs, silence is expected.
-    const running = new Set<unknown>();
-    let stalled = false;
-    let watchdog: NodeJS.Timeout | undefined;
-    const arm = () => {
-      clearTimeout(watchdog);
-      watchdog = undefined;
-      if (args.responseTimeoutMs <= 0 || running.size > 0) return;
-      watchdog = setTimeout(() => {
-        stalled = true;
-        terminate();
-      }, args.responseTimeoutMs);
-    };
-    arm();
-
-    const nativeTools: NativeToolUse[] = [];
-    const toolIds = new Set<unknown>();
-    let unparsed = false;
-    let completed = false;
-    let closeTimer: NodeJS.Timeout | undefined;
-    let closedAfterTurn = false;
-    let failure: string | undefined;
-    let usage: CodingUsage | undefined;
-    let reaped = false;
-    try {
-      for await (const line of createInterface({ input: child.stdout })) {
-        let event: CodexEvent;
-        try {
-          event = JSON.parse(line) as CodexEvent;
-        } catch {
-          if (line.trim() !== "") unparsed = true;
-          continue;
-        }
-        if (event === null || typeof event !== "object" || Array.isArray(event)) {
-          unparsed = true;
-          continue;
-        }
-        if (event.type === "thread.started" && typeof event.thread_id === "string" && THREAD_ID.test(event.thread_id)) {
-          // Codex names the thread first: from here its rollout can be saved and resumed.
-          if (!thread.started) {
-            // A fresh run names a new thread, whatever an earlier unsaved run of this session named.
-            if (thread.threadId !== event.thread_id) delete thread.rollout;
-            thread.threadId = event.thread_id;
-          } else if (thread.threadId?.toLowerCase() !== event.thread_id.toLowerCase()) {
-            failure = `Codex continued thread ${event.thread_id}, not the saved thread ${thread.threadId}`;
-            terminate();
-          }
-        }
-        args.onActivity?.();
-        const item = event.item;
-        if (item !== undefined && item !== null && (event.type === "item.started" || event.type === "item.completed") && !toolIds.has(item.id)) {
-          if (item.type !== "agent_message" && item.type !== "reasoning") {
-            toolIds.add(item.id);
-            nativeTools.push(codexToolUse(item));
-          }
-        }
-        if (event.type === "item.started" && item?.type === "command_execution") running.add(item.id);
-        if (event.type === "item.completed" && item?.type === "command_execution") {
-          running.delete(item.id);
-          reserve();
-        }
-        if (event.type === "turn.failed") failure = text(event.error?.message) ?? "turn failed";
-        if (event.type === "error") failure = text(event.message) ?? "error";
-        if (event.type === "turn.completed") {
-          completed = true;
-          usage = usageOf(event.usage) ?? usage;
-          clearTimeout(watchdog);
-          // A descendant can retain the pipes after Codex has finished its turn.
-          closeTimer = setTimeout(() => {
-            closedAfterTurn = true;
-            terminate();
-          }, args.killGraceMs);
-        }
-        if (!completed) arm();
-      }
-      clearTimeout(watchdog);
-      const { code, error } = await exited;
-      await drainGroup();
-      reaped = true;
-      await reservations;
-      clearTimeout(closeTimer);
-      clearTimeout(killTimer);
-
-      const outcome = await (async (): Promise<CodingRunResult> => {
-        if (budgetRefused) return { status: "failed", summary: BUDGET_EXHAUSTED };
-        if (options.signal?.aborted) return { status: "failed", summary: "agent session aborted" };
-        if (stalled) return { status: "failed", summary: `Codex stalled: no activity for ${args.responseTimeoutMs / 1000}s` };
-        if (accountingFailed) return { status: "failed", summary: "Codex model request accounting failed" };
-        if (error !== undefined) return { status: "failed", summary: bounded(`could not start Codex (${args.command}): ${error.message}`) };
-        if (failure !== undefined || (code !== 0 && !closedAfterTurn) || !completed) {
-          const detail = failure ?? (stderr.trim() || `exit code ${code}`);
-          return { status: "failed", summary: bounded(`Codex run failed: ${detail}`) };
-        }
-        const message = (await readFile(last, "utf8").catch(() => "")).trim();
-        if (!wantsResult) return { status: "completed", summary: bounded(message || "Codex completed") };
-        const kind = request.resultContract?.name ?? (schema !== undefined ? "structured" : request.resultSchema);
-        const output = parseJson(message);
-        if (output === undefined) return { status: "failed", summary: `agent finished without submitting a ${kind} result` };
-        if (request.resultContract !== undefined) {
-          const problems = validateResultShape(output, request.resultContract.schema);
-          let value: unknown = output;
-          if (problems.length === 0 && request.resultContract.references !== undefined && request.resultContract.knownReferences !== undefined) {
-            const checked = checkReferences(output, request.resultContract.references, request.resultContract.knownReferences);
-            problems.push(...checked.problems);
-            value = checked.value;
-          }
-          if (problems.length > 0) {
-            // --output-schema makes a type-level miss rare; a reference
-            // outside the shown set is the likely case here. Codex has no
-            // further turn in this run to correct it in, so the job fails as
-            // a named contract violation instead of recording the result.
-            return {
-              status: "failed",
-              summary: bounded(`result did not satisfy its declared contract (${kind}): ${problems.join("; ")}`),
-              failureKind: "contract_violation",
-              output,
-            };
-          }
-          const submitted = (value as { summary?: unknown } | null)?.summary;
-          return {
-            status: "completed",
-            summary: bounded(typeof submitted === "string" ? submitted : `Codex submitted a ${kind} result`),
-            output: value,
-          };
-        }
-        const submitted = (output as { summary?: unknown } | null)?.summary;
-        return {
-          status: "completed",
-          summary: bounded(typeof submitted === "string" ? submitted : `Codex submitted a ${kind} result`),
-          output,
-        };
-      })();
-      const tooled: CodingRunResult = unparsed ? outcome : { ...outcome, nativeTools };
-      return usage !== undefined ? { ...tooled, usage } : tooled;
-    } finally {
-      clearTimeout(watchdog);
-      clearTimeout(closeTimer);
-      options.signal?.removeEventListener("abort", terminate);
-      if (!reaped) {
-        terminate();
-        await exited;
-        await drainGroup();
-      }
-      clearTimeout(killTimer);
-    }
+    const outcome: CodingRunResult =
+      run.outcome.kind === "failed"
+        ? { status: "failed", summary: run.outcome.summary }
+        : interpretMessage(run.outcome.message, request, wantsResult, schema !== undefined);
+    const tooled: CodingRunResult = run.nativeTools === undefined ? outcome : { ...outcome, nativeTools: run.nativeTools };
+    return run.usage !== undefined ? { ...tooled, usage: run.usage } : tooled;
   } finally {
     await rm(scratch, { recursive: true, force: true });
   }
 }
 
-function text(value: unknown): string | undefined {
-  return typeof value === "string" && value.trim() !== "" ? value.trim() : undefined;
+/** A completed turn's final message as the job's result: JSON checked against the job's result contract, or plain text. */
+function interpretMessage(message: string, request: CodingRunRequest, wantsResult: boolean, constrained: boolean): CodingRunResult {
+  if (!wantsResult) return { status: "completed", summary: bounded(message || "Codex completed") };
+  const kind = request.resultContract?.name ?? (constrained ? "structured" : request.resultSchema);
+  const output = parseJson(message);
+  if (output === undefined) return { status: "failed", summary: `agent finished without submitting a ${kind} result` };
+  if (request.resultContract !== undefined) {
+    const problems = validateResultShape(output, request.resultContract.schema);
+    let value: unknown = output;
+    if (problems.length === 0 && request.resultContract.references !== undefined && request.resultContract.knownReferences !== undefined) {
+      const checked = checkReferences(output, request.resultContract.references, request.resultContract.knownReferences);
+      problems.push(...checked.problems);
+      value = checked.value;
+    }
+    if (problems.length > 0) {
+      // --output-schema makes a type-level miss rare; a reference
+      // outside the shown set is the likely case here. Codex has no
+      // further turn in this run to correct it in, so the job fails as
+      // a named contract violation instead of recording the result.
+      return {
+        status: "failed",
+        summary: bounded(`result did not satisfy its declared contract (${kind}): ${problems.join("; ")}`),
+        failureKind: "contract_violation",
+        output,
+      };
+    }
+    const submitted = (value as { summary?: unknown } | null)?.summary;
+    return {
+      status: "completed",
+      summary: bounded(typeof submitted === "string" ? submitted : `Codex submitted a ${kind} result`),
+      output: value,
+    };
+  }
+  const submitted = (output as { summary?: unknown } | null)?.summary;
+  return {
+    status: "completed",
+    summary: bounded(typeof submitted === "string" ? submitted : `Codex submitted a ${kind} result`),
+    output,
+  };
 }
 
 /** The final message as a JSON object; a code fence around it is tolerated. */
@@ -569,26 +272,4 @@ function parseJson(message: string): Record<string, unknown> | undefined {
   } catch {
     return undefined;
   }
-}
-
-/** Codex reports `input_tokens` including the cached part. */
-function usageOf(usage: Record<string, unknown> | undefined): CodingUsage | undefined {
-  if (usage === undefined || usage === null || typeof usage !== "object") return undefined;
-  const input = count(usage.input_tokens);
-  const cached = count(usage.cached_input_tokens);
-  return {
-    inputTokens: Math.max(0, input - cached),
-    outputTokens: count(usage.output_tokens),
-    cacheReadTokens: cached,
-    cacheWriteTokens: count(usage.cache_write_input_tokens),
-  };
-}
-
-function count(value: unknown): number {
-  return typeof value === "number" && Number.isFinite(value) ? value : 0;
-}
-
-/** Every command, patch, search or other item counts: nothing Codex runs on its own is proven side-effect free. */
-function codexToolUse(item: { type?: unknown }): NativeToolUse {
-  return { name: typeof item.type === "string" ? item.type : "unknown" };
 }

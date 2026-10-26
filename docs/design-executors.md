@@ -74,6 +74,14 @@ controller, or supervisor. To add one:
    executor process, the controller, or a live service in the host
    (`apps/graphloom/test`).
 
+The coding-agent package drives Claude Code, Codex, and Pi through the shared
+`@graphloom/agent-harness` library (process groups, stream protocols, session
+capture, failure classification). Its build vendors the library into
+`dist/vendor/agent-harness/`, so the package digest a run pins also covers the
+harness code. A harness change is therefore an executor change that needs
+`--update-executors` on a run that pinned the earlier bytes
+([supervisor harnesses](design-supervisor-harnesses.md) §3.2).
+
 The operator serves packages through `createBuiltinExecutorRunner` in
 `@graphloom/runner`:
 

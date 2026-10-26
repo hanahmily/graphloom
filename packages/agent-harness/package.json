@@ -1,0 +1,48 @@
+{
+  "name": "@graphloom/agent-harness",
+  "version": "0.0.0",
+  "description": "Drives agent sessions (Claude Code, Codex, Pi): processes, stream protocols, session capture, failure classification",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    "./claude": {
+      "types": "./dist/claude/index.d.ts",
+      "import": "./dist/claude/index.js"
+    },
+    "./codex": {
+      "types": "./dist/codex/index.d.ts",
+      "import": "./dist/codex/index.js"
+    },
+    "./pi": {
+      "types": "./dist/pi/index.d.ts",
+      "import": "./dist/pi/index.js"
+    },
+    "./session": {
+      "types": "./dist/session/index.d.ts",
+      "import": "./dist/session/index.js"
+    },
+    "./process": {
+      "types": "./dist/process/index.d.ts",
+      "import": "./dist/process/index.js"
+    },
+    "./classify": {
+      "types": "./dist/classify/index.d.ts",
+      "import": "./dist/classify/index.js"
+    },
+    "./launch": {
+      "types": "./dist/launch/index.d.ts",
+      "import": "./dist/launch/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.test.json",
+    "test": "tsc -p tsconfig.json && vitest run"
+  },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "0.87.1"
+  }
+}
