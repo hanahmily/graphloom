@@ -496,6 +496,25 @@ describe("committed state-format fixtures (docs/design-release.md §6 step 8)", 
   });
 
   for (const name of fixtures) {
+    // A fixture lives only in git: a file the repository ignores, or that its manifest names but git does not
+    // track, exists in the capturing work tree and nowhere else (a clean checkout then fails with a pin mismatch).
+    it(`fixture ${name} is complete in git: no file ignored, every file and every manifest entry point tracked`, async () => {
+      const dir = path.join(fixturesRoot, name);
+      const top = await execFileAsync("git", ["rev-parse", "--show-toplevel"], { cwd: dir }).then((r) => r.stdout.trim(), () => undefined);
+      if (top === undefined) return; // not a Git work tree (an extracted tree): nothing to compare against
+      const files = Object.keys(await snapshot(dir)).map((rel) => path.join(dir, rel));
+      const ignored = await execFileAsync("git", ["check-ignore", ...files], { cwd: top }).then((r) => r.stdout.trim(), () => "");
+      expect(ignored, "fixture files the repository ignores (re-include them in .gitignore)").toBe("");
+      const tracked = new Set(
+        (await execFileAsync("git", ["ls-files", "--", path.relative(top, dir)], { cwd: top })).stdout.split("\n").filter(Boolean).map((f) => path.join(top, f)),
+      );
+      expect(files.filter((f) => !tracked.has(f)), "fixture files not committed").toEqual([]);
+      const manifest = JSON.parse(await readFile(path.join(dir, "bundle", "graphloom.manifest.json"), "utf8")) as { entryPoints?: Record<string, string> };
+      const entries = Object.values(manifest.entryPoints ?? {}).map((rel) => path.resolve(dir, "bundle", rel));
+      expect(entries.length).toBeGreaterThan(0);
+      expect(entries.filter((f) => !tracked.has(f)), "manifest entry points not committed").toEqual([]);
+    });
+
     it(`moves fixture ${name} to this release and completes it on a scripted runner`, async () => {
       const dir = path.join(fixturesRoot, name);
       const meta = JSON.parse(await readFile(path.join(dir, "fixture.json"), "utf8")) as { runId: string; stateFormat: number; owner: InstallRecord; worktreeBranch: string };

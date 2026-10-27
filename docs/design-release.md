@@ -1236,6 +1236,12 @@ usual, and `graphloom upgrade` clears the skip.
     fixture. It moves the run with `--upgrade`, completes it on a scripted
     runner, and checks the recorded transition and migrations.
   - `GRAPHLOOM_CAPTURE_STATE_FIXTURE=<name>` re-captures one.
+  - The root `.gitignore` re-includes everything under
+    `packages/controller/test/fixtures/state-formats/`. Otherwise its `dist/`,
+    `artifacts/`, and `*.log` rules would leave part of a fixture in the
+    capturing work tree only. A test fails when a fixture file is ignored or
+    untracked, or when a manifest entry point is not committed.
+  - Fixture files are exempt from the header check (`fixtures/`).
 - **Tests.**
   - `packages/controller/src/upgrade.test.ts`: the ownership record in
     state, the stop-at hook, the format refusal of a plain resume, the
