@@ -561,6 +561,7 @@ export function createController(): Controller {
             updatePlugin: request.updatePlugin === true,
             stateFormats,
             checkPluginUpdate: (current) => checkPluginUpdate(current, request),
+            assertResumable: (current) => assertSupervisorRestorable(request, current),
           });
         }
         state = await loadCurrentFormat(stateDir, stateFormats);

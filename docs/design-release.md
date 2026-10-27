@@ -1182,6 +1182,11 @@ usual, and `graphloom upgrade` clears the skip.
        a throwaway host, as the resume would check it. The installed
        bundle's own `sdkProtocol` is what the update pins
      - an executor re-pin that `--update-executors` would refuse
+     - a refusal the resume itself would make, such as a supervisor binding
+       with no `restoreSupervisor` (the controller has no default restore;
+       the CLI passes `supervisorRestore(config)` on every resume, `--upgrade`
+       included, and `resume --rehearsal` restores the rehearsal's scripted
+       supervisor)
   2. The migrators run in memory. The run's `install`, `stateFormat`,
      `installHistory`, `stateMigrations`, an `upgrade` evidence record, a
      version-history entry, and the executor re-pins are applied to the

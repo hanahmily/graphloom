@@ -82,6 +82,8 @@ export interface UpgradeDeps {
   stateFormats?: StateFormatRegistry;
   /** With `updatePlugin`: why the installed bundle cannot replace the pinned one, or undefined when it passes describe-compatibility. */
   checkPluginUpdate?: (state: DurableRunState) => Promise<string | undefined>;
+  /** Throws why the resume that follows the move would refuse the (migrated) run, such as a supervisor binding with no restore. */
+  assertResumable?: (state: DurableRunState) => void;
 }
 
 /**
@@ -147,6 +149,12 @@ export async function upgradeRun(stateDir: string, request: UpgradeRequest, deps
     throw new UpgradeRefusedError(
       `the run's plugin bundle speaks sdkProtocol ${state.intake.bundle.sdkProtocol}, and GraphLoom ${target.version} speaks ${PROTOCOL_VERSION}; combine --upgrade with --update-plugin on a bundle built for it`,
     );
+  }
+  // A refusal the ordinary resume would make anyway is made before the move, so the run is not moved and then held.
+  try {
+    deps.assertResumable?.(state);
+  } catch (err) {
+    throw new UpgradeRefusedError(err instanceof Error ? err.message : String(err));
   }
   // The ordinary resume refuses a plugin update while an activated repair owns the plugin; decide that before the move.
   if (deps.updatePlugin && state.activeVersion !== `${state.intake.bundle.graphId}@${state.intake.bundle.version}`) {

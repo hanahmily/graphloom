@@ -30,7 +30,8 @@ import {
   type Validator,
 } from "@graphloom/sdk";
 import { createScriptedRunner, type Runner } from "@graphloom/runner";
-import { createController, loadRunState } from "./index.js";
+import { createScriptedSupervisor } from "@graphloom/supervisor";
+import { createController, loadRunState, type ResumeRequest } from "./index.js";
 import type { InstallRecord } from "./state.js";
 import { CURRENT_STATE_FORMAT, type StateFormatRegistry } from "./state-migrations/index.js";
 
@@ -175,7 +176,11 @@ async function stoppedRun(runId = "up1"): Promise<{ env: Env; stateDir: string }
   return { env, stateDir: report.stateDir };
 }
 
-function resumeUpgrade(stateDir: string, install: InstallRecord, extra: { stateFormats?: StateFormatRegistry; runner?: Runner; onMoved?: () => void } = {}) {
+function resumeUpgrade(
+  stateDir: string,
+  install: InstallRecord,
+  extra: { stateFormats?: StateFormatRegistry; runner?: Runner; onMoved?: () => void; restoreSupervisor?: ResumeRequest["restoreSupervisor"] } = {},
+) {
   return createController().resume({
     runRef: stateDir,
     plugin: createScriptedGraph({ definition, advances: REVIEW_STEPS }),
@@ -184,8 +189,13 @@ function resumeUpgrade(stateDir: string, install: InstallRecord, extra: { stateF
     updateExecutors: true,
     upgrade: { install, ...(extra.onMoved !== undefined ? { onMoved: extra.onMoved } : {}) },
     ...(extra.stateFormats !== undefined ? { stateFormats: extra.stateFormats } : {}),
+    // The controller has no restore of its own (supervisor S2): a caller resuming a run with a binding supplies one.
+    ...(extra.restoreSupervisor !== undefined ? { restoreSupervisor: extra.restoreSupervisor } : {}),
   });
 }
+
+/** A recorded supervisor session, as a run that had a recovery episode carries. */
+const BINDING = { sessionId: "sup-1", sessionFile: "/runs/sup-1.jsonl", provider: "minimax-cn", modelId: "MiniMax-M3", switchJournal: [] };
 
 /** Every file under `dir` (except lock files), by relative path. */
 async function snapshot(dir: string): Promise<Record<string, string>> {
@@ -374,6 +384,33 @@ describe("resume --upgrade (docs/design-release.md §5.2)", () => {
     });
   }
 
+  it("refuses to move a run with a supervisor binding when no restore is given, with the run unchanged", async () => {
+    const { stateDir } = await stoppedRun();
+    await editState(stateDir, (s) => (s.supervisorBinding = BINDING));
+    const before = await snapshot(stateDir);
+    let moved = false;
+    await expect(resumeUpgrade(stateDir, target, { onMoved: () => (moved = true) })).rejects.toThrow(
+      /cannot upgrade: run up1 has a pi supervisor binding \(session sup-1\) but no restoreSupervisor/,
+    );
+    expect(await snapshot(stateDir)).toEqual(before);
+    expect(moved).toBe(false);
+  });
+
+  it("moves a run with a supervisor binding and restores its supervisor the way a plain resume does", async () => {
+    const { stateDir } = await stoppedRun();
+    await editState(stateDir, (s) => (s.supervisorBinding = BINDING));
+    const restored: string[] = [];
+    const report = await resumeUpgrade(stateDir, target, {
+      restoreSupervisor: async (binding) => {
+        restored.push(binding.sessionId);
+        return createScriptedSupervisor({ decisions: [] });
+      },
+    });
+    expect(report.status).toBe("succeeded");
+    expect(restored).toEqual(["sup-1"]);
+    expect((await createController().inspect(stateDir)).install).toEqual(target);
+  });
+
   it("lets the executor re-pin of --upgrade lift a final stop, as --update-executors does", async () => {
     const env = await makeEnv();
     const described = (source: string, digest: string): NonNullable<Runner["describeExecutors"]> => async () => [
@@ -485,7 +522,7 @@ describe("committed state-format fixtures (docs/design-release.md §6 step 8)", 
       }
 
       const report = await resumeUpgrade(stateDir, target);
-      expect(report.status).toBe("succeeded");
+      expect(report.status, `${report.stopReason}: ${report.blocker}`).toBe("succeeded");
       const inspect = await createController().inspect(stateDir);
       expect(inspect.install).toEqual(target);
       expect(inspect.stateFormat).toBe(CURRENT_STATE_FORMAT);
