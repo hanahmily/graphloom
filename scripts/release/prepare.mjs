@@ -23,7 +23,7 @@
  *        Prints the executors, plugins, stateFormat, and sdkProtocol that
  *        release.json will record for the tree, digested as assemble.mjs
  *        digests the shipped copies.
- *   node scripts/release/prepare.mjs check-components --current <json> --previous <release.json> [--src <built tree>]
+ *   node scripts/release/prepare.mjs check-components --current <json> --previous <release.json> [--src <built tree>] [--fixtures-root <dir>]
  *        The component bump rule (§3), and for a changed stateFormat a
  *        migrator and a fixture (§6 step 2).
  *   node scripts/release/prepare.mjs latest --tags <file> [--below <v>]
@@ -434,7 +434,8 @@ if (isMain) {
               return false;
             }
           };
-          fixtures = stateFixtures(src);
+          // A shipped tree has no tests: the fixtures then come from the release commit.
+          fixtures = stateFixtures(flags["fixtures-root"] ? path.resolve(flags["fixtures-root"]) : src);
         }
         const problems = componentProblems(previous, current, { migrates, fixtures });
         if (problems.length > 0) throw new Error(`component versions against ${previous.version} (§3):\n  ${problems.join("\n  ")}`);

@@ -478,7 +478,7 @@ interface Assets {
 }
 
 /** A fake release tree whose CLI answers `version` and `doctor`, packed with the real install.sh and launcher. */
-async function makeAssets(fx: Fixture, version: string, options: { signWith?: "release" | "other"; reproduced?: boolean } = {}): Promise<Assets> {
+async function makeAssets(fx: Fixture, version: string, options: { signWith?: "release" | "other"; reproduced?: boolean; stateFormat?: number } = {}): Promise<Assets> {
   const commit = fx.git("rev-parse", "HEAD");
   const name = `graphloom-${version}-linux-x64`;
   const work = path.join(fx.base, `assets-${version}-${Math.random().toString(16).slice(2)}`);
@@ -494,7 +494,7 @@ async function makeAssets(fx: Fixture, version: string, options: { signWith?: "r
     git: { tag: `v${version}`, commit, sourceDateEpoch: 0 },
     node: { version: process.versions.node },
     sdk: { version, sdkProtocol: 1, sha256: sha256(`sdk ${version}\n`) },
-    stateFormat: 1,
+    stateFormat: options.stateFormat ?? 1,
     executors: [{ package: "@graphloom/executor-command", version: "0.1.0", digest: "d".repeat(64) }],
     plugins: [{ graphId: "hello", version: "0.1.0", manifestSha256: "m", sourceTree: "s" }],
   };
@@ -508,6 +508,13 @@ async function makeAssets(fx: Fixture, version: string, options: { signWith?: "r
   await writeFile(
     path.join(tree, "apps", "graphloom", "dist", "main.js"),
     `const [cmd] = process.argv.slice(2);\nif (cmd === "version") console.log(${JSON.stringify(`graphloom ${version} (${commit.slice(0, 7)})`)});\nelse if (cmd === "doctor") console.log("doctor: stub");\n`,
+  );
+  // The shipped controller's migrators: a path from format 1 to the release's format.
+  await mkdir(path.join(tree, "packages", "controller", "dist"), { recursive: true });
+  await writeFile(path.join(tree, "packages", "controller", "package.json"), `{"type":"module"}\n`);
+  await writeFile(
+    path.join(tree, "packages", "controller", "dist", "index.js"),
+    `export const CURRENT_STATE_FORMAT = ${options.stateFormat ?? 1};\nexport function migrationPath(from) { if (from !== 1) throw new Error("no migrator from " + from); return []; }\n`,
   );
   must(spawnSync("tar", ["-czf", path.join(dir, `${name}.tar.gz`), "-C", path.join(work, "tree"), name], { encoding: "utf8" }), "tar");
   await writeJson(path.join(dir, "release.json"), release);
@@ -622,6 +629,49 @@ describe("release.sh publish (§6 steps 9-10)", () => {
     expect(fx.git("tag", "-l")).toBe("");
     expect(await readdir(fx.releases)).toEqual([]);
   }, 120_000);
+
+  it("--dry-run accepts a tag an earlier attempt left at the commit, verifying it as it is", async () => {
+    const fx = await releasableFixture();
+    const assets = await makeAssets(fx, "0.1.0");
+    fx.git("-c", "gpg.format=ssh", "-c", `user.signingKey=${fx.key}`, "tag", "-s", "-a", "-m", "GraphLoom v0.1.0", "v0.1.0", assets.commit);
+    const before = fx.git("rev-parse", "v0.1.0");
+    const r = fx.releaseSh(["publish", "0.1.0", "--assets", assets.dir, "--signing-key", fx.key, "--dry-run"]);
+    expect(r.status, r.stderr + r.stdout).toBe(0);
+    expect(r.stdout).not.toContain("tag -s -a");
+    expect(r.stdout).toContain(`push origin refs/tags/v0.1.0`);
+    expect(fx.git("rev-parse", "v0.1.0")).toBe(before);
+    expect(spawnSync("git", ["ls-remote", "--tags", fx.remote], { encoding: "utf8" }).stdout).toBe("");
+  }, 60_000);
+
+  it("checks a new state format against the shipped migrators and the fixtures committed at the release commit", async () => {
+    const fx = await releasableFixture();
+    await mkdir(path.join(fx.releases, "v0.1.0"));
+    await writeJson(path.join(fx.releases, "v0.1.0", "release.json"), {
+      version: "0.1.0",
+      stateFormat: 1,
+      sdk: { sdkProtocol: 1 },
+      executors: [{ package: "@graphloom/executor-command", version: "0.1.0", digest: "d".repeat(64) }],
+      plugins: [{ graphId: "hello", version: "0.1.0", manifestSha256: "m", sourceTree: "s" }],
+    });
+    const table = P.componentsTable({ executors: [{ package: "@graphloom/executor-command", version: "0.1.0" }], plugins: [{ graphId: "hello", version: "0.1.0" }] });
+    const changelog = readFileSync(path.join(fx.repo, "CHANGELOG.md"), "utf8");
+    await writeFile(path.join(fx.repo, "CHANGELOG.md"), P.withTable(P.insertSection(changelog, COMPLETE_SECTION("0.2.0")), "0.2.0", table));
+    fx.git("commit", "-q", "-am", "0.2.0 changelog");
+    fx.git("push", "-q", "origin", "main");
+    const publish = (dir: string) => fx.releaseSh(["publish", "0.2.0", "--assets", dir, "--signing-key", fx.key, "--dry-run"]);
+    let r = publish((await makeAssets(fx, "0.2.0", { stateFormat: 2 })).dir);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("stateFormat changed from 1 to 2, but no committed fixture under packages/controller/test/fixtures/state-formats/ is in format 1");
+
+    await writeJson(path.join(fx.repo, "packages/controller/test/fixtures/state-formats/v0.1/fixture.json"), { stateFormat: 1 });
+    fx.git("add", "-A");
+    fx.git("commit", "-q", "-m", "format 1 fixture");
+    fx.git("push", "-q", "origin", "main");
+    r = publish((await makeAssets(fx, "0.2.0", { stateFormat: 2 })).dir);
+    expect(r.status, r.stderr + r.stdout).toBe(0);
+    expect(r.stdout).toContain("components: the bump rule holds against 0.1.0");
+    expect(r.stdout).toContain("dry run: would also install 0.1.0 in a fresh HOME, run graphloom upgrade, and require graphloom 0.2.0");
+  }, 90_000);
 
   it("refuses a release commit with no committed allowed_signers, naming how to create the key", async () => {
     const fx = await makeFixture();

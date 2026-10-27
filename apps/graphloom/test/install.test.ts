@@ -12,7 +12,7 @@ import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ttyRun } from "./doctor-env.js";
-import { makeSandbox, removeTree, repoRoot, startDetached, tempBase, waitUntil, type Sandbox } from "./install-env.js";
+import { makeSandbox, removeTree, startDetached, tempBase, waitUntil, type Sandbox } from "./install-env.js";
 
 let base: string;
 beforeAll(async () => {
@@ -123,7 +123,7 @@ describe("install.sh --from, with no node on PATH", () => {
     const realTar = spawnSync("sh", ["-c", "command -v tar"], { env: sb.env, encoding: "utf8" }).stdout.trim();
     await writeFile(path.join(wrap, "tar"), `#!/bin/sh\n"${realTar}" "$@" || exit $?\ncase " $* " in *" -xzf "*) touch "${sb.root}/extracted"; sleep 30 ;; esac\n`, { mode: 0o755 });
     const killed = await sb.build("0.1.2");
-    const install = startDetached("sh", [path.join(repoRoot, "scripts", "install.sh"), "--from", killed.tarball], { ...sb.env, PATH: `${wrap}:${sb.env.PATH}` });
+    const install = startDetached("sh", [sb.installerPath, "--from", killed.tarball], { ...sb.env, PATH: `${wrap}:${sb.env.PATH}` });
     await waitUntil(() => existsSync(path.join(sb.root, "extracted")), 20_000, "the extraction");
     expect(sb.graphloom(["self", "list"], quiet).stdout).not.toContain("0.1.2");
     process.kill(-install.child.pid!, "SIGKILL");
@@ -355,7 +355,6 @@ describe("install.sh step 6: the doctor, then the setup offer (§4.2)", () => {
       .split("\n")
       .filter((l) => l.startsWith('{"stub"'))
       .map((l) => JSON.parse(l) as { stub: string; version: string; tty: boolean });
-  const installer = path.join(repoRoot, "scripts", "install.sh");
 
   it("runs the doctor and, without a terminal, prints graphloom setup --yes instead of asking", async () => {
     const sb = await makeSandbox(base);
@@ -376,7 +375,7 @@ describe("install.sh step 6: the doctor, then the setup offer (§4.2)", () => {
   it.runIf(spawnSync("script", ["--version"]).status === 0)("on a terminal, offers setup (default yes) only when no runner config exists", async () => {
     const sb = await makeSandbox(base);
     const built = await sb.build("0.1.0");
-    const yes = await ttyRun(["sh", installer, "--from", built.tarball], [""], sb.env, sb.root);
+    const yes = await ttyRun(["sh", sb.installerPath, "--from", built.tarball], [""], sb.env, sb.root);
     expect(yes.code, yes.output).toBe(0);
     expect(yes.output).toContain("No runner config yet. Run graphloom setup now? [Y/n]");
     expect(stubRuns(yes.output)).toEqual([
@@ -384,13 +383,13 @@ describe("install.sh step 6: the doctor, then the setup offer (§4.2)", () => {
       { stub: "setup", version: "0.1.0", tty: true },
     ]);
 
-    const no = await ttyRun(["sh", installer, "--from", built.tarball], ["n"], sb.env, sb.root);
+    const no = await ttyRun(["sh", sb.installerPath, "--from", built.tarball], ["n"], sb.env, sb.root);
     expect(stubRuns(no.output)).toEqual([{ stub: "doctor", version: "0.1.0", tty: true }]);
     expect(no.output).toContain("Run graphloom setup when ready.");
 
     await mkdir(path.join(sb.home, ".config", "graphloom"), { recursive: true });
     await writeFile(path.join(sb.home, ".config", "graphloom", "runner.json"), JSON.stringify({ harness: "claude-code", allowUnrestricted: true }));
-    const present = await ttyRun(["sh", installer, "--from", built.tarball], [], sb.env, sb.root);
+    const present = await ttyRun(["sh", sb.installerPath, "--from", built.tarball], [], sb.env, sb.root);
     expect(present.output).not.toContain("Run graphloom setup now?");
     expect(present.output).toContain("review it with graphloom setup");
     expect(stubRuns(present.output)).toEqual([{ stub: "doctor", version: "0.1.0", tty: true }]);

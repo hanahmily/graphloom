@@ -164,6 +164,11 @@ export interface Sandbox {
   build(version: string, options?: ReleaseOptions): Promise<BuiltRelease>;
   /** Builds and publishes into the stub gh's release directory. */
   publish(version: string, options?: ReleaseOptions & { draft?: boolean; prerelease?: boolean }): Promise<BuiltRelease>;
+  /**
+   * A copy of this checkout's `scripts/install.sh` outside it, so it never takes the
+   * checkout's committed `release/allowed_signers` (the real release key) as its anchor.
+   */
+  installerPath: string;
   installer(args: string[], env?: NodeJS.ProcessEnv): SpawnSyncReturns<string>;
   graphloom(args: string[], env?: NodeJS.ProcessEnv): SpawnSyncReturns<string>;
   /** `graphloom` under a pseudo-terminal (`script`), so stdout and stderr are terminals. */
@@ -199,6 +204,9 @@ export async function makeSandbox(base: string, options: { gh?: boolean } = {}):
     FAKE_GH_LOG: ghLog,
   };
   const signers = path.join(root, "allowed_signers");
+  const installerPath = path.join(root, "installer", "install.sh");
+  await mkdir(path.dirname(installerPath), { recursive: true });
+  await copyFile(path.join(scripts, "install.sh"), installerPath);
   await writeFile(signers, keys.signers);
   const ghome = path.join(home, ".local", "share", "graphloom");
   const shim = path.join(home, ".local", "bin", "graphloom");
@@ -263,7 +271,8 @@ export async function makeSandbox(base: string, options: { gh?: boolean } = {}):
       if (opts.prerelease) await writeFile(path.join(dest, ".prerelease"), "");
       return built;
     },
-    installer: (args, extra) => run("sh", [path.join(scripts, "install.sh"), ...args], extra),
+    installerPath,
+    installer: (args, extra) => run("sh", [installerPath, ...args], extra),
     graphloom: (args, extra) => run(shim, args, extra),
     graphloomTty: (args, extra) => run("script", ["-qec", [shim, ...args].map(shellQuote).join(" "), "/dev/null"], extra),
     ghCalls: () => readFileSync(ghLog, "utf8").split("\n").filter(Boolean),

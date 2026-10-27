@@ -1775,7 +1775,8 @@ runs steps 3 to 8 on `<rev>`, which defaults to `HEAD`. It publishes nothing.
   `publish` refuses.
 - **`build` reproducibility record.** With `--compare-to`, a build whose
   four assets hash as in the other build writes `reproduced.json` (`commit`,
-  `comparedTo`, and the hashes). It is not a release asset.
+  `comparedTo`, and the hashes). It is written last, after every smoke test
+  passes, so it also records a complete build. It is not a release asset.
 - **Step 8.6, the external plugin.** The installed `examples/plugins/hello`
   is copied to the smoke directory, outside any checkout, without `dist/`,
   beside the packed SDK tarball. Its `@graphloom/sdk` dependency becomes
@@ -1805,7 +1806,9 @@ runs steps 3 to 8 on `<rev>`, which defaults to `HEAD`. It publishes nothing.
       `release.json`, is the release notes
     - tag `v<version>` is absent, or already at the commit, locally and on
       the remote, and `gh` has no release of that tag, draft or published
-    - the bump rule holds against the newest earlier release
+    - the bump rule holds against the newest earlier release; for a newer
+      `stateFormat`, the migrators are the tarball's controller and the
+      fixtures those committed at the release commit
   - Step 9: `git -c gpg.format=ssh -c user.signingKey=<key> tag -s -a`,
     verified with `git verify-tag` against the commit's `allowed_signers`,
     then pushed as `refs/tags/v<version>`.
@@ -1821,7 +1824,8 @@ runs steps 3 to 8 on `<rev>`, which defaults to `HEAD`. It publishes nothing.
   - When an earlier release exists, that release is installed in another
     fresh `HOME` and `graphloom upgrade` must reach `<version>`.
   - **`--dry-run`** runs every precondition. It signs and verifies the tag
-    in a scratch clone and prints the tag, verify, push, and
+    in a scratch clone (a tag that an earlier attempt left at the commit is
+    verified as it is) and prints the tag, verify, push, and
     `gh release create` commands instead of running them. It then rehearses
     the published install through `scripts/release/stub-gh.sh`, a local
     `gh` stand-in that serves the local assets. It tags, pushes, and creates
@@ -1843,7 +1847,12 @@ runs steps 3 to 8 on `<rev>`, which defaults to `HEAD`. It publishes nothing.
     reproduction record, a tampered asset, a commit not on `main`, an
     existing release, and no committed `allowed_signers`
 
-  The full procedure runs by hand, as recorded in the release PR.
+  The full procedure runs by hand, as recorded in the release PR. It found
+  that a committed key would break the install tests: the checkout's
+  `scripts/install.sh` takes the checkout's `release/allowed_signers` as
+  its anchor, which the tests' throwaway key does not match. The sandbox
+  (`install-env.ts`) therefore runs a copy of `install.sh` outside the
+  checkout.
 - **`v0.1.0`.** `prepare 0.1.0 --first` produced the release commit:
   lockstep `0.1.0`, the lockfiles and manifests, and `CHANGELOG.md`. No
   executor or plugin version moved, because there is no previous

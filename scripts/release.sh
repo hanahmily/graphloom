@@ -509,9 +509,9 @@ do_build() {
       fi
     done
     [ "$differs" = 0 ] || exit 1
-    # The record publish requires (§6 "R2 as implemented").
+    # The record publish requires (§6 "R2 as implemented"); it lands in <out> only once the smoke tests pass.
     node -e 'const fs=require("fs");const [sums,dir,commit]=process.argv.slice(1);const assets={};for(const l of fs.readFileSync(sums,"utf8").trim().split("\n")){const [h,n]=l.split(/\s+\*?/);assets[n]=h}console.log(JSON.stringify({commit,comparedTo:dir,assets},null,2))' \
-      "$out/SHA256SUMS" "$compare_to" "$commit" >"$out/reproduced.json"
+      "$out/SHA256SUMS" "$compare_to" "$commit" >"$work/reproduced.json"
   fi
 
   # 8. Smoke tests, with no Node on PATH.
@@ -588,6 +588,9 @@ do_build() {
   echo "external plugin: built with the release's typescript against graphloom-sdk-$version.tgz; manifest regenerated"
   smoke_task "$smoke/external" "$author/hello" "external hello"
 
+  # Every smoke test passed: only now is a reproduced build publishable.
+  if [ -f "$work/reproduced.json" ]; then cp "$work/reproduced.json" "$out/reproduced.json"; fi
+
   step "checksums"
   cat "$out/SHA256SUMS"
   echo
@@ -649,7 +652,12 @@ do_publish() {
   previous_json=$(fetch_previous "$version" "$work/previous")
   if [ -n "$previous_json" ]; then
     prev=$(node -p 'require(process.argv[1]).version' "$previous_json")
-    node "$rel/prepare.mjs" check-components --current "$assets/release.json" --previous "$previous_json"
+    # The migration evidence: the shipped controller's migrators, and the fixtures committed at the release commit.
+    mkdir -p "$work/shipped" "$work/fixtures-root"
+    tar -xzf "$assets/$name.tar.gz" -C "$work/shipped"
+    git -C "$repo" archive "$commit" packages/controller/test/fixtures/state-formats 2>/dev/null | tar -x -C "$work/fixtures-root" 2>/dev/null || true
+    node "$rel/prepare.mjs" check-components --current "$assets/release.json" --previous "$previous_json" \
+      --src "$work/shipped/$name" --fixtures-root "$work/fixtures-root"
   else
     prev=
     echo "previous release: none; $version is the first release"
@@ -664,6 +672,11 @@ do_publish() {
   if [ "$dry_run" = 1 ]; then
     # Sign the tag where nothing is shared, to prove the key and allowed_signers sign and verify it.
     git clone -q --no-checkout "$repo" "$work/tag-check"
+    if [ -n "$local_tag" ]; then
+      # A tag left by an earlier attempt, at the commit: it must verify as it is.
+      "${verify_cmd[@]}" 2>&1 | sed 's/^/  /' || die "the existing tag $tag does not verify against release/allowed_signers"
+      git -C "$work/tag-check" tag -d "$tag" >/dev/null
+    fi
     git -C "$work/tag-check" -c gpg.format=ssh -c "user.signingKey=$signing_key" tag -s -a -m "GraphLoom $tag" "$tag" "$commit"
     git -C "$work/tag-check" -c gpg.format=ssh -c "gpg.ssh.allowedSignersFile=$work/allowed_signers" verify-tag "$tag" 2>&1 | sed 's/^/  /'
     echo "dry run: the tag signs and verifies in a scratch clone; would run:"
