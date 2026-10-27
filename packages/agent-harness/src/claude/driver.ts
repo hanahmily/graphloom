@@ -71,6 +71,12 @@ export interface ClaudeProcessOptions {
   requiredMcpServer?: { name: string; failure: string };
   /** Called on each event Claude Code streams, while its transcript may be growing. */
   onActivity?: () => void;
+  /**
+   * Called with each parsed stream event (assistant and user messages, system
+   * and result events; control messages excluded), for a caller that records
+   * what the agent did. It observes only: its return value is ignored.
+   */
+  onEvent?: (event: Readonly<Record<string, unknown>>) => void;
 }
 
 /** How a Claude Code turn ended: a failure summary, or a successful `result` event for the caller to interpret. */
@@ -232,6 +238,13 @@ export async function runClaudeProcess(args: ClaudeProcessOptions): Promise<Clau
       }
       // Any event may follow a transcript write; the session is copied while the turn goes on.
       args.onActivity?.();
+      if (args.onEvent !== undefined && event.type !== "control_response" && event.type !== "control_request") {
+        try {
+          args.onEvent(event as Record<string, unknown>);
+        } catch {
+          // An observer's failure never changes the turn.
+        }
+      }
       if (event.type === "control_response") {
         if (event.response?.request_id === initializeId && !initialized) {
           if (event.response.subtype !== "success") {

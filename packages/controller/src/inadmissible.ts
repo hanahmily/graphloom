@@ -242,19 +242,31 @@ export function checkoutSpecRefusal(checkout: unknown): string | undefined {
   return problem === undefined ? undefined : `checkout paths: ${problem}`;
 }
 
+/** Step ids for a refusal: `inv-1..inv-7` when they run without a gap, else listed. */
+function stepList(ids: ReadonlySet<string>): string {
+  const numbers = [...ids].map((id) => Number(id.slice(4))).filter((n) => Number.isSafeInteger(n)).sort((a, b) => a - b);
+  if (numbers.length > 2 && numbers.every((n, i) => n === numbers[0]! + i)) return `inv-${numbers[0]}..inv-${numbers.at(-1)}`;
+  return numbers.map((n) => `inv-${n}`).join(", ");
+}
+
 /** Supervisor proposals that assert a fault must say what shows it. */
 const CITATION_BLAME_TARGETS: ReadonlySet<string> = new Set(["validator", "executor"]);
 
 /**
  * A supervisor's `stop`, `reenter`, or `qualify_repair` that blames a
  * validator or executor is admissible only with a citation: an evidence ref
- * recorded in this run, or a probe that ran in this episode. Every citation
- * must resolve, whatever the action.
+ * recorded in this run, a probe that ran in this episode, or an investigation
+ * step (`inv-<n>`) the episode observed. Every citation must resolve,
+ * whatever the action. A step shows code or the environment, never what the
+ * controller or a validator does, so a `stop` or a validator- or
+ * executor-blaming `qualify_repair` must also cite a probe or recorded
+ * evidence (design-supervisor-harnesses.md §5.3).
  */
 export function groundingRefusal(
   state: DurableRunState,
   decision: GraphDecision,
   probeIds: ReadonlySet<string>,
+  stepIds: ReadonlySet<string> = new Set(),
 ): Inadmissible | undefined {
   const { action } = decision;
   const own =
@@ -273,22 +285,28 @@ export function groundingRefusal(
   }
   const cited = [...(decision.evidence ?? []), ...(own ?? [])];
   const known = new Set(state.evidence.map((e) => e.ref));
-  const unknown = cited.filter((ref) => !known.has(ref) && !probeIds.has(ref));
+  const unknown = cited.filter((ref) => !known.has(ref) && !probeIds.has(ref) && !stepIds.has(ref));
   if (unknown.length > 0) {
+    const steps = stepIds.size > 0 ? `; investigation steps this episode: ${stepList(stepIds)}` : "";
     return {
       precondition: `${action.type} cites unknown evidence`,
-      detail: `${unknown.join(", ")} is neither recorded evidence in this run nor a probe that ran in this episode; probes this episode: ${probeIds.size > 0 ? [...probeIds].join(", ") : "none"}`,
+      detail: `${unknown.join(", ")} is neither recorded evidence in this run nor a probe that ran in this episode${stepIds.size > 0 ? " nor one of its investigation steps" : ""}; probes this episode: ${probeIds.size > 0 ? [...probeIds].join(", ") : "none"}${steps}`,
     };
   }
-  const needsCitation =
-    action.type === "stop" ||
-    action.type === "reenter" ||
-    (action.type === "qualify_repair" && CITATION_BLAME_TARGETS.has(action.qualify.target));
+  const blames = action.type === "qualify_repair" && CITATION_BLAME_TARGETS.has(action.qualify.target);
+  const needsCitation = action.type === "stop" || action.type === "reenter" || blames;
   if (needsCitation && cited.length === 0) {
     return {
       precondition: `${action.type} requires cited evidence`,
       detail:
         "list in evidence the evidence refs (list_evidence, get_evidence) or probe ids (check_validate, check_activation, check_checkout) from this episode that show why; check before you claim",
+    };
+  }
+  if ((action.type === "stop" || blames) && cited.every((ref) => stepIds.has(ref) && !known.has(ref) && !probeIds.has(ref))) {
+    const claim = action.type === "qualify_repair" ? `a qualify_repair blaming the ${action.qualify.target}` : "a stop";
+    return {
+      precondition: `${action.type} rests on investigation steps alone`,
+      detail: `${cited.join(", ")} show code or the environment, not what the controller or a validator does; ${claim} must also cite a GraphLoom probe or recorded evidence (cite check_validate for a claim about validation)`,
     };
   }
   return undefined;

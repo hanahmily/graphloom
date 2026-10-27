@@ -86,12 +86,15 @@ export function liveCaseFile(state: DurableRunState): CaseFile {
 /**
  * Keep a finding the supervisor submitted, or say why not. A fact or a
  * refutation is kept only when it cites at least one evidence ref and every
- * ref it cites names evidence this run recorded.
+ * ref it cites names evidence this run recorded or one of the episode's
+ * investigation steps (`stepIds`). A step id is kept as `inv-<n>@<episode>`,
+ * since the same id names another step in a later episode.
  */
 export function recordFinding(
   state: DurableRunState,
   finding: CaseFinding,
   episodeId: string | undefined,
+  stepIds: ReadonlySet<string> = new Set(),
 ): { state: DurableRunState; outcome: CaseFindingOutcome } {
   const refused = (reason: string) => ({ state, outcome: { kept: false, reason } });
   if (finding === null || typeof finding !== "object") return refused("a finding must be an object");
@@ -119,10 +122,13 @@ export function recordFinding(
   }
   if (evidence.length > MAX_CASE_REFS) return refused(`cite at most ${MAX_CASE_REFS} evidence refs`);
   const known = new Set(refreshed.evidence.map((e) => e.ref));
-  const missing = evidence.filter((ref) => !known.has(ref));
+  const missing = evidence.filter((ref) => !known.has(ref) && !stepIds.has(ref));
   if (missing.length > 0) {
-    return refused(`no recorded evidence has ${missing.length === 1 ? "ref" : "refs"} ${missing.join(", ")}`);
+    return refused(
+      `no recorded evidence${stepIds.size > 0 ? " or investigation step of this episode" : ""} has ${missing.length === 1 ? "ref" : "refs"} ${missing.join(", ")}`,
+    );
   }
+  const cites = evidence.map((ref) => (!known.has(ref) && stepIds.has(ref) && episodeId !== undefined ? `${ref}@${episodeId}` : ref));
   const scopes = finding.dependsOn ?? ["candidate", "plugin"];
   if (!Array.isArray(scopes) || scopes.some((s) => s !== "candidate" && s !== "plugin")) {
     return refused('dependsOn must list "candidate" and/or "plugin"');
@@ -137,13 +143,13 @@ export function recordFinding(
     const same = file.facts.find((f) => f.stale === undefined && f.text === bounded);
     if (same !== undefined) return { state: refreshed, outcome: { kept: true, id: same.id } };
     const id = `fact-${seq}`;
-    const facts = bound([...file.facts, { id, text: bounded, evidence, ...at, dependsOn }], MAX_CASE_FACTS);
+    const facts = bound([...file.facts, { id, text: bounded, evidence: cites, ...at, dependsOn }], MAX_CASE_FACTS);
     return { state: { ...refreshed, caseFileSeq: seq, caseFile: { ...file, facts } }, outcome: { kept: true, id } };
   }
   const same = file.refuted.find((r) => r.stale === undefined && r.claim === bounded);
   if (same !== undefined) return { state: refreshed, outcome: { kept: true, id: same.id } };
   const id = `refuted-${seq}`;
-  const refuted = bound([...file.refuted, { id, claim: bounded, by: evidence, ...at, dependsOn }], MAX_CASE_REFUTED);
+  const refuted = bound([...file.refuted, { id, claim: bounded, by: cites, ...at, dependsOn }], MAX_CASE_REFUTED);
   return { state: { ...refreshed, caseFileSeq: seq, caseFile: { ...file, refuted } }, outcome: { kept: true, id } };
 }
 

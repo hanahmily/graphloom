@@ -5,6 +5,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { parseSessionEntries } from "@earendil-works/pi-coding-agent";
 import { bindingHarness, type SupervisorBinding, type SupervisorHost, type SupervisorModelRef } from "./harness.js";
+import { CLAUDE_CODE_HARNESS, lastClaudeSessionModel } from "./claude-harness.js";
 import { createPiHarness } from "./pi-harness.js";
 
 export { piEpisodeSessionOpener } from "./pi-harness.js";
@@ -72,15 +73,23 @@ export async function restorePiSupervisorFromBinding(options: RestorePiSuperviso
 /**
  * Settle switch intents left by a crash between journaling and commit, from
  * the bound harness's own record of the switch. Pi appends a `model_change`
- * entry to the session file when a switch takes effect, so an intent whose
- * target matches the file's last model change is committed; any other intent
- * failed and the run stays on its `from` model. A harness that keeps no such
- * record (none yet besides Pi) settles every intent as failed. The session
- * itself is never replaced.
+ * entry to the session file when a switch takes effect. Claude Code switches
+ * by opening a fresh session on the target, whose record (`<ref>.json` beside
+ * the transcript copies) names its model as it opens, so the newest record's
+ * model is the last one switched to (§4.4). An intent whose target matches
+ * that last model is committed; any other intent failed and the run stays on
+ * its `from` model. A harness that keeps no such record settles every intent
+ * as failed. The session itself is never replaced.
  */
 export async function reconcileSupervisorBinding(binding: SupervisorBinding): Promise<SupervisorBinding> {
   if (!binding.switchJournal.some((r) => r.status === "intent")) return binding;
-  const last = bindingHarness(binding) === "pi" ? await lastModelChange(binding.sessionFile) : undefined;
+  const harness = bindingHarness(binding);
+  const last =
+    harness === "pi"
+      ? await lastModelChange(binding.sessionFile)
+      : harness === CLAUDE_CODE_HARNESS && binding.sessionFile !== undefined
+        ? await lastClaudeSessionModel(path.dirname(binding.sessionFile))
+        : undefined;
   let model: SupervisorModelRef = { provider: binding.provider, modelId: binding.modelId };
   const switchJournal = binding.switchJournal.map((record) => {
     if (record.status !== "intent") return record;

@@ -165,6 +165,8 @@ export function createSupervisorHost(options: CreateSupervisorHostOptions): Supe
    * order the host saw them, so ids stay unique across the episode's sessions.
    */
   let episodeSteps: InvestigationStep[] = [];
+  /** Steps of this episode numbered before this host took it up (a restart mid-episode). */
+  let stepBase = 0;
   /** Steps not yet drained by the controller for its episode record. */
   let undrainedSteps: InvestigationStep[] = [];
   /** How many of each session's own steps the host has taken. */
@@ -181,7 +183,7 @@ export function createSupervisorHost(options: CreateSupervisorHostOptions): Supe
     if (all.length <= seen) return;
     stepsSeen.set(session, all.length);
     for (const step of all.slice(seen)) {
-      const renumbered = { ...step, id: `inv-${episodeSteps.length + 1}` };
+      const renumbered = { ...step, id: `inv-${stepBase + episodeSteps.length + 1}` };
       episodeSteps.push(renumbered);
       undrainedSteps.push(renumbered);
     }
@@ -208,7 +210,7 @@ export function createSupervisorHost(options: CreateSupervisorHostOptions): Supe
    * was created with; a later one opens a fresh session on the current model,
    * so no chat from an earlier episode (or an earlier process) reaches it.
    */
-  async function enterEpisode(episodeId: string): Promise<void> {
+  async function enterEpisode(episodeId: string, priorSteps: number | undefined): Promise<void> {
     if (sessionEpisode === episodeId) return;
     if (sessionEpisode !== undefined && openSession !== undefined) await replaceSession(openSession);
     if (sessionEpisode !== undefined) {
@@ -216,6 +218,7 @@ export function createSupervisorHost(options: CreateSupervisorHostOptions): Supe
       pendingNotes = [];
       needsOpening = false;
     }
+    stepBase = priorSteps !== undefined && Number.isSafeInteger(priorSteps) && priorSteps > 0 ? priorSteps : 0;
     sessionEpisode = episodeId;
   }
 
@@ -571,6 +574,7 @@ export function createSupervisorHost(options: CreateSupervisorHostOptions): Supe
         }
         return { proposal: { type: "switch_model", provider: target.provider, modelId: target.modelId, reason: parsed.reason } };
       }
+      for (const refused of parsed.refusedFindings ?? []) pendingNotes.push(`Finding not recorded (${refused}); a finding is {"kind": "fact" | "refuted" | "open", "text", "evidence": [refs]}`);
       for (const finding of parsed.findings) {
         if (input.recordFinding === undefined) {
           pendingNotes.push(`Finding not recorded (this turn takes no findings): ${clipText(finding.text, 160)}`);
@@ -809,6 +813,10 @@ export function createSupervisorHost(options: CreateSupervisorHostOptions): Supe
       return drained;
     },
 
+    investigationSteps() {
+      return episodeSteps.map((s) => ({ ...s }));
+    },
+
     candidateCodingRoot() {
       return codingRoot;
     },
@@ -837,7 +845,7 @@ export function createSupervisorHost(options: CreateSupervisorHostOptions): Supe
       if (input.maxProviderCalls !== undefined && input.maxProviderCalls < 1) {
         throw new Error("decide has no provider-call allowance");
       }
-      await enterEpisode(input.episodeId);
+      await enterEpisode(input.episodeId, input.priorInvestigationSteps);
       try {
         return await decideTurn(input);
       } finally {

@@ -34,6 +34,7 @@ import { bumpGeneration } from "./generation.js";
 import { activateExecutorRepair, executorRepairSubject } from "./executor-repair.js";
 import { citedEvidence, saveRunState } from "./state.js";
 import { citedProbeEvidence } from "./inspection.js";
+import { citedInvestigationEvidence, episodeInvestigation } from "./investigation.js";
 import { worktreeChangeFingerprints } from "./worktree.js";
 
 export interface RepairPatchAuthor {
@@ -379,6 +380,9 @@ export async function applyQualifyRepair(
       const evidence: EvidenceRecord[] = [
         ...state.evidence.filter((e) => (qualify.evidenceRefs ?? []).includes(e.ref)),
         ...citedProbeEvidence(state, qualify.evidenceRefs),
+        ...(state.recoveryEpisodeId !== undefined
+          ? citedInvestigationEvidence(episodeInvestigation(state, state.recoveryEpisodeId), qualify.evidenceRefs)
+          : []),
       ];
       const review = await deps.repair.reviewer.review({
         candidateRoot: snap.candidateRoot,
