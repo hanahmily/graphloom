@@ -35,14 +35,23 @@ describe("parseSupervisorReply", () => {
     });
   });
 
-  it("refuses malformed requests, switches, findings, and prose as malformed", () => {
+  it("refuses malformed requests, switches, and prose as malformed", () => {
     expect(() => parseSupervisorReply('{"inspect": []}')).toThrow(/non-empty array/);
     expect(() => parseSupervisorReply(JSON.stringify({ inspect: Array.from({ length: MAX_INSPECT_REQUESTS + 1 }, () => ({ tool: "list_receipts" })) }))).toThrow(/at most/);
     expect(() => parseSupervisorReply('{"inspect": [{"args": {}}]}')).toThrow(/tool name/);
     expect(() => parseSupervisorReply('{"switch_model": {"provider": "x"}}')).toThrow(/switch_model.modelId/);
-    expect(() =>
-      parseSupervisorReply(JSON.stringify({ reason: "r", action: { type: "return", return: { summary: "s" } }, findings: [{ kind: "guess", text: "t" }] })),
-    ).toThrow(/findings\[0\].kind/);
     expect(() => parseSupervisorReply("I would retry the stage.")).toThrow(/neither a tool call nor GraphDecision JSON/);
+  });
+
+  it("keeps a decision whose findings are not findings, saying why each was left out", () => {
+    const decision = { reason: "r", action: { type: "return", return: { summary: "s" } } };
+    const good = { kind: "fact", text: "x.go lacks the check", evidence: ["inv-1"] };
+    expect(parseSupervisorReply(JSON.stringify({ ...decision, findings: [{ kind: "guess", text: "t" }, "the script has a typo", good] }))).toEqual({
+      kind: "decision",
+      decision,
+      findings: [good],
+      refusedFindings: ["findings[0].kind must be fact, refuted, or open", "findings[1] must be an object: the script has a typo"],
+    });
+    expect(parseSupervisorReply(JSON.stringify({ ...decision, findings: "typo" }))).toMatchObject({ findings: [], refusedFindings: [expect.stringMatching(/must be an array/)] });
   });
 });

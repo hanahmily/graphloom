@@ -11,7 +11,7 @@ import { createController, resolveStateDir } from "@graphloom/controller";
 import type { GraphRehearsal } from "@graphloom/sdk";
 import type { RunReport } from "@graphloom/controller";
 import { createCliRunner } from "./cli-runner.js";
-import { piRepairDeps, resolveBundlePath, resolveBundlePathForResume } from "./repair-config.js";
+import { harnessRepairDeps, resolveBundlePath, resolveBundlePathForResume } from "./repair-config.js";
 import { check, probe, recordScenario, rehearse, rehearseStopAt, replay, resumeRehearsal } from "./rehearsal.js";
 import { dispatchToOwner, installHome, recordOwnership, removeOwnershipRecord, selfInstall } from "./ownership.js";
 import { requireRunnerConfig } from "./runner-config.js";
@@ -22,7 +22,9 @@ import { JOB_TIMEOUT_MS, killActiveChildren, runAutoUpdate } from "./auto-update
 import {
   loadSupervisorConfig,
   parseModelRef,
-  piSupervisorFactory,
+  resumeSupervisorHarness,
+  selectSupervisorHarness,
+  supervisorFactoryFor,
   supervisorRestore,
 } from "./supervisor-config.js";
 
@@ -76,6 +78,13 @@ async function main(): Promise<void> {
     const runnerConfig = await requireRunnerConfig(process.env, (loaded) => stopHook.useConfig(loaded.notify));
     const runner = createCliRunner(runnerConfig);
     const config = await loadSupervisorConfig();
+    // design-supervisor-harnesses.md §7.3: --supervisor, then the operator's select, then the first available.
+    const supervisorFlag = flagValue(args, "--supervisor");
+    if (supervisorFlag !== undefined && config === undefined) {
+      throw new Error(`--supervisor ${supervisorFlag} needs an operator supervisor config that enables it ($GRAPHLOOM_SUPERVISOR_CONFIG or ~/.config/graphloom/supervisor.json)`);
+    }
+    const selection = config !== undefined ? await selectSupervisorHarness(config, supervisorFlag !== undefined ? { flag: supervisorFlag } : {}) : undefined;
+    if (selection !== undefined && config?.harnesses !== undefined) console.error(`supervisor: ${selection.harness} (${selection.reason})`);
     const bundlePath = await resolveBundlePath(taskPath).catch(() => undefined);
     const report = await controller.run({
       taskPath,
@@ -86,8 +95,11 @@ async function main(): Promise<void> {
       },
       runner,
       ...(stateRoot !== undefined ? { stateRoot } : {}),
-      ...(config !== undefined
-        ? { supervisorFactory: piSupervisorFactory(config), repair: piRepairDeps(config, bundlePath ?? (await resolveBundlePath(taskPath))) }
+      ...(config !== undefined && selection !== undefined
+        ? {
+            supervisorFactory: supervisorFactoryFor(config, selection.harness),
+            repair: harnessRepairDeps(selection.harness, config, bundlePath ?? (await resolveBundlePath(taskPath))),
+          }
         : {}),
     });
     console.log(JSON.stringify(report, null, 2));
@@ -183,6 +195,9 @@ async function main(): Promise<void> {
     const runnerConfig = await requireRunnerConfig(process.env, (loaded) => stopHook.useConfig(loaded.notify));
     const runner = createCliRunner(runnerConfig);
     const config = await loadSupervisorConfig();
+    const resolvedRoot = stateRoot ? path.resolve(stateRoot) : undefined;
+    // The supervisor and its repair reviewer run on the harness the run is pinned to (§7.5).
+    const pinned = config !== undefined ? await resumeSupervisorHarness(config, runRef, resolvedRoot) : undefined;
     const report = await controller.resume({
       runRef,
       runner,
@@ -194,10 +209,10 @@ async function main(): Promise<void> {
       // The controller has no restore of its own: a run's supervisor binding
       // is restored on the harness it is pinned to, with or without a config.
       restoreSupervisor: supervisorRestore(config),
-      ...(config !== undefined
+      ...(config !== undefined && pinned !== undefined
         ? {
-            supervisorFactory: piSupervisorFactory(config),
-            repair: piRepairDeps(config, await resolveBundlePathForResume(runRef, stateRoot ? path.resolve(stateRoot) : undefined)),
+            supervisorFactory: supervisorFactoryFor(config, pinned),
+            repair: harnessRepairDeps(pinned, config, await resolveBundlePathForResume(runRef, resolvedRoot)),
           }
         : {}),
     });
@@ -415,7 +430,7 @@ function printHelp(): void {
   console.log(`graphloom — TypeScript harness
 
 Usage:
-  graphloom run <task.yaml> [--state-root <dir>] [--on-stop <command>]
+  graphloom run <task.yaml> [--state-root <dir>] [--supervisor <harness>] [--on-stop <command>]
   graphloom check <task.yaml>
   graphloom rehearse <task.yaml> [--scenario <name>] [--commands <stub|run>] [--offline] [--synthesized] [--adversarial] [--keep] [--stop-at <stage>]
   graphloom rehearse --record-from <stateDir|runId> [--state-root <dir>] [--name <name>] [--out <path>]
@@ -562,6 +577,12 @@ $GRAPHLOOM_SUPERVISOR_CONFIG or ~/.config/graphloom/supervisor.json:
   { "provider": "minimax-cn", "modelId": "MiniMax-M3",
     "models": ["deepseek/deepseek-chat"], "agentDir": "~/.pi/agent" }
 Credentials come from Pi's agent dir or the provider's environment variable.
+The per-harness form enables Claude Code too, with your own Claude Code login
+(never an API key), confined by bwrap:
+  { "harnesses": ["pi", "claude-code"], "pi": { "provider": "minimax-cn", "modelId": "MiniMax-M3" },
+    "claude": { "models": ["opus", "sonnet"], "configDir": "~/.claude" } }
+A run uses --supervisor <harness>, else "select", else the first enabled
+harness that is available; resume keeps the harness the run is pinned to.
 `);
 }
 

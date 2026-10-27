@@ -21,7 +21,13 @@ export interface InspectRequest {
  * model switch.
  */
 export type SupervisorReply =
-  | { kind: "decision"; decision: GraphDecision; findings: CaseFinding[] }
+  | {
+      kind: "decision";
+      decision: GraphDecision;
+      findings: CaseFinding[];
+      /** Why each finding that is not a finding was left out; the decision stands without it. */
+      refusedFindings?: string[];
+    }
   | { kind: "inspect"; requests: InspectRequest[] }
   | { kind: "switch_model"; provider: string; modelId: string; reason: string };
 
@@ -75,26 +81,44 @@ function parseSwitch(value: unknown): { provider: string; modelId: string; reaso
   return { provider: value.provider as string, modelId: value.modelId as string, reason: value.reason as string };
 }
 
-function parseFindings(value: unknown): CaseFinding[] {
-  if (value === undefined) return [];
-  if (!Array.isArray(value)) throw malformed("findings must be an array");
-  return value.map((entry, i) => {
-    if (!isObject(entry)) throw malformed(`findings[${i}] must be an object`);
-    if (typeof entry.kind !== "string" || !FINDING_KINDS.has(entry.kind)) throw malformed(`findings[${i}].kind must be fact, refuted, or open`);
-    if (typeof entry.text !== "string" || entry.text.trim() === "") throw malformed(`findings[${i}].text must be a non-empty string`);
-    if (entry.evidence !== undefined && (!Array.isArray(entry.evidence) || !entry.evidence.every((e) => typeof e === "string"))) {
-      throw malformed(`findings[${i}].evidence must be an array of strings`);
+/**
+ * The findings a decision carries. An entry that is not a finding is left
+ * out with the reason, never the decision with it: a live model has written
+ * findings as plain strings, and losing an admissible decision to that would
+ * cost the turn's slip remedies for nothing.
+ */
+function parseFindings(value: unknown): { findings: CaseFinding[]; refused: string[] } {
+  if (value === undefined) return { findings: [], refused: [] };
+  if (!Array.isArray(value)) return { findings: [], refused: ["findings must be an array of {kind, text, evidence} objects"] };
+  const findings: CaseFinding[] = [];
+  const refused: string[] = [];
+  value.forEach((entry, i) => {
+    try {
+      findings.push(parseFinding(entry, i));
+    } catch (err) {
+      const text = typeof entry === "string" ? `: ${entry.length <= 120 ? entry : `${entry.slice(0, 120)}…`}` : "";
+      refused.push(`${err instanceof Error ? err.message : String(err)}${text}`);
     }
-    if (entry.dependsOn !== undefined && (!Array.isArray(entry.dependsOn) || !entry.dependsOn.every((d) => typeof d === "string" && DEPENDS_ON.has(d)))) {
-      throw malformed(`findings[${i}].dependsOn must list candidate and/or plugin`);
-    }
-    return {
-      kind: entry.kind as CaseFinding["kind"],
-      text: entry.text,
-      ...(entry.evidence !== undefined ? { evidence: entry.evidence as string[] } : {}),
-      ...(entry.dependsOn !== undefined ? { dependsOn: entry.dependsOn as NonNullable<CaseFinding["dependsOn"]> } : {}),
-    };
   });
+  return { findings, refused };
+}
+
+function parseFinding(entry: unknown, i: number): CaseFinding {
+  if (!isObject(entry)) throw malformed(`findings[${i}] must be an object`);
+  if (typeof entry.kind !== "string" || !FINDING_KINDS.has(entry.kind)) throw malformed(`findings[${i}].kind must be fact, refuted, or open`);
+  if (typeof entry.text !== "string" || entry.text.trim() === "") throw malformed(`findings[${i}].text must be a non-empty string`);
+  if (entry.evidence !== undefined && (!Array.isArray(entry.evidence) || !entry.evidence.every((e) => typeof e === "string"))) {
+    throw malformed(`findings[${i}].evidence must be an array of strings`);
+  }
+  if (entry.dependsOn !== undefined && (!Array.isArray(entry.dependsOn) || !entry.dependsOn.every((d) => typeof d === "string" && DEPENDS_ON.has(d)))) {
+    throw malformed(`findings[${i}].dependsOn must list candidate and/or plugin`);
+  }
+  return {
+    kind: entry.kind as CaseFinding["kind"],
+    text: entry.text,
+    ...(entry.evidence !== undefined ? { evidence: entry.evidence as string[] } : {}),
+    ...(entry.dependsOn !== undefined ? { dependsOn: entry.dependsOn as NonNullable<CaseFinding["dependsOn"]> } : {}),
+  };
 }
 
 /**
@@ -114,6 +138,11 @@ export function parseSupervisorReply(text: string): SupervisorReply {
     return { kind: "decision", decision: parseSupervisorDecision(text), findings: [] };
   }
   const { findings, ...decision } = obj;
-  const parsedFindings = parseFindings(findings);
-  return { kind: "decision", decision: parseSupervisorDecision(JSON.stringify(decision)), findings: parsedFindings };
+  const parsed = parseFindings(findings);
+  return {
+    kind: "decision",
+    decision: parseSupervisorDecision(JSON.stringify(decision)),
+    findings: parsed.findings,
+    ...(parsed.refused.length > 0 ? { refusedFindings: parsed.refused } : {}),
+  };
 }

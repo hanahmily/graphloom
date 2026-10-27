@@ -200,6 +200,6 @@ describe("operator supervisor restore", () => {
         { sessionId: "s", sessionFile: "/x/y.jsonl", provider: "claude-code", modelId: "opus", switchJournal: [], harness: "claude-code" },
         { runId: "run-1", stateDir: "/x" },
       ),
-    ).rejects.toThrow(/pinned to the claude-code harness/);
+    ).rejects.toThrow(/pin mismatch: .*pinned to the claude-code harness, which the operator's supervisor config does not enable \(enabled: pi\)/);
   });
 });

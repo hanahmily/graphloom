@@ -43,6 +43,14 @@ export interface ConformanceTarget {
   capabilities: HarnessCapabilities;
   mode: DecisionMode;
   build(args: { script: ScriptStep[]; models: SupervisorModelRef[]; transientRetryBaseMs?: number; quotaRetryMs?: number }): ConformanceBuild;
+  /**
+   * A repair candidate root the grant and patch cases use. A harness that
+   * runs a real process in it needs one that exists. Default
+   * `/state/repairs/a1/candidate`.
+   */
+  candidateRoot?: string;
+  /** Per-case timeout for a harness whose sessions are real processes. */
+  timeoutMs?: number;
 }
 
 function view(over: Partial<RunView> = {}): RunView {
@@ -151,12 +159,13 @@ function actionOf(proposal: unknown): string | undefined {
 
 export function harnessConformance(target: ConformanceTarget): void {
   const { name, mode, capabilities } = target;
+  const candidate = target.candidateRoot ?? "/state/repairs/a1/candidate";
   const models = [PRIMARY(name), SECONDARY(name)];
   const build = (script: ScriptStep[], extra: { transientRetryBaseMs?: number; quotaRetryMs?: number } = {}) =>
     target.build({ script, models, ...extra });
   const promptsOf = (log: ScriptLog) => log.prompts.map((p) => p.text);
 
-  describe(`${name} harness conformance (${mode} protocol)`, () => {
+  describe(`${name} harness conformance (${mode} protocol)`, { ...(target.timeoutMs !== undefined ? { timeout: target.timeoutMs } : {}) }, () => {
     it("decides, records the harness in the binding, and charges the turn's provider calls", async () => {
       const b = build([{ decide: REENTER }]);
       const host = await b.start();
@@ -353,14 +362,14 @@ export function harnessConformance(target: ConformanceTarget): void {
       const b = build([{ decide: REENTER }, { text: "Patched the validator's off-by-one; added a regression case." }, { decide: RETURN }]);
       const host = await b.start();
       await host.decide(turn("ep-1").input);
-      await host.grantCandidateCoding("/state/repairs/a1/candidate");
-      expect(host.candidateCodingRoot()).toBe("/state/repairs/a1/candidate");
-      const patched = await host.patchCandidate!({ candidateRoot: "/state/repairs/a1/candidate", target: "validator", reason: "off by one" });
+      await host.grantCandidateCoding(candidate);
+      expect(host.candidateCodingRoot()).toBe(candidate);
+      const patched = await host.patchCandidate!({ candidateRoot: candidate, target: "validator", reason: "off by one" });
       expect(patched.summary).toContain("off-by-one");
       await expect(host.patchCandidate!({ candidateRoot: "/elsewhere", target: "validator", reason: "x" })).rejects.toThrow(/!= granted/);
       // A new episode opens a new session, which inherits the grant.
       await host.decide(turn("ep-2").input);
-      expect(b.log.granted.map((g) => g.root)).toEqual(["/state/repairs/a1/candidate", "/state/repairs/a1/candidate"]);
+      expect(b.log.granted.map((g) => g.root)).toEqual([candidate, candidate]);
       expect(new Set(b.log.granted.map((g) => g.session)).size).toBe(2);
       await host.revokeCandidateCoding();
       expect(host.candidateCodingRoot()).toBeUndefined();

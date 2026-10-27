@@ -167,6 +167,33 @@ describe("runClaudeProcess", () => {
     expect(argv.slice(-4)).toEqual(["--tools", "default", "--session-id", session.sessionId]);
   });
 
+  it("hands each stream event, but no control message, to onEvent", async () => {
+    const f = await fake(FAKE_CLAUDE);
+    const seen: string[] = [];
+    const run = await runClaudeProcess({
+      command: "claude",
+      args: [],
+      session: { sessionId: "6b0e1c1e-8d2f-4a53-9f0e-2f9c3b8e7a10", ref: "claude-6b0e1c1e-8d2f-4a53-9f0e-2f9c3b8e7a10", started: false },
+      cwd: f.dir,
+      env: {},
+      prompt: "investigate",
+      launch: f.launch,
+      killGraceMs: 200,
+      interruptGraceMs: 200,
+      startupTimeoutMs: 10_000,
+      responseTimeoutMs: 10_000,
+      toolPolicy: async () => ({ behavior: "allow", updatedInput: {} }),
+      reserveModelCall: async () => true,
+      onEvent: (event) => {
+        seen.push(String(event.type));
+        // An observer that throws changes nothing.
+        if (event.type === "assistant") throw new Error("observer bug");
+      },
+    });
+    expect(run.outcome).toMatchObject({ kind: "result" });
+    expect(seen).toEqual(["user", "assistant", "user", "assistant", "result"]);
+  });
+
   it("does not start the process once the signal has aborted", async () => {
     const f = await fake(FAKE_CLAUDE);
     const controller = new AbortController();

@@ -46,6 +46,28 @@ export {
 } from "./harness.js";
 
 export {
+  CLAUDE_CODE_HARNESS,
+  CLAUDE_DEFAULT_MODEL,
+  CLAUDE_DEFAULT_PROMPT_TIMEOUT_MS,
+  CLAUDE_DEFAULT_PROMPT_TOTAL_TIMEOUT_MS,
+  CLAUDE_HARNESS_CAPABILITIES,
+  CLAUDE_SUPERVISOR_FLAGS,
+  claudeSessionsOpened,
+  commandPaths,
+  createClaudeSupervisorHarness,
+  lastClaudeSessionModel,
+  type ClaudeConfinement,
+  type ClaudeReviewSessionOptions,
+  type ClaudeSessionOpened,
+  type ClaudeSessionRecord,
+  type ClaudeSupervisorHarness,
+  type ClaudeSupervisorHarnessOptions,
+} from "./claude-harness.js";
+
+export { classifyClaudeFailure } from "./claude-failure.js";
+export { claudeStepKind, claudeStepRecorder, CLAUDE_WRITE_TOOLS, type ClaudeStepRecorder } from "./claude-steps.js";
+
+export {
   buildInspectResultPrompt,
   buildReaskPrompt,
   buildRecoveryPrompt,

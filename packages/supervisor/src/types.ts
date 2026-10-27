@@ -82,6 +82,13 @@ export interface SupervisorInput {
    * themselves). Nothing in the run changed since that proposal.
    */
   rejection?: SupervisorRejection;
+  /**
+   * Investigation steps this episode's records already hold, numbered before
+   * this supervisor process took the episode up (a restart mid-episode). The
+   * host numbers its own steps after them, so an `inv-<n>` id is never reused
+   * within an episode.
+   */
+  priorInvestigationSteps?: number;
 }
 
 /** Narrows `list_evidence`; every field given must match. */
@@ -276,6 +283,12 @@ export interface Supervisor {
    * whose inspection the controller records itself, returns none.
    */
   drainInvestigation?(): InvestigationStep[];
+  /**
+   * Optional: every investigation step of the current episode, drained or
+   * not (non-destructive). The controller accepts these ids as citations
+   * while the turn is still running, before its episode record exists.
+   */
+  investigationSteps?(): InvestigationStep[];
   /**
    * Stable session id for this run's supervisor (Pi session id or scripted stand-in).
    * Required for qualified repair so every patch round binds to the same session.

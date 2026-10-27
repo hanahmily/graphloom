@@ -128,7 +128,7 @@ crashes; filesystem and execution scopes require host enforcement.
 - [Domain glossary](CONTEXT.md): project vocabulary.
 - [Roadmap](docs/roadmap.md): entry point to the implementation sequence.
 - [TypeScript decision](docs/adr/0002-typescript-repairable-plugins.md).
-- [Supervisor harnesses](docs/design-supervisor-harnesses.md) (proposed): the
+- [Supervisor harnesses](docs/design-supervisor-harnesses.md) (proposed; S1 to S3, through the Claude Code harness, implemented): the
   supervisor runs on Pi, Claude Code, or Codex behind one contract, so a Claude
   Code subscription or a Codex login alone gets automatic recovery; the plugin
   declares its preferred harness and the run pins one.

@@ -164,6 +164,8 @@ export interface SupervisorHost extends Supervisor {
   drainRemedies(): SupervisorRemedy[];
   /** Investigation steps the harness recorded since the last drain (none for Pi). */
   drainInvestigation(): InvestigationStep[];
+  /** Every investigation step of the current episode, oldest first (non-destructive). */
+  investigationSteps(): InvestigationStep[];
   switchModel(args: { provider: string; modelId: string; reason: string }): Promise<void>;
   grantCandidateCoding(candidateRoot: string): Promise<void>;
   revokeCandidateCoding(): Promise<void>;

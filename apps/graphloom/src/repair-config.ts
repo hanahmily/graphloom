@@ -9,7 +9,15 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { loadRunState, parseTaskYaml, resolveStateDir, resolveUnderBase, type RepairDeps, type RepairReviewer } from "@graphloom/controller";
 import type { EvidenceRecord } from "@graphloom/sdk";
-import { assertAdmittedCandidateRoot, createCandidateReviewTools, createPiSupervisorSession, type PiSupervisorSession } from "@graphloom/supervisor";
+import {
+  assertAdmittedCandidateRoot,
+  CLAUDE_CODE_HARNESS,
+  createCandidateReviewTools,
+  createPiSupervisorSession,
+  type PiSupervisorSession,
+  type SupervisorHarnessName,
+} from "@graphloom/supervisor";
+import { claudeHarnessFor, claudeSupervisorDirs } from "./supervisor-claude.js";
 import type { SupervisorConfig } from "./supervisor-config.js";
 
 const execFileAsync = promisify(execFile);
@@ -117,41 +125,115 @@ export function piRepairDeps(config: SupervisorConfig, bundlePath: string): Repa
     },
   };
 
+  return { reviewer, preflight: repairPreflight(bundlePath) };
+}
+
+/**
+ * The controller-mediated preflight every harness's repair deps share: GraphLoom's
+ * own `tsc` builds the candidate, and a validator patch runs the installed
+ * bundle's own `scripts/qualify.mjs` against it.
+ */
+export function repairPreflight(bundlePath: string): RepairDeps["preflight"] {
+  return async ({ candidateRoot, target }) => {
+    let tsc: string;
+    try {
+      tsc = resolveGraphloomTsc();
+    } catch (err) {
+      return { ok: false, summary: `graphloom's own typescript installation cannot be resolved: ${commandOutput(err)}` };
+    }
+    if (!(await exists(tsc))) {
+      return { ok: false, summary: `graphloom's own typescript installation has no bin/tsc at ${tsc}` };
+    }
+    try {
+      await execFileAsync(process.execPath, [tsc, "-p", path.join(candidateRoot, "tsconfig.json")]);
+    } catch (err) {
+      return { ok: false, summary: `the candidate does not build: ${commandOutput(err)}` };
+    }
+    // scripts/qualify.mjs requires the installed (unpatched) validators to fail a case the
+    // candidate now passes: a validator-regression contract that does not apply to a plugin-
+    // or executor-level patch (an environment/checklist fix, for example), which changes no
+    // validator and would leave the installed copy passing every case, rejecting a good patch.
+    // The controller's own describe()-compatibility and steps-pin checks already guard those.
+    if (target !== "validator") {
+      return { ok: true, summary: "the candidate builds; scripts/qualify.mjs judges validator patches only, skipped for this target" };
+    }
+    const qualify = path.join(bundlePath, "scripts", "qualify.mjs");
+    if (!(await exists(qualify))) {
+      return { ok: true, summary: "the candidate builds; the installed plugin has no scripts/qualify.mjs to run" };
+    }
+    try {
+      const { stdout } = await execFileAsync(process.execPath, [qualify, candidateRoot]);
+      return { ok: true, summary: `the candidate builds; ${stdout.trim()}` };
+    } catch (err) {
+      return { ok: false, summary: `the candidate builds, but qualification failed: ${commandOutput(err)}` };
+    }
+  };
+}
+
+/**
+ * Qualified repair hooks for the run's pinned supervisor harness
+ * (design-supervisor-harnesses.md §7.5): the repair reviewer always runs on
+ * the same agent as the supervisor, as a separate read-only session with no
+ * shared chat. The preflight is the harness-neutral one.
+ */
+export function harnessRepairDeps(harness: SupervisorHarnessName, config: SupervisorConfig, bundlePath: string): RepairDeps {
+  if (harness === "pi") return piRepairDeps(config, bundlePath);
+  if (harness === CLAUDE_CODE_HARNESS) return { reviewer: claudeRepairReviewer(config), preflight: repairPreflight(bundlePath) };
+  throw new Error(`the ${harness} supervisor harness is not available in this GraphLoom yet`);
+}
+
+/**
+ * The independent repair reviewer on Claude Code: a fresh read-only session
+ * per review, in the candidate root, confined like the supervisor and
+ * writable only in its own scratch directory. Its transcripts are kept under
+ * `<stateDir>/supervisor/claude-code/review`.
+ */
+export function claudeRepairReviewer(config: SupervisorConfig): RepairReviewer {
+  let spent = 0;
   return {
-    reviewer,
-    async preflight({ candidateRoot, target }) {
-      let tsc: string;
+    sessionId: REVIEWER_SESSION_ID,
+    async review({ candidateRoot, baseRoot, target, reason, task, requirement, patchSummary, evidence, maxProviderCalls }) {
+      const cap = maxProviderCalls ?? 0;
+      if (cap <= 0) return { approved: false, reason: "no agentInvocations budget remains for independent review" };
+      const repairsDir = path.dirname(path.dirname(candidateRoot));
+      const root = await assertAdmittedCandidateRoot(repairsDir, candidateRoot);
+      const stateDir = path.dirname(repairsDir);
+      const diff = await candidateDiff(baseRoot, root);
+      const dirs = claudeSupervisorDirs(stateDir);
+      const harness = await claudeHarnessFor(config.claude, config, REVIEWER_SESSION_ID, stateDir, {
+        sessionDir: path.join(dirs.sessionDir, "review"),
+        scratchDir: path.join(dirs.sessionDir, "review", "scratch"),
+      });
+      const session = await harness.openReviewSession({ cwd: root });
       try {
-        tsc = resolveGraphloomTsc();
+        const text = await session.prompt(
+          repairReviewPrompt({
+            candidateRoot: root,
+            target,
+            reason,
+            task,
+            ...(requirement !== undefined ? { requirement } : {}),
+            ...(patchSummary !== undefined ? { patchSummary } : {}),
+            evidence,
+            diff,
+          }),
+          { maxTurns: cap },
+        );
+        const failure = session.lastReplyFailure?.();
+        if (failure !== undefined && text === "") return { approved: false, reason: `the reviewer gave no verdict: ${failure.message}` };
+        return parseRepairVerdict(text);
       } catch (err) {
-        return { ok: false, summary: `graphloom's own typescript installation cannot be resolved: ${commandOutput(err)}` };
+        // Fail closed: a review that did not finish never approves.
+        return { approved: false, reason: `the reviewer gave no verdict: ${err instanceof Error ? err.message : String(err)}` };
+      } finally {
+        spent += session.drainTurnCount?.() ?? 0;
+        await session.close();
       }
-      if (!(await exists(tsc))) {
-        return { ok: false, summary: `graphloom's own typescript installation has no bin/tsc at ${tsc}` };
-      }
-      try {
-        await execFileAsync(process.execPath, [tsc, "-p", path.join(candidateRoot, "tsconfig.json")]);
-      } catch (err) {
-        return { ok: false, summary: `the candidate does not build: ${commandOutput(err)}` };
-      }
-      // scripts/qualify.mjs requires the installed (unpatched) validators to fail a case the
-      // candidate now passes: a validator-regression contract that does not apply to a plugin-
-      // or executor-level patch (an environment/checklist fix, for example), which changes no
-      // validator and would leave the installed copy passing every case, rejecting a good patch.
-      // The controller's own describe()-compatibility and steps-pin checks already guard those.
-      if (target !== "validator") {
-        return { ok: true, summary: "the candidate builds; scripts/qualify.mjs judges validator patches only, skipped for this target" };
-      }
-      const qualify = path.join(bundlePath, "scripts", "qualify.mjs");
-      if (!(await exists(qualify))) {
-        return { ok: true, summary: "the candidate builds; the installed plugin has no scripts/qualify.mjs to run" };
-      }
-      try {
-        const { stdout } = await execFileAsync(process.execPath, [qualify, candidateRoot]);
-        return { ok: true, summary: `the candidate builds; ${stdout.trim()}` };
-      } catch (err) {
-        return { ok: false, summary: `the candidate builds, but qualification failed: ${commandOutput(err)}` };
-      }
+    },
+    drainProviderCalls() {
+      const n = spent;
+      spent = 0;
+      return n;
     },
   };
 }

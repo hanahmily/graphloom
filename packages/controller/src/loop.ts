@@ -130,6 +130,7 @@ import {
   type Inadmissible,
 } from "./inadmissible.js";
 import { citedRefs, needsReview, runReview, type OpenReviewInspection, type ProposalReviewer, type ReviewOutcome } from "./proposal-review.js";
+import { citedInvestigationEvidence, episodeInvestigation } from "./investigation.js";
 
 /**
  * Consecutive controller steps that charge no finite budget before the loop
@@ -538,8 +539,10 @@ async function runNormalLoopSteps(
           turnSaves = next.catch(() => undefined);
           return next;
         };
+        // The episode's investigation steps: recorded, and the running turn's own (design-supervisor-harnesses.md §5.3).
+        const investigationNow = () => episodeInvestigation(state, episodeId, supervisor.investigationSteps?.() ?? []);
         const recordCaseFinding = async (finding: CaseFinding): Promise<CaseFindingOutcome> => {
-          const kept = recordFinding(state, finding, episodeId);
+          const kept = recordFinding(state, finding, episodeId, investigationNow().ids);
           if (kept.outcome.kept) {
             state = { ...kept.state, stateRevision: state.stateRevision + 1 };
             await saveLatest();
@@ -719,7 +722,11 @@ async function runNormalLoopSteps(
                   episodeId,
                   triggerCode: trigger.code,
                   decision: candidate,
-                  evidence: [...state.evidence.filter((e) => cited.has(e.ref)), ...citedProbeEvidence(state, refs)],
+                  evidence: [
+                    ...state.evidence.filter((e) => cited.has(e.ref)),
+                    ...citedProbeEvidence(state, refs),
+                    ...citedInvestigationEvidence(investigationNow(), refs),
+                  ],
                   openInspection: openReviewInspection,
                   ...(metered ? { maxProviderCalls: allowance } : {}),
                 },
@@ -762,6 +769,7 @@ async function runNormalLoopSteps(
               deps,
               trigger.code,
               supervisor.requiresCitedEvidence === true ? episodeProbeIds(state, episodeId) : undefined,
+              investigationNow().ids,
             ) ??
             (await executorInputRefusal(admittedAgainst, candidate, deps.runner)) ??
             (await hostScopeRefusal(admittedAgainst, candidate, deps.runner));
@@ -843,6 +851,7 @@ async function runNormalLoopSteps(
               caseFile,
               recordFinding: recorder.recordFinding(recordCaseFinding),
               inspect: recorder.inspect(inspection.inspection),
+              priorInvestigationSteps: episodeInvestigation(state, episodeId).numbered,
             });
             decided = isModelSwitchRequest(proposal) ? proposal : assertGraphDecision(proposal);
           } catch (err) {
@@ -2645,10 +2654,12 @@ export function supervisorAdmissionRefusal(
   triggerCode: string,
   /** The probes that ran this episode; given only for a supervisor that must ground its claims. */
   probeIds?: ReadonlySet<string>,
+  /** The investigation steps (`inv-<n>`) the episode observed, citable with the probes. */
+  stepIds?: ReadonlySet<string>,
 ): Inadmissible | undefined {
   const repeated = repeatRefusal(state, triggerCode, decision);
   if (repeated !== undefined) return repeated;
-  const ungrounded = probeIds !== undefined ? groundingRefusal(state, decision, probeIds) : undefined;
+  const ungrounded = probeIds !== undefined ? groundingRefusal(state, decision, probeIds, stepIds) : undefined;
   if (ungrounded !== undefined) return ungrounded;
   const action = decision.action;
   const hasRepair = deps.repair !== undefined;

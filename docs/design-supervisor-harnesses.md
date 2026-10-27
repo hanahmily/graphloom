@@ -1,8 +1,9 @@
 # Supervisor harnesses: Pi, Claude Code, and Codex
 
-Status: proposed design, 2026-10-26; S1 (the shared harness library, §3)
-and S2 (the supervisor host contract, §4.1, as built in §4.5) implemented,
-S3 to S6 not implemented. This supersedes the
+Status: proposed design, 2026-10-26; S1 (the shared harness library, §3),
+S2 (the supervisor host contract, §4.1, as built in §4.5), and S3 (the
+Claude Code harness, as built in §4.6) implemented, S4 to S6 not
+implemented. This supersedes the
 Pi-only backend choice in the [core design](design-typescript-core.md) §6
 ("Standalone Pi SDK session implementation") and in the
 [Pi supervisor design](design-pi-supervisor.md). Pi stays a supported harness,
@@ -126,9 +127,12 @@ already had, with the executor-specific parts passed in:
   `transient.ts` keeps only its retry loop (policy, backoff, worktree
   fingerprint) and re-exports the classifiers.
 
-The neutral API below is the target for S3. It is built on those functions
-when its first consumer, the Claude Code supervisor harness, needs a live
-event stream. S1 does not add it: nothing would use or test it yet.
+The neutral API below was the target for S3. S3 did not need it: the Claude
+Code supervisor harness runs one process per prompt with `runClaudeProcess`
+and resumes the session for each follow-up (§4.6), so it needs the stream's
+events, not a live process. S3 adds only an `onEvent` observer to
+`runClaudeProcess`. The API stays unbuilt until a consumer needs a process
+that outlives a prompt.
 
 ```ts
 interface AgentRun {
@@ -360,8 +364,9 @@ refused, and the refusal points to `resume --supervisor`.
   crash, an `intent` is committed when the newest session copy's `.json`
   record names the target model, and failed otherwise.
 - `model_retry` uses the next model of the pinned harness.
-- `thinkingLevel` maps to Codex `model_reasoning_effort` (`--config`). Claude
-  Code has no equivalent, so it is ignored there, with a `check` warning.
+- `thinkingLevel` maps to Codex `model_reasoning_effort` (`--config`). For
+  Claude Code, `low` through `max` map to `--effort` (Claude Code 2.1.300 has
+  it; §11); `off` and `minimal` pass nothing and leave Claude Code's default.
 
 ### 4.5 As built in S2
 
@@ -425,6 +430,127 @@ settled a point the sections above leave open, it did so as follows.
   harness that has no capabilities and records investigation steps. Each run
   includes the replay of the `9bfa446d-4ea` fixtures. The suite's directory is
   excluded from `dist`.
+
+### 4.6 As built in S3
+
+S3 adds the Claude Code harness. Where the code settled a point the sections
+above leave open, or departs from them, it did so as follows.
+
+- **Modules.** `packages/supervisor/src/claude-harness.ts` is
+  `createClaudeSupervisorHarness` (`probe`, `openSession`, `openReviewSession`,
+  `start`, `restore`), `claude-steps.ts` turns the stream into investigation
+  steps, and `claude-failure.ts` is `classifyClaudeFailure`.
+  `apps/graphloom/src/supervisor-claude.ts` composes it for a run: the `claude`
+  section of `supervisor.json`, the bwrap launch, and the directories.
+- **One process per prompt.** Each `prompt` is one `runClaudeProcess` turn.
+  The first creates the session with `--session-id`; every follow-up (a
+  re-ask, a rejection, an inspect answer, the next turn, the patch) resumes it
+  with `--resume`. This is the "`--resume` once the process has exited" path
+  of §4.2 for every follow-up, so no process outlives a prompt and `close`
+  has nothing to stop. Before each resume, the shared write-back
+  (`openClaudeSession`) restores GraphLoom's copy of the transcript into
+  Claude Code's store, so a transcript Claude Code lost is not a lost session.
+- **Flags.** The shared driver's protocol flags (`--permission-mode default
+  --permission-prompt-tool stdio`, stream-json in and out), plus `--tools
+  default`, `--strict-mcp-config` (none of the user's MCP servers), and
+  `--append-system-prompt`. `--model` is omitted for the model id `default`,
+  which runs on Claude Code's own default model. No `--json-schema` (§4.2).
+- **The patch turn** resumes the episode's session with `cwd` set to the
+  candidate root. Claude Code 2.1.300 finds a session from any working
+  directory (§11), so the transcript is not moved first.
+- **`ToolPolicy`.** Every `can_use_tool` request is allowed, except a
+  `Write`, `Edit`, `MultiEdit`, or `NotebookEdit` whose path is outside the
+  supervisor's scratch directory and the granted candidate root. Writes to
+  the scratch directory are allowed too, since bwrap allows them anyway. The
+  stream's `tool_use` and `tool_result` events are the record (§11.1), so the
+  policy keeps no record of its own.
+- **Investigation steps.** Each `tool_use` paired with its `tool_result`,
+  the main thread's and its subagents', is one step. Kind: `command` (Bash),
+  `file_read` (Read), `file_change` (the write tools), `subagent` (Agent,
+  Task), otherwise `tool`. A command's `exitCode` is 0, or the `Exit code
+  <n>` its error result starts with. A call with no result when the turn ends
+  is recorded with a note. Input and output are bounded to
+  `MAX_EPISODE_TOOL_RESULT_CHARS`, and thinking blocks are never read.
+- **Steps as citations.** The controller accepts an `inv-` id that the
+  episode's records hold or that the running turn has observed (the new
+  `Supervisor.investigationSteps()`, read while the turn runs). The rule for
+  claims about the controller's or a validator's behavior is applied by
+  action: a `stop`, and a `qualify_repair` that targets a validator or an
+  executor, are refused when every citation is an `inv-` step (`… rests on
+  investigation steps alone`; cite `check_validate` for a claim about
+  validation). The text of a stop is not interpreted, so this covers every
+  stop; the trigger's own evidence refs are always citable beside the steps.
+  A `reenter`, and a plugin repair, may rest on steps alone. A finding may
+  cite steps; the case file keeps such a ref as `inv-<n>@<episode>`, since
+  the same id names another step in a later episode. Both reviewers receive
+  each cited step as evidence (`kind: "other"`, `payload.investigation`).
+- **Numbering across a restart.** `SupervisorInput.priorInvestigationSteps`
+  tells a supervisor restored in the middle of an episode how many steps the
+  episode's records already numbered, so the host numbers after them and an
+  id is never reused within an episode.
+- **Findings that are not findings** no longer make the whole reply
+  malformed. A live Claude Code reply wrote `findings` as plain strings; the
+  decision now stands, each bad entry is left out, and the next prompt says
+  why.
+- **Session records.** When a session opens, GraphLoom writes
+  `<sessionDir>/claude-<uuid>.json` with the harness, model, system prompt
+  digest, role, and opening time. The shared driver rewrites it with the
+  transcript's project as it saves the transcript, keeping the rest. An
+  interrupted switch is committed when a session on its target opened at or
+  after the intent was journaled, and failed otherwise
+  (`reconcileSupervisorBinding`); a session an earlier `model_retry` opened
+  on that model is no evidence.
+- **Failures.** `classifyClaudeFailure` maps the driver's failure summary
+  with the shared classifiers: `quota` (with the stated reset), `transient`
+  (with a stated retry time), `overflow` ("Prompt is too long", context
+  limit), `auth` (not logged in, invalid key, expired token; the message
+  names `claude /login`), otherwise `unknown`. A stall (no model output for
+  `promptTimeoutMs` while no tool runs, or none after start) and the total
+  cap (`promptTotalTimeoutMs`, or the patch timeout) are `timeout`. A process
+  that exits with no result is thrown as `unknown`, and the host gives it the
+  timeout's one `fresh_session_retry` (§8). An empty final message is
+  `empty`. A refused provider-call reservation ends the
+  prompt as over its allowance, as Pi's does.
+- **Confinement.** `claudeConfinement` wraps the runner's `confineWorker`
+  with `keepUserState` and drops its `--json-status-fd`: the driver signals
+  bwrap's own process group. Writable: the scratch directory
+  (`<stateDir>/supervisor/claude-code/scratch`, also `TMPDIR`), Claude Code's
+  config dir as trusted state, and the candidate root while it is granted.
+  `CLAUDE_CONFIG_DIR` is always set, as the executor does. `ANTHROPIC_API_KEY`
+  is never passed; `passEnv` and `supervisor.json` refuse it.
+- **`probe()`** fails without configured confinement or where bwrap cannot
+  run, when `claude --help` does not mention every flag the harness passes
+  (`--effort` only when a configured model has a reasoning level), and when
+  the config dir holds no login (`.credentials.json`, or an OAuth account in
+  `.claude.json`; on macOS the keychain cannot be read, so it is not
+  checked).
+- **Selection, minimally.** `supervisor.json` takes the per-harness form of
+  §7.2 (`harnesses`, `select`, `pi`, `claude`; a `codex` section is accepted
+  and enables a harness that is not available until S4). `graphloom run
+  --supervisor <harness>`, then `select`, must be enabled and pass `probe()`,
+  or `run` refuses; otherwise the first enabled harness that is available is
+  used. The flat Pi form keeps Pi unprobed, as before. The plugin's
+  preference, `supervisorSelection`, its transitions, `resume --supervisor`,
+  and `check` are S5. Until then, the pin is the binding's `harness`,
+  recorded at the run's first recovery episode; `resume` restores on it and
+  refuses with `supervisor harness pin mismatch` when the operator's config no
+  longer enables it or it is not available.
+- **`harnessRepairDeps`.** The repair reviewer runs on the pinned harness. On
+  Claude Code, each review is a fresh read-only session (`openReviewSession`)
+  in the candidate root, writable only in its own scratch directory, with its
+  transcripts under `<stateDir>/supervisor/claude-code/review`. A review that
+  fails or gives no verdict is not an approval. The preflight is shared with
+  Pi (`repairPreflight`). The CLI wires no proposal reviewer for any harness
+  yet, so the proposal-reviewer half of §7.5 waits for that wiring.
+- **Tests.** The conformance suite runs against the real harness with the
+  fake CLI in `packages/supervisor/test/fake-claude.mjs` (it stayed beside
+  its harness rather than moving to `packages/testkit`). The bwrap tests in
+  `apps/graphloom/test/supervisor-claude.test.ts` run where bwrap works. The
+  live episode, `GRAPHLOOM_SUPERVISOR_LIVE=claude-code`, is outside `npm
+  test`.
+- **Digests.** `runClaudeProcess` gained `onEvent`, so the vendored copy in
+  `executors/coding-agent` changes and its digest with it: a run started
+  before S3 resumes with `--update-executors`.
 
 ## 5. Investigation, grounding, and evidence
 
@@ -784,6 +910,21 @@ Each is checked in its phase. A failure changes only the named fallback.
    prompts also for read-only native tools in `-p` mode with
    `--permission-mode default`. This matters only for recording, since the
    stream's `tool_use` events record the calls anyway. (S3)
+   **Checked in S3 against Claude Code 2.1.300: false.** `Read` and a
+   read-only `ls -la` ran without a `can_use_tool` request; a compound shell
+   command, and `Write`, were asked. Investigation steps therefore come from
+   the stream's `tool_use` and `tool_result` events (§4.6), the fallback named
+   here. Also observed: `--permission-mode default` is accepted though
+   `--help` now lists the modes as `acceptEdits`, `auto`,
+   `bypassPermissions`, `manual`, `dontAsk`, and `plan`;
+   `--permission-prompt-tool` appears in `--help` only inside the description
+   of `--permission-prompts`, so the flag probe still finds it; `--resume
+   <id>` finds a session from another working directory and keeps writing it
+   in its original project directory; `--effort` exists; under bwrap, with
+   only the config dir and a scratch directory writable and `TMPDIR` in the
+   scratch, Claude Code runs on the subscription login, a `Write` elsewhere
+   fails with `EROFS` and a shell write with "read-only file system"; the
+   stream carries `rate_limit_event` events, which the harness ignores.
 2. **Codex event items.** Codex `--json` reports `command_execution` items
    with command, exit code, and output, as the executor already parses. It
    does not report file reads done other than through commands. If file reads
