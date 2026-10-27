@@ -1811,7 +1811,9 @@ runs steps 3 to 8 on `<rev>`, which defaults to `HEAD`. It publishes nothing.
       fixtures those committed at the release commit
   - Step 9: `git -c gpg.format=ssh -c user.signingKey=<key> tag -s -a`,
     verified with `git verify-tag` against the commit's `allowed_signers`,
-    then pushed as `refs/tags/v<version>`.
+    then pushed as `refs/tags/v<version>`. A tag already on the remote is
+    fetched into a scratch repository and must verify too, and equal the
+    local tag when there is one; it is then used instead of a new one.
   - Step 10: `gh release create v<version> --verify-tag --title "GraphLoom
     v<version>" --notes-file <section>` with the six assets. The release is
     downloaded again, each asset compared byte for byte, and the checksums

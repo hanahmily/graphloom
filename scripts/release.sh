@@ -669,6 +669,20 @@ do_publish() {
   tag_cmd=(git -C "$repo" -c gpg.format=ssh -c "user.signingKey=$signing_key" tag -s -a -m "GraphLoom $tag" "$tag" "$commit")
   verify_cmd=(git -C "$repo" -c gpg.format=ssh -c "gpg.ssh.allowedSignersFile=$work/allowed_signers" verify-tag "$tag")
   push_cmd=(git -C "$repo" push "$remote" "refs/tags/$tag")
+  if [ -n "$remote_tag" ]; then
+    # A tag already on the remote is not pushed again, so it must itself be signed by the release key.
+    git init -q --bare "$work/remote-tag"
+    git -C "$work/remote-tag" fetch -q "$(cd "$repo" && git remote get-url "$remote")" "refs/tags/$tag:refs/tags/$tag" ||
+      die "cannot fetch tag $tag from $remote"
+    git -C "$work/remote-tag" -c gpg.format=ssh -c "gpg.ssh.allowedSignersFile=$work/allowed_signers" verify-tag "$tag" >/dev/null 2>&1 ||
+      die "tag $tag on $remote is not signed by the release key; delete it there and publish again"
+    if [ -n "$local_tag" ] && [ "$(git -C "$repo" rev-parse "refs/tags/$tag")" != "$(git -C "$work/remote-tag" rev-parse "refs/tags/$tag")" ]; then
+      die "tag $tag on $remote is another tag object than the local one"
+    fi
+    echo "tag: $tag on $remote is signed by the release key"
+    # Use the remote's tag rather than signing a second one.
+    [ -n "$local_tag" ] || tag_cmd=(git -C "$repo" fetch "$remote" "refs/tags/$tag:refs/tags/$tag")
+  fi
   if [ "$dry_run" = 1 ]; then
     # Sign the tag where nothing is shared, to prove the key and allowed_signers sign and verify it.
     git clone -q --no-checkout "$repo" "$work/tag-check"
@@ -688,8 +702,7 @@ do_publish() {
   else
     [ -n "$local_tag" ] || "${tag_cmd[@]}"
     "${verify_cmd[@]}" || die "tag $tag does not verify against release/allowed_signers"
-    [ -n "$remote_tag" ] || "${push_cmd[@]}"
-    echo "tag: $tag pushed to $remote"
+    if [ -n "$remote_tag" ]; then echo "tag: $tag already on $remote"; else "${push_cmd[@]}"; echo "tag: $tag pushed to $remote"; fi
   fi
 
   # 10. Publish.

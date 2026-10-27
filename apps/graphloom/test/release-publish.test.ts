@@ -643,6 +643,27 @@ describe("release.sh publish (§6 steps 9-10)", () => {
     expect(spawnSync("git", ["ls-remote", "--tags", fx.remote], { encoding: "utf8" }).stdout).toBe("");
   }, 60_000);
 
+  it("never skips pushing the tag for a remote tag the release key did not sign, and reuses one it did", async () => {
+    const fx = await releasableFixture();
+    const assets = await makeAssets(fx, "0.1.0");
+    fx.git("tag", "v0.1.0", assets.commit);
+    fx.git("push", "-q", "origin", "refs/tags/v0.1.0");
+    fx.git("tag", "-d", "v0.1.0");
+    let r = fx.releaseSh(["publish", "0.1.0", "--assets", assets.dir, "--signing-key", fx.key, "--dry-run"]);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("tag v0.1.0 on origin is not signed by the release key");
+
+    spawnSync("git", ["--git-dir", fx.remote, "tag", "-d", "v0.1.0"], { encoding: "utf8" });
+    fx.git("-c", "gpg.format=ssh", "-c", `user.signingKey=${fx.key}`, "tag", "-s", "-a", "-m", "GraphLoom v0.1.0", "v0.1.0", assets.commit);
+    fx.git("push", "-q", "origin", "refs/tags/v0.1.0");
+    const remoteTag = fx.git("rev-parse", "v0.1.0");
+    fx.git("tag", "-d", "v0.1.0");
+    r = fx.releaseSh(["publish", "0.1.0", "--assets", assets.dir, "--signing-key", fx.key]);
+    expect(r.status, r.stderr + r.stdout).toBe(0);
+    expect(r.stdout).toContain("tag: v0.1.0 on origin is signed by the release key");
+    expect(fx.git("rev-parse", "v0.1.0")).toBe(remoteTag);
+  }, 90_000);
+
   it("checks a new state format against the shipped migrators and the fixtures committed at the release commit", async () => {
     const fx = await releasableFixture();
     await mkdir(path.join(fx.releases, "v0.1.0"));
