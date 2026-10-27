@@ -543,7 +543,15 @@ export async function resumeSupervisorPlan(
       throw new Error(`supervisor harness pin mismatch: this run's supervisor is pinned to ${pinned}, which the operator's supervisor config does not enable (enabled: ${enabled.join(", ")}); enable it again, or resume with --supervisor <harness>`);
     }
     if (!(config.harnesses === undefined && pinned === "pi")) {
-      const probed = await probe(pinned).catch((err: unknown) => ({ ok: false as const, reason: err instanceof Error ? err.message : String(err) }));
+      // A Pi session restores on its bound model (it may have switched provider): probe that one.
+      const binding = state.supervisorBinding;
+      const bound = pinned === "pi" && options.probe === undefined && binding?.sessionFile !== undefined && bindingHarness(binding) === "pi"
+        ? config.models.find((m) => m.provider === binding.provider && m.modelId === binding.modelId)
+        : undefined;
+      const check = bound !== undefined
+        ? (h: SupervisorHarnessName) => probeSupervisorHarness({ ...config, provider: bound.provider, modelId: bound.modelId, models: [bound, ...config.models.filter((m) => m !== bound)] }, h)
+        : probe;
+      const probed = await check(pinned).catch((err: unknown) => ({ ok: false as const, reason: err instanceof Error ? err.message : String(err) }));
       if (!probed.ok) throw new Error(`supervisor harness pin mismatch: this run's supervisor is pinned to ${pinned}, which is not available here: ${probed.reason}; resume with --supervisor <harness>`);
     }
     return { harness: pinned, config: withModelHints(config, pinned, preference), ...(legacy !== undefined ? { pin: legacy } : {}) };

@@ -223,6 +223,27 @@ describe("resume's supervisor (§7.4)", () => {
     await expect(resumeSupervisorPlan(ALL, runState({ selection: "codex", preference: { harnesses: ["codex", "pi"] } }), { probe: async_({ pi: true }) })).rejects.toThrow(/pin mismatch/);
   });
 
+  it("probes a bound Pi session on the model it restores on, not the operator's first", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "gl-resume-pi-probe-"));
+    temps.push(dir);
+    const config = parseSupervisorConfig({ harnesses: ["pi"], pi: { provider: "minimax-cn", modelId: "MiniMax-M3", models: ["deepseek/deepseek-v4-pro"], agentDir: dir } });
+    const saved = { minimax: process.env.MINIMAX_CN_API_KEY, deepseek: process.env.DEEPSEEK_API_KEY };
+    delete process.env.MINIMAX_CN_API_KEY;
+    process.env.DEEPSEEK_API_KEY = "stand-in-not-a-key";
+    try {
+      const switched = runState({ selection: "pi", binding: "pi" });
+      switched.supervisorBinding = { ...switched.supervisorBinding!, provider: "deepseek", modelId: "deepseek-v4-pro" };
+      expect(await resumeSupervisorPlan(config, switched)).toMatchObject({ harness: "pi" });
+      // Bound to the model without a credential, the same resume is refused.
+      await expect(resumeSupervisorPlan(config, runState({ selection: "pi", binding: "pi" }))).rejects.toThrow(/pin mismatch: .*pinned to pi, which is not available here/);
+    } finally {
+      for (const [k, v] of [["MINIMAX_CN_API_KEY", saved.minimax], ["DEEPSEEK_API_KEY", saved.deepseek]] as const) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+    }
+  });
+
   it("applies the run's model hints to the pinned harness", async () => {
     const plan = await resumeSupervisorPlan(ALL, runState({ selection: "claude-code", preference: { harnesses: ["claude-code"], models: { "claude-code": ["sonnet"] } } }), { probe: everything });
     expect(plan.config?.claude?.models.map((m) => m.modelId)).toEqual(["sonnet", "opus"]);
