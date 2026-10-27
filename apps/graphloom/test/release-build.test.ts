@@ -566,13 +566,17 @@ describe("the issue-fix plugin's bundled open-code-review (§2.3, §2.8, §6 ste
 describe("scripts/release.sh", () => {
   const releaseSh = path.join(repoRoot, "scripts", "release.sh");
 
-  it("refuses a malformed version and the subcommands of later phases", () => {
+  it("refuses a malformed version, an unknown subcommand, and an option of another subcommand", () => {
     const bad = spawnSync(releaseSh, ["build", "1.2"], { encoding: "utf8" });
     expect(bad.status).toBe(2);
     expect(bad.stderr).toContain("version must be MAJOR.MINOR.PATCH");
-    const later = spawnSync(releaseSh, ["publish", "1.2.3"], { encoding: "utf8" });
-    expect(later.status).toBe(2);
-    expect(later.stderr).toContain("not implemented yet (phase R5");
-    expect(spawnSync(releaseSh, [], { encoding: "utf8" }).stderr).toContain("usage: scripts/release.sh build <version>");
+    const usage = spawnSync(releaseSh, [], { encoding: "utf8" });
+    expect(usage.status).toBe(2);
+    for (const sub of ["prepare", "build", "publish"]) expect(usage.stderr).toContain(`scripts/release.sh ${sub} `);
+    expect(spawnSync(releaseSh, ["tag", "1.2.3"], { encoding: "utf8" }).status).toBe(2);
+    expect(spawnSync(releaseSh, ["publish", "1.2.3", "--commit", "HEAD"], { encoding: "utf8" }).status).toBe(2);
+    expect(spawnSync(releaseSh, ["build", "1.2.3", "--dry-run"], { encoding: "utf8" }).status).toBe(2);
+    const both = spawnSync(releaseSh, ["build", "1.2.3", "--unsigned", "--signing-key", "k"], { encoding: "utf8" });
+    expect(both.stderr).toContain("--signing-key and --unsigned are mutually exclusive");
   });
 });
