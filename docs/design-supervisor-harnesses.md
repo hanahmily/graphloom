@@ -496,16 +496,20 @@ above leave open, or departs from them, it did so as follows.
   `<sessionDir>/claude-<uuid>.json` with the harness, model, system prompt
   digest, role, and opening time. The shared driver rewrites it with the
   transcript's project as it saves the transcript, keeping the rest. An
-  interrupted switch is committed when the newest record (by opening time)
-  names its target, and failed otherwise (`reconcileSupervisorBinding`).
+  interrupted switch is committed when a session on its target opened at or
+  after the intent was journaled, and failed otherwise
+  (`reconcileSupervisorBinding`); a session an earlier `model_retry` opened
+  on that model is no evidence.
 - **Failures.** `classifyClaudeFailure` maps the driver's failure summary
   with the shared classifiers: `quota` (with the stated reset), `transient`
   (with a stated retry time), `overflow` ("Prompt is too long", context
   limit), `auth` (not logged in, invalid key, expired token; the message
   names `claude /login`), otherwise `unknown`. A stall (no model output for
   `promptTimeoutMs` while no tool runs, or none after start) and the total
-  cap (`promptTotalTimeoutMs`, or the patch timeout) are `timeout`. An empty
-  final message is `empty`. A refused provider-call reservation ends the
+  cap (`promptTotalTimeoutMs`, or the patch timeout) are `timeout`. A process
+  that exits with no result is thrown as `unknown`, and the host gives it the
+  timeout's one `fresh_session_retry` (§8). An empty final message is
+  `empty`. A refused provider-call reservation ends the
   prompt as over its allowance, as Pi's does.
 - **Confinement.** `claudeConfinement` wraps the runner's `confineWorker`
   with `keepUserState` and drops its `--json-status-fd`: the driver signals

@@ -406,6 +406,11 @@ async function openClaudeSupervisorSession(
       if (outcome.summary.startsWith("Claude Code stalled:")) {
         throw new SupervisorProviderError({ failureClass: "timeout", message: outcome.summary });
       }
+      if (outcome.summary.startsWith("Claude Code exited with code")) {
+        // A crash or an exit with no result (§8): the host retries it once in
+        // a fresh session, as it does a timeout, then stops by name.
+        throw new SupervisorProviderError({ failureClass: "unknown", message: classifyClaudeFailure(outcome.summary).message });
+      }
       lastFailure = classifyClaudeFailure(outcome.summary);
       return "";
     }
@@ -573,14 +578,16 @@ export function createClaudeSupervisorHarness(options: ClaudeSupervisorHarnessOp
   return harness;
 }
 
-/**
- * The model the newest session record in `sessionDir` names, as a model ref
- * of this harness, or undefined when there is none. A switch opens a fresh
- * session on its target, whose record is written as it opens.
- */
-export async function lastClaudeSessionModel(sessionDir: string): Promise<SupervisorModelRef | undefined> {
+/** One session the harness opened in `sessionDir`, from its record: when, and on which model. */
+export interface ClaudeSessionOpened {
+  openedAt: number;
+  model: SupervisorModelRef;
+}
+
+/** The sessions the records in `sessionDir` name, oldest first. */
+export async function claudeSessionsOpened(sessionDir: string): Promise<ClaudeSessionOpened[]> {
   const names = await readdir(sessionDir).catch(() => [] as string[]);
-  let newest: { at: number; model: string | null } | undefined;
+  const opened: ClaudeSessionOpened[] = [];
   for (const name of names) {
     if (!/^claude-[0-9a-f-]{36}\.json$/.test(name)) continue;
     const file = path.join(sessionDir, name);
@@ -593,10 +600,16 @@ export async function lastClaudeSessionModel(sessionDir: string): Promise<Superv
       continue;
     }
     if (parsed.model !== null && typeof parsed.model !== "string") continue;
-    const opened = typeof parsed.opened === "string" ? Date.parse(parsed.opened) : Number.NaN;
-    const at = Number.isFinite(opened) ? opened : info.mtimeMs;
-    if (newest === undefined || at > newest.at) newest = { at, model: parsed.model };
+    const at = typeof parsed.opened === "string" ? Date.parse(parsed.opened) : Number.NaN;
+    opened.push({
+      openedAt: Number.isFinite(at) ? at : info.mtimeMs,
+      model: { provider: CLAUDE_CODE_HARNESS, modelId: parsed.model ?? CLAUDE_DEFAULT_MODEL },
+    });
   }
-  if (newest === undefined) return undefined;
-  return { provider: CLAUDE_CODE_HARNESS, modelId: newest.model ?? CLAUDE_DEFAULT_MODEL };
+  return opened.sort((x, y) => x.openedAt - y.openedAt);
+}
+
+/** The model of the newest session record in `sessionDir`, or undefined when there is none. */
+export async function lastClaudeSessionModel(sessionDir: string): Promise<SupervisorModelRef | undefined> {
+  return (await claudeSessionsOpened(sessionDir)).at(-1)?.model;
 }

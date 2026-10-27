@@ -99,7 +99,6 @@ describe("Claude Code supervisor harness: protocol", () => {
       [{ error: 'API Error: 529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}' }, "transient", false],
       [{ error: "Prompt is too long" }, "overflow", false],
       [{ error: "Not logged in · Please run /login" }, "auth", false],
-      [{ crash: "segfault in the CLI" }, "unknown", false],
       [{ empty: true }, "empty", false],
     ];
     for (const [step, failureClass, hasReset] of cases) {
@@ -111,6 +110,29 @@ describe("Claude Code supervisor harness: protocol", () => {
       if (hasReset) expect(failure?.retryAt).toBe(reset);
       if (failureClass === "auth") expect(failure?.message).toMatch(/claude \/login/);
     }
+  });
+
+  it("throws a crash with no result for the host's one fresh-session retry", async () => {
+    const fake = fakeClaude([{ crash: "segfault in the CLI" }]);
+    const session = await fakeClaudeHarness(fake).openSession!({ model: OPUS, role: "decide" });
+    const err = await session.prompt("decide").catch((e: unknown) => e);
+    expect(isSupervisorProviderError(err) && err.failureClass).toBe("unknown");
+    expect(String(err)).toMatch(/exited with code 3 and no result: segfault in the CLI/);
+
+    const recovering = fakeClaude([{ crash: "segfault" }, { text: decision(REENTER) }]);
+    const host = await fakeClaudeHarness(recovering, { configuredModels: [OPUS] }).start();
+    expect(await host.decide(input())).toMatchObject({ action: { type: "reenter" } });
+    expect(host.drainRemedies().map((r) => [r.failureClass, r.remedy])).toEqual([["unknown", "fresh_session_retry"]]);
+    const [crashed, retried] = recovering.invocations();
+    expect(retried!.sessionId).not.toBe(crashed!.sessionId);
+    expect(retried!.prompt).toContain("You are the GraphLoom run supervisor in recovery.");
+    await host.close();
+
+    const twice = fakeClaude([{ crash: "segfault" }, { crash: "segfault" }]);
+    const host2 = await fakeClaudeHarness(twice, { configuredModels: [OPUS] }).start();
+    const stopped = await host2.decide(input()).catch((e: unknown) => e);
+    expect(isSupervisorProviderError(stopped) && [stopped.failureClass, stopped.unremedied]).toEqual(["unknown", "already retried once"]);
+    await host2.close();
   });
 
   it("stops a silent turn as a timeout, and a turn over its allowance as exceeded", async () => {
@@ -299,17 +321,22 @@ describe("Claude Code supervisor harness: permissions and investigation evidence
 });
 
 describe("Claude Code supervisor harness: switching and restore", () => {
-  it("settles an interrupted switch from the newest session record", async () => {
+  it("settles an interrupted switch from a session on its target opened after the intent", async () => {
     const fake = fakeClaude();
     const harness = fakeClaudeHarness(fake, { configuredModels: [OPUS, SONNET] });
     const first = await harness.openSession!({ model: OPUS, role: "decide" });
+    // An earlier turn's model_retry opened a Sonnet session, then went back to Opus.
+    await harness.openSession!({ model: SONNET, role: "decide" });
+    await new Promise((r) => setTimeout(r, 5));
+    const intent = { at: new Date().toISOString(), from: OPUS, to: SONNET, reason: "slips", status: "intent" as const };
+    const binding = { sessionId: "logical", sessionFile: first.sessionFile, provider: CLAUDE_CODE_HARNESS, modelId: "opus", switchJournal: [intent], harness: CLAUDE_CODE_HARNESS };
+    // The controller died before the switch opened its session: no evidence it took.
+    expect(await reconcileSupervisorBinding(binding)).toMatchObject({ modelId: "opus", switchJournal: [{ status: "failed" }] });
     await new Promise((r) => setTimeout(r, 5));
     await harness.openSession!({ model: SONNET, role: "decide" });
     expect(await lastClaudeSessionModel(fake.sessionDir)).toEqual(SONNET);
-    const intent = { at: new Date().toISOString(), from: OPUS, to: SONNET, reason: "slips", status: "intent" as const };
-    const binding = { sessionId: "logical", sessionFile: first.sessionFile, provider: CLAUDE_CODE_HARNESS, modelId: "opus", switchJournal: [intent], harness: CLAUDE_CODE_HARNESS };
     expect(await reconcileSupervisorBinding(binding)).toMatchObject({ modelId: "sonnet", switchJournal: [{ status: "committed" }] });
-    const back = { ...intent, from: SONNET, to: OPUS };
+    const back = { ...intent, at: new Date(Date.now() + 1_000).toISOString(), from: SONNET, to: OPUS };
     expect(await reconcileSupervisorBinding({ ...binding, modelId: "sonnet", switchJournal: [back] })).toMatchObject({
       modelId: "sonnet",
       switchJournal: [{ status: "failed" }],

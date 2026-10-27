@@ -4,8 +4,8 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { parseSessionEntries } from "@earendil-works/pi-coding-agent";
-import { bindingHarness, type SupervisorBinding, type SupervisorHost, type SupervisorModelRef } from "./harness.js";
-import { CLAUDE_CODE_HARNESS, lastClaudeSessionModel } from "./claude-harness.js";
+import { bindingHarness, type ModelSwitchRecord, type SupervisorBinding, type SupervisorHost, type SupervisorModelRef } from "./harness.js";
+import { CLAUDE_CODE_HARNESS, claudeSessionsOpened, type ClaudeSessionOpened } from "./claude-harness.js";
 import { createPiHarness } from "./pi-harness.js";
 
 export { piEpisodeSessionOpener } from "./pi-harness.js";
@@ -73,27 +73,30 @@ export async function restorePiSupervisorFromBinding(options: RestorePiSuperviso
 /**
  * Settle switch intents left by a crash between journaling and commit, from
  * the bound harness's own record of the switch. Pi appends a `model_change`
- * entry to the session file when a switch takes effect. Claude Code switches
- * by opening a fresh session on the target, whose record (`<ref>.json` beside
- * the transcript copies) names its model as it opens, so the newest record's
- * model is the last one switched to (§4.4). An intent whose target matches
- * that last model is committed; any other intent failed and the run stays on
- * its `from` model. A harness that keeps no such record settles every intent
- * as failed. The session itself is never replaced.
+ * entry to the session file when a switch takes effect; an intent whose
+ * target matches the file's last model change is committed. Claude Code
+ * switches by opening a fresh session on the target, whose record
+ * (`<ref>.json` beside the transcript copies) names its model and opening
+ * time (§4.4); an intent is committed when a session on its target opened at
+ * or after the intent was journaled, so a session an earlier turn opened on
+ * that model (a model_retry) is no evidence. Any other intent failed and the
+ * run stays on its `from` model. A harness that keeps no such record settles
+ * every intent as failed. The session itself is never replaced.
  */
 export async function reconcileSupervisorBinding(binding: SupervisorBinding): Promise<SupervisorBinding> {
   if (!binding.switchJournal.some((r) => r.status === "intent")) return binding;
   const harness = bindingHarness(binding);
-  const last =
+  const last = harness === "pi" ? await lastModelChange(binding.sessionFile) : undefined;
+  const opened: ClaudeSessionOpened[] =
+    harness === CLAUDE_CODE_HARNESS && binding.sessionFile !== undefined ? await claudeSessionsOpened(path.dirname(binding.sessionFile)) : [];
+  const took = (record: ModelSwitchRecord): boolean =>
     harness === "pi"
-      ? await lastModelChange(binding.sessionFile)
-      : harness === CLAUDE_CODE_HARNESS && binding.sessionFile !== undefined
-        ? await lastClaudeSessionModel(path.dirname(binding.sessionFile))
-        : undefined;
+      ? last !== undefined && sameModel(last, record.to)
+      : opened.some((s) => s.openedAt >= Date.parse(record.at) && sameModel(s.model, record.to));
   let model: SupervisorModelRef = { provider: binding.provider, modelId: binding.modelId };
   const switchJournal = binding.switchJournal.map((record) => {
     if (record.status !== "intent") return record;
-    if (last !== undefined && sameModel(last, record.to)) {
+    if (took(record)) {
       model = { ...record.to };
       return { ...record, status: "committed" as const };
     }

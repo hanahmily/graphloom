@@ -345,6 +345,7 @@ export function createSupervisorHost(options: CreateSupervisorHostOptions): Supe
           throw new Error("decide has no provider-call allowance left this turn");
         }
         let reply = "";
+        /** A prompt that went silent, or a CLI that died with no result: retried once in a fresh session. */
         let timedOut: SupervisorProviderError | undefined;
         const reservedAtStart = input.admission?.reservedProviderCalls?.() ?? 0;
         try {
@@ -361,7 +362,9 @@ export function createSupervisorHost(options: CreateSupervisorHostOptions): Supe
           });
         } catch (err) {
           // Stop always wins: an aborted prompt is never a timeout to remedy.
-          if (input.signal?.aborted === true || !isSupervisorProviderError(err) || err.failureClass !== "timeout") throw err;
+          // A session throws `unknown` only for a process that died with no
+          // result (a CLI harness, §8), which shares the timeout's one retry.
+          if (input.signal?.aborted === true || !isSupervisorProviderError(err) || (err.failureClass !== "timeout" && err.failureClass !== "unknown")) throw err;
           timedOut = err;
         } finally {
           // Charged to the session that made the calls, before any replacement.
@@ -383,7 +386,7 @@ export function createSupervisorHost(options: CreateSupervisorHostOptions): Supe
           } catch (err) {
             throw last.withUnremedied(`opening a fresh session failed: ${err instanceof Error ? err.message : String(err)}`);
           }
-          remedy({ failureClass: "timeout", message: last.providerMessage }, "fresh_session_retry");
+          remedy({ failureClass: last.failureClass, message: last.providerMessage }, "fresh_session_retry");
           // The fresh session has no chat: a re-ask or rejection follows the full prompt.
           sent = decorate(text.startsWith(opening) ? text : `${opening}\n\n${text}`);
           continue;
