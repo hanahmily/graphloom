@@ -45,7 +45,8 @@ if (argv.includes("--help")) {
 if (argv[0] === "login" && argv[1] === "status") {
   const home = process.env.CODEX_HOME;
   if (home !== undefined && existsSync(path.join(home, "auth.json"))) {
-    process.stderr.write("Logged in using ChatGPT\n");
+    const key = readFileSync(path.join(home, "auth.json"), "utf8").includes("OPENAI_API_KEY");
+    process.stderr.write(key ? "Logged in using an API key - sk-***\n" : "Logged in using ChatGPT\n");
     process.exit(0);
   }
   process.stderr.write("Not logged in\n");

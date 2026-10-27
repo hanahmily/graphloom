@@ -623,8 +623,10 @@ S4 adds the Codex harness, on the same plan as S3 (§4.6). Where it differs:
 - **`probe()`** fails without configured confinement or where bwrap cannot
   run, when `codex exec --help` does not mention every flag above, `resume`,
   and `danger-full-access`, and when `codex login status` says "Not logged
-  in". `login status` makes no provider call, and covers a login kept in the
-  OS keyring, which a look for `auth.json` would miss.
+  in" or "Logged in using an API key" (a key stored with `codex login
+  --with-api-key` would bill the API, which is the Pi route). `login status`
+  makes no provider call, and covers a login kept in the OS keyring, which a
+  look for `auth.json` would miss.
 - **Selection, doctor, setup.** `run --supervisor codex` and `select:
   "codex"` work as for Claude Code, and the pin restores as in §4.6.
   `SHIPPED_SUPERVISOR_HARNESSES` is `pi`, `claude-code`, `codex`: the doctor

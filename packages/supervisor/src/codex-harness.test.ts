@@ -200,6 +200,9 @@ describe("Codex supervisor harness: probe", () => {
     writeFileSync(bin, `#!/bin/sh\nexec '${process.execPath}' '${FAKE_CODEX}' "$@"\n`, { mode: 0o755 });
     const harness = createCodexSupervisorHarness({ runId: "r", sessionDir: fake.sessionDir, codexHome: fake.codexHome, command: bin, allowUnconfined: true });
     expect(await harness.probe()).toMatchObject({ ok: false, reason: expect.stringMatching(/no login in .*codex login/) });
+    // A key stored with `codex login --with-api-key` is not a CLI login.
+    writeFileSync(path.join(fake.codexHome, "auth.json"), JSON.stringify({ OPENAI_API_KEY: "sk-placeholder" }));
+    expect(await harness.probe()).toMatchObject({ ok: false, reason: expect.stringMatching(/signed in with an API key.*codex login/) });
     writeFileSync(path.join(fake.codexHome, "auth.json"), "{}");
     expect(await harness.probe()).toEqual({ ok: true });
   });

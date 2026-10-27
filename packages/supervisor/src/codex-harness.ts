@@ -167,8 +167,12 @@ export interface CodexSupervisorHarnessOptions {
   transientRetryBaseMs?: number;
   /** Reads `codex exec --help` for the probe. Default: run `<command> exec --help`. */
   readHelp?: () => Promise<string | undefined>;
-  /** Whether Codex has a login, without a provider call; undefined when it cannot be told. Default: `codex login status`. */
-  loggedIn?: () => Promise<boolean | undefined>;
+  /**
+   * Whether Codex has a login, without a provider call: true, false, `"api-key"`
+   * for an API key stored in Codex's home (refused: OpenAI by API key is the Pi
+   * route), or undefined when it cannot be told. Default: `codex login status`.
+   */
+  loggedIn?: () => Promise<boolean | "api-key" | undefined>;
   /** Sees each session as it opens and may wrap it (conformance tests record what the host does with them). */
   observeSession?: (session: HarnessSession, opened: { model: SupervisorModelRef; role: HarnessSessionRole }) => HarnessSession;
 }
@@ -235,10 +239,12 @@ function run(command: string, args: string[], env: NodeJS.ProcessEnv): Promise<{
 }
 
 /** Codex's own answer to `codex login status` (no provider call); undefined when it cannot be read. */
-async function defaultLoggedIn(command: string, env: NodeJS.ProcessEnv): Promise<boolean | undefined> {
+async function defaultLoggedIn(command: string, env: NodeJS.ProcessEnv): Promise<boolean | "api-key" | undefined> {
   const status = await run(command, ["login", "status"], env);
   if (status === undefined) return undefined;
   if (/not logged in/i.test(status.out)) return false;
+  // `codex login --with-api-key` stores a key that Codex would bill to: not a CLI login.
+  if (/logged in using an api key/i.test(status.out)) return "api-key";
   return status.code === 0 ? true : undefined;
 }
 
@@ -535,6 +541,12 @@ export function createCodexSupervisorHarness(options: CodexSupervisorHarnessOpti
       if (missing.length > 0) return { ok: false, reason: `${command} exec --help does not mention ${missing.join(", ")}; update Codex` };
       const loggedIn = await (options.loggedIn ?? (() => defaultLoggedIn(command, env)))();
       if (loggedIn === false) return { ok: false, reason: `Codex has no login in ${codexHome}; run \`codex login\`` };
+      if (loggedIn === "api-key") {
+        return {
+          ok: false,
+          reason: `Codex in ${codexHome} is signed in with an API key; the Codex supervisor uses a ChatGPT login only: run \`codex login\` (OpenAI by API key is the Pi supervisor's route)`,
+        };
+      }
       return { ok: true };
     },
     openSession: ({ model, role }) => open(model, role),
