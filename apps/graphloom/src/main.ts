@@ -3,7 +3,7 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 /**
- * GraphLoom CLI: run | inspect | stats | wait | stop | resume | switch-model | delete | version | doctor | setup
+ * GraphLoom CLI: run | inspect | stats | wait | stop | resume | switch-model | delete | version | doctor | setup | skills
  */
 import { existsSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
@@ -23,6 +23,8 @@ import { describeTask } from "./rehearsal.js";
 import { isInteractive, runSetup, terminalPrompter } from "./setup.js";
 import { onceStopHook, parseDuration, waitForRun, type StopNotice } from "./notify.js";
 import { formatRunStats, loadRunStats } from "./stats.js";
+import { formatProgress, waitForProgress } from "./progress.js";
+import { formatSkillsStatus, installSkills, parseSkillAgent, removeSkills, skillsStatus, updateSkills, type SkillAgent } from "./skills.js";
 import { formatVersion, installRoot } from "./version.js";
 import { JOB_TIMEOUT_MS, killActiveChildren, runAutoUpdate } from "./auto-update.js";
 import {
@@ -106,6 +108,11 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (cmd === "skills") {
+    process.exitCode = await skillsCommand(args.slice(1));
+    return;
+  }
+
   // A run-scoped command on a run another installed version owns runs there (docs/design-release.md §5.1).
   const self = selfInstall();
   const dispatched = await dispatchToOwner(cmd, args, self);
@@ -139,6 +146,8 @@ async function main(): Promise<void> {
       install: self.record,
       onRunCreated: async ({ runId, stateDir }) => {
         crashContext = { runId, stateDir };
+        // A run started in the background is found by this line (wait, stats and inspect take either).
+        console.error(`graphloom: run ${runId} started; state ${stateDir}`);
         await recordOwnership(self, { runId, stateDir, ...(bundlePath !== undefined ? { plugin: bundlePath } : {}) });
       },
       runner,
@@ -182,11 +191,32 @@ async function main(): Promise<void> {
   }
 
   if (cmd === "wait") {
-    const usage = "wait <stateDir|runId> [--state-root <dir>] [--timeout <dur>] [--json]";
+    const usage = "wait <stateDir|runId> [--state-root <dir>] [--until stop|progress] [--since <cursor>] [--timeout <dur>] [--json]";
     const runRef = requireRunRef(args[1], usage);
     const stateRootFlag = flagValue(args, "--state-root");
     const stateRoot = stateRootFlag ? path.resolve(stateRootFlag) : undefined;
     const timeout = flagValue(args, "--timeout");
+    const until = flagValue(args, "--until") ?? "stop";
+    if (until !== "stop" && until !== "progress") throw new Error(`--until must be "stop" or "progress", not ${JSON.stringify(until)}`);
+    // An empty cursor (a watcher's first wait, `--since "$(cat cursor)"`) is no cursor.
+    const sinceFlag = flagValue(args, "--since");
+    if (args.includes("--since") && (sinceFlag === undefined || sinceFlag.startsWith("--"))) throw new Error("--since needs a cursor");
+    const since = sinceFlag === "" ? undefined : sinceFlag;
+    if (since !== undefined && until !== "progress") throw new Error("--since needs --until progress");
+    if (until === "progress") {
+      const progress = await waitForProgress(runRef, {
+        ...(stateRoot !== undefined ? { stateRoot } : {}),
+        ...(timeout !== undefined ? { timeoutMs: parseDuration(timeout) } : {}),
+        ...(since !== undefined ? { since } : {}),
+      });
+      console.log(args.includes("--json") ? JSON.stringify(progress, null, 2) : formatProgress(progress));
+      if (progress.outcome === "timeout") process.exitCode = 2;
+      if (progress.outcome === "orphaned") {
+        console.error(`run is recorded as running but ${progress.detail}; the controller died without recording a stop. \`graphloom resume\` takes it over.`);
+        process.exitCode = 3;
+      }
+      return;
+    }
     const result = await waitForRun(runRef, {
       ...(stateRoot !== undefined ? { stateRoot } : {}),
       ...(timeout !== undefined ? { timeoutMs: parseDuration(timeout) } : {}),
@@ -509,6 +539,52 @@ function requireRunRef(value: string | undefined, usage: string): string {
   return value;
 }
 
+/** `graphloom skills list|install|update|remove` (docs/design-agent-skills.md §3). */
+async function skillsCommand(args: string[]): Promise<number> {
+  const usage = "usage: graphloom skills list|install|update|remove [<name>...] [--agent claude-code|codex] [--dir <dir>] [--force] [--quiet] [--json]";
+  const sub = args[0];
+  const valued = new Set(["--agent", "--dir"]);
+  const agents: SkillAgent[] = [];
+  const names: string[] = [];
+  let dir: string | undefined;
+  for (let i = 1; i < args.length; i++) {
+    const a = args[i]!;
+    if (valued.has(a)) {
+      const v = args[++i];
+      if (v === undefined || v.startsWith("--")) throw new Error(`${a} needs a value`);
+      if (a === "--agent") agents.push(parseSkillAgent(v));
+      else dir = v;
+    } else if (a === "--force" || a === "--quiet" || a === "--json") {
+      continue;
+    } else if (a.startsWith("-")) {
+      throw new Error(`unknown option ${a}; ${usage}`);
+    } else {
+      names.push(a);
+    }
+  }
+  const options = { agents, ...(dir !== undefined ? { dir } : {}), names, force: args.includes("--force") };
+  if (sub === "list") {
+    const status = await skillsStatus(options);
+    console.log(args.includes("--json") ? JSON.stringify(status, null, 2) : formatSkillsStatus(status));
+    return 0;
+  }
+  if (sub === "install") {
+    await installSkills(options);
+    return 0;
+  }
+  if (sub === "update") {
+    if (names.length > 0) throw new Error("graphloom skills update refreshes every installed copy; it takes no names");
+    await updateSkills({ ...options, quiet: args.includes("--quiet") });
+    return 0;
+  }
+  if (sub === "remove") {
+    await removeSkills(options);
+    return 0;
+  }
+  console.error(usage);
+  return 1;
+}
+
 function requireCommandsMode(args: string[]): "stub" | "run" | undefined {
   const value = flagValue(args, "--commands");
   if (value === undefined) return undefined;
@@ -534,7 +610,7 @@ Usage:
   graphloom probe <task.yaml> --contract <name> [--scenario <name>] [--commands <stub|run>] [--offline]
   graphloom inspect <stateDir|runId> [--state-root <dir>]
   graphloom stats <stateDir|runId> [--state-root <dir>] [--json]
-  graphloom wait <stateDir|runId> [--state-root <dir>] [--timeout <dur>] [--json]
+  graphloom wait <stateDir|runId> [--state-root <dir>] [--until stop|progress] [--since <cursor>] [--timeout <dur>] [--json]
   graphloom stop <stateDir|runId> [--state-root <dir>]
   graphloom resume <stateDir|runId> [--state-root <dir>] [--supervisor <harness> [--reason <text>]] [--upgrade] [--update-plugin] [--update-executors] [--reconciled] [--rehearsal] [--on-stop <command>]
   graphloom switch-model <stateDir|runId> <model> --reason <text> [--state-root <dir>]
@@ -542,6 +618,10 @@ Usage:
   graphloom version [--json | --root]
   graphloom doctor [--task <task.yaml>] [--json]
   graphloom setup [--yes]
+  graphloom skills list [--agent <claude-code|codex>] [--dir <dir>] [--json]
+  graphloom skills install [<name>...] [--agent <claude-code|codex>] [--dir <dir>] [--force]
+  graphloom skills update [--agent <claude-code|codex>] [--dir <dir>] [--quiet]
+  graphloom skills remove [<name>...] [--agent <claude-code|codex>] [--dir <dir>] [--force]
 
 Installed releases (handled by the shim in ~/.local/bin, docs/design-release.md §4.3):
   graphloom upgrade [<version>] [--no-switch]
@@ -604,6 +684,17 @@ what stats prints. --timeout takes 90s, 10m, 2h (bare numbers are seconds).
 Exit 0: the run left running, whatever it became (read the status line). Exit
 2: timed out, still running. Exit 3: the state says running but its controller
 died without recording a stop (resume takes it over).
+
+Wait --until progress (docs/design-agent-skills.md §2) also returns when
+something meaningful happens: a stage entered, receipts accepted or
+invalidated, a supervisor episode started or ended (with its one-line reason),
+a quota or usage-limit pause (with resetAt), a budget reaching 80% of the run's
+budget, a resume, or the stop. --json prints the events, a summary of the run
+(status, stage, budgets, waiting states) and a cursor; wait --since <cursor>
+reports only what happened after it, so nothing is reported twice or lost.
+Exit 0: events, or the run is not running. Exit 2: the timeout elapsed with
+nothing to report (--json still prints the unchanged cursor). Exit 3: orphaned,
+as above. Exit 1: an error, such as another run's cursor.
 
 Version prints the product version: an installed release's version and commit
 from its release.json, or <version>-dev+<short sha> in a clone. --json prints
@@ -672,6 +763,17 @@ change and keeps the old file as <name>.bak-<UTC time>. It never asks for or
 writes a token. --yes accepts the recommendations (and counts as consent) and
 leaves existing files unchanged. run, resume, probe, check and rehearse start
 it on a terminal when no runner config exists at the default path.
+
+Skills (docs/design-agent-skills.md §3): GraphLoom ships agent skills for
+driving it from Claude Code ($CLAUDE_CONFIG_DIR/skills, default ~/.claude/skills)
+or Codex ($CODEX_HOME/skills, default ~/.codex/skills); GRAPHLOOM_CLAUDE_SKILLS_DIR
+and GRAPHLOOM_CODEX_SKILLS_DIR override them, --dir names one directory. Each
+copy carries .graphloom-skill.json (version and digest). install writes missing
+and outdated copies for the agents found here (or --agent); an edited copy only
+with --force, and never a directory GraphLoom did not write. update refreshes
+the copies GraphLoom installed, skipping edited ones; upgrade and automatic
+updates run it. remove deletes unedited copies (edited ones with --force); self
+uninstall runs it. setup offers to install them; doctor reports them.
 
 Agent runner: run and resume refuse to start without $GRAPHLOOM_RUNNER_CONFIG or
 ~/.config/graphloom/runner.json (graphloom setup writes it):

@@ -116,6 +116,10 @@ export async function assemble({ src, out, nodeDir, nodePin, version, commit, ep
     }
   }
 
+  // The agent skills `graphloom skills` installs (docs/design-agent-skills.md §3): each directory as it is.
+  if (!existsSync(path.join(src, "skills"))) throw new Error("staging tree has no skills/");
+  await cp(path.join(src, "skills"), path.join(dest, "skills"), { recursive: true, filter: filtered(skipInPackage) });
+
   for (const entry of readdirSync(path.join(src, "examples"), { withFileTypes: true })) {
     if (entry.isFile() && (entry.name.endsWith(".yaml") || entry.name === "README.md")) {
       await copyFile(path.join(src, "examples", entry.name), path.join(dest, "examples", entry.name));

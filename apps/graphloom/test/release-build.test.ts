@@ -254,6 +254,22 @@ describe("the release tree content checks (§2.3, §6 step 6)", () => {
     expect(result.status).toBe(0);
   });
 
+  it("passes the shipped skills, and fails a skill without SKILL.md, a name that is not its directory, no description, or a shipped install marker", async () => {
+    const root = await cleanTree();
+    await cp(path.join(repoRoot, "skills"), path.join(root, "skills"), { recursive: true });
+    expect(script("check-tree.mjs", ["--root", root]).status).toBe(0);
+    await mkdir(path.join(root, "skills", "empty"));
+    await mkdir(path.join(root, "skills", "renamed"));
+    await writeFile(path.join(root, "skills", "renamed", "SKILL.md"), "---\nname: other\n---\n# x\n");
+    await writeFile(path.join(root, "skills", "graphloom-run", ".graphloom-skill.json"), "{}");
+    const result = script("check-tree.mjs", ["--root", root]);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("skill without SKILL.md: skills/empty");
+    expect(result.stderr).toContain("skill frontmatter name is not its directory (renamed): skills/renamed/SKILL.md");
+    expect(result.stderr).toContain("skill frontmatter has no description: skills/renamed/SKILL.md");
+    expect(result.stderr).toContain("install marker shipped: skills/graphloom-run/.graphloom-skill.json");
+  });
+
   it("fails on excluded paths, host paths, absolute shebangs, escaping or dangling links, .env files, and credentials", async () => {
     const root = await cleanTree();
     const outside = await tempDir();

@@ -7,12 +7,12 @@
  * HOME with no Node on PATH, against fake release trees and a stub gh.
  */
 import { spawnSync } from "node:child_process";
-import { existsSync, readdirSync, statSync } from "node:fs";
-import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { appendFile, cp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ttyRun } from "./doctor-env.js";
-import { makeSandbox, removeTree, startDetached, tempBase, waitUntil, type Sandbox } from "./install-env.js";
+import { makeSandbox, realCli, removeTree, repoRoot, startDetached, tempBase, waitUntil, type Sandbox } from "./install-env.js";
 
 let base: string;
 beforeAll(async () => {
@@ -346,6 +346,59 @@ describe("self uninstall", () => {
     expect(existsSync(xdg)).toBe(true);
     expect(existsSync(config)).toBe(false);
     expect(existsSync(state)).toBe(true);
+  });
+});
+
+describe("agent skills follow upgrade and uninstall (docs/design-agent-skills.md §3)", () => {
+  /** A release with the real CLI and this checkout's skills; `edit` changes graphloom-run's text in it. */
+  const withSkills = (edit?: string) => async (tree: string) => {
+    await realCli(tree);
+    await cp(path.join(repoRoot, "skills"), path.join(tree, "skills"), { recursive: true });
+    if (edit !== undefined) await appendFile(path.join(tree, "skills", "graphloom-run", "SKILL.md"), edit);
+  };
+
+  it("upgrade refreshes the copies GraphLoom installed and skips edited ones; uninstall removes unedited ones", async () => {
+    const sb = await makeSandbox(base);
+    await mkdir(path.join(sb.home, ".claude"), { recursive: true });
+    const first = await sb.build("0.1.0", { populate: withSkills() });
+    const r = sb.installer(["--from", first.tarball], quiet);
+    expect(r.status, r.stderr).toBe(0);
+    const skills = path.join(sb.home, ".claude", "skills");
+    // Installing switched current, but installs nothing new: there were no copies.
+    expect(existsSync(skills)).toBe(false);
+
+    const install = sb.graphloom(["skills", "install", "--agent", "claude-code"], quiet);
+    expect(install.status, install.stderr).toBe(0);
+    expect(install.stdout).toContain("6 skill(s) written, 0 unchanged (version 0.1.0)");
+    await appendFile(path.join(skills, "graphloom-setup", "SKILL.md"), "\nmine\n");
+    const marker = (name: string) => JSON.parse(readFileSync(path.join(skills, name, ".graphloom-skill.json"), "utf8")) as { version: string };
+
+    await sb.publish("0.2.0", { populate: withSkills("\nNew in 0.2.0.\n") });
+    const up = sb.graphloom(["upgrade"], quiet);
+    expect(up.status, up.stderr).toBe(0);
+    expect(up.stdout, up.stdout + up.stderr).toContain("graphloom skills: 1 updated to 0.2.0");
+    expect(up.stdout).toContain(`kept ${path.join(skills, "graphloom-setup")} (you edited it)`);
+    expect(readFileSync(path.join(skills, "graphloom-run", "SKILL.md"), "utf8")).toContain("New in 0.2.0.");
+    expect(marker("graphloom-run").version).toBe("0.2.0");
+    expect(readFileSync(path.join(skills, "graphloom-setup", "SKILL.md"), "utf8")).toContain("mine");
+
+    const gone = sb.graphloom(["self", "uninstall"], quiet);
+    expect(gone.status, gone.stderr).toBe(0);
+    expect(gone.stdout).toContain(`kept ${path.join(skills, "graphloom-setup")}: you edited it`);
+    expect(readdirSync(skills)).toEqual(["graphloom-setup"]);
+    expect(existsSync(sb.ghome)).toBe(false);
+  }, 240_000);
+
+  it("uninstall names the copies left when current cannot remove them", async () => {
+    const sb = await makeSandbox(base);
+    await installed(sb, "0.1.0");
+    const copy = path.join(sb.home, ".codex", "skills", "graphloom-run");
+    await mkdir(copy, { recursive: true });
+    await writeFile(path.join(copy, ".graphloom-skill.json"), "{}");
+    const gone = sb.graphloom(["self", "uninstall"], quiet);
+    expect(gone.status, gone.stderr).toBe(0);
+    expect(gone.stdout).toContain(`kept ${copy}: remove it yourself`);
+    expect(existsSync(copy)).toBe(true);
   });
 });
 

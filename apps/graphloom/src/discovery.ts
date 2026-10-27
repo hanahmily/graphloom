@@ -43,6 +43,7 @@ import {
 import type { SupervisorPreference } from "@graphloom/sdk";
 import type { HarnessProbe } from "@graphloom/supervisor";
 import { installRoot, versionInfo } from "./version.js";
+import { skillsStatus, type SkillsStatus } from "./skills.js";
 
 export const HARNESS_ORDER: readonly HarnessName[] = ["claude-code", "codex", "pi"];
 export const HARNESS_LABEL: Readonly<Record<HarnessName, string>> = { "claude-code": "Claude Code", codex: "Codex", pi: "Pi" };
@@ -570,6 +571,8 @@ export interface Discovery {
   supervisorSelection?: SupervisorSelection;
   /** Why `run` would refuse the existing supervisor config's selection (a `select` that is not available). */
   supervisorSelectionError?: string;
+  /** The bundled agent skills and their copies for Claude Code and Codex (docs/design-agent-skills.md §3); absent when unreadable. */
+  skills?: SkillsStatus;
   env: NodeJS.ProcessEnv;
 }
 
@@ -693,6 +696,14 @@ export async function discover(env: NodeJS.ProcessEnv = process.env, root: strin
   const supervisorCandidates = await discoverSupervisorCandidates(claude, codex, pi, claudeSupervisorSection, codexSupervisorSection);
   const { enabled: supervisorEnabled, selection: supervisorSelection, error: supervisorSelectionError } = await discoverSupervisorSelection(supervisor.config, pi, env);
   const updates = await discoverUpdates(self, runner, env);
+  const skills = await skillsStatus({ env, root }).then(
+    (status) => ({
+      ...status,
+      // An agent the doctor found (its CLI, as configured) counts as found too.
+      targets: status.targets.map((t) => ({ ...t, found: t.found || (t.agent === "claude-code" ? claude.path !== undefined : t.agent === "codex" ? codex.path !== undefined : false) })),
+    }),
+    () => undefined,
+  );
   return {
     self,
     root,
@@ -710,6 +721,7 @@ export async function discover(env: NodeJS.ProcessEnv = process.env, root: strin
     supervisorEnabled,
     ...(supervisorSelection !== undefined ? { supervisorSelection } : {}),
     ...(supervisorSelectionError !== undefined ? { supervisorSelectionError } : {}),
+    ...(skills !== undefined ? { skills } : {}),
     env,
   };
 }

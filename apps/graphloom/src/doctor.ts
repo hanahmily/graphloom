@@ -202,6 +202,7 @@ function configurationChecks(d: Discovery): DoctorCheck[] {
   }
 
   checks.push(updatesCheck(d));
+  checks.push(...skillsChecks(d));
   return checks;
 }
 
@@ -457,6 +458,39 @@ export function formatDoctor(report: DoctorReport): string {
 
 export function taskProfile(taskPath: string, config: string | undefined): string | undefined {
   return config === undefined ? undefined : path.resolve(path.dirname(taskPath), config);
+}
+
+/**
+ * The bundled agent skills per agent found here (docs/design-agent-skills.md
+ * §3): current, or what `graphloom skills` would do. Edited copies are kept and
+ * named; a directory GraphLoom did not write is the user's own.
+ */
+export function skillsChecks(d: Discovery): DoctorCheck[] {
+  const s = d.skills;
+  if (s === undefined || s.bundled.length === 0) return [];
+  const checks: DoctorCheck[] = [];
+  for (const t of s.targets) {
+    if (t.agent === "dir" || !t.found) continue;
+    const bundled = t.skills.filter((c) => s.bundled.includes(c.name));
+    const by = (state: string) => bundled.filter((c) => c.state === state).map((c) => c.name);
+    const [missing, outdated, edited, foreign] = [by("missing"), by("outdated"), by("edited"), by("foreign")];
+    const notes = [
+      ...(edited.length > 0 ? [`edited by you, kept: ${edited.join(", ")}`] : []),
+      ...(foreign.length > 0 ? [`not GraphLoom's (no marker), left alone: ${foreign.join(", ")}`] : []),
+    ];
+    const tail = notes.length > 0 ? `; ${notes.join("; ")}` : "";
+    const name = `skills (${t.agent})`;
+    if (missing.length === bundled.length) {
+      checks.push(check("configuration", name, "warn", `none of the ${bundled.length} GraphLoom skills are installed in ${t.dir}${tail}`, `graphloom skills install --agent ${t.agent}`));
+    } else if (missing.length > 0) {
+      checks.push(check("configuration", name, "warn", `not installed in ${t.dir}: ${missing.join(", ")}${tail}`, `graphloom skills install --agent ${t.agent}`));
+    } else if (outdated.length > 0) {
+      checks.push(check("configuration", name, "warn", `from another version in ${t.dir}: ${outdated.join(", ")} (this is ${s.version})${tail}`, `graphloom skills update --agent ${t.agent}`));
+    } else {
+      checks.push(check("configuration", name, "pass", `${bundled.length - edited.length - foreign.length} current (${s.version}) in ${t.dir}${tail}`));
+    }
+  }
+  return checks;
 }
 
 export { LOGIN_FIX };
