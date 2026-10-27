@@ -1,6 +1,6 @@
 # Installable releases
 
-Status: proposed design, 2026-10-26; phases R0, R1, R2, R3, and R4 implemented. The repository
+Status: proposed design, 2026-10-26; phases R0 to R5 implemented; `v0.1.0` is prepared, not yet published. The repository
 license (Apache-2.0: `LICENSE`, `NOTICE`, and `license` in every `package.json`)
 and the source headers with their check (§2.8) are in place (R0). So are the
 product version and `graphloom version` (§2.4), the repair toolchain as CLI
@@ -13,7 +13,10 @@ implemented"). R3 added run ownership, dispatch to the owning version,
 `resume --upgrade` with state formats and migrators, the product version in
 the gate fingerprint, and the upgrade-matrix hooks (§5.6). R4 added
 `graphloom doctor`, guided `graphloom setup`, the automatic first run, and
-the installer's setup offer (§4.8); everything else here is design. This covers how GraphLoom is packaged, installed, upgraded, and released
+the installer's setup offer (§4.8). R5 added `release.sh prepare` and
+`publish`, signing, and the external-plugin smoke test (§6, "R5 as
+implemented"); the first release waits for the maintainer's release key.
+This covers how GraphLoom is packaged, installed, upgraded, and released
 for an operator who runs it on their own Linux machine. It specializes the
 [TypeScript core design](design-typescript-core.md) (version transitions, §8) and the
 [executor design](design-executors.md#restart-versions-and-recovery). It adds no
@@ -815,9 +818,11 @@ own toolchain.
   `release/allowed_signers` of the version tree `install.sh` sits in (or
   of the checkout, for `scripts/install.sh`), or `--allowed-signers
   <file>`. The signing identity and namespace are both `graphloom-release`.
-  Until R5 commits a key and signs releases, nothing can be verified, so a
-  manual install warns and relies on the checksum, and `--auto` and
-  `--require-signature` refuse.
+  Until the maintainer commits the release key (§6, "R5 as implemented"),
+  nothing can be verified, so a manual install warns and relies on the
+  checksum, and `--auto` and `--require-signature` refuse. A standalone
+  `install.sh` downloaded from a release carries no anchor, so a first
+  install names one with `--allowed-signers`.
 - **Install steps.**
   - The lock is taken before the download, which goes into `.staging/`.
     Every `.staging/` entry left by an interrupted install is removed by the
@@ -1265,8 +1270,8 @@ usual, and `graphloom upgrade` clears the skip.
   across a breaking release.
 - **Signature.** The worker announces instead of installing when it cannot
   verify a signature: `ssh-keygen` is missing, or `current` carries no
-  `release/allowed_signers`. Until R5 signs releases, no release is
-  installed automatically. A release without `SHA256SUMS.sig` fails
+  `release/allowed_signers`. Until a release that carries the committed
+  release key is installed, no release is installed automatically. A release without `SHA256SUMS.sig` fails
   `install.sh --auto`, which records it.
 - **Failures.** `install.sh --auto` writes its own failures to
   `update/last-failure` as `{ "version", "reason", "time" }`, and the
@@ -1452,8 +1457,9 @@ usual, and `graphloom upgrade` clears the skip.
 
 ## 6. Release procedure (local)
 
-`scripts/release.sh` is a script specification; phase R1 implements `build`
-(see "R1 as implemented" at the end of this section). It runs on an otherwise
+`scripts/release.sh` implements this procedure: phase R1 `build` and R5
+`prepare`, `publish`, and signing (see "R1 as implemented" and "R5 as
+implemented" at the end of this section). It runs on an otherwise
 idle Linux x64 machine with bubblewrap working,
 `gh` authenticated with push rights, and the signing key loaded. It needs no host
 Node beyond what fetches the pinned runtime. All gate, build, and smoke steps run
@@ -1697,6 +1703,154 @@ runs steps 3 to 8 on `<rev>`, which defaults to `HEAD`. It publishes nothing.
   `GRAPHLOOM_DISABLE_AUTOUPDATE=1`, so no smoke step queries the real
   release source. Sub-step 5 still waits for a previous release.
 
+### R5 as implemented
+
+- **The release key.** The repository carries no key, and `release.sh`
+  never creates or writes one. The maintainer creates it once and commits
+  its public half through a reviewed PR to `main`:
+
+  ```sh
+  ssh-keygen -t ed25519 -C graphloom-release -f ~/.ssh/graphloom-release
+  printf 'graphloom-release namespaces="graphloom-release,git" %s\n' \
+    "$(cat ~/.ssh/graphloom-release.pub)" >release/allowed_signers
+  ```
+
+  The private key never enters the repository. `release.sh build` and
+  `publish` take it as `--signing-key <file>`, else
+  `$GRAPHLOOM_RELEASE_SIGNING_KEY`; the file may also be the `.pub` of a key
+  that `ssh-agent` holds. `git` in `namespaces` lets the same key sign the
+  tag, because Git verifies SSH tag signatures in the `git` namespace.
+  `install.sh` verifies `SHA256SUMS.sig` only in the `graphloom-release`
+  namespace. There is no placeholder file: until the key is committed,
+  `build` and `publish` refuse with these instructions, and installs behave
+  as §4.7 says.
+- **`prepare <version> [--previous <release.json> | --first] [--no-pr]`.**
+  - Step 1: on `main`, equal to `<remote>/main` (`--remote`, default
+    `origin`) after a fetch. The tree is clean except `CHANGELOG.md`. Tag
+    `v<version>` and branch `release/v<version>` exist neither locally nor
+    on the remote, and `<version>` is greater than the newest release among
+    local tags, remote tags, and published GitHub releases. `--first`
+    asserts that there is none.
+  - Changelog: without a `## [<version>]` section, `prepare` writes a draft
+    from the PR titles and direct commits on `main` since the previous tag,
+    with `TODO` markers, and stops. A section passes when it has Added,
+    Changed, or Fixed entries, `### Upgrade notes` with the five labelled
+    entries `**State format:**`, `**Configuration:**`, `**SDK protocol:**`,
+    `**Node:**`, and `**Digests:**`, and no `TODO`. `prepare` writes the
+    components table (executor and plugin versions) into the section
+    between generated markers.
+  - Step 2: on a new `release/v<version>` branch, `prepare.mjs bump` sets
+    the lockstep versions (§3) and every workspace's dependency on a
+    lockstep package, testkit's and the executors' included, and the SDK
+    entry of each plugin's own lockfile. `npm install --package-lock-only`
+    refreshes the root lockfile on the pinned Node. The plugin manifests are
+    regenerated on a built copy of the bumped tree, because a manifest
+    script may read the plugin's build, so the maintainer's checkout keeps
+    its `node_modules` and `dist`. Then the header check, the changelog
+    check, and the lockstep check run, and everything is committed as
+    `release: v<version>`.
+  - The commit is gated like `build` step 4, in a clean clone on the pinned
+    Node. In that clone, regenerating the manifests must change nothing, and
+    the components are computed as `release.json` will record them.
+    `check-components` then applies the §3 bump rule against the previous
+    release's `release.json` (`--previous`, else downloaded from the newest
+    release). A changed digest needs a changed version. A newer
+    `stateFormat` needs the staged controller's `migrationPath` from the
+    previous format and a committed fixture in that format. A changed
+    `sdkProtocol` needs a breaking release.
+  - It pushes the branch and runs `gh pr create`. `--no-pr` prints both
+    commands instead and keeps the work directory with the PR body.
+- **`build` signing.** A signed build needs the commit's
+  `release/allowed_signers` with a `graphloom-release
+  namespaces="graphloom-release,…"` line. Before the gate, it signs a probe
+  and verifies it against that file, so a wrong key costs nothing. It also
+  requires the commit's `CHANGELOG.md` section. After step 6, the tree must
+  carry the same `allowed_signers`. The section's components table must
+  equal one generated from `release.json`. `SHA256SUMS` is signed with
+  `ssh-keygen -Y sign -n graphloom-release` and verified. The smoke install
+  runs `install.sh --from <tarball> --require-signature --allowed-signers
+  <the commit's file>`, as a first install names its anchor. `--previous
+  <release.json>` also applies the bump rule. `--unsigned` makes a
+  development build with no signature and no changelog check, which
+  `publish` refuses.
+- **`build` reproducibility record.** With `--compare-to`, a build whose
+  four assets hash as in the other build writes `reproduced.json` (`commit`,
+  `comparedTo`, and the hashes). It is not a release asset.
+- **Step 8.6, the external plugin.** The installed `examples/plugins/hello`
+  is copied to the smoke directory, outside any checkout, without `dist/`,
+  beside the packed SDK tarball. Its `@graphloom/sdk` dependency becomes
+  `file:../graphloom-sdk-<version>.tgz`. `npm i --offline --ignore-scripts`
+  runs on the pinned Node and npm, from the npm cache the gate filled. The
+  SDK must be installed as a package of the product version, not a link.
+  The plugin is built with the installed release's `node/bin/node` and
+  `node_modules/typescript`, and its manifest is regenerated with its own
+  script. Then a new task links it as `plugins/hello`, and `check` and
+  `rehearse --offline` run through the shim, with no Node on `PATH`, under
+  the verdict rule of sub-step 4.
+- **`publish <version> [--assets <dir>] [--dry-run]`.** The assets default
+  to `release-out/<version>/`.
+  - Preconditions:
+    - all six assets are present, and `SHA256SUMS` lists exactly the four
+      others and matches them
+    - `release.json` names the product, version, tag, and platform
+    - the trust anchor is `release/allowed_signers` at `release.json`'s
+      commit, never the working tree's or the download's; `SHA256SUMS.sig`
+      verifies against it, and the signing key signs what it verifies
+    - the tarball's `release.json` equals the asset, `install.sh` equals
+      `scripts/install.sh` at the commit, and the SDK tarball's digest
+      equals `release.json`'s
+    - `reproduced.json` records these hashes for this commit
+    - the commit is on `<remote>/main` after a fetch, and its
+      `CHANGELOG.md` section, with a components table matching
+      `release.json`, is the release notes
+    - tag `v<version>` is absent, or already at the commit, locally and on
+      the remote, and `gh` has no release of that tag, draft or published
+    - the bump rule holds against the newest earlier release
+  - Step 9: `git -c gpg.format=ssh -c user.signingKey=<key> tag -s -a`,
+    verified with `git verify-tag` against the commit's `allowed_signers`,
+    then pushed as `refs/tags/v<version>`.
+  - Step 10: `gh release create v<version> --verify-tag --title "GraphLoom
+    v<version>" --notes-file <section>` with the six assets. The release is
+    downloaded again, each asset compared byte for byte, and the checksums
+    and signature verified.
+  - The published `install.sh --version <version> --require-signature
+    --allowed-signers <the commit's file>` runs in a fresh `HOME`, with no
+    Node on `PATH`, through the maintainer's `gh` (its config directory and
+    `gh auth token`). `graphloom version` must print `graphloom <version>
+    (<short commit>)`.
+  - When an earlier release exists, that release is installed in another
+    fresh `HOME` and `graphloom upgrade` must reach `<version>`.
+  - **`--dry-run`** runs every precondition. It signs and verifies the tag
+    in a scratch clone and prints the tag, verify, push, and
+    `gh release create` commands instead of running them. It then rehearses
+    the published install through `scripts/release/stub-gh.sh`, a local
+    `gh` stand-in that serves the local assets. It tags, pushes, and creates
+    nothing.
+- **Helpers.** `scripts/release/prepare.mjs` holds the version bump, the
+  changelog draft, check, table, and notes, the tree's components, and the
+  bump rule. `stub-gh.sh` is the `gh` stand-in for `--dry-run` and the tests.
+- **Tests.** `apps/graphloom/test/release-publish.test.ts` covers the
+  helpers. It also runs the real `release.sh` in a fixture repository with a
+  bare remote, the stub `gh`, and throwaway keys:
+  - `prepare`'s refusals, the draft and its refusal, and the bumped,
+    regenerated, committed, and clone-gated release commit, with the PR
+    commands printed or the PR opened
+  - the bump rule against a published previous release
+  - `publish --dry-run`, which changes no tag, remote, or release
+  - a real `publish` to the stub, which tags, verifies, uploads, re-verifies,
+    and installs
+  - `publish`'s refusals: another key's signature, a wrong signing key, no
+    reproduction record, a tampered asset, a commit not on `main`, an
+    existing release, and no committed `allowed_signers`
+
+  The full procedure runs by hand, as recorded in the release PR.
+- **`v0.1.0`.** `prepare 0.1.0 --first` produced the release commit:
+  lockstep `0.1.0`, the lockfiles and manifests, and `CHANGELOG.md`. No
+  executor or plugin version moved, because there is no previous
+  `release.json` (§2.8). The changelog has no `[Unreleased]` section.
+  Publishing needs the maintainer's key (above), a merged release commit,
+  two builds of it with `--compare-to`, and `publish 0.1.0`.
+
 ## 7. Compatibility, support, and security
 
 **Support.**
@@ -1743,7 +1897,7 @@ runs steps 3 to 8 on `<rev>`, which defaults to `HEAD`. It publishes nothing.
 | R2 | `install.sh`, the shim, `graphloom upgrade`, `self list/use/rollback/prune/uninstall`, automatic updates (`__auto-update`, `autoUpdate` in the runner config, `update/`, `install.lock`, the skip record, auto-prune), and deterministic packing. A read-only version directory also needs the repair snapshot (`snapshotRepairCandidate`, `packages/controller/src/repair.ts`) to make its copy writable, because `cp` keeps the read-only modes (done: §4.7, §5.5, §6 "R2 as implemented"; `makeTreeWritable` serves the plugin and executor snapshots) | Shell tests in a temporary `HOME` with no host Node: atomic switch, no overwrite, prune respects ownership and plugin links, an interrupted install is never listed. `upgrade` installs, switches, lists runs on older versions, and `--no-switch` keeps `current`. Updater tests against a fake release source and a stub `gh`: at most one check per 24 hours; patch (and from 1.0, minor) installed and switched; a breaking release only announced; `notify` never installs; a bad checksum or signature records the failure and does not switch; two concurrent invocations install once; `GRAPHLOOM_DISABLE_AUTOUPDATE=1` and `off` make no network call; the notice never reaches a non-TTY, `--json`, or hook invocation, and the foreground exit code is unchanged; `self rollback` keeps the skipped version from being reinstalled until a newer release or `upgrade`; auto-prune keeps three versions plus owners; a process started from the old version keeps loading from it across a switch. Two independent builds give the same hash (done: `apps/graphloom/test/install.test.ts`, `auto-update.test.ts`, `packages/controller/src/repair.test.ts`, and `release.sh build --compare-to`) |
 | R3 | Run ownership (`runs/<id>.json`, `install` record, `stateFormat`), dispatch to the owning version, `resume --upgrade` with ordered migrators, the gate fingerprint including the product version, and the `rehearse --stop-at` / `resume --rehearsal` hooks (done: §5.6) | Controller and CLI tests: resume under a new `current` dispatches with no pin mismatch. `--upgrade` migrates each committed fixture and completes it on a scripted runner. Transitions are recorded. Downgrade, crossing a major, an unknown format, a missing migrator, and an unsettled repair are each refused with the run unchanged. A cached gate result is not reused across versions (done: `packages/controller/src/upgrade.test.ts`, `apps/graphloom/test/ownership.test.ts`, `gate.test.ts`) |
 | R4 | `doctor` with agent discovery (Claude Code, Codex, Pi credentials, `gh`), viable-setup reporting, `fix:` commands, and the updates check; `doctor --task` with `environment`, supervisor selection, and `GraphDefinition.agentRoles` (SDK shape check; issue-fix declares its roles); guided `setup` with `--yes`, rerun, and backups; automatic first-run setup in `run`, `resume`, `probe`, `check`, and `rehearse`; the installer's setup offer (§4.2 step 6, §4.4, §4.5) (done: §4.8; Pi and Claude Code (S3) supervisors are configured, and a Codex supervisor is reported but not configured until S4) | Tests with a stubbed `PATH` and `HOME` (stub `claude`, `codex`, `gh`, `bwrap`; Pi provider variables and auth store): each discovery result for each agent (missing, probe failed, logged out, login not verifiable, available), each with its `fix:` command; each reason automatic updates are a no-op. Viable setups for Claude Code only, Codex only, Pi only, and all three, including the supervisor order Pi, Claude Code, Codex. `doctor --task` on a fixture plugin's `agentRoles`: an unavailable role harness, a read-only harness on a write role, and a `distinctFrom` conflict, each with its alternatives. Setup offers only available choices with the recommendation; refusing `allowUnrestricted` writes nothing; `--yes` writes the recommendations; a rerun shows the current config, changes only confirmed answers, and keeps a `.bak-` copy, and `--yes` leaves an existing file unchanged. Under a pseudo-terminal, `run` with no config completes setup and then the run; without one, and with `--json` or `GRAPHLOOM_RUN_ID` set, `run` exits 1 naming `graphloom setup --yes` and `check` reports and continues. The installer offers setup only on a terminal. No written file contains a stub credential value. The doctor reuses the confinement and capability probes, spends no model call, and never asks for a host Node (done: `apps/graphloom/test/doctor.test.ts`, `doctor-report.test.ts`, `doctor-task.test.ts`, `doctor-installed.test.ts`, `setup.test.ts`, `first-run.test.ts`, `install.test.ts`, and `packages/sdk/src/index.test.ts`) |
-| R5 | `release.sh prepare/publish`, signing, the external-plugin smoke test, and the first release `v0.1.0` | The full procedure in §6. The upgrade matrix starts with the second release, from its first fixture |
+| R5 | `release.sh prepare/publish`, signing, the external-plugin smoke test, and the first release `v0.1.0` (tooling done and `v0.1.0` prepared, §6 "R5 as implemented"; publishing waits for the release key) | The full procedure in §6. The upgrade matrix starts with the second release, from its first fixture (done for the tooling: `apps/graphloom/test/release-publish.test.ts`, and `prepare 0.1.0`, two `build 0.1.0` runs with `--compare-to`, and `publish 0.1.0 --dry-run` with a throwaway key) |
 
 Open questions: none at present. Repository visibility is to be revisited
 later. Making the repository public would add `curl` installs and
