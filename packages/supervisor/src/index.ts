@@ -71,6 +71,29 @@ export { classifyClaudeFailure } from "./claude-failure.js";
 export { claudeStepKind, claudeStepRecorder, CLAUDE_WRITE_TOOLS, type ClaudeStepRecorder } from "./claude-steps.js";
 
 export {
+  CODEX_API_KEY_ENV,
+  CODEX_DEFAULT_MODEL,
+  CODEX_DEFAULT_PROMPT_TIMEOUT_MS,
+  CODEX_DEFAULT_PROMPT_TOTAL_TIMEOUT_MS,
+  CODEX_HARNESS,
+  CODEX_HARNESS_CAPABILITIES,
+  CODEX_SUPERVISOR_FLAGS,
+  CODEX_SUPERVISOR_SANDBOX,
+  codexSessionsOpened,
+  createCodexSupervisorHarness,
+  lastCodexSessionModel,
+  type CodexConfinement,
+  type CodexReviewSessionOptions,
+  type CodexSessionOpened,
+  type CodexSessionRecord,
+  type CodexSupervisorHarness,
+  type CodexSupervisorHarnessOptions,
+} from "./codex-harness.js";
+
+export { classifyCodexFailure } from "./codex-failure.js";
+export { codexStepKind, codexStepRecorder, type CodexStepRecorder } from "./codex-steps.js";
+
+export {
   buildInspectResultPrompt,
   buildReaskPrompt,
   buildRecoveryPrompt,

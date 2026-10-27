@@ -124,11 +124,11 @@ export function fakeStepFor(step: ScriptStep): FakeStep {
 }
 
 /** Records what the host did with each session, in the conformance suite's log shape. */
-export function loggingSessions(log: ScriptLog): NonNullable<ClaudeSupervisorHarnessOptions["observeSession"]> {
+export function loggingSessions(log: ScriptLog, prefix = "claude-session"): NonNullable<ClaudeSupervisorHarnessOptions["observeSession"]> {
   let opened = 0;
   return (session, { model, role }) => {
     opened += 1;
-    const id = `claude-session-${opened}`;
+    const id = `${prefix}-${opened}`;
     log.opened.push({ session: id, model: `${model.provider}/${model.modelId}`, role });
     const wrapped: HarnessSession = {
       ...session,

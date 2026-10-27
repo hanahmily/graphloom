@@ -1,9 +1,9 @@
 # Supervisor harnesses: Pi, Claude Code, and Codex
 
 Status: proposed design, 2026-10-26; S1 (the shared harness library, §3),
-S2 (the supervisor host contract, §4.1, as built in §4.5), and S3 (the
-Claude Code harness, as built in §4.6) implemented, S4 to S6 not
-implemented. This supersedes the
+S2 (the supervisor host contract, §4.1, as built in §4.5), S3 (the
+Claude Code harness, as built in §4.6), and S4 (the Codex harness, as built
+in §4.7) implemented, S5 and S6 not implemented. This supersedes the
 Pi-only backend choice in the [core design](design-typescript-core.md) §6
 ("Standalone Pi SDK session implementation") and in the
 [Pi supervisor design](design-pi-supervisor.md). Pi stays a supported harness,
@@ -552,6 +552,98 @@ above leave open, or departs from them, it did so as follows.
   `executors/coding-agent` changes and its digest with it: a run started
   before S3 resumes with `--update-executors`.
 
+### 4.7 As built in S4
+
+S4 adds the Codex harness, on the same plan as S3 (§4.6). Where it differs:
+
+- **Modules.** `packages/supervisor/src/codex-harness.ts` is
+  `createCodexSupervisorHarness` (`probe`, `openSession`, `openReviewSession`,
+  `start`, `restore`), `codex-steps.ts` turns `exec --json` events into
+  investigation steps, and `codex-failure.ts` is `classifyCodexFailure`.
+  `apps/graphloom/src/supervisor-codex.ts` composes it for a run: the `codex`
+  section of `supervisor.json` (`command`, `codexHome`, `models`, `passEnv`),
+  Claude Code's bwrap launch (`claudeConfinement`), and the directories under
+  `<stateDir>/supervisor/codex`.
+- **One process per prompt.** The first prompt of a session runs `codex exec
+  --json`; Codex names the thread in `thread.started`. Every follow-up runs
+  `codex exec --sandbox danger-full-access --cd <cwd> resume … <thread> -`
+  after the shared write-back (`openCodexThread`) restores GraphLoom's copy of
+  the rollout into Codex's home. `--ephemeral` is never passed.
+- **Flags.** `--sandbox danger-full-access` (bwrap is the limit, §5.1),
+  `--skip-git-repo-check`, `--output-last-message` (a file in the scratch
+  directory, removed after each prompt), `--model` unless the model id is
+  `default`, `--config model_reasoning_effort=…` for a reasoning level
+  (`minimal` through `xhigh` as named, `max` as `xhigh`, `off` passes
+  nothing), and `--ignore-user-config`. The last keeps the operator's
+  `config.toml` (its MCP servers, plugins, hooks, profiles, and default
+  model) out of the supervisor, as `--strict-mcp-config` does for Claude
+  Code; Codex still signs in from its home. Live, it also cut a trivial
+  turn's input from about 89k to 17k tokens. No `--output-schema` (§4.2).
+- **No appended system prompt.** Codex has no `--append-system-prompt`, so
+  the harness's instructions open the first prompt of each thread, and the
+  thread keeps them.
+- **Session records.** Codex names a thread only once a process runs, so
+  `HarnessSession.sessionId` is GraphLoom's own UUID and the binding's
+  `sessionFile` is the session's record,
+  `<sessionDir>/codex-session-<uuid>.json`, written when the session opens:
+  harness, model, system prompt digest, role, opening time, and, once Codex
+  names it, `threadId` and `transcript` (`codex-<thread>.jsonl`, the rollout
+  copy the shared driver keeps beside it). `reconcileSupervisorBinding`
+  settles an interrupted switch from these records as it does for Claude
+  Code. This departs from §4.3, which names the rollout copy as
+  `sessionFile`.
+- **Investigation steps.** Each item Codex runs, from `item.started` to its
+  `item.completed` within one prompt (item ids restart in each process), is
+  one step: `command_execution` is `command` with its command, aggregated
+  output, and exit code (a declined or unfinished command has none and keeps
+  its status); `file_change` is `file_change` with its paths and status;
+  `mcp_tool_call` is `tool`, named `mcp:<server>/<tool>`; `web_search` and
+  anything else are `tool`. Reasoning, agent messages, plans (`todo_list`),
+  and `error` items are not steps. Codex 0.162 has no file-read tool: a read
+  is a shell command, recorded with the file's content as its output (§11).
+- **Failures.** `classifyCodexFailure` maps the driver's summary: `quota`
+  (Codex's "You've hit your usage limit … try again in …", with the stated
+  reset), `overflow` (context window, `context_length_exceeded`), `auth` (not
+  logged in, `401 Unauthorized`, which is what Codex 0.162 reports without a
+  login, an expired token; the message names `codex login`), `transient`
+  (the shared classifier), otherwise `unknown`. A stall and the total cap are
+  `timeout`. A process that exits without reporting a failure (no `error` or
+  `turn.failed` event) is thrown as `unknown`, so the host gives it the
+  timeout's one `fresh_session_retry`.
+- **Shared driver.** `runCodexProcess` gained `onEvent`. An `error` event no
+  longer fails a turn by itself: Codex reports each reconnect it retries
+  itself as one ("Reconnecting... 2/5"), so the turn fails only when it does
+  not complete, with `turn.failed`, or the last `error`, as its reason. Both
+  change the vendored copy in `executors/coding-agent`, so its digest
+  changes: a run started before S4 resumes with `--update-executors`.
+- **Credentials.** `CODEX_HOME` is always set (from `codexHome`, then
+  `CODEX_HOME`, then `~/.codex`). `OPENAI_API_KEY` and `CODEX_API_KEY` are
+  never passed; `passEnv` and `supervisor.json` refuse them, and a `codex`
+  section refuses `apiKey`. OpenAI by API key is the Pi route.
+- **`probe()`** fails without configured confinement or where bwrap cannot
+  run, when `codex exec --help` does not mention every flag above, `resume`,
+  and `danger-full-access`, and when `codex login status` says "Not logged
+  in" or "Logged in using an API key" (a key stored with `codex login
+  --with-api-key` would bill the API, which is the Pi route). `login status`
+  makes no provider call, and covers a login kept in the OS keyring, which a
+  look for `auth.json` would miss.
+- **Selection, doctor, setup.** `run --supervisor codex` and `select:
+  "codex"` work as for Claude Code, and the pin restores as in §4.6.
+  `SHIPPED_SUPERVISOR_HARNESSES` is `pi`, `claude-code`, `codex`: the doctor
+  counts Codex when its CLI and `codex login status` check and this probe
+  pass, and setup writes its `codex` section from the runner config's Codex
+  command and home. The order stays `pi`, `claude-code`, `codex`.
+- **`harnessRepairDeps`.** On Codex, each review is a fresh read-only thread
+  (`openReviewSession`) in the candidate root, its rollouts under
+  `<stateDir>/supervisor/codex/review`, through the same CLI reviewer as
+  Claude Code's.
+- **Tests.** The conformance suite runs against the real harness with
+  `packages/supervisor/test/fake-codex.mjs`; the suite gained `observedAs`,
+  since Codex names its steps its own way. The bwrap tests are in
+  `apps/graphloom/test/supervisor-codex.test.ts`. The live episode,
+  `GRAPHLOOM_SUPERVISOR_LIVE=codex`, is outside `npm test`; it removes the
+  threads it started from the Codex home.
+
 ## 5. Investigation, grounding, and evidence
 
 ### 5.1 Native tools, confined
@@ -677,7 +769,7 @@ harness. Claude and OpenAI models therefore have two routes each:
 | Vendor | CLI harness (login, no API key) | Pi (API key) |
 |---|---|---|
 | Claude | `claude-code`: your Claude Code login | provider `anthropic`, `ANTHROPIC_API_KEY` |
-| OpenAI | `codex`: your Codex CLI login (phase S4) | provider `openai`, `OPENAI_API_KEY` |
+| OpenAI | `codex`: your Codex CLI login (a ChatGPT login; a Codex home signed in with an API key is refused, §4.7) | provider `openai`, `OPENAI_API_KEY` |
 | Gemini, DeepSeek, Kimi, MiniMax, others | none | provider `google`, `deepseek`, `moonshotai`, `minimax-cn`, ... or a custom `models.json` provider |
 
 `graphloom doctor` and `graphloom setup` present the same routes, with what
@@ -945,8 +1037,26 @@ Each is checked in its phase. A failure changes only the named fallback.
    with command, exit code, and output, as the executor already parses. It
    does not report file reads done other than through commands. If file reads
    are invisible, Codex's investigation evidence is its commands only. (S4)
+   **Checked in S4 against Codex 0.162.1: true, and reads are visible.**
+   Codex has no file-read tool; asked to read a file, it ran `/bin/zsh -lc
+   'cat <file>'` (the user's login shell), a `command_execution` item whose
+   `aggregated_output` is the file's content. Its patch tool shows as a
+   `file_change` item with `changes[{path, kind}]` and a `status`
+   (`completed`, or `failed` when the write was refused). Every item comes as
+   `item.started` then `item.completed`; agent messages come as
+   `item.completed` only. Codex reports each reconnect it retries itself as
+   an `error` event before the turn's outcome (§4.7, shared driver).
 3. **Codex inside bwrap.** `--sandbox danger-full-access` runs inside bwrap
    without Codex's own sandbox attempting a namespace of its own. (S4)
+   **Checked in S4 against Codex 0.162.1: true.** Under `--ro-bind / /` with
+   only Codex's home and a scratch directory writable and `TMPDIR` in the
+   scratch, Codex ran on the ChatGPT login; a shell write elsewhere failed
+   with "read-only file system", a patch elsewhere ended `failed`, and a
+   write in the scratch succeeded.
 4. **Codex resume with a new cwd.** `exec resume` honors a changed `--cd` for
    the patch turn, as the executor relies on for the same cwd. If it does
    not, the patch runs in a fresh session. (S4)
+   **Checked in S4 against Codex 0.162.1: true.** `codex exec --sandbox
+   danger-full-access --cd <candidate> resume … <thread> -` named the same
+   thread, kept the earlier turn's context, ran `pwd` as the candidate root,
+   and its patch wrote there, with the candidate bound writable.

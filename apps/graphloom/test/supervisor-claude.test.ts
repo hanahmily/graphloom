@@ -55,7 +55,7 @@ describe("supervisor.json per-harness form (design-supervisor-harnesses.md §7.2
     expect(ordered.claude?.models).toEqual([{ provider: "claude-code", modelId: "default" }]);
     // A claude-only config enables only Claude Code.
     expect(parseSupervisorConfig({ claude: { models: ["opus"] } }).harnesses).toEqual(["claude-code"]);
-    // A codex section is accepted for later; it enables a harness that is not available yet.
+    // A codex section enables Codex (S4).
     expect(parseSupervisorConfig({ claude: {}, codex: { command: "codex" } }).harnesses).toEqual(["claude-code", "codex"]);
   });
 

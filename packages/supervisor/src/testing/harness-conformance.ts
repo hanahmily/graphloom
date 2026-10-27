@@ -27,7 +27,7 @@ import type { HarnessCapabilities, SupervisorHarness, SupervisorHost, Supervisor
 import { isSupervisorProviderError } from "../provider-failure.js";
 import { MAX_INSPECT_ROUNDS } from "../reply.js";
 import type { ProbeResult, SupervisorInput, SupervisorInspection, SupervisorRejection } from "../types.js";
-import type { DecisionMode, ScriptLog, ScriptStep } from "./scripted-harness.js";
+import type { DecisionMode, ScriptedObservation, ScriptLog, ScriptStep } from "./scripted-harness.js";
 
 export interface ConformanceBuild {
   harness: SupervisorHarness;
@@ -51,6 +51,12 @@ export interface ConformanceTarget {
   candidateRoot?: string;
   /** Per-case timeout for a harness whose sessions are real processes. */
   timeoutMs?: number;
+  /**
+   * How a scripted observation shows in the harness's own steps: a CLI names
+   * its tools its own way (Codex runs a read as a shell command). Default: as
+   * scripted.
+   */
+  observedAs?: (observation: ScriptedObservation) => { tool: string; exitCode?: number };
 }
 
 function view(over: Partial<RunView> = {}): RunView {
@@ -378,9 +384,11 @@ export function harnessConformance(target: ConformanceTarget): void {
 
     it("gives each episode its own session and its own investigation steps", async () => {
       const ran = { tool: "Bash", input: { command: "go test ./pkg/x" }, output: "FAIL", exitCode: 1 };
+      const read = { tool: "Read", input: { file_path: "pkg/x/x.go" }, output: "package x" };
+      const seen = (o: ScriptedObservation) => target.observedAs?.(o) ?? { tool: o.tool, ...(o.exitCode !== undefined ? { exitCode: o.exitCode } : {}) };
       const b = build([
         { text: "not json", observe: [ran] },
-        { decide: REENTER, observe: [{ tool: "Read", input: { file_path: "pkg/x/x.go" }, output: "package x" }] },
+        { decide: REENTER, observe: [read] },
         { decide: RETURN, observe: [ran] },
       ]);
       const host = await b.start();
@@ -390,12 +398,15 @@ export function harnessConformance(target: ConformanceTarget): void {
       const second = host.drainInvestigation();
       expect(new Set(b.log.prompts.map((p) => p.session)).size).toBe(2);
       if (mode === "reply") {
-        expect(first.map((s) => [s.id, s.tool, s.exitCode])).toEqual([["inv-1", "Bash", 1], ["inv-2", "Read", undefined]]);
+        expect(first.map((s) => [s.id, s.tool, s.exitCode])).toEqual([
+          ["inv-1", seen(ran).tool, seen(ran).exitCode],
+          ["inv-2", seen(read).tool, seen(read).exitCode],
+        ]);
         expect(first.every((s) => s.harness === name)).toBe(true);
         // Numbering restarts with the episode.
         expect(second.map((s) => s.id)).toEqual(["inv-1"]);
         // The follow-up lists the steps so far, so the agent can cite them.
-        expect(promptsOf(b.log)[1]).toContain('inv-1: Bash "go test ./pkg/x" exit 1');
+        expect(promptsOf(b.log)[1]).toContain(`inv-1: ${seen(ran).tool} "go test ./pkg/x" exit 1`);
       } else {
         expect(first).toEqual([]);
         expect(second).toEqual([]);

@@ -127,6 +127,48 @@ describe("runCodexProcess", () => {
     expect(argv.slice(0, 6)).toEqual(["exec", "--sandbox", "danger-full-access", "--cd", f.dir, "resume"]);
     expect(argv.slice(-2)).toEqual([THREAD, "-"]);
   });
+
+  it("shows each event to onEvent, and fails on an error event only when the turn does not complete", async () => {
+    const reconnecting = (tail: string) => `
+import { readFileSync, writeFileSync } from "node:fs";
+const args = process.argv.slice(2);
+readFileSync(0, "utf8");
+const emit = (e) => process.stdout.write(JSON.stringify(e) + "\\n");
+emit({ type: "thread.started", thread_id: "${THREAD}" });
+emit({ type: "error", message: "Reconnecting... 1/5 (stream disconnected)" });
+${tail}
+`;
+    const run = async (source: string) => {
+      const f = await fake(source);
+      const seen: string[] = [];
+      const result = await runCodexProcess({
+        command: "codex",
+        thread: { started: false },
+        cwd: f.dir,
+        env: {},
+        prompt: "hi",
+        sandbox: "danger-full-access",
+        ephemeral: true,
+        lastMessageFile: path.join(f.dir, "last.txt"),
+        launch: f.launch,
+        responseTimeoutMs: 10_000,
+        killGraceMs: 200,
+        reserveModelCall: async () => true,
+        onEvent: (e) => seen.push(String(e.type)),
+      });
+      return { result, seen };
+    };
+    // Codex retried the reconnect itself, and the turn completed.
+    const recovered = await run(
+      reconnecting(`writeFileSync(args[args.indexOf("--output-last-message") + 1], "ok");
+emit({ type: "turn.completed", usage: { input_tokens: 1, output_tokens: 1 } });`),
+    );
+    expect(recovered.result.outcome).toEqual({ kind: "completed", message: "ok" });
+    expect(recovered.seen).toEqual(["thread.started", "error", "turn.completed"]);
+    // It gave up: the last error is the failure.
+    const failed = await run(reconnecting(`emit({ type: "error", message: "unexpected status 401 Unauthorized" }); process.exit(1);`));
+    expect(failed.result.outcome).toEqual({ kind: "failed", summary: "Codex run failed: unexpected status 401 Unauthorized" });
+  });
 });
 
 describe("runClaudeProcess", () => {

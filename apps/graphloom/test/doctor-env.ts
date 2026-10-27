@@ -19,7 +19,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { CLAUDE_CODE_ADAPTER_FLAGS, CODEX_ADAPTER_FLAGS } from "@graphloom/executor-coding-agent";
-import { CLAUDE_SUPERVISOR_FLAGS } from "@graphloom/supervisor";
+import { CLAUDE_SUPERVISOR_FLAGS, CODEX_SUPERVISOR_FLAGS } from "@graphloom/supervisor";
 
 export const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 export const cli = path.join(repoRoot, "apps", "graphloom", "dist", "main.js");
@@ -35,7 +35,7 @@ export const STUB_SECRETS = {
 } as const;
 
 export type ClaudeMode = "ok" | "missing" | "badprobe" | "loggedout" | "noauth";
-export type CodexMode = "ok" | "missing" | "badprobe" | "loggedout" | "unverifiable";
+export type CodexMode = "ok" | "missing" | "badprobe" | "loggedout" | "unverifiable" | "nosupervisor";
 export type GhMode = "ok" | "missing" | "loggedout" | "noaccess";
 
 export interface DoctorEnvOptions {
@@ -145,13 +145,17 @@ FAKE_CLAUDE_SCRIPT='${script}' FAKE_CLAUDE_LOG='${log}' exec '${process.execPath
 }
 
 const CODEX_STUB = `#!/bin/sh
-# Stub Codex: answers the doctor's questions by $FAKE_CODEX_MODE.
-mode=\${FAKE_CODEX_MODE:-ok}
+# Stub Codex: answers the doctor's questions by $FAKE_CODEX_MODE, or the mode file in $HOME
+# (the supervisor's probe runs Codex with its minimal environment, which drops FAKE_CODEX_MODE).
+mode=\${FAKE_CODEX_MODE:-$(cat "$HOME/.fake-codex-mode" 2>/dev/null || echo ok)}
 if [ "$1" = --version ]; then echo "codex-cli 0.162.1"; exit 0; fi
 case "$1 $2" in
   "exec --help")
     if [ "$mode" = badprobe ]; then echo "Usage: codex exec --json"; exit 0; fi
-    echo "Usage: codex exec [options] ${CODEX_ADAPTER_FLAGS.join(" ")}"; exit 0 ;;
+    echo "Usage: codex exec [options] ${CODEX_ADAPTER_FLAGS.join(" ")}"
+    # What the S4 supervisor probe also needs; an older Codex (mode nosupervisor) lacks it.
+    if [ "$mode" != nosupervisor ]; then echo "Commands: resume ${CODEX_SUPERVISOR_FLAGS.join(" ")} [possible values: read-only, workspace-write, danger-full-access]"; fi
+    exit 0 ;;
   "login status")
     case "$mode" in
       loggedout) echo "Not logged in" >&2; exit 1 ;;
@@ -195,6 +199,7 @@ export async function makeDoctorEnv(options: DoctorEnvOptions = {}): Promise<Doc
   const bwrap = options.bwrap ?? "ok";
   if (claude !== "missing") await writeFile(path.join(bin, "claude"), claudeStub(claudeScript, claudeLog), { mode: 0o755 });
   if (codex !== "missing") await writeFile(path.join(bin, "codex"), CODEX_STUB, { mode: 0o755 });
+  await writeFile(path.join(home, ".fake-codex-mode"), codex);
   if (gh !== "missing") await writeFile(path.join(bin, "gh"), GH_STUB, { mode: 0o755 });
   if (bwrap !== "missing") await writeFile(path.join(bin, "bwrap"), bwrapStub(bwrap), { mode: 0o755 });
   // Claude Code's own login marker, which the S3 supervisor probe looks for (presence only; no credential in it).

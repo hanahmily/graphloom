@@ -70,6 +70,8 @@ export interface CodexProcessOptions {
   reserveModelCall(): Promise<boolean>;
   /** Called on each event Codex streams, while its rollout may be growing. */
   onActivity?: () => void;
+  /** Sees each event Codex streams, as parsed (the supervisor records its investigation steps from them). */
+  onEvent?: (event: Readonly<Record<string, unknown>>) => void;
 }
 
 /** How a Codex turn ended: a failure summary, or its final message for the caller to interpret. */
@@ -166,6 +168,9 @@ export async function runCodexProcess(args: CodexProcessOptions): Promise<CodexP
   let closeTimer: NodeJS.Timeout | undefined;
   let closedAfterTurn = false;
   let failure: string | undefined;
+  // An `error` event alone is not the end: Codex reports each reconnect it
+  // retries itself this way, and a turn that then completes has succeeded.
+  let streamError: string | undefined;
   let usage: AgentUsage | undefined;
   let reaped = false;
   try {
@@ -193,6 +198,7 @@ export async function runCodexProcess(args: CodexProcessOptions): Promise<CodexP
         }
       }
       args.onActivity?.();
+      args.onEvent?.(event as Readonly<Record<string, unknown>>);
       const item = event.item;
       if (item !== undefined && item !== null && (event.type === "item.started" || event.type === "item.completed") && !toolIds.has(item.id)) {
         if (item.type !== "agent_message" && item.type !== "reasoning") {
@@ -206,7 +212,7 @@ export async function runCodexProcess(args: CodexProcessOptions): Promise<CodexP
         reserve();
       }
       if (event.type === "turn.failed") failure = text(event.error?.message) ?? "turn failed";
-      if (event.type === "error") failure = text(event.message) ?? "error";
+      if (event.type === "error") streamError = text(event.message) ?? "error";
       if (event.type === "turn.completed") {
         completed = true;
         usage = codexUsage(event.usage) ?? usage;
@@ -235,7 +241,7 @@ export async function runCodexProcess(args: CodexProcessOptions): Promise<CodexP
       if (accountingFailed) return failed("Codex model request accounting failed");
       if (error !== undefined) return failed(bounded(`could not start Codex (${args.command}): ${error.message}`));
       if (failure !== undefined || (code !== 0 && !closedAfterTurn) || !completed) {
-        const detail = failure ?? (stderr.trim() || `exit code ${code}`);
+        const detail = failure ?? streamError ?? (stderr.trim() || `exit code ${code}`);
         return failed(bounded(`Codex run failed: ${detail}`));
       }
       return { kind: "completed", message: (await readFile(last, "utf8").catch(() => "")).trim() };

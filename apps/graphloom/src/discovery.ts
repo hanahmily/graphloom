@@ -47,11 +47,11 @@ export const WRITING_HARNESSES: readonly HarnessName[] = ["claude-code", "pi"];
 /** The built-in supervisor order with no plugin preference (docs/design-supervisor-harnesses.md §7.3). */
 export const SUPERVISOR_ORDER: readonly HarnessName[] = ["pi", "claude-code", "codex"];
 /**
- * The supervisor harnesses this GraphLoom can run: Pi, and Claude Code since
- * phase S3. A Codex supervisor arrives with phase S4; until then it is
- * reported but never counted (docs/design-release.md §4.4).
+ * The supervisor harnesses this GraphLoom can run: Pi, Claude Code since
+ * phase S3, and Codex since phase S4 (docs/design-release.md §4.4). Each is
+ * counted when its CLI, its login, and its supervisor probe pass.
  */
-export const SHIPPED_SUPERVISOR_HARNESSES: readonly HarnessName[] = ["pi", "claude-code"];
+export const SHIPPED_SUPERVISOR_HARNESSES: readonly HarnessName[] = ["pi", "claude-code", "codex"];
 /**
  * The Pi model setup falls back to on its provider when nothing is configured
  * and its credential is present (§4.5); any other provider's recommendation is
@@ -559,6 +559,8 @@ export interface Discovery {
   supervisorCandidates: Record<HarnessName, SupervisorHarnessCheck>;
   /** The `claude` section setup writes for a Claude Code supervisor: the runner's Claude Code command and config dir. */
   claudeSupervisorSection: Record<string, unknown>;
+  /** The `codex` section setup writes for a Codex supervisor: the runner's Codex command and home. */
+  codexSupervisorSection: Record<string, unknown>;
   /** The existing supervisor config's enabled harnesses, each probed as `run` probes it. */
   supervisorEnabled: SupervisorHarnessCheck[];
   /** The harness `run` would select from the existing supervisor config (no `--supervisor`), if any. */
@@ -681,7 +683,11 @@ export async function discover(env: NodeJS.ProcessEnv = process.env, root: strin
     ...(claude.commandSource !== "PATH" && claude.path !== undefined ? { command: claude.path } : {}),
     ...(runner.config?.claude?.configDir !== undefined ? { configDir: runner.config.claude.configDir } : {}),
   };
-  const supervisorCandidates = await discoverSupervisorCandidates(claude, pi, claudeSupervisorSection);
+  const codexSupervisorSection: Record<string, unknown> = {
+    ...(codex.commandSource !== "PATH" && codex.path !== undefined ? { command: codex.path } : {}),
+    ...(runner.config?.codex?.codexHome !== undefined ? { codexHome: runner.config.codex.codexHome } : {}),
+  };
+  const supervisorCandidates = await discoverSupervisorCandidates(claude, codex, pi, claudeSupervisorSection, codexSupervisorSection);
   const { enabled: supervisorEnabled, selection: supervisorSelection, error: supervisorSelectionError } = await discoverSupervisorSelection(supervisor.config, pi);
   const updates = await discoverUpdates(self, runner, env);
   return {
@@ -697,6 +703,7 @@ export async function discover(env: NodeJS.ProcessEnv = process.env, root: strin
     updates,
     supervisorCandidates,
     claudeSupervisorSection,
+    codexSupervisorSection,
     supervisorEnabled,
     ...(supervisorSelection !== undefined ? { supervisorSelection } : {}),
     ...(supervisorSelectionError !== undefined ? { supervisorSelectionError } : {}),
@@ -712,8 +719,6 @@ export interface SupervisorHarnessCheck {
   reason?: string;
   fix?: string;
 }
-
-const NOT_SHIPPED: Record<string, string> = { codex: "the Codex supervisor arrives with phase S4 of the supervisor harness design" };
 
 /** A Pi supervisor needs a provider credential and a model Pi knows. */
 function piSupervisorCheck(pi: PiDiscovery, where?: PiModelCheck): SupervisorHarnessCheck {
@@ -736,11 +741,26 @@ async function claudeSupervisorCheck(claude: CliHarnessDiscovery, config: Superv
   return { harness: "claude-code", ok: false, reason, fix: /login/i.test(reason) ? LOGIN_FIX["claude-code"] : /--help/.test(reason) ? "claude update" : "graphloom doctor" };
 }
 
-async function discoverSupervisorCandidates(claude: CliHarnessDiscovery, pi: PiDiscovery, claudeSection: Record<string, unknown>): Promise<Record<HarnessName, SupervisorHarnessCheck>> {
+/** S4's own probe of the Codex supervisor (`probeSupervisorHarness`), behind the doctor's CLI and login check. */
+async function codexSupervisorCheck(codex: CliHarnessDiscovery, config: SupervisorConfig): Promise<SupervisorHarnessCheck> {
+  if (!codex.available) return { harness: "codex", ok: false, reason: codex.reason ?? "Codex is not available", ...(codex.fix !== undefined ? { fix: codex.fix } : {}) };
+  const probe = await probeSupervisorHarness(config, "codex").catch((err: unknown) => ({ ok: false as const, reason: err instanceof Error ? err.message : String(err) }));
+  if (probe.ok) return { harness: "codex", ok: true };
+  const reason = probe.reason ?? "the Codex supervisor probe failed";
+  return { harness: "codex", ok: false, reason, fix: /login/i.test(reason) ? LOGIN_FIX.codex : /--help/.test(reason) ? "npm install -g @openai/codex@latest" : "graphloom doctor" };
+}
+
+async function discoverSupervisorCandidates(
+  claude: CliHarnessDiscovery,
+  codex: CliHarnessDiscovery,
+  pi: PiDiscovery,
+  claudeSection: Record<string, unknown>,
+  codexSection: Record<string, unknown>,
+): Promise<Record<HarnessName, SupervisorHarnessCheck>> {
   return {
     pi: piSupervisorCheck(pi),
     "claude-code": await claudeSupervisorCheck(claude, parseSupervisorConfig({ harnesses: ["claude-code"], claude: claudeSection }, "the Claude Code supervisor setup would write")),
-    codex: { harness: "codex", ok: false, reason: NOT_SHIPPED.codex!, fix: "graphloom upgrade, once a release ships it" },
+    codex: await codexSupervisorCheck(codex, parseSupervisorConfig({ harnesses: ["codex"], codex: codexSection }, "the Codex supervisor setup would write")),
   };
 }
 
@@ -748,11 +768,13 @@ async function discoverSupervisorCandidates(claude: CliHarnessDiscovery, pi: PiD
 async function discoverSupervisorSelection(config: SupervisorConfig | undefined, pi: PiDiscovery): Promise<{ enabled: SupervisorHarnessCheck[]; selection?: SupervisorSelection; error?: string }> {
   if (config === undefined) return { enabled: [] };
   const claudeDiscovery = (config: SupervisorConfig): CliHarnessDiscovery => ({ harness: "claude-code", command: config.claude?.command ?? "claude", commandSource: "supervisor config", available: true });
+  const codexDiscovery = (config: SupervisorConfig): CliHarnessDiscovery => ({ harness: "codex", command: config.codex?.command ?? "codex", commandSource: "supervisor config", available: true });
   const checks = new Map<string, SupervisorHarnessCheck>();
   for (const harness of enabledSupervisorHarnesses(config)) {
     if (harness === "pi") checks.set(harness, piSupervisorCheck(pi, pi.configured.find((c) => c.where === "supervisor config")));
     else if (harness === "claude-code") checks.set(harness, await claudeSupervisorCheck(claudeDiscovery(config), config));
-    else checks.set(harness, { harness: harness as HarnessName, ok: false, reason: NOT_SHIPPED[harness] ?? `the ${harness} supervisor is not available in this GraphLoom`, fix: "graphloom setup" });
+    else if (harness === "codex") checks.set(harness, await codexSupervisorCheck(codexDiscovery(config), config));
+    else checks.set(harness, { harness: harness as HarnessName, ok: false, reason: `the ${harness} supervisor is not available in this GraphLoom`, fix: "graphloom setup" });
   }
   // The same selection `run` makes, on these probes; a flat Pi config selects Pi unprobed, as `run` does.
   // A `select` that is not available makes run refuse: keep that error; only an exhausted fallback means no supervisor.

@@ -55,7 +55,7 @@ export interface ViableSetups {
   supervisor?: HarnessName;
   /** Every harness that can supervise here, in the built-in order Pi, Claude Code, Codex. */
   supervisors: HarnessName[];
-  /** Available harnesses that could supervise once their supervisor ships (Codex: phase S4). */
+  /** Available harnesses that could supervise once their supervisor ships (none since phase S4 shipped Codex). */
   supervisorLater: HarnessName[];
 }
 
@@ -233,7 +233,7 @@ export function updatesCheck(d: Discovery): DoctorCheck {
  * How each vendor's models can supervise here (docs/design-supervisor-harnesses.md
  * §6.2): Claude through the Claude Code harness (your Claude Code login, never an
  * API key) or through Pi with an Anthropic API key; OpenAI through the Codex
- * harness (phase S4) or through Pi with an OpenAI API key; every other vendor
+ * harness (your Codex login, never an API key) or through Pi with an OpenAI API key; every other vendor
  * through Pi, on whichever providers have a credential.
  */
 export function supervisorRoutes(d: Discovery): string[] {
@@ -245,7 +245,8 @@ export function supervisorRoutes(d: Discovery): string[] {
   };
   const claude = d.supervisorCandidates["claude-code"];
   const claudeRoute = claude.ok ? "via Claude Code (logged in)" : `via Claude Code (not available: ${claude.reason ?? "unknown"})`;
-  const codex = d.codex.available ? "via Codex (logged in; supervises from phase S4, not yet)" : "via Codex (supervises from phase S4, not yet)";
+  const codexCheck = d.supervisorCandidates.codex;
+  const codex = codexCheck.ok ? "via Codex (logged in)" : `via Codex (not available: ${codexCheck.reason ?? "unknown"})`;
   const others = d.pi.credentials.filter((c) => c.provider !== "anthropic" && c.provider !== "openai").map((c) => `${c.provider} (${c.source})`);
   return [
     `Claude: ${claudeRoute} or ${viaPi("anthropic", "ANTHROPIC_API_KEY")}`,
