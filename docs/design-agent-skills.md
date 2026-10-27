@@ -61,7 +61,7 @@ controller notions, never plugin ones.
 |---|---|
 | `stage_entered` | `current` (stage id and attempt) changed |
 | `receipt_accepted` | Valid receipts with a sequence number above the mark (`rcpt-<n>`), grouped per stage, with whether the stage is now complete |
-| `receipts_invalidated` | More invalid receipts than the mark saw |
+| `receipts_invalidated` | Invalid receipts the mark had not seen as invalid (by id), with their stages |
 | `episode_started` | `mode: recovery` with a `recoveryEpisodeId` not yet reported, or episode records (`supervisorEpisodes`) of an unreported episode; detail is the recovery trigger |
 | `episode_ended` | The reported open episode is no longer open, or an episode started and ended between two looks; detail is its last proposal's action and one-line reason, or its outcome |
 | `quota_pause` | A new remedy record whose condition is a quota or usage limit; `resetAt` from `quotaHold.until`, `executorRetryAt`, or the remedy text |
@@ -72,13 +72,14 @@ controller notions, never plugin ones.
 `--json` prints `{ runId, stateDir, outcome, events, summary, cursor }`.
 `summary` is the current status, stop reason and class, mode, stage and
 attempt, stages complete, each budget's use against its budget, episode
-count, and any waiting state (a quota hold with its `until`, a
-reconciliation required). `cursor` is an opaque `p1.` token encoding the mark;
+count, and any waiting state (a quota hold or quota retry with its `until`,
+an ordinary executor retry backoff, a reconciliation required). `cursor` is an opaque `p1.` token encoding the mark;
 `wait --since <cursor>` starts from that mark, so no event is reported twice
 and none that happened between two waits is lost. Without `--since` the mark
 is the state when `wait` starts (a run that is not running reports its stop at
 once). A cursor names its run; another run's cursor is refused. The poll stats
-`state.json` once a second and parses it only when it changed.
+`state.json` once a second and parses it only when it changed (the first
+signature is taken before the first read, so a write in between is not lost).
 
 Exit codes for `--until progress`: 0, events were reported or the run is not
 running (read `summary.status`); 2, the timeout elapsed with nothing to report

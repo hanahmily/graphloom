@@ -50,7 +50,12 @@ describe("progress events from durable state", () => {
     expect(progressSince(accepted.mark, next).events).toEqual([]);
 
     const invalidated = { ...next, receipts: next.receipts.map((r) => (r.id === "rcpt-22" ? { ...r, valid: false } : r)) };
-    expect(progressSince(accepted.mark, invalidated).events).toEqual([expect.objectContaining({ kind: "receipts_invalidated", count: 1, stages: ["review"] })]);
+    const second = progressSince(accepted.mark, invalidated);
+    expect(second.events).toEqual([expect.objectContaining({ kind: "receipts_invalidated", count: 1, stages: ["review"] })]);
+    // An older receipt invalidated after a newer one: its own stage, by id, not by order.
+    const older = invalidated.receipts.find((r) => r.valid && r.stageId === "fix")!;
+    const third = { ...invalidated, receipts: invalidated.receipts.map((r) => (r.id === older.id ? { ...r, valid: false } : r)) };
+    expect(progressSince(second.mark, third).events).toEqual([expect.objectContaining({ kind: "receipts_invalidated", count: 1, stages: ["fix"] })]);
   });
 
   it("episode_started and episode_ended: the open episode, its trigger, and its one-line outcome", async () => {
@@ -106,6 +111,11 @@ describe("progress events from durable state", () => {
     expect(events).toEqual([expect.objectContaining({ kind: "quota_pause", resetAt: until, condition: "harness quota (executor graphloom.coding-agent/run)" })]);
     expect(progressSince(mark, held).events).toEqual([]);
     expect(progressSummary(held).waiting).toEqual({ kind: "quota", until });
+    // An ordinary retry backoff is not a quota wait; one after a quota remedy is.
+    const later = new Date(Date.now() + 60_000).toISOString();
+    const backoff = { ...s, executorRetryAt: { "acme/x": later }, remedies: [held.remedies[0]!] };
+    expect(progressSummary(backoff).waiting).toEqual({ kind: "retry", until: later });
+    expect(progressSummary({ ...backoff, remedies: held.remedies }).waiting).toEqual({ kind: "quota", until: later });
     // Without a hold, the reset time in the remedy's own text.
     const { quotaHold: _h, ...free } = held;
     expect(progressSince(markOf(s), free as DurableRunState).events[0]).toMatchObject({ resetAt: "2026-10-27T14:05:00.000Z" });

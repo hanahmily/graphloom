@@ -51,8 +51,8 @@ export interface ProgressMark {
   stage: string;
   /** Highest receipt number reported. */
   rs: number;
-  /** Invalid receipts seen. */
-  inv: number;
+  /** Ids of the invalid receipts seen. */
+  inv: string[];
   /** The open recovery episode reported as started. */
   ep?: string;
   /** Newest supervisor episode record time reported. */
@@ -74,7 +74,8 @@ export interface ProgressSummary {
   stages: number;
   budgets: Array<{ budget: string; used?: number; granted?: number; percent?: number }>;
   episodes: number;
-  waiting?: { kind: "quota"; until: string } | { kind: "reconcile"; stage: string; reason: string };
+  /** A quota hold, an ordinary executor retry backoff, or a reconciliation only the operator can settle. */
+  waiting?: { kind: "quota"; until: string } | { kind: "retry"; until: string } | { kind: "reconcile"; stage: string; reason: string };
 }
 
 const isRecord = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === "object" && !Array.isArray(v);
@@ -130,7 +131,7 @@ export function markOf(state: DurableRunState): ProgressMark {
     st: stopKey(state),
     stage: `${state.current?.stageId ?? ""}#${state.current?.attempt ?? 0}`,
     rs: Math.max(0, ...(state.receipts ?? []).map((r) => receiptNumber(r.id))),
-    inv: (state.receipts ?? []).filter((r) => !r.valid).length,
+    inv: (state.receipts ?? []).filter((r) => !r.valid).map((r) => r.id),
     ...(open !== undefined ? { ep: open } : {}),
     epAt: newest((state.supervisorEpisodes ?? []).map((r) => r.at)),
     remAt: newest((state.remedies ?? []).map((r) => r.at)),
@@ -158,7 +159,8 @@ export function decodeCursor(cursor: string): ProgressMark {
     typeof mark.st !== "string" ||
     typeof mark.stage !== "string" ||
     typeof mark.rs !== "number" ||
-    typeof mark.inv !== "number" ||
+    !Array.isArray(mark.inv) ||
+    !mark.inv.every((id) => typeof id === "string") ||
     (mark.ep !== undefined && typeof mark.ep !== "string") ||
     typeof mark.epAt !== "string" ||
     typeof mark.remAt !== "string" ||
@@ -233,11 +235,11 @@ export function progressSince(mark: ProgressMark, state: DurableRunState): { eve
       detail: `${stageId}: accepted ${requirements.join(", ")}${complete ? " (stage complete)" : ""}`,
     });
   }
-  if (next.inv > mark.inv) {
-    // Invalidation reaches the newest receipts first: name the stages of the newest invalid ones.
-    const invalid = (state.receipts ?? []).filter((r) => !r.valid).sort((a, b) => receiptNumber(b.id) - receiptNumber(a.id));
-    const stages = [...new Set(invalid.slice(0, next.inv - mark.inv).map((r) => r.stageId))];
-    events.push({ kind: "receipts_invalidated", count: next.inv - mark.inv, stages, detail: `${next.inv - mark.inv} receipt(s) invalidated (${stages.join(", ") || "unknown stage"})` });
+  const seenInvalid = new Set(mark.inv);
+  const newlyInvalid = (state.receipts ?? []).filter((r) => !r.valid && !seenInvalid.has(r.id));
+  if (newlyInvalid.length > 0) {
+    const stages = [...new Set(newlyInvalid.map((r) => r.stageId))];
+    events.push({ kind: "receipts_invalidated", count: newlyInvalid.length, stages, detail: `${newlyInvalid.length} receipt(s) invalidated (${stages.join(", ")})` });
   }
 
   // Episodes: the open one, and any whose records appeared since the mark.
@@ -291,11 +293,16 @@ export function progressSummary(state: DurableRunState): ProgressSummary {
   const complete = stages.filter((s) => s.requirementIds.every((id) => valid.has(`${s.id}\u0000${id}`))).length;
   const cls = state.status !== "running" ? classifyStop(state) : undefined;
   const retries = Object.values(state.executorRetryAt ?? {}).filter((t) => time(t) > Date.now());
-  const until = state.quotaHold?.until ?? (retries.length > 0 ? newest(retries) : undefined);
+  const retryUntil = retries.length > 0 ? newest(retries) : undefined;
+  // A retry backoff is a quota wait only when the newest remedy says so; ordinary retryable failures back off too.
+  const lastRemedy = (state.remedies ?? [])[(state.remedies ?? []).length - 1];
+  const quotaRetry = retryUntil !== undefined && lastRemedy !== undefined && QUOTA.test(lastRemedy.condition);
   const waiting: ProgressSummary["waiting"] =
-    state.status === "running" && until !== undefined
-      ? { kind: "quota", until }
-      : state.reconciliationRequired !== undefined
+    state.status === "running" && state.quotaHold?.until !== undefined
+      ? { kind: "quota", until: state.quotaHold.until }
+      : state.status === "running" && retryUntil !== undefined
+        ? { kind: quotaRetry ? "quota" : "retry", until: retryUntil }
+        : state.reconciliationRequired !== undefined
         ? { kind: "reconcile", stage: state.reconciliationRequired.stageId, reason: oneLine(state.reconciliationRequired.reason) }
         : undefined;
   return {
@@ -343,12 +350,18 @@ export async function waitForProgress(runRef: string, options: ProgressWaitOptio
   const pollMs = options.pollMs ?? 1_000;
   const deadline = options.timeoutMs === undefined ? Infinity : Date.now() + options.timeoutMs;
   const file = path.join(stateDir, "state.json");
+  const signature = async (): Promise<string> => {
+    const st = await stat(file).catch(() => undefined);
+    return st === undefined ? "" : `${st.mtimeMs}:${st.size}:${st.ino}`;
+  };
+  // The signature is taken before the read: a write between them is seen as a change at the first poll.
+  let seen = await signature();
   let state = await loadRunState(stateDir);
   let mark = options.since !== undefined ? decodeCursor(options.since) : markOf(state);
   // A wait without a cursor on a run that is not running reports that stop.
   if (options.since === undefined && state.status !== "running") mark = { ...mark, st: "running" };
   if (mark.run !== state.runId) throw new Error(`--since: the cursor is for run ${mark.run}, not ${state.runId}`);
-  let seen = "";
+  let first = true;
   const result = (outcome: ProgressOutcome, events: ProgressEvent[], m: ProgressMark, detail?: string): ProgressResult => ({
     runId: state.runId,
     stateDir,
@@ -359,10 +372,10 @@ export async function waitForProgress(runRef: string, options: ProgressWaitOptio
     cursor: encodeCursor(m),
   });
   for (;;) {
-    const st = await stat(file).catch(() => undefined);
-    const key = st === undefined ? "" : `${st.mtimeMs}:${st.size}:${st.ino}`;
-    if (key !== seen) {
-      if (seen !== "") state = await loadRunState(stateDir);
+    const key = await signature();
+    if (first || key !== seen) {
+      if (!first) state = await loadRunState(stateDir);
+      first = false;
       seen = key;
       const { events, mark: next } = progressSince(mark, state);
       if (events.length > 0) return result(state.status === "running" ? "progress" : "stopped", events, next);
@@ -394,7 +407,7 @@ export function formatProgress(r: ProgressResult): string {
   lines.push(
     `run ${r.runId}  ${s.status}${s.stopReason !== undefined ? ` (${s.stopReason})` : ""}  ${s.mode}  stage ${s.stage}#${s.attempt}  ${s.stagesComplete}/${s.stages} stages complete` +
       (budgets !== "" ? `  budgets: ${budgets}` : "") +
-      (s.waiting?.kind === "quota" ? `  waiting for a quota reset until ${s.waiting.until}` : s.waiting?.kind === "reconcile" ? `  reconciliation required (${s.waiting.stage})` : ""),
+      (s.waiting?.kind === "quota" ? `  waiting for a quota reset until ${s.waiting.until}` : s.waiting?.kind === "retry" ? `  retrying a failed job at ${s.waiting.until}` : s.waiting?.kind === "reconcile" ? `  reconciliation required (${s.waiting.stage})` : ""),
   );
   if (s.status === "running") lines.push(`next: graphloom wait ${r.stateDir} --until progress --since ${r.cursor}`);
   return lines.join("\n");
