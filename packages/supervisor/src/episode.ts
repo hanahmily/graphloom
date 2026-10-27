@@ -2,6 +2,7 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 import type { CaseFinding, CaseFile, RunView } from "@graphloom/sdk";
+import type { InvestigationStep } from "./investigation.js";
 import type {
   AdmissionFacts,
   RecoveryTrigger,
@@ -74,6 +75,13 @@ export interface SupervisorEpisodeRecord {
   };
   toolCalls: EpisodeToolCall[];
   droppedToolCalls?: number;
+  /**
+   * What the agent did with its own tools during the call, as its harness
+   * observed it (`inv-<n>` steps, design-supervisor-harnesses.md §5.2), under
+   * the tool calls' bounds. Absent when the harness recorded none (Pi).
+   */
+  investigation?: InvestigationStep[];
+  droppedInvestigation?: number;
   proposal?: SupervisorProposal;
   /** The decide() failure, bounded. */
   error?: string;
@@ -316,10 +324,42 @@ export interface EpisodeRecordArgs {
   maxProviderCalls?: number;
   maxWaitMs?: number;
   recorder: EpisodeRecorder;
+  /** The harness's investigation steps of this call (the host's `drainInvestigation`). */
+  investigation?: readonly InvestigationStep[];
   proposal?: SupervisorProposal;
   error?: unknown;
   admission: EpisodeAdmission;
   providerCalls: number;
+}
+
+/**
+ * Steps as an episode record keeps them: at most MAX_EPISODE_TOOL_CALLS (the
+ * earliest, as tool calls are kept), each input and output within
+ * MAX_EPISODE_TOOL_RESULT_CHARS. `dropped` counts the steps left out, and
+ * `truncated` is set when any kept step was cut.
+ */
+export function boundInvestigationSteps(steps: readonly InvestigationStep[]): {
+  steps: InvestigationStep[];
+  dropped: number;
+  truncated: boolean;
+} {
+  let truncated = false;
+  const kept = steps.slice(0, MAX_EPISODE_TOOL_CALLS).map((step) => {
+    const input = boundValue(step.input, MAX_EPISODE_TOOL_RESULT_CHARS);
+    const output = boundValue(step.output, MAX_EPISODE_TOOL_RESULT_CHARS);
+    if (input.truncated || output.truncated) truncated = true;
+    return {
+      id: step.id,
+      harness: step.harness,
+      kind: step.kind,
+      tool: step.tool,
+      input: input.value,
+      output: output.value,
+      ...(step.exitCode !== undefined ? { exitCode: step.exitCode } : {}),
+      at: step.at,
+    };
+  });
+  return { steps: kept, dropped: Math.max(0, steps.length - kept.length), truncated };
 }
 
 /** Rejections one record keeps (the newest); each is cut at 1,000 chars. */
@@ -345,6 +385,10 @@ export function fitEpisodeRecord(record: SupervisorEpisodeRecord): SupervisorEpi
     fitted = { ...shrinkJson(record, level), truncated: true };
     if (jsonLength(fitted) <= MAX_EPISODE_RECORD_CHARS) return fitted;
   }
+  while (jsonLength(fitted) > MAX_EPISODE_RECORD_CHARS && (fitted.investigation?.length ?? 0) > 0) {
+    fitted.investigation!.pop();
+    fitted.droppedInvestigation = (fitted.droppedInvestigation ?? 0) + 1;
+  }
   while (jsonLength(fitted) > MAX_EPISODE_RECORD_CHARS && fitted.toolCalls.length > 0) {
     fitted.toolCalls.pop();
     fitted.droppedToolCalls = (fitted.droppedToolCalls ?? 0) + 1;
@@ -360,6 +404,7 @@ export function fitEpisodeRecord(record: SupervisorEpisodeRecord): SupervisorEpi
 export function buildEpisodeRecord(args: EpisodeRecordArgs): SupervisorEpisodeRecord {
   const dropped = args.recorder.dropped();
   const message = args.error === undefined ? undefined : errorText(args.error).slice(0, 1_000);
+  const steps = boundInvestigationSteps(args.investigation ?? []);
   return fitEpisodeRecord({
     episodeId: args.episodeId,
     turn: args.turn,
@@ -376,6 +421,8 @@ export function buildEpisodeRecord(args: EpisodeRecordArgs): SupervisorEpisodeRe
     },
     toolCalls: args.recorder.toolCalls(),
     ...(dropped > 0 ? { droppedToolCalls: dropped } : {}),
+    ...(steps.steps.length > 0 ? { investigation: steps.steps } : {}),
+    ...(steps.dropped > 0 ? { droppedInvestigation: steps.dropped } : {}),
     ...(args.proposal !== undefined ? { proposal: args.proposal } : {}),
     ...(message !== undefined ? { error: message } : {}),
     admission: {
@@ -385,6 +432,6 @@ export function buildEpisodeRecord(args: EpisodeRecordArgs): SupervisorEpisodeRe
       outcome: args.admission.outcome,
     },
     providerCalls: args.providerCalls,
-    ...(args.recorder.truncated() || dropped > 0 ? { truncated: true } : {}),
+    ...(args.recorder.truncated() || dropped > 0 || steps.truncated || steps.dropped > 0 ? { truncated: true } : {}),
   });
 }

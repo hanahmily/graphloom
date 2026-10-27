@@ -7,14 +7,14 @@ import os from "node:os";
 import path from "node:path";
 import {
   createAgentSession,
-  createExtensionRuntime,
-  ModelRuntime,
   SessionManager,
   SettingsManager,
   type AgentSession,
-  type ResourceLoader,
+  type ModelRuntime,
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
+import { defaultPiModelRuntime, isolatedResourceLoader } from "@graphloom/agent-harness/pi";
+import type { HarnessPromptOptions, HarnessSession, ThinkingLevel } from "./harness.js";
 import {
   resolveMiniMaxCredential,
   type MiniMaxCredentialSource,
@@ -40,11 +40,7 @@ export const DEFAULT_PROMPT_INACTIVITY_MS = 120_000;
 /** Default total cap of one prompt, a backstop for a reply that streams forever. */
 export const DEFAULT_PROMPT_TOTAL_TIMEOUT_MS = 900_000;
 
-/**
- * Mirrors `@earendil-works/pi-agent-core`'s own `ThinkingLevel` (not re-exported
- * from the package's public surface), so callers need no deeper import path.
- */
-export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+export type { ThinkingLevel } from "./harness.js";
 
 export function isMiniMaxProvider(provider: string): boolean {
   return provider === "minimax-cn" || provider === "minimax";
@@ -133,7 +129,8 @@ export interface CreatePiSupervisorSessionOptions {
   repairsDir?: string;
 }
 
-export interface PiSupervisorSession {
+/** The Pi harness's episode session: a HarnessSession with Pi's own accounting and tools. */
+export interface PiSupervisorSession extends HarnessSession {
   readonly runId: string;
   readonly provider: string;
   readonly modelId: string;
@@ -153,18 +150,7 @@ export interface PiSupervisorSession {
    * what it asked for (an admitted proposal), so that turn is neither sent nor
    * charged, and it is no failure or timeout.
    */
-  prompt(
-    text: string,
-    options?: {
-      signal?: AbortSignal;
-      timeoutMs?: number;
-      maxTurns?: number;
-      /** Provider calls others spent against `maxTurns` during this prompt (read at each turn); shrinks the cap. */
-      reservedTurns?: () => number;
-      tools?: ToolDefinition[];
-      done?: () => boolean;
-    },
-  ): Promise<string>;
+  prompt(text: string, options?: HarnessPromptOptions): Promise<string>;
   /** Provider turns (model calls) started since the last drain, including tool turns. */
   drainTurnCount?(): number;
   /** Non-destructive count of provider turns started and not yet drained. */
@@ -225,10 +211,7 @@ export async function createPiSupervisorSession(
   const sessionDir = path.resolve(options.sessionDir);
   await mkdir(sessionDir, { recursive: true });
 
-  const modelRuntime = await ModelRuntime.create({
-    authPath: path.join(agentDir, "auth.json"),
-    modelsPath: path.join(agentDir, "models.json"),
-  });
+  const modelRuntime = await defaultPiModelRuntime(agentDir);
 
   const credentialSource = await applyProviderCredentials({
     modelRuntime,
@@ -262,7 +245,7 @@ export async function createPiSupervisorSession(
       "Be concise; do not expose private chain-of-thought.",
     ].join(" ");
 
-  const resourceLoader = createIsolatedResourceLoader(systemPrompt);
+  const resourceLoader = isolatedResourceLoader(systemPrompt);
 
   const sessionManager = options.sessionFile
     ? SessionManager.open(options.sessionFile, sessionDir, cwd)
@@ -652,26 +635,6 @@ export function wrapPiAgentSession(args: {
       }
       session.dispose();
     },
-  };
-}
-
-function createIsolatedResourceLoader(systemPrompt: string): ResourceLoader {
-  return {
-    getExtensions: () => ({
-      extensions: [],
-      errors: [],
-      runtime: createExtensionRuntime(),
-    }),
-    getSkills: () => ({ skills: [], diagnostics: [] }),
-    getPrompts: () => ({ prompts: [], diagnostics: [] }),
-    getThemes: () => ({ themes: [], diagnostics: [] }),
-    getAgentsFiles: () => ({ agentsFiles: [] }),
-    getSystemPrompt: () => systemPrompt,
-    getSystemPromptSource: () => undefined,
-    getAppendSystemPrompt: () => [],
-    getAppendSystemPromptSources: () => [],
-    extendResources: () => undefined,
-    reload: async () => undefined,
   };
 }
 

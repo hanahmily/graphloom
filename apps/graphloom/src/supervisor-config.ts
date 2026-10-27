@@ -6,9 +6,10 @@ import os from "node:os";
 import path from "node:path";
 import type { ResumeRequest, RunRequest } from "@graphloom/controller";
 import {
-  createPiSupervisor,
-  piEpisodeSessionOpener,
+  bindingHarness,
+  createPiHarness,
   restorePiSupervisorFromBinding,
+  type PiHarness,
   type SupervisorModelRef,
   type ThinkingLevel,
 } from "@graphloom/supervisor";
@@ -152,60 +153,60 @@ function parseThinkingLevel(value: unknown, what: string): ThinkingLevel {
   return text as ThinkingLevel;
 }
 
+/** The Pi harness for one run, its transcripts in the run's state directory. */
+function piHarnessFor(config: SupervisorConfig, runId: string, stateDir: string): PiHarness {
+  return createPiHarness({
+    runId,
+    sessionDir: path.join(stateDir, "supervisor"),
+    repairsDir: path.join(stateDir, "repairs"),
+    configuredModels: config.models,
+    ...(config.agentDir !== undefined ? { agentDir: config.agentDir } : {}),
+    ...(config.promptTimeoutMs !== undefined ? { promptTimeoutMs: config.promptTimeoutMs } : {}),
+    ...(config.promptTotalTimeoutMs !== undefined ? { promptTotalTimeoutMs: config.promptTotalTimeoutMs } : {}),
+    ...(config.rawStreamCapture === true ? { rawStreamCapture: true } : {}),
+    ...(config.quotaRetryMs !== undefined ? { quotaRetryMs: config.quotaRetryMs } : {}),
+  });
+}
+
 /**
  * A fresh Pi supervisor whose transcripts live in the run's state directory,
  * one Pi session per recovery episode.
  */
 export function piSupervisorFactory(config: SupervisorConfig): NonNullable<RunRequest["supervisorFactory"]> {
-  return async ({ runId, stateDir }) => {
-    const openSession = piEpisodeSessionOpener({
-      runId,
-      sessionDir: path.join(stateDir, "supervisor"),
-      repairsDir: path.join(stateDir, "repairs"),
-      ...(config.agentDir !== undefined ? { agentDir: config.agentDir } : {}),
-      ...(config.promptTimeoutMs !== undefined ? { promptTimeoutMs: config.promptTimeoutMs } : {}),
-      ...(config.promptTotalTimeoutMs !== undefined ? { promptTotalTimeoutMs: config.promptTotalTimeoutMs } : {}),
-      ...(config.rawStreamCapture === true ? { rawStreamCapture: true } : {}),
-    });
-    const session = await openSession({
-      provider: config.provider,
-      modelId: config.modelId,
-      ...(config.thinkingLevel !== undefined ? { thinkingLevel: config.thinkingLevel } : {}),
-    });
-    return createPiSupervisor({
-      session,
-      openSession,
-      configuredModels: config.models,
-      ...(config.quotaRetryMs !== undefined ? { quotaRetryMs: config.quotaRetryMs } : {}),
-    });
-  };
+  return async ({ runId, stateDir }) => piHarnessFor(config, runId, stateDir).start();
 }
 
 /**
- * Restore the run's logical supervisor on its bound model, with the
+ * Restore the run's logical supervisor on the harness its binding is pinned
+ * to (a binding without one was recorded by Pi), on its bound model, with the
  * operator's current model list. The first episode after resume starts a
  * fresh session; earlier transcripts stay on disk but are never reopened.
+ * Without an operator config a Pi binding restores on Pi's defaults, with its
+ * credential from the environment or Pi's own store, as before harnesses.
  */
+export function supervisorRestore(config: SupervisorConfig | undefined): NonNullable<ResumeRequest["restoreSupervisor"]> {
+  return async (binding, { runId, stateDir }) => {
+    const harness = bindingHarness(binding);
+    if (harness !== "pi") {
+      throw new Error(`this run's supervisor is pinned to the ${harness} harness, which this GraphLoom cannot run`);
+    }
+    const restored = { ...binding, sessionFile: binding.sessionFile, harness };
+    if (config === undefined) {
+      return restorePiSupervisorFromBinding({
+        runId,
+        binding: restored,
+        ...(binding.sessionFile !== undefined ? { sessionDir: path.dirname(binding.sessionFile) } : {}),
+        repairsDir: path.join(stateDir, "repairs"),
+      });
+    }
+    // The operator's current models take precedence over those the binding recorded.
+    return piHarnessFor(config, runId, stateDir).restore(restored);
+  };
+}
+
+/** The Pi restore with the operator's config (see supervisorRestore). */
 export function piSupervisorRestore(config: SupervisorConfig): NonNullable<ResumeRequest["restoreSupervisor"]> {
-  return async (binding, { runId, stateDir }) =>
-    restorePiSupervisorFromBinding({
-      runId,
-      binding: {
-        sessionId: binding.sessionId,
-        sessionFile: binding.sessionFile,
-        provider: binding.provider,
-        modelId: binding.modelId,
-        switchJournal: binding.switchJournal,
-      },
-      sessionDir: path.join(stateDir, "supervisor"),
-      configuredModels: config.models,
-      repairsDir: path.join(stateDir, "repairs"),
-      ...(config.agentDir !== undefined ? { agentDir: config.agentDir } : {}),
-      ...(config.promptTimeoutMs !== undefined ? { promptTimeoutMs: config.promptTimeoutMs } : {}),
-      ...(config.promptTotalTimeoutMs !== undefined ? { promptTotalTimeoutMs: config.promptTotalTimeoutMs } : {}),
-      ...(config.rawStreamCapture === true ? { rawStreamCapture: true } : {}),
-      ...(config.quotaRetryMs !== undefined ? { quotaRetryMs: config.quotaRetryMs } : {}),
-    });
+  return supervisorRestore(config);
 }
 
 function expandHome(p: string): string {

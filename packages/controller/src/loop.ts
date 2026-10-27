@@ -874,6 +874,7 @@ async function runNormalLoopSteps(
                 ...(metered ? { maxProviderCalls: budgetBefore } : {}),
                 maxWaitMs: waitBefore,
                 recorder,
+                ...(supervisor.drainInvestigation !== undefined ? { investigation: supervisor.drainInvestigation() } : {}),
                 ...(decided !== undefined ? { proposal: decided } : {}),
                 ...(decideError !== undefined ? { error: decideError } : {}),
                 admission: {

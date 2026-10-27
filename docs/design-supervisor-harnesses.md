@@ -1,7 +1,8 @@
 # Supervisor harnesses: Pi, Claude Code, and Codex
 
 Status: proposed design, 2026-10-26; S1 (the shared harness library, §3)
-implemented, S2 to S6 not implemented. This supersedes the
+and S2 (the supervisor host contract, §4.1, as built in §4.5) implemented,
+S3 to S6 not implemented. This supersedes the
 Pi-only backend choice in the [core design](design-typescript-core.md) §6
 ("Standalone Pi SDK session implementation") and in the
 [Pi supervisor design](design-pi-supervisor.md). Pi stays a supported harness,
@@ -115,8 +116,12 @@ already had, with the executor-specific parts passed in:
 - **Pi:** `createPiAgent` (the isolated loader, the tool activation, and the
   reservation hook on `streamFunction`), `promptPiAgent`,
   `openPiSessionManager`, `piSessionReporter`, `piBashTool`, `piNativeTools`,
-  and the session settings record. `packages/supervisor/src/pi-session.ts`
-  stays in the supervisor until S2 builds the host on the library.
+  and the session settings record. Since S2, `packages/supervisor/src/pi-session.ts`
+  takes its model runtime (`defaultPiModelRuntime`) and isolated resource
+  loader (`isolatedResourceLoader`) from the library. It does not use
+  `createPiAgent`: a supervisor session needs compaction on, the configured
+  `thinkingLevel`, and no built-in tools until a candidate grant, which
+  `createPiAgent` fixes the other way for executors.
 - **`classify/`, `session/`, `process/`:** moved unchanged. The executor's
   `transient.ts` keeps only its retry loop (policy, backoff, worktree
   fingerprint) and re-exports the classifiers.
@@ -184,9 +189,13 @@ Mechanism (S1):
   release. There the script keeps the vendored copy as it is, so a
   candidate's build never overwrites the harness code under review.
 - The library is only a `devDependency` of the executor, so repair does not
-  link it into a candidate. In S1 nothing loads it at run time except through
-  the vendored copy, so the release does not ship `packages/agent-harness`.
-  S2 adds it to the release's core packages when the supervisor imports it.
+  link it into a candidate. In S1 nothing loaded it at run time except through
+  the vendored copy, so the release did not ship `packages/agent-harness`.
+  S2 makes it a dependency of the supervisor and adds it to the release's
+  core packages (`CORE_PACKAGES` in `scripts/release/assemble.mjs`,
+  `DIST_ONLY` in `check-tree.mjs`, the lockstep test): it ships as
+  `package.json` and `dist/` only, and `smoke-pi.mjs` checks that the
+  supervisor resolves it to the tree's own `packages/agent-harness`.
 - `apps/graphloom/test/agent-harness-vendor.test.ts` checks four things:
   - the vendored files match the built library;
   - the executor resolves the harness only from `dist/vendor`;
@@ -353,6 +362,69 @@ refused, and the refusal points to `resume --supervisor`.
 - `model_retry` uses the next model of the pinned harness.
 - `thinkingLevel` maps to Codex `model_reasoning_effort` (`--config`). Claude
   Code has no equivalent, so it is ignored there, with a `check` warning.
+
+### 4.5 As built in S2
+
+S2 builds the contract with Pi as its only real harness. Where the code
+settled a point the sections above leave open, it did so as follows.
+
+- **Modules.** `packages/supervisor/src/harness.ts` holds the contract
+  (`HarnessSession`, `SupervisorHarness`, `SupervisorHost`,
+  `HarnessCapabilities`, `SupervisorBinding` with `harness`, and
+  `bindingHarness`). `host.ts` is `createSupervisorHost`, moved from
+  `pi-supervisor.ts`. `pi-harness.ts` is `createPiHarness`, with `probe`,
+  `openSession`, `start`, and `restore`. `reply.ts` is `parseSupervisorReply`,
+  and `investigation.ts` is the step record. `createPiSupervisor`,
+  `restorePiSupervisorFromBinding`, and `PiSupervisorSession` remain as the
+  Pi harness's names, so existing callers and tests are unchanged.
+- **Protocol by capability.** The host chooses its decision protocol from
+  `capabilities.toolCalling`. With it, the host keeps the Pi protocol byte for
+  byte: tool calls, the `parseSupervisorDecision` fallback, and the same
+  prompts. Without it, the host uses the JSON reply, `inspect` rounds, and
+  findings (§4.2), with the reply-protocol variants of the recovery,
+  rejection, and re-ask prompts. Pi never takes that path, so a Pi model that
+  writes `{"inspect": …}` still gets a malformed-reply slip, as before S2.
+- **Optional members.** `SupervisorHarness.openSession` is optional. Without
+  it, every episode shares the first session, and the remedies that need a
+  fresh session are skipped, as `createPiSupervisor` without `openSession`
+  always did. `HarnessSession.investigation` and `lastUsage` are optional too,
+  so a session that records neither, such as Pi's, needs no stub.
+- **Investigation steps.** The host takes each session's steps after every
+  prompt and numbers them `inv-<n>` itself, so ids stay unique across the
+  fresh sessions of one episode. Numbering restarts at each episode. The
+  `Supervisor` port gains an optional `drainInvestigation()`. The controller
+  puts the drained steps into the episode record as `investigation` (and
+  `droppedInvestigation`). A record whose turn has no steps, which is every
+  Pi turn, has neither field. Under the record's 64 KB bound, steps are
+  dropped before tool calls. Admission does not yet accept `inv-` ids as
+  citations; S3 adds that with the first harness that records steps.
+- **Inspect rounds.** One `inspect` reply may carry at most 8 requests
+  (`MAX_INSPECT_REQUESTS`). The host runs them through the same inspection
+  tools Pi is offered, so the controller records them as probes and charges
+  them in the same way. The fourth answer says it was the last round. A fifth
+  request is a `malformed` slip, which the slip ladder bounds.
+- **Findings.** Each finding's outcome is prepended to the next prompt the
+  host sends in the episode.
+- **Switching and overflow without Pi's capabilities.** On a harness without
+  `inSessionModelSwitch`, `switchModel` replaces the session with a fresh one
+  on the target model, and the next prompt is the turn's full opening. On a
+  harness without `compaction`, an overflow takes `fresh_session_retry` once.
+- **Restore.** The controller has no restore of its own. A resume of a run
+  that has a binding, given neither `supervisor` nor `restoreSupervisor`, is
+  refused before the run is claimed: `run <id> has a pi supervisor binding
+  (session …) but no restoreSupervisor was given to restore it`. The CLI
+  passes `supervisorRestore(config)` on every resume. Without
+  `supervisor.json`, a Pi binding restores on Pi's defaults, as the old
+  controller default did. A binding pinned to any other harness is refused
+  until that harness exists. `reconcileSupervisorBinding` reads the Pi session
+  file only for a Pi binding. For any other harness it settles an interrupted
+  intent as failed, until S3 and S4 add their session-copy records.
+- **Conformance.** `packages/supervisor/src/testing/harness-conformance.ts`
+  is the shared suite. It runs from `harness-conformance.test.ts` against
+  `createPiHarness` with scripted sessions, and against a scripted CLI-shaped
+  harness that has no capabilities and records investigation steps. Each run
+  includes the replay of the `9bfa446d-4ea` fixtures. The suite's directory is
+  excluded from `dist`.
 
 ## 5. Investigation, grounding, and evidence
 

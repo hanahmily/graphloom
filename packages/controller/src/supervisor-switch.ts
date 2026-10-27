@@ -154,5 +154,6 @@ export function readBinding(supervisor: Supervisor): DurableRunState["supervisor
     modelId: b.modelId,
     switchJournal: structuredClone(b.switchJournal),
     ...(b.configuredModels !== undefined ? { configuredModels: structuredClone(b.configuredModels) } : {}),
+    ...(b.harness !== undefined ? { harness: b.harness } : {}),
   };
 }

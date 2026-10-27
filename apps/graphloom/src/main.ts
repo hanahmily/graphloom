@@ -22,7 +22,7 @@ import {
   loadSupervisorConfig,
   parseModelRef,
   piSupervisorFactory,
-  piSupervisorRestore,
+  supervisorRestore,
 } from "./supervisor-config.js";
 
 async function main(): Promise<void> {
@@ -153,9 +153,11 @@ async function main(): Promise<void> {
       ...(args.includes("--update-plugin") ? { updatePlugin: true } : {}),
       ...(args.includes("--update-executors") ? { updateExecutors: true } : {}),
       ...(args.includes("--reconciled") ? { reconciled: true } : {}),
+      // The controller has no restore of its own: a run's supervisor binding
+      // is restored on the harness it is pinned to, with or without a config.
+      restoreSupervisor: supervisorRestore(config),
       ...(config !== undefined
         ? {
-            restoreSupervisor: piSupervisorRestore(config),
             supervisorFactory: piSupervisorFactory(config),
             repair: piRepairDeps(config, await resolveBundlePathForResume(runRef, stateRoot ? path.resolve(stateRoot) : undefined)),
           }

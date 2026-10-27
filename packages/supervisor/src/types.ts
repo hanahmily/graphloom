@@ -12,6 +12,7 @@ import type {
   RepairTarget,
   RunView,
 } from "@graphloom/sdk";
+import type { InvestigationStep } from "./investigation.js";
 import type { ProviderFailureClass } from "./provider-failure.js";
 
 /** Why the controller entered recovery for this episode. */
@@ -269,6 +270,12 @@ export interface Supervisor {
    * records them for the operator and charges their waits to `waitMs`.
    */
   drainRemedies?(): SupervisorRemedy[];
+  /**
+   * Optional: the investigation steps (`inv-<n>`) the harness observed since
+   * the last drain, for the decide() call's episode record. A Pi supervisor,
+   * whose inspection the controller records itself, returns none.
+   */
+  drainInvestigation?(): InvestigationStep[];
   /**
    * Stable session id for this run's supervisor (Pi session id or scripted stand-in).
    * Required for qualified repair so every patch round binds to the same session.

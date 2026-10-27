@@ -6,15 +6,17 @@
  *
  *   <tree>/node/bin/node scripts/release/smoke-pi.mjs --root <tree>
  *
- * Imports the modules that load Pi the way GraphLoom does: the supervisor
- * package, the Pi harness and its rehearsal stand-in, and
+ * Imports the modules that load Pi the way GraphLoom does: the shared
+ * `@graphloom/agent-harness` library as the supervisor resolves it (it must be
+ * the tree's own `packages/agent-harness`), the supervisor package, the
+ * coding-agent Pi harness and its rehearsal stand-in, and
  * `@earendil-works/pi-coding-agent` resolved from the harness. It then runs
  * esbuild as Pi's own dependency tree resolves it (through
  * `@earendil-works/chord`), which needs its native binary for this platform.
  * The platform prune and the nested dedupe (`prune-tree.mjs`) must leave all
  * of this working.
  */
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -37,7 +39,14 @@ export async function smokePi(root) {
     await import(pathToFileURL(file).href);
     loaded.push(path.relative(root, file));
   };
-  await load(path.join(root, "packages", "supervisor", "dist", "index.js"));
+  // The supervisor builds its Pi sessions on the shared harness library, a core package of its own.
+  const supervisorDir = path.join(root, "packages", "supervisor");
+  const library = findPackage(path.join(supervisorDir, "dist"), "@graphloom/agent-harness");
+  const libraryReal = realpathSync(library);
+  const shipped = realpathSync(path.join(root, "packages", "agent-harness"));
+  if (libraryReal !== shipped) throw new Error(`the supervisor resolves @graphloom/agent-harness to ${libraryReal}, not the tree's ${shipped}`);
+  await load(path.join(shipped, "dist", "pi", "index.js"));
+  await load(path.join(supervisorDir, "dist", "index.js"));
   const harness = path.join(root, "executors", "coding-agent", "dist", "pi.js");
   await load(harness);
   await load(path.join(root, "executors", "coding-agent", "dist", "rehearsal", "pi.js"));

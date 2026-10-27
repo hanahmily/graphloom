@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
-/** Supervisor package — Pi SDK session adapter and recovery protocol. */
+/** Supervisor package — harness-neutral recovery host, the Pi harness, and the recovery protocol. */
 
 export {
   resolveMiniMaxCredential,
@@ -27,16 +27,65 @@ export {
 } from "./pi-session.js";
 
 export {
+  bindingHarness,
+  DEFAULT_SUPERVISOR_HARNESS,
+  PI_HARNESS_CAPABILITIES,
+  SUPERVISOR_HARNESS_NAMES,
+  type HarnessCapabilities,
+  type HarnessProbe,
+  type HarnessPromptOptions,
+  type HarnessSession,
+  type HarnessSessionRole,
+  type HarnessUsage,
+  type ModelSwitchRecord,
+  type SupervisorBinding,
+  type SupervisorHarness,
+  type SupervisorHarnessName,
+  type SupervisorHost,
+  type SupervisorModelRef,
+} from "./harness.js";
+
+export {
+  buildInspectResultPrompt,
+  buildReaskPrompt,
   buildRecoveryPrompt,
+  buildRejectionPrompt,
   buildRepairPrompt,
+  createSupervisorHost,
+  type CreateSupervisorHostOptions,
+  type DecisionProtocol,
+  type InspectResult,
+} from "./host.js";
+
+export {
   createPiSupervisor,
   type CreatePiSupervisorOptions,
-  type ModelSwitchRecord,
   type PiSupervisor,
   type PiSupervisorSessionPort,
-  type SupervisorBinding,
-  type SupervisorModelRef,
 } from "./pi-supervisor.js";
+
+export {
+  configuredModelsFromBinding,
+  createPiHarness,
+  type PiHarness,
+  type PiHarnessOptions,
+  type PiSessionBase,
+} from "./pi-harness.js";
+
+export {
+  MAX_INSPECT_REQUESTS,
+  MAX_INSPECT_ROUNDS,
+  parseSupervisorReply,
+  type InspectRequest,
+  type SupervisorReply,
+} from "./reply.js";
+
+export {
+  investigationLines,
+  isInvestigationStepId,
+  type InvestigationStep,
+  type InvestigationStepKind,
+} from "./investigation.js";
 
 export {
   assertAdmittedCandidateRoot,
@@ -99,6 +148,7 @@ export {
   boundValue,
   shrinkJson,
   boundRejections,
+  boundInvestigationSteps,
   buildEpisodeRecord,
   fitEpisodeRecord,
   createEpisodeRecorder,

@@ -23,7 +23,7 @@ import { pruneTree } from "./prune-tree.mjs";
 const here = path.dirname(fileURLToPath(import.meta.url));
 
 /** Core packages: `package.json` and `dist/` only (§2.3). */
-export const CORE_PACKAGES = ["packages/sdk", "packages/controller", "packages/plugin-host", "packages/supervisor", "packages/runner", "apps/graphloom"];
+export const CORE_PACKAGES = ["packages/sdk", "packages/agent-harness", "packages/controller", "packages/plugin-host", "packages/supervisor", "packages/runner", "apps/graphloom"];
 
 /** The commands of the release gate (§6 step 4), recorded in `release.json`. */
 export const GATE = ["NODE_ENV=development npm ci --include=dev", "npm run build", "npm run typecheck", "npm test"];

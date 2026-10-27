@@ -4,20 +4,10 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { parseSessionEntries } from "@earendil-works/pi-coding-agent";
-import {
-  createPiSupervisorSession,
-  isMiniMaxProvider,
-  type CreatePiSupervisorSessionOptions,
-  type PiSupervisorSession,
-} from "./pi-session.js";
-import {
-  createPiSupervisor,
-  findConfigured,
-  type ModelSwitchRecord,
-  type PiSupervisor,
-  type SupervisorBinding,
-  type SupervisorModelRef,
-} from "./pi-supervisor.js";
+import { bindingHarness, type SupervisorBinding, type SupervisorHost, type SupervisorModelRef } from "./harness.js";
+import { createPiHarness } from "./pi-harness.js";
+
+export { piEpisodeSessionOpener } from "./pi-harness.js";
 
 export interface RestorePiSupervisorOptions {
   runId: string;
@@ -38,7 +28,7 @@ export interface RestorePiSupervisorOptions {
   /** Controller repairs directory; required for candidate coding grants. */
   repairsDir?: string;
   patchTimeoutMs?: number;
-  /** Operator fallback wait for a quota error with no reset time (see CreatePiSupervisorOptions). */
+  /** Operator fallback wait for a quota error with no reset time (see CreateSupervisorHostOptions). */
   quotaRetryMs?: number;
 }
 
@@ -48,22 +38,21 @@ export interface RestorePiSupervisorOptions {
  * first episode after a restart starts a fresh session with no prior chat,
  * like every episode, and learns what earlier episodes established from the
  * controller's case file. Each later episode opens its own session too.
+ * A binding without `harness` was recorded by a Pi supervisor; one naming
+ * another harness is refused.
  */
-export async function restorePiSupervisorFromBinding(
-  options: RestorePiSupervisorOptions,
-): Promise<PiSupervisor> {
+export async function restorePiSupervisorFromBinding(options: RestorePiSupervisorOptions): Promise<SupervisorHost> {
   const { binding } = options;
+  const harness = bindingHarness(binding);
+  if (harness !== "pi") {
+    throw new Error(`cannot restore supervisor: the binding is pinned to the ${harness} harness, not pi`);
+  }
   const sessionDir =
     options.sessionDir ?? (binding.sessionFile !== undefined ? path.dirname(binding.sessionFile) : undefined);
   if (sessionDir === undefined) {
     throw new Error("cannot restore supervisor: binding has no sessionFile and no sessionDir was given");
   }
-
-  const configured =
-    options.configuredModels ??
-    binding.configuredModels ??
-    configuredModelsFromBinding(binding);
-  const openSession = piEpisodeSessionOpener({
+  return createPiHarness({
     runId: options.runId,
     sessionDir,
     ...(options.agentDir !== undefined ? { agentDir: options.agentDir } : {}),
@@ -74,57 +63,24 @@ export async function restorePiSupervisorFromBinding(
     ...(options.systemPrompt !== undefined ? { systemPrompt: options.systemPrompt } : {}),
     ...(options.cwd !== undefined ? { cwd: options.cwd } : {}),
     ...(options.repairsDir !== undefined ? { repairsDir: options.repairsDir } : {}),
-  });
-  // The bound model may require a reasoning level other than the "off" default
-  // (e.g. a model that rejects thinking disabled); it takes effect when the
-  // session is created.
-  const session = await openSession(
-    findConfigured(configured, binding) ?? { provider: binding.provider, modelId: binding.modelId },
-  );
-
-  return createPiSupervisor({
-    session,
-    openSession,
-    logicalSessionId: binding.sessionId,
-    configuredModels: configured,
-    initialSwitchJournal: binding.switchJournal as ModelSwitchRecord[],
+    ...(options.configuredModels !== undefined ? { configuredModels: options.configuredModels } : {}),
     ...(options.patchTimeoutMs !== undefined ? { patchTimeoutMs: options.patchTimeoutMs } : {}),
     ...(options.quotaRetryMs !== undefined ? { quotaRetryMs: options.quotaRetryMs } : {}),
-  });
+  }).restore(binding);
 }
 
 /**
- * Opens a new durable Pi session in `sessionDir` on a given model, for one
- * recovery episode. Every session the run's supervisor uses comes from here.
+ * Settle switch intents left by a crash between journaling and commit, from
+ * the bound harness's own record of the switch. Pi appends a `model_change`
+ * entry to the session file when a switch takes effect, so an intent whose
+ * target matches the file's last model change is committed; any other intent
+ * failed and the run stays on its `from` model. A harness that keeps no such
+ * record (none yet besides Pi) settles every intent as failed. The session
+ * itself is never replaced.
  */
-export function piEpisodeSessionOpener(
-  base: Omit<CreatePiSupervisorSessionOptions, "provider" | "modelId" | "thinkingLevel" | "sessionFile">,
-): (model: SupervisorModelRef) => Promise<PiSupervisorSession> {
-  // The explicit key is MiniMax's only: after a switch to another provider,
-  // later episodes open on that provider's own Pi-stored credential.
-  const { apiKey, ...shared } = base;
-  return (model) =>
-    createPiSupervisorSession({
-      ...shared,
-      ...(apiKey !== undefined && isMiniMaxProvider(model.provider) ? { apiKey } : {}),
-      provider: model.provider,
-      modelId: model.modelId,
-      ...(model.thinkingLevel !== undefined ? { thinkingLevel: model.thinkingLevel } : {}),
-    });
-}
-
-/**
- * Settle switch intents left by a crash between journaling and commit. Pi
- * appends a `model_change` entry to the session file when a switch takes
- * effect, so an intent whose target matches the file's last model change is
- * committed; any other intent failed and the run stays on its `from` model.
- * The session itself is never replaced.
- */
-export async function reconcileSupervisorBinding(
-  binding: SupervisorBinding,
-): Promise<SupervisorBinding> {
+export async function reconcileSupervisorBinding(binding: SupervisorBinding): Promise<SupervisorBinding> {
   if (!binding.switchJournal.some((r) => r.status === "intent")) return binding;
-  const last = await lastModelChange(binding.sessionFile);
+  const last = bindingHarness(binding) === "pi" ? await lastModelChange(binding.sessionFile) : undefined;
   let model: SupervisorModelRef = { provider: binding.provider, modelId: binding.modelId };
   const switchJournal = binding.switchJournal.map((record) => {
     if (record.status !== "intent") return record;
@@ -142,9 +98,7 @@ export async function reconcileSupervisorBinding(
   return { ...binding, ...model, switchJournal };
 }
 
-async function lastModelChange(
-  sessionFile: string | undefined,
-): Promise<SupervisorModelRef | undefined> {
+async function lastModelChange(sessionFile: string | undefined): Promise<SupervisorModelRef | undefined> {
   if (sessionFile === undefined) return undefined;
   let content: string;
   try {
@@ -164,17 +118,4 @@ async function lastModelChange(
 
 function sameModel(a: SupervisorModelRef, b: SupervisorModelRef): boolean {
   return a.provider === b.provider && a.modelId === b.modelId;
-}
-
-function configuredModelsFromBinding(binding: SupervisorBinding): SupervisorModelRef[] {
-  const seen = new Map<string, SupervisorModelRef>();
-  const add = (ref: SupervisorModelRef) => {
-    seen.set(`${ref.provider}/${ref.modelId}`, ref);
-  };
-  add({ provider: binding.provider, modelId: binding.modelId });
-  for (const entry of binding.switchJournal) {
-    add(entry.from);
-    add(entry.to);
-  }
-  return [...seen.values()];
 }
