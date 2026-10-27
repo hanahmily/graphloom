@@ -6,8 +6,10 @@
  * performs L0 (`check`) then L1-quick (`rehearse` with stubbed commands)
  * before a live run is intaken, keyed by a fingerprint of everything that
  * would change their verdict — bundle digests, the runner config, the
- * environment checks' own output, the protocol version, and B2's capability
- * probe. A `ready` report at a matching fingerprint is reused so a second
+ * environment checks' own output, the protocol version, B2's capability
+ * probe, the GraphLoom product version, and the built-in executors' digests
+ * (docs/design-release.md §5.1), so a result cached by one installed version
+ * is not reused by another. A `ready` report at a matching fingerprint is reused so a second
  * run on an unchanged machine pays nothing. `not-ready` stops before any
  * provider call; `inconclusive` proceeds but is recorded; `--skip-rehearsal`
  * overrides and is recorded the same way, so `inspect` shows whether (and
@@ -17,6 +19,11 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { defaultStateRoot, intakeTask, type RehearsalReport } from "@graphloom/controller";
 import { PROTOCOL_VERSION, stableHash } from "@graphloom/sdk";
+import { digestExecutorSource, packageRootOf } from "@graphloom/runner";
+import { codingAgentExecutorPackage } from "@graphloom/executor-coding-agent";
+import { commandExecutorPackage } from "@graphloom/executor-command";
+import { githubExecutorPackage } from "@graphloom/executor-github";
+import { installRoot, versionInfo } from "./version.js";
 import { check, rehearse, type CheckReport } from "./rehearsal.js";
 import { loadRunnerConfig } from "./runner-config.js";
 
@@ -40,6 +47,17 @@ export interface GateOptions {
   stateRoot?: string;
   /** `--skip-rehearsal`: nothing runs, fingerprint stays empty, recorded as `skipped` for `inspect`. */
   skip?: boolean;
+  /** The product version the fingerprint names (tests); defaults to this installation's. */
+  productVersion?: string;
+}
+
+/** The digest of each built-in executor package this installation serves, by package name. */
+export async function builtinExecutorDigests(): Promise<Record<string, string>> {
+  const digests: Record<string, string> = {};
+  for (const pkg of [codingAgentExecutorPackage, commandExecutorPackage, githubExecutorPackage]) {
+    digests[pkg.name] = await digestExecutorSource(packageRootOf(pkg.entryModule));
+  }
+  return digests;
 }
 
 function cachePath(stateRoot: string, fingerprintValue: string): string {
@@ -98,6 +116,9 @@ export async function runGate(taskPath: string, options: GateOptions = {}): Prom
 
   const fingerprintValue = stableHash({
     protocolVersion: PROTOCOL_VERSION,
+    // A result cached by one GraphLoom is not reused by another (docs/design-release.md §5.1).
+    productVersion: options.productVersion ?? versionInfo(installRoot()).version,
+    executors: await builtinExecutorDigests(),
     bundle: { manifestDigest: intake.bundle.manifestDigest, entryDigest: intake.bundle.entryDigest },
     // Rehearsal runs the graph's own request text verbatim, against the
     // pinned repository revision: two tasks sharing a bundle/config/

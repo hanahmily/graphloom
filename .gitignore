@@ -45,3 +45,8 @@ Thumbs.db
 
 # Release build output (scripts/release.sh build)
 /release-out/
+
+# Committed state-format fixtures are complete run snapshots, built bundle and
+# artifacts included (packages/controller/src/upgrade.test.ts checks this).
+!/packages/controller/test/fixtures/state-formats/**/
+!/packages/controller/test/fixtures/state-formats/**

@@ -134,6 +134,10 @@ export interface ReleaseOptions {
   salt?: string;
   /** Leave release/allowed_signers out of the tree. */
   noSigners?: boolean;
+  /** Fill the tree further before it is packed, such as with the real CLI (ownership tests). */
+  populate?: (tree: string) => Promise<void>;
+  /** Extra release.json fields. */
+  release?: Record<string, unknown>;
 }
 
 export interface BuiltRelease {
@@ -206,7 +210,7 @@ export async function makeSandbox(base: string, options: { gh?: boolean } = {}):
     await mkdir(path.join(tree, "apps", "graphloom", "dist"), { recursive: true });
     await mkdir(path.join(tree, "examples", "plugins", "hello"), { recursive: true });
     await mkdir(out, { recursive: true });
-    await writeFile(path.join(tree, "release.json"), `${JSON.stringify({ product: "graphloom", version, platform: "linux-x64", git: { commit: "0".repeat(40) }, node: { version: process.versions.node } }, null, 2)}\n`);
+    await writeFile(path.join(tree, "release.json"), `${JSON.stringify({ product: "graphloom", version, platform: "linux-x64", git: { commit: "0".repeat(40) }, node: { version: process.versions.node }, ...opts.release }, null, 2)}\n`);
     await copyFile(path.join(scripts, "release", "launcher.sh"), path.join(tree, "bin", "graphloom"));
     await chmod(path.join(tree, "bin", "graphloom"), 0o755);
     await symlink(process.execPath, path.join(tree, "node", "bin", "node"));
@@ -220,6 +224,7 @@ export async function makeSandbox(base: string, options: { gh?: boolean } = {}):
     await writeFile(path.join(tree, "apps", "graphloom", "dist", "main.js"), stubMain(version));
     await writeFile(path.join(tree, "apps", "graphloom", "dist", "late.js"), `export const version = ${JSON.stringify(version)};\n`);
     await writeFile(path.join(tree, "examples", "plugins", "hello", "graphloom.manifest.json"), `{"graphId":"hello","salt":${JSON.stringify(opts.salt ?? "")}}\n`);
+    if (opts.populate !== undefined) await opts.populate(tree);
     const tarball = path.join(out, `${name}.tar.gz`);
     const tar = spawnSync("tar", ["-czf", tarball, "-C", path.join(work, "tree"), name], { encoding: "utf8" });
     if (tar.status !== 0) throw new Error(tar.stderr);

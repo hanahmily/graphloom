@@ -632,7 +632,10 @@ naming what changed; the run stays in recovery on its old version. Activation
 repeats the `describe()` check on the host it switches to. An independent review
 cannot authorize a structural difference.
 Runtime admission also rejects jobs and routes that name undeclared steps.
-Arbitrary state migration is deferred.
+Arbitrary state migration is deferred. Moving a run's durable state to a newer
+GraphLoom release, across ordered state-format migrators that change only how
+state is stored, is `resume --upgrade`
+([release design §5.2](design-release.md#52-moving-a-run-forward-resume---upgrade)).
 Private state is disposable bookkeeping: a compatible patched plugin must reconcile
 it against the canonical run view. If it cannot, stop with a compatibility reason;
 do not erase authoritative state or start a new run silently.

@@ -1,6 +1,6 @@
 # Installable releases
 
-Status: proposed design, 2026-10-26; phases R0, R1, and R2 implemented. The repository
+Status: proposed design, 2026-10-26; phases R0, R1, R2, and R3 implemented. The repository
 license (Apache-2.0: `LICENSE`, `NOTICE`, and `license` in every `package.json`)
 and the source headers with their check (§2.8) are in place (R0). So are the
 product version and `graphloom version` (§2.4), the repair toolchain as CLI
@@ -9,7 +9,10 @@ pinned Node fetch (§2.7), the license check and notices (§2.8), SDK packing
 (§3.1), and `scripts/release.sh build` (§6, "R1 as implemented"). R2 added
 `install.sh`, the shim, `graphloom upgrade`, `graphloom self`, automatic
 updates, and deterministic packing (§4.7, §5.5, and §6, "R2 as
-implemented"); everything else here is design. This covers how GraphLoom is packaged, installed, upgraded, and released
+implemented"). R3 added run ownership, dispatch to the owning version,
+`resume --upgrade` with state formats and migrators, the product version in
+the gate fingerprint, and the upgrade-matrix hooks (§5.6); everything else
+here is design. This covers how GraphLoom is packaged, installed, upgraded, and released
 for an operator who runs it on their own Linux machine. It specializes the
 [TypeScript core design](design-typescript-core.md) (version transitions, §8) and the
 [executor design](design-executors.md#restart-versions-and-recovery). It adds no
@@ -231,9 +234,9 @@ As implemented in R1 (`apps/graphloom/src/version.ts`):
   `<v>-dev` and no commit is printed. A tree nested inside some other
   repository does not take that repository's commit.
 - `executors`, `plugins`, and `stateFormat` are computed when the tree is
-  assembled. `stateFormat` is the constant `1` until R3 records it in run
-  state. `node.sha256` is the digest of the nodejs.org tarball from
-  `release/node.json`.
+  assembled. `stateFormat` is the staged controller's
+  `CURRENT_STATE_FORMAT` (R3, §5.6). `node.sha256` is the digest of the
+  nodejs.org tarball from `release/node.json`.
 
 ### 2.5 Checksums, reproducibility, signing
 
@@ -1092,6 +1095,169 @@ usual, and `graphloom upgrade` clears the skip.
   `GRAPHLOOM_HOME` or `GRAPHLOOM_RUNNER_CONFIG` absolute before it starts the
   worker.
 
+### 5.6 R3 as implemented (ownership and moving runs)
+
+- **Who the CLI is.** `selfInstall()` (`apps/graphloom/src/ownership.ts`)
+  reads the tree's version (§2.4). The CLI is an **installed** version when
+  its root is `<home>/versions/<v>` and `release.json` names `<v>`, a plain
+  `MAJOR.MINOR.PATCH`; `<home>` is then the install home. Anything else is a
+  **clone**, including an extracted tarball outside `versions/`.
+- **The `install` record and `stateFormat`.** `run`, and `rehearse
+  --stop-at`, pass `install: { version, root }` to the controller
+  (`RunRequest.install`), which writes it into the run state with
+  `stateFormat`. A clone records `<v>-dev[+<sha>]` and its checkout. The run
+  state is the authority on the owner; `runs/<id>.json` is the index that sh
+  reads.
+- **Ownership records.** Only an installed version writes
+  `runs/<runId>.json`, from `onRunCreated`, in the flat form install.sh
+  reads: `{ "version", "stateDir", "plugin" }`, where `plugin` is the task's
+  `plugins/<graph>` path, its link included. The write is atomic (a temporary
+  file renamed over the record) and best effort: a failure is reported, the
+  run continues, and the next run-scoped command on the owner rewrites a
+  missing or stale record. `delete` removes the run's record. A clone writes
+  none, so prune and `upgrade` never see clone runs.
+- **Dispatch.** Before any other work, `resume`, `stop`, `wait`, `inspect`,
+  `stats`, `replay`, `switch-model`, and `delete` read the run's `install`
+  record:
+  - No record (a run from before R3), or a clone's record: the command runs
+    where it was invoked, and the executor pins decide (an `executor pin
+    mismatch` until `--update-executors` or `--upgrade`).
+  - Owned by this version at this root: it runs here. The same version
+    installed elsewhere, such as another home, dispatches to the recorded
+    root while that root exists, because its executor sources differ. Once
+    the recorded root is gone, this installation takes the run.
+  - `resume --upgrade`: it runs here, which moves the run.
+  - Owned by another installed version: the CLI runs that version's
+    `bin/graphloom` with the same arguments and stdio, forwards SIGINT,
+    SIGTERM, and SIGHUP, exits with its status, and prints one stderr line,
+    `graphloom: run <id> belongs to GraphLoom <v>; running <cmd> there
+    (<bin>)`. The version is found at the recorded root, else under the
+    install home: the CLI's own, else `$GRAPHLOOM_HOME`, else the default.
+    So a clone also dispatches a run an installed version owns.
+  - That version is not installed: `run <id> belongs to GraphLoom <v>,
+    which is not installed; reinstall it with graphloom upgrade <v>
+    --no-switch, or move the run here with graphloom resume <run> --upgrade`,
+    exit 1.
+  - The child gets `GRAPHLOOM_DISPATCHED=<v>`. A version that is dispatched a
+    run it does not own refuses instead of dispatching again. An `--on-stop`
+    hook that the owner runs, and that calls back through a newer `current`,
+    still reaches the owner.
+- **State formats.** `packages/controller/src/state-migrations/index.ts`
+  declares `CURRENT_STATE_FORMAT` (1) and `STATE_FORMATS`, the registry of
+  this release's migrators, which is empty. `release.json` takes its
+  `stateFormat` from it (`scripts/release/assemble.mjs`).
+  - A migrator is `{ from, to, files?, migrate }`. `migrate` is a pure
+    function over the run's durable files, given as UTF-8 text by path
+    relative to the state directory: `state.json`, plus the `files` it
+    names. Migrators are found by `from`, in any order, and each step must
+    exist.
+  - Each format can supply a *protected view*, which reads the accepted
+    receipts, evidence, stages, and requirements from its files; format 1's
+    view reads them from `state.json`. After each step, the views before and
+    after must hash equal, or the migration is refused. So a migrator can
+    change how they are stored, never what they say.
+  - A plain `resume` refuses a state in any other format, unchanged. A newer
+    format names "a newer GraphLoom"; an older one names `--upgrade`.
+- **`resume --upgrade`** (`packages/controller/src/upgrade.ts`), under the run
+  lock, before the run's state is loaded as this release's:
+  1. Refusals are decided first, in this order, and each throws
+     `cannot upgrade: …` with nothing written:
+     - a different major version (`0.x` to `1.0` included)
+     - a downgrade: the target is older than the owner, where a
+       `-dev` build orders before its release
+     - an unknown future format
+     - a missing migrator
+     - a run that is not `stopped` (`running`, `succeeded`, or `failed`)
+     - an unsettled repair: an activation journaled as `intent`, or a
+       candidate that is `qualifying` or `qualified`
+     - an active repair: an executor running its activated run-local copy,
+       or a plugin on a `@repair-` version. This goes beyond §5.2. The copy
+       links its dependencies into the owner's tree, and moving the owner
+       would let `self prune` remove that tree. Such a run finishes on its
+       owner
+     - a plugin `sdkProtocol` other than the host's without
+       `--update-plugin`
+     - with `--update-plugin`, an activated plugin repair (the resume would
+       refuse the update), or a bundle that fails describe-compatibility in
+       a throwaway host, as the resume would check it. The installed
+       bundle's own `sdkProtocol` is what the update pins
+     - an executor re-pin that `--update-executors` would refuse
+     - a refusal the resume itself would make, such as a supervisor binding
+       with no `restoreSupervisor` (the controller has no default restore;
+       the CLI passes `supervisorRestore(config)` on every resume, `--upgrade`
+       included, and `resume --rehearsal` restores the rehearsal's scripted
+       supervisor)
+  2. The migrators run in memory. The run's `install`, `stateFormat`,
+     `installHistory`, `stateMigrations`, an `upgrade` evidence record, a
+     version-history entry, and the executor re-pins are applied to the
+     migrated state. `--upgrade` implies `--update-executors`.
+  3. The commit then follows. Each step's original files are kept under
+     `<stateDir>/migrations/<from>-<to>/`, any migrated side files are
+     written, and `state.json` is written last as the single commit point.
+     Then `onMoved` moves `runs/<id>.json`, or removes it when a clone took
+     the run.
+  4. The ordinary resume follows and finds the pins current. Executors that
+     the move re-pinned count as updated, so they lift a final stop as
+     `--update-executors` does.
+  A run already owned by this exact version and root, in the current format,
+  has nothing to move. `inspect` shows `install`, `stateFormat`,
+  `installHistory`, and `stateMigrations`.
+- **Rehearsal hooks** for the upgrade matrix (§6 step 8.7):
+  - `rehearse <task> --stop-at <stage>` takes a stage name or id. Once
+    every requirement of that stage has a valid receipt, the run stops
+    before the graph's next step (`RunRequest.stopAfterStage`, an operator
+    stop). The scratch directory is always kept, and the ownership record is
+    written.
+    - It prints `{ stoppedAt, ok, runId, stateDir, status, stopReason,
+      blocker, resume }` and exits 0 only when the run stopped with that
+      stage complete and the next one not.
+    - The scratch directory also keeps the scenario name and the harness
+      options as `rehearsal.json`.
+  - `resume <stateDir> --rehearsal` continues a kept rehearsal run: a
+    `rehearsal-*` run under `<scratch>/state/`, beside `scenario.json`.
+    - It runs on the same stand-ins and scripted supervisor. It rewrites
+      the stand-in launchers for this process's Node, so a moved run runs
+      the new version's Node.
+    - It reads no runner config. It combines with `--upgrade`,
+      `--update-plugin`, `--update-executors`, and `--reconciled`.
+- **Gate fingerprint.** It adds `productVersion` (the version from
+  `graphloom version`) and `executors`, the `digestExecutorSource` of each
+  built-in executor package by name (`builtinExecutorDigests`,
+  `apps/graphloom/src/gate.ts`). The catalog that a run pins is only known
+  at intake, after the gate. The built-in packages are the code that an
+  upgrade changes.
+- **Fixtures.** `packages/controller/test/fixtures/state-formats/v0.0/` is
+  the first fixture, in format 1. It holds a run of a two-stage fixture graph
+  stopped after Write on a scripted runner (`fixture.json`, `state/`, the
+  pinned `bundle/` bytes, and the changed `worktree/` files). Machine paths
+  and the pinned commit are placeholders (`@@STATE_DIR@@`, `@@WORKTREE@@`,
+  `@@REPO@@`, `@@TASK_DIR@@`, `@@HEAD@@`).
+  - `upgrade.test.ts` rebuilds the repository and worktree for each
+    fixture. It moves the run with `--upgrade`, completes it on a scripted
+    runner, and checks the recorded transition and migrations.
+  - `GRAPHLOOM_CAPTURE_STATE_FIXTURE=<name>` re-captures one.
+  - The root `.gitignore` re-includes everything under
+    `packages/controller/test/fixtures/state-formats/`. Otherwise its `dist/`,
+    `artifacts/`, and `*.log` rules would leave part of a fixture in the
+    capturing work tree only. A test fails when a fixture file is ignored or
+    untracked, or when a manifest entry point is not committed.
+  - Fixture files are exempt from the header check (`fixtures/`).
+- **Tests.**
+  - `packages/controller/src/upgrade.test.ts`: the ownership record in
+    state, the stop-at hook, the format refusal of a plain resume, the
+    move, ordered migrators with backups, a migrator that changes receipts,
+    each refusal with the state directory byte for byte unchanged, and the
+    fixtures.
+  - `apps/graphloom/test/ownership.test.ts`: release trees carrying the
+    real CLI, installed with the real install.sh, with no Node on `PATH`.
+    It covers the records the CLI writes and how `self prune`, `self list`,
+    and `upgrade` read them. It also covers dispatch from a new `current`
+    with no pin mismatch, `resume --upgrade --rehearsal` with re-pinned
+    executors, a refused downgrade, dispatch from a clone, the refusal for
+    a pruned owner and its restore, and `delete` removing the record.
+  - `apps/graphloom/test/gate.test.ts`: no cached `ready` across product
+    versions.
+
 ## 6. Release procedure (local)
 
 `scripts/release.sh` is a script specification; phase R1 implements `build`
@@ -1190,10 +1356,14 @@ scripts/release.sh publish <version>   # steps 9-10, after the maintainer confir
          and the new owner.
       7. Check that a downgrade attempt is refused.
       `--stop-at` and `resume --rehearsal` are test hooks that R3 adds.
-   8. **New fixture.** Copy the stopped run state that the new release produced
-      in its own sub-step 7 run. Commit it in the next release PR as the
-      migration fixture
-      `packages/controller/test/fixtures/state-formats/v<minor>/`.
+   8. **New fixture.** When the new release writes a new `stateFormat`,
+      capture a stopped run in that format with the controller's capture
+      mode (`GRAPHLOOM_CAPTURE_STATE_FIXTURE=v<minor>`, §5.6) and commit it
+      in the next release PR as the migration fixture
+      `packages/controller/test/fixtures/state-formats/v<minor>/`. The
+      fixture is a scripted-runner run, not the sub-step 7 rehearsal state,
+      so the controller's tests can complete it without the CLI or its
+      stand-ins.
 9. **Tag.** Create a signed annotated tag `v<version>` on the merge commit and
    push it.
 10. **Publish.** Run
@@ -1312,8 +1482,8 @@ runs steps 3 to 8 on `<rev>`, which defaults to `HEAD`. It publishes nothing.
   - Hello `check` must be `ok`, and `rehearse --offline` must not be
     `not-ready`.
   - Sub-step 1 waits for `install.sh` (R2) and `doctor` (R4). Sub-step 5
-    waits for R2 and sub-step 6 for R5. Sub-steps 7 and 8 wait for R3 and a
-    second release.
+    waits for R2 and sub-step 6 for R5. Sub-steps 7 and 8 wait for a
+    second release; R3 added their hooks (§5.6).
 
 ### R2 as implemented
 
@@ -1378,7 +1548,7 @@ runs steps 3 to 8 on `<rev>`, which defaults to `HEAD`. It publishes nothing.
 | R0 | Apache-2.0 `LICENSE`, `NOTICE`, and `license` fields (done); SPDX headers on hand-written source and `scripts/check-headers.mjs` in the gate, with the component bumps they cause (done; no bumps were needed, §2.8); this design accepted | Gate passes; header check fails on a file without a header; manifests current |
 | R1 | Product version source of truth, `release.json`, and `graphloom version` from it. `typescript` and `vitest` as CLI dependencies. GraphLoom's own scripts spawned with `process.execPath`, and the stand-in shebang patch removed. Bundled Node fetch and verification. `notices.mjs` and the license allowlist. SDK packing. `scripts/release.sh build` producing all assets (done; the assets of R1's phases, §6 "R1 as implemented") | Tests for version output. Tarball content and no-absolute-path checks. A repair preflight test on a production-pruned tree with no `node` on `PATH`. A license check that fails on a planted disallowed license. Pack file-list check (done: `apps/graphloom/test/version.test.ts`, `release-build.test.ts`, and `release.sh build`'s own step 6 and 8 checks) |
 | R2 | `install.sh`, the shim, `graphloom upgrade`, `self list/use/rollback/prune/uninstall`, automatic updates (`__auto-update`, `autoUpdate` in the runner config, `update/`, `install.lock`, the skip record, auto-prune), and deterministic packing. A read-only version directory also needs the repair snapshot (`snapshotRepairCandidate`, `packages/controller/src/repair.ts`) to make its copy writable, because `cp` keeps the read-only modes (done: §4.7, §5.5, §6 "R2 as implemented"; `makeTreeWritable` serves the plugin and executor snapshots) | Shell tests in a temporary `HOME` with no host Node: atomic switch, no overwrite, prune respects ownership and plugin links, an interrupted install is never listed. `upgrade` installs, switches, lists runs on older versions, and `--no-switch` keeps `current`. Updater tests against a fake release source and a stub `gh`: at most one check per 24 hours; patch (and from 1.0, minor) installed and switched; a breaking release only announced; `notify` never installs; a bad checksum or signature records the failure and does not switch; two concurrent invocations install once; `GRAPHLOOM_DISABLE_AUTOUPDATE=1` and `off` make no network call; the notice never reaches a non-TTY, `--json`, or hook invocation, and the foreground exit code is unchanged; `self rollback` keeps the skipped version from being reinstalled until a newer release or `upgrade`; auto-prune keeps three versions plus owners; a process started from the old version keeps loading from it across a switch. Two independent builds give the same hash (done: `apps/graphloom/test/install.test.ts`, `auto-update.test.ts`, `packages/controller/src/repair.test.ts`, and `release.sh build --compare-to`) |
-| R3 | Run ownership (`runs/<id>.json`, `install` record, `stateFormat`), dispatch to the owning version, `resume --upgrade` with ordered migrators, the gate fingerprint including the product version, and the `rehearse --stop-at` / `resume --rehearsal` hooks | Controller and CLI tests: resume under a new `current` dispatches with no pin mismatch. `--upgrade` migrates each committed fixture and completes it on a scripted runner. Transitions are recorded. Downgrade, crossing a major, an unknown format, a missing migrator, and an unsettled repair are each refused with the run unchanged. A cached gate result is not reused across versions |
+| R3 | Run ownership (`runs/<id>.json`, `install` record, `stateFormat`), dispatch to the owning version, `resume --upgrade` with ordered migrators, the gate fingerprint including the product version, and the `rehearse --stop-at` / `resume --rehearsal` hooks (done: §5.6) | Controller and CLI tests: resume under a new `current` dispatches with no pin mismatch. `--upgrade` migrates each committed fixture and completes it on a scripted runner. Transitions are recorded. Downgrade, crossing a major, an unknown format, a missing migrator, and an unsettled repair are each refused with the run unchanged. A cached gate result is not reused across versions (done: `packages/controller/src/upgrade.test.ts`, `apps/graphloom/test/ownership.test.ts`, `gate.test.ts`) |
 | R4 | `doctor` with agent discovery (Claude Code, Codex, Pi credentials, `gh`), viable-setup reporting, `fix:` commands, and the updates check; `doctor --task` with `environment`, supervisor selection, and `GraphDefinition.agentRoles` (SDK shape check; issue-fix declares its roles); guided `setup` with `--yes`, rerun, and backups; automatic first-run setup in `run`, `resume`, `probe`, `check`, and `rehearse`; the installer's setup offer (§4.2 step 6, §4.4, §4.5) | Tests with a stubbed `PATH` and `HOME` (stub `claude`, `codex`, `gh`, `bwrap`; Pi provider variables and auth store): each discovery result for each agent (missing, probe failed, logged out, login not verifiable, available), each with its `fix:` command; each reason automatic updates are a no-op. Viable setups for Claude Code only, Codex only, Pi only, and all three, including the supervisor order Pi, Claude Code, Codex. `doctor --task` on a fixture plugin's `agentRoles`: an unavailable role harness, a read-only harness on a write role, and a `distinctFrom` conflict, each with its alternatives. Setup offers only available choices with the recommendation; refusing `allowUnrestricted` writes nothing; `--yes` writes the recommendations; a rerun shows the current config, changes only confirmed answers, and keeps a `.bak-` copy, and `--yes` leaves an existing file unchanged. Under a pseudo-terminal, `run` with no config completes setup and then the run; without one, and with `--json` or `GRAPHLOOM_RUN_ID` set, `run` exits 1 naming `graphloom setup --yes` and `check` reports and continues. The installer offers setup only on a terminal. No written file contains a stub credential value. The doctor reuses the confinement and capability probes, spends no model call, and never asks for a host Node |
 | R5 | `release.sh prepare/publish`, signing, the external-plugin smoke test, and the first release `v0.1.0` | The full procedure in §6. The upgrade matrix starts with the second release, from its first fixture |
 

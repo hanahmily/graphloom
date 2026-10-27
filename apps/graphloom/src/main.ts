@@ -12,7 +12,8 @@ import type { GraphRehearsal } from "@graphloom/sdk";
 import type { RunReport } from "@graphloom/controller";
 import { createCliRunner } from "./cli-runner.js";
 import { piRepairDeps, resolveBundlePath, resolveBundlePathForResume } from "./repair-config.js";
-import { check, probe, recordScenario, rehearse, replay } from "./rehearsal.js";
+import { check, probe, recordScenario, rehearse, rehearseStopAt, replay, resumeRehearsal } from "./rehearsal.js";
+import { dispatchToOwner, installHome, recordOwnership, removeOwnershipRecord, selfInstall } from "./ownership.js";
 import { requireRunnerConfig } from "./runner-config.js";
 import { onceStopHook, parseDuration, waitForRun, type StopNotice } from "./notify.js";
 import { formatRunStats, loadRunStats } from "./stats.js";
@@ -57,6 +58,14 @@ async function main(): Promise<void> {
     return;
   }
 
+  // A run-scoped command on a run another installed version owns runs there (docs/design-release.md §5.1).
+  const self = selfInstall();
+  const dispatched = await dispatchToOwner(cmd, args, self);
+  if (dispatched !== undefined) {
+    process.exitCode = dispatched;
+    return;
+  }
+
   const controller = createController();
 
   if (cmd === "run") {
@@ -67,13 +76,18 @@ async function main(): Promise<void> {
     const runnerConfig = await requireRunnerConfig(process.env, (loaded) => stopHook.useConfig(loaded.notify));
     const runner = createCliRunner(runnerConfig);
     const config = await loadSupervisorConfig();
+    const bundlePath = await resolveBundlePath(taskPath).catch(() => undefined);
     const report = await controller.run({
       taskPath,
-      onRunCreated: ({ runId, stateDir }) => { crashContext = { runId, stateDir }; },
+      install: self.record,
+      onRunCreated: async ({ runId, stateDir }) => {
+        crashContext = { runId, stateDir };
+        await recordOwnership(self, { runId, stateDir, ...(bundlePath !== undefined ? { plugin: bundlePath } : {}) });
+      },
       runner,
       ...(stateRoot !== undefined ? { stateRoot } : {}),
       ...(config !== undefined
-        ? { supervisorFactory: piSupervisorFactory(config), repair: piRepairDeps(config, await resolveBundlePath(taskPath)) }
+        ? { supervisorFactory: piSupervisorFactory(config), repair: piRepairDeps(config, bundlePath ?? (await resolveBundlePath(taskPath))) }
         : {}),
     });
     console.log(JSON.stringify(report, null, 2));
@@ -137,8 +151,31 @@ async function main(): Promise<void> {
   }
 
   if (cmd === "resume") {
-    const runRef = requireRunRef(args[1], "resume <stateDir|runId> [--state-root <dir>] [--update-plugin] [--update-executors] [--reconciled] [--on-stop <command>]");
+    const runRef = requireRunRef(args[1], "resume <stateDir|runId> [--state-root <dir>] [--upgrade] [--update-plugin] [--update-executors] [--reconciled] [--rehearsal] [--on-stop <command>]");
     const stateRoot = flagValue(args, "--state-root");
+    // `--upgrade` moves the run to this GraphLoom first (§5.2), and moves its ownership record with it.
+    const upgrade = args.includes("--upgrade")
+      ? {
+          install: self.record,
+          onMoved: async (moved: { runId: string; stateDir: string; bundlePath: string }) => {
+            if (self.home !== undefined) await recordOwnership(self, { runId: moved.runId, stateDir: moved.stateDir, plugin: moved.bundlePath });
+            else await removeOwnershipRecord(installHome(self), moved.runId, moved.stateDir).catch(() => undefined);
+          },
+        }
+      : undefined;
+    if (args.includes("--rehearsal")) {
+      // A rehearsal's kept run continues on its own stand-ins (docs/design-release.md §6 step 8.7); no runner config is read.
+      const report = await resumeRehearsal(runRef, {
+        ...(stateRoot ? { stateRoot: path.resolve(stateRoot) } : {}),
+        ...(upgrade !== undefined ? { upgrade } : {}),
+        ...(args.includes("--update-plugin") ? { updatePlugin: true } : {}),
+        ...(args.includes("--update-executors") ? { updateExecutors: true } : {}),
+        ...(args.includes("--reconciled") ? { reconciled: true } : {}),
+      });
+      console.log(JSON.stringify(report, null, 2));
+      process.exitCode = report.status === "succeeded" ? 0 : 1;
+      return;
+    }
     const stopHook = armStopHook(args, {
       runId: path.basename(runRef),
       stateDir: resolveStateDir(runRef, stateRoot ? path.resolve(stateRoot) : undefined).catch(() => ""),
@@ -151,7 +188,8 @@ async function main(): Promise<void> {
       runner,
       ...(stateRoot ? { stateRoot: path.resolve(stateRoot) } : {}),
       ...(args.includes("--update-plugin") ? { updatePlugin: true } : {}),
-      ...(args.includes("--update-executors") ? { updateExecutors: true } : {}),
+      ...(args.includes("--update-executors") || upgrade !== undefined ? { updateExecutors: true } : {}),
+      ...(upgrade !== undefined ? { upgrade } : {}),
       ...(args.includes("--reconciled") ? { reconciled: true } : {}),
       // The controller has no restore of its own: a run's supervisor binding
       // is restored on the harness it is pinned to, with or without a config.
@@ -176,6 +214,7 @@ async function main(): Promise<void> {
       ...(stateRoot ? { stateRoot: path.resolve(stateRoot) } : {}),
       force: args.includes("--force"),
     });
+    await removeOwnershipRecord(installHome(self), report.runId, report.stateDir).catch(() => undefined);
     console.log(JSON.stringify(report, null, 2));
     return;
   }
@@ -231,6 +270,23 @@ async function main(): Promise<void> {
     const taskPath = path.resolve(args[1] ?? "task.yaml");
     const scenario = flagValue(args, "--scenario");
     const commands = requireCommandsMode(args);
+    const stopAt = flagValue(args, "--stop-at");
+    if (args.includes("--stop-at")) {
+      if (stopAt === undefined || stopAt.startsWith("--")) throw new Error("--stop-at needs a stage name or id");
+      const plugin = await resolveBundlePath(taskPath).catch(() => undefined);
+      const stopped = await rehearseStopAt(taskPath, stopAt, {
+        ...(scenario !== undefined ? { scenario } : {}),
+        ...(commands !== undefined ? { commands } : {}),
+        offline: args.includes("--offline"),
+        synthesized: args.includes("--synthesized"),
+        adversarial: args.includes("--adversarial"),
+        install: self.record,
+        onRunCreated: ({ runId, stateDir }) => recordOwnership(self, { runId, stateDir, ...(plugin !== undefined ? { plugin } : {}) }),
+      });
+      console.log(JSON.stringify(stopped, null, 2));
+      process.exitCode = stopped.ok ? 0 : 1;
+      return;
+    }
     const report = await rehearse(taskPath, {
       ...(scenario !== undefined ? { scenario } : {}),
       ...(commands !== undefined ? { commands } : {}),
@@ -361,7 +417,7 @@ function printHelp(): void {
 Usage:
   graphloom run <task.yaml> [--state-root <dir>] [--on-stop <command>]
   graphloom check <task.yaml>
-  graphloom rehearse <task.yaml> [--scenario <name>] [--commands <stub|run>] [--offline] [--synthesized] [--adversarial] [--keep]
+  graphloom rehearse <task.yaml> [--scenario <name>] [--commands <stub|run>] [--offline] [--synthesized] [--adversarial] [--keep] [--stop-at <stage>]
   graphloom rehearse --record-from <stateDir|runId> [--state-root <dir>] [--name <name>] [--out <path>]
   graphloom replay <stateDir|runId> [--state-root <dir>]
   graphloom probe <task.yaml> --contract <name> [--scenario <name>] [--commands <stub|run>] [--offline]
@@ -369,7 +425,7 @@ Usage:
   graphloom stats <stateDir|runId> [--state-root <dir>] [--json]
   graphloom wait <stateDir|runId> [--state-root <dir>] [--timeout <dur>] [--json]
   graphloom stop <stateDir|runId> [--state-root <dir>]
-  graphloom resume <stateDir|runId> [--state-root <dir>] [--update-plugin] [--update-executors] [--reconciled] [--on-stop <command>]
+  graphloom resume <stateDir|runId> [--state-root <dir>] [--upgrade] [--update-plugin] [--update-executors] [--reconciled] [--rehearsal] [--on-stop <command>]
   graphloom switch-model <stateDir|runId> <provider/model> --reason <text> [--state-root <dir>]
   graphloom delete <stateDir|runId> [--state-root <dir>] [--force]
   graphloom version [--json | --root]
@@ -458,6 +514,27 @@ longer installed, its isolation or built-in status changed, or the installed byt
 moved past an active run-local repair of it. Accepted receipts and evidence are
 not changed. Without it, a changed executor stops the run with "executor pin
 mismatch". It combines with --update-plugin.
+
+Installed releases own their runs (docs/design-release.md §5): a run belongs to
+the version that created it. resume, stop, wait, inspect, stats, replay,
+switch-model and delete on a run another installed version owns run on that
+version, saying so on stderr; one whose owner was pruned is refused until
+graphloom upgrade <v> --no-switch restores it. A run from a clone has no
+installed owner and runs where it is invoked, under its executor pins.
+
+Resume --upgrade moves a stopped run to this GraphLoom: it migrates the run's
+state format (keeping the original files under <stateDir>/migrations/), re-pins
+its executors as --update-executors does, and moves its owner, all recorded in
+the run (inspect: install, installHistory, stateMigrations). It is refused, with
+the run unchanged, for a downgrade, a different major version (0.x to 1.0
+included), an unknown state format, a missing migrator, an unsettled repair, a
+run that is not stopped, a plugin protocol change without --update-plugin, and
+an executor re-pin --update-executors would refuse.
+
+Rehearse --stop-at <stage> keeps the rehearsal's run stopped once that stage is
+complete and prints how to continue it; resume <stateDir> --rehearsal continues
+a kept rehearsal run on its own stand-ins (with --upgrade, on this version).
+Both are hooks for the release upgrade matrix (docs/design-release.md §6).
 
 Resume --reconciled acknowledges a job a harness usage limit cut off after possible
 effects whose agent session could not be continued. With a supervisor, a plain
