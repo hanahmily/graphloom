@@ -19,7 +19,7 @@ import {
   type PluginHost,
 } from "@graphloom/plugin-host";
 import type { Supervisor, SupervisorBinding } from "@graphloom/supervisor";
-import { reconcileSupervisorBinding, restorePiSupervisorFromBinding } from "@graphloom/supervisor";
+import { bindingHarness, reconcileSupervisorBinding } from "@graphloom/supervisor";
 import type { ProposalReviewer } from "./proposal-review.js";
 import { readBinding, writeSwitchRequest, type ModelSwitchOrder } from "./supervisor-switch.js";
 import { refreshCaseFile } from "./case-file.js";
@@ -165,7 +165,10 @@ export interface ResumeRequest {
   proposalReviewer?: ProposalReviewer;
   /**
    * When `supervisor` is omitted and durable `supervisorBinding` exists,
-   * restore the logical Pi session. Defaults to `restorePiSupervisorFromBinding`.
+   * restore the run's logical supervisor on the harness the binding names
+   * (`binding.harness`; absent reads as `pi`). The controller has no default:
+   * the composition root passes the restore for the bound harness, and a
+   * resume with a binding but no restore refuses rather than guess one.
    */
   restoreSupervisor?: (
     binding: NonNullable<DurableRunState["supervisorBinding"]>,
@@ -640,6 +643,8 @@ export function createController(): Controller {
             remedy: `ran the graph again: ${decided.lifted}`,
           });
         }
+        // Refused before the run is claimed and marked running again.
+        assertSupervisorRestorable(request, state);
         if (state.reconciliationRequired !== undefined) {
           const owed = state.reconciliationRequired;
           if (request.reconciled === true) {
@@ -850,6 +855,7 @@ export function createController(): Controller {
               modelId: restoredBinding.modelId,
               ...(restoredBinding.sessionFile !== undefined ? { sessionFile: restoredBinding.sessionFile } : {}),
               ...(restoredBinding.configuredModels !== undefined ? { configuredModels: restoredBinding.configuredModels } : {}),
+              ...(restoredBinding.harness !== undefined ? { harness: restoredBinding.harness } : {}),
             },
           };
           await saveRunState(state);
@@ -1035,16 +1041,20 @@ async function resolveResumeSupervisor(
   if (!binding?.sessionFile) {
     return request.supervisorFactory?.({ runId: state.runId, stateDir });
   }
-  const restore =
-    request.restoreSupervisor ??
-    (async (b, ctx) =>
-      restorePiSupervisorFromBinding({
-        runId: ctx.runId,
-        binding: toSupervisorBinding(b),
-        sessionDir: path.dirname(b.sessionFile!),
-        repairsDir: path.join(ctx.stateDir, "repairs"),
-      }));
-  return restore(binding, { runId: state.runId, stateDir });
+  assertSupervisorRestorable(request, state);
+  return request.restoreSupervisor!(binding, { runId: state.runId, stateDir });
+}
+
+/**
+ * A run with a supervisor binding resumes only with a supervisor or a restore
+ * for the bound harness: the controller has none of its own to fall back on.
+ */
+function assertSupervisorRestorable(request: ResumeRequest, state: DurableRunState): void {
+  const binding = state.supervisorBinding;
+  if (request.supervisor !== undefined || binding?.sessionFile === undefined || request.restoreSupervisor !== undefined) return;
+  throw new Error(
+    `run ${state.runId} has a ${bindingHarness(binding)} supervisor binding (session ${binding.sessionId}) but no restoreSupervisor was given to restore it`,
+  );
 }
 
 function toSupervisorBinding(b: NonNullable<DurableRunState["supervisorBinding"]>): SupervisorBinding {
@@ -1055,6 +1065,7 @@ function toSupervisorBinding(b: NonNullable<DurableRunState["supervisorBinding"]
     modelId: b.modelId,
     switchJournal: b.switchJournal,
     ...(b.configuredModels !== undefined ? { configuredModels: b.configuredModels } : {}),
+    ...(b.harness !== undefined ? { harness: b.harness } : {}),
   };
 }
 

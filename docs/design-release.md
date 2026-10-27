@@ -166,7 +166,7 @@ graphloom-<version>-linux-x64/
   install.sh  README.md  CHANGELOG.md  LICENSE  NOTICE  THIRD_PARTY_NOTICES
   package.json  package-lock.json
   node_modules/                    # production closure + typescript, vitest; workspace links are relative
-  packages/{sdk,controller,plugin-host,supervisor,runner}/   # package.json + dist/ only
+  packages/{sdk,agent-harness,controller,plugin-host,supervisor,runner}/   # package.json + dist/ only
   apps/graphloom/                  # package.json + dist/ only
   executors/{coding-agent,command,github}/                   # complete source-repairable package
   examples/plugins/{hello,release,issue-fix}/   # complete source-repairable bundles

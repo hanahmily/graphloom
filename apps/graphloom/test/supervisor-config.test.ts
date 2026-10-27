@@ -12,6 +12,7 @@ import {
   parseSupervisorConfig,
   piSupervisorFactory,
   piSupervisorRestore,
+  supervisorRestore,
 } from "../src/supervisor-config.js";
 
 const temps: string[] = [];
@@ -160,8 +161,45 @@ describe("operator supervisor restore", () => {
       expect(supervisor.binding.sessionId).toBe("logical-1");
       expect(supervisor.binding.sessionFile).not.toBe(oldFile);
       expect(supervisor.binding.sessionFile).toMatch(new RegExp(`^${path.join(stateDir, "supervisor")}`));
+      // A binding recorded before harnesses resumes as Pi, and is pinned to it from now on.
+      expect(supervisor.binding.harness).toBe("pi");
     } finally {
       await supervisor.close?.();
     }
+  });
+
+  it("restores a Pi binding without an operator config, as the controller's old default did", async () => {
+    const dir = await tempDir();
+    const home = process.env.HOME;
+    // Pi's own agent dir defaults under HOME; keep it in the test's directory.
+    process.env.HOME = dir;
+    process.env.MINIMAX_CN_API_KEY = "test-key-not-used";
+    const stateDir = path.join(dir, "state", "run-1");
+    const oldFile = path.join(stateDir, "supervisor", "old.jsonl");
+    try {
+      const supervisor = (await supervisorRestore(undefined)(
+        { sessionId: "logical-2", sessionFile: oldFile, provider: "minimax-cn", modelId: "MiniMax-M3", switchJournal: [] },
+        { runId: "run-1", stateDir },
+      )) as PiSupervisor;
+      try {
+        expect(supervisor.binding).toMatchObject({ sessionId: "logical-2", harness: "pi", provider: "minimax-cn", modelId: "MiniMax-M3" });
+        expect(path.dirname(supervisor.binding.sessionFile!)).toBe(path.dirname(oldFile));
+      } finally {
+        await supervisor.close?.();
+      }
+    } finally {
+      if (home === undefined) delete process.env.HOME;
+      else process.env.HOME = home;
+    }
+  });
+
+  it("refuses a binding pinned to a harness this GraphLoom cannot run", async () => {
+    const restore = supervisorRestore(parseSupervisorConfig({ provider: "minimax-cn", modelId: "MiniMax-M3" }));
+    await expect(
+      restore(
+        { sessionId: "s", sessionFile: "/x/y.jsonl", provider: "claude-code", modelId: "opus", switchJournal: [], harness: "claude-code" },
+        { runId: "run-1", stateDir: "/x" },
+      ),
+    ).rejects.toThrow(/pinned to the claude-code harness/);
   });
 });

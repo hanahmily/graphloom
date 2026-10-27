@@ -92,7 +92,7 @@ describe("the product version (§3)", () => {
   it("is the root package.json version, carried in lockstep by every core package, the SDK, and the CLI", async () => {
     const version = (rel: string) => readFile(path.join(repoRoot, rel, "package.json"), "utf8").then((raw) => (JSON.parse(raw) as { version: string }).version);
     const product = await version(".");
-    for (const rel of ["packages/sdk", "packages/controller", "packages/plugin-host", "packages/supervisor", "packages/runner", "apps/graphloom"]) {
+    for (const rel of ["packages/sdk", "packages/agent-harness", "packages/controller", "packages/plugin-host", "packages/supervisor", "packages/runner", "apps/graphloom"]) {
       expect(`${rel} ${await version(rel)}`).toBe(`${rel} ${product}`);
     }
   });

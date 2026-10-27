@@ -20,7 +20,7 @@ import { parseArgs, runMain, walk } from "./lib.mjs";
 import { foreignPackages, parseTarget } from "./prune-tree.mjs";
 
 /** Core packages ship only `package.json` and `dist/` (§2.3). */
-export const DIST_ONLY = ["packages/sdk", "packages/controller", "packages/plugin-host", "packages/supervisor", "packages/runner", "apps/graphloom"];
+export const DIST_ONLY = ["packages/sdk", "packages/agent-harness", "packages/controller", "packages/plugin-host", "packages/supervisor", "packages/runner", "apps/graphloom"];
 
 /** Paths §2.3 excludes, relative to the tree root. */
 export const EXCLUDED = ["packages/testkit", "legacy", "docs", ".github", "examples/skywalking-banyandb", "graphloom", "examples/graphloom", "release-out"];

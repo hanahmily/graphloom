@@ -413,9 +413,9 @@ export interface DurableRunState {
     evidenceRefs?: string[];
   };
   /**
-   * Durable Pi supervisor session identity (session file + active model).
+   * Durable supervisor session identity (harness, session file, active model).
    * On resume, when no supervisor is supplied, the controller restores from
-   * this binding (see ResumeRequest.restoreSupervisor / default Pi restore).
+   * this binding through ResumeRequest.restoreSupervisor.
    */
   supervisorBinding?: {
     sessionId: string;
@@ -431,6 +431,12 @@ export interface DurableRunState {
       error?: string;
     }>;
     configuredModels?: Array<{ provider: string; modelId: string }>;
+    /**
+     * The supervisor harness the run is pinned to (`pi`, `claude-code`,
+     * `codex`). A binding recorded before harnesses existed has none and
+     * reads as `pi`.
+     */
+    harness?: string;
   };
   /**
    * The supervisor's last proposal and the run as it stood when it was taken.
