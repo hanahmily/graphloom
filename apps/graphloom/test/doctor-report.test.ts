@@ -9,7 +9,7 @@
  */
 import type { AgentRoleDeclaration } from "@graphloom/sdk";
 import { describe, expect, it } from "vitest";
-import type { Discovery } from "../src/discovery.js";
+import { exec, type Discovery } from "../src/discovery.js";
 import { machineChecks, roleChecks, supervisorSelection, updatesCheck, viableSetups, type DoctorCheck } from "../src/doctor.js";
 import { fakeDiscovery } from "./discovery-fixture.js";
 
@@ -18,6 +18,16 @@ const row = (checks: DoctorCheck[], name: string) => {
   if (found === undefined) throw new Error(`no ${name}`);
   return found;
 };
+
+describe("discovery's bounded commands", () => {
+  it("time out even when a descendant keeps the output pipes open", async () => {
+    const start = Date.now();
+    const r = await exec("/bin/sh", ["-c", "sleep 5 & wait"], process.env, 200);
+    expect(r.error).toMatch(/timed out after 200 ms/);
+    expect(Date.now() - start).toBeLessThan(2_000);
+    expect((await exec("/bin/sh", ["-c", "echo hi"], process.env)).stdout).toBe("hi\n");
+  });
+});
 
 describe("viable setups (§4.4)", () => {
   it("Claude Code only", () => {

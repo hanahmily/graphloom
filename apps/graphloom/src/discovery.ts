@@ -61,7 +61,8 @@ export function exec(command: string, args: readonly string[], env: NodeJS.Proce
   return new Promise((resolve) => {
     let child: ReturnType<typeof spawn>;
     try {
-      child = spawn(command, [...args], { env, stdio: ["ignore", "pipe", "pipe"] });
+      // Its own process group, so a timeout kills every descendant too.
+      child = spawn(command, [...args], { env, stdio: ["ignore", "pipe", "pipe"], detached: true });
     } catch (err) {
       resolve({ code: null, stdout: "", stderr: "", error: err instanceof Error ? err.message : String(err) });
       return;
@@ -71,7 +72,15 @@ export function exec(command: string, args: readonly string[], env: NodeJS.Proce
     let timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;
-      child.kill("SIGKILL");
+      try {
+        if (child.pid !== undefined) process.kill(-child.pid, "SIGKILL");
+      } catch {
+        child.kill("SIGKILL");
+      }
+      // Do not wait for pipes a surviving descendant may still hold.
+      child.stdout?.destroy();
+      child.stderr?.destroy();
+      resolve({ code: null, stdout, stderr, error: `timed out after ${timeoutMs} ms` });
     }, timeoutMs);
     child.stdout?.on("data", (d: Buffer) => (stdout += d.toString("utf8")));
     child.stderr?.on("data", (d: Buffer) => (stderr += d.toString("utf8")));

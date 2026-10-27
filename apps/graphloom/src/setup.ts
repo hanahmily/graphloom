@@ -395,7 +395,9 @@ export async function runSetup(options: SetupOptions = {}): Promise<SetupResult>
     say(`   ${supervisorFile}: pi ${show(current.provider)}/${show(current.modelId)}`);
     const pi = d.pi.configured.find((c) => c.where === "supervisor config");
     const fine = pi !== undefined && pi.resolves && pi.credential;
-    const recRaw = rec.supervisor !== undefined ? supervisorRaw(current, rec.supervisor) : undefined;
+    // The recommendation comes from the Pi agent dir discovery read; it applies only to a supervisor that reads the same one.
+    const supDir = typeof current.agentDir === "string" ? parseSupervisorConfig(current, supervisorFile).agentDir : path.join(env.HOME ?? os.homedir(), ".pi", "agent");
+    const recRaw = rec.supervisor !== undefined && supDir === d.pi.agentDir ? supervisorRaw(current, rec.supervisor) : undefined;
     const diffs = recRaw !== undefined ? differences(current, recRaw, ["provider", "modelId"]) : [];
     if (diffs.length === 0 || recRaw === undefined) {
       say(recRaw !== undefined ? "   matches the recommendation; unchanged" : `   ${fine ? "" : "its model is not available here, and "}no supervisor harness this GraphLoom runs is available to recommend; unchanged`);
