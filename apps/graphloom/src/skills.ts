@@ -10,7 +10,7 @@
  * touches a directory GraphLoom did not write.
  */
 import { createHash, randomBytes } from "node:crypto";
-import { existsSync, statSync } from "node:fs";
+import { existsSync, realpathSync, statSync } from "node:fs";
 import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -271,11 +271,19 @@ async function markedCopies(dir: string): Promise<string[]> {
  * agent's copies and is not reported.
  */
 export async function sharedDuplicates(env: NodeJS.ProcessEnv = process.env, agents: readonly SkillAgent[] = SKILL_AGENTS): Promise<SharedSkillDuplicate[]> {
-  const own = new Set(SKILL_AGENTS.map((a) => agentSkillsDir(a, env)));
+  // By real path: a shared directory symlinked to an agent's own target is that target, not a duplicate.
+  const real = (dir: string): string => {
+    try {
+      return realpathSync(dir);
+    } catch {
+      return dir;
+    }
+  };
+  const own = new Set(SKILL_AGENTS.map((a) => real(agentSkillsDir(a, env))));
   const out: SharedSkillDuplicate[] = [];
   for (const agent of agents) {
     const ownDir = agentSkillsDir(agent, env);
-    const shared = sharedSkillDirs(agent, env).filter((d) => !own.has(d));
+    const shared = sharedSkillDirs(agent, env).filter((d) => !own.has(real(d)));
     if (shared.length === 0) continue;
     const mine = new Set(await markedCopies(ownDir));
     if (mine.size === 0) continue;
@@ -473,7 +481,8 @@ export function formatSkillsStatus(s: SkillsStatus): string {
 
 /** The command that removes only the duplicated copies from the shared directory. */
 export function duplicateFix(d: SharedSkillDuplicate): string {
-  return `graphloom skills remove ${d.skills.join(" ")} --dir ${d.dir}`;
+  const q = (arg: string): string => (/^[\w@%+=:,./-]+$/.test(arg) ? arg : `'${arg.replace(/'/g, `'\\''`)}'`);
+  return `graphloom skills remove ${d.skills.map(q).join(" ")} --dir ${q(d.dir)}`;
 }
 
 /** One line naming a duplicate and the command that removes the shared copies. */

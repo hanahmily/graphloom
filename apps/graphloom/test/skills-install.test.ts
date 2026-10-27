@@ -13,7 +13,7 @@
  */
 import { execFile, spawnSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { appendFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -21,7 +21,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { discover, type Discovery } from "../src/discovery.js";
 import { doctorReport } from "../src/doctor.js";
 import { runSetup, type Prompter } from "../src/setup.js";
-import { SKILL_MARKER, agentFound, skillDigest, skillsStatus, type SkillMarker, type SkillsStatus } from "../src/skills.js";
+import { SKILL_MARKER, agentFound, duplicateFix, skillDigest, skillsStatus, type SkillMarker, type SkillsStatus } from "../src/skills.js";
 import { versionInfo } from "../src/version.js";
 import { repoRoot } from "./cli-env.js";
 import { fakeDiscovery } from "./discovery-fixture.js";
@@ -337,6 +337,17 @@ describe("opencode as a target", { timeout: 60_000 }, () => {
     expect((await s.list()).duplicates!.map((d) => [d.agent, d.dir, d.skills])).toEqual([["opencode", s.claude, ["graphloom-run"]]]);
     s.env.OPENCODE_DISABLE_CLAUDE_CODE_SKILLS = "true";
     expect((await s.list()).duplicates).toEqual([]);
+  });
+
+  it("does not report a shared directory that is a symlink to an agent's own, and shell-quotes the fix", async () => {
+    const s = await sandbox();
+    await s.graphloom("install", "graphloom-run", "--agent", "codex");
+    await mkdir(path.dirname(s.agents), { recursive: true });
+    await symlink(s.codex, s.agents);
+    expect((await s.list()).duplicates).toEqual([]);
+    expect(duplicateFix({ agent: "codex", dir: "/tmp/home space/it's/.agents/skills", ownDir: "/x", skills: ["graphloom-run"] })).toBe(
+      "graphloom skills remove graphloom-run --dir '/tmp/home space/it'\\''s/.agents/skills'",
+    );
   });
 
   it("setup offers the skills for opencode when it is found and installs them in its directory", async () => {
