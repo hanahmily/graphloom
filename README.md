@@ -217,9 +217,10 @@ crashes; filesystem and execution scopes require host enforcement.
   the version they started with until `resume --upgrade` migrates them, and the
   local release procedure.
 - [Agent skills](docs/design-agent-skills.md): [`skills/`](skills) for driving
-  GraphLoom from Claude Code or Codex (setup, issue, run, watch, triage,
-  deliver), installed with `graphloom skills install`, and `graphloom wait
-  --until progress`.
+  GraphLoom from Claude Code, Codex or opencode (setup, issue, run, watch,
+  triage, deliver), installed with `graphloom skills install` (`--agent
+  opencode` writes `~/.config/opencode/skills`), and `graphloom wait --until
+  progress`.
 - [Run budgets](docs/budgets.md): what recorded runs used (`graphloom stats`),
   the profile defaults derived from them, budget layers, and what a raised
   budget means.

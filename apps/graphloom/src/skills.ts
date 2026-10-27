@@ -4,22 +4,22 @@
 /**
  * `graphloom skills list|install|update|remove` (docs/design-agent-skills.md
  * §3): copies of the bundled agent skills (`<root>/skills/<name>/SKILL.md`)
- * in the skill directories of Claude Code and Codex. Each copy carries a
+ * in the skill directories of Claude Code, Codex and opencode. Each copy carries a
  * marker with the version and a digest of its files, so a refresh replaces
  * only copies GraphLoom installed and the user has not edited, and never
  * touches a directory GraphLoom did not write.
  */
 import { createHash, randomBytes } from "node:crypto";
-import { existsSync, statSync } from "node:fs";
+import { existsSync, realpathSync, statSync } from "node:fs";
 import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { installRoot, versionInfo } from "./version.js";
 
 export const SKILL_MARKER = ".graphloom-skill.json";
-export const SKILL_AGENTS = ["claude-code", "codex"] as const;
+export const SKILL_AGENTS = ["claude-code", "codex", "opencode"] as const;
 export type SkillAgent = (typeof SKILL_AGENTS)[number];
-export const SKILL_AGENT_LABEL: Record<SkillAgent, string> = { "claude-code": "Claude Code", codex: "Codex" };
+export const SKILL_AGENT_LABEL: Record<SkillAgent, string> = { "claude-code": "Claude Code", codex: "Codex", opencode: "opencode" };
 
 export interface SkillTarget {
   agent: SkillAgent | "dir";
@@ -66,11 +66,28 @@ export interface TargetStatus extends SkillTarget {
   skills: SkillCopy[];
 }
 
+/**
+ * GraphLoom copies in a shared directory an agent also reads besides its own
+ * skill directory, duplicating copies of the same names there.
+ */
+export interface SharedSkillDuplicate {
+  /** The shared directory (`~/.agents/skills`, or `~/.claude/skills` for opencode). */
+  dir: string;
+  /** The agent that reads both. */
+  agent: SkillAgent;
+  /** That agent's own skill directory. */
+  ownDir: string;
+  /** Skill names with a GraphLoom copy in both. */
+  skills: string[];
+}
+
 export interface SkillsStatus {
   version: string;
   source: string;
   bundled: string[];
   targets: TargetStatus[];
+  /** GraphLoom copies an agent would load twice (absent with `--dir`). */
+  duplicates?: SharedSkillDuplicate[];
 }
 
 const isRecord = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === "object" && !Array.isArray(v);
@@ -117,17 +134,25 @@ export async function bundledSkills(root: string = installRoot()): Promise<Bundl
   return out;
 }
 
-function onPath(name: string, env: NodeJS.ProcessEnv): boolean {
-  for (const d of (env.PATH ?? "").split(":")) {
-    if (d === "") continue;
-    try {
-      if (statSync(path.join(d, name)).isFile()) return true;
-    } catch {
-      // not here
-    }
+const isFile = (file: string): boolean => {
+  try {
+    return statSync(file).isFile();
+  } catch {
+    return false;
   }
-  return false;
+};
+
+function onPath(name: string, env: NodeJS.ProcessEnv): boolean {
+  return (env.PATH ?? "").split(":").some((d) => d !== "" && isFile(path.join(d, name)));
 }
+
+/** opencode's global config directory: `$XDG_CONFIG_HOME/opencode`, default `~/.config/opencode` (`opencode debug paths`). */
+export function opencodeConfigDir(env: NodeJS.ProcessEnv = process.env): string {
+  return path.join(env.XDG_CONFIG_HOME ? path.resolve(env.XDG_CONFIG_HOME) : path.join(home(env), ".config"), "opencode");
+}
+
+/** Where opencode's installer puts its binary when it is not on `PATH`. */
+export const opencodeDefaultBin = (env: NodeJS.ProcessEnv = process.env): string => path.join(home(env), ".opencode", "bin", "opencode");
 
 /** The skill directory an agent reads personal skills from. */
 export function agentSkillsDir(agent: SkillAgent, env: NodeJS.ProcessEnv = process.env): string {
@@ -135,8 +160,29 @@ export function agentSkillsDir(agent: SkillAgent, env: NodeJS.ProcessEnv = proce
     if (env.GRAPHLOOM_CLAUDE_SKILLS_DIR) return path.resolve(env.GRAPHLOOM_CLAUDE_SKILLS_DIR);
     return path.join(env.CLAUDE_CONFIG_DIR ? path.resolve(env.CLAUDE_CONFIG_DIR) : path.join(home(env), ".claude"), "skills");
   }
+  if (agent === "opencode") {
+    if (env.GRAPHLOOM_OPENCODE_SKILLS_DIR) return path.resolve(env.GRAPHLOOM_OPENCODE_SKILLS_DIR);
+    return path.join(opencodeConfigDir(env), "skills");
+  }
   if (env.GRAPHLOOM_CODEX_SKILLS_DIR) return path.resolve(env.GRAPHLOOM_CODEX_SKILLS_DIR);
   return path.join(env.CODEX_HOME ? path.resolve(env.CODEX_HOME) : path.join(home(env), ".codex"), "skills");
+}
+
+/** opencode's boolean flags (`OPENCODE_DISABLE_*`) as it parses them. */
+const flagOn = (value: string | undefined): boolean => value !== undefined && /^(1|true|yes|on|y)$/i.test(value.trim());
+
+/**
+ * Shared directories an agent reads skills from besides its own: Codex and
+ * opencode read `~/.agents/skills`; opencode also reads `~/.claude/skills`
+ * (literally under HOME, whatever `CLAUDE_CONFIG_DIR` says) unless
+ * `OPENCODE_DISABLE_EXTERNAL_SKILLS` or `OPENCODE_DISABLE_CLAUDE_CODE(_SKILLS)` is set.
+ */
+export function sharedSkillDirs(agent: SkillAgent, env: NodeJS.ProcessEnv = process.env): string[] {
+  const agentsDir = path.join(home(env), ".agents", "skills");
+  if (agent === "codex") return [agentsDir];
+  if (agent !== "opencode" || flagOn(env.OPENCODE_DISABLE_EXTERNAL_SKILLS)) return [];
+  const claudeOff = flagOn(env.OPENCODE_DISABLE_CLAUDE_CODE) || flagOn(env.OPENCODE_DISABLE_CLAUDE_CODE_SKILLS);
+  return [...(claudeOff ? [] : [path.join(home(env), ".claude", "skills")]), agentsDir];
 }
 
 /** Whether the agent is on this machine: its CLI (as GraphLoom finds it) or its home directory. */
@@ -144,6 +190,7 @@ export function agentFound(agent: SkillAgent, env: NodeJS.ProcessEnv = process.e
   if (agent === "claude-code") {
     return Boolean(env.GRAPHLOOM_CLAUDE_BIN) || onPath("claude", env) || existsSync(env.CLAUDE_CONFIG_DIR || path.join(home(env), ".claude"));
   }
+  if (agent === "opencode") return onPath("opencode", env) || isFile(opencodeDefaultBin(env)) || existsSync(opencodeConfigDir(env));
   return Boolean(env.GRAPHLOOM_CODEX_BIN) || onPath("codex", env) || existsSync(env.CODEX_HOME || path.join(home(env), ".codex"));
 }
 
@@ -154,11 +201,11 @@ export interface TargetOptions {
 }
 
 export function parseSkillAgent(value: string | undefined): SkillAgent {
-  if (value === "claude-code" || value === "codex") return value;
-  throw new Error(`--agent must be claude-code or codex, not ${JSON.stringify(value)}`);
+  if ((SKILL_AGENTS as readonly string[]).includes(value ?? "")) return value as SkillAgent;
+  throw new Error(`--agent must be claude-code, codex or opencode, not ${JSON.stringify(value)}`);
 }
 
-/** The directories a command acts on: `--dir`, else the named agents, else both. */
+/** The directories a command acts on: `--dir`, else the named agents, else every agent. */
 export function skillTargets(options: TargetOptions = {}): SkillTarget[] {
   const env = options.env ?? process.env;
   if (options.dir !== undefined) return [{ agent: "dir", dir: path.resolve(options.dir), found: true }];
@@ -209,11 +256,53 @@ export async function targetStatus(target: SkillTarget, bundle: readonly Bundled
   return { ...target, skills };
 }
 
+/** Names of the directories under `dir` that hold a GraphLoom marker. */
+async function markedCopies(dir: string): Promise<string[]> {
+  const entries = existsSync(dir) ? await readdir(dir, { withFileTypes: true }).catch(() => []) : [];
+  const out: string[] = [];
+  for (const e of entries) if (e.isDirectory() && !e.name.startsWith(".") && (await readMarker(path.join(dir, e.name))) !== undefined) out.push(e.name);
+  return out.sort();
+}
+
+/**
+ * GraphLoom copies each agent would load twice: from a shared directory it
+ * also reads and from its own skill directory. A shared directory that is
+ * some agent's own target (`~/.claude/skills` for Claude Code) holds that
+ * agent's copies and is not reported.
+ */
+export async function sharedDuplicates(env: NodeJS.ProcessEnv = process.env, agents: readonly SkillAgent[] = SKILL_AGENTS): Promise<SharedSkillDuplicate[]> {
+  // By real path: a shared directory symlinked to an agent's own target is that target, not a duplicate.
+  const real = (dir: string): string => {
+    try {
+      return realpathSync(dir);
+    } catch {
+      return dir;
+    }
+  };
+  const own = new Set(SKILL_AGENTS.map((a) => real(agentSkillsDir(a, env))));
+  const out: SharedSkillDuplicate[] = [];
+  for (const agent of agents) {
+    const ownDir = agentSkillsDir(agent, env);
+    const shared = sharedSkillDirs(agent, env).filter((d) => !own.has(real(d)));
+    if (shared.length === 0) continue;
+    const mine = new Set(await markedCopies(ownDir));
+    if (mine.size === 0) continue;
+    for (const dir of shared) {
+      const skills = (await markedCopies(dir)).filter((n) => mine.has(n));
+      if (skills.length > 0) out.push({ dir, agent, ownDir, skills });
+    }
+  }
+  return out;
+}
+
 export async function skillsStatus(options: TargetOptions & { root?: string } = {}): Promise<SkillsStatus> {
   const root = options.root ?? installRoot();
+  const env = options.env ?? process.env;
   const bundle = await bundledSkills(root);
   const targets = await Promise.all(skillTargets(options).map((t) => targetStatus(t, bundle)));
-  return { version: versionInfo(root).version, source: bundledSkillsDir(root), bundled: bundle.map((b) => b.name), targets };
+  const agents = targets.flatMap((t) => (t.agent === "dir" ? [] : [t.agent]));
+  const duplicates = options.dir === undefined ? await sharedDuplicates(env, agents) : undefined;
+  return { version: versionInfo(root).version, source: bundledSkillsDir(root), bundled: bundle.map((b) => b.name), targets, ...(duplicates !== undefined ? { duplicates } : {}) };
 }
 
 /** Writes `skill` into `target/<name>` through a temporary sibling renamed into place. */
@@ -281,7 +370,7 @@ export async function installSkills(options: SkillsActionOptions = {}): Promise<
   const targets = skillTargets(options).filter((t) => explicit || t.found);
   const result: SkillsActionResult = { changed: [], skipped: [] };
   if (targets.length === 0) {
-    say("no Claude Code or Codex found here; name one with --agent claude-code|codex or a directory with --dir");
+    say("no Claude Code, Codex or opencode found here; name one with --agent claude-code|codex|opencode or a directory with --dir");
     return result;
   }
   const chosen = pick(bundle, options.names, bundle.map((b) => b.name));
@@ -383,5 +472,20 @@ export function formatSkillsStatus(s: SkillsStatus): string {
       lines.push(`  ${c.name.padEnd(20)} ${c.state}${c.installedVersion !== undefined && c.state !== "current" ? ` (installed ${c.installedVersion})` : ""}`);
     }
   }
+  for (const d of s.duplicates ?? []) {
+    lines.push("", duplicateNotice(d));
+  }
   return lines.join("\n");
+}
+
+
+/** The command that removes only the duplicated copies from the shared directory. */
+export function duplicateFix(d: SharedSkillDuplicate): string {
+  const q = (arg: string): string => (/^[\w@%+=:,./-]+$/.test(arg) ? arg : `'${arg.replace(/'/g, `'\\''`)}'`);
+  return `graphloom skills remove ${d.skills.map(q).join(" ")} --dir ${q(d.dir)}`;
+}
+
+/** One line naming a duplicate and the command that removes the shared copies. */
+export function duplicateNotice(d: SharedSkillDuplicate): string {
+  return `${SKILL_AGENT_LABEL[d.agent]} also reads ${d.dir}, whose GraphLoom copies duplicate the ones in ${d.ownDir}: ${d.skills.join(", ")}; ${duplicateFix(d)} removes them there`;
 }

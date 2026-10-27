@@ -571,7 +571,7 @@ export interface Discovery {
   supervisorSelection?: SupervisorSelection;
   /** Why `run` would refuse the existing supervisor config's selection (a `select` that is not available). */
   supervisorSelectionError?: string;
-  /** The bundled agent skills and their copies for Claude Code and Codex (docs/design-agent-skills.md §3); absent when unreadable. */
+  /** The bundled agent skills and their copies for Claude Code, Codex and opencode, and shared-directory duplicates (docs/design-agent-skills.md §3); absent when unreadable. */
   skills?: SkillsStatus;
   env: NodeJS.ProcessEnv;
 }
@@ -699,7 +699,8 @@ export async function discover(env: NodeJS.ProcessEnv = process.env, root: strin
   const skills = await skillsStatus({ env, root }).then(
     (status) => ({
       ...status,
-      // An agent the doctor found (its CLI, as configured) counts as found too.
+      // An agent the doctor found (its CLI, as configured) counts as found too; opencode is found by
+      // skills.ts itself (on PATH, at ~/.opencode/bin/opencode, or its config directory).
       targets: status.targets.map((t) => ({ ...t, found: t.found || (t.agent === "claude-code" ? claude.path !== undefined : t.agent === "codex" ? codex.path !== undefined : false) })),
     }),
     () => undefined,

@@ -1,6 +1,6 @@
 ---
 name: graphloom-watch
-description: Periodic progress check of a running GraphLoom run. Arms graphloom wait --until progress (a background command in Claude Code, a foreground loop in Codex), and on each wake snapshots graphloom stats --json and inspect, diffs against the previous snapshot in a watch file, and reports only the deltas - stage and attempt, stages accepted, budget use against limits, new supervisor episodes with one-line reasons, waiting states such as a quota pause with its reset time. Flags a stall, any budget over 80%, a repeated identical failure, or a run waiting for a human; hands a stopped run to graphloom-triage. Never resumes a run or changes a budget. Use after graphloom-run, or when the user asks how a run is doing.
+description: Periodic progress check of a running GraphLoom run. Arms graphloom wait --until progress (a background command in Claude Code, a foreground loop in Codex and opencode), and on each wake snapshots graphloom stats --json and inspect, diffs against the previous snapshot in a watch file, and reports only the deltas - stage and attempt, stages accepted, budget use against limits, new supervisor episodes with one-line reasons, waiting states such as a quota pause with its reset time. Flags a stall, any budget over 80%, a repeated identical failure, or a run waiting for a human; hands a stopped run to graphloom-triage. Never resumes a run or changes a budget. Use after graphloom-run, or when the user asks how a run is doing.
 ---
 
 # Watch a GraphLoom run
@@ -47,14 +47,16 @@ graphloom wait <run> --until progress --since "$(cat .graphloom-watch/cursor 2>/
 On the first arm there is no cursor yet: leave `--since` out. For hands-off
 periodic checks the user can also start `/loop 30m /graphloom-watch <run>`.
 
-**Codex.** No background notifications: loop in the foreground, one wait at a
-time, reporting after each return:
+**Codex and opencode.** No background-command notifications: loop in the
+foreground, one wait at a time, reporting after each return (a 10-minute
+timeout keeps each call within the shell tool's limits):
 
 ```sh
 graphloom wait <run> --until progress --since "$(cat .graphloom-watch/cursor)" --timeout 10m --json
 ```
 
-The `--on-stop` marker file is the push signal in both: check
+On the first arm there is no cursor yet: leave `--since` out. The `--on-stop`
+marker file is the push signal in every agent: check
 `.graphloom-watch/stopped` on every wake.
 
 ## 2. On each wake

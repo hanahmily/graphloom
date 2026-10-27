@@ -444,7 +444,8 @@ remove_skills() {
     GRAPHLOOM_DISABLE_AUTOUPDATE=1 "$bin" skills remove </dev/null && return 0
   fi
   # current cannot start (or ships no skills): name what is left, never remove blind.
-  for dir in "${GRAPHLOOM_CLAUDE_SKILLS_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills}" "${GRAPHLOOM_CODEX_SKILLS_DIR:-${CODEX_HOME:-$HOME/.codex}/skills}"; do
+  for dir in "${GRAPHLOOM_CLAUDE_SKILLS_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills}" "${GRAPHLOOM_CODEX_SKILLS_DIR:-${CODEX_HOME:-$HOME/.codex}/skills}" \
+    "${GRAPHLOOM_OPENCODE_SKILLS_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode/skills}"; do
     for marker in "$dir"/*/.graphloom-skill.json; do
       [ -f "$marker" ] || continue
       say "kept $(dirname "$marker"): remove it yourself if you no longer want this GraphLoom skill"
