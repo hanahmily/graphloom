@@ -127,7 +127,7 @@ describe("graphloom setup", () => {
 
   it("re-asks a choice that is not offered", async () => {
     const h = await home();
-    const p = scripted(["codex", "claude-code", "", "", "", "", "", "", "y"]);
+    const p = scripted(["codex", "claude-code", "", "", "", "", "", "", "", "y"]);
     await runSetup({ prompter: p, discovery: discovery(h), now });
     expect(p.transcript()).toContain("choose one of claude-code, pi");
     expect(json(h.runnerFile).harness).toBe("claude-code");
