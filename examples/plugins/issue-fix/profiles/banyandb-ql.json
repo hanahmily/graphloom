@@ -333,6 +333,9 @@
     "reviewer": "codex",
     "verifier": "claude-code"
   },
+  "supervisor": {
+    "harnesses": ["pi", "claude-code", "codex"]
+  },
   "agent": {
     "timeoutMs": 10800000
   },

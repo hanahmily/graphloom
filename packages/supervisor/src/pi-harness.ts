@@ -10,6 +10,7 @@ import {
   type HarnessProbe,
   type HarnessSession,
   type HarnessSessionRole,
+  type HarnessStartOptions,
   type SupervisorBinding,
   type SupervisorHarness,
   type SupervisorHost,
@@ -51,8 +52,8 @@ export interface PiHarnessOptions extends PiSessionBase {
 
 export interface PiHarness extends SupervisorHarness {
   readonly name: "pi";
-  /** A new logical supervisor on the first configured model (DEFAULT_SUPERVISOR_PROVIDER/MODEL when none is configured). */
-  start(): Promise<SupervisorHost>;
+  /** A new logical supervisor on the first configured model (DEFAULT_SUPERVISOR_PROVIDER/MODEL when none is configured), or one continuing another harness's (§7.4). */
+  start(options?: HarnessStartOptions): Promise<SupervisorHost>;
 }
 
 /**
@@ -119,12 +120,14 @@ export function createPiHarness(options: PiHarnessOptions): PiHarness {
       }
     },
     openSession: ({ model, role }) => open(model, role),
-    async start() {
+    async start(options: HarnessStartOptions = {}) {
       const model = initial();
       return createSupervisorHost({
         harness,
         session: await open(model, "decide"),
         configuredModels: configuredModels ?? [model],
+        ...(options.logicalSessionId !== undefined ? { logicalSessionId: options.logicalSessionId } : {}),
+        ...(options.switchJournal !== undefined ? { initialSwitchJournal: options.switchJournal } : {}),
         ...hostOptions,
       });
     },

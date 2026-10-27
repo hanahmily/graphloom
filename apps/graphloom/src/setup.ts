@@ -467,7 +467,6 @@ export async function runSetup(options: SetupOptions = {}): Promise<SetupResult>
   say("");
   say("4. Supervisor: recovers a failing run (investigates, repairs, reenters). The repair reviewer uses the same agent, in a separate read-only session.");
   for (const route of supervisorRoutes(d)) say(`   ${route}`);
-  if (v.supervisorLater.length > 0) say(`   ${v.supervisorLater.map(label).join(" and ")} ${v.supervisorLater.length === 1 ? "supervises" : "supervise"} from the GraphLoom release that ships it (phase S4).`);
   const recFile = rec.supervisors.length > 0 ? supervisorFile(rec.supervisors, rec.supervisor, claudeSection, newSupervisorBase, {}, codexSection) : undefined;
   if (existingSup === undefined) {
     if (recFile === undefined) {
@@ -476,7 +475,7 @@ export async function runSetup(options: SetupOptions = {}): Promise<SetupResult>
     } else if (yes) {
       supNext = recFile;
     } else {
-      say(`   Available, in the built-in order: ${rec.supervisors.join(", ")} (recommended: ${rec.supervisors[0]}). A run uses the first one available.`);
+      say(`   Available, in the built-in order: ${rec.supervisors.join(", ")} (recommended: ${rec.supervisors[0]}). A run uses the plugin's preference among the enabled ones, else the first one available.`);
       const chosen: HarnessName[] = [];
       let pi: PiChoice | undefined;
       for (const h of rec.supervisors) {

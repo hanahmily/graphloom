@@ -39,6 +39,7 @@ import {
   type HarnessPromptOptions,
   type HarnessSession,
   type HarnessSessionRole,
+  type HarnessStartOptions,
   type HarnessUsage,
   type SupervisorBinding,
   type SupervisorHarness,
@@ -186,8 +187,8 @@ export interface CodexReviewSessionOptions {
 
 export interface CodexSupervisorHarness extends SupervisorHarness {
   readonly name: typeof CODEX_HARNESS;
-  /** A new logical supervisor on the first configured model. */
-  start(): Promise<SupervisorHost>;
+  /** A new logical supervisor on the first configured model, or one continuing another harness's (§7.4). */
+  start(options?: HarnessStartOptions): Promise<SupervisorHost>;
   /** An independent read-only session in `cwd`, for a reviewer (core §7): no grants, no shared chat. */
   openReviewSession(options: CodexReviewSessionOptions): Promise<HarnessSession>;
 }
@@ -551,12 +552,14 @@ export function createCodexSupervisorHarness(options: CodexSupervisorHarnessOpti
     },
     openSession: ({ model, role }) => open(model, role),
     openReviewSession: ({ cwd, model }) => open(model ?? initial(), "review", path.resolve(cwd)),
-    async start() {
+    async start(options: HarnessStartOptions = {}) {
       const model = initial();
       return createSupervisorHost({
         harness,
         session: await open(model, "decide"),
         configuredModels: configuredModels ?? [model],
+        ...(options.logicalSessionId !== undefined ? { logicalSessionId: options.logicalSessionId } : {}),
+        ...(options.switchJournal !== undefined ? { initialSwitchJournal: options.switchJournal } : {}),
         ...hostOptions,
       });
     },

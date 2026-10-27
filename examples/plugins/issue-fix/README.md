@@ -131,6 +131,20 @@ about ten minutes; its commands allow 45.
 GRAPHLOOM_GITHUB_LIVE_TOKEN="$(gh auth token)" node ../apps/graphloom/dist/main.js run issue-fix-graphloom-task.yaml
 ```
 
+## Supervisor preference (0.16.0)
+
+Each profile declares which supervisor harness its runs prefer for recovery,
+in order: `"supervisor": { "harnesses": ["pi", "claude-code", "codex"] }`
+(also the default when a profile names none). The graph returns it as
+`GraphDefinition.supervisor`. `graphloom run` picks the first of these that
+the operator's `supervisor.json` enables and that is available here, unless
+`run --supervisor` or the operator's `select` says otherwise, and pins it for
+the run ([supervisor harnesses §7](../../../docs/design-supervisor-harnesses.md#7-selection-and-pinning)).
+`graphloom check` and `doctor --task` report the choice. A profile may add
+`models` hints per harness and `"required": true` to refuse a run instead of
+falling back. The supervisor preference is independent of `harnesses`, which
+assign the jobs' agents.
+
 ## Agent roles for `graphloom doctor --task` (0.15.0)
 
 The graph declares the roles its profile assigns harnesses to, in

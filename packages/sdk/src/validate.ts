@@ -2,7 +2,7 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 import type { GraphRehearsal, RehearsalExpectation, RehearsalReply, RehearsalScenario } from "./rehearsal.js";
-import { GRAPH_BUDGET_KEYS, PROTOCOL_VERSION, type GraphAction, type GraphDecision, type GraphDefinition, type RunView, type ValidationInput, type ValidationResult, type WireRequest, type WireResponse } from "./types.js";
+import { GRAPH_BUDGET_KEYS, PROTOCOL_VERSION, SUPERVISOR_HARNESSES, type GraphAction, type GraphDecision, type GraphDefinition, type RunView, type ValidationInput, type ValidationResult, type WireRequest, type WireResponse } from "./types.js";
 
 /**
  * A run's RunView grows with its evidence (command stdout/stderr tails, file
@@ -226,7 +226,44 @@ export function assertGraphDefinition(value: unknown): GraphDefinition {
   if (obj["resultContracts"] !== undefined) assertResultContracts(obj["resultContracts"]);
   if (obj["defaultBudgets"] !== undefined) assertDefaultBudgets(obj["defaultBudgets"]);
   if (obj["agentRoles"] !== undefined) assertAgentRoles(obj["agentRoles"]);
+  if (obj["supervisor"] !== undefined) assertSupervisorPreference(obj["supervisor"]);
   return obj as unknown as GraphDefinition;
+}
+
+const SUPERVISOR_PREFERENCE_KEYS: ReadonlySet<string> = new Set(["harnesses", "models", "required"]);
+const SUPERVISOR_HARNESS_SET: ReadonlySet<string> = new Set(SUPERVISOR_HARNESSES);
+
+/** The shape of `supervisor` only (design-supervisor-harnesses.md §7.1): which harness runs is the CLI's to resolve. */
+function assertSupervisorPreference(value: unknown): void {
+  const label = "definition.supervisor";
+  const obj = asObject(value, label);
+  for (const key of Object.keys(obj)) {
+    if (!SUPERVISOR_PREFERENCE_KEYS.has(key)) throw new WireValidationError("malformed", `${label}.${key} is not a supervisor preference field`);
+  }
+  const harnesses = requireArray(obj, "harnesses");
+  if (harnesses.length === 0) throw new WireValidationError("malformed", `${label}.harnesses must be non-empty`);
+  const seen = new Set<string>();
+  harnesses.forEach((h, i) => {
+    if (typeof h !== "string" || !SUPERVISOR_HARNESS_SET.has(h)) {
+      throw new WireValidationError("malformed", `${label}.harnesses[${i}] must be one of ${SUPERVISOR_HARNESSES.join(", ")}`);
+    }
+    if (seen.has(h)) throw new WireValidationError("malformed", `${label}.harnesses[${i}] repeats ${h}`);
+    seen.add(h);
+  });
+  if (obj["models"] !== undefined) {
+    const models = asObject(obj["models"], `${label}.models`);
+    for (const [harness, list] of Object.entries(models)) {
+      if (!SUPERVISOR_HARNESS_SET.has(harness)) {
+        throw new WireValidationError("malformed", `${label}.models.${harness} is not one of ${SUPERVISOR_HARNESSES.join(", ")}`);
+      }
+      if (!Array.isArray(list) || list.some((m) => typeof m !== "string" || m.trim() === "")) {
+        throw new WireValidationError("malformed", `${label}.models.${harness} must be an array of non-empty model names`);
+      }
+    }
+  }
+  if (obj["required"] !== undefined && typeof obj["required"] !== "boolean") {
+    throw new WireValidationError("malformed", `${label}.required must be a boolean`);
+  }
 }
 
 const AGENT_ROLE_KEYS: ReadonlySet<string> = new Set(["role", "harness", "access", "distinctFrom", "setting"]);

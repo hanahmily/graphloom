@@ -113,6 +113,10 @@ async function ready(profileBudgets?: Record<string, number>) {
   const runnerConfigPath = path.join(env.dir, "runner.json");
   await writeFile(runnerConfigPath, JSON.stringify(fakeRunnerConfig(agents)));
   vi.stubEnv(RUNNER_CONFIG_ENV, runnerConfigPath);
+  // check reports the supervisor selection from the operator's supervisor config: a flat Pi one here, never the real one.
+  const supervisorConfigPath = path.join(env.dir, "supervisor.json");
+  await writeFile(supervisorConfigPath, JSON.stringify({ provider: "minimax-cn", modelId: "MiniMax-M3" }));
+  vi.stubEnv("GRAPHLOOM_SUPERVISOR_CONFIG", supervisorConfigPath);
   return env;
 }
 
@@ -128,6 +132,12 @@ describe.skipIf(GO === undefined)("graphloom rehearse (L1) on issue-fix with the
     const report = await rehearse(env.taskPath, { commands: "run" });
     expect(report.verdict, JSON.stringify({ blocker: report.blocker, convergence: report.convergence })).toBe("ready");
     expect(report.convergence.actual.receipts.sort()).toEqual(["fix", "review"]);
+    // The rehearsal run pinned the harness issue-fix's preference picks among stand-ins for all three (S5).
+    expect(report.supervisorSelection).toEqual({
+      harness: "pi",
+      source: "plugin",
+      reason: "the plugin's preference (pi, claude-code, codex): pi; a scripted stand-in answers for it",
+    });
   }, 120_000);
 
   // #193: a review that fails once on a confirmed finding is the graph's own
@@ -155,6 +165,8 @@ describe.skipIf(GO === undefined)("graphloom rehearse (L1) on issue-fix with the
     const env = await ready();
     const report = await check(env.taskPath);
     expect(report.ok, JSON.stringify(report.problems)).toBe(true);
+    // The selection run would make: issue-fix prefers pi, which the flat Pi config enables.
+    expect(report.supervisor).toEqual({ status: "selected", harness: "pi", source: "plugin", reason: "the plugin's preference (pi, claude-code, codex): pi", warnings: [] });
   }, 30_000);
 
   it("--offline never asks the real (fake) GitHub, and reports the unrecorded read as unverified under B2", async () => {

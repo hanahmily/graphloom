@@ -67,6 +67,15 @@ describe("the Pi harness", () => {
     } finally {
       await fresh.close();
     }
+    // A run moved here from another harness (resume --supervisor, §7.4) continues its logical session and journal.
+    const journal = [{ at: "t", from: { provider: "claude-code", modelId: "opus" }, to: { provider: "claude-code", modelId: "sonnet" }, reason: "earlier", status: "committed" as const }];
+    const moved = await harness.start({ logicalSessionId: "logical-cc", switchJournal: journal });
+    try {
+      expect(moved.sessionId).toBe("logical-cc");
+      expect(moved.binding).toMatchObject({ sessionId: "logical-cc", harness: "pi", ...MINIMAX, switchJournal: journal });
+    } finally {
+      await moved.close();
+    }
     // A binding recorded before harnesses (no `harness`) restores as Pi.
     const legacy: SupervisorBinding = { sessionId: "logical-1", sessionFile: path.join(dir, "supervisor", "old.jsonl"), ...MINIMAX, switchJournal: [] };
     expect(bindingHarness(legacy)).toBe("pi");

@@ -8,7 +8,7 @@
  * (the regression runners and their report parsers) is selected by name.
  * See docs/design-issue-fix-graph.md for the schema.
  */
-import { GRAPH_BUDGET_KEYS, MAX_JOB_TIMEOUT_MS, MAX_TIMEOUT_CONTINUATIONS, type EnvironmentCommand, type EnvironmentDeclaration, type GraphBudgetDefaults } from "@graphloom/sdk";
+import { GRAPH_BUDGET_KEYS, MAX_JOB_TIMEOUT_MS, MAX_TIMEOUT_CONTINUATIONS, SUPERVISOR_HARNESSES, type EnvironmentCommand, type EnvironmentDeclaration, type GraphBudgetDefaults, type SupervisorPreference } from "@graphloom/sdk";
 import { COMMAND } from "./constants.js";
 import { runnerById, RUNNERS, type RegressionRunner, type RunnerId } from "./runners/index.js";
 
@@ -161,6 +161,13 @@ export interface ProfileData {
   /** Harnesses for each role; defaults: Claude Code implements and verifies, Codex reviews. */
   harnesses?: { implementer?: string; reviewer?: string; verifier?: string };
   /**
+   * Which supervisor harness this repository's runs prefer for recovery, in
+   * order (the graph's `GraphDefinition.supervisor`; the operator's enabled
+   * harnesses decide among them). Default `pi`, `claude-code`, `codex`.
+   * Independent of `harnesses`, which assign the jobs' agents.
+   */
+  supervisor?: SupervisorPreference;
+  /**
    * The coding agents' wall clock. `timeoutMs`: how long each coding-agent job
    * (plan, implement, review, verify) asks to run, instead of the operator's
    * default (one hour); the operator's `maxTimeoutMs` still caps it, and the
@@ -186,11 +193,15 @@ export interface Profile extends ProfileData {
   roles: { implementer: string; reviewer: string; verifier: string };
   /** `agent.timeoutContinuations`, defaulted. */
   timeoutContinuations: number;
+  /** `supervisor`, defaulted. */
+  supervisorPreference: SupervisorPreference;
 }
 
 const MINUTE = 60_000;
 const DEFAULT_REGRESSION_TIMEOUT_MS = 30 * MINUTE;
 const DEFAULT_TIMEOUT_CONTINUATIONS = 1;
+/** The supervisor order with no profile preference: Pi first (design-supervisor-harnesses.md §7.6). */
+export const DEFAULT_SUPERVISOR_PREFERENCE: SupervisorPreference = { harnesses: ["pi", "claude-code", "codex"] };
 const RESERVED_COMMANDS: ReadonlySet<string> = new Set(Object.values(COMMAND));
 const HARNESSES: Readonly<Record<string, string>> = { "claude-code": "Claude Code", codex: "Codex", pi: "Pi" };
 
@@ -393,6 +404,7 @@ export function parseProfile(config: unknown): Profile {
   // A verifier from the reviewer's own family would judge its own findings.
   need(roles.verifier !== roles.reviewer, "harnesses.verifier must differ from harnesses.reviewer");
   checkBudgets(p.budgets);
+  const supervisorPreference = checkSupervisor(p.supervisor);
   const agent = p.agent ?? {};
   need(isObject(agent), "agent must be an object");
   const a = agent as Record<string, unknown>;
@@ -412,7 +424,30 @@ export function parseProfile(config: unknown): Profile {
     regressionTimeoutMs: (regression.timeoutMs as number | undefined) ?? DEFAULT_REGRESSION_TIMEOUT_MS,
     roles: roles as Profile["roles"],
     timeoutContinuations: (a.timeoutContinuations as number | undefined) ?? DEFAULT_TIMEOUT_CONTINUATIONS,
+    supervisorPreference,
   };
+}
+
+/** The profile's `supervisor` preference, checked, or the default order. */
+function checkSupervisor(raw: unknown): SupervisorPreference {
+  if (raw === undefined) return structuredClone(DEFAULT_SUPERVISOR_PREFERENCE);
+  need(isObject(raw), "supervisor must be an object");
+  const s = raw as Record<string, unknown>;
+  for (const key of Object.keys(s)) need(key === "harnesses" || key === "models" || key === "required", `supervisor.${key} is not a supervisor setting; they are harnesses, models and required`);
+  const known: readonly string[] = SUPERVISOR_HARNESSES;
+  need(isStrings(s.harnesses) && (s.harnesses as string[]).length > 0, "supervisor.harnesses must be a non-empty list");
+  const harnesses = s.harnesses as string[];
+  for (const h of harnesses) need(known.includes(h), `supervisor.harnesses: ${JSON.stringify(h)} is not one of ${known.join(", ")}`);
+  need(new Set(harnesses).size === harnesses.length, "supervisor.harnesses must not repeat a harness");
+  if (s.models !== undefined) {
+    need(isObject(s.models), "supervisor.models must be an object of model lists by harness");
+    for (const [h, list] of Object.entries(s.models as Record<string, unknown>)) {
+      need(known.includes(h), `supervisor.models.${h} is not one of ${known.join(", ")}`);
+      need(isStrings(list) && (list as string[]).every((m) => m.trim() !== ""), `supervisor.models.${h} must be a list of model names`);
+    }
+  }
+  need(s.required === undefined || typeof s.required === "boolean", "supervisor.required must be true or false");
+  return structuredClone(s) as unknown as SupervisorPreference;
 }
 
 /** The context documents the profile declares, in order. */

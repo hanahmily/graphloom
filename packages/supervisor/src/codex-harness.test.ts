@@ -47,6 +47,17 @@ function input(over: Partial<SupervisorInput> = {}): SupervisorInput {
 const REENTER = reenter({ stageId: "fix", reason: "flaky", evidenceRefs: ["ev-1"] }, "retry the stage");
 
 describe("Codex supervisor harness: protocol", () => {
+  it("continues another harness's logical session and journal when the run's pin moved here (resume --supervisor, §7.4)", async () => {
+    const journal = [{ at: "t", from: { provider: "minimax-cn", modelId: "MiniMax-M3" }, to: { provider: "deepseek", modelId: "deepseek-v4-pro" }, reason: "earlier", status: "committed" as const }];
+    const host = await fakeCodexHarness(fakeCodex([]), { configuredModels: [GPT, MINI] }).start({ logicalSessionId: "logical-pi", switchJournal: journal });
+    try {
+      expect(host.sessionId).toBe("logical-pi");
+      expect(host.binding).toMatchObject({ sessionId: "logical-pi", harness: CODEX_HARNESS, modelId: "gpt-5-codex", switchJournal: journal });
+    } finally {
+      await host.close();
+    }
+  });
+
   it("starts a thread with exec --json, resumes it for a follow-up, and passes no schema or API key", async () => {
     const fake = fakeCodex([{ text: "not a decision" }, { text: decision(REENTER) }]);
     const harness = fakeCodexHarness(fake, {

@@ -192,6 +192,17 @@ export interface SupervisorHarness {
   restore(binding: SupervisorBinding): Promise<SupervisorHost>;
 }
 
+/**
+ * How `start` begins a logical supervisor. Both are set when the run's pin
+ * moved to this harness (`resume --supervisor`, design-supervisor-harnesses.md
+ * §7.4): the supervisor keeps the run's logical session id and its switch
+ * journal as history, on this harness's first configured model.
+ */
+export interface HarnessStartOptions {
+  logicalSessionId?: string;
+  switchJournal?: ModelSwitchRecord[];
+}
+
 /** Pi's capabilities: everything the host can use (design-supervisor-harnesses.md §8). */
 export const PI_HARNESS_CAPABILITIES: HarnessCapabilities = Object.freeze({
   toolCalling: true,

@@ -8,11 +8,12 @@
 import { existsSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
-import { createController, resolveStateDir } from "@graphloom/controller";
+import { createController, loadRunState, resolveStateDir } from "@graphloom/controller";
 import type { GraphRehearsal } from "@graphloom/sdk";
 import type { RunReport } from "@graphloom/controller";
 import { createCliRunner } from "./cli-runner.js";
 import { harnessRepairDeps, resolveBundlePath, resolveBundlePathForResume } from "./repair-config.js";
+import { switchModelTarget } from "./switch-model.js";
 import { check, probe, recordScenario, rehearse, rehearseStopAt, replay, resumeRehearsal } from "./rehearsal.js";
 import { dispatchToOwner, installHome, recordOwnership, removeOwnershipRecord, selfInstall } from "./ownership.js";
 import { requireRunnerConfig, runnerConfigPath } from "./runner-config.js";
@@ -26,9 +27,9 @@ import { formatVersion, installRoot } from "./version.js";
 import { JOB_TIMEOUT_MS, killActiveChildren, runAutoUpdate } from "./auto-update.js";
 import {
   loadSupervisorConfig,
-  parseModelRef,
-  resumeSupervisorHarness,
-  selectSupervisorHarness,
+  resumeSupervisorPlan,
+  type ResumeSupervisorPlan,
+  supervisorChooser,
   supervisorFactoryFor,
   supervisorRestore,
 } from "./supervisor-config.js";
@@ -120,13 +121,13 @@ async function main(): Promise<void> {
     const runnerConfig = await requireRunnerConfig(process.env, (loaded) => stopHook.useConfig(loaded.notify));
     const runner = createCliRunner(runnerConfig);
     const config = await loadSupervisorConfig();
-    // design-supervisor-harnesses.md §7.3: --supervisor, then the operator's select, then the first available.
+    // design-supervisor-harnesses.md §7.3: --supervisor, then the operator's select, then the plugin's
+    // preference, then the operator's order; resolved once the plugin described itself, and pinned at intake.
     const supervisorFlag = flagValue(args, "--supervisor");
+    if (args.includes("--supervisor") && (supervisorFlag === undefined || supervisorFlag.startsWith("--"))) throw new Error("--supervisor needs a harness");
     if (supervisorFlag !== undefined && config === undefined) {
       throw new Error(`--supervisor ${supervisorFlag} needs an operator supervisor config that enables it ($GRAPHLOOM_SUPERVISOR_CONFIG or ~/.config/graphloom/supervisor.json)`);
     }
-    const selection = config !== undefined ? await selectSupervisorHarness(config, supervisorFlag !== undefined ? { flag: supervisorFlag } : {}) : undefined;
-    if (selection !== undefined && config?.harnesses !== undefined) console.error(`supervisor: ${selection.harness} (${selection.reason})`);
     const bundlePath = await resolveBundlePath(taskPath).catch(() => undefined);
     const report = await controller.run({
       taskPath,
@@ -137,10 +138,16 @@ async function main(): Promise<void> {
       },
       runner,
       ...(stateRoot !== undefined ? { stateRoot } : {}),
-      ...(config !== undefined && selection !== undefined
+      ...(config !== undefined
         ? {
-            supervisorFactory: supervisorFactoryFor(config, selection.harness),
-            repair: harnessRepairDeps(selection.harness, config, bundlePath ?? (await resolveBundlePath(taskPath))),
+            selectSupervisor: supervisorChooser(config, {
+              ...(supervisorFlag !== undefined ? { flag: supervisorFlag } : {}),
+              bundlePath: async () => bundlePath ?? (await resolveBundlePath(taskPath)),
+              onSelected: (selection, warnings) => {
+                console.error(`supervisor: ${selection.harness} (${selection.source}: ${selection.reason})`);
+                for (const w of warnings) console.error(`supervisor: ${w}`);
+              },
+            }),
           }
         : {}),
     });
@@ -205,7 +212,7 @@ async function main(): Promise<void> {
   }
 
   if (cmd === "resume") {
-    const runRef = requireRunRef(args[1], "resume <stateDir|runId> [--state-root <dir>] [--upgrade] [--update-plugin] [--update-executors] [--reconciled] [--rehearsal] [--on-stop <command>]");
+    const runRef = requireRunRef(args[1], "resume <stateDir|runId> [--state-root <dir>] [--supervisor <harness> [--reason <text>]] [--upgrade] [--update-plugin] [--update-executors] [--reconciled] [--rehearsal] [--on-stop <command>]");
     const stateRoot = flagValue(args, "--state-root");
     // `--upgrade` moves the run to this GraphLoom first (§5.2), and moves its ownership record with it.
     const upgrade = args.includes("--upgrade")
@@ -238,8 +245,21 @@ async function main(): Promise<void> {
     const runner = createCliRunner(runnerConfig);
     const config = await loadSupervisorConfig();
     const resolvedRoot = stateRoot ? path.resolve(stateRoot) : undefined;
-    // The supervisor and its repair reviewer run on the harness the run is pinned to (§7.5).
-    const pinned = config !== undefined ? await resumeSupervisorHarness(config, runRef, resolvedRoot) : undefined;
+    const supervisorFlag = flagValue(args, "--supervisor");
+    if (args.includes("--supervisor") && (supervisorFlag === undefined || supervisorFlag.startsWith("--"))) throw new Error("--supervisor needs a harness");
+    const transitionReason = flagValue(args, "--reason");
+    // The supervisor and its repair reviewer run on the harness the run is pinned to (§7.4, §7.5);
+    // --supervisor moves the pin, recorded as a transition.
+    const current = await loadRunState(await resolveStateDir(runRef, resolvedRoot));
+    // A finished run only reports itself on resume; its supervisor is not consulted.
+    const finished = current.status === "succeeded" || current.status === "failed";
+    const plan: ResumeSupervisorPlan = finished
+      ? {}
+      : await resumeSupervisorPlan(config, current, {
+          ...(supervisorFlag !== undefined ? { flag: supervisorFlag } : {}),
+          ...(transitionReason !== undefined ? { reason: transitionReason } : {}),
+        });
+    if (plan.pin?.transition !== undefined) console.error(`supervisor: ${plan.pin.transition.from} -> ${plan.pin.transition.to} (${plan.pin.transition.reason})`);
     const report = await controller.resume({
       runRef,
       runner,
@@ -250,11 +270,12 @@ async function main(): Promise<void> {
       ...(args.includes("--reconciled") ? { reconciled: true } : {}),
       // The controller has no restore of its own: a run's supervisor binding
       // is restored on the harness it is pinned to, with or without a config.
-      restoreSupervisor: supervisorRestore(config),
-      ...(config !== undefined && pinned !== undefined
+      restoreSupervisor: supervisorRestore(plan.config ?? config),
+      ...(plan.pin !== undefined ? { supervisorPin: plan.pin } : {}),
+      ...(plan.config !== undefined && plan.harness !== undefined
         ? {
-            supervisorFactory: supervisorFactoryFor(config, pinned),
-            repair: harnessRepairDeps(pinned, config, await resolveBundlePathForResume(runRef, resolvedRoot)),
+            supervisorFactory: supervisorFactoryFor(plan.config, plan.harness),
+            repair: harnessRepairDeps(plan.harness, plan.config, await resolveBundlePathForResume(runRef, resolvedRoot)),
           }
         : {}),
     });
@@ -277,7 +298,7 @@ async function main(): Promise<void> {
   }
 
   if (cmd === "switch-model") {
-    const usage = "switch-model <stateDir|runId> <provider/model> --reason <text> [--state-root <dir>]";
+    const usage = "switch-model <stateDir|runId> <model> --reason <text> [--state-root <dir>]";
     const runRef = requireRunRef(args[1], usage);
     const reason = flagValue(args, "--reason");
     if (!args[2] || !reason) {
@@ -285,21 +306,12 @@ async function main(): Promise<void> {
       process.exitCode = 1;
       return;
     }
-    const target = parseModelRef(args[2]);
-    const config = await loadSupervisorConfig();
-    if (
-      config !== undefined &&
-      !config.models.some((m) => m.provider === target.provider && m.modelId === target.modelId)
-    ) {
-      throw new Error(`${args[2]} is not in the operator supervisor config's models`);
-    }
     const stateRoot = flagValue(args, "--state-root");
-    await controller.switchModel(
-      runRef,
-      { ...target, reason },
-      stateRoot ? { stateRoot: path.resolve(stateRoot) } : undefined,
-    );
-    console.log(`switch to ${args[2]} requested; applied before the run's next supervisor prompt`);
+    const resolvedRoot = stateRoot ? path.resolve(stateRoot) : undefined;
+    // Only a model of the harness the run is pinned to (design-supervisor-harnesses.md §4.4).
+    const target = switchModelTarget(args[2], await loadSupervisorConfig(), await loadRunState(await resolveStateDir(runRef, resolvedRoot)));
+    await controller.switchModel(runRef, { ...target, reason }, resolvedRoot !== undefined ? { stateRoot: resolvedRoot } : undefined);
+    console.log(`switch to ${target.provider}/${target.modelId} requested; applied before the run's next supervisor prompt`);
     return;
   }
 
@@ -519,8 +531,8 @@ Usage:
   graphloom stats <stateDir|runId> [--state-root <dir>] [--json]
   graphloom wait <stateDir|runId> [--state-root <dir>] [--timeout <dur>] [--json]
   graphloom stop <stateDir|runId> [--state-root <dir>]
-  graphloom resume <stateDir|runId> [--state-root <dir>] [--upgrade] [--update-plugin] [--update-executors] [--reconciled] [--rehearsal] [--on-stop <command>]
-  graphloom switch-model <stateDir|runId> <provider/model> --reason <text> [--state-root <dir>]
+  graphloom resume <stateDir|runId> [--state-root <dir>] [--supervisor <harness> [--reason <text>]] [--upgrade] [--update-plugin] [--update-executors] [--reconciled] [--rehearsal] [--on-stop <command>]
+  graphloom switch-model <stateDir|runId> <model> --reason <text> [--state-root <dir>]
   graphloom delete <stateDir|runId> [--state-root <dir>] [--force]
   graphloom version [--json | --root]
   graphloom doctor [--task <task.yaml>] [--json]
@@ -683,8 +695,18 @@ login (never an API key: OpenAI by key is the Pi route), confined by bwrap:
   { "harnesses": ["pi", "claude-code", "codex"], "pi": { "provider": "deepseek", "modelId": "deepseek-v4-pro" },
     "claude": { "models": ["opus", "sonnet"], "configDir": "~/.claude" },
     "codex": { "models": [{ "modelId": "gpt-5-codex", "thinkingLevel": "high" }], "codexHome": "~/.codex" } }
-A run uses --supervisor <harness>, else "select", else the first enabled
-harness that is available; resume keeps the harness the run is pinned to.
+A run uses --supervisor <harness>, else "select", else the first harness in
+the plugin's preference (GraphDefinition.supervisor) that is enabled and
+available, else the first enabled harness that is available (a plugin that
+sets "required" refuses instead); check and doctor --task report the choice.
+The harness is pinned when the run starts (inspect: supervisorSelection), and
+the repair reviewer uses the same one. resume keeps the pin and refuses when
+the pinned harness is no longer enabled or available; resume --supervisor
+<harness> [--reason <text>] moves the run to another enabled, available
+harness, keeping its logical session, budgets, and case file (inspect:
+supervisorTransitions). switch-model takes a model of the pinned harness:
+provider/model for Pi, the model name (or claude-code/<name>, codex/<name>)
+for Claude Code and Codex, each one the operator configured.
 `);
 }
 

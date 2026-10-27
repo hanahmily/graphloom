@@ -39,6 +39,8 @@ export interface RehearsalReport {
   substituted: string[];
   notCovered: string[];
   convergence: RehearsalConvergence;
+  /** The supervisor harness the rehearsal run pinned at intake, and why (design-supervisor-harnesses.md §7.4); a stand-in answers for it. */
+  supervisorSelection?: { harness: string; source: string; reason: string };
 }
 
 export interface EvidenceProducerInfo {
@@ -120,6 +122,9 @@ export function evaluateRehearsal(
     substituted: context.substituted ?? [],
     notCovered,
     convergence,
+    ...(state.supervisorSelection !== undefined
+      ? { supervisorSelection: { harness: state.supervisorSelection.harness, source: state.supervisorSelection.source, reason: state.supervisorSelection.reason } }
+      : {}),
   };
 }
 

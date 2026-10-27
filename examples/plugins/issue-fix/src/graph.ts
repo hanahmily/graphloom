@@ -148,7 +148,7 @@ import { finalSections } from "./final.js";
 import { cleanRun, codeReview, finalRun, implementerRecord, latestImplementerRecord, plannerRecord, reportText, validatorById, verifiedChecks } from "./validators.js";
 
 export const GRAPH_ID = "issue-fix";
-export const GRAPH_VERSION = "0.15.0";
+export const GRAPH_VERSION = "0.16.0";
 
 /** Graph bookkeeping; everything else is read back from recorded evidence. */
 export interface FixPrivateState {
@@ -282,6 +282,8 @@ export function definitionFor(profile: Profile): GraphDefinition {
     environment: structuredClone(profile.environment),
     ...(profile.budgets !== undefined ? { defaultBudgets: { ...profile.budgets } } : {}),
     agentRoles: agentRoles(profile),
+    // The supervisor harness this repository's runs prefer (design-supervisor-harnesses.md §7.6).
+    supervisor: structuredClone(profile.supervisorPreference),
   };
 }
 

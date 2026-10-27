@@ -930,9 +930,14 @@ own toolchain.
   `selectSupervisorHarness` on those probes: `select`, else the first enabled
   harness that is available. The flat Pi form selects Pi unprobed, as `run`
   does, and then warns when Pi is not available. `run --supervisor` is a
-  per-invocation flag, so it is not reported. The plugin's own preference
-  (`GraphDefinition.supervisor`, and its `required`) is phase S5 and joins
-  through the same function (`supervisorSelection`).
+  per-invocation flag, so it is not reported. Since phase S5 the plugin's own
+  preference (`GraphDefinition.supervisor`, its order, model hints, and
+  `required`) joins through the same function: the doctor's
+  `supervisorSelection` runs `resolveSupervisorSelection`, which `run`,
+  `resume`, and `check` also use, on its probes
+  ([supervisor harnesses §7.7](design-supervisor-harnesses.md#77-as-built-in-s5)).
+  A `required` preference the operator cannot meet is a `fail`, and each
+  unconfigured model hint a `warn`.
 - **`GraphDefinition.agentRoles`** is in the SDK with a shape check only:
   unique non-empty `role`, non-empty `harness`, `access` read or write, and
   optional non-empty `distinctFrom[]` and `setting`; any other key is refused.
@@ -951,7 +956,7 @@ own toolchain.
 - **Setup.**
   - **The supervisor file.** Setup enables the supervisor harnesses the
     operator keeps, in the built-in order, with no `select`, so a plugin's
-    preference still applies once S5 ships. Pi alone is written in the flat
+    preference applies (it does since S5). Pi alone is written in the flat
     Pi form (`{ "provider", "modelId" }`), which S3's parser still reads as
     `{ harnesses: ["pi"], pi: { … } }`. Any other choice is written in the
     per-harness form, for example `{ "harnesses": ["pi", "claude-code"],

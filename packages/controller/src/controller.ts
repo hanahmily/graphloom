@@ -84,9 +84,18 @@ import {
   type InstallRecord,
   type InstallTransitionRecord,
   type StateMigrationRecord,
+  type SupervisorSelectionRecord,
+  type SupervisorTransitionRecord,
   type VersionRecord,
 } from "./state.js";
 import { returnToGraphOnResume } from "./resume-recovery.js";
+import {
+  applySupervisorPin,
+  selectionRecord,
+  supervisorMoved,
+  type SupervisorPinRequest,
+  type SupervisorSelectionChoice,
+} from "./supervisor-pin.js";
 import { CURRENT_STATE_FORMAT, STATE_FORMATS, stateFormatOf, type StateFormatRegistry } from "./state-migrations/index.js";
 import { upgradeRun, type UpgradeRequest } from "./upgrade.js";
 import { classifyStop, decideResume, FINAL_STOP_HELD_REMEDY, resumeView, stopMarkOf } from "./stop-class.js";
@@ -95,6 +104,29 @@ import {
   createRunWorktree,
   listDirtyPaths,
 } from "./worktree.js";
+
+/** Where a supervisor's transcripts live, and the logical session it continues on another harness. */
+export interface SupervisorFactoryContext {
+  runId: string;
+  stateDir: string;
+  /**
+   * Set when the run's pin moved to another harness (`resume --supervisor`):
+   * the new harness continues this logical session id and switch journal
+   * (design-supervisor-harnesses.md §7.4) instead of starting a new one.
+   */
+  continueSession?: { sessionId: string; switchJournal: NonNullable<DurableRunState["supervisorBinding"]>["switchJournal"] };
+}
+
+export type SupervisorFactory = (ctx: SupervisorFactoryContext) => Promise<Supervisor>;
+
+/** The composition root's supervisor for a new run (`RunRequest.selectSupervisor`). */
+export interface SupervisorChoice {
+  /** Pinned at intake as the run's `supervisorSelection`. */
+  selection: SupervisorSelectionChoice;
+  supervisorFactory: SupervisorFactory;
+  /** The repair hooks for the same harness (§7.5); replace `RunRequest.repair`. */
+  repair?: RepairDeps;
+}
 
 export interface RunRequest {
   taskPath: string;
@@ -122,7 +154,16 @@ export interface RunRequest {
    * Create the run's supervisor once the run id and state directory exist, so
    * its session transcript lives with the run. Ignored when `supervisor` is set.
    */
-  supervisorFactory?: (ctx: { runId: string; stateDir: string }) => Promise<Supervisor>;
+  supervisorFactory?: SupervisorFactory;
+  /**
+   * Resolve the run's supervisor harness once the plugin has described its
+   * preference (`GraphDefinition.supervisor`, passed as given; design-supervisor-harnesses.md
+   * §7.3), before any run state exists: a throw refuses the run. The
+   * choice's selection is pinned at intake, and its factory and repair hooks
+   * replace `supervisorFactory` and `repair`. Undefined: the run has no
+   * supervisor. Ignored when `supervisor` is set.
+   */
+  selectSupervisor?: (preference: GraphDefinition["supervisor"]) => Promise<SupervisorChoice | undefined>;
   /** Qualified repair patch author + independent reviewer hooks. */
   repair?: RepairDeps;
   /**
@@ -191,7 +232,16 @@ export interface ResumeRequest {
    * A fresh supervisor when there is no session to restore: the run stopped
    * before its supervisor made a decision, or started without one.
    */
-  supervisorFactory?: (ctx: { runId: string; stateDir: string }) => Promise<Supervisor>;
+  supervisorFactory?: SupervisorFactory;
+  /**
+   * The run's supervisor pin (design-supervisor-harnesses.md §7.4), as the
+   * composition root resolved it: a selection to record for a run that has
+   * none, or `resume --supervisor`'s transition, refused unless its `from` is
+   * the run's pin. A transition keeps the logical session id, budgets, case
+   * file, and episode records, and records `supervisorTransitions` and a
+   * `supervisorUpdate` evidence record.
+   */
+  supervisorPin?: SupervisorPinRequest;
   recreateHost?: RecreateHostFn;
   stateRoot?: string;
   /**
@@ -263,6 +313,10 @@ export interface InspectReport {
   versionHistory: VersionRecord[];
   /** Executors the operator re-pinned to installed code (`resume --update-executors`): old -> new digest at the generation it took effect. */
   executorTransitions: ExecutorTransitionRecord[];
+  /** The harness the run's supervisor is pinned to, and why (§7.4); absent until something pinned it. */
+  supervisorSelection?: SupervisorSelectionRecord;
+  /** Operator moves of the supervisor to another harness (`resume --supervisor`), oldest first. */
+  supervisorTransitions: SupervisorTransitionRecord[];
   /** The GraphLoom that owns the run; absent for runs created before ownership was recorded. */
   install?: InstallRecord;
   /** The durable state format (1 for runs saved before it was recorded). */
@@ -374,6 +428,10 @@ export function createController(): Controller {
         const stopAfter = request.stopAfterStage !== undefined ? stageNamed(definition, request.stopAfterStage) : undefined;
         // Controller defaults < the graph's declared defaultBudgets < task budgets.
         const budgeted = applyGraphDefaultBudgets(intake, definition);
+        // §7.3: resolved once the plugin described its preference, before any run state; a refusal refuses the run.
+        const choice = supervisor === undefined && request.selectSupervisor !== undefined ? await request.selectSupervisor(definition.supervisor) : undefined;
+        const supervisorFactory = choice !== undefined ? choice.supervisorFactory : request.selectSupervisor !== undefined ? undefined : request.supervisorFactory;
+        const repair = choice !== undefined ? choice.repair : request.repair;
 
         const revisionBridge = { current: 0 };
         const validators = resolveValidators(
@@ -404,6 +462,8 @@ export function createController(): Controller {
           sourceDirtyBefore,
         });
         state = { ...state, stateFormat: CURRENT_STATE_FORMAT, ...(request.install !== undefined ? { install: { ...request.install } } : {}) };
+        // §7.4: the harness is pinned at intake.
+        if (choice !== undefined) state = { ...state, supervisorSelection: selectionRecord(choice.selection, state) };
         const executorCatalog = await pinExecutorCatalog(request.runner);
         if (executorCatalog !== undefined) state = { ...state, executorCatalog };
         revisionBridge.current = state.stateRevision;
@@ -416,8 +476,8 @@ export function createController(): Controller {
         await claimRunOwner(state.stateDir);
         await saveRunState(state);
         await request.onRunCreated?.({ runId, stateDir: state.stateDir });
-        if (supervisor === undefined && request.supervisorFactory !== undefined) {
-          supervisor = await request.supervisorFactory({ runId, stateDir: state.stateDir });
+        if (supervisor === undefined && supervisorFactory !== undefined) {
+          supervisor = await supervisorFactory({ runId, stateDir: state.stateDir });
         }
 
         state = await runNormalLoop(state, {
@@ -429,7 +489,7 @@ export function createController(): Controller {
             (stopAfter !== undefined && stageComplete(await loadRunState(session.stateDir), stopAfter)),
           revisionBridge,
           ...(supervisor !== undefined ? { supervisor } : {}),
-          ...(request.repair !== undefined ? { repair: request.repair } : {}),
+          ...(repair !== undefined ? { repair } : {}),
           ...(request.proposalReviewer !== undefined ? { proposalReviewer: request.proposalReviewer } : {}),
           ...resolveCandidateHost(request),
           ...resolveRecreateHost(session, {
@@ -656,6 +716,8 @@ export function createController(): Controller {
 
         state = reconcileRepairJournal(state);
         state = await reconcileSwitchJournal(state);
+        // After the switch journal settled on the old harness: a transition moves a settled binding.
+        state = applySupervisorPin(state, request.supervisorPin);
         state = await reassessAcceptedWorkspace(state);
         // §8: a retryable stop runs again; a final one surfaces the same
         // blocker until something it depends on changed.
@@ -1093,6 +1155,14 @@ async function resolveResumeSupervisor(
   if (!binding?.sessionFile) {
     return request.supervisorFactory?.({ runId: state.runId, stateDir });
   }
+  if (supervisorMoved(state)) {
+    // §7.4: the pin moved to another harness, which continues the same logical session.
+    return request.supervisorFactory?.({
+      runId: state.runId,
+      stateDir,
+      continueSession: { sessionId: binding.sessionId, switchJournal: structuredClone(binding.switchJournal) },
+    });
+  }
   assertSupervisorRestorable(request, state);
   return request.restoreSupervisor!(binding, { runId: state.runId, stateDir });
 }
@@ -1103,7 +1173,14 @@ async function resolveResumeSupervisor(
  */
 function assertSupervisorRestorable(request: ResumeRequest, state: DurableRunState): void {
   const binding = state.supervisorBinding;
-  if (request.supervisor !== undefined || binding?.sessionFile === undefined || request.restoreSupervisor !== undefined) return;
+  if (request.supervisor !== undefined || binding?.sessionFile === undefined) return;
+  if (supervisorMoved(state) || request.supervisorPin?.transition !== undefined) {
+    // A moved pin starts its new harness (§7.4); a restore of the old binding cannot serve it.
+    if (request.supervisorFactory !== undefined) return;
+    const to = request.supervisorPin?.transition?.to ?? state.supervisorSelection?.harness;
+    throw new Error(`run ${state.runId}'s supervisor moved from ${bindingHarness(binding)} to ${to}, but no supervisorFactory was given to start it there`);
+  }
+  if (request.restoreSupervisor !== undefined) return;
   throw new Error(
     `run ${state.runId} has a ${bindingHarness(binding)} supervisor binding (session ${binding.sessionId}) but no restoreSupervisor was given to restore it`,
   );
@@ -1372,6 +1449,8 @@ function toInspect(state: DurableRunState): InspectReport {
     budgets: { ...state.budgets },
     versionHistory: structuredClone(state.versionHistory ?? []),
     executorTransitions: structuredClone(state.executorTransitions ?? []),
+    ...(state.supervisorSelection !== undefined ? { supervisorSelection: structuredClone(state.supervisorSelection) } : {}),
+    supervisorTransitions: structuredClone(state.supervisorTransitions ?? []),
     ...(state.install !== undefined ? { install: { ...state.install } } : {}),
     stateFormat: state.stateFormat ?? 1,
     installHistory: structuredClone(state.installHistory ?? []),

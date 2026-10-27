@@ -4,7 +4,8 @@
 import { readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { loadRunState, resolveStateDir, type ResumeRequest, type RunRequest } from "@graphloom/controller";
+import { pinnedSupervisorHarness, type DurableRunState, type ResumeRequest, type RunRequest, type SupervisorFactory, type SupervisorPinRequest } from "@graphloom/controller";
+import type { SupervisorPreference } from "@graphloom/sdk";
 import {
   bindingHarness,
   CLAUDE_CODE_HARNESS,
@@ -15,6 +16,7 @@ import {
   restorePiSupervisorFromBinding,
   SUPERVISOR_HARNESS_NAMES,
   type HarnessProbe,
+  type HarnessStartOptions,
   type PiHarness,
   type SupervisorHarnessName,
   type SupervisorModelRef,
@@ -22,6 +24,7 @@ import {
 } from "@graphloom/supervisor";
 import { claudeHarnessFor, claudeProbeHarness, parseClaudeSupervisorConfig, type ClaudeSupervisorConfig } from "./supervisor-claude.js";
 import { codexHarnessFor, codexProbeHarness, parseCodexSupervisorConfig, type CodexSupervisorConfig } from "./supervisor-codex.js";
+import { harnessRepairDeps } from "./repair-config.js";
 
 const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 
@@ -243,8 +246,13 @@ function piHarnessFor(config: SupervisorConfig, runId: string, stateDir: string)
  * A fresh Pi supervisor whose transcripts live in the run's state directory,
  * one Pi session per recovery episode.
  */
-export function piSupervisorFactory(config: SupervisorConfig): NonNullable<RunRequest["supervisorFactory"]> {
-  return async ({ runId, stateDir }) => piHarnessFor(config, runId, stateDir).start();
+export function piSupervisorFactory(config: SupervisorConfig): SupervisorFactory {
+  return async ({ runId, stateDir, continueSession }) => piHarnessFor(config, runId, stateDir).start(startOptions(continueSession));
+}
+
+/** A harness's start on a run whose pin moved to it: the same logical session and switch journal (§7.4). */
+function startOptions(continueSession: Parameters<SupervisorFactory>[0]["continueSession"]): HarnessStartOptions {
+  return continueSession !== undefined ? { logicalSessionId: continueSession.sessionId, switchJournal: continueSession.switchJournal } : {};
 }
 
 /** The harnesses `config` enables, in the operator's order (the flat Pi form: `pi`). */
@@ -252,11 +260,20 @@ export function enabledSupervisorHarnesses(config: SupervisorConfig): Supervisor
   return config.harnesses ?? ["pi"];
 }
 
-/** How a run's supervisor harness was chosen (§7.3; the plugin's preference comes with S5). */
+/** How a run's supervisor harness was chosen (design-supervisor-harnesses.md §7.3). */
 export interface SupervisorSelection {
   harness: SupervisorHarnessName;
-  source: "flag" | "operator" | "fallback";
+  source: "flag" | "operator" | "plugin" | "fallback";
   reason: string;
+}
+
+/** What selection resolved: a harness, or why there is none, and the plugin's model hints that were ignored. */
+export interface SupervisorSelectionOutcome {
+  selection?: SupervisorSelection;
+  /** Why the run has no supervisor (no enabled harness is available). */
+  none?: string;
+  /** Plugin model hints the operator did not configure, so they are ignored (§7.2), and other notes for `check`. */
+  warnings: string[];
 }
 
 /** Whether `harness` can run here, with no provider call (§7.3 "available"). */
@@ -274,73 +291,323 @@ export async function probeSupervisorHarness(config: SupervisorConfig, harness: 
   return { ok: false, reason: `the ${harness} supervisor harness is not available in this GraphLoom` };
 }
 
+const isHarnessName = (h: string): h is SupervisorHarnessName => (SUPERVISOR_HARNESS_NAMES as readonly string[]).includes(h);
+
 /**
- * The run's supervisor harness (design-supervisor-harnesses.md §7.3): the
- * `--supervisor` flag, then `select`, each of which must be enabled and
- * available or the run is refused; otherwise the first enabled harness that
- * is available, in the operator's order. The flat Pi form keeps Pi unprobed,
- * as before harnesses. Undefined when no harness is available.
+ * The run's supervisor harness (design-supervisor-harnesses.md §7.3), from
+ * probes already taken; the one function `run`, `resume`, `check`, and
+ * `doctor --task` share. The first rule that applies wins:
+ *
+ * 1. `flag` (`run`/`resume --supervisor`), then 2. the operator's `select`:
+ *    each must be enabled and available, or the run is refused (a throw).
+ * 3. The plugin's `harnesses`, in its order: the first the operator enabled
+ *    that is available.
+ * 4. None of them: with the plugin's `required`, the run is refused; else the
+ *    first enabled harness available in the operator's order, with the reason.
+ * 5. No harness available: no supervisor (`none`).
+ *
+ * The flat Pi form enables Pi alone and keeps it unprobed, as before
+ * harnesses: `probe` is asked about it only for a `--supervisor pi`.
  */
-export async function selectSupervisorHarness(
+export function resolveSupervisorSelection(
   config: SupervisorConfig,
-  options: { flag?: string; probe?: (harness: SupervisorHarnessName) => Promise<HarnessProbe> } = {},
-): Promise<SupervisorSelection | undefined> {
+  probe: (harness: SupervisorHarnessName) => HarnessProbe,
+  options: { flag?: string; preference?: SupervisorPreference } = {},
+): SupervisorSelectionOutcome {
   const enabled = enabledSupervisorHarnesses(config);
-  const probe = options.probe ?? ((h: SupervisorHarnessName) => probeSupervisorHarness(config, h));
-  const required = async (name: string, what: string, source: SupervisorSelection["source"]): Promise<SupervisorSelection> => {
+  const flat = config.harnesses === undefined;
+  const available = (h: SupervisorHarnessName): HarnessProbe => (flat && h === "pi" ? { ok: true } : probe(h));
+  const preference = options.preference;
+  const warnings = preference !== undefined ? ignoredModelHints(config, preference) : [];
+  const required = (name: string, what: string, source: SupervisorSelection["source"]): SupervisorSelectionOutcome => {
     if (!(enabled as string[]).includes(name)) {
       throw new Error(`supervisor: ${what} ${name} is not enabled in the operator's supervisor config (enabled: ${enabled.join(", ")})`);
     }
-    const available = await probe(name as SupervisorHarnessName);
-    if (!available.ok) throw new Error(`supervisor: ${what} ${name} is not available: ${available.reason}`);
-    return { harness: name as SupervisorHarnessName, source, reason: `${what} ${name}` };
+    const probed = probe(name as SupervisorHarnessName);
+    if (!probed.ok) throw new Error(`supervisor: ${what} ${name} is not available: ${probed.reason}`);
+    return { selection: { harness: name as SupervisorHarnessName, source, reason: `${what} ${name}` }, warnings };
   };
   if (options.flag !== undefined) return required(options.flag, "--supervisor", "flag");
   if (config.select !== undefined) return required(config.select, "select", "operator");
-  if (config.harnesses === undefined) return { harness: "pi", source: "operator", reason: "the operator's Pi supervisor config" };
+  let passed = "";
+  if (preference !== undefined) {
+    const skipped: string[] = [];
+    for (const h of preference.harnesses) {
+      if (!isHarnessName(h)) {
+        skipped.push(`${h}: not a harness this GraphLoom runs`);
+        continue;
+      }
+      if (!(enabled as string[]).includes(h)) {
+        skipped.push(`${h}: not enabled by the operator`);
+        continue;
+      }
+      const probed = available(h);
+      if (probed.ok) {
+        const order = preference.harnesses.join(", ");
+        return {
+          selection: { harness: h, source: "plugin", reason: `the plugin's preference (${order}): ${h}${skipped.length > 0 ? ` (${skipped.join("; ")})` : ""}` },
+          warnings,
+        };
+      }
+      skipped.push(`${h}: ${probed.reason}`);
+    }
+    const usable = enabled.filter((h) => available(h).ok);
+    if (preference.required === true) {
+      throw new Error(`supervisor: plugin requires one of ${preference.harnesses.join(", ")}; enabled and available: ${usable.length > 0 ? usable.join(", ") : "none"} (${skipped.join("; ")})`);
+    }
+    passed = `none of the plugin's harnesses (${preference.harnesses.join(", ")}) is enabled and available (${skipped.join("; ")}), so the operator's order applies: `;
+  }
+  if (flat) return { selection: { harness: "pi", source: preference !== undefined ? "fallback" : "operator", reason: `${passed}the operator's Pi supervisor config` }, warnings };
   const unavailable: string[] = [];
   for (const harness of enabled) {
-    const available = await probe(harness);
-    if (available.ok) {
+    const probed = available(harness);
+    if (probed.ok) {
       return {
-        harness,
-        source: "fallback",
-        reason: unavailable.length === 0 ? `the first enabled harness, ${harness}` : `${harness}, the first enabled harness available (${unavailable.join("; ")})`,
+        selection: {
+          harness,
+          source: "fallback",
+          reason: `${passed}${unavailable.length === 0 ? `the first enabled harness, ${harness}` : `${harness}, the first enabled harness available (${unavailable.join("; ")})`}`,
+        },
+        warnings,
       };
     }
-    unavailable.push(`${harness}: ${available.reason}`);
+    unavailable.push(`${harness}: ${probed.reason}`);
   }
-  console.error(`supervisor: no enabled harness is available, so this run has no supervisor (${unavailable.join("; ")})`);
-  return undefined;
+  return { none: `no enabled harness is available (${unavailable.join("; ")})`, warnings };
 }
 
 /**
- * The harness a resuming run's supervisor runs on: the one its binding is
- * pinned to, or, for a run whose supervisor never ran, the selection
- * `selectSupervisorHarness` makes now.
+ * The run's supervisor harness, probing every harness `config` enables (and
+ * the flag's) first: `resolveSupervisorSelection` on those probes.
+ * Undefined when no harness is available.
  */
-export async function resumeSupervisorHarness(
+export async function selectSupervisorHarness(
   config: SupervisorConfig,
-  runRef: string,
-  stateRoot: string | undefined,
-): Promise<SupervisorHarnessName | undefined> {
-  const state = await loadRunState(await resolveStateDir(runRef, stateRoot));
-  const binding = state.supervisorBinding;
-  if (binding?.sessionFile !== undefined) {
-    const pinned = bindingHarness(binding);
-    return (SUPERVISOR_HARNESS_NAMES as readonly string[]).includes(pinned) ? (pinned as SupervisorHarnessName) : undefined;
+  options: { flag?: string; preference?: SupervisorPreference; probe?: (harness: SupervisorHarnessName) => Promise<HarnessProbe>; onNone?: (why: string) => void } = {},
+): Promise<SupervisorSelection | undefined> {
+  const outcome = await supervisorSelectionOutcome(config, options);
+  if (outcome.selection === undefined) {
+    (options.onNone ?? ((why: string) => console.error(`supervisor: ${why}, so this run has no supervisor`)))(outcome.none ?? "no harness is available");
   }
-  return (await selectSupervisorHarness(config))?.harness;
+  return outcome.selection;
+}
+
+/** `resolveSupervisorSelection` after probing what it may ask about; throws as it does. */
+export async function supervisorSelectionOutcome(
+  config: SupervisorConfig,
+  options: { flag?: string; preference?: SupervisorPreference; probe?: (harness: SupervisorHarnessName) => Promise<HarnessProbe> } = {},
+): Promise<SupervisorSelectionOutcome> {
+  // Each harness is probed as it would start: on its models reordered by the plugin's hints.
+  const probe = options.probe ?? ((h: SupervisorHarnessName) => probeSupervisorHarness(withModelHints(config, h, options.preference), h));
+  const enabled = enabledSupervisorHarnesses(config);
+  // A flag or select decides alone, and is probed even in the flat Pi form; otherwise every enabled harness may be asked about.
+  const named = options.flag ?? config.select;
+  const wanted = new Set<SupervisorHarnessName>(
+    named !== undefined ? (enabled as string[]).filter((h) => h === named) as SupervisorHarnessName[] : config.harnesses === undefined ? [] : enabled,
+  );
+  const probes = new Map<SupervisorHarnessName, HarnessProbe>();
+  await Promise.all(
+    [...wanted].map(async (h) => {
+      probes.set(h, await probe(h).catch((err: unknown) => ({ ok: false as const, reason: err instanceof Error ? err.message : String(err) })));
+    }),
+  );
+  const flag = options.flag;
+  return resolveSupervisorSelection(config, (h) => probes.get(h) ?? { ok: false, reason: "not probed" }, {
+    ...(flag !== undefined ? { flag } : {}),
+    ...(options.preference !== undefined ? { preference: options.preference } : {}),
+  });
+}
+
+/** A plugin model hint for `harness`, as that harness's config names its models. */
+function hintRef(harness: SupervisorHarnessName, hint: string): { provider?: string; modelId: string } {
+  if (harness === "pi") {
+    const slash = hint.indexOf("/");
+    return slash > 0 ? { provider: hint.slice(0, slash), modelId: hint.slice(slash + 1) } : { modelId: hint };
+  }
+  return { modelId: hint.startsWith(`${harness}/`) ? hint.slice(harness.length + 1) : hint };
+}
+
+/** The models the operator configured for `harness`, in order (the parser's defaults when its section is absent). */
+export function harnessModels(config: SupervisorConfig, harness: SupervisorHarnessName): SupervisorModelRef[] {
+  if (harness === "pi") return config.models;
+  if (harness === CLAUDE_CODE_HARNESS) return (config.claude ?? parseClaudeSupervisorConfig({}, "supervisor config")).models;
+  return (config.codex ?? parseCodexSupervisorConfig({}, "supervisor config")).models;
+}
+
+const sameModel = (ref: SupervisorModelRef, hint: { provider?: string; modelId: string }): boolean =>
+  ref.modelId === hint.modelId && (hint.provider === undefined || ref.provider === hint.provider);
+
+/** The plugin's model hints the operator has not configured (for enabled harnesses only), each ignored. */
+export function ignoredModelHints(config: SupervisorConfig, preference: SupervisorPreference): string[] {
+  const enabled = enabledSupervisorHarnesses(config);
+  const ignored: string[] = [];
+  for (const [harness, hints] of Object.entries(preference.models ?? {})) {
+    if (!isHarnessName(harness) || !enabled.includes(harness)) continue;
+    const models = harnessModels(config, harness);
+    for (const hint of hints ?? []) {
+      if (!models.some((m) => sameModel(m, hintRef(harness, hint)))) {
+        ignored.push(`the plugin's ${harness} model hint ${hint} is not among the operator's ${harness} models (${models.map((m) => (harness === "pi" ? `${m.provider}/${m.modelId}` : m.modelId)).join(", ")}), so it is ignored`);
+      }
+    }
+  }
+  return ignored;
+}
+
+/**
+ * `config` with `harness`'s models reordered by the plugin's hints (§7.2):
+ * each hint the operator configured moves to the front, in the hint order;
+ * an unconfigured hint is ignored. The first model is the initial one.
+ */
+export function withModelHints(config: SupervisorConfig, harness: SupervisorHarnessName, preference: SupervisorPreference | undefined): SupervisorConfig {
+  const hints = preference?.models?.[harness];
+  if (hints === undefined || hints.length === 0) return config;
+  const models = harnessModels(config, harness);
+  const first: SupervisorModelRef[] = [];
+  for (const hint of hints) {
+    const found = models.find((m) => sameModel(m, hintRef(harness, hint)));
+    if (found !== undefined && !first.includes(found)) first.push(found);
+  }
+  if (first.length === 0) return config;
+  const ordered = [...first, ...models.filter((m) => !first.includes(m))];
+  if (harness === "pi") {
+    const head = ordered[0]!;
+    const next: SupervisorConfig = { ...config, provider: head.provider, modelId: head.modelId, models: ordered };
+    if (head.thinkingLevel !== undefined) next.thinkingLevel = head.thinkingLevel;
+    else delete next.thinkingLevel;
+    return next;
+  }
+  if (harness === CLAUDE_CODE_HARNESS) return { ...config, claude: { ...(config.claude ?? parseClaudeSupervisorConfig({}, "supervisor config")), models: ordered } };
+  return { ...config, codex: { ...(config.codex ?? parseCodexSupervisorConfig({}, "supervisor config")), models: ordered } };
+}
+
+/** What `resume` runs its supervisor on, and the pin it asks the controller to record. */
+export interface ResumeSupervisorPlan {
+  /** The harness the run's supervisor and its repair reviewer run on; undefined: none (no config, nothing pinned). */
+  harness?: SupervisorHarnessName;
+  /** The operator's config with the plugin's model hints for `harness` applied. */
+  config?: SupervisorConfig;
+  pin?: SupervisorPinRequest;
+}
+
+/**
+ * The supervisor of a resuming run (§7.4). The run's pin holds: its
+ * `supervisorSelection`, or, for a run started before selection existed,
+ * the harness its binding recorded at the first recovery episode (recorded
+ * now as a selection with source `binding`). A pinned harness the operator no
+ * longer enables, or that is not available, refuses the resume: nothing falls
+ * back. `--supervisor <harness>` moves the pin, as a transition. A run that
+ * nothing pinned (its supervisor never ran before selection existed) is
+ * pinned now, by the same selection `run` makes, from the preference the run
+ * was described with.
+ */
+export async function resumeSupervisorPlan(
+  config: SupervisorConfig | undefined,
+  state: Pick<DurableRunState, "supervisorSelection" | "supervisorBinding" | "definition">,
+  options: { flag?: string; reason?: string; probe?: (harness: SupervisorHarnessName) => Promise<HarnessProbe> } = {},
+): Promise<ResumeSupervisorPlan> {
+  const pinned = pinnedSupervisorHarness(state);
+  const preference = state.supervisorSelection?.preference ?? state.definition.supervisor;
+  const legacy: SupervisorPinRequest | undefined =
+    pinned !== undefined && state.supervisorSelection === undefined
+      ? { selection: { harness: pinned, source: "binding", reason: `pinned at the run's first recovery episode, ${pinned} (a run started before supervisor selection)` } }
+      : undefined;
+  const probe = options.probe ?? ((h: SupervisorHarnessName) => probeSupervisorHarness(withModelHints(config!, h, preference), h));
+  // --supervisor naming the pinned harness changes nothing: the pinned checks below apply (a bound Pi on its bound model).
+  if (options.flag !== undefined && !(pinned !== undefined && options.flag === pinned && config !== undefined)) {
+    if (config === undefined) {
+      throw new Error(`--supervisor ${options.flag} needs an operator supervisor config that enables it ($GRAPHLOOM_SUPERVISOR_CONFIG or ~/.config/graphloom/supervisor.json)`);
+    }
+    const chosen = (await supervisorSelectionOutcome(config, { flag: options.flag, probe })).selection!;
+    const harness = chosen.harness;
+    const hinted = withModelHints(config, harness, preference);
+    if (pinned === undefined) {
+      return { harness, config: hinted, pin: { selection: { harness, source: "flag", reason: `resume --supervisor ${harness}, for a run nothing had pinned` } } };
+    }
+    if (pinned === harness) return { harness, config: hinted, ...(legacy !== undefined ? { pin: legacy } : {}) };
+    return { harness, config: hinted, pin: { transition: { from: pinned, to: harness, reason: options.reason ?? "the operator's resume --supervisor" } } };
+  }
+  if (pinned !== undefined) {
+    if (!isHarnessName(pinned)) throw new Error(`this run's supervisor is pinned to the ${pinned} harness, which this GraphLoom cannot run; resume with --supervisor <harness>`);
+    if (config === undefined) {
+      // Without a config only a binding on the pinned harness can be restored (on that harness's defaults);
+      // a pin with no session yet, or one moved to another harness, needs the config to start its supervisor.
+      const binding = state.supervisorBinding;
+      if (binding?.sessionFile === undefined || bindingHarness(binding) !== pinned) {
+        throw new Error(
+          `this run's supervisor is pinned to ${pinned}, but there is no operator supervisor config to start it ($GRAPHLOOM_SUPERVISOR_CONFIG or ~/.config/graphloom/supervisor.json); restore a config that enables ${pinned}`,
+        );
+      }
+      return { harness: pinned, ...(legacy !== undefined ? { pin: legacy } : {}) };
+    }
+    const enabled = enabledSupervisorHarnesses(config);
+    if (!enabled.includes(pinned)) {
+      throw new Error(`supervisor harness pin mismatch: this run's supervisor is pinned to ${pinned}, which the operator's supervisor config does not enable (enabled: ${enabled.join(", ")}); enable it again, or resume with --supervisor <harness>`);
+    }
+    // A Pi switch a crash interrupted is settled by the controller from the transcript; which model then
+    // restores is not known here, so its preflight is left to the restore.
+    const unsettled = pinned === "pi" && (state.supervisorBinding?.switchJournal ?? []).some((r) => r.status === "intent");
+    if (!(config.harnesses === undefined && pinned === "pi") && !unsettled) {
+      // A Pi session restores on its bound model (it may have switched provider): probe that one.
+      const binding = state.supervisorBinding;
+      const bound = pinned === "pi" && options.probe === undefined && binding?.sessionFile !== undefined && bindingHarness(binding) === "pi"
+        ? config.models.find((m) => m.provider === binding.provider && m.modelId === binding.modelId)
+        : undefined;
+      const check = bound !== undefined
+        ? (h: SupervisorHarnessName) => probeSupervisorHarness({ ...config, provider: bound.provider, modelId: bound.modelId, models: [bound, ...config.models.filter((m) => m !== bound)] }, h)
+        : probe;
+      const probed = await check(pinned).catch((err: unknown) => ({ ok: false as const, reason: err instanceof Error ? err.message : String(err) }));
+      if (!probed.ok) throw new Error(`supervisor harness pin mismatch: this run's supervisor is pinned to ${pinned}, which is not available here: ${probed.reason}; resume with --supervisor <harness>`);
+    }
+    return { harness: pinned, config: withModelHints(config, pinned, preference), ...(legacy !== undefined ? { pin: legacy } : {}) };
+  }
+  if (config === undefined) return {};
+  const outcome = await supervisorSelectionOutcome(config, { probe, ...(preference !== undefined ? { preference } : {}) });
+  if (outcome.selection === undefined) {
+    console.error(`supervisor: ${outcome.none ?? "no harness is available"}, so this run has no supervisor`);
+    return {};
+  }
+  const { harness, source, reason } = outcome.selection;
+  return { harness, config: withModelHints(config, harness, preference), pin: { selection: { harness, source, reason: `pinned at resume: ${reason}` } } };
+}
+
+/**
+ * The run's supervisor for `controller.run`'s `selectSupervisor`: the
+ * selection on the plugin's preference, its factory, and the repair hooks on
+ * the same harness (§7.5). A refusal throws, which refuses the run.
+ */
+export function supervisorChooser(
+  config: SupervisorConfig,
+  options: { flag?: string; bundlePath: () => Promise<string>; probe?: (harness: SupervisorHarnessName) => Promise<HarnessProbe>; onSelected?: (selection: SupervisorSelection, warnings: string[]) => void },
+): NonNullable<RunRequest["selectSupervisor"]> {
+  return async (preference) => {
+    const outcome = await supervisorSelectionOutcome(config, {
+      ...(options.flag !== undefined ? { flag: options.flag } : {}),
+      ...(preference !== undefined ? { preference } : {}),
+      ...(options.probe !== undefined ? { probe: options.probe } : {}),
+    });
+    if (outcome.selection === undefined) {
+      console.error(`supervisor: ${outcome.none ?? "no harness is available"}, so this run has no supervisor`);
+      return undefined;
+    }
+    const { selection } = outcome;
+    options.onSelected?.(selection, outcome.warnings);
+    const hinted = withModelHints(config, selection.harness, preference);
+    return {
+      selection,
+      supervisorFactory: supervisorFactoryFor(hinted, selection.harness),
+      repair: harnessRepairDeps(selection.harness, hinted, await options.bundlePath()),
+    };
+  };
 }
 
 /** A fresh supervisor on `harness` for a new run. */
-export function supervisorFactoryFor(config: SupervisorConfig, harness: SupervisorHarnessName): NonNullable<RunRequest["supervisorFactory"]> {
+export function supervisorFactoryFor(config: SupervisorConfig, harness: SupervisorHarnessName): SupervisorFactory {
   if (harness === "pi") return piSupervisorFactory(config);
   if (harness === CLAUDE_CODE_HARNESS) {
-    return async ({ runId, stateDir }) => (await claudeHarnessFor(config.claude, config, runId, stateDir)).start();
+    return async ({ runId, stateDir, continueSession }) => (await claudeHarnessFor(config.claude, config, runId, stateDir)).start(startOptions(continueSession));
   }
   if (harness === CODEX_HARNESS) {
-    return async ({ runId, stateDir }) => (await codexHarnessFor(config.codex, config, runId, stateDir)).start();
+    return async ({ runId, stateDir, continueSession }) => (await codexHarnessFor(config.codex, config, runId, stateDir)).start(startOptions(continueSession));
   }
   throw new Error(`the ${harness} supervisor harness is not available in this GraphLoom`);
 }
@@ -362,14 +629,14 @@ export function supervisorRestore(config: SupervisorConfig | undefined): NonNull
     const enabled = config !== undefined ? enabledSupervisorHarnesses(config) : undefined;
     if (enabled !== undefined && !(enabled as string[]).includes(harness)) {
       throw new Error(
-        `supervisor harness pin mismatch: this run's supervisor is pinned to the ${harness} harness, which the operator's supervisor config does not enable (enabled: ${enabled.join(", ")}); enable it again to resume`,
+        `supervisor harness pin mismatch: this run's supervisor is pinned to the ${harness} harness, which the operator's supervisor config does not enable (enabled: ${enabled.join(", ")}); enable it again, or resume with --supervisor <harness>`,
       );
     }
     if (harness === CLAUDE_CODE_HARNESS) {
       const claude = await claudeHarnessFor(config?.claude, config ?? {}, runId, stateDir);
       const available = await claude.probe();
       if (!available.ok) {
-        throw new Error(`supervisor harness pin mismatch: this run's supervisor is pinned to ${harness}, which is not available here: ${available.reason}`);
+        throw new Error(`supervisor harness pin mismatch: this run's supervisor is pinned to ${harness}, which is not available here: ${available.reason}; resume with --supervisor <harness>`);
       }
       return claude.restore({ ...binding, sessionFile: binding.sessionFile, harness });
     }
@@ -377,7 +644,7 @@ export function supervisorRestore(config: SupervisorConfig | undefined): NonNull
       const codex = await codexHarnessFor(config?.codex, config ?? {}, runId, stateDir);
       const available = await codex.probe();
       if (!available.ok) {
-        throw new Error(`supervisor harness pin mismatch: this run's supervisor is pinned to ${harness}, which is not available here: ${available.reason}`);
+        throw new Error(`supervisor harness pin mismatch: this run's supervisor is pinned to ${harness}, which is not available here: ${available.reason}; resume with --supervisor <harness>`);
       }
       return codex.restore({ ...binding, sessionFile: binding.sessionFile, harness });
     }

@@ -135,6 +135,36 @@ export interface ExecutorCatalogEntry {
 }
 
 /** An operator re-pin of an executor to its installed bytes, at the generation it took effect. */
+/** How the run's supervisor harness was chosen (design-supervisor-harnesses.md §7.3, §7.4). */
+export interface SupervisorSelectionRecord {
+  /** The pinned harness (`pi`, `claude-code`, `codex`). */
+  harness: string;
+  /**
+   * Which rule chose it: `flag` (`run`/`resume --supervisor`), `operator`
+   * (the operator's `select`, or the flat Pi form), `plugin` (the graph's
+   * preference), `fallback` (the operator's order), or `binding` (a run
+   * started before selection existed, pinned at its first recovery episode).
+   */
+  source: string;
+  /** Why, in the operator's words; `inspect` shows it. */
+  reason: string;
+  /** The graph's `GraphDefinition.supervisor` as intake read it; opaque here. */
+  preference?: GraphDefinition["supervisor"];
+  generation: number;
+  at: string;
+}
+
+/** One `resume --supervisor` move (design-supervisor-harnesses.md §7.4). */
+export interface SupervisorTransitionRecord {
+  from: string;
+  to: string;
+  reason: string;
+  generation: number;
+  at: string;
+  /** The `supervisorUpdate` evidence record. */
+  evidenceRef: string;
+}
+
 export interface ExecutorTransitionRecord {
   id: string;
   fromDigest: string;
@@ -455,6 +485,17 @@ export interface DurableRunState {
     /** Recorded evidence the escalation cited. */
     evidenceRefs?: string[];
   };
+  /**
+   * The supervisor harness the run is pinned to, and why
+   * (design-supervisor-harnesses.md §7.4). Recorded at intake from the
+   * composition root's selection; a run started before selection existed gets
+   * one at its next resume. Only `resume --supervisor` changes it, as a
+   * transition. The controller stores the plugin's preference as given and
+   * never interprets it.
+   */
+  supervisorSelection?: SupervisorSelectionRecord;
+  /** Operator moves of the run's supervisor to another harness (`resume --supervisor`), oldest first. */
+  supervisorTransitions?: SupervisorTransitionRecord[];
   /**
    * Durable supervisor session identity (harness, session file, active model).
    * On resume, when no supervisor is supplied, the controller restores from

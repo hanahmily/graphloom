@@ -82,7 +82,7 @@ describe("the banyandb profile", () => {
   it("describes the graph identity and finds the plugin's bundled open-code-review first", () => {
     const ours = createGraph().describe(BANYANDB);
     expect(ours.environment?.checks?.find((c) => c.id === "ocr")?.argv.join(" ")).toContain("scripts/ocr-path.sh");
-    expect(ours).toMatchObject({ graphId: "issue-fix", version: "0.15.0", privateStateSchema: "issue-fix-private-v1" });
+    expect(ours).toMatchObject({ graphId: "issue-fix", version: "0.16.0", privateStateSchema: "issue-fix-private-v1" });
   });
 
   it("declares its agent roles from the resolved profile for graphloom doctor --task (0.15.0)", () => {
@@ -93,6 +93,27 @@ describe("the banyandb profile", () => {
     ]);
     const swapped = createGraph().describe({ ...(BANYANDB as object), harnesses: { implementer: "pi", reviewer: "claude-code", verifier: "codex" } });
     expect(swapped.agentRoles?.map((r) => [r.role, r.harness])).toEqual([["implementer", "pi"], ["reviewer", "claude-code"], ["verifier", "codex"]]);
+  });
+
+  it("declares its supervisor preference, Pi first, from the profile (0.16.0, design-supervisor-harnesses.md §7.6)", () => {
+    for (const name of ["banyandb", "banyandb-ql", "canopy", "graphloom"] as const) {
+      expect(createGraph().describe(shippedProfile(name)).supervisor).toEqual({ harnesses: ["pi", "claude-code", "codex"] });
+    }
+    const { supervisor: _declared, ...undeclared } = BANYANDB as Record<string, unknown>;
+    void _declared;
+    expect(createGraph().describe(undeclared).supervisor).toEqual({ harnesses: ["pi", "claude-code", "codex"] });
+    const preferred = { harnesses: ["claude-code", "codex"], models: { "claude-code": ["opus"] }, required: true };
+    expect(createGraph().describe({ ...(BANYANDB as object), supervisor: preferred }).supervisor).toEqual(preferred);
+    // Independent of the jobs' own harnesses.
+    expect(createGraph().describe({ ...(BANYANDB as object), harnesses: { implementer: "pi", reviewer: "claude-code", verifier: "codex" } }).supervisor?.harnesses).toEqual(["pi", "claude-code", "codex"]);
+    const bad = (supervisor: unknown) => () => createGraph().describe({ ...(BANYANDB as object), supervisor });
+    expect(bad([])).toThrow(/supervisor must be an object/);
+    expect(bad({ harnesses: [] })).toThrow(/supervisor.harnesses must be a non-empty list/);
+    expect(bad({ harnesses: ["gemini"] })).toThrow(/"gemini" is not one of pi, claude-code, codex/);
+    expect(bad({ harnesses: ["pi", "pi"] })).toThrow(/must not repeat/);
+    expect(bad({ harnesses: ["pi"], models: { gemini: ["x"] } })).toThrow(/supervisor.models.gemini/);
+    expect(bad({ harnesses: ["pi"], required: "yes" })).toThrow(/supervisor.required/);
+    expect(bad({ harnesses: ["pi"], select: "pi" })).toThrow(/supervisor.select is not a supervisor setting/);
   });
 
   it("splits make generate into separately cached steps with narrow inputs (#174)", () => {
@@ -394,7 +415,7 @@ describe("profiles", () => {
   it("ships the banyandb-ql profile in the manifest's pinned files and describes it under the graph's version (#197)", async () => {
     const manifest = JSON.parse(await readFile(path.join(here, "../graphloom.manifest.json"), "utf8")) as { digests: { files: Record<string, string> } };
     expect(Object.keys(manifest.digests.files)).toContain("profiles/banyandb-ql.json");
-    expect(createGraph().describe(shippedProfile("banyandb-ql"))).toMatchObject({ graphId: "issue-fix", version: "0.15.0" });
+    expect(createGraph().describe(shippedProfile("banyandb-ql"))).toMatchObject({ graphId: "issue-fix", version: "0.16.0" });
   });
 });
 
