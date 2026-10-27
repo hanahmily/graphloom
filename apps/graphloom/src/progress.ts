@@ -92,8 +92,9 @@ const receiptNumber = (id: string): number => {
 const QUOTA = /quota|usage limit|rate limit/i;
 const ISO = /\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z/;
 
+/** The recovery episode in progress; a run that left `running` (a supervisor's stop keeps `mode: recovery`) has none. */
 function openEpisode(state: DurableRunState): string | undefined {
-  return state.mode === "recovery" ? state.recoveryEpisodeId : undefined;
+  return state.status === "running" && state.mode === "recovery" ? state.recoveryEpisodeId : undefined;
 }
 
 function stopKey(state: DurableRunState): string {
@@ -381,6 +382,8 @@ export async function waitForProgress(runRef: string, options: ProgressWaitOptio
       const { events, mark: next } = progressSince(mark, state);
       if (events.length > 0) return result(state.status === "running" ? "progress" : "stopped", events, next);
       if (state.status !== "running") return result("stopped", [], next);
+      // Keep what was observed without an event (a budget a raise took below the threshold), so a later crossing reports.
+      mark = next;
     }
     const owner = await readOwnerClaim(stateDir).catch((err: unknown) => {
       throw new Error(`cannot read owner claim in ${stateDir}: ${err instanceof Error ? err.message : String(err)}`);

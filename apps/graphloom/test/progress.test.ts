@@ -7,12 +7,13 @@
  * stop; and an end-to-end scripted hello run watched with it.
  */
 import { existsSync } from "node:fs";
-import { readdir, writeFile } from "node:fs/promises";
+import { cp, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { loadRunState, type DurableRunState } from "@graphloom/controller";
-import { decodeCursor, encodeCursor, markOf, progressSince, progressSummary, type ProgressEvent, type ProgressResult } from "../src/progress.js";
+import { loadRunState, saveRunState, type DurableRunState } from "@graphloom/controller";
+import { decodeCursor, encodeCursor, markOf, progressSince, progressSummary, waitForProgress, type ProgressEvent, type ProgressResult } from "../src/progress.js";
 import { makeCliEnv, type CliEnv } from "./cli-env.js";
 
 const fixture = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures/stats/395ec998-6e4");
@@ -94,6 +95,17 @@ describe("progress events from durable state", () => {
       expect.objectContaining({ kind: "episode_started", episodeId: "ep-b", detail: "supervisor episode ep-b started: stalled: no progress" }),
       expect.objectContaining({ kind: "episode_ended", episodeId: "ep-b", detail: "supervisor episode ep-b ended: error: provider refused" }),
     ]);
+  });
+
+  it("episode_ended when the supervisor's own decision stopped the run, which keeps mode recovery", async () => {
+    const s = await running();
+    const opened = { ...s, mode: "recovery" as const, recoveryEpisodeId: "ep-s", recoveryTrigger: { code: "correction_limit", message: "limit" } };
+    const started = progressSince(markOf(s), opened);
+    const record = { episodeId: "ep-s", turn: 1, runId: s.runId, at: "2026-10-27T10:00:00.000Z", input: { trigger: { code: "correction_limit", message: "limit" } }, toolCalls: [], proposal: { action: { type: "stop" }, reason: "the issue needs a maintainer decision" }, admission: { rejections: [], outcome: "admitted" }, providerCalls: 1 };
+    const stopped = { ...opened, status: "stopped" as const, stopReason: "needs a maintainer", stateRevision: s.stateRevision + 1, supervisorEpisodes: [record] } as unknown as DurableRunState;
+    const { events } = progressSince(started.mark, stopped);
+    expect(kinds(events)).toEqual(["episode_ended", "run_stopped"]);
+    expect(events[0]!.detail).toBe("supervisor episode ep-s ended: stop: the issue needs a maintainer decision");
   });
 
   it("quota_pause: a quota or usage-limit remedy, with resetAt; other remedies are not events", async () => {
@@ -189,6 +201,25 @@ async function runningStateDir(env: CliEnv): Promise<string> {
 
 /** A bash step that blocks until `file` exists. */
 const gate = (file: string) => ({ bash: `while [ ! -f ${JSON.stringify(file)} ]; do sleep 0.1; done` });
+
+describe("waitForProgress", () => {
+  it("keeps an eventless observation (a budget raised below the threshold), so a later crossing in the same wait reports", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "gl-progress-"));
+    cleanups.push(() => rm(dir, { recursive: true, force: true }));
+    await cp(fixture, dir, { recursive: true });
+    const base = { ...(await running()), stateDir: dir };
+    await saveRunState({ ...base, budgets: { ...base.budgets, jobs: 100_000 } });
+    await writeFile(path.join(dir, "run.owner.json"), JSON.stringify({ ownerId: "t", controllerPid: process.pid, claimedAt: new Date().toISOString(), expiresAt: Date.now() + 600_000 }));
+    const cursor = encodeCursor(markOf(await loadRunState(dir)));
+    const waiting = waitForProgress(dir, { since: cursor, pollMs: 20, timeoutMs: 20_000 });
+    await new Promise((r) => setTimeout(r, 300));
+    await saveRunState({ ...(await loadRunState(dir)), budgets: { ...base.budgets } });
+    await new Promise((r) => setTimeout(r, 300));
+    await saveRunState({ ...(await loadRunState(dir)), budgets: { ...base.budgets, jobs: 100_000 } });
+    const result = await waiting;
+    expect(kinds(result.events)).toEqual(["budget_threshold"]);
+  }, 30_000);
+});
 
 describe("graphloom wait --until progress on a scripted hello run", () => {
   it("reports each delta once across --since, times out with the cursor unchanged, and ends with the stop", async () => {
