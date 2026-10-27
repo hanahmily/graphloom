@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { defaultPiModelRuntime } from "@graphloom/agent-harness/pi";
 import {
+  bindingHarness,
   PI_HARNESS_CAPABILITIES,
   type HarnessProbe,
   type HarnessSession,
@@ -118,6 +119,10 @@ export function createPiHarness(options: PiHarnessOptions): PiHarness {
       });
     },
     async restore(binding: SupervisorBinding) {
+      const pinned = bindingHarness(binding);
+      if (pinned !== "pi") {
+        throw new Error(`cannot restore supervisor: the binding is pinned to the ${pinned} harness, not pi`);
+      }
       const configured = configuredModels ?? binding.configuredModels ?? configuredModelsFromBinding(binding);
       // The bound model may require a reasoning level other than the "off"
       // default (e.g. a model that rejects thinking disabled); it takes effect

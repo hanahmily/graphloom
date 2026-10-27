@@ -86,6 +86,19 @@ describe("the Pi harness", () => {
         binding: { sessionId: "s", sessionFile: "/x/y.jsonl", provider: "claude-code", modelId: "opus", switchJournal: [], harness: "claude-code" },
       }),
     ).rejects.toThrow(/pinned to the claude-code harness, not pi/);
+    let opened = 0;
+    const harness = createPiHarness({
+      runId: "run-1",
+      sessionDir: "/nonexistent",
+      sessionOpener: async () => {
+        opened += 1;
+        throw new Error("no session should open");
+      },
+    });
+    await expect(
+      harness.restore({ sessionId: "s", sessionFile: "/x/y.jsonl", provider: "codex", modelId: "gpt-5-codex", switchJournal: [], harness: "codex" }),
+    ).rejects.toThrow(/pinned to the codex harness, not pi/);
+    expect(opened).toBe(0);
   });
 
   it("settles an interrupted switch of a non-Pi binding as failed, without reading a Pi session file", async () => {
