@@ -40,7 +40,8 @@ import {
   type UpgradeRequest,
 } from "@graphloom/controller";
 import { createChildPluginHost } from "@graphloom/plugin-host";
-import { createScriptedSupervisor } from "@graphloom/supervisor";
+import { createScriptedSupervisor, SUPERVISOR_HARNESS_NAMES } from "@graphloom/supervisor";
+import { loadSupervisorConfig, parseSupervisorConfig, resolveSupervisorSelection, supervisorSelectionOutcome } from "./supervisor-config.js";
 import {
   checkContract,
   PLUGIN_ROOT_ENV,
@@ -134,7 +135,56 @@ export interface CheckReport {
   capabilities?: CapabilityProbeResult;
   /** The gate in `run` (§3.5): each environment check's own stdout, fingerprint input — a changed tool version re-rehearses. */
   environmentOutputs: Record<string, string>;
+  /** The supervisor selection `run` would make here (design-supervisor-harnesses.md §7.3). */
+  supervisor: SupervisorCheck;
 }
+
+/**
+ * `check`'s supervisor report: the harness `run` would pin from the
+ * operator's supervisor config and the plugin's `GraphDefinition.supervisor`
+ * (no `--supervisor`), or why there is none, or why `run` would refuse.
+ */
+export interface SupervisorCheck {
+  status: "selected" | "none" | "refused";
+  harness?: string;
+  source?: string;
+  reason: string;
+  /** Things `run` tolerates but the operator should see, such as an unconfigured model hint. */
+  warnings: string[];
+}
+
+/** The supervisor selection for `check`, through the same resolution `run` uses; a refusal is the run's. */
+export async function checkSupervisorSelection(definition: GraphDefinition, env: NodeJS.ProcessEnv = process.env): Promise<SupervisorCheck> {
+  let config: Awaited<ReturnType<typeof loadSupervisorConfig>>;
+  try {
+    config = await loadSupervisorConfig(env);
+  } catch (err) {
+    return { status: "refused", reason: err instanceof Error ? err.message : String(err), warnings: [] };
+  }
+  const preference = definition.supervisor;
+  if (config === undefined) {
+    return {
+      status: "none",
+      reason: `no operator supervisor config, so the run has no automatic recovery${preference !== undefined ? ` (the plugin prefers ${preference.harnesses.join(", ")})` : ""}`,
+      warnings: [],
+    };
+  }
+  try {
+    const outcome = await supervisorSelectionOutcome(config, preference !== undefined ? { preference } : {});
+    if (outcome.selection === undefined) return { status: "none", reason: `${outcome.none ?? "no enabled harness is available"}, so the run has no automatic recovery`, warnings: outcome.warnings };
+    const { harness, source, reason } = outcome.selection;
+    return { status: "selected", harness, source, reason, warnings: outcome.warnings };
+  } catch (err) {
+    return { status: "refused", reason: err instanceof Error ? err.message : String(err), warnings: [] };
+  }
+}
+
+/**
+ * A rehearsal's stand-in operator: every supervisor harness enabled in the
+ * built-in order and available, so the plugin's own preference decides, and
+ * a scripted supervisor answers for whichever harness it picks.
+ */
+const REHEARSAL_SUPERVISOR_CONFIG = parseSupervisorConfig({ harnesses: [...SUPERVISOR_HARNESS_NAMES], pi: {}, claude: {}, codex: {} }, "the rehearsal's stand-in supervisor config");
 
 /** The task's pinned config for a plugin host, so check, rehearse and replay describe the same graph a run would. */
 function configOption(intake: Pick<DurableRunState["intake"], "config">): { config?: unknown } {
@@ -392,7 +442,10 @@ export async function check(taskPath: string): Promise<CheckReport> {
   const capabilities = await probeHarnessCapabilities(runnerConfig);
   if (capabilities.status === "failed") problems.push(...capabilities.notes.map((n) => `harness capability: ${n}`));
 
-  return { ok: problems.length === 0, problems, definition, capabilities, environmentOutputs, ...(rehearsal !== undefined ? { rehearsal } : {}) };
+  const supervisor = await checkSupervisorSelection(definition);
+  if (supervisor.status === "refused") problems.push(`supervisor: run would refuse: ${supervisor.reason}`);
+
+  return { ok: problems.length === 0, problems, definition, capabilities, environmentOutputs, supervisor, ...(rehearsal !== undefined ? { rehearsal } : {}) };
 }
 
 interface RehearsalRun {
@@ -490,7 +543,14 @@ async function performRehearsal(
       runner: harness.runner,
       stateRoot,
       runId: `${REHEARSAL_RUN_ID_PREFIX}${randomUUID().slice(0, 8)}`,
-      supervisorFactory: async () => createScriptedSupervisor({ decisions: scenario.supervisor ?? [] }),
+      // The harness the plugin's preference picks among stand-ins for all three, pinned as a live run pins it.
+      selectSupervisor: async (preference) => {
+        const { selection } = resolveSupervisorSelection(REHEARSAL_SUPERVISOR_CONFIG, () => ({ ok: true }), preference !== undefined ? { preference } : {});
+        return {
+          selection: { harness: selection!.harness, source: selection!.source, reason: `${selection!.reason}; a scripted stand-in answers for it` },
+          supervisorFactory: async () => createScriptedSupervisor({ decisions: scenario.supervisor ?? [] }),
+        };
+      },
       ...(options.stopAt !== undefined ? { stopAfterStage: options.stopAt } : {}),
       ...(options.install !== undefined ? { install: options.install } : {}),
       ...(options.onRunCreated !== undefined ? { onRunCreated: options.onRunCreated } : {}),

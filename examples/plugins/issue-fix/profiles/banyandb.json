@@ -283,6 +283,9 @@
     "reviewer": "codex",
     "verifier": "claude-code"
   },
+  "supervisor": {
+    "harnesses": ["pi", "claude-code", "codex"]
+  },
   "budgets": {
     "agentInvocations": 6000,
     "jobs": 250,

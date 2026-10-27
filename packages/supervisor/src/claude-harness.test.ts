@@ -47,6 +47,17 @@ function input(over: Partial<SupervisorInput> = {}): SupervisorInput {
 const REENTER = reenter({ stageId: "fix", reason: "flaky", evidenceRefs: ["ev-1"] }, "retry the stage");
 
 describe("Claude Code supervisor harness: protocol", () => {
+  it("continues another harness's logical session and journal when the run's pin moved here (resume --supervisor, §7.4)", async () => {
+    const journal = [{ at: "t", from: { provider: "minimax-cn", modelId: "MiniMax-M3" }, to: { provider: "deepseek", modelId: "deepseek-v4-pro" }, reason: "earlier", status: "committed" as const }];
+    const host = await fakeClaudeHarness(fakeClaude([]), { configuredModels: [OPUS, SONNET] }).start({ logicalSessionId: "logical-pi", switchJournal: journal });
+    try {
+      expect(host.sessionId).toBe("logical-pi");
+      expect(host.binding).toMatchObject({ sessionId: "logical-pi", harness: CLAUDE_CODE_HARNESS, modelId: "opus", switchJournal: journal });
+    } finally {
+      await host.close();
+    }
+  });
+
   it("opens with --session-id, resumes the same session for a follow-up, and passes no schema, key, or MCP servers", async () => {
     const fake = fakeClaude([{ text: "not a decision" }, { text: decision(REENTER) }]);
     const harness = fakeClaudeHarness(fake, { configuredModels: [OPUS, SONNET], env: { ...process.env, ANTHROPIC_API_KEY: "sk-secret" } });

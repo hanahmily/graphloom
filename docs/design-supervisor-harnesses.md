@@ -2,8 +2,9 @@
 
 Status: proposed design, 2026-10-26; S1 (the shared harness library, §3),
 S2 (the supervisor host contract, §4.1, as built in §4.5), S3 (the
-Claude Code harness, as built in §4.6), and S4 (the Codex harness, as built
-in §4.7) implemented, S5 and S6 not implemented. This supersedes the
+Claude Code harness, as built in §4.6), S4 (the Codex harness, as built
+in §4.7), and S5 (plugin selection and pinning, as built in §7.7)
+implemented, S6 not implemented. This supersedes the
 Pi-only backend choice in the [core design](design-typescript-core.md) §6
 ("Standalone Pi SDK session implementation") and in the
 [Pi supervisor design](design-pi-supervisor.md). Pi stays a supported harness,
@@ -534,7 +535,8 @@ above leave open, or departs from them, it did so as follows.
   and `check` are S5. Until then, the pin is the binding's `harness`,
   recorded at the run's first recovery episode; `resume` restores on it and
   refuses with `supervisor harness pin mismatch` when the operator's config no
-  longer enables it or it is not available.
+  longer enables it or it is not available. S5 pins at intake instead and
+  reads a binding-only pin as the run's selection (§7.7).
 - **`harnessRepairDeps`.** The repair reviewer runs on the pinned harness. On
   Claude Code, each review is a fresh read-only session (`openReviewSession`)
   in the candidate root, writable only in its own scratch directory, with its
@@ -925,6 +927,105 @@ issue-fix profiles declare
 `"supervisor": { "harnesses": ["pi", "claude-code", "codex"] }`, and
 `profile.ts` returns it in `GraphDefinition.supervisor`. Executor `harnesses`
 (implementer, reviewer, verifier) are independent of it.
+
+### 7.7 As built in S5
+
+S5 adds the plugin's preference, the pin at intake, and transitions. Where
+the code settled a point §7.1–§7.6 leave open, or departs from them, it did
+so as follows.
+
+- **SDK.** `GraphDefinition.supervisor` is `SupervisorPreference`
+  (`harnesses`, `models?`, `required?`). `assertGraphDefinition` checks the
+  shape only: a non-empty list of `pi`, `claude-code`, `codex` without
+  repeats (`SUPERVISOR_HARNESSES`), model hints as non-empty strings keyed by
+  those names, `required` a boolean, and no other key.
+- **One resolution.** `resolveSupervisorSelection(config, probe, { flag?,
+  preference? })` in `apps/graphloom/src/supervisor-config.ts` is the §7.3
+  table, on probes already taken. `run`, `resume`, `check`, and `doctor
+  --task` all call it: `run`, `resume`, and `check` through
+  `supervisorSelectionOutcome`, which probes every enabled harness first, and
+  the doctor through `selectionOnProbes` on its own probes. Its reasons name
+  every harness it passed over and why (`codex: not enabled by the
+  operator`, or the probe's reason). The flat Pi form enables Pi alone and
+  keeps it unprobed, so a preference chooses within it: Pi when the plugin
+  lists it (`plugin`), otherwise Pi as the operator's order (`fallback`), or a
+  refusal when the plugin set `required`. With no supervisor config there is
+  no selection and no supervisor, `required` or not, as before S5; `check`
+  and the doctor report it as "none".
+- **Where the selection runs.** The preference is known only once the plugin
+  has described itself, which happens in the controller's intake. So
+  `RunRequest.selectSupervisor(preference)` is a callback: the controller
+  calls it after `describe` and before any run state or worktree exists, with
+  the preference as given, and pins the choice it returns. A throw refuses
+  the run with nothing created. The returned factory and repair hooks
+  replace `supervisorFactory` and `repair`. The CLI's callback is
+  `supervisorChooser`; the controller reads none of the preference.
+- **The record.** `state.supervisorSelection` is `{ harness, source, reason,
+  preference?, generation, at }`; `source` is `flag`, `operator` (`select`,
+  or the flat Pi form without a preference), `plugin`, `fallback`, or
+  `binding` (below). `state.supervisorTransitions` holds `{ from, to,
+  reason, generation, at, evidenceRef }`. `inspect` shows both as
+  `supervisorSelection` and `supervisorTransitions`; that is the "inspect
+  line". `graphloom run` prints the selection and any ignored model hints on
+  stderr.
+- **Model hints.** `withModelHints` moves each hint the operator configured
+  for the selected harness to the front of that harness's models, in hint
+  order, so the first is the initial model. A Pi hint is `provider/model`; a
+  CLI hint is the model name or `<harness>/<name>`. `ignoredModelHints`
+  names each hint for an enabled harness that the operator did not
+  configure. `check` lists them as warnings, and the doctor gives each its
+  own "supervisor model hints" `warn`. `run` and `resume` apply the hints
+  of the preference the run recorded.
+- **Resume** (`resumeSupervisorPlan`). The pin is the run's
+  `supervisorSelection`. A run pinned the S3 way (a binding, no selection)
+  keeps its binding's harness (`pi` for a binding without `harness`), and
+  the resume records it as a selection with source `binding`. A run that
+  nothing pinned (its supervisor never ran before S5, or the run had no
+  supervisor config) is pinned at that resume by the same selection, on the
+  preference the run was described with (`pinned at resume: …`). A pinned
+  harness that the config no longer enables, or that is not available, is
+  refused before the controller claims the run, so the run is left as it
+  was, not stopped: `supervisor harness pin mismatch: … ; resume with
+  --supervisor <harness>`. A finished run is not checked.
+- **Transitions.** `resume --supervisor <harness> [--reason <text>]` is
+  resolved like `run --supervisor`: the harness must be enabled and
+  available. To the pinned harness it changes nothing. Otherwise the CLI
+  passes `ResumeRequest.supervisorPin.transition` (`from`, `to`, `reason`).
+  The controller applies it after it has settled any interrupted model switch
+  on the old harness, and refuses it when `from` is no longer the run's pin.
+  It appends the transition, writes a `supervisorUpdate` evidence record,
+  and pins `to` with source `flag`. While the binding still names the old
+  harness, the controller does not restore the old session. It calls the
+  factory with `continueSession` (the logical session id and the switch
+  journal), and the new harness's `start({ logicalSessionId, switchJournal
+  })` continues the same logical session on its first configured model. The
+  budgets, case file, and episode records are the run's and stay. A crash
+  before the new binding is saved repeats this on the next resume.
+- **Reviewers.** The repair reviewer runs on the pinned harness, at intake
+  and on every resume, transitions included (`harnessRepairDeps`). The CLI
+  still wires no proposal reviewer (§4.6), so the proposal-reviewer half of
+  §7.5 is unchanged.
+- **`switch-model`** takes a model of the pinned harness: `provider/model`
+  for Pi; for Claude Code and Codex, `claude-code/<name>` and `codex/<name>`,
+  or the bare name on a run pinned to that harness. It must be one of the
+  operator's models for that harness. A model of another harness is refused,
+  and the refusal names `graphloom resume <run> --supervisor <harness>`.
+- **`check`** adds `supervisor: { status: "selected" | "none" | "refused",
+  harness?, source?, reason, warnings }` to its report, for the selection
+  `run` would make with no `--supervisor`. A refusal is also a problem, so
+  `check` fails: a `required` preference the operator cannot meet, a
+  `select` that is not available, or a supervisor config that `run` would
+  refuse.
+- **Rehearsal.** A rehearsal's stand-in operator enables all three harnesses,
+  in the built-in order, all available. So the plugin's preference decides,
+  and a scripted supervisor answers for the harness it picks. The run pins
+  that harness, and the rehearsal report shows it as `supervisorSelection`.
+- **issue-fix 0.16.0.** Each shipped profile declares `"supervisor": {
+  "harnesses": ["pi", "claude-code", "codex"] }`, which is also the default
+  for a profile without it. `parseProfile` checks it, and `describe` returns
+  it as `GraphDefinition.supervisor`.
+- **Doctor and setup.** The doctor's and setup's "phase S4" notes about
+  supervisors that ship later are gone, with `ViableSetups.supervisorLater`.
 
 ## 8. Failure modes and parity
 

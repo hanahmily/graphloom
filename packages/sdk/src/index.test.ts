@@ -313,6 +313,24 @@ describe("wire validation", () => {
     expect(() => assertGraphDefinition(withRoles([{ ...roles[0], setting: 3 }]))).toThrow(/setting/);
     expect(() => assertGraphDefinition(withRoles([{ ...roles[0], model: "x" }]))).toThrow(/model is not a role field/);
   });
+
+  it("checks the shape of the supervisor preference only (design-supervisor-harnesses.md §7.1)", () => {
+    const withPreference = (supervisor: unknown) => ({ ...helloDefinition, supervisor });
+    const preference = { harnesses: ["claude-code", "pi"], models: { "claude-code": ["opus"], pi: ["deepseek/deepseek-v4-pro"] }, required: true };
+    expect(assertGraphDefinition(withPreference(preference)).supervisor).toEqual(preference);
+    expect(assertGraphDefinition(withPreference({ harnesses: ["codex"] })).supervisor).toEqual({ harnesses: ["codex"] });
+    expect(assertGraphDefinition(helloDefinition).supervisor).toBeUndefined();
+    expect(() => assertGraphDefinition(withPreference([]))).toThrow(/definition.supervisor/);
+    expect(() => assertGraphDefinition(withPreference({}))).toThrow(/harnesses/);
+    expect(() => assertGraphDefinition(withPreference({ harnesses: [] }))).toThrow(/harnesses must be non-empty/);
+    expect(() => assertGraphDefinition(withPreference({ harnesses: ["gemini-cli"] }))).toThrow(/harnesses\[0\] must be one of pi, claude-code, codex/);
+    expect(() => assertGraphDefinition(withPreference({ harnesses: ["pi", "pi"] }))).toThrow(/repeats pi/);
+    expect(() => assertGraphDefinition(withPreference({ harnesses: ["pi"], models: { gemini: ["x"] } }))).toThrow(/models.gemini/);
+    expect(() => assertGraphDefinition(withPreference({ harnesses: ["pi"], models: { pi: "x" } }))).toThrow(/models.pi must be an array/);
+    expect(() => assertGraphDefinition(withPreference({ harnesses: ["pi"], models: { pi: [""] } }))).toThrow(/models.pi must be an array/);
+    expect(() => assertGraphDefinition(withPreference({ harnesses: ["pi"], required: "yes" }))).toThrow(/required must be a boolean/);
+    expect(() => assertGraphDefinition(withPreference({ harnesses: ["pi"], select: "pi" }))).toThrow(/select is not a supervisor preference field/);
+  });
 });
 
 describe("GraphDecision.evidence (#119)", () => {

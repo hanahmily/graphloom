@@ -40,6 +40,9 @@ export {
 } from "./controller.js";
 export type { DurableRunState, RunStatus, IntakePin, SupervisorOutcomeRecord, TaskConfigPin, VersionRecord } from "./controller.js";
 export type { ContractOutcome } from "./controller.js";
+export type { SupervisorChoice, SupervisorFactory, SupervisorFactoryContext } from "./controller.js";
+export type { SupervisorSelectionRecord, SupervisorTransitionRecord } from "./state.js";
+export { pinnedSupervisorHarness, type SupervisorPinRequest, type SupervisorSelectionChoice } from "./supervisor-pin.js";
 export type { ChildOperationRecord, SupervisorMark } from "./state.js";
 export type { ModelSwitchOrder } from "./supervisor-switch.js";
 export type {

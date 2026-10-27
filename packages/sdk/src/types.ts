@@ -81,6 +81,33 @@ export interface GraphDefinition {
    * CLI treats `role` and `setting` as opaque text.
    */
   agentRoles?: AgentRoleDeclaration[];
+  /**
+   * Which supervisor harness this graph prefers for its recovery
+   * (docs/design-supervisor-harnesses.md §7.1), for the task config it was
+   * described with. Returned from code like `defaultBudgets`. The SDK checks
+   * the shape only; the controller stores it with the run, read at intake and
+   * never compared on resume or repair, and the CLI resolves it against the
+   * operator's enabled harnesses.
+   */
+  supervisor?: SupervisorPreference;
+}
+
+/** The supervisor harnesses a graph may name (docs/design-supervisor-harnesses.md §7.1). */
+export const SUPERVISOR_HARNESSES = ["pi", "claude-code", "codex"] as const;
+export type SupervisorHarnessId = (typeof SUPERVISOR_HARNESSES)[number];
+
+/** A graph's supervisor preference (`GraphDefinition.supervisor`). */
+export interface SupervisorPreference {
+  /** The graph's order; the first one the operator enabled and that is available here is used. */
+  harnesses: SupervisorHarnessId[];
+  /**
+   * Model hints per harness, best first. Each is honored only when the
+   * operator configured that model for the harness, and then reorders the
+   * operator's models; an unconfigured hint is ignored.
+   */
+  models?: Partial<Record<SupervisorHarnessId, string[]>>;
+  /** Refuse the run instead of falling back to the operator's order; default false. */
+  required?: boolean;
 }
 
 /** One agent role a graph declares (`GraphDefinition.agentRoles`). */

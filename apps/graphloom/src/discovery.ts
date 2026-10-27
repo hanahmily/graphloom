@@ -33,11 +33,13 @@ import {
   loadSupervisorConfig,
   parseSupervisorConfig,
   probeSupervisorHarness,
-  selectSupervisorHarness,
+  resolveSupervisorSelection,
   supervisorConfigPath,
   type SupervisorConfig,
   type SupervisorSelection,
+  type SupervisorSelectionOutcome,
 } from "./supervisor-config.js";
+import type { SupervisorPreference } from "@graphloom/sdk";
 import { installRoot, versionInfo } from "./version.js";
 
 export const HARNESS_ORDER: readonly HarnessName[] = ["claude-code", "codex", "pi"];
@@ -47,9 +49,8 @@ export const WRITING_HARNESSES: readonly HarnessName[] = ["claude-code", "pi"];
 /** The built-in supervisor order with no plugin preference (docs/design-supervisor-harnesses.md §7.3). */
 export const SUPERVISOR_ORDER: readonly HarnessName[] = ["pi", "claude-code", "codex"];
 /**
- * The supervisor harnesses this GraphLoom can run: Pi, Claude Code since
- * phase S3, and Codex since phase S4 (docs/design-release.md §4.4). Each is
- * counted when its CLI, its login, and its supervisor probe pass.
+ * The supervisor harnesses this GraphLoom can run (docs/design-release.md
+ * §4.4). Each is counted when its CLI, its login, and its supervisor probe pass.
  */
 export const SHIPPED_SUPERVISOR_HARNESSES: readonly HarnessName[] = ["pi", "claude-code", "codex"];
 /**
@@ -776,17 +777,34 @@ async function discoverSupervisorSelection(config: SupervisorConfig | undefined,
     else if (harness === "codex") checks.set(harness, await codexSupervisorCheck(codexDiscovery(config), config));
     else checks.set(harness, { harness: harness as HarnessName, ok: false, reason: `the ${harness} supervisor is not available in this GraphLoom`, fix: "graphloom setup" });
   }
-  // The same selection `run` makes, on these probes; a flat Pi config selects Pi unprobed, as `run` does.
-  // A `select` that is not available makes run refuse: keep that error; only an exhausted fallback means no supervisor.
+  const enabled = [...checks.values()];
+  const { outcome, error } = selectionOnProbes(config, enabled);
+  return { enabled, ...(outcome?.selection !== undefined ? { selection: outcome.selection } : {}), ...(error !== undefined ? { error } : {}) };
+}
+
+/**
+ * The selection `run` would make from `config` with the plugin's
+ * `preference`, on the doctor's probes of the enabled harnesses: the same
+ * `resolveSupervisorSelection` that `run`, `resume`, and `check` use
+ * (design-supervisor-harnesses.md §7.3). A refusal (a `select` that is not
+ * available, a plugin's `required`) is the `error`.
+ */
+export function selectionOnProbes(
+  config: SupervisorConfig,
+  enabled: readonly SupervisorHarnessCheck[],
+  preference?: SupervisorPreference,
+): { outcome?: SupervisorSelectionOutcome; error?: string } {
   try {
-    const selection = await selectSupervisorHarness(config, {
-      probe: async (h) => {
-        const c = checks.get(h);
+    const outcome = resolveSupervisorSelection(
+      config,
+      (h) => {
+        const c = enabled.find((e) => e.harness === h);
         return c?.ok ? { ok: true } : { ok: false, reason: c?.reason ?? "not enabled" };
       },
-    });
-    return { enabled: [...checks.values()], ...(selection !== undefined ? { selection } : {}) };
+      preference !== undefined ? { preference } : {},
+    );
+    return { outcome };
   } catch (err) {
-    return { enabled: [...checks.values()], error: err instanceof Error ? err.message : String(err) };
+    return { error: err instanceof Error ? err.message : String(err) };
   }
 }

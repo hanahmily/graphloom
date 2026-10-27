@@ -39,6 +39,7 @@ export {
   type HarnessPromptOptions,
   type HarnessSession,
   type HarnessSessionRole,
+  type HarnessStartOptions,
   type HarnessUsage,
   type ModelSwitchRecord,
   type SupervisorBinding,
