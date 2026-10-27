@@ -35,11 +35,13 @@ import {
   probeSupervisorHarness,
   resolveSupervisorSelection,
   supervisorConfigPath,
+  withModelHints,
   type SupervisorConfig,
   type SupervisorSelection,
   type SupervisorSelectionOutcome,
 } from "./supervisor-config.js";
 import type { SupervisorPreference } from "@graphloom/sdk";
+import type { HarnessProbe } from "@graphloom/supervisor";
 import { installRoot, versionInfo } from "./version.js";
 
 export const HARNESS_ORDER: readonly HarnessName[] = ["claude-code", "codex", "pi"];
@@ -689,7 +691,7 @@ export async function discover(env: NodeJS.ProcessEnv = process.env, root: strin
     ...(runner.config?.codex?.codexHome !== undefined ? { codexHome: runner.config.codex.codexHome } : {}),
   };
   const supervisorCandidates = await discoverSupervisorCandidates(claude, codex, pi, claudeSupervisorSection, codexSupervisorSection);
-  const { enabled: supervisorEnabled, selection: supervisorSelection, error: supervisorSelectionError } = await discoverSupervisorSelection(supervisor.config, pi);
+  const { enabled: supervisorEnabled, selection: supervisorSelection, error: supervisorSelectionError } = await discoverSupervisorSelection(supervisor.config, pi, env);
   const updates = await discoverUpdates(self, runner, env);
   return {
     self,
@@ -721,14 +723,9 @@ export interface SupervisorHarnessCheck {
   fix?: string;
 }
 
-/** A Pi supervisor needs a provider credential and a model Pi knows. */
-function piSupervisorCheck(pi: PiDiscovery, where?: PiModelCheck): SupervisorHarnessCheck {
+/** A Pi supervisor for a new supervisor config needs some provider's credential (setup then picks the model). */
+function piSupervisorCheck(pi: PiDiscovery): SupervisorHarnessCheck {
   if (pi.error !== undefined) return { harness: "pi", ok: false, reason: pi.reason ?? "Pi's registry could not be read", ...(pi.fix !== undefined ? { fix: pi.fix } : {}) };
-  if (where !== undefined) {
-    if (!where.resolves) return { harness: "pi", ok: false, reason: `${where.provider}/${where.modelId} is not in Pi's model registry`, fix: "graphloom setup" };
-    if (!where.credential) return { harness: "pi", ok: false, reason: `no credential for ${where.provider}`, fix: piCredentialFix(where.provider) };
-    return { harness: "pi", ok: true };
-  }
   if (pi.credentials.length === 0) return { harness: "pi", ok: false, reason: "no Pi provider has a credential", fix: NO_PI_CREDENTIAL_FIX };
   return { harness: "pi", ok: true };
 }
@@ -765,19 +762,59 @@ async function discoverSupervisorCandidates(
   };
 }
 
-/** The existing supervisor config's harnesses, probed, and the harness `run` would select from them. */
-async function discoverSupervisorSelection(config: SupervisorConfig | undefined, pi: PiDiscovery): Promise<{ enabled: SupervisorHarnessCheck[]; selection?: SupervisorSelection; error?: string }> {
-  if (config === undefined) return { enabled: [] };
+/**
+ * Each harness `config` enables, probed by its own `probe()` as `run` probes it
+ * (design-supervisor-harnesses.md §7.3, S6): on its models reordered by the
+ * plugin's `preference` hints, so the doctor's answer for a task is the one
+ * `run` would get. A Pi probe asks Pi's registry and auth store under `env`.
+ */
+export async function probeEnabledSupervisors(
+  config: SupervisorConfig,
+  pi: PiDiscovery,
+  env: NodeJS.ProcessEnv,
+  preference?: SupervisorPreference,
+): Promise<SupervisorHarnessCheck[]> {
   const claudeDiscovery = (config: SupervisorConfig): CliHarnessDiscovery => ({ harness: "claude-code", command: config.claude?.command ?? "claude", commandSource: "supervisor config", available: true });
   const codexDiscovery = (config: SupervisorConfig): CliHarnessDiscovery => ({ harness: "codex", command: config.codex?.command ?? "codex", commandSource: "supervisor config", available: true });
-  const checks = new Map<string, SupervisorHarnessCheck>();
+  const checks: SupervisorHarnessCheck[] = [];
   for (const harness of enabledSupervisorHarnesses(config)) {
-    if (harness === "pi") checks.set(harness, piSupervisorCheck(pi, pi.configured.find((c) => c.where === "supervisor config")));
-    else if (harness === "claude-code") checks.set(harness, await claudeSupervisorCheck(claudeDiscovery(config), config));
-    else if (harness === "codex") checks.set(harness, await codexSupervisorCheck(codexDiscovery(config), config));
-    else checks.set(harness, { harness: harness as HarnessName, ok: false, reason: `the ${harness} supervisor is not available in this GraphLoom`, fix: "graphloom setup" });
+    const hinted = withModelHints(config, harness, preference);
+    if (harness === "pi") checks.push(await piEnabledCheck(pi, hinted, env));
+    else if (harness === "claude-code") checks.push(await claudeSupervisorCheck(claudeDiscovery(hinted), hinted));
+    else if (harness === "codex") checks.push(await codexSupervisorCheck(codexDiscovery(hinted), hinted));
+    else checks.push({ harness: harness as HarnessName, ok: false, reason: `the ${harness} supervisor is not available in this GraphLoom`, fix: "graphloom setup" });
   }
-  const enabled = [...checks.values()];
+  return checks;
+}
+
+/**
+ * An enabled Pi supervisor: the Pi harness's own `probe()` on the model it
+ * would start on (a credential reference and a registered model, no provider
+ * call), with the doctor's registry facts for the fix.
+ */
+async function piEnabledCheck(pi: PiDiscovery, config: SupervisorConfig, env: NodeJS.ProcessEnv): Promise<SupervisorHarnessCheck> {
+  const saved = swapEnv(env);
+  let probe: HarnessProbe;
+  try {
+    probe = await probeSupervisorHarness(config, "pi").catch((err: unknown) => ({ ok: false as const, reason: err instanceof Error ? err.message : String(err) }));
+  } finally {
+    restoreEnv(saved);
+  }
+  if (probe.ok) return { harness: "pi", ok: true };
+  const model = `${config.provider}/${config.modelId}`;
+  if (pi.error !== undefined) return { harness: "pi", ok: false, reason: `${model}: ${probe.reason}`, ...(pi.fix !== undefined ? { fix: pi.fix } : {}) };
+  const fix = /model not found/i.test(probe.reason) ? "graphloom setup   (choose a supervisor model Pi knows)" : /credential/i.test(probe.reason) ? piCredentialFix(config.provider) : "graphloom setup";
+  return { harness: "pi", ok: false, reason: probe.reason, fix };
+}
+
+/** The existing supervisor config's harnesses, probed, and the harness `run` would select from them. */
+async function discoverSupervisorSelection(
+  config: SupervisorConfig | undefined,
+  pi: PiDiscovery,
+  env: NodeJS.ProcessEnv,
+): Promise<{ enabled: SupervisorHarnessCheck[]; selection?: SupervisorSelection; error?: string }> {
+  if (config === undefined) return { enabled: [] };
+  const enabled = await probeEnabledSupervisors(config, pi, env);
   const { outcome, error } = selectionOnProbes(config, enabled);
   return { enabled, ...(outcome?.selection !== undefined ? { selection: outcome.selection } : {}), ...(error !== undefined ? { error } : {}) };
 }

@@ -1,11 +1,12 @@
 # Supervisor harnesses: Pi, Claude Code, and Codex
 
-Status: proposed design, 2026-10-26; S1 (the shared harness library, §3),
-S2 (the supervisor host contract, §4.1, as built in §4.5), S3 (the
-Claude Code harness, as built in §4.6), S4 (the Codex harness, as built
-in §4.7), and S5 (plugin selection and pinning, as built in §7.7)
-implemented, S6 not implemented. This supersedes the
-Pi-only backend choice in the [core design](design-typescript-core.md) §6
+Status: implemented through S6, 2026-10-27 (designed 2026-10-26): S1 (the
+shared harness library, §3), S2 (the supervisor host contract, §4.1, as
+built in §4.5), S3 (the Claude Code harness, as built in §4.6), S4 (the
+Codex harness, as built in §4.7), S5 (plugin selection and pinning, as built
+in §7.7), and S6 (docs, the doctor's probes, and per-harness `stats`, as
+built in §10.1). Live qualification of each harness stays opt-in (§9). This
+supersedes the single-backend (Pi) choice in the [core design](design-typescript-core.md) §6
 ("Standalone Pi SDK session implementation") and in the
 [Pi supervisor design](design-pi-supervisor.md). Pi stays a supported harness,
 and that document still governs the Pi harness's details. Recovery authority,
@@ -39,10 +40,10 @@ models. The controller pins one harness when the run starts, and only
 `resume --supervisor <harness>` changes it. The default order is `pi`,
 `claude-code`, `codex`.
 
-Why: a user who has only a Claude Code subscription or only a Codex login
-cannot get automatic recovery today. `graphloom run` composes a Pi supervisor
-only from `supervisor.json` (`apps/graphloom/src/supervisor-config.ts:159`),
-and Pi needs a model API credential. The executor already runs both CLIs
+Why: a user who had only a Claude Code subscription or only a Codex login
+could not get automatic recovery before this design. `graphloom run`
+composed a Pi supervisor only from `supervisor.json` (`apps/graphloom/src/supervisor-config.ts:159`),
+and Pi needs a model API credential. The executor already ran both CLIs
 headless with their own logins (`executors/coding-agent/src/claude-harness.ts`,
 `codex-harness.ts`). Copying subscription credentials into Pi is ruled out by
 the [authentication findings](design-pi-supervisor.md#authentication-and-claude-code-plan-gap).
@@ -977,9 +978,7 @@ so as follows.
   own "supervisor model hints" `warn`. `run` and `resume` apply the hints
   of the preference the run recorded, and probe each harness with its
   hinted models, so Pi's credential check is for the model it would start
-  on. The doctor's probes are taken once, without a task, on the operator's
-  own first model, so for a Pi hint it can differ from `run` (a known
-  limit).
+  on. Since S6 `doctor --task` probes the same way (§10.1).
 - **Resume** (`resumeSupervisorPlan`). The pin is the run's
   `supervisorSelection`. A run pinned the S3 way (a binding, no selection)
   keeps its binding's harness (`pi` for a binding without `harness`), and
@@ -989,7 +988,9 @@ so as follows.
   preference the run was described with (`pinned at resume: …`). A pinned
   harness that the config no longer enables, or that is not available, is
   refused before the controller claims the run, so the run is left as it
-  was, not stopped: `supervisor harness pin mismatch: … ; resume with
+  was, not stopped (a bound Pi session is probed on its bound model, which
+  it restores on even when the operator has since removed it from `models`;
+  §10.1): `supervisor harness pin mismatch: … ; resume with
   --supervisor <harness>`. Without any supervisor config, only a binding on
   the pinned harness restores (on that harness's defaults, as before S5); a
   pin with no session yet, or one moved whose new binding was never saved,
@@ -1118,6 +1119,55 @@ All of this runs in CI with no provider calls unless marked live.
 | **S4. Codex harness** | The same on the shared Codex driver (`exec --json`, `exec resume`, `danger-full-access` inside bwrap) | Conformance; fake-codex tests; opt-in live episode with a Codex login only |
 | **S5. Plugin selection** | `GraphDefinition.supervisor`; per-harness `supervisor.json`; `run`/`resume --supervisor`; `supervisorSelection` and transitions; `check`; issue-fix declares `pi`, `claude-code`, `codex` | Selection table tests; `check` output per branch; issue-fix rehearsal shows the resolved harness; `inspect` shows the selection and transitions |
 | **S6. Docs and doctor** | README, examples guide, cross-links; the doctor's supervisor check runs each enabled harness's `probe()`; `stats` shows per-harness supervisor usage | Link, format, and consistency checks; doctor on hosts with Pi only, Claude Code only, and Codex only |
+
+### 10.1 As built in S6
+
+- **Doctor: one row per enabled harness.** For each harness the operator's
+  `supervisor.json` enables, the doctor runs that harness's own `probe()`
+  (`probeEnabledSupervisors` in `apps/graphloom/src/discovery.ts`) and
+  reports it as a `supervisor <harness>` row in the Configuration section,
+  with the model it would start on and the fix. Pi's row is the Pi harness's
+  probe, not only the doctor's registry facts: a model Pi's registry lacks
+  reads `Pi model not found: …`, and a provider without a credential
+  `credential unavailable for provider …`, with that provider's variable as
+  the fix. The flat Pi form is probed too, though `run` still selects it
+  unprobed (§7.7); a failing probe there warns that a recovery episode would
+  fail. The setup recommendations (`supervisorCandidates`) are unchanged.
+- **`doctor --task` probes as `run` does.** When the plugin's preference
+  carries model hints, the doctor probes each enabled harness again on its
+  models reordered by those hints (`withModelHints`), and the selection row
+  names the model `run` would start on (`claude-code (sonnet) (plugin: …)`).
+  This closes the known limit S5 recorded.
+- **Resume, a removed bound Pi model.** `resumeSupervisorPlan` probes a
+  bound Pi session on its bound model even when the operator has removed
+  that model from `models`, since the restore opens the bound model
+  regardless. Before S6 it probed the operator's first model in that case.
+- **Episode records** gain `harness` (from the supervisor's binding at the
+  decide() call) and `usage` (the call's prompts' token usage summed by the
+  host's new `drainUsage()`, from each session's `lastUsage()`; Claude Code's
+  `result` usage and Codex's `turn.completed`; Pi reports none). Patch turns
+  are not a decide() call's and are not summed. Usage is recorded, never
+  charged.
+- **`graphloom stats`** adds, under the supervisor line, the run's pin, one
+  line per harness (episodes, turns, provider calls, and token usage where
+  recorded, with how many turns reported it), and each `resume --supervisor`
+  transition; `--json` has them as `supervisor.pinned`, `byHarness`, and
+  `transitions`. An episode that moved across a resume counts for both
+  harnesses. A record written before S6 has no `harness`: it is attributed
+  to the harness pinned at its time (the first transition's `from` before
+  it, each transition's `to` after it, or the pin), and marked `inferred`.
+- **Docs.** The README, the [example guide](../examples/README.md), the
+  core, Pi supervisor, release, and agent-host designs, and `AGENTS.md` now
+  describe the three harnesses as implemented, with the vendor routes
+  (§6.2), plugin selection, `run`/`resume --supervisor`, and `switch-model`
+  per harness.
+- **Tests.** `apps/graphloom/test/doctor-supervisor.test.ts` runs the doctor
+  on stubbed hosts with Pi only, Claude Code only, and Codex only (stub CLIs,
+  a temporary `HOME`), each showing its own probe by a failure only that
+  probe reports. `doctor-task.test.ts` covers the hinted probe,
+  `supervisor-selection.test.ts` the removed bound model, the controller's
+  `supervisor-selection.test.ts` the records' `harness` and `usage` across a
+  transition, and `stats.test.ts` the per-harness report.
 
 ## 11. Unverified CLI assumptions
 

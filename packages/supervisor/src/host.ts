@@ -5,6 +5,7 @@ import type { AgentSessionView, CaseFile, EvidenceRecord, GraphAction } from "@g
 import { parseSupervisorDecision } from "./decision.js";
 import {
   type HarnessSession,
+  type HarnessUsage,
   type ModelSwitchRecord,
   type SupervisorBinding,
   type SupervisorHarness,
@@ -177,6 +178,19 @@ export function createSupervisorHost(options: CreateSupervisorHostOptions): Supe
   let needsOpening = false;
 
   /** Take the steps the session recorded since the host last looked. */
+  /** Usage of decide prompts not yet drained into an episode record (patch turns are not a decide call's). */
+  let undrainedUsage: HarnessUsage | undefined;
+  function collectUsage(): void {
+    const u = session.lastUsage?.();
+    if (u === undefined) return;
+    const sum = { ...(undrainedUsage ?? {}) };
+    for (const key of ["inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens", "costUsd"] as const) {
+      const v = u[key];
+      if (typeof v === "number" && Number.isFinite(v)) sum[key] = (sum[key] ?? 0) + v;
+    }
+    undrainedUsage = sum;
+  }
+
   function collectSteps(): void {
     const all = session.investigation?.() ?? [];
     const seen = stepsSeen.get(session) ?? 0;
@@ -370,6 +384,7 @@ export function createSupervisorHost(options: CreateSupervisorHostOptions): Supe
           // Charged to the session that made the calls, before any replacement.
           settleTurns();
           collectSteps();
+          collectUsage();
           needsOpening = false;
         }
         if (timedOut !== undefined) {
@@ -813,6 +828,12 @@ export function createSupervisorHost(options: CreateSupervisorHostOptions): Supe
     drainInvestigation() {
       const drained = undrainedSteps;
       undrainedSteps = [];
+      return drained;
+    },
+
+    drainUsage() {
+      const drained = undrainedUsage;
+      undrainedUsage = undefined;
       return drained;
     },
 

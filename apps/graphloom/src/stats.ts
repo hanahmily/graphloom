@@ -19,7 +19,7 @@ import {
   type DurableRunState,
   type MeteredBudgetKey,
 } from "@graphloom/controller";
-import { MAX_EPISODE_RECORDS } from "@graphloom/supervisor";
+import { bindingHarness, MAX_EPISODE_RECORDS, type HarnessUsage, type SupervisorEpisodeRecord } from "@graphloom/supervisor";
 
 /** How far a number can be trusted. */
 export type Exactness = "exact" | "lower bound" | "estimate" | "unknown";
@@ -85,9 +85,39 @@ export interface RunStats {
     providerCalls?: number;
     source: "episode records" | "episode ids referenced in run state" | "episode records and episode ids referenced in run state";
     exactness: Exactness;
+    /** The run's supervisor pin (`supervisorSelection`, else its binding's harness), if any. */
+    pinned?: string;
+    /** `resume --supervisor` transitions, oldest first. */
+    transitions: Array<{ from: string; to: string; at: string; reason: string }>;
+    /**
+     * Use per supervisor harness, from the episode records (design-supervisor-harnesses.md
+     * §6.3, S6), in the order each first ran. An episode that ran on two
+     * harnesses (moved across a resume) counts for both.
+     */
+    byHarness: HarnessSupervisorStats[];
   };
   remedies: { count: number; byCondition: Record<string, number>; waitedMs: number; exactness: Exactness };
   evidence: number;
+}
+
+export interface HarnessSupervisorStats {
+  harness: string;
+  /** Episodes with at least one recorded decide() call on this harness. */
+  episodes: number;
+  /** Recorded decide() calls. */
+  turns: number;
+  /** Provider calls the records charged. */
+  providerCalls: number;
+  /** Token usage summed over the records that carry it (Claude Code, Codex); absent when none does (Pi). */
+  usage?: HarnessUsage;
+  /** Records with usage, of `turns`. */
+  turnsWithUsage: number;
+  /**
+   * `recorded`: every record names its harness. `inferred`: some records
+   * predate the harness field and were attributed from the pin and the
+   * transitions by time.
+   */
+  attribution: "recorded" | "inferred";
 }
 
 const MAX_REMEDY_RECORDS = 100;
@@ -268,8 +298,13 @@ function supervisorStats(state: DurableRunState): RunStats["supervisor"] {
     }
   }
   const records = state.supervisorEpisodes ?? [];
+  const transitions = (state.supervisorTransitions ?? []).map((t) => ({ from: t.from, to: t.to, at: t.at, reason: t.reason }));
+  const pinned = state.supervisorSelection?.harness ?? (state.supervisorBinding !== undefined ? bindingHarness(state.supervisorBinding) : undefined);
+  const harnessOf = harnessAt(transitions, pinned);
+  const byHarness = harnessStats(records, harnessOf);
+  const extra = { ...(pinned !== undefined ? { pinned } : {}), transitions, byHarness };
   if (records.length === 0) {
-    return { episodes: referenced.size, source: "episode ids referenced in run state", exactness: "lower bound" };
+    return { episodes: referenced.size, source: "episode ids referenced in run state", exactness: "lower bound", ...extra };
   }
   const recorded = new Set(records.map((r) => r.episodeId));
   const all = new Set([...recorded, ...referenced]);
@@ -284,7 +319,59 @@ function supervisorStats(state: DurableRunState): RunStats["supervisor"] {
     providerCalls: records.reduce((a, r) => a + (r.providerCalls ?? 0), 0),
     source: covered ? "episode records" : "episode records and episode ids referenced in run state",
     exactness: covered ? "exact" : "lower bound",
+    ...extra,
   };
+}
+
+/**
+ * Which harness a record without `harness` (written before S6) ran on: the
+ * harness pinned at its time. Before the first transition that is the first
+ * transition's `from`; after each, its `to`. With no transition, the pin.
+ */
+function harnessAt(transitions: ReadonlyArray<{ from: string; to: string; at: string }>, pinned: string | undefined): (at: string) => string {
+  const sorted = [...transitions].sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
+  return (at) => {
+    const t = Date.parse(at);
+    let current = sorted[0]?.from ?? pinned ?? "unknown";
+    for (const tr of sorted) if (Date.parse(tr.at) <= t) current = tr.to;
+    return current;
+  };
+}
+
+function harnessStats(records: readonly SupervisorEpisodeRecord[], harnessOf: (at: string) => string): HarnessSupervisorStats[] {
+  const out = new Map<string, HarnessSupervisorStats & { ids: Set<string> }>();
+  for (const r of records) {
+    const harness = r.harness ?? harnessOf(r.at);
+    let h = out.get(harness);
+    if (h === undefined) {
+      h = { harness, episodes: 0, turns: 0, providerCalls: 0, turnsWithUsage: 0, attribution: "recorded", ids: new Set() };
+      out.set(harness, h);
+    }
+    h.ids.add(r.episodeId);
+    h.turns += 1;
+    h.providerCalls += r.providerCalls ?? 0;
+    if (r.harness === undefined) h.attribution = "inferred";
+    if (r.usage !== undefined) {
+      h.turnsWithUsage += 1;
+      const sum: HarnessUsage = { ...(h.usage ?? {}) };
+      for (const key of ["inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens", "costUsd"] as const) {
+        const v = r.usage[key];
+        if (typeof v === "number" && Number.isFinite(v)) sum[key] = (sum[key] ?? 0) + v;
+      }
+      h.usage = sum;
+    }
+  }
+  return [...out.values()].map(({ ids, ...h }) => ({ ...h, episodes: ids.size }));
+}
+
+/** `usage` as `12,345 in / 678 out tokens (9,000 cache read), $0.12`. */
+function formatUsage(usage: HarnessUsage): string {
+  const n = (v: number) => v.toLocaleString("en-US");
+  const parts = [`${n(usage.inputTokens ?? 0)} in / ${n(usage.outputTokens ?? 0)} out tokens`];
+  const cache = [usage.cacheReadTokens ? `${n(usage.cacheReadTokens)} cache read` : "", usage.cacheWriteTokens ? `${n(usage.cacheWriteTokens)} cache write` : ""].filter(Boolean);
+  if (cache.length > 0) parts[0] += ` (${cache.join(", ")})`;
+  if (usage.costUsd !== undefined) parts.push(`$${usage.costUsd.toFixed(2)}`);
+  return parts.join(", ");
 }
 
 function spanOf(state: DurableRunState): { span: NonNullable<RunStats["span"]> } | Record<string, never> {
@@ -393,8 +480,17 @@ export function formatRunStats(stats: RunStats): string {
   lines.push(
     `supervisor: ${sup.episodes} episodes` +
       (sup.turns !== undefined ? `, ${sup.turns} recorded turns, ${sup.providerCalls} recorded provider calls` : "") +
-      ` (${sup.exactness}, from ${sup.source})`,
+      ` (${sup.exactness}, from ${sup.source})` +
+      (sup.pinned !== undefined ? `; pinned to ${sup.pinned}` : ""),
   );
+  for (const h of sup.byHarness) {
+    lines.push(
+      `  ${h.harness}: ${h.episodes} episodes, ${h.turns} turns, ${h.providerCalls} provider calls` +
+        (h.usage !== undefined ? `, ${formatUsage(h.usage)}${h.turnsWithUsage < h.turns ? ` (${h.turnsWithUsage} of ${h.turns} turns reported usage)` : ""}` : ", no token usage reported") +
+        (h.attribution === "inferred" ? " (harness inferred from the pin for records before S6)" : ""),
+    );
+  }
+  for (const t of sup.transitions) lines.push(`  moved ${t.from} -> ${t.to} at ${t.at}: ${t.reason}`);
   const conditions = Object.entries(stats.remedies.byCondition)
     .sort((x, y) => y[1] - x[1])
     .map(([c, n]) => `${c} ${n}`)

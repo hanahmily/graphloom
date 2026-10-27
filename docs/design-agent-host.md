@@ -10,9 +10,10 @@ not an implementation of this mode.
 Let an existing coding-agent session drive a GraphLoom run. The host supplies the
 model, conversation, native coding tools, and continuation mechanism. GraphLoom
 supplies the graph, durable state, executor integration, validation, recovery
-admission, and finite run limits. No separate Pi supervisor is started for an
-agent-host run. One attached primary session performs assigned implementation
-work and also fulfills the supervisor role during recovery.
+admission, and finite run limits. No separate supervisor (Pi, Claude Code, or
+Codex harness) is started for an agent-host run. One attached primary session
+performs assigned implementation work and also fulfills the supervisor role
+during recovery.
 
 Independent review still requires another session when the graph declares it.
 A graph with only deterministic checks can use one agent session throughout.
@@ -28,7 +29,7 @@ cross-run memory, distributed scheduler, or automatic publication is introduced.
 | Start and continue work | GraphLoom CLI/controller loop | Attached host session through tools |
 | Normal routing | Graph plugin | Same graph plugin |
 | Implementation work | Controller-launched coding executor | Attached host receives a bounded assignment |
-| Exceptional recovery and repair coding | Run-wide Pi supervisor session | Same attached primary session in supervisor role |
+| Exceptional recovery and repair coding | Run-wide supervisor session on the pinned harness (Pi, Claude Code, or Codex) | Same attached primary session in supervisor role |
 | GitHub/command executors | Controller-managed execution lifecycle | Same lifecycle, requested through host tools |
 | Acceptance and durable truth | Controller | Same controller |
 | Independent review | Separate reviewer session | Separate reviewer session |
@@ -238,7 +239,7 @@ another stage itself. During recovery, the same host receives current requiremen
 last settlement, failure evidence, active versions, remaining budgets, and allowed
 supervisor actions. It may propose diagnosis, prompt overrides, retries/reentry,
 executor alternatives, source repair, validation, or Return. The controller admits
-the proposal using the same rules as the standalone Pi supervisor.
+the proposal using the same rules as the standalone supervisor.
 
 A recovery packet carries a claimable proposal offer. `propose` atomically closes
 that proposal claim and records the admitted action intent before exposing any
@@ -407,7 +408,7 @@ are available. Hook names and event payloads must be verified during implementat
 
 A later Pi extension implements attachment, scoped tool admission, continuation,
 usage reporting, and cancellation through this same protocol. It is distinct from
-the standalone Pi supervisor and the existing headless Pi worker harness. Do not
+the standalone supervisor's Pi harness and the existing headless Pi worker harness. Do not
 reuse one session simultaneously through both drivers.
 
 ## Delivery and acceptance

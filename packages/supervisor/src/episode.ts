@@ -2,6 +2,7 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 import type { CaseFinding, CaseFile, RunView } from "@graphloom/sdk";
+import type { HarnessUsage } from "./harness.js";
 import type { InvestigationStep } from "./investigation.js";
 import type {
   AdmissionFacts,
@@ -87,6 +88,18 @@ export interface SupervisorEpisodeRecord {
   error?: string;
   admission: EpisodeAdmission;
   providerCalls: number;
+  /**
+   * The supervisor harness the call ran on (`pi`, `claude-code`, `codex`),
+   * from the supervisor's binding. Absent on records written before S6 and
+   * for a supervisor without a binding (scripted).
+   */
+  harness?: string;
+  /**
+   * Token usage of the call's prompts, summed, as the harness reported it
+   * (Claude Code's `result` usage, Codex's `turn.completed`); recorded, never
+   * charged. Absent when the harness reports none (Pi).
+   */
+  usage?: HarnessUsage;
   /** Set when any part of the record was cut to stay within its bounds. */
   truncated?: boolean;
 }
@@ -330,6 +343,10 @@ export interface EpisodeRecordArgs {
   error?: unknown;
   admission: EpisodeAdmission;
   providerCalls: number;
+  /** The harness the call ran on (see SupervisorEpisodeRecord.harness). */
+  harness?: string;
+  /** The call's summed token usage (the host's `drainUsage`). */
+  usage?: HarnessUsage;
 }
 
 /**
@@ -432,6 +449,8 @@ export function buildEpisodeRecord(args: EpisodeRecordArgs): SupervisorEpisodeRe
       outcome: args.admission.outcome,
     },
     providerCalls: args.providerCalls,
+    ...(args.harness !== undefined ? { harness: args.harness } : {}),
+    ...(args.usage !== undefined ? { usage: { ...args.usage } } : {}),
     ...(args.recorder.truncated() || dropped > 0 || steps.truncated || steps.dropped > 0 ? { truncated: true } : {}),
   });
 }

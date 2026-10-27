@@ -33,6 +33,7 @@ import {
 import type { ExecutorSourceOverride, JobConfinement, JobContext, Runner } from "@graphloom/runner";
 import type { PluginHost } from "@graphloom/plugin-host";
 import {
+  bindingHarness,
   buildEpisodeRecord,
   createEpisodeRecorder,
   isModelSwitchRequest,
@@ -884,6 +885,7 @@ async function runNormalLoopSteps(
                 maxWaitMs: waitBefore,
                 recorder,
                 ...(supervisor.drainInvestigation !== undefined ? { investigation: supervisor.drainInvestigation() } : {}),
+                ...episodeHarness(supervisor),
                 ...(decided !== undefined ? { proposal: decided } : {}),
                 ...(decideError !== undefined ? { error: decideError } : {}),
                 admission: {
@@ -1791,6 +1793,21 @@ export function toRunView(state: DurableRunState): RunView {
     },
   };
   return view;
+}
+
+/**
+ * The harness a decide() call ran on, from the supervisor's binding (a
+ * binding without one is Pi's), and the token usage it reported, for the
+ * episode record; `graphloom stats` reports both per harness. A supervisor
+ * without a binding (scripted) records neither.
+ */
+function episodeHarness(supervisor: Supervisor): { harness?: string; usage?: NonNullable<ReturnType<NonNullable<Supervisor["drainUsage"]>>> } {
+  const binding = readBinding(supervisor);
+  const usage = supervisor.drainUsage?.();
+  return {
+    ...(binding !== undefined ? { harness: bindingHarness(binding) } : {}),
+    ...(usage !== undefined ? { usage } : {}),
+  };
 }
 
 function settleSupervisorUsage(

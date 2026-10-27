@@ -45,7 +45,7 @@ repair steps cannot evade this fixed-step contract.
 The first complete release is a local Linux CLI, a Pi SDK supervisor backend with
 multiple configured model providers, serial jobs, and an isolated Git worktree.
 Claude Code and Codex supervisor harnesses, selected by the plugin as data, are
-proposed in the [supervisor harnesses design](design-supervisor-harnesses.md).
+implemented by the [supervisor harnesses design](design-supervisor-harnesses.md).
 The example is **Write → Review**, producing a local file change. It includes bounded recovery and one tested plugin-repair transition.
 No RSI, cross-run memory, portal, distributed scheduler, or automatic publication
 is part of this release. Multiple roles do not require parallel execution.
@@ -53,7 +53,7 @@ is part of this release. Multiple roles do not require parallel execution.
 ### Execution modes
 
 The existing **standalone** mode uses the GraphLoom CLI as driver and Pi as the
-supervisor backend (proposed: Pi, Claude Code, or Codex; see
+supervisor backend (Pi, Claude Code, or Codex; see
 [supervisor harnesses](design-supervisor-harnesses.md)). The proposed **agent-host** mode attaches an existing coding
 session, which executes admitted implementation work and supplies supervisor
 judgment during recovery. It requires no second Pi supervisor. Both use the same
@@ -436,8 +436,8 @@ path. A host acting as a worker does not simultaneously own recovery decisions.
 
 ### Standalone Pi SDK session implementation
 
-Superseded as the only backend by the proposed
-[supervisor harnesses design](design-supervisor-harnesses.md): a harness-neutral
+Superseded as the only backend by the
+[supervisor harnesses design](design-supervisor-harnesses.md) (implemented through S6): a harness-neutral
 supervisor host drives Pi, Claude Code, or Codex behind the same `Supervisor`
 port. The plugin declares its preferred harness in `GraphDefinition.supervisor`;
 the operator's `supervisor.json` enables harnesses and may override or forbid

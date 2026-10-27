@@ -59,6 +59,58 @@ or the provider's environment variable, such as `MINIMAX_CN_API_KEY`. A missing
 runner config, Claude Code or Codex command, or Pi model fails before the run
 starts.
 
+### The supervisor
+
+Recovery needs a supervisor config, `~/.config/graphloom/supervisor.json` (or
+the file `GRAPHLOOM_SUPERVISOR_CONFIG` names), which `graphloom setup` also
+writes. Without one a run has no automatic recovery. The supervisor runs on
+one harness: Pi on any provider, Claude Code on your `claude` login, or Codex
+on your `codex` login (never an API key for either CLI). Pi alone is the flat
+form:
+
+```json
+{ "provider": "deepseek", "modelId": "deepseek-v4-pro", "models": ["anthropic/claude-sonnet-5"] }
+```
+
+The per-harness form enables more than one, in the operator's fallback order:
+
+```json
+{
+  "harnesses": ["pi", "claude-code", "codex"],
+  "pi": { "provider": "minimax-cn", "modelId": "MiniMax-M3" },
+  "claude": { "models": ["opus", "sonnet"], "configDir": "~/.claude" },
+  "codex": { "models": [{ "modelId": "gpt-5-codex", "thinkingLevel": "high" }], "codexHome": "~/.codex" }
+}
+```
+
+- `harnesses` lists the harnesses a run may use; any other is refused.
+  `select` picks one for every run, over the plugin's preference.
+- Each harness's first model is the one it starts on; the rest are the models
+  `switch_model` and `graphloom switch-model` may move to. `thinkingLevel`
+  (`off` to `max`) sets the reasoning level where the harness has one.
+- `pi.agentDir` (default `~/.pi/agent`) holds Pi's auth store and
+  `models.json`; `claude.command`/`configDir`, `codex.command`/`codexHome`
+  pick the CLI and its login, and both take `passEnv`. `promptTimeoutMs`,
+  `promptTotalTimeoutMs`, and `quotaRetryMs` apply to every harness.
+- Credentials never go here: Pi uses the provider's variable or its auth
+  store; Claude Code and Codex use their own logins, and `ANTHROPIC_API_KEY`,
+  `OPENAI_API_KEY`, and `CODEX_API_KEY` are never passed to them.
+
+hello declares no preference, so it gets the first enabled harness that is
+available; issue-fix prefers `pi`, `claude-code`, `codex`. To choose:
+
+```sh
+graphloom run task.yaml --supervisor claude-code      # this run only
+graphloom resume <runId> --supervisor codex --reason "Claude Code session limit"
+graphloom switch-model <runId> sonnet --reason "try a faster model"   # within the pinned harness
+```
+
+`graphloom doctor` probes each enabled harness and says how to fix one that is
+not available; `graphloom doctor --task task.yaml` and `graphloom check
+task.yaml` name the harness the run would get, and `graphloom stats` shows the
+supervisor's episodes, turns, provider calls, and tokens per harness. See
+[supervisor harnesses](../docs/design-supervisor-harnesses.md).
+
 Then build, prepare a disposable repository beside the task, and run:
 
 ```sh

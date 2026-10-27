@@ -13,7 +13,7 @@ are superseded. Historical Go code lives under `legacy/go/` and is not built by 
 | `packages/sdk` | `@graphloom/sdk` | Public value/wire contracts, operations, scripted GraphPlugin |
 | `packages/controller` | `@graphloom/controller` | Durable state, admission, receipts (scaffold) |
 | `packages/plugin-host` | `@graphloom/plugin-host` | Isolated child process adapter (scaffold) |
-| `packages/supervisor` | `@graphloom/supervisor` | Recovery supervisor: harness-neutral host (`createSupervisorHost`) with the Pi harness (any Pi provider/model: Anthropic, OpenAI, Gemini, DeepSeek, Kimi, MiniMax, custom `models.json` endpoints) and the Claude Code harness (your own `claude` login, under bwrap); Codex proposed in [supervisor harnesses](docs/design-supervisor-harnesses.md) |
+| `packages/supervisor` | `@graphloom/supervisor` | Recovery supervisor: harness-neutral host (`createSupervisorHost`) with the Pi harness (any Pi provider/model: Anthropic, OpenAI, Gemini, DeepSeek, Kimi, MiniMax, custom `models.json` endpoints), the Claude Code harness (your own `claude` login, under bwrap), and the Codex harness (your own `codex` login, under bwrap); the plugin's preference selects one per run ([supervisor harnesses](docs/design-supervisor-harnesses.md)) |
 | `packages/runner` | `@graphloom/runner` | Jobs and scopes (scaffold) |
 | `packages/agent-harness` | `@graphloom/agent-harness` | Agent session drivers (Claude Code, Codex, Pi): processes, stream protocols, session capture, failure classification; vendored into `executors/coding-agent` |
 | `packages/testkit` | `@graphloom/testkit` | Unpublished test fixtures (repos, tasks, bundles, scripted agents, fake provider); tests only |

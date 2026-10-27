@@ -14,10 +14,11 @@ BeforeProviderRequest interception is not implemented. Scripted supervisors stay
 the CI default.
 This document specializes the [core design](design-typescript-core.md).
 
-The proposed [supervisor harnesses design](design-supervisor-harnesses.md)
-supersedes Pi as the only supervisor backend: a harness-neutral supervisor host
-drives Pi, Claude Code, or Codex, and the plugin declares which it prefers. This
-document remains the specification of the Pi harness.
+The [supervisor harnesses design](design-supervisor-harnesses.md), implemented
+through S6, supersedes Pi as the only supervisor backend: a harness-neutral
+supervisor host drives Pi, Claude Code, or Codex, the plugin declares which it
+prefers, and the run pins one. This document remains the specification of the
+Pi harness.
 
 ## Driver scope
 
@@ -69,7 +70,7 @@ other vendor goes through Pi.
 | Vendor | CLI harness route | Pi route (`"harnesses": ["pi"]`) |
 |---|---|---|
 | Claude | `claude-code` harness: your Claude Code login (subscription), never an API key; `ANTHROPIC_API_KEY` is never passed to it | provider `anthropic` with `ANTHROPIC_API_KEY` |
-| OpenAI | `codex` harness: your Codex CLI login; supervises from phase S4, not yet | provider `openai` with `OPENAI_API_KEY` |
+| OpenAI | `codex` harness: your Codex CLI login (a ChatGPT login; a Codex home signed in with an API key is refused), never an API key; `OPENAI_API_KEY` and `CODEX_API_KEY` are never passed to it | provider `openai` with `OPENAI_API_KEY` |
 | Gemini, DeepSeek, Kimi, MiniMax, and every other vendor | none | provider `google`, `deepseek`, `moonshotai`, `minimax-cn`, ... with that provider's variable |
 
 **Credentials.** `supervisor.json` never holds one (`apiKey` is refused). For

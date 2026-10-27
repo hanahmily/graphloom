@@ -32,8 +32,10 @@ import {
   unavailability,
   type CliHarnessDiscovery,
   type Discovery,
+  type SupervisorHarnessCheck,
 } from "./discovery.js";
 import { enabledHarnesses, type HarnessName } from "./runner-config.js";
+import { harnessModels, withModelHints, type SupervisorConfig } from "./supervisor-config.js";
 
 export type CheckStatus = "pass" | "warn" | "fail";
 export type CheckSection = "host" | "agents" | "configuration" | "setups" | "task";
@@ -186,6 +188,8 @@ function configurationChecks(d: Discovery): DoctorCheck[] {
     // A listed harness that is not available warns: selection falls back past it. A `select` run refuses fails.
     if (d.supervisorSelectionError !== undefined) checks.push(check("configuration", "supervisor config", "fail", `${detail}; run refuses: ${d.supervisorSelectionError}`, missing.map((c) => c.fix ?? "graphloom setup").join("; ") || "graphloom setup"));
     else checks.push(missing.length === 0 ? check("configuration", "supervisor config", "pass", detail) : check("configuration", "supervisor config", "warn", detail, missing.map((c) => c.fix ?? "graphloom setup").join("; ")));
+    // One row per enabled harness: its own probe() (design-supervisor-harnesses.md §7.3, S6).
+    for (const c of d.supervisorEnabled) checks.push(supervisorHarnessRow(c, s.config));
   }
 
   const tokenEnv = r.config?.github?.tokenEnv;
@@ -199,6 +203,25 @@ function configurationChecks(d: Discovery): DoctorCheck[] {
 
   checks.push(updatesCheck(d));
   return checks;
+}
+
+/**
+ * What an enabled supervisor harness starts on, as the operator configured it
+ * (or as the plugin's hints reordered it); empty for a CLI on its own default model.
+ */
+function startingModel(config: SupervisorConfig, harness: string): string {
+  if (harness === "pi") return `${config.provider}/${config.modelId}`;
+  if (harness !== "claude-code" && harness !== "codex") return "";
+  const first = harnessModels(config, harness)[0];
+  return first === undefined || first.modelId === "default" ? "" : `${first.modelId}${first.thinkingLevel !== undefined ? `, ${first.thinkingLevel}` : ""}`;
+}
+
+function supervisorHarnessRow(c: SupervisorHarnessCheck, config: SupervisorConfig): DoctorCheck {
+  const model = startingModel(config, c.harness);
+  const on = model !== "" ? ` on ${model}` : " on its default model";
+  return c.ok
+    ? check("configuration", `supervisor ${c.harness}`, "pass", `enabled; its probe passed${on} (no provider call)`)
+    : check("configuration", `supervisor ${c.harness}`, "warn", `enabled, not available${on}: ${c.reason ?? "its probe failed"}`, c.fix ?? "graphloom setup");
 }
 
 /** The effective automatic-update mode, and why automatic updates would be a no-op (§4.4, §5.4). */
@@ -284,6 +307,13 @@ export interface TaskInputs {
   error?: string;
   /** The plugin's environment checks: each id with its failure, if any. */
   environment: Array<{ id: string; argv: string[]; error?: string }>;
+  /**
+   * The enabled supervisor harnesses probed as `run` would probe them for this
+   * task: on their models reordered by the plugin's hints
+   * (`probeEnabledSupervisors` with the preference). Absent: the doctor's own
+   * probes, on the operator's first models.
+   */
+  supervisorEnabled?: SupervisorHarnessCheck[];
 }
 
 /**
@@ -293,7 +323,7 @@ export interface TaskInputs {
  * same `resolveSupervisorSelection` that `run` and `check` use. `run
  * --supervisor` is a per-invocation flag, so it is not reported.
  */
-export function supervisorSelection(d: Discovery, preference?: SupervisorPreference): DoctorCheck[] {
+export function supervisorSelection(d: Discovery, preference?: SupervisorPreference, probed?: readonly SupervisorHarnessCheck[]): DoctorCheck[] {
   const s = d.supervisor;
   if (s.error !== undefined) return [check("task", "supervisor selection", "fail", `run refuses: ${s.error}`, "graphloom setup")];
   if (s.config === undefined) {
@@ -301,8 +331,9 @@ export function supervisorSelection(d: Discovery, preference?: SupervisorPrefere
     const wants = preference !== undefined ? `; the plugin prefers ${preference.harnesses.join(", ")}${preference.required === true ? " (required)" : ""}` : "";
     return [check("task", "supervisor selection", "warn", `none: no supervisor config, so the run has no automatic recovery${wants}${v.supervisor !== undefined ? `; ${v.supervisor} is available` : ""}`, "graphloom setup")];
   }
-  const { outcome, error } = selectionOnProbes(s.config, d.supervisorEnabled, preference);
-  const fixes = d.supervisorEnabled.filter((c) => !c.ok).map((c) => c.fix ?? "graphloom setup").join("; ") || "graphloom setup";
+  const enabled = probed ?? d.supervisorEnabled;
+  const { outcome, error } = selectionOnProbes(s.config, enabled, preference);
+  const fixes = enabled.filter((c) => !c.ok).map((c) => c.fix ?? "graphloom setup").join("; ") || "graphloom setup";
   if (error !== undefined) {
     const fix = /plugin requires/.test(error) ? `${fixes}; or enable one of ${preference!.harnesses.join(", ")} in ${s.file}` : fixes;
     return [check("task", "supervisor selection", "fail", `run refuses: ${error}`, fix)];
@@ -310,15 +341,16 @@ export function supervisorSelection(d: Discovery, preference?: SupervisorPrefere
   const hints = (outcome!.warnings ?? []).map((w) => check("task", "supervisor model hints", "warn", w, `add the model to the harness's models in ${s.file}, or leave it: the operator's own order applies`));
   const sel = outcome!.selection;
   if (sel === undefined) {
-    return [check("task", "supervisor selection", "warn", `none: ${outcome!.none ?? "no enabled supervisor harness is available"}, so the run has no automatic recovery`, d.supervisorEnabled.map((c) => c.fix ?? "graphloom setup").join("; ") || "graphloom setup"), ...hints];
+    return [check("task", "supervisor selection", "warn", `none: ${outcome!.none ?? "no enabled supervisor harness is available"}, so the run has no automatic recovery`, fixes), ...hints];
   }
-  const probed = d.supervisorEnabled.find((c) => c.harness === sel.harness);
-  const model = sel.harness === "pi" ? ` (${s.config.provider}/${s.config.modelId})` : "";
-  if (probed !== undefined && !probed.ok) {
+  const mine = enabled.find((c) => c.harness === sel.harness);
+  const model = startingModel(withModelHints(s.config, sel.harness, preference), sel.harness);
+  const on = model !== "" ? ` (${model})` : "";
+  if (mine !== undefined && !mine.ok) {
     // The flat Pi form selects Pi unprobed, as run does; its recovery episode would then fail.
-    return [check("task", "supervisor selection", "warn", `${sel.harness}${model} (${sel.source}: ${sel.reason}), which is not available (${probed.reason}), so a recovery episode would fail`, probed.fix ?? "graphloom setup"), ...hints];
+    return [check("task", "supervisor selection", "warn", `${sel.harness}${on} (${sel.source}: ${sel.reason}), which is not available (${mine.reason}), so a recovery episode would fail`, mine.fix ?? "graphloom setup"), ...hints];
   }
-  return [check("task", "supervisor selection", "pass", `${sel.harness}${model} (${sel.source}: ${sel.reason}, from ${s.file}); the repair reviewer uses the same agent`), ...hints];
+  return [check("task", "supervisor selection", "pass", `${sel.harness}${on} (${sel.source}: ${sel.reason}, from ${s.file}); the repair reviewer uses the same agent`), ...hints];
 }
 
 /** Each harness that could take `role` instead: available, able to give its access, and distinct where required. */
@@ -391,7 +423,7 @@ export function taskChecks(d: Discovery, task: TaskInputs): DoctorCheck[] {
         : check("task", `environment ${env.id}`, "fail", `${env.argv.join(" ")}: ${env.error}`, `make \`${env.argv.join(" ")}\` succeed in the task's repository, then graphloom check ${task.taskPath}`),
     );
   }
-  checks.push(...supervisorSelection(d, task.definition.supervisor));
+  checks.push(...supervisorSelection(d, task.definition.supervisor, task.supervisorEnabled));
   const roles = task.definition.agentRoles ?? [];
   if (roles.length === 0) checks.push(check("task", "agent roles", "pass", "the plugin declares none"));
   checks.push(...roleChecks(d, roles, task.profile));

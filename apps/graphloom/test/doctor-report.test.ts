@@ -133,7 +133,7 @@ describe("doctor --task: supervisor selection", () => {
     expect(sel(noKey)).toMatchObject({ status: "warn", detail: expect.stringContaining("which is not available"), fix: expect.stringContaining("MINIMAX_CN_API_KEY") });
     // A per-harness config falls back past an unavailable Pi to Claude Code, as run does.
     const fallback = perHarness(d, { "claude-code": true });
-    expect(sel(fallback)).toMatchObject({ status: "pass", detail: expect.stringMatching(/^claude-code \(fallback: claude-code, the first enabled harness available \(pi: pi is missing\)/) });
+    expect(sel(fallback)).toMatchObject({ status: "pass", detail: expect.stringMatching(/^claude-code \(opus\) \(fallback: claude-code, the first enabled harness available \(pi: pi is missing\)/) });
     const none = perHarness(d, {});
     expect(sel(none)).toMatchObject({ status: "warn", detail: expect.stringContaining("none: no enabled harness is available"), fix: "fix-pi; fix-claude-code; fix-codex" });
     const refused = perHarness(d, { pi: true }, { select: "codex" });
@@ -148,12 +148,12 @@ describe("doctor --task: supervisor selection", () => {
     // The plugin's order among enabled, available harnesses.
     expect(sel(all, { harnesses: ["codex", "pi"] })).toMatchObject({ status: "pass", detail: expect.stringMatching(/^codex \(plugin: the plugin's preference \(codex, pi\): codex, from /) });
     // Past one that is not available, with the reason.
-    expect(sel(perHarness(d, { pi: true, "claude-code": true }), { harnesses: ["codex", "claude-code"] })).toMatchObject({ detail: expect.stringMatching(/^claude-code \(plugin: .*\(codex: codex is missing\)/) });
+    expect(sel(perHarness(d, { pi: true, "claude-code": true }), { harnesses: ["codex", "claude-code"] })).toMatchObject({ detail: expect.stringMatching(/^claude-code \(opus\) \(plugin: .*\(codex: codex is missing\)/) });
     // The operator's select overrides the plugin.
     expect(sel(perHarness(d, { pi: true, codex: true }, { select: "pi" }), { harnesses: ["codex"] })).toMatchObject({ status: "pass", detail: expect.stringMatching(/^pi \(minimax-cn\/MiniMax-M3\) \(operator: select pi/) });
     // A harness the operator does not enable is forbidden, even when the plugin prefers it.
     const piOnly: Discovery = { ...all, supervisor: { ...all.supervisor, config: { ...pi, harnesses: ["pi", "claude-code"], claude } }, supervisorEnabled: all.supervisorEnabled.filter((c) => c.harness !== "codex") };
-    expect(sel(piOnly, { harnesses: ["codex", "claude-code"] })).toMatchObject({ detail: expect.stringMatching(/^claude-code \(plugin: .*\(codex: not enabled by the operator\)/) });
+    expect(sel(piOnly, { harnesses: ["codex", "claude-code"] })).toMatchObject({ detail: expect.stringMatching(/^claude-code \(opus\) \(plugin: .*\(codex: not enabled by the operator\)/) });
     // None of the plugin's: the operator's order, with the reason; or a refusal when it is required.
     expect(sel(piOnly, { harnesses: ["codex"] })).toMatchObject({ status: "pass", detail: expect.stringMatching(/^pi .*\(fallback: none of the plugin's harnesses \(codex\) is enabled and available \(codex: not enabled by the operator\), so the operator's order applies: the first enabled harness, pi/) });
     expect(sel(piOnly, { harnesses: ["codex"], required: true })).toMatchObject({
@@ -161,9 +161,9 @@ describe("doctor --task: supervisor selection", () => {
       detail: expect.stringContaining("run refuses: supervisor: plugin requires one of codex; enabled and available: pi, claude-code"),
       fix: expect.stringContaining("or enable one of codex in"),
     });
-    // Model hints: a configured one is honored silently, an unconfigured one warns.
+    // Model hints: a configured one is honored silently (the selection shows the hinted model run starts on), an unconfigured one warns.
     const hinted = supervisorSelection(all, { harnesses: ["claude-code"], models: { "claude-code": ["sonnet", "haiku"], codex: ["gpt-5-codex"] } });
-    expect(hinted[0]).toMatchObject({ status: "pass", detail: expect.stringMatching(/^claude-code \(plugin/) });
+    expect(hinted[0]).toMatchObject({ status: "pass", detail: expect.stringMatching(/^claude-code \(sonnet\) \(plugin/) });
     expect(hinted.slice(1).map((c) => [c.name, c.status, c.detail])).toEqual([
       ["supervisor model hints", "warn", expect.stringContaining("claude-code model hint haiku is not among the operator's claude-code models (opus, sonnet)")],
       ["supervisor model hints", "warn", expect.stringContaining("codex model hint gpt-5-codex is not among the operator's codex models (default)")],
