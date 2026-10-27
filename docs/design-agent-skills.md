@@ -131,7 +131,8 @@ graphloom skills remove [<name>...] [--agent <a>] [--dir <dir>] [--force]
   Claude Code's own target) holds GraphLoom copies (with a marker) of skills
   that are also in that agent's own directory, `skills list` names them and
   the doctor warns (never fails) with a `skills duplicates (<agent>)` row and
-  fix `graphloom skills remove --dir <shared dir>`. A shared directory that is
+  fix `graphloom skills remove <names> --dir <shared dir>`, which removes
+  only the duplicated copies there. A shared directory that is
   some agent's own target (`~/.claude/skills` while `CLAUDE_CONFIG_DIR` is
   unset) holds that agent's copies and is not reported; directories without a
   marker are the user's and are never counted.

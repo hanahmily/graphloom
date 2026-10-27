@@ -471,7 +471,12 @@ export function formatSkillsStatus(s: SkillsStatus): string {
 }
 
 
+/** The command that removes only the duplicated copies from the shared directory. */
+export function duplicateFix(d: SharedSkillDuplicate): string {
+  return `graphloom skills remove ${d.skills.join(" ")} --dir ${d.dir}`;
+}
+
 /** One line naming a duplicate and the command that removes the shared copies. */
 export function duplicateNotice(d: SharedSkillDuplicate): string {
-  return `${SKILL_AGENT_LABEL[d.agent]} also reads ${d.dir}, whose GraphLoom copies duplicate the ones in ${d.ownDir}: ${d.skills.join(", ")}; graphloom skills remove --dir ${d.dir} removes them there`;
+  return `${SKILL_AGENT_LABEL[d.agent]} also reads ${d.dir}, whose GraphLoom copies duplicate the ones in ${d.ownDir}: ${d.skills.join(", ")}; ${duplicateFix(d)} removes them there`;
 }

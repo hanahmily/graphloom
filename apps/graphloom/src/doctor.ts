@@ -36,7 +36,7 @@ import {
 } from "./discovery.js";
 import { enabledHarnesses, type HarnessName } from "./runner-config.js";
 import { harnessModels, withModelHints, type SupervisorConfig } from "./supervisor-config.js";
-import { SKILL_AGENT_LABEL } from "./skills.js";
+import { SKILL_AGENT_LABEL, duplicateFix } from "./skills.js";
 
 export type CheckStatus = "pass" | "warn" | "fail";
 export type CheckSection = "host" | "agents" | "configuration" | "setups" | "task";
@@ -501,7 +501,7 @@ export function skillsChecks(d: Discovery): DoctorCheck[] {
         `skills duplicates (${dup.agent})`,
         "warn",
         `${SKILL_AGENT_LABEL[dup.agent]} also reads ${dup.dir}, whose GraphLoom copies duplicate the ones in ${dup.ownDir}: ${dup.skills.join(", ")}`,
-        `graphloom skills remove --dir ${dup.dir}`,
+        duplicateFix(dup),
       ),
     );
   }

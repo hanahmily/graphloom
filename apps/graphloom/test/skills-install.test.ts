@@ -312,23 +312,29 @@ describe("opencode as a target", { timeout: 60_000 }, () => {
       ["opencode", s.agents, s.opencode, ["graphloom-run", "graphloom-watch"]],
     ]);
     expect((await s.graphloom("list")).stdout).toContain(
-      `Codex also reads ${s.agents}, whose GraphLoom copies duplicate the ones in ${s.codex}: graphloom-run, graphloom-watch; graphloom skills remove --dir ${s.agents} removes them there`,
+      `Codex also reads ${s.agents}, whose GraphLoom copies duplicate the ones in ${s.codex}: graphloom-run, graphloom-watch; graphloom skills remove graphloom-run graphloom-watch --dir ${s.agents} removes them there`,
     );
     expect((await s.list("--agent", "codex")).duplicates!.map((d) => d.agent)).toEqual(["codex"]);
     expect((await s.list("--dir", s.agents)).duplicates).toBeUndefined();
     s.env.OPENCODE_DISABLE_EXTERNAL_SKILLS = "1";
     expect((await s.list()).duplicates!.map((d) => d.agent)).toEqual(["codex"]);
     delete s.env.OPENCODE_DISABLE_EXTERNAL_SKILLS;
-    // The fix the notice names.
+    // The fix the notice names removes only the duplicated copies, not the shared directory's others.
+    await s.graphloom("install", "graphloom-issue", "--dir", s.agents);
+    await rm(path.join(s.codex, "graphloom-issue"), { recursive: true });
+    await rm(path.join(s.opencode, "graphloom-issue"), { recursive: true });
+    expect((await s.list()).duplicates!.map((d) => d.skills)).toEqual([["graphloom-run", "graphloom-watch"], ["graphloom-run", "graphloom-watch"]]);
+    await s.graphloom("remove", "graphloom-run", "graphloom-watch", "--dir", s.agents);
+    expect(readdirSync(s.agents)).toEqual(["graphloom-issue"]);
     await s.graphloom("remove", "--dir", s.agents);
     expect(readdirSync(s.agents)).toEqual([]);
     expect((await s.list()).duplicates).toEqual([]);
 
     // ~/.claude/skills is Claude Code's own target, unless CLAUDE_CONFIG_DIR moves that elsewhere.
-    await s.graphloom("install", "graphloom-issue", "--agent", "claude-code");
+    await s.graphloom("install", "graphloom-run", "--agent", "claude-code");
     expect((await s.list()).duplicates).toEqual([]);
     s.env.CLAUDE_CONFIG_DIR = path.join(s.home, "claude-config");
-    expect((await s.list()).duplicates!.map((d) => [d.agent, d.dir, d.skills])).toEqual([["opencode", s.claude, ["graphloom-issue"]]]);
+    expect((await s.list()).duplicates!.map((d) => [d.agent, d.dir, d.skills])).toEqual([["opencode", s.claude, ["graphloom-run"]]]);
     s.env.OPENCODE_DISABLE_CLAUDE_CODE_SKILLS = "true";
     expect((await s.list()).duplicates).toEqual([]);
   });
@@ -375,8 +381,8 @@ describe("opencode as a target", { timeout: 60_000 }, () => {
     await execFileAsync(process.execPath, [cli, "skills", "install", "graphloom-run", "--dir", shared], { env });
     const both = await rows({ opencode: true, codex: true });
     expect(both.filter((c) => c.name.startsWith("skills duplicates"))).toEqual([
-      expect.objectContaining({ name: "skills duplicates (codex)", status: "warn", fix: `graphloom skills remove --dir ${shared}`, detail: expect.stringContaining(`Codex also reads ${shared}`) }),
-      expect.objectContaining({ name: "skills duplicates (opencode)", status: "warn", fix: `graphloom skills remove --dir ${shared}`, detail: expect.stringContaining("graphloom-run") }),
+      expect.objectContaining({ name: "skills duplicates (codex)", status: "warn", fix: `graphloom skills remove graphloom-run --dir ${shared}`, detail: expect.stringContaining(`Codex also reads ${shared}`) }),
+      expect.objectContaining({ name: "skills duplicates (opencode)", status: "warn", fix: `graphloom skills remove graphloom-run --dir ${shared}`, detail: expect.stringContaining("graphloom-run") }),
     ]);
     expect(both.some((c) => c.status === "fail")).toBe(false);
     // An agent not found here is not warned about.
