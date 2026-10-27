@@ -677,7 +677,9 @@ do_publish() {
       "${verify_cmd[@]}" 2>&1 | sed 's/^/  /' || die "the existing tag $tag does not verify against release/allowed_signers"
       git -C "$work/tag-check" tag -d "$tag" >/dev/null
     fi
-    git -C "$work/tag-check" -c gpg.format=ssh -c "user.signingKey=$signing_key" tag -s -a -m "GraphLoom $tag" "$tag" "$commit"
+    # The tagger is the repository's own identity, which may be configured only in it.
+    git -C "$work/tag-check" -c "user.name=$(git -C "$repo" config user.name || true)" -c "user.email=$(git -C "$repo" config user.email || true)" \
+      -c gpg.format=ssh -c "user.signingKey=$signing_key" tag -s -a -m "GraphLoom $tag" "$tag" "$commit"
     git -C "$work/tag-check" -c gpg.format=ssh -c "gpg.ssh.allowedSignersFile=$work/allowed_signers" verify-tag "$tag" 2>&1 | sed 's/^/  /'
     echo "dry run: the tag signs and verifies in a scratch clone; would run:"
     [ -n "$local_tag" ] || { show_cmd "${tag_cmd[@]}"; }
