@@ -42,6 +42,11 @@ describe("investigation steps as citations (design-supervisor-harnesses.md §5.3
     expect(inv.steps.has("inv-3")).toBe(false);
     expect(inv.numbered).toBe(5);
     expect(episodeInvestigation(s, "ep-3").numbered).toBe(0);
+    // A record the size bound shrank from the front still makes its earlier ids citable.
+    const shrunk = episodeInvestigation(state([{ episodeId: "ep-1", investigation: [step(31), step(50)] }]), "ep-1");
+    expect(shrunk.ids.has("inv-1")).toBe(true);
+    expect(shrunk.ids.has("inv-51")).toBe(false);
+    expect(shrunk.numbered).toBe(50);
     expect(citedInvestigationEvidence(inv, ["inv-1", "inv-3", "ev-1"])).toEqual([
       { ref: "inv-1", kind: "other", payload: { investigation: step(1) } },
       { ref: "inv-3", kind: "other", payload: { investigation: { id: "inv-3", note: expect.stringMatching(/no longer kept/) } } },

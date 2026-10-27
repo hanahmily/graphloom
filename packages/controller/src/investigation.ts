@@ -41,14 +41,18 @@ export function episodeInvestigation(
     for (const step of record.investigation ?? []) {
       if (!isInvestigationStepId(step.id)) continue;
       steps.set(step.id, step);
-      ids.add(step.id);
       last = Math.max(last, stepNumber(step.id));
     }
-    // A record keeps its first steps and counts the ones the size bound dropped after them.
+    // The size bound drops steps after the kept ones (counted) and, when it
+    // shrinks the record further, before them (not counted): the highest kept
+    // id plus the counted ones is how far the episode has numbered. A record
+    // that kept none numbered its counted ones after the records before it.
     const dropped = record.droppedInvestigation ?? 0;
-    if (last > 0 || dropped > 0) numbered = Math.max(numbered, last + dropped);
-    for (let n = last + 1; n <= last + dropped; n += 1) ids.add(`inv-${n}`);
+    numbered = Math.max(numbered, last > 0 ? last + dropped : numbered + dropped);
   }
+  // An episode numbers its steps inv-1, inv-2, … without a gap, so every id up
+  // to that point ran in it, whether or not its content is still kept.
+  for (let n = 1; n <= numbered; n += 1) ids.add(`inv-${n}`);
   for (const step of live) {
     if (!isInvestigationStepId(step.id)) continue;
     steps.set(step.id, step);

@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
-import { mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { reenter, returnToNormal, stop, type GraphDecision } from "@graphloom/sdk";
 import { describe, expect, it } from "vitest";
 import { classifyClaudeFailure } from "./claude-failure.js";
-import { CLAUDE_CODE_HARNESS, createClaudeSupervisorHarness, lastClaudeSessionModel } from "./claude-harness.js";
+import { CLAUDE_CODE_HARNESS, commandPaths, createClaudeSupervisorHarness, lastClaudeSessionModel } from "./claude-harness.js";
 import { claudeStepRecorder } from "./claude-steps.js";
 import { MAX_EPISODE_TOOL_RESULT_CHARS } from "./episode.js";
 import { isSupervisorProviderError } from "./provider-failure.js";
@@ -347,6 +347,19 @@ describe("Claude Code supervisor harness: switching and restore", () => {
     expect(fake.invocations()[0]).toMatchObject({ resumed: false });
     expect(fake.invocations()[0]!.argv).toEqual(expect.arrayContaining(["--model", "sonnet"]));
     await expect(harness.restore({ sessionId: "x", sessionFile: undefined, provider: "minimax-cn", modelId: "M", switchJournal: [] })).rejects.toThrow(/pinned to the pi harness/);
+  });
+});
+
+describe("commandPaths", () => {
+  it("keeps the executable visible in the sandbox, as given, on PATH, and through a link", () => {
+    const fake = fakeClaude();
+    const bin = path.join(fake.dir, "bin");
+    mkdirSync(bin);
+    writeFileSync(path.join(fake.dir, "real-claude"), "");
+    symlinkSync(path.join(fake.dir, "real-claude"), path.join(bin, "claude"));
+    expect(commandPaths("claude", `/nonexistent${path.delimiter}${bin}`)).toEqual([path.join(bin, "claude"), path.join(fake.dir, "real-claude")]);
+    expect(commandPaths(path.join(bin, "claude"), undefined)).toEqual([path.join(bin, "claude"), path.join(fake.dir, "real-claude")]);
+    expect(commandPaths("claude", "/nonexistent")).toEqual([]);
   });
 });
 

@@ -13,6 +13,7 @@
  */
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
+import { existsSync, realpathSync } from "node:fs";
 import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -200,6 +201,26 @@ function modelFlags(ref: SupervisorModelRef): string[] {
   ];
 }
 
+/** Where `command` resolves (as given, on `PATH`, and through links), for the sandbox to keep visible. */
+export function commandPaths(command: string, searchPath: string | undefined): string[] {
+  const found = command.includes("/")
+    ? [path.resolve(command)]
+    : (searchPath ?? "")
+        .split(path.delimiter)
+        .filter((dir) => dir !== "")
+        .map((dir) => path.join(dir, command))
+        .filter((candidate) => existsSync(candidate))
+        .slice(0, 1);
+  const resolved = found.flatMap((p) => {
+    try {
+      return [p, realpathSync(p)];
+    } catch {
+      return [p];
+    }
+  });
+  return [...new Set(resolved)];
+}
+
 /** Claude Code's own login in `configDir`: its credentials file, or an OAuth account in its config; undefined where the OS keychain holds it. */
 async function defaultLoggedIn(configDir: string): Promise<boolean | undefined> {
   if (await exists(path.join(configDir, ".credentials.json"))) return true;
@@ -356,7 +377,8 @@ async function openClaudeSupervisorSession(
           launchScope: {
             writable: writableRoots(),
             trustedWritable: [shared.configDir],
-            readPaths: [turnCwd],
+            // The executable must stay visible inside the sandbox (a private /tmp would hide one there).
+            readPaths: [turnCwd, ...commandPaths(shared.command, shared.env.PATH)],
           },
           signal,
           killGraceMs: shared.killGraceMs,
