@@ -115,7 +115,10 @@ export function claudeConfinement(scratchDir: string): ClaudeConfinement {
         scratchDir,
         writable: scope.writable ?? [],
         ...(scope.trustedWritable !== undefined ? { trustedWritable: scope.trustedWritable } : {}),
-        ...(scope.readPaths !== undefined ? { readPaths: scope.readPaths } : {}),
+        // The supervisor reads the whole filesystem (§6.1): naming /tmp keeps it
+        // from getting a private /tmp that would hide run state, logs, or a
+        // plugin under /tmp. Its own temp files go to the scratch dir (TMPDIR).
+        readPaths: [...(scope.readPaths ?? []), "/tmp"],
         // Claude Code keeps its own login and state, which stay where they are.
         keepUserState: true,
       });

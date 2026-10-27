@@ -10,7 +10,7 @@ import { reenter, type GraphDecision } from "@graphloom/sdk";
 import { confinementUnsupported } from "@graphloom/runner";
 import type { SupervisorHost, SupervisorInput } from "@graphloom/supervisor";
 import { claudeRepairReviewer } from "../src/repair-config.js";
-import { claudeHarnessFor, parseClaudeSupervisorConfig } from "../src/supervisor-claude.js";
+import { claudeConfinement, claudeHarnessFor, parseClaudeSupervisorConfig } from "../src/supervisor-claude.js";
 import {
   parseSupervisorConfig,
   selectSupervisorHarness,
@@ -95,6 +95,23 @@ describe("supervisor harness selection (§7.3)", () => {
     const flat = parseSupervisorConfig({ provider: "minimax-cn", modelId: "MiniMax-M3" });
     expect(await selectSupervisorHarness(flat, { probe: async () => ((probed = true), { ok: false, reason: "x" }) })).toMatchObject({ harness: "pi" });
     expect(probed).toBe(false);
+  });
+});
+
+describe("the Claude Code supervisor's launch", () => {
+  it("reads the whole filesystem: no private /tmp, writable only where the scope says, no status fd", () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "gl-claude-launch-"));
+    temps.push(dir);
+    const scratch = path.join(dir, "scratch");
+    const own = path.join(dir, "own");
+    mkdirSync(own);
+    const launched = claudeConfinement(scratch).launch("claude", ["-p"], { PATH: "/usr/bin" }, os.homedir(), { writable: [], trustedWritable: [own], readPaths: [os.homedir()] });
+    expect(launched.command).toBe("bwrap");
+    expect(launched.args).not.toContain("--tmpfs");
+    expect(launched.args).not.toContain("--json-status-fd");
+    expect(launched.args.join(" ")).toContain(`--bind ${own} ${own}`);
+    expect(launched.args.slice(-3)).toEqual(["--", "claude", "-p"]);
+    expect(launched.env.TMPDIR).toBe(path.join(scratch, "tmp"));
   });
 });
 
