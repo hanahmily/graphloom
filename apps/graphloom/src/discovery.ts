@@ -374,7 +374,6 @@ async function discoverPi(config: RunnerConfig | undefined, supervisor: Supervis
     if (config !== undefined && enabledHarnesses(config).includes("pi")) {
       checks.push({ where: config.pi?.provider !== undefined ? "runner config pi" : PI_PROVIDER_ENV, provider: config.pi?.provider ?? env[PI_PROVIDER_ENV], modelId: config.pi?.modelId ?? env[PI_MODEL_ENV] });
     }
-    if (supervisor !== undefined) checks.push({ where: "supervisor config", provider: supervisor.provider, modelId: supervisor.modelId });
     for (const c of checks) {
       if (c.provider === undefined || c.modelId === undefined) continue;
       base.configured.push({
@@ -383,6 +382,19 @@ async function discoverPi(config: RunnerConfig | undefined, supervisor: Supervis
         modelId: c.modelId,
         resolves: runtime.getModel(c.provider, c.modelId) !== undefined,
         credential: base.credentials.some((p) => p.provider === c.provider),
+      });
+    }
+    if (supervisor !== undefined) {
+      // The supervisor reads its own agent dir (supervisor.json agentDir, else ~/.pi/agent), not the runner's.
+      const supervisorDir = supervisor.agentDir ?? path.join(home, ".pi", "agent");
+      const supRuntime = supervisorDir === agentDir ? runtime : await defaultPiModelRuntime(supervisorDir);
+      base.configured.push({
+        where: "supervisor config",
+        provider: supervisor.provider,
+        modelId: supervisor.modelId,
+        resolves: supRuntime.getModel(supervisor.provider, supervisor.modelId) !== undefined,
+        credential:
+          supervisorDir === agentDir ? base.credentials.some((p) => p.provider === supervisor.provider) : (await credentialSource(supRuntime, supervisor.provider)) !== undefined,
       });
     }
   } catch (err) {

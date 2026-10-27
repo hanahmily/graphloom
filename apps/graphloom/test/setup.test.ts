@@ -192,6 +192,18 @@ describe("graphloom setup", () => {
     expect(readdirSync(path.dirname(h.runnerFile)).some((n) => n.includes(".bak-"))).toBe(false);
   });
 
+  it("repairs a runner config whose Pi model Pi does not know, when Pi is the only writer", async () => {
+    const h = await home();
+    await mkdir(path.dirname(h.runnerFile), { recursive: true });
+    await writeFile(h.runnerFile, JSON.stringify({ harness: "pi", allowUnrestricted: true, pi: { provider: "minimax-cn", modelId: "bogus" } }));
+    const d = discovery(h, { available: ["pi"] });
+    d.pi = { ...d.pi, available: false, reason: "minimax-cn/bogus is not in Pi's model registry", fix: "graphloom setup" };
+    const p = scripted(["y", "n", "y"]);
+    const result = await runSetup({ prompter: p, discovery: d, now });
+    expect(result.exitCode, p.transcript()).toBe(0);
+    expect(json(h.runnerFile)).toEqual({ harness: "pi", allowUnrestricted: true, pi: { provider: "minimax-cn", modelId: "MiniMax-M3" } });
+  });
+
   it("a rerun offers to disable an enabled harness that is no longer available", async () => {
     const h = await home();
     await mkdir(path.dirname(h.runnerFile), { recursive: true });

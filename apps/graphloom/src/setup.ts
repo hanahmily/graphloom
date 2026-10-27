@@ -249,7 +249,11 @@ export async function runSetup(options: SetupOptions = {}): Promise<SetupResult>
   if (!yes && p === undefined) throw new Error("graphloom setup needs a terminal to ask its questions; run graphloom setup --yes to accept the recommendations");
 
   say("graphloom setup: discovering what this machine can run (graphloom doctor shows the details)");
-  const d = options.discovery ?? (await discover(env));
+  const found = options.discovery ?? (await discover(env));
+  // Setup can configure Pi whenever a provider has a credential, even when the
+  // current runner config names a model Pi does not know: that is what it repairs.
+  const piCandidate = found.pi.error === undefined && found.pi.credentials.length > 0;
+  const d: Discovery = piCandidate && !found.pi.available ? { ...found, pi: { ...found.pi, available: true } } : found;
   const runnerFile = d.runner.file;
   const supervisorFile = d.supervisor.file;
   const result = (exitCode: 0 | 1, runner: FileOutcome, supervisor: FileOutcome, reason?: string): SetupResult => ({
