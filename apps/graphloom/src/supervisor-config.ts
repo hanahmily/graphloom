@@ -512,7 +512,8 @@ export async function resumeSupervisorPlan(
       ? { selection: { harness: pinned, source: "binding", reason: `pinned at the run's first recovery episode, ${pinned} (a run started before supervisor selection)` } }
       : undefined;
   const probe = options.probe ?? ((h: SupervisorHarnessName) => probeSupervisorHarness(withModelHints(config!, h, preference), h));
-  if (options.flag !== undefined) {
+  // --supervisor naming the pinned harness changes nothing: the pinned checks below apply (a bound Pi on its bound model).
+  if (options.flag !== undefined && !(pinned !== undefined && options.flag === pinned && config !== undefined)) {
     if (config === undefined) {
       throw new Error(`--supervisor ${options.flag} needs an operator supervisor config that enables it ($GRAPHLOOM_SUPERVISOR_CONFIG or ~/.config/graphloom/supervisor.json)`);
     }

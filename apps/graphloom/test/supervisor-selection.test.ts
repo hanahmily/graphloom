@@ -234,6 +234,10 @@ describe("resume's supervisor (§7.4)", () => {
       const switched = runState({ selection: "pi", binding: "pi" });
       switched.supervisorBinding = { ...switched.supervisorBinding!, provider: "deepseek", modelId: "deepseek-v4-pro" };
       expect(await resumeSupervisorPlan(config, switched)).toMatchObject({ harness: "pi" });
+      // --supervisor naming the pinned harness is the same resume.
+      const same = await resumeSupervisorPlan(config, switched, { flag: "pi" });
+      expect(same).toMatchObject({ harness: "pi" });
+      expect(same.pin).toBeUndefined();
       // Bound to the model without a credential, the same resume is refused.
       await expect(resumeSupervisorPlan(config, runState({ selection: "pi", binding: "pi" }))).rejects.toThrow(/pin mismatch: .*pinned to pi, which is not available here/);
       // Unless a crash interrupted a switch: the controller settles it from the transcript, so the restore decides.
