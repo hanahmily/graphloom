@@ -240,6 +240,14 @@ describe("resume's supervisor (§7.4)", () => {
       expect(same.pin).toBeUndefined();
       // Bound to the model without a credential, the same resume is refused.
       await expect(resumeSupervisorPlan(config, runState({ selection: "pi", binding: "pi" }))).rejects.toThrow(/pin mismatch: .*pinned to pi, which is not available here/);
+      // The bound model removed from the operator's models still restores on it, so it is the one probed:
+      // with the operator's first (minimax-cn, no credential) the bound deepseek session resumes...
+      const removed = parseSupervisorConfig({ harnesses: ["pi"], pi: { provider: "minimax-cn", modelId: "MiniMax-M3", agentDir: dir } });
+      expect(await resumeSupervisorPlan(removed, switched)).toMatchObject({ harness: "pi" });
+      // ...and with a credential only for the operator's first, the bound model's missing one refuses it.
+      process.env.MINIMAX_CN_API_KEY = "stand-in-not-a-key";
+      delete process.env.DEEPSEEK_API_KEY;
+      await expect(resumeSupervisorPlan(removed, switched)).rejects.toThrow(/pin mismatch: .*pinned to pi, which is not available here: .*deepseek/);
       // Unless a crash interrupted a switch: the controller settles it from the transcript, so the restore decides.
       const interrupted = runState({ selection: "pi", binding: "pi" });
       interrupted.supervisorBinding = {

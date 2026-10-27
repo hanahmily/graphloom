@@ -17,7 +17,7 @@ import { switchModelTarget } from "./switch-model.js";
 import { check, probe, recordScenario, rehearse, rehearseStopAt, replay, resumeRehearsal } from "./rehearsal.js";
 import { dispatchToOwner, installHome, recordOwnership, removeOwnershipRecord, selfInstall } from "./ownership.js";
 import { requireRunnerConfig, runnerConfigPath } from "./runner-config.js";
-import { discover } from "./discovery.js";
+import { discover, probeEnabledSupervisors } from "./discovery.js";
 import { doctorReport, formatDoctor, taskProfile, type TaskInputs } from "./doctor.js";
 import { describeTask } from "./rehearsal.js";
 import { isInteractive, runSetup, terminalPrompter } from "./setup.js";
@@ -77,6 +77,11 @@ async function main(): Promise<void> {
         (t) => ({ taskPath, definition: t.definition, environment: t.environment, ...(t.config !== undefined ? { profile: taskProfile(taskPath, t.config)! } : {}) }),
         (err: unknown) => ({ taskPath, environment: [], error: err instanceof Error ? err.message : String(err) }),
       );
+      // Probe the enabled supervisors as run would for this task: on the models its plugin's hints put first.
+      const preference = task.definition?.supervisor;
+      if (preference?.models !== undefined && discovery.supervisor.config !== undefined) {
+        task.supervisorEnabled = await probeEnabledSupervisors(discovery.supervisor.config, discovery.pi, discovery.env, preference);
+      }
     }
     const report = doctorReport(discovery, task);
     console.log(args.includes("--json") ? JSON.stringify(report, null, 2) : formatDoctor(report));
@@ -682,8 +687,9 @@ input.harness. Command jobs run as you in the job's workspace ("command":
 { "timeoutMs": ... } bounds one job). "github": { "tokenEnv": "GITHUB_TOKEN" }
 serves read-only GitHub executors with the token from that variable.
 
-Supervisor: run and resume use a Pi supervisor when an operator config exists at
-$GRAPHLOOM_SUPERVISOR_CONFIG or ~/.config/graphloom/supervisor.json. Its model is
+Supervisor: run and resume use a supervisor on Pi, Claude Code, or Codex when an
+operator config exists at $GRAPHLOOM_SUPERVISOR_CONFIG or
+~/.config/graphloom/supervisor.json. The flat form is Pi alone; its model is
 any <provider>/<modelId> Pi knows (anthropic, openai, google, deepseek,
 moonshotai, minimax-cn, ..., or a custom provider in Pi's models.json):
   { "provider": "deepseek", "modelId": "deepseek-v4-pro",
@@ -706,7 +712,9 @@ the pinned harness is no longer enabled or available; resume --supervisor
 harness, keeping its logical session, budgets, and case file (inspect:
 supervisorTransitions). switch-model takes a model of the pinned harness:
 provider/model for Pi, the model name (or claude-code/<name>, codex/<name>)
-for Claude Code and Codex, each one the operator configured.
+for Claude Code and Codex, each one the operator configured. doctor probes
+each enabled harness; stats shows supervisor use (episodes, turns, provider
+calls, tokens where the harness reports them) per harness.
 `);
 }
 

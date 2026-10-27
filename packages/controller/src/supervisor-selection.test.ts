@@ -138,10 +138,11 @@ async function makeEnv(): Promise<{ taskPath: string; stateRoot: string }> {
   return { taskPath, stateRoot: path.join(dir, "state") };
 }
 
-/** A session answering with JSON replies, then failing once they run out. */
-function session(replies: string[], id: string): PiSupervisorSessionPort {
+/** A session answering with JSON replies, then failing once they run out; `usage`, when given, is each prompt's reported usage. */
+function session(replies: string[], id: string, usage?: { inputTokens: number; outputTokens: number }): PiSupervisorSessionPort {
   let i = 0;
   return {
+    ...(usage !== undefined ? { lastUsage: () => ({ ...usage }) } : {}),
     runId: "run",
     provider: "minimax-cn",
     modelId: "MiniMax-M3",
@@ -166,7 +167,12 @@ const FINISH = [
 ];
 
 /** A supervisor host on a harness named `name`, scripted with `replies`. */
-function hostOn(name: string, replies: string[], id: string, options: { logicalSessionId?: string; switchJournal?: Parameters<typeof createSupervisorHost>[0]["initialSwitchJournal"] } = {}) {
+function hostOn(
+  name: string,
+  replies: string[],
+  id: string,
+  options: { logicalSessionId?: string; switchJournal?: Parameters<typeof createSupervisorHost>[0]["initialSwitchJournal"]; usage?: { inputTokens: number; outputTokens: number } } = {},
+) {
   const harness: SupervisorHarness = {
     name,
     capabilities: PI_HARNESS_CAPABILITIES,
@@ -177,7 +183,7 @@ function hostOn(name: string, replies: string[], id: string, options: { logicalS
   };
   return createSupervisorHost({
     harness,
-    session: session(replies, id) as unknown as HarnessSession,
+    session: session(replies, id, options.usage) as unknown as HarnessSession,
     requireCitedEvidence: false,
     ...(options.logicalSessionId !== undefined ? { logicalSessionId: options.logicalSessionId } : {}),
     ...(options.switchJournal !== undefined ? { initialSwitchJournal: options.switchJournal } : {}),
@@ -344,6 +350,7 @@ describe("supervisor pin on resume", () => {
         contexts.push(ctx);
         return hostOn("claude-code", FINISH, "sess-cc-episode", {
           ...(ctx.continueSession !== undefined ? { logicalSessionId: ctx.continueSession.sessionId, switchJournal: ctx.continueSession.switchJournal } : {}),
+          usage: { inputTokens: 1000, outputTokens: 50 },
         });
       },
     });
@@ -355,6 +362,15 @@ describe("supervisor pin on resume", () => {
     expect(state.supervisorBinding?.switchJournal[0]).toMatchObject({ reason: "earlier" });
     expect(state.budgets.decisions).toBeLessThan(before.budgets.decisions);
     expect(state.supervisorEpisodes?.length).toBeGreaterThan(before.supervisorEpisodes?.length ?? 0);
+    // Each episode record names the harness its decide() call ran on, and the usage it reported (S6, for stats).
+    const records = state.supervisorEpisodes ?? [];
+    const old = records.slice(0, before.supervisorEpisodes?.length ?? 0);
+    const moved = records.slice(before.supervisorEpisodes?.length ?? 0);
+    expect(old.map((r) => r.harness)).toEqual(old.map(() => "pi"));
+    expect(old.every((r) => r.usage === undefined)).toBe(true);
+    expect(moved.map((r) => r.harness)).toEqual(moved.map(() => "claude-code"));
+    // One prompt per decide() call here, each reporting its usage.
+    expect(moved.map((r) => r.usage)).toEqual(moved.map(() => ({ inputTokens: 1000, outputTokens: 50 })));
     const transition = state.supervisorTransitions?.[0];
     expect(state.supervisorTransitions).toEqual([
       { from: "pi", to: "claude-code", reason: "Pi's provider is out of credit", generation: before.generation, at: expect.any(String), evidenceRef: expect.stringMatching(/^ev-/) },

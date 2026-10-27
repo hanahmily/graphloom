@@ -23,7 +23,10 @@ and purpose (review jobs among them), receipts kept and invalidated; every
 budget as used, left, the run's budget (used plus left) and the intake value;
 agent calls outside the stages (supervisor, proposal reviewer, repairs);
 generations by reason (reentries, resumes, activated repairs); supervisor
-episodes, turns and provider calls; and remedies.
+episodes, turns and provider calls, in total and per supervisor harness (with
+token usage where Claude Code or Codex reported it, and each `resume
+--supervisor` transition; [supervisor harnesses §10.1](design-supervisor-harnesses.md#101-as-built-in-s6));
+and remedies.
 
 Every number says how far it can be trusted:
 

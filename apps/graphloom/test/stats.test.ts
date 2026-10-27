@@ -74,8 +74,62 @@ describe("graphloom stats on recorded runs (#150)", () => {
       providerCalls: 3,
       source: "episode records and episode ids referenced in run state",
       exactness: "lower bound",
+      transitions: [],
+      // Nothing pinned it and the record predates the harness field.
+      byHarness: [{ harness: "unknown", episodes: 1, turns: 1, providerCalls: 3, turnsWithUsage: 0, attribution: "inferred" }],
     });
     expect(formatRunStats(stats)).toContain("supervisor: 24 episodes, 1 recorded turns, 3 recorded provider calls (lower bound");
+  });
+
+  it("reports supervisor use per harness across resume --supervisor transitions, with token usage where the harness reported it (S6)", () => {
+    const legacy = (episodeId: string, at: string, providerCalls: number) => ({ episodeId, turn: 1, runId: "moved", at, providerCalls }) as never;
+    const recorded = (episodeId: string, turn: number, at: string, harness: string, providerCalls: number, usage?: Record<string, number>) =>
+      ({ episodeId, turn, runId: "moved", at, providerCalls, harness, ...(usage !== undefined ? { usage } : {}) }) as never;
+    const state = {
+      runId: "moved",
+      status: "succeeded",
+      generation: 1,
+      activeVersion: "g@1",
+      receipts: [],
+      evidence: [],
+      definition: { graphId: "g", version: "1", stages: [], requirements: [], defaultValidators: [] },
+      budgets: { agentInvocations: 50 },
+      intake: { task: {}, bundle: { graphId: "g" }, budgets: { agentInvocations: 64 } },
+      versionHistory: [],
+      supervisorSelection: { harness: "codex", source: "flag", reason: "resume --supervisor codex", generation: 1, at: "2026-10-27T03:00:00.000Z" },
+      supervisorBinding: { sessionId: "s", provider: "codex", modelId: "default", switchJournal: [], harness: "codex" },
+      supervisorTransitions: [
+        { from: "pi", to: "claude-code", reason: "Pi's provider is out of credit", generation: 1, at: "2026-10-27T01:00:00.000Z", evidenceRef: "ev-1" },
+        { from: "claude-code", to: "codex", reason: "session limit", generation: 1, at: "2026-10-27T02:00:00.000Z", evidenceRef: "ev-2" },
+      ],
+      supervisorEpisodes: [
+        // Written before records named their harness: attributed to pi, the pin before the first transition.
+        legacy("ep-1", "2026-10-27T00:10:00.000Z", 3),
+        legacy("ep-2", "2026-10-27T00:20:00.000Z", 2),
+        // ep-2 continued on Claude Code after the move.
+        recorded("ep-2", 2, "2026-10-27T01:10:00.000Z", "claude-code", 2, { inputTokens: 12000, outputTokens: 300, cacheReadTokens: 9000, costUsd: 0.05 }),
+        recorded("ep-3", 1, "2026-10-27T02:10:00.000Z", "codex", 1, { inputTokens: 17000, outputTokens: 120 }),
+        recorded("ep-3", 2, "2026-10-27T02:20:00.000Z", "codex", 1),
+      ],
+    } as unknown as DurableRunState;
+    const stats = runStats(state);
+    expect(stats.supervisor).toMatchObject({ episodes: 3, turns: 5, providerCalls: 9, pinned: "codex" });
+    expect(stats.supervisor.transitions.map((t) => [t.from, t.to])).toEqual([["pi", "claude-code"], ["claude-code", "codex"]]);
+    expect(stats.supervisor.byHarness).toEqual([
+      { harness: "pi", episodes: 2, turns: 2, providerCalls: 5, turnsWithUsage: 0, attribution: "inferred" },
+      { harness: "claude-code", episodes: 1, turns: 1, providerCalls: 2, turnsWithUsage: 1, usage: { inputTokens: 12000, outputTokens: 300, cacheReadTokens: 9000, costUsd: 0.05 }, attribution: "recorded" },
+      { harness: "codex", episodes: 1, turns: 2, providerCalls: 2, turnsWithUsage: 1, usage: { inputTokens: 17000, outputTokens: 120 }, attribution: "recorded" },
+    ]);
+    const text = formatRunStats(stats);
+    expect(text).toContain("; pinned to codex");
+    expect(text).toContain("  pi: 2 episodes, 2 turns, 5 provider calls, no token usage reported (harness inferred from the pin for records before S6)");
+    expect(text).toContain("  claude-code: 1 episodes, 1 turns, 2 provider calls, 12,000 in / 300 out tokens (9,000 cache read), $0.05");
+    expect(text).toContain("  codex: 1 episodes, 2 turns, 2 provider calls, 17,000 in / 120 out tokens (1 of 2 turns reported usage)");
+    expect(text).toContain("  moved pi -> claude-code at 2026-10-27T01:00:00.000Z: Pi's provider is out of credit");
+
+    // Without transitions, a record without its harness is the pin's.
+    const plain = runStats({ ...state, supervisorTransitions: [], supervisorEpisodes: [legacy("ep-1", "2026-10-27T00:10:00.000Z", 1)] } as DurableRunState);
+    expect(plain.supervisor.byHarness).toEqual([{ harness: "codex", episodes: 1, turns: 1, providerCalls: 1, turnsWithUsage: 0, attribution: "inferred" }]);
   });
 
   it("handles a state missing every optional field", () => {

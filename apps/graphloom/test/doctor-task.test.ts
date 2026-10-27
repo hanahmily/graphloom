@@ -36,8 +36,8 @@ async function repo(env: DoctorEnv): Promise<void> {
   await mkdir(path.join(env.root, "plugins"));
 }
 
-/** A copy of hello whose describe() declares `roles` and two environment checks, one failing. */
-async function fixturePlugin(roles: unknown[]): Promise<string> {
+/** A copy of hello whose describe() declares `roles` and two environment checks, one failing, plus `extra` fields. */
+async function fixturePlugin(roles: unknown[], extra: Record<string, unknown> = {}): Promise<string> {
   const bundle = await copyBundle(scope, path.join(repoRoot, "examples", "plugins", "hello"));
   await writeFile(
     path.join(bundle, "dist", "doctor-fixture.js"),
@@ -50,6 +50,7 @@ export function createGraph() {
     ...(await graph.describe(config)),
     environment: { checks: [{ id: "has-sh", argv: ["sh", "-c", "echo ok"] }, { id: "needs-docker", argv: ["sh", "-c", "echo docker is required >&2; exit 3"] }] },
     agentRoles: ${JSON.stringify(roles)},
+    ...${JSON.stringify(extra)},
   });
   return wrapped;
 }
@@ -116,6 +117,28 @@ describe("graphloom doctor --task", () => {
     expect(row(report, "role builder")).toMatchObject({ status: "pass", detail: "builder: pi (write); enabled and available; alternatives: claude-code" });
     expect(text).toMatch(/^Task$/m);
     expect(text).toContain('fix: set roles.auditor to "pi" in the task\'s config');
+  });
+
+  it("probes the supervisor on the model the plugin's hint makes run start on, as run does", async () => {
+    // MiniMax has a credential, DeepSeek none; the operator lists MiniMax first, the plugin hints DeepSeek.
+    const env = await makeDoctorEnv({ claude: "missing", codex: "missing", piEnv: true });
+    await repo(env);
+    await mkdir(path.dirname(env.runnerFile), { recursive: true });
+    await writeFile(env.runnerFile, JSON.stringify({ harness: "pi", allowUnrestricted: true, pi: { provider: "minimax-cn", modelId: "MiniMax-M3" } }));
+    await writeFile(env.supervisorFile, JSON.stringify({ harnesses: ["pi"], pi: { provider: "minimax-cn", modelId: "MiniMax-M3", models: ["deepseek/deepseek-v4-pro"] } }));
+    const bundle = await fixturePlugin([], { supervisor: { harnesses: ["pi"], models: { pi: ["deepseek/deepseek-v4-pro"] } } });
+    await symlink(bundle, path.join(env.root, "plugins", "hello"));
+    await writeFile(path.join(env.root, "task.yaml"), `graph: hello\nrepo: ./test-repo\nrequest: "Create GREETING.txt"\n`);
+
+    const { report } = await doctorTask(env, "task.yaml");
+    // Without the task, the operator's own first model: available.
+    expect(row(report, "supervisor pi")).toMatchObject({ status: "pass", detail: expect.stringContaining("minimax-cn/MiniMax-M3") });
+    // For the task, run would start on the hinted DeepSeek model and refuse it for want of a credential.
+    expect(row(report, "supervisor selection")).toMatchObject({
+      status: "warn",
+      detail: expect.stringMatching(/^none: no enabled harness is available \(pi: credential unavailable for provider deepseek/),
+      fix: expect.stringContaining("export DEEPSEEK_API_KEY=<key>"),
+    });
   });
 
   it("on issue-fix on a host with only Claude Code: the reviewer needs Codex (codex login) or a profile change", async () => {

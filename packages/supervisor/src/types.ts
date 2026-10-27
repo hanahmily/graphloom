@@ -12,6 +12,7 @@ import type {
   RepairTarget,
   RunView,
 } from "@graphloom/sdk";
+import type { HarnessUsage } from "./harness.js";
 import type { InvestigationStep } from "./investigation.js";
 import type { ProviderFailureClass } from "./provider-failure.js";
 
@@ -283,6 +284,12 @@ export interface Supervisor {
    * whose inspection the controller records itself, returns none.
    */
   drainInvestigation?(): InvestigationStep[];
+  /**
+   * Optional: the token usage the harness reported for the prompts since the
+   * last drain, summed, for the decide() call's episode record; undefined
+   * when it reported none (Pi). Recorded, never charged.
+   */
+  drainUsage?(): HarnessUsage | undefined;
   /**
    * Optional: every investigation step of the current episode, drained or
    * not (non-destructive). The controller accepts these ids as citations

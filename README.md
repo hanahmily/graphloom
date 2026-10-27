@@ -17,8 +17,8 @@ The [TypeScript core design](docs/design-typescript-core.md) is authoritative.
 Active code lives under `packages/` (`sdk`, `controller`, `plugin-host`,
 `supervisor`, `runner`), built-in executor packages under `executors/` (`github`, `coding-agent`),
 and `apps/graphloom`. The SDK, isolated plugin host, durable controller lifecycle,
-Pi supervisor, executor packages, and qualified repair workflows are implemented
-and covered by scripted integration tests. Live-provider qualification and the
+the supervisor on Pi, Claude Code, or Codex, executor packages, and qualified
+repair workflows are implemented and covered by scripted integration tests. Live-provider qualification and the
 complete local-release scenarios remain outstanding. [Agent-host mode](docs/design-agent-host.md) is newly designed and not implemented.
 Earlier Go sources are frozen under
 [`legacy/go`](legacy/go) for reference and are not part of CI.
@@ -74,24 +74,59 @@ The same configuration is used by `resume`. Without runner configuration, or
 without the Claude Code or Codex command or Pi model it names, `run` and
 `resume` refuse to start. The [example guide](examples/README.md) lists every setting.
 
-The supervisor (`~/.config/graphloom/supervisor.json`, also written by
-`graphloom setup`) runs on any model Pi supports, with one config shape for
-every vendor: `{ "provider": "<pi provider>", "modelId": "<model>" }`. Claude
-and OpenAI models have two routes: Claude through the `claude-code` harness
-(your Claude Code login, never an API key) or through Pi with
-`ANTHROPIC_API_KEY`; OpenAI through the `codex` harness (phase S4, not yet) or
-through Pi with `OPENAI_API_KEY`. Gemini, DeepSeek, Kimi, MiniMax, and every
-other vendor run through Pi; a custom OpenAI-, Anthropic-, or Google-compatible
-endpoint is a provider in Pi's `models.json`. For DeepSeek, `DEEPSEEK_API_KEY`
-and `{ "provider": "deepseek", "modelId": "deepseek-v4-pro" }` are all it
-takes. See [choosing a supervisor model](docs/design-pi-supervisor.md#choosing-a-supervisor-model)
-for examples per vendor; `graphloom doctor` shows which routes have a credential.
-
 `allowUnrestricted` is required because coding agents can run shell commands
 with the operator's permissions. Claude's file-tool permission checks restrict
 file mutations to the job scope and deny shell commands for read-only jobs;
 writer shell commands still require trust. See the
 [permission and cancellation design](docs/design-claude-live-mode.md).
+
+### The supervisor
+
+The supervisor (`~/.config/graphloom/supervisor.json`, or the file
+`GRAPHLOOM_SUPERVISOR_CONFIG` names; also written by `graphloom setup`) runs on
+one of three **harnesses**:
+
+- **Pi**, in-process, on any model Pi supports:
+  `{ "provider": "<pi provider>", "modelId": "<model>" }` with that provider's
+  Pi credential. For DeepSeek, `DEEPSEEK_API_KEY` and
+  `{ "provider": "deepseek", "modelId": "deepseek-v4-pro" }` are all it takes.
+- **Claude Code**, your own `claude` login (never an API key), under bwrap.
+- **Codex**, your own `codex` login (a ChatGPT login; a Codex home signed in
+  with an API key is refused), under bwrap.
+
+So Claude and OpenAI models each have two routes: Claude through Claude Code
+or through Pi with `ANTHROPIC_API_KEY`; OpenAI through Codex or through Pi with
+`OPENAI_API_KEY`. Gemini, DeepSeek, Kimi, MiniMax, and every other vendor run
+through Pi; a custom OpenAI-, Anthropic-, or Google-compatible endpoint is a
+provider in Pi's `models.json`. A Claude Code subscription or a Codex login
+alone is enough for automatic recovery.
+
+The per-harness form enables several and lists each one's models:
+
+```json
+{
+  "harnesses": ["pi", "claude-code", "codex"],
+  "pi": { "provider": "deepseek", "modelId": "deepseek-v4-pro" },
+  "claude": { "models": ["opus", "sonnet"] },
+  "codex": { "models": [{ "modelId": "gpt-5-codex", "thinkingLevel": "high" }] }
+}
+```
+
+A plugin may say which harness it prefers (`GraphDefinition.supervisor`); the
+operator's `harnesses` is the allowlist and fallback order, and `"select"`
+overrides the plugin. `graphloom run --supervisor <harness>` overrides both for
+one run. The harness is pinned when the run starts, and the repair reviewer
+uses the same one. `graphloom resume <run> --supervisor <harness> [--reason
+<text>]` moves a run to another enabled harness, keeping its logical session,
+budgets, and case file; `graphloom switch-model <run> <model> --reason
+<text>` changes the model within the pinned harness (`provider/model` for Pi, the model name for
+Claude Code and Codex). `graphloom check` and `graphloom doctor --task` report
+the harness a run would get, `graphloom doctor` runs each enabled harness's own
+probe and shows which vendor routes have a login or credential, and
+`graphloom stats` shows the supervisor's use per harness. See
+[supervisor harnesses](docs/design-supervisor-harnesses.md) and
+[choosing a supervisor model](docs/design-pi-supervisor.md#choosing-a-supervisor-model)
+for examples per vendor.
 
 ### Knowing when a run stops
 
@@ -121,7 +156,7 @@ takes it over.
 
 An existing coding-agent session can be the primary worker and supervisor, using
 GraphLoom tools for assignments, executors, evidence, and recovery. This mode needs
-no separate Pi supervisor, and retains separate sessions for independent review.
+no separate supervisor session, and retains separate sessions for independent review.
 The first adapter targets a Claude Code plugin; the existing headless Claude worker
 is not that plugin. See the [agent-host design](docs/design-agent-host.md).
 
@@ -148,10 +183,13 @@ crashes; filesystem and execution scopes require host enforcement.
 - [Domain glossary](CONTEXT.md): project vocabulary.
 - [Roadmap](docs/roadmap.md): entry point to the implementation sequence.
 - [TypeScript decision](docs/adr/0002-typescript-repairable-plugins.md).
-- [Supervisor harnesses](docs/design-supervisor-harnesses.md) (proposed; S1 to S3, through the Claude Code harness, implemented): the
-  supervisor runs on Pi, Claude Code, or Codex behind one contract, so a Claude
-  Code subscription or a Codex login alone gets automatic recovery; the plugin
-  declares its preferred harness and the run pins one.
+- [Supervisor harnesses](docs/design-supervisor-harnesses.md) (implemented, S1
+  to S6): the supervisor runs on Pi, Claude Code, or Codex behind one
+  contract, so a Claude Code subscription or a Codex login alone gets
+  automatic recovery; the plugin declares its preferred harness, the run pins
+  one, and `resume --supervisor` moves it.
+- [Pi supervisor](docs/design-pi-supervisor.md): the Pi harness, and
+  choosing a supervisor model on any Pi provider.
 - [Run convergence design](docs/design-run-convergence.md): candidate-anchored
   freshness, correction escalation with an exit, supervisor repetition detection,
   and adjudicated plan review.

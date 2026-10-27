@@ -547,10 +547,11 @@ export async function resumeSupervisorPlan(
     // restores is not known here, so its preflight is left to the restore.
     const unsettled = pinned === "pi" && (state.supervisorBinding?.switchJournal ?? []).some((r) => r.status === "intent");
     if (!(config.harnesses === undefined && pinned === "pi") && !unsettled) {
-      // A Pi session restores on its bound model (it may have switched provider): probe that one.
+      // A Pi session restores on its bound model (it may have switched provider), configured or not
+      // (the restore opens the bound model even when the operator has since removed it): probe that one.
       const binding = state.supervisorBinding;
       const bound = pinned === "pi" && options.probe === undefined && binding?.sessionFile !== undefined && bindingHarness(binding) === "pi"
-        ? config.models.find((m) => m.provider === binding.provider && m.modelId === binding.modelId)
+        ? (config.models.find((m) => m.provider === binding.provider && m.modelId === binding.modelId) ?? { provider: binding.provider, modelId: binding.modelId })
         : undefined;
       const check = bound !== undefined
         ? (h: SupervisorHarnessName) => probeSupervisorHarness({ ...config, provider: bound.provider, modelId: bound.modelId, models: [bound, ...config.models.filter((m) => m !== bound)] }, h)
