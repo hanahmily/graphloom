@@ -41,7 +41,7 @@ const view: RunView = {
 };
 
 describe("restorePiSupervisorFromBinding", () => {
-  it("opens later episodes on a non-MiniMax model after a switch, without forwarding the MiniMax apiKey", async () => {
+  it("opens later episodes on another provider after a switch, without forwarding the first provider's apiKey", async () => {
     const dir = await mkdtemp(path.join(os.tmpdir(), "gl-restore-"));
     temps.push(dir);
     setEnv("MINIMAX_CN_API_KEY", undefined);

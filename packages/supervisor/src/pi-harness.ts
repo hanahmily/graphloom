@@ -21,7 +21,6 @@ import {
   DEFAULT_SUPERVISOR_MODEL,
   DEFAULT_SUPERVISOR_PROVIDER,
   ensureProviderCredentials,
-  isMiniMaxProvider,
   type CreatePiSupervisorSessionOptions,
   type PiSupervisorSession,
 } from "./pi-session.js";
@@ -29,6 +28,11 @@ import {
 /** Everything a Pi episode session is opened with except its model. */
 export type PiSessionBase = Omit<CreatePiSupervisorSessionOptions, "provider" | "modelId" | "thinkingLevel" | "sessionFile">;
 
+/**
+ * `apiKey` (inherited) is the explicit key of the first configured model's
+ * provider; `apiKeys` (inherited) names explicit keys of any other provider.
+ * Without one, each provider's own Pi credential is used.
+ */
 export interface PiHarnessOptions extends PiSessionBase {
   /** Models the operator configured, the initial one first; switches outside this set are refused. */
   configuredModels?: SupervisorModelRef[];
@@ -47,7 +51,7 @@ export interface PiHarnessOptions extends PiSessionBase {
 
 export interface PiHarness extends SupervisorHarness {
   readonly name: "pi";
-  /** A new logical supervisor on the first configured model (default MiniMax-M3 on minimax-cn). */
+  /** A new logical supervisor on the first configured model (DEFAULT_SUPERVISOR_PROVIDER/MODEL when none is configured). */
   start(): Promise<SupervisorHost>;
 }
 
@@ -55,14 +59,19 @@ export interface PiHarness extends SupervisorHarness {
  * Opens a new durable Pi session in `sessionDir` on a given model, for one
  * recovery episode. Every session the run's supervisor uses comes from here.
  */
-export function piEpisodeSessionOpener(base: PiSessionBase): (model: SupervisorModelRef) => Promise<PiSupervisorSession> {
-  // The explicit key is MiniMax's only: after a switch to another provider,
-  // later episodes open on that provider's own Pi-stored credential.
-  const { apiKey, ...shared } = base;
+export function piEpisodeSessionOpener(
+  base: PiSessionBase,
+  /** The provider `base.apiKey` belongs to. Default: DEFAULT_SUPERVISOR_PROVIDER. */
+  keyProvider: string = DEFAULT_SUPERVISOR_PROVIDER,
+): (model: SupervisorModelRef) => Promise<PiSupervisorSession> {
+  // Each explicit key belongs to one provider: an episode on another provider
+  // (after a switch) opens on that provider's own key, never this one.
+  const { apiKey: _apiKey, apiKeys: _apiKeys, ...shared } = base;
+  const keys = explicitKeys(base, keyProvider);
   return (model) =>
     createPiSupervisorSession({
       ...shared,
-      ...(apiKey !== undefined && isMiniMaxProvider(model.provider) ? { apiKey } : {}),
+      ...(Object.keys(keys).length > 0 ? { apiKeys: keys } : {}),
       provider: model.provider,
       modelId: model.modelId,
       ...(model.thinkingLevel !== undefined ? { thinkingLevel: model.thinkingLevel } : {}),
@@ -76,10 +85,11 @@ export function piEpisodeSessionOpener(base: PiSessionBase): (model: SupervisorM
  */
 export function createPiHarness(options: PiHarnessOptions): PiHarness {
   const { configuredModels, patchTimeoutMs, quotaRetryMs, transientRetryBaseMs, sessionOpener, ...base } = options;
-  const piOpen = piEpisodeSessionOpener(base);
-  const open = sessionOpener ?? ((model: SupervisorModelRef) => piOpen(model));
   const initial = (): SupervisorModelRef =>
     configuredModels?.[0] ?? { provider: DEFAULT_SUPERVISOR_PROVIDER, modelId: DEFAULT_SUPERVISOR_MODEL };
+  const keys = explicitKeys(base, initial().provider);
+  const piOpen = piEpisodeSessionOpener(base, initial().provider);
+  const open = sessionOpener ?? ((model: SupervisorModelRef) => piOpen(model));
   const hostOptions = {
     ...(patchTimeoutMs !== undefined ? { patchTimeoutMs } : {}),
     ...(quotaRetryMs !== undefined ? { quotaRetryMs } : {}),
@@ -98,7 +108,7 @@ export function createPiHarness(options: PiHarnessOptions): PiHarness {
           modelRuntime,
           provider: model.provider,
           agentDir,
-          ...(base.apiKey !== undefined && isMiniMaxProvider(model.provider) ? { apiKey: base.apiKey } : {}),
+          ...(keys[model.provider] !== undefined ? { apiKey: keys[model.provider] } : {}),
         });
         if (modelRuntime.getModel(model.provider, model.modelId) === undefined) {
           return { ok: false, reason: `Pi model not found: ${model.provider}/${model.modelId}` };
@@ -139,6 +149,11 @@ export function createPiHarness(options: PiHarnessOptions): PiHarness {
     },
   };
   return harness;
+}
+
+/** Explicit keys by provider: `apiKeys`, plus `apiKey` for `keyProvider`. */
+function explicitKeys(base: Pick<PiSessionBase, "apiKey" | "apiKeys">, keyProvider: string): Record<string, string> {
+  return { ...(base.apiKeys ?? {}), ...(base.apiKey !== undefined ? { [keyProvider]: base.apiKey } : {}) };
 }
 
 /** Every model a binding names: the bound one and both ends of each journaled switch. */

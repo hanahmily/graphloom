@@ -21,7 +21,6 @@ import {
   HARNESS_LABEL,
   HARNESS_ORDER,
   LOGIN_FIX,
-  RECOMMENDED_PI,
   SHIPPED_SUPERVISOR_HARNESSES,
   SUPERVISOR_ORDER,
   WRITING_HARNESSES,
@@ -230,6 +229,31 @@ export function updatesCheck(d: Discovery): DoctorCheck {
   return check("configuration", "updates", "pass", facts_);
 }
 
+/**
+ * How each vendor's models can supervise here (docs/design-supervisor-harnesses.md
+ * §6.2): Claude through the Claude Code harness (your Claude Code login, never an
+ * API key) or through Pi with an Anthropic API key; OpenAI through the Codex
+ * harness (phase S4) or through Pi with an OpenAI API key; every other vendor
+ * through Pi, on whichever providers have a credential.
+ */
+export function supervisorRoutes(d: Discovery): string[] {
+  const piCred = (provider: string): string | undefined => d.pi.credentials.find((c) => c.provider === provider)?.source;
+  const viaPi = (provider: string, envVar: string): string => {
+    const source = piCred(provider);
+    if (d.pi.error !== undefined) return `via Pi (${provider}: Pi's registry could not be read)`;
+    return source !== undefined ? `via Pi (${provider}: ${source} present)` : `via Pi (${provider}: no ${envVar})`;
+  };
+  const claude = d.supervisorCandidates["claude-code"];
+  const claudeRoute = claude.ok ? "via Claude Code (logged in)" : `via Claude Code (not available: ${claude.reason ?? "unknown"})`;
+  const codex = d.codex.available ? "via Codex (logged in; supervises from phase S4, not yet)" : "via Codex (supervises from phase S4, not yet)";
+  const others = d.pi.credentials.filter((c) => c.provider !== "anthropic" && c.provider !== "openai").map((c) => `${c.provider} (${c.source})`);
+  return [
+    `Claude: ${claudeRoute} or ${viaPi("anthropic", "ANTHROPIC_API_KEY")}`,
+    `OpenAI: ${codex} or ${viaPi("openai", "OPENAI_API_KEY")}`,
+    `Gemini, DeepSeek, MiniMax, Kimi, and every other provider: via Pi (${others.length > 0 ? `credentials present for ${others.join(", ")}` : "no other provider has a credential"})`,
+  ];
+}
+
 function setupChecks(d: Discovery): DoctorCheck[] {
   const v = viableSetups(d);
   const checks: DoctorCheck[] = [];
@@ -241,6 +265,7 @@ function setupChecks(d: Discovery): DoctorCheck[] {
   const enable = v.enable.map((h) => (h === "codex" ? "codex (read-only jobs)" : h));
   checks.push(check("setups", "also enable", "pass", enable.length > 0 ? `${enable.join(", ")}, so a plugin role such as a Codex reviewer can run` : "no other harness is available"));
   const later = v.supervisorLater.length > 0 ? `; ${v.supervisorLater.map(label).join(" and ")} ${v.supervisorLater.length === 1 ? "supervises" : "supervise"} from the release that ships it (phase S4)` : "";
+  checks.push(check("setups", "supervisor routes", "pass", supervisorRoutes(d).join("; ")));
   if (v.supervisor !== undefined) {
     checks.push(check("setups", "supervisor", "pass", `${v.supervisors.join(", ")} (recommended: ${v.supervisor}; order ${SUPERVISOR_ORDER.join(", ")}); the repair reviewer uses the same agent${later}`));
   } else {

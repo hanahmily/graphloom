@@ -97,9 +97,32 @@ describe("graphloom doctor: agent discovery", () => {
     expect(row(report, "runner config").status).toBe("pass");
   });
 
+  it("Pi: discovers any provider's credential, built-in by Pi's own variable or custom from models.json, and a DeepSeek supervisor", async () => {
+    const env = await makeDoctorEnv({});
+    const agentDir = path.join(env.home, ".pi", "agent");
+    await mkdir(agentDir, { recursive: true });
+    await writeFile(
+      path.join(agentDir, "models.json"),
+      JSON.stringify({ providers: { "my-endpoint": { baseUrl: "http://127.0.0.1:9/v1", api: "anthropic-messages", apiKey: "$GL_TEST_MY_ENDPOINT_KEY", models: [{ id: "my-model" }] } } }),
+    );
+    await mkdir(path.dirname(env.supervisorFile), { recursive: true });
+    await writeFile(env.supervisorFile, JSON.stringify({ provider: "deepseek", modelId: "deepseek-v4-pro" }));
+    const keys = { DEEPSEEK_API_KEY: STUB_SECRETS.stored, GEMINI_API_KEY: STUB_SECRETS.stored, GL_TEST_MY_ENDPOINT_KEY: STUB_SECRETS.stored };
+    const { report } = await doctor(env, [], keys);
+    expect(row(report, "pi")).toMatchObject({ status: "pass" });
+    for (const present of ["deepseek (DEEPSEEK_API_KEY)", "google (GEMINI_API_KEY)", "my-endpoint (GL_TEST_MY_ENDPOINT_KEY)", "supervisor config: deepseek/deepseek-v4-pro"]) {
+      expect(row(report, "pi").detail).toContain(present);
+    }
+    expect(row(report, "supervisor config").status).toBe("pass");
+    expect(row(report, "supervisor routes").detail).toContain("via Pi (credentials present for deepseek (DEEPSEEK_API_KEY), google (GEMINI_API_KEY), my-endpoint (GL_TEST_MY_ENDPOINT_KEY))");
+    // Without its key, the DeepSeek supervisor's fix names DeepSeek's own variable.
+    const without = await doctor(env, [], { GEMINI_API_KEY: STUB_SECRETS.stored });
+    expect(row(without.report, "supervisor config")).toMatchObject({ status: "warn", fix: expect.stringContaining("export DEEPSEEK_API_KEY=<key>") });
+  });
+
   it("Pi: no credential, a provider variable, and an auth store entry, by presence only", async () => {
     const none = (await withEnv({})).report;
-    expect(row(none, "pi")).toMatchObject({ status: "warn", fix: expect.stringMatching(/^export MINIMAX_CN_API_KEY=<key>/) });
+    expect(row(none, "pi")).toMatchObject({ status: "warn", fix: expect.stringMatching(/^export the API key variable of any provider Pi supports/) });
     expect(none.available).not.toContain("pi");
 
     const viaEnv = (await withEnv({ piEnv: true })).report;

@@ -15,17 +15,21 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { defaultPiModelRuntime, isolatedResourceLoader } from "@graphloom/agent-harness/pi";
 import type { HarnessPromptOptions, HarnessSession, ThinkingLevel } from "./harness.js";
-import {
-  resolveMiniMaxCredential,
-  type MiniMaxCredentialSource,
-} from "./credentials.js";
+import { providerCredentialEnvVars, resolveProviderCredential, type PiCredentialSource } from "./credentials.js";
 import {
   assertAdmittedCandidateRoot,
   createCandidateCodingTools,
 } from "./candidate-tools.js";
 import { classifyAssistantMessage, SupervisorProviderError, type ProviderFailure } from "./provider-failure.js";
+import { sessionModelCompat } from "./provider-profiles.js";
+import { trackFailedResponses } from "./provider-response.js";
 
-/** Default initial supervisor model (design-pi-supervisor.md). */
+/**
+ * The model a Pi supervisor session opens on when its caller names none
+ * (design-pi-supervisor.md). Any provider Pi knows works; operators name
+ * theirs in supervisor.json, and this is only the fallback for callers that
+ * pass no model at all.
+ */
 export const DEFAULT_SUPERVISOR_PROVIDER = "minimax-cn";
 export const DEFAULT_SUPERVISOR_MODEL = "MiniMax-M3";
 
@@ -42,34 +46,21 @@ export const DEFAULT_PROMPT_TOTAL_TIMEOUT_MS = 900_000;
 
 export type { ThinkingLevel } from "./harness.js";
 
-export function isMiniMaxProvider(provider: string): boolean {
-  return provider === "minimax-cn" || provider === "minimax";
-}
-
 /** A model as Pi's registry returns it. */
 type RegistryModel = NonNullable<ReturnType<ModelRuntime["getModel"]>>;
 
 /**
- * Providers whose thinking blocks carry an empty signature (`signature: ""`)
- * and accept them back. Without `compat.allowEmptySignature`, Pi's
- * anthropic-messages request builder replays such a block as a plain `text`
- * block of the assistant turn, so the model reads its own private reasoning
- * as something it said.
- */
-export function emitsEmptyThinkingSignatures(provider: string): boolean {
-  return isMiniMaxProvider(provider);
-}
-
-/**
  * The model a supervisor session runs on: the registry's entry, with the
- * provider compat flags the supervisor needs. A copy, so the registry's own
- * object (shared by whatever else resolves that model) is never mutated.
+ * compat flags provider-profiles.ts lists for its api and provider (none for
+ * most). A copy, so the registry's own object (shared by whatever else
+ * resolves that model) is never mutated.
  */
 export function supervisorSessionModel<M extends RegistryModel>(model: M): M {
-  if (!emitsEmptyThinkingSignatures(model.provider)) return model;
+  const wanted = sessionModelCompat(model);
+  if (wanted === undefined) return model;
   const compat = (model as unknown as { compat?: Record<string, unknown> }).compat;
-  if (compat?.allowEmptySignature === true) return model;
-  return { ...model, compat: { ...compat, allowEmptySignature: true } } as M;
+  if (Object.entries(wanted).every(([k, v]) => compat?.[k] === v)) return model;
+  return { ...model, compat: { ...compat, ...wanted } } as M;
 }
 
 export interface CreatePiSupervisorSessionOptions {
@@ -82,9 +73,9 @@ export interface CreatePiSupervisorSessionOptions {
   sessionDir: string;
   /** Existing Pi session file to restore; omit to start a new durable session. */
   sessionFile?: string;
-  /** Pi provider id. Default: minimax-cn */
+  /** Pi provider id: any provider in Pi's registry (built-in or models.json). Default DEFAULT_SUPERVISOR_PROVIDER. */
   provider?: string;
-  /** Model id. Default: MiniMax-M3 */
+  /** Model id. Default DEFAULT_SUPERVISOR_MODEL. */
   modelId?: string;
   /**
    * Reasoning level for the initial model. Default: "off", since the supervisor
@@ -96,10 +87,16 @@ export interface CreatePiSupervisorSessionOptions {
   /** Absolute Pi agent dir (auth.json / models.json). Default: ~/.pi/agent */
   agentDir?: string;
   /**
-   * Explicit MiniMax API key (MiniMax providers only).
-   * Otherwise env or Pi-stored credential for that provider.
+   * Explicit API key for `provider` (the session's initial provider). Without
+   * one, Pi resolves that provider's own credential: its auth store, the agent
+   * dir's models.json, or the provider's environment variable.
    */
   apiKey?: string;
+  /**
+   * Explicit API keys by provider id, for the models a session may switch to.
+   * Each key is applied to its own provider only, never to another one.
+   */
+  apiKeys?: Readonly<Record<string, string>>;
   /** Working directory for the session (does not grant filesystem tools). */
   cwd?: string;
   /** Optional system prompt override. */
@@ -137,7 +134,8 @@ export interface PiSupervisorSession extends HarnessSession {
   readonly sessionId: string;
   /** Durable Pi transcript path (undefined only if the SDK did not persist). */
   readonly sessionFile: string | undefined;
-  readonly credentialSource: MiniMaxCredentialSource;
+  /** Where the initial provider's credential came from (never the value). */
+  readonly credentialSource: PiCredentialSource;
   /**
    * Send a prompt and wait until idle. Returns the final turn's assistant text
    * only (no thinking / tool internals). Rejects with a `timeout`
@@ -196,7 +194,7 @@ export interface PiSupervisorSession extends HarnessSession {
 
 /**
  * Create one Pi AgentSession; the supervisor opens one per recovery episode.
- * Uses MiniMax by default; credentials never appear in prompts or activity.
+ * Any provider Pi knows works; credentials never appear in prompts or activity.
  * The raw AgentSession stays private — only mediated prompt/close are exposed.
  */
 export async function createPiSupervisorSession(
@@ -212,12 +210,13 @@ export async function createPiSupervisorSession(
   await mkdir(sessionDir, { recursive: true });
 
   const modelRuntime = await defaultPiModelRuntime(agentDir);
+  const apiKeys = sessionApiKeys(provider, options.apiKey, options.apiKeys);
 
-  const credentialSource = await applyProviderCredentials({
+  const credentialSource = await ensureProviderCredentials({
     modelRuntime,
     provider,
     agentDir,
-    ...(options.apiKey !== undefined ? { apiKey: options.apiKey } : {}),
+    ...(apiKeys[provider] !== undefined ? { apiKey: apiKeys[provider] } : {}),
   });
 
   const registered = modelRuntime.getModel(provider, modelId);
@@ -275,58 +274,76 @@ export async function createPiSupervisorSession(
     credentialSource,
     promptTimeoutMs,
     promptTotalTimeoutMs,
-    ...(options.apiKey !== undefined ? { apiKey: options.apiKey } : {}),
+    apiKeys,
     ...(options.repairsDir !== undefined ? { repairsDir: options.repairsDir } : {}),
   });
 }
 
-/** Ensure the target provider has usable credentials before setModel. */
+/** Explicit keys by provider: `apiKeys`, with `apiKey` for the initial provider. */
+function sessionApiKeys(
+  provider: string,
+  apiKey: string | undefined,
+  apiKeys: Readonly<Record<string, string>> | undefined,
+): Record<string, string> {
+  return { ...(apiKeys ?? {}), ...(apiKey !== undefined ? { [provider]: apiKey } : {}) };
+}
+
+/**
+ * Ensure `provider` has a usable credential before a session opens on it or
+ * switches to it. An explicit key (or a fallback variable listed in
+ * provider-profiles.ts) is injected into Pi's runtime for that provider
+ * only; otherwise Pi must resolve one itself, from its auth store, the agent
+ * dir's models.json (a literal key, `$ENV` reference, or `!command`), or the
+ * provider's environment variable. Returns where it came from, never the value.
+ */
 export async function ensureProviderCredentials(args: {
   modelRuntime: ModelRuntime;
   provider: string;
   agentDir: string;
   apiKey?: string;
-}): Promise<MiniMaxCredentialSource> {
-  return applyProviderCredentials(args);
+  env?: NodeJS.ProcessEnv;
+}): Promise<PiCredentialSource> {
+  const { modelRuntime, provider, agentDir } = args;
+  const injected = resolveProviderCredential({
+    provider,
+    ...(args.apiKey !== undefined ? { apiKey: args.apiKey } : {}),
+    ...(args.env !== undefined ? { env: args.env } : {}),
+  });
+  if (injected.apiKey !== undefined && injected.source !== undefined) {
+    await modelRuntime.setRuntimeApiKey(provider, injected.apiKey);
+    return injected.source;
+  }
+  let auth: Awaited<ReturnType<ModelRuntime["getAuth"]>>;
+  try {
+    auth = await modelRuntime.getAuth(provider);
+  } catch (err) {
+    // A models.json `$NAME` reference to an unset variable, a failing `!command`, ...
+    throw new Error(`credential unavailable for provider ${provider}: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  if (!auth) {
+    throw new Error(`credential unavailable for provider ${provider}: ${credentialHint(provider, agentDir)}`);
+  }
+  return piCredentialSource(modelRuntime, provider);
 }
 
-async function applyProviderCredentials(args: {
-  modelRuntime: ModelRuntime;
-  provider: string;
-  agentDir: string;
-  apiKey?: string;
-}): Promise<MiniMaxCredentialSource> {
-  const { modelRuntime, provider, agentDir } = args;
+/** How to give `provider` a credential, naming Pi's own variable when it has one. */
+function credentialHint(provider: string, agentDir: string): string {
+  const names = providerCredentialEnvVars(provider);
+  const env = names.length > 0 ? `set ${names.join(" or ")}, or ` : "";
+  return `${env}configure Pi auth under ${agentDir} (pi /login, or an apiKey for ${provider} in models.json)`;
+}
 
-  if (isMiniMaxProvider(provider)) {
-    const credential = resolveMiniMaxCredential({
-      ...(args.apiKey !== undefined ? { apiKey: args.apiKey } : {}),
-    });
-    if (credential.apiKey !== undefined) {
-      await modelRuntime.setRuntimeApiKey(provider, credential.apiKey);
-    } else {
-      const auth = await modelRuntime.getAuth(provider);
-      if (!auth) {
-        throw new Error(
-          `MiniMax credential unavailable for provider ${provider}: set MINIMAX_CN_API_KEY or MINIMAX_API_KEY, or configure Pi auth under ${agentDir}`,
-        );
-      }
-    }
-    return credential.source;
+/** Where Pi resolved `provider`'s credential from, as a PiCredentialSource. */
+function piCredentialSource(modelRuntime: ModelRuntime, provider: string): PiCredentialSource {
+  let status: ReturnType<ModelRuntime["getProviderAuthStatus"]>;
+  try {
+    status = modelRuntime.getProviderAuthStatus(provider);
+  } catch {
+    return "pi-stored";
   }
-
-  if (args.apiKey !== undefined) {
-    throw new Error(
-      `apiKey option is MiniMax-only; cannot inject MiniMax credentials into provider ${provider}`,
-    );
-  }
-  // Do not resolve or apply MiniMax env keys to other providers.
-  const auth = await modelRuntime.getAuth(provider);
-  if (!auth) {
-    throw new Error(
-      `credential unavailable for provider ${provider}: configure Pi auth under ${agentDir}`,
-    );
-  }
+  if (status.source === "environment" && status.label !== undefined && status.label !== "") return `env:${status.label}`;
+  if (status.source === "models_json_key" || status.source === "models_json_command") return "models.json";
+  if (status.source === "runtime") return "options";
   return "pi-stored";
 }
 
@@ -338,12 +355,13 @@ export function wrapPiAgentSession(args: {
   provider: string;
   modelId: string;
   agentDir: string;
-  credentialSource: MiniMaxCredentialSource;
+  credentialSource: PiCredentialSource;
   /** Inactivity limit of one prompt (see CreatePiSupervisorSessionOptions.promptTimeoutMs). */
   promptTimeoutMs: number;
   /** Total cap of one prompt. Default DEFAULT_PROMPT_TOTAL_TIMEOUT_MS. */
   promptTotalTimeoutMs?: number;
-  apiKey?: string;
+  /** Explicit keys by provider id; a switch applies only its target provider's. */
+  apiKeys?: Readonly<Record<string, string>>;
   repairsDir?: string;
 }): PiSupervisorSession {
   const { session, modelRuntime, agentDir, promptTimeoutMs } = args;
@@ -356,6 +374,8 @@ export function wrapPiAgentSession(args: {
   let lastReply: ProviderFailure | undefined;
   /** The last completed prompt's own user message and single reply, while it can still be omitted. */
   let lastExchange: { user: unknown; reply: unknown } | undefined;
+  /** The last failed HTTP response of the current turn: Pi drops its retry headers from the error message. */
+  const failedResponses = trackFailedResponses(session);
 
   return {
     runId: args.runId,
@@ -380,9 +400,7 @@ export function wrapPiAgentSession(args: {
         modelRuntime,
         provider: ref.provider,
         agentDir,
-        ...(args.apiKey !== undefined && isMiniMaxProvider(ref.provider)
-          ? { apiKey: args.apiKey }
-          : {}),
+        ...(args.apiKeys?.[ref.provider] !== undefined ? { apiKey: args.apiKeys[ref.provider] } : {}),
       });
       const model = modelRuntime.getModel(ref.provider, ref.modelId);
       if (!model) {
@@ -461,6 +479,7 @@ export function wrapPiAgentSession(args: {
           promptTurns += COMPACTION_PROVIDER_CALLS;
           turns += COMPACTION_PROVIDER_CALLS;
         } else if (event.type === "turn_start") {
+          failedResponses.reset();
           // Pi awaits listeners before streaming, so aborting here cancels the
           // turn before its provider request is sent. Pi ends a tool batch on
           // its own only when every result in it terminates, so a batch that
@@ -541,7 +560,10 @@ export function wrapPiAgentSession(args: {
         const contextWindow = session.model?.contextWindow;
         lastReply =
           lastAssistant !== undefined
-            ? classifyAssistantMessage(lastAssistant, contextWindow !== undefined ? { contextWindow } : {})
+            ? classifyAssistantMessage(lastAssistant, {
+                ...(contextWindow !== undefined ? { contextWindow } : {}),
+                ...(failedResponses.last() !== undefined ? { response: failedResponses.last()! } : {}),
+              })
             : undefined;
         if (promptTurns === 1 && promptUser !== undefined && lastAssistant !== undefined) {
           lastExchange = { user: promptUser, reply: lastAssistant };

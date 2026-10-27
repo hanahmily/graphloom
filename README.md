@@ -64,13 +64,28 @@ configure the job runner in `~/.config/graphloom/runner.json`, or point
 
 Claude Code must be installed and logged in. Optional `claude.command` and
 `claude.model` select its executable and model. For Pi, use `"harness": "pi"`
-with `"pi": { "provider": "minimax-cn", "modelId": "MiniMax-M3" }` and the
-existing Pi credential store. Codex (`"codex"`, installed and logged in) serves
+with any provider and model Pi knows, for example
+`"pi": { "provider": "deepseek", "modelId": "deepseek-v4-pro" }`, and that
+provider's Pi credential (its environment variable, such as `DEEPSEEK_API_KEY`,
+or Pi's auth store). Codex (`"codex"`, installed and logged in) serves
 read-only jobs only, such as a plugin's code review; list it in `harnesses` next
 to the default. Keep credentials out of runner configuration.
 The same configuration is used by `resume`. Without runner configuration, or
 without the Claude Code or Codex command or Pi model it names, `run` and
 `resume` refuse to start. The [example guide](examples/README.md) lists every setting.
+
+The supervisor (`~/.config/graphloom/supervisor.json`, also written by
+`graphloom setup`) runs on any model Pi supports, with one config shape for
+every vendor: `{ "provider": "<pi provider>", "modelId": "<model>" }`. Claude
+and OpenAI models have two routes: Claude through the `claude-code` harness
+(your Claude Code login, never an API key) or through Pi with
+`ANTHROPIC_API_KEY`; OpenAI through the `codex` harness (phase S4, not yet) or
+through Pi with `OPENAI_API_KEY`. Gemini, DeepSeek, Kimi, MiniMax, and every
+other vendor run through Pi; a custom OpenAI-, Anthropic-, or Google-compatible
+endpoint is a provider in Pi's `models.json`. For DeepSeek, `DEEPSEEK_API_KEY`
+and `{ "provider": "deepseek", "modelId": "deepseek-v4-pro" }` are all it
+takes. See [choosing a supervisor model](docs/design-pi-supervisor.md#choosing-a-supervisor-model)
+for examples per vendor; `graphloom doctor` shows which routes have a credential.
 
 `allowUnrestricted` is required because coding agents can run shell commands
 with the operator's permissions. Claude's file-tool permission checks restrict

@@ -2,17 +2,28 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 import { isContextOverflow, type AssistantMessage } from "@earendil-works/pi-ai";
+import { API_FAILURES, failurePatternsFor, GENERIC_FAILURES, matchesFailure, type FailurePatterns } from "./provider-profiles.js";
 
 /**
  * Why a supervisor turn produced no usable decision, read from the provider's
  * own last assistant message rather than inferred from missing JSON.
  *
- * - `quota`: rate limit or usage cap (HTTP 429 and provider equivalents).
+ * Provider-neutral: Pi reports every provider's HTTP failure the same way
+ * (`<status> <message>`, `<status>: <body>`, or `<Provider> (<status>): ...`),
+ * and names the model's `api` and `provider` on the message. The message is
+ * matched against generic HTTP semantics, then its API family's error
+ * vocabulary (OpenAI-style, Anthropic messages, Google, Bedrock), then its
+ * provider's own overrides (provider-profiles.ts), so any provider Pi speaks
+ * to, built-in or a models.json custom one, is classified the same way.
+ *
+ * - `quota`: rate limit or usage cap (HTTP 429, "insufficient balance" such as
+ *   DeepSeek's 402, and provider equivalents).
  * - `overflow`: the request exceeded the model's context window.
  * - `auth`: the provider refused the credentials (HTTP 401/403 and equivalents).
  * - `transient`: the provider failed on its side and asked for a retry (HTTP
- *   500/502/503/504/529, Anthropic-style `api_error`/`overloaded_error`,
- *   "internal server error", "overloaded", "please retry" and equivalents).
+ *   408, 5xx including 529 and gateway 520-524, Anthropic-style
+ *   `api_error`/`overloaded_error`, "internal server error", "overloaded",
+ *   "please retry", a dropped connection, and equivalents).
  * - `interrupted`: the reply ended normally with no tool call and no text, but
  *   the provider billed output beyond its thinking that never arrived: the
  *   server dropped what the model generated (MiniMax drops tool calls this way).
@@ -94,11 +105,55 @@ export function isSupervisorProviderError(value: unknown): value is SupervisorPr
   return typeof v.failureClass === "string" && typeof v.providerMessage === "string";
 }
 
-const QUOTA = /rate.?limit|too many requests|quota|usage limit|insufficient.?(?:balance|credit)|resource.?exhausted|throttl|用量上限|限流/i;
-const TRANSIENT_STATUS = new Set(["500", "502", "503", "504", "529"]);
-const TRANSIENT =
-  /internal server error|overloaded|service unavailable|bad gateway|gateway time-?out|temporarily unavailable|please retry|"type"\s*:\s*"(?:api_error|overloaded_error)"/i;
-const AUTH = /unauthori[sz]ed|forbidden|invalid.{0,20}api.?key|api.?key.{0,20}invalid|authentication|permission denied|access denied/i;
+/**
+ * The HTTP status a provider error message carries, in the forms Pi's
+ * adapters write: a leading status (`429 Rate limit...`, `429: {...}`), a
+ * parenthesized one after a provider name (`DeepSeek (503): ...`), or a
+ * `status`/`status code` field. Only 4xx/5xx codes count, so MiniMax's
+ * four-digit `(2056)` codes and token counts are never read as one.
+ */
+export function httpStatusOf(message: string): string | undefined {
+  const patterns = [
+    /^\s*(?:error:?\s*)?([45]\d\d)\b/i,
+    /\(([45]\d\d)\)/,
+    /\bstatus(?:[ _]?code)?["']?\s*[:=]?\s*["']?([45]\d\d)\b/i,
+    /\bHTTP\/?\d?(?:\.\d)?\s+([45]\d\d)\b/i,
+  ];
+  for (const pattern of patterns) {
+    const status = pattern.exec(message)?.[1];
+    if (status !== undefined) return status;
+  }
+  return undefined;
+}
+
+/**
+ * The HTTP response a failed provider request returned, as the session saw it
+ * (Pi's error message does not carry its headers): its status and the retry
+ * headers an OpenAI-compatible provider sends with a 429 or 503.
+ */
+export interface ProviderResponseHint {
+  status: number;
+  /** `retry-after` (seconds or an HTTP date), `retry-after-ms`, and similar headers, lower-cased. */
+  headers: Record<string, string>;
+  /** When the response arrived (ms since epoch); relative headers count from here. */
+  at?: number;
+}
+
+/** The retry time a response's headers state, if any (`retry-after-ms`, then `retry-after`). */
+export function retryAtFromHeaders(headers: Record<string, string>, now: number): string | undefined {
+  const ms = headers["retry-after-ms"]?.trim();
+  if (ms !== undefined && ms !== "") {
+    const value = Number.parseFloat(ms);
+    if (Number.isFinite(value) && value >= 0) return new Date(now + Math.ceil(value)).toISOString();
+  }
+  const after = headers["retry-after"]?.trim();
+  if (after !== undefined && after !== "") {
+    if (/^\d+(?:\.\d+)?$/.test(after)) return new Date(now + Math.ceil(Number.parseFloat(after) * 1_000)).toISOString();
+    const at = Date.parse(after);
+    if (Number.isFinite(at)) return new Date(at).toISOString();
+  }
+  return undefined;
+}
 
 /**
  * Classify the last assistant message of a turn. Returns undefined for a
@@ -107,25 +162,41 @@ const AUTH = /unauthori[sz]ed|forbidden|invalid.{0,20}api.?key|api.?key.{0,20}in
  */
 export function classifyAssistantMessage(
   message: Pick<AssistantMessage, "stopReason" | "errorMessage" | "content"> & Partial<AssistantMessage>,
-  options: { contextWindow?: number; now?: number } = {},
+  options: {
+    contextWindow?: number;
+    now?: number;
+    /** The failed HTTP response, when the session saw one (its retry headers). */
+    response?: ProviderResponseHint;
+    /** The model's Pi api and provider; default the message's own `api` and `provider`. */
+    model?: { api?: string; provider?: string };
+  } = {},
 ): ProviderFailure | undefined {
   if (message.stopReason === "aborted") return undefined;
   if (message.stopReason === "error") {
     const raw = message.errorMessage ?? "";
+    const model = options.model ?? { ...(message.api !== undefined ? { api: message.api } : {}), ...(message.provider !== undefined ? { provider: message.provider } : {}) };
+    // Without a known api, every API family's vocabulary applies.
+    const layers: FailurePatterns[] = model.api !== undefined ? failurePatternsFor(model) : [GENERIC_FAILURES, ...Object.values(API_FAILURES), ...failurePatternsFor(model).slice(2)];
+    const is = (errorClass: Parameters<typeof matchesFailure>[1]) => matchesFailure(layers, errorClass, raw, status);
     const text = bound(raw === "" ? "provider error with no message" : raw);
-    const status = /^\s*(\d{3})\b/.exec(raw)?.[1];
-    if (status === "429" || QUOTA.test(raw)) {
-      const retryAt = retryAtFromMessage(raw, options.now ?? Date.now());
+    const now = options.now ?? Date.now();
+    const response = options.response !== undefined && options.response.status >= 400 ? options.response : undefined;
+    const status: string | undefined = httpStatusOf(raw) ?? (response !== undefined ? String(response.status) : undefined);
+    // The message's own reset time first; else the failed response's retry headers.
+    const retryAtOf = () =>
+      retryAtFromMessage(raw, now) ?? (response !== undefined ? retryAtFromHeaders(response.headers, response.at ?? now) : undefined);
+    if (is("quota")) {
+      const retryAt = retryAtOf();
       return { failureClass: "quota", message: text, ...(retryAt !== undefined ? { retryAt } : {}) };
     }
-    if (isContextOverflow(message as AssistantMessage, options.contextWindow)) {
+    if (isContextOverflow(message as AssistantMessage, options.contextWindow) || is("overflow")) {
       return { failureClass: "overflow", message: text };
     }
-    if (status === "401" || status === "403" || AUTH.test(raw)) {
+    if (is("auth")) {
       return { failureClass: "auth", message: text };
     }
-    if ((status !== undefined && TRANSIENT_STATUS.has(status)) || TRANSIENT.test(raw)) {
-      const retryAt = retryAtFromMessage(raw, options.now ?? Date.now());
+    if (is("transient")) {
+      const retryAt = retryAtOf();
       return { failureClass: "transient", message: text, ...(retryAt !== undefined ? { retryAt } : {}) };
     }
     return { failureClass: "unknown", message: text };
@@ -209,6 +280,8 @@ export function durationMs(text: string): number | undefined {
 /** Relative waits: each pattern's group 1 is a whole duration, or a bare number in the given unit. */
 const RELATIVE: Array<{ pattern: RegExp; bareUnit?: string }> = [
   { pattern: /server requested (\d+(?:\.\d+)?)s\b/i, bareUnit: "s" },
+  // Google's RetryInfo detail: "retryDelay": "30s".
+  { pattern: /"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s"/i, bareUnit: "s" },
   { pattern: /retry[- _]?after[- _]?ms["']?\s*[:=]?\s*["']?(\d+(?:\.\d+)?)(?![\d.])/i, bareUnit: "ms" },
   { pattern: new RegExp(String.raw`retry[- _]?after["']?\s*[:=]?\s*["']?(${DURATION})`, "i") },
   // A bare number after "retry-after" is seconds, as in the HTTP header.

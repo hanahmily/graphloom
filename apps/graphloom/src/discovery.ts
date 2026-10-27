@@ -23,6 +23,7 @@ import path from "node:path";
 import { defaultPiModelRuntime } from "@graphloom/agent-harness/pi";
 import { CLAUDE_BIN_ENV, CODEX_BIN_ENV, PI_AGENT_DIR_ENV, PI_MODEL_ENV, PI_PROVIDER_ENV } from "@graphloom/executor-coding-agent";
 import { confinementUnsupported, digestExecutorSource } from "@graphloom/runner";
+import { DEFAULT_SUPERVISOR_MODEL, DEFAULT_SUPERVISOR_PROVIDER, piDefaultModelId, providerCredentialEnvVars } from "@graphloom/supervisor";
 import { DISABLE_AUTOUPDATE_ENV, RELEASE_REPO } from "./auto-update.js";
 import { probeHarnessCommand } from "./capability-probe.js";
 import { selfInstall, type SelfInstall } from "./ownership.js";
@@ -51,8 +52,12 @@ export const SUPERVISOR_ORDER: readonly HarnessName[] = ["pi", "claude-code", "c
  * reported but never counted (docs/design-release.md §4.4).
  */
 export const SHIPPED_SUPERVISOR_HARNESSES: readonly HarnessName[] = ["pi", "claude-code"];
-/** The Pi model setup recommends when its credential is present (§4.5). */
-export const RECOMMENDED_PI = { provider: "minimax-cn", modelId: "MiniMax-M3", envVar: "MINIMAX_CN_API_KEY" } as const;
+/**
+ * The Pi model setup falls back to on its provider when nothing is configured
+ * and its credential is present (§4.5); any other provider's recommendation is
+ * Pi's own default model for it. One option among every provider Pi knows.
+ */
+export const FALLBACK_PI = { provider: DEFAULT_SUPERVISOR_PROVIDER, modelId: DEFAULT_SUPERVISOR_MODEL } as const;
 
 const PROBE_TIMEOUT_MS = 10_000;
 const GH_TIMEOUT_MS = 15_000;
@@ -347,6 +352,8 @@ export interface PiProviderCredential {
   provider: string;
   /** Where the credential is: an environment variable's name, `auth store`, or a models.json entry. Never the value. */
   source: string;
+  /** The Pi API types its models speak (`openai-completions`, `anthropic-messages`, ...). */
+  apis?: string[];
 }
 
 export interface PiModelCheck {
@@ -366,6 +373,10 @@ export interface PiDiscovery {
   configured: PiModelCheck[];
   /** Model ids Pi's registry knows for each provider with a credential. */
   models: Record<string, string[]>;
+  /** Pi's own default model for each provider with a credential, when Pi names one. */
+  defaults?: Record<string, string>;
+  /** Every provider id in Pi's registry (built-in and models.json), credential or not. */
+  known?: string[];
   available: boolean;
   reason?: string;
   fix?: string;
@@ -382,11 +393,16 @@ async function discoverPi(config: RunnerConfig | undefined, supervisor: Supervis
   const saved = swapEnv(env);
   try {
     runtime = await defaultPiModelRuntime(agentDir);
+    base.known = runtime.getProviders().map((p) => p.id);
+    base.defaults = {};
     for (const provider of runtime.getProviders()) {
       const source = await credentialSource(runtime, provider.id);
       if (source === undefined) continue;
-      base.credentials.push({ provider: provider.id, source });
-      base.models[provider.id] = runtime.getModels(provider.id).map((m) => m.id);
+      const models = runtime.getModels(provider.id);
+      base.credentials.push({ provider: provider.id, source, apis: [...new Set(models.map((m) => String(m.api)))] });
+      base.models[provider.id] = models.map((m) => m.id);
+      const preferred = await piDefaultModelId(provider.id, base.models[provider.id] ?? []);
+      if (preferred !== undefined) base.defaults[provider.id] = preferred;
     }
     const checks: Array<{ where: string; provider: string | undefined; modelId: string | undefined }> = [];
     if (config !== undefined && enabledHarnesses(config).includes("pi")) {
@@ -426,14 +442,22 @@ async function discoverPi(config: RunnerConfig | undefined, supervisor: Supervis
     if (!runnerPi.credential) return { ...base, reason: `no credential for ${runnerPi.provider}`, fix: piCredentialFix(runnerPi.provider) };
     return { ...base, available: true };
   }
-  if (base.credentials.length === 0) return { ...base, reason: "no Pi provider has a credential", fix: piCredentialFix(RECOMMENDED_PI.provider) };
+  if (base.credentials.length === 0) return { ...base, reason: "no Pi provider has a credential", fix: NO_PI_CREDENTIAL_FIX };
   return { ...base, available: true };
 }
 
+/** What to do when no Pi provider has a credential: any provider Pi supports will do. */
+export const NO_PI_CREDENTIAL_FIX =
+  "export the API key variable of any provider Pi supports (for example ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, DEEPSEEK_API_KEY, MOONSHOT_API_KEY, MINIMAX_CN_API_KEY), store a key with pi (/login), or add a custom provider with graphloom setup";
+
+/** How to give `provider` a credential: Pi's own variable for it, or its models.json reference. */
 export function piCredentialFix(provider: string): string {
-  return provider === RECOMMENDED_PI.provider
-    ? `export ${RECOMMENDED_PI.envVar}=<key>   (or store it with pi: /login)`
-    : `export the ${provider} API key variable, or store it with pi (/login)`;
+  const names = providerCredentialEnvVars(provider);
+  // Anthropic's first variables are OAuth tokens; an API key is what a supervisor uses.
+  const name = names.find((n) => n.endsWith("_API_KEY")) ?? names[0];
+  return name !== undefined
+    ? `export ${name}=<key>   (or store it with pi: /login)`
+    : `export the variable ${provider}'s apiKey references in Pi's models.json, or store a key with pi (/login)`;
 }
 
 async function credentialSource(runtime: Awaited<ReturnType<typeof defaultPiModelRuntime>>, provider: string): Promise<string | undefined> {
@@ -699,7 +723,7 @@ function piSupervisorCheck(pi: PiDiscovery, where?: PiModelCheck): SupervisorHar
     if (!where.credential) return { harness: "pi", ok: false, reason: `no credential for ${where.provider}`, fix: piCredentialFix(where.provider) };
     return { harness: "pi", ok: true };
   }
-  if (pi.credentials.length === 0) return { harness: "pi", ok: false, reason: "no Pi provider has a credential", fix: piCredentialFix(RECOMMENDED_PI.provider) };
+  if (pi.credentials.length === 0) return { harness: "pi", ok: false, reason: "no Pi provider has a credential", fix: NO_PI_CREDENTIAL_FIX };
   return { harness: "pi", ok: true };
 }
 

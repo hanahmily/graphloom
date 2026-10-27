@@ -22,14 +22,20 @@
  * §7.2), with no `select`. Pi alone is written in the flat Pi form, which the
  * per-harness parser keeps accepting; any other choice in the per-harness form.
  * A Codex supervisor is reported but not written until the release that ships it.
+ *
+ * The Pi model is any provider Pi has a credential for (built-in or a
+ * models.json custom provider), chosen from what discovery found; setup can
+ * also add a custom provider of any API type Pi speaks to the agent dir's
+ * models.json, its key referenced by the NAME of an environment variable.
  */
 import { constants } from "node:fs";
 import { chmod, copyFile, mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { createInterface } from "node:readline";
-import { HARNESS_LABEL, LOGIN_FIX, RECOMMENDED_PI, SHIPPED_SUPERVISOR_HARNESSES, availableHarnesses, discover, type Discovery } from "./discovery.js";
-import { missingWriterFixes, viableSetups } from "./doctor.js";
+import { FALLBACK_PI, HARNESS_LABEL, LOGIN_FIX, SHIPPED_SUPERVISOR_HARNESSES, availableHarnesses, discover, type Discovery } from "./discovery.js";
+import { missingWriterFixes, supervisorRoutes, viableSetups } from "./doctor.js";
+import { CUSTOM_PI_APIS, addCustomPiProvider, customProviderProblem, type CustomPiApi, type CustomPiProvider } from "./pi-models.js";
 import { enabledHarnesses, parseRunnerConfig, type HarnessName } from "./runner-config.js";
 import { enabledSupervisorHarnesses, parseSupervisorConfig } from "./supervisor-config.js";
 
@@ -75,7 +81,12 @@ interface Existing {
 interface PiChoice {
   provider: string;
   modelId: string;
+  /** A custom provider setup adds to Pi's models.json for this choice. */
+  custom?: CustomPiProvider;
 }
+
+/** The answer that adds a custom provider instead of choosing a discovered one. */
+const NEW_PROVIDER = "new";
 
 const label = (h: string) => HARNESS_LABEL[h as HarnessName] ?? h;
 
@@ -145,12 +156,26 @@ export interface Recommendation {
   supervisors: HarnessName[];
 }
 
-export function recommendedPi(d: Discovery, provider?: string): PiChoice | undefined {
+/**
+ * The Pi model to recommend (§4.5), among providers with a credential: the
+ * model already configured for `role` (else for the other role) when its
+ * provider has a credential, else the first provider with one, in Pi's
+ * registry order. The model is the configured one when it resolves, else
+ * FALLBACK_PI's model on its provider, else Pi's own default for the provider.
+ */
+export function recommendedPi(d: Discovery, provider?: string, role: "runner" | "supervisor" = "runner"): PiChoice | undefined {
   const providers = d.pi.credentials.map((c) => c.provider);
-  const chosen = provider ?? (providers.includes(RECOMMENDED_PI.provider) ? RECOMMENDED_PI.provider : providers[0]);
-  if (chosen === undefined) return undefined;
+  const isSupervisor = (where: string) => where === "supervisor config";
+  const configured = [...d.pi.configured]
+    .filter((c) => c.credential && providers.includes(c.provider))
+    .sort((a, b) => Number(isSupervisor(b.where) === (role === "supervisor")) - Number(isSupervisor(a.where) === (role === "supervisor")));
+  const chosen = provider ?? configured[0]?.provider ?? providers[0];
+  if (chosen === undefined || !providers.includes(chosen)) return undefined;
   const models = d.pi.models[chosen] ?? [];
-  const modelId = chosen === RECOMMENDED_PI.provider && models.includes(RECOMMENDED_PI.modelId) ? RECOMMENDED_PI.modelId : models[0];
+  const mine = configured.find((c) => c.provider === chosen && c.resolves && models.includes(c.modelId));
+  const fallback = chosen === FALLBACK_PI.provider && models.includes(FALLBACK_PI.modelId) ? FALLBACK_PI.modelId : undefined;
+  const piDefault = d.pi.defaults?.[chosen];
+  const modelId = mine?.modelId ?? fallback ?? (piDefault !== undefined && models.includes(piDefault) ? piDefault : models[0]);
   return modelId === undefined ? undefined : { provider: chosen, modelId };
 }
 
@@ -162,8 +187,8 @@ export function recommend(d: Discovery): Recommendation {
     ...(v.defaultHarness[0] !== undefined ? { harness: v.defaultHarness[0] } : {}),
     harnesses,
     ...(pi !== undefined ? { pi } : {}),
-    ...(v.supervisors.includes("pi") && recommendedPi(d) !== undefined ? { supervisor: recommendedPi(d)! } : {}),
-    supervisors: v.supervisors.filter((h) => h !== "pi" || recommendedPi(d) !== undefined),
+    ...(v.supervisors.includes("pi") && recommendedPi(d, undefined, "supervisor") !== undefined ? { supervisor: recommendedPi(d, undefined, "supervisor")! } : {}),
+    supervisors: v.supervisors.filter((h) => h !== "pi" || recommendedPi(d, undefined, "supervisor") !== undefined),
   };
 }
 
@@ -244,12 +269,52 @@ async function choose(p: Prompter, question: string, options: readonly string[],
   return def;
 }
 
+async function ask(p: Prompter, question: string, check: (answer: string) => string | undefined): Promise<string | undefined> {
+  for (let i = 0; i < 3; i++) {
+    const answer = await p.ask(question);
+    if (answer === undefined) return undefined;
+    const a = answer.trim();
+    const problem = check(a);
+    if (problem === undefined) return a;
+    p.say(`  ${problem}`);
+  }
+  return undefined;
+}
+
+/**
+ * A custom Pi provider of any API type Pi speaks: its id, API type, base URL,
+ * model id, and the NAME of the environment variable holding its key. The key
+ * itself is never asked for.
+ */
+async function askCustomProvider(p: Prompter, d: Discovery, what: string): Promise<PiChoice | undefined> {
+  const known = d.pi.known ?? d.pi.credentials.map((c) => c.provider);
+  // Each answer is checked alone, against valid placeholders for the rest.
+  const draft: CustomPiProvider = { id: "graphloom-placeholder", api: "openai-completions", baseUrl: "https://example.invalid", modelId: "m", envVar: "KEY" };
+  const problem = (patch: Partial<CustomPiProvider>) => customProviderProblem({ ...draft, ...patch }, known);
+  p.say(`${what}: a custom provider is added to ${d.pi.agentDir}/models.json in Pi's own format; its apiKey names an environment variable, never the key.`);
+  const id = await ask(p, `${what}: provider id (for example my-endpoint) `, (a) => problem({ id: a }));
+  if (id === undefined) return undefined;
+  const api = (await choose(p, `${what}: API type`, CUSTOM_PI_APIS, "openai-completions")) as CustomPiApi | undefined;
+  if (api === undefined) return undefined;
+  const baseUrl = await ask(p, `${what}: base URL (for example https://api.example.com/v1) `, (a) => problem({ baseUrl: a }));
+  if (baseUrl === undefined) return undefined;
+  const modelId = await ask(p, `${what}: model id `, (a) => problem({ modelId: a }));
+  if (modelId === undefined) return undefined;
+  const envVar = await ask(p, `${what}: NAME of the environment variable that holds the key (not the key itself) `, (a) => problem({ envVar: a }));
+  if (envVar === undefined) return undefined;
+  const custom: CustomPiProvider = { id, api, baseUrl, modelId, envVar };
+  return { provider: id, modelId, custom };
+}
+
 async function choosePi(p: Prompter, d: Discovery, what: string, start: PiChoice | undefined): Promise<PiChoice | undefined> {
   const providers = d.pi.credentials.map((c) => c.provider);
   const rec = start ?? recommendedPi(d);
   if (rec === undefined) return undefined;
-  const provider = providers.length > 1 ? await choose(p, `${what}: Pi provider with a credential`, providers, rec.provider) : rec.provider;
+  const offered = providers.includes(rec.provider) ? providers : [rec.provider, ...providers];
+  const provider = await choose(p, `${what}: Pi provider with a credential, or ${NEW_PROVIDER} to add a custom one`, [...offered, NEW_PROVIDER], rec.provider);
   if (provider === undefined) return undefined;
+  if (provider === NEW_PROVIDER) return askCustomProvider(p, d, what);
+  if (rec.custom !== undefined && provider === rec.provider) return rec;
   const models = d.pi.models[provider] ?? [];
   const def = provider === rec.provider ? rec.modelId : recommendedPi(d, provider)?.modelId;
   if (def === undefined) return undefined;
@@ -305,6 +370,12 @@ export async function runSetup(options: SetupOptions = {}): Promise<SetupResult>
     return result(1, "none", "none", "no available harness can write");
   }
   const rec = recommend(d);
+  /** Custom Pi providers the operator added, written to models.json with the configs. */
+  const customs = new Map<string, CustomPiProvider>();
+  const keep = (choice: PiChoice | undefined): PiChoice | undefined => {
+    if (choice?.custom !== undefined) customs.set(choice.custom.id, choice.custom);
+    return choice;
+  };
   const available = availableHarnesses(d);
 
   // ---- runner config
@@ -343,7 +414,7 @@ export async function runSetup(options: SetupOptions = {}): Promise<SetupResult>
       }
       if (enabled.includes("pi")) {
         say("3. Pi model: a provider whose credential is present.");
-        pi = await choosePi(p!, d, "   Pi", rec.pi);
+        pi = keep(await choosePi(p!, d, "   Pi", rec.pi));
         if (pi === undefined) return result(1, "none", "none", "setup was not completed");
       }
     }
@@ -392,6 +463,7 @@ export async function runSetup(options: SetupOptions = {}): Promise<SetupResult>
   const claudeSection = d.claudeSupervisorSection;
   say("");
   say("4. Supervisor: recovers a failing run (investigates, repairs, reenters). The repair reviewer uses the same agent, in a separate read-only session.");
+  for (const route of supervisorRoutes(d)) say(`   ${route}`);
   if (v.supervisorLater.length > 0) say(`   ${v.supervisorLater.map(label).join(" and ")} ${v.supervisorLater.length === 1 ? "supervises" : "supervise"} from the GraphLoom release that ships it (phase S4).`);
   const recFile = rec.supervisors.length > 0 ? supervisorFile(rec.supervisors, rec.supervisor, claudeSection, newSupervisorBase) : undefined;
   if (existingSup === undefined) {
@@ -415,7 +487,7 @@ export async function runSetup(options: SetupOptions = {}): Promise<SetupResult>
               pi = start;
             }
           } else if (await confirm(p!, `   Enable a Pi supervisor (recommended: ${rec.supervisor!.provider}/${rec.supervisor!.modelId})?`, true)) {
-            pi = await choosePi(p!, d, "   Supervisor", rec.supervisor);
+            pi = keep(await choosePi(p!, d, "   Supervisor", rec.supervisor));
             if (pi === undefined) return result(1, "none", "none", "setup was not completed");
             chosen.push("pi");
           }
@@ -477,6 +549,20 @@ export async function runSetup(options: SetupOptions = {}): Promise<SetupResult>
   const writes: Array<{ file: string; raw: Raw; parse: (v: unknown, s: string) => unknown; exists: boolean; kind: "runner" | "supervisor" }> = [];
   if (runnerNext !== undefined) writes.push({ file: runnerFile, raw: runnerNext, parse: parseRunnerConfig, exists: existingRunner !== undefined, kind: "runner" });
   if (supNext !== undefined) writes.push({ file: supervisorFile_, raw: supNext, parse: parseSupervisorConfig, exists: existingSup !== undefined, kind: "supervisor" });
+  const customNotes: string[] = [];
+  if (writes.length > 0) {
+    for (const custom of customs.values()) {
+      try {
+        const kept = await addCustomPiProvider(d.pi.agentDir, custom, backupStamp(now()));
+        say(`added provider ${custom.id} (${custom.api} at ${custom.baseUrl}, key from $${custom.envVar}) to ${path.join(d.pi.agentDir, "models.json")}${kept !== undefined ? ` (the old file is ${kept})` : ""}`);
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
+        say(`Could not add provider ${custom.id}: ${reason}; setup wrote nothing.`);
+        return result(1, "none", "none", reason);
+      }
+      if (!env[custom.envVar]) customNotes.push(`export ${custom.envVar}=<key>   (the key of the ${custom.id} provider; Pi's models.json references $${custom.envVar})`);
+    }
+  }
   for (const w of writes) {
     if (w.exists && !yes && !(w.kind === "runner" && runnerConfirmed)) {
       say("");
@@ -495,7 +581,7 @@ export async function runSetup(options: SetupOptions = {}): Promise<SetupResult>
 
   // ---- what remains
   const final = runnerNext ?? existingRunner?.raw;
-  const remaining: string[] = [];
+  const remaining: string[] = [...customNotes];
   if (final !== undefined) {
     let enabled: HarnessName[] = [];
     try {

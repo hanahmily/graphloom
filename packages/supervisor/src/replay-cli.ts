@@ -7,7 +7,10 @@
  * against a real provider and prints the score. Never run by CI.
  *
  *   GRAPHLOOM_REPLAY_LIVE=1 npm run replay:live -w @graphloom/supervisor -- \
- *     [--provider minimax-cn] [--model MiniMax-M3] [--fixtures <dir>]
+ *     [--provider <pi provider>] [--model <model id>] [--fixtures <dir>]
+ *
+ * Any Pi provider works (for example `--provider deepseek --model deepseek-v4-pro`
+ * with DEEPSEEK_API_KEY set); without flags it uses DEFAULT_SUPERVISOR_PROVIDER/MODEL.
  */
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";

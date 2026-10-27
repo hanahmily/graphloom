@@ -42,16 +42,129 @@ upgrades explicitly instead of following moving `latest` documentation.
 
 “One backend” in the minimal core means one Pi integration supporting multiple
 configured providers; it does not mean one fixed provider or model. DeepSeek,
-MiniMax, and OpenAI GPT model switching is required. Anthropic API access is also
-supported by the selected SDK. Exact models are selected by provider/model ID from
+MiniMax, Kimi, Gemini, OpenAI, and Anthropic (API key) all work through it, and
+switching among configured providers is required (see Choosing a supervisor model). Exact models are selected by provider/model ID from
 the qualified registry; GraphLoom must not silently substitute another model.
 
-## Initial MiniMax configuration
+## Choosing a supervisor model
 
-The selected initial supervisor model is **`minimax-cn/MiniMax-M3`**, matching
-OpenCode's most recently used `minimax-cn-coding-plan/MiniMax-M3`. This is the
-current operator setup, not a model hard-coded into graph plugins. Future switching
-uses the same explicit provider/model selection protocol described below.
+The Pi supervisor runs on any model Pi can talk to. GraphLoom treats a
+supervisor model as `<provider>/<modelId>` resolved through Pi's own model
+registry and Pi's own auth, with no provider branch in its code paths:
+credential resolution, key passing on start, switch, and restore, the `doctor`
+and `run` probes, and budgets are the same for every provider. The provider is
+one Pi ships (in Pi 0.87.1: `anthropic`, `openai`, `google`, `deepseek`,
+`moonshotai`, `kimi-coding`, `minimax`, `minimax-cn`, `xai`, `mistral`, `groq`,
+`openrouter`, `zai`, `fireworks`, `together`, `huggingface`, `cerebras`,
+`nvidia`, `azure-openai-responses`, `amazon-bedrock`, `google-vertex`,
+`github-copilot`, and more; `graphloom doctor` lists every one with a
+credential) or a custom provider in the agent dir's `models.json`, of any API
+type Pi speaks (`openai-completions`, `openai-responses`, `anthropic-messages`,
+`google-generative-ai`, `mistral-conversations`).
+
+**Two routes for Claude and OpenAI.** Claude and OpenAI models can supervise
+through their vendor's own CLI harness or through Pi with an API key. Every
+other vendor goes through Pi.
+
+| Vendor | CLI harness route | Pi route (`"harnesses": ["pi"]`) |
+|---|---|---|
+| Claude | `claude-code` harness: your Claude Code login (subscription), never an API key; `ANTHROPIC_API_KEY` is never passed to it | provider `anthropic` with `ANTHROPIC_API_KEY` |
+| OpenAI | `codex` harness: your Codex CLI login; supervises from phase S4, not yet | provider `openai` with `OPENAI_API_KEY` |
+| Gemini, DeepSeek, Kimi, MiniMax, and every other vendor | none | provider `google`, `deepseek`, `moonshotai`, `minimax-cn`, ... with that provider's variable |
+
+**Credentials.** `supervisor.json` never holds one (`apiKey` is refused). For
+each provider, including each target of a model switch, Pi resolves that
+provider's own credential in Pi's order: its auth store (`auth.json`, `pi`
+`/login`), an `apiKey` in `models.json` (a literal, a `$NAME` or `${NAME}`
+environment reference, or a `!command`), then the provider's environment
+variable from Pi's table (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
+`GEMINI_API_KEY`, `DEEPSEEK_API_KEY`, `MOONSHOT_API_KEY`, `MINIMAX_CN_API_KEY`,
+...). A key belongs to its provider only: switching providers resolves the
+target's key and never reuses another provider's. The one GraphLoom-specific
+rule is kept for existing MiniMax setups: for `minimax-cn` and `minimax`,
+`MINIMAX_CN_API_KEY`, then `MINIMAX_API_KEY`, is injected ahead of Pi's own
+order, exactly as before. Programmatic callers may pass explicit keys
+(`apiKey` for the first configured model's provider, `apiKeys` by provider).
+
+**Reasoning level.** `thinkingLevel` (per model in `models`, or for the
+initial model) defaults to `"off"`; Pi clamps a level the model does not
+support to the nearest one it does (Gemini 3.1 Pro, for example, cannot turn
+thinking off and runs at `low`).
+
+**Examples.** Each is a complete `~/.config/graphloom/supervisor.json`; set the
+named variable (or store the key with `pi` `/login`) and check with
+`graphloom doctor`.
+
+| Vendor | `supervisor.json` | Key |
+|---|---|---|
+| OpenAI | `{ "provider": "openai", "modelId": "gpt-5.5" }` | `OPENAI_API_KEY` |
+| Claude (API) | `{ "provider": "anthropic", "modelId": "claude-sonnet-5" }` | `ANTHROPIC_API_KEY` |
+| Gemini | `{ "provider": "google", "modelId": "gemini-3.1-pro-preview", "thinkingLevel": "low" }` | `GEMINI_API_KEY` |
+| DeepSeek | `{ "provider": "deepseek", "modelId": "deepseek-v4-pro", "models": ["deepseek/deepseek-flash"] }` | `DEEPSEEK_API_KEY` |
+| Kimi | `{ "provider": "moonshotai", "modelId": "kimi-k2.6" }` | `MOONSHOT_API_KEY` |
+| MiniMax | `{ "provider": "minimax-cn", "modelId": "MiniMax-M3" }` | `MINIMAX_CN_API_KEY` |
+| Several, switchable | `{ "provider": "deepseek", "modelId": "deepseek-v4-pro", "models": ["anthropic/claude-sonnet-5", "openai/gpt-5.5", "minimax-cn/MiniMax-M3"] }` | each provider's own |
+
+The model ids are those Pi 0.87.1's registry lists (`deepseek` has
+`deepseek-flash` and `deepseek-v4-pro`; Pi's own default for DeepSeek is
+`deepseek-v4-pro`). DeepSeek needs nothing but `DEEPSEEK_API_KEY`: Pi ships the
+provider at `https://api.deepseek.com` with its OpenAI-compatible API, thinking
+format, and `max_tokens` field. To add Claude Code as a second supervisor
+harness, use the per-harness form, for example
+`{ "harnesses": ["pi", "claude-code"], "pi": { "provider": "deepseek", "modelId": "deepseek-v4-pro" }, "claude": {} }`.
+
+**A custom endpoint.** For an endpoint Pi does not ship (a gateway, a
+self-hosted vLLM, a regional mirror), define a provider in the agent dir's
+`models.json` in Pi's own format, its key referenced by environment variable,
+and name it in `supervisor.json` like any other:
+
+```json
+{
+  "providers": {
+    "my-endpoint": {
+      "baseUrl": "https://llm.example.com/v1",
+      "api": "openai-completions",
+      "apiKey": "$MY_ENDPOINT_API_KEY",
+      "models": [{ "id": "my-model" }]
+    }
+  }
+}
+```
+
+```json
+{ "provider": "my-endpoint", "modelId": "my-model", "agentDir": "~/.pi/agent" }
+```
+
+`graphloom setup` writes such an entry when you answer `new` to its Pi provider
+question: it asks for the provider id, API type, base URL, model id, and the
+NAME of the variable that holds the key (upper case; never the key itself),
+checks the new file with Pi's registry, keeps the old one as
+`models.json.bak-<stamp>`, and prints the `export` that remains. `apiKey` may
+also name a `!command` that prints the key; setup never writes a literal key.
+
+**Provider failures.** One classifier serves every provider
+(`provider-failure.ts`): HTTP semantics first (429 quota, 401/403 auth, 408 and
+5xx transient, with the `Retry-After` header of the failed response when the
+message states no reset time), then the error vocabulary of the model's Pi API
+family (OpenAI's `insufficient_quota`/`rate_limit_exceeded`/`server_error`,
+Anthropic's `rate_limit_error`/`overloaded_error`/`authentication_error`,
+Google's `RESOURCE_EXHAUSTED`/`UNAVAILABLE`/`retryDelay`, Bedrock's exception
+names), then provider overrides. Everything provider-specific lives in one
+table, `provider-profiles.ts`: MiniMax's `(2056)` usage cap and `(2013)`
+overflow, DeepSeek's 402 insufficient balance, Moonshot's quota error type,
+MiniMax's historical key variables, and MiniMax's empty thinking signatures
+(below). Context overflow uses Pi's own `isContextOverflow`, which covers every
+provider Pi ships.
+
+### The MiniMax operator setup (history)
+
+The first supervisor model was **`minimax-cn/MiniMax-M3`**, matching
+OpenCode's most recently used `minimax-cn-coding-plan/MiniMax-M3`. It remains
+the fallback a programmatic caller gets with no model at all
+(`DEFAULT_SUPERVISOR_PROVIDER`/`DEFAULT_SUPERVISOR_MODEL`) and the model setup
+recommends when `minimax-cn` is the provider it picks and nothing is
+configured; it is one option, not a model hard-coded into GraphLoom or graph
+plugins. The operator settings of that setup:
 
 | Setting | Configured value |
 |---|---|
@@ -94,7 +207,9 @@ the model's `compat.allowEmptySignature` is true; otherwise it replays the block
 a plain `text` block of the assistant turn, so the model reads its own private
 reasoning as something it said. Neither Pi's built-in `minimax-cn` entries nor an
 operator's custom entry in `models.json` set the flag, so the supervisor host sets
-it on every session model it uses for `minimax` and `minimax-cn`: when a session
+it, from the `SESSION_MODEL_COMPAT` entry in `provider-profiles.ts` (API
+`anthropic-messages`, providers `minimax` and `minimax-cn`), on every session
+model it uses for them: when a session
 is created (including each episode session and the first one after a restart) and
 on every model switch. The host sets it on a copy of the registry's model, never
 on the shared registry object.
@@ -141,9 +256,10 @@ the user's own login and never reads or copies its credentials. Nothing may
 masquerade as Claude Code or proxy its subscription credentials into Pi.
 [Anthropic authentication and product-integration rules](https://code.claude.com/docs/en/legal-and-compliance).
 
-For the requested direct providers, Pi documents `DEEPSEEK_API_KEY`,
-`MINIMAX_API_KEY` / `MINIMAX_CN_API_KEY`, and `OPENAI_API_KEY`. Select the regional
-endpoint and credential that match the account. An account usable in another
+Each direct provider has its own variable in Pi's table (`DEEPSEEK_API_KEY`,
+`MINIMAX_API_KEY` / `MINIMAX_CN_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`,
+`GEMINI_API_KEY`, `MOONSHOT_API_KEY`, ...). Select the regional endpoint and
+credential that match the account. An account usable in another
 coding tool is not proof that its subscription includes this API traffic.
 [Provider authentication reference](https://pi.dev/docs/latest/providers).
 
@@ -382,7 +498,8 @@ timeout in the same turn stops the run, for example with
 
 A decision turn that yields no proposal is classified from the provider's last
 assistant message (`stopReason`, `errorMessage`), not from the missing JSON:
-`quota` (429 and rate/usage limits; any reset time the message states becomes
+`quota` (429 and rate/usage limits; any reset time the message states, else the
+`Retry-After` or `retry-after-ms` header of the failed HTTP response, becomes
 `retryAt`), `overflow` (Pi's own `isContextOverflow`), `auth` (401/403 and
 credential refusals), `transient` (see below), `interrupted` (see below), `empty` (no tool call and no
 text, including thinking-only replies), `malformed` (text that is not a GraphDecision), `timeout` (see Prompt
@@ -392,9 +509,19 @@ reset time waits until then (at most three waits a turn, only within the
 `maxWaitMs` the controller passes from the run's `waitMs`) and retries the turn;
 an overflow compacts the session and retries once.
 
+The classification is the same for every provider and is layered (see
+Choosing a supervisor model): generic HTTP semantics, then the error vocabulary
+of the model's Pi API family, then provider overrides from
+`provider-profiles.ts`. The HTTP status is read wherever Pi's adapters write it
+(`429 ...`, `429: {...}`, `OpenAI API error (429): ...`, a `status` field), or
+from the failed response itself, which the session records (status and retry
+headers only) because Pi's error message drops the headers.
+
 A provider error is `transient` when the provider failed on its side and the
-request can simply be sent again: a leading HTTP status of 500, 502, 503, 504
-or 529, an Anthropic-style error type `api_error` or `overloaded_error`, or a
+request can simply be sent again: an HTTP status of 408, 500, 502, 503, 504,
+520 to 524, or 529, an API family's server error (Anthropic-style `api_error`
+or `overloaded_error`, OpenAI's `server_error`, Google's `UNAVAILABLE`), a
+dropped connection ("Connection error.", "fetch failed", `ECONNRESET`), or a
 message saying "internal server error", "overloaded", "service unavailable",
 "bad gateway", "gateway timeout", "temporarily unavailable" or "please retry"
 (case-insensitive). Quota (429), overflow and auth are checked first, so a 429
@@ -474,7 +601,8 @@ so it is not counted as an inadmissible proposal and is not charged to
 and the prompt timeout: either aborts Pi's summarization request and fails the
 remedy.
 
-Some providers give no reset time; MiniMax's quota 429 `(2056)` is one. For
+Some providers give no reset time: MiniMax's quota 429 `(2056)` is one, and so
+is any 429 without a `Retry-After` header or a stated reset. For
 those, the operator may set `quotaRetryMs` in the supervisor config
 (`~/.config/graphloom/supervisor.json`, or `GRAPHLOOM_SUPERVISOR_CONFIG`), for
 example `"quotaRetryMs": 300000`. A quota error with no parsed reset time then
@@ -502,6 +630,9 @@ Faux-provider tests cover: each recovery episode, and the first turn after a
 restart, opens a fresh session with no prior chat while the logical id stays;
 switching DeepSeek → MiniMax → OpenAI keeps the episode's history in its session
 and the next episode opens on the switched model; a credential failure (Anthropic without a key) keeps the current model;
+one parameterized suite (`pi-providers.test.ts`) runs the same credential resolution, probe, start, switch through
+every provider and back, restore, explicit-key isolation, and failure classification over OpenAI, Anthropic, Gemini,
+DeepSeek, Kimi, MiniMax, and custom OpenAI-compatible and Anthropic-messages providers, with fake keys and no request;
 Stop during a decision prompt or candidate patch settles as an operator stop; a
 crash between switch intent and outcome reconciles from the session file; decisions
 are capped at the remaining invocations and refused at zero; admission tools reject

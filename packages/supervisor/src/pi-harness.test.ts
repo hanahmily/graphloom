@@ -45,7 +45,7 @@ describe("the Pi harness", () => {
     expect(harness.capabilities.toolCalling).toBe(true);
     const missing = await harness.probe();
     expect(missing.ok).toBe(false);
-    expect(missing.ok === false && missing.reason).toMatch(/MiniMax credential unavailable/);
+    expect(missing.ok === false && missing.reason).toMatch(/credential unavailable for provider minimax-cn: set MINIMAX_CN_API_KEY or MINIMAX_API_KEY/);
     setEnv("MINIMAX_CN_API_KEY", "test-key-not-used");
     expect(await harness.probe()).toEqual({ ok: true });
     const unknown = createPiHarness({

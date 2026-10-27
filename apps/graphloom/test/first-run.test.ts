@@ -93,16 +93,18 @@ describe.runIf(hasScript)("under a pseudo-terminal", () => {
     const env = await envWith({ piEnv: true, piStore: true });
     // Default harness, Codex, Pi, Pi provider, Pi model, Pi supervisor, Claude Code supervisor, consent.
     const { output, code } = await env.runTty(["setup"], ["", "", "", "", "", "", "", "y"]);
+    // Nothing is configured yet, so the recommendation is the first provider with a credential, on Pi's own default model.
     expect(code, output).toBe(0);
     expect(output).toMatch(/Default harness \[claude-code\/pi\] \(recommended: claude-code\)/);
-    expect(output).toMatch(/Pi provider with a credential \[deepseek\/minimax-cn\] \(recommended: minimax-cn\)|Pi provider with a credential \[minimax-cn\/deepseek\] \(recommended: minimax-cn\)/);
+    expect(output).toMatch(/Pi provider with a credential, or new to add a custom one \[deepseek\/minimax-cn\/new\] \(recommended: deepseek\)/);
+    expect(output).toMatch(/Claude: via Claude Code \(logged in\) or via Pi \(anthropic: no ANTHROPIC_API_KEY\)/);
     expect(JSON.parse(readFileSync(env.runnerFile, "utf8"))).toEqual({
       harness: "claude-code",
       allowUnrestricted: true,
       harnesses: ["claude-code", "codex", "pi"],
-      pi: { provider: "minimax-cn", modelId: "MiniMax-M3" },
+      pi: { provider: "deepseek", modelId: "deepseek-v4-pro" },
     });
-    expect(JSON.parse(readFileSync(env.supervisorFile, "utf8"))).toEqual({ harnesses: ["pi", "claude-code"], pi: { provider: "minimax-cn", modelId: "MiniMax-M3" }, claude: {} });
+    expect(JSON.parse(readFileSync(env.supervisorFile, "utf8"))).toEqual({ harnesses: ["pi", "claude-code"], pi: { provider: "deepseek", modelId: "deepseek-v4-pro" }, claude: {} });
     for (const secret of Object.values(STUB_SECRETS)) expect(output).not.toContain(secret);
     expectNoSecrets(env.runnerFile, env.supervisorFile);
     // The doctor now passes the configuration.
