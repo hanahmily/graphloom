@@ -448,7 +448,7 @@ async function discoverPi(config: RunnerConfig | undefined, supervisor: Supervis
 
 /** What to do when no Pi provider has a credential: any provider Pi supports will do. */
 export const NO_PI_CREDENTIAL_FIX =
-  "export the API key variable of any provider Pi supports (for example ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, DEEPSEEK_API_KEY, MOONSHOT_API_KEY, MINIMAX_CN_API_KEY), store a key with pi (/login), or add a custom provider with graphloom setup";
+  "export the API key variable of any provider Pi supports (for example ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, DEEPSEEK_API_KEY, MOONSHOT_API_KEY, MINIMAX_CN_API_KEY), store a key with pi (/login), or define a custom provider in Pi's models.json with its apiKey set to \"$<VARIABLE>\" (docs/design-pi-supervisor.md, Choosing a supervisor model)";
 
 /** How to give `provider` a credential: Pi's own variable for it, or its models.json reference. */
 export function piCredentialFix(provider: string): string {
