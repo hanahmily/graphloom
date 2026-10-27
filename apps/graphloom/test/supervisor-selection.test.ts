@@ -236,6 +236,13 @@ describe("resume's supervisor (§7.4)", () => {
       expect(await resumeSupervisorPlan(config, switched)).toMatchObject({ harness: "pi" });
       // Bound to the model without a credential, the same resume is refused.
       await expect(resumeSupervisorPlan(config, runState({ selection: "pi", binding: "pi" }))).rejects.toThrow(/pin mismatch: .*pinned to pi, which is not available here/);
+      // Unless a crash interrupted a switch: the controller settles it from the transcript, so the restore decides.
+      const interrupted = runState({ selection: "pi", binding: "pi" });
+      interrupted.supervisorBinding = {
+        ...interrupted.supervisorBinding!,
+        switchJournal: [{ at: "t", from: { provider: "minimax-cn", modelId: "MiniMax-M3" }, to: { provider: "deepseek", modelId: "deepseek-v4-pro" }, reason: "r", status: "intent" }],
+      };
+      expect(await resumeSupervisorPlan(config, interrupted)).toMatchObject({ harness: "pi" });
     } finally {
       for (const [k, v] of [["MINIMAX_CN_API_KEY", saved.minimax], ["DEEPSEEK_API_KEY", saved.deepseek]] as const) {
         if (v === undefined) delete process.env[k];

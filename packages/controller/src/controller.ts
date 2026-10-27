@@ -1173,8 +1173,14 @@ async function resolveResumeSupervisor(
  */
 function assertSupervisorRestorable(request: ResumeRequest, state: DurableRunState): void {
   const binding = state.supervisorBinding;
-  if (request.supervisor !== undefined || binding?.sessionFile === undefined || request.restoreSupervisor !== undefined) return;
-  if (supervisorMoved(state) || request.supervisorPin?.transition !== undefined) return;
+  if (request.supervisor !== undefined || binding?.sessionFile === undefined) return;
+  if (supervisorMoved(state) || request.supervisorPin?.transition !== undefined) {
+    // A moved pin starts its new harness (§7.4); a restore of the old binding cannot serve it.
+    if (request.supervisorFactory !== undefined) return;
+    const to = request.supervisorPin?.transition?.to ?? state.supervisorSelection?.harness;
+    throw new Error(`run ${state.runId}'s supervisor moved from ${bindingHarness(binding)} to ${to}, but no supervisorFactory was given to start it there`);
+  }
+  if (request.restoreSupervisor !== undefined) return;
   throw new Error(
     `run ${state.runId} has a ${bindingHarness(binding)} supervisor binding (session ${binding.sessionId}) but no restoreSupervisor was given to restore it`,
   );

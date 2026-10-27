@@ -391,6 +391,20 @@ describe("supervisor pin on resume", () => {
     const state = await loadRunState(paused.stateDir);
     expect(state.status).toBe("stopped");
     expect(state.supervisorTransitions).toBeUndefined();
+    // A transition with nothing to start the new harness is refused too, rather than resumed without a supervisor.
+    await expect(
+      controller.resume({
+        runRef: paused.stateDir,
+        runner: reviewRunner(),
+        validators,
+        plugin,
+        supervisorPin: { transition: { from: "pi", to: "claude-code", reason: "x" } },
+        restoreSupervisor: async () => {
+          throw new Error("not reached");
+        },
+      }),
+    ).rejects.toThrow(/supervisor moved from pi to claude-code, but no supervisorFactory was given to start it there/);
+    expect((await loadRunState(paused.stateDir)).supervisorTransitions).toBeUndefined();
   });
 
   it("a run pinned the S3 way (binding only, no selection) is pinned to its binding's harness; another harness is refused", async () => {

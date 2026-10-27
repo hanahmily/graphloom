@@ -542,7 +542,10 @@ export async function resumeSupervisorPlan(
     if (!enabled.includes(pinned)) {
       throw new Error(`supervisor harness pin mismatch: this run's supervisor is pinned to ${pinned}, which the operator's supervisor config does not enable (enabled: ${enabled.join(", ")}); enable it again, or resume with --supervisor <harness>`);
     }
-    if (!(config.harnesses === undefined && pinned === "pi")) {
+    // A Pi switch a crash interrupted is settled by the controller from the transcript; which model then
+    // restores is not known here, so its preflight is left to the restore.
+    const unsettled = pinned === "pi" && (state.supervisorBinding?.switchJournal ?? []).some((r) => r.status === "intent");
+    if (!(config.harnesses === undefined && pinned === "pi") && !unsettled) {
       // A Pi session restores on its bound model (it may have switched provider): probe that one.
       const binding = state.supervisorBinding;
       const bound = pinned === "pi" && options.probe === undefined && binding?.sessionFile !== undefined && bindingHarness(binding) === "pi"
