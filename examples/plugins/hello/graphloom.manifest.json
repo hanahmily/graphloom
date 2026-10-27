@@ -15,11 +15,11 @@
     "vitest": "^3.0.9"
   },
   "digests": {
-    "sourceTree": "573ba831da3bf84a33ecb3b2b88d12fc9d1adb98d2bd86916318b6fdc9117437",
-    "packageLock": "79329fee592576db0eeafca36576b30a8d534375b6c26c86d2e1cefc907d4e03",
+    "sourceTree": "fdd0509a0ae9240b88d2b045c5c6038ef2874b36d0c3dfe50eefa7da332a908d",
+    "packageLock": "0a43e392983b33ee78771f285c957ff3b492b916260ce590e5424daa7a582837",
     "files": {
       "package.json": "32726cf15b405c0050be2a4080ba25e4637cff72684d75c997008c969c963b7e",
-      "package-lock.json": "79329fee592576db0eeafca36576b30a8d534375b6c26c86d2e1cefc907d4e03",
+      "package-lock.json": "0a43e392983b33ee78771f285c957ff3b492b916260ce590e5424daa7a582837",
       "tsconfig.json": "d166142bd5d917d1eb7d3011cf6423c652f30e2989881deec6147a997bf41597",
       "src/constants.ts": "c11d5212794cfe7f714a75b7c50ed38ac6881c047fdcee8e41408a5e3874d8b0",
       "src/graph.ts": "9f700cd6c89910143548c04f5f12d9e049a6d6181fd23df1aeaaf237389f0627",

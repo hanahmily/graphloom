@@ -16,11 +16,11 @@
     "vitest": "^3.0.9"
   },
   "digests": {
-    "sourceTree": "90cad613bbee4025c01accccea2f35ab350129c203ff31a8f21cc9832476aef7",
-    "packageLock": "66c0b05ef6962fb934baddfe8404bdeb4c50f8f782b45ad361ceb1cd67320b2d",
+    "sourceTree": "06bb39a87f3191896247d8e95923b37cda318de40e0f8384b9af78af8329055d",
+    "packageLock": "ff5a0e84a7fd868e35d1c5172d10a139817ee153fca2d3bc797411f536fef131",
     "files": {
       "package.json": "207fb67133b61a3c7a21e58c83ce343d38ac3b3ce331c0ba1809f24af0714bdb",
-      "package-lock.json": "66c0b05ef6962fb934baddfe8404bdeb4c50f8f782b45ad361ceb1cd67320b2d",
+      "package-lock.json": "ff5a0e84a7fd868e35d1c5172d10a139817ee153fca2d3bc797411f536fef131",
       "tsconfig.json": "3bafb75902b6084b621c996ae838dbfb87088cf095ce411be9809ce79bf3916b",
       "profiles/banyandb-ql.json": "aa687d99a6556ba05ec354092bc2cf04c04e1d96efc2afc61c05bbf4e6a3dafc",
       "profiles/banyandb.json": "b15369f4f2ad04da48e8a04bc79b697505b124781c134da7683e3a9c04cf6f75",

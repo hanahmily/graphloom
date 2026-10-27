@@ -60,10 +60,10 @@
   },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "0.87.1",
-    "@graphloom/sdk": "0.0.0",
+    "@graphloom/sdk": "0.1.0",
     "@earendil-works/pi-ai": "0.87.1"
   },
   "devDependencies": {
-    "@graphloom/agent-harness": "0.0.0"
+    "@graphloom/agent-harness": "0.1.0"
   }
 }

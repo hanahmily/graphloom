@@ -1,6 +1,6 @@
 {
   "name": "@graphloom/runner",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Job execution and enforced scopes",
   "license": "Apache-2.0",
   "type": "module",
@@ -16,6 +16,6 @@
     "test": "tsc -p tsconfig.json && vitest run"
   },
   "dependencies": {
-    "@graphloom/sdk": "0.0.0"
+    "@graphloom/sdk": "0.1.0"
   }
 }
