@@ -211,5 +211,10 @@ function unsettledRepair(state: DurableRunState): string | undefined {
   }
   const pending = (state.repairCandidates ?? []).find((c) => c.status === "qualifying" || c.status === "qualified");
   if (pending !== undefined) return `unsettled repair: candidate ${pending.artifactId} is ${pending.status} and not activated`;
+  // An activated run-local copy links its dependencies into the owning version's tree too;
+  // moving the owner would let that version be pruned from under it.
+  const executor = (state.executorCatalog ?? []).find((e) => e.repair !== undefined);
+  if (executor !== undefined) return `active repair: executor ${executor.id} runs the run-local copy ${executor.repair!.artifactId}`;
+  if (/@repair-/.test(state.activeVersion)) return `active repair: the plugin runs the run-local copy ${state.activeVersion}`;
   return undefined;
 }

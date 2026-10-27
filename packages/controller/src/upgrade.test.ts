@@ -348,6 +348,14 @@ describe("resume --upgrade (docs/design-release.md §5.2)", () => {
       error: /unsettled repair: the activation of candidate cand-1 is journaled but not settled.*resume the run on 0\.0\.0/,
     },
     { name: "a qualified candidate that is not activated", edit: (s) => (s.repairCandidates = [{ artifactId: "cand-2", status: "qualified" }]), error: /candidate cand-2 is qualified and not activated/ },
+    {
+      name: "an activated executor repair",
+      edit: (s) =>
+        (s.executorCatalog = [
+          { id: "acme/x", digest: "c".repeat(64), source: "/old/acme", isolation: "sandbox", builtin: true, repair: { artifactId: "cand-3", root: "/run/cand-3", entryModule: "/run/cand-3/dist/index.js", baseDigest: "a".repeat(64) } },
+        ]),
+      error: /active repair: executor acme\/x runs the run-local copy cand-3/,
+    },
     { name: "a run that is not stopped", edit: (s) => (s.status = "running"), error: /run up1 is running; only a stopped run can be moved/ },
     { name: "a plugin protocol change without --update-plugin", edit: (s) => ((s.intake as { bundle: { sdkProtocol: number } }).bundle.sdkProtocol = 2), error: /sdkProtocol 2.*combine --upgrade with --update-plugin/ },
   ];
@@ -404,7 +412,7 @@ describe("resume --upgrade (docs/design-release.md §5.2)", () => {
         updatePlugin: true,
         upgrade: { install: target },
       }),
-    ).rejects.toThrow(/--update-plugin: an activated repair \(fixture@repair-cand-9\) owns this run's plugin/);
+    ).rejects.toThrow(/active repair: the plugin runs the run-local copy fixture@repair-cand-9/);
     expect(await snapshot(stateDir)).toEqual(before);
   });
 

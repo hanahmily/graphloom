@@ -144,8 +144,11 @@ export function planDispatch(
   if (owner === undefined || !isReleaseVersion(owner.version)) return { kind: "here" };
   // `resume --upgrade` moves the run to this CLI instead.
   if (options.upgrade === true) return { kind: "here" };
-  if (owner.version === self.record.version && (self.home !== undefined || owner.root === self.record.root)) return { kind: "here" };
-  const bin = installedBin(owner, options.home);
+  if (owner.version === self.record.version && owner.root === self.record.root) return { kind: "here" };
+  // The same version in another home or tree is not the owner while the recorded one exists (its executor sources differ);
+  // once it is gone, this installation of that version takes the run, under its pins.
+  const bin = owner.version === self.record.version ? installedBin(owner, path.dirname(path.dirname(owner.root))) : installedBin(owner, options.home);
+  if (bin === undefined && owner.version === self.record.version && self.home !== undefined) return { kind: "here" };
   if (bin === undefined) {
     return {
       kind: "refuse",
@@ -192,7 +195,7 @@ export async function dispatchToOwner(cmd: string, args: readonly string[], self
   }
   if (plan.kind === "here") {
     // Heal the index for a run this installed version owns (a crash between the state and the record).
-    if (self.home !== undefined && raw.install?.version === self.record.version && cmd !== "delete") {
+    if (self.home !== undefined && raw.install?.version === self.record.version && raw.install.root === self.record.root && cmd !== "delete") {
       const record = await readOwnershipRecord(self.home, runId);
       if (record === undefined || record.version !== self.record.version || path.resolve(record.stateDir) !== stateDir) {
         const plugin = raw.intake?.bundle?.bundlePath;

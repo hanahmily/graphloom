@@ -237,6 +237,10 @@ describe("planDispatch (§5.1)", () => {
     const owner = { version: "0.1.0", root };
     expect(planDispatch(installed("0.2.0", home), owner, run, { home })).toEqual({ kind: "exec", bin: path.join(root, "bin", "graphloom"), version: "0.1.0" });
     expect(planDispatch(installed("0.2.0", home), owner, run, { home, env: { [DISPATCHED_ENV]: "0.2.0" } })).toMatchObject({ kind: "refuse" });
+    // The same version installed in another home is not the owner while the recorded one exists.
+    const otherHome = path.join(base, "other-home");
+    expect(planDispatch(installed("0.1.0", otherHome), owner, run, { home: otherHome })).toEqual({ kind: "exec", bin: path.join(root, "bin", "graphloom"), version: "0.1.0" });
+    expect(planDispatch(installed("0.1.0", otherHome), { version: "0.1.0", root: path.join(base, "gone", "versions", "0.1.0") }, run, { home: otherHome })).toEqual({ kind: "here" });
     // A hook the owner ran, calling back through a newer current, still reaches the owner.
     expect(planDispatch(installed("0.2.0", home), owner, run, { home, env: { [DISPATCHED_ENV]: "0.1.0" } })).toMatchObject({ kind: "exec" });
   });

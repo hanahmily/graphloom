@@ -1122,7 +1122,10 @@ usual, and `graphloom upgrade` clears the skip.
   - No record (a run from before R3), or a clone's record: the command runs
     where it was invoked, and the executor pins decide (an `executor pin
     mismatch` until `--update-executors` or `--upgrade`).
-  - Owned by this version: it runs here.
+  - Owned by this version at this root: it runs here. The same version
+    installed elsewhere, such as another home, dispatches to the recorded
+    root while that root exists, because its executor sources differ. Once
+    the recorded root is gone, this installation takes the run.
   - `resume --upgrade`: it runs here, which moves the run.
   - Owned by another installed version: the CLI runs that version's
     `bin/graphloom` with the same arguments and stdio, forwards SIGINT,
@@ -1167,6 +1170,11 @@ usual, and `graphloom upgrade` clears the skip.
      - a run that is not `stopped` (`running`, `succeeded`, or `failed`)
      - an unsettled repair: an activation journaled as `intent`, or a
        candidate that is `qualifying` or `qualified`
+     - an active repair: an executor running its activated run-local copy,
+       or a plugin on a `@repair-` version. This goes beyond §5.2. The copy
+       links its dependencies into the owner's tree, and moving the owner
+       would let `self prune` remove that tree. Such a run finishes on its
+       owner
      - a plugin `sdkProtocol` other than the host's without
        `--update-plugin`
      - with `--update-plugin`, an activated plugin repair (the resume would
