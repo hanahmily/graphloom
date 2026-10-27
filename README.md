@@ -115,7 +115,9 @@ its durable state and owner claim rather than the process table, then prints wha
 `graphloom stats` prints. Exit 0: the run left `running` (read its status line).
 Exit 2: `--timeout` (`90s`, `10m`, `2h`) elapsed first. Exit 3: the state says
 `running` but its controller died without recording a stop; `graphloom resume`
-takes it over.
+takes it over. `--until progress` also returns on each meaningful change (a stage
+accepted, a supervisor episode, a quota pause, a budget at 80%) with a cursor for
+the next `--since` ([agent skills](docs/design-agent-skills.md)).
 
 ## Agent-host mode (proposed)
 
@@ -176,6 +178,10 @@ crashes; filesystem and execution scopes require host enforcement.
   upgrade`, `graphloom self`, and automatic updates, `graphloom doctor` and guided `graphloom setup`, runs that stay on
   the version they started with until `resume --upgrade` migrates them, and the
   local release procedure.
+- [Agent skills](docs/design-agent-skills.md): [`skills/`](skills) for driving
+  GraphLoom from Claude Code or Codex (setup, issue, run, watch, triage,
+  deliver), installed with `graphloom skills install`, and `graphloom wait
+  --until progress`.
 - [Run budgets](docs/budgets.md): what recorded runs used (`graphloom stats`),
   the profile defaults derived from them, budget layers, and what a raised
   budget means.

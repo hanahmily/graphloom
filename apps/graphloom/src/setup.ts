@@ -38,6 +38,7 @@ import { missingWriterFixes, supervisorRoutes, viableSetups } from "./doctor.js"
 import { CUSTOM_PI_APIS, addCustomPiProvider, customProviderProblem, type CustomPiApi, type CustomPiProvider } from "./pi-models.js";
 import { enabledHarnesses, parseRunnerConfig, type HarnessName } from "./runner-config.js";
 import { enabledSupervisorHarnesses, parseSupervisorConfig } from "./supervisor-config.js";
+import { SKILL_AGENT_LABEL, installSkills } from "./skills.js";
 
 /** How setup talks to the operator. */
 export interface Prompter {
@@ -244,6 +245,38 @@ function differences(current: Raw | undefined, next: Raw, fields: string[]): str
     if (!same(a, b)) out.push(`${f}: ${show(a)} -> ${show(b)}`);
   }
   return out;
+}
+
+/**
+ * Offers the bundled agent skills to each agent discovery found whose copies
+ * are missing or outdated (default yes). `--yes` installs nothing outside the
+ * config directory: it prints the command instead.
+ */
+async function offerSkills(d: Discovery, yes: boolean, p: Prompter | undefined, say: (line: string) => void, now: Date): Promise<void> {
+  const s = d.skills;
+  if (s === undefined || s.bundled.length === 0) return;
+  for (const t of s.targets) {
+    if (t.agent === "dir" || !t.found) continue;
+    const pending = t.skills.filter((c) => s.bundled.includes(c.name) && (c.state === "missing" || c.state === "outdated")).map((c) => c.name);
+    if (pending.length === 0) continue;
+    const agent = t.agent;
+    const label = SKILL_AGENT_LABEL[agent];
+    say("");
+    say(`GraphLoom ships agent skills for driving it from ${label} (${pending.join(", ")}); they would go to ${t.dir}.`);
+    if (yes) {
+      say(`  --yes installs nothing there; run graphloom skills install --agent ${agent} to add them`);
+      continue;
+    }
+    if (!(await confirm(p!, `  Install them for ${label}?`, true))) {
+      say(`  not installed; graphloom skills install --agent ${agent} adds them later`);
+      continue;
+    }
+    try {
+      await installSkills({ agents: [agent], root: d.root, env: d.env, now, say: (line) => say(`  ${line}`) });
+    } catch (err) {
+      say(`  could not install them: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
 }
 
 async function confirm(p: Prompter, question: string, def: boolean): Promise<boolean> {
@@ -581,6 +614,9 @@ export async function runSetup(options: SetupOptions = {}): Promise<SetupResult>
     if (w.kind === "runner") runnerOutcome = "written";
     else supOutcome = "written";
   }
+
+  // ---- agent skills (docs/design-agent-skills.md §3)
+  await offerSkills(d, yes, p, say, now());
 
   // ---- what remains
   const final = runnerNext ?? existingRunner?.raw;

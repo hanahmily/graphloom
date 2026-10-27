@@ -61,8 +61,10 @@ async function envWith(options: DoctorEnvOptions): Promise<DoctorEnv> {
 describe.runIf(hasScript)("under a pseudo-terminal", () => {
   it.runIf(realBwrap !== undefined)("run with no runner config completes setup, then the run", async () => {
     const env = await envWith({ codex: "missing" });
-    // The Claude Code supervisor (default yes), then the consent.
-    const { output, code } = await env.runTty(["run", "task.yaml"], ["", "y"]);
+    // The Claude Code supervisor (default yes), the consent, then no to the agent skills.
+    const { output, code } = await env.runTty(["run", "task.yaml"], ["", "y", "n"]);
+    expect(output).toContain("Install them for Claude Code? [Y/n]");
+    expect(output).toContain("not installed; graphloom skills install --agent claude-code adds them later");
     expect(output).toContain(`graphloom: no runner config at ${env.runnerFile}; starting graphloom setup, then run continues.`);
     // Only Claude Code is available: no other job harness is offered; it is also the supervisor (S3).
     expect(output).not.toMatch(/Default harness \[/);
@@ -91,8 +93,10 @@ describe.runIf(hasScript)("under a pseudo-terminal", () => {
 
   it("graphloom setup asks on the terminal and writes both files without secrets", async () => {
     const env = await envWith({ piEnv: true, piStore: true });
-    // Default harness, Codex, Pi, Pi provider, Pi model, Pi supervisor, Claude Code supervisor, Codex supervisor, consent.
-    const { output, code } = await env.runTty(["setup"], ["", "", "", "", "", "", "", "", "y"]);
+    // Default harness, Codex, Pi, Pi provider, Pi model, Pi supervisor, Claude Code supervisor, Codex supervisor, consent,
+    // then no to the agent skills for Claude Code and for Codex.
+    const { output, code } = await env.runTty(["setup"], ["", "", "", "", "", "", "", "", "y", "n", "n"]);
+    expect(output).toContain("Install them for Codex? [Y/n]");
     // Nothing is configured yet, so the recommendation is the first provider with a credential, on Pi's own default model.
     expect(code, output).toBe(0);
     expect(output).toMatch(/Default harness \[claude-code\/pi\] \(recommended: claude-code\)/);

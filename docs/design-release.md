@@ -179,6 +179,7 @@ graphloom-<version>-linux-x64/
   executors/{coding-agent,command,github}/                   # complete source-repairable package
   examples/plugins/{hello,release,issue-fix}/   # complete source-repairable bundles
   examples/*.yaml  examples/README.md
+  skills/<name>/SKILL.md           # agent skills `graphloom skills` installs (design-agent-skills.md §3)
 ```
 
 A **complete source-repairable package** contains `package.json`, its lockfile if
@@ -579,7 +580,7 @@ current version cannot start.
 | `self list` | Installed versions, marking `current`, `previous`, versions owned by runs, and a skipped version (§5.4) |
 | `self use <v>` / `self rollback` | Switch `current` to an installed version, or to `previous`. Switching to an older version records the version left as skipped by automatic updates (§5.4) |
 | `self prune [--dry-run] [--force]` | Remove versions that are not `current`, not `previous`, and not owned by any `runs/<runId>.json` whose state directory still exists; `--force` is needed to override ownership |
-| `self uninstall [--purge-config]` | Remove the shim and `$GRAPHLOOM_HOME`; `--purge-config` also removes `~/.config/graphloom`. Never touches run state or worktrees under target repositories, or harness logins |
+| `self uninstall [--purge-config]` | Remove the shim and `$GRAPHLOOM_HOME`; `--purge-config` also removes `~/.config/graphloom`. Never touches run state or worktrees under target repositories, or harness logins. Removes the agent skill copies GraphLoom installed and the user did not edit ([agent skills §3](design-agent-skills.md#3-distribution-graphloom-skills)) |
 
 There is no `self upgrade`. No release has shipped, so no operator depends on
 it, and one spelling avoids two documented paths. The shim answers

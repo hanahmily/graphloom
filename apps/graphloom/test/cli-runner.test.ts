@@ -89,7 +89,7 @@ describe("configured CLI runner", () => {
       await new Promise((resolve) => setTimeout(resolve, 150));
       expect(await readFile(path.join(f.env.GRAPHLOOM_TEST_LIVE_DIR, "heartbeat"), "utf8")).toBe(heartbeat);
       const result = await completion;
-      expect(result.stderr).toBe("");
+      expect(result.stderr.replace(/^graphloom: run \S+ started; state .*\n/m, "")).toBe("");
       expect(JSON.parse(result.stdout).status).toBe("stopped");
       await expect(stat(path.join(stateDir, "run.owner.json"))).rejects.toMatchObject({ code: "ENOENT" });
       const state = await loadRunState(stateDir);
@@ -163,7 +163,7 @@ describe("configured CLI runner", () => {
   it("completes the real hello graph with pinned agent identity, accounting, sessions, and reviewer evidence", async () => {
     const f = await fixture();
     const result = await f.run();
-    expect(result.stderr).toBe("");
+    expect(result.stderr.replace(/^graphloom: run \S+ started; state .*\n/m, "")).toBe("");
     const report = JSON.parse(result.stdout) as { status: string; stateDir: string; worktreePath: string };
     expect(report.status).toBe("succeeded");
     expect(await readFile(path.join(report.worktreePath, "GREETING.txt"), "utf8")).toBe("Hello, GraphLoom!\n");

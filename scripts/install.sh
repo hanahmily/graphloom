@@ -417,12 +417,39 @@ do_install() {
   if [ "$no_switch" = 0 ]; then switch_to "$version"; fi
   # 5. The shim.
   write_shim "$version"
+  # The agent skills GraphLoom installed follow current (docs/design-agent-skills.md §3).
+  if [ "$no_switch" = 0 ]; then refresh_skills "$version"; fi
   if [ "$auto" = 1 ]; then
     rm -f "$home/update/last-failure"
     prune_versions 3
   fi
   # 6. The doctor and the setup offer; not for --auto or graphloom upgrade.
   if [ "$auto" = 0 ] && [ "$upgrading" = 0 ]; then offer_setup "$version"; fi
+}
+
+# Refreshes the agent skill copies GraphLoom installed (never edited or foreign
+# ones, never a missing one) to the version just switched to, when it ships them.
+refresh_skills() { # version
+  bin="$home/versions/$1/bin/graphloom"
+  [ -x "$bin" ] && [ -d "$home/versions/$1/skills" ] || return 0
+  GRAPHLOOM_DISABLE_AUTOUPDATE=1 "$bin" skills update --quiet </dev/null ||
+    warn "graphloom skills update did not finish; run it again when ready"
+}
+
+# Removes the agent skill copies GraphLoom installed, with current's CLI; edited ones stay.
+remove_skills() {
+  bin="$home/current/bin/graphloom"
+  cur=$(current_version)
+  if [ -n "$cur" ] && [ -x "$bin" ] && [ -d "$home/versions/$cur/skills" ]; then
+    GRAPHLOOM_DISABLE_AUTOUPDATE=1 "$bin" skills remove </dev/null && return 0
+  fi
+  # current cannot start (or ships no skills): name what is left, never remove blind.
+  for dir in "${GRAPHLOOM_CLAUDE_SKILLS_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills}" "${GRAPHLOOM_CODEX_SKILLS_DIR:-${CODEX_HOME:-$HOME/.codex}/skills}"; do
+    for marker in "$dir"/*/.graphloom-skill.json; do
+      [ -f "$marker" ] || continue
+      say "kept $(dirname "$marker"): remove it yourself if you no longer want this GraphLoom skill"
+    done
+  done
 }
 
 # §4.2 step 6: run the installed version's doctor, whose failures do not undo
@@ -518,6 +545,7 @@ self_uninstall() {
     say "runs keep their state under their repositories; remove them with graphloom delete:"
     printf '%s\n' "$owners" | while read -r id v dir; do say "  $id ($v) $dir"; done
   fi
+  remove_skills
   shim=${shim_path:-$bin_dir/graphloom}
   if [ -f "$shim" ] && grep -q '^GRAPHLOOM_SHIM_VERSION=' "$shim"; then
     rm -f "$shim"

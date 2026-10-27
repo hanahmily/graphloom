@@ -69,6 +69,8 @@ export async function checkTree(root, { forbid = [], platform = "linux-x64", lib
     }
   }
 
+  problems.push(...(await checkSkills(rootAbs, entries)));
+
   const needles = forbid.filter((s) => s.length > 0).map((s) => ({ s, b: Buffer.from(s) }));
   for (const e of entries) {
     const parts = e.rel.split("/");
@@ -108,6 +110,31 @@ export async function checkTree(root, { forbid = [], platform = "linux-x64", lib
       if ([...text.matchAll(global)].some((m) => !isDocumentedExample(m[0]))) problems.push(`credential-shaped string (${name}): ${e.rel}`);
     }
   }
+  return problems;
+}
+
+/**
+ * The shipped agent skills (docs/design-agent-skills.md §3): every directory
+ * under `skills/` holds a `SKILL.md` whose frontmatter names that directory and
+ * has a description, and none carries an install marker (those are written
+ * only into an agent's skill directory).
+ */
+export async function checkSkills(rootAbs, entries) {
+  const problems = [];
+  const dirs = entries.filter((e) => e.stat.isDirectory() && /^skills\/[^/]+$/.test(e.rel));
+  for (const d of dirs) {
+    const name = d.rel.slice("skills/".length);
+    const text = await readFile(path.join(rootAbs, d.rel, "SKILL.md"), "utf8").catch(() => undefined);
+    if (text === undefined) {
+      problems.push(`skill without SKILL.md: ${d.rel}`);
+      continue;
+    }
+    const front = /^---\n([\s\S]*?)\n---\n/.exec(text)?.[1];
+    const field = (key) => front?.split("\n").find((l) => l.startsWith(`${key}:`))?.slice(key.length + 1).trim();
+    if (field("name") !== name) problems.push(`skill frontmatter name is not its directory (${name}): ${d.rel}/SKILL.md`);
+    if (!field("description")) problems.push(`skill frontmatter has no description: ${d.rel}/SKILL.md`);
+  }
+  for (const e of entries) if (e.rel.startsWith("skills/") && path.basename(e.rel) === ".graphloom-skill.json") problems.push(`install marker shipped: ${e.rel}`);
   return problems;
 }
 
