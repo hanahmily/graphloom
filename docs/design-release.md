@@ -1,6 +1,6 @@
 # Installable releases
 
-Status: proposed design, 2026-10-26; phases R0 to R5 implemented; `v0.1.0` is prepared, not yet published. The repository
+Status: proposed design, 2026-10-26; phases R0 to R5 implemented; `v0.1.0` is not yet prepared or published. The repository
 license (Apache-2.0: `LICENSE`, `NOTICE`, and `license` in every `package.json`)
 and the source headers with their check (§2.8) are in place (R0). So are the
 product version and `graphloom version` (§2.4), the repair toolchain as CLI
@@ -15,7 +15,8 @@ the gate fingerprint, and the upgrade-matrix hooks (§5.6). R4 added
 `graphloom doctor`, guided `graphloom setup`, the automatic first run, and
 the installer's setup offer (§4.8). R5 added `release.sh prepare` and
 `publish`, signing, and the external-plugin smoke test (§6, "R5 as
-implemented"); the first release waits for the maintainer's release key.
+implemented"); the first release waits for its remaining work and the maintainer's
+release key.
 This covers how GraphLoom is packaged, installed, upgraded, and released
 for an operator who runs it on their own Linux machine. It specializes the
 [TypeScript core design](design-typescript-core.md) (version transitions, §8) and the
@@ -1855,12 +1856,13 @@ runs steps 3 to 8 on `<rev>`, which defaults to `HEAD`. It publishes nothing.
   its anchor, which the tests' throwaway key does not match. The sandbox
   (`install-env.ts`) therefore runs a copy of `install.sh` outside the
   checkout.
-- **`v0.1.0`.** `prepare 0.1.0 --first` produced the release commit:
-  lockstep `0.1.0`, the lockfiles and manifests, and `CHANGELOG.md`. No
-  executor or plugin version moved, because there is no previous
-  `release.json` (§2.8). The changelog has no `[Unreleased]` section.
-  Publishing needs the maintainer's key (above), a merged release commit,
-  two builds of it with `--compare-to`, and `publish 0.1.0`.
+- **`v0.1.0`.** A rehearsal of `prepare 0.1.0 --first` in a throwaway clone
+  produced a release commit with lockstep `0.1.0`, the lockfiles and
+  manifests, and `CHANGELOG.md`. No executor or plugin version moved,
+  because there is no previous `release.json` (§2.8). The real release
+  commit is prepared on `main` once the work it should include has merged.
+  Publishing then needs the maintainer's key (above), the merged release
+  commit, two builds of it with `--compare-to`, and `publish 0.1.0`.
 
 ## 7. Compatibility, support, and security
 
@@ -1908,7 +1910,7 @@ runs steps 3 to 8 on `<rev>`, which defaults to `HEAD`. It publishes nothing.
 | R2 | `install.sh`, the shim, `graphloom upgrade`, `self list/use/rollback/prune/uninstall`, automatic updates (`__auto-update`, `autoUpdate` in the runner config, `update/`, `install.lock`, the skip record, auto-prune), and deterministic packing. A read-only version directory also needs the repair snapshot (`snapshotRepairCandidate`, `packages/controller/src/repair.ts`) to make its copy writable, because `cp` keeps the read-only modes (done: §4.7, §5.5, §6 "R2 as implemented"; `makeTreeWritable` serves the plugin and executor snapshots) | Shell tests in a temporary `HOME` with no host Node: atomic switch, no overwrite, prune respects ownership and plugin links, an interrupted install is never listed. `upgrade` installs, switches, lists runs on older versions, and `--no-switch` keeps `current`. Updater tests against a fake release source and a stub `gh`: at most one check per 24 hours; patch (and from 1.0, minor) installed and switched; a breaking release only announced; `notify` never installs; a bad checksum or signature records the failure and does not switch; two concurrent invocations install once; `GRAPHLOOM_DISABLE_AUTOUPDATE=1` and `off` make no network call; the notice never reaches a non-TTY, `--json`, or hook invocation, and the foreground exit code is unchanged; `self rollback` keeps the skipped version from being reinstalled until a newer release or `upgrade`; auto-prune keeps three versions plus owners; a process started from the old version keeps loading from it across a switch. Two independent builds give the same hash (done: `apps/graphloom/test/install.test.ts`, `auto-update.test.ts`, `packages/controller/src/repair.test.ts`, and `release.sh build --compare-to`) |
 | R3 | Run ownership (`runs/<id>.json`, `install` record, `stateFormat`), dispatch to the owning version, `resume --upgrade` with ordered migrators, the gate fingerprint including the product version, and the `rehearse --stop-at` / `resume --rehearsal` hooks (done: §5.6) | Controller and CLI tests: resume under a new `current` dispatches with no pin mismatch. `--upgrade` migrates each committed fixture and completes it on a scripted runner. Transitions are recorded. Downgrade, crossing a major, an unknown format, a missing migrator, and an unsettled repair are each refused with the run unchanged. A cached gate result is not reused across versions (done: `packages/controller/src/upgrade.test.ts`, `apps/graphloom/test/ownership.test.ts`, `gate.test.ts`) |
 | R4 | `doctor` with agent discovery (Claude Code, Codex, Pi credentials, `gh`), viable-setup reporting, `fix:` commands, and the updates check; `doctor --task` with `environment`, supervisor selection, and `GraphDefinition.agentRoles` (SDK shape check; issue-fix declares its roles); guided `setup` with `--yes`, rerun, and backups; automatic first-run setup in `run`, `resume`, `probe`, `check`, and `rehearse`; the installer's setup offer (§4.2 step 6, §4.4, §4.5) (done: §4.8; Pi and Claude Code (S3) supervisors are configured, and a Codex supervisor is reported but not configured until S4) | Tests with a stubbed `PATH` and `HOME` (stub `claude`, `codex`, `gh`, `bwrap`; Pi provider variables and auth store): each discovery result for each agent (missing, probe failed, logged out, login not verifiable, available), each with its `fix:` command; each reason automatic updates are a no-op. Viable setups for Claude Code only, Codex only, Pi only, and all three, including the supervisor order Pi, Claude Code, Codex. `doctor --task` on a fixture plugin's `agentRoles`: an unavailable role harness, a read-only harness on a write role, and a `distinctFrom` conflict, each with its alternatives. Setup offers only available choices with the recommendation; refusing `allowUnrestricted` writes nothing; `--yes` writes the recommendations; a rerun shows the current config, changes only confirmed answers, and keeps a `.bak-` copy, and `--yes` leaves an existing file unchanged. Under a pseudo-terminal, `run` with no config completes setup and then the run; without one, and with `--json` or `GRAPHLOOM_RUN_ID` set, `run` exits 1 naming `graphloom setup --yes` and `check` reports and continues. The installer offers setup only on a terminal. No written file contains a stub credential value. The doctor reuses the confinement and capability probes, spends no model call, and never asks for a host Node (done: `apps/graphloom/test/doctor.test.ts`, `doctor-report.test.ts`, `doctor-task.test.ts`, `doctor-installed.test.ts`, `setup.test.ts`, `first-run.test.ts`, `install.test.ts`, and `packages/sdk/src/index.test.ts`) |
-| R5 | `release.sh prepare/publish`, signing, the external-plugin smoke test, and the first release `v0.1.0` (tooling done and `v0.1.0` prepared, §6 "R5 as implemented"; publishing waits for the release key) | The full procedure in §6. The upgrade matrix starts with the second release, from its first fixture (done for the tooling: `apps/graphloom/test/release-publish.test.ts`, and `prepare 0.1.0`, two `build 0.1.0` runs with `--compare-to`, and `publish 0.1.0 --dry-run` with a throwaway key) |
+| R5 | `release.sh prepare/publish`, signing, the external-plugin smoke test, and the first release `v0.1.0` (tooling done, §6 "R5 as implemented"; preparing and publishing `v0.1.0` wait for the remaining pre-release work and the release key) | The full procedure in §6. The upgrade matrix starts with the second release, from its first fixture (done for the tooling: `apps/graphloom/test/release-publish.test.ts`, and, in a rehearsal clone, `prepare 0.1.0`, two `build 0.1.0` runs with `--compare-to`, and `publish 0.1.0 --dry-run` with a throwaway key) |
 
 Open questions: none at present. Repository visibility is to be revisited
 later. Making the repository public would add `curl` installs and
