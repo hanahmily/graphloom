@@ -212,6 +212,13 @@ describe("resume's supervisor (§7.4)", () => {
     );
     // The flat Pi form keeps Pi unprobed.
     expect(await resumeSupervisorPlan(FLAT, runState({ selection: "pi" }), { probe: async_({}) })).toMatchObject({ harness: "pi" });
+    // Without a config, only a binding on the pinned harness restores; a pin with nothing to restore is refused, not dropped.
+    expect(await resumeSupervisorPlan(undefined, runState({ selection: "claude-code", binding: "claude-code" }))).toEqual({ harness: "claude-code" });
+    await expect(resumeSupervisorPlan(undefined, runState({ selection: "codex" }))).rejects.toThrow(
+      /pinned to codex, but there is no operator supervisor config to start it .*restore a config that enables codex/,
+    );
+    // A pin moved to codex whose new binding was never saved: the old binding is not the pin.
+    await expect(resumeSupervisorPlan(undefined, runState({ selection: "codex", binding: "pi" }))).rejects.toThrow(/pinned to codex, but there is no operator supervisor config/);
     // Nothing falls back: the plugin's other harnesses are not considered.
     await expect(resumeSupervisorPlan(ALL, runState({ selection: "codex", preference: { harnesses: ["codex", "pi"] } }), { probe: async_({ pi: true }) })).rejects.toThrow(/pin mismatch/);
   });

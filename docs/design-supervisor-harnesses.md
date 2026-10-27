@@ -975,7 +975,11 @@ so as follows.
   names each hint for an enabled harness that the operator did not
   configure. `check` lists them as warnings, and the doctor gives each its
   own "supervisor model hints" `warn`. `run` and `resume` apply the hints
-  of the preference the run recorded.
+  of the preference the run recorded, and probe each harness with its
+  hinted models, so Pi's credential check is for the model it would start
+  on. The doctor's probes are taken once, without a task, on the operator's
+  own first model, so for a Pi hint it can differ from `run` (a known
+  limit).
 - **Resume** (`resumeSupervisorPlan`). The pin is the run's
   `supervisorSelection`. A run pinned the S3 way (a binding, no selection)
   keeps its binding's harness (`pi` for a binding without `harness`), and
@@ -986,7 +990,11 @@ so as follows.
   harness that the config no longer enables, or that is not available, is
   refused before the controller claims the run, so the run is left as it
   was, not stopped: `supervisor harness pin mismatch: … ; resume with
-  --supervisor <harness>`. A finished run is not checked.
+  --supervisor <harness>`. Without any supervisor config, only a binding on
+  the pinned harness restores (on that harness's defaults, as before S5); a
+  pin with no session yet, or one moved whose new binding was never saved,
+  is refused, naming the config to restore, rather than resumed without its
+  supervisor. A finished run is not checked.
 - **Transitions.** `resume --supervisor <harness> [--reason <text>]` is
   resolved like `run --supervisor`: the harness must be enabled and
   available. To the pinned harness it changes nothing. Otherwise the CLI

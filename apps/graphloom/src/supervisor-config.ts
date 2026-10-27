@@ -397,7 +397,8 @@ export async function supervisorSelectionOutcome(
   config: SupervisorConfig,
   options: { flag?: string; preference?: SupervisorPreference; probe?: (harness: SupervisorHarnessName) => Promise<HarnessProbe> } = {},
 ): Promise<SupervisorSelectionOutcome> {
-  const probe = options.probe ?? ((h: SupervisorHarnessName) => probeSupervisorHarness(config, h));
+  // Each harness is probed as it would start: on its models reordered by the plugin's hints.
+  const probe = options.probe ?? ((h: SupervisorHarnessName) => probeSupervisorHarness(withModelHints(config, h, options.preference), h));
   const enabled = enabledSupervisorHarnesses(config);
   // A flag or select decides alone, and is probed even in the flat Pi form; otherwise every enabled harness may be asked about.
   const named = options.flag ?? config.select;
@@ -510,7 +511,7 @@ export async function resumeSupervisorPlan(
     pinned !== undefined && state.supervisorSelection === undefined
       ? { selection: { harness: pinned, source: "binding", reason: `pinned at the run's first recovery episode, ${pinned} (a run started before supervisor selection)` } }
       : undefined;
-  const probe = options.probe ?? ((h: SupervisorHarnessName) => probeSupervisorHarness(config!, h));
+  const probe = options.probe ?? ((h: SupervisorHarnessName) => probeSupervisorHarness(withModelHints(config!, h, preference), h));
   if (options.flag !== undefined) {
     if (config === undefined) {
       throw new Error(`--supervisor ${options.flag} needs an operator supervisor config that enables it ($GRAPHLOOM_SUPERVISOR_CONFIG or ~/.config/graphloom/supervisor.json)`);
@@ -526,7 +527,17 @@ export async function resumeSupervisorPlan(
   }
   if (pinned !== undefined) {
     if (!isHarnessName(pinned)) throw new Error(`this run's supervisor is pinned to the ${pinned} harness, which this GraphLoom cannot run; resume with --supervisor <harness>`);
-    if (config === undefined) return { ...(legacy !== undefined ? { pin: legacy } : {}), ...(state.supervisorBinding?.sessionFile !== undefined ? { harness: pinned } : {}) };
+    if (config === undefined) {
+      // Without a config only a binding on the pinned harness can be restored (on that harness's defaults);
+      // a pin with no session yet, or one moved to another harness, needs the config to start its supervisor.
+      const binding = state.supervisorBinding;
+      if (binding?.sessionFile === undefined || bindingHarness(binding) !== pinned) {
+        throw new Error(
+          `this run's supervisor is pinned to ${pinned}, but there is no operator supervisor config to start it ($GRAPHLOOM_SUPERVISOR_CONFIG or ~/.config/graphloom/supervisor.json); restore a config that enables ${pinned}`,
+        );
+      }
+      return { harness: pinned, ...(legacy !== undefined ? { pin: legacy } : {}) };
+    }
     const enabled = enabledSupervisorHarnesses(config);
     if (!enabled.includes(pinned)) {
       throw new Error(`supervisor harness pin mismatch: this run's supervisor is pinned to ${pinned}, which the operator's supervisor config does not enable (enabled: ${enabled.join(", ")}); enable it again, or resume with --supervisor <harness>`);

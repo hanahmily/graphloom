@@ -12,6 +12,7 @@ import { existsSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { loadRunState, saveRunState } from "@graphloom/controller";
 import { makeCliEnv, type CliEnv } from "./cli-env.js";
 
 const cleanups: (() => Promise<void>)[] = [];
@@ -47,10 +48,20 @@ describe("graphloom run and resume: the supervisor pin", () => {
     expect(inspected.supervisorSelection?.preference).toBeUndefined();
     expect(inspected.supervisorTransitions).toEqual([]);
 
+    // A finished run only reports itself; stand in for one an operator stopped.
+    const state = await loadRunState(stateDir);
+    await saveRunState({ ...state, status: "stopped", stopReason: "operator stop", blocker: "stop requested" });
     // The flat Pi form enables Pi alone: another harness is refused before the run is touched.
     const moved = await e.graphloom("resume", stateDir, "--supervisor", "claude-code");
     expect(moved.code).toBe(1);
     expect(moved.stderr).toContain("supervisor: --supervisor claude-code is not enabled in the operator's supervisor config (enabled: pi)");
+    expect((await loadRunState(stateDir)).status).toBe("stopped");
+    // Without the config, a pin with no session to restore is refused rather than dropped.
+    delete e.env.GRAPHLOOM_SUPERVISOR_CONFIG;
+    const unconfigured = await e.graphloom("resume", stateDir);
+    expect(unconfigured.code).toBe(1);
+    expect(unconfigured.stderr).toContain("this run's supervisor is pinned to pi, but there is no operator supervisor config to start it");
+    e.env.GRAPHLOOM_SUPERVISOR_CONFIG = path.join(e.dir, "supervisor.json");
 
     // switch-model takes a model of the pinned harness only.
     const cross = await e.graphloom("switch-model", stateDir, "claude-code/opus", "--reason", "try Claude");
