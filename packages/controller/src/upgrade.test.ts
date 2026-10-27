@@ -366,6 +366,68 @@ describe("resume --upgrade (docs/design-release.md §5.2)", () => {
     });
   }
 
+  it("lets the executor re-pin of --upgrade lift a final stop, as --update-executors does", async () => {
+    const env = await makeEnv();
+    const described = (source: string, digest: string): NonNullable<Runner["describeExecutors"]> => async () => [
+      { id: "acme/extra", digest, source, isolation: "in-process", builtin: true },
+    ];
+    const first = writeRunner();
+    first.describeExecutors = described("/old/acme", "a".repeat(64));
+    const stopped = await createController().run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({ definition, advances: [...WRITE_STEPS, stop({ reason: "needs a maintainer", blocker: "final", retryable: false }, "final stop")] }),
+      validators,
+      runner: first,
+      stateRoot: env.stateRoot,
+      runId: "final1",
+      install: OWNER,
+    });
+    expect(stopped.stopRetryable).toBe(false);
+    const runner = reviewRunner();
+    runner.describeExecutors = described("/new/acme", "b".repeat(64));
+    const report = await resumeUpgrade(stopped.stateDir, target, { runner });
+    expect(report.status).toBe("succeeded");
+    const inspect = await createController().inspect(stopped.stateDir);
+    expect(inspect.executorTransitions).toEqual([expect.objectContaining({ id: "acme/extra", fromSource: "/old/acme", toSource: "/new/acme" })]);
+  });
+
+  it("refuses --upgrade --update-plugin while an activated repair owns the plugin, with the run unchanged", async () => {
+    const { stateDir } = await stoppedRun();
+    await editState(stateDir, (s) => (s.activeVersion = "fixture@repair-cand-9"));
+    const before = await snapshot(stateDir);
+    await expect(
+      createController().resume({
+        runRef: stateDir,
+        plugin: createScriptedGraph({ definition, advances: REVIEW_STEPS }),
+        validators,
+        runner: reviewRunner(),
+        updatePlugin: true,
+        upgrade: { install: target },
+      }),
+    ).rejects.toThrow(/--update-plugin: an activated repair \(fixture@repair-cand-9\) owns this run's plugin/);
+    expect(await snapshot(stateDir)).toEqual(before);
+  });
+
+  it("moves a run across a plugin protocol change with --update-plugin and completes it", async () => {
+    const { stateDir } = await stoppedRun();
+    // The run pinned a bundle speaking another protocol; the installed bundle speaks this host's.
+    await editState(stateDir, (s) => {
+      const bundle = (s.intake as { bundle: { sdkProtocol: number; manifestDigest: string } }).bundle;
+      bundle.sdkProtocol = 2;
+      bundle.manifestDigest = "0".repeat(64);
+    });
+    const report = await createController().resume({
+      runRef: stateDir,
+      plugin: createScriptedGraph({ definition, advances: REVIEW_STEPS }),
+      validators,
+      runner: reviewRunner(),
+      updatePlugin: true,
+      upgrade: { install: target },
+    });
+    expect(report.status).toBe("succeeded");
+    expect((await loadRunState(stateDir)).intake.bundle.sdkProtocol).toBe(1);
+  });
+
   it("refuses an executor re-pin the update would refuse, with the run unchanged", async () => {
     const { stateDir } = await stoppedRun();
     await editState(stateDir, (s) => (s.executorCatalog = [{ id: "acme/gone", digest: "a".repeat(64), source: "/old/acme", isolation: "sandbox", builtin: false }]));

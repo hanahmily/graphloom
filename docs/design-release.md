@@ -1169,8 +1169,10 @@ usual, and `graphloom upgrade` clears the skip.
        candidate that is `qualifying` or `qualified`
      - a plugin `sdkProtocol` other than the host's without
        `--update-plugin`
-     - with `--update-plugin`, a bundle that fails describe-compatibility in
-       a throwaway host, as the resume would check it
+     - with `--update-plugin`, an activated plugin repair (the resume would
+       refuse the update), or a bundle that fails describe-compatibility in
+       a throwaway host, as the resume would check it. The installed
+       bundle's own `sdkProtocol` is what the update pins
      - an executor re-pin that `--update-executors` would refuse
   2. The migrators run in memory. The run's `install`, `stateFormat`,
      `installHistory`, `stateMigrations`, an `upgrade` evidence record, a
@@ -1181,7 +1183,9 @@ usual, and `graphloom upgrade` clears the skip.
      written, and `state.json` is written last as the single commit point.
      Then `onMoved` moves `runs/<id>.json`, or removes it when a clone took
      the run.
-  4. The ordinary resume follows and finds the pins current.
+  4. The ordinary resume follows and finds the pins current. Executors that
+     the move re-pinned count as updated, so they lift a final stop as
+     `--update-executors` does.
   A run already owned by this exact version and root, in the current format,
   has nothing to move. `inspect` shows `install`, `stateFormat`,
   `installHistory`, and `stateMigrations`.

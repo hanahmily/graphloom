@@ -85,9 +85,10 @@ export interface UpgradeDeps {
 }
 
 /**
- * Decides and, unless refused, commits the move. Returns false when there is
- * nothing to move (the run already belongs to `request.install` and is in the
- * current format). Throws `UpgradeRefusedError` with the run unchanged.
+ * Decides and, unless refused, commits the move. Returns whether the move
+ * re-pinned any executor (false too when there is nothing to move: the run
+ * already belongs to `request.install` and is in the current format). Throws
+ * `UpgradeRefusedError` with the run unchanged.
  * The caller holds the run lock.
  */
 export async function upgradeRun(stateDir: string, request: UpgradeRequest, deps: UpgradeDeps): Promise<boolean> {
@@ -134,7 +135,6 @@ export async function upgradeRun(stateDir: string, request: UpgradeRequest, deps
   }
   const sameOwner = owner !== undefined && owner.version === target.version && owner.root === target.root;
   if (sameOwner && steps.length === 0) return false;
-
   const files = await readStateFiles(stateDir, steps);
   let migrated;
   try {
@@ -147,6 +147,10 @@ export async function upgradeRun(stateDir: string, request: UpgradeRequest, deps
     throw new UpgradeRefusedError(
       `the run's plugin bundle speaks sdkProtocol ${state.intake.bundle.sdkProtocol}, and GraphLoom ${target.version} speaks ${PROTOCOL_VERSION}; combine --upgrade with --update-plugin on a bundle built for it`,
     );
+  }
+  // The ordinary resume refuses a plugin update while an activated repair owns the plugin; decide that before the move.
+  if (deps.updatePlugin && state.activeVersion !== `${state.intake.bundle.graphId}@${state.intake.bundle.version}`) {
+    throw new UpgradeRefusedError(`--update-plugin: an activated repair (${state.activeVersion}) owns this run's plugin; only the installed bundle can be updated`);
   }
   if (deps.updatePlugin && deps.checkPluginUpdate !== undefined) {
     const reason = await deps.checkPluginUpdate(state);
@@ -197,7 +201,7 @@ export async function upgradeRun(stateDir: string, request: UpgradeRequest, deps
   await writeMigratedSideFiles(stateDir, migrated);
   await saveRunState(state);
   await request.onMoved?.({ runId: state.runId, stateDir, install: target, bundlePath: state.intake.bundle.bundlePath });
-  return true;
+  return executors !== undefined && executors.repins.length > 0;
 }
 
 /** A journaled activation that has not settled, or a qualified candidate that was never activated. */

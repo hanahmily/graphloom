@@ -543,6 +543,8 @@ export function createController(): Controller {
       let restoredSupervisor: Supervisor | undefined;
       // The operator's plugin update is committed only after the updated graph keeps the pinned contract.
       let pluginUpdate: IntakePin["bundle"] | undefined;
+      // Whether `--upgrade` re-pinned executors (they then count as updated for the final-stop decision).
+      let upgradeRepinned = false;
       await withDirectoryLock(stateDir, "run.exec.lock", async () => {
         if (getSession(stateDir) || getSession(request.runRef)) {
           throw new Error("cannot resume: run has an active controller session; stop first");
@@ -554,7 +556,7 @@ export function createController(): Controller {
           );
         }
         if (request.upgrade !== undefined) {
-          await upgradeRun(stateDir, request.upgrade, {
+          upgradeRepinned = await upgradeRun(stateDir, request.upgrade, {
             runner: request.runner,
             updatePlugin: request.updatePlugin === true,
             stateFormats,
@@ -659,12 +661,14 @@ export function createController(): Controller {
         const pluginUpdated = pluginUpdate !== undefined;
         // An executor update that would re-pin something answers a final stop like a plugin update does.
         // One the check refuses runs on too, so the executor pin mismatch naming the executor surfaces instead of the old stop.
+        // An upgrade that re-pinned executors already consumed their differences; it lifts a final stop the same way.
         const executorsUpdated =
-          request.updateExecutors === true &&
+          upgradeRepinned ||
+          (request.updateExecutors === true &&
           (await verifyExecutorCatalog(state, request.runner, true).then(
             (check) => check !== undefined && ("blocker" in check || check.repins.length > 0),
             () => true,
-          ));
+          )));
         const live = await liveCandidateDigest(state).catch(() => state.candidateDigest);
         const asStopped: DurableRunState = {
           ...state,
@@ -1318,7 +1322,7 @@ async function checkPluginUpdate(state: DurableRunState, request: ResumeRequest)
     if (manifest.sdkProtocol !== PROTOCOL_VERSION) {
       return `the installed bundle speaks sdkProtocol ${String(manifest.sdkProtocol)}, not ${PROTOCOL_VERSION}`;
     }
-    const intake: IntakePin = { ...state.intake, bundle: { ...installed, sdkProtocol: PROTOCOL_VERSION } };
+    const intake: IntakePin = { ...state.intake, bundle: installed };
     host = await openHost({
       intake,
       activeVersion: state.activeVersion,
