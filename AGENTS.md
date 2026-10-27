@@ -33,7 +33,7 @@ and `.sh` files start with the two-line SPDX header (after any shebang); run
 `node scripts/check-headers.mjs --fix` to add it to new files. After editing an
 example plugin's sources, regenerate its manifest with `npm run manifest -w <plugin>`.
 
-Agent skills for driving GraphLoom from Claude Code or Codex live in top-level
+Agent skills for driving GraphLoom from Claude Code, Codex or opencode live in top-level
 `skills/<name>/SKILL.md` ([design](docs/design-agent-skills.md)); every
 `graphloom` command and flag they name must be in `graphloom --help`
 (`skills-drift.test.ts`), and `graphloom skills` installs them.

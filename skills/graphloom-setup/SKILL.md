@@ -46,6 +46,7 @@ one line each: what is wrong, why it matters, and the fix. Typical rows:
 | `runner config` warn/fail | `run` refuses without a valid one | `graphloom setup` |
 | `supervisor config` warn | No automatic recovery | `graphloom setup` |
 | `skills (<agent>)` warn | These skills are missing or from another version | `graphloom skills install --agent <agent>` or `graphloom skills update` |
+| `skills duplicates (<agent>)` warn | The agent also reads a shared directory (`~/.agents/skills`, or `~/.claude/skills` for opencode) holding GraphLoom copies of the skills in its own directory, so it loads them twice | `graphloom skills remove --dir <shared dir>` (the fix names it) |
 
 A login the doctor cannot verify ("login not verified") still counts as
 available; tell the user how to confirm it themselves.

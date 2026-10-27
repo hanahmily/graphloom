@@ -72,7 +72,7 @@ graphloom run task.yaml \
 
 - **Claude Code**: run that command with the Bash tool's background option, so
   you are notified when it exits.
-- **Codex** (or any shell): detach it so it outlives the command:
+- **Codex or opencode** (or any shell): detach it so it outlives the command:
   `setsid nohup sh -c '<the command above>' >/dev/null 2>&1 &`.
 
 The hook runs once when the run leaves `running` (or the CLI crashes); its

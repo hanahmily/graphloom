@@ -541,7 +541,7 @@ function requireRunRef(value: string | undefined, usage: string): string {
 
 /** `graphloom skills list|install|update|remove` (docs/design-agent-skills.md §3). */
 async function skillsCommand(args: string[]): Promise<number> {
-  const usage = "usage: graphloom skills list|install|update|remove [<name>...] [--agent claude-code|codex] [--dir <dir>] [--force] [--quiet] [--json]";
+  const usage = "usage: graphloom skills list|install|update|remove [<name>...] [--agent claude-code|codex|opencode] [--dir <dir>] [--force] [--quiet] [--json]";
   const sub = args[0];
   const valued = new Set(["--agent", "--dir"]);
   const agents: SkillAgent[] = [];
@@ -618,10 +618,10 @@ Usage:
   graphloom version [--json | --root]
   graphloom doctor [--task <task.yaml>] [--json]
   graphloom setup [--yes]
-  graphloom skills list [--agent <claude-code|codex>] [--dir <dir>] [--json]
-  graphloom skills install [<name>...] [--agent <claude-code|codex>] [--dir <dir>] [--force]
-  graphloom skills update [--agent <claude-code|codex>] [--dir <dir>] [--quiet]
-  graphloom skills remove [<name>...] [--agent <claude-code|codex>] [--dir <dir>] [--force]
+  graphloom skills list [--agent <claude-code|codex|opencode>] [--dir <dir>] [--json]
+  graphloom skills install [<name>...] [--agent <claude-code|codex|opencode>] [--dir <dir>] [--force]
+  graphloom skills update [--agent <claude-code|codex|opencode>] [--dir <dir>] [--quiet]
+  graphloom skills remove [<name>...] [--agent <claude-code|codex|opencode>] [--dir <dir>] [--force]
 
 Installed releases (handled by the shim in ~/.local/bin, docs/design-release.md §4.3):
   graphloom upgrade [<version>] [--no-switch]
@@ -765,15 +765,19 @@ leaves existing files unchanged. run, resume, probe, check and rehearse start
 it on a terminal when no runner config exists at the default path.
 
 Skills (docs/design-agent-skills.md §3): GraphLoom ships agent skills for
-driving it from Claude Code ($CLAUDE_CONFIG_DIR/skills, default ~/.claude/skills)
-or Codex ($CODEX_HOME/skills, default ~/.codex/skills); GRAPHLOOM_CLAUDE_SKILLS_DIR
-and GRAPHLOOM_CODEX_SKILLS_DIR override them, --dir names one directory. Each
+driving it from Claude Code ($CLAUDE_CONFIG_DIR/skills, default ~/.claude/skills),
+Codex ($CODEX_HOME/skills, default ~/.codex/skills) or opencode
+($XDG_CONFIG_HOME/opencode/skills, default ~/.config/opencode/skills);
+GRAPHLOOM_CLAUDE_SKILLS_DIR, GRAPHLOOM_CODEX_SKILLS_DIR and
+GRAPHLOOM_OPENCODE_SKILLS_DIR override them, --dir names one directory. Each
 copy carries .graphloom-skill.json (version and digest). install writes missing
 and outdated copies for the agents found here (or --agent); an edited copy only
 with --force, and never a directory GraphLoom did not write. update refreshes
 the copies GraphLoom installed, skipping edited ones; upgrade and automatic
 updates run it. remove deletes unedited copies (edited ones with --force); self
-uninstall runs it. setup offers to install them; doctor reports them.
+uninstall runs it. setup offers to install them; doctor reports them, and
+warns when copies in a shared directory an agent also reads (~/.agents/skills
+for Codex and opencode, ~/.claude/skills for opencode) duplicate its own.
 
 Agent runner: run and resume refuse to start without $GRAPHLOOM_RUNNER_CONFIG or
 ~/.config/graphloom/runner.json (graphloom setup writes it):

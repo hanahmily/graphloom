@@ -3,24 +3,24 @@
 Status: implemented (skills, `wait --until progress`, `graphloom skills`).
 
 An operator often drives GraphLoom from an interactive coding agent (Claude
-Code or Codex) rather than by hand: set the machine up, shape a request into an
-issue, start a run, watch it for hours, diagnose a stop, check the delivered
-branch. This design ships that knowledge as agent skills, adds the one CLI
+Code, Codex or opencode) rather than by hand: set the machine up, shape a
+request into an issue, start a run, watch it for hours, diagnose a stop, check
+the delivered branch. This design ships that knowledge as agent skills, adds the one CLI
 feature watching needs (`graphloom wait --until progress`), and distributes the
 skills with the release.
 
 ## 1. Skills
 
-Claude Code and Codex both load `SKILL.md` skills: one directory per skill,
-YAML frontmatter with `name` and `description`, then instructions. The repository
-holds them in top-level [`skills/`](../skills):
+Claude Code, Codex and opencode all load `SKILL.md` skills: one directory per
+skill, YAML frontmatter with `name` and `description`, then instructions. The
+repository holds them in top-level [`skills/`](../skills):
 
 | Skill | Does |
 |---|---|
 | `graphloom-setup` | `graphloom doctor`, explains each warn/fail, runs the `fix:` commands with the user's consent, then `graphloom setup`; supervisor routes per vendor |
 | `graphloom-issue` | Shapes a requirement into an issue one run handles well: one deliverable PR, acceptance criteria, context documents (issue-fix `issues.context`), split or merged to size; the private-tracker option (`pullRequest.reference`) |
 | `graphloom-run` | Writes `task.yaml`, `graphloom check`, starts the run in the background with an `--on-stop` marker file, hands off to watch |
-| `graphloom-watch` | One progress check: arms `graphloom wait --until progress`, diffs `stats --json`/`inspect` against the previous snapshot, reports deltas and flags (stall, budget > 80%, repeated failure, waiting for a human) |
+| `graphloom-watch` | One progress check: arms `graphloom wait --until progress` (a background command in Claude Code; a foreground loop in Codex and opencode, which have no background-command notifications), diffs `stats --json`/`inspect` against the previous snapshot, reports deltas and flags (stall, budget > 80%, repeated failure, waiting for a human) |
 | `graphloom-triage` | A stopped run: diagnose the cause from `inspect`, `stats` and evidence first, then choose the resume form with the user |
 | `graphloom-deliver` | Verifies the delivered branch (commit message, PR body, required sections, the repository's checks on a clean copy), then pushes or opens the PR only with explicit approval |
 
@@ -110,14 +110,31 @@ graphloom skills update [--agent <a>] [--dir <dir>] [--quiet]
 graphloom skills remove [<name>...] [--agent <a>] [--dir <dir>] [--force]
 ```
 
-- **Targets.** Claude Code reads personal skills from
-  `$CLAUDE_CONFIG_DIR/skills` (default `~/.claude/skills`); Codex from
-  `$CODEX_HOME/skills` (default `~/.codex/skills`; verified against codex-cli
-  0.162, whose bundled skill installer writes to `$CODEX_HOME/skills/<name>`).
-  `GRAPHLOOM_CLAUDE_SKILLS_DIR` and `GRAPHLOOM_CODEX_SKILLS_DIR` override them;
-  `--dir` names one directory instead. `install` defaults to the agents found
-  here (the CLI on `PATH`, `GRAPHLOOM_CLAUDE_BIN`/`GRAPHLOOM_CODEX_BIN`, or its
-  home directory); `update`, `list` and `remove` default to both targets.
+- **Targets.** `--agent` names one; `--dir` names one directory instead.
+
+  | Agent | Directory GraphLoom writes | Override | Found here when |
+  |---|---|---|---|
+  | `claude-code` | `$CLAUDE_CONFIG_DIR/skills` (default `~/.claude/skills`) | `GRAPHLOOM_CLAUDE_SKILLS_DIR` | `claude` on `PATH`, `GRAPHLOOM_CLAUDE_BIN`, or `$CLAUDE_CONFIG_DIR` (default `~/.claude`) exists |
+  | `codex` | `$CODEX_HOME/skills` (default `~/.codex/skills`; codex-cli 0.162's bundled skill installer writes there) | `GRAPHLOOM_CODEX_SKILLS_DIR` | `codex` on `PATH`, `GRAPHLOOM_CODEX_BIN`, or `$CODEX_HOME` (default `~/.codex`) exists |
+  | `opencode` | `$XDG_CONFIG_HOME/opencode/skills` (default `~/.config/opencode/skills`; the global config directory `opencode debug paths` prints) | `GRAPHLOOM_OPENCODE_SKILLS_DIR` | `opencode` on `PATH`, `~/.opencode/bin/opencode` (its installer's default), or `$XDG_CONFIG_HOME/opencode` exists |
+
+  `install` defaults to the agents found here; `update`, `list` and `remove`
+  default to every target. Besides its own directory, opencode (verified
+  against 1.19, `opencode debug skill`) also reads `.../opencode/skill/`,
+  project `.opencode/skill(s)/`, and the external `~/.claude/skills` and
+  `~/.agents/skills` (`OPENCODE_DISABLE_EXTERNAL_SKILLS=1` turns both off,
+  `OPENCODE_DISABLE_CLAUDE_CODE_SKILLS=1` or `OPENCODE_DISABLE_CLAUDE_CODE=1`
+  the first); Codex also reads `~/.agents/skills`. GraphLoom never writes
+  either shared directory by default, so no agent loads a skill twice.
+- **Duplicates.** When a shared directory an agent reads (`~/.agents/skills`
+  for Codex and opencode; `~/.claude/skills` for opencode, unless that is
+  Claude Code's own target) holds GraphLoom copies (with a marker) of skills
+  that are also in that agent's own directory, `skills list` names them and
+  the doctor warns (never fails) with a `skills duplicates (<agent>)` row and
+  fix `graphloom skills remove --dir <shared dir>`. A shared directory that is
+  some agent's own target (`~/.claude/skills` while `CLAUDE_CONFIG_DIR` is
+  unset) holds that agent's copies and is not reported; directories without a
+  marker are the user's and are never counted.
 - **Marker.** Each installed copy holds `.graphloom-skill.json`:
   `{ product, skill, version, digest, installedAt }`. `digest` is the SHA-256
   of the `sha256sum`-style listing (`<sha256>  <relative path>` lines, sorted)
@@ -153,7 +170,11 @@ graphloom skills remove [<name>...] [--agent <a>] [--dir <dir>] [--force]
   stay with a notice. When `current` cannot start, it names the directories
   that still hold a marker.
 
-A copy installed with `--dir` is found again only with the same `--dir`.
+A copy installed with `--dir` is found again only with the same `--dir`, or
+when that directory is an agent's own target: the state comes from the marker
+alone, so copies installed with `--dir ~/.config/opencode/skills` before
+opencode was a target are GraphLoom's own copies there and `update`,
+`upgrade` and `remove` treat them so.
 
 ## 4. Verification
 
@@ -165,9 +186,13 @@ A copy installed with `--dir` is found again only with the same `--dir`.
   CLI's own `--help` lacks the command or the flag.
 - `skills-install.test.ts`: install, list, update, remove, edit detection,
   foreign directories, `--force`, and the marker digest against `sha256sum`,
-  all in a temporary `HOME`; setup's offer and doctor's row.
+  all in a temporary `HOME`; every target with its variables (opencode with
+  and without `XDG_CONFIG_HOME`, `GRAPHLOOM_OPENCODE_SKILLS_DIR`), finding
+  opencode on `PATH` and at `~/.opencode/bin` (stub binaries), adopting
+  copies installed with `--dir` at a default location; setup's offer,
+  doctor's row, and the duplicate warning.
 - `progress.test.ts`: each event kind from synthetic state, the cursor and
   `--since`, timeout, stop, a foreign cursor; and an end-to-end scripted run of
   the hello graph watched with `wait --until progress` that reports deltas.
-- `install.test.ts`: upgrade refreshes installed copies and skips edited ones;
-  uninstall removes them.
+- `install.test.ts`: upgrade refreshes installed copies (Claude Code's and
+  opencode's) and skips edited ones; uninstall removes them.

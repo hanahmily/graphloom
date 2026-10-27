@@ -36,6 +36,7 @@ import {
 } from "./discovery.js";
 import { enabledHarnesses, type HarnessName } from "./runner-config.js";
 import { harnessModels, withModelHints, type SupervisorConfig } from "./supervisor-config.js";
+import { SKILL_AGENT_LABEL } from "./skills.js";
 
 export type CheckStatus = "pass" | "warn" | "fail";
 export type CheckSection = "host" | "agents" | "configuration" | "setups" | "task";
@@ -489,6 +490,20 @@ export function skillsChecks(d: Discovery): DoctorCheck[] {
     } else {
       checks.push(check("configuration", name, "pass", `${bundled.length - edited.length - foreign.length} current (${s.version}) in ${t.dir}${tail}`));
     }
+  }
+  // Copies an agent loads twice: from a shared directory it also reads and its own. Never a failure.
+  const found = new Set(s.targets.filter((t) => t.agent !== "dir" && t.found).map((t) => t.agent));
+  for (const dup of s.duplicates ?? []) {
+    if (!found.has(dup.agent)) continue;
+    checks.push(
+      check(
+        "configuration",
+        `skills duplicates (${dup.agent})`,
+        "warn",
+        `${SKILL_AGENT_LABEL[dup.agent]} also reads ${dup.dir}, whose GraphLoom copies duplicate the ones in ${dup.ownDir}: ${dup.skills.join(", ")}`,
+        `graphloom skills remove --dir ${dup.dir}`,
+      ),
+    );
   }
   return checks;
 }

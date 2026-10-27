@@ -5,8 +5,8 @@
  * Fixtures for the doctor, setup, and first-run tests (docs/design-release.md
  * §4.4, §4.5, phase R4). Each environment is a temporary `HOME` whose `PATH`
  * holds a stub directory first, then the host's tools without Node, its
- * package managers, and the real `claude`, `codex`, `gh`, and `bwrap`. The
- * stubs answer `--version`, `--help` (the capability probe), and the login
+ * package managers, and the real `claude`, `codex`, `opencode`, `gh`, and
+ * `bwrap`. The stubs answer `--version`, `--help` (the capability probe), and the login
  * status commands as the real CLIs do, by mode; the stub `claude` hands every
  * other invocation to the fake Claude Code the executor tests use. The Pi
  * credential is a stub provider variable or a stub auth store entry. Nothing
@@ -83,7 +83,7 @@ export async function removeDoctorBase(): Promise<void> {
   systemBin = undefined;
 }
 
-const STUBBED = new Set(["node", "nodejs", "npm", "npx", "corepack", "pnpm", "yarn", "claude", "codex", "gh", "bwrap"]);
+const STUBBED = new Set(["node", "nodejs", "npm", "npx", "corepack", "pnpm", "yarn", "claude", "codex", "opencode", "gh", "bwrap"]);
 
 /** The host's tools, linked, without Node and without the CLIs the stubs stand in for. */
 function systemPath(): Promise<string> {

@@ -6,7 +6,10 @@
  * install for the agents found, the marker and its digest (equal to the sh
  * pipeline the design gives), list, update of outdated and retired copies,
  * edit detection, directories GraphLoom did not write, --force, --dir and the
- * agents' own directory variables, remove; and setup's offer and doctor's row.
+ * agents' own directory variables, remove; opencode as a target (its XDG
+ * directory, override, and how it is found, with stub binaries), copies
+ * installed with --dir adopted at a default location, duplicates in shared
+ * directories; and setup's offer and doctor's rows.
  */
 import { execFile, spawnSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
@@ -15,10 +18,10 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
-import type { Discovery } from "../src/discovery.js";
+import { discover, type Discovery } from "../src/discovery.js";
 import { doctorReport } from "../src/doctor.js";
 import { runSetup, type Prompter } from "../src/setup.js";
-import { SKILL_MARKER, skillDigest, skillsStatus, type SkillMarker, type SkillsStatus } from "../src/skills.js";
+import { SKILL_MARKER, agentFound, skillDigest, skillsStatus, type SkillMarker, type SkillsStatus } from "../src/skills.js";
 import { versionInfo } from "../src/version.js";
 import { repoRoot } from "./cli-env.js";
 import { fakeDiscovery } from "./discovery-fixture.js";
@@ -33,7 +36,7 @@ afterEach(async () => {
   while (dirs.length > 0) await rm(dirs.pop()!, { recursive: true, force: true });
 });
 
-/** A HOME with no agent and a PATH with neither claude nor codex. */
+/** A HOME with no agent and a PATH with none of claude, codex, opencode. */
 async function sandbox() {
   const home = await mkdtemp(path.join(os.tmpdir(), "gl-skills-"));
   dirs.push(home);
@@ -46,7 +49,17 @@ async function sandbox() {
   const list = async (...args: string[]) => JSON.parse((await graphloom("list", "--json", ...args)).stdout) as SkillsStatus;
   const states = async (agent: string, ...args: string[]) =>
     Object.fromEntries((await list(...args)).targets.find((t) => t.agent === agent)!.skills.map((c) => [c.name, c.state]));
-  return { home, env, graphloom, list, states, claude: path.join(home, ".claude", "skills"), codex: path.join(home, ".codex", "skills") };
+  return {
+    home,
+    env,
+    graphloom,
+    list,
+    states,
+    claude: path.join(home, ".claude", "skills"),
+    codex: path.join(home, ".codex", "skills"),
+    opencode: path.join(home, ".config", "opencode", "skills"),
+    agents: path.join(home, ".agents", "skills"),
+  };
 }
 
 const marker = (dir: string) => JSON.parse(readFileSync(path.join(dir, SKILL_MARKER), "utf8")) as SkillMarker;
@@ -56,7 +69,7 @@ describe("graphloom skills install, list, update, remove", { timeout: 60_000 }, 
     const s = await sandbox();
     const none = await s.graphloom("install");
     expect(none.code).toBe(0);
-    expect(none.stdout).toContain("no Claude Code or Codex found here");
+    expect(none.stdout).toContain("no Claude Code, Codex or opencode found here");
     expect(existsSync(s.claude)).toBe(false);
 
     await mkdir(path.join(s.home, ".claude"));
@@ -158,6 +171,7 @@ describe("graphloom skills install, list, update, remove", { timeout: 60_000 }, 
     expect(targets).toEqual([
       ["claude-code", path.join(s.home, "claude-config", "skills"), false],
       ["codex", path.join(s.home, "codex-home", "skills"), false],
+      ["opencode", path.join(s.home, ".config", "opencode", "skills"), false],
     ]);
     s.env.GRAPHLOOM_CODEX_SKILLS_DIR = path.join(s.home, "override");
     s.env.GRAPHLOOM_CODEX_BIN = "/stub/codex";
@@ -168,7 +182,7 @@ describe("graphloom skills install, list, update, remove", { timeout: 60_000 }, 
 
   it("refuses an unknown agent, option, or subcommand", async () => {
     const s = await sandbox();
-    expect((await s.graphloom("install", "--agent", "cursor")).stderr).toContain("--agent must be claude-code or codex");
+    expect((await s.graphloom("install", "--agent", "cursor")).stderr).toContain("--agent must be claude-code, codex or opencode");
     expect((await s.graphloom("install", "--bogus")).stderr).toContain("unknown option --bogus");
     const bare = await s.graphloom();
     expect(bare.code).toBe(1);
@@ -176,18 +190,201 @@ describe("graphloom skills install, list, update, remove", { timeout: 60_000 }, 
   });
 });
 
-describe("setup and doctor", { timeout: 60_000 }, () => {
-  async function discovered(home: string, found: { claude?: boolean; codex?: boolean }): Promise<Discovery> {
-    const env = { HOME: home, PATH: "" };
-    const skills = await skillsStatus({ env, root: repoRoot });
-    const base = path.join(home, ".config", "graphloom");
-    return {
-      ...fakeDiscovery({ runnerFile: path.join(base, "runner.json"), supervisorFile: path.join(base, "supervisor.json"), available: ["claude-code"] }),
-      root: repoRoot,
-      env,
-      skills: { ...skills, targets: skills.targets.map((t) => ({ ...t, found: (t.agent === "claude-code" && found.claude === true) || (t.agent === "codex" && found.codex === true) })) },
+/** A discovery whose skills status is real for `home`, with the named agents found. */
+async function discovered(home: string, found: { claude?: boolean; codex?: boolean; opencode?: boolean }, extra: NodeJS.ProcessEnv = {}): Promise<Discovery> {
+  const env = { HOME: home, PATH: "", ...extra };
+  const skills = await skillsStatus({ env, root: repoRoot });
+  const base = path.join(home, ".config", "graphloom");
+  const isFound = (agent: string) => (agent === "claude-code" && found.claude === true) || (agent === "codex" && found.codex === true) || (agent === "opencode" && found.opencode === true);
+  return {
+    ...fakeDiscovery({ runnerFile: path.join(base, "runner.json"), supervisorFile: path.join(base, "supervisor.json"), available: ["claude-code"] }),
+    root: repoRoot,
+    env,
+    skills: { ...skills, targets: skills.targets.map((t) => ({ ...t, found: isFound(t.agent) })) },
+  };
+}
+
+describe("opencode as a target", { timeout: 60_000 }, () => {
+  /** A stub `opencode` that is never run: GraphLoom only looks for the file. */
+  const stub = async (file: string) => {
+    await mkdir(path.dirname(file), { recursive: true });
+    await writeFile(file, "#!/bin/sh\necho 'stub opencode must not run' >&2\nexit 99\n", { mode: 0o755 });
+  };
+
+  it("installs, lists, updates and removes in $XDG_CONFIG_HOME/opencode/skills, default ~/.config, and honours GRAPHLOOM_OPENCODE_SKILLS_DIR", async () => {
+    const s = await sandbox();
+    const installed = await s.graphloom("install", "--agent", "opencode");
+    expect(installed.stdout).toContain(`opencode (${s.opencode}): 6 skill(s) written`);
+    expect(readdirSync(s.opencode).sort()).toEqual(SKILLS);
+    expect(marker(path.join(s.opencode, "graphloom-watch"))).toMatchObject({ product: "graphloom", skill: "graphloom-watch", version });
+    expect(Object.values(await s.states("opencode"))).toEqual(SKILLS.map(() => "current"));
+    // Only opencode's directory was written.
+    expect(existsSync(s.claude)).toBe(false);
+    expect(existsSync(s.codex)).toBe(false);
+
+    const old = path.join(s.opencode, "graphloom-run");
+    await writeFile(path.join(old, "SKILL.md"), "---\nname: graphloom-run\ndescription: older\n---\n");
+    await writeFile(path.join(old, SKILL_MARKER), JSON.stringify({ ...marker(old), version: "0.0.1", digest: await skillDigest(old) }));
+    expect((await s.states("opencode"))["graphloom-run"]).toBe("outdated");
+    expect((await s.graphloom("update", "--quiet")).stdout).toContain(`graphloom skills: 1 updated to ${version}`);
+    expect(marker(old).version).toBe(version);
+    expect((await s.graphloom("remove", "--agent", "opencode")).stdout).toContain(`removed ${old}`);
+    expect(readdirSync(s.opencode)).toEqual([]);
+
+    // XDG_CONFIG_HOME moves it, as it moves opencode's own config directory.
+    s.env.XDG_CONFIG_HOME = path.join(s.home, "xdg");
+    const xdg = path.join(s.home, "xdg", "opencode", "skills");
+    expect((await s.list("--agent", "opencode")).targets.map((t) => [t.agent, t.dir])).toEqual([["opencode", xdg]]);
+    await s.graphloom("install", "graphloom-watch", "--agent", "opencode");
+    expect(readdirSync(xdg)).toEqual(["graphloom-watch"]);
+    expect(readdirSync(s.opencode)).toEqual([]);
+
+    // GraphLoom's override wins over both.
+    s.env.GRAPHLOOM_OPENCODE_SKILLS_DIR = path.join(s.home, "oc-override");
+    await s.graphloom("install", "--agent", "opencode");
+    expect(readdirSync(path.join(s.home, "oc-override")).sort()).toEqual(SKILLS);
+    expect(readdirSync(xdg)).toEqual(["graphloom-watch"]);
+    await s.graphloom("remove");
+    expect(readdirSync(path.join(s.home, "oc-override"))).toEqual([]);
+  });
+
+  it("is found on PATH, at ~/.opencode/bin/opencode, or by its config directory; install without --agent then writes it", async () => {
+    const s = await sandbox();
+    expect(agentFound("opencode", s.env)).toBe(false);
+    const binDir = path.join(s.home, "path-bin");
+    await stub(path.join(binDir, "opencode"));
+    expect(agentFound("opencode", { ...s.env, PATH: `${binDir}:/usr/bin:/bin` })).toBe(true);
+    await stub(path.join(s.home, ".opencode", "bin", "opencode"));
+    expect(agentFound("opencode", s.env)).toBe(true);
+    const written = await s.graphloom("install");
+    expect(written.stdout).toContain(`opencode (${s.opencode}): 6 skill(s) written`);
+    expect(existsSync(s.claude)).toBe(false);
+    await rm(path.join(s.home, ".opencode"), { recursive: true });
+    // Its config directory (now holding the skills) still says opencode is here.
+    expect(agentFound("opencode", s.env)).toBe(true);
+    expect(agentFound("opencode", { ...s.env, XDG_CONFIG_HOME: path.join(s.home, "nowhere") })).toBe(false);
+  });
+
+  it("discovery finds opencode on PATH and at ~/.opencode/bin", async () => {
+    const s = await sandbox();
+    const found = async (env: NodeJS.ProcessEnv) => (await discover(env, repoRoot)).skills!.targets.find((t) => t.agent === "opencode")!.found;
+    const empty = path.join(s.home, "empty-bin");
+    await mkdir(empty);
+    expect(await found({ HOME: s.home, PATH: empty })).toBe(false);
+    const binDir = path.join(s.home, "path-bin");
+    await stub(path.join(binDir, "opencode"));
+    expect(await found({ HOME: s.home, PATH: `${empty}:${binDir}` })).toBe(true);
+    await stub(path.join(s.home, ".opencode", "bin", "opencode"));
+    expect(await found({ HOME: s.home, PATH: empty })).toBe(true);
+  });
+
+  it("adopts copies installed with --dir at opencode's default directory as GraphLoom's own", async () => {
+    const s = await sandbox();
+    // As before opencode was a target: installed with --dir, then left behind by an older version.
+    await s.graphloom("install", "--dir", s.opencode);
+    const old = path.join(s.opencode, "graphloom-triage");
+    await writeFile(path.join(old, "SKILL.md"), "---\nname: graphloom-triage\ndescription: older\n---\n");
+    await writeFile(path.join(old, SKILL_MARKER), JSON.stringify({ ...marker(old), version: "0.0.1", digest: await skillDigest(old) }));
+    await appendFile(path.join(s.opencode, "graphloom-run", "SKILL.md"), "\nmine\n");
+    expect(await s.states("opencode")).toMatchObject({ "graphloom-triage": "outdated", "graphloom-run": "edited", "graphloom-watch": "current" });
+    const up = await s.graphloom("update", "--quiet");
+    expect(up.stdout).toContain(`graphloom skills: 1 updated to ${version}`);
+    expect(up.stdout).toContain(`kept ${path.join(s.opencode, "graphloom-run")} (you edited it)`);
+    expect(marker(old).version).toBe(version);
+    const gone = await s.graphloom("remove");
+    expect(gone.stdout).toContain(`kept ${path.join(s.opencode, "graphloom-run")}: you edited it`);
+    expect(readdirSync(s.opencode)).toEqual(["graphloom-run"]);
+  });
+
+  it("names GraphLoom copies in a shared directory an agent also reads, never unmarked ones", async () => {
+    const s = await sandbox();
+    await s.graphloom("install", "--agent", "codex", "--agent", "opencode");
+    expect((await s.list()).duplicates).toEqual([]);
+    // Unmarked directories in ~/.agents/skills are the user's own.
+    await mkdir(path.join(s.agents, "graphloom-run"), { recursive: true });
+    await writeFile(path.join(s.agents, "graphloom-run", "SKILL.md"), "---\nname: graphloom-run\ndescription: mine\n---\n");
+    expect((await s.list()).duplicates).toEqual([]);
+    await rm(path.join(s.agents, "graphloom-run"), { recursive: true });
+    await s.graphloom("install", "graphloom-run", "graphloom-watch", "--dir", s.agents);
+    const dups = (await s.list()).duplicates!;
+    expect(dups.map((d) => [d.agent, d.dir, d.ownDir, d.skills])).toEqual([
+      ["codex", s.agents, s.codex, ["graphloom-run", "graphloom-watch"]],
+      ["opencode", s.agents, s.opencode, ["graphloom-run", "graphloom-watch"]],
+    ]);
+    expect((await s.graphloom("list")).stdout).toContain(
+      `Codex also reads ${s.agents}, whose GraphLoom copies duplicate the ones in ${s.codex}: graphloom-run, graphloom-watch; graphloom skills remove --dir ${s.agents} removes them there`,
+    );
+    expect((await s.list("--agent", "codex")).duplicates!.map((d) => d.agent)).toEqual(["codex"]);
+    expect((await s.list("--dir", s.agents)).duplicates).toBeUndefined();
+    s.env.OPENCODE_DISABLE_EXTERNAL_SKILLS = "1";
+    expect((await s.list()).duplicates!.map((d) => d.agent)).toEqual(["codex"]);
+    delete s.env.OPENCODE_DISABLE_EXTERNAL_SKILLS;
+    // The fix the notice names.
+    await s.graphloom("remove", "--dir", s.agents);
+    expect(readdirSync(s.agents)).toEqual([]);
+    expect((await s.list()).duplicates).toEqual([]);
+
+    // ~/.claude/skills is Claude Code's own target, unless CLAUDE_CONFIG_DIR moves that elsewhere.
+    await s.graphloom("install", "graphloom-issue", "--agent", "claude-code");
+    expect((await s.list()).duplicates).toEqual([]);
+    s.env.CLAUDE_CONFIG_DIR = path.join(s.home, "claude-config");
+    expect((await s.list()).duplicates!.map((d) => [d.agent, d.dir, d.skills])).toEqual([["opencode", s.claude, ["graphloom-issue"]]]);
+    s.env.OPENCODE_DISABLE_CLAUDE_CODE_SKILLS = "true";
+    expect((await s.list()).duplicates).toEqual([]);
+  });
+
+  it("setup offers the skills for opencode when it is found and installs them in its directory", async () => {
+    const home = await mkdtemp(path.join(os.tmpdir(), "gl-skills-setup-oc-"));
+    dirs.push(home);
+    const xdg = path.join(home, "xdg");
+    const lines: string[] = [];
+    const p: Prompter = {
+      say: (l) => void lines.push(l),
+      ask: async (q) => {
+        lines.push(q);
+        return q.includes("Allow coding agents") ? "y" : "";
+      },
     };
-  }
+    const result = await runSetup({ prompter: p, discovery: await discovered(home, { opencode: true }, { XDG_CONFIG_HOME: xdg }), env: { HOME: home } });
+    expect(result.exitCode).toBe(0);
+    const text = lines.join("\n");
+    expect(text).toContain("GraphLoom ships agent skills for driving it from opencode");
+    expect(text).toContain(`they would go to ${path.join(xdg, "opencode", "skills")}`);
+    expect(text).toContain("Install them for opencode?");
+    expect(readdirSync(path.join(xdg, "opencode", "skills")).sort()).toEqual(SKILLS);
+    expect(existsSync(path.join(home, ".claude", "skills"))).toBe(false);
+  });
+
+  it("doctor reports a skills (opencode) row and warns, never fails, about duplicates in a shared directory", async () => {
+    const home = await mkdtemp(path.join(os.tmpdir(), "gl-skills-doctor-oc-"));
+    dirs.push(home);
+    const env = { HOME: home, PATH: "" };
+    const rows = async (found: { codex?: boolean; opencode?: boolean }) => doctorReport(await discovered(home, found)).checks.filter((c) => c.name.startsWith("skills"));
+    expect(await rows({ opencode: true })).toEqual([
+      expect.objectContaining({
+        name: "skills (opencode)",
+        status: "warn",
+        fix: "graphloom skills install --agent opencode",
+        detail: expect.stringContaining(path.join(home, ".config", "opencode", "skills")),
+      }),
+    ]);
+    await execFileAsync(process.execPath, [cli, "skills", "install", "--agent", "opencode", "--agent", "codex"], { env });
+    expect(await rows({ opencode: true })).toEqual([expect.objectContaining({ name: "skills (opencode)", status: "pass", detail: expect.stringContaining(`6 current (${version})`) })]);
+
+    const shared = path.join(home, ".agents", "skills");
+    await execFileAsync(process.execPath, [cli, "skills", "install", "graphloom-run", "--dir", shared], { env });
+    const both = await rows({ opencode: true, codex: true });
+    expect(both.filter((c) => c.name.startsWith("skills duplicates"))).toEqual([
+      expect.objectContaining({ name: "skills duplicates (codex)", status: "warn", fix: `graphloom skills remove --dir ${shared}`, detail: expect.stringContaining(`Codex also reads ${shared}`) }),
+      expect.objectContaining({ name: "skills duplicates (opencode)", status: "warn", fix: `graphloom skills remove --dir ${shared}`, detail: expect.stringContaining("graphloom-run") }),
+    ]);
+    expect(both.some((c) => c.status === "fail")).toBe(false);
+    // An agent not found here is not warned about.
+    expect((await rows({ opencode: true })).map((c) => c.name)).toEqual(["skills (opencode)", "skills duplicates (opencode)"]);
+  });
+});
+
+describe("setup and doctor", { timeout: 60_000 }, () => {
 
   /** Answers each question by what it asks: `skills` for the skill offer, `y` for consent, the default otherwise. */
   function prompter(skills: string): Prompter & { lines: string[] } {
