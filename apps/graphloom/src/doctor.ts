@@ -186,8 +186,9 @@ function configurationChecks(d: Discovery): DoctorCheck[] {
     const parts = d.supervisorEnabled.map((c) => `${c.harness}${c.harness === "pi" ? ` (${s.config!.provider}/${s.config!.modelId})` : ""}${c.ok ? "" : `: not available, ${c.reason}`}`);
     const missing = d.supervisorEnabled.filter((c) => !c.ok);
     const detail = `${s.file} (${form}): ${parts.join("; ")}; the repair reviewer uses the same agent`;
-    // A listed harness that is not available warns: selection falls back past it.
-    checks.push(missing.length === 0 ? check("configuration", "supervisor config", "pass", detail) : check("configuration", "supervisor config", "warn", detail, missing.map((c) => c.fix ?? "graphloom setup").join("; ")));
+    // A listed harness that is not available warns: selection falls back past it. A `select` run refuses fails.
+    if (d.supervisorSelectionError !== undefined) checks.push(check("configuration", "supervisor config", "fail", `${detail}; run refuses: ${d.supervisorSelectionError}`, missing.map((c) => c.fix ?? "graphloom setup").join("; ") || "graphloom setup"));
+    else checks.push(missing.length === 0 ? check("configuration", "supervisor config", "pass", detail) : check("configuration", "supervisor config", "warn", detail, missing.map((c) => c.fix ?? "graphloom setup").join("; ")));
   }
 
   const tokenEnv = r.config?.github?.tokenEnv;
@@ -273,6 +274,9 @@ export function supervisorSelection(d: Discovery): DoctorCheck {
   // The selection `run` makes with no --supervisor: `select`, else the first enabled harness available.
   // The plugin's own preference (GraphDefinition.supervisor) joins with phase S5.
   const sel = d.supervisorSelection;
+  if (d.supervisorSelectionError !== undefined) {
+    return check("task", "supervisor selection", "fail", `run refuses: ${d.supervisorSelectionError}`, d.supervisorEnabled.filter((c) => !c.ok).map((c) => c.fix ?? "graphloom setup").join("; ") || "graphloom setup");
+  }
   if (sel === undefined) {
     const why = d.supervisorEnabled.map((c) => `${c.harness}: ${c.reason}`).join("; ");
     return check("task", "supervisor selection", "warn", `none: no enabled supervisor harness is available (${why}), so the run has no automatic recovery`, d.supervisorEnabled.map((c) => c.fix ?? "graphloom setup").join("; ") || "graphloom setup");

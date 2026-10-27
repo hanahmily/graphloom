@@ -130,6 +130,9 @@ describe("doctor --task: supervisor selection", () => {
     const none: Discovery = { ...fallback, supervisorEnabled: [{ harness: "pi", ok: false, reason: "x", fix: "fix-pi" }, { harness: "claude-code", ok: false, reason: "y", fix: "claude" }] };
     delete none.supervisorSelection;
     expect(supervisorSelection(none)).toMatchObject({ status: "warn", detail: expect.stringContaining("none: no enabled supervisor harness is available"), fix: "fix-pi; claude" });
+    const refused: Discovery = { ...none, supervisorSelectionError: "supervisor: select codex is not available: the Codex supervisor arrives with phase S4" };
+    expect(supervisorSelection(refused)).toMatchObject({ status: "fail", detail: expect.stringContaining("run refuses: supervisor: select codex") });
+    expect(machineChecks(refused).find((c) => c.name === "supervisor config")).toMatchObject({ status: "fail" });
     const broken: Discovery = { ...d, supervisor: { ...d.supervisor, exists: true, error: "supervisor.json: provider must be a non-empty string" } };
     expect(supervisorSelection(broken)).toMatchObject({ status: "fail", detail: expect.stringContaining("run refuses") });
   });

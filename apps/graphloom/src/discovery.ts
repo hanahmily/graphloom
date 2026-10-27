@@ -539,6 +539,8 @@ export interface Discovery {
   supervisorEnabled: SupervisorHarnessCheck[];
   /** The harness `run` would select from the existing supervisor config (no `--supervisor`), if any. */
   supervisorSelection?: SupervisorSelection;
+  /** Why `run` would refuse the existing supervisor config's selection (a `select` that is not available). */
+  supervisorSelectionError?: string;
   env: NodeJS.ProcessEnv;
 }
 
@@ -656,7 +658,7 @@ export async function discover(env: NodeJS.ProcessEnv = process.env, root: strin
     ...(runner.config?.claude?.configDir !== undefined ? { configDir: runner.config.claude.configDir } : {}),
   };
   const supervisorCandidates = await discoverSupervisorCandidates(claude, pi, claudeSupervisorSection);
-  const { enabled: supervisorEnabled, selection: supervisorSelection } = await discoverSupervisorSelection(supervisor.config, pi);
+  const { enabled: supervisorEnabled, selection: supervisorSelection, error: supervisorSelectionError } = await discoverSupervisorSelection(supervisor.config, pi);
   const updates = await discoverUpdates(self, runner, env);
   return {
     self,
@@ -673,6 +675,7 @@ export async function discover(env: NodeJS.ProcessEnv = process.env, root: strin
     claudeSupervisorSection,
     supervisorEnabled,
     ...(supervisorSelection !== undefined ? { supervisorSelection } : {}),
+    ...(supervisorSelectionError !== undefined ? { supervisorSelectionError } : {}),
     env,
   };
 }
@@ -718,7 +721,7 @@ async function discoverSupervisorCandidates(claude: CliHarnessDiscovery, pi: PiD
 }
 
 /** The existing supervisor config's harnesses, probed, and the harness `run` would select from them. */
-async function discoverSupervisorSelection(config: SupervisorConfig | undefined, pi: PiDiscovery): Promise<{ enabled: SupervisorHarnessCheck[]; selection?: SupervisorSelection }> {
+async function discoverSupervisorSelection(config: SupervisorConfig | undefined, pi: PiDiscovery): Promise<{ enabled: SupervisorHarnessCheck[]; selection?: SupervisorSelection; error?: string }> {
   if (config === undefined) return { enabled: [] };
   const claudeDiscovery = (config: SupervisorConfig): CliHarnessDiscovery => ({ harness: "claude-code", command: config.claude?.command ?? "claude", commandSource: "supervisor config", available: true });
   const checks = new Map<string, SupervisorHarnessCheck>();
@@ -728,11 +731,16 @@ async function discoverSupervisorSelection(config: SupervisorConfig | undefined,
     else checks.set(harness, { harness: harness as HarnessName, ok: false, reason: NOT_SHIPPED[harness] ?? `the ${harness} supervisor is not available in this GraphLoom`, fix: "graphloom setup" });
   }
   // The same selection `run` makes, on these probes; a flat Pi config selects Pi unprobed, as `run` does.
-  const selection = await selectSupervisorHarness(config, {
-    probe: async (h) => {
-      const c = checks.get(h);
-      return c?.ok ? { ok: true } : { ok: false, reason: c?.reason ?? "not enabled" };
-    },
-  }).catch(() => undefined);
-  return { enabled: [...checks.values()], ...(selection !== undefined ? { selection } : {}) };
+  // A `select` that is not available makes run refuse: keep that error; only an exhausted fallback means no supervisor.
+  try {
+    const selection = await selectSupervisorHarness(config, {
+      probe: async (h) => {
+        const c = checks.get(h);
+        return c?.ok ? { ok: true } : { ok: false, reason: c?.reason ?? "not enabled" };
+      },
+    });
+    return { enabled: [...checks.values()], ...(selection !== undefined ? { selection } : {}) };
+  } catch (err) {
+    return { enabled: [...checks.values()], error: err instanceof Error ? err.message : String(err) };
+  }
 }
