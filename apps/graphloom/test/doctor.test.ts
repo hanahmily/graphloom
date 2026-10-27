@@ -136,6 +136,32 @@ describe("graphloom doctor: agent discovery", () => {
   });
 });
 
+describe("graphloom doctor: supervisor harnesses (S3)", () => {
+  it("on a Claude Code-only machine, Claude Code is the viable supervisor; setup --yes writes it and doctor passes it", async () => {
+    const env = await makeDoctorEnv({ codex: "missing" });
+    let { report } = await doctor(env);
+    expect(row(report, "supervisor")).toMatchObject({ status: "pass", detail: expect.stringMatching(/^claude-code \(recommended: claude-code/) });
+    expect(report.viable).toMatchObject({ supervisor: "claude-code", supervisors: ["claude-code"] });
+    const setup = await env.run(["setup", "--yes"]);
+    expect(setup.code, setup.stdout + setup.stderr).toBe(0);
+    ({ report } = await doctor(env));
+    expect(row(report, "supervisor config")).toMatchObject({ status: "pass", detail: expect.stringContaining("(the per-harness form): claude-code;") });
+  });
+
+  it("Claude Code without its login marker fails S3's supervisor probe and does not count", async () => {
+    const env = await makeDoctorEnv({ codex: "missing", claude: "noauth" });
+    await (await import("node:fs/promises")).rm(path.join(env.home, ".claude", ".credentials.json"));
+    const { report } = await doctor(env);
+    expect(report.viable.supervisors).toEqual([]);
+    expect(row(report, "supervisor")).toMatchObject({ status: "warn", detail: expect.stringContaining("claude-code: Claude Code has no login") });
+  });
+
+  it("with Pi present, Pi comes first", async () => {
+    const { report } = await withEnv({ piEnv: true });
+    expect(report.viable).toMatchObject({ supervisor: "pi", supervisors: ["pi", "claude-code"] });
+  });
+});
+
 describe("graphloom doctor: host", () => {
   it("reuses the confinement probe: no bwrap, and one that cannot create a namespace naming the AppArmor setting", async () => {
     const missing = (await withEnv({ bwrap: "missing" })).report;

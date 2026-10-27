@@ -15,7 +15,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { Discovery } from "../src/discovery.js";
 import { loadRunnerConfig } from "../src/runner-config.js";
 import { backupStamp, runSetup, type Prompter } from "../src/setup.js";
-import { loadSupervisorConfig } from "../src/supervisor-config.js";
+import { enabledSupervisorHarnesses, loadSupervisorConfig } from "../src/supervisor-config.js";
 import { fakeDiscovery, type FakeDiscoveryOptions } from "./discovery-fixture.js";
 
 const dirs: string[] = [];
@@ -65,7 +65,7 @@ const now = () => new Date("2026-10-27T05:17:00.123Z");
 describe("graphloom setup", () => {
   it("offers only available choices, each with its recommendation, and writes 0600 files run accepts", async () => {
     const h = await home();
-    const p = scripted(["", "", "", "", "", "y"]);
+    const p = scripted(["", "", "", "", "", "", "y"]);
     const result = await runSetup({ prompter: p, discovery: discovery(h, { available: ["claude-code", "pi"], piProviders: ["minimax-cn", "deepseek"] }), now });
     expect(result).toMatchObject({ exitCode: 0, runner: "written", supervisor: "written" });
     expect(p.questions[0]).toMatch(/Default harness \[claude-code\/pi\] \(recommended: claude-code\)/);
@@ -73,35 +73,37 @@ describe("graphloom setup", () => {
     expect(p.questions[1]).toMatch(/Also enable Pi\? \[Y\/n\]/);
     expect(p.questions[2]).toMatch(/Pi provider with a credential \[minimax-cn\/deepseek\] \(recommended: minimax-cn\)/);
     expect(p.questions[3]).toMatch(/minimax-cn model \(recommended: MiniMax-M3;/);
-    expect(p.questions[4]).toMatch(/Configure a Pi supervisor on minimax-cn\/MiniMax-M3\? \[Y\/n\]/);
+    expect(p.questions[4]).toMatch(/Enable a Pi supervisor on minimax-cn\/MiniMax-M3\? \[Y\/n\]/);
+    expect(p.questions[5]).toMatch(/Enable a Claude Code supervisor \(your own Claude Code login\)\? \[Y\/n\]/);
+    expect(p.transcript()).toContain("Available, in the built-in order: pi, claude-code (recommended: pi)");
     expect(p.questions.at(-1)).toMatch(/Allow coding agents to run with your user permissions\? \[y\/N\]/);
     expect(p.transcript()).toContain("The repair reviewer uses the same agent");
     expect(p.transcript()).toMatch(/confinement \(bubblewrap\)\s+limits what they write, not everything a shell can do/i);
 
     expect(json(h.runnerFile)).toEqual({ harness: "claude-code", allowUnrestricted: true, harnesses: ["claude-code", "pi"], pi: { provider: "minimax-cn", modelId: "MiniMax-M3" } });
-    expect(json(h.supervisorFile)).toEqual({ provider: "minimax-cn", modelId: "MiniMax-M3" });
+    expect(json(h.supervisorFile)).toEqual({ harnesses: ["pi", "claude-code"], pi: { provider: "minimax-cn", modelId: "MiniMax-M3" }, claude: {} });
     expect(mode(h.runnerFile)).toBe(0o600);
     expect(mode(h.supervisorFile)).toBe(0o600);
     // The same lookups and parsers run uses accept them.
     expect(await loadRunnerConfig(h.env)).toMatchObject({ harness: "claude-code", harnesses: ["claude-code", "pi"] });
-    expect(await loadSupervisorConfig(h.env)).toMatchObject({ provider: "minimax-cn", modelId: "MiniMax-M3" });
+    expect(await loadSupervisorConfig(h.env)).toMatchObject({ provider: "minimax-cn", modelId: "MiniMax-M3", harnesses: ["pi", "claude-code"] });
     // No temporary file is left behind.
     expect(readdirSync(path.dirname(h.runnerFile)).sort()).toEqual(["runner.json", "supervisor.json"]);
   });
 
   it("takes the operator's other choices: Pi as the default, Codex left out, another Pi model", async () => {
     const h = await home();
-    const p = scripted(["pi", "y", "n", "deepseek", "deepseek-v4-pro", "", "y"]);
+    const p = scripted(["pi", "y", "n", "deepseek", "deepseek-v4-pro", "", "n", "y"]);
     const result = await runSetup({ prompter: p, discovery: discovery(h, { piProviders: ["minimax-cn", "deepseek"] }), now });
     expect(result.exitCode).toBe(0);
     expect(json(h.runnerFile)).toEqual({ harness: "pi", allowUnrestricted: true, harnesses: ["pi", "claude-code"], pi: { provider: "deepseek", modelId: "deepseek-v4-pro" } });
-    // The supervisor starts from the runner's Pi choice.
+    // The supervisor starts from the runner's Pi choice; Pi alone is the flat Pi form.
     expect(json(h.supervisorFile)).toEqual({ provider: "deepseek", modelId: "deepseek-v4-pro" });
   });
 
   it("re-asks a choice that is not offered", async () => {
     const h = await home();
-    const p = scripted(["codex", "claude-code", "", "", "", "", "y"]);
+    const p = scripted(["codex", "claude-code", "", "", "", "", "", "y"]);
     await runSetup({ prompter: p, discovery: discovery(h), now });
     expect(p.transcript()).toContain("choose one of claude-code, pi");
     expect(json(h.runnerFile).harness).toBe("claude-code");
@@ -126,7 +128,7 @@ describe("graphloom setup", () => {
     const result = await runSetup({ yes: true, say: (l) => void lines.push(l), discovery: discovery(h), now });
     expect(result).toMatchObject({ exitCode: 0, runner: "written", supervisor: "written" });
     expect(json(h.runnerFile)).toEqual({ harness: "claude-code", allowUnrestricted: true, harnesses: ["claude-code", "codex", "pi"], pi: { provider: "minimax-cn", modelId: "MiniMax-M3" } });
-    expect(json(h.supervisorFile)).toEqual({ provider: "minimax-cn", modelId: "MiniMax-M3" });
+    expect(json(h.supervisorFile)).toEqual({ harnesses: ["pi", "claude-code"], pi: { provider: "minimax-cn", modelId: "MiniMax-M3" }, claude: {} });
     expect(lines.join("\n")).toContain("--yes counts as your consent");
   });
 
@@ -135,19 +137,38 @@ describe("graphloom setup", () => {
     const d = discovery(h);
     d.pi = { ...d.pi, agentDir: path.join(h.dir, "pi-elsewhere") };
     await runSetup({ yes: true, say: () => undefined, discovery: d, env: h.env, now });
-    expect(json(h.supervisorFile)).toEqual({ agentDir: path.join(h.dir, "pi-elsewhere"), provider: "minimax-cn", modelId: "MiniMax-M3" });
+    expect(json(h.supervisorFile)).toEqual({ harnesses: ["pi", "claude-code"], pi: { agentDir: path.join(h.dir, "pi-elsewhere"), provider: "minimax-cn", modelId: "MiniMax-M3" }, claude: {} });
     expect(await loadSupervisorConfig(h.env)).toMatchObject({ agentDir: path.join(h.dir, "pi-elsewhere") });
   });
 
-  it("without Pi, writes no supervisor and says Claude Code and Codex supervise from later releases", async () => {
+  it("on a Claude Code-only machine, writes a claude-code supervisor run's parser accepts; Codex never supervises before S4", async () => {
     const h = await home();
     const lines: string[] = [];
-    await runSetup({ yes: true, say: (l) => void lines.push(l), discovery: discovery(h, { available: ["claude-code", "codex"] }), now });
+    const d = discovery(h, { available: ["claude-code", "codex"] });
+    d.claudeSupervisorSection = { command: "/opt/claude/bin/claude" };
+    await runSetup({ yes: true, say: (l) => void lines.push(l), discovery: d, env: h.env, now });
     expect(json(h.runnerFile)).toEqual({ harness: "claude-code", allowUnrestricted: true, harnesses: ["claude-code", "codex"] });
+    expect(json(h.supervisorFile)).toEqual({ harnesses: ["claude-code"], claude: { command: "/opt/claude/bin/claude" } });
+    const parsed = await loadSupervisorConfig(h.env);
+    expect(parsed).toMatchObject({ harnesses: ["claude-code"], claude: { command: "/opt/claude/bin/claude" } });
+    expect(enabledSupervisorHarnesses(parsed!)).toEqual(["claude-code"]);
+    expect(lines.join("\n")).toContain("Codex supervises from the GraphLoom release that ships it (phase S4)");
+  });
+
+  it("with Pi present, Pi comes first in the supervisor order", async () => {
+    const h = await home();
+    await runSetup({ yes: true, say: () => undefined, discovery: discovery(h, { available: ["claude-code", "pi"] }), env: h.env, now });
+    expect(enabledSupervisorHarnesses((await loadSupervisorConfig(h.env))!)).toEqual(["pi", "claude-code"]);
+  });
+
+  it("without any supervisor harness, writes no supervisor config", async () => {
+    const h = await home();
+    const lines: string[] = [];
+    const d = discovery(h, { available: ["claude-code"] });
+    d.supervisorCandidates["claude-code"] = { harness: "claude-code", ok: false, reason: "no login", fix: "claude" };
+    await runSetup({ yes: true, say: (l) => void lines.push(l), discovery: d, env: h.env, now });
     expect(existsSync(h.supervisorFile)).toBe(false);
-    const text = lines.join("\n");
-    expect(text).toContain("Claude Code and Codex supervise from the GraphLoom releases that ship them (phases S3, S4)");
-    expect(text).toContain("runs have no automatic recovery");
+    expect(lines.join("\n")).toContain("runs have no automatic recovery");
   });
 
   it("with no available harness that can write, writes nothing, prints the doctor's fixes, and exits 1", async () => {
@@ -164,8 +185,8 @@ describe("graphloom setup", () => {
     await mkdir(path.dirname(h.runnerFile), { recursive: true });
     const old = { harness: "pi", allowUnrestricted: true, pi: { provider: "minimax-cn", modelId: "MiniMax-M2.7", agentDir: "~/.pi/agent" }, timeoutMs: 1234, notify: { onStop: "echo done" } };
     await writeFile(h.runnerFile, JSON.stringify(old));
-    // Change the default to Claude Code: yes; enable Codex: no; Pi model to MiniMax-M3: no; replace: yes. Supervisor: decline.
-    const p = scripted(["y", "n", "n", "n", "y"]);
+    // Change the default to Claude Code: yes; enable Codex: no; Pi model to MiniMax-M3: no. Supervisor: decline Pi and Claude Code. Replace: yes.
+    const p = scripted(["y", "n", "n", "n", "n", "y"]);
     const result = await runSetup({ prompter: p, discovery: discovery(h), now });
     expect(result).toMatchObject({ exitCode: 0, runner: "written", supervisor: "none" });
     const text = p.transcript();
@@ -184,9 +205,9 @@ describe("graphloom setup", () => {
     await mkdir(path.dirname(h.runnerFile), { recursive: true });
     const current = { harness: "claude-code", allowUnrestricted: true, harnesses: ["claude-code", "codex", "pi"], pi: { provider: "minimax-cn", modelId: "MiniMax-M3" } };
     await writeFile(h.runnerFile, JSON.stringify(current));
-    await writeFile(h.supervisorFile, JSON.stringify({ provider: "minimax-cn", modelId: "MiniMax-M3" }));
+    await writeFile(h.supervisorFile, JSON.stringify({ harnesses: ["pi", "claude-code"], pi: { provider: "minimax-cn", modelId: "MiniMax-M3" }, claude: {} }));
     const d = discovery(h);
-    d.pi.configured = [{ where: "supervisor config", provider: "minimax-cn", modelId: "MiniMax-M3", resolves: true, credential: true }];
+    d.supervisorEnabled = [{ harness: "pi", ok: true }, { harness: "claude-code", ok: true }];
     const p = scripted([]);
     const result = await runSetup({ prompter: p, discovery: d, now });
     expect(result).toMatchObject({ exitCode: 0, runner: "unchanged", supervisor: "unchanged" });
@@ -217,7 +238,7 @@ describe("graphloom setup", () => {
     const h = await home();
     await mkdir(path.dirname(h.runnerFile), { recursive: true });
     await writeFile(h.runnerFile, JSON.stringify({ harness: "claude-code", allowUnrestricted: true, harnesses: ["claude-code", "codex"] }));
-    const p = scripted(["y", "y", "n"]);
+    const p = scripted(["y", "n", "y"]);
     await runSetup({ prompter: p, discovery: discovery(h, { available: ["claude-code"] }), now });
     expect(p.questions[0]).toMatch(/Disable Codex, which is not available\?/);
     expect(json(h.runnerFile)).toEqual({ harness: "claude-code", allowUnrestricted: true });
@@ -239,7 +260,8 @@ describe("graphloom setup", () => {
     expect(text).toContain("harness: pi -> claude-code");
     expect(text).toContain('harnesses: (unset) -> ["claude-code","codex","pi"]');
     expect(text).toContain("pi.modelId: MiniMax-M2.7 -> MiniMax-M3");
-    expect(text).toContain("provider: deepseek -> minimax-cn");
+    expect(text).toContain("harnesses: pi -> pi, claude-code");
+    expect(text).toContain("pi: deepseek/deepseek-flash -> minimax-cn/MiniMax-M3");
     expect(readdirSync(path.dirname(h.runnerFile)).some((n) => n.includes(".bak-"))).toBe(false);
   });
 

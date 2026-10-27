@@ -53,5 +53,12 @@ export function fakeDiscovery(options: FakeDiscoveryOptions = {}): Discovery {
     supervisor: { file: options.supervisorFile ?? "/home/.config/graphloom/supervisor.json", explicit: false, exists: false },
     updates: { mode: "auto", source: "the default", canVerify: false, sshKeygen: true },
     env: {},
+    supervisorCandidates: {
+      pi: available.has("pi") && providers.length > 0 ? { harness: "pi", ok: true } : { harness: "pi", ok: false, reason: "no Pi provider has a credential", fix: "export MINIMAX_CN_API_KEY=<key>" },
+      "claude-code": available.has("claude-code") ? { harness: "claude-code", ok: true } : { harness: "claude-code", ok: false, reason: "not logged in", fix: "claude" },
+      codex: { harness: "codex", ok: false, reason: "the Codex supervisor arrives with phase S4 of the supervisor harness design", fix: "graphloom upgrade" },
+    },
+    claudeSupervisorSection: {},
+    supervisorEnabled: [],
   };
 }

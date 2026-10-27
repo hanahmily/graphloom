@@ -30,42 +30,48 @@ describe("discovery's bounded commands", () => {
 });
 
 describe("viable setups (§4.4)", () => {
-  it("Claude Code only", () => {
+  it("Claude Code only: Claude Code supervises (S3)", () => {
     const d = fakeDiscovery({ available: ["claude-code"] });
-    expect(viableSetups(d)).toEqual({ defaultHarness: ["claude-code"], enable: [], supervisorLater: ["claude-code"] });
+    expect(viableSetups(d)).toEqual({ defaultHarness: ["claude-code"], enable: [], supervisor: "claude-code", supervisors: ["claude-code"], supervisorLater: [] });
     const checks = machineChecks(d);
     expect(row(checks, "default harness")).toMatchObject({ status: "pass", detail: "claude-code (recommended)" });
-    expect(row(checks, "supervisor")).toMatchObject({ status: "warn", detail: expect.stringContaining("Claude Code supervises from the releases that ship them") });
-    expect(row(checks, "supervisor").fix).toMatch(/MINIMAX_CN_API_KEY/);
+    expect(row(checks, "supervisor")).toMatchObject({ status: "pass", detail: expect.stringMatching(/^claude-code \(recommended: claude-code; order pi, claude-code, codex\)/) });
   });
 
-  it("Codex only: no harness can write, and the fix lists each login still missing", () => {
+  it("Claude Code whose supervisor probe fails does not count as a supervisor", () => {
+    const d = fakeDiscovery({ available: ["claude-code"] });
+    d.supervisorCandidates["claude-code"] = { harness: "claude-code", ok: false, reason: "Claude Code has no login in /home/.claude; run `claude /login`", fix: "claude" };
+    expect(viableSetups(d).supervisor).toBeUndefined();
+    expect(row(machineChecks(d), "supervisor")).toMatchObject({ status: "warn", detail: expect.stringContaining("claude-code: Claude Code has no login"), fix: expect.stringContaining("Claude Code: claude") });
+  });
+
+  it("Codex only: no harness can write, no supervisor, and the fixes list each login still missing", () => {
     const d = fakeDiscovery({ available: ["codex"] });
-    expect(viableSetups(d)).toEqual({ defaultHarness: [], enable: ["codex"], supervisorLater: ["codex"] });
+    expect(viableSetups(d)).toEqual({ defaultHarness: [], enable: ["codex"], supervisors: [], supervisorLater: ["codex"] });
     const checks = machineChecks(d);
     expect(row(checks, "default harness")).toMatchObject({ status: "warn", fix: "Claude Code: claude; Pi: export MINIMAX_CN_API_KEY=<key>" });
     expect(row(checks, "also enable").detail).toContain("codex (read-only jobs)");
+    expect(row(checks, "supervisor")).toMatchObject({ status: "warn", detail: expect.stringContaining("Codex supervises from the release that ships it (phase S4)") });
   });
 
   it("Pi only", () => {
     const d = fakeDiscovery({ available: ["pi"] });
-    expect(viableSetups(d)).toEqual({ defaultHarness: ["pi"], enable: [], supervisor: "pi", supervisorLater: [] });
+    expect(viableSetups(d)).toEqual({ defaultHarness: ["pi"], enable: [], supervisor: "pi", supervisors: ["pi"], supervisorLater: [] });
     expect(row(machineChecks(d), "supervisor")).toMatchObject({ status: "pass", detail: expect.stringContaining("the repair reviewer uses the same agent") });
   });
 
   it("all three, with the supervisor order Pi, Claude Code, Codex", () => {
     const d = fakeDiscovery();
-    expect(viableSetups(d)).toEqual({ defaultHarness: ["claude-code", "pi"], enable: ["codex", "pi"], supervisor: "pi", supervisorLater: ["claude-code", "codex"] });
+    expect(viableSetups(d)).toEqual({ defaultHarness: ["claude-code", "pi"], enable: ["codex", "pi"], supervisor: "pi", supervisors: ["pi", "claude-code"], supervisorLater: ["codex"] });
     const checks = machineChecks(d);
     expect(row(checks, "default harness").detail).toBe("claude-code (recommended), pi");
-    expect(row(checks, "supervisor").detail).toMatch(/^pi \(order pi, claude-code, codex\)/);
-    expect(row(checks, "supervisor").detail).toContain("Claude Code and Codex supervise from the releases that ship them (phases S3, S4)");
+    expect(row(checks, "supervisor").detail).toMatch(/^pi, claude-code \(recommended: pi; order pi, claude-code, codex\)/);
+    expect(row(checks, "supervisor").detail).toContain("Codex supervises from the release that ships it (phase S4)");
   });
 
-  it("without Pi, the next supervisor in the order only counts once its release ships it", () => {
+  it("without Pi, Claude Code is next in the order; Codex never counts before S4", () => {
     const d = fakeDiscovery({ available: ["claude-code", "codex"] });
-    expect(viableSetups(d).supervisor).toBeUndefined();
-    expect(viableSetups(d).supervisorLater).toEqual(["claude-code", "codex"]);
+    expect(viableSetups(d)).toMatchObject({ supervisor: "claude-code", supervisors: ["claude-code"], supervisorLater: ["codex"] });
   });
 });
 
@@ -100,17 +106,30 @@ describe("automatic updates (§4.4, §5.4)", () => {
 });
 
 describe("doctor --task: supervisor selection", () => {
-  it("none without a supervisor config, Pi from it, and a warning when its Pi model is not available", () => {
+  it("none without a supervisor config; the harness run would select from it; a warning when it is not available", () => {
     const d = fakeDiscovery();
     expect(supervisorSelection(d)).toMatchObject({ status: "warn", detail: expect.stringContaining("no automatic recovery; pi is available"), fix: "graphloom setup" });
-    const configured: Discovery = {
+    const pi = { provider: "minimax-cn", modelId: "MiniMax-M3", models: [{ provider: "minimax-cn", modelId: "MiniMax-M3" }] };
+    const flat: Discovery = {
       ...d,
-      supervisor: { ...d.supervisor, exists: true, config: { provider: "minimax-cn", modelId: "MiniMax-M3", models: [{ provider: "minimax-cn", modelId: "MiniMax-M3" }] } },
-      pi: { ...d.pi, configured: [{ where: "supervisor config", provider: "minimax-cn", modelId: "MiniMax-M3", resolves: true, credential: true }] },
+      supervisor: { ...d.supervisor, exists: true, config: pi },
+      supervisorEnabled: [{ harness: "pi", ok: true }],
+      supervisorSelection: { harness: "pi", source: "operator", reason: "the operator's Pi supervisor config" },
     };
-    expect(supervisorSelection(configured)).toMatchObject({ status: "pass", detail: expect.stringMatching(/^pi \(minimax-cn\/MiniMax-M3, from .*supervisor\.json: operator\)/) });
-    const noKey: Discovery = { ...configured, pi: { ...configured.pi, configured: [{ ...configured.pi.configured[0]!, credential: false }] } };
-    expect(supervisorSelection(noKey)).toMatchObject({ status: "warn", fix: expect.stringContaining("MINIMAX_CN_API_KEY") });
+    expect(supervisorSelection(flat)).toMatchObject({ status: "pass", detail: expect.stringMatching(/^pi \(minimax-cn\/MiniMax-M3\) \(operator: the operator's Pi supervisor config, from .*supervisor\.json\)/) });
+    const noKey: Discovery = { ...flat, supervisorEnabled: [{ harness: "pi", ok: false, reason: "no credential for minimax-cn", fix: "export MINIMAX_CN_API_KEY=<key>" }] };
+    expect(supervisorSelection(noKey)).toMatchObject({ status: "warn", detail: expect.stringContaining("which is not available"), fix: expect.stringContaining("MINIMAX_CN_API_KEY") });
+    // A per-harness config falls back past an unavailable Pi to Claude Code, as run does.
+    const fallback: Discovery = {
+      ...d,
+      supervisor: { ...d.supervisor, exists: true, config: { ...pi, harnesses: ["pi", "claude-code"], claude: { models: [{ provider: "anthropic", modelId: "default" }] } } },
+      supervisorEnabled: [{ harness: "pi", ok: false, reason: "no credential for minimax-cn" }, { harness: "claude-code", ok: true }],
+      supervisorSelection: { harness: "claude-code", source: "fallback", reason: "claude-code, the first enabled harness available (pi: no credential for minimax-cn)" },
+    };
+    expect(supervisorSelection(fallback)).toMatchObject({ status: "pass", detail: expect.stringMatching(/^claude-code \(fallback: claude-code, the first enabled harness available/) });
+    const none: Discovery = { ...fallback, supervisorEnabled: [{ harness: "pi", ok: false, reason: "x", fix: "fix-pi" }, { harness: "claude-code", ok: false, reason: "y", fix: "claude" }] };
+    delete none.supervisorSelection;
+    expect(supervisorSelection(none)).toMatchObject({ status: "warn", detail: expect.stringContaining("none: no enabled supervisor harness is available"), fix: "fix-pi; claude" });
     const broken: Discovery = { ...d, supervisor: { ...d.supervisor, exists: true, error: "supervisor.json: provider must be a non-empty string" } };
     expect(supervisorSelection(broken)).toMatchObject({ status: "fail", detail: expect.stringContaining("run refuses") });
   });

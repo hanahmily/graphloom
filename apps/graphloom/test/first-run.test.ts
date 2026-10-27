@@ -61,10 +61,12 @@ async function envWith(options: DoctorEnvOptions): Promise<DoctorEnv> {
 describe.runIf(hasScript)("under a pseudo-terminal", () => {
   it.runIf(realBwrap !== undefined)("run with no runner config completes setup, then the run", async () => {
     const env = await envWith({ codex: "missing" });
-    const { output, code } = await env.runTty(["run", "task.yaml"], ["y"]);
+    // The Claude Code supervisor (default yes), then the consent.
+    const { output, code } = await env.runTty(["run", "task.yaml"], ["", "y"]);
     expect(output).toContain(`graphloom: no runner config at ${env.runnerFile}; starting graphloom setup, then run continues.`);
-    // Only Claude Code is available: no other choice is offered, only the consent.
+    // Only Claude Code is available: no other job harness is offered; it is also the supervisor (S3).
     expect(output).not.toMatch(/Default harness \[/);
+    expect(output).toContain("Enable a Claude Code supervisor (your own Claude Code login)? [Y/n]");
     expect(output).toContain("Allow coding agents to run with your user permissions? [y/N]");
     expect(output).toContain(`wrote ${env.runnerFile}`);
     expect(output).toContain("graphloom: setup done; continuing with run.");
@@ -72,14 +74,14 @@ describe.runIf(hasScript)("under a pseudo-terminal", () => {
     expect(code, output).toBe(0);
     expect(JSON.parse(readFileSync(env.runnerFile, "utf8"))).toEqual({ harness: "claude-code", allowUnrestricted: true });
     expect(statSync(env.runnerFile).mode & 0o777).toBe(0o600);
-    expect(existsSync(env.supervisorFile)).toBe(false);
+    expect(JSON.parse(readFileSync(env.supervisorFile, "utf8"))).toEqual({ harnesses: ["claude-code"], claude: {} });
     expect(output).not.toContain(STUB_SECRETS.email);
     expectNoSecrets(env.runnerFile);
   });
 
   it("run whose setup is declined continues as it would with no configuration", async () => {
     const env = await envWith({ codex: "missing" });
-    const { output, code } = await env.runTty(["run", "task.yaml"], ["n"]);
+    const { output, code } = await env.runTty(["run", "task.yaml"], ["", "n"]);
     expect(output).toContain("Declined: setup wrote nothing.");
     expect(output).toContain("graphloom: setup did not write a runner config; run continues without one.");
     expect(output).toContain("no agent runner configured: run graphloom setup (graphloom setup --yes in scripts)");
@@ -89,8 +91,8 @@ describe.runIf(hasScript)("under a pseudo-terminal", () => {
 
   it("graphloom setup asks on the terminal and writes both files without secrets", async () => {
     const env = await envWith({ piEnv: true, piStore: true });
-    // Default harness, Codex, Pi, Pi provider, Pi model, supervisor, consent.
-    const { output, code } = await env.runTty(["setup"], ["", "", "", "", "", "", "y"]);
+    // Default harness, Codex, Pi, Pi provider, Pi model, Pi supervisor, Claude Code supervisor, consent.
+    const { output, code } = await env.runTty(["setup"], ["", "", "", "", "", "", "", "y"]);
     expect(code, output).toBe(0);
     expect(output).toMatch(/Default harness \[claude-code\/pi\] \(recommended: claude-code\)/);
     expect(output).toMatch(/Pi provider with a credential \[deepseek\/minimax-cn\] \(recommended: minimax-cn\)|Pi provider with a credential \[minimax-cn\/deepseek\] \(recommended: minimax-cn\)/);
@@ -100,7 +102,7 @@ describe.runIf(hasScript)("under a pseudo-terminal", () => {
       harnesses: ["claude-code", "codex", "pi"],
       pi: { provider: "minimax-cn", modelId: "MiniMax-M3" },
     });
-    expect(JSON.parse(readFileSync(env.supervisorFile, "utf8"))).toEqual({ provider: "minimax-cn", modelId: "MiniMax-M3" });
+    expect(JSON.parse(readFileSync(env.supervisorFile, "utf8"))).toEqual({ harnesses: ["pi", "claude-code"], pi: { provider: "minimax-cn", modelId: "MiniMax-M3" }, claude: {} });
     for (const secret of Object.values(STUB_SECRETS)) expect(output).not.toContain(secret);
     expectNoSecrets(env.runnerFile, env.supervisorFile);
     // The doctor now passes the configuration.

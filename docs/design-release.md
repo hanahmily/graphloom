@@ -886,18 +886,23 @@ own toolchain.
   problem, a recorded `update/last-failure`, and, in `auto` mode, a release
   that can only be announced because `ssh-keygen` or the version's
   `release/allowed_signers` is missing (§5.5).
-- **Supervisor harnesses until S3 and S4.**
-  `SHIPPED_SUPERVISOR_HARNESSES` (`discovery.ts`) is `["pi"]`. The viable
-  setups name Claude Code and Codex as supervisors "from the releases that
-  ship them", and neither the doctor nor setup counts them. The phase that
-  ships one adds it to that list.
-- **Decision: `doctor --task` reports the selection `run` makes today.**
-  Plugin selection (`GraphDefinition.supervisor`, `select`, `run
-  --supervisor`, and `required`) is phase S5 of the supervisor harness
-  design and is not implemented, so `run` uses a Pi supervisor exactly when
-  `supervisor.json` exists. The doctor reports that selection and whether its
-  Pi model is available. Plugin preferences join when S5 does, through the
-  same function (`supervisorSelection`).
+- **Supervisor harnesses (with S3).** `SHIPPED_SUPERVISOR_HARNESSES`
+  (`discovery.ts`) is `["pi", "claude-code"]`. A Codex supervisor is
+  reported as arriving with S4 and is never counted. S4 adds it to that list.
+  - A Pi supervisor counts when a provider has a credential.
+  - A Claude Code supervisor counts when the doctor's CLI and login check
+    passes and S3's own probe (`probeSupervisorHarness`, which also needs
+    bwrap and Claude Code's login marker in its config dir) passes too.
+  - The viable setups list every supervisor harness that counts, in the
+    built-in order Pi, Claude Code, Codex, and recommend the first.
+- **`doctor --task` reports the selection `run` makes.** The doctor probes
+  each harness the existing `supervisor.json` enables, then runs S3's
+  `selectSupervisorHarness` on those probes: `select`, else the first enabled
+  harness that is available. The flat Pi form selects Pi unprobed, as `run`
+  does, and then warns when Pi is not available. `run --supervisor` is a
+  per-invocation flag, so it is not reported. The plugin's own preference
+  (`GraphDefinition.supervisor`, and its `required`) is phase S5 and joins
+  through the same function (`supervisorSelection`).
 - **`GraphDefinition.agentRoles`** is in the SDK with a shape check only:
   unique non-empty `role`, non-empty `harness`, `access` read or write, and
   optional non-empty `distinctFrom[]` and `setting`; any other key is refused.
@@ -914,22 +919,31 @@ own toolchain.
   `runEnvironmentChecks`, which `check` now shares. Its other static checks
   stay in `graphloom check`.
 - **Setup.**
-  - **Decision: setup writes today's flat Pi `supervisor.json`**,
-    `{ "provider", "modelId" }`, not the per-harness form with `harnesses` of
-    §4.5 step 4. The parser this release ships accepts only the flat form,
-    and the supervisor harness design keeps parsing it as `{ harnesses:
-    ["pi"], pi: { … } }` (§7.2), so a file written now stays valid. It writes
-    no `select`. A new file also names `agentDir` when discovery found Pi
-    in a non-default agent dir, and the doctor checks an existing
-    supervisor's model in that file's own `agentDir`. Setup offers Pi
-    whenever a provider has a credential, so it can repair a runner config
-    whose Pi model Pi does not know. Without an available Pi it writes no supervisor file and
-    says that Claude Code and Codex supervise from the releases that ship
-    them.
+  - **The supervisor file.** Setup enables the supervisor harnesses the
+    operator keeps, in the built-in order, with no `select`, so a plugin's
+    preference still applies once S5 ships. Pi alone is written in the flat
+    Pi form (`{ "provider", "modelId" }`), which S3's parser still reads as
+    `{ harnesses: ["pi"], pi: { … } }`. Any other choice is written in the
+    per-harness form, for example `{ "harnesses": ["pi", "claude-code"],
+    "pi": { … }, "claude": { … } }`.
+    - The `claude` section names the runner's Claude Code command when it is
+      not the `PATH` default, and the runner's `claude.configDir`, so the
+      supervisor uses the same login. Its models default as S3's parser
+      defaults them.
+    - Every file is checked with S3's `parseSupervisorConfig` before it is
+      written.
+    - A new Pi entry also names `agentDir` when discovery found Pi in a
+      non-default agent dir. The doctor checks an existing supervisor's Pi
+      model in that file's own `agentDir`, and a rerun recommends a Pi model
+      only for a supervisor that reads the same dir.
+    - Setup offers Pi whenever a provider has a credential, so it can repair
+      a runner config whose Pi model Pi does not know.
+    - With no supervisor harness available it writes no supervisor file and
+      says that runs have no automatic recovery.
   - Questions are asked only for real choices: the default harness when more
     than one writer is available, each other available harness, the Pi
     provider when more than one has a credential, the Pi model (checked
-    against Pi's registry), the supervisor, and the consent. The supervisor's
+    against Pi's registry), each available supervisor harness (default yes), and the consent. The Pi supervisor's
     model is the runner's Pi choice when Pi is enabled for jobs.
   - The consent defaults to no, and end of input is no. It is asked when a
     runner config is created. A rerun on a valid file keeps the consent that
@@ -1704,7 +1718,7 @@ runs steps 3 to 8 on `<rev>`, which defaults to `HEAD`. It publishes nothing.
 | R1 | Product version source of truth, `release.json`, and `graphloom version` from it. `typescript` and `vitest` as CLI dependencies. GraphLoom's own scripts spawned with `process.execPath`, and the stand-in shebang patch removed. Bundled Node fetch and verification. `notices.mjs` and the license allowlist. SDK packing. `scripts/release.sh build` producing all assets (done; the assets of R1's phases, §6 "R1 as implemented") | Tests for version output. Tarball content and no-absolute-path checks. A repair preflight test on a production-pruned tree with no `node` on `PATH`. A license check that fails on a planted disallowed license. Pack file-list check (done: `apps/graphloom/test/version.test.ts`, `release-build.test.ts`, and `release.sh build`'s own step 6 and 8 checks) |
 | R2 | `install.sh`, the shim, `graphloom upgrade`, `self list/use/rollback/prune/uninstall`, automatic updates (`__auto-update`, `autoUpdate` in the runner config, `update/`, `install.lock`, the skip record, auto-prune), and deterministic packing. A read-only version directory also needs the repair snapshot (`snapshotRepairCandidate`, `packages/controller/src/repair.ts`) to make its copy writable, because `cp` keeps the read-only modes (done: §4.7, §5.5, §6 "R2 as implemented"; `makeTreeWritable` serves the plugin and executor snapshots) | Shell tests in a temporary `HOME` with no host Node: atomic switch, no overwrite, prune respects ownership and plugin links, an interrupted install is never listed. `upgrade` installs, switches, lists runs on older versions, and `--no-switch` keeps `current`. Updater tests against a fake release source and a stub `gh`: at most one check per 24 hours; patch (and from 1.0, minor) installed and switched; a breaking release only announced; `notify` never installs; a bad checksum or signature records the failure and does not switch; two concurrent invocations install once; `GRAPHLOOM_DISABLE_AUTOUPDATE=1` and `off` make no network call; the notice never reaches a non-TTY, `--json`, or hook invocation, and the foreground exit code is unchanged; `self rollback` keeps the skipped version from being reinstalled until a newer release or `upgrade`; auto-prune keeps three versions plus owners; a process started from the old version keeps loading from it across a switch. Two independent builds give the same hash (done: `apps/graphloom/test/install.test.ts`, `auto-update.test.ts`, `packages/controller/src/repair.test.ts`, and `release.sh build --compare-to`) |
 | R3 | Run ownership (`runs/<id>.json`, `install` record, `stateFormat`), dispatch to the owning version, `resume --upgrade` with ordered migrators, the gate fingerprint including the product version, and the `rehearse --stop-at` / `resume --rehearsal` hooks (done: §5.6) | Controller and CLI tests: resume under a new `current` dispatches with no pin mismatch. `--upgrade` migrates each committed fixture and completes it on a scripted runner. Transitions are recorded. Downgrade, crossing a major, an unknown format, a missing migrator, and an unsettled repair are each refused with the run unchanged. A cached gate result is not reused across versions (done: `packages/controller/src/upgrade.test.ts`, `apps/graphloom/test/ownership.test.ts`, `gate.test.ts`) |
-| R4 | `doctor` with agent discovery (Claude Code, Codex, Pi credentials, `gh`), viable-setup reporting, `fix:` commands, and the updates check; `doctor --task` with `environment`, supervisor selection, and `GraphDefinition.agentRoles` (SDK shape check; issue-fix declares its roles); guided `setup` with `--yes`, rerun, and backups; automatic first-run setup in `run`, `resume`, `probe`, `check`, and `rehearse`; the installer's setup offer (§4.2 step 6, §4.4, §4.5) (done: §4.8; until S3 and S4, Claude Code and Codex supervisors are reported but not configured) | Tests with a stubbed `PATH` and `HOME` (stub `claude`, `codex`, `gh`, `bwrap`; Pi provider variables and auth store): each discovery result for each agent (missing, probe failed, logged out, login not verifiable, available), each with its `fix:` command; each reason automatic updates are a no-op. Viable setups for Claude Code only, Codex only, Pi only, and all three, including the supervisor order Pi, Claude Code, Codex. `doctor --task` on a fixture plugin's `agentRoles`: an unavailable role harness, a read-only harness on a write role, and a `distinctFrom` conflict, each with its alternatives. Setup offers only available choices with the recommendation; refusing `allowUnrestricted` writes nothing; `--yes` writes the recommendations; a rerun shows the current config, changes only confirmed answers, and keeps a `.bak-` copy, and `--yes` leaves an existing file unchanged. Under a pseudo-terminal, `run` with no config completes setup and then the run; without one, and with `--json` or `GRAPHLOOM_RUN_ID` set, `run` exits 1 naming `graphloom setup --yes` and `check` reports and continues. The installer offers setup only on a terminal. No written file contains a stub credential value. The doctor reuses the confinement and capability probes, spends no model call, and never asks for a host Node (done: `apps/graphloom/test/doctor.test.ts`, `doctor-report.test.ts`, `doctor-task.test.ts`, `doctor-installed.test.ts`, `setup.test.ts`, `first-run.test.ts`, `install.test.ts`, and `packages/sdk/src/index.test.ts`) |
+| R4 | `doctor` with agent discovery (Claude Code, Codex, Pi credentials, `gh`), viable-setup reporting, `fix:` commands, and the updates check; `doctor --task` with `environment`, supervisor selection, and `GraphDefinition.agentRoles` (SDK shape check; issue-fix declares its roles); guided `setup` with `--yes`, rerun, and backups; automatic first-run setup in `run`, `resume`, `probe`, `check`, and `rehearse`; the installer's setup offer (§4.2 step 6, §4.4, §4.5) (done: §4.8; Pi and Claude Code (S3) supervisors are configured, and a Codex supervisor is reported but not configured until S4) | Tests with a stubbed `PATH` and `HOME` (stub `claude`, `codex`, `gh`, `bwrap`; Pi provider variables and auth store): each discovery result for each agent (missing, probe failed, logged out, login not verifiable, available), each with its `fix:` command; each reason automatic updates are a no-op. Viable setups for Claude Code only, Codex only, Pi only, and all three, including the supervisor order Pi, Claude Code, Codex. `doctor --task` on a fixture plugin's `agentRoles`: an unavailable role harness, a read-only harness on a write role, and a `distinctFrom` conflict, each with its alternatives. Setup offers only available choices with the recommendation; refusing `allowUnrestricted` writes nothing; `--yes` writes the recommendations; a rerun shows the current config, changes only confirmed answers, and keeps a `.bak-` copy, and `--yes` leaves an existing file unchanged. Under a pseudo-terminal, `run` with no config completes setup and then the run; without one, and with `--json` or `GRAPHLOOM_RUN_ID` set, `run` exits 1 naming `graphloom setup --yes` and `check` reports and continues. The installer offers setup only on a terminal. No written file contains a stub credential value. The doctor reuses the confinement and capability probes, spends no model call, and never asks for a host Node (done: `apps/graphloom/test/doctor.test.ts`, `doctor-report.test.ts`, `doctor-task.test.ts`, `doctor-installed.test.ts`, `setup.test.ts`, `first-run.test.ts`, `install.test.ts`, and `packages/sdk/src/index.test.ts`) |
 | R5 | `release.sh prepare/publish`, signing, the external-plugin smoke test, and the first release `v0.1.0` | The full procedure in §6. The upgrade matrix starts with the second release, from its first fixture |
 
 Open questions: none at present. Repository visibility is to be revisited

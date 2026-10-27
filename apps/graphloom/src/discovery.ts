@@ -27,7 +27,16 @@ import { DISABLE_AUTOUPDATE_ENV, RELEASE_REPO } from "./auto-update.js";
 import { probeHarnessCommand } from "./capability-probe.js";
 import { selfInstall, type SelfInstall } from "./ownership.js";
 import { enabledHarnesses, loadRunnerConfig, requireRunnerConfig, runnerConfigPath, type HarnessName, type RunnerConfig } from "./runner-config.js";
-import { loadSupervisorConfig, supervisorConfigPath, type SupervisorConfig } from "./supervisor-config.js";
+import {
+  enabledSupervisorHarnesses,
+  loadSupervisorConfig,
+  parseSupervisorConfig,
+  probeSupervisorHarness,
+  selectSupervisorHarness,
+  supervisorConfigPath,
+  type SupervisorConfig,
+  type SupervisorSelection,
+} from "./supervisor-config.js";
 import { installRoot, versionInfo } from "./version.js";
 
 export const HARNESS_ORDER: readonly HarnessName[] = ["claude-code", "codex", "pi"];
@@ -37,11 +46,11 @@ export const WRITING_HARNESSES: readonly HarnessName[] = ["claude-code", "pi"];
 /** The built-in supervisor order with no plugin preference (docs/design-supervisor-harnesses.md §7.3). */
 export const SUPERVISOR_ORDER: readonly HarnessName[] = ["pi", "claude-code", "codex"];
 /**
- * The supervisor harnesses this GraphLoom can run. Claude Code and Codex
- * supervisors arrive with phases S3 and S4 of the supervisor harness design;
- * until then only a Pi supervisor counts (docs/design-release.md §4.4).
+ * The supervisor harnesses this GraphLoom can run: Pi, and Claude Code since
+ * phase S3. A Codex supervisor arrives with phase S4; until then it is
+ * reported but never counted (docs/design-release.md §4.4).
  */
-export const SHIPPED_SUPERVISOR_HARNESSES: readonly HarnessName[] = ["pi"];
+export const SHIPPED_SUPERVISOR_HARNESSES: readonly HarnessName[] = ["pi", "claude-code"];
 /** The Pi model setup recommends when its credential is present (§4.5). */
 export const RECOMMENDED_PI = { provider: "minimax-cn", modelId: "MiniMax-M3", envVar: "MINIMAX_CN_API_KEY" } as const;
 
@@ -393,7 +402,7 @@ async function discoverPi(config: RunnerConfig | undefined, supervisor: Supervis
         credential: base.credentials.some((p) => p.provider === c.provider),
       });
     }
-    if (supervisor !== undefined) {
+    if (supervisor !== undefined && enabledSupervisorHarnesses(supervisor).includes("pi")) {
       // The supervisor reads its own agent dir (supervisor.json agentDir, else ~/.pi/agent), not the runner's.
       const supervisorDir = supervisor.agentDir ?? path.join(home, ".pi", "agent");
       const supRuntime = supervisorDir === agentDir ? runtime : await defaultPiModelRuntime(supervisorDir);
@@ -522,6 +531,14 @@ export interface Discovery {
   runner: RunnerDiscovery;
   supervisor: SupervisorDiscovery;
   updates: UpdatesDiscovery;
+  /** Each harness as a supervisor for a new supervisor config: what setup can write and the viable setups count. */
+  supervisorCandidates: Record<HarnessName, SupervisorHarnessCheck>;
+  /** The `claude` section setup writes for a Claude Code supervisor: the runner's Claude Code command and config dir. */
+  claudeSupervisorSection: Record<string, unknown>;
+  /** The existing supervisor config's enabled harnesses, each probed as `run` probes it. */
+  supervisorEnabled: SupervisorHarnessCheck[];
+  /** The harness `run` would select from the existing supervisor config (no `--supervisor`), if any. */
+  supervisorSelection?: SupervisorSelection;
   env: NodeJS.ProcessEnv;
 }
 
@@ -634,6 +651,12 @@ export async function discover(env: NodeJS.ProcessEnv = process.env, root: strin
     discoverCli("codex", runner.config, env, confinement),
   ]);
   const pi = await discoverPi(runner.config, supervisor.config, env);
+  const claudeSupervisorSection: Record<string, unknown> = {
+    ...(claude.commandSource !== "PATH" && claude.path !== undefined ? { command: claude.path } : {}),
+    ...(runner.config?.claude?.configDir !== undefined ? { configDir: runner.config.claude.configDir } : {}),
+  };
+  const supervisorCandidates = await discoverSupervisorCandidates(claude, pi, claudeSupervisorSection);
+  const { enabled: supervisorEnabled, selection: supervisorSelection } = await discoverSupervisorSelection(supervisor.config, pi);
   const updates = await discoverUpdates(self, runner, env);
   return {
     self,
@@ -646,6 +669,70 @@ export async function discover(env: NodeJS.ProcessEnv = process.env, root: strin
     runner,
     supervisor,
     updates,
+    supervisorCandidates,
+    claudeSupervisorSection,
+    supervisorEnabled,
+    ...(supervisorSelection !== undefined ? { supervisorSelection } : {}),
     env,
   };
+}
+
+// ---------------------------------------------------------------- supervisor harnesses
+
+export interface SupervisorHarnessCheck {
+  harness: HarnessName;
+  ok: boolean;
+  reason?: string;
+  fix?: string;
+}
+
+const NOT_SHIPPED: Record<string, string> = { codex: "the Codex supervisor arrives with phase S4 of the supervisor harness design" };
+
+/** A Pi supervisor needs a provider credential and a model Pi knows. */
+function piSupervisorCheck(pi: PiDiscovery, where?: PiModelCheck): SupervisorHarnessCheck {
+  if (pi.error !== undefined) return { harness: "pi", ok: false, reason: pi.reason ?? "Pi's registry could not be read", ...(pi.fix !== undefined ? { fix: pi.fix } : {}) };
+  if (where !== undefined) {
+    if (!where.resolves) return { harness: "pi", ok: false, reason: `${where.provider}/${where.modelId} is not in Pi's model registry`, fix: "graphloom setup" };
+    if (!where.credential) return { harness: "pi", ok: false, reason: `no credential for ${where.provider}`, fix: piCredentialFix(where.provider) };
+    return { harness: "pi", ok: true };
+  }
+  if (pi.credentials.length === 0) return { harness: "pi", ok: false, reason: "no Pi provider has a credential", fix: piCredentialFix(RECOMMENDED_PI.provider) };
+  return { harness: "pi", ok: true };
+}
+
+/** S3's own probe of the Claude Code supervisor (`probeSupervisorHarness`), behind the doctor's CLI and login check. */
+async function claudeSupervisorCheck(claude: CliHarnessDiscovery, config: SupervisorConfig): Promise<SupervisorHarnessCheck> {
+  if (!claude.available) return { harness: "claude-code", ok: false, reason: claude.reason ?? "Claude Code is not available", ...(claude.fix !== undefined ? { fix: claude.fix } : {}) };
+  const probe = await probeSupervisorHarness(config, "claude-code").catch((err: unknown) => ({ ok: false as const, reason: err instanceof Error ? err.message : String(err) }));
+  if (probe.ok) return { harness: "claude-code", ok: true };
+  const reason = probe.reason ?? "the Claude Code supervisor probe failed";
+  return { harness: "claude-code", ok: false, reason, fix: /login/i.test(reason) ? LOGIN_FIX["claude-code"] : /--help/.test(reason) ? "claude update" : "graphloom doctor" };
+}
+
+async function discoverSupervisorCandidates(claude: CliHarnessDiscovery, pi: PiDiscovery, claudeSection: Record<string, unknown>): Promise<Record<HarnessName, SupervisorHarnessCheck>> {
+  return {
+    pi: piSupervisorCheck(pi),
+    "claude-code": await claudeSupervisorCheck(claude, parseSupervisorConfig({ harnesses: ["claude-code"], claude: claudeSection }, "the Claude Code supervisor setup would write")),
+    codex: { harness: "codex", ok: false, reason: NOT_SHIPPED.codex!, fix: "graphloom upgrade, once a release ships it" },
+  };
+}
+
+/** The existing supervisor config's harnesses, probed, and the harness `run` would select from them. */
+async function discoverSupervisorSelection(config: SupervisorConfig | undefined, pi: PiDiscovery): Promise<{ enabled: SupervisorHarnessCheck[]; selection?: SupervisorSelection }> {
+  if (config === undefined) return { enabled: [] };
+  const claudeDiscovery = (config: SupervisorConfig): CliHarnessDiscovery => ({ harness: "claude-code", command: config.claude?.command ?? "claude", commandSource: "supervisor config", available: true });
+  const checks = new Map<string, SupervisorHarnessCheck>();
+  for (const harness of enabledSupervisorHarnesses(config)) {
+    if (harness === "pi") checks.set(harness, piSupervisorCheck(pi, pi.configured.find((c) => c.where === "supervisor config")));
+    else if (harness === "claude-code") checks.set(harness, await claudeSupervisorCheck(claudeDiscovery(config), config));
+    else checks.set(harness, { harness: harness as HarnessName, ok: false, reason: NOT_SHIPPED[harness] ?? `the ${harness} supervisor is not available in this GraphLoom`, fix: "graphloom setup" });
+  }
+  // The same selection `run` makes, on these probes; a flat Pi config selects Pi unprobed, as `run` does.
+  const selection = await selectSupervisorHarness(config, {
+    probe: async (h) => {
+      const c = checks.get(h);
+      return c?.ok ? { ok: true } : { ok: false, reason: c?.reason ?? "not enabled" };
+    },
+  }).catch(() => undefined);
+  return { enabled: [...checks.values()], ...(selection !== undefined ? { selection } : {}) };
 }

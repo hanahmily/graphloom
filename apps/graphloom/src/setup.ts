@@ -17,20 +17,21 @@
  *   and the old one is kept as `<name>.bak-<UTC timestamp>`. Unchanged
  *   answers write nothing.
  *
- * The supervisor file is today's flat Pi form (`{ provider, modelId }`), which
- * the per-harness form of the supervisor harness design keeps accepting
- * (docs/design-supervisor-harnesses.md §7.2). Claude Code and Codex
- * supervisors are reported but not written until the releases that ship them.
+ * The supervisor file lists the available supervisor harnesses the operator
+ * keeps, in the built-in order Pi, Claude Code (docs/design-supervisor-harnesses.md
+ * §7.2), with no `select`. Pi alone is written in the flat Pi form, which the
+ * per-harness parser keeps accepting; any other choice in the per-harness form.
+ * A Codex supervisor is reported but not written until the release that ships it.
  */
 import { constants } from "node:fs";
 import { chmod, copyFile, mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { createInterface } from "node:readline";
-import { HARNESS_LABEL, LOGIN_FIX, RECOMMENDED_PI, availableHarnesses, discover, piCredentialFix, type Discovery } from "./discovery.js";
+import { HARNESS_LABEL, LOGIN_FIX, RECOMMENDED_PI, SHIPPED_SUPERVISOR_HARNESSES, availableHarnesses, discover, type Discovery } from "./discovery.js";
 import { missingWriterFixes, viableSetups } from "./doctor.js";
 import { enabledHarnesses, parseRunnerConfig, type HarnessName } from "./runner-config.js";
-import { parseSupervisorConfig } from "./supervisor-config.js";
+import { enabledSupervisorHarnesses, parseSupervisorConfig } from "./supervisor-config.js";
 
 /** How setup talks to the operator. */
 export interface Prompter {
@@ -130,6 +131,7 @@ async function writeConfig(file: string, raw: Raw, parse: (value: unknown, sourc
 }
 
 const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+const same_ = same;
 const show = (v: unknown) => (v === undefined ? "(unset)" : typeof v === "string" ? v : JSON.stringify(v));
 
 /** The recommendations for this machine (§4.5). */
@@ -137,7 +139,10 @@ export interface Recommendation {
   harness?: HarnessName;
   harnesses: HarnessName[];
   pi?: PiChoice;
+  /** The Pi supervisor's model, when Pi is among `supervisors`. */
   supervisor?: PiChoice;
+  /** The supervisor harnesses to enable, in the built-in order. */
+  supervisors: HarnessName[];
 }
 
 export function recommendedPi(d: Discovery, provider?: string): PiChoice | undefined {
@@ -157,7 +162,8 @@ export function recommend(d: Discovery): Recommendation {
     ...(v.defaultHarness[0] !== undefined ? { harness: v.defaultHarness[0] } : {}),
     harnesses,
     ...(pi !== undefined ? { pi } : {}),
-    ...(v.supervisor === "pi" && recommendedPi(d) !== undefined ? { supervisor: recommendedPi(d)! } : {}),
+    ...(v.supervisors.includes("pi") && recommendedPi(d) !== undefined ? { supervisor: recommendedPi(d)! } : {}),
+    supervisors: v.supervisors.filter((h) => h !== "pi" || recommendedPi(d) !== undefined),
   };
 }
 
@@ -174,6 +180,25 @@ function runnerRaw(base: Raw | undefined, harness: HarnessName, enabled: Harness
 function supervisorRaw(base: Raw | undefined, pi: PiChoice): Raw {
   return { ...(base ?? {}), provider: pi.provider, modelId: pi.modelId };
 }
+
+/** Settings every supervisor harness shares, at the top level of either form. */
+const SHARED_SUPERVISOR_KEYS = ["promptTimeoutMs", "promptTotalTimeoutMs", "quotaRetryMs"];
+
+/**
+ * A supervisor.json enabling `harnesses` in order: the flat Pi form for Pi
+ * alone, otherwise the per-harness form (`harnesses`, `pi`, `claude`; no
+ * `select`, so a plugin's preference still applies). `piBase` carries Pi's
+ * other settings (such as `agentDir`); `shared` the shared prompt limits.
+ */
+export function supervisorFile(harnesses: readonly HarnessName[], pi: PiChoice | undefined, claude: Raw, piBase: Raw | undefined, shared: Raw = {}): Raw {
+  if (harnesses.length === 1 && harnesses[0] === "pi" && pi !== undefined) return { ...shared, ...supervisorRaw(piBase, pi) };
+  const out: Raw = { ...shared, harnesses: [...harnesses] };
+  if (harnesses.includes("pi") && pi !== undefined) out.pi = supervisorRaw(piBase, pi);
+  if (harnesses.includes("claude-code")) out.claude = { ...claude };
+  return out;
+}
+
+const pickShared = (raw: Raw): Raw => Object.fromEntries(SHARED_SUPERVISOR_KEYS.filter((k) => k in raw).map((k) => [k, raw[k]]));
 
 /** Field-by-field differences of two configs, as `name: current -> recommended`. */
 function differences(current: Raw | undefined, next: Raw, fields: string[]): string[] {
@@ -258,13 +283,13 @@ export async function runSetup(options: SetupOptions = {}): Promise<SetupResult>
   const newSupervisorBase: Raw | undefined = found.pi.agentDir !== path.join(env.HOME ?? os.homedir(), ".pi", "agent") ? { agentDir: found.pi.agentDir } : undefined;
   const d: Discovery = piCandidate && !found.pi.available ? { ...found, pi: { ...found.pi, available: true } } : found;
   const runnerFile = d.runner.file;
-  const supervisorFile = d.supervisor.file;
+  const supervisorFile_ = d.supervisor.file;
   const result = (exitCode: 0 | 1, runner: FileOutcome, supervisor: FileOutcome, reason?: string): SetupResult => ({
     exitCode,
     runner,
     supervisor,
     runnerFile,
-    supervisorFile,
+    supervisorFile: supervisorFile_,
     ...(reason !== undefined ? { reason } : {}),
   });
 
@@ -362,49 +387,71 @@ export async function runSetup(options: SetupOptions = {}): Promise<SetupResult>
   }
 
   // ---- supervisor config
-  const existingSup = await readExisting(supervisorFile, parseSupervisorConfig);
+  const existingSup = await readExisting(supervisorFile_, parseSupervisorConfig);
   let supNext: Raw | undefined;
+  const claudeSection = d.claudeSupervisorSection;
   say("");
   say("4. Supervisor: recovers a failing run (investigates, repairs, reenters). The repair reviewer uses the same agent, in a separate read-only session.");
-  if (v.supervisorLater.length > 0) say(`   ${v.supervisorLater.map(label).join(" and ")} supervise from the GraphLoom releases that ship them (phases S3, S4); this one supervises with Pi.`);
+  if (v.supervisorLater.length > 0) say(`   ${v.supervisorLater.map(label).join(" and ")} ${v.supervisorLater.length === 1 ? "supervises" : "supervise"} from the GraphLoom release that ships it (phase S4).`);
+  const recFile = rec.supervisors.length > 0 ? supervisorFile(rec.supervisors, rec.supervisor, claudeSection, newSupervisorBase) : undefined;
   if (existingSup === undefined) {
-    if (v.supervisor === undefined || rec.supervisor === undefined) {
-      say(`   No supervisor harness this GraphLoom runs is available, so none is configured and runs have no automatic recovery. Next: ${piCredentialFix(RECOMMENDED_PI.provider)}`);
+    if (recFile === undefined) {
+      const fixes = SHIPPED_SUPERVISOR_HARNESSES.map((h) => `${label(h)}: ${d.supervisorCandidates[h].fix ?? "graphloom doctor"}`);
+      say(`   No supervisor harness this GraphLoom runs is available, so none is configured and runs have no automatic recovery. Next: ${fixes.join("; ")}`);
     } else if (yes) {
-      supNext = supervisorRaw(newSupervisorBase, rec.supervisor);
+      supNext = recFile;
     } else {
-      // The runner's Pi choice, when there is one, is the supervisor's recommendation too.
-      const runnerPi = runnerNext?.pi as Raw | undefined;
-      const start = runnerPi !== undefined && typeof runnerPi.provider === "string" && typeof runnerPi.modelId === "string" ? { provider: runnerPi.provider, modelId: runnerPi.modelId } : undefined;
-      if (start !== undefined) {
-        if (await confirm(p!, `   Configure a Pi supervisor on ${start.provider}/${start.modelId}?`, true)) supNext = supervisorRaw(newSupervisorBase, start);
-      } else if (await confirm(p!, `   Configure a Pi supervisor (recommended: ${rec.supervisor.provider}/${rec.supervisor.modelId})?`, true)) {
-        const pick = await choosePi(p!, d, "   Supervisor", rec.supervisor);
-        if (pick === undefined) return result(1, "none", "none", "setup was not completed");
-        supNext = supervisorRaw(newSupervisorBase, pick);
+      say(`   Available, in the built-in order: ${rec.supervisors.join(", ")} (recommended: ${rec.supervisors[0]}). A run uses the first one available.`);
+      const chosen: HarnessName[] = [];
+      let pi: PiChoice | undefined;
+      for (const h of rec.supervisors) {
+        if (h === "pi") {
+          // The runner's Pi choice, when there is one, is the supervisor's recommendation too.
+          const runnerPi = runnerNext?.pi as Raw | undefined;
+          const start = runnerPi !== undefined && typeof runnerPi.provider === "string" && typeof runnerPi.modelId === "string" ? { provider: runnerPi.provider, modelId: runnerPi.modelId } : undefined;
+          if (start !== undefined) {
+            if (await confirm(p!, `   Enable a Pi supervisor on ${start.provider}/${start.modelId}?`, true)) {
+              chosen.push("pi");
+              pi = start;
+            }
+          } else if (await confirm(p!, `   Enable a Pi supervisor (recommended: ${rec.supervisor!.provider}/${rec.supervisor!.modelId})?`, true)) {
+            pi = await choosePi(p!, d, "   Supervisor", rec.supervisor);
+            if (pi === undefined) return result(1, "none", "none", "setup was not completed");
+            chosen.push("pi");
+          }
+        } else if (await confirm(p!, `   Enable a ${label(h)} supervisor (your own ${label(h)} login)?`, true)) {
+          chosen.push(h);
+        }
       }
-      if (supNext === undefined) say("   No supervisor: runs have no automatic recovery.");
+      if (chosen.length > 0) supNext = supervisorFile(chosen, pi, claudeSection, newSupervisorBase);
+      else say("   No supervisor: runs have no automatic recovery.");
     }
   } else if (existingSup.error !== undefined || existingSup.raw === undefined) {
-    say(`   ${supervisorFile} exists but run would refuse it: ${existingSup.error}`);
-    if (!yes && rec.supervisor !== undefined && (await confirm(p!, `   Replace it with a Pi supervisor on ${rec.supervisor.provider}/${rec.supervisor.modelId}?`, false))) {
-      supNext = supervisorRaw(newSupervisorBase, rec.supervisor);
-    }
+    say(`   ${supervisorFile_} exists but run would refuse it: ${existingSup.error}`);
+    if (!yes && recFile !== undefined && (await confirm(p!, `   Replace it with a supervisor on ${rec.supervisors.join(", ")}?`, false))) supNext = recFile;
   } else {
     const current = existingSup.raw;
-    say(`   ${supervisorFile}: pi ${show(current.provider)}/${show(current.modelId)}`);
-    const pi = d.pi.configured.find((c) => c.where === "supervisor config");
-    const fine = pi !== undefined && pi.resolves && pi.credential;
-    // The recommendation comes from the Pi agent dir discovery read; it applies only to a supervisor that reads the same one.
-    const supDir = typeof current.agentDir === "string" ? parseSupervisorConfig(current, supervisorFile).agentDir : path.join(env.HOME ?? os.homedir(), ".pi", "agent");
-    const recRaw = rec.supervisor !== undefined && supDir === d.pi.agentDir ? supervisorRaw(current, rec.supervisor) : undefined;
-    const diffs = recRaw !== undefined ? differences(current, recRaw, ["provider", "modelId"]) : [];
-    if (diffs.length === 0 || recRaw === undefined) {
-      say(recRaw !== undefined ? "   matches the recommendation; unchanged" : `   ${fine ? "" : "its model is not available here, and "}no supervisor harness this GraphLoom runs is available to recommend; unchanged`);
+    const parsed = parseSupervisorConfig(current, supervisorFile_);
+    const enabled = enabledSupervisorHarnesses(parsed);
+    say(`   ${supervisorFile_}: ${enabled.map((h) => (h === "pi" ? `pi ${parsed.provider}/${parsed.modelId}` : h)).join(", ")}`);
+    say(`   recommended: ${rec.supervisors.length > 0 ? rec.supervisors.map((h) => (h === "pi" && rec.supervisor !== undefined ? `pi ${rec.supervisor.provider}/${rec.supervisor.modelId}` : h)).join(", ") : "none available"}`);
+    const fine = d.supervisorEnabled.every((c) => c.ok);
+    // The Pi recommendation comes from the agent dir discovery read; it applies only to a supervisor that reads the same one.
+    const supDir = parsed.agentDir ?? path.join(env.HOME ?? os.homedir(), ".pi", "agent");
+    const piComparable = !enabled.includes("pi") || supDir === d.pi.agentDir;
+    const currentPi = current.pi !== undefined ? (current.pi as Raw) : current.harnesses === undefined ? current : undefined;
+    const piBase = currentPi !== undefined ? Object.fromEntries(Object.entries(currentPi).filter(([k]) => !["provider", "modelId", ...SHARED_SUPERVISOR_KEYS].includes(k))) : newSupervisorBase;
+    const claudeBase = (current.claude as Raw | undefined) ?? claudeSection;
+    const recRaw = rec.supervisors.length > 0 && piComparable ? supervisorFile(rec.supervisors, rec.supervisor, claudeBase, piBase, pickShared(current)) : undefined;
+    const samePi = !rec.supervisors.includes("pi") || (parsed.provider === rec.supervisor?.provider && parsed.modelId === rec.supervisor?.modelId);
+    const same = recRaw === undefined || (same_(enabled, rec.supervisors) && samePi);
+    if (same) {
+      say(recRaw !== undefined ? "   matches the recommendation; unchanged" : `   ${fine ? "" : "a harness it enables is not available here, and "}no recommendation applies to it; unchanged`);
     } else if (yes) {
       say("   --yes leaves it unchanged; the recommendation differs:");
-      for (const line of diffs) say(`     ${line}`);
-    } else if (await confirm(p!, `   Change the supervisor model to ${rec.supervisor!.provider}/${rec.supervisor!.modelId}?`, !fine)) {
+      if (!same_(enabled, rec.supervisors)) say(`     harnesses: ${enabled.join(", ")} -> ${rec.supervisors.join(", ")}`);
+      if (!samePi) say(`     pi: ${parsed.provider}/${parsed.modelId} -> ${rec.supervisor?.provider}/${rec.supervisor?.modelId}`);
+    } else if (await confirm(p!, `   Change the supervisor to ${rec.supervisors.map((h) => (h === "pi" && rec.supervisor !== undefined ? `pi ${rec.supervisor.provider}/${rec.supervisor.modelId}` : h)).join(", ")}?`, !fine)) {
       supNext = recRaw;
     } else {
       say("   unchanged");
@@ -429,7 +476,7 @@ export async function runSetup(options: SetupOptions = {}): Promise<SetupResult>
   let supOutcome: FileOutcome = existingSup !== undefined ? "unchanged" : "none";
   const writes: Array<{ file: string; raw: Raw; parse: (v: unknown, s: string) => unknown; exists: boolean; kind: "runner" | "supervisor" }> = [];
   if (runnerNext !== undefined) writes.push({ file: runnerFile, raw: runnerNext, parse: parseRunnerConfig, exists: existingRunner !== undefined, kind: "runner" });
-  if (supNext !== undefined) writes.push({ file: supervisorFile, raw: supNext, parse: parseSupervisorConfig, exists: existingSup !== undefined, kind: "supervisor" });
+  if (supNext !== undefined) writes.push({ file: supervisorFile_, raw: supNext, parse: parseSupervisorConfig, exists: existingSup !== undefined, kind: "supervisor" });
   for (const w of writes) {
     if (w.exists && !yes && !(w.kind === "runner" && runnerConfirmed)) {
       say("");

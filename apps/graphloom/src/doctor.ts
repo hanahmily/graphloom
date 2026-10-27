@@ -54,7 +54,9 @@ export interface ViableSetups {
   enable: HarnessName[];
   /** The supervisor harness §7.3 resolves with no plugin preference, if any. */
   supervisor?: HarnessName;
-  /** Available harnesses that could supervise once their supervisor ships (phases S3, S4). */
+  /** Every harness that can supervise here, in the built-in order Pi, Claude Code, Codex. */
+  supervisors: HarnessName[];
+  /** Available harnesses that could supervise once their supervisor ships (Codex: phase S4). */
   supervisorLater: HarnessName[];
 }
 
@@ -76,11 +78,14 @@ function check(section: CheckSection, name: string, status: CheckStatus, detail:
 export function viableSetups(d: Discovery): ViableSetups {
   const available = availableHarnesses(d);
   const writers = (["claude-code", "pi"] as const).filter((h) => available.includes(h));
-  const supervisor = SUPERVISOR_ORDER.find((h) => SHIPPED_SUPERVISOR_HARNESSES.includes(h) && available.includes(h));
+  // A supervisor harness counts when this GraphLoom ships it and its own probe passes (S3's, for Claude Code).
+  const supervisors = SUPERVISOR_ORDER.filter((h) => SHIPPED_SUPERVISOR_HARNESSES.includes(h) && d.supervisorCandidates[h].ok);
+  const supervisor = supervisors[0];
   return {
     defaultHarness: writers,
     enable: available.filter((h) => h !== writers[0]),
     ...(supervisor !== undefined ? { supervisor } : {}),
+    supervisors,
     supervisorLater: SUPERVISOR_ORDER.filter((h) => !SHIPPED_SUPERVISOR_HARNESSES.includes(h) && available.includes(h)),
   };
 }
@@ -177,21 +182,12 @@ function configurationChecks(d: Discovery): DoctorCheck[] {
   } else if (s.config === undefined) {
     checks.push(check("configuration", "supervisor config", s.explicit ? "fail" : "warn", s.explicit ? `${s.file} does not exist` : `none at ${s.file}: no automatic recovery`, "graphloom setup"));
   } else {
-    // Today's supervisor.json is the flat Pi form; the per-harness form arrives with phases S3 to S5.
-    const model = `${s.config.provider}/${s.config.modelId}`;
-    const pi = d.pi.configured.find((c) => c.where === "supervisor config");
-    const piOk = pi !== undefined && pi.resolves && pi.credential;
-    checks.push(
-      piOk
-        ? check("configuration", "supervisor config", "pass", `${s.file}: pi (${model}); the repair reviewer uses the same agent`)
-        : check(
-            "configuration",
-            "supervisor config",
-            "warn",
-            `${s.file}: pi (${model}) is not available: ${pi === undefined ? "Pi's registry could not be read" : !pi.resolves ? "the model is not in Pi's registry" : `no credential for ${s.config.provider}`}`,
-            pi !== undefined && pi.resolves ? piCredentialFix(s.config.provider) : "graphloom setup",
-          ),
-    );
+    const form = s.config.harnesses === undefined ? "the flat Pi form" : "the per-harness form";
+    const parts = d.supervisorEnabled.map((c) => `${c.harness}${c.harness === "pi" ? ` (${s.config!.provider}/${s.config!.modelId})` : ""}${c.ok ? "" : `: not available, ${c.reason}`}`);
+    const missing = d.supervisorEnabled.filter((c) => !c.ok);
+    const detail = `${s.file} (${form}): ${parts.join("; ")}; the repair reviewer uses the same agent`;
+    // A listed harness that is not available warns: selection falls back past it.
+    checks.push(missing.length === 0 ? check("configuration", "supervisor config", "pass", detail) : check("configuration", "supervisor config", "warn", detail, missing.map((c) => c.fix ?? "graphloom setup").join("; ")));
   }
 
   const tokenEnv = r.config?.github?.tokenEnv;
@@ -243,11 +239,12 @@ function setupChecks(d: Discovery): DoctorCheck[] {
   }
   const enable = v.enable.map((h) => (h === "codex" ? "codex (read-only jobs)" : h));
   checks.push(check("setups", "also enable", "pass", enable.length > 0 ? `${enable.join(", ")}, so a plugin role such as a Codex reviewer can run` : "no other harness is available"));
-  const later = v.supervisorLater.length > 0 ? `; ${v.supervisorLater.map(label).join(" and ")} ${v.supervisorLater.length === 1 ? "supervises" : "supervise"} from the releases that ship them (phases S3, S4)` : "";
+  const later = v.supervisorLater.length > 0 ? `; ${v.supervisorLater.map(label).join(" and ")} ${v.supervisorLater.length === 1 ? "supervises" : "supervise"} from the release that ships it (phase S4)` : "";
   if (v.supervisor !== undefined) {
-    checks.push(check("setups", "supervisor", "pass", `${v.supervisor} (order ${SUPERVISOR_ORDER.join(", ")}); the repair reviewer uses the same agent${later}`));
+    checks.push(check("setups", "supervisor", "pass", `${v.supervisors.join(", ")} (recommended: ${v.supervisor}; order ${SUPERVISOR_ORDER.join(", ")}); the repair reviewer uses the same agent${later}`));
   } else {
-    checks.push(check("setups", "supervisor", "warn", `no supervisor harness this GraphLoom runs is available: no automatic recovery${later}`, piCredentialFix(RECOMMENDED_PI.provider)));
+    const fixes = SHIPPED_SUPERVISOR_HARNESSES.map((h) => `${label(h)}: ${d.supervisorCandidates[h].fix ?? "graphloom doctor"}`);
+    checks.push(check("setups", "supervisor", "warn", `no supervisor harness this GraphLoom runs is available (${SHIPPED_SUPERVISOR_HARNESSES.map((h) => `${h}: ${d.supervisorCandidates[h].reason}`).join("; ")}): no automatic recovery${later}`, fixes.join("; ")));
   }
   return checks;
 }
@@ -273,14 +270,20 @@ export function supervisorSelection(d: Discovery): DoctorCheck {
     const v = viableSetups(d);
     return check("task", "supervisor selection", "warn", `none: no supervisor config, so the run has no automatic recovery${v.supervisor !== undefined ? `; ${v.supervisor} is available` : ""}`, "graphloom setup");
   }
-  // This GraphLoom runs a Pi supervisor from the operator's supervisor.json and
-  // applies no plugin preference yet (GraphDefinition.supervisor, phase S5).
-  const pi = d.pi.configured.find((c) => c.where === "supervisor config");
-  const model = `${s.config.provider}/${s.config.modelId}`;
-  if (pi === undefined || !pi.resolves || !pi.credential) {
-    return check("task", "supervisor selection", "warn", `pi (${model}, from ${s.file}), which is not available, so a recovery episode would fail`, pi?.resolves ? piCredentialFix(s.config.provider) : "graphloom setup");
+  // The selection `run` makes with no --supervisor: `select`, else the first enabled harness available.
+  // The plugin's own preference (GraphDefinition.supervisor) joins with phase S5.
+  const sel = d.supervisorSelection;
+  if (sel === undefined) {
+    const why = d.supervisorEnabled.map((c) => `${c.harness}: ${c.reason}`).join("; ");
+    return check("task", "supervisor selection", "warn", `none: no enabled supervisor harness is available (${why}), so the run has no automatic recovery`, d.supervisorEnabled.map((c) => c.fix ?? "graphloom setup").join("; ") || "graphloom setup");
   }
-  return check("task", "supervisor selection", "pass", `pi (${model}, from ${s.file}: operator); the repair reviewer uses the same agent`);
+  const probed = d.supervisorEnabled.find((c) => c.harness === sel.harness);
+  const model = sel.harness === "pi" ? ` (${s.config.provider}/${s.config.modelId})` : "";
+  if (probed !== undefined && !probed.ok) {
+    // The flat Pi form selects Pi unprobed, as run does; its recovery episode would then fail.
+    return check("task", "supervisor selection", "warn", `${sel.harness}${model} (${sel.source}: ${sel.reason}), which is not available (${probed.reason}), so a recovery episode would fail`, probed.fix ?? "graphloom setup");
+  }
+  return check("task", "supervisor selection", "pass", `${sel.harness}${model} (${sel.source}: ${sel.reason}, from ${s.file}); the repair reviewer uses the same agent`);
 }
 
 /** Each harness that could take `role` instead: available, able to give its access, and distinct where required. */

@@ -19,6 +19,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { CLAUDE_CODE_ADAPTER_FLAGS, CODEX_ADAPTER_FLAGS } from "@graphloom/executor-coding-agent";
+import { CLAUDE_SUPERVISOR_FLAGS } from "@graphloom/supervisor";
 
 export const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 export const cli = path.join(repoRoot, "apps", "graphloom", "dist", "main.js");
@@ -132,7 +133,7 @@ case "$1" in
   --version) echo "2.1.300 (Claude Code)"; exit 0 ;;
   --help)
     if [ "$mode" = badprobe ]; then echo "Usage: claude -p --model"; exit 0; fi
-    echo "Usage: claude [options] ${CLAUDE_CODE_ADAPTER_FLAGS.join(" ")}"
+    echo "Usage: claude [options] ${[...new Set([...CLAUDE_CODE_ADAPTER_FLAGS, ...CLAUDE_SUPERVISOR_FLAGS])].join(" ")}"
     if [ "$mode" != noauth ]; then printf 'Commands:\\n  auth                                  Manage authentication\\n'; fi
     exit 0 ;;
   auth)
@@ -196,6 +197,11 @@ export async function makeDoctorEnv(options: DoctorEnvOptions = {}): Promise<Doc
   if (codex !== "missing") await writeFile(path.join(bin, "codex"), CODEX_STUB, { mode: 0o755 });
   if (gh !== "missing") await writeFile(path.join(bin, "gh"), GH_STUB, { mode: 0o755 });
   if (bwrap !== "missing") await writeFile(path.join(bin, "bwrap"), bwrapStub(bwrap), { mode: 0o755 });
+  // Claude Code's own login marker, which the S3 supervisor probe looks for (presence only; no credential in it).
+  if (claude === "ok" || claude === "noauth") {
+    await mkdir(path.join(home, ".claude"), { recursive: true });
+    await writeFile(path.join(home, ".claude", ".credentials.json"), "{}\n");
+  }
   if (options.piStore) {
     await mkdir(path.join(home, ".pi", "agent"), { recursive: true });
     await writeFile(path.join(home, ".pi", "agent", "auth.json"), JSON.stringify({ deepseek: { type: "api_key", key: STUB_SECRETS.stored } }));
