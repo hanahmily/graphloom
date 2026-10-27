@@ -229,6 +229,46 @@ function syntheticEvidenceRecord(
   return { ...base, kind: outcome.kind, contract: outcome.contract, payload: attach(outcome.payload) };
 }
 
+/** One environment check of the graph, run as `check` runs it. */
+export interface EnvironmentCheckResult {
+  id: string;
+  argv: string[];
+  stdout?: string;
+  error?: string;
+}
+
+/** The graph's environment checks in the task's repository, with the bundle root a run's checks get. */
+export async function runEnvironmentChecks(intake: Awaited<ReturnType<typeof intakeTask>>, definition: GraphDefinition): Promise<EnvironmentCheckResult[]> {
+  const results: EnvironmentCheckResult[] = [];
+  for (const c of definition.environment?.checks ?? []) {
+    const [cmd, ...args] = c.argv;
+    if (cmd === undefined) {
+      results.push({ id: c.id, argv: [], error: "empty argv" });
+      continue;
+    }
+    try {
+      // The same `$GRAPHLOOM_PLUGIN_ROOT` a run's checks get (packages/controller/src/prepare-cache.ts).
+      const { stdout } = await execFileAsync(cmd, args, {
+        cwd: intake.repoPath,
+        timeout: c.timeoutMs ?? 10_000,
+        env: { ...process.env, [PLUGIN_ROOT_ENV]: path.resolve(intake.bundle.bundlePath) },
+      });
+      results.push({ id: c.id, argv: c.argv, stdout });
+    } catch (err) {
+      results.push({ id: c.id, argv: c.argv, error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+  return results;
+}
+
+/** What `doctor --task` needs of a task (docs/design-release.md §4.4): its plugin loaded as `check` loads it, and its environment checks. */
+export async function describeTask(taskPath: string): Promise<{ definition: GraphDefinition; config?: string; environment: EnvironmentCheckResult[] }> {
+  const intake = await intakeTask(taskPath);
+  const definition = await describeBundle(intake);
+  const environment = await runEnvironmentChecks(intake, definition);
+  return { definition, ...(intake.task.config !== undefined ? { config: intake.task.config } : {}), environment };
+}
+
 /** L0 (§3.1): the declared data agrees with itself and the environment's tools are present, for zero provider calls. */
 export async function check(taskPath: string): Promise<CheckReport> {
   const intake = await intakeTask(taskPath);
@@ -338,26 +378,10 @@ export async function check(taskPath: string): Promise<CheckReport> {
     }
   }
 
-  const env = definition.environment;
   const environmentOutputs: Record<string, string> = {};
-  for (const c of env?.checks ?? []) {
-    const [cmd, ...args] = c.argv;
-    if (cmd === undefined) {
-      problems.push(`environment check ${c.id}: empty argv`);
-      continue;
-    }
-    try {
-      // The same `$GRAPHLOOM_PLUGIN_ROOT` a run's checks get (packages/controller/src/prepare-cache.ts).
-      const { stdout } = await execFileAsync(cmd, args, {
-        cwd: intake.repoPath,
-        timeout: c.timeoutMs ?? 10_000,
-        env: { ...process.env, [PLUGIN_ROOT_ENV]: path.resolve(intake.bundle.bundlePath) },
-      });
-      environmentOutputs[c.id] = stdout;
-    } catch (err) {
-      const detail = err instanceof Error ? err.message : String(err);
-      problems.push(`environment check ${c.id} failed: ${detail}`);
-    }
+  for (const result of await runEnvironmentChecks(intake, definition)) {
+    if (result.error !== undefined) problems.push(result.argv.length === 0 ? `environment check ${result.id}: empty argv` : `environment check ${result.id} failed: ${result.error}`);
+    else environmentOutputs[result.id] = result.stdout ?? "";
   }
 
   // B2: optional, since check (like rehearse) needs no $GRAPHLOOM_RUNNER_CONFIG —
@@ -935,6 +959,8 @@ export async function probe(
   /** Test seam: a runner in place of the real configured one (never used by the CLI). */
   overrideRunner?: Runner,
 ): Promise<ProbeReport> {
+  // A probe cannot work without the runner config: refuse before the rehearsal it starts with (docs/design-release.md §4.5).
+  const runnerConfig = overrideRunner === undefined ? await requireRunnerConfig() : undefined;
   const intake = await intakeTask(path.resolve(taskPath));
   const definition = await describeBundle(intake);
   const contract = definition.resultContracts?.find((c) => c.name === options.contract);
@@ -961,7 +987,7 @@ export async function probe(
   }
   const { assignment, harness, knownReferences } = recorded;
 
-  const runner = overrideRunner ?? createCliRunner(await requireRunnerConfig());
+  const runner = overrideRunner ?? createCliRunner(runnerConfig!);
   let providerCalls = 0;
   const probeDir = await mkdtemp(path.join(os.tmpdir(), "graphloom-probe-"));
   try {

@@ -208,7 +208,8 @@ nonode=$(node "$rel/no-node-path.mjs" --dir "$smoke/bin")
 printf '[user]\n\tname = GraphLoom Release Smoke\n\temail = release-smoke@example.invalid\n' >"$smoke/home/.gitconfig"
 # No automatic-update check from the smoke tests: it would query the real release source.
 in_smoke() { env -i HOME="$smoke/home" PATH="$nonode" TMPDIR="$smoke/tmp" LANG=C.UTF-8 GRAPHLOOM_DISABLE_AUTOUPDATE=1 "$@"; }
-in_smoke sh "$out/install.sh" --from "$tarball"
+# stdin from /dev/null: the install is not interactive, so it offers no setup (§4.2 step 6).
+in_smoke sh "$out/install.sh" --from "$tarball" </dev/null
 shim=$smoke/home/.local/bin/graphloom
 installed=$(readlink -f "$smoke/home/.local/share/graphloom/current")
 [ "$installed" = "$smoke/home/.local/share/graphloom/versions/$version" ] || { echo "install.sh did not switch current to $version" >&2; exit 1; }
@@ -220,6 +221,12 @@ node -e 'const fs=require("fs");const a=JSON.parse(fs.readFileSync(process.argv[
   "$smoke/version.json" "$out/release.json"
 [ "$(in_smoke "$shim" version --root)" = "$installed" ] || { echo "graphloom version --root is not the installed version directory" >&2; exit 1; }
 echo "version: $(in_smoke "$shim" version) (matches release.json), installed at $installed"
+
+# 8.1: the doctor may warn (no runner config, no harness CLIs), but platform, confinement, and integrity must pass.
+in_smoke "$shim" doctor --json >"$smoke/doctor.json" || true
+node -e 'const r=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));const bad=["platform","confinement","install integrity"].map((n)=>r.checks.find((c)=>c.name===n)).filter((c)=>!c||c.status!=="pass");if(bad.length){console.error("graphloom doctor: "+JSON.stringify(bad));process.exit(1)}' \
+  "$smoke/doctor.json"
+echo "doctor: platform, confinement, and install integrity pass"
 
 in_smoke "$installed/node/bin/node" "$rel/smoke-preflight.mjs" --root "$installed"
 in_smoke "$installed/node/bin/node" "$rel/smoke-pi.mjs" --root "$installed"

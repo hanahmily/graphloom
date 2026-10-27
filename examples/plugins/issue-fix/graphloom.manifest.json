@@ -1,6 +1,6 @@
 {
   "graphId": "issue-fix",
-  "version": "0.14.0",
+  "version": "0.15.0",
   "sdkProtocol": 1,
   "taskConfig": "required",
   "entryPoints": {
@@ -16,11 +16,11 @@
     "vitest": "^3.0.9"
   },
   "digests": {
-    "sourceTree": "9f0473b51e5af3ba27cfa13ae72e58725395ad17ccfb03a1832ca6e10da570e2",
-    "packageLock": "66ad31024ac0fdb1a6d8f96ef0c4043b56b604e92d605541db8199654c82d233",
+    "sourceTree": "8a775eb8971d7ced9836473c72140990c520154976114294ff29ac58662bf09d",
+    "packageLock": "d7fdd110e403ebf02ca9a491ab8bc8591ffa101d7982f09cb72ce475f7347f58",
     "files": {
-      "package.json": "310095f9ce54d16d56524de2d4ef2fe266b56cc82ccb1de5c4ad80498707d3fd",
-      "package-lock.json": "66ad31024ac0fdb1a6d8f96ef0c4043b56b604e92d605541db8199654c82d233",
+      "package.json": "f3f7ea1b26c8b0d392cd45aaefcd40ed77dd6f84bcdb20a2f670be388bfd98f1",
+      "package-lock.json": "d7fdd110e403ebf02ca9a491ab8bc8591ffa101d7982f09cb72ce475f7347f58",
       "tsconfig.json": "3bafb75902b6084b621c996ae838dbfb87088cf095ce411be9809ce79bf3916b",
       "profiles/banyandb-ql.json": "f1ffb9b5299df63145aec05446359c6471e769536549b3294c3c1a3102d9e386",
       "profiles/banyandb.json": "d4554d37d373eea847cb450753fab75885e71b94c208daf730fe933464e9aa9b",
@@ -35,7 +35,7 @@
       "src/evidence.ts": "93783022aa375f4ba1024da60e7cb34c4c0c2114341783e80e2db15145586a82",
       "src/final.ts": "4bc011007a06be8ec0547bfa3beb6a886bf859e685741e28c2ed7463be5a8612",
       "src/findings.ts": "93a90bafccca0a51db94620c1c886915a91c0de2aad75cbc107b61ddf408e964",
-      "src/graph.ts": "4e33a1187713b9909e14a3bdc549dcb3b697e81606007aca9acd862b9f09b735",
+      "src/graph.ts": "b5b9854484ec4e93d30e9c5a25fa8480a0edbfdd62a44b13693c1cd386aed012",
       "src/index.ts": "96bde504da23994638b30e16e59a968351ef33629062b527a45aac68e995d52c",
       "src/issues.ts": "b0f98551a88a9ffed6d958907d1fe26f3f6658ebecb38e1ddd1bfcd4bdfb3d67",
       "src/ocr.ts": "a5c12554b5807ebdfa161720e2e89d395db0fda22707b72b2dc612a4ff96f941",
@@ -51,7 +51,7 @@
       "src/validators.ts": "8e834300e241c4c7f232551adff4d4d4a8bdeae3e0d517d71274108ffb525b35",
       "test/issue-fix.test.ts": "6944cd0c89754cbb43600b86bd53cba93e8104cc6b6b9e6d9265bba9a2a0753d",
       "test/issues.test.ts": "3234213eea8f2e3833d4370e9fd4f0f1366ede09c6f674a198f3037d26a89f91",
-      "test/profiles.test.ts": "36a5e504a8a47e55aec5f6443cf777bcf36522721b5eb27033fa439f0058fdf3",
+      "test/profiles.test.ts": "4db103dddabb172b201302864f6a3fa8cb68a94bdaa251f10e7e2963cf699561",
       "test/review-dedupe.test.ts": "9e2fc053c6be9624e950f79167b5b37c80248939afb1c41419a5c773fd4260ca"
     }
   }

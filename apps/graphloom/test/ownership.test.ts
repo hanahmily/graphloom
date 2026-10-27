@@ -12,11 +12,11 @@
  */
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { cp, mkdir, readdir, readlink, rename, symlink, writeFile } from "node:fs/promises";
+import { cp, mkdir, readdir, rename, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { DISPATCHED_ENV, planDispatch, type SelfInstall } from "../src/ownership.js";
-import { makeSandbox, removeTree, repoRoot, tempBase, type Sandbox } from "./install-env.js";
+import { makeSandbox, realCli, removeTree, repoRoot, tempBase, type Sandbox } from "./install-env.js";
 
 let base: string;
 beforeAll(async () => {
@@ -27,43 +27,6 @@ afterAll(async () => {
 });
 
 const quiet = { GRAPHLOOM_DISABLE_AUTOUPDATE: "1" };
-
-/**
- * Replaces a fake release tree's stub CLI with this checkout's built CLI, core
- * packages, and executors (real copies, so each version has its own executor
- * sources and digests). Third-party dependencies link to this checkout's.
- */
-async function realCli(tree: string): Promise<void> {
-  const copy = async (rel: string, entries: string[]) => {
-    for (const entry of entries) {
-      const from = path.join(repoRoot, rel, entry);
-      if (existsSync(from)) await cp(from, path.join(tree, rel, entry), { recursive: true, force: true });
-    }
-  };
-  await copy("apps/graphloom", ["package.json", "dist"]);
-  for (const pkg of await readdir(path.join(repoRoot, "packages"))) {
-    if (pkg !== "testkit") await copy(`packages/${pkg}`, ["package.json", "dist"]);
-  }
-  for (const ex of await readdir(path.join(repoRoot, "executors"))) {
-    await cp(path.join(repoRoot, "executors", ex), path.join(tree, "executors", ex), {
-      recursive: true,
-      filter: (src) => !src.split(path.sep).includes("node_modules"),
-    });
-  }
-  const modules = path.join(tree, "node_modules");
-  await mkdir(path.join(modules, "@graphloom"), { recursive: true });
-  for (const entry of await readdir(path.join(repoRoot, "node_modules"))) {
-    if (entry.startsWith(".")) continue;
-    if (entry !== "@graphloom") {
-      await symlink(path.join(repoRoot, "node_modules", entry), path.join(modules, entry));
-      continue;
-    }
-    for (const name of await readdir(path.join(repoRoot, "node_modules", "@graphloom"))) {
-      const target = await readlink(path.join(repoRoot, "node_modules", "@graphloom", name));
-      if (existsSync(path.resolve(modules, "@graphloom", target))) await symlink(target, path.join(modules, "@graphloom", name));
-    }
-  }
-}
 
 /** A task beside a one-commit repository, with plugins/hello linked to this checkout's built bundle. */
 async function helloTask(sb: Sandbox, name: string): Promise<string> {

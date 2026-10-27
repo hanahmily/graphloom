@@ -73,6 +73,28 @@ export interface GraphDefinition {
    * was intaken with.
    */
   defaultBudgets?: GraphBudgetDefaults;
+  /**
+   * The agent roles this graph's jobs play (for the task config it was
+   * described with), for the operator's `graphloom doctor --task`
+   * (docs/design-release.md §4.4). Returned from code like `defaultBudgets`.
+   * The SDK checks the shape only; the controller never reads it, and the
+   * CLI treats `role` and `setting` as opaque text.
+   */
+  agentRoles?: AgentRoleDeclaration[];
+}
+
+/** One agent role a graph declares (`GraphDefinition.agentRoles`). */
+export interface AgentRoleDeclaration {
+  /** The plugin's own name for the role, shown as is. */
+  role: string;
+  /** The harness the resolved profile assigns, such as `claude-code`. */
+  harness: string;
+  /** Whether the role's jobs change the workspace. */
+  access: "read" | "write";
+  /** Roles whose harness this one must not share. */
+  distinctFrom?: string[];
+  /** Where the operator changes the harness, such as `harnesses.verifier`. */
+  setting?: string;
 }
 
 /** Run budget defaults a graph may declare; every value is a positive safe integer. */

@@ -758,7 +758,9 @@ as `{ harnesses: ["pi"], pi: { … } }`.
 
 `graphloom setup` writes this file from what `graphloom doctor` discovers, in
 the built-in order and without `select`
-([release §4.4–§4.5](design-release.md#44-graphloom-doctor)).
+([release §4.4–§4.5](design-release.md#44-graphloom-doctor)). Pi alone is
+written in the flat Pi form, which keeps parsing as above
+([release §4.8](design-release.md#48-r4-as-implemented)).
 
 ### 7.3 Precedence and fallback
 

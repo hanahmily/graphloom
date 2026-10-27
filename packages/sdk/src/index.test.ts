@@ -294,6 +294,25 @@ describe("wire validation", () => {
     expect(() => assertGraphDefinition(withBudgets({ jobs: 1.5 }))).toThrow(/positive integer/);
     expect(() => assertGraphDefinition(withBudgets({ jobs: "10" }))).toThrow(/positive integer/);
   });
+
+  it("checks the shape of declared agent roles only (docs/design-release.md §4.4)", () => {
+    const withRoles = (agentRoles: unknown) => ({ ...helloDefinition, agentRoles });
+    const roles = [
+      { role: "implementer", harness: "claude-code", access: "write", setting: "harnesses.implementer" },
+      { role: "verifier", harness: "any-harness-name", access: "read", distinctFrom: ["implementer"] },
+    ];
+    expect(assertGraphDefinition(withRoles(roles)).agentRoles).toEqual(roles);
+    expect(assertGraphDefinition(helloDefinition).agentRoles).toBeUndefined();
+    expect(() => assertGraphDefinition(withRoles({}))).toThrow(/agentRoles must be an array/);
+    expect(() => assertGraphDefinition(withRoles([{ harness: "pi", access: "read" }]))).toThrow(/role/);
+    expect(() => assertGraphDefinition(withRoles([{ role: "a", access: "read" }]))).toThrow(/harness/);
+    expect(() => assertGraphDefinition(withRoles([{ role: "a", harness: "pi", access: "admin" }]))).toThrow(/access must be read or write/);
+    expect(() => assertGraphDefinition(withRoles([roles[0], roles[0]]))).toThrow(/unique/);
+    expect(() => assertGraphDefinition(withRoles([{ ...roles[1], distinctFrom: [""] }]))).toThrow(/distinctFrom/);
+    expect(() => assertGraphDefinition(withRoles([{ ...roles[1], distinctFrom: "implementer" }]))).toThrow(/distinctFrom/);
+    expect(() => assertGraphDefinition(withRoles([{ ...roles[0], setting: 3 }]))).toThrow(/setting/);
+    expect(() => assertGraphDefinition(withRoles([{ ...roles[0], model: "x" }]))).toThrow(/model is not a role field/);
+  });
 });
 
 describe("GraphDecision.evidence (#119)", () => {
