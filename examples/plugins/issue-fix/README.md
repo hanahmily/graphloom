@@ -131,6 +131,17 @@ about ten minutes; its commands allow 45.
 GRAPHLOOM_GITHUB_LIVE_TOKEN="$(gh auth token)" node ../apps/graphloom/dist/main.js run issue-fix-graphloom-task.yaml
 ```
 
+## Agent roles for `graphloom doctor --task` (0.15.0)
+
+The graph declares the roles its profile assigns harnesses to, in
+`GraphDefinition.agentRoles`: the implementer (write, `harnesses.implementer`),
+the reviewer (read, `harnesses.reviewer`), and the verifier (read,
+`harnesses.verifier`, which must differ from the reviewer's). The controller
+never reads them. `graphloom doctor --task <task.yaml>` reports, per role,
+whether its harness is enabled in the runner config, available on this machine,
+and able to give the access, and lists the harnesses that could take the role
+instead ([release design §4.4](../../../docs/design-release.md#44-graphloom-doctor)).
+
 ## Bundled open-code-review (0.14.0)
 
 You don't need to install open-code-review. The plugin depends on

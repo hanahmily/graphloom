@@ -82,7 +82,17 @@ describe("the banyandb profile", () => {
   it("describes the graph identity and finds the plugin's bundled open-code-review first", () => {
     const ours = createGraph().describe(BANYANDB);
     expect(ours.environment?.checks?.find((c) => c.id === "ocr")?.argv.join(" ")).toContain("scripts/ocr-path.sh");
-    expect(ours).toMatchObject({ graphId: "issue-fix", version: "0.14.0", privateStateSchema: "issue-fix-private-v1" });
+    expect(ours).toMatchObject({ graphId: "issue-fix", version: "0.15.0", privateStateSchema: "issue-fix-private-v1" });
+  });
+
+  it("declares its agent roles from the resolved profile for graphloom doctor --task (0.15.0)", () => {
+    expect(createGraph().describe(BANYANDB).agentRoles).toEqual([
+      { role: "implementer", harness: "claude-code", access: "write", setting: "harnesses.implementer" },
+      { role: "reviewer", harness: "codex", access: "read", setting: "harnesses.reviewer" },
+      { role: "verifier", harness: "claude-code", access: "read", distinctFrom: ["reviewer"], setting: "harnesses.verifier" },
+    ]);
+    const swapped = createGraph().describe({ ...(BANYANDB as object), harnesses: { implementer: "pi", reviewer: "claude-code", verifier: "codex" } });
+    expect(swapped.agentRoles?.map((r) => [r.role, r.harness])).toEqual([["implementer", "pi"], ["reviewer", "claude-code"], ["verifier", "codex"]]);
   });
 
   it("splits make generate into separately cached steps with narrow inputs (#174)", () => {
@@ -384,7 +394,7 @@ describe("profiles", () => {
   it("ships the banyandb-ql profile in the manifest's pinned files and describes it under the graph's version (#197)", async () => {
     const manifest = JSON.parse(await readFile(path.join(here, "../graphloom.manifest.json"), "utf8")) as { digests: { files: Record<string, string> } };
     expect(Object.keys(manifest.digests.files)).toContain("profiles/banyandb-ql.json");
-    expect(createGraph().describe(shippedProfile("banyandb-ql"))).toMatchObject({ graphId: "issue-fix", version: "0.14.0" });
+    expect(createGraph().describe(shippedProfile("banyandb-ql"))).toMatchObject({ graphId: "issue-fix", version: "0.15.0" });
   });
 });
 

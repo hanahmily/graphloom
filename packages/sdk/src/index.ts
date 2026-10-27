@@ -70,6 +70,7 @@ export type {
   GraphAction,
   GraphDecision,
   GraphBudgetDefaults,
+  AgentRoleDeclaration,
   GraphDefinition,
   GraphPlugin,
   JobId,

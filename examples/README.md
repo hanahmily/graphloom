@@ -14,8 +14,9 @@ npm test -w @graphloom/plugin-hello
 `graphloom run` sends each job hello dispatches to the coding agent the operator
 configures: [Claude Code](https://docs.anthropic.com/en/docs/claude-code) or a
 Pi coding agent. Both run with your user permissions in the run's worktree, so
-the runner config must say `"allowUnrestricted": true`. Configure it in
-`~/.config/graphloom/runner.json`, or in the file `GRAPHLOOM_RUNNER_CONFIG`
+the runner config must say `"allowUnrestricted": true`. `graphloom setup`
+writes it from what `graphloom doctor` finds on this machine. Or configure it
+in `~/.config/graphloom/runner.json`, or in the file `GRAPHLOOM_RUNNER_CONFIG`
 names:
 
 ```json

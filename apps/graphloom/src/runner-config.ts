@@ -55,16 +55,24 @@ export interface RunnerConfig {
   autoUpdate?: "auto" | "notify" | "off";
 }
 
+/** Why `run`, `resume`, and `probe` refuse without a runner config (docs/design-release.md §4.5). */
+export const NO_RUNNER_CONFIG = `no agent runner configured: run graphloom setup (graphloom setup --yes in scripts), or point ${RUNNER_CONFIG_ENV} at a runner config`;
+
+/** Where `run` looks for the runner config: `$GRAPHLOOM_RUNNER_CONFIG`, otherwise `~/.config/graphloom/runner.json`. */
+export function runnerConfigPath(env: NodeJS.ProcessEnv = process.env): { file: string; explicit: boolean } {
+  const explicit = env[RUNNER_CONFIG_ENV];
+  return explicit
+    ? { file: path.resolve(explicit), explicit: true }
+    : { file: path.join(env.HOME ?? os.homedir(), ".config", "graphloom", "runner.json"), explicit: false };
+}
+
 /** Every harness a job of this run may use. */
 export function enabledHarnesses(config: RunnerConfig): HarnessName[] {
   return [...new Set([config.harness, ...(config.harnesses ?? [])])];
 }
 
 export async function loadRunnerConfig(env: NodeJS.ProcessEnv = process.env): Promise<RunnerConfig | undefined> {
-  const explicit = env[RUNNER_CONFIG_ENV];
-  const file = explicit
-    ? path.resolve(explicit)
-    : path.join(env.HOME ?? os.homedir(), ".config", "graphloom", "runner.json");
+  const { file, explicit } = runnerConfigPath(env);
   let raw: string;
   try {
     raw = await readFile(file, "utf8");
@@ -95,9 +103,7 @@ export async function requireRunnerConfig(
   const loaded = await loadRunnerConfig(env);
   if (loaded !== undefined) onLoaded?.(loaded);
   if (loaded === undefined) {
-    throw new Error(
-      `no agent runner configured: create ~/.config/graphloom/runner.json (or point ${RUNNER_CONFIG_ENV} at one) with {"harness": "claude-code", "allowUnrestricted": true}`,
-    );
+    throw new Error(NO_RUNNER_CONFIG);
   }
   let config = loaded;
   const harnesses = enabledHarnesses(config);

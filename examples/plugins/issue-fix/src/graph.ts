@@ -16,6 +16,7 @@ import {
   type EnvironmentCommand,
   type EvidenceRecord,
   type GraphDecision,
+  type AgentRoleDeclaration,
   type GraphDefinition,
   type GraphPlugin,
   type JobSpec,
@@ -147,7 +148,7 @@ import { finalSections } from "./final.js";
 import { cleanRun, codeReview, finalRun, implementerRecord, latestImplementerRecord, plannerRecord, reportText, validatorById, verifiedChecks } from "./validators.js";
 
 export const GRAPH_ID = "issue-fix";
-export const GRAPH_VERSION = "0.14.0";
+export const GRAPH_VERSION = "0.15.0";
 
 /** Graph bookkeeping; everything else is read back from recorded evidence. */
 export interface FixPrivateState {
@@ -280,7 +281,21 @@ export function definitionFor(profile: Profile): GraphDefinition {
     defaultValidators: requirements.map((r) => bindings[r.id]!),
     environment: structuredClone(profile.environment),
     ...(profile.budgets !== undefined ? { defaultBudgets: { ...profile.budgets } } : {}),
+    agentRoles: agentRoles(profile),
   };
+}
+
+/**
+ * The roles the profile assigns harnesses to, for `graphloom doctor --task`:
+ * the implementer writes; the reviewer and the verifier read, and the
+ * verifier must not share the reviewer's harness (parseProfile refuses that).
+ */
+export function agentRoles(profile: Profile): AgentRoleDeclaration[] {
+  return [
+    { role: "implementer", harness: profile.roles.implementer, access: "write", setting: "harnesses.implementer" },
+    { role: "reviewer", harness: profile.roles.reviewer, access: "read", setting: "harnesses.reviewer" },
+    { role: "verifier", harness: profile.roles.verifier, access: "read", distinctFrom: ["reviewer"], setting: "harnesses.verifier" },
+  ];
 }
 
 /** The graph: its definition and routing both come from the task's profile (`config`). */

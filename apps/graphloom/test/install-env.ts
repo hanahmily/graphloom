@@ -15,7 +15,7 @@
 import { spawn, spawnSync, type SpawnSyncReturns } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { chmod, copyFile, cp, mkdir, mkdtemp, readFile, realpath, rm, symlink, unlink, writeFile } from "node:fs/promises";
+import { chmod, copyFile, cp, mkdir, mkdtemp, readdir, readFile, readlink, realpath, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -82,6 +82,10 @@ if (cmd === "__auto-update") {
   await import(${JSON.stringify(pathToFileURL(realMain).href)});
 } else if (cmd === "version") {
   console.log("graphloom " + version);
+} else if (cmd === "doctor" || cmd === "setup") {
+  // install.sh step 6 (§4.2): which command ran, with a terminal or not.
+  console.log(JSON.stringify({ stub: cmd, version, tty: process.stdin.isTTY === true && process.stdout.isTTY === true }));
+  process.exit(Number(process.env.FAKE_STUB_EXIT ?? 0));
 } else if (cmd === "exit") {
   console.log("exiting " + rest[0]);
   process.exit(Number(rest[0]));
@@ -328,4 +332,41 @@ export async function removeTree(dir: string): Promise<void> {
 
 export async function tempBase(prefix: string): Promise<string> {
   return realpath(await mkdtemp(path.join(os.tmpdir(), prefix)));
+}
+
+/**
+ * Replaces a fake release tree's stub CLI with this checkout's built CLI, core
+ * packages, and executors (real copies, so each version has its own executor
+ * sources and digests). Third-party dependencies link to this checkout's.
+ */
+export async function realCli(tree: string): Promise<void> {
+  const copy = async (rel: string, entries: string[]) => {
+    for (const entry of entries) {
+      const from = path.join(repoRoot, rel, entry);
+      if (existsSync(from)) await cp(from, path.join(tree, rel, entry), { recursive: true, force: true });
+    }
+  };
+  await copy("apps/graphloom", ["package.json", "dist"]);
+  for (const pkg of await readdir(path.join(repoRoot, "packages"))) {
+    if (pkg !== "testkit") await copy(`packages/${pkg}`, ["package.json", "dist"]);
+  }
+  for (const ex of await readdir(path.join(repoRoot, "executors"))) {
+    await cp(path.join(repoRoot, "executors", ex), path.join(tree, "executors", ex), {
+      recursive: true,
+      filter: (src) => !src.split(path.sep).includes("node_modules"),
+    });
+  }
+  const modules = path.join(tree, "node_modules");
+  await mkdir(path.join(modules, "@graphloom"), { recursive: true });
+  for (const entry of await readdir(path.join(repoRoot, "node_modules"))) {
+    if (entry.startsWith(".")) continue;
+    if (entry !== "@graphloom") {
+      await symlink(path.join(repoRoot, "node_modules", entry), path.join(modules, entry));
+      continue;
+    }
+    for (const name of await readdir(path.join(repoRoot, "node_modules", "@graphloom"))) {
+      const target = await readlink(path.join(repoRoot, "node_modules", "@graphloom", name));
+      if (existsSync(path.resolve(modules, "@graphloom", target))) await symlink(target, path.join(modules, "@graphloom", name));
+    }
+  }
 }

@@ -1,6 +1,6 @@
 {
   "name": "@graphloom/plugin-issue-fix",
-  "version": "0.14.0",
+  "version": "0.15.0",
   "description": "Fix → Review graph plugin for bug issues in any repository, driven by a repository profile",
   "license": "Apache-2.0",
   "type": "module",

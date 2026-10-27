@@ -3,8 +3,9 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 /**
- * GraphLoom CLI: run | inspect | stats | wait | stop | resume | switch-model | delete | version
+ * GraphLoom CLI: run | inspect | stats | wait | stop | resume | switch-model | delete | version | doctor | setup
  */
+import { existsSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
 import { createController, resolveStateDir } from "@graphloom/controller";
@@ -14,7 +15,11 @@ import { createCliRunner } from "./cli-runner.js";
 import { harnessRepairDeps, resolveBundlePath, resolveBundlePathForResume } from "./repair-config.js";
 import { check, probe, recordScenario, rehearse, rehearseStopAt, replay, resumeRehearsal } from "./rehearsal.js";
 import { dispatchToOwner, installHome, recordOwnership, removeOwnershipRecord, selfInstall } from "./ownership.js";
-import { requireRunnerConfig } from "./runner-config.js";
+import { requireRunnerConfig, runnerConfigPath } from "./runner-config.js";
+import { discover } from "./discovery.js";
+import { doctorReport, formatDoctor, taskProfile, type TaskInputs } from "./doctor.js";
+import { describeTask } from "./rehearsal.js";
+import { isInteractive, runSetup, terminalPrompter } from "./setup.js";
 import { onceStopHook, parseDuration, waitForRun, type StopNotice } from "./notify.js";
 import { formatRunStats, loadRunStats } from "./stats.js";
 import { formatVersion, installRoot } from "./version.js";
@@ -60,6 +65,41 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (cmd === "doctor") {
+    const taskFlag = flagValue(args, "--task");
+    if (args.includes("--task") && (taskFlag === undefined || taskFlag.startsWith("--"))) throw new Error("--task needs a task file");
+    const discovery = await discover();
+    let task: TaskInputs | undefined;
+    if (taskFlag !== undefined) {
+      const taskPath = path.resolve(taskFlag);
+      task = await describeTask(taskPath).then(
+        (t) => ({ taskPath, definition: t.definition, environment: t.environment, ...(t.config !== undefined ? { profile: taskProfile(taskPath, t.config)! } : {}) }),
+        (err: unknown) => ({ taskPath, environment: [], error: err instanceof Error ? err.message : String(err) }),
+      );
+    }
+    const report = doctorReport(discovery, task);
+    console.log(args.includes("--json") ? JSON.stringify(report, null, 2) : formatDoctor(report));
+    process.exitCode = report.ok ? 0 : 1;
+    return;
+  }
+
+  if (cmd === "setup") {
+    const yes = args.includes("--yes") || args.includes("-y");
+    if (!yes && !isInteractive(args)) {
+      console.error("graphloom setup asks its questions on a terminal; in scripts, run graphloom setup --yes to accept the recommendations");
+      process.exitCode = 1;
+      return;
+    }
+    const prompter = yes ? undefined : terminalPrompter();
+    try {
+      const result = await runSetup({ yes, ...(prompter !== undefined ? { prompter } : {}) });
+      process.exitCode = result.exitCode;
+    } finally {
+      prompter?.close();
+    }
+    return;
+  }
+
   // A run-scoped command on a run another installed version owns runs there (docs/design-release.md §5.1).
   const self = selfInstall();
   const dispatched = await dispatchToOwner(cmd, args, self);
@@ -67,6 +107,8 @@ async function main(): Promise<void> {
     process.exitCode = dispatched;
     return;
   }
+
+  await firstRunSetup(cmd, args);
 
   const controller = createController();
 
@@ -350,6 +392,43 @@ async function main(): Promise<void> {
   process.exitCode = 1;
 }
 
+/** The commands that look for the runner config first (docs/design-release.md §4.5). */
+const FIRST_RUN_COMMANDS: ReadonlySet<string> = new Set(["run", "resume", "probe", "check", "rehearse"]);
+
+/**
+ * Automatic first run (§4.5): with no runner config at the default path, an
+ * interactive invocation starts the guided setup and then continues with the
+ * new configuration; if setup is declined or fails, the command continues as
+ * it would with none. A non-interactive one never prompts: `check` and
+ * `rehearse` say so on stderr and continue, and `run`, `resume`, and `probe`
+ * refuse when they read the config. A missing file named by
+ * `GRAPHLOOM_RUNNER_CONFIG` is an error and never starts setup.
+ */
+async function firstRunSetup(cmd: string, args: string[]): Promise<void> {
+  if (!FIRST_RUN_COMMANDS.has(cmd)) return;
+  // These forms read no runner config.
+  if (cmd === "resume" && args.includes("--rehearsal")) return;
+  if (cmd === "rehearse" && args.includes("--record-from")) return;
+  const { file, explicit } = runnerConfigPath();
+  if (explicit || existsSync(file)) return;
+  if (!isInteractive(args)) {
+    if (cmd === "check" || cmd === "rehearse") {
+      console.error(`graphloom: no runner config at ${file}; harness capabilities are not checked. Run graphloom setup (graphloom setup --yes in scripts).`);
+    }
+    return;
+  }
+  console.log(`graphloom: no runner config at ${file}; starting graphloom setup, then ${cmd} continues.`);
+  const prompter = terminalPrompter();
+  try {
+    const result = await runSetup({ prompter });
+    console.log(result.exitCode === 0 && existsSync(file) ? `graphloom: setup done; continuing with ${cmd}.` : `graphloom: setup did not write a runner config; ${cmd} continues without one.`);
+  } catch (err) {
+    console.error(`graphloom: setup failed (${err instanceof Error ? err.message : String(err)}); ${cmd} continues without a runner config.`);
+  } finally {
+    prompter.close();
+  }
+}
+
 interface CrashContext {
   runId: string;
   stateDir: string | Promise<string>;
@@ -444,6 +523,8 @@ Usage:
   graphloom switch-model <stateDir|runId> <provider/model> --reason <text> [--state-root <dir>]
   graphloom delete <stateDir|runId> [--state-root <dir>] [--force]
   graphloom version [--json | --root]
+  graphloom doctor [--task <task.yaml>] [--json]
+  graphloom setup [--yes]
 
 Installed releases (handled by the shim in ~/.local/bin, docs/design-release.md §4.3):
   graphloom upgrade [<version>] [--no-switch]
@@ -558,8 +639,25 @@ stops again ("harness quota hit after possible effects; reconcile before resumin
 until you have reconciled the worktree and external state yourself and pass
 --reconciled, which lets the graph run again.
 
+Doctor reports what this machine can run (docs/design-release.md §4.4): git,
+flock, bubblewrap confinement and install integrity; Claude Code, Codex, Pi and
+gh, each found, probed and logged in or not (presence only, never a secret, no
+model call); the runner and supervisor configs as run reads them; automatic
+updates; and the setups the available harnesses allow. Every warn and fail
+carries a "fix:" line with the next command; it exits 1 on any fail. --task
+<task.yaml> adds the plugin's environment checks, the supervisor selection run
+would make, and each agent role the plugin declares (GraphDefinition.agentRoles).
+
+Setup writes the runner config and supervisor.json from what doctor finds,
+offering only choices that work here, each with a recommendation, and asks for
+your consent to allowUnrestricted. Files are mode 0600; a rerun offers each
+change and keeps the old file as <name>.bak-<UTC time>. It never asks for or
+writes a token. --yes accepts the recommendations (and counts as consent) and
+leaves existing files unchanged. run, resume, probe, check and rehearse start
+it on a terminal when no runner config exists at the default path.
+
 Agent runner: run and resume refuse to start without $GRAPHLOOM_RUNNER_CONFIG or
-~/.config/graphloom/runner.json:
+~/.config/graphloom/runner.json (graphloom setup writes it):
   { "harness": "claude-code", "allowUnrestricted": true }
 Use "pi" for the Pi harness, or "codex" for Codex, which runs read-only jobs
 only. The agent runs with your user permissions; credentials come from the

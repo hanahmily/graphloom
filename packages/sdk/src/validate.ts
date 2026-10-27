@@ -225,7 +225,38 @@ export function assertGraphDefinition(value: unknown): GraphDefinition {
   if (obj["environment"] !== undefined) assertEnvironment(obj["environment"]);
   if (obj["resultContracts"] !== undefined) assertResultContracts(obj["resultContracts"]);
   if (obj["defaultBudgets"] !== undefined) assertDefaultBudgets(obj["defaultBudgets"]);
+  if (obj["agentRoles"] !== undefined) assertAgentRoles(obj["agentRoles"]);
   return obj as unknown as GraphDefinition;
+}
+
+const AGENT_ROLE_KEYS: ReadonlySet<string> = new Set(["role", "harness", "access", "distinctFrom", "setting"]);
+
+/** The shape of `agentRoles` only: what a role means stays the plugin's. */
+function assertAgentRoles(value: unknown): void {
+  if (!Array.isArray(value)) throw new WireValidationError("malformed", "definition.agentRoles must be an array");
+  const roles = new Set<string>();
+  value.forEach((raw, i) => {
+    const label = `definition.agentRoles[${i}]`;
+    const r = asObject(raw, label);
+    for (const key of Object.keys(r)) {
+      if (!AGENT_ROLE_KEYS.has(key)) throw new WireValidationError("malformed", `${label}.${key} is not a role field`);
+    }
+    const role = requireString(r, "role");
+    if (role.trim() === "" || roles.has(role)) throw new WireValidationError("malformed", `${label}.role must be a unique non-empty string`);
+    roles.add(role);
+    if (requireString(r, "harness").trim() === "") throw new WireValidationError("malformed", `${label}.harness must be a non-empty string`);
+    if (r["access"] !== "read" && r["access"] !== "write") throw new WireValidationError("malformed", `${label}.access must be read or write`);
+    if (r["distinctFrom"] !== undefined) {
+      requireArray(r, "distinctFrom").forEach((other, j) => {
+        if (typeof other !== "string" || other.trim() === "") {
+          throw new WireValidationError("malformed", `${label}.distinctFrom[${j}] must be a non-empty string`);
+        }
+      });
+    }
+    if (r["setting"] !== undefined && (typeof r["setting"] !== "string" || r["setting"].trim() === "")) {
+      throw new WireValidationError("malformed", `${label}.setting must be a non-empty string`);
+    }
+  });
 }
 
 const DEFAULT_BUDGET_KEYS: ReadonlySet<string> = new Set(GRAPH_BUDGET_KEYS);

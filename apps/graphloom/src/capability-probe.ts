@@ -54,37 +54,47 @@ export interface CapabilityProbeResult extends BoundaryResult {
   helpText: Record<string, string>;
 }
 
-/** B2: every enabled spawned-CLI harness's own `--help` names every flag its adapter passes it. */
+/** The `--help` invocation and adapter flags of each spawned-CLI harness. */
+export const HARNESS_HELP: Readonly<Record<"claude-code" | "codex", { args: readonly string[]; flags: readonly string[] }>> = {
+  "claude-code": { args: ["--help"], flags: CLAUDE_CODE_ADAPTER_FLAGS },
+  codex: { args: ["exec", "--help"], flags: CODEX_ADAPTER_FLAGS },
+};
+
+/** One spawned-CLI harness's probe: its `--help` names every flag its adapter passes it. */
+export async function probeHarnessCommand(
+  harness: "claude-code" | "codex",
+  command: string,
+): Promise<{ status: "passed" | "failed" | "unverified"; notes: string[]; help?: string }> {
+  const { args, flags } = HARNESS_HELP[harness];
+  const help = await helpText(command, [...args]);
+  if (help === undefined) return { status: "unverified", notes: [`${harness}: ${command} ${args.join(" ")} could not be read`] };
+  const missing = missingFlags(help, flags);
+  if (missing.length > 0) return { status: "failed", notes: [`${harness}: ${command} ${args.join(" ")} does not mention ${missing.join(", ")}`], help };
+  return { status: "passed", notes: [], help };
+}
+
+/** B2: every enabled spawned-CLI harness's own --help names every flag its adapter passes it. */
 export async function probeHarnessCapabilities(config: RunnerConfig | undefined): Promise<CapabilityProbeResult> {
-  if (config === undefined) return { status: "unverified", notes: ["no runner configured"], helpText: {} };
+  if (config === undefined) return { status: "unverified", notes: [NO_RUNNER_NOTE], helpText: {} };
   const harnesses = enabledHarnesses(config);
   const notes: string[] = [];
   const texts: Record<string, string> = {};
   let unverified = false;
   let failed = false;
 
-  const check = async (name: string, command: string, args: string[], flags: readonly string[]) => {
-    const help = await helpText(command, args);
-    if (help === undefined) {
-      unverified = true;
-      notes.push(`${name}: ${command} ${args.join(" ")} could not be read`);
-      return;
-    }
-    texts[name] = help;
-    const missing = missingFlags(help, flags);
-    if (missing.length > 0) {
-      failed = true;
-      notes.push(`${name}: ${command} ${args.join(" ")} does not mention ${missing.join(", ")}`);
-    }
+  const check = async (name: "claude-code" | "codex", command: string) => {
+    const result = await probeHarnessCommand(name, command);
+    if (result.help !== undefined) texts[name] = result.help;
+    notes.push(...result.notes);
+    if (result.status === "unverified") unverified = true;
+    if (result.status === "failed") failed = true;
   };
 
   if (harnesses.includes("claude-code")) {
-    const command = config.claude?.command ?? (process.env[CLAUDE_BIN_ENV] || "claude");
-    await check("claude-code", command, ["--help"], CLAUDE_CODE_ADAPTER_FLAGS);
+    await check("claude-code", config.claude?.command ?? (process.env[CLAUDE_BIN_ENV] || "claude"));
   }
   if (harnesses.includes("codex")) {
-    const command = config.codex?.command ?? (process.env[CODEX_BIN_ENV] || "codex");
-    await check("codex", command, ["exec", "--help"], CODEX_ADAPTER_FLAGS);
+    await check("codex", config.codex?.command ?? (process.env[CODEX_BIN_ENV] || "codex"));
   }
   // Pi is an in-process SDK integration, not a spawned CLI: no `--help` to ask.
 
@@ -92,3 +102,6 @@ export async function probeHarnessCapabilities(config: RunnerConfig | undefined)
   if (unverified) return { status: "unverified", notes, helpText: texts };
   return { status: "passed", notes, helpText: texts };
 }
+
+/** What check and rehearse report without a runner config (docs/design-release.md §4.5). */
+export const NO_RUNNER_NOTE = "no runner configured; run graphloom setup (graphloom setup --yes in scripts), or point GRAPHLOOM_RUNNER_CONFIG at a runner config";

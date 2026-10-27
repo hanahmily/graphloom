@@ -50,7 +50,12 @@ It implements Write → Review in code. The controller creates an isolated Git
 worktree and preserves the source checkout. Successful runs deliver a local diff
 without automatic commit, push, or publication.
 
-Configure the job runner in `~/.config/graphloom/runner.json`, or point
+`graphloom doctor` reports what this machine can run (Claude Code, Codex, Pi,
+`gh`, bubblewrap) with the next command for each gap, and `graphloom setup`
+writes the runner and supervisor configs from what it finds, asking for your
+consent to `allowUnrestricted` (`graphloom setup --yes` in scripts). `run`
+starts setup on a terminal when no runner config exists. To write it by hand,
+configure the job runner in `~/.config/graphloom/runner.json`, or point
 `GRAPHLOOM_RUNNER_CONFIG` at an operator-owned file. For Claude Code:
 
 ```json
@@ -153,7 +158,7 @@ crashes; filesystem and execution scopes require host enforcement.
 - [Installable releases](docs/design-release.md) (proposed): a self-contained
   release tarball with a bundled Node runtime and the SDK tarball on GitHub
   Releases, versioned install directories with `install.sh`, `graphloom
-  upgrade`, `graphloom self`, and automatic updates, `graphloom doctor`, runs that stay on
+  upgrade`, `graphloom self`, and automatic updates, `graphloom doctor` and guided `graphloom setup`, runs that stay on
   the version they started with until `resume --upgrade` migrates them, and the
   local release procedure.
 - [Run budgets](docs/budgets.md): what recorded runs used (`graphloom stats`),

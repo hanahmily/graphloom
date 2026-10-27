@@ -421,7 +421,38 @@ do_install() {
     rm -f "$home/update/last-failure"
     prune_versions 3
   fi
-  # 6. `graphloom doctor` arrives with phase R4.
+  # 6. The doctor and the setup offer; not for --auto or graphloom upgrade.
+  if [ "$auto" = 0 ] && [ "$upgrading" = 0 ]; then offer_setup "$version"; fi
+}
+
+# §4.2 step 6: run the installed version's doctor, whose failures do not undo
+# the install, then offer graphloom setup when stdin and stdout are terminals
+# and no runner config exists. The installer itself never writes configuration.
+offer_setup() { # version
+  bin="$home/versions/$1/bin/graphloom"
+  [ -x "$bin" ] || return 0
+  # The doctor and setup are not layout operations: release install.lock first.
+  exec 9>&-
+  say ""
+  say "graphloom doctor:"
+  "$bin" doctor || warn "graphloom doctor reported a failure; the install is kept (fix it, then run graphloom doctor again)"
+  config=${GRAPHLOOM_RUNNER_CONFIG:-$HOME/.config/graphloom/runner.json}
+  say ""
+  if [ -f "$config" ]; then
+    say "A runner config exists at $config; review it with graphloom setup."
+    return 0
+  fi
+  if [ -t 0 ] && [ -t 1 ]; then
+    printf 'No runner config yet. Run graphloom setup now? [Y/n] '
+    answer=
+    read -r answer || answer=n
+    case "$answer" in
+      "" | y | Y | yes | YES | Yes) "$bin" setup || warn "graphloom setup did not complete; run graphloom setup when ready" ;;
+      *) say "Run graphloom setup when ready." ;;
+    esac
+  else
+    say "No runner config yet: run graphloom setup (graphloom setup --yes in scripts)."
+  fi
 }
 
 # ---------------------------------------------------------------- self
