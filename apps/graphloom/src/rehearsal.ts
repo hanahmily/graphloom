@@ -9,7 +9,8 @@
  */
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -32,8 +33,11 @@ import {
   type BoundaryResult,
   type ContractOutcome,
   type DurableRunState,
+  type InstallRecord,
   type RehearsalReport,
   type ReplayReport,
+  type RunReport,
+  type UpgradeRequest,
 } from "@graphloom/controller";
 import { createChildPluginHost } from "@graphloom/plugin-host";
 import { createScriptedSupervisor } from "@graphloom/supervisor";
@@ -372,6 +376,7 @@ interface RehearsalRun {
   rehearsalRoot: string;
   scenarioPath: string;
   stateDir?: string;
+  runReport?: RunReport;
 }
 
 /**
@@ -410,16 +415,13 @@ export function checkProvenance(state: DurableRunState, calls: RecordedCall[]): 
  */
 async function performRehearsal(
   taskPath: string,
-  options: { scenario?: string; commands?: "stub" | "run"; offline?: boolean; synthesized?: boolean; adversarial?: boolean } = {},
+  options: RehearsalHarnessOptions & { scenario?: string; stopAt?: string; install?: InstallRecord; onRunCreated?: (run: { runId: string; stateDir: string }) => void | Promise<void> } = {},
 ): Promise<RehearsalRun> {
   const absoluteTaskPath = path.resolve(taskPath);
   const taskDir = path.dirname(absoluteTaskPath);
   const intake = await intakeTask(absoluteTaskPath);
   const rehearsalData = await loadRehearsal(intake);
   const definition = await describeBundle(intake);
-  const environmentCommands = new Map(
-    [...(definition.environment?.checks ?? []), ...(definition.environment?.prepare ?? [])].map((c) => [c.id, c.argv] as const),
-  );
   const scenarioName = options.scenario ?? "happy";
   const scenario: RehearsalScenario = rehearsalData?.scenarios[scenarioName] ?? {
     results: {},
@@ -431,12 +433,16 @@ async function performRehearsal(
 
   const rehearsalRoot = await mkdtemp(path.join(os.tmpdir(), "graphloom-rehearsal-"));
   const scenarioPath = path.join(rehearsalRoot, "scenario.json");
-  const standInHome = path.join(rehearsalRoot, "stand-in-home");
   const stateRoot = path.join(rehearsalRoot, "state");
   await writeFile(scenarioPath, JSON.stringify(scenario), "utf8");
-  // Stand-ins run on this process's Node through launchers in the scratch directory (§2.7 of the release design).
-  const claudeStandIn = await writeStandInLauncher(path.join(rehearsalRoot, "bin"), "claude", claudeRehearsalStandIn);
-  const codexStandIn = await writeStandInLauncher(path.join(rehearsalRoot, "bin"), "codex", codexRehearsalStandIn);
+  // What `resume --rehearsal` needs to continue this run on the same stand-ins.
+  const harnessOptions: RehearsalHarnessOptions = {
+    ...(options.commands !== undefined ? { commands: options.commands } : {}),
+    ...(options.offline === true ? { offline: true } : {}),
+    ...(options.synthesized === true ? { synthesized: true } : {}),
+    ...(options.adversarial === true ? { adversarial: true } : {}),
+  };
+  await writeFile(path.join(rehearsalRoot, REHEARSAL_OPTIONS_FILE), JSON.stringify({ scenario: scenarioName, ...harnessOptions }, null, 2), "utf8");
 
   const tempTaskPath = path.join(taskDir, `.graphloom-rehearsal-${randomUUID().slice(0, 8)}.yaml`);
   const budgets = rehearsalBudgets(scenario.budgets);
@@ -453,16 +459,109 @@ async function performRehearsal(
     "utf8",
   );
 
-  const previousScenarioEnv = process.env[REHEARSAL_SCENARIO_ENV];
-  const previousHomeEnv = process.env[REHEARSAL_HOME_ENV];
-  const previousSynthesizedEnv = process.env[REHEARSAL_SYNTHESIZED_ENV];
-  const previousAdversarialEnv = process.env[REHEARSAL_ADVERSARIAL_ENV];
+  const harness = await rehearsalHarness(rehearsalRoot, environmentCommandsOf(definition), harnessOptions);
+  try {
+    const report = await createController().run({
+      taskPath: tempTaskPath,
+      runner: harness.runner,
+      stateRoot,
+      runId: `${REHEARSAL_RUN_ID_PREFIX}${randomUUID().slice(0, 8)}`,
+      supervisorFactory: async () => createScriptedSupervisor({ decisions: scenario.supervisor ?? [] }),
+      ...(options.stopAt !== undefined ? { stopAfterStage: options.stopAt } : {}),
+      ...(options.install !== undefined ? { install: options.install } : {}),
+      ...(options.onRunCreated !== undefined ? { onRunCreated: options.onRunCreated } : {}),
+    });
+    const state = await loadRunState(report.stateDir);
+    // B2 probes the operator's real, configured binaries (not this rehearsal's
+    // own stand-in runnerConfig above): the question is whether a live run
+    // would find what its adapters need, same as the gate in `run` (§3.5).
+    // Offline reads with nothing recorded fold into the same boundary: a seam
+    // this rehearsal could not fully verify, same spirit as an unreadable
+    // --help (§4.6: never a fabricated payload, the gap is reported instead).
+    const realConfig = await loadRunnerConfig().catch(() => undefined);
+    const capabilities = await probeHarnessCapabilities(realConfig);
+    const unverifiedReads = harness.offline ? readUnverifiedReads(scenarioPath) : [];
+    const B2 = unverifiedReads.length === 0
+      ? capabilities
+      : {
+          status: capabilities.status === "failed" ? "failed" as const : "unverified" as const,
+          notes: [...capabilities.notes, ...unverifiedReads.map((id) => `offline: no recorded read for ${id}`)],
+        };
+    // B3's own default (malformed agent evidence) stays canonical in the
+    // controller; the call-log cross-check needs the scenario's own sidecar
+    // file, a CLI concern, so it is computed here and merged in.
+    const baseline = checkB3(state);
+    const provenance = checkProvenance(state, readCallLog(scenarioPath));
+    const B3: BoundaryResult = {
+      status: baseline.status === "failed" || provenance.status === "failed" ? "failed" : baseline.status,
+      notes: [...baseline.notes, ...provenance.notes],
+    };
+    const evaluated = evaluateRehearsal(state, scenario, { B2, B3 }, {
+      substituted: harness.substituted,
+      notCovered: harness.stubCommands
+        ? ["the toolchain, build and tests: command jobs answered from the scenario's stubs (quick mode); rerun with --commands run for the full verdict"]
+        : [],
+    });
+    return { report: evaluated, rehearsalRoot, scenarioPath, stateDir: report.stateDir, runReport: report };
+  } finally {
+    harness.restore();
+    await rm(tempTaskPath, { force: true });
+  }
+}
+
+/** The options a rehearsal's stand-in harness is built with, kept in its scratch directory for `resume --rehearsal`. */
+export interface RehearsalHarnessOptions {
+  commands?: "stub" | "run";
+  offline?: boolean;
+  synthesized?: boolean;
+  adversarial?: boolean;
+}
+
+/** Beside `scenario.json` in a rehearsal's scratch directory: the scenario name and harness options it ran with. */
+const REHEARSAL_OPTIONS_FILE = "rehearsal.json";
+
+/** The graph's own environment declarations, by id: quick mode never stubs these. */
+function environmentCommandsOf(definition: GraphDefinition): Map<string, readonly string[]> {
+  return new Map(
+    [...(definition.environment?.checks ?? []), ...(definition.environment?.prepare ?? [])].map((c) => [c.id, c.argv] as const),
+  );
+}
+
+/**
+ * The stand-in harness of the rehearsal in `rehearsalRoot`: launchers for the
+ * stand-ins on this process's Node, the stand-in variables set for this
+ * process (restored by `restore`), and a runner with every harness a plugin
+ * might dispatch to enabled on its stand-in.
+ */
+async function rehearsalHarness(
+  rehearsalRoot: string,
+  environmentCommands: ReadonlyMap<string, readonly string[]>,
+  options: RehearsalHarnessOptions,
+): Promise<{ runner: Runner; substituted: string[]; stubCommands: boolean; offline: boolean; restore: () => void }> {
+  const scenarioPath = path.join(rehearsalRoot, "scenario.json");
+  const standInHome = path.join(rehearsalRoot, "stand-in-home");
+  // Stand-ins run on this process's Node through launchers in the scratch directory (§2.7 of the release design).
+  // A resume rewrites them, so a run moved to another installed version runs that version's Node.
+  const claudeStandIn = await writeStandInLauncher(path.join(rehearsalRoot, "bin"), "claude", claudeRehearsalStandIn);
+  const codexStandIn = await writeStandInLauncher(path.join(rehearsalRoot, "bin"), "codex", codexRehearsalStandIn);
+  const previous = {
+    [REHEARSAL_SCENARIO_ENV]: process.env[REHEARSAL_SCENARIO_ENV],
+    [REHEARSAL_HOME_ENV]: process.env[REHEARSAL_HOME_ENV],
+    [REHEARSAL_SYNTHESIZED_ENV]: process.env[REHEARSAL_SYNTHESIZED_ENV],
+    [REHEARSAL_ADVERSARIAL_ENV]: process.env[REHEARSAL_ADVERSARIAL_ENV],
+  };
   process.env[REHEARSAL_SCENARIO_ENV] = scenarioPath;
   process.env[REHEARSAL_HOME_ENV] = standInHome;
   if (options.synthesized === true) process.env[REHEARSAL_SYNTHESIZED_ENV] = "1";
   else delete process.env[REHEARSAL_SYNTHESIZED_ENV];
   if (options.adversarial === true) process.env[REHEARSAL_ADVERSARIAL_ENV] = "1";
   else delete process.env[REHEARSAL_ADVERSARIAL_ENV];
+  const restore = () => {
+    for (const [name, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  };
   try {
     // Every harness a plugin might dispatch to gets its stand-in enabled
     // unconditionally; createCliRunner's own per-job `input.harness` routing
@@ -503,55 +602,93 @@ async function performRehearsal(
       ...(options.synthesized === true ? ["every agent reply: schema-synthesized, ignoring the scenario's own scripted replies (--synthesized)"] : []),
       ...(options.adversarial === true ? ["every agent reply: adversarially corrupted before submission, to prove the robustness machinery is wired (--adversarial)"] : []),
     ];
-    const report = await createController().run({
-      taskPath: tempTaskPath,
-      runner,
-      stateRoot,
-      runId: `${REHEARSAL_RUN_ID_PREFIX}${randomUUID().slice(0, 8)}`,
+    return { runner, substituted, stubCommands, offline, restore };
+  } catch (err) {
+    restore();
+    throw err;
+  }
+}
+
+export interface RehearsalStopReport {
+  /** The stage `--stop-at` named, as the graph names it. */
+  stoppedAt: string;
+  /** Whether the run stopped there: stopped, with that stage complete and the next not. */
+  ok: boolean;
+  runId: string;
+  stateDir: string;
+  status: DurableRunState["status"];
+  stopReason?: string;
+  blocker?: string;
+  /** How to continue it on the stand-ins, on this or a later installed version. */
+  resume: string;
+}
+
+/**
+ * `rehearse --stop-at <stage>` (docs/design-release.md §6 step 8.7): a
+ * rehearsal that keeps a durable run stopped once `<stage>` (its id or name)
+ * is complete, for `resume --rehearsal` to finish, possibly on a later
+ * installed version after `--upgrade`. Its scratch directory is always kept.
+ */
+export async function rehearseStopAt(
+  taskPath: string,
+  stopAt: string,
+  options: RehearseOptions & { install?: InstallRecord; onRunCreated?: (run: { runId: string; stateDir: string }) => void | Promise<void> } = {},
+): Promise<RehearsalStopReport> {
+  const { keep: _keep, ...rest } = options;
+  void _keep;
+  const run = await performRehearsal(taskPath, { ...rest, stopAt });
+  const state = await loadRunState(run.stateDir!);
+  const stage = state.definition.stages.find((s) => s.id === stopAt) ?? state.definition.stages.find((s) => s.name === stopAt)!;
+  const complete = (id: string) =>
+    state.definition.stages.find((s) => s.id === id)!.requirementIds.every((req) => state.receipts.some((r) => r.stageId === id && r.requirementId === req && r.valid));
+  const index = state.definition.stages.indexOf(stage);
+  const next = state.definition.stages[index + 1];
+  return {
+    stoppedAt: stage.name,
+    ok: state.status === "stopped" && complete(stage.id) && (next === undefined || !complete(next.id)),
+    runId: state.runId,
+    stateDir: state.stateDir,
+    status: state.status,
+    ...(state.stopReason !== undefined ? { stopReason: state.stopReason } : {}),
+    ...(state.blocker !== undefined ? { blocker: state.blocker } : {}),
+    resume: `graphloom resume ${state.stateDir} --rehearsal`,
+  };
+}
+
+/**
+ * `resume <run> --rehearsal`: continue a rehearsal's kept run on the same
+ * stand-ins and scripted supervisor it started with, from its scratch
+ * directory. The run must be a rehearsal's (`rehearsal-` id, under
+ * `<scratch>/state/`). Returns the run's report; with `upgrade`, the run first
+ * moves to this GraphLoom (`resume --upgrade`).
+ */
+export async function resumeRehearsal(
+  runRef: string,
+  options: { stateRoot?: string; upgrade?: UpgradeRequest; updatePlugin?: boolean; updateExecutors?: boolean; reconciled?: boolean } = {},
+): Promise<RunReport> {
+  const stateDir = await resolveStateDir(runRef, options.stateRoot);
+  const raw = JSON.parse(await readFile(path.join(stateDir, "state.json"), "utf8")) as { runId?: string; definition?: GraphDefinition };
+  const rehearsalRoot = path.dirname(path.dirname(stateDir));
+  const scenarioPath = path.join(rehearsalRoot, "scenario.json");
+  if (raw.runId === undefined || !raw.runId.startsWith(REHEARSAL_RUN_ID_PREFIX) || path.basename(path.dirname(stateDir)) !== "state" || !existsSync(scenarioPath)) {
+    throw new Error(`${stateDir} is not a kept rehearsal run (a ${REHEARSAL_RUN_ID_PREFIX}* run under <scratch>/state/ beside scenario.json); resume --rehearsal continues only those`);
+  }
+  const scenario = JSON.parse(await readFile(scenarioPath, "utf8")) as RehearsalScenario;
+  const saved = JSON.parse(await readFile(path.join(rehearsalRoot, REHEARSAL_OPTIONS_FILE), "utf8").catch(() => "{}")) as RehearsalHarnessOptions;
+  const harness = await rehearsalHarness(rehearsalRoot, raw.definition !== undefined ? environmentCommandsOf(raw.definition) : new Map(), saved);
+  try {
+    return await createController().resume({
+      runRef: stateDir,
+      runner: harness.runner,
       supervisorFactory: async () => createScriptedSupervisor({ decisions: scenario.supervisor ?? [] }),
+      restoreSupervisor: async () => createScriptedSupervisor({ decisions: scenario.supervisor ?? [] }),
+      ...(options.upgrade !== undefined ? { upgrade: options.upgrade, updateExecutors: true } : {}),
+      ...(options.updateExecutors === true ? { updateExecutors: true } : {}),
+      ...(options.updatePlugin === true ? { updatePlugin: true } : {}),
+      ...(options.reconciled === true ? { reconciled: true } : {}),
     });
-    const state = await loadRunState(report.stateDir);
-    // B2 probes the operator's real, configured binaries (not this rehearsal's
-    // own stand-in runnerConfig above): the question is whether a live run
-    // would find what its adapters need, same as the gate in `run` (§3.5).
-    // Offline reads with nothing recorded fold into the same boundary: a seam
-    // this rehearsal could not fully verify, same spirit as an unreadable
-    // --help (§4.6: never a fabricated payload, the gap is reported instead).
-    const realConfig = await loadRunnerConfig().catch(() => undefined);
-    const capabilities = await probeHarnessCapabilities(realConfig);
-    const unverifiedReads = offline ? readUnverifiedReads(scenarioPath) : [];
-    const B2 = unverifiedReads.length === 0
-      ? capabilities
-      : {
-          status: capabilities.status === "failed" ? "failed" as const : "unverified" as const,
-          notes: [...capabilities.notes, ...unverifiedReads.map((id) => `offline: no recorded read for ${id}`)],
-        };
-    // B3's own default (malformed agent evidence) stays canonical in the
-    // controller; the call-log cross-check needs the scenario's own sidecar
-    // file, a CLI concern, so it is computed here and merged in.
-    const baseline = checkB3(state);
-    const provenance = checkProvenance(state, readCallLog(scenarioPath));
-    const B3: BoundaryResult = {
-      status: baseline.status === "failed" || provenance.status === "failed" ? "failed" : baseline.status,
-      notes: [...baseline.notes, ...provenance.notes],
-    };
-    const evaluated = evaluateRehearsal(state, scenario, { B2, B3 }, {
-      substituted,
-      notCovered: stubCommands
-        ? ["the toolchain, build and tests: command jobs answered from the scenario's stubs (quick mode); rerun with --commands run for the full verdict"]
-        : [],
-    });
-    return { report: evaluated, rehearsalRoot, scenarioPath, stateDir: report.stateDir };
   } finally {
-    if (previousScenarioEnv === undefined) delete process.env[REHEARSAL_SCENARIO_ENV];
-    else process.env[REHEARSAL_SCENARIO_ENV] = previousScenarioEnv;
-    if (previousHomeEnv === undefined) delete process.env[REHEARSAL_HOME_ENV];
-    else process.env[REHEARSAL_HOME_ENV] = previousHomeEnv;
-    if (previousSynthesizedEnv === undefined) delete process.env[REHEARSAL_SYNTHESIZED_ENV];
-    else process.env[REHEARSAL_SYNTHESIZED_ENV] = previousSynthesizedEnv;
-    if (previousAdversarialEnv === undefined) delete process.env[REHEARSAL_ADVERSARIAL_ENV];
-    else process.env[REHEARSAL_ADVERSARIAL_ENV] = previousAdversarialEnv;
-    await rm(tempTaskPath, { force: true });
+    harness.restore();
   }
 }
 

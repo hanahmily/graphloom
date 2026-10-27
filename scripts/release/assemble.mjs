@@ -28,9 +28,6 @@ export const CORE_PACKAGES = ["packages/sdk", "packages/agent-harness", "package
 /** The commands of the release gate (§6 step 4), recorded in `release.json`. */
 export const GATE = ["NODE_ENV=development npm ci --include=dev", "npm run build", "npm run typecheck", "npm test"];
 
-/** Run-state format the release writes (§5.2); run state has no recorded format before R3, which reads it as 1. */
-export const STATE_FORMAT = 1;
-
 const ROOT_FILES = ["package.json", "package-lock.json", "README.md", "CHANGELOG.md", "LICENSE", "NOTICE"];
 
 /** The installer and the user shim (§4.2, §4.3), copied from `scripts/` to the tree's root, executable. */
@@ -147,6 +144,8 @@ export async function assemble({ src, out, nodeDir, nodePin, version, commit, ep
 export async function releaseManifest({ src, dest, version, commit, epoch, sdkTgz, nodePin, platform, repairable }) {
   const { digestExecutorSource } = await import(pathToFileURL(path.join(src, "packages", "runner", "dist", "index.js")).href);
   const { PROTOCOL_VERSION } = await import(pathToFileURL(path.join(src, "packages", "sdk", "dist", "index.js")).href);
+  // The run-state format the release writes (§5.2), from the controller that writes it.
+  const { CURRENT_STATE_FORMAT } = await import(pathToFileURL(path.join(src, "packages", "controller", "dist", "index.js")).href);
   const executors = [];
   const plugins = [];
   for (const rel of repairable) {
@@ -171,7 +170,7 @@ export async function releaseManifest({ src, dest, version, commit, epoch, sdkTg
     lockfileSha256: await sha256File(path.join(dest, "package-lock.json")),
     node: { version: nodePin.version, sha256: nodePin.sha256 },
     sdk: { version: sdkPkg.version, sdkProtocol: PROTOCOL_VERSION, sha256: await sha256File(sdkTgz) },
-    stateFormat: STATE_FORMAT,
+    stateFormat: CURRENT_STATE_FORMAT,
     executors: executors.sort((a, b) => a.package.localeCompare(b.package)),
     plugins: plugins.sort((a, b) => a.graphId.localeCompare(b.graphId)),
     gate: GATE,

@@ -2,7 +2,7 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 import { randomUUID } from "node:crypto";
-import { access, writeFile } from "node:fs/promises";
+import { access, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
   emptyCaseFile,
@@ -81,9 +81,14 @@ import {
   type SupervisorOutcomeRecord,
   type ExecutorCatalogEntry,
   type ExecutorTransitionRecord,
+  type InstallRecord,
+  type InstallTransitionRecord,
+  type StateMigrationRecord,
   type VersionRecord,
 } from "./state.js";
 import { returnToGraphOnResume } from "./resume-recovery.js";
+import { CURRENT_STATE_FORMAT, STATE_FORMATS, stateFormatOf, type StateFormatRegistry } from "./state-migrations/index.js";
+import { upgradeRun, type UpgradeRequest } from "./upgrade.js";
 import { classifyStop, decideResume, FINAL_STOP_HELD_REMEDY, resumeView, stopMarkOf } from "./stop-class.js";
 import {
   assertWorktreeMatches,
@@ -146,6 +151,14 @@ export interface RunRequest {
   rehearsalGate?: IntakePin["rehearsalGate"];
   /** Called once the run's id and state directory are durable, before the first job. */
   onRunCreated?: (run: { runId: string; stateDir: string }) => void | Promise<void>;
+  /** The GraphLoom that owns the run (docs/design-release.md §5.1), recorded in its state. */
+  install?: InstallRecord;
+  /**
+   * A test hook (`rehearse --stop-at`): stop the run as an operator stop once
+   * every requirement of this stage (by id or name) has a valid receipt,
+   * before the graph is asked for its next step.
+   */
+  stopAfterStage?: string;
 }
 
 export interface ResumeRequest {
@@ -197,6 +210,17 @@ export interface ResumeRequest {
    * evidence are not changed.
    */
   updateExecutors?: boolean;
+  /**
+   * `resume --upgrade` (docs/design-release.md §5.2): move the stopped run to
+   * this GraphLoom first, migrating its state format and re-pinning its
+   * executors. Refused, with the run unchanged, on a downgrade, a major
+   * crossing, an unknown format, a missing migrator, an unsettled repair, a
+   * plugin protocol change without `updatePlugin`, or an executor re-pin the
+   * update would refuse.
+   */
+  upgrade?: UpgradeRequest;
+  /** The state formats this controller writes and migrates (tests); defaults to the release's own. */
+  stateFormats?: StateFormatRegistry;
 }
 
 export interface RunReport {
@@ -239,6 +263,14 @@ export interface InspectReport {
   versionHistory: VersionRecord[];
   /** Executors the operator re-pinned to installed code (`resume --update-executors`): old -> new digest at the generation it took effect. */
   executorTransitions: ExecutorTransitionRecord[];
+  /** The GraphLoom that owns the run; absent for runs created before ownership was recorded. */
+  install?: InstallRecord;
+  /** The durable state format (1 for runs saved before it was recorded). */
+  stateFormat: number;
+  /** Moves to another GraphLoom (`resume --upgrade`), oldest first. */
+  installHistory: InstallTransitionRecord[];
+  /** State-format migrations `resume --upgrade` applied, oldest first. */
+  stateMigrations: StateMigrationRecord[];
   /** Supervisor jobs run with the operator's `hostRepair` grant, outside the run's scope, oldest first. */
   hostChanges: HostChangeRecord[];
   activeVersion: string;
@@ -339,6 +371,7 @@ export function createController(): Controller {
         }
         const definition = described.value;
         assertDefinitionMatchesPin(definition, intake);
+        const stopAfter = request.stopAfterStage !== undefined ? stageNamed(definition, request.stopAfterStage) : undefined;
         // Controller defaults < the graph's declared defaultBudgets < task budgets.
         const budgeted = applyGraphDefaultBudgets(intake, definition);
 
@@ -370,6 +403,7 @@ export function createController(): Controller {
           stateRoot,
           sourceDirtyBefore,
         });
+        state = { ...state, stateFormat: CURRENT_STATE_FORMAT, ...(request.install !== undefined ? { install: { ...request.install } } : {}) };
         const executorCatalog = await pinExecutorCatalog(request.runner);
         if (executorCatalog !== undefined) state = { ...state, executorCatalog };
         revisionBridge.current = state.stateRevision;
@@ -390,7 +424,9 @@ export function createController(): Controller {
           host,
           runner: request.runner,
           validators,
-          shouldStop: () => sessionStop(session),
+          shouldStop: async () =>
+            (await sessionStop(session)) ||
+            (stopAfter !== undefined && stageComplete(await loadRunState(session.stateDir), stopAfter)),
           revisionBridge,
           ...(supervisor !== undefined ? { supervisor } : {}),
           ...(request.repair !== undefined ? { repair: request.repair } : {}),
@@ -491,8 +527,11 @@ export function createController(): Controller {
         throw new Error("cannot resume: run has an active controller session; stop first");
       }
 
-      let state = await loadRunState(stateDir);
-      if (state.status === "succeeded" || state.status === "failed") {
+      const stateFormats = request.stateFormats ?? STATE_FORMATS;
+      // An upgrade reads the state in its own format, under the lock, before anything loads it as this release's.
+      let state: DurableRunState =
+        request.upgrade !== undefined ? (undefined as unknown as DurableRunState) : await loadCurrentFormat(stateDir, stateFormats);
+      if (request.upgrade === undefined && (state.status === "succeeded" || state.status === "failed")) {
         // A crash after the finished state was saved can leave them behind.
         await wipeAgentSessions(state);
         return toReport(state, await listDirtyPaths(state.intake.repoPath));
@@ -514,7 +553,15 @@ export function createController(): Controller {
             `cannot resume: run owned by live controller pid ${owner.controllerPid}; stop first`,
           );
         }
-        state = await loadRunState(stateDir);
+        if (request.upgrade !== undefined) {
+          await upgradeRun(stateDir, request.upgrade, {
+            runner: request.runner,
+            updatePlugin: request.updatePlugin === true,
+            stateFormats,
+            checkPluginUpdate: (current) => checkPluginUpdate(current, request),
+          });
+        }
+        state = await loadCurrentFormat(stateDir, stateFormats);
         if (state.status === "succeeded" || state.status === "failed") {
           return;
         }
@@ -1231,6 +1278,68 @@ function contractSummary(evidence: DurableRunState["evidence"]): InspectReport["
   return { ...totals, byName };
 }
 
+/** Loads run state written in the format this controller writes; any other format is refused, unchanged. */
+async function loadCurrentFormat(stateDir: string, formats: StateFormatRegistry): Promise<DurableRunState> {
+  const raw = JSON.parse(await readFile(path.join(stateDir, "state.json"), "utf8")) as { runId?: string; stateFormat?: unknown };
+  const format = stateFormatOf(raw);
+  if (format > formats.current) {
+    throw new Error(`run ${raw.runId ?? stateDir} is in state format ${format}, written by a newer GraphLoom; this one writes format ${formats.current}`);
+  }
+  if (format < formats.current) {
+    throw new Error(`run ${raw.runId ?? stateDir} is in state format ${format}; resume it on the GraphLoom that owns it, or move it here with resume --upgrade`);
+  }
+  return loadRunState(stateDir);
+}
+
+/** A stage by id, or by name; refused when the definition has neither. */
+function stageNamed(definition: GraphDefinition, ref: string): GraphDefinition["stages"][number] {
+  const stage = definition.stages.find((s) => s.id === ref) ?? definition.stages.find((s) => s.name === ref);
+  if (stage === undefined) {
+    throw new Error(`no stage ${JSON.stringify(ref)} in graph ${definition.graphId}; its stages are ${definition.stages.map((s) => s.name).join(", ")}`);
+  }
+  return stage;
+}
+
+/** Every requirement of `stage` has a valid receipt. */
+function stageComplete(state: DurableRunState, stage: GraphDefinition["stages"][number]): boolean {
+  return stage.requirementIds.every((reqId) => state.receipts.some((r) => r.stageId === stage.id && r.requirementId === reqId && r.valid));
+}
+
+/**
+ * `--upgrade --update-plugin`: the installed bundle must pass the
+ * describe-compatibility checks a plugin update does on resume, decided
+ * before the move commits. Returns why not, or undefined.
+ */
+async function checkPluginUpdate(state: DurableRunState, request: ResumeRequest): Promise<string | undefined> {
+  let host: PluginHost | undefined;
+  try {
+    const installed = await readInstalledBundlePin(state.intake.bundle);
+    const manifest = JSON.parse(installed.manifestRaw) as { sdkProtocol?: unknown };
+    if (manifest.sdkProtocol !== PROTOCOL_VERSION) {
+      return `the installed bundle speaks sdkProtocol ${String(manifest.sdkProtocol)}, not ${PROTOCOL_VERSION}`;
+    }
+    const intake: IntakePin = { ...state.intake, bundle: { ...installed, sdkProtocol: PROTOCOL_VERSION } };
+    host = await openHost({
+      intake,
+      activeVersion: state.activeVersion,
+      generation: state.generation,
+      ...(request.plugin !== undefined ? { plugin: request.plugin } : {}),
+      ...(request.host !== undefined ? { host: request.host } : {}),
+    });
+    const described = await host.describe({ runId: state.runId, operationId: "describe-upgrade", expectedStateRevision: state.stateRevision });
+    if (!described.ok) return `plugin describe failed: ${described.observation.message}`;
+    assertDefinitionMatchesPin(described.value, intake);
+    assertDefinitionUnchanged(described.value, state.definition, true);
+    if (described.value.privateStateSchema !== state.definition.privateStateSchema) return "plugin privateStateSchema changed since run start";
+    return undefined;
+  } catch (err) {
+    return err instanceof Error ? err.message : String(err);
+  } finally {
+    // A caller's own host serves the resume after this; only a host opened here is closed.
+    if (host !== undefined && request.host === undefined) await host.close().catch(() => undefined);
+  }
+}
+
 function toInspect(state: DurableRunState): InspectReport {
   const report: InspectReport = {
     runId: state.runId,
@@ -1258,6 +1367,10 @@ function toInspect(state: DurableRunState): InspectReport {
     budgets: { ...state.budgets },
     versionHistory: structuredClone(state.versionHistory ?? []),
     executorTransitions: structuredClone(state.executorTransitions ?? []),
+    ...(state.install !== undefined ? { install: { ...state.install } } : {}),
+    stateFormat: state.stateFormat ?? 1,
+    installHistory: structuredClone(state.installHistory ?? []),
+    stateMigrations: structuredClone(state.stateMigrations ?? []),
     hostChanges: structuredClone(state.hostChanges ?? []),
     activeVersion: state.activeVersion,
     generation: state.generation,

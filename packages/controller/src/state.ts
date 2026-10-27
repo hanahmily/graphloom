@@ -186,9 +186,52 @@ export interface StopMark {
   budgets: IntakePin["budgets"];
 }
 
+/**
+ * The installed GraphLoom that owns a run (docs/design-release.md §5.1):
+ * its product version and the real path of its tree. A release version is
+ * `MAJOR.MINOR.PATCH`; a clone records `<version>-dev[+<sha>]` and its
+ * checkout, which no installed version dispatches to.
+ */
+export interface InstallRecord {
+  version: string;
+  root: string;
+}
+
+/** One state-format step `resume --upgrade` applied, and where it kept the original files. */
+export interface StateMigrationRecord {
+  from: number;
+  to: number;
+  /** `<stateDir>/migrations/<from>-<to>`: a copy of the files as they were before this step. */
+  backup: string;
+  generation: number;
+  at: string;
+}
+
+/** A run moved from one installed GraphLoom to another with `resume --upgrade`. */
+export interface InstallTransitionRecord {
+  /** Absent for a run created before ownership was recorded. */
+  from?: InstallRecord;
+  to: InstallRecord;
+  fromStateFormat: number;
+  toStateFormat: number;
+  generation: number;
+  at: string;
+}
+
 export interface DurableRunState {
   runId: string;
   status: RunStatus;
+  /**
+   * The durable state format (state-migrations/). Absent in runs saved before
+   * it was recorded, which are format 1.
+   */
+  stateFormat?: number;
+  /** The GraphLoom that owns the run; absent in runs created before R3 or by a caller that names none. */
+  install?: InstallRecord;
+  /** Moves to another GraphLoom (`resume --upgrade`), oldest first. */
+  installHistory?: InstallTransitionRecord[];
+  /** State-format steps applied by `resume --upgrade`, oldest first. */
+  stateMigrations?: StateMigrationRecord[];
   stopReason?: string;
   blocker?: string;
   /** Recorded evidence the stop cites, such as the failing validation of an opaque gate. */

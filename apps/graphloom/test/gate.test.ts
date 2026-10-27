@@ -72,6 +72,26 @@ describe("the gate in run (§3.5)", () => {
     expect(resultA.fingerprint).not.toBe(resultB.fingerprint);
   }, 30_000);
 
+  it("does not reuse a cached ready result across GraphLoom versions (docs/design-release.md §5.1)", async () => {
+    const f = await fixture("hello", "Create GREETING.txt.");
+    const first = await runGate(f.taskPath, { stateRoot: f.stateRoot, productVersion: "0.1.0" });
+    expect(first.verdict).toBe("ready");
+    const same = await runGate(f.taskPath, { stateRoot: f.stateRoot, productVersion: "0.1.0" });
+    expect(same.notes.some((n) => n.includes("reused cached rehearsal"))).toBe(true);
+    const upgraded = await runGate(f.taskPath, { stateRoot: f.stateRoot, productVersion: "0.2.0" });
+    expect(upgraded.fingerprint).not.toBe(first.fingerprint);
+    expect(upgraded.verdict).toBe("ready");
+    expect(upgraded.notes.some((n) => n.includes("reused cached rehearsal"))).toBe(false);
+    expect(upgraded.report).toBeDefined();
+  }, 60_000);
+
+  it("names the built-in executors' digests in the fingerprint", async () => {
+    const { builtinExecutorDigests } = await import("../src/gate.js");
+    const digests = await builtinExecutorDigests();
+    expect(Object.keys(digests).sort()).toEqual(["@graphloom/executor-coding-agent", "@graphloom/executor-command", "@graphloom/executor-github"]);
+    for (const d of Object.values(digests)) expect(d).toMatch(/^[0-9a-f]{64}$/);
+  });
+
   it("reports not-ready from L1 when the request never converges, and caches nothing", async () => {
     const f = await fixture("hello", "this request never mentions the greeting file");
     const result = await runGate(f.taskPath, { stateRoot: f.stateRoot });

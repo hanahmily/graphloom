@@ -1,0 +1,238 @@
+{
+  "runId": "fixture-run",
+  "status": "stopped",
+  "generation": 1,
+  "stateRevision": 6,
+  "activeVersion": "fixture@1.0.0",
+  "mode": "normal",
+  "current": {
+    "stageId": "write",
+    "attempt": 1
+  },
+  "receipts": [
+    {
+      "id": "rcpt-1",
+      "stageId": "write",
+      "requirementId": "greeting-bytes",
+      "validatorBinding": {
+        "requirementId": "greeting-bytes",
+        "validatorId": "exact-greeting",
+        "version": "1"
+      },
+      "candidateFingerprint": "ef27f919ca7bc216230c0a5c313acd7a82a47a545206fbf74756bb5f7fae93ee",
+      "evidenceRefs": [
+        "ev-g1-1-1d985ea7",
+        "ev-g1-2-49f8dfba"
+      ],
+      "valid": true,
+      "candidateDigest": "7e073c8b12ca6cea62f3342c549458102c4e692200c725d7a41c0745d5fb3e25",
+      "acceptedIdentity": {
+        "workspace": "03e68dbebf7d800736e2538ac503ae2b3b452c47ca558f03e895f7405c7362ef"
+      }
+    }
+  ],
+  "evidence": [
+    {
+      "ref": "ev-g1-1-1d985ea7",
+      "kind": "file",
+      "generation": 1,
+      "payload": {
+        "path": "GREETING.txt",
+        "bytes": "Hello, GraphLoom!\n"
+      },
+      "fingerprint": "a5b33d6b86efd80e3c474370de632cece94a23fe2f5b830889603f7c9d8fe8c0",
+      "candidateDigest": "7e073c8b12ca6cea62f3342c549458102c4e692200c725d7a41c0745d5fb3e25"
+    },
+    {
+      "ref": "ev-g1-2-49f8dfba",
+      "kind": "workspace",
+      "generation": 1,
+      "payload": {
+        "changedPaths": [
+          "GREETING.txt"
+        ]
+      },
+      "fingerprint": "8069266a16691de5f9256488d6bb4093e528f8e9b9bc3e3daaa055efe41d7514",
+      "candidateDigest": "7e073c8b12ca6cea62f3342c549458102c4e692200c725d7a41c0745d5fb3e25"
+    }
+  ],
+  "outstanding": [],
+  "definition": {
+    "graphId": "fixture",
+    "version": "1.0.0",
+    "stages": [
+      {
+        "id": "write",
+        "name": "Write",
+        "requirementIds": [
+          "greeting-bytes"
+        ]
+      },
+      {
+        "id": "review",
+        "name": "Review",
+        "requirementIds": [
+          "independent-review"
+        ]
+      }
+    ],
+    "requirements": [
+      {
+        "id": "greeting-bytes",
+        "statement": "GREETING.txt contains exactly Hello, GraphLoom!\\n and nothing else changed.",
+        "evidenceSchema": "workspace-bytes-v1"
+      },
+      {
+        "id": "independent-review",
+        "statement": "An independent reviewer approves GREETING.txt.",
+        "evidenceSchema": "review-verdict-v1"
+      }
+    ],
+    "defaultValidators": [
+      {
+        "requirementId": "greeting-bytes",
+        "validatorId": "exact-greeting",
+        "version": "1"
+      },
+      {
+        "requirementId": "independent-review",
+        "validatorId": "independent-reviewer",
+        "version": "1",
+        "independence": "separate-reviewer"
+      }
+    ]
+  },
+  "validatorBindings": [
+    {
+      "requirementId": "greeting-bytes",
+      "validatorId": "exact-greeting",
+      "version": "1"
+    },
+    {
+      "requirementId": "independent-review",
+      "validatorId": "independent-reviewer",
+      "version": "1",
+      "independence": "separate-reviewer"
+    }
+  ],
+  "budgets": {
+    "agentInvocations": 63,
+    "jobs": 127,
+    "decisions": 509,
+    "corrections": 8,
+    "waitMs": 900000,
+    "activeMs": 14399669,
+    "recoveryReserve": 8
+  },
+  "budgetUsage": {
+    "used": {
+      "agentInvocations": 1,
+      "jobs": 1,
+      "decisions": 3,
+      "corrections": 0,
+      "waitMs": 0,
+      "activeMs": 331
+    },
+    "saved": {
+      "agentInvocations": 63,
+      "jobs": 127,
+      "decisions": 509,
+      "corrections": 8,
+      "waitMs": 900000,
+      "activeMs": 14399669
+    },
+    "since": "intake",
+    "stageCallsComplete": true
+  },
+  "intake": {
+    "taskPath": "@@TASK_DIR@@/task.yaml",
+    "taskDir": "@@TASK_DIR@@",
+    "task": {
+      "graph": "fixture",
+      "repo": "./test-repo",
+      "request": "Write GREETING.txt."
+    },
+    "repoPath": "@@REPO@@",
+    "pinnedHead": "@@HEAD@@",
+    "bundle": {
+      "graphId": "fixture",
+      "version": "1.0.0",
+      "bundlePath": "@@TASK_DIR@@/plugins/fixture",
+      "sdkProtocol": 1,
+      "digests": {},
+      "manifestRaw": "{\n  \"graphId\": \"fixture\",\n  \"version\": \"1.0.0\",\n  \"sdkProtocol\": 1,\n  \"entryPoints\": {\n    \"createGraph\": \"./dist/index.js\"\n  },\n  \"privateStateSchema\": \"fixture-private-v1\"\n}\n",
+      "manifestDigest": "67cd1e573a2ca1c96163aec90b7b631891401497657663c7181534964b992778",
+      "entryDigest": "d7f3424ca2acdd1d7fced5cf862f622ecb05d3d0f4bbbac0400524e56fac7fce"
+    },
+    "grants": {
+      "sourceRepair": false,
+      "validatorSubstitution": false
+    },
+    "budgets": {
+      "agentInvocations": 64,
+      "jobs": 128,
+      "decisions": 512,
+      "corrections": 8,
+      "waitMs": 900000,
+      "activeMs": 14400000,
+      "recoveryReserve": 8
+    }
+  },
+  "worktreePath": "@@WORKTREE@@",
+  "worktreeBranch": "graphloom/fixture-run",
+  "artifactDir": "@@STATE_DIR@@/artifacts",
+  "stateDir": "@@STATE_DIR@@",
+  "sourceDirtyBefore": [],
+  "evidenceSeq": 2,
+  "receiptSeq": 1,
+  "versionHistory": [
+    {
+      "activeVersion": "fixture@1.0.0",
+      "generation": 1,
+      "reason": "intake",
+      "at": "2026-10-27T01:04:45.201Z"
+    }
+  ],
+  "stateFormat": 1,
+  "install": {
+    "version": "0.0.0",
+    "root": "/opt/graphloom/versions/0.0.0"
+  },
+  "candidateDigest": "7e073c8b12ca6cea62f3342c549458102c4e692200c725d7a41c0745d5fb3e25",
+  "noProgress": {
+    "mark": "69b464ccf836f9bf122f3803badfa1c718d8fa45ff3a578ce974f1c19d223ffb",
+    "counts": {
+      "4f1c339ca093fe55b5bea49fcb7f2861c5349e7e986b4521dfc2975629f00522": 1
+    }
+  },
+  "stageAttempts": {
+    "write": 1
+  },
+  "workDispatched": {
+    "write": true
+  },
+  "agentInvocationsByStage": {
+    "write": 1
+  },
+  "dispatchesSinceReceipt": {},
+  "lastWorkOperationId": "op-1-c5ea3931",
+  "workspaceRevision": "8069266a16691de5f9256488d6bb4093e528f8e9b9bc3e3daaa055efe41d7514",
+  "stopReason": "operator stop",
+  "blocker": "stop requested",
+  "stopMark": {
+    "stopReason": "operator stop",
+    "activeVersion": "fixture@1.0.0",
+    "manifestDigest": "67cd1e573a2ca1c96163aec90b7b631891401497657663c7181534964b992778",
+    "entryDigest": "d7f3424ca2acdd1d7fced5cf862f622ecb05d3d0f4bbbac0400524e56fac7fce",
+    "candidateDigest": "7e073c8b12ca6cea62f3342c549458102c4e692200c725d7a41c0745d5fb3e25",
+    "budgets": {
+      "agentInvocations": 63,
+      "jobs": 127,
+      "decisions": 509,
+      "corrections": 8,
+      "waitMs": 900000,
+      "activeMs": 14399669,
+      "recoveryReserve": 8
+    }
+  }
+}
