@@ -374,7 +374,8 @@ export async function waitForProgress(runRef: string, options: ProgressWaitOptio
   for (;;) {
     const key = await signature();
     if (first || key !== seen) {
-      if (!first) state = await loadRunState(stateDir);
+      // Any signature other than the one taken before the last read means a write that read has not seen.
+      if (key !== seen) state = await loadRunState(stateDir);
       first = false;
       seen = key;
       const { events, mark: next } = progressSince(mark, state);
