@@ -8,6 +8,7 @@ import { loadRunState, resolveStateDir, type ResumeRequest, type RunRequest } fr
 import {
   bindingHarness,
   CLAUDE_CODE_HARNESS,
+  CODEX_HARNESS,
   createPiHarness,
   DEFAULT_SUPERVISOR_MODEL,
   DEFAULT_SUPERVISOR_PROVIDER,
@@ -20,6 +21,7 @@ import {
   type ThinkingLevel,
 } from "@graphloom/supervisor";
 import { claudeHarnessFor, claudeProbeHarness, parseClaudeSupervisorConfig, type ClaudeSupervisorConfig } from "./supervisor-claude.js";
+import { codexHarnessFor, codexProbeHarness, parseCodexSupervisorConfig, type CodexSupervisorConfig } from "./supervisor-codex.js";
 
 const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 
@@ -73,6 +75,8 @@ export interface SupervisorConfig {
   select?: SupervisorHarnessName;
   /** The Claude Code harness's settings (`claude` section). */
   claude?: ClaudeSupervisorConfig;
+  /** The Codex harness's settings (`codex` section). */
+  codex?: CodexSupervisorConfig;
 }
 
 export function supervisorConfigPath(env: NodeJS.ProcessEnv = process.env): { file: string; explicit: boolean } {
@@ -105,8 +109,8 @@ const SHARED_KEYS = ["promptTimeoutMs", "promptTotalTimeoutMs", "quotaRetryMs"];
 /**
  * Parse `supervisor.json`: the flat Pi form, or the per-harness form
  * (design-supervisor-harnesses.md §7.2) with `harnesses`, `select`, and a
- * section per harness (`pi`, `claude`; a `codex` section is kept for later
- * and enables nothing yet). Secrets are refused for every harness.
+ * section per harness (`pi`, `claude`, `codex`). Secrets are refused for
+ * every harness.
  */
 export function parseSupervisorConfig(value: unknown, source = "supervisor config"): SupervisorConfig {
   if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error(`${source}: expected an object`);
@@ -118,8 +122,9 @@ export function parseSupervisorConfig(value: unknown, source = "supervisor confi
   // Without a pi section the Pi fields carry Pi's defaults, but pi is not enabled.
   const pi = parsePiConfig({ provider: DEFAULT_SUPERVISOR_PROVIDER, modelId: DEFAULT_SUPERVISOR_MODEL, ...((obj.pi as Record<string, unknown> | undefined) ?? {}), ...shared }, `${source}: pi`);
   const claude = obj.claude !== undefined ? parseClaudeSupervisorConfig(obj.claude, source) : undefined;
+  const codex = obj.codex !== undefined ? parseCodexSupervisorConfig(obj.codex, source) : undefined;
   const configured: SupervisorHarnessName[] = SUPERVISOR_HARNESS_NAMES.filter((h) =>
-    h === "pi" ? obj.pi !== undefined : h === CLAUDE_CODE_HARNESS ? claude !== undefined : obj.codex !== undefined,
+    h === "pi" ? obj.pi !== undefined : h === CLAUDE_CODE_HARNESS ? claude !== undefined : codex !== undefined,
   );
   let harnesses = configured;
   if (obj.harnesses !== undefined) {
@@ -134,6 +139,7 @@ export function parseSupervisorConfig(value: unknown, source = "supervisor confi
   }
   const config: SupervisorConfig = { ...pi, harnesses };
   if (claude !== undefined) config.claude = claude;
+  if (codex !== undefined) config.codex = codex;
   if (obj.select !== undefined) {
     if (typeof obj.select !== "string" || !(harnesses as string[]).includes(obj.select)) {
       throw new Error(`${source}: select must be one of the enabled harnesses (${harnesses.join(", ")})`);
@@ -264,7 +270,8 @@ export async function probeSupervisorHarness(config: SupervisorConfig, harness: 
     }).probe();
   }
   if (harness === CLAUDE_CODE_HARNESS) return claudeProbeHarness(config.claude).probe();
-  return { ok: false, reason: `the ${harness} supervisor harness is not available in this GraphLoom yet` };
+  if (harness === CODEX_HARNESS) return codexProbeHarness(config.codex).probe();
+  return { ok: false, reason: `the ${harness} supervisor harness is not available in this GraphLoom` };
 }
 
 /**
@@ -332,7 +339,10 @@ export function supervisorFactoryFor(config: SupervisorConfig, harness: Supervis
   if (harness === CLAUDE_CODE_HARNESS) {
     return async ({ runId, stateDir }) => (await claudeHarnessFor(config.claude, config, runId, stateDir)).start();
   }
-  throw new Error(`the ${harness} supervisor harness is not available in this GraphLoom yet`);
+  if (harness === CODEX_HARNESS) {
+    return async ({ runId, stateDir }) => (await codexHarnessFor(config.codex, config, runId, stateDir)).start();
+  }
+  throw new Error(`the ${harness} supervisor harness is not available in this GraphLoom`);
 }
 
 /**
@@ -342,7 +352,7 @@ export function supervisorFactoryFor(config: SupervisorConfig, harness: Supervis
  * fresh session; earlier transcripts stay on disk but are never reopened.
  * Without an operator config a Pi binding restores on Pi's defaults, with its
  * credential from the environment or Pi's own store, as before harnesses, and
- * a Claude Code binding on Claude Code's defaults. A per-harness config that
+ * a Claude Code or Codex binding on that CLI's defaults. A per-harness config that
  * no longer enables the pinned harness, or a pinned CLI harness that is not
  * available, stops the resume: nothing falls back to another harness (§7.4).
  */
@@ -362,6 +372,14 @@ export function supervisorRestore(config: SupervisorConfig | undefined): NonNull
         throw new Error(`supervisor harness pin mismatch: this run's supervisor is pinned to ${harness}, which is not available here: ${available.reason}`);
       }
       return claude.restore({ ...binding, sessionFile: binding.sessionFile, harness });
+    }
+    if (harness === CODEX_HARNESS) {
+      const codex = await codexHarnessFor(config?.codex, config ?? {}, runId, stateDir);
+      const available = await codex.probe();
+      if (!available.ok) {
+        throw new Error(`supervisor harness pin mismatch: this run's supervisor is pinned to ${harness}, which is not available here: ${available.reason}`);
+      }
+      return codex.restore({ ...binding, sessionFile: binding.sessionFile, harness });
     }
     if (harness !== "pi") {
       throw new Error(`this run's supervisor is pinned to the ${harness} harness, which this GraphLoom cannot run`);

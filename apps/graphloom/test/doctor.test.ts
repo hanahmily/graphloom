@@ -181,7 +181,32 @@ describe("graphloom doctor: supervisor harnesses (S3)", () => {
 
   it("with Pi present, Pi comes first", async () => {
     const { report } = await withEnv({ piEnv: true });
-    expect(report.viable).toMatchObject({ supervisor: "pi", supervisors: ["pi", "claude-code"] });
+    expect(report.viable).toMatchObject({ supervisor: "pi", supervisors: ["pi", "claude-code", "codex"] });
+  });
+});
+
+describe("graphloom doctor: the Codex supervisor (S4)", () => {
+  it("counts Codex once its CLI, its login, and the supervisor probe pass; setup --yes writes it and doctor passes it", async () => {
+    const env = await makeDoctorEnv({ claude: "missing" });
+    let { report } = await doctor(env);
+    expect(report.viable).toMatchObject({ supervisor: "codex", supervisors: ["codex"] });
+    expect(row(report, "supervisor")).toMatchObject({ status: "pass", detail: expect.stringMatching(/^codex \(recommended: codex/) });
+    // Codex cannot write, so setup still needs a writer; Pi gives it one.
+    const withPi = await makeDoctorEnv({ claude: "missing", piEnv: true });
+    const setup = await withPi.run(["setup", "--yes"]);
+    expect(setup.code, setup.stdout + setup.stderr).toBe(0);
+    ({ report } = await doctor(withPi));
+    expect(report.viable).toMatchObject({ supervisor: "pi", supervisors: ["pi", "codex"] });
+    expect(row(report, "supervisor config")).toMatchObject({ status: "pass", detail: expect.stringContaining("(the per-harness form): pi (minimax-cn/MiniMax-M3); codex;") });
+  });
+
+  it("does not count a Codex that is logged out or too old for the supervisor", async () => {
+    const out = (await withEnv({ claude: "missing", codex: "loggedout" })).report;
+    expect(out.viable.supervisors).toEqual([]);
+    expect(row(out, "supervisor")).toMatchObject({ status: "warn", detail: expect.stringContaining("codex: not logged in"), fix: expect.stringContaining("Codex: codex login") });
+    const old = (await withEnv({ claude: "missing", codex: "nosupervisor" })).report;
+    expect(old.viable.supervisors).toEqual([]);
+    expect(row(old, "supervisor").detail).toMatch(/codex: codex exec --help does not mention --ignore-user-config/);
   });
 });
 

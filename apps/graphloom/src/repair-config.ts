@@ -12,12 +12,15 @@ import type { EvidenceRecord } from "@graphloom/sdk";
 import {
   assertAdmittedCandidateRoot,
   CLAUDE_CODE_HARNESS,
+  CODEX_HARNESS,
   createCandidateReviewTools,
   createPiSupervisorSession,
+  type HarnessSession,
   type PiSupervisorSession,
   type SupervisorHarnessName,
 } from "@graphloom/supervisor";
 import { claudeHarnessFor, claudeSupervisorDirs } from "./supervisor-claude.js";
+import { codexHarnessFor, codexSupervisorDirs } from "./supervisor-codex.js";
 import type { SupervisorConfig } from "./supervisor-config.js";
 
 const execFileAsync = promisify(execFile);
@@ -179,7 +182,8 @@ export function repairPreflight(bundlePath: string): RepairDeps["preflight"] {
 export function harnessRepairDeps(harness: SupervisorHarnessName, config: SupervisorConfig, bundlePath: string): RepairDeps {
   if (harness === "pi") return piRepairDeps(config, bundlePath);
   if (harness === CLAUDE_CODE_HARNESS) return { reviewer: claudeRepairReviewer(config), preflight: repairPreflight(bundlePath) };
-  throw new Error(`the ${harness} supervisor harness is not available in this GraphLoom yet`);
+  if (harness === CODEX_HARNESS) return { reviewer: codexRepairReviewer(config), preflight: repairPreflight(bundlePath) };
+  throw new Error(`the ${harness} supervisor harness is not available in this GraphLoom`);
 }
 
 /**
@@ -189,6 +193,34 @@ export function harnessRepairDeps(harness: SupervisorHarnessName, config: Superv
  * `<stateDir>/supervisor/claude-code/review`.
  */
 export function claudeRepairReviewer(config: SupervisorConfig): RepairReviewer {
+  return cliRepairReviewer(async (stateDir, root) => {
+    const dirs = claudeSupervisorDirs(stateDir);
+    const harness = await claudeHarnessFor(config.claude, config, REVIEWER_SESSION_ID, stateDir, {
+      sessionDir: path.join(dirs.sessionDir, "review"),
+      scratchDir: path.join(dirs.sessionDir, "review", "scratch"),
+    });
+    return harness.openReviewSession({ cwd: root });
+  });
+}
+
+/**
+ * The independent repair reviewer on Codex, as on Claude Code: a fresh
+ * read-only thread per review in the candidate root, its rollouts under
+ * `<stateDir>/supervisor/codex/review`.
+ */
+export function codexRepairReviewer(config: SupervisorConfig): RepairReviewer {
+  return cliRepairReviewer(async (stateDir, root) => {
+    const dirs = codexSupervisorDirs(stateDir);
+    const harness = await codexHarnessFor(config.codex, config, REVIEWER_SESSION_ID, stateDir, {
+      sessionDir: path.join(dirs.sessionDir, "review"),
+      scratchDir: path.join(dirs.sessionDir, "review", "scratch"),
+    });
+    return harness.openReviewSession({ cwd: root });
+  });
+}
+
+/** A repair reviewer on a CLI harness: one fresh review session per review, opened by `open` in the candidate root. */
+function cliRepairReviewer(open: (stateDir: string, candidateRoot: string) => Promise<HarnessSession>): RepairReviewer {
   let spent = 0;
   return {
     sessionId: REVIEWER_SESSION_ID,
@@ -199,12 +231,7 @@ export function claudeRepairReviewer(config: SupervisorConfig): RepairReviewer {
       const root = await assertAdmittedCandidateRoot(repairsDir, candidateRoot);
       const stateDir = path.dirname(repairsDir);
       const diff = await candidateDiff(baseRoot, root);
-      const dirs = claudeSupervisorDirs(stateDir);
-      const harness = await claudeHarnessFor(config.claude, config, REVIEWER_SESSION_ID, stateDir, {
-        sessionDir: path.join(dirs.sessionDir, "review"),
-        scratchDir: path.join(dirs.sessionDir, "review", "scratch"),
-      });
-      const session = await harness.openReviewSession({ cwd: root });
+      const session = await open(stateDir, root);
       try {
         const text = await session.prompt(
           repairReviewPrompt({

@@ -91,8 +91,8 @@ describe.runIf(hasScript)("under a pseudo-terminal", () => {
 
   it("graphloom setup asks on the terminal and writes both files without secrets", async () => {
     const env = await envWith({ piEnv: true, piStore: true });
-    // Default harness, Codex, Pi, Pi provider, Pi model, Pi supervisor, Claude Code supervisor, consent.
-    const { output, code } = await env.runTty(["setup"], ["", "", "", "", "", "", "", "y"]);
+    // Default harness, Codex, Pi, Pi provider, Pi model, Pi supervisor, Claude Code supervisor, Codex supervisor, consent.
+    const { output, code } = await env.runTty(["setup"], ["", "", "", "", "", "", "", "", "y"]);
     // Nothing is configured yet, so the recommendation is the first provider with a credential, on Pi's own default model.
     expect(code, output).toBe(0);
     expect(output).toMatch(/Default harness \[claude-code\/pi\] \(recommended: claude-code\)/);
@@ -104,7 +104,7 @@ describe.runIf(hasScript)("under a pseudo-terminal", () => {
       harnesses: ["claude-code", "codex", "pi"],
       pi: { provider: "deepseek", modelId: "deepseek-v4-pro" },
     });
-    expect(JSON.parse(readFileSync(env.supervisorFile, "utf8"))).toEqual({ harnesses: ["pi", "claude-code"], pi: { provider: "deepseek", modelId: "deepseek-v4-pro" }, claude: {} });
+    expect(JSON.parse(readFileSync(env.supervisorFile, "utf8"))).toEqual({ harnesses: ["pi", "claude-code", "codex"], pi: { provider: "deepseek", modelId: "deepseek-v4-pro" }, claude: {}, codex: {} });
     for (const secret of Object.values(STUB_SECRETS)) expect(output).not.toContain(secret);
     expectNoSecrets(env.runnerFile, env.supervisorFile);
     // The doctor now passes the configuration.

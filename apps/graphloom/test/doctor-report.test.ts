@@ -46,13 +46,20 @@ describe("viable setups (§4.4)", () => {
     expect(row(machineChecks(d), "supervisor")).toMatchObject({ status: "warn", detail: expect.stringContaining("claude-code: Claude Code has no login"), fix: expect.stringContaining("Claude Code: claude") });
   });
 
-  it("Codex only: no harness can write, no supervisor, and the fixes list each login still missing", () => {
+  it("Codex only: no harness can write, Codex supervises (S4), and the fixes list each login still missing", () => {
     const d = fakeDiscovery({ available: ["codex"] });
-    expect(viableSetups(d)).toEqual({ defaultHarness: [], enable: ["codex"], supervisors: [], supervisorLater: ["codex"] });
+    expect(viableSetups(d)).toEqual({ defaultHarness: [], enable: ["codex"], supervisor: "codex", supervisors: ["codex"], supervisorLater: [] });
     const checks = machineChecks(d);
     expect(row(checks, "default harness")).toMatchObject({ status: "warn", fix: `Claude Code: claude; Pi: ${NO_PI_CREDENTIAL_FIX}` });
     expect(row(checks, "also enable").detail).toContain("codex (read-only jobs)");
-    expect(row(checks, "supervisor")).toMatchObject({ status: "warn", detail: expect.stringContaining("Codex supervises from the release that ships it (phase S4)") });
+    expect(row(checks, "supervisor").detail).toMatch(/^codex \(recommended: codex; order pi, claude-code, codex\)/);
+  });
+
+  it("Codex whose supervisor probe fails does not count as a supervisor", () => {
+    const d = fakeDiscovery({ available: ["codex"] });
+    d.supervisorCandidates.codex = { harness: "codex", ok: false, reason: "Codex has no login in /home/.codex; run `codex login`", fix: "codex login" };
+    expect(viableSetups(d).supervisor).toBeUndefined();
+    expect(row(machineChecks(d), "supervisor")).toMatchObject({ status: "warn", detail: expect.stringContaining("codex: Codex has no login"), fix: expect.stringContaining("Codex: codex login") });
   });
 
   it("Pi only", () => {
@@ -63,16 +70,16 @@ describe("viable setups (§4.4)", () => {
 
   it("all three, with the supervisor order Pi, Claude Code, Codex", () => {
     const d = fakeDiscovery();
-    expect(viableSetups(d)).toEqual({ defaultHarness: ["claude-code", "pi"], enable: ["codex", "pi"], supervisor: "pi", supervisors: ["pi", "claude-code"], supervisorLater: ["codex"] });
+    expect(viableSetups(d)).toEqual({ defaultHarness: ["claude-code", "pi"], enable: ["codex", "pi"], supervisor: "pi", supervisors: ["pi", "claude-code", "codex"], supervisorLater: [] });
     const checks = machineChecks(d);
     expect(row(checks, "default harness").detail).toBe("claude-code (recommended), pi");
-    expect(row(checks, "supervisor").detail).toMatch(/^pi, claude-code \(recommended: pi; order pi, claude-code, codex\)/);
-    expect(row(checks, "supervisor").detail).toContain("Codex supervises from the release that ships it (phase S4)");
+    expect(row(checks, "supervisor").detail).toMatch(/^pi, claude-code, codex \(recommended: pi; order pi, claude-code, codex\)/);
+    expect(row(checks, "supervisor").detail).not.toContain("phase S4");
   });
 
-  it("without Pi, Claude Code is next in the order; Codex never counts before S4", () => {
+  it("without Pi, Claude Code is next in the order, then Codex (counted since S4)", () => {
     const d = fakeDiscovery({ available: ["claude-code", "codex"] });
-    expect(viableSetups(d)).toMatchObject({ supervisor: "claude-code", supervisors: ["claude-code"], supervisorLater: ["codex"] });
+    expect(viableSetups(d)).toMatchObject({ supervisor: "claude-code", supervisors: ["claude-code", "codex"], supervisorLater: [] });
   });
 });
 
@@ -230,9 +237,11 @@ describe("any Pi provider (no MiniMax binding)", () => {
     d.pi = { ...d.pi, credentials: [{ provider: "anthropic", source: "ANTHROPIC_API_KEY" }, { provider: "deepseek", source: "DEEPSEEK_API_KEY" }, { provider: "google", source: "auth store" }] };
     expect(supervisorRoutes(d)).toEqual([
       "Claude: via Claude Code (logged in) or via Pi (anthropic: ANTHROPIC_API_KEY present)",
-      "OpenAI: via Codex (logged in; supervises from phase S4, not yet) or via Pi (openai: no OPENAI_API_KEY)",
+      "OpenAI: via Codex (logged in) or via Pi (openai: no OPENAI_API_KEY)",
       "Gemini, DeepSeek, MiniMax, Kimi, and every other provider: via Pi (credentials present for deepseek (DEEPSEEK_API_KEY), google (auth store))",
     ]);
-    expect(row(machineChecks(d), "supervisor routes").detail).toContain("Claude: via Claude Code (logged in) or via Pi");
+    expect(row(machineChecks(d), "supervisor routes").detail).toContain("Claude: via Claude Code (logged in) or via Pi");    // Codex counts as a route only when its supervisor probe passes, as Claude Code does.
+    d.supervisorCandidates.codex = { harness: "codex", ok: false, reason: "not logged in (codex login status)", fix: "codex login" };
+    expect(supervisorRoutes(d)[1]).toBe("OpenAI: via Codex (not available: not logged in (codex login status)) or via Pi (openai: no OPENAI_API_KEY)");
   });
 });

@@ -678,10 +678,11 @@ moonshotai, minimax-cn, ..., or a custom provider in Pi's models.json):
     "models": ["anthropic/claude-sonnet-5"], "agentDir": "~/.pi/agent" }
 Credentials come from Pi's agent dir or the provider's environment variable
 (DEEPSEEK_API_KEY, ANTHROPIC_API_KEY, ...); graphloom doctor lists them.
-The per-harness form enables Claude Code too, with your own Claude Code login
-(never an API key), confined by bwrap:
-  { "harnesses": ["pi", "claude-code"], "pi": { "provider": "deepseek", "modelId": "deepseek-v4-pro" },
-    "claude": { "models": ["opus", "sonnet"], "configDir": "~/.claude" } }
+The per-harness form enables Claude Code and Codex too, each with your own CLI
+login (never an API key: OpenAI by key is the Pi route), confined by bwrap:
+  { "harnesses": ["pi", "claude-code", "codex"], "pi": { "provider": "deepseek", "modelId": "deepseek-v4-pro" },
+    "claude": { "models": ["opus", "sonnet"], "configDir": "~/.claude" },
+    "codex": { "models": [{ "modelId": "gpt-5-codex", "thinkingLevel": "high" }], "codexHome": "~/.codex" } }
 A run uses --supervisor <harness>, else "select", else the first enabled
 harness that is available; resume keeps the harness the run is pinned to.
 `);

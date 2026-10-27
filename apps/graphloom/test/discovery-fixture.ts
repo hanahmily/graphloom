@@ -56,9 +56,10 @@ export function fakeDiscovery(options: FakeDiscoveryOptions = {}): Discovery {
     supervisorCandidates: {
       pi: available.has("pi") && providers.length > 0 ? { harness: "pi", ok: true } : { harness: "pi", ok: false, reason: "no Pi provider has a credential", fix: NO_PI_CREDENTIAL_FIX },
       "claude-code": available.has("claude-code") ? { harness: "claude-code", ok: true } : { harness: "claude-code", ok: false, reason: "not logged in", fix: "claude" },
-      codex: { harness: "codex", ok: false, reason: "the Codex supervisor arrives with phase S4 of the supervisor harness design", fix: "graphloom upgrade" },
+      codex: available.has("codex") ? { harness: "codex", ok: true } : { harness: "codex", ok: false, reason: "not logged in", fix: "codex login" },
     },
     claudeSupervisorSection: {},
+    codexSupervisorSection: {},
     supervisorEnabled: [],
   };
 }

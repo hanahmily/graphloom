@@ -6,6 +6,7 @@ import path from "node:path";
 import { parseSessionEntries } from "@earendil-works/pi-coding-agent";
 import { bindingHarness, type ModelSwitchRecord, type SupervisorBinding, type SupervisorHost, type SupervisorModelRef } from "./harness.js";
 import { CLAUDE_CODE_HARNESS, claudeSessionsOpened, type ClaudeSessionOpened } from "./claude-harness.js";
+import { CODEX_HARNESS, codexSessionsOpened } from "./codex-harness.js";
 import { createPiHarness } from "./pi-harness.js";
 
 export { piEpisodeSessionOpener } from "./pi-harness.js";
@@ -85,7 +86,7 @@ export async function restorePiSupervisorFromBinding(options: RestorePiSuperviso
  * the bound harness's own record of the switch. Pi appends a `model_change`
  * entry to the session file when a switch takes effect; an intent whose
  * target matches the file's last model change is committed. Claude Code
- * switches by opening a fresh session on the target, whose record
+ * (and Codex, from its `codex-session-<id>.json` records) switches by opening a fresh session on the target, whose record
  * (`<ref>.json` beside the transcript copies) names its model and opening
  * time (§4.4); an intent is committed when a session on its target opened at
  * or after the intent was journaled, so a session an earlier turn opened on
@@ -97,8 +98,15 @@ export async function reconcileSupervisorBinding(binding: SupervisorBinding): Pr
   if (!binding.switchJournal.some((r) => r.status === "intent")) return binding;
   const harness = bindingHarness(binding);
   const last = harness === "pi" ? await lastModelChange(binding.sessionFile) : undefined;
+  const sessionDir = binding.sessionFile !== undefined ? path.dirname(binding.sessionFile) : undefined;
   const opened: ClaudeSessionOpened[] =
-    harness === CLAUDE_CODE_HARNESS && binding.sessionFile !== undefined ? await claudeSessionsOpened(path.dirname(binding.sessionFile)) : [];
+    sessionDir === undefined
+      ? []
+      : harness === CLAUDE_CODE_HARNESS
+        ? await claudeSessionsOpened(sessionDir)
+        : harness === CODEX_HARNESS
+          ? await codexSessionsOpened(sessionDir)
+          : [];
   const took = (record: ModelSwitchRecord): boolean =>
     harness === "pi"
       ? last !== undefined && sameModel(last, record.to)

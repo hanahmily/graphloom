@@ -211,15 +211,17 @@ const SHARED_SUPERVISOR_KEYS = ["promptTimeoutMs", "promptTotalTimeoutMs", "quot
 
 /**
  * A supervisor.json enabling `harnesses` in order: the flat Pi form for Pi
- * alone, otherwise the per-harness form (`harnesses`, `pi`, `claude`; no
- * `select`, so a plugin's preference still applies). `piBase` carries Pi's
- * other settings (such as `agentDir`); `shared` the shared prompt limits.
+ * alone, otherwise the per-harness form (`harnesses`, `pi`, `claude`,
+ * `codex`; no `select`, so a plugin's preference still applies). `piBase`
+ * carries Pi's other settings (such as `agentDir`); `shared` the shared
+ * prompt limits.
  */
-export function supervisorFile(harnesses: readonly HarnessName[], pi: PiChoice | undefined, claude: Raw, piBase: Raw | undefined, shared: Raw = {}): Raw {
+export function supervisorFile(harnesses: readonly HarnessName[], pi: PiChoice | undefined, claude: Raw, piBase: Raw | undefined, shared: Raw = {}, codex: Raw = {}): Raw {
   if (harnesses.length === 1 && harnesses[0] === "pi" && pi !== undefined) return { ...shared, ...supervisorRaw(piBase, pi) };
   const out: Raw = { ...shared, harnesses: [...harnesses] };
   if (harnesses.includes("pi") && pi !== undefined) out.pi = supervisorRaw(piBase, pi);
   if (harnesses.includes("claude-code")) out.claude = { ...claude };
+  if (harnesses.includes("codex")) out.codex = { ...codex };
   return out;
 }
 
@@ -461,11 +463,12 @@ export async function runSetup(options: SetupOptions = {}): Promise<SetupResult>
   const existingSup = await readExisting(supervisorFile_, parseSupervisorConfig);
   let supNext: Raw | undefined;
   const claudeSection = d.claudeSupervisorSection;
+  const codexSection = d.codexSupervisorSection;
   say("");
   say("4. Supervisor: recovers a failing run (investigates, repairs, reenters). The repair reviewer uses the same agent, in a separate read-only session.");
   for (const route of supervisorRoutes(d)) say(`   ${route}`);
   if (v.supervisorLater.length > 0) say(`   ${v.supervisorLater.map(label).join(" and ")} ${v.supervisorLater.length === 1 ? "supervises" : "supervise"} from the GraphLoom release that ships it (phase S4).`);
-  const recFile = rec.supervisors.length > 0 ? supervisorFile(rec.supervisors, rec.supervisor, claudeSection, newSupervisorBase) : undefined;
+  const recFile = rec.supervisors.length > 0 ? supervisorFile(rec.supervisors, rec.supervisor, claudeSection, newSupervisorBase, {}, codexSection) : undefined;
   if (existingSup === undefined) {
     if (recFile === undefined) {
       const fixes = SHIPPED_SUPERVISOR_HARNESSES.map((h) => `${label(h)}: ${d.supervisorCandidates[h].fix ?? "graphloom doctor"}`);
@@ -495,7 +498,7 @@ export async function runSetup(options: SetupOptions = {}): Promise<SetupResult>
           chosen.push(h);
         }
       }
-      if (chosen.length > 0) supNext = supervisorFile(chosen, pi, claudeSection, newSupervisorBase);
+      if (chosen.length > 0) supNext = supervisorFile(chosen, pi, claudeSection, newSupervisorBase, {}, codexSection);
       else say("   No supervisor: runs have no automatic recovery.");
     }
   } else if (existingSup.error !== undefined || existingSup.raw === undefined) {
@@ -514,7 +517,8 @@ export async function runSetup(options: SetupOptions = {}): Promise<SetupResult>
     const currentPi = current.pi !== undefined ? (current.pi as Raw) : current.harnesses === undefined ? current : undefined;
     const piBase = currentPi !== undefined ? Object.fromEntries(Object.entries(currentPi).filter(([k]) => !["provider", "modelId", ...SHARED_SUPERVISOR_KEYS].includes(k))) : newSupervisorBase;
     const claudeBase = (current.claude as Raw | undefined) ?? claudeSection;
-    const recRaw = rec.supervisors.length > 0 && piComparable ? supervisorFile(rec.supervisors, rec.supervisor, claudeBase, piBase, pickShared(current)) : undefined;
+    const codexBase = (current.codex as Raw | undefined) ?? codexSection;
+    const recRaw = rec.supervisors.length > 0 && piComparable ? supervisorFile(rec.supervisors, rec.supervisor, claudeBase, piBase, pickShared(current), codexBase) : undefined;
     const samePi = !rec.supervisors.includes("pi") || (parsed.provider === rec.supervisor?.provider && parsed.modelId === rec.supervisor?.modelId);
     const same = recRaw === undefined || (same_(enabled, rec.supervisors) && samePi);
     if (same) {

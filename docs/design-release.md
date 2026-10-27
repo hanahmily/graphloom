@@ -907,13 +907,16 @@ own toolchain.
   problem, a recorded `update/last-failure`, and, in `auto` mode, a release
   that can only be announced because `ssh-keygen` or the version's
   `release/allowed_signers` is missing (§5.5).
-- **Supervisor harnesses (with S3).** `SHIPPED_SUPERVISOR_HARNESSES`
-  (`discovery.ts`) is `["pi", "claude-code"]`. A Codex supervisor is
-  reported as arriving with S4 and is never counted. S4 adds it to that list.
+- **Supervisor harnesses (with S3 and S4).** `SHIPPED_SUPERVISOR_HARNESSES`
+  (`discovery.ts`) is `["pi", "claude-code", "codex"]`; S4 added Codex.
   - A Pi supervisor counts when a provider has a credential, any provider.
   - A Claude Code supervisor counts when the doctor's CLI and login check
     passes and S3's own probe (`probeSupervisorHarness`, which also needs
     bwrap and Claude Code's login marker in its config dir) passes too.
+  - A Codex supervisor counts the same way: the doctor's CLI and `codex
+    login status` check, then S4's probe (bwrap, `codex exec --help` naming
+    every flag the harness passes, and `codex login status`). Setup writes
+    its `codex` section with the runner config's Codex command and home.
   - The viable setups list every supervisor harness that counts, in the
     built-in order Pi, Claude Code, Codex, and recommend the first.
 - **`doctor --task` reports the selection `run` makes.** The doctor probes
