@@ -4,9 +4,13 @@
 /** Supervisor package — harness-neutral recovery host, the Pi harness, and the recovery protocol. */
 
 export {
-  resolveMiniMaxCredential,
-  type MiniMaxCredentialSource,
-  type ResolvedMiniMaxCredential,
+  checkPiModelsFile,
+  piDefaultModelId,
+  piProviderEnvVars,
+  providerCredentialEnvVars,
+  resolveProviderCredential,
+  type PiCredentialSource,
+  type ResolvedProviderCredential,
 } from "./credentials.js";
 
 export {
@@ -20,7 +24,6 @@ export {
   DEFAULT_PROMPT_TOTAL_TIMEOUT_MS,
   DEFAULT_SUPERVISOR_MODEL,
   DEFAULT_SUPERVISOR_PROVIDER,
-  isMiniMaxProvider,
   type CreatePiSupervisorSessionOptions,
   type PiSupervisorSession,
   type ThinkingLevel,
@@ -159,11 +162,14 @@ export {
 
 export {
   classifyAssistantMessage,
+  httpStatusOf,
   isSupervisorProviderError,
+  retryAtFromHeaders,
   retryAtFromMessage,
   SupervisorProviderError,
   type ProviderFailure,
   type ProviderFailureClass,
+  type ProviderResponseHint,
 } from "./provider-failure.js";
 
 export {

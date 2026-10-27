@@ -2,7 +2,7 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 import { describe, expect, it } from "vitest";
-import { classifyAssistantMessage, retryAtFromMessage } from "./provider-failure.js";
+import { classifyAssistantMessage, httpStatusOf, retryAtFromHeaders, retryAtFromMessage } from "./provider-failure.js";
 
 const error = (errorMessage: string) => ({ stopReason: "error" as const, errorMessage, content: [] });
 const NOW = Date.parse("2026-10-15T00:00:00.000Z");
@@ -132,5 +132,62 @@ describe("retryAtFromMessage", () => {
 
   it("finds nothing in a message without a reset time", () => {
     expect(retryAtFromMessage("429 Token Plan usage cap reached (2056)", NOW)).toBeUndefined();
+  });
+});
+
+describe("provider-neutral HTTP failures", () => {
+  it("reads the status in every form Pi's adapters write, never a MiniMax code", () => {
+    expect(httpStatusOf("429 Rate limit reached for requests")).toBe("429");
+    expect(httpStatusOf('503: {"error":"busy"}')).toBe("503");
+    expect(httpStatusOf("OpenAI API error (429): slow down")).toBe("429");
+    expect(httpStatusOf("429 status code (no body)")).toBe("429");
+    expect(httpStatusOf('{"status": 502, "message": "bad"}')).toBe("502");
+    expect(httpStatusOf("usage cap reached (2056)")).toBeUndefined();
+    expect(httpStatusOf("billed 1500 tokens")).toBeUndefined();
+  });
+
+  it.each([
+    ["429 status code (no body)", "quota"],
+    ["DeepSeek (402): Insufficient Balance", "quota"],
+    ["402 Insufficient Balance", "quota"],
+    ["408 Request Timeout", "transient"],
+    ["522 Connection timed out", "transient"],
+    ["Connection error.", "transient"],
+    ["fetch failed", "transient"],
+    ["401 Authentication Fails, Your api key is invalid", "auth"],
+    ["403 status code (no body)", "auth"],
+  ])("classifies %j as %s", (message, expected) => {
+    expect(classifyAssistantMessage({ ...error(message), api: "openai-completions", provider: "deepseek" })?.failureClass).toBe(expected);
+  });
+
+  it("waits as long as a failed response's Retry-After says, when the message states no time", () => {
+    const at = NOW;
+    expect(classifyAssistantMessage(error("429 status code (no body)"), { now: NOW, response: { status: 429, headers: { "retry-after": "12" }, at } })).toMatchObject({
+      failureClass: "quota",
+      retryAt: "2026-10-15T00:00:12.000Z",
+    });
+    expect(classifyAssistantMessage(error("503 overloaded"), { now: NOW, response: { status: 503, headers: { "retry-after-ms": "1500" }, at } })).toMatchObject({
+      failureClass: "transient",
+      retryAt: "2026-10-15T00:00:01.500Z",
+    });
+    // Without Retry-After the quota has no reset time (the host's quotaRetryMs, if any, applies).
+    expect(classifyAssistantMessage(error("429 Too Many Requests"), { now: NOW, response: { status: 429, headers: {}, at } })?.retryAt).toBeUndefined();
+    // The status comes from the response when the message carries none.
+    expect(classifyAssistantMessage(error("request failed"), { now: NOW, response: { status: 429, headers: {}, at } })?.failureClass).toBe("quota");
+    // The message's own reset time wins.
+    expect(classifyAssistantMessage(error("429 retry after 30s"), { now: NOW, response: { status: 429, headers: { "retry-after": "5" }, at } })?.retryAt).toBe(
+      "2026-10-15T00:00:30.000Z",
+    );
+  });
+
+  it("reads Retry-After as seconds or an HTTP date", () => {
+    expect(retryAtFromHeaders({ "retry-after": "7" }, NOW)).toBe("2026-10-15T00:00:07.000Z");
+    expect(retryAtFromHeaders({ "retry-after": "Thu, 15 Oct 2026 00:01:00 GMT" }, NOW)).toBe("2026-10-15T00:01:00.000Z");
+    expect(retryAtFromHeaders({}, NOW)).toBeUndefined();
+  });
+
+  it("keys provider overrides on the provider: MiniMax's (2056) is a quota only there", () => {
+    expect(classifyAssistantMessage({ ...error("usage cap reached (2056)"), api: "anthropic-messages", provider: "minimax-cn" })?.failureClass).toBe("quota");
+    expect(classifyAssistantMessage({ ...error("odd failure (2056)"), api: "anthropic-messages", provider: "anthropic" })?.failureClass).toBe("unknown");
   });
 });

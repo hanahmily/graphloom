@@ -76,7 +76,7 @@ const SSE_ONLY_WHEN_CAPTURED: ReadonlySet<string> = new Set(["openai-codex-respo
  * client (checked against the pinned pi-ai: each reads `options.fetch`).
  * google-generative-ai and google-vertex read it only to throw.
  */
-const FETCH_CAPABLE_APIS: ReadonlySet<string> = new Set([
+export const FETCH_CAPABLE_APIS: ReadonlySet<string> = new Set([
   "anthropic-messages",
   "azure-openai-responses",
   "mistral-conversations",

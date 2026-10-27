@@ -16,7 +16,10 @@ export interface RestorePiSupervisorOptions {
   /** Defaults to dirname(binding.sessionFile). */
   sessionDir?: string;
   agentDir?: string;
+  /** Explicit key of the first configured model's provider (else the bound provider); see PiHarnessOptions. */
   apiKey?: string;
+  /** Explicit keys by provider id, each applied to its own provider only. */
+  apiKeys?: Readonly<Record<string, string>>;
   configuredModels?: SupervisorModelRef[];
   /** Inactivity limit of one prompt (see CreatePiSupervisorSessionOptions). */
   promptTimeoutMs?: number;
@@ -31,6 +34,13 @@ export interface RestorePiSupervisorOptions {
   patchTimeoutMs?: number;
   /** Operator fallback wait for a quota error with no reset time (see CreateSupervisorHostOptions). */
   quotaRetryMs?: number;
+}
+
+/** The explicit keys by provider: `apiKey` belongs to the first configured model's provider, else the bound one. */
+function restoreKeys(options: RestorePiSupervisorOptions): Record<string, string> | undefined {
+  if (options.apiKey === undefined) return options.apiKeys !== undefined ? { ...options.apiKeys } : undefined;
+  const owner = options.configuredModels?.[0]?.provider ?? options.binding.provider;
+  return { ...(options.apiKeys ?? {}), [owner]: options.apiKey };
 }
 
 /**
@@ -57,7 +67,7 @@ export async function restorePiSupervisorFromBinding(options: RestorePiSuperviso
     runId: options.runId,
     sessionDir,
     ...(options.agentDir !== undefined ? { agentDir: options.agentDir } : {}),
-    ...(options.apiKey !== undefined ? { apiKey: options.apiKey } : {}),
+    ...(restoreKeys(options) !== undefined ? { apiKeys: restoreKeys(options)! } : {}),
     ...(options.promptTimeoutMs !== undefined ? { promptTimeoutMs: options.promptTimeoutMs } : {}),
     ...(options.promptTotalTimeoutMs !== undefined ? { promptTotalTimeoutMs: options.promptTotalTimeoutMs } : {}),
     ...(options.rawStreamCapture !== undefined ? { rawStreamCapture: options.rawStreamCapture } : {}),

@@ -662,13 +662,27 @@ guard.
 - **Claude Code:** the user's own login in its config dir, used by genuine,
   unmodified Claude Code that the user authenticated. GraphLoom never reads,
   copies, or proxies it. The process gets `minimalEnv` plus `passEnv`.
-  `ANTHROPIC_API_KEY` is not passed unless the operator binds one explicitly.
+  `ANTHROPIC_API_KEY` is never passed: it is removed from the environment and
+  `passEnv` refuses it.
 - **Codex:** its own login in `CODEX_HOME`, with the same environment rules.
-- **Pi:** unchanged. An operator credential reference; `apiKey` is refused in
-  `supervisor.json` (`supervisor-config.ts:79`).
+- **Pi:** any provider Pi supports, through Pi's own auth: the provider's
+  environment variable, Pi's auth store, or an `apiKey` reference in the agent
+  dir's `models.json`; each switch target resolves its own provider's key.
+  `apiKey` is refused in `supervisor.json`
+  ([choosing a supervisor model](design-pi-supervisor.md#choosing-a-supervisor-model)).
 
 No CLI harness needs an API key. `supervisor.json` refuses secrets for every
-harness.
+harness. Claude and OpenAI models therefore have two routes each:
+
+| Vendor | CLI harness (login, no API key) | Pi (API key) |
+|---|---|---|
+| Claude | `claude-code`: your Claude Code login | provider `anthropic`, `ANTHROPIC_API_KEY` |
+| OpenAI | `codex`: your Codex CLI login (phase S4) | provider `openai`, `OPENAI_API_KEY` |
+| Gemini, DeepSeek, Kimi, MiniMax, others | none | provider `google`, `deepseek`, `moonshotai`, `minimax-cn`, ... or a custom `models.json` provider |
+
+`graphloom doctor` and `graphloom setup` present the same routes, with what
+each has here (for example "Claude: via Claude Code (logged in) or via Pi
+(anthropic: ANTHROPIC_API_KEY present)").
 
 ### 6.3 Budgets
 
@@ -739,7 +753,7 @@ as `{ harnesses: ["pi"], pi: { … } }`.
 {
   "harnesses": ["pi", "claude-code", "codex"],
   "select": "claude-code",
-  "pi": { "provider": "minimax-cn", "modelId": "MiniMax-M3", "models": ["deepseek/deepseek-chat"] },
+  "pi": { "provider": "deepseek", "modelId": "deepseek-v4-pro", "models": ["anthropic/claude-sonnet-5", "minimax-cn/MiniMax-M3"] },
   "claude": { "command": "claude", "configDir": "~/.claude", "models": ["opus", "sonnet"] },
   "codex": { "command": "codex", "codexHome": "~/.codex",
              "models": [{ "modelId": "gpt-5-codex", "thinkingLevel": "high" }] },

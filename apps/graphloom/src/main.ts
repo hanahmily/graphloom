@@ -671,13 +671,16 @@ input.harness. Command jobs run as you in the job's workspace ("command":
 serves read-only GitHub executors with the token from that variable.
 
 Supervisor: run and resume use a Pi supervisor when an operator config exists at
-$GRAPHLOOM_SUPERVISOR_CONFIG or ~/.config/graphloom/supervisor.json:
-  { "provider": "minimax-cn", "modelId": "MiniMax-M3",
-    "models": ["deepseek/deepseek-chat"], "agentDir": "~/.pi/agent" }
-Credentials come from Pi's agent dir or the provider's environment variable.
+$GRAPHLOOM_SUPERVISOR_CONFIG or ~/.config/graphloom/supervisor.json. Its model is
+any <provider>/<modelId> Pi knows (anthropic, openai, google, deepseek,
+moonshotai, minimax-cn, ..., or a custom provider in Pi's models.json):
+  { "provider": "deepseek", "modelId": "deepseek-v4-pro",
+    "models": ["anthropic/claude-sonnet-5"], "agentDir": "~/.pi/agent" }
+Credentials come from Pi's agent dir or the provider's environment variable
+(DEEPSEEK_API_KEY, ANTHROPIC_API_KEY, ...); graphloom doctor lists them.
 The per-harness form enables Claude Code too, with your own Claude Code login
 (never an API key), confined by bwrap:
-  { "harnesses": ["pi", "claude-code"], "pi": { "provider": "minimax-cn", "modelId": "MiniMax-M3" },
+  { "harnesses": ["pi", "claude-code"], "pi": { "provider": "deepseek", "modelId": "deepseek-v4-pro" },
     "claude": { "models": ["opus", "sonnet"], "configDir": "~/.claude" } }
 A run uses --supervisor <harness>, else "select", else the first enabled
 harness that is available; resume keeps the harness the run is pinned to.

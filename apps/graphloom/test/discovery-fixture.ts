@@ -4,13 +4,13 @@
 /** A constructed `Discovery` for unit tests of the doctor's report and of setup (docs/design-release.md §4.4, §4.5). */
 import os from "node:os";
 import path from "node:path";
-import type { Discovery } from "../src/discovery.js";
+import { NO_PI_CREDENTIAL_FIX, type Discovery } from "../src/discovery.js";
 import type { HarnessName } from "../src/runner-config.js";
 
 export interface FakeDiscoveryOptions {
   /** The harnesses that are available. Default all three. */
   available?: HarnessName[];
-  /** Pi providers with a credential. Default `minimax-cn` when Pi is available. */
+  /** Pi providers with a credential, in Pi's registry order. Default `minimax-cn` when Pi is available. */
   piProviders?: string[];
   runnerFile?: string;
   supervisorFile?: string;
@@ -46,7 +46,7 @@ export function fakeDiscovery(options: FakeDiscoveryOptions = {}): Discovery {
       configured: [],
       models: Object.fromEntries(providers.map((p) => [p, PI_MODELS[p] ?? [`${p}-model`]])),
       available: available.has("pi") && providers.length > 0,
-      ...(available.has("pi") && providers.length > 0 ? {} : { reason: "no Pi provider has a credential", fix: "export MINIMAX_CN_API_KEY=<key>" }),
+      ...(available.has("pi") && providers.length > 0 ? {} : { reason: "no Pi provider has a credential", fix: NO_PI_CREDENTIAL_FIX }),
     },
     gh: { repo: "hanahmily/graphloom", path: "/stub/gh", version: "gh 2", loggedIn: true, access: true, available: true },
     runner: { file: options.runnerFile ?? "/home/.config/graphloom/runner.json", explicit: false, exists: false },
@@ -54,7 +54,7 @@ export function fakeDiscovery(options: FakeDiscoveryOptions = {}): Discovery {
     updates: { mode: "auto", source: "the default", canVerify: false, sshKeygen: true },
     env: {},
     supervisorCandidates: {
-      pi: available.has("pi") && providers.length > 0 ? { harness: "pi", ok: true } : { harness: "pi", ok: false, reason: "no Pi provider has a credential", fix: "export MINIMAX_CN_API_KEY=<key>" },
+      pi: available.has("pi") && providers.length > 0 ? { harness: "pi", ok: true } : { harness: "pi", ok: false, reason: "no Pi provider has a credential", fix: NO_PI_CREDENTIAL_FIX },
       "claude-code": available.has("claude-code") ? { harness: "claude-code", ok: true } : { harness: "claude-code", ok: false, reason: "not logged in", fix: "claude" },
       codex: { harness: "codex", ok: false, reason: "the Codex supervisor arrives with phase S4 of the supervisor harness design", fix: "graphloom upgrade" },
     },

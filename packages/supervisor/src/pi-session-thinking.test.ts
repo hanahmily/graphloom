@@ -166,7 +166,7 @@ describe("Pi supervisor session: empty-signature thinking", () => {
   });
 
   it("copies the registry model instead of mutating it", () => {
-    const registered = { provider: "minimax-cn", id: "MiniMax-M3", compat: { supportsStrictTools: false } };
+    const registered = { provider: "minimax-cn", api: "anthropic-messages", id: "MiniMax-M3", compat: { supportsStrictTools: false } };
     const model = supervisorSessionModel(registered as never) as unknown as typeof registered & { compat: Record<string, unknown> };
     expect(model).not.toBe(registered);
     expect(model.compat).toEqual({ supportsStrictTools: false, allowEmptySignature: true });

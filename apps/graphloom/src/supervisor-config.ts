@@ -9,6 +9,8 @@ import {
   bindingHarness,
   CLAUDE_CODE_HARNESS,
   createPiHarness,
+  DEFAULT_SUPERVISOR_MODEL,
+  DEFAULT_SUPERVISOR_PROVIDER,
   restorePiSupervisorFromBinding,
   SUPERVISOR_HARNESS_NAMES,
   type HarnessProbe,
@@ -22,8 +24,11 @@ import { claudeHarnessFor, claudeProbeHarness, parseClaudeSupervisorConfig, type
 const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 
 /**
- * Operator-owned supervisor settings. Credentials never live here: Pi resolves
- * them from its agent dir or the provider's environment variable.
+ * Operator-owned supervisor settings. The Pi model is any `<provider>/<modelId>`
+ * in Pi's registry: a provider Pi ships (anthropic, openai, google, deepseek,
+ * moonshotai, minimax-cn, ...) or a custom one in the agent dir's models.json.
+ * Credentials never live here: Pi resolves them from its agent dir (auth.json,
+ * models.json) or the provider's environment variable.
  */
 export interface SupervisorConfig {
   provider: string;
@@ -54,7 +59,7 @@ export interface SupervisorConfig {
   rawStreamCapture?: boolean;
   /**
    * Fixed wait before retrying a provider quota error that states no reset
-   * time (MiniMax's 429 `(2056)` gives none). Still bounded by the run's
+   * time (a 429 without Retry-After, or MiniMax's `(2056)`, gives none). Still bounded by the run's
    * `waitMs` budget and the per-turn wait limit. Omitted: such errors stop.
    */
   quotaRetryMs?: number;
@@ -111,7 +116,7 @@ export function parseSupervisorConfig(value: unknown, source = "supervisor confi
   const shared = Object.fromEntries(SHARED_KEYS.filter((k) => k in obj).map((k) => [k, obj[k]]));
   if (obj.pi !== undefined && (typeof obj.pi !== "object" || obj.pi === null || Array.isArray(obj.pi))) throw new Error(`${source}: pi must be an object`);
   // Without a pi section the Pi fields carry Pi's defaults, but pi is not enabled.
-  const pi = parsePiConfig({ provider: "minimax-cn", modelId: "MiniMax-M3", ...((obj.pi as Record<string, unknown> | undefined) ?? {}), ...shared }, `${source}: pi`);
+  const pi = parsePiConfig({ provider: DEFAULT_SUPERVISOR_PROVIDER, modelId: DEFAULT_SUPERVISOR_MODEL, ...((obj.pi as Record<string, unknown> | undefined) ?? {}), ...shared }, `${source}: pi`);
   const claude = obj.claude !== undefined ? parseClaudeSupervisorConfig(obj.claude, source) : undefined;
   const configured: SupervisorHarnessName[] = SUPERVISOR_HARNESS_NAMES.filter((h) =>
     h === "pi" ? obj.pi !== undefined : h === CLAUDE_CODE_HARNESS ? claude !== undefined : obj.codex !== undefined,

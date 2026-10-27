@@ -9,8 +9,9 @@
  */
 import type { AgentRoleDeclaration } from "@graphloom/sdk";
 import { describe, expect, it } from "vitest";
-import { exec, type Discovery } from "../src/discovery.js";
-import { machineChecks, roleChecks, supervisorSelection, updatesCheck, viableSetups, type DoctorCheck } from "../src/doctor.js";
+import { exec, NO_PI_CREDENTIAL_FIX, piCredentialFix, type Discovery } from "../src/discovery.js";
+import { machineChecks, roleChecks, supervisorRoutes, supervisorSelection, updatesCheck, viableSetups, type DoctorCheck } from "../src/doctor.js";
+import { recommend, recommendedPi } from "../src/setup.js";
 import { fakeDiscovery } from "./discovery-fixture.js";
 
 const row = (checks: DoctorCheck[], name: string) => {
@@ -49,7 +50,7 @@ describe("viable setups (§4.4)", () => {
     const d = fakeDiscovery({ available: ["codex"] });
     expect(viableSetups(d)).toEqual({ defaultHarness: [], enable: ["codex"], supervisors: [], supervisorLater: ["codex"] });
     const checks = machineChecks(d);
-    expect(row(checks, "default harness")).toMatchObject({ status: "warn", fix: "Claude Code: claude; Pi: export MINIMAX_CN_API_KEY=<key>" });
+    expect(row(checks, "default harness")).toMatchObject({ status: "warn", fix: `Claude Code: claude; Pi: ${NO_PI_CREDENTIAL_FIX}` });
     expect(row(checks, "also enable").detail).toContain("codex (read-only jobs)");
     expect(row(checks, "supervisor")).toMatchObject({ status: "warn", detail: expect.stringContaining("Codex supervises from the release that ships it (phase S4)") });
   });
@@ -192,5 +193,46 @@ describe("doctor --task: agent roles (§4.4)", () => {
     const d = withRunner(fakeDiscovery(), ["claude-code", "codex", "pi"]);
     const [c] = roleChecks(d, [{ role: "Grader of ✓", harness: "gemini", access: "read" }], undefined);
     expect(c).toMatchObject({ name: "role Grader of ✓", status: "fail", detail: expect.stringContaining("gemini is not a harness GraphLoom runs") });
+  });
+});
+
+describe("any Pi provider (no MiniMax binding)", () => {
+  it("names each provider's own key variable from Pi's table, or its models.json reference", () => {
+    expect(piCredentialFix("deepseek")).toBe("export DEEPSEEK_API_KEY=<key>   (or store it with pi: /login)");
+    expect(piCredentialFix("anthropic")).toBe("export ANTHROPIC_API_KEY=<key>   (or store it with pi: /login)");
+    expect(piCredentialFix("google")).toBe("export GEMINI_API_KEY=<key>   (or store it with pi: /login)");
+    expect(piCredentialFix("minimax-cn")).toBe("export MINIMAX_CN_API_KEY=<key>   (or store it with pi: /login)");
+    expect(piCredentialFix("my-endpoint")).toMatch(/variable my-endpoint's apiKey references in Pi's models.json/);
+    expect(NO_PI_CREDENTIAL_FIX).not.toMatch(/^export MINIMAX/);
+  });
+
+  it("recommends the first provider with a credential, on Pi's own default model, without MiniMax", () => {
+    const d = fakeDiscovery({ piProviders: ["deepseek", "openai"] });
+    d.pi = { ...d.pi, models: { deepseek: ["deepseek-flash", "deepseek-v4-pro"], openai: ["gpt-4", "gpt-5.5"] }, defaults: { deepseek: "deepseek-v4-pro", openai: "gpt-5.5" } };
+    expect(recommendedPi(d)).toEqual({ provider: "deepseek", modelId: "deepseek-v4-pro" });
+    expect(recommendedPi(d, "openai")).toEqual({ provider: "openai", modelId: "gpt-5.5" });
+    expect(recommend(d)).toMatchObject({ pi: { provider: "deepseek" }, supervisor: { provider: "deepseek", modelId: "deepseek-v4-pro" } });
+  });
+
+  it("prefers the configured supervisor model when its provider has a credential, and MiniMax-M3 only as minimax-cn's fallback", () => {
+    const d = fakeDiscovery({ piProviders: ["deepseek", "minimax-cn"] });
+    d.pi = { ...d.pi, defaults: { deepseek: "deepseek-v4-pro", "minimax-cn": "MiniMax-M2.7" } };
+    expect(recommendedPi(d, "minimax-cn")).toEqual({ provider: "minimax-cn", modelId: "MiniMax-M3" });
+    d.pi.configured = [{ where: "supervisor config", provider: "minimax-cn", modelId: "MiniMax-M2.7", resolves: true, credential: true }];
+    expect(recommendedPi(d, undefined, "supervisor")).toEqual({ provider: "minimax-cn", modelId: "MiniMax-M2.7" });
+    // A configured provider without a credential is not recommended.
+    d.pi.configured = [{ where: "supervisor config", provider: "openai", modelId: "gpt-5.5", resolves: true, credential: false }];
+    expect(recommendedPi(d, undefined, "supervisor")).toEqual({ provider: "deepseek", modelId: "deepseek-v4-pro" });
+  });
+
+  it("presents each vendor's routes: Claude via Claude Code or Pi, OpenAI via Codex (S4) or Pi, the rest via Pi", () => {
+    const d = fakeDiscovery({ piProviders: ["anthropic", "deepseek", "google"] });
+    d.pi = { ...d.pi, credentials: [{ provider: "anthropic", source: "ANTHROPIC_API_KEY" }, { provider: "deepseek", source: "DEEPSEEK_API_KEY" }, { provider: "google", source: "auth store" }] };
+    expect(supervisorRoutes(d)).toEqual([
+      "Claude: via Claude Code (logged in) or via Pi (anthropic: ANTHROPIC_API_KEY present)",
+      "OpenAI: via Codex (logged in; supervises from phase S4, not yet) or via Pi (openai: no OPENAI_API_KEY)",
+      "Gemini, DeepSeek, MiniMax, Kimi, and every other provider: via Pi (credentials present for deepseek (DEEPSEEK_API_KEY), google (auth store))",
+    ]);
+    expect(row(machineChecks(d), "supervisor routes").detail).toContain("Claude: via Claude Code (logged in) or via Pi");
   });
 });

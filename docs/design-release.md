@@ -608,7 +608,7 @@ command is the configured one (`claude.command`, `codex.command`, or
 |---|---|---|
 | Claude Code | `claude` found and executable; `--version`; the capability probe from `apps/graphloom/src/capability-probe.ts` | The CLI's own status command when its `--help` lists one (`claude auth status`); otherwise a `warn` "login not verified" with fix `claude`. GraphLoom never reads Claude Code's credential files ([supervisor harnesses §6.2](design-supervisor-harnesses.md#62-credentials)) |
 | Codex | `codex` found and executable; `--version`; the capability probe | `codex login status`; fix `codex login` |
-| Pi | In-process; nothing to find on `PATH` | Per provider, whether a credential is present: the provider's variable (for example `MINIMAX_CN_API_KEY`) is set, or Pi's auth store in `agentDir` has an entry for it. Presence only, never the value. A configured `pi.provider` and `pi.modelId` must resolve in Pi's model registry |
+| Pi | In-process; nothing to find on `PATH` | Per provider, for every provider in Pi's registry (each one Pi ships and each custom provider in `agentDir`'s `models.json`), whether a credential is present: the provider's own variable from Pi's table (for example `DEEPSEEK_API_KEY`, `ANTHROPIC_API_KEY`, `MINIMAX_CN_API_KEY`) is set, Pi's auth store in `agentDir` has an entry for it, or its `models.json` `apiKey` resolves (a `$NAME` reference to a variable that is set). Presence only, never the value. A configured `pi.provider` and `pi.modelId` must resolve in Pi's model registry |
 | GitHub CLI | `gh` on `PATH`; `gh auth status`; read access to the release repository | Fix `gh auth login`. Used by install, `upgrade`, and automatic updates |
 
 A harness is **available** when it is found, passes its probe, and shows a
@@ -616,6 +616,12 @@ login or credential. Claude Code and Codex also need the confinement check to
 pass. These are the conditions of the supervisor's `probe()`
 ([supervisor harnesses §7.3](design-supervisor-harnesses.md#73-precedence-and-fallback)),
 so the doctor and `run` agree.
+
+The doctor also reports each vendor's **supervisor routes**, as
+[supervisor harnesses §6.2](design-supervisor-harnesses.md#62-credentials)
+lists them: Claude via Claude Code (its login) or via Pi (`ANTHROPIC_API_KEY`),
+OpenAI via Codex (phase S4) or via Pi (`OPENAI_API_KEY`), and every other
+vendor via Pi, with what is present here.
 
 **Configuration.**
 
@@ -693,16 +699,25 @@ only choices that work on this machine, each with a recommendation:
 2. **Enabled harnesses** (`harnesses`): the other available harnesses.
    Recommended: all of them, so that a plugin role such as a Codex reviewer
    can run.
-3. **Pi model** (`pi.provider`, `pi.modelId`), when Pi is enabled: a provider
-   whose credential is present. Recommended: `minimax-cn` and `MiniMax-M3`
-   when that credential is present.
+3. **Pi model** (`pi.provider`, `pi.modelId`), when Pi is enabled: any
+   provider whose credential is present, built-in or custom, or `new` to add a
+   custom provider of any API type Pi speaks to the agent dir's `models.json`
+   (provider id, API type, base URL, model id, and the NAME of the variable
+   holding its key, which the entry references as `$NAME`; the key itself is
+   never asked for or written). Recommended: the model already configured
+   (for the supervisor, the supervisor's; for the runner, the runner's) when
+   its provider has a credential, else the first provider with a credential
+   in Pi's registry order. Its model is the configured one, else
+   `MiniMax-M3` on `minimax-cn`, else Pi's own default model for the
+   provider.
 4. **Supervisor** (`supervisor.json`): `harnesses` lists the available
    supervisor harnesses in the built-in order `pi`, `claude-code`, `codex`. So
    Pi is recommended when available, then Claude Code, then Codex. Setup
    writes no `select` unless the operator picks one, so a plugin's preference
    still applies
    ([supervisor harnesses §7.2](design-supervisor-harnesses.md#72-operator-configuration)).
-   Setup says that the repair reviewer uses the same agent. The operator may
+   Setup says that the repair reviewer uses the same agent, and prints each
+   vendor's supervisor routes as the doctor does. The operator may
    decline a supervisor; runs then have no automatic recovery.
 5. **Consent.** Setup explains `allowUnrestricted`: coding agents run shell
    commands with the operator's permissions, and confinement limits what they
@@ -713,7 +728,8 @@ Setup then writes `~/.config/graphloom/runner.json` (or the file that
 `GRAPHLOOM_RUNNER_CONFIG` names) and `supervisor.json`. Each file is checked
 by the parser `run` uses, written to a temporary file with mode `0600`, and
 renamed into place. Setup prints what remains: `claude` to log in,
-`codex login`, the Pi provider variable (for example `MINIMAX_CN_API_KEY`), or
+`codex login`, the Pi provider's own variable (for example `DEEPSEEK_API_KEY`,
+or the `$NAME` a custom provider references), or
 the variable that `github.tokenEnv` names (the examples use
 `GRAPHLOOM_GITHUB_LIVE_TOKEN`). It never asks for a token and never writes one.
 `GRAPHLOOM_REHEARSAL_GITHUB_TOKEN` is a stand-in variable that the rehearsal
@@ -862,6 +878,11 @@ own toolchain.
     refresh, so no network. A stored or `models.json` credential is known from
     `getProviderAuthStatus` without resolving it, so no credential command
     runs; otherwise `checkAuth` asks whether the provider's variable is set.
+    Every provider in the registry is asked, so each provider Pi ships and
+    each custom `models.json` provider is discovered the same way, with the
+    Pi API types its models speak and Pi's own default model for it. A fix
+    names the provider's own variable from Pi's table
+    (`providerCredentialEnvVars`), never a fixed MiniMax one.
     The value is never printed or written. Pi is available when the runner
     config's `pi.provider` has a credential and `pi.modelId` resolves, or, with
     no Pi configured, when any provider has a credential.
@@ -889,7 +910,7 @@ own toolchain.
 - **Supervisor harnesses (with S3).** `SHIPPED_SUPERVISOR_HARNESSES`
   (`discovery.ts`) is `["pi", "claude-code"]`. A Codex supervisor is
   reported as arriving with S4 and is never counted. S4 adds it to that list.
-  - A Pi supervisor counts when a provider has a credential.
+  - A Pi supervisor counts when a provider has a credential, any provider.
   - A Claude Code supervisor counts when the doctor's CLI and login check
     passes and S3's own probe (`probeSupervisorHarness`, which also needs
     bwrap and Claude Code's login marker in its config dir) passes too.

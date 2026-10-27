@@ -71,7 +71,7 @@ describe("graphloom setup", () => {
     expect(p.questions[0]).toMatch(/Default harness \[claude-code\/pi\] \(recommended: claude-code\)/);
     expect(p.questions.some((q) => /Codex/.test(q))).toBe(false);
     expect(p.questions[1]).toMatch(/Also enable Pi\? \[Y\/n\]/);
-    expect(p.questions[2]).toMatch(/Pi provider with a credential \[minimax-cn\/deepseek\] \(recommended: minimax-cn\)/);
+    expect(p.questions[2]).toMatch(/Pi provider with a credential, or new to add a custom one \[minimax-cn\/deepseek\/new\] \(recommended: minimax-cn\)/);
     expect(p.questions[3]).toMatch(/minimax-cn model \(recommended: MiniMax-M3;/);
     expect(p.questions[4]).toMatch(/Enable a Pi supervisor on minimax-cn\/MiniMax-M3\? \[Y\/n\]/);
     expect(p.questions[5]).toMatch(/Enable a Claude Code supervisor \(your own Claude Code login\)\? \[Y\/n\]/);
@@ -101,9 +101,33 @@ describe("graphloom setup", () => {
     expect(json(h.supervisorFile)).toEqual({ provider: "deepseek", modelId: "deepseek-v4-pro" });
   });
 
+  it("adds a custom provider to Pi's models.json by key variable NAME, and configures Pi on it", async () => {
+    const h = await home();
+    const piDir = path.join(h.dir, "pi-agent");
+    await mkdir(piDir, { recursive: true });
+    await writeFile(path.join(piDir, "auth.json"), "{}");
+    const d = discovery(h, { available: ["claude-code", "pi"], piProviders: ["deepseek"] });
+    d.pi = { ...d.pi, agentDir: piDir, known: ["deepseek", "openai"] };
+    // Default harness, enable Pi, provider: new; id (taken, then fresh), API type, base URL, model, key NAME (a key first);
+    // Pi supervisor on it: yes; Claude Code supervisor: no; consent.
+    const p = scripted(["", "", "new", "openai", "my-ds", "", "https://api.deepseek.com", "deepseek-v4-pro", "sk-pasted-key-123", "MY_DS_KEY", "", "n", "y"]);
+    const result = await runSetup({ prompter: p, discovery: d, env: h.env, now });
+    expect(result, p.transcript()).toMatchObject({ exitCode: 0, runner: "written", supervisor: "written" });
+    expect(p.transcript()).toContain("Pi already knows a provider openai");
+    expect(p.transcript()).not.toContain("sk-pasted-key-123 ");
+    expect(p.lines.filter((l) => !p.questions.includes(l)).join("\n")).not.toContain("sk-pasted-key-123");
+    expect(p.questions).toContainEqual(expect.stringMatching(/API type \[openai-completions\/openai-responses\/anthropic-messages\/google-generative-ai\/mistral-conversations\]/));
+    const models = json(path.join(piDir, "models.json"));
+    expect(models).toEqual({ providers: { "my-ds": { baseUrl: "https://api.deepseek.com", api: "openai-completions", apiKey: "$MY_DS_KEY", models: [{ id: "deepseek-v4-pro" }] } } });
+    expect(json(h.runnerFile)).toMatchObject({ harness: "claude-code", harnesses: ["claude-code", "pi"], pi: { provider: "my-ds", modelId: "deepseek-v4-pro" } });
+    expect(json(h.supervisorFile)).toEqual({ agentDir: piDir, provider: "my-ds", modelId: "deepseek-v4-pro" });
+    expect(p.transcript()).toContain("export MY_DS_KEY=<key>");
+    expect(readFileSync(h.supervisorFile, "utf8") + readFileSync(h.runnerFile, "utf8")).not.toMatch(/apiKey|sk-/);
+  });
+
   it("re-asks a choice that is not offered", async () => {
     const h = await home();
-    const p = scripted(["codex", "claude-code", "", "", "", "", "", "y"]);
+    const p = scripted(["codex", "claude-code", "", "", "", "", "", "", "y"]);
     await runSetup({ prompter: p, discovery: discovery(h), now });
     expect(p.transcript()).toContain("choose one of claude-code, pi");
     expect(json(h.runnerFile).harness).toBe("claude-code");
@@ -111,7 +135,7 @@ describe("graphloom setup", () => {
 
   it("refusing allowUnrestricted writes nothing and exits 1", async () => {
     const h = await home();
-    const p = scripted(["", "", "", "", "", "n"]);
+    const p = scripted(["", "", "", "", "", "", "n"]);
     const result = await runSetup({ prompter: p, discovery: discovery(h), now });
     expect(result).toMatchObject({ exitCode: 1, runner: "none", supervisor: "none", reason: "allowUnrestricted was declined" });
     expect(existsSync(h.runnerFile)).toBe(false);
@@ -177,7 +201,7 @@ describe("graphloom setup", () => {
     const result = await runSetup({ yes: true, say: (l) => void lines.push(l), discovery: discovery(h, { available: ["codex"] }), now });
     expect(result).toMatchObject({ exitCode: 1, reason: "no available harness can write" });
     expect(existsSync(h.runnerFile)).toBe(false);
-    expect(lines.join("\n")).toMatch(/Claude Code: claude\n.*Pi: export MINIMAX_CN_API_KEY=<key>/);
+    expect(lines.join("\n")).toMatch(/Claude Code: claude\n.*Pi: export the API key variable of any provider Pi supports/);
   });
 
   it("a rerun shows the current configuration, changes only confirmed answers, and keeps a .bak- copy", async () => {
@@ -271,7 +295,7 @@ describe("graphloom setup", () => {
     await writeFile(h.runnerFile, JSON.stringify({ harness: "claude-code" }));
     const kept = await runSetup({ yes: true, say: () => undefined, discovery: discovery(h), now });
     expect(kept.runner).toBe("unchanged");
-    const p = scripted(["y", "", "", "", "", "y"]);
+    const p = scripted(["y", "", "", "", "", "", "y"]);
     const result = await runSetup({ prompter: p, discovery: discovery(h), now });
     expect(result.runner, p.transcript()).toBe("written");
     expect(p.transcript()).toContain("allowUnrestricted must be true");

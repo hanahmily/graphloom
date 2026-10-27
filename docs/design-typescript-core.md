@@ -445,11 +445,14 @@ them; the run pins one harness, changed only by `resume --supervisor`. The Pi
 details below remain the Pi harness specification.
 
 Use the pinned `@earendil-works/pi-coding-agent@0.87.1` for the supervisor runtime.
-The initial model is `minimax-cn/MiniMax-M3`, using a private command reference to
-the existing OpenCode MiniMax CN credential. SDK connectivity and project type
+The supervisor model is any `<provider>/<modelId>` in Pi's registry, a provider
+Pi ships or a custom one in its `models.json`, with that provider's own Pi
+credential ([choosing a supervisor model](design-pi-supervisor.md#choosing-a-supervisor-model)).
+The first operator setup used `minimax-cn/MiniMax-M3`, through a private command
+reference to the existing OpenCode MiniMax CN credential. SDK connectivity and project type
 checks have passed. Recovery and model switching are implemented with faux-provider
 verification; live recovery/provider qualification remains outstanding. See the
-[verified MiniMax setup](design-pi-supervisor.md#initial-minimax-configuration).
+[verified MiniMax setup](design-pi-supervisor.md#the-minimax-operator-setup-history).
 
 Model changes among configured DeepSeek, MiniMax, OpenAI, and Anthropic providers preserve one
 logical run-wide supervisor; each recovery episode opens its own Pi session on the
