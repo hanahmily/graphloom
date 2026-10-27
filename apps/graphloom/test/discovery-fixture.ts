@@ -2,6 +2,8 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 /** A constructed `Discovery` for unit tests of the doctor's report and of setup (docs/design-release.md §4.4, §4.5). */
+import os from "node:os";
+import path from "node:path";
 import type { Discovery } from "../src/discovery.js";
 import type { HarnessName } from "../src/runner-config.js";
 
@@ -39,7 +41,7 @@ export function fakeDiscovery(options: FakeDiscoveryOptions = {}): Discovery {
     claude: cli("claude-code"),
     codex: cli("codex"),
     pi: {
-      agentDir: "/home/.pi/agent",
+      agentDir: path.join(os.homedir(), ".pi", "agent"),
       credentials: providers.map((provider) => ({ provider, source: provider === "minimax-cn" ? "MINIMAX_CN_API_KEY" : "auth store" })),
       configured: [],
       models: Object.fromEntries(providers.map((p) => [p, PI_MODELS[p] ?? [`${p}-model`]])),

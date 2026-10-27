@@ -24,6 +24,7 @@
  */
 import { constants } from "node:fs";
 import { chmod, copyFile, mkdir, open, readFile, rename, rm } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { createInterface } from "node:readline";
 import { HARNESS_LABEL, LOGIN_FIX, RECOMMENDED_PI, availableHarnesses, discover, piCredentialFix, type Discovery } from "./discovery.js";
@@ -253,6 +254,8 @@ export async function runSetup(options: SetupOptions = {}): Promise<SetupResult>
   // Setup can configure Pi whenever a provider has a credential, even when the
   // current runner config names a model Pi does not know: that is what it repairs.
   const piCandidate = found.pi.error === undefined && found.pi.credentials.length > 0;
+  // A new supervisor reads Pi from where discovery found its credentials and models: a non-default agent dir is written too.
+  const newSupervisorBase: Raw | undefined = found.pi.agentDir !== path.join(env.HOME ?? os.homedir(), ".pi", "agent") ? { agentDir: found.pi.agentDir } : undefined;
   const d: Discovery = piCandidate && !found.pi.available ? { ...found, pi: { ...found.pi, available: true } } : found;
   const runnerFile = d.runner.file;
   const supervisorFile = d.supervisor.file;
@@ -368,24 +371,24 @@ export async function runSetup(options: SetupOptions = {}): Promise<SetupResult>
     if (v.supervisor === undefined || rec.supervisor === undefined) {
       say(`   No supervisor harness this GraphLoom runs is available, so none is configured and runs have no automatic recovery. Next: ${piCredentialFix(RECOMMENDED_PI.provider)}`);
     } else if (yes) {
-      supNext = supervisorRaw(undefined, rec.supervisor);
+      supNext = supervisorRaw(newSupervisorBase, rec.supervisor);
     } else {
       // The runner's Pi choice, when there is one, is the supervisor's recommendation too.
       const runnerPi = runnerNext?.pi as Raw | undefined;
       const start = runnerPi !== undefined && typeof runnerPi.provider === "string" && typeof runnerPi.modelId === "string" ? { provider: runnerPi.provider, modelId: runnerPi.modelId } : undefined;
       if (start !== undefined) {
-        if (await confirm(p!, `   Configure a Pi supervisor on ${start.provider}/${start.modelId}?`, true)) supNext = supervisorRaw(undefined, start);
+        if (await confirm(p!, `   Configure a Pi supervisor on ${start.provider}/${start.modelId}?`, true)) supNext = supervisorRaw(newSupervisorBase, start);
       } else if (await confirm(p!, `   Configure a Pi supervisor (recommended: ${rec.supervisor.provider}/${rec.supervisor.modelId})?`, true)) {
         const pick = await choosePi(p!, d, "   Supervisor", rec.supervisor);
         if (pick === undefined) return result(1, "none", "none", "setup was not completed");
-        supNext = supervisorRaw(undefined, pick);
+        supNext = supervisorRaw(newSupervisorBase, pick);
       }
       if (supNext === undefined) say("   No supervisor: runs have no automatic recovery.");
     }
   } else if (existingSup.error !== undefined || existingSup.raw === undefined) {
     say(`   ${supervisorFile} exists but run would refuse it: ${existingSup.error}`);
     if (!yes && rec.supervisor !== undefined && (await confirm(p!, `   Replace it with a Pi supervisor on ${rec.supervisor.provider}/${rec.supervisor.modelId}?`, false))) {
-      supNext = supervisorRaw(undefined, rec.supervisor);
+      supNext = supervisorRaw(newSupervisorBase, rec.supervisor);
     }
   } else {
     const current = existingSup.raw;

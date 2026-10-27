@@ -919,7 +919,11 @@ own toolchain.
     §4.5 step 4. The parser this release ships accepts only the flat form,
     and the supervisor harness design keeps parsing it as `{ harnesses:
     ["pi"], pi: { … } }` (§7.2), so a file written now stays valid. It writes
-    no `select`. Without an available Pi it writes no supervisor file and
+    no `select`. A new file also names `agentDir` when discovery found Pi
+    in a non-default agent dir, and the doctor checks an existing
+    supervisor's model in that file's own `agentDir`. Setup offers Pi
+    whenever a provider has a credential, so it can repair a runner config
+    whose Pi model Pi does not know. Without an available Pi it writes no supervisor file and
     says that Claude Code and Codex supervise from the releases that ship
     them.
   - Questions are asked only for real choices: the default harness when more

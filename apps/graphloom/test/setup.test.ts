@@ -130,6 +130,15 @@ describe("graphloom setup", () => {
     expect(lines.join("\n")).toContain("--yes counts as your consent");
   });
 
+  it("writes the Pi agent dir discovery used into a new supervisor config when it is not the default", async () => {
+    const h = await home();
+    const d = discovery(h);
+    d.pi = { ...d.pi, agentDir: path.join(h.dir, "pi-elsewhere") };
+    await runSetup({ yes: true, say: () => undefined, discovery: d, env: h.env, now });
+    expect(json(h.supervisorFile)).toEqual({ agentDir: path.join(h.dir, "pi-elsewhere"), provider: "minimax-cn", modelId: "MiniMax-M3" });
+    expect(await loadSupervisorConfig(h.env)).toMatchObject({ agentDir: path.join(h.dir, "pi-elsewhere") });
+  });
+
   it("without Pi, writes no supervisor and says Claude Code and Codex supervise from later releases", async () => {
     const h = await home();
     const lines: string[] = [];
