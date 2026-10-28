@@ -212,7 +212,9 @@ crashes; filesystem and execution scopes require host enforcement.
   BanyanDB-only fix graph.
 - [PR-review graph](docs/design-pr-review-graph.md) (proposed): first a
   neutral, cited change report on an incoming pull request (schema, background
-  work, features, dependencies, config, interfaces, deletions; no judgement),
+  work, features, dependencies, config, interfaces, deletions; no judgement) and,
+  from a second agent, evidence-backed questions for the author (purpose,
+  existing equivalents, reusable libraries, shared logic, missing tests),
   report-only by default; on request, a review layer drafts verified findings
   and inline comments, published as one GitHub review only after `graphloom
   resume <run> --approve publish-review`. Later pushes get delta reports and
