@@ -79,7 +79,9 @@ for r in $(cut -d' ' -f1 "$tmp/pk" | sort -u); do
   tail -n 25 "$tmp/t.$k" >> "$tmp/log"
   grep -E '^(ok|FAIL|\?|---|panic:|#)' "$tmp/t.$k" | tr '\t' ' ' | cut -c1-200 | head -n 80 | sed 's/^/test /' >> "$tmp/tests"
   if [ -s "$tmp/c.$k" ]; then
-    mp=$(cd "$r" && go list -m 2>/dev/null | head -n 1)
+    # The module's own path, from its go.mod: in a go.work workspace `go list -m` lists every module.
+    gm=$(cd "$r" && go env GOMOD 2>/dev/null)
+    mp=$(awk '$1 == "module" { gsub(/"/, "", $2); print $2; exit }' "$gm" 2>/dev/null)
     awk -f "$here/goprofile.awk" -v mp="$mp" -v root="$r" "$tmp/spec.txt" "$tmp/c.$k" >> "$tmp/prof"
   else
     printf 'fail go test wrote no coverage profile for module %s (exit %s)\n' "$r" "$rc" >> "$tmp/fails"

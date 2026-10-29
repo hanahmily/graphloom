@@ -284,6 +284,11 @@ async function prepareDockerJob(job: JobSpec, spec: DockerConfinement, ctx: JobC
     }
     const target = resolveMount(value, ctx.worktreePath, ctx.scratchDir);
     if (typeof target === "string") return { refusal: `environment variable ${name}: ${target}` };
+    // Nothing is created before the value is known to stay below the scratch directory.
+    const below = path.relative(ctx.scratchDir!, target.path);
+    if (below === "" || below.startsWith("..") || path.isAbsolute(below) || value.split("/").includes("..")) {
+      return { refusal: `environment variable ${name}: ${JSON.stringify(value)} does not name a directory below the run's scratch directory` };
+    }
     ensureRealDir(ctx.scratchDir!);
     ensureRealDirBelow(ctx.scratchDir!, value.slice(SCRATCH_MOUNT_PREFIX.length));
     env[name] = target.path;

@@ -16,7 +16,7 @@
     "vitest": "^3.0.9"
   },
   "digests": {
-    "sourceTree": "59fa9d2123c00515e6f5bb0bda62831550c53f096352af343096321a36ca6f80",
+    "sourceTree": "7e1ef629ff43f8af7b8ceaaae9605d73f229fcf2caa358870db0d1062ea13eb6",
     "packageLock": "ae5b886a88656f187132576e5f1579a047eec7e260abddf2994bb44d6815b49a",
     "files": {
       "package.json": "d2ecf50847d4ef5e66d59240dabdb523a3a58b04a5d089d956e9abe1dccc37ea",
@@ -24,7 +24,7 @@
       "tsconfig.json": "d166142bd5d917d1eb7d3011cf6423c652f30e2989881deec6147a997bf41597",
       "profiles/banyandb.json": "8ed3461abdd1f4bffb8834b5f6ccb4e661b7e9232fceaaed549dd85eec6f673d",
       "tools/README.md": "91b5de1909d83fd98463dfaaba0ea006a616075b041dc426c5a8ebaa98ab9039",
-      "tools/cover/go.sh": "338425da1049b09bce570b5604fc3e61b7bd802167c79e53b5f1ef904043c76a",
+      "tools/cover/go.sh": "cd64f4b6a7d48dc0b89de4a2b856f6a7b479105fa30c80e19d2dac0651b65f98",
       "tools/cover/goprofile.awk": "675b39613ebe8dd8bf0249b6874bf6e6199a825ad5c1fbfbb9cf7f7de77569e8",
       "tools/cover/ts.sh": "c18f57a98c715415167365ce09ee3fc1e75bb739fcd49995756eb9b4df4c98ae",
       "tools/gometrics/analyze.go": "008fc603a06eefdcdd571678b06950fe14e15f965b64d542ea7666ea35512722",

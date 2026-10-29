@@ -288,6 +288,19 @@ describe.skipIf(unavailable !== undefined)("a command job in a docker confinemen
     expect(noScratch.status).toBe("failed");
   });
 
+  it("refuses an environment value that leaves the scratch directory, before anything is created or removed", async () => {
+    const victim = path.join(dir, "victim");
+    await writeFile(victim, "keep\n");
+    for (const value of ["@scratch/../victim", "@scratch/a/../../victim", "@scratch/"]) {
+      const result = await runner.runJob(job([{ id: "s", argv: ["true"] }], { env: { CACHE: value } }), ctx()).then(
+        (r) => r.summary,
+        (e: unknown) => String(e),
+      );
+      expect(result, value).toMatch(/env\.CACHE|scratch|refus/i);
+    }
+    expect(await readFile(victim, "utf8")).toBe("keep\n");
+  });
+
   it("gives a command its report file, and only that file: what it writes there is the command's report, and the executor's other artifacts stay out of reach", async () => {
     const [out] = await runCommands([{ id: "r", argv: sh('echo reported > "$GRAPHLOOM_REPORT_FILE"; ls "$(dirname "$GRAPHLOOM_REPORT_FILE")" | wc -l; echo "$GRAPHLOOM_REPORT_FILE"') }]);
     expect(out!.report).toEqual({ text: "reported\n", truncated: false });

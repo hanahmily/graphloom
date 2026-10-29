@@ -359,6 +359,30 @@ describe("measured coverage, Go, under real Docker", () => {
   });
 });
 
+describe("measured coverage, Go, a go.work workspace of two modules, under real Docker", () => {
+  it.skipIf(!hasDocker || !hasGo)("attributes the second module's blocks by its own module path, not the workspace's first", async () => {
+    if (!goReady) return;
+    const work = path.join(tmp, "go-work-space");
+    const scratch = path.join(tmp, "go-work-space-scratch");
+    await mkdir(scratch, { recursive: true });
+    await write(work, {
+      "go.work": "go 1.25\n\nuse (\n\t./a\n\t./b\n)\n",
+      "a/go.mod": "module example.com/a\n\ngo 1.25\n",
+      "a/f.go": "package a\n\nfunc A() int { return 1 }\n",
+      "a/f_test.go": 'package a\n\nimport "testing"\n\nfunc TestA(t *testing.T) {\n\tif A() != 1 {\n\t\tt.Fatal("a")\n\t}\n}\n',
+      "b/go.mod": "module example.com/b\n\ngo 1.25\n",
+      "b/f.go": "package b\n\nfunc B(n int) int {\n\tif n > 0 {\n\t\treturn n\n\t}\n\treturn -n\n}\n",
+      "b/f_test.go": 'package b\n\nimport "testing"\n\nfunc TestB(t *testing.T) {\n\tif B(1) != 1 {\n\t\tt.Fatal("b")\n\t}\n}\n',
+    });
+    const index: Record<string, Fn[]> = { "a/f.go": [["a.A", 3, 3]], "b/f.go": [["b.B", 3, 8]] };
+    const files = Object.keys(index).flatMap((p) => [{ path: p, language: "go" as const }, { path: p.replace(/\.go$/, "_test.go"), language: "go" as const }]);
+    const m = await measure({ work, scratch, records: recordsOf(index), index: new Map(Object.entries(index)), files, profile: profileWith({ metrics: { generated: [], sandbox: { go: { image: goImage, cpus: 2, memory: "2g", pids: 256, wallClockMs: 300_000 } } } }) });
+    expect(m.state.outcomes!.get("a/f.go\u0000a.A\u00003")).toMatchObject({ source: "measured", covered: 1, total: 1 });
+    expect(m.state.outcomes!.get("b/f.go\u0000b.B\u00003")).toMatchObject({ source: "measured", covered: 2, total: 3 });
+    expect(m.state.facts!.runs[0]).toMatchObject({ ran: true, exit: 0 });
+  }, 300_000);
+});
+
 describe.skipIf(!hasDocker)("the sandbox is never fallen back from, under real Docker", () => {
   const files = [{ path: "pkg/calc/calc.go", language: "go" as const }];
   const idx = { "pkg/calc/calc.go": GO_INDEX["pkg/calc/calc.go"]! };

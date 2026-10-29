@@ -1418,7 +1418,7 @@ docker run --rm --pull never --name graphloom-<run>-<op> --label graphloom.run=<
     `npm ci --offline --ignore-scripts` into the checkout's ignored `node_modules`); the environment is
     `GOFLAGS=-mod=readonly GOPROXY=off GOTOOLCHAIN=local GOCACHE=<scratch> GOMODCACHE=<host cache> HOME=/tmp` (Go) or the
     npm cache variables (TypeScript). The generic runner changes are two: a docker environment value may name
-    `@scratch/<dir>`, and the command's `GRAPHLOOM_REPORT_FILE` is mounted into its container (only that file), so a
+    `@scratch/<dir>`, a value that names scratch is checked like a mount (no `..`) before anything is created, and the command's `GRAPHLOOM_REPORT_FILE` is mounted into its container (only that file), so a
     report larger than the output tail travels as the command's report.
   - **The report.** `go.sh` and `ts.sh` write `graphloom-coverage-v1`: the test command's exit status and result lines,
     and the coverage facts filtered to the changed functions' line ranges (`goprofile.awk`; `tscover-cli.js`). The
