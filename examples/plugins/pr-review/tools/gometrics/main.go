@@ -174,10 +174,14 @@ func run(headDir string, hunks map[string][]Range, generated []string) (*Documen
 			if decisions == nil {
 				decisions = []Step{}
 			}
+			nesting := fn.Nesting
+			if nesting == nil {
+				nesting = []Step{}
+			}
 			doc.Records = append(doc.Records, Record{
 				Path: p, Function: fn.Name, StartLine: fn.Start, EndLine: fn.End,
 				Change: change, Test: isTest, Complexity: 1 + len(decisions),
-				Decisions: decisions, Nesting: len(fn.Nesting), NestingPath: fn.Nesting,
+				Decisions: decisions, Nesting: len(nesting), NestingPath: nesting,
 			})
 		}
 		doc.Files = append(doc.Files, idx)

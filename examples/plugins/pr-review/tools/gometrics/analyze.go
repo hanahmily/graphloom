@@ -63,7 +63,7 @@ func Analyze(path string, src []byte) (*FileInfo, error) {
 			}
 		}
 	}
-	line := func(p token.Pos) int { return fset.Position(p).Line }
+	line := func(p token.Pos) int { return fset.PositionFor(p, false).Line }
 	// Package-level closures hang off an unrecorded pseudo function.
 	glob := &Func{Name: info.Package + ".glob"}
 	for _, decl := range file.Decls {
@@ -117,7 +117,7 @@ func receiverName(e ast.Expr) string {
 // measure walks root as the own body of fn. A function literal inside it
 // becomes a child function and is measured on its own.
 func measure(info *FileInfo, fset *token.FileSet, fn *Func, root ast.Node) {
-	line := func(p token.Pos) int { return fset.Position(p).Line }
+	line := func(p token.Pos) int { return fset.PositionFor(p, false).Line }
 	var stack []ast.Node
 	var added []bool
 	var path []Step

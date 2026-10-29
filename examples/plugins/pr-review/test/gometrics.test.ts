@@ -173,6 +173,31 @@ describe("gometrics", () => {
     expect(validate(dir, doc, hunks).ok).toBe(false);
   });
 
+  goIt("uses physical lines despite //line directives, and emits [] for bodyless declarations", () => {
+    const src = [
+      "package a",
+      "",
+      "//line other.go:100",
+      "func Moved(x int) int {",
+      "\tif x > 0 {",
+      "\t\treturn x",
+      "\t}",
+      "\treturn 0",
+      "}",
+      "",
+      "func external()",
+      "",
+    ].join("\n");
+    const { dir, hunks } = twoCommits({ "a.txt": "x" }, { "a.go": src });
+    const doc = runGo(dir, hunks);
+    expect(doc.records.map((r) => [r.function, r.startLine, r.endLine, r.complexity])).toEqual([
+      ["a.Moved", 4, 9, 2],
+      ["a.external", 11, 11, 1],
+    ]);
+    expect(doc.records[1]?.nestingPath).toEqual([]);
+    expect(validate(dir, doc, hunks)).toEqual({ ok: true, errors: [] });
+  });
+
   goIt("fails loudly on a Go file that does not parse", () => {
     const { dir } = twoCommits({ "a.txt": "x" }, { "bad.go": "package a\nfunc {" });
     const hunkFile = path.join(scratch, "bad-hunks.txt");

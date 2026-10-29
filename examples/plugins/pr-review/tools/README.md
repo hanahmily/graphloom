@@ -100,5 +100,10 @@ dependency of the tool.
 - A closure's name depends on its position in the file, so adding a closure
   before it renames the later ones.
 - Class static blocks are not functions; their decisions are not measured.
+- The validator's own index check for Go is textual (a column-0 `func` line
+  must be an indexed start line, so a raw string with such a line is a false
+  reject); pass `reindex` (a second, independent index) for the full check.
+- `hunksFromUnifiedDiff` needs a well-formed `-U0` diff, since it counts hunk
+  body lines to tell added `+++ ` text from file headers.
 - Keyword evidence is textual: the validator checks that the line holds the
   keyword, not that it is code rather than a comment or string.

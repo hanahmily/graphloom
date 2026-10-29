@@ -68,17 +68,32 @@ export function unquoteGitPath(raw: string): string {
 export function hunksFromUnifiedDiff(diff: string): Hunks {
   const hunks: Hunks = new Map();
   let path: string | undefined;
+  // Lines left in the current hunk's body. An added line such as `++ x` looks
+  // like a `+++ ` file header, so headers are only read outside a hunk.
+  let oldLeft = 0;
+  let newLeft = 0;
   for (const line of diff.split("\n")) {
+    if (oldLeft > 0 || newLeft > 0) {
+      if (line.startsWith("-")) oldLeft--;
+      else if (line.startsWith("+")) newLeft--;
+      else if (line.startsWith(" ")) {
+        oldLeft--;
+        newLeft--;
+      }
+      continue;
+    }
     if (line.startsWith("+++ ")) {
       const name = unquoteGitPath(line.slice(4).split("\t")[0] as string);
       path = name === "/dev/null" ? undefined : name.replace(/^b\//, "");
       continue;
     }
-    const m = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/.exec(line);
-    if (!m || path === undefined) continue;
-    const start = Number(m[1]);
-    const count = m[2] === undefined ? 1 : Number(m[2]);
-    if (count === 0) continue;
+    const m = /^@@ -\d+(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(line);
+    if (!m) continue;
+    oldLeft = m[1] === undefined ? 1 : Number(m[1]);
+    const start = Number(m[2]);
+    const count = m[3] === undefined ? 1 : Number(m[3]);
+    newLeft = count;
+    if (path === undefined || count === 0) continue;
     const list = hunks.get(path) ?? [];
     list.push({ start, end: start + count - 1 });
     hunks.set(path, list);

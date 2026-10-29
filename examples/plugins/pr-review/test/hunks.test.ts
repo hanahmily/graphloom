@@ -31,12 +31,26 @@ describe("hunks", () => {
       "--- a/x.go",
       "+++ b/x.go",
       "@@ -3,2 +3,0 @@",
+      "-a",
+      "-b",
       "@@ -10 +8 @@",
+      "-c",
+      "+d",
       "@@ -20,0 +18,4 @@",
+      "+1",
+      "++ counter;",
+      "+3",
+      "+4",
+      "\\ No newline at end of file",
+      "@@ -30 +30 @@",
+      "-e",
+      "+++ not a header",
       "diff --git a/y.go b/y.go",
       "--- a/y.go",
       "+++ /dev/null",
       "@@ -1,2 +0,0 @@",
+      "-p",
+      "-q",
       "",
     ].join("\n");
     expect([...hunksFromUnifiedDiff(diff)]).toEqual([
@@ -45,6 +59,7 @@ describe("hunks", () => {
         [
           { start: 8, end: 8 },
           { start: 18, end: 21 },
+          { start: 30, end: 30 },
         ],
       ],
     ]);
@@ -56,7 +71,7 @@ describe("git path quoting", () => {
     expect(unquoteGitPath('"caf\\303\\251.go"')).toBe("café.go");
     expect(unquoteGitPath('"b/a\\"b\\\\c\\td.ts"')).toBe('b/a"b\\c\td.ts');
     expect(unquoteGitPath("b/plain.go")).toBe("b/plain.go");
-    const diff = '--- a/x\n+++ "b/caf\\303\\251.go"\n@@ -1 +1,2 @@\n';
+    const diff = '--- a/x\n+++ "b/caf\\303\\251.go"\n@@ -1 +1,2 @@\n-a\n+b\n+c\n';
     expect([...hunksFromUnifiedDiff(diff).keys()]).toEqual(["café.go"]);
   });
 });
