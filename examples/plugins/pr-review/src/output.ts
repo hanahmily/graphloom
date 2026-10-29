@@ -7,7 +7,6 @@ import type { Profile } from "./profile.js";
 import { renderReport, type FinalReport } from "./report.js";
 import type { PullRequest } from "./request.js";
 import type { Snapshot } from "./snapshot.js";
-import { NOT_IMPLEMENTED } from "./constants.js";
 
 export const REPORT_FILE_SCHEMA = "pr-change-report-v1";
 
@@ -43,7 +42,7 @@ export function reportJson(i: OutputInput): string {
   });
 }
 
-/** `review.md`: Report, Measurements, then the Q&A part this version does not produce (design §6.6, §7.4). */
+/** `review.md`: Report, Measurements, then Q&A (design §6.6, §7.4). The Report stage writes it with the Q&A pending; the Answers stage writes it whole. */
 export function reviewMarkdown(i: OutputInput): string {
   const head = i.pr.head.slice(0, 12);
   const header = {
@@ -58,12 +57,19 @@ export function reviewMarkdown(i: OutputInput): string {
   };
   return [
     `# ${i.pr.owner}/${i.pr.repo}#${i.pr.number} at ${head}${i.base !== undefined ? ` (base ${i.base.slice(0, 12)})` : ""}`,
-    "Contents: Report · Measurements · Q&A (not produced in this version)",
+    "Contents: Report · Measurements · Q&A",
     "",
     renderReport(i.final, header),
     renderMeasurements(i.measurements, i.profile),
-    "# Q&A",
-    `Not produced: questions and answers are ${NOT_IMPLEMENTED}. The Questions and Answers stages exist and fail closed.`,
-    "",
+    QA_PENDING,
   ].join("\n");
+}
+
+/** What the Q&A part says until the Answers stage replaces it. */
+export const QA_PENDING = ["# Q&A", "Pending: the Questions and Answers stages follow the report.", ""].join("\n");
+
+/** The whole `review.md`: the report's own, with its pending Q&A part replaced by the rendered one (a report cut short keeps its cut note, then the Q&A). */
+export function withQa(reportMarkdown: string, qaMarkdown: string): string {
+  const base = reportMarkdown.endsWith(QA_PENDING) ? reportMarkdown.slice(0, reportMarkdown.length - QA_PENDING.length) : `${reportMarkdown}\n`;
+  return `${base}${qaMarkdown}`;
 }

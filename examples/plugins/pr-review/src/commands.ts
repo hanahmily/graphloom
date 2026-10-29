@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
-import type { EnvironmentCommand } from "@graphloom/sdk";
+import type { EnvironmentCommand, EvidenceRecord } from "@graphloom/sdk";
 import { COMMAND, REVIEW_DIR, ledgerRef } from "./constants.js";
+import { commandRuns, reportText, succeeded } from "./evidence.js";
 
 /**
  * The graph's own git commands (design §4). Each runs git on pinned trees
@@ -105,4 +106,10 @@ export function parseLedger(text: string): Ledger | undefined {
   if (line === "absent") return { present: false };
   const m = /^present ([0-9a-f]{40})$/.exec(line);
   return m === null ? undefined : { present: true, sha: m[1]! };
+}
+
+/** The base the checkout recorded: the pinned commit the worktree is built on. */
+export function pinnedBase(evidence: readonly EvidenceRecord[]): string | undefined {
+  const run = commandRuns(evidence, COMMAND.headTree).at(-1);
+  return run === undefined || !succeeded(run.command) ? undefined : parseHeadTree(reportText(run).text)?.base;
 }

@@ -78,12 +78,12 @@ describe.skipIf(GO === undefined)("graphloom check and rehearse on pr-review wit
     expect(report.supervisor).toMatchObject({ status: "selected", harness: "pi", source: "plugin" });
   }, 60_000);
 
-  for (const scenario of ["happy", "report", "report-corrections", "injection", "complex-function", "sandbox-unavailable"]) {
-    it(`reaches ready for the ${scenario} scenario: Fetch and Report accepted, then the run stops final at "report ready"`, async () => {
+  for (const scenario of ["happy", "report", "report-corrections", "injection", "complex-function", "sandbox-unavailable", "answer-finds-existing-helper", "answer-no-library-with-whole-repo-search", "answer-checker-contradicts", "needs-author-purpose", "purpose-stated", "missing-test", "crap-upper-bound"]) {
+    it(`reaches ready for the ${scenario} scenario: Fetch, Report, Questions and Answers accepted, then the run stops final at "report ready"`, async () => {
       const env = await ready();
       const report = await rehearse(env.taskPath, { scenario, offline: true, commands: "stub" });
       expect(report.verdict, JSON.stringify({ blocker: report.blocker, convergence: report.convergence, boundaries: report.boundaries })).toBe("ready");
-      expect(report.convergence.actual.receipts.sort()).toEqual(["fetch", "report"]);
+      expect(report.convergence.actual.receipts.sort()).toEqual(["answers", "fetch", "questions", "report"]);
       expect(report.convergence.actual.stopReason).toBe("report ready");
       // Offline: the fake GitHub was never asked.
       expect(github!.requests).toEqual([]);

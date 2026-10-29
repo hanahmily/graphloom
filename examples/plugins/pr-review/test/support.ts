@@ -10,7 +10,7 @@ import { CODING_AGENT } from "../src/constants.js";
 import { parseProfile, type Profile } from "../src/profile.js";
 import { REHEARSAL_HEAD_FILES, REHEARSAL_REQUEST, rehearsal } from "../src/rehearsal.js";
 import { validatorById } from "../src/validators.js";
-import { writtenReport } from "../src/write.js";
+import { writtenQa, writtenReport } from "../src/write.js";
 
 export const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 export const BANYANDB: Record<string, unknown> = JSON.parse(readFileSync(path.join(root, "profiles", "banyandb.json"), "utf8"));
@@ -24,6 +24,8 @@ export interface Simulation {
   final: GraphDecision;
   /** What the report-write command wrote. */
   written?: { json: string; markdown: string };
+  /** What the qa-write command wrote: qa.json and the whole review.md. */
+  qa?: { json: string; markdown: string };
 }
 
 interface Options {
@@ -90,6 +92,7 @@ export function simulate(options: Options = {}): Simulation {
     return list[i];
   };
   let written: Simulation["written"];
+  let qa: Simulation["qa"];
   let lastWork: string | undefined;
   let digest = "d0";
   for (let step = 0; step < (options.maxSteps ?? 60); step += 1) {
@@ -112,7 +115,7 @@ export function simulate(options: Options = {}): Simulation {
     const decision = advancePullRequest(view);
     decisions.push(decision);
     const action = decision.action;
-    if (action.type === "stop" || action.type === "supervise") return { decisions, jobs, evidence, receipts, final: decision, ...(written !== undefined ? { written } : {}) };
+    if (action.type === "stop" || action.type === "supervise") return { decisions, jobs, evidence, receipts, final: decision, ...(written !== undefined ? { written } : {}), ...(qa !== undefined ? { qa } : {}) };
     if (action.type === "observe") {
       for (const p of action.observe.paths ?? []) {
         const bytes = files[p];
@@ -156,6 +159,7 @@ export function simulate(options: Options = {}): Simulation {
         const stub = scenario.commands?.[c.id];
         if ((stub?.exitCode ?? 0) !== 0 && input.continueOnFailure !== true) stopped = true;
         if (c.id === "report-write") written = writtenReport(c.argv);
+        if (c.id === "qa-write") qa = writtenQa(c.argv);
         evidence.push({ ref: `e${(n += 1)}`, kind: "command", candidateDigest: digest, payload: { producer, command: { id: c.id, argv: c.argv, exitCode: stub?.exitCode ?? 0, stdoutTail: stub?.stdout ?? "", stderrTail: stub?.stderr ?? "" } } });
       }
     } else {
