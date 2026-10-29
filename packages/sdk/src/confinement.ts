@@ -121,6 +121,11 @@ function dockerProblem(v: Record<string, unknown>): string | undefined {
     if (typeof value !== "string" || value.length > MAX_ENV_VALUE_CHARS || value.includes("\0")) {
       return `confinement.env.${name}: must be a string of at most ${MAX_ENV_VALUE_CHARS} characters`;
     }
+    // A value that names the run's scratch directory is a path the runner creates before the container starts.
+    if (value.startsWith(SCRATCH_MOUNT_PREFIX)) {
+      const problem = pathProblem(`confinement.env.${name}`, value, dockerPath);
+      if (problem !== undefined) return problem;
+    }
   }
   return undefined;
 }

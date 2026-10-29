@@ -91,7 +91,7 @@ describe("graphloom doctor --task", () => {
     const { report, code, text } = await doctorTask(env, "task.yaml");
     expect(code).toBe(1);
     expect(row(report, "plugin")).toMatchObject({ status: "pass", detail: "hello@0.1.0" });
-    expect(row(report, "environment has-sh")).toMatchObject({ status: "pass" });
+    expect(row(report, "environment has-sh")).toMatchObject({ status: "pass", detail: "ok" });
     expect(row(report, "environment needs-docker")).toMatchObject({ status: "fail", detail: expect.stringContaining("docker is required"), fix: expect.stringContaining("graphloom check") });
     expect(row(report, "supervisor selection")).toMatchObject({ status: "pass", detail: expect.stringContaining("pi (minimax-cn/MiniMax-M3") });
 

@@ -276,6 +276,39 @@ describe.skipIf(unavailable !== undefined)("a command job in a docker confinemen
     expect(result.summary).toMatch(/environment from the confinement's env/);
   });
 
+  it("lets an environment value name a scratch directory, which the container sees at its host path", async () => {
+    const [out] = await runCommands(
+      [{ id: "s", argv: sh('echo "$CACHE" && echo built > "$CACHE/f"') }],
+      { writable: [".", "@scratch/cache"], env: { HOME: "/tmp", CACHE: "@scratch/cache" } },
+    );
+    expect(out!.stdoutTail.trim()).toBe(path.join(scratch, "cache"));
+    expect(await readFile(path.join(scratch, "cache", "f"), "utf8")).toBe("built\n");
+    // A value that names scratch where none exists is refused, not passed on.
+    const noScratch = await runner.runJob(job([{ id: "s", argv: ["true"] }], { env: { CACHE: "@scratch/x" } }), { ...ctx(), scratchDir: undefined as never });
+    expect(noScratch.status).toBe("failed");
+  });
+
+  it("refuses an environment value that leaves the scratch directory, before anything is created or removed", async () => {
+    const victim = path.join(dir, "victim");
+    await writeFile(victim, "keep\n");
+    for (const value of ["@scratch/../victim", "@scratch/a/../../victim", "@scratch/"]) {
+      const result = await runner.runJob(job([{ id: "s", argv: ["true"] }], { env: { CACHE: value } }), ctx()).then(
+        (r) => r.summary,
+        (e: unknown) => String(e),
+      );
+      expect(result, value).toMatch(/env\.CACHE|scratch|refus/i);
+    }
+    expect(await readFile(victim, "utf8")).toBe("keep\n");
+  });
+
+  it("gives a command its report file, and only that file: what it writes there is the command's report, and the executor's other artifacts stay out of reach", async () => {
+    const [out] = await runCommands([{ id: "r", argv: sh('echo reported > "$GRAPHLOOM_REPORT_FILE"; ls "$(dirname "$GRAPHLOOM_REPORT_FILE")" | wc -l; echo "$GRAPHLOOM_REPORT_FILE"') }]);
+    expect(out!.report).toEqual({ text: "reported\n", truncated: false });
+    // Only the report file is mounted from the artifact directory: its directory holds nothing else in the container.
+    expect(out!.stdoutTail.split("\n")[0]!.trim()).toBe("1");
+    expect(out!.stdoutTail).toContain(path.join(dir, "artifacts", "reports"));
+  });
+
   it("refuses an image that is not pinned by digest, before anything runs", async () => {
     await expect(runner.runJob(job([{ id: "x", argv: ["true"] }], { image: "busybox:1.36" }), ctx())).rejects.toThrow(/pinned by digest/);
   });

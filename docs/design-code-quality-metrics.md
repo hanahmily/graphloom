@@ -420,3 +420,33 @@ The static tools (`gometrics`, `tsmetrics`, source under
   since §2.1 lists only `&&`, `||` and `??`.
 - **Coverage of an empty function.** With no executable statements,
   `cov = 1`.
+
+### 5.2 Coverage as implemented in P1
+
+The pr-review graph measures coverage as [pr-review §12.2](design-pr-review-graph.md#122-confinement) lists
+("As built for coverage"). Points that §2.3 left open:
+
+- **Report.** A coverage command writes `graphloom-coverage-v1`, line-based text: the test command's exit
+  status and result lines, then the facts, reduced inside the sandbox to the changed functions' line ranges so
+  that they fit a 64 KiB command report. Go: one `B <path>:<l>.<c>,<l>.<c> <statements> <count>` line per block;
+  TypeScript: one `S <path> <line> <count>` line per statement. The report is what the graph recomputes
+  coverage from; no coverage value is stored anywhere else.
+- **Go, several modules and test binaries.** `go test` runs once per module that holds a touched package, with
+  `-coverprofile -covermode=set -coverpkg=<its touched packages> <them>`. With several test binaries it appends one
+  profile after another, so a block can occur once per binary; it counts once and is covered when any occurrence
+  is. Module-path prefixes become repository paths.
+- **Whose block.** A block belongs to the innermost function that holds its start line. Go starts a nested
+  function's body block on the line of its opening brace, so a nested function owns its first line and not its
+  last; TypeScript statements are whole lines, so a nested function's boundary lines are its enclosing function's
+  statements. A nested function on one line owns nothing.
+- **Empty and absent.** A function whose file the tool knew but that holds no statement has `cov = 1`. A file the
+  tool did not know is `not run`: its package did not build offline (named), has no test files (named), or no
+  test ran.
+- **Not run.** Docker or its daemon unavailable, the image missing and not pullable, no cache directory on the
+  host, a package that did not build, no coverage provider, a mismatched major (`not run (@vitest/coverage-v8
+  <range> does not match vitest <range>)`), dependencies not installable offline, a report that did not fit:
+  each is a per-function reason, and the unknown-coverage rule applies.
+- **Limits.** At most 8 TypeScript workspaces per run, one install at the repository root (`package-lock.json` or
+  `npm install --offline`), and the sandbox writes the one report file, so a pull request's test that outlives
+  the tool could write a coverage report of its own: coverage is evidence about the run, not a proof against the
+  code it ran.

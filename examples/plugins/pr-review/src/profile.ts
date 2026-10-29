@@ -7,7 +7,7 @@
  * controller passes it opaquely; only this module reads it. Unknown fields
  * are refused, as issue-fix's parser refuses them.
  */
-import { GRAPH_BUDGET_KEYS, MAX_JOB_TIMEOUT_MS, SUPERVISOR_HARNESSES, type EnvironmentCommand, type GraphBudgetDefaults, type SupervisorPreference } from "@graphloom/sdk";
+import { confinementProblem, GRAPH_BUDGET_KEYS, MAX_JOB_TIMEOUT_MS, SUPERVISOR_HARNESSES, type EnvironmentCommand, type GraphBudgetDefaults, type SupervisorPreference } from "@graphloom/sdk";
 import { RESERVED_CHECKS } from "./constants.js";
 
 export type SectionId = string;
@@ -63,8 +63,22 @@ export interface MetricsConfig {
   mutation: { enabled: boolean; timeBudgetMs?: number };
   /** Per language: which changed files are measured, by glob. */
   files: Partial<Record<"go" | "typescript", string[]>>;
-  /** The Docker sandbox's image and limits per language; used by the coverage jobs of a later version. */
-  sandbox?: Record<string, unknown>;
+  /** The Docker sandbox's image and limits per language, over the defaults (`resolveSandbox`). */
+  sandbox?: Partial<Record<"go" | "typescript", SandboxConfig>>;
+}
+
+/** What a profile may say about one language's Docker sandbox; the rest is the default. */
+export interface SandboxConfig {
+  /** `name@sha256:<digest>`; a tag is refused. */
+  image?: string;
+  cpus?: number;
+  /** Memory, and swap equal to it. */
+  memory?: string;
+  pids?: number;
+  /** Size of `/tmp`. */
+  tmp?: string;
+  /** Wall clock of each container. */
+  wallClockMs?: number;
 }
 
 export type Role = "reporter" | "report-checker" | "questioner" | "answerer" | "answer-checker";
@@ -97,7 +111,7 @@ export interface ProfileData {
   report?: { sections: SectionConfig[] };
   symbols?: { packs: SymbolPack[] };
   questions?: { excludeRoots?: string[]; similarity?: number; maxCandidates?: number };
-  metrics?: Partial<MetricsConfig> & { sandbox?: Record<string, unknown> };
+  metrics?: Partial<MetricsConfig>;
   context?: ContextRef[];
   privateRepos?: string[];
   harnesses?: Partial<Record<Role, string>>;
@@ -126,6 +140,11 @@ export interface Profile {
   limits: Limits;
   agentTimeoutMs?: number;
 }
+
+/** The sandbox's limits when a profile says nothing: the ones issue-fix's banyandb-ql `bench-gates` already uses (design-code-quality-metrics.md §4). */
+export const SANDBOX_LIMITS = { cpus: 4, memory: "8g", pids: 512, tmp: "1g", wallClockMs: 30 * 60_000 } as const;
+/** A digest-shaped placeholder, so the limits are checked alone. */
+const SANDBOX_PROBE_IMAGE = `probe@sha256:${"0".repeat(64)}`;
 
 export const DEFAULT_LIMITS: Limits = { maxFiles: 150, maxPatchBytes: 1024 * 1024, maxNewSymbols: 200 };
 export const DEFAULT_SUPERVISOR_PREFERENCE: SupervisorPreference = { harnesses: ["pi", "claude-code", "codex"] };
@@ -312,7 +331,7 @@ function checkMetrics(raw: unknown, defaults: MetricsConfig): MetricsConfig {
     need(mu.timeBudgetMs === undefined || isCount(mu.timeBudgetMs), "metrics.mutation.timeBudgetMs must be a positive integer");
     mutation = { enabled: (mu.enabled as boolean | undefined) ?? true, ...(mu.timeBudgetMs !== undefined ? { timeBudgetMs: mu.timeBudgetMs as number } : {}) };
   }
-  if (m.sandbox !== undefined) need(isObject(m.sandbox), "metrics.sandbox must be an object of per-language sandbox settings");
+  const sandbox = checkSandbox(m.sandbox);
   const files: MetricsConfig["files"] = {};
   for (const key of ["go", "typescript"] as const) {
     const lang = m[key] as { files?: string[] } | undefined;
@@ -323,8 +342,29 @@ function checkMetrics(raw: unknown, defaults: MetricsConfig): MetricsConfig {
     coverage: (m.coverage as boolean | undefined) ?? defaults.coverage,
     mutation,
     files,
-    ...(m.sandbox !== undefined ? { sandbox: structuredClone(m.sandbox) as Record<string, unknown> } : {}),
+    ...(sandbox !== undefined ? { sandbox } : {}),
   };
+}
+
+/**
+ * `metrics.sandbox`: per language (`go`, `typescript`), the image (pinned by digest, a tag is refused) and the
+ * limits, each checked by the SDK's own docker-confinement rules so that what a profile accepts is what a job runs.
+ */
+function checkSandbox(raw: unknown): MetricsConfig["sandbox"] {
+  if (raw === undefined) return undefined;
+  need(isObject(raw), "metrics.sandbox must be an object of per-language sandbox settings");
+  const out: NonNullable<MetricsConfig["sandbox"]> = {};
+  for (const [language, value] of Object.entries(raw as Record<string, unknown>)) {
+    const where = `metrics.sandbox.${language}`;
+    need(language === "go" || language === "typescript", `${where} is not a language with a sandbox; the languages are go and typescript`);
+    need(isObject(value), `${where} must be an object`);
+    const v = value as Record<string, unknown>;
+    onlyKeys(v, where, ["image", "cpus", "memory", "pids", "tmp", "wallClockMs"]);
+    const problem = confinementProblem({ kind: "docker", writable: [], readOnly: [], env: {}, ...SANDBOX_LIMITS, image: SANDBOX_PROBE_IMAGE, ...v });
+    need(problem === undefined, `${where}.${(problem ?? "").replace(/^confinement\./, "")}`);
+    out[language as "go" | "typescript"] = structuredClone(v) as SandboxConfig;
+  }
+  return out;
 }
 
 function checkContext(raw: unknown): ContextRef[] {

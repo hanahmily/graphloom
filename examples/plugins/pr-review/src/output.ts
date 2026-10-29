@@ -2,7 +2,7 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 import type { Fact } from "./detectors.js";
-import { renderMeasurements, notRunReasons, type MeasurementState } from "./measurements.js";
+import { coverageNotes, renderMeasurements, notRunReasons, type MeasurementState } from "./measurements.js";
 import type { Profile } from "./profile.js";
 import { renderReport, type FinalReport } from "./report.js";
 import type { PullRequest } from "./request.js";
@@ -37,8 +37,8 @@ export function reportJson(i: OutputInput): string {
     removed: i.final.removed,
     measurements:
       m.state === "ready"
-        ? { tools: "static", coverage: reasons.coverage, mutation: reasons.mutation, records: m.records }
-        : { tools: "static", coverage: reasons.coverage, mutation: reasons.mutation, records: [], none: m.state === "none" ? m.reason : "not measured" },
+        ? { tools: m.coverage.runs.some((r) => r.ran) ? "static+coverage" : "static", coverage: coverageNotes(m.coverage), runs: m.coverage.runs, mutation: reasons.mutation, records: m.records }
+        : { tools: "static", coverage: [reasons.coverage], runs: [], mutation: reasons.mutation, records: [], none: m.state === "none" ? m.reason : "not measured" },
   });
 }
 

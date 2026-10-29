@@ -52,13 +52,30 @@ One `graphloom-metrics-v1` document:
 - `files`: every function of each changed, measured file as
   `[name, startLine, endLine]`, closures included, so scope can be checked.
 - `skipped`: `generated`, `unsupported-language` or `not-in-head`.
-- Coverage, `crap` and `mutation` are added by later stages.
+- Coverage and `crap` are added from the sandbox's coverage report (below); `mutation` by a later stage.
 
 Names: Go `pkg.Func`, `pkg.Recv.Method`, `pkg.(*Recv).Method`, type
 parameters as `[...]`. TypeScript `<module path>.<Class>.<member>`, with the
 module path being the repository path without its extension. Closures are
 `<enclosing>.func<n>`, numbered per enclosing function in source order. A
 package-level or module-level literal belongs to `<pkg|module>.glob`.
+
+## Coverage tools (run in the Docker sandbox)
+
+Unlike the static tools, these run the measured repository's own tests, so they run only inside the Docker
+sandbox ([pr-review design §12.2](../../../../docs/design-pr-review-graph.md#122-confinement)), over a
+checkout of the head. Each is a plugin script, mounted read-only into the container, that writes a
+`graphloom-coverage-v1` report to `$GRAPHLOOM_REPORT_FILE` and exits 0 once it has (the report carries the test
+command's exit status):
+
+| Script | Runs | Needs |
+|---|---|---|
+| `tools/cover/go.sh <n> <spec chunk…>` | `go test -coverprofile -covermode=set -coverpkg=<touched> <touched>` once per module, then `goprofile.awk` reduces the profile to the changed functions | the image's `go`, the host module cache (read-only), `GOFLAGS=-mod=readonly GOPROXY=off GOTOOLCHAIN=local` |
+| `tools/cover/ts.sh <n> <spec chunk…>` | the repository's own `vitest run --coverage.enabled --coverage.provider=v8 --coverage.reporter=json` in one workspace, installing its locked dependencies first with `npm ci --offline --ignore-scripts` when the checkout has no `node_modules`; `dist/metrics/tscover-cli.js` reduces `coverage-final.json` | the image's `node` and `npm`, the host npm cache (read-only); `@vitest/coverage-v8` in the repository, at vitest's major |
+
+The spec (`pkg`, `ws`, `file`, `fn` lines; `formatSpec` in `src/metrics/coverage.ts`) travels in the command's
+argv. `src/metrics/coverage.ts` also holds the report parser and the attribution that the graph and the
+`measurements` validator share. `awk -f tools/cover/goprofile.awk -v mp=<module path> -v root=<module root> spec.txt cover.out` runs on its own.
 
 ## Library and validation
 

@@ -43,7 +43,7 @@ export const MAX_CHECK_RETRIES = 2;
 /** Environment checks the graph adds to the profile's own: where the worktree and the plugin live. */
 export const ENV_WORKTREE = "worktree";
 export const ENV_PLUGIN_ROOT = "plugin-root";
-export const RESERVED_CHECKS: readonly string[] = [ENV_WORKTREE, ENV_PLUGIN_ROOT];
+export const RESERVED_CHECKS: readonly string[] = [ENV_WORKTREE, ENV_PLUGIN_ROOT, "docker-go", "docker-typescript"];
 
 /** Command ids the graph owns. */
 export const COMMAND = {
@@ -66,6 +66,13 @@ export const COMMAND = {
   qaWrite: "qa-write",
   ledgerPrior: "ledger-prior",
   ledgerWrite: "ledger-write",
+  /** The Docker sandbox image checks of Fetch: `sandbox-go`, `sandbox-typescript` (design §12.2). */
+  sandboxPrefix: "sandbox-",
+  hostGoModcache: "host-go-modcache",
+  hostNpmCache: "host-npm-cache",
+  /** The coverage commands, `cover-go` and `cover-ts-<n>`. */
+  coverGo: "cover-go",
+  coverTs: "cover-ts",
 } as const;
 
 /** The questioner's and the answerer's session keys, so a correction continues the previous session. */

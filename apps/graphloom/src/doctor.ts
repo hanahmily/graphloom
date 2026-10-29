@@ -335,7 +335,7 @@ export interface TaskInputs {
   /** Why the plugin could not be described. */
   error?: string;
   /** The plugin's environment checks: each id with its failure, if any. */
-  environment: Array<{ id: string; argv: string[]; error?: string }>;
+  environment: Array<{ id: string; argv: string[]; stdout?: string; error?: string }>;
   /**
    * The enabled supervisor harnesses probed as `run` would probe them for this
    * task: on their models reordered by the plugin's hints
@@ -446,9 +446,12 @@ export function taskChecks(d: Discovery, task: TaskInputs): DoctorCheck[] {
   }
   checks.push(check("task", "plugin", "pass", `${task.definition.graphId}@${task.definition.version}`));
   for (const env of task.environment) {
+    // A check that prints a state (`ready`, `unavailable: …`, a path) is reported by it, so a graph's non-failing
+    // probe (a docker sandbox image, say) shows what it found; one that prints nothing shows its command.
+    const printed = env.stdout?.trim().split("\n").at(-1)?.trim() ?? "";
     checks.push(
       env.error === undefined
-        ? check("task", `environment ${env.id}`, "pass", env.argv.join(" "))
+        ? check("task", `environment ${env.id}`, "pass", printed !== "" ? printed : env.argv.join(" "))
         : check("task", `environment ${env.id}`, "fail", `${env.argv.join(" ")}: ${env.error}`, `make \`${env.argv.join(" ")}\` succeed in the task's repository, then graphloom check ${task.taskPath}`),
     );
   }

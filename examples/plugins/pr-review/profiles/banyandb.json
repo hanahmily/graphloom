@@ -1,6 +1,6 @@
 {
   "name": "banyandb",
-  "description": "Report profile for incoming pull requests to apache/skywalking-banyandb. The report.sections routing globs follow the repository's layout as the design maps it (design-pr-review-graph.md 6.2) and are TO CONFIRM against the repository before a live run; a glob that matches nothing only means less routing, the generic detectors still run.",
+  "description": "Report profile for incoming pull requests to apache/skywalking-banyandb. metrics.sandbox.go.image is golang:1.26.10 (go.mod needs go 1.26.x), pinned by digest; refresh it with docker pull and docker image inspect when go.mod moves. The report.sections routing globs follow the repository's layout as the design maps it (design-pr-review-graph.md 6.2) and are TO CONFIRM against the repository before a live run; a glob that matches nothing only means less routing, the generic detectors still run.",
   "project": "apache/skywalking-banyandb",
   "issues": {
     "owner": "apache",
@@ -100,7 +100,17 @@
     "maxCandidates": 5
   },
   "metrics": {
-    "generated": ["**/*.pb.go", "**/*.pb.validate.go", "**/*_mock.go", "**/mock_*.go"]
+    "generated": ["**/*.pb.go", "**/*.pb.validate.go", "**/*_mock.go", "**/mock_*.go"],
+    "sandbox": {
+      "go": {
+        "image": "golang@sha256:670bb5aa5349ae03b8516764718486f4f16399134bdc9acd0c46a23f043ab05c",
+        "cpus": 4,
+        "memory": "8g",
+        "pids": 512,
+        "tmp": "1g",
+        "wallClockMs": 1800000
+      }
+    }
   },
   "privateRepos": [],
   "harnesses": {

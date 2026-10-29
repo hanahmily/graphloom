@@ -148,12 +148,17 @@ export const measurements: Validator = profiled((input, profile) => {
   switch (m.state) {
     case "none":
       return passed(`no function to measure: ${m.reason}`);
-    case "ready":
-      return passed(`${m.records.length} function(s) the pull request adds or modifies were measured by the pinned static tools over the head tree and recompute from its bytes; coverage and mutation are recorded as not run`);
+    case "ready": {
+      const measured = m.records.filter((r) => r.coverage?.source === "measured").length;
+      const where = m.coverage.runs.filter((r) => r.ran).map((r) => r.language).join(", ");
+      return passed(
+        `${m.records.length} function(s) the pull request adds or modifies were measured by the pinned static tools over the head tree and recompute from its bytes; coverage ${m.coverage.enabled ? `was measured in the Docker sandbox for ${measured} of them${where !== "" ? ` (${where})` : ""}, recomputed from its reports by line range, and the rest say why it was not run` : "is off in the profile"}; mutation is recorded as not run`,
+      );
+    }
     case "failed":
       return failed(m.problems.slice(0, 3).join("; "));
     default:
-      return inconclusive(`the static measurements are not complete (${m.state})`);
+      return inconclusive(`the measurements are not complete (${m.state})`);
   }
 });
 

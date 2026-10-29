@@ -36,7 +36,7 @@ describe("the report scenario, end to end through the graph", () => {
     expect(sim.jobs.filter((j) => j.stageId === "fetch" || j.stageId === "report").map((j) => j.instruction.split(" ").slice(0, 3).join(" "))).toEqual([
       "Materialize the pull",
       "Read the changed", "Read the commits", "Read the reviews", "Read the review", "Read the review", "Read the check", "Read the pull",
-      "Read the pull", "Write the change", "Check the report's", "List the changed", "Measure the changed", "Write .graphloom/review/review.md and",
+      "Read the pull", "Check the Docker", "Write the change", "Check the report's", "List the changed", "Measure the changed", "Write .graphloom/review/review.md and",
     ]);
     expect(sim.jobs.slice(1, 8).map((j) => j.executor!.id)).toEqual([
       "graphloom.github/list-pull-files", "graphloom.github/list-pull-commits", "graphloom.github/list-pull-reviews", "graphloom.github/list-pull-review-comments", "graphloom.github/list-review-threads", "graphloom.github/list-check-runs", "graphloom.github/get-pull",
@@ -126,12 +126,12 @@ describe("the report scenario, end to end through the graph", () => {
     expect(written.markdown).not.toMatch(/verdict|severity|request-changes|\bapprove\b/i);
   });
 
-  it("states the not-run coverage and mutation in every measurement row, with CRAP as its upper bound", () => {
-    expect(sim.written!.markdown).toContain("| `server.registerFlags` banyand/cmd/server/flags.go:12 | modified | 2 | 1 | unknown: not run (coverage arrives in a later wave) | 6 (upper bound, coverage unknown) | not run: no coverage |");
-    const records = (JSON.parse(sim.written!.json) as { measurements: { coverage: string; mutation: string; records: Array<{ coverage: unknown; crap: number }> } }).measurements;
-    expect(records.coverage).toBe("not run (coverage arrives in a later wave)");
+  it("states the not-run coverage (Docker unavailable) and mutation in every measurement row, with CRAP as its upper bound", () => {
+    expect(sim.written!.markdown).toContain("| `server.registerFlags` banyand/cmd/server/flags.go:12 | modified | 2 | 1 | unknown: not run (docker unavailable: docker is not available in a rehearsal) | 6 (upper bound, coverage unknown) | not run: no coverage |");
+    const records = (JSON.parse(sim.written!.json) as { measurements: { coverage: string[]; mutation: string; records: Array<{ coverage: unknown; crap: number }> } }).measurements;
+    expect(records.coverage).toEqual(["Coverage (go): not run (docker unavailable: docker is not available in a rehearsal)."]);
     expect(records.mutation).toBe("not run: mutation not available in this version");
-    expect(records.records[0]).toMatchObject({ coverage: { source: "unknown", reason: "not run (coverage arrives in a later wave)" }, crap: 6 });
+    expect(records.records[0]).toMatchObject({ coverage: { source: "unknown", reason: "not run (docker unavailable: docker is not available in a rehearsal)" }, crap: 6 });
   });
 
   it("covers every changed file and every detector fact, with None for the sections that have nothing", () => {
@@ -251,7 +251,7 @@ describe("complex-function (the static part)", () => {
   const sim = simulate({ scenarioName: "complex-function" });
 
   it("shows complexity 12 and nesting 4 beside their limits, with CRAP at its upper bound and no coverage", () => {
-    expect(sim.written!.markdown).toContain("| `schema.ParseTTL` pkg/schema/ttl.go:6 | added | 12 (over the limit of 10) | 4 (over the limit of 3) | unknown: not run (coverage arrives in a later wave) | 156 (upper bound, coverage unknown) | not run: no coverage |");
+    expect(sim.written!.markdown).toContain("| `schema.ParseTTL` pkg/schema/ttl.go:6 | added | 12 (over the limit of 10) | 4 (over the limit of 3) | unknown: not run (docker unavailable: docker is not available in a rehearsal) | 156 (upper bound, coverage unknown) | not run: no coverage |");
   });
 
   it("reports the new function under features, with nothing else to account for", () => {
@@ -265,7 +265,7 @@ describe("complex-function (the static part)", () => {
       s.commands!["static-go-1"]!.stdout = JSON.stringify(doc);
     });
     const bad = simulate({ scenario: tampered });
-    expect(superviseOf(bad)!.reason).toMatch(/the static measurements failed:.*complexity/);
+    expect(superviseOf(bad)!.reason).toMatch(/the measurements failed:.*complexity/);
     expect(bad.receipts.some((r) => r.requirementId === "measurements")).toBe(false);
   });
 
@@ -273,7 +273,7 @@ describe("complex-function (the static part)", () => {
     const shifted = scenarioWith("complex-function", (s) => {
       s.commands!["metrics-diff"]!.stdout = s.commands!["metrics-diff"]!.stdout!.replace("@@ -0,0 +1,35 @@", "@@ -0,0 +1,10 @@");
     });
-    expect(superviseOf(simulate({ scenario: shifted }))!.reason).toMatch(/static measurements failed/);
+    expect(superviseOf(simulate({ scenario: shifted }))!.reason).toMatch(/the measurements failed/);
     const failed = scenarioWith("complex-function", (s) => {
       s.commands!["static-go-1"] = { exitCode: 127, stderr: "go: command not found" };
     });
@@ -286,7 +286,7 @@ describe("complex-function (the static part)", () => {
 
   it("measures nothing when the head's bytes are not in the worktree (the document would not recompute)", () => {
     const sim2 = simulate({ scenarioName: "complex-function", files: {} });
-    expect(superviseOf(sim2)!.reason).toMatch(/static measurements failed/);
+    expect(superviseOf(sim2)!.reason).toMatch(/the measurements failed/);
   });
 });
 
@@ -298,13 +298,14 @@ describe("sandbox-unavailable", () => {
     expect(sim.jobs.every((j) => j.confinement === undefined || j.confinement.kind === "bwrap")).toBe(true);
     const programs = new Set(sim.jobs.flatMap((j) => ((j.input as { commands?: Array<{ argv: string[] }> }).commands ?? []).map((c) => c.argv[0]!)));
     expect([...programs].sort()).toEqual(["git", "sh"]);
-    expect(sim.written!.markdown).toContain("not run (coverage arrives in a later wave)");
+    expect(sim.written!.markdown).toContain("Coverage (go): not run (docker unavailable: docker is not available in a rehearsal).");
     expect(sim.receipts.some((r) => r.requirementId === "measurements" && r.valid)).toBe(true);
   });
 
   it("says the profile turned coverage off, when it did", () => {
     const off = simulate({ scenarioName: "sandbox-unavailable", config: { metrics: { generated: [], coverage: false, mutation: { enabled: false } } } });
-    expect(off.written!.markdown).toContain("Coverage: not run (coverage disabled by the profile). Mutation: not run (mutation disabled by the profile).");
+    expect(off.written!.markdown).toContain("Coverage: not run (coverage disabled by the profile); CRAP is shown as its upper bound.\nMutation: not run (mutation disabled by the profile).");
+    expect(jobsOf(off, "Check the Docker")).toEqual([]);
   });
 });
 

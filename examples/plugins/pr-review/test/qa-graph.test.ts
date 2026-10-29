@@ -326,7 +326,7 @@ describe("complex-function", () => {
   const sim = simulate({ scenarioName: "complex-function" });
 
   it("shows the measurement row, and answers split-function with a proposal whose ranges lie inside the function and whose names are new", () => {
-    expect(sim.qa!.markdown).toContain("| `schema.ParseTTL` pkg/schema/ttl.go:6 | added | 12 (over the limit of 10) | 4 (over the limit of 3) | unknown: not run (coverage arrives in a later wave) | 156 (upper bound, coverage unknown) | not run: no coverage |");
+    expect(sim.qa!.markdown).toContain("| `schema.ParseTTL` pkg/schema/ttl.go:6 | added | 12 (over the limit of 10) | 4 (over the limit of 3) | unknown: not run (docker unavailable: docker is not available in a rehearsal) | 156 (upper bound, coverage unknown) | not run: no coverage |");
     const a = qOf(sim, "split-function")[0]!.answer!;
     expect(a).toMatchObject({ status: "answered", proposal: { kind: "split" } });
     for (const s of a.proposal.splits) {
@@ -373,7 +373,7 @@ describe("crap-upper-bound", () => {
   const sim = simulate({ scenarioName: "crap-upper-bound" });
 
   it("shows CRAP 42 as an upper bound with unknown coverage, and asks no complexity-coverage question", () => {
-    expect(sim.qa!.markdown).toContain("| `offline.Sync` pkg/offline/sync.go:6 | modified | 6 | 2 | unknown: not run (coverage arrives in a later wave) | 42 (upper bound, coverage unknown) | not run: no coverage |");
+    expect(sim.qa!.markdown).toContain("| `offline.Sync` pkg/offline/sync.go:6 | modified | 6 | 2 | unknown: not run (docker unavailable: docker is not available in a rehearsal) | 42 (upper bound, coverage unknown) | not run: no coverage |");
     expect(qaOf(sim).questions.map((q) => q.type)).toEqual(["missing-test"]);
     expect(qaOf(sim).symbols[0]).toMatchObject({ qualified: "offline.Sync", change: "modified" });
   });

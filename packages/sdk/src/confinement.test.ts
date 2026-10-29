@@ -71,6 +71,8 @@ describe("job confinement shape", () => {
     ["a path both writable and read-only", docker({ readOnly: ["."] }), /also writable/],
     ["a bad variable name", docker({ env: { "A-B": "x" } }), /env/],
     ["a non-string variable", docker({ env: { A: 1 } }), /env\.A/],
+    ["a scratch variable that leaves scratch", docker({ env: { CACHE: "@scratch/../victim" } }), /env\.CACHE.*\.\./],
+    ["a scratch variable with no directory", docker({ env: { CACHE: "@scratch/" } }), /env\.CACHE/],
     ["an unknown field such as network", docker({ network: "host" }), /network/],
   ])("rejects a docker confinement with %s", (_name, value, pattern) => {
     expect(confinementProblem(value)).toMatch(pattern);

@@ -28,7 +28,7 @@ const HOW_TO_READ =
 
 function recordText(r: MetricsRecord): string {
   const th = checkThresholds(r);
-  return `${r.function} ${r.path}:${r.startLine}-${r.endLine} (${r.change}): complexity ${r.complexity} (limit < ${LIMITS.complexity}), nesting ${r.nesting} (limit ≤ ${LIMITS.nesting}), coverage unknown, CRAP ${th.crap.value} (upper bound)`;
+  return `${r.function} ${r.path}:${r.startLine}-${r.endLine} (${r.change}): complexity ${r.complexity} (limit < ${LIMITS.complexity}), nesting ${r.nesting} (limit ≤ ${LIMITS.nesting}), ${r.coverage?.source === "measured" ? `coverage ${r.coverage.covered} of ${r.coverage.total} statements (measured in the sandbox)` : "coverage unknown"}, CRAP ${th.crap.value}${th.crap.upperBound ? " (upper bound)" : ""}`;
 }
 
 /** The groundwork as text, in three levels of detail so it fits an executor input. */

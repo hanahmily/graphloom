@@ -11,3 +11,4 @@ export * from "./hunks.js";
 export * from "./scope.js";
 export * from "./validate.js";
 export { analyzeTypeScript, runTsMetrics, type MeasuredFunction } from "./tsmetrics.js";
+export * from "./coverage.js";
