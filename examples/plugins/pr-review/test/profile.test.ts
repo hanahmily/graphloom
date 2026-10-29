@@ -120,10 +120,11 @@ describe("profile refusals", () => {
     expect(refused({ harnesses: { answerer: "codex" } })).toMatch(/answerer must differ from harnesses.questioner/);
     expect(refused({ harnesses: { reporter: "gpt" } })).toMatch(/must be one of/);
     expect(refused({ harnesses: { "reviewer-security": "pi" } })).toMatch(/belongs to the review layer/);
+    expect(refused({ harnesses: { answerer: "pi" } })).toMatch(/answerer must be claude-code or codex/);
   });
 
   it("accepts roles that satisfy every pair", () => {
-    expect(profileOf({ harnesses: { reporter: "pi", "report-checker": "codex", questioner: "claude-code", answerer: "pi", "answer-checker": "claude-code" } }).roles.reporter).toBe("pi");
+    expect(profileOf({ harnesses: { reporter: "pi", "report-checker": "codex", questioner: "claude-code", answerer: "codex", "answer-checker": "claude-code" } }).roles.reporter).toBe("pi");
   });
 
   it("checks limits, budgets, the supervisor, privateRepos, metrics and context", () => {

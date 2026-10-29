@@ -16,7 +16,7 @@
     "vitest": "^3.0.9"
   },
   "digests": {
-    "sourceTree": "19ff21ccb0c6fe3b1fe34201733d8550bb1a25c246a5d371a22e7d56b3d5ead3",
+    "sourceTree": "1633f7d99bdaa308fbfaf9a06610dad1aeb5971e477aa3da08f1c8b9221d4227",
     "packageLock": "ae5b886a88656f187132576e5f1579a047eec7e260abddf2994bb44d6815b49a",
     "files": {
       "package.json": "b8926b1cfa5774e01aeca919da533e98f2d5f942a2289bc7e35795829f0f392f",
@@ -53,7 +53,7 @@
       "src/metrics/validate.ts": "53ccdca30d5e90d80761cabed87e9d2196367cce3b9f07b3eb3ba2e1b1caba46",
       "src/output.ts": "5886a405c1ec072de9dc60edb0853245cb4cfdaf3e77207588c8f7265c164fcd",
       "src/patch.ts": "e8dc3e4f18e01747494da71065bc048c24c331bea417ef7840fa5961084607d0",
-      "src/profile.ts": "418c2f6efb5febb7a0696814447bac05eacfc73ab96b0ad58d460317f96dd5af",
+      "src/profile.ts": "9b7ee576bd7975da2bf45e8633370b0c9ed4c48f8459ce9701c3f320234bf533",
       "src/prompts.ts": "0e73008f16b24e75fd0bc6623fb31aa55aff81a1e477ec5ad3b4747ae69a73ba",
       "src/rehearsal.ts": "7447cd56f5839520f64def8410ce5f4cb34b4cb02457f5efb84d8a41d700cb61",
       "src/report.ts": "0c1b0d7399000ee95a32a69fb31daf8659f968cc877d0e324358ed030b3f2f16",
@@ -71,7 +71,7 @@
       "test/graph.test.ts": "f25056dba560cc76ef66e66c60688a21451f0c5f6a86aec0f916f1c384013932",
       "test/hunks.test.ts": "d952cbfebc71123522fa3589d46a84a512b7ff521772dfdcfd5861de31e0715e",
       "test/manifest.test.ts": "2d9258324684392eda600edfc4b23fc30fcee9029a98234f15692ae62579c235",
-      "test/profile.test.ts": "e10c9f3b83741d59831c847a74fbb3b2122f52dc3bd857d1cebce7f46c788dcd",
+      "test/profile.test.ts": "1e2d18775f0b97d9f5ed419e2966862b13dc777ecd6d0de4eaf9b3923a2a5b82",
       "test/report.test.ts": "912f383700e11fe420c23249df5a876661c57a5b18fa6ccafea185f8954c03d9",
       "test/static-tools.test.ts": "96f28fbd89143d951bf59a7167ab3ea2c99fc4fec716a761f1cf6a8063729bd3",
       "test/support.ts": "1c4fcecf80b5337b1252529c0ca64fabece290a0889a523ed1e2bf88ef79cfa7",

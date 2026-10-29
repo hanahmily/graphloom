@@ -369,6 +369,8 @@ function checkRoles(raw: unknown): Record<Role, string> {
     need(typeof v === "string" && HARNESSES[v] !== undefined, `harnesses.${role} must be one of ${Object.keys(HARNESSES).join(", ")}`);
     roles[role] = v as string;
   }
+  // The maintainer opens the answerer's session (design §13.1), and a Pi session has no interactive restore.
+  need(roles.answerer !== "pi", 'harnesses.answerer must be claude-code or codex: a Pi session cannot be opened by the maintainer, so the review layer could not continue from it');
   for (const [checked, author] of DISTINCT_PAIRS) {
     need(roles[checked] !== roles[author], `harnesses.${checked} must differ from harnesses.${author} (both are ${roles[checked]}): an artifact is checked on a harness other than its author's`);
   }
