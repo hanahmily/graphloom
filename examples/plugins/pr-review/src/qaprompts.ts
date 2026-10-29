@@ -84,7 +84,7 @@ export interface QuestionerAssignment {
 
 /** The questioner's assignment (design §7.1): ask, never answer. */
 export function questionerInstruction(a: QuestionerAssignment): string {
-  const items = changeItems(a.view).map((i) => `${i.id} [${i.section}] ${oneLine(i.text)} — ${i.cites.map(citeLabel).join(", ")}`);
+  const items = changeItems(a.view).map((i) => `${i.id} [${i.section}] ${oneLine(i.text)} — ${i.cites.map((c) => citeLabel(c)).join(", ")}`);
   return [
     `You are the questioner for ${a.pr.owner}/${a.pr.repo}#${a.pr.number} at head ${a.pr.head}. Another agent wrote the change report; plugin rules decided which questions are required. You phrase and group the questions and may add others. You only ask: you never answer, and you are read-only.`,
     "",

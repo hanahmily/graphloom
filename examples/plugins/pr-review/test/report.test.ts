@@ -4,6 +4,7 @@
 import { validateResultShape } from "@graphloom/sdk";
 import { describe, expect, it } from "vitest";
 import { detectFacts } from "../src/detectors.js";
+import { pinnedTexts } from "../src/questions.js";
 import { assembleReport, asReporterOutput, CHANGE_REPORT_SCHEMA, MAX_ITEM_CHARS, MAX_ITEMS_PER_SECTION, numbered, parseReporterOutput, renderReport, reportProblems, type Cite, type ReportContext, type ReportItem, type ReporterOutput } from "../src/report.js";
 import { pullFile, type PullFile } from "../src/snapshot.js";
 import { reporterSections } from "../src/template.js";
@@ -15,10 +16,11 @@ const GO_PATCH = "@@ -10,3 +10,4 @@ func f() {\n a\n-old\n+new\n+newer\n b";
 const files = [file("pkg/a.go", "modified", GO_PATCH), file("docs/x.md", "added", "@@ -0,0 +1 @@\n+text here"), file("img/logo.png", "modified", null), file("new/name.go", "renamed", null, { previousPath: "old/name.go" }), file("gone.go", "removed", "@@ -1,2 +0,0 @@\n-package gone\n-func Gone() {}")];
 const sections = reporterSections({ sections: [] });
 const facts = detectFacts(files, { sections: [] });
-const ctx: ReportContext = { sections, files, facts };
+const PULL = { title: "Add the things the maintainers asked for", body: "The change lets writers keep the first error of a batch.\n\nIt also renames a file." };
+const ctx: ReportContext = { sections, files, facts, pinned: pinnedTexts(PULL, [{ message: "Keep the first error of a batch" }]), candidates: [] };
 
 const cite = (path: string, side: "head" | "base" = "head", start = 0, end = 0, symbol = ""): Cite => ({ path, side, start, end, symbol });
-const item = (text: string, cites: Cite[], factIds: string[] = []): ReportItem => ({ text, cites, facts: factIds });
+const item = (text: string, cites: Cite[], factIds: string[] = []): ReportItem => ({ text, cites, facts: factIds, state: [], behavior: [] });
 
 /** A report that passes every rule, with the given items in `other`, and each fact listed by an item of its section. */
 function valid(extra: ReportItem[] = []): ReporterOutput {
@@ -33,7 +35,7 @@ function valid(extra: ReportItem[] = []): ReporterOutput {
     ...extra,
   );
   for (const s of secs) s.none = s.items.length === 0;
-  return { sections: secs, notes: [] };
+  return { purpose: { text: "Lets writers keep the first error of a batch.", source: "stated", quote: "keep the first error of a batch" }, overview: "The change keeps the first error of a batch. It renames a file.", sections: secs, notes: [] };
 }
 
 const problems = (r: ReporterOutput): string[] => reportProblems(r, ctx);
@@ -52,7 +54,7 @@ describe("the change-report-v1 contract", () => {
   });
 
   it("has every property required, so no model can leave one out", () => {
-    expect(parseReporterOutput({ sections: [] })).toEqual({ problems: [expect.stringMatching(/notes is required/)] });
+    expect(parseReporterOutput({ sections: [] })).toEqual({ problems: expect.arrayContaining([expect.stringMatching(/notes is required/), expect.stringMatching(/purpose is required/), expect.stringMatching(/overview is required/)]) });
     expect(parseReporterOutput({ notes: [], sections: [{ id: "x", none: true, items: [{ text: "a", cites: [], facts: [] }, { text: 1 }] }] })).toMatchObject({ problems: expect.any(Array) });
   });
 });
@@ -188,7 +190,7 @@ describe("the assembled report (design 6.4)", () => {
   it("with nothing removed it is the report, and passes the same rules", () => {
     const final = assembleReport(valid(), new Map(), ctx);
     expect(final.removed).toEqual([]);
-    expect(reportProblems(asReporterOutput(final), ctx)).toEqual([]);
+    expect(reportProblems(asReporterOutput(final), ctx, { final: true })).toEqual([]);
     expect(final.sections.find((s) => s.id === "claims")!.none).toBe(true);
   });
 
@@ -201,7 +203,7 @@ describe("the assembled report (design 6.4)", () => {
     const auto = final.sections.find((s) => s.id === "other")!.items.filter((i) => i.auto !== undefined);
     expect(auto.map((i) => [i.text, i.auto, i.cites.map((c) => c.path)])).toEqual([["docs/x.md changed (+2 −1 lines); not summarised", "coverage", ["docs/x.md"]]]);
     expect(final.sections.flatMap((s) => s.items).some((i) => i.id === docs.id)).toBe(false);
-    expect(reportProblems(asReporterOutput(final), ctx)).toEqual([]);
+    expect(reportProblems(asReporterOutput(final), ctx, { final: true })).toEqual([]);
   });
 
   it("lists a renamed file under both names, and a deleted file's base side", () => {
@@ -213,7 +215,7 @@ describe("the assembled report (design 6.4)", () => {
     const gone = numbered(r, ctx).find((i) => i.item.cites[0]!.path === "gone.go")!;
     const f2 = assembleReport(r, new Map([[gone.id, "unsupported"]]), ctx);
     expect(f2.sections.find((s) => s.id === "removed")!.items.some((i) => i.auto === "fact")).toBe(true);
-    expect(reportProblems(asReporterOutput(f2), ctx)).toEqual([]);
+    expect(reportProblems(asReporterOutput(f2), ctx, { final: true })).toEqual([]);
   });
 
   it("gives a detector fact whose item was removed an item of its own, so facts stay accounted for", () => {
@@ -224,19 +226,19 @@ describe("the assembled report (design 6.4)", () => {
     expect(auto).toHaveLength(1);
     expect(auto[0]!.facts).toEqual(first.item.facts);
     expect(auto[0]!.text).toMatch(/^Detected: /);
-    expect(reportProblems(asReporterOutput(final), ctx)).toEqual([]);
+    expect(reportProblems(asReporterOutput(final), ctx, { final: true })).toEqual([]);
   });
 
   it("groups the fallback items when removing an item would leave more uncited files than a section can hold", () => {
     const many = Array.from({ length: 50 }, (_, i) => file(`docs/f${i}.md`, "added", "@@ -0,0 +1 @@\n+text here"));
-    const big: ReportContext = { sections, files: many, facts: [] };
+    const big: ReportContext = { ...ctx, files: many, facts: [] };
     const secs = sections.map((s) => ({ id: s.id, none: s.id !== "other", items: [] as ReportItem[] }));
-    secs.find((s) => s.id === "other")!.items = [item("All the docs.", many.map((f) => cite(f.path)))];
-    const r: ReporterOutput = { sections: secs, notes: [] };
+    secs.find((s) => s.id === "other")!.items = [item("All the docs.", many.map((f) => cite(f.path, "head", 1, 1)))];
+    const r: ReporterOutput = { ...valid(), sections: secs };
     expect(reportProblems(r, big)).toEqual([]);
     const final = assembleReport(r, new Map([["R1", "unsupported"]]), big);
     expect(final.sections.find((s) => s.id === "other")!.items.length).toBeLessThanOrEqual(MAX_ITEMS_PER_SECTION);
-    expect(reportProblems(asReporterOutput(final), big)).toEqual([]);
+    expect(reportProblems(asReporterOutput(final), big, { final: true })).toEqual([]);
   });
 
   it("a section left with no items says None", () => {
@@ -257,7 +259,8 @@ describe("rendering the Report part of review.md", () => {
 
   it("lists items with ids, citations and fact ids; the base side and symbols are shown", () => {
     expect(text).toContain("- R1.");
-    expect(text).toMatch(/Edits pkg\/a\.go\. — pkg\/a\.go:11-12 #new/);
+    expect(text).toMatch(/Edits pkg\/a\.go\. — pkg\/a\.go:11-12$/m);
+    expect(text).not.toMatch(/#new/);
     expect(text).toMatch(/gone\.go:\d+ \(base\)/);
     expect(text).toMatch(/\[D\d+\]/);
   });

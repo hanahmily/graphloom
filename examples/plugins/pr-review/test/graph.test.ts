@@ -120,7 +120,7 @@ describe("the report scenario, end to end through the graph", () => {
     const written = sim.written!;
     const json = JSON.parse(written.json) as Record<string, unknown>;
     expect(json.schema).toBe("pr-change-report-v1");
-    expect(Object.keys(json).sort()).toEqual(["checks", "commits", "facts", "files", "measurements", "notes", "pull", "removed", "schema", "sections"]);
+    expect(Object.keys(json).sort()).toEqual(["checks", "commits", "facts", "files", "measurements", "notes", "pull", "removed", "removedParts", "schema", "sections", "summary"]);
     expect(written.markdown).toMatch(/^# apache\/skywalking-banyandb#7 at 0123456789ab \(base fedcba987654\)\nContents: Report · Measurements · Q&A/);
     expect(written.markdown).toMatch(/\n# Report\n[\s\S]*\n# Measurements\n[\s\S]*\n# Q&A\n/);
     expect(written.markdown).not.toMatch(/verdict|severity|request-changes|\bapprove\b/i);
@@ -155,7 +155,7 @@ describe("report-corrections", () => {
     expect(correction).toMatch(/changed file\(s\) no item cites: docs\/retention\.md/);
     expect(correction).toMatch(/line\(s\) 90, 91, 92 on the head side are outside the file's hunks/);
     const revision = assignmentOf(reporters[2]!);
-    expect(revision).toMatch(/The claim check could not support the items below/);
+    expect(revision).toMatch(/The claim check could not support the claims below/);
     expect(revision).toMatch(/describing a retention dashboard.*the claim check: unsupported: the diff does not show this/);
     expect(jobsOf(sim, "Check the report")).toHaveLength(2);
   });
@@ -499,7 +499,7 @@ describe("agentConfigMasks", () => {
 
 describe("the worktree the scenarios assume", () => {
   it("holds the head files the static metrics read", () => {
-    expect(Object.keys(REHEARSAL_HEAD_FILES).sort()).toEqual(["banyand/cmd/server/flags.go", "pkg/offline/sync.go", "pkg/quota/limit.go", "pkg/retention/ttl.go", "pkg/retry/backoff.go", "pkg/schema/ttl.go", "pkg/spread/jitter.go"]);
+    expect(Object.keys(REHEARSAL_HEAD_FILES).sort()).toEqual(["banyand/cmd/server/flags.go", "banyand/stream/write_standalone.go", "pkg/offline/sync.go", "pkg/quota/limit.go", "pkg/retention/ttl.go", "pkg/retry/backoff.go", "pkg/schema/ttl.go", "pkg/spread/jitter.go"]);
     expect(REHEARSAL_REQUEST).toBe(`Report on apache/skywalking-banyandb#7 at ${REHEARSAL_HEAD}.`);
     const _s: RehearsalScenario | undefined = undefined;
     void _s;

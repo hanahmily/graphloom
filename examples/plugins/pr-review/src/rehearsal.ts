@@ -23,9 +23,11 @@ import { parseProfile, ProfileError, type Profile } from "./profile.js";
 import { withOutcome, withUnknownCoverage } from "./measurements.js";
 import { goFunctionCoverage, parseCoverageReport } from "./metrics/coverage.js";
 import type { FileIndex, MetricsRecord } from "./metrics/record.js";
-import { numbered, type Cite, type ReportItem, type ReporterOutput } from "./report.js";
+import { claimTargets } from "./claims.js";
+import { numbered, type Cite, type ReportItem, type ReporterOutput, type StateEntry } from "./report.js";
+import { detectStateCandidates } from "./statecandidates.js";
 import { DOCS } from "./rehearsal-docs.js";
-import { NEW_HEAD_FILES, RETENTION_TTL_GO, BACKOFF_GO, JITTER_GO, LIMIT_GO, SYNC_GO, SYNC_CHANGED } from "./rehearsal-fixtures.js";
+import { NEW_HEAD_FILES, RETENTION_TTL_GO, BACKOFF_GO, JITTER_GO, LIMIT_GO, SYNC_GO, SYNC_CHANGED, STREAM_ADDED_LINES, STREAM_CHANGED, STREAM_PATH, STREAM_WRITE_GO } from "./rehearsal-fixtures.js";
 import { qaScenario, type QaSpec } from "./rehearsal-qa.js";
 import { pullFile, type PullFile } from "./snapshot.js";
 import { reporterSections } from "./template.js";
@@ -357,8 +359,22 @@ function factCite(f: Fact): Cite {
   return { path: f.path, side: f.side, start: f.line, end: f.line, symbol: "" };
 }
 
-/** A valid report for these files and facts: one item per file with facts, a narrative item for the others. */
-function goodReport(files: readonly PullFile[], facts: readonly Fact[], sectionIds: readonly string[], notes: string[]): ReporterOutput {
+const item = (text: string, cites: Cite[], facts: string[] = []): ReportItem => ({ text, cites, facts, state: [], behavior: [] });
+
+/** A lifecycle entry for state the scan found: where it is declared and where it first changes (or, for a field, where it is declared). */
+function candidateEntry(c: ReturnType<typeof detectStateCandidates>[number]): StateEntry {
+  const at = (line: number): Cite => ({ path: c.path, side: "head", start: line, end: line, symbol: "" });
+  return {
+    name: c.name,
+    scope: c.kind === "field" ? "per instance" : "per call",
+    initial: `set where it is declared (line ${c.line})`,
+    transitions: c.mutatedAt === undefined ? [] : [{ when: `line ${c.mutatedAt} runs`, effect: "the value changes", cite: at(c.mutatedAt) }],
+    reads: c.mutatedAt === undefined ? [{ where: "wherever the field is used", decision: "holds the value its users read", cite: at(c.line) }] : [],
+  };
+}
+
+/** A valid report for these files and facts: one item per file with facts, a narrative item for the others, a lifecycle entry for each piece of state the scan finds. */
+function goodReport(files: readonly PullFile[], facts: readonly Fact[], sectionIds: readonly string[], notes: string[], pull: { title: string }): ReporterOutput {
   const sections = sectionIds.map((id) => ({ id, none: true, items: [] as ReportItem[] }));
   const by = new Map(sections.map((s) => [s.id, s]));
   const cited = new Set<string>();
@@ -366,7 +382,7 @@ function goodReport(files: readonly PullFile[], facts: readonly Fact[], sectionI
     const s = by.get(f.section);
     if (s === undefined) continue;
     const existing = s.items.find((i) => i.cites[0]?.path === f.path);
-    if (existing === undefined) s.items.push({ text: f.text, cites: [factCite(f)], facts: [f.id] });
+    if (existing === undefined) s.items.push(item(f.text, [factCite(f)], [f.id]));
     else {
       existing.text = `${existing.text}; ${f.text}`.slice(0, 560);
       existing.facts.push(f.id);
@@ -376,31 +392,40 @@ function goodReport(files: readonly PullFile[], facts: readonly Fact[], sectionI
   for (const file of files) {
     if (cited.has(file.path)) continue;
     const n = NARRATIVE[file.path] ?? { section: "other", text: `${file.path} changes (+${file.additions} −${file.deletions} lines).` };
-    by.get(n.section)!.items.push({ text: n.text, cites: [firstCite(file)], facts: [] });
+    by.get(n.section)!.items.push(item(n.text, [firstCite(file)]));
+  }
+  for (const c of detectStateCandidates(files)) {
+    const host = sections.flatMap((s) => s.items).find((i) => i.cites.some((x) => x.path === c.path));
+    host?.state.push(candidateEntry(c));
   }
   for (const s of sections) s.none = s.items.length === 0;
-  return { sections, notes };
+  return {
+    purpose: { text: `The pull request is titled "${pull.title}".`, source: "stated", quote: pull.title },
+    overview: `This pull request changes ${files.length} file${files.length === 1 ? "" : "s"}: ${files.map((f) => f.path).join(", ")}. Each change is described below.`,
+    sections,
+    notes,
+  };
 }
 
-/** A quote the checker would give for an item: the longest cited diff line (the quote's own line number). */
-function quoteFor(item: ReportItem, files: readonly PullFile[]): { path: string; line: number; text: string } | undefined {
+/** A quote the checker would give for a claim: the longest diff line of the cited files, or of any file (the quote's own line number). */
+function quoteFor(cites: readonly Cite[] | undefined, files: readonly PullFile[]): { path: string; line: number; text: string } | undefined {
   let best: { path: string; line: number; text: string } | undefined;
-  for (const c of item.cites) {
-    const file = files.find((f) => f.path === c.path);
+  for (const path of cites === undefined ? files.map((f) => f.path) : cites.map((c) => c.path)) {
+    const file = files.find((f) => f.path === path);
     for (const l of file?.parsed.lines ?? []) {
       if (l.kind === "ctx") continue;
       const text = l.text.replace(/\s+/g, " ").trim();
-      if (text.length >= 8 && (best === undefined || text.length > best.text.length)) best = { path: c.path, line: l.line, text };
+      if (text.length >= 8 && (best === undefined || text.length > best.text.length)) best = { path, line: l.line, text };
     }
   }
   return best;
 }
 
 function checkReply(report: ReporterOutput, files: readonly PullFile[], sections: ReturnType<typeof reporterSections>, unsupported: ReadonlySet<string> = new Set()): RehearsalReply {
-  const verdicts = numbered(report, { sections }).map(({ id, item }) => {
-    if (unsupported.has(id)) return { item: id, verdict: "unsupported", note: "the diff does not show this", quotes: [] };
-    const q = quoteFor(item, files);
-    return { item: id, verdict: "supported", note: "", quotes: q === undefined ? [] : [q] };
+  const verdicts = claimTargets(report, { sections }).map((t) => {
+    if (unsupported.has(t.id)) return { item: t.id, verdict: "unsupported", note: "the diff does not show this", quotes: [] };
+    const q = quoteFor(t.cites, files);
+    return { item: t.id, verdict: "supported", note: "", quotes: q === undefined ? [] : [q] };
   });
   return { output: { verdicts } };
 }
@@ -420,13 +445,13 @@ function measuredRecords(doc: { records?: MetricsRecord[]; files?: FileIndex[] }
   });
 }
 
-function build(profile: Profile, pull: Pull, options: { body?: string; notes?: string[]; toolId?: string; corrections?: boolean; qa?: QaSpec; coverage?: string }): Built {
+function build(profile: Profile, pull: Pull, options: { body?: string; notes?: string[]; toolId?: string; corrections?: boolean; qa?: QaSpec; coverage?: string; report?: (files: readonly PullFile[], sectionIds: readonly string[]) => ReporterOutput }): Built {
   const files = pull.files.map((f) => pullFile(fileItem(f))!);
   const facts = detectFacts(files, profile);
   const sections = reporterSections(profile);
   const sectionIds = sections.map((s) => s.id);
   const notes = options.notes ?? [];
-  const good = goodReport(files, facts, sectionIds, notes);
+  const good = options.report !== undefined ? options.report(files, sectionIds) : goodReport(files, facts, sectionIds, notes, pull);
   const results: RehearsalScenario["results"] = {};
   if (options.corrections === true) {
     const docItemOf = (r: ReporterOutput): ReportItem => r.sections.find((s) => s.id === "other")!.items.find((i) => i.cites[0]?.path === "docs/retention.md")!;
@@ -639,6 +664,122 @@ const SYNC_PULL: Pull = {
   },
 };
 
+/** The patch of a file whose head adds only the lines numbered `added`: hunks of three lines of context, merged where they touch. */
+function additionsPatch(head: string, added: readonly number[]): string {
+  const lines = head.replace(/\n$/, "").split("\n");
+  const isAdded = new Set(added);
+  const groups: Array<[number, number]> = [];
+  for (const n of added) {
+    const from = Math.max(1, n - 3);
+    const to = Math.min(lines.length, n + 3);
+    const last = groups.at(-1);
+    if (last !== undefined && from <= last[1] + 1) last[1] = Math.max(last[1], to);
+    else groups.push([from, to]);
+  }
+  return groups
+    .map(([from, to]) => {
+      const body: Line[] = [];
+      for (let n = from; n <= to; n += 1) body.push([isAdded.has(n) ? "+" : " ", lines[n - 1]!]);
+      return hunk(from - added.filter((a) => a < from).length, from, body);
+    })
+    .join("\n");
+}
+
+const streamHead = STREAM_WRITE_GO.replace(/\n$/, "").split("\n");
+
+/** `git diff -U0 -w` for the stream fixture: only the head-side hunks matter to the tools. */
+const STREAM_DIFF = [
+  `diff --git a/${STREAM_PATH} b/${STREAM_PATH}`,
+  `--- a/${STREAM_PATH}`,
+  `+++ b/${STREAM_PATH}`,
+  ...STREAM_CHANGED.flatMap((r) => [`@@ -${r.start - 1 - STREAM_ADDED_LINES.filter((a) => a < r.start).length},0 +${r.start},${r.end - r.start + 1} @@`, ...streamHead.slice(r.start - 1, r.end).map((l) => `+${l}`)]),
+  "",
+].join("\n");
+
+const STREAM_FILE: FixtureFile = { path: STREAM_PATH, status: "modified", patch: additionsPatch(STREAM_WRITE_GO, STREAM_ADDED_LINES) };
+const CHANGES_FILE: FixtureFile = {
+  path: "CHANGES.md",
+  status: "modified",
+  patch: hunk(12, 12, [ctx("- Fix a panic in the measure flusher."), ctx("- Speed up stream queries."), add("- Reply with an error when a stream write batch stores nothing."), ctx("- Bump the Go toolchain.")]),
+};
+
+const STREAM_BODY = "A write batch whose events all fail used to be acknowledged as a success. The write callback now replies with the first error when nothing was stored.";
+
+const STREAM_PULL: Pull = {
+  files: [STREAM_FILE, CHANGES_FILE],
+  title: "fix(stream): reply with an error when a write batch stores nothing",
+  body: STREAM_BODY,
+  commits: ["fix(stream): reply with an error when a write batch stores nothing"],
+  diff: STREAM_DIFF,
+  doc: doc(STREAM_PATH),
+  qa: {
+    purposes: [{ section: "features", source: "body", quote: "replies with the first error when nothing was stored" }],
+    base: { defs: `${STREAM_PATH}:3:package stream\n${STREAM_PATH}:6:func (w *writeCallback) Rev(message bus.Message) (resp bus.Message) {` },
+  },
+};
+
+/** The head-side line of the `n`th line of the stream fixture that reads `text` once trimmed. */
+function streamLine(text: string, n = 1): number {
+  let seen = 0;
+  for (let i = 0; i < streamHead.length; i += 1) {
+    if (streamHead[i]!.trim() === text && ++seen === n) return i + 1;
+  }
+  throw new Error(`the stream fixture has no line ${n} of ${JSON.stringify(text)}`);
+}
+
+/**
+ * The report of the `state-lifecycle` scenario: the counter, the first-error variable, the three places that set it,
+ * the place that increments the counter and the reply it switches are ONE item, with each variable's lifecycle and
+ * the three cases whose behavior differs (or deliberately does not).
+ */
+function streamReport(files: readonly PullFile[], sectionIds: readonly string[]): ReporterOutput {
+  const at = (line: number, end = line): Cite => ({ path: STREAM_PATH, side: "head", start: line, end, symbol: "" });
+  const changes = files.find((f) => f.path === "CHANGES.md")!;
+  const read = { where: "once, after the groups are flushed", decision: "stored == 0 && firstErr != nil switches the reply from success to an INTERNAL_ERROR carrying firstErr", cite: at(streamLine("if stored == 0 && firstErr != nil {")) };
+  const setsFirstErr = (n: number, when: string): StateEntry["transitions"][number] => ({ when, effect: "firstErr = the error, only while firstErr is still nil", cite: at(streamLine("firstErr = err", n)) });
+  const change: ReportItem = {
+    text: "A write batch that stores nothing is now answered with the first failure instead of a success: Rev counts the events it stores and keeps the first error of its three failure paths, and the reply is decided from the two after the groups are flushed.",
+    cites: STREAM_CHANGED.map((r) => at(r.start, r.end)),
+    facts: [],
+    state: [
+      {
+        name: "stored",
+        scope: "per call",
+        initial: "0, set at the start of the Rev call before the event loop",
+        transitions: [{ when: "w.handle returns no error for an event", effect: "increments by one; every failure path continues before it", cite: at(streamLine("stored++")) }],
+        reads: [read],
+      },
+      {
+        name: "firstErr",
+        scope: "per call",
+        initial: "nil, declared at the start of the Rev call",
+        transitions: [
+          setsFirstErr(1, "proto.Unmarshal of a []byte event fails"),
+          { when: "an event has an unsupported type", effect: "firstErr = errUnsupportedEvent, only while firstErr is still nil", cite: at(streamLine("firstErr = errUnsupportedEvent")) },
+          setsFirstErr(2, "w.handle returns an error"),
+        ],
+        reads: [read],
+      },
+    ],
+    behavior: [
+      { case: "every event of the batch fails", before: "the empty success reply", after: "an INTERNAL_ERROR reply with the original message ID and the first error" },
+      { case: "some events are stored and some fail", before: "the empty success reply", after: "the empty success reply (unchanged)" },
+      { case: "flushing the groups fails after events were stored", before: "logged; the empty success reply", after: "logged; the empty success reply (unchanged)" },
+    ],
+  };
+  const entry = changes.parsed.lines.find((l) => l.kind === "add")!.line;
+  const changelog = item("Adds a changelog entry for the fix.", [{ path: "CHANGES.md", side: "head", start: entry, end: entry, symbol: "" }]);
+  return {
+    purpose: { text: "A write batch whose events all fail was acknowledged as a success, which hid the failure from the sender; the callback now replies with the first error in that case.", source: "stated", quote: "replies with the first error when nothing was stored" },
+    overview: "Rev counts the events it stores and remembers the first failure among its three failure paths. After the batch is flushed, a batch that stored nothing and failed at least once is answered with an INTERNAL_ERROR carrying that error and the original message ID. A batch that stored anything keeps the success reply.",
+    sections: sectionIds.map((id) => {
+      const items = id === "features" ? [change] : id === "other" ? [changelog] : [];
+      return { id, none: items.length === 0, items };
+    }),
+    notes: [],
+  };
+}
+
 /** A new flag and a nightly sweep, with nothing in the pull request's text that says why. */
 const FLAG_PULL = (body: string, title: string): Pull => ({
   files: [FLAGS],
@@ -698,6 +839,8 @@ export function rehearsal(config: unknown): GraphRehearsal {
       "coverage-measured": build(profile, COMPLEX_PULL, { toolId: "static-go-1", coverage: TTL_COVERAGE_REPORT }).scenario,
       // A modified function of complexity 6 with unknown coverage: CRAP 42 is an upper bound and asks nothing.
       "crap-upper-bound": build(profile, SYNC_PULL, { toolId: "static-go-1" }).scenario,
+      // A #1443-like change: a counter and a first-error variable set in several places and read once. The report is one item with their lifecycles and a before/after table, not one item per hunk.
+      "state-lifecycle": build(profile, STREAM_PULL, { toolId: "static-go-1", report: streamReport }).scenario,
     },
   };
 }

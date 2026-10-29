@@ -274,5 +274,100 @@ export const DOCS: Record<string, unknown> = {
       }
     ],
     "skipped": []
+  },
+  "banyand/stream/write_standalone.go": {
+    "schema": "graphloom-metrics-v1",
+    "tool": "gometrics",
+    "records": [
+      {
+        "path": "banyand/stream/write_standalone.go",
+        "function": "stream.(*writeCallback).Rev",
+        "startLine": 6,
+        "endLine": 49,
+        "change": "modified",
+        "test": false,
+        "complexity": 12,
+        "decisions": [
+          {
+            "line": 8,
+            "kind": "if"
+          },
+          {
+            "line": 14,
+            "kind": "for"
+          },
+          {
+            "line": 17,
+            "kind": "case"
+          },
+          {
+            "line": 19,
+            "kind": "case"
+          },
+          {
+            "line": 21,
+            "kind": "if"
+          },
+          {
+            "line": 23,
+            "kind": "if"
+          },
+          {
+            "line": 30,
+            "kind": "if"
+          },
+          {
+            "line": 35,
+            "kind": "if"
+          },
+          {
+            "line": 37,
+            "kind": "if"
+          },
+          {
+            "line": 45,
+            "kind": "if"
+          },
+          {
+            "line": 45,
+            "kind": "&&"
+          }
+        ],
+        "nesting": 4,
+        "nestingPath": [
+          {
+            "line": 14,
+            "kind": "for"
+          },
+          {
+            "line": 16,
+            "kind": "switch"
+          },
+          {
+            "line": 21,
+            "kind": "if"
+          },
+          {
+            "line": 23,
+            "kind": "if"
+          }
+        ]
+      }
+    ],
+    "files": [
+      {
+        "path": "banyand/stream/write_standalone.go",
+        "language": "go",
+        "test": false,
+        "functions": [
+          [
+            "stream.(*writeCallback).Rev",
+            6,
+            49
+          ]
+        ]
+      }
+    ],
+    "skipped": []
   }
 };

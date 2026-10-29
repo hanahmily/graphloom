@@ -2,8 +2,8 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 import { describe, expect, it } from "vitest";
-import { quoteMatches, readClaimCheck } from "../src/claims.js";
-import type { ReportItem } from "../src/report.js";
+import { claimTargets, quoteMatches, readClaimCheck, type ClaimTarget } from "../src/claims.js";
+import type { ReporterOutput } from "../src/report.js";
 import { pullFile, type PullFile } from "../src/snapshot.js";
 
 const file = (path: string, patch: string | null, extra: Record<string, unknown> = {}): PullFile =>
@@ -13,8 +13,8 @@ const a = file("a.go", "@@ -20,3 +20,4 @@\n ctx line\n-removed  text   here\n+ad
 const bin = file("logo.png", null);
 const files = [a, bin];
 
-const item = (path: string): ReportItem => ({ text: "claim", cites: [{ path, side: "head", start: 0, end: 0, symbol: "" }], facts: [] });
-const items = [{ id: "R1", item: item("a.go") }, { id: "R2", item: item("logo.png") }];
+const target = (id: string, path: string): ClaimTarget => ({ id, text: "claim", cites: [{ path, side: "head", start: 0, end: 0, symbol: "" }], quotes: "required" });
+const items = [target("R1", "a.go"), target("R2", "logo.png")];
 const reading = (verdicts: unknown[]) => readClaimCheck({ verdicts }, items, files) as Exclude<ReturnType<typeof readClaimCheck>, { problems: string[] }>;
 const v = (itemId: string, verdict: string, quotes: unknown[] = [], note = "") => ({ item: itemId, verdict, note, quotes });
 

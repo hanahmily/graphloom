@@ -9,10 +9,10 @@
  * supported, and what is still not supported leaves the report.
  */
 import type { EvidenceRecord } from "@graphloom/sdk";
-import { CLAIM_CHECK_SCHEMA_NAME, readClaimCheck, type ClaimReading } from "./claims.js";
+import { CLAIM_CHECK_SCHEMA_NAME, claimTargets, readClaimCheck, type ClaimReading } from "./claims.js";
 import { MAX_CHECK_RETRIES, MAX_REPORT_CORRECTIONS } from "./constants.js";
 import { agentRuns, type AgentRun } from "./evidence.js";
-import { assembleReport, asReporterOutput, numbered, parseReporterOutput, reportProblems, type FinalReport, type ReportContext, type ReporterOutput } from "./report.js";
+import { assembleReport, asReporterOutput, numbered, parseReporterOutput, reportProblems, type BehaviorRow, type Cite, type FinalReport, type ReportContext, type ReportItem, type ReporterOutput, type StateEntry } from "./report.js";
 
 export const REPORTER_SCHEMA_NAME = "change-report-v1";
 /**
@@ -51,12 +51,29 @@ const isObject = (v: unknown): v is Record<string, unknown> => v !== null && typ
 function salvage(output: unknown): ReporterOutput | undefined {
   if (!isObject(output) || !Array.isArray(output.sections)) return undefined;
   const strings = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []);
+  const string = (v: unknown): string => (typeof v === "string" ? v : "");
   const int = (v: unknown): number => (typeof v === "number" && Number.isInteger(v) ? v : 0);
-  const cite = (c: unknown): ReporterOutput["sections"][number]["items"][number]["cites"] =>
-    isObject(c) && typeof c.path === "string" ? [{ path: c.path, side: c.side === "base" ? "base" : "head", start: int(c.start), end: int(c.end), symbol: typeof c.symbol === "string" ? c.symbol : "" }] : [];
-  const item = (i: unknown): ReporterOutput["sections"][number]["items"] =>
-    isObject(i) && typeof i.text === "string" && Array.isArray(i.cites) ? [{ text: i.text, cites: i.cites.flatMap(cite), facts: strings(i.facts) }] : [];
+  const cite = (c: unknown): Cite[] => (isObject(c) && typeof c.path === "string" ? [{ path: c.path, side: c.side === "base" ? "base" : "head", start: int(c.start), end: int(c.end), symbol: string(c.symbol) }] : []);
+  const list = (v: unknown): unknown[] => (Array.isArray(v) ? v : []);
+  const entry = (e: unknown): StateEntry[] =>
+    isObject(e) && typeof e.name === "string"
+      ? [
+          {
+            name: e.name,
+            scope: string(e.scope),
+            initial: string(e.initial),
+            transitions: list(e.transitions).flatMap((t) => (isObject(t) ? cite(t.cite).map((c) => ({ when: string(t.when), effect: string(t.effect), cite: c })) : [])),
+            reads: list(e.reads).flatMap((r) => (isObject(r) ? cite(r.cite).map((c) => ({ where: string(r.where), decision: string(r.decision), cite: c })) : [])),
+          },
+        ]
+      : [];
+  const row = (b: unknown): BehaviorRow[] => (isObject(b) ? [{ case: string(b.case), before: string(b.before), after: string(b.after) }] : []);
+  const item = (i: unknown): ReportItem[] =>
+    isObject(i) && typeof i.text === "string" && Array.isArray(i.cites) ? [{ text: i.text, cites: i.cites.flatMap(cite), facts: strings(i.facts), state: list(i.state).flatMap(entry), behavior: list(i.behavior).flatMap(row) }] : [];
+  const p = isObject(output.purpose) ? output.purpose : {};
   return {
+    purpose: { text: string(p.text), source: p.source === "stated" ? "stated" : "inferred", quote: string(p.quote) },
+    overview: string(output.overview),
     sections: output.sections.flatMap((s) => (isObject(s) && typeof s.id === "string" && Array.isArray(s.items) ? [{ id: s.id, none: s.none === true, items: s.items.flatMap(item) }] : [])),
     notes: strings(output.notes),
   };
@@ -107,7 +124,7 @@ export function reportFlow(evidence: readonly EvidenceRecord[], ctx: ReportConte
       continue;
     }
     if (report === undefined || pending !== undefined || ev.run.status !== "completed") continue;
-    const read = ev.run.contract?.status === "invalid" ? { problems: ev.run.contract.problems } : readClaimCheck(ev.run.output, itemsOf(report, ctx), ctx.files);
+    const read = ev.run.contract?.status === "invalid" ? { problems: ev.run.contract.problems } : readClaimCheck(ev.run.output, claimTargets(report, ctx), ctx.files);
     if ("problems" in read || read.unchecked.length > 0) {
       checkTries += 1;
       continue;
@@ -129,13 +146,13 @@ export function reportFlow(evidence: readonly EvidenceRecord[], ctx: ReportConte
     return { state: "checker", report, retry: checkTries > 0 };
   }
   if (reading.weak.size > 0 && !revised) {
-    const byId = new Map(itemsOf(report, ctx).map((i) => [i.id, i]));
-    const feedback = [...reading.weak].map(([id, why]) => `${id} (${byId.get(id)?.section ?? "?"}): "${(byId.get(id)?.item.text ?? "").slice(0, 160)}" — the claim check: ${why}`);
+    const byId = new Map(claimTargets(report, ctx).map((t) => [t.id, t] as const));
+    const feedback = [...reading.weak].map(([id, why]) => `${id}: "${(byId.get(id)?.text ?? "").slice(0, 200)}" — the claim check: ${why}`);
     return { state: "reporter", kind: "revision", feedback, schema: REVISION_SCHEMA_NAME };
   }
   const removed = new Map([...reading.weak].map(([id, why]) => [id, why] as const));
   const final = assembleReport(report, removed, ctx);
-  const problems = reportProblems(asReporterOutput(final), ctx);
+  const problems = reportProblems(asReporterOutput(final), ctx, { final: true });
   if (problems.length > 0) {
     return { state: "supervise", reason: `the assembled report fails its own validation: ${problems.slice(0, 3).join("; ")}`, refs: tail };
   }
