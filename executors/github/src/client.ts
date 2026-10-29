@@ -133,6 +133,41 @@ export async function githubRequest<T>(
   };
 }
 
+/**
+ * One GraphQL query. GraphQL reports most failures as HTTP 200 with `errors`,
+ * so they are mapped to the same errors the REST path throws: a rate limit
+ * keeps its retry timing and a missing object is a 404.
+ */
+export async function githubGraphql<T>(
+  options: GitHubClientOptions,
+  query: string,
+  variables: Record<string, unknown>,
+): Promise<{ data: T; rateLimit: RateLimitSnapshot }> {
+  // `../graphql` resolves beside the REST root on github.com (`/graphql`) and on
+  // Enterprise (`/api/v3` -> `/api/graphql`).
+  const res = await githubRequest<{ data?: T | null; errors?: { type?: string; message?: string }[] }>(
+    options,
+    "POST",
+    "../graphql",
+    { query, variables },
+  );
+  const errors = res.data?.errors ?? [];
+  if (errors.length > 0) {
+    const text = errors.map((e) => e.message ?? e.type ?? "error").join("; ").slice(0, 300);
+    if (errors.some((e) => e.type === "RATE_LIMITED")) {
+      throw new GitHubRateLimitError(`GitHub GraphQL rate limited: ${text}`, res.rateLimit);
+    }
+    throw new GitHubHttpError(
+      `GitHub GraphQL returned ${errors.some((e) => e.type === "NOT_FOUND") ? 404 : 400}: ${text}`,
+      errors.some((e) => e.type === "NOT_FOUND") ? 404 : 400,
+    );
+  }
+  if (res.data?.data === undefined || res.data.data === null) {
+    throw new GitHubHttpError("GitHub GraphQL returned no data", 502);
+  }
+  return { data: res.data.data, rateLimit: res.rateLimit };
+}
+
 function withTrailingSlash(baseUrl: string): string {
   return baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`;
 }

@@ -146,7 +146,17 @@ described below, but not effects elsewhere on the machine.
 
 - Reads (effect `read`): `graphloom.github/list-issues`, `list-pulls`,
   `get-issue`, `get-pull`, `get-file`, `list-issue-comments`, `list-labels`, and
-  `list-milestones`.
+  `list-milestones`. The pull request snapshot reads are `list-pull-files`
+  (status, previous path of a rename, counts, patch, and `patchOmitted` when
+  GitHub dropped a patch for size), `list-pull-commits`, `list-pull-reviews`,
+  `list-pull-review-comments`, `list-check-runs` (for a commit sha), and
+  `list-review-threads`, which uses GraphQL for resolution and outdated state and
+  pages with GraphQL's opaque cursors. GitHub caps a pull request at 3000 files
+  and 250 commits; a list that reaches its cap reports `limitReached` and is
+  never `complete`, and a thread whose comments could not all be read is named in
+  `incompleteThreads`. All are served by the rehearsal stand-in and
+  `testing/fake-github.ts`. The package is pinned by digest, so a run started
+  before this version needs `--update-executors` to see them.
 - Writes (effect `write`): `create-issue-comment`, `create-pull`,
   `create-pull-review` (request changes, comment, or approve, with optional
   inline comments), `add-labels`, `remove-labels`, and `update-issue` (title,

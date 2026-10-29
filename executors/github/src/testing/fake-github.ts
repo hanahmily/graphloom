@@ -32,10 +32,64 @@ export interface FakePull {
   labels?: string[];
   milestone?: number | null;
   updatedAt?: string;
+  /** Head commit; "abc123" when absent. */
+  headSha?: string;
+  baseSha?: string;
+  draft?: boolean;
+}
+
+export interface FakePullFile {
+  filename: string;
+  status?: "added" | "modified" | "removed" | "renamed";
+  previousFilename?: string;
+  additions: number;
+  deletions: number;
+  /** Absent, as GitHub omits it for a diff too large to render or a binary file. */
+  patch?: string;
+}
+
+export interface FakeCommit {
+  sha: string;
+  parents?: string[];
+  message: string;
+  author?: string;
+  committedDate?: string;
+}
+
+export interface FakeReviewComment {
+  id: number;
+  path: string;
+  /** null when the commented line is gone from the head. */
+  line?: number | null;
+  originalLine?: number;
+  side?: "LEFT" | "RIGHT";
+  startLine?: number;
+  commitId?: string;
+  inReplyTo?: number;
+  body: string;
+  user?: string;
+}
+
+export interface FakeThread {
+  id: string;
+  isResolved: boolean;
+  isOutdated: boolean;
+  path: string;
+  line?: number | null;
+  comments: { id: number; author: string; body: string }[];
+}
+
+export interface FakeCheckRun {
+  id?: number;
+  name: string;
+  status: "queued" | "in_progress" | "completed";
+  conclusion?: "success" | "failure" | "neutral" | "cancelled" | "skipped" | "timed_out" | null;
+  detailsUrl?: string;
 }
 
 export interface FakeReview {
   id: number;
+  user?: string;
   body: string;
   state: "CHANGES_REQUESTED" | "COMMENTED" | "APPROVED";
   commitId: string;
@@ -72,6 +126,14 @@ export interface FakeGitHub {
   comments: Map<number, FakeComment[]>;
   pulls: FakePull[];
   reviews: Map<number, FakeReview[]>;
+  /** Per pull request number. */
+  pullFiles: Map<number, FakePullFile[]>;
+  pullCommits: Map<number, FakeCommit[]>;
+  reviewComments: Map<number, FakeReviewComment[]>;
+  /** Served through GraphQL, which the fake answers at `/graphql`. */
+  reviewThreads: Map<number, FakeThread[]>;
+  /** Per commit sha. */
+  checkRuns: Map<string, FakeCheckRun[]>;
   labels: string[];
   milestones: FakeMilestone[];
   files: FakeFile[];
@@ -104,6 +166,11 @@ export async function startFakeGitHub(
   const files = [...(seed.files ?? [])];
   const comments = new Map<number, FakeComment[]>();
   const reviews = new Map<number, FakeReview[]>();
+  const pullFiles = new Map<number, FakePullFile[]>();
+  const pullCommits = new Map<number, FakeCommit[]>();
+  const reviewComments = new Map<number, FakeReviewComment[]>();
+  const reviewThreads = new Map<number, FakeThread[]>();
+  const checkRuns = new Map<string, FakeCheckRun[]>();
   const requests: FakeRequest[] = [];
   let rateLimited = 0;
   let resetIn = 60;
@@ -165,6 +232,11 @@ export async function startFakeGitHub(
     res.setHeader("x-ratelimit-limit", "5000");
     res.setHeader("x-ratelimit-remaining", "4999");
     res.setHeader("x-ratelimit-reset", String(Math.floor(Date.now() / 1000) + 3600));
+
+    if (url.pathname === "/graphql" && method === "POST") {
+      graphql(res, body as { query?: string; variables?: Record<string, unknown> }, pulls, reviewThreads);
+      return;
+    }
 
     const parts = url.pathname.split("/").filter(Boolean).map(decodeURIComponent);
     // /repos/:owner/:repo/...
@@ -366,6 +438,19 @@ export async function startFakeGitHub(
       send(res, 200, rawReview(owner, repo, pull.number, review));
       return;
     }
+    if (resource === "pulls" && id !== undefined && method === "GET" && ["files", "commits", "comments"].includes(sub ?? "")) {
+      const pull = pulls.find((p) => p.number === Number(id));
+      if (!pull) return send(res, 404, { message: "Not Found" });
+      if (sub === "files") return paginate(res, url, (pullFiles.get(pull.number) ?? []).map(rawPullFile));
+      if (sub === "commits") return paginate(res, url, (pullCommits.get(pull.number) ?? []).map((c) => rawCommit(owner, repo, c)));
+      return paginate(res, url, (reviewComments.get(pull.number) ?? []).map((c) => rawReviewComment(owner, repo, pull.number, c)));
+    }
+    if (resource === "commits" && sub === "check-runs" && method === "GET") {
+      const runs = checkRuns.get(id ?? "");
+      if (runs === undefined) return send(res, 422, { message: `No commit found for SHA: ${id}` });
+      paginate(res, url, runs.map(rawCheckRun), (slice) => ({ total_count: runs.length, check_runs: slice }));
+      return;
+    }
     if (resource === "pulls" && id !== undefined && method === "GET") {
       const pull = pulls.find((p) => p.number === Number(id));
       if (!pull) return send(res, 404, { message: "Not Found" });
@@ -382,6 +467,11 @@ export async function startFakeGitHub(
     comments,
     pulls,
     reviews,
+    pullFiles,
+    pullCommits,
+    reviewComments,
+    reviewThreads,
+    checkRuns,
     labels,
     milestones,
     files,
@@ -403,7 +493,7 @@ export async function startFakeGitHub(
   };
 }
 
-function paginate(res: ServerResponse, url: URL, items: unknown[]): void {
+function paginate(res: ServerResponse, url: URL, items: unknown[], wrap: (slice: unknown[]) => unknown = (slice) => slice): void {
   const perPage = Number(url.searchParams.get("per_page") ?? "30");
   const page = Number(url.searchParams.get("page") ?? "1");
   const slice = items.slice((page - 1) * perPage, page * perPage);
@@ -412,7 +502,7 @@ function paginate(res: ServerResponse, url: URL, items: unknown[]): void {
     next.searchParams.set("page", String(page + 1));
     res.setHeader("link", `<${next.toString()}>; rel="next"`);
   }
-  send(res, 200, slice);
+  send(res, 200, wrap(slice));
 }
 
 function send(res: ServerResponse, status: number, body: unknown): void {
@@ -473,10 +563,10 @@ function rawPull(owner: string, repo: string, pull: FakePull, milestoneOf: Miles
     labels: (pull.labels ?? []).map(rawLabel),
     milestone: milestoneOf(pull.milestone),
     updated_at: pull.updatedAt ?? "2026-09-02T00:00:00Z",
-    draft: false,
+    draft: pull.draft ?? false,
     merged_at: null,
-    head: { ref: pull.head.split(":").pop(), label: pull.head, sha: "abc123" },
-    base: { ref: pull.base },
+    head: { ref: pull.head.split(":").pop(), label: pull.head, sha: pull.headSha ?? "abc123" },
+    base: { ref: pull.base, label: `${owner}:${pull.base}`, sha: pull.baseSha ?? "def456" },
   };
 }
 
@@ -487,7 +577,7 @@ function rawReview(owner: string, repo: string, pull: number, review: FakeReview
     state: review.state,
     commit_id: review.commitId,
     html_url: `https://github.com/${owner}/${repo}/pull/${pull}#pullrequestreview-${review.id}`,
-    user: { login: FAKE_VIEWER },
+    user: { login: review.user ?? FAKE_VIEWER },
     submitted_at: "2026-09-04T00:00:00Z",
   };
 }
@@ -508,4 +598,151 @@ function rawMilestone(milestones: FakeMilestone[], n: number | null | undefined)
     closed_issues: 0,
     html_url: `https://github.com/acme/app/milestone/${m.number}`,
   };
+}
+
+function rawPullFile(f: FakePullFile) {
+  return {
+    sha: createHash("sha1").update(f.filename).digest("hex"),
+    filename: f.filename,
+    status: f.status ?? "modified",
+    additions: f.additions,
+    deletions: f.deletions,
+    changes: f.additions + f.deletions,
+    ...(f.previousFilename !== undefined ? { previous_filename: f.previousFilename } : {}),
+    ...(f.patch !== undefined ? { patch: f.patch } : {}),
+  };
+}
+
+function rawCommit(owner: string, repo: string, c: FakeCommit) {
+  const date = c.committedDate ?? "2026-09-01T00:00:00Z";
+  return {
+    sha: c.sha,
+    html_url: `https://github.com/${owner}/${repo}/commit/${c.sha}`,
+    parents: (c.parents ?? []).map((sha) => ({ sha })),
+    author: { login: c.author ?? "octo" },
+    commit: { message: c.message, author: { name: c.author ?? "octo", date }, committer: { name: c.author ?? "octo", date } },
+  };
+}
+
+function rawReviewComment(owner: string, repo: string, pull: number, c: FakeReviewComment) {
+  return {
+    id: c.id,
+    pull_request_review_id: 1,
+    path: c.path,
+    line: c.line === undefined ? c.originalLine ?? 1 : c.line,
+    original_line: c.originalLine ?? c.line ?? 1,
+    side: c.side ?? "RIGHT",
+    ...(c.startLine !== undefined ? { start_line: c.startLine } : {}),
+    commit_id: c.commitId ?? "abc123",
+    original_commit_id: c.commitId ?? "abc123",
+    ...(c.inReplyTo !== undefined ? { in_reply_to_id: c.inReplyTo } : {}),
+    body: c.body,
+    html_url: `https://github.com/${owner}/${repo}/pull/${pull}#discussion_r${c.id}`,
+    created_at: "2026-09-05T00:00:00Z",
+    user: { login: c.user ?? FAKE_VIEWER },
+  };
+}
+
+function rawCheckRun(c: FakeCheckRun, i: number) {
+  return {
+    id: c.id ?? 9000 + i,
+    name: c.name,
+    status: c.status,
+    conclusion: c.conclusion ?? null,
+    details_url: c.detailsUrl ?? `https://ci.example/${encodeURIComponent(c.name)}`,
+    html_url: `https://github.com/acme/app/runs/${c.id ?? 9000 + i}`,
+    started_at: "2026-09-06T00:00:00Z",
+    completed_at: c.status === "completed" ? "2026-09-06T00:05:00Z" : null,
+    app: { slug: "github-actions" },
+  };
+}
+
+const COMMENT_PAGE = 100;
+
+function cursorOf(index: number): string {
+  return Buffer.from(`c:${index}`).toString("base64");
+}
+
+function indexOf(cursor: unknown): number {
+  if (typeof cursor !== "string") return 0;
+  const m = /^c:(\d+)$/.exec(Buffer.from(cursor, "base64").toString("utf8"));
+  return m ? Number(m[1]) : 0;
+}
+
+function threadComment(c: FakeThread["comments"][number], thread: FakeThread) {
+  return {
+    id: `PRRC_${c.id}`,
+    databaseId: c.id,
+    author: { login: c.author },
+    body: c.body,
+    createdAt: "2026-09-05T00:00:00Z",
+    path: thread.path,
+    outdated: thread.isOutdated,
+    replyTo: null,
+    commit: { oid: "abc123" },
+    originalCommit: { oid: "abc123" },
+  };
+}
+
+function commentConnection(thread: FakeThread, after: unknown) {
+  const start = indexOf(after);
+  const slice = thread.comments.slice(start, start + COMMENT_PAGE);
+  const end = start + slice.length;
+  return {
+    pageInfo: { hasNextPage: end < thread.comments.length, endCursor: cursorOf(end) },
+    nodes: slice.map((c) => threadComment(c, thread)),
+  };
+}
+
+/** The two review-thread queries the executor sends; anything else is a GraphQL error. */
+function graphql(
+  res: ServerResponse,
+  body: { query?: string; variables?: Record<string, unknown> },
+  pulls: FakePull[],
+  threads: Map<number, FakeThread[]>,
+): void {
+  const query = body.query ?? "";
+  const vars = body.variables ?? {};
+  if (query.includes("reviewThreads")) {
+    const number = Number(vars.number);
+    if (!pulls.some((p) => p.number === number)) {
+      send(res, 200, { data: { repository: { pullRequest: null } }, errors: [{ type: "NOT_FOUND", message: `Could not resolve to a PullRequest with the number of ${number}.` }] });
+      return;
+    }
+    const all = threads.get(number) ?? [];
+    const start = indexOf(vars.after);
+    const first = Number(vars.first ?? 30);
+    const slice = all.slice(start, start + first);
+    const end = start + slice.length;
+    send(res, 200, {
+      data: {
+        repository: {
+          pullRequest: {
+            reviewThreads: {
+              pageInfo: { hasNextPage: end < all.length, endCursor: cursorOf(end) },
+              nodes: slice.map((t) => ({
+                id: t.id,
+                isResolved: t.isResolved,
+                isOutdated: t.isOutdated,
+                path: t.path,
+                line: t.line === undefined ? 1 : t.line,
+                originalLine: 1,
+                startLine: null,
+                diffSide: "RIGHT",
+                resolvedBy: t.isResolved ? { login: "maintainer" } : null,
+                comments: commentConnection(t, null),
+              })),
+            },
+          },
+        },
+      },
+    });
+    return;
+  }
+  if (query.includes("node(id")) {
+    const thread = [...threads.values()].flat().find((t) => t.id === vars.id);
+    send(res, 200, { data: { node: thread ? { comments: commentConnection(thread, vars.after) } : null } });
+    return;
+  }
+  send(res, 200, { errors: [{ message: "unsupported query" }] });
 }
