@@ -144,6 +144,27 @@ export async function ensureDockerImage(image: string, options: { pull: boolean 
   return after === undefined ? { status: "pulled" } : { status: "failed", reason: `docker pulled ${image} but it is still not in the local store: ${after}` };
 }
 
+let rootless: Promise<boolean> | undefined;
+
+/** Whether the daemon is rootless: its `root` is the operator, and the operator's own uid is a stranger in it. */
+export function daemonIsRootless(): Promise<boolean> {
+  rootless ??= execFileAsync("docker", ["info", "--format", "{{json .SecurityOptions}}"], { timeout: DOCKER_TIMEOUT_MS }).then(
+    ({ stdout }) => stdout.includes("rootless"),
+    () => false,
+  );
+  return rootless;
+}
+
+/**
+ * The user the container's commands run as. A rootful daemon maps container ids to host ids as they
+ * are, so the operator's own uid keeps owning the workspace. In a rootless daemon the operator is
+ * container root (all other ids are subordinate ids that own nothing of theirs), so the commands
+ * run as that unprivileged-on-the-host root, which `--cap-drop ALL` and `no-new-privileges` still bind.
+ */
+export function containerIdentity(rootlessDaemon: boolean, uid: number, gid: number): { uid: number; gid: number } {
+  return rootlessDaemon ? { uid: 0, gid: 0 } : { uid, gid };
+}
+
 /** `docker kill` each named container; one that is already gone is fine. */
 export async function killContainers(names: readonly string[]): Promise<void> {
   await Promise.all(names.map((name) => execFileAsync("docker", ["kill", name], { timeout: DOCKER_TIMEOUT_MS }).catch(() => undefined)));
@@ -262,8 +283,7 @@ async function prepareDockerJob(job: JobSpec, spec: DockerConfinement, ctx: JobC
         writable,
         readOnly,
         argv: raw.argv,
-        uid: process.getuid?.() ?? 0,
-        gid: process.getgid?.() ?? 0,
+        ...containerIdentity(await daemonIsRootless(), process.getuid?.() ?? 0, process.getgid?.() ?? 0),
       });
     } catch (err) {
       return { refusal: err instanceof Error ? err.message : String(err) };

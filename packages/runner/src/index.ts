@@ -32,6 +32,8 @@ export { digestExecutorSource } from "./digest.js";
 export {
   DOCKER_RUN_MODULE,
   RUN_LABEL,
+  containerIdentity,
+  daemonIsRootless,
   dockerImageProblem,
   ensureDockerImage,
   type ImageOutcome,
@@ -42,6 +44,7 @@ export {
   type DockerRunOptions,
   type DockerRunSpec,
 } from "./sandbox-docker.js";
+export { agentExecutables } from "./registry.js";
 export { assertSandboxSupported, packageClosure, packageRootOf } from "./sandbox.js";
 export { confineWorker, confinementUnsupported, expandHome, hasPrivateTmp, operatorGoSettings, type BwrapSandbox, type ConfinedWorker, type OperatorGo } from "./confine.js";
 export {

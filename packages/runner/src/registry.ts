@@ -3,7 +3,7 @@
 
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import os from "node:os";
 import { lstat, mkdir, realpath } from "node:fs/promises";
 import { createInterface } from "node:readline";
@@ -27,7 +27,7 @@ import {
 import { confineWorker, confinementUnsupported, findSandboxWorker, hasPrivateTmp, operatorGoSettings } from "./confine.js";
 import { digestExecutorSource } from "./digest.js";
 import { withDockerConfinement } from "./sandbox-docker.js";
-import { assertSandboxSupported, packageClosure, sandboxNodeArgs } from "./sandbox.js";
+import { assertSandboxSupported, packageClosure, packageRootOf, sandboxNodeArgs } from "./sandbox.js";
 import type { ExecutorDescriptor, ExecutorSourceOverride, JobContext, JobEvidenceItem, JobResult, Runner } from "./types.js";
 
 /** Qualified ids under this namespace belong to GraphLoom built-in packages. */
@@ -407,11 +407,44 @@ function inProcessConfinementRefusal(id: string): string {
   return `executor ${id} runs in-process and cannot be confined as the job asks, so the job was not run`;
 }
 
-/** Locations of agent binaries the operator configured (`GRAPHLOOM_*_BIN`): a hidden home must still show them. */
-function executorBinaries(env: NodeJS.ProcessEnv): string[] {
-  return Object.entries(env)
+/** The agent CLIs a harness finds by name when the operator named no location. */
+const AGENT_COMMANDS = ["claude", "codex"];
+
+/**
+ * The agent CLIs a job may start, found on the host the way the harnesses find them (an absolute
+ * `GRAPHLOOM_*_BIN` the operator set, else the name on PATH), with their real targets and, for an
+ * npm-style install, the package they run from: a hidden home must still show them. A package
+ * directory that contains the home itself is never exposed.
+ */
+export function agentExecutables(env: NodeJS.ProcessEnv, home: string = os.homedir()): string[] {
+  const configured = Object.entries(env)
     .filter(([name, value]) => /^GRAPHLOOM_.*_BIN$/.test(name) && typeof value === "string" && path.isAbsolute(value))
     .map(([, value]) => value as string);
+  const named = AGENT_COMMANDS.filter((name) => !configured.some((c) => path.basename(c) === name)).flatMap((name) =>
+    (env.PATH ?? "")
+      .split(path.delimiter)
+      .filter((dir) => dir !== "")
+      .map((dir) => path.join(dir, name))
+      .filter((candidate) => existsSync(candidate))
+      .slice(0, 1),
+  );
+  const found = new Set<string>();
+  for (const bin of [...configured, ...named]) {
+    found.add(bin);
+    let real: string;
+    try {
+      real = realpathSync(bin);
+    } catch {
+      continue;
+    }
+    found.add(real);
+    const root = packageRootOf(real);
+    if (path.dirname(real) !== root || existsSync(path.join(root, "package.json"))) {
+      for (const dir of packageClosure([real])) found.add(dir);
+    }
+  }
+  const home1 = path.resolve(home);
+  return [...found].filter((p) => !(home1 === p || home1.startsWith(p.endsWith(path.sep) ? p : p + path.sep)));
 }
 
 /**
@@ -640,9 +673,8 @@ export function createChildExecutorRunner(
             readPaths: [
               ...(ctx.confinement.readPaths ?? []),
               ...(readOnlySandbox ? ctx.confinement.writablePaths : []),
-              ...executorBinaries(launch.env),
-              // A hidden home must still show the executor's packages and what they import.
-              ...(own?.kind === "bwrap" ? packageClosure([workerModule, entry]) : []),
+              // A hidden home must still show the executor's packages and what they import, and the agent CLIs it starts.
+              ...(own?.kind === "bwrap" ? [...packageClosure([workerModule, entry]), ...agentExecutables(launch.env)] : []),
               process.execPath, workerModule, entry, ...(sourceRoot !== undefined ? [sourceRoot] : []), ...(override !== undefined ? [override.root] : []), cwd,
             ],
             ...(own?.kind === "bwrap" ? { sandbox: own } : {}),
