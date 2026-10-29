@@ -8,9 +8,12 @@ Revised 2026-10-29: the review layer runs three aspect reviewers
 (correctness, maintainability, security) on custom open-code-review rules,
 and a behavioral finding counts only when the reviewer's test, rerun by the
 graph in the Docker sandbox, fails on the head ([§8](#8-the-review-layer)).
-Not implemented. The
+Revised again 2026-10-29: the maintainer may chat with a fork of an
+agent's recorded session through `graphloom session open`
+([§17](#17-discussing-a-run-graphloom-session-open)); there is no
+`graphloom-review` skill. Not implemented. The
 plugin would live in `examples/plugins/pr-review`. It reuses the review
-machinery of the [issue-fix graph](design-issue-fix-graph.md) and needs four
+machinery of the [issue-fix graph](design-issue-fix-graph.md) and needs these
 generic platform changes ([§15](#15-generic-platform-changes)).
 
 ## 1. Purpose and fixed decisions
@@ -60,6 +63,7 @@ The product has three layers, each produced by different agents:
 | Report-only is the default for every run, the first one on a PR included | The prepared request is `Report on …`. The run pauses after Answers. The maintainer continues with `graphloom resume <run> --approve review-layer` or finishes with `--decline review-layer` ([§2](#2-modes-and-operator-flow)) |
 | The report and the answers are grounded | Deterministic detectors, symbol extraction, whole-repository search, the dependency inventory and test mapping feed them. Every item cites the diff or the base tree. An absence lists the searches that found nothing. Completeness checks cover every changed file, symbol and question. Independent checkers verify every claim ([§6](#6-the-change-report), [§7](#7-questions-and-answers)) |
 | The maintainer chooses what reaches the PR's author | `needs author` items are pre-selected as draft review comments. The maintainer may promote any other Q&A item, proposals included, or drop a pre-selected one ([§7.4](#74-output-one-file)) |
+| The maintainer can chat with the run's agents before deciding | `graphloom session open` starts a fork of an agent's recorded session in the maintainer's terminal, confined as its job was. The chat is not recorded and changes nothing in the run ([§17](#17-discussing-a-run-graphloom-session-open)) |
 | Judgement words are allowed | No word list is enforced. The report and the Q&A stay structurally neutral (no severities, verdict or findings), the prompts ask for factual descriptions, and the checkers judge claims for support ([§6.5](#65-deterministic-validation)) |
 | Nothing goes to GitHub unless the maintainer explicitly approves | Writes need an `operator-approval` that pins the approved bytes, plus a write token bound only in that `resume --approve` process ([§11](#11-approvals)) |
 | The review draft is posted as **one** GitHub review | One `graphloom.github/create-pull-review` call carries every inline comment, the Q&A items the maintainer keeps included |
@@ -90,14 +94,17 @@ the request, which `advance` reads, not in `describe(config)`:
 sh plugins/pr-review/scripts/prepare.sh reviews/ apache/skywalking-banyandb#1234   # writes task.yaml
 graphloom check reviews/banyandb-1234/task.yaml
 graphloom run reviews/banyandb-1234/task.yaml --on-stop '…'
-# read <worktree>/.graphloom/review/review.md: report, measurements, Q&A (graphloom inspect prints the path)
+# stops "report ready": read <worktree>/.graphloom/review/review.md (graphloom inspect prints the path)
+graphloom session open <run> --stage answers               # optional: chat with a fork of the answerer's session; nothing is recorded
 graphloom resume <run> --decline review-layer              # report only: done
 graphloom resume <run> --approve review-layer              # or: review it
-# read and edit <worktree>/.graphloom/review/draft.md, then
+# read and edit <worktree>/.graphloom/review/draft.md (promote or drop entries there), then
 graphloom resume <run> --approve publish-review            # one GitHub review
 ```
 
-The `graphloom-review` skill drives this flow ([§17](#17-skill-graphloom-review)).
+Starting and watching the run use the existing `graphloom-run` and
+`graphloom-watch` skills. Chatting with a session is a CLI command, not a
+skill ([§17](#17-discussing-a-run-graphloom-session-open)).
 
 ## 3. Inputs
 
@@ -1210,6 +1217,7 @@ tools run under bwrap.
 | Job | Confinement |
 |---|---|
 | Reporter, questioner, answerer, checkers, reviewers, verifiers | `untrusted-read` (bwrap). Reviewers write reproducing tests only as text in their results and run nothing. The root filesystem is read-only. The home directory is replaced by a tmpfs, except the agent's own login state (`ownState`) and the inventory's dependency directories (read-only). The masks above apply, the environment is minimal, and there is no GitHub token. Network is on, because the agents need their CLI logins and their model APIs |
+| A session the maintainer opens (`graphloom session open`, [§17](#17-discussing-a-run-graphloom-session-open)) | The confinement of the job that recorded it: `untrusted-read` with the same masks, a read-only checkout, no GitHub token, network on for the agent's login and model API, and the maintainer's own CLI login. The run's state is not mounted, and the chat is not recorded |
 | Static metrics (`gometrics`, `tsmetrics`) | bwrap with no network, read-only. They run the plugin's own parser over the head tree and execute none of it, so they always run, with or without Docker |
 | Checks, coverage, mutation, reproducing tests: **everything that runs PR code** | `sandbox: docker` (below) |
 | Materialize, searches, writes | Graph commands with fixed argv over pinned trees. No repository code runs |
@@ -1420,6 +1428,9 @@ These are estimates until measured ([budgets](budgets.md)).
     reproducing tests at most `review.repro.timeBudgetMs` (30 minutes), so
     a run with the review layer takes about 2.5 hours at most.
 
+- **Sessions the maintainer opens** run on the maintainer's own login and
+  cost the run nothing.
+
 | Budget | Default |
 |---|---|
 | `agentInvocations` | 1,200 |
@@ -1484,6 +1495,7 @@ schema name enters the controller, SDK or CLI.
 | `JobSpec.confinement` kind `bwrap`: `{ kind: "bwrap", network, mask, binds }` | `packages/sdk/src/types.ts` (`JobSpec`, line 419), `packages/runner/src/confine.ts` | For agents and static tools: a hidden home with `ownState` holes, masks, read-only binds, network on or off. Refused without bwrap. A definition flag `untrustedWorkspace` applies the masks to supervisor jobs |
 | `JobSpec.confinement` kind `docker`: `{ kind: "docker", image, cpus, memory, pids, tmp, wallClockMs, writable, readOnly, env }` | `packages/sdk/src/types.ts`; a new `packages/runner/src/sandbox-docker.ts`; `graphloom doctor` and `check` probes (CLI, daemon, image by digest) | A generic, plugin-neutral option for any graph command job that runs untrusted code. The runner builds the `docker run` of [§12.2](#122-confinement) from the data, refuses an image without a digest, always passes `--pull never`, labels the container with the run, and kills it by name on stop. issue-fix's `bench-gates` could move onto it |
 | Approvals | `GraphDefinition.approvals`, `resume --approve/--decline`, `operator-approval` evidence, write admission by `approvalRef`, `github.writeTokenEnv`, `inspect` | [§11](#11-approvals). Rehearsal scenarios gain `operator: { approve?, decline? }` |
+| `graphloom session list/open` | `apps/graphloom`; `AgentSessionRecord` gains `harness` and `confinement`; fork helpers beside the session save/restore in `@graphloom/agent-harness` | [Core §15](design-typescript-core.md#15-opening-a-recorded-agent-session) |
 
 `create-pull-review` and `create-issue-comment` need no change.
 
@@ -1524,33 +1536,39 @@ recorded, so they do not decide CI verdicts.
 
 `--adversarial` and `--synthesized` apply unchanged.
 
-## 17. Skill: `graphloom-review`
+## 17. Discussing a run: `graphloom session open`
 
-A new skill, `skills/graphloom-review/SKILL.md`, installed by
-`graphloom skills` ([agent skills](design-agent-skills.md)). It reuses
-`graphloom-run` and `graphloom-watch`:
+There is no `graphloom-review` skill. Starting a run and watching it use the
+existing `graphloom-run` and `graphloom-watch` skills; the rest is the flow
+of [§2](#2-modes-and-operator-flow).
 
-1. **Start.** From `owner/repo#N` or a URL, it runs `prepare.sh` (always
-   `Report on`), `graphloom check` and `graphloom run`, then hands the run to
-   watch.
-2. **The combined file first.** On `report ready`, it shows `review.md`:
-   Report, Measurements, then Q&A. It lists the `needs author` items at the
-   top, since they are what may go to the PR's author. On a re-run, it shows
-   the since-last sections first. It adds no evaluation of its own. It then
-   asks one question: continue to the review layer, or stop here?
-3. **Continue or stop.** It runs `--approve review-layer` or
-   `--decline review-layer` only on the user's answer.
-4. **Draft.** On `awaiting approval`, it shows `draft.md` and edits it only as
-   the user instructs. It runs `--approve publish-review` only after an
-   explicit "publish" for this run.
+On `report ready`, after reading `review.md`, the maintainer may run
+`graphloom session open <run> --stage answers`. GraphLoom only launches the
+agent: it restores the answerer's recorded session (the Answers stage
+dispatches the answerer first, so it is the stage's default), forks it, and
+starts Claude Code or Codex on the fork in the maintainer's terminal
+([core §15](design-typescript-core.md#15-opening-a-recorded-agent-session)).
+The agent is told, in one line, that it is a fork of the answers session,
+what the answer checker's job reported since, and the run's status.
 
-Hard rules, in addition to the shared ones:
-
-- never pass any `--approve` without the user's instruction for that run and
-  that approval;
-- never write `approve` into a verdict;
-- never post with `gh`;
-- never print a token.
+- `graphloom session list <run>` shows the other sessions by stage,
+  operation, harness and session ref: the reporter and report checker under
+  `report`, the questioner under `questions`, the answer checker under
+  `answers`, and later each reviewer and verifier under `review`. A Pi
+  session, such as the default `reviewer-security`, is refused.
+- The fork runs under its job's confinement ([§12.2](#122-confinement)), so
+  the PR content in its transcript stays untrusted data. The opened agent
+  may be steered by it as the job could have been, and it can do no more
+  than the job could: it cannot write the checkout or the run.
+- The chat is chat. Nothing in it is recorded or changes the run, and there
+  is no inbox. The review layer reads the `review.md` the first layer wrote;
+  what reaches the author is chosen by editing `draft.md`, where promoting
+  or dropping an entry is moving or deleting it
+  ([§10.2](#102-edits-and-their-validation)).
+- Sessions survive while the run is stopped at `report ready`. Once the
+  maintainer declines the review layer, or the run otherwise finishes, the
+  run's saved sessions are removed; forks already opened stay in the
+  maintainer's own agent store.
 
 ## 18. Phases
 
@@ -1573,10 +1591,10 @@ writes.
 
 | Phase | Scope | Verification |
 |---|---|---|
-| P1 | **First layer, report-only.** Fetch, workspace, report, questions, answers, static measurements. Generic: `base:`, the GitHub reads, `bwrap` confinement (agents, static tools) and the `docker` sandbox (coverage), image checks and pulls in Fetch, doctor and check probes. pr-review 0.1 with stages Fetch, Report, Questions and Answers; it succeeds after Answers. Also: detectors; symbol packs (Go, TypeScript); whole-repository search; similarity; the dependency inventory; test mapping; the reporter, questioner and answerer with both checkers; `gometrics` and `tsmetrics`; confined coverage (`go test -coverprofile`; for TypeScript the repository's own `vitest run --coverage` with its `@vitest/coverage-v8`, or `not run (no vitest coverage provider)` when the repository declares none) with measured CRAP and the unknown-coverage rule; `review.md`, `report.json`, `qa.json`; the ledger; the BanyanDB mapping; the skill's start and combined-file steps | Intake, executor contract and confinement tests. Unit tests per detector, symbol pattern (new vs modified, receivers, generics), query builder, similarity scorer, test-map rule and validator rule. `gometrics` matches gocyclo on a fixture corpus. Nesting and changed-function scope fixtures. The `measurements` validator rejects each kind of inconsistent record. Real-Git tests: searches read the base commit only, and materialization runs no hook or filter. Ledger CAS race. Rehearsal `report`, `report-corrections`, `answer-finds-existing-helper`, `answer-no-library-with-whole-repo-search`, `answer-checker-contradicts`, `needs-author-purpose`, `purpose-stated`, `missing-test`, `complex-function`, `crap-upper-bound`, `sandbox-unavailable`, `injection`. Under real Docker: a coverage run with `--network none`, where a test that dials out fails; the limits enforced (a fork bomb stops at `--pids-limit`, an allocation at `--memory`, the host unaffected); only the checkout and the build cache writable, the root read-only, no host home, `--pull never`; the container killed by name on stop and removed on resume; coverage attributed by line range, Go from the coverprofile and TypeScript from `coverage-final.json` statements, with the report written under the job's temporary directory and the checkout unchanged. One live run on a real BanyanDB PR, read by the user, with recall of new symbols, tests and existing equivalents checked by hand |
+| P1 | **First layer, report-only.** Fetch, workspace, report, questions, answers, static measurements. Generic: `base:`, the GitHub reads, `bwrap` confinement (agents, static tools) and the `docker` sandbox (coverage), image checks and pulls in Fetch, doctor and check probes. pr-review 0.1 with stages Fetch, Report, Questions and Answers; it stops `report ready` after Answers and `--decline review-layer` finishes it. Also: detectors; symbol packs (Go, TypeScript); whole-repository search; similarity; the dependency inventory; test mapping; the reporter, questioner and answerer with both checkers; `gometrics` and `tsmetrics`; confined coverage (`go test -coverprofile`; for TypeScript the repository's own `vitest run --coverage` with its `@vitest/coverage-v8`, or `not run (no vitest coverage provider)` when the repository declares none) with measured CRAP and the unknown-coverage rule; `review.md`, `report.json`, `qa.json`; the ledger; the BanyanDB mapping. **Wave 3**, with the Questions and Answers work: generic `graphloom session list/open` ([core §15](design-typescript-core.md#15-opening-a-recorded-agent-session)), and the decision half of approvals (`GraphDefinition.approvals`, `resume --approve/--decline`, `operator-approval` evidence) for the `report ready` stop; 0.1 has no Review stage, so it refuses `--approve review-layer` and names the version | Intake, executor contract and confinement tests. Unit tests per detector, symbol pattern (new vs modified, receivers, generics), query builder, similarity scorer, test-map rule and validator rule. `gometrics` matches gocyclo on a fixture corpus. Nesting and changed-function scope fixtures. The `measurements` validator rejects each kind of inconsistent record. Real-Git tests: searches read the base commit only, and materialization runs no hook or filter. Ledger CAS race. Rehearsal `report`, `report-corrections`, `answer-finds-existing-helper`, `answer-no-library-with-whole-repo-search`, `answer-checker-contradicts`, `needs-author-purpose`, `purpose-stated`, `missing-test`, `complex-function`, `crap-upper-bound`, `sandbox-unavailable`, `injection`. Wave 3: opening a session leaves the recorded transcript, side files and rollout byte-identical; `session open` refuses a Pi session, a ref whose harness disagrees with its record and a finished run, and refuses while the owning job or a continuation of it runs; the opened session's confinement (repository agent-config masks applied, no GitHub token in its environment, the checkout read-only); `--stage answers` opens the answerer, not the checker; `--decline review-layer` records `operator-approval` evidence and finishes the run; `--approve review-layer` refused by 0.1. Under real Docker: a coverage run with `--network none`, where a test that dials out fails; the limits enforced (a fork bomb stops at `--pids-limit`, an allocation at `--memory`, the host unaffected); only the checkout and the build cache writable, the root read-only, no host home, `--pull never`; the container killed by name on stop and removed on resume; coverage attributed by line range, Go from the coverprofile and TypeScript from `coverage-final.json` statements, with the report written under the job's temporary directory and the checkout unchanged. One live run on a real BanyanDB PR, read by the user, with recall of new symbols, tests and existing equivalents checked by hand |
 | P2 | **Deltas and mutation.** Head mapping, then the since-last sections for the report and the Q&A, with question closure. Mutation testing (`gomutate`, `tsmutate`) at covered sites, with `weak-test` questions | Real-Git fixtures for append, rebase, squash, base merge and missing objects; rehearsal `report-delta` and `surviving-mutant`; `gomutate` fixtures (one per inversion: `<`/`>=`, `>`/`<=`, `==`/`!=` and `true`/`false`, each direction; no other operator ever produced; overlay leaves the checkout unchanged, a compile-failing mutant is `invalid`, uncovered sites `not-run (uncovered)`, the budget cut-off records `not-run`); `tsmutate` fixtures likewise (adding `===`/`!==`; no other operator ever produced, and a fixture fails if one appears; literal types never mutated; the Vite `load` overlay leaves the checkout and its `node_modules` unchanged; a module reached through two import specifiers is mutated for both; a syntax-error mutant is `invalid`), and one run on a real canopy (vitest ^5) and a real GraphLoom (vitest ^3) test; a live re-run after a contributor push |
 | P3 | review-kit extracted and vendored into issue-fix | issue-fix tests unchanged; `describe()` byte-identical for every shipped profile; drift test; `resume --update-plugin` from 0.16.0 |
-| P4 | **Review layer, local:** generic approvals (`review-layer`); Review, Checks (definition only), Draft, and Publish as a stop; the three aspect reviewers with their shipped rule files (Go, TypeScript), the rule-group assertion, the per-aspect sweep and verifiers, cross-aspect dedupe; reproducing tests (`scripts/repro.sh`, Go overlay, vitest scratch config, fix run) in the P1 Docker sandbox, unchanged; `findings-proven`; `needs author` items pre-selected and other Q&A items promotable as draft comments; verdict rule; edits | Graph tests per requirement; anchor validation on real GitHub patches; secret and private-reference scans; report-only requirements pass on a decline; harness resolution for every pair of available harnesses, and refusal with one. Against the bundled ocr 1.13.3: each shipped rule file yields only `custom` groups carrying its language's rule text for `.go`, `.ts`, `.tsx` and other files, and a wrongly shaped file is caught by the assertion. Under real Docker, with the checkout unchanged after every run: a Go repro in an internal and an external test package through `-overlay`; a vitest repro whose relative import, workspace-package import and `vi.mock` path resolve as from its virtual location, on a real canopy (vitest ^5) and a real GraphLoom (vitest ^3) workspace; attribution fixtures (assertion failure → proven, compile error, panic outside the cited code, timeout and memory kill → inconclusive, one failure in two runs → flaky, passing → does not fail); a fix run that passes and one that does not. Rehearsal `no-findings`, `aspect-rules-ignored`, `cross-aspect-dedupe`, `bug-proven-by-test`, `test-does-not-fail`, `security-repro`, `maintainability-non-behavioral`, `repro-disabled`, and `happy` up to the stop |
+| P4 | **Review layer, local:** `--approve review-layer`; Review, Checks (definition only), Draft, and Publish as a stop; the three aspect reviewers with their shipped rule files (Go, TypeScript), the rule-group assertion, the per-aspect sweep and verifiers, cross-aspect dedupe; reproducing tests (`scripts/repro.sh`, Go overlay, vitest scratch config, fix run) in the P1 Docker sandbox, unchanged; `findings-proven`; `needs author` items pre-selected and other Q&A items promotable as draft comments; verdict rule; edits | Graph tests per requirement; anchor validation on real GitHub patches; secret and private-reference scans; report-only requirements pass on a decline; harness resolution for every pair of available harnesses, and refusal with one. Against the bundled ocr 1.13.3: each shipped rule file yields only `custom` groups carrying its language's rule text for `.go`, `.ts`, `.tsx` and other files, and a wrongly shaped file is caught by the assertion. Under real Docker, with the checkout unchanged after every run: a Go repro in an internal and an external test package through `-overlay`; a vitest repro whose relative import, workspace-package import and `vi.mock` path resolve as from its virtual location, on a real canopy (vitest ^5) and a real GraphLoom (vitest ^3) workspace; attribution fixtures (assertion failure → proven, compile error, panic outside the cited code, timeout and memory kill → inconclusive, one failure in two runs → flaky, passing → does not fail); a fix run that passes and one that does not. Rehearsal `no-findings`, `aspect-rules-ignored`, `cross-aspect-dedupe`, `bug-proven-by-test`, `test-does-not-fail`, `security-repro`, `maintainability-non-behavioral`, `repro-disabled`, and `happy` up to the stop |
 | P5 | **Publish:** write token binding, `publish-review`, read-back, optional `publish-report` | Controller tests: write refused without `approvalRef`, with a stale generation or past `maxDispatches`; token bound only under `--approve`; ambiguous POST reconciled; rehearsal `publish-refused`, `happy` to `succeeded`; a live publish on a user-chosen PR |
 | P6 | Review-layer checks (`checks-ran`), incremental review (prior findings, threads, never re-raise, proven tests rerun on the new head), measured budgets | Rehearsal `force-push`; `checks-ran` in the real Docker sandbox; a proven test that passes on a later head makes its finding `fixed`; budgets, coverage, mutation and reproducing-test times recorded in `budgets.md` |
 
