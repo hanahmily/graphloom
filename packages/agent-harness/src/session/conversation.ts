@@ -138,8 +138,11 @@ export function turnExtract(turns: readonly Turn[]): ExtractTurn[] {
   for (let i = 0; i < out.length && operatorBytes > EXTRACT_OPERATOR_BYTES; i += 1) {
     const t = out[i]!;
     const before = bytes(t.operator);
-    const room = Math.max(256, before - (operatorBytes - EXTRACT_OPERATOR_BYTES));
-    t.operator = cutText(t.operator, room);
+    // Down to what the budget still needs of it, or to the marker alone: the oldest give way first, until the total fits.
+    const room = Math.max(bytes(CUT_MARK), before - (operatorBytes - EXTRACT_OPERATOR_BYTES));
+    const cut = cutText(t.operator, room);
+    if (cut === t.operator) continue;
+    t.operator = cut;
     t.operatorCut = true;
     operatorBytes -= before - bytes(t.operator);
   }

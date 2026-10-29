@@ -89,6 +89,17 @@ describe("transcript turns and the turn extract", () => {
     expect(Buffer.byteLength(JSON.stringify(long))).toBeLessThanOrEqual(EXTRACT_MAX_BYTES);
   });
 
+  it("enforces the operator budget over many short messages, marking only what was cut", () => {
+    const turns = Array.from({ length: 1000 }, (_, i) => ({ user: `m${i} ${"x".repeat(200)}` }));
+    const extract = turnExtract(turns);
+    const operatorBytes = extract.reduce((n, t) => n + Buffer.byteLength(t.operator), 0);
+    expect(operatorBytes).toBeLessThanOrEqual(128 * 1024);
+    expect(extract.some((t) => t.operatorCut === true)).toBe(true);
+    // The newest messages are whole, and a message that was not changed is not marked.
+    expect(extract.at(-1)!.operator).toBe(turns.at(-1)!.user);
+    expect(extract.every((t, i) => (t.operatorCut === true) === (t.operator !== turns[i]!.user))).toBe(true);
+  });
+
   it("holds the bound for very many short turns, dropping the oldest whole and saying how many", () => {
     const turns = Array.from({ length: 7000 }, (_, i) => ({ user: `hello ${i}`, answer: "world" }));
     const extract = turnExtract(turns);

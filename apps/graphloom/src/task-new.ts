@@ -292,6 +292,10 @@ async function run(options: TaskNewOptions, out: (line: string) => void): Promis
   if (path.resolve(taskDir) !== path.resolve(outDir)) links.push({ path: path.join(taskDir, "plugins", graph), target: await realpath(loaded.bundle) });
   await checkLinks(links, outDir, options.force === true);
 
+  // The composed task must read back as written before any step runs: a plan whose fields cannot make one (no request) is refused here.
+  const stand = new Map<string, string>(plan.steps.flatMap((s) => (s.kind === "resolve" ? [[s.name, ZERO_OID] as [string, string]] : [])));
+  composeTask(graph, repoField, configField, Object.fromEntries(Object.entries(writeStep.fields).map(([k, v]) => [k, substitutePlan(v, stand)])));
+
   out(`plan: ${plan.summary}`);
   if (options.dryRun === true) {
     plan.steps.forEach((step, i) => out(`step ${i + 1}: ${describeStep(step)}`));
