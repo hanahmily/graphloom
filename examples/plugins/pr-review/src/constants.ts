@@ -26,9 +26,6 @@ export const REQUIREMENT_QUESTIONS = "questions-complete";
 export const REQUIREMENT_ANSWERS = "answers-complete";
 export const REQUIREMENT_GROUNDED = "answers-grounded";
 
-/** Why Questions and Answers cannot pass in this version. */
-export const NOT_IMPLEMENTED = "not implemented in this version";
-
 export const CODING_AGENT: ExecutorPin = { id: "graphloom.coding-agent/run", version: "1" };
 export const GET_PULL: ExecutorPin = { id: "graphloom.github/get-pull", version: "1" };
 export const LIST_PULL_FILES: ExecutorPin = { id: "graphloom.github/list-pull-files", version: "1" };
@@ -57,7 +54,26 @@ export const COMMAND = {
   ledger: "ledger-read",
   metricsDiff: "metrics-diff",
   reportWrite: "report-write",
+  baseDefs: "base-defs",
+  baseTree: "base-tree",
+  baseManifests: "base-manifests",
+  search: "search",
+  candidate: "cand",
+  depSites: "dep-sites",
+  depSource: "dep-source",
+  cite: "cite",
+  names: "names",
+  qaWrite: "qa-write",
+  ledgerPrior: "ledger-prior",
+  ledgerWrite: "ledger-write",
 } as const;
+
+/** The questioner's and the answerer's session keys, so a correction continues the previous session. */
+export const QUESTIONER_JOB = "questioner";
+export const ANSWERER_JOB = "answerer";
+
+/** The exit status of the ledger write when its compare-and-swap lost the race (design §9.1). */
+export const LEDGER_MOVED = 4;
 
 /** The reporter's session key, so a correction continues the previous session. */
 export const REPORTER_JOB = "reporter";
@@ -65,6 +81,7 @@ export const REPORTER_JOB = "reporter";
 export const REVIEW_DIR = ".graphloom/review";
 export const REPORT_JSON = `${REVIEW_DIR}/report.json`;
 export const REVIEW_MD = `${REVIEW_DIR}/review.md`;
+export const QA_JSON = `${REVIEW_DIR}/qa.json`;
 
 /** `refs/graphloom/pr-review/<owner>/<repo>/<N>/ledger`: the per-PR ledger (design §9.1). */
 export const ledgerRef = (owner: string, repo: string, n: number): string => `refs/graphloom/pr-review/${owner}/${repo}/${n}/ledger`;

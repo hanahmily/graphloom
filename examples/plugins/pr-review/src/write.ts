@@ -2,7 +2,7 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 import { MAX_EXECUTOR_INPUT_BYTES, type EnvironmentCommand } from "@graphloom/sdk";
-import { COMMAND, REPORT_JSON, REVIEW_DIR, REVIEW_MD } from "./constants.js";
+import { COMMAND, QA_JSON, REPORT_JSON, REVIEW_DIR, REVIEW_MD } from "./constants.js";
 
 /**
  * Writing a file as a graph command, chunked as issue-fix's issues writer is:
@@ -33,33 +33,43 @@ export function writeChunks(text: string): string[] {
 
 const inputBytes = (command: EnvironmentCommand): number => Buffer.byteLength(JSON.stringify({ commands: [command] }), "utf8");
 
-const WRITE =
+const script = (jsonFile: string): string =>
   'set -eu; n="$1"; shift; json=""; while [ "$n" -gt 0 ]; do json="$json$1"; shift; n=$((n - 1)); done; md=""; for part in "$@"; do md="$md$part"; done; ' +
   `mkdir -p ${REVIEW_DIR}; printf '*\\n' > ${REVIEW_DIR}/.gitignore; ` +
-  `printf '%s' "$json" > ${REPORT_JSON}.tmp; mv ${REPORT_JSON}.tmp ${REPORT_JSON}; ` +
+  `printf '%s' "$json" > ${jsonFile}.tmp; mv ${jsonFile}.tmp ${jsonFile}; ` +
   `printf '%s' "$md" > ${REVIEW_MD}.tmp; mv ${REVIEW_MD}.tmp ${REVIEW_MD}; echo written`;
 
 /**
- * The command that writes `report.json` and `review.md`, or undefined when the
+ * The command that writes a JSON file and `review.md`, or undefined when the
  * JSON alone does not fit one command. The markdown is the readable copy; what
  * does not fit is cut short with a note, the JSON never is.
  */
-export function reportWriteCommand(json: string, markdown: string): EnvironmentCommand | undefined {
+function fileWriteCommand(id: string, jsonFile: string, json: string, markdown: string): EnvironmentCommand | undefined {
   const parts = writeChunks(json);
-  const build = (md: string[]): EnvironmentCommand => ({ id: COMMAND.reportWrite, argv: ["sh", "-c", WRITE, COMMAND.reportWrite, String(parts.length), ...parts, ...md] });
+  const sh = script(jsonFile);
+  const build = (md: string[]): EnvironmentCommand => ({ id, argv: ["sh", "-c", sh, id, String(parts.length), ...parts, ...md] });
   const fits = (c: EnvironmentCommand): boolean => c.argv.length - 5 <= MAX_CHUNKS && inputBytes(c) <= MAX_COMMAND_INPUT_BYTES;
   if (!fits(build([]))) return undefined;
   const md = writeChunks(markdown);
   if (fits(build(md))) return build(md);
-  const cut = `\n… (cut short; see ${REPORT_JSON})\n`;
+  const cut = `\n… (cut short; see ${jsonFile})\n`;
   let kept = 0;
   while (kept < md.length && fits(build([...md.slice(0, kept + 1), cut]))) kept += 1;
   return build(fits(build([...md.slice(0, kept), cut])) ? [...md.slice(0, kept), cut] : md.slice(0, kept));
 }
 
-/** The JSON and markdown a `report-write` argv wrote. */
-export function writtenReport(argv: readonly string[]): { json: string; markdown: string } | undefined {
+/** The command that writes `report.json` and `review.md`. */
+export const reportWriteCommand = (json: string, markdown: string): EnvironmentCommand | undefined => fileWriteCommand(COMMAND.reportWrite, REPORT_JSON, json, markdown);
+
+/** The command that writes `qa.json` and the whole `review.md` (Report, Measurements, Q&A). */
+export const qaWriteCommand = (json: string, markdown: string): EnvironmentCommand | undefined => fileWriteCommand(COMMAND.qaWrite, QA_JSON, json, markdown);
+
+/** The JSON and markdown a `report-write` or `qa-write` argv wrote. */
+export function writtenFiles(argv: readonly string[], id: string): { json: string; markdown: string } | undefined {
   const n = Number(argv[4]);
-  if (argv[3] !== COMMAND.reportWrite || !Number.isSafeInteger(n) || n < 0) return undefined;
+  if (argv[3] !== id || !Number.isSafeInteger(n) || n < 0) return undefined;
   return { json: argv.slice(5, 5 + n).join(""), markdown: argv.slice(5 + n).join("") };
 }
+
+export const writtenReport = (argv: readonly string[]): { json: string; markdown: string } | undefined => writtenFiles(argv, COMMAND.reportWrite);
+export const writtenQa = (argv: readonly string[]): { json: string; markdown: string } | undefined => writtenFiles(argv, COMMAND.qaWrite);

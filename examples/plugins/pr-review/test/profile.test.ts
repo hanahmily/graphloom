@@ -46,7 +46,7 @@ describe("the BanyanDB profile", () => {
     ]);
     expect(d.requirements.map((r) => r.id)).toEqual(d.defaultValidators.map((b) => b.requirementId));
     expect(new Set(d.requirements.map((r) => r.id)).size).toBe(9);
-    expect(d.resultContracts!.map((c) => [c.name, c.evidenceKind])).toEqual([["change-report-v1", "other"], ["change-report-revision-v1", "other"], ["claim-check-v1", "review"]]);
+    expect(d.resultContracts!.map((c) => [c.name, c.evidenceKind])).toEqual([["change-report-v1", "other"], ["change-report-revision-v1", "other"], ["claim-check-v1", "review"], ["questions-v1", "other"], ["answers-v1", "other"], ["answers-revision-v1", "other"], ["answer-check-v1", "review"]]);
   });
 
   it("declares the roles with their distinctFrom pairs, the supervisor preference and the budgets", () => {
@@ -121,6 +121,16 @@ describe("profile refusals", () => {
     expect(refused({ harnesses: { reporter: "gpt" } })).toMatch(/must be one of/);
     expect(refused({ harnesses: { "reviewer-security": "pi" } })).toMatch(/belongs to the review layer/);
     expect(refused({ harnesses: { answerer: "pi" } })).toMatch(/answerer must be claude-code or codex/);
+  });
+
+  it("checks symbol packs: patterns must compile and name the symbol, and a profile pack overrides only the fields it names", () => {
+    const pack = (over: object) => ({ symbols: { packs: [{ language: "go", globs: ["**/*.go"], ...over }] } });
+    expect(refused(pack({ definitions: ["^func (?<name>"] }))).toMatch(/not a regular expression/);
+    expect(refused(pack({ definitions: ["^func\\s+(\\w+)"] }))).toMatch(/must name the symbol with a \(\?<name>…\) group/);
+    expect(refused(pack({ members: ["^\\s+(\\w+)\\("] }))).toMatch(/must name the symbol/);
+    expect(refused(pack({ grep: 3 }))).toMatch(/grep must be a POSIX extended regular expression/);
+    expect(refused({ symbols: { packs: [{ language: "go", globs: ["../x"] }] } })).toMatch(/without "\.\."/);
+    expect(profileOf(pack({ definitions: ["^fn\\s+(?<name>\\w+)"], testFiles: ["**/*_spec.go"] })).symbols[0]).toMatchObject({ language: "go", testFiles: ["**/*_spec.go"] });
   });
 
   it("accepts roles that satisfy every pair", () => {

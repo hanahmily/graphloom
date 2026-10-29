@@ -1781,6 +1781,57 @@ writes.
 | P5 | **Publish:** write token binding, `publish-review`, read-back, optional `publish-report` | Controller tests: write refused without `approvalRef`, with a stale generation or past `maxDispatches`; token bound only under `--approve`; ambiguous POST reconciled; rehearsal `publish-refused`, `happy` to `succeeded`; a live publish on a user-chosen PR |
 | P6 | Review-layer checks (`checks-ran`), incremental review (prior findings, threads, never re-raise, proven tests rerun on the new head), measured budgets | Rehearsal `force-push`; `checks-ran` in the real Docker sandbox; a proven test that passes on a later head makes its finding `fixed`; budgets, coverage, mutation and reproducing-test times recorded in `budgets.md` |
 
+### Wave 3a: what is implemented, and how it differs
+
+`examples/plugins/pr-review` implements the Questions and Answers stages
+(`questions-complete`, `answers-complete`, `answers-grounded`), the
+deterministic groundwork, `qa.json`, the Q&A part of `review.md` and the
+ledger write. The stage and requirement lists are unchanged. Where the code
+settles something this document left open:
+
+- **Packs** are profile data with shipped defaults for Go and TypeScript
+  (`src/packs.ts`): `definitions` and `members` are JavaScript regular
+  expressions with a `(?<name>…)` group, `grep` is the POSIX expression that
+  selects a file's declarations from the base, `testFiles` and `testNames` as
+  before. A profile pack of the same language overrides the fields it names.
+- **New versus modified** compares the head's qualified names (named as
+  `gometrics` and `tsmetrics` name functions) with the names the base file
+  defined, read by one `git grep` per batch of modified files; when that
+  report is cut, the patch decides.
+- **Searches** are one read-only command per symbol (`search-S<n>`): name,
+  variants, signature, rare body tokens, and for a modified symbol the base
+  tests as context. The rarest tokens are those least common in the pull
+  request's own new bodies. Candidate definitions are fetched
+  (`cand-<n>`) and scored with Jaccard similarity over 5-token shingles.
+- **Test mapping** counts a test file the pull request adds in the symbol's
+  directory as a find by itself, as §7.2 lists it; added lines naming the
+  symbol or its exported caller, and case names holding every word of its
+  name, are the others.
+- **Answers** are one contract (`answers-v1`); a correction after the answer
+  check is asked as `answers-revision-v1`, so the evidence says which result
+  is the correction. The controller keeps only the newest review evidence for a
+  validator, so the checker judges the whole set again after the correction;
+  a revision is checked for the questions it answers.
+  Citations, and proposed names, are verified by read-only commands
+  (`cite-<n>`, `names-<n>`) in the tree they name, the base commit or the
+  working tree; a dependency citation must lie in a mounted source directory.
+  At most 60 source directories are mounted; a dependency past that is marked
+  `source unavailable`.
+- **The Questions and Answers stages read the finished report** from the
+  `report-write` command's recorded bytes, which the Report stage's validators
+  already recomputed, because the claim check that produced them is review
+  evidence a later review supersedes.
+- **The ledger write** advances `R/ledger` by compare-and-swap in the Answers
+  stage, because 0.1 has no Draft stage. `ledger.json` keeps the heads a prior
+  ledger listed and records this head's questions; delta reports and question
+  closure are P2. After "ledger moved" and the operator's resume, the graph
+  reads the ledger again before swapping.
+- **Not built in this wave:** linked issues are not read, so a stated purpose
+  quotes the title, body or a commit message only; weak-test questions need
+  mutation results, so the Q&A says none is asked until P2; the harness for a
+  role is the profile's static choice with the distinctness pairs enforced, not
+  a choice among the harnesses the runner config makes available.
+
 ## 19. Deferred items
 
 - **Thread replies.** The status of earlier comments goes in the review body

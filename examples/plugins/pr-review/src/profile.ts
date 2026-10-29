@@ -33,7 +33,12 @@ export interface SectionConfig {
 export interface SymbolPack {
   language: string;
   globs: string[];
+  /** Top-level declaration patterns: JavaScript regular expressions with a named group `name` (see packs.ts). */
   definitions?: string[];
+  /** Class member patterns, same shape. */
+  members?: string[];
+  /** POSIX extended expression that selects a file's declaration lines from the base commit. */
+  grep?: string;
   testFiles?: string[];
   testNames?: string[];
 }
@@ -263,10 +268,23 @@ function checkSymbols(raw: unknown): SymbolPack[] {
     const where = `symbols.packs[${i}]`;
     need(isObject(p), `${where} must be an object`);
     const o = p as Record<string, unknown>;
-    onlyKeys(o, where, ["language", "globs", "definitions", "testFiles", "testNames"]);
+    onlyKeys(o, where, ["language", "globs", "definitions", "members", "grep", "testFiles", "testNames"]);
     need(isString(o.language), `${where}.language is required`);
     checkGlobs(o.globs, `${where}.globs`);
-    for (const key of ["definitions", "testFiles", "testNames"]) need(o[key] === undefined || isStrings(o[key]), `${where}.${key} must be a list of patterns`);
+    for (const key of ["definitions", "members", "testFiles", "testNames"]) need(o[key] === undefined || isStrings(o[key]), `${where}.${key} must be a list of patterns`);
+    need(o.grep === undefined || isString(o.grep), `${where}.grep must be a POSIX extended regular expression`);
+    for (const key of ["definitions", "members", "testNames"]) {
+      for (const pattern of (o[key] as string[] | undefined) ?? []) {
+        let re: RegExp;
+        try {
+          re = new RegExp(pattern);
+        } catch (err) {
+          throw new ProfileError(`${where}.${key} pattern ${JSON.stringify(pattern)} is not a regular expression: ${err instanceof Error ? err.message : String(err)}`);
+        }
+        need(key === "testNames" || /\(\?<name>/.test(pattern), `${where}.${key} pattern ${JSON.stringify(pattern)} must name the symbol with a (?<name>…) group`);
+        void re;
+      }
+    }
     return structuredClone(o) as unknown as SymbolPack;
   });
 }
@@ -404,6 +422,8 @@ export function parseProfile(config: unknown): Profile {
     const q = p.questions as Record<string, unknown>;
     onlyKeys(q, "questions", ["excludeRoots", "similarity", "maxCandidates"]);
     need(q.excludeRoots === undefined || isStrings(q.excludeRoots), "questions.excludeRoots must be a list of paths");
+    // They travel in one argument of each search command, which a command allows 4,096 characters.
+    need(q.excludeRoots === undefined || (q.excludeRoots as string[]).join("\n").length <= 3_000, "questions.excludeRoots is too long: at most 3,000 characters in all");
     need(q.similarity === undefined || (typeof q.similarity === "number" && q.similarity > 0 && q.similarity <= 1), "questions.similarity must be a number above 0 and at most 1");
     need(q.maxCandidates === undefined || isCount(q.maxCandidates), "questions.maxCandidates must be a positive integer");
     questions = { excludeRoots: (q.excludeRoots as string[] | undefined) ?? [], similarity: (q.similarity as number | undefined) ?? 0.5, maxCandidates: (q.maxCandidates as number | undefined) ?? 5 };

@@ -85,14 +85,11 @@
       {
         "language": "go",
         "globs": ["**/*.go"],
-        "definitions": ["^func\\s+(?:\\([^)]*\\)\\s*)?(\\w+)", "^type\\s+(\\w+)"],
-        "testFiles": ["**/*_test.go"],
-        "testNames": ["^func\\s+(Test\\w+)"]
+        "testFiles": ["**/*_test.go"]
       },
       {
         "language": "typescript",
         "globs": ["**/*.ts", "**/*.tsx"],
-        "definitions": ["^export\\s+(?:async\\s+)?(?:function|class|interface|type|const)\\s+(\\w+)"],
         "testFiles": ["**/*.test.ts", "**/*.spec.ts"]
       }
     ]

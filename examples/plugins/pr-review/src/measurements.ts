@@ -29,7 +29,7 @@ export const MAX_DIFF_BYTES = 60_000;
 export const STATIC_PREFIX = "static-";
 
 /** The observable path rule: a relative file path the controller can read (no `..`, no `.git`, a file name with an extension). */
-function observable(p: string): boolean {
+export function observable(p: string): boolean {
   if (!/^[A-Za-z0-9_./-]+$/.test(p)) return false;
   const parts = p.split("/");
   if (parts.some((s) => s === "" || s === "." || s === ".." || s === ".git")) return false;

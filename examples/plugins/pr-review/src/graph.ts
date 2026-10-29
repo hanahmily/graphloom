@@ -26,13 +26,15 @@ import {
 import { analyze, type Analysis } from "./analysis.js";
 import { checkoutCommand, GIT_ENV, GUARD_REFUSED, guardCommand, headTreeCommand, ledgerReadCommand, reviewDirCommand } from "./commands.js";
 import {
+  ANSWERER_JOB,
   ANSWERS_STAGE,
   CODING_AGENT,
   COMMAND,
   ENV_PLUGIN_ROOT,
   ENV_WORKTREE,
   FETCH_STAGE,
-  NOT_IMPLEMENTED,
+  LEDGER_MOVED,
+  QUESTIONER_JOB,
   QUESTIONS_STAGE,
   REPORTER_JOB,
   REPORT_STAGE,
@@ -47,9 +49,11 @@ import {
   REQUIREMENT_SNAPSHOT,
   GRAPH_ID,
   GRAPH_VERSION,
+  QA_JSON,
   REVIEW_MD,
 } from "./constants.js";
 import { commandRuns, describeCommand, environmentOutput, outputTail, succeeded, validatorEvidence, type CommandRun } from "./evidence.js";
+import { LIMITS } from "./metrics/crap.js";
 import { CHANGE_REPORT_SCHEMA } from "./report.js";
 import { CLAIM_CHECK_SCHEMA } from "./claims.js";
 import { itemsOf, REPORTER_SCHEMA_NAME, REVISION_SCHEMA_NAME, reportFlow } from "./flow.js";
@@ -58,10 +62,16 @@ import { checkerInstruction, reporterInstruction } from "./prompts.js";
 import { harnessName, parseProfile, ProfileError, ROLES, DISTINCT_PAIRS, type Profile } from "./profile.js";
 import { requestedPull, type PullRequest } from "./request.js";
 import { secretFindings } from "./secrets.js";
-import { readInput, snapshotState, type ReadSpec } from "./snapshot.js";
+import { readInput, snapshotState, type PullFile, type ReadSpec } from "./snapshot.js";
 import { CLAIM_CHECK_SCHEMA_NAME } from "./claims.js";
 import { outputsOf, validatorById } from "./validators.js";
-import { reportWriteCommand, writtenReport } from "./write.js";
+import { reportWriteCommand, writtenQa, writtenReport } from "./write.js";
+import { ANSWER_CHECK_SCHEMA, ANSWER_CHECK_SCHEMA_NAME, ANSWERS_REVISION_SCHEMA_NAME, ANSWERS_SCHEMA, ANSWERS_SCHEMA_NAME, answersFlow } from "./answers.js";
+import { sourceDirs } from "./inventory.js";
+import { ledgerRead, priorShowCommand, writtenLedger } from "./ledger.js";
+import { QUESTIONS_SCHEMA, QUESTIONS_SCHEMA_NAME, requiredQuestions } from "./questions.js";
+import { answerCheckerInstruction, answererInstruction, questionerInstruction } from "./qaprompts.js";
+import { answerContext, answerWrites, qaContext, qaOutputs, questionSet, questionerFlow, type QaContext } from "./qaflow.js";
 
 export { GRAPH_ID, GRAPH_VERSION };
 
@@ -118,20 +128,18 @@ export function definitionFor(profile: Profile): GraphDefinition {
     },
     {
       id: REQUIREMENT_QUESTIONS,
-      statement: `Every required question was asked (purpose, existing equivalent, reuse of a library, common logic, missing test, split function, complexity and coverage, weak test). The Questions stage is ${NOT_IMPLEMENTED}: this requirement fails closed.`,
-      evidenceSchema: "questions-v1",
+      statement: `Every required question was asked: purpose for each change item whose purpose the pull request's text does not state (a stated purpose is recorded with a quote that matches that text instead), existing-equivalent, reuse-library and common-logic for each new symbol, missing-test for each new or modified symbol the test map finds no covering test for, split-function for each changed function with complexity of ${LIMITS.complexity} or more or nesting over ${LIMITS.nesting}, complexity-coverage for each function with measured coverage and CRAP of ${LIMITS.crap} or more or with unknown coverage and complexity of ${LIMITS.complexity} or more (an upper-bound CRAP alone asks nothing), and weak-test for each surviving mutant (none in this version: mutation testing arrives later). The groundwork behind them (symbols from the language packs, whole-repository searches over the pinned base commit, similarity, the dependency inventory, the test map) was read by read-only commands, and every changed function has a measurement record.`,
+      evidenceSchema: QUESTIONS_SCHEMA_NAME,
     },
     {
       id: REQUIREMENT_ANSWERS,
-      statement: `Every question has an answer with evidence and a status. The Answers stage is ${NOT_IMPLEMENTED}: this requirement fails closed.`,
-      evidenceSchema: "answers-v1",
+      statement: `Every question has an answer from the ${harnessName(profile.roles.answerer)} answerer with evidence (citations that resolve in the tree they name, the searches run with their results, inventory entries) and a status of answered, partially answered or needs author. Every "none found" answer lists its whole-repository searches. Every cited metric equals its measurement record. Every proposal's line ranges lie inside its function and its names are new to the package. ${QA_JSON} and ${REVIEW_MD} are written, and the pull request's ledger ref was advanced by compare-and-swap from the value Fetch read with this head's report.json and qa.json.`,
+      evidenceSchema: ANSWERS_SCHEMA_NAME,
     },
     {
       id: REQUIREMENT_GROUNDED,
-      statement: `An independent checker re-checked every answer against the trees. The Answers stage is ${NOT_IMPLEMENTED}: this requirement fails closed.`,
-      // The answer checker's own result shape arrives with the Answers stage. It is not claim-check-v1 yet,
-      // so no report-checker reply is ever walked against this requirement's closed validator.
-      evidenceSchema: "answer-check-v1",
+      statement: `An independent ${harnessName(profile.roles["answer-checker"])} answer checker, on a harness other than the answerer's, re-checked every cited equivalent, library, duplicate and covering test, and every "none found" claim with searches of its own, against the trees. Every answer left is supported or partial; an answer still unsupported after one correction is needs author, with both statements recorded.`,
+      evidenceSchema: ANSWER_CHECK_SCHEMA_NAME,
     },
   ];
   const bindings: ValidatorBinding[] = [
@@ -155,6 +163,11 @@ export function definitionFor(profile: Profile): GraphDefinition {
       // Kind "review": the claims-checked requirement is judged by an independent reviewer, and the controller
       // admits one only from the review evidence of a read-only review job.
       { name: CLAIM_CHECK_SCHEMA_NAME, schema: asSchema(CLAIM_CHECK_SCHEMA), evidenceKind: "review" },
+      { name: QUESTIONS_SCHEMA_NAME, schema: asSchema(QUESTIONS_SCHEMA), evidenceKind: "other" },
+      { name: ANSWERS_SCHEMA_NAME, schema: asSchema(ANSWERS_SCHEMA), evidenceKind: "other" },
+      { name: ANSWERS_REVISION_SCHEMA_NAME, schema: asSchema(ANSWERS_SCHEMA), evidenceKind: "other" },
+      // Kind "review": answers-grounded is judged by an independent reviewer (a read-only review job on another harness).
+      { name: ANSWER_CHECK_SCHEMA_NAME, schema: asSchema(ANSWER_CHECK_SCHEMA), evidenceKind: "review" },
     ],
     stages: [
       { id: FETCH_STAGE, name: "Fetch", requirementIds: [REQUIREMENT_SNAPSHOT, REQUIREMENT_CHECKED_OUT, REQUIREMENT_LEDGER] },
@@ -173,9 +186,7 @@ export function definitionFor(profile: Profile): GraphDefinition {
 
 /**
  * The roles the profile assigns harnesses to (design §13.1), for `graphloom
- * doctor --task`. The questioner and the answerer belong to stages this
- * version does not run, and are declared so the operator sees the whole role
- * set, with its distinctness constraints, now.
+ * doctor --task`: the whole role set with its distinctness constraints.
  */
 export function agentRoles(profile: Profile): AgentRoleDeclaration[] {
   return ROLES.map((role) => {
@@ -207,15 +218,24 @@ export function advancePullRequest(view: RunView): GraphDecision {
   const definition = definitionFor(profile);
   const stage = definition.stages.find((s) => !s.requirementIds.every((id) => view.receipts.some((r) => r.stageId === s.id && r.requirementId === id && r.valid)) || view.openAttempt?.[s.id] === true);
   const ctx: Context = { profile, definition, pr };
-  if (stage === undefined || stage.id === QUESTIONS_STAGE || stage.id === ANSWERS_STAGE) {
+  if (stage === undefined) {
     return withPrivate(
       stop(
-        { reason: "report ready", blocker: `the report is written to ${REVIEW_MD} in the worktree; the Questions and Answers stages are ${NOT_IMPLEMENTED}, so the run ends here`, retryable: false },
-        "the report is ready; questions and answers are not built in this version",
+        { reason: "report ready", blocker: `the report, the questions and their answers are written to ${REVIEW_MD} in the worktree (report.json and qa.json beside it); the review layer is a later version, so the run ends here`, retryable: false },
+        "the report and the Q&A are ready; the review layer is not built in this version",
       ),
     );
   }
-  return stage.id === FETCH_STAGE ? fetch(ctx, view) : report(ctx, view);
+  switch (stage.id) {
+    case FETCH_STAGE:
+      return fetch(ctx, view);
+    case REPORT_STAGE:
+      return report(ctx, view);
+    case QUESTIONS_STAGE:
+      return questions(ctx, view);
+    default:
+      return answers(ctx, view);
+  }
 }
 
 interface Context {
@@ -329,14 +349,14 @@ function refused(job: { problem: string; incompatible?: true }): GraphDecision {
   return supervise({ reason: job.problem }, "escalate a missing worktree path");
 }
 
-function agentJob(ctx: Context, view: RunView, spec: { jobId?: string; purpose: "diagnostic" | "review"; instruction: string; schema: string; harness: string; assignment: string; continueFrom?: string }, analysis: Analysis): JobSpec | { problem: string; incompatible?: true } {
+function agentJob(ctx: Context, view: RunView, spec: { jobId?: string; stageId?: string; purpose: "diagnostic" | "review"; instruction: string; schema: string; harness: string; assignment: string; continueFrom?: string; readOnlyBinds?: readonly string[] }, files: readonly PullFile[]): JobSpec | { problem: string; incompatible?: true } {
   const worktree = environmentOutput(view.evidence, ENV_WORKTREE);
   if (worktree === undefined || !path.isAbsolute(worktree)) return { problem: "the environment check recorded no worktree path, which the confinement masks need" };
-  const masks = agentConfigMasks(worktree, analysis.snapshot.files.flatMap((f) => [f.path, ...(f.previousPath !== null ? [f.previousPath] : [])]));
+  const masks = agentConfigMasks(worktree, files.flatMap((f) => [f.path, ...(f.previousPath !== null ? [f.previousPath] : [])]));
   if ("problem" in masks) return { problem: masks.problem, incompatible: true };
   return {
     ...(spec.jobId !== undefined ? { jobId: spec.jobId } : {}),
-    stageId: REPORT_STAGE,
+    stageId: spec.stageId ?? REPORT_STAGE,
     kind: "agent",
     purpose: spec.purpose,
     readOnly: true,
@@ -345,15 +365,15 @@ function agentJob(ctx: Context, view: RunView, spec: { jobId?: string; purpose: 
     executor: CODING_AGENT,
     input: { assignment: spec.assignment, harness: spec.harness },
     // Untrusted-read confinement (design §12.2): home hidden, repository agent configuration masked, no GitHub token.
-    confinement: { kind: "bwrap", network: true, mask: masks.masks, binds: [] },
+    confinement: { kind: "bwrap", network: true, mask: masks.masks, binds: (spec.readOnlyBinds ?? []).map((p) => ({ path: p, readOnly: true })) },
     ...(ctx.profile.agentTimeoutMs !== undefined ? { timeoutMs: ctx.profile.agentTimeoutMs } : {}),
     ...(spec.continueFrom !== undefined ? { continueFrom: spec.continueFrom } : {}),
   };
 }
 
-/** The newest reporter session, which no later job has continued. */
-function reporterSession(view: RunView): string | undefined {
-  const sessions = (view.agentSessions ?? []).filter((s) => s.stageId === REPORT_STAGE && s.dispatchKey === REPORTER_JOB && s.status === "ok" && s.generation <= view.generation);
+/** The newest session of job `jobId` in `stageId`, which no later job has continued. */
+function jobSession(view: RunView, stageId: string, jobId: string): string | undefined {
+  const sessions = (view.agentSessions ?? []).filter((s) => s.stageId === stageId && s.dispatchKey === jobId && s.status === "ok" && s.generation <= view.generation);
   const continued = new Set(sessions.map((s) => s.continuedFrom).filter((s) => s !== undefined));
   return sessions.filter((s) => !continued.has(s.operationId)).at(-1)?.operationId;
 }
@@ -387,15 +407,15 @@ function report(ctx: Context, view: RunView): GraphDecision {
       return supervise({ reason: flow.reason, evidenceRefs: flow.refs }, "hand the unresolved report to the supervisor");
     case "reporter": {
       const assignment = reporterInstruction({ pr, snapshot: analysis.snapshot, sections: analysis.sections, facts: analysis.facts, kind: flow.kind, feedback: flow.feedback });
-      const from = flow.kind === "first" ? undefined : reporterSession(view);
-      const job = agentJob(ctx, view, { jobId: REPORTER_JOB, purpose: "diagnostic", instruction: "Write the change report", schema: flow.schema, harness: profile.roles.reporter, assignment, ...(from !== undefined ? { continueFrom: from } : {}) }, analysis);
+      const from = flow.kind === "first" ? undefined : jobSession(view, REPORT_STAGE, REPORTER_JOB);
+      const job = agentJob(ctx, view, { jobId: REPORTER_JOB, purpose: "diagnostic", instruction: "Write the change report", schema: flow.schema, harness: profile.roles.reporter, assignment, ...(from !== undefined ? { continueFrom: from } : {}) }, analysis.snapshot.files);
       if ("problem" in job) return refused(job);
       const why = { first: "write the change report (read-only, confined)", correction: "correct the report: deterministic validation found problems", revision: "revise the report: the claim check did not support some items" }[flow.kind];
       return dispatchAgent(view, job, why);
     }
     case "checker": {
       const assignment = checkerInstruction({ pr, snapshot: analysis.snapshot, report: flow.report, items: itemsOf(flow.report, analysis.ctx), retry: flow.retry });
-      const job = agentJob(ctx, view, { purpose: "review", instruction: "Check the report's claims against the diff", schema: CLAIM_CHECK_SCHEMA_NAME, harness: profile.roles["report-checker"], assignment }, analysis);
+      const job = agentJob(ctx, view, { purpose: "review", instruction: "Check the report's claims against the diff", schema: CLAIM_CHECK_SCHEMA_NAME, harness: profile.roles["report-checker"], assignment }, analysis.snapshot.files);
       if ("problem" in job) return refused(job);
       return dispatchAgent(view, job, `check every report item with a fresh read-only ${harnessName(profile.roles["report-checker"])} session`);
     }
@@ -472,4 +492,136 @@ function measureAndWrite(ctx: Context, view: RunView, analysis: Analysis, flow: 
     return stop({ reason: "incompatible task", blocker: "the report is too large for one write command", retryable: false }, "stop: the report does not fit one command");
   }
   return withPrivate(dispatch(commandJob(REPORT_STAGE, `Write ${REVIEW_MD} and report.json`, { commands: [command] }), "write report.json and the readable review.md"));
+}
+
+/** Whether a failed command may run again: the operator resumed since it failed. */
+const retryOf = (view: RunView) => (run: CommandRun): boolean => isStaleFailure(run.record, view);
+
+/** What the groundwork still needs, as the decision that gets it (or stops the run). */
+function groundworkDecision(step: Extract<ReturnType<typeof qaContext>, { state: "groundwork" }>["step"], stageId: string): GraphDecision {
+  switch (step.state) {
+    case "observe":
+      return withPrivate(observe({ paths: step.paths }, "observe the changed source files the symbol extraction reads, so symbols come from the head's bytes"));
+    case "run":
+      return withPrivate(dispatch(commandJob(stageId, "Read the base commit for the groundwork (declarations, searches, dependencies)", { commands: step.commands, env: { ...GIT_ENV } }), step.why));
+    case "failed":
+      return supervise({ reason: `the groundwork could not be read: ${step.problems.join("; ")}`, evidenceRefs: step.refs.slice(-10) }, "hand a failed groundwork read to the supervisor");
+    case "incompatible":
+      return stop({ reason: "incompatible task", blocker: step.problem, retryable: false }, "stop: the pull request is past a profile limit");
+  }
+}
+
+function questions(ctx: Context, view: RunView): GraphDecision {
+  const { profile, pr } = ctx;
+  const c = qaContext(view.evidence, profile, pr, retryOf(view));
+  if (c.state === "pending") return supervise({ reason: `the Questions stage lost what it reads: ${c.reason}` }, "escalate a missing report or snapshot");
+  if (c.state === "groundwork") return groundworkDecision(c.step, QUESTIONS_STAGE);
+  const flow = questionerFlow(view.evidence, c.ctx);
+  switch (flow.state) {
+    case "supervise":
+      return supervise({ reason: flow.reason, evidenceRefs: flow.refs }, "hand the unresolved questions to the supervisor");
+    case "questioner": {
+      const required = requiredQuestions({ view: c.ctx.view, groundwork: c.ctx.groundwork }, new Map());
+      const assignment = questionerInstruction({ pr, snapshot: c.ctx.analysis.snapshot, view: c.ctx.view, groundwork: c.ctx.groundwork, required, feedback: flow.feedback, kind: flow.kind });
+      const from = flow.kind === "first" ? undefined : jobSession(view, QUESTIONS_STAGE, QUESTIONER_JOB);
+      const job = agentJob(ctx, view, { jobId: QUESTIONER_JOB, stageId: QUESTIONS_STAGE, purpose: "diagnostic", instruction: "Ask the questions (ask only; never answer)", schema: QUESTIONS_SCHEMA_NAME, harness: profile.roles.questioner, assignment, ...(from !== undefined ? { continueFrom: from } : {}) }, c.ctx.analysis.snapshot.files);
+      if ("problem" in job) return refused(job);
+      return dispatchAgent(view, job, flow.kind === "first" ? "ask the questions (read-only, confined)" : "correct the questions: deterministic validation found problems");
+    }
+    case "done":
+      return validateStage(ctx, view, QUESTIONS_STAGE);
+  }
+}
+
+const sameArgv = (a: readonly string[], b: readonly string[]): boolean => a.length === b.length && a.every((x, i) => x === b[i]);
+
+function answers(ctx: Context, view: RunView): GraphDecision {
+  const { profile, pr } = ctx;
+  const c = qaContext(view.evidence, profile, pr, retryOf(view));
+  if (c.state === "pending") return supervise({ reason: `the Answers stage lost what it reads: ${c.reason}` }, "escalate a missing report or snapshot");
+  if (c.state === "groundwork") return supervise({ reason: `the Answers stage lost the groundwork the questions rest on (${c.step.state})` }, "escalate a missing groundwork");
+  const qf = questionerFlow(view.evidence, c.ctx);
+  if (qf.state !== "done") return supervise({ reason: `the Answers stage lost the questions (${qf.state})` }, "escalate missing questions");
+  const set = questionSet(c.ctx, qf.output);
+  const actx = answerContext(c.ctx, set.questions);
+  const flow = answersFlow(view.evidence, actx, c.ctx.base, retryOf(view));
+  const files = c.ctx.analysis.snapshot.files;
+  switch (flow.state) {
+    case "supervise":
+      return supervise({ reason: flow.reason, evidenceRefs: flow.refs }, "hand the unresolved answers to the supervisor");
+    case "answerer": {
+      const mounted = sourceDirs(c.ctx.groundwork.inventory);
+      const assignment = answererInstruction({ pr, snapshot: c.ctx.analysis.snapshot, view: c.ctx.view, groundwork: c.ctx.groundwork, questions: set.questions, kind: flow.kind, feedback: flow.feedback, ...(flow.only !== undefined ? { only: flow.only } : {}), mountedDirs: mounted });
+      const from = flow.kind === "first" ? undefined : jobSession(view, ANSWERS_STAGE, ANSWERER_JOB);
+      // Untrusted-read confinement, with the dependency source mounted read-only (design §7.3).
+      const job = agentJob(ctx, view, { jobId: ANSWERER_JOB, stageId: ANSWERS_STAGE, purpose: "diagnostic", instruction: "Answer the questions from the whole codebase", schema: flow.schema, harness: profile.roles.answerer, assignment, readOnlyBinds: mounted, ...(from !== undefined ? { continueFrom: from } : {}) }, files);
+      if ("problem" in job) return refused(job);
+      const why = { first: "answer the questions (read-only, confined, dependency source mounted read-only)", correction: "correct the answers: deterministic validation found problems", revision: "revise the answers: the answer checker did not support some" }[flow.kind];
+      return dispatchAgent(view, job, why);
+    }
+    case "verify":
+      return withPrivate(dispatch(commandJob(ANSWERS_STAGE, "Check the answers' citations and proposed names against the trees", { commands: flow.commands.slice(0, 16), env: { ...GIT_ENV } }), "resolve each citation in the tree it names, and each proposed name in the package"));
+    case "checker": {
+      const mounted = sourceDirs(c.ctx.groundwork.inventory);
+      const assignment = answerCheckerInstruction({ pr, snapshot: c.ctx.analysis.snapshot, groundwork: c.ctx.groundwork, questions: set.questions, answers: flow.answers, retry: flow.retry, mountedDirs: mounted });
+      // The same dependency source, read-only, so a library or dependency citation can be re-checked where it points.
+      const job = agentJob(ctx, view, { stageId: ANSWERS_STAGE, purpose: "review", instruction: "Check the answers against the trees", schema: ANSWER_CHECK_SCHEMA_NAME, harness: profile.roles["answer-checker"], assignment, readOnlyBinds: mounted }, files);
+      if ("problem" in job) return refused(job);
+      return dispatchAgent(view, job, `check every answer with a fresh read-only ${harnessName(profile.roles["answer-checker"])} session`);
+    }
+    case "done":
+      return writeAnswers(ctx, view, c.ctx, set, flow.final);
+  }
+}
+
+/** After the answers: write qa.json and review.md, advance the ledger by compare-and-swap, then validate the stage. */
+function writeAnswers(ctx: Context, view: RunView, c: QaContext, set: ReturnType<typeof questionSet>, final: Parameters<typeof qaOutputs>[2]): GraphDecision {
+  const w = answerWrites(view.evidence, c, set, final);
+  if (w.qa === undefined) return stop({ reason: "incompatible task", blocker: w.problem ?? "the Q&A cannot be written", retryable: false }, "stop: the Q&A does not fit one write command");
+  const write = commandState(view, COMMAND.qaWrite);
+  if (write.run === undefined || write.failed || !sameArgv(write.run.command.argv, w.qa.argv)) {
+    if (write.failed && !write.retry && write.run !== undefined) {
+      return supervise({ reason: `writing the Q&A failed: ${describeCommand(write.run.command)}: ${outputTail(write.run.command)}`, evidenceRefs: [write.run.record.ref] }, "escalate a failed Q&A write");
+    }
+    if (commandRuns(view.evidence, COMMAND.qaWrite).length >= 4) return supervise({ reason: "the written Q&A keeps differing from the one the evidence recomputes" }, "escalate a Q&A write that does not settle");
+    const written = writtenQa(w.qa.argv);
+    const secrets = [...secretFindings(written?.json ?? ""), ...secretFindings(written?.markdown ?? "")];
+    if (secrets.length > 0) {
+      return stop({ reason: "report refused", blocker: `the Q&A would hold what looks like a credential (${[...new Set(secrets)].slice(0, 3).join("; ")}); it was not written`, retryable: false }, "refuse to write a Q&A that holds a secret");
+    }
+    return withPrivate(dispatch(commandJob(ANSWERS_STAGE, `Write ${QA_JSON} and ${REVIEW_MD}`, { commands: [w.qa] }), "write qa.json and the whole review.md (Report, Measurements, Q&A)"));
+  }
+  return recordLedger(ctx, view, c, w);
+}
+
+function recordLedger(ctx: Context, view: RunView, c: QaContext, w: ReturnType<typeof answerWrites>): GraphDecision {
+  const read = ledgerRead(view.evidence);
+  const lw = commandState(view, COMMAND.ledgerWrite);
+  if (read === undefined || w.old === undefined) return supervise({ reason: w.problem ?? "the ledger value Fetch read is not in the evidence" }, "escalate a missing ledger read");
+  const ref = writtenLedger(lw.run?.command.argv ?? [])?.ref ?? "the ledger ref";
+  if (lw.run !== undefined && lw.failed) {
+    if (!lw.retry) {
+      if (lw.run.command.exitCode === LEDGER_MOVED) {
+        return stop({ reason: "ledger moved", blocker: `another run advanced ${ref} after Fetch read it; resume to read it again and record this head after it`, evidenceRefs: [lw.run.record.ref], retryable: true }, "stop: lost the compare-and-swap on the ledger");
+      }
+      return supervise({ reason: `advancing the ledger failed: ${describeCommand(lw.run.command)}: ${outputTail(lw.run.command)}`, evidenceRefs: [lw.run.record.ref] }, "escalate a failed ledger write");
+    }
+    // After the operator's resume: read the ledger again first, since the value the write swapped from was stale.
+    const at = (r: string): number => view.evidence.findIndex((e) => e.ref === r);
+    if (at(read.run.record.ref) < at(lw.run.record.ref)) {
+      return withPrivate(dispatch(commandJob(ANSWERS_STAGE, "Read the pull request's ledger ref again", { commands: [ledgerReadCommand(c.pr.owner, c.pr.repo, c.pr.number)], env: { ...GIT_ENV } }), "read the ledger ref again: it moved since Fetch read it"));
+    }
+  }
+  const lr = commandState(view, COMMAND.ledger);
+  if (lr.failed && lr.run !== undefined) return supervise({ reason: `the ledger read failed: ${describeCommand(lr.run.command)}`, evidenceRefs: [lr.run.record.ref] }, "escalate a failed ledger read");
+  if (w.prior?.state === "missing" || (w.prior?.state === "unreadable" && retryOf(view)(w.prior.run))) {
+    return withPrivate(dispatch(commandJob(ANSWERS_STAGE, "Read the prior ledger's ledger.json", { commands: [priorShowCommand(w.old)], continueOnFailure: true, env: { ...GIT_ENV } }), "read the prior ledger.json, so the new one keeps its heads"));
+  }
+  if (w.prior?.state === "unreadable") {
+    return supervise({ reason: w.problem ?? "the prior ledger cannot be read", evidenceRefs: [w.prior.run.record.ref] }, "escalate a prior ledger that cannot be read: it is never overwritten");
+  }
+  if (w.ledger === undefined) return stop({ reason: "incompatible task", blocker: w.problem ?? "the ledger files cannot be written", retryable: false }, "stop: the ledger files do not fit one command");
+  if (lw.run !== undefined && !lw.failed && sameArgv(lw.run.command.argv, w.ledger.argv)) return validateStage(ctx, view, ANSWERS_STAGE);
+  if (commandRuns(view.evidence, COMMAND.ledgerWrite).length >= 6) return supervise({ reason: "the ledger write keeps differing from the one the evidence recomputes" }, "escalate a ledger write that does not settle");
+  return withPrivate(dispatch(commandJob(ANSWERS_STAGE, "Advance the pull request's ledger ref by compare-and-swap (no repository code runs)", { commands: [w.ledger], env: { ...GIT_ENV } }), "record this head's report and Q&A in the ledger, from the value Fetch read"));
 }

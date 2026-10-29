@@ -16,9 +16,9 @@ const commandIds = (jobs: Array<{ input?: unknown }>): string[] => jobs.flatMap(
 describe("the report scenario, end to end through the graph", () => {
   const sim = simulate({});
 
-  it("fetches, reports, and stops final at `report ready` with the later stages named as not built", () => {
+  it("fetches, reports, asks, answers, and stops final at `report ready`", () => {
     expect(stopOf(sim)).toMatchObject({ reason: "report ready", retryable: false });
-    expect(stopOf(sim)!.blocker).toMatch(/Questions and Answers stages are not implemented in this version/);
+    expect(stopOf(sim)!.blocker).toMatch(/the report, the questions and their answers are written to \.graphloom\/review\/review\.md/);
     expect(sim.receipts.filter((r) => r.valid).map((r) => `${r.stageId}/${r.requirementId}`)).toEqual([
       "fetch/pr-snapshot",
       "fetch/head-checked-out",
@@ -26,11 +26,14 @@ describe("the report scenario, end to end through the graph", () => {
       "report/change-report",
       "report/measurements",
       "report/claims-checked",
+      "questions/questions-complete",
+      "answers/answers-complete",
+      "answers/answers-grounded",
     ]);
   });
 
-  it("runs the jobs in order: the checkout first, then seven reads, the ledger, the reporter, its checker, the diff, the tools, the write", () => {
-    expect(sim.jobs.map((j) => j.instruction.split(" ").slice(0, 3).join(" "))).toEqual([
+  it("runs the jobs of Fetch and Report in order: the checkout first, then seven reads, the ledger, the reporter, its checker, the diff, the tools, the write", () => {
+    expect(sim.jobs.filter((j) => j.stageId === "fetch" || j.stageId === "report").map((j) => j.instruction.split(" ").slice(0, 3).join(" "))).toEqual([
       "Materialize the pull",
       "Read the changed", "Read the commits", "Read the reviews", "Read the review", "Read the review", "Read the check", "Read the pull",
       "Read the pull", "Write the change", "Check the report's", "List the changed", "Measure the changed", "Write .graphloom/review/review.md and",
@@ -43,7 +46,8 @@ describe("the report scenario, end to end through the graph", () => {
   it("reads only: every GitHub job is a read executor, and nothing in the run writes to GitHub", () => {
     const executors = sim.jobs.flatMap((j) => (j.executor !== undefined ? [j.executor.id] : []));
     expect(executors.filter((id) => id.startsWith("graphloom.github/")).every((id) => /\/(get|list)-/.test(id))).toBe(true);
-    expect(JSON.stringify(sim.jobs)).not.toMatch(/create-|update-|add-|remove-/);
+    // The ledger write is `git update-ref` in a command job, never a GitHub executor.
+    expect(JSON.stringify(sim.jobs.filter((j) => j.executor !== undefined))).not.toMatch(/create-|update-|add-|remove-/);
   });
 
   it("asks for each GitHub read with the request's repository, pull request number and head", () => {
@@ -79,9 +83,9 @@ describe("the report scenario, end to end through the graph", () => {
     expect((job!.input as { commands: Array<{ argv: string[] }> }).commands[0]!.argv.at(-1)).toBe("refs/graphloom/pr-review/apache/skywalking-banyandb/7/ledger");
   });
 
-  it("confines the reporter and the checker untrusted-read: bwrap with the network on and the repository's agent configuration masked", () => {
+  it("confines every agent untrusted-read: bwrap with the network on and the repository's agent configuration masked", () => {
     const agents = sim.jobs.filter((j) => j.kind === "agent");
-    expect(agents).toHaveLength(2);
+    expect(agents.map((j) => j.resultSchema)).toEqual(["change-report-v1", "claim-check-v1", "questions-v1", "answers-v1", "answer-check-v1"]);
     for (const job of agents) {
       expect(job.readOnly).toBe(true);
       expect(job.confinement).toEqual({
@@ -94,7 +98,7 @@ describe("the report scenario, end to end through the graph", () => {
   });
 
   it("puts the reporter and the checker on different harnesses, and nobody on a write job", () => {
-    const [reporter, checker] = sim.jobs.filter((j) => j.kind === "agent");
+    const [reporter, checker] = sim.jobs.filter((j) => j.kind === "agent" && j.stageId === "report");
     expect((reporter!.input as { harness: string }).harness).toBe("claude-code");
     expect((checker!.input as { harness: string }).harness).toBe("codex");
     expect(reporter).toMatchObject({ resultSchema: "change-report-v1", jobId: "reporter", purpose: "diagnostic" });
@@ -169,7 +173,7 @@ describe("report-corrections", () => {
 
   it("is judged by validators that see only what the controller hands them: the latest review, not the first claim check", () => {
     expect(sim.receipts.filter((r) => r.stageId === "report").every((r) => r.valid)).toBe(true);
-    expect(sim.evidence.filter((e) => e.kind === "review")).toHaveLength(2);
+    expect(sim.evidence.filter((e) => e.kind === "review")).toHaveLength(3);
   });
 
   it("records the removed item in report.json and lists its file in other as not summarised", () => {
@@ -438,22 +442,6 @@ describe("failures go to the supervisor, not into a loop", () => {
   });
 });
 
-describe("Questions and Answers fail closed", () => {
-  it("never pass: their validators fail with `not implemented in this version`", () => {
-    for (const id of ["questions-complete", "answers-complete", "answers-grounded"]) {
-      const result = validatorById(id)!.evaluate({ requirementId: id, statement: "", evidence: simulate({}).evidence, config: BANYANDB });
-      expect(result.status).toBe("failed");
-      expect(result.reason).toMatch(/not implemented in this version/);
-    }
-  });
-
-  it("are never dispatched: the graph stops at the end of Report, final", () => {
-    const sim = simulate({});
-    expect(sim.jobs.every((j) => j.stageId === "fetch" || j.stageId === "report")).toBe(true);
-    expect(stopOf(sim)!.retryable).toBe(false);
-  });
-});
-
 describe("agentConfigMasks", () => {
   it("masks the usual agent configuration and every such file the pull request adds or changes, anywhere", () => {
     const { masks } = agentConfigMasks("/w", ["src/a.go", "docs/CLAUDE.md", ".claude/settings.json", "x/.codex/y/z.json", "x/.codex/other", "ok/AGENTS.md"]) as { masks: string[] };
@@ -490,13 +478,13 @@ describe("agentConfigMasks", () => {
 
   it("tells the agents where to read the hidden files", () => {
     const sim = simulate({});
-    for (const job of sim.jobs.filter((j) => j.kind === "agent")) expect(assignmentOf(job)).toContain(`git show ${REHEARSAL_HEAD}:<path>`);
+    for (const job of sim.jobs.filter((j) => j.kind === "agent")) expect(assignmentOf(job)).toContain(job.stageId === "report" ? `git show ${REHEARSAL_HEAD}:<path>` : "git show <head>:<path>");
   });
 });
 
 describe("the worktree the scenarios assume", () => {
   it("holds the head files the static metrics read", () => {
-    expect(Object.keys(REHEARSAL_HEAD_FILES).sort()).toEqual(["banyand/cmd/server/flags.go", "pkg/schema/ttl.go"]);
+    expect(Object.keys(REHEARSAL_HEAD_FILES).sort()).toEqual(["banyand/cmd/server/flags.go", "pkg/offline/sync.go", "pkg/quota/limit.go", "pkg/retention/ttl.go", "pkg/retry/backoff.go", "pkg/schema/ttl.go", "pkg/spread/jitter.go"]);
     expect(REHEARSAL_REQUEST).toBe(`Report on apache/skywalking-banyandb#7 at ${REHEARSAL_HEAD}.`);
     const _s: RehearsalScenario | undefined = undefined;
     void _s;
