@@ -24,7 +24,7 @@ import {
   type JobSpec,
   type ToolCallResult,
 } from "@graphloom/sdk";
-import { confineWorker, confinementUnsupported, findSandboxWorker, hasPrivateTmp, operatorGoSettings } from "./confine.js";
+import { confineWorker, confinementUnsupported, findSandboxWorker, hasPrivateTmp, operatorGoSettings, rehearsalWritable } from "./confine.js";
 import { digestExecutorSource } from "./digest.js";
 import { withDockerConfinement } from "./sandbox-docker.js";
 import { assertSandboxSupported, packageClosure, packageRootOf, sandboxNodeArgs } from "./sandbox.js";
@@ -668,7 +668,13 @@ export function createChildExecutorRunner(
             ...launch,
             cwd,
             scratchDir: ctx.confinement.scratchDir,
-            writable: [...(readOnlySandbox ? [] : ctx.confinement.writablePaths), ctx.artifactDir, ...(ctx.session !== undefined ? [ctx.session.dir] : [])],
+            writable: [
+              ...(readOnlySandbox ? [] : ctx.confinement.writablePaths),
+              ctx.artifactDir,
+              ...(ctx.session !== undefined ? [ctx.session.dir] : []),
+              // A rehearsal's stand-in records beside its scenario file; a real run names no scenario.
+              ...(rehearsalWritable(launch.env) !== undefined ? [rehearsalWritable(launch.env)!] : []),
+            ],
             trustedWritable: ownStateDirs(),
             readPaths: [
               ...(ctx.confinement.readPaths ?? []),

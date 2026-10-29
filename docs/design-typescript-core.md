@@ -250,7 +250,9 @@ apply to), never running it unconfined.
   and what it needs to start, `mask` paths (absolute or `~/`) are hidden, `binds`
   (`{ path, readOnly }`) are added, and `network: false` removes the network
   (`--unshare-net`). The workspace stays writable unless the job is `readOnly`. It builds on
-  the run-scope confinement above, so the controller gives such a job the run's scope.
+  the run-scope confinement above, so the controller gives such a job the run's scope. In a
+  rehearsal, where `GRAPHLOOM_REHEARSAL_SCENARIO` names the scenario file, the runner also
+  leaves that file's directory writable, since the stand-in model records beside it.
 - `{ kind: "docker", image, cpus, memory, pids, tmp, wallClockMs, writable, readOnly, env }`
   for a command job that runs untrusted code: each command runs as one `docker run` built from
   the data in `packages/runner/src/sandbox-docker.ts`: `--network none`, the memory and pids limits,
