@@ -201,7 +201,11 @@ export async function runInCheckout(args: {
         const saves = pendingSave;
         pending = [];
         pendingSave = [];
-        const prep = await args.runner.runJob({ ...plain, input: environmentInput(batch, args.bundlePath) }, prepContext);
+        // The checks and preparation are the profile's host probes, run as Fetch runs them: under the run's
+        // checkout confinement, never under the job's own sandbox (a docker job's commands, not its setup).
+        const { confinement: _jobSandbox, ...prepJob } = plain;
+        void _jobSandbox;
+        const prep = await args.runner.runJob({ ...prepJob, input: environmentInput(batch, args.bundlePath) }, prepContext);
         mismatch = identityMismatch(prep, prepContext);
         if (mismatch !== undefined) return;
         collected.push(...(prep.evidence ?? []));

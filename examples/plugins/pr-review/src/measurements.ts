@@ -160,14 +160,24 @@ function latestRuns(evidence: readonly EvidenceRecord[], batches: readonly Batch
  * rebuilt from the head file bytes the graph observed; a document that does
  * not recompute is a failure, never corrected.
  */
-export function measurementState(evidence: readonly EvidenceRecord[], files: readonly PullFile[], profile: Pick<Profile, "metrics">): MeasurementState {
+export function measurementState(
+  evidence: readonly EvidenceRecord[],
+  files: readonly PullFile[],
+  profile: Pick<Profile, "metrics">,
+  /** Whether a failed run may run again because the operator resumed since it failed (the graph passes it; validators do not). */
+  canRetry?: (run: CommandRun) => boolean,
+): MeasurementState {
   const m = measurable(files, profile);
   if (m.files.length === 0) return { state: "none", reason: "no changed file is in a measured language" };
   const unread = m.files.filter((f) => latestFile(evidence, f.path) === undefined).map((f) => f.path);
   if (unread.length > 0) return { state: "observe", paths: unread };
   const diff = diffRun(evidence);
   if (diff === undefined) return { state: "diff" };
-  if (!succeeded(diff.command)) return { state: "failed", problems: [`${describeCommand(diff.command)}: ${outputTail(diff.command)}`], refs: [diff.record.ref], retry: [] };
+  if (!succeeded(diff.command)) {
+    // A failure from before the operator's resume runs again once, as every command does.
+    if (canRetry?.(diff) === true) return { state: "diff" };
+    return { state: "failed", problems: [`${describeCommand(diff.command)}: ${outputTail(diff.command)}`], refs: [diff.record.ref], retry: [] };
+  }
   const text = reportText(diff);
   if (text.truncated || Buffer.byteLength(text.text, "utf8") > MAX_DIFF_BYTES) {
     return { state: "failed", problems: [`the changed lines (git diff -U0) did not fit the ${MAX_DIFF_BYTES}-byte report whole`], refs: [diff.record.ref], retry: [] };
@@ -181,6 +191,7 @@ export function measurementState(evidence: readonly EvidenceRecord[], files: rea
   const problems: string[] = [];
   const refs = [diff.record.ref];
   const retry: Batch[] = [];
+  const rerun: Batch[] = [];
   const records: MetricsRecord[] = [];
   const covered = new Set<string>();
   const index = new Map<string, FunctionIndexEntry[]>();
@@ -188,6 +199,10 @@ export function measurementState(evidence: readonly EvidenceRecord[], files: rea
     const run = runs.get(b.id)!;
     refs.push(run.record.ref);
     if (!succeeded(run.command)) {
+      if (canRetry?.(run) === true) {
+        rerun.push(b);
+        continue;
+      }
       problems.push(`${describeCommand(run.command)}: ${outputTail(run.command)}`);
       retry.push(b);
       continue;
@@ -236,6 +251,8 @@ export function measurementState(evidence: readonly EvidenceRecord[], files: rea
     for (const s of document.skipped) covered.add(s.path);
     records.push(...document.records);
   }
+  // Batches that failed before the operator's resume are measured again before anything is judged.
+  if (rerun.length > 0) return { state: "tools", batches: rerun, hunks };
   if (problems.length > 0) return { state: "failed", problems, refs, retry };
   const missing = m.files.map((f) => f.path).filter((p) => !covered.has(p) && hunks.has(p));
   if (missing.length > 0) return { state: "failed", problems: [`the tools accounted for none of: ${missing.slice(0, 5).join(", ")}`], refs, retry: [] };

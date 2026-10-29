@@ -16,7 +16,7 @@
     "vitest": "^3.0.9"
   },
   "digests": {
-    "sourceTree": "cbff3a9f21c725c22c2ddf108485b9f9b74577bba09bb082a3658686ce03355c",
+    "sourceTree": "31309ad2b696b00751728a2e108fb8bf5ade7c32108695eaec62024631b07045",
     "packageLock": "ae5b886a88656f187132576e5f1579a047eec7e260abddf2994bb44d6815b49a",
     "files": {
       "package.json": "d2ecf50847d4ef5e66d59240dabdb523a3a58b04a5d089d956e9abe1dccc37ea",
@@ -43,12 +43,12 @@
       "src/detectors.ts": "f2a8b0926ee6c71ad5292efd8399380c16f9598495eda2fc17a8d54c79d221c6",
       "src/evidence.ts": "8ac679d44549e11f94b9b226b394faebfaee72cd9a68cd377132286bfcf60366",
       "src/flow.ts": "39b383da2fc721dbcf91b9e186a2a0afa89bf0bdb61cfa940b32752964c98e56",
-      "src/graph.ts": "adc53f7b3ca8d2a0f038ade5c003fa16ee711808abd3ad04283dd4d852430d16",
+      "src/graph.ts": "2164cedc6241563d880f05d6626ccc21f8af50d5cce6156701ed1b8ca13d2115",
       "src/groundwork.ts": "a91dd3b78ac7a99e829274dc36c9085d9ac953e0523092d8c5173071bcd58225",
       "src/index.ts": "8e081e2b43c97ecdd29866fd6abd0a808db4a2393b07299d359c67017475c12b",
       "src/inventory.ts": "46c5db65903805751277146a19b13fba56e6e50386dbd66a1d175e512eef6e66",
       "src/ledger.ts": "e1977463c6e403c7d8ffeea843b07afc2cd0efbc50150b3347d2f55eb37577af",
-      "src/measurements.ts": "d3195297b0beead285cef5a3b1ca513f4a72e51bdcc79dd9ec84d2c3544f92da",
+      "src/measurements.ts": "200436f432375bd84ba4dc8be6a60bd447f8fdc5ace6e412c77f256879dc10ee",
       "src/metrics/coverage.ts": "789fec377062803ff6143535e2aab9c781b8a4966439a88887448b21f3be3255",
       "src/metrics/crap.ts": "8052c075783c89ca13058aea1a437fbcee198136dcf7d0d562bc06aecda0acc3",
       "src/metrics/generated.ts": "aac742beb0af53afc62cb0b24e79c6f61a5528dff06c256551db0be7119a44ba",
@@ -92,7 +92,7 @@
       "test/detectors.test.ts": "cb780849cbe65e86cc7a536c7b98e995192a6c4fb1c92bb5c7c0f7aaf715d7dc",
       "test/git.test.ts": "67fdb5892a0f040e869f31422b7e82daba8ae1c1a34a3257aaf64b89f2fa9ab3",
       "test/gometrics.test.ts": "d8b4ce32aa4ac8314eecfa9b7c6762e7527cce6dc0f302f7f975a737f92a9c62",
-      "test/graph.test.ts": "9ec7839e80ff9158336a404f0e011d386ae711050eb9066274f9d12f1e204346",
+      "test/graph.test.ts": "de2af2c0d37d0a8c4e0ed13eee762026f738d2e19be5472b9d5ba85325992ecb",
       "test/hunks.test.ts": "d952cbfebc71123522fa3589d46a84a512b7ff521772dfdcfd5861de31e0715e",
       "test/manifest.test.ts": "82b6ab6295e38c2becf73ea8d626adb8dd74b05bf0ad0fcb158a026e3f62949b",
       "test/prepare.test.ts": "58fa0de4def1507a910fb5a99316d6ec7aaacb32e0de2d289ffb49c81f792e4c",

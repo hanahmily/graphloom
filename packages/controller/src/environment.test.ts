@@ -401,6 +401,56 @@ describe("graph-declared environment and disposable checkouts", () => {
     expect(commandRuns(short.state.evidence, "red")).toEqual([]);
   });
 
+  it("prepares a checkout under the run's confinement, never under the job's own docker sandbox", async () => {
+    const env = await makeEnv();
+    const inner = testRunner(fixAndAddTest);
+    const seen: Array<{ op: string; confinement: unknown }> = [];
+    const runner: Runner = {
+      async runJob(job, ctx) {
+        if (job.kind === "command") seen.push({ op: ctx.operationId, confinement: job.confinement });
+        return inner.runJob(job, ctx);
+      },
+    };
+    const sandbox = {
+      kind: "docker" as const,
+      image: `busybox@sha256:${"b".repeat(64)}`,
+      cpus: 1,
+      memory: "1g",
+      pids: 64,
+      tmp: "64m",
+      wallClockMs: 60_000,
+      writable: ["."],
+      readOnly: [],
+      env: {},
+    };
+    const sandboxed = dispatch(
+      {
+        stageId: "write",
+        kind: "command",
+        purpose: "check",
+        instruction: "green in a sandbox",
+        readOnly: true,
+        checkout: { from: "candidate" },
+        confinement: sandbox,
+        input: { commands: [{ id: "green", argv: ["sh", "-c", CHECK] }] },
+      },
+      "pass on the candidate in a sandbox",
+    );
+    await createController().run({
+      taskPath: env.taskPath,
+      plugin: createScriptedGraph({ definition: definitionWith(PREPARE), advances: [work, sandboxed] }),
+      validators,
+      runner,
+      stateRoot: env.stateRoot,
+      runId: "sandboxed-prepare",
+    });
+    const prepares = seen.filter((s) => /-prepare(-\d+)?$/.test(s.op));
+    expect(prepares.length).toBeGreaterThan(0);
+    for (const p of prepares) expect(p.confinement).toBeUndefined();
+    // The job itself keeps its sandbox.
+    expect(seen.find((s) => !/-prepare(-\d+)?$/.test(s.op) && s.confinement !== undefined)?.confinement).toMatchObject({ kind: "docker" });
+  });
+
   it("fails a checkout job whose preparation changes tracked files", async () => {
     const env = await makeEnv();
     const runner = testRunner(fixAndAddTest);

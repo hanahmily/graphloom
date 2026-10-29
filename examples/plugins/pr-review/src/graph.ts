@@ -506,7 +506,7 @@ function toolBinds(view: RunView, batches: readonly Batch[]): Array<{ path: stri
 
 function measureAndWrite(ctx: Context, view: RunView, analysis: Analysis, flow: Extract<ReturnType<typeof reportFlow>, { state: "done" }>): GraphDecision {
   const { profile, pr } = ctx;
-  const m = measurementState(view.evidence, analysis.snapshot.files, profile);
+  const m = measurementState(view.evidence, analysis.snapshot.files, profile, retryOf(view));
   switch (m.state) {
     case "observe":
       return withPrivate(observe({ paths: m.paths }, "observe the changed files the static tools measure, so their records can be recomputed from the head's bytes"));
