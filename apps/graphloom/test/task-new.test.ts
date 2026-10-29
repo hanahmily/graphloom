@@ -127,6 +127,8 @@ describe("graphloom task new: the plan runs as the plan says", () => {
     expect(await w.repo.git("rev-parse", `${NS}/7/head`)).toBe(w.head);
     expect(await w.repo.git("rev-parse", `${NS}/7/base`)).toBe(w.base);
     expect(await w.repo.git("rev-parse", `${NS}/7/heads/${w.head}`)).toBe(w.head);
+    // The configured remote's own fetch mapping did not also write refs/remotes/origin/*: only the plan's refs changed.
+    expect(await w.repo.git("for-each-ref", "--format=%(refname)", "refs/remotes")).toBe("");
     const task = await readFile(path.join(w.out, "t", "task.yaml"), "utf8");
     // The clone is outside the task's directory, so the task names it through a link beside it (intake refuses a path that leaves it).
     expect(task).toBe(`graph: stub\nrepo: repo\nbase: ${w.base}\nrequest: "Report on acme/widgets#7 at ${w.head}."\n`);

@@ -257,7 +257,10 @@ async function open(rest: string[], io: SessionIo): Promise<number> {
         ? {
             network: true,
             mask: record.confinement.mask,
-            binds: record.confinement.binds.filter((b) => existsSync(b.path.startsWith("~/") ? path.join(os.homedir(), b.path.slice(2)) : b.path)),
+            // The chat is not a graph job: whatever the job could write, the opened session may only read.
+            binds: record.confinement.binds
+              .filter((b) => existsSync(b.path.startsWith("~/") ? path.join(os.homedir(), b.path.slice(2)) : b.path))
+              .map((b) => ({ path: b.path, readOnly: true })),
           }
         : undefined;
     const env2 = agentEnv(setup, config, env);

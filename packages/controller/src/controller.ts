@@ -601,7 +601,7 @@ export function createController(): Controller {
       // An upgrade reads the state in its own format, under the lock, before anything loads it as this release's.
       let state: DurableRunState =
         request.upgrade !== undefined ? (undefined as unknown as DurableRunState) : await loadCurrentFormat(stateDir, stateFormats);
-      if (request.approval !== undefined && (state.status === "succeeded" || state.status === "failed")) {
+      if (request.approval !== undefined && request.upgrade === undefined && (state.status === "succeeded" || state.status === "failed")) {
         throw new Error(approvalRefusal(state, request.approval)!);
       }
       if (request.upgrade === undefined && (state.status === "succeeded" || state.status === "failed")) {
@@ -639,6 +639,8 @@ export function createController(): Controller {
         }
         state = await loadCurrentFormat(stateDir, stateFormats);
         if (state.status === "succeeded" || state.status === "failed") {
+          // After an upgrade the state was loaded only now: a decision on a finished run is still refused.
+          if (request.approval !== undefined) throw new Error(approvalRefusal(state, request.approval)!);
           return;
         }
         // Refused before anything changes: an undeclared, unavailable or misplaced decision records nothing.

@@ -264,6 +264,22 @@ describe("graphloom session open: a Claude Code session", () => {
     expect(await stat(path.join(w.worktree, ".fake-agent-write")).catch(() => undefined)).toBeUndefined();
   }, 120_000);
 
+  it("opens a job's writable bind read-only: the chat may read what the job could write", async () => {
+    const w = await world();
+    const writable = path.join(w.env.dir, "job-writable");
+    await mkdir(writable);
+    await patchState(w, (s) => {
+      const sessions = s.agentSessions as Array<{ confinement: { binds: unknown[] } }>;
+      sessions[0]!.confinement.binds = [{ path: writable, readOnly: false }];
+    });
+    await runnerConfig(w, {});
+    const r = await session(w, ["open", w.runId, "--stage", "write"], { script: {}, env: { FAKE_AGENT_STATE_DIR: writable } });
+    expect(r.code, r.stderr).toBe(0);
+    const [call] = await agentLog(w);
+    expect(call!.probes.launcherStateWrite).toBe("EROFS");
+    expect(await stat(path.join(writable, "marker")).catch(() => undefined)).toBeUndefined();
+  }, 120_000);
+
   it("chains: a second open of the stage forks the first conversation, --from-original forks the job session, and list shows the parents", async () => {
     const w = await world();
     const first = await session(w, ["open", w.runId, "--stage", "write"], { script: { ask: "first question" } });

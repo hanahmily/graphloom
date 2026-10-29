@@ -379,7 +379,8 @@ async function execute(step: TaskPlanStep, graph: string, repo: { top: string; r
       await git(repo.top, env, [
         "-c", "protocol.allow=never",
         "-c", "protocol.https.allow=always",
-        "fetch", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head", "--",
+        // An empty --refmap: a configured remote's own fetch mapping must not also write refs/remotes/<name>/*.
+        "fetch", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head", "--refmap=", "--",
         remote, `+${step.refspec}:${into}`,
       ]);
       return `fetched ${step.refspec} into ${into}`;
