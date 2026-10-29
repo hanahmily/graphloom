@@ -69,7 +69,7 @@ function evidenceLine(a: FinalAnswer): string {
   if (a.citations.length > 0) parts.push(`cites ${a.citations.map((c) => `${c.tree === "base" ? "" : `${c.tree} `}\`${c.path}:${c.start === c.end ? c.start : `${c.start}-${c.end}`}\`${c.quote.trim() !== "" ? ` "${short(oneLine(c.quote), 70)}"` : ""}`).join(", ")}`);
   if (a.searches.length > 0) parts.push(`searches ${a.searches.map((s) => `\`${short(oneLine(s.pattern), 80)}\` (${s.scope}) → ${s.hits} hit${s.hits === 1 ? "" : "s"}`).join("; ")}`);
   if (a.inventory.length > 0) parts.push(`inventory ${a.inventory.map((d) => `${d.name}@${d.version}`).join(", ")}`);
-  if (a.metrics.length > 0) parts.push(`metrics ${a.metrics.map((m) => `${m.function} ${m.name} ${m.value}`).join(", ")}`);
+  if (a.metrics.length > 0) parts.push(`metrics ${a.metrics.map((m) => `${m.function} (${m.path}) ${m.name} ${m.value}`).join(", ")}`);
   const check = a.check.verdict === "downgraded" ? `downgraded to needs author${a.check.note !== "" ? ` (${oneLine(a.check.note)})` : ""}` : `${a.check.verdict}${a.check.note !== "" ? `: ${oneLine(a.check.note)}` : ""}`;
   return `  Evidence: ${parts.length === 0 ? "none" : parts.join("; ")}. Checker: ${check}.${a.check.searches.length > 0 ? ` Its own searches: ${a.check.searches.map((s) => `\`${short(oneLine(s.pattern), 60)}\` (${s.scope}) → ${s.hits}`).join("; ")}.` : ""}`;
 }

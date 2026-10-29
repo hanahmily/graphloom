@@ -115,7 +115,7 @@ function defaultAnswer(q: Question, sym: SymbolDef | undefined, record: MetricsR
       return {
         ...base,
         answer: `${name} mixes tokenizing with range checking; they split cleanly.`,
-        metrics: record !== undefined ? [{ function: record.function, name: "complexity", value: record.complexity }, { function: record.function, name: "nesting", value: record.nesting }] : [],
+        metrics: record !== undefined ? [{ function: record.function, path: record.path, name: "complexity", value: record.complexity }, { function: record.function, path: record.path, name: "nesting", value: record.nesting }] : [],
         searches: searches([`\\b${name}Tokens\\b`]),
         proposal: {
           ...emptyProposal,
@@ -128,7 +128,7 @@ function defaultAnswer(q: Question, sym: SymbolDef | undefined, record: MetricsR
       };
     }
     case "complexity-coverage":
-      return { ...base, answer: `No test exercises the branches of ${name}; coverage is not measured in this version.`, status: "needs author", metrics: record !== undefined ? [{ function: record.function, name: "complexity", value: record.complexity }] : [], searches: [{ pattern: `\\b${name}\\b`, scope: "tests", hits: 0 }], proposal: { ...emptyProposal, kind: "test", testFile: `${dirOf(sym?.path ?? record?.path ?? "pkg/x/x.go")}/${stemOf(sym?.path ?? record?.path ?? "x.go")}_test.go`, testName: `Test${upper(name)}Branches`, cases: [{ input: "each unit", branches: "the unit path" }] } };
+      return { ...base, answer: `No test exercises the branches of ${name}; coverage is not measured in this version.`, status: "needs author", metrics: record !== undefined ? [{ function: record.function, path: record.path, name: "complexity", value: record.complexity }] : [], searches: [{ pattern: `\\b${name}\\b`, scope: "tests", hits: 0 }], proposal: { ...emptyProposal, kind: "test", testFile: `${dirOf(sym?.path ?? record?.path ?? "pkg/x/x.go")}/${stemOf(sym?.path ?? record?.path ?? "x.go")}_test.go`, testName: `Test${upper(name)}Branches`, cases: [{ input: "each unit", branches: "the unit path" }] } };
     default:
       return { ...base, answer: "Answered from the code.", searches: searches(["other"]) };
   }

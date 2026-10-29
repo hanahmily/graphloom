@@ -302,7 +302,7 @@ describe("the answer rules (design 7.3 checks)", () => {
 
   it("accepts a split inside the function with names new to the package, citing numbers that equal the record", () => {
     const ok = split([{ name: "tokenizeTTL", startLine: fn.startLine + 1, endLine: fn.startLine + 10 }, { name: "checkTTLRange", startLine: fn.startLine + 11, endLine: fn.endLine - 1 }]);
-    expect(problems({ ...ok, metrics: [{ function: "schema.ParseTTL", name: "complexity", value: 12 }, { function: "schema.ParseTTL", name: "crap", value: 156 }] })).toEqual([]);
+    expect(problems({ ...ok, metrics: [{ function: "schema.ParseTTL", path: "pkg/schema/ttl.go", name: "complexity", value: 12 }, { function: "schema.ParseTTL", path: "pkg/schema/ttl.go", name: "crap", value: 156 }] })).toEqual([]);
   });
 
   it("rejects a split with a range outside the function, a name already in the package, one function, or an empty responsibility", () => {
@@ -316,8 +316,9 @@ describe("the answer rules (design 7.3 checks)", () => {
 
   it("rejects a cited number that is not the measurement record's, and a function no record has", () => {
     const base = split([{ name: "a1", startLine: fn.startLine + 1, endLine: fn.startLine + 5 }, { name: "b1", startLine: fn.startLine + 6, endLine: fn.startLine + 9 }]);
-    expect(problems({ ...base, metrics: [{ function: "schema.ParseTTL", name: "complexity", value: 11 }] })).toEqual(["Q6: schema.ParseTTL complexity is 12 in its measurement record, not 11"]);
-    expect(problems({ ...base, metrics: [{ function: "schema.Nope", name: "nesting", value: 1 }] })).toEqual([`${base.question}: the metric names "schema.Nope", which no measurement record has`]);
+    expect(problems({ ...base, metrics: [{ function: "schema.ParseTTL", path: "pkg/schema/ttl.go", name: "complexity", value: 11 }] })).toEqual(["Q6: schema.ParseTTL complexity is 12 in its measurement record, not 11"]);
+    expect(problems({ ...base, metrics: [{ function: "schema.ParseTTL", path: "pkg/other/ttl.go", name: "complexity", value: 12 }] })).toEqual([`${base.question}: the metric names "schema.ParseTTL" in "pkg/other/ttl.go", which no measurement record has`]);
+    expect(problems({ ...base, metrics: [{ function: "schema.Nope", path: "pkg/schema/ttl.go", name: "nesting", value: 1 }] })).toEqual([`${base.question}: the metric names "schema.Nope" in "pkg/schema/ttl.go", which no measurement record has`]);
   });
 
   it("makes split-function answered with a split proposal, and a missing-test answer cite a test file or stay needs author with an outline", () => {

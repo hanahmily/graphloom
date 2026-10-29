@@ -13,7 +13,7 @@ import type { AnswerContext, FinalAnswer } from "./answers.js";
 import { pinnedBase } from "./commands.js";
 import { COMMAND } from "./constants.js";
 import { commandRuns, succeeded, type CommandRun } from "./evidence.js";
-import { ledgerJson, ledgerMarkdown, ledgerRead, ledgerWriteCommand, oldValue, priorLedger } from "./ledger.js";
+import { ledgerJson, ledgerMarkdown, ledgerRead, ledgerWriteCommand, oldValue, priorState, type PriorLedger } from "./ledger.js";
 import { withQa } from "./output.js";
 import { qaWriteCommand, writtenReport } from "./write.js";
 import { groundworkState, type Groundwork, type GroundworkState } from "./groundwork.js";
@@ -92,6 +92,8 @@ export interface AnswerWrites {
   ledger?: EnvironmentCommand;
   /** The value the ledger write swaps from: what Fetch (or a later read) saw. */
   old?: string;
+  /** The prior ledger.json, read from the commit the ledger write swaps from. */
+  prior?: PriorLedger;
   /** Why a write cannot be built. */
   problem?: string;
 }
@@ -107,7 +109,10 @@ export function answerWrites(evidence: readonly EvidenceRecord[], ctx: QaContext
   const read = ledgerRead(evidence);
   if (read === undefined) return { qa, problem: "the ledger value Fetch read is not in the evidence" };
   const old = oldValue(read.ledger);
+  const prior = priorState(evidence, old);
+  if (prior.state === "missing") return { qa, old, prior, problem: "the prior ledger's ledger.json has not been read" };
+  if (prior.state === "unreadable") return { qa, old, prior, problem: `the prior ledger's ledger.json cannot be read (${prior.reason}); the ledger is not overwritten` };
   const input = { pr: ctx.pr, base: ctx.base, files: ctx.analysis.snapshot.files.length, commits: ctx.analysis.snapshot.commits.length, facts: ctx.analysis.facts.length, questions: set.questions, answers: final, purposes: set.purposes };
-  const ledger = ledgerWriteCommand(ctx.pr, old, ledgerJson(input, priorLedger(evidence, old)), ledgerMarkdown(input));
-  return ledger === undefined ? { qa, old, problem: "the ledger files are too large for one command" } : { qa, ledger, old };
+  const ledger = ledgerWriteCommand(ctx.pr, old, ledgerJson(input, prior.state === "read" ? prior.value : undefined), ledgerMarkdown(input));
+  return ledger === undefined ? { qa, old, prior, problem: "the ledger files are too large for one command" } : { qa, ledger, old, prior };
 }

@@ -419,6 +419,30 @@ describe("the ledger (design 9.1)", () => {
     expect(json.heads.map((h) => h.sha)).toEqual(["e".repeat(40), "0123456789abcdef0123456789abcdef01234567"]);
   });
 
+  it("never overwrites a prior ledger it cannot read whole: a failed read, a non-JSON one and one that is not a ledger go to the supervisor, and are read again after the resume", () => {
+    const prior = "d".repeat(40);
+    const withPrior = (stub: { exitCode: number; stdout?: string; stderr?: string }) =>
+      simulate({
+        scenario: scenarioWith("answer-finds-existing-helper", (s) => {
+          s.commands!["ledger-read"] = { exitCode: 0, stdout: `present ${prior}\n` };
+          s.commands!["ledger-prior"] = stub;
+        }),
+      });
+    const cases: Array<[{ exitCode: number; stdout?: string; stderr?: string }, RegExp]> = [
+      [{ exitCode: 128, stderr: "fatal: path is not in the commit" }, /exited 128/],
+      [{ exitCode: 0, stdout: "not json" }, /it is not JSON/],
+      [{ exitCode: 0, stdout: JSON.stringify({ heads: [] }) }, /not a graphloom-pr-ledger-v1 document/],
+    ];
+    for (const [stub, reason] of cases) {
+      const sim = withPrior(stub);
+      expect(superviseOf(sim)!.reason, JSON.stringify(stub)).toMatch(/the prior ledger's ledger\.json cannot be read .*the ledger is not overwritten/);
+      expect(superviseOf(sim)!.reason).toMatch(reason);
+      expect(sim.jobs.some((j) => j.instruction.startsWith("Advance the pull"))).toBe(false);
+      const again = advancePullRequest(viewOf(sim, { generation: 2, resume: { generation: 2, at: "2026-10-29T00:00:00Z", pluginUpdated: false } }));
+      expect(again.action).toMatchObject({ type: "dispatch", job: { instruction: "Read the prior ledger's ledger.json" } });
+    }
+  });
+
   it("stops retryably 'ledger moved' when the compare-and-swap loses the race", () => {
     const lost = scenarioWith("answer-finds-existing-helper", (s) => {
       s.commands!["ledger-write"] = { exitCode: 4, stderr: "ledger moved" };
@@ -443,7 +467,7 @@ describe("the ledger (design 9.1)", () => {
     const evidence = [...s2.evidence, { ...read, ref: "reread", generation: 2, payload: { ...(read.payload as object), command: { ...(read.payload as { command: object }).command, stdoutTail: `present ${winner}\n` } } } as EvidenceRecord];
     const next = advancePullRequest(viewOf({ ...s2, evidence }, resume));
     expect(next.action).toMatchObject({ type: "dispatch", job: { instruction: "Read the prior ledger's ledger.json" } });
-    const priors = [...evidence, { ...read, ref: "prior", generation: 2, payload: { ...(read.payload as object), command: { id: "ledger-prior", argv: ["sh", "-c", "x", "ledger-prior", winner], exitCode: 0, stdoutTail: "{}", stderrTail: "" } } } as EvidenceRecord];
+    const priors = [...evidence, { ...read, ref: "prior", generation: 2, payload: { ...(read.payload as object), command: { id: "ledger-prior", argv: ["sh", "-c", "x", "ledger-prior", winner], exitCode: 0, stdoutTail: JSON.stringify({ schema: "graphloom-pr-ledger-v1", heads: [] }), stderrTail: "" } } } as EvidenceRecord];
     const write2 = advancePullRequest(viewOf({ ...s2, evidence: priors }, resume));
     expect(write2.action).toMatchObject({ type: "dispatch", job: { instruction: expect.stringMatching(/^Advance the pull/) } });
     const argv = ((write2.action as { job: JobSpec }).job.input as { commands: Array<{ argv: string[] }> }).commands[0]!.argv;

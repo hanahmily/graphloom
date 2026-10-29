@@ -74,7 +74,7 @@ export const ANSWERS_SCHEMA = {
           inventory: { type: "array", items: { type: "object", additionalProperties: false, required: ["name", "version"], properties: { name: { type: "string" }, version: { type: "string" } } } },
           metrics: {
             type: "array",
-            items: { type: "object", additionalProperties: false, required: ["function", "name", "value"], properties: { function: { type: "string" }, name: { type: "string", enum: ["complexity", "nesting", "crap"] }, value: { type: "number" } } },
+            items: { type: "object", additionalProperties: false, required: ["function", "path", "name", "value"], properties: { function: { type: "string" }, path: { type: "string" }, name: { type: "string", enum: ["complexity", "nesting", "crap"] }, value: { type: "number" } } },
           },
           proposal: {
             type: "object",
@@ -140,7 +140,7 @@ export interface Answer {
   citations: Citation[];
   searches: Search[];
   inventory: Array<{ name: string; version: string }>;
-  metrics: Array<{ function: string; name: "complexity" | "nesting" | "crap"; value: number }>;
+  metrics: Array<{ function: string; path: string; name: "complexity" | "nesting" | "crap"; value: number }>;
   proposal: Proposal;
 }
 export interface AnswersOutput {
@@ -224,9 +224,9 @@ function answerProblemsOf(a: Answer, q: Question, ctx: AnswerContext, dirs: read
   });
   for (const inv of a.inventory) if (!declared.has(`${inv.name}@${inv.version}`)) out.push(`${at}: inventory entry ${inv.name}@${inv.version} is not in the dependency inventory`);
   for (const m of a.metrics) {
-    const r = ctx.view.records.find((x) => x.function === m.function);
+    const r = ctx.view.records.find((x) => x.function === m.function && x.path === m.path);
     if (r === undefined) {
-      out.push(`${at}: the metric names ${JSON.stringify(m.function)}, which no measurement record has`);
+      out.push(`${at}: the metric names ${JSON.stringify(m.function)} in ${JSON.stringify(m.path)}, which no measurement record has`);
       continue;
     }
     const truth = m.name === "complexity" ? r.complexity : m.name === "nesting" ? r.nesting : r.crap ?? crapRounded(r.complexity, r.coverage);

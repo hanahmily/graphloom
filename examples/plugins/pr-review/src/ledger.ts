@@ -157,13 +157,24 @@ export function ledgerRead(evidence: readonly EvidenceRecord[]): LedgerReading |
 
 export const oldValue = (l: Ledger): string => (l.present ? l.sha : "absent");
 
-/** The prior `ledger.json`, parsed, when the latest `ledger-prior` read it after the latest ledger read; undefined when it could not be read or is not JSON. */
-export function priorLedger(evidence: readonly EvidenceRecord[], old: string): unknown {
+export type PriorLedger = { state: "absent" } | { state: "missing" } | { state: "read"; value: unknown } | { state: "unreadable"; reason: string; run: CommandRun };
+
+/**
+ * The prior ledger's `ledger.json` as the latest `ledger-prior` read it from the commit the write swaps from.
+ * A ledger that is there and cannot be read whole is never replaced by one that forgets its heads.
+ */
+export function priorState(evidence: readonly EvidenceRecord[], old: string): PriorLedger {
+  if (old === "absent") return { state: "absent" };
   const run = commandRuns(evidence, COMMAND.ledgerPrior).filter((r) => r.command.argv[4] === old).at(-1);
-  if (run === undefined || !succeeded(run.command)) return undefined;
+  if (run === undefined) return { state: "missing" };
+  if (!succeeded(run.command)) return { state: "unreadable", reason: `reading ${old.slice(0, 12)}:ledger.json exited ${run.command.exitCode ?? "on a signal"}`, run };
+  const report = reportText(run);
+  if (report.truncated) return { state: "unreadable", reason: "ledger.json did not fit the command report whole", run };
   try {
-    return JSON.parse(reportText(run).text);
+    const value: unknown = JSON.parse(report.text);
+    if (!isObject(value) || value.schema !== LEDGER_SCHEMA) return { state: "unreadable", reason: `it is not a ${LEDGER_SCHEMA} document`, run };
+    return { state: "read", value };
   } catch {
-    return undefined;
+    return { state: "unreadable", reason: "it is not JSON", run };
   }
 }
