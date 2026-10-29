@@ -51,7 +51,9 @@ worktree and preserves the source checkout. Successful runs deliver a local diff
 without automatic commit, push, or publication.
 
 `graphloom doctor` reports what this machine can run (Claude Code, Codex, Pi,
-`gh`, bubblewrap) with the next command for each gap, and `graphloom setup`
+`gh`, bubblewrap, and optionally Docker for graphs that run untrusted code in a
+container; `graphloom sandbox pull` fetches a sandbox image by digest before a run)
+with the next command for each gap, and `graphloom setup`
 writes the runner and supervisor configs from what it finds, asking for your
 consent to `allowUnrestricted` (`graphloom setup --yes` in scripts). `run`
 starts setup on a terminal when no runner config exists. To write it by hand,

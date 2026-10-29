@@ -234,6 +234,34 @@ describe("graphloom doctor: host", () => {
   });
 });
 
+describe("graphloom doctor: docker sandbox", () => {
+  it("warns, without failing, when the docker CLI is missing", async () => {
+    const out = await withEnv({ docker: "missing" });
+    expect(row(out.report, "docker")).toMatchObject({ section: "host", status: "warn", detail: expect.stringContaining("not on PATH"), fix: expect.stringContaining("rootless") });
+    // An optional prerequisite: it never turns a doctor failure on.
+    expect(out.report.checks.filter((c) => c.status === "fail").map((c) => c.name)).not.toContain("docker");
+  });
+
+  it("warns when the CLI cannot reach a daemon, naming why", async () => {
+    const { report } = await withEnv({ docker: "nodaemon" });
+    expect(row(report, "docker")).toMatchObject({ status: "warn", detail: expect.stringContaining("Cannot connect to the Docker daemon"), fix: expect.stringContaining("rootless") });
+  });
+
+  it("passes for a rootless daemon", async () => {
+    const { report } = await withEnv({ docker: "rootless" });
+    expect(row(report, "docker")).toMatchObject({ status: "pass", detail: expect.stringMatching(/27\.3\.1.*daemon reachable; rootless/) });
+  });
+
+  it("warns that docker-group membership is root-equivalent when the daemon is not rootless", async () => {
+    const { report } = await withEnv({ docker: "rootful" });
+    const docker = row(report, "docker");
+    expect(docker.status).toBe("warn");
+    expect(docker.detail).toMatch(/root-equivalent/);
+    expect(docker.detail).toMatch(/rootless Docker is recommended/);
+    expect(docker.fix).toMatch(/docs.docker.com\/engine\/security\/rootless/);
+  });
+});
+
 describe("graphloom doctor: configuration", () => {
   it("a missing runner and supervisor config warn with graphloom setup; a malformed one fails as run would", async () => {
     const env = await makeDoctorEnv({});

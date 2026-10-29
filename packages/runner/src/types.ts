@@ -46,6 +46,8 @@ export interface JobContext {
   worktreePath: string;
   /** Absolute path for immutable run artifacts (outside worktree). */
   artifactDir: string;
+  /** The run's scratch directory, which a docker confinement's `@scratch/<dir>` mounts name. */
+  scratchDir?: string;
   /** Aborted when the run stops; runners terminate the job's process. */
   signal?: AbortSignal;
   /** Present for jobs the controller can service tool calls and model usage for. */
@@ -136,6 +138,12 @@ export interface Runner {
   runJob(job: JobSpec, ctx: JobContext): Promise<JobResult>;
   /** Executors this runner (and its fallbacks) serve, for pinning at intake and checking on resume. */
   describeExecutors?(): Promise<ExecutorDescriptor[]>;
+  /**
+   * Remove what a stopped controller left running for this run, such as the
+   * labelled containers of a docker confinement. Called on resume, before the
+   * run dispatches anything; best effort and idempotent.
+   */
+  releaseRun?(runId: string): Promise<void>;
   /**
    * Whether the job's executor would refuse the job before running it: its
    * pinned version, declared effect, or input schema, exactly as the executor

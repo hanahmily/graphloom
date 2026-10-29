@@ -472,6 +472,13 @@ export interface JobSpec {
    */
   checkout?: CheckoutSpec;
   /**
+   * How the runner confines this job beyond the run's own scope; the job is
+   * refused, never run unconfined, where the machine cannot enforce it.
+   * `bwrap`: a bubblewrap sandbox for an agent or tool. `docker`: a container
+   * for a command job that runs untrusted code (the commands run inside it).
+   */
+  confinement?: ConfinementSpec;
+  /**
    * Per-dispatch valid id sets for this job's declared result contract's own
    * `references` paths (e.g. "findings[].finding"), keyed by that same path.
    * The harness constrains the model to these ids and validates the result
@@ -480,6 +487,53 @@ export interface JobSpec {
    */
   knownReferences?: Record<string, import("./result-contract.js").ReferenceSet>;
 }
+
+/** A path bound into a bubblewrap sandbox; `~` stands for the operator's home. */
+export interface BwrapBind {
+  path: string;
+  readOnly: boolean;
+}
+
+/**
+ * Bubblewrap confinement: the root filesystem is read-only, the home
+ * directory is replaced by an empty tmpfs (holes only for the executor's own
+ * state, such as an agent's login, and the paths the executor needs to start),
+ * `mask` paths are hidden, `binds` are added, and `network: false` leaves the
+ * job with no network at all. Absolute paths, or `~`-relative ones.
+ */
+export interface BwrapConfinement {
+  kind: "bwrap";
+  network: boolean;
+  mask: string[];
+  binds: BwrapBind[];
+}
+
+/**
+ * Docker confinement for a command job: each command runs inside one
+ * `docker run` of `image` (pinned by `@sha256:` digest, never pulled by the
+ * run) with no network, a read-only root, a user-owned `tmp`, dropped
+ * capabilities and these limits. `writable` and `readOnly` name the only host
+ * paths mounted, each at the same path: absolute, `.` (the job's workspace),
+ * a path relative to it, or `@scratch/<dir>` under the run's scratch
+ * directory. `env` is the whole environment the commands see.
+ */
+export interface DockerConfinement {
+  kind: "docker";
+  image: string;
+  cpus: number;
+  /** Memory and swap limit, such as `8g`. */
+  memory: string;
+  pids: number;
+  /** Size of `/tmp`, such as `1g`. */
+  tmp: string;
+  /** Wall clock (ms) of each command's container. */
+  wallClockMs: number;
+  writable: string[];
+  readOnly: string[];
+  env: Record<string, string>;
+}
+
+export type ConfinementSpec = BwrapConfinement | DockerConfinement;
 
 /**
  * `candidate`: the pinned base commit plus the whole current workspace change.

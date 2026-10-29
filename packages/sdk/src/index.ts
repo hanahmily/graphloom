@@ -60,8 +60,12 @@ export type {
   AgentSessionView,
   ExecutorView,
   BudgetRemaining,
+  BwrapBind,
+  BwrapConfinement,
   CheckoutSpec,
+  ConfinementSpec,
   CorrectionHandoff,
+  DockerConfinement,
   EnvironmentCommand,
   EnvironmentDeclaration,
   EvidenceRecord,
@@ -154,6 +158,7 @@ export {
   MAX_INPUT_SHAPE_BYTES,
 } from "./executor.js";
 export { jsonSchemaProblem } from "./input-problem.js";
+export { assertConfinement, confinementProblem, SCRATCH_MOUNT_PREFIX } from "./confinement.js";
 
 export {
   activateRepair,

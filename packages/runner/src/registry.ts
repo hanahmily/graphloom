@@ -10,6 +10,7 @@ import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import {
+  BUILTIN_COMMAND_EXECUTOR_ID,
   MAX_SESSION_REF_CHARS,
   boundedInputShape,
   parseJsonBounded,
@@ -25,6 +26,7 @@ import {
 } from "@graphloom/sdk";
 import { confineWorker, confinementUnsupported, findSandboxWorker, hasPrivateTmp, operatorGoSettings } from "./confine.js";
 import { digestExecutorSource } from "./digest.js";
+import { withDockerConfinement } from "./sandbox-docker.js";
 import { assertSandboxSupported, sandboxNodeArgs } from "./sandbox.js";
 import type { ExecutorDescriptor, ExecutorSourceOverride, JobContext, JobEvidenceItem, JobResult, Runner } from "./types.js";
 
@@ -331,6 +333,7 @@ export function createTrustedInProcessRunner(
       const def = byId.get(pin.id);
       if (!def) return options.fallback.checkJob?.(pinned, ctx);
       // The refusals runJob gives, in its order.
+      if (pinned.confinement !== undefined) return inProcessConfinementRefusal(def.id);
       if (ctx?.executorSource !== undefined) return `executor ${def.id} runs in-process and cannot be served from a run-local copy`;
       if (pin.version !== undefined && pin.version !== def.version) {
         return `executor ${def.id} pinned version ${pin.version} but installed ${def.version ?? "(unversioned)"}`;
@@ -354,6 +357,7 @@ export function createTrustedInProcessRunner(
         return options.fallback.runJob(pinned, ctx);
       }
       try {
+        if (pinned.confinement !== undefined) throw new Error(inProcessConfinementRefusal(def.id));
         if (ctx.executorSource !== undefined) {
           throw new Error(`executor ${def.id} runs in-process and cannot be served from a run-local copy`);
         }
@@ -397,6 +401,17 @@ export function createTrustedInProcessRunner(
       }
     },
   };
+}
+
+function inProcessConfinementRefusal(id: string): string {
+  return `executor ${id} runs in-process and cannot be confined as the job asks, so the job was not run`;
+}
+
+/** Locations of agent binaries the operator configured (`GRAPHLOOM_*_BIN`): a hidden home must still show them. */
+function executorBinaries(env: NodeJS.ProcessEnv): string[] {
+  return Object.entries(env)
+    .filter(([name, value]) => /^GRAPHLOOM_.*_BIN$/.test(name) && typeof value === "string" && path.isAbsolute(value))
+    .map(([, value]) => value as string);
 }
 
 /**
@@ -487,7 +502,10 @@ export function createChildExecutorRunner(
     return [...configured, ...own.homeRelative.map((rel) => path.join(os.homedir(), rel))].filter((dir) => existsSync(dir));
   };
 
-  return {
+  const runner: Runner = {
+    async releaseRun(runId) {
+      await options.fallback.releaseRun?.(runId);
+    },
     async describeExecutors() {
       const digest = await digestExecutorSource(sourceRoot ?? entryModule);
       const shapes = await declaredShapes(digest);
@@ -511,6 +529,14 @@ export function createChildExecutorRunner(
       if (confinement !== undefined) {
         const unsupported = await confinementUnsupported();
         if (unsupported !== undefined) return `executor ${pin.id} runs with the user's permissions and cannot be confined to the run: ${unsupported}`;
+      }
+      if (pinned.confinement?.kind === "bwrap") {
+        if (options.sandbox === true) return `executor ${pin.id} runs under Node's permission model, which a bwrap confinement cannot narrow`;
+        const unsupported = await confinementUnsupported();
+        if (unsupported !== undefined) return `executor ${pin.id} cannot be confined as the job asks: ${unsupported}`;
+      }
+      if (pinned.confinement?.kind === "docker") {
+        return `executor ${pin.id} cannot run in a docker confinement; only the built-in command executor runs its commands in a container`;
       }
       const override = ctx?.executorSource;
       // The same source-pin checks runJob makes, before any module is loaded:
@@ -573,6 +599,16 @@ export function createChildExecutorRunner(
         void _unusable;
         ctx = withoutSession;
       }
+      const own = pinned.confinement;
+      if (own?.kind === "docker") {
+        return failed(`executor ${pin.id} cannot run in a docker confinement; only the built-in command executor runs its commands in a container`);
+      }
+      if (own?.kind === "bwrap" && options.sandbox === true) {
+        return failed(`executor ${pin.id} runs under Node's permission model, which a bwrap confinement cannot narrow, so the job was not run`);
+      }
+      if (own?.kind === "bwrap" && ctx.confinement === undefined) {
+        return failed(`executor ${pin.id}: a bwrap confinement needs the run's scope (scratch directory and workspace), and the job was given none`);
+      }
       const override = ctx.executorSource;
       const source = await servingSource(pin, override);
       if ("refusal" in source) return failed(source.refusal);
@@ -593,13 +629,21 @@ export function createChildExecutorRunner(
             if (!(await lstat(dir).catch(() => undefined))) await mkdir(dir, { recursive: true });
           }
           const goSettings = operatorGoSettings(launch.env);
+          // A read-only job under its own sandbox writes nothing of the run's but its artifacts and session.
+          const readOnlySandbox = own?.kind === "bwrap" && pinned.readOnly === true;
           launch = confineWorker({
             ...launch,
             cwd,
             scratchDir: ctx.confinement.scratchDir,
-            writable: [...ctx.confinement.writablePaths, ctx.artifactDir, ...(ctx.session !== undefined ? [ctx.session.dir] : [])],
+            writable: [...(readOnlySandbox ? [] : ctx.confinement.writablePaths), ctx.artifactDir, ...(ctx.session !== undefined ? [ctx.session.dir] : [])],
             trustedWritable: ownStateDirs(),
-            readPaths: [...(ctx.confinement.readPaths ?? []), process.execPath, workerModule, entry, ...(sourceRoot !== undefined ? [sourceRoot] : []), ...(override !== undefined ? [override.root] : []), cwd],
+            readPaths: [
+              ...(ctx.confinement.readPaths ?? []),
+              ...(readOnlySandbox ? ctx.confinement.writablePaths : []),
+              ...executorBinaries(launch.env),
+              process.execPath, workerModule, entry, ...(sourceRoot !== undefined ? [sourceRoot] : []), ...(override !== undefined ? [override.root] : []), cwd,
+            ],
+            ...(own?.kind === "bwrap" ? { sandbox: own } : {}),
             keepUserState: options.ownState !== undefined,
             ...(goSettings !== undefined ? { operatorGo: goSettings } : {}),
           });
@@ -845,6 +889,8 @@ export function createChildExecutorRunner(
       });
     },
   };
+  // The built-in command executor runs a job's commands in containers when the job asks for it.
+  return options.sandbox !== true && served.has(BUILTIN_COMMAND_EXECUTOR_ID) ? withDockerConfinement(runner) : runner;
 }
 
 /** Bound on a pre-admission check; it loads the module and runs only the schema. */

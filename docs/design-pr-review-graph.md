@@ -1220,13 +1220,23 @@ tools run under bwrap.
 ```sh
 docker run --rm --pull never --name graphloom-<run>-<op> --label graphloom.run=<run> \
   --network none --cpus <cpus> --memory <mem> --memory-swap <mem> --pids-limit <pids> \
-  --read-only --tmpfs /tmp:size=<tmp> --user <uid>:<gid> \
+  --read-only --tmpfs /tmp:rw,exec,nosuid,nodev,size=<tmp> --user <uid>:<gid> \
   --cap-drop ALL --security-opt no-new-privileges \
   -v <checkout>:/work -v <run build cache>:/cache \
   -v <GOMODCACHE>:/go/pkg/mod:ro --env HOME=/tmp --env GOFLAGS=-mod=readonly --env GOPROXY=off \
   --env GOCACHE=/cache/go -w /work <image>@sha256:<digest> <argv>
 ```
 
+- **Built by the runner, as shipped in P1.** The platform piece is generic
+  (`packages/runner/src/sandbox-docker.ts`, [core design](design-typescript-core.md#a-jobs-own-confinement)).
+  The `/tmp` tmpfs is mounted `exec` because Docker's default is `noexec`, which
+  stops `go test` and similar toolchains from running what they build there. The
+  job's argv is the container's entrypoint plus arguments (`--entrypoint <argv[0]>`), so an image's own
+  entrypoint never intervenes. A mount may be `.` (the checkout), a path under it, or
+  `@scratch/<dir>` (the run's scratch directory, for the build cache). `graphloom sandbox pull
+  <image@sha256:…> [--check]` is the seam for "checked, and pulled if missing, in Fetch":
+  Fetch's environment check calls it, so no job ever pulls. `graphloom doctor` reports
+  the CLI, the daemon and rootless or not.
 - **Limits are profile data.** `metrics.sandbox` and `checks.sandbox` each
   hold `{ image, cpus, memory, pids, tmp, wallClockMs }`, with one image per
   language, pinned by digest: `golang@sha256:…` for Go and `node@sha256:…` for

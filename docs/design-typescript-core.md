@@ -120,7 +120,13 @@ active or effects remain unreconciled, even after the controller service exits.
 `--force` does not bypass this check or permit removal of the reconciliation
 journal; see the [host lifecycle contract](design-agent-host.md#leases-disconnection-stop-and-resume).
 
-Intake pins the task, repository HEAD, graph definition, plugin bundle, runtime
+A task may also carry `base: <commit>` (a hash, tag or branch of the task repository). Intake
+checks it with `git rev-parse --verify <base>^{commit}`, refuses anything that is not a commit,
+and pins that commit instead of `HEAD`: the run's worktree starts at it, and the candidate
+digest, `git diff <pinned>` and checkouts all measure the change from it. Absent means `HEAD`.
+`inspect` shows the request and the pinned commit as `base`.
+
+Intake pins the task, repository HEAD (or its `base`), graph definition, plugin bundle, runtime
 profile, grants, and finite budgets. A task may also name a JSON `config:` file
 relative to it; intake pins its bytes and digest, and the plugin host hands that
 pinned value, unread by the controller, to `describe`, `advance` and every
@@ -219,6 +225,34 @@ as a blocker". The operator's `hostRepair` task grant (off by default) lifts the
 confinement; each such job is then recorded in `state.hostChanges`, in `inspect`, and
 as `hostChange` evidence. Environment faults outside the run are the operator's: the
 supervisor reports them as a blocker with evidence.
+
+### A job's own confinement
+
+A job may also ask for confinement beyond the run's scope with `JobSpec.confinement`, as data
+the SDK validates when the job is pinned. The runner enforces it, and refuses the job, in-turn and
+again at run time, where the machine cannot (no bubblewrap, no Docker, an executor it does not
+apply to), never running it unconfined.
+
+- `{ kind: "bwrap", network, mask, binds }` for an agent or command job: the root is read-only,
+  the home directory is an empty tmpfs with holes only for the executor's own state (`ownState`)
+  and what it needs to start, `mask` paths (absolute or `~/`) are hidden, `binds`
+  (`{ path, readOnly }`) are added, and `network: false` removes the network
+  (`--unshare-net`). The workspace stays writable unless the job is `readOnly`. It builds on
+  the run-scope confinement above, so the controller gives such a job the run's scope.
+- `{ kind: "docker", image, cpus, memory, pids, tmp, wallClockMs, writable, readOnly, env }`
+  for a command job that runs untrusted code: each command runs as one `docker run` built from
+  the data in `packages/runner/src/sandbox-docker.ts`: `--network none`, the memory and pids limits,
+  `--read-only` with a `tmp` tmpfs, the operator's uid, `--cap-drop ALL`, `no-new-privileges`
+  and `--pull never`. The image must be pinned by `@sha256:` digest. Only the `writable` and
+  `readOnly` paths are mounted (each at its own path; `.` is the job's workspace, a relative path
+  is under it, `@scratch/<dir>` is under the run's scratch directory), and only `env` is passed:
+  no host environment reaches the container. A stop or the container's wall clock ends in
+  `docker kill` by name; a resume removes the containers labelled `graphloom.run=<run>`
+  (`Runner.releaseRun`).
+  Images are never pulled by a job. `graphloom sandbox pull <image@sha256:...> [--check]` puts one
+  in the local store before the run (a graph's environment check calls it), and `graphloom doctor`
+  reports the Docker CLI, the daemon, and whether it is rootless (the `docker` group is
+  root-equivalent on the host; rootless is recommended).
 
 Plugins, validators, builders, workers, and reviewers run outside the controller
 process. A plugin crash or hang becomes an observed child failure; the controller

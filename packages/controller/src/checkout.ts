@@ -81,6 +81,8 @@ export async function runInCheckout(args: {
   source?: ExecutorSourceOverride;
   /** Confine the job's writes to its checkout and this run-scoped directory. */
   scratchDir?: string;
+  /** The run's scratch directory, for a job that names it in a docker confinement; no confinement by itself. */
+  runScratchDir?: string;
 }): Promise<{ result: JobResult; candidateDigest: string; staleIdentity?: string }> {
   const { job, operationId, generation, runId } = args;
   const change = await candidateChange(args.worktreePath, args.pinnedHead);
@@ -162,6 +164,7 @@ export async function runInCheckout(args: {
       generation,
       worktreePath: dir,
       artifactDir: args.artifactDir,
+      ...(args.runScratchDir !== undefined ? { scratchDir: args.runScratchDir } : {}),
       signal: args.signal,
       ...(args.scratchDir !== undefined ? { confinement: { scratchDir: args.scratchDir, writablePaths: [dir], ...(sourceGitDir !== undefined ? { readPaths: [sourceGitDir] } : {}) } } : {}),
       ...(args.source !== undefined ? { executorSource: args.source } : {}),

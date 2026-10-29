@@ -150,10 +150,26 @@ export interface IntegrityDiscovery {
   problems: string[];
 }
 
+/**
+ * What the machine offers a docker sandbox (a graph's untrusted-code jobs): the CLI, a daemon this
+ * user can reach, and whether the daemon is rootless. Optional: a graph that needs it reports
+ * "not run" without it, so this never fails the doctor.
+ */
+export interface DockerDiscovery {
+  path?: string;
+  /** The daemon's version, when it answered. */
+  serverVersion?: string;
+  /** Why the daemon could not be asked, when the CLI is present but it did not answer. */
+  daemonError?: string;
+  /** `name=rootless` among the daemon's security options; undefined when unknown. */
+  rootless?: boolean;
+}
+
 export interface HostDiscovery {
   platform: { ok: boolean; actual: string; expected: string };
   git: ToolDiscovery;
   flock: ToolDiscovery;
+  docker: DockerDiscovery;
   confinement: ConfinementDiscovery;
   integrity: IntegrityDiscovery;
 }
@@ -164,6 +180,19 @@ async function tool(name: string, env: NodeJS.ProcessEnv): Promise<ToolDiscovery
   const out = await exec(found, ["--version"], env);
   const version = firstLine(out.stdout || out.stderr);
   return { path: found, ...(version ? { version } : {}) };
+}
+
+async function discoverDocker(env: NodeJS.ProcessEnv): Promise<DockerDiscovery> {
+  const found = await findExecutable("docker", env);
+  if (found === undefined) return {};
+  const version = await exec(found, ["version", "--format", "{{.Server.Version}}"], env, 15_000);
+  if (version.code !== 0 || version.error !== undefined) {
+    const why = firstLine(version.stderr) || version.error || "the daemon did not answer";
+    return { path: found, daemonError: why };
+  }
+  const info = await exec(found, ["info", "--format", "{{json .SecurityOptions}}"], env, 15_000);
+  const rootless = info.code === 0 ? info.stdout.includes("rootless") : undefined;
+  return { path: found, serverVersion: firstLine(version.stdout), ...(rootless !== undefined ? { rootless } : {}) };
 }
 
 async function discoverConfinement(env: NodeJS.ProcessEnv): Promise<ConfinementDiscovery> {
@@ -671,9 +700,10 @@ export async function discover(env: NodeJS.ProcessEnv = process.env, root: strin
   const info = versionInfo(root);
   const expectedPlatform = typeof info.release?.platform === "string" ? info.release.platform : `linux-${process.arch}`;
   const actual = `${process.platform}-${process.arch}`;
-  const [git, flock, confinement, integrity, runner, supervisor, gh] = await Promise.all([
+  const [git, flock, docker, confinement, integrity, runner, supervisor, gh] = await Promise.all([
     tool("git", env),
     tool("flock", env),
+    discoverDocker(env),
     discoverConfinement(env),
     discoverIntegrity(root, info.release),
     discoverRunner(env),
@@ -708,7 +738,7 @@ export async function discover(env: NodeJS.ProcessEnv = process.env, root: strin
   return {
     self,
     root,
-    host: { platform: { ok: actual === expectedPlatform, actual, expected: expectedPlatform }, git, flock, confinement, integrity },
+    host: { platform: { ok: actual === expectedPlatform, actual, expected: expectedPlatform }, git, flock, docker, confinement, integrity },
     claude,
     codex,
     pi,

@@ -2,7 +2,7 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -91,6 +91,73 @@ export function hasPrivateTmp(needed: readonly string[]): boolean {
   return !needed.some(underTmp);
 }
 
+/** The bubblewrap part of a job's own confinement (`JobSpec.confinement`, kind bwrap). */
+export interface BwrapSandbox {
+  network: boolean;
+  mask: readonly string[];
+  binds: ReadonlyArray<{ path: string; readOnly: boolean }>;
+}
+
+/** `~` and `~/x` mean the operator's home; anything else is already absolute. */
+export function expandHome(p: string, home: string): string {
+  return p === "~" ? home : p.startsWith("~/") ? path.join(home, p.slice(2)) : path.resolve(p);
+}
+
+function under(p: string, root: string): boolean {
+  return p === root || p.startsWith(root.endsWith(path.sep) ? root : root + path.sep);
+}
+
+function realOrSame(p: string): string {
+  try {
+    return realpathSync(p);
+  } catch {
+    return p;
+  }
+}
+
+/**
+ * The mount arguments of a job's own sandbox. The home directory becomes an empty tmpfs, and is
+ * given back only what the job cannot start without (`needed`: the runtime and executor modules,
+ * read-only) and the writable paths and executor state (`binds`, which the caller binds
+ * read-write after this). Then the declared binds, and last the masks: a directory is replaced by an
+ * empty tmpfs and a file by an empty one, so what a mask names reads as missing or empty.
+ */
+function sandboxMounts(
+  sandbox: BwrapSandbox,
+  ctx: { needed: readonly string[]; binds: readonly string[]; home: string },
+): { hideHome: string[]; after: string[] } {
+  const home = path.resolve(ctx.home);
+  const holes = new Set<string>(ctx.binds);
+  const hideHome: string[] = [];
+  const reads = new Set<string>();
+  if (existsSync(home) && home !== "/") {
+    hideHome.push("--tmpfs", home);
+    for (const p of ctx.needed) {
+      for (const candidate of [path.resolve(p), realOrSame(path.resolve(p))]) {
+        if (under(candidate, home) && existsSync(candidate) && !ctx.binds.some((b) => under(candidate, b))) reads.add(candidate);
+      }
+    }
+    for (const r of reads) hideHome.push("--ro-bind", r, r);
+  }
+  const visible = (p: string): boolean => !under(p, home) || [...reads, ...holes].some((h) => under(p, h));
+  const after: string[] = [];
+  for (const bind of sandbox.binds) {
+    const p = expandHome(bind.path, home);
+    if (!existsSync(p)) throw new Error(`sandbox bind ${bind.path} does not exist`);
+    after.push(bind.readOnly ? "--ro-bind" : "--bind", p, p);
+    holes.add(p);
+  }
+  for (const mask of sandbox.mask) {
+    const p = expandHome(mask, home);
+    const stat = lstatOrUndefined(p);
+    // A path that is not there, or sits in the hidden home, is already unreadable.
+    if (stat === undefined || !visible(p)) continue;
+    if (stat.isDirectory()) after.push("--tmpfs", p);
+    else after.push("--ro-bind", "/dev/null", p);
+  }
+  return { hideHome, after };
+}
+
 export interface ConfinedWorker {
   command: string;
   args: string[];
@@ -121,6 +188,12 @@ export function confineWorker(options: {
   /** Paths the job reads that must stay visible (the worker and executor modules, the runtime). */
   readPaths?: readonly string[];
   keepUserState: boolean;
+  /**
+   * The job's own sandbox (`JobSpec.confinement`, kind bwrap): the home directory is hidden but for the
+   * executor's own state and what it needs to start, `mask` paths are hidden, `binds` are added, and
+   * `network: false` removes the network.
+   */
+  sandbox?: BwrapSandbox;
   /** The operator's Go settings, when known; the job then gets a run-scoped module cache reading through the operator's. */
   operatorGo?: OperatorGo;
 }): ConfinedWorker {
@@ -175,12 +248,15 @@ export function confineWorker(options: {
   // used only when nothing the job reads lives there; otherwise /tmp stays read-only.
   const needed = [...(options.readPaths ?? []), options.cwd, ...(go !== undefined ? [go.modCache] : [])];
   const privateTmp = hasPrivateTmp(needed);
+  const own = options.sandbox !== undefined ? sandboxMounts(options.sandbox, { needed, binds, home: os.homedir() }) : undefined;
   return {
     command: "bwrap",
     args: [
       "--ro-bind", "/", "/",
       "--dev", "/dev",
       ...(privateTmp ? ["--tmpfs", "/tmp"] : []),
+      ...(own?.hideHome ?? []),
+      ...(options.sandbox?.network === false ? ["--unshare-net"] : []),
       // The worker is pid 1 of its own pid namespace: when it exits, or bubblewrap is killed
       // (--die-with-parent), the kernel kills every process left in it, detached ones included.
       "--unshare-pid",
@@ -188,6 +264,7 @@ export function confineWorker(options: {
       "--die-with-parent",
       "--json-status-fd", "3",
       ...binds.flatMap((p) => ["--bind", p, p]),
+      ...(own?.after ?? []),
       "--chdir", options.cwd,
       "--",
       options.command,
