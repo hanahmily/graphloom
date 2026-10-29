@@ -130,7 +130,7 @@ meaning and parser (review-kit, [§14](#14-sharing-code-with-issue-fix)).
 | `report` | The section template, each section's meaning in this repository, and its detectors ([§6.2](#62-profile-mapping), [§6.3](#63-detectors)) |
 | `symbols` | Language packs: file globs, definition patterns, test-file and test-name patterns ([§7.2](#72-deterministic-groundwork)). The plugin ships packs for Go and TypeScript as data, and a profile may add or override them |
 | `questions` | `excludeRoots` (generated code only; the search covers the whole base tree, vendored directories included), `similarity` (default 0.5), `maxCandidates` per query (5) ([§7.2](#72-deterministic-groundwork)) |
-| `metrics` | Per language: `files`, and the tools' `argv` for static metrics, coverage and mutation (defaults: [metrics §3](design-code-quality-metrics.md#3-tools)). Also `generated` globs, `execute` (allow coverage and mutation runs of PR code under untrusted confinement, default false), and `mutation.timeBudgetMs` (default 30 min). Thresholds may be tightened, never loosened |
+| `metrics` | Per language: `files`, and the tools' `argv` for static metrics, coverage and mutation (defaults: [metrics §3](design-code-quality-metrics.md#3-tools)). Also `generated` globs; `coverage` (run the PR's tests for coverage under untrusted confinement, **default true**); `mutation.enabled` (**default true**; needs coverage) and `mutation.timeBudgetMs` (default 30 min); and `limits` for confined test runs (memory, file size, wall clock). A profile may turn either run off. Thresholds may be tightened, never loosened |
 | `context` | issue-fix's [context documents](design-issue-fix-graph.md#context-documents) |
 | `issues` | Where linked issues live. `Fixes`/`Closes` references are read with `get-issue` |
 | `review` | issue-fix's `language`, `testFiles`, `rules`, plus `discoveryRounds` (default 3, [§9.4](#94-rounds)) |
@@ -181,7 +181,7 @@ generation's evidence holds a `--decline review-layer`.
 | Fetch | `head-checked-out` | The worktree holds exactly the head's tree, its base is the merge base, and no repository code ran to produce it | `checkout-command-v1` | `head-tree` |
 | Fetch | `prior-ledger` | The PR's ledger was read, or recorded absent, and the delta scope follows from it | command report | `review-scope` |
 | Report | `change-report` | Every template section is present, with cited items or an explicit "None". Every citation is inside the PR's diff. Every changed file and every detector fact is cited. No item carries a severity, finding or verdict (the contract has no such field) | `change-report-v1`, `report-write` | `change-report` |
-| Report | `measurements` | For every function the PR adds or modifies, complexity and nesting were measured by the pinned tools over the head tree, and coverage and mutation were measured in an untrusted-confined checkout or carry a not-run reason. Every value recomputes from its evidence ([metrics §5](design-code-quality-metrics.md#5-records-and-recomputation)) | `graphloom-metrics-v1` command reports | `measurements` |
+| Report | `measurements` | For every function the PR adds or modifies, complexity and nesting were measured by the pinned tools over the head tree, and coverage (on by default) and then mutation (on by default, at covered sites only) were measured in an untrusted-confined checkout, or carry a not-run reason (switched off by the profile, bwrap missing, a dependency not cached, no coverage). Every value recomputes from its evidence ([metrics §5](design-code-quality-metrics.md#5-records-and-recomputation)) | `graphloom-metrics-v1` command reports | `measurements` |
 | Report | `claims-checked` | An independent `<report-checker>` judged every report item against the diff, and every item left is `supported` with matching quotes | `claim-check-v1` | `claims-checked` |
 | Questions | `questions-complete` | Every required question was asked ([§7.1](#71-questions)): purpose for each change item whose purpose the PR text does not state (a stated purpose recorded with a matching quote instead); `existing-equivalent`, `reuse-library` and `common-logic` for each new symbol; `missing-test` for each new or modified symbol with no mapped test; and one question per value over a metric limit and per surviving mutant. Every changed function has a measurement record or a not-run reason | `questions-v1`, search and test-map reports | `questions-complete` |
 | Answers | `answers-complete` | Every question has an answer from the `<answerer>`, with evidence (citations, the searches run with their results, quotes) and a status of `answered`, `partially answered` or `needs author`. Every "none found" answer lists its whole-repository searches and the dependency inventory. Every cited metric equals its record. Every proposal cites line ranges inside its function. `review.md`, `report.json` and `qa.json` are written | `answers-v1`, `qa-write` | `answers-complete` |
@@ -361,26 +361,28 @@ the PR adds or modifies, never untouched code, using the definitions in
 
 ````markdown
 ## Measurements
-Coverage and mutation: not run (profile disallows executing PR code). CRAP uses cov = 0 as the upper bound.
+Coverage: `go test -coverprofile` of 2 touched packages, confined (no network), 6 min; 1 test failed (pkg/schema TestGroupDefaults). Mutation: 41 mutants at covered sites, 23 min of 30.
 
-| Function | Change | Complexity (limit < 10) | Nesting (limit ≤ 3) | CRAP (threshold 30) | Mutation |
-|---|---|---|---|---|---|
-| `schema.ParseTTL` pkg/schema/ttl.go:14 | added | 12 | 4 | 156 (coverage unknown, upper bound) | not run |
-| `measure.(*writer).flush` banyand/measure/write.go:110 | modified | 6 | 2 | 42 (coverage unknown, upper bound) | not run |
+| Function | Change | Complexity (limit < 10) | Nesting (limit ≤ 3) | Coverage | CRAP (threshold 30) | Mutation |
+|---|---|---|---|---|---|---|
+| `schema.ParseTTL` pkg/schema/ttl.go:14 | added | 12 | 4 | 70% (measured) | 15.9 | 9 of 10 killed; survivor :27 relational `n > max` → `n >= max` |
+| `measure.(*writer).flush` banyand/measure/write.go:110 | modified | 6 | 2 | 50% (measured) | 10.5 | 6 of 6 killed |
+| `liaison.(*grpc).route` banyand/liaison/grpc/route.go:88 | modified | 7 | 2 | unknown: package did not build offline | 56 (upper bound) | not run: no coverage |
 ````
 
-With `metrics.execute`, the columns show measured CRAP (`coverage 70%,
-measured`) and the mutation score, and the section lists each surviving
-mutant as `path:line`, the operator and `original → mutated`.
+When the profile turns coverage off, every row shows coverage `unknown`
+with that reason, CRAP as the upper bound, and mutation `not run`.
 
 The section follows a few rules:
 
 - Exceeding a limit is stated as a number beside its limit.
-- The static metrics run on every profile. Coverage and mutation run only
-  with `metrics.execute` and working bwrap, under `untrusted` confinement
+- The static metrics always run. Coverage and mutation run **by default**,
+  BanyanDB included, always under `untrusted` confinement and always
+  coverage first
   ([metrics §4](design-code-quality-metrics.md#4-execution-and-confinement)).
-  The BanyanDB profile leaves `execute` off, so its reports say
-  "not run (profile disallows executing PR code)".
+  A profile can switch either off (`metrics.coverage: false`,
+  `metrics.mutation.enabled: false`). A missing bwrap or cache dependency
+  shows as `not run`, with its reason, per package.
 - The `measurements` validator recomputes every value from its evidence
   ([metrics §5](design-code-quality-metrics.md#5-records-and-recomputation))
   before the section is written.
@@ -418,7 +420,7 @@ question.
 | `common-logic` | Every new symbol: does it duplicate logic elsewhere, in the base or in the PR, that could become shared code? |
 | `missing-test` | Every new or modified symbol or feature that the test map finds no covering test for: which test covers it? |
 | `split-function` | Every changed function with complexity ≥ 10 or nesting > 3: could it be split into smaller functions with one intent each? |
-| `complexity-coverage` | Every changed function with CRAP ≥ 30: which tests cover its branches? |
+| `complexity-coverage` | Every changed function with **measured** coverage and CRAP ≥ 30, or with **unknown** coverage and complexity ≥ 10: which tests cover its branches? An upper-bound CRAP alone ([metrics §2.4](design-code-quality-metrics.md#24-crap)) is shown in Measurements but asks nothing |
 | `weak-test` | Each surviving mutant: which assertion would fail when `n > max` at `path:line` becomes `n >= max`? |
 
 Questions carry no severity or verdict ([§6.5](#65-deterministic-validation)).
@@ -468,7 +470,8 @@ material that both the questioner and the answerer receive:
    - table-driven case names containing the symbol's name tokens.
 
    Base tests that already reference a modified symbol are kept as context
-   only. With `metrics.execute`, the confined coverage run also counts.
+   only. The confined coverage run, on by default, also counts: a changed
+   line it executed is covered by whichever test executed it.
 5. **Purpose lookup.** The PR body, commits and linked issues are pinned text.
    A `stated` purpose must quote one of them, matched after whitespace is
    collapsed.
@@ -921,7 +924,7 @@ request inside them is itself a fact to record. The report records it under
 | Job | Confinement |
 |---|---|
 | Reporter, questioner, answerer, checkers, reviewer, verifier | `untrusted-read`: bwrap, root read-only, home replaced by a tmpfs except the agent's own state (`ownState`) and the dependency directories of the inventory (read-only), the masks above, network on (model API), minimal environment, no GitHub token |
-| Checks, coverage and mutation runs | `untrusted`: as above plus `--unshare-net` and `--clearenv`, writable only in the checkout and scratch |
+| Checks, coverage and mutation runs | `untrusted`: as above plus `--unshare-net`, `--clearenv` and resource limits (`metrics.limits`, defaults 8 GiB address space, 2 GiB per written file, the step's wall clock), writable only in the checkout and scratch |
 | Static metrics (`gometrics`, `tsmetrics`) | `untrusted`, read-only. They parse the head tree and execute none of it, so they run on every profile |
 | Materialize, searches, writes | Graph commands with fixed argv over pinned trees; no repository code runs |
 | GitHub reads and writes | The sandboxed executor package |
@@ -931,6 +934,27 @@ The runner already uses bwrap for supervisor jobs
 home, or graph-job opt-in. Those are generic additions
 ([§15](#15-generic-platform-changes)). A runner that cannot confine refuses
 the job.
+
+**Contributor tests run by default.** Coverage and mutation execute the PR's
+own test code on the operator's machine for every run, under the `untrusted`
+confinement. Some risk remains after confinement, and the design accepts it:
+
+- **Kernel or bwrap escape.** The confinement relies on user namespaces. A
+  kernel or bwrap vulnerability would let test code out.
+- **Readable files.** The root filesystem stays visible read-only (minus the
+  home directory). World-readable files elsewhere, such as `/etc` or other
+  checkouts outside `$HOME`, can be read. With no network, they can leave
+  only through the run's own output. Test output enters evidence bounded and
+  secret-scanned ([§12.3](#123-secrets)), and nothing is posted without
+  approval.
+- **Resource use.** Memory, file size and wall clock are limited. CPU and
+  process count are not, so a hostile test can slow the machine until its
+  wall clock ends.
+
+A profile that does not accept this sets `metrics.coverage: false`, which also
+stops mutation. An operator can do the same for one run by naming a profile
+copy with it off. The report then states `not run (coverage disabled by the
+profile)`.
 
 ### 12.3 Secrets
 
@@ -992,11 +1016,14 @@ These are estimates until measured ([budgets](budgets.md)).
 - **Search jobs:** about 10 more command jobs.
 - **Measurements:** no agent calls.
   - Static metrics are one or two command jobs, in seconds.
-  - With `metrics.execute`, coverage is one test run of the touched packages.
-    Mutation is bounded by `metrics.mutation.timeBudgetMs`, default 30
-    minutes. That fits about 50 to 150 mutants of BanyanDB-sized Go packages
+  - Coverage, on by default, is one confined test run of the touched
+    packages, about 2 to 15 minutes for BanyanDB.
+  - Mutation, on by default, is bounded by `metrics.mutation.timeBudgetMs`,
+    default 30 minutes. That fits about 50 to 150 mutants of BanyanDB-sized
+    Go packages
     ([metrics §4](design-code-quality-metrics.md#4-execution-and-confinement)).
-    Both draw on `activeMs`.
+  - Both draw on `activeMs`, so a report-only run takes about 1 hour of wall
+    clock at most, well inside the 4 h default.
 - **Review layer:** adds about 165 calls.
 
 | Budget | Default |
@@ -1079,8 +1106,9 @@ recorded, so they do not decide CI verdicts.
 | `needs-author-purpose` | A new config flag; nothing in the PR text, commits, issue or code comments says why | A `purpose` question answered `needs author`, listing what was read; marked in `review.md`; offered as a draft comment in the review layer |
 | `purpose-stated` | The PR body states why the flag is added | A purpose record `stated` with the matching quote; no `purpose` question |
 | `missing-test` | A new exported function that no test references; the questioner omits the question | The plugin adds the required `missing-test` question; the answerer's whole-repository search finds no test → `needs author`, naming the package's `_test.go` |
-| `complex-function` | A new function with 12 decision points and nesting 4; `metrics.execute` off | A Measurements row (12, 4, CRAP with coverage unknown as the upper bound, mutation not run with its reason); `split-function` answered with a proposal (line ranges, names new to the package, one responsibility each) and `complexity-coverage` entries; the `measurements` validator rejects a canned record whose `complexity` disagrees with its `decisions` |
-| `surviving-mutant` | `metrics.execute` on; a canned mutation report with one survivor (`n > max` → `n >= max`) and one killed mutant | The survivor in Measurements; one `weak-test` entry `needs author`, naming `path:line`, the operator and the mutant, with the proposed assertion; score 1/2 |
+| `complex-function` | A new function with 12 decision points and nesting 4; `metrics.coverage: false` | A Measurements row (12, 4, CRAP with coverage unknown as the upper bound, mutation not run with its reason); `split-function` answered with a proposal (line ranges, names new to the package, one responsibility each) and `complexity-coverage` entries; the `measurements` validator rejects a canned record whose `complexity` disagrees with its `decisions` |
+| `crap-upper-bound` | A modified function with complexity 6 in a package that does not build offline | Coverage `unknown` with that reason; CRAP 42 shown as the upper bound; no `complexity-coverage` question; mutation `not run: no coverage` |
+| `surviving-mutant` | Defaults (coverage and mutation on); canned coverage and mutation reports with one survivor (`n > max` → `n >= max`) at a covered site, one killed mutant, one uncovered site | The survivor in Measurements; one `weak-test` entry `needs author`, naming `path:line`, the operator and the mutant, with the proposed assertion; score 1/2; the uncovered site recorded `not-run (uncovered)`, not run |
 | `happy` | `Review` mode; findings, one `needs author` item, one `answered` split proposal that the maintainer promotes in the draft; publish approved | One `create-pull-review` carrying the findings, the pre-selected item and the promoted proposal, and no other Q&A item; ledger `published` |
 | `no-findings` | `Review` mode; nothing raised | Draft `comment` with `recommended: approve`; never `APPROVE` |
 | `force-push` | Seeded ledger (F1 published, F2 dropped by the maintainer); rebased; the author disputes F1 | Scope by patch-id; F1 settled by the verifier; F2 suppressed |
@@ -1120,7 +1148,12 @@ Hard rules, in addition to the shared ones:
 ## 18. Phases
 
 **P1 ships the whole first layer: report, questions and answers, with the
-static measurements.** Two reasons:
+static measurements and coverage.** Coverage is on by default, and the
+`untrusted` confinement it needs is already a P1 deliverable. Mutation is
+also on by default, but it needs its own tools (`gomutate`, StrykerJS). It
+lands in P2, which changes no stage. Until then the report says
+`not run: mutation not available in this version`. The first layer comes as
+one release for two reasons:
 
 - The user defined the first step as the report, the questions and the
   answers together. Each part alone does not inform the decision.
@@ -1133,12 +1166,12 @@ writes.
 
 | Phase | Scope | Verification |
 |---|---|---|
-| P1 | **First layer, report-only.** Fetch, workspace, report, questions, answers, static measurements. Generic: `base:`, the GitHub reads, `untrusted-read` and `untrusted` confinement with read-only dependency mounts. pr-review 0.1 with stages Fetch, Report, Questions and Answers; it succeeds after Answers. Also: detectors; symbol packs (Go, TypeScript); whole-repository search; similarity; the dependency inventory; test mapping; the reporter, questioner and answerer with both checkers; `gometrics` and `tsmetrics` (coverage unknown); `review.md`, `report.json`, `qa.json`; the ledger; the BanyanDB mapping; the skill's start and combined-file steps | Intake, executor contract and confinement tests. Unit tests per detector, symbol pattern (new vs modified, receivers, generics), query builder, similarity scorer, test-map rule and validator rule. `gometrics` matches gocyclo on a fixture corpus. Nesting and changed-function scope fixtures. The `measurements` validator rejects each kind of inconsistent record. Real-Git tests: searches read the base commit only, and materialization runs no hook or filter. Ledger CAS race. Rehearsal `report`, `report-corrections`, `answer-finds-existing-helper`, `answer-no-library-with-whole-repo-search`, `answer-checker-contradicts`, `needs-author-purpose`, `purpose-stated`, `missing-test`, `complex-function`, `injection`. One live run on a real BanyanDB PR, read by the user, with recall of new symbols, tests and existing equivalents checked by hand |
-| P2 | **Deltas:** head mapping, then the since-last sections for the report and the Q&A, with question closure | Real-Git fixtures for append, rebase, squash, base merge and missing objects; rehearsal `report-delta`; a live re-run after a contributor push |
+| P1 | **First layer, report-only.** Fetch, workspace, report, questions, answers, static measurements. Generic: `base:`, the GitHub reads, `untrusted-read` and `untrusted` confinement with read-only dependency mounts. pr-review 0.1 with stages Fetch, Report, Questions and Answers; it succeeds after Answers. Also: detectors; symbol packs (Go, TypeScript); whole-repository search; similarity; the dependency inventory; test mapping; the reporter, questioner and answerer with both checkers; `gometrics` and `tsmetrics`; confined coverage (`go test -coverprofile`, c8) with measured CRAP and the unknown-coverage rule; `review.md`, `report.json`, `qa.json`; the ledger; the BanyanDB mapping; the skill's start and combined-file steps | Intake, executor contract and confinement tests. Unit tests per detector, symbol pattern (new vs modified, receivers, generics), query builder, similarity scorer, test-map rule and validator rule. `gometrics` matches gocyclo on a fixture corpus. Nesting and changed-function scope fixtures. The `measurements` validator rejects each kind of inconsistent record. Real-Git tests: searches read the base commit only, and materialization runs no hook or filter. Ledger CAS race. Rehearsal `report`, `report-corrections`, `answer-finds-existing-helper`, `answer-no-library-with-whole-repo-search`, `answer-checker-contradicts`, `needs-author-purpose`, `purpose-stated`, `missing-test`, `complex-function`, `crap-upper-bound`, `injection`. Under real bwrap: a coverage run with no network, the home directory hidden and resource limits; coverage attributed by line range; a test that tries the network or `$HOME` fails inside the run and is reported as a fact. One live run on a real BanyanDB PR, read by the user, with recall of new symbols, tests and existing equivalents checked by hand |
+| P2 | **Deltas and mutation.** Head mapping, then the since-last sections for the report and the Q&A, with question closure. Mutation testing (`gomutate`, StrykerJS) at covered sites, with `weak-test` questions | Real-Git fixtures for append, rebase, squash, base merge and missing objects; rehearsal `report-delta` and `surviving-mutant`; `gomutate` operator fixtures (one per operator, overlay leaves the checkout unchanged, a compile-failing mutant is `invalid`, uncovered sites `not-run (uncovered)`, the budget cut-off records `not-run`); a StrykerJS run restricted to line ranges with the operator allowlist; a live re-run after a contributor push |
 | P3 | review-kit extracted and vendored into issue-fix | issue-fix tests unchanged; `describe()` byte-identical for every shipped profile; drift test; `resume --update-plugin` from 0.16.0 |
 | P4 | **Review layer, local:** generic approvals (`review-layer`); Review, Checks (definition only), Draft, and Publish as a stop; `needs author` items pre-selected and other Q&A items promotable as draft comments; verdict rule; edits | Graph tests per requirement; anchor validation on real GitHub patches; secret and private-reference scans; report-only requirements pass on a decline; rehearsal `no-findings` and `happy` up to the stop |
 | P5 | **Publish:** write token binding, `publish-review`, read-back, optional `publish-report` | Controller tests: write refused without `approvalRef`, with a stale generation or past `maxDispatches`; token bound only under `--approve`; ambiguous POST reconciled; rehearsal `publish-refused`, `happy` to `succeeded`; a live publish on a user-chosen PR |
-| P6 | **Confined execution:** checks; coverage and measured CRAP; mutation testing (`gomutate`, StrykerJS, c8) with `weak-test` questions. Also incremental review (prior findings, threads, never re-raise) and measured budgets | Rehearsal `surviving-mutant` and `force-push`. Under real bwrap: `checks-ran`; coverage attribution by line range; `gomutate` operator fixtures (one per operator, overlay leaves the checkout unchanged, a compile-failing mutant is `invalid`, the budget cut-off records `not-run`); a StrykerJS run restricted to line ranges with the operator allowlist. Budgets and mutation times recorded in `budgets.md` |
+| P6 | Review-layer checks (`checks-ran`), incremental review (prior findings, threads, never re-raise), measured budgets | Rehearsal `force-push`; `checks-ran` under real bwrap; budgets, coverage and mutation times recorded in `budgets.md` |
 
 ## 19. Open questions
 

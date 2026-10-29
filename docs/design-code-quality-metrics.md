@@ -90,9 +90,12 @@ checkout of the head.
   statements, so this uses executed lines over executable lines in the
   function's range, stated as line coverage in every record.
 
-When coverage was not measured, the record says `unknown` with the reason
-(for example "profile disallows executing PR code"). CRAP then uses `cov = 0`,
-stated as the **upper bound**.
+When coverage was not measured, the record says `unknown` with the reason,
+for example "coverage disabled by the profile", "bwrap unavailable" or
+"package did not build offline". CRAP then uses `cov = 0`, stated as the
+**upper bound**. A test that fails in the confined run does not void the
+coverage of the tests that ran. The failures are recorded as facts.
+
 
 ### 2.4 CRAP
 
@@ -104,6 +107,13 @@ CRAP(m) = comp(m)^2 * (1 - cov(m))^3 + comp(m)
 `measured`, or `unknown (upper bound, cov = 0)`. At `cov = 0` the formula is
 `comp^2 + comp`, so any function with `comp >= 5` reaches 30 when coverage is
 unknown. Records say so rather than leaving the reader to infer it.
+
+**Unknown-coverage rule.** With unknown coverage, the upper-bound CRAP is
+always *shown*. It *triggers* follow-up only when `comp >= 10`, where the
+complexity rule already applies. Below that, an upper bound of 30 or more
+reflects the missing measurement, not the function. With measured coverage,
+`CRAP >= 30` triggers follow-up as stated. A graph's follow-up is its own:
+pr-review asks a question, and issue-fix applies a gate.
 
 ### 2.5 Mutation testing
 
@@ -181,10 +191,18 @@ Why these tools:
 | Measurement | Executes PR code? | Where it runs |
 |---|---|---|
 | Complexity, nesting | No. The tool parses only | A read-only command under `untrusted` confinement (no network), over the head tree. It always runs, on every profile |
-| Coverage, mutation | Yes: the PR's tests | Only in a `{ from: "candidate" }` checkout under `untrusted` confinement (no network, no credentials, home hidden), with dependencies from the operator's read-only caches. Only when the profile allows executing PR code (`metrics.execute`) |
+| Coverage, mutation | Yes: the PR's tests | Only in a `{ from: "candidate" }` checkout under `untrusted` confinement (no network, no credentials, home hidden, resource limits), with dependencies from the operator's read-only caches. Each has its own switch: `metrics.coverage` and `metrics.mutation.enabled`. The defaults are the graph's; pr-review turns both on |
 
-When execution is not allowed, or bwrap is missing, the coverage and mutation
-records say `not run` with the reason, and CRAP uses the upper bound (§2.4).
+When a switch is off, bwrap is missing, or a dependency is not in the cache,
+the record says `not run` with the reason, and CRAP uses the upper bound
+(§2.4).
+
+**Ordering.** Coverage runs first, and mutation uses its result. Mutants are
+generated only at sites that the coverage run executed. A site no test
+executed would survive by construction, so it is recorded
+`not-run (uncovered)` and left to the missing-test follow-up instead of
+costing a test run. When coverage did not run, mutation does not run either
+(`not run: no coverage`).
 
 Mutation runs within `metrics.mutation.timeBudgetMs` (default 30 minutes per
 run):
@@ -194,8 +212,9 @@ run):
 - a compile failure costs one build;
 - each mutant costs one test run of the touched packages.
 
-As an estimate for BanyanDB-sized Go packages, 10 to 40 seconds per mutant
-after the first build, so about 50 to 150 mutants fit the default budget.
+As an estimate for BanyanDB-sized Go packages, the coverage run of the
+touched packages takes 2 to 15 minutes. A mutant takes 10 to 40 seconds after
+the first build, so about 50 to 150 mutants fit the default budget.
 
 ## 5. Records and recomputation
 
