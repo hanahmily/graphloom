@@ -130,12 +130,12 @@ meaning and parser (review-kit, [§14](#14-sharing-code-with-issue-fix)).
 | `report` | The section template, each section's meaning in this repository, and its detectors ([§6.2](#62-profile-mapping), [§6.3](#63-detectors)) |
 | `symbols` | Language packs: file globs, definition patterns, test-file and test-name patterns ([§7.2](#72-deterministic-groundwork)). The plugin ships packs for Go and TypeScript as data, and a profile may add or override them |
 | `questions` | `excludeRoots` (generated code only; the search covers the whole base tree, vendored directories included), `similarity` (default 0.5), `maxCandidates` per query (5) ([§7.2](#72-deterministic-groundwork)) |
-| `metrics` | Per language: `files`, and the tools' `argv` for static metrics, coverage and mutation (defaults: [metrics §3](design-code-quality-metrics.md#3-tools)). Also `generated` globs; `coverage` (run the PR's tests for coverage under untrusted confinement, **default true**); `mutation.enabled` (**default true**; needs coverage) and `mutation.timeBudgetMs` (default 30 min); and `limits` for confined test runs (memory, file size, wall clock). A profile may turn either run off. Thresholds may be tightened, never loosened |
+| `metrics` | Per language: `files`, and the tools' `argv` for static metrics, coverage and mutation (defaults: [metrics §3](design-code-quality-metrics.md#3-tools)). Also `generated` globs; `coverage` (run the PR's tests for coverage under untrusted confinement, **default true**); `mutation.enabled` (**default true**; needs coverage) and `mutation.timeBudgetMs` (default 30 min); and `sandbox`, the Docker sandbox's image digest per language with its `cpus`, `memory`, `pids`, `tmp` and `wallClockMs` ([§12.2](#122-confinement)). A profile may turn either run off. Thresholds may be tightened, never loosened |
 | `context` | issue-fix's [context documents](design-issue-fix-graph.md#context-documents) |
 | `issues` | Where linked issues live. `Fixes`/`Closes` references are read with `get-issue` |
 | `review` | issue-fix's `language`, `testFiles`, `rules`, plus `discoveryRounds` (default 3, [§9.4](#94-rounds)) |
 | `rules` | Deterministic review checks on the diff: `changelog`, `licenseHeader`, `dependencies` ([§8.1](#81-review)) |
-| `checks` | Optional commands run only under untrusted confinement ([§8.2](#82-checks)). Absent means there is no Checks stage |
+| `checks` | Optional commands, run only in the Docker sandbox (`checks.sandbox`, same shape as `metrics.sandbox`) ([§8.2](#82-checks)). Absent means there is no Checks stage |
 | `comments` | `minSeverity` (default `P2`), `nits` (false), `questions` (pre-select `needs author` items as draft comments, true), `maxComments` (30), `suggestions.maxLines` (10), optional `footer` |
 | `privateRepos` | Never named in posted text (issue-fix's `withoutPrivateReferences`, `src/prompts.ts:325`) |
 | `harnesses` | `reporter`, `questioner`, `answerer`, `report-checker`, `answer-checker`, `reviewer`, `verifier` ([§13.1](#131-roles)) |
@@ -162,6 +162,7 @@ meaning and parser (review-kit, [§14](#14-sharing-code-with-issue-fix)).
 | `review.md`, `report.json`, `qa.json`, draft | `.graphloom/review/`, ignored by its own `.gitignore` (`*`) | Kept out of the digest and every checkout, as issue-fix's [issues file](design-issue-fix-graph.md#where-it-lives-and-how-it-stays-out-of-the-change) is |
 | Per-PR ledger | Ref `refs/graphloom/pr-review/<owner>/<repo>/<N>` | Durable, versioned, CAS-updated ([§9.1](#91-where-the-ledger-lives)) |
 | Earlier heads | `…/<N>/heads/<sha>` | Needed for the deltas and the head mapping |
+| Sandbox images | The local Docker image store, by digest | Checked, and pulled if missing, in Fetch, never during a sandboxed job ([§12.2](#122-confinement)) |
 
 **Materialization** is one writer command job with a fixed argv,
 `git -c core.hooksPath=/dev/null checkout --no-overlay <head> -- .`, run with
@@ -181,14 +182,14 @@ generation's evidence holds a `--decline review-layer`.
 | Fetch | `head-checked-out` | The worktree holds exactly the head's tree, its base is the merge base, and no repository code ran to produce it | `checkout-command-v1` | `head-tree` |
 | Fetch | `prior-ledger` | The PR's ledger was read, or recorded absent, and the delta scope follows from it | command report | `review-scope` |
 | Report | `change-report` | Every template section is present, with cited items or an explicit "None". Every citation is inside the PR's diff. Every changed file and every detector fact is cited. No item carries a severity, finding or verdict (the contract has no such field) | `change-report-v1`, `report-write` | `change-report` |
-| Report | `measurements` | For every function the PR adds or modifies, complexity and nesting were measured by the pinned tools over the head tree, and coverage (on by default) and then mutation (on by default, at covered sites only) were measured in an untrusted-confined checkout, or carry a not-run reason (switched off by the profile, bwrap missing, a dependency not cached, no coverage). Every value recomputes from its evidence ([metrics §5](design-code-quality-metrics.md#5-records-and-recomputation)) | `graphloom-metrics-v1` command reports | `measurements` |
+| Report | `measurements` | For every function the PR adds or modifies, complexity and nesting were measured by the pinned tools over the head tree, and coverage (on by default) and then mutation (on by default, at covered sites only) were measured in the Docker sandbox over a checkout of the head, or carry a not-run reason (switched off by the profile, Docker unavailable, image missing, a dependency not cached, no coverage). Every value recomputes from its evidence ([metrics §5](design-code-quality-metrics.md#5-records-and-recomputation)) | `graphloom-metrics-v1` command reports | `measurements` |
 | Report | `claims-checked` | An independent `<report-checker>` judged every report item against the diff, and every item left is `supported` with matching quotes | `claim-check-v1` | `claims-checked` |
 | Questions | `questions-complete` | Every required question was asked ([§7.1](#71-questions)): purpose for each change item whose purpose the PR text does not state (a stated purpose recorded with a matching quote instead); `existing-equivalent`, `reuse-library` and `common-logic` for each new symbol; `missing-test` for each new or modified symbol with no mapped test; and one question per value over a metric limit and per surviving mutant. Every changed function has a measurement record or a not-run reason | `questions-v1`, search and test-map reports | `questions-complete` |
 | Answers | `answers-complete` | Every question has an answer from the `<answerer>`, with evidence (citations, the searches run with their results, quotes) and a status of `answered`, `partially answered` or `needs author`. Every "none found" answer lists its whole-repository searches and the dependency inventory. Every cited metric equals its record. Every proposal cites line ranges inside its function. `review.md`, `report.json` and `qa.json` are written | `answers-v1`, `qa-write` | `answers-complete` |
 | Answers | `answers-grounded` | An independent `<answer-checker>` re-checked every cited equivalent, library, duplicate and covering test, and every "none found" claim, against the trees. Every answer left is `supported` or `partial`. An answer still unsupported after one correction is `needs author`, with both statements recorded | `claim-check-v1` | `answers-grounded` |
 | Review | `code-review` | Unless report-only: the latest read-only `<reviewer>` pass reviewed every file in scope and gave a status for every open prior finding. The sweep saturated or ran four passes. Every finding has an independent `<verifier>` verdict | `pr-code-review-v1`, `finding-verification-v1` | `open-code-review` |
 | Review | `rule-checks` | Unless report-only: each profile rule was evaluated on the diff | from `pr-snapshot` | `rule-checks` |
-| Checks | `checks-ran` | Unless report-only: in an untrusted-confined checkout, each check ran to completion or recorded why not | `checkout-command-v1` | `checks-ran` |
+| Checks | `checks-ran` | Unless report-only: in the Docker sandbox over a checkout of the head, each check ran to completion or recorded why not | `checkout-command-v1` | `checks-ran` |
 | Draft | `draft-composed` | Unless report-only: every comment is anchored inside the PR diff at the head and comes from a confirmed finding, a rule, a check or a Q&A item the maintainer kept. There is no private reference or secret, and the recommended verdict follows the rule | `draft-write` | `draft` |
 | Draft | `ledger-recorded` | The ledger was advanced by CAS from the value Fetch read, with this head's report and Q&A and, unless report-only, every finding's state | command report | `ledger-cas` |
 | Publish | `publish-decided` | Report-only, or publication was declined, or exactly one review carrying this run's marker exists at the head with the approved verdict, body and comments, and the ledger records its ids | `operator-approval`, GitHub read-back | `published` |
@@ -377,12 +378,12 @@ The section follows a few rules:
 
 - Exceeding a limit is stated as a number beside its limit.
 - The static metrics always run. Coverage and mutation run **by default**,
-  BanyanDB included, always under `untrusted` confinement and always
-  coverage first
+  BanyanDB included, always in the Docker sandbox and always coverage
+  first
   ([metrics §4](design-code-quality-metrics.md#4-execution-and-confinement)).
   A profile can switch either off (`metrics.coverage: false`,
-  `metrics.mutation.enabled: false`). A missing bwrap or cache dependency
-  shows as `not run`, with its reason, per package.
+  `metrics.mutation.enabled: false`). Missing Docker, a missing image or an
+  uncached dependency shows as `not run`, with its reason, per package.
 - The `measurements` validator recomputes every value from its evidence
   ([metrics §5](design-code-quality-metrics.md#5-records-and-recomputation))
   before the section is written.
@@ -667,14 +668,15 @@ with one candidate per run, the reviewed head.
 
 ### 8.2 Checks
 
-Contributor code runs only in a `{ from: "candidate" }` checkout under
-`confinement: "untrusted"` ([§12.2](#122-confinement)): no network, no
-credentials, home hidden, dependencies from read-only caches only.
+Contributor code runs only in a `{ from: "candidate" }` checkout inside the
+Docker sandbox (`checks.sandbox`, [§12.2](#122-confinement)). The sandbox has
+no network, no credentials, no host home, limits on CPU, memory and
+processes, and dependencies from read-only caches only.
 
 - `cheap` commands run by default; `full` ones on `with full checks`.
 - A missing cached dependency means "not run", which is not a finding.
 - A failing check is a P1 finding with actor `check`.
-- Without bwrap, the job is refused.
+- Without Docker, the job is "not run". It never runs outside the sandbox.
 
 The BanyanDB profile ships with no `checks`; GitHub CI status is shown in the
 report.
@@ -764,8 +766,8 @@ Every reviewer pass gives them a `prior` status, with their thread
 | `drafted`, never published | carried into the next draft | as new |
 
 Status goes in the **review body** with thread links. REST review submission
-cannot reply in threads, and the single-review rule outweighs that
-([§19](#19-open-questions)).
+cannot reply in threads, and the single-review rule outweighs that.
+Replying in threads is deferred ([§19](#19-deferred-items)).
 
 **Never raised again:** `fixed`, `withdrawn`, `dismissed`,
 `dropped-by-maintainer` and `resolved-by-maintainer` are closed. A new comment
@@ -776,8 +778,10 @@ maintainer states never reopen.
 
 ### 9.4 Rounds
 
-A round is one reviewed head. From round `review.discoveryRounds + 1` on, new
-findings in scope are kept only at P0 and P1. Others become "Follow-ups".
+A round is one reviewed head. **Decided:** from round
+`review.discoveryRounds + 1` on (the fourth reviewed head with the default
+3), only new P0 and P1 findings in scope are posted. Other new findings
+become "Follow-ups" in the maintainer section.
 Q&A is not limited by rounds: every new symbol is always asked about and answered.
 
 ## 10. Draft format, edits, and comment style
@@ -921,40 +925,89 @@ request inside them is itself a fact to record. The report records it under
 
 ### 12.2 Confinement
 
+Contributor code runs in a **Docker sandbox**; the agents and the plugin's own
+tools run under bwrap.
+
 | Job | Confinement |
 |---|---|
-| Reporter, questioner, answerer, checkers, reviewer, verifier | `untrusted-read`: bwrap, root read-only, home replaced by a tmpfs except the agent's own state (`ownState`) and the dependency directories of the inventory (read-only), the masks above, network on (model API), minimal environment, no GitHub token |
-| Checks, coverage and mutation runs | `untrusted`: as above plus `--unshare-net`, `--clearenv` and resource limits (`metrics.limits`, defaults 8 GiB address space, 2 GiB per written file, the step's wall clock), writable only in the checkout and scratch |
-| Static metrics (`gometrics`, `tsmetrics`) | `untrusted`, read-only. They parse the head tree and execute none of it, so they run on every profile |
-| Materialize, searches, writes | Graph commands with fixed argv over pinned trees; no repository code runs |
+| Reporter, questioner, answerer, checkers, reviewer, verifier | `untrusted-read` (bwrap). The root filesystem is read-only. The home directory is replaced by a tmpfs, except the agent's own login state (`ownState`) and the inventory's dependency directories (read-only). The masks above apply, the environment is minimal, and there is no GitHub token. Network is on, because the agents need their CLI logins and their model APIs |
+| Static metrics (`gometrics`, `tsmetrics`) | bwrap with no network, read-only. They run the plugin's own parser over the head tree and execute none of it, so they always run, with or without Docker |
+| Checks, coverage, mutation: **everything that runs PR code** | `sandbox: docker` (below) |
+| Materialize, searches, writes | Graph commands with fixed argv over pinned trees. No repository code runs |
 | GitHub reads and writes | The sandboxed executor package |
 
-The runner already uses bwrap for supervisor jobs
-(`packages/runner/src/confine.ts`), but without network isolation, a hidden
-home, or graph-job opt-in. Those are generic additions
-([§15](#15-generic-platform-changes)). A runner that cannot confine refuses
-the job.
+**The Docker sandbox.** Each job that runs PR code is one `docker run`:
 
-**Contributor tests run by default.** Coverage and mutation execute the PR's
-own test code on the operator's machine for every run, under the `untrusted`
-confinement. Some risk remains after confinement, and the design accepts it:
+```sh
+docker run --rm --pull never --name graphloom-<run>-<op> --label graphloom.run=<run> \
+  --network none --cpus <cpus> --memory <mem> --memory-swap <mem> --pids-limit <pids> \
+  --read-only --tmpfs /tmp:size=<tmp> --user <uid>:<gid> \
+  --cap-drop ALL --security-opt no-new-privileges \
+  -v <checkout>:/work -v <run build cache>:/cache \
+  -v <GOMODCACHE>:/go/pkg/mod:ro --env HOME=/tmp --env GOFLAGS=-mod=readonly --env GOPROXY=off \
+  --env GOCACHE=/cache/go -w /work <image>@sha256:<digest> <argv>
+```
 
-- **Kernel or bwrap escape.** The confinement relies on user namespaces. A
-  kernel or bwrap vulnerability would let test code out.
-- **Readable files.** The root filesystem stays visible read-only (minus the
-  home directory). World-readable files elsewhere, such as `/etc` or other
-  checkouts outside `$HOME`, can be read. With no network, they can leave
-  only through the run's own output. Test output enters evidence bounded and
-  secret-scanned ([§12.3](#123-secrets)), and nothing is posted without
-  approval.
-- **Resource use.** Memory, file size and wall clock are limited. CPU and
-  process count are not, so a hostile test can slow the machine until its
-  wall clock ends.
+- **Limits are profile data.** `metrics.sandbox` and `checks.sandbox` each
+  hold `{ image, cpus, memory, pids, tmp, wallClockMs }`, with one image per
+  language, pinned by digest: `golang@sha256:…` for Go and `node@sha256:…` for
+  TypeScript. The defaults are 4 CPUs, 8 GiB of memory with no extra swap,
+  512 processes, a 1 GiB `/tmp` and the step's wall clock. The CPU, memory
+  and swap defaults are the limits issue-fix's banyandb-ql `bench-gates`
+  already uses (`docker run --rm --cpus=4 --memory=8g --memory-swap=8g`,
+  [`profiles/banyandb-ql.json`](../examples/plugins/issue-fix/profiles/banyandb-ql.json),
+  [benchmark gates](design-issue-fix-graph.md#the-measure-ql-profile-and-benchmark-gates)).
+- **Mounts.** Only two mounts are writable: the disposable
+  `{ from: "candidate" }` checkout and a per-run build-cache directory under
+  the run's scratch. The build cache is reused by the coverage and mutation
+  jobs of one run. Dependency inputs are mounted read-only: the Go module
+  cache, and for npm the operator's cache, installed inside the container
+  with `--offline --ignore-scripts`. P1 verifies an offline npm install from
+  a read-only cache; if npm needs a writable cache, it gets a per-run copy in
+  scratch. There is no host home directory and no other host path.
+- **Environment.** Only the variables listed are passed, so no credentials
+  and no host environment reach the container.
+- **Images are pulled before the run, never during it.** Fetch checks each
+  profile image by digest (`docker image inspect`). A missing image is pulled
+  there, as `docker pull <image>@sha256:<digest>`, by the daemon; the digest
+  fixes its bytes. Every sandboxed job then runs with `--pull never`.
+  `graphloom check` and `graphloom doctor --task` report:
+  - whether the `docker` CLI is present;
+  - whether the daemon is reachable by the operator's user;
+  - whether each image is local, or Fetch will pull it.
+- **Lifecycle.** A job's wall clock, a run stop or a cancellation ends in
+  `docker kill`, by the container's name. A resume removes leftover
+  containers labelled with the run (`docker rm -f`) before it dispatches.
+- **Not run.** When Docker is missing, the daemon is unreachable, the image
+  pull failed, a dependency is not cached, or the image's toolchain is older
+  than `go.mod` asks for (`GOTOOLCHAIN=local`), the record says `not run`
+  with that reason. Static metrics still run. No job falls back to running
+  PR code outside the sandbox.
+
+**Contributor tests run by default.** Coverage and mutation run the PR's own
+test code on the operator's machine for every run, inside the Docker sandbox.
+CPU, memory, process count, filesystem and network are all contained. Some
+risk remains, and the design accepts it:
+
+- **Container or kernel escape.** Containers share the host kernel. Dropped
+  capabilities, `no-new-privileges`, Docker's default seccomp and AppArmor
+  profiles and a non-root user narrow this, but a kernel or runtime
+  vulnerability would still let test code out.
+- **Trust in the Docker daemon.** The daemon runs as root. An operator user
+  in the `docker` group is root-equivalent on the host. That is a
+  precondition of using Docker at all, not something GraphLoom adds.
+  Rootless Docker works unchanged and is the recommended setup.
+- **Image supply chain.** Images are pinned by digest in the profile, so a
+  re-tagged image cannot change a run. Changing a digest is a profile change
+  the operator reviews.
+- **Output.** Test output enters evidence bounded and secret-scanned
+  ([§12.3](#123-secrets)). The container sees only the checkout and the
+  read-only dependency caches, so it holds no host secret to leak, and
+  nothing is posted without approval.
 
 A profile that does not accept this sets `metrics.coverage: false`, which also
-stops mutation. An operator can do the same for one run by naming a profile
-copy with it off. The report then states `not run (coverage disabled by the
-profile)`.
+stops mutation, and leaves `checks` out. The report then says `not run
+(coverage disabled by the profile)`.
 
 ### 12.3 Secrets
 
@@ -1083,7 +1136,8 @@ schema name enters the controller, SDK or CLI.
 |---|---|---|
 | Task field `base: <commit>` | `packages/controller/src/intake.ts`, task parsing, `inspect` | Pinned after `git rev-parse --verify <base>^{commit}`. Absent means `HEAD` |
 | GitHub reads | `executors/github`: `list-pull-files`, `list-pull-commits`, `list-pull-reviews`, `list-pull-review-comments`, `list-review-threads` (GraphQL resolution and outdated state), `list-check-runs` | The same pagination and `complete` contract as today. Served by the stand-in (`src/rehearsal/github-standin.ts`) and `testing/fake-github.ts` |
-| `JobSpec.confinement: "untrusted-read" \| "untrusted"` with `mask` and read-only `binds` | `packages/sdk/src/types.ts` (`JobSpec`, line 419), `packages/runner/src/confine.ts` | Network isolation, hidden home with `ownState` holes, a cleared environment, masks. Refused without bwrap. A definition flag `untrustedWorkspace` applies the masks to supervisor jobs |
+| `JobSpec.confinement` kind `bwrap`: `{ kind: "bwrap", network, mask, binds }` | `packages/sdk/src/types.ts` (`JobSpec`, line 419), `packages/runner/src/confine.ts` | For agents and static tools: a hidden home with `ownState` holes, masks, read-only binds, network on or off. Refused without bwrap. A definition flag `untrustedWorkspace` applies the masks to supervisor jobs |
+| `JobSpec.confinement` kind `docker`: `{ kind: "docker", image, cpus, memory, pids, tmp, wallClockMs, writable, readOnly, env }` | `packages/sdk/src/types.ts`; a new `packages/runner/src/sandbox-docker.ts`; `graphloom doctor` and `check` probes (CLI, daemon, image by digest) | A generic, plugin-neutral option for any graph command job that runs untrusted code. The runner builds the `docker run` of [§12.2](#122-confinement) from the data, refuses an image without a digest, always passes `--pull never`, labels the container with the run, and kills it by name on stop. issue-fix's `bench-gates` could move onto it |
 | Approvals | `GraphDefinition.approvals`, `resume --approve/--decline`, `operator-approval` evidence, write admission by `approvalRef`, `github.writeTokenEnv`, `inspect` | [§11](#11-approvals). Rehearsal scenarios gain `operator: { approve?, decline? }` |
 
 `create-pull-review` and `create-issue-comment` need no change.
@@ -1108,6 +1162,7 @@ recorded, so they do not decide CI verdicts.
 | `missing-test` | A new exported function that no test references; the questioner omits the question | The plugin adds the required `missing-test` question; the answerer's whole-repository search finds no test → `needs author`, naming the package's `_test.go` |
 | `complex-function` | A new function with 12 decision points and nesting 4; `metrics.coverage: false` | A Measurements row (12, 4, CRAP with coverage unknown as the upper bound, mutation not run with its reason); `split-function` answered with a proposal (line ranges, names new to the package, one responsibility each) and `complexity-coverage` entries; the `measurements` validator rejects a canned record whose `complexity` disagrees with its `decisions` |
 | `crap-upper-bound` | A modified function with complexity 6 in a package that does not build offline | Coverage `unknown` with that reason; CRAP 42 shown as the upper bound; no `complexity-coverage` question; mutation `not run: no coverage` |
+| `sandbox-unavailable` | Docker missing (the stand-in's probe fails) with coverage and mutation on | Static metrics run; coverage and mutation `not run: docker unavailable`; CRAP shown as the upper bound; no PR code runs anywhere; the run still succeeds |
 | `surviving-mutant` | Defaults (coverage and mutation on); canned coverage and mutation reports with one survivor (`n > max` → `n <= max`) at a covered site, one killed mutant, one uncovered site | The survivor in Measurements; one `weak-test` entry `needs author`, naming `path:line`, the operator and the mutant, with the proposed assertion; score 1/2; the uncovered site recorded `not-run (uncovered)`, not run |
 | `happy` | `Review` mode; findings, one `needs author` item, one `answered` split proposal that the maintainer promotes in the draft; publish approved | One `create-pull-review` carrying the findings, the pre-selected item and the promoted proposal, and no other Q&A item; ledger `published` |
 | `no-findings` | `Review` mode; nothing raised | Draft `comment` with `recommended: approve`; never `APPROVE` |
@@ -1148,8 +1203,8 @@ Hard rules, in addition to the shared ones:
 ## 18. Phases
 
 **P1 ships the whole first layer: report, questions and answers, with the
-static measurements and coverage.** Coverage is on by default, and the
-`untrusted` confinement it needs is already a P1 deliverable. Mutation is
+static measurements and coverage.** Coverage is on by default, and the Docker
+sandbox it needs is a P1 deliverable. Mutation is
 also on by default, but it needs its own tools (`gomutate`, StrykerJS). It
 lands in P2, which changes no stage. Until then the report says
 `not run: mutation not available in this version`. The first layer comes as
@@ -1166,20 +1221,20 @@ writes.
 
 | Phase | Scope | Verification |
 |---|---|---|
-| P1 | **First layer, report-only.** Fetch, workspace, report, questions, answers, static measurements. Generic: `base:`, the GitHub reads, `untrusted-read` and `untrusted` confinement with read-only dependency mounts. pr-review 0.1 with stages Fetch, Report, Questions and Answers; it succeeds after Answers. Also: detectors; symbol packs (Go, TypeScript); whole-repository search; similarity; the dependency inventory; test mapping; the reporter, questioner and answerer with both checkers; `gometrics` and `tsmetrics`; confined coverage (`go test -coverprofile`, c8) with measured CRAP and the unknown-coverage rule; `review.md`, `report.json`, `qa.json`; the ledger; the BanyanDB mapping; the skill's start and combined-file steps | Intake, executor contract and confinement tests. Unit tests per detector, symbol pattern (new vs modified, receivers, generics), query builder, similarity scorer, test-map rule and validator rule. `gometrics` matches gocyclo on a fixture corpus. Nesting and changed-function scope fixtures. The `measurements` validator rejects each kind of inconsistent record. Real-Git tests: searches read the base commit only, and materialization runs no hook or filter. Ledger CAS race. Rehearsal `report`, `report-corrections`, `answer-finds-existing-helper`, `answer-no-library-with-whole-repo-search`, `answer-checker-contradicts`, `needs-author-purpose`, `purpose-stated`, `missing-test`, `complex-function`, `crap-upper-bound`, `injection`. Under real bwrap: a coverage run with no network, the home directory hidden and resource limits; coverage attributed by line range; a test that tries the network or `$HOME` fails inside the run and is reported as a fact. One live run on a real BanyanDB PR, read by the user, with recall of new symbols, tests and existing equivalents checked by hand |
+| P1 | **First layer, report-only.** Fetch, workspace, report, questions, answers, static measurements. Generic: `base:`, the GitHub reads, `bwrap` confinement (agents, static tools) and the `docker` sandbox (coverage), image checks and pulls in Fetch, doctor and check probes. pr-review 0.1 with stages Fetch, Report, Questions and Answers; it succeeds after Answers. Also: detectors; symbol packs (Go, TypeScript); whole-repository search; similarity; the dependency inventory; test mapping; the reporter, questioner and answerer with both checkers; `gometrics` and `tsmetrics`; confined coverage (`go test -coverprofile`, c8) with measured CRAP and the unknown-coverage rule; `review.md`, `report.json`, `qa.json`; the ledger; the BanyanDB mapping; the skill's start and combined-file steps | Intake, executor contract and confinement tests. Unit tests per detector, symbol pattern (new vs modified, receivers, generics), query builder, similarity scorer, test-map rule and validator rule. `gometrics` matches gocyclo on a fixture corpus. Nesting and changed-function scope fixtures. The `measurements` validator rejects each kind of inconsistent record. Real-Git tests: searches read the base commit only, and materialization runs no hook or filter. Ledger CAS race. Rehearsal `report`, `report-corrections`, `answer-finds-existing-helper`, `answer-no-library-with-whole-repo-search`, `answer-checker-contradicts`, `needs-author-purpose`, `purpose-stated`, `missing-test`, `complex-function`, `crap-upper-bound`, `sandbox-unavailable`, `injection`. Under real Docker: a coverage run with `--network none`, where a test that dials out fails; the limits enforced (a fork bomb stops at `--pids-limit`, an allocation at `--memory`, the host unaffected); only the checkout and the build cache writable, the root read-only, no host home, `--pull never`; the container killed by name on stop and removed on resume; coverage attributed by line range. One live run on a real BanyanDB PR, read by the user, with recall of new symbols, tests and existing equivalents checked by hand |
 | P2 | **Deltas and mutation.** Head mapping, then the since-last sections for the report and the Q&A, with question closure. Mutation testing (`gomutate`, StrykerJS) at covered sites, with `weak-test` questions | Real-Git fixtures for append, rebase, squash, base merge and missing objects; rehearsal `report-delta` and `surviving-mutant`; `gomutate` fixtures (one per inversion: `<`/`>=`, `>`/`<=`, `==`/`!=` and `true`/`false`, each direction; no other operator ever produced; overlay leaves the checkout unchanged, a compile-failing mutant is `invalid`, uncovered sites `not-run (uncovered)`, the budget cut-off records `not-run`); a StrykerJS run restricted to line ranges with the inversion-only allowlist (a non-inversion mutant fails the fixture); a live re-run after a contributor push |
 | P3 | review-kit extracted and vendored into issue-fix | issue-fix tests unchanged; `describe()` byte-identical for every shipped profile; drift test; `resume --update-plugin` from 0.16.0 |
 | P4 | **Review layer, local:** generic approvals (`review-layer`); Review, Checks (definition only), Draft, and Publish as a stop; `needs author` items pre-selected and other Q&A items promotable as draft comments; verdict rule; edits | Graph tests per requirement; anchor validation on real GitHub patches; secret and private-reference scans; report-only requirements pass on a decline; rehearsal `no-findings` and `happy` up to the stop |
 | P5 | **Publish:** write token binding, `publish-review`, read-back, optional `publish-report` | Controller tests: write refused without `approvalRef`, with a stale generation or past `maxDispatches`; token bound only under `--approve`; ambiguous POST reconciled; rehearsal `publish-refused`, `happy` to `succeeded`; a live publish on a user-chosen PR |
-| P6 | Review-layer checks (`checks-ran`), incremental review (prior findings, threads, never re-raise), measured budgets | Rehearsal `force-push`; `checks-ran` under real bwrap; budgets, coverage and mutation times recorded in `budgets.md` |
+| P6 | Review-layer checks (`checks-ran`), incremental review (prior findings, threads, never re-raise), measured budgets | Rehearsal `force-push`; `checks-ran` in the real Docker sandbox; budgets, coverage and mutation times recorded in `budgets.md` |
 
-## 19. Open questions
+## 19. Deferred items
 
-1. **Thread replies.** Earlier comments' status goes in the review body
-   ([§9.3](#93-re-checking-earlier-findings)). Should a later phase use
-   GitHub's multi-call pending-review flow to reply in the threads?
-2. **Discovery after round 3.** From the fourth reviewed head on, only P0 and
-   P1 findings in new code are posted ([§9.4](#94-rounds)). Is that right for
-   contributor PRs?
-3. **Sharing the ledger.** The ledger ref lives in one review clone. Do other
-   machines or maintainers need it, through a shared private remote?
+- **Thread replies.** The status of earlier comments goes in the review body
+  ([§9.3](#93-re-checking-earlier-findings)). Replying inside the threads
+  through GitHub's multi-call pending-review flow is deferred to a later
+  phase. It is not part of P1 to P6.
+
+No open questions remain. The round limit is decided ([§9.4](#94-rounds)).
+The ledger is local to the review clone ([§9.1](#91-where-the-ledger-lives)).
+GraphLoom is a local process, and the design has no cross-machine sharing.

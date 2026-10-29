@@ -79,8 +79,8 @@ function's own body, where a body with no control block has depth 0:
 ### 2.3 Coverage, `cov(m)`
 
 `cov(m)` is the fraction, from 0 to 1, of the function's executable statements
-that the tests of the touched packages executed, in an untrusted-confined
-checkout of the head.
+that the tests of the touched packages executed, in a checkout of the head
+inside the Docker sandbox (§4).
 
 - **Go:** `go test -coverprofile -covermode=set -coverpkg=<touched packages>
   <touched packages>`. A statement is covered when its coverprofile block is
@@ -91,8 +91,8 @@ checkout of the head.
   function's range, stated as line coverage in every record.
 
 When coverage was not measured, the record says `unknown` with the reason,
-for example "coverage disabled by the profile", "bwrap unavailable" or
-"package did not build offline". CRAP then uses `cov = 0`, stated as the
+for example "coverage disabled by the profile", "docker unavailable",
+"image not available" or "package did not build offline". CRAP then uses `cov = 0`, stated as the
 **upper bound**. A test that fails in the confined run does not void the
 coverage of the tests that ran. The failures are recorded as facts.
 
@@ -120,7 +120,7 @@ pr-review asks a question, and issue-fix applies a gate.
 Mutation testing applies **operator inversion**, the operator's rule
 ("把 > 改成 <=，把 true 改成 false"), to the changed functions only. Each
 operator site gives exactly one **mutant**, applied one at a time. Each mutant
-runs the tests of the touched packages in an untrusted-confined checkout.
+runs the tests of the touched packages in the Docker sandbox (§4).
 
 | Operator | Mutation (each direction) |
 |---|---|
@@ -198,12 +198,16 @@ Why these tools:
 
 | Measurement | Executes PR code? | Where it runs |
 |---|---|---|
-| Complexity, nesting | No. The tool parses only | A read-only command under `untrusted` confinement (no network), over the head tree. It always runs, on every profile |
-| Coverage, mutation | Yes: the PR's tests | Only in a `{ from: "candidate" }` checkout under `untrusted` confinement (no network, no credentials, home hidden, resource limits), with dependencies from the operator's read-only caches. Each has its own switch: `metrics.coverage` and `metrics.mutation.enabled`. The defaults are the graph's; pr-review turns both on |
+| Complexity, nesting | No. The plugin's tool parses only | A read-only bwrap command with no network, over the head tree. It always runs, on every profile, with or without Docker |
+| Coverage, mutation | Yes: the PR's tests | Only in the **Docker sandbox**: one `docker run` per job with `--network none`, `--cpus`, `--memory` (equal `--memory-swap`), `--pids-limit`, a read-only root, a sized tmpfs `/tmp`, the operator's uid and gid, `--cap-drop ALL`, `no-new-privileges`, `--pull never`, and an image pinned by digest. The candidate checkout and a per-run build cache are its only writable mounts. Dependency caches are mounted read-only, and no credentials, host environment or host home are passed. The limits are profile data (`metrics.sandbox`); its CPU and memory defaults are the ones the issue-fix banyandb-ql `bench-gates` command already uses. Each run has its own switch, `metrics.coverage` and `metrics.mutation.enabled`. The defaults are the graph's; pr-review turns both on |
 
-When a switch is off, bwrap is missing, or a dependency is not in the cache,
-the record says `not run` with the reason, and CRAP uses the upper bound
-(§2.4).
+Images are checked, and pulled by digest if missing, before the run's first
+sandboxed job, never during one. The full sandbox and its residual risks are
+specified in [pr-review §12.2](design-pr-review-graph.md#122-confinement).
+When a switch is off, Docker or its daemon is unavailable, the image is
+missing, or a dependency is not in the cache, the record says `not run` with
+the reason, and CRAP uses the upper bound (§2.4). PR code never runs outside
+the sandbox.
 
 **Ordering.** Coverage runs first, and mutation uses its result. Mutants are
 generated only at sites that the coverage run executed. A site no test
