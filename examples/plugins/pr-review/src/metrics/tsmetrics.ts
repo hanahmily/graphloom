@@ -156,7 +156,8 @@ export function analyzeTypeScript(file: string, source: string): MeasuredFunctio
   const walk = (node: ts.Node, scope: Scope, prefix: string[], path: Step[]): void => {
     if (isFunctionLike(node)) {
       const child = scopeFor(node, scope, prefix, glob);
-      ts.forEachChild(node, (c) => walk(c, child, [], []));
+      // Decorator expressions run in the enclosing scope, outside the range.
+      ts.forEachChild(node, (c) => (ts.isDecorator(c) ? walk(c, scope, prefix, path) : walk(c, child, [], [])));
       return;
     }
     const line = (pos: number): number => lineOf(pos);

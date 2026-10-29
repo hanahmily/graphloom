@@ -192,6 +192,12 @@ describe("tsmetrics functions, closures and names (§1)", () => {
     expect([f?.start, f?.end]).toEqual([5, 7]);
   });
 
+  it("attributes decorator expressions to the enclosing scope, not the method", () => {
+    const fns = measure("export class A {\n  @dec(flag ? 1 : 2)\n  m() {\n    return 1;\n  }\n}\n");
+    expect(kinds(fns.get("src/m.A.m"))).toEqual([]);
+    expect(fns.get("src/m.A.m")?.start).toBe(3);
+  });
+
   it("measures JavaScript and TSX files", () => {
     expect(measure("export function f(a) { return a || 1; }", "lib/x.js").get("lib/x.f")?.decisions).toHaveLength(1);
     expect(measure("export const C = () => <div>{1 && 2}</div>;", "ui/c.tsx").get("ui/c.C")?.decisions).toHaveLength(1);

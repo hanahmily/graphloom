@@ -119,7 +119,7 @@ function shapeErrors(d: MetricsDocument): string | undefined {
 function declaresFunction(language: Language, line: string, name: string): boolean {
   if (language === "go") return /\bfunc\b/.test(line);
   const last = name.slice(name.lastIndexOf(".") + 1).replace(/^(get|set) /, "");
-  return /\bfunction\b|=>|\(|\bconstructor\b|\b(?:export|default|declare|async|static|abstract|public|private|protected|override)\b|^\s*@/.test(line) || (last !== "" && line.includes(last));
+  return /\bfunction\b|=>|\(|\bconstructor\b|\b(?:export|default|declare|async|static|abstract|public|private|protected|override)\b|^\s*[@<]/.test(line) || (last !== "" && line.includes(last));
 }
 
 export function validateMetricsDocument(doc: unknown, options: ValidateOptions): ValidationResult {
