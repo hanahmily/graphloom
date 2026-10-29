@@ -29,7 +29,7 @@ import { onceStopHook, parseDuration, waitForRun, type StopNotice } from "./noti
 import { formatRunStats, loadRunStats } from "./stats.js";
 import { formatProgress, waitForProgress } from "./progress.js";
 import { formatSkillsStatus, installSkills, parseSkillAgent, removeSkills, skillsStatus, updateSkills, type SkillAgent } from "./skills.js";
-import { formatVersion, installRoot } from "./version.js";
+import { formatVersion, installRoot, versionInfo } from "./version.js";
 import { JOB_TIMEOUT_MS, killActiveChildren, runAutoUpdate } from "./auto-update.js";
 import {
   loadSupervisorConfig,
@@ -172,6 +172,7 @@ async function main(): Promise<void> {
     }
     const bundlePath = await resolveBundlePath(taskPath).catch(() => undefined);
     const report = await controller.run({
+      ...hostBuildField(),
       taskPath,
       install: self.record,
       onRunCreated: async ({ runId, stateDir }) => {
@@ -334,6 +335,7 @@ async function main(): Promise<void> {
     const report = await controller.resume({
       runRef,
       runner,
+      ...hostBuildField(),
       ...(stateRoot ? { stateRoot: path.resolve(stateRoot) } : {}),
       ...(args.includes("--update-plugin") ? { updatePlugin: true } : {}),
       ...(args.includes("--update-executors") || upgrade !== undefined ? { updateExecutors: true } : {}),
@@ -917,3 +919,17 @@ main().catch((err: unknown) => {
   process.exitCode = 1;
   return notifyCrash(err);
 });
+
+/**
+ * This GraphLoom build (product version and commit), recorded on a run so a final
+ * stop can tell a fix to GraphLoom itself from nothing changing. Unknown builds
+ * record nothing.
+ */
+function hostBuildField(): { hostBuild?: string } {
+  try {
+    const info = versionInfo(installRoot());
+    return { hostBuild: info.commit !== undefined && !info.version.includes(info.commit.slice(0, 7)) ? `${info.version} (${info.commit.slice(0, 7)})` : info.version };
+  } catch {
+    return {};
+  }
+}

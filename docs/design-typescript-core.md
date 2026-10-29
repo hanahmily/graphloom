@@ -812,7 +812,13 @@ controller never learns a plugin's reason strings. On resume:
 
 A stop's class is visible as `stopRetryable` in `run`/`resume` reports and
 `inspect`. What a final stop depends on is recorded when the run stops
-(`stopMark`); a run that stopped before stop marks existed has none and is
+(`stopMark`): the plugin and executors, the active version, the workspace
+change, the budgets, and the GraphLoom build that ran it (product version and
+commit, `hostBuild`, passed by the CLI on `run` and `resume`). A fix to
+GraphLoom itself, such as its runner's confinement, is therefore a change: a
+resume on a different build runs the run again and records "GraphLoom changed
+from X to Y" as the remedy. A mark from before builds were recorded counts as an
+unrecorded build. A run that stopped before stop marks existed has none and is
 retried, as before. A class and mark belong to the stop reason they were recorded
 for: a resume sets them aside, so a new stop it records (a preflight `pin
 mismatch`) is classified on its own, and restores them only when it holds the

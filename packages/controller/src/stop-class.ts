@@ -85,6 +85,7 @@ export function stopMarkOf(state: DurableRunState, candidateDigest: string | und
     entryDigest: state.intake.bundle.entryDigest,
     ...(candidateDigest !== undefined ? { candidateDigest } : {}),
     budgets: { ...state.budgets },
+    ...(state.hostBuild !== undefined ? { hostBuild: state.hostBuild } : {}),
   };
 }
 
@@ -96,6 +97,12 @@ export function changeSinceStop(mark: StopMark, now: { pluginUpdated: boolean; e
   if (now.mark.activeVersion !== mark.activeVersion) return `the active version changed from ${mark.activeVersion} to ${now.mark.activeVersion}`;
   if (now.mark.manifestDigest !== mark.manifestDigest || now.mark.entryDigest !== mark.entryDigest) return "the plugin bundle changed";
   if (now.mark.candidateDigest !== mark.candidateDigest) return "the workspace change differs from the one the run stopped on";
+  // A fix to GraphLoom itself (runner, confinement, controller) is not a plugin or
+  // executor change, but a stop may depend on it. A mark from before builds were
+  // recorded counts as unknown, so the first build-aware resume may run again.
+  if (now.mark.hostBuild !== undefined && now.mark.hostBuild !== mark.hostBuild) {
+    return `GraphLoom changed from ${mark.hostBuild ?? "an unrecorded build"} to ${now.mark.hostBuild}`;
+  }
   for (const key of BUDGET_KEYS) {
     const before = mark.budgets[key];
     const after = now.mark.budgets[key];
@@ -105,7 +112,7 @@ export function changeSinceStop(mark: StopMark, now: { pluginUpdated: boolean; e
 }
 
 export const FINAL_STOP_HELD_REMEDY =
-  "kept stopped on the same blocker: nothing the stop depends on (plugin, executors, active version, workspace change, budgets) changed since";
+  "kept stopped on the same blocker: nothing the stop depends on (plugin, executors, active version, workspace change, budgets, GraphLoom build) changed since";
 
 export type ResumeDecision =
   /** Run again: the stop was retryable, answered by the resume, or something it depends on changed. */
