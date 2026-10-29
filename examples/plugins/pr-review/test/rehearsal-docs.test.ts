@@ -9,14 +9,14 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { formatHunkFile, validateMetricsDocument, type Hunks } from "../src/metrics/index.js";
 import { DOCS } from "../src/rehearsal-docs.js";
-import { NEW_HEAD_FILES, SYNC_CHANGED } from "../src/rehearsal-fixtures.js";
+import { NEW_HEAD_FILES, STREAM_CHANGED, STREAM_PATH, SYNC_CHANGED } from "../src/rehearsal-fixtures.js";
 
 const toolDir = fileURLToPath(new URL("../tools/gometrics", import.meta.url));
 const docsFile = fileURLToPath(new URL("../src/rehearsal-docs.ts", import.meta.url));
 const hasGo = spawnSync("go", ["version"], { encoding: "utf8" }).status === 0;
 const goIt = hasGo ? it : it.skip;
 
-const hunksOf = (p: string, text: string): Hunks => new Map([[p, p === "pkg/offline/sync.go" ? [{ start: SYNC_CHANGED.start, end: SYNC_CHANGED.end }] : [{ start: 1, end: text.split("\n").length - 1 }]]]);
+const hunksOf = (p: string, text: string): Hunks => new Map([[p, p === "pkg/offline/sync.go" ? [{ start: SYNC_CHANGED.start, end: SYNC_CHANGED.end }] : p === STREAM_PATH ? STREAM_CHANGED.map((r) => ({ ...r })) : [{ start: 1, end: text.split("\n").length - 1 }]]]);
 
 /** What gometrics prints for the fixtures, run over a temporary head tree. */
 function fresh(): Record<string, unknown> {

@@ -58,8 +58,8 @@ import {
 import { commandRuns, describeCommand, environmentOutput, outputTail, succeeded, validatorEvidence, type CommandRun } from "./evidence.js";
 import { LIMITS } from "./metrics/crap.js";
 import { CHANGE_REPORT_SCHEMA } from "./report.js";
-import { CLAIM_CHECK_SCHEMA } from "./claims.js";
-import { itemsOf, REPORTER_SCHEMA_NAME, REVISION_SCHEMA_NAME, reportFlow } from "./flow.js";
+import { CLAIM_CHECK_SCHEMA, claimTargets } from "./claims.js";
+import { REPORTER_SCHEMA_NAME, REVISION_SCHEMA_NAME, reportFlow } from "./flow.js";
 import { measurementState, metricsDiffCommand, staticCommand, type Batch } from "./measurements.js";
 import { coverageCommand, coverageConfinement, missingProbe, sandboxEnvironmentChecks, type CoveragePlan } from "./coverage.js";
 import { checkerInstruction, reporterInstruction } from "./prompts.js";
@@ -474,7 +474,7 @@ function report(ctx: Context, view: RunView): GraphDecision {
     case "supervise":
       return supervise({ reason: flow.reason, evidenceRefs: flow.refs }, "hand the unresolved report to the supervisor");
     case "reporter": {
-      const assignment = reporterInstruction({ pr, snapshot: analysis.snapshot, sections: analysis.sections, facts: analysis.facts, kind: flow.kind, feedback: flow.feedback });
+      const assignment = reporterInstruction({ pr, snapshot: analysis.snapshot, sections: analysis.sections, facts: analysis.facts, candidates: analysis.ctx.candidates ?? [], kind: flow.kind, feedback: flow.feedback });
       const from = flow.kind === "first" ? undefined : jobSession(view, REPORT_STAGE, REPORTER_JOB);
       const job = agentJob(ctx, view, { jobId: REPORTER_JOB, purpose: "diagnostic", instruction: "Write the change report", schema: flow.schema, harness: profile.roles.reporter, assignment, ...(from !== undefined ? { continueFrom: from } : {}) }, analysis.snapshot.files);
       if ("problem" in job) return refused(job);
@@ -482,7 +482,7 @@ function report(ctx: Context, view: RunView): GraphDecision {
       return dispatchAgent(view, job, why);
     }
     case "checker": {
-      const assignment = checkerInstruction({ pr, snapshot: analysis.snapshot, report: flow.report, items: itemsOf(flow.report, analysis.ctx), retry: flow.retry });
+      const assignment = checkerInstruction({ pr, snapshot: analysis.snapshot, report: flow.report, targets: claimTargets(flow.report, analysis.ctx), retry: flow.retry });
       const job = agentJob(ctx, view, { purpose: "review", instruction: "Check the report's claims against the diff", schema: CLAIM_CHECK_SCHEMA_NAME, harness: profile.roles["report-checker"], assignment }, analysis.snapshot.files);
       if ("problem" in job) return refused(job);
       return dispatchAgent(view, job, `check every report item with a fresh read-only ${harnessName(profile.roles["report-checker"])} session`);

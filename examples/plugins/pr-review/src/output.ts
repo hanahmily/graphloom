@@ -32,9 +32,11 @@ export function reportJson(i: OutputInput): string {
     commits: i.snapshot.commits.length,
     checks: i.snapshot.checks,
     facts: i.facts,
+    summary: i.final.summary,
     sections: i.final.sections,
     notes: i.final.notes,
     removed: i.final.removed,
+    removedParts: i.final.removedParts,
     measurements:
       m.state === "ready"
         ? { tools: m.coverage.runs.some((r) => r.ran) ? "static+coverage" : "static", coverage: coverageNotes(m.coverage), runs: m.coverage.runs, mutation: reasons.mutation, records: m.records }

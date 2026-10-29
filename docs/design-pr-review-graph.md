@@ -319,6 +319,34 @@ minimal extras:
 
 Each item gets a stable id (`R<n>`). The Q&A refers to items by it.
 
+**The report is analysis, not narration.** It has three layers, and the
+sections above hold only the second:
+
+1. **Summary**, first in the report. The **purpose** is `{ text, source,
+   quote }`: `source` is `stated` when the pull request's own title, body or
+   a commit message says why, with `quote` an excerpt that matches that text
+   (whitespace collapsed, at least 12 characters, as the Q&A's stated
+   purposes do), and `inferred` otherwise, with an empty quote, marked as
+   inferred wherever it is shown. The **overview** is two to four sentences
+   on the mechanism of the whole change.
+2. **Conceptual change items.** An item is one behavioral change, however
+   many places in however many files implement it: its `cites` list every
+   diff location involved. One mechanism is never split across items. A new
+   variable, the three places that set it, the place that increments it and
+   the branch that reads it are one item. The reporter analyses the change
+   and does not describe hunks one by one.
+3. **Lifecycle and behavior inside the item.** For every new or changed piece
+   of state (a field, counter, flag, cached value or accumulator) the item
+   has a `state` entry, and where behavior changes it has `behavior` rows
+   ([§6.4](#64-writing-and-checking)).
+
+Example of the difference. For a pull request that makes a write callback
+reply with an error when a batch stores nothing, narrating the diff gives
+four items: "declares `stored` and `firstErr`", "records `firstErr` on three
+failure paths", "increments `stored`" and "returns an error when
+`stored == 0`". The analysis is one item with the lifecycle of `stored` and of
+`firstErr` and a before/after table ([§6.6](#66-output)).
+
 ### 6.2 Profile mapping
 
 `report.sections` may retitle a section, give its repository meaning (text
@@ -353,32 +381,118 @@ Detectors aid recall and ground the report; they do not parse code. A
 detector cannot miss without leaving a trace, and a false match costs one item
 the checker rejects.
 
+**State candidates** are the deterministic trigger for the lifecycle analysis
+([§6.4](#64-writing-and-checking)). A scan of the added lines of non-test Go
+and TypeScript sources yields a candidate for:
+
+- an **accumulator**: a local declared in an added line (`x := …`,
+  `var x …`, `let x …`) that a later added line of the same file changes
+  (`x++`, `x += …`, `x = …`, `append(x, …)`, `x[k] = …`), leaving out `err`,
+  `ok`, `ctx`, one-letter names and declarations in a `for`/`if`/`switch`
+  header;
+- a **field**: an added Go struct field or TypeScript class property.
+
+Candidates are not facts: they route to no section and are not listed in an
+item's `facts`. They are handed to the reporter, and validation requires a
+`state` entry named for each in an item that cites the candidate's file. A
+candidate that is not real state still gets its entry, saying so in `initial`.
+A pull request in a language the scan does not know, or state it does not
+see, relies on the reporter's prompt and on the checker.
+
 ### 6.4 Writing and checking
 
 1. The **reporter** runs one read-only job (`change-report-v1`), confined
-   `untrusted-read`. It gets the template and meanings, the facts, the file
-   list with diffstat, and the PR text in untrusted blocks. For each section
-   it returns `none: true`, or items `{ text, cites: [{ path, side, lines? |
-   symbol? }], facts }`, plus `claims` and `notes`. Its prompt says: describe
-   what the code does, in the present tense, with no evaluation.
+   `untrusted-read`. It gets the template and meanings, the facts, the state
+   candidates ([§6.3](#63-detectors)), the file list with diffstat, and the PR
+   text in untrusted blocks. It returns:
+
+   ```text
+   purpose:  { text, source: "stated" | "inferred", quote }   quote "" when inferred
+   overview: text                                              2 to 4 sentences
+   sections: [{ id, none, items: [{
+       text,                                    one conceptual change
+       cites: [{ path, side, start, end, symbol }],            every location
+       facts: [fact id],
+       state: [{ name,
+                 scope,            "per call" | "per request/batch" | "per instance" | "global" | other text
+                 initial,
+                 transitions: [{ when, effect, cite }],
+                 reads:       [{ where, decision, cite }] }],
+       behavior: [{ case, before, after }] }] }]
+   notes:    [text]
+   ```
+
+   Every property is required (empty arrays where an item has no state or no
+   behavior change), and the contract has no other. Its prompt says:
+   analyse, do not narrate the diff; one item per conceptual change; do not
+   split one mechanism across items; give every new or changed piece of state
+   its lifecycle (each transition and each read the diff shows, in the order
+   they happen, none left out and none invented); give a before/after row for
+   each case whose behavior differs, and for a case that deliberately stays as
+   it was when a reader would expect it to change; describe what the code does,
+   in the present tense, with no evaluation.
 2. **Deterministic validation** ([§6.5](#65-deterministic-validation)).
    Failures go back as a correction listing every problem: at most two
    corrections, then the supervisor.
 3. The **report checker** runs on a harness different from the reporter's
    (`claim-check-v1`). It returns `supported` (with 1 to 3 quotes matched by
-   issue-fix's `quoteMatches`), `partial` or `unsupported` per item. It checks
-   claims only, never judges.
-4. `partial` and `unsupported` items go back to the reporter once. An item
-   still unsupported is removed and recorded in `report.json` under `removed`.
+   issue-fix's `quoteMatches`), `partial` or `unsupported` per **claim**. It
+   checks claims only, never judges. The claims are:
+
+   | Claim id | What the checker judges | Quotes |
+   |---|---|---|
+   | `purpose` | when stated, that the text says what the quote says (the quote itself is matched against the PR text by code); when inferred, that the diff supports it | none when stated, else required |
+   | `overview` | consistent with the diff and with the items: no mechanism no item has, none an item contradicts | required |
+   | `R3` | the item's text against its cited diff | required, from the cited files |
+   | `R3.s1` | the entry's name, scope and initial value | required, from the files its steps cite |
+   | `R3.s1.t2` | the transition's condition (`when`) is the one the code has at the cited line, and its effect is what the line does | required, from the cited file |
+   | `R3.s1.r1` | the code at the cited line decides what `decision` says, from this state | required, from the cited file |
+   | `R3.b1` | `before` is what the base code does in that case, `after` what the head code does | required, any changed file |
+
+   The checker also says, in the note of an entry's verdict, when the diff
+   shows a transition or a read the entry leaves out.
+4. `partial` and `unsupported` claims go back to the reporter once. A claim
+   still unsupported is handled by what it is, and recorded in `report.json`
+   (`removed`, `removedParts`) and in `review.md` ("Removed by the claim
+   check"):
+   - an **item** is removed whole, and its parts with it;
+   - a **lifecycle entry** is dropped whole, with the item kept: if its
+     name, scope or initial value, or any one of its transitions or reads, is
+     unsupported, half a lifecycle would mislead more than none;
+   - a **behavior row** is dropped, with the item and its other rows kept;
+   - the **purpose** or the **overview** is not shown; the summary says the
+     claim check could not support it, with the reason.
+
    Plugin code then lists any file that became uncited in `other` as "changed
    (+a −d lines); not summarised", so coverage holds without trusting a model.
+   Removing a lifecycle entry does not re-trigger the state check below: the
+   removal is the recorded outcome.
 
 ### 6.5 Deterministic validation
 
 - **Sections:** every template section is present, `none` or with items. A
   section that is `none` while a detector fact routes to it fails.
+- **Summary:** the purpose and the overview are present and bounded (400 and
+  900 characters). A `stated` purpose's quote matches the PR's title, body or
+  a commit message, whitespace collapsed; an `inferred` one has no quote.
 - **Citations:** paths are PR files, line ranges lie in the file's hunks on
-  the given side, and symbols appear in the file's patch.
+  the given side, and symbols appear in the file's patch. A file with patch
+  text is cited by lines: `0`/`0` and a symbol alone are refused, so that
+  every citation renders as `path:line` or `path:start-end`. Only a file with
+  no patch text (binary, pure rename) is cited as a whole, and renders as
+  `path`. The rendering resolves what plugin-written items leave without lines
+  (a fallback for an uncited file, a whole-file fact) from the patch: a file as
+  a whole to its changed lines, never to a bare `path:`.
+- **State:** every state candidate ([§6.3](#63-detectors)) has an entry named
+  for it in an item that cites its file. Each entry has a name, a scope, an
+  initial value and at least one transition or read; at most 6 entries per
+  item and 8 transitions and 8 reads per entry; each text at most 240
+  characters. Every transition and read cites lines inside a hunk of the
+  diff, context lines included. The head file's unchanged lines outside the
+  hunks are not citable, because the validators see the patches, not the
+  files: a read site the diff does not show is described in the item's text.
+- **Behavior:** at most 8 rows per item, each with a case, a before and an
+  after.
 - **Coverage:** every changed file (renames under both names, deletions
   included) is cited by at least one item.
 - **Facts:** every detector fact is cited by an item of its section.
@@ -408,17 +522,47 @@ Contents: Report · Measurements · Q&A (2 items need the author)
 # Report
 14 files, +612 −88. Commits: 5. GitHub checks at head: 9 passed, 1 pending.
 
-## Database / storage schema changes
-- R1. Adds field `retention_days` (int32) to message `Group` — api/proto/banyandb/common/v1/common.proto:88
+## Summary
+**Purpose** (stated: "replies with the first error when nothing was stored"): A write batch whose events all fail was acknowledged as a success; the callback now replies with the first error in that case.
+**Overview:** Rev counts the events it stores and remembers the first failure among its three failure paths. After the batch is flushed, a batch that stored nothing and failed at least once is answered with an INTERNAL_ERROR carrying that error and the original message ID. A batch that stored anything keeps the success reply.
 
-## Scheduled jobs, cron, background workers
+## Database / storage schema changes
 - None
+
+## Every feature added or modified
+- R1. A write batch that stores nothing is now answered with the first failure instead of a success: Rev counts the events it stores and keeps the first error of its three failure paths, and the reply is decided from the two after the groups are flushed. — banyand/stream/write_standalone.go:12-13, banyand/stream/write_standalone.go:23-25, banyand/stream/write_standalone.go:30-32, banyand/stream/write_standalone.go:37-39, banyand/stream/write_standalone.go:42, banyand/stream/write_standalone.go:45-47
+  - State `stored` (per call); starts: 0, set at the start of the Rev call before the event loop
+    - when w.handle returns no error for an event → increments by one; every failure path continues before it (banyand/stream/write_standalone.go:42)
+    - read once, after the groups are flushed: stored == 0 && firstErr != nil switches the reply from success to an INTERNAL_ERROR carrying firstErr (banyand/stream/write_standalone.go:45)
+  - State `firstErr` (per call); starts: nil, declared at the start of the Rev call
+    - when proto.Unmarshal of a []byte event fails → firstErr = the error, only while firstErr is still nil (banyand/stream/write_standalone.go:24)
+    - when an event has an unsupported type → firstErr = errUnsupportedEvent, only while firstErr is still nil (banyand/stream/write_standalone.go:31)
+    - when w.handle returns an error → firstErr = the error, only while firstErr is still nil (banyand/stream/write_standalone.go:38)
+    - read once, after the groups are flushed: stored == 0 && firstErr != nil switches the reply from success to an INTERNAL_ERROR carrying firstErr (banyand/stream/write_standalone.go:45)
+  - Behavior:
+
+    | Case | Before | After |
+    |---|---|---|
+    | every event of the batch fails | the empty success reply | an INTERNAL_ERROR reply with the original message ID and the first error |
+    | some events are stored and some fail | the empty success reply | the empty success reply (unchanged) |
+    | flushing the groups fails after events were stored | logged; the empty success reply | logged; the empty success reply (unchanged) |
+
+## Other changes
+- R2. Adds a changelog entry for the fix. — CHANGES.md:14
 …
 # Measurements
 …
 # Q&A
 …
 ````
+
+(The example is the `state-lifecycle` rehearsal scenario, a change modelled on
+the first live report, [apache/skywalking-banyandb#1443](https://github.com/apache/skywalking-banyandb/pull/1443),
+whose first report narrated it hunk by hunk as six items.) The report shows
+the lifecycle as a compact block under its item and the before/after as a
+small table, and a claim check removal as a "Removed by the claim check" line
+under the item. `report.json` carries `summary` (`purpose`, `overview`, each
+null when removed), the items' `state` and `behavior`, and `removedParts`.
 
 `review.md` is local. From the publish phase on, its Report and Measurements
 parts can optionally be posted as a PR comment through their own approval,
@@ -1701,6 +1845,7 @@ recorded, so they do not decide CI verdicts.
 |---|---|---|
 | `report` | A PR adds a proto field, a flag, a Go module and a cron schedule, and deletes a file; `--decline review-layer` | `succeeded`; each fact cited in its section; empty sections say None; zero GitHub writes |
 | `report-corrections` | The reporter misses a file, returns an item with a `severity` property, and cites outside the diff; one item is unsupported | Corrections name all three (the extra property is refused by the contract); the item is removed and its file lands in `other` |
+| `state-lifecycle` | A change modelled on live PR #1443: a write callback declares `stored` and `firstErr`, sets `firstErr` on three failure paths, increments `stored`, and replies with an error when nothing was stored; plus a changelog line | One item in `features` (not one per hunk) citing every location by line range, with the lifecycle of `stored` (initial 0, one transition, one read) and of `firstErr` (initial nil, three transitions, one read), a three-row before/after table and a stated purpose; the changelog entry in `other`; a claim check that finds one transition unsupported drops that entry only, keeps the item, and records it |
 | `report-delta` | Seeded ledger with a report at L; rebased with one new commit | A since-L section with that commit's facts and items, then the full report |
 | `answer-finds-existing-helper` | The PR adds `ParseTTL`; the base has `ParseDuration`, outside any path the PR touches | `existing-equivalent` answered with `ParseDuration`'s `path:line`, its call sites and the search; checker `supported`; status `answered`, not posted |
 | `answer-no-library-with-whole-repo-search` | The PR adds a back-off helper; no declared dependency or internal package provides one | `reuse-library` answered "none found", listing the name, signature and token searches over the whole base tree and every go.mod entry with its source status; checker `supported` |

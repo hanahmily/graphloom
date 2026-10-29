@@ -66,7 +66,7 @@ export function qaJson(i: QaInput): string {
 
 function evidenceLine(a: FinalAnswer): string {
   const parts: string[] = [];
-  if (a.citations.length > 0) parts.push(`cites ${a.citations.map((c) => `${c.tree === "base" ? "" : `${c.tree} `}\`${c.path}:${c.start === c.end ? c.start : `${c.start}-${c.end}`}\`${c.quote.trim() !== "" ? ` "${short(oneLine(c.quote), 70)}"` : ""}`).join(", ")}`);
+  if (a.citations.length > 0) parts.push(`cites ${a.citations.map((c) => `${c.tree === "base" ? "" : `${c.tree} `}\`${c.path}${c.start < 1 ? "" : c.start === c.end ? `:${c.start}` : `:${c.start}-${c.end}`}\`${c.quote.trim() !== "" ? ` "${short(oneLine(c.quote), 70)}"` : ""}`).join(", ")}`);
   if (a.searches.length > 0) parts.push(`searches ${a.searches.map((s) => `\`${short(oneLine(s.pattern), 80)}\` (${s.scope}) → ${s.hits} hit${s.hits === 1 ? "" : "s"}`).join("; ")}`);
   if (a.inventory.length > 0) parts.push(`inventory ${a.inventory.map((d) => `${d.name}@${d.version}`).join(", ")}`);
   if (a.metrics.length > 0) parts.push(`metrics ${a.metrics.map((m) => `${m.function} (${m.path}) ${m.name} ${m.value}`).join(", ")}`);

@@ -3,6 +3,8 @@
 
 import type { EvidenceRecord } from "@graphloom/sdk";
 import { detectFacts, type Fact } from "./detectors.js";
+import { pinnedTexts } from "./questions.js";
+import { detectStateCandidates } from "./statecandidates.js";
 import { READS, readResult, snapshotState, type Snapshot } from "./snapshot.js";
 import type { Profile } from "./profile.js";
 import type { ReportContext } from "./report.js";
@@ -39,5 +41,5 @@ export function analyze(evidence: readonly EvidenceRecord[], profile: Profile, p
   if (s.state === "incompatible") return s;
   const sections = reporterSections(profile);
   const facts = detectFacts(s.snapshot.files, profile);
-  return { state: "ready", analysis: { snapshot: s.snapshot, sections, facts, ctx: { sections, files: s.snapshot.files, facts } } };
+  return { state: "ready", analysis: { snapshot: s.snapshot, sections, facts, ctx: { sections, files: s.snapshot.files, facts, pinned: pinnedTexts(s.snapshot.pull, s.snapshot.commits), candidates: detectStateCandidates(s.snapshot.files) } } };
 }
