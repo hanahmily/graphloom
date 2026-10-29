@@ -302,6 +302,32 @@ describe("graphloom task new: dry runs, overwrites and refusals", () => {
     expect(text).toContain("Report at ${headSha}.");
   }, 60_000);
 
+  it("refuses a symbolic fetch destination, and a generated link whose parent leaves --out, before anything is written", async () => {
+    const w = await worldWithMain();
+    await stubBundle(w.out, "stub");
+    // A destination that is a symbolic ref to a branch: a fetch would move the branch.
+    await w.repo.git("branch", "victim");
+    const victim = await w.repo.git("rev-parse", "victim");
+    await w.repo.git("symbolic-ref", `${NS}/7/head`, "refs/heads/victim");
+    const symbolic = await run({ graph: "stub", args: ["plan", fetchPlan(w)], repo: w.repo.path, out: w.out });
+    expect(symbolic.code).toBe(2);
+    expect(symbolic.errors.join("\n")).toMatch(/is a symbolic ref/);
+    expect(await w.repo.git("rev-parse", "victim")).toBe(victim);
+    await w.repo.git("symbolic-ref", "--delete", `${NS}/7/head`);
+    // The task directory's plugins/ is a link out of --out: the bundle link would be written, and --force would delete, outside.
+    const elsewhere = path.join(w.dir, "elsewhere");
+    await mkdir(path.join(elsewhere, "stub"), { recursive: true });
+    await mkdir(path.join(w.out, "t"), { recursive: true });
+    await symlink(elsewhere, path.join(w.out, "t", "plugins"));
+    for (const force of [false, true]) {
+      const escaped = await run({ graph: "stub", args: ["plan", fetchPlan(w)], repo: w.repo.path, out: w.out, force });
+      expect(escaped.code).toBe(2);
+      expect(escaped.errors.join("\n")).toMatch(/symbolic link that leaves --out/);
+    }
+    expect(await stat(path.join(elsewhere, "stub")).catch(() => undefined)).toBeDefined();
+    expect(await w.repo.git("for-each-ref", "--format=%(refname)", "refs/graphloom")).toBe("");
+  }, 60_000);
+
   it("refuses to replace an existing task before any step runs, and replaces it with --force", async () => {
     const w = await worldWithMain();
     await stubBundle(w.out, "stub");

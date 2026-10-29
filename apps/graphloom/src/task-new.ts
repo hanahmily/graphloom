@@ -290,7 +290,7 @@ async function run(options: TaskNewOptions, out: (line: string) => void): Promis
   const repoField = await place(taskDir, await realpath(repo.top), "repo", links);
   const configField = profileFile !== undefined ? await place(taskDir, await realpath(profileFile), "profile.json", links) : undefined;
   if (path.resolve(taskDir) !== path.resolve(outDir)) links.push({ path: path.join(taskDir, "plugins", graph), target: await realpath(loaded.bundle) });
-  await checkLinks(links, options.force === true);
+  await checkLinks(links, outDir, options.force === true);
 
   out(`plan: ${plan.summary}`);
   if (options.dryRun === true) {
@@ -376,6 +376,10 @@ async function execute(step: TaskPlanStep, graph: string, repo: { top: string; r
       const remote = await httpsRemote(step.remote, repo.remotes);
       const into = sub(step.intoRef);
       await checkRef(into);
+      // A fetch writes through a symbolic ref, so a destination that is one could move a branch outside the namespace.
+      if ((await git(repo.top, env, ["symbolic-ref", "--quiet", into]).catch(() => "")).trim() !== "") {
+        throw new Refused(`${into} is a symbolic ref; a fetch would write through it, so it is refused (remove it with git update-ref -d --no-deref ${into})`);
+      }
       await git(repo.top, env, [
         "-c", "protocol.allow=never",
         "-c", "protocol.https.allow=always",
@@ -475,8 +479,12 @@ async function linkConflict(link: Link, force: boolean): Promise<"same" | "repla
   return "replace";
 }
 
-async function checkLinks(links: Link[], force: boolean): Promise<void> {
-  for (const link of links) await linkConflict(link, force);
+async function checkLinks(links: Link[], outDir: string, force: boolean): Promise<void> {
+  for (const link of links) {
+    // A link's parent that is itself a link out of --out would carry the write, and any `--force` removal, outside it.
+    if (!(await realUnder(outDir, path.dirname(link.path)))) throw new Refused(`${link.path} would be written through a symbolic link that leaves --out`);
+    await linkConflict(link, force);
+  }
 }
 
 async function applyLinks(links: Link[], force: boolean): Promise<string[]> {
@@ -486,7 +494,8 @@ async function applyLinks(links: Link[], force: boolean): Promise<string[]> {
     if (state === "same") continue;
     if (state === "replace") await rm(link.path, { recursive: true, force: true });
     await mkdir(path.dirname(link.path), { recursive: true });
-    const rel = path.relative(path.dirname(link.path), link.target);
+    // Relative to where the parent really is, so the link resolves.
+    const rel = path.relative(await realpath(path.dirname(link.path)), link.target);
     await symlink(rel, link.path);
     lines.push(`linked ${link.path} -> ${rel}`);
   }
