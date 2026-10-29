@@ -76,7 +76,7 @@ describe("the report scenario, end to end through the graph", () => {
   it("records the ledger as absent, read-only", () => {
     const [job] = jobsOf(sim, "Read the pull request's ledger ref");
     expect(job).toMatchObject({ readOnly: true });
-    expect((job!.input as { commands: Array<{ argv: string[] }> }).commands[0]!.argv.at(-1)).toBe("refs/graphloom/pr-review/apache/skywalking-banyandb/7");
+    expect((job!.input as { commands: Array<{ argv: string[] }> }).commands[0]!.argv.at(-1)).toBe("refs/graphloom/pr-review/apache/skywalking-banyandb/7/ledger");
   });
 
   it("confines the reporter and the checker untrusted-read: bwrap with the network on and the repository's agent configuration masked", () => {

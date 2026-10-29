@@ -98,7 +98,7 @@ export function definitionFor(profile: Profile): GraphDefinition {
     },
     {
       id: REQUIREMENT_LEDGER,
-      statement: "The pull request's ledger ref (refs/graphloom/pr-review/<owner>/<repo>/<N>) was read, or recorded absent. This version reports the whole pull request either way.",
+      statement: "The pull request's ledger ref (refs/graphloom/pr-review/<owner>/<repo>/<N>/ledger) was read, or recorded absent. This version reports the whole pull request either way.",
       evidenceSchema: "command-report-v1",
     },
     {

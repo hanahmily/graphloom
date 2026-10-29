@@ -66,5 +66,5 @@ export const REVIEW_DIR = ".graphloom/review";
 export const REPORT_JSON = `${REVIEW_DIR}/report.json`;
 export const REVIEW_MD = `${REVIEW_DIR}/review.md`;
 
-/** `refs/graphloom/pr-review/<owner>/<repo>/<N>`: the per-PR ledger (design §9.1). */
-export const ledgerRef = (owner: string, repo: string, n: number): string => `refs/graphloom/pr-review/${owner}/${repo}/${n}`;
+/** `refs/graphloom/pr-review/<owner>/<repo>/<N>/ledger`: the per-PR ledger (design §9.1). */
+export const ledgerRef = (owner: string, repo: string, n: number): string => `refs/graphloom/pr-review/${owner}/${repo}/${n}/ledger`;

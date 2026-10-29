@@ -244,7 +244,10 @@ describe("the ledger read", () => {
     const command = ledgerReadCommand("apache", "skywalking-banyandb", 7);
     const read = () => spawnSync(command.argv[0]!, command.argv.slice(1), { cwd: dir, encoding: "utf8", env: { ...process.env, ...GIT_ENV } });
     expect(parseLedger(read().stdout)).toEqual({ present: false });
-    out(dir, ["update-ref", "refs/graphloom/pr-review/apache/skywalking-banyandb/7", sha]);
+    const R = "refs/graphloom/pr-review/apache/skywalking-banyandb/7";
+    for (const r of ["head", "base", `heads/${sha}`]) out(dir, ["update-ref", `${R}/${r}`, sha]);
+    expect(parseLedger(read().stdout)).toEqual({ present: false });
+    out(dir, ["update-ref", `${R}/ledger`, sha]);
     expect(parseLedger(read().stdout)).toEqual({ present: true, sha });
     expect(read().status).toBe(0);
   });
