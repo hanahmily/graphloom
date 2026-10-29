@@ -32,6 +32,8 @@ const MAX_WORKSPACES = 8;
 /** Argv elements a command may carry (64) less `sh`, the script, the count. */
 const MAX_SPEC_CHUNKS = 58;
 const MAX_REASON_CHARS = 240;
+/** The command executor accepts at most a day per command. */
+const MAX_COMMAND_TIMEOUT_MS = 24 * 60 * 60_000;
 
 export interface Sandbox {
   image: string | undefined;
@@ -389,7 +391,7 @@ export function measuredSpec(argv: readonly string[]): string | undefined {
 export function coverageCommand(c: PlannedCommand, pluginRoot: string, wallClockMs: number): EnvironmentCommand {
   const parts = writeChunks(c.spec);
   // The container's own wall clock ends it first; the executor's limit only has to outlast it.
-  return { id: c.id, argv: ["sh", `${pluginRoot}/tools/cover/${c.script}`, String(parts.length), ...parts], timeoutMs: wallClockMs + 60_000 };
+  return { id: c.id, argv: ["sh", `${pluginRoot}/tools/cover/${c.script}`, String(parts.length), ...parts], timeoutMs: Math.min(MAX_COMMAND_TIMEOUT_MS, wallClockMs + 60_000) };
 }
 
 /** The Docker confinement of a coverage job: the checkout and (Go) a build cache in the run's scratch are writable; the plugin and the dependency cache are read-only; only the variables below reach the container. */

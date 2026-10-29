@@ -214,6 +214,9 @@ describe("coverageState", () => {
     const cmd = coverageCommand(plan.commands[0]!, "/plugin", 1_800_000);
     expect(cmd.argv.slice(0, 2)).toEqual(["sh", "/plugin/tools/cover/go.sh"]);
     expect(measuredSpec(cmd.argv)).toBe(goSpec);
+    // The executor takes at most a day per command, whatever wall clock the profile allows.
+    expect(cmd.timeoutMs).toBe(1_860_000);
+    expect(coverageCommand(plan.commands[0]!, "/plugin", 24 * 60 * 60_000).timeoutMs).toBe(24 * 60 * 60_000);
   });
 
   it("attributes the report's blocks, keeps coverage when a test failed, and measures CRAP from it", () => {
