@@ -85,31 +85,33 @@ inside the Docker sandbox (§4).
 - **Go:** `go test -coverprofile -covermode=set -coverpkg=<touched packages>
   <touched packages>`. A statement is covered when its coverprofile block is
   covered. Blocks are attributed to a function by line range.
-- **TypeScript:** the repository's own vitest coverage, `vitest run
-  --coverage.enabled --coverage.reporter=json` in each touched workspace,
-  with the provider the repository configures (`coverage.provider`, vitest's
-  default `v8`, which means the `@vitest/coverage-v8` package). Beyond
-  those two flags the plugin adds three things and nothing else:
-  `--coverage.reportsDirectory` under the
-  job's temporary directory, so `coverage-final.json` and every other report
-  file land outside the checkout; `--coverage.include` naming the changed
-  non-test files, so a file no test loads is reported with zero hits rather
-  than left out; and a generated config (§3.1) that moves vitest's cache out of
-  the checkout. `coverage-final.json` is Istanbul's format, and `cov(m)` is
-  **statement coverage** over it: the statements of `statementMap` whose
-  start line falls in the function's line range, less those inside a nested
-  function literal, which belong to that literal; a statement is covered
-  when its `s` count is above zero. The v8 provider converts V8's byte
-  ranges into one Istanbul statement per executable source line, so with it
-  the statements are line-granular; the istanbul provider gives real
-  statements. Every TypeScript record's `coverage` names the provider, for
-  example `"provider": "v8"`.
-  - **No provider, no coverage.** GraphLoom never installs a coverage
-    provider. When the configured provider does not resolve from the
-    workspace (`@vitest/coverage-v8` or `@vitest/coverage-istanbul` absent
-    from the repository's dependencies), the tool does not start vitest,
-    which would otherwise offer to install it, and the record says `not run
-    (no vitest coverage provider in the repository)`.
+- **TypeScript:** the repository's own vitest, run as `vitest run
+  --coverage.enabled --coverage.provider=v8 --coverage.reporter=json` in
+  each touched workspace. The provider is
+  [`@vitest/coverage-v8`](https://vitest.dev/guide/coverage), the one
+  approved third-party metrics tool (§3), installed in the repository's own
+  dependencies at the repository's vitest major version. Beyond those flags
+  the plugin adds three things and nothing else:
+  `--coverage.reportsDirectory` under the job's temporary directory, so
+  `coverage-final.json` and every other report file land outside the
+  checkout; `--coverage.include` naming the changed non-test files, so a
+  file no test loads is reported with zero hits rather than left out; and a
+  generated config (§3.1) that moves vitest's cache out of the checkout.
+  `coverage-final.json` is Istanbul's format, and `cov(m)` is **statement
+  coverage** over it: the statements of `statementMap` whose start line
+  falls in the function's line range, less those inside a nested function
+  literal, which belong to that literal; a statement is covered when its `s`
+  count is above zero. `@vitest/coverage-v8` converts V8's byte ranges into
+  one Istanbul statement per executable source line, so these statements
+  are line-granular, and every TypeScript record's `coverage` says so
+  (`"unit": "line-statement", "provider": "@vitest/coverage-v8@<version>"`).
+  - **No provider, no coverage.** GraphLoom never installs the provider into
+    a measured repository, at run time or otherwise. When
+    `@vitest/coverage-v8` does not resolve from the workspace, the tool does
+    not start vitest, which would otherwise offer to install it, and the
+    record says `not run (no vitest coverage provider in the repository)`.
+    When its major version differs from the workspace's vitest, the record
+    says `not run (@vitest/coverage-v8 <x> does not match vitest <y>)`.
 
 When coverage was not measured, the record says `unknown` with the reason,
 for example "coverage disabled by the profile", "docker unavailable",
@@ -188,7 +190,7 @@ but the definitions above stay fixed.
 | Metric | Go | TypeScript |
 |---|---|---|
 | Complexity, nesting | `gometrics`: a small stdlib-only `go/ast` program in the plugin's source | `tsmetrics`: a Node script on the TypeScript compiler API |
-| Coverage | `go test -coverprofile` | The repository's own `vitest run --coverage` with its configured provider (§2.3) |
+| Coverage | `go test -coverprofile` | The repository's own `vitest run --coverage` with `@vitest/coverage-v8` from its own dependencies (§2.3) |
 | Mutation | `gomutate`: a stdlib-only `go/ast` mutator that implements exactly the §2.5 inversions and runs `go test -overlay` | `tsmutate`: a Node script on the TypeScript compiler API that implements exactly the §2.5 inversions and serves each mutant to the repository's own vitest through a Vite `load` hook (below) |
 
 `tsmetrics` and `tsmutate` load the `typescript` package that GraphLoom
@@ -198,12 +200,20 @@ already ships as a runtime dependency of the CLI
 
 **Third-party tools need the operator's approval.** The metrics toolchain is
 the plugin's own tools, the language toolchains (`go`, `node`), the
-`typescript` package GraphLoom already ships, and what the measured
-repository itself installs (its vitest and its coverage provider). Adding a
-third-party tool to it, such as a mutation framework, a coverage wrapper or a
-linter, is a design decision that needs the operator's approval, as adding a
-mutation operator is (§2.5). It is not a profile setting, and a design may
-not add one on its own.
+`typescript` package GraphLoom already ships, the measured repository's own
+test runner (vitest), and the approved third-party tools listed below.
+Adding a third-party tool to it, such as a mutation framework, a coverage
+wrapper or a linter, is a design decision that needs the operator's
+approval, as adding a mutation operator is (§2.5). It is not a profile
+setting, and a design may not add one on its own.
+
+Approved third-party metrics tools:
+
+| Tool | Approved for | Reason | Version rule |
+|---|---|---|---|
+| [`@vitest/coverage-v8`](https://github.com/vitest-dev/vitest/tree/main/packages/coverage-v8) | TypeScript coverage (§2.3) | Vitest's official coverage package, from the same project as vitest; it reads V8's own coverage inside the repository's test run, so nothing wraps or replaces the runner. Approved explicitly by the operator | Must match the repository's vitest major version. It is a dependency of the measured repository (GraphLoom's own included), never installed by GraphLoom into a target repository |
+
+It is the only one.
 
 ### 3.1 `tsmutate`
 
@@ -299,11 +309,12 @@ Both languages use the plugin's own tools, for the same reasons:
 - **Offline in the Docker sandbox.** The Go tools are stdlib-only, so `go
   run` builds them offline inside the confinement. The TypeScript tools need
   only Node, the shipped `typescript`, and the repository's own installed
-  vitest and coverage provider, so nothing is downloaded in a `--network
-  none` job.
-- **No third-party dependency.** Coverage is the language's own
-  (`go test -coverprofile`) or the repository's own (vitest's configured
-  provider), and nothing else is added to GraphLoom or to the repository.
+  vitest and `@vitest/coverage-v8`, so nothing is downloaded in a
+  `--network none` job.
+- **No unapproved third-party dependency.** Coverage is the language's own
+  (`go test -coverprofile`) or vitest's official provider, the one approved
+  tool, installed by the repository itself. No mutation framework or
+  coverage wrapper is added to GraphLoom or to a measured repository.
 
 gocyclo stays as a cross-check in `gometrics`' tests. A test fixture for each
 mutator fails if any mutant outside §2.5 appears.

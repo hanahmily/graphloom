@@ -1189,8 +1189,8 @@ taken on trust.
 |---|---|---|---|---|
 | `banyandb` | `gometrics` | `go test -coverprofile -covermode=set -coverpkg=<touched> <touched>` | `gomutate` (`go test -overlay`) | `golang@sha256:…` matching `go.mod` |
 | `banyandb-ql` | same | same | same | same |
-| `canopy` | `tsmetrics` | The repository's `vitest run --coverage` in each touched workspace (`web`, `server`); not gated today (below) | `tsmutate` with the workspace's vitest; not gated today | `node@sha256:…` matching `canopy/package.json` `engines.node` |
-| `graphloom` | `tsmetrics` | The repository's `vitest run --coverage` in each touched workspace; not gated today (below) | `tsmutate` with the workspace's vitest; not gated today | `node@sha256:…`, Node 22 |
+| `canopy` | `tsmetrics` | `vitest run --coverage` with `@vitest/coverage-v8` in each touched workspace (`web`, `server`); **off** until canopy declares the provider upstream (below) | `tsmutate` with the workspace's vitest; **off** with coverage | `node@sha256:…` matching `canopy/package.json` `engines.node` |
+| `graphloom` | `tsmetrics` | `vitest run --coverage` with `@vitest/coverage-v8` in each touched workspace; **on** from the GraphLoom release that adds the provider (below) | `tsmutate` with the workspace's vitest; **on** with coverage | `node@sha256:…`, Node 22 |
 
 **Static measurement** (`quality-metrics`) only parses and runs no repository
 code. It stays in the cheap job, under that job's confinement, on every
@@ -1262,37 +1262,52 @@ job's temporary directory
 ([§3.1](design-code-quality-metrics.md#31-tsmutate)), and coverage reports and
 vitest's cache are written there too.
 
-**A coverage provider is the repository's, never GraphLoom's.** Coverage
-needs the provider the repository's vitest config names (`@vitest/coverage-v8`
-by default) in the repository's own dependencies. GraphLoom does not install
-one. Neither canopy (`web` and `server`, vitest ^5.0.0) nor GraphLoom
-(vitest ^3) declares one today, so:
+**The coverage provider is the repository's, never installed by GraphLoom.**
+Coverage uses `@vitest/coverage-v8`, the one approved third-party metrics
+tool ([metrics §3](design-code-quality-metrics.md#3-tools)), from the
+repository's own dependencies at the repository's vitest major version.
+GraphLoom never installs it into a target repository, at run time or
+otherwise. Where it is missing, coverage is `not run (no vitest coverage
+provider in the repository)`, and the two gates cannot pass, so a profile
+whose repository lacks it ships them off:
 
-- the `canopy` and `graphloom` profiles ship with `crap.enabled: false` and
-  `mutation.enabled: false`, the reason `no vitest coverage provider in the
-  repository`, and `function-complexity` on;
-- the pull request's Quality section states both gates as "not gated" with
-  that reason;
-- once a repository adds a provider in its own change, enabling the two gates
-  is a profile change, and new runs get them.
+- **`graphloom`.** GraphLoom's implementation adds `@vitest/coverage-v8` as a
+  root `devDependency` at the version matching its vitest (^3) (Phase 1). The
+  `graphloom` profile turns `crap` and `mutation` on in the same release, so
+  they are on from the release that adds the provider.
+- **`canopy`.** Canopy's `web` and `server` workspaces use vitest ^5.0.0 and
+  declare no provider. Adding one is an upstream change to
+  apache/skywalking-banyandb that GraphLoom does not make on its own:
+  `@vitest/coverage-v8` at the version matching vitest 5 as a
+  `devDependency` in `canopy/web/package.json` and
+  `canopy/server/package.json`, with the updated lockfile. The operator may
+  file it as a follow-up. Until it lands, the `canopy` profile ships with
+  `crap.enabled: false` and `mutation.enabled: false`, the reason `no vitest
+  coverage provider in the repository`, and `function-complexity` on; the
+  pull request's Quality section states both gates as "not gated" with that
+  reason. Enabling them after it lands is a profile change, and new runs get
+  them.
 
 When a `vitest` profile enables `crap`, the `quality-tools` check (below)
-fails unless the configured provider resolves from every workspace the
-profile tests, so `graphloom check` reports a missing provider before the
-run rather than as an inconclusive gate during it.
+fails unless `@vitest/coverage-v8` resolves from every workspace the profile
+tests at that workspace's vitest major version, so `graphloom check` reports
+a missing or mismatched provider before the run rather than as an
+inconclusive gate during it.
 
 A run that changes a checkout file fails the clean-run rule like any check. A
 second environment check, `quality-tools`, resolves the plugin's tools and
 the shipped `typescript` the way `scripts/ocr-path.sh` resolves ocr, and, for
-a `vitest` profile with `crap` enabled, the repository's coverage provider.
+a `vitest` profile with `crap` enabled, the repository's
+`@vitest/coverage-v8`.
 It exists only when a gate is enabled.
 
 Every tool's version is recorded in the report: the plugin's tools carry the
 plugin version, and the report adds `go`, `node`, `typescript`, and the
-repository's vitest and coverage provider. The validators fail a report whose
+repository's vitest and `@vitest/coverage-v8`. The validators fail a report whose
 plugin tool or `typescript` version differs from the installed plugin's, so a
 host tool cannot silently change a gate. The repository's vitest and provider
-are recorded, not pinned, since they are the repository's choice.
+are recorded, not pinned by the plugin, since the repository pins them; a
+provider whose major differs from vitest's fails the report.
 
 ### Mutation time budget
 
@@ -1496,8 +1511,8 @@ legacy functions no worse than the base).
 
 Inherited functions are marked as such, with their base and head values. A
 gate disabled in the profile is stated as "not gated", with the reason when
-the profile gives one (the canopy and graphloom profiles' CRAP and mutation
-gates: no vitest coverage provider in the repository). The
+the profile gives one (the canopy profile's CRAP and mutation gates: no
+vitest coverage provider in the repository). The
 section never shows a number the validators did not recompute.
 
 ### Profile switches
@@ -1525,15 +1540,20 @@ never loosen them. A gate may be disabled; its requirement then does not
 exist. `mutation.enabled` needs `crap.enabled`, because mutation needs the
 coverage run. `sandbox.image` must carry a digest; `parseProfile` refuses a
 tag alone. All four shipped profiles enable `complexity` with the defaults
-and their own image. `banyandb` and `banyandb-ql` also enable `crap` and
-`mutation`; `canopy` and `graphloom` disable them until their repositories
-declare a vitest coverage provider
-([tools](#tools-per-profile-and-confinement)).
+and their own image. `banyandb`, `banyandb-ql` and `graphloom` also enable
+`crap` and `mutation` (`graphloom` from the release that adds
+`@vitest/coverage-v8`); `canopy` disables them until canopy declares the
+provider upstream ([tools](#tools-per-profile-and-confinement)).
 
 ### Rehearsal scenarios
 
 These are added to each profile's rehearsal, hand-written like
-`bench-gate-fails`, with real tool runs under `--commands run`:
+`bench-gate-fails`, with real tool runs under `--commands run`. A profile
+gets only the scenarios its enabled gates exercise: while canopy's CRAP and
+mutation gates are off, the `canopy` rehearsal gets
+`complex-function-refactored`, the complexity half of `legacy-no-worse`,
+and one scenario whose Quality section states the two gates as "not gated"
+with the reason.
 
 - **`complex-function-refactored`.** The first implementer pass writes a
   function of complexity 12 and nesting 4. The cheap job fails
@@ -1569,8 +1589,12 @@ These are added to each profile's rehearsal, hand-written like
    - `gometrics` and `gomutate`: stdlib Go, under `tools/` in the plugin.
    - `tsmetrics` and `tsmutate`: Node scripts on the shipped `typescript`,
      under `tools/` in the plugin.
-   - The vitest coverage step: provider resolution, the reporter, include
-     and cache flags, and statement attribution from `coverage-final.json`.
+   - The vitest coverage step: `@vitest/coverage-v8` resolution and its
+     major-version match, the reporter, include and cache flags, and
+     statement attribution from `coverage-final.json`.
+   - `@vitest/coverage-v8` added to GraphLoom's root `devDependencies` at the
+     version matching its vitest (^3), with the lockfile, and the `graphloom`
+     profile's `crap` and `mutation` gates turned on in the same release.
 
    The shared document's fixtures apply to both mutators: gocyclo agreement
    on a corpus, recomputation, the overlay leaving the checkout unchanged
@@ -1582,19 +1606,23 @@ These are added to each profile's rehearsal, hand-written like
    outside that set appears; literal types are never mutated; a module
    imported through two different specifiers is mutated for both. Coverage
    fixtures: statements attributed by line range from a checked-in
-   `coverage-final.json` from each provider (v8 and istanbul), with a nested
+   `coverage-final.json` from `@vitest/coverage-v8`, with a nested
    literal's statements excluded; an unloaded changed file reported at zero;
-   and a workspace without a provider reported `not run (no vitest coverage
-   provider in the repository)` with no vitest started.
+   a workspace without the provider reported `not run (no vitest coverage
+   provider in the repository)` and one with a mismatched major reported
+   `not run` with both versions, in both cases with no vitest started.
 
-   Two real-repository verifications, with no package added to either
-   repository or to GraphLoom:
-   - one real canopy test (`web` or `server`, vitest ^5): `tsmutate` given
-     that test's sites as covered (a test-only input in place of a coverage
-     report) kills one mutant and reports one survivor, and the checkout is
-     unchanged; coverage reports `not run (no vitest coverage provider in the
-     repository)`;
-   - the same on one GraphLoom workspace (vitest ^3).
+   Two real-repository verifications:
+   - one GraphLoom workspace (vitest ^3, with the provider added above):
+     coverage attributed from `coverage-final.json`, then `tsmutate` at the
+     covered sites kills one mutant and reports one survivor, and the
+     checkout is unchanged;
+   - one real canopy test (`web` or `server`, vitest ^5), with nothing added
+     to canopy: coverage reports `not run (no vitest coverage provider in the
+     repository)`, and `tsmutate` given that test's sites as covered (a
+     test-only input in place of a coverage report) kills one mutant and
+     reports one survivor with the checkout unchanged, so the vitest 5 path
+     is proven before the upstream provider lands.
 2. **Sandbox and gates.**
    - The generic `docker` confinement kind
      ([pr-review §15](design-pr-review-graph.md#15-generic-platform-changes)),
