@@ -97,8 +97,10 @@ describe("stop classification (§8)", () => {
   });
 
   it("counts a different GraphLoom build as a change, so a fix to GraphLoom itself lifts a final stop", () => {
-    const mark: StopMark = { activeVersion: "g@1", manifestDigest: "m", entryDigest: "e", budgets: { jobs: 3 }, hostBuild: "0.0.0-dev+967231e" };
-    const now = (hostBuild?: string) => ({ pluginUpdated: false, mark: { ...mark, ...(hostBuild !== undefined ? { hostBuild } : { hostBuild: undefined }) } });
+    const mark: StopMark = { activeVersion: "g@1", manifestDigest: "m", entryDigest: "e", budgets: { agentInvocations: 0, jobs: 3, decisions: 4, corrections: 0 }, hostBuild: "0.0.0-dev+967231e" };
+    const { hostBuild: _known, ...unknownBuild } = mark;
+    void _known;
+    const now = (hostBuild?: string): { pluginUpdated: boolean; mark: StopMark } => ({ pluginUpdated: false, mark: hostBuild !== undefined ? { ...mark, hostBuild } : unknownBuild });
     expect(changeSinceStop(mark, now("0.0.0-dev+967231e"))).toBeUndefined();
     expect(changeSinceStop(mark, now("0.0.0-dev+76dddd7"))).toBe("GraphLoom changed from 0.0.0-dev+967231e to 0.0.0-dev+76dddd7");
     // A caller that does not know its build changes nothing.
