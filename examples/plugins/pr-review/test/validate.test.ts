@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
 import {
+  analyzeTypeScript,
   parseHunkFile,
   runTsMetrics,
   validateMetricsDocument,
@@ -325,6 +326,53 @@ describe("validateMetricsDocument rejects inconsistent records (never corrects)"
     const added = runTsMetrics(dir, all, []);
     expect(added.records.map((x) => x.function)).toEqual(["c.f", "c.f.func1"]);
     expect(validateMetricsDocument(added, { ...opts, hunks: all })).toEqual({ ok: true, errors: [] });
+  });
+
+  it("returns an error, without iterating, for an absurd index range", () => {
+    const d = clone();
+    const entry = d.files[0]?.functions[1];
+    if (entry === undefined) throw new Error("no entry");
+    entry[2] = 1e100;
+    expect(messages(d).join("\n")).toMatch(/bad index entry/);
+  });
+
+  it("detects a function removed from both the index and the records", () => {
+    const d = clone();
+    const file = d.files[0];
+    if (file === undefined) throw new Error("no file");
+    file.functions = file.functions.filter((f) => f[0] !== "src/a.small");
+    d.records = d.records.filter((r) => r.function !== "src/a.small");
+    expect(check(d).ok).toBe(true); // nothing in the document alone shows the omission
+    const reindex = (p: string, _l: unknown, text: string) =>
+      analyzeTypeScript(p, text).map((f): [string, number, number] => [f.name, f.start, f.end]);
+    const r = validateMetricsDocument(d, { readFile: read, hunks, reindex });
+    expect(r.errors.map((e) => e.message)).toEqual(["function index differs from an independent index of the head file"]);
+  });
+
+  it("detects an omitted Go function by its column-0 declaration", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "gl-metrics-"));
+    writeFileSync(path.join(dir, "a.go"), "package a\n\nfunc A() {}\n\nfunc B() {\n\tprintln()\n}\n");
+    const h = parseHunkFile("a.go:5-7\n");
+    const omitted: MetricsDocument = {
+      schema: "graphloom-metrics-v1",
+      tool: "gometrics",
+      records: [],
+      files: [{ path: "a.go", language: "go", test: false, functions: [["a.A", 3, 3]] }],
+      skipped: [],
+    };
+    const r = validateMetricsDocument(omitted, { readFile: (p) => readFileSync(path.join(dir, p), "utf8"), hunks: h });
+    expect(r.errors.map((e) => e.message)).toEqual(["line 5 declares a function that is not indexed"]);
+  });
+
+  it("accepts a declaration whose modifiers sit on their own line", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "gl-metrics-"));
+    writeFileSync(path.join(dir, "m.ts"), "export\nfunction f() {\n  return 1;\n}\n");
+    const h = parseHunkFile("m.ts:1-4\n");
+    const r = runTsMetrics(dir, h, []);
+    expect(r.records.map((x) => x.startLine)).toEqual([1]);
+    expect(validateMetricsDocument(r, { readFile: (p) => readFileSync(path.join(dir, p), "utf8"), hunks: h }).ok).toBe(
+      true,
+    );
   });
 
   it("requires coverage when asked", () => {

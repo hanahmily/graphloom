@@ -33,6 +33,12 @@ export interface ValidateOptions {
   hunks: Hunks;
   /** The profile's `generated` globs. */
   generated?: readonly string[];
+  /**
+   * An independent function index of a head file (for example from a second
+   * run of the tool). When given, the document's index must equal it, so an
+   * omitted function cannot hide from scope recomputation.
+   */
+  reindex?: (path: string, language: Language, text: string) => FunctionIndexEntry[] | undefined;
   /** Reject records that carry no coverage and crap (later phases). Default false. */
   requireCoverage?: boolean;
 }
@@ -113,7 +119,7 @@ function shapeErrors(d: MetricsDocument): string | undefined {
 function declaresFunction(language: Language, line: string, name: string): boolean {
   if (language === "go") return /\bfunc\b/.test(line);
   const last = name.slice(name.lastIndexOf(".") + 1).replace(/^(get|set) /, "");
-  return /\bfunction\b|=>|\(|\bconstructor\b/.test(line) || (last !== "" && line.includes(last));
+  return /\bfunction\b|=>|\(|\bconstructor\b|\b(?:export|default|declare|async|static|abstract|public|private|protected|override)\b|^\s*@/.test(line) || (last !== "" && line.includes(last));
 }
 
 export function validateMetricsDocument(doc: unknown, options: ValidateOptions): ValidationResult {
@@ -166,7 +172,6 @@ export function validateMetricsDocument(doc: unknown, options: ValidateOptions):
 
   for (const file of d.files) {
     accounted.add(file.path);
-    indexByPath.set(file.path, file);
     const language = languageOf(file.path);
     const text = options.readFile(file.path);
     if (language === undefined || language !== file.language) {
@@ -184,16 +189,33 @@ export function validateMetricsDocument(doc: unknown, options: ValidateOptions):
     if (isGeneratedSource(file.path, language, text, globs)) fail("generated file is indexed as measured", file.path);
     if (file.test !== isTestPath(file.path)) fail("test flag does not match the path", file.path);
     const lines = text.split("\n");
+    // Only well-formed entries take part in scope recomputation.
+    const sane: FunctionIndexEntry[] = [];
     for (const entry of file.functions) {
       const [name, start, end] = entry;
       if (typeof name !== "string" || !isInt(start) || !isInt(end) || end < start || end > lines.length) {
         fail(`bad index entry ${JSON.stringify(entry)}`, file.path);
         continue;
       }
+      sane.push(entry);
       if (!declaresFunction(language, lines[start - 1] ?? "", name)) {
         fail(`indexed range starts on line ${start}, which does not declare a function`, file.path, name);
       }
     }
+    // The index must list every function. Go declarations start in column 0.
+    if (language === "go") {
+      const starts = new Set(sane.map((e) => e[1]));
+      lines.forEach((line, i) => {
+        if (/^func\b/.test(line) && !starts.has(i + 1)) {
+          fail(`line ${i + 1} declares a function that is not indexed`, file.path);
+        }
+      });
+    }
+    const independent = options.reindex?.(file.path, language, text);
+    if (independent !== undefined && JSON.stringify(independent) !== JSON.stringify(file.functions)) {
+      fail("function index differs from an independent index of the head file", file.path);
+    }
+    indexByPath.set(file.path, { ...file, functions: sane });
   }
 
   for (const path of options.hunks.keys()) {
@@ -203,7 +225,7 @@ export function validateMetricsDocument(doc: unknown, options: ValidateOptions):
   // Scope: the measured set equals the changed functions of the index.
   const key = (path: string, e: FunctionIndexEntry): string => `${path}\u0000${e[0]}\u0000${e[1]}\u0000${e[2]}`;
   const expected = new Map<string, "added" | "modified">();
-  for (const file of d.files) {
+  for (const file of indexByPath.values()) {
     const changed = changedLines(options.hunks.get(file.path));
     for (const entry of file.functions) {
       const change = classifyFunction(entry, file.functions, changed);
