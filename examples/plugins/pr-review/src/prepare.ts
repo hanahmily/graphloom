@@ -66,7 +66,8 @@ export function prepareTask(input: PrepareTaskInput): PrepareTaskReply {
   }
 
   // The repository's remote for the project, else the URL itself.
-  const url = new RegExp(`^https://github\\.com/${owner}/${repo}(?:\\.git)?/?$`, "i");
+  const literal = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const url = new RegExp(`^https://github\\.com/${literal(owner)}/${literal(repo)}(?:\\.git)?/?$`, "i");
   const remote = input.repo.remotes.find((r) => url.test(r.url))?.name ?? `https://github.com/${owner}/${repo}.git`;
 
   const R = `refs/graphloom/${GRAPH_ID}/${owner}/${repo}/${number}`;

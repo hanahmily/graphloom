@@ -101,6 +101,8 @@ export interface ExtractTurn {
   operatorCut?: true;
   /** The agent answer was cut to its limit or dropped to fit the bound. */
   answerCut?: true;
+  /** On the first turn kept: how many older turns were dropped whole to fit the bound. */
+  droppedBefore?: number;
 }
 
 export const EXTRACT_MAX_BYTES = 256 * 1024;
@@ -124,7 +126,7 @@ export function cutText(text: string, max: number): string {
 /**
  * The turn extract (at most 256 KiB): each operator message verbatim, up to 128 KiB in all, and each
  * answer cut to 4 KiB. Past the limit the oldest agent answers go first, then the oldest operator
- * messages; every cut is marked. Tool calls and results never appear.
+ * messages, then the oldest turns whole (`droppedBefore` on the first one kept); every cut is marked. Tool calls and results never appear.
  */
 export function turnExtract(turns: readonly Turn[]): ExtractTurn[] {
   const out: ExtractTurn[] = turns.map((t) => {
@@ -141,18 +143,35 @@ export function turnExtract(turns: readonly Turn[]): ExtractTurn[] {
     t.operatorCut = true;
     operatorBytes -= before - bytes(t.operator);
   }
-  const size = (): number => bytes(JSON.stringify(out));
-  for (let i = 0; i < out.length && size() > EXTRACT_MAX_BYTES; i += 1) {
+  // Running totals, so a long conversation is not serialized again for every cut: each turn's own size, plus the array's brackets and commas.
+  const sizeOf = (t: ExtractTurn): number => bytes(JSON.stringify(t));
+  const sizes = out.map(sizeOf);
+  let total = 2 + sizes.reduce((n, x) => n + x + 1, 0) - (sizes.length > 0 ? 1 : 0);
+  /** Replace a field with the cut marker when that makes the turn smaller (a marker never grows the extract). */
+  const cut = (i: number, field: "answer" | "operator"): void => {
     const t = out[i]!;
-    if (t.answer !== undefined) {
-      t.answer = CUT_MARK;
-      t.answerCut = true;
-    }
+    const text = t[field];
+    if (text === undefined || bytes(text) <= bytes(CUT_MARK)) return;
+    const next: ExtractTurn = { ...t, [field]: CUT_MARK, ...(field === "answer" ? { answerCut: true as const } : { operatorCut: true as const }) };
+    const size = sizeOf(next);
+    if (size >= sizes[i]!) return;
+    total -= sizes[i]! - size;
+    sizes[i] = size;
+    out[i] = next;
+  };
+  for (let i = 0; i < out.length && total > EXTRACT_MAX_BYTES; i += 1) cut(i, "answer");
+  for (let i = 0; i < out.length && total > EXTRACT_MAX_BYTES; i += 1) cut(i, "operator");
+  // Still over (very many short turns): the oldest turns go whole, and the first one kept says how many did.
+  let first = 0;
+  const room = EXTRACT_MAX_BYTES - 40;
+  while (first < out.length - 1 && total > room) {
+    total -= sizes[first]! + 1;
+    first += 1;
   }
-  for (let i = 0; i < out.length && size() > EXTRACT_MAX_BYTES; i += 1) {
-    const t = out[i]!;
-    t.operator = CUT_MARK;
-    t.operatorCut = true;
+  if (first > 0) {
+    const kept = out.slice(first);
+    kept[0] = { ...kept[0]!, droppedBefore: first };
+    return kept;
   }
   return out;
 }

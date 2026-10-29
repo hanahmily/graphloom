@@ -89,6 +89,16 @@ describe("transcript turns and the turn extract", () => {
     expect(Buffer.byteLength(JSON.stringify(long))).toBeLessThanOrEqual(EXTRACT_MAX_BYTES);
   });
 
+  it("holds the bound for very many short turns, dropping the oldest whole and saying how many", () => {
+    const turns = Array.from({ length: 7000 }, (_, i) => ({ user: `hello ${i}`, answer: "world" }));
+    const extract = turnExtract(turns);
+    expect(Buffer.byteLength(JSON.stringify(extract))).toBeLessThanOrEqual(EXTRACT_MAX_BYTES);
+    expect(extract.at(-1)!.operator).toBe("hello 6999");
+    expect(extract[0]!.droppedBefore).toBe(turns.length - extract.length);
+    expect(extract[0]!.droppedBefore).toBeGreaterThan(0);
+    expect(extract.slice(1).every((t) => t.droppedBefore === undefined)).toBe(true);
+  });
+
   it("cuts on a character boundary and marks the cut", () => {
     const text = "é".repeat(3000);
     const cut = cutText(text, 100);

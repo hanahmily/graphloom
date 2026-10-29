@@ -48,6 +48,14 @@ describe("prepareTask", () => {
     expect(withBranch.steps[1]).toMatchObject({ refspec: "refs/heads/develop" });
   });
 
+  it("matches a remote's URL literally: a dot in the repository name is not a wildcard", () => {
+    const profile = { name: "p", project: "org/foo.bar", environment: { checks: [] } };
+    const plan = prepareTask(input(["org/foo.bar#1"], { profile, repo: { remotes: [{ name: "wrong", url: "https://github.com/org/foo-bar.git" }, { name: "right", url: "https://github.com/org/foo.bar" }], head: "c".repeat(40) } })) as { steps: Array<Record<string, unknown>> };
+    expect(plan.steps[0]).toMatchObject({ remote: "right" });
+    const only = prepareTask(input(["org/foo.bar#1"], { profile, repo: { remotes: [{ name: "wrong", url: "https://github.com/org/foo-bar.git" }], head: "c".repeat(40) } })) as { steps: Array<Record<string, unknown>> };
+    expect(only.steps[0]).toMatchObject({ remote: "https://github.com/org/foo.bar.git" });
+  });
+
   it("refuses another project, a missing profile and malformed arguments, naming the problem", () => {
     const refused = (i: PrepareTaskInput): string => (prepareTask(i) as { refused: string }).refused;
     expect(refused(input(["other/repo#1"]))).toMatch(/not this profile's project \(apache\/skywalking-banyandb\)/);
