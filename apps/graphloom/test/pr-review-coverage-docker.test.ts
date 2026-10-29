@@ -493,6 +493,20 @@ describe("measured coverage, TypeScript, under real Docker", () => {
     expect(m.state.outcomes!.get(`src/math.ts\u0000src/math.classify\u00001`)).toMatchObject({ source: "measured", covered: 7, total: 9 });
   }, 300_000);
 
+  it.skipIf(!hasDocker || !hasNpm)("installs an independent nested project from its own lockfile, with no root package.json", async () => {
+    if (!ok) return;
+    const dir = path.join(tmp, "ts-nested");
+    await write(dir, { "frontend/package.json": `${JSON.stringify({ name: "fx", private: true, type: "module", devDependencies: { vitest: vitestVersion, "@vitest/coverage-v8": vitestVersion } })}\n`, "frontend/src/math.ts": MATH, "frontend/src/math.test.ts": TEST, ".gitignore": "node_modules\n" });
+    expect(spawnSync("npm", ["install", "--package-lock-only", "--offline", "--include=dev", "--ignore-scripts"], { cwd: path.join(dir, "frontend") }).status).toBe(0);
+    git(dir, "init", "-q");
+    git(dir, "add", "-A");
+    git(dir, "commit", "-q", "-m", "fixture");
+    const nested = { "frontend/src/math.ts": INDEX["src/math.ts"]! };
+    const m = await measure({ work: dir, scratch: path.join(tmp, "nested-scratch"), records: recordsOf(nested), index: new Map(Object.entries(nested)), files: [{ path: "frontend/src/math.ts", language: "typescript" }], profile: profileWith({ metrics: { generated: [], sandbox: { typescript: { image: tsImage, cpus: 2, memory: "2g", wallClockMs: 300_000 } } } }) });
+    expect(m.state.outcomes!.get("frontend/src/math.ts\u0000src/math.classify\u00001")).toMatchObject({ source: "measured", covered: 7, total: 9 });
+    expect(git(dir, "status", "--porcelain")).toBe("");
+  }, 300_000);
+
   it.skipIf(!hasDocker || !hasNpm)("does not start vitest, nor any container, when the repository declares no coverage provider", async () => {
     const dir = await fixture("ts-none", { name: "fx", private: true, devDependencies: { vitest: "3.2.7" } }, false);
     const m = await measure({ work: dir, scratch: path.join(tmp, "none-scratch"), records: recordsOf(INDEX), index: new Map(Object.entries(INDEX)), files, profile: profileWith({ metrics: { generated: [], sandbox: { typescript: { image: tsImage } } } }) });

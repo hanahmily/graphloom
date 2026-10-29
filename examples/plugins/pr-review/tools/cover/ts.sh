@@ -12,7 +12,8 @@
 # with the facts of the run, to $GRAPHLOOM_REPORT_FILE as graphloom-coverage-v1. A failing test does not void
 # coverage. The script never installs the provider into the repository's declarations: when the checkout has no
 # node_modules, it installs the repository's own locked dependencies with `--offline --ignore-scripts` from the
-# operator's npm cache (mounted read-only), into the checkout's ignored node_modules. Always exits 0 once it
+# operator's npm cache (mounted read-only), into the checkout's ignored node_modules, from the workspace's own
+# lockfile when it has one (an independent nested project) and else from the repository root's. Always exits 0 once it
 # has written a report; the report says what happened.
 
 set -u
@@ -38,8 +39,18 @@ say() { printf '%s\n' "$1" >> "$rep"; }
 : > "$rep"
 say "graphloom-coverage-v1 typescript"
 
+# Where the repository installs its dependencies: the workspace's own lockfile (an independent nested project)
+# when it has one, else the repository root's (an npm workspace, or none: then the workspace itself).
+if [ -f "$ws/package-lock.json" ]; then
+  ir="$ws"
+elif [ -f package-lock.json ]; then
+  ir=.
+else
+  ir="$ws"
+fi
+
 findbin() {
-  for c in "$ws/node_modules/.bin/vitest" "node_modules/.bin/vitest"; do
+  for c in "$ws/node_modules/.bin/vitest" "$ir/node_modules/.bin/vitest" "node_modules/.bin/vitest"; do
     if [ -x "$root/$c" ]; then
       printf '%s' "$root/$c"
       return 0
@@ -50,10 +61,10 @@ findbin() {
 
 bin=$(findbin)
 if [ -z "$bin" ]; then
-  if [ -f package-lock.json ]; then
-    npm ci --offline --ignore-scripts --include=dev --no-audit --no-fund > "$tmp/npm.out" 2>&1
+  if [ -f "$ir/package-lock.json" ]; then
+    (cd "$ir" && npm ci --offline --ignore-scripts --include=dev --no-audit --no-fund) > "$tmp/npm.out" 2>&1
   else
-    npm install --offline --ignore-scripts --include=dev --no-audit --no-fund --no-package-lock > "$tmp/npm.out" 2>&1
+    (cd "$ir" && npm install --offline --ignore-scripts --include=dev --no-audit --no-fund --no-package-lock) > "$tmp/npm.out" 2>&1
   fi
   rc=$?
   bin=$(findbin)
