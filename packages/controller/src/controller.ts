@@ -130,6 +130,12 @@ export interface SupervisorChoice {
 }
 
 export interface RunRequest {
+  /**
+   * The GraphLoom build running this controller (product version and commit, as
+   * `graphloom version` prints it). Recorded on the run; a final stop depends on
+   * it, so a resume on a different build may run again.
+   */
+  hostBuild?: string;
   taskPath: string;
   runner: Runner;
   /**
@@ -204,6 +210,12 @@ export interface RunRequest {
 }
 
 export interface ResumeRequest {
+  /**
+   * The GraphLoom build running this controller (product version and commit, as
+   * `graphloom version` prints it). Recorded on the run; a final stop depends on
+   * it, so a resume on a different build may run again.
+   */
+  hostBuild?: string;
   /**
    * The operator reconciled the job a harness usage limit cut off after possible effects:
    * the run's graph may run again. Without a supervisor, a resume refuses to otherwise.
@@ -471,7 +483,7 @@ export function createController(): Controller {
           stateRoot,
           sourceDirtyBefore,
         });
-        state = { ...state, stateFormat: CURRENT_STATE_FORMAT, ...(request.install !== undefined ? { install: { ...request.install } } : {}) };
+        state = { ...state, stateFormat: CURRENT_STATE_FORMAT, ...(request.install !== undefined ? { install: { ...request.install } } : {}), ...(request.hostBuild !== undefined ? { hostBuild: request.hostBuild } : {}) };
         // §7.4: the harness is pinned at intake.
         if (choice !== undefined) state = { ...state, supervisorSelection: selectionRecord(choice.selection, state) };
         const executorCatalog = await pinExecutorCatalog(request.runner);
@@ -762,7 +774,7 @@ export function createController(): Controller {
           pluginUpdated,
           executorsUpdated,
           ...(request.approval !== undefined ? { approval: `the operator recorded ${request.approval.decision === "approve" ? "an approval of" : "a decline of"} ${request.approval.approvalId}` } : {}),
-          mark: stopMarkOf(state, live),
+          mark: stopMarkOf(request.hostBuild !== undefined ? { ...state, hostBuild: request.hostBuild } : state, live),
         });
         if (!decided.run) {
           state = recordRemedy(
@@ -824,7 +836,7 @@ export function createController(): Controller {
         void _repeats;
         void _class;
         void _mark;
-        state = bumpGeneration({ ...resumed, status: "running" }, "resume");
+        state = bumpGeneration({ ...resumed, status: "running", ...(request.hostBuild !== undefined ? { hostBuild: request.hostBuild } : {}) }, "resume");
         state = {
           ...state,
           lastResume: resumeView(stopped, {

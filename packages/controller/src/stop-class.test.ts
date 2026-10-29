@@ -96,6 +96,24 @@ describe("stop classification (§8)", () => {
     expect(changeSinceStop(mark, now({ budgets: { ...mark.budgets, agentInvocations: 5 } }))).toBe("the agentInvocations budget was raised from 0 to 5");
   });
 
+  it("counts a different GraphLoom build as a change, so a fix to GraphLoom itself lifts a final stop", () => {
+    const mark: StopMark = { activeVersion: "g@1", manifestDigest: "m", entryDigest: "e", budgets: { agentInvocations: 0, jobs: 3, decisions: 4, corrections: 0 }, hostBuild: "0.0.0-dev+967231e" };
+    const { hostBuild: _known, ...unknownBuild } = mark;
+    void _known;
+    const now = (hostBuild?: string): { pluginUpdated: boolean; mark: StopMark } => ({ pluginUpdated: false, mark: hostBuild !== undefined ? { ...mark, hostBuild } : unknownBuild });
+    expect(changeSinceStop(mark, now("0.0.0-dev+967231e"))).toBeUndefined();
+    expect(changeSinceStop(mark, now("0.0.0-dev+76dddd7"))).toBe("GraphLoom changed from 0.0.0-dev+967231e to 0.0.0-dev+76dddd7");
+    // A caller that does not know its build changes nothing.
+    expect(changeSinceStop(mark, now())).toBeUndefined();
+    // A mark recorded before builds were: the first build-aware resume may run again.
+    const { hostBuild: _b, ...older } = mark;
+    void _b;
+    expect(changeSinceStop(older, { pluginUpdated: false, mark: { ...older, hostBuild: "0.1.0" } })).toBe("GraphLoom changed from an unrecorded build to 0.1.0");
+    const stopped = { status: "stopped", stopReason: "x", stopClass: { by: "supervisor", retryable: false }, stopMark: { ...mark, stopReason: "x" } } as unknown as DurableRunState;
+    expect(decideResume(stopped, { pluginUpdated: false, mark: { ...mark, stopReason: "x" } })).toMatchObject({ run: false });
+    expect(decideResume(stopped, { pluginUpdated: false, mark: { ...mark, stopReason: "x", hostBuild: "0.0.0-dev+76dddd7" } })).toMatchObject({ run: true, lifted: expect.stringMatching(/GraphLoom changed/) });
+  });
+
   it("retries a final stop recorded before stop marks existed", () => {
     const old = { status: "stopped", stopReason: "budgets exhausted" } as DurableRunState;
     expect(decideResume(old, { pluginUpdated: false, mark: {} as StopMark })).toMatchObject({ run: true, previous: { retryable: false } });
@@ -201,6 +219,29 @@ describe("resume after a stop (§8)", () => {
     const state = await loadRunState(done.stateDir);
     expect(state.remedies?.at(-1)?.remedy).toMatch(/^ran the graph again: the agentInvocations budget was raised/);
     expect(state.stopClass).toBeUndefined();
+  }, 60_000);
+
+  it("runs a final stop again when GraphLoom itself changed, and holds it on the same build", async () => {
+    const env = await makeEnv();
+    const controller = createController();
+    const first = graph([stop({ reason: "host fault", blocker: "the agent cannot start in its sandbox", retryable: false }, "stop")]);
+    const report = await controller.run({ taskPath: env.taskPath, plugin: first.plugin, validators, runner: agents(), stateRoot: env.stateRoot, runId: "host-build", hostBuild: "0.0.0-dev+967231e" });
+    expect(report).toMatchObject({ status: "stopped", stopRetryable: false });
+    expect((await loadRunState(report.stateDir)).stopMark).toMatchObject({ hostBuild: "0.0.0-dev+967231e" });
+
+    // The same build: held, the graph is not asked.
+    const idle = graph([]);
+    const held = await controller.resume({ runRef: report.stateDir, plugin: idle.plugin, validators, runner: agents(), hostBuild: "0.0.0-dev+967231e" });
+    expect(held.status).toBe("stopped");
+    expect(idle.views).toEqual([]);
+
+    // The operator fixed GraphLoom and rebuilt it: the graph runs again, and the run records the new build.
+    const resumed = graph(completes);
+    const done = await controller.resume({ runRef: report.stateDir, plugin: resumed.plugin, validators, runner: agents(), hostBuild: "0.0.0-dev+76dddd7" });
+    expect(done.status, `${done.stopReason}: ${done.blocker}`).toBe("succeeded");
+    const state = await loadRunState(done.stateDir);
+    expect(state.remedies?.at(-1)?.remedy).toBe("ran the graph again: GraphLoom changed from 0.0.0-dev+967231e to 0.0.0-dev+76dddd7");
+    expect(state.hostBuild).toBe("0.0.0-dev+76dddd7");
   }, 60_000);
 
   it("classifies a preflight failure during a resume on its own, so the next resume retries once it is fixed", async () => {

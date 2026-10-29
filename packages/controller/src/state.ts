@@ -235,6 +235,8 @@ export interface StopMark {
   /** The live workspace change when the run stopped. */
   candidateDigest?: string;
   budgets: IntakePin["budgets"];
+  /** The GraphLoom build that ran the run when it stopped (product version and commit). */
+  hostBuild?: string;
 }
 
 /**
@@ -299,6 +301,13 @@ export interface DurableRunState {
    * Absent in runs that stopped before it existed; they are retried.
    */
   stopMark?: StopMark;
+  /**
+   * The GraphLoom build (product version and commit) the controller ran on last,
+   * from `RunRequest.hostBuild` / `ResumeRequest.hostBuild`. A fix to GraphLoom
+   * itself (its runner, confinement or controller) is a change a final stop
+   * depends on.
+   */
+  hostBuild?: string;
   /** The operator's latest resume, shown to the graph as `RunView.resume`. Absent until the first resume. */
   lastResume?: import("@graphloom/sdk").ResumeView;
   generation: number;
