@@ -52,8 +52,8 @@ async function run(sandbox: BwrapSandbox, script: string, extra: { trustedWritab
     const child = spawn(launch.command, launch.args, { env: launch.env, cwd: work, stdio: ["ignore", "pipe", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
-    child.stdout.on("data", (c: Buffer) => (stdout += c.toString()));
-    child.stderr.on("data", (c: Buffer) => (stderr += c.toString()));
+    child.stdout!.on("data", (c: Buffer) => (stdout += c.toString()));
+    child.stderr!.on("data", (c: Buffer) => (stderr += c.toString()));
     child.on("close", (status) => resolve({ status, stdout, stderr }));
   });
 }

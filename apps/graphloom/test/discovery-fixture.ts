@@ -35,6 +35,7 @@ export function fakeDiscovery(options: FakeDiscoveryOptions = {}): Discovery {
       platform: { ok: true, actual: "linux-x64", expected: "linux-x64" },
       git: { path: "/usr/bin/git", version: "git version 2" },
       flock: { path: "/usr/bin/flock", version: "flock 2" },
+      docker: {},
       confinement: { ok: true },
       integrity: { status: "pass", detail: "a clone", problems: [] },
     },
