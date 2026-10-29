@@ -73,6 +73,18 @@ describe("github rehearsal stand-in (--offline, §4.6)", () => {
     expect(await readUnverifiedReads(scenarioFile)).toEqual([GET_ISSUE]);
   });
 
+  it("serves every pull request snapshot read from the scenario's recordings", async () => {
+    const ids = ["list-pull-files", "list-pull-commits", "list-pull-reviews", "list-pull-review-comments", "list-review-threads", "list-check-runs", "get-pull"].map((n) => `graphloom.github/${n}`);
+    const reads = Object.fromEntries(ids.map((id) => [id, [{ operation: id, items: [{ id }], page: { complete: true } }]]));
+    await withScenario({ results: {}, reads, expect: { status: "succeeded" } });
+    for (const id of ids) {
+      const out = (await executor(id).execute({}, ctx)) as { status: string; evidence: Array<{ payload: { github: { operation: string } } }> };
+      expect(out.status, id).toBe("ok");
+      expect(out.evidence[0]!.payload.github.operation).toBe(id);
+    }
+    expect(await readUnverifiedReads(scenarioFile)).toEqual([]);
+  });
+
   it("declares no write executor at all, regardless of the binding's own allowedEffects", () => {
     expect(executors.some((e) => e.id === "graphloom.github/create-issue-comment")).toBe(false);
     expect(executors.every((e) => e.effect === "read")).toBe(true);

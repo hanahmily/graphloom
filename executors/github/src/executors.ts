@@ -6,7 +6,9 @@ import { defineExecutor, jsonSchemaProblem, type ExecutorContext, type ExecutorI
 import {
   DEFAULT_GITHUB_API_URL,
   GITHUB_API_URL_ENV,
+  GitHubHttpError,
   GitHubRateLimitError,
+  githubGraphql,
   githubRequest,
   isAmbiguous,
   type GitHubClientOptions,
@@ -178,7 +180,7 @@ interface RawPull extends RawIssue {
   draft?: boolean;
   merged_at?: string | null;
   head?: { ref?: string; sha?: string; label?: string };
-  base?: { ref?: string };
+  base?: { ref?: string; sha?: string; label?: string };
 }
 
 interface RawContent {
@@ -915,6 +917,488 @@ export const listMilestones = defineExecutor<ListMilestonesInput, JobOutput>({
   },
 });
 
+// ---------------------------------------------------------------------------
+// Pull request snapshot reads (docs/design-pr-review-graph.md, `pr-snapshot`).
+// Same pagination and `complete` contract as the list reads above. GitHub caps
+// some of these lists whatever the page size; when a list reaches its cap the
+// result says so (`limitReached`) and is never `complete`.
+
+/** GitHub serves at most this many files of a pull request, however many pages are asked for. */
+const PULL_FILES_LIMIT = 3_000;
+/** GitHub serves at most this many commits of a pull request. */
+const PULL_COMMITS_LIMIT = 250;
+const SNAPSHOT_PER_PAGE = 100;
+
+interface PullPageInput extends NumberInput {
+  perPage?: number;
+  cursor?: string;
+  maxPages?: number;
+}
+
+interface CheckRunsInput extends RepoInput {
+  sha: string;
+  perPage?: number;
+  cursor?: string;
+  maxPages?: number;
+}
+
+interface ThreadsInput extends NumberInput {
+  perPage?: number;
+  cursor?: string;
+  maxPages?: number;
+}
+
+interface RawPullFile {
+  filename: string;
+  status?: string;
+  previous_filename?: string;
+  additions?: number;
+  deletions?: number;
+  changes?: number;
+  sha?: string;
+  patch?: string;
+}
+
+interface RawCommit {
+  sha: string;
+  html_url?: string;
+  parents?: { sha: string }[];
+  author?: { login?: string } | null;
+  commit?: {
+    message?: string;
+    author?: { name?: string; date?: string } | null;
+    committer?: { name?: string; date?: string } | null;
+  };
+}
+
+interface RawReviewFull extends RawReview {
+  submitted_at?: string | null;
+}
+
+interface RawReviewComment {
+  id: number;
+  pull_request_review_id?: number | null;
+  path?: string;
+  line?: number | null;
+  original_line?: number | null;
+  start_line?: number | null;
+  original_start_line?: number | null;
+  side?: string | null;
+  start_side?: string | null;
+  commit_id?: string;
+  original_commit_id?: string;
+  in_reply_to_id?: number | null;
+  body?: string | null;
+  html_url?: string;
+  created_at?: string;
+  user?: { login?: string } | null;
+}
+
+interface RawCheckRun {
+  id: number;
+  name: string;
+  status?: string;
+  conclusion?: string | null;
+  details_url?: string | null;
+  html_url?: string | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+  app?: { slug?: string } | null;
+}
+
+const SNAPSHOT_EXAMPLE = { number: 1, perPage: SNAPSHOT_PER_PAGE, maxPages: MAX_PAGES_PER_CALL };
+const pullSnapshotShape = () => readShape(["number"], { number: NUMBER, ...PAGE_PROPERTIES }, SNAPSHOT_EXAMPLE);
+const isPullPageInput = (v: unknown): v is PullPageInput => isRepoInput(v) && isPositiveInt(field(v, "number")) && isPageInput(v);
+
+/** Bound a free-text field and say so when it was cut, so a caller never mistakes a prefix for the whole. */
+function boundText(text: string | null | undefined): { text: string | null; truncated: boolean } {
+  const bounded = boundBody(text);
+  return { text: bounded, truncated: text !== null && text !== undefined && bounded !== text };
+}
+
+/** Apply a service-side cap to a finished page: a list that reached it cannot be called complete. */
+function capped<P extends { startCursor: string; perPage: number; complete: boolean }>(
+  page: P,
+  count: number,
+  limit: number,
+): P & { limitReached: boolean } {
+  const total = (Number.parseInt(page.startCursor, 10) - 1) * page.perPage + count;
+  const limitReached = page.complete && total >= limit;
+  return { ...page, complete: page.complete && !limitReached, limitReached };
+}
+
+function describeComplete(page: { complete: boolean; nextCursor: string | null; limitReached?: boolean }): string {
+  if (page.limitReached === true) return "incomplete: GitHub's list cap was reached";
+  return page.complete ? "complete" : `more after cursor ${page.nextCursor}`;
+}
+
+export const listPullFiles = defineExecutor<PullPageInput, JobOutput>({
+  id: "graphloom.github/list-pull-files",
+  version: GITHUB_EXECUTOR_VERSION,
+  effect: "read",
+  capabilities: ["network:github"],
+  ...pullSnapshotShape(),
+  inputSchema: isPullPageInput,
+  async execute(input, ctx) {
+    const query = { owner: input.owner, repo: input.repo, number: input.number, perPage: input.perPage ?? SNAPSHOT_PER_PAGE };
+    return runRead(ctx, "list-pull-files", query, async (client) => {
+      const params = new URLSearchParams({ per_page: String(query.perPage) });
+      const pages = await fetchPages<RawPullFile>(client, `/repos/${repoPath(input)}/pulls/${input.number}/files`, params, { ...input, perPage: query.perPage });
+      const items = pages.items.map((f) => ({
+        path: f.filename,
+        status: f.status ?? null,
+        previousPath: f.previous_filename ?? null,
+        additions: f.additions ?? 0,
+        deletions: f.deletions ?? 0,
+        sha: f.sha ?? null,
+        patch: f.patch ?? null,
+        // GitHub drops the patch of a diff it will not render; a binary file or a pure rename has no changed lines to show.
+        patchOmitted: f.patch === undefined && (f.additions ?? 0) + (f.deletions ?? 0) > 0,
+      }));
+      const page = capped(pages.page, items.length, PULL_FILES_LIMIT);
+      return {
+        summary: `listed ${items.length} files of #${input.number}; ${describeComplete(page)}`,
+        github: { items, page, rateLimit: pages.rateLimit },
+      };
+    });
+  },
+});
+
+export const listPullCommits = defineExecutor<PullPageInput, JobOutput>({
+  id: "graphloom.github/list-pull-commits",
+  version: GITHUB_EXECUTOR_VERSION,
+  effect: "read",
+  capabilities: ["network:github"],
+  ...pullSnapshotShape(),
+  inputSchema: isPullPageInput,
+  async execute(input, ctx) {
+    const query = { owner: input.owner, repo: input.repo, number: input.number, perPage: input.perPage ?? SNAPSHOT_PER_PAGE };
+    return runRead(ctx, "list-pull-commits", query, async (client) => {
+      const params = new URLSearchParams({ per_page: String(query.perPage) });
+      const pages = await fetchPages<RawCommit>(client, `/repos/${repoPath(input)}/pulls/${input.number}/commits`, params, { ...input, perPage: query.perPage });
+      const items = pages.items.map((c) => {
+        const message = boundText(c.commit?.message);
+        return {
+          sha: c.sha,
+          parents: (c.parents ?? []).map((p) => p.sha),
+          message: message.text,
+          messageTruncated: message.truncated,
+          author: c.author?.login ?? null,
+          authorName: c.commit?.author?.name ?? null,
+          authoredDate: c.commit?.author?.date ?? null,
+          committedDate: c.commit?.committer?.date ?? null,
+          url: c.html_url ?? null,
+        };
+      });
+      const page = capped(pages.page, items.length, PULL_COMMITS_LIMIT);
+      return {
+        summary: `listed ${items.length} commits of #${input.number}; ${describeComplete(page)}`,
+        github: { items, page, rateLimit: pages.rateLimit },
+      };
+    });
+  },
+});
+
+export const listPullReviews = defineExecutor<PullPageInput, JobOutput>({
+  id: "graphloom.github/list-pull-reviews",
+  version: GITHUB_EXECUTOR_VERSION,
+  effect: "read",
+  capabilities: ["network:github"],
+  ...pullSnapshotShape(),
+  inputSchema: isPullPageInput,
+  async execute(input, ctx) {
+    const query = { owner: input.owner, repo: input.repo, number: input.number, perPage: input.perPage ?? SNAPSHOT_PER_PAGE };
+    return runRead(ctx, "list-pull-reviews", query, async (client) => {
+      const params = new URLSearchParams({ per_page: String(query.perPage) });
+      const pages = await fetchPages<RawReviewFull>(client, `/repos/${repoPath(input)}/pulls/${input.number}/reviews`, params, { ...input, perPage: query.perPage });
+      const items = pages.items.map((r) => {
+        const body = boundText(r.body);
+        return {
+          id: r.id,
+          user: r.user?.login ?? null,
+          state: r.state ?? null,
+          body: body.text,
+          bodyTruncated: body.truncated,
+          commitId: r.commit_id ?? null,
+          submittedAt: r.submitted_at ?? null,
+          url: r.html_url ?? null,
+        };
+      });
+      return {
+        summary: `listed ${items.length} reviews of #${input.number}; ${describeComplete(pages.page)}`,
+        github: { items, page: pages.page, rateLimit: pages.rateLimit },
+      };
+    });
+  },
+});
+
+export const listPullReviewComments = defineExecutor<PullPageInput, JobOutput>({
+  id: "graphloom.github/list-pull-review-comments",
+  version: GITHUB_EXECUTOR_VERSION,
+  effect: "read",
+  capabilities: ["network:github"],
+  ...pullSnapshotShape(),
+  inputSchema: isPullPageInput,
+  async execute(input, ctx) {
+    const query = { owner: input.owner, repo: input.repo, number: input.number, perPage: input.perPage ?? SNAPSHOT_PER_PAGE };
+    return runRead(ctx, "list-pull-review-comments", query, async (client) => {
+      const params = new URLSearchParams({ per_page: String(query.perPage) });
+      const pages = await fetchPages<RawReviewComment>(client, `/repos/${repoPath(input)}/pulls/${input.number}/comments`, params, { ...input, perPage: query.perPage });
+      const items = pages.items.map((c) => {
+        const body = boundText(c.body);
+        return {
+          id: c.id,
+          reviewId: c.pull_request_review_id ?? null,
+          path: c.path ?? null,
+          // `line` is null once the commented line is gone from the head; `originalLine` stays.
+          line: c.line ?? null,
+          originalLine: c.original_line ?? null,
+          side: c.side ?? null,
+          startLine: c.start_line ?? null,
+          originalStartLine: c.original_start_line ?? null,
+          commitId: c.commit_id ?? null,
+          originalCommitId: c.original_commit_id ?? null,
+          inReplyTo: c.in_reply_to_id ?? null,
+          body: body.text,
+          bodyTruncated: body.truncated,
+          user: c.user?.login ?? null,
+          createdAt: c.created_at ?? null,
+          url: c.html_url ?? null,
+        };
+      });
+      return {
+        summary: `listed ${items.length} review comments of #${input.number}; ${describeComplete(pages.page)}`,
+        github: { items, page: pages.page, rateLimit: pages.rateLimit },
+      };
+    });
+  },
+});
+
+export const listCheckRuns = defineExecutor<CheckRunsInput, JobOutput>({
+  id: "graphloom.github/list-check-runs",
+  version: GITHUB_EXECUTOR_VERSION,
+  effect: "read",
+  capabilities: ["network:github"],
+  ...readShape(
+    ["sha"],
+    { sha: { type: "string", pattern: "^[0-9a-f]{7,64}$", description: "The commit whose check runs are listed." }, ...PAGE_PROPERTIES },
+    { sha: "0123456789abcdef0123456789abcdef01234567", perPage: SNAPSHOT_PER_PAGE, maxPages: MAX_PAGES_PER_CALL },
+  ),
+  inputSchema: (v): v is CheckRunsInput => isRepoInput(v) && isSha(field(v, "sha")) && isPageInput(v),
+  async execute(input, ctx) {
+    const query = { owner: input.owner, repo: input.repo, sha: input.sha, perPage: input.perPage ?? SNAPSHOT_PER_PAGE };
+    return runRead(ctx, "list-check-runs", query, async (client) => {
+      const params = new URLSearchParams({ per_page: String(query.perPage) });
+      let totalCount: number | null = null;
+      const pages = await fetchPages<RawCheckRun, { total_count?: number; check_runs?: RawCheckRun[] }>(
+        client,
+        `/repos/${repoPath(input)}/commits/${input.sha}/check-runs`,
+        params,
+        { ...input, perPage: query.perPage },
+        (data) => {
+          totalCount = data.total_count ?? totalCount;
+          return data.check_runs ?? [];
+        },
+      );
+      const items = pages.items.map((c) => ({
+        id: c.id,
+        name: c.name,
+        status: c.status ?? null,
+        conclusion: c.conclusion ?? null,
+        detailsUrl: c.details_url ?? null,
+        url: c.html_url ?? null,
+        startedAt: c.started_at ?? null,
+        completedAt: c.completed_at ?? null,
+        app: c.app?.slug ?? null,
+      }));
+      return {
+        summary: `listed ${items.length} check runs of ${input.sha.slice(0, 12)}; ${describeComplete(pages.page)}`,
+        github: { items, totalCount, page: pages.page, rateLimit: pages.rateLimit },
+      };
+    });
+  },
+});
+
+// Review threads exist only in GraphQL (resolution and outdated state are not in REST).
+// Their cursors are GraphQL's opaque ones, unlike the page numbers of the REST lists.
+
+const THREAD_CURSOR_PATTERN = "^[A-Za-z0-9+/=_:-]{1,200}$";
+const THREAD_COMMENT_FIELDS = "id databaseId author { login } body createdAt path outdated replyTo { databaseId } commit { oid } originalCommit { oid }";
+const THREADS_QUERY = `query($owner: String!, $name: String!, $number: Int!, $first: Int!, $after: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      reviewThreads(first: $first, after: $after) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          id isResolved isOutdated path line originalLine startLine diffSide
+          resolvedBy { login }
+          comments(first: 100) { pageInfo { hasNextPage endCursor } nodes { ${THREAD_COMMENT_FIELDS} } }
+        }
+      }
+    }
+  }
+}`;
+const THREAD_COMMENTS_QUERY = `query($id: ID!, $after: String) {
+  node(id: $id) {
+    ... on PullRequestReviewThread {
+      comments(first: 100, after: $after) { pageInfo { hasNextPage endCursor } nodes { ${THREAD_COMMENT_FIELDS} } }
+    }
+  }
+}`;
+
+interface RawThreadComment {
+  id: string;
+  databaseId?: number | null;
+  author?: { login?: string } | null;
+  body?: string | null;
+  createdAt?: string;
+  path?: string;
+  outdated?: boolean;
+  replyTo?: { databaseId?: number | null } | null;
+  commit?: { oid?: string } | null;
+  originalCommit?: { oid?: string } | null;
+}
+
+interface RawThreadComments {
+  pageInfo: { hasNextPage: boolean; endCursor: string | null };
+  nodes: (RawThreadComment | null)[];
+}
+
+interface RawThread {
+  id: string;
+  isResolved: boolean;
+  isOutdated: boolean;
+  path?: string | null;
+  line?: number | null;
+  originalLine?: number | null;
+  startLine?: number | null;
+  diffSide?: string | null;
+  resolvedBy?: { login?: string } | null;
+  comments: RawThreadComments;
+}
+
+interface RawThreadsPage {
+  repository: {
+    pullRequest: { reviewThreads: { pageInfo: { hasNextPage: boolean; endCursor: string | null }; nodes: (RawThread | null)[] } } | null;
+  } | null;
+}
+
+function summarizeThreadComment(c: RawThreadComment) {
+  const body = boundText(c.body);
+  return {
+    id: c.databaseId ?? null,
+    nodeId: c.id,
+    author: c.author?.login ?? null,
+    body: body.text,
+    bodyTruncated: body.truncated,
+    path: c.path ?? null,
+    outdated: c.outdated ?? false,
+    inReplyTo: c.replyTo?.databaseId ?? null,
+    commitId: c.commit?.oid ?? null,
+    originalCommitId: c.originalCommit?.oid ?? null,
+    createdAt: c.createdAt ?? null,
+  };
+}
+
+function threadItem(thread: RawThread, comments: RawThreadComment[], commentsComplete: boolean) {
+  return {
+    id: thread.id,
+    isResolved: thread.isResolved,
+    isOutdated: thread.isOutdated,
+    resolvedBy: thread.resolvedBy?.login ?? null,
+    path: thread.path ?? null,
+    line: thread.line ?? null,
+    originalLine: thread.originalLine ?? null,
+    startLine: thread.startLine ?? null,
+    side: thread.diffSide ?? null,
+    commentsComplete,
+    comments: comments.map(summarizeThreadComment),
+  };
+}
+
+export const listReviewThreads = defineExecutor<ThreadsInput, JobOutput>({
+  id: "graphloom.github/list-review-threads",
+  version: GITHUB_EXECUTOR_VERSION,
+  effect: "read",
+  capabilities: ["network:github"],
+  ...readShape(
+    ["number"],
+    {
+      number: NUMBER,
+      perPage: PAGE_PROPERTIES.perPage,
+      maxPages: PAGE_PROPERTIES.maxPages,
+      cursor: { type: "string", pattern: THREAD_CURSOR_PATTERN, description: "The nextCursor of an earlier incomplete page." },
+    },
+    { number: 1, perPage: 50, maxPages: MAX_PAGES_PER_CALL },
+  ),
+  inputSchema: (v): v is ThreadsInput =>
+    isRepoInput(v) &&
+    isPositiveInt(field(v, "number")) &&
+    isPageInput({ perPage: field(v, "perPage"), maxPages: field(v, "maxPages") }) &&
+    (field(v, "cursor") === undefined || (typeof field(v, "cursor") === "string" && new RegExp(THREAD_CURSOR_PATTERN).test(field(v, "cursor") as string))),
+  async execute(input, ctx) {
+    const query = { owner: input.owner, repo: input.repo, number: input.number, perPage: input.perPage ?? 50 };
+    return runRead(ctx, "list-review-threads", query, async (client) => {
+      const maxPages = input.maxPages ?? 1;
+      const items: ReturnType<typeof threadItem>[] = [];
+      const incompleteThreads: string[] = [];
+      let cursor: string | null = input.cursor ?? null;
+      let pagesFetched = 0;
+      let rateLimit: RateLimitSnapshot = {};
+      let more = true;
+      while (more && pagesFetched < maxPages) {
+        const res = await githubGraphql<RawThreadsPage>(client, THREADS_QUERY, {
+          owner: input.owner,
+          name: input.repo,
+          number: input.number,
+          first: query.perPage,
+          after: cursor,
+        });
+        rateLimit = res.rateLimit;
+        const threads = res.data.repository?.pullRequest?.reviewThreads;
+        if (threads === undefined) {
+          throw new GitHubHttpError(`GitHub GraphQL returned 404: no pull request #${input.number} in ${input.owner}/${input.repo}`, 404);
+        }
+        for (const thread of threads.nodes) {
+          if (thread === null) continue;
+          const comments = thread.comments.nodes.filter((c): c is RawThreadComment => c !== null);
+          let info = thread.comments.pageInfo;
+          for (let extra = 0; info.hasNextPage && extra < MAX_PAGES_PER_CALL; extra += 1) {
+            const next = await githubGraphql<{ node: { comments?: RawThreadComments } | null }>(client, THREAD_COMMENTS_QUERY, {
+              id: thread.id,
+              after: info.endCursor,
+            });
+            rateLimit = next.rateLimit;
+            if (next.data.node?.comments === undefined) break;
+            comments.push(...next.data.node.comments.nodes.filter((c): c is RawThreadComment => c !== null));
+            info = next.data.node.comments.pageInfo;
+          }
+          if (info.hasNextPage) incompleteThreads.push(thread.id);
+          items.push(threadItem(thread, comments, !info.hasNextPage));
+        }
+        pagesFetched += 1;
+        more = threads.pageInfo.hasNextPage;
+        cursor = threads.pageInfo.endCursor;
+      }
+      const page = {
+        startCursor: input.cursor ?? "start",
+        nextCursor: more ? cursor : null,
+        pagesFetched,
+        perPage: query.perPage,
+        // Threads left to read, or a thread whose comments could not all be read, make this incomplete.
+        complete: !more && incompleteThreads.length === 0,
+        incompleteThreads,
+      };
+      return {
+        summary: `listed ${items.length} review threads of #${input.number}; ${
+          page.complete ? "complete" : more ? `more after cursor ${page.nextCursor}` : `incomplete: ${incompleteThreads.length} thread(s) with unread comments`
+        }`,
+        github: { items, page, rateLimit },
+      };
+    });
+  },
+});
+
 export const executors = [
   listIssues,
   listPulls,
@@ -924,6 +1408,12 @@ export const executors = [
   listIssueComments,
   listLabels,
   listMilestones,
+  listPullFiles,
+  listPullCommits,
+  listPullReviews,
+  listPullReviewComments,
+  listReviewThreads,
+  listCheckRuns,
   createIssueComment,
   createPull,
   createPullReview,
@@ -1072,11 +1562,13 @@ interface PageInput {
   maxPages?: number;
 }
 
-async function fetchPages<T>(
+async function fetchPages<T, R = T[]>(
   client: GitHubClientOptions,
   listPath: string,
   params: URLSearchParams,
   input: PageInput,
+  /** Pick the items out of a response that wraps them (check runs). */
+  pick: (data: R) => T[] = (data) => data as unknown as T[],
 ): Promise<{
   items: T[];
   rateLimit: RateLimitSnapshot;
@@ -1096,12 +1588,12 @@ async function fetchPages<T>(
   let rateLimit: RateLimitSnapshot = {};
   while (page !== undefined && pagesFetched < maxPages) {
     params.set("page", String(page));
-    const res: Awaited<ReturnType<typeof githubRequest<T[]>>> = await githubRequest<T[]>(
+    const res: Awaited<ReturnType<typeof githubRequest<R>>> = await githubRequest<R>(
       client,
       "GET",
       `${listPath}?${params.toString()}`,
     );
-    items.push(...res.data);
+    items.push(...pick(res.data));
     rateLimit = res.rateLimit;
     pagesFetched += 1;
     page = res.nextPage;
@@ -1141,7 +1633,7 @@ function summarizePull(pull: RawPull) {
     draft: pull.draft ?? false,
     merged: pull.merged_at !== undefined && pull.merged_at !== null,
     head: { ref: pull.head?.ref ?? null, sha: pull.head?.sha ?? null, label: pull.head?.label ?? null },
-    base: { ref: pull.base?.ref ?? null },
+    base: { ref: pull.base?.ref ?? null, sha: pull.base?.sha ?? null, label: pull.base?.label ?? null },
   };
 }
 

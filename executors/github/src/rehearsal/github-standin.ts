@@ -31,6 +31,12 @@ const READ_EXECUTOR_IDS = [
   "graphloom.github/list-issue-comments",
   "graphloom.github/list-labels",
   "graphloom.github/list-milestones",
+  "graphloom.github/list-pull-files",
+  "graphloom.github/list-pull-commits",
+  "graphloom.github/list-pull-reviews",
+  "graphloom.github/list-pull-review-comments",
+  "graphloom.github/list-review-threads",
+  "graphloom.github/list-check-runs",
 ] as const;
 
 function readExecutor(id: string): ExecutorDefinition<unknown, unknown> {
