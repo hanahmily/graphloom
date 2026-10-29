@@ -1219,3 +1219,16 @@ Each is checked in its phase. A failure changes only the named fallback.
    danger-full-access --cd <candidate> resume … <thread> -` named the same
    thread, kept the earlier turn's context, ran `pwd` as the candidate root,
    and its patch wrote there, with the candidate bound writable.
+5. **Claude Code fork with an appended note.** Interactive `claude --resume
+   <uuid> --fork-session --append-system-prompt <note>` resumes a transcript
+   restored into the config dir, writes the new turns under a new session id,
+   leaves the restored transcript unchanged, and applies the note to the new
+   turns. If the note is not applied, it becomes the first user turn, as for
+   Codex. (`graphloom session open`,
+   [core §15](design-typescript-core.md#15-opening-a-recorded-agent-session))
+6. **Codex resume of a copied rollout.** Interactive `codex resume <thread>
+   <prompt>` finds a rollout copied under a new thread id (its file name and
+   its `session_meta` id rewritten), keeps the earlier turns' context, and
+   writes only that copy. If Codex checks more than the id, the fork is
+   refused with the reason until the copy is fixed; the recorded rollout is
+   never resumed in its place. (`graphloom session open`)

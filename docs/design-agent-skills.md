@@ -66,6 +66,8 @@ controller notions, never plugin ones.
 | `episode_ended` | The reported open episode is no longer open, or an episode started and ended between two looks; detail is its last proposal's action and one-line reason, or its outcome |
 | `quota_pause` | A new remedy record whose condition is a quota or usage limit; `resetAt` from `quotaHold.until`, `executorRetryAt`, or the remedy text |
 | `budget_threshold` | A metered budget whose use reached 80% of the run's budget (operator raises included); it fires again only after a raise takes it below 80% and use crosses again |
+| `input_recorded` | Operator inputs ([core §16](design-typescript-core.md#16-operator-inputs), proposed) the mark had not seen, with kind and id |
+| `input_consumed` | Inputs the mark saw pending that are now `taken` (with the consuming operation) or `refused` (with the reason) |
 | `run_resumed` | The mark saw the run stopped and it is running again |
 | `run_stopped` | The run left `running` (any status), with its stop reason and class |
 

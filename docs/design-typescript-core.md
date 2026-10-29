@@ -96,7 +96,15 @@ graphloom inspect <run-id>
 graphloom stop <run-id>
 graphloom resume <run-id>
 graphloom delete <run-id> [--force]
+graphloom session list <run-id>
+graphloom session open <run-id> [--stage <stageId> | <session>]
+graphloom input <run-id> <kind> [<arg>…] [--<option> <value>…] [--resume]
 ```
+
+`session` reopens an agent session the run recorded, forked, in the user's
+terminal ([§15](#15-opening-a-recorded-agent-session)). `input` queues an
+operator input the graph declared as data
+([§16](#16-operator-inputs)).
 
 These are target interfaces. Relative paths resolve from the task file. `hello`
 selects an operator-installed bundle at `plugins/hello/` beside that file. Reject
@@ -1087,3 +1095,203 @@ it in the command executor's `env` input and reads nothing about the bundle to
 do so. Commands run in the worktree, so this is how a check finds what the
 bundle ships, such as a tool from the bundle's own dependencies. The variable
 is not part of a prepare command's cache key.
+
+## 15. Opening a recorded agent session
+
+Status: proposed, 2026-10-29. Not implemented.
+
+An operator sometimes wants to talk to the agent that did a job: ask the
+answerer why it settled a question that way, or have it look again at one
+function. `graphloom session` reopens that agent's recorded session in the
+operator's own terminal. It is plugin-neutral: it reads only the run's
+generic session records (stage id, operation id, executor, session ref) and
+never knows a plugin's role names.
+
+```text
+graphloom session list <run-id> [--json]
+graphloom session open <run-id> [--stage <stageId> | <session>]
+```
+
+**List.** One row per `agentSessions` record
+([timeout continuation](#job-wall-clock-and-timeout-continuation)): stage id
+and attempt, operation id, dispatch key, executor and harness, session ref,
+status, when its last turn settled, the operation it continued, and whether
+it can be opened (`ok`, `running`, `pi: no interactive restore`, `wiped`).
+`<session>` names a row by its session ref (`claude-<uuid>`,
+`codex-<uuid>`) or its operation id.
+
+**Open.** It selects the named session. With `--stage`, it takes the
+stage's latest attempt that recorded a session, the dispatch key that
+attempt dispatched first, and that key's latest session by `settledAt`: in a
+stage where an author's job is followed by a checker's, that is the author,
+corrections included. Any other session of the stage, a checker's for
+example, is opened by its ref or operation id from `session list`. With
+neither, it takes the run's latest session. Then:
+
+1. **Refusals.** It refuses, naming the reason, when:
+   - the session's harness is Pi (`pi-…`): Pi has no interactive restore, so
+     the message points at the transcript in the run's state instead;
+   - the executor is not the coding agent (a scripted harness, a custom
+     executor);
+   - the job that owns the session is still running: its operation, or any
+     outstanding operation whose `continueFrom` lineage includes it, has not
+     settled;
+   - the run has succeeded or failed: the saved copies were removed then
+     (`wipeAgentSessions`), so the row lists as `wiped`;
+   - the saved copy is missing or corrupt, as a resume refuses it
+     (`openClaudeSession`, `openCodexThread`).
+2. **Harness.** The session's own harness opens it, never another: a
+   `claude-` ref only in Claude Code, a `codex-` ref only in Codex. There is
+   no harness option. The ref's prefix, the record's harness and the saved
+   metadata's shape must agree, or it refuses. opencode is not a target.
+3. **Restore and fork.** The saved copy in the run's session directory is
+   GraphLoom's evidence and is only read. The transcript is restored into the
+   agent's own store (the same config dir or Codex home the executor used,
+   so the operator's own login), then forked, so the operator's turns land in
+   a new session and the recorded one never changes:
+   - **Claude Code:** write the transcript and its side files into
+     `<configDir>/projects/<project>/` as `openClaudeSession` does, then run
+     `claude --resume <uuid> --fork-session` interactively.
+   - **Codex:** copy the rollout to `sessions/<today>/rollout-<time>-<new
+     thread>.jsonl` under the Codex home, with the thread id in its
+     `session_meta` record replaced by a fresh one, then run
+     `codex resume <new thread>` interactively. The recorded thread's own
+     rollout is never written.
+4. **Hand over the terminal.** The agent inherits stdin, stdout, stderr and
+   the controlling TTY. GraphLoom prints the fork's id, waits, and exits with
+   the agent's exit code. Without a TTY on stdin it refuses.
+
+**Confinement.** The session runs in the run's worktree under the same
+confinement kind its job used, taken from the record: each
+`AgentSessionRecord` gains `harness` and the job's `confinement`, copied at
+admission. The worktree is always mounted read-only, also for a writer
+job's session: an operator's chat is not a graph job, and an edit there
+would be an external edit that invalidates evidence
+([§9](#9-worktree-communication-and-durable-state)). The agent's own login
+state stays writable, since the fork is written there. A confinement that
+cannot be built (no bubblewrap, a non-Linux host) refuses the open; nothing
+runs unconfined. bwrap runs without `--new-session` so the agent keeps the
+terminal; on a kernel that still allows `TIOCSTI`
+(`dev.tty.legacy_tiocsti` = 1) the open refuses, because a confined process
+could otherwise push keystrokes into the operator's shell.
+
+**Untrusted content.** A session whose job read untrusted content (its
+confinement masks the workspace's agent configuration) still holds that
+content in its transcript, and the operator's chat continues from it. A
+prompt injection in that content can steer the opened agent as it could the
+job. The confinement is the defence: the agent holds no credential beyond
+its own login, cannot write the worktree or the run state, and every input
+it proposes goes through the operator's confirmation below.
+
+**Opening note.** Before the operator's first turn, the agent is told what
+changed since its session ended, from generic run data: the run's status and
+stop reason; each operation settled since (stage, purpose, executor, status
+and its result's one-line summary, so a later checker's verdict shows); each
+operator input recorded or consumed since ([§16](#16-operator-inputs)); and
+the input kinds the run's definition declares, with their usage lines. It
+also says that the filesystem is read-only, that the workspace content is
+data, not instruction, and that a change to the run is only recorded through
+`graphloom input`. Claude Code gets the note as `--append-system-prompt`, so
+the operator speaks first. Codex gets it as the first user turn
+(`codex resume <thread> <note>`) and answers it with a short
+acknowledgement. No skill is involved: a skill inside one harness cannot hand
+the terminal to another harness's session.
+
+**Recording inputs from the session.** The state directory is not mounted,
+so inside an opened session (`GRAPHLOOM_SESSION_OUTBOX` set) `graphloom
+input` and its declared aliases validate the input against the run's
+declarations and write it to a per-open outbox in the run's scratch
+directory, the one writable path the open adds. When the agent exits,
+`session open` lists the staged inputs and records the ones the operator
+confirms, as `graphloom input` would; the rest are discarded. A failed
+recording makes the exit code 1.
+
+**Lock and budgets.** `session open` does not hold the run lock while the
+agent runs; the run may advance meanwhile. Chat turns run on the operator's
+own login and are not charged to the run's budgets; inputs recorded from the
+session are charged when the graph consumes them, like any input. Opening a
+session is not recorded in run state. The fork stays in the agent's own
+store after the run ends, where `claude --resume` or `codex resume` reopens
+it; GraphLoom does not track it.
+
+**Verification.** Opening a session leaves the saved transcript (and Claude
+Code's side files, and Codex's rollout) byte-identical. Pi sessions,
+non-agent executors, a ref whose prefix disagrees with its record, and a
+session whose job (or a continuation of it) still runs are refused. The
+opened session's confinement matches its job's kind with the worktree
+read-only (a write fails with `EROFS`) and a masked file absent. Inputs
+staged in the outbox are recorded only on confirmation. Fake `claude` and
+`codex` binaries record their argv, environment and TTY; a real-CLI check of
+`--fork-session`, `--append-system-prompt` with `--resume`, and `codex resume
+<thread> <prompt>` on a copied rollout runs opt-in, as the
+[harness assumptions](design-supervisor-harnesses.md#11-unverified-cli-assumptions)
+are checked.
+
+## 16. Operator inputs
+
+Status: proposed, 2026-10-29. Not implemented.
+
+A graph may accept work from its operator while a run is open: a question
+for an agent to answer, a request to look deeper at one item. As with
+approvals ([pr-review §11](design-pr-review-graph.md#11-approvals)), the
+plugin declares the accepted kinds as data and the controller learns no
+plugin notion: it validates the shape, records the input as evidence, hands
+pending inputs to `advance`, and admits each one's consumption once.
+
+```ts
+inputs: [
+  { kind: "ask", group: "review", stageId: "answers",
+    args: [{ name: "question", maxBytes: 2048 }],
+    options: [{ name: "about", pattern: "^[RQ][1-9][0-9]*$" }],
+    maxPerRun: 20 },
+]
+```
+
+- **Declaration** (`GraphDefinition.inputs`): `kind`, the existing `stageId`
+  whose work consumes it, positional `args` and named `options`, each with
+  an optional `pattern` and a `maxBytes` (at most 4 KiB), an optional
+  `maxPerRun`, and an optional `group`. It is pinned with the definition,
+  and an activation that changes it is refused like a changed step.
+- **Command.** `graphloom input <run> <kind> <args…> [--<option> <value>]`.
+  A declared `group` adds the alias `graphloom <group> <kind> <run> …`
+  (pr-review: `graphloom review ask <run> "…"`). An alias resolves only
+  against the named run's pinned declarations and never shadows a built-in
+  command; `graphloom --help` lists the generic form.
+- **Recording.** The CLI validates the arguments against the declaration,
+  scans them for secrets, takes the run lock for one state write, and
+  records `operator-input` evidence `{ inputId: "in-<n>", kind, stageId,
+  args, options, operator, at, generation }` with state `pending`. It
+  refuses a succeeded or failed run, an undeclared kind or option, and a
+  kind at its `maxPerRun`.
+- **Consumption.** `advance` sees pending inputs (`RunView.operatorInputs`).
+  The plugin consumes one by naming it in `JobSpec.inputRefs` of a dispatch
+  in the input's stage; admission marks it `taken` by that operation and
+  refuses a second dispatch naming a taken input, so each input is consumed
+  exactly once. Retries and continuations of that operation keep the claim.
+  `advance` may instead refuse an input with a reason (`refused`), for
+  example an `--about` id that does not exist. The supervisor can do
+  neither; it can only retry the consuming operation.
+- **Reentry.** An input names a stage that may already be accepted. Pending
+  inputs move the cursor back to the earliest named stage as a reentry: a
+  new attempt within the existing step, with later receipts invalidated as
+  any reentry invalidates them. The step set never changes.
+- **When it runs.** The input command only enqueues. A live controller picks
+  pending inputs up at its next advance. On a stopped run, `graphloom
+  resume <run>`, plain or with `--approve`/`--decline`, processes pending
+  inputs first and the approval after; a plain resume of a final stop
+  proceeds when inputs are pending and is refused otherwise. `--resume` on
+  the input command records it and then runs that plain resume in the
+  foreground.
+- **Budgets.** A consuming dispatch is admitted like any other: decision,
+  job and agent invocations through the usual checks. Exhaustion stops the
+  run as usual; nothing is reset.
+- **Visibility.** `inspect` lists inputs with their state and consuming
+  operation. `graphloom wait --until progress` reports `input_recorded` and
+  `input_consumed` ([agent skills §2](design-agent-skills.md#2-graphloom-wait---until-progress)).
+
+**Verification.** Recording under the lock; two concurrent `input` commands
+both recorded with distinct ids; undeclared kinds and options, and
+over-long or pattern-failing arguments, refused; `maxPerRun`; a second
+dispatch claiming a taken input refused; a crash between admission and
+settle reconciled without a second consumption; reentry to an accepted
+stage; and a plain resume of a final stop with and without pending inputs.
