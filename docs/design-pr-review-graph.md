@@ -15,6 +15,10 @@ agent's recorded session through `graphloom session open`
 is recorded, and each aspect reviewer starts as its own fork of the latest
 answers session, the maintainer's conversation included, so all reviewers
 run on the answerer's harness ([§8.1](#81-review), [§13.1](#131-roles)).
+Revised a fourth time 2026-10-29: the task is prepared by the generic
+`graphloom task new` command from the plugin's `prepareTask` plan, not by a
+plugin script, and the ledger ref moves to `…/<N>/ledger`
+([§3.1](#31-task)).
 Not implemented. The
 plugin would live in `examples/plugins/pr-review`. It reuses the review
 machinery of the [issue-fix graph](design-issue-fix-graph.md) and needs these
@@ -77,7 +81,7 @@ The product has three layers, each produced by different agents:
 | Reviewers prove bugs with tests, not only by reading | A finding that claims wrong behavior carries a test the reviewer wrote. The graph reruns it in the Docker sandbox, as an overlay that never enters the PR checkout. The finding is `proven` only when the test fails on the head in its own assertion and the verifier judges that it shows the claimed bug. Unproven behavioral findings are never posted as P0 or P1 and never make the verdict `request-changes` ([§8.2](#82-reproducing-tests)) |
 | Fixes are suggestions only | Small, verified fixes become GitHub ` ```suggestion ` blocks. Nothing is committed or pushed |
 | Re-runs are incremental | A later head gets a delta report and delta Q&A plus the full current ones. The review re-checks earlier findings against the head and the thread replies ([§9](#9-incremental-re-review)) |
-| The per-PR ledger is durable and needs no extra permission | It is a Git ref in the operator's review clone, `refs/graphloom/pr-review/<owner>/<repo>/<N>`, advanced by compare-and-swap ([§9.1](#91-where-the-ledger-lives)) |
+| The per-PR ledger is durable and needs no extra permission | It is a Git ref in the operator's review clone, `refs/graphloom/pr-review/<owner>/<repo>/<N>/ledger`, advanced by compare-and-swap ([§9.1](#91-where-the-ledger-lives)) |
 
 ## 2. Modes and operator flow
 
@@ -85,20 +89,21 @@ The stage list is the same in both modes. The mode only routes, so it lives in
 the request, which `advance` reads, not in `describe(config)`:
 
 - **`Report on owner/repo#N at <sha>.`** (the default, written by
-  `prepare.sh`). After Answers, the run stops, final, with reason
-  `report ready`.
+  `graphloom task new`, [§3.1](#31-task)). After Answers, the run stops,
+  final, with reason `report ready`.
   - `--approve review-layer` continues into Review.
   - `--decline review-layer` makes the later requirements pass on that
     decline, as their statements say ([§5](#5-stages-and-requirements)), and
     the run **succeeds** as report-only.
   - Nothing is posted in this mode.
-- **`Review owner/repo#N at <sha>.`** continues into the review layer without
-  pausing. Publication still needs its own approval.
+- **`Review owner/repo#N at <sha>.`** (`task new … --review`) continues into
+  the review layer without pausing. Publication still needs its own approval.
 
 ```sh
-sh plugins/pr-review/scripts/prepare.sh reviews/ apache/skywalking-banyandb#1234   # writes task.yaml
-graphloom check reviews/banyandb-1234/task.yaml
-graphloom run reviews/banyandb-1234/task.yaml --on-stop '…'
+graphloom task new pr-review apache/skywalking-banyandb#1234 --repo ../skywalking-banyandb --profile banyandb
+# fetches the head and base refs, pins the head, writes reviews/skywalking-banyandb-1234/task.yaml
+graphloom check reviews/skywalking-banyandb-1234/task.yaml
+graphloom run reviews/skywalking-banyandb-1234/task.yaml --on-stop '…'
 # stops "report ready": read <worktree>/.graphloom/review/review.md (graphloom inspect prints the path)
 graphloom session open <run> --stage answers               # optional: chat with a fork of the answerer's session; recorded on exit
 graphloom session open <run> --stage answers               # optional again: continues that conversation (--from-original starts over)
@@ -114,7 +119,10 @@ the latest one, so a fact the maintainer states there (an intended
 behavior, an area to doubt, a constraint the PR text omits) is in each
 reviewer's context ([§8.1](#81-review)). In `Review` mode there is no pause,
 so the reviewers fork the answerer's own session. Starting and watching the
-run use the existing `graphloom-run` and `graphloom-watch` skills. Chatting
+run use the existing `graphloom-run` and `graphloom-watch` skills; preparing
+the task is the generic `graphloom task new` command
+([core §16](design-typescript-core.md#16-preparing-a-task-graphloom-task-new)),
+not a plugin script. Chatting
 with a session is a CLI command, not a skill
 ([§17](#17-discussing-a-run-graphloom-session-open)).
 
@@ -122,11 +130,14 @@ with a session is a CLI command, not a skill
 
 ### 3.1 Task
 
+`graphloom task new` writes it ([core §16](design-typescript-core.md#16-preparing-a-task-graphloom-task-new));
+`reviews/skywalking-banyandb-1234/task.yaml` for the command in [§2](#2-modes-and-operator-flow):
+
 ```yaml
 graph: pr-review
-repo: ../skywalking-banyandb          # the operator's review clone
+repo: ../../../skywalking-banyandb    # the operator's review clone (--repo), relative to the task
+config: ../../plugins/pr-review/profiles/banyandb.json   # --profile banyandb, found in the bundle
 base: 3f1c…e9                         # new generic field (§15): the merge base, pinned instead of HEAD
-config: plugins/pr-review/profiles/banyandb.json
 request: "Report on apache/skywalking-banyandb#1234 at 9ab2…41."
 ```
 
@@ -139,11 +150,50 @@ request: "Report on apache/skywalking-banyandb#1234 at 9ab2…41."
   is then exactly the PR's diff, so the candidate digest, `git diff HEAD`,
   open-code-review's workspace mode and `{ from: "candidate" }` checkouts all
   mean "this PR at this head".
-- `scripts/prepare.sh` fetches `refs/pull/N/head` and the base branch into
-  `refs/graphloom/pr-review/<owner>/<repo>/<N>/heads/<sha>` and `…/base`, which
-  keep earlier heads alive for re-runs. It computes the merge base and writes
-  the task. It runs only `git fetch`, `git merge-base` and file writes, never
-  repository code.
+
+**Preparing the task.** pr-review implements the optional `prepareTask` hook
+(`src/prepare.ts`). It is pure over its input and only returns a plan; the
+generic CLI validates and executes it, and knows nothing of pull requests.
+
+- **Arguments:** one pull request, `owner/repo#N` or
+  `https://github.com/owner/repo/pull/N`; optional `--base <branch>` (default
+  the profile's `baseBranch`, itself default `main`); optional `--review`,
+  which writes the `Review …` request instead of `Report on …`. Anything
+  else, a missing profile, or an `owner/repo` other than the profile's
+  `project` is a `{ refused }` reply naming the problem.
+- **Remote:** the repository's remote whose fetch URL is
+  `https://github.com/<owner>/<repo>(.git)`, else that URL itself.
+- **Two phases for the head.** The head's sha is unknown until it is fetched,
+  so the plan fetches into a moving ref, resolves it, and only then pins
+  `heads/<sha>`. With `R = refs/graphloom/pr-review/<owner>/<repo>/<N>`, the
+  plan for `apache/skywalking-banyandb#1234` is:
+
+  | # | Step |
+  |---|---|
+  | 1 | `fetch { remote: "https://github.com/apache/skywalking-banyandb.git", refspec: "refs/pull/1234/head", intoRef: "R/head" }` |
+  | 2 | `fetch { remote: (same), refspec: "refs/heads/main", intoRef: "R/base" }` |
+  | 3 | `resolve { name: "headSha", revParse: "R/head" }` |
+  | 4 | `updateRef { from: "${headSha}", to: "R/heads/${headSha}" }` |
+  | 5 | `resolve { name: "mergeBase", mergeBase: ["R/head", "R/base"] }` |
+  | 6 | `writeTask { path: "reviews/skywalking-banyandb-1234/task.yaml", fields: { base: "${mergeBase}", request: "Report on apache/skywalking-banyandb#1234 at ${headSha}." } }` |
+
+  with the summary "report-only review of apache/skywalking-banyandb#1234
+  against main". The default task directory is `reviews/<repo>-<N>/` under
+  `--out`.
+- `R/head` and `R/base` move with every `task new`; `R/heads/<sha>` is
+  created once per head and never moved, so earlier heads stay alive for the
+  deltas of re-runs ([§9.2](#92-mapping-a-new-head-to-the-last-reviewed-one)).
+  The ledger is `R/ledger` ([§9.1](#91-where-the-ledger-lives)): Git cannot
+  hold a ref at `R` and refs under `R/` at once.
+- Only `git fetch`, `git rev-parse`, `git merge-base`, `git update-ref` and
+  the task write run, with hooks and the user's Git config disabled; no
+  repository code runs, and nothing is checked out.
+- Fetch checks the task against GitHub: the PR's head sha must equal the
+  request's, and `base` must be an ancestor of the head and of the base
+  commit the PR metadata names (`git merge-base --is-ancestor`, when that
+  commit is in the clone). A mismatch (a push since `task new`, or a PR into another
+  branch without `--base`) stops the run with reason "incompatible task",
+  naming the command to rerun.
 
 ### 3.2 Profile
 
@@ -155,6 +205,7 @@ meaning and parser (review-kit, [§14](#14-sharing-code-with-issue-fix)).
 | Field | Meaning |
 |---|---|
 | `name`, `project` | Names for messages, and the repository whose PRs are read |
+| `baseBranch` | The branch PRs usually target (default `main`), fetched by `task new` unless `--base` names another ([§3.1](#31-task)) |
 | `environment` | Only `checks` (`git`, the bundled `ocr` via `scripts/ocr-path.sh`, the harness CLIs). **`prepare` and `pinnedFiles` are refused**: preparation would run contributor code in the unconfined worktree |
 | `report` | The section template, each section's meaning in this repository, and its detectors ([§6.2](#62-profile-mapping), [§6.3](#63-detectors)) |
 | `symbols` | Language packs: file globs, definition patterns, test-file and test-name patterns ([§7.2](#72-deterministic-groundwork)). The plugin ships packs for Go and TypeScript as data, and a profile may add or override them |
@@ -189,7 +240,7 @@ meaning and parser (review-kit, [§14](#14-sharing-code-with-issue-fix)).
 | PR head tree | The run worktree, materialized by Fetch over the pinned merge base | The existing checkout, digest and quote machinery applies |
 | Base tree | The pinned base commit, read with `git show <base>:<path>` and `git grep <base>` | Searches see the repository as it is without the PR |
 | `review.md`, `report.json`, `qa.json`, draft | `.graphloom/review/`, ignored by its own `.gitignore` (`*`) | Kept out of the digest and every checkout, as issue-fix's [issues file](design-issue-fix-graph.md#where-it-lives-and-how-it-stays-out-of-the-change) is |
-| Per-PR ledger | Ref `refs/graphloom/pr-review/<owner>/<repo>/<N>` | Durable, versioned, CAS-updated ([§9.1](#91-where-the-ledger-lives)) |
+| Per-PR ledger | Ref `refs/graphloom/pr-review/<owner>/<repo>/<N>/ledger` | Durable, versioned, CAS-updated ([§9.1](#91-where-the-ledger-lives)) |
 | Earlier heads | `…/<N>/heads/<sha>` | Needed for the deltas and the head mapping |
 | Sandbox images | The local Docker image store, by digest | Checked, and pulled if missing, in Fetch, never during a sandboxed job ([§12.2](#122-confinement)) |
 | Aspect rule files | Shipped as plugin data, `rules/<aspect>.json`. The effective file, with the profile's entries applied, is written to `.graphloom/review/rules/<aspect>.json` | The rules each pass used are evidence ([§8.1](#81-review)) |
@@ -1021,7 +1072,7 @@ approval`. On approval, the plugin:
 ### 9.1 Where the ledger lives
 
 The ledger lives at **a Git ref in the operator's review clone**,
-`refs/graphloom/pr-review/<owner>/<repo>/<N>`. The ref points at a commit
+`refs/graphloom/pr-review/<owner>/<repo>/<N>/ledger`. The ref points at a commit
 whose tree holds `ledger.json` (`graphloom-pr-ledger-v1`), `ledger.md`, and
 the latest `report.json` and `qa.json`. Each run adds one commit.
 
@@ -1604,6 +1655,8 @@ schema name enters the controller, SDK or CLI.
 | `graphloom session list/open` | `apps/graphloom`; `AgentSessionRecord` gains `harness`, `confinement`, `origin`, `parent` and `contextTokens`; fork, capture and turn-extract helpers beside the session save/restore in `@graphloom/agent-harness`; `operator-conversation` evidence; `maxConversationBytes`, and per harness `sessionLauncher` and `sessionLauncherStateDirs` (with the `GRAPHLOOM_<HARNESS>_SESSION_LAUNCHER` overrides and a `doctor` probe), in the runner config | [Core §15](design-typescript-core.md#15-opening-a-recorded-agent-session): the conversation is captured on exit, `--stage` continues the latest one, `--from-original` starts over |
 | `JobSpec.forkFrom` | `packages/sdk/src/types.ts`, controller admission, the coding-agent executor | The fork form of `continueFrom`: across stages and dispatch keys, same harness only, the parent never written ([core §15](design-typescript-core.md#15-opening-a-recorded-agent-session)) |
 | `AgentRoleDeclaration.sameAs` | `packages/sdk/src/types.ts`, role resolution and `inspect` | A role that must run on another role's harness, as the reviewers on the answerer's ([§13.1](#131-roles)) |
+| Optional hook `GraphPlugin.prepareTask` and the `TaskPlan` schema with `validateTaskPlan` | `packages/sdk` (types and validation), `packages/plugin-host` (the call in the isolated child) | The plugin returns a plan as data: `fetch`, `resolve` (`revParse` or `mergeBase`), `updateRef` and one final `writeTask`. No step runs a command; written refs stay under `refs/graphloom/<graph>/`; the task path stays under `--out` ([core §16](design-typescript-core.md#16-preparing-a-task-graphloom-task-new)) |
+| `graphloom task new <graph> <args…> [--repo] [--profile] [--out] [--dry-run] [--force]` | `apps/graphloom` | Loads the bundle as `run` does, calls the hook, executes the validated plan with hooks and user Git config disabled, refuses to overwrite a task without `--force`. It never interprets the arguments: `owner/repo#N` means a pull request only inside pr-review ([§3.1](#31-task)) |
 
 `create-pull-review` and `create-issue-comment` need no change.
 
@@ -1721,7 +1774,7 @@ writes.
 
 | Phase | Scope | Verification |
 |---|---|---|
-| P1 | **First layer, report-only.** Fetch, workspace, report, questions, answers, static measurements. Generic: `base:`, the GitHub reads, `bwrap` confinement (agents, static tools) and the `docker` sandbox (coverage), image checks and pulls in Fetch, doctor and check probes. pr-review 0.1 with stages Fetch, Report, Questions and Answers; it stops `report ready` after Answers and `--decline review-layer` finishes it. Also: detectors; symbol packs (Go, TypeScript); whole-repository search; similarity; the dependency inventory; test mapping; the reporter, questioner and answerer with both checkers; `gometrics` and `tsmetrics`; confined coverage (`go test -coverprofile`; for TypeScript the repository's own `vitest run --coverage` with its `@vitest/coverage-v8`, or `not run (no vitest coverage provider)` when the repository declares none) with measured CRAP and the unknown-coverage rule; `review.md`, `report.json`, `qa.json`; the ledger; the BanyanDB mapping. **Wave 3**, with the Questions and Answers work: generic `graphloom session list/open` ([core §15](design-typescript-core.md#15-opening-a-recorded-agent-session)) with conversation capture (`operator-conversation` evidence, the turn extract, the 32 MiB bound, `contextTokens`), chained forks and `--from-original`; the operator's session launcher (`claude.sessionLauncher`, `codex.sessionLauncher`, their state directories, the environment overrides and the launcher probe in `session open` and `doctor`); `parseProfile` refusing a Pi answerer; and the decision half of approvals (`GraphDefinition.approvals`, `resume --approve/--decline`, `operator-approval` evidence) for the `report ready` stop; 0.1 has no Review stage, so it refuses `--approve review-layer` and names the version | Intake, executor contract and confinement tests. Unit tests per detector, symbol pattern (new vs modified, receivers, generics), query builder, similarity scorer, test-map rule and validator rule. `gometrics` matches gocyclo on a fixture corpus. Nesting and changed-function scope fixtures. The `measurements` validator rejects each kind of inconsistent record. Real-Git tests: searches read the base commit only, and materialization runs no hook or filter. Ledger CAS race. Rehearsal `report`, `report-corrections`, `answer-finds-existing-helper`, `answer-no-library-with-whole-repo-search`, `answer-checker-contradicts`, `needs-author-purpose`, `purpose-stated`, `missing-test`, `complex-function`, `crap-upper-bound`, `sandbox-unavailable`, `injection`. Wave 3: opening a session and capturing its fork leave the recorded transcript, side files and rollout byte-identical; a second `--stage answers` open forks the first conversation and `--from-original` forks the answerer; `session list` shows each conversation with its parent; a fork with no operator turn records nothing, one over the bound records `transcript: omitted`, and a capture after the run finished records nothing; the turn extract keeps the operator's messages verbatim (Claude Code and Codex fixtures); a stub launcher prefixes `session open` only and headless jobs keep `claude.command`, the environment override wins, its state directories are writable in the confinement, a launcher that cannot resume is refused by the probe before launch, and capture through a stub launcher finds the fork by the id GraphLoom chose; `session open` refuses a Pi session, a ref whose harness disagrees with its record and a finished run, and refuses while the owning job or a continuation of it runs; the opened session's confinement (repository agent-config masks applied, no GitHub token in its environment, the checkout read-only); `--stage answers` opens the answerer, not the checker; `--decline review-layer` records `operator-approval` evidence and finishes the run; `--approve review-layer` refused by 0.1. Under real Docker: a coverage run with `--network none`, where a test that dials out fails; the limits enforced (a fork bomb stops at `--pids-limit`, an allocation at `--memory`, the host unaffected); only the checkout and the build cache writable, the root read-only, no host home, `--pull never`; the container killed by name on stop and removed on resume; coverage attributed by line range, Go from the coverprofile and TypeScript from `coverage-final.json` statements, with the report written under the job's temporary directory and the checkout unchanged. One live run on a real BanyanDB PR, read by the user, with recall of new symbols, tests and existing equivalents checked by hand |
+| P1 | **First layer, report-only.** Fetch, workspace, report, questions, answers, static measurements. Generic: `base:`, the GitHub reads, `bwrap` confinement (agents, static tools) and the `docker` sandbox (coverage), image checks and pulls in Fetch, doctor and check probes. pr-review 0.1 with stages Fetch, Report, Questions and Answers; it stops `report ready` after Answers and `--decline review-layer` finishes it. Also: detectors; symbol packs (Go, TypeScript); whole-repository search; similarity; the dependency inventory; test mapping; the reporter, questioner and answerer with both checkers; `gometrics` and `tsmetrics`; confined coverage (`go test -coverprofile`; for TypeScript the repository's own `vitest run --coverage` with its `@vitest/coverage-v8`, or `not run (no vitest coverage provider)` when the repository declares none) with measured CRAP and the unknown-coverage rule; `review.md`, `report.json`, `qa.json`; the ledger; the BanyanDB mapping. **Wave 3**, with the Questions and Answers work: generic `graphloom session list/open` ([core §15](design-typescript-core.md#15-opening-a-recorded-agent-session)) with conversation capture (`operator-conversation` evidence, the turn extract, the 32 MiB bound, `contextTokens`), chained forks and `--from-original`; the operator's session launcher (`claude.sessionLauncher`, `codex.sessionLauncher`, their state directories, the environment overrides and the launcher probe in `session open` and `doctor`); `parseProfile` refusing a Pi answerer; and the decision half of approvals (`GraphDefinition.approvals`, `resume --approve/--decline`, `operator-approval` evidence) for the `report ready` stop; 0.1 has no Review stage, so it refuses `--approve review-layer` and names the version; and task preparation: the generic `prepareTask` hook, `TaskPlan` and `validateTaskPlan`, `graphloom task new` ([core §16](design-typescript-core.md#16-preparing-a-task-graphloom-task-new)), pr-review's `prepareTask` ([§3.1](#31-task)), and the `graphloom-run` skill using `task new` | Intake, executor contract and confinement tests. Unit tests per detector, symbol pattern (new vs modified, receivers, generics), query builder, similarity scorer, test-map rule and validator rule. `gometrics` matches gocyclo on a fixture corpus. Nesting and changed-function scope fixtures. The `measurements` validator rejects each kind of inconsistent record. Real-Git tests: searches read the base commit only, and materialization runs no hook or filter. Ledger CAS race. Rehearsal `report`, `report-corrections`, `answer-finds-existing-helper`, `answer-no-library-with-whole-repo-search`, `answer-checker-contradicts`, `needs-author-purpose`, `purpose-stated`, `missing-test`, `complex-function`, `crap-upper-bound`, `sandbox-unavailable`, `injection`. Wave 3: opening a session and capturing its fork leave the recorded transcript, side files and rollout byte-identical; a second `--stage answers` open forks the first conversation and `--from-original` forks the answerer; `session list` shows each conversation with its parent; a fork with no operator turn records nothing, one over the bound records `transcript: omitted`, and a capture after the run finished records nothing; the turn extract keeps the operator's messages verbatim (Claude Code and Codex fixtures); a stub launcher prefixes `session open` only and headless jobs keep `claude.command`, the environment override wins, its state directories are writable in the confinement, a launcher that cannot resume is refused by the probe before launch, and capture through a stub launcher finds the fork by the id GraphLoom chose; `session open` refuses a Pi session, a ref whose harness disagrees with its record and a finished run, and refuses while the owning job or a continuation of it runs; the opened session's confinement (repository agent-config masks applied, no GitHub token in its environment, the checkout read-only); `--stage answers` opens the answerer, not the checker; `--decline review-layer` records `operator-approval` evidence and finishes the run; `--approve review-layer` refused by 0.1. Task preparation: `validateTaskPlan` refuses a step that would run a command (an unknown kind, an extra property) and any `intoRef` or `to` outside `refs/graphloom/<graph>/`; a `fetch` from a local smart-HTTP fixture runs no hook (a `reference-transaction` hook's marker never appears) and leaves the working tree, index and `HEAD` unchanged; `--dry-run` creates no ref and writes no file; an existing `task.yaml` is refused without `--force`; pr-review's plan for a temporary repository whose fixture remote serves a fake `refs/pull/7/head`: the six steps of [§3.1](#31-task), `heads/<sha>` pinned at the fetched head, `base` the merge base, the request naming that sha, and the written task passing `graphloom check`; a URL argument gives the same plan; another `owner/repo` than the profile's `project`, a missing profile and a malformed argument are refused. Under real Docker: a coverage run with `--network none`, where a test that dials out fails; the limits enforced (a fork bomb stops at `--pids-limit`, an allocation at `--memory`, the host unaffected); only the checkout and the build cache writable, the root read-only, no host home, `--pull never`; the container killed by name on stop and removed on resume; coverage attributed by line range, Go from the coverprofile and TypeScript from `coverage-final.json` statements, with the report written under the job's temporary directory and the checkout unchanged. One live run on a real BanyanDB PR, read by the user, with recall of new symbols, tests and existing equivalents checked by hand |
 | P2 | **Deltas and mutation.** Head mapping, then the since-last sections for the report and the Q&A, with question closure. Mutation testing (`gomutate`, `tsmutate`) at covered sites, with `weak-test` questions | Real-Git fixtures for append, rebase, squash, base merge and missing objects; rehearsal `report-delta` and `surviving-mutant`; `gomutate` fixtures (one per inversion: `<`/`>=`, `>`/`<=`, `==`/`!=` and `true`/`false`, each direction; no other operator ever produced; overlay leaves the checkout unchanged, a compile-failing mutant is `invalid`, uncovered sites `not-run (uncovered)`, the budget cut-off records `not-run`); `tsmutate` fixtures likewise (adding `===`/`!==`; no other operator ever produced, and a fixture fails if one appears; literal types never mutated; the Vite `load` overlay leaves the checkout and its `node_modules` unchanged; a module reached through two import specifiers is mutated for both; a syntax-error mutant is `invalid`), and one run on a real canopy (vitest ^5) and a real GraphLoom (vitest ^3) test; a live re-run after a contributor push |
 | P3 | review-kit extracted and vendored into issue-fix | issue-fix tests unchanged; `describe()` byte-identical for every shipped profile; drift test; `resume --update-plugin` from 0.16.0 |
 | P4 | **Review layer, local:** `--approve review-layer`; Review, Checks (definition only), Draft, and Publish as a stop; the three aspect reviewers with their shipped rule files (Go, TypeScript), the rule-group assertion, the per-aspect sweep and verifiers, cross-aspect dedupe; reproducing tests (`scripts/repro.sh`, Go overlay, vitest scratch config, fix run) in the P1 Docker sandbox, unchanged; `findings-proven`; `needs author` items pre-selected and other Q&A items promotable as draft comments; verdict rule; edits. Reviewer forking: generic `JobSpec.forkFrom` and `AgentRoleDeclaration.sameAs`; the review base session; each aspect's passes and corrections as forks of it; the seeded fallback with its conversation summary | Graph tests per requirement; anchor validation on real GitHub patches; secret and private-reference scans; report-only requirements pass on a decline; harness resolution for every pair of available harnesses, and refusal with one. Against the bundled ocr 1.13.3: each shipped rule file yields only `custom` groups carrying its language's rule text for `.go`, `.ts`, `.tsx` and other files, and a wrongly shaped file is caught by the assertion. Under real Docker, with the checkout unchanged after every run: a Go repro in an internal and an external test package through `-overlay`; a vitest repro whose relative import, workspace-package import and `vi.mock` path resolve as from its virtual location, on a real canopy (vitest ^5) and a real GraphLoom (vitest ^3) workspace; attribution fixtures (assertion failure → proven, compile error, panic outside the cited code, timeout and memory kill → inconclusive, one failure in two runs → flaky, passing → does not fail); a fix run that passes and one that does not. Forking: each aspect reviewer forks the latest Answers conversation as its own session, and the parent stays byte-identical; without a conversation it forks the answerer; `forkFrom` refused across harnesses, together with `continueFrom`, and for an omitted transcript; over `review.fork.maxParentTokens` the pass is `context: seeded` with its reason and the summary keeps the maintainer's messages verbatim; harness resolution per the [§13.1](#131-roles) table, with a `reviewer-<aspect>` key refused. Rehearsal `operator-conversation-carried`, `context-seeded`, `no-conversation`, `no-findings`, `aspect-rules-ignored`, `cross-aspect-dedupe`, `bug-proven-by-test`, `test-does-not-fail`, `security-repro`, `maintainability-non-behavioral`, `repro-disabled`, and `happy` up to the stop |

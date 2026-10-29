@@ -16,6 +16,11 @@ _Avoid_: Stage list, prompt collection
 **Task**:
 A request to run a selected graph against a target repository for a stated result.
 
+**Task plan**:
+The data a graph's optional `prepareTask` hook returns for `graphloom task new`:
+a bounded list of generic steps (fetch a ref, resolve a commit, pin a ref, write
+the task) that the CLI validates and executes. It never runs a command.
+
 **Run**:
 One execution of a task, with pinned inputs, an isolated workspace, evidence,
 and finite resources.
