@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
+import { assertConfinement } from "./confinement.js";
 import type { JobKind, JobSpec } from "./types.js";
 
 /** Qualified executor identity, e.g. `graphloom.agent/run` or `acme.echo/ping`. */
@@ -402,11 +403,16 @@ export function pinJobExecutor(job: JobSpec): JobSpec {
     if (n > 0 && job.kind !== "agent") throw new Error(`only agent jobs carry sessions; a ${job.kind} job cannot set timeoutContinuations`);
   }
 
+  const withConfinement = job.confinement !== undefined ? { ...withTools, confinement: assertConfinement(job.confinement) } : withTools;
+  if (withConfinement.confinement?.kind === "docker" && job.kind !== "command") {
+    throw new Error("only command jobs run in a docker confinement");
+  }
+
   if (job.executor) {
     const pin = assertExecutorPin(job.executor);
-    return { ...withTools, executor: pin };
+    return { ...withConfinement, executor: pin };
   }
-  return { ...withTools, executor: builtinPinForKind(job.kind) };
+  return { ...withConfinement, executor: builtinPinForKind(job.kind) };
 }
 
 const EFFECTS: readonly ExecutorEffect[] = ["read", "write", "ambiguous"];

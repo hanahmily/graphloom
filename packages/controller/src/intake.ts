@@ -119,6 +119,12 @@ export interface TaskFile {
    * controller never reads a field of it.
    */
   config?: string;
+  /**
+   * A commit of the task repository to pin instead of its `HEAD`: the run's
+   * worktree starts there and every change is measured against it. Intake
+   * checks it names a commit; absent means `HEAD`.
+   */
+  base?: string;
 }
 
 /** Largest task config intake accepts: it travels on every plugin call. */
@@ -262,6 +268,7 @@ export function parseTaskYaml(text: string): TaskFile {
   let repo: string | undefined;
   let request: string | undefined;
   let config: string | undefined;
+  let base: string | undefined;
   let sourceRepair: boolean | undefined;
   let validatorSubstitution: boolean | undefined;
   let executorRepair: boolean | undefined;
@@ -327,6 +334,11 @@ export function parseTaskYaml(text: string): TaskFile {
       repo = unquote(repoMatch[1]!);
       continue;
     }
+    const baseMatch = /^base:\s*(.+?)\s*$/.exec(line);
+    if (baseMatch) {
+      base = unquote(baseMatch[1]!);
+      continue;
+    }
     const configMatch = /^config:\s*(.+?)\s*$/.exec(line);
     if (configMatch) {
       config = unquote(configMatch[1]!);
@@ -381,6 +393,12 @@ export function parseTaskYaml(text: string): TaskFile {
   if (config !== undefined) {
     if (config === "") throw new IntakeError("config must name a JSON file relative to the task file");
     task.config = config;
+  }
+  if (base !== undefined) {
+    if (base === "" || base.startsWith("-") || /\s/.test(base)) {
+      throw new IntakeError(`base must name a commit of the repository (a hash, tag or branch), got ${JSON.stringify(base)}`);
+    }
+    task.base = base;
   }
   return task;
 }
@@ -444,7 +462,7 @@ export async function intakeTask(taskPath: string): Promise<IntakePin> {
     throw new IntakeError(`graph ${task.graph} needs a task config: name a JSON file with config: in the task file`);
   }
 
-  const pinnedHead = await gitRevParse(repoPath, "HEAD");
+  const pinnedHead = task.base !== undefined ? await resolveBaseCommit(repoPath, task.base) : await gitRevParse(repoPath, "HEAD");
   const entryPath = resolveBundleEntryFromManifest(bundlePath, manifestRaw);
   let entryBytes: Buffer;
   try {
@@ -566,6 +584,18 @@ async function gitTopLevel(dir: string): Promise<string> {
   } catch {
     throw new IntakeError(`repo is not inside a git repository: ${dir}`);
   }
+}
+
+/** The commit `base` names in the repository, verified; never a tree, blob or missing object. */
+async function resolveBaseCommit(repoPath: string, base: string): Promise<string> {
+  try {
+    const { stdout } = await execFileAsync("git", ["rev-parse", "--verify", "--quiet", `${base}^{commit}`], { cwd: repoPath });
+    const commit = stdout.trim();
+    if (commit !== "") return commit;
+  } catch {
+    /* reported below */
+  }
+  throw new IntakeError(`base ${JSON.stringify(base)} is not a commit in ${repoPath}; fetch it or name another with base:`);
 }
 
 async function gitRevParse(repoPath: string, rev: string): Promise<string> {

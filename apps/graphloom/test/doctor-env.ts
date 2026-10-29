@@ -44,6 +44,8 @@ export interface DoctorEnvOptions {
   gh?: GhMode;
   /** "ok": the real bwrap (or, without one, a probe that passes); "fail": cannot create a namespace; "missing": none on PATH. */
   bwrap?: "ok" | "fail" | "missing";
+  /** A stub docker: "rootless" or "rootful" daemon, "nodaemon" (the CLI cannot reach one), or "missing" (the default: none on PATH). */
+  docker?: "rootless" | "rootful" | "nodaemon" | "missing";
   /** Set MINIMAX_CN_API_KEY to a stub value. */
   piEnv?: boolean;
   /** Write a stub deepseek entry into Pi's auth store. */
@@ -83,7 +85,7 @@ export async function removeDoctorBase(): Promise<void> {
   systemBin = undefined;
 }
 
-const STUBBED = new Set(["node", "nodejs", "npm", "npx", "corepack", "pnpm", "yarn", "claude", "codex", "opencode", "gh", "bwrap"]);
+const STUBBED = new Set(["node", "nodejs", "npm", "npx", "corepack", "pnpm", "yarn", "claude", "codex", "opencode", "gh", "bwrap", "docker"]);
 
 /** The host's tools, linked, without Node and without the CLIs the stubs stand in for. */
 function systemPath(): Promise<string> {
@@ -179,6 +181,21 @@ echo "stub gh: unsupported: $*" >&2
 exit 1
 `;
 
+function dockerStub(mode: "rootless" | "rootful" | "nodaemon"): string {
+  if (mode === "nodaemon") {
+    return "#!/bin/sh\necho 'Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?' >&2\nexit 1\n";
+  }
+  const options = mode === "rootless" ? '["name=seccomp,profile=builtin","name=rootless"]' : '["name=apparmor","name=seccomp,profile=builtin"]';
+  return `#!/bin/sh
+case "$1" in
+  version) echo 27.3.1; exit 0 ;;
+  info) echo '${options}'; exit 0 ;;
+esac
+echo "stub docker: unsupported: $*" >&2
+exit 1
+`;
+}
+
 function bwrapStub(mode: "ok" | "fail"): string {
   if (mode === "fail") return "#!/bin/sh\necho 'bwrap: setting up uid map: Permission denied' >&2\nexit 1\n";
   return realBwrap !== undefined ? `#!/bin/sh\nexec '${realBwrap}' "$@"\n` : "#!/bin/sh\nexit 0\n";
@@ -201,6 +218,8 @@ export async function makeDoctorEnv(options: DoctorEnvOptions = {}): Promise<Doc
   if (codex !== "missing") await writeFile(path.join(bin, "codex"), CODEX_STUB, { mode: 0o755 });
   await writeFile(path.join(home, ".fake-codex-mode"), codex);
   if (gh !== "missing") await writeFile(path.join(bin, "gh"), GH_STUB, { mode: 0o755 });
+  const docker = options.docker ?? "missing";
+  if (docker !== "missing") await writeFile(path.join(bin, "docker"), dockerStub(docker), { mode: 0o755 });
   if (bwrap !== "missing") await writeFile(path.join(bin, "bwrap"), bwrapStub(bwrap), { mode: 0o755 });
   // Claude Code's own login marker, which the S3 supervisor probe looks for (presence only; no credential in it).
   if (claude === "ok" || claude === "noauth") {

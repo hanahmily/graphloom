@@ -532,7 +532,7 @@ async function performRehearsal(
     tempTaskPath,
     // The task's own config path: the temporary task sits beside it, so the
     // rehearsal intakes the same config (and digest) a live run would.
-    `graph: ${intake.task.graph}\nrepo: ${intake.task.repo}\n${intake.task.config !== undefined ? `config: ${JSON.stringify(intake.task.config)}\n` : ""}request: |\n${requestBody}\nbudgets:\n${budgetLines}\n`,
+    `graph: ${intake.task.graph}\nrepo: ${intake.task.repo}\n${intake.task.base !== undefined ? `base: ${JSON.stringify(intake.task.base)}\n` : ""}${intake.task.config !== undefined ? `config: ${JSON.stringify(intake.task.config)}\n` : ""}request: |\n${requestBody}\nbudgets:\n${budgetLines}\n`,
     "utf8",
   );
 

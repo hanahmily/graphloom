@@ -29,8 +29,24 @@ export {
   type RegistryRunnerOptions,
 } from "./registry.js";
 export { digestExecutorSource } from "./digest.js";
-export { assertSandboxSupported, packageRootOf } from "./sandbox.js";
-export { confineWorker, confinementUnsupported, hasPrivateTmp, operatorGoSettings, type ConfinedWorker, type OperatorGo } from "./confine.js";
+export {
+  DOCKER_RUN_MODULE,
+  RUN_LABEL,
+  containerIdentity,
+  daemonIsRootless,
+  dockerImageProblem,
+  ensureDockerImage,
+  type ImageOutcome,
+  dockerRunArgs,
+  killContainers,
+  removeRunContainers,
+  withDockerConfinement,
+  type DockerRunOptions,
+  type DockerRunSpec,
+} from "./sandbox-docker.js";
+export { agentExecutables } from "./registry.js";
+export { assertSandboxSupported, packageClosure, packageRootOf } from "./sandbox.js";
+export { confineWorker, confinementUnsupported, expandHome, hasPrivateTmp, operatorGoSettings, type BwrapSandbox, type ConfinedWorker, type OperatorGo } from "./confine.js";
 export {
   createBuiltinExecutorRunner,
   type BuiltinExecutorPackage,

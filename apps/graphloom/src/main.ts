@@ -20,6 +20,7 @@ import { requireRunnerConfig, runnerConfigPath } from "./runner-config.js";
 import { discover, probeEnabledSupervisors } from "./discovery.js";
 import { doctorReport, formatDoctor, taskProfile, type TaskInputs } from "./doctor.js";
 import { describeTask } from "./rehearsal.js";
+import { SANDBOX_USAGE, sandboxCommand } from "./sandbox.js";
 import { isInteractive, runSetup, terminalPrompter } from "./setup.js";
 import { onceStopHook, parseDuration, waitForRun, type StopNotice } from "./notify.js";
 import { formatRunStats, loadRunStats } from "./stats.js";
@@ -110,6 +111,11 @@ async function main(): Promise<void> {
 
   if (cmd === "skills") {
     process.exitCode = await skillsCommand(args.slice(1));
+    return;
+  }
+
+  if (cmd === "sandbox") {
+    process.exitCode = await sandboxCommand(args.slice(1));
     return;
   }
 
@@ -618,10 +624,17 @@ Usage:
   graphloom version [--json | --root]
   graphloom doctor [--task <task.yaml>] [--json]
   graphloom setup [--yes]
+  ${SANDBOX_USAGE}
   graphloom skills list [--agent <claude-code|codex|opencode>] [--dir <dir>] [--json]
   graphloom skills install [<name>...] [--agent <claude-code|codex|opencode>] [--dir <dir>] [--force]
   graphloom skills update [--agent <claude-code|codex|opencode>] [--dir <dir>] [--quiet]
   graphloom skills remove [<name>...] [--agent <claude-code|codex|opencode>] [--dir <dir>] [--force]
+
+sandbox pull puts a docker sandbox image, pinned by digest, in the local image
+store before a run; a graph's environment check calls it for the image its
+profile names, since a sandboxed job runs with --pull never and never pulls.
+--check only reports whether the image is present (exit 1 when it is not).
+graphloom doctor reports the docker CLI, the daemon, and whether it is rootless.
 
 Installed releases (handled by the shim in ~/.local/bin, docs/design-release.md §4.3):
   graphloom upgrade [<version>] [--no-switch]

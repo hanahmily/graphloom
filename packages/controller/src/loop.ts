@@ -1184,7 +1184,9 @@ async function runNormalLoopSteps(
           result = { status: "failed", summary: "executor cancelled before start", runId: state.runId, operationId, generation };
         } else {
           before = unchanged;
-          const confinement = confined ? await jobConfinement(state) : undefined;
+          // A job that asks for a bwrap sandbox runs within the run's scope too: its writes stay in the workspace.
+          const confinedRun = confined || job.confinement?.kind === "bwrap";
+          const confinement = confinedRun ? await jobConfinement(state) : undefined;
           children =
             job.kind === "agent" || job.tools !== undefined
               ? createChildPort(
@@ -1209,7 +1211,8 @@ async function runNormalLoopSteps(
               pinnedHead: state.intake.pinnedHead,
               stateDir: state.stateDir,
               artifactDir: state.artifactDir,
-              ...(confined ? { scratchDir: scratchDirOf(state) } : {}),
+              ...(confinedRun ? { scratchDir: scratchDirOf(state) } : {}),
+              runScratchDir: scratchDirOf(state),
               checks: state.definition.environment?.checks ?? [],
               prepare: state.definition.environment?.prepare ?? [],
               bundlePath: state.intake.bundle.bundlePath,
@@ -1228,6 +1231,7 @@ async function runNormalLoopSteps(
               generation,
               worktreePath: state.worktreePath,
               artifactDir: state.artifactDir,
+              scratchDir: scratchDirOf(state),
               signal: abort.signal,
               ...(confinement !== undefined ? { confinement } : {}),
               ...(children !== undefined ? { children } : {}),

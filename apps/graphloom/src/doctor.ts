@@ -118,6 +118,7 @@ export function machineChecks(d: Discovery): DoctorCheck[] {
   for (const [name, t, pkg] of [["git", host.git, "git"], ["flock", host.flock, "util-linux"]] as const) {
     checks.push(t.path !== undefined ? check("host", name, "pass", `${t.version ?? "version unknown"} (${t.path})`) : check("host", name, "fail", `${name} is not on PATH`, `sudo apt-get install ${pkg}`));
   }
+  checks.push(dockerCheck(host.docker));
   checks.push(
     host.confinement.ok
       ? check("host", "confinement", "pass", "bwrap can create a namespace")
@@ -144,6 +145,32 @@ export function machineChecks(d: Discovery): DoctorCheck[] {
   checks.push(...configurationChecks(d));
   checks.push(...setupChecks(d));
   return checks;
+}
+
+const ROOTLESS_DOCS = "https://docs.docker.com/engine/security/rootless/";
+
+/**
+ * The docker sandbox's prerequisites. Optional, so never a fail: a graph that runs contributor code
+ * in a container reports "not run" without it. A rootful daemon works, but a user who can reach it
+ * (the `docker` group) is root-equivalent on the host, which is why rootless is recommended.
+ */
+function dockerCheck(docker: Discovery["host"]["docker"]): DoctorCheck {
+  if (docker.path === undefined) {
+    return check("host", "docker", "warn", "the docker CLI is not on PATH; graphs that run untrusted code in a container (a docker sandbox) will report \"not run\"", `install Docker Engine, rootless preferred: ${ROOTLESS_DOCS}`);
+  }
+  if (docker.daemonError !== undefined) {
+    return check("host", "docker", "warn", `${docker.path}: the daemon is not reachable by this user (${docker.daemonError}); docker sandbox jobs will report "not run"`, `start the daemon, or set up rootless Docker: ${ROOTLESS_DOCS}`);
+  }
+  const server = `docker ${docker.serverVersion ?? "(version unknown)"} at ${docker.path}`;
+  if (docker.rootless === true) return check("host", "docker", "pass", `${server}; daemon reachable; rootless`);
+  const known = docker.rootless === false ? "the daemon is not rootless" : "whether the daemon is rootless could not be read";
+  return check(
+    "host",
+    "docker",
+    "warn",
+    `${server}; daemon reachable; ${known}. Membership in the docker group is root-equivalent on this host; rootless Docker is recommended`,
+    `set up rootless Docker: ${ROOTLESS_DOCS}`,
+  );
 }
 
 function piCheck(d: Discovery): DoctorCheck {

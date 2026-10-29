@@ -348,6 +348,8 @@ export interface InspectReport {
   };
   /** Per stage, dispatches settled since its last receipt (§4.6). */
   dispatchesSinceReceipt: Record<string, { agent: number; total: number; since: string }>;
+  /** The task's `base:` and the commit intake pinned for it, instead of the repository's HEAD; absent when the task names none. */
+  base?: { requested: string; commit: string };
   /** The task config intake pinned (path and digest; its content stays with the run). */
   config?: { path: string; sha256: string };
   /** Deterministic remedies applied without a model decision (quota waits, compactions, re-asks, retries), newest last. */
@@ -628,6 +630,8 @@ export function createController(): Controller {
         if (state.status === "succeeded" || state.status === "failed") {
           return;
         }
+        // No controller owns the run now: whatever sandbox a stopped job left behind is stale.
+        await request.runner.releaseRun?.(state.runId).catch(() => undefined);
         // Evidence belongs to the stop being resumed; any stop from here on is a new one.
         // A pre-#120 run may carry `resumedSinceLastDecision`; nothing reads it
         // now, since the supervisor's first episode after resume starts a fresh
@@ -1460,6 +1464,7 @@ function toInspect(state: DurableRunState): InspectReport {
     generation: state.generation,
     worktreePath: state.worktreePath,
     stateDir: state.stateDir,
+    ...(state.intake.task.base !== undefined ? { base: { requested: state.intake.task.base, commit: state.intake.pinnedHead } } : {}),
     contracts: contractSummary(state.evidence),
     dispatchesSinceReceipt: structuredClone(state.dispatchesSinceReceipt ?? {}),
     remedies: structuredClone(state.remedies ?? []),
