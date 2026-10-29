@@ -10,6 +10,7 @@ import {
   isTestPath,
   matchesGeneratedGlob,
   parseHunkFile,
+  unquoteGitPath,
 } from "../src/metrics/index.js";
 
 describe("hunks", () => {
@@ -47,6 +48,16 @@ describe("hunks", () => {
         ],
       ],
     ]);
+  });
+});
+
+describe("git path quoting", () => {
+  it("decodes quoted non-ASCII and escaped names in diff headers", () => {
+    expect(unquoteGitPath('"caf\\303\\251.go"')).toBe("café.go");
+    expect(unquoteGitPath('"b/a\\"b\\\\c\\td.ts"')).toBe('b/a"b\\c\td.ts');
+    expect(unquoteGitPath("b/plain.go")).toBe("b/plain.go");
+    const diff = '--- a/x\n+++ "b/caf\\303\\251.go"\n@@ -1 +1,2 @@\n';
+    expect([...hunksFromUnifiedDiff(diff).keys()]).toEqual(["café.go"]);
   });
 });
 

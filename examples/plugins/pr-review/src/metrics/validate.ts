@@ -76,6 +76,39 @@ function isStep(v: unknown): v is Step {
   return typeof v === "object" && v !== null && isInt((v as Step).line) && typeof (v as Step).kind === "string";
 }
 
+/** A description of the first structural problem in the document, if any. */
+function shapeErrors(d: MetricsDocument): string | undefined {
+  const obj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+  for (const [i, s] of d.skipped.entries()) {
+    if (!obj(s) || typeof s.path !== "string" || typeof s.reason !== "string") return `skipped[${i}]`;
+  }
+  for (const [i, f] of d.files.entries()) {
+    if (!obj(f) || typeof f.path !== "string" || typeof f.language !== "string" || typeof f.test !== "boolean") {
+      return `files[${i}]`;
+    }
+    if (!Array.isArray(f.functions)) return `files[${i}].functions`;
+    for (const [j, e] of f.functions.entries()) {
+      if (!Array.isArray(e) || e.length !== 3) return `files[${i}].functions[${j}]`;
+    }
+  }
+  for (const [i, r] of d.records.entries()) {
+    if (
+      !obj(r) ||
+      typeof r.path !== "string" ||
+      typeof r.function !== "string" ||
+      typeof r.startLine !== "number" ||
+      typeof r.endLine !== "number" ||
+      typeof r.complexity !== "number" ||
+      typeof r.nesting !== "number" ||
+      typeof r.test !== "boolean" ||
+      (r.change !== "added" && r.change !== "modified")
+    ) {
+      return `records[${i}]`;
+    }
+  }
+  return undefined;
+}
+
 /** The declaring line of a function must show a function-like token. */
 function declaresFunction(language: Language, line: string, name: string): boolean {
   if (language === "go") return /\bfunc\b/.test(line);
@@ -99,6 +132,14 @@ export function validateMetricsDocument(doc: unknown, options: ValidateOptions):
     fail("records, files and skipped must be arrays");
     return { ok: false, errors };
   }
+  const shape = shapeErrors(d as MetricsDocument);
+  if (shape !== undefined) {
+    fail(`malformed document: ${shape}`);
+    return { ok: false, errors };
+  }
+  // Each tool measures its own language and skips the other's files.
+  const toolLanguage: Language | undefined =
+    d.tool === "gometrics" ? "go" : d.tool === "tsmetrics" ? "typescript" : undefined;
 
   const globs = options.generated ?? [];
   const accounted = new Set<string>();
@@ -108,7 +149,9 @@ export function validateMetricsDocument(doc: unknown, options: ValidateOptions):
     accounted.add(skip.path);
     const language = languageOf(skip.path);
     if (skip.reason === "unsupported-language") {
-      if (language !== undefined) fail("skipped as unsupported but the language is supported", skip.path);
+      if (language !== undefined && (toolLanguage === undefined || language === toolLanguage)) {
+        fail("skipped as unsupported but the tool supports its language", skip.path);
+      }
     } else if (skip.reason === "not-in-head") {
       if (options.readFile(skip.path) !== undefined) fail("skipped as not in head but the file exists", skip.path);
     } else if (skip.reason === "generated") {
@@ -128,6 +171,10 @@ export function validateMetricsDocument(doc: unknown, options: ValidateOptions):
     const text = options.readFile(file.path);
     if (language === undefined || language !== file.language) {
       fail("index language does not match the path", file.path);
+      continue;
+    }
+    if (toolLanguage !== undefined && language !== toolLanguage) {
+      fail(`${String(d.tool)} measures ${toolLanguage} files, not ${language}`, file.path);
       continue;
     }
     if (text === undefined) {
@@ -284,6 +331,10 @@ function validateRecord(
     return;
   }
   const cov = rec.coverage;
+  if (typeof cov !== "object" || cov === null) {
+    where("coverage must be an object");
+    return;
+  }
   if (cov.source === "measured") {
     if (!Number.isInteger(cov.covered) || !Number.isInteger(cov.total) || cov.covered < 0 || cov.covered > cov.total) {
       where("measured coverage needs integers with 0 <= covered <= total");

@@ -13,8 +13,9 @@ import type { FunctionIndexEntry } from "./record.js";
  */
 export function isOwnLine(fn: FunctionIndexEntry, all: readonly FunctionIndexEntry[], line: number): boolean {
   if (line < fn[1] || line > fn[2]) return false;
-  for (const other of all) {
-    if (other === fn) continue;
+  // Index order is pre-order, so a function's nested functions follow it. That
+  // also tells apart nested functions that share one line range.
+  for (const other of all.slice(all.indexOf(fn) + 1)) {
     if (other[1] >= fn[1] && other[2] <= fn[2] && line > other[1] && line < other[2]) return false;
   }
   return true;

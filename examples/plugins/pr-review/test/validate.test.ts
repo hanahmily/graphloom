@@ -281,6 +281,52 @@ describe("validateMetricsDocument rejects inconsistent records (never corrects)"
     expect(messages(d).join("\n")).toMatch(/decisions must be a list/);
   });
 
+  it("rejects malformed nested entries instead of throwing", () => {
+    const bad: unknown[] = [
+      { ...doc, skipped: [null] },
+      { ...doc, files: [{ path: "src/a.ts", language: "typescript", test: false }] },
+      { ...doc, files: [{ path: "src/a.ts", language: "typescript", test: false, functions: [["x"]] }] },
+      { ...doc, records: [{}] },
+      { ...doc, records: [null] },
+    ];
+    for (const d of bad) {
+      const r = check(d);
+      expect(r.ok).toBe(false);
+      expect(r.errors[0]?.message).toMatch(/malformed document/);
+    }
+    const d = clone();
+    (rec(d, "src/a.small") as unknown as { coverage: unknown }).coverage = null;
+    (rec(d, "src/a.small") as unknown as { crap: unknown }).crap = 5;
+    expect(messages(d).join("\n")).toMatch(/coverage must be an object/);
+  });
+
+  it("accepts each tool's output for a mixed Go and TypeScript change", () => {
+    const mixed = parseHunkFile("src/a.ts:1-8\nsrc/a.ts:16\ncmd/x.go:1-3\n");
+    const ts = runTsMetrics(root, mixed, []);
+    expect(ts.skipped).toEqual([{ path: "cmd/x.go", reason: "unsupported-language" }]);
+    expect(check(ts, mixed)).toEqual({ ok: true, errors: [] });
+    // The same skip is wrong for a tool that does support the language.
+    const wrong = { ...ts, tool: "gometrics" };
+    expect(check(wrong, mixed).ok).toBe(false);
+  });
+
+  it("measures the inner function of a curried arrow that shares its range", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "gl-metrics-"));
+    writeFileSync(
+      path.join(dir, "c.ts"),
+      "export const f = (a: number) => (b: number) => {\n  if (a && b) {\n    return 1;\n  }\n  return 0;\n};\n",
+    );
+    const inner = parseHunkFile("c.ts:3\n");
+    const r = runTsMetrics(dir, inner, []);
+    expect(r.records.map((x) => [x.function, x.change])).toEqual([["c.f.func1", "modified"]]);
+    const opts = { readFile: (p: string) => readFileSync(path.join(dir, p), "utf8"), hunks: inner };
+    expect(validateMetricsDocument(r, opts)).toEqual({ ok: true, errors: [] });
+    const all = parseHunkFile("c.ts:1-6\n");
+    const added = runTsMetrics(dir, all, []);
+    expect(added.records.map((x) => x.function)).toEqual(["c.f", "c.f.func1"]);
+    expect(validateMetricsDocument(added, { ...opts, hunks: all })).toEqual({ ok: true, errors: [] });
+  });
+
   it("requires coverage when asked", () => {
     const r = validateMetricsDocument(doc, { readFile: read, hunks, requireCoverage: true });
     expect(r.errors.some((e) => /coverage and crap are required/.test(e.message))).toBe(true);

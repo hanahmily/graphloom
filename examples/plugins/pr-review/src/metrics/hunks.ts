@@ -33,6 +33,33 @@ export function formatHunkFile(hunks: Hunks): string {
 }
 
 /**
+ * Decodes Git's C-style path quoting (`"caf\303\251.go"`), which Git applies
+ * to names with non-ASCII or special characters unless `core.quotePath` is off.
+ */
+export function unquoteGitPath(raw: string): string {
+  if (raw.length < 2 || !raw.startsWith('"') || !raw.endsWith('"')) return raw;
+  const bytes: number[] = [];
+  const body = raw.slice(1, -1);
+  const simple: Record<string, number> = { a: 7, b: 8, t: 9, n: 10, v: 11, f: 12, r: 13, '"': 34, "\\": 92 };
+  for (let i = 0; i < body.length; i++) {
+    const c = body.charAt(i);
+    if (c !== "\\") {
+      bytes.push(...new TextEncoder().encode(c));
+      continue;
+    }
+    const oct = /^[0-7]{1,3}/.exec(body.slice(i + 1));
+    if (oct) {
+      bytes.push(parseInt(oct[0], 8));
+      i += oct[0].length;
+    } else {
+      bytes.push(simple[body.charAt(i + 1)] ?? body.charCodeAt(i + 1));
+      i++;
+    }
+  }
+  return new TextDecoder().decode(Uint8Array.from(bytes));
+}
+
+/**
  * Head-side added or changed line ranges from a unified diff made with `-U0`
  * (for example `git diff -U0 -w base head`). With `-w` a whitespace-only
  * change is not a hunk, so it does not make a function "modified". Pure
@@ -43,7 +70,7 @@ export function hunksFromUnifiedDiff(diff: string): Hunks {
   let path: string | undefined;
   for (const line of diff.split("\n")) {
     if (line.startsWith("+++ ")) {
-      const name = line.slice(4).split("\t")[0] as string;
+      const name = unquoteGitPath(line.slice(4).split("\t")[0] as string);
       path = name === "/dev/null" ? undefined : name.replace(/^b\//, "");
       continue;
     }
