@@ -1,0 +1,269 @@
+# Code quality metrics
+
+Status: proposed, 2026-10-28. Not implemented.
+
+This document defines four metrics once, so that every graph measures the
+same thing:
+
+- cyclomatic complexity;
+- nesting depth;
+- CRAP;
+- mutation survival.
+
+Graphs differ only in what they do with a measurement:
+
+| Graph | Use |
+|---|---|
+| [pr-review](design-pr-review-graph.md) | Facts in the change report's Measurements section, and questions for the author. Never a rejection |
+| [issue-fix](design-issue-fix-graph.md) | Gates on the graph's own change, designed in the issue-fix document |
+
+The thresholds are the operator's ("ub-mode") rules. A profile may tighten
+them but not loosen them.
+
+## 1. Scope: changed functions only
+
+A metric applies only to a function that the change **adds or modifies**. A
+function counts as modified when any of its body or signature lines on the
+head side are added or changed in the diff. Untouched legacy code is never
+measured, even in a changed file. The scope also excludes:
+
+- **Deleted functions.** They are reported by the change report, not
+  measured.
+- **Generated files.** These are files matching the profile's `generated`
+  globs, or starting with Go's `// Code generated … DO NOT EDIT.` line.
+- **Test files**, from coverage, CRAP and mutation. Tests are the
+  instrument, not the subject. Test files are still measured for complexity
+  and nesting.
+
+Function identity is the language-qualified name: the package (Go) or the
+module path (TypeScript), the receiver or class, and the name. A closure or
+function literal is its own function, named `<enclosing>.func<n>` in source
+order, as Go's runtime names them.
+
+## 2. Definitions
+
+### 2.1 Cyclomatic complexity, `comp(m)`
+
+`comp(m)` is 1 plus the number of decision points in the function's own body.
+Nested function literals are excluded, since they are measured on their own.
+
+| Decision point | Go | TypeScript |
+|---|---|---|
+| Conditional branch | `if` (each `else if` too) | `if` (each `else if` too), `?:` |
+| Loop | `for` (all forms) | `for`, `for…in`, `for…of`, `while`, `do…while` |
+| Case | each `case` and `select` `case` with an expression or channel; not `default` | each `case` with a test; not `default` |
+| Short-circuit | each `&&`, `\|\|` | each `&&`, `\|\|`, `??` |
+| Exception | — | each `catch` |
+
+The Go column is gocyclo's counting rule
+([fzipp/gocyclo](https://github.com/fzipp/gocyclo)). Its tests compare the
+plugin tool with gocyclo on a fixture corpus. The TypeScript column is fixed
+here rather than borrowed from a linter, so a linter upgrade cannot change a
+gate.
+
+**Rule:** `comp(m) < 10`.
+
+### 2.2 Nesting depth
+
+Nesting depth is the deepest chain of nested control blocks in the
+function's own body, where a body with no control block has depth 0:
+
+- `if`, `for`/loops, `switch`, `select` and `try` each add one level.
+- An `else if` or `else` stays at its `if`'s level.
+- A `case` clause does not add a level beyond its `switch`.
+- Bare `{}` blocks and function literals add nothing; a literal is measured
+  as its own function.
+
+**Rule:** `depth(m) <= 3`.
+
+### 2.3 Coverage, `cov(m)`
+
+`cov(m)` is the fraction, from 0 to 1, of the function's executable statements
+that the tests of the touched packages executed, in a checkout of the head
+inside the Docker sandbox (§4).
+
+- **Go:** `go test -coverprofile -covermode=set -coverpkg=<touched packages>
+  <touched packages>`. A statement is covered when its coverprofile block is
+  covered. Blocks are attributed to a function by line range.
+- **TypeScript:** V8 coverage collected by [c8](https://github.com/bcoe/c8)
+  around the profile's test command. c8 reports lines rather than
+  statements, so this uses executed lines over executable lines in the
+  function's range, stated as line coverage in every record.
+
+When coverage was not measured, the record says `unknown` with the reason,
+for example "coverage disabled by the profile", "docker unavailable",
+"image not available" or "package did not build offline". CRAP then uses `cov = 0`, stated as the
+**upper bound**. A test that fails in the confined run does not void the
+coverage of the tests that ran. The failures are recorded as facts.
+
+
+### 2.4 CRAP
+
+```text
+CRAP(m) = comp(m)^2 * (1 - cov(m))^3 + comp(m)
+```
+
+**Threshold:** 30. The value is always reported with its coverage source:
+`measured`, or `unknown (upper bound, cov = 0)`. At `cov = 0` the formula is
+`comp^2 + comp`, so any function with `comp >= 5` reaches 30 when coverage is
+unknown. Records say so rather than leaving the reader to infer it.
+
+**Unknown-coverage rule.** With unknown coverage, the upper-bound CRAP is
+always *shown*. It *triggers* follow-up only when `comp >= 10`, where the
+complexity rule already applies. Below that, an upper bound of 30 or more
+reflects the missing measurement, not the function. With measured coverage,
+`CRAP >= 30` triggers follow-up as stated. A graph's follow-up is its own:
+pr-review asks a question, and issue-fix applies a gate.
+
+### 2.5 Mutation testing
+
+Mutation testing applies **operator inversion**, the operator's rule
+("把 > 改成 <=，把 true 改成 false"), to the changed functions only. Each
+operator site gives exactly one **mutant**, applied one at a time. Each mutant
+runs the tests of the touched packages in the Docker sandbox (§4).
+
+| Operator | Mutation (each direction) |
+|---|---|
+| Relational inversion | `<` ↔ `>=`, `>` ↔ `<=`, `==` ↔ `!=` |
+| Boolean literal flip | `true` ↔ `false` |
+
+Inversion is the logical complement: `a > b` becomes `a <= b`, never
+`a >= b`. In TypeScript, `===` ↔ `!==` is the same inversion as `==` ↔ `!=`.
+
+**The operator set is exactly this rule.** Statement removal, return-value
+replacement, arithmetic swaps, condition negation and every other operator
+are excluded. Adding one changes what "no surviving mutant" means for every
+graph and every profile, so it is a design decision that needs the operator's
+approval. It is not a profile setting.
+
+Each mutant has exactly one outcome:
+
+| Outcome | Meaning |
+|---|---|
+| `killed` | A test failed |
+| `timeout` | The tests ran past three times the baseline duration (at least 30 s). Counted as killed |
+| `survived` | All tests passed. The covering tests do not assert the mutated behaviour |
+| `invalid` | The mutant did not compile (rare for inversions, for example a constant expression the compiler checks). Excluded from the score |
+| `not-run` | The time budget ran out first. Listed, with the reason |
+
+**Mutation score** = (killed + timeout) / (killed + timeout + survived).
+
+**Rule:** no surviving mutant.
+
+A survivor may be *equivalent*: a mutation that changes no observable
+behaviour, for example inverting a condition whose two branches do the same
+thing, or `x == nil` → `x != nil` on a value that is never nil and whose
+both outcomes are handled alike. Only a
+reader can tell, so a survivor is never dropped automatically. A graph may
+record a reasoned "possibly equivalent" claim that an independent checker
+verifies.
+
+## 3. Tools
+
+These are the plugin defaults. A profile can override `argv` per language,
+but the definitions above stay fixed.
+
+| Metric | Go | TypeScript |
+|---|---|---|
+| Complexity, nesting | `gometrics`: a small stdlib-only `go/ast` program in the plugin's source | `tsmetrics`: a Node script on the TypeScript compiler API (`typescript`, a plugin dependency) |
+| Coverage | `go test -coverprofile` | c8 (bundled with the plugin at an exact version) |
+| Mutation | `gomutate`: a stdlib-only `go/ast` mutator that implements exactly the §2.5 inversions and runs `go test -overlay` | [StrykerJS](https://stryker-mutator.io/) (bundled at an exact version), with `mutate` line ranges and a mutator allowlist of exactly the §2.5 inversions (relational and boolean literal; every other mutator excluded). Where its equality mutator also produces non-inverting variants, such as `<` → `<=`, those are filtered out of the run. A test fixture fails if any non-§2.5 mutant appears |
+
+Why these tools:
+
+- **The plugin's own Go tools, not gocyclo plus gremlins or go-mutesting.**
+  - One stdlib-only program pair yields complexity, nesting and the decision
+    and nesting *evidence* that recomputation needs (§5). Line-ranged mutation
+    restricted to changed functions needs that evidence too.
+  - The operator set is exactly §2.5, the two inversions. The external Go
+    mutators' operator sets and scoping differ from it. Adapting one would mean patching a tool the
+    supervisor cannot repair inside a run.
+  - `go test -overlay` substitutes the mutated file without writing the
+    checkout. The "checks change no file" rule therefore holds, and mutants
+    can run one after another in one checkout.
+  - The tools are plugin source, vendored with the review kit
+    ([pr-review §14](design-pr-review-graph.md#14-sharing-code-with-issue-fix)),
+    so they are source-repairable and pinned with the plugin.
+  - Being stdlib-only, `go run` builds them offline inside the confinement.
+  - gocyclo stays as a cross-check in the tool's tests.
+- **StrykerJS for TypeScript.** It is the maintained mutation tool for the
+  ecosystem. It accepts line ranges, and a mutator allowlist maps it onto
+  §2.5. It is bundled, as open-code-review is
+  ([issue-fix](design-issue-fix-graph.md#bundled-open-code-review)), so
+  nothing is downloaded in a no-network job.
+- **c8** reads V8's own coverage around any Node test command, so it does not
+  depend on which coverage provider the repository configures.
+
+## 4. Execution and confinement
+
+| Measurement | Executes PR code? | Where it runs |
+|---|---|---|
+| Complexity, nesting | No. The plugin's tool parses only | A read-only bwrap command with no network, over the head tree. It always runs, on every profile, with or without Docker |
+| Coverage, mutation | Yes: the PR's tests | Only in the **Docker sandbox**: one `docker run` per job with `--network none`, `--cpus`, `--memory` (equal `--memory-swap`), `--pids-limit`, a read-only root, a sized tmpfs `/tmp`, the operator's uid and gid, `--cap-drop ALL`, `no-new-privileges`, `--pull never`, and an image pinned by digest. The candidate checkout and a per-run build cache are its only writable mounts. Dependency caches are mounted read-only, and no credentials, host environment or host home are passed. The limits are profile data (`metrics.sandbox`); its CPU and memory defaults are the ones the issue-fix banyandb-ql `bench-gates` command already uses. Each run has its own switch, `metrics.coverage` and `metrics.mutation.enabled`. The defaults are the graph's; pr-review turns both on |
+
+Images are checked, and pulled by digest if missing, before the run's first
+sandboxed job, never during one. The full sandbox and its residual risks are
+specified in [pr-review §12.2](design-pr-review-graph.md#122-confinement).
+When a switch is off, Docker or its daemon is unavailable, the image is
+missing, or a dependency is not in the cache, the record says `not run` with
+the reason, and CRAP uses the upper bound (§2.4). PR code never runs outside
+the sandbox.
+
+**Ordering.** Coverage runs first, and mutation uses its result. Mutants are
+generated only at sites that the coverage run executed. A site no test
+executed would survive by construction, so it is recorded
+`not-run (uncovered)` and left to the missing-test follow-up instead of
+costing a test run. When coverage did not run, mutation does not run either
+(`not run: no coverage`).
+
+Mutation runs within `metrics.mutation.timeBudgetMs` (default 30 minutes per
+run):
+
+- mutants are visited function by function in source order, one operator
+  site at a time, so a cut-off still covers every function a little;
+- each mutant costs one test run of the touched packages.
+
+The estimates below are for BanyanDB-sized Go packages:
+
+- the coverage run of the touched packages takes 2 to 15 minutes;
+- each relational operator and boolean literal at a covered site gives one
+  mutant, typically 2 to 8 per changed function, so a PR of 10 to 30 changed
+  functions has about 20 to 150 mutants;
+- a mutant takes 10 to 40 seconds after the first build, so the 30-minute
+  default fits about 45 to 180 mutants.
+
+Most PRs therefore finish inside the budget. A larger one ends with
+`not-run` mutants listed.
+
+## 5. Records and recomputation
+
+Every tool emits `graphloom-metrics-v1`, one record per changed function:
+
+```json
+{ "path": "pkg/schema/ttl.go", "function": "schema.ParseTTL", "startLine": 14, "endLine": 61,
+  "change": "added",
+  "complexity": 12, "decisions": [{ "line": 18, "kind": "if" }, { "line": 18, "kind": "&&" }],
+  "nesting": 4, "nestingPath": [{ "line": 20, "kind": "for" }, { "line": 22, "kind": "if" }],
+  "coverage": { "source": "measured", "covered": 21, "total": 30 },
+  "crap": 12.06,
+  "mutation": { "status": "run", "killed": 9, "timeout": 0, "invalid": 1,
+    "survivors": [{ "line": 27, "operator": "relational-inversion", "original": "n > max", "mutated": "n <= max" }] } }
+```
+
+A graph accepts a measurement only after deterministic recomputation from
+evidence:
+
+- `complexity` is 1 plus the number of listed decisions, and each decision's
+  line holds its keyword or operator in the head file's bytes;
+- `nesting` is the length of `nestingPath`, each step's line holds its
+  keyword, and the lines increase;
+- `coverage` follows from the coverprofile or c8 report attributed by line
+  range;
+- `crap` is recomputed with the formula;
+- each survivor's `original` text is on its line, and `mutated` differs from
+  it at exactly one site, by exactly that site's §2.5 inversion: `<`/`>=`,
+  `>`/`<=`, `==`/`!=` (`===`/`!==`) or `true`/`false`. Any other difference
+  rejects the record;
+- the set of measured functions equals the changed functions of §1.
+
+A record that does not recompute is rejected, never corrected by hand.

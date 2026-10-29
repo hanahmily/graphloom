@@ -210,6 +210,20 @@ crashes; filesystem and execution scopes require host enforcement.
   repository, driven by a JSON profile the task names with `config:`; ships
   profiles for BanyanDB and for GraphLoom itself. It replaced the earlier
   BanyanDB-only fix graph.
+- [PR-review graph](docs/design-pr-review-graph.md) (proposed): first a
+  neutral, cited change report on an incoming pull request (schema, background
+  work, features, dependencies, config, interfaces, deletions; no findings or verdict) and
+  questions (purpose, existing equivalents, reusable libraries, shared logic,
+  missing tests) answered by a separate agent from the whole codebase, all in
+  one file; report-only by default; on request, a review layer drafts verified findings
+  and inline comments, published as one GitHub review only after `graphloom
+  resume <run> --approve publish-review`. Later pushes get delta reports and
+  incremental reviews from a per-PR ledger ref.
+- [Code quality metrics](docs/design-code-quality-metrics.md) (proposed):
+  one definition of cyclomatic complexity (< 10), nesting depth (≤ 3), CRAP
+  (threshold 30) and mutation survival for changed functions only, with
+  tools and confinement; issue-fix uses them as gates, pr-review as facts and
+  questions.
 - [Installable releases](docs/design-release.md) (proposed): a self-contained
   release tarball with a bundled Node runtime and the SDK tarball on GitHub
   Releases, versioned install directories with `install.sh`, `graphloom
