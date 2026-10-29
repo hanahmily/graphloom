@@ -155,7 +155,20 @@ function sandboxMounts(
         if (under(candidate, home) && existsSync(candidate) && !ctx.binds.some((b) => under(candidate, b))) reads.add(candidate);
       }
     }
-    for (const r of reads) hideHome.push("--ro-bind", r, r);
+    for (const r of reads) {
+      // A symbolic link is given back as a link to its final target (which is exposed too), not as
+      // a bind: binding a link mounts the target's content at the link's path, so a launcher that
+      // resolves files beside its real location (an npm package's bin script) would look in the
+      // wrong directory.
+      if (lstatOrUndefined(r)?.isSymbolicLink()) {
+        const target = realOrSame(r);
+        if (target !== r && existsSync(target)) {
+          hideHome.push("--symlink", target, r);
+          continue;
+        }
+      }
+      hideHome.push("--ro-bind", r, r);
+    }
   }
   // A path is still there when it is, or sits in, an exposed path; and when it holds one (a mask of a
   // parent hides what is exposed beneath it: masks win).
