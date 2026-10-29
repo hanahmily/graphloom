@@ -33,6 +33,7 @@ import { admitValidation, assertLiveWorkspaceMatchesEvidence, deliveryDrift, inv
 import type { AdmissionValidator } from "./admit.js";
 import { resolveBundleEntry } from "./bundle.js";
 import { createHostValidators } from "./host-validators.js";
+import { applyApproval, approvalRefusal, type ApprovalRequest } from "./approvals.js";
 import { applyGraphDefaultBudgets, intakeTask, taskConfigValue, type IntakePin } from "./intake.js";
 import { assertSafeRunId } from "./ids.js";
 import { withDirectoryLock } from "./lock.js";
@@ -208,6 +209,13 @@ export interface ResumeRequest {
    * the run's graph may run again. Without a supervisor, a resume refuses to otherwise.
    */
   reconciled?: boolean;
+  /**
+   * The operator's decision on an approval the graph declared
+   * (`GraphDefinition.approvals`): recorded as `operator-approval` evidence
+   * at the new generation, under the run lock, and counted as something that
+   * changed since a final stop, so the stopped run advances to read it.
+   */
+  approval?: ApprovalRequest;
   /** Absolute state directory, or runId under stateRoot. */
   runRef: string;
   runner: Runner;
@@ -593,6 +601,9 @@ export function createController(): Controller {
       // An upgrade reads the state in its own format, under the lock, before anything loads it as this release's.
       let state: DurableRunState =
         request.upgrade !== undefined ? (undefined as unknown as DurableRunState) : await loadCurrentFormat(stateDir, stateFormats);
+      if (request.approval !== undefined && (state.status === "succeeded" || state.status === "failed")) {
+        throw new Error(approvalRefusal(state, request.approval)!);
+      }
       if (request.upgrade === undefined && (state.status === "succeeded" || state.status === "failed")) {
         // A crash after the finished state was saved can leave them behind.
         await wipeAgentSessions(state);
@@ -630,6 +641,9 @@ export function createController(): Controller {
         if (state.status === "succeeded" || state.status === "failed") {
           return;
         }
+        // Refused before anything changes: an undeclared, unavailable or misplaced decision records nothing.
+        const approvalProblem = request.approval !== undefined ? approvalRefusal(state, request.approval) : undefined;
+        if (approvalProblem !== undefined) throw new Error(approvalProblem);
         // No controller owns the run now: whatever sandbox a stopped job left behind is stale.
         await request.runner.releaseRun?.(state.runId).catch(() => undefined);
         // Evidence belongs to the stop being resumed; any stop from here on is a new one.
@@ -742,7 +756,12 @@ export function createController(): Controller {
           ...(heldStop.stopClass !== undefined ? { stopClass: heldStop.stopClass } : {}),
           ...(heldStop.stopMark !== undefined ? { stopMark: heldStop.stopMark } : {}),
         };
-        const decided = decideResume(asStopped, { pluginUpdated, executorsUpdated, mark: stopMarkOf(state, live) });
+        const decided = decideResume(asStopped, {
+          pluginUpdated,
+          executorsUpdated,
+          ...(request.approval !== undefined ? { approval: `the operator recorded ${request.approval.decision === "approve" ? "an approval of" : "a decline of"} ${request.approval.approvalId}` } : {}),
+          mark: stopMarkOf(state, live),
+        });
         if (!decided.run) {
           state = recordRemedy(
             { ...asStopped, ...(heldStop.stopEvidenceRefs !== undefined ? { stopEvidenceRefs: heldStop.stopEvidenceRefs } : {}) },
@@ -812,6 +831,8 @@ export function createController(): Controller {
             ...(decided.previous !== undefined ? { previous: decided.previous } : {}),
           }),
         };
+        // At the new generation: the decision is current evidence for this run of the graph.
+        if (request.approval !== undefined) state = await applyApproval(state, request.approval);
         await clearStopRequest(stateDir);
         // Own the run before durable state says `running` again (see `run`).
         await claimRunOwner(stateDir);

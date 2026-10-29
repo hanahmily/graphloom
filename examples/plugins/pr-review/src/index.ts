@@ -2,7 +2,8 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 export * from "./constants.js";
-export { advancePullRequest, agentConfigMasks, agentRoles, createGraph, definitionFor } from "./graph.js";
+export { advancePullRequest, agentConfigMasks, agentRoles, approvalDeclarations, approvalDecision, createGraph, definitionFor } from "./graph.js";
+export { parsePullArgument, prepareTask } from "./prepare.js";
 export { parseProfile, ProfileError, harnessName, DISTINCT_PAIRS, ROLES, type Profile, type ProfileData, type Role, type SectionConfig, type DetectorConfig } from "./profile.js";
 export { requestedPull, type PullRequest } from "./request.js";
 export { validatorById, validatorsFor } from "./validators.js";

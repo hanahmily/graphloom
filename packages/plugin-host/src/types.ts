@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
-import type { GraphDecision, GraphDefinition, GraphRehearsal, RunView, ValidationInput, ValidationResult } from "@graphloom/sdk";
+import type { GraphDecision, GraphDefinition, GraphRehearsal, PrepareTaskInput, PrepareTaskReply, RunView, ValidationInput, ValidationResult } from "@graphloom/sdk";
 
 /** Non-durable observation returned instead of applying a plugin result. */
 export interface ChildObservation {
@@ -47,6 +47,11 @@ export interface PluginHost {
   ): Promise<HostResult<ValidationResult>>;
   /** Loads the bundle's declared rehearsal entry inside this same sandbox, never the caller's own process. */
   rehearsal?(ctx: CallContext, entry: string): Promise<HostResult<GraphRehearsal | undefined>>;
+  /**
+   * The graph's `prepareTask` hook (docs/design-typescript-core.md section 16): the reply as the plugin
+   * returned it, unvalidated, or undefined when the graph has no such hook.
+   */
+  prepareTask?(ctx: CallContext, input: PrepareTaskInput): Promise<HostResult<PrepareTaskReply | undefined>>;
   close(): Promise<void>;
 }
 

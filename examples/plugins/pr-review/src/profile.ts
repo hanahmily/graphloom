@@ -106,6 +106,8 @@ export interface ProfileData {
   description?: string;
   /** `owner/repo` whose pull requests are read. */
   project: string;
+  /** The branch pull requests are made against, for `graphloom task new` (default `main`); `--base` overrides it. */
+  baseBranch?: string;
   issues?: { owner: string; repo: string };
   environment: { checks: EnvironmentCommand[] };
   report?: { sections: SectionConfig[] };
@@ -125,6 +127,8 @@ export interface Profile {
   name: string;
   description?: string;
   project: string;
+  /** The branch pull requests are made against (`task new`); `main` unless the profile names another. */
+  baseBranch: string;
   owner: string;
   repo: string;
   environment: { checks: EnvironmentCommand[] };
@@ -169,6 +173,7 @@ const isObject = (v: unknown): v is Record<string, unknown> => v !== null && typ
 const isString = (v: unknown): v is string => typeof v === "string" && v.trim() !== "";
 const isStrings = (v: unknown): v is string[] => Array.isArray(v) && v.every((s) => typeof s === "string" && s.trim() !== "");
 const isCount = (v: unknown, min = 1): v is number => typeof v === "number" && Number.isSafeInteger(v) && v >= min;
+const BRANCH_NAME = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/;
 const REPO_NAME = /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/;
 const SECTION_ID = /^[a-z][a-z0-9-]{0,31}$/;
 const BUDGET_NAMES: ReadonlySet<string> = new Set(GRAPH_BUDGET_KEYS);
@@ -443,11 +448,12 @@ export function parseProfile(config: unknown): Profile {
   for (const key of Object.keys(p)) {
     if (LATER_FIELDS[key] !== undefined) throw new ProfileError(`${key} is not supported in this version: it belongs to ${LATER_FIELDS[key]}`);
   }
-  onlyKeys(p, "", ["name", "description", "project", "issues", "environment", "report", "symbols", "questions", "metrics", "context", "privateRepos", "harnesses", "supervisor", "budgets", "limits", "agent"]);
+  onlyKeys(p, "", ["name", "description", "project", "baseBranch", "issues", "environment", "report", "symbols", "questions", "metrics", "context", "privateRepos", "harnesses", "supervisor", "budgets", "limits", "agent"]);
   need(isString(p.name), "name is required");
   need(typeof p.description === "undefined" || isString(p.description), "description must be text");
   need(typeof p.project === "string" && REPO_NAME.test(p.project), 'project is required, as "owner/name"');
   const [owner, repo] = (p.project as string).split("/") as [string, string];
+  need(p.baseBranch === undefined || (typeof p.baseBranch === "string" && BRANCH_NAME.test(p.baseBranch) && !(p.baseBranch as string).includes("..") && !(p.baseBranch as string).endsWith("/") && !(p.baseBranch as string).endsWith(".lock")), "baseBranch must be a branch name");
   if (p.issues !== undefined) {
     need(isObject(p.issues), "issues must be an object");
     onlyKeys(p.issues as Record<string, unknown>, "issues", ["owner", "repo"]);
@@ -494,6 +500,7 @@ export function parseProfile(config: unknown): Profile {
     name: p.name as string,
     ...(p.description !== undefined ? { description: p.description as string } : {}),
     project: p.project as string,
+    baseBranch: (p.baseBranch as string | undefined) ?? "main",
     owner,
     repo,
     environment,

@@ -6,11 +6,12 @@
  * GraphLoom CLI: run | inspect | stats | wait | stop | resume | switch-model | delete | version | doctor | setup | skills
  */
 import { existsSync } from "node:fs";
+import os from "node:os";
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
 import { createController, loadRunState, resolveStateDir } from "@graphloom/controller";
 import type { GraphRehearsal } from "@graphloom/sdk";
-import type { RunReport } from "@graphloom/controller";
+import type { ApprovalRequest, RunReport } from "@graphloom/controller";
 import { createCliRunner } from "./cli-runner.js";
 import { harnessRepairDeps, resolveBundlePath, resolveBundlePathForResume } from "./repair-config.js";
 import { switchModelTarget } from "./switch-model.js";
@@ -21,6 +22,7 @@ import { discover, probeEnabledSupervisors } from "./discovery.js";
 import { doctorReport, formatDoctor, taskProfile, type TaskInputs } from "./doctor.js";
 import { describeTask } from "./rehearsal.js";
 import { SANDBOX_USAGE, sandboxCommand } from "./sandbox.js";
+import { parseTaskNewArgs, taskNew, TASK_NEW_USAGE } from "./task-new.js";
 import { isInteractive, runSetup, terminalPrompter } from "./setup.js";
 import { onceStopHook, parseDuration, waitForRun, type StopNotice } from "./notify.js";
 import { formatRunStats, loadRunStats } from "./stats.js";
@@ -111,6 +113,22 @@ async function main(): Promise<void> {
 
   if (cmd === "skills") {
     process.exitCode = await skillsCommand(args.slice(1));
+    return;
+  }
+
+  if (cmd === "task") {
+    if (args[1] !== "new") {
+      console.error(`usage: ${TASK_NEW_USAGE}`);
+      process.exitCode = 2;
+      return;
+    }
+    const parsed = parseTaskNewArgs(args.slice(2));
+    if (parsed.error !== undefined) {
+      console.error(`graphloom task new: ${parsed.error}\nusage: ${TASK_NEW_USAGE}`);
+      process.exitCode = 2;
+      return;
+    }
+    process.exitCode = await taskNew(parsed.options);
     return;
   }
 
@@ -253,8 +271,9 @@ async function main(): Promise<void> {
   }
 
   if (cmd === "resume") {
-    const runRef = requireRunRef(args[1], "resume <stateDir|runId> [--state-root <dir>] [--supervisor <harness> [--reason <text>]] [--upgrade] [--update-plugin] [--update-executors] [--reconciled] [--rehearsal] [--on-stop <command>]");
+    const runRef = requireRunRef(args[1], "resume <stateDir|runId> [--state-root <dir>] [--supervisor <harness> [--reason <text>]] [--upgrade] [--update-plugin] [--update-executors] [--reconciled] [--approve <id> | --decline <id> [--reason <text>]] [--rehearsal] [--on-stop <command>]");
     const stateRoot = flagValue(args, "--state-root");
+    const approval = approvalFlags(args);
     // `--upgrade` moves the run to this GraphLoom first (§5.2), and moves its ownership record with it.
     const upgrade = args.includes("--upgrade")
       ? {
@@ -273,6 +292,7 @@ async function main(): Promise<void> {
         ...(args.includes("--update-plugin") ? { updatePlugin: true } : {}),
         ...(args.includes("--update-executors") ? { updateExecutors: true } : {}),
         ...(args.includes("--reconciled") ? { reconciled: true } : {}),
+        ...(approval !== undefined ? { approval } : {}),
       });
       console.log(JSON.stringify(report, null, 2));
       process.exitCode = report.status === "succeeded" ? 0 : 1;
@@ -288,7 +308,11 @@ async function main(): Promise<void> {
     const resolvedRoot = stateRoot ? path.resolve(stateRoot) : undefined;
     const supervisorFlag = flagValue(args, "--supervisor");
     if (args.includes("--supervisor") && (supervisorFlag === undefined || supervisorFlag.startsWith("--"))) throw new Error("--supervisor needs a harness");
-    const transitionReason = flagValue(args, "--reason");
+    // --reason belongs to a supervisor transition or to a decline, never both.
+    if (approval !== undefined && args.includes("--supervisor") && args.includes("--reason")) {
+      throw new Error("--reason answers either --supervisor or --decline, not both in one resume; resume once for each");
+    }
+    const transitionReason = approval !== undefined ? undefined : flagValue(args, "--reason");
     // The supervisor and its repair reviewer run on the harness the run is pinned to (§7.4, §7.5);
     // --supervisor moves the pin, recorded as a transition.
     const current = await loadRunState(await resolveStateDir(runRef, resolvedRoot));
@@ -309,6 +333,7 @@ async function main(): Promise<void> {
       ...(args.includes("--update-executors") || upgrade !== undefined ? { updateExecutors: true } : {}),
       ...(upgrade !== undefined ? { upgrade } : {}),
       ...(args.includes("--reconciled") ? { reconciled: true } : {}),
+      ...(approval !== undefined ? { approval } : {}),
       // The controller has no restore of its own: a run's supervisor binding
       // is restored on the harness it is pinned to, with or without a config.
       restoreSupervisor: supervisorRestore(plan.config ?? config),
@@ -598,6 +623,30 @@ function requireCommandsMode(args: string[]): "stub" | "run" | undefined {
   return value;
 }
 
+/** `--approve <id>`, or `--decline <id> [--reason <text>]` (docs/design-pr-review-graph.md section 11): who decides is the login running this. */
+function approvalFlags(args: string[]): ApprovalRequest | undefined {
+  const approve = flagValue(args, "--approve");
+  const decline = flagValue(args, "--decline");
+  for (const flag of ["--approve", "--decline"]) {
+    const value = flagValue(args, flag);
+    if (args.includes(flag) && (value === undefined || value.startsWith("--") || value === "")) throw new Error(`${flag} needs an approval id`);
+  }
+  if (approve === undefined && decline === undefined) {
+    if (args.includes("--reason") && !args.includes("--supervisor")) throw new Error("--reason answers --supervisor or --decline");
+    return undefined;
+  }
+  if (approve !== undefined && decline !== undefined) throw new Error("--approve and --decline decide one approval each; resume once for each");
+  const reason = flagValue(args, "--reason");
+  if (args.includes("--reason") && (reason === undefined || reason.startsWith("--"))) throw new Error("--reason needs a text");
+  if (approve !== undefined && reason !== undefined) throw new Error("--reason goes with --decline");
+  return {
+    approvalId: (approve ?? decline)!,
+    decision: approve !== undefined ? "approve" : "decline",
+    ...(reason !== undefined ? { reason } : {}),
+    operator: os.userInfo().username,
+  };
+}
+
 function flagValue(args: string[], name: string): string | undefined {
   const i = args.indexOf(name);
   if (i < 0) return undefined;
@@ -610,6 +659,7 @@ function printHelp(): void {
 Usage:
   graphloom run <task.yaml> [--state-root <dir>] [--supervisor <harness>] [--on-stop <command>]
   graphloom check <task.yaml>
+  ${TASK_NEW_USAGE}
   graphloom rehearse <task.yaml> [--scenario <name>] [--commands <stub|run>] [--offline] [--synthesized] [--adversarial] [--keep] [--stop-at <stage>]
   graphloom rehearse --record-from <stateDir|runId> [--state-root <dir>] [--name <name>] [--out <path>]
   graphloom replay <stateDir|runId> [--state-root <dir>]
@@ -618,7 +668,7 @@ Usage:
   graphloom stats <stateDir|runId> [--state-root <dir>] [--json]
   graphloom wait <stateDir|runId> [--state-root <dir>] [--until stop|progress] [--since <cursor>] [--timeout <dur>] [--json]
   graphloom stop <stateDir|runId> [--state-root <dir>]
-  graphloom resume <stateDir|runId> [--state-root <dir>] [--supervisor <harness> [--reason <text>]] [--upgrade] [--update-plugin] [--update-executors] [--reconciled] [--rehearsal] [--on-stop <command>]
+  graphloom resume <stateDir|runId> [--state-root <dir>] [--supervisor <harness> [--reason <text>]] [--upgrade] [--update-plugin] [--update-executors] [--reconciled] [--approve <id> | --decline <id> [--reason <text>]] [--rehearsal] [--on-stop <command>]
   graphloom switch-model <stateDir|runId> <model> --reason <text> [--state-root <dir>]
   graphloom delete <stateDir|runId> [--state-root <dir>] [--force]
   graphloom version [--json | --root]
@@ -629,6 +679,11 @@ Usage:
   graphloom skills install [<name>...] [--agent <claude-code|codex|opencode>] [--dir <dir>] [--force]
   graphloom skills update [--agent <claude-code|codex|opencode>] [--dir <dir>] [--quiet]
   graphloom skills remove [<name>...] [--agent <claude-code|codex|opencode>] [--dir <dir>] [--force]
+
+task new asks the graph's own prepareTask hook what its arguments mean (for pr-review, a pull
+request: pr-review owner/repo#N --repo <clone> --profile <name>), validates the plan it returns, fetches
+the refs under refs/graphloom/<graph>/ over https with no hook or user configuration, and writes the task.
+--dry-run prints the plan and the task and changes nothing; --force replaces an existing task file.
 
 sandbox pull puts a docker sandbox image, pinned by digest, in the local image
 store before a run; a graph's environment check calls it for the image its

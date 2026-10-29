@@ -30,6 +30,7 @@ import {
   resolveBundleRehearsalEntry,
   resolveStateDir,
   taskConfigValue,
+  type ApprovalRequest,
   type BoundaryResult,
   type ContractOutcome,
   type DurableRunState,
@@ -748,7 +749,7 @@ export async function rehearseStopAt(
  */
 export async function resumeRehearsal(
   runRef: string,
-  options: { stateRoot?: string; upgrade?: UpgradeRequest; updatePlugin?: boolean; updateExecutors?: boolean; reconciled?: boolean } = {},
+  options: { stateRoot?: string; upgrade?: UpgradeRequest; updatePlugin?: boolean; updateExecutors?: boolean; reconciled?: boolean; approval?: ApprovalRequest } = {},
 ): Promise<RunReport> {
   const stateDir = await resolveStateDir(runRef, options.stateRoot);
   const raw = JSON.parse(await readFile(path.join(stateDir, "state.json"), "utf8")) as { runId?: string; definition?: GraphDefinition };
@@ -770,6 +771,7 @@ export async function resumeRehearsal(
       ...(options.updateExecutors === true ? { updateExecutors: true } : {}),
       ...(options.updatePlugin === true ? { updatePlugin: true } : {}),
       ...(options.reconciled === true ? { reconciled: true } : {}),
+      ...(options.approval !== undefined ? { approval: options.approval } : {}),
     });
   } finally {
     harness.restore();

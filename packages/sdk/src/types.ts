@@ -90,6 +90,34 @@ export interface GraphDefinition {
    * operator's enabled harnesses.
    */
   supervisor?: SupervisorPreference;
+  /**
+   * Decisions the graph asks the operator to make with `graphloom resume
+   * <run> --approve <id>` or `--decline <id>`, as data. The controller
+   * records each decision as `operator-approval` evidence under the run lock
+   * and never reads what an approval means; the graph's `advance` does.
+   */
+  approvals?: ApprovalDeclaration[];
+}
+
+/** One operator decision a graph declares (`GraphDefinition.approvals`; docs/design-pr-review-graph.md section 11). */
+export interface ApprovalDeclaration {
+  /** The id `--approve` and `--decline` name: `[a-z][a-z0-9-]{0,63}`. */
+  id: string;
+  /** The stage the approval opens, shown as is; the controller does not look it up. */
+  stageId?: string;
+  /** One line telling the operator what approving means. */
+  description?: string;
+  /**
+   * Worktree-relative files whose bytes an approval pins (path, SHA-256,
+   * size) in its evidence; at most 256 KiB together.
+   */
+  files?: string[];
+  /**
+   * Set when this version cannot act on an approval (for example, the stage
+   * it opens does not exist yet): `--approve` is refused with this message,
+   * and `--decline` still records.
+   */
+  unavailable?: string;
 }
 
 /** The supervisor harnesses a graph may name (docs/design-supervisor-harnesses.md §7.1). */
@@ -677,6 +705,12 @@ export interface GraphPlugin {
    */
   describe(config?: unknown): GraphDefinition;
   advance(view: RunView): GraphDecision;
+  /**
+   * Optional: turn the arguments of `graphloom task new` into a task plan,
+   * or refuse them (docs/design-typescript-core.md section 16). Pure over its
+   * input: it reads no file, runs no process and has no network.
+   */
+  prepareTask?(input: import("./task-plan.js").PrepareTaskInput): import("./task-plan.js").PrepareTaskReply;
 }
 
 export interface Validator {
@@ -702,13 +736,15 @@ export type WireRequest =
       validatorId: string;
       input: ValidationInput;
     })
-  | (WireEnvelope & { kind: "rehearsal"; entry: string; config?: unknown });
+  | (WireEnvelope & { kind: "rehearsal"; entry: string; config?: unknown })
+  | (WireEnvelope & { kind: "prepare_task"; input: import("./task-plan.js").PrepareTaskInput });
 
 export type WireResponse =
   | (WireEnvelope & { kind: "describe_ok"; definition: GraphDefinition })
   | (WireEnvelope & { kind: "advance_ok"; decision: GraphDecision })
   | (WireEnvelope & { kind: "evaluate_ok"; result: ValidationResult })
   | (WireEnvelope & { kind: "rehearsal_ok"; rehearsal?: GraphRehearsal })
+  | (WireEnvelope & { kind: "prepare_task_ok"; reply?: import("./task-plan.js").PrepareTaskReply })
   | (WireEnvelope & {
       kind: "error";
       code: "malformed" | "stale" | "oversized" | "unknown" | "internal";

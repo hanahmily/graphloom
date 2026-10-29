@@ -13,6 +13,7 @@ import {
   supervise,
   validate,
   type AgentRoleDeclaration,
+  type ApprovalDeclaration,
   type EnvironmentCommand,
   type GraphBudgetDefaults,
   type GraphDecision,
@@ -40,6 +41,7 @@ import {
   REPORTER_JOB,
   REPORT_STAGE,
   REQUIREMENT_ANSWERS,
+  REVIEW_LAYER_APPROVAL,
   REQUIREMENT_CHECKED_OUT,
   REQUIREMENT_CLAIMS,
   REQUIREMENT_GROUNDED,
@@ -62,6 +64,7 @@ import { measurementState, metricsDiffCommand, staticCommand, type Batch } from 
 import { coverageCommand, coverageConfinement, missingProbe, sandboxEnvironmentChecks, type CoveragePlan } from "./coverage.js";
 import { checkerInstruction, reporterInstruction } from "./prompts.js";
 import { harnessName, parseProfile, ProfileError, ROLES, DISTINCT_PAIRS, type Profile } from "./profile.js";
+import { prepareTask } from "./prepare.js";
 import { requestedPull, type PullRequest } from "./request.js";
 import { secretFindings } from "./secrets.js";
 import { readInput, snapshotState, type PullFile, type ReadSpec } from "./snapshot.js";
@@ -184,7 +187,32 @@ export function definitionFor(profile: Profile): GraphDefinition {
     defaultBudgets: { ...DEFAULT_BUDGETS, ...(profile.budgets ?? {}) },
     agentRoles: agentRoles(profile),
     supervisor: structuredClone(profile.supervisorPreference),
+    approvals: approvalDeclarations(),
   };
+}
+
+/**
+ * The operator decisions this version declares (design §11). `review-layer` opens the Review stage, which 0.1 does
+ * not have, so an approval is refused with that reason and a decline finishes the run report-only.
+ */
+export function approvalDeclarations(): ApprovalDeclaration[] {
+  return [
+    {
+      id: REVIEW_LAYER_APPROVAL,
+      stageId: "review",
+      description: "continue into the review layer (aspect reviewers, findings, a draft); declining finishes the run report-only",
+      unavailable: `pr-review ${GRAPH_VERSION} has no Review stage (its first layer is the report, the questions and the answers), so --approve ${REVIEW_LAYER_APPROVAL} is refused; --decline ${REVIEW_LAYER_APPROVAL} finishes the run as succeeded, report only`,
+    },
+  ];
+}
+
+/** The operator's latest recorded decision on approval `id`, from the run's `operator-approval` evidence. */
+export function approvalDecision(evidence: RunView["evidence"], id: string): "approve" | "decline" | undefined {
+  for (let i = evidence.length - 1; i >= 0; i -= 1) {
+    const payload = evidence[i]!.payload as { type?: unknown; approvalId?: unknown; decision?: unknown } | undefined;
+    if (payload?.type === "operator-approval" && payload.approvalId === id && (payload.decision === "approve" || payload.decision === "decline")) return payload.decision;
+  }
+  return undefined;
 }
 
 /**
@@ -203,6 +231,7 @@ export function createGraph(): GraphPlugin {
   return {
     describe: (config?: unknown) => definitionFor(parseProfile(config)),
     advance: advancePullRequest,
+    prepareTask,
   };
 }
 
@@ -222,9 +251,21 @@ export function advancePullRequest(view: RunView): GraphDecision {
   const stage = definition.stages.find((s) => !s.requirementIds.every((id) => view.receipts.some((r) => r.stageId === s.id && r.requirementId === id && r.valid)) || view.openAttempt?.[s.id] === true);
   const ctx: Context = { profile, definition, pr };
   if (stage === undefined) {
+    if (approvalDecision(view.evidence, REVIEW_LAYER_APPROVAL) === "decline") {
+      return withPrivate(
+        stop(
+          { reason: "complete", blocker: `report only: the operator declined the review layer; the report, the questions and their answers are in ${REVIEW_MD} in the worktree`, retryable: false },
+          "the operator declined the review layer: finish with the report and the Q&A",
+        ),
+      );
+    }
     return withPrivate(
       stop(
-        { reason: "report ready", blocker: `the report, the questions and their answers are written to ${REVIEW_MD} in the worktree (report.json and qa.json beside it); the review layer is a later version, so the run ends here`, retryable: false },
+        {
+          reason: "report ready",
+          blocker: `the report, the questions and their answers are written to ${REVIEW_MD} in the worktree (report.json and qa.json beside it). graphloom session open <run> --stage answers discusses them; graphloom resume <run> --decline review-layer finishes the run report-only (this version has no Review stage, so --approve review-layer is refused)`,
+          retryable: false,
+        },
         "the report and the Q&A are ready; the review layer is not built in this version",
       ),
     );

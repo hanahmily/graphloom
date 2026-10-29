@@ -58,6 +58,7 @@ export {
 export type {
   ActivateRepairSpec,
   AgentSessionView,
+  ApprovalDeclaration,
   ExecutorView,
   BudgetRemaining,
   BwrapBind,
@@ -182,10 +183,27 @@ export {
   assertRunView,
   assertWireRequest,
   assertWireResponse,
+  MAX_APPROVAL_FILE_BYTES,
   assertValidationInput,
   assertValidationResult,
   parseJsonBounded,
 } from "./validate.js";
+
+export type { PrepareTaskInput, PrepareTaskReply, TaskPlan, TaskPlanRefusal, TaskPlanStep } from "./task-plan.js";
+export {
+  isTaskPlanRefusal,
+  MAX_TASK_FIELD_BYTES,
+  MAX_TASK_PLAN_BYTES,
+  MAX_TASK_PLAN_NAMES,
+  MAX_TASK_PLAN_STEPS,
+  planReferences,
+  refFormatProblem,
+  substitutePlan,
+  TASK_PLAN_FIELDS,
+  taskPlanNamespace,
+  TaskPlanError,
+  validateTaskPlan,
+} from "./task-plan.js";
 
 export { executorFailureOf, failuresSinceResume, isStaleFailure, type ExecutorFailureEvidence } from "./resume.js";
 
