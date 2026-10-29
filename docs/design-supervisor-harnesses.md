@@ -1226,6 +1226,16 @@ Each is checked in its phase. A failure changes only the named fallback.
    turns. If the note is not applied, it becomes the first user turn, as for
    Codex. (`graphloom session open`,
    [core §15](design-typescript-core.md#15-opening-a-recorded-agent-session))
+   **Checked in pr-review wave 3c against Claude Code 2.1.300 (live, in a
+   temporary config dir holding a copy of the login): partly false.** The fork
+   flags work, interactive (through a pseudo-terminal) and with `-p`:
+   `--resume <id> --fork-session --session-id <new>` resumes the restored
+   transcript, writes `<new>.jsonl` in the same project directory, leaves the
+   parent's file byte-identical and accepts a fork of a fork. But
+   `--append-system-prompt` is accepted on a resume and **not applied**: asked
+   for the marker word of its note, the fork said it had none (both modes). The
+   fallback is taken: `session open` also passes the note as the first prompt,
+   and the turn extract skips it. Codex is not checked.
 6. **Codex resume of a copied rollout.** Interactive `codex resume <thread>
    <prompt>` finds a rollout copied under a new thread id (its file name and
    its `session_meta` id rewritten), keeps the earlier turns' context, and
@@ -1239,7 +1249,9 @@ Each is checked in its phase. A failure changes only the named fallback.
    resume <new thread>`, the copied rollout holds both. If Claude Code
    writes the fork elsewhere or only the new turns, the capture records the
    parent's saved copy followed by the new file, and a later fork restores
-   both. (`graphloom session open`)
+   both. (`graphloom session open`) **Claude Code checked in wave 3c: true**
+   (the fork file held the parent's records and the new turns; the new
+   `--session-id` named it); Codex is not checked.
 8. **Non-interactive forks for a job.** `claude -p --resume <uuid>
    --fork-session --output-format stream-json` writes the job's turns under
    a new session id and leaves the restored transcript unchanged; `codex
@@ -1249,6 +1261,10 @@ Each is checked in its phase. A failure changes only the named fallback.
    `session open` does, so a CLI that wrote the restored file would change
    only that copy. (`JobSpec.forkFrom`,
    [core §15](design-typescript-core.md#15-opening-a-recorded-agent-session))
+   **Claude Code checked in wave 3c: true** for `claude -p --resume
+   --fork-session` (a new session id, the restored transcript unchanged, the
+   fork file complete; `--output-format json` rather than stream-json was
+   used). `forkFrom` itself and the Codex side are not built or checked.
 9. **Choosing a Claude Code fork's id.** `claude --resume <uuid>
    --fork-session --session-id <new uuid>` writes the fork under the given
    id, so `graphloom session open` knows the transcript to capture before
@@ -1256,4 +1272,8 @@ Each is checked in its phase. A failure changes only the named fallback.
    combination, the capture takes the one new `.jsonl` file that appeared
    in the project directory during the open and whose first record resumes
    the parent, and records nothing when there is not exactly one.
-   (`graphloom session open`)
+   (`graphloom session open`) **Checked in wave 3c: true** for Claude Code
+   2.1.300 (interactive and `-p`): the fork is written under the given id; a
+   reused id is refused ("Session ID … is already in use"), so GraphLoom's
+   fresh id per open never collides. The fallback is not needed and not built:
+   a launcher that drops `--session-id` records nothing.

@@ -17,5 +17,6 @@ export {
   type ClaudeSessionSettings,
   type ClaudeSessionStore,
 } from "./session.js";
+export { captureClaudeFork, restoreClaudeFork, MAX_READ_TRANSCRIPT_BYTES, type CapturedClaudeFork, type ClaudeFork } from "./fork.js";
 export { claudeUsage, costState, type ClaudeResultEvent, type ClaudeTotals } from "./usage.js";
 export { BUDGET_EXHAUSTED, SESSION_ABORTED, type AgentUsage, type NativeToolUse } from "../common.js";

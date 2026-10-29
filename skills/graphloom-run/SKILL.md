@@ -44,6 +44,29 @@ request: "Fix acme/widgets#42."                   # what to do; issue-fix names 
 - A `budgets:` block overrides the profile's defaults key by key. Do not raise
   budgets "to be safe"; the defaults come from measured runs.
 
+### A graph that prepares its own task
+
+Some graphs fetch refs and pin commits for you (a review of a pull request
+needs the head fetched, pinned by hash, and its merge base found).
+`graphloom task new` asks the graph's plugin for a plan, validates it, fetches
+over https with no hook or user Git configuration, never checks anything out,
+and writes the `task.yaml`. A graph that does not prepare tasks says so, and
+the task is written by hand as above.
+
+```sh
+graphloom task new pr-review apache/skywalking-banyandb#1234 --repo ./skywalking-banyandb --profile banyandb --dry-run
+graphloom task new pr-review apache/skywalking-banyandb#1234 --repo ./skywalking-banyandb --profile banyandb
+```
+
+- The first line prints the plan and the task it would write and changes
+  nothing; show it to the user, then run the second. The bundle is
+  `plugins/<graph>/` in the current directory (`--out` changes where), and a
+  profile is a name looked up in `profiles/` there and in the bundle, or a path.
+- It refuses to replace an existing task unless `--force`; refs it wrote stay
+  under `refs/graphloom/<graph>/` in the repository. The last line names the
+  next command, `graphloom check` on the new task. Skip the hand-written
+  task above and continue with section 2.
+
 ## 2. Check before spending
 
 ```sh
@@ -107,3 +130,23 @@ died (see graphloom-triage).
 Record the state directory in `.graphloom-watch/run` and hand over to the
 graphloom-watch skill. Tell the user: the run id, the stage it is in, where
 the marker and log are, and that watch reports only changes.
+
+## 6. A run that stops for a decision
+
+A graph may stop, final, with a result for you to read before anything
+continues (pr-review stops with `report ready` once the report, the questions
+and the answers are written). Read what the stop names, then decide:
+
+```sh
+graphloom session list <stateDir>
+graphloom session open <stateDir> --stage answers
+graphloom resume <stateDir> --decline review-layer --reason "the report is enough"
+```
+
+- `session open` forks a recorded Claude Code or Codex session in your own
+  terminal, under the job's confinement with the checkout read-only, and
+  records the conversation when you exit; it needs a terminal, so ask the user
+  to run it themselves. It never changes the recorded session.
+- `--decline <id>` and `--approve <id>` record your decision as evidence on the
+  stopped run; only the user decides, so never run either without being told
+  which. A version that cannot act on an approval refuses it and says why.

@@ -11,6 +11,9 @@ export const GRAPH_ID = "pr-review";
  */
 export const GRAPH_VERSION = "0.1.0";
 
+/** The operator decision that would continue into the review layer (design §11). */
+export const REVIEW_LAYER_APPROVAL = "review-layer";
+
 export const FETCH_STAGE = "fetch";
 export const REPORT_STAGE = "report";
 export const QUESTIONS_STAGE = "questions";

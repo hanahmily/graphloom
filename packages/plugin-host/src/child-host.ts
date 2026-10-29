@@ -13,6 +13,8 @@ import {
   type GraphDecision,
   type GraphDefinition,
   type GraphRehearsal,
+  type PrepareTaskInput,
+  type PrepareTaskReply,
   type RunView,
   type ValidationInput,
   type ValidationResult,
@@ -223,6 +225,15 @@ class ChildSession implements PluginHost {
     });
   }
 
+  prepareTask(ctx: CallContext, input: PrepareTaskInput): Promise<HostResult<PrepareTaskReply | undefined>> {
+    return this.call(ctx, { kind: "prepare_task", input }, (res) => {
+      if (res.kind !== "prepare_task_ok") {
+        throw new WireValidationError("malformed", `expected prepare_task_ok, got ${res.kind}`);
+      }
+      return res.reply;
+    });
+  }
+
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
@@ -294,7 +305,8 @@ class ChildSession implements PluginHost {
       | { kind: "describe"; config?: unknown }
       | { kind: "advance"; view: RunView }
       | { kind: "evaluate"; validatorId: string; input: ValidationInput }
-      | { kind: "rehearsal"; entry: string; config?: unknown },
+      | { kind: "rehearsal"; entry: string; config?: unknown }
+      | { kind: "prepare_task"; input: PrepareTaskInput },
     extract: (res: WireResponse) => T,
   ): Promise<HostResult<T>> {
     // A child that already exited may have left the reason it failed (a load

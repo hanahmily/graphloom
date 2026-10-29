@@ -38,6 +38,17 @@ Agent skills for driving GraphLoom from Claude Code, Codex or opencode live in t
 `graphloom` command and flag they name must be in `graphloom --help`
 (`skills-drift.test.ts`), and `graphloom skills` installs them.
 
+`graphloom task new <graph> <args...>` asks a bundle's optional `prepareTask`
+hook for a task plan and runs it with Git hooks and user configuration off
+([core design §16](docs/design-typescript-core.md#16-preparing-a-task-graphloom-task-new));
+`graphloom session list|open` forks a recorded Claude Code or Codex session in
+the operator's terminal and records the conversation
+([§15](docs/design-typescript-core.md#15-opening-a-recorded-agent-session));
+`graphloom resume <run> --approve|--decline <id>` records an operator decision on
+an approval a graph declared as data. Tests of these use stub `claude`/`codex`
+binaries and a temporary `HOME`, never the real login; the one live check of
+Claude Code's fork is opt-in (`GRAPHLOOM_LIVE_CLAUDE_FORK=1`).
+
 The proposed `pr-review` graph (a neutral change report, questions and their
 answers on an incoming pull request first; an optional review layer
 drafts findings, published only on operator approval) follows the

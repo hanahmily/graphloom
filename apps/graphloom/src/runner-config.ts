@@ -30,6 +30,24 @@ export const RUNNER_SETUP_ENV: readonly string[] = [
 export type HarnessName = "claude-code" | "codex" | "pi";
 const HARNESS_NAMES: readonly HarnessName[] = ["claude-code", "codex", "pi"];
 
+/**
+ * The operator's own wrapper for `graphloom session open` only (docs/design-typescript-core.md section 15): an
+ * argv prefix that replaces the agent command, and the directories it keeps its own state in. Headless graph
+ * jobs never use it: they keep `command`.
+ */
+export interface SessionLauncherSettings {
+  sessionLauncher?: string[];
+  sessionLauncherStateDirs?: string[];
+}
+
+/** The settings the executor binding takes: the launcher keys are the CLI's, never the executor's. */
+export function withoutLauncher<T extends SessionLauncherSettings>(settings: T): Omit<T, keyof SessionLauncherSettings> {
+  const { sessionLauncher: _l, sessionLauncherStateDirs: _d, ...rest } = settings;
+  void _l;
+  void _d;
+  return rest;
+}
+
 /** Operator consent and nonsecret settings; the harness uses its existing login. */
 export interface RunnerConfig {
   /** Harness for agent jobs that do not choose one. */
@@ -41,9 +59,11 @@ export interface RunnerConfig {
   timeoutMs?: number;
   /** Most wall clock (ms) a coding-agent job may ask for with its own `timeoutMs`. Default four hours, or `timeoutMs` when longer. */
   maxTimeoutMs?: number;
-  claude?: Omit<ClaudeCodeBindingOptions, "apiKey">;
+  claude?: Omit<ClaudeCodeBindingOptions, "apiKey"> & SessionLauncherSettings;
   /** Codex serves read-only jobs only, with its own login. */
-  codex?: CodexBindingOptions;
+  codex?: CodexBindingOptions & SessionLauncherSettings;
+  /** Largest operator-conversation transcript `session open` stores (bytes); beyond it the evidence says `transcript: omitted`. Default 32 MiB. */
+  maxConversationBytes?: number;
   pi?: Omit<PiBindingOptions, "apiKey">;
   /** Serve the read-only GitHub executors; the token comes from the named environment variable. */
   github?: { tokenEnv?: string; baseUrl?: string };
@@ -149,7 +169,7 @@ function expandHome(p: string): string {
 }
 
 export function parseRunnerConfig(value: unknown, source = "runner config"): RunnerConfig {
-  const obj = settings(value, source, ["harness", "harnesses", "allowUnrestricted", "timeoutMs", "maxTimeoutMs", "claude", "codex", "pi", "github", "command", "notify", "autoUpdate"]);
+  const obj = settings(value, source, ["harness", "harnesses", "allowUnrestricted", "timeoutMs", "maxTimeoutMs", "maxConversationBytes", "claude", "codex", "pi", "github", "command", "notify", "autoUpdate"]);
   if (!isHarness(obj.harness)) throw new Error(`${source}: harness must be one of ${HARNESS_NAMES.join(", ")}`);
   if (obj.allowUnrestricted !== true) throw new Error(`${source}: allowUnrestricted must be true to run an agent with your user permissions`);
   const config: RunnerConfig = { harness: obj.harness, allowUnrestricted: true };
@@ -167,6 +187,7 @@ export function parseRunnerConfig(value: unknown, source = "runner config"): Run
       throw new Error(`${source}: maxTimeoutMs must be at least timeoutMs (${config.timeoutMs ?? DEFAULT_CODING_TIMEOUT_MS} ms)`);
     }
   }
+  if (obj.maxConversationBytes !== undefined) config.maxConversationBytes = milliseconds(obj.maxConversationBytes, `${source}: maxConversationBytes`, false);
   if (obj.autoUpdate !== undefined) {
     if (obj.autoUpdate !== "auto" && obj.autoUpdate !== "notify" && obj.autoUpdate !== "off") {
       throw new Error(`${source}: autoUpdate must be auto, notify, or off`);
@@ -197,8 +218,9 @@ export function parseRunnerConfig(value: unknown, source = "runner config"): Run
   }
   if (obj.claude !== undefined) {
     const nested = `${source}: claude`;
-    const c = settings(obj.claude, nested, ["command", "model", "configDir", "passEnv", "startupTimeoutMs", "responseTimeoutMs"]);
+    const c = settings(obj.claude, nested, ["command", "model", "configDir", "passEnv", "startupTimeoutMs", "responseTimeoutMs", "sessionLauncher", "sessionLauncherStateDirs"]);
     config.claude = {
+      ...launcherSettings(c, nested),
       ...(c.command !== undefined ? { command: nonempty(c.command, `${nested}.command`) } : {}),
       ...(c.configDir !== undefined ? { configDir: expandHome(nonempty(c.configDir, `${nested}.configDir`)) } : {}),
       ...(c.model !== undefined ? { model: nonempty(c.model, `${nested}.model`) } : {}),
@@ -209,11 +231,12 @@ export function parseRunnerConfig(value: unknown, source = "runner config"): Run
   }
   if (obj.codex !== undefined) {
     const nested = `${source}: codex`;
-    const c = settings(obj.codex, nested, ["command", "model", "reasoningEffort", "codexHome", "passEnv", "responseTimeoutMs"]);
+    const c = settings(obj.codex, nested, ["command", "model", "reasoningEffort", "codexHome", "passEnv", "responseTimeoutMs", "sessionLauncher", "sessionLauncherStateDirs"]);
     if (c.reasoningEffort !== undefined && !["minimal", "low", "medium", "high", "xhigh"].includes(c.reasoningEffort as string)) {
       throw new Error(`${nested}.reasoningEffort: expected minimal, low, medium, high or xhigh`);
     }
     config.codex = {
+      ...launcherSettings(c, nested),
       ...(c.command !== undefined ? { command: nonempty(c.command, `${nested}.command`) } : {}),
       ...(c.model !== undefined ? { model: nonempty(c.model, `${nested}.model`) } : {}),
       ...(c.reasoningEffort !== undefined ? { reasoningEffort: c.reasoningEffort as string } : {}),
@@ -234,6 +257,25 @@ export function parseRunnerConfig(value: unknown, source = "runner config"): Run
     };
   }
   return config;
+}
+
+/** `sessionLauncher`: a non-empty array of non-empty strings; `sessionLauncherStateDirs`: absolute or `~/` paths. */
+function launcherSettings(c: Record<string, unknown>, nested: string): SessionLauncherSettings {
+  const out: SessionLauncherSettings = {};
+  if (c.sessionLauncher !== undefined) {
+    if (!Array.isArray(c.sessionLauncher) || c.sessionLauncher.length === 0 || !c.sessionLauncher.every((w) => typeof w === "string" && w !== "")) {
+      throw new Error(`${nested}.sessionLauncher: expected a non-empty array of non-empty strings, such as ["hapi", "claude"]`);
+    }
+    out.sessionLauncher = [...(c.sessionLauncher as string[])];
+  }
+  if (c.sessionLauncherStateDirs !== undefined) {
+    const dirs = c.sessionLauncherStateDirs;
+    if (!Array.isArray(dirs) || !dirs.every((d) => typeof d === "string" && (d === "~" || d.startsWith("~/") || path.isAbsolute(d)))) {
+      throw new Error(`${nested}.sessionLauncherStateDirs: expected an array of absolute or ~/ paths`);
+    }
+    out.sessionLauncherStateDirs = (dirs as string[]).map((d) => expandHome(d));
+  }
+  return out;
 }
 
 function isHarness(value: unknown): value is HarnessName {

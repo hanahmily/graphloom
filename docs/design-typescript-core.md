@@ -1149,9 +1149,12 @@ is not part of a prepare command's cache key.
 
 ## 15. Opening a recorded agent session
 
-Status: proposed, 2026-10-29. Revised 2026-10-29: the conversation is
-recorded, a repeated open continues it, and a graph job may fork it. Not
-implemented.
+Status: `session list`, `session open`, conversation capture, the launcher
+and its probe are implemented (pr-review P1 wave 3c); `JobSpec.forkFrom` and
+the fork by a job are not (P4). Differences from the text are under
+[Implementation notes](#implementation-notes-wave-3c-session). Revised
+2026-10-29: the conversation is recorded, a repeated open continues it, and a
+graph job may fork it.
 
 An operator sometimes wants to talk to the agent that did a job, for
 example to ask the answerer why it settled a question that way, and wants
@@ -1429,9 +1432,60 @@ as the
 [harness assumptions](design-supervisor-harnesses.md#11-unverified-cli-assumptions)
 are checked.
 
+### Implementation notes (wave 3c, session)
+
+- **The opening note reaches Claude Code twice.** Checked against Claude Code
+  2.1.300 (live, [harness assumptions](design-supervisor-harnesses.md#11-unverified-cli-assumptions)
+  5, 7 and 8): `--resume <id> --fork-session --session-id <new>` works as
+  specified, interactive and with `-p`, and `--append-system-prompt` is
+  accepted on a resume but does **not** reach the model (asked for its note's
+  marker word, the fork answered NONE). `session open` therefore passes the
+  note as `--append-system-prompt` (it applies if a later Claude Code honors
+  it) and also as the positional first prompt, so it becomes the first turn,
+  as for Codex. Either way the note starts with `[GraphLoom opening note]`,
+  which the turn extract and the "did the operator say anything" test skip.
+- **Records.** `AgentSessionRecord` gains `harness` (from the session ref's
+  prefix), `confinement` (the job's, copied at admission), `summary` (one line
+  of the job's result, for the note), and for a conversation `origin:
+  "operator"`, `parent` (the parent record's `operationId`), `startedAt`,
+  `endedAt`, `transcript` (`sha256`, `bytes`, `omitted`) and `contextTokens`. A
+  conversation's `operationId` is its record id (`conv-<hex>`) and its
+  `dispatchKey` is `operator`, so a plugin's lookup of a job's session by
+  dispatch key never meets one. `RunView.agentSessions` carries `harness`,
+  `origin`, `parent` and `contextTokens`.
+- **Capture only into a stopped run.** The capture takes the run lock and
+  writes `state.json`; a controller that is running holds its own copy and
+  would overwrite the write, so a run that is running (or owned by a live
+  controller) records nothing and says so; the fork stays in the agent's own
+  store. A run that finished records nothing either. A run stopped at `report
+  ready` is the intended case.
+- **Confinement.** The opened session runs through the runner's own
+  `confineWorker` (bubblewrap, no `--new-session`): root read-only, the home
+  an empty tmpfs with only the checkout, the agent, the launcher and its
+  directory read-only, the agent's config dir or Codex home and the launcher's
+  state directories writable, network on, the job's masks and read-only
+  binds (binds that no longer exist are skipped), and the environment the
+  harness's executor gives plus `passEnv`, with the runner config's GitHub
+  token variable and the usual token names removed. A job that had no
+  confinement of its own opens under the run's read-only scope without
+  hiding the home; a docker confinement refuses. `~/.claude.json` lives in the
+  hidden home, as for a job.
+- **Codex.** `codex resume` gets `--sandbox danger-full-access` when its
+  `resume --help` lists `--sandbox` (bubblewrap is the confinement). Not
+  checked against a real Codex in this wave (assumptions 6 and 7 for Codex
+  remain unverified); the stand-in tests cover the copied rollout.
+- **Turn extract and context.** As designed; the extract is
+  `[{ operator, answer?, operatorCut?, answerCut? }]`. `contextTokens` is
+  computed for conversations (stored on the record); a job session's is not
+  stored in this wave.
+- **`session` is not dispatched** to the installed version that owns a run
+  (the way `resume` is); it reads the run's state directly.
+- **Not built:** `JobSpec.forkFrom` and the executor's fork (P4).
+
 ## 16. Preparing a task: `graphloom task new`
 
-Status: proposed, 2026-10-29. Not implemented.
+Status: implemented (pr-review P1 wave 3c); differences from the text are
+under [Implementation notes](#implementation-notes-wave-3c-task-new).
 
 Some graphs need a task that is tedious and error-prone to write by hand: a
 ref fetched from a forge, a commit pinned by hash, a merge base, a request
@@ -1578,3 +1632,30 @@ to be in `graphloom --help`.
 - A bundle without `prepareTask`, a hook that throws, times out or returns
   a malformed plan, and a `{ refused }` reply each exit 2 with the message
   and run nothing.
+
+### Implementation notes (wave 3c, task new)
+
+- **Paths the task names from outside its directory are links.** Intake
+  refuses `..` in `repo` and `config`, so a task written under `--out` that
+  names a clone or a profile elsewhere cannot hold `repo: ../../clone`. The
+  CLI instead puts a relative symbolic link beside the task (`repo`,
+  `profile.json`, and `plugins/<graph>` as designed) and writes `repo: repo`
+  and `config: profile.json`; a path already inside the task's directory is
+  written as it is. A link already in place for the same target is left, any
+  other file there is replaced only with `--force`, and every conflict is
+  refused before a step runs.
+- **Fields.** A plan may set only `request` and `base`; the composed task is
+  parsed back by `parseTaskYaml` and must read as written (a request holding a
+  quote, a backslash or a newline is written as a block scalar).
+- **Remote check.** A `remote` that is a name must be configured in the
+  repository with an `https://` fetch URL without user information; a URL
+  must be the same. Every Git command also runs with `credential.helper=`,
+  `core.sshCommand=/bin/false`, `core.fsmonitor=false` and the ambient
+  `GIT_*` variables removed. The CLI asks Git itself (`check-ref-format`)
+  after substitution as well.
+- **`--dry-run`** reads the remotes and `HEAD` and prints the plan and the
+  task with references unresolved; it writes no ref, link or file.
+- Plugin arguments are every token that is not one of the CLI's five flags
+  (`--repo`, `--profile`, `--out`, `--dry-run`, `--force`, each also as
+  `--flag=value`), or follows `--`; so `--base main` and `--review` reach
+  pr-review untouched.

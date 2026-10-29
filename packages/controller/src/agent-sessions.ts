@@ -97,8 +97,25 @@ export function recordAgentSession(
     ...(job.continueFrom !== undefined ? { continuedFrom: job.continueFrom } : {}),
     ...(result.failureKind === "timeout" ? { timedOut: true as const } : {}),
     settledAt: new Date().toISOString(),
+    ...(harnessOfSessionRef(result.sessionRef) !== undefined ? { harness: harnessOfSessionRef(result.sessionRef)! } : {}),
+    ...(job.confinement !== undefined ? { confinement: structuredClone(job.confinement) } : {}),
+    ...(oneLine(result.summary) !== "" ? { summary: oneLine(result.summary) } : {}),
   };
   return { ...state, agentSessions: [...(state.agentSessions ?? []), record] };
+}
+
+/** The harness a session ref names by its prefix: the executor's own identity for the session. */
+export function harnessOfSessionRef(ref: string): AgentSessionRecord["harness"] | undefined {
+  if (ref.startsWith("claude-")) return "claude-code";
+  if (ref.startsWith("codex-")) return "codex";
+  if (ref.startsWith("pi-")) return "pi";
+  return undefined;
+}
+
+/** `text` on one line, bounded to 200 characters. */
+export function oneLine(text: string | undefined): string {
+  const line = (text ?? "").replace(/\s+/g, " ").trim();
+  return line.length > 200 ? `${line.slice(0, 199)}\u2026` : line;
 }
 
 export function agentSessionViews(state: DurableRunState): AgentSessionView[] | undefined {
@@ -113,6 +130,10 @@ export function agentSessionViews(state: DurableRunState): AgentSessionView[] | 
     executorId: r.executorId,
     status: r.status,
     ...(r.continuedFrom !== undefined ? { continuedFrom: r.continuedFrom } : {}),
+    ...(r.harness !== undefined ? { harness: r.harness } : {}),
+    ...(r.origin !== undefined ? { origin: r.origin } : {}),
+    ...(r.parent !== undefined ? { parent: r.parent } : {}),
+    ...(r.contextTokens !== undefined ? { contextTokens: r.contextTokens } : {}),
   }));
 }
 

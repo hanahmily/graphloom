@@ -107,6 +107,12 @@ async function main(): Promise<void> {
         writeResponse({ ...envelope, kind: "evaluate_ok", result });
         continue;
       }
+      if (req.kind === "prepare_task") {
+        // The hook is optional: a graph without one answers with no reply, and the CLI says so.
+        const reply = typeof plugin.prepareTask === "function" ? await Promise.resolve(plugin.prepareTask(req.input)) : undefined;
+        writeResponse({ ...envelope, kind: "prepare_task_ok", ...(reply !== undefined ? { reply } : {}) });
+        continue;
+      }
       if (req.kind === "rehearsal") {
         const rehearsal = await loadRehearsalExport(req.entry, req.config);
         writeResponse({ ...envelope, kind: "rehearsal_ok", ...(rehearsal !== undefined ? { rehearsal } : {}) });

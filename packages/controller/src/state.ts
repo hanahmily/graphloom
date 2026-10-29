@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, open, readFile, rename, unlink } from "node:fs/promises";
 import path from "node:path";
 import type {
+  ConfinementSpec,
   EvidenceRecord,
   ExecutorInputShape,
   GraphDefinition,
@@ -113,6 +114,26 @@ export interface AgentSessionRecord {
   /** The job ran out of its wall clock; a continuation tells the agent so. */
   timedOut?: true;
   settledAt: string;
+  /** The harness that ran the session, from the session ref's own prefix (`claude-`, `codex-`, `pi-`). */
+  harness?: "claude-code" | "codex" | "pi";
+  /** The job's own confinement, copied at admission; an opened session runs under the same kind. */
+  confinement?: ConfinementSpec;
+  /** One line of what the job reported, for the opening note and `session list`. */
+  summary?: string;
+  /**
+   * `operator`: an operator conversation (`graphloom session open`), recorded when the agent exited.
+   * Absent: a job's session. A conversation's `operationId` is its record id.
+   */
+  origin?: "operator";
+  /** A conversation's parent: the record id (`operationId`) of the session it forked. */
+  parent?: string;
+  /** A conversation's start, and when its agent exited (`settledAt` is the same moment). */
+  startedAt?: string;
+  endedAt?: string;
+  /** The stored transcript's digest and size; `omitted` when it was over the bound and not copied. */
+  transcript?: { sha256: string; bytes: number; omitted?: true };
+  /** The input context of the transcript's last model call (a conversation's; generic data). */
+  contextTokens?: number;
 }
 
 /**

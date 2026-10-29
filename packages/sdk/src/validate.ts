@@ -56,6 +56,11 @@ export function assertWireRequest(value: unknown): WireRequest {
     case "rehearsal":
       requireString(obj, "entry");
       return obj as unknown as WireRequest;
+    case "prepare_task": {
+      const input = asObject(obj["input"], "input");
+      requireArray(input, "args");
+      return obj as unknown as WireRequest;
+    }
     default:
       throw new WireValidationError("unknown", `unknown request kind: ${kind}`);
   }
@@ -82,6 +87,10 @@ export function assertWireResponse(value: unknown): WireResponse {
       return obj as unknown as WireResponse;
     case "rehearsal_ok":
       if (obj["rehearsal"] !== undefined) assertGraphRehearsal(obj["rehearsal"]);
+      return obj as unknown as WireResponse;
+    case "prepare_task_ok":
+      // The reply's own shape is `validateTaskPlan`'s to judge, in the CLI; the wire only bounds it.
+      if (obj["reply"] !== undefined) asObject(obj["reply"], "reply");
       return obj as unknown as WireResponse;
     case "error":
       requireString(obj, "code");
@@ -227,7 +236,40 @@ export function assertGraphDefinition(value: unknown): GraphDefinition {
   if (obj["defaultBudgets"] !== undefined) assertDefaultBudgets(obj["defaultBudgets"]);
   if (obj["agentRoles"] !== undefined) assertAgentRoles(obj["agentRoles"]);
   if (obj["supervisor"] !== undefined) assertSupervisorPreference(obj["supervisor"]);
+  if (obj["approvals"] !== undefined) assertApprovals(obj["approvals"]);
   return obj as unknown as GraphDefinition;
+}
+
+const APPROVAL_KEYS: ReadonlySet<string> = new Set(["id", "stageId", "description", "files", "unavailable"]);
+/** Most bytes the files an approval pins may total (docs/design-pr-review-graph.md section 11). */
+export const MAX_APPROVAL_FILE_BYTES = 256 * 1024;
+
+/** The shape of `approvals` only: what an approval means stays the plugin's. */
+function assertApprovals(value: unknown): void {
+  if (!Array.isArray(value)) throw new WireValidationError("malformed", "definition.approvals must be an array");
+  const ids = new Set<string>();
+  value.forEach((raw, i) => {
+    const label = `definition.approvals[${i}]`;
+    const a = asObject(raw, label);
+    for (const key of Object.keys(a)) {
+      if (!APPROVAL_KEYS.has(key)) throw new WireValidationError("malformed", `${label}.${key} is not an approval field`);
+    }
+    const id = requireString(a, "id");
+    if (!/^[a-z][a-z0-9-]{0,63}$/.test(id) || ids.has(id)) throw new WireValidationError("malformed", `${label}.id must be a unique [a-z][a-z0-9-]{0,63}`);
+    ids.add(id);
+    for (const key of ["stageId", "description", "unavailable"]) {
+      if (a[key] !== undefined && (typeof a[key] !== "string" || (a[key] as string).trim() === "")) {
+        throw new WireValidationError("malformed", `${label}.${key} must be a non-empty string`);
+      }
+    }
+    if (a["files"] !== undefined) {
+      requireArray(a, "files").forEach((f, j) => {
+        if (typeof f !== "string" || f === "" || f.startsWith("/") || f.includes("\\") || f.split("/").some((s) => s === ".." || s === "" || s === ".")) {
+          throw new WireValidationError("malformed", `${label}.files[${j}] must be a relative path without .. segments`);
+        }
+      });
+    }
+  });
 }
 
 const SUPERVISOR_PREFERENCE_KEYS: ReadonlySet<string> = new Set(["harnesses", "models", "required"]);

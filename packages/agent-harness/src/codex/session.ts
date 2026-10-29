@@ -157,7 +157,7 @@ async function saveRollout(
  * the day directories of `times` (local and UTC), and, with `everywhere`, in
  * every day directory of the store.
  */
-async function findRollout(home: string, threadId: string, times: Date[], everywhere: boolean): Promise<string | undefined> {
+export async function findRollout(home: string, threadId: string, times: Date[], everywhere: boolean): Promise<string | undefined> {
   const suffix = `-${threadId}.jsonl`;
   const pad = (n: number) => String(n).padStart(2, "0");
   const days = new Set<string>();

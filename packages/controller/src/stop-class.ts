@@ -89,7 +89,8 @@ export function stopMarkOf(state: DurableRunState, candidateDigest: string | und
 }
 
 /** What changed since `mark` that a final stop depends on, or undefined when nothing did. */
-export function changeSinceStop(mark: StopMark, now: { pluginUpdated: boolean; executorsUpdated?: boolean; mark: StopMark }): string | undefined {
+export function changeSinceStop(mark: StopMark, now: { pluginUpdated: boolean; executorsUpdated?: boolean; approval?: string; mark: StopMark }): string | undefined {
+  if (now.approval !== undefined) return now.approval;
   if (now.pluginUpdated) return "the operator updated the plugin";
   if (now.executorsUpdated === true) return "the operator updated the executors";
   if (now.mark.activeVersion !== mark.activeVersion) return `the active version changed from ${mark.activeVersion} to ${now.mark.activeVersion}`;
@@ -119,7 +120,7 @@ export type ResumeDecision =
  */
 export function decideResume(
   state: DurableRunState,
-  now: { pluginUpdated: boolean; executorsUpdated?: boolean; mark: StopMark },
+  now: { pluginUpdated: boolean; executorsUpdated?: boolean; approval?: string; mark: StopMark },
 ): ResumeDecision {
   const previous = classifyStop(state);
   const mark = state.stopMark;

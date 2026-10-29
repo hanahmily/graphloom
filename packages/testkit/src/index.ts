@@ -56,3 +56,4 @@ export {
   type IssueFixFixtureOptions,
 } from "./issue-fix.js";
 export { prependPath } from "./env.js";
+export { startHttpsGit, type HttpsGitServer } from "./https-git.js";
