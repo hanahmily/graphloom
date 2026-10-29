@@ -1137,8 +1137,8 @@ gremlins or go-mutesting, as the shared
 [§3](design-code-quality-metrics.md#3-tools) decides. For issue-fix two more
 reasons settle it:
 
-- gremlins has no statement removal, return-value removal or boolean literal
-  flip, all of which the rule names;
+- gremlins has no boolean literal flip, which the rule names, and it brings
+  operators the rule does not name;
 - go-mutesting rewrites the source file in place, which an interrupted run
   leaves dirty, so the clean-run rule fails. Its MD5 blacklist also changes
   with any edit to the file, so no equivalent-mutant claim could outlive the
@@ -1153,7 +1153,9 @@ and c8 likewise, as open-code-review is
 on the command line:
 
 - `mutate` takes one `file:start-end` range per changed function;
-- `mutator.excludedMutations` keeps only the shared operator set;
+- `mutator.excludedMutations` excludes every mutator except `EqualityOperator`
+  and `BooleanLiteral`, and the tool keeps only the replacements in the
+  shared operator set (relational inversions, `true`↔`false`);
 - `tempDirName` and the reporters' paths are under the job's temporary
   directory, never in the checkout.
 
@@ -1176,10 +1178,16 @@ mutants it was asked to kill:
   SHA-256 over `path`, `function`, `operator`, `original`, `mutated` and the
   occurrence index of that `original` within the function. Lines are not part
   of it, so an edit elsewhere keeps the id.
-- **Per function.** At most `mutation.maxPerFunction` mutants (default 40).
-- **Per change.** At most `mutation.maxMutants` (default 300). When the
-  changed functions generate more than that, each function gets an equal
-  share, at least 5.
+- **Size.** The shared operators
+  ([§2.5](design-code-quality-metrics.md#25-mutation-testing)) are only
+  relational inversions and boolean literal flips. Each relational operator or boolean literal
+  in a changed function yields exactly one mutant. A function below
+  complexity 10 rarely has more than a dozen.
+- **Per function.** At most `mutation.maxPerFunction` mutants (default 20).
+- **Per change.** At most `mutation.maxMutants` (default 120). That fits the
+  default time budget at the shared document's estimate of 10 to 40 seconds a
+  mutant. When the changed functions generate more, each function gets an
+  equal share, at least 5.
 - **Sampling.** Within a function's cap, mutants are taken round-robin over
   the operator families, so every family is tried. Within a family they are
   taken in order of SHA-256(`seed` + id), with `mutation.seed` defaulting to
@@ -1187,7 +1195,7 @@ mutants it was asked to kill:
   per function.
 - **Clock.** Each mutant gets three times the baseline test duration, at
   least 30 s; a timeout counts as killed (shared §2.5). The whole job has
-  `mutation.timeBudgetMs` (default 30 min; banyandb-ql 45 min). The tool stops
+  `mutation.timeBudgetMs` (default 30 min). The tool stops
   starting mutants at 90% of it and records the rest as `not-run`.
 
 `not-run` mutants make `mutants-killed` **inconclusive**, not failed. Slow
@@ -1245,9 +1253,10 @@ function-complexity: 2 changed functions exceed the limits.
   At the base: complexity 11. Split it into small, intention-revealing functions
   (pure where possible) so each is below 10 and nests at most 3; keep the behaviour.
 mutants-killed: 1 mutant survived.
-- M3fa29c01 pkg/query/plan.go:88 schema.clampLimit, relational: `n > max` -> `n >= max`.
+- M3fa29c01 pkg/query/plan.go:88 schema.clampLimit, relational: `n > max` -> `n <= max`.
   The tests do not fail when it is mutated. Strengthen the assertions
-  (for example a case at n == max), or claim it equivalent with a reason.
+  (for example a case above max and one at or below it), or claim it
+  equivalent with a reason.
 ```
 
 The loop has three bounds:
@@ -1283,8 +1292,8 @@ claim one equivalent in its decision record, an additive field of
 
 ```json
 "equivalentMutants": [
-  { "id": "M3fa29c01", "reason": "i starts at 0 and steps by 1, so i < n and i != n stop at the same i.",
-    "quotes": [{ "path": "pkg/query/plan.go", "line": 86, "text": "for i := 0; i < n; i++ {" }] }
+  { "id": "M7c41e0b2", "reason": "presize only sets the map's initial capacity; lookups return the same values either way.",
+    "quotes": [{ "path": "pkg/query/index.go", "line": 31, "text": "if presize { m = make(map[string]int, len(entries)) }" }] }
 ]
 ```
 
@@ -1335,7 +1344,7 @@ built from the reports of the delivered digest only:
 7 changed functions measured (gometrics, gomutate; complexity below 10, nesting at most 3, CRAP at most 30).
 - Max complexity 6 (`schema.(*Planner).Build`), max nesting 2, max CRAP 7.4.
 - Mutation: 58 mutants, 55 killed, 2 timed out, 1 equivalent (verified), 0 survived; score 100%.
-- Equivalent: M3fa29c01 `i < n` -> `i != n` in `schema.clampLimit`: i starts at 0 and steps by 1.
+- Equivalent: M7c41e0b2 `newIndex(entries, true)` -> `newIndex(entries, false)` in `schema.buildIndex`: the flag only presizes the map.
 ```
 
 A gate disabled in the profile is stated as "not gated". The section never
@@ -1351,7 +1360,7 @@ An optional `quality` field; absent means no gates and the definition of
   "generated": ["**/*.pb.go", "**/*.pb.*.go", "**/mocks/**"],
   "complexity": { "enabled": true, "below": 10, "maxNesting": 3 },
   "crap": { "enabled": true, "max": 30 },
-  "mutation": { "enabled": true, "maxPerFunction": 40, "maxMutants": 300, "timeBudgetMs": 1800000,
+  "mutation": { "enabled": true, "maxPerFunction": 20, "maxMutants": 120, "timeBudgetMs": 1800000,
                 "maxEquivalent": 3, "seed": "issue-fix" },
   "maxCorrections": 3
 }
@@ -1362,8 +1371,7 @@ An optional `quality` field; absent means no gates and the definition of
 never loosen them. A gate may be disabled; its requirement then does not
 exist. `mutation.enabled` needs `crap.enabled`, because mutation needs the
 coverage run. All four shipped profiles enable all three gates with the
-defaults. banyandb-ql sets `timeBudgetMs` to 45 minutes, since its changes
-are larger and its mutants run inside the 4-CPU container.
+defaults.
 
 ### Rehearsal scenarios
 
@@ -1376,12 +1384,14 @@ These are added to each profile's rehearsal, hand-written like
   names the function, its decision lines and its nesting path. The second pass
   splits it, and the run reaches delivery with a Quality section. There is no
   supervisor episode.
-- **`surviving-mutant-fixed`.** The first pass's test exercises the boundary
-  function without asserting its boundary case. The quality job reports the
-  survivor by id; the correction quotes it. The second pass adds the
-  assertion, and the same id is now killed.
-- **`equivalent-mutant-justified`.** The first pass leaves a `<` → `!=`
-  survivor in a loop that steps by one and claims it equivalent with a quote.
+- **`surviving-mutant-fixed`.** The first pass's test calls a function with
+  an `n > max` guard but asserts only a result that does not depend on the
+  guard. The quality job reports the `n > max` → `n <= max` survivor by id,
+  and the correction quotes it. The second pass adds assertions on both sides
+  of the guard, and the same id is now killed.
+- **`equivalent-mutant-justified`.** The first pass leaves a `true` → `false`
+  survivor on a flag that only presizes a map, and claims it equivalent with
+  a quote.
   The scripted verifier returns `equivalent` with matching quotes, the mutant
   is exempt, and the pull request lists it. A variant whose verifier returns
   `distinguishable` sends one correction and then passes.
