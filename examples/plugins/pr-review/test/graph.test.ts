@@ -2,7 +2,7 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 import { describe, expect, it } from "vitest";
-import type { RehearsalScenario } from "@graphloom/sdk";
+import type { JobSpec, RehearsalScenario } from "@graphloom/sdk";
 import { GIT_ENV } from "../src/commands.js";
 import { advancePullRequest, agentConfigMasks } from "../src/graph.js";
 import { REHEARSAL_HEAD, REHEARSAL_HEAD_FILES, REHEARSAL_REQUEST } from "../src/rehearsal.js";
@@ -405,6 +405,20 @@ describe("failures go to the supervisor, not into a loop", () => {
     expect(stale.action).toMatchObject({ type: "dispatch", job: { purpose: "work", instruction: expect.stringMatching(/^Materialize/) } });
     const same = advancePullRequest(viewOf(sim));
     expect(same.action.type).toBe("supervise");
+  });
+
+  it("hands over a static metrics batch that failed, and measures it again after the operator's resume", () => {
+    const failing = scenarioWith("report", (s) => {
+      s.commands!["static-go-1"] = { exitCode: 127, stderr: "static-go-1: 1: go: not found" };
+    });
+    const sim = simulate({ scenario: failing });
+    expect(superviseOf(sim)!.reason).toMatch(/the measurements failed: static-go-1 exited 127/);
+    // After the resume (a fixed GraphLoom or plugin), the failed batch is measured again, not escalated on its old failure.
+    const again = advancePullRequest(viewOf(sim, { generation: 2, resume: { generation: 2, at: "2026-10-29T00:00:00Z", pluginUpdated: true } }));
+    expect(again.action).toMatchObject({ type: "dispatch", job: { instruction: expect.stringMatching(/^Measure the changed functions/) } });
+    expect(commandIds([(again.action as { job: JobSpec }).job])).toEqual(["static-go-1"]);
+    // Without a resume it stays with the supervisor: no loop.
+    expect(advancePullRequest(viewOf(sim)).action.type).toBe("supervise");
   });
 
   it("hands over a head whose tree differs from the worktree", () => {
