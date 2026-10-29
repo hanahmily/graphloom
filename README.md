@@ -212,7 +212,7 @@ crashes; filesystem and execution scopes require host enforcement.
   BanyanDB-only fix graph.
 - [PR-review graph](docs/design-pr-review-graph.md) (proposed): first a
   neutral, cited change report on an incoming pull request (schema, background
-  work, features, dependencies, config, interfaces, deletions; no judgement) and
+  work, features, dependencies, config, interfaces, deletions; no findings or verdict) and
   questions (purpose, existing equivalents, reusable libraries, shared logic,
   missing tests) answered by a separate agent from the whole codebase, all in
   one file; report-only by default; on request, a review layer drafts verified findings

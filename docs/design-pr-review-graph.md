@@ -20,8 +20,8 @@ own.
 The product has three layers, each produced by different agents:
 
 1. **The change report** is primary. The *reporter* writes a neutral, cited
-   account of exactly what the PR changes. It contains no findings,
-   severities, opinions or verdict, and the graph checks that it has none.
+   account of exactly what the PR changes. It carries no findings,
+   severities or verdict, and its result contract has no field for them.
    Its **Measurements** section gives, for every function the PR adds or
    modifies, the cyclomatic complexity, nesting depth, CRAP and mutation
    results, as defined in [code quality metrics](design-code-quality-metrics.md).
@@ -50,10 +50,11 @@ The product has three layers, each produced by different agents:
 | Understanding comes before any judgement | Stage order: Fetch → Report → Questions → Answers → Review → Checks → Draft → Publish. The review layer reads the report and the Q&A as its map, so it does not review blind ([§8.1](#81-review)) |
 | Reporter, questioner and answerer are three agents | Separate sessions. The questioner's harness differs from the reporter's, and the answerer's from the questioner's. Each artifact is checked by a session on a harness different from its author's ([§13.1](#131-roles)) |
 | Report-only is the default for every run, the first one on a PR included | The prepared request is `Report on …`. The run pauses after Answers. The maintainer continues with `graphloom resume <run> --approve review-layer` or finishes with `--decline review-layer` ([§2](#2-modes-and-operator-flow)) |
-| The report and the answers are grounded | Deterministic detectors, symbol extraction, whole-repository search, the dependency inventory and test mapping feed them. Every item cites the diff or the base tree. An absence lists the searches that found nothing. Completeness checks cover every changed file, symbol and question. Independent checkers verify every claim. A judgement-language check rejects opinions ([§6](#6-the-change-report), [§7](#7-questions-and-answers)) |
-| Only `needs author` items can reach the PR's author | `answered` items are for the maintainer. `needs author` items become candidate review comments in the review layer ([§7.4](#74-output-one-file)) |
+| The report and the answers are grounded | Deterministic detectors, symbol extraction, whole-repository search, the dependency inventory and test mapping feed them. Every item cites the diff or the base tree. An absence lists the searches that found nothing. Completeness checks cover every changed file, symbol and question. Independent checkers verify every claim ([§6](#6-the-change-report), [§7](#7-questions-and-answers)) |
+| The maintainer chooses what reaches the PR's author | `needs author` items are pre-selected as draft review comments. The maintainer may promote any other Q&A item, proposals included, or drop a pre-selected one ([§7.4](#74-output-one-file)) |
+| Judgement words are allowed | No word list is enforced. The report and the Q&A stay structurally neutral (no severities, verdict or findings), the prompts ask for factual descriptions, and the checkers judge claims for support ([§6.5](#65-deterministic-validation)) |
 | Nothing goes to GitHub unless the maintainer explicitly approves | Writes need an `operator-approval` that pins the approved bytes, plus a write token bound only in that `resume --approve` process ([§11](#11-approvals)) |
-| The review draft is posted as **one** GitHub review | One `graphloom.github/create-pull-review` call carries every inline comment, the `needs author` questions the maintainer keeps included |
+| The review draft is posted as **one** GitHub review | One `graphloom.github/create-pull-review` call carries every inline comment, the Q&A items the maintainer keeps included |
 | The maintainer's edits are respected | The approved bytes are published after validation. A comment the maintainer removes is never raised again |
 | Fixes are suggestions only | Small, verified fixes become GitHub ` ```suggestion ` blocks. Nothing is committed or pushed |
 | Re-runs are incremental | A later head gets a delta report and delta Q&A plus the full current ones. The review re-checks earlier findings against the head and the thread replies ([§9](#9-incremental-re-review)) |
@@ -135,7 +136,7 @@ meaning and parser (review-kit, [§14](#14-sharing-code-with-issue-fix)).
 | `review` | issue-fix's `language`, `testFiles`, `rules`, plus `discoveryRounds` (default 3, [§9.4](#94-rounds)) |
 | `rules` | Deterministic review checks on the diff: `changelog`, `licenseHeader`, `dependencies` ([§8.1](#81-review)) |
 | `checks` | Optional commands run only under untrusted confinement ([§8.2](#82-checks)). Absent means there is no Checks stage |
-| `comments` | `minSeverity` (default `P2`), `nits` (false), `questions` (offer `needs author` questions as draft comments, true), `maxComments` (30), `suggestions.maxLines` (10), optional `footer` |
+| `comments` | `minSeverity` (default `P2`), `nits` (false), `questions` (pre-select `needs author` items as draft comments, true), `maxComments` (30), `suggestions.maxLines` (10), optional `footer` |
 | `privateRepos` | Never named in posted text (issue-fix's `withoutPrivateReferences`, `src/prompts.ts:325`) |
 | `harnesses` | `reporter`, `questioner`, `answerer`, `report-checker`, `answer-checker`, `reviewer`, `verifier` ([§13.1](#131-roles)) |
 | `supervisor`, `budgets` | As in issue-fix ([§13](#13-agent-roles-supervisor-budgets)) |
@@ -179,16 +180,16 @@ generation's evidence holds a `--decline review-layer`.
 | Fetch | `pr-snapshot` | The PR's metadata, every changed file with its patch, every commit, review, review comment and thread (with resolution), and the head's check runs were read completely, for head `<sha>` | GitHub read results | `pr-snapshot` |
 | Fetch | `head-checked-out` | The worktree holds exactly the head's tree, its base is the merge base, and no repository code ran to produce it | `checkout-command-v1` | `head-tree` |
 | Fetch | `prior-ledger` | The PR's ledger was read, or recorded absent, and the delta scope follows from it | command report | `review-scope` |
-| Report | `change-report` | Every template section is present, with cited items or an explicit "None". Every citation is inside the PR's diff. Every changed file and every detector fact is cited. No judgement language appears | `change-report-v1`, `report-write` | `change-report` |
+| Report | `change-report` | Every template section is present, with cited items or an explicit "None". Every citation is inside the PR's diff. Every changed file and every detector fact is cited. No item carries a severity, finding or verdict (the contract has no such field) | `change-report-v1`, `report-write` | `change-report` |
 | Report | `measurements` | For every function the PR adds or modifies, complexity and nesting were measured by the pinned tools over the head tree, and coverage and mutation were measured in an untrusted-confined checkout or carry a not-run reason. Every value recomputes from its evidence ([metrics §5](design-code-quality-metrics.md#5-records-and-recomputation)) | `graphloom-metrics-v1` command reports | `measurements` |
 | Report | `claims-checked` | An independent `<report-checker>` judged every report item against the diff, and every item left is `supported` with matching quotes | `claim-check-v1` | `claims-checked` |
-| Questions | `questions-complete` | Every required question was asked ([§7.1](#71-questions)): purpose for each change item whose purpose the PR text does not state (a stated purpose recorded with a matching quote instead); `existing-equivalent`, `reuse-library` and `common-logic` for each new symbol; `missing-test` for each new or modified symbol with no mapped test; and one question per value over a metric limit and per surviving mutant. Every changed function has a measurement record or a not-run reason. No severity or judgement language appears | `questions-v1`, search and test-map reports | `questions-complete` |
-| Answers | `answers-complete` | Every question has an answer from the `<answerer>`, with evidence (citations, the searches run with their results, quotes) and a status of `answered`, `partially answered` or `needs author`. Every "none found" answer lists its whole-repository searches and the dependency inventory. Every cited metric equals its record. No judgement language appears. `review.md`, `report.json` and `qa.json` are written | `answers-v1`, `qa-write` | `answers-complete` |
+| Questions | `questions-complete` | Every required question was asked ([§7.1](#71-questions)): purpose for each change item whose purpose the PR text does not state (a stated purpose recorded with a matching quote instead); `existing-equivalent`, `reuse-library` and `common-logic` for each new symbol; `missing-test` for each new or modified symbol with no mapped test; and one question per value over a metric limit and per surviving mutant. Every changed function has a measurement record or a not-run reason | `questions-v1`, search and test-map reports | `questions-complete` |
+| Answers | `answers-complete` | Every question has an answer from the `<answerer>`, with evidence (citations, the searches run with their results, quotes) and a status of `answered`, `partially answered` or `needs author`. Every "none found" answer lists its whole-repository searches and the dependency inventory. Every cited metric equals its record. Every proposal cites line ranges inside its function. `review.md`, `report.json` and `qa.json` are written | `answers-v1`, `qa-write` | `answers-complete` |
 | Answers | `answers-grounded` | An independent `<answer-checker>` re-checked every cited equivalent, library, duplicate and covering test, and every "none found" claim, against the trees. Every answer left is `supported` or `partial`. An answer still unsupported after one correction is `needs author`, with both statements recorded | `claim-check-v1` | `answers-grounded` |
 | Review | `code-review` | Unless report-only: the latest read-only `<reviewer>` pass reviewed every file in scope and gave a status for every open prior finding. The sweep saturated or ran four passes. Every finding has an independent `<verifier>` verdict | `pr-code-review-v1`, `finding-verification-v1` | `open-code-review` |
 | Review | `rule-checks` | Unless report-only: each profile rule was evaluated on the diff | from `pr-snapshot` | `rule-checks` |
 | Checks | `checks-ran` | Unless report-only: in an untrusted-confined checkout, each check ran to completion or recorded why not | `checkout-command-v1` | `checks-ran` |
-| Draft | `draft-composed` | Unless report-only: every comment is anchored inside the PR diff at the head and comes from a confirmed finding, a rule, a check or a kept `needs author` question. There is no private reference or secret, and the recommended verdict follows the rule | `draft-write` | `draft` |
+| Draft | `draft-composed` | Unless report-only: every comment is anchored inside the PR diff at the head and comes from a confirmed finding, a rule, a check or a Q&A item the maintainer kept. There is no private reference or secret, and the recommended verdict follows the rule | `draft-write` | `draft` |
 | Draft | `ledger-recorded` | The ledger was advanced by CAS from the value Fetch read, with this head's report and Q&A and, unless report-only, every finding's state | command report | `ledger-cas` |
 | Publish | `publish-decided` | Report-only, or publication was declined, or exactly one review carrying this run's marker exists at the head with the approved verdict, body and comments, and the ledger records its ids | `operator-approval`, GitHub read-back | `published` |
 
@@ -294,13 +295,13 @@ the checker rejects.
 - **Coverage:** every changed file (renames under both names, deletions
   included) is cited by at least one item.
 - **Facts:** every detector fact is cited by an item of its section.
-- **Judgement language:** a case-insensitive whole-word list is rejected
-  outside backticks and quoted PR text. The list includes *should, must,
-  ought, better, worse, good, bad, nice, clean, messy, bug, defect, flaw,
-  risk, risky, unsafe, dangerous, concern, problem, issue (not as `#N`),
-  wrong, incorrect, improve, recommend, suggest, LGTM, approve, critical,
-  major, minor, severity* and *P0* to *P3*. A profile may add words but not
-  remove them. A hit names the sentence.
+- **No severities, findings or verdict:** this is structural. The result
+  contracts (`change-report-v1`, `questions-v1`, `answers-v1`) have no
+  severity, finding or verdict field and refuse unknown properties.
+  **Decision: judgement words are allowed.** No word list is enforced in the
+  report, the questions or the answers. The reporter's and the answerer's
+  prompts still say to describe what the code does, factually, and the
+  checkers judge each claim for support, not for tone.
 - **Bounds:** at most 40 items per section and 600 characters per item, all
   within the 256 KiB evidence bound.
 
@@ -318,7 +319,6 @@ evidence. The human-readable report is the first part of the one file
 Contents: Report · Measurements · Q&A (2 items need the author)
 
 # Report
-14 files, +612 −88. Commits: 5. GitHub checks at head: 9 passed, 1 pending.
 14 files, +612 −88. Commits: 5. GitHub checks at head: 9 passed, 1 pending.
 
 ## Database / storage schema changes
@@ -375,8 +375,7 @@ mutant as `path:line`, the operator and `original → mutated`.
 
 The section follows a few rules:
 
-- Exceeding a limit is stated as a number beside its limit. The words of the
-  [judgement check](#65-deterministic-validation) still apply.
+- Exceeding a limit is stated as a number beside its limit.
 - The static metrics run on every profile. Coverage and mutation run only
   with `metrics.execute` and working bwrap, under `untrusted` confinement
   ([metrics §4](design-code-quality-metrics.md#4-execution-and-confinement)).
@@ -422,8 +421,7 @@ question.
 | `complexity-coverage` | Every changed function with CRAP ≥ 30: which tests cover its branches? |
 | `weak-test` | Each surviving mutant: which assertion would fail when `n > max` at `path:line` becomes `n >= max`? |
 
-Questions carry no severity, verdict or judgement words; the
-[§6.5](#65-deterministic-validation) check applies.
+Questions carry no severity or verdict ([§6.5](#65-deterministic-validation)).
 
 ### 7.2 Deterministic groundwork
 
@@ -496,9 +494,9 @@ and reads library source in the mounted caches. Every answer has three parts.
 
 | Status | Meaning |
 |---|---|
-| `answered` | The code and its dependencies settle the question |
+| `answered` | The code and its dependencies settle the question, or the answerer gives a concrete **proposal** (below) for the maintainer to weigh |
 | `partially answered` | Part is settled. The rest is stated, with what was searched |
-| `needs author` | The answer cannot be completed without the author: it depends on intent the code cannot show (a purpose stated nowhere, or a design choice), or it asks for an action only the author can take (a test to add, an assertion to strengthen, a function to split) |
+| `needs author` | The answer cannot be completed without the author: it depends on intent the code cannot show (a purpose stated nowhere, or a design choice), or it asks for an action only the author can take (a test to add, an assertion to strengthen) |
 
 A **"no existing equivalent", "no library" or "no shared logic"** answer must
 list the whole-repository searches run: names and variants, signatures, key
@@ -513,8 +511,24 @@ Each question type has a typical outcome:
 | `purpose` | A code comment, a linked design document or a call site shows the purpose (cited) | Nothing states it |
 | `existing-equivalent`, `reuse-library`, `common-logic` | A candidate is found and described, or the searches show none | The candidate is equivalent, and only the author can say why it was not used |
 | `missing-test` | The answerer finds a covering test that the test map missed: an integration test, or an indirect caller (cited) | No test covers it. The answer names where a test would live and what to cover |
-| `split-function` | — (it describes the function's parts with line ranges) | Always: the split is the author's design choice |
-| `complexity-coverage`, `weak-test` | A test already exercises the branch or would catch the mutant (cited) | No test does. The answer names the assertion that is missing |
+| `split-function` | Always, as a proposal: a concrete split with line ranges, the intended function names and each one's single responsibility | — |
+| `complexity-coverage`, `weak-test` | A test already exercises the branch or would catch the mutant (cited) | No test does. The answer proposes the missing assertion, or the cases for the branches |
+
+**Proposals.** Where it helps, an answer carries a `proposal`:
+
+- for `split-function`, the split, for example
+  "`tokenizeTTL` (lines 18–30): split the number from the unit;
+  `checkTTLRange` (lines 31–58): range limits per unit";
+- for `missing-test`, a test outline: the file, the test name, and the cases
+  with their inputs and the branches each one reaches;
+- for `weak-test`, the assertion that would kill the mutant.
+
+The checks on a proposal are deterministic. Its line ranges must lie inside
+the function, and its proposed names must not already exist in the package.
+A `missing-test` or `weak-test` answer stays `needs author`, with its
+proposal attached, because the standing rule is to always ask for the test.
+A `split-function` answer is `answered`, because the proposal is a design
+option for the maintainer to weigh, not a requirement.
 
 The answers are checked as follows.
 
@@ -523,7 +537,8 @@ The answers are checked as follows.
    - every citation resolves in the named tree;
    - every number cited equals its measurement record, which the
      `measurements` validator recomputes;
-   - no judgement language appears.
+   - every proposal's line ranges lie inside its function, and its names are
+     new to the package.
 
    Failures go back to the answerer as one correction, then to the
    supervisor.
@@ -556,7 +571,7 @@ validators, the ledger and the review layer read. The review layer's
 The Q&A part is grouped by change item, then by symbol. Each entry has the
 question (type, asked by the questioner), the answer (by the answerer), the
 evidence and the status. `needs author` entries are marked so they stand
-out:
+out, and proposals follow their answer:
 
 ````markdown
 ## Q&A
@@ -572,24 +587,32 @@ Purpose: stated — "so retention can be set per group" (PR body)
   **A — answered.** None of the 41 go.mod requires provides unit-suffixed duration parsing beyond `time.ParseDuration` (stdlib, no `d` unit).
   Evidence: inventory go.mod:5-60; `git grep -n 'ParseDuration\|units\.' <base>` → 9 hits, none outside pkg/timestamp. Checker: supported.
 - **Q3 [missing-test] ▶ needs author** Which test covers `ParseTTL`?
-  **A — needs author.** No test references `ParseTTL` or its caller `schema.(*Group).Validate` (searched: all `*_test.go` in the base and PR; test/integration/**). A table test in pkg/schema/ttl_test.go beside the existing group tests would be its place.
-- **Q4 [split-function] ▶ needs author** `ParseTTL` has complexity 12 (limit < 10) and nesting 4 (limit ≤ 3). Could it be split?
-  **A — needs author.** Lines 18–30 tokenize the unit and lines 31–58 range-check per unit; the split is the author's choice.
+  **A — needs author.** No test references `ParseTTL` or its caller `schema.(*Group).Validate` (searched: all `*_test.go` in the base and PR; test/integration/**).
+  Proposal: `TestParseTTL` in pkg/schema/ttl_test.go, table cases `"7d"` (unit path :18–30), `"0h"` (lower bound :35), `"9999d"` (upper bound :41), `"7x"` (unknown unit :52).
+- **Q4 [split-function]** `ParseTTL` has complexity 12 (limit < 10) and nesting 4 (limit ≤ 3). Could it be split?
+  **A — answered (proposal).** `tokenizeTTL` (lines 18–30): separate the number from the unit; `checkTTLRange` (lines 31–58): range limits per unit. `ParseTTL` keeps the call order. Neither name exists in pkg/schema.
+
+<details><summary>Unexported helpers with no existing equivalent, library or shared logic found (3)</summary>
+
+- `trimUnit` (pkg/schema/ttl.go:70): searched names `trimUnit`, `trim\w*Unit`; signature `func(string) (string, string)`; tokens `unitSuffixes`, `TrimRight`; inventory go.mod:5-60 → none.
+- …
+</details>
 ````
 
-`reuse-library` and `common-logic` answers of "none found" for **unexported
-helpers** stay in `qa.json` only. `review.md` shows them only when a candidate
-was found, so a large PR stays readable while the absence remains grounded in
-`qa.json`. Everything else is always shown.
+"None found" answers are always shown, unexported helpers included. To keep
+a large PR readable, the "none found" answers for a change item's unexported
+helpers are grouped into one collapsed list under that item. Each entry still
+shows its searches.
 
-**Who sees what:**
+**Who decides what reaches the author:** the maintainer.
 
-- `answered` and `partially answered` items are for the maintainer only. They
-  are never posted.
-- `needs author` items are the only candidates for review comments to the PR's
-  author. In the review layer they become draft comments at the symbol's
-  definition line, labelled `**[question]**`, with no severity. They are
-  posted only through the `publish-review` approval.
+- In the review layer, `needs author` items are **pre-selected** as draft
+  comments at the symbol's definition line, labelled `**[question]**`, with
+  no severity.
+- Every other Q&A item, `answered` proposals included, is listed in the
+  draft's "Not selected" section. The maintainer can promote any of them by
+  moving it into Comments, and can drop a pre-selected one.
+- Nothing is posted except through the `publish-review` approval.
 
 Questions keep stable ids (`Q<n>`) in the ledger. On a later head:
 
@@ -656,9 +679,9 @@ report.
 ### 8.3 Draft
 
 Plugin code composes the draft from the ledger, the verdicts, the rule and
-check results, and the `needs author` Q&A items. The reporter writes only a prose
+check results, and the Q&A items (`needs author` pre-selected, the rest under "Not selected"). The reporter writes only a prose
 summary (`review-summary-v1`, at most 1,200 characters) from the ledger. The
-verdict is computed ([§10.3](#103-verdict)). `needs author` questions alone never make
+verdict is computed ([§10.3](#103-verdict)). Q&A items alone never make
 the recommendation `request-changes`; that takes a confirmed finding or a
 failing check.
 
@@ -779,6 +802,9 @@ The flush error is dropped when …; return it so the caller retries.
 ```
 ### Q3 · question · pkg/schema/ttl.go:14 · RIGHT
 No test exercises `ParseTTL` or its caller `schema.(*Group).Validate`. Could a table test in pkg/schema/ttl_test.go cover its units and range limits?
+## Not selected (move an entry into Comments to post it)
+### Q4 · question · pkg/schema/ttl.go:14 · RIGHT
+Proposal: split into `tokenizeTTL` (lines 18–30) and `checkTTLRange` (lines 31–58)?
 ## For the maintainer (never posted)
 …
 ````
@@ -802,7 +828,8 @@ would refuse:
 - `Verdict` must be `approve`, `comment` or `request-changes`.
 
 A deleted comment becomes `dropped-by-maintainer`, or a dropped question.
-Added comments get the next id with actor `maintainer`.
+A Q&A entry moved from "Not selected" into Comments is promoted and posted
+like any comment. Added comments get the next id with actor `maintainer`.
 
 ### 10.3 Verdict
 
@@ -810,7 +837,7 @@ The recommended verdict follows from the ledger:
 
 - `request-changes` when a confirmed P0 or P1 finding, or a failing check,
   remains open;
-- `comment` when only P2 or P3 findings, rule failures or `needs author` questions remain;
+- `comment` when only P2 or P3 findings, rule failures or kept Q&A items remain;
 - `approve` only when nothing is open and every check passed.
 
 A recommended `approve` is drafted as `comment`, with `recommended: approve`
@@ -1044,7 +1071,7 @@ recorded, so they do not decide CI verdicts.
 | Scenario | Shape | Expect |
 |---|---|---|
 | `report` | A PR adds a proto field, a flag, a Go module and a cron schedule, and deletes a file; `--decline review-layer` | `succeeded`; each fact cited in its section; empty sections say None; zero GitHub writes |
-| `report-corrections` | The reporter misses a file, says "risky", and cites outside the diff; one item is unsupported | Corrections name all three; the item is removed and its file lands in `other` |
+| `report-corrections` | The reporter misses a file, returns an item with a `severity` property, and cites outside the diff; one item is unsupported | Corrections name all three (the extra property is refused by the contract); the item is removed and its file lands in `other` |
 | `report-delta` | Seeded ledger with a report at L; rebased with one new commit | A since-L section with that commit's facts and items, then the full report |
 | `answer-finds-existing-helper` | The PR adds `ParseTTL`; the base has `ParseDuration`, outside any path the PR touches | `existing-equivalent` answered with `ParseDuration`'s `path:line`, its call sites and the search; checker `supported`; status `answered`, not posted |
 | `answer-no-library-with-whole-repo-search` | The PR adds a back-off helper; no declared dependency or internal package provides one | `reuse-library` answered "none found", listing the name, signature and token searches over the whole base tree and every go.mod entry with its source status; checker `supported` |
@@ -1052,9 +1079,9 @@ recorded, so they do not decide CI verdicts.
 | `needs-author-purpose` | A new config flag; nothing in the PR text, commits, issue or code comments says why | A `purpose` question answered `needs author`, listing what was read; marked in `review.md`; offered as a draft comment in the review layer |
 | `purpose-stated` | The PR body states why the flag is added | A purpose record `stated` with the matching quote; no `purpose` question |
 | `missing-test` | A new exported function that no test references; the questioner omits the question | The plugin adds the required `missing-test` question; the answerer's whole-repository search finds no test → `needs author`, naming the package's `_test.go` |
-| `complex-function` | A new function with 12 decision points and nesting 4; `metrics.execute` off | A Measurements row (12, 4, CRAP with coverage unknown as the upper bound, mutation not run with its reason); `split-function` (`needs author`, with the function's parts described) and `complexity-coverage` entries; the `measurements` validator rejects a canned record whose `complexity` disagrees with its `decisions` |
-| `surviving-mutant` | `metrics.execute` on; a canned mutation report with one survivor (`n > max` → `n >= max`) and one killed mutant | The survivor in Measurements; one `weak-test` entry `needs author`, naming `path:line`, the operator, the mutant and the assertion that is missing; score 1/2 |
-| `happy` | `Review` mode; findings and one `needs author` question; publish approved | One `create-pull-review` carrying the findings and the question, and no `answered` item; ledger `published` |
+| `complex-function` | A new function with 12 decision points and nesting 4; `metrics.execute` off | A Measurements row (12, 4, CRAP with coverage unknown as the upper bound, mutation not run with its reason); `split-function` answered with a proposal (line ranges, names new to the package, one responsibility each) and `complexity-coverage` entries; the `measurements` validator rejects a canned record whose `complexity` disagrees with its `decisions` |
+| `surviving-mutant` | `metrics.execute` on; a canned mutation report with one survivor (`n > max` → `n >= max`) and one killed mutant | The survivor in Measurements; one `weak-test` entry `needs author`, naming `path:line`, the operator and the mutant, with the proposed assertion; score 1/2 |
+| `happy` | `Review` mode; findings, one `needs author` item, one `answered` split proposal that the maintainer promotes in the draft; publish approved | One `create-pull-review` carrying the findings, the pre-selected item and the promoted proposal, and no other Q&A item; ledger `published` |
 | `no-findings` | `Review` mode; nothing raised | Draft `comment` with `recommended: approve`; never `APPROVE` |
 | `force-push` | Seeded ledger (F1 published, F2 dropped by the maintainer); rebased; the author disputes F1 | Scope by patch-id; F1 settled by the verifier; F2 suppressed |
 | `publish-refused` | No approval, then a plain `resume`, then an edit after approval | Stops `awaiting approval` twice; zero `create-pull-review` calls; "draft changed after approval" |
@@ -1109,7 +1136,7 @@ writes.
 | P1 | **First layer, report-only.** Fetch, workspace, report, questions, answers, static measurements. Generic: `base:`, the GitHub reads, `untrusted-read` and `untrusted` confinement with read-only dependency mounts. pr-review 0.1 with stages Fetch, Report, Questions and Answers; it succeeds after Answers. Also: detectors; symbol packs (Go, TypeScript); whole-repository search; similarity; the dependency inventory; test mapping; the reporter, questioner and answerer with both checkers; `gometrics` and `tsmetrics` (coverage unknown); `review.md`, `report.json`, `qa.json`; the ledger; the BanyanDB mapping; the skill's start and combined-file steps | Intake, executor contract and confinement tests. Unit tests per detector, symbol pattern (new vs modified, receivers, generics), query builder, similarity scorer, test-map rule and validator rule. `gometrics` matches gocyclo on a fixture corpus. Nesting and changed-function scope fixtures. The `measurements` validator rejects each kind of inconsistent record. Real-Git tests: searches read the base commit only, and materialization runs no hook or filter. Ledger CAS race. Rehearsal `report`, `report-corrections`, `answer-finds-existing-helper`, `answer-no-library-with-whole-repo-search`, `answer-checker-contradicts`, `needs-author-purpose`, `purpose-stated`, `missing-test`, `complex-function`, `injection`. One live run on a real BanyanDB PR, read by the user, with recall of new symbols, tests and existing equivalents checked by hand |
 | P2 | **Deltas:** head mapping, then the since-last sections for the report and the Q&A, with question closure | Real-Git fixtures for append, rebase, squash, base merge and missing objects; rehearsal `report-delta`; a live re-run after a contributor push |
 | P3 | review-kit extracted and vendored into issue-fix | issue-fix tests unchanged; `describe()` byte-identical for every shipped profile; drift test; `resume --update-plugin` from 0.16.0 |
-| P4 | **Review layer, local:** generic approvals (`review-layer`); Review, Checks (definition only), Draft, and Publish as a stop; `needs author` items as draft comments; verdict rule; edits | Graph tests per requirement; anchor validation on real GitHub patches; secret and private-reference scans; report-only requirements pass on a decline; rehearsal `no-findings` and `happy` up to the stop |
+| P4 | **Review layer, local:** generic approvals (`review-layer`); Review, Checks (definition only), Draft, and Publish as a stop; `needs author` items pre-selected and other Q&A items promotable as draft comments; verdict rule; edits | Graph tests per requirement; anchor validation on real GitHub patches; secret and private-reference scans; report-only requirements pass on a decline; rehearsal `no-findings` and `happy` up to the stop |
 | P5 | **Publish:** write token binding, `publish-review`, read-back, optional `publish-report` | Controller tests: write refused without `approvalRef`, with a stale generation or past `maxDispatches`; token bound only under `--approve`; ambiguous POST reconciled; rehearsal `publish-refused`, `happy` to `succeeded`; a live publish on a user-chosen PR |
 | P6 | **Confined execution:** checks; coverage and measured CRAP; mutation testing (`gomutate`, StrykerJS, c8) with `weak-test` questions. Also incremental review (prior findings, threads, never re-raise) and measured budgets | Rehearsal `surviving-mutant` and `force-push`. Under real bwrap: `checks-ran`; coverage attribution by line range; `gomutate` operator fixtures (one per operator, overlay leaves the checkout unchanged, a compile-failing mutant is `invalid`, the budget cut-off records `not-run`); a StrykerJS run restricted to line ranges with the operator allowlist. Budgets and mutation times recorded in `budgets.md` |
 
@@ -1123,6 +1150,3 @@ writes.
    contributor PRs?
 3. **Sharing the ledger.** The ledger ref lives in one review clone. Do other
    machines or maintainers need it, through a shared private remote?
-4. **Judgement-word list.** The fixed list
-   ([§6.5](#65-deterministic-validation)) errs toward rejecting. For example,
-   "must" is rejected even where it describes code. Is that strictness wanted?
