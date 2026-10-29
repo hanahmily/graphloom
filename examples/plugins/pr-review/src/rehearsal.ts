@@ -272,6 +272,7 @@ function reads(p: Pull): NonNullable<RehearsalScenario["reads"]> {
 
 function commands(p: Pull, toolId: string | undefined): NonNullable<RehearsalScenario["commands"]> {
   return {
+    "head-guard": { exitCode: 0, stdout: "clear\n" },
     "head-checkout": { exitCode: 0 },
     "head-tree": { exitCode: 0, stdout: `head=${TREE}\nindex=${TREE}\nbase=${REHEARSAL_MERGE_BASE}\nworktree=clean\n` },
     "review-dir": { exitCode: 0, stdout: "ready\n" },

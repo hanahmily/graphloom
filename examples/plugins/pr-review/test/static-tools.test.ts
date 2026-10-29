@@ -6,6 +6,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import os from "node:os";
 import path from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
+import { GIT_ENV } from "../src/commands.js";
 import { measurementState, staticCommand, metricsDiffCommand, type Batch } from "../src/measurements.js";
 import { FLAGS_DOC, FLAGS_GO, REHEARSAL_HEAD_FILES, TTL_DOC, TTL_GO } from "../src/rehearsal.js";
 import { pullFile } from "../src/snapshot.js";
@@ -81,11 +82,18 @@ describe("the diff command", () => {
     git("-c", "user.email=a@b.c", "-c", "user.name=n", "add", ".");
     git("-c", "user.email=a@b.c", "-c", "user.name=n", "commit", "-q", "-m", "base");
     writeFileSync(path.join(dir, "a.go"), "package a\n\nfunc A() {\n\tprintln(1)\n}\n");
+    writeFileSync(path.join(dir, "notes.md"), "not a measured file\n");
+    git("-c", "user.email=a@b.c", "-c", "user.name=n", "add", "-N", "notes.md");
     const argv = metricsDiffCommand().argv;
-    const out = spawnSync(argv[0]!, argv.slice(1), { cwd: dir, encoding: "utf8" });
-    expect(out.status).toBe(0);
-    expect(out.stdout).toContain("+++ b/a.go");
-    expect(out.stdout).toMatch(/@@ -3(?:,\d+)? \+3(?:,\d+)? @@/);
+    const report = path.join(dir, ".report-out");
+    const out = spawnSync(argv[0]!, argv.slice(1), { cwd: dir, encoding: "utf8", env: { ...process.env, ...GIT_ENV, GRAPHLOOM_REPORT_FILE: report } });
+    expect(out.status, out.stderr).toBe(0);
+    // The diff goes to the report file, where a cut is flagged, and only files of a measured language are in it.
+    expect(out.stdout).toBe("");
+    const text = readFileSync(report, "utf8");
+    expect(text).toContain("+++ b/a.go");
+    expect(text).not.toContain("notes.md");
+    expect(text).toMatch(/@@ -3(?:,\d+)? \+3(?:,\d+)? @@/);
     // The static state machine reads the same text.
     const state = measurementState([], [pullFile({ path: "a.go", status: "modified", patch: "@@ -3 +3,3 @@\n+x" })!], profileOf());
     expect(state.state).toBe("observe");

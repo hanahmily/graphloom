@@ -3,7 +3,7 @@
 
 import type { EvidenceRecord, ValidationInput, ValidationResult, Validator } from "@graphloom/sdk";
 import { analyze, evidencePull, type Analysis } from "./analysis.js";
-import { checkoutCommand, headTreeCommand, parseHeadTree, parseLedger } from "./commands.js";
+import { checkoutCommand, guardCommand, headTreeCommand, parseHeadTree, parseLedger } from "./commands.js";
 import { COMMAND, NOT_IMPLEMENTED, REPORT_JSON, REVIEW_MD } from "./constants.js";
 import { commandRuns, describeCommand, outputTail, reportText, succeeded } from "./evidence.js";
 import { reportFlow, type ReportFlow } from "./flow.js";
@@ -61,6 +61,11 @@ export function pinnedBase(evidence: readonly EvidenceRecord[]): string | undefi
 export const headTree: Validator = profiled((input, profile) => {
   const pr = evidencePull(input.evidence, profile);
   if (pr === undefined) return inconclusive("the pull request has not been read");
+  const guard = commandRuns(input.evidence, COMMAND.guard).at(-1);
+  if (guard === undefined) return inconclusive("the head was not checked for a change under .graphloom/ before it was checked out");
+  const wantGuard = guardCommand(pr.head).argv;
+  if (guard.command.argv.length !== wantGuard.length || guard.command.argv.some((a, i) => a !== wantGuard[i])) return failed("the .graphloom/ guard did not name the head");
+  if (!succeeded(guard.command)) return failed(`${describeCommand(guard.command)}: ${outputTail(guard.command)}`);
   const checkout = commandRuns(input.evidence, COMMAND.checkout).at(-1);
   if (checkout === undefined) return inconclusive("the head has not been checked out");
   const want = checkoutCommand(pr.head).argv;

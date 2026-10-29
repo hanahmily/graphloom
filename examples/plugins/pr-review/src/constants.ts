@@ -50,6 +50,7 @@ export const RESERVED_CHECKS: readonly string[] = [ENV_WORKTREE, ENV_PLUGIN_ROOT
 
 /** Command ids the graph owns. */
 export const COMMAND = {
+  guard: "head-guard",
   checkout: "head-checkout",
   headTree: "head-tree",
   reviewDir: "review-dir",

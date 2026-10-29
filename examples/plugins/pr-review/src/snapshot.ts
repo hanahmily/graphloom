@@ -58,14 +58,19 @@ export interface ReadSpec {
   paged: boolean;
 }
 
+/**
+ * The pull request's metadata is read last. Every list is read at some moment, and the head the metadata then
+ * shows must still be the requested one: a push in between would otherwise leave lists of a newer head
+ * beside metadata of the old one, and the report would mix revisions.
+ */
 export const READS: readonly ReadSpec[] = [
-  { key: "pull", pin: GET_PULL, label: "pull request metadata", paged: false },
   { key: "files", pin: LIST_PULL_FILES, label: "changed files", paged: true },
   { key: "commits", pin: LIST_PULL_COMMITS, label: "commits", paged: true },
   { key: "reviews", pin: LIST_PULL_REVIEWS, label: "reviews", paged: true },
   { key: "reviewComments", pin: LIST_PULL_REVIEW_COMMENTS, label: "review comments", paged: true },
   { key: "threads", pin: LIST_REVIEW_THREADS, label: "review threads", paged: true },
   { key: "checks", pin: LIST_CHECK_RUNS, label: "check runs of the head", paged: true },
+  { key: "pull", pin: GET_PULL, label: "pull request metadata", paged: false },
 ];
 
 export interface ReadResult {

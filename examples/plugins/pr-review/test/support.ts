@@ -41,6 +41,7 @@ interface Options {
 const environment = (id: string, out: string): EvidenceRecord => ({
   ref: `env-${id}`,
   kind: "command",
+  candidateDigest: "d0",
   generation: 1,
   payload: { environment: { check: id }, command: { id, argv: ["sh", "-c", id], exitCode: 0, stdoutTail: out, stderrTail: "" } },
 });
@@ -49,12 +50,13 @@ const environment = (id: string, out: string): EvidenceRecord => ({
  * What the controller hands a validator (packages/controller/src/admit.ts candidateEvidence): the latest
  * observation of each file, and only the latest review and workspace evidence. Everything else stays.
  */
-export function candidateEvidence(evidence: EvidenceRecord[]): EvidenceRecord[] {
+export function candidateEvidence(evidence: EvidenceRecord[], digest: string): EvidenceRecord[] {
   const out: EvidenceRecord[] = [];
   const files = new Set<string>();
   const kinds = new Set<string>();
   for (let i = evidence.length - 1; i >= 0; i -= 1) {
     const e = evidence[i]!;
+    if (e.candidateDigest !== undefined && e.candidateDigest !== digest) continue;
     if (e.kind === "file") {
       const p = (e.payload as { path?: string }).path;
       if (p === undefined || files.has(p)) continue;
@@ -89,6 +91,7 @@ export function simulate(options: Options = {}): Simulation {
   };
   let written: Simulation["written"];
   let lastWork: string | undefined;
+  let digest = "d0";
   for (let step = 0; step < (options.maxSteps ?? 60); step += 1) {
     const view: RunView = {
       runId: "rehearsal-sim",
@@ -102,7 +105,7 @@ export function simulate(options: Options = {}): Simulation {
       generation: 1,
       stateRevision: step,
       activeVersion: "0.1.0",
-      candidateDigest: "digest",
+      candidateDigest: digest,
       config,
       agentSessions: sessions,
     };
@@ -113,7 +116,7 @@ export function simulate(options: Options = {}): Simulation {
     if (action.type === "observe") {
       for (const p of action.observe.paths ?? []) {
         const bytes = files[p];
-        evidence.push({ ref: `e${(n += 1)}`, kind: "file", candidateDigest: "digest", ...(bytes === undefined ? { fingerprint: "missing" } : {}), payload: { path: p, bytes: bytes ?? "" } });
+        evidence.push({ ref: `e${(n += 1)}`, kind: "file", candidateDigest: digest, ...(bytes === undefined ? { fingerprint: "missing" } : {}), payload: { path: p, bytes: bytes ?? "" } });
       }
       continue;
     }
@@ -127,8 +130,8 @@ export function simulate(options: Options = {}): Simulation {
           const who = (review?.payload as { producer?: { readOnly: boolean; purpose: string; operationId: string } } | undefined)?.producer;
           if (who === undefined || !who.readOnly || who.purpose !== "review" || who.operationId === lastWork) throw new Error(`the controller would refuse ${id}: no independent review evidence`);
         }
-        const result = validatorById(binding.validatorId)!.evaluate({ requirementId: id, statement: "", evidence: candidateEvidence(evidence), candidateDigest: "digest", config });
-        receipts.push({ id: `r${(n += 1)}`, stageId: stage.id, requirementId: id, validatorBinding: binding, candidateFingerprint: "x", evidenceRefs: [], valid: result.status === "passed", candidateDigest: "digest" });
+        const result = validatorById(binding.validatorId)!.evaluate({ requirementId: id, statement: "", evidence: candidateEvidence(evidence, digest), candidateDigest: digest, config });
+        receipts.push({ id: `r${(n += 1)}`, stageId: stage.id, requirementId: id, validatorBinding: binding, candidateFingerprint: "x", evidenceRefs: [], valid: result.status === "passed", candidateDigest: digest });
       }
       continue;
     }
@@ -136,15 +139,24 @@ export function simulate(options: Options = {}): Simulation {
     const job = action.job;
     jobs.push(job);
     const producer = { operationId: `op${(n += 1)}`, stageId: job.stageId, purpose: job.purpose, readOnly: job.readOnly === true, kind: job.kind, ...(job.executor !== undefined ? { executorId: job.executor.id } : {}) };
-    if (job.purpose === "work") lastWork = producer.operationId;
+    if (job.purpose === "work") {
+      lastWork = producer.operationId;
+      // A job that changes the worktree changes the workspace digest, and its own evidence carries the new one.
+      digest = "d1";
+    }
     if (job.kind === "command" && job.executor !== undefined) {
       const read = next("reads", job.executor.id);
-      evidence.push({ ref: `e${(n += 1)}`, kind: "other", candidateDigest: "digest", payload: { producer, github: read } });
+      evidence.push({ ref: `e${(n += 1)}`, kind: "other", candidateDigest: digest, payload: { producer, github: read } });
     } else if (job.kind === "command") {
-      for (const c of (job.input as { commands: Array<{ id: string; argv: string[] }> }).commands) {
+      const input = job.input as { commands: Array<{ id: string; argv: string[] }>; continueOnFailure?: boolean };
+      let stopped = false;
+      for (const c of input.commands) {
+        // As the command executor does: after a failing command, the rest do not run unless the job says to continue.
+        if (stopped) break;
         const stub = scenario.commands?.[c.id];
+        if ((stub?.exitCode ?? 0) !== 0 && input.continueOnFailure !== true) stopped = true;
         if (c.id === "report-write") written = writtenReport(c.argv);
-        evidence.push({ ref: `e${(n += 1)}`, kind: "command", candidateDigest: "digest", payload: { producer, command: { id: c.id, argv: c.argv, exitCode: stub?.exitCode ?? 0, stdoutTail: stub?.stdout ?? "", stderrTail: stub?.stderr ?? "" } } });
+        evidence.push({ ref: `e${(n += 1)}`, kind: "command", candidateDigest: digest, payload: { producer, command: { id: c.id, argv: c.argv, exitCode: stub?.exitCode ?? 0, stdoutTail: stub?.stdout ?? "", stderrTail: stub?.stderr ?? "" } } });
       }
     } else {
       const reply = next("results", job.resultSchema!) as { output?: unknown } | undefined;
@@ -156,7 +168,7 @@ export function simulate(options: Options = {}): Simulation {
       let record: EvidenceRecord = {
         ref: `e${(n += 1)}`,
         kind: flat ? "review" : "other",
-        candidateDigest: "digest",
+        candidateDigest: digest,
         resultSchema: job.resultSchema!,
         contract: { name: contract.name, status: problems.length > 0 ? "invalid" : "valid", problems },
         payload: flat ? { ...(reply!.output as object), producer: who } : { producer: who, codingAgent: { status: "completed", output: reply?.output } },
@@ -194,7 +206,7 @@ export function viewOf(sim: Simulation, over: Partial<RunView> = {}, config: Rec
     generation: 1,
     stateRevision: 99,
     activeVersion: "0.1.0",
-    candidateDigest: "digest",
+    candidateDigest: sim.evidence.flatMap((e) => (e.candidateDigest !== undefined ? [e.candidateDigest] : [])).at(-1) ?? "d0",
     config,
     ...over,
   };

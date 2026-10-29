@@ -6,7 +6,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync,
 import os from "node:os";
 import path from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
-import { checkoutCommand, GIT_ENV, headTreeCommand, ledgerReadCommand, parseHeadTree, parseLedger, reviewDirCommand } from "../src/commands.js";
+import { checkoutCommand, GIT_ENV, GUARD_REFUSED, guardCommand, headTreeCommand, ledgerReadCommand, parseHeadTree, parseLedger, reviewDirCommand } from "../src/commands.js";
 import { BANYANDB, root } from "./support.js";
 
 const dirs: string[] = [];
@@ -243,6 +243,29 @@ describe("materialization (design 4)", () => {
     expect(markers(marks)).toEqual(expect.arrayContaining(["smudge"]));
   });
 
+  it("is not fooled by the review clone's own configuration: a filter it defines cannot be activated by the pull request's .gitattributes, and its filesystem monitor does not run", () => {
+    const { dir, head } = worktree();
+    const marks = tmp("marks");
+    out(dir, ["config", "filter.mark.smudge", `touch ${marks}/ran-smudge; cat`]);
+    out(dir, ["config", "filter.mark.clean", "cat"]);
+    out(dir, ["config", "core.fsmonitor", path.join(booby(marks), "monitor.sh")]);
+    const results = materialize(dir, head, tmp("home"));
+    expect(results.map((r) => r.code)).toEqual([0, 0, 0]);
+    expect(markers(marks)).toEqual([]);
+    expect(parseHeadTree(results[1]!.stdout)).toMatchObject({ clean: true });
+    expect(readFileSync(path.join(dir, "mod.txt"), "utf8")).toBe("after\n");
+  });
+
+  it("proves that test too: with only the global configuration and the hooks switched off, the clone's own filter and monitor do run on the pull request's attributes", () => {
+    const { dir, head } = worktree();
+    const marks = tmp("marks");
+    out(dir, ["config", "filter.mark.smudge", `touch ${marks}/ran-smudge; cat`]);
+    out(dir, ["config", "filter.mark.clean", "cat"]);
+    const partial = { GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
+    materialize(dir, head, tmp("home"), partial);
+    expect(markers(marks)).toEqual(["smudge"]);
+  });
+
   it("is not fooled by hooks in the repository itself (core.hooksPath is switched off for the checkout)", () => {
     const { dir, head } = worktree();
     const marks = tmp("marks");
@@ -274,6 +297,68 @@ describe("materialization (design 4)", () => {
     expect(parseHeadTree("head=a\nindex=b\nbase=c\nworktree=dirty\n")).toEqual({ head: "a", index: "b", base: "c", clean: false });
     expect(parseHeadTree("head=a\nindex=b\n")).toBeUndefined();
     expect(parseHeadTree("")).toBeUndefined();
+  });
+});
+
+describe("the .graphloom/ guard (design 4)", () => {
+  function repo() {
+    const dir = tmp("guard");
+    out(dir, ["init", "-q", "-b", "main"]);
+    write(dir, { "a.txt": "a\n", ".graphloom/old/keep.json": "{}\n" });
+    const base = commit(dir, "base");
+    return { dir, base, head: (files: Record<string, string>, remove: string[] = []) => {
+      out(dir, ["checkout", "-q", "--detach", base]);
+      for (const r of remove) out(dir, ["rm", "-q", "-r", r]);
+      write(dir, files);
+      return commit(dir, "head");
+    } };
+  }
+  const guard = (dir: string, head: string) => {
+    const c = guardCommand(head);
+    return spawnSync(c.argv[0]!, c.argv.slice(1), { cwd: dir, encoding: "utf8", env: { ...process.env, ...GIT_ENV } });
+  };
+
+  it("lets a head that leaves .graphloom/ alone through, from Git objects, with nothing checked out", () => {
+    const { dir, base, head } = repo();
+    const h = head({ "b.go": "package b\n" });
+    out(dir, ["checkout", "-q", "--detach", base]);
+    const r = guard(dir, h);
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout.trim()).toBe("clear");
+    expect(existsSync(path.join(dir, "b.go"))).toBe(false);
+  });
+
+  it("refuses an added, changed or deleted file under .graphloom/, with exit 3 and the first paths on stderr", () => {
+    for (const change of [{ add: { ".graphloom/review/review.md": "x\n" }, remove: [] }, { add: { ".graphloom/old/keep.json": "{ }\n" }, remove: [] }, { add: {}, remove: [".graphloom"] }]) {
+      const { dir, base, head } = repo();
+      const h = head(change.add, change.remove);
+      out(dir, ["checkout", "-q", "--detach", base]);
+      const r = guard(dir, h);
+      expect(r.status, JSON.stringify(change)).toBe(GUARD_REFUSED);
+      expect(r.stderr).toContain(".graphloom/");
+    }
+  });
+
+  it("refuses a file renamed out of .graphloom/ (the old name is a change too) and a symlink named .graphloom", () => {
+    const a = repo();
+    const renamed = a.head({ "moved.json": "{}\n" }, [".graphloom/old/keep.json"]);
+    out(a.dir, ["checkout", "-q", "--detach", a.base]);
+    expect(guard(a.dir, renamed).status).toBe(GUARD_REFUSED);
+    const b = tmp("guard-link");
+    out(b, ["init", "-q", "-b", "main"]);
+    write(b, { "a.txt": "a\n" });
+    const base = commit(b, "base");
+    spawnSync("ln", ["-s", "elsewhere", path.join(b, ".graphloom")]);
+    const linked = commit(b, "link");
+    out(b, ["checkout", "-q", "--detach", base]);
+    expect(guard(b, linked).status).toBe(GUARD_REFUSED);
+  });
+
+  it("fails some other way, not with the refusal, when the head's objects are missing", () => {
+    const { dir } = repo();
+    const r = guard(dir, "0".repeat(39) + "1");
+    expect(r.status).not.toBe(0);
+    expect(r.status).not.toBe(GUARD_REFUSED);
   });
 });
 

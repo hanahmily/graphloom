@@ -9,12 +9,42 @@ import { COMMAND, REVIEW_DIR, ledgerRef } from "./constants.js";
  * and writes files; none runs repository code.
  */
 
+/** Git's empty tree, which Git knows without the object being stored. */
+export const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
 /**
- * The environment of every one of them: no global or system Git configuration,
- * so no user filter, hook or textconv from there can run. Passed as the job's
- * `env`, so the checkout's argv is exactly the fixed one.
+ * The environment of every one of them, passed as the job's `env` so the
+ * checkout's argv stays exactly the fixed one:
+ *
+ * - no global or system Git configuration, so no filter, hook or textconv from there runs;
+ * - the filesystem monitor is off, whatever the repository's own configuration says;
+ * - attributes are read from the empty tree, so a `.gitattributes` the pull request carries (or any
+ *   attribute in the working tree) can name no filter, which is how a pull request could otherwise
+ *   activate a filter driver that the review clone's local configuration defines.
+ *
+ * Needs Git 2.40 or later for `GIT_ATTR_SOURCE`; the profile's own git check asks for 2.41.
  */
-export const GIT_ENV = { GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" } as const;
+export const GIT_ENV = {
+  GIT_CONFIG_GLOBAL: "/dev/null",
+  GIT_CONFIG_NOSYSTEM: "1",
+  GIT_CONFIG_COUNT: "1",
+  GIT_CONFIG_KEY_0: "core.fsmonitor",
+  GIT_CONFIG_VALUE_0: "false",
+  GIT_ATTR_SOURCE: EMPTY_TREE,
+} as const;
+
+/** The exit status of the guard when the head touches `.graphloom/`, which the graph reads as an incompatible task. */
+export const GUARD_REFUSED = 3;
+
+const GUARD =
+  'set -eu; names=$(git -c core.hooksPath=/dev/null diff --name-only --no-renames HEAD "$1" -- .graphloom); ' +
+  `if [ -n "$names" ]; then printf '%s\\n' "$names" | head -n 5 >&2; exit ${GUARD_REFUSED}; fi; echo clear`;
+
+/**
+ * Refuses a head that touches `.graphloom/` (design §4), from the Git objects alone and before anything is
+ * checked out: the pinned base (HEAD) against the head commit. It lists the first paths on stderr.
+ */
+export const guardCommand = (head: string): EnvironmentCommand => ({ id: COMMAND.guard, argv: ["sh", "-c", GUARD, COMMAND.guard, head] });
 
 /**
  * Materialization (design §4): the pinned base plus the head's tree, with files

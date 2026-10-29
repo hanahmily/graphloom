@@ -3,6 +3,7 @@
 
 import { describe, expect, it } from "vitest";
 import type { RehearsalScenario } from "@graphloom/sdk";
+import { GIT_ENV } from "../src/commands.js";
 import { advancePullRequest, agentConfigMasks } from "../src/graph.js";
 import { REHEARSAL_HEAD, REHEARSAL_HEAD_FILES, REHEARSAL_REQUEST } from "../src/rehearsal.js";
 import { validatorById } from "../src/validators.js";
@@ -28,13 +29,14 @@ describe("the report scenario, end to end through the graph", () => {
     ]);
   });
 
-  it("runs the jobs in order: seven reads, one checkout, the ledger, the reporter, its checker, the diff, the tools, the write", () => {
+  it("runs the jobs in order: the checkout first, then seven reads, the ledger, the reporter, its checker, the diff, the tools, the write", () => {
     expect(sim.jobs.map((j) => j.instruction.split(" ").slice(0, 3).join(" "))).toEqual([
-      "Read the pull", "Read the changed", "Read the commits", "Read the reviews", "Read the review", "Read the review", "Read the check",
-      "Materialize the pull", "Read the pull", "Write the change", "Check the report's", "List the changed", "Measure the changed", "Write .graphloom/review/review.md and",
+      "Materialize the pull",
+      "Read the changed", "Read the commits", "Read the reviews", "Read the review", "Read the review", "Read the check", "Read the pull",
+      "Read the pull", "Write the change", "Check the report's", "List the changed", "Measure the changed", "Write .graphloom/review/review.md and",
     ]);
-    expect(sim.jobs.slice(0, 7).map((j) => j.executor!.id)).toEqual([
-      "graphloom.github/get-pull", "graphloom.github/list-pull-files", "graphloom.github/list-pull-commits", "graphloom.github/list-pull-reviews", "graphloom.github/list-pull-review-comments", "graphloom.github/list-review-threads", "graphloom.github/list-check-runs",
+    expect(sim.jobs.slice(1, 8).map((j) => j.executor!.id)).toEqual([
+      "graphloom.github/list-pull-files", "graphloom.github/list-pull-commits", "graphloom.github/list-pull-reviews", "graphloom.github/list-pull-review-comments", "graphloom.github/list-review-threads", "graphloom.github/list-check-runs", "graphloom.github/get-pull",
     ]);
   });
 
@@ -45,18 +47,30 @@ describe("the report scenario, end to end through the graph", () => {
   });
 
   it("asks for each GitHub read with the request's repository, pull request number and head", () => {
-    expect(sim.jobs[0]!.input).toEqual({ owner: "apache", repo: "skywalking-banyandb", number: 7 });
+    expect(sim.jobs[7]!.input).toEqual({ owner: "apache", repo: "skywalking-banyandb", number: 7 });
     expect(sim.jobs[1]!.input).toEqual({ owner: "apache", repo: "skywalking-banyandb", number: 7, perPage: 100, maxPages: 10 });
     expect(sim.jobs[6]!.input).toEqual({ owner: "apache", repo: "skywalking-banyandb", sha: REHEARSAL_HEAD, perPage: 100, maxPages: 10 });
+  });
+
+  it("reads the pull request after the checkout, because evidence counts only under the workspace change it was produced under", () => {
+    const at = (text: string) => sim.jobs.findIndex((j) => j.instruction.startsWith(text));
+    expect(at("Materialize")).toBeLessThan(at("Read the changed files"));
+    // The metadata is read last, so a push after the lists were read shows in the head it reports.
+    expect(at("Read the pull request metadata")).toBeGreaterThan(at("Read the check runs"));
+    expect(at("Read the pull request metadata")).toBeGreaterThan(at("Read the changed files"));
+    // The simulation moves the workspace digest on at the checkout, as the controller does, and judges with the controller's evidence view.
+    const digests = new Set(sim.evidence.filter((e) => e.payload !== undefined && (e.payload as { github?: unknown }).github !== undefined).map((e) => e.candidateDigest));
+    expect([...digests]).toEqual(["d1"]);
   });
 
   it("materializes with the fixed argv in one writer job, and the environment that turns off user Git configuration", () => {
     const [job] = jobsOf(sim, "Materialize");
     expect(job).toMatchObject({ kind: "command", purpose: "work", writeScope: ["."], stageId: "fetch" });
     const input = job!.input as { commands: Array<{ id: string; argv: string[] }>; env: Record<string, string> };
-    expect(input.commands[0]).toEqual({ id: "head-checkout", argv: ["git", "-c", "core.hooksPath=/dev/null", "checkout", "--no-overlay", REHEARSAL_HEAD, "--", "."] });
-    expect(input.commands.map((c) => c.id)).toEqual(["head-checkout", "head-tree", "review-dir"]);
-    expect(input.env).toEqual({ GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" });
+    expect(input.commands[1]).toEqual({ id: "head-checkout", argv: ["git", "-c", "core.hooksPath=/dev/null", "checkout", "--no-overlay", REHEARSAL_HEAD, "--", "."] });
+    expect(input.commands.map((c) => c.id)).toEqual(["head-guard", "head-checkout", "head-tree", "review-dir"]);
+    expect(input.env).toEqual({ ...GIT_ENV });
+    expect(input.env).toMatchObject({ GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_KEY_0: "core.fsmonitor", GIT_CONFIG_VALUE_0: "false", GIT_ATTR_SOURCE: "4b825dc642cb6eb9a060e54bf8d69288fbee4904" });
   });
 
   it("records the ledger as absent, read-only", () => {
@@ -279,7 +293,7 @@ describe("sandbox-unavailable", () => {
     expect(stopOf(sim)!.reason).toBe("report ready");
     expect(sim.jobs.every((j) => j.confinement === undefined || j.confinement.kind === "bwrap")).toBe(true);
     const programs = new Set(sim.jobs.flatMap((j) => ((j.input as { commands?: Array<{ argv: string[] }> }).commands ?? []).map((c) => c.argv[0]!)));
-    expect([...programs].sort()).toEqual(["env", "git", "sh"]);
+    expect([...programs].sort()).toEqual(["git", "sh"]);
     expect(sim.written!.markdown).toContain("not run (coverage arrives in a later wave)");
     expect(sim.receipts.some((r) => r.requirementId === "measurements" && r.valid)).toBe(true);
   });
@@ -317,14 +331,24 @@ describe("what makes the run stop before any agent", () => {
     expect(stopOf(simulate({ config: { limits: { maxFiles: 3 } } }))!.reason).toBe("incompatible task");
   });
 
-  it("refuses a pull request that touches .graphloom/, before it checks anything out", () => {
+  it("refuses a pull request that touches .graphloom/ from the Git objects, before the checkout runs and before any read", () => {
+    const refused = scenarioWith("report", (s) => {
+      s.commands!["head-guard"] = { exitCode: 3, stderr: ".graphloom/review/review.md\n" };
+    });
+    const sim = simulate({ scenario: refused });
+    expect(stopOf(sim)).toMatchObject({ reason: "incompatible task", retryable: false });
+    expect(stopOf(sim)!.blocker).toMatch(/touches \.graphloom\/.*\.graphloom\/review\/review\.md/);
+    expect(sim.jobs).toHaveLength(1);
+    expect(sim.evidence.some((e) => (e.payload as { command?: { id: string } }).command?.id === "head-checkout")).toBe(false);
+  });
+
+  it("refuses it again from the GitHub file list, whatever the guard said, and a rename out of .graphloom/", () => {
     const touching = scenarioWith("report", (s) => {
       const files = (s.reads!["graphloom.github/list-pull-files"]![0] as { items: Array<Record<string, unknown>> }).items;
       files.push({ path: ".graphloom/review/review.md", status: "added", previousPath: null, additions: 1, deletions: 0, sha: null, patch: "@@ -0,0 +1 @@\n+x", patchOmitted: false });
     });
     const sim = simulate({ scenario: touching });
     expect(stopOf(sim)!.blocker).toMatch(/touches \.graphloom\/review\/review\.md/);
-    expect(jobsOf(sim, "Materialize")).toEqual([]);
     const renamed = scenarioWith("report", (s) => {
       const files = (s.reads!["graphloom.github/list-pull-files"]![0] as { items: Array<Record<string, unknown>> }).items;
       files.push({ path: "moved.md", status: "renamed", previousPath: ".graphloom/issues.json", additions: 0, deletions: 0, sha: null, patch: null, patchOmitted: false });

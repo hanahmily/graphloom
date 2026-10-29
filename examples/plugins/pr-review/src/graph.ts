@@ -24,7 +24,7 @@ import {
   type ValidatorBinding,
 } from "@graphloom/sdk";
 import { analyze, type Analysis } from "./analysis.js";
-import { checkoutCommand, GIT_ENV, headTreeCommand, ledgerReadCommand, reviewDirCommand } from "./commands.js";
+import { checkoutCommand, GIT_ENV, GUARD_REFUSED, guardCommand, headTreeCommand, ledgerReadCommand, reviewDirCommand } from "./commands.js";
 import {
   ANSWERS_STAGE,
   CODING_AGENT,
@@ -242,14 +242,18 @@ function githubJob(spec: ReadSpec, input: Record<string, unknown>): JobSpec {
 
 function fetch(ctx: Context, view: RunView): GraphDecision {
   const { profile, pr } = ctx;
-  const s = snapshotState(view.evidence, pr, profile.limits);
-  if (s.state === "reading") return withPrivate(dispatch(githubJob(s.next, readInput(s.next, pr, s.cursor)), s.why));
-  if (s.state === "incompatible") return stop({ reason: "incompatible task", blocker: s.problem, evidenceRefs: s.refs.slice(-10), retryable: false }, "stop: this pull request cannot be reported");
-
+  // The head is checked out first, then the pull request is read: evidence is judged against the workspace
+  // change it was produced under, and the checkout changes it, so a read made before would no longer count.
+  const guard = commandState(view, COMMAND.guard);
+  if (guard.failed && !guard.retry && guard.run !== undefined) {
+    if (guard.run.command.exitCode === GUARD_REFUSED) {
+      return stop({ reason: "incompatible task", blocker: `the pull request touches .graphloom/, which holds this graph's own files and which a pull request may not change: ${outputTail(guard.run.command, 300).replace(/\s+/g, " ")}`, evidenceRefs: [guard.run.record.ref], retryable: false }, "stop: the pull request touches .graphloom/");
+    }
+  }
   const checkout = commandState(view, COMMAND.checkout);
   const tree = commandState(view, COMMAND.headTree);
   const dir = commandState(view, COMMAND.reviewDir);
-  const checked = [checkout, tree, dir];
+  const checked = [guard, checkout, tree, dir];
   const failed = checked.find((c) => c.failed && !c.retry);
   if (failed?.run !== undefined) {
     return supervise({ reason: `the checkout of the head failed: ${describeCommand(failed.run.command)}: ${outputTail(failed.run.command)}`, evidenceRefs: [failed.run.record.ref] }, "escalate a failed checkout");
@@ -262,10 +266,13 @@ function fetch(ctx: Context, view: RunView): GraphDecision {
       purpose: "work",
       writeScope: ["."],
       instruction: "Materialize the pull request's head in the worktree (no hook, no filter, no repository code)",
-      input: { commands: [checkoutCommand(pr.head), headTreeCommand(pr.head), reviewDirCommand()], env: { ...GIT_ENV } },
+      input: { commands: [guardCommand(pr.head), checkoutCommand(pr.head), headTreeCommand(pr.head), reviewDirCommand()], env: { ...GIT_ENV } },
     };
     return withPrivate(dispatch(job, `check out head ${pr.head.slice(0, 12)} over the pinned merge base`));
   }
+  const s = snapshotState(view.evidence, pr, profile.limits);
+  if (s.state === "reading") return withPrivate(dispatch(githubJob(s.next, readInput(s.next, pr, s.cursor)), s.why));
+  if (s.state === "incompatible") return stop({ reason: "incompatible task", blocker: s.problem, evidenceRefs: s.refs.slice(-10), retryable: false }, "stop: this pull request cannot be reported");
   const ledger = commandState(view, COMMAND.ledger);
   if (ledger.failed && !ledger.retry && ledger.run !== undefined) {
     return supervise({ reason: `the ledger read failed: ${describeCommand(ledger.run.command)}`, evidenceRefs: [ledger.run.record.ref] }, "escalate a failed ledger read");
@@ -397,7 +404,7 @@ function measureAndWrite(ctx: Context, view: RunView, analysis: Analysis, flow: 
     case "diff": {
       const diff = commandState(view, COMMAND.metricsDiff);
       if (diff.failed && !diff.retry && diff.run !== undefined) return supervise({ reason: `the changed-lines diff failed: ${describeCommand(diff.run.command)}`, evidenceRefs: [diff.run.record.ref] }, "escalate a failed diff");
-      return withPrivate(dispatch(commandJob(REPORT_STAGE, "List the changed lines (git diff -U0 -w)", { commands: [metricsDiffCommand()] }), "list the head-side changed lines for the static metrics tools"));
+      return withPrivate(dispatch(commandJob(REPORT_STAGE, "List the changed lines (git diff -U0 -w)", { commands: [metricsDiffCommand()], env: { ...GIT_ENV } }), "list the head-side changed lines for the static metrics tools"));
     }
     case "tools": {
       const binds = toolBinds(view, m.batches);

@@ -74,9 +74,18 @@ export function batchesOf(m: Measurable): Batch[] {
   return out;
 }
 
-/** `git diff -U0 -w` of the worktree against the pinned base: the head-side hunks, whitespace-only edits excluded (§5.1). */
-export const METRICS_DIFF_ARGV = ["env", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1", "git", "-c", "core.hooksPath=/dev/null", "diff", "-U0", "-w", "--no-color", "--no-ext-diff", "--no-textconv", "HEAD", "--"];
-export const metricsDiffCommand = (): EnvironmentCommand => ({ id: COMMAND.metricsDiff, argv: [...METRICS_DIFF_ARGV] });
+/** The files a measured language can have, as Git pathspecs: the diff the tools' hunks come from holds nothing else. */
+export const MEASURED_PATHSPECS = ["*.go", "*.ts", "*.tsx", "*.mts", "*.cts", "*.js", "*.jsx", "*.mjs", "*.cjs"];
+
+/**
+ * `git diff -U0 -w` of the worktree against the pinned base, over the measured languages' files: the head-side
+ * hunks, whitespace-only edits excluded (§5.1). It goes to the command's report file, whose tail the controller
+ * keeps with a flag when it is cut, so a diff that does not fit is refused, never read short.
+ */
+export const metricsDiffCommand = (): EnvironmentCommand => ({
+  id: COMMAND.metricsDiff,
+  argv: ["sh", "-c", 'set -eu; git -c core.hooksPath=/dev/null diff -U0 -w --no-color --no-ext-diff --no-textconv HEAD -- "$@" > "$GRAPHLOOM_REPORT_FILE"', COMMAND.metricsDiff, ...MEASURED_PATHSPECS],
+});
 
 const STATIC_SCRIPT =
   'set -eu; n="$1"; shift; h=""; while [ "$n" -gt 0 ]; do h="$h$1"; shift; n=$((n - 1)); done; kind="$1"; root="$2"; gen="$3"; node="$4"; wt=$(pwd -P); ' +
