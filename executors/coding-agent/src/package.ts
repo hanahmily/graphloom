@@ -56,9 +56,13 @@ export const codingAgentExecutorPackage: ExecutorPackageManifest = {
   // The agent edits the worktree and runs commands as the user.
   isolation: "unrestricted",
   // Jobs the supervisor originates run confined to the run, but the harness still keeps its login and history.
+  // Each harness resolves its state dir as GRAPHLOOM_* env, then the CLI's own env
+  // (CLAUDE_CONFIG_DIR, CODEX_HOME), then the home default; list every link so a
+  // confined job keeps whichever one the harness will actually use. Claude Code's
+  // default account file sits beside its dir, at ~/.claude.json.
   ownState: {
-    env: [CLAUDE_CONFIG_DIR_ENV, CODEX_HOME_ENV, PI_AGENT_DIR_ENV],
-    homeRelative: [".claude", ".codex", path.join(".pi", "agent")],
+    env: [CLAUDE_CONFIG_DIR_ENV, "CLAUDE_CONFIG_DIR", CODEX_HOME_ENV, "CODEX_HOME", PI_AGENT_DIR_ENV],
+    homeRelative: [".claude", ".claude.json", ".codex", path.join(".pi", "agent")],
   },
 };
 
