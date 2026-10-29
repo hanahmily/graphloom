@@ -2,7 +2,7 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
@@ -61,6 +61,21 @@ describe.skipIf(!go)("the confined static command, run for real (without the san
     expect(result.stderr).toBe("");
     expect(result.code).toBe(0);
     expect(JSON.parse(result.report)).toEqual(FLAGS_DOC);
+  }, 120_000);
+
+  it("runs the resolved Go toolchain, not the first go on PATH (which a hidden home can hide)", () => {
+    const dir = head({ ...REHEARSAL_HEAD_FILES });
+    const hunks = parseHunkFile("banyand/cmd/server/flags.go:14-17\n");
+    const goRoot = spawnSync("go", ["env", "GOROOT"], { encoding: "utf8" }).stdout.trim();
+    const command = staticCommand(batch("go", ["banyand/cmd/server/flags.go"]), hunks, root, [], process.execPath, path.join(goRoot, "bin", "go"));
+    expect(command.argv.at(-1)).toBe(path.join(goRoot, "bin", "go"));
+    // No go anywhere on PATH: only the toolchain the command names can run.
+    const pathWithoutGo = (process.env.PATH ?? "").split(path.delimiter).filter((d) => !existsSync(path.join(d, "go"))).join(path.delimiter);
+    const reportFile = path.join(dir, ".report-out");
+    const r = spawnSync(command.argv[0]!, command.argv.slice(1), { cwd: dir, env: { ...process.env, PATH: pathWithoutGo, GRAPHLOOM_REPORT_FILE: reportFile }, encoding: "utf8" });
+    expect(r.stderr).toBe("");
+    expect(r.status).toBe(0);
+    expect(JSON.parse(readFileSync(reportFile, "utf8"))).toEqual(FLAGS_DOC);
   }, 120_000);
 
   it("measures a TypeScript head with tsmetrics", () => {
