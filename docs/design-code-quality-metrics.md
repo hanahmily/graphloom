@@ -117,18 +117,24 @@ pr-review asks a question, and issue-fix applies a gate.
 
 ### 2.5 Mutation testing
 
-Mutation testing applies the operators below, one at a time, to the changed
-functions only. Each resulting **mutant** runs the tests of the touched
-packages in an untrusted-confined checkout.
+Mutation testing applies **operator inversion**, the operator's rule
+("把 > 改成 <=，把 true 改成 false"), to the changed functions only. Each
+operator site gives exactly one **mutant**, applied one at a time. Each mutant
+runs the tests of the touched packages in an untrusted-confined checkout.
 
-| Operator | Mutation |
+| Operator | Mutation (each direction) |
 |---|---|
-| Relational flip | `<`↔`<=`, `>`↔`>=`, `==`↔`!=`, and the boundary forms (`>` → `<=` and the like) |
-| Boolean literal flip | `true`↔`false` |
-| Arithmetic swap | `+`↔`-`, `*`↔`/`, `%` → `*` |
-| Condition negation | `if c` → `if !(c)`, likewise in loop conditions and `?:` |
-| Statement removal | An expression or assignment statement deleted. Declarations are never removed, so the mutant still compiles |
-| Return-value removal | `return x` → `return <zero value of its type>` |
+| Relational inversion | `<` ↔ `>=`, `>` ↔ `<=`, `==` ↔ `!=` |
+| Boolean literal flip | `true` ↔ `false` |
+
+Inversion is the logical complement: `a > b` becomes `a <= b`, never
+`a >= b`. In TypeScript, `===` ↔ `!==` is the same inversion as `==` ↔ `!=`.
+
+**The operator set is exactly this rule.** Statement removal, return-value
+replacement, arithmetic swaps, condition negation and every other operator
+are excluded. Adding one changes what "no surviving mutant" means for every
+graph and every profile, so it is a design decision that needs the operator's
+approval. It is not a profile setting.
 
 Each mutant has exactly one outcome:
 
@@ -137,7 +143,7 @@ Each mutant has exactly one outcome:
 | `killed` | A test failed |
 | `timeout` | The tests ran past three times the baseline duration (at least 30 s). Counted as killed |
 | `survived` | All tests passed. The covering tests do not assert the mutated behaviour |
-| `invalid` | The mutant did not compile. Excluded from the score |
+| `invalid` | The mutant did not compile (rare for inversions, for example a constant expression the compiler checks). Excluded from the score |
 | `not-run` | The time budget ran out first. Listed, with the reason |
 
 **Mutation score** = (killed + timeout) / (killed + timeout + survived).
@@ -145,7 +151,9 @@ Each mutant has exactly one outcome:
 **Rule:** no surviving mutant.
 
 A survivor may be *equivalent*: a mutation that changes no observable
-behaviour, such as `i < n` → `i != n` in a loop that steps by one. Only a
+behaviour, for example inverting a condition whose two branches do the same
+thing, or `x == nil` → `x != nil` on a value that is never nil and whose
+both outcomes are handled alike. Only a
 reader can tell, so a survivor is never dropped automatically. A graph may
 record a reasoned "possibly equivalent" claim that an independent checker
 verifies.
@@ -159,7 +167,7 @@ but the definitions above stay fixed.
 |---|---|---|
 | Complexity, nesting | `gometrics`: a small stdlib-only `go/ast` program in the plugin's source | `tsmetrics`: a Node script on the TypeScript compiler API (`typescript`, a plugin dependency) |
 | Coverage | `go test -coverprofile` | c8 (bundled with the plugin at an exact version) |
-| Mutation | `gomutate`: a stdlib-only `go/ast` mutator that runs `go test -overlay` | [StrykerJS](https://stryker-mutator.io/) (bundled at an exact version), with `mutate` line ranges and a mutator allowlist matching §2.5 |
+| Mutation | `gomutate`: a stdlib-only `go/ast` mutator that implements exactly the §2.5 inversions and runs `go test -overlay` | [StrykerJS](https://stryker-mutator.io/) (bundled at an exact version), with `mutate` line ranges and a mutator allowlist of exactly the §2.5 inversions (relational and boolean literal; every other mutator excluded). Where its equality mutator also produces non-inverting variants, such as `<` → `<=`, those are filtered out of the run. A test fixture fails if any non-§2.5 mutant appears |
 
 Why these tools:
 
@@ -167,8 +175,8 @@ Why these tools:
   - One stdlib-only program pair yields complexity, nesting and the decision
     and nesting *evidence* that recomputation needs (§5). Line-ranged mutation
     restricted to changed functions needs that evidence too.
-  - The operator set is exactly §2.5. The external Go mutators' operator sets
-    and scoping differ from it. Adapting one would mean patching a tool the
+  - The operator set is exactly §2.5, the two inversions. The external Go
+    mutators' operator sets and scoping differ from it. Adapting one would mean patching a tool the
     supervisor cannot repair inside a run.
   - `go test -overlay` substitutes the mutated file without writing the
     checkout. The "checks change no file" rule therefore holds, and mutants
@@ -209,12 +217,19 @@ run):
 
 - mutants are visited function by function in source order, one operator
   site at a time, so a cut-off still covers every function a little;
-- a compile failure costs one build;
 - each mutant costs one test run of the touched packages.
 
-As an estimate for BanyanDB-sized Go packages, the coverage run of the
-touched packages takes 2 to 15 minutes. A mutant takes 10 to 40 seconds after
-the first build, so about 50 to 150 mutants fit the default budget.
+The estimates below are for BanyanDB-sized Go packages:
+
+- the coverage run of the touched packages takes 2 to 15 minutes;
+- each relational operator and boolean literal at a covered site gives one
+  mutant, typically 2 to 8 per changed function, so a PR of 10 to 30 changed
+  functions has about 20 to 150 mutants;
+- a mutant takes 10 to 40 seconds after the first build, so the 30-minute
+  default fits about 45 to 180 mutants.
+
+Most PRs therefore finish inside the budget. A larger one ends with
+`not-run` mutants listed.
 
 ## 5. Records and recomputation
 
@@ -228,7 +243,7 @@ Every tool emits `graphloom-metrics-v1`, one record per changed function:
   "coverage": { "source": "measured", "covered": 21, "total": 30 },
   "crap": 12.06,
   "mutation": { "status": "run", "killed": 9, "timeout": 0, "invalid": 1,
-    "survivors": [{ "line": 27, "operator": "relational", "original": "n > max", "mutated": "n >= max" }] } }
+    "survivors": [{ "line": 27, "operator": "relational-inversion", "original": "n > max", "mutated": "n <= max" }] } }
 ```
 
 A graph accepts a measurement only after deterministic recomputation from
@@ -242,7 +257,9 @@ evidence:
   range;
 - `crap` is recomputed with the formula;
 - each survivor's `original` text is on its line, and `mutated` differs from
-  it by exactly one operator of its kind;
+  it at exactly one site, by exactly that site's §2.5 inversion: `<`/`>=`,
+  `>`/`<=`, `==`/`!=` (`===`/`!==`) or `true`/`false`. Any other difference
+  rejects the record;
 - the set of measured functions equals the changed functions of §1.
 
 A record that does not recompute is rejected, never corrected by hand.
