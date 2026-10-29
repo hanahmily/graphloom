@@ -16,7 +16,7 @@
     "vitest": "^3.0.9"
   },
   "digests": {
-    "sourceTree": "31309ad2b696b00751728a2e108fb8bf5ade7c32108695eaec62024631b07045",
+    "sourceTree": "024e5c76ec661ae65b654e224b772a20f0cb583a019b8bd390ff06f7e52ed537",
     "packageLock": "ae5b886a88656f187132576e5f1579a047eec7e260abddf2994bb44d6815b49a",
     "files": {
       "package.json": "d2ecf50847d4ef5e66d59240dabdb523a3a58b04a5d089d956e9abe1dccc37ea",
@@ -92,7 +92,7 @@
       "test/detectors.test.ts": "cb780849cbe65e86cc7a536c7b98e995192a6c4fb1c92bb5c7c0f7aaf715d7dc",
       "test/git.test.ts": "67fdb5892a0f040e869f31422b7e82daba8ae1c1a34a3257aaf64b89f2fa9ab3",
       "test/gometrics.test.ts": "d8b4ce32aa4ac8314eecfa9b7c6762e7527cce6dc0f302f7f975a737f92a9c62",
-      "test/graph.test.ts": "de2af2c0d37d0a8c4e0ed13eee762026f738d2e19be5472b9d5ba85325992ecb",
+      "test/graph.test.ts": "3f84034f5abcf6f7902e815e5f5bb5f163fee21c8c2c7df6efc6ed85750742ab",
       "test/hunks.test.ts": "d952cbfebc71123522fa3589d46a84a512b7ff521772dfdcfd5861de31e0715e",
       "test/manifest.test.ts": "82b6ab6295e38c2becf73ea8d626adb8dd74b05bf0ad0fcb158a026e3f62949b",
       "test/prepare.test.ts": "58fa0de4def1507a910fb5a99316d6ec7aaacb32e0de2d289ffb49c81f792e4c",
