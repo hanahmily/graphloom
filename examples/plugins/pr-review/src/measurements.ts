@@ -2,20 +2,23 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 /**
- * Measurements (design §6.8, design-code-quality-metrics.md §4, §5), the
- * static part: `gometrics` and `tsmetrics` run under bwrap with no network
- * over the head tree and execute none of it, then the `graphloom-metrics-v1`
- * documents are recomputed from the head file bytes (`validateMetricsDocument`)
- * before any value reaches the report. Coverage and mutation run PR code and
- * so belong in the Docker sandbox, which a later version brings; until then
- * every record says so, honestly, and CRAP is its upper bound (§2.4).
+ * Measurements (design §6.8, design-code-quality-metrics.md §4, §5): `gometrics`
+ * and `tsmetrics` run under bwrap with no network over the head tree and execute
+ * none of it, then the `graphloom-metrics-v1` documents are recomputed from the
+ * head file bytes (`validateMetricsDocument`) before any value reaches the report.
+ * Coverage runs the pull request's own tests, so it runs only in the Docker
+ * sandbox (`coverage.ts`); each record then carries measured statement coverage
+ * attributed from the sandbox's report, or says why it was not run, and CRAP is
+ * recomputed (or stays its upper bound, §2.4). Mutation arrives with a later version.
  */
 import type { EnvironmentCommand, EvidenceRecord } from "@graphloom/sdk";
+import { coverageState, reasonText, recordKey, type CoverageFacts, type CoveragePlan, type Outcome } from "./coverage.js";
 import { commandRuns, describeCommand, latestFile, outputTail, reportText, succeeded, type CommandRun } from "./evidence.js";
 import { crapRounded, LIMITS } from "./metrics/crap.js";
 import { matchesGeneratedGlob } from "./metrics/generated.js";
 import { formatHunkFile, hunksFromUnifiedDiff } from "./metrics/hunks.js";
-import { isTestPath, languageOf, SCHEMA, type Hunks, type Language, type MetricsDocument, type MetricsRecord } from "./metrics/record.js";
+import { withCoverage } from "./metrics/coverage.js";
+import { isTestPath, languageOf, SCHEMA, type FunctionIndexEntry, type Hunks, type Language, type MetricsDocument, type MetricsRecord } from "./metrics/record.js";
 import { validateMetricsDocument } from "./metrics/validate.js";
 import { COMMAND } from "./constants.js";
 import type { Profile } from "./profile.js";
@@ -111,18 +114,22 @@ export type MeasurementState =
   | { state: "observe"; paths: string[] }
   | { state: "diff" }
   | { state: "tools"; batches: Batch[]; hunks: Hunks }
+  /** The sandbox images are to be checked, and pulled by digest when missing, before any sandboxed job (design §12.2). */
+  | { state: "probe"; commands: EnvironmentCommand[] }
+  /** The coverage job to run in the Docker sandbox next. */
+  | { state: "coverage"; plan: CoveragePlan }
   | { state: "failed"; problems: string[]; refs: string[]; retry: Batch[] }
-  | { state: "ready"; records: MetricsRecord[]; refs: string[]; excluded: Measurable["excluded"] };
+  | { state: "ready"; records: MetricsRecord[]; refs: string[]; excluded: Measurable["excluded"]; coverage: CoverageFacts };
 
 export interface Reasons {
   coverage: string;
   mutation: string;
 }
 
-/** Why coverage and mutation did not run, in the words a record carries. */
+/** Why coverage did not run when the profile says so, and why mutation did not run, in the words a record carries. */
 export function notRunReasons(profile: Pick<Profile, "metrics">): Reasons {
   return {
-    coverage: profile.metrics.coverage ? "not run (coverage arrives in a later wave)" : "not run (coverage disabled by the profile)",
+    coverage: profile.metrics.coverage ? "not run" : "not run (coverage disabled by the profile)",
     mutation: !profile.metrics.mutation.enabled ? "not run (mutation disabled by the profile)" : "not run: mutation not available in this version",
   };
 }
@@ -172,6 +179,7 @@ export function measurementState(evidence: readonly EvidenceRecord[], files: rea
   const retry: Batch[] = [];
   const records: MetricsRecord[] = [];
   const covered = new Set<string>();
+  const index = new Map<string, FunctionIndexEntry[]>();
   for (const b of batches) {
     const run = runs.get(b.id)!;
     refs.push(run.record.ref);
@@ -217,24 +225,60 @@ export function measurementState(evidence: readonly EvidenceRecord[], files: rea
       problems.push(`${b.id}: the document is from ${document.tool}, not ${expectedTool}`);
       continue;
     }
-    for (const f of document.files) covered.add(f.path);
+    for (const f of document.files) {
+      covered.add(f.path);
+      index.set(f.path, f.functions);
+    }
     for (const s of document.skipped) covered.add(s.path);
     records.push(...document.records);
   }
   if (problems.length > 0) return { state: "failed", problems, refs, retry };
   const missing = m.files.map((f) => f.path).filter((p) => !covered.has(p) && hunks.has(p));
   if (missing.length > 0) return { state: "failed", problems: [`the tools accounted for none of: ${missing.slice(0, 5).join(", ")}`], refs, retry: [] };
-  return { state: "ready", records: records.map((r) => withUnknownCoverage(r, profile)), refs, excluded: m.excluded };
+  const cov = coverageState({ evidence, records, index, files: m.files, profile, afterRef: diff.record.ref });
+  switch (cov.state) {
+    case "probe":
+      return { state: "probe", commands: cov.commands };
+    case "observe":
+      return { state: "observe", paths: cov.paths };
+    case "run":
+      return { state: "coverage", plan: cov.plan };
+    case "failed":
+      return { state: "failed", problems: cov.problems, refs: [...refs, ...cov.refs], retry: [] };
+    case "done":
+      return { state: "ready", records: records.map((r) => withOutcome(r, cov.outcomes.get(recordKey(r)))), refs: [...refs, ...cov.refs], excluded: m.excluded, coverage: cov.facts };
+  }
 }
 
-/** A record with the not-run coverage and its upper-bound CRAP (design-code-quality-metrics.md §2.3, §2.4). */
-export function withUnknownCoverage(r: MetricsRecord, profile: Pick<Profile, "metrics">): MetricsRecord {
+/** A record with its coverage outcome and the CRAP it implies: measured, or not run with a reason and the upper bound (design-code-quality-metrics.md §2.3, §2.4). */
+export function withOutcome(r: MetricsRecord, outcome: Outcome | undefined): MetricsRecord {
   if (r.test) return r;
-  const { coverage } = notRunReasons(profile);
-  return { ...r, coverage: { source: "unknown", reason: coverage }, crap: crapRounded(r.complexity, undefined) };
+  if (outcome === undefined) return { ...r, coverage: { source: "unknown", reason: "not run" }, crap: crapRounded(r.complexity, undefined) };
+  if ("reason" in outcome) return { ...r, coverage: { source: "unknown", reason: reasonText(outcome.reason) }, crap: crapRounded(r.complexity, undefined) };
+  return withCoverage(r, outcome);
+}
+
+/** A record whose coverage was not measured, with the reason and the upper-bound CRAP. */
+export function withUnknownCoverage(r: MetricsRecord, reason: string): MetricsRecord {
+  return withOutcome(r, { reason });
 }
 
 const cell = (s: string): string => s.replace(/\|/g, "\\|").replace(/\s*\n\s*/g, " ");
+
+const shortImage = (image: string): string => image.replace(/@sha256:([0-9a-f]{12})[0-9a-f]*$/, "@sha256:$1…");
+
+/** What the Coverage run did, in a sentence per language. */
+export function coverageNotes(facts: CoverageFacts): string[] {
+  if (!facts.enabled) return ["Coverage: not run (coverage disabled by the profile); CRAP is shown as its upper bound."];
+  if (facts.runs.length === 0) return ["Coverage: no function needed a run."];
+  return facts.runs.map((run) => {
+    if (!run.ran) return `Coverage (${run.language}): not run (${run.reason ?? "no reason recorded"}).`;
+    const how = run.language === "go" ? "go test -coverprofile -covermode=set over the touched packages" : "the repository's own vitest run with @vitest/coverage-v8 over the touched workspace";
+    const exit = run.exit === undefined ? "" : run.exit === 0 ? "; the tests passed" : `; the test command exited ${run.exit} (a test failed or a package did not build: coverage is of what ran)`;
+    const changed = run.changed.length > 0 ? `; the run changed ${run.changed.length} file(s) in its checkout (${run.changed.slice(0, 3).join(", ")}): the checks must not change files` : "";
+    return `Coverage (${run.language}): measured with ${how}, in the Docker sandbox (image ${shortImage(run.image ?? "")}, no network, read-only dependency caches) over a prepared checkout of the head, statement coverage by function line range${exit}${changed}.`;
+  });
+}
 
 /** The Measurements part of `review.md` (design §6.8): facts only, built from the records. */
 export function renderMeasurements(state: MeasurementState, profile: Pick<Profile, "metrics">): string {
@@ -249,7 +293,9 @@ export function renderMeasurements(state: MeasurementState, profile: Pick<Profil
     return lines.join("\n");
   }
   lines.push(
-    `Static metrics (gometrics, tsmetrics): parsed over the head tree, read-only, no network; no PR code ran. Coverage: ${reasons.coverage}. Mutation: ${reasons.mutation}.`,
+    "Static metrics (gometrics, tsmetrics): parsed over the head tree, read-only, no network; none of the pull request's code ran for them.",
+    ...coverageNotes(state.coverage),
+    `Mutation: ${reasons.mutation}.`,
     "",
     `| Function | Change | Complexity (limit < ${LIMITS.complexity}) | Nesting (limit ≤ ${LIMITS.nesting}) | Coverage | CRAP (threshold ${LIMITS.crap}) | Mutation |`,
     "|---|---|---|---|---|---|---|",
@@ -258,9 +304,21 @@ export function renderMeasurements(state: MeasurementState, profile: Pick<Profil
   for (const r of state.records) {
     const over = (value: number, exceeded: boolean, limit: number): string => (exceeded ? `${value} (over the limit of ${limit})` : String(value));
     const test = r.test || isTestPath(r.path);
-    const coverage = test ? "n/a (test file)" : `unknown: ${reasons.coverage}`;
-    const crap = test || r.crap === undefined ? "n/a" : `${r.crap} (upper bound, coverage unknown)`;
-    const mutation = test ? "n/a (test file)" : "not run: no coverage";
+    const measured = r.coverage?.source === "measured" ? r.coverage : undefined;
+    const coverage = test
+      ? "n/a (test file)"
+      : measured !== undefined
+        ? measured.total === 0
+          ? "100% (no executable statements)"
+          : `${Math.round((measured.covered / measured.total) * 1000) / 10}% (${measured.covered}/${measured.total} statements, measured)`
+        : `unknown: ${r.coverage?.source === "unknown" ? r.coverage.reason : "not run"}`;
+    const crap =
+      test || r.crap === undefined
+        ? "n/a"
+        : measured !== undefined
+          ? `${r.crap}${r.crap >= LIMITS.crap ? ` (at or over the threshold of ${LIMITS.crap})` : ""}`
+          : `${r.crap} (upper bound, coverage unknown)`;
+    const mutation = test ? "n/a (test file)" : measured !== undefined ? reasons.mutation : "not run: no coverage";
     lines.push(
       `| ${cell(`\`${r.function}\` ${r.path}:${r.startLine}`)} | ${r.change} | ${over(r.complexity, r.complexity >= LIMITS.complexity, LIMITS.complexity)} | ${over(r.nesting, r.nesting > LIMITS.nesting, LIMITS.nesting)} | ${cell(coverage)} | ${cell(crap)} | ${cell(mutation)} |`,
     );

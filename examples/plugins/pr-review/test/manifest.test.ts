@@ -57,7 +57,7 @@ describe("graphloom.manifest.json", () => {
   });
 
   it("has a rehearsal entry whose scenarios the graph can describe", () => {
-    expect(Object.keys(rehearsal(BANYANDB).scenarios)).toEqual(["happy", "report", "report-corrections", "injection", "complex-function", "sandbox-unavailable", "answer-finds-existing-helper", "answer-no-library-with-whole-repo-search", "answer-checker-contradicts", "needs-author-purpose", "purpose-stated", "missing-test", "crap-upper-bound"]);
+    expect(Object.keys(rehearsal(BANYANDB).scenarios)).toEqual(["happy", "report", "report-corrections", "injection", "complex-function", "sandbox-unavailable", "answer-finds-existing-helper", "answer-no-library-with-whole-repo-search", "answer-checker-contradicts", "needs-author-purpose", "purpose-stated", "missing-test", "coverage-measured", "crap-upper-bound"]);
     expect(Object.keys(rehearsal({ not: "a profile" }).scenarios)).toEqual([]);
   });
 });

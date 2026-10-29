@@ -35,6 +35,11 @@ export interface DockerRunSpec {
    * command of the job may have replaced one with a link.
    */
   guards: Array<{ root: string; rel: string }>;
+  /**
+   * Where the wrapper adds the mount and variable of the command's report file (an index into `args`, at
+   * the working directory flag), when the executor names that file in `GRAPHLOOM_REPORT_FILE`.
+   */
+  reportAt: number;
 }
 
 export interface DockerRunOptions {
@@ -270,6 +275,21 @@ async function prepareDockerJob(job: JobSpec, spec: DockerConfinement, ctx: JobC
   const notDirectory = writable.filter((p) => !statSync(p).isDirectory());
   if (notDirectory.length > 0) return { refusal: `docker confinement's writable paths must be directories: ${notDirectory.join(", ")}` };
 
+  // An environment value may name a scratch directory (`@scratch/<dir>`), which a container sees at its host path.
+  const env: Record<string, string> = {};
+  for (const [name, value] of Object.entries(spec.env)) {
+    if (!value.startsWith(SCRATCH_MOUNT_PREFIX)) {
+      env[name] = value;
+      continue;
+    }
+    const target = resolveMount(value, ctx.worktreePath, ctx.scratchDir);
+    if (typeof target === "string") return { refusal: `environment variable ${name}: ${target}` };
+    ensureRealDir(ctx.scratchDir!);
+    ensureRealDirBelow(ctx.scratchDir!, value.slice(SCRATCH_MOUNT_PREFIX.length));
+    env[name] = target.path;
+  }
+  const specWithEnv: DockerConfinement = { ...spec, env };
+
   const specDir = path.join(ctx.artifactDir, "docker", ctx.operationId);
   await mkdir(specDir, { recursive: true });
   const guards: Array<{ root: string; rel: string }> = [];
@@ -286,7 +306,7 @@ async function prepareDockerJob(job: JobSpec, spec: DockerConfinement, ctx: JobC
     originals.set(raw.id, { id: raw.id, argv: [...raw.argv] });
     let args: string[];
     try {
-      args = dockerRunArgs(spec, {
+      args = dockerRunArgs(specWithEnv, {
         runId: ctx.runId,
         operationId: ctx.operationId,
         name,
@@ -300,7 +320,7 @@ async function prepareDockerJob(job: JobSpec, spec: DockerConfinement, ctx: JobC
       return { refusal: err instanceof Error ? err.message : String(err) };
     }
     const specFile = path.join(specDir, `${index}.json`);
-    const runSpec: DockerRunSpec = { name, wallClockMs: spec.wallClockMs, args, guards };
+    const runSpec: DockerRunSpec = { name, wallClockMs: spec.wallClockMs, args, guards, reportAt: args.indexOf("-w") };
     await writeFile(specFile, JSON.stringify(runSpec, null, 2), "utf8");
     rewritten.push({ ...(raw as object), argv: [process.execPath, DOCKER_RUN_MODULE, specFile] });
   }

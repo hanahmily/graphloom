@@ -7,6 +7,7 @@ import {
   isStaleFailure,
   jsonSchemaProblem,
   MAX_EXECUTOR_INPUT_BYTES,
+  MAX_JOB_TIMEOUT_MS,
   observe,
   stop,
   supervise,
@@ -58,6 +59,7 @@ import { CHANGE_REPORT_SCHEMA } from "./report.js";
 import { CLAIM_CHECK_SCHEMA } from "./claims.js";
 import { itemsOf, REPORTER_SCHEMA_NAME, REVISION_SCHEMA_NAME, reportFlow } from "./flow.js";
 import { measurementState, metricsDiffCommand, staticCommand, type Batch } from "./measurements.js";
+import { coverageCommand, coverageConfinement, missingProbe, sandboxEnvironmentChecks, type CoveragePlan } from "./coverage.js";
 import { checkerInstruction, reporterInstruction } from "./prompts.js";
 import { harnessName, parseProfile, ProfileError, ROLES, DISTINCT_PAIRS, type Profile } from "./profile.js";
 import { requestedPull, type PullRequest } from "./request.js";
@@ -80,8 +82,8 @@ const asSchema = (schema: unknown): Record<string, unknown> => JSON.parse(JSON.s
 /** The defaults the design gives a pr-review run (design §13.3), under the profile's own and the task's. */
 const DEFAULT_BUDGETS: GraphBudgetDefaults = { agentInvocations: 1_200, jobs: 220, decisions: 240, corrections: 12, activeMs: 4 * 3_600_000, waitMs: 6 * 3_600_000 };
 
-/** Environment checks the graph adds to the profile's: where the worktree, the plugin and Go live (for the confined static tools). */
-function generatedChecks(): EnvironmentCommand[] {
+/** Environment checks the graph adds to the profile's: where the worktree, the plugin and Go live (for the confined static tools), and the state of the sandbox images (reported by `graphloom check` and `doctor --task`, never failing the run). */
+function generatedChecks(profile: Profile): EnvironmentCommand[] {
   return [
     { id: ENV_WORKTREE, argv: ["sh", "-c", "pwd -P"] },
     {
@@ -89,6 +91,7 @@ function generatedChecks(): EnvironmentCommand[] {
       argv: ["sh", "-c", 'r=${GRAPHLOOM_PLUGIN_ROOT:-}; [ -n "$r" ] || { echo "GRAPHLOOM_PLUGIN_ROOT is not set: GraphLoom sets it to the plugin\'s directory for environment checks" >&2; exit 127; }; cd "$r" && pwd -P'],
     },
     { id: "go-root", argv: ["sh", "-c", "go env GOROOT 2>/dev/null || true"] },
+    ...sandboxEnvironmentChecks(profile),
   ];
 }
 
@@ -118,7 +121,7 @@ export function definitionFor(profile: Profile): GraphDefinition {
     },
     {
       id: REQUIREMENT_MEASUREMENTS,
-      statement: `For every function the pull request adds or modifies, complexity and nesting were measured by the pinned static tools (gometrics, tsmetrics) over the head tree, under bwrap with no network, and every value recomputes from its evidence. Coverage and mutation run the pull request's own tests, which belongs in the Docker sandbox that a later version brings; in this version each record says so: ${profile.metrics.coverage ? "not run (coverage arrives in a later wave)" : "not run (coverage disabled by the profile)"}, CRAP shown as its upper bound.`,
+      statement: `For every function the pull request adds or modifies, complexity and nesting were measured by the pinned static tools (gometrics, tsmetrics) over the head tree, under bwrap with no network, and every value recomputes from its evidence. Coverage runs the pull request's own tests, so it runs only in the Docker sandbox (no network, a read-only dependency cache, a prepared checkout of the head, images pinned by digest and pulled in Fetch): ${profile.metrics.coverage ? "each function's statement coverage is attributed by line range from the sandbox's report (go test -coverprofile; the repository's own vitest with @vitest/coverage-v8), and its CRAP is recomputed, or the function says why it was not run (Docker or the image is not available, a package did not build offline, no vitest coverage provider in the repository) and its CRAP is shown as its upper bound" : "not run (coverage disabled by the profile), CRAP shown as its upper bound"}. Mutation arrives with a later version.`,
       evidenceSchema: "graphloom-metrics-v1",
     },
     {
@@ -177,7 +180,7 @@ export function definitionFor(profile: Profile): GraphDefinition {
     ],
     requirements,
     defaultValidators: bindings,
-    environment: { checks: [...structuredClone(profile.environment.checks), ...generatedChecks()] },
+    environment: { checks: [...structuredClone(profile.environment.checks), ...generatedChecks(profile)] },
     defaultBudgets: { ...DEFAULT_BUDGETS, ...(profile.budgets ?? {}) },
     agentRoles: agentRoles(profile),
     supervisor: structuredClone(profile.supervisorPreference),
@@ -300,7 +303,31 @@ function fetch(ctx: Context, view: RunView): GraphDecision {
   if (ledger.run === undefined || ledger.retry) {
     return withPrivate(dispatch(commandJob(FETCH_STAGE, "Read the pull request's ledger ref", { commands: [ledgerReadCommand(pr.owner, pr.repo, pr.number)], env: { ...GIT_ENV } }), "read the ledger ref, or record it absent"));
   }
+  // The sandbox images are checked, and pulled by digest when missing, here: before the run's no-network jobs, never during one.
+  const probe = missingProbe(view.evidence, profile);
+  if (probe.length > 0) return withPrivate(dispatch(sandboxProbeJob(FETCH_STAGE, probe), "check the Docker sandbox images by digest, and pull a missing one, before any sandboxed job"));
   return validateStage(ctx, view, FETCH_STAGE);
+}
+
+/** The image checks (and pulls) and the host cache lookups: graph commands that run no pull request code, from `/`. */
+export function sandboxProbeJob(stageId: string, commands: EnvironmentCommand[]): JobSpec {
+  return commandJob(stageId, "Check the Docker sandbox images by digest, pulling a missing one", { commands, continueOnFailure: true }, { timeoutMs: Math.min(MAX_JOB_TIMEOUT_MS, 35 * 60_000 * Math.max(1, commands.length)) });
+}
+
+/** The coverage job (design §12.2): the pull request's own tests, in the Docker sandbox, over a prepared checkout of the head. */
+export function coverageJob(plan: CoveragePlan, root: string): JobSpec {
+  const language = plan.language === "go" ? "Go" : "TypeScript";
+  return {
+    stageId: REPORT_STAGE,
+    kind: "command",
+    purpose: "diagnostic",
+    readOnly: true,
+    instruction: `Measure the changed ${language} functions' statement coverage with the pull request's own tests (Docker sandbox: no network, read-only dependency cache, a checkout of the head)`,
+    input: { commands: plan.commands.map((c) => coverageCommand(c, root, plan.sandbox.wallClockMs)), continueOnFailure: true },
+    checkout: { from: "candidate" },
+    confinement: coverageConfinement(plan, root),
+    timeoutMs: Math.min(MAX_JOB_TIMEOUT_MS, (plan.sandbox.wallClockMs + 120_000) * plan.commands.length + 10 * 60_000),
+  };
 }
 
 /** Judges the stage's requirements with the shipped validators first, so a failure goes to the supervisor with its reason instead of looping. */
@@ -464,8 +491,15 @@ function measureAndWrite(ctx: Context, view: RunView, analysis: Analysis, flow: 
       };
       return withPrivate(dispatch(job, `measure ${batches.length} batch(es) of changed files with the static metrics tools, confined with no network`));
     }
+    case "probe":
+      return withPrivate(dispatch(sandboxProbeJob(REPORT_STAGE, m.commands), "check the Docker sandbox images by digest: Fetch did not record them"));
+    case "coverage": {
+      const root = environmentOutput(view.evidence, ENV_PLUGIN_ROOT);
+      if (root === undefined) return supervise({ reason: "the environment check recorded no plugin directory, which the coverage scripts run from" }, "escalate a missing plugin path");
+      return withPrivate(dispatch(coverageJob(m.plan, root), `measure statement coverage of the changed ${m.plan.language} functions in the Docker sandbox over a checkout of the head`));
+    }
     case "failed":
-      return supervise({ reason: `the static measurements failed: ${m.problems.slice(0, 3).join("; ")}`, evidenceRefs: m.refs.slice(-10) }, "hand the failed measurements to the supervisor");
+      return supervise({ reason: `the measurements failed: ${m.problems.slice(0, 3).join("; ")}`, evidenceRefs: m.refs.slice(-10) }, "hand the failed measurements to the supervisor");
     default:
       break;
   }

@@ -9,7 +9,7 @@
  */
 
 import { spawn, spawnSync } from "node:child_process";
-import { lstatSync, readFileSync } from "node:fs";
+import { lstatSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 const KILL_WAIT_MS = 10_000;
@@ -19,6 +19,7 @@ interface Spec {
   wallClockMs: number;
   args: string[];
   guards: Array<{ root: string; rel: string }>;
+  reportAt?: number;
 }
 
 const specFile = process.argv[2];
@@ -47,7 +48,16 @@ for (const guard of spec.guards ?? []) {
   }
 }
 
-const child = spawn("docker", spec.args, { stdio: ["ignore", "inherit", "inherit"] });
+// The command's report file (`GRAPHLOOM_REPORT_FILE`, a file the executor reads after the command) is the one
+// host file a container may write besides its mounts: only that file is mounted, and named for the command inside.
+const reportFile = process.env.GRAPHLOOM_REPORT_FILE;
+const args = [...spec.args];
+if (reportFile !== undefined && reportFile !== "" && path.isAbsolute(reportFile) && !/[:,\n]/.test(reportFile) && spec.reportAt !== undefined && spec.reportAt >= 0) {
+  writeFileSync(reportFile, "");
+  args.splice(spec.reportAt, 0, "-v", `${reportFile}:${reportFile}:rw`, "--env", `GRAPHLOOM_REPORT_FILE=${reportFile}`);
+}
+
+const child = spawn("docker", args, { stdio: ["ignore", "inherit", "inherit"] });
 let stopping: "signal" | "wall-clock" | undefined;
 let exited = false;
 

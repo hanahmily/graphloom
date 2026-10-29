@@ -262,7 +262,10 @@ apply to), never running it unconfined.
   is under it, `@scratch/<dir>` is under the run's scratch directory), and only `env` is passed:
   no host environment reaches the container. A stop or the container's wall clock ends in
   `docker kill` by name; a resume removes the containers labelled `graphloom.run=<run>`
-  (`Runner.releaseRun`).
+  (`Runner.releaseRun`). An `env` value may name a scratch directory (`@scratch/<dir>`), which the container sees
+  at its host path (a toolchain's build cache, say); and the command's own report file
+  (`GRAPHLOOM_REPORT_FILE`) is mounted into the container, the one host file besides the mounts it may write, so
+  a report larger than the output tail comes back as the command's report.
   A job's tool calls are the controller's own admitted child operations of executors the graph bound,
   not processes of the confined job; the confinement binds the job's process, and each tool executor
   keeps its own isolation and credentials (a GitHub read needs its token and the network).

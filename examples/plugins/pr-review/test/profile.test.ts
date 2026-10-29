@@ -2,6 +2,7 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 import { describe, expect, it } from "vitest";
+import { DEFAULT_TS_IMAGE, resolveSandbox } from "../src/coverage.js";
 import { createGraph, definitionFor } from "../src/graph.js";
 import { parseProfile, ProfileError } from "../src/profile.js";
 import { requestedPull } from "../src/request.js";
@@ -64,13 +65,17 @@ describe("the BanyanDB profile", () => {
 
   it("adds the graph's own environment checks to the profile's, which cannot use their ids", () => {
     const ids = definitionFor(profileOf()).environment!.checks!.map((c) => c.id);
-    expect(ids).toEqual(["go", "git", "codex", "claude", "worktree", "plugin-root", "go-root"]);
+    expect(ids).toEqual(["go", "git", "codex", "claude", "worktree", "plugin-root", "go-root", "docker-go", "docker-typescript"]);
     expect(refused({ environment: { checks: [{ id: "worktree", argv: ["true"] }] } })).toMatch(/reserved/);
+    expect(refused({ environment: { checks: [{ id: "docker-go", argv: ["true"] }] } })).toMatch(/reserved/);
+    // With coverage off there is no sandbox to report on.
+    expect(definitionFor(profileOf({ metrics: { coverage: false } })).environment!.checks!.map((c) => c.id)).not.toContain("docker-go");
   });
 
   it("states honestly what the measurements requirement covers in this version", () => {
     const statement = definitionFor(profileOf()).requirements.find((r) => r.id === "measurements")!.statement;
-    expect(statement).toContain("not run (coverage arrives in a later wave)");
+    expect(statement).toContain("runs only in the Docker sandbox");
+    expect(statement).toContain("attributed by line range from the sandbox's report");
     const off = definitionFor(profileOf({ metrics: { coverage: false } })).requirements.find((r) => r.id === "measurements")!.statement;
     expect(off).toContain("not run (coverage disabled by the profile)");
   });
@@ -158,6 +163,34 @@ describe("profile refusals", () => {
     expect(p.metrics.coverage).toBe(false);
     expect(p.metrics.files.go).toEqual(["pkg/**"]);
     expect(p.agentTimeoutMs).toBe(60000);
+  });
+});
+
+describe("metrics.sandbox", () => {
+  const digest = `golang@sha256:${"a".repeat(64)}`;
+
+  it("pins the BanyanDB Go image by digest, and resolves the defaults the banyandb-ql bench-gates use", () => {
+    const p = profileOf();
+    expect(p.metrics.sandbox!.go!.image).toMatch(/^golang@sha256:[0-9a-f]{64}$/);
+    expect(resolveSandbox(p, "go")).toMatchObject({ cpus: 4, memory: "8g", pids: 512, tmp: "1g", wallClockMs: 1_800_000 });
+    // TypeScript has a default image, by digest; Go has none unless the profile pins one (it follows the repository's go.mod).
+    expect(resolveSandbox(p, "typescript")).toMatchObject({ image: DEFAULT_TS_IMAGE, cpus: 4, memory: "8g" });
+    expect(resolveSandbox(profileOf({ metrics: {} }), "go").image).toBeUndefined();
+  });
+
+  it("refuses an image that is a tag, and anything that is not a limit", () => {
+    expect(refused({ metrics: { sandbox: { go: { image: "golang:1.26" } } } })).toMatch(/metrics\.sandbox\.go\.image: must be pinned by digest/);
+    expect(refused({ metrics: { sandbox: { go: { image: `${digest}x` } } } })).toMatch(/pinned by digest/);
+    expect(refused({ metrics: { sandbox: { go: { image: digest, cpus: 0 } } } })).toMatch(/metrics\.sandbox\.go\.cpus/);
+    expect(refused({ metrics: { sandbox: { go: { image: digest, memory: "lots" } } } })).toMatch(/metrics\.sandbox\.go\.memory/);
+    expect(refused({ metrics: { sandbox: { go: { image: digest, network: true } } } })).toMatch(/network is not a field/);
+    expect(refused({ metrics: { sandbox: { rust: { image: digest } } } })).toMatch(/not a language with a sandbox/);
+    expect(refused({ metrics: { sandbox: [] } })).toMatch(/object of per-language/);
+  });
+
+  it("accepts a limit or two over the defaults", () => {
+    const p = profileOf({ metrics: { sandbox: { typescript: { image: `node@sha256:${"b".repeat(64)}`, memory: "2g", wallClockMs: 60_000 } } } });
+    expect(resolveSandbox(p, "typescript")).toMatchObject({ image: `node@sha256:${"b".repeat(64)}`, memory: "2g", wallClockMs: 60_000, cpus: 4 });
   });
 });
 
