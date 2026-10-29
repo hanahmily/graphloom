@@ -305,6 +305,24 @@ describe.skipIf(unavailable !== undefined)("a command job in a docker confinemen
     expect(await readFile(path.join(scratch, "cache", "f"), "utf8")).toBe("planted\n");
   });
 
+  it("checks the mount sources again before each command's container, so an earlier command cannot redirect one", async () => {
+    const outside = path.join(dir, "outside-between");
+    await mkdir(outside);
+    await writeFile(path.join(outside, "host-secret.txt"), "host secret");
+    await mkdir(path.join(work, "sub", "data"), { recursive: true });
+    const [first, second] = await runCommands(
+      [
+        { id: "swap", argv: sh(`mv sub sub-moved && ln -s ${outside} sub && echo swapped`) },
+        { id: "read", argv: sh("cat sub/data/host-secret.txt; ls sub") },
+      ],
+      { writable: ["."], readOnly: ["sub/data"] },
+    );
+    expect(first!.stdoutTail).toContain("swapped");
+    expect(second!.exitCode).toBe(125);
+    expect(second!.stderrTail).toMatch(/is a symbolic link/);
+    expect(second!.stdoutTail).not.toContain("host secret");
+  });
+
   it("refuses a workspace mount that passes through a link", async () => {
     const outside = path.join(dir, "outside-ws");
     await mkdir(outside);

@@ -9,7 +9,8 @@
  */
 
 import { spawn, spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { lstatSync, readFileSync } from "node:fs";
+import path from "node:path";
 
 const KILL_WAIT_MS = 10_000;
 
@@ -17,6 +18,7 @@ interface Spec {
   name: string;
   wallClockMs: number;
   args: string[];
+  guards: Array<{ root: string; rel: string }>;
 }
 
 const specFile = process.argv[2];
@@ -25,6 +27,25 @@ if (specFile === undefined) {
   process.exit(2);
 }
 const spec = JSON.parse(readFileSync(specFile, "utf8")) as Spec;
+
+// An earlier command of the job may have replaced a mount source with a link, which Docker would follow.
+for (const guard of spec.guards ?? []) {
+  let current = guard.root;
+  for (const part of path.normalize(guard.rel).split(path.sep)) {
+    if (part === "." || part === "") continue;
+    current = path.join(current, part);
+    let link = false;
+    try {
+      link = lstatSync(current).isSymbolicLink();
+    } catch {
+      break;
+    }
+    if (link) {
+      process.stderr.write(`graphloom: mount source ${current} is a symbolic link, which a container would follow out of its mounts; not started\n`);
+      process.exit(125);
+    }
+  }
+}
 
 const child = spawn("docker", spec.args, { stdio: ["ignore", "inherit", "inherit"] });
 let stopping: "signal" | "wall-clock" | undefined;

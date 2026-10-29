@@ -249,6 +249,9 @@ apply to), never running it unconfined.
   no host environment reaches the container. A stop or the container's wall clock ends in
   `docker kill` by name; a resume removes the containers labelled `graphloom.run=<run>`
   (`Runner.releaseRun`).
+  A job's tool calls are the controller's own admitted child operations of executors the graph bound,
+  not processes of the confined job; the confinement binds the job's process, and each tool executor
+  keeps its own isolation and credentials (a GitHub read needs its token and the network).
   Images are never pulled by a job. `graphloom sandbox pull <image@sha256:...> [--check]` puts one
   in the local store before the run (a graph's environment check calls it), and `graphloom doctor`
   reports the Docker CLI, the daemon, and whether it is rootless (the `docker` group is

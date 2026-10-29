@@ -29,6 +29,12 @@ export interface DockerRunSpec {
   wallClockMs: number;
   /** Arguments after `docker`. */
   args: string[];
+  /**
+   * Mount sources below a root the job can change (the workspace, the run's scratch): each component
+   * is checked again, without following links, just before this container starts, since an earlier
+   * command of the job may have replaced one with a link.
+   */
+  guards: Array<{ root: string; rel: string }>;
 }
 
 export interface DockerRunOptions {
@@ -266,6 +272,11 @@ async function prepareDockerJob(job: JobSpec, spec: DockerConfinement, ctx: JobC
 
   const specDir = path.join(ctx.artifactDir, "docker", ctx.operationId);
   await mkdir(specDir, { recursive: true });
+  const guards: Array<{ root: string; rel: string }> = [];
+  for (const mount of [...spec.writable, ...spec.readOnly]) {
+    if (mount.startsWith(SCRATCH_MOUNT_PREFIX) && ctx.scratchDir !== undefined) guards.push({ root: ctx.scratchDir, rel: mount.slice(SCRATCH_MOUNT_PREFIX.length) });
+    else if (!path.isAbsolute(mount) && mount !== ".") guards.push({ root: ctx.worktreePath, rel: mount });
+  }
   const names: string[] = [];
   const originals = new Map<string, OriginalCommand>();
   const rewritten: unknown[] = [];
@@ -289,7 +300,7 @@ async function prepareDockerJob(job: JobSpec, spec: DockerConfinement, ctx: JobC
       return { refusal: err instanceof Error ? err.message : String(err) };
     }
     const specFile = path.join(specDir, `${index}.json`);
-    const runSpec: DockerRunSpec = { name, wallClockMs: spec.wallClockMs, args };
+    const runSpec: DockerRunSpec = { name, wallClockMs: spec.wallClockMs, args, guards };
     await writeFile(specFile, JSON.stringify(runSpec, null, 2), "utf8");
     rewritten.push({ ...(raw as object), argv: [process.execPath, DOCKER_RUN_MODULE, specFile] });
   }
