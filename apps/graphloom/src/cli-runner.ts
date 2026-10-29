@@ -168,6 +168,10 @@ export function createCliRunner(
       const routed = route(job);
       return "refusal" in routed ? failure(ctx, routed.refusal) : routed.runner.runJob(routed.job, ctx);
     },
+    // What a stopped controller left (a docker confinement's containers) is removed by whichever runner owns it.
+    async releaseRun(runId) {
+      await Promise.all([...agents.values(), others].map((runner) => runner.releaseRun?.(runId)));
+    },
   };
 }
 
@@ -213,6 +217,9 @@ function routeEnvironmentChecks(real: Runner, standIn: Runner, environmentComman
     },
     async checkJob(job, ctx) {
       return (isEnvironmentDispatch(job, environmentCommands) ? real : standIn).checkJob?.(job, ctx);
+    },
+    async releaseRun(runId) {
+      await Promise.all([real.releaseRun?.(runId), standIn.releaseRun?.(runId)]);
     },
   };
 }

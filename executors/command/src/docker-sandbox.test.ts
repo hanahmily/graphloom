@@ -3,11 +3,11 @@
 
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { lstat, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createBuiltinExecutorRunner, dockerRunArgs, type JobContext, type Runner } from "@graphloom/runner";
+import { createBuiltinExecutorRunner, daemonIsRootless, dockerRunArgs, type JobContext, type Runner } from "@graphloom/runner";
 import type { DockerConfinement, JobSpec } from "@graphloom/sdk";
 import type { CommandOutcome } from "./run.js";
 
@@ -166,10 +166,18 @@ describe("docker confinement: what the job is built from", () => {
 
 describe.skipIf(unavailable !== undefined)("a command job in a docker confinement", () => {
   it("runs its argv in the container, in the workspace, and records the declared command", async () => {
-    const [pwd, ident] = await runCommands([{ id: "pwd", argv: ["pwd"] }, { id: "id", argv: ["id", "-u"] }]);
+    const [pwd, ident, wrote] = await runCommands([
+      { id: "pwd", argv: ["pwd"] },
+      { id: "id", argv: ["id", "-u"] },
+      { id: "wrote", argv: sh("echo x > made-by-job.txt") },
+    ]);
     expect(pwd).toMatchObject({ id: "pwd", argv: ["pwd"], exitCode: 0 });
     expect(pwd!.stdoutTail.trim()).toBe(work);
-    expect(ident!.stdoutTail.trim()).toBe(String(process.getuid!()));
+    // A rootful daemon keeps the operator's own uid; a rootless one maps the operator to container root.
+    expect(ident!.stdoutTail.trim()).toBe((await daemonIsRootless()) ? "0" : String(process.getuid!()));
+    // Either way the file the job wrote belongs to the operator on the host.
+    expect(wrote!.exitCode).toBe(0);
+    expect((await stat(path.join(work, "made-by-job.txt"))).uid).toBe(process.getuid!());
     expect((pwd as unknown as { sandbox: { image: string } }).sandbox.image).toBe(IMAGE);
   });
 

@@ -98,6 +98,16 @@ describe.skipIf(unsupported !== undefined)("a job's own bwrap sandbox", async ()
     expect(res.stdout.trim()).toBe("0");
   });
 
+  it("applies a mask to a parent of an exposed path, so the mask wins", async () => {
+    mkdirSync(path.join(home, ".cfg", "agent"), { recursive: true });
+    writeFileSync(path.join(home, ".cfg", "agent", "login"), "agent-login");
+    const exposed = await run({ network: true, mask: [], binds: [{ path: "~/.cfg/agent", readOnly: true }] }, `cat ~/.cfg/agent/login`);
+    expect(exposed.stdout).toBe("agent-login");
+    const masked = await run({ network: true, mask: ["~/.cfg"], binds: [{ path: "~/.cfg/agent", readOnly: true }] }, `cat ~/.cfg/agent/login 2>&1; echo "[$(ls -A ~/.cfg | wc -l)]"`);
+    expect(masked.stdout).not.toContain("agent-login");
+    expect(masked.stdout).toContain("[0]");
+  });
+
   it("hides the home directory but for the executor's own state", async () => {
     const state = path.join(home, ".agent");
     mkdirSync(state, { recursive: true });

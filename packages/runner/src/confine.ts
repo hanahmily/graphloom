@@ -139,7 +139,9 @@ function sandboxMounts(
     }
     for (const r of reads) hideHome.push("--ro-bind", r, r);
   }
-  const visible = (p: string): boolean => !under(p, home) || [...reads, ...holes].some((h) => under(p, h));
+  // A path is still there when it is, or sits in, an exposed path; and when it holds one (a mask of a
+  // parent hides what is exposed beneath it: masks win).
+  const visible = (p: string): boolean => !under(p, home) || [...reads, ...holes].some((h) => under(p, h) || under(h, p));
   const after: string[] = [];
   for (const bind of sandbox.binds) {
     const p = expandHome(bind.path, home);

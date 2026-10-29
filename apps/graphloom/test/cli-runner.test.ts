@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
-import { execFile } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
 import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -363,4 +363,27 @@ describe("isEnvironmentDispatch", () => {
     const job = { input: { commands: [{ id: "go" }, { id: "git", argv: ["git", "--version"] }] } };
     expect(isEnvironmentDispatch(job, environmentCommands)).toBe(false);
   });
+});
+
+describe("releasing a stopped run's sandbox through the CLI runner", () => {
+  const IMAGE = "busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662";
+  const available = spawnSync("docker", ["image", "inspect", IMAGE], { stdio: "ignore" }).status === 0;
+  if (!available) console.warn("cli runner releaseRun test skipped: docker or the busybox test image is not available");
+
+  it.skipIf(!available)("removes the containers a controller left for that run and only that run's", async () => {
+    const run = `cli-release-${process.pid}`;
+    const start = (label: string) => spawnSync("docker", ["run", "-d", "--label", label, "--network", "none", IMAGE, "sleep", "120"], { encoding: "utf8" }).stdout.trim();
+    const ours = start(`graphloom.run=${run}`);
+    const other = start(`graphloom.run=${run}-other`);
+    try {
+      const runner = createCliRunner(parseRunnerConfig({ harness: "claude-code", allowUnrestricted: true, claude: { command: "claude" } }), {});
+      expect(runner.releaseRun).toBeTypeOf("function");
+      await runner.releaseRun!(run);
+      const exists = (id: string) => spawnSync("docker", ["inspect", id], { stdio: "ignore" }).status === 0;
+      expect(exists(ours)).toBe(false);
+      expect(exists(other)).toBe(true);
+    } finally {
+      spawnSync("docker", ["rm", "-f", ours, other], { stdio: "ignore" });
+    }
+  }, 60_000);
 });
