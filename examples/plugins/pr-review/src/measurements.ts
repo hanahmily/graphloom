@@ -91,15 +91,19 @@ export const metricsDiffCommand = (): EnvironmentCommand => ({
 });
 
 const STATIC_SCRIPT =
-  'set -eu; n="$1"; shift; h=""; while [ "$n" -gt 0 ]; do h="$h$1"; shift; n=$((n - 1)); done; kind="$1"; root="$2"; gen="$3"; node="$4"; wt=$(pwd -P); ' +
-  'if [ "$kind" = go ]; then printf \'%s\' "$h" | { cd "$root/tools/gometrics" && GOTOOLCHAIN=local GOFLAGS=-mod=readonly CGO_ENABLED=0 go run . --head "$wt" --hunks - --generated "$gen"; } > "$GRAPHLOOM_REPORT_FILE"; ' +
+  'set -eu; n="$1"; shift; h=""; while [ "$n" -gt 0 ]; do h="$h$1"; shift; n=$((n - 1)); done; kind="$1"; root="$2"; gen="$3"; node="$4"; gobin="${5:-go}"; wt=$(pwd -P); ' +
+  'if [ "$kind" = go ]; then printf \'%s\' "$h" | { cd "$root/tools/gometrics" && GOTOOLCHAIN=local GOFLAGS=-mod=readonly CGO_ENABLED=0 "$gobin" run . --head "$wt" --hunks - --generated "$gen"; } > "$GRAPHLOOM_REPORT_FILE"; ' +
   'else printf \'%s\' "$h" | "$node" "$root/dist/metrics/tsmetrics-cli.js" --head "$wt" --hunks - --generated "$gen" > "$GRAPHLOOM_REPORT_FILE"; fi';
 
-/** The command that measures one batch: its hunks travel in the argv, so the recorded bytes are the bytes measured. */
-export function staticCommand(batch: Batch, hunks: Hunks, pluginRoot: string, generated: readonly string[], nodeBin: string): EnvironmentCommand {
+/**
+ * The command that measures one batch: its hunks travel in the argv, so the recorded bytes are the bytes measured.
+ * `goBin` is the Go toolchain to run: the `go` of the GOROOT the environment check resolved in the worktree (which
+ * the confined job binds), not the first `go` on PATH, which may be a launcher in the hidden home.
+ */
+export function staticCommand(batch: Batch, hunks: Hunks, pluginRoot: string, generated: readonly string[], nodeBin: string, goBin = "go"): EnvironmentCommand {
   const subset: Hunks = new Map(batch.paths.flatMap((p) => (hunks.has(p) ? [[p, hunks.get(p)!] as const] : [])));
   const parts = writeChunks(formatHunkFile(subset));
-  return { id: batch.id, argv: ["sh", "-c", STATIC_SCRIPT, batch.id, String(parts.length), ...parts, batch.language === "go" ? "go" : "ts", pluginRoot, generated.join(","), nodeBin] };
+  return { id: batch.id, argv: ["sh", "-c", STATIC_SCRIPT, batch.id, String(parts.length), ...parts, batch.language === "go" ? "go" : "ts", pluginRoot, generated.join(","), nodeBin, goBin] };
 }
 
 /** The hunk text a static command measured, read back from its argv. */

@@ -520,7 +520,9 @@ function measureAndWrite(ctx: Context, view: RunView, analysis: Analysis, flow: 
       if (binds === undefined) return supervise({ reason: "the environment check recorded no plugin directory, which the static tools run from" }, "escalate a missing plugin path");
       const batches = m.batches.slice(0, 16);
       const generated = profile.metrics.generated;
-      const commands = batches.map((b) => staticCommand(b, m.hunks, binds[0]!.path, generated, process.execPath));
+      const goRoot = environmentOutput(view.evidence, "go-root");
+      const goBin = goRoot !== undefined && path.isAbsolute(goRoot) && goRoot !== "/" ? path.join(goRoot, "bin", "go") : "go";
+      const commands = batches.map((b) => staticCommand(b, m.hunks, binds[0]!.path, generated, process.execPath, goBin));
       const job: JobSpec = {
         stageId: REPORT_STAGE,
         kind: "command",

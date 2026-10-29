@@ -16,7 +16,7 @@
     "vitest": "^3.0.9"
   },
   "digests": {
-    "sourceTree": "2ff00f5fc455822adf9a6912d6f8db235c3f8360b0cb54384867676f46d05001",
+    "sourceTree": "cbff3a9f21c725c22c2ddf108485b9f9b74577bba09bb082a3658686ce03355c",
     "packageLock": "ae5b886a88656f187132576e5f1579a047eec7e260abddf2994bb44d6815b49a",
     "files": {
       "package.json": "d2ecf50847d4ef5e66d59240dabdb523a3a58b04a5d089d956e9abe1dccc37ea",
@@ -43,12 +43,12 @@
       "src/detectors.ts": "f2a8b0926ee6c71ad5292efd8399380c16f9598495eda2fc17a8d54c79d221c6",
       "src/evidence.ts": "8ac679d44549e11f94b9b226b394faebfaee72cd9a68cd377132286bfcf60366",
       "src/flow.ts": "39b383da2fc721dbcf91b9e186a2a0afa89bf0bdb61cfa940b32752964c98e56",
-      "src/graph.ts": "acf9f5d04ea26d137aa8984370c3a8093fda166fc0842f9556cdbefa338f3568",
+      "src/graph.ts": "adc53f7b3ca8d2a0f038ade5c003fa16ee711808abd3ad04283dd4d852430d16",
       "src/groundwork.ts": "a91dd3b78ac7a99e829274dc36c9085d9ac953e0523092d8c5173071bcd58225",
       "src/index.ts": "8e081e2b43c97ecdd29866fd6abd0a808db4a2393b07299d359c67017475c12b",
       "src/inventory.ts": "46c5db65903805751277146a19b13fba56e6e50386dbd66a1d175e512eef6e66",
       "src/ledger.ts": "e1977463c6e403c7d8ffeea843b07afc2cd0efbc50150b3347d2f55eb37577af",
-      "src/measurements.ts": "c448c9d91301dc5abc7392fbe236116f6bb11e3790043054653f3befda6d83fd",
+      "src/measurements.ts": "d3195297b0beead285cef5a3b1ca513f4a72e51bdcc79dd9ec84d2c3544f92da",
       "src/metrics/coverage.ts": "789fec377062803ff6143535e2aab9c781b8a4966439a88887448b21f3be3255",
       "src/metrics/crap.ts": "8052c075783c89ca13058aea1a437fbcee198136dcf7d0d562bc06aecda0acc3",
       "src/metrics/generated.ts": "aac742beb0af53afc62cb0b24e79c6f61a5528dff06c256551db0be7119a44ba",
@@ -102,7 +102,7 @@
       "test/qa-units.test.ts": "10526db1205a1c2bbfe0833d67ec80ca387c12318487aefd85b8a33ffa3e613b",
       "test/rehearsal-docs.test.ts": "3e61a6bba413b468a1a3783cf6577b9c170a4daa856e27176f380c863ab6f3e8",
       "test/report.test.ts": "c73d09ae842f616b5a76cb28f3fbc8f652a2c8991d9caadfffe157de33259ae7",
-      "test/static-tools.test.ts": "2247ecedf0141f4ef33d305de875bd1114c8b6ede08ac3cc1c9c99c8b47b1f0a",
+      "test/static-tools.test.ts": "80023bce2a360bb233424a9b7b502f1f8455fdbe926cace75c6fdbf5e5071237",
       "test/support.ts": "c2eb24a1da0d3a9ef434389010a6e45841851649036e9486cf32ec88f0e643f0",
       "test/symbols.test.ts": "97c763e078f97e2d67089f8b55559842032067d024a0c724a0095a76fad01370",
       "test/tsmetrics.test.ts": "15e64d695be1bc3e92e75bd0b0f03bbc84ff4637e789885db66ff4e34dd907cd",
