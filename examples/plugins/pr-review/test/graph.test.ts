@@ -456,16 +456,36 @@ describe("Questions and Answers fail closed", () => {
 
 describe("agentConfigMasks", () => {
   it("masks the usual agent configuration and every such file the pull request adds or changes, anywhere", () => {
-    const masks = agentConfigMasks("/w", ["src/a.go", "docs/CLAUDE.md", ".claude/settings.json", "x/.codex/y", "ok/AGENTS.md"]);
-    expect(masks).toEqual(expect.arrayContaining(["/w/CLAUDE.md", "/w/.mcp.json", "/w/.opencode", "/w/docs/CLAUDE.md", "/w/.claude/settings.json", "/w/x/.codex/y", "/w/ok/AGENTS.md"]));
+    const { masks } = agentConfigMasks("/w", ["src/a.go", "docs/CLAUDE.md", ".claude/settings.json", "x/.codex/y/z.json", "x/.codex/other", "ok/AGENTS.md"]) as { masks: string[] };
+    expect(masks).toEqual(expect.arrayContaining(["/w/CLAUDE.md", "/w/.mcp.json", "/w/.opencode", "/w/docs/CLAUDE.md", "/w/.claude", "/w/x/.codex", "/w/ok/AGENTS.md"]));
     expect(masks).not.toContain("/w/src/a.go");
+    // A directory of configuration is one mask, however many files the pull request puts in it.
+    expect(masks.filter((p) => p.startsWith("/w/x/.codex"))).toEqual(["/w/x/.codex"]);
     expect(new Set(masks).size).toBe(masks.length);
   });
 
-  it("skips a path no mask can name, and keeps within the confinement's limit", () => {
+  it("refuses, rather than leave anything exposed, a path no mask can name and more places than one confinement can mask", () => {
+    expect(agentConfigMasks("/w", ["bad\nname/CLAUDE.md"])).toEqual({ problem: expect.stringMatching(/no confinement mask can name/) });
     const many = Array.from({ length: 100 }, (_, i) => `d${i}/CLAUDE.md`);
-    expect(agentConfigMasks("/w", ["bad\nname/CLAUDE.md", "a/../CLAUDE.md", ...many]).length).toBeLessThanOrEqual(64);
-    expect(agentConfigMasks("/w", ["bad\nname/CLAUDE.md"]).some((p) => p.includes("bad"))).toBe(false);
+    expect(agentConfigMasks("/w", many)).toEqual({ problem: expect.stringMatching(/agent configuration in 106 places, more than the 64/) });
+    const fits = Array.from({ length: 58 }, (_, i) => `d${i}/CLAUDE.md`);
+    expect((agentConfigMasks("/w", fits) as { masks: string[] }).masks).toHaveLength(64);
+  });
+
+  it("stops the run as incompatible when the pull request adds more configuration than can be hidden, and never dispatches an agent", () => {
+    const many = scenarioWith("report", (s) => {
+      const files = (s.reads!["graphloom.github/list-pull-files"]![0] as { items: Array<Record<string, unknown>> }).items;
+      for (let i = 0; i < 70; i += 1) files.push({ path: `pkg/d${i}/CLAUDE.md`, status: "added", previousPath: null, additions: 1, deletions: 0, sha: null, patch: "@@ -0,0 +1 @@\n+x", patchOmitted: false });
+    });
+    const sim = simulate({ scenario: many, config: { limits: { maxFiles: 500 } } });
+    expect(stopOf(sim)).toMatchObject({ reason: "incompatible task", retryable: false });
+    expect(stopOf(sim)!.blocker).toMatch(/agent configuration in 76 places/);
+    expect(sim.jobs.some((j) => j.kind === "agent")).toBe(false);
+  });
+
+  it("tells the agents where to read the hidden files", () => {
+    const sim = simulate({});
+    for (const job of sim.jobs.filter((j) => j.kind === "agent")) expect(assignmentOf(job)).toContain(`git show ${REHEARSAL_HEAD}:<path>`);
   });
 });
 

@@ -13,8 +13,8 @@
 #                      is the repository's name without a leading "skywalking-")
 #
 # It fetches refs/pull/N/head and the base branch into
-#   refs/graphloom/pr-review/<owner>/<repo>/<N>/heads/<sha>   (kept, so re-runs find earlier heads)
-#   refs/graphloom/pr-review/<owner>/<repo>/<N>/base
+#   refs/graphloom/pr-review-pulls/<owner>/<repo>/<N>/heads/<sha>   (kept, so re-runs find earlier heads)
+#   refs/graphloom/pr-review-pulls/<owner>/<repo>/<N>/base  (a sibling of the ledger ref refs/graphloom/pr-review/<owner>/<repo>/<N>, which is a leaf)
 # computes the merge base, and writes <out-dir>/<name>-<N>/task.yaml with `base:` set to the merge
 # base and the request `Report on owner/repo#N at <sha>.`. The profile is copied beside the task as
 # profile.json, and the plugin linked as plugins/pr-review, where a task looks for them.
@@ -87,7 +87,7 @@ g() {
 
 git -C "$repo_dir" rev-parse --git-dir >/dev/null 2>&1 || fail "$repo_dir is not a Git repository"
 
-ns="refs/graphloom/pr-review/$owner/$name/$number"
+ns="refs/graphloom/pr-review-pulls/$owner/$name/$number"
 
 if [ -z "$base_branch" ]; then
   # The remote's default branch: `ref: refs/heads/main	HEAD`.

@@ -299,20 +299,41 @@ function validateStage(ctx: Context, view: RunView, stageId: string): GraphDecis
   return withPrivate(validate({ stageId }, `validate ${stage.name} from the recorded evidence`));
 }
 
-/** The paths of repository-provided agent configuration (design §12.1): the usual top-level ones, and any the pull request itself adds or changes. */
-export function agentConfigMasks(worktree: string, changed: readonly string[]): string[] {
+/** The most paths one bwrap confinement can mask (`confinementProblem`'s bound). */
+const MAX_MASKS = 64;
+
+/**
+ * The paths of repository-provided agent configuration (design §12.1) to hide from an agent: the usual
+ * top-level ones, and for every file the pull request adds or changes under such a name, the topmost path
+ * that carries it (`a/.claude` for `a/.claude/x/y`, `docs/CLAUDE.md` for itself). More than the confinement
+ * can mask, or a path no mask can name, is refused, never left exposed.
+ */
+export function agentConfigMasks(worktree: string, changed: readonly string[]): { masks: string[] } | { problem: string } {
   const names = ["CLAUDE.md", "AGENTS.md", ".claude", ".codex", ".mcp.json", ".opencode"];
-  const config = (p: string): boolean => p.split("/").some((seg) => names.includes(seg));
-  const rel = [...names, ...changed.filter(config)];
-  return [...new Set(rel)]
-    .filter((p) => !p.includes("\n") && !p.includes("\u0000") && !p.split("/").includes(".."))
-    .map((p) => path.posix.join(worktree, p))
-    .slice(0, 64);
+  const roots = new Set(names);
+  for (const p of changed) {
+    const segments = p.split("/");
+    const at = segments.findIndex((seg) => names.includes(seg));
+    if (at < 0) continue;
+    const prefix = segments.slice(0, at + 1).join("/");
+    if (/[\n\u0000]/.test(prefix) || segments.includes("..")) return { problem: `the pull request changes ${JSON.stringify(p)}, an agent-configuration path that no confinement mask can name` };
+    roots.add(prefix);
+  }
+  if (roots.size > MAX_MASKS) return { problem: `the pull request adds or changes agent configuration in ${roots.size} places, more than the ${MAX_MASKS} paths one confinement can hide from the agents` };
+  return { masks: [...roots].map((p) => path.posix.join(worktree, p)) };
 }
 
-function agentJob(ctx: Context, view: RunView, spec: { jobId?: string; purpose: "diagnostic" | "review"; instruction: string; schema: string; harness: string; assignment: string; continueFrom?: string }, analysis: Analysis): JobSpec | { problem: string } {
+/** What a job that cannot be built asks for: the pull request is refused when it is the pull request's fault, else the supervisor decides. */
+function refused(job: { problem: string; incompatible?: true }): GraphDecision {
+  if (job.incompatible === true) return stop({ reason: "incompatible task", blocker: job.problem, retryable: false }, "stop: the agents cannot be confined for this pull request");
+  return supervise({ reason: job.problem }, "escalate a missing worktree path");
+}
+
+function agentJob(ctx: Context, view: RunView, spec: { jobId?: string; purpose: "diagnostic" | "review"; instruction: string; schema: string; harness: string; assignment: string; continueFrom?: string }, analysis: Analysis): JobSpec | { problem: string; incompatible?: true } {
   const worktree = environmentOutput(view.evidence, ENV_WORKTREE);
   if (worktree === undefined || !path.isAbsolute(worktree)) return { problem: "the environment check recorded no worktree path, which the confinement masks need" };
+  const masks = agentConfigMasks(worktree, analysis.snapshot.files.flatMap((f) => [f.path, ...(f.previousPath !== null ? [f.previousPath] : [])]));
+  if ("problem" in masks) return { problem: masks.problem, incompatible: true };
   return {
     ...(spec.jobId !== undefined ? { jobId: spec.jobId } : {}),
     stageId: REPORT_STAGE,
@@ -324,7 +345,7 @@ function agentJob(ctx: Context, view: RunView, spec: { jobId?: string; purpose: 
     executor: CODING_AGENT,
     input: { assignment: spec.assignment, harness: spec.harness },
     // Untrusted-read confinement (design §12.2): home hidden, repository agent configuration masked, no GitHub token.
-    confinement: { kind: "bwrap", network: true, mask: agentConfigMasks(worktree, analysis.snapshot.files.flatMap((f) => [f.path, ...(f.previousPath !== null ? [f.previousPath] : [])])), binds: [] },
+    confinement: { kind: "bwrap", network: true, mask: masks.masks, binds: [] },
     ...(ctx.profile.agentTimeoutMs !== undefined ? { timeoutMs: ctx.profile.agentTimeoutMs } : {}),
     ...(spec.continueFrom !== undefined ? { continueFrom: spec.continueFrom } : {}),
   };
@@ -368,14 +389,14 @@ function report(ctx: Context, view: RunView): GraphDecision {
       const assignment = reporterInstruction({ pr, snapshot: analysis.snapshot, sections: analysis.sections, facts: analysis.facts, kind: flow.kind, feedback: flow.feedback });
       const from = flow.kind === "first" ? undefined : reporterSession(view);
       const job = agentJob(ctx, view, { jobId: REPORTER_JOB, purpose: "diagnostic", instruction: "Write the change report", schema: flow.schema, harness: profile.roles.reporter, assignment, ...(from !== undefined ? { continueFrom: from } : {}) }, analysis);
-      if ("problem" in job) return supervise({ reason: job.problem }, "escalate a missing worktree path");
+      if ("problem" in job) return refused(job);
       const why = { first: "write the change report (read-only, confined)", correction: "correct the report: deterministic validation found problems", revision: "revise the report: the claim check did not support some items" }[flow.kind];
       return dispatchAgent(view, job, why);
     }
     case "checker": {
       const assignment = checkerInstruction({ pr, snapshot: analysis.snapshot, report: flow.report, items: itemsOf(flow.report, analysis.ctx), retry: flow.retry });
       const job = agentJob(ctx, view, { purpose: "review", instruction: "Check the report's claims against the diff", schema: CLAIM_CHECK_SCHEMA_NAME, harness: profile.roles["report-checker"], assignment }, analysis);
-      if ("problem" in job) return supervise({ reason: job.problem }, "escalate a missing worktree path");
+      if ("problem" in job) return refused(job);
       return dispatchAgent(view, job, `check every report item with a fresh read-only ${harnessName(profile.roles["report-checker"])} session`);
     }
     case "done":

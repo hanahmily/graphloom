@@ -91,7 +91,7 @@ describe("scripts/prepare.sh (design 3.1)", () => {
     expect(r.status, r.stderr).toBe(0);
     const task = r.stdout.trim();
     expect(task).toBe(path.join(outDir, "banyandb-7", "task.yaml"));
-    const ns = "refs/graphloom/pr-review/apache/skywalking-banyandb/7";
+    const ns = "refs/graphloom/pr-review-pulls/apache/skywalking-banyandb/7";
     expect(out(s.clone, ["rev-parse", `${ns}/heads/${s.head}`])).toBe(s.head);
     expect(out(s.clone, ["rev-parse", `${ns}/base`])).toBe(s.tip);
     expect(readFileSync(task, "utf8")).toBe(
@@ -123,7 +123,7 @@ describe("scripts/prepare.sh (design 3.1)", () => {
     const r = run([path.join(s.base, "r"), "apache/skywalking-banyandb#7", "--repo", s.clone], { HOME: booby(marks) });
     expect(r.status, r.stderr).toBe(0);
     expect(markers(marks)).toEqual([]);
-    expect(out(s.clone, ["rev-parse", `refs/graphloom/pr-review/apache/skywalking-banyandb/7/base`])).toBe(s.tip);
+    expect(out(s.clone, ["rev-parse", `refs/graphloom/pr-review-pulls/apache/skywalking-banyandb/7/base`])).toBe(s.tip);
   });
 
   it("proves its own test: a plain fetch and ref update in the same clone does run the hook (the control)", () => {
@@ -135,6 +135,19 @@ describe("scripts/prepare.sh (design 3.1)", () => {
     expect(markers(marks)).toEqual(["hook"]);
   });
 
+  it("lives beside an existing ledger ref, in either order (a Git ref cannot be a leaf and a directory)", () => {
+    const s = setup();
+    const ledger = "refs/graphloom/pr-review/apache/skywalking-banyandb/7";
+    out(s.clone, ["update-ref", ledger, s.fork]);
+    const r = run([path.join(s.base, "r"), "apache/skywalking-banyandb#7", "--repo", s.clone]);
+    expect(r.status, r.stderr).toBe(0);
+    expect(out(s.clone, ["rev-parse", ledger])).toBe(s.fork);
+    const fresh = setup();
+    expect(run([path.join(fresh.base, "r"), "apache/skywalking-banyandb#7", "--repo", fresh.clone]).status).toBe(0);
+    out(fresh.clone, ["update-ref", ledger, fresh.fork]);
+    expect(out(fresh.clone, ["rev-parse", ledger])).toBe(fresh.fork);
+  });
+
   it("takes the pull request's URL, and an explicit base branch and remote", () => {
     const s = setup();
     out(s.upstream, ["branch", "release", s.fork]);
@@ -143,7 +156,7 @@ describe("scripts/prepare.sh (design 3.1)", () => {
     expect(r.status, r.stderr).toBe(0);
     const task = readFileSync(r.stdout.trim(), "utf8");
     expect(task).toContain(`base: ${s.fork}`);
-    expect(out(s.clone, ["rev-parse", "refs/graphloom/pr-review/apache/skywalking-banyandb/7/base"])).toBe(s.fork);
+    expect(out(s.clone, ["rev-parse", "refs/graphloom/pr-review-pulls/apache/skywalking-banyandb/7/base"])).toBe(s.fork);
   });
 
   it("keeps earlier heads alive: a second head gets its own ref beside the first", () => {
@@ -156,8 +169,8 @@ describe("scripts/prepare.sh (design 3.1)", () => {
     out(s.upstream, ["update-ref", "refs/pull/7/head", second]);
     out(s.upstream, ["checkout", "-q", "main"]);
     expect(run([outDir, "apache/skywalking-banyandb#7", "--repo", s.clone]).status).toBe(0);
-    const refs = out(s.clone, ["for-each-ref", "--format=%(refname)", "refs/graphloom/pr-review/apache/skywalking-banyandb/7/heads"]).split("\n");
-    expect(refs).toEqual([`refs/graphloom/pr-review/apache/skywalking-banyandb/7/heads/${s.head}`, `refs/graphloom/pr-review/apache/skywalking-banyandb/7/heads/${second}`].sort());
+    const refs = out(s.clone, ["for-each-ref", "--format=%(refname)", "refs/graphloom/pr-review-pulls/apache/skywalking-banyandb/7/heads"]).split("\n");
+    expect(refs).toEqual([`refs/graphloom/pr-review-pulls/apache/skywalking-banyandb/7/heads/${s.head}`, `refs/graphloom/pr-review-pulls/apache/skywalking-banyandb/7/heads/${second}`].sort());
     expect(readFileSync(path.join(outDir, "banyandb-7", "task.yaml"), "utf8")).toContain(`at ${second}.`);
   });
 
