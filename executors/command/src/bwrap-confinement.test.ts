@@ -2,11 +2,12 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 import { createServer, type Server } from "node:net";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { confinementUnsupported, createBuiltinExecutorRunner, type JobContext, type Runner } from "@graphloom/runner";
+import { confinementUnsupported, createBuiltinExecutorRunner, packageClosure, type JobContext, type Runner } from "@graphloom/runner";
 import type { BwrapConfinement, JobSpec } from "@graphloom/sdk";
 import type { CommandOutcome } from "./run.js";
 
@@ -99,6 +100,28 @@ describe.skipIf(unsupported !== undefined)("a command job with a bwrap confineme
     expect((await outcome(job(argv, sandbox(), true))).stdoutTail).not.toContain("wrote");
     expect((await outcome(job(argv, sandbox(), false))).stdoutTail).toContain("wrote");
     expect(await readFile(path.join(work, "out.txt"), "utf8")).toBe("x\n");
+  });
+
+  it("still starts the executor when GraphLoom is installed under the hidden home", async () => {
+    // The installation (its packages and the dependencies they import) lives beneath the operator's home here.
+    const installHome = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
+    const realHome = process.env.HOME;
+    process.env.HOME = installHome;
+    try {
+      const probe = await outcome(job(["sh", "-c", `echo started; ls -A ${installHome} | wc -l`], sandbox()));
+      expect(probe.stdoutTail).toContain("started");
+      // The rest of that home is hidden: only what the executor needs shows through.
+      expect(Number(probe.stdoutTail.trim().split("\n").pop())).toBeLessThan((await readdir(installHome)).length);
+    } finally {
+      process.env.HOME = realHome;
+    }
+  });
+
+  it("shows through a hidden home the packages the executor imports, not only its own", async () => {
+    const { commandExecutorPackage } = await import("../dist/package.js");
+    const closure = packageClosure([commandExecutorPackage.entryModule]);
+    // @graphloom/sdk is found through an ancestor node_modules, outside the executor's own package.
+    expect(closure).toContain(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../packages/sdk"));
   });
 
   it("refuses a job that asks for a sandbox when the run gave it no scope", async () => {

@@ -31,6 +31,18 @@ export function sandboxNodeArgs(modules: readonly string[], extraReadPaths: read
   return ["--permission", ...[...readable].sort().map((p) => `--allow-fs-read=${p}`)];
 }
 
+/**
+ * Every directory a module's packages read at run time: each module's package, its real location, and
+ * the dependencies Node's resolver reaches from it. What a confined job that hides the operator's home
+ * must still see of an executor installed beneath it.
+ */
+export function packageClosure(modules: readonly string[]): string[] {
+  const readable = new Set<string>();
+  const seen = new Set<string>();
+  for (const file of modules) addPackageClosure(packageRootOf(file), readable, seen);
+  return [...readable].sort();
+}
+
 /** Nearest directory at or above `file` holding a package.json. */
 export function packageRootOf(file: string): string {
   let dir = path.dirname(path.resolve(file));

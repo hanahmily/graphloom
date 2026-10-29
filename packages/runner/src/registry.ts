@@ -27,7 +27,7 @@ import {
 import { confineWorker, confinementUnsupported, findSandboxWorker, hasPrivateTmp, operatorGoSettings } from "./confine.js";
 import { digestExecutorSource } from "./digest.js";
 import { withDockerConfinement } from "./sandbox-docker.js";
-import { assertSandboxSupported, sandboxNodeArgs } from "./sandbox.js";
+import { assertSandboxSupported, packageClosure, sandboxNodeArgs } from "./sandbox.js";
 import type { ExecutorDescriptor, ExecutorSourceOverride, JobContext, JobEvidenceItem, JobResult, Runner } from "./types.js";
 
 /** Qualified ids under this namespace belong to GraphLoom built-in packages. */
@@ -641,6 +641,8 @@ export function createChildExecutorRunner(
               ...(ctx.confinement.readPaths ?? []),
               ...(readOnlySandbox ? ctx.confinement.writablePaths : []),
               ...executorBinaries(launch.env),
+              // A hidden home must still show the executor's packages and what they import.
+              ...(own?.kind === "bwrap" ? packageClosure([workerModule, entry]) : []),
               process.execPath, workerModule, entry, ...(sourceRoot !== undefined ? [sourceRoot] : []), ...(override !== undefined ? [override.root] : []), cwd,
             ],
             ...(own?.kind === "bwrap" ? { sandbox: own } : {}),

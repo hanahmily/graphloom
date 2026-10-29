@@ -42,7 +42,7 @@ export {
   type DockerRunOptions,
   type DockerRunSpec,
 } from "./sandbox-docker.js";
-export { assertSandboxSupported, packageRootOf } from "./sandbox.js";
+export { assertSandboxSupported, packageClosure, packageRootOf } from "./sandbox.js";
 export { confineWorker, confinementUnsupported, expandHome, hasPrivateTmp, operatorGoSettings, type BwrapSandbox, type ConfinedWorker, type OperatorGo } from "./confine.js";
 export {
   createBuiltinExecutorRunner,

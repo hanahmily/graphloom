@@ -3,12 +3,13 @@
 
 import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { existsSync, statSync } from "node:fs";
+import { existsSync, lstatSync, statSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { BUILTIN_COMMAND_EXECUTOR_ID, SCRATCH_MOUNT_PREFIX, pinJobExecutor, type DockerConfinement, type JobSpec } from "@graphloom/sdk";
+import { ensureRealDir, ensureRealDirBelow } from "./confine.js";
 import type { JobContext, JobEvidenceItem, JobResult, Runner } from "./types.js";
 
 const execFileAsync = promisify(execFile);
@@ -165,6 +166,21 @@ export async function removeRunContainers(runId: string): Promise<void> {
   }
 }
 
+/** The first component of `rel` below `root` that is a symbolic link, if any. */
+function linkBelow(root: string, rel: string): string | undefined {
+  let current = root;
+  for (const part of path.normalize(rel).split(path.sep)) {
+    if (part === "." || part === "") continue;
+    current = path.join(current, part);
+    try {
+      if (lstatSync(current).isSymbolicLink()) return current;
+    } catch {
+      return undefined;
+    }
+  }
+  return undefined;
+}
+
 interface OriginalCommand {
   id: string;
   argv: string[];
@@ -210,9 +226,17 @@ async function prepareDockerJob(job: JobSpec, spec: DockerConfinement, ctx: JobC
   if (!Array.isArray(writable)) return writable;
   const readOnly = mounts(spec.readOnly);
   if (!Array.isArray(readOnly)) return readOnly;
+  // Docker follows a link at a mount source, so a link an earlier job planted must never be one. Scratch
+  // is the runner's: each component is checked without following links, and a link in the way is
+  // replaced. A path under the workspace is the job's own, so a link there refuses the job.
   for (const mount of [...spec.writable, ...spec.readOnly]) {
-    const target = resolveMount(mount, ctx.worktreePath, ctx.scratchDir) as { path: string; create: boolean };
-    if (target.create) await mkdir(target.path, { recursive: true });
+    if (mount.startsWith(SCRATCH_MOUNT_PREFIX) && ctx.scratchDir !== undefined) {
+      ensureRealDir(ctx.scratchDir);
+      ensureRealDirBelow(ctx.scratchDir, mount.slice(SCRATCH_MOUNT_PREFIX.length));
+    } else if (!path.isAbsolute(mount)) {
+      const link = linkBelow(ctx.worktreePath, mount);
+      if (link !== undefined) return { refusal: `docker confinement mount ${mount} passes through a symbolic link (${link}), which a container would follow out of the workspace` };
+    }
   }
   const missing = [...writable, ...readOnly].filter((p) => !existsSync(p));
   if (missing.length > 0) return { refusal: `docker confinement mounts paths that do not exist: ${missing.join(", ")}` };

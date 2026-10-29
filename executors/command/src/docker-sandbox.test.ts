@@ -3,7 +3,7 @@
 
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -281,6 +281,30 @@ describe.skipIf(unavailable !== undefined)("a command job in a docker confinemen
     // A command that reaches the CLI itself refuses to pull too.
     const run = spawnSync("docker", ["run", "--rm", "--pull", "never", missing, "true"], { encoding: "utf8" });
     expect(run.status).not.toBe(0);
+  });
+
+  it("does not follow a link an earlier job left in scratch, and replaces it", async () => {
+    const outside = path.join(dir, "outside");
+    await mkdir(outside);
+    await symlink(outside, path.join(scratch, "cache"));
+    const [probe] = await runCommands(
+      [{ id: "w", argv: sh(`echo planted > ${scratch}/cache/f && echo wrote`) }],
+      { writable: [".", "@scratch/cache"] },
+    );
+    expect(probe!.stdoutTail).toContain("wrote");
+    expect((await lstat(path.join(scratch, "cache"))).isSymbolicLink()).toBe(false);
+    expect(await readdir(outside)).toEqual([]);
+    expect(await readFile(path.join(scratch, "cache", "f"), "utf8")).toBe("planted\n");
+  });
+
+  it("refuses a workspace mount that passes through a link", async () => {
+    const outside = path.join(dir, "outside-ws");
+    await mkdir(outside);
+    await symlink(outside, path.join(work, "build"));
+    const result = await runner.runJob(job([{ id: "x", argv: ["true"] }], { writable: ["build"] }), ctx());
+    expect(result.status).toBe("failed");
+    expect(result.summary).toMatch(/passes through a symbolic link/);
+    expect(await readdir(outside)).toEqual([]);
   });
 
   it("refuses a mount that does not exist", async () => {

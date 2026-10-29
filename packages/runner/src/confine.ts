@@ -330,7 +330,7 @@ function lstatOrUndefined(p: string): ReturnType<typeof lstatSync> | undefined {
 }
 
 /** `dir` exists as a real directory (not a link), created if absent; its parents are the runner's own. */
-function ensureRealDir(dir: string): void {
+export function ensureRealDir(dir: string): void {
   const stat = lstatOrUndefined(dir);
   if (stat === undefined) {
     mkdirSync(dir, { recursive: true });
@@ -340,7 +340,7 @@ function ensureRealDir(dir: string): void {
 }
 
 /** Make `rel` below `root` real directories one component at a time, replacing any link or file a job left in the way. */
-function ensureRealDirBelow(root: string, rel: string): void {
+export function ensureRealDirBelow(root: string, rel: string): void {
   let current = root;
   for (const part of rel.split(path.sep)) {
     current = path.join(current, part);
