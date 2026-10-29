@@ -27,6 +27,7 @@ import { DEFAULT_SUPERVISOR_MODEL, DEFAULT_SUPERVISOR_PROVIDER, piDefaultModelId
 import { DISABLE_AUTOUPDATE_ENV, RELEASE_REPO } from "./auto-update.js";
 import { probeHarnessCommand } from "./capability-probe.js";
 import { selfInstall, type SelfInstall } from "./ownership.js";
+import { probeConfiguredLaunchers } from "./session-launcher.js";
 import { enabledHarnesses, loadRunnerConfig, requireRunnerConfig, runnerConfigPath, type HarnessName, type RunnerConfig } from "./runner-config.js";
 import {
   enabledSupervisorHarnesses,
@@ -602,6 +603,8 @@ export interface Discovery {
   supervisorSelectionError?: string;
   /** The bundled agent skills and their copies for Claude Code, Codex and opencode, and shared-directory duplicates (docs/design-agent-skills.md §3); absent when unreadable. */
   skills?: SkillsStatus;
+  /** The session launchers the runner config or the environment sets, each probed as `session open` probes it. */
+  sessionLaunchers?: Awaited<ReturnType<typeof probeConfiguredLaunchers>>;
   env: NodeJS.ProcessEnv;
 }
 
@@ -726,6 +729,7 @@ export async function discover(env: NodeJS.ProcessEnv = process.env, root: strin
   const supervisorCandidates = await discoverSupervisorCandidates(claude, codex, pi, claudeSupervisorSection, codexSupervisorSection);
   const { enabled: supervisorEnabled, selection: supervisorSelection, error: supervisorSelectionError } = await discoverSupervisorSelection(supervisor.config, pi, env);
   const updates = await discoverUpdates(self, runner, env);
+  const sessionLaunchers = await probeConfiguredLaunchers(runner.config, env).catch(() => []);
   const skills = await skillsStatus({ env, root }).then(
     (status) => ({
       ...status,
@@ -753,6 +757,7 @@ export async function discover(env: NodeJS.ProcessEnv = process.env, root: strin
     ...(supervisorSelection !== undefined ? { supervisorSelection } : {}),
     ...(supervisorSelectionError !== undefined ? { supervisorSelectionError } : {}),
     ...(skills !== undefined ? { skills } : {}),
+    ...(sessionLaunchers.length > 0 ? { sessionLaunchers } : {}),
     env,
   };
 }

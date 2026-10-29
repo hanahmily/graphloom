@@ -439,6 +439,14 @@ export interface AgentSessionView {
   status: "ok" | "failed" | "conflict";
   /** Operation this session continued, when it was not fresh. */
   continuedFrom?: string;
+  /** The harness that ran the session (`claude-code`, `codex`, `pi`). */
+  harness?: string;
+  /** `operator` for a conversation an operator had with a fork (`graphloom session open`); absent for a job's session. */
+  origin?: "operator";
+  /** A conversation's parent: the `operationId` of the session it forked. */
+  parent?: string;
+  /** The input context of the session's last model call (a conversation's); a plugin compares it with its own bound. */
+  contextTokens?: number;
 }
 
 export type JobKind = "agent" | "command";

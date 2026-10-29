@@ -23,6 +23,7 @@ import { doctorReport, formatDoctor, taskProfile, type TaskInputs } from "./doct
 import { describeTask } from "./rehearsal.js";
 import { SANDBOX_USAGE, sandboxCommand } from "./sandbox.js";
 import { parseTaskNewArgs, taskNew, TASK_NEW_USAGE } from "./task-new.js";
+import { SESSION_USAGE, sessionCommand } from "./session.js";
 import { isInteractive, runSetup, terminalPrompter } from "./setup.js";
 import { onceStopHook, parseDuration, waitForRun, type StopNotice } from "./notify.js";
 import { formatRunStats, loadRunStats } from "./stats.js";
@@ -113,6 +114,11 @@ async function main(): Promise<void> {
 
   if (cmd === "skills") {
     process.exitCode = await skillsCommand(args.slice(1));
+    return;
+  }
+
+  if (cmd === "session") {
+    process.exitCode = await sessionCommand(args.slice(1), { out: console.log, err: console.error });
     return;
   }
 
@@ -660,6 +666,7 @@ Usage:
   graphloom run <task.yaml> [--state-root <dir>] [--supervisor <harness>] [--on-stop <command>]
   graphloom check <task.yaml>
   ${TASK_NEW_USAGE}
+  ${SESSION_USAGE.join("\n  ")}
   graphloom rehearse <task.yaml> [--scenario <name>] [--commands <stub|run>] [--offline] [--synthesized] [--adversarial] [--keep] [--stop-at <stage>]
   graphloom rehearse --record-from <stateDir|runId> [--state-root <dir>] [--name <name>] [--out <path>]
   graphloom replay <stateDir|runId> [--state-root <dir>]
@@ -679,6 +686,10 @@ Usage:
   graphloom skills install [<name>...] [--agent <claude-code|codex|opencode>] [--dir <dir>] [--force]
   graphloom skills update [--agent <claude-code|codex|opencode>] [--dir <dir>] [--quiet]
   graphloom skills remove [<name>...] [--agent <claude-code|codex|opencode>] [--dir <dir>] [--force]
+
+session list shows a run's recorded agent sessions; session open forks one in your own terminal (Claude Code or
+Codex, under the job's confinement with the checkout read-only) and records the conversation when the agent
+exits, as an operator conversation a later open continues (--from-original starts again from the job's session).
 
 task new asks the graph's own prepareTask hook what its arguments mean (for pr-review, a pull
 request: pr-review owner/repo#N --repo <clone> --profile <name>), validates the plan it returns, fetches

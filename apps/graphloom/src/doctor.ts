@@ -37,6 +37,7 @@ import {
 import { enabledHarnesses, type HarnessName } from "./runner-config.js";
 import { harnessModels, withModelHints, type SupervisorConfig } from "./supervisor-config.js";
 import { SKILL_AGENT_LABEL, duplicateFix } from "./skills.js";
+import { SESSION_LAUNCHER_ENV, probeRefusal } from "./session-launcher.js";
 
 export type CheckStatus = "pass" | "warn" | "fail";
 export type CheckSection = "host" | "agents" | "configuration" | "setups" | "task";
@@ -226,6 +227,16 @@ function configurationChecks(d: Discovery): DoctorCheck[] {
       d.env[tokenEnv]
         ? check("configuration", "github token", "pass", `${tokenEnv} is set`)
         : check("configuration", "github token", "warn", `github.tokenEnv names ${tokenEnv}, which is not set`, `export ${tokenEnv}=<token>   (for example "$(gh auth token)")`),
+    );
+  }
+
+  for (const l of d.sessionLaunchers ?? []) {
+    const name = `session launcher ${l.harness}`;
+    const where = l.setup.source === "environment" ? SESSION_LAUNCHER_ENV[l.harness] : `${l.harness === "claude-code" ? "claude" : "codex"}.sessionLauncher`;
+    checks.push(
+      l.probe.ok
+        ? check("configuration", name, "pass", `${l.setup.argv.join(" ")} (${where}) passes GraphLoom's session arguments through (probe \`${l.probe.command}\`)`)
+        : check("configuration", name, "warn", l.setup.argv.length === 0 ? l.probe.output : probeRefusal(l.setup, l.probe), `remove ${where} (graphloom session open then starts plain ${l.harness === "claude-code" ? "claude" : "codex"}), or use the launcher's own resume outside GraphLoom`),
     );
   }
 

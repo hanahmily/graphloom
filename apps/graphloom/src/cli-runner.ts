@@ -18,7 +18,7 @@ import {
 } from "@graphloom/executor-coding-agent";
 import { commandBinding, commandExecutorPackage, type CommandBindingOptions } from "@graphloom/executor-command";
 import { githubBinding, githubExecutorPackage } from "@graphloom/executor-github";
-import { enabledHarnesses, type HarnessName, type RunnerConfig } from "./runner-config.js";
+import { enabledHarnesses, withoutLauncher, type HarnessName, type RunnerConfig } from "./runner-config.js";
 
 const INSTALLED_HARNESSES: Record<HarnessName, string> = {
   "claude-code": claudeCodeHarnessModule,
@@ -80,8 +80,8 @@ export function createCliRunner(
             ...(config.timeoutMs !== undefined ? { timeoutMs: config.timeoutMs } : {}),
             ...(config.maxTimeoutMs !== undefined ? { maxTimeoutMs: config.maxTimeoutMs } : {}),
             // Default watchdogs are fitted inside each job's own wall clock by the harness.
-            ...(harness === "claude-code" ? { claude: { ...config.claude } } : {}),
-            ...(harness === "codex" ? { codex: { ...config.codex } } : {}),
+            ...(harness === "claude-code" ? { claude: withoutLauncher({ ...config.claude }) } : {}),
+            ...(harness === "codex" ? { codex: withoutLauncher({ ...config.codex }) } : {}),
             ...(config.pi !== undefined ? { pi: config.pi } : {}),
           }),
         }],

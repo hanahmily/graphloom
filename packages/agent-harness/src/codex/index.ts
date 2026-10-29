@@ -13,9 +13,11 @@ export {
 export {
   captureCodexTurn,
   codexSessionRef,
+  findRollout,
   openCodexThread,
   type CodexSessionSettings,
   type CodexSessionStore,
   type CodexThread,
 } from "./session.js";
+export { captureCodexFork, restoreCodexFork, type CapturedCodexFork, type CodexFork } from "./fork.js";
 export { BUDGET_EXHAUSTED, SESSION_ABORTED, type AgentUsage, type NativeToolUse } from "../common.js";

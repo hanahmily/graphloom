@@ -63,6 +63,23 @@ export { CONTROLLER_STOP_CLASSES, classifyStop, FINAL_STOP_HELD_REMEDY, type Sto
 export { budgetGranted, budgetsUsed, METERED_BUDGET_KEYS, type BudgetAmounts, type BudgetUsage, type MeteredBudgetKey } from "./budget-usage.js";
 export { readOwnerClaim, isClaimStale, type RunOwnerClaim } from "./owner.js";
 export { MAX_APPROVAL_REASON, type ApprovalRequest, type OperatorApprovalPayload } from "./approvals.js";
+export {
+  DEFAULT_MAX_CONVERSATION_BYTES,
+  conversationsDir,
+  openRefusal,
+  openStatus,
+  openingNote,
+  recordConversation,
+  selectSession,
+  sessionRows,
+  type ConversationCapture,
+  type ConversationOutcome,
+  type OpenStatus,
+  type SessionRow,
+  type SessionSelector,
+} from "./conversations.js";
+export { harnessOfSessionRef } from "./agent-sessions.js";
+export type { AgentSessionRecord } from "./state.js";
 export { TIMEOUT_CONTINUATION_NOTE } from "./agent-sessions.js";
 export type { InstallRecord, InstallTransitionRecord, StateMigrationRecord } from "./state.js";
 export {
