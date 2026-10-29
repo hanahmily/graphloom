@@ -3,7 +3,7 @@
 
 import { spawn } from "node:child_process";
 import { createServer, type Server } from "node:net";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -34,7 +34,7 @@ afterAll(async () => {
 });
 
 /** Run `script` under the confinement, as a job would: the home directory is the test's own. */
-async function run(sandbox: BwrapSandbox, script: string, extra: { trustedWritable?: string[] } = {}): Promise<{ status: number | null; stdout: string; stderr: string }> {
+async function run(sandbox: BwrapSandbox, script: string, extra: { trustedWritable?: string[]; readPaths?: string[] } = {}): Promise<{ status: number | null; stdout: string; stderr: string }> {
   const launch = confineWorker({
     command: "sh",
     args: ["-c", script],
@@ -144,6 +144,24 @@ describe.skipIf(unsupported !== undefined)("a job's own bwrap sandbox", async ()
     expect(res.stdout).not.toContain("hidden");
     expect(res.stdout).toContain("wrote");
     expect(readFileSync(account, "utf8")).toBe('{"account":"refreshed"}\n');
+  });
+
+  it("gives back a symlinked launcher as a link, so it still resolves files beside its real location", async () => {
+    // An npm-installed CLI (codex) is a bin symlink to a package script that loads files relative to
+    // its real path. Bound as a file, the script would run from the link's directory and miss them.
+    const pkg = path.join(home, "pkgs", "tool");
+    mkdirSync(path.join(pkg, "bin"), { recursive: true });
+    mkdirSync(path.join(pkg, "lib"), { recursive: true });
+    writeFileSync(path.join(pkg, "lib", "data.js"), "module.exports = 'found-beside-real-path';\n");
+    writeFileSync(path.join(pkg, "bin", "tool.js"), "console.log(require(require('path').join(__dirname, '..', 'lib', 'data.js')));\n");
+    mkdirSync(path.join(home, "bin"), { recursive: true });
+    const link = path.join(home, "bin", "tool");
+    if (!existsSync(link)) symlinkSync(path.join(pkg, "bin", "tool.js"), link);
+    const res = await run({ network: false, mask: [], binds: [] }, `${JSON.stringify(process.execPath)} ${link}`, {
+      readPaths: [work, link, pkg],
+    });
+    expect(res.stderr).toBe("");
+    expect(res.stdout).toContain("found-beside-real-path");
   });
 
   it("adds a read-only bind that cannot be written, and a read-write bind that can", async () => {
