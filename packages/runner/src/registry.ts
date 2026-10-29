@@ -416,6 +416,25 @@ const AGENT_COMMANDS = ["claude", "codex"];
  * npm-style install, the package they run from: a hidden home must still show them. A package
  * directory that contains the home itself is never exposed.
  */
+/**
+ * The state paths (directories, or files such as `~/.claude.json`) an executor
+ * keeps when its job runs with a hidden home: each `ownState.env` variable set in
+ * the environment the worker inherits, then each `homeRelative` path under the
+ * home. Only paths that exist are returned. The worker inherits the runner's
+ * `env` option, or the runner's own environment when none is given, so callers
+ * pass that same environment: a harness that falls back to `CLAUDE_CONFIG_DIR`
+ * must find its login visible inside the confinement.
+ */
+export function resolveOwnStateDirs(
+  own: { env: readonly string[]; homeRelative: readonly string[] } | undefined,
+  env: NodeJS.ProcessEnv,
+  home: string = os.homedir(),
+): string[] {
+  if (own === undefined) return [];
+  const configured = own.env.map((name) => env[name]).filter((v): v is string => typeof v === "string" && v.length > 0);
+  return [...new Set([...configured, ...own.homeRelative.map((rel) => path.join(home, rel))])].filter((p) => existsSync(p));
+}
+
 export function agentExecutables(env: NodeJS.ProcessEnv, home: string = os.homedir()): string[] {
   const configured = Object.entries(env)
     .filter(([name, value]) => /^GRAPHLOOM_.*_BIN$/.test(name) && typeof value === "string" && path.isAbsolute(value))
@@ -528,12 +547,7 @@ export function createChildExecutorRunner(
   };
 
   /** Directories the executor keeps its own state in (an agent's login and history), which stay writable when confined. */
-  const ownStateDirs = (): string[] => {
-    const own = options.ownState;
-    if (own === undefined) return [];
-    const configured = own.env.map((name) => options.env?.[name]).filter((v): v is string => typeof v === "string" && v.length > 0);
-    return [...configured, ...own.homeRelative.map((rel) => path.join(os.homedir(), rel))].filter((dir) => existsSync(dir));
-  };
+  const ownStateDirs = (): string[] => resolveOwnStateDirs(options.ownState, options.env ?? process.env);
 
   const runner: Runner = {
     async releaseRun(runId) {

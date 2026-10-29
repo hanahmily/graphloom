@@ -131,6 +131,21 @@ describe.skipIf(unsupported !== undefined)("a job's own bwrap sandbox", async ()
     expect(readFileSync(path.join(home, "private.txt"), "utf8")).toBe("mine");
   });
 
+  it("keeps a single own-state file, such as ~/.claude.json, readable and writable in the hidden home", async () => {
+    const account = path.join(home, ".agent.json");
+    writeFileSync(account, '{"account":"signed-in"}');
+    writeFileSync(path.join(home, "other.json"), "hidden");
+    const res = await run(
+      { network: true, mask: [], binds: [] },
+      `cat ${account}; echo; cat ${home}/other.json 2>&1; echo '{"account":"refreshed"}' > ${account} && echo wrote`,
+      { trustedWritable: [account] },
+    );
+    expect(res.stdout).toContain("signed-in");
+    expect(res.stdout).not.toContain("hidden");
+    expect(res.stdout).toContain("wrote");
+    expect(readFileSync(account, "utf8")).toBe('{"account":"refreshed"}\n');
+  });
+
   it("adds a read-only bind that cannot be written, and a read-write bind that can", async () => {
     const ro = path.join(home, "deps");
     const rw = path.join(home, "cache");

@@ -44,7 +44,7 @@ export {
   type DockerRunOptions,
   type DockerRunSpec,
 } from "./sandbox-docker.js";
-export { agentExecutables } from "./registry.js";
+export { agentExecutables, resolveOwnStateDirs } from "./registry.js";
 export { assertSandboxSupported, packageClosure, packageRootOf } from "./sandbox.js";
 export { confineWorker, confinementUnsupported, expandHome, hasPrivateTmp, operatorGoSettings, type BwrapSandbox, type ConfinedWorker, type OperatorGo } from "./confine.js";
 export {
