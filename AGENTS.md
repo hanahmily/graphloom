@@ -38,8 +38,8 @@ Agent skills for driving GraphLoom from Claude Code, Codex or opencode live in t
 `graphloom` command and flag they name must be in `graphloom --help`
 (`skills-drift.test.ts`), and `graphloom skills` installs them.
 
-The proposed `pr-review` graph (a neutral change report and questions for
-the author on an incoming pull request first; an optional review layer
+The proposed `pr-review` graph (a neutral change report, questions and their
+answers on an incoming pull request first; an optional review layer
 drafts findings, published only on operator approval) follows the
 [PR-review design](docs/design-pr-review-graph.md); its shared review machinery
 is vendored source, not a dependency.
