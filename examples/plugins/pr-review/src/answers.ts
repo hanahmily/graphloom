@@ -345,7 +345,7 @@ const NAMES_SCRIPT = String.raw`set -u; base="$1"; dir="$2"; shift 2
 { i=0
 for name in "$@"; do
   i=$((i + 1))
-  hit=$(git -c core.hooksPath=/dev/null grep -n -I --no-color -E -e "(^|[^A-Za-z0-9_])(func|function|type|const|var|class|interface)[[:space:]]+([(][^)]*[)][[:space:]]*)?$name([^A-Za-z0-9_]|$)" -e "^[[:space:]]*$name[[:space:]]*(:=|=)" "$base" -- "$dir" 2>/dev/null | head -n 1)
+  hit=$(git -c core.hooksPath=/dev/null grep -n -I --no-color -E -e "(^|[^A-Za-z0-9_])(func|function|type|const|var|class|interface)[[:space:]]+([(][^)]*[)][[:space:]]*)?$name([^A-Za-z0-9_]|$)" -e "^[[:space:]]*$name[[:space:]]*(:=|=)" -e "^[[:space:]]+([a-z]+[[:space:]]+)*$name[[:space:]]*[(<]" "$base" -- "$dir" 2>/dev/null | head -n 1)
   if [ -n "$hit" ]; then echo "exists $name"; fi
 done; echo "checked $i"; } > "$GRAPHLOOM_REPORT_FILE"`;
 

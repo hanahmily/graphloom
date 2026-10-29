@@ -75,6 +75,7 @@ function repo() {
     "pkg/gen/api.pb.go": "package gen\n\nfunc ParseDuration(s string) (int, error) { return 0, nil }\n",
     "cmd/main.go": 'package main\n\nimport (\n\t"github.com/spf13/cobra"\n)\n\nfunc main() { _ = cobra.Command{} }\n',
     "ui/app.ts": 'import { useState } from "react";\nexport const x = useState;\n',
+    "ui/svc.ts": "export class Svc {\n  static async existingHelper<T>(x: T) {\n    return x;\n  }\n  private other() {}\n}\n",
     "pkg/timestamp/duration_test.go": "package timestamp\n\nfunc TestParseDuration(t *testing.T) { ParseDuration(\"1d\") }\n",
   });
   const base = commit(dir, "base");
@@ -258,6 +259,13 @@ describe("the answers' verification commands", () => {
     expect(plan).toHaveLength(1);
     const r = run(dir, plan[0]!.command);
     expect(r.report.trim().split("\n")).toEqual(["1 ok", "2 missing", "3 ok", "4 missing", "5 range 7", "checked 5"]);
+  });
+
+  it("finds a proposed name already defined as a class member in the package, in the base", () => {
+    const fn = { id: "S1", path: "ui/app.ts", language: "typescript", dir: "ui", name: "x", startLine: 1, endLine: 2, qualified: "ui/app.x", kind: "function", exported: true, scope: "ui/app", signature: "", body: "", change: "modified" };
+    const split = answer({ proposal: { kind: "split", splits: [{ name: "existingHelper", startLine: 1, endLine: 2, responsibility: "r" }, { name: "other", startLine: 3, endLine: 4, responsibility: "r" }, { name: "fresh", startLine: 5, endLine: 6, responsibility: "r" }], testFile: "", testName: "", cases: [], assertion: "" } });
+    const plan = verificationPlan([split], { ...(ctx as object), questions: [{ id: "Q1", type: "split-function", item: "R1", symbol: "S1", text: "?", origin: "required", key: "k" }], groundwork: { symbols: [fn], inventory: { dependencies: [], packages: [], truncated: [] } } } as never, base);
+    expect(run(dir, plan.find((p) => p.kind === "names")!.command).report.trim().split("\n")).toEqual(["exists existingHelper", "exists other", "checked 3"]);
   });
 
   it("finds a proposed name already defined in the package, in the base", () => {
