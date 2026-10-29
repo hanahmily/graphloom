@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
-import type { EvidenceRecord, JobSpec } from "@graphloom/sdk";
+import { checkAssignmentFidelity, type EvidenceRecord, type JobSpec } from "@graphloom/sdk";
 import { describe, expect, it } from "vitest";
 import { ledgerReadCommand } from "../src/commands.js";
 import { GIT_ENV } from "../src/commands.js";
@@ -36,6 +36,19 @@ describe("every scenario settles Fetch, Report, Questions and Answers and stops 
       expect(qa.schema).toBe("pr-qa-v1");
       expect(qa.weakTest).toMatch(/mutation testing is not available in this version/);
       expect(qa.questions.every((q) => q.answer !== undefined)).toBe(true);
+    });
+  }
+});
+
+describe("the assignments name every field the stand-in agents reply with (rehearsal assignment fidelity)", () => {
+  for (const name of Object.keys(rehearsal(BANYANDB).scenarios)) {
+    it(name, () => {
+      const scenario = rehearsal(BANYANDB).scenarios[name]!;
+      const sim = simulate({ scenarioName: name });
+      for (const job of sim.jobs.filter((j) => j.kind === "agent")) {
+        const replies = scenario.results[job.resultSchema!]!;
+        for (const reply of replies) expect(checkAssignmentFidelity(assignmentOf(job), reply.output), `${name}: ${job.resultSchema}`).toEqual([]);
+      }
     });
   }
 });
