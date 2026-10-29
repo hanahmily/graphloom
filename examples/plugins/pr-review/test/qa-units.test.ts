@@ -376,7 +376,7 @@ describe("a closure question keeps its file", () => {
     const q = { id: "Q1", type: "split-function" as const, item: "R1", fn: "p.glob.func1", fnPath: "pkg/schema/ttl.go", text: "?", origin: "required" as const, key: "k" };
     expect(functionOf(q, { groundwork: { ...ctx.groundwork, symbols: [] }, view })).toMatchObject({ path: "pkg/schema/ttl.go", start: 6, end: 30 });
     const required = requiredQuestions({ view: { ...view, records: [{ ...other, complexity: 12, nesting: 4 }, { ...mine, complexity: 12, nesting: 4 }] }, groundwork: { ...ctx.groundwork, symbols: [] } }, new Map());
-    expect(required.filter((r) => r.type === "split-function").map((r) => [r.fn, r.fnPath])).toEqual([["p.glob.func1", "pkg/other/init.go"], ["p.glob.func1", "pkg/schema/ttl.go"]]);
+    expect(required.filter((r) => r.type === "split-function").map((r) => [r.fn, r.fnPath])).toEqual([["p.glob.func1", "pkg/schema/ttl.go"], ["p.glob.func1", "pkg/other/init.go"]]);
   });
 });
 
