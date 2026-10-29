@@ -299,7 +299,7 @@ function goPackages(files: ReadonlyArray<{ path: string; language: Language }>):
   for (const f of files) {
     if (f.language !== GO) continue;
     const dir = dirOf(f.path);
-    if (dir.split("/").some((s) => s === "testdata" || s === "vendor" || s.startsWith("_") || s.startsWith("."))) continue;
+    if (dir !== "." && dir.split("/").some((s) => s === "testdata" || s === "vendor" || s.startsWith("_") || s.startsWith("."))) continue;
     dirs.add(dir);
   }
   return [...dirs].sort();

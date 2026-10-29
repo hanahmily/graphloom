@@ -411,9 +411,9 @@ describe("measured coverage, TypeScript, under real Docker", () => {
   const INDEX: Record<string, Fn[]> = { "src/math.ts": [["src/math.classify", 1, 9], ["src/math.unused", 11, 13]] };
   const files = [{ path: "src/math.ts", language: "typescript" as const }];
 
-  const fixture = async (name: string, packageJson: unknown, lock: boolean): Promise<string> => {
+  const fixture = async (name: string, packageJson: unknown, lock: boolean, extra: Record<string, string> = {}): Promise<string> => {
     const dir = path.join(tmp, name);
-    await write(dir, { "package.json": `${JSON.stringify(packageJson)}\n`, "src/math.ts": MATH, "src/math.test.ts": TEST, ".gitignore": "node_modules\n" });
+    await write(dir, { "package.json": `${JSON.stringify(packageJson)}\n`, "src/math.ts": MATH, "src/math.test.ts": TEST, ".gitignore": "node_modules\n", ...extra });
     if (lock) {
       const r = spawnSync("npm", ["install", "--package-lock-only", "--offline", "--include=dev", "--ignore-scripts"], { cwd: dir, encoding: "utf8" });
       if (r.status !== 0) return "";
@@ -460,6 +460,14 @@ describe("measured coverage, TypeScript, under real Docker", () => {
     expect(git(work, "status", "--porcelain")).toBe("");
     expect(spawnSync("docker", ["ps", "-aq", "--filter", `label=graphloom.run=${runId}`], { encoding: "utf8" }).stdout.trim()).toBe("");
   });
+
+  it.skipIf(!hasDocker || !hasNpm)("keeps the coverage of the tests that ran when another test fails", async () => {
+    if (!ok) return;
+    const dir = await fixture("ts-fail", { name: "fx", private: true, type: "module", devDependencies: { vitest: vitestVersion, "@vitest/coverage-v8": vitestVersion } }, true, { "src/fails.test.ts": 'import { expect, it } from "vitest";\n\nit("fails", () => {\n  expect(1).toBe(2);\n});\n' });
+    const m = await measure({ work: dir, scratch: path.join(tmp, "fail-scratch"), records: recordsOf(INDEX), index: new Map(Object.entries(INDEX)), files, profile: profileWith({ metrics: { generated: [], sandbox: { typescript: { image: tsImage, cpus: 2, memory: "2g", wallClockMs: 300_000 } } } }) });
+    expect(m.state.facts!.runs[0]).toMatchObject({ language: "typescript", ran: true, exit: 1 });
+    expect(m.state.outcomes!.get(`src/math.ts\u0000src/math.classify\u00001`)).toMatchObject({ source: "measured", covered: 7, total: 9 });
+  }, 300_000);
 
   it.skipIf(!hasDocker || !hasNpm)("does not start vitest, nor any container, when the repository declares no coverage provider", async () => {
     const dir = await fixture("ts-none", { name: "fx", private: true, devDependencies: { vitest: "3.2.7" } }, false);

@@ -253,6 +253,12 @@ describe("coverageState", () => {
     expect(doneOf(coverageState(input({ evidence: [diff, ...ready("go"), run] }))).facts.runs[0]!.changed).toEqual(["go.sum", "pkg/a/gen.go"]);
   });
 
+  it("takes the repository's root package as a package, and leaves hidden, testdata and vendor directories out", () => {
+    const root: MetricsRecord = { ...goRecord, path: "main.go", function: "main.F", startLine: 3, endLine: 9 };
+    const s = coverageState(input({ evidence: [diff, ...ready("go")], records: [root], index: new Map([["main.go", [["main.F", 3, 9]]]]), files: [{ path: "main.go", language: "go" }, { path: ".github/x.go", language: "go" }, { path: "pkg/testdata/t.go", language: "go" }, { path: "vendor/v/v.go", language: "go" }] }));
+    expect((s as Extract<CoverageState, { state: "run" }>).plan.commands[0]!.spec).toBe(formatSpec({ packages: ["."], functions: [{ path: "main.go", start: 3, end: 9 }] }));
+  });
+
   it("runs only the languages that have a function to measure, and not for a test file alone", () => {
     const d = doneOf(coverageState(input({ evidence: [diff], records: [{ ...goRecord, test: true }] })));
     expect(d.facts.runs).toEqual([]);

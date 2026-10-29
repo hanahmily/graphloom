@@ -6,7 +6,8 @@
 #
 # Statement coverage of the changed files of one TypeScript workspace (docs/design-code-quality-metrics.md §2.3):
 # the repository's own `vitest run --coverage.enabled --coverage.provider=v8 --coverage.reporter=json` with
-# `--coverage.reportsDirectory` under the sandbox's /tmp and `--coverage.include` of the changed files, then
+# `--coverage.reportsDirectory` under the sandbox's /tmp and `--coverage.include` of the changed files (and `--coverage.reportOnFailure`, since vitest writes no report when a test
+# fails unless told to), then
 # `coverage-final.json` reduced to the changed functions' line ranges (dist/metrics/tscover-cli.js) and written,
 # with the facts of the run, to $GRAPHLOOM_REPORT_FILE as graphloom-coverage-v1. A failing test does not void
 # coverage. The script never installs the provider into the repository's declarations: when the checkout has no
@@ -65,7 +66,7 @@ if [ -z "$bin" ]; then
   fi
 fi
 
-set -- run --coverage.enabled --coverage.provider=v8 --coverage.reporter=json "--coverage.reportsDirectory=$tmp/cov" --reporter=dot
+set -- run --coverage.enabled --coverage.reportOnFailure --coverage.provider=v8 --coverage.reporter=json "--coverage.reportsDirectory=$tmp/cov" --reporter=dot
 for f in $(sed -n 's/^file //p' "$tmp/spec.txt"); do
   if [ "$ws" != . ]; then p="${f#"$ws"/}"; else p="$f"; fi
   set -- "$@" "--coverage.include=$p"
