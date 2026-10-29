@@ -392,3 +392,31 @@ evidence:
 - the set of measured functions equals the changed functions of §1.
 
 A record that does not recompute is rejected, never corrected by hand.
+
+### 5.1 Static tool output (implemented in P1)
+
+The static tools (`gometrics`, `tsmetrics`, source under
+`examples/plugins/pr-review`, see its `tools/README.md`) settle points that
+§1 to §5 left open:
+
+- **Document.** A tool prints one `graphloom-metrics-v1` document:
+  `records` (the §5 records, plus a `test` flag), `files` (an index of every
+  function of each changed, measured file as `[name, startLine, endLine]`,
+  closures included) and `skipped` (`generated`, `unsupported-language`,
+  `not-in-head`). Scope recomputation needs the index.
+- **Inputs.** Head-side changed line ranges (`path:start-end`), from
+  `git diff -U0 -w`, so whitespace-only edits never modify a function.
+- **Added versus modified.** `added` when every line of the function is in
+  the hunks, else `modified`. A function's own lines exclude the interior of
+  nested closures; a closure's first and last lines belong to both it and
+  its enclosing function.
+- **Names.** Go as the runtime prints them (`pkg.(*T).M`, type parameters
+  as `[...]`); closures `<enclosing>.func<n>`, numbered per enclosing
+  function; package-level literals under `<pkg>.glob`. TypeScript:
+  `<repo path without extension>.<Class>.<member>`.
+- **Nesting evidence.** `nestingPath` is the first deepest chain; its lines
+  must not decrease (two blocks may share a line in TypeScript).
+- **TypeScript logical assignment** (`&&=`, `||=`, `??=`) is not counted,
+  since §2.1 lists only `&&`, `||` and `??`.
+- **Coverage of an empty function.** With no executable statements,
+  `cov = 1`.
