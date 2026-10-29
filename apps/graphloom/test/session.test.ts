@@ -296,7 +296,7 @@ describe("graphloom session open: a Claude Code session", () => {
     expect(list.stdout).toContain(`parent ${convs[0]!.sessionRef} (${convs[0]!.operationId})`);
     expect(list.stdout).toContain(`parent claude-${w.claudeId} (op-answerer)`);
     // By ref: any recorded session, a conversation included.
-    const byRef = await session(w, ["open", w.runId, convs[1]!.sessionRef], { script: { ask: "fourth question" } });
+    const byRef = await session(w, ["open", w.runId, convs[1]!.sessionRef as string], { script: { ask: "fourth question" } });
     expect(byRef.code, byRef.stderr).toBe(0);
     expect((await agentLog(w))[3]!.argv[(await agentLog(w))[3]!.argv.indexOf("--resume") + 1]).toBe(forks[1]);
   }, 240_000);

@@ -24,11 +24,12 @@ repository holds them in top-level [`skills/`](../skills):
 | `graphloom-triage` | A stopped run: diagnose the cause from `inspect`, `stats` and evidence first, then choose the resume form with the user |
 | `graphloom-deliver` | Verifies the delivered branch (commit message, PR body, required sections, the repository's checks on a clean copy), then pushes or opens the PR only with explicit approval |
 
-When `graphloom task new` lands ([core §16](design-typescript-core.md#16-preparing-a-task-graphloom-task-new)),
-`graphloom-run` prepares the task with it for a graph whose bundle implements
-`prepareTask`, and still writes `task.yaml` by hand for the others. The skill
-names the command only in the same change as the CLI, so the drift test (§4)
-keeps passing.
+`graphloom-run` prepares the task with `graphloom task new`
+([core §16](design-typescript-core.md#16-preparing-a-task-graphloom-task-new))
+for a graph whose bundle implements `prepareTask` (pr-review), and still writes
+`task.yaml` by hand for the others; it also covers a run that stops for a
+decision (`session list`, `session open`, `resume --decline`). The skill
+changed in the same change as the CLI, so the drift test (§4) keeps passing.
 
 **Hard rules, in every skill.** Ask before anything outward-facing (push, pull
 request, issue creation, release). Never print or ask for a token or secret.

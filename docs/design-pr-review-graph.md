@@ -135,8 +135,8 @@ with a session is a CLI command, not a skill
 
 ```yaml
 graph: pr-review
-repo: ../../../skywalking-banyandb    # the operator's review clone (--repo), relative to the task
-config: ../../plugins/pr-review/profiles/banyandb.json   # --profile banyandb, found in the bundle
+repo: repo                            # a link beside the task to the operator's review clone (--repo)
+config: profile.json                  # a link beside the task to the profile found in the bundle (intake refuses `..`)
 base: 3f1c…e9                         # new generic field (§15): the merge base, pinned instead of HEAD
 request: "Report on apache/skywalking-banyandb#1234 at 9ab2…41."
 ```
@@ -1811,6 +1811,32 @@ writes.
 | P4 | **Review layer, local:** `--approve review-layer`; Review, Checks (definition only), Draft, and Publish as a stop; the three aspect reviewers with their shipped rule files (Go, TypeScript), the rule-group assertion, the per-aspect sweep and verifiers, cross-aspect dedupe; reproducing tests (`scripts/repro.sh`, Go overlay, vitest scratch config, fix run) in the P1 Docker sandbox, unchanged; `findings-proven`; `needs author` items pre-selected and other Q&A items promotable as draft comments; verdict rule; edits. Reviewer forking: generic `JobSpec.forkFrom` and `AgentRoleDeclaration.sameAs`; the review base session; each aspect's passes and corrections as forks of it; the seeded fallback with its conversation summary | Graph tests per requirement; anchor validation on real GitHub patches; secret and private-reference scans; report-only requirements pass on a decline; harness resolution for every pair of available harnesses, and refusal with one. Against the bundled ocr 1.13.3: each shipped rule file yields only `custom` groups carrying its language's rule text for `.go`, `.ts`, `.tsx` and other files, and a wrongly shaped file is caught by the assertion. Under real Docker, with the checkout unchanged after every run: a Go repro in an internal and an external test package through `-overlay`; a vitest repro whose relative import, workspace-package import and `vi.mock` path resolve as from its virtual location, on a real canopy (vitest ^5) and a real GraphLoom (vitest ^3) workspace; attribution fixtures (assertion failure → proven, compile error, panic outside the cited code, timeout and memory kill → inconclusive, one failure in two runs → flaky, passing → does not fail); a fix run that passes and one that does not. Forking: each aspect reviewer forks the latest Answers conversation as its own session, and the parent stays byte-identical; without a conversation it forks the answerer; `forkFrom` refused across harnesses, together with `continueFrom`, and for an omitted transcript; over `review.fork.maxParentTokens` the pass is `context: seeded` with its reason and the summary keeps the maintainer's messages verbatim; harness resolution per the [§13.1](#131-roles) table, with a `reviewer-<aspect>` key refused. Rehearsal `operator-conversation-carried`, `context-seeded`, `no-conversation`, `no-findings`, `aspect-rules-ignored`, `cross-aspect-dedupe`, `bug-proven-by-test`, `test-does-not-fail`, `security-repro`, `maintainability-non-behavioral`, `repro-disabled`, and `happy` up to the stop |
 | P5 | **Publish:** write token binding, `publish-review`, read-back, optional `publish-report` | Controller tests: write refused without `approvalRef`, with a stale generation or past `maxDispatches`; token bound only under `--approve`; ambiguous POST reconciled; rehearsal `publish-refused`, `happy` to `succeeded`; a live publish on a user-chosen PR |
 | P6 | Review-layer checks (`checks-ran`), incremental review (prior findings, threads, never re-raise, proven tests rerun on the new head), measured budgets | Rehearsal `force-push`; `checks-ran` in the real Docker sandbox; a proven test that passes on a later head makes its finding `fixed`; budgets, coverage, mutation and reproducing-test times recorded in `budgets.md` |
+
+### Wave 3c: what is implemented, and how it differs
+
+`graphloom task new`, `GraphPlugin.prepareTask`, `graphloom session list/open`
+and the decision half of approvals are generic and implemented; the core design
+lists what differs ([task new](design-typescript-core.md#implementation-notes-wave-3c-task-new),
+[session](design-typescript-core.md#implementation-notes-wave-3c-session)). For
+pr-review:
+
+- `src/prepare.ts` returns the six steps of [§3.1](#31-task) (the remote is the
+  clone's remote whose fetch URL is the project's GitHub URL, else that URL);
+  the profile gains an optional `baseBranch` (default `main`) that `--base`
+  overrides; `--review` writes `Review on …`, which 0.1 refuses at run with
+  "incompatible task" naming the missing review layer.
+- `GraphDefinition.approvals` declares `review-layer` with `unavailable` set:
+  `resume --approve review-layer` is refused before anything is recorded, with
+  the message that 0.1 has no Review stage; `--decline review-layer
+  [--reason]` records `operator-approval` evidence at the new generation, lifts
+  the final `report ready` stop, and the graph answers with `stop({ reason:
+  "complete" })`, so the run **succeeds**, report only. The approval's `files`
+  (read and hashed under the lock, 256 KiB) are generic and unused until P4.
+- The run stops, final, at `report ready` after Answers; its saved sessions
+  stay until the run finishes.
+- Conversations are recorded only into a stopped run, so a chat is captured at
+  `report ready` (the intended place); while the run is running the fork stays
+  in the agent's own store.
 
 ### Wave 3a: what is implemented, and how it differs
 
