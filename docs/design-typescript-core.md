@@ -91,6 +91,7 @@ request: |
 ```
 
 ```sh
+graphloom task new <graph> <args…> [--repo <dir>] [--profile <name|path>] [--out <dir>] [--dry-run] [--force]
 graphloom run task.yaml
 graphloom inspect <run-id>
 graphloom stop <run-id>
@@ -103,6 +104,11 @@ graphloom session open <run-id> [--stage <stageId> [--from-original] | <session>
 `session open` starts the agent of a session the run recorded, on a fork of
 it, in the user's terminal, and records the conversation when the agent exits
 ([§15](#15-opening-a-recorded-agent-session)).
+`task new` asks the graph's plugin for a declarative plan, executes its
+bounded generic steps (fetch a ref, resolve a commit, pin a ref, write the
+task) in the task repository, and writes `task.yaml`
+([§16](#16-preparing-a-task-graphloom-task-new)). Writing the file by hand
+stays valid.
 
 These are target interfaces. Relative paths resolve from the task file. `hello`
 selects an operator-installed bundle at `plugins/hello/` beside that file. Reject
@@ -292,6 +298,7 @@ value types and wire schemas must be defined and tested during implementation:
 export interface GraphPlugin {
   describe(config?: unknown): GraphDefinition; // config: the task's pinned config
   advance(view: RunView): GraphDecision;       // view.config: the same value
+  prepareTask?(input: PrepareTaskInput): TaskPlan | TaskPlanRefusal; // optional; `graphloom task new` (§16)
 }
 
 export interface Validator {
@@ -316,6 +323,10 @@ decision callbacks, not the whole plugin: plugin-owned executors perform actual
 I/O in scoped execution processes. Built-in executors follow the same lifecycle
 protocol. The controller records and admits execution without implementing its
 domain behavior; see [executor invocation](design-executors.md#invocation-and-lifecycle).
+
+`prepareTask` is optional and runs before any run exists. It is pure over its
+input, like `advance`: it returns a plan as data, which the CLI validates and
+executes ([§16](#16-preparing-a-task-graphloom-task-new)).
 
 Values crossing processes use a versioned, bounded JSON protocol, with runtime
 schema checks. TypeScript types do not validate external data. Requests and replies
@@ -1412,3 +1423,153 @@ on a copied rollout, and the non-interactive forks a job uses runs opt-in,
 as the
 [harness assumptions](design-supervisor-harnesses.md#11-unverified-cli-assumptions)
 are checked.
+
+## 16. Preparing a task: `graphloom task new`
+
+Status: proposed, 2026-10-29. Not implemented.
+
+Some graphs need a task that is tedious and error-prone to write by hand: a
+ref fetched from a forge, a commit pinned by hash, a merge base, a request
+that names them. `graphloom task new` prepares it. The plugin decides what
+its arguments mean and returns a **task plan**: a short list of generic
+steps, as data. The CLI validates the plan, executes it in the task
+repository, and writes `task.yaml`. The CLI, the SDK and the controller never
+learn what the arguments name (a pull request, an issue, a release); that
+stays in the plugin, following the controller-plugin boundary.
+
+```text
+graphloom task new <graph> <args…> [--repo <dir>] [--profile <name|path>]
+                   [--out <dir>] [--dry-run] [--force]
+```
+
+| Option | Meaning |
+|---|---|
+| `<graph>` | The graph id. The bundle is `plugins/<graph>/` in `--out`, the resolution `run` applies beside a task file ([§2](#2-task-and-operator-experience)), with the same path-traversal refusal |
+| `<args…>` | Passed to the plugin verbatim. Words after `--` are never read as CLI flags. The CLI does not interpret them |
+| `--repo <dir>` | The task repository (default `.`). Its top level is used, as intake does |
+| `--profile <name\|path>` | The task's config. A value containing `/` or ending in `.json` is a path from the current directory; otherwise a name, looked up as `profiles/<name>.json` in `--out`, then in the bundle. Required when the manifest declares `taskConfig: "required"` |
+| `--out <dir>` | The operator's workspace (default `.`): where the bundle is found and under which the task is written |
+| `--dry-run` | Print the validated plan and the task it would write, with `${name}` references unresolved. No step runs and nothing is written; the CLI only reads the remotes and `HEAD` for the hook's input |
+| `--force` | Replace an existing task file at the plan's path. Without it, an existing file is refused before any step runs |
+
+**The hook.** The CLI loads the bundle in the plugin host, an isolated child
+process as for every other callback, and calls `prepareTask`. A bundle
+without it is refused: "graph `<id>` does not prepare tasks; write task.yaml
+by hand". The input is data the CLI read, bounded like every protocol value:
+
+```ts
+interface PrepareTaskInput {
+  args: string[];          // the words after <graph>, verbatim
+  repo: {
+    remotes: Array<{ name: string; url: string }>; // fetch URLs, as `git remote -v`
+    head: string;          // HEAD's commit
+  };
+  profile?: unknown;       // the parsed JSON of --profile, unread by the CLI
+  options: { dryRun: boolean };
+}
+
+type TaskPlanRefusal = { refused: string };     // usage or input error, printed as is
+
+interface TaskPlan {
+  summary: string;         // one line for the operator, at most 200 characters
+  steps: TaskPlanStep[];   // at most 16, executed in order
+}
+
+type TaskPlanStep =
+  | { kind: "fetch"; remote: string; refspec: string; intoRef: string }
+  | { kind: "resolve"; name: string; revParse: string }
+  | { kind: "resolve"; name: string; mergeBase: [string, string] }
+  | { kind: "updateRef"; from: string; to: string }
+  | { kind: "writeTask"; path: string; fields: Record<string, string> };
+```
+
+The hook reads no file, runs no process and has no network, as `advance`.
+A thrown error, a timeout or a malformed reply is reported with the plugin's
+message, and nothing runs.
+
+**Validation.** `validateTaskPlan(plan, graphId)` in `@graphloom/sdk` checks
+the reply's shape at run time and refuses the whole plan, naming the step
+and the rule, before any step runs. No step kind runs a command; an unknown
+`kind` or an extra property is refused.
+
+- **Names.** A `resolve` binds `name` (`[A-Za-z][A-Za-z0-9]{0,31}`, unique in
+  the plan). `${name}` may appear in `from`, `to`, `revParse`, the
+  `mergeBase` operands and field values, only after the step that binds it.
+  An unbound or malformed reference is refused; there is no other expansion.
+  A bound value is always a full object id.
+- **Refs.** `intoRef` and `to` must lie under `refs/graphloom/<graph>/`, the
+  graph's own namespace, and pass `git check-ref-format`, after
+  substitution. `refspec` is one source ref starting with `refs/` that passes
+  `check-ref-format`, with no `:`, `+`, `*`, `^`, `~`, `@{` or `..`, so the
+  plan cannot write outside its namespace or name a pattern. `revParse`, the
+  two `mergeBase` operands and `from` are each a ref under the graph's
+  namespace or a `${name}`.
+- **Remotes.** `remote` is a remote configured in the repository whose fetch
+  URL is `https://`, or an `https://` URL without user information. Other
+  transports (`file`, `ssh`, `ext`, a local path) are refused.
+- **Task.** Exactly one `writeTask`, the last step. `path` is relative, ends
+  in `task.yaml`, and resolves under `--out` with no `..` segment; a
+  directory on the way may not be a symlink that leaves `--out`. Field keys
+  are task fields other than `graph`, `repo` and `config`, which the CLI
+  writes itself. Values are strings of at most 4 KiB with no NUL. The
+  composed task must parse with intake's own task parser (`parseTaskYaml`),
+  so a field intake does not know is refused here, not at `run`.
+- **Bounds.** At most 16 steps, 8 names and 64 KiB of plan JSON.
+
+**Execution.** The CLI executes the steps in order with fixed argv, never a
+shell, and prints one line per step with its result. Every git command runs
+with `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM=1`,
+`GIT_TERMINAL_PROMPT=0` and `-c core.hooksPath=/dev/null`, so no hook
+(`reference-transaction` included), user filter or credential helper runs,
+and no repository code runs at all.
+
+| Step | Command |
+|---|---|
+| `fetch` | `git -c core.hooksPath=/dev/null -c protocol.allow=never -c protocol.https.allow=always -c gc.auto=0 -c maintenance.auto=false fetch --no-tags --no-recurse-submodules --no-write-fetch-head -- <remote> +<refspec>:<intoRef>`. The ref is created or moved; nothing is checked out, and no branch, index or working tree changes |
+| `resolve` | `git rev-parse --verify --end-of-options <ref>^{commit}`, or `git merge-base --all -- <a> <b>`, which must print exactly one commit. The full object id is bound to `name` |
+| `updateRef` | `git update-ref --no-deref <to> <oid of from> <zero oid>`: create only. An existing `to` at the same commit is left as is; at another commit the step fails ("pinned ref moved") |
+| `writeTask` | Writes `graph`, `repo` (relative from the task's directory), `config` (relative, when a profile is given), then the fields with `${name}` substituted, to a temporary sibling renamed into place. When the task's directory is not `--out`, a relative symlink `plugins/<graph>` beside it points at the bundle the CLI loaded, so `run` pins the same bundle; an existing one at another real path is refused without `--force` |
+
+A failed step stops the plan: the line names the step and git's message, no
+task is written, and refs already written stay in the graph's namespace,
+where a repeated `task new` updates them. On success the CLI prints the
+summary, the task's path, and the next command (`graphloom check <path>`).
+Exit codes: 0 written (or printed, with `--dry-run`), 1 a step failed, 2 a
+usage error, a refusal or an invalid plan.
+
+**Adoption.** A graph implements the hook when its task needs such
+preparation. The [PR-review graph](design-pr-review-graph.md#31-task) is the
+first. issue-fix may adopt it later (for example `graphloom task new
+issue-fix owner/repo#N`); that is not part of this design. The
+[`graphloom-run` skill](design-agent-skills.md#1-skills) uses `task new` for
+a graph whose bundle implements it. That skill change lands with the
+command, since the drift test requires every command and flag a skill names
+to be in `graphloom --help`.
+
+**Verification.**
+
+- `validateTaskPlan` unit tests: a step of unknown kind (`{ kind: "run",
+  argv }`) and an extra property are refused; `intoRef` and `to` outside
+  `refs/graphloom/<graph>/` (another graph's namespace, `refs/heads/main`,
+  a `..` segment, also after substitution) are refused; so are a refspec
+  with `:`, `+` or `*`, an unbound or forward `${name}`, a duplicate name, a
+  second or non-final `writeTask`, an absolute or escaping `path`, a
+  `graph` or `repo` field, and a `file://`, `ssh://` or credentialed URL;
+  each bound holds.
+- Real-Git CLI tests in a temporary repository fetching from a local
+  smart-HTTP fixture: a `fetch` runs no hook (a `reference-transaction` and a
+  `post-checkout` hook in the repository that would write a marker file
+  leave none) and ignores the global config (`HOME` pointing at a config
+  with a hook path); the working tree, index and `HEAD` are unchanged after
+  the plan; `resolve` binds the right ids and refuses a criss-cross history
+  with two merge bases; `updateRef` creates, accepts the same value, and
+  fails on a moved ref.
+- `--dry-run` runs only the read-only input commands (a stub `git` on
+  `PATH` records the argv), creates no ref and writes no file. An existing
+  `task.yaml` is refused without `--force` before any step runs, and
+  replaced with it. A failing step writes no task. The written task passes
+  `graphloom check`, and `run` pins the bundle through the `plugins/<graph>`
+  link.
+- A bundle without `prepareTask`, a hook that throws, times out or returns
+  a malformed plan, and a `{ refused }` reply each exit 2 with the message
+  and run nothing.
