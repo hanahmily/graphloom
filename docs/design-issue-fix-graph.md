@@ -1062,9 +1062,9 @@ review rounds are what discovery rounds bound.
 
 | Requirement | Validator | Job | Statement (defaults filled in) |
 |---|---|---|---|
-| `function-complexity` | `function-complexity` v1 | The first candidate job: the cheap job, or the only job of an untiered profile | In the candidate checkout, `gometrics` (Go) or `tsmetrics` (TypeScript) measured every function the change adds or modifies, test files included and generated files excluded; each has cyclomatic complexity below 10 and nesting depth at most 3, and the measurements recompute from the decision and nesting evidence against the observed files. |
-| `crap-score` | `crap-score` v1 | The quality job (below) | In the quality checkout, the touched packages' tests ran with coverage (`go test -coverprofile`, or c8 around the profile's test command), and every changed non-test function has CRAP(m) = comp(m)² × (1 − cov(m))³ + comp(m) of at most 30, recomputed from the coverage report. |
-| `mutants-killed` | `mutants-killed` v1 | The quality job | In the quality checkout, `gomutate` or StrykerJS applied the shared mutation operators to every changed non-test function within the profile's mutant caps, ran the touched packages' tests against each mutant, and no mutant survived, except a mutant the decision record claims equivalent and an independent verifier confirmed with quotes that match the change. |
+| `function-complexity` | `function-complexity` v1 | The first candidate job: the cheap job, or the only job of an untiered profile | In the candidate checkout, `gometrics` (Go) or `tsmetrics` (TypeScript) measured every function the change adds or modifies, test files included and generated files excluded. Each has cyclomatic complexity below 10 and nesting depth at most 3, except a [legacy function](#legacy-functions-no-worse) over a limit at the base, whose complexity and nesting are each at most its base value. The measurements recompute from the decision and nesting evidence against the observed files and the base lines. |
+| `crap-score` | `crap-score` v1 | The quality job (below) | In the quality job's Docker sandbox, the touched packages' tests ran with coverage (`go test -coverprofile`, or c8 around the profile's test command). Every changed non-test function has CRAP(m) = comp(m)² × (1 − cov(m))³ + comp(m) of at most 30, or, for a legacy function, at most its CRAP measured at the base, recomputed from the coverage reports. |
+| `mutants-killed` | `mutants-killed` v1 | The quality job | In the quality job's Docker sandbox, `gomutate` or StrykerJS applied the shared mutation operators to every changed non-test function within the profile's mutant caps and ran the touched packages' tests against each mutant. No mutant survived, except a legacy function's mutant whose id also survived at the base, or a mutant the decision record claims equivalent and an independent verifier confirmed with quotes that match the change. |
 
 A requirement exists only when its gate is enabled in the profile (below), as
 `final-checks` exists only with `final` commands. Adding one changes the
@@ -1080,20 +1080,28 @@ TypeScript. The order of a candidate's checks becomes:
 
 1. **The cheap job**, or the only job of an untiered profile. GREEN, the cheap
    commands, then `quality-diff` (`git diff -w --ignore-blank-lines
-   --unified=0 HEAD~1 HEAD`, reduced to `+++` and `@@` lines) and
-   `quality-metrics` (complexity and nesting; parsing only, so seconds). A
-   complexity failure is a cheap-tier failure. RED, the full tier and the
-   quality job are not paid for, as for any cheap failure today.
+   --unified=0 HEAD~1 HEAD`, reduced to `+++` and `@@` lines),
+   `quality-metrics` and `quality-base-lines`. `quality-metrics` measures
+   complexity and nesting on the head and the base trees; it only parses, so
+   it takes seconds. `quality-base-lines` is described under
+   [legacy functions](#legacy-functions-no-worse). A complexity failure is a
+   cheap-tier failure. RED, the full tier and the quality job are not paid
+   for, as for any cheap failure today.
 2. **RED, then the full job**, unchanged.
-3. **The quality job.** One read-only `command` job in a prepared checkout of
-   the candidate, running `quality-tested`. It runs coverage first, which also
-   gives the baseline test duration, then mutation. The graph dispatches it
-   only when every other Fix requirement passed on the same digest. Mutation
-   never runs against failing tests, and it never runs twice on one digest
-   except after a resume, as for every check.
-4. **The equivalence verification**, when the decision record claims
+3. **The base quality job**, only when the change modifies a legacy function
+   whose base CRAP and mutation results the run does not have yet
+   ([below](#legacy-functions-no-worse)). It runs once per run in practice,
+   since the base never changes.
+4. **The quality job.** One read-only `command` job in a prepared checkout of
+   the candidate, running `quality-tested` in the
+   [Docker sandbox](#tools-per-profile-and-confinement). It runs coverage
+   first, which also gives the baseline test duration, then mutation. The
+   graph dispatches it only when every other Fix requirement passed on the
+   same digest. Mutation never runs against failing tests, and it never runs
+   twice on one digest except after a resume, as for every check.
+5. **The equivalence verification**, when the decision record claims
    equivalent mutants ([below](#equivalent-mutants)).
-5. The [acceptance coverage](#acceptance-coverage) check, then Fix is
+6. The [acceptance coverage](#acceptance-coverage) check, then Fix is
    validated.
 
 Before the quality job, the graph observes the changed source files on the
@@ -1109,10 +1117,9 @@ The rules are the shared document's
 modified functions; closures as their own functions; generated files never
 measured; test files measured for complexity and nesting only. `-w
 --ignore-blank-lines` keeps a reformatted legacy function out of scope. A
-function is modified only when a non-whitespace line of it changed. A function
-that was already over a limit at the base and is modified must still meet the
-limit. Its base value is reported beside it, so the implementer knows it
-inherited the excess.
+function is modified only when a non-whitespace line of it changed. A
+modified function that was already over a limit at the base must not get
+worse ([legacy functions](#legacy-functions-no-worse)).
 
 Each tool reads the hunks and the head files and writes one record per changed
 function. It also writes a `functions` index, `[name, startLine, endLine]` for
@@ -1123,14 +1130,109 @@ the observed bytes. Profile `quality.generated` globs are added to the shared
 `// Code generated … DO NOT EDIT.` rule; for BanyanDB, `**/*.pb.go`,
 `**/*.pb.*.go` and `**/mocks/**`.
 
+### Legacy functions: no worse
+
+A **legacy function** is a modified function that exists at the base, matched
+by its qualified name, and is over the complexity or nesting limit there. It
+must not get worse. Every other changed function gets the strict limits: new
+functions, and modified functions that were within both limits at the base.
+For a legacy function:
+
+- complexity at most its base complexity, and nesting at most its base
+  nesting;
+- CRAP at most its base CRAP;
+- no new survivor: every mutant that survives at the head has an id that also
+  survived at the base. Ids leave lines out ([below](#mutation-time-budget)),
+  so an unchanged expression keeps its id. A head survivor whose id was
+  `not-run` or absent at the base counts as new.
+
+Its base and head values are reported side by side, in the correction and in
+the pull request.
+
+**Base complexity and nesting** come from the cheap job. `quality-metrics`
+also parses each changed file's base version (`git show HEAD~1:<path>` inside
+the checkout, whose parent commit is the base) and writes base records for the
+changed functions that exist there. It only parses, so it costs nothing worth
+capping. `quality-base-lines` is a graph-owned `git show` with fixed argv. It
+writes the base lines of every legacy function, each function's line range
+from its base record, to `GRAPHLOOM_REPORT_FILE`, at most 60,000 bytes. The
+validator recomputes base complexity and nesting against these bytes, as it
+does the head's against the observed files. A tool's base numbers are never
+taken on trust.
+
+**Base CRAP and mutation** are measured only for legacy functions.
+
+- *Why only those.* A function within complexity 10 and nesting 3 can be
+  covered and have its mutants killed at bounded cost, so it gets the strict
+  CRAP and mutation rules even when its base was untested. The functions
+  where a strict rule could force a large refactor are the complex ones.
+- *How.* They need the base's own tests run against the base code, so the
+  base quality job runs `quality-tested` in a prepared checkout of the base,
+  `{ from: "base", paths: [] }`. It uses the same Docker sandbox, tools, seed
+  and caps as the quality job, scoped to the legacy functions by their base
+  line ranges. Today a base checkout needs at least one path; the generic
+  change in Phase 2 lets an empty list mean the prepared base itself.
+- *Reuse.* The base never changes within a run, so a function's base result is
+  measured once and read back from evidence, history included, for every later
+  candidate. A later candidate that modifies another legacy function dispatches
+  the job again for that function only.
+- *Cost cap.* At most `quality.legacy.maxFunctions` legacy functions (default
+  5) are measured at the base per run, within one `mutation.timeBudgetMs`. A
+  change that modifies more is a stop with reason "incompatible task", naming
+  the functions and the cap; touching that much legacy code is not one issue.
+  `not-run` base mutants are not survivors, so they can only make the head
+  stricter.
+
 ### Tools, per profile, and confinement
 
-| Profile | Complexity, nesting | Coverage | Mutation | Where it runs |
+| Profile | Complexity, nesting (cheap job) | Coverage (quality jobs) | Mutation (quality jobs) | Sandbox image |
 |---|---|---|---|---|
-| `banyandb` | `gometrics` | `go test -coverprofile -covermode=set -coverpkg=<touched> <touched>` | `gomutate` (`go test -overlay`) | In the checkout, as the profile's `test-ci` runs |
-| `banyandb-ql` | same | same | same | Coverage and mutation inside the `bench-gates` container wrapper: same image rule, `--cpus=4 --memory=8g`, `GOPROXY=off`, read-only module cache. The tools are stdlib-only, so `go run` builds them offline there |
-| `canopy` | `tsmetrics` | c8 around `npm run -w <workspace> test` for each touched workspace | StrykerJS with the vitest runner | In the checkout |
-| `graphloom` | `tsmetrics` | c8 around `npx vitest run` in each touched workspace | StrykerJS with the vitest runner | In the checkout |
+| `banyandb` | `gometrics` | `go test -coverprofile -covermode=set -coverpkg=<touched> <touched>` | `gomutate` (`go test -overlay`) | `golang@sha256:…` matching `go.mod` |
+| `banyandb-ql` | same | same | same | same |
+| `canopy` | `tsmetrics` | c8 around `npm run -w <workspace> test` for each touched workspace | StrykerJS with the vitest runner | `node@sha256:…` matching `canopy/package.json` `engines.node` |
+| `graphloom` | `tsmetrics` | c8 around `npx vitest run` in each touched workspace | StrykerJS with the vitest runner | `node@sha256:…`, Node 22 |
+
+**Static measurement** (`quality-metrics`) only parses and runs no repository
+code. It stays in the cheap job, under that job's confinement, on every
+profile.
+
+**The quality job and the base quality job run in Docker on every profile.**
+They use the generic `docker` confinement kind
+(`JobSpec.confinement: { kind: "docker", … }`) that the pr-review design adds
+to the runner
+([pr-review §12.2](design-pr-review-graph.md#122-confinement),
+[§15](design-pr-review-graph.md#15-generic-platform-changes)). That design
+defines the sandbox and this one does not repeat it: no network, CPU, memory
+and process limits, a read-only root, a tmpfs `/tmp`, the operator's
+uid/gid, all capabilities dropped, `no-new-privileges`, an image pinned by
+digest and run with `--pull never`. Only the checkout and a per-run build
+cache are writable. The module and npm caches are read-only, with
+`GOFLAGS=-mod=readonly`. The plugin's tools are mounted read-only from the
+installed tree: `gometrics` and `gomutate` are stdlib-only, so `go run` builds
+them offline into the build cache, and StrykerJS and c8 sit in the plugin's
+`node_modules`.
+
+- **Limits are profile data:** `quality.sandbox`
+  `{ image, cpus, memory, pids, tmp }`. The image is pinned by digest. The
+  defaults are banyandb-ql's `bench-gates` limits: 4 CPUs, 8 GiB memory and
+  8 GiB memory-swap (no extra swap), plus pr-review's 512 processes and 1 GiB
+  `/tmp`. The wall clock is the job's own (below).
+- **banyandb-ql's `bench-gates` wrapper** moves onto the same confinement kind
+  in Phase 2, with its image and limits as data, so the profile keeps one
+  Docker setup.
+- **Readiness.** When a quality gate is enabled, the profile gets a
+  `quality-sandbox` environment check. It needs the `docker` CLI, a daemon
+  reachable by the operator's user, and the profile's image present locally by
+  digest. A missing image is pulled there, by digest, before any job runs,
+  and never during the run. `graphloom check` and `graphloom doctor --task`
+  report each of the three, as for pr-review.
+- **No unconfined fallback.** When Docker is missing, the daemon is
+  unreachable, the image is absent, or the container cannot start, the quality
+  job's report says `not run` with the reason. `crap-score` and
+  `mutants-killed` are then **inconclusive**, and the supervisor gets the
+  reason; a resume after the operator fixes Docker runs the job again.
+  Coverage and mutation never run outside the sandbox. `function-complexity`
+  is unaffected.
 
 Go uses the plugin's own `gometrics` and `gomutate` rather than gocyclo with
 gremlins or go-mutesting, as the shared
@@ -1147,10 +1249,16 @@ reasons settle it:
 `gomutate` gives each mutant a stable id (below) and never writes the
 checkout.
 
-StrykerJS is bundled at an exact version with `@stryker-mutator/vitest-runner`,
-and c8 likewise, as open-code-review is
-([bundled open-code-review](#bundled-open-code-review)). They are configured
-on the command line:
+StrykerJS is bundled as `@stryker-mutator/core` and
+`@stryker-mutator/vitest-runner`, both pinned exactly at 10.1.1, and c8 is
+pinned likewise, as open-code-review is
+([bundled open-code-review](#bundled-open-code-review)). The runner declares
+`vitest >=2.0.0` as its peer dependency, so it covers canopy's `server` and
+`web` workspaces, which use vitest ^5.0.0, and GraphLoom's vitest ^3. Phase 1
+runs it on a real canopy test. If it fails there in practice, the canopy
+profile ships with `mutation.enabled: false`, `graphloom check` notes that
+canopy's mutation gate is off, the pull request's Quality section says so,
+and an issue is filed. The tools are configured on the command line:
 
 - `mutate` takes one `file:start-end` range per changed function;
 - `mutator.excludedMutations` excludes every mutator except `EqualityOperator`
@@ -1159,10 +1267,9 @@ on the command line:
 - `tempDirName` and the reporters' paths are under the job's temporary
   directory, never in the checkout.
 
-A run that changes a checkout file fails the clean-run rule like any check. An
-environment check, `quality-tools`, resolves the bundled tools the way
-`scripts/ocr-path.sh` resolves ocr, with `GRAPHLOOM_STRYKER_BIN` and
-`GRAPHLOOM_C8_BIN` overrides. It exists only when a gate is enabled.
+A run that changes a checkout file fails the clean-run rule like any check. A
+second environment check, `quality-tools`, resolves the bundled tools the way
+`scripts/ocr-path.sh` resolves ocr. It exists only when a gate is enabled.
 
 Every tool's version is recorded in the report. The validators fail a report
 whose tool versions differ from the plugin's pins, so a host tool cannot
@@ -1217,20 +1324,33 @@ size.
 
 Validators judge the report only after recomputing it, and never correct it:
 
-- **`function-complexity`.** The shared §5 checks for complexity and nesting,
-  against the observed bytes. The scope check against `quality-diff`'s hunks
-  and the `functions` index. Then the thresholds.
-- **`crap-score`.** Coverage follows from the covered and total counts. The
-  validator computes CRAP itself, and a report's `crap` field that differs
-  beyond rounding fails it. A coverage of `unknown` cannot happen here,
-  because issue-fix always executes the change's tests. A report that says it
-  is not a pass.
-- **`mutants-killed`.** Survivors and `not-run` are counted from the listed
-  mutants. Each survivor's `original` must sit on its line in the observed
-  bytes, and its `mutated` must differ by one operator of its family. A
-  changed non-test function with no selected mutant needs `generated: 0`, and
-  the validator checks that the function's observed lines hold no operator of
-  any family.
+- **`function-complexity`.**
+  - The shared §5 checks for complexity and nesting: the head records against
+    the observed bytes, the base records against `quality-base-lines`.
+  - The scope check against `quality-diff`'s hunks and the `functions` index.
+  - The thresholds: a function whose recomputed base complexity is 10 or more,
+    or whose base nesting is over 3, is legacy and is held to its base values.
+    Every other function gets the strict limits.
+- **`crap-score`.**
+  - Coverage follows from the covered and total counts. The validator computes
+    CRAP itself, and a report's `crap` field that differs beyond rounding
+    fails it.
+  - A legacy function is compared with its base CRAP, recomputed the same way
+    from the base quality job's report. A legacy function with no base
+    measurement in evidence is inconclusive, not strict: the graph dispatches
+    the base job first, so that means a job is missing.
+  - A coverage of `unknown`, or a report that says `not run`, is not a pass.
+    Issue-fix always executes the change's tests, so either means the run went
+    wrong.
+- **`mutants-killed`.**
+  - Survivors and `not-run` are counted from the listed mutants.
+  - Each survivor's `original` must sit on its line in the observed bytes, and
+    its `mutated` must differ by one operator of its family.
+  - A changed non-test function with no selected mutant needs `generated: 0`,
+    and the validator checks that the function's observed lines hold no
+    operator of any family.
+  - A legacy function's head survivors are allowed only when their ids are
+    listed as survivors in its base report.
 
 No validator reads the implementer's decision record for a number. The
 implementer may run the same tools as `implementation.selfCheck` (the shipped
@@ -1248,10 +1368,14 @@ possible, that keeps behaviour and the tests green:
 
 ```text
 function-complexity: 2 changed functions exceed the limits.
-- pkg/query/plan.go schema.(*Planner).Build (lines 40-131): complexity 14 (limit: below 10),
-  nesting 4 (limit: 3; for at 52 > if at 57 > switch at 60 > if at 63).
-  At the base: complexity 11. Split it into small, intention-revealing functions
-  (pure where possible) so each is below 10 and nests at most 3; keep the behaviour.
+- pkg/query/plan.go schema.newPlanStep (lines 140-188, new): complexity 11 (limit: below 10),
+  nesting 4 (limit: 3; for at 152 > if at 157 > switch at 160 > if at 163).
+  Split it into small, intention-revealing functions (pure where possible) so
+  each is below 10 and nests at most 3; keep the behaviour.
+- pkg/query/plan.go schema.(*Planner).Build (lines 40-131, legacy: over the limits at the base):
+  complexity 16, base 14 (limit: no worse than the base, 14); nesting 4, base 4 (limit: 4).
+  The change added the decisions at 77 (if) and 77 (&&). Keep it at or below its base values,
+  for example by moving the new logic into a small function of its own.
 mutants-killed: 1 mutant survived.
 - M3fa29c01 pkg/query/plan.go:88 schema.clampLimit, relational: `n > max` -> `n <= max`.
   The tests do not fail when it is mutated. Strengthen the assertions
@@ -1275,11 +1399,12 @@ The loop has three bounds:
   across the run: implementer runs whose feedback carried a quality failure,
   counted from evidence, so a resume or a supervisor reentry cannot reset it.
   At the cap, the supervisor gets a summary such as "quality round 3 of 3:
-  schema.(*Planner).Build complexity 11 (was 14, then 12)". It may reenter,
+  schema.newPlanStep complexity 10 (was 12, then 11)". It may reenter,
   charged to corrections as always, or stop with that blocker.
 
 Cost per candidate that reaches it: one quality job and one observation, plus
-one verifier job when equivalence is claimed. Agent invocations are
+one verifier job when equivalence is claimed. A run that modifies a legacy
+function adds one base quality job, usually once per run. Agent invocations are
 unchanged, apart from the corrections themselves. Active time grows by up to
 the mutation time budget per candidate. The profiles' `budgets` stay as they
 are until a rehearsal and a live run measure them (Phase 4).
@@ -1341,14 +1466,19 @@ built from the reports of the delivered digest only:
 ```markdown
 ## Quality
 
-7 changed functions measured (gometrics, gomutate; complexity below 10, nesting at most 3, CRAP at most 30).
-- Max complexity 6 (`schema.(*Planner).Build`), max nesting 2, max CRAP 7.4.
-- Mutation: 58 mutants, 55 killed, 2 timed out, 1 equivalent (verified), 0 survived; score 100%.
+7 changed functions measured (gometrics, gomutate; complexity below 10, nesting at most 3, CRAP at most 30;
+legacy functions no worse than the base).
+- New and within-limit functions: max complexity 6 (`schema.newPlanStep`), max nesting 2, max CRAP 7.4.
+- Inherited, no worse: `schema.(*Planner).Build` complexity 14 → 13, nesting 4 → 4, CRAP 41.2 → 33.0,
+  surviving mutants 3 at the base, 2 now, none new.
+- Mutation: 58 mutants, 53 killed, 2 timed out, 2 inherited survivors, 1 equivalent (verified), 0 new survivors.
 - Equivalent: M7c41e0b2 `newIndex(entries, true)` -> `newIndex(entries, false)` in `schema.buildIndex`: the flag only presizes the map.
 ```
 
-A gate disabled in the profile is stated as "not gated". The section never
-shows a number the validators did not recompute.
+Inherited functions are marked as such, with their base and head values. A
+gate disabled in the profile is stated as "not gated", with the reason when
+the profile gives one (canopy's mutation gate, if Phase 1 disables it). The
+section never shows a number the validators did not recompute.
 
 ### Profile switches
 
@@ -1362,6 +1492,9 @@ An optional `quality` field; absent means no gates and the definition of
   "crap": { "enabled": true, "max": 30 },
   "mutation": { "enabled": true, "maxPerFunction": 20, "maxMutants": 120, "timeBudgetMs": 1800000,
                 "maxEquivalent": 3, "seed": "issue-fix" },
+  "legacy": { "maxFunctions": 5 },
+  "sandbox": { "image": "golang:1.25@sha256:…", "cpus": 4, "memory": "8g", "memorySwap": "8g",
+               "pids": 512, "tmp": "1g" },
   "maxCorrections": 3
 }
 ```
@@ -1370,8 +1503,9 @@ An optional `quality` field; absent means no gates and the definition of
 (`below` ≤ 10, `maxNesting` ≤ 3, `max` ≤ 30); a profile may tighten them,
 never loosen them. A gate may be disabled; its requirement then does not
 exist. `mutation.enabled` needs `crap.enabled`, because mutation needs the
-coverage run. All four shipped profiles enable all three gates with the
-defaults.
+coverage run. `sandbox.image` must carry a digest; `parseProfile` refuses a
+tag alone. All four shipped profiles enable all three gates with the defaults
+and their own image, unless Phase 1 disables canopy's mutation gate.
 
 ### Rehearsal scenarios
 
@@ -1395,48 +1529,74 @@ These are added to each profile's rehearsal, hand-written like
   The scripted verifier returns `equivalent` with matching quotes, the mutant
   is exempt, and the pull request lists it. A variant whose verifier returns
   `distinguishable` sends one correction and then passes.
+- **`legacy-no-worse`.** The fixture's base has a function of complexity 12,
+  with one surviving mutant at the base. The first pass adds a branch to it
+  (complexity 13). The cheap job fails `function-complexity` with "no worse
+  than the base, 12", and the base quality job does not run yet. The second
+  pass moves the new branch into a small new function, which gets the strict
+  limits. The base quality job then runs once, and the quality job finds the
+  legacy function's one survivor among its base survivors. The run reaches
+  delivery with the function marked inherited (complexity 12 → 12) in the
+  Quality section, and the base job is not run again for the review round
+  that follows.
 
 ### Phases and verification
 
-1. **Tools.** `gometrics` and `gomutate` (stdlib Go, under `tools/` in the
-   plugin), `tsmetrics`, and bundled c8 and StrykerJS. The shared document's
-   fixtures apply: gocyclo agreement on a corpus, recomputation, overlay
-   leaving the checkout unchanged, stable ids across unrelated edits, and the
-   deterministic sample.
-2. **Gates.** The profile `quality` field, the three requirements and
-   validators, the graph-owned commands, the observation step, the quality
-   job's ordering, feedback, convergence and the run cap. Qualification cases
-   for each validator:
+1. **Tools.**
+   - `gometrics` and `gomutate`: stdlib Go, under `tools/` in the plugin.
+   - `tsmetrics`.
+   - Bundled c8, and StrykerJS core and vitest runner pinned at 10.1.1.
+
+   The shared document's fixtures apply: gocyclo agreement on a corpus,
+   recomputation, overlay leaving the checkout unchanged, stable ids across
+   unrelated edits (including between a base and a head), and the
+   deterministic sample. StrykerJS runs on one real canopy test and one
+   GraphLoom test. If canopy fails, its mutation gate is disabled as described
+   under [tools](#tools-per-profile-and-confinement).
+2. **Sandbox and gates.**
+   - The generic `docker` confinement kind
+     ([pr-review §15](design-pr-review-graph.md#15-generic-platform-changes)),
+     shared with pr-review; whichever design lands first builds it.
+   - An empty `paths` list for a `{ from: "base" }` checkout, meaning the
+     prepared base. This is generic, in `packages/controller/src/inadmissible.ts`
+     and the checkout code.
+   - The `quality-sandbox` and `quality-tools` environment checks, with the
+     `check` and `doctor --task` reports, and banyandb-ql's `bench-gates` moved
+     onto the confinement kind.
+   - The profile `quality` field, the three requirements and validators, the
+     graph-owned commands, the observation step, the base quality job and its
+     reuse and cap, the quality job's ordering, feedback, convergence and the
+     run cap.
+
+   Qualification cases for each validator:
    - passes;
    - over a limit, by one;
+   - a legacy function no worse (passes) and one worse by one (fails);
+   - a legacy function without its base measurement (inconclusive);
+   - a head survivor whose id is not among the base survivors;
    - a report that does not recompute (complexity not 1 + decisions, a
-     decision line without its keyword, a survivor's text absent);
+     decision line without its keyword in the head or base lines, a survivor's
+     text absent);
    - an incomplete function set;
    - foreign tool versions;
-   - `not-run` (inconclusive);
+   - `not-run`, and a `not run` sandbox (both inconclusive);
    - an exempted mutant with stale quotes.
 
-   Graph tests: complexity fails in the cheap job and skips RED and the full
-   tier; the quality job waits for the other requirements; a non-shrinking
-   correction goes to the supervisor; the run cap counts across a resume.
+   Graph tests:
+   - complexity fails in the cheap job and skips RED and the full tier;
+   - the base job runs once and is reused across candidates and a resume;
+   - more legacy functions than the cap stop the run;
+   - the quality job waits for the other requirements;
+   - Docker unavailable goes to the supervisor and never runs unconfined;
+   - a non-shrinking correction goes to the supervisor;
+   - the run cap counts across a resume.
 3. **Equivalence and delivery.** `equivalentMutants`, its bounds, the
    `mutant-equivalence-v1` job, the reviewer's summary and the Quality
-   section.
-4. **Rehearse and measure.** The three scenarios on banyandb-ql and graphloom
-   (L1), then one live run per language. Record the quality job's time and the
-   correction count, and set each profile's `budgets` and `timeBudgetMs` from
-   them, in [budgets](budgets.md).
-
-### Open questions
-
-- **A modified function that was already over a limit at the base.** This
-  design makes the implementer bring it under the limit, which can pull a
-  large legacy refactor into a small fix. The alternative is "no worse than the
-  base" for such functions. The rule as adopted says the former.
-- **canopy's tool versions.** StrykerJS's vitest runner loads the
-  repository's own vitest. If canopy's vitest 5 is not supported by the
-  bundled runner version, should canopy run with the mutation gate disabled
-  until it is, or should the plugin pin a runner per vitest major?
+   section with inherited functions marked.
+4. **Rehearse and measure.** The four scenarios on banyandb-ql and graphloom
+   (L1), then one live run per language. Record the quality jobs' time and
+   the correction count, and set each profile's `budgets` and `timeBudgetMs`
+   from them, in [budgets](budgets.md).
 
 ## Migration from banyandb-fix
 
