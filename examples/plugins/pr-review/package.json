@@ -1,30 +1,43 @@
 {
   "name": "@graphloom/plugin-pr-review",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "private": true,
-  "description": "pr-review graph plugin: P1 static metrics tools and shared record library (graph code to follow)",
+  "description": "pr-review graph plugin: a neutral, cited change report on an incoming pull request (Fetch and Report; questions and answers to follow)",
   "license": "Apache-2.0",
   "type": "module",
   "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
     "./metrics": {
       "types": "./dist/metrics/index.d.ts",
       "import": "./dist/metrics/index.js",
       "default": "./dist/metrics/index.js"
     }
   },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "files": [
     "dist",
     "src",
     "test",
     "tools",
+    "scripts",
+    "profiles",
+    "graphloom.manifest.json",
+    "package-lock.json",
     "tsconfig.json"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.test.json",
-    "test": "tsc -p tsconfig.json && vitest run"
+    "test": "tsc -p tsconfig.json && vitest run",
+    "manifest": "node ./scripts/generate-manifest.mjs"
   },
   "dependencies": {
+    "@graphloom/sdk": "file:../../../packages/sdk",
     "typescript": "^5.8.2"
   },
   "devDependencies": {
@@ -33,5 +46,11 @@
   },
   "engines": {
     "node": ">=22"
+  },
+  "graphloom": {
+    "graphId": "pr-review",
+    "repairContract": "source-repairable",
+    "entry": "./dist/index.js",
+    "taskConfig": "required"
   }
 }

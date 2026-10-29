@@ -6,6 +6,24 @@ import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSy
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { REHEARSAL_SCENARIO_ENV } from "@graphloom/sdk";
+
+/**
+ * The directory a rehearsal's stand-ins write beside their scenario file (what
+ * they were asked, which reply they gave), when `env` names a scenario: that
+ * directory is the rehearsal's own, so a confined job's stand-in may write it
+ * (docs/design-graph-rehearsal.md §4.1). A real run names no scenario.
+ */
+export function rehearsalWritable(env: NodeJS.ProcessEnv): string | undefined {
+  const file = env[REHEARSAL_SCENARIO_ENV];
+  if (file === undefined || file === "") return undefined;
+  const dir = path.dirname(path.resolve(file));
+  try {
+    return lstatSync(dir).isDirectory() ? dir : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 /** Run-scoped locations a confined job's user-level state is redirected to, under its scratch directory. */
 const SCOPED_ENV_DIRS = {

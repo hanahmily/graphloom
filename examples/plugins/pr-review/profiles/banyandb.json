@@ -1,0 +1,124 @@
+{
+  "name": "banyandb",
+  "description": "Report profile for incoming pull requests to apache/skywalking-banyandb. The report.sections routing globs follow the repository's layout as the design maps it (design-pr-review-graph.md 6.2) and are TO CONFIRM against the repository before a live run; a glob that matches nothing only means less routing, the generic detectors still run.",
+  "project": "apache/skywalking-banyandb",
+  "issues": {
+    "owner": "apache",
+    "repo": "skywalking"
+  },
+  "environment": {
+    "checks": [
+      {
+        "id": "go",
+        "argv": [
+          "sh",
+          "-c",
+          "want=$(sed -n \"s/^go //p\" go.mod); have=$(go env GOVERSION) || exit 127; [ \"$have\" = \"go$want\" ] || { echo \"$have found; go.mod needs go$want\" >&2; exit 1; }"
+        ]
+      },
+      {
+        "id": "git",
+        "argv": [
+          "sh",
+          "-c",
+          "v=$(git --version | sed -n \"s/^git version \\([0-9]*\\)\\.\\([0-9]*\\).*/\\1 \\2/p\"); set -- $v; [ \"${1:-0}\" -gt 2 ] || { [ \"${1:-0}\" -eq 2 ] && [ \"${2:-0}\" -ge 41 ]; } || { echo \"git >= 2.41 required; found $(git --version)\" >&2; exit 1; }"
+        ]
+      },
+      {
+        "id": "codex",
+        "argv": [
+          "sh",
+          "-c",
+          "c=\"${GRAPHLOOM_CODEX_BIN:-codex}\"; h=\"${GRAPHLOOM_CODEX_HOME:-${CODEX_HOME:-}}\"; [ -z \"$h\" ] || export CODEX_HOME=\"$h\"; \"$c\" --version >/dev/null 2>&1 || { echo \"Codex ($c) is not installed\" >&2; exit 127; }; \"$c\" login status >/dev/null 2>&1 || { echo \"Codex is not logged in${h:+ for $h}: run $c login\" >&2; exit 1; }"
+        ],
+        "timeoutMs": 120000
+      },
+      {
+        "id": "claude",
+        "argv": [
+          "sh",
+          "-c",
+          "c=\"${GRAPHLOOM_CLAUDE_BIN:-claude}\"; d=\"${GRAPHLOOM_CLAUDE_CONFIG_DIR:-${CLAUDE_CONFIG_DIR:-}}\"; [ -z \"$d\" ] || export CLAUDE_CONFIG_DIR=\"$d\"; \"$c\" --version >/dev/null 2>&1 || { echo \"Claude Code ($c) is not installed\" >&2; exit 127; }; \"$c\" auth status >/dev/null 2>&1 || { echo \"Claude Code is not logged in${d:+ for $d}: run $c auth login\" >&2; exit 1; }"
+        ],
+        "timeoutMs": 120000
+      }
+    ]
+  },
+  "report": {
+    "sections": [
+      {
+        "id": "schema",
+        "meaning": "Proto and API definitions, the schema catalog, storage and on-disk format.",
+        "routing": ["api/proto/**", "banyand/metadata/schema/**", "pkg/encoding/**", "banyand/internal/storage/**"]
+      },
+      {
+        "id": "background",
+        "meaning": "Schedulers, flushers, compaction and merge, retention.",
+        "routing": ["**/*scheduler*.go", "**/*flusher*.go", "**/*merger*.go", "**/*retention*.go", "**/*compact*.go"]
+      },
+      {
+        "id": "config",
+        "meaning": "CLI flags (cobra/pflag), environment variables, config files.",
+        "detectors": [
+          {
+            "kind": "added-line",
+            "pattern": "Flags\\(\\)\\.\\w+(?:Var)?P?\\(\\s*(?:&[\\w.]+,\\s*)?\"([^\"]+)\"",
+            "files": ["**/*.go"],
+            "label": "command-line flag (pflag)"
+          }
+        ]
+      },
+      {
+        "id": "interfaces",
+        "meaning": "gRPC services and messages, the HTTP gateway, BydbQL syntax.",
+        "routing": ["api/proto/**/rpc.proto", "pkg/bydbql/**"]
+      },
+      {
+        "id": "external",
+        "meaning": "Go modules, the UI's npm packages, Docker images.",
+        "routing": ["go.mod", "ui/package.json", "**/Dockerfile", "docker/**"]
+      }
+    ]
+  },
+  "symbols": {
+    "packs": [
+      {
+        "language": "go",
+        "globs": ["**/*.go"],
+        "definitions": ["^func\\s+(?:\\([^)]*\\)\\s*)?(\\w+)", "^type\\s+(\\w+)"],
+        "testFiles": ["**/*_test.go"],
+        "testNames": ["^func\\s+(Test\\w+)"]
+      },
+      {
+        "language": "typescript",
+        "globs": ["**/*.ts", "**/*.tsx"],
+        "definitions": ["^export\\s+(?:async\\s+)?(?:function|class|interface|type|const)\\s+(\\w+)"],
+        "testFiles": ["**/*.test.ts", "**/*.spec.ts"]
+      }
+    ]
+  },
+  "questions": {
+    "excludeRoots": ["**/*.pb.go", "**/*.pb.validate.go"],
+    "similarity": 0.5,
+    "maxCandidates": 5
+  },
+  "metrics": {
+    "generated": ["**/*.pb.go", "**/*.pb.validate.go", "**/*_mock.go", "**/mock_*.go"]
+  },
+  "privateRepos": [],
+  "harnesses": {
+    "reporter": "claude-code",
+    "report-checker": "codex",
+    "questioner": "codex",
+    "answerer": "claude-code",
+    "answer-checker": "codex"
+  },
+  "supervisor": {
+    "harnesses": ["pi", "claude-code", "codex"]
+  },
+  "limits": {
+    "maxFiles": 150,
+    "maxPatchBytes": 1048576,
+    "maxNewSymbols": 200
+  }
+}
