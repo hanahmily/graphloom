@@ -56,15 +56,15 @@ export function resolveSandbox(profile: Pick<Profile, "metrics">, language: "go"
 }
 
 /**
- * Checks the image and pulls it by digest when it is missing: `graphloom sandbox pull` when it is on `PATH`, else
- * the docker CLI itself. It prints `ready` or `unavailable: <why>` and always exits 0, since an image that cannot
+ * Checks the image and pulls it by digest when it is missing: `graphloom sandbox pull` when a `graphloom` on `PATH`
+ * does it, else (no `graphloom`, one older than that command, or its pull failing) the docker CLI itself, whose own
+ * error is the reason when that fails too. It prints `ready` or `unavailable: <why>` and always exits 0, since an image that cannot
  * be had is a recorded reason, not a failed run. Run from `/`, so that nothing in the pull request's tree is read.
  */
 const PULL_SCRIPT = [
   'cd / || exit 0; img="$1"; out=""',
-  'if command -v graphloom >/dev/null 2>&1; then',
-  '  if out=$(graphloom sandbox pull "$img" 2>&1); then echo ready; exit 0; fi',
-  'elif ! command -v docker >/dev/null 2>&1; then',
+  'if command -v graphloom >/dev/null 2>&1 && graphloom sandbox pull "$img" >/dev/null 2>&1; then echo ready; exit 0; fi',
+  'if ! command -v docker >/dev/null 2>&1; then',
   '  out="the docker CLI is not installed"',
   'else',
   '  if docker image inspect "$img" >/dev/null 2>&1; then echo ready; exit 0; fi',

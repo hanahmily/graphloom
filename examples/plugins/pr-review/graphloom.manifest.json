@@ -16,7 +16,7 @@
     "vitest": "^3.0.9"
   },
   "digests": {
-    "sourceTree": "042a3d3ee8ec493d7627d14bf30a445706eb49483d07369fab8d899f0407af13",
+    "sourceTree": "bc7f836ddc01cf2f63d22a64adfdac7fa303cd64b618dc2fa3817808e3dd1df4",
     "packageLock": "ae5b886a88656f187132576e5f1579a047eec7e260abddf2994bb44d6815b49a",
     "files": {
       "package.json": "d2ecf50847d4ef5e66d59240dabdb523a3a58b04a5d089d956e9abe1dccc37ea",
@@ -39,7 +39,7 @@
       "src/claims.ts": "7b4f2ad5b74579986b986ea0f811b3522e8233f0fea9407bab9ce6584a6574ec",
       "src/commands.ts": "ba0370e065e1b19561785a76b122c62b463bbaad93755a57815ea1e0660b5681",
       "src/constants.ts": "55dba11f5828eb4fbe32523f217bd6b0f1ea60f85366cd362b00ec4fd1b03298",
-      "src/coverage.ts": "618418c97de82e298b246873c4a045179775c13e8a2d6301fa517ab4266a7e60",
+      "src/coverage.ts": "8557b495671d521b5a4d53292e209af5b65148aa85c6967ddce3a0b71570eea0",
       "src/detectors.ts": "f2a8b0926ee6c71ad5292efd8399380c16f9598495eda2fc17a8d54c79d221c6",
       "src/evidence.ts": "8ac679d44549e11f94b9b226b394faebfaee72cd9a68cd377132286bfcf60366",
       "src/flow.ts": "39b383da2fc721dbcf91b9e186a2a0afa89bf0bdb61cfa940b32752964c98e56",
@@ -86,7 +86,7 @@
       "src/validators.ts": "6cbb1552991e609cd9012c4c50bc591ac4a704f98a9d910a05ecd72a73890593",
       "src/write.ts": "4a9fe5f79867022252b62198416606cac69e7beffbd51abf7aa649d7b9e7156a",
       "test/claims.test.ts": "870972d0ae0723716b162dd736b008f08551d9b47aa6dd045e6a1d3d8f8dbc66",
-      "test/coverage.test.ts": "5701136c5c9e0a78a7c89474c0f2b128212e8b9a785c2d80ef115412abcfe9e8",
+      "test/coverage.test.ts": "740e57899efd5d43e56d5aac620c1d3c7860dc08872a244a29ea6184bb224678",
       "test/crap.test.ts": "e2494e348e47ee1a6e5022d6745ba02b186cd3d74c95711148b37ef1de002eea",
       "test/detectors.test.ts": "cb780849cbe65e86cc7a536c7b98e995192a6c4fb1c92bb5c7c0f7aaf715d7dc",
       "test/git.test.ts": "67fdb5892a0f040e869f31422b7e82daba8ae1c1a34a3257aaf64b89f2fa9ab3",

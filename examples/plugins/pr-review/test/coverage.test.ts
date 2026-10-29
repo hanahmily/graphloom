@@ -334,6 +334,46 @@ describe("coverageState", () => {
   });
 });
 
+describe("the image check Fetch runs", () => {
+  const script = sandboxProbeCommands(profile)[0]!.argv[2]!;
+  const IMAGE = profile.metrics.sandbox!.go!.image!;
+
+  /** The script with a PATH of stubs only: each named program is a shell script with the given body. */
+  function run(stubs: Record<string, string>): { stdout: string; status: number | null; calls: string } {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "gl-probe-"));
+    try {
+      for (const tool of ["tail", "cut"]) spawnSync("ln", ["-s", spawnSync("sh", ["-c", `command -v ${tool}`], { encoding: "utf8" }).stdout.trim(), path.join(dir, tool)]);
+      for (const [name, body] of Object.entries(stubs)) {
+        writeFileSync(path.join(dir, name), `#!/bin/sh\necho "${name} $*" >> ${dir}/calls\n${body}\n`, { mode: 0o755 });
+      }
+      const r = spawnSync("/bin/sh", ["-c", script, "sandbox-go", IMAGE], { encoding: "utf8", env: { PATH: dir } });
+      const calls = spawnSync("cat", [path.join(dir, "calls")], { encoding: "utf8" }).stdout;
+      return { stdout: r.stdout, status: r.status, calls };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it("is ready when graphloom sandbox pull does it, and asks docker nothing", () => {
+    expect(run({ graphloom: "exit 0" })).toMatchObject({ stdout: "ready\n", status: 0, calls: `graphloom sandbox pull ${IMAGE}\n` });
+  });
+
+  it("asks docker itself when the graphloom on PATH is older than the sandbox command, or its pull failed", () => {
+    const r = run({ graphloom: 'echo "usage: graphloom run ..." >&2; exit 2', docker: "exit 0" });
+    expect(r).toMatchObject({ stdout: "ready\n", status: 0 });
+    expect(r.calls).toBe(`graphloom sandbox pull ${IMAGE}\ndocker image inspect ${IMAGE}\n`);
+  });
+
+  it("pulls by digest when the image is missing, and says why when docker cannot", () => {
+    expect(run({ docker: 'case "$1" in image) exit 1;; pull) exit 0;; esac' })).toMatchObject({ stdout: "ready\n" });
+    expect(run({ docker: 'case "$1" in image) exit 1;; pull) echo "Error response from daemon: manifest unknown" >&2; exit 1;; esac' })).toMatchObject({ stdout: "unavailable: Error response from daemon: manifest unknown\n", status: 0 });
+  });
+
+  it("says the docker CLI is missing, and still exits 0", () => {
+    expect(run({})).toMatchObject({ stdout: "unavailable: the docker CLI is not installed\n", status: 0 });
+  });
+});
+
 describe("the sandbox environment checks", () => {
   it("report the image state without pulling, and never fail", () => {
     const checks = sandboxEnvironmentChecks(profile);
