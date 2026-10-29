@@ -1232,3 +1232,20 @@ Each is checked in its phase. A failure changes only the named fallback.
    writes only that copy. If Codex checks more than the id, the fork is
    refused with the reason until the copy is fixed; the recorded rollout is
    never resumed in its place. (`graphloom session open`)
+7. **Capturing an interactive fork.** After an interactive `claude --resume
+   <uuid> --fork-session` exits, the new session's transcript is the single
+   file `<fork uuid>.jsonl` (plus its side directory) in the same project
+   directory, holding the parent's turns and the new ones; after `codex
+   resume <new thread>`, the copied rollout holds both. If Claude Code
+   writes the fork elsewhere or only the new turns, the capture records the
+   parent's saved copy followed by the new file, and a later fork restores
+   both. (`graphloom session open`)
+8. **Non-interactive forks for a job.** `claude -p --resume <uuid>
+   --fork-session --output-format stream-json` writes the job's turns under
+   a new session id and leaves the restored transcript unchanged; `codex
+   exec resume <new thread>` on a rollout copied under a new thread id does
+   the same. Either way GraphLoom's saved copy is never the file resumed:
+   the executor restores a scratch copy into the agent's store first, as
+   `session open` does, so a CLI that wrote the restored file would change
+   only that copy. (`JobSpec.forkFrom`,
+   [core §15](design-typescript-core.md#15-opening-a-recorded-agent-session))
