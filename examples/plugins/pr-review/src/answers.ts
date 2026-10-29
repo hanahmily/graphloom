@@ -32,7 +32,10 @@ export const MAX_ANSWER_CORRECTIONS = 2;
 export const MAX_ANSWER_CHECK_RETRIES = 2;
 export const MAX_ANSWER_CHARS = 2_000;
 const MAX_LIST = 12;
-const CITES_PER_COMMAND = 15;
+/** Citations one verification command carries: four arguments each beside five fixed ones, within the executor's 64. */
+const CITES_PER_COMMAND = 14;
+const MAX_SPLITS = 8;
+const MAX_PATH_CHARS = 500;
 
 export const STATUSES = ["answered", "partially answered", "needs author"] as const;
 export type AnswerStatus = (typeof STATUSES)[number];
@@ -162,7 +165,11 @@ const isRelative = (p: string): boolean => p !== "" && !p.startsWith("/") && !p.
 /** The function a question is about: its file, language, name, directory and lines. */
 export function functionOf(q: Question, ctx: Pick<AnswerContext, "groundwork" | "view">): { path: string; language: string; dir: string; name: string; start: number; end: number; record?: MetricsRecord; symbol?: SymbolDef } | undefined {
   const sym = q.symbol !== undefined ? ctx.groundwork.symbols.find((s) => s.id === q.symbol) : undefined;
-  const record = ctx.view.records.find((r) => (sym !== undefined && r.path === sym.path && (r.function === sym.qualified || (r.startLine >= sym.startLine && r.endLine <= sym.endLine))) || (q.fn !== undefined && r.function === q.fn));
+  // A symbol's own record: its qualified name, else its own lines (never a closure inside it).
+  const record =
+    sym !== undefined
+      ? (ctx.view.records.find((r) => r.path === sym.path && r.function === sym.qualified) ?? ctx.view.records.find((r) => r.path === sym.path && r.startLine === sym.startLine && r.endLine === sym.endLine))
+      : ctx.view.records.find((r) => q.fn !== undefined && r.function === q.fn);
   if (sym !== undefined) return { path: sym.path, language: sym.language, dir: sym.dir, name: sym.name, start: sym.startLine, end: sym.endLine, ...(record !== undefined ? { record } : {}), symbol: sym };
   if (record !== undefined) {
     const dir = record.path.includes("/") ? record.path.slice(0, record.path.lastIndexOf("/")) : ".";
@@ -213,6 +220,7 @@ function answerProblemsOf(a: Answer, q: Question, ctx: AnswerContext, dirs: read
       if (!c.path.startsWith("/") || c.path.includes("..") || /[\n\u0000|]/.test(c.path) || !dirs.some((d) => c.path.startsWith(`${d}/`))) out.push(`${where}: a dependency citation must be an absolute path inside one of the inventory's source directories${dirs.length === 0 ? " (none is available here)" : ""}`);
     } else if (!isRelative(c.path)) out.push(`${where}: a ${c.tree} citation is a repository-relative path`);
     if (c.quote.length > 400) out.push(`${where}: the quote is longer than 400 characters`);
+    if (c.path.length > MAX_PATH_CHARS) out.push(`${where}: the path is longer than ${MAX_PATH_CHARS} characters`);
   });
   for (const inv of a.inventory) if (!declared.has(`${inv.name}@${inv.version}`)) out.push(`${at}: inventory entry ${inv.name}@${inv.version} is not in the dependency inventory`);
   for (const m of a.metrics) {
@@ -238,8 +246,9 @@ function answerProblemsOf(a: Answer, q: Question, ctx: AnswerContext, dirs: read
       if (a.none_found) {
         const need = q.type === "reuse-library" ? 1 : 3;
         if (baseSearches < need) out.push(`${at}: a "none found" answer lists the whole-repository searches that found nothing (${need} or more with scope base: names and variants, signatures, key tokens), not ${baseSearches}`);
-        if (q.type === "reuse-library" && a.status === "answered" && ctx.groundwork.inventory.dependencies.some((d) => d.source === undefined)) {
-          out.push(`${at}: some declared dependency has no source available here, so a "none found" library answer is "partially answered", not "answered"`);
+        const inv = ctx.groundwork.inventory;
+        if (q.type === "reuse-library" && a.status === "answered" && (inv.dependencies.some((d) => d.source === undefined) || inv.truncated.length > 0)) {
+          out.push(`${at}: ${inv.truncated.length > 0 ? "the dependency inventory is incomplete" : "some declared dependency has no source available here"}, so a "none found" library answer is "partially answered", not "answered"`);
         }
       } else if (a.citations.length === 0 && a.status !== "needs author") out.push(`${at}: an answer that names an existing equivalent, library or duplicate cites it`);
       break;
@@ -280,11 +289,12 @@ function splitProblems(p: Proposal, at: string, fn: ReturnType<typeof functionOf
   const out: string[] = [];
   if (fn === undefined) return [`${at}: the function to split is not known`];
   if (p.splits.length < 2) out.push(`${at}: a split proposal names at least two functions`);
+  if (p.splits.length > MAX_SPLITS) out.push(`${at}: a split proposal names at most ${MAX_SPLITS} functions`);
   const names = new Set<string>();
   const existing = new Set(ctx.groundwork.symbols.filter((s) => s.dir === fn.dir && s.language === fn.language).map((s) => s.name));
   for (const s of p.splits) {
     const where = `${at} split ${JSON.stringify(s.name)}`;
-    if (!/^[A-Za-z_$][\w$]*$/.test(s.name)) out.push(`${where}: not a function name`);
+    if (!/^[A-Za-z_$][\w$]*$/.test(s.name) || s.name.length > 100) out.push(`${where}: not a function name`);
     if (names.has(s.name)) out.push(`${where}: named twice`);
     names.add(s.name);
     if (s.name === fn.name || existing.has(s.name)) out.push(`${where}: the name already exists in the package ${fn.dir}`);

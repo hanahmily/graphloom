@@ -208,6 +208,7 @@ export function groundworkState(o: GroundworkOptions): GroundworkState {
     sites,
     sources: sourceRuns.flatMap((c) => parseSources(textOf(o.evidence, c.id).text)),
     manifestsComplete: manifests.complete,
+    manifestCuts: manifests.cuts,
   });
   const testMap = new Map(symbols.map((s) => [s.id, mapTests(s, symbols, o.files, packs)] as const));
   return { state: "ready", groundwork: { base: o.base, symbols, searches, candidates, prSimilar, inventory, testMap, notes }, refs };

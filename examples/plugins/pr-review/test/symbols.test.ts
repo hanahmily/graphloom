@@ -8,6 +8,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { GO_PACK, TS_PACK, effectivePacks } from "../src/packs.js";
 import { parsePatch } from "../src/patch.js";
+import { symbolOfRecord } from "../src/questions.js";
 import { changedSymbols, declarationEnd, extractSymbols, goReceiver, maskCode, parseBaseDefinitions, touches, changedHeadLines } from "../src/symbols.js";
 
 const GO = `package store
@@ -172,8 +173,24 @@ describe("symbol extraction: TypeScript", () => {
     expect(syms.find((s) => s.name === "Parser")!.endLine).toBe(34);
   });
 
+  it("ends a function at its body, not at a braced type in its header", () => {
+    const text = "export function f(a: number): { value: number; tags: { x: string } } {\n  const v = a;\n  return { value: v, tags: { x: \"1\" } };\n}\n\nexport type U = { a: 1 } | { b: 2 };\n\nexport const g = (): Array<{ a: number }> => {\n  return [];\n};\n";
+    const found = extractSymbols("src/h.ts", text, TS_PACK);
+    expect(found.map((s) => [s.name, s.startLine, s.endLine])).toEqual([["f", 1, 4], ["U", 6, 6], ["g", 8, 10]]);
+  });
+
   it("does not take a property or a control statement for a member", () => {
     expect(syms.some((s) => s.name === "cache" || s.name === "if")).toBe(false);
+  });
+});
+
+describe("a record and its symbol", () => {
+  it("join by qualified name or by the same lines, and a closure inside an extracted function keeps its own identity", () => {
+    const text = "package p\n\nfunc Outer() {\n\tf := func() {\n\t\tif x {\n\t\t}\n\t}\n\tf()\n}\n";
+    const syms = extractSymbols("p/o.go", text, GO_PACK).map((s, n) => ({ ...s, id: `S${n + 1}`, change: "new" as const }));
+    expect(symbolOfRecord({ path: "p/o.go", function: "p.Outer", startLine: 3, endLine: 9 }, syms)?.id).toBe("S1");
+    expect(symbolOfRecord({ path: "p/o.go", function: "p.Outer.func1", startLine: 4, endLine: 7 }, syms)).toBeUndefined();
+    expect(symbolOfRecord({ path: "p/o.go", function: "p.Renamed", startLine: 3, endLine: 9 }, syms)?.id).toBe("S1");
   });
 });
 

@@ -422,6 +422,8 @@ export function parseProfile(config: unknown): Profile {
     const q = p.questions as Record<string, unknown>;
     onlyKeys(q, "questions", ["excludeRoots", "similarity", "maxCandidates"]);
     need(q.excludeRoots === undefined || isStrings(q.excludeRoots), "questions.excludeRoots must be a list of paths");
+    // They travel in one argument of each search command, which a command allows 4,096 characters.
+    need(q.excludeRoots === undefined || (q.excludeRoots as string[]).join("\n").length <= 3_000, "questions.excludeRoots is too long: at most 3,000 characters in all");
     need(q.similarity === undefined || (typeof q.similarity === "number" && q.similarity > 0 && q.similarity <= 1), "questions.similarity must be a number above 0 and at most 1");
     need(q.maxCandidates === undefined || isCount(q.maxCandidates), "questions.maxCandidates must be a positive integer");
     questions = { excludeRoots: (q.excludeRoots as string[] | undefined) ?? [], similarity: (q.similarity as number | undefined) ?? 0.5, maxCandidates: (q.maxCandidates as number | undefined) ?? 5 };

@@ -120,10 +120,13 @@ export function itemOfSymbol(sym: Pick<SymbolDef, "path" | "startLine" | "endLin
   return (citing.find((i) => overlap(i) && change(i)) ?? citing.find(overlap) ?? citing.find(change) ?? citing[0])?.id;
 }
 
-/** The symbol a measurement record is about: the same qualified name in the same file, else the one whose lines contain it. */
+/**
+ * The symbol a measurement record is about: the same qualified name in the same file, or the same lines. A closure
+ * measured inside an extracted function is not that function and keeps its own identity.
+ */
 export function symbolOfRecord(r: Pick<MetricsRecord, "path" | "function" | "startLine" | "endLine">, symbols: readonly SymbolDef[]): SymbolDef | undefined {
   const same = symbols.filter((s) => s.path === r.path);
-  return same.find((s) => s.qualified === r.function) ?? same.find((s) => s.startLine <= r.startLine && s.endLine >= r.endLine && (s.kind === "func" || s.kind === "method" || s.kind === "function" || s.kind === "member" || s.kind === "constructor"));
+  return same.find((s) => s.qualified === r.function) ?? same.find((s) => s.startLine === r.startLine && s.endLine === r.endLine);
 }
 
 /** The first mutant a record's mutation result says survived, as `path:line from → to`, when a mutation result exists (it arrives with a later version). */

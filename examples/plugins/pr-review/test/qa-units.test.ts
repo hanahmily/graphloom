@@ -3,7 +3,7 @@
 
 import { describe, expect, it } from "vitest";
 import { evidencePull } from "../src/analysis.js";
-import { answerProblems, readAnswerCheck, type Answer } from "../src/answers.js";
+import { answerProblems, readAnswerCheck, verificationPlan, type Answer } from "../src/answers.js";
 import { GO_PACK, TS_PACK } from "../src/packs.js";
 import { nameVariants, nameWords, planFor, rareTokens, signaturePattern, signatureTypes, tokenPopulation, excludeSpecs } from "../src/queries.js";
 import { answerContext, qaContext, questionSet, questionerFlow, type QaContext } from "../src/qaflow.js";
@@ -339,6 +339,12 @@ describe("the answer rules (design 7.3 checks)", () => {
     expect(problems(answer("reuse-library", { none_found: true, status: "partially answered" }))).toEqual([]);
   });
 
+  it("makes a library answer partial while the inventory is incomplete, even when every source is available", () => {
+    const cut = { ...actx, groundwork: { ...actx.groundwork, inventory: { dependencies: [], packages: [], truncated: ["dependency manifests cut: 3 more manifests"] } } };
+    const a = answer("reuse-library", { none_found: true });
+    expect(answerProblems([a], cut, new Set([a.question])).join("|")).toMatch(/the dependency inventory is incomplete, so a "none found" library answer is "partially answered"/);
+  });
+
   it("makes an answer name an equivalent it claims, with a citation, and an answer carry evidence", () => {
     expect(problems(answer("existing-equivalent", { citations: [], searches: [] })).join("|")).toMatch(/no evidence/);
     expect(problems(answer("existing-equivalent", { searches: [{ pattern: "p", scope: "base", hits: 2 }] })).join("|")).toMatch(/cites it/);
@@ -357,6 +363,19 @@ describe("the answer rules (design 7.3 checks)", () => {
     expect(answerProblems(all.slice(1), actx)).toContain(`${set.questions[0]!.id} has no answer`);
     expect(answerProblems([...all, all[0]!], actx)).toContain(`${all[0]!.question} is answered twice`);
     expect(answerProblems([{ ...all[0]!, question: "Q99" }, ...all.slice(1)], actx).join("|")).toMatch(/"Q99" is not a question id.*has no answer/);
+  });
+});
+
+describe("the verification commands fit the command executor's input contract", () => {
+  it("carries at most 14 citations a command: 61 arguments, within the executor's 64, however many are cited", () => {
+    const { ctx } = contextOf("complex-function");
+    const actx = answerContext(ctx, questionSet(ctx, undefined).questions);
+    const cites = Array.from({ length: 40 }, (_, i) => ({ path: `pkg/p${i}.go`, tree: "base" as const, start: 1, end: 2, quote: "" }));
+    const a = { question: "Q1", answer: "x", status: "answered", none_found: false, citations: cites, searches: [], inventory: [], metrics: [], proposal: { kind: "none", splits: [], testFile: "", testName: "", cases: [], assertion: "" } } as Answer;
+    const plan = verificationPlan([a], actx, "b".repeat(40));
+    expect(plan.map((p) => p.command.argv.length)).toEqual([61, 61, 53]);
+    expect(plan.flatMap((p) => p.entries)).toHaveLength(40);
+    for (const p of plan) for (const arg of p.command.argv) expect(arg.length).toBeLessThanOrEqual(4096);
   });
 });
 

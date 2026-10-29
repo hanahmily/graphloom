@@ -46,14 +46,38 @@ export interface Inventory {
 const MANIFEST_MARK = "===== graphloom manifest ";
 const END = "# end";
 
+const CUT = "# cut: ";
+
+/** Root manifests first (fewest path segments), then the rest, at most MAX_MANIFESTS; a cut is said, never silent. */
 const MANIFESTS =
-  String.raw`set -eu; base="$1"; { git -c core.hooksPath=/dev/null ls-tree -r --name-only "$base" | grep -E '(^|/)(go\.mod|package\.json)$' | grep -v node_modules | head -n ` +
+  String.raw`set -eu; base="$1"
+{ list=$(git -c core.hooksPath=/dev/null ls-tree -r --name-only "$base" | grep -E '(^|/)(go\.mod|package\.json)$' | grep -v node_modules | awk -F/ '{ print NF, $0 }' | sort -n -s | cut -d' ' -f2- || true)
+total=$(printf '%s\n' "$list" | grep -c . || true)
+printf '%s\n' "$list" | head -n ` +
   String(MAX_MANIFESTS) +
-  String.raw` | while IFS= read -r f; do printf '%s%s\n' '` +
+  String.raw` | while IFS= read -r f; do
+  [ -n "$f" ] || continue
+  printf '%s%s\n' '` +
   MANIFEST_MARK +
-  String.raw`' "$f"; git -c core.hooksPath=/dev/null show "$base:$f" | head -c ` +
+  String.raw`' "$f"
+  n=$(git -c core.hooksPath=/dev/null show "$base:$f" | wc -c)
+  git -c core.hooksPath=/dev/null show "$base:$f" | head -c ` +
   String(MANIFEST_BYTES) +
-  String.raw`; printf '\n'; done; echo '` +
+  String.raw`; printf '\n'
+  if [ "$n" -gt ` +
+  String(MANIFEST_BYTES) +
+  String.raw` ]; then echo "` +
+  CUT +
+  String.raw`$f"; fi
+done
+if [ "$total" -gt ` +
+  String(MAX_MANIFESTS) +
+  String.raw` ]; then echo "` +
+  CUT +
+  String.raw`$((total - ` +
+  String(MAX_MANIFESTS) +
+  String.raw`)) more manifests"; fi
+echo '` +
   END +
   String.raw`'; } > "$GRAPHLOOM_REPORT_FILE"`;
 
@@ -72,8 +96,9 @@ export function parseTree(text: string): { dirs: string[]; complete: boolean } {
   return { dirs: lines.filter((l) => l !== END), complete };
 }
 
-export function parseManifests(text: string): { files: Array<{ path: string; text: string }>; complete: boolean } {
+export function parseManifests(text: string): { files: Array<{ path: string; text: string }>; complete: boolean; cuts: string[] } {
   const files: Array<{ path: string; text: string }> = [];
+  const cuts: string[] = [];
   let complete = false;
   let current: { path: string; lines: string[] } | undefined;
   const flush = (): void => {
@@ -87,10 +112,11 @@ export function parseManifests(text: string): { files: Array<{ path: string; tex
     } else if (line === END) {
       flush();
       complete = true;
-    } else current?.lines.push(line);
+    } else if (line.startsWith(CUT)) cuts.push(line.slice(CUT.length));
+    else current?.lines.push(line);
   }
   flush();
-  return { files, complete };
+  return { files, complete, cuts };
 }
 
 /** The requires of a go.mod: both forms, `// indirect` marked. */
@@ -241,10 +267,13 @@ export function buildInventory(input: {
   sites: ReadonlyMap<string, string>;
   sources: ReturnType<typeof parseSources>;
   manifestsComplete: boolean;
+  /** What the manifests command said it cut: a manifest past the byte limit, manifests past the count. */
+  manifestCuts?: readonly string[];
 }): Inventory {
   const truncated: string[] = [];
   if (!input.tree.complete) truncated.push("the list of internal packages was cut");
   if (!input.manifestsComplete) truncated.push("the dependency manifests were cut");
+  for (const c of input.manifestCuts ?? []) truncated.push(`dependency manifests cut: ${c}`);
   let deps = declaredDependencies(input.manifests);
   if (deps.length > MAX_INVENTORY) {
     truncated.push(`${deps.length - MAX_INVENTORY} of ${deps.length} dependencies are not listed`);

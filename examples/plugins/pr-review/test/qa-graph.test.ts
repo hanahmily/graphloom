@@ -53,6 +53,23 @@ describe("the assignments name every field the stand-in agents reply with (rehea
   }
 });
 
+describe("every command job fits the command executor's input contract", () => {
+  for (const name of Object.keys(rehearsal(BANYANDB).scenarios)) {
+    it(name, () => {
+      const sim = simulate({ scenarioName: name });
+      for (const job of sim.jobs.filter((j) => j.kind === "command" && j.executor === undefined)) {
+        const input = job.input as { commands: Array<{ id: string; argv: string[] }> };
+        expect(input.commands.length, job.instruction).toBeLessThanOrEqual(16);
+        for (const c of input.commands) {
+          expect(c.argv.length, c.id).toBeLessThanOrEqual(64);
+          for (const arg of c.argv) expect(arg.length, `${c.id} argument`).toBeLessThanOrEqual(4096);
+        }
+        expect(Buffer.byteLength(JSON.stringify(input), "utf8")).toBeLessThanOrEqual(256_000);
+      }
+    });
+  }
+});
+
 describe("answer-finds-existing-helper", () => {
   const sim = simulate({ scenarioName: "answer-finds-existing-helper" });
 

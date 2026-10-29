@@ -182,6 +182,29 @@ describe("the dependency inventory commands (design 7.2 item 3)", () => {
     ]);
   });
 
+  it("reads the root manifests first, and says when the count or the size cut the rest", () => {
+    const wide = tmp("wide");
+    git(wide, ["init", "-q", "-b", "main"]);
+    const files: Record<string, string> = { "go.mod": "module x\n\ngo 1.24\n\nrequire github.com/a/b v1.0.0\n", "package.json": JSON.stringify({ dependencies: { root: "1" } }) };
+    for (let i = 0; i < 14; i += 1) files[`a/b${String(i).padStart(2, "0")}/c/package.json`] = JSON.stringify({ dependencies: { [`deep${i}`]: "1" } });
+    files["big/package.json"] = JSON.stringify({ description: "x".repeat(41_000), dependencies: { huge: "1" } });
+    write(wide, files);
+    const b = commit(wide, "base");
+    const r = parseManifests(run(wide, manifestsCommand(b)).report);
+    expect(r.files.map((f) => f.path).slice(0, 2).sort()).toEqual(["go.mod", "package.json"]);
+    expect(r.files).toHaveLength(12);
+    expect(r.cuts).toEqual(["big/package.json", "5 more manifests"]);
+    expect(r.complete).toBe(true);
+    const inv = buildInventory({ manifests: r.files, tree: { dirs: [], complete: true }, sites: new Map(), sources: [], manifestsComplete: r.complete, manifestCuts: r.cuts });
+    expect(inv.truncated).toEqual(["dependency manifests cut: big/package.json", "dependency manifests cut: 5 more manifests"]);
+    expect(inv.dependencies.map((d) => d.name)).toEqual(expect.arrayContaining(["github.com/a/b", "root"]));
+    // One manifest past the byte limit is named too.
+    const one = tmp("one");
+    git(one, ["init", "-q", "-b", "main"]);
+    write(one, { "package.json": JSON.stringify({ description: "x".repeat(41_000), dependencies: { huge: "1" } }) });
+    expect(parseManifests(run(one, manifestsCommand(commit(one, "base"))).report).cuts).toEqual(["package.json"]);
+  });
+
   it("finds a base call site for a dependency, and none for one the base does not use", () => {
     const deps = declaredDependencies(parseManifests(run(dir, manifestsCommand(base)).report).files);
     const sites = new Map<string, string>();

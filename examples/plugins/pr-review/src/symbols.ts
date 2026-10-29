@@ -89,7 +89,8 @@ export function declarationEnd(maskedLines: readonly string[], startLine: number
   let sawBrace = false;
   for (let li = startLine - 1; li < maskedLines.length; li += 1) {
     const line = maskedLines[li]!;
-    for (const c of line) {
+    for (let ci = 0; ci < line.length; ci += 1) {
+      const c = line[ci]!;
       if (c === "(" || c === "[") paren += 1;
       else if (c === ")" || c === "]") paren -= 1;
       else if (c === "{") {
@@ -97,7 +98,14 @@ export function declarationEnd(maskedLines: readonly string[], startLine: number
         sawBrace = true;
       } else if (c === "}") {
         brace -= 1;
-        if (brace === 0 && sawBrace && paren <= 0) return li + 1;
+        if (brace === 0 && sawBrace && paren <= 0) {
+          // A block that a `{`, `=>`, `|`, `&` or `>` follows is a type in the declaration's header (`): { a: number } {`), not its body.
+          if (/^\s*(\{|=>|\||&|>)/.test(line.slice(ci + 1))) {
+            sawBrace = false;
+            continue;
+          }
+          return li + 1;
+        }
         if (brace < 0) return undefined;
       } else if (c === ";" && paren <= 0 && brace === 0) return li + 1;
     }
@@ -140,7 +148,7 @@ const dirOf = (p: string): string => (p.includes("/") ? p.slice(0, p.lastIndexOf
 
 /** The TypeScript module path of a file, as the metrics tool names it: the path without its extension. */
 export function modulePath(path: string): string {
-  return path.replace(/\.[cm]?[jt]sx?$/, "");
+  return path.replace(/\.(d\.)?[cm]?[jt]sx?$/, "");
 }
 
 /** The Go receiver text `r *T[K, V]` as the metrics tool prints it: `(*T[...])`. */
