@@ -1208,19 +1208,28 @@ the stage's latest. Then:
    a new session and the recorded one never changes:
    - **Claude Code:** write the transcript and its side files into
      `<configDir>/projects/<project>/` as `openClaudeSession` does, then run
-     `claude --resume <uuid> --fork-session` interactively.
+     `claude --resume <uuid> --fork-session --session-id <new uuid>`
+     interactively. GraphLoom picks the fork's id before launch.
    - **Codex:** copy the rollout to `sessions/<today>/rollout-<time>-<new
      thread>.jsonl` under the Codex home, with the thread id in its
      `session_meta` record replaced by a fresh one, then run
      `codex resume <new thread>` interactively. The recorded thread's own
      rollout is never written.
+
+   Either command may be prefixed by the operator's session launcher
+   (below).
 4. **Hand over the terminal.** The agent inherits stdin, stdout, stderr and
    the controlling TTY. GraphLoom prints the fork's id and waits. Without a
    TTY on stdin it refuses.
 5. **Capture.** When the agent exits, whatever its exit code, GraphLoom
-   reads the fork's transcript from the agent's store (Claude Code's
-   `<fork uuid>.jsonl` and side directory, Codex's copied rollout). A fork
-   with no operator turn is discarded and nothing is recorded. Otherwise it
+   reads the fork's transcript from the agent's store by the id it chose
+   before launch (Claude Code's `<new uuid>.jsonl` and side directory under
+   the project directory, Codex's copied rollout), never from the agent's
+   or a launcher's output. If no transcript exists under that id, for
+   example because a launcher dropped `--session-id` or pointed the agent at
+   another store, nothing is recorded and the message says why; GraphLoom
+   never guesses at another session. A fork with no operator turn is
+   discarded and nothing is recorded. Otherwise it
    takes the run lock, only now and only for the write, and:
    - copies the transcript into the run's session directory
      (`agent-sessions/operator/<fork ref>`). Like a job's saved copy, it is
@@ -1236,6 +1245,49 @@ the stage's latest. Then:
    The parent's saved copy is left byte-identical. If the run finished while
    the agent ran, the capture records nothing and says so; the fork stays in
    the agent's own store. GraphLoom then exits with the agent's exit code.
+
+**Session launcher.** Some operators start Claude Code or Codex through a
+local wrapper of their own (for example `hapi claude …`, `hapi codex …`).
+That is operator configuration, never code. The runner config gains, per
+harness:
+
+| Key | Meaning |
+|---|---|
+| `claude.sessionLauncher`, `codex.sessionLauncher` | An argv prefix, such as `["hapi", "claude"]`, that replaces the agent command for `session open` only. GraphLoom appends its own arguments: `hapi claude --resume <uuid> --fork-session --session-id <new uuid> --append-system-prompt "<note>"` |
+| `claude.sessionLauncherStateDirs`, `codex.sessionLauncherStateDirs` | Directories the launcher keeps its own state in (for example `~/.hapi`), made writable inside the session's confinement as `ownState` is |
+
+`GRAPHLOOM_CLAUDE_SESSION_LAUNCHER` and `GRAPHLOOM_CODEX_SESSION_LAUNCHER`
+override the launcher for one invocation, split into words as a shell would
+split them (quotes honored, no expansion); the state directories still come
+from the config. The keys are per harness because a launcher wraps one CLI,
+and its state is that launcher's. The existing runner-config parser, which
+refuses unknown keys, gains them: a launcher must be a non-empty array of
+non-empty strings, and a state directory an absolute or `~/` path. Headless
+graph jobs never use a launcher: they keep `claude.command` and
+`codex.command`, since their stream-json over pipes must not pass through a
+wrapper.
+
+Inside the confinement, the launcher's first word is resolved on `PATH` to
+an absolute real path; that file and its directory are bound read-only, and
+its state directories writable. The agent's config dir or Codex home, and
+`passEnv`, are those of the harness, so the agent the launcher starts uses
+the store GraphLoom restored into. Network is already on for an opened
+session, so a launcher may talk to a local hub.
+
+**Launcher probe.** A wrapper may not pass GraphLoom's arguments through.
+Checked against the operator's `hapi`: `hapi claude --help` prints Claude
+Code's own help, so it passes options through; `hapi codex --help` fails
+with "Unsupported shared Codex launch flag: --help", so it may not accept
+`resume <thread>` either. Before launching, `session open` probes the
+configured launcher, with no model call and no session: for Claude Code,
+`<launcher> --help` must succeed and list `--resume`, `--fork-session`,
+`--session-id` and `--append-system-prompt`; for Codex, `<launcher> resume
+--help` must succeed and describe `resume`. A failed probe refuses the open,
+naming the launcher, the probe and its output, and suggests removing the
+launcher setting (plain `claude` or `codex`) or using the launcher's own
+resume outside GraphLoom. It never falls back to a fresh session or to
+another one. `graphloom doctor` runs the same probes and warns with the same
+message.
 
 **Turn extract.** A harness-neutral list of the conversation's own turns,
 built deterministically from the transcript: each operator message verbatim,
@@ -1346,8 +1398,15 @@ prefix disagrees with its record, a finished run, and a session whose job
 the stage's first-dispatched key, not a later checker. The opened session's
 confinement matches its job's kind with the worktree read-only (a write
 fails with `EROFS`), a masked file absent and no token in its environment.
-Fake `claude` and `codex` binaries record their argv, environment and TTY
-and write scripted turns; a real-CLI check of `--fork-session`,
+A stub launcher prefix is applied to `session open` only, and a headless
+job with the same config runs `claude.command` unchanged; the environment
+override replaces the configured launcher; the launcher's state directories
+are writable inside the confinement and the rest of the home is not; a
+launcher whose probe fails (a stub that rejects `resume`, like `hapi
+codex`) is refused before anything launches, and `doctor` warns; capture
+through a stub launcher finds the fork by the id GraphLoom chose, and a
+stub that drops `--session-id` records nothing. Fake `claude` and `codex`
+binaries record their argv, environment and TTY and write scripted turns; a real-CLI check of `--fork-session`,
 `--append-system-prompt` with `--resume`, `codex resume <thread> <prompt>`
 on a copied rollout, and the non-interactive forks a job uses runs opt-in,
 as the

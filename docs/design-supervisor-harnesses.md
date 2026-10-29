@@ -1249,3 +1249,11 @@ Each is checked in its phase. A failure changes only the named fallback.
    `session open` does, so a CLI that wrote the restored file would change
    only that copy. (`JobSpec.forkFrom`,
    [core §15](design-typescript-core.md#15-opening-a-recorded-agent-session))
+9. **Choosing a Claude Code fork's id.** `claude --resume <uuid>
+   --fork-session --session-id <new uuid>` writes the fork under the given
+   id, so `graphloom session open` knows the transcript to capture before
+   launch, also through a session launcher. If Claude Code rejects the
+   combination, the capture takes the one new `.jsonl` file that appeared
+   in the project directory during the open and whose first record resumes
+   the parent, and records nothing when there is not exactly one.
+   (`graphloom session open`)
