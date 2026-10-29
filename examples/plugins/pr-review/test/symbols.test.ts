@@ -216,6 +216,16 @@ describe("new versus modified", () => {
     ]);
   });
 
+  it("compares a renamed TypeScript file's symbols with the old module's names in the base", () => {
+    const baseText = 'export function f(): number {\n  return 1;\n}\n';
+    const head = 'export function f(): number {\n  return 2;\n}\n';
+    const defs = parseBaseDefinitions(baseText.split("\n").map((l, n) => `old.ts:${n + 1}:${l}`).join("\n"), TS_PACK).byPath.get("old.ts")!;
+    expect([...defs]).toEqual(["old.f"]);
+    const parsed = parsePatch("@@ -2 +2 @@\n-  return 1;\n+  return 2;");
+    const found = changedSymbols({ path: "new.ts", previousPath: "old.ts", status: "renamed", parsed, text: head }, TS_PACK, defs);
+    expect(found.map((s) => [s.qualified, s.change])).toEqual([["new.f", "modified"]]);
+  });
+
   it("takes every symbol of an added file as new", () => {
     const parsed = parsePatch(["@@ -0,0 +1,3 @@", "+package p", "+", "+func A() {}"].join("\n"));
     const found = changedSymbols({ path: "p/a.go", previousPath: null, status: "added", parsed, text: "package p\n\nfunc A() {}\n" }, GO_PACK, undefined);

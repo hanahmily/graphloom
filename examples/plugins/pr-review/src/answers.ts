@@ -169,7 +169,7 @@ export function functionOf(q: Question, ctx: Pick<AnswerContext, "groundwork" | 
   const record =
     sym !== undefined
       ? (ctx.view.records.find((r) => r.path === sym.path && r.function === sym.qualified) ?? ctx.view.records.find((r) => r.path === sym.path && r.startLine === sym.startLine && r.endLine === sym.endLine))
-      : ctx.view.records.find((r) => q.fn !== undefined && r.function === q.fn);
+      : ctx.view.records.find((r) => q.fn !== undefined && r.function === q.fn && (q.fnPath === undefined || r.path === q.fnPath));
   if (sym !== undefined) return { path: sym.path, language: sym.language, dir: sym.dir, name: sym.name, start: sym.startLine, end: sym.endLine, ...(record !== undefined ? { record } : {}), symbol: sym };
   if (record !== undefined) {
     const dir = record.path.includes("/") ? record.path.slice(0, record.path.lastIndexOf("/")) : ".";

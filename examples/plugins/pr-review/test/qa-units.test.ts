@@ -3,7 +3,7 @@
 
 import { describe, expect, it } from "vitest";
 import { evidencePull } from "../src/analysis.js";
-import { answerProblems, readAnswerCheck, verificationPlan, type Answer } from "../src/answers.js";
+import { answerProblems, functionOf, readAnswerCheck, verificationPlan, type Answer } from "../src/answers.js";
 import { GO_PACK, TS_PACK } from "../src/packs.js";
 import { nameVariants, nameWords, planFor, rareTokens, signaturePattern, signatureTypes, tokenPopulation, excludeSpecs } from "../src/queries.js";
 import { answerContext, qaContext, questionSet, questionerFlow, type QaContext } from "../src/qaflow.js";
@@ -363,6 +363,20 @@ describe("the answer rules (design 7.3 checks)", () => {
     expect(answerProblems(all.slice(1), actx)).toContain(`${set.questions[0]!.id} has no answer`);
     expect(answerProblems([...all, all[0]!], actx)).toContain(`${all[0]!.question} is answered twice`);
     expect(answerProblems([{ ...all[0]!, question: "Q99" }, ...all.slice(1)], actx).join("|")).toMatch(/"Q99" is not a question id.*has no answer/);
+  });
+});
+
+describe("a closure question keeps its file", () => {
+  it("resolves to the record of its own file when two files measure a function of the same name", () => {
+    const { ctx } = contextOf("complex-function");
+    const record = ctx.view.records[0]!;
+    const other = { ...record, path: "pkg/other/init.go", function: "p.glob.func1", startLine: 40, endLine: 50 };
+    const mine = { ...record, path: "pkg/schema/ttl.go", function: "p.glob.func1", startLine: 6, endLine: 30 };
+    const view = { ...ctx.view, items: [...ctx.view.items, { id: "R9", section: "features", text: "x", cites: [{ path: "pkg/other/init.go", side: "head" as const, start: 0, end: 0, symbol: "" }], facts: [] }], records: [other, mine] };
+    const q = { id: "Q1", type: "split-function" as const, item: "R1", fn: "p.glob.func1", fnPath: "pkg/schema/ttl.go", text: "?", origin: "required" as const, key: "k" };
+    expect(functionOf(q, { groundwork: { ...ctx.groundwork, symbols: [] }, view })).toMatchObject({ path: "pkg/schema/ttl.go", start: 6, end: 30 });
+    const required = requiredQuestions({ view: { ...view, records: [{ ...other, complexity: 12, nesting: 4 }, { ...mine, complexity: 12, nesting: 4 }] }, groundwork: { ...ctx.groundwork, symbols: [] } }, new Map());
+    expect(required.filter((r) => r.type === "split-function").map((r) => [r.fn, r.fnPath])).toEqual([["p.glob.func1", "pkg/other/init.go"], ["p.glob.func1", "pkg/schema/ttl.go"]]);
   });
 });
 

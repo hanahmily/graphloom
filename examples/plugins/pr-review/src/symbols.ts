@@ -390,6 +390,13 @@ export interface ChangedFile {
   text: string | undefined;
 }
 
+/** The name a head symbol had in the base file: a renamed TypeScript file's module prefix is the old path's. */
+function baseName(file: Pick<ChangedFile, "path" | "previousPath">, pack: Pick<FullPack, "language">, qualified: string): string {
+  if (pack.language !== "typescript" || file.previousPath === null || file.previousPath === file.path) return qualified;
+  const now = modulePath(file.path);
+  return qualified === now || qualified.startsWith(`${now}.`) ? `${modulePath(file.previousPath)}${qualified.slice(now.length)}` : qualified;
+}
+
 /**
  * The symbols the pull request adds or modifies in one file. With the base
  * file's definitions, a touched symbol is new when the base does not define
@@ -417,7 +424,7 @@ export function changedSymbols(file: ChangedFile, pack: FullPack, base: Readonly
     if (!touches(s, changed)) continue;
     let isNew: boolean;
     if (file.status === "added") isNew = true;
-    else if (base !== undefined) isNew = !base.has(s.qualified);
+    else if (base !== undefined) isNew = !base.has(baseName(file, pack, s.qualified));
     else isNew = changed.added.has(s.startLine) && !deletedNames.has(s.name);
     out.push({ ...s, change: isNew ? "new" : "modified" });
   }

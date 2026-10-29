@@ -88,8 +88,9 @@ export interface RequiredQuestion {
   item: string;
   /** The symbol's id, when the question is about one. */
   symbol?: string;
-  /** A measured function with no symbol of its own (a closure), by qualified name. */
+  /** A measured function with no symbol of its own (a closure), by qualified name, and the file it is measured in. */
   fn?: string;
+  fnPath?: string;
   text: string;
 }
 
@@ -99,6 +100,7 @@ export interface Question {
   item: string;
   symbol?: string;
   fn?: string;
+  fnPath?: string;
   text: string;
   /** `required` when plugin rules demand it, `added` when the questioner raised it. */
   origin: "required" | "added";
@@ -166,7 +168,7 @@ export function requiredQuestions(inp: QuestionInputs, stated: ReadonlyMap<strin
     const sym = symbolOfRecord(r, groundwork.symbols);
     const item = (sym !== undefined ? itemOfSymbol(sym, items) : itemOfSymbol({ path: r.path, startLine: r.startLine, endLine: r.endLine }, items));
     if (item === undefined) continue;
-    const ref = sym !== undefined ? { symbol: sym.id } : { fn: r.function };
+    const ref = sym !== undefined ? { symbol: sym.id } : { fn: r.function, fnPath: r.path };
     const keyOf = (type: string): string => `${type}:${sym?.id ?? `fn:${r.path}:${r.function}`}`;
     const th = checkThresholds(r);
     const where = `${r.function} (${r.path}:${r.startLine})`;
@@ -244,7 +246,7 @@ export function finalQuestions(required: readonly RequiredQuestion[], output: Qu
   const byKey = new Map((output?.questions ?? []).filter((q) => q.key !== "").map((q) => [q.key, q] as const));
   const out: Omit<Question, "id">[] = required.map((r) => {
     const phrased = byKey.get(r.key)?.text.trim();
-    return { type: r.type, item: r.item, ...(r.symbol !== undefined ? { symbol: r.symbol } : {}), ...(r.fn !== undefined ? { fn: r.fn } : {}), text: phrased !== undefined && phrased !== "" ? phrased : r.text, origin: "required" as const, key: r.key };
+    return { type: r.type, item: r.item, ...(r.symbol !== undefined ? { symbol: r.symbol } : {}), ...(r.fn !== undefined ? { fn: r.fn } : {}), ...(r.fnPath !== undefined ? { fnPath: r.fnPath } : {}), text: phrased !== undefined && phrased !== "" ? phrased : r.text, origin: "required" as const, key: r.key };
   });
   const symbols = new Set(groundwork.symbols.map((s) => s.id));
   let n = 0;

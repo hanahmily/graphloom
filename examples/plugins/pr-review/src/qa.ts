@@ -59,7 +59,7 @@ export function qaJson(i: QaInput): string {
     questions: i.questions.map((q) => {
       const a = answers.get(q.id);
       const { question: _id, ...rest } = a ?? ({} as Partial<FinalAnswer>);
-      return { id: q.id, type: q.type, item: q.item, ...(q.symbol !== undefined ? { symbol: q.symbol } : {}), ...(q.fn !== undefined ? { function: q.fn } : {}), text: q.text, origin: q.origin, ...(a !== undefined ? { answer: rest } : {}) };
+      return { id: q.id, type: q.type, item: q.item, ...(q.symbol !== undefined ? { symbol: q.symbol } : {}), ...(q.fn !== undefined ? { function: q.fn } : {}), ...(q.fnPath !== undefined ? { functionPath: q.fnPath } : {}), text: q.text, origin: q.origin, ...(a !== undefined ? { answer: rest } : {}) };
     }),
   });
 }

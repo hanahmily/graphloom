@@ -175,7 +175,7 @@ export function qaScenario(i: QaInput): QaScenario {
   // The answerer and its checker.
   const manifest = base.manifests ?? { "go.mod": DEFAULT_GO_MOD };
   const deps = declaredDependencies(parseManifests(Object.entries(manifest).map(([p, t]) => `===== graphloom manifest ${p}\n${t}`).join("\n") + "\n# end\n").files);
-  const recordOf = (q: Question): MetricsRecord | undefined => (q.symbol !== undefined ? i.records.find((r) => r.function === symbols.find((s) => s.id === q.symbol)?.qualified) : i.records.find((r) => r.function === q.fn));
+  const recordOf = (q: Question): MetricsRecord | undefined => (q.symbol !== undefined ? i.records.find((r) => r.function === symbols.find((s) => s.id === q.symbol)?.qualified) : i.records.find((r) => r.function === q.fn && (q.fnPath === undefined || r.path === q.fnPath)));
   const symOf = (q: Question): SymbolDef | undefined => symbols.find((s) => s.id === q.symbol);
   const first: Answer[] = questions.map((q) => {
     const dflt = defaultAnswer(q, symOf(q), recordOf(q), deps.length > 0);
