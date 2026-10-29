@@ -85,14 +85,36 @@ inside the Docker sandbox (§4).
 - **Go:** `go test -coverprofile -covermode=set -coverpkg=<touched packages>
   <touched packages>`. A statement is covered when its coverprofile block is
   covered. Blocks are attributed to a function by line range.
-- **TypeScript:** V8 coverage collected by [c8](https://github.com/bcoe/c8)
-  around the profile's test command. c8 reports lines rather than
-  statements, so this uses executed lines over executable lines in the
-  function's range, stated as line coverage in every record.
+- **TypeScript:** the repository's own vitest coverage, `vitest run
+  --coverage.enabled --coverage.reporter=json` in each touched workspace,
+  with the provider the repository configures (`coverage.provider`, vitest's
+  default `v8`, which means the `@vitest/coverage-v8` package). Beyond
+  those two flags the plugin adds three things and nothing else:
+  `--coverage.reportsDirectory` under the
+  job's temporary directory, so `coverage-final.json` and every other report
+  file land outside the checkout; `--coverage.include` naming the changed
+  non-test files, so a file no test loads is reported with zero hits rather
+  than left out; and a generated config (§3.1) that moves vitest's cache out of
+  the checkout. `coverage-final.json` is Istanbul's format, and `cov(m)` is
+  **statement coverage** over it: the statements of `statementMap` whose
+  start line falls in the function's line range, less those inside a nested
+  function literal, which belong to that literal; a statement is covered
+  when its `s` count is above zero. The v8 provider converts V8's byte
+  ranges into one Istanbul statement per executable source line, so with it
+  the statements are line-granular; the istanbul provider gives real
+  statements. Every TypeScript record's `coverage` names the provider, for
+  example `"provider": "v8"`.
+  - **No provider, no coverage.** GraphLoom never installs a coverage
+    provider. When the configured provider does not resolve from the
+    workspace (`@vitest/coverage-v8` or `@vitest/coverage-istanbul` absent
+    from the repository's dependencies), the tool does not start vitest,
+    which would otherwise offer to install it, and the record says `not run
+    (no vitest coverage provider in the repository)`.
 
 When coverage was not measured, the record says `unknown` with the reason,
 for example "coverage disabled by the profile", "docker unavailable",
-"image not available" or "package did not build offline". CRAP then uses `cov = 0`, stated as the
+"image not available", "package did not build offline" or "no vitest
+coverage provider in the repository". CRAP then uses `cov = 0`, stated as the
 **upper bound**. A test that fails in the confined run does not void the
 coverage of the tests that ran. The failures are recorded as facts.
 
@@ -165,34 +187,126 @@ but the definitions above stay fixed.
 
 | Metric | Go | TypeScript |
 |---|---|---|
-| Complexity, nesting | `gometrics`: a small stdlib-only `go/ast` program in the plugin's source | `tsmetrics`: a Node script on the TypeScript compiler API (`typescript`, a plugin dependency) |
-| Coverage | `go test -coverprofile` | c8 (bundled with the plugin at an exact version) |
-| Mutation | `gomutate`: a stdlib-only `go/ast` mutator that implements exactly the §2.5 inversions and runs `go test -overlay` | [StrykerJS](https://stryker-mutator.io/) (bundled at an exact version), with `mutate` line ranges and a mutator allowlist of exactly the §2.5 inversions (relational and boolean literal; every other mutator excluded). Where its equality mutator also produces non-inverting variants, such as `<` → `<=`, those are filtered out of the run. A test fixture fails if any non-§2.5 mutant appears |
+| Complexity, nesting | `gometrics`: a small stdlib-only `go/ast` program in the plugin's source | `tsmetrics`: a Node script on the TypeScript compiler API |
+| Coverage | `go test -coverprofile` | The repository's own `vitest run --coverage` with its configured provider (§2.3) |
+| Mutation | `gomutate`: a stdlib-only `go/ast` mutator that implements exactly the §2.5 inversions and runs `go test -overlay` | `tsmutate`: a Node script on the TypeScript compiler API that implements exactly the §2.5 inversions and serves each mutant to the repository's own vitest through a Vite `load` hook (below) |
 
-Why these tools:
+`tsmetrics` and `tsmutate` load the `typescript` package that GraphLoom
+already ships as a runtime dependency of the CLI
+([`apps/graphloom/package.json`](../apps/graphloom/package.json),
+[release design](design-release.md)). They add no package to GraphLoom.
 
-- **The plugin's own Go tools, not gocyclo plus gremlins or go-mutesting.**
-  - One stdlib-only program pair yields complexity, nesting and the decision
-    and nesting *evidence* that recomputation needs (§5). Line-ranged mutation
-    restricted to changed functions needs that evidence too.
-  - The operator set is exactly §2.5, the two inversions. The external Go
-    mutators' operator sets and scoping differ from it. Adapting one would mean patching a tool the
-    supervisor cannot repair inside a run.
-  - `go test -overlay` substitutes the mutated file without writing the
-    checkout. The "checks change no file" rule therefore holds, and mutants
-    can run one after another in one checkout.
-  - The tools are plugin source, vendored with the review kit
-    ([pr-review §14](design-pr-review-graph.md#14-sharing-code-with-issue-fix)),
-    so they are source-repairable and pinned with the plugin.
-  - Being stdlib-only, `go run` builds them offline inside the confinement.
-  - gocyclo stays as a cross-check in the tool's tests.
-- **StrykerJS for TypeScript.** It is the maintained mutation tool for the
-  ecosystem. It accepts line ranges, and a mutator allowlist maps it onto
-  §2.5. It is bundled, as open-code-review is
-  ([issue-fix](design-issue-fix-graph.md#bundled-open-code-review)), so
-  nothing is downloaded in a no-network job.
-- **c8** reads V8's own coverage around any Node test command, so it does not
-  depend on which coverage provider the repository configures.
+**Third-party tools need the operator's approval.** The metrics toolchain is
+the plugin's own tools, the language toolchains (`go`, `node`), the
+`typescript` package GraphLoom already ships, and what the measured
+repository itself installs (its vitest and its coverage provider). Adding a
+third-party tool to it, such as a mutation framework, a coverage wrapper or a
+linter, is a design decision that needs the operator's approval, as adding a
+mutation operator is (§2.5). It is not a profile setting, and a design may
+not add one on its own.
+
+### 3.1 `tsmutate`
+
+`tsmutate` is `gomutate`'s TypeScript counterpart. It takes the same inputs
+(the diff hunks, the head files, the coverage report, the caps, the seed and
+the time budget) and writes the same `graphloom-metrics-v1` mutation fields.
+
+- **Sites.** It parses each changed non-test file with the compiler API and
+  walks only the changed functions of §1, skipping nested function literals,
+  which are their own functions. A site is a `BinaryExpression` whose
+  operator token is `<`, `>=`, `>`, `<=`, `==`, `!=`, `===` or `!==`, or a
+  `TrueKeyword` or `FalseKeyword` in expression position. Literal types
+  (`x: true`, `T extends false ? …`) are types, not values, and never sites.
+  Each site yields exactly one mutant, its §2.5 inversion, and nothing else
+  is ever produced.
+- **One mutant at a time.** The mutated text is the head file with that one
+  token replaced, at the token's own offsets, so every other byte is
+  unchanged. It is parsed again first; a syntax error makes the mutant
+  `invalid` without a test run.
+- **Identity, caps, sampling, clock.** As `gomutate`: the mutant id hashes
+  `path`, `function`, `operator`, `original`, `mutated` and the occurrence
+  index, not the line; the same per-function and per-change caps,
+  deterministic round-robin sample, per-mutant timeout of three times the
+  baseline (at least 30 s), and time budget
+  ([issue-fix](design-issue-fix-graph.md#mutation-time-budget)). Sites the
+  coverage run did not execute are `not-run (uncovered)` (§4).
+- **Tests.** Each mutant runs the touched workspace's own vitest, the
+  repository's installed binary, as `vitest run --bail=1 --config <generated
+  config> --root <workspace>`. The first failing test kills the mutant.
+
+**The overlay mechanism.** The checkout is never written. For each mutant,
+`tsmutate` writes the mutated file and a generated vitest config into its own
+directory under the job's temporary directory. The generated config imports
+the workspace's own config file by absolute path, if it has one, resolves it
+when it is a function, and returns it with two changes:
+
+- one Vite plugin prepended, `enforce: "pre"`, whose `load(id)` hook
+  returns the mutated text when `id` is the absolute path of the mutated
+  file and defers to the normal load for every other module;
+- `cacheDir` under the job's temporary directory, so vitest's results cache
+  is not written into the checkout.
+
+The coverage run (§2.3) uses the same generated config without the plugin.
+The generated config imports nothing but the repository's config, so it
+resolves from the temporary directory.
+
+Vite resolves every import of the module, whatever its specifier
+(`./ttl.js`, `../src/ttl`, a workspace package name through a symlink), to
+the one absolute path before it calls `load`, and the mutated text then goes
+through the repository's own transform pipeline (TypeScript stripping, JSX,
+its plugins). This is `go test -overlay` for vitest: one substitution, keyed
+by the real file, inside the repository's own test run. A fresh vitest
+process per mutant has a fresh in-memory transform cache, so no mutant can
+leak into the next run.
+
+Two alternatives were rejected:
+
+- *A `resolve.alias` entry.* An alias matches import specifiers, not files,
+  so every specifier that reaches the module would need its own entry, and a
+  missed one silently tests the unmutated file. The resolved path is the one
+  key that cannot be missed.
+- *A copy of the package under the temporary directory.* It breaks
+  `node_modules` resolution, workspace links, `tsconfig` paths and test
+  fixtures found relative to the source, and it costs a copy per mutant.
+
+A test that reads the source file's bytes from disk (rather than importing
+it) sees the unmutated file, and so cannot kill that mutant; the mutant
+survives and is reported, never dropped. The clean-run rule holds: a check
+that changes a checkout file fails, as for any check.
+
+### 3.2 Why these tools
+
+Both languages use the plugin's own tools, for the same reasons:
+
+- **The exact operator set.** The mutators implement §2.5 and nothing else,
+  so "no surviving mutant" means the operator's rule. The external mutators
+  (gremlins and go-mutesting for Go, mutation frameworks for TypeScript)
+  have operator sets and scoping that differ from it, and fitting one to it
+  means filtering or patching a tool the supervisor cannot repair inside a
+  run.
+- **Line-level evidence.** One parser per language yields complexity,
+  nesting, and the decision and nesting *evidence* that recomputation needs
+  (§5). The same parser finds the mutation sites in the changed functions'
+  line ranges, so every survivor names its line, operator and exact text.
+- **No checkout writes.** `go test -overlay` and the Vite `load` hook
+  substitute the mutated file without writing the checkout. The "checks
+  change no file" rule therefore holds, an interrupted run leaves nothing
+  behind, and mutants run one after another in one checkout.
+- **Repairable plugin source.** The tools are plugin source, vendored with
+  the review kit
+  ([pr-review §14](design-pr-review-graph.md#14-sharing-code-with-issue-fix)),
+  so they are source-repairable and pinned with the plugin.
+- **Offline in the Docker sandbox.** The Go tools are stdlib-only, so `go
+  run` builds them offline inside the confinement. The TypeScript tools need
+  only Node, the shipped `typescript`, and the repository's own installed
+  vitest and coverage provider, so nothing is downloaded in a `--network
+  none` job.
+- **No third-party dependency.** Coverage is the language's own
+  (`go test -coverprofile`) or the repository's own (vitest's configured
+  provider), and nothing else is added to GraphLoom or to the repository.
+
+gocyclo stays as a cross-check in `gometrics`' tests. A test fixture for each
+mutator fails if any mutant outside §2.5 appears.
 
 ## 4. Execution and confinement
 
@@ -257,8 +371,8 @@ evidence:
   line holds its keyword or operator in the head file's bytes;
 - `nesting` is the length of `nestingPath`, each step's line holds its
   keyword, and the lines increase;
-- `coverage` follows from the coverprofile or c8 report attributed by line
-  range;
+- `coverage` follows from the coverprofile (Go) or `coverage-final.json`
+  (TypeScript), attributed by line range as §2.3 states;
 - `crap` is recomputed with the formula;
 - each survivor's `original` text is on its line, and `mutated` differs from
   it at exactly one site, by exactly that site's §2.5 inversion: `<`/`>=`,

@@ -1063,8 +1063,8 @@ review rounds are what discovery rounds bound.
 | Requirement | Validator | Job | Statement (defaults filled in) |
 |---|---|---|---|
 | `function-complexity` | `function-complexity` v1 | The first candidate job: the cheap job, or the only job of an untiered profile | In the candidate checkout, `gometrics` (Go) or `tsmetrics` (TypeScript) measured every function the change adds or modifies, test files included and generated files excluded. Each has cyclomatic complexity below 10 and nesting depth at most 3, except a [legacy function](#legacy-functions-no-worse) over a limit at the base, whose complexity and nesting are each at most its base value. The measurements recompute from the decision and nesting evidence against the observed files and the base lines. |
-| `crap-score` | `crap-score` v1 | The quality job (below) | In the quality job's Docker sandbox, the touched packages' tests ran with coverage (`go test -coverprofile`, or c8 around the profile's test command). Every changed non-test function has CRAP(m) = comp(m)² × (1 − cov(m))³ + comp(m) of at most 30, or, for a legacy function, at most its CRAP measured at the base, recomputed from the coverage reports. |
-| `mutants-killed` | `mutants-killed` v1 | The quality job | In the quality job's Docker sandbox, `gomutate` or StrykerJS applied the shared mutation operators to every changed non-test function within the profile's mutant caps and ran the touched packages' tests against each mutant. No mutant survived, except a legacy function's mutant whose id also survived at the base, or a mutant the decision record claims equivalent and an independent verifier confirmed with quotes that match the change. |
+| `crap-score` | `crap-score` v1 | The quality job (below) | In the quality job's Docker sandbox, the touched packages' tests ran with coverage (`go test -coverprofile`, or the repository's own `vitest run --coverage` in each touched workspace). Every changed non-test function has CRAP(m) = comp(m)² × (1 − cov(m))³ + comp(m) of at most 30, or, for a legacy function, at most its CRAP measured at the base, recomputed from the coverage reports. |
+| `mutants-killed` | `mutants-killed` v1 | The quality job | In the quality job's Docker sandbox, `gomutate` or `tsmutate` applied the shared mutation operators to every changed non-test function within the profile's mutant caps and ran the touched packages' tests against each mutant. No mutant survived, except a legacy function's mutant whose id also survived at the base, or a mutant the decision record claims equivalent and an independent verifier confirmed with quotes that match the change. |
 
 A requirement exists only when its gate is enabled in the profile (below), as
 `final-checks` exists only with `final` commands. Adding one changes the
@@ -1189,8 +1189,8 @@ taken on trust.
 |---|---|---|---|---|
 | `banyandb` | `gometrics` | `go test -coverprofile -covermode=set -coverpkg=<touched> <touched>` | `gomutate` (`go test -overlay`) | `golang@sha256:…` matching `go.mod` |
 | `banyandb-ql` | same | same | same | same |
-| `canopy` | `tsmetrics` | c8 around `npm run -w <workspace> test` for each touched workspace | StrykerJS with the vitest runner | `node@sha256:…` matching `canopy/package.json` `engines.node` |
-| `graphloom` | `tsmetrics` | c8 around `npx vitest run` in each touched workspace | StrykerJS with the vitest runner | `node@sha256:…`, Node 22 |
+| `canopy` | `tsmetrics` | The repository's `vitest run --coverage` in each touched workspace (`web`, `server`); not gated today (below) | `tsmutate` with the workspace's vitest; not gated today | `node@sha256:…` matching `canopy/package.json` `engines.node` |
+| `graphloom` | `tsmetrics` | The repository's `vitest run --coverage` in each touched workspace; not gated today (below) | `tsmutate` with the workspace's vitest; not gated today | `node@sha256:…`, Node 22 |
 
 **Static measurement** (`quality-metrics`) only parses and runs no repository
 code. It stays in the cheap job, under that job's confinement, on every
@@ -1209,8 +1209,11 @@ digest and run with `--pull never`. Only the checkout and a per-run build
 cache are writable. The module and npm caches are read-only, with
 `GOFLAGS=-mod=readonly`. The plugin's tools are mounted read-only from the
 installed tree: `gometrics` and `gomutate` are stdlib-only, so `go run` builds
-them offline into the build cache, and StrykerJS and c8 sit in the plugin's
-`node_modules`.
+them offline into the build cache, and `tsmetrics` and `tsmutate` run on the
+container's `node` with the `typescript` package GraphLoom ships as a CLI
+dependency, mounted read-only with them. Vitest and its coverage provider are
+the repository's own, installed offline from the read-only npm cache like its
+other dependencies.
 
 - **Limits are profile data:** `quality.sandbox`
   `{ image, cpus, memory, pids, tmp }`. The image is pinned by digest. The
@@ -1249,31 +1252,47 @@ reasons settle it:
 `gomutate` gives each mutant a stable id (below) and never writes the
 checkout.
 
-StrykerJS is bundled as `@stryker-mutator/core` and
-`@stryker-mutator/vitest-runner`, both pinned exactly at 10.1.1, and c8 is
-pinned likewise, as open-code-review is
-([bundled open-code-review](#bundled-open-code-review)). The runner declares
-`vitest >=2.0.0` as its peer dependency, so it covers canopy's `server` and
-`web` workspaces, which use vitest ^5.0.0, and GraphLoom's vitest ^3. Phase 1
-runs it on a real canopy test. If it fails there in practice, the canopy
-profile ships with `mutation.enabled: false`, `graphloom check` notes that
-canopy's mutation gate is off, the pull request's Quality section says so,
-and an issue is filed. The tools are configured on the command line:
+TypeScript uses `tsmetrics` and `tsmutate`, the plugin's own tools on the
+TypeScript compiler API, and the repository's own vitest coverage, as the
+shared [§3](design-code-quality-metrics.md#3-tools) decides. No mutation
+framework or coverage wrapper is bundled, and adding one needs the operator's
+approval. `tsmutate` never writes the checkout: each mutant is served to the
+workspace's vitest by a Vite `load` hook from a generated config under the
+job's temporary directory
+([§3.1](design-code-quality-metrics.md#31-tsmutate)), and coverage reports and
+vitest's cache are written there too.
 
-- `mutate` takes one `file:start-end` range per changed function;
-- `mutator.excludedMutations` excludes every mutator except `EqualityOperator`
-  and `BooleanLiteral`, and the tool keeps only the replacements in the
-  shared operator set (relational inversions, `true`↔`false`);
-- `tempDirName` and the reporters' paths are under the job's temporary
-  directory, never in the checkout.
+**A coverage provider is the repository's, never GraphLoom's.** Coverage
+needs the provider the repository's vitest config names (`@vitest/coverage-v8`
+by default) in the repository's own dependencies. GraphLoom does not install
+one. Neither canopy (`web` and `server`, vitest ^5.0.0) nor GraphLoom
+(vitest ^3) declares one today, so:
+
+- the `canopy` and `graphloom` profiles ship with `crap.enabled: false` and
+  `mutation.enabled: false`, the reason `no vitest coverage provider in the
+  repository`, and `function-complexity` on;
+- the pull request's Quality section states both gates as "not gated" with
+  that reason;
+- once a repository adds a provider in its own change, enabling the two gates
+  is a profile change, and new runs get them.
+
+When a `vitest` profile enables `crap`, the `quality-tools` check (below)
+fails unless the configured provider resolves from every workspace the
+profile tests, so `graphloom check` reports a missing provider before the
+run rather than as an inconclusive gate during it.
 
 A run that changes a checkout file fails the clean-run rule like any check. A
-second environment check, `quality-tools`, resolves the bundled tools the way
-`scripts/ocr-path.sh` resolves ocr. It exists only when a gate is enabled.
+second environment check, `quality-tools`, resolves the plugin's tools and
+the shipped `typescript` the way `scripts/ocr-path.sh` resolves ocr, and, for
+a `vitest` profile with `crap` enabled, the repository's coverage provider.
+It exists only when a gate is enabled.
 
-Every tool's version is recorded in the report. The validators fail a report
-whose tool versions differ from the plugin's pins, so a host tool cannot
-silently change a gate.
+Every tool's version is recorded in the report: the plugin's tools carry the
+plugin version, and the report adds `go`, `node`, `typescript`, and the
+repository's vitest and coverage provider. The validators fail a report whose
+plugin tool or `typescript` version differs from the installed plugin's, so a
+host tool cannot silently change a gate. The repository's vitest and provider
+are recorded, not pinned, since they are the repository's choice.
 
 ### Mutation time budget
 
@@ -1477,7 +1496,8 @@ legacy functions no worse than the base).
 
 Inherited functions are marked as such, with their base and head values. A
 gate disabled in the profile is stated as "not gated", with the reason when
-the profile gives one (canopy's mutation gate, if Phase 1 disables it). The
+the profile gives one (the canopy and graphloom profiles' CRAP and mutation
+gates: no vitest coverage provider in the repository). The
 section never shows a number the validators did not recompute.
 
 ### Profile switches
@@ -1504,8 +1524,11 @@ An optional `quality` field; absent means no gates and the definition of
 never loosen them. A gate may be disabled; its requirement then does not
 exist. `mutation.enabled` needs `crap.enabled`, because mutation needs the
 coverage run. `sandbox.image` must carry a digest; `parseProfile` refuses a
-tag alone. All four shipped profiles enable all three gates with the defaults
-and their own image, unless Phase 1 disables canopy's mutation gate.
+tag alone. All four shipped profiles enable `complexity` with the defaults
+and their own image. `banyandb` and `banyandb-ql` also enable `crap` and
+`mutation`; `canopy` and `graphloom` disable them until their repositories
+declare a vitest coverage provider
+([tools](#tools-per-profile-and-confinement)).
 
 ### Rehearsal scenarios
 
@@ -1544,15 +1567,34 @@ These are added to each profile's rehearsal, hand-written like
 
 1. **Tools.**
    - `gometrics` and `gomutate`: stdlib Go, under `tools/` in the plugin.
-   - `tsmetrics`.
-   - Bundled c8, and StrykerJS core and vitest runner pinned at 10.1.1.
+   - `tsmetrics` and `tsmutate`: Node scripts on the shipped `typescript`,
+     under `tools/` in the plugin.
+   - The vitest coverage step: provider resolution, the reporter, include
+     and cache flags, and statement attribution from `coverage-final.json`.
 
-   The shared document's fixtures apply: gocyclo agreement on a corpus,
-   recomputation, overlay leaving the checkout unchanged, stable ids across
-   unrelated edits (including between a base and a head), and the
-   deterministic sample. StrykerJS runs on one real canopy test and one
-   GraphLoom test. If canopy fails, its mutation gate is disabled as described
-   under [tools](#tools-per-profile-and-confinement).
+   The shared document's fixtures apply to both mutators: gocyclo agreement
+   on a corpus, recomputation, the overlay leaving the checkout unchanged
+   (a clean worktree status and no file under the checkout modified,
+   `node_modules` included), stable ids across unrelated edits (including
+   between a base and a head), and the deterministic sample. `tsmutate` has
+   one fixture per inversion (`<`/`>=`, `>`/`<=`, `==`/`!=`, `===`/`!==`,
+   `true`/`false`, each direction), and every fixture fails if any mutant
+   outside that set appears; literal types are never mutated; a module
+   imported through two different specifiers is mutated for both. Coverage
+   fixtures: statements attributed by line range from a checked-in
+   `coverage-final.json` from each provider (v8 and istanbul), with a nested
+   literal's statements excluded; an unloaded changed file reported at zero;
+   and a workspace without a provider reported `not run (no vitest coverage
+   provider in the repository)` with no vitest started.
+
+   Two real-repository verifications, with no package added to either
+   repository or to GraphLoom:
+   - one real canopy test (`web` or `server`, vitest ^5): `tsmutate` given
+     that test's sites as covered (a test-only input in place of a coverage
+     report) kills one mutant and reports one survivor, and the checkout is
+     unchanged; coverage reports `not run (no vitest coverage provider in the
+     repository)`;
+   - the same on one GraphLoom workspace (vitest ^3).
 2. **Sandbox and gates.**
    - The generic `docker` confinement kind
      ([pr-review §15](design-pr-review-graph.md#15-generic-platform-changes)),
