@@ -41,7 +41,7 @@ afterEach(async () => {
 /**
  * A repository that holds the head's files the scenarios' static metrics read
  * (the stubbed checkout writes none), a task naming the shipped BanyanDB
- * profile unmodified, copied beside it as `graphloom/prepare.sh` does, and the
+ * profile unmodified, as task preparation (wave 3: `graphloom task new`) will write it, and the
  * request the scenarios replay.
  */
 async function ready() {

@@ -87,7 +87,7 @@ describe("the report scenario, end to end through the graph", () => {
       expect(job.confinement).toEqual({
         kind: "bwrap",
         network: true,
-        mask: ["CLAUDE.md", "AGENTS.md", ".claude", ".codex", ".mcp.json", ".opencode"].map((p) => `/work/tree/${p}`),
+        mask: ["CLAUDE.md", "CLAUDE.local.md", "AGENTS.md", "AGENTS.override.md", ".claude", ".codex", ".agents", ".pi", ".mcp.json", ".opencode"].map((p) => `/work/tree/${p}`),
         binds: [],
       });
     }
@@ -467,8 +467,8 @@ describe("agentConfigMasks", () => {
   it("refuses, rather than leave anything exposed, a path no mask can name and more places than one confinement can mask", () => {
     expect(agentConfigMasks("/w", ["bad\nname/CLAUDE.md"])).toEqual({ problem: expect.stringMatching(/no confinement mask can name/) });
     const many = Array.from({ length: 100 }, (_, i) => `d${i}/CLAUDE.md`);
-    expect(agentConfigMasks("/w", many)).toEqual({ problem: expect.stringMatching(/agent configuration in 106 places, more than the 64/) });
-    const fits = Array.from({ length: 58 }, (_, i) => `d${i}/CLAUDE.md`);
+    expect(agentConfigMasks("/w", many)).toEqual({ problem: expect.stringMatching(/agent configuration in 110 places, more than the 64/) });
+    const fits = Array.from({ length: 54 }, (_, i) => `d${i}/CLAUDE.md`);
     expect((agentConfigMasks("/w", fits) as { masks: string[] }).masks).toHaveLength(64);
   });
 
@@ -479,8 +479,13 @@ describe("agentConfigMasks", () => {
     });
     const sim = simulate({ scenario: many, config: { limits: { maxFiles: 500 } } });
     expect(stopOf(sim)).toMatchObject({ reason: "incompatible task", retryable: false });
-    expect(stopOf(sim)!.blocker).toMatch(/agent configuration in 76 places/);
+    expect(stopOf(sim)!.blocker).toMatch(/agent configuration in 80 places/);
     expect(sim.jobs.some((j) => j.kind === "agent")).toBe(false);
+  });
+
+  it("masks the alternate instruction files too, at the root and nested", () => {
+    const { masks } = agentConfigMasks("/w", ["AGENTS.override.md", "pkg/CLAUDE.local.md"]) as { masks: string[] };
+    expect(masks).toEqual(expect.arrayContaining(["/w/AGENTS.override.md", "/w/CLAUDE.local.md", "/w/pkg/CLAUDE.local.md", "/w/.agents", "/w/.pi"]));
   });
 
   it("tells the agents where to read the hidden files", () => {

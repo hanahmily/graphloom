@@ -52,8 +52,8 @@ describe("graphloom.manifest.json", () => {
     expect(manifest.digests.packageLock).toBe(manifest.digests.files["package-lock.json"]);
   });
 
-  it("ships the tools and the preparation script the graph runs from its own tree", () => {
-    expect(Object.keys(manifest.digests.files)).toEqual(expect.arrayContaining(["scripts/prepare.sh", "tools/gometrics/main.go", "tools/gometrics/go.mod", "profiles/banyandb.json"]));
+  it("ships the tools the graph runs from its own tree", () => {
+    expect(Object.keys(manifest.digests.files)).toEqual(expect.arrayContaining(["tools/gometrics/main.go", "tools/gometrics/go.mod", "profiles/banyandb.json"]));
   });
 
   it("has a rehearsal entry whose scenarios the graph can describe", () => {

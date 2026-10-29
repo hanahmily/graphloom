@@ -22,7 +22,7 @@ export function requestedPull(request: string, profile: Pick<Profile, "project">
   const text = request.trim();
   const m = /^(Report|Review) on (?:([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)#(\d+)|https:\/\/github\.com\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\/pull\/(\d+)) at ([0-9a-f]{40})\.?$/.exec(text);
   if (m === null) {
-    return { problem: `the request must be "Report on <owner>/<repo>#<N> at <40-hex head commit>." (scripts/prepare.sh writes it), got ${JSON.stringify(text.slice(0, 200))}` };
+    return { problem: `the request must be "Report on <owner>/<repo>#<N> at <40-hex head commit>." (task preparation, wave 3: graphloom task new, writes it), got ${JSON.stringify(text.slice(0, 200))}` };
   }
   if (m[1] === "Review") {
     return { problem: 'Review mode continues into the review layer, which this version of pr-review does not have; ask for "Report on …"' };

@@ -227,6 +227,18 @@ describe("the assembled report (design 6.4)", () => {
     expect(reportProblems(asReporterOutput(final), ctx)).toEqual([]);
   });
 
+  it("groups the fallback items when removing an item would leave more uncited files than a section can hold", () => {
+    const many = Array.from({ length: 50 }, (_, i) => file(`docs/f${i}.md`, "added", "@@ -0,0 +1 @@\n+text here"));
+    const big: ReportContext = { sections, files: many, facts: [] };
+    const secs = sections.map((s) => ({ id: s.id, none: s.id !== "other", items: [] as ReportItem[] }));
+    secs.find((s) => s.id === "other")!.items = [item("All the docs.", many.map((f) => cite(f.path)))];
+    const r: ReporterOutput = { sections: secs, notes: [] };
+    expect(reportProblems(r, big)).toEqual([]);
+    const final = assembleReport(r, new Map([["R1", "unsupported"]]), big);
+    expect(final.sections.find((s) => s.id === "other")!.items.length).toBeLessThanOrEqual(MAX_ITEMS_PER_SECTION);
+    expect(reportProblems(asReporterOutput(final), big)).toEqual([]);
+  });
+
   it("a section left with no items says None", () => {
     const r = valid();
     const final = assembleReport(r, new Map(), ctx);

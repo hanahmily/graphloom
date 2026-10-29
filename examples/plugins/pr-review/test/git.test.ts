@@ -2,12 +2,12 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 import { spawnSync, type SpawnSyncReturns } from "node:child_process";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import { checkoutCommand, GIT_ENV, GUARD_REFUSED, guardCommand, headTreeCommand, ledgerReadCommand, parseHeadTree, parseLedger, reviewDirCommand } from "../src/commands.js";
-import { BANYANDB, root } from "./support.js";
+import { BANYANDB } from "./support.js";
 
 const dirs: string[] = [];
 afterAll(() => dirs.forEach((d) => rmSync(d, { recursive: true, force: true })));
@@ -58,146 +58,6 @@ function booby(markerDir: string): string {
   writeFileSync(path.join(home, ".gitconfig"), `[core]\n\thooksPath = ${hooks}\n\tfsmonitor = ${path.join(home, "monitor.sh")}\n[filter "mark"]\n\tsmudge = touch ${markerDir}/ran-smudge; cat\n\tclean = cat\n`);
   return home;
 }
-
-describe("scripts/prepare.sh (design 3.1)", () => {
-  const script = path.join(root, "scripts", "prepare.sh");
-
-  /** An upstream with a pull request (refs/pull/7/head), a base branch that moved on, and a review clone that has neither fetched. */
-  function setup() {
-    const base = tmp("prepare");
-    const upstream = path.join(base, "upstream");
-    mkdirSync(upstream);
-    out(upstream, ["init", "-q", "-b", "main"]);
-    write(upstream, { "a.txt": "one\n", "pkg/x.go": "package x\n" });
-    const fork = commit(upstream, "base");
-    out(upstream, ["checkout", "-q", "-b", "feature"]);
-    write(upstream, { "a.txt": "one\ntwo\n", "new.go": "package n\n" });
-    const head = commit(upstream, "head");
-    out(upstream, ["update-ref", "refs/pull/7/head", head]);
-    out(upstream, ["checkout", "-q", "main"]);
-    write(upstream, { "later.txt": "later\n" });
-    const tip = commit(upstream, "main moves on");
-    const clone = path.join(base, "clone");
-    out(base, ["clone", "-q", upstream, clone]);
-    return { base, upstream, clone, fork, head, tip };
-  }
-
-  const run = (args: string[], env: NodeJS.ProcessEnv = {}, cwd?: string) => spawnSync("sh", [script, ...args], { cwd, encoding: "utf8", env: { ...process.env, ...env } });
-
-  it("fetches the pull request's head and the base branch into the ledger namespace, computes the merge base, and writes the task", () => {
-    const s = setup();
-    const outDir = path.join(s.base, "reviews");
-    const r = run([outDir, "apache/skywalking-banyandb#7", "--repo", s.clone]);
-    expect(r.status, r.stderr).toBe(0);
-    const task = r.stdout.trim();
-    expect(task).toBe(path.join(outDir, "banyandb-7", "task.yaml"));
-    const ns = "refs/graphloom/pr-review-pulls/apache/skywalking-banyandb/7";
-    expect(out(s.clone, ["rev-parse", `${ns}/heads/${s.head}`])).toBe(s.head);
-    expect(out(s.clone, ["rev-parse", `${ns}/base`])).toBe(s.tip);
-    expect(readFileSync(task, "utf8")).toBe(
-      ["graph: pr-review", `repo: ${path.join(s.base, "clone")}`, `base: ${s.fork}`, "config: profile.json", `request: "Report on apache/skywalking-banyandb#7 at ${s.head}."`, ""].join("\n"),
-    );
-    expect(r.stderr).toContain(`merge base ${s.fork}`);
-    // The profile is copied (a run pins its bytes), the plugin linked, where a task looks for them.
-    expect(readFileSync(path.join(outDir, "banyandb-7", "profile.json"), "utf8")).toBe(readFileSync(path.join(root, "profiles", "banyandb.json"), "utf8"));
-    expect(lstatSync(path.join(outDir, "banyandb-7", "plugins", "pr-review")).isSymbolicLink()).toBe(true);
-    expect(readlinkSync(path.join(outDir, "banyandb-7", "plugins", "pr-review"))).toBe(root);
-  });
-
-  it("checks nothing out: the clone's branch, index and files are exactly as they were", () => {
-    const s = setup();
-    const before = [out(s.clone, ["rev-parse", "HEAD"]), out(s.clone, ["status", "--porcelain"]), readdirSync(s.clone).sort().join()];
-    expect(run([path.join(s.base, "r"), "apache/skywalking-banyandb#7", "--repo", s.clone]).status).toBe(0);
-    expect([out(s.clone, ["rev-parse", "HEAD"]), out(s.clone, ["status", "--porcelain"]), readdirSync(s.clone).sort().join()]).toEqual(before);
-  });
-
-  it("runs no hook, no filesystem monitor and no filter: only fetch, ls-remote, merge-base, update-ref, rev-parse and file writes", () => {
-    const s = setup();
-    const marks = tmp("marks");
-    // Hooks in the clone itself, and global configuration that would run code on any ref update or file operation.
-    for (const name of ["reference-transaction", "post-fetch", "post-checkout", "post-merge", "pre-auto-gc", "post-update"]) {
-      writeFileSync(path.join(s.clone, ".git", "hooks", name), `#!/bin/sh\ntouch ${marks}/ran-hook\n`);
-      chmodSync(path.join(s.clone, ".git", "hooks", name), 0o755);
-    }
-    out(s.clone, ["config", "core.fsmonitor", path.join(booby(marks), "monitor.sh")]);
-    const r = run([path.join(s.base, "r"), "apache/skywalking-banyandb#7", "--repo", s.clone], { HOME: booby(marks) });
-    expect(r.status, r.stderr).toBe(0);
-    expect(markers(marks)).toEqual([]);
-    expect(out(s.clone, ["rev-parse", `refs/graphloom/pr-review-pulls/apache/skywalking-banyandb/7/base`])).toBe(s.tip);
-  });
-
-  it("proves its own test: a plain fetch and ref update in the same clone does run the hook (the control)", () => {
-    const s = setup();
-    const marks = tmp("marks");
-    writeFileSync(path.join(s.clone, ".git", "hooks", "reference-transaction"), `#!/bin/sh\ntouch ${marks}/ran-hook\n`);
-    chmodSync(path.join(s.clone, ".git", "hooks", "reference-transaction"), 0o755);
-    out(s.clone, ["update-ref", "refs/x/y", s.head.length === 40 ? out(s.clone, ["rev-parse", "HEAD"]) : ""]);
-    expect(markers(marks)).toEqual(["hook"]);
-  });
-
-  it("lives beside an existing ledger ref, in either order (a Git ref cannot be a leaf and a directory)", () => {
-    const s = setup();
-    const ledger = "refs/graphloom/pr-review/apache/skywalking-banyandb/7";
-    out(s.clone, ["update-ref", ledger, s.fork]);
-    const r = run([path.join(s.base, "r"), "apache/skywalking-banyandb#7", "--repo", s.clone]);
-    expect(r.status, r.stderr).toBe(0);
-    expect(out(s.clone, ["rev-parse", ledger])).toBe(s.fork);
-    const fresh = setup();
-    expect(run([path.join(fresh.base, "r"), "apache/skywalking-banyandb#7", "--repo", fresh.clone]).status).toBe(0);
-    out(fresh.clone, ["update-ref", ledger, fresh.fork]);
-    expect(out(fresh.clone, ["rev-parse", ledger])).toBe(fresh.fork);
-  });
-
-  it("takes the pull request's URL, and an explicit base branch and remote", () => {
-    const s = setup();
-    out(s.upstream, ["branch", "release", s.fork]);
-    out(s.clone, ["remote", "add", "up", s.upstream]);
-    const r = run([path.join(s.base, "r"), "https://github.com/apache/skywalking-banyandb/pull/7", "--repo", s.clone, "--remote", "up", "--base", "release"]);
-    expect(r.status, r.stderr).toBe(0);
-    const task = readFileSync(r.stdout.trim(), "utf8");
-    expect(task).toContain(`base: ${s.fork}`);
-    expect(out(s.clone, ["rev-parse", "refs/graphloom/pr-review-pulls/apache/skywalking-banyandb/7/base"])).toBe(s.fork);
-  });
-
-  it("keeps earlier heads alive: a second head gets its own ref beside the first", () => {
-    const s = setup();
-    const outDir = path.join(s.base, "r");
-    expect(run([outDir, "apache/skywalking-banyandb#7", "--repo", s.clone]).status).toBe(0);
-    out(s.upstream, ["checkout", "-q", "feature"]);
-    write(s.upstream, { "more.go": "package m\n" });
-    const second = commit(s.upstream, "push again");
-    out(s.upstream, ["update-ref", "refs/pull/7/head", second]);
-    out(s.upstream, ["checkout", "-q", "main"]);
-    expect(run([outDir, "apache/skywalking-banyandb#7", "--repo", s.clone]).status).toBe(0);
-    const refs = out(s.clone, ["for-each-ref", "--format=%(refname)", "refs/graphloom/pr-review-pulls/apache/skywalking-banyandb/7/heads"]).split("\n");
-    expect(refs).toEqual([`refs/graphloom/pr-review-pulls/apache/skywalking-banyandb/7/heads/${s.head}`, `refs/graphloom/pr-review-pulls/apache/skywalking-banyandb/7/heads/${second}`].sort());
-    expect(readFileSync(path.join(outDir, "banyandb-7", "task.yaml"), "utf8")).toContain(`at ${second}.`);
-  });
-
-  it("refuses what it cannot use, with a message and a non-zero exit, and writes no task", () => {
-    const s = setup();
-    const outDir = path.join(s.base, "r");
-    const failure = (args: string[]) => {
-      const r = run(args);
-      expect(r.status, `${args.join(" ")}: ${r.stdout}`).not.toBe(0);
-      return r.stderr;
-    };
-    expect(failure([outDir])).toMatch(/usage/);
-    expect(failure([outDir, "apache/skywalking-banyandb", "--repo", s.clone])).toMatch(/usage/);
-    expect(failure([outDir, "apache/skywalking-banyandb#x", "--repo", s.clone])).toMatch(/bad pull request number/);
-    expect(failure([outDir, "apache/skywalking-banyandb#07", "--repo", s.clone])).toMatch(/bad pull request number/);
-    expect(failure([outDir, "../evil/skywalking-banyandb#7", "--repo", s.clone])).toMatch(/bad repository owner/);
-    expect(failure([outDir, "apache/skywalking-banyandb#8", "--repo", s.clone])).toMatch(/could not fetch refs\/pull\/8\/head/);
-    expect(failure([outDir, "apache/skywalking-banyandb#7", "--repo", path.join(s.base, "nowhere")])).toMatch(/is not a directory/);
-    expect(failure([outDir, "apache/skywalking-banyandb#7", "--repo", s.base])).toMatch(/not a Git repository/);
-    expect(failure([outDir, "apache/skywalking-banyandb#7", "--repo", s.clone, "--base", "-x"])).toMatch(/bad base branch/);
-    expect(failure([outDir, "apache/skywalking-banyandb#7", "--repo", s.clone, "--base", "nope"])).toMatch(/could not fetch the base branch nope/);
-    expect(failure([outDir, "apache/skywalking-banyandb#7", "--repo", s.clone, "--config", path.join(s.base, "none.json")])).toMatch(/no profile at/);
-    expect(failure([outDir, "apache/skywalking-banyandb#7", "--repo", s.clone, "--remote", "--upload-pack=x"])).toMatch(/bad remote name/);
-    expect(failure([outDir, "apache/skywalking-banyandb#7", "--bogus"])).toMatch(/usage/);
-    expect(existsSync(path.join(outDir, "banyandb-7", "task.yaml"))).toBe(false);
-  });
-});
 
 describe("materialization (design 4)", () => {
   /** A worktree on the base commit of a pull request that modifies, adds and deletes files and carries a filter in its .gitattributes. */

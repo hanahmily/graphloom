@@ -255,26 +255,55 @@ export function assembleReport(report: ReporterOutput, removed: ReadonlyMap<stri
   let next = items.length;
   const cited = new Set(ctx.sections.flatMap((s) => bySection.get(s.id)!.flatMap((i) => i.cites.map((c) => c.path))));
   const accounted = new Set(ctx.sections.flatMap((s) => bySection.get(s.id)!.flatMap((i) => i.facts)));
+  /**
+   * Appends plugin-written items to a section. Past the section's bound they are grouped, several to an item,
+   * so assembly never produces a report the deterministic rules would refuse.
+   */
+  const place = (section: string, autos: Array<Omit<FinalItem, "id">>, label: string): void => {
+    const target = bySection.get(section)!;
+    const room = MAX_ITEMS_PER_SECTION - target.length;
+    if (autos.length <= room) {
+      for (const a of autos) {
+        next += 1;
+        target.push({ id: `R${next}`, ...a });
+      }
+      return;
+    }
+    const size = Math.ceil(autos.length / Math.max(1, room));
+    for (let i = 0; i < autos.length; i += size) {
+      const chunk = autos.slice(i, i + size);
+      const text = `${label === "" ? "" : `${label}: `}${chunk.map((a) => a.text).join("; ")}`;
+      next += 1;
+      target.push({
+        id: `R${next}`,
+        text: text.length <= MAX_ITEM_CHARS ? text : `${text.slice(0, MAX_ITEM_CHARS - 1)}…`,
+        cites: chunk.flatMap((a) => a.cites),
+        facts: chunk.flatMap((a) => a.facts),
+        auto: chunk[0]!.auto!,
+      });
+    }
+  };
+  const factItems = new Map<string, Array<Omit<FinalItem, "id">>>();
   for (const fact of ctx.facts) {
     if (accounted.has(fact.id) || !bySection.has(fact.section)) continue;
-    next += 1;
     const whole = fact.line < 1;
-    bySection.get(fact.section)!.push({
-      id: `R${next}`,
+    const list = factItems.get(fact.section) ?? [];
+    list.push({
       text: `Detected: ${fact.text}. The reported item for it was removed by the claim check.`,
       cites: [{ path: fact.path, side: fact.side, start: whole ? 0 : fact.line, end: whole ? 0 : fact.line, symbol: "" }],
       facts: [fact.id],
       auto: "fact",
     });
+    factItems.set(fact.section, list);
     cited.add(fact.path);
   }
+  for (const [section, list] of factItems) place(section, list, "");
   if (bySection.has("other")) {
+    const uncovered: Array<Omit<FinalItem, "id">> = [];
     for (const file of ctx.files) {
       const names = fileNames(file);
       if (names.every((n) => cited.has(n))) continue;
-      next += 1;
-      bySection.get("other")!.push({
-        id: `R${next}`,
+      uncovered.push({
         text: `${file.path} changed (+${file.additions} −${file.deletions} lines); not summarised`,
         cites: names.map((n) => ({ path: n, side: (n === file.path && file.status !== "removed" ? "head" : "base") as Side, start: 0, end: 0, symbol: "" })),
         facts: [],
@@ -282,6 +311,7 @@ export function assembleReport(report: ReporterOutput, removed: ReadonlyMap<stri
       });
       for (const n of names) cited.add(n);
     }
+    place("other", uncovered, "Changed, not summarised");
   }
   return {
     sections: ctx.sections.map((s) => ({ id: s.id, title: s.title, none: bySection.get(s.id)!.length === 0, items: bySection.get(s.id)! })),

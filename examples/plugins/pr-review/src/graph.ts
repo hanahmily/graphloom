@@ -309,7 +309,7 @@ const MAX_MASKS = 64;
  * can mask, or a path no mask can name, is refused, never left exposed.
  */
 export function agentConfigMasks(worktree: string, changed: readonly string[]): { masks: string[] } | { problem: string } {
-  const names = ["CLAUDE.md", "AGENTS.md", ".claude", ".codex", ".mcp.json", ".opencode"];
+  const names = ["CLAUDE.md", "CLAUDE.local.md", "AGENTS.md", "AGENTS.override.md", ".claude", ".codex", ".agents", ".pi", ".mcp.json", ".opencode"];
   const roots = new Set(names);
   for (const p of changed) {
     const segments = p.split("/");
