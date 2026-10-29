@@ -536,14 +536,15 @@ export function asReporterOutput(final: FinalReport): Pick<ReporterOutput, "sect
 }
 
 /** The lines a cite names, resolved from the file's patch when it gives none: a symbol to the lines that mention it, a whole file to its changed lines. */
-export function citedLines(c: Cite, files: readonly PullFile[]): { start: number; end: number } | undefined {
-  if (c.start >= 1 && c.end >= c.start) return { start: c.start, end: c.end };
+export function citedLines(c: Cite, files: readonly PullFile[]): { start: number; end: number; side: Side } | undefined {
+  if (c.start >= 1 && c.end >= c.start) return { start: c.start, end: c.end, side: c.side };
   const file = findFile(files, c.path);
   if (file === undefined || file.parsed.lines.length === 0) return undefined;
   const number = (l: PullFile["parsed"]["lines"][number], side: Side): number | undefined => (side === "head" ? (l.kind === "del" ? undefined : l.line) : l.kind === "del" ? l.line : l.baseLine);
-  const range = (pool: PullFile["parsed"]["lines"], side: Side): { start: number; end: number } | undefined => {
+  /** The range on `side`, with that side named: a resolved range keeps the tree its numbers belong to. */
+  const range = (pool: PullFile["parsed"]["lines"], side: Side): { start: number; end: number; side: Side } | undefined => {
     const ns = pool.map((l) => number(l, side)).filter((n): n is number => n !== undefined);
-    return ns.length === 0 ? undefined : { start: Math.min(...ns), end: Math.max(...ns) };
+    return ns.length === 0 ? undefined : { start: Math.min(...ns), end: Math.max(...ns), side };
   };
   const lines = file.parsed.lines;
   if (c.symbol !== "") {
@@ -561,10 +562,10 @@ export function citedLines(c: Cite, files: readonly PullFile[]): { start: number
  * Without them, a symbol shows as `#symbol`.
  */
 export function citeLabel(c: Cite, files?: readonly PullFile[]): string {
-  const at = files !== undefined ? citedLines(c, files) : c.start >= 1 && c.end >= c.start ? { start: c.start, end: c.end } : undefined;
+  const at = files !== undefined ? citedLines(c, files) : c.start >= 1 && c.end >= c.start ? { start: c.start, end: c.end, side: c.side } : undefined;
   const lines = at === undefined ? "" : at.start === at.end ? `:${at.start}` : `:${at.start}-${at.end}`;
   const symbol = files === undefined && at === undefined && c.symbol !== "" ? ` #${c.symbol}` : "";
-  return `${c.path}${lines}${c.side === "base" ? " (base)" : ""}${symbol}`;
+  return `${c.path}${lines}${(at?.side ?? c.side) === "base" ? " (base)" : ""}${symbol}`;
 }
 
 export interface ReportHeader {

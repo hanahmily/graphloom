@@ -180,9 +180,14 @@ describe("lifecycle and behavior validation", () => {
 describe("citations always read as path:line", () => {
   const w = [goFile, changelog, file("logo.png", "modified", null)];
   it("resolves a symbol alone to the lines that mention it, and a whole file to its changed lines", () => {
-    expect(citedLines({ path: "pkg/cb.go", side: "head", start: 0, end: 0, symbol: "stored++" }, w)).toEqual({ start: find("stored++"), end: find("stored++") });
+    expect(citedLines({ path: "pkg/cb.go", side: "head", start: 0, end: 0, symbol: "stored++" }, w)).toEqual({ start: find("stored++"), end: find("stored++"), side: "head" });
     expect(citeLabel({ path: "pkg/cb.go", side: "head", start: 0, end: 0, symbol: "firstErr" }, w)).toBe(`pkg/cb.go:${find("var firstErr")}-${find("return failure")}`);
     expect(citeLabel({ path: "CHANGES.md", side: "head", start: 0, end: 0, symbol: "" }, w)).toBe("CHANGES.md:4");
+  });
+
+  it("keeps the tree a resolved range belongs to: a whole-file cite of a file that only deletes lines reads as base lines", () => {
+    const shrunk = file("a.ts", "modified", "@@ -1,3 +1,1 @@\n keep\n-oldA\n-oldB");
+    expect(citeLabel({ path: "a.ts", side: "head", start: 0, end: 0, symbol: "" }, [shrunk])).toBe("a.ts:2-3 (base)");
   });
 
   it("renders a file with no patch text as the path alone, never as a path and a colon", () => {
