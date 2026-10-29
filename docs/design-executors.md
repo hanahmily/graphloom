@@ -437,6 +437,12 @@ generation or an earlier one, and has not already been continued. It rejects
 anything else before the job runs, with `continuation rejected`. A continued
 job gets the same directory, and `ctx.session.resume` names the session.
 
+`job.forkFrom: <session id>` is the fork form: the job starts from a copy of
+a recorded session, a job's or an operator conversation's, under a fresh
+session id in its own directory, and the parent is never written. It may
+cross stages and dispatch keys and needs the same harness
+([core §15](design-typescript-core.md#15-opening-a-recorded-agent-session)).
+
 The continued session's transcript is context, not authority:
 
 - The assignment starts with a notice that the worktree and services may have

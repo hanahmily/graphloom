@@ -97,11 +97,12 @@ graphloom stop <run-id>
 graphloom resume <run-id>
 graphloom delete <run-id> [--force]
 graphloom session list <run-id>
-graphloom session open <run-id> [--stage <stageId> | <session>]
+graphloom session open <run-id> [--stage <stageId> [--from-original] | <session>]
 ```
 
 `session open` starts the agent of a session the run recorded, on a fork of
-it, in the user's terminal ([§15](#15-opening-a-recorded-agent-session)).
+it, in the user's terminal, and records the conversation when the agent exits
+([§15](#15-opening-a-recorded-agent-session)).
 
 These are target interfaces. Relative paths resolve from the task file. `hello`
 selects an operator-installed bundle at `plugins/hello/` beside that file. Reject
@@ -1132,37 +1133,55 @@ is not part of a prepare command's cache key.
 
 ## 15. Opening a recorded agent session
 
-Status: proposed, 2026-10-29. Not implemented.
+Status: proposed, 2026-10-29. Revised 2026-10-29: the conversation is
+recorded, a repeated open continues it, and a graph job may fork it. Not
+implemented.
 
 An operator sometimes wants to talk to the agent that did a job, for
-example to ask the answerer why it settled a question that way.
-`graphloom session open` is only a launcher: it finds the recorded session,
-restores and forks it, and starts the real agent CLI on the fork in the
-operator's terminal. The chat is the operator's own; GraphLoom records
-nothing of it and the run does not change. The command is plugin-neutral: it
-reads only the run's generic session records (stage id, operation id,
-executor, session ref) and never knows a plugin's role names.
+example to ask the answerer why it settled a question that way, and wants
+what was said there to count: a later job of the run may start from it.
+`graphloom session open` finds the recorded session, restores and forks it,
+starts the real agent CLI on the fork in the operator's terminal, and, when
+the agent exits, records the fork's transcript in the run as an **operator
+conversation**. The recorded session itself never changes. The command is
+plugin-neutral: it reads only the run's generic session records (stage id,
+operation id, executor, session ref, origin, parent) and never knows a
+plugin's role names.
 
 ```text
 graphloom session list <run-id> [--json]
-graphloom session open <run-id> [--stage <stageId> | <session>]
+graphloom session open <run-id> [--stage <stageId> [--from-original] | <session>]
 ```
 
 **List.** One row per `agentSessions` record
 ([timeout continuation](#job-wall-clock-and-timeout-continuation)): stage id
 and attempt, operation id, dispatch key, executor and harness, session ref,
 status, when its last turn settled, the operation it continued, and whether
-it can be opened (`ok`, `running`, `pi: no interactive restore`, `wiped`).
-`<session>` names a row by its session ref (`claude-<uuid>`,
-`codex-<uuid>`) or its operation id.
+it can be opened (`ok`, `running`, `pi: no interactive restore`, `wiped`,
+`transcript omitted`). Operator conversations are rows too, with origin
+`operator`, their stage, their parent's session ref (the job session or the
+earlier conversation they forked), and when they started and ended, so a
+chain reads conversation → conversation → job session. `<session>` names a
+row by its session ref (`claude-<uuid>`, `codex-<uuid>`), its operation id,
+or a conversation's record id.
 
-**Open.** It selects the named session. With `--stage`, it takes the
-stage's latest attempt that recorded a session, the dispatch key that
-attempt dispatched first, and that key's latest session by `settledAt`: in a
-stage where an author's job is followed by a checker's, that is the author,
-corrections included. Any other session of the stage, a checker's for
-example, is opened by its ref or operation id from `session list`. With
-neither, it takes the run's latest session. Then:
+**Open.** It selects the session to fork:
+
+- With `--stage`, the stage's latest operator conversation by `endedAt`, so
+  a second open continues the first conversation (a chained fork). With no
+  conversation yet, or with `--from-original`, the stage's **job session**:
+  the stage's latest attempt that recorded a session, the dispatch key that
+  attempt dispatched first, and that key's latest session by `settledAt`. In
+  a stage where an author's job is followed by a checker's, that is the
+  author, corrections included. `--from-original` starts a new chain beside
+  the old one, which stays recorded.
+- With `<session>`, that row: any job session (a checker's, for example) or
+  any conversation.
+- With neither, the run's latest session.
+
+Every open makes a new fork; nothing is resumed in place. Two opens at once
+fork the same parent and are recorded as siblings; the later `endedAt` is
+the stage's latest. Then:
 
 1. **Refusals.** It refuses, naming the reason, when:
    - the session's harness is Pi (`pi-…`): Pi has no interactive restore, so
@@ -1170,12 +1189,14 @@ neither, it takes the run's latest session. Then:
    - the executor is not the coding agent (a scripted harness, a custom
      executor);
    - the job that owns the session is still running: its operation, or any
-     outstanding operation whose `continueFrom` lineage includes it, has not
-     settled;
+     outstanding operation whose `continueFrom` or `forkFrom` lineage
+     includes it, has not settled;
    - the run has succeeded or failed: the saved copies were removed then
      (`wipeAgentSessions`), so the row lists as `wiped`;
    - the saved copy is missing or corrupt, as a resume refuses it
-     (`openClaudeSession`, `openCodexThread`).
+     (`openClaudeSession`, `openCodexThread`);
+   - the conversation's transcript was not stored because it exceeded the
+     bound (below); the message names `--from-original`.
 2. **Harness.** The session's own harness opens it, never another: a
    `claude-` ref only in Claude Code, a `codex-` ref only in Codex. There is
    no harness option. The ref's prefix, the record's harness and the saved
@@ -1187,15 +1208,127 @@ neither, it takes the run's latest session. Then:
    a new session and the recorded one never changes:
    - **Claude Code:** write the transcript and its side files into
      `<configDir>/projects/<project>/` as `openClaudeSession` does, then run
-     `claude --resume <uuid> --fork-session` interactively.
+     `claude --resume <uuid> --fork-session --session-id <new uuid>`
+     interactively. GraphLoom picks the fork's id before launch.
    - **Codex:** copy the rollout to `sessions/<today>/rollout-<time>-<new
      thread>.jsonl` under the Codex home, with the thread id in its
      `session_meta` record replaced by a fresh one, then run
      `codex resume <new thread>` interactively. The recorded thread's own
      rollout is never written.
+
+   Either command may be prefixed by the operator's session launcher
+   (below).
 4. **Hand over the terminal.** The agent inherits stdin, stdout, stderr and
-   the controlling TTY. GraphLoom prints the fork's id, waits, and exits with
-   the agent's exit code. Without a TTY on stdin it refuses.
+   the controlling TTY. GraphLoom prints the fork's id and waits. Without a
+   TTY on stdin it refuses.
+5. **Capture.** When the agent exits, whatever its exit code, GraphLoom
+   reads the fork's transcript from the agent's store by the id it chose
+   before launch (Claude Code's `<new uuid>.jsonl` and side directory under
+   the project directory, Codex's copied rollout), never from the agent's
+   or a launcher's output. If no transcript exists under that id, for
+   example because a launcher dropped `--session-id` or pointed the agent at
+   another store, nothing is recorded and the message says why; GraphLoom
+   never guesses at another session. A fork with no operator turn is
+   discarded and nothing is recorded. Otherwise it
+   takes the run lock, only now and only for the write, and:
+   - copies the transcript into the run's session directory
+     (`agent-sessions/operator/<fork ref>`). Like a job's saved copy, it is
+     self-contained: it holds the parent's turns, so a later fork needs only
+     it;
+   - adds an `AgentSessionRecord` with `origin: "operator"`, the stage, the
+     harness and confinement of the session it forked, and `parent`;
+   - records `operator-conversation` evidence: stage, base session ref (the
+     parent), root job session ref, fork session ref, harness, `startedAt`,
+     `endedAt`, the transcript's SHA-256 and size, its context estimate
+     (below), and the **turn extract**.
+
+   The parent's saved copy is left byte-identical. If the run finished while
+   the agent ran, the capture records nothing and says so; the fork stays in
+   the agent's own store. GraphLoom then exits with the agent's exit code.
+
+**Session launcher.** Some operators start Claude Code or Codex through a
+local wrapper of their own (for example `hapi claude …`, `hapi codex …`).
+That is operator configuration, never code. The runner config gains, per
+harness:
+
+| Key | Meaning |
+|---|---|
+| `claude.sessionLauncher`, `codex.sessionLauncher` | An argv prefix, such as `["hapi", "claude"]`, that replaces the agent command for `session open` only. GraphLoom appends its own arguments: `hapi claude --resume <uuid> --fork-session --session-id <new uuid> --append-system-prompt "<note>"` |
+| `claude.sessionLauncherStateDirs`, `codex.sessionLauncherStateDirs` | Directories the launcher keeps its own state in (for example `~/.hapi`), made writable inside the session's confinement as `ownState` is |
+
+`GRAPHLOOM_CLAUDE_SESSION_LAUNCHER` and `GRAPHLOOM_CODEX_SESSION_LAUNCHER`
+override the launcher for one invocation, split into words as a shell would
+split them (quotes honored, no expansion); the state directories still come
+from the config. The keys are per harness because a launcher wraps one CLI,
+and its state is that launcher's. The existing runner-config parser, which
+refuses unknown keys, gains them: a launcher must be a non-empty array of
+non-empty strings, and a state directory an absolute or `~/` path. Headless
+graph jobs never use a launcher: they keep `claude.command` and
+`codex.command`, since their stream-json over pipes must not pass through a
+wrapper.
+
+Inside the confinement, the launcher's first word is resolved on `PATH` to
+an absolute real path; that file and its directory are bound read-only, and
+its state directories writable. The agent's config dir or Codex home, and
+`passEnv`, are those of the harness, so the agent the launcher starts uses
+the store GraphLoom restored into. Network is already on for an opened
+session, so a launcher may talk to a local hub.
+
+**Launcher probe.** A wrapper may not pass GraphLoom's arguments through.
+Checked against the operator's `hapi`: `hapi claude --help` prints Claude
+Code's own help, so it passes options through; `hapi codex --help` fails
+with "Unsupported shared Codex launch flag: --help", so it may not accept
+`resume <thread>` either. Before launching, `session open` probes the
+configured launcher, with no model call and no session: for Claude Code,
+`<launcher> --help` must succeed and list `--resume`, `--fork-session`,
+`--session-id` and `--append-system-prompt`; for Codex, `<launcher> resume
+--help` must succeed and describe `resume`. A failed probe refuses the open,
+naming the launcher, the probe and its output, and suggests removing the
+launcher setting (plain `claude` or `codex`) or using the launcher's own
+resume outside GraphLoom. It never falls back to a fresh session or to
+another one. `graphloom doctor` runs the same probes and warns with the same
+message.
+
+**Turn extract.** A harness-neutral list of the conversation's own turns,
+built deterministically from the transcript: each operator message verbatim,
+and the agent's final text answer of each turn (Claude Code: the last
+assistant text before the next user message; Codex: the turn's last agent
+message). Tool calls and results are left out. It is at most 256 KiB:
+operator messages are kept whole up to 128 KiB in total, each agent answer
+is cut to 4 KiB, and past the limit the oldest agent answers go first, then
+the oldest operator messages, each cut marked. Plugins read the extract as
+run evidence, as they read `operator-approval`; it holds no ref or path.
+
+**Bound.** A conversation's stored transcript is at most 32 MiB
+(`maxConversationBytes` in the runner config). Beyond it, the transcript is
+not copied: the evidence records `transcript: omitted (<size>)`, and keeps
+its digest and the turn extract. Such a conversation cannot be forked, by a
+later open or by a job; a plugin that wanted it falls back to its own
+seeding from the extract.
+
+**Context estimate.** Each session record carries `contextTokens`: the
+input context of the transcript's last model call, from its own usage
+records (Claude Code: `input_tokens` plus cache reads and cache writes of
+the last assistant message; Codex: the last `token_count` event), or its
+byte size divided by four when there is none. It is generic data, listed in
+`RunView.agentSessions`; a plugin compares it with its own bound.
+
+**Forking by a job.** `JobSpec.forkFrom: <session id>` is the fork form of
+`continueFrom`
+([continuing an agent session](design-executors.md#continuing-an-agent-session)).
+The id is an operation id (a job session) or an operator conversation's
+record id. The controller admits it only for a coding-agent job whose
+harness equals the session's, for a settled session with a stored
+transcript, and never together with `continueFrom`. Unlike `continueFrom`,
+it may cross stages and dispatch keys, and one session may be forked any
+number of times. Anything else is `continuation rejected`, with the reason
+(a `claude-` session cannot start a Codex job). The executor restores the
+saved copy into the new job's own session directory under a fresh id
+(`claude -p --resume <uuid> --fork-session`; for Codex, the rollout copied
+under a new thread id, then `codex exec resume`), so the parent stays
+byte-identical, and the job's session is recorded with `forkedFrom`. The
+assignment starts with the continuation notice, and scopes, tools,
+credentials, confinement and budget come only from the new dispatch.
 
 **Opening note.** One line of status, built from generic run data, for
 example: "This is a fork of the answers session; since it ended: the
@@ -1205,49 +1338,77 @@ summary of each operation the stage settled after the session's own, and
 the run's status and stop reason. Claude Code gets it as
 `--append-system-prompt`, which adds no turn; Codex, which has no such flag
 for an interactive resume, gets it as the first user turn
-(`codex resume <thread> <note>`). No skill is involved: a skill inside one
-harness cannot hand the terminal to another harness's session.
+(`codex resume <thread> <note>`), which the turn extract skips. No skill is
+involved: a skill inside one harness cannot hand the terminal to another
+harness's session.
 
 **Confinement.** The session runs in the run's worktree under the same
 confinement kind its job used, taken from the record: each
 `AgentSessionRecord` gains `harness` and the job's `confinement`, copied at
-admission. The worktree is always mounted read-only, also for a writer
-job's session: the chat is not a graph job, and an edit there would be an
-external edit that invalidates evidence
+admission, and a conversation inherits its parent's. The worktree is always
+mounted read-only, also for a writer job's session: the chat is not a graph
+job, and an edit there would be an external edit that invalidates evidence
 ([§9](#9-worktree-communication-and-durable-state)). The run's state
-directory is not mounted. The agent's own login state stays writable, since
-the fork is written there. A confinement that cannot be built (no
-bubblewrap, a non-Linux host) refuses the open; nothing runs unconfined.
-bwrap runs without `--new-session` so the agent keeps the terminal; on a
-kernel that still allows `TIOCSTI` (`dev.tty.legacy_tiocsti` = 1) the open
-refuses, because a confined process could otherwise push keystrokes into the
-operator's shell.
+directory is not mounted; the GraphLoom process captures the transcript
+after the agent has exited, never the agent. The agent's own login state
+stays writable, since the fork is written there. A confinement that cannot
+be built (no bubblewrap, a non-Linux host) refuses the open; nothing runs
+unconfined. bwrap runs without `--new-session` so the agent keeps the
+terminal; on a kernel that still allows `TIOCSTI`
+(`dev.tty.legacy_tiocsti` = 1) the open refuses, because a confined process
+could otherwise push keystrokes into the operator's shell.
 
 **Untrusted content.** A session whose job read untrusted content (its
 confinement masks the workspace's agent configuration) still holds that
 content in its transcript, and the operator's chat continues from it. A
 prompt injection in that content can steer the opened agent as it could the
-job. The confinement is the defence: the agent holds no credential beyond
-its own login and cannot write the worktree or the run state, so whatever
-it is steered to do changes nothing in the run.
+job. While the chat runs, the confinement is the defence: the agent holds
+no credential beyond its own login and cannot write the worktree or the run
+state. Once recorded, the operator's messages are trusted operator input,
+but the agent's answers in the same transcript are not, since they may have
+been steered. A job that forks a conversation gets it as a continued
+transcript, context and not authority, and the plugin keeps its own
+independent checks.
 
-**Lock and budgets.** `session open` does not hold the run lock while the
-agent runs; the run may advance meanwhile. Chat turns run on the operator's
-own login and are not charged to the run's budgets. Opening a session is not
-recorded in run state. The fork stays in the agent's own store after the run
-ends, where `claude --resume` or `codex resume` reopens it; GraphLoom does
-not track it.
+**Lock and budgets.** `session open` holds no run lock while the agent
+runs, so the run may advance meanwhile; a job dispatched before the capture
+does not see the conversation. Chat turns run on the operator's own login
+and are not charged to the run's budgets. A job that forks a conversation
+is charged like any job, its inherited context included. The fork also
+stays in the agent's own store, where `claude --resume` or `codex resume`
+reopens it outside GraphLoom; turns added there are not recorded. When the
+run finishes, `wipeAgentSessions` removes the conversations' transcripts
+with the jobs'; their evidence, extract included, stays in run state.
 
-**Verification.** Opening a session leaves the saved transcript (and Claude
-Code's side files, and Codex's rollout) byte-identical. Pi sessions,
-non-agent executors, a ref whose prefix disagrees with its record, a
-finished run, and a session whose job (or a continuation of it) still runs
-are refused. `--stage` picks the stage's first-dispatched key, not a later
-checker. The opened session's confinement matches its job's kind with the
-worktree read-only (a write fails with `EROFS`), a masked file absent and no
-token in its environment. Fake `claude` and `codex` binaries record their
-argv, environment and TTY; a real-CLI check of `--fork-session`,
-`--append-system-prompt` with `--resume`, and `codex resume <thread>
-<prompt>` on a copied rollout runs opt-in, as the
+**Verification.** Opening and capturing leave the parent's saved transcript
+(and Claude Code's side files, and Codex's rollout) byte-identical, and so
+does a job's `forkFrom`. A second `--stage` open forks the first
+conversation (its parent is that conversation, and the agent sees the first
+chat's turns); `--from-original` forks the job session; `session list`
+shows each conversation with its parent. A fork with no operator turn
+records nothing; one over the bound records `transcript: omitted` and is
+refused as a fork source; a capture after the run finished records nothing.
+The turn extract of fixture transcripts (Claude Code and Codex) keeps the
+operator messages verbatim and drops tool output, and its cut order holds
+at the limit. `forkFrom` is refused across harnesses, together with
+`continueFrom`, and for an omitted or wiped transcript, and admitted across
+stages and dispatch keys. Pi sessions, non-agent executors, a ref whose
+prefix disagrees with its record, a finished run, and a session whose job
+(or a continuation or fork of it) still runs are refused. `--stage` picks
+the stage's first-dispatched key, not a later checker. The opened session's
+confinement matches its job's kind with the worktree read-only (a write
+fails with `EROFS`), a masked file absent and no token in its environment.
+A stub launcher prefix is applied to `session open` only, and a headless
+job with the same config runs `claude.command` unchanged; the environment
+override replaces the configured launcher; the launcher's state directories
+are writable inside the confinement and the rest of the home is not; a
+launcher whose probe fails (a stub that rejects `resume`, like `hapi
+codex`) is refused before anything launches, and `doctor` warns; capture
+through a stub launcher finds the fork by the id GraphLoom chose, and a
+stub that drops `--session-id` records nothing. Fake `claude` and `codex`
+binaries record their argv, environment and TTY and write scripted turns; a real-CLI check of `--fork-session`,
+`--append-system-prompt` with `--resume`, `codex resume <thread> <prompt>`
+on a copied rollout, and the non-interactive forks a job uses runs opt-in,
+as the
 [harness assumptions](design-supervisor-harnesses.md#11-unverified-cli-assumptions)
 are checked.
