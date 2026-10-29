@@ -562,8 +562,10 @@ function answers(ctx: Context, view: RunView): GraphDecision {
     case "verify":
       return withPrivate(dispatch(commandJob(ANSWERS_STAGE, "Check the answers' citations and proposed names against the trees", { commands: flow.commands.slice(0, 16), env: { ...GIT_ENV } }), "resolve each citation in the tree it names, and each proposed name in the package"));
     case "checker": {
-      const assignment = answerCheckerInstruction({ pr, snapshot: c.ctx.analysis.snapshot, groundwork: c.ctx.groundwork, questions: set.questions, answers: flow.answers, retry: flow.retry });
-      const job = agentJob(ctx, view, { stageId: ANSWERS_STAGE, purpose: "review", instruction: "Check the answers against the trees", schema: ANSWER_CHECK_SCHEMA_NAME, harness: profile.roles["answer-checker"], assignment }, files);
+      const mounted = sourceDirs(c.ctx.groundwork.inventory);
+      const assignment = answerCheckerInstruction({ pr, snapshot: c.ctx.analysis.snapshot, groundwork: c.ctx.groundwork, questions: set.questions, answers: flow.answers, retry: flow.retry, mountedDirs: mounted });
+      // The same dependency source, read-only, so a library or dependency citation can be re-checked where it points.
+      const job = agentJob(ctx, view, { stageId: ANSWERS_STAGE, purpose: "review", instruction: "Check the answers against the trees", schema: ANSWER_CHECK_SCHEMA_NAME, harness: profile.roles["answer-checker"], assignment, readOnlyBinds: mounted }, files);
       if ("problem" in job) return refused(job);
       return dispatchAgent(view, job, `check every answer with a fresh read-only ${harnessName(profile.roles["answer-checker"])} session`);
     }

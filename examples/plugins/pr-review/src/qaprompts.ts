@@ -159,6 +159,7 @@ export interface CheckerAssignment {
   questions: readonly Question[];
   answers: ReadonlyMap<string, Answer>;
   retry: boolean;
+  mountedDirs: readonly string[];
 }
 
 function answerText(a: Answer): string {
@@ -177,6 +178,7 @@ export function answerCheckerInstruction(a: CheckerAssignment): string {
     UNTRUSTED_PREAMBLE,
     "",
     HOW_TO_READ,
+    a.mountedDirs.length > 0 ? `Dependency source is mounted read-only at: ${a.mountedDirs.join(", ")}; a dependency citation names a file there.` : "No dependency source is available on this machine.",
     "",
     "For every answer: re-check each equivalent, library, duplicate and covering test it cites against the tree (does the cited code exist and do what the answer says? does the cited test exercise the symbol?). For every answer that says none found, and every missing-test, complexity-coverage or weak-test answer, run searches of your own over the whole base tree (and the head, for tests) with your own patterns, not only the answerer's, and list them in the searches of your verdict (pattern, scope, hits); an absence you could not reproduce is a finding. Give a verdict: supported when your checks agree; partial when part holds (say which in note); unsupported when a none-found answer has a candidate you found, a cited equivalent does not do what is claimed, or a cited test does not exercise the symbol (say what you found in note). Judge claims only, never wording. Return the verdicts of your result: one for every question, none left out.",
     "",

@@ -181,6 +181,20 @@ describe("answer-no-library-with-whole-repo-search", () => {
     expect(text).toContain("No dependency source is available on this machine");
   });
 
+  it("mounts a dependency's source read-only in the answerer's confinement when the cache holds it, and lets the answerer cite it", () => {
+    const cached = scenarioWith("answer-no-library-with-whole-repo-search", (s) => {
+      s.commands!["dep-source-go-1"] = { exitCode: 0, stdout: "go\tgithub.com/spf13/cobra\tv1.9.1\t/home/u/go/pkg/mod/github.com/spf13/cobra@v1.9.1\n# end\n" };
+    });
+    const s2 = simulate({ scenario: cached });
+    const [answerer, checker] = [jobsOf(s2, "Answer the questions")[0]!, jobsOf(s2, "Check the answers against")[0]!];
+    expect((answerer.confinement as { binds: unknown[] }).binds).toEqual([{ path: "/home/u/go/pkg/mod/github.com/spf13/cobra@v1.9.1", readOnly: true }]);
+    expect(assignmentOf(answerer)).toContain("Dependency source is mounted read-only at: /home/u/go/pkg/mod/github.com/spf13/cobra@v1.9.1");
+    expect(assignmentOf(answerer)).toContain("go github.com/spf13/cobra v1.9.1 [go.mod] no use found — source available: /home/u/go/pkg/mod/github.com/spf13/cobra@v1.9.1");
+    // The checker gets the same read-only mount, to re-check a dependency citation where it points.
+    expect((checker.confinement as { binds: unknown[] }).binds).toEqual([{ path: "/home/u/go/pkg/mod/github.com/spf13/cobra@v1.9.1", readOnly: true }]);
+    expect(qaOf(s2).inventory.dependencies[0]!.source).toBe("/home/u/go/pkg/mod/github.com/spf13/cobra@v1.9.1");
+  });
+
   it("makes the library answer partially answered while a dependency's source is unavailable: an answered one is sent back", () => {
     const wrong = scenarioWith("answer-no-library-with-whole-repo-search", (s) => {
       const reply = s.results["answers-v1"]![0]!.output as { answers: Array<{ question: string; status: string }> };
