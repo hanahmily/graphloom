@@ -12,7 +12,7 @@
  * recomputed (or stays its upper bound, §2.4). Mutation arrives with a later version.
  */
 import type { EnvironmentCommand, EvidenceRecord } from "@graphloom/sdk";
-import { coverageState, reasonText, recordKey, type CoverageFacts, type CoveragePlan, type Outcome } from "./coverage.js";
+import { coverageState, reasonText, recordKey, type CoverageFacts, type CoverageRunFacts, type CoveragePlan, type Outcome } from "./coverage.js";
 import { pinnedBase } from "./commands.js";
 import { commandRuns, describeCommand, latestFile, outputTail, reportText, succeeded, type CommandRun } from "./evidence.js";
 import { crapRounded, exceeds, LIMITS, originOf, type Metric } from "./metrics/crap.js";
@@ -469,6 +469,22 @@ const cell = (s: string): string => s.replace(/\|/g, "\\|").replace(/\s*\n\s*/g,
 
 const shortImage = (image: string): string => image.replace(/@sha256:([0-9a-f]{12})[0-9a-f]*$/, "@sha256:$1…");
 
+/** A failing entry as a name: `--- FAIL: TestX (0.01s)` is `TestX`; a Ginkgo `[FAIL] spec` and a `FAIL pkg` line stay as written. */
+function failingName(entry: string): string {
+  const go = /^--- FAIL: (\S+)/.exec(entry);
+  if (go !== null) return go[1]!;
+  const pkg = /^FAIL (\S+)/.exec(entry);
+  return pkg !== null ? `package ${pkg[1]!}` : entry.replace(/^\[FAIL\]\s*/, "");
+}
+
+/** What a non-zero test command says: the failing tests when the report names them, else the generic sentence and the first build error. */
+function failureSentence(run: CoverageRunFacts): string {
+  const names = [...new Set((run.failing ?? []).map(failingName))];
+  if (names.length > 0) return `the test command exited ${run.exit}; failing: ${names.join("; ")} (coverage is of what ran)`;
+  const build = run.buildError !== undefined ? `; first build error: ${run.buildError}` : "";
+  return `the test command exited ${run.exit} (a test failed or a package did not build: coverage is of what ran)${build}`;
+}
+
 /** What the Coverage run did, in a sentence per language. */
 export function coverageNotes(facts: CoverageFacts): string[] {
   if (!facts.enabled) return ["Coverage: not run (coverage disabled by the profile); CRAP is shown as its upper bound."];
@@ -476,7 +492,7 @@ export function coverageNotes(facts: CoverageFacts): string[] {
   return facts.runs.map((run) => {
     if (!run.ran) return `Coverage (${run.language}): not run (${run.reason ?? "no reason recorded"}).`;
     const how = run.language === "go" ? "go test -coverprofile -covermode=set over the touched packages" : "the repository's own vitest run with @vitest/coverage-v8 over the touched workspace";
-    const exit = run.exit === undefined ? "" : run.exit === 0 ? "; the tests passed" : `; the test command exited ${run.exit} (a test failed or a package did not build: coverage is of what ran)`;
+    const exit = run.exit === undefined ? "" : run.exit === 0 ? "; the tests passed" : `; ${failureSentence(run)}`;
     const changed = run.changed.length > 0 ? `; the run changed ${run.changed.length} file(s) in its checkout (${run.changed.slice(0, 3).join(", ")}): the checks must not change files` : "";
     const setup = run.setup !== undefined && run.setup.length > 0 ? `, after the profile's sandboxed setup (${run.setup.join(", ")}: code the repository does not commit, generated from read-only tools and caches, in the same sandbox)` : "";
     return `Coverage (${run.language}): measured with ${how}, in the Docker sandbox (image ${shortImage(run.image ?? "")}, no network, read-only dependency caches) over a prepared checkout of the head${setup}, statement coverage by function line range${exit}${changed}.`;

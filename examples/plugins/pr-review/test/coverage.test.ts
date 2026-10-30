@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { confinementProblem, type EvidenceRecord, type JobSpec } from "@graphloom/sdk";
 import { describe, expect, it } from "vitest";
 import { coverageCommand, coverageConfinement, coverageState, DEFAULT_TS_IMAGE, majorOf, measuredSpec, missingProbe, recordKey, sandboxEnvironmentChecks, sandboxProbeCommands, type CoverageInput, type CoverageState } from "../src/coverage.js";
-import { withOutcome } from "../src/measurements.js";
+import { coverageNotes, withOutcome } from "../src/measurements.js";
 import {
   formatSpec,
   goFunctionCoverage,
@@ -109,7 +109,8 @@ describe("the coverage report and its attribution", () => {
 
   it("round-trips the spec a command carries", () => {
     const text = formatSpec({ workspace: "ui", packages: ["pkg/a"], files: ["ui/src/m.ts"], functions: [{ path: "ui/src/m.ts", start: 3, end: 16 }] });
-    expect(parseSpec(text)).toEqual({ workspace: "ui", packages: ["pkg/a"], files: ["ui/src/m.ts"], functions: [{ path: "ui/src/m.ts", start: 3, end: 16 }], setup: [] });
+    expect(parseSpec(text)).toEqual({ workspace: "ui", packages: ["pkg/a"], files: ["ui/src/m.ts"], functions: [{ path: "ui/src/m.ts", start: 3, end: 16 }], setup: [], buildTags: [] });
+    expect(parseSpec(formatSpec({ packages: ["pkg/a"], functions: [], buildTags: ["a", "b.c"] })).buildTags).toEqual(["a", "b.c"]);
   });
 
   it("carries setup commands in the spec with every argument intact (spaces, quotes, newlines, the empty string), in order", () => {
@@ -191,7 +192,7 @@ const input = (over: Partial<CoverageInput> & { evidence: EvidenceRecord[] }): C
   ...over,
 });
 
-const goSpec = formatSpec({ packages: ["pkg/a"], functions: [{ path: "pkg/a/a.go", start: 3, end: 16 }], setup: profile.metrics.sandbox!.go!.setup! });
+const goSpec = formatSpec({ packages: ["pkg/a"], functions: [{ path: "pkg/a/a.go", start: 3, end: 16 }], setup: profile.metrics.sandbox!.go!.setup!, buildTags: profile.metrics.sandbox!.go!.buildTags! });
 const goRun = (text: string, over: Parameters<typeof command>[2] = {}): EvidenceRecord => command("cover-go", "", { argv: coverageCommand({ id: "cover-go", script: "go.sh", spec: goSpec }, "/plugin", 60_000).argv, report: { text, truncated: false }, ...over });
 const doneOf = (s: CoverageState): Extract<CoverageState, { state: "done" }> => {
   expect(s.state).toBe("done");
@@ -278,7 +279,7 @@ describe("coverageState", () => {
   it("takes the repository's root package as a package, and leaves hidden, testdata and vendor directories out", () => {
     const root: MetricsRecord = { ...goRecord, path: "main.go", function: "main.F", startLine: 3, endLine: 9 };
     const s = coverageState(input({ evidence: [diff, ...ready("go")], records: [root], index: new Map([["main.go", [["main.F", 3, 9]]]]), files: [{ path: "main.go", language: "go" }, { path: ".github/x.go", language: "go" }, { path: "pkg/testdata/t.go", language: "go" }, { path: "vendor/v/v.go", language: "go" }] }));
-    expect((s as Extract<CoverageState, { state: "run" }>).plan.commands[0]!.spec).toBe(formatSpec({ packages: ["."], functions: [{ path: "main.go", start: 3, end: 9 }], setup: profile.metrics.sandbox!.go!.setup! }));
+    expect((s as Extract<CoverageState, { state: "run" }>).plan.commands[0]!.spec).toBe(formatSpec({ packages: ["."], functions: [{ path: "main.go", start: 3, end: 9 }], setup: profile.metrics.sandbox!.go!.setup!, buildTags: profile.metrics.sandbox!.go!.buildTags! }));
   });
 
   it("runs only the languages that have a function to measure, and not for a test file alone", () => {
@@ -606,15 +607,17 @@ case "$1" in
   env) echo "$PWD/go.mod" ;;
   test)
     echo "test" >> "$ORDER"
+    echo "$*" >> "$ARGS"
     for a in "$@"; do case "$a" in -coverprofile=*) printf 'mode: set\nexample.com/m/pkg/a/a.go:4.2,6.3 3 1\n' > "\${a#-coverprofile=}" ;; esac; done
-    echo "ok  	example.com/m/pkg/a	0.1s" ;;
+    if [ -n "\${GOOUT:-}" ]; then printf '%b' "$GOOUT"; else echo "ok  	example.com/m/pkg/a	0.1s"; fi
+    exit "\${GORC:-0}" ;;
 esac
 `,
       { mode: 0o755 },
     );
   };
 
-  function run(setup: Array<{ id: string; argv: string[] }>): { report: string; order: string[]; status: number | null } {
+  function run(setup: Array<{ id: string; argv: string[] }>, more: { buildTags?: string[]; out?: string; rc?: number; spec?: string } = {}): { report: string; order: string[]; status: number | null; args: string[] } {
     const dir = mkdtempSync(path.join(os.tmpdir(), "gl-gosh-"));
     try {
       const bin = path.join(dir, "bin");
@@ -622,13 +625,15 @@ esac
       spawnSync("mkdir", ["-p", bin, path.join(work, "pkg", "a")]);
       stubs(bin);
       writeFileSync(path.join(work, "go.mod"), "module example.com/m\n\ngo 1.25\n");
-      const spec = formatSpec({ packages: ["pkg/a"], functions: [{ path: "pkg/a/a.go", start: 3, end: 16 }], setup });
+      const spec = more.spec ?? formatSpec({ packages: ["pkg/a"], functions: [{ path: "pkg/a/a.go", start: 3, end: 16 }], setup, ...(more.buildTags !== undefined ? { buildTags: more.buildTags } : {}) });
       const parts = [spec];
+      const args = path.join(dir, "args.txt");
+      writeFileSync(args, "");
       const rep = path.join(dir, "report.txt");
       const order = path.join(dir, "order.txt");
       writeFileSync(order, "");
-      const r = spawnSync("sh", [goSh, String(parts.length), ...parts], { cwd: work, encoding: "utf8", env: { PATH: `${bin}:${process.env.PATH}`, TMPDIR: dir, GRAPHLOOM_REPORT_FILE: rep, ORDER: order } });
-      return { report: spawnSync("cat", [rep], { encoding: "utf8" }).stdout, order: spawnSync("cat", [order], { encoding: "utf8" }).stdout.split("\n").filter(Boolean), status: r.status };
+      const r = spawnSync("sh", [goSh, String(parts.length), ...parts], { cwd: work, encoding: "utf8", env: { PATH: `${bin}:${process.env.PATH}`, TMPDIR: dir, GRAPHLOOM_REPORT_FILE: rep, ORDER: order, ARGS: args, GORC: String(more.rc ?? 0), ...(more.out !== undefined ? { GOOUT: more.out } : {}) } });
+      return { args: spawnSync("cat", [args], { encoding: "utf8" }).stdout.split("\n").filter(Boolean), report: spawnSync("cat", [rep], { encoding: "utf8" }).stdout, order: spawnSync("cat", [order], { encoding: "utf8" }).stdout.split("\n").filter(Boolean), status: r.status };
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -670,5 +675,62 @@ esac
     const r = run([]);
     expect(r.order).toEqual(["test"]);
     expect(r.report).not.toMatch(/^setup/m);
+  });
+  it("passes the profile's build tags to `go test` as -tags=, comma-joined, and to nothing else; none when the spec has none", () => {
+    const r = run([note("one")], { buildTags: ["querymetrics", "integration"] });
+    expect(r.args).toHaveLength(1);
+    expect(r.args[0]).toMatch(/^test -tags=querymetrics,integration -coverprofile=/);
+    expect(run([]).args[0]).not.toMatch(/-tags/);
+  });
+
+  it("does not pass a tag that is not a build tag identifier, even from a hand-written spec", () => {
+    const spec = formatSpec({ packages: ["pkg/a"], functions: [{ path: "pkg/a/a.go", start: 3, end: 16 }] }) + "tags a;touch,x\n";
+    const r = run([], { spec });
+    expect(r.args[0]).not.toMatch(/-tags/);
+    expect(r.args[0]).not.toContain("touch");
+  });
+
+  it("names the failing Go tests, Ginkgo specs and packages in dedicated report lines, colour stripped and bounded, when the command exits non-zero", () => {
+    const esc = "\\0033";
+    const long = "x".repeat(400);
+    const specs = Array.from({ length: 25 }, (_, i) => `  ${esc}[38;5;9m${esc}[1m[FAIL]${esc}[0m spec ${i} [label]\\n`).join("");
+    const out = `--- FAIL: TestA (0.00s)\\n    --- FAIL: TestA/sub (0.00s)\\n${esc}[1mSummarizing 1 Failure:${esc}[0m\\n${specs}  [FAIL] ${long}\\nFAIL\\nFAIL\\texample.com/m/pkg/a\\t0.3s\\n`;
+    const r = run([], { out, rc: 1 });
+    const failed = r.report.split("\n").filter((l) => l.startsWith("failed "));
+    expect(r.report).toContain("exit 1\n");
+    expect(failed.slice(0, 2)).toEqual(["failed --- FAIL: TestA (0.00s)", "failed --- FAIL: TestA/sub (0.00s)"]);
+    expect(failed).toContain("failed [FAIL] spec 0 [label]");
+    expect(failed).toContain("failed FAIL example.com/m/pkg/a 0.3s");
+    expect(failed.length).toBeLessThanOrEqual(20);
+    expect(failed.every((l) => l.length <= "failed ".length + 300)).toBe(true);
+    expect(r.report).not.toContain(String.fromCharCode(27));
+  });
+
+  it("reports the first compiler error and no failed lines for a build failure, and nothing when the tests pass", () => {
+    const build = run([], { out: "# example.com/m/pkg/a\\npkg/a/a.go:12:5: undefined: foo\\npkg/a/a.go:13:1: other\\nFAIL\\texample.com/m/pkg/a [build failed]\\n", rc: 1 });
+    expect(build.report).toContain("build-error pkg/a/a.go:12:5: undefined: foo\n");
+    expect(build.report).not.toContain("other\n");
+    const ok = run([]);
+    expect(ok.report).not.toMatch(/^(failed|build-error) /m);
+  });
+
+  it("feeds the failures into coverage facts and review.md's sentence, from the recorded report", () => {
+    const text = "graphloom-coverage-v1 go\nexit 1\nfailed --- FAIL: TestA (0.00s)\nfailed [FAIL] vec QL [BeforeAll] raw [measure-ql, QLB-T02]\nfailed FAIL example.com/m/pkg/a 0.3s\nbuild-error pkg/a/a.go:1:1: boom\nB pkg/a/a.go:4.2,6.3 3 1\nseen pkg/a/a.go\n";
+    const facts = doneOf(coverageState(input({ evidence: [diff, ...ready("go"), goRun(text)] }))).facts;
+    expect(facts.runs[0]).toMatchObject({ exit: 1, failing: ["--- FAIL: TestA (0.00s)", "[FAIL] vec QL [BeforeAll] raw [measure-ql, QLB-T02]", "FAIL example.com/m/pkg/a 0.3s"], buildError: "pkg/a/a.go:1:1: boom" });
+    const [line] = coverageNotes(facts);
+    expect(line).toContain("; the test command exited 1; failing: TestA; vec QL [BeforeAll] raw [measure-ql, QLB-T02]; package example.com/m/pkg/a (coverage is of what ran).");
+    expect(line).not.toContain("a test failed or a package did not build");
+  });
+
+  it("bounds the failing list to 20 entries of 300 characters, and keeps the generic sentence with the first build error when none is named", () => {
+    const many = Array.from({ length: 30 }, (_, i) => `failed --- FAIL: T${i}${"y".repeat(400)}`).join("\n");
+    const f = doneOf(coverageState(input({ evidence: [diff, ...ready("go"), goRun(`graphloom-coverage-v1 go\nexit 1\n${many}\nseen pkg/a/a.go\n`)] }))).facts.runs[0]!;
+    expect(f.failing).toHaveLength(20);
+    expect(f.failing!.every((t) => t.length <= 300)).toBe(true);
+    const b = doneOf(coverageState(input({ evidence: [diff, ...ready("go"), goRun("graphloom-coverage-v1 go\nexit 2\nbuild-error pkg/a/a.go:1:1: boom\nseen pkg/a/a.go\n")] }))).facts;
+    expect(coverageNotes(b)[0]).toContain("the test command exited 2 (a test failed or a package did not build: coverage is of what ran); first build error: pkg/a/a.go:1:1: boom.");
+    const passed = doneOf(coverageState(input({ evidence: [diff, ...ready("go"), goRun("graphloom-coverage-v1 go\nexit 0\nfailed --- FAIL: Stale\nseen pkg/a/a.go\n")] }))).facts.runs[0]!;
+    expect(passed.failing).toBeUndefined();
   });
 });

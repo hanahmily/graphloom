@@ -226,7 +226,7 @@ meaning and parser (review-kit, [§14](#14-sharing-code-with-issue-fix)).
 | `report` | The section template, each section's meaning in this repository, and its detectors ([§6.2](#62-profile-mapping), [§6.3](#63-detectors)) |
 | `symbols` | Language packs: file globs, definition patterns, test-file and test-name patterns ([§7.2](#72-deterministic-groundwork)). The plugin ships packs for Go and TypeScript as data, and a profile may add or override them |
 | `questions` | `excludeRoots` (generated code only; the search covers the whole base tree, vendored directories included), `similarity` (default 0.5), `maxCandidates` per query (5) ([§7.2](#72-deterministic-groundwork)); and `designDocs`, repository-relative globs of the design and architecture documents that N1's answerer and checker read first, beside the `context` documents ([§7.5](#75-the-necessity-question-n1)). BanyanDB's are `docs/concept/{tsdb,clustering,persistence-storage,storage-and-format,data-model,rotation}.md`, `docs/design/README.md` and the two `docs/design/0.12.0` pages on the write stream (`streaming-api`, `measure-batch-v2`) |
-| `metrics` | Per language: `files`, and the tools' `argv` for static metrics, coverage and mutation (defaults: [metrics §3](design-code-quality-metrics.md#3-tools)). Also `generated` globs; `coverage` (run the PR's tests for coverage under untrusted confinement, **default true**); `mutation.enabled` (**default true**; needs coverage) and `mutation.timeBudgetMs` (default 30 min); and `sandbox`, the Docker sandbox's image digest per language with its `cpus`, `memory`, `pids`, `tmp` and `wallClockMs`, its `readOnly` mounts (named host directories of tools and offline caches, `~/…` for the operator's home) and, for Go, its `setup` commands: sandboxed code generation run in the checkout before the tests ([§12.2](#122-confinement)). BanyanDB's protobuf and mock code is generated this way. A profile may turn either run off. Thresholds may be tightened, never loosened |
+| `metrics` | Per language: `files`, and the tools' `argv` for static metrics, coverage and mutation (defaults: [metrics §3](design-code-quality-metrics.md#3-tools)). Also `generated` globs; `coverage` (run the PR's tests for coverage under untrusted confinement, **default true**); `mutation.enabled` (**default true**; needs coverage) and `mutation.timeBudgetMs` (default 30 min); and `sandbox`, the Docker sandbox's image digest per language with its `cpus`, `memory`, `pids`, `tmp` and `wallClockMs`, its `readOnly` mounts (named host directories of tools and offline caches, `~/…` for the operator's home) and, for Go, its `setup` commands (sandboxed code generation run in the checkout before the tests, [§12.2](#122-confinement)) and its `buildTags` (the Go build tags the coverage `go test` compiles with, `-tags=a,b`: those the repository's own CI passes; each `[A-Za-z0-9_.]+`, none twice, at most 16; never applied to setup). BanyanDB's protobuf and mock code is generated this way. A profile may turn either run off. Thresholds may be tightened, never loosened |
 | `context` | issue-fix's [context documents](design-issue-fix-graph.md#context-documents) |
 | `issues` | Where linked issues live. `Fixes`/`Closes` references are read with `get-issue` |
 | `review` | issue-fix's `language` and `testFiles`, plus `discoveryRounds` (default 3, [§9.4](#94-rounds)); `aspects.<aspect>.rules`, `[{ path, rule }]` entries that replace the shipped rule of the same `path` or add one ([§8.1](#81-review)); `fork.maxParentTokens` (default 100,000), the largest parent context a reviewer forks before it starts seeded instead ([§8.1](#81-review)); and `repro`: `enabled` (**default true**), `perFindingMs` (3 min), `timeBudgetMs` (30 min per head), `maxTestBytes` (16 KiB) ([§8.2](#82-reproducing-tests)) |
@@ -661,6 +661,12 @@ The section follows a few rules:
   does a sandboxed `setup` command that fails (`not run (setup failed: <id>
   exited <n> (<output>))`): the sentence under the heading then names the
   setup commands that ran (`after the profile's sandboxed setup (proto, mocks)`).
+  When the test command exits non-zero, the sentence names the failing tests
+  (`the test command exited 1; failing: <list>`), read from the recorded output
+  (Go `--- FAIL:` lines, Ginkgo's `[FAIL]` summary lines with colour codes
+  stripped, and `FAIL <pkg>` lines; at most 20, each cut to 300 characters); a
+  failure with none named (a build failure) keeps the generic sentence and adds
+  the first compiler error line.
 - The `measurements` validator recomputes every value from its evidence
   ([metrics §5](design-code-quality-metrics.md#5-records-and-recomputation))
   before the section is written.
@@ -1861,7 +1867,7 @@ docker run --rm --pull never --name graphloom-<run>-<op> --label graphloom.run=<
   - whether the daemon is reachable by the operator's user;
   - whether each image is local, or Fetch will pull it.
 - **As built for coverage (P1, wave 3b).**
-  - **Profile.** `metrics.sandbox.<go|typescript>` is `{ image, cpus, memory, pids, tmp, wallClockMs, readOnly?, setup? }` (the last two below), each
+  - **Profile.** `metrics.sandbox.<go|typescript>` is `{ image, cpus, memory, pids, tmp, wallClockMs, readOnly?, setup?, buildTags? }` (the last three below), each
     checked by the SDK's own docker-confinement rules, so a tag is refused when the profile is read. Defaults are
     `--cpus=4 --memory=8g` (swap equal), 512 processes, a 1 GiB `/tmp` and 30 minutes. The TypeScript default image is
     `node:22-bookworm-slim` by digest; Go has none unless the profile pins one, because the right image follows the
@@ -1888,6 +1894,13 @@ docker run --rm --pull never --name graphloom-<run>-<op> --label graphloom.run=<
       stops the run before any test with `setup-fail <id> <exit> <last output lines>`, and every function is `not run
       (setup failed: <id> exited <n> (<output>))`. The container's wall clock covers setup and tests together. TypeScript
       has no setup in this version.
+    - `buildTags: string[]` (Go): the tags `go test` compiles with, carried as one `tags a,b` line of the spec (so the recorded
+      bytes are the bytes run) and passed as `-tags=a,b` to `go test` only, never to setup. BanyanDB sets `querymetrics`,
+      as its own integration workflow does (QLB-T02 asserts it). `go.sh` re-checks the characters and drops the tags
+      rather than pass anything else on.
+    - **Failing tests.** `go.sh` names failures in dedicated report lines, not the output tail: `failed <text>` per Go
+      `--- FAIL:`, Ginkgo `[FAIL]` (colour codes stripped) and `FAIL <pkg>` line, and `build-error <text>` for the first
+      compiler error. `parseCoverageReport` reads them, so the validator recomputes the same list.
     - **Not cached.** The setup's outputs are not kept between runs. They depend on the head (the protobuf sources, the
       sources mockgen reflects over), so a cache keyed by their content would be a new store the sandboxed code writes
       and a later run trusts; issue-fix's prepare cache has a host-side trust model that this sandbox does not share.
