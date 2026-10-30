@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
-import { applyReferenceEnums, checkContract, type JobSpec } from "@graphloom/sdk";
+import { applyReferenceEnums, checkContract, type EvidenceRecord, type JobSpec } from "@graphloom/sdk";
 import { describe, expect, it } from "vitest";
 import { evidencePull } from "../src/analysis.js";
 import { answerProblems, parseAnswers, readAnswerCheck, searchItems, verificationPlan, type Answer, type FinalAnswer } from "../src/answers.js";
@@ -345,6 +345,56 @@ describe("the live run's failure: verdicts keyed with the type and the question'
     expect(superviseOf(sim)?.reason).toMatch(/the answer checker did not judge every answer after 3 tries; verdict ids that matched no question: "Q\d+, Q2" \(ambiguous\)/);
     const unknown = simulate({ scenario: scenarioWith("answer-finds-existing-helper", (sc) => rekey(sc, () => "Q99 [purpose] nothing")) });
     expect(superviseOf(unknown)?.reason).toMatch(/\(unknown\)/);
+  });
+});
+
+describe("a result the controller classed invalid because of an id", () => {
+  const defn = definitionFor(parseProfile(BANYANDB));
+  /** What the controller records when a result's ids are off the job's enum: the contract invalid, kind other, the wrapper kept. */
+  const classify = (job: JobSpec, [record]: EvidenceRecord[]): EvidenceRecord[] | undefined => {
+    const contract = defn.resultContracts!.find((c) => c.name === job.resultSchema);
+    if (contract === undefined || job.knownReferences === undefined) return undefined;
+    if (record === undefined) return undefined;
+    const payload = record.payload as { producer: unknown; codingAgent?: { status: string; output: unknown } } & Record<string, unknown>;
+    const output = payload.codingAgent !== undefined ? payload.codingAgent.output : (({ producer: _p, ...rest }) => rest)(payload);
+    const checked = checkContract(output, contract, job.knownReferences);
+    if (checked.status !== "invalid") return undefined;
+    return [{ ...record, kind: "other", contract: { name: contract.name, status: "invalid", problems: checked.problems }, payload: { producer: payload.producer, codingAgent: { status: "completed", output } } }];
+  };
+
+  it("still reads the answerer's answers when only an id is off, and notes it", () => {
+    const s = scenarioWith("answer-finds-existing-helper", (sc) => {
+      for (const key of ["answers-v1", "answers-revision-v1"]) for (const r of sc.results[key] ?? []) for (const a of (r.output as { answers: Answer[] }).answers) a.question = `${a.question} [existing-equivalent] Does the codebase already have one?`;
+    });
+    const sim = simulate({ scenario: s, tamper: classify });
+    expect(sim.evidence.some((e) => e.contract?.status === "invalid")).toBe(true);
+    expect(stopOf(sim)).toMatchObject({ reason: "report ready" });
+    expect(sim.qa!.markdown).toMatch(/Note: the answerer's id "Q1 \[existing-equivalent\]/);
+  });
+
+  it("does not read the checker's: its review evidence is not admitted when invalid, so it is asked again, and then escalated", () => {
+    const s = scenarioWith("answer-finds-existing-helper", (sc) => {
+      for (const r of sc.results["answer-check-v1"]!) for (const v of (r.output as { verdicts: Array<{ question: string }> }).verdicts) if (v.question !== "N1") v.question = `${v.question} [existing-equivalent] text`;
+    });
+    const sim = simulate({ scenario: s, tamper: classify });
+    expect(superviseOf(sim)?.reason).toMatch(/the answer checker did not judge every answer after 3 tries/);
+    expect(jobsOf(sim, "Check the answers against")).toHaveLength(3);
+  });
+});
+
+describe("only a search of the whole base tree grounds an absence", () => {
+  const ctx = contextOf("complex-function");
+  const set = questionSet(ctx, undefined);
+  const actx = answerContext(ctx, set.questions);
+  const q = set.questions.find((x) => x.type === "existing-equivalent")!;
+  const none = (searches: Search[]): Answer => ({ question: q.id, answer: "a", status: "answered", none_found: true, citations: [], searches, inventory: [], metrics: [], proposal: { kind: "none", splits: [], testFile: "", testName: "", cases: [], assertion: "" } });
+  const problems = (searches: Search[]) => answerProblems([none(searches)], actx, new Set([q.id])).join("|");
+
+  it("does not count a search scoped to paths, nor a head or dependency one, toward the whole-repository searches", () => {
+    const scoped = [search("a", { paths: ["README.md"] }), search("b", { paths: ["pkg/**"] }), search("c", { paths: ["nowhere/*"] })];
+    expect(problems(scoped)).toMatch(/3 or more over the whole base tree, with no paths.*not 0/);
+    expect(problems([search("a"), search("b"), search("c", { tree: "head" })])).toMatch(/not 2/);
+    expect(problems([search("a"), search("b"), search("c"), search("d", { paths: ["x/*"] })])).toBe("");
   });
 });
 

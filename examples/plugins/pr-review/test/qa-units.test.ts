@@ -333,7 +333,7 @@ describe("the answer rules (design 7.3 checks)", () => {
 
   it("makes a none-found answer list its whole-repository searches, and a library answer partial while a dependency's source is unavailable", () => {
     const one = answer("existing-equivalent", { none_found: true });
-    expect(problems(one).join("|")).toMatch(/3 or more over the base tree.*not 1/);
+    expect(problems(one).join("|")).toMatch(/3 or more over the whole base tree.*not 1/);
     const three = answer("existing-equivalent", { none_found: true, searches: [1, 2, 3].map((n) => ({ pattern: `p${n}`, tree: "base", paths: [], ignoreCase: false as const, hits: 0 })) });
     expect(problems(three)).toEqual([]);
     expect(problems(answer("reuse-library", { none_found: true })).join("|")).toMatch(/source available here, so a "none found" library answer is "partially answered"/);

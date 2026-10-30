@@ -792,7 +792,11 @@ A **"no existing equivalent", "no library" or "no shared logic"** answer must
 list the whole-repository searches run: names and variants, signatures, key
 tokens, and the dependency inventory with each library's source status. That
 way an absence is grounded rather than assumed, and it rests on **measured**
-zero counts ([Searches](#searches-and-their-counts)). A dependency marked
+zero counts ([Searches](#searches-and-their-counts)). Only a search of the
+whole base tree (`tree` `base`, no `paths`) counts toward the required number
+(three for an equivalent or shared logic, one for a library); a search scoped to
+paths, over the head or over a dependency is supplementary evidence, since it
+covers less than the repository. A dependency marked
 `source unavailable` makes the answer `partially answered`.
 
 #### Ids
@@ -808,7 +812,13 @@ output cannot hold anything else. The answerer's revision lists only the
 questions asked again; N1's checker lists `N1`. The assignments say it too: use
 the bare id exactly as listed (`Q1`, never `Q1 [split-function]` or the text).
 
-That is the first line of defence. The second is a tolerant read
+That is the first line of defence. The controller applies the same enum when it
+classifies a result (`checkReferences`): a result whose ids are off it is
+recorded as an invalid contract result, never as review evidence, so a checker
+result with a wrong id is a failed try (asked again, three tries, then the
+supervisor, which sees the ignored keys), and the second line below serves the
+answerer's result (kind `other`, read despite the classification when its shape
+holds) and any result the controller does not classify. The second line is a tolerant read
 (`src/ids.ts`) for a harness that writes the id wrongly anyway, as the live run
 `485ea8ea-e73` on apache/skywalking-banyandb#1443 showed: the checker keyed its
 verdicts `Q1 [split-function]` or by the whole question text, the plugin matched

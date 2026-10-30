@@ -241,7 +241,8 @@ function answerProblemsOf(a: Answer, q: Question, ctx: AnswerContext, dirs: read
     if (truth !== m.value) out.push(`${at}: ${m.function} ${m.name} is ${truth} in its measurement record, not ${m.value}`);
   }
   const testCited = a.citations.some((c) => c.tree !== "dependency" && isTestPath(ctx.packs, c.path));
-  const baseSearches = a.searches.filter((s) => s.tree === "base").length;
+  // Only a search of the whole base tree grounds an absence: one scoped to some paths covers less than the repository.
+  const baseSearches = a.searches.filter((s) => s.tree === "base" && s.paths.length === 0).length;
   const fn = functionOf(q, ctx);
   const mustNeedAuthor = ["missing-test", "complexity-coverage", "weak-test"].includes(q.type) && !testCited;
   switch (q.type) {
@@ -257,7 +258,7 @@ function answerProblemsOf(a: Answer, q: Question, ctx: AnswerContext, dirs: read
     case "reuse-library":
       if (a.none_found) {
         const need = q.type === "reuse-library" ? 1 : 3;
-        if (baseSearches < need) out.push(`${at}: a "none found" answer lists the whole-repository searches that found nothing (${need} or more over the base tree: names and variants, signatures, key tokens), not ${baseSearches}`);
+        if (baseSearches < need) out.push(`${at}: a "none found" answer lists the whole-repository searches that found nothing (${need} or more over the whole base tree, with no paths: names and variants, signatures, key tokens; a search scoped to paths is supplementary), not ${baseSearches}`);
         const inv = ctx.groundwork.inventory;
         if (q.type === "reuse-library" && a.status === "answered" && (inv.dependencies.some((d) => d.source === undefined) || inv.truncated.length > 0)) {
           out.push(`${at}: ${inv.truncated.length > 0 ? "the dependency inventory is incomplete" : "some declared dependency has no source available here"}, so a "none found" library answer is "partially answered", not "answered"`);
@@ -641,7 +642,10 @@ export function answersFlow(evidence: readonly EvidenceRecord[], ctx: AnswerCont
     if (ev.kind === "answerer") {
       const revision = ev.run.record.resultSchema === kind.revision;
       if (ev.run.status !== "completed") continue;
-      const parsed = ev.run.contract?.status === "invalid" ? { problems: ev.run.contract.problems.slice(0, 20) } : kind.parse(ev.run.output, all);
+      // A result the controller classed invalid (an id outside the job's enum, or the shape) is read anyway: when the
+      // contract's own shape holds, the only thing off is an id, which the tolerant read normalizes (noted) or refuses.
+      let parsed = kind.parse(ev.run.output, all);
+      if ("problems" in parsed && ev.run.contract?.status === "invalid") parsed = { problems: ev.run.contract.problems.slice(0, 20) };
       if ("problems" in parsed) {
         failures += 1;
         pending = { problems: parsed.problems, revision };
