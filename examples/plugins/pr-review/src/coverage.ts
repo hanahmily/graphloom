@@ -17,7 +17,7 @@ import { COMMAND } from "./constants.js";
 import { commandRuns, isObject, latestFile, outputTail, reportText, type CommandRun } from "./evidence.js";
 import { formatSpec, goFunctionCoverage, parseCoverageReport, tsFunctionCoverage, type CoverageSpecFunction } from "./metrics/coverage.js";
 import { languageOf, type Coverage, type FunctionIndexEntry, type Language, type MetricsRecord } from "./metrics/record.js";
-import { SANDBOX_LIMITS, type Profile } from "./profile.js";
+import { SANDBOX_LIMITS, type Profile, type SandboxMount, type SandboxSetupStep } from "./profile.js";
 import { writeChunks } from "./write.js";
 
 /** The image TypeScript coverage runs in unless a profile pins another: `node:22-bookworm-slim`, by digest (a tag is never run). */
@@ -42,7 +42,20 @@ export interface Sandbox {
   pids: number;
   tmp: string;
   wallClockMs: number;
+  /** The profile's read-only mounts, still unresolved (`~/…` is the operator's home). */
+  readOnly: SandboxMount[];
+  /** The sandboxed setup commands, in order. */
+  setup: SandboxSetupStep[];
 }
+
+/** A read-only mount as the host resolved it: the real path, mounted at the same path. */
+export interface ResolvedMount {
+  name: string;
+  path: string;
+}
+
+/** The variable that gives a container the resolved path of a mount (`GRAPHLOOM_MOUNT_<NAME>`). */
+export const mountVariable = (name: string): string => `GRAPHLOOM_MOUNT_${name.toUpperCase().replace(/-/g, "_")}`;
 
 /** The sandbox a language's coverage runs in: the profile's settings over the defaults (the image of Go has none: it follows the repository's `go.mod`). */
 export function resolveSandbox(profile: Pick<Profile, "metrics">, language: "go" | "typescript"): Sandbox {
@@ -54,6 +67,8 @@ export function resolveSandbox(profile: Pick<Profile, "metrics">, language: "go"
     pids: given.pids ?? SANDBOX_LIMITS.pids,
     tmp: given.tmp ?? SANDBOX_LIMITS.tmp,
     wallClockMs: given.wallClockMs ?? SANDBOX_LIMITS.wallClockMs,
+    readOnly: given.readOnly ?? [],
+    setup: given.setup ?? [],
   };
 }
 
@@ -79,6 +94,27 @@ const PULL_SCRIPT = [
 const MODCACHE_SCRIPT = 'cd / && GOTOOLCHAIN=local go env GOMODCACHE 2>/dev/null || true';
 const NPMCACHE_SCRIPT = "cd / && npm config get cache 2>/dev/null || true";
 
+/**
+ * Where the profile's read-only mounts are on the host. Each argument is `~/…` or an absolute path; the script expands `~`
+ * to the operator's home, follows links, requires a directory that is not `/`, and prints one line per argument, in order:
+ * `ok <real path>` or `missing <why>`. Run from `/`, so that nothing in the pull request's tree is read.
+ */
+const MOUNTS_SCRIPT = [
+  'cd / || exit 0',
+  'for p in "$@"; do',
+  '  case "$p" in',
+  '    "~/"*) if [ -n "${HOME:-}" ]; then q="$HOME/${p#"~/"}"; else echo "missing HOME is not set"; continue; fi ;;',
+  '    /*) q="$p" ;;',
+  '    *) echo "missing not an absolute path"; continue ;;',
+  '  esac',
+  '  if [ ! -d "$q" ]; then echo "missing $q is not a directory on this host"; continue; fi',
+  '  r=$(cd "$q" 2>/dev/null && pwd -P) || { echo "missing $q cannot be entered"; continue; }',
+  '  if [ "$r" = / ]; then echo "missing $q is the filesystem root"; continue; fi',
+  '  printf "ok %s\\n" "$r"',
+  'done',
+  'exit 0',
+].join("\n");
+
 /** The image checks (and pulls) of Fetch, and where the host's caches are; empty when coverage is off or no language has an image. */
 export function sandboxProbeCommands(profile: Pick<Profile, "metrics">): EnvironmentCommand[] {
   if (!profile.metrics.coverage) return [];
@@ -87,6 +123,8 @@ export function sandboxProbeCommands(profile: Pick<Profile, "metrics">): Environ
     const { image } = resolveSandbox(profile, language);
     if (image === undefined) continue;
     commands.push({ id: `${COMMAND.sandboxPrefix}${language}`, argv: ["sh", "-c", PULL_SCRIPT, `${COMMAND.sandboxPrefix}${language}`, image], timeoutMs: 30 * 60_000 });
+    const mounts = resolveSandbox(profile, language).readOnly;
+    if (mounts.length > 0) commands.push({ id: `${COMMAND.hostMountsPrefix}${language}`, argv: ["sh", "-c", MOUNTS_SCRIPT, `${COMMAND.hostMountsPrefix}${language}`, ...mounts.map((m) => m.path)] });
     commands.push(
       language === GO
         ? { id: COMMAND.hostGoModcache, argv: ["sh", "-c", MODCACHE_SCRIPT] }
@@ -242,6 +280,8 @@ export interface CoveragePlan {
   commands: PlannedCommand[];
   /** Host paths mounted read-only besides the plugin: the Go module cache or the npm cache. */
   cache: string;
+  /** The profile's read-only mounts, resolved on the host. */
+  mounts: ResolvedMount[];
 }
 
 export type Outcome = Coverage | { reason: string };
@@ -253,6 +293,8 @@ export interface CoverageRunFacts {
   /** The test command's exit status, when it ran. */
   exit?: number;
   image?: string;
+  /** The sandboxed setup commands that ran successfully before the tests, in order. */
+  setup?: string[];
   /** Test result lines, as the report carried them. */
   tests: string[];
   /** Files the run changed in its checkout, as the controller recorded them. */
@@ -307,8 +349,35 @@ function goPackages(files: ReadonlyArray<{ path: string; language: Language }>):
   return [...dirs].sort();
 }
 
+/**
+ * The profile's read-only mounts as the host's probe resolved them, in the profile's order; or why one is not usable
+ * (the directory does not exist), or undefined while the probe has not run.
+ */
+function resolvedMounts(evidence: readonly EvidenceRecord[], sandbox: Sandbox, language: "go" | "typescript"): ResolvedMount[] | { reason: string } | undefined {
+  if (sandbox.readOnly.length === 0) return [];
+  const run = commandRuns(evidence, `${COMMAND.hostMountsPrefix}${language}`).at(-1);
+  if (run === undefined) return undefined;
+  if (run.command.spawnError !== undefined || run.command.timedOut === true || run.command.aborted === true || run.command.exitCode !== 0) {
+    return { reason: `the sandbox mounts could not be located on the host: ${oneLine(outputTail(run.command, 200))}` };
+  }
+  const lines = run.command.stdoutTail.trim().split("\n");
+  const out: ResolvedMount[] = [];
+  for (const [i, mount] of sandbox.readOnly.entries()) {
+    const line = lines[i] ?? "";
+    if (line.startsWith("ok /")) {
+      const real = line.slice(3);
+      if (/[:,\u0000]|(^|\/)\.\.(\/|$)/.test(real) || real === "/") return { reason: `sandbox mount ${mount.name} resolves to a path a container cannot mount (${oneLine(real)})` };
+      out.push({ name: mount.name, path: real });
+      continue;
+    }
+    const why = line.startsWith("missing ") ? line.slice("missing ".length) : "the host probe printed no answer for it";
+    return { reason: `sandbox mount ${mount.name} (${mount.path}): ${oneLine(why)}` };
+  }
+  return out;
+}
+
 /** The package that ran, or why not: the job has no image, or Docker or the image is not available. */
-function languageReadiness(evidence: readonly EvidenceRecord[], profile: Pick<Profile, "metrics">, language: "go" | "typescript"): { ready: true; image: string; sandbox: Sandbox & { image: string }; cache: string } | { reason: string } | { probe: true } {
+function languageReadiness(evidence: readonly EvidenceRecord[], profile: Pick<Profile, "metrics">, language: "go" | "typescript"): { ready: true; image: string; sandbox: Sandbox & { image: string }; cache: string; mounts: ResolvedMount[] } | { reason: string } | { probe: true } {
   const sandbox = resolveSandbox(profile, language);
   if (sandbox.image === undefined) return { reason: `the profile pins no ${language} sandbox image (metrics.sandbox.${language}.image)` };
   const status = sandboxStatus(evidence, language);
@@ -318,7 +387,10 @@ function languageReadiness(evidence: readonly EvidenceRecord[], profile: Pick<Pr
   if (commandRuns(evidence, cacheId).length === 0) return { probe: true };
   const cache = hostPath(evidence, cacheId);
   if (cache === undefined) return { reason: language === GO ? "the Go module cache could not be located on the host (go env GOMODCACHE)" : "the npm cache could not be located on the host (npm config get cache)" };
-  return { ready: true, image: sandbox.image, sandbox: { ...sandbox, image: sandbox.image }, cache };
+  const mounts = resolvedMounts(evidence, sandbox, language);
+  if (mounts === undefined) return { probe: true };
+  if ("reason" in mounts) return mounts;
+  return { ready: true, image: sandbox.image, sandbox: { ...sandbox, image: sandbox.image }, cache, mounts };
 }
 
 interface Part {
@@ -352,7 +424,7 @@ function partsOf(input: CoverageInput, language: "go" | "typescript", records: M
   if (language === GO) {
     const packages = goPackages(input.files);
     if (packages.length === 0) return { reason: "no touched Go package" };
-    const spec = formatSpec({ packages, functions: functionsOf(records) });
+    const spec = formatSpec({ packages, functions: functionsOf(records), setup: resolveSandbox(input.profile, GO).setup });
     return [{ language, records, command: { id: COMMAND.coverGo, script: "go.sh", spec } }];
   }
   const manifests = [...new Set(records.flatMap((r) => manifestChain(r.path)))];
@@ -394,7 +466,7 @@ export function coverageCommand(c: PlannedCommand, pluginRoot: string, wallClock
   return { id: c.id, argv: ["sh", `${pluginRoot}/tools/cover/${c.script}`, String(parts.length), ...parts], timeoutMs: Math.min(MAX_COMMAND_TIMEOUT_MS, wallClockMs + 60_000) };
 }
 
-/** The Docker confinement of a coverage job: the checkout and (Go) a build cache in the run's scratch are writable; the plugin and the dependency cache are read-only; only the variables below reach the container. */
+/** The Docker confinement of a coverage job: the checkout and (Go) a build cache in the run's scratch are writable; the plugin, the dependency cache and the profile's mounts (tools, offline caches) are read-only; only the variables below reach the container. */
 export function coverageConfinement(plan: CoveragePlan, pluginRoot: string): DockerConfinement {
   const { sandbox: s } = plan;
   const go = plan.language === GO;
@@ -407,10 +479,13 @@ export function coverageConfinement(plan: CoveragePlan, pluginRoot: string): Doc
     tmp: s.tmp,
     wallClockMs: s.wallClockMs,
     writable: go ? [".", "@scratch/gocache"] : ["."],
-    readOnly: [pluginRoot, plan.cache],
-    env: go
-      ? { HOME: "/tmp", GOFLAGS: "-mod=readonly", GOPROXY: "off", GOTOOLCHAIN: "local", GOCACHE: "@scratch/gocache", GOMODCACHE: plan.cache }
-      : { HOME: "/tmp", npm_config_cache: plan.cache, npm_config_update_notifier: "false", npm_config_fund: "false", npm_config_audit: "false" },
+    readOnly: [pluginRoot, plan.cache, ...plan.mounts.map((m) => m.path)],
+    env: {
+      ...(go
+        ? { HOME: "/tmp", GOFLAGS: "-mod=readonly", GOPROXY: "off", GOTOOLCHAIN: "local", GOCACHE: "@scratch/gocache", GOMODCACHE: plan.cache }
+        : { HOME: "/tmp", npm_config_cache: plan.cache, npm_config_update_notifier: "false", npm_config_fund: "false", npm_config_audit: "false" }),
+      ...Object.fromEntries(plan.mounts.map((m) => [mountVariable(m.name), m.path])),
+    },
   };
 }
 
@@ -439,9 +514,14 @@ function attribute(part: Part, run: CommandRun, input: CoverageInput, outcomes: 
     return none(`the coverage command wrote no report${why !== "" ? `: ${oneLine(why)}` : ""}`);
   }
   if (parsed.language !== part.language) return { facts, problem: `${part.command.id}: the report is for ${parsed.language}, not ${part.language}` };
+  if (parsed.setupFail !== undefined) {
+    const f = parsed.setupFail;
+    return none(`setup failed: ${f.id} exited ${f.exit}${f.text !== "" ? ` (${f.text})` : ""}`);
+  }
   facts.ran = true;
   if (parsed.exit !== undefined) facts.exit = parsed.exit;
   facts.tests = parsed.tests.slice(0, 12);
+  if (parsed.setup.length > 0) facts.setup = parsed.setup;
   const wholeFailure = parsed.language === TS && parsed.fail.length > 0 && parsed.seen.size === 0;
   for (const r of part.records) {
     const where = entryOf(input.index, r);
@@ -499,7 +579,7 @@ export function coverageState(input: CoverageInput): CoverageState {
       facts.runs.push({ language, ran: false, reason: why, tests: [], changed: [] });
       continue;
     }
-    const plan: CoveragePlan = { language, sandbox: ready.sandbox, commands: parts.map((p) => p.command), cache: ready.cache };
+    const plan: CoveragePlan = { language, sandbox: ready.sandbox, commands: parts.map((p) => p.command), cache: ready.cache, mounts: ready.mounts };
     if (!planFits(plan)) {
       for (const p of parts) for (const r of p.records) outcomes.set(recordKey(r), NOT_RUN("the changed functions are too many for one coverage command"));
       facts.runs.push({ language, ran: false, reason: "the changed functions are too many for one coverage command", tests: [], changed: [] });

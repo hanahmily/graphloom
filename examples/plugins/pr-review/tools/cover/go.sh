@@ -11,6 +11,12 @@
 # A failing test does not void coverage: `go test` still writes the profile of what ran, and the exit status is
 # recorded as a fact. The script always exits 0 once it has written a report; the report says what happened.
 #
+# Sandboxed setup first: the `setup <id> <_base64 argument>...` lines of the spec (profile metrics.sandbox.go.setup)
+# run in order in the checkout's root, in this same container configuration (no network, read-only mounts), before any
+# `go test`: code generation the repository does not commit (design-pr-review-graph.md 12.2). The first one to fail
+# ends the run with `setup-fail <id> <exit> <output tail>` and no coverage; the report says why. Setup never runs
+# on the host.
+#
 # The environment is the sandbox's own: GOFLAGS=-mod=readonly, GOPROXY=off, GOTOOLCHAIN=local, a read-only
 # module cache, a GOCACHE under the run's scratch, no network.
 
@@ -35,6 +41,48 @@ printf '%s' "$spec" > "$tmp/spec.txt"
 : > "$tmp/prof"
 : > "$tmp/log"
 worst=0
+root0=$(pwd -P)
+
+# decode_run <id> <token>...: the argument tokens are `_` and the base64 of each argv element.
+decode_run() {
+  sid="$1"
+  shift
+  count=$#
+  while [ "$count" -gt 0 ]; do
+    tok="$1"
+    shift
+    dec=$(printf '%s' "${tok#_}" | base64 -d 2>/dev/null; printf x)
+    set -- "$@" "${dec%x}"
+    count=$((count - 1))
+  done
+  [ "$#" -gt 0 ] || return 127
+  (cd "$root0" && "$@") > "$tmp/setup.$sid" 2>&1
+}
+
+: > "$tmp/setup-ok"
+while IFS= read -r line; do
+  case "$line" in "setup "*) ;; *) continue ;; esac
+  set -f
+  # shellcheck disable=SC2086
+  set -- $line
+  set +f
+  shift
+  sid="$1"
+  shift
+  decode_run "$sid" "$@"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    why=$(tail -n 6 "$tmp/setup.$sid" | tr '\n\t' '  ' | sed 's/ *$//' | cut -c1-240)
+    {
+      echo "graphloom-coverage-v1 go"
+      sed 's/^/setup /; s/$/ ok/' "$tmp/setup-ok"
+      echo "setup-fail $sid $rc $why"
+    } > "$rep"
+    tail -n 25 "$tmp/setup.$sid"
+    exit 0
+  fi
+  echo "$sid" >> "$tmp/setup-ok"
+done < "$tmp/spec.txt"
 
 modroot() {
   r="$1"
@@ -90,6 +138,7 @@ done
 
 {
   echo "graphloom-coverage-v1 go"
+  sed 's/^/setup /; s/$/ ok/' "$tmp/setup-ok"
   echo "exit $worst"
   cat "$tmp/tests" "$tmp/fails"
   sort "$tmp/prof"

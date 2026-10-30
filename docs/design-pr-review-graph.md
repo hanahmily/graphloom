@@ -222,11 +222,11 @@ meaning and parser (review-kit, [§14](#14-sharing-code-with-issue-fix)).
 |---|---|
 | `name`, `project` | Names for messages, and the repository whose PRs are read |
 | `baseBranch` | The branch PRs usually target (default `main`), fetched by `task new` unless `--base` names another ([§3.1](#31-task)) |
-| `environment` | Only `checks` (`git`, the bundled `ocr` via `scripts/ocr-path.sh`, the harness CLIs). **`prepare` and `pinnedFiles` are refused**: preparation would run contributor code in the unconfined worktree |
+| `environment` | Only `checks` (`git`, the bundled `ocr` via `scripts/ocr-path.sh`, the harness CLIs). **`prepare` and `pinnedFiles` are refused**: preparation would run contributor code in the unconfined worktree. Setup that a coverage run needs (code generation the repository does not commit) is `metrics.sandbox.<language>.setup` instead, which runs inside the Docker sandbox ([§12.2](#122-confinement)) |
 | `report` | The section template, each section's meaning in this repository, and its detectors ([§6.2](#62-profile-mapping), [§6.3](#63-detectors)) |
 | `symbols` | Language packs: file globs, definition patterns, test-file and test-name patterns ([§7.2](#72-deterministic-groundwork)). The plugin ships packs for Go and TypeScript as data, and a profile may add or override them |
 | `questions` | `excludeRoots` (generated code only; the search covers the whole base tree, vendored directories included), `similarity` (default 0.5), `maxCandidates` per query (5) ([§7.2](#72-deterministic-groundwork)); and `designDocs`, repository-relative globs of the design and architecture documents that N1's answerer and checker read first, beside the `context` documents ([§7.5](#75-the-necessity-question-n1)). BanyanDB's are `docs/concept/{tsdb,clustering,persistence-storage,storage-and-format,data-model,rotation}.md`, `docs/design/README.md` and the two `docs/design/0.12.0` pages on the write stream (`streaming-api`, `measure-batch-v2`) |
-| `metrics` | Per language: `files`, and the tools' `argv` for static metrics, coverage and mutation (defaults: [metrics §3](design-code-quality-metrics.md#3-tools)). Also `generated` globs; `coverage` (run the PR's tests for coverage under untrusted confinement, **default true**); `mutation.enabled` (**default true**; needs coverage) and `mutation.timeBudgetMs` (default 30 min); and `sandbox`, the Docker sandbox's image digest per language with its `cpus`, `memory`, `pids`, `tmp` and `wallClockMs` ([§12.2](#122-confinement)). A profile may turn either run off. Thresholds may be tightened, never loosened |
+| `metrics` | Per language: `files`, and the tools' `argv` for static metrics, coverage and mutation (defaults: [metrics §3](design-code-quality-metrics.md#3-tools)). Also `generated` globs; `coverage` (run the PR's tests for coverage under untrusted confinement, **default true**); `mutation.enabled` (**default true**; needs coverage) and `mutation.timeBudgetMs` (default 30 min); and `sandbox`, the Docker sandbox's image digest per language with its `cpus`, `memory`, `pids`, `tmp` and `wallClockMs`, its `readOnly` mounts (named host directories of tools and offline caches, `~/…` for the operator's home) and, for Go, its `setup` commands: sandboxed code generation run in the checkout before the tests ([§12.2](#122-confinement)). BanyanDB's protobuf and mock code is generated this way. A profile may turn either run off. Thresholds may be tightened, never loosened |
 | `context` | issue-fix's [context documents](design-issue-fix-graph.md#context-documents) |
 | `issues` | Where linked issues live. `Fixes`/`Closes` references are read with `get-issue` |
 | `review` | issue-fix's `language` and `testFiles`, plus `discoveryRounds` (default 3, [§9.4](#94-rounds)); `aspects.<aspect>.rules`, `[{ path, rule }]` entries that replace the shipped rule of the same `path` or add one ([§8.1](#81-review)); `fork.maxParentTokens` (default 100,000), the largest parent context a reviewer forks before it starts seeded instead ([§8.1](#81-review)); and `repro`: `enabled` (**default true**), `perFindingMs` (3 min), `timeBudgetMs` (30 min per head), `maxTestBytes` (16 KiB) ([§8.2](#82-reproducing-tests)) |
@@ -657,7 +657,10 @@ The section follows a few rules:
   ([metrics §4](design-code-quality-metrics.md#4-execution-and-confinement)).
   A profile can switch either off (`metrics.coverage: false`,
   `metrics.mutation.enabled: false`). Missing Docker, a missing image or an
-  uncached dependency shows as `not run`, with its reason, per package.
+  uncached dependency shows as `not run`, with its reason, per package. So
+  does a sandboxed `setup` command that fails (`not run (setup failed: <id>
+  exited <n> (<output>))`): the sentence under the heading then names the
+  setup commands that ran (`after the profile's sandboxed setup (proto, mocks)`).
 - The `measurements` validator recomputes every value from its evidence
   ([metrics §5](design-code-quality-metrics.md#5-records-and-recomputation))
   before the section is written.
@@ -1858,13 +1861,57 @@ docker run --rm --pull never --name graphloom-<run>-<op> --label graphloom.run=<
   - whether the daemon is reachable by the operator's user;
   - whether each image is local, or Fetch will pull it.
 - **As built for coverage (P1, wave 3b).**
-  - **Profile.** `metrics.sandbox.<go|typescript>` is `{ image, cpus, memory, pids, tmp, wallClockMs }`, each
+  - **Profile.** `metrics.sandbox.<go|typescript>` is `{ image, cpus, memory, pids, tmp, wallClockMs, readOnly?, setup? }` (the last two below), each
     checked by the SDK's own docker-confinement rules, so a tag is refused when the profile is read. Defaults are
     `--cpus=4 --memory=8g` (swap equal), 512 processes, a 1 GiB `/tmp` and 30 minutes. The TypeScript default image is
     `node:22-bookworm-slim` by digest; Go has none unless the profile pins one, because the right image follows the
     repository's `go.mod` (the BanyanDB profile pins `golang:1.26.10`, `golang@sha256:670bb5aa…`).
+  - **Mounts and setup (profile data).** A repository whose tests need code that is not committed (BanyanDB's
+    generated protobuf, `make generate`) would fail to build in a sandbox with no network, and the profile may not
+    prepare the checkout on the host ([§3.2](#32-profile)). Two optional fields of `metrics.sandbox.<language>` solve
+    that without running anything outside the container:
+    - `readOnly: [{ name, path }]`: host directories mounted read-only at their own real path, for trusted tools and
+      offline caches. A path is absolute or `~/…` (the operator's home; `~` alone, `..`, `:`, `,`, line breaks, `/` and
+      relative paths are refused when the profile is read, since a relative path would name the pull request's own tree).
+      Names are `[a-z][a-z0-9-]*` and unique. The container sees each resolved path in `GRAPHLOOM_MOUNT_<NAME>`
+      (upper case, `-` as `_`), so a setup command names its tools without knowing the operator's home. Fetch resolves
+      the paths on the host, from `/` (`host-mounts-<language>`: expand `~`, follow links, require a directory, print
+      the real path); a missing one makes the language's functions `not run (sandbox mount <name> (<path>): … is not a
+      directory on this host)`, and nothing runs. The runner refuses, when it prepares the job, an absolute read-only
+      mount that lies inside the checkout or holds it. Tools never come from the pull request: they are the
+      operator's, outside the checkout. A mounted directory is read-only in the container whatever its host mode.
+    - `setup: [{ id, argv }]` (Go): commands run in order inside the same container configuration as the tests
+      (no network, the same limits, the same read-only mounts and caches, the checkout and build cache writable), in
+      the checkout's root, before any `go test`. They are part of the one coverage command: its spec carries them as
+      `setup <id> <_base64 of each argument>` lines (so the recorded bytes are the bytes run, and the validator's
+      comparison of the spec covers them), `go.sh` runs them and reports `setup <id> ok` per success. The first failure
+      stops the run before any test with `setup-fail <id> <exit> <last output lines>`, and every function is `not run
+      (setup failed: <id> exited <n> (<output>))`. The container's wall clock covers setup and tests together. TypeScript
+      has no setup in this version.
+    - **Not cached.** The setup's outputs are not kept between runs. They depend on the head (the protobuf sources, the
+      sources mockgen reflects over), so a cache keyed by their content would be a new store the sandboxed code writes
+      and a later run trusts; issue-fix's prepare cache has a host-side trust model that this sandbox does not share.
+      Regeneration is offline and measured in seconds to a minute (BanyanDB: protobuf 2 s, mocks 35 s on 4 CPUs, with
+      the build cache of the run shared with the tests), so this version regenerates every run.
+    - **BanyanDB.** `api/Makefile`'s `generate` target is `buf generate` with the `protoc-gen-*` plugins on `PATH`, and
+      `buf.yaml` depends on three BSR modules (`protoc-gen-validate`, `googleapis`, `grpc-gateway`), pinned by
+      `buf.lock`. The profile mounts `~/.graphloom/tools/banyandb/bin` (`buf`, `protoc-gen-go`, `protoc-gen-go-grpc`,
+      `protoc-gen-doc`, `protoc-gen-grpc-gateway`, `protoc-gen-openapiv2`, `protoc-gen-validate`, built by the operator
+      at the versions of `scripts/build/version.mk`, for example by symlinking the review clone's `bin/`) and
+      `~/.cache/buf` (the buf module cache that already holds those three modules), and runs two setup commands:
+      `proto` copies the cache to the container's `/tmp` (buf writes lock files into its cache) and runs
+      `cd api && PATH=<tools>:<proto dir>:$PATH <tools>/buf generate`, exactly the Makefile's invocation, offline; and
+      `mocks` runs `go generate ./...` with a `mockgen` built inside the container from the module cache
+      (`go build go.uber.org/mock/mockgen`), because a prebuilt `mockgen` is built by one Go version and refuses
+      a repository that moved to a newer one. The first generates everything the failing packages imported
+      (`api/proto/banyandb/**/v1/*.pb.go`, `*.pb.validate.go`, `*_grpc.pb.go`, `*.pb.gw.go`); the second generates the
+      git-ignored `*_mock.go` of `banyand/metadata`, `banyand/metadata/schema`, `banyand/queue`, `pkg/flow`,
+      `pkg/meter` and `pkg/node`, which the tests of those packages and their dependents import. Nothing else in
+      `make generate` is needed to compile a package's tests (`api-reference.md` and the OpenAPI output are documents).
+      `~/.cache/buf` is the operator's trust root for the three modules; a head that changes `buf.lock` to a module not
+      in the cache makes `buf generate` fail offline, and the coverage `not run (setup failed: proto exited …)`.
   - **Fetch.** After the ledger read, a read-only command job (`sandbox-go`, `sandbox-typescript`,
-    `host-go-modcache`, `host-npm-cache`) runs `graphloom sandbox pull <image@digest>` (the docker CLI itself when
+    `host-go-modcache`, `host-npm-cache`, and `host-mounts-<language>` when the profile names mounts) runs `graphloom sandbox pull <image@digest>` (the docker CLI itself when
     `graphloom` is not on `PATH`) and asks the host where its Go module cache and npm cache are, from `/`, so the
     pull request's `go.mod` and `.npmrc` answer nothing. Each prints `ready` or `unavailable: <why>` and exits 0.
     The evidence is the `measurements` validator's: it carries the digest of the head's checkout, which the

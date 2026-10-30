@@ -79,7 +79,38 @@ export interface SandboxConfig {
   tmp?: string;
   /** Wall clock of each container. */
   wallClockMs?: number;
+  /**
+   * Host directories mounted read-only into the container (tools, offline caches): each is named, and the container sees its
+   * resolved path in `GRAPHLOOM_MOUNT_<NAME>`. Never a path of the pull request (design §12.2).
+   */
+  readOnly?: SandboxMount[];
+  /**
+   * Commands run inside the same container configuration, in the checkout, before the tests (Go only in this version):
+   * code generation the repository does not commit. Never run on the host.
+   */
+  setup?: SandboxSetupStep[];
 }
+
+/** A host directory a sandbox mounts read-only. */
+export interface SandboxMount {
+  /** `[a-z][a-z0-9-]*`, unique per language. */
+  name: string;
+  /** Absolute, or `~/…` for the operator's home. */
+  path: string;
+}
+
+/** One sandboxed setup command. */
+export interface SandboxSetupStep {
+  /** `[a-z][a-z0-9-]*`, unique per language. */
+  id: string;
+  argv: string[];
+}
+
+export const MOUNT_NAME = /^[a-z][a-z0-9-]{0,31}$/;
+export const MAX_MOUNTS = 8;
+export const MAX_SETUP_STEPS = 8;
+/** An argv element's longest text; the whole setup must also fit the coverage command's spec. */
+const MAX_SETUP_ARG_CHARS = 2_000;
 
 export type Role = "reporter" | "report-checker" | "questioner" | "answerer" | "answer-checker";
 export const ROLES: readonly Role[] = ["reporter", "report-checker", "questioner", "answerer", "answer-checker"];
@@ -364,12 +395,65 @@ function checkSandbox(raw: unknown): MetricsConfig["sandbox"] {
     need(language === "go" || language === "typescript", `${where} is not a language with a sandbox; the languages are go and typescript`);
     need(isObject(value), `${where} must be an object`);
     const v = value as Record<string, unknown>;
-    onlyKeys(v, where, ["image", "cpus", "memory", "pids", "tmp", "wallClockMs"]);
-    const problem = confinementProblem({ kind: "docker", writable: [], readOnly: [], env: {}, ...SANDBOX_LIMITS, image: SANDBOX_PROBE_IMAGE, ...v });
+    onlyKeys(v, where, ["image", "cpus", "memory", "pids", "tmp", "wallClockMs", "readOnly", "setup"]);
+    const { readOnly, setup, ...limits } = v;
+    const problem = confinementProblem({ kind: "docker", writable: [], readOnly: [], env: {}, ...SANDBOX_LIMITS, image: SANDBOX_PROBE_IMAGE, ...limits });
     need(problem === undefined, `${where}.${(problem ?? "").replace(/^confinement\./, "")}`);
-    out[language as "go" | "typescript"] = structuredClone(v) as SandboxConfig;
+    const config = structuredClone(limits) as SandboxConfig;
+    if (readOnly !== undefined) config.readOnly = checkMounts(readOnly, `${where}.readOnly`);
+    if (setup !== undefined) {
+      need(language === "go", `${where}.setup: sandboxed setup is supported for go only in this version`);
+      config.setup = checkSetup(setup, `${where}.setup`);
+    }
+    out[language as "go" | "typescript"] = config;
   }
   return out;
+}
+
+/**
+ * `metrics.sandbox.<language>.readOnly`: host directories the container sees read-only. A path is absolute or `~/…`
+ * (the operator's home, expanded on the host when the sandbox is probed), has no `..` and none of `: ,` or a line
+ * break, and is never `/`. That it exists is checked when the sandbox is probed, and that it is not inside the
+ * checkout when the job is prepared.
+ */
+function checkMounts(raw: unknown, where: string): SandboxMount[] {
+  need(Array.isArray(raw) && raw.length <= MAX_MOUNTS, `${where} must be a list of at most ${MAX_MOUNTS} {name, path} mounts`);
+  const seen = new Set<string>();
+  return (raw as unknown[]).map((entry, i) => {
+    const at = `${where}[${i}]`;
+    need(isObject(entry), `${at} must be an object {name, path}`);
+    const e = entry as Record<string, unknown>;
+    onlyKeys(e, at, ["name", "path"]);
+    need(typeof e.name === "string" && MOUNT_NAME.test(e.name), `${at}.name must match ${MOUNT_NAME.source}`);
+    need(!seen.has(e.name as string), `${at}.name ${JSON.stringify(e.name)} is used twice`);
+    seen.add(e.name as string);
+    const p = e.path;
+    need(typeof p === "string" && p.length <= 1_024, `${at}.path must be a path`);
+    const path = p as string;
+    need(path.startsWith("/") || path.startsWith("~/"), `${at}.path ${JSON.stringify(path)} must be absolute or start with ~/ (a relative path would name the pull request's checkout)`);
+    need(!/[:,\n\r\0]/.test(path), `${at}.path must not contain : , or a line break`);
+    need(!path.split("/").includes(".."), `${at}.path must not contain ..`);
+    need(path.replace(/\/+$/, "") !== "" && path !== "~/", `${at}.path must not be the filesystem root or the whole home`);
+    return { name: e.name as string, path };
+  });
+}
+
+/** `metrics.sandbox.go.setup`: commands run in the container, in the checkout, before the tests, in order. */
+function checkSetup(raw: unknown, where: string): SandboxSetupStep[] {
+  need(Array.isArray(raw) && raw.length > 0 && raw.length <= MAX_SETUP_STEPS, `${where} must be a list of 1 to ${MAX_SETUP_STEPS} {id, argv} commands`);
+  const seen = new Set<string>();
+  return (raw as unknown[]).map((entry, i) => {
+    const at = `${where}[${i}]`;
+    need(isObject(entry), `${at} must be an object {id, argv}`);
+    const e = entry as Record<string, unknown>;
+    onlyKeys(e, at, ["id", "argv"]);
+    need(typeof e.id === "string" && MOUNT_NAME.test(e.id), `${at}.id must match ${MOUNT_NAME.source}`);
+    need(!seen.has(e.id as string), `${at}.id ${JSON.stringify(e.id)} is used twice`);
+    seen.add(e.id as string);
+    need(Array.isArray(e.argv) && e.argv.length > 0 && e.argv.length <= 32 && e.argv.every((a) => typeof a === "string" && a.length <= MAX_SETUP_ARG_CHARS && !a.includes("\0")), `${at}.argv must be a list of 1 to 32 strings of at most ${MAX_SETUP_ARG_CHARS} characters`);
+    need((e.argv as string[])[0] !== "", `${at}.argv needs a program`);
+    return { id: e.id as string, argv: [...(e.argv as string[])] };
+  });
 }
 
 function checkContext(raw: unknown): ContextRef[] {

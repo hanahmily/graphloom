@@ -109,7 +109,25 @@ describe("the coverage report and its attribution", () => {
 
   it("round-trips the spec a command carries", () => {
     const text = formatSpec({ workspace: "ui", packages: ["pkg/a"], files: ["ui/src/m.ts"], functions: [{ path: "ui/src/m.ts", start: 3, end: 16 }] });
-    expect(parseSpec(text)).toEqual({ workspace: "ui", packages: ["pkg/a"], files: ["ui/src/m.ts"], functions: [{ path: "ui/src/m.ts", start: 3, end: 16 }] });
+    expect(parseSpec(text)).toEqual({ workspace: "ui", packages: ["pkg/a"], files: ["ui/src/m.ts"], functions: [{ path: "ui/src/m.ts", start: 3, end: 16 }], setup: [] });
+  });
+
+  it("carries setup commands in the spec with every argument intact (spaces, quotes, newlines, the empty string), in order", () => {
+    const setup = [
+      { id: "proto", argv: ["sh", "-c", "set -eu\ncd api; echo \"it's $HOME\" | tr a b"] },
+      { id: "empty", argv: ["tool", "", "--flag=a b", "ünï"] },
+    ];
+    const text = formatSpec({ packages: ["pkg/a"], functions: [{ path: "pkg/a/a.go", start: 3, end: 16 }], setup });
+    expect(text.split("\n").filter((l) => l.startsWith("setup "))).toHaveLength(2);
+    expect(text).not.toMatch(/set -eu/);
+    expect(parseSpec(text).setup).toEqual(setup);
+  });
+
+  it("reads the setup facts of a report: the ones that passed, and the one that failed with its exit status and tail", () => {
+    const ok = report("graphloom-coverage-v1 go\nsetup proto ok\nsetup mocks ok\nexit 0\n");
+    expect(ok).toMatchObject({ setup: ["proto", "mocks"], setupFail: undefined });
+    const bad = report("graphloom-coverage-v1 go\nsetup proto ok\nsetup-fail mocks 2 go: no such tool\n");
+    expect(bad).toMatchObject({ setup: ["proto"], setupFail: { id: "mocks", exit: 2, text: "go: no such tool" } });
   });
 
   it("reads the major version of the ranges a package.json declares", () => {
@@ -161,6 +179,7 @@ const diff = command("metrics-diff", "");
 const ready = (language: "go" | "typescript"): EvidenceRecord[] => [
   command(`sandbox-${language}`, "ready\n"),
   command(language === "go" ? "host-go-modcache" : "host-npm-cache", language === "go" ? "/gomodcache\n" : "/npm-cache\n"),
+  ...(language === "go" ? [command("host-mounts-go", "ok /opt/tools\nok /opt/bufcache\n")] : []),
 ];
 
 const input = (over: Partial<CoverageInput> & { evidence: EvidenceRecord[] }): CoverageInput => ({
@@ -172,7 +191,7 @@ const input = (over: Partial<CoverageInput> & { evidence: EvidenceRecord[] }): C
   ...over,
 });
 
-const goSpec = formatSpec({ packages: ["pkg/a"], functions: [{ path: "pkg/a/a.go", start: 3, end: 16 }] });
+const goSpec = formatSpec({ packages: ["pkg/a"], functions: [{ path: "pkg/a/a.go", start: 3, end: 16 }], setup: profile.metrics.sandbox!.go!.setup! });
 const goRun = (text: string, over: Parameters<typeof command>[2] = {}): EvidenceRecord => command("cover-go", "", { argv: coverageCommand({ id: "cover-go", script: "go.sh", spec: goSpec }, "/plugin", 60_000).argv, report: { text, truncated: false }, ...over });
 const doneOf = (s: CoverageState): Extract<CoverageState, { state: "done" }> => {
   expect(s.state).toBe("done");
@@ -184,11 +203,11 @@ describe("coverageState", () => {
     const s = coverageState(input({ evidence: [diff] }));
     expect(s).toMatchObject({ state: "probe" });
     const ids = (s as { commands: Array<{ id: string }> }).commands.map((c) => c.id);
-    expect(ids).toEqual(["sandbox-go", "host-go-modcache", "sandbox-typescript", "host-npm-cache"]);
+    expect(ids).toEqual(["sandbox-go", "host-mounts-go", "host-go-modcache", "sandbox-typescript", "host-npm-cache"]);
     const pull = (s as { commands: Array<{ argv: string[] }> }).commands[0]!.argv;
     expect(pull.at(-1)).toBe(profile.metrics.sandbox!.go!.image);
     expect(pull[2]).toContain("graphloom sandbox pull");
-    expect(missingProbe([command("sandbox-go", "ready"), command("host-go-modcache", "/g")], profile).map((c) => c.id)).toEqual(["sandbox-typescript", "host-npm-cache"]);
+    expect(missingProbe([command("sandbox-go", "ready"), command("host-mounts-go", "ok /a\nok /b"), command("host-go-modcache", "/g")], profile).map((c) => c.id)).toEqual(["sandbox-typescript", "host-npm-cache"]);
     expect(sandboxProbeCommands(profileOf({ metrics: { coverage: false } }))).toEqual([]);
   });
 
@@ -207,10 +226,10 @@ describe("coverageState", () => {
       pids: 512,
       tmp: "1g",
       writable: [".", "@scratch/gocache"],
-      readOnly: ["/plugin", "/gomodcache"],
-      env: { GOFLAGS: "-mod=readonly", GOPROXY: "off", GOTOOLCHAIN: "local", GOCACHE: "@scratch/gocache", GOMODCACHE: "/gomodcache", HOME: "/tmp" },
+      readOnly: ["/plugin", "/gomodcache", "/opt/tools", "/opt/bufcache"],
+      env: { GRAPHLOOM_MOUNT_TOOLS: "/opt/tools", GRAPHLOOM_MOUNT_BUF_CACHE: "/opt/bufcache", GOFLAGS: "-mod=readonly", GOPROXY: "off", GOTOOLCHAIN: "local", GOCACHE: "@scratch/gocache", GOMODCACHE: "/gomodcache", HOME: "/tmp" },
     });
-    expect(Object.keys((confinement as { env: object }).env).sort()).toEqual(["GOCACHE", "GOFLAGS", "GOMODCACHE", "GOPROXY", "GOTOOLCHAIN", "HOME"]);
+    expect(Object.keys((confinement as { env: object }).env).sort()).toEqual(["GOCACHE", "GOFLAGS", "GOMODCACHE", "GOPROXY", "GOTOOLCHAIN", "GRAPHLOOM_MOUNT_BUF_CACHE", "GRAPHLOOM_MOUNT_TOOLS", "HOME"]);
     const cmd = coverageCommand(plan.commands[0]!, "/plugin", 1_800_000);
     expect(cmd.argv.slice(0, 2)).toEqual(["sh", "/plugin/tools/cover/go.sh"]);
     expect(measuredSpec(cmd.argv)).toBe(goSpec);
@@ -259,7 +278,7 @@ describe("coverageState", () => {
   it("takes the repository's root package as a package, and leaves hidden, testdata and vendor directories out", () => {
     const root: MetricsRecord = { ...goRecord, path: "main.go", function: "main.F", startLine: 3, endLine: 9 };
     const s = coverageState(input({ evidence: [diff, ...ready("go")], records: [root], index: new Map([["main.go", [["main.F", 3, 9]]]]), files: [{ path: "main.go", language: "go" }, { path: ".github/x.go", language: "go" }, { path: "pkg/testdata/t.go", language: "go" }, { path: "vendor/v/v.go", language: "go" }] }));
-    expect((s as Extract<CoverageState, { state: "run" }>).plan.commands[0]!.spec).toBe(formatSpec({ packages: ["."], functions: [{ path: "main.go", start: 3, end: 9 }] }));
+    expect((s as Extract<CoverageState, { state: "run" }>).plan.commands[0]!.spec).toBe(formatSpec({ packages: ["."], functions: [{ path: "main.go", start: 3, end: 9 }], setup: profile.metrics.sandbox!.go!.setup! }));
   });
 
   it("runs only the languages that have a function to measure, and not for a test file alone", () => {
@@ -400,7 +419,7 @@ describe("coverage-measured (through the graph)", () => {
     expect(sim.jobs[at("Check the Docker sandbox images")]).toMatchObject({ stageId: "fetch", readOnly: true });
     expect(at("Measure the changed Go")).toBeGreaterThan(at("List the changed lines"));
     expect(job).toMatchObject({ kind: "command", stageId: "report", readOnly: true, checkout: { from: "candidate" } });
-    expect(job!.confinement).toMatchObject({ kind: "docker", image: BANYANDB_GO_IMAGE, readOnly: ["/plugin", "/gomodcache"] });
+    expect(job!.confinement).toMatchObject({ kind: "docker", image: BANYANDB_GO_IMAGE, readOnly: ["/plugin", "/gomodcache", "/rehearsal/tools", "/rehearsal/buf-cache"] });
     expect(confinementProblem(job!.confinement)).toBeUndefined();
   });
 
@@ -483,3 +502,167 @@ describe.skipIf(!hasAwk)("goprofile.awk", () => {
 });
 
 const BANYANDB_GO_IMAGE = profile.metrics.sandbox!.go!.image!;
+
+// ---------------------------------------------------------------- sandboxed setup and read-only mounts
+
+describe("sandbox mounts and setup (profile)", () => {
+  const withGo = (extra: Record<string, unknown>) => profileOf({ metrics: { generated: [], sandbox: { go: { image: profile.metrics.sandbox!.go!.image, ...extra } } } });
+  const mounts = [{ name: "tools", path: "~/t/bin" }];
+  const setup = [{ id: "gen", argv: ["sh", "-c", "echo hi > gen.txt"] }];
+
+  it("probes where the mounts are on the host only when the profile names some, from `/`", () => {
+    const ids = (p: Parameters<typeof sandboxProbeCommands>[0]): string[] => sandboxProbeCommands(p).map((c) => c.id);
+    expect(ids(withGo({}))).toEqual(["sandbox-go", "host-go-modcache", "sandbox-typescript", "host-npm-cache"]);
+    expect(ids(withGo({ readOnly: mounts }))).toEqual(["sandbox-go", "host-mounts-go", "host-go-modcache", "sandbox-typescript", "host-npm-cache"]);
+    const probe = sandboxProbeCommands(withGo({ readOnly: mounts })).find((c) => c.id === "host-mounts-go")!;
+    expect(probe.argv.slice(3)).toEqual(["host-mounts-go", "~/t/bin"]);
+    expect(probe.argv[2]).toMatch(/^cd \/ /);
+  });
+
+  describe("the host probe script", () => {
+    const script = sandboxProbeCommands(withGo({ readOnly: mounts })).find((c) => c.id === "host-mounts-go")!.argv[2]!;
+    const run = (home: string | undefined, ...paths: string[]) => {
+      const r = spawnSync("/bin/sh", ["-c", script, "host-mounts-go", ...paths], { encoding: "utf8", env: { PATH: process.env.PATH ?? "/usr/bin:/bin", ...(home !== undefined ? { HOME: home } : {}) } });
+      return { status: r.status, lines: r.stdout.trimEnd().split("\n") };
+    };
+
+    it("expands ~ to the operator's home, follows links to the real directory, and answers one line per path", () => {
+      const home = mkdtempSync(path.join(os.tmpdir(), "gl-mounts-"));
+      try {
+        spawnSync("sh", ["-c", `mkdir -p real/bin && ln -s "$PWD/real/bin" tools && mkdir plain`], { cwd: home });
+        const real = spawnSync("sh", ["-c", "cd real/bin && pwd -P"], { cwd: home, encoding: "utf8" }).stdout.trim();
+        const plain = spawnSync("sh", ["-c", "cd plain && pwd -P"], { cwd: home, encoding: "utf8" }).stdout.trim();
+        expect(run(home, "~/tools", "~/plain", `${home}/plain`, "~/nope", "relative/dir", "/", "~/real/bin/../..")).toEqual({
+          status: 0,
+          lines: [
+            `ok ${real}`,
+            `ok ${plain}`,
+            `ok ${plain}`,
+            `missing ${home}/nope is not a directory on this host`,
+            "missing not an absolute path",
+            "missing / is the filesystem root",
+            `ok ${home}`,
+          ],
+        });
+        expect(run(undefined, "~/tools").lines).toEqual(["missing HOME is not set"]);
+      } finally {
+        rmSync(home, { recursive: true, force: true });
+      }
+    });
+  });
+
+  it("states mounts and setup on the plan, in the spec the command carries, and in a confinement the SDK accepts", () => {
+    const p = withGo({ readOnly: mounts, setup });
+    const evidence = [diff, command("sandbox-go", "ready\n"), command("host-go-modcache", "/gomodcache\n"), command("host-mounts-go", "ok /home/u/real/bin\n")];
+    const s = coverageState(input({ evidence, profile: p })) as Extract<CoverageState, { state: "run" }>;
+    expect(s.state).toBe("run");
+    expect(s.plan.mounts).toEqual([{ name: "tools", path: "/home/u/real/bin" }]);
+    expect(parseSpec(s.plan.commands[0]!.spec).setup).toEqual(setup);
+    const c = coverageConfinement(s.plan, "/plugin");
+    expect(confinementProblem(c)).toBeUndefined();
+    expect(c).toMatchObject({ readOnly: ["/plugin", "/gomodcache", "/home/u/real/bin"], env: { GRAPHLOOM_MOUNT_TOOLS: "/home/u/real/bin" } });
+    // Mounts are read-only: never listed as writable.
+    expect((c as { writable: string[] }).writable).toEqual([".", "@scratch/gocache"]);
+  });
+
+  it("waits for the mounts probe, and says which mount is unusable without running anything", () => {
+    const p = withGo({ readOnly: mounts, setup });
+    const base = [diff, command("sandbox-go", "ready\n"), command("host-go-modcache", "/gomodcache\n")];
+    expect(coverageState(input({ evidence: base, profile: p }))).toMatchObject({ state: "probe" });
+    const why = (line: string, over: Parameters<typeof command>[2] = {}): string => (doneOf(coverageState(input({ evidence: [...base, command("host-mounts-go", line, over)], profile: p }))).outcomes.get(recordKey(goRecord)) as { reason: string }).reason;
+    expect(why("missing /home/u/t/bin is not a directory on this host\n")).toBe("sandbox mount tools (~/t/bin): /home/u/t/bin is not a directory on this host");
+    expect(why("")).toBe("sandbox mount tools (~/t/bin): the host probe printed no answer for it");
+    expect(why("", { exit: 2, stderr: "boom" })).toMatch(/the sandbox mounts could not be located on the host: boom/);
+    expect(why("ok /a:b\n")).toMatch(/resolves to a path a container cannot mount/);
+  });
+
+  it("makes every function not run, with the failed setup command named, when the setup failed; and keeps what ran when it did not", () => {
+    const p = withGo({ readOnly: mounts, setup });
+    const spec = formatSpec({ packages: ["pkg/a"], functions: [{ path: "pkg/a/a.go", start: 3, end: 16 }], setup });
+    const evidence = (text: string): EvidenceRecord[] => [
+      diff,
+      command("sandbox-go", "ready\n"),
+      command("host-go-modcache", "/gomodcache\n"),
+      command("host-mounts-go", "ok /m\n"),
+      command("cover-go", "", { argv: coverageCommand({ id: "cover-go", script: "go.sh", spec }, "/plugin", 60_000).argv, report: { text, truncated: false } }),
+    ];
+    const failed = doneOf(coverageState(input({ evidence: evidence("graphloom-coverage-v1 go\nsetup-fail gen 3 generator exploded\n"), profile: p })));
+    expect(failed.outcomes.get(recordKey(goRecord))).toEqual({ reason: "setup failed: gen exited 3 (generator exploded)" });
+    expect(failed.facts.runs[0]).toMatchObject({ ran: false, reason: "setup failed: gen exited 3 (generator exploded)" });
+    const fine = doneOf(coverageState(input({ evidence: evidence("graphloom-coverage-v1 go\nsetup gen ok\nexit 0\nB pkg/a/a.go:4.2,6.3 3 1\nseen pkg/a/a.go\n"), profile: p })));
+    expect(fine.outcomes.get(recordKey(goRecord))).toMatchObject({ source: "measured", covered: 3 });
+    expect(fine.facts.runs[0]).toMatchObject({ ran: true, setup: ["gen"] });
+  });
+});
+
+describe("go.sh runs the setup before the tests", () => {
+  const goSh = fileURLToPath(new URL("../tools/cover/go.sh", import.meta.url));
+  const stubs = (dir: string): void => {
+    // A `go` that records its calls into order.txt, writes a one-block profile for `go test`, and names the module for `go env GOMOD`.
+    writeFileSync(
+      path.join(dir, "go"),
+      `#!/bin/sh
+case "$1" in
+  env) echo "$PWD/go.mod" ;;
+  test)
+    echo "test" >> "$ORDER"
+    for a in "$@"; do case "$a" in -coverprofile=*) printf 'mode: set\nexample.com/m/pkg/a/a.go:4.2,6.3 3 1\n' > "\${a#-coverprofile=}" ;; esac; done
+    echo "ok  	example.com/m/pkg/a	0.1s" ;;
+esac
+`,
+      { mode: 0o755 },
+    );
+  };
+
+  function run(setup: Array<{ id: string; argv: string[] }>): { report: string; order: string[]; status: number | null } {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "gl-gosh-"));
+    try {
+      const bin = path.join(dir, "bin");
+      const work = path.join(dir, "work");
+      spawnSync("mkdir", ["-p", bin, path.join(work, "pkg", "a")]);
+      stubs(bin);
+      writeFileSync(path.join(work, "go.mod"), "module example.com/m\n\ngo 1.25\n");
+      const spec = formatSpec({ packages: ["pkg/a"], functions: [{ path: "pkg/a/a.go", start: 3, end: 16 }], setup });
+      const parts = [spec];
+      const rep = path.join(dir, "report.txt");
+      const order = path.join(dir, "order.txt");
+      writeFileSync(order, "");
+      const r = spawnSync("sh", [goSh, String(parts.length), ...parts], { cwd: work, encoding: "utf8", env: { PATH: `${bin}:${process.env.PATH}`, TMPDIR: dir, GRAPHLOOM_REPORT_FILE: rep, ORDER: order } });
+      return { report: spawnSync("cat", [rep], { encoding: "utf8" }).stdout, order: spawnSync("cat", [order], { encoding: "utf8" }).stdout.split("\n").filter(Boolean), status: r.status };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  const note = (id: string): { id: string; argv: string[] } => ({ id, argv: ["sh", "-c", `echo ${id} >> "$ORDER"`] });
+
+  it("runs each setup command in order, from the checkout's root, before `go test`, and reports them", () => {
+    const r = run([note("one"), note("two"), { id: "where", argv: ["sh", "-c", 'pwd >> "$ORDER"; printf "%s" "$0|$1" >> "$ORDER"; echo >> "$ORDER"', "a b", "c'd"] }]);
+    expect(r.status).toBe(0);
+    expect(r.order.slice(0, 2)).toEqual(["one", "two"]);
+    expect(r.order[2]).toMatch(/\/work$/);
+    expect(r.order[3]).toBe("a b|c'd");
+    expect(r.order.at(-1)).toBe("test");
+    expect(r.report.split("\n").slice(0, 5)).toEqual(["graphloom-coverage-v1 go", "setup one ok", "setup two ok", "setup where ok", "exit 0"]);
+    expect(r.report).toContain("B pkg/a/a.go:4.2,6.3 3 1");
+  });
+
+  it("stops at the first failing command: the later ones and the tests do not run, and the report says which failed, its exit and its output", () => {
+    const r = run([note("one"), { id: "broken", argv: ["sh", "-c", 'echo "line1"; echo "boom here" >&2; exit 7'] }, note("never")]);
+    expect(r.status).toBe(0);
+    expect(r.order).toEqual(["one"]);
+    expect(r.report).toBe("graphloom-coverage-v1 go\nsetup one ok\nsetup-fail broken 7 line1 boom here\n");
+  });
+
+  it("reports a program that does not exist as exit 127, and has no tests run", () => {
+    const r = run([{ id: "ghost", argv: ["definitely-not-a-program-xyz"] }]);
+    expect(r.order).toEqual([]);
+    expect(r.report).toMatch(/^graphloom-coverage-v1 go\nsetup-fail ghost 127 /);
+  });
+
+  it("runs no setup, and the report has no setup facts, when the spec names none", () => {
+    const r = run([]);
+    expect(r.order).toEqual(["test"]);
+    expect(r.report).not.toMatch(/^setup/m);
+  });
+});
