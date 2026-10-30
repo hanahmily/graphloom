@@ -283,7 +283,7 @@ generation's evidence holds a `--decline review-layer`.
 | Report | `measurements` | For every function the PR adds or modifies, complexity and nesting were measured by the pinned tools over the head tree, and coverage (on by default) and then mutation (on by default, at covered sites only) were measured in the Docker sandbox over a checkout of the head, or carry a not-run reason (switched off by the profile, Docker unavailable, image missing, a dependency not cached, no vitest coverage provider, no coverage). Every value recomputes from its evidence ([metrics §5](design-code-quality-metrics.md#5-records-and-recomputation)) | `graphloom-metrics-v1` command reports | `measurements` |
 | Report | `claims-checked` | An independent `<report-checker>` judged every report item against the diff, and every item left is `supported` with matching quotes | `claim-check-v1` | `claims-checked` |
 | Questions | `questions-complete` | N1, the necessity question, was asked first ([§7.5](#75-the-necessity-question-n1)): its three parts have their evidence, an independent checker verified every cited design statement, trace step and the conclusion, and N1's checked answer and decision are recorded in `necessity.json`. When N1 concluded `unnecessary`, the checker supports it and the operator did not ask for every question, N1 is the only question required and the skip is recorded. Otherwise every required question was asked ([§7.1](#71-questions)): purpose for each change item whose purpose the PR text does not state (a stated purpose recorded with a matching quote instead); `existing-equivalent`, `reuse-library` and `common-logic` for each new symbol; `missing-test` for each new or modified symbol with no mapped test; and one question per value over a metric limit and per surviving mutant. Every changed function has a measurement record or a not-run reason | `necessity-v1`, `answer-check-v1`, `necessity-write`, `questions-v1`, search and test-map reports | `questions-complete` (`independence: separate-reviewer`: N1's check is its latest review) |
-| Answers | `answers-complete` | N1 has its recorded answer first (alone, with the skip recorded in the Q&A, when it was skipped past). Every other question has an answer from the `<answerer>`, with evidence (citations, the searches run with their results, quotes) and a status of `answered`, `partially answered` or `needs author`. Every "none found" answer lists its whole-repository searches and the dependency inventory. Every cited metric equals its record. Every proposal cites line ranges inside its function. `review.md`, `report.json` and `qa.json` are written | `answers-v1`, `qa-write` | `answers-complete` |
+| Answers | `answers-complete` | N1 has its recorded answer first (alone, with the skip recorded in the Q&A, when it was skipped past). Every other question has an answer from the `<answerer>`, with evidence (citations, the searches run, each re-run by the plugin with the count it measured, quotes) and a status of `answered`, `partially answered` or `needs author`. Every "none found" answer lists its whole-repository searches and the dependency inventory. Every cited metric equals its record. Every proposal cites line ranges inside its function. `review.md`, `report.json` and `qa.json` are written | `answers-v1`, `qa-write` | `answers-complete` |
 | Answers | `answers-grounded` | An independent `<answer-checker>` verified N1's cited design statements, trace steps and conclusion, and re-checked every cited equivalent, library, duplicate and covering test, and every "none found" claim, against the trees. Every answer left is `supported` or `partial`. An answer still unsupported after one correction is `needs author`, with both statements recorded | `claim-check-v1` | `answers-grounded` |
 | Review | `code-review` | Unless report-only: for each aspect (correctness, maintainability, security), the latest read-only `<reviewer-aspect>` pass reviewed every file in scope with that aspect's rule file, every rule group `ocr delegate rule` returned for it has source `custom` and that file's rule text, and the pass gave a status for every open prior finding of the aspect. Every pass started, on the answerer's harness, as a fork of the review's base session or seeded with its recorded reason. Each aspect's sweep saturated or ran four passes. Every finding has a verdict from its `<verifier-aspect>`, in a fresh session on a harness different from its reviewer's | `pr-code-review-v1`, `ocr-rule-groups` command reports, `pr-finding-verification-v1` | `open-code-review` |
 | Review | `findings-proven` | Unless report-only: every behavioral finding is `proven` (its test, rerun by the graph in the Docker sandbox, failed on the head in every run, in the test's own assertion or by a panic inside the cited code, and the verifier judged that the test shows the claimed bug), or is recorded `unproven` with its reason. No unproven behavioral finding is drafted as P0 or P1 or counts toward the verdict | `graphloom-repro-v1` command reports, `pr-finding-verification-v1` | `findings-proven` |
@@ -776,7 +776,9 @@ adds to it, is the context the review layer starts from
   `<n><unit>` grammar and is called from 7 places".
 - **Evidence:**
   - `path:line` citations and quotes;
-  - each search run, with its pattern, its scope and its hit count;
+  - each search run, as a structured record ([Searches](#searches-and-their-counts)):
+    its pattern, the tree it ran over, its paths and its case flag, with the
+    count the answerer got; the plugin re-runs it and shows its own count;
   - dependency inventory entries, with the version.
 - **Status**, one of three:
 
@@ -789,8 +791,105 @@ adds to it, is the context the review layer starts from
 A **"no existing equivalent", "no library" or "no shared logic"** answer must
 list the whole-repository searches run: names and variants, signatures, key
 tokens, and the dependency inventory with each library's source status. That
-way an absence is grounded rather than assumed. A dependency marked `source
-unavailable` makes the answer `partially answered`.
+way an absence is grounded rather than assumed, and it rests on **measured**
+zero counts ([Searches](#searches-and-their-counts)). Only a search of the
+whole base tree (`tree` `base`, no `paths`) counts toward the required number
+(three for an equivalent or shared logic, one for a library); a search scoped to
+paths, over the head or over a dependency is supplementary evidence, since it
+covers less than the repository. A dependency marked
+`source unavailable` makes the answer `partially answered`.
+
+#### Ids
+
+Every id field of a Q&A contract names one of the ids the job lists: the
+answerer's `answers[].question`, the checker's `verdicts[].question`, the claim
+checker's `verdicts[].item`, the questioner's `purposes[].item`,
+`questions[].item` and `questions[].symbol`. The contract declares each as a
+reference path (`ResultContract.references`), and the plugin passes the ids of
+that job in `knownReferences`, so the harness narrows the field to a JSON-schema
+`enum` of exactly those ids (`applyReferenceEnums`) and the CLI's structured
+output cannot hold anything else. The answerer's revision lists only the
+questions asked again; N1's checker lists `N1`. The assignments say it too: use
+the bare id exactly as listed (`Q1`, never `Q1 [split-function]` or the text).
+
+That is the first line of defence. The controller applies the same enum when it
+classifies a result (`checkReferences`): a result whose ids are off it is
+recorded as an invalid contract result, never as review evidence, so a checker
+result with a wrong id is a failed try (asked again, three tries, then the
+supervisor, which sees the ignored keys), and the second line below serves the
+answerer's result (kind `other`, read despite the classification when its shape
+holds) and any result the controller does not classify. The second line is a tolerant read
+(`src/ids.ts`) for a harness that writes the id wrongly anyway, as the live run
+`485ea8ea-e73` on apache/skywalking-banyandb#1443 showed: the checker keyed its
+verdicts `Q1 [split-function]` or by the whole question text, the plugin matched
+by exact id, saw none judged and escalated after three tries. An id that is not
+exactly a listed one is accepted only when it begins with exactly one listed id
+token (`N<n>`, `Q<n>`, `R<n>` and, for claims, `R<n>.s<m>`, `purpose`,
+`overview`) followed by a character that is not alphanumeric. An unknown token
+(`Q99 …`, `Q1x`) and an ambiguous one (`Q1, Q2`, `Q1 and Q2`, `Q1-Q3`) stay
+unjudged, and an escalation names the keys it ignored. A normalization is never
+silent: the answer carries a note (`the checker's id "Q1 [split-function]" is
+not a bare id; read as Q1`), which `qa.json` records (`notes`) and `review.md`
+shows under the answer; a claim check's notes are in the summary of the report
+write.
+
+#### Searches and their counts
+
+An agent's own hit count is a claim, not a fact (the live run's N1 listed its
+searches all with `hits: 0` while the checker's own re-run found 54, 9 and
+more). A search is therefore a structured, re-runnable record, in `answers-v1`,
+`necessity-v1` and the checker's `answer-check-v1`:
+
+| Field | Meaning |
+|---|---|
+| `pattern` | A POSIX extended regular expression, as `git grep -E` reads it: one line, at most 300 characters |
+| `tree` | `base` (the pinned base commit), `head` (the working tree) or `dependency` (a dependency's mounted source) |
+| `paths` | Pathspec globs relative to the tree's root (`*` also matches across `/`), at most 8; empty is the whole tree. A test search is the base tree with a path such as `*_test.go`. For a dependency, absolute directories inside the inventory's source directories |
+| `ignoreCase` | Whether `-i` was used |
+| `hits` | The number of matching lines the agent counted |
+
+The deterministic check refuses, without running anything, a pattern that is
+not a valid ERE (unbalanced parenthesis or bracket, a repetition operator with
+nothing to repeat, a malformed `{m,n}`, a trailing backslash, a newline), and a
+path that leaves the tree (a `..` segment, an absolute path, a leading `:` that
+git would read as pathspec magic) or, for a dependency, lies outside the
+inventory's directories. The answer goes back with each problem named. The
+check is a static approximation: the re-run is the final word, and a pattern
+git refuses is sent back with git's message.
+
+The plugin then **re-runs every `base` and `head` search** an answer, N1 or the
+checker reports, in a read-only graph command job (`git grep -I -E -c`, with `-i`
+and the paths; the head search covers tracked and untracked files of the
+working tree), which prints only the total lines and files matched (a few
+bytes of report). A distinct search runs once however many answers report it
+(its command id is content-addressed, `cite-s-<hash>`, `cite-n-s-<hash>` for
+N1). The measured count is the one recorded and shown:
+
+- `review.md` and `qa.json` show `measured 54 hits in 9 files (reported 0:
+  mismatch)` where the counts differ, and `54 hits (measured)` where they agree;
+- a search that was not re-run (a `dependency` search, whose source lies outside
+  the repository, or one beyond the bound below) shows the agent's count marked
+  `reported N, not measured` with the reason, so no agent count appears as a
+  fact;
+- a search an answer reports as finding nothing (`hits: 0`) that measures hits
+  fails the answer's deterministic check, which sends it back to the answerer
+  with the measured count: **a "none found" claim rests on measured zeros**.
+  This is the same one correction as for the other inconsistencies; a search
+  that reported hits is only flagged when the counts differ;
+- the checker's searches are measured the same way before the Q&A is written,
+  for display only: they correct nobody.
+
+**Bound.** At most 200 distinct searches are re-run per answer set and per
+checker result (a command is one search, 16 to a job, so at most thirteen
+jobs); the searches behind "none found" answers come first. The searches
+beyond the bound are recorded `reported N, not measured (only the first 200
+distinct searches of one result are re-run)`; one cannot correct an answer or
+ground an absence. So a "none found" answer whose required whole-tree searches
+are not all among those re-run is sent back (the same one correction) to list
+fewer, and a result that still reports more than the bound's worth of required
+absence searches reaches the supervisor, who sees why. Each answer is also
+limited to 12 searches ([the checks below](#73-answers)); the checker's
+searches beyond the bound are shown as its own count, marked.
 
 Each question type has a typical outcome:
 
@@ -822,6 +921,8 @@ The answers are checked as follows.
 
 1. **Deterministic checks:**
    - every question has an answer with evidence and a status;
+   - every search is a valid, re-runnable record, and none that reports finding
+     nothing measures hits when re-run ([Searches](#searches-and-their-counts));
    - every citation resolves in the named tree;
    - every number cited equals its measurement record, which the
      `measurements` validator recomputes;
@@ -835,7 +936,8 @@ The answers are checked as follows.
    - It re-checks each cited equivalent, library, duplicate and covering
      test against the tree.
    - For each "none found" answer, it searches the whole repository with its
-     own queries.
+     own queries, reported as structured searches like the answerer's; the
+     plugin measures them too.
    - It returns `supported`, `partial` (kept, with its note) or
      `unsupported`.
 3. An unsupported answer goes back to the answerer once, with the checker's
@@ -871,10 +973,10 @@ Purpose: stated — "so retention can be set per group" (PR body)
 #### `ParseTTL` — pkg/schema/ttl.go:14 (new)
 - **Q1 [existing-equivalent]** Does the codebase already parse TTL-like durations?
   **A — answered.** `ParseDuration` (pkg/timestamp/duration.go:30) parses the same `<n><unit>` grammar (similarity 0.71); called from 7 places, e.g. banyand/measure/flusher.go:52.
-  Evidence: `git grep -nE 'func \w*Parse\w*(Duration|TTL)' <base>` → 3 hits; quotes duration.go:30-41. Checker: supported.
+  Evidence: searches `func \w*Parse\w*(Duration|TTL)` (base) → 3 hits (measured); quotes duration.go:30-41. Checker: supported.
 - **Q2 [reuse-library]** Could a declared library do this?
   **A — answered.** None of the 41 go.mod requires provides unit-suffixed duration parsing beyond `time.ParseDuration` (stdlib, no `d` unit).
-  Evidence: inventory go.mod:5-60; `git grep -n 'ParseDuration\|units\.' <base>` → 9 hits, none outside pkg/timestamp. Checker: supported.
+  Evidence: inventory go.mod:5-60; searches `ParseDuration|units\.` (base) → 9 hits (measured), none outside pkg/timestamp. Checker: supported.
 - **Q3 [missing-test] ▶ needs author** Which test covers `ParseTTL`?
   **A — needs author.** No test references `ParseTTL` or its caller `schema.(*Group).Validate` (searched: all `*_test.go` in the base and PR; test/integration/**).
   Proposal: `TestParseTTL` in pkg/schema/ttl_test.go, table cases `"7d"` (unit path :18–30), `"0h"` (lower bound :35), `"9999d"` (upper bound :41), `"7x"` (unknown unit :52).
@@ -892,6 +994,13 @@ Purpose: stated — "so retention can be set per group" (PR body)
 a large PR readable, the "none found" answers for a change item's unexported
 helpers are grouped into one collapsed list under that item. Each entry still
 shows its searches.
+
+Every search shows the count the plugin **measured**, never the agent's alone:
+`→ 54 hits (measured)`, or `→ measured 54 hits in 9 files (reported 0:
+mismatch)` where the agent's count differs, or `→ reported 2 hits, not measured
+(<why>)` where it was not re-run. An answer carries `notes` where the plugin
+normalized an id ([Ids](#ids)); `review.md` shows them as `Note: …` under the
+answer.
 
 **Who decides what reaches the author:** the maintainer.
 
@@ -929,7 +1038,7 @@ with evidence, and a conclusion.
 | Part | The answerer must |
 |---|---|
 | 1. **Is the problem real on the base?** | Quote the claimed problem from the pull request's title, body or a commit message (the quote must match the pinned text, as a stated purpose does). Trace the base behavior through the **base code**: each trace step cites `path:line` in the base tree. Say whether the claimed failure can happen on the base (`yes`, `no`, `unclear`). A failing test on the base is optional evidence; this version has no mechanism to run one (it arrives with the P4 reproducing tests), so the answer says `not attempted: no reproduction mechanism in this version` and rests on the trace |
-| 2. **Does the fix fit the system's design?** | Search the repository's **design and architecture documents** (the profile's `questions.designDocs` globs, its `context` documents, and the repository's `docs/`) and the code comments that state intent. List every search with its hit count, found or not. Cite the **design statement** and the **changed lines** and say whether the change `preserves` or `breaks` them, is `unrelated`, or that no design statement is `not stated` (for #1443: does replying after the flush loop make the write wait on flushing, against the write path design?) |
+| 2. **Does the fix fit the system's design?** | Search the repository's **design and architecture documents** (the profile's `questions.designDocs` globs, its `context` documents, and the repository's `docs/`) and the code comments that state intent. List every search as a structured record ([§7.3](#searches-and-their-counts)), found or not; the plugin re-runs each and records its own count Cite the **design statement** and the **changed lines** and say whether the change `preserves` or `breaks` them, is `unrelated`, or that no design statement is `not stated` (for #1443: does replying after the flush loop make the write wait on flushing, against the write path design?) |
 | 3. **Is there a simpler or existing way?** | Say whether the caller, another layer or an existing mechanism already handles it, or the fix belongs elsewhere, and cite where |
 
 **Conclusion**, one line with its rationale: `necessary`, `questionable`,
@@ -1017,7 +1126,7 @@ Reproduction: not attempted: no reproduction mechanism in this version
 Effect: **breaks**. The design says the write is buffered as a memory part and a background worker flushes it later, so a write returns before flushing. The change decides the reply after the flush loop, so the reply waits on flushing, which the design does not allow.
 - Design statement: `docs/concept/tsdb.md:172` "A background worker periodically flushes the memory part to disk."
 - Changed lines: head `banyand/stream/write_standalone.go:45-47` "if stored == 0 && firstErr != nil {"
-Searched: `write path|flush|acknowledg` (base) → 9 hits; …
+Searched: `write path|flush|acknowledg` (base) → 9 hits (measured); …
 
 ## 3. Is there a simpler or existing way?
 None found. …
@@ -2154,6 +2263,32 @@ pr-review:
 - Conversations are recorded only into a stopped run, so a chat is captured at
   `report ready` (the intended place); while the run is running the fork stays
   in the agent's own store.
+
+### Version 0.4: ids and measured searches
+
+`examples/plugins/pr-review` 0.4 fixes two bugs the live run `485ea8ea-e73` on
+apache/skywalking-banyandb#1443 showed, without changing the stage list:
+
+- **Ids** ([§7.3](#ids)): the id fields of every Q&A contract are a per-job
+  `enum` of the listed ids (reference paths on `answers-v1`,
+  `answers-revision-v1`, `answer-check-v1`, `claim-check-v1` and
+  `questions-v1`), and a tolerant read accepts an id that begins with exactly
+  one listed id token, noting it in the Q&A. Before, the checker keyed
+  verdicts `Q1 [split-function]`, none matched, and the answer check escalated
+  after three tries.
+- **Searches** ([§7.3](#searches-and-their-counts)): a search is a structured
+  record (`pattern`, `tree`, `paths`, `ignoreCase`, `hits`; the free-text
+  `scope` is gone, and a test search is the base tree with a test glob). The
+  plugin re-runs every `base` and `head` search of an answer, N1 and the
+  checker in a read-only command job, shows the measured count, flags a
+  mismatch, and sends back an answer whose "found nothing" search measures
+  hits. At most 200 distinct searches are re-run per result; a dependency
+  search is not re-run and is shown as the agent's own count, marked.
+- **Not built:** a search over a dependency's source is not measured (it lies
+  outside the repository, and the command job is not mounted with it), so an
+  absence in a library rests partly on the agent's count there, marked as such;
+  the ERE validity check is a static approximation, with the re-run as the
+  final word.
 
 ### Version 0.3: the necessity question and base → head metrics
 

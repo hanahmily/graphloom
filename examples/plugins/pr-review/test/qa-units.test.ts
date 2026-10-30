@@ -290,7 +290,7 @@ describe("the answer rules (design 7.3 checks)", () => {
     status: "answered",
     none_found: false,
     citations: [],
-    searches: [{ pattern: "p", scope: "base", hits: 0 }],
+    searches: [{ pattern: "p", tree: "base", paths: [], ignoreCase: false, hits: 0 }],
     inventory: [],
     metrics: [],
     proposal: { kind: "none", splits: [], testFile: "", testName: "", cases: [], assertion: "" },
@@ -333,8 +333,8 @@ describe("the answer rules (design 7.3 checks)", () => {
 
   it("makes a none-found answer list its whole-repository searches, and a library answer partial while a dependency's source is unavailable", () => {
     const one = answer("existing-equivalent", { none_found: true });
-    expect(problems(one).join("|")).toMatch(/3 or more with scope base.*not 1/);
-    const three = answer("existing-equivalent", { none_found: true, searches: [1, 2, 3].map((n) => ({ pattern: `p${n}`, scope: "base" as const, hits: 0 })) });
+    expect(problems(one).join("|")).toMatch(/3 or more over the whole base tree.*not 1/);
+    const three = answer("existing-equivalent", { none_found: true, searches: [1, 2, 3].map((n) => ({ pattern: `p${n}`, tree: "base", paths: [], ignoreCase: false as const, hits: 0 })) });
     expect(problems(three)).toEqual([]);
     expect(problems(answer("reuse-library", { none_found: true })).join("|")).toMatch(/source available here, so a "none found" library answer is "partially answered"/);
     expect(problems(answer("reuse-library", { none_found: true, status: "partially answered" }))).toEqual([]);
@@ -348,7 +348,7 @@ describe("the answer rules (design 7.3 checks)", () => {
 
   it("makes an answer name an equivalent it claims, with a citation, and an answer carry evidence", () => {
     expect(problems(answer("existing-equivalent", { citations: [], searches: [] })).join("|")).toMatch(/no evidence/);
-    expect(problems(answer("existing-equivalent", { searches: [{ pattern: "p", scope: "base", hits: 2 }] })).join("|")).toMatch(/cites it/);
+    expect(problems(answer("existing-equivalent", { searches: [{ pattern: "p", tree: "base", paths: [], ignoreCase: false, hits: 2 }] })).join("|")).toMatch(/cites it/);
   });
 
   it("rejects a citation outside the tree it names: a parent path, an absolute base path, a dependency path outside the mounted directories, and a backwards range", () => {

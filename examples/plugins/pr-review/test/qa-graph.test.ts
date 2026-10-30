@@ -81,11 +81,13 @@ describe("answer-finds-existing-helper", () => {
       "questions/agent/Answer the necessity",
       "questions/command/Check the necessity",
       "questions/agent/Check the necessity",
+      "questions/command/Check the necessity",
       "questions/command/Record N1's checked",
       "questions/agent/Ask the questions",
       "answers/agent/Answer the questions",
       "answers/command/Check the answers'",
       "answers/agent/Check the answers",
+      "answers/command/Check the answers'",
       "answers/command/Write .graphloom/review/qa.json and",
       "answers/command/Advance the pull",
     ]);
@@ -263,8 +265,8 @@ describe("answer-checker-contradicts", () => {
 
   it("verifies the corrected answer's citation before the second check", () => {
     const order = qaJobs(sim).filter((j) => j.stageId === "answers").map((j) => (j.kind === "agent" ? `${j.resultSchema}` : j.instruction.split(" ")[0]!));
-    expect(order).toEqual(["answers-v1", "answer-check-v1", "answers-revision-v1", "Check", "answer-check-v1", "Write", "Advance"]);
-    expect(commandIds(qaJobs(sim).filter((j) => j.instruction.startsWith("Check the answers'")))).toEqual(["cite-1"]);
+    expect(order).toEqual(["answers-v1", "Check", "answer-check-v1", "answers-revision-v1", "Check", "answer-check-v1", "Check", "Write", "Advance"]);
+    expect(commandIds(qaJobs(sim).filter((j) => j.instruction.startsWith("Check the answers'"))).filter((id) => /^cite-\d+$/.test(id))).toEqual(["cite-1"]);
   });
 
   it("downgrades to needs author, with both statements recorded, when the correction is still unsupported", () => {

@@ -576,7 +576,7 @@ const RETENTION_PULL: Pull = {
               { path: "pkg/timestamp/duration.go", tree: "base", start: 30, end: 42, quote: "func ParseDuration" },
               { path: "banyand/measure/flusher.go", tree: "base", start: 52, end: 52, quote: "timestamp.ParseDuration" },
             ],
-            searches: [{ pattern: "func .*\\(.*string.*\\).*int.*error", scope: "base", hits: 3 }],
+            searches: [{ pattern: "func .*\\(.*string.*\\).*int.*error", tree: "base", paths: [], ignoreCase: false, hits: 3 }],
           }
         : dflt,
   },
@@ -597,9 +597,9 @@ const BACKOFF_PULL: Pull = {
             ...dflt,
             answer: "No declared dependency or internal package provides a back-off: github.com/spf13/cobra, github.com/robfig/cron/v3 and go.uber.org/multierr do not, and no directory of the base is named for retries; none of their sources is available here, so the answer rests on the searches and the manifest.",
             searches: [
-              { pattern: "\\bBackoff\\b|\\bbackoff\\b|\\bback_off\\b", scope: "base", hits: 0 },
-              { pattern: "func .*\\(.*int.*Duration.*\\).*Duration", scope: "base", hits: 2 },
-              { pattern: "maxDelay|time.Minute", scope: "base", hits: 6 },
+              { pattern: "\\bBackoff\\b|\\bbackoff\\b|\\bback_off\\b", tree: "base", paths: [], ignoreCase: false, hits: 0 },
+              { pattern: "func .*\\(.*int.*Duration.*\\).*Duration", tree: "base", paths: [], ignoreCase: false, hits: 2 },
+              { pattern: "maxDelay|time.Minute", tree: "base", paths: [], ignoreCase: false, hits: 6 },
             ],
             inventory: [{ name: "github.com/spf13/cobra", version: "v1.9.1" }, { name: "github.com/robfig/cron/v3", version: "v3.0.1" }],
           }
@@ -630,14 +630,14 @@ const JITTER_PULL: Pull = {
     },
     // The answerer finds nothing in its own searches; the checker's search finds the vendored equivalent.
     checks: [
-      (q) => (q.type === "existing-equivalent" ? { verdict: "unsupported", note: "git grep -n 'func Jitter' finds vendor/github.com/foo/jitter/jitter.go:12, which spreads a duration by a fifth: the same function", searches: [{ pattern: "func Jitter", scope: "base", hits: 1 }] } : undefined),
+      (q) => (q.type === "existing-equivalent" ? { verdict: "unsupported", note: "git grep -n 'func Jitter' finds vendor/github.com/foo/jitter/jitter.go:12, which spreads a duration by a fifth: the same function", searches: [{ pattern: "func Jitter", tree: "base", paths: [], ignoreCase: false, hits: 1 }] } : undefined),
     ],
     revise: (q, _sym, prev) => ({
       ...prev,
       answer: "`Jitter` (vendor/github.com/foo/jitter/jitter.go:12) spreads a duration by a fifth either way, as this one does; the vendored directory is searched too.",
       none_found: false,
       citations: [{ path: "vendor/github.com/foo/jitter/jitter.go", tree: "base", start: 12, end: 18, quote: "func Jitter" }],
-      searches: [{ pattern: "func Jitter", scope: "base", hits: 1 }],
+      searches: [{ pattern: "func Jitter", tree: "base", paths: [], ignoreCase: false, hits: 1 }],
       question: q.id,
     }),
   },
@@ -830,8 +830,8 @@ function streamUnnecessary(dflt: Necessity): Necessity {
       effect: "breaks",
       explanation: "The design says the write is buffered as a memory part and a background worker flushes it later, so a write returns before flushing. The change decides the reply after the flush loop, so the reply waits on flushing, which the design does not allow.",
       searches: [
-        { pattern: "write path|flush|acknowledg", scope: "base", hits: 9 },
-        { pattern: "docs/concept/*.md: background worker", scope: "base", hits: 2 },
+        { pattern: "write path|flush|acknowledg", tree: "base", paths: [], ignoreCase: false, hits: 9 },
+        { pattern: "background worker", tree: "base", paths: ["docs/concept/*.md"], ignoreCase: false, hits: 2 },
       ],
     },
     alternatives: { exists: false, explanation: "The liaison does not report a data node's partial failure either; the failure would have to be reported by an asynchronous path, not by delaying the reply.", citations: [] },
