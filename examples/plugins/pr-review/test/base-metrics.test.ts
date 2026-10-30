@@ -8,7 +8,7 @@ import path from "node:path";
 import type { EvidenceRecord } from "@graphloom/sdk";
 import { afterAll, describe, expect, it } from "vitest";
 import { GIT_ENV } from "../src/commands.js";
-import { baseFileCommand, baseTargets, MAX_BASE_FILE_BYTES, renderMeasurements, staticBaseCommand, wholeFile, type BaseBatch } from "../src/measurements.js";
+import { baseFileCommand, baseFunctionName, baseTargets, MAX_BASE_FILE_BYTES, renderMeasurements, staticBaseCommand, wholeFile, type BaseBatch } from "../src/measurements.js";
 import { LIMITS, originOf, originText } from "../src/metrics/crap.js";
 import type { MetricsRecord } from "../src/metrics/record.js";
 import { formatHunkFile } from "../src/metrics/hunks.js";
@@ -65,6 +65,31 @@ describe("the base files of the modified functions", () => {
     expect(c.argv.slice(3)).toEqual(["base-file-3", "b".repeat(40), "pkg/x.go"]);
     expect(c.argv[2]).toMatch(/git -c core\.hooksPath=\/dev\/null show "\$1:\$2" > "\$GRAPHLOOM_REPORT_FILE"/);
     expect(MAX_BASE_FILE_BYTES).toBeLessThan(65_536);
+  });
+});
+
+describe("a renamed file's functions are matched at the base under the file's old name", () => {
+  it("translates a TypeScript function's module path, since tsmetrics qualifies a name by it, and leaves Go and unrenamed names alone", () => {
+    expect(baseFunctionName("src/new.f", "src/new.ts", "src/old.ts", "typescript")).toBe("src/old.f");
+    expect(baseFunctionName("src/new.Widget.render", "src/new.tsx", "lib/old.jsx", "typescript")).toBe("lib/old.Widget.render");
+    expect(baseFunctionName("src/new.f.func1", "src/new.ts", "src/old.mts", "typescript")).toBe("src/old.f.func1");
+    expect(baseFunctionName("src/other.f", "src/new.ts", "src/old.ts", "typescript")).toBe("src/other.f");
+    expect(baseFunctionName("src/a.f", "src/a.ts", "src/a.ts", "typescript")).toBe("src/a.f");
+    expect(baseFunctionName("stream.(*writeCallback).Rev", "pkg/new.go", "pkg/old.go", "go")).toBe("stream.(*writeCallback).Rev");
+  });
+
+  it("names its functions the way the translation assumes: the real tsmetrics qualifies by the path without its extension", () => {
+    const source = "export function f(x: number) {\n  if (x > 1) {\n    return 1;\n  }\n  return 0;\n}\n";
+    const dir = mkdtempSync(path.join(os.tmpdir(), "gl-pr-tsrename-"));
+    dirs.push(dir);
+    mkdirSync(path.join(dir, "src"), { recursive: true });
+    for (const p of ["src/old.ts", "src/new.ts"]) writeFileSync(path.join(dir, p), source);
+    const names = ["src/old.ts", "src/new.ts"].map((p) => {
+      const r = spawnSync(process.execPath, [path.join(root, "dist", "metrics", "tsmetrics-cli.js"), "--head", dir, "--hunks", "-", "--generated", ""], { input: formatHunkFile(wholeFile(p, source)), encoding: "utf8" });
+      return (JSON.parse(r.stdout) as { records: Array<{ function: string }> }).records[0]!.function;
+    });
+    expect(names).toEqual(["src/old.f", "src/new.f"]);
+    expect(baseFunctionName(names[1]!, "src/new.ts", "src/old.ts", "typescript")).toBe(names[0]);
   });
 });
 

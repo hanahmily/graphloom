@@ -16,7 +16,7 @@
     "vitest": "^3.0.9"
   },
   "digests": {
-    "sourceTree": "80124ba31733e673e43330feefa6643ab13b90ab0c14c1718690fc7e08050a96",
+    "sourceTree": "dd3ce6ed9506f6674e311823f784d538059d6d709e2472c68d2f5950736bbfde",
     "packageLock": "8c68f549b7b6fa3dd465e177ffa3901539984b62f8aeb404944dd9fb3dc2d11c",
     "files": {
       "package.json": "13e4239152826ff4b8eef1390f08b45bae484b260068435d97e5d26c83712442",
@@ -48,7 +48,7 @@
       "src/index.ts": "d19ee6905eab043152cd1f790e9f01bc053dc3b6ad7467a76a33e908d5248898",
       "src/inventory.ts": "46c5db65903805751277146a19b13fba56e6e50386dbd66a1d175e512eef6e66",
       "src/ledger.ts": "e1977463c6e403c7d8ffeea843b07afc2cd0efbc50150b3347d2f55eb37577af",
-      "src/measurements.ts": "3b3cd2b89d80499a6395352b64d479ee12b63da09efe57dff47a9f3cb71b7dd3",
+      "src/measurements.ts": "134900eeadae64bd2bfb0ab97953731c011668e5fecd0aa6421148cc9a12ccbe",
       "src/metrics/coverage.ts": "789fec377062803ff6143535e2aab9c781b8a4966439a88887448b21f3be3255",
       "src/metrics/crap.ts": "0b40d4785ab3b1da37a1fbc32029fb2f346930c7f23182fb1779c22df230e7eb",
       "src/metrics/generated.ts": "aac742beb0af53afc62cb0b24e79c6f61a5528dff06c256551db0be7119a44ba",
@@ -88,7 +88,7 @@
       "src/testmap.ts": "00119245d26ee6aa59ee02deeae26f2f9339c1d1982b11be1ca3efe4d899b2c7",
       "src/validators.ts": "f4ae0f454023c9bcbbfd7670727822fc8d00942accf8a019777ea612bf837bfc",
       "src/write.ts": "0e8adfe5080f42d93998e7915f4aef121ec9609acb60cf6fb1ebaab8e62bfbe6",
-      "test/base-metrics.test.ts": "baa0f1b546fd4cdf75dc71cd03d3e47dc85304aa31c371cafd70124150d02471",
+      "test/base-metrics.test.ts": "900b61e77854ae06e7de1b4b98b506962e9ee069dc83489b3fc6f9c27d74bd10",
       "test/claims.test.ts": "da8e83123542bb4ca302cacac7e648d24c305b2e3b5faf588382ed0068a6eb81",
       "test/coverage.test.ts": "ab54cb7571c55ce0e84421ad0f54a927234c6c3f212f06ab9fac83b396344296",
       "test/crap.test.ts": "e2494e348e47ee1a6e5022d6745ba02b186cd3d74c95711148b37ef1de002eea",

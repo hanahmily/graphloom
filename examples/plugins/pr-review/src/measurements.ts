@@ -140,6 +140,19 @@ export function baseTargets(records: readonly MetricsRecord[], files: readonly P
   return out;
 }
 
+const modulePathOf = (file: string): string => file.replace(/\.(d\.)?[cm]?[jt]sx?$/, "");
+
+/**
+ * A head function's name as the base file's measurement names it. `tsmetrics` qualifies a function with its file's module path
+ * (the path without its extension), so a renamed TypeScript file's function carries the old module path at the base; a Go
+ * function is named by its package and receiver, which do not change with the file's name.
+ */
+export function baseFunctionName(fn: string, headPath: string, basePath: string, language: Language): string {
+  if (headPath === basePath || language !== "typescript") return fn;
+  const head = modulePathOf(headPath);
+  return fn === head || fn.startsWith(`${head}.`) ? `${modulePathOf(basePath)}${fn.slice(head.length)}` : fn;
+}
+
 /** A base file larger than a command report holds whole is not measured at the base. */
 export const MAX_BASE_FILE_BYTES = 60_000;
 export const BASE_FILE_PREFIX = `${COMMAND.baseFile}-`;
@@ -249,7 +262,7 @@ function baseState(evidence: readonly EvidenceRecord[], records: readonly Metric
     if ("unavailable" in read) return { ...r, base: { unavailable: read.unavailable } };
     const doc = documents.get(target.path);
     if (doc === undefined || "unavailable" in doc) return { ...r, base: { unavailable: doc?.unavailable ?? "the base was not measured" } };
-    return { ...r, base: doc.metrics.get(r.function) ?? { unavailable: "no function of this name at the base" } };
+    return { ...r, base: doc.metrics.get(baseFunctionName(r.function, r.path, target.path, target.language)) ?? { unavailable: "no function of this name at the base" } };
   });
   return { state: "done", records: out };
 }
