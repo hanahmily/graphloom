@@ -6,7 +6,11 @@ import type { CodingSessionOptions } from "./harness.js";
 
 /** The job's scope as guidance for the agent; the controller observes what actually changed. */
 export function scopeNotes(options: CodingSessionOptions): string[] {
-  if (options.readOnly) return ["This job is read-only: do not change files in the worktree."];
+  if (options.readOnly) {
+    return options.readOnlySandboxed === true
+      ? ["This job is read-only: do not change files in the worktree. You may run shell commands (for example git show <rev>:<path> and git grep); the filesystem is mounted read-only, so a write fails."]
+      : ["This job is read-only: do not change files in the worktree."];
+  }
   if (options.writeScope !== undefined && options.writeScope.length > 0) {
     const includes = writeScopeIncludes(options.writeScope);
     const excludes = writeScopeExcludes(options.writeScope);

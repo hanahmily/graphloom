@@ -12,6 +12,7 @@ import path from "node:path";
 import {
   BUILTIN_COMMAND_EXECUTOR_ID,
   MAX_SESSION_REF_CHARS,
+  READONLY_SANDBOX_ENV,
   boundedInputShape,
   parseJsonBounded,
   pinJobExecutor,
@@ -663,7 +664,10 @@ export function createChildExecutorRunner(
       const args = override !== undefined ? sandboxArgs(entry) : nodeArgs;
 
       const cwd = options.cwd ?? path.dirname(entry);
-      let launch = { command: process.execPath, args: [...args, workerModule, entry], env: options.env ?? process.env };
+      // The read-only-sandbox signal is the runner's alone: an operator's or a parent's value never reaches an executor.
+      const { [READONLY_SANDBOX_ENV]: _inherited, ...inheritedEnv } = options.env ?? process.env;
+      void _inherited;
+      let launch = { command: process.execPath, args: [...args, workerModule, entry], env: inheritedEnv as NodeJS.ProcessEnv };
       if (ctx.confinement !== undefined && options.sandbox !== true) {
         const unsupported = await confinementUnsupported();
         if (unsupported !== undefined) {
@@ -701,6 +705,9 @@ export function createChildExecutorRunner(
             keepUserState: options.ownState !== undefined,
             ...(goSettings !== undefined ? { operatorGo: goSettings } : {}),
           });
+          // Set only here, where the workspace really was mounted read-only under the job's own bwrap sandbox, and
+          // the sandbox adds no writable bind of its own (a declared read-write bind could reopen the workspace).
+          if (readOnlySandbox && own?.kind === "bwrap" && own.binds.every((bind) => bind.readOnly)) launch.env[READONLY_SANDBOX_ENV] = "1";
         } catch (err) {
           return failed(`executor ${pin.id} cannot be confined to the run, so the job was not run: ${err instanceof Error ? err.message : String(err)}`);
         }

@@ -20,4 +20,12 @@ describe("scope notes", () => {
     ]);
     expect(scopeNotes({ ...base, writeScope: ["notes.md"] })).toEqual(["Change only these paths: notes.md."]);
   });
+
+  it("says a read-only job's shell is allowed only when the sandbox enforces read-only", () => {
+    expect(scopeNotes({ ...base, readOnly: true })).toEqual(["This job is read-only: do not change files in the worktree."]);
+    const [note] = scopeNotes({ ...base, readOnly: true, readOnlySandboxed: true });
+    expect(note).toContain("do not change files in the worktree");
+    expect(note).toContain("git show <rev>:<path>");
+    expect(note).toContain("mounted read-only");
+  });
 });

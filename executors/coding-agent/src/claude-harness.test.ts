@@ -8,7 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { ExecutorContext, ToolCallRequest, ToolCallResult } from "@graphloom/sdk";
+import { READONLY_SANDBOX_ENV, type ExecutorContext, type ToolCallRequest, type ToolCallResult } from "@graphloom/sdk";
 import { createClaudeCodeHarness, type ClaudeCodeHarnessOptions } from "./claude.js";
 import { CONTINUATION_NOTICE, createCodingAgentExecutor } from "./index.js";
 import { startToolBridge } from "./mcp-bridge.js";
@@ -439,6 +439,27 @@ describe("Claude Code harness", () => {
     expect(payload(result).usage).toEqual({ inputTokens: 40, outputTokens: 20, cacheReadTokens: 100, cacheWriteTokens: 20, costUsd: 0.0125 });
     const [call] = await h.invocations();
     expect(call!.argv).toContain("--forward-subagent-text");
+  });
+
+  it("admits a read-only job's shell only under the runner's read-only sandbox signal, never from the job input", async () => {
+    const run = async (signal: string | undefined, input: Record<string, unknown> = {}): Promise<string | undefined> => {
+      const h = await setup();
+      await h.script([{ bash: "true" }, { text: "done" }]);
+      const before = process.env[READONLY_SANDBOX_ENV];
+      if (signal === undefined) delete process.env[READONLY_SANDBOX_ENV];
+      else process.env[READONLY_SANDBOX_ENV] = signal;
+      try {
+        await h.executor.execute({ assignment: "look", ...input }, h.ctx({ readOnly: true }));
+      } finally {
+        if (before === undefined) delete process.env[READONLY_SANDBOX_ENV];
+        else process.env[READONLY_SANDBOX_ENV] = before;
+      }
+      return (await h.controls()).filter((entry) => entry.reply && entry.tool === "Bash").map((entry) => entry.reply?.response?.behavior)[0];
+    };
+    expect(await run(undefined)).toBe("deny");
+    expect(await run("0")).toBe("deny");
+    expect(await run(undefined, { harnessOptions: { readOnlySandboxed: true } })).toBe("deny");
+    expect(await run("1")).toBe("allow");
   });
 
   it.each(["Agent", "Task"])("admits %s subagents without granting writes to a read-only job", async (agentTool) => {

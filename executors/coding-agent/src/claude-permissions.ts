@@ -38,7 +38,9 @@ export async function evaluateClaudePermission(
   }
   if (toolName === "Bash") {
     if (typeof record.command !== "string" || record.command.trim().length === 0) return deny("Shell command is required");
-    return options.readOnly ? deny("Read-only jobs cannot execute shell commands") : allow();
+    // A read-only job's shell is admitted only when the runner enforces read-only below it (a bwrap sandbox with the
+    // workspace mounted read-only): then the sandbox, not this policy, stops a write. Unconfined, it stays denied.
+    return options.readOnly && options.readOnlySandboxed !== true ? deny("Read-only jobs cannot execute shell commands") : allow();
   }
   const field = toolName === "NotebookEdit" ? "notebook_path"
     : ["Write", "Edit", "MultiEdit"].includes(toolName) ? "file_path" : undefined;

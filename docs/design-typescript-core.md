@@ -253,6 +253,23 @@ apply to), never running it unconfined.
   the run-scope confinement above, so the controller gives such a job the run's scope. In a
   rehearsal, where `GRAPHLOOM_REHEARSAL_SCENARIO` names the scenario file, the runner also
   leaves that file's directory writable, since the stand-in model records beside it.
+- **Read-only jobs and the shell.** A read-only job under a `bwrap` confinement runs with the
+  workspace (and the run's other writable paths) mounted read-only: only its artifacts, its agent
+  session, the executor's own state (an agent's login) and the run's scratch directory (the redirected temp and cache directories) stay
+  writable. The sandbox, not a permission policy, then keeps the job from changing the workspace,
+  so an agent executor may give such a job a shell. The runner says so with one signal: it sets
+  `GRAPHLOOM_READONLY_SANDBOX=1` (`READONLY_SANDBOX_ENV` in the SDK) in the environment of the
+  executor process it launched, only for a `readOnly` job it actually started under its own
+  `bwrap` confinement that declares no read-write bind (one could reopen the workspace), and it removes any inherited value from every other launch. The signal
+  is never read from job input, and an agent harness's own child processes do not inherit it. The
+  coding-agent executor reads it into `CodingSessionOptions.readOnlySandboxed`; the Claude Code
+  permission policy then admits `Bash` for a read-only job. Without the signal (no confinement,
+  a docker or writing job, a harness started outside the runner) `Bash` stays denied for a
+  read-only job, and `Write`, `Edit`, `NotebookEdit` and write tools stay denied either way. The
+  shell can still read what the sandbox shows and use the network the confinement allows; it can
+  write the run's scratch directory and the job's artifacts. A Codex job has its own shell
+  inside Codex's read-only sandbox and is unaffected. The coding-agent executor's digest changes
+  with this behavior, so an existing run needs `--update-executors` to use it.
 - `{ kind: "docker", image, cpus, memory, pids, tmp, wallClockMs, writable, readOnly, env }`
   for a command job that runs untrusted code: each command runs as one `docker run` built from
   the data in `packages/runner/src/sandbox-docker.ts`: `--network none`, the memory and pids limits,

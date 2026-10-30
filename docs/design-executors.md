@@ -249,7 +249,12 @@ configured from the environment):
 - It runs `claude -p` with stream-json input/output, `--tools default`, and
   `--permission-prompt-tool stdio` in permission mode `default`. File-tool
   permissions enforce the job's write scope; read-only jobs cannot use file
-  mutation tools or Bash. Unknown permission requests are denied. Writer shell
+  mutation tools, and cannot use Bash unless the runner started the job under
+  its own bwrap confinement with the workspace mounted read-only (it sets
+  `GRAPHLOOM_READONLY_SANDBOX=1` for the executor, never from job input; see
+  [a job's own confinement](design-typescript-core.md#a-jobs-own-confinement)),
+  where the sandbox, not this policy, keeps the job from writing. Unknown
+  permission requests are denied. Writer shell
   commands remain unrestricted; see the [live-mode design](design-claude-live-mode.md).
   Job tools are
   served on a loopback MCP endpoint with a per-run bearer token, as the

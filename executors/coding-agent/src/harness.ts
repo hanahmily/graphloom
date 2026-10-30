@@ -61,6 +61,12 @@ export interface CodingSessionOptions {
   /** Paths the graph admitted for writing (relative to `cwd`). Claude checks file-tool permissions; shell execution remains unrestricted. */
   writeScope?: string[];
   readOnly: boolean;
+  /**
+   * True only when the runner launched this job under a bwrap confinement with the workspace mounted read-only
+   * (`READONLY_SANDBOX_ENV`), so the sandbox, not the permission policy, keeps a read-only job from writing. A
+   * Claude read-only job may then run shell commands. Never taken from job input.
+   */
+  readOnlySandboxed?: boolean;
   tools: CodingTool[];
   /** Reserve one provider request against the run budget before making it; false means stop. */
   reserveModelCall(): Promise<boolean>;

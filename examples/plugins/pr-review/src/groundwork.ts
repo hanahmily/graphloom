@@ -12,6 +12,7 @@
  */
 import type { EnvironmentCommand, EvidenceRecord } from "@graphloom/sdk";
 import { COMMAND } from "./constants.js";
+import { baseExportCommand, parseBaseExport, type BaseExport } from "./basetree.js";
 import { commandRuns, describeCommand, latestFile, outputTail, reportText, succeeded, type CommandRun } from "./evidence.js";
 import { buildInventory, manifestsCommand, parseManifests, parseSites, parseSources, parseTree, siteCommands, sourceCommands, treeCommand, declaredDependencies, type Inventory } from "./inventory.js";
 import { observable } from "./measurements.js";
@@ -51,6 +52,8 @@ export interface Groundwork {
   inventory: Inventory;
   testMap: Map<string, TestEvidence[]>;
   notes: string[];
+  /** The base commit's files exported into the review directory (design §7.3), when the export is recorded whole. */
+  baseTree?: BaseExport;
 }
 
 export type GroundworkState =
@@ -121,7 +124,7 @@ export function groundworkState(o: GroundworkOptions): GroundworkState {
     const pack = packs.find((p) => p.language === b.language)!;
     baseDefsCmds.push(baseDefsCommand(b.id, o.base, pack, b.files.map((f) => f.basePath)));
   }
-  const phase1 = [...baseDefsCmds, treeCommand(o.base), manifestsCommand(o.base)];
+  const phase1 = [baseExportCommand(o.base), ...baseDefsCmds, treeCommand(o.base), manifestsCommand(o.base)];
   const s1 = step(phase1, "read the base commit's declarations, directories and dependency manifests");
   if (s1 !== undefined) return s1;
   for (const c of phase1) refs.push(runOf(o.evidence, c.id)!.record.ref);
@@ -211,7 +214,9 @@ export function groundworkState(o: GroundworkOptions): GroundworkState {
     manifestCuts: manifests.cuts,
   });
   const testMap = new Map(symbols.map((s) => [s.id, mapTests(s, symbols, o.files, packs)] as const));
-  return { state: "ready", groundwork: { base: o.base, symbols, searches, candidates, prSimilar, inventory, testMap, notes }, refs };
+  const baseTree = parseBaseExport(textOf(o.evidence, COMMAND.baseExport).text);
+  if (baseTree === undefined || baseTree.base !== o.base) notes.push("the base commit's files could not be exported to a directory, so base facts come from `git show` and `git grep` over the base commit only");
+  return { state: "ready", groundwork: { base: o.base, symbols, searches, candidates, prSimilar, inventory, testMap, notes, ...(baseTree !== undefined && baseTree.base === o.base ? { baseTree } : {}) }, refs };
 }
 
 /** `pending`, with the failing runs listed by themselves. */
