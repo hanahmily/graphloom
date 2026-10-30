@@ -20,14 +20,15 @@
 import type { GraphRehearsal, RehearsalReply, RehearsalScenario } from "@graphloom/sdk";
 import { detectFacts, type Fact } from "./detectors.js";
 import { parseProfile, ProfileError, type Profile } from "./profile.js";
-import { withOutcome, withUnknownCoverage } from "./measurements.js";
+import { baseTargets, withOutcome, withUnknownCoverage } from "./measurements.js";
 import { goFunctionCoverage, parseCoverageReport } from "./metrics/coverage.js";
 import type { FileIndex, MetricsRecord } from "./metrics/record.js";
 import { claimTargets } from "./claims.js";
 import { numbered, type Cite, type ReportItem, type ReporterOutput, type StateEntry } from "./report.js";
 import { detectStateCandidates } from "./statecandidates.js";
 import { DOCS } from "./rehearsal-docs.js";
-import { NEW_HEAD_FILES, RETENTION_TTL_GO, BACKOFF_GO, JITTER_GO, LIMIT_GO, SYNC_GO, SYNC_CHANGED, STREAM_ADDED_LINES, STREAM_CHANGED, STREAM_PATH, STREAM_WRITE_GO } from "./rehearsal-fixtures.js";
+import type { Necessity } from "./necessity.js";
+import { BASE_FILES, FLAGS_GO, NEW_HEAD_FILES, RETENTION_TTL_GO, BACKOFF_GO, JITTER_GO, LIMIT_GO, SYNC_GO, SYNC_CHANGED, STREAM_ADDED_LINES, STREAM_CHANGED, STREAM_PATH, STREAM_WRITE_BASE_GO, STREAM_WRITE_GO, WRITE_PATH_DOC } from "./rehearsal-fixtures.js";
 import { qaScenario, type QaSpec } from "./rehearsal-qa.js";
 import { pullFile, type PullFile } from "./snapshot.js";
 import { reporterSections } from "./template.js";
@@ -39,25 +40,7 @@ export const REHEARSAL_MERGE_BASE = "fedcba9876543210fedcba9876543210fedcba98";
 const TREE = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 export const REHEARSAL_REQUEST = `Report on ${REHEARSAL_PULL.owner}/${REHEARSAL_PULL.repo}#${REHEARSAL_PULL.number} at ${REHEARSAL_HEAD}.`;
 
-export const FLAGS_GO = `// Licensed under the Apache License, Version 2.0.
-
-package server
-
-import (
-	"os"
-
-	"github.com/spf13/cobra"
-)
-
-// registerFlags adds the server's flags.
-func registerFlags(cmd *cobra.Command) {
-	cmd.Flags().String("listen", ":17912", "listen address")
-	cmd.Flags().Int("retention-days", 7, "default retention in days")
-	if os.Getenv("BYDB_RETENTION_DAYS") != "" {
-		schedule("0 3 * * *")
-	}
-}
-`;
+export { FLAGS_GO };
 
 export const TTL_GO = `// Licensed under the Apache License, Version 2.0.
 
@@ -284,8 +267,37 @@ function reads(p: Pull): NonNullable<RehearsalScenario["reads"]> {
 /** What the stand-in's sandbox image check says. */
 export const REHEARSAL_NO_DOCKER = "docker is not available in a rehearsal";
 
+/** What the base's file and its measurement print, for each modified function's file the pull request has a base fixture for (design §6.8). */
+function baseCommands(p: Pull): NonNullable<RehearsalScenario["commands"]> {
+  const out: NonNullable<RehearsalScenario["commands"]> = {};
+  const files = p.files.map((f) => pullFile(fileItem(f))!);
+  let n = 0;
+  for (const t of baseTargets((p.doc as { records?: MetricsRecord[] }).records ?? [], files)) {
+    const text = BASE_FILES[t.path];
+    const doc = DOCS[`base:${t.path}`];
+    if (text === undefined || doc === undefined) continue;
+    n += 1;
+    out[`base-file-${t.index}`] = { exitCode: 0, stdout: text };
+    out[`static-base-go-${n}`] = { exitCode: 0, stdout: JSON.stringify(doc) };
+  }
+  return out;
+}
+
+/** The pull request's records with their base values, as the Report stage attaches them from the base measurement. */
+function recordsWithBase(p: Pull): MetricsRecord[] {
+  const files = p.files.map((f) => pullFile(fileItem(f))!);
+  return ((p.doc as { records?: MetricsRecord[] }).records ?? []).map((r) => {
+    if (r.change !== "modified") return r;
+    const path = files.find((f) => f.path === r.path)?.previousPath ?? r.path;
+    const baseDoc = DOCS[`base:${path}`] as { records?: MetricsRecord[] } | undefined;
+    const base = baseDoc?.records?.find((b) => b.function === r.function);
+    return baseDoc === undefined ? r : { ...r, base: base === undefined ? { unavailable: "no function of this name at the base" } : { complexity: base.complexity, nesting: base.nesting, startLine: base.startLine, endLine: base.endLine, path: base.path } };
+  });
+}
+
 function commands(p: Pull, toolId: string | undefined): NonNullable<RehearsalScenario["commands"]> {
   return {
+    ...baseCommands(p),
     "head-guard": { exitCode: 0, stdout: "clear\n" },
     "head-checkout": { exitCode: 0 },
     "head-tree": { exitCode: 0, stdout: `head=${TREE}\nindex=${TREE}\nbase=${REHEARSAL_MERGE_BASE}\nworktree=clean\n` },
@@ -488,8 +500,8 @@ function build(profile: Profile, pull: Pull, options: { body?: string; notes?: s
     good: reported,
     records:
       options.coverage !== undefined
-        ? measuredRecords(pull.doc as { records?: MetricsRecord[]; files?: FileIndex[] }, options.coverage)
-        : ((pull.doc as { records?: MetricsRecord[] }).records ?? []).map((r) => withUnknownCoverage(r, `docker unavailable: ${REHEARSAL_NO_DOCKER}`)),
+        ? measuredRecords({ ...(pull.doc as { files?: FileIndex[] }), records: recordsWithBase(pull) }, options.coverage)
+        : recordsWithBase(pull).map((r) => withUnknownCoverage(r, `docker unavailable: ${REHEARSAL_NO_DOCKER}`)),
     pull: { title: pull.title, body: options.body ?? pull.body, commits: pull.commits },
     mergeBase: REHEARSAL_MERGE_BASE,
     spec: options.qa ?? pull.qa ?? {},
@@ -780,6 +792,52 @@ function streamReport(files: readonly PullFile[], sectionIds: readonly string[])
   };
 }
 
+/** The base-side line of the `n`th line of the stream fixture's base that reads `text` once trimmed. */
+function streamBaseLine(text: string, n = 1): number {
+  const lines = STREAM_WRITE_BASE_GO.replace(/\n$/, "").split("\n");
+  let seen = 0;
+  for (let i = 0; i < lines.length; i += 1) {
+    if (lines[i]!.trim() === text && ++seen === n) return i + 1;
+  }
+  throw new Error(`the stream fixture's base has no line ${n} of ${JSON.stringify(text)}`);
+}
+
+/**
+ * The necessity answer of the `necessity-unnecessary` scenario, a #1443-like change: the problem is real (a batch whose events all fail is
+ * acknowledged as a success), but the fix makes the acknowledgement depend on a loop that flushes the groups, and the write path design
+ * says a write returns once it is buffered, with a background worker flushing. The ground is the design statement it breaks.
+ */
+function streamUnnecessary(dflt: Necessity): Necessity {
+  const flush = streamBaseLine("w.flushGroups()");
+  const reply = streamLine("if stored == 0 && firstErr != nil {");
+  return {
+    ...dflt,
+    conclusion: "unnecessary",
+    rationale: "Replying only after the groups are flushed makes the write wait on flushing, against the write path design, which acknowledges a write once it is buffered and flushes in the background.",
+    problem: {
+      claim: "A write batch whose events all fail was acknowledged as a success, so the sender never learns of the failure.",
+      quotes: [{ source: "body", quote: "A write batch whose events all fail used to be acknowledged as a success." }],
+      trace: [
+        { step: "Rev handles each event and only logs a failure; nothing is kept for the reply", path: STREAM_PATH, tree: "base", start: streamBaseLine("for i := range events {"), end: flush - 1, quote: "w.l.Error().Err(err).Msg(\"cannot handle write event\")" },
+        { step: "After the loop Rev flushes the groups and returns an empty reply whatever failed", path: STREAM_PATH, tree: "base", start: flush, end: flush + 2, quote: "w.flushGroups()" },
+      ],
+      canHappen: "yes",
+      explanation: "The failure can happen as described: the reply does not depend on what was stored. The question is whether the fix, which decides the reply after flushing, fits the write path.",
+    },
+    design: {
+      statements: [{ path: WRITE_PATH_DOC.path, tree: "base", start: WRITE_PATH_DOC.line, end: WRITE_PATH_DOC.line, quote: WRITE_PATH_DOC.quote }],
+      changed: [{ path: STREAM_PATH, tree: "head", start: reply, end: reply + 2, quote: "if stored == 0 && firstErr != nil {" }],
+      effect: "breaks",
+      explanation: "The design says the write is buffered as a memory part and a background worker flushes it later, so a write returns before flushing. The change decides the reply after the flush loop, so the reply waits on flushing, which the design does not allow.",
+      searches: [
+        { pattern: "write path|flush|acknowledg", scope: "base", hits: 9 },
+        { pattern: "docs/concept/*.md: background worker", scope: "base", hits: 2 },
+      ],
+    },
+    alternatives: { exists: false, explanation: "The liaison does not report a data node's partial failure either; the failure would have to be reported by an asynchronous path, not by delaying the reply.", citations: [] },
+  };
+}
+
 /** A new flag and a nightly sweep, with nothing in the pull request's text that says why. */
 const FLAG_PULL = (body: string, title: string): Pull => ({
   files: [FLAGS],
@@ -839,6 +897,26 @@ export function rehearsal(config: unknown): GraphRehearsal {
       "coverage-measured": build(profile, COMPLEX_PULL, { toolId: "static-go-1", coverage: TTL_COVERAGE_REPORT }).scenario,
       // A modified function of complexity 6 with unknown coverage: CRAP 42 is an upper bound and asks nothing.
       "crap-upper-bound": build(profile, SYNC_PULL, { toolId: "static-go-1" }).scenario,
+      // N1 concludes unnecessary (the change breaks the write path design) and the checker confirms it: no other question is asked.
+      "necessity-unnecessary": build(profile, STREAM_PULL, { toolId: "static-go-1", report: streamReport, qa: { ...STREAM_PULL.qa, necessity: { result: streamUnnecessary } } }).scenario,
+      // The checker refutes the unnecessary conclusion twice (its own search finds the design statement is about something else): it becomes questionable and every question is asked.
+      "necessity-disputed": build(profile, STREAM_PULL, {
+        toolId: "static-go-1",
+        report: streamReport,
+        qa: {
+          ...STREAM_PULL.qa,
+          necessity: {
+            result: streamUnnecessary,
+            checks: [
+              { verdict: "unsupported", note: "D1 (docs/concept/tsdb.md:172) describes the shard's own write buffer, not the liaison callback: the cited statement does not show that this reply waits on a flush the design forbids" },
+              { verdict: "unsupported", note: "the revised answer still rests on D1, which is about the shard; no design statement about the callback's reply was found" },
+            ],
+            revise: (prev) => ({ ...prev, rationale: "The reply is decided after the flush loop; the design statement cited is about the shard's write buffer." }),
+          },
+        },
+      }).scenario,
+      // N1 concludes necessary: the failure is possible, the change keeps the design, no existing way does it; every question follows.
+      "necessity-necessary": build(profile, SYNC_PULL, { toolId: "static-go-1" }).scenario,
       // A #1443-like change: a counter and a first-error variable set in several places and read once. The report is one item with their lifecycles and a before/after table, not one item per hunk.
       "state-lifecycle": build(profile, STREAM_PULL, { toolId: "static-go-1", report: streamReport }).scenario,
     },

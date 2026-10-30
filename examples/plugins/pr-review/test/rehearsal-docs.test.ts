@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { formatHunkFile, validateMetricsDocument, type Hunks } from "../src/metrics/index.js";
 import { DOCS } from "../src/rehearsal-docs.js";
-import { NEW_HEAD_FILES, STREAM_CHANGED, STREAM_PATH, SYNC_CHANGED } from "../src/rehearsal-fixtures.js";
+import { BASE_FILES, NEW_HEAD_FILES, STREAM_CHANGED, STREAM_PATH, SYNC_CHANGED } from "../src/rehearsal-fixtures.js";
 
 const toolDir = fileURLToPath(new URL("../tools/gometrics", import.meta.url));
 const docsFile = fileURLToPath(new URL("../src/rehearsal-docs.ts", import.meta.url));
@@ -18,19 +18,28 @@ const goIt = hasGo ? it : it.skip;
 
 const hunksOf = (p: string, text: string): Hunks => new Map([[p, p === "pkg/offline/sync.go" ? [{ start: SYNC_CHANGED.start, end: SYNC_CHANGED.end }] : p === STREAM_PATH ? STREAM_CHANGED.map((r) => ({ ...r })) : [{ start: 1, end: text.split("\n").length - 1 }]]]);
 
+/** Every line of a base file is changed: the tool records every function of it, as the graph's base measurement asks (design §6.8). */
+const wholeFile = (p: string, text: string): Hunks => new Map([[p, [{ start: 1, end: text.split("\n").length }]]]);
+
 /** What gometrics prints for the fixtures, run over a temporary head tree. */
 function fresh(): Record<string, unknown> {
   const dir = mkdtempSync(path.join(os.tmpdir(), "gl-pr-docs-"));
   try {
     const out: Record<string, unknown> = {};
-    for (const [p, text] of Object.entries(NEW_HEAD_FILES)) {
-      mkdirSync(path.dirname(path.join(dir, p)), { recursive: true });
-      writeFileSync(path.join(dir, p), text);
+    const files: Array<[string, string, Hunks]> = [
+      ...Object.entries(NEW_HEAD_FILES).map(([p, text]): [string, string, Hunks] => [p, text, hunksOf(p, text)]),
+      ...Object.entries(BASE_FILES).map(([p, text]): [string, string, Hunks] => [`base:${p}`, text, wholeFile(p, text)]),
+    ];
+    for (const [key, text, hunkSet] of files) {
+      const p = key.replace(/^base:/, "");
+      const target = path.join(dir, key.startsWith("base:") ? "base" : "head");
+      mkdirSync(path.dirname(path.join(target, p)), { recursive: true });
+      writeFileSync(path.join(target, p), text);
       const hunks = path.join(dir, "hunks.txt");
-      writeFileSync(hunks, formatHunkFile(hunksOf(p, text)));
-      const r = spawnSync("go", ["run", ".", "--head", dir, "--hunks", hunks, "--generated", ""], { cwd: toolDir, encoding: "utf8", env: { ...process.env, GOTOOLCHAIN: "local", GOFLAGS: "-mod=readonly", CGO_ENABLED: "0" } });
+      writeFileSync(hunks, formatHunkFile(hunkSet));
+      const r = spawnSync("go", ["run", ".", "--head", target, "--hunks", hunks, "--generated", ""], { cwd: toolDir, encoding: "utf8", env: { ...process.env, GOTOOLCHAIN: "local", GOFLAGS: "-mod=readonly", CGO_ENABLED: "0" } });
       if (r.status !== 0) throw new Error(`gometrics: ${r.stderr}`);
-      out[p] = JSON.parse(r.stdout);
+      out[key] = JSON.parse(r.stdout);
     }
     return out;
   } finally {
@@ -51,6 +60,10 @@ describe("the recorded metrics documents of the Q&A rehearsal fixtures", () => {
     for (const [p, text] of Object.entries(NEW_HEAD_FILES)) {
       const result = validateMetricsDocument(DOCS[p] as never, { readFile: (f) => (f === p ? text : undefined), hunks: hunksOf(p, text), generated: [] });
       expect(result.errors, p).toEqual([]);
+    }
+    for (const [p, text] of Object.entries(BASE_FILES)) {
+      const result = validateMetricsDocument(DOCS[`base:${p}`] as never, { readFile: (f) => (f === p ? text : undefined), hunks: wholeFile(p, text), generated: [] });
+      expect(result.errors, `base:${p}`).toEqual([]);
     }
   }, 120_000);
 });

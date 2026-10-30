@@ -11,10 +11,11 @@ import { measurementState, type MeasurementState } from "./measurements.js";
 import { reportJson, reviewMarkdown } from "./output.js";
 import { parseProfile, ProfileError, type Profile } from "./profile.js";
 import type { PullRequest } from "./request.js";
-import { answerContext, answerWrites, qaContext, questionSet, questionerFlow, type QaContext } from "./qaflow.js";
-import { answersFlow } from "./answers.js";
+import { afterNecessity, answerContext, answerWrites, necessityFlow, qaContext, questionSet, questionerFlow, recordedNecessity, type QaContext } from "./qaflow.js";
+import { answersFlow, type FinalAnswer } from "./answers.js";
+import { admissibleDecision, effectiveConclusion, necessityJson, NECESSITY_ID, type NecessityRecord } from "./necessity.js";
 import { requiredQuestions, statedPurposes } from "./questions.js";
-import { writtenReport } from "./write.js";
+import { writtenNecessity, writtenReport } from "./write.js";
 
 const passed = (reason: string): ValidationResult => ({ status: "passed", reason });
 const failed = (reason: string): ValidationResult => ({ status: "failed", reason });
@@ -151,8 +152,10 @@ export const measurements: Validator = profiled((input, profile) => {
     case "ready": {
       const measured = m.records.filter((r) => r.coverage?.source === "measured").length;
       const where = m.coverage.runs.filter((r) => r.ran).map((r) => r.language).join(", ");
+      const modified = m.records.filter((r) => r.change === "modified" && !r.test);
+      const atBase = modified.filter((r) => r.base !== undefined && !("unavailable" in r.base)).length;
       return passed(
-        `${m.records.length} function(s) the pull request adds or modifies were measured by the pinned static tools over the head tree and recompute from its bytes; coverage ${m.coverage.enabled ? `was measured in the Docker sandbox for ${measured} of them${where !== "" ? ` (${where})` : ""}, recomputed from its reports by line range, and the rest say why it was not run` : "is off in the profile"}; mutation is recorded as not run`,
+        `${m.records.length} function(s) the pull request adds or modifies were measured by the pinned static tools over the head tree and recompute from its bytes (${modified.length > 0 ? `${atBase} of the ${modified.length} modified function(s) also at the base, recomputed from the base file's recorded text` : "none is modified, so none has a base value"}); coverage ${m.coverage.enabled ? `was measured in the Docker sandbox for ${measured} of them${where !== "" ? ` (${where})` : ""}, recomputed from its reports by line range, and the rest say why it was not run` : "is off in the profile"}; mutation is recorded as not run`,
       );
     }
     case "failed":
@@ -191,9 +194,36 @@ function qaStart(input: ValidationInput, profile: Profile): QaStart {
 }
 const isFailure = (s: QaStart): s is ValidationResult => "status" in s;
 
+/** N1's checked answer and its recorded decision, as the Questions stage left them, or why they cannot be judged yet. */
+function necessityOutcome(evidence: readonly EvidenceRecord[], ctx: QaContext): { record: NecessityRecord } | ValidationResult {
+  const nf = necessityFlow(evidence, ctx);
+  if (nf.state === "supervise") return failed(nf.reason);
+  if (nf.state !== "done") return inconclusive(`the necessity question N1 is not answered and checked yet (${nf.state})`);
+  const rec = recordedNecessity(evidence);
+  if (rec.state === "missing") return inconclusive("N1's checked answer and its decision are not recorded yet");
+  if (rec.state === "failed") return failed(rec.reason);
+  const final = nf.final[0]!;
+  if (JSON.stringify(rec.record.final) !== JSON.stringify(final)) return failed("necessity.json is not N1's checked answer as the evidence recomputes it");
+  if (!admissibleDecision(final, rec.record.decision)) return failed(`necessity.json decides ${rec.record.decision.action}, which N1's conclusion (${effectiveConclusion(final)}) and the checker's verdict (${final.check.verdict}) do not allow`);
+  const run = commandRuns(evidence, "necessity-write").at(-1);
+  if (run === undefined || writtenNecessity(run.command.argv) !== necessityJson(rec.record)) return failed("necessity.json is not what the evidence recomputes");
+  return { record: rec.record };
+}
+
+const isOutcomeFailure = (o: { record: NecessityRecord } | ValidationResult): o is ValidationResult => "status" in o;
+
 export const questionsComplete: Validator = profiled((input, profile) => {
   const start = qaStart(input, profile);
   if (isFailure(start)) return start;
+  // N1, the necessity question, is asked first (design §7.5); a confirmed unnecessary conclusion is the only question.
+  const n1 = necessityOutcome(input.evidence, start.ctx);
+  if (isOutcomeFailure(n1)) return n1;
+  const conclusion = effectiveConclusion(n1.record.final);
+  if (n1.record.decision.action === "skip") {
+    return passed(
+      `the necessity question N1 was asked first, with its three parts (the problem traced on the base, the design statements and changed lines, the simpler or existing way) and a conclusion of ${conclusion}; the answer checker supports it, and the skip is recorded in necessity.json, so no other question is required: only N1`,
+    );
+  }
   const flow = questionerFlow(input.evidence, start.ctx);
   if (flow.state === "supervise") return failed(flow.reason);
   if (flow.state !== "done") return inconclusive(`the questions are not asked yet (${flow.state})`);
@@ -204,30 +234,44 @@ export const questionsComplete: Validator = profiled((input, profile) => {
   const have = new Set(set.questions.map((q) => q.key));
   const missing = requiredQuestions({ view: start.ctx.view, groundwork: start.ctx.groundwork }, stated).filter((r) => !have.has(r.key));
   if (missing.length > 0) return failed(`required question(s) not asked: ${missing.slice(0, 5).map((r) => r.key).join(", ")}`);
-  const required = set.questions.filter((q) => q.origin === "required").length;
+  const asked = set.questions.filter((q) => q.id !== NECESSITY_ID);
+  const required = asked.filter((q) => q.origin === "required").length;
   return passed(
-    `${set.questions.length} question(s) asked: ${required} required by the plugin's rules (none dropped) and ${set.questions.length - required} added by the questioner; ${set.purposes.filter((p) => p.status === "stated").length} purpose(s) stated with a quote that matches the pull request's text, ${set.purposes.filter((p) => p.status === "asked").length} asked; ${start.ctx.groundwork.symbols.length} symbol(s) read from the packs and searched over the whole base commit; weak-test questions: none (mutation testing is a later version)`,
+    `the necessity question N1 was asked first (${conclusion}; ${n1.record.decision.reason}); ${asked.length} further question(s) asked: ${required} required by the plugin's rules (none dropped) and ${asked.length - required} added by the questioner; ${set.purposes.filter((p) => p.status === "stated").length} purpose(s) stated with a quote that matches the pull request's text, ${set.purposes.filter((p) => p.status === "asked").length} asked; ${start.ctx.groundwork.symbols.length} symbol(s) read from the packs and searched over the whole base commit; weak-test questions: none (mutation testing is a later version)`,
   );
 });
 
-/** The answers' flow and the questions behind it, once the questions are settled. */
-function answersState(input: ValidationInput, profile: Profile): { start: { ctx: QaContext; pr: PullRequest }; set: ReturnType<typeof questionSet>; flow: ReturnType<typeof answersFlow> } | ValidationResult {
+type AnswersState = { start: { ctx: QaContext; pr: PullRequest }; set: ReturnType<typeof questionSet>; record: NecessityRecord; final: FinalAnswer[]; pending?: undefined; failure?: undefined } | { start: { ctx: QaContext; pr: PullRequest }; set: ReturnType<typeof questionSet>; record: NecessityRecord; final?: undefined; pending?: string; failure?: string };
+
+/** The answers as the Answers stage holds them: N1's recorded answer, then (unless it was skipped past) the other answers' flow. */
+function answersState(input: ValidationInput, profile: Profile): AnswersState | ValidationResult {
   const start = qaStart(input, profile);
   if (isFailure(start)) return start;
+  const rec = recordedNecessity(input.evidence);
+  if (rec.state === "missing") return inconclusive("N1's checked answer and its decision are not recorded");
+  if (rec.state === "failed") return failed(rec.reason);
+  if (!admissibleDecision(rec.record.final, rec.record.decision)) return failed(`necessity.json decides ${rec.record.decision.action}, which N1's conclusion and the checker's verdict do not allow`);
+  if (rec.record.decision.action === "skip") {
+    const set = questionSet(start.ctx, undefined, true);
+    return { start, set, record: rec.record, final: [rec.record.final] };
+  }
   const qf = questionerFlow(input.evidence, start.ctx);
   if (qf.state !== "done") return inconclusive(`the questions are not asked yet (${qf.state})`);
   const set = questionSet(start.ctx, qf.output);
-  const flow = answersFlow(input.evidence, answerContext(start.ctx, set.questions), start.ctx.base);
-  return { start, set, flow };
+  const flow = answersFlow(input.evidence, answerContext(start.ctx, afterNecessity(set)), start.ctx.base);
+  if (flow.state === "supervise") return { start, set, record: rec.record, failure: flow.reason };
+  if (flow.state !== "done") return { start, set, record: rec.record, pending: flow.state };
+  return { start, set, record: rec.record, final: [rec.record.final, ...flow.final] };
 }
 
 export const answersComplete: Validator = profiled((input, profile) => {
   const st = answersState(input, profile);
   if ("status" in st) return st;
-  const { start, set, flow } = st;
-  if (flow.state === "supervise") return failed(flow.reason);
-  if (flow.state !== "done") return inconclusive(`the answers are not finished (${flow.state})`);
-  const w = answerWrites(input.evidence, start.ctx, set, flow.final);
+  const { start, set, record } = st;
+  if (st.failure !== undefined) return failed(st.failure);
+  if (st.final === undefined) return inconclusive(`the answers are not finished (${st.pending ?? "pending"})`);
+  const final = st.final;
+  const w = answerWrites(input.evidence, start.ctx, set, final, record);
   if (w.qa === undefined) return failed(w.problem ?? "the Q&A cannot be written");
   const qa = commandRuns(input.evidence, COMMAND.qaWrite).at(-1);
   if (qa === undefined) return inconclusive("the Q&A has not been written");
@@ -238,23 +282,25 @@ export const answersComplete: Validator = profiled((input, profile) => {
   if (lw === undefined) return inconclusive("the ledger has not been advanced");
   if (!succeeded(lw.command)) return failed(`${describeCommand(lw.command)}: ${outputTail(lw.command)}`);
   if (lw.command.argv.length !== w.ledger.argv.length || lw.command.argv.some((a, i) => a !== w.ledger!.argv[i])) return failed("the ledger write is not the compare-and-swap from the value Fetch read with this head's report and Q&A");
-  const by = (status: string): number => flow.final.filter((a) => a.status === status).length;
+  const rest = final.filter((a) => a.question !== NECESSITY_ID);
+  const by = (status: string): number => rest.filter((a) => a.status === status).length;
+  const n1 = `N1 (${effectiveConclusion(record.final)}) is answered first with its three parts and evidence${set.skipped ? ", and the remaining questions are recorded as skipped" : ""}`;
   return passed(
-    `${flow.final.length} question(s) answered (${by("answered")} answered, ${by("partially answered")} partially answered, ${by("needs author")} needs author), each with evidence; every citation resolves in the tree it names, every cited number equals its record, every proposal lies inside its function with names new to the package; ${QA_JSON} and ${REVIEW_MD} are written as recomputed; the ledger ref advanced by compare-and-swap from ${w.old === "absent" ? "absent" : w.old.slice(0, 12)}`,
+    `${n1}; ${rest.length} further question(s) answered (${by("answered")} answered, ${by("partially answered")} partially answered, ${by("needs author")} needs author), each with evidence; every citation resolves in the tree it names, every cited number equals its record, every proposal lies inside its function with names new to the package; ${QA_JSON} and ${REVIEW_MD} are written as recomputed; the ledger ref advanced by compare-and-swap from ${w.old === "absent" ? "absent" : w.old.slice(0, 12)}`,
   );
 });
 
 export const answersGrounded: Validator = profiled((input, profile) => {
   const st = answersState(input, profile);
   if ("status" in st) return st;
-  const { flow } = st;
-  if (flow.state === "supervise") return failed(flow.reason);
-  if (flow.state !== "done") return inconclusive(`the answer check is not finished (${flow.state})`);
-  const bad = flow.final.filter((a) => a.check.verdict !== "supported" && a.check.verdict !== "partial" && !(a.check.verdict === "downgraded" && a.status === "needs author"));
+  if (st.failure !== undefined) return failed(st.failure);
+  if (st.final === undefined) return inconclusive(`the answer check is not finished (${st.pending ?? "pending"})`);
+  const final = st.final;
+  const bad = final.filter((a) => a.check.verdict !== "supported" && a.check.verdict !== "partial" && !(a.check.verdict === "downgraded" && a.status === "needs author"));
   if (bad.length > 0) return failed(`answer(s) ${bad.map((a) => a.question).join(", ")} stand without a supported or partial verdict`);
-  const downgraded = flow.final.filter((a) => a.check.verdict === "downgraded");
+  const downgraded = final.filter((a) => a.check.verdict === "downgraded");
   return passed(
-    `an independent checker re-checked every answer, with searches of its own where a none-found or test claim needs them; ${flow.final.filter((a) => a.check.verdict === "supported").length} supported, ${flow.final.filter((a) => a.check.verdict === "partial").length} partial, ${downgraded.length} downgraded to needs author with both statements recorded`,
+    `an independent checker verified N1's cited design statements, trace steps and conclusion (${effectiveConclusion(st.record.final)}, ${st.record.final.check.verdict}) and re-checked every other answer, with searches of its own where a none-found or test claim needs them; ${final.filter((a) => a.check.verdict === "supported").length} supported, ${final.filter((a) => a.check.verdict === "partial").length} partial, ${downgraded.length} downgraded to needs author with both statements recorded`,
   );
 });
 

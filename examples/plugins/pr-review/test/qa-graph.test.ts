@@ -78,6 +78,10 @@ describe("answer-finds-existing-helper", () => {
       "questions/command/Read the base",
       "questions/command/Read the base",
       "questions/command/Read the base",
+      "questions/agent/Answer the necessity",
+      "questions/command/Check the necessity",
+      "questions/agent/Check the necessity",
+      "questions/command/Record N1's checked",
       "questions/agent/Ask the questions",
       "answers/agent/Answer the questions",
       "answers/command/Check the answers'",
@@ -104,10 +108,11 @@ describe("answer-finds-existing-helper", () => {
   });
 
   it("confines the questioner, the answerer and the checker untrusted-read on three roles, the checker on a harness other than the answerer's", () => {
-    const [questioner, answerer, checker] = sim.jobs.filter((j) => j.kind === "agent" && (j.stageId === "questions" || j.stageId === "answers"));
-    expect([questioner, answerer, checker].map((j) => (j!.input as { harness: string }).harness)).toEqual(["codex", "claude-code", "codex"]);
-    expect([questioner, answerer, checker].map((j) => [j!.resultSchema, j!.purpose, j!.readOnly])).toEqual([["questions-v1", "diagnostic", true], ["answers-v1", "diagnostic", true], ["answer-check-v1", "review", true]]);
-    for (const j of [questioner, answerer, checker]) {
+    const [necessity, necessityChecker, questioner, answerer, checker] = sim.jobs.filter((j) => j.kind === "agent" && (j.stageId === "questions" || j.stageId === "answers"));
+    expect([necessity, necessityChecker, questioner, answerer, checker].map((j) => (j!.input as { harness: string }).harness)).toEqual(["claude-code", "codex", "codex", "claude-code", "codex"]);
+    expect([necessity, necessityChecker, questioner, answerer, checker].map((j) => [j!.resultSchema, j!.purpose, j!.readOnly])).toEqual([["necessity-v1", "diagnostic", true], ["answer-check-v1", "review", true], ["questions-v1", "diagnostic", true], ["answers-v1", "diagnostic", true], ["answer-check-v1", "review", true]]);
+    expect(necessity).toMatchObject({ jobId: "answerer", stageId: "questions" });
+    for (const j of [necessity, necessityChecker, questioner, answerer, checker]) {
       expect(j!.confinement).toMatchObject({ kind: "bwrap", network: true, binds: [] });
       expect((j!.confinement as { mask: string[] }).mask).toContain("/work/tree/CLAUDE.md");
     }
@@ -142,7 +147,10 @@ describe("answer-finds-existing-helper", () => {
   });
 
   it("keeps the Report part of review.md byte for byte what the Report stage wrote, with only the pending Q&A replaced", () => {
-    expect(sim.qa!.markdown.startsWith(sim.written!.markdown.slice(0, sim.written!.markdown.indexOf("# Q&A")))).toBe(true);
+    // N1's Necessity part is the only thing added in front of the Report; the rest of the report stays byte for byte.
+    const reportPart = sim.written!.markdown.slice(sim.written!.markdown.indexOf("# Report"), sim.written!.markdown.indexOf("# Q&A"));
+    expect(sim.qa!.markdown).toContain(reportPart);
+    expect(sim.qa!.markdown.indexOf("# Necessity")).toBeLessThan(sim.qa!.markdown.indexOf("# Report"));
     expect(sim.written!.markdown).toContain("# Q&A\nPending");
   });
 });
@@ -192,7 +200,7 @@ describe("answer-no-library-with-whole-repo-search", () => {
   });
 
   it("hands the answerer the inventory with each version and its source status", () => {
-    const text = assignmentOf(sim.jobs.find((j) => j.jobId === "answerer")!);
+    const text = assignmentOf(sim.jobs.find((j) => j.resultSchema === "answers-v1")!);
     expect(text).toContain("go github.com/spf13/cobra v1.9.1 [go.mod] no use found — source unavailable");
     expect(text).toContain("go go.uber.org/multierr v1.11.0 (indirect or dev)");
     expect(text).toContain("No dependency source is available on this machine");
@@ -261,7 +269,8 @@ describe("answer-checker-contradicts", () => {
 
   it("downgrades to needs author, with both statements recorded, when the correction is still unsupported", () => {
     const stubborn = scenarioWith("answer-checker-contradicts", (s) => {
-      const second = s.results["answer-check-v1"]![1]!.output as { verdicts: Array<{ question: string; verdict: string; note: string; searches: unknown[] }> };
+      // Round 0 is N1's check; the answers' own rounds follow.
+      const second = s.results["answer-check-v1"]![2]!.output as { verdicts: Array<{ question: string; verdict: string; note: string; searches: unknown[] }> };
       const v = second.verdicts.find((x) => x.question === "Q1")!;
       v.verdict = "unsupported";
       v.note = "the cited file does not define Jitter";
@@ -373,8 +382,8 @@ describe("crap-upper-bound", () => {
   const sim = simulate({ scenarioName: "crap-upper-bound" });
 
   it("shows CRAP 42 as an upper bound with unknown coverage, and asks no complexity-coverage question", () => {
-    expect(sim.qa!.markdown).toContain("| `offline.Sync` pkg/offline/sync.go:6 | modified | 6 | 2 | unknown: not run (docker unavailable: docker is not available in a rehearsal) | 42 (upper bound, coverage unknown) | not run: no coverage |");
-    expect(qaOf(sim).questions.map((q) => q.type)).toEqual(["missing-test"]);
+    expect(sim.qa!.markdown).toContain("| `offline.Sync` pkg/offline/sync.go:6 | modified | 4 → 6 | 2 → 2 | unknown: not run (docker unavailable: docker is not available in a rehearsal) | 42 (upper bound, coverage unknown) | not run: no coverage |");
+    expect(qaOf(sim).questions.map((q) => q.type)).toEqual(["necessity", "missing-test"]);
     expect(qaOf(sim).symbols[0]).toMatchObject({ qualified: "offline.Sync", change: "modified" });
   });
 
@@ -484,8 +493,12 @@ describe("the Questions and Answers validators", () => {
       return c?.id === id ? ({ ...e, payload: { ...(e.payload as object), command: { ...c, argv: change([...c.argv]) } } } as EvidenceRecord) : e;
     });
 
-  it("pass on the untouched evidence", () => {
-    for (const id of ["questions-complete", "answers-complete", "answers-grounded"]) expect(evaluate(id, sim.evidence), id).toMatchObject({ status: "passed" });
+  // The evidence as the Questions stage judges it: before the answers (the controller keeps only the latest review, and a receipt rests on its own evidence).
+  const atQuestions = sim.evidence.slice(0, sim.evidence.findIndex((e) => (e.payload as { producer?: { stageId: string } }).producer?.stageId === "answers"));
+
+  it("pass on the untouched evidence, each stage on the evidence it is judged on", () => {
+    expect(evaluate("questions-complete", atQuestions), "questions-complete").toMatchObject({ status: "passed" });
+    for (const id of ["answers-complete", "answers-grounded"]) expect(evaluate(id, sim.evidence), id).toMatchObject({ status: "passed" });
   });
 
   it("reject a qa-write whose file is not what the evidence recomputes, and a ledger write from another value or with other content", () => {
@@ -499,7 +512,7 @@ describe("the Questions and Answers validators", () => {
     expect(evaluate("answers-complete", noWrite)).toMatchObject({ status: "inconclusive", reason: expect.stringMatching(/has not been written/) });
     const noCheck = sim.evidence.filter((e) => e.resultSchema !== "answer-check-v1");
     expect(evaluate("answers-grounded", noCheck)).toMatchObject({ status: "inconclusive", reason: expect.stringMatching(/answer check is not finished \(checker\)/) });
-    const noQuestions = sim.evidence.filter((e) => e.resultSchema !== "questions-v1");
+    const noQuestions = atQuestions.filter((e) => e.resultSchema !== "questions-v1");
     expect(evaluate("questions-complete", noQuestions)).toMatchObject({ status: "inconclusive" });
   });
 
@@ -514,7 +527,7 @@ describe("the Questions and Answers validators", () => {
   it("are bound as the design says: answers-grounded needs a separate reviewer, the others none", async () => {
     const { createGraph } = await import("../src/graph.js");
     const d = createGraph().describe(BANYANDB);
-    expect(d.defaultValidators.filter((b) => b.independence !== undefined).map((b) => [b.requirementId, b.independence])).toEqual([["claims-checked", "separate-reviewer"], ["answers-grounded", "separate-reviewer"]]);
+    expect(d.defaultValidators.filter((b) => b.independence !== undefined).map((b) => [b.requirementId, b.independence])).toEqual([["claims-checked", "separate-reviewer"], ["questions-complete", "separate-reviewer"], ["answers-grounded", "separate-reviewer"]]);
     expect(d.resultContracts!.find((c) => c.name === "answer-check-v1")!.evidenceKind).toBe("review");
   });
 });
@@ -522,7 +535,8 @@ describe("the Questions and Answers validators", () => {
 describe("stopping rules", () => {
   it("stops when no agent invocation is left for the questioner", () => {
     const sim = simulate({ scenarioName: "answer-finds-existing-helper" });
-    const kept = sim.evidence.filter((e) => !["questions-v1", "answers-v1", "answers-revision-v1", "answer-check-v1"].includes(e.resultSchema ?? "") && !["cite-1", "qa-write", "ledger-write"].includes((e.payload as { command?: { id: string } }).command?.id ?? ""));
+    // Everything up to and including N1's recorded outcome: the questioner is next.
+    const kept = sim.evidence.slice(0, sim.evidence.findIndex((e) => e.resultSchema === "questions-v1"));
     const asked = advancePullRequest(viewOf({ ...sim, receipts: sim.receipts.filter((r) => r.stageId === "fetch" || r.stageId === "report"), evidence: kept }, { budgets: { agentInvocations: 0, jobs: 100, decisions: 100, corrections: 12 } }));
     expect(asked.action).toMatchObject({ type: "stop", stop: { reason: "budgets exhausted" } });
   });

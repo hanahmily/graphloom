@@ -40,6 +40,36 @@ module path (TypeScript), the receiver or class, and the name. A closure or
 function literal is its own function, named `<enclosing>.func<n>` in source
 order, as Go's runtime names them.
 
+### 1.1 The base side of a modified function
+
+A modified function's value is only partly the change's: a legacy function
+with complexity 21 that the change touches shows 25 at the head, and that
+reads as if the change caused 25. So a **modified** function is also
+measured at the **base**, and a report that shows both says which part the
+change made. A new function has no base and shows its head value alone.
+
+- **Which.** For each modified function (not a test), the same
+  language-qualified name in the same file at the base. A renamed file is
+  read under its old path. A function with no counterpart of that name at
+  the base (a renamed method, a new receiver) has no base value, and says
+  so.
+- **How.** The static tool measures the **base file's bytes**, as
+  `git show <base>:<path>` prints them, with every line treated as changed,
+  so it records every function of the file. The measured bytes are the
+  evidence: the base file's text is recorded, and the validator recomputes
+  the base values from it exactly as it recomputes the head's (§5.1). Only
+  complexity and nesting are measured at the base. Coverage, CRAP and
+  mutation are the head's: they judge the tests that exist now.
+- **Limits.** A base file that does not fit a command report whole (about
+  60 KB) or cannot be read is not measured at the base. That is never a
+  failure: the row shows the head value alone, with the reason.
+- **Reading it.** A report shows `base → head` (for example `21 → 25`) and
+  says whether an over-the-limit value was **already over the limit at the
+  base** (not raised, or made worse) or **introduced** by the change (within
+  the limit at the base, over it at the head). A question about the excess
+  (for example splitting the function) says the same, so a maintainer does
+  not ask the author to repair what the base already had.
+
 ## 2. Definitions
 
 ### 2.1 Cyclomatic complexity, `comp(m)`

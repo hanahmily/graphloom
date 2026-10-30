@@ -2,7 +2,7 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 import { MAX_EXECUTOR_INPUT_BYTES, type EnvironmentCommand } from "@graphloom/sdk";
-import { COMMAND, QA_JSON, REPORT_JSON, REVIEW_DIR, REVIEW_MD } from "./constants.js";
+import { COMMAND, NECESSITY_JSON, QA_JSON, REPORT_JSON, REVIEW_DIR, REVIEW_MD } from "./constants.js";
 
 /**
  * Writing a file as a graph command, chunked as issue-fix's issues writer is:
@@ -73,3 +73,26 @@ export function writtenFiles(argv: readonly string[], id: string): { json: strin
 
 export const writtenReport = (argv: readonly string[]): { json: string; markdown: string } | undefined => writtenFiles(argv, COMMAND.reportWrite);
 export const writtenQa = (argv: readonly string[]): { json: string; markdown: string } | undefined => writtenFiles(argv, COMMAND.qaWrite);
+
+const jsonScript = (jsonFile: string): string =>
+  'set -eu; n="$1"; shift; json=""; for part in "$@"; do json="$json$part"; done; ' +
+  `mkdir -p ${REVIEW_DIR}; printf '*\\n' > ${REVIEW_DIR}/.gitignore; ` +
+  `printf '%s' "$json" > ${jsonFile}.tmp; mv ${jsonFile}.tmp ${jsonFile}; echo written`;
+
+/**
+ * The command that writes `necessity.json` (design §7.5), the recorded outcome of N1: its checked answer and the
+ * decision it led to. The bytes are evidence, so the Answers stage and its validators read the decision from here
+ * even after a later review has superseded the check that made it. Undefined when it does not fit one command.
+ */
+export function necessityWriteCommand(json: string): EnvironmentCommand | undefined {
+  const parts = writeChunks(json);
+  const command: EnvironmentCommand = { id: COMMAND.necessityWrite, argv: ["sh", "-c", jsonScript(NECESSITY_JSON), COMMAND.necessityWrite, String(parts.length), ...parts] };
+  return command.argv.length - 5 <= MAX_CHUNKS && inputBytes(command) <= MAX_COMMAND_INPUT_BYTES ? command : undefined;
+}
+
+/** The JSON a `necessity-write` argv wrote. */
+export function writtenNecessity(argv: readonly string[]): string | undefined {
+  const n = Number(argv[4]);
+  if (argv[3] !== COMMAND.necessityWrite || !Number.isSafeInteger(n) || n < 0) return undefined;
+  return argv.slice(5, 5 + n).join("");
+}

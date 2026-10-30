@@ -189,6 +189,17 @@ export const STREAM_CHANGED: ReadonlyArray<{ start: number; end: number }> = STR
 
 export const STREAM_PATH = "banyand/stream/write_standalone.go";
 
+/**
+ * A design statement of the base repository, as the `necessity-unnecessary` scenario cites it: line 172 of BanyanDB's
+ * docs/concept/tsdb.md, "Write Path" (copied, so a test can hold the scenario's quote to this text).
+ */
+export const WRITE_PATH_DOC = {
+  path: "docs/concept/tsdb.md",
+  line: 172,
+  text: "When a shard receives a write request, the data is written to a buffer as a memory part; the series index (and, for indexed tags, the inverted index) is updated as well. A background worker periodically flushes the memory part to disk. After a flush completes, it triggers a merge operation to combine parts and remove invalid data.",
+  quote: "A background worker periodically flushes the memory part to disk.",
+} as const;
+
 export const NEW_HEAD_FILES: Readonly<Record<string, string>> = {
   "pkg/retention/ttl.go": RETENTION_TTL_GO,
   "pkg/retry/backoff.go": BACKOFF_GO,
@@ -196,4 +207,41 @@ export const NEW_HEAD_FILES: Readonly<Record<string, string>> = {
   "pkg/quota/limit.go": LIMIT_GO,
   "pkg/offline/sync.go": SYNC_GO,
   [STREAM_PATH]: STREAM_WRITE_GO,
+};
+
+/** `report`: a modified registerFlags that gains a flag and a sweep. Lines the pull request adds are FLAGS_ADDED_LINES. */
+export const FLAGS_GO = `// Licensed under the Apache License, Version 2.0.
+
+package server
+
+import (
+	"os"
+
+	"github.com/spf13/cobra"
+)
+
+// registerFlags adds the server's flags.
+func registerFlags(cmd *cobra.Command) {
+	cmd.Flags().String("listen", ":17912", "listen address")
+	cmd.Flags().Int("retention-days", 7, "default retention in days")
+	if os.Getenv("BYDB_RETENTION_DAYS") != "" {
+		schedule("0 3 * * *")
+	}
+}
+`;
+
+/** The head-side lines the `report` pull request adds to FLAGS_GO. */
+export const FLAGS_ADDED_LINES: readonly number[] = [14, 15, 16, 17];
+
+const without = (text: string, lines: readonly number[]): string => `${text.replace(/\n$/, "").split("\n").filter((_, i) => !lines.includes(i + 1)).join("\n")}\n`;
+
+/** The files the modified-function scenarios have at the base: the head without the lines the pull request adds. */
+export const FLAGS_BASE_GO = without(FLAGS_GO, FLAGS_ADDED_LINES);
+export const SYNC_BASE_GO = without(SYNC_GO, [SYNC_CHANGED.start, SYNC_CHANGED.start + 1, SYNC_CHANGED.end]);
+
+/** The modified files' text at the base, by path: what `git show <base>:<path>` prints for them in a rehearsal. */
+export const BASE_FILES: Readonly<Record<string, string>> = {
+  "banyand/cmd/server/flags.go": FLAGS_BASE_GO,
+  "pkg/offline/sync.go": SYNC_BASE_GO,
+  [STREAM_PATH]: STREAM_WRITE_BASE_GO,
 };

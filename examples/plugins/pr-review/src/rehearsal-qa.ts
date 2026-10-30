@@ -11,6 +11,8 @@
  */
 import type { RehearsalCommandResult, RehearsalReply } from "@graphloom/sdk";
 import { needsOwnSearch, verificationPlan, type Answer, type CheckVerdict } from "./answers.js";
+import { COMMAND } from "./constants.js";
+import { effectiveConclusion, necessityAnswer, necessityQuestion, type Necessity } from "./necessity.js";
 import { candidatePlan, type Groundwork } from "./groundwork.js";
 import { declaredDependencies, parseManifests, siteCommands } from "./inventory.js";
 import type { MetricsRecord } from "./metrics/record.js";
@@ -59,7 +61,18 @@ require (
 )
 `;
 
+/** How the answerer and the checker treat the necessity question N1 (design §7.5, §16). */
+export interface NecessitySpec {
+  /** The answerer's result; the argument is the plugin's default (necessary, on the pull request's title). */
+  result?: (dflt: Necessity) => Necessity;
+  /** The checker's verdict on N1 by round; a round it does not list is supported. */
+  checks?: Array<{ verdict: "supported" | "partial" | "unsupported"; note: string }>;
+  /** The corrected result after an unsupported verdict. It keeps the number of citations, so the verification command is the same. */
+  revise?: (prev: Necessity) => Necessity;
+}
+
 export interface QaSpec {
+  necessity?: NecessitySpec;
   base?: BaseFixture;
   /** Purposes the pull request's text states: the section of the change item, the source and a quote from it. */
   purposes?: Array<{ section: string; source: "title" | "body" | "commit"; quote: string }>;
@@ -134,6 +147,25 @@ function defaultAnswer(q: Question, sym: SymbolDef | undefined, record: MetricsR
   }
 }
 
+/** The necessity answer a scenario gives unless it says otherwise: the problem is possible on the base, the design says nothing about it, nothing existing does it. */
+export function defaultNecessity(title: string): Necessity {
+  return {
+    conclusion: "necessary",
+    rationale: "The failure the pull request describes is possible on the base, the change keeps the system's design, and no existing way does it.",
+    problem: {
+      claim: `The pull request is titled "${title}": it describes a behavior the base lacks.`,
+      quotes: [{ source: "title", quote: title }],
+      trace: [{ step: "The base code path the change touches has no handling for the case the title names", path: "pkg/timestamp/duration.go", tree: "base", start: 30, end: 42, quote: "func ParseDuration" }],
+      canHappen: "yes",
+      explanation: "Following the callers of the touched code in the base, nothing else handles the case, so it can happen.",
+    },
+    reproduction: "not attempted: no reproduction mechanism in this version",
+    design: { statements: [], changed: [], effect: "unrelated", explanation: "No design or architecture statement concerns this behavior.", searches: [{ pattern: "design|architecture|write path", scope: "base", hits: 4 }] },
+    alternatives: { exists: false, explanation: "No caller or other layer already handles it, and the change belongs where it is made.", citations: [] },
+    searches: [{ pattern: "callers of the touched code", scope: "base", hits: 3 }],
+  };
+}
+
 const formatHits = (hits: readonly Hit[]): string => hits.map((h) => `${h.path}:${h.line}:${h.text}`).join("\n");
 
 const SECTION_ORDER = ["name", "variants", "signature", "tokens", "tests"] as const;
@@ -141,8 +173,10 @@ const SECTION_ORDER = ["name", "variants", "signature", "tokens", "tests"] as co
 export interface QaScenario {
   results: Record<string, RehearsalReply[]>;
   commands: Record<string, RehearsalCommandResult>;
-  /** The symbols and questions the graph will derive, for the scenario's own assertions. */
+  /** The symbols and the questions after N1 the graph will derive, for the scenario's own assertions. */
   questions: Question[];
+  /** N1's results by round, and whether the other questions are asked after it. */
+  necessity: { first: Necessity; final: Necessity; asked: boolean };
   symbols: SymbolDef[];
 }
 
@@ -183,6 +217,20 @@ export function qaScenario(i: QaInput): QaScenario {
   });
   const revised = spec.revise !== undefined ? questions.flatMap((q, n) => (spec.checks?.[0]?.(q, first[n]!)?.verdict === "unsupported" ? [spec.revise!(q, symOf(q), first[n]!)] : [])) : [];
   const final = first.map((a) => revised.find((r) => r.question === a.question) ?? a);
+  // N1 comes first: its answerer, its checker (one correction when the first round is unsupported), and its verification.
+  const nspec = spec.necessity ?? {};
+  const n1First = nspec.result !== undefined ? nspec.result(defaultNecessity(i.pull.title)) : defaultNecessity(i.pull.title);
+  const nChecks = nspec.checks ?? [];
+  const n1Revised = nChecks[0]?.verdict === "unsupported" && nspec.revise !== undefined ? nspec.revise(n1First) : undefined;
+  const n1Final = n1Revised ?? n1First;
+  const n1Verdicts = (round: number, n: Necessity): CheckVerdict[] => {
+    const given = nChecks[round];
+    return [{ question: necessityQuestion().id, verdict: given?.verdict ?? "supported", note: given?.note ?? "", searches: [{ pattern: "design|flush|write path|acknowledg", scope: "base", hits: 4 }, { pattern: n.problem.trace[0]?.path ?? "path", scope: "base", hits: 1 }] }];
+  };
+  const n1Rounds = [n1Verdicts(0, n1First), ...(n1Revised !== undefined ? [n1Verdicts(1, n1Revised)] : [])];
+  const lastN1 = nChecks[n1Rounds.length - 1];
+  const n1Supported = (lastN1?.verdict ?? "supported") === "supported";
+  const n1Asked = !(effectiveConclusion({ necessity: n1Final, check: { verdict: lastN1?.verdict === "unsupported" ? "downgraded" : (lastN1?.verdict ?? "supported") } }) === "unnecessary" && n1Supported);
   const verdicts = (round: number, set: readonly Answer[]): CheckVerdict[] =>
     questions.map((q, n) => {
       const a = set[n]!;
@@ -192,9 +240,12 @@ export function qaScenario(i: QaInput): QaScenario {
     });
   const rounds = revised.length > 0 || (spec.checks?.length ?? 0) > 1 ? [verdicts(0, first), verdicts(1, final)] : [verdicts(0, final)];
   const results: QaScenario["results"] = {
+    "necessity-v1": [{ output: n1First }],
+    ...(n1Revised !== undefined ? { "necessity-revision-v1": [{ output: n1Revised }] } : {}),
     "questions-v1": [{ output: questionerOutput }],
     "answers-v1": [{ output: { answers: first } }],
-    "answer-check-v1": rounds.map((verdict) => ({ output: { verdicts: verdict } })),
+    // N1's rounds come first, then the other answers' (a run that skips them never asks for those).
+    "answer-check-v1": [...n1Rounds, ...rounds].map((verdict) => ({ output: { verdicts: verdict } })),
     ...(revised.length > 0 ? { "answers-revision-v1": [{ output: { answers: revised } }] } : {}),
   };
   // Canned outputs of the read-only commands, by id, for the commands the graph will run.
@@ -223,7 +274,13 @@ export function qaScenario(i: QaInput): QaScenario {
     const lines = item.entries.map((_, n) => (item.kind === "cite" ? `${n + 1} ok` : "")).filter((l) => l !== "");
     commands[item.command.id] = ok(`${lines.join("\n")}${lines.length > 0 ? "\n" : ""}checked ${item.entries.length}\n`);
   }
+  const nctx = { questions: [necessityQuestion()], groundwork, view, packs };
+  for (const item of verificationPlan([necessityAnswer(n1First)], nctx, i.mergeBase, COMMAND.citeNecessity)) {
+    const lines = item.entries.map((_, n) => (item.kind === "cite" ? `${n + 1} ok` : "")).filter((l) => l !== "");
+    commands[item.command.id] = ok(`${lines.join("\n")}${lines.length > 0 ? "\n" : ""}checked ${item.entries.length}\n`);
+  }
+  commands["necessity-write"] = ok("written\n");
   commands["qa-write"] = ok("written\n");
   commands["ledger-write"] = ok(`advanced ${"b".repeat(40)}\n`);
-  return { results, commands, questions, symbols };
+  return { results, commands, questions, symbols, necessity: { first: n1First, final: n1Final, asked: n1Asked } };
 }

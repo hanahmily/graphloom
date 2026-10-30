@@ -9,7 +9,7 @@ export const GRAPH_ID = "pr-review";
  * §18): 0.1 declares Fetch, Report, Questions and Answers. Review, Checks,
  * Draft and Publish arrive with later versions.
  */
-export const GRAPH_VERSION = "0.2.0";
+export const GRAPH_VERSION = "0.3.0";
 
 /** The operator decision that would continue into the review layer (design §11). */
 export const REVIEW_LAYER_APPROVAL = "review-layer";
@@ -65,6 +65,11 @@ export const COMMAND = {
   depSites: "dep-sites",
   depSource: "dep-source",
   cite: "cite",
+  /** The verification of the necessity answer's citations, apart from the answers' own (`cite-<n>`). */
+  citeNecessity: "cite-n",
+  /** `base-file-<n>` reads a modified function's file at the base; `static-base-<language>-<n>` measures it. */
+  baseFile: "base-file",
+  necessityWrite: "necessity-write",
   names: "names",
   qaWrite: "qa-write",
   ledgerPrior: "ledger-prior",
@@ -92,6 +97,7 @@ export const REVIEW_DIR = ".graphloom/review";
 export const REPORT_JSON = `${REVIEW_DIR}/report.json`;
 export const REVIEW_MD = `${REVIEW_DIR}/review.md`;
 export const QA_JSON = `${REVIEW_DIR}/qa.json`;
+export const NECESSITY_JSON = `${REVIEW_DIR}/necessity.json`;
 
 /** `refs/graphloom/pr-review/<owner>/<repo>/<N>/ledger`: the per-PR ledger (design §9.1). */
 export const ledgerRef = (owner: string, repo: string, n: number): string => `refs/graphloom/pr-review/${owner}/${repo}/${n}/ledger`;

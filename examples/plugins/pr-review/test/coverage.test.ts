@@ -428,7 +428,7 @@ describe("coverage-measured (through the graph)", () => {
 
   const evaluate = (id: string, evidence: EvidenceRecord[]) => validatorById(id)!.evaluate({ requirementId: id, statement: "", evidence: candidateEvidence(evidence, "d1"), candidateDigest: "d1", config: BANYANDB });
   // The evidence as the Report stage judges it: before the questions (the controller keeps only the latest review).
-  const atReport = sim.evidence.slice(0, sim.evidence.findIndex((e) => e.resultSchema === "questions-v1"));
+  const atReport = sim.evidence.slice(0, sim.evidence.findIndex((e) => e.resultSchema === "necessity-v1"));
   const tamper = (change: (c: { argv: string[]; stdoutTail: string }) => void): EvidenceRecord[] =>
     atReport.map((e) => {
       const c = (e.payload as { command?: { id: string; argv: string[]; stdoutTail: string } }).command;

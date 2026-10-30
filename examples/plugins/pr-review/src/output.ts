@@ -70,8 +70,16 @@ export function reviewMarkdown(i: OutputInput): string {
 /** What the Q&A part says until the Answers stage replaces it. */
 export const QA_PENDING = ["# Q&A", "Pending: the Questions and Answers stages follow the report.", ""].join("\n");
 
-/** The whole `review.md`: the report's own, with its pending Q&A part replaced by the rendered one (a report cut short keeps its cut note, then the Q&A). */
-export function withQa(reportMarkdown: string, qaMarkdown: string): string {
+/**
+ * The whole `review.md`: the report's own, with its pending Q&A part replaced by the rendered one (a report cut
+ * short keeps its cut note, then the Q&A), and the Necessity part (design §7.5) in front of the Report.
+ */
+export function withQa(reportMarkdown: string, qaMarkdown: string, necessityMarkdown?: string): string {
   const base = reportMarkdown.endsWith(QA_PENDING) ? reportMarkdown.slice(0, reportMarkdown.length - QA_PENDING.length) : `${reportMarkdown}\n`;
-  return `${base}${qaMarkdown}`;
+  const joined = `${base}${qaMarkdown}`;
+  if (necessityMarkdown === undefined) return joined;
+  const at = joined.indexOf("\n# Report");
+  if (at < 0) return `${necessityMarkdown}\n${joined}`;
+  const front = joined.slice(0, at).replace("Contents: Report · Measurements · Q&A", "Contents: Necessity · Report · Measurements · Q&A");
+  return `${front}\n${necessityMarkdown}${joined.slice(at)}`;
 }

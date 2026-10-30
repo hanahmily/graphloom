@@ -13,7 +13,7 @@ import { validateResultShape } from "@graphloom/sdk";
 import type { EvidenceRecord } from "@graphloom/sdk";
 import { agentRuns, type AgentRun } from "./evidence.js";
 import type { Groundwork } from "./groundwork.js";
-import { checkThresholds, LIMITS } from "./metrics/crap.js";
+import { checkThresholds, exceeds, LIMITS, originText, type Metric } from "./metrics/crap.js";
 import type { MetricsRecord } from "./metrics/record.js";
 import { changeItems, type ReportView, type ViewItem } from "./reportview.js";
 import type { SymbolDef } from "./symbols.js";
@@ -24,10 +24,10 @@ export const MAX_ADDED_QUESTIONS = 30;
 export const MAX_QUESTION_CORRECTIONS = 2;
 const MIN_QUOTE_CHARS = 12;
 
-export const QUESTION_TYPES = ["purpose", "existing-equivalent", "reuse-library", "common-logic", "missing-test", "split-function", "complexity-coverage", "weak-test", "other"] as const;
+export const QUESTION_TYPES = ["necessity", "purpose", "existing-equivalent", "reuse-library", "common-logic", "missing-test", "split-function", "complexity-coverage", "weak-test", "other"] as const;
 export type QuestionType = (typeof QUESTION_TYPES)[number];
-/** The types the questioner may add: a weak-test question exists only for a surviving mutant, which the graph, not the questioner, finds. */
-const ADDABLE: readonly string[] = QUESTION_TYPES.filter((t) => t !== "weak-test");
+/** The types the questioner may add: a weak-test question exists only for a surviving mutant, which the graph, not the questioner, finds; the necessity question N1 is the plugin's own and comes first. */
+const ADDABLE: readonly string[] = QUESTION_TYPES.filter((t) => t !== "weak-test" && t !== "necessity");
 
 export const QUESTIONS_SCHEMA = {
   type: "object",
@@ -49,7 +49,7 @@ export const QUESTIONS_SCHEMA = {
         type: "object",
         additionalProperties: false,
         required: ["key", "type", "item", "symbol", "text"],
-        properties: { key: { type: "string" }, type: { type: "string", enum: QUESTION_TYPES }, item: { type: "string" }, symbol: { type: "string" }, text: { type: "string" } },
+        properties: { key: { type: "string" }, type: { type: "string", enum: QUESTION_TYPES.filter((t) => t !== "necessity") }, item: { type: "string" }, symbol: { type: "string" }, text: { type: "string" } },
       },
     },
   },
@@ -173,11 +173,14 @@ export function requiredQuestions(inp: QuestionInputs, stated: ReadonlyMap<strin
     const th = checkThresholds(r);
     const where = `${r.function} (${r.path}:${r.startLine})`;
     if (th.complexity.exceeded || th.nesting.exceeded) {
-      out.push({ key: keyOf("split-function"), type: "split-function", item, ...ref, text: `${where} has complexity ${r.complexity} (limit < ${LIMITS.complexity}) and nesting ${r.nesting} (limit ≤ ${LIMITS.nesting}). Could it be split into smaller functions with one intent each?` });
+      // Whether the excess is inherited from the base or introduced by the pull request (design §6.8).
+      const origins = (["complexity", "nesting"] as Metric[]).filter((m) => exceeds(m, r[m])).map((m) => `${m}: ${originText(r, m)}`);
+      out.push({ key: keyOf("split-function"), type: "split-function", item, ...ref, text: `${where} has complexity ${r.complexity} (limit < ${LIMITS.complexity}) and nesting ${r.nesting} (limit ≤ ${LIMITS.nesting}); ${origins.join("; ")}. Could it be split into smaller functions with one intent each?` });
     }
     if (th.crap.triggers) {
       const coverage = r.coverage?.source === "measured" ? `measured coverage ${r.coverage.covered}/${r.coverage.total}` : "unknown coverage";
-      out.push({ key: keyOf("complexity-coverage"), type: "complexity-coverage", item, ...ref, text: `Which tests cover the branches of ${where}? Complexity ${r.complexity}, ${coverage}, CRAP ${th.crap.value}${th.crap.upperBound ? " (upper bound)" : ""}.` });
+      const base = r.change === "modified" && r.base !== undefined && !("unavailable" in r.base) ? ` (${r.base.complexity} at the base: ${originText(r, "complexity")})` : "";
+      out.push({ key: keyOf("complexity-coverage"), type: "complexity-coverage", item, ...ref, text: `Which tests cover the branches of ${where}? Complexity ${r.complexity}${base}, ${coverage}, CRAP ${th.crap.value}${th.crap.upperBound ? " (upper bound)" : ""}.` });
     }
     for (const s of survivors(r)) {
       out.push({ key: keyOf(`weak-test:${s.line}`), type: "weak-test", item, ...ref, text: `Which assertion would fail when \`${s.from}\` at ${r.path}:${s.line} becomes \`${s.to}\`?` });

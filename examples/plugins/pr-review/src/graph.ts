@@ -36,6 +36,7 @@ import {
   ENV_WORKTREE,
   FETCH_STAGE,
   LEDGER_MOVED,
+  NECESSITY_JSON,
   QUESTIONER_JOB,
   QUESTIONS_STAGE,
   REPORTER_JOB,
@@ -60,7 +61,7 @@ import { LIMITS } from "./metrics/crap.js";
 import { CHANGE_REPORT_SCHEMA } from "./report.js";
 import { CLAIM_CHECK_SCHEMA, claimTargets } from "./claims.js";
 import { REPORTER_SCHEMA_NAME, REVISION_SCHEMA_NAME, reportFlow } from "./flow.js";
-import { measurementState, metricsDiffCommand, staticCommand, type Batch } from "./measurements.js";
+import { measurementState, metricsDiffCommand, staticBaseCommand, staticCommand } from "./measurements.js";
 import { coverageCommand, coverageConfinement, missingProbe, sandboxEnvironmentChecks, type CoveragePlan } from "./coverage.js";
 import { checkerInstruction, reporterInstruction } from "./prompts.js";
 import { harnessName, parseProfile, ProfileError, ROLES, DISTINCT_PAIRS, type Profile } from "./profile.js";
@@ -75,8 +76,9 @@ import { ANSWER_CHECK_SCHEMA, ANSWER_CHECK_SCHEMA_NAME, ANSWERS_REVISION_SCHEMA_
 import { sourceDirs } from "./inventory.js";
 import { ledgerRead, priorShowCommand, writtenLedger } from "./ledger.js";
 import { QUESTIONS_SCHEMA, QUESTIONS_SCHEMA_NAME, requiredQuestions } from "./questions.js";
-import { answerCheckerInstruction, answererInstruction, questionerInstruction } from "./qaprompts.js";
-import { answerContext, answerWrites, qaContext, qaOutputs, questionSet, questionerFlow, type QaContext } from "./qaflow.js";
+import { necessityDecision, necessityQuestion, NECESSITY_ID, NECESSITY_REVISION_SCHEMA_NAME, NECESSITY_SCHEMA, NECESSITY_SCHEMA_NAME, type NecessityRecord } from "./necessity.js";
+import { answerCheckerInstruction, answererInstruction, necessityCheckerInstruction, necessityInstruction, questionerInstruction } from "./qaprompts.js";
+import { afterNecessity, answerContext, answerWrites, necessityFlow, necessityRecordCommand, qaContext, qaOutputs, questionSet, questionerFlow, recordedNecessity, type QaContext } from "./qaflow.js";
 
 export { GRAPH_ID, GRAPH_VERSION };
 
@@ -124,7 +126,7 @@ export function definitionFor(profile: Profile): GraphDefinition {
     },
     {
       id: REQUIREMENT_MEASUREMENTS,
-      statement: `For every function the pull request adds or modifies, complexity and nesting were measured by the pinned static tools (gometrics, tsmetrics) over the head tree, under bwrap with no network, and every value recomputes from its evidence. Coverage runs the pull request's own tests, so it runs only in the Docker sandbox (no network, a read-only dependency cache, a prepared checkout of the head, images pinned by digest and pulled in Fetch): ${profile.metrics.coverage ? "each function's statement coverage is attributed by line range from the sandbox's report (go test -coverprofile; the repository's own vitest with @vitest/coverage-v8), and its CRAP is recomputed, or the function says why it was not run (Docker or the image is not available, a package did not build offline, no vitest coverage provider in the repository) and its CRAP is shown as its upper bound" : "not run (coverage disabled by the profile), CRAP shown as its upper bound"}. Mutation arrives with a later version.`,
+      statement: `For every function the pull request adds or modifies, complexity and nesting were measured by the pinned static tools (gometrics, tsmetrics) over the head tree, under bwrap with no network, and every value recomputes from its evidence. A modified function is also measured at the base: its file is read at the pinned base (git show <base>:<path>, read-only, recorded whole) and measured by the same tools, confined with no network and recomputed from the recorded text, so its row shows base → head and says whether an over-the-limit value was already there, or why the base is not known (a base that cannot be measured never fails the report). Coverage runs the pull request's own tests, so it runs only in the Docker sandbox (no network, a read-only dependency cache, a prepared checkout of the head, images pinned by digest and pulled in Fetch): ${profile.metrics.coverage ? "each function's statement coverage is attributed by line range from the sandbox's report (go test -coverprofile; the repository's own vitest with @vitest/coverage-v8), and its CRAP is recomputed, or the function says why it was not run (Docker or the image is not available, a package did not build offline, no vitest coverage provider in the repository) and its CRAP is shown as its upper bound" : "not run (coverage disabled by the profile), CRAP shown as its upper bound"}. Mutation arrives with a later version.`,
       evidenceSchema: "graphloom-metrics-v1",
     },
     {
@@ -134,17 +136,17 @@ export function definitionFor(profile: Profile): GraphDefinition {
     },
     {
       id: REQUIREMENT_QUESTIONS,
-      statement: `Every required question was asked: purpose for each change item whose purpose the pull request's text does not state (a stated purpose is recorded with a quote that matches that text instead), existing-equivalent, reuse-library and common-logic for each new symbol, missing-test for each new or modified symbol the test map finds no covering test for, split-function for each changed function with complexity of ${LIMITS.complexity} or more or nesting over ${LIMITS.nesting}, complexity-coverage for each function with measured coverage and CRAP of ${LIMITS.crap} or more or with unknown coverage and complexity of ${LIMITS.complexity} or more (an upper-bound CRAP alone asks nothing), and weak-test for each surviving mutant (none in this version: mutation testing arrives later). The groundwork behind them (symbols from the language packs, whole-repository searches over the pinned base commit, similarity, the dependency inventory, the test map) was read by read-only commands, and every changed function has a measurement record.`,
+      statement: `The necessity question N1 was asked first, before every other question: is the problem real on the base (the claimed problem quoted from the pull request's text, the base behavior traced through the base code with path:line citations, a failing test on the base optional and not available in this version), does the fix fit the system's design (the repository's design and architecture documents${profile.questions.designDocs.length > 0 ? ` (${profile.questions.designDocs.join(", ")})` : ""} and code comments searched, the design statement and the changed lines cited, and whether the change preserves or breaks them said), and is there a simpler or existing way; it concludes necessary, questionable, unnecessary or needs author, in one line. An independent ${harnessName(profile.roles["answer-checker"])} answer checker verified each cited design statement, each trace step and the conclusion, with searches of its own, and N1's checked answer and the decision it led to are recorded in necessity.json. When N1 concludes unnecessary and the checker supports it, and the operator did not ask for every question, no other question is asked and the skip is recorded (only N1 is required). Otherwise every required question was asked: purpose for each change item whose purpose the pull request's text does not state (a stated purpose is recorded with a quote that matches that text instead), existing-equivalent, reuse-library and common-logic for each new symbol, missing-test for each new or modified symbol the test map finds no covering test for, split-function for each changed function with complexity of ${LIMITS.complexity} or more or nesting over ${LIMITS.nesting}, complexity-coverage for each function with measured coverage and CRAP of ${LIMITS.crap} or more or with unknown coverage and complexity of ${LIMITS.complexity} or more (an upper-bound CRAP alone asks nothing), and weak-test for each surviving mutant (none in this version: mutation testing arrives later). The groundwork behind them (symbols from the language packs, whole-repository searches over the pinned base commit, similarity, the dependency inventory, the test map) was read by read-only commands, and every changed function has a measurement record.`,
       evidenceSchema: QUESTIONS_SCHEMA_NAME,
     },
     {
       id: REQUIREMENT_ANSWERS,
-      statement: `Every question has an answer from the ${harnessName(profile.roles.answerer)} answerer with evidence (citations that resolve in the tree they name, the searches run with their results, inventory entries) and a status of answered, partially answered or needs author. Every "none found" answer lists its whole-repository searches. Every cited metric equals its measurement record. Every proposal's line ranges lie inside its function and its names are new to the package. ${QA_JSON} and ${REVIEW_MD} are written, and the pull request's ledger ref was advanced by compare-and-swap from the value Fetch read with this head's report.json and qa.json.`,
+      statement: `N1 has its recorded answer first (when it is the only question, because it concluded unnecessary and the checker supports it, the Q&A says the remaining questions were skipped). Every other question has an answer from the ${harnessName(profile.roles.answerer)} answerer with evidence (citations that resolve in the tree they name, the searches run with their results, inventory entries) and a status of answered, partially answered or needs author. Every "none found" answer lists its whole-repository searches. Every cited metric equals its measurement record. Every proposal's line ranges lie inside its function and its names are new to the package. ${QA_JSON} and ${REVIEW_MD} are written, and the pull request's ledger ref was advanced by compare-and-swap from the value Fetch read with this head's report.json and qa.json.`,
       evidenceSchema: ANSWERS_SCHEMA_NAME,
     },
     {
       id: REQUIREMENT_GROUNDED,
-      statement: `An independent ${harnessName(profile.roles["answer-checker"])} answer checker, on a harness other than the answerer's, re-checked every cited equivalent, library, duplicate and covering test, and every "none found" claim with searches of its own, against the trees. Every answer left is supported or partial; an answer still unsupported after one correction is needs author, with both statements recorded.`,
+      statement: `An independent ${harnessName(profile.roles["answer-checker"])} answer checker, on a harness other than the answerer's, re-checked every cited equivalent, library, duplicate and covering test, and every "none found" claim with searches of its own, against the trees, and had verified N1's cited design statements, trace steps and conclusion. Every answer left is supported or partial; an answer still unsupported after one correction is needs author, with both statements recorded (for N1, its conclusion becomes questionable and every question is asked).`,
       evidenceSchema: ANSWER_CHECK_SCHEMA_NAME,
     },
   ];
@@ -155,7 +157,8 @@ export function definitionFor(profile: Profile): GraphDefinition {
     { requirementId: REQUIREMENT_REPORT, validatorId: "change-report", version: "1" },
     { requirementId: REQUIREMENT_MEASUREMENTS, validatorId: "measurements", version: "1" },
     { requirementId: REQUIREMENT_CLAIMS, validatorId: "claims-checked", version: "1", independence: "separate-reviewer" },
-    { requirementId: REQUIREMENT_QUESTIONS, validatorId: "questions-complete", version: "1" },
+    // N1's check is review evidence: the controller admits it only from a read-only review job on another operation.
+    { requirementId: REQUIREMENT_QUESTIONS, validatorId: "questions-complete", version: "1", independence: "separate-reviewer" },
     { requirementId: REQUIREMENT_ANSWERS, validatorId: "answers-complete", version: "1" },
     { requirementId: REQUIREMENT_GROUNDED, validatorId: "answers-grounded", version: "1", independence: "separate-reviewer" },
   ];
@@ -172,6 +175,8 @@ export function definitionFor(profile: Profile): GraphDefinition {
       { name: QUESTIONS_SCHEMA_NAME, schema: asSchema(QUESTIONS_SCHEMA), evidenceKind: "other" },
       { name: ANSWERS_SCHEMA_NAME, schema: asSchema(ANSWERS_SCHEMA), evidenceKind: "other" },
       { name: ANSWERS_REVISION_SCHEMA_NAME, schema: asSchema(ANSWERS_SCHEMA), evidenceKind: "other" },
+      { name: NECESSITY_SCHEMA_NAME, schema: asSchema(NECESSITY_SCHEMA), evidenceKind: "other" },
+      { name: NECESSITY_REVISION_SCHEMA_NAME, schema: asSchema(NECESSITY_SCHEMA), evidenceKind: "other" },
       // Kind "review": answers-grounded is judged by an independent reviewer (a read-only review job on another harness).
       { name: ANSWER_CHECK_SCHEMA_NAME, schema: asSchema(ANSWER_CHECK_SCHEMA), evidenceKind: "review" },
     ],
@@ -259,11 +264,14 @@ export function advancePullRequest(view: RunView): GraphDecision {
         ),
       );
     }
+    // N1's answerer sits in the Questions stage; when it was the only answer, that is the session to discuss.
+    const rec = recordedNecessity(view.evidence);
+    const chat = rec.state === "read" && rec.record.decision.action === "skip" ? QUESTIONS_STAGE : ANSWERS_STAGE;
     return withPrivate(
       stop(
         {
           reason: "report ready",
-          blocker: `the report, the questions and their answers are written to ${REVIEW_MD} in the worktree (report.json and qa.json beside it). graphloom session open <run> --stage answers discusses them; graphloom resume <run> --decline review-layer finishes the run report-only (this version has no Review stage, so --approve review-layer is refused)`,
+          blocker: `the report, the questions and their answers are written to ${REVIEW_MD} in the worktree (report.json and qa.json beside it). graphloom session open <run> --stage ${chat} discusses them; graphloom resume <run> --decline review-layer finishes the run report-only (this version has no Review stage, so --approve review-layer is refused)`,
           retryable: false,
         },
         "the report and the Q&A are ready; the review layer is not built in this version",
@@ -493,7 +501,7 @@ function report(ctx: Context, view: RunView): GraphDecision {
 }
 
 /** Where a tool of the confined static job lives: the plugin's directory, and the Go and Node installations under a hidden home. */
-function toolBinds(view: RunView, batches: readonly Batch[]): Array<{ path: string; readOnly: boolean }> | undefined {
+function toolBinds(view: RunView, batches: ReadonlyArray<{ language: string }>): Array<{ path: string; readOnly: boolean }> | undefined {
   const root = environmentOutput(view.evidence, ENV_PLUGIN_ROOT);
   if (root === undefined) return undefined;
   const binds = [{ path: root, readOnly: true }];
@@ -533,6 +541,27 @@ function measureAndWrite(ctx: Context, view: RunView, analysis: Analysis, flow: 
         confinement: { kind: "bwrap", network: false, mask: [], binds },
       };
       return withPrivate(dispatch(job, `measure ${batches.length} batch(es) of changed files with the static metrics tools, confined with no network`));
+    }
+    case "baseFiles":
+      // The modified functions' base files, as `git show <base>:<path>` prints them: read-only, no repository code.
+      return withPrivate(dispatch(commandJob(REPORT_STAGE, "Read the base versions of the modified files (git show <base>:<path>)", { commands: m.commands.slice(0, 16), continueOnFailure: true, env: { ...GIT_ENV } }), `read ${Math.min(16, m.commands.length)} base file(s) so each modified function can be measured at the base too`));
+    case "baseTools": {
+      const binds = toolBinds(view, m.batches);
+      if (binds === undefined) return supervise({ reason: "the environment check recorded no plugin directory, which the static tools run from" }, "escalate a missing plugin path");
+      const batches = m.batches.slice(0, 16);
+      const goRoot = environmentOutput(view.evidence, "go-root");
+      const goBin = goRoot !== undefined && path.isAbsolute(goRoot) && goRoot !== "/" ? path.join(goRoot, "bin", "go") : "go";
+      const commands = batches.map((b) => staticBaseCommand(b, m.base, binds[0]!.path, profile.metrics.generated, process.execPath, goBin));
+      const job: JobSpec = {
+        stageId: REPORT_STAGE,
+        kind: "command",
+        purpose: "diagnostic",
+        readOnly: true,
+        instruction: "Measure the modified functions at the base: complexity and nesting by the same static tools over the base files (parse only; no network; no repository code runs)",
+        input: { commands, continueOnFailure: true, env: { ...GIT_ENV } },
+        confinement: { kind: "bwrap", network: false, mask: [], binds },
+      };
+      return withPrivate(dispatch(job, `measure ${batches.length} base file(s) with the static metrics tools, confined with no network`));
     }
     case "probe":
       return withPrivate(dispatch(sandboxProbeJob(REPORT_STAGE, m.commands), "check the Docker sandbox images by digest: Fetch did not record them"));
@@ -593,6 +622,44 @@ function questions(ctx: Context, view: RunView): GraphDecision {
   const c = qaContext(view.evidence, profile, pr, retryOf(view));
   if (c.state === "pending") return supervise({ reason: `the Questions stage lost what it reads: ${c.reason}` }, "escalate a missing report or snapshot");
   if (c.state === "groundwork") return groundworkDecision(c.step, QUESTIONS_STAGE);
+  const files = c.ctx.analysis.snapshot.files;
+  // N1, the necessity question, comes first (design §7.5): answered and checked before any other question is asked.
+  const nf = necessityFlow(view.evidence, c.ctx, retryOf(view));
+  switch (nf.state) {
+    case "supervise":
+      return supervise({ reason: nf.reason, evidenceRefs: nf.refs }, "hand the unresolved necessity answer to the supervisor");
+    case "answerer": {
+      const assignment = necessityInstruction({ pr, snapshot: c.ctx.analysis.snapshot, view: c.ctx.view, designDocs: c.ctx.designDocs, context: c.ctx.context, kind: nf.kind, feedback: nf.feedback });
+      const from = nf.kind === "first" ? undefined : jobSession(view, QUESTIONS_STAGE, ANSWERER_JOB);
+      const job = agentJob(ctx, view, { jobId: ANSWERER_JOB, stageId: QUESTIONS_STAGE, purpose: "diagnostic", instruction: "Answer the necessity question N1 from the whole codebase", schema: nf.schema, harness: profile.roles.answerer, assignment, ...(from !== undefined ? { continueFrom: from } : {}) }, files);
+      if ("problem" in job) return refused(job);
+      const why = { first: "answer the necessity question N1 (read-only, confined): is the problem real, does the fix fit the design, is there a simpler way", correction: "correct the necessity answer: deterministic validation found problems", revision: "revise the necessity answer: the answer checker did not support it" }[nf.kind];
+      return dispatchAgent(view, job, why);
+    }
+    case "verify":
+      return withPrivate(dispatch(commandJob(QUESTIONS_STAGE, "Check the necessity answer's citations against the trees", { commands: nf.commands.slice(0, 16), env: { ...GIT_ENV } }), "resolve each citation of the necessity answer in the tree it names"));
+    case "checker": {
+      const answer = nf.answers.get(NECESSITY_ID)!;
+      const assignment = necessityCheckerInstruction({ pr, snapshot: c.ctx.analysis.snapshot, question: necessityQuestion(), answer, designDocs: c.ctx.designDocs, context: c.ctx.context, retry: nf.retry });
+      const job = agentJob(ctx, view, { stageId: QUESTIONS_STAGE, purpose: "review", instruction: "Check the necessity answer against the trees", schema: ANSWER_CHECK_SCHEMA_NAME, harness: profile.roles["answer-checker"], assignment }, files);
+      if ("problem" in job) return refused(job);
+      return dispatchAgent(view, job, `check the necessity answer with a fresh read-only ${harnessName(profile.roles["answer-checker"])} session`);
+    }
+    case "done":
+      break;
+  }
+  const record: NecessityRecord = { final: nf.final[0]!, decision: necessityDecision(nf.final[0]!, pr.askAll === true) };
+  const command = necessityRecordCommand(record);
+  if (command === undefined) return stop({ reason: "incompatible task", blocker: "the necessity answer is too large for one write command", retryable: false }, "stop: the necessity record does not fit one command");
+  const write = commandState(view, COMMAND.necessityWrite);
+  if (write.run === undefined || write.failed || !sameArgv(write.run.command.argv, command.argv)) {
+    if (write.failed && !write.retry && write.run !== undefined) {
+      return supervise({ reason: `recording the necessity answer failed: ${describeCommand(write.run.command)}: ${outputTail(write.run.command)}`, evidenceRefs: [write.run.record.ref] }, "escalate a failed necessity write");
+    }
+    if (commandRuns(view.evidence, COMMAND.necessityWrite).length >= 4) return supervise({ reason: "the recorded necessity answer keeps differing from the one the evidence recomputes" }, "escalate a necessity write that does not settle");
+    return withPrivate(dispatch(commandJob(QUESTIONS_STAGE, `Record N1's checked answer and its decision in ${NECESSITY_JSON}`, { commands: [command] }), `record N1's outcome (${record.decision.action === "skip" ? "the other questions are skipped" : "every question is asked"}) as evidence`));
+  }
+  if (record.decision.action === "skip") return validateStage(ctx, view, QUESTIONS_STAGE);
   const flow = questionerFlow(view.evidence, c.ctx);
   switch (flow.state) {
     case "supervise":
@@ -601,7 +668,7 @@ function questions(ctx: Context, view: RunView): GraphDecision {
       const required = requiredQuestions({ view: c.ctx.view, groundwork: c.ctx.groundwork }, new Map());
       const assignment = questionerInstruction({ pr, snapshot: c.ctx.analysis.snapshot, view: c.ctx.view, groundwork: c.ctx.groundwork, required, feedback: flow.feedback, kind: flow.kind });
       const from = flow.kind === "first" ? undefined : jobSession(view, QUESTIONS_STAGE, QUESTIONER_JOB);
-      const job = agentJob(ctx, view, { jobId: QUESTIONER_JOB, stageId: QUESTIONS_STAGE, purpose: "diagnostic", instruction: "Ask the questions (ask only; never answer)", schema: QUESTIONS_SCHEMA_NAME, harness: profile.roles.questioner, assignment, ...(from !== undefined ? { continueFrom: from } : {}) }, c.ctx.analysis.snapshot.files);
+      const job = agentJob(ctx, view, { jobId: QUESTIONER_JOB, stageId: QUESTIONS_STAGE, purpose: "diagnostic", instruction: "Ask the questions (ask only; never answer)", schema: QUESTIONS_SCHEMA_NAME, harness: profile.roles.questioner, assignment, ...(from !== undefined ? { continueFrom: from } : {}) }, files);
       if ("problem" in job) return refused(job);
       return dispatchAgent(view, job, flow.kind === "first" ? "ask the questions (read-only, confined)" : "correct the questions: deterministic validation found problems");
     }
@@ -617,10 +684,21 @@ function answers(ctx: Context, view: RunView): GraphDecision {
   const c = qaContext(view.evidence, profile, pr, retryOf(view));
   if (c.state === "pending") return supervise({ reason: `the Answers stage lost what it reads: ${c.reason}` }, "escalate a missing report or snapshot");
   if (c.state === "groundwork") return supervise({ reason: `the Answers stage lost the groundwork the questions rest on (${c.step.state})` }, "escalate a missing groundwork");
-  const qf = questionerFlow(view.evidence, c.ctx);
-  if (qf.state !== "done") return supervise({ reason: `the Answers stage lost the questions (${qf.state})` }, "escalate missing questions");
-  const set = questionSet(c.ctx, qf.output);
-  const actx = answerContext(c.ctx, set.questions);
+  // N1's checked answer and decision are the recorded evidence of the Questions stage (design §7.5).
+  const rec = recordedNecessity(view.evidence);
+  if (rec.state !== "read") return supervise({ reason: `the Answers stage lost the necessity record (${rec.state === "failed" ? rec.reason : "none was written"})` }, "escalate a missing necessity record");
+  const skipped = rec.record.decision.action === "skip";
+  let output: Parameters<typeof questionSet>[1];
+  if (!skipped) {
+    const qf = questionerFlow(view.evidence, c.ctx);
+    if (qf.state !== "done") return supervise({ reason: `the Answers stage lost the questions (${qf.state})` }, "escalate missing questions");
+    output = qf.output;
+  }
+  const set = questionSet(c.ctx, output, skipped);
+  // A confirmed unnecessary N1 is the only question: nothing else is answered or checked.
+  if (skipped) return writeAnswers(ctx, view, c.ctx, set, [rec.record.final], rec.record);
+  const rest = afterNecessity(set);
+  const actx = answerContext(c.ctx, rest);
   const flow = answersFlow(view.evidence, actx, c.ctx.base, retryOf(view));
   const files = c.ctx.analysis.snapshot.files;
   switch (flow.state) {
@@ -628,7 +706,7 @@ function answers(ctx: Context, view: RunView): GraphDecision {
       return supervise({ reason: flow.reason, evidenceRefs: flow.refs }, "hand the unresolved answers to the supervisor");
     case "answerer": {
       const mounted = sourceDirs(c.ctx.groundwork.inventory);
-      const assignment = answererInstruction({ pr, snapshot: c.ctx.analysis.snapshot, view: c.ctx.view, groundwork: c.ctx.groundwork, questions: set.questions, kind: flow.kind, feedback: flow.feedback, ...(flow.only !== undefined ? { only: flow.only } : {}), mountedDirs: mounted });
+      const assignment = answererInstruction({ pr, snapshot: c.ctx.analysis.snapshot, view: c.ctx.view, groundwork: c.ctx.groundwork, questions: rest, kind: flow.kind, feedback: flow.feedback, ...(flow.only !== undefined ? { only: flow.only } : {}), mountedDirs: mounted });
       const from = flow.kind === "first" ? undefined : jobSession(view, ANSWERS_STAGE, ANSWERER_JOB);
       // Untrusted-read confinement, with the dependency source mounted read-only (design §7.3).
       const job = agentJob(ctx, view, { jobId: ANSWERER_JOB, stageId: ANSWERS_STAGE, purpose: "diagnostic", instruction: "Answer the questions from the whole codebase", schema: flow.schema, harness: profile.roles.answerer, assignment, readOnlyBinds: mounted, ...(from !== undefined ? { continueFrom: from } : {}) }, files);
@@ -640,20 +718,20 @@ function answers(ctx: Context, view: RunView): GraphDecision {
       return withPrivate(dispatch(commandJob(ANSWERS_STAGE, "Check the answers' citations and proposed names against the trees", { commands: flow.commands.slice(0, 16), env: { ...GIT_ENV } }), "resolve each citation in the tree it names, and each proposed name in the package"));
     case "checker": {
       const mounted = sourceDirs(c.ctx.groundwork.inventory);
-      const assignment = answerCheckerInstruction({ pr, snapshot: c.ctx.analysis.snapshot, groundwork: c.ctx.groundwork, questions: set.questions, answers: flow.answers, retry: flow.retry, mountedDirs: mounted });
+      const assignment = answerCheckerInstruction({ pr, snapshot: c.ctx.analysis.snapshot, groundwork: c.ctx.groundwork, questions: rest, answers: flow.answers, retry: flow.retry, mountedDirs: mounted });
       // The same dependency source, read-only, so a library or dependency citation can be re-checked where it points.
       const job = agentJob(ctx, view, { stageId: ANSWERS_STAGE, purpose: "review", instruction: "Check the answers against the trees", schema: ANSWER_CHECK_SCHEMA_NAME, harness: profile.roles["answer-checker"], assignment, readOnlyBinds: mounted }, files);
       if ("problem" in job) return refused(job);
       return dispatchAgent(view, job, `check every answer with a fresh read-only ${harnessName(profile.roles["answer-checker"])} session`);
     }
     case "done":
-      return writeAnswers(ctx, view, c.ctx, set, flow.final);
+      return writeAnswers(ctx, view, c.ctx, set, [rec.record.final, ...flow.final], rec.record);
   }
 }
 
 /** After the answers: write qa.json and review.md, advance the ledger by compare-and-swap, then validate the stage. */
-function writeAnswers(ctx: Context, view: RunView, c: QaContext, set: ReturnType<typeof questionSet>, final: Parameters<typeof qaOutputs>[2]): GraphDecision {
-  const w = answerWrites(view.evidence, c, set, final);
+function writeAnswers(ctx: Context, view: RunView, c: QaContext, set: ReturnType<typeof questionSet>, final: Parameters<typeof qaOutputs>[2], necessity: NecessityRecord): GraphDecision {
+  const w = answerWrites(view.evidence, c, set, final, necessity);
   if (w.qa === undefined) return stop({ reason: "incompatible task", blocker: w.problem ?? "the Q&A cannot be written", retryable: false }, "stop: the Q&A does not fit one write command");
   const write = commandState(view, COMMAND.qaWrite);
   if (write.run === undefined || write.failed || !sameArgv(write.run.command.argv, w.qa.argv)) {
