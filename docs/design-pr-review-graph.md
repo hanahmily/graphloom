@@ -234,7 +234,7 @@ meaning and parser (review-kit, [§14](#14-sharing-code-with-issue-fix)).
 | `checks` | Optional commands, run only in the Docker sandbox (`checks.sandbox`, same shape as `metrics.sandbox`) ([§8.3](#83-checks)). Absent means there is no Checks stage |
 | `comments` | `minSeverity` (default `P2`), `nits` (false), `questions` (pre-select `needs author` items as draft comments, true), `maxComments` (30), `suggestions.maxLines` (10), optional `footer` |
 | `privateRepos` | Never named in posted text (issue-fix's `withoutPrivateReferences`, `src/prompts.ts:325`) |
-| `harnesses` | `reporter`, `questioner`, `answerer` (`claude-code` or `codex` only), `report-checker`, `answer-checker`, and `verifier-<aspect>` for `correctness`, `maintainability` and `security`. There is no `reviewer-<aspect>` key: the reviewers run on the answerer's harness, and a profile that names one is refused ([§13.1](#131-roles)) |
+| `harnesses` | each role takes a harness id or `{ harness, model?, effort? }` ([§13.1](#131-roles)): `reporter`, `questioner`, `answerer` (`claude-code` or `codex` only), `report-checker`, `answer-checker`, and `verifier-<aspect>` for `correctness`, `maintainability` and `security`. There is no `reviewer-<aspect>` key: the reviewers run on the answerer's harness, and a profile that names one is refused ([§13.1](#131-roles)) |
 | `supervisor`, `budgets` | As in issue-fix ([§13](#13-agent-roles-supervisor-budgets)) |
 | `limits` | `maxFiles` (150), `maxPatchBytes` (1 MiB), `maxNewSymbols` (200). Past any of them, the run stops "incompatible task" and names the size |
 
@@ -2056,6 +2056,19 @@ Any two available harnesses therefore satisfy every constraint:
 | claude-code, codex | claude-code | codex | codex | codex |
 | claude-code, pi | claude-code | pi | pi | pi |
 | codex, pi | codex | pi | pi | pi |
+
+**Model and effort per role.** A `harnesses.<role>` entry is either the
+harness id or an object `{ "harness": "claude-code" | "codex", "model"?,
+"effort"? }` (unknown keys are refused; an object cannot name `pi`). The
+`harness` rules above apply to the object's `harness` unchanged. `effort` is
+checked against the harness: `low`, `medium`, `high`, `xhigh` or `max` for
+Claude Code (`claude --help`, `--effort`), `minimal`, `low`, `medium`, `high`
+or `xhigh` for Codex. The plugin passes both in the job's `harnessOptions`;
+the coding-agent executor turns them into `--model`/`--effort` for Claude
+Code and `--model` and `model_reasoning_effort` for Codex, and a job's effort
+overrides the executor's `reasoningEffort`. A role that omits them inherits
+the harness's own settings. A Claude Code session records its effort next to
+its model, so a job that continues it must name the same effort.
 
 A profile that sets `answerer: "codex"` with all three available gets
 verifiers on claude-code, claude-code and pi. Pi counts as available only

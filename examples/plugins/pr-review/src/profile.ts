@@ -132,6 +132,21 @@ export const DISTINCT_PAIRS: ReadonlyArray<readonly [Role, Role]> = [
   ["answer-checker", "answerer"],
 ];
 
+/** What a role asks of its harness beyond which one: either may be absent, which inherits the harness's own. */
+export interface RoleSettings {
+  model?: string;
+  effort?: string;
+}
+
+/** A role's `harnesses` entry: a harness id, or the harness with its model and effort. */
+export type RoleHarness = string | ({ harness: string } & RoleSettings);
+
+/** The effort levels each harness accepts: `claude --help` (`--effort`), and Codex's `model_reasoning_effort`. */
+const EFFORTS: Readonly<Record<string, readonly string[]>> = {
+  "claude-code": ["low", "medium", "high", "xhigh", "max"],
+  codex: ["minimal", "low", "medium", "high", "xhigh"],
+};
+
 export interface ProfileData {
   name: string;
   description?: string;
@@ -147,7 +162,7 @@ export interface ProfileData {
   metrics?: Partial<MetricsConfig>;
   context?: ContextRef[];
   privateRepos?: string[];
-  harnesses?: Partial<Record<Role, string>>;
+  harnesses?: Partial<Record<Role, RoleHarness>>;
   supervisor?: SupervisorPreference;
   budgets?: GraphBudgetDefaults;
   limits?: Partial<Limits>;
@@ -170,6 +185,8 @@ export interface Profile {
   context: ContextRef[];
   privateRepos: string[];
   roles: Record<Role, string>;
+  /** The model and effort a role names, for the roles that name one. */
+  roleSettings: Partial<Record<Role, RoleSettings>>;
   supervisorPreference: SupervisorPreference;
   budgets?: GraphBudgetDefaults;
   limits: Limits;
@@ -501,7 +518,7 @@ function checkSupervisor(raw: unknown): SupervisorPreference {
   return structuredClone(s) as unknown as SupervisorPreference;
 }
 
-function checkRoles(raw: unknown): Record<Role, string> {
+function checkRoles(raw: unknown): { roles: Record<Role, string>; settings: Partial<Record<Role, RoleSettings>> } {
   need(raw === undefined || isObject(raw), "harnesses must be an object");
   const h = (raw ?? {}) as Record<string, unknown>;
   const names = [...ROLES, "reviewer-correctness", "reviewer-maintainability", "reviewer-security"] as readonly string[];
@@ -510,10 +527,22 @@ function checkRoles(raw: unknown): Record<Role, string> {
     need(ROLES.includes(key as Role), `harnesses.${key} belongs to the review layer, which this version does not have`);
   }
   const roles = { ...DEFAULT_ROLES };
+  const settings: Partial<Record<Role, RoleSettings>> = {};
   for (const role of ROLES) {
     const v = h[role];
     if (v === undefined) continue;
-    need(typeof v === "string" && HARNESSES[v] !== undefined, `harnesses.${role} must be one of ${Object.keys(HARNESSES).join(", ")}`);
+    if (isObject(v)) {
+      onlyKeys(v, `harnesses.${role}`, ["harness", "model", "effort"]);
+      need(typeof v.harness === "string" && EFFORTS[v.harness] !== undefined, `harnesses.${role}.harness must be one of ${Object.keys(EFFORTS).join(", ")}`);
+      const harness = v.harness as string;
+      need(v.model === undefined || (typeof v.model === "string" && v.model.trim() !== "" && !/[\u0000-\u001f]/.test(v.model)), `harnesses.${role}.model must be a model name`);
+      const efforts = EFFORTS[harness]!;
+      need(v.effort === undefined || (typeof v.effort === "string" && efforts.includes(v.effort)), `harnesses.${role}.effort must be one of ${efforts.join(", ")} for ${harness}`);
+      roles[role] = harness;
+      if (v.model !== undefined || v.effort !== undefined) settings[role] = { ...(v.model !== undefined ? { model: v.model as string } : {}), ...(v.effort !== undefined ? { effort: v.effort as string } : {}) };
+      continue;
+    }
+    need(typeof v === "string" && HARNESSES[v] !== undefined, `harnesses.${role} must be one of ${Object.keys(HARNESSES).join(", ")}, or an object with harness (claude-code or codex), model and effort`);
     roles[role] = v as string;
   }
   // The maintainer opens the answerer's session (design §13.1), and a Pi session has no interactive restore.
@@ -521,7 +550,7 @@ function checkRoles(raw: unknown): Record<Role, string> {
   for (const [checked, author] of DISTINCT_PAIRS) {
     need(roles[checked] !== roles[author], `harnesses.${checked} must differ from harnesses.${author} (both are ${roles[checked]}): an artifact is checked on a harness other than its author's`);
   }
-  return roles;
+  return { roles, settings };
 }
 
 /** The profile the task's config holds, checked, or a ProfileError naming the first problem. */
@@ -564,7 +593,7 @@ export function parseProfile(config: unknown): Profile {
   const metrics = checkMetrics(p.metrics, { generated: [], coverage: true, mutation: { enabled: true }, files: {} });
   const context = checkContext(p.context);
   need(p.privateRepos === undefined || (isStrings(p.privateRepos) && (p.privateRepos as string[]).every((r) => REPO_NAME.test(r))), 'privateRepos must be a list of "owner/name"');
-  const roles = checkRoles(p.harnesses);
+  const { roles, settings: roleSettings } = checkRoles(p.harnesses);
   const budgets = checkBudgets(p.budgets);
   const supervisorPreference = checkSupervisor(p.supervisor);
   let limits = { ...DEFAULT_LIMITS };
@@ -598,6 +627,7 @@ export function parseProfile(config: unknown): Profile {
     context,
     privateRepos: (p.privateRepos as string[] | undefined) ?? [],
     roles,
+    roleSettings,
     supervisorPreference,
     ...(budgets !== undefined ? { budgets } : {}),
     limits,

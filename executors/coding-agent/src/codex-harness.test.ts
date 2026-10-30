@@ -94,6 +94,19 @@ function alive(pid: number): boolean {
 }
 
 describe("Codex harness", () => {
+  it("lets a job's effort override the executor's, and refuses an effort Codex does not have", async () => {
+    vi.stubEnv("GRAPHLOOM_CODEX_REASONING_EFFORT", "low");
+    const h = await setup({ reasoningEffort: "high" });
+    await h.script(turn());
+    await h.executor.execute({ assignment: "a", resultSchema: SCHEMA, harnessOptions: { model: "gpt-job", effort: "xhigh" } }, h.ctx());
+    await h.executor.execute({ assignment: "b", resultSchema: SCHEMA }, h.ctx());
+    const [overridden, inherited] = await h.invocations();
+    expect(flagValue(overridden!.argv, "--config")).toBe('model_reasoning_effort="xhigh"');
+    expect(flagValue(overridden!.argv, "--model")).toBe("gpt-job");
+    expect(flagValue(inherited!.argv, "--config")).toBe('model_reasoning_effort="high"');
+    await expect(h.executor.execute({ assignment: "c", resultSchema: SCHEMA, harnessOptions: { effort: "max" } }, h.ctx())).rejects.toThrow(/Codex reasoning effort must be one of/);
+  });
+
   it("runs codex exec read-only in the worktree and returns its JSON result and usage", async () => {
     vi.stubEnv("GRAPHLOOM_TEST_SECRET", "s3cret");
     vi.stubEnv("CODEX_EXTRA", "passed");

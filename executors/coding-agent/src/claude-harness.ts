@@ -75,6 +75,9 @@ export interface ClaudeCodeHarnessOptions {
   responseTimeoutMs?: number;
 }
 
+/** The `--effort` levels of `claude --help`. */
+export const CLAUDE_EFFORTS: ReadonlySet<string> = new Set(["low", "medium", "high", "xhigh", "max"]);
+
 /** MCP server name; graph tools appear to the model as `mcp__graphloom__<tool>`. */
 const BRIDGE_NAME = "graphloom";
 
@@ -109,6 +112,7 @@ export const CLAUDE_CODE_ADAPTER_FLAGS: readonly string[] = [
   "--append-system-prompt",
   "--mcp-config",
   "--model",
+  "--effort",
   "--json-schema",
   "--resume",
   "--session-id",
@@ -140,7 +144,13 @@ export function createClaudeCodeHarness(harnessOptions: ClaudeCodeHarnessOptions
       // Each job's own wall clock bounds the watchdogs, so a longer job keeps the full ones and a shorter one still reports a stall.
       const startupTimeoutMs = fitWatchdog(harnessOptions.startupTimeoutMs ?? envMs(CLAUDE_STARTUP_TIMEOUT_ENV, CLAUDE_DEFAULT_STARTUP_TIMEOUT_MS), options.timeoutMs);
       const responseTimeoutMs = fitWatchdog(harnessOptions.responseTimeoutMs ?? envMs(CLAUDE_RESPONSE_TIMEOUT_ENV, CLAUDE_DEFAULT_RESPONSE_TIMEOUT_MS), options.timeoutMs);
-      const settings: ClaudeSessionSettings = { model: model ?? null, systemPromptSha256: sha256(systemPrompt) };
+      const jobEffort = options.options?.effort;
+      if (jobEffort !== undefined && typeof jobEffort !== "string") throw new Error("harnessOptions.effort must be a string");
+      if (jobEffort !== undefined && !CLAUDE_EFFORTS.has(jobEffort)) {
+        throw new Error(`Claude Code effort must be one of ${[...CLAUDE_EFFORTS].join(", ")}`);
+      }
+      const effort = jobEffort;
+      const settings: ClaudeSessionSettings = { model: model ?? null, ...(effort !== undefined ? { effort } : {}), systemPromptSha256: sha256(systemPrompt) };
       const store: ClaudeSessionStore = { configDir, settings, ...(options.sessionDir !== undefined ? { sessionDir: options.sessionDir } : {}) };
       const saved = await openClaudeSession(store, options.resume);
       const apiKey = await options.credentials?.get(CLAUDE_API_KEY_CREDENTIAL);
@@ -159,6 +169,7 @@ export function createClaudeCodeHarness(harnessOptions: ClaudeCodeHarnessOptions
               runClaude({
                 command,
                 model,
+                effort,
                 systemPrompt,
                 killGraceMs: harnessOptions.killGraceMs ?? 5_000,
                 interruptGraceMs: harnessOptions.interruptGraceMs ?? 1_000,
@@ -202,6 +213,7 @@ function childEnv(passEnv: string[], configDir: string, apiKey: string | undefin
 interface RunArgs {
   command: string;
   model: string | undefined;
+  effort: string | undefined;
   systemPrompt: string;
   killGraceMs: number;
   interruptGraceMs: number;
@@ -242,6 +254,7 @@ async function runClaude(args: RunArgs): Promise<CodingRunResult> {
       cli.push("--mcp-config", config);
     }
     if (args.model !== undefined) cli.push("--model", args.model);
+    if (args.effort !== undefined) cli.push("--effort", args.effort);
     const wantsResult = request.resultContract !== undefined || request.resultSchema !== undefined;
     if (wantsResult) {
       // Claude has no in-turn retry in this harness, so the reference id

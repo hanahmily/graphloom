@@ -24,6 +24,8 @@ export interface ClaudeSession {
 /** Settings a resumed session must share with the one that recorded its earlier turns. */
 export interface ClaudeSessionSettings {
   model: string | null;
+  /** `--effort` level; absent when the job inherits Claude Code's own. */
+  effort?: string;
   systemPromptSha256: string;
 }
 
@@ -37,6 +39,10 @@ export interface ClaudeSessionStore {
 
 function describeModel(model: string | null): string {
   return model === null ? "Claude Code's default model" : `model ${model}`;
+}
+
+function describeEffort(effort: string | undefined): string {
+  return effort === undefined ? "Claude Code's default effort" : `effort ${effort}`;
 }
 
 /** A new session, or the one `resume` names restored into Claude Code's store; never a fresh one in its place. */
@@ -56,20 +62,21 @@ export async function openClaudeSession(store: ClaudeSessionStore, resume: strin
   ]);
   if (meta === undefined || transcript === undefined) throw new Error(`no saved session for ${ref}`);
   if (transcript.trim() === "") throw new Error(`saved session ${ref} is empty`);
-  let recorded: { project?: unknown; model?: unknown; systemPromptSha256?: unknown };
+  let recorded: { project?: unknown; model?: unknown; effort?: unknown; systemPromptSha256?: unknown };
   try {
     recorded = JSON.parse(meta) as typeof recorded;
     for (const line of transcript.split("\n")) if (line.trim() !== "") JSON.parse(line);
   } catch {
     throw new Error(`saved session ${ref} is corrupt`);
   }
-  const { project, model, systemPromptSha256 } = recorded ?? {};
+  const { project, model, effort, systemPromptSha256 } = recorded ?? {};
   if (
     typeof project !== "string" ||
     !PROJECT_DIR.test(project) ||
     project === "." ||
     project === ".." ||
     (model !== null && typeof model !== "string") ||
+    (effort !== undefined && typeof effort !== "string") ||
     typeof systemPromptSha256 !== "string"
   ) {
     throw new Error(`saved session ${ref} is corrupt`);
@@ -77,6 +84,9 @@ export async function openClaudeSession(store: ClaudeSessionStore, resume: strin
   // Claude Code resumes under any settings; earlier turns reasoned under others would pass as continuity.
   if (model !== settings.model) {
     throw new Error(`saved session ${ref} ran on ${describeModel(model)}; this job asks for ${describeModel(settings.model)}`);
+  }
+  if (effort !== settings.effort) {
+    throw new Error(`saved session ${ref} ran on ${describeEffort(effort)}; this job asks for ${describeEffort(settings.effort)}`);
   }
   if (systemPromptSha256 !== settings.systemPromptSha256) {
     throw new Error(`saved session ${ref} ran with a different system prompt`);

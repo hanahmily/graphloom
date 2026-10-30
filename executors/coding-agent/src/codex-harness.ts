@@ -42,7 +42,7 @@ export interface CodexHarnessOptions {
   command?: string;
   /** Model name; a job's `harnessOptions.model` overrides it. Default: `GRAPHLOOM_CODEX_MODEL`, then Codex's own. */
   model?: string;
-  /** Reasoning effort (`minimal` to `xhigh`). Default: `GRAPHLOOM_CODEX_REASONING_EFFORT`, then Codex's own. */
+  /** Reasoning effort (`minimal` to `xhigh`); a job's `harnessOptions.effort` overrides it. Default: `GRAPHLOOM_CODEX_REASONING_EFFORT`, then Codex's own. */
   reasoningEffort?: string;
   /** Codex home: its login and config, so it selects the account. Default: `GRAPHLOOM_CODEX_HOME`, then `CODEX_HOME`, then Codex's own `~/.codex`. */
   codexHome?: string;
@@ -95,7 +95,9 @@ export function createCodexHarness(harnessOptions: CodexHarnessOptions = {}): Co
       const jobModel = options.options?.model;
       if (jobModel !== undefined && typeof jobModel !== "string") throw new Error("harnessOptions.model must be a string");
       const model = jobModel ?? harnessOptions.model ?? (process.env[CODEX_MODEL_ENV] || undefined);
-      const reasoningEffort = harnessOptions.reasoningEffort ?? (process.env[CODEX_REASONING_EFFORT_ENV] || undefined);
+      const jobEffort = options.options?.effort;
+      if (jobEffort !== undefined && typeof jobEffort !== "string") throw new Error("harnessOptions.effort must be a string");
+      const reasoningEffort = jobEffort ?? harnessOptions.reasoningEffort ?? (process.env[CODEX_REASONING_EFFORT_ENV] || undefined);
       if (reasoningEffort !== undefined && !REASONING_EFFORTS.has(reasoningEffort)) {
         throw new Error(`Codex reasoning effort must be one of ${[...REASONING_EFFORTS].join(", ")}`);
       }
