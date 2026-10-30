@@ -116,7 +116,7 @@ describe("answer-finds-existing-helper", () => {
     expect([necessity, necessityChecker, questioner, answerer, checker].map((j) => [j!.resultSchema, j!.purpose, j!.readOnly])).toEqual([["necessity-v1", "diagnostic", true], ["answer-check-v1", "review", true], ["questions-v1", "diagnostic", true], ["answers-v1", "diagnostic", true], ["answer-check-v1", "review", true]]);
     expect(necessity).toMatchObject({ jobId: "answerer", stageId: "questions" });
     for (const j of [necessity, necessityChecker, questioner, answerer, checker]) {
-      expect(j!.confinement).toMatchObject({ kind: "bwrap", network: true, binds: [{ path: BASE_TREE, readOnly: true }] });
+      expect(j!.confinement).toMatchObject({ kind: "bwrap", network: true, binds: [] });
       expect((j!.confinement as { mask: string[] }).mask).toContain("/work/tree/CLAUDE.md");
     }
     expect(answerer).toMatchObject({ jobId: "answerer" });
@@ -215,11 +215,11 @@ describe("answer-no-library-with-whole-repo-search", () => {
     });
     const s2 = simulate({ scenario: cached });
     const [answerer, checker] = [jobsOf(s2, "Answer the questions")[0]!, jobsOf(s2, "Check the answers against")[0]!];
-    expect((answerer.confinement as { binds: unknown[] }).binds).toEqual([{ path: "/home/u/go/pkg/mod/github.com/spf13/cobra@v1.9.1", readOnly: true }, { path: BASE_TREE, readOnly: true }]);
+    expect((answerer.confinement as { binds: unknown[] }).binds).toEqual([{ path: "/home/u/go/pkg/mod/github.com/spf13/cobra@v1.9.1", readOnly: true }])
     expect(assignmentOf(answerer)).toContain("Dependency source is mounted read-only at: /home/u/go/pkg/mod/github.com/spf13/cobra@v1.9.1");
     expect(assignmentOf(answerer)).toContain("go github.com/spf13/cobra v1.9.1 [go.mod] no use found — source available: /home/u/go/pkg/mod/github.com/spf13/cobra@v1.9.1");
     // The checker gets the same read-only mount, to re-check a dependency citation where it points.
-    expect((checker.confinement as { binds: unknown[] }).binds).toEqual([{ path: "/home/u/go/pkg/mod/github.com/spf13/cobra@v1.9.1", readOnly: true }, { path: BASE_TREE, readOnly: true }]);
+    expect((checker.confinement as { binds: unknown[] }).binds).toEqual([{ path: "/home/u/go/pkg/mod/github.com/spf13/cobra@v1.9.1", readOnly: true }])
     expect(qaOf(s2).inventory.dependencies[0]!.source).toBe("/home/u/go/pkg/mod/github.com/spf13/cobra@v1.9.1");
   });
 
@@ -571,10 +571,12 @@ describe("the base tree (read-only export of the pinned base commit for the answ
     expect((record.payload as { command: { stdoutTail: string } }).command.stdoutTail).toMatch(/^tree=[0-9a-f]{40}$/m);
   });
 
-  it("is named in the assignments of N1, its checker, the questioner, the answerer and the answer checker, and bound read-only in their confinements", () => {
+  it("is named in the assignments of N1, its checker, the questioner, the answerer and the answer checker, and sit inside the read-only workspace of their confinements", () => {
     expect(agents.map((j) => j.instruction.split(" ").slice(0, 3).join(" "))).toEqual(["Answer the necessity", "Check the necessity", "Ask the questions", "Answer the questions", "Check the answers"]);
     for (const job of agents) {
-      expect(binds(job), job.instruction).toContainEqual({ path: BASE_TREE, readOnly: true });
+      // Inside the worktree, which a read-only bwrap job mounts read-only: no writable bind reopens it.
+      expect(binds(job).filter((b) => !b.readOnly), job.instruction).toEqual([]);
+      expect(binds(job).filter((b) => BASE_TREE.startsWith(`${b.path}/`) || b.path === BASE_TREE), job.instruction).toEqual([]);
       const text = assignmentOf(job);
       expect(text, job.instruction).toContain(`exported read-only at ${BASE_TREE}`);
       expect(text, job.instruction).toContain("The head's files are the working tree");

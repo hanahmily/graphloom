@@ -968,9 +968,11 @@ adds a `.ignore` (`!*`) beside the review directory's `.gitignore`, outside the 
 count and the number of entries left out as the command's evidence: the tree id
 is the digest of what was exported. The N1 answerer and its checker, the
 questioner, the answerer and the answer checker get its absolute path in their
-assignments ("exported read-only at …; the head's files are the working tree")
-and in their confinement's `binds` as a read-only bind, on top of the read-only
-workspace. The assignments require base facts to come from the base (`git show
+assignments ("exported read-only at …; the head's files are the working tree").
+The directory lies inside the worktree, which these jobs' bwrap confinement
+mounts read-only, so the sandbox keeps it read-only (an explicit bind would
+only repeat that, and would fail a job whose directory is missing). The
+assignments require base facts to come from the base (`git show
 <base>:<path> | cat -n`, `git grep -n <base>` or the base tree) with exact line
 numbers, and never from the head or the diff; a base line that was not read is
 said to be unread. A citation still names a repository-relative path and its
@@ -1799,7 +1801,7 @@ tools run under bwrap.
 
 | Job | Confinement |
 |---|---|
-| Reporter, questioner, answerer, checkers, reviewers, verifiers | `untrusted-read` (bwrap). Reviewers write reproducing tests only as text in their results and run nothing. The root filesystem is read-only, and so is the workspace: because the runner enforces that, a Claude Code agent of these roles may run shell commands (`git show <base>:<path>`, `git grep <base>`, `cat`, `grep`), which a read-only job without such a sandbox may not (a Codex agent's shell is inside Codex's own read-only sandbox). The base tree ([§7.3](#73-answers)) is bound read-only into the answerer's, N1's and their checkers' and the questioner's confinement. The home directory is replaced by a tmpfs, except the agent's own login state (`ownState`) and the inventory's dependency directories (read-only). The masks above apply, the environment is minimal, and there is no GitHub token. Network is on, because the agents need their CLI logins and their model APIs |
+| Reporter, questioner, answerer, checkers, reviewers, verifiers | `untrusted-read` (bwrap). Reviewers write reproducing tests only as text in their results and run nothing. The root filesystem is read-only, and so is the workspace: because the runner enforces that, a Claude Code agent of these roles may run shell commands (`git show <base>:<path>`, `git grep <base>`, `cat`, `grep`), which a read-only job without such a sandbox may not (a Codex agent's shell is inside Codex's own read-only sandbox). The base tree ([§7.3](#73-answers)) lies inside that read-only workspace. The home directory is replaced by a tmpfs, except the agent's own login state (`ownState`) and the inventory's dependency directories (read-only). The masks above apply, the environment is minimal, and there is no GitHub token. Network is on, because the agents need their CLI logins and their model APIs |
 | A session the maintainer opens (`graphloom session open`, [§17](#17-discussing-a-run-graphloom-session-open)) | The confinement of the job that recorded it: `untrusted-read` with the same masks, a read-only checkout, no GitHub token, network on for the agent's login and model API, and the maintainer's own CLI login. A configured session launcher is bound read-only and its state directories writable. The run's state is not mounted; the `graphloom` process records the conversation after the agent exits |
 | Static metrics (`gometrics`, `tsmetrics`) | bwrap with no network, read-only. They run the plugin's own parser over the head tree and execute none of it, so they always run, with or without Docker |
 | Checks, coverage, mutation, reproducing tests: **everything that runs PR code** | `sandbox: docker` (below) |

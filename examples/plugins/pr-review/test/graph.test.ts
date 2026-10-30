@@ -92,8 +92,7 @@ describe("the report scenario, end to end through the graph", () => {
         kind: "bwrap",
         network: true,
         mask: ["CLAUDE.md", "CLAUDE.local.md", "AGENTS.md", "AGENTS.override.md", ".claude", ".codex", ".agents", ".pi", ".mcp.json", ".opencode"].map((p) => `/work/tree/${p}`),
-        // The base tree is exported by the groundwork, so only the jobs after it get it, read-only.
-        binds: job.stageId === "report" ? [] : [{ path: "/work/tree/.graphloom/review/base", readOnly: true }],
+        binds: [],
       });
     }
   });
