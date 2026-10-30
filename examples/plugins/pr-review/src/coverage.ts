@@ -32,6 +32,8 @@ const MAX_WORKSPACES = 8;
 /** Argv elements a command may carry (64) less `sh`, the script, the count. */
 const MAX_SPEC_CHUNKS = 58;
 const MAX_REASON_CHARS = 240;
+export const MAX_FAILING = 20;
+export const MAX_FAILING_CHARS = 300;
 /** The command executor accepts at most a day per command. */
 const MAX_COMMAND_TIMEOUT_MS = 24 * 60 * 60_000;
 
@@ -46,6 +48,8 @@ export interface Sandbox {
   readOnly: SandboxMount[];
   /** The sandboxed setup commands, in order. */
   setup: SandboxSetupStep[];
+  /** The Go build tags the tests compile with. */
+  buildTags: string[];
 }
 
 /** A read-only mount as the host resolved it: the real path, mounted at the same path. */
@@ -69,6 +73,7 @@ export function resolveSandbox(profile: Pick<Profile, "metrics">, language: "go"
     wallClockMs: given.wallClockMs ?? SANDBOX_LIMITS.wallClockMs,
     readOnly: given.readOnly ?? [],
     setup: given.setup ?? [],
+    buildTags: given.buildTags ?? [],
   };
 }
 
@@ -295,6 +300,10 @@ export interface CoverageRunFacts {
   image?: string;
   /** The sandboxed setup commands that ran successfully before the tests, in order. */
   setup?: string[];
+  /** The failing tests and packages the report names (at most `MAX_FAILING`, each cut to `MAX_FAILING_CHARS`); only when the test command exited non-zero. */
+  failing?: string[];
+  /** The first compiler error of the test output, when the command failed. */
+  buildError?: string;
   /** Test result lines, as the report carried them. */
   tests: string[];
   /** Files the run changed in its checkout, as the controller recorded them. */
@@ -424,7 +433,7 @@ function partsOf(input: CoverageInput, language: "go" | "typescript", records: M
   if (language === GO) {
     const packages = goPackages(input.files);
     if (packages.length === 0) return { reason: "no touched Go package" };
-    const spec = formatSpec({ packages, functions: functionsOf(records), setup: resolveSandbox(input.profile, GO).setup });
+    const spec = formatSpec({ packages, functions: functionsOf(records), setup: resolveSandbox(input.profile, GO).setup, buildTags: resolveSandbox(input.profile, GO).buildTags });
     return [{ language, records, command: { id: COMMAND.coverGo, script: "go.sh", spec } }];
   }
   const manifests = [...new Set(records.flatMap((r) => manifestChain(r.path)))];
@@ -522,6 +531,11 @@ function attribute(part: Part, run: CommandRun, input: CoverageInput, outcomes: 
   if (parsed.exit !== undefined) facts.exit = parsed.exit;
   facts.tests = parsed.tests.slice(0, 12);
   if (parsed.setup.length > 0) facts.setup = parsed.setup;
+  if (parsed.exit !== undefined && parsed.exit !== 0) {
+    const failing = parsed.failed.slice(0, MAX_FAILING).map((t) => t.slice(0, MAX_FAILING_CHARS));
+    if (failing.length > 0) facts.failing = failing;
+    if (parsed.buildError !== undefined) facts.buildError = parsed.buildError.slice(0, MAX_FAILING_CHARS);
+  }
   const wholeFailure = parsed.language === TS && parsed.fail.length > 0 && parsed.seen.size === 0;
   for (const r of part.records) {
     const where = entryOf(input.index, r);

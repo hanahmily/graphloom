@@ -267,6 +267,32 @@ describe("metrics.sandbox.go.readOnly and setup", () => {
   });
 });
 
+describe("metrics.sandbox.go.buildTags", () => {
+  const digest = `golang@sha256:${"a".repeat(64)}`;
+  const go = (buildTags: unknown) => ({ metrics: { sandbox: { go: { image: digest, buildTags } } } });
+
+  it("ships BanyanDB with querymetrics, the tag its own CI passes", () => {
+    expect(profileOf().metrics.sandbox!.go!.buildTags).toEqual(["querymetrics"]);
+    expect(resolveSandbox(profileOf({ metrics: { sandbox: { go: { image: digest } } } }), "go").buildTags).toEqual([]);
+  });
+
+  it("accepts identifiers in order", () => {
+    expect(resolveSandbox(profileOf(go(["querymetrics", "linux.amd64", "a_B1"])), "go").buildTags).toEqual(["querymetrics", "linux.amd64", "a_B1"]);
+  });
+
+  it("refuses a tag that is not an identifier, a duplicate, an empty or oversized list, and another language", () => {
+    expect(refused(go(["a b"]))).toMatch(/buildTags\[0\] must be a Go build tag/);
+    expect(refused(go(["ok", "a,b"]))).toMatch(/buildTags\[1\] must be a Go build tag/);
+    expect(refused(go(["-x"]))).toMatch(/must be a Go build tag/);
+    expect(refused(go([1]))).toMatch(/must be a Go build tag/);
+    expect(refused(go(["a", "a"]))).toMatch(/used twice/);
+    expect(refused(go([]))).toMatch(/1 to 16 build tags/);
+    expect(refused(go(Array.from({ length: 17 }, (_, i) => `t${i}`)))).toMatch(/1 to 16 build tags/);
+    expect(refused(go("a"))).toMatch(/1 to 16 build tags/);
+    expect(refused({ metrics: { sandbox: { typescript: { buildTags: ["a"] } } } })).toMatch(/buildTags: build tags are supported for go only/);
+  });
+});
+
 describe("requestedPull", () => {
   const profile = { project: "apache/skywalking-banyandb" };
   const head = "0123456789abcdef0123456789abcdef01234567";

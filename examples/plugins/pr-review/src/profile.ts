@@ -89,6 +89,11 @@ export interface SandboxConfig {
    * code generation the repository does not commit. Never run on the host.
    */
   setup?: SandboxSetupStep[];
+  /**
+   * Go build tags (`-tags=a,b`) the coverage `go test` compiles with: the ones the repository's own CI passes. Never applied
+   * to the setup commands. Go only.
+   */
+  buildTags?: string[];
 }
 
 /** A host directory a sandbox mounts read-only. */
@@ -109,6 +114,8 @@ export interface SandboxSetupStep {
 export const MOUNT_NAME = /^[a-z][a-z0-9-]{0,31}$/;
 export const MAX_MOUNTS = 8;
 export const MAX_SETUP_STEPS = 8;
+export const BUILD_TAG = /^[A-Za-z0-9_.]+$/;
+export const MAX_BUILD_TAGS = 16;
 /** An argv element's longest text; the whole setup must also fit the coverage command's spec. */
 const MAX_SETUP_ARG_CHARS = 2_000;
 
@@ -412,8 +419,8 @@ function checkSandbox(raw: unknown): MetricsConfig["sandbox"] {
     need(language === "go" || language === "typescript", `${where} is not a language with a sandbox; the languages are go and typescript`);
     need(isObject(value), `${where} must be an object`);
     const v = value as Record<string, unknown>;
-    onlyKeys(v, where, ["image", "cpus", "memory", "pids", "tmp", "wallClockMs", "readOnly", "setup"]);
-    const { readOnly, setup, ...limits } = v;
+    onlyKeys(v, where, ["image", "cpus", "memory", "pids", "tmp", "wallClockMs", "readOnly", "setup", "buildTags"]);
+    const { readOnly, setup, buildTags, ...limits } = v;
     const problem = confinementProblem({ kind: "docker", writable: [], readOnly: [], env: {}, ...SANDBOX_LIMITS, image: SANDBOX_PROBE_IMAGE, ...limits });
     need(problem === undefined, `${where}.${(problem ?? "").replace(/^confinement\./, "")}`);
     const config = structuredClone(limits) as SandboxConfig;
@@ -421,6 +428,10 @@ function checkSandbox(raw: unknown): MetricsConfig["sandbox"] {
     if (setup !== undefined) {
       need(language === "go", `${where}.setup: sandboxed setup is supported for go only in this version`);
       config.setup = checkSetup(setup, `${where}.setup`);
+    }
+    if (buildTags !== undefined) {
+      need(language === "go", `${where}.buildTags: build tags are supported for go only`);
+      config.buildTags = checkBuildTags(buildTags, `${where}.buildTags`);
     }
     out[language as "go" | "typescript"] = config;
   }
@@ -452,6 +463,18 @@ function checkMounts(raw: unknown, where: string): SandboxMount[] {
     need(!path.split("/").includes(".."), `${at}.path must not contain ..`);
     need(path.replace(/\/+$/, "") !== "" && path !== "~/", `${at}.path must not be the filesystem root or the whole home`);
     return { name: e.name as string, path };
+  });
+}
+
+/** `metrics.sandbox.go.buildTags`: Go build tag identifiers, each `[A-Za-z0-9_.]+`, none twice, at most `MAX_BUILD_TAGS`. */
+function checkBuildTags(raw: unknown, where: string): string[] {
+  need(Array.isArray(raw) && raw.length > 0 && raw.length <= MAX_BUILD_TAGS, `${where} must be a list of 1 to ${MAX_BUILD_TAGS} build tags`);
+  const seen = new Set<string>();
+  return (raw as unknown[]).map((tag, i) => {
+    need(typeof tag === "string" && BUILD_TAG.test(tag) && tag.length <= 64, `${where}[${i}] must be a Go build tag matching ${BUILD_TAG.source} (at most 64 characters)`);
+    need(!seen.has(tag as string), `${where}[${i}] ${JSON.stringify(tag)} is used twice`);
+    seen.add(tag as string);
+    return tag as string;
   });
 }
 

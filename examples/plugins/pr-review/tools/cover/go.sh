@@ -17,6 +17,14 @@
 # ends the run with `setup-fail <id> <exit> <output tail>` and no coverage; the report says why. Setup never runs
 # on the host.
 #
+# Build tags: a `tags <a,b>` line of the spec (profile metrics.sandbox.go.buildTags, the tags the repository's own CI
+# passes) becomes `-tags=a,b` on `go test` and on nothing else; the setup commands never get them. The profile validates
+# each tag as [A-Za-z0-9_.]+; this script refuses anything else again rather than pass it on.
+#
+# Failures: when `go test` exits non-zero, the failing tests are named in dedicated report lines, from the output with
+# colour codes stripped: `failed --- FAIL: <Test>` (Go), `failed [FAIL] <spec>` (Ginkgo's summary) and `failed FAIL <pkg>`
+# (at most 15 tests and 5 packages per module, each line cut to 300 characters), and `build-error <first compiler error line>`.
+#
 # The environment is the sandbox's own: GOFLAGS=-mod=readonly, GOPROXY=off, GOTOOLCHAIN=local, a read-only
 # module cache, a GOCACHE under the run's scratch, no network.
 
@@ -40,6 +48,8 @@ printf '%s' "$spec" > "$tmp/spec.txt"
 : > "$tmp/tests"
 : > "$tmp/prof"
 : > "$tmp/log"
+: > "$tmp/failed"
+: > "$tmp/builderr"
 worst=0
 root0=$(pwd -P)
 
@@ -84,6 +94,22 @@ while IFS= read -r line; do
   echo "$sid" >> "$tmp/setup-ok"
 done < "$tmp/spec.txt"
 
+tags=$(sed -n 's/^tags //p' "$tmp/spec.txt" | head -n 1)
+case "$tags" in *[!A-Za-z0-9_.,]*) tags="" ;; esac
+tagarg=""
+[ -n "$tags" ] && tagarg="-tags=$tags"
+esc=$(printf '\033')
+
+# failures <output file>: the failing tests and packages, then the first compiler error, as report lines.
+failures() {
+  sed "s/${esc}\[[0-9;]*[A-Za-z]//g" "$1" | tr '\t\r' '  ' > "$tmp/clean"
+  {
+    sed -n 's/^ *\(--- FAIL: .*\)$/failed \1/p; s/^ *\(\[FAIL\] .*\)$/failed \1/p' "$tmp/clean" | awk '!seen[$0]++' | head -n 15
+    sed -n 's/^\(FAIL  *[^ ].*\)$/failed \1/p' "$tmp/clean" | awk '!seen[$0]++' | head -n 5
+  } | cut -c1-307
+  sed -n 's/^\([^ ][^ ]*\.go:[0-9][0-9]*\(:[0-9][0-9]*\)\{0,1\}: .*\)$/build-error \1/p' "$tmp/clean" | head -n 1 | cut -c1-312
+}
+
 modroot() {
   r="$1"
   while :; do
@@ -121,10 +147,15 @@ for r in $(cut -d' ' -f1 "$tmp/pk" | sort -u); do
     cp="${cp:+$cp,}$p"
   done
   # shellcheck disable=SC2086
-  (cd "$r" && go test -coverprofile="$tmp/c.$k" -covermode=set -coverpkg="$cp" $pkgs) > "$tmp/t.$k" 2>&1
+  (cd "$r" && go test ${tagarg:+"$tagarg"} -coverprofile="$tmp/c.$k" -covermode=set -coverpkg="$cp" $pkgs) > "$tmp/t.$k" 2>&1
   rc=$?
   [ "$rc" -gt "$worst" ] && worst=$rc
   tail -n 25 "$tmp/t.$k" >> "$tmp/log"
+  if [ "$rc" -ne 0 ]; then
+    failures "$tmp/t.$k" > "$tmp/f.$k"
+    grep '^failed ' "$tmp/f.$k" >> "$tmp/failed"
+    grep '^build-error ' "$tmp/f.$k" | head -n 1 >> "$tmp/builderr"
+  fi
   grep -E '^(ok|FAIL|\?|---|panic:|#)' "$tmp/t.$k" | tr '\t' ' ' | cut -c1-200 | head -n 80 | sed 's/^/test /' >> "$tmp/tests"
   if [ -s "$tmp/c.$k" ]; then
     # The module's own path, from its go.mod: in a go.work workspace `go list -m` lists every module.
@@ -141,6 +172,8 @@ done
   sed 's/^/setup /; s/$/ ok/' "$tmp/setup-ok"
   echo "exit $worst"
   cat "$tmp/tests" "$tmp/fails"
+  head -n 20 "$tmp/failed"
+  head -n 1 "$tmp/builderr"
   sort "$tmp/prof"
 } > "$rep"
 cat "$tmp/log"
