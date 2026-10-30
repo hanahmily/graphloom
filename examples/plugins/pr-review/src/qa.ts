@@ -11,6 +11,7 @@
  */
 import type { FinalAnswer } from "./answers.js";
 import type { Groundwork } from "./groundwork.js";
+import { effectiveConclusion, NECESSITY_ID, SKIPPED_NOTE, type NecessityRecord } from "./necessity.js";
 import type { PurposeRecord, Question } from "./questions.js";
 import type { ReportView } from "./reportview.js";
 import type { PullRequest } from "./request.js";
@@ -28,6 +29,10 @@ export interface QaInput {
   purposes: PurposeRecord[];
   questions: Question[];
   answers: FinalAnswer[];
+  /** N1's checked answer and what it decided (design §7.5). */
+  necessity?: NecessityRecord;
+  /** The other questions were skipped: N1 concluded unnecessary and the checker supports it. */
+  skipped?: boolean;
 }
 
 const oneLine = (s: string): string => s.replace(/\s*\n\s*/g, " ").trim();
@@ -54,6 +59,7 @@ export function qaJson(i: QaInput): string {
       tests: (i.groundwork.testMap.get(s.id) ?? []).length,
     })),
     purposes: i.purposes,
+    ...(i.necessity !== undefined ? { necessity: { conclusion: effectiveConclusion(i.necessity.final), decision: i.necessity.decision, skipped: i.skipped === true, ...(i.skipped === true ? { note: SKIPPED_NOTE } : {}), detail: i.necessity.final.necessity } } : {}),
     inventory: { dependencies: inv.dependencies, packages: inv.packages.length, truncated: inv.truncated },
     weakTest: WEAK_TEST_NOTE,
     questions: i.questions.map((q) => {
@@ -95,16 +101,19 @@ const COMPACT: ReadonlySet<string> = new Set(["existing-equivalent", "reuse-libr
 
 /** The Q&A part of `review.md` (design §7.4). */
 export function renderQa(i: QaInput): string {
+  const asked = i.questions.filter((q) => q.id !== NECESSITY_ID);
+  if (i.skipped === true) return ["# Q&A", `${NECESSITY_ID} is answered above, under Necessity.`, SKIPPED_NOTE, ""].join("\n");
   const answers = new Map(i.answers.map((a) => [a.question, a] as const));
-  const by = (s: FinalAnswer["status"]): number => i.answers.filter((a) => a.status === s).length;
+  const by = (s: FinalAnswer["status"]): number => i.answers.filter((a) => a.question !== NECESSITY_ID && a.status === s).length;
   const lines = [
     "# Q&A",
-    `${i.questions.length} question${i.questions.length === 1 ? "" : "s"} (${i.questions.filter((q) => q.origin === "required").length} required, ${i.questions.filter((q) => q.origin === "added").length} added by the questioner): ${by("answered")} answered, ${by("partially answered")} partially answered, ${by("needs author")} needs author. Weak-test questions: ${WEAK_TEST_NOTE}.`,
+    ...(i.necessity !== undefined ? [`${NECESSITY_ID} (necessity) is answered above, under Necessity: ${effectiveConclusion(i.necessity.final)}; ${i.necessity.decision.reason}.`] : []),
+    `${asked.length} question${asked.length === 1 ? "" : "s"} (${asked.filter((q) => q.origin === "required").length} required, ${asked.filter((q) => q.origin === "added").length} added by the questioner): ${by("answered")} answered, ${by("partially answered")} partially answered, ${by("needs author")} needs author. Weak-test questions: ${WEAK_TEST_NOTE}.`,
     `Dependency inventory: ${i.groundwork.inventory.dependencies.length} declared dependencies (${i.groundwork.inventory.dependencies.filter((d) => d.source !== undefined).length} with source available, ${i.groundwork.inventory.dependencies.filter((d) => d.source === undefined).length} source unavailable), ${i.groundwork.inventory.packages.length} internal directories${i.groundwork.inventory.truncated.length > 0 ? `; ${i.groundwork.inventory.truncated.join("; ")}` : ""}.`,
     "",
   ];
   const symbols = new Map(i.groundwork.symbols.map((s) => [s.id, s] as const));
-  const itemIds = [...new Set([...i.view.items.map((x) => x.id)].filter((id) => i.questions.some((q) => q.item === id) || i.purposes.some((p) => p.item === id && p.status === "stated")))];
+  const itemIds = [...new Set([...i.view.items.map((x) => x.id)].filter((id) => asked.some((q) => q.item === id) || i.purposes.some((p) => p.item === id && p.status === "stated")))];
   const itemById = new Map(i.view.items.map((x) => [x.id, x] as const));
   for (const id of itemIds) {
     const item = itemById.get(id)!;
@@ -112,7 +121,7 @@ export function renderQa(i: QaInput): string {
     const purpose = i.purposes.find((p) => p.item === id && p.status === "stated");
     if (purpose !== undefined) lines.push(`Purpose: stated — "${purpose.quote ?? ""}" (pull request ${purpose.source ?? "text"})`);
     lines.push("");
-    const here = i.questions.filter((q) => q.item === id);
+    const here = asked.filter((q) => q.item === id);
     const own = here.filter((q) => q.symbol === undefined && q.fn === undefined);
     for (const q of own) lines.push(...questionLines(q, answers.get(q.id)));
     if (own.length > 0) lines.push("");
@@ -143,7 +152,7 @@ export function renderQa(i: QaInput): string {
       lines.push("", "</details>", "");
     }
   }
-  const orphans = i.questions.filter((q) => !itemById.has(q.item));
+  const orphans = asked.filter((q) => !itemById.has(q.item));
   if (orphans.length > 0) {
     lines.push("### Other questions");
     for (const q of orphans) lines.push(...questionLines(q, answers.get(q.id)));
@@ -153,3 +162,40 @@ export function renderQa(i: QaInput): string {
   return lines.join("\n");
 }
 
+
+const cite = (c: { path: string; tree: string; start: number; end: number; quote: string }): string => `${c.tree === "base" ? "" : `${c.tree} `}\`${c.path}${c.start === c.end ? `:${c.start}` : `:${c.start}-${c.end}`}\` "${short(oneLine(c.quote), 160)}"`;
+
+/** The Necessity part of `review.md` (design §7.5): N1 first, before the report, with its three parts and their evidence. */
+export function renderNecessity(r: NecessityRecord): string {
+  const a = r.final;
+  const n = a.necessity!;
+  const conclusion = effectiveConclusion(a);
+  const check = a.check.verdict === "downgraded" ? `downgraded to needs author${a.check.note !== "" ? ` (${oneLine(a.check.note)})` : ""}` : `${a.check.verdict}${a.check.note !== "" ? `: ${oneLine(a.check.note)}` : ""}`;
+  const lines = [
+    "# Necessity",
+    `**${NECESSITY_ID} — Is this change necessary?** Conclusion: **${conclusion}**. ${oneLine(n.rationale)}`,
+    `Checker: ${check}.${conclusion !== n.conclusion ? ` The answerer concluded ${n.conclusion}; its evidence did not hold after one correction, so the conclusion is ${conclusion}.` : ""} ${r.decision.action === "skip" ? SKIPPED_NOTE : `All questions follow: ${r.decision.reason}.`}`,
+    "",
+    "## 1. Is the problem real on the base?",
+    `Claimed: ${oneLine(n.problem.claim)}${n.problem.quotes.map((q) => ` — "${short(oneLine(q.quote), 200)}" (pull request ${q.source})`).join("")}`,
+    `Can the claimed failure happen on the base: **${n.problem.canHappen}**. ${oneLine(n.problem.explanation)}`,
+    ...n.problem.trace.map((s, k) => `${k + 1}. ${oneLine(s.step)} — ${cite(s)}`),
+    `Reproduction: ${oneLine(n.reproduction)}`,
+    "",
+    "## 2. Does the fix fit the system's design?",
+    `Effect: **${n.design.effect}**. ${oneLine(n.design.explanation)}`,
+    ...n.design.statements.map((s) => `- Design statement: ${cite(s)}`),
+    ...n.design.changed.map((s) => `- Changed lines: ${cite(s)}`),
+    `Searched: ${n.design.searches.map((s) => `\`${short(oneLine(s.pattern), 80)}\` (${s.scope}) → ${s.hits} hit${s.hits === 1 ? "" : "s"}`).join("; ")}.`,
+    "",
+    "## 3. Is there a simpler or existing way?",
+    `${n.alternatives.exists ? "Yes" : "None found"}. ${oneLine(n.alternatives.explanation)}`,
+    ...n.alternatives.citations.map((s) => `- ${cite(s)}`),
+    ...(n.searches.length > 0 ? [`Other searches: ${n.searches.map((s) => `\`${short(oneLine(s.pattern), 80)}\` (${s.scope}) → ${s.hits}`).join("; ")}.`] : []),
+    ...(a.check.searches.length > 0 ? [`The checker's own searches: ${a.check.searches.map((s) => `\`${short(oneLine(s.pattern), 60)}\` (${s.scope}) → ${s.hits}`).join("; ")}.`] : []),
+    ...(a.history.length > 1 ? [`Statements before the ${a.check.verdict === "downgraded" ? "downgrade" : "correction"}: ${a.history.map((h, k) => `${k === 0 ? "first" : "corrected"}: "${short(oneLine(h.answer), 160)}"`).join("; ")}.`] : []),
+    ...(r.decision.action === "ask-all" && r.decision.override === true ? ["Override: the operator asked for every question, so none was skipped."] : []),
+    "",
+  ];
+  return lines.join("\n");
+}

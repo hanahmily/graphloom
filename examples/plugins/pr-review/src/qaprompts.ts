@@ -7,6 +7,8 @@
  * request content is data: its text sits in `<untrusted>` blocks.
  */
 import type { Answer, FinalAnswer } from "./answers.js";
+import { NECESSITY_ID, NECESSITY_TEXT } from "./necessity.js";
+import type { ContextRef } from "./profile.js";
 import { needsOwnSearch } from "./answers.js";
 import type { Groundwork } from "./groundwork.js";
 import { sourceStatus } from "./inventory.js";
@@ -28,7 +30,8 @@ const HOW_TO_READ =
 
 function recordText(r: MetricsRecord): string {
   const th = checkThresholds(r);
-  return `${r.function} ${r.path}:${r.startLine}-${r.endLine} (${r.change}): complexity ${r.complexity} (limit < ${LIMITS.complexity}), nesting ${r.nesting} (limit ≤ ${LIMITS.nesting}), ${r.coverage?.source === "measured" ? `coverage ${r.coverage.covered} of ${r.coverage.total} statements (measured in the sandbox)` : "coverage unknown"}, CRAP ${th.crap.value}${th.crap.upperBound ? " (upper bound)" : ""}`;
+  const base = r.change === "modified" && r.base !== undefined ? (("unavailable" in r.base) ? ` [base not measured: ${r.base.unavailable}]` : ` [at the base: complexity ${r.base.complexity}, nesting ${r.base.nesting}]`) : "";
+  return `${r.function} ${r.path}:${r.startLine}-${r.endLine} (${r.change}): complexity ${r.complexity} (limit < ${LIMITS.complexity}), nesting ${r.nesting} (limit ≤ ${LIMITS.nesting})${base}, ${r.coverage?.source === "measured" ? `coverage ${r.coverage.covered} of ${r.coverage.total} statements (measured in the sandbox)` : "coverage unknown"}, CRAP ${th.crap.value}${th.crap.upperBound ? " (upper bound)" : ""}`;
 }
 
 /** The groundwork as text, in three levels of detail so it fits an executor input. */
@@ -187,6 +190,101 @@ export function answerCheckerInstruction(a: CheckerAssignment): string {
     "",
     pullText(a.snapshot),
     ...(a.retry ? ["", "Your previous result left questions without a verdict, left out the searches of your own that a none-found or test answer needs, or did not follow the contract. Judge every question."] : []),
+  ].join("\n");
+}
+
+export interface NecessityAssignment {
+  pr: PullRequest;
+  snapshot: Pick<Snapshot, "pull" | "commits">;
+  view: ReportView;
+  /** The profile's `questions.designDocs` globs and `context` documents. */
+  designDocs: readonly string[];
+  context: readonly ContextRef[];
+  kind: "first" | "correction" | "revision";
+  feedback: string[];
+}
+
+const designDocLines = (docs: readonly string[], context: readonly ContextRef[]): string[] => [
+  docs.length > 0
+    ? `Design and architecture documents the profile names (globs; read them from the base with \`git show HEAD:<path>\`, list them with \`git ls-tree -r --name-only HEAD\`): ${docs.join(", ")}.`
+    : "The profile names no design documents: search the repository's docs/ directory, README and architecture or design pages yourself.",
+  ...(context.length > 0 ? [`Context documents the profile names: ${context.map((c) => `${c.repo !== undefined ? `${c.repo}:` : ""}${c.path}`).join(", ")}.`] : []),
+];
+
+/** The answerer's assignment for the necessity question N1 (design §7.5): did the pull request fix a real thing, and does the fix fit the design? */
+export function necessityInstruction(a: NecessityAssignment): string {
+  const items = changeItems(a.view).map((i) => `${i.id} [${i.section}] ${oneLine(i.text)} — ${i.cites.map((c) => citeLabel(c)).join(", ")}`);
+  return [
+    `You are the answerer for ${a.pr.owner}/${a.pr.repo}#${a.pr.number} at head ${a.pr.head}, and the question is ${NECESSITY_ID}, the first question of the run: ${NECESSITY_TEXT} Answer it from the report, the diff and the whole base codebase, with evidence. You are read-only: change nothing.`,
+    "",
+    UNTRUSTED_PREAMBLE,
+    "",
+    HOW_TO_READ,
+    "",
+    "Answer the three parts, each with evidence. You are the one answer allowed to conclude, but only on evidence you cite; never state a severity, a verdict or a recommendation to merge.",
+    "Part 1, the problem (problem): is the problem real on the base? Put the claimed problem in claim, and quote where the pull request states it in quotes: each entry has the source (title, body or commit) and a quote copied exactly from the pull request's own text below, at least 12 characters long (leave quotes empty when nothing states a problem). Then trace the base behavior through the base code in trace: each step has what it shows (step), the path, tree base, the first and last line, and a short verbatim quote. Say in canHappen whether the claimed failure can happen on the base (yes, no, or unclear) and why in explanation. A trace is required whenever canHappen is yes or no. Look at what the callers, the surrounding code and the system already do, not only the function the change touches.",
+    "Reproduction (reproduction): a failing test on the base is optional evidence. This version of the plugin has no mechanism to run one, so write `not attempted: no reproduction mechanism in this version` and rely on the trace.",
+    "Part 2, the design (design): does the fix fit the system's design? Search the repository's design and architecture documents, and the code comments that state intent, for what the system says about the behavior the change touches, for example the write path, the ordering of an acknowledgement and a flush, or who owns a responsibility. List every such search in design.searches (pattern, scope base, hits), including the ones that found nothing. Cite each design statement in design.statements (path, tree base, first and last line, a verbatim quote) and the changed lines in design.changed (path, tree head, lines, a verbatim quote). Say in design.effect whether the change preserves or breaks those intents, or is unrelated to them, or that no design statement is stated; explain in design.explanation, for example: does replying after a flush make the write wait on the flush, against the write path design? preserves and breaks cite both a statement and the changed lines.",
+    ...designDocLines(a.designDocs, a.context),
+    "Part 3, a simpler or existing way (alternatives): is there one (the caller or another layer already handles it, or the fix belongs elsewhere)? Set exists, explain in alternatives.explanation, and cite where in alternatives.citations (path, tree base or head, lines, quote). Put any other search you ran in searches (pattern, scope, hits).",
+    "Conclusion (conclusion), with its one-line rationale (rationale, one line): necessary (the failure is possible, the change keeps the design, no existing way does it); questionable (some part does not hold or is unclear); unnecessary (it rests on a cited ground: the claimed failure cannot happen on the base, the change breaks a cited design statement, or an existing way already does it); needs author (the answer depends on intent only the author can state). A conclusion of necessary or unnecessary needs a problem the pull request states, quoted.",
+    "",
+    `The report's change items (${items.length}):`,
+    ...(items.length === 0 ? ["(none)"] : items),
+    "",
+    pullText(a.snapshot),
+    ...(a.kind !== "first"
+      ? ["", a.kind === "correction" ? "Your previous result failed deterministic validation. Return the whole corrected result; every problem below must be fixed:" : "The answer checker could not support your answer. Return a corrected answer, searching again: fix what the checker found, or conclude questionable or needs author.", ...a.feedback.map((f) => `- ${f}`)]
+      : []),
+  ].join("\n");
+}
+
+const necessityLines = (a: Answer): string[] => {
+  const n = a.necessity;
+  if (n === undefined) return ["(none)"];
+  const cite = (c: { path: string; tree: string; start: number; end: number; quote: string }): string => `${c.tree}:${c.path}:${c.start}-${c.end} "${clip(oneLine(c.quote), 120)}"`;
+  return [
+    `conclusion ${n.conclusion}: ${oneLine(n.rationale)}`,
+    `problem claimed: ${clip(oneLine(n.problem.claim), 300)}${n.problem.quotes.map((q) => ` [${q.source}: "${clip(oneLine(q.quote), 160)}"]`).join("")}; canHappen ${n.problem.canHappen}: ${clip(oneLine(n.problem.explanation), 300)}`,
+    ...n.problem.trace.map((s, i) => `  T${i + 1} trace step: ${clip(oneLine(s.step), 200)} — ${cite(s)}`),
+    `reproduction: ${clip(oneLine(n.reproduction), 200)}`,
+    `design effect ${n.design.effect}: ${clip(oneLine(n.design.explanation), 300)}`,
+    ...n.design.statements.map((s, i) => `  D${i + 1} design statement — ${cite(s)}`),
+    ...n.design.changed.map((s, i) => `  C${i + 1} changed lines — ${cite(s)}`),
+    `design searches: ${n.design.searches.map((s) => `\`${clip(oneLine(s.pattern), 80)}\` (${s.scope}) → ${s.hits}`).join("; ")}`,
+    `alternatives ${n.alternatives.exists ? "exist" : "none"}: ${clip(oneLine(n.alternatives.explanation), 300)}`,
+    ...n.alternatives.citations.map((s, i) => `  A${i + 1} alternative — ${cite(s)}`),
+  ];
+};
+
+export interface NecessityCheckerAssignment {
+  pr: PullRequest;
+  snapshot: Pick<Snapshot, "pull" | "commits">;
+  question: Question;
+  answer: Answer;
+  designDocs: readonly string[];
+  context: readonly ContextRef[];
+  retry: boolean;
+}
+
+/** The answer checker's assignment for N1 (design §7.5): verify every design statement, trace step and the conclusion. */
+export function necessityCheckerInstruction(a: NecessityCheckerAssignment): string {
+  return [
+    `You are the answer checker for ${a.pr.owner}/${a.pr.repo}#${a.pr.number} at head ${a.pr.head}. Another agent answered the necessity question ${NECESSITY_ID} (${NECESSITY_TEXT}). Re-check its answer against the trees. You are read-only: change nothing, and run no code from the repository.`,
+    "",
+    UNTRUSTED_PREAMBLE,
+    "",
+    HOW_TO_READ,
+    "",
+    "Check each of these, and name in your note every one that fails (T1…, D1…, C1…, A1… as numbered below): (1) every trace step (T): does the cited base code exist and do what the step says, and does the trace really show that the claimed failure can or cannot happen? Follow the callers and the surrounding code yourself; (2) every design statement (D): does the cited document or comment say what is quoted, and does it state the intent the answer says? Search the design documents yourself for a statement the answer missed or got wrong; (3) the changed lines (C): are they what the pull request changes, and do they preserve or break the design statement, as claimed? (4) the alternatives (A): does the cited existing way do what is claimed? (5) the conclusion: does the evidence support it, in particular an unnecessary conclusion, which ends all other questions when you support it? Run searches of your own with your own patterns over the whole base tree and the documents, and list them in the searches of your verdict (pattern, scope, hits): this answer always needs them.",
+    `Give one verdict for the question: supported only when every element holds and the conclusion follows from them; partial when part holds (say which does not in note); unsupported when a statement, a trace step or the conclusion does not hold (say what you found in note). Judge claims only, never wording. Return the verdicts of your result: one entry for the question ${NECESSITY_ID}.`,
+    ...designDocLines(a.designDocs, a.context),
+    "",
+    `${a.question.id} [${a.question.type}] ${oneLine(a.question.text)}`,
+    ...necessityLines(a.answer).map((l) => `  ${l}`),
+    "",
+    pullText(a.snapshot),
+    ...(a.retry ? ["", "Your previous result left the question without a verdict, left out the searches of your own that this answer needs, or did not follow the contract. Judge it."] : []),
   ].join("\n");
 }
 

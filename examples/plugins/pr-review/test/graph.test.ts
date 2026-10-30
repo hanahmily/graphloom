@@ -32,11 +32,11 @@ describe("the report scenario, end to end through the graph", () => {
     ]);
   });
 
-  it("runs the jobs of Fetch and Report in order: the checkout first, then seven reads, the ledger, the reporter, its checker, the diff, the tools, the write", () => {
+  it("runs the jobs of Fetch and Report in order: the checkout first, then seven reads, the ledger, the reporter, its checker, the diff, the tools, the base files, the base tools, the write", () => {
     expect(sim.jobs.filter((j) => j.stageId === "fetch" || j.stageId === "report").map((j) => j.instruction.split(" ").slice(0, 3).join(" "))).toEqual([
       "Materialize the pull",
       "Read the changed", "Read the commits", "Read the reviews", "Read the review", "Read the review", "Read the check", "Read the pull",
-      "Read the pull", "Check the Docker", "Write the change", "Check the report's", "List the changed", "Measure the changed", "Write .graphloom/review/review.md and",
+      "Read the pull", "Check the Docker", "Write the change", "Check the report's", "List the changed", "Measure the changed", "Read the base", "Measure the modified", "Write .graphloom/review/review.md and",
     ]);
     expect(sim.jobs.slice(1, 8).map((j) => j.executor!.id)).toEqual([
       "graphloom.github/list-pull-files", "graphloom.github/list-pull-commits", "graphloom.github/list-pull-reviews", "graphloom.github/list-pull-review-comments", "graphloom.github/list-review-threads", "graphloom.github/list-check-runs", "graphloom.github/get-pull",
@@ -85,7 +85,7 @@ describe("the report scenario, end to end through the graph", () => {
 
   it("confines every agent untrusted-read: bwrap with the network on and the repository's agent configuration masked", () => {
     const agents = sim.jobs.filter((j) => j.kind === "agent");
-    expect(agents.map((j) => j.resultSchema)).toEqual(["change-report-v1", "claim-check-v1", "questions-v1", "answers-v1", "answer-check-v1"]);
+    expect(agents.map((j) => j.resultSchema)).toEqual(["change-report-v1", "claim-check-v1", "necessity-v1", "answer-check-v1", "questions-v1", "answers-v1", "answer-check-v1"]);
     for (const job of agents) {
       expect(job.readOnly).toBe(true);
       expect(job.confinement).toEqual({
@@ -127,7 +127,7 @@ describe("the report scenario, end to end through the graph", () => {
   });
 
   it("states the not-run coverage (Docker unavailable) and mutation in every measurement row, with CRAP as its upper bound", () => {
-    expect(sim.written!.markdown).toContain("| `server.registerFlags` banyand/cmd/server/flags.go:12 | modified | 2 | 1 | unknown: not run (docker unavailable: docker is not available in a rehearsal) | 6 (upper bound, coverage unknown) | not run: no coverage |");
+    expect(sim.written!.markdown).toContain("| `server.registerFlags` banyand/cmd/server/flags.go:12 | modified | 1 → 2 | 0 → 1 | unknown: not run (docker unavailable: docker is not available in a rehearsal) | 6 (upper bound, coverage unknown) | not run: no coverage |");
     const records = (JSON.parse(sim.written!.json) as { measurements: { coverage: string[]; mutation: string; records: Array<{ coverage: unknown; crap: number }> } }).measurements;
     expect(records.coverage).toEqual(["Coverage (go): not run (docker unavailable: docker is not available in a rehearsal)."]);
     expect(records.mutation).toBe("not run: mutation not available in this version");
@@ -173,7 +173,8 @@ describe("report-corrections", () => {
 
   it("is judged by validators that see only what the controller hands them: the latest review, not the first claim check", () => {
     expect(sim.receipts.filter((r) => r.stageId === "report").every((r) => r.valid)).toBe(true);
-    expect(sim.evidence.filter((e) => e.kind === "review")).toHaveLength(3);
+    // Two claim checks, N1's check and the answers' check.
+    expect(sim.evidence.filter((e) => e.kind === "review")).toHaveLength(4);
   });
 
   it("records the removed item in report.json and lists its file in other as not summarised", () => {

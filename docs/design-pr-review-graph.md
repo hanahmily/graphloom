@@ -19,6 +19,11 @@ Revised a fourth time 2026-10-29: the task is prepared by the generic
 `graphloom task new` command from the plugin's `prepareTask` plan, not by a
 plugin script, and the ledger ref moves to `…/<N>/ledger`
 ([§3.1](#31-task)).
+Revised 2026-10-30: the first question of every run is the **necessity**
+question N1, which asks whether the pull request fixed a real thing, and an
+unnecessary change ends the questions ([§7.5](#75-the-necessity-question-n1));
+a modified function's Measurements show its value at the base beside the
+head's ([§6.8](#68-measurements)).
 Not implemented. The
 plugin would live in `examples/plugins/pr-review`. It reuses the review
 machinery of the [issue-fix graph](design-issue-fix-graph.md) and needs these
@@ -46,6 +51,12 @@ The product has three layers, each produced by different agents:
    evidence and a status (`answered`, `partially answered`, `needs author`).
    The report, the questions and the answers form one file, `review.md`. The
    questions cover these points:
+   - **First of all, always (N1):** is the change necessary? Is the problem
+     it claims to fix real on the base, does the fix fit the system's
+     design, and is there a simpler or existing way? It concludes
+     `necessary`, `questionable`, `unnecessary` or `needs author`. An
+     `unnecessary` conclusion that the checker supports ends the questions
+     ([§7.5](#75-the-necessity-question-n1)).
    - What is each change for, unless the PR already says so?
    - For every new function, type, feature or helper: does the codebase
      already have it, could an existing package or library be reused, and is
@@ -68,6 +79,7 @@ The product has three layers, each produced by different agents:
 |---|---|
 | Understanding comes before any judgement | Stage order: Fetch → Report → Questions → Answers → Review → Checks → Draft → Publish. The review layer reads the report and the Q&A as its map, so it does not review blind ([§8.1](#81-review)) |
 | Reporter, questioner and answerer are three agents | Separate sessions. The questioner's harness differs from the reporter's, and the answerer's from the questioner's. The answerer runs on Claude Code or Codex, because its session is opened by the maintainer and forked by the reviewers. Each artifact is checked by a session on a harness different from its author's ([§13.1](#131-roles)) |
+| The first question is whether the change is necessary, and the answer can end the questions | N1 is asked before every other question, with evidence for each of its three parts. When it concludes `unnecessary` and the answer checker supports that, no other question is asked. `questionable` and `needs author` never skip, and an operator can ask for everything anyway ([§7.5](#75-the-necessity-question-n1)) |
 | Report-only is the default for every run, the first one on a PR included | The prepared request is `Report on …`. The run pauses after Answers. The maintainer continues with `graphloom resume <run> --approve review-layer` or finishes with `--decline review-layer` ([§2](#2-modes-and-operator-flow)) |
 | The report and the answers are grounded | Deterministic detectors, symbol extraction, whole-repository search, the dependency inventory and test mapping feed them. Every item cites the diff or the base tree. An absence lists the searches that found nothing. Completeness checks cover every changed file, symbol and question. Independent checkers verify every claim ([§6](#6-the-change-report), [§7](#7-questions-and-answers)) |
 | The maintainer chooses what reaches the PR's author | `needs author` items are pre-selected as draft review comments. The maintainer may promote any other Q&A item, proposals included, or drop a pre-selected one ([§7.4](#74-output-one-file)) |
@@ -98,6 +110,9 @@ the request, which `advance` reads, not in `describe(config)`:
   - Nothing is posted in this mode.
 - **`Review owner/repo#N at <sha>.`** (`task new … --review`) continues into
   the review layer without pausing. Publication still needs its own approval.
+- **`… at <sha>, asking every question.`** (`task new … --all-questions`, with
+  either mode) asks every question even when N1 judges the change unnecessary
+  and the checker supports it ([§7.5](#75-the-necessity-question-n1)).
 
 ```sh
 graphloom task new pr-review apache/skywalking-banyandb#1234 --repo ../skywalking-banyandb --profile banyandb
@@ -142,7 +157,7 @@ request: "Report on apache/skywalking-banyandb#1234 at 9ab2…41."
 ```
 
 - `request` names the mode, one pull request (`owner/repo#N` or its URL) and
-  its head `at <40-hex>`. The repository must be the profile's `project`.
+  its head `at <40-hex>`, optionally followed by `, asking every question`. The repository must be the profile's `project`.
   `requestedPull`, the counterpart of issue-fix's `requestedIssue`
   (`src/graph.ts:312`), refuses anything else with reason "incompatible task".
 - `base` is the merge base of the head and the base branch. Intake pins it
@@ -158,7 +173,8 @@ generic CLI validates and executes it, and knows nothing of pull requests.
 - **Arguments:** one pull request, `owner/repo#N` or
   `https://github.com/owner/repo/pull/N`; optional `--base <branch>` (default
   the profile's `baseBranch`, itself default `main`); optional `--review`,
-  which writes the `Review …` request instead of `Report on …`. Anything
+  which writes the `Review …` request instead of `Report on …`; optional
+  `--all-questions`, which appends `, asking every question` to the request. Anything
   else, a missing profile, or an `owner/repo` other than the profile's
   `project` is a `{ refused }` reply naming the problem.
 - **Remote:** the repository's remote whose fetch URL is
@@ -209,7 +225,7 @@ meaning and parser (review-kit, [§14](#14-sharing-code-with-issue-fix)).
 | `environment` | Only `checks` (`git`, the bundled `ocr` via `scripts/ocr-path.sh`, the harness CLIs). **`prepare` and `pinnedFiles` are refused**: preparation would run contributor code in the unconfined worktree |
 | `report` | The section template, each section's meaning in this repository, and its detectors ([§6.2](#62-profile-mapping), [§6.3](#63-detectors)) |
 | `symbols` | Language packs: file globs, definition patterns, test-file and test-name patterns ([§7.2](#72-deterministic-groundwork)). The plugin ships packs for Go and TypeScript as data, and a profile may add or override them |
-| `questions` | `excludeRoots` (generated code only; the search covers the whole base tree, vendored directories included), `similarity` (default 0.5), `maxCandidates` per query (5) ([§7.2](#72-deterministic-groundwork)) |
+| `questions` | `excludeRoots` (generated code only; the search covers the whole base tree, vendored directories included), `similarity` (default 0.5), `maxCandidates` per query (5) ([§7.2](#72-deterministic-groundwork)); and `designDocs`, repository-relative globs of the design and architecture documents that N1's answerer and checker read first, beside the `context` documents ([§7.5](#75-the-necessity-question-n1)). BanyanDB's are `docs/concept/{tsdb,clustering,persistence-storage,storage-and-format,data-model,rotation}.md`, `docs/design/README.md` and the two `docs/design/0.12.0` pages on the write stream (`streaming-api`, `measure-batch-v2`) |
 | `metrics` | Per language: `files`, and the tools' `argv` for static metrics, coverage and mutation (defaults: [metrics §3](design-code-quality-metrics.md#3-tools)). Also `generated` globs; `coverage` (run the PR's tests for coverage under untrusted confinement, **default true**); `mutation.enabled` (**default true**; needs coverage) and `mutation.timeBudgetMs` (default 30 min); and `sandbox`, the Docker sandbox's image digest per language with its `cpus`, `memory`, `pids`, `tmp` and `wallClockMs` ([§12.2](#122-confinement)). A profile may turn either run off. Thresholds may be tightened, never loosened |
 | `context` | issue-fix's [context documents](design-issue-fix-graph.md#context-documents) |
 | `issues` | Where linked issues live. `Fixes`/`Closes` references are read with `get-issue` |
@@ -266,9 +282,9 @@ generation's evidence holds a `--decline review-layer`.
 | Report | `change-report` | Every template section is present, with cited items or an explicit "None". Every citation is inside the PR's diff. Every changed file and every detector fact is cited. No item carries a severity, finding or verdict (the contract has no such field) | `change-report-v1`, `report-write` | `change-report` |
 | Report | `measurements` | For every function the PR adds or modifies, complexity and nesting were measured by the pinned tools over the head tree, and coverage (on by default) and then mutation (on by default, at covered sites only) were measured in the Docker sandbox over a checkout of the head, or carry a not-run reason (switched off by the profile, Docker unavailable, image missing, a dependency not cached, no vitest coverage provider, no coverage). Every value recomputes from its evidence ([metrics §5](design-code-quality-metrics.md#5-records-and-recomputation)) | `graphloom-metrics-v1` command reports | `measurements` |
 | Report | `claims-checked` | An independent `<report-checker>` judged every report item against the diff, and every item left is `supported` with matching quotes | `claim-check-v1` | `claims-checked` |
-| Questions | `questions-complete` | Every required question was asked ([§7.1](#71-questions)): purpose for each change item whose purpose the PR text does not state (a stated purpose recorded with a matching quote instead); `existing-equivalent`, `reuse-library` and `common-logic` for each new symbol; `missing-test` for each new or modified symbol with no mapped test; and one question per value over a metric limit and per surviving mutant. Every changed function has a measurement record or a not-run reason | `questions-v1`, search and test-map reports | `questions-complete` |
-| Answers | `answers-complete` | Every question has an answer from the `<answerer>`, with evidence (citations, the searches run with their results, quotes) and a status of `answered`, `partially answered` or `needs author`. Every "none found" answer lists its whole-repository searches and the dependency inventory. Every cited metric equals its record. Every proposal cites line ranges inside its function. `review.md`, `report.json` and `qa.json` are written | `answers-v1`, `qa-write` | `answers-complete` |
-| Answers | `answers-grounded` | An independent `<answer-checker>` re-checked every cited equivalent, library, duplicate and covering test, and every "none found" claim, against the trees. Every answer left is `supported` or `partial`. An answer still unsupported after one correction is `needs author`, with both statements recorded | `claim-check-v1` | `answers-grounded` |
+| Questions | `questions-complete` | N1, the necessity question, was asked first ([§7.5](#75-the-necessity-question-n1)): its three parts have their evidence, an independent checker verified every cited design statement, trace step and the conclusion, and N1's checked answer and decision are recorded in `necessity.json`. When N1 concluded `unnecessary`, the checker supports it and the operator did not ask for every question, N1 is the only question required and the skip is recorded. Otherwise every required question was asked ([§7.1](#71-questions)): purpose for each change item whose purpose the PR text does not state (a stated purpose recorded with a matching quote instead); `existing-equivalent`, `reuse-library` and `common-logic` for each new symbol; `missing-test` for each new or modified symbol with no mapped test; and one question per value over a metric limit and per surviving mutant. Every changed function has a measurement record or a not-run reason | `necessity-v1`, `answer-check-v1`, `necessity-write`, `questions-v1`, search and test-map reports | `questions-complete` (`independence: separate-reviewer`: N1's check is its latest review) |
+| Answers | `answers-complete` | N1 has its recorded answer first (alone, with the skip recorded in the Q&A, when it was skipped past). Every other question has an answer from the `<answerer>`, with evidence (citations, the searches run with their results, quotes) and a status of `answered`, `partially answered` or `needs author`. Every "none found" answer lists its whole-repository searches and the dependency inventory. Every cited metric equals its record. Every proposal cites line ranges inside its function. `review.md`, `report.json` and `qa.json` are written | `answers-v1`, `qa-write` | `answers-complete` |
+| Answers | `answers-grounded` | An independent `<answer-checker>` verified N1's cited design statements, trace steps and conclusion, and re-checked every cited equivalent, library, duplicate and covering test, and every "none found" claim, against the trees. Every answer left is `supported` or `partial`. An answer still unsupported after one correction is `needs author`, with both statements recorded | `claim-check-v1` | `answers-grounded` |
 | Review | `code-review` | Unless report-only: for each aspect (correctness, maintainability, security), the latest read-only `<reviewer-aspect>` pass reviewed every file in scope with that aspect's rule file, every rule group `ocr delegate rule` returned for it has source `custom` and that file's rule text, and the pass gave a status for every open prior finding of the aspect. Every pass started, on the answerer's harness, as a fork of the review's base session or seeded with its recorded reason. Each aspect's sweep saturated or ran four passes. Every finding has a verdict from its `<verifier-aspect>`, in a fresh session on a harness different from its reviewer's | `pr-code-review-v1`, `ocr-rule-groups` command reports, `pr-finding-verification-v1` | `open-code-review` |
 | Review | `findings-proven` | Unless report-only: every behavioral finding is `proven` (its test, rerun by the graph in the Docker sandbox, failed on the head in every run, in the test's own assertion or by a panic inside the cited code, and the verifier judged that the test shows the claimed bug), or is recorded `unproven` with its reason. No unproven behavioral finding is drafted as P0 or P1 or counts toward the verdict | `graphloom-repro-v1` command reports, `pr-finding-verification-v1` | `findings-proven` |
 | Review | `rule-checks` | Unless report-only: each profile rule was evaluated on the diff | from `pr-snapshot` | `rule-checks` |
@@ -517,7 +533,12 @@ evidence. The human-readable report is the first part of the one file
 
 ````markdown
 # apache/skywalking-banyandb#1234 at 9ab2…41 (base 3f1c…e9)
-Contents: Report · Measurements · Q&A (2 items need the author)
+Contents: Necessity · Report · Measurements · Q&A (2 items need the author)
+
+# Necessity
+**N1 — Is this change necessary?** Conclusion: **necessary**. The failure is possible on the base, the change keeps the design, and nothing existing does it.
+Checker: supported. All questions follow: N1 concluded necessary; every question is asked.
+…
 
 # Report
 14 files, +612 −88. Commits: 5. GitHub checks at head: 9 passed, 1 pending.
@@ -556,7 +577,9 @@ Contents: Report · Measurements · Q&A (2 items need the author)
 …
 ````
 
-(The example is the `state-lifecycle` rehearsal scenario, a change modelled on
+(The Necessity part comes first, before the Report, and is written with the
+Q&A ([§7.5](#75-the-necessity-question-n1)). The example is the
+`state-lifecycle` rehearsal scenario, a change modelled on
 the first live report, [apache/skywalking-banyandb#1443](https://github.com/apache/skywalking-banyandb/pull/1443),
 whose first report narrated it hunk by hunk as six items.) The report shows
 the lifecycle as a compact block under its item and the before/after as a
@@ -596,9 +619,10 @@ Coverage: `go test -coverprofile` of 2 touched packages, confined (no network), 
 
 | Function | Change | Complexity (limit < 10) | Nesting (limit ≤ 3) | Coverage | CRAP (threshold 30) | Mutation |
 |---|---|---|---|---|---|---|
-| `schema.ParseTTL` pkg/schema/ttl.go:14 | added | 12 | 4 | 70% (measured) | 15.9 | 9 of 10 killed; survivor :27 relational inversion `n > max` → `n <= max` |
-| `measure.(*writer).flush` banyand/measure/write.go:110 | modified | 6 | 2 | 50% (measured) | 10.5 | 6 of 6 killed |
-| `liaison.(*grpc).route` banyand/liaison/grpc/route.go:88 | modified | 7 | 2 | unknown: package did not build offline | 56 (upper bound) | not run: no coverage |
+| `schema.ParseTTL` pkg/schema/ttl.go:14 | added | 12 (over the limit of 10) | 4 (over the limit of 3) | 70% (measured) | 15.9 | 9 of 10 killed; survivor :27 relational inversion `n > max` → `n <= max` |
+| `measure.(*writer).flush` banyand/measure/write.go:110 | modified | 4 → 6 | 1 → 2 | 50% (measured) | 10.5 | 6 of 6 killed |
+| `stream.(*writeCallback).Rev` banyand/stream/write_standalone.go:6 | modified | 21 → 25 (over the limit of 10 at the base; made worse) | 4 → 4 (over the limit of 3 at the base; not raised) | unknown: package did not build offline | 650 (upper bound) | not run: no coverage |
+| `liaison.(*grpc).route` banyand/liaison/grpc/route.go:88 | modified | 7 → 12 (over the limit of 10: introduced by the pull request) | 2 → 2 | unknown: package did not build offline | 56 (upper bound) | not run: no coverage |
 ````
 
 When the profile turns coverage off, every row shows coverage `unknown`
@@ -606,6 +630,26 @@ with that reason, CRAP as the upper bound, and mutation `not run`.
 
 The section follows a few rules:
 
+- **A modified function shows `base → head`** ([metrics §1.1](design-code-quality-metrics.md#11-the-base-side-of-a-modified-function)),
+  so a legacy value is not read as the pull request's: `21 → 25` is a
+  function that was already over the limit and got worse, `7 → 12` one the
+  change pushed over. The row says **over the limit at the base** (and
+  whether it was **made worse** or **not raised**) or **introduced by the
+  pull request**. A new function shows its head value alone. When the base
+  value cannot be measured (the file is over a command report's 60 KB, cannot
+  be read at the base, or has no function of that name), the row shows the
+  head value with the reason. Only complexity and nesting are measured at the
+  base; coverage, CRAP and mutation are the head's. The `split-function` and
+  `complexity-coverage` questions say the same, so a maintainer sees whether
+  the excess is inherited or introduced ([§7.1](#71-questions)).
+- **How the base is measured.** A read-only command job reads each modified
+  function's file at the pinned base (`git show <base>:<path>`, one command
+  per file, recorded whole), then the same static tool, confined with no
+  network, measures that file with every line treated as changed, so every
+  function of it is recorded. The validator recomputes the base values from
+  the recorded file text as it does the head's. A base measurement that does
+  not recompute, or fails, never fails the report: it leaves that row's base
+  unknown, with the reason.
 - Exceeding a limit is stated as a number beside its limit.
 - The static metrics always run. Coverage and mutation run **by default**,
   BanyanDB included, always in the Docker sandbox and always coverage
@@ -645,16 +689,23 @@ question.
 
 | Type | Required for |
 |---|---|
+| `necessity` | Always, as the first question, id `N1`: is the change necessary ([§7.5](#75-the-necessity-question-n1))? It is the plugin's own wording. The questioner neither asks nor drops it |
 | `purpose` | Every change item whose purpose the PR text, linked issue and commit messages do not state. When they state it, the item records `stated` with the matching quote, and no question is asked |
 | `existing-equivalent` | Every new symbol: does the codebase already have the same or an equivalent? |
 | `reuse-library` | Every new symbol: could an existing internal package or an already-declared third-party library do this? |
 | `common-logic` | Every new symbol: does it duplicate logic elsewhere, in the base or in the PR, that could become shared code? |
 | `missing-test` | Every new or modified symbol or feature that the test map finds no covering test for: which test covers it? |
-| `split-function` | Every changed function with complexity ≥ 10 or nesting > 3: could it be split into smaller functions with one intent each? |
-| `complexity-coverage` | Every changed function with **measured** coverage and CRAP ≥ 30, or with **unknown** coverage and complexity ≥ 10: which tests cover its branches? An upper-bound CRAP alone ([metrics §2.4](design-code-quality-metrics.md#24-crap)) is shown in Measurements but asks nothing |
+| `split-function` | Every changed function with complexity ≥ 10 or nesting > 3: could it be split into smaller functions with one intent each? The question says, per metric over its limit, whether the excess is **inherited** from the base, **made worse** by the change or **introduced** by it ([§6.8](#68-measurements)) |
+| `complexity-coverage` | Every changed function with **measured** coverage and CRAP ≥ 30, or with **unknown** coverage and complexity ≥ 10: which tests cover its branches? The question gives a modified function's base complexity and where the value comes from. An upper-bound CRAP alone ([metrics §2.4](design-code-quality-metrics.md#24-crap)) is shown in Measurements but asks nothing |
 | `weak-test` | Each surviving mutant: which assertion would fail when `n > max` at `path:line` becomes `n <= max`, or `true` becomes `false`? |
 
 Questions carry no severity or verdict ([§6.5](#65-deterministic-validation)).
+N1 is the one answer that concludes, on evidence ([§7.5](#75-the-necessity-question-n1)).
+The per-item `purpose` questions remain beside N1: N1 judges whether the
+problem the pull request claims is real, a `purpose` question asks why one
+change item exists, so where the report-level purpose is stated and an item's
+is not, both are asked. A later version may let a stated report-level purpose
+settle the items it covers.
 
 ### 7.2 Deterministic groundwork
 
@@ -797,7 +848,8 @@ The answers are checked as follows.
 ### 7.4 Output: one file
 
 **Decision:** the first layer writes one human-readable file,
-`.graphloom/review/review.md`, with three parts: **Report**, then
+`.graphloom/review/review.md`, with four parts: **Necessity** (N1's answer,
+first, [§7.5](#75-the-necessity-question-n1)), then **Report**, then
 **Measurements**, then **Q&A**. The user asked for the first step to hold the
 report, the questions and the answers together, and one file is read in one
 pass. Each question sits with its answer. The machine-readable copies are
@@ -859,6 +911,118 @@ Questions keep stable ids (`Q<n>`) in the ledger. On a later head:
 - a question the maintainer dropped is never asked again.
 
 The delta section lists new, changed and closed Q&A entries.
+
+### 7.5 The necessity question N1
+
+The first question to answer is whether the pull request is necessary: did it
+fix a real thing? A change whose problem does not exist, or whose fix
+contradicts the system's design, is not worth the rest of the questions. A live
+example is [apache/skywalking-banyandb#1443](https://github.com/apache/skywalking-banyandb/pull/1443):
+it replies to a write only after the groups are flushed, so the write waits on
+flushing, and BanyanDB's write path design has a write return once it is
+buffered, with a background worker flushing it.
+
+N1 is a required question of type `necessity`, always **first**, before every
+other question, in the plugin's own wording. Its answer has three parts, each
+with evidence, and a conclusion.
+
+| Part | The answerer must |
+|---|---|
+| 1. **Is the problem real on the base?** | Quote the claimed problem from the pull request's title, body or a commit message (the quote must match the pinned text, as a stated purpose does). Trace the base behavior through the **base code**: each trace step cites `path:line` in the base tree. Say whether the claimed failure can happen on the base (`yes`, `no`, `unclear`). A failing test on the base is optional evidence; this version has no mechanism to run one (it arrives with the P4 reproducing tests), so the answer says `not attempted: no reproduction mechanism in this version` and rests on the trace |
+| 2. **Does the fix fit the system's design?** | Search the repository's **design and architecture documents** (the profile's `questions.designDocs` globs, its `context` documents, and the repository's `docs/`) and the code comments that state intent. List every search with its hit count, found or not. Cite the **design statement** and the **changed lines** and say whether the change `preserves` or `breaks` them, is `unrelated`, or that no design statement is `not stated` (for #1443: does replying after the flush loop make the write wait on flushing, against the write path design?) |
+| 3. **Is there a simpler or existing way?** | Say whether the caller, another layer or an existing mechanism already handles it, or the fix belongs elsewhere, and cite where |
+
+**Conclusion**, one line with its rationale: `necessary`, `questionable`,
+`unnecessary` or `needs author`. This is the one answer allowed to conclude,
+and it is still a Q&A answer: it carries no severity and gives no verdict on the
+pull request. The deterministic rules hold it to its evidence
+(`src/necessity.ts`):
+
+- `unnecessary` needs a **ground it cites**: the claimed failure cannot happen
+  (`canHappen: no`, traced), the change breaks a cited design statement
+  (`effect: breaks`, with the statement and the changed lines), or an existing
+  way is cited.
+- `necessary` needs the failure shown possible (traced), no broken design
+  statement and no existing way.
+- Neither is allowed when the pull request's text states no problem to quote:
+  the answer is `questionable` or `needs author`.
+- Every quote matches the pull request's text, every citation resolves in the
+  tree it names (the same verification as every answer, with its own command
+  ids, `cite-n-<n>`), and the design searches are listed.
+
+**The checker.** The answer checker, on a harness other than the answerer's,
+verifies each cited design statement (does the document say what is quoted, and
+does it state that intent?), each trace step (does the base code do what the
+step says, and does the trace show what is claimed?), the changed lines, the
+alternatives and the conclusion, with searches of its own over the base tree and
+the documents. It returns `supported`, `partial` or `unsupported`. An
+`unsupported` N1 goes back to the answerer **once**, with the checker's note,
+and is checked again. If it is still unsupported its conclusion becomes
+`questionable` (with both statements recorded, and status `needs author`).
+
+**The skip rule.** When N1 concludes `unnecessary` **and the checker supports
+it** (`supported`; `partial` does not count), the graph asks no further
+question. The questioner and the answerer do not run, the Questions and
+Answers stages complete with only N1, and `review.md` shows N1's answer, the
+Report, the Measurements and then "Remaining questions skipped: the change was
+judged unnecessary (see N1)." `questionable` and `needs author` never skip.
+
+**Where it runs.** N1 is answered and checked in the Questions stage, before
+the questioner, so that a skipped run never pays for the questioner and the
+answerer's other work. Its checked answer and the decision it led to are then
+written by a graph command, `necessity.json` (`pr-necessity-v1`), whose bytes are
+evidence. The Answers stage and the validators read the decision from that
+record, because the checker's own result is review evidence that a later
+review supersedes. A validator accepts only a decision the recorded answer
+allows. The record is evidence for the stage's requirement, so
+`questions-complete` is bound with `independence: separate-reviewer`: the
+controller admits it only when N1's check is the latest review and comes from a
+read-only review job.
+
+**Operator override.** An operator can ask every question anyway with
+`graphloom task new … --all-questions`, which writes `Report on … at <sha>,
+asking every question.` The graph asks N1 first, records the conclusion, and
+asks everything as if N1 had not skipped; the record says the skip was
+overridden, and `review.md` says so. Why a request option and not an approval:
+approvals gate an effect or a stage the run stops at ([§11](#11-approvals)),
+and a pause after every N1 would defeat the skip; the skip is decided
+mid-run from evidence, and the stage list and receipts are fixed once a stage
+is accepted, so there is no stage to reopen after the fact. The request is
+where `advance` already reads the run's mode ([§2](#2-modes-and-operator-flow)),
+the task file is where the operator's intent is recorded before the run
+starts, and an override only asks for more, so it needs no authority the run
+does not have. An operator who changes their mind after a skipped run starts a
+new task for the same head with the flag.
+
+**Rendering.** N1 renders at the **top** of `review.md`, before the Report:
+
+````markdown
+# Necessity
+**N1 — Is this change necessary?** Conclusion: **unnecessary**. Replying only after the groups are flushed makes the write wait on flushing, against the write path design, which acknowledges a write once it is buffered and flushes in the background.
+Checker: supported. Remaining questions skipped: the change was judged unnecessary (see N1).
+
+## 1. Is the problem real on the base?
+Claimed: A write batch whose events all fail was acknowledged as a success, so the sender never learns of the failure. — "A write batch whose events all fail used to be acknowledged as a success." (pull request body)
+Can the claimed failure happen on the base: **yes**. The failure can happen as described: the reply does not depend on what was stored. …
+1. Rev handles each event and only logs a failure; nothing is kept for the reply — `banyand/stream/write_standalone.go:12-31` "w.l.Error()…"
+2. After the loop Rev flushes the groups and returns an empty reply whatever failed — `banyand/stream/write_standalone.go:32-34` "w.flushGroups()"
+Reproduction: not attempted: no reproduction mechanism in this version
+
+## 2. Does the fix fit the system's design?
+Effect: **breaks**. The design says the write is buffered as a memory part and a background worker flushes it later, so a write returns before flushing. The change decides the reply after the flush loop, so the reply waits on flushing, which the design does not allow.
+- Design statement: `docs/concept/tsdb.md:172` "A background worker periodically flushes the memory part to disk."
+- Changed lines: head `banyand/stream/write_standalone.go:45-47` "if stored == 0 && firstErr != nil {"
+Searched: `write path|flush|acknowledg` (base) → 9 hits; …
+
+## 3. Is there a simpler or existing way?
+None found. …
+````
+
+(from the `necessity-unnecessary` rehearsal scenario). The Q&A part then
+reads "N1 is answered above, under Necessity" and, when skipped, the skip
+note. `qa.json` records N1 as the first question with its structured answer,
+and a `necessity` object with the conclusion, the decision and whether the
+rest was skipped.
 
 ## 8. The review layer
 
@@ -1643,8 +1807,8 @@ the review base session ([§8.1](#81-review)).
 | `reporter` | `claude-code` | read | Writes the neutral report and the draft summary |
 | `report-checker` | `codex` | read | `distinctFrom: ["reporter"]` |
 | `questioner` | `codex` | read | `distinctFrom: ["reporter"]`. Asks only |
-| `answerer` | `claude-code` | read | `distinctFrom: ["questioner"]`. Claude Code or Codex only. Answers from the whole codebase |
-| `answer-checker` | `codex` | read | `distinctFrom: ["answerer"]` |
+| `answerer` | `claude-code` | read | `distinctFrom: ["questioner"]`. Claude Code or Codex only. Answers N1 first, in the Questions stage (`necessity-v1`), then the other questions from the whole codebase |
+| `answer-checker` | `codex` | read | `distinctFrom: ["answerer"]`. Verifies N1's cited design statements, trace steps and conclusion, then the other answers |
 | `reviewer-correctness` | the answerer's | read | `sameAs: "answerer"`. Correctness passes; writes reproducing tests |
 | `reviewer-maintainability` | the answerer's | read | `sameAs: "answerer"`. Maintainability passes |
 | `reviewer-security` | the answerer's | read | `sameAs: "answerer"`. Security passes; writes reproducing tests |
@@ -1845,7 +2009,10 @@ recorded, so they do not decide CI verdicts.
 |---|---|---|
 | `report` | A PR adds a proto field, a flag, a Go module and a cron schedule, and deletes a file; `--decline review-layer` | `succeeded`; each fact cited in its section; empty sections say None; zero GitHub writes |
 | `report-corrections` | The reporter misses a file, returns an item with a `severity` property, and cites outside the diff; one item is unsupported | Corrections name all three (the extra property is refused by the contract); the item is removed and its file lands in `other` |
-| `state-lifecycle` | A change modelled on live PR #1443: a write callback declares `stored` and `firstErr`, sets `firstErr` on three failure paths, increments `stored`, and replies with an error when nothing was stored; plus a changelog line | One item in `features` (not one per hunk) citing every location by line range, with the lifecycle of `stored` (initial 0, one transition, one read) and of `firstErr` (initial nil, three transitions, one read), a three-row before/after table and a stated purpose; the changelog entry in `other`; a claim check that finds one transition unsupported drops that entry only, keeps the item, and records it |
+| `state-lifecycle` | (also base → head) A change modelled on live PR #1443: a write callback declares `stored` and `firstErr`, sets `firstErr` on three failure paths, increments `stored`, and replies with an error when nothing was stored; plus a changelog line | One item in `features` (not one per hunk) citing every location by line range, with the lifecycle of `stored` (initial 0, one transition, one read) and of `firstErr` (initial nil, three transitions, one read), a three-row before/after table and a stated purpose; the changelog entry in `other`; a claim check that finds one transition unsupported drops that entry only, keeps the item, and records it; the modified `Rev` is measured at the base too, so its row reads `7 → 12 (over the limit of 10: introduced by the pull request)` and the `split-function` question says it was introduced; a base file that cannot be read leaves the head value with the reason |
+| `necessity-unnecessary` | The `state-lifecycle` change with a design statement (BanyanDB's `docs/concept/tsdb.md` write path: a write is buffered and a background worker flushes it): N1 finds the problem real but the change decides the reply after the flush loop, which breaks that statement; the checker supports it | N1 concludes `unnecessary` with the design statement and the changed lines cited; only N1 is asked and answered (no questioner, no other answer); `review.md` shows N1 first, then the Report, the Measurements and "Remaining questions skipped…"; `necessity.json` records the skip; every receipt is valid |
+| `necessity-disputed` | As above, but the checker refutes the answer twice (the cited statement is about the shard's buffer, not this reply) | One correction, then N1 is `questionable` (status `needs author`, both statements recorded) and **every** question is asked |
+| `necessity-necessary` | A modified function; N1 finds the failure possible, the design untouched and nothing existing | N1 is `necessary`, first in `qa.json`, and every other question follows; nothing is skipped |
 | `report-delta` | Seeded ledger with a report at L; rebased with one new commit | A since-L section with that commit's facts and items, then the full report |
 | `answer-finds-existing-helper` | The PR adds `ParseTTL`; the base has `ParseDuration`, outside any path the PR touches | `existing-equivalent` answered with `ParseDuration`'s `path:line`, its call sites and the search; checker `supported`; status `answered`, not posted |
 | `answer-no-library-with-whole-repo-search` | The PR adds a back-off helper; no declared dependency or internal package provides one | `reuse-library` answered "none found", listing the name, signature and token searches over the whole base tree and every go.mod entry with its source status; checker `supported` |
@@ -1982,6 +2149,31 @@ pr-review:
 - Conversations are recorded only into a stopped run, so a chat is captured at
   `report ready` (the intended place); while the run is running the fork stays
   in the agent's own store.
+
+### Version 0.3: the necessity question and base → head metrics
+
+`examples/plugins/pr-review` 0.3 adds, without changing the stage list:
+
+- **N1** ([§7.5](#75-the-necessity-question-n1)) in the Questions stage, before
+  the questioner. Its contract is `necessity-v1` (`necessity-revision-v1` for
+  the one correction); plugin code turns it into an ordinary answer so its
+  citations are verified (`cite-n-<n>`), the checker (`answer-check-v1`) judges
+  it and the Q&A holds it. The checked answer and the decision are written by
+  `necessity-write` to `necessity.json`. `questions-complete` is bound
+  `separate-reviewer`. The Answers stage reads the record, answers only the
+  questions after N1, and writes `review.md` with the Necessity part in front
+  of the Report. When the decision is `skip`, the questioner and the answerer
+  never run. The override is `task new … --all-questions` (request suffix).
+  A `needs author` or `questionable` N1 still asks every question.
+- **`questions.designDocs`**, the profile's design-document globs.
+- **Base → head** ([§6.8](#68-measurements)): `base-file-<n>` and
+  `static-base-<language>-<n>` commands in the Report stage, and a
+  `base` value on each modified record. A base file over about 60 KB is not
+  measured at the base (its row shows the head value and says why).
+- **Not built:** a failing test on the base as evidence for N1 (the P4
+  reproducing tests); linked issues are still not read, so N1 quotes the title,
+  body or a commit message; the per-item `purpose` questions are not merged with
+  N1's problem statement ([§7.1](#71-questions)).
 
 ### Wave 3a: what is implemented, and how it differs
 

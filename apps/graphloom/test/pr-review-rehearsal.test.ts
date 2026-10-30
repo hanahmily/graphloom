@@ -78,7 +78,7 @@ describe.skipIf(GO === undefined)("graphloom check and rehearse on pr-review wit
     expect(report.supervisor).toMatchObject({ status: "selected", harness: "pi", source: "plugin" });
   }, 60_000);
 
-  for (const scenario of ["happy", "report", "report-corrections", "injection", "complex-function", "sandbox-unavailable", "answer-finds-existing-helper", "answer-no-library-with-whole-repo-search", "answer-checker-contradicts", "needs-author-purpose", "purpose-stated", "missing-test", "crap-upper-bound", "state-lifecycle"]) {
+  for (const scenario of ["happy", "report", "report-corrections", "injection", "complex-function", "sandbox-unavailable", "answer-finds-existing-helper", "answer-no-library-with-whole-repo-search", "answer-checker-contradicts", "needs-author-purpose", "purpose-stated", "missing-test", "crap-upper-bound", "state-lifecycle", "necessity-unnecessary", "necessity-disputed", "necessity-necessary"]) {
     it(`reaches ready for the ${scenario} scenario: Fetch, Report, Questions and Answers accepted, then the run stops final at "report ready"`, async () => {
       const env = await ready();
       const report = await rehearse(env.taskPath, { scenario, offline: true, commands: "stub" });

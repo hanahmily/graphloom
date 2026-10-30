@@ -10,6 +10,8 @@ export interface PullRequest {
   number: number;
   /** The head commit the run reports on: 40 hex digits. */
   head: string;
+  /** The operator asked for every question, whatever N1 concludes (`task new … --all-questions`, design §7.5). */
+  askAll?: true;
 }
 
 /**
@@ -20,9 +22,9 @@ export interface PullRequest {
  */
 export function requestedPull(request: string, profile: Pick<Profile, "project">): PullRequest | { problem: string } {
   const text = request.trim();
-  const m = /^(Report|Review) on (?:([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)#(\d+)|https:\/\/github\.com\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\/pull\/(\d+)) at ([0-9a-f]{40})\.?$/.exec(text);
+  const m = /^(Report|Review) on (?:([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)#(\d+)|https:\/\/github\.com\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\/pull\/(\d+)) at ([0-9a-f]{40})(, asking every question)?\.?$/.exec(text);
   if (m === null) {
-    return { problem: `the request must be "Report on <owner>/<repo>#<N> at <40-hex head commit>." (graphloom task new pr-review writes it), got ${JSON.stringify(text.slice(0, 200))}` };
+    return { problem: `the request must be "Report on <owner>/<repo>#<N> at <40-hex head commit>[, asking every question]." (graphloom task new pr-review writes it), got ${JSON.stringify(text.slice(0, 200))}` };
   }
   if (m[1] === "Review") {
     return { problem: 'Review mode continues into the review layer, which this version of pr-review does not have; ask for "Report on …"' };
@@ -34,5 +36,5 @@ export function requestedPull(request: string, profile: Pick<Profile, "project">
     return { problem: `the request names ${owner}/${repo}, but the profile's project is ${profile.project}` };
   }
   if (!Number.isSafeInteger(number) || number < 1) return { problem: `the pull request number ${m[4] ?? m[7]} is not valid` };
-  return { mode: "report", owner, repo, number, head: m[8]! };
+  return { mode: "report", owner, repo, number, head: m[8]!, ...(m[9] !== undefined ? { askAll: true as const } : {}) };
 }

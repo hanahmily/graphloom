@@ -6,7 +6,7 @@ import { evidencePull } from "../src/analysis.js";
 import { answerProblems, functionOf, readAnswerCheck, verificationPlan, type Answer } from "../src/answers.js";
 import { GO_PACK, TS_PACK } from "../src/packs.js";
 import { nameVariants, nameWords, planFor, rareTokens, signaturePattern, signatureTypes, tokenPopulation, excludeSpecs } from "../src/queries.js";
-import { answerContext, qaContext, questionSet, questionerFlow, type QaContext } from "../src/qaflow.js";
+import { afterNecessity, answerContext, qaContext, questionSet, questionerFlow, type QaContext } from "../src/qaflow.js";
 import { finalQuestions, quoteInPinned, requiredQuestions, statedPurposes, type QuestionerOutput } from "../src/questions.js";
 import { jaccard, shingles, similarity, tokensOf } from "../src/similarity.js";
 import { extractSymbols, type SymbolDef } from "../src/symbols.js";
@@ -396,7 +396,8 @@ describe("the verification commands fit the command executor's input contract", 
 
 describe("reading the answer checker", () => {
   const { ctx } = contextOf("missing-test");
-  const set = questionSet(ctx, undefined);
+  // The answers after N1, whose check has its own flow (necessity.test.ts).
+  const set = { questions: afterNecessity(questionSet(ctx, undefined)) };
   const answers = new Map(set.questions.map((x) => [x.id, { question: x.id, none_found: x.type === "existing-equivalent" } as Answer] as const));
 
   it("leaves a question unchecked when it has no verdict, or a none-found or test answer has no searches of the checker's own", () => {

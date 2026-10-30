@@ -20,7 +20,8 @@ import { matchesGeneratedGlob } from "./metrics/generated.js";
 import type { FullPack } from "./packs.js";
 import type { MetricsRecord } from "./metrics/record.js";
 import { crapRounded } from "./metrics/crap.js";
-import type { Question } from "./questions.js";
+import { NECESSITY_SCHEMA, NECESSITY_REVISION_SCHEMA_NAME, NECESSITY_SCHEMA_NAME, necessityAnswer, necessityProblems, type Necessity } from "./necessity.js";
+import type { PinnedText, Question } from "./questions.js";
 import type { ReportView } from "./reportview.js";
 import { packOf, type SymbolDef } from "./symbols.js";
 
@@ -142,6 +143,8 @@ export interface Answer {
   inventory: Array<{ name: string; version: string }>;
   metrics: Array<{ function: string; path: string; name: "complexity" | "nesting" | "crap"; value: number }>;
   proposal: Proposal;
+  /** The structured necessity answer, on N1 alone (design §7.5). */
+  necessity?: Necessity;
 }
 export interface AnswersOutput {
   answers: Answer[];
@@ -158,6 +161,8 @@ export interface AnswerContext {
   groundwork: Groundwork;
   view: ReportView;
   packs: readonly FullPack[];
+  /** The pull request's own text, which a necessity answer's quotes must match. */
+  pinned?: readonly PinnedText[];
 }
 
 const isRelative = (p: string): boolean => p !== "" && !p.startsWith("/") && !p.split("/").some((s) => s === ".." || s === "") && !/[\n\u0000|]/.test(p);
@@ -178,7 +183,7 @@ export function functionOf(q: Question, ctx: Pick<AnswerContext, "groundwork" | 
   return undefined;
 }
 
-const NEEDS_OWN_SEARCH: ReadonlySet<string> = new Set(["missing-test", "complexity-coverage", "weak-test"]);
+const NEEDS_OWN_SEARCH: ReadonlySet<string> = new Set(["missing-test", "complexity-coverage", "weak-test", "necessity"]);
 /** Whether the checker must run searches of its own for this answer: every "none found", and every claim about a covering test. */
 export const needsOwnSearch = (q: Question, a: Pick<Answer, "none_found">): boolean => a.none_found || NEEDS_OWN_SEARCH.has(q.type);
 
@@ -211,7 +216,8 @@ function answerProblemsOf(a: Answer, q: Question, ctx: AnswerContext, dirs: read
   const at = a.question;
   if (a.answer.trim() === "") out.push(`${at}: the answer is empty`);
   if (a.answer.length > MAX_ANSWER_CHARS) out.push(`${at}: the answer is ${a.answer.length} characters, more than ${MAX_ANSWER_CHARS}`);
-  if (a.citations.length > MAX_LIST || a.searches.length > MAX_LIST || a.inventory.length > MAX_LIST * 4 || a.metrics.length > MAX_LIST) out.push(`${at}: more than ${MAX_LIST} citations, searches or metrics (cite the ones that settle it)`);
+  // The necessity answer has its own bounds (necessityProblems): its trace, design statements and changed lines are citations too.
+  if (q.type !== "necessity" && (a.citations.length > MAX_LIST || a.searches.length > MAX_LIST || a.inventory.length > MAX_LIST * 4 || a.metrics.length > MAX_LIST)) out.push(`${at}: more than ${MAX_LIST} citations, searches or metrics (cite the ones that settle it)`);
   if (a.citations.length + a.searches.length + a.inventory.length === 0) out.push(`${at}: it has no evidence: cite the code, list the searches run, or name the inventory entries read`);
   a.citations.forEach((c, i) => {
     const where = `${at} citation ${i + 1} (${c.path})`;
@@ -237,6 +243,10 @@ function answerProblemsOf(a: Answer, q: Question, ctx: AnswerContext, dirs: read
   const fn = functionOf(q, ctx);
   const mustNeedAuthor = ["missing-test", "complexity-coverage", "weak-test"].includes(q.type) && !testCited;
   switch (q.type) {
+    case "necessity":
+      if (a.necessity === undefined) out.push(`${at}: the necessity answer is missing`);
+      else out.push(...necessityProblems(a.necessity, ctx.pinned ?? []));
+      break;
     case "purpose":
       if (a.status === "answered" && a.citations.length === 0) out.push(`${at}: a purpose is answered only from cited code, comments or documents; otherwise it needs the author`);
       break;
@@ -315,6 +325,21 @@ export function parseAnswers(output: unknown): { answers: Answer[] } | { problem
   return shape.length > 0 ? { problems: shape.slice(0, 20) } : { answers: (output as AnswersOutput).answers };
 }
 
+/** The necessity result (`necessity-v1`) as the one answer N1, or what the contract refuses in it. */
+export function parseNecessity(output: unknown): { answers: Answer[] } | { problems: string[] } {
+  const shape = validateResultShape(output, NECESSITY_SCHEMA as unknown as Record<string, unknown>);
+  return shape.length > 0 ? { problems: shape.slice(0, 20) } : { answers: [necessityAnswer(output as Necessity)] };
+}
+
+/** Which answerer the flow follows: the answers to the questions, or the necessity answer that comes before them. */
+export interface AnswerKind {
+  schema: string;
+  revision: string;
+  parse: (output: unknown) => { answers: Answer[] } | { problems: string[] };
+}
+export const ANSWER_KIND: AnswerKind = { schema: ANSWERS_SCHEMA_NAME, revision: ANSWERS_REVISION_SCHEMA_NAME, parse: parseAnswers };
+export const NECESSITY_KIND: AnswerKind = { schema: NECESSITY_SCHEMA_NAME, revision: NECESSITY_REVISION_SCHEMA_NAME, parse: parseNecessity };
+
 // ---- the deterministic verification of citations and names (design §7.3, check 1) ----
 
 export interface VerifyEntry {
@@ -350,13 +375,13 @@ for name in "$@"; do
 done; echo "checked $i"; } > "$GRAPHLOOM_REPORT_FILE"`;
 
 /** The commands that check a set of answers: each citation against its tree, and each split proposal's names against the package. */
-export function verificationPlan(answers: readonly Answer[], ctx: AnswerContext, base: string): VerifyItem[] {
+export function verificationPlan(answers: readonly Answer[], ctx: AnswerContext, base: string, idPrefix: string = COMMAND.cite): VerifyItem[] {
   const out: VerifyItem[] = [];
   const cites: Array<{ question: string; c: Citation }> = [];
   for (const a of answers) for (const c of a.citations) cites.push({ question: a.question, c });
   for (let i = 0; i < cites.length; i += CITES_PER_COMMAND) {
     const chunk = cites.slice(i, i + CITES_PER_COMMAND);
-    const id = `${COMMAND.cite}-${out.length + 1}`;
+    const id = `${idPrefix}-${out.length + 1}`;
     out.push({
       kind: "cite",
       entries: chunk.map(({ question, c }) => ({ question, label: `${c.tree}:${c.path}:${c.start}-${c.end}` })),
@@ -483,9 +508,9 @@ interface Event {
   run: AgentRun;
 }
 
-function events(evidence: readonly EvidenceRecord[]): Event[] {
+function events(evidence: readonly EvidenceRecord[], kind: AnswerKind): Event[] {
   const index = new Map(evidence.map((e, i) => [e.ref, i]));
-  const answerers = [ANSWERS_SCHEMA_NAME, ANSWERS_REVISION_SCHEMA_NAME].flatMap((schema) => agentRuns(evidence, schema).map((run) => ({ at: index.get(run.record.ref) ?? 0, kind: "answerer" as const, run })));
+  const answerers = [kind.schema, kind.revision].flatMap((schema) => agentRuns(evidence, schema).map((run) => ({ at: index.get(run.record.ref) ?? 0, kind: "answerer" as const, run })));
   const checkers = agentRuns(evidence, ANSWER_CHECK_SCHEMA_NAME).map((run) => ({ at: index.get(run.record.ref) ?? 0, kind: "checker" as const, run }));
   return [...answerers, ...checkers].sort((a, b) => a.at - b.at);
 }
@@ -497,7 +522,7 @@ function events(evidence: readonly EvidenceRecord[]): Event[] {
  * harness judges every answer; an unsupported answer goes back once; what is
  * still unsupported after that is `needs author`, with both statements.
  */
-export function answersFlow(evidence: readonly EvidenceRecord[], ctx: AnswerContext, base: string, retryable?: (r: ReturnType<typeof commandRuns>[number]) => boolean): AnswersFlow {
+export function answersFlow(evidence: readonly EvidenceRecord[], ctx: AnswerContext, base: string, retryable?: (r: ReturnType<typeof commandRuns>[number]) => boolean, kind: AnswerKind = ANSWER_KIND, idPrefix: string = COMMAND.cite): AnswersFlow {
   let current: Map<string, Answer> | undefined;
   let original: Map<string, Answer> | undefined;
   let revised = false;
@@ -508,12 +533,12 @@ export function answersFlow(evidence: readonly EvidenceRecord[], ctx: AnswerCont
   let checkTries = 0;
   const refs: string[] = [];
   const all = new Set(ctx.questions.map((q) => q.id));
-  for (const ev of events(evidence)) {
+  for (const ev of events(evidence, kind)) {
     refs.push(ev.run.record.ref);
     if (ev.kind === "answerer") {
-      const revision = ev.run.record.resultSchema === ANSWERS_REVISION_SCHEMA_NAME;
+      const revision = ev.run.record.resultSchema === kind.revision;
       if (ev.run.status !== "completed") continue;
-      const parsed = ev.run.contract?.status === "invalid" ? { problems: ev.run.contract.problems.slice(0, 20) } : parseAnswers(ev.run.output);
+      const parsed = ev.run.contract?.status === "invalid" ? { problems: ev.run.contract.problems.slice(0, 20) } : kind.parse(ev.run.output);
       if ("problems" in parsed) {
         failures += 1;
         pending = { problems: parsed.problems, revision };
@@ -527,7 +552,7 @@ export function answersFlow(evidence: readonly EvidenceRecord[], ctx: AnswerCont
       const merged = new Map(revision ? current : []);
       for (const a of parsed.answers) merged.set(a.question, a);
       if (problems.length === 0) {
-        const v = verificationOutcome(evidence, verificationPlan([...merged.values()], ctx, base));
+        const v = verificationOutcome(evidence, verificationPlan([...merged.values()], ctx, base, idPrefix));
         if (v.state === "checked") problems = v.problems;
       }
       if (problems.length > 0) {
@@ -556,10 +581,10 @@ export function answersFlow(evidence: readonly EvidenceRecord[], ctx: AnswerCont
   if (pending !== undefined) {
     if (failures > MAX_ANSWER_CORRECTIONS) return { state: "supervise", reason: `the answers still fail deterministic validation after ${MAX_ANSWER_CORRECTIONS} corrections: ${pending.problems.slice(0, 3).join("; ")}`, refs: tail };
     const only = pending.revision ? flagged : undefined;
-    return { state: "answerer", kind: "correction", feedback: pending.problems, schema: pending.revision ? ANSWERS_REVISION_SCHEMA_NAME : ANSWERS_SCHEMA_NAME, ...(only !== undefined ? { only } : {}) };
+    return { state: "answerer", kind: "correction", feedback: pending.problems, schema: pending.revision ? kind.revision : kind.schema, ...(only !== undefined ? { only } : {}) };
   }
-  if (current === undefined) return { state: "answerer", kind: "first", feedback: [], schema: ANSWERS_SCHEMA_NAME };
-  const outcome = verificationOutcome(evidence, verificationPlan([...current.values()], ctx, base), retryable);
+  if (current === undefined) return { state: "answerer", kind: "first", feedback: [], schema: kind.schema };
+  const outcome = verificationOutcome(evidence, verificationPlan([...current.values()], ctx, base, idPrefix), retryable);
   if (outcome.state === "missing") return { state: "verify", commands: outcome.commands, answers: current };
   if (outcome.state === "failed") return { state: "supervise", reason: outcome.reason, refs: outcome.refs };
   if (reading === undefined) {
@@ -568,7 +593,7 @@ export function answersFlow(evidence: readonly EvidenceRecord[], ctx: AnswerCont
   }
   if (reading.unsupported.size > 0 && !revised) {
     const feedback = [...reading.unsupported].map(([id, note]) => `${id}: the answer checker found it unsupported: ${note === "" ? "(no note)" : note}`);
-    return { state: "answerer", kind: "revision", feedback, schema: ANSWERS_REVISION_SCHEMA_NAME, only: [...reading.unsupported.keys()] };
+    return { state: "answerer", kind: "revision", feedback, schema: kind.revision, only: [...reading.unsupported.keys()] };
   }
   return { state: "done", final: assemble(ctx.questions, current, original ?? current, reading, revised), refs: tail };
 }

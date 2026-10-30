@@ -369,5 +369,164 @@ export const DOCS: Record<string, unknown> = {
       }
     ],
     "skipped": []
+  },
+  "base:banyand/cmd/server/flags.go": {
+    "schema": "graphloom-metrics-v1",
+    "tool": "gometrics",
+    "records": [
+      {
+        "path": "banyand/cmd/server/flags.go",
+        "function": "server.registerFlags",
+        "startLine": 12,
+        "endLine": 14,
+        "change": "added",
+        "test": false,
+        "complexity": 1,
+        "decisions": [],
+        "nesting": 0,
+        "nestingPath": []
+      }
+    ],
+    "files": [
+      {
+        "path": "banyand/cmd/server/flags.go",
+        "language": "go",
+        "test": false,
+        "functions": [
+          [
+            "server.registerFlags",
+            12,
+            14
+          ]
+        ]
+      }
+    ],
+    "skipped": []
+  },
+  "base:pkg/offline/sync.go": {
+    "schema": "graphloom-metrics-v1",
+    "tool": "gometrics",
+    "records": [
+      {
+        "path": "pkg/offline/sync.go",
+        "function": "offline.Sync",
+        "startLine": 6,
+        "endLine": 17,
+        "change": "added",
+        "test": false,
+        "complexity": 4,
+        "decisions": [
+          {
+            "line": 7,
+            "kind": "for"
+          },
+          {
+            "line": 8,
+            "kind": "if"
+          },
+          {
+            "line": 12,
+            "kind": "case"
+          }
+        ],
+        "nesting": 2,
+        "nestingPath": [
+          {
+            "line": 7,
+            "kind": "for"
+          },
+          {
+            "line": 8,
+            "kind": "if"
+          }
+        ]
+      }
+    ],
+    "files": [
+      {
+        "path": "pkg/offline/sync.go",
+        "language": "go",
+        "test": false,
+        "functions": [
+          [
+            "offline.Sync",
+            6,
+            17
+          ]
+        ]
+      }
+    ],
+    "skipped": []
+  },
+  "base:banyand/stream/write_standalone.go": {
+    "schema": "graphloom-metrics-v1",
+    "tool": "gometrics",
+    "records": [
+      {
+        "path": "banyand/stream/write_standalone.go",
+        "function": "stream.(*writeCallback).Rev",
+        "startLine": 6,
+        "endLine": 34,
+        "change": "added",
+        "test": false,
+        "complexity": 7,
+        "decisions": [
+          {
+            "line": 8,
+            "kind": "if"
+          },
+          {
+            "line": 12,
+            "kind": "for"
+          },
+          {
+            "line": 15,
+            "kind": "case"
+          },
+          {
+            "line": 17,
+            "kind": "case"
+          },
+          {
+            "line": 19,
+            "kind": "if"
+          },
+          {
+            "line": 27,
+            "kind": "if"
+          }
+        ],
+        "nesting": 3,
+        "nestingPath": [
+          {
+            "line": 12,
+            "kind": "for"
+          },
+          {
+            "line": 14,
+            "kind": "switch"
+          },
+          {
+            "line": 19,
+            "kind": "if"
+          }
+        ]
+      }
+    ],
+    "files": [
+      {
+        "path": "banyand/stream/write_standalone.go",
+        "language": "go",
+        "test": false,
+        "functions": [
+          [
+            "stream.(*writeCallback).Rev",
+            6,
+            34
+          ]
+        ]
+      }
+    ],
+    "skipped": []
   }
 };

@@ -47,7 +47,7 @@ describe("the BanyanDB profile", () => {
     ]);
     expect(d.requirements.map((r) => r.id)).toEqual(d.defaultValidators.map((b) => b.requirementId));
     expect(new Set(d.requirements.map((r) => r.id)).size).toBe(9);
-    expect(d.resultContracts!.map((c) => [c.name, c.evidenceKind])).toEqual([["change-report-v1", "other"], ["change-report-revision-v1", "other"], ["claim-check-v1", "review"], ["questions-v1", "other"], ["answers-v1", "other"], ["answers-revision-v1", "other"], ["answer-check-v1", "review"]]);
+    expect(d.resultContracts!.map((c) => [c.name, c.evidenceKind])).toEqual([["change-report-v1", "other"], ["change-report-revision-v1", "other"], ["claim-check-v1", "review"], ["questions-v1", "other"], ["answers-v1", "other"], ["answers-revision-v1", "other"], ["necessity-v1", "other"], ["necessity-revision-v1", "other"], ["answer-check-v1", "review"]]);
   });
 
   it("declares the roles with their distinctFrom pairs, the supervisor preference and the budgets", () => {

@@ -112,7 +112,7 @@ export interface ProfileData {
   environment: { checks: EnvironmentCommand[] };
   report?: { sections: SectionConfig[] };
   symbols?: { packs: SymbolPack[] };
-  questions?: { excludeRoots?: string[]; similarity?: number; maxCandidates?: number };
+  questions?: { excludeRoots?: string[]; similarity?: number; maxCandidates?: number; designDocs?: string[] };
   metrics?: Partial<MetricsConfig>;
   context?: ContextRef[];
   privateRepos?: string[];
@@ -134,7 +134,7 @@ export interface Profile {
   environment: { checks: EnvironmentCommand[] };
   sections: SectionConfig[];
   symbols: SymbolPack[];
-  questions: { excludeRoots: string[]; similarity: number; maxCandidates: number };
+  questions: { excludeRoots: string[]; similarity: number; maxCandidates: number; designDocs: string[] };
   metrics: MetricsConfig;
   context: ContextRef[];
   privateRepos: string[];
@@ -462,17 +462,20 @@ export function parseProfile(config: unknown): Profile {
   const environment = checkEnvironment(p.environment);
   const sections = checkSections(p.report);
   const symbols = checkSymbols(p.symbols);
-  let questions = { excludeRoots: [] as string[], similarity: 0.5, maxCandidates: 5 };
+  let questions = { excludeRoots: [] as string[], similarity: 0.5, maxCandidates: 5, designDocs: [] as string[] };
   if (p.questions !== undefined) {
     need(isObject(p.questions), "questions must be an object");
     const q = p.questions as Record<string, unknown>;
-    onlyKeys(q, "questions", ["excludeRoots", "similarity", "maxCandidates"]);
+    onlyKeys(q, "questions", ["excludeRoots", "similarity", "maxCandidates", "designDocs"]);
     need(q.excludeRoots === undefined || isStrings(q.excludeRoots), "questions.excludeRoots must be a list of paths");
     // They travel in one argument of each search command, which a command allows 4,096 characters.
     need(q.excludeRoots === undefined || (q.excludeRoots as string[]).join("\n").length <= 3_000, "questions.excludeRoots is too long: at most 3,000 characters in all");
     need(q.similarity === undefined || (typeof q.similarity === "number" && q.similarity > 0 && q.similarity <= 1), "questions.similarity must be a number above 0 and at most 1");
     need(q.maxCandidates === undefined || isCount(q.maxCandidates), "questions.maxCandidates must be a positive integer");
-    questions = { excludeRoots: (q.excludeRoots as string[] | undefined) ?? [], similarity: (q.similarity as number | undefined) ?? 0.5, maxCandidates: (q.maxCandidates as number | undefined) ?? 5 };
+    need(q.designDocs === undefined || isStrings(q.designDocs), "questions.designDocs must be a list of repository-relative globs");
+    need(q.designDocs === undefined || (q.designDocs as string[]).every((g) => g.trim() !== "" && !g.startsWith("/") && !g.split("/").includes("..") && !/[\n\u0000]/.test(g)), "questions.designDocs globs are repository-relative, without \"..\" or empty entries");
+    need(q.designDocs === undefined || (q.designDocs as string[]).join("\n").length <= 3_000, "questions.designDocs is too long: at most 3,000 characters in all");
+    questions = { excludeRoots: (q.excludeRoots as string[] | undefined) ?? [], similarity: (q.similarity as number | undefined) ?? 0.5, maxCandidates: (q.maxCandidates as number | undefined) ?? 5, designDocs: (q.designDocs as string[] | undefined) ?? [] };
   }
   const metrics = checkMetrics(p.metrics, { generated: [], coverage: true, mutation: { enabled: true }, files: {} });
   const context = checkContext(p.context);

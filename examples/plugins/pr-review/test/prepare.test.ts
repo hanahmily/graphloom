@@ -48,6 +48,17 @@ describe("prepareTask", () => {
     expect(withBranch.steps[1]).toMatchObject({ refspec: "refs/heads/develop" });
   });
 
+  it("writes --all-questions into the request, which asks every follow-up question even when N1 judges the change unnecessary (design 7.5), and validates", () => {
+    const plan = prepareTask(input(["apache/skywalking-banyandb#7", "--all-questions"])) as { summary: string; steps: Array<Record<string, unknown>> };
+    expect(plan.steps[5]).toMatchObject({ fields: { request: "Report on apache/skywalking-banyandb#7 at ${headSha}, asking every question." } });
+    expect(plan.summary).toBe("report-only review of apache/skywalking-banyandb#7 against main, asking every question even if the change is judged unnecessary");
+    expect(() => validateTaskPlan(plan as never, "pr-review")).not.toThrow();
+    const both = prepareTask(input(["apache/skywalking-banyandb#7", "--review", "--all-questions"])) as { steps: Array<Record<string, unknown>> };
+    expect(both.steps[5]).toMatchObject({ fields: { request: "Review on apache/skywalking-banyandb#7 at ${headSha}, asking every question." } });
+    const plain = prepareTask(input(["apache/skywalking-banyandb#7"])) as { steps: Array<Record<string, unknown>> };
+    expect(plain.steps[5]).toMatchObject({ fields: { request: "Report on apache/skywalking-banyandb#7 at ${headSha}." } });
+  });
+
   it("matches a remote's URL literally: a dot in the repository name is not a wildcard", () => {
     const profile = { name: "p", project: "org/foo.bar", environment: { checks: [] } };
     const plan = prepareTask(input(["org/foo.bar#1"], { profile, repo: { remotes: [{ name: "wrong", url: "https://github.com/org/foo-bar.git" }, { name: "right", url: "https://github.com/org/foo.bar" }], head: "c".repeat(40) } })) as { steps: Array<Record<string, unknown>> };

@@ -50,7 +50,8 @@ binaries and a temporary `HOME`, never the real login; the one live check of
 Claude Code's fork is opt-in (`GRAPHLOOM_LIVE_CLAUDE_FORK=1`).
 
 The proposed `pr-review` graph (a neutral change report, questions and their
-answers on an incoming pull request first; an optional review layer
+answers on an incoming pull request first, the first question being whether the
+change is necessary, which an unnecessary answer ends; an optional review layer
 drafts findings, published only on operator approval) follows the
 [PR-review design](docs/design-pr-review-graph.md); its shared review machinery
 is vendored source, not a dependency.

@@ -18,6 +18,12 @@ export type Coverage =
   | { source: "measured"; covered: number; total: number; unit?: string; provider?: string }
   | { source: "unknown"; reason: string };
 
+/**
+ * The same function's static metrics at the base, for a modified function (design §6.8): measured by the same tool over
+ * the base file's bytes, so a legacy value is not read as the pull request's. The plugin adds it; the tools do not emit it.
+ */
+export type BaseMetrics = { complexity: number; nesting: number; startLine: number; endLine: number; path: string } | { unavailable: string };
+
 /** One measured function. The static tools emit everything but coverage, crap and mutation. */
 export interface MetricsRecord {
   path: string;
@@ -35,6 +41,8 @@ export interface MetricsRecord {
   coverage?: Coverage;
   crap?: number;
   mutation?: unknown;
+  /** A modified function's complexity and nesting at the base, or why they are not known. Absent for an added function. */
+  base?: BaseMetrics;
 }
 
 /** [qualified name, startLine, endLine] */

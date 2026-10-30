@@ -1,6 +1,6 @@
 {
   "name": "banyandb",
-  "description": "Report profile for incoming pull requests to apache/skywalking-banyandb. metrics.sandbox.go.image is golang:1.26.10 (go.mod needs go 1.26.x), pinned by digest; refresh it with docker pull and docker image inspect when go.mod moves. The report.sections routing globs follow the repository's layout as the design maps it (design-pr-review-graph.md 6.2) and are TO CONFIRM against the repository before a live run; a glob that matches nothing only means less routing, the generic detectors still run.",
+  "description": "Report profile for incoming pull requests to apache/skywalking-banyandb. metrics.sandbox.go.image is golang:1.26.10 (go.mod needs go 1.26.x), pinned by digest; refresh it with docker pull and docker image inspect when go.mod moves. The report.sections routing globs follow the repository's layout as the design maps it (design-pr-review-graph.md 6.2) and are TO CONFIRM against the repository before a live run; a glob that matches nothing only means less routing, the generic detectors still run. questions.designDocs names the design and architecture pages (docs/concept and the 0.12.0 streaming and batch designs) that the necessity question N1 reads for what the system says about the behavior a change touches; it was checked against docs/ in apache/skywalking-banyandb at 450c73a3a, so refresh it when those pages move.",
   "project": "apache/skywalking-banyandb",
   "issues": {
     "owner": "apache",
@@ -97,7 +97,18 @@
   "questions": {
     "excludeRoots": ["**/*.pb.go", "**/*.pb.validate.go"],
     "similarity": 0.5,
-    "maxCandidates": 5
+    "maxCandidates": 5,
+    "designDocs": [
+      "docs/concept/tsdb.md",
+      "docs/concept/clustering.md",
+      "docs/concept/persistence-storage.md",
+      "docs/concept/storage-and-format.md",
+      "docs/concept/data-model.md",
+      "docs/concept/rotation.md",
+      "docs/design/README.md",
+      "docs/design/0.12.0/streaming-api/README.md",
+      "docs/design/0.12.0/measure-batch-v2/README.md"
+    ]
   },
   "metrics": {
     "generated": ["**/*.pb.go", "**/*.pb.validate.go", "**/*_mock.go", "**/mock_*.go"],
