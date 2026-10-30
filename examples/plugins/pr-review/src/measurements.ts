@@ -477,11 +477,11 @@ function failingName(entry: string): string {
   return pkg !== null ? `package ${pkg[1]!}` : entry.replace(/^\[FAIL\]\s*/, "");
 }
 
-/** What a non-zero test command says: the failing tests when the report names them, else the generic sentence and the first build error. */
+/** What a non-zero test command says: the failing tests when the report names them, else the generic sentence; the first build error either way. */
 function failureSentence(run: CoverageRunFacts): string {
   const names = [...new Set((run.failing ?? []).map(failingName))];
-  if (names.length > 0) return `the test command exited ${run.exit}; failing: ${names.join("; ")} (coverage is of what ran)`;
   const build = run.buildError !== undefined ? `; first build error: ${run.buildError}` : "";
+  if (names.length > 0) return `the test command exited ${run.exit}; failing: ${names.join("; ")} (coverage is of what ran)${build}`;
   return `the test command exited ${run.exit} (a test failed or a package did not build: coverage is of what ran)${build}`;
 }
 

@@ -710,6 +710,9 @@ esac
     const build = run([], { out: "# example.com/m/pkg/a\\npkg/a/a.go:12:5: undefined: foo\\npkg/a/a.go:13:1: other\\nFAIL\\texample.com/m/pkg/a [build failed]\\n", rc: 1 });
     expect(build.report).toContain("build-error pkg/a/a.go:12:5: undefined: foo\n");
     expect(build.report).not.toContain("other\n");
+    // End to end: go.sh's own build-failure report keeps the compiler error in review.md's sentence.
+    const built = doneOf(coverageState(input({ evidence: [diff, ...ready("go"), goRun(`${build.report}seen pkg/a/a.go\n`)] }))).facts;
+    expect(coverageNotes(built)[0]).toContain("first build error: pkg/a/a.go:12:5: undefined: foo");
     const ok = run([]);
     expect(ok.report).not.toMatch(/^(failed|build-error) /m);
   });
@@ -719,7 +722,7 @@ esac
     const facts = doneOf(coverageState(input({ evidence: [diff, ...ready("go"), goRun(text)] }))).facts;
     expect(facts.runs[0]).toMatchObject({ exit: 1, failing: ["--- FAIL: TestA (0.00s)", "[FAIL] vec QL [BeforeAll] raw [measure-ql, QLB-T02]", "FAIL example.com/m/pkg/a 0.3s"], buildError: "pkg/a/a.go:1:1: boom" });
     const [line] = coverageNotes(facts);
-    expect(line).toContain("; the test command exited 1; failing: TestA; vec QL [BeforeAll] raw [measure-ql, QLB-T02]; package example.com/m/pkg/a (coverage is of what ran).");
+    expect(line).toContain("; the test command exited 1; failing: TestA; vec QL [BeforeAll] raw [measure-ql, QLB-T02]; package example.com/m/pkg/a (coverage is of what ran); first build error: pkg/a/a.go:1:1: boom.");
     expect(line).not.toContain("a test failed or a package did not build");
   });
 
