@@ -13,6 +13,7 @@ import type { FinalAnswer } from "./answers.js";
 import type { Groundwork } from "./groundwork.js";
 import { effectiveConclusion, NECESSITY_ID, SKIPPED_NOTE, type NecessityRecord } from "./necessity.js";
 import type { PurposeRecord, Question } from "./questions.js";
+import { searchLine, withMeasure } from "./searchview.js";
 import type { ReportView } from "./reportview.js";
 import type { PullRequest } from "./request.js";
 import type { SymbolDef } from "./symbols.js";
@@ -73,11 +74,11 @@ export function qaJson(i: QaInput): string {
 function evidenceLine(a: FinalAnswer): string {
   const parts: string[] = [];
   if (a.citations.length > 0) parts.push(`cites ${a.citations.map((c) => `${c.tree === "base" ? "" : `${c.tree} `}\`${c.path}${c.start < 1 ? "" : c.start === c.end ? `:${c.start}` : `:${c.start}-${c.end}`}\`${c.quote.trim() !== "" ? ` "${short(oneLine(c.quote), 70)}"` : ""}`).join(", ")}`);
-  if (a.searches.length > 0) parts.push(`searches ${a.searches.map((s) => `\`${short(oneLine(s.pattern), 80)}\` (${s.scope}) → ${s.hits} hit${s.hits === 1 ? "" : "s"}`).join("; ")}`);
+  if (a.searches.length > 0) parts.push(`searches ${a.searches.map((s) => searchLine(s, 80)).join("; ")}`);
   if (a.inventory.length > 0) parts.push(`inventory ${a.inventory.map((d) => `${d.name}@${d.version}`).join(", ")}`);
   if (a.metrics.length > 0) parts.push(`metrics ${a.metrics.map((m) => `${m.function} (${m.path}) ${m.name} ${m.value}`).join(", ")}`);
   const check = a.check.verdict === "downgraded" ? `downgraded to needs author${a.check.note !== "" ? ` (${oneLine(a.check.note)})` : ""}` : `${a.check.verdict}${a.check.note !== "" ? `: ${oneLine(a.check.note)}` : ""}`;
-  return `  Evidence: ${parts.length === 0 ? "none" : parts.join("; ")}. Checker: ${check}.${a.check.searches.length > 0 ? ` Its own searches: ${a.check.searches.map((s) => `\`${short(oneLine(s.pattern), 60)}\` (${s.scope}) → ${s.hits}`).join("; ")}.` : ""}`;
+  return `  Evidence: ${parts.length === 0 ? "none" : parts.join("; ")}. Checker: ${check}.${a.check.searches.length > 0 ? ` Its own searches: ${a.check.searches.map((s) => searchLine(s, 60)).join("; ")}.` : ""}`;
 }
 
 function proposalLines(a: FinalAnswer): string[] {
@@ -93,6 +94,7 @@ function questionLines(q: Question, a: FinalAnswer | undefined): string[] {
   const lines = [`- **${q.id} [${q.type}]${mark}** ${oneLine(q.text)}`];
   if (a === undefined) return [...lines, "  **A — not answered.**"];
   lines.push(`  **A — ${a.status}${a.proposal.kind === "split" && a.status === "answered" ? " (proposal)" : ""}.** ${oneLine(a.answer)}`, evidenceLine(a), ...proposalLines(a));
+  if (a.notes.length > 0) lines.push(`  Note: ${a.notes.join("; ")}.`);
   if (a.history.length > 1) lines.push(`  Statements before the ${a.check.verdict === "downgraded" ? "downgrade" : "correction"}: ${a.history.map((h, n) => `${n === 0 ? "first" : "corrected"} (${h.status}): "${short(oneLine(h.answer), 160)}"`).join("; ")}.`);
   return lines;
 }
@@ -186,13 +188,14 @@ export function renderNecessity(r: NecessityRecord): string {
     `Effect: **${n.design.effect}**. ${oneLine(n.design.explanation)}`,
     ...n.design.statements.map((s) => `- Design statement: ${cite(s)}`),
     ...n.design.changed.map((s) => `- Changed lines: ${cite(s)}`),
-    `Searched: ${n.design.searches.map((s) => `\`${short(oneLine(s.pattern), 80)}\` (${s.scope}) → ${s.hits} hit${s.hits === 1 ? "" : "s"}`).join("; ")}.`,
+    `Searched: ${n.design.searches.map((s) => searchLine(withMeasure(s, a.searches), 80)).join("; ")}.`,
     "",
     "## 3. Is there a simpler or existing way?",
     `${n.alternatives.exists ? "Yes" : "None found"}. ${oneLine(n.alternatives.explanation)}`,
     ...n.alternatives.citations.map((s) => `- ${cite(s)}`),
-    ...(n.searches.length > 0 ? [`Other searches: ${n.searches.map((s) => `\`${short(oneLine(s.pattern), 80)}\` (${s.scope}) → ${s.hits}`).join("; ")}.`] : []),
-    ...(a.check.searches.length > 0 ? [`The checker's own searches: ${a.check.searches.map((s) => `\`${short(oneLine(s.pattern), 60)}\` (${s.scope}) → ${s.hits}`).join("; ")}.`] : []),
+    ...(n.searches.length > 0 ? [`Other searches: ${n.searches.map((s) => searchLine(withMeasure(s, a.searches), 80)).join("; ")}.`] : []),
+    ...(a.check.searches.length > 0 ? [`The checker's own searches: ${a.check.searches.map((s) => searchLine(s, 60)).join("; ")}.`] : []),
+    ...(a.notes.length > 0 ? [`Note: ${a.notes.join("; ")}.`] : []),
     ...(a.history.length > 1 ? [`Statements before the ${a.check.verdict === "downgraded" ? "downgrade" : "correction"}: ${a.history.map((h, k) => `${k === 0 ? "first" : "corrected"}: "${short(oneLine(h.answer), 160)}"`).join("; ")}.`] : []),
     ...(r.decision.action === "ask-all" && r.decision.override === true ? ["Override: the operator asked for every question, so none was skipped."] : []),
     "",

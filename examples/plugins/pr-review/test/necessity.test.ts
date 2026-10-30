@@ -30,7 +30,7 @@ const base = (over: Partial<Necessity> = {}): Necessity => ({ ...defaultNecessit
 const unnecessaryByDesign = (): Necessity =>
   base({
     conclusion: "unnecessary",
-    design: { statements: [{ path: "docs/concept/tsdb.md", tree: "base", start: 172, end: 172, quote: "background worker" }], changed: [{ path: "a.go", tree: "head", start: 3, end: 4, quote: "x" }], effect: "breaks", explanation: "it waits on the flush", searches: [{ pattern: "flush", scope: "base", hits: 2 }] },
+    design: { statements: [{ path: "docs/concept/tsdb.md", tree: "base", start: 172, end: 172, quote: "background worker" }], changed: [{ path: "a.go", tree: "head", start: 3, end: 4, quote: "x" }], effect: "breaks", explanation: "it waits on the flush", searches: [{ pattern: "flush", tree: "base", paths: [], ignoreCase: false, hits: 2 }] },
   });
 
 describe("the necessity answer's deterministic rules (design 7.5)", () => {

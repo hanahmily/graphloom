@@ -136,7 +136,7 @@ export function checkerInstruction(a: CheckerAssignment): string {
     "- A behavior row (R3.b1): before is what the base code does in that case, after is what the head code does. Judge both from the diff and the files, tracing the cases through the code.",
     "Give a verdict for each: supported when what it says is what the diff or the cited code shows; partial when part of it is shown and part is not, or its citation is wrong; unsupported when the diff does not show it. Check claims only. Do not judge whether the change is good, and do not judge the item's tone or wording.",
     `A supported claim needs one to ${MAX_QUOTES} quotes: path, the line number of the quoted text (on the side the claim cites: head for new text, base for old; for a behavior row, the lines that show its before and after), and text, a verbatim excerpt of at least 8 characters from that line of the diff, copied exactly. The quotes are matched against the diff's own text, so an excerpt that is not in it makes the claim unsupported. For a claim that cites only files with no patch text, and for a stated purpose, give no quotes. For partial and unsupported claims, note says what is missing in one sentence.`,
-    "Return the verdicts of your result: one for every claim id below, none left out.",
+    "Return the verdicts of your result: one for every claim id below, none left out. The item field of each verdict is the bare claim id exactly as listed below (for example R3.s1, never the text after it); the result contract accepts no other value.",
     "",
     "Claims:",
     ...a.targets.map((t) => `${t.id} ${t.text}${t.cites !== undefined ? ` — cites: ${t.cites.map((c) => citeLabel(c)).join(", ")}` : ""}`),

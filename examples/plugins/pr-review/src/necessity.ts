@@ -19,6 +19,7 @@
 import type { Answer, Citation, FinalAnswer, Search } from "./answers.js";
 import type { PinnedText, Question } from "./questions.js";
 import { quoteInPinned } from "./questions.js";
+import { SEARCH_SCHEMA } from "./searches.js";
 
 export const NECESSITY_SCHEMA_NAME = "necessity-v1";
 /** The same shape, asked again after the answer check found part of it unsupported. */
@@ -49,7 +50,6 @@ const CITATION = {
   required: ["path", "tree", "start", "end", "quote"],
   properties: { path: { type: "string" }, tree: { type: "string", enum: ["base", "head"] }, start: { type: "integer" }, end: { type: "integer" }, quote: { type: "string" } },
 } as const;
-const SEARCH = { type: "object", additionalProperties: false, required: ["pattern", "scope", "hits"], properties: { pattern: { type: "string" }, scope: { type: "string", enum: ["base", "head", "dependency", "tests"] }, hits: { type: "integer" } } } as const;
 
 export const NECESSITY_SCHEMA = {
   type: "object",
@@ -88,7 +88,7 @@ export const NECESSITY_SCHEMA = {
         changed: { type: "array", items: CITATION },
         effect: { type: "string", enum: DESIGN_EFFECTS },
         explanation: { type: "string" },
-        searches: { type: "array", items: SEARCH },
+        searches: { type: "array", items: SEARCH_SCHEMA },
       },
     },
     alternatives: {
@@ -97,7 +97,7 @@ export const NECESSITY_SCHEMA = {
       required: ["exists", "explanation", "citations"],
       properties: { exists: { type: "boolean" }, explanation: { type: "string" }, citations: { type: "array", items: CITATION } },
     },
-    searches: { type: "array", items: SEARCH },
+    searches: { type: "array", items: SEARCH_SCHEMA },
   },
 } as const;
 

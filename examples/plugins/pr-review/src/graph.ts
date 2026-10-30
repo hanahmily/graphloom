@@ -20,6 +20,7 @@ import {
   type GraphDefinition,
   type GraphPlugin,
   type JobSpec,
+  type ReferenceSet,
   type Requirement,
   type RunView,
   type ValidationResult,
@@ -72,10 +73,11 @@ import { readInput, snapshotState, type PullFile, type ReadSpec } from "./snapsh
 import { CLAIM_CHECK_SCHEMA_NAME } from "./claims.js";
 import { outputsOf, validatorById } from "./validators.js";
 import { reportWriteCommand, writtenQa, writtenReport } from "./write.js";
-import { ANSWER_CHECK_SCHEMA, ANSWER_CHECK_SCHEMA_NAME, ANSWERS_REVISION_SCHEMA_NAME, ANSWERS_SCHEMA, ANSWERS_SCHEMA_NAME, answersFlow } from "./answers.js";
+import { ANSWER_CHECK_REFERENCES, ANSWER_CHECK_SCHEMA, ANSWER_CHECK_SCHEMA_NAME, ANSWERS_REFERENCES, ANSWERS_REVISION_SCHEMA_NAME, ANSWERS_SCHEMA, ANSWERS_SCHEMA_NAME, answersFlow } from "./answers.js";
 import { sourceDirs } from "./inventory.js";
 import { ledgerRead, priorShowCommand, writtenLedger } from "./ledger.js";
-import { QUESTIONS_SCHEMA, QUESTIONS_SCHEMA_NAME, requiredQuestions } from "./questions.js";
+import { QUESTIONS_REFERENCES, QUESTIONS_SCHEMA, QUESTIONS_SCHEMA_NAME, requiredQuestions, type Question } from "./questions.js";
+import { CLAIM_CHECK_REFERENCES } from "./claims.js";
 import { necessityDecision, necessityQuestion, NECESSITY_ID, NECESSITY_REVISION_SCHEMA_NAME, NECESSITY_SCHEMA, NECESSITY_SCHEMA_NAME, type NecessityRecord } from "./necessity.js";
 import { answerCheckerInstruction, answererInstruction, necessityCheckerInstruction, necessityInstruction, questionerInstruction } from "./qaprompts.js";
 import { afterNecessity, answerContext, answerWrites, necessityFlow, necessityRecordCommand, qaContext, qaOutputs, questionSet, questionerFlow, recordedNecessity, type QaContext } from "./qaflow.js";
@@ -83,6 +85,13 @@ import { afterNecessity, answerContext, answerWrites, necessityFlow, necessityRe
 export { GRAPH_ID, GRAPH_VERSION };
 
 const asSchema = (schema: unknown): Record<string, unknown> => JSON.parse(JSON.stringify(schema)) as Record<string, unknown>;
+
+/** The ids a job's contract field is constrained to: the contract's `enum`, with each id's description for reconciling a value that names the thing instead. */
+const idSet = (ids: readonly string[], describe?: (id: string) => string): ReferenceSet => ({ ids: [...ids], ...(describe !== undefined ? { descriptions: Object.fromEntries(ids.filter((i) => i !== "").map((i) => [i, describe(i)])) } : {}) });
+const oneLineText = (s: string): string => s.replace(/\s+/g, " ").trim();
+/** Per-job id sets for a contract's reference paths; a path with no ids is left unconstrained (an empty enum would allow nothing). */
+const idRefs = (sets: Record<string, ReferenceSet>): Record<string, ReferenceSet> => Object.fromEntries(Object.entries(sets).filter(([, v]) => v.ids.length > 0));
+const questionRefs = (path: string, qs: readonly Question[]): Record<string, ReferenceSet> => idRefs({ [path]: idSet(qs.map((q) => q.id), (id) => oneLineText(qs.find((q) => q.id === id)?.text ?? "")) });
 
 /** The defaults the design gives a pr-review run (design §13.3), under the profile's own and the task's. */
 const DEFAULT_BUDGETS: GraphBudgetDefaults = { agentInvocations: 1_200, jobs: 220, decisions: 240, corrections: 12, activeMs: 4 * 3_600_000, waitMs: 6 * 3_600_000 };
@@ -171,14 +180,14 @@ export function definitionFor(profile: Profile): GraphDefinition {
       { name: REVISION_SCHEMA_NAME, schema: asSchema(CHANGE_REPORT_SCHEMA), evidenceKind: "other" },
       // Kind "review": the claims-checked requirement is judged by an independent reviewer, and the controller
       // admits one only from the review evidence of a read-only review job.
-      { name: CLAIM_CHECK_SCHEMA_NAME, schema: asSchema(CLAIM_CHECK_SCHEMA), evidenceKind: "review" },
-      { name: QUESTIONS_SCHEMA_NAME, schema: asSchema(QUESTIONS_SCHEMA), evidenceKind: "other" },
-      { name: ANSWERS_SCHEMA_NAME, schema: asSchema(ANSWERS_SCHEMA), evidenceKind: "other" },
-      { name: ANSWERS_REVISION_SCHEMA_NAME, schema: asSchema(ANSWERS_SCHEMA), evidenceKind: "other" },
+      { name: CLAIM_CHECK_SCHEMA_NAME, schema: asSchema(CLAIM_CHECK_SCHEMA), evidenceKind: "review", references: [...CLAIM_CHECK_REFERENCES] },
+      { name: QUESTIONS_SCHEMA_NAME, schema: asSchema(QUESTIONS_SCHEMA), evidenceKind: "other", references: [...QUESTIONS_REFERENCES] },
+      { name: ANSWERS_SCHEMA_NAME, schema: asSchema(ANSWERS_SCHEMA), evidenceKind: "other", references: [...ANSWERS_REFERENCES] },
+      { name: ANSWERS_REVISION_SCHEMA_NAME, schema: asSchema(ANSWERS_SCHEMA), evidenceKind: "other", references: [...ANSWERS_REFERENCES] },
       { name: NECESSITY_SCHEMA_NAME, schema: asSchema(NECESSITY_SCHEMA), evidenceKind: "other" },
       { name: NECESSITY_REVISION_SCHEMA_NAME, schema: asSchema(NECESSITY_SCHEMA), evidenceKind: "other" },
       // Kind "review": answers-grounded is judged by an independent reviewer (a read-only review job on another harness).
-      { name: ANSWER_CHECK_SCHEMA_NAME, schema: asSchema(ANSWER_CHECK_SCHEMA), evidenceKind: "review" },
+      { name: ANSWER_CHECK_SCHEMA_NAME, schema: asSchema(ANSWER_CHECK_SCHEMA), evidenceKind: "review", references: [...ANSWER_CHECK_REFERENCES] },
     ],
     stages: [
       { id: FETCH_STAGE, name: "Fetch", requirementIds: [REQUIREMENT_SNAPSHOT, REQUIREMENT_CHECKED_OUT, REQUIREMENT_LEDGER] },
@@ -425,7 +434,7 @@ function refused(job: { problem: string; incompatible?: true }): GraphDecision {
   return supervise({ reason: job.problem }, "escalate a missing worktree path");
 }
 
-function agentJob(ctx: Context, view: RunView, spec: { jobId?: string; stageId?: string; purpose: "diagnostic" | "review"; instruction: string; schema: string; harness: string; assignment: string; continueFrom?: string; readOnlyBinds?: readonly string[] }, files: readonly PullFile[]): JobSpec | { problem: string; incompatible?: true } {
+function agentJob(ctx: Context, view: RunView, spec: { jobId?: string; stageId?: string; purpose: "diagnostic" | "review"; instruction: string; schema: string; harness: string; assignment: string; continueFrom?: string; readOnlyBinds?: readonly string[]; references?: Record<string, ReferenceSet> }, files: readonly PullFile[]): JobSpec | { problem: string; incompatible?: true } {
   const worktree = environmentOutput(view.evidence, ENV_WORKTREE);
   if (worktree === undefined || !path.isAbsolute(worktree)) return { problem: "the environment check recorded no worktree path, which the confinement masks need" };
   const masks = agentConfigMasks(worktree, files.flatMap((f) => [f.path, ...(f.previousPath !== null ? [f.previousPath] : [])]));
@@ -440,6 +449,8 @@ function agentJob(ctx: Context, view: RunView, spec: { jobId?: string; stageId?:
     resultSchema: spec.schema,
     executor: CODING_AGENT,
     input: { assignment: spec.assignment, harness: spec.harness },
+    // The id fields of the contract are constrained to the ids this job lists (an enum in the schema the harness enforces).
+    ...(spec.references !== undefined && Object.keys(spec.references).length > 0 ? { knownReferences: spec.references } : {}),
     // Untrusted-read confinement (design §12.2): home hidden, repository agent configuration masked, no GitHub token.
     confinement: { kind: "bwrap", network: true, mask: masks.masks, binds: (spec.readOnlyBinds ?? []).map((p) => ({ path: p, readOnly: true })) },
     ...(ctx.profile.agentTimeoutMs !== undefined ? { timeoutMs: ctx.profile.agentTimeoutMs } : {}),
@@ -491,7 +502,9 @@ function report(ctx: Context, view: RunView): GraphDecision {
     }
     case "checker": {
       const assignment = checkerInstruction({ pr, snapshot: analysis.snapshot, report: flow.report, targets: claimTargets(flow.report, analysis.ctx), retry: flow.retry });
-      const job = agentJob(ctx, view, { purpose: "review", instruction: "Check the report's claims against the diff", schema: CLAIM_CHECK_SCHEMA_NAME, harness: profile.roles["report-checker"], assignment }, analysis.snapshot.files);
+      const targets = claimTargets(flow.report, analysis.ctx);
+      const references = idRefs({ [CLAIM_CHECK_REFERENCES[0]!]: idSet(targets.map((t) => t.id), (id) => oneLineText(targets.find((t) => t.id === id)?.text ?? "").slice(0, 300)) });
+      const job = agentJob(ctx, view, { purpose: "review", instruction: "Check the report's claims against the diff", schema: CLAIM_CHECK_SCHEMA_NAME, harness: profile.roles["report-checker"], assignment, references }, analysis.snapshot.files);
       if ("problem" in job) return refused(job);
       return dispatchAgent(view, job, `check every report item with a fresh read-only ${harnessName(profile.roles["report-checker"])} session`);
     }
@@ -597,7 +610,8 @@ function measureAndWrite(ctx: Context, view: RunView, analysis: Analysis, flow: 
   if (command === undefined) {
     return stop({ reason: "incompatible task", blocker: "the report is too large for one write command", retryable: false }, "stop: the report does not fit one command");
   }
-  return withPrivate(dispatch(commandJob(REPORT_STAGE, `Write ${REVIEW_MD} and report.json`, { commands: [command] }), "write report.json and the readable review.md"));
+  const idNotes = flow.reading.notes.length > 0 ? `; claim-check ids normalized: ${flow.reading.notes.slice(0, 4).join("; ")}` : "";
+  return withPrivate(dispatch(commandJob(REPORT_STAGE, `Write ${REVIEW_MD} and report.json`, { commands: [command] }), `write report.json and the readable review.md${idNotes}`));
 }
 
 /** Whether a failed command may run again: the operator resumed since it failed. */
@@ -641,7 +655,8 @@ function questions(ctx: Context, view: RunView): GraphDecision {
     case "checker": {
       const answer = nf.answers.get(NECESSITY_ID)!;
       const assignment = necessityCheckerInstruction({ pr, snapshot: c.ctx.analysis.snapshot, question: necessityQuestion(), answer, designDocs: c.ctx.designDocs, context: c.ctx.context, retry: nf.retry });
-      const job = agentJob(ctx, view, { stageId: QUESTIONS_STAGE, purpose: "review", instruction: "Check the necessity answer against the trees", schema: ANSWER_CHECK_SCHEMA_NAME, harness: profile.roles["answer-checker"], assignment }, files);
+      const references = questionRefs(ANSWER_CHECK_REFERENCES[0]!, [necessityQuestion()]);
+      const job = agentJob(ctx, view, { stageId: QUESTIONS_STAGE, purpose: "review", instruction: "Check the necessity answer against the trees", schema: ANSWER_CHECK_SCHEMA_NAME, harness: profile.roles["answer-checker"], assignment, references }, files);
       if ("problem" in job) return refused(job);
       return dispatchAgent(view, job, `check the necessity answer with a fresh read-only ${harnessName(profile.roles["answer-checker"])} session`);
     }
@@ -668,7 +683,10 @@ function questions(ctx: Context, view: RunView): GraphDecision {
       const required = requiredQuestions({ view: c.ctx.view, groundwork: c.ctx.groundwork }, new Map());
       const assignment = questionerInstruction({ pr, snapshot: c.ctx.analysis.snapshot, view: c.ctx.view, groundwork: c.ctx.groundwork, required, feedback: flow.feedback, kind: flow.kind });
       const from = flow.kind === "first" ? undefined : jobSession(view, QUESTIONS_STAGE, QUESTIONER_JOB);
-      const job = agentJob(ctx, view, { jobId: QUESTIONER_JOB, stageId: QUESTIONS_STAGE, purpose: "diagnostic", instruction: "Ask the questions (ask only; never answer)", schema: QUESTIONS_SCHEMA_NAME, harness: profile.roles.questioner, assignment, ...(from !== undefined ? { continueFrom: from } : {}) }, files);
+      const itemIds = c.ctx.view.items.map((i) => i.id);
+      const symbolIds = c.ctx.groundwork.symbols.map((x) => x.id);
+      const references = idRefs({ "purposes[].item": idSet(itemIds), "questions[].item": idSet(itemIds), "questions[].symbol": idSet(["", ...symbolIds]) });
+      const job = agentJob(ctx, view, { jobId: QUESTIONER_JOB, stageId: QUESTIONS_STAGE, purpose: "diagnostic", instruction: "Ask the questions (ask only; never answer)", schema: QUESTIONS_SCHEMA_NAME, harness: profile.roles.questioner, assignment, references, ...(from !== undefined ? { continueFrom: from } : {}) }, files);
       if ("problem" in job) return refused(job);
       return dispatchAgent(view, job, flow.kind === "first" ? "ask the questions (read-only, confined)" : "correct the questions: deterministic validation found problems");
     }
@@ -709,7 +727,8 @@ function answers(ctx: Context, view: RunView): GraphDecision {
       const assignment = answererInstruction({ pr, snapshot: c.ctx.analysis.snapshot, view: c.ctx.view, groundwork: c.ctx.groundwork, questions: rest, kind: flow.kind, feedback: flow.feedback, ...(flow.only !== undefined ? { only: flow.only } : {}), mountedDirs: mounted });
       const from = flow.kind === "first" ? undefined : jobSession(view, ANSWERS_STAGE, ANSWERER_JOB);
       // Untrusted-read confinement, with the dependency source mounted read-only (design §7.3).
-      const job = agentJob(ctx, view, { jobId: ANSWERER_JOB, stageId: ANSWERS_STAGE, purpose: "diagnostic", instruction: "Answer the questions from the whole codebase", schema: flow.schema, harness: profile.roles.answerer, assignment, readOnlyBinds: mounted, ...(from !== undefined ? { continueFrom: from } : {}) }, files);
+      const references = questionRefs(ANSWERS_REFERENCES[0]!, flow.only !== undefined ? rest.filter((q) => flow.only!.includes(q.id)) : rest);
+      const job = agentJob(ctx, view, { jobId: ANSWERER_JOB, stageId: ANSWERS_STAGE, purpose: "diagnostic", instruction: "Answer the questions from the whole codebase", schema: flow.schema, harness: profile.roles.answerer, assignment, readOnlyBinds: mounted, references, ...(from !== undefined ? { continueFrom: from } : {}) }, files);
       if ("problem" in job) return refused(job);
       const why = { first: "answer the questions (read-only, confined, dependency source mounted read-only)", correction: "correct the answers: deterministic validation found problems", revision: "revise the answers: the answer checker did not support some" }[flow.kind];
       return dispatchAgent(view, job, why);
@@ -720,7 +739,7 @@ function answers(ctx: Context, view: RunView): GraphDecision {
       const mounted = sourceDirs(c.ctx.groundwork.inventory);
       const assignment = answerCheckerInstruction({ pr, snapshot: c.ctx.analysis.snapshot, groundwork: c.ctx.groundwork, questions: rest, answers: flow.answers, retry: flow.retry, mountedDirs: mounted });
       // The same dependency source, read-only, so a library or dependency citation can be re-checked where it points.
-      const job = agentJob(ctx, view, { stageId: ANSWERS_STAGE, purpose: "review", instruction: "Check the answers against the trees", schema: ANSWER_CHECK_SCHEMA_NAME, harness: profile.roles["answer-checker"], assignment, readOnlyBinds: mounted }, files);
+      const job = agentJob(ctx, view, { stageId: ANSWERS_STAGE, purpose: "review", instruction: "Check the answers against the trees", schema: ANSWER_CHECK_SCHEMA_NAME, harness: profile.roles["answer-checker"], assignment, readOnlyBinds: mounted, references: questionRefs(ANSWER_CHECK_REFERENCES[0]!, rest) }, files);
       if ("problem" in job) return refused(job);
       return dispatchAgent(view, job, `check every answer with a fresh read-only ${harnessName(profile.roles["answer-checker"])} session`);
     }

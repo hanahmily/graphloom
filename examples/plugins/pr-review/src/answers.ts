@@ -11,11 +11,13 @@
  * what is still unsupported to `needs author`, keeping both statements.
  */
 import { validateResultShape } from "@graphloom/sdk";
+import { createHash } from "node:crypto";
 import type { EnvironmentCommand, EvidenceRecord } from "@graphloom/sdk";
 import { COMMAND } from "./constants.js";
 import { agentRuns, commandRuns, reportText, succeeded, type AgentRun } from "./evidence.js";
 import type { Groundwork } from "./groundwork.js";
 import { sourceDirs } from "./inventory.js";
+import { resolveId } from "./ids.js";
 import { matchesGeneratedGlob } from "./metrics/generated.js";
 import type { FullPack } from "./packs.js";
 import type { MetricsRecord } from "./metrics/record.js";
@@ -23,7 +25,10 @@ import { crapRounded } from "./metrics/crap.js";
 import { NECESSITY_SCHEMA, NECESSITY_REVISION_SCHEMA_NAME, NECESSITY_SCHEMA_NAME, necessityAnswer, necessityProblems, type Necessity } from "./necessity.js";
 import type { PinnedText, Question } from "./questions.js";
 import type { ReportView } from "./reportview.js";
+import { MAX_RERUN_SEARCHES, readSearchReport, searchCommand, searchKey, searchProblems, searchWhere, SEARCH_SCHEMA, type MeasuredSearch, type Search } from "./searches.js";
 import { packOf, type SymbolDef } from "./symbols.js";
+
+export type { MeasuredSearch, Search } from "./searches.js";
 
 export const ANSWERS_SCHEMA_NAME = "answers-v1";
 /** The same shape, asked again after the answer check, so the evidence itself says which result is the correction. */
@@ -42,9 +47,10 @@ export const STATUSES = ["answered", "partially answered", "needs author"] as co
 export type AnswerStatus = (typeof STATUSES)[number];
 export const VERDICTS = ["supported", "partial", "unsupported"] as const;
 export type AnswerVerdict = (typeof VERDICTS)[number];
-const SEARCH_SCOPES = ["base", "head", "dependency", "tests"] as const;
 
-const SEARCH_SCHEMA = { type: "object", additionalProperties: false, required: ["pattern", "scope", "hits"], properties: { pattern: { type: "string" }, scope: { type: "string", enum: SEARCH_SCOPES }, hits: { type: "integer" } } };
+/** The id fields of the answerer's and the checker's contracts: each is constrained, per job, to the ids the assignment lists. */
+export const ANSWERS_REFERENCES = ["answers[].question"];
+export const ANSWER_CHECK_REFERENCES = ["verdicts[].question"];
 
 export const ANSWERS_SCHEMA = {
   type: "object",
@@ -119,11 +125,6 @@ export interface Citation {
   start: number;
   end: number;
   quote: string;
-}
-export interface Search {
-  pattern: string;
-  scope: (typeof SEARCH_SCOPES)[number];
-  hits: number;
 }
 export interface Proposal {
   kind: "none" | "split" | "test" | "assertion";
@@ -219,6 +220,7 @@ function answerProblemsOf(a: Answer, q: Question, ctx: AnswerContext, dirs: read
   // The necessity answer has its own bounds (necessityProblems): its trace, design statements and changed lines are citations too.
   if (q.type !== "necessity" && (a.citations.length > MAX_LIST || a.searches.length > MAX_LIST || a.inventory.length > MAX_LIST * 4 || a.metrics.length > MAX_LIST)) out.push(`${at}: more than ${MAX_LIST} citations, searches or metrics (cite the ones that settle it)`);
   if (a.citations.length + a.searches.length + a.inventory.length === 0) out.push(`${at}: it has no evidence: cite the code, list the searches run, or name the inventory entries read`);
+  for (const s of a.searches) out.push(...searchProblems(s, at, dirs));
   a.citations.forEach((c, i) => {
     const where = `${at} citation ${i + 1} (${c.path})`;
     if (c.start < 1 || c.end < c.start) out.push(`${where}: the lines ${c.start}-${c.end} are not a range`);
@@ -239,7 +241,7 @@ function answerProblemsOf(a: Answer, q: Question, ctx: AnswerContext, dirs: read
     if (truth !== m.value) out.push(`${at}: ${m.function} ${m.name} is ${truth} in its measurement record, not ${m.value}`);
   }
   const testCited = a.citations.some((c) => c.tree !== "dependency" && isTestPath(ctx.packs, c.path));
-  const baseSearches = a.searches.filter((s) => s.scope === "base").length;
+  const baseSearches = a.searches.filter((s) => s.tree === "base").length;
   const fn = functionOf(q, ctx);
   const mustNeedAuthor = ["missing-test", "complexity-coverage", "weak-test"].includes(q.type) && !testCited;
   switch (q.type) {
@@ -255,7 +257,7 @@ function answerProblemsOf(a: Answer, q: Question, ctx: AnswerContext, dirs: read
     case "reuse-library":
       if (a.none_found) {
         const need = q.type === "reuse-library" ? 1 : 3;
-        if (baseSearches < need) out.push(`${at}: a "none found" answer lists the whole-repository searches that found nothing (${need} or more with scope base: names and variants, signatures, key tokens), not ${baseSearches}`);
+        if (baseSearches < need) out.push(`${at}: a "none found" answer lists the whole-repository searches that found nothing (${need} or more over the base tree: names and variants, signatures, key tokens), not ${baseSearches}`);
         const inv = ctx.groundwork.inventory;
         if (q.type === "reuse-library" && a.status === "answered" && (inv.dependencies.some((d) => d.source === undefined) || inv.truncated.length > 0)) {
           out.push(`${at}: ${inv.truncated.length > 0 ? "the dependency inventory is incomplete" : "some declared dependency has no source available here"}, so a "none found" library answer is "partially answered", not "answered"`);
@@ -320,22 +322,38 @@ function isTestPath(packs: readonly FullPack[], path: string): boolean {
 }
 
 /** The result as typed data, or what the contract refuses in it. */
-export function parseAnswers(output: unknown): { answers: Answer[] } | { problems: string[] } {
+export function parseAnswers(output: unknown, listed?: ReadonlySet<string>): ParsedAnswers | { problems: string[] } {
   const shape = validateResultShape(output, ANSWERS_SCHEMA as unknown as Record<string, unknown>);
-  return shape.length > 0 ? { problems: shape.slice(0, 20) } : { answers: (output as AnswersOutput).answers };
+  if (shape.length > 0) return { problems: shape.slice(0, 20) };
+  const notes = new Map<string, string[]>();
+  const answers = (output as AnswersOutput).answers.map((a) => {
+    if (listed === undefined) return a;
+    // The contract's enum should have made the id exact; an id that is not is read only when it begins with one listed id.
+    const r = resolveId(a.question, listed);
+    if (r.id === undefined || r.id === a.question) return a;
+    notes.set(r.id, [...(notes.get(r.id) ?? []), `the answerer's ${r.note ?? `id ${JSON.stringify(a.question)} read as ${r.id}`}`]);
+    return { ...a, question: r.id };
+  });
+  return { answers, notes };
 }
 
 /** The necessity result (`necessity-v1`) as the one answer N1, or what the contract refuses in it. */
-export function parseNecessity(output: unknown): { answers: Answer[] } | { problems: string[] } {
+export function parseNecessity(output: unknown): ParsedAnswers | { problems: string[] } {
   const shape = validateResultShape(output, NECESSITY_SCHEMA as unknown as Record<string, unknown>);
-  return shape.length > 0 ? { problems: shape.slice(0, 20) } : { answers: [necessityAnswer(output as Necessity)] };
+  return shape.length > 0 ? { problems: shape.slice(0, 20) } : { answers: [necessityAnswer(output as Necessity)], notes: new Map() };
+}
+
+/** The answers a result holds, and what was normalized in reading their ids (by question id). */
+export interface ParsedAnswers {
+  answers: Answer[];
+  notes: Map<string, string[]>;
 }
 
 /** Which answerer the flow follows: the answers to the questions, or the necessity answer that comes before them. */
 export interface AnswerKind {
   schema: string;
   revision: string;
-  parse: (output: unknown) => { answers: Answer[] } | { problems: string[] };
+  parse: (output: unknown, listed: ReadonlySet<string>) => ParsedAnswers | { problems: string[] };
 }
 export const ANSWER_KIND: AnswerKind = { schema: ANSWERS_SCHEMA_NAME, revision: ANSWERS_REVISION_SCHEMA_NAME, parse: parseAnswers };
 export const NECESSITY_KIND: AnswerKind = { schema: NECESSITY_SCHEMA_NAME, revision: NECESSITY_REVISION_SCHEMA_NAME, parse: parseNecessity };
@@ -348,8 +366,13 @@ export interface VerifyEntry {
 }
 export interface VerifyItem {
   command: EnvironmentCommand;
-  kind: "cite" | "names";
+  kind: "cite" | "names" | "search";
   entries: VerifyEntry[];
+  /** A `search` item: the search it re-runs, and what each answer reported of it. */
+  search?: Search;
+  reported?: Array<{ question: string; hits: number }>;
+  /** A search the checker reported: its count is measured and shown, but it corrects nobody. */
+  advisory?: true;
 }
 
 const CITE_SCRIPT = String.raw`set -u; base="$1"; shift
@@ -374,7 +397,29 @@ for name in "$@"; do
   if [ -n "$hit" ]; then echo "exists $name"; fi
 done; echo "checked $i"; } > "$GRAPHLOOM_REPORT_FILE"`;
 
-/** The commands that check a set of answers: each citation against its tree, and each split proposal's names against the package. */
+const dirsOf = (ctx: Pick<AnswerContext, "groundwork">): string[] => (ctx.groundwork.inventory !== undefined ? sourceDirs(ctx.groundwork.inventory) : []);
+
+/**
+ * The commands that re-run searches: one per distinct `base` or `head` search, at most MAX_RERUN_SEARCHES, in the
+ * order given. A dependency search is not re-run (its source lies outside the repository), nor is an invalid one
+ * (it is sent back); the ids are content-addressed, so the same search is run once however many answers report it.
+ */
+export function searchItems(list: ReadonlyArray<{ question: string; search: Search }>, base: string, idPrefix: string, dirs: readonly string[], advisory = false): VerifyItem[] {
+  const byKey = new Map<string, { search: Search; reported: Array<{ question: string; hits: number }> }>();
+  for (const { question, search } of list) {
+    if (search.tree === "dependency" || searchProblems(search, "", dirs).length > 0) continue;
+    const key = searchKey(search);
+    const entry = byKey.get(key) ?? { search, reported: [] };
+    entry.reported.push({ question, hits: search.hits });
+    byKey.set(key, entry);
+  }
+  return [...byKey].slice(0, MAX_RERUN_SEARCHES).map(([key, e]) => {
+    const id = `${idPrefix}-s-${createHash("sha1").update(key).digest("hex").slice(0, 10)}`;
+    return { kind: "search" as const, search: e.search, reported: e.reported, ...(advisory ? { advisory: true as const } : {}), entries: e.reported.map((r) => ({ question: r.question, label: e.search.pattern })), command: searchCommand(id, base, e.search) };
+  });
+}
+
+/** The commands that check a set of answers: each citation against its tree, each split proposal's names against the package, and each search they report, re-run. */
 export function verificationPlan(answers: readonly Answer[], ctx: AnswerContext, base: string, idPrefix: string = COMMAND.cite): VerifyItem[] {
   const out: VerifyItem[] = [];
   const cites: Array<{ question: string; c: Citation }> = [];
@@ -399,6 +444,9 @@ export function verificationPlan(answers: readonly Answer[], ctx: AnswerContext,
     const names = a.proposal.splits.map((s) => s.name).filter((s) => /^[A-Za-z_$][\w$]*$/.test(s));
     out.push({ kind: "names", entries: names.map((name) => ({ question: a.question, label: name })), command: { id, argv: ["sh", "-c", NAMES_SCRIPT, id, base, fn.dir, ...names] } });
   }
+  // The searches behind a "none found" answer come first, so they are inside the bound.
+  const ordered = [...answers].sort((x, y) => Number(y.none_found) - Number(x.none_found));
+  out.push(...searchItems(ordered.flatMap((a) => a.searches.map((search) => ({ question: a.question, search }))), base, idPrefix, dirsOf(ctx)));
   return out;
 }
 
@@ -422,11 +470,24 @@ export function verificationOutcome(evidence: readonly EvidenceRecord[], plan: r
     if (!succeeded(run.command)) return { state: "failed", reason: `${item.command.id} did not run: exit ${run.command.exitCode ?? "signal"}: ${(run.command.stderrTail || run.command.stdoutTail).slice(-300)}`, refs: [run.record.ref] };
     const lines = reportText(run).text.split("\n");
     const checked = lines.map((l) => /^checked (\d+)$/.exec(l)).find((m) => m !== null);
-    if (checked === undefined || Number(checked[1]) !== item.entries.length) {
-      problems.push(`${item.command.id} checked ${checked?.[1] ?? "none"} of ${item.entries.length} entries`);
+    const expected = item.kind === "search" ? 1 : item.entries.length;
+    if (checked === undefined || Number(checked[1]) !== expected) {
+      problems.push(`${item.command.id} checked ${checked?.[1] ?? "none"} of ${expected} entries`);
       continue;
     }
-    if (item.kind === "cite") {
+    if (item.kind === "search") {
+      if (item.advisory === true) continue;
+      const read = readSearchReport(lines.join("\n"));
+      const s = item.search!;
+      const named = `the search ${JSON.stringify(s.pattern.length > 80 ? `${s.pattern.slice(0, 79)}…` : s.pattern)} (${searchWhere(s)})`;
+      if (read === undefined) problems.push(`${item.entries[0]?.question ?? "?"}: ${named} was not measured`);
+      else if ("error" in read) problems.push(`${item.entries[0]?.question ?? "?"}: ${named} could not run: ${read.error}`);
+      else {
+        for (const r of item.reported ?? []) {
+          if (r.hits === 0 && read.measured > 0) problems.push(`${r.question}: ${named} is reported as finding nothing (hits 0), but re-running it measured ${read.measured} hit${read.measured === 1 ? "" : "s"} in ${read.files} file${read.files === 1 ? "" : "s"}: an answer cannot rest on it as an absence, and its count is the measured one`);
+        }
+      }
+    } else if (item.kind === "cite") {
       const result = new Map<number, string>();
       for (const l of lines) {
         const m = /^(\d+) (ok|missing|range \d+)$/.exec(l);
@@ -449,6 +510,28 @@ export function verificationOutcome(evidence: readonly EvidenceRecord[], plan: r
   return { state: "checked", problems };
 }
 
+/** What the plugin measured for a search, or why it did not: the lookup the Q&A's final answers use. */
+export type SearchMeasurer = (s: Search) => Pick<MeasuredSearch, "measured" | "files" | "note">;
+
+export function searchMeasurer(evidence: readonly EvidenceRecord[], plan: readonly VerifyItem[], dirs: readonly string[]): SearchMeasurer {
+  const byKey = new Map<string, NonNullable<ReturnType<typeof readSearchReport>>>();
+  for (const item of plan) {
+    if (item.kind !== "search" || item.search === undefined) continue;
+    const run = runWith(evidence, item.command);
+    const read = run !== undefined && succeeded(run.command) ? readSearchReport(reportText(run).text) : undefined;
+    if (read !== undefined) byKey.set(searchKey(item.search), read);
+  }
+  return (s) => {
+    if (s.tree === "dependency") return { note: "not re-run: the dependency's source lies outside the repository, so this count is the agent's own" };
+    const invalid = searchProblems(s, "search", dirs)[0];
+    if (invalid !== undefined) return { note: `not run: ${invalid}` };
+    const read = byKey.get(searchKey(s));
+    if (read === undefined) return { note: `not re-run: only the first ${MAX_RERUN_SEARCHES} distinct searches of one result are re-run (those behind none-found answers first), so this count is the agent's own` };
+    if ("error" in read) return { note: `could not run: ${read.error}` };
+    return { measured: read.measured, files: read.files };
+  };
+}
+
 // ---- the answer checker ----
 
 export interface AnswerReading {
@@ -458,6 +541,10 @@ export interface AnswerReading {
   partial: Map<string, string>;
   unsupported: Map<string, string>;
   searches: Map<string, Search[]>;
+  /** What was normalized in reading the verdicts' ids, by question id. */
+  notes: Map<string, string[]>;
+  /** Verdict ids that matched no question (unknown or ambiguous), which stay unjudged. */
+  ignored: string[];
 }
 
 /** Reads a checker result against the answers it was asked about. */
@@ -466,12 +553,22 @@ export function readAnswerCheck(output: unknown, questions: readonly Question[],
   if (shape.length > 0) return { problems: shape.slice(0, 10) };
   const list = (output as { verdicts: CheckVerdict[] }).verdicts;
   const byQuestion = new Map<string, CheckVerdict>();
+  const listed = new Set(questions.map((q) => q.id));
+  const notes = new Map<string, string[]>();
+  const ignored: string[] = [];
   for (const v of list) {
-    const earlier = byQuestion.get(v.question.trim());
+    // The contract's enum should have made the id exact; one that is not is read only when it begins with one listed id.
+    const r = resolveId(v.question, listed);
+    if (r.id === undefined) {
+      ignored.push(`${JSON.stringify(v.question.length > 60 ? `${v.question.slice(0, 59)}…` : v.question)} (${r.why})`);
+      continue;
+    }
+    if (r.note !== undefined) notes.set(r.id, [...(notes.get(r.id) ?? []), `the checker's ${r.note}`]);
+    const earlier = byQuestion.get(r.id);
     // Two verdicts for one question: the weaker stands.
-    if (earlier === undefined || VERDICTS.indexOf(v.verdict) > VERDICTS.indexOf(earlier.verdict)) byQuestion.set(v.question.trim(), v);
+    if (earlier === undefined || VERDICTS.indexOf(v.verdict) > VERDICTS.indexOf(earlier.verdict)) byQuestion.set(r.id, v);
   }
-  const reading: AnswerReading = { unchecked: [], supported: new Set(), partial: new Map(), unsupported: new Map(), searches: new Map() };
+  const reading: AnswerReading = { unchecked: [], supported: new Set(), partial: new Map(), unsupported: new Map(), searches: new Map(), notes, ignored };
   for (const q of questions) {
     const a = answers.get(q.id);
     const v = byQuestion.get(q.id);
@@ -490,7 +587,11 @@ export function readAnswerCheck(output: unknown, questions: readonly Question[],
 
 /** One answer as the Q&A holds it: the answerer's, with the checker's verdict, and both statements when it was downgraded. */
 export interface FinalAnswer extends Answer {
-  check: { verdict: AnswerVerdict | "downgraded"; note: string; searches: Search[] };
+  /** The searches as the plugin re-ran them: its own count beside the agent's, or why it has none. */
+  searches: MeasuredSearch[];
+  check: { verdict: AnswerVerdict | "downgraded"; note: string; searches: MeasuredSearch[] };
+  /** What was normalized in reading this answer's id and its verdict's, recorded and never silent. */
+  notes: string[];
   /** The statements the answerer made, oldest first, when the answer was corrected. */
   history: Array<{ answer: string; status: AnswerStatus }>;
 }
@@ -531,6 +632,8 @@ export function answersFlow(evidence: readonly EvidenceRecord[], ctx: AnswerCont
   let pending: { problems: string[]; revision: boolean } | undefined;
   let failures = 0;
   let checkTries = 0;
+  let ignored: string[] = [];
+  let idNotes = new Map<string, string[]>();
   const refs: string[] = [];
   const all = new Set(ctx.questions.map((q) => q.id));
   for (const ev of events(evidence, kind)) {
@@ -538,7 +641,7 @@ export function answersFlow(evidence: readonly EvidenceRecord[], ctx: AnswerCont
     if (ev.kind === "answerer") {
       const revision = ev.run.record.resultSchema === kind.revision;
       if (ev.run.status !== "completed") continue;
-      const parsed = ev.run.contract?.status === "invalid" ? { problems: ev.run.contract.problems.slice(0, 20) } : kind.parse(ev.run.output);
+      const parsed = ev.run.contract?.status === "invalid" ? { problems: ev.run.contract.problems.slice(0, 20) } : kind.parse(ev.run.output, all);
       if ("problems" in parsed) {
         failures += 1;
         pending = { problems: parsed.problems, revision };
@@ -561,6 +664,8 @@ export function answersFlow(evidence: readonly EvidenceRecord[], ctx: AnswerCont
         continue;
       }
       current = merged;
+      idNotes = new Map(revision ? idNotes : []);
+      for (const [id, n] of parsed.notes) idNotes.set(id, [...(idNotes.get(id) ?? []), ...n]);
       if (!revision) original = new Map(merged);
       if (revision) revised = true;
       pending = undefined;
@@ -572,6 +677,7 @@ export function answersFlow(evidence: readonly EvidenceRecord[], ctx: AnswerCont
     const read = ev.run.contract?.status === "invalid" ? { problems: ev.run.contract.problems } : readAnswerCheck(ev.run.output, ctx.questions, current);
     if ("problems" in read || read.unchecked.length > 0) {
       checkTries += 1;
+      ignored = "problems" in read ? [] : read.ignored;
       continue;
     }
     reading = read;
@@ -588,29 +694,39 @@ export function answersFlow(evidence: readonly EvidenceRecord[], ctx: AnswerCont
   if (outcome.state === "missing") return { state: "verify", commands: outcome.commands, answers: current };
   if (outcome.state === "failed") return { state: "supervise", reason: outcome.reason, refs: outcome.refs };
   if (reading === undefined) {
-    if (checkTries > MAX_ANSWER_CHECK_RETRIES) return { state: "supervise", reason: `the answer checker did not judge every answer after ${checkTries} tries`, refs: tail };
+    if (checkTries > MAX_ANSWER_CHECK_RETRIES) return { state: "supervise", reason: `the answer checker did not judge every answer after ${checkTries} tries${ignored.length > 0 ? `; verdict ids that matched no question: ${ignored.slice(0, 4).join(", ")}` : ""}`, refs: tail };
     return { state: "checker", answers: current, retry: checkTries > 0 };
   }
   if (reading.unsupported.size > 0 && !revised) {
     const feedback = [...reading.unsupported].map(([id, note]) => `${id}: the answer checker found it unsupported: ${note === "" ? "(no note)" : note}`);
     return { state: "answerer", kind: "revision", feedback, schema: kind.revision, only: [...reading.unsupported.keys()] };
   }
-  return { state: "done", final: assemble(ctx.questions, current, original ?? current, reading, revised), refs: tail };
+  // The searches the checker reported are re-run too, so the Q&A shows measured counts beside its own.
+  const dirs = dirsOf(ctx);
+  const checkerPlan = searchItems([...reading.searches].flatMap(([question, list]) => list.map((search) => ({ question, search }))), base, idPrefix, dirs, true);
+  const measured = verificationOutcome(evidence, checkerPlan, retryable);
+  if (measured.state === "missing") return { state: "verify", commands: measured.commands, answers: current };
+  if (measured.state === "failed") return { state: "supervise", reason: measured.reason, refs: measured.refs };
+  const measure = searchMeasurer(evidence, [...verificationPlan([...current.values()], ctx, base, idPrefix), ...checkerPlan], dirs);
+  return { state: "done", final: assemble(ctx.questions, current, original ?? current, reading, revised, measure, idNotes), refs: tail };
 }
 
 /** The answers as the Q&A holds them: what the checker did not support, after the one correction, is `needs author` with both statements. */
-export function assemble(questions: readonly Question[], current: ReadonlyMap<string, Answer>, original: ReadonlyMap<string, Answer>, reading: AnswerReading, revised: boolean): FinalAnswer[] {
+export function assemble(questions: readonly Question[], current: ReadonlyMap<string, Answer>, original: ReadonlyMap<string, Answer>, reading: AnswerReading, revised: boolean, measure: SearchMeasurer = () => ({}), idNotes: ReadonlyMap<string, string[]> = new Map()): FinalAnswer[] {
   const out: FinalAnswer[] = [];
+  const measured = (list: readonly Search[]): MeasuredSearch[] => list.map((s) => ({ ...s, ...measure(s) }));
   for (const q of questions) {
     const a = current.get(q.id);
     if (a === undefined) continue;
     const first = original.get(q.id);
     const history = revised && first !== undefined && first !== a ? [{ answer: first.answer, status: first.status }, { answer: a.answer, status: a.status }] : [];
-    const searches = reading.searches.get(q.id) ?? [];
+    const searches = measured(reading.searches.get(q.id) ?? []);
+    const notes = [...(idNotes.get(q.id) ?? []), ...(reading.notes.get(q.id) ?? [])];
+    const mine = { ...a, searches: measured(a.searches), notes };
     if (reading.unsupported.has(q.id)) {
-      out.push({ ...a, status: "needs author", check: { verdict: "downgraded", note: reading.unsupported.get(q.id) ?? "", searches }, history: history.length > 0 ? history : [{ answer: a.answer, status: a.status }] });
-    } else if (reading.partial.has(q.id)) out.push({ ...a, check: { verdict: "partial", note: reading.partial.get(q.id) ?? "", searches }, history });
-    else out.push({ ...a, check: { verdict: "supported", note: "", searches }, history });
+      out.push({ ...mine, status: "needs author", check: { verdict: "downgraded", note: reading.unsupported.get(q.id) ?? "", searches }, history: history.length > 0 ? history : [{ answer: a.answer, status: a.status }] });
+    } else if (reading.partial.has(q.id)) out.push({ ...mine, check: { verdict: "partial", note: reading.partial.get(q.id) ?? "", searches }, history });
+    else out.push({ ...mine, check: { verdict: "supported", note: "", searches }, history });
   }
   return out;
 }

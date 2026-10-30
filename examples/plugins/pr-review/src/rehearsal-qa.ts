@@ -10,7 +10,7 @@
  * plugin's own functions, so a scenario cannot drift from the graph.
  */
 import type { RehearsalCommandResult, RehearsalReply } from "@graphloom/sdk";
-import { needsOwnSearch, verificationPlan, type Answer, type CheckVerdict } from "./answers.js";
+import { needsOwnSearch, searchItems, verificationPlan, type Answer, type CheckVerdict, type VerifyItem } from "./answers.js";
 import { COMMAND } from "./constants.js";
 import { effectiveConclusion, necessityAnswer, necessityQuestion, type Necessity } from "./necessity.js";
 import { candidatePlan, type Groundwork } from "./groundwork.js";
@@ -105,7 +105,7 @@ const upper = (s: string): string => s.charAt(0).toUpperCase() + s.slice(1);
 const dirOf = (p: string): string => (p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : ".");
 
 function defaultAnswer(q: Question, sym: SymbolDef | undefined, record: MetricsRecord | undefined, hasDeps: boolean): Answer {
-  const searches = (names: string[]): Answer["searches"] => names.map((pattern) => ({ pattern, scope: "base" as const, hits: 0 }));
+  const searches = (names: string[]): Answer["searches"] => names.map((pattern) => ({ pattern, tree: "base", paths: [], ignoreCase: false as const, hits: 0 }));
   const base: Answer = { question: q.id, answer: "", status: "answered", none_found: false, citations: [], searches: [], inventory: [], metrics: [], proposal: { ...emptyProposal } };
   const name = sym?.name ?? "the function";
   switch (q.type) {
@@ -119,7 +119,7 @@ function defaultAnswer(q: Question, sym: SymbolDef | undefined, record: MetricsR
       return { ...base, answer: `No logic elsewhere in the base or in the pull request duplicates ${name}.`, none_found: true, searches: searches([`\\b${name}\\b`, "signature", "key body tokens"]) };
     case "missing-test": {
       const path = sym?.path ?? record?.path ?? "pkg/x/x.go";
-      return { ...base, answer: `No test references ${name} or its callers: every *_test.go in the base and in the pull request was searched. A test would live beside it, in ${dirOf(path)}.`, status: "needs author", searches: [{ pattern: `\\b${name}\\b`, scope: "tests", hits: 0 }, { pattern: `\\b${name}\\b`, scope: "base", hits: 0 }], proposal: { ...emptyProposal, kind: "test", testFile: `${dirOf(path)}/${stemOf(path)}_test.go`, testName: `Test${upper(name)}`, cases: [{ input: "a typical value", branches: "the main path" }, { input: "an empty or invalid value", branches: "the error path" }] } };
+      return { ...base, answer: `No test references ${name} or its callers: every *_test.go in the base and in the pull request was searched. A test would live beside it, in ${dirOf(path)}.`, status: "needs author", searches: [{ pattern: `\\b${name}\\b`, tree: "base", paths: ["*_test.go"], ignoreCase: false, hits: 0 }, { pattern: `\\b${name}\\b`, tree: "base", paths: [], ignoreCase: false, hits: 0 }], proposal: { ...emptyProposal, kind: "test", testFile: `${dirOf(path)}/${stemOf(path)}_test.go`, testName: `Test${upper(name)}`, cases: [{ input: "a typical value", branches: "the main path" }, { input: "an empty or invalid value", branches: "the error path" }] } };
     }
     case "split-function": {
       const start = sym?.startLine ?? record?.startLine ?? 1;
@@ -141,7 +141,7 @@ function defaultAnswer(q: Question, sym: SymbolDef | undefined, record: MetricsR
       };
     }
     case "complexity-coverage":
-      return { ...base, answer: `No test exercises the branches of ${name}; ${record?.coverage?.source === "measured" ? `the sandbox measured ${record.coverage.covered} of ${record.coverage.total} statements covered` : "its coverage was not measured"}.`, status: "needs author", metrics: record !== undefined ? [{ function: record.function, path: record.path, name: "complexity", value: record.complexity }, ...(record.coverage?.source === "measured" && record.crap !== undefined ? [{ function: record.function, path: record.path, name: "crap" as const, value: record.crap }] : [])] : [], searches: [{ pattern: `\\b${name}\\b`, scope: "tests", hits: 0 }], proposal: { ...emptyProposal, kind: "test", testFile: `${dirOf(sym?.path ?? record?.path ?? "pkg/x/x.go")}/${stemOf(sym?.path ?? record?.path ?? "x.go")}_test.go`, testName: `Test${upper(name)}Branches`, cases: [{ input: "each unit", branches: "the unit path" }] } };
+      return { ...base, answer: `No test exercises the branches of ${name}; ${record?.coverage?.source === "measured" ? `the sandbox measured ${record.coverage.covered} of ${record.coverage.total} statements covered` : "its coverage was not measured"}.`, status: "needs author", metrics: record !== undefined ? [{ function: record.function, path: record.path, name: "complexity", value: record.complexity }, ...(record.coverage?.source === "measured" && record.crap !== undefined ? [{ function: record.function, path: record.path, name: "crap" as const, value: record.crap }] : [])] : [], searches: [{ pattern: `\\b${name}\\b`, tree: "base", paths: ["*_test.go"], ignoreCase: false, hits: 0 }], proposal: { ...emptyProposal, kind: "test", testFile: `${dirOf(sym?.path ?? record?.path ?? "pkg/x/x.go")}/${stemOf(sym?.path ?? record?.path ?? "x.go")}_test.go`, testName: `Test${upper(name)}Branches`, cases: [{ input: "each unit", branches: "the unit path" }] } };
     default:
       return { ...base, answer: "Answered from the code.", searches: searches(["other"]) };
   }
@@ -160,9 +160,9 @@ export function defaultNecessity(title: string): Necessity {
       explanation: "Following the callers of the touched code in the base, nothing else handles the case, so it can happen.",
     },
     reproduction: "not attempted: no reproduction mechanism in this version",
-    design: { statements: [], changed: [], effect: "unrelated", explanation: "No design or architecture statement concerns this behavior.", searches: [{ pattern: "design|architecture|write path", scope: "base", hits: 4 }] },
+    design: { statements: [], changed: [], effect: "unrelated", explanation: "No design or architecture statement concerns this behavior.", searches: [{ pattern: "design|architecture|write path", tree: "base", paths: [], ignoreCase: false, hits: 4 }] },
     alternatives: { exists: false, explanation: "No caller or other layer already handles it, and the change belongs where it is made.", citations: [] },
-    searches: [{ pattern: "callers of the touched code", scope: "base", hits: 3 }],
+    searches: [{ pattern: "callers of the touched code", tree: "base", paths: [], ignoreCase: false, hits: 3 }],
   };
 }
 
@@ -225,7 +225,7 @@ export function qaScenario(i: QaInput): QaScenario {
   const n1Final = n1Revised ?? n1First;
   const n1Verdicts = (round: number, n: Necessity): CheckVerdict[] => {
     const given = nChecks[round];
-    return [{ question: necessityQuestion().id, verdict: given?.verdict ?? "supported", note: given?.note ?? "", searches: [{ pattern: "design|flush|write path|acknowledg", scope: "base", hits: 4 }, { pattern: n.problem.trace[0]?.path ?? "path", scope: "base", hits: 1 }] }];
+    return [{ question: necessityQuestion().id, verdict: given?.verdict ?? "supported", note: given?.note ?? "", searches: [{ pattern: "design|flush|write path|acknowledg", tree: "base", paths: [], ignoreCase: false, hits: 4 }, { pattern: n.problem.trace[0]?.path ?? "path", tree: "base", paths: [], ignoreCase: false, hits: 1 }] }];
   };
   const n1Rounds = [n1Verdicts(0, n1First), ...(n1Revised !== undefined ? [n1Verdicts(1, n1Revised)] : [])];
   const lastN1 = nChecks[n1Rounds.length - 1];
@@ -235,7 +235,7 @@ export function qaScenario(i: QaInput): QaScenario {
     questions.map((q, n) => {
       const a = set[n]!;
       const given = spec.checks?.[round]?.(q, a);
-      const searches = given?.searches ?? (needsOwnSearch(q, a) ? [{ pattern: `\\b${symOf(q)?.name ?? "x"}\\b|test`, scope: "base" as const, hits: 0 }] : []);
+      const searches = given?.searches ?? (needsOwnSearch(q, a) ? [{ pattern: `\\b${symOf(q)?.name ?? "x"}\\b|test`, tree: "base", paths: [], ignoreCase: false as const, hits: 0 }] : []);
       return { question: q.id, verdict: given?.verdict ?? "supported", note: given?.note ?? "", searches };
     });
   const rounds = revised.length > 0 || (spec.checks?.length ?? 0) > 1 ? [verdicts(0, first), verdicts(1, final)] : [verdicts(0, final)];
@@ -270,15 +270,23 @@ export function qaScenario(i: QaInput): QaScenario {
   }
   if (deps.some((d) => d.ecosystem === "go")) commands["dep-source-go-1"] = ok("# end\n");
   const ctx = { questions, groundwork, view, packs };
-  for (const item of verificationPlan(final, ctx, i.mergeBase)) {
+  // A canned verification: citations resolve, and a re-run search measures what the scenario's agent reported (a scenario
+  // that wants a mismatch says so in the search's own hits and its fixture's).
+  const canned = (item: VerifyItem): void => {
+    if (item.kind === "search") {
+      const hits = item.search?.hits ?? 0;
+      commands[item.command.id] = ok(`count ${hits} ${hits > 0 ? 1 : 0}\nchecked 1\n`);
+      return;
+    }
     const lines = item.entries.map((_, n) => (item.kind === "cite" ? `${n + 1} ok` : "")).filter((l) => l !== "");
     commands[item.command.id] = ok(`${lines.join("\n")}${lines.length > 0 ? "\n" : ""}checked ${item.entries.length}\n`);
-  }
+  };
+  for (const set of [first, revised, final]) for (const item of verificationPlan(set, ctx, i.mergeBase)) canned(item);
   const nctx = { questions: [necessityQuestion()], groundwork, view, packs };
-  for (const item of verificationPlan([necessityAnswer(n1First)], nctx, i.mergeBase, COMMAND.citeNecessity)) {
-    const lines = item.entries.map((_, n) => (item.kind === "cite" ? `${n + 1} ok` : "")).filter((l) => l !== "");
-    commands[item.command.id] = ok(`${lines.join("\n")}${lines.length > 0 ? "\n" : ""}checked ${item.entries.length}\n`);
-  }
+  for (const n of [n1First, ...(n1Revised !== undefined ? [n1Revised] : [])]) for (const item of verificationPlan([necessityAnswer(n)], nctx, i.mergeBase, COMMAND.citeNecessity)) canned(item);
+  // The searches the checker reports are re-run too.
+  for (const round of rounds) for (const item of searchItems(round.flatMap((v) => v.searches.map((search) => ({ question: v.question, search }))), i.mergeBase, COMMAND.cite, [], true)) canned(item);
+  for (const round of n1Rounds) for (const item of searchItems(round.flatMap((v) => v.searches.map((search) => ({ question: v.question, search }))), i.mergeBase, COMMAND.citeNecessity, [], true)) canned(item);
   commands["necessity-write"] = ok("written\n");
   commands["qa-write"] = ok("written\n");
   commands["ledger-write"] = ok(`advanced ${"b".repeat(40)}\n`);

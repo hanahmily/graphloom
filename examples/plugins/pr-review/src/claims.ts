@@ -11,6 +11,7 @@
  * before/after table.
  */
 import { validateResultShape } from "@graphloom/sdk";
+import { resolveId } from "./ids.js";
 import { behaviorId, numbered, readId, stateId, transitionId, type Cite, type ReportContext, type ReporterOutput } from "./report.js";
 import type { PullFile } from "./snapshot.js";
 
@@ -29,6 +30,9 @@ export interface Quote {
   line: number;
   text: string;
 }
+
+/** The id field of the claim checker's contract: constrained, per job, to the claim ids the assignment lists. */
+export const CLAIM_CHECK_REFERENCES = ["verdicts[].item"] as const;
 
 export const CLAIM_CHECK_SCHEMA = {
   type: "object",
@@ -110,6 +114,10 @@ export interface ClaimReading {
   supported: Set<string>;
   /** Claims that do not, with why. */
   weak: Map<string, string>;
+  /** What was normalized in reading the verdicts' ids, recorded and never silent. */
+  notes: string[];
+  /** Verdict ids that matched no claim (unknown or ambiguous); those claims stay unjudged. */
+  ignored: string[];
 }
 
 /**
@@ -125,13 +133,23 @@ export function readClaimCheck(output: unknown, targets: readonly ClaimTarget[],
   if (shape.length > 0) return { problems: shape.slice(0, 10) };
   const list = (output as { verdicts: Array<{ item: string; verdict: ClaimVerdict; note: string; quotes: Quote[] }> }).verdicts;
   const byItem = new Map<string, (typeof list)[number]>();
+  const listed = new Set(targets.map((t) => t.id));
+  const notes: string[] = [];
+  const ignored: string[] = [];
   for (const v of list) {
-    const id = v.item.trim();
+    // The contract's enum should have made the id exact; one that is not is read only when it begins with one listed id.
+    const r = resolveId(v.item, listed);
+    if (r.id === undefined) {
+      ignored.push(`${JSON.stringify(v.item.length > 60 ? `${v.item.slice(0, 59)}…` : v.item)} (${r.why})`);
+      continue;
+    }
+    if (r.note !== undefined) notes.push(`the claim checker's ${r.note}`);
+    const id = r.id;
     const earlier = byItem.get(id);
     // Two verdicts for one claim: the weaker stands.
     if (earlier === undefined || VERDICTS.indexOf(v.verdict) > VERDICTS.indexOf(earlier.verdict)) byItem.set(id, v);
   }
-  const reading: ClaimReading = { unchecked: [], supported: new Set(), weak: new Map() };
+  const reading: ClaimReading = { unchecked: [], supported: new Set(), weak: new Map(), notes, ignored };
   const findFile = (path: string): PullFile | undefined => files.find((f) => f.path === path || f.previousPath === path);
   for (const { id, cites, quotes: need } of targets) {
     const v = byItem.get(id);

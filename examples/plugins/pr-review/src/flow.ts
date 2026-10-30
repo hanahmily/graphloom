@@ -104,6 +104,7 @@ export function reportFlow(evidence: readonly EvidenceRecord[], ctx: ReportConte
   let pending: { problems: string[]; revision: boolean } | undefined;
   let detProblems = 0;
   let checkTries = 0;
+  let ignored: string[] = [];
   const refs: string[] = [];
   for (const ev of events(evidence)) {
     refs.push(ev.run.record.ref);
@@ -127,6 +128,7 @@ export function reportFlow(evidence: readonly EvidenceRecord[], ctx: ReportConte
     const read = ev.run.contract?.status === "invalid" ? { problems: ev.run.contract.problems } : readClaimCheck(ev.run.output, claimTargets(report, ctx), ctx.files);
     if ("problems" in read || read.unchecked.length > 0) {
       checkTries += 1;
+      ignored = "problems" in read ? [] : read.ignored;
       continue;
     }
     reading = read;
@@ -141,7 +143,7 @@ export function reportFlow(evidence: readonly EvidenceRecord[], ctx: ReportConte
   if (report === undefined) return { state: "reporter", kind: "first", feedback: [], schema: REPORTER_SCHEMA_NAME };
   if (reading === undefined) {
     if (checkTries > MAX_CHECK_RETRIES) {
-      return { state: "supervise", reason: `the report checker did not judge every item after ${checkTries} tries`, refs: tail };
+      return { state: "supervise", reason: `the report checker did not judge every item after ${checkTries} tries${ignored.length > 0 ? `; verdict ids that matched no claim: ${ignored.slice(0, 4).join(", ")}` : ""}`, refs: tail };
     }
     return { state: "checker", report, retry: checkTries > 0 };
   }

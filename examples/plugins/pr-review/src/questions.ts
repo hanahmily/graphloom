@@ -29,6 +29,9 @@ export type QuestionType = (typeof QUESTION_TYPES)[number];
 /** The types the questioner may add: a weak-test question exists only for a surviving mutant, which the graph, not the questioner, finds; the necessity question N1 is the plugin's own and comes first. */
 const ADDABLE: readonly string[] = QUESTION_TYPES.filter((t) => t !== "weak-test" && t !== "necessity");
 
+/** The id fields of the questioner's contract: each is constrained, per job, to the report's item ids and the groundwork's symbol ids. */
+export const QUESTIONS_REFERENCES = ["purposes[].item", "questions[].item", "questions[].symbol"] as const;
+
 export const QUESTIONS_SCHEMA = {
   type: "object",
   additionalProperties: false,
