@@ -22,8 +22,8 @@ const WITHHELD = AGENT_CONFIG_NAMES.map((n) => `-name '${n}'`).join(" -o ");
  * `git archive`, whose `export-ignore` attribute would drop files, and not `git worktree add`, which would
  * write the repository's own administrative state), with hooks off and attributes read from the empty tree
  * (the job's env), so no filter or hook runs. It checks that every entry arrived, withholds agent
- * configuration, adds an `.ignore` that lets Grep see the directory under the review directory's own
- * `.gitignore`, and reports the base tree's object id, the digest of what was exported.
+ * configuration, adds a `.ignore` beside the review directory's own `.gitignore` (outside the exported tree, so nothing the base
+ * holds is written through) that lets Grep see the directory, and reports the base tree's object id, the digest of what was exported.
  */
 const EXPORT =
   String.raw`set -eu; base="$1"; dir="$2"
@@ -43,7 +43,7 @@ if [ "$found" -ne $((entries - links)) ]; then echo "base export holds $found fi
 withheld=$(find "$dir" \( ` + WITHHELD + String.raw` \) -prune -print0 | tr -cd '\0' | wc -c)
 find "$dir" \( ` + WITHHELD + String.raw` \) -prune -exec rm -rf {} +
 found=$(find "$dir" ! -type d -print0 | tr -cd '\0' | wc -c)
-printf '!*\n' > "$dir/.ignore"
+printf '!*\n' > .graphloom/review/.ignore
 { printf 'base=%s\ntree=%s\nfiles=%s\nwithheld=%s\n' "$base" "$tree" "$found" "$withheld"; echo '# end'; } > "$GRAPHLOOM_REPORT_FILE"`;
 
 export const baseExportCommand = (base: string): EnvironmentCommand => ({ id: COMMAND.baseExport, argv: ["sh", "-c", EXPORT, COMMAND.baseExport, base, BASE_DIR] });

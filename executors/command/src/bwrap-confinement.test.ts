@@ -139,6 +139,10 @@ describe.skipIf(unsupported !== undefined)("a command job with a bwrap confineme
       expect((await outcome(job(probe, sandbox(), true), repoCtx())).stdoutTail).toContain("signal=1");
       expect((await outcome(job(probe, sandbox(), false), repoCtx())).stdoutTail).toContain("signal=unset");
       expect((await outcome(job(probe, undefined, true), repoCtx())).stdoutTail).toContain("signal=unset");
+      // A declared read-write bind could reopen the workspace, so the sandbox no longer vouches for read-only.
+      const reopened = sandbox({ binds: [{ path: repo, readOnly: false }] });
+      expect((await outcome(job(probe, reopened, true), repoCtx())).stdoutTail).toContain("signal=unset");
+      expect((await outcome(job(probe, sandbox({ binds: [{ path: repo, readOnly: true }] }), true), repoCtx())).stdoutTail).toContain("signal=1");
       const before = process.env[READONLY_SANDBOX_ENV];
       process.env[READONLY_SANDBOX_ENV] = "1";
       try {

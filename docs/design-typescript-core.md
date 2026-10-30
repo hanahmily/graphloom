@@ -260,7 +260,7 @@ apply to), never running it unconfined.
   so an agent executor may give such a job a shell. The runner says so with one signal: it sets
   `GRAPHLOOM_READONLY_SANDBOX=1` (`READONLY_SANDBOX_ENV` in the SDK) in the environment of the
   executor process it launched, only for a `readOnly` job it actually started under its own
-  `bwrap` confinement, and it removes any inherited value from every other launch. The signal
+  `bwrap` confinement that declares no read-write bind (one could reopen the workspace), and it removes any inherited value from every other launch. The signal
   is never read from job input, and an agent harness's own child processes do not inherit it. The
   coding-agent executor reads it into `CodingSessionOptions.readOnlySandboxed`; the Claude Code
   permission policy then admits `Bash` for a read-only job. Without the signal (no confinement,

@@ -400,7 +400,8 @@ describe("the base tree export (real git)", () => {
     // export-ignore does not drop files; symbolic links stay links; the grep ignore file is added.
     expect(existsSync(path.join(dir, ".graphloom/review/base/pkg/skip.go"))).toBe(true);
     expect(lstatSync(path.join(dir, ".graphloom/review/base/pkg/link.go")).isSymbolicLink()).toBe(true);
-    expect(readFileSync(path.join(dir, ".graphloom/review/base/.ignore"), "utf8")).toBe("!*\n");
+    expect(readFileSync(path.join(dir, ".graphloom/review/.ignore"), "utf8")).toBe("!*\n");
+    expect(existsSync(path.join(dir, ".graphloom/review/base/.ignore"))).toBe(false);
     expect(out.files).toBe(4);
   });
 
@@ -425,6 +426,21 @@ describe("the base tree export (real git)", () => {
     expect(readdirSync(marks)).toEqual([]);
     expect([git(dir, ["status", "--porcelain=v1", "--ignored"]), git(dir, ["write-tree"]), git(dir, ["for-each-ref"])]).toEqual(before);
     expect(readFileSync(path.join(dir, "pkg/a.go"), "utf8")).toContain("// a new line");
+  });
+
+  it("exports a base's own .ignore, even a symbolic link, as it is, and writes nothing through it", () => {
+    const dir = tmp("export-link");
+    git(dir, ["init", "-q", "-b", "main"]);
+    write(dir, { "victim": "keep\n", "a.txt": "a\n" });
+    symlinkSync("../../../victim", path.join(dir, ".ignore"));
+    write(dir, { "sub/.ignore": "own rule\n" });
+    const base = commit(dir, "base");
+    write(dir, { ".graphloom/review/.gitignore": "*\n" });
+    const r = run(dir, baseExportCommand(base));
+    expect(r.code, r.stderr).toBe(0);
+    expect(readFileSync(path.join(dir, "victim"), "utf8")).toBe("keep\n");
+    expect(lstatSync(path.join(dir, ".graphloom/review/base/.ignore")).isSymbolicLink()).toBe(true);
+    expect(readFileSync(path.join(dir, ".graphloom/review/base/sub/.ignore"), "utf8")).toBe("own rule\n");
   });
 
   it("fails, writing no report, for a commit the repository does not have", () => {

@@ -16,7 +16,7 @@
     "vitest": "^3.0.9"
   },
   "digests": {
-    "sourceTree": "62f559fe3f3662460e1ad66b1492f8e3c4e7dd6ab99b483eb21b8352484f83b9",
+    "sourceTree": "7dd463cb7aab0cf68c98c1fbc40bc436501da955d125df3e5331d6310e129980",
     "packageLock": "f301896b4204540e879383e898fea432e76637e9434526d2bab45643e054c6a2",
     "files": {
       "package.json": "372865e244535711343c2e21e60d44b9bbaedec153d2cf04242829a95b8f6586",
@@ -36,7 +36,7 @@
       "tools/gometrics/testdata/gocyclo-expected.json": "9c6a7cc52edfce37fb13dec96efb4b8a789ff108b0a504b6571272b49049f6b8",
       "src/analysis.ts": "7640cd3f0e317e1d9db5172d6c9363c7079e76b99c3386da1e0e405f16e30281",
       "src/answers.ts": "9752fb2ffb5b8dbe1a1f011274d72b3b4b24960a54de0584e4065e4e43085072",
-      "src/basetree.ts": "b897cca93a43f891d4235129fe8e1c30b452e455cf8f027c02a5547deee2ad77",
+      "src/basetree.ts": "09f12dd8efb9acd20a48a62ae029f8c05b676c4eaa77bdfdabe18f283b425450",
       "src/claims.ts": "389908dc5885fd5fcbc9616b22b2de4b8ad1dc88b4b44bae25a98cf9ba52d7b8",
       "src/commands.ts": "ba0370e065e1b19561785a76b122c62b463bbaad93755a57815ea1e0660b5681",
       "src/constants.ts": "ce806c250f057734453c08adf7fc3fbe3a3458d1e4ec588363c390564e2210a7",
@@ -105,7 +105,7 @@
       "test/necessity.test.ts": "d57ecfd07887439a0469d8583141c800f4f8a70b8c5f358a72c31129adaad091",
       "test/prepare.test.ts": "baf1b9caea05acf7904623f8a24eefa699ed7a74d97117d943e3293588cc53ca",
       "test/profile.test.ts": "fd0e2928b651aa00b9487165cdfbff9882987350fb7f961057bbfd4ed2686808",
-      "test/qa-git.test.ts": "6aaed8f76bec2aa541afc99f27a2d354576a4b0d9fa7d6f4f616d0564c5ccf1f",
+      "test/qa-git.test.ts": "06b9989c58ae085770c560680ea463dd898622aefbccf948e07af5a8a501797e",
       "test/qa-graph.test.ts": "c428ca94292f3ba3a8b5dfe621e6d1bd9575004616347f7b7124ab6f5ad31d0b",
       "test/qa-ids-searches.test.ts": "6520ab99094aedec22a050b691fa305b169e0ae0ae2be8a295368b555e9f3f7d",
       "test/qa-units.test.ts": "35daffe5396996e24b011e0ec17ef5f413a4d41f6c37d008c29edfbdc2a95d2c",

@@ -963,7 +963,7 @@ not `git worktree add` (which writes the repository's administrative state). It
 checks that every entry of the base tree arrived, leaves out repository agent
 configuration (`CLAUDE.md`, `AGENTS.md`, `.claude`, `.codex`, `.agents`, `.pi`,
 `.mcp.json`, `.opencode`, at any depth, so reading the tree loads none of it),
-adds an `.ignore` (`!*`) so that Grep, which honors the review directory's
+adds a `.ignore` (`!*`) beside the review directory's `.gitignore`, outside the exported tree so nothing the base holds is written through, so that Grep, which honors the review directory's
 `.gitignore`, still sees it, and records the base tree's object id, the file
 count and the number of entries left out as the command's evidence: the tree id
 is the digest of what was exported. The N1 answerer and its checker, the

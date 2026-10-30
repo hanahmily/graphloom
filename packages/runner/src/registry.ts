@@ -705,8 +705,9 @@ export function createChildExecutorRunner(
             keepUserState: options.ownState !== undefined,
             ...(goSettings !== undefined ? { operatorGo: goSettings } : {}),
           });
-          // Set only here, where the workspace really was mounted read-only under the job's own bwrap sandbox.
-          if (readOnlySandbox) launch.env[READONLY_SANDBOX_ENV] = "1";
+          // Set only here, where the workspace really was mounted read-only under the job's own bwrap sandbox, and
+          // the sandbox adds no writable bind of its own (a declared read-write bind could reopen the workspace).
+          if (readOnlySandbox && own?.kind === "bwrap" && own.binds.every((bind) => bind.readOnly)) launch.env[READONLY_SANDBOX_ENV] = "1";
         } catch (err) {
           return failed(`executor ${pin.id} cannot be confined to the run, so the job was not run: ${err instanceof Error ? err.message : String(err)}`);
         }
