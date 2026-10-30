@@ -264,11 +264,14 @@ export function advancePullRequest(view: RunView): GraphDecision {
         ),
       );
     }
+    // N1's answerer sits in the Questions stage; when it was the only answer, that is the session to discuss.
+    const rec = recordedNecessity(view.evidence);
+    const chat = rec.state === "read" && rec.record.decision.action === "skip" ? QUESTIONS_STAGE : ANSWERS_STAGE;
     return withPrivate(
       stop(
         {
           reason: "report ready",
-          blocker: `the report, the questions and their answers are written to ${REVIEW_MD} in the worktree (report.json and qa.json beside it). graphloom session open <run> --stage answers discusses them; graphloom resume <run> --decline review-layer finishes the run report-only (this version has no Review stage, so --approve review-layer is refused)`,
+          blocker: `the report, the questions and their answers are written to ${REVIEW_MD} in the worktree (report.json and qa.json beside it). graphloom session open <run> --stage ${chat} discusses them; graphloom resume <run> --decline review-layer finishes the run report-only (this version has no Review stage, so --approve review-layer is refused)`,
           retryable: false,
         },
         "the report and the Q&A are ready; the review layer is not built in this version",

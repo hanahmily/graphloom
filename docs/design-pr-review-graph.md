@@ -979,6 +979,11 @@ allows. The record is evidence for the stage's requirement, so
 controller admits it only when N1's check is the latest review and comes from a
 read-only review job.
 
+N1's answerer session is recorded in the Questions stage, so after a skip
+`graphloom session open <run> --stage questions` is the conversation to open
+(there is no Answers-stage session); otherwise `--stage answers` opens the
+answerer of the other questions, as before.
+
 **Operator override.** An operator can ask every question anyway with
 `graphloom task new … --all-questions`, which writes `Report on … at <sha>,
 asking every question.` The graph asks N1 first, records the conclusion, and

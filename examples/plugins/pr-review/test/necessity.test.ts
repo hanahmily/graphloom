@@ -121,6 +121,11 @@ describe("necessity-unnecessary: a #1443-like change that breaks the write path 
     expect(qa.purposes).toEqual([]);
   });
 
+  it("points the operator at the session that holds N1's answer: the Questions stage after a skip, the Answers stage otherwise", () => {
+    expect(stopOf(sim)!.blocker).toContain("graphloom session open <run> --stage questions");
+    expect(stopOf(simulate({ scenarioName: "necessity-necessary" }))!.blocker).toContain("graphloom session open <run> --stage answers");
+  });
+
   it("records N1 with its conclusion, the checker's support, and the skip", () => {
     expect(qa.necessity).toMatchObject({ conclusion: "unnecessary", skipped: true, note: "Remaining questions skipped: the change was judged unnecessary (see N1).", decision: { action: "skip" } });
     expect(qa.questions[0]!.answer).toMatchObject({ status: "answered", check: { verdict: "supported" } });
