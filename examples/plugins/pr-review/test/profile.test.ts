@@ -120,6 +120,24 @@ describe("profile refusals", () => {
     expect(refused({ report: { sections: [{ id: "config", detectors: [{ kind: "paths", globs: ["../x"] }] } ] } })).toMatch(/without "\.\."/);
   });
 
+  it("takes a harness id or an object with the harness, model and effort, and keeps inheriting what is omitted", () => {
+    expect(profileOf().roleSettings).toEqual({});
+    const p = profileOf({ harnesses: { reporter: { harness: "claude-code", model: "opus", effort: "max" }, "report-checker": { harness: "codex", effort: "minimal" }, questioner: { harness: "codex" }, answerer: "claude-code" } });
+    expect(p.roles).toEqual({ reporter: "claude-code", "report-checker": "codex", questioner: "codex", answerer: "claude-code", "answer-checker": "codex" });
+    expect(p.roleSettings).toEqual({ reporter: { model: "opus", effort: "max" }, "report-checker": { effort: "minimal" } });
+  });
+
+  it("checks a role's effort against its harness, and refuses unknown keys and a Pi object", () => {
+    expect(refused({ harnesses: { reporter: { harness: "claude-code", effort: "minimal" } } })).toMatch(/reporter\.effort must be one of low, medium, high, xhigh, max for claude-code/);
+    expect(refused({ harnesses: { "report-checker": { harness: "codex", effort: "max" } } })).toMatch(/report-checker\.effort must be one of minimal, low, medium, high, xhigh for codex/);
+    expect(refused({ harnesses: { reporter: { harness: "claude-code", temperature: 1 } } })).toMatch(/harnesses\.reporter\.temperature is not a field/);
+    expect(refused({ harnesses: { questioner: { harness: "pi" } } })).toMatch(/questioner\.harness must be one of claude-code, codex/);
+    expect(refused({ harnesses: { reporter: { effort: "high" } } })).toMatch(/reporter\.harness must be one of/);
+    expect(refused({ harnesses: { reporter: { harness: "claude-code", model: "" } } })).toMatch(/reporter\.model must be a model name/);
+    // The distinct-pair rule compares harness ids, whatever the object form says.
+    expect(refused({ harnesses: { "report-checker": { harness: "claude-code", effort: "low" } } })).toMatch(/report-checker must differ from harnesses.reporter/);
+  });
+
   it("refuses two roles on one harness, naming the first unsatisfiable pair", () => {
     expect(refused({ harnesses: { "report-checker": "claude-code" } })).toMatch(/report-checker must differ from harnesses.reporter \(both are claude-code\)/);
     expect(refused({ harnesses: { answerer: "codex" } })).toMatch(/answerer must differ from harnesses.questioner/);

@@ -21,7 +21,7 @@ export interface ClaudeFork {
   forkRef: string;
   project: string;
   /** What the parent ran under, carried to the fork's saved copy so a later job can resume it. */
-  settings: { model: string | null; systemPromptSha256: string };
+  settings: { model: string | null; effort?: string; systemPromptSha256: string };
   /** The parent's saved transcript, as restored. */
   parentTranscript: string;
 }
@@ -41,20 +41,21 @@ export async function restoreClaudeFork(args: { configDir: string; savedDir: str
   ]);
   if (meta === undefined || transcript === undefined) throw new Error(`no saved session for ${parentRef}`);
   if (transcript.trim() === "") throw new Error(`saved session ${parentRef} is empty`);
-  let recorded: { project?: unknown; model?: unknown; systemPromptSha256?: unknown };
+  let recorded: { project?: unknown; model?: unknown; effort?: unknown; systemPromptSha256?: unknown };
   try {
     recorded = JSON.parse(meta) as typeof recorded;
     for (const line of transcript.split("\n")) if (line.trim() !== "") JSON.parse(line);
   } catch {
     throw new Error(`saved session ${parentRef} is corrupt`);
   }
-  const { project, model, systemPromptSha256 } = recorded ?? {};
+  const { project, model, effort, systemPromptSha256 } = recorded ?? {};
   if (
     typeof project !== "string" ||
     !PROJECT_DIR.test(project) ||
     project === "." ||
     project === ".." ||
     (model !== null && typeof model !== "string") ||
+    (effort !== undefined && typeof effort !== "string") ||
     typeof systemPromptSha256 !== "string"
   ) {
     throw new Error(`saved session ${parentRef} is corrupt`);
@@ -67,7 +68,7 @@ export async function restoreClaudeFork(args: { configDir: string; savedDir: str
   await rm(storeSide, { recursive: true, force: true });
   if (side !== undefined) await copyFiles(savedSide, side.files, storeSide);
   const forkId = args.forkId ?? randomUUID();
-  return { parentRef, parentId, forkId, forkRef: `claude-${forkId}`, project, settings: { model: model as string | null, systemPromptSha256 }, parentTranscript: transcript };
+  return { parentRef, parentId, forkId, forkRef: `claude-${forkId}`, project, settings: { model: model as string | null, ...(effort !== undefined ? { effort: effort as string } : {}), systemPromptSha256 }, parentTranscript: transcript };
 }
 
 /** What a fork left in Claude Code's store, copied into a directory for the caller to keep. */

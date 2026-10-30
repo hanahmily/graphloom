@@ -106,6 +106,20 @@ describe("the report scenario, end to end through the graph", () => {
     expect(sim.jobs.filter((j) => j.kind === "agent" && j.readOnly !== true)).toEqual([]);
   });
 
+  it("inherits the harness's model and effort unless the profile names them", () => {
+    for (const job of sim.jobs.filter((j) => j.kind === "agent")) expect(job.input).not.toHaveProperty("harnessOptions");
+  });
+
+  it("carries a role's model and effort to its job as harness options", () => {
+    const set = simulate({ config: { harnesses: { reporter: { harness: "claude-code", model: "opus", effort: "high" }, "report-checker": { harness: "codex", effort: "xhigh" } } } });
+    const [reporter, checker] = set.jobs.filter((j) => j.kind === "agent" && j.stageId === "report");
+    expect(reporter!.input).toMatchObject({ harness: "claude-code", harnessOptions: { model: "opus", effort: "high" } });
+    expect(checker!.input).toMatchObject({ harness: "codex" });
+    expect((checker!.input as { harnessOptions: object }).harnessOptions).toEqual({ effort: "xhigh" });
+    const questioner = set.jobs.find((j) => j.resultSchema === "questions-v1");
+    expect(questioner!.input).not.toHaveProperty("harnessOptions");
+  });
+
   it("runs the static tools under bwrap with no network, binding only the plugin and the toolchain read-only", () => {
     const [job] = jobsOf(sim, "Measure");
     expect(job!.confinement).toMatchObject({ kind: "bwrap", network: false, mask: [] });

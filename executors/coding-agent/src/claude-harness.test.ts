@@ -233,6 +233,25 @@ describe("Claude Code harness", () => {
     expect(chosen!.mcp).toBeNull();
   });
 
+  it("passes a job's effort as --effort, validates it, and records it with the session", async () => {
+    const h = await setup();
+    await h.script([{ text: "one" }], [{ text: "two" }]);
+    const first = await h.executor.execute({ assignment: "a", harnessOptions: { model: "opus", effort: "max" } }, h.ctx({ session: { dir: h.sessions } }));
+    const ref = (first as { sessionRef?: string }).sessionRef!;
+    const [run] = await h.invocations();
+    expect(flagValue(run!.argv, "--effort")).toBe("max");
+    expect(flagValue(run!.argv, "--model")).toBe("opus");
+    expect(JSON.parse(await readFile(path.join(h.sessions, `${ref}.json`), "utf8"))).toMatchObject({ model: "opus", effort: "max" });
+
+    // The same role settings continue the session; another effort does not.
+    const same = await h.executor.execute({ assignment: "b", harnessOptions: { model: "opus", effort: "max" } }, h.ctx({ session: { dir: h.sessions, resume: ref } }));
+    expect(same).toMatchObject({ status: "ok", sessionRef: ref });
+    const other = await h.executor.execute({ assignment: "c", harnessOptions: { model: "opus", effort: "low" } }, h.ctx({ session: { dir: h.sessions, resume: ref } }));
+    expect(other).toMatchObject({ status: "failed" });
+    expect((other as { summary: string }).summary).toMatch(/ran on effort max; this job asks for effort low/);
+    await expect(h.executor.execute({ assignment: "d", harnessOptions: { effort: "minimal" } }, h.ctx())).rejects.toThrow(/effort must be one of low, medium, high, xhigh, max/);
+  });
+
   it("reserves budget before launching and ends the session when a later request is refused", async () => {
     const h = await setup();
     await h.script([{ tool: "read_comments", args: {} }, { hang: true }]);

@@ -65,7 +65,7 @@ import { REPORTER_SCHEMA_NAME, REVISION_SCHEMA_NAME, reportFlow } from "./flow.j
 import { measurementState, metricsDiffCommand, staticBaseCommand, staticCommand } from "./measurements.js";
 import { coverageCommand, coverageConfinement, missingProbe, sandboxEnvironmentChecks, type CoveragePlan } from "./coverage.js";
 import { checkerInstruction, reporterInstruction } from "./prompts.js";
-import { harnessName, parseProfile, ProfileError, ROLES, DISTINCT_PAIRS, type Profile } from "./profile.js";
+import { harnessName, parseProfile, ProfileError, ROLES, DISTINCT_PAIRS, type Profile, type Role } from "./profile.js";
 import { prepareTask } from "./prepare.js";
 import { requestedPull, type PullRequest } from "./request.js";
 import { secretFindings } from "./secrets.js";
@@ -435,11 +435,14 @@ function refused(job: { problem: string; incompatible?: true }): GraphDecision {
   return supervise({ reason: job.problem }, "escalate a missing worktree path");
 }
 
-function agentJob(ctx: Context, view: RunView, spec: { jobId?: string; stageId?: string; purpose: "diagnostic" | "review"; instruction: string; schema: string; harness: string; assignment: string; continueFrom?: string; readOnlyBinds?: readonly string[]; references?: Record<string, ReferenceSet> }, files: readonly PullFile[]): JobSpec | { problem: string; incompatible?: true } {
+function agentJob(ctx: Context, view: RunView, spec: { jobId?: string; stageId?: string; purpose: "diagnostic" | "review"; instruction: string; schema: string; harness: string; role: Role; assignment: string; continueFrom?: string; readOnlyBinds?: readonly string[]; references?: Record<string, ReferenceSet> }, files: readonly PullFile[]): JobSpec | { problem: string; incompatible?: true } {
   const worktree = environmentOutput(view.evidence, ENV_WORKTREE);
   if (worktree === undefined || !path.isAbsolute(worktree)) return { problem: "the environment check recorded no worktree path, which the confinement masks need" };
   const masks = agentConfigMasks(worktree, files.flatMap((f) => [f.path, ...(f.previousPath !== null ? [f.previousPath] : [])]));
   if ("problem" in masks) return { problem: masks.problem, incompatible: true };
+  // The role's model and effort travel as the job's harness options; a role that sets neither inherits the harness's own.
+  const { model, effort } = ctx.profile.roleSettings[spec.role] ?? {};
+  const harnessOptions = model !== undefined || effort !== undefined ? { ...(model !== undefined ? { model } : {}), ...(effort !== undefined ? { effort } : {}) } : undefined;
   return {
     ...(spec.jobId !== undefined ? { jobId: spec.jobId } : {}),
     stageId: spec.stageId ?? REPORT_STAGE,
@@ -449,7 +452,7 @@ function agentJob(ctx: Context, view: RunView, spec: { jobId?: string; stageId?:
     instruction: spec.instruction,
     resultSchema: spec.schema,
     executor: CODING_AGENT,
-    input: { assignment: spec.assignment, harness: spec.harness },
+    input: { assignment: spec.assignment, harness: spec.harness, ...(harnessOptions !== undefined ? { harnessOptions } : {}) },
     // The id fields of the contract are constrained to the ids this job lists (an enum in the schema the harness enforces).
     ...(spec.references !== undefined && Object.keys(spec.references).length > 0 ? { knownReferences: spec.references } : {}),
     // Untrusted-read confinement (design §12.2): home hidden, repository agent configuration masked, no GitHub token.
@@ -502,7 +505,7 @@ function report(ctx: Context, view: RunView): GraphDecision {
     case "reporter": {
       const assignment = reporterInstruction({ pr, snapshot: analysis.snapshot, sections: analysis.sections, facts: analysis.facts, candidates: analysis.ctx.candidates ?? [], kind: flow.kind, feedback: flow.feedback });
       const from = flow.kind === "first" ? undefined : jobSession(view, REPORT_STAGE, REPORTER_JOB);
-      const job = agentJob(ctx, view, { jobId: REPORTER_JOB, purpose: "diagnostic", instruction: "Write the change report", schema: flow.schema, harness: profile.roles.reporter, assignment, ...(from !== undefined ? { continueFrom: from } : {}) }, analysis.snapshot.files);
+      const job = agentJob(ctx, view, { jobId: REPORTER_JOB, purpose: "diagnostic", instruction: "Write the change report", schema: flow.schema, harness: profile.roles.reporter, role: "reporter", assignment, ...(from !== undefined ? { continueFrom: from } : {}) }, analysis.snapshot.files);
       if ("problem" in job) return refused(job);
       const why = { first: "write the change report (read-only, confined)", correction: "correct the report: deterministic validation found problems", revision: "revise the report: the claim check did not support some items" }[flow.kind];
       return dispatchAgent(view, job, why);
@@ -511,7 +514,7 @@ function report(ctx: Context, view: RunView): GraphDecision {
       const assignment = checkerInstruction({ pr, snapshot: analysis.snapshot, report: flow.report, targets: claimTargets(flow.report, analysis.ctx), retry: flow.retry });
       const targets = claimTargets(flow.report, analysis.ctx);
       const references = idRefs({ [CLAIM_CHECK_REFERENCES[0]!]: idSet(targets.map((t) => t.id), (id) => oneLineText(targets.find((t) => t.id === id)?.text ?? "").slice(0, 300)) });
-      const job = agentJob(ctx, view, { purpose: "review", instruction: "Check the report's claims against the diff", schema: CLAIM_CHECK_SCHEMA_NAME, harness: profile.roles["report-checker"], assignment, references }, analysis.snapshot.files);
+      const job = agentJob(ctx, view, { purpose: "review", instruction: "Check the report's claims against the diff", schema: CLAIM_CHECK_SCHEMA_NAME, harness: profile.roles["report-checker"], role: "report-checker", assignment, references }, analysis.snapshot.files);
       if ("problem" in job) return refused(job);
       return dispatchAgent(view, job, `check every report item with a fresh read-only ${harnessName(profile.roles["report-checker"])} session`);
     }
@@ -653,7 +656,7 @@ function questions(ctx: Context, view: RunView): GraphDecision {
       const baseDir = baseTreeDir(view, c.ctx.groundwork);
       const assignment = necessityInstruction({ pr, snapshot: c.ctx.analysis.snapshot, view: c.ctx.view, designDocs: c.ctx.designDocs, context: c.ctx.context, kind: nf.kind, feedback: nf.feedback, ...(baseDir !== undefined ? { baseDir } : {}) });
       const from = nf.kind === "first" ? undefined : jobSession(view, QUESTIONS_STAGE, ANSWERER_JOB);
-      const job = agentJob(ctx, view, { jobId: ANSWERER_JOB, stageId: QUESTIONS_STAGE, purpose: "diagnostic", instruction: "Answer the necessity question N1 from the whole codebase", schema: nf.schema, harness: profile.roles.answerer, assignment, ...(from !== undefined ? { continueFrom: from } : {}) }, files);
+      const job = agentJob(ctx, view, { jobId: ANSWERER_JOB, stageId: QUESTIONS_STAGE, purpose: "diagnostic", instruction: "Answer the necessity question N1 from the whole codebase", schema: nf.schema, harness: profile.roles.answerer, role: "answerer", assignment, ...(from !== undefined ? { continueFrom: from } : {}) }, files);
       if ("problem" in job) return refused(job);
       const why = { first: "answer the necessity question N1 (read-only, confined): is the problem real, does the fix fit the design, is there a simpler way", correction: "correct the necessity answer: deterministic validation found problems", revision: "revise the necessity answer: the answer checker did not support it" }[nf.kind];
       return dispatchAgent(view, job, why);
@@ -665,7 +668,7 @@ function questions(ctx: Context, view: RunView): GraphDecision {
       const baseDir = baseTreeDir(view, c.ctx.groundwork);
       const assignment = necessityCheckerInstruction({ pr, snapshot: c.ctx.analysis.snapshot, question: necessityQuestion(), answer, designDocs: c.ctx.designDocs, context: c.ctx.context, retry: nf.retry, ...(baseDir !== undefined ? { baseDir } : {}) });
       const references = questionRefs(ANSWER_CHECK_REFERENCES[0]!, [necessityQuestion()]);
-      const job = agentJob(ctx, view, { stageId: QUESTIONS_STAGE, purpose: "review", instruction: "Check the necessity answer against the trees", schema: ANSWER_CHECK_SCHEMA_NAME, harness: profile.roles["answer-checker"], assignment, references }, files);
+      const job = agentJob(ctx, view, { stageId: QUESTIONS_STAGE, purpose: "review", instruction: "Check the necessity answer against the trees", schema: ANSWER_CHECK_SCHEMA_NAME, harness: profile.roles["answer-checker"], role: "answer-checker", assignment, references }, files);
       if ("problem" in job) return refused(job);
       return dispatchAgent(view, job, `check the necessity answer with a fresh read-only ${harnessName(profile.roles["answer-checker"])} session`);
     }
@@ -696,7 +699,7 @@ function questions(ctx: Context, view: RunView): GraphDecision {
       const itemIds = c.ctx.view.items.map((i) => i.id);
       const symbolIds = c.ctx.groundwork.symbols.map((x) => x.id);
       const references = idRefs({ "purposes[].item": idSet(itemIds), "questions[].item": idSet(itemIds), "questions[].symbol": idSet(["", ...symbolIds]) });
-      const job = agentJob(ctx, view, { jobId: QUESTIONER_JOB, stageId: QUESTIONS_STAGE, purpose: "diagnostic", instruction: "Ask the questions (ask only; never answer)", schema: QUESTIONS_SCHEMA_NAME, harness: profile.roles.questioner, assignment, references, ...(from !== undefined ? { continueFrom: from } : {}) }, files);
+      const job = agentJob(ctx, view, { jobId: QUESTIONER_JOB, stageId: QUESTIONS_STAGE, purpose: "diagnostic", instruction: "Ask the questions (ask only; never answer)", schema: QUESTIONS_SCHEMA_NAME, harness: profile.roles.questioner, role: "questioner", assignment, references, ...(from !== undefined ? { continueFrom: from } : {}) }, files);
       if ("problem" in job) return refused(job);
       return dispatchAgent(view, job, flow.kind === "first" ? "ask the questions (read-only, confined)" : "correct the questions: deterministic validation found problems");
     }
@@ -739,7 +742,7 @@ function answers(ctx: Context, view: RunView): GraphDecision {
       const from = flow.kind === "first" ? undefined : jobSession(view, ANSWERS_STAGE, ANSWERER_JOB);
       // Untrusted-read confinement, with the dependency source mounted read-only (design §7.3).
       const references = questionRefs(ANSWERS_REFERENCES[0]!, flow.only !== undefined ? rest.filter((q) => flow.only!.includes(q.id)) : rest);
-      const job = agentJob(ctx, view, { jobId: ANSWERER_JOB, stageId: ANSWERS_STAGE, purpose: "diagnostic", instruction: "Answer the questions from the whole codebase", schema: flow.schema, harness: profile.roles.answerer, assignment, readOnlyBinds: mounted, references, ...(from !== undefined ? { continueFrom: from } : {}) }, files);
+      const job = agentJob(ctx, view, { jobId: ANSWERER_JOB, stageId: ANSWERS_STAGE, purpose: "diagnostic", instruction: "Answer the questions from the whole codebase", schema: flow.schema, harness: profile.roles.answerer, role: "answerer", assignment, readOnlyBinds: mounted, references, ...(from !== undefined ? { continueFrom: from } : {}) }, files);
       if ("problem" in job) return refused(job);
       const why = { first: "answer the questions (read-only, confined, dependency source mounted read-only)", correction: "correct the answers: deterministic validation found problems", revision: "revise the answers: the answer checker did not support some" }[flow.kind];
       return dispatchAgent(view, job, why);
@@ -751,7 +754,7 @@ function answers(ctx: Context, view: RunView): GraphDecision {
       const baseDir = baseTreeDir(view, c.ctx.groundwork);
       const assignment = answerCheckerInstruction({ pr, snapshot: c.ctx.analysis.snapshot, groundwork: c.ctx.groundwork, questions: rest, answers: flow.answers, retry: flow.retry, mountedDirs: mounted, ...(baseDir !== undefined ? { baseDir } : {}) });
       // The same dependency source, read-only, so a library or dependency citation can be re-checked where it points.
-      const job = agentJob(ctx, view, { stageId: ANSWERS_STAGE, purpose: "review", instruction: "Check the answers against the trees", schema: ANSWER_CHECK_SCHEMA_NAME, harness: profile.roles["answer-checker"], assignment, readOnlyBinds: mounted, references: questionRefs(ANSWER_CHECK_REFERENCES[0]!, rest) }, files);
+      const job = agentJob(ctx, view, { stageId: ANSWERS_STAGE, purpose: "review", instruction: "Check the answers against the trees", schema: ANSWER_CHECK_SCHEMA_NAME, harness: profile.roles["answer-checker"], role: "answer-checker", assignment, readOnlyBinds: mounted, references: questionRefs(ANSWER_CHECK_REFERENCES[0]!, rest) }, files);
       if ("problem" in job) return refused(job);
       return dispatchAgent(view, job, `check every answer with a fresh read-only ${harnessName(profile.roles["answer-checker"])} session`);
     }
