@@ -25,6 +25,7 @@ const stopOf = (s: Simulation) => (s.final.action.type === "stop" ? s.final.acti
 const superviseOf = (s: Simulation) => (s.final.action.type === "supervise" ? s.final.action.supervise : undefined);
 const commandIds = (jobs: JobSpec[]): string[] => jobs.flatMap((j) => ((j.input as { commands?: Array<{ id: string }> } | undefined)?.commands ?? []).map((c) => c.id));
 const qaJobs = (sim: Simulation): JobSpec[] => sim.jobs.filter((j) => j.stageId === "questions" || j.stageId === "answers");
+const BASE_TREE = "/work/tree/.graphloom/review/base";
 
 describe("every scenario settles Fetch, Report, Questions and Answers and stops final at report ready", () => {
   for (const name of Object.keys(rehearsal(BANYANDB).scenarios)) {
@@ -101,7 +102,7 @@ describe("answer-finds-existing-helper", () => {
     expect(searches.map((c) => c.id)).toEqual(["search-S1"]);
     expect(searches[0]!.argv).toContain(REHEARSAL_MERGE_BASE);
     for (const j of groundwork) for (const c of (j.input as { commands: Array<{ argv: string[] }> }).commands) expect(c.argv.slice(0, 2)).toEqual(["sh", "-c"]);
-    expect(commandIds(groundwork)).toEqual(["base-tree", "base-manifests", "search-S1", "dep-sites-1", "dep-source-go-1", "cand-1"]);
+    expect(commandIds(groundwork)).toEqual(["base-export", "base-tree", "base-manifests", "search-S1", "dep-sites-1", "dep-source-go-1", "cand-1"]);
   });
 
   it("observes the changed source files before extracting symbols from them", () => {
@@ -115,7 +116,7 @@ describe("answer-finds-existing-helper", () => {
     expect([necessity, necessityChecker, questioner, answerer, checker].map((j) => [j!.resultSchema, j!.purpose, j!.readOnly])).toEqual([["necessity-v1", "diagnostic", true], ["answer-check-v1", "review", true], ["questions-v1", "diagnostic", true], ["answers-v1", "diagnostic", true], ["answer-check-v1", "review", true]]);
     expect(necessity).toMatchObject({ jobId: "answerer", stageId: "questions" });
     for (const j of [necessity, necessityChecker, questioner, answerer, checker]) {
-      expect(j!.confinement).toMatchObject({ kind: "bwrap", network: true, binds: [] });
+      expect(j!.confinement).toMatchObject({ kind: "bwrap", network: true, binds: [{ path: BASE_TREE, readOnly: true }] });
       expect((j!.confinement as { mask: string[] }).mask).toContain("/work/tree/CLAUDE.md");
     }
     expect(answerer).toMatchObject({ jobId: "answerer" });
@@ -214,11 +215,11 @@ describe("answer-no-library-with-whole-repo-search", () => {
     });
     const s2 = simulate({ scenario: cached });
     const [answerer, checker] = [jobsOf(s2, "Answer the questions")[0]!, jobsOf(s2, "Check the answers against")[0]!];
-    expect((answerer.confinement as { binds: unknown[] }).binds).toEqual([{ path: "/home/u/go/pkg/mod/github.com/spf13/cobra@v1.9.1", readOnly: true }]);
+    expect((answerer.confinement as { binds: unknown[] }).binds).toEqual([{ path: "/home/u/go/pkg/mod/github.com/spf13/cobra@v1.9.1", readOnly: true }, { path: BASE_TREE, readOnly: true }]);
     expect(assignmentOf(answerer)).toContain("Dependency source is mounted read-only at: /home/u/go/pkg/mod/github.com/spf13/cobra@v1.9.1");
     expect(assignmentOf(answerer)).toContain("go github.com/spf13/cobra v1.9.1 [go.mod] no use found — source available: /home/u/go/pkg/mod/github.com/spf13/cobra@v1.9.1");
     // The checker gets the same read-only mount, to re-check a dependency citation where it points.
-    expect((checker.confinement as { binds: unknown[] }).binds).toEqual([{ path: "/home/u/go/pkg/mod/github.com/spf13/cobra@v1.9.1", readOnly: true }]);
+    expect((checker.confinement as { binds: unknown[] }).binds).toEqual([{ path: "/home/u/go/pkg/mod/github.com/spf13/cobra@v1.9.1", readOnly: true }, { path: BASE_TREE, readOnly: true }]);
     expect(qaOf(s2).inventory.dependencies[0]!.source).toBe("/home/u/go/pkg/mod/github.com/spf13/cobra@v1.9.1");
   });
 
@@ -548,5 +549,69 @@ describe("stopping rules", () => {
     expect(stopOf(sim)).toMatchObject({ reason: "incompatible task", retryable: false });
     expect(stopOf(sim)!.blocker).toContain("the pull request adds 2 symbols, past the profile's limits.maxNewSymbols of 1");
     expect(sim.jobs.some((j) => j.kind === "agent" && j.stageId === "questions")).toBe(false);
+  });
+});
+
+describe("the base tree (read-only export of the pinned base commit for the answerer, N1 and their checkers)", () => {
+  const sim = simulate({ scenarioName: "answer-finds-existing-helper" });
+  const agents = qaJobs(sim).filter((j) => j.kind === "agent");
+  const binds = (j: JobSpec): Array<{ path: string; readOnly: boolean }> => (j.confinement as { binds: Array<{ path: string; readOnly: boolean }> }).binds;
+
+  it("is exported once, by a fixed-argv graph command with git's hooks and configuration off, and recorded as evidence with its tree digest", () => {
+    const exports = qaJobs(sim).flatMap((j) => ((j.input as { commands?: Array<{ id: string; argv: string[] }>; env?: unknown }).commands ?? []).filter((c) => c.id === "base-export"));
+    expect(exports).toHaveLength(1);
+    expect(exports[0]!.argv.slice(0, 2)).toEqual(["sh", "-c"]);
+    expect(exports[0]!.argv.slice(-2)).toEqual([REHEARSAL_MERGE_BASE, ".graphloom/review/base"]);
+    expect(exports[0]!.argv[2]).toContain("core.hooksPath=/dev/null");
+    expect(exports[0]!.argv[2]).not.toContain("git archive");
+    const job = qaJobs(sim).find((j) => j.kind === "command" && ((j.input as { commands?: Array<{ id: string }> }).commands ?? []).some((c) => c.id === "base-export"))!;
+    expect(job.readOnly).toBe(true);
+    expect((job.input as { env: unknown }).env).toEqual({ ...GIT_ENV });
+    const record = sim.evidence.find((e) => (e.payload as { command?: { id?: string } }).command?.id === "base-export")!;
+    expect((record.payload as { command: { stdoutTail: string } }).command.stdoutTail).toMatch(/^tree=[0-9a-f]{40}$/m);
+  });
+
+  it("is named in the assignments of N1, its checker, the questioner, the answerer and the answer checker, and bound read-only in their confinements", () => {
+    expect(agents.map((j) => j.instruction.split(" ").slice(0, 3).join(" "))).toEqual(["Answer the necessity", "Check the necessity", "Ask the questions", "Answer the questions", "Check the answers"]);
+    for (const job of agents) {
+      expect(binds(job), job.instruction).toContainEqual({ path: BASE_TREE, readOnly: true });
+      const text = assignmentOf(job);
+      expect(text, job.instruction).toContain(`exported read-only at ${BASE_TREE}`);
+      expect(text, job.instruction).toContain("The head's files are the working tree");
+      expect(text, job.instruction).toContain("git show HEAD:<path>");
+      expect(text, job.instruction).toContain("exact line numbers");
+      expect(text, job.instruction).toContain("Never estimate base lines");
+      expect(job.readOnly).toBe(true);
+      expect(job.confinement).toMatchObject({ kind: "bwrap" });
+    }
+  });
+
+  it("is not claimed for the reporter and its checker, which run before the groundwork and read the base with git show", () => {
+    for (const job of sim.jobs.filter((j) => j.kind === "agent" && j.stageId === "report")) {
+      expect(binds(job)).toEqual([]);
+      expect(assignmentOf(job)).not.toContain(BASE_TREE);
+      expect(assignmentOf(job)).toContain("never estimated from the head");
+    }
+  });
+
+  it("is left out of the assignments, with a note, when the export reported nothing usable (base facts then come from git show and git grep)", () => {
+    const none = scenarioWith("answer-finds-existing-helper", (s) => {
+      s.commands!["base-export"] = { exitCode: 0, stdout: "" };
+    });
+    const s2 = simulate({ scenario: none });
+    const answerer = jobsOf(s2, "Answer the questions")[0]!;
+    expect(binds(answerer)).toEqual([]);
+    expect(assignmentOf(answerer)).not.toContain("exported read-only at");
+    expect(assignmentOf(answerer)).toContain("could not be exported to a directory");
+    expect(assignmentOf(answerer)).toContain("git show HEAD:<path>");
+  });
+
+  it("hands a failed export to the supervisor like any failed groundwork command", () => {
+    const failed = scenarioWith("answer-finds-existing-helper", (s) => {
+      s.commands!["base-export"] = { exitCode: 1, stderr: "disk full" };
+    });
+    const s2 = simulate({ scenario: failed });
+    expect(superviseOf(s2)?.reason).toContain("base-export");
+    expect(s2.jobs.some((j) => j.kind === "agent" && j.stageId === "questions")).toBe(false);
   });
 });

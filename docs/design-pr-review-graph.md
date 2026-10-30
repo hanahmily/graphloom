@@ -765,8 +765,12 @@ material that both the questioner and the answerer receive:
 The **answerer** runs one read-only job (`answers-v1`), confined
 `untrusted-read` with the dependency directories mounted read-only. It gets
 the report, the questions, the groundwork and the PR text (untrusted). It
-searches the whole base tree itself, with Grep and Glob or `git grep <base>`,
-and reads library source in the mounted caches. It runs on Claude Code or Codex
+searches the whole base tree itself, with `git grep <base>` and `git show
+<base>:<path>` in its shell (a read-only job under a bwrap confinement has one:
+the sandbox mounts the workspace read-only, so the shell cannot write; [core
+design](design-typescript-core.md#a-jobs-own-confinement)), or with Read,
+Grep and Glob over the **base tree** (below), and reads library source in the
+mounted caches. It runs on Claude Code or Codex
 ([§13.1](#131-roles)): its recorded session, with whatever the maintainer
 adds to it, is the context the review layer starts from
 ([§8.1](#81-review)). Every answer has three parts.
@@ -946,6 +950,36 @@ The answers are checked as follows.
    still unsupported, it is downgraded to `needs author`, with both
    statements recorded. A disputed absence therefore never shows as
    settled.
+
+**The base tree.** The working tree is the head, so Read, Grep and Glob over it
+show head lines, and an agent that estimated a base line from the head or the
+diff would cite a wrong one (the pull request adds or removes lines above it).
+The first groundwork command, `base-export`, therefore exports the pinned base
+commit into `.graphloom/review/base/` (a fixed-argv graph command, once per
+run, before the searches). It reads the base through a temporary index and
+`git checkout-index` with hooks and configuration off and attributes read from
+the empty tree, not `git archive` (whose `export-ignore` would drop files) and
+not `git worktree add` (which writes the repository's administrative state). It
+checks that every entry of the base tree arrived, leaves out repository agent
+configuration (`CLAUDE.md`, `AGENTS.md`, `.claude`, `.codex`, `.agents`, `.pi`,
+`.mcp.json`, `.opencode`, at any depth, so reading the tree loads none of it),
+adds an `.ignore` (`!*`) so that Grep, which honors the review directory's
+`.gitignore`, still sees it, and records the base tree's object id, the file
+count and the number of entries left out as the command's evidence: the tree id
+is the digest of what was exported. The N1 answerer and its checker, the
+questioner, the answerer and the answer checker get its absolute path in their
+assignments ("exported read-only at …; the head's files are the working tree")
+and in their confinement's `binds` as a read-only bind, on top of the read-only
+workspace. The assignments require base facts to come from the base (`git show
+<base>:<path> | cat -n`, `git grep -n <base>` or the base tree) with exact line
+numbers, and never from the head or the diff; a base line that was not read is
+said to be unread. A citation still names a repository-relative path and its
+tree (`base` or `head`), never a path under the export. The reporter and its
+checker run before the groundwork: they get the shell and the same rule, and
+read the base with `git show`. A `base-export` that exits non-zero goes to the
+supervisor like any failed groundwork command; one that reports nothing usable
+leaves the base tree out of the assignments, with a note, and the agents use
+`git show` and `git grep` only.
 
 ### 7.4 Output: one file
 
@@ -1765,7 +1799,7 @@ tools run under bwrap.
 
 | Job | Confinement |
 |---|---|
-| Reporter, questioner, answerer, checkers, reviewers, verifiers | `untrusted-read` (bwrap). Reviewers write reproducing tests only as text in their results and run nothing. The root filesystem is read-only. The home directory is replaced by a tmpfs, except the agent's own login state (`ownState`) and the inventory's dependency directories (read-only). The masks above apply, the environment is minimal, and there is no GitHub token. Network is on, because the agents need their CLI logins and their model APIs |
+| Reporter, questioner, answerer, checkers, reviewers, verifiers | `untrusted-read` (bwrap). Reviewers write reproducing tests only as text in their results and run nothing. The root filesystem is read-only, and so is the workspace: because the runner enforces that, a Claude Code agent of these roles may run shell commands (`git show <base>:<path>`, `git grep <base>`, `cat`, `grep`), which a read-only job without such a sandbox may not (a Codex agent's shell is inside Codex's own read-only sandbox). The base tree ([§7.3](#73-answers)) is bound read-only into the answerer's, N1's and their checkers' and the questioner's confinement. The home directory is replaced by a tmpfs, except the agent's own login state (`ownState`) and the inventory's dependency directories (read-only). The masks above apply, the environment is minimal, and there is no GitHub token. Network is on, because the agents need their CLI logins and their model APIs |
 | A session the maintainer opens (`graphloom session open`, [§17](#17-discussing-a-run-graphloom-session-open)) | The confinement of the job that recorded it: `untrusted-read` with the same masks, a read-only checkout, no GitHub token, network on for the agent's login and model API, and the maintainer's own CLI login. A configured session launcher is bound read-only and its state directories writable. The run's state is not mounted; the `graphloom` process records the conversation after the agent exits |
 | Static metrics (`gometrics`, `tsmetrics`) | bwrap with no network, read-only. They run the plugin's own parser over the head tree and execute none of it, so they always run, with or without Docker |
 | Checks, coverage, mutation, reproducing tests: **everything that runs PR code** | `sandbox: docker` (below) |

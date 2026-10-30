@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
-import { defineExecutor, jsonSchemaProblem, type ExecutorContext, type ExecutorDefinition, type ToolCallResult } from "@graphloom/sdk";
+import { defineExecutor, jsonSchemaProblem, READONLY_SANDBOX_ENV, type ExecutorContext, type ExecutorDefinition, type ToolCallResult } from "@graphloom/sdk";
 import type { CodingHarness, CodingRunResult, CodingUsage, CodingSession, CodingTool } from "./harness.js";
 import { classifyQuota, classifyTransient, type QuotaFailure } from "#agent-harness/classify";
 import { abortableSleep, backoffMs, resolveRetryPolicy, worktreeDigest, type TransientRetryPolicy } from "./transient.js";
@@ -151,6 +151,8 @@ export function createCodingAgentExecutor(
         session = await h.createSession({
           cwd: ctx.worktreePath,
           readOnly: ctx.readOnly === true,
+          // The runner's own signal, in this process's environment; the job input cannot set it.
+          ...(ctx.readOnly === true && process.env[READONLY_SANDBOX_ENV] === "1" ? { readOnlySandboxed: true } : {}),
           tools,
           async reserveModelCall() {
             // Without host accounting the harness cannot spend a shared budget.

@@ -85,6 +85,20 @@ describe("Claude tool permissions", () => {
     expect((await evaluateClaudePermission("Bash", { command: "npm test" }, options)).behavior).toBe("allow");
   });
 
+  it("admits a read-only job's shell only when the runner enforces read-only below it", async () => {
+    const command = { command: "git show HEAD:README.md" };
+    await denied("Bash", command, { ...options, readOnly: true });
+    await denied("Bash", command, { ...options, readOnly: true, readOnlySandboxed: false });
+    expect(await evaluateClaudePermission("Bash", command, { ...options, readOnly: true, readOnlySandboxed: true })).toEqual({ behavior: "allow", updatedInput: command });
+    // The sandbox only widens the shell: the other read-only denials stay.
+    const sandboxed = { ...options, readOnly: true, readOnlySandboxed: true, tools: [{ name: "modify", effect: "write" as const, call: async () => ({ status: "ok" as const, summary: "done" }) }] };
+    await denied("Write", { file_path: "src/file.ts" }, sandboxed);
+    await denied("Edit", { file_path: "src/file.ts" }, sandboxed);
+    await denied("NotebookEdit", { notebook_path: "src/n.ipynb" }, sandboxed);
+    await denied("mcp__graphloom__modify", {}, sandboxed);
+    await denied("Bash", {}, sandboxed);
+  });
+
   it("admits only configured GraphLoom tools and denies write effects to reviewers", async () => {
     const config: CodingSessionOptions = {
       ...options,

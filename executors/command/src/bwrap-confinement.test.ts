@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
+import { execFileSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { createServer, type Server } from "node:net";
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
@@ -8,7 +10,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { confinementUnsupported, createBuiltinExecutorRunner, packageClosure, type JobContext, type Runner } from "@graphloom/runner";
-import type { BwrapConfinement, JobSpec } from "@graphloom/sdk";
+import { READONLY_SANDBOX_ENV, type BwrapConfinement, type JobSpec } from "@graphloom/sdk";
 import type { CommandOutcome } from "./run.js";
 
 const unsupported = await confinementUnsupported();
@@ -100,6 +102,53 @@ describe.skipIf(unsupported !== undefined)("a command job with a bwrap confineme
     expect((await outcome(job(argv, sandbox(), true))).stdoutTail).not.toContain("wrote");
     expect((await outcome(job(argv, sandbox(), false))).stdoutTail).toContain("wrote");
     expect(await readFile(path.join(work, "out.txt"), "utf8")).toBe("x\n");
+  });
+
+  describe("a read-only job's shell (what lets a read-only agent run git show and git grep)", () => {
+    let repo: string;
+    const repoCtx = (): JobContext => ({ ...ctx(), worktreePath: repo, confinement: { scratchDir: path.join(dir, "scratch"), writablePaths: [repo] } });
+    const git = (...args: string[]): string => execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", ...args], { cwd: repo, encoding: "utf8" });
+
+    beforeAll(async () => {
+      repo = path.join(dir, "repo");
+      await mkdir(repo);
+      git("init", "-q");
+      await writeFile(path.join(repo, "base.txt"), "needle on the base\n");
+      git("add", ".");
+      git("commit", "-q", "-m", "base");
+      await writeFile(path.join(repo, "base.txt"), "the head has changed\n");
+    });
+
+    it("cannot write the workspace (read-only filesystem), though git show HEAD:<file> and git grep still work", async () => {
+      const script = 'git show HEAD:base.txt; git grep -n needle HEAD; echo "head: $(cat base.txt)"; if echo x > out.txt; then echo WROTE; else echo WRITE_FAILED; fi; if git checkout -- base.txt 2>/dev/null; then echo CHECKED_OUT; fi; touch .git/pwned 2>&1 || true';
+      const out = (await outcome(job(["sh", "-c", script], sandbox(), true), repoCtx())).stdoutTail;
+      expect(out).toContain("needle on the base");
+      expect(out).toMatch(/HEAD:base\.txt:1:needle on the base/);
+      expect(out).toContain("head: the head has changed");
+      expect(out).toContain("WRITE_FAILED");
+      expect(out).toContain("Read-only file system");
+      expect(out).not.toContain("WROTE");
+      expect(out).not.toContain("CHECKED_OUT");
+      expect(existsSync(path.join(repo, "out.txt"))).toBe(false);
+      expect(existsSync(path.join(repo, ".git", "pwned"))).toBe(false);
+      expect(await readFile(path.join(repo, "base.txt"), "utf8")).toBe("the head has changed\n");
+    });
+
+    it("tells the executor the workspace is mounted read-only, only for a read-only bwrap job, and never from the operator's environment", async () => {
+      const probe = ["sh", "-c", `echo "signal=\${${READONLY_SANDBOX_ENV}:-unset}"`];
+      expect((await outcome(job(probe, sandbox(), true), repoCtx())).stdoutTail).toContain("signal=1");
+      expect((await outcome(job(probe, sandbox(), false), repoCtx())).stdoutTail).toContain("signal=unset");
+      expect((await outcome(job(probe, undefined, true), repoCtx())).stdoutTail).toContain("signal=unset");
+      const before = process.env[READONLY_SANDBOX_ENV];
+      process.env[READONLY_SANDBOX_ENV] = "1";
+      try {
+        expect((await outcome(job(probe, sandbox(), false), repoCtx())).stdoutTail).toContain("signal=unset");
+        expect((await outcome(job(probe, undefined, true), repoCtx())).stdoutTail).toContain("signal=unset");
+      } finally {
+        if (before === undefined) delete process.env[READONLY_SANDBOX_ENV];
+        else process.env[READONLY_SANDBOX_ENV] = before;
+      }
+    });
   });
 
   it("still starts the executor when GraphLoom is installed under the hidden home", async () => {

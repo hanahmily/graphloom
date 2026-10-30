@@ -159,7 +159,7 @@ export {
   MAX_INPUT_SHAPE_BYTES,
 } from "./executor.js";
 export { jsonSchemaProblem } from "./input-problem.js";
-export { assertConfinement, confinementProblem, SCRATCH_MOUNT_PREFIX } from "./confinement.js";
+export { assertConfinement, confinementProblem, READONLY_SANDBOX_ENV, SCRATCH_MOUNT_PREFIX } from "./confinement.js";
 
 export {
   activateRepair,

@@ -9,7 +9,7 @@ export const GRAPH_ID = "pr-review";
  * §18): 0.1 declares Fetch, Report, Questions and Answers. Review, Checks,
  * Draft and Publish arrive with later versions.
  */
-export const GRAPH_VERSION = "0.4.0";
+export const GRAPH_VERSION = "0.5.0";
 
 /** The operator decision that would continue into the review layer (design §11). */
 export const REVIEW_LAYER_APPROVAL = "review-layer";
@@ -59,6 +59,8 @@ export const COMMAND = {
   reportWrite: "report-write",
   baseDefs: "base-defs",
   baseTree: "base-tree",
+  /** The read-only export of the pinned base commit's files into `BASE_DIR`, for the agents that read base files. */
+  baseExport: "base-export",
   baseManifests: "base-manifests",
   search: "search",
   candidate: "cand",
@@ -94,6 +96,8 @@ export const LEDGER_MOVED = 4;
 export const REPORTER_JOB = "reporter";
 
 export const REVIEW_DIR = ".graphloom/review";
+/** The pinned base commit's files, exported once per run for the answerer, N1 and their checkers (design §7.3); ignored like the rest of `.graphloom/review/`. */
+export const BASE_DIR = `${REVIEW_DIR}/base`;
 export const REPORT_JSON = `${REVIEW_DIR}/report.json`;
 export const REVIEW_MD = `${REVIEW_DIR}/review.md`;
 export const QA_JSON = `${REVIEW_DIR}/qa.json`;

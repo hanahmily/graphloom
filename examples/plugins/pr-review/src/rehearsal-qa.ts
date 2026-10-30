@@ -251,6 +251,8 @@ export function qaScenario(i: QaInput): QaScenario {
   // Canned outputs of the read-only commands, by id, for the commands the graph will run.
   const commands: QaScenario["commands"] = {};
   const ok = (stdout: string): RehearsalCommandResult => ({ exitCode: 0, stdout });
+  // The base tree export the answerer, N1 and their checkers read (design §7.3): the exported directory exists, and says its tree.
+  commands["base-export"] = ok(`base=${i.mergeBase}\ntree=${"b".repeat(40)}\nfiles=${(base.dirs ?? ["pkg", "banyand"]).length}\nwithheld=0\n# end\n`);
   commands["base-defs-1"] = ok(`${base.defs ?? ""}\n# end\n`);
   commands["base-tree"] = ok(`${(base.dirs ?? ["pkg", "banyand"]).join("\n")}\n# end\n`);
   commands["base-manifests"] = ok(`${Object.entries(manifest).map(([p, t]) => `===== graphloom manifest ${p}\n${t}`).join("\n")}\n# end\n`);

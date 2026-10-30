@@ -14,6 +14,14 @@ const IMAGE_DIGEST = /^[A-Za-z0-9][A-Za-z0-9._\-/:]*@sha256:[0-9a-f]{64}$/;
 const SIZE = /^[1-9][0-9]{0,14}[bkmg]?$/i;
 const MAX_WALL_CLOCK_MS = 24 * 60 * 60_000;
 
+/**
+ * The environment variable the runner sets, in an executor's own process only, when it launched the job under a
+ * bwrap confinement with the workspace mounted read-only (a `readOnly` job). An executor may then rely on the
+ * sandbox, not its own permission policy, to keep the job read-only. Never read from job input; the runner clears
+ * it from the environment it inherits and sets it only on that launch.
+ */
+export const READONLY_SANDBOX_ENV = "GRAPHLOOM_READONLY_SANDBOX";
+
 /** The scratch prefix a docker mount may use for a run-scoped directory. */
 export const SCRATCH_MOUNT_PREFIX = "@scratch/";
 
