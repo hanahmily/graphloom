@@ -879,14 +879,17 @@ N1). The measured count is the one recorded and shown:
 - the checker's searches are measured the same way before the Q&A is written,
   for display only: they correct nobody.
 
-**Bound.** At most 60 distinct searches are re-run per answer set and per
-checker result (a command is one search, 16 to a job, so at most four jobs);
-the searches behind "none found" answers come first. The searches beyond the
-bound are recorded `reported N, not measured (only the first 60 distinct
-searches of one result are re-run)`. Beyond the bound a search can neither
-correct an answer nor ground an absence, so an answerer that wants an absence
-grounded keeps its none-found searches few. Each answer is also limited to 12
-searches ([the checks below](#73-answers)).
+**Bound.** At most 200 distinct searches are re-run per answer set and per
+checker result (a command is one search, 16 to a job, so at most thirteen
+jobs); the searches behind "none found" answers come first. The searches
+beyond the bound are recorded `reported N, not measured (only the first 200
+distinct searches of one result are re-run)`; one cannot correct an answer or
+ground an absence. So a "none found" answer whose required whole-tree searches
+are not all among those re-run is sent back (the same one correction) to list
+fewer, and a result that still reports more than the bound's worth of required
+absence searches reaches the supervisor, who sees why. Each answer is also
+limited to 12 searches ([the checks below](#73-answers)); the checker's
+searches beyond the bound are shown as its own count, marked.
 
 Each question type has a typical outcome:
 
@@ -2279,7 +2282,7 @@ apache/skywalking-banyandb#1443 showed, without changing the stage list:
   plugin re-runs every `base` and `head` search of an answer, N1 and the
   checker in a read-only command job, shows the measured count, flags a
   mismatch, and sends back an answer whose "found nothing" search measures
-  hits. At most 60 distinct searches are re-run per result; a dependency
+  hits. At most 200 distinct searches are re-run per result; a dependency
   search is not re-run and is shown as the agent's own count, marked.
 - **Not built:** a search over a dependency's source is not measured (it lies
   outside the repository, and the command job is not mounted with it), so an

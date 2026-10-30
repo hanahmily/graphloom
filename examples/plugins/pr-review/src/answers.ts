@@ -257,7 +257,7 @@ function answerProblemsOf(a: Answer, q: Question, ctx: AnswerContext, dirs: read
     case "common-logic":
     case "reuse-library":
       if (a.none_found) {
-        const need = q.type === "reuse-library" ? 1 : 3;
+        const need = absenceNeed(q);
         if (baseSearches < need) out.push(`${at}: a "none found" answer lists the whole-repository searches that found nothing (${need} or more over the whole base tree, with no paths: names and variants, signatures, key tokens; a search scoped to paths is supplementary), not ${baseSearches}`);
         const inv = ctx.groundwork.inventory;
         if (q.type === "reuse-library" && a.status === "answered" && (inv.dependencies.some((d) => d.source === undefined) || inv.truncated.length > 0)) {
@@ -418,6 +418,26 @@ export function searchItems(list: ReadonlyArray<{ question: string; search: Sear
     const id = `${idPrefix}-s-${createHash("sha1").update(key).digest("hex").slice(0, 10)}`;
     return { kind: "search" as const, search: e.search, reported: e.reported, ...(advisory ? { advisory: true as const } : {}), entries: e.reported.map((r) => ({ question: r.question, label: e.search.pattern })), command: searchCommand(id, base, e.search) };
   });
+}
+
+/** How many whole-base-tree searches a "none found" answer needs (design §7.3): one for a library, three otherwise. */
+export const absenceNeed = (q: Pick<Question, "type">): number => (q.type === "reuse-library" ? 1 : 3);
+
+/**
+ * The "none found" answers whose required whole-tree searches did not all get re-run, because more distinct searches
+ * were reported than the bound re-runs: an absence rests on measured zeros, so such an answer is sent back to list fewer.
+ */
+export function unmeasuredAbsences(answers: readonly Answer[], ctx: AnswerContext, plan: readonly VerifyItem[]): string[] {
+  const planned = new Set(plan.filter((p) => p.kind === "search" && p.search !== undefined).map((p) => searchKey(p.search!)));
+  const out: string[] = [];
+  for (const a of answers) {
+    const q = ctx.questions.find((x) => x.id === a.question);
+    if (q === undefined || !a.none_found || !["existing-equivalent", "common-logic", "reuse-library"].includes(q.type)) continue;
+    const need = absenceNeed(q);
+    const measured = new Set(a.searches.filter((s) => s.tree === "base" && s.paths.length === 0 && planned.has(searchKey(s))).map(searchKey)).size;
+    if (measured < need) out.push(`${a.question}: its "none found" answer rests on ${measured} of the ${need} whole-tree searches the plugin re-runs: at most ${MAX_RERUN_SEARCHES} distinct searches are re-run per result, those behind none-found answers first, and an absence rests on measured zeros; list fewer, and only the ones that settle it`);
+  }
+  return out;
 }
 
 /** The commands that check a set of answers: each citation against its tree, each split proposal's names against the package, and each search they report, re-run. */
@@ -659,8 +679,10 @@ export function answersFlow(evidence: readonly EvidenceRecord[], ctx: AnswerCont
       const merged = new Map(revision ? current : []);
       for (const a of parsed.answers) merged.set(a.question, a);
       if (problems.length === 0) {
-        const v = verificationOutcome(evidence, verificationPlan([...merged.values()], ctx, base, idPrefix));
-        if (v.state === "checked") problems = v.problems;
+        const plan = verificationPlan([...merged.values()], ctx, base, idPrefix);
+        problems = unmeasuredAbsences([...merged.values()], ctx, plan);
+        const v = problems.length === 0 ? verificationOutcome(evidence, plan) : undefined;
+        if (v?.state === "checked") problems = v.problems;
       }
       if (problems.length > 0) {
         failures += 1;

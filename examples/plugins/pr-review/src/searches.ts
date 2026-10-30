@@ -20,7 +20,7 @@ export const MAX_PATTERN_CHARS = 300;
 export const MAX_SEARCH_PATHS = 8;
 export const MAX_SEARCH_PATH_CHARS = 200;
 /** Searches re-run per verification: the distinct ones of one answer set, or of one checker result. */
-export const MAX_RERUN_SEARCHES = 60;
+export const MAX_RERUN_SEARCHES = 200;
 /** Quantifier operands (`{m,n}`) glibc accepts; a larger one is refused rather than left to the tool. */
 const MAX_REPEAT = 1000;
 

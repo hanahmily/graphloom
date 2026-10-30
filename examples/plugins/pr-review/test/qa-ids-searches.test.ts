@@ -4,7 +4,7 @@
 import { applyReferenceEnums, checkContract, type EvidenceRecord, type JobSpec } from "@graphloom/sdk";
 import { describe, expect, it } from "vitest";
 import { evidencePull } from "../src/analysis.js";
-import { answerProblems, parseAnswers, readAnswerCheck, searchItems, verificationPlan, type Answer, type FinalAnswer } from "../src/answers.js";
+import { answerProblems, parseAnswers, readAnswerCheck, searchItems, unmeasuredAbsences, verificationPlan, type Answer, type FinalAnswer } from "../src/answers.js";
 import { readClaimCheck, type ClaimTarget } from "../src/claims.js";
 import { definitionFor } from "../src/graph.js";
 import { resolveId } from "../src/ids.js";
@@ -389,6 +389,18 @@ describe("only a search of the whole base tree grounds an absence", () => {
   const q = set.questions.find((x) => x.type === "existing-equivalent")!;
   const none = (searches: Search[]): Answer => ({ question: q.id, answer: "a", status: "answered", none_found: true, citations: [], searches, inventory: [], metrics: [], proposal: { kind: "none", splits: [], testFile: "", testName: "", cases: [], assertion: "" } });
   const problems = (searches: Search[]) => answerProblems([none(searches)], actx, new Set([q.id])).join("|");
+
+  it("sends a none-found answer back when its required searches fall beyond the bound of re-runs, and accepts it when they are re-run", () => {
+    const mine = [search("alpha"), search("beta"), search("gamma")];
+    const filler = Array.from({ length: MAX_RERUN_SEARCHES }, (_, i) => ({ question: "Qx", search: search(`filler${i}`) }));
+    const crowded = searchItems([...filler, ...mine.map((s) => ({ question: q.id, search: s }))], REHEARSAL_MERGE_BASE, "cite", []);
+    expect(crowded).toHaveLength(MAX_RERUN_SEARCHES);
+    expect(unmeasuredAbsences([none(mine)], actx, crowded).join("|")).toMatch(new RegExp(`${q.id}: its "none found" answer rests on 0 of the 3 whole-tree searches the plugin re-runs.*at most ${MAX_RERUN_SEARCHES} distinct searches`));
+    const roomy = searchItems(mine.map((s) => ({ question: q.id, search: s })), REHEARSAL_MERGE_BASE, "cite", []);
+    expect(unmeasuredAbsences([none(mine)], actx, roomy)).toEqual([]);
+    // Two of the three re-run is not enough.
+    expect(unmeasuredAbsences([none(mine)], actx, roomy.slice(0, 2))[0]).toMatch(/rests on 2 of the 3/);
+  });
 
   it("does not count a search scoped to paths, nor a head or dependency one, toward the whole-repository searches", () => {
     const scoped = [search("a", { paths: ["README.md"] }), search("b", { paths: ["pkg/**"] }), search("c", { paths: ["nowhere/*"] })];
