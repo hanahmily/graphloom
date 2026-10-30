@@ -654,6 +654,12 @@ esac
     expect(r.report).toBe("graphloom-coverage-v1 go\nsetup one ok\nsetup-fail broken 7 line1 boom here\n");
   });
 
+  it("gives each command an empty stdin, so one that reads it cannot swallow the setup commands after it", () => {
+    const r = run([{ id: "reader", argv: ["cat"] }, note("after")]);
+    expect(r.order).toEqual(["after", "test"]);
+    expect(r.report.split("\n").slice(0, 4)).toEqual(["graphloom-coverage-v1 go", "setup reader ok", "setup after ok", "exit 0"]);
+  });
+
   it("reports a program that does not exist as exit 127, and has no tests run", () => {
     const r = run([{ id: "ghost", argv: ["definitely-not-a-program-xyz"] }]);
     expect(r.order).toEqual([]);

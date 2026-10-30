@@ -56,7 +56,7 @@ decode_run() {
     count=$((count - 1))
   done
   [ "$#" -gt 0 ] || return 127
-  (cd "$root0" && "$@") > "$tmp/setup.$sid" 2>&1
+  (cd "$root0" && "$@") < /dev/null > "$tmp/setup.$sid" 2>&1
 }
 
 : > "$tmp/setup-ok"

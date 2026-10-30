@@ -16,7 +16,7 @@
     "vitest": "^3.0.9"
   },
   "digests": {
-    "sourceTree": "8c399fc169f2d7ab54d0c261c4bce26d178fdbf556d7c9126d0659b12622c3c3",
+    "sourceTree": "90f14471306b4ec617443ff3f60ab53c78d1805f1acecf4fc51d0a016e9f555b",
     "packageLock": "e590486fbaf1569872eaa937415e8af83ff0484747535edb0fa1e9ad134535cf",
     "files": {
       "package.json": "b37ef7771e6500d0b623399c21b2f87ab7c06acac6187ec41009d53ecd93a6d4",
@@ -24,7 +24,7 @@
       "tsconfig.json": "d166142bd5d917d1eb7d3011cf6423c652f30e2989881deec6147a997bf41597",
       "profiles/banyandb.json": "83549920bc1c5bc8bb15a0324dc4d3d01398ce293c81c1ee13d9aec0472f4873",
       "tools/README.md": "91b5de1909d83fd98463dfaaba0ea006a616075b041dc426c5a8ebaa98ab9039",
-      "tools/cover/go.sh": "580f08ed08b55a0966a12c5ff1a3b1c177450a5e2b5d3522ebb86a0edec03185",
+      "tools/cover/go.sh": "a471a89262c34217330cf3c0a2a26ac6543ab071097162722a0aeb3e0c58bd9d",
       "tools/cover/goprofile.awk": "675b39613ebe8dd8bf0249b6874bf6e6199a825ad5c1fbfbb9cf7f7de77569e8",
       "tools/cover/ts.sh": "7887da9d0d32b71910e9342d19b93526358bce100dda18612b2d6c21113de54d",
       "tools/gometrics/analyze.go": "008fc603a06eefdcdd571678b06950fe14e15f965b64d542ea7666ea35512722",
@@ -94,7 +94,7 @@
       "src/write.ts": "0e8adfe5080f42d93998e7915f4aef121ec9609acb60cf6fb1ebaab8e62bfbe6",
       "test/base-metrics.test.ts": "900b61e77854ae06e7de1b4b98b506962e9ee069dc83489b3fc6f9c27d74bd10",
       "test/claims.test.ts": "da8e83123542bb4ca302cacac7e648d24c305b2e3b5faf588382ed0068a6eb81",
-      "test/coverage.test.ts": "3a6f4ac122c7eef0788f6181189df33270c57deab91ed08b3f468dcbff0b07e7",
+      "test/coverage.test.ts": "f0c90865215399094721aafe4ea335fa3f68b63bf6eab21ffc88198ae006502e",
       "test/crap.test.ts": "e2494e348e47ee1a6e5022d6745ba02b186cd3d74c95711148b37ef1de002eea",
       "test/detectors.test.ts": "cb780849cbe65e86cc7a536c7b98e995192a6c4fb1c92bb5c7c0f7aaf715d7dc",
       "test/git.test.ts": "67fdb5892a0f040e869f31422b7e82daba8ae1c1a34a3257aaf64b89f2fa9ab3",
