@@ -9,7 +9,7 @@
  * which pulls the pinned images once, as a run's Fetch does.
  */
 import { spawnSync } from "node:child_process";
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -521,4 +521,163 @@ describe("measured coverage, TypeScript, under real Docker", () => {
     expect(m.jobs.map((j) => j.instruction.split(" ").slice(0, 3).join(" "))).toEqual(["Check the Docker"]);
     expect((m.state.outcomes!.get(`src/math.ts\u0000src/math.classify\u00001`) as { reason: string }).reason).toBe("@vitest/coverage-v8 ^2.1.0 does not match vitest ^3.2.4");
   }, 300_000);
+});
+
+// ---------------------------------------------------------------- sandboxed setup and read-only mounts
+
+describe("measured coverage, Go, sandboxed setup from a read-only mounted tool, under real Docker", () => {
+  const GEN_SH = `#!/bin/sh
+# A trusted generator the operator keeps outside any checkout: it writes the Go file the package needs.
+set -eu
+writable=false
+if touch "$GRAPHLOOM_MOUNT_TOOLS/probe" 2>/dev/null; then writable=true; fi
+nets=$(ls /sys/class/net | tr '\\n' ',')
+printf 'package gen\\n\\nconst Greeting = "%s"\\nconst Interfaces = "%s"\\nconst ToolsWritable = %s\\n' "$1" "$nets" "$writable"
+`;
+  const LIB = `package gen
+
+// Greet says what the generated file says.
+func Greet() string {
+	if Greeting == "" {
+		return "empty"
+	}
+	return Greeting
+}
+`;
+  const LIB_TEST = `package gen
+
+import "testing"
+
+func TestGenerated(t *testing.T) {
+	if Greet() != "hello with spaces and 'quotes'" {
+		t.Fatalf("generated file wrong: %q", Greet())
+	}
+	if Interfaces != "lo," {
+		t.Fatalf("the setup had a network: %q", Interfaces)
+	}
+	if ToolsWritable {
+		t.Fatal("the mounted tools were writable")
+	}
+}
+`;
+  const index: Record<string, Fn[]> = { "gen/lib.go": [["gen.Greet", 4, 9]] };
+  const filesOf = [{ path: "gen/lib.go", language: "go" as const }, { path: "gen/lib_test.go", language: "go" as const }];
+  const GREET = "gen/lib.go\u0000gen.Greet\u00004";
+
+  async function setupFixture(name: string): Promise<{ work: string; scratch: string; tools: string }> {
+    const work = path.join(tmp, `${name}-work`);
+    const scratch = path.join(tmp, `${name}-scratch`);
+    const tools = path.join(tmp, `${name}-tools`);
+    await mkdir(scratch, { recursive: true });
+    await write(tools, { "gen.sh": GEN_SH });
+    await chmod(path.join(tools, "gen.sh"), 0o755);
+    await write(work, { "go.mod": "module example.com/setupfx\n\ngo 1.25\n", ".gitignore": "gen/generated.go\n", "gen/lib.go": LIB, "gen/lib_test.go": LIB_TEST });
+    git(work, "init", "-q");
+    git(work, "add", "-A");
+    git(work, "commit", "-q", "-m", "fixture");
+    return { work, scratch, tools };
+  }
+
+  const profileFor = (tools: string, setup: unknown): unknown =>
+    profileWith({ metrics: { generated: [], sandbox: { go: { image: goImage, cpus: 2, memory: "2g", pids: 256, tmp: "256m", wallClockMs: 300_000, readOnly: [{ name: "tools", path: tools }], setup } } } });
+
+  it.skipIf(!hasDocker || !hasGo)("runs the setup in the sandbox, with no network and a read-only tool, then measures coverage of what it generated", async () => {
+    if (!goReady) return;
+    const { work, scratch, tools } = await setupFixture("setup-ok");
+    const m = await measure({
+      work,
+      scratch,
+      records: recordsOf(index),
+      index: new Map(Object.entries(index)),
+      files: filesOf,
+      profile: profileFor(tools, [{ id: "gen", argv: ["sh", "-c", '"$GRAPHLOOM_MOUNT_TOOLS/gen.sh" "hello with spaces and \'quotes\'" > gen/generated.go'] }]),
+    });
+    expect(m.state.state).toBe("done");
+    expect(m.state.outcomes!.get(GREET)).toMatchObject({ source: "measured", covered: 2, total: 3 });
+    expect(m.state.facts!.runs[0]).toMatchObject({ language: "go", ran: true, exit: 0, setup: ["gen"] });
+    // The tools directory was read-only, and the generated file is the checkout's own (ignored) output.
+    expect(await readdir(tools)).toEqual(["gen.sh"]);
+    expect(git(work, "status", "--porcelain")).toBe("");
+    expect(await readFile(path.join(work, "gen", "generated.go"), "utf8")).toContain('const Interfaces = "lo,"');
+    expect(m.jobs[1]!.confinement).toMatchObject({ kind: "docker", env: { GRAPHLOOM_MOUNT_TOOLS: tools } });
+    expect(spawnSync("docker", ["ps", "-aq", "--filter", `label=graphloom.run=${runId}`], { encoding: "utf8" }).stdout.trim()).toBe("");
+  }, 600_000);
+
+  it.skipIf(!hasDocker || !hasGo)("a failing setup command stops the run before any test and says why, in the record's reason", async () => {
+    if (!goReady) return;
+    const { work, scratch, tools } = await setupFixture("setup-fail");
+    const m = await measure({
+      work,
+      scratch,
+      records: recordsOf(index),
+      index: new Map(Object.entries(index)),
+      files: filesOf,
+      profile: profileFor(tools, [
+        { id: "first", argv: ["sh", "-c", "echo one > first.txt"] },
+        { id: "broken", argv: ["sh", "-c", "echo 'generator exploded' >&2; exit 3"] },
+        { id: "never", argv: ["sh", "-c", "echo three > never.txt"] },
+      ]),
+    });
+    expect(m.state.state).toBe("done");
+    expect(m.state.outcomes!.get(GREET)).toEqual({ reason: "setup failed: broken exited 3 (generator exploded)" });
+    expect((await readdir(work)).sort()).toEqual([".git", ".gitignore", "first.txt", "gen", "go.mod"]);
+    expect(m.state.facts!.runs[0]).toMatchObject({ ran: false, reason: "setup failed: broken exited 3 (generator exploded)" });
+  }, 600_000);
+
+  it.skipIf(!hasDocker || !hasGo)("a mount that is missing on the host, or inside the checkout, runs no container and says so", async () => {
+    if (!goReady) return;
+    const { work, scratch, tools } = await setupFixture("setup-mounts");
+    const ask = (dir: string) => measure({ work, scratch, records: recordsOf(index), index: new Map(Object.entries(index)), files: filesOf, profile: profileFor(dir, [{ id: "gen", argv: ["true"] }]) });
+    const missing = await ask(path.join(tools, "nope"));
+    expect(missing.jobs.map((j) => j.instruction.split(" ").slice(0, 3).join(" "))).toEqual(["Check the Docker"]);
+    expect((missing.state.outcomes!.get(GREET) as { reason: string }).reason).toMatch(/^sandbox mount tools \(.*nope\): .*is not a directory on this host/);
+    // A directory of the pull request's own checkout is refused when the job is prepared.
+    await mkdir(path.join(work, "bin"), { recursive: true });
+    const inside = await ask(path.join(work, "bin"));
+    expect((inside.state.outcomes!.get(GREET) as { reason: string }).reason).toMatch(/read-only mount .* is inside the workspace or holds it/);
+  }, 600_000);
+});
+
+// ---------------------------------------------------------------- opt-in: the real BanyanDB clone, generated offline
+
+/**
+ * Not part of `npm test`: set GRAPHLOOM_BANYANDB_CLONE to a BanyanDB checkout whose `bin/` holds the buf and protoc-gen-*
+ * tools (the operator's review clone), and optionally GRAPHLOOM_BUF_CACHE (default ~/.cache/buf) to a buf module cache that
+ * holds the dependencies of api/proto/buf.lock. The test copies the clone's sources (never its `bin/` or generated files) into a
+ * temporary checkout, names the profile's two read-only mounts by absolute paths (in a profile `~/…` is the operator's home), and runs the
+ * banyandb profile's own setup in the sandbox: protobuf and mock code generated offline, then coverage of a package whose
+ * tests need both.
+ */
+const cloneDir = process.env.GRAPHLOOM_BANYANDB_CLONE;
+describe.skipIf(cloneDir === undefined || !hasDocker || !hasGo)("the banyandb profile's setup against the real BanyanDB clone (opt-in)", () => {
+  it("generates the protobuf and mock code offline, in the sandbox, and measures coverage of pkg/node", async () => {
+    if (!goReady || cloneDir === undefined) return;
+    const work = path.join(tmp, "bdb-work");
+    const scratch = path.join(tmp, "bdb-scratch");
+    await mkdir(scratch, { recursive: true });
+    await mkdir(path.join(work), { recursive: true });
+    for (const d of ["api", "banyand", "pkg", "scripts", "test", "bydbctl", "fodc", "mcp", "plugins", "cmd", "docs"]) {
+      await cp(path.join(cloneDir, d), path.join(work, d), { recursive: true }).catch(() => undefined);
+    }
+    for (const f of ["go.mod", "go.sum"]) await cp(path.join(cloneDir, f), path.join(work, f));
+    const shipped = (): unknown => {
+      const sandbox = (plugin.banyandb.metrics as { sandbox: { go: Record<string, unknown> } }).sandbox;
+      const mounts = [{ name: "tools", path: path.join(cloneDir, "bin") }, { name: "buf-cache", path: process.env.GRAPHLOOM_BUF_CACHE ?? path.join(os.homedir(), ".cache", "buf") }];
+      return profileWith({ metrics: { generated: [], sandbox: { go: { ...sandbox.go, readOnly: mounts } } } });
+    };
+    const index: Record<string, Fn[]> = { "pkg/node/round_robin.go": [["node.roundRobinSelector.Name", 86, 88]] };
+    const m = await measure({
+      work,
+      scratch,
+      records: recordsOf(index),
+      index: new Map(Object.entries(index)),
+      files: [{ path: "pkg/node/round_robin.go", language: "go" }, { path: "pkg/node/round_robin_test.go", language: "go" }],
+      // The banyandb profile as shipped (its setup, its image), with its two `~/…` mounts named by the absolute paths of this machine.
+      profile: shipped(),
+    });
+    const outcome = m.state.outcomes!.get("pkg/node/round_robin.go\u0000node.roundRobinSelector.Name\u000086");
+    expect(outcome, JSON.stringify(m.state.facts)).toMatchObject({ source: "measured" });
+    expect(m.state.facts!.runs[0]).toMatchObject({ ran: true, setup: ["proto", "mocks"] });
+    expect(await readdir(path.join(work, "api", "proto", "banyandb", "bydbql", "v1"))).toContain("query.pb.go");
+  }, 1_800_000);
 });

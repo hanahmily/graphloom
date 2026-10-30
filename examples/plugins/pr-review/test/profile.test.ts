@@ -194,6 +194,61 @@ describe("metrics.sandbox", () => {
   });
 });
 
+describe("metrics.sandbox.go.readOnly and setup", () => {
+  const digest = `golang@sha256:${"a".repeat(64)}`;
+  const go = (extra: Record<string, unknown>) => ({ metrics: { sandbox: { go: { image: digest, ...extra } } } });
+  const step = { id: "gen", argv: ["sh", "-c", "echo hi"] };
+
+  it("ships the BanyanDB profile with its tools and buf cache mounts and its two sandboxed setup commands", () => {
+    const go = profileOf().metrics.sandbox!.go!;
+    expect(go.readOnly).toEqual([{ name: "tools", path: "~/.graphloom/tools/banyandb/bin" }, { name: "buf-cache", path: "~/.cache/buf" }]);
+    expect(go.setup!.map((s) => s.id)).toEqual(["proto", "mocks"]);
+    expect(go.setup![0]!.argv.join(" ")).toMatch(/buf" generate/);
+    // Generation and mocks both come from the mounted tools and the module cache: nothing is fetched.
+    expect(go.setup!.map((s) => s.argv.join(" ")).join("\n")).not.toMatch(/https?:|go install|go get|git /);
+    expect(resolveSandbox(profileOf(), "go").setup).toHaveLength(2);
+    expect(resolveSandbox(profileOf({ metrics: { sandbox: { go: { image: digest } } } }), "go")).toMatchObject({ readOnly: [], setup: [] });
+  });
+
+  it("accepts absolute and ~/ mounts and setup commands, and keeps them in order", () => {
+    const p = profileOf(go({ readOnly: [{ name: "a-b1", path: "/opt/tools" }, { name: "c", path: "~/x/y/" }], setup: [step, { id: "two", argv: ["true"] }] }));
+    expect(resolveSandbox(p, "go").readOnly.map((m) => m.path)).toEqual(["/opt/tools", "~/x/y/"]);
+    expect(resolveSandbox(p, "go").setup.map((s) => s.id)).toEqual(["gen", "two"]);
+  });
+
+  it("refuses mounts that are relative (the checkout), parent-relative, the root, unnamed or twice named, or that Docker could not take", () => {
+    const m = (path: string, name = "t") => refused(go({ readOnly: [{ name, path }] }));
+    expect(m("tools/bin")).toMatch(/readOnly\[0\]\.path .* must be absolute or start with ~\//);
+    expect(m(".")).toMatch(/must be absolute/);
+    expect(m("~tools")).toMatch(/must be absolute/);
+    expect(m("/opt/../etc")).toMatch(/must not contain \.\./);
+    expect(m("~/a/../../b")).toMatch(/must not contain \.\./);
+    expect(m("/")).toMatch(/not be the filesystem root/);
+    expect(m("~/")).toMatch(/not be the filesystem root/);
+    expect(m("/a:b")).toMatch(/must not contain :/);
+    expect(m("/a,b")).toMatch(/must not contain :/);
+    expect(m("/a\nb")).toMatch(/must not contain :/);
+    expect(m("/ok", "Bad Name")).toMatch(/name must match/);
+    expect(m("/ok", "")).toMatch(/name must match/);
+    expect(refused(go({ readOnly: [{ name: "t", path: "/a" }, { name: "t", path: "/b" }] }))).toMatch(/used twice/);
+    expect(refused(go({ readOnly: [{ name: "t", path: "/a", extra: 1 }] }))).toMatch(/extra is not a field/);
+    expect(refused(go({ readOnly: "/a" }))).toMatch(/must be a list/);
+    expect(refused(go({ readOnly: Array.from({ length: 9 }, (_, i) => ({ name: `m${i}`, path: `/m${i}` })) }))).toMatch(/at most 8/);
+  });
+
+  it("refuses setup that is empty, has no program, repeats an id, or is for another language", () => {
+    expect(refused(go({ setup: [] }))).toMatch(/setup must be a list of 1 to 8/);
+    expect(refused(go({ setup: [{ id: "x", argv: [] }] }))).toMatch(/setup\[0\]\.argv must be a list of 1 to 32 strings/);
+    expect(refused(go({ setup: [{ id: "x", argv: [""] }] }))).toMatch(/argv needs a program/);
+    expect(refused(go({ setup: [{ id: "x", argv: [1] }] }))).toMatch(/argv must be a list/);
+    expect(refused(go({ setup: [{ id: "X", argv: ["a"] }] }))).toMatch(/id must match/);
+    expect(refused(go({ setup: [step, step] }))).toMatch(/used twice/);
+    expect(refused(go({ setup: [{ ...step, cwd: "." }] }))).toMatch(/cwd is not a field/);
+    expect(refused(go({ setup: [{ id: "x", argv: ["a".repeat(2_001)] }] }))).toMatch(/at most 2000 characters/);
+    expect(refused({ metrics: { sandbox: { typescript: { image: `node@sha256:${"b".repeat(64)}`, setup: [step] } } } })).toMatch(/setup: sandboxed setup is supported for go only/);
+  });
+});
+
 describe("requestedPull", () => {
   const profile = { project: "apache/skywalking-banyandb" };
   const head = "0123456789abcdef0123456789abcdef01234567";

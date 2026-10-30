@@ -3,7 +3,7 @@
 
 import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { existsSync, lstatSync, statSync } from "node:fs";
+import { existsSync, lstatSync, realpathSync, statSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -272,6 +272,15 @@ async function prepareDockerJob(job: JobSpec, spec: DockerConfinement, ctx: JobC
   }
   const missing = [...writable, ...readOnly].filter((p) => !existsSync(p));
   if (missing.length > 0) return { refusal: `docker confinement mounts paths that do not exist: ${missing.join(", ")}` };
+  // An absolute read-only mount is the operator's (tools, caches): never a path inside the workspace, which the job's own
+  // commands can change, and never one that holds it.
+  const real = realpathSync(ctx.worktreePath);
+  for (const [i, mount] of spec.readOnly.entries()) {
+    if (!path.isAbsolute(mount)) continue;
+    const resolved = realpathSync(readOnly[i]!);
+    const within = (inner: string, outer: string): boolean => inner === outer || inner.startsWith(outer.endsWith(path.sep) ? outer : `${outer}${path.sep}`);
+    if (within(resolved, real) || within(real, resolved)) return { refusal: `docker confinement's read-only mount ${mount} is inside the workspace or holds it; a read-only mount must be a directory outside the checkout` };
+  }
   const notDirectory = writable.filter((p) => !statSync(p).isDirectory());
   if (notDirectory.length > 0) return { refusal: `docker confinement's writable paths must be directories: ${notDirectory.join(", ")}` };
 

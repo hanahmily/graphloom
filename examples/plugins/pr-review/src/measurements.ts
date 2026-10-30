@@ -478,7 +478,8 @@ export function coverageNotes(facts: CoverageFacts): string[] {
     const how = run.language === "go" ? "go test -coverprofile -covermode=set over the touched packages" : "the repository's own vitest run with @vitest/coverage-v8 over the touched workspace";
     const exit = run.exit === undefined ? "" : run.exit === 0 ? "; the tests passed" : `; the test command exited ${run.exit} (a test failed or a package did not build: coverage is of what ran)`;
     const changed = run.changed.length > 0 ? `; the run changed ${run.changed.length} file(s) in its checkout (${run.changed.slice(0, 3).join(", ")}): the checks must not change files` : "";
-    return `Coverage (${run.language}): measured with ${how}, in the Docker sandbox (image ${shortImage(run.image ?? "")}, no network, read-only dependency caches) over a prepared checkout of the head, statement coverage by function line range${exit}${changed}.`;
+    const setup = run.setup !== undefined && run.setup.length > 0 ? `, after the profile's sandboxed setup (${run.setup.join(", ")}: code the repository does not commit, generated from read-only tools and caches, in the same sandbox)` : "";
+    return `Coverage (${run.language}): measured with ${how}, in the Docker sandbox (image ${shortImage(run.image ?? "")}, no network, read-only dependency caches) over a prepared checkout of the head${setup}, statement coverage by function line range${exit}${changed}.`;
   });
 }
 

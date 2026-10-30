@@ -9,7 +9,7 @@ export const GRAPH_ID = "pr-review";
  * §18): 0.1 declares Fetch, Report, Questions and Answers. Review, Checks,
  * Draft and Publish arrive with later versions.
  */
-export const GRAPH_VERSION = "0.5.0";
+export const GRAPH_VERSION = "0.6.0";
 
 /** The operator decision that would continue into the review layer (design §11). */
 export const REVIEW_LAYER_APPROVAL = "review-layer";
@@ -80,6 +80,8 @@ export const COMMAND = {
   sandboxPrefix: "sandbox-",
   hostGoModcache: "host-go-modcache",
   hostNpmCache: "host-npm-cache",
+  /** Where a language's profile-declared read-only mounts are on the host: `host-mounts-go`. */
+  hostMountsPrefix: "host-mounts-",
   /** The coverage commands, `cover-go` and `cover-ts-<n>`. */
   coverGo: "cover-go",
   coverTs: "cover-ts",

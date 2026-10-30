@@ -16,6 +16,8 @@
 //   test <text>              one line of the test command's package results
 //   note <text>              anything else worth reading
 //   fail <reason>            the command could not produce coverage at all
+//   setup <id> ok            a sandboxed setup command (profile metrics.sandbox.<language>.setup) that succeeded
+//   setup-fail <id> <exit> <text>   a setup command that failed: nothing was measured
 //   provider <name@version>  the coverage provider
 //   seen <path>              a file the coverage tool knew (so an empty function is not "not run")
 //   B <path>:<l>.<c>,<l>.<c> <statements> <count>     one Go coverprofile block (path repository-relative)
@@ -52,6 +54,10 @@ export interface CoverageReport {
   notes: string[];
   /** The coverage command could not produce coverage at all, and why. */
   fail: string[];
+  /** The setup commands that succeeded, in order. */
+  setup: string[];
+  /** The setup command that failed (the later ones did not run), with its exit status and output tail. */
+  setupFail: { id: string; exit: number; text: string } | undefined;
   provider: string | undefined;
   seen: Set<string>;
   blocks: GoBlock[];
@@ -73,7 +79,7 @@ export function parseCoverageReport(text: string): CoverageReport | { error: str
   const lines = text.split("\n");
   const head = /^graphloom-coverage-v1 (go|typescript)$/.exec((lines[0] ?? "").trim());
   if (head === null) return { error: `the report does not start with "${COVERAGE_SCHEMA} go|typescript"` };
-  const report: CoverageReport = { language: head[1] as Language, exit: undefined, tests: [], notes: [], fail: [], provider: undefined, seen: new Set(), blocks: [], statements: [] };
+  const report: CoverageReport = { language: head[1] as Language, exit: undefined, tests: [], notes: [], fail: [], setup: [], setupFail: undefined, provider: undefined, seen: new Set(), blocks: [], statements: [] };
   for (const raw of lines.slice(1)) {
     const line = raw.replace(/\r$/, "");
     const sp = line.indexOf(" ");
@@ -94,6 +100,16 @@ export function parseCoverageReport(text: string): CoverageReport | { error: str
       case "fail":
         report.fail.push(rest);
         break;
+      case "setup": {
+        const m = /^(\S+) ok$/.exec(rest);
+        if (m !== null) report.setup.push(m[1]!);
+        break;
+      }
+      case "setup-fail": {
+        const m = /^(\S+) (\d+) ?(.*)$/.exec(rest);
+        if (m !== null && report.setupFail === undefined) report.setupFail = { id: m[1]!, exit: Number(m[2]), text: m[3]! };
+        break;
+      }
       case "provider":
         report.provider = rest;
         break;
@@ -234,28 +250,36 @@ export interface CoverageSpecFunction {
   end: number;
 }
 
+/** A setup argument as one token of a spec line: `_` and its base64, so that spaces, quotes, newlines and the empty string travel intact. */
+export function encodeArg(arg: string): string {
+  return `_${Buffer.from(arg, "utf8").toString("base64")}`;
+}
+
 /**
  * What a coverage command is asked to measure, as text that travels in its argv (so the recorded bytes are the
  * bytes measured): `pkg <dir>` (Go, a changed file's directory), `ws <dir>` (TypeScript, a workspace),
- * `file <path>` (TypeScript, a changed file) and `fn <path> <start> <end>` (a changed function's range).
+ * `file <path>` (TypeScript, a changed file) and `fn <path> <start> <end>` (a changed function's range) and
+ * `setup <id> <_base64 of each argument>…` (Go, a sandboxed setup command, run in this order before the tests).
  */
-export function formatSpec(spec: { packages?: readonly string[]; workspace?: string; files?: readonly string[]; functions: readonly CoverageSpecFunction[] }): string {
+export function formatSpec(spec: { packages?: readonly string[]; workspace?: string; files?: readonly string[]; functions: readonly CoverageSpecFunction[]; setup?: ReadonlyArray<{ id: string; argv: readonly string[] }> }): string {
   const lines = [
     ...(spec.workspace !== undefined ? [`ws ${spec.workspace}`] : []),
     ...(spec.packages ?? []).map((p) => `pkg ${p}`),
     ...(spec.files ?? []).map((f) => `file ${f}`),
     ...spec.functions.map((f) => `fn ${f.path} ${f.start} ${f.end}`),
+    ...(spec.setup ?? []).map((st) => `setup ${st.id} ${st.argv.map(encodeArg).join(" ")}`),
   ];
   return `${lines.join("\n")}\n`;
 }
 
-export function parseSpec(text: string): { packages: string[]; workspace?: string; files: string[]; functions: CoverageSpecFunction[] } {
-  const out: { packages: string[]; workspace?: string; files: string[]; functions: CoverageSpecFunction[] } = { packages: [], files: [], functions: [] };
+export function parseSpec(text: string): { packages: string[]; workspace?: string; files: string[]; functions: CoverageSpecFunction[]; setup: Array<{ id: string; argv: string[] }> } {
+  const out: { packages: string[]; workspace?: string; files: string[]; functions: CoverageSpecFunction[]; setup: Array<{ id: string; argv: string[] }> } = { packages: [], files: [], functions: [], setup: [] };
   for (const line of text.split("\n")) {
     const [tag, a, b, c] = line.split(" ");
     if (tag === "pkg" && a !== undefined) out.packages.push(a);
     else if (tag === "ws" && a !== undefined) out.workspace = a;
     else if (tag === "file" && a !== undefined) out.files.push(a);
+    else if (tag === "setup" && a !== undefined) out.setup.push({ id: a, argv: line.split(" ").slice(2).map((t) => Buffer.from(t.slice(1), "base64").toString("utf8")) });
     else if (tag === "fn" && a !== undefined && b !== undefined && c !== undefined) out.functions.push({ path: a, start: Number(b), end: Number(c) });
   }
   return out;

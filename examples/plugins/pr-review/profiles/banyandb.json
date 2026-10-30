@@ -119,7 +119,29 @@
         "memory": "8g",
         "pids": 512,
         "tmp": "1g",
-        "wallClockMs": 1800000
+        "wallClockMs": 1800000,
+        "readOnly": [
+          { "name": "tools", "path": "~/.graphloom/tools/banyandb/bin" },
+          { "name": "buf-cache", "path": "~/.cache/buf" }
+        ],
+        "setup": [
+          {
+            "id": "proto",
+            "argv": [
+              "sh",
+              "-c",
+              "set -eu; export BUF_CACHE_DIR=/tmp/buf-cache; mkdir -p \"$BUF_CACHE_DIR\"; cp -R --no-preserve=mode \"$GRAPHLOOM_MOUNT_BUF_CACHE/.\" \"$BUF_CACHE_DIR/\"; cd api; PATH=\"$GRAPHLOOM_MOUNT_TOOLS:$PWD/proto:$PATH\" \"$GRAPHLOOM_MOUNT_TOOLS/buf\" generate"
+            ]
+          },
+          {
+            "id": "mocks",
+            "argv": [
+              "sh",
+              "-c",
+              "set -eu; mkdir -p /tmp/genbin; go build -o /tmp/genbin/mockgen go.uber.org/mock/mockgen; PATH=\"/tmp/genbin:$PATH\" go generate ./..."
+            ]
+          }
+        ]
       }
     }
   },

@@ -307,6 +307,7 @@ function commands(p: Pull, toolId: string | undefined): NonNullable<RehearsalSce
     "sandbox-go": { exitCode: 0, stdout: `unavailable: ${REHEARSAL_NO_DOCKER}\n` },
     "sandbox-typescript": { exitCode: 0, stdout: `unavailable: ${REHEARSAL_NO_DOCKER}\n` },
     "host-go-modcache": { exitCode: 0, stdout: "/gomodcache\n" },
+    "host-mounts-go": { exitCode: 0, stdout: "ok /rehearsal/tools\nok /rehearsal/buf-cache\n" },
     "host-npm-cache": { exitCode: 0, stdout: "/npm-cache\n" },
     "metrics-diff": { exitCode: 0, stdout: p.diff },
     ...(toolId !== undefined ? { [toolId]: { exitCode: 0, stdout: JSON.stringify(p.doc) } } : {}),
