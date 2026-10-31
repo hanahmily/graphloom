@@ -107,7 +107,13 @@ describe("the report scenario, end to end through the graph", () => {
   });
 
   it("inherits the harness's model and effort unless the profile names them", () => {
-    for (const job of sim.jobs.filter((j) => j.kind === "agent")) expect(job.input).not.toHaveProperty("harnessOptions");
+    const plain = simulate({ config: { harnesses: { reporter: "claude-code", "report-checker": "codex", questioner: "codex", answerer: "claude-code", "answer-checker": "codex" } } });
+    for (const job of plain.jobs.filter((j) => j.kind === "agent")) expect(job.input).not.toHaveProperty("harnessOptions");
+    // The BanyanDB profile's pins reach every agent job.
+    for (const job of sim.jobs.filter((j) => j.kind === "agent")) {
+      const input = job.input as { harness: string; harnessOptions?: object };
+      expect(input.harnessOptions).toEqual(input.harness === "claude-code" ? { model: "opus", effort: "high" } : { effort: "medium" });
+    }
   });
 
   it("carries a role's model and effort to its job as harness options", () => {

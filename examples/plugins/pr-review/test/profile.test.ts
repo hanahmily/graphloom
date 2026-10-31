@@ -121,7 +121,10 @@ describe("profile refusals", () => {
   });
 
   it("takes a harness id or an object with the harness, model and effort, and keeps inheriting what is omitted", () => {
-    expect(profileOf().roleSettings).toEqual({});
+    const ids = { reporter: "claude-code", "report-checker": "codex", questioner: "codex", answerer: "claude-code", "answer-checker": "codex" };
+    expect(profileOf({ harnesses: ids }).roleSettings).toEqual({});
+    // The BanyanDB profile pins Opus at high effort for the authors and medium effort for the Codex checkers.
+    expect(profileOf().roleSettings).toEqual({ reporter: { model: "opus", effort: "high" }, answerer: { model: "opus", effort: "high" }, "report-checker": { effort: "medium" }, questioner: { effort: "medium" }, "answer-checker": { effort: "medium" } });
     const p = profileOf({ harnesses: { reporter: { harness: "claude-code", model: "opus", effort: "max" }, "report-checker": { harness: "codex", effort: "minimal" }, questioner: { harness: "codex" }, answerer: "claude-code" } });
     expect(p.roles).toEqual({ reporter: "claude-code", "report-checker": "codex", questioner: "codex", answerer: "claude-code", "answer-checker": "codex" });
     expect(p.roleSettings).toEqual({ reporter: { model: "opus", effort: "max" }, "report-checker": { effort: "minimal" } });
