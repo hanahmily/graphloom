@@ -15,7 +15,7 @@
 import type { DockerConfinement, EnvironmentCommand, EvidenceRecord } from "@graphloom/sdk";
 import { COMMAND } from "./constants.js";
 import { commandRuns, isObject, latestFile, outputTail, reportText, type CommandRun } from "./evidence.js";
-import { formatSpec, goFunctionCoverage, parseCoverageReport, tsFunctionCoverage, type CoverageSpecFunction } from "./metrics/coverage.js";
+import { formatSpec, goFunctionCoverage, parseCoverageReport, parseSpec, tsFunctionCoverage, type CoverageSpecFunction } from "./metrics/coverage.js";
 import { languageOf, type Coverage, type FunctionIndexEntry, type Language, type MetricsRecord } from "./metrics/record.js";
 import { SANDBOX_LIMITS, type Profile, type SandboxMount, type SandboxSetupStep } from "./profile.js";
 import { writeChunks } from "./write.js";
@@ -34,6 +34,8 @@ const MAX_SPEC_CHUNKS = 58;
 const MAX_REASON_CHARS = 240;
 export const MAX_FAILING = 20;
 export const MAX_FAILING_CHARS = 300;
+export const MAX_TIMED_OUT = 5;
+export const MAX_TIMEOUT_TESTS = 5;
 /** The command executor accepts at most a day per command. */
 const MAX_COMMAND_TIMEOUT_MS = 24 * 60 * 60_000;
 
@@ -50,6 +52,17 @@ export interface Sandbox {
   setup: SandboxSetupStep[];
   /** The Go build tags the tests compile with. */
   buildTags: string[];
+  /** The Ginkgo label filter for the test binaries that use Ginkgo, when the profile sets one. */
+  ginkgoLabelFilter?: string;
+}
+
+/** Setup and profile collection happen inside the sandbox's wall clock too: the tests get the clock less this. */
+export const TEST_TIMEOUT_MARGIN_MS = 2 * 60_000;
+export const MIN_TEST_TIMEOUT_MS = 60_000;
+
+/** The seconds `go test` may run in a sandbox, counted from the start of `go.sh`: its wall clock less the margin, at least a minute. */
+export function goTestTimeoutSeconds(wallClockMs: number): number {
+  return Math.floor(Math.max(MIN_TEST_TIMEOUT_MS, wallClockMs - TEST_TIMEOUT_MARGIN_MS) / 1000);
 }
 
 /** A read-only mount as the host resolved it: the real path, mounted at the same path. */
@@ -74,6 +87,7 @@ export function resolveSandbox(profile: Pick<Profile, "metrics">, language: "go"
     readOnly: given.readOnly ?? [],
     setup: given.setup ?? [],
     buildTags: given.buildTags ?? [],
+    ...(given.ginkgoLabelFilter !== undefined ? { ginkgoLabelFilter: given.ginkgoLabelFilter } : {}),
   };
 }
 
@@ -304,6 +318,11 @@ export interface CoverageRunFacts {
   failing?: string[];
   /** The first compiler error of the test output, when the command failed. */
   buildError?: string;
+  /** The packages whose test binary timed out, with the tests it was running (at most `MAX_TIMED_OUT` packages, `MAX_TIMEOUT_TESTS` tests each). */
+  timedOut?: Array<{ package: string; after: string; tests: string[] }>;
+  /** The `go test -timeout` budget in seconds (from the start of the run) and the Ginkgo label filter the recorded spec carried (Go). */
+  timeoutSeconds?: number;
+  ginkgoLabelFilter?: string;
   /** Test result lines, as the report carried them. */
   tests: string[];
   /** Files the run changed in its checkout, as the controller recorded them. */
@@ -433,7 +452,8 @@ function partsOf(input: CoverageInput, language: "go" | "typescript", records: M
   if (language === GO) {
     const packages = goPackages(input.files);
     if (packages.length === 0) return { reason: "no touched Go package" };
-    const spec = formatSpec({ packages, functions: functionsOf(records), setup: resolveSandbox(input.profile, GO).setup, buildTags: resolveSandbox(input.profile, GO).buildTags });
+    const sandbox = resolveSandbox(input.profile, GO);
+    const spec = formatSpec({ packages, functions: functionsOf(records), setup: sandbox.setup, buildTags: sandbox.buildTags, timeoutSeconds: goTestTimeoutSeconds(sandbox.wallClockMs), ...(sandbox.ginkgoLabelFilter !== undefined ? { ginkgoLabelFilter: sandbox.ginkgoLabelFilter } : {}) });
     return [{ language, records, command: { id: COMMAND.coverGo, script: "go.sh", spec } }];
   }
   const manifests = [...new Set(records.flatMap((r) => manifestChain(r.path)))];
@@ -531,6 +551,12 @@ function attribute(part: Part, run: CommandRun, input: CoverageInput, outcomes: 
   if (parsed.exit !== undefined) facts.exit = parsed.exit;
   facts.tests = parsed.tests.slice(0, 12);
   if (parsed.setup.length > 0) facts.setup = parsed.setup;
+  if (part.language === GO) {
+    const given = parseSpec(part.command.spec);
+    if (given.timeoutSeconds !== undefined) facts.timeoutSeconds = given.timeoutSeconds;
+    if (given.ginkgoLabelFilter !== undefined) facts.ginkgoLabelFilter = given.ginkgoLabelFilter;
+  }
+  if (parsed.exit !== undefined && parsed.exit !== 0 && parsed.timedOut.length > 0) facts.timedOut = parsed.timedOut.slice(0, MAX_TIMED_OUT).map((t) => ({ ...t, tests: t.tests.slice(0, MAX_TIMEOUT_TESTS) }));
   if (parsed.exit !== undefined && parsed.exit !== 0) {
     const failing = parsed.failed.slice(0, MAX_FAILING).map((t) => t.slice(0, MAX_FAILING_CHARS));
     if (failing.length > 0) facts.failing = failing;

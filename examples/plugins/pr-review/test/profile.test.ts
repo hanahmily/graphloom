@@ -293,6 +293,31 @@ describe("metrics.sandbox.go.buildTags", () => {
   });
 });
 
+describe("metrics.sandbox.go.ginkgoLabelFilter", () => {
+  const digest = `golang@sha256:${"a".repeat(64)}`;
+  const go = (ginkgoLabelFilter: unknown) => ({ metrics: { sandbox: { go: { image: digest, ginkgoLabelFilter } } } });
+
+  it("ships BanyanDB with !slow, the label filter its integration workflow passes; none by default", () => {
+    expect(profileOf().metrics.sandbox!.go!.ginkgoLabelFilter).toBe("!slow");
+    expect(resolveSandbox(profileOf({ metrics: { sandbox: { go: { image: digest } } } }), "go").ginkgoLabelFilter).toBeUndefined();
+  });
+
+  it("accepts the safe label-expression characters", () => {
+    expect(resolveSandbox(profileOf(go("(!slow && !flaky) || a-b_c.d, x/y")), "go").ginkgoLabelFilter).toBe("(!slow && !flaky) || a-b_c.d, x/y");
+    expect(resolveSandbox(profileOf(go("a".repeat(200))), "go").ginkgoLabelFilter).toHaveLength(200);
+  });
+
+  it("refuses an empty, blank, oversized, non-string or unsafe filter, and another language", () => {
+    const shape = /ginkgoLabelFilter must be a non-empty string of at most 200 characters/;
+    expect(refused(go(""))).toMatch(shape);
+    expect(refused(go("  "))).toMatch(shape);
+    expect(refused(go("a".repeat(201)))).toMatch(shape);
+    expect(refused(go(1))).toMatch(shape);
+    for (const bad of ["a;b", "$(id)", "a`b`", "a'b", 'a"b', "a\\b", "a\nb", "a=b", "é"]) expect(refused(go(bad))).toMatch(shape);
+    expect(refused({ metrics: { sandbox: { typescript: { ginkgoLabelFilter: "x" } } } })).toMatch(/ginkgoLabelFilter: a Ginkgo label filter is supported for go only/);
+  });
+});
+
 describe("requestedPull", () => {
   const profile = { project: "apache/skywalking-banyandb" };
   const head = "0123456789abcdef0123456789abcdef01234567";

@@ -8,7 +8,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { confinementProblem, type EvidenceRecord, type JobSpec } from "@graphloom/sdk";
 import { describe, expect, it } from "vitest";
-import { coverageCommand, coverageConfinement, coverageState, DEFAULT_TS_IMAGE, majorOf, measuredSpec, missingProbe, recordKey, sandboxEnvironmentChecks, sandboxProbeCommands, type CoverageInput, type CoverageState } from "../src/coverage.js";
+import { coverageCommand, coverageConfinement, coverageState, DEFAULT_TS_IMAGE, goTestTimeoutSeconds, majorOf, measuredSpec, missingProbe, recordKey, sandboxEnvironmentChecks, sandboxProbeCommands, type CoverageInput, type CoverageState } from "../src/coverage.js";
 import { coverageNotes, withOutcome } from "../src/measurements.js";
 import {
   formatSpec,
@@ -192,7 +192,7 @@ const input = (over: Partial<CoverageInput> & { evidence: EvidenceRecord[] }): C
   ...over,
 });
 
-const goSpec = formatSpec({ packages: ["pkg/a"], functions: [{ path: "pkg/a/a.go", start: 3, end: 16 }], setup: profile.metrics.sandbox!.go!.setup!, buildTags: profile.metrics.sandbox!.go!.buildTags! });
+const goSpec = formatSpec({ packages: ["pkg/a"], functions: [{ path: "pkg/a/a.go", start: 3, end: 16 }], setup: profile.metrics.sandbox!.go!.setup!, buildTags: profile.metrics.sandbox!.go!.buildTags!, timeoutSeconds: 1680, ginkgoLabelFilter: profile.metrics.sandbox!.go!.ginkgoLabelFilter! });
 const goRun = (text: string, over: Parameters<typeof command>[2] = {}): EvidenceRecord => command("cover-go", "", { argv: coverageCommand({ id: "cover-go", script: "go.sh", spec: goSpec }, "/plugin", 60_000).argv, report: { text, truncated: false }, ...over });
 const doneOf = (s: CoverageState): Extract<CoverageState, { state: "done" }> => {
   expect(s.state).toBe("done");
@@ -279,7 +279,7 @@ describe("coverageState", () => {
   it("takes the repository's root package as a package, and leaves hidden, testdata and vendor directories out", () => {
     const root: MetricsRecord = { ...goRecord, path: "main.go", function: "main.F", startLine: 3, endLine: 9 };
     const s = coverageState(input({ evidence: [diff, ...ready("go")], records: [root], index: new Map([["main.go", [["main.F", 3, 9]]]]), files: [{ path: "main.go", language: "go" }, { path: ".github/x.go", language: "go" }, { path: "pkg/testdata/t.go", language: "go" }, { path: "vendor/v/v.go", language: "go" }] }));
-    expect((s as Extract<CoverageState, { state: "run" }>).plan.commands[0]!.spec).toBe(formatSpec({ packages: ["."], functions: [{ path: "main.go", start: 3, end: 9 }], setup: profile.metrics.sandbox!.go!.setup!, buildTags: profile.metrics.sandbox!.go!.buildTags! }));
+    expect((s as Extract<CoverageState, { state: "run" }>).plan.commands[0]!.spec).toBe(formatSpec({ packages: ["."], functions: [{ path: "main.go", start: 3, end: 9 }], setup: profile.metrics.sandbox!.go!.setup!, buildTags: profile.metrics.sandbox!.go!.buildTags!, timeoutSeconds: 1680, ginkgoLabelFilter: profile.metrics.sandbox!.go!.ginkgoLabelFilter! }));
   });
 
   it("runs only the languages that have a function to measure, and not for a test file alone", () => {
@@ -431,7 +431,7 @@ describe("coverage-measured (through the graph)", () => {
 
   it("writes the measured row, the measured CRAP and the Coverage sentence, and recomputes them in the validators", () => {
     expect(sim.written!.markdown).toContain("| `schema.ParseTTL` pkg/schema/ttl.go:6 | added | 12 (over the limit of 10) | 4 (over the limit of 3) | 40% (8/20 statements, measured) | 43.1 (at or over the threshold of 30) | not run: mutation not available in this version |");
-    expect(sim.written!.markdown).toMatch(/Coverage \(go\): measured with go test -coverprofile -covermode=set over the touched packages, in the Docker sandbox \(image golang@sha256:670bb5aa5349…, no network, read-only dependency caches\) over a prepared checkout of the head, statement coverage by function line range; the tests passed\./);
+    expect(sim.written!.markdown).toMatch(/Coverage \(go\): measured with go test -coverprofile -covermode=set over the touched packages, -timeout=1680s from the start of the run \(the sandbox.s wall clock less a margin for setup and profile collection\), the packages whose tests use Ginkgo run with -ginkgo\.label-filter="!slow" \(the repository.s own CI filter; plain test packages without it\), in the Docker sandbox \(image golang@sha256:670bb5aa5349…, no network, read-only dependency caches\) over a prepared checkout of the head, statement coverage by function line range; the tests passed\./);
     const json = JSON.parse(sim.written!.json) as { measurements: { tools: string; records: Array<{ coverage: unknown; crap: number }> } };
     expect(json.measurements.tools).toBe("static+coverage");
     expect(json.measurements.records[0]).toMatchObject({ coverage: { source: "measured", covered: 8, total: 20, unit: "statement" }, crap: 43.1 });
@@ -579,7 +579,7 @@ describe("sandbox mounts and setup (profile)", () => {
 
   it("makes every function not run, with the failed setup command named, when the setup failed; and keeps what ran when it did not", () => {
     const p = withGo({ readOnly: mounts, setup });
-    const spec = formatSpec({ packages: ["pkg/a"], functions: [{ path: "pkg/a/a.go", start: 3, end: 16 }], setup });
+    const spec = formatSpec({ packages: ["pkg/a"], functions: [{ path: "pkg/a/a.go", start: 3, end: 16 }], setup, timeoutSeconds: 1680 });
     const evidence = (text: string): EvidenceRecord[] => [
       diff,
       command("sandbox-go", "ready\n"),
@@ -605,10 +605,16 @@ describe("go.sh runs the setup before the tests", () => {
       `#!/bin/sh
 case "$1" in
   env) echo "$PWD/go.mod" ;;
+  list)
+    for last; do :; done
+    case " \${GINKGO_PKGS:-} " in *" $last "*) echo "testing"; echo "github.com/onsi/ginkgo/v2" ;; *) echo "testing" ;; esac
+    exit 0 ;;
   test)
     echo "test" >> "$ORDER"
     echo "$*" >> "$ARGS"
-    for a in "$@"; do case "$a" in -coverprofile=*) printf 'mode: set\nexample.com/m/pkg/a/a.go:4.2,6.3 3 1\n' > "\${a#-coverprofile=}" ;; esac; done
+    prof='mode: set\nexample.com/m/pkg/a/a.go:4.2,6.3 3 1\n'
+    for a in "$@"; do case "$a" in -args) prof="\${PROF_INK:-$prof}" ;; esac; done
+    for a in "$@"; do case "$a" in -coverprofile=*) printf '%b' "$prof" > "\${a#-coverprofile=}" ;; esac; done
     if [ -n "\${GOOUT:-}" ]; then printf '%b' "$GOOUT"; else echo "ok  	example.com/m/pkg/a	0.1s"; fi
     exit "\${GORC:-0}" ;;
 esac
@@ -617,7 +623,7 @@ esac
     );
   };
 
-  function run(setup: Array<{ id: string; argv: string[] }>, more: { buildTags?: string[]; out?: string; rc?: number; spec?: string } = {}): { report: string; order: string[]; status: number | null; args: string[] } {
+  function run(setup: Array<{ id: string; argv: string[] }>, more: { buildTags?: string[]; out?: string; rc?: number; spec?: string; packages?: string[]; timeoutSeconds?: number; ginkgoLabelFilter?: string; ginkgoPkgs?: string[]; profInk?: string } = {}): { report: string; order: string[]; status: number | null; args: string[] } {
     const dir = mkdtempSync(path.join(os.tmpdir(), "gl-gosh-"));
     try {
       const bin = path.join(dir, "bin");
@@ -625,14 +631,14 @@ esac
       spawnSync("mkdir", ["-p", bin, path.join(work, "pkg", "a")]);
       stubs(bin);
       writeFileSync(path.join(work, "go.mod"), "module example.com/m\n\ngo 1.25\n");
-      const spec = more.spec ?? formatSpec({ packages: ["pkg/a"], functions: [{ path: "pkg/a/a.go", start: 3, end: 16 }], setup, ...(more.buildTags !== undefined ? { buildTags: more.buildTags } : {}) });
+      const spec = more.spec ?? formatSpec({ packages: more.packages ?? ["pkg/a"], functions: [{ path: "pkg/a/a.go", start: 3, end: 16 }], setup, ...(more.buildTags !== undefined ? { buildTags: more.buildTags } : {}), ...(more.timeoutSeconds !== undefined ? { timeoutSeconds: more.timeoutSeconds } : {}), ...(more.ginkgoLabelFilter !== undefined ? { ginkgoLabelFilter: more.ginkgoLabelFilter } : {}) });
       const parts = [spec];
       const args = path.join(dir, "args.txt");
       writeFileSync(args, "");
       const rep = path.join(dir, "report.txt");
       const order = path.join(dir, "order.txt");
       writeFileSync(order, "");
-      const r = spawnSync("sh", [goSh, String(parts.length), ...parts], { cwd: work, encoding: "utf8", env: { PATH: `${bin}:${process.env.PATH}`, TMPDIR: dir, GRAPHLOOM_REPORT_FILE: rep, ORDER: order, ARGS: args, GORC: String(more.rc ?? 0), ...(more.out !== undefined ? { GOOUT: more.out } : {}) } });
+      const r = spawnSync("sh", [goSh, String(parts.length), ...parts], { cwd: work, encoding: "utf8", env: { PATH: `${bin}:${process.env.PATH}`, TMPDIR: dir, GRAPHLOOM_REPORT_FILE: rep, ORDER: order, ARGS: args, GORC: String(more.rc ?? 0), GINKGO_PKGS: (more.ginkgoPkgs ?? []).join(" "), ...(more.profInk !== undefined ? { PROF_INK: more.profInk } : {}), ...(more.out !== undefined ? { GOOUT: more.out } : {}) } });
       return { args: spawnSync("cat", [args], { encoding: "utf8" }).stdout.split("\n").filter(Boolean), report: spawnSync("cat", [rep], { encoding: "utf8" }).stdout, order: spawnSync("cat", [order], { encoding: "utf8" }).stdout.split("\n").filter(Boolean), status: r.status };
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -735,5 +741,141 @@ esac
     expect(coverageNotes(b)[0]).toContain("the test command exited 2 (a test failed or a package did not build: coverage is of what ran); first build error: pkg/a/a.go:1:1: boom.");
     const passed = doneOf(coverageState(input({ evidence: [diff, ...ready("go"), goRun("graphloom-coverage-v1 go\nexit 0\nfailed --- FAIL: Stale\nseen pkg/a/a.go\n")] }))).facts.runs[0]!;
     expect(passed.failing).toBeUndefined();
+  });
+
+  describe("the go test timeout", () => {
+    it("is the spec's budget less the time already spent, as -timeout=<n>s on every go test; none when the spec has none", () => {
+      const r = run([], { timeoutSeconds: 100 });
+      expect(r.args[0]).toMatch(/^test -timeout=(100|99)s -coverprofile=/);
+      expect(run([]).args[0]).not.toMatch(/-timeout/);
+    });
+
+    it("counts setup against the budget, and never goes below 1s (go test's 0 means no timeout)", () => {
+      const r = run([{ id: "slow", argv: ["sleep", "2"] }], { timeoutSeconds: 1 });
+      expect(r.args[0]).toMatch(/-timeout=1s /);
+      const left = run([{ id: "slow", argv: ["sleep", "2"] }], { timeoutSeconds: 4 });
+      expect(left.args[0]).toMatch(/-timeout=[12]s /);
+    });
+
+    it("gives each of the two invocations the time that is left, from one clock", () => {
+      const r = run([], { packages: ["pkg/a", "pkg/b"], ginkgoLabelFilter: "!slow", ginkgoPkgs: ["./pkg/b"], timeoutSeconds: 50 });
+      expect(r.args).toHaveLength(2);
+      for (const line of r.args) expect(line).toMatch(/-timeout=(50|49|48)s /);
+    });
+
+    it("ignores a timeout that is not 1 to 86400 seconds of digits, even from a hand-written spec", () => {
+      for (const bad of ["0", "86401", "5m", "10;touch x", "-3", "123456"]) {
+        const spec = formatSpec({ packages: ["pkg/a"], functions: [{ path: "pkg/a/a.go", start: 3, end: 16 }] }) + `timeout ${bad}\n`;
+        expect(run([], { spec }).args[0]).not.toMatch(/-timeout/);
+      }
+    });
+
+    it("is derived from the profile's wall clock less 2 minutes, at least a minute, and travels in the recorded spec", () => {
+      expect(goTestTimeoutSeconds(30 * 60_000)).toBe(28 * 60);
+      expect(goTestTimeoutSeconds(2 * 60_000)).toBe(60);
+      expect(goTestTimeoutSeconds(90_000)).toBe(60);
+      expect(parseSpec(goSpec).timeoutSeconds).toBe(28 * 60);
+      expect(goSpec).toContain("\ntimeout 1680\n");
+      expect(parseSpec(goSpec).ginkgoLabelFilter).toBe("!slow");
+    });
+  });
+
+  describe("the timeout in the report and in review.md", () => {
+    const panic = "panic: test timed out after 10m0s\\n\\trunning tests:\\n\\t\\tTestAlpha (10m0s)\\n\\t\\tTestBeta/sub (9m59s)\\n\\ngoroutine 1 [running]:\\nFAIL\\texample.com/m/pkg/a\\t600.212s\\nFAIL\\n";
+
+    it("records `timeout <pkg> <d> <tests>` beside the failed lines, from the output", () => {
+      const r = run([], { out: panic, rc: 1 });
+      expect(r.report).toContain("timeout example.com/m/pkg/a 10m0s TestAlpha,TestBeta/sub\n");
+      expect(r.report).toContain("failed FAIL example.com/m/pkg/a 600.212s\n");
+    });
+
+    it("bounds the named tests to 5 and the lines to 5, and names a timeout whose package is not printed", () => {
+      const tests = Array.from({ length: 9 }, (_, i) => `\\t\\tTest${i} (10m0s)\\n`).join("");
+      const r = run([], { out: `panic: test timed out after 1h0m0s\\n\\trunning tests:\\n${tests}FAIL\\texample.com/m/pkg/a\\t3600s\\n`, rc: 1 });
+      expect(r.report).toContain("timeout example.com/m/pkg/a 1h0m0s Test0,Test1,Test2,Test3,Test4\n");
+      const many = Array.from({ length: 8 }, (_, i) => `panic: test timed out after 1m0s\\nFAIL\\texample.com/m/p${i}\\t60s\\n`).join("");
+      expect(run([], { out: many, rc: 1 }).report.split("\n").filter((l) => l.startsWith("timeout "))).toHaveLength(5);
+      expect(run([], { out: "panic: test timed out after 1m0s\\n", rc: 1 }).report).toContain("timeout - 1m0s\n");
+      expect(run([], { out: "panic: test timed out after 1m0s; rm -rf\\n", rc: 1 }).report).not.toMatch(/^timeout /m);
+    });
+
+    it("reaches review.md's failing sentence, with the package and the running tests", () => {
+      const r = run([], { out: panic, rc: 1 });
+      const facts = doneOf(coverageState(input({ evidence: [diff, ...ready("go"), goRun(`${r.report}seen pkg/a/a.go\n`)] }))).facts;
+      expect(facts.runs[0]!.timedOut).toEqual([{ package: "example.com/m/pkg/a", after: "10m0s", tests: ["TestAlpha", "TestBeta/sub"] }]);
+      const [line] = coverageNotes(facts);
+      expect(line).toContain("failing: package example.com/m/pkg/a (timed out after 10m0s; running tests: TestAlpha, TestBeta/sub) (coverage is of what ran)");
+      expect(line).not.toContain("package example.com/m/pkg/a;");
+      expect(line).toContain("-timeout=1680s from the start of the run");
+      expect(line).toContain('-ginkgo.label-filter="!slow"');
+    });
+
+    it("names a timeout without running tests, and keeps the plain package name for a package that did not time out", () => {
+      const text = "graphloom-coverage-v1 go\nexit 1\nfailed FAIL example.com/m/pkg/a 600s\nfailed FAIL example.com/m/pkg/b 1s\ntimeout example.com/m/pkg/a 10m0s\nseen pkg/a/a.go\n";
+      const [line] = coverageNotes(doneOf(coverageState(input({ evidence: [diff, ...ready("go"), goRun(text)] }))).facts);
+      expect(line).toContain("failing: package example.com/m/pkg/a (timed out after 10m0s); package example.com/m/pkg/b (coverage");
+    });
+
+    it("drops malformed timeout lines and shows nothing for a run that passed", () => {
+      const text = "graphloom-coverage-v1 go\nexit 0\ntimeout example.com/m/pkg/a 10m0s TestA\nseen pkg/a/a.go\n";
+      expect(doneOf(coverageState(input({ evidence: [diff, ...ready("go"), goRun(text)] }))).facts.runs[0]!.timedOut).toBeUndefined();
+      const bad = "graphloom-coverage-v1 go\nexit 1\ntimeout pkg 10 minutes\ntimeout\nseen pkg/a/a.go\n";
+      expect(doneOf(coverageState(input({ evidence: [diff, ...ready("go"), goRun(bad)] }))).facts.runs[0]!.timedOut).toBeUndefined();
+    });
+  });
+
+  describe("the Ginkgo label filter", () => {
+    const filter = "!slow";
+
+    it("splits the touched packages: Ginkgo ones get -args -ginkgo.label-filter=<filter>, the rest run as before, each with its own profile", () => {
+      const r = run([], { packages: ["pkg/a", "pkg/b", "pkg/c"], ginkgoLabelFilter: filter, ginkgoPkgs: ["./pkg/b"], buildTags: ["q"] });
+      expect(r.args).toHaveLength(2);
+      const plain = r.args.find((l) => !l.includes("-args"))!;
+      const ink = r.args.find((l) => l.includes("-args"))!;
+      expect(plain).toMatch(/^test -tags=q -coverprofile=\S+c\.1\.plain -covermode=set -coverpkg=\.\/pkg\/a,\.\/pkg\/b,\.\/pkg\/c \.\/pkg\/a \.\/pkg\/c$/);
+      expect(ink).toMatch(/^test -tags=q -coverprofile=\S+c\.1\.ink -covermode=set -coverpkg=\.\/pkg\/a,\.\/pkg\/b,\.\/pkg\/c \.\/pkg\/b -args -ginkgo\.label-filter=!slow$/);
+      expect(plain).not.toContain("ginkgo");
+      expect(r.status).toBe(0);
+    });
+
+    it("passes the filter as one argument, whatever its characters (spaces, pipes, parentheses)", () => {
+      const complex = "(!slow && !flaky) || smoke, x/y";
+      const r = run([], { ginkgoLabelFilter: complex, ginkgoPkgs: ["./pkg/a"] });
+      expect(r.args[0]).toContain(`-args -ginkgo.label-filter=${complex}`);
+      expect(r.report).toContain("B pkg/a/a.go:4.2,6.3 3 1");
+    });
+
+    it("runs only the group that has packages, and only one invocation when every package is plain", () => {
+      expect(run([], { ginkgoLabelFilter: filter }).args).toHaveLength(1);
+      expect(run([], { ginkgoLabelFilter: filter }).args[0]).not.toContain("-args");
+      const onlyInk = run([], { ginkgoLabelFilter: filter, ginkgoPkgs: ["./pkg/a"] });
+      expect(onlyInk.args).toHaveLength(1);
+      expect(onlyInk.args[0]).toContain("-args -ginkgo.label-filter=!slow");
+    });
+
+    it("merges the two profiles in set mode, a block's largest count, and reports the worst exit", () => {
+      const ink = "mode: set\\nexample.com/m/pkg/a/a.go:4.2,6.3 3 5\\nexample.com/m/pkg/a/a.go:8.2,9.3 1 0\\n";
+      const r = run([], { packages: ["pkg/a", "pkg/b"], ginkgoLabelFilter: filter, ginkgoPkgs: ["./pkg/b"], profInk: ink, rc: 1 });
+      expect(r.report).toContain("exit 1\n");
+      const blocks = r.report.split("\n").filter((l) => l.startsWith("B "));
+      expect(blocks).toEqual(["B pkg/a/a.go:4.2,6.3 3 5", "B pkg/a/a.go:8.2,9.3 1 0"]);
+      const clean = run([], { packages: ["pkg/a", "pkg/b"], ginkgoLabelFilter: filter, ginkgoPkgs: ["./pkg/b"], profInk: "mode: set\\nexample.com/m/pkg/a/a.go:4.2,6.3 3 0\\n" });
+      expect(clean.report.split("\n").filter((l) => l.startsWith("B "))).toEqual(["B pkg/a/a.go:4.2,6.3 3 1"]);
+    });
+
+    it("keeps today's single invocation when no filter is configured, and never asks `go list`", () => {
+      const r = run([], { packages: ["pkg/a", "pkg/b"], ginkgoPkgs: ["./pkg/b"] });
+      expect(r.args).toHaveLength(1);
+      expect(r.args[0]).toMatch(/^test -coverprofile=\S+c\.1 -covermode=set -coverpkg=\.\/pkg\/a,\.\/pkg\/b \.\/pkg\/a \.\/pkg\/b$/);
+    });
+
+    it("drops a filter whose characters are not the safe set, even from a hand-written spec", () => {
+      for (const bad of ["a;touch x", "$(id)", "a`id`", "x'y", `x"y`, "x\\y", "a".repeat(201)]) {
+        const spec = formatSpec({ packages: ["pkg/a"], functions: [{ path: "pkg/a/a.go", start: 3, end: 16 }] }) + `ginkgo ${bad}\n`;
+        const r = run([], { spec, ginkgoPkgs: ["./pkg/a"] });
+        expect(r.args).toHaveLength(1);
+        expect(r.args[0]).not.toContain("-args");
+      }
+    });
   });
 });
