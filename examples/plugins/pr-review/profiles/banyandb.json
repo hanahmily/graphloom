@@ -149,11 +149,11 @@
   },
   "privateRepos": [],
   "harnesses": {
-    "reporter": "claude-code",
-    "report-checker": "codex",
-    "questioner": "codex",
-    "answerer": "claude-code",
-    "answer-checker": "codex"
+    "reporter": { "harness": "claude-code", "model": "opus", "effort": "high" },
+    "report-checker": { "harness": "codex", "effort": "medium" },
+    "questioner": { "harness": "codex", "effort": "medium" },
+    "answerer": { "harness": "claude-code", "model": "opus", "effort": "high" },
+    "answer-checker": { "harness": "codex", "effort": "medium" }
   },
   "supervisor": {
     "harnesses": ["pi", "claude-code", "codex"]
