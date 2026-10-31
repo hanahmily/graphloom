@@ -18,6 +18,8 @@
 //   fail <reason>            the command could not produce coverage at all
 //   failed <text>            a failing test or package of the test command: `--- FAIL: <Test>`, Ginkgo's `[FAIL] <spec>`, `FAIL <pkg>`
 //   build-error <text>       the first compiler error line of the test output
+//   timeout <pkg> <d> [<TestA,TestB>]   a test binary that hit `go test -timeout` after <d> (`panic: test timed out after <d>`), with
+//                            the tests Go printed under `running tests:`
 //   setup <id> ok            a sandboxed setup command (profile metrics.sandbox.<language>.setup) that succeeded
 //   setup-fail <id> <exit> <text>   a setup command that failed: nothing was measured
 //   provider <name@version>  the coverage provider
@@ -58,6 +60,8 @@ export interface CoverageReport {
   failed: string[];
   /** The first compiler error the report names (`build-error`). */
   buildError: string | undefined;
+  /** The test binaries that timed out, as the `timeout` lines name them. */
+  timedOut: Array<{ package: string; after: string; tests: string[] }>;
   /** The coverage command could not produce coverage at all, and why. */
   fail: string[];
   /** The setup commands that succeeded, in order. */
@@ -81,11 +85,14 @@ export function parseGoBlock(line: string): GoBlock | undefined {
 }
 
 /** Why `text` is not a coverage report, or the report. Unknown lines are ignored, so a later version may add facts. */
+/** `timeout <pkg> <duration> [<test>,<test>...]`: a package path, a Go duration, test names without blanks. */
+const TIMEOUT_LINE = /^(\S{1,200}) ((?:[0-9.]{1,12}(?:h|ms|m|s|us|µs|ns)){1,4})(?: (\S{1,2000}))?$/;
+
 export function parseCoverageReport(text: string): CoverageReport | { error: string } {
   const lines = text.split("\n");
   const head = /^graphloom-coverage-v1 (go|typescript)$/.exec((lines[0] ?? "").trim());
   if (head === null) return { error: `the report does not start with "${COVERAGE_SCHEMA} go|typescript"` };
-  const report: CoverageReport = { language: head[1] as Language, exit: undefined, tests: [], notes: [], failed: [], buildError: undefined, fail: [], setup: [], setupFail: undefined, provider: undefined, seen: new Set(), blocks: [], statements: [] };
+  const report: CoverageReport = { language: head[1] as Language, exit: undefined, tests: [], notes: [], failed: [], buildError: undefined, timedOut: [], fail: [], setup: [], setupFail: undefined, provider: undefined, seen: new Set(), blocks: [], statements: [] };
   for (const raw of lines.slice(1)) {
     const line = raw.replace(/\r$/, "");
     const sp = line.indexOf(" ");
@@ -109,6 +116,11 @@ export function parseCoverageReport(text: string): CoverageReport | { error: str
       case "build-error":
         if (rest !== "" && report.buildError === undefined) report.buildError = rest;
         break;
+      case "timeout": {
+        const t = TIMEOUT_LINE.exec(rest);
+        if (t !== null) report.timedOut.push({ package: t[1]!, after: t[2]!, tests: (t[3] ?? "").split(",").filter((x) => x !== "") });
+        break;
+      }
       case "fail":
         report.fail.push(rest);
         break;
@@ -272,9 +284,12 @@ export function encodeArg(arg: string): string {
  * bytes measured): `pkg <dir>` (Go, a changed file's directory), `ws <dir>` (TypeScript, a workspace),
  * `file <path>` (TypeScript, a changed file) and `fn <path> <start> <end>` (a changed function's range) and
  * `setup <id> <_base64 of each argument>…` (Go, a sandboxed setup command, run in this order before the tests)
- * and `tags <a,b>` (Go, the build tags `go test` compiles with, profile `metrics.sandbox.go.buildTags`).
+ * and `tags <a,b>` (Go, the build tags `go test` compiles with, profile `metrics.sandbox.go.buildTags`),
+ * `timeout <seconds>` (Go, the seconds `go test` may run in all, counted from the start of the script: the sandbox's wall clock
+ * less a margin) and `ginkgo <filter>` (Go, the rest of the line is the Ginkgo label filter for the test binaries that use
+ * Ginkgo, profile `metrics.sandbox.go.ginkgoLabelFilter`).
  */
-export function formatSpec(spec: { packages?: readonly string[]; workspace?: string; files?: readonly string[]; functions: readonly CoverageSpecFunction[]; setup?: ReadonlyArray<{ id: string; argv: readonly string[] }>; buildTags?: readonly string[] }): string {
+export function formatSpec(spec: { packages?: readonly string[]; workspace?: string; files?: readonly string[]; functions: readonly CoverageSpecFunction[]; setup?: ReadonlyArray<{ id: string; argv: readonly string[] }>; buildTags?: readonly string[]; timeoutSeconds?: number; ginkgoLabelFilter?: string }): string {
   const lines = [
     ...(spec.workspace !== undefined ? [`ws ${spec.workspace}`] : []),
     ...(spec.packages ?? []).map((p) => `pkg ${p}`),
@@ -282,16 +297,20 @@ export function formatSpec(spec: { packages?: readonly string[]; workspace?: str
     ...spec.functions.map((f) => `fn ${f.path} ${f.start} ${f.end}`),
     ...(spec.setup ?? []).map((st) => `setup ${st.id} ${st.argv.map(encodeArg).join(" ")}`),
     ...(spec.buildTags !== undefined && spec.buildTags.length > 0 ? [`tags ${spec.buildTags.join(",")}`] : []),
+    ...(spec.timeoutSeconds !== undefined ? [`timeout ${spec.timeoutSeconds}`] : []),
+    ...(spec.ginkgoLabelFilter !== undefined ? [`ginkgo ${spec.ginkgoLabelFilter}`] : []),
   ];
   return `${lines.join("\n")}\n`;
 }
 
-export function parseSpec(text: string): { packages: string[]; workspace?: string; files: string[]; functions: CoverageSpecFunction[]; setup: Array<{ id: string; argv: string[] }>; buildTags: string[] } {
-  const out: { packages: string[]; workspace?: string; files: string[]; functions: CoverageSpecFunction[]; setup: Array<{ id: string; argv: string[] }>; buildTags: string[] } = { packages: [], files: [], functions: [], setup: [], buildTags: [] };
+export function parseSpec(text: string): { packages: string[]; workspace?: string; files: string[]; functions: CoverageSpecFunction[]; setup: Array<{ id: string; argv: string[] }>; buildTags: string[]; timeoutSeconds?: number; ginkgoLabelFilter?: string } {
+  const out: { packages: string[]; workspace?: string; files: string[]; functions: CoverageSpecFunction[]; setup: Array<{ id: string; argv: string[] }>; buildTags: string[]; timeoutSeconds?: number; ginkgoLabelFilter?: string } = { packages: [], files: [], functions: [], setup: [], buildTags: [] };
   for (const line of text.split("\n")) {
     const [tag, a, b, c] = line.split(" ");
     if (tag === "pkg" && a !== undefined) out.packages.push(a);
     else if (tag === "tags" && a !== undefined) out.buildTags = a.split(",").filter((t) => t !== "");
+    else if (tag === "timeout" && a !== undefined && /^[0-9]+$/.test(a)) out.timeoutSeconds = Number(a);
+    else if (tag === "ginkgo" && line.length > "ginkgo ".length) out.ginkgoLabelFilter = line.slice("ginkgo ".length);
     else if (tag === "ws" && a !== undefined) out.workspace = a;
     else if (tag === "file" && a !== undefined) out.files.push(a);
     else if (tag === "setup" && a !== undefined) out.setup.push({ id: a, argv: line.split(" ").slice(2).map((t) => Buffer.from(t.slice(1), "base64").toString("utf8")) });

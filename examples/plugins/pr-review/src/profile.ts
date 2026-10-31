@@ -94,6 +94,11 @@ export interface SandboxConfig {
    * to the setup commands. Go only.
    */
   buildTags?: string[];
+  /**
+   * A Ginkgo label filter (`-args -ginkgo.label-filter=<filter>`) for the test binaries that use Ginkgo, as the repository's own CI
+   * passes it (BanyanDB: `!slow`). Other test binaries do not get it. Go only.
+   */
+  ginkgoLabelFilter?: string;
 }
 
 /** A host directory a sandbox mounts read-only. */
@@ -116,6 +121,9 @@ export const MAX_MOUNTS = 8;
 export const MAX_SETUP_STEPS = 8;
 export const BUILD_TAG = /^[A-Za-z0-9_.]+$/;
 export const MAX_BUILD_TAGS = 16;
+/** The characters of a Ginkgo label-filter expression the profile accepts, and its longest length. */
+export const GINKGO_LABEL_FILTER = /^[A-Za-z0-9_.\-!&|() ,/]+$/;
+export const MAX_GINKGO_LABEL_FILTER_CHARS = 200;
 /** An argv element's longest text; the whole setup must also fit the coverage command's spec. */
 const MAX_SETUP_ARG_CHARS = 2_000;
 
@@ -419,8 +427,8 @@ function checkSandbox(raw: unknown): MetricsConfig["sandbox"] {
     need(language === "go" || language === "typescript", `${where} is not a language with a sandbox; the languages are go and typescript`);
     need(isObject(value), `${where} must be an object`);
     const v = value as Record<string, unknown>;
-    onlyKeys(v, where, ["image", "cpus", "memory", "pids", "tmp", "wallClockMs", "readOnly", "setup", "buildTags"]);
-    const { readOnly, setup, buildTags, ...limits } = v;
+    onlyKeys(v, where, ["image", "cpus", "memory", "pids", "tmp", "wallClockMs", "readOnly", "setup", "buildTags", "ginkgoLabelFilter"]);
+    const { readOnly, setup, buildTags, ginkgoLabelFilter, ...limits } = v;
     const problem = confinementProblem({ kind: "docker", writable: [], readOnly: [], env: {}, ...SANDBOX_LIMITS, image: SANDBOX_PROBE_IMAGE, ...limits });
     need(problem === undefined, `${where}.${(problem ?? "").replace(/^confinement\./, "")}`);
     const config = structuredClone(limits) as SandboxConfig;
@@ -432,6 +440,11 @@ function checkSandbox(raw: unknown): MetricsConfig["sandbox"] {
     if (buildTags !== undefined) {
       need(language === "go", `${where}.buildTags: build tags are supported for go only`);
       config.buildTags = checkBuildTags(buildTags, `${where}.buildTags`);
+    }
+    if (ginkgoLabelFilter !== undefined) {
+      need(language === "go", `${where}.ginkgoLabelFilter: a Ginkgo label filter is supported for go only`);
+      need(typeof ginkgoLabelFilter === "string" && ginkgoLabelFilter.trim() !== "" && ginkgoLabelFilter.length <= MAX_GINKGO_LABEL_FILTER_CHARS && GINKGO_LABEL_FILTER.test(ginkgoLabelFilter), `${where}.ginkgoLabelFilter must be a non-empty string of at most ${MAX_GINKGO_LABEL_FILTER_CHARS} characters matching ${GINKGO_LABEL_FILTER.source}`);
+      config.ginkgoLabelFilter = ginkgoLabelFilter as string;
     }
     out[language as "go" | "typescript"] = config;
   }

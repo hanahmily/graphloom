@@ -477,9 +477,22 @@ function failingName(entry: string): string {
   return pkg !== null ? `package ${pkg[1]!}` : entry.replace(/^\[FAIL\]\s*/, "");
 }
 
+/** A package whose test binary hit `go test -timeout`: `package <pkg> (timed out after 10m0s; running tests: TestA, TestB)`. */
+function timeoutName(t: { package: string; after: string; tests: string[] }): string {
+  const running = t.tests.length > 0 ? `; running tests: ${t.tests.join(", ")}` : "";
+  return `package ${t.package} (timed out after ${t.after}${running})`;
+}
+
 /** What a non-zero test command says: the failing tests when the report names them, else the generic sentence; the first build error either way. */
 function failureSentence(run: CoverageRunFacts): string {
-  const names = [...new Set((run.failing ?? []).map(failingName))];
+  const timedOut = new Map((run.timedOut ?? []).map((t) => [`package ${t.package}`, t]));
+  const named = (run.failing ?? []).map(failingName).map((n) => {
+    const t = timedOut.get(n);
+    if (t === undefined) return n;
+    timedOut.delete(n);
+    return timeoutName(t);
+  });
+  const names = [...new Set([...named, ...[...timedOut.values()].map(timeoutName)])];
   const build = run.buildError !== undefined ? `; first build error: ${run.buildError}` : "";
   if (names.length > 0) return `the test command exited ${run.exit}; failing: ${names.join("; ")} (coverage is of what ran)${build}`;
   return `the test command exited ${run.exit} (a test failed or a package did not build: coverage is of what ran)${build}`;
@@ -491,7 +504,9 @@ export function coverageNotes(facts: CoverageFacts): string[] {
   if (facts.runs.length === 0) return ["Coverage: no function needed a run."];
   return facts.runs.map((run) => {
     if (!run.ran) return `Coverage (${run.language}): not run (${run.reason ?? "no reason recorded"}).`;
-    const how = run.language === "go" ? "go test -coverprofile -covermode=set over the touched packages" : "the repository's own vitest run with @vitest/coverage-v8 over the touched workspace";
+    const timeout = run.timeoutSeconds !== undefined ? `, -timeout=${run.timeoutSeconds}s from the start of the run (the sandbox's wall clock less a margin for setup and profile collection)` : "";
+    const label = run.ginkgoLabelFilter !== undefined ? `, the packages whose tests use Ginkgo run with -ginkgo.label-filter=${JSON.stringify(run.ginkgoLabelFilter)} (the repository's own CI filter; plain test packages without it)` : "";
+    const how = run.language === "go" ? `go test -coverprofile -covermode=set over the touched packages${timeout}${label}` : "the repository's own vitest run with @vitest/coverage-v8 over the touched workspace";
     const exit = run.exit === undefined ? "" : run.exit === 0 ? "; the tests passed" : `; ${failureSentence(run)}`;
     const changed = run.changed.length > 0 ? `; the run changed ${run.changed.length} file(s) in its checkout (${run.changed.slice(0, 3).join(", ")}): the checks must not change files` : "";
     const setup = run.setup !== undefined && run.setup.length > 0 ? `, after the profile's sandboxed setup (${run.setup.join(", ")}: code the repository does not commit, generated from read-only tools and caches, in the same sandbox)` : "";
