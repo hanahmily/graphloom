@@ -24,7 +24,11 @@
 # Timeout: a `timeout <seconds>` line of the spec (the profile's sandbox wall clock less a margin for setup and profile
 # collection) is the budget of all `go test` runs together, counted from the start of this script (setup included):
 # every `go test` gets `-timeout=<seconds left>s` (at least 1s: 0 would turn the timeout off), so the container's wall
-# clock, not go test's default 10 minutes, is the limit. Anything but 1 to 86400 digits is ignored (go test's default).
+# clock, not go test's default 10 minutes, is the limit. Go starts that clock when a test binary starts, after it was
+# compiled or waited its turn, so each binary is also launched through `-exec` by a wrapper that appends
+# `-test.timeout=<seconds left at launch>s` (the last one wins): a slow build cannot push a test past the deadline
+# before its timeout report and the coverage profile are written. Anything but 1 to 86400 digits is ignored (go
+# test's default).
 #
 # Ginkgo: a `ginkgo <label filter>` line of the spec (profile metrics.sandbox.go.ginkgoLabelFilter, the filter the
 # repository's CI passes) reaches only the test binaries that use Ginkgo: a plain test binary refuses the flag. The
@@ -126,6 +130,17 @@ if [ -n "$lbl" ]; then
   if [ "${#lbl}" -gt 200 ] || ! printf '%s' "$lbl" | grep -Eq '^[A-Za-z0-9_.!&|() ,/-]+$'; then lbl=""; fi
 fi
 
+# The -exec wrapper: the budget left at the moment a test binary starts, appended last.
+if [ -n "$tmo" ]; then
+  cat > "$tmp/launch" << 'LAUNCH'
+left=$((GRAPHLOOM_COVER_DEADLINE - $(date +%s)))
+[ "$left" -ge 1 ] || left=1
+exec "$@" "-test.timeout=${left}s"
+LAUNCH
+  GRAPHLOOM_COVER_DEADLINE=$((t0 + tmo))
+  export GRAPHLOOM_COVER_DEADLINE
+fi
+
 # gotest <module root> <coverprofile> <output file> <1 for Ginkgo binaries> <package>...: one `go test`, the budget left on the clock.
 gotest() {
   g_root="$1"
@@ -134,15 +149,17 @@ gotest() {
   g_ink="$4"
   shift 4
   g_tmo=""
+  g_exec=""
   if [ -n "$tmo" ]; then
     g_left=$((t0 + tmo - $(date +%s)))
     [ "$g_left" -ge 1 ] || g_left=1
     g_tmo="-timeout=${g_left}s"
+    g_exec="sh $tmp/launch"
   fi
   if [ "$g_ink" = 1 ]; then
-    (cd "$g_root" && go test ${tagarg:+"$tagarg"} ${g_tmo:+"$g_tmo"} -coverprofile="$g_prof" -covermode=set -coverpkg="$cp" "$@" -args "-ginkgo.label-filter=$lbl") > "$g_out" 2>&1
+    (cd "$g_root" && go test ${tagarg:+"$tagarg"} ${g_tmo:+"$g_tmo"} -coverprofile="$g_prof" -covermode=set -coverpkg="$cp" ${g_exec:+-exec} ${g_exec:+"$g_exec"} "$@" -args "-ginkgo.label-filter=$lbl") > "$g_out" 2>&1
   else
-    (cd "$g_root" && go test ${tagarg:+"$tagarg"} ${g_tmo:+"$g_tmo"} -coverprofile="$g_prof" -covermode=set -coverpkg="$cp" "$@") > "$g_out" 2>&1
+    (cd "$g_root" && go test ${tagarg:+"$tagarg"} ${g_tmo:+"$g_tmo"} -coverprofile="$g_prof" -covermode=set -coverpkg="$cp" ${g_exec:+-exec} ${g_exec:+"$g_exec"} "$@") > "$g_out" 2>&1
   fi
 }
 

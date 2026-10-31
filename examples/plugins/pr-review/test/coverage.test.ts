@@ -2,7 +2,7 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -748,6 +748,18 @@ esac
       const r = run([], { timeoutSeconds: 100 });
       expect(r.args[0]).toMatch(/^test -timeout=(100|99)s -coverprofile=/);
       expect(run([]).args[0]).not.toMatch(/-timeout/);
+    });
+
+    it("launches every test binary through the -exec wrapper, which appends the time left at launch (compilation and queueing count)", () => {
+      const r = run([], { packages: ["pkg/a", "pkg/b"], ginkgoLabelFilter: "!slow", ginkgoPkgs: ["./pkg/b"], timeoutSeconds: 50 });
+      for (const line of r.args) expect(line).toMatch(/ -exec sh \S+\/gl-cover\/launch /);
+      expect(run([]).args[0]).not.toMatch(/-exec/);
+      // The wrapper as go.sh writes it: the deadline is absolute, so a binary that starts late gets less.
+      const launch = /<< 'LAUNCH'\n([\s\S]*?)\nLAUNCH\n/.exec(readFileSync(goSh, "utf8"))![1]!;
+      const at = (deadline: number) => spawnSync("sh", ["-c", launch, "launch", "echo", "-test.timeout=1680s", "-ginkgo.label-filter=!slow"], { encoding: "utf8", env: { ...process.env, GRAPHLOOM_COVER_DEADLINE: String(deadline) } }).stdout.trim();
+      const now = Math.floor(Date.now() / 1000);
+      expect(at(now + 300)).toMatch(/^-test\.timeout=1680s -ginkgo\.label-filter=!slow -test\.timeout=(300|299|298)s$/);
+      expect(at(now - 60)).toBe("-test.timeout=1680s -ginkgo.label-filter=!slow -test.timeout=1s");
     });
 
     it("counts setup against the budget, and never goes below 1s (go test's 0 means no timeout)", () => {
