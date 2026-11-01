@@ -7,12 +7,13 @@
  * read-only to confirm a claim, as the standard reporter does.
  */
 import { MAX_EXECUTOR_INPUT_BYTES } from "@graphloom/sdk";
+import { ASSIGNMENT_BUDGET_CHARS, MAX_ASSIGNMENT_CHARS } from "./fit.js";
 import { BRIEFING_AREAS_PROMPT, BRIEFING_PROMPT } from "./briefing.js";
 import type { Partition } from "./areas.js";
 import type { Fact } from "./detectors.js";
 import { buildDigest, INTERFACE_PATCH_BYTES, type Digest } from "./digest.js";
 import { MAX_ITEM_CHARS, MAX_LARGE_REPORTER_ITEMS, MAX_OVERVIEW_CHARS, MAX_PURPOSE_CHARS } from "./report.js";
-import { factText, pullText, sectionText, untrusted, UNTRUSTED_PREAMBLE } from "./prompts.js";
+import { factText, feedbackLines, pullText, sectionText, untrusted, UNTRUSTED_PREAMBLE } from "./prompts.js";
 import type { PullRequest } from "./request.js";
 import type { Snapshot } from "./snapshot.js";
 import type { Section } from "./template.js";
@@ -23,12 +24,8 @@ const FACTS_BUDGET_CHARS = 40_000;
 const MAX_FACTS_SHOWN = 200;
 /** What the rest of the job input (the harness, the options) may take of the executor's bound, and a margin for escaping. */
 const INPUT_MARGIN_BYTES = 6_000;
-/**
- * The coding-agent executor's own bound on an assignment (`graphloom.coding-agent/run` declares `assignment` at most
- * 64,000 characters), less a margin: the digest is fitted to it as well as to the input's byte bound.
- */
-export const MAX_ASSIGNMENT_CHARS = 64_000;
-const ASSIGNMENT_MARGIN_CHARS = 1_000;
+/** The executor's bound on an assignment (`fit.ts`), less its margin: the digest is fitted to it as well as to the input's byte bound. */
+export { MAX_ASSIGNMENT_CHARS };
 
 export interface LargeReporterAssignment {
   pr: PullRequest;
@@ -132,7 +129,7 @@ export function largeReporterInstruction(a: LargeReporterAssignment): string {
             a.kind === "correction"
               ? "Your previous result failed deterministic validation. Return the whole corrected report; every problem below must be fixed:"
               : "The claim check could not support the claims below (ids: purpose, overview, R3 an item, R3.s1 a state entry, R3.b1 a behavior row, W2 a what's-new bullet, F1 a feature, F1.s2 a stage, F1.f3 a flow, C.risks.1 a check entry). Return the whole revised report: fix each (cite and describe only what the code shows), or drop it. A claim that stays unsupported is removed from the report.",
-            ...a.feedback.map((f) => `- ${f}`),
+            ...feedbackLines(a.feedback),
           ]),
     ].join("\n");
   };
@@ -140,7 +137,7 @@ export function largeReporterInstruction(a: LargeReporterAssignment): string {
   // assignment. The interface patches give first; then the file list (the areas still give every area's files, lines
   // and sizes, and `git diff HEAD --stat` lists every file); then the shown facts (the plugin accounts for the rest).
   const limit = MAX_EXECUTOR_INPUT_BYTES - INPUT_MARGIN_BYTES;
-  const chars = MAX_ASSIGNMENT_CHARS - ASSIGNMENT_MARGIN_CHARS;
+  const chars = ASSIGNMENT_BUDGET_CHARS;
   const over = (t: string): number => Math.max(jsonBytes(t) - limit, t.length - chars);
   let cap = INTERFACE_PATCH_BYTES;
   const budgets = { files: FILES_BUDGET_CHARS, facts: FACTS_BUDGET_CHARS };

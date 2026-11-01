@@ -57,6 +57,7 @@ import {
   GRAPH_VERSION,
   QA_JSON,
   REVIEW_APPENDIX_HTML,
+  REVIEW_DIR,
   REVIEW_HTML,
   REVIEW_MD,
 } from "./constants.js";
@@ -71,7 +72,8 @@ import { budgetShortfall, largeNeeds } from "./large.js";
 import { largeCheckScope, largeReporterInstruction } from "./largeprompts.js";
 import { measurementState, metricsDiffCommand, staticBaseCommand, staticCommand } from "./measurements.js";
 import { coverageCommand, coverageConfinement, missingProbe, sandboxEnvironmentChecks, type CoveragePlan } from "./coverage.js";
-import { checkerInstruction, reporterInstruction } from "./prompts.js";
+import { planChecker, planReporter } from "./prompts.js";
+import { assignmentProblem, type FileSpill } from "./fit.js";
 import { isLarge } from "./mode.js";
 import { harnessName, parseProfile, ProfileError, ROLES, DISTINCT_PAIRS, type Profile, type Role } from "./profile.js";
 import { prepareTask } from "./prepare.js";
@@ -80,7 +82,7 @@ import { secretFindings } from "./secrets.js";
 import { readInput, snapshotState, type PullFile, type ReadSpec } from "./snapshot.js";
 import { CLAIM_CHECK_SCHEMA_NAME } from "./claims.js";
 import { diagramsOf, outputsOf, validatorById, writtenHtmlProblems } from "./validators.js";
-import { appendixWriteCommands, htmlWriteCommands, recordCommands, reportWriteCommands } from "./parts.js";
+import { appendixWriteCommands, htmlWriteCommands, partCommands, recordCommands, reportWriteCommands } from "./parts.js";
 import { ANSWER_CHECK_REFERENCES, ANSWER_CHECK_SCHEMA, ANSWER_CHECK_SCHEMA_NAME, ANSWERS_REFERENCES, ANSWERS_REVISION_SCHEMA_NAME, ANSWERS_SCHEMA, ANSWERS_SCHEMA_NAME, answersFlow } from "./answers.js";
 import { baseDirIn } from "./basetree.js";
 import { sourceDirs } from "./inventory.js";
@@ -89,7 +91,7 @@ import { QUESTIONS_REFERENCES, QUESTIONS_SCHEMA, QUESTIONS_SCHEMA_NAME, required
 import { CLAIM_CHECK_REFERENCES } from "./claims.js";
 import { necessityQuestion, NECESSITY_ID, NECESSITY_REFERENCES, NECESSITY_REVISION_SCHEMA_NAME, NECESSITY_SCHEMA, NECESSITY_SCHEMA_NAME, type NecessityRecord } from "./necessity.js";
 import { principlesReadCommand, type Principle } from "./principles.js";
-import { answerCheckerInstruction, answererInstruction, necessityCheckerInstruction, necessityInstruction, questionerInstruction } from "./qaprompts.js";
+import { planAnswerChecker, planAnswerer, planNecessity, planNecessityChecker, planQuestioner } from "./qaprompts.js";
 import { afterNecessity, answerBatches, answerContext, batchedAnswers, batchRecordId, batchRecordJson, answerWrites, necessityFlow, necessityRecordCommands, necessityRecordOf, qaContext, qaOutputs, questionSet, questionerFlow, recordedNecessity, type QaContext } from "./qaflow.js";
 
 export { GRAPH_ID, GRAPH_VERSION };
@@ -472,6 +474,9 @@ function refused(job: { problem: string; incompatible?: true }): GraphDecision {
 function agentJob(ctx: Context, view: RunView, spec: { jobId?: string; stageId?: string; purpose: "diagnostic" | "review"; instruction: string; schema: string; harness: string; role: Role; assignment: string; continueFrom?: string; readOnlyBinds?: readonly string[]; references?: Record<string, ReferenceSet> }, files: readonly PullFile[]): JobSpec | { problem: string; incompatible?: true } {
   const worktree = environmentOutput(view.evidence, ENV_WORKTREE);
   if (worktree === undefined || !path.isAbsolute(worktree)) return { problem: "the environment check recorded no worktree path, which the confinement masks need" };
+  // The one guard of every agent job: an assignment past the executor's bound is caught here, naming the job and what to shrink, not by the executor.
+  const tooBig = assignmentProblem(spec.instruction, spec.assignment);
+  if (tooBig !== undefined) return { problem: tooBig, incompatible: true };
   const masks = agentConfigMasks(worktree, files.flatMap((f) => [f.path, ...(f.previousPath !== null ? [f.previousPath] : [])]));
   if ("problem" in masks) return { problem: masks.problem, incompatible: true };
   // The role's model and effort travel as the job's harness options; a role that sets neither inherits the harness's own.
@@ -494,6 +499,25 @@ function agentJob(ctx: Context, view: RunView, spec: { jobId?: string; stageId?:
     ...(ctx.profile.agentTimeoutMs !== undefined ? { timeoutMs: ctx.profile.agentTimeoutMs } : {}),
     ...(spec.continueFrom !== undefined ? { continueFrom: spec.continueFrom } : {}),
   };
+}
+
+/** The absolute `.graphloom/review/` directory of the worktree, where the report and the files an assignment points to are, once the environment check recorded the worktree. */
+function reviewDirOf(view: RunView): string | undefined {
+  const worktree = environmentOutput(view.evidence, ENV_WORKTREE);
+  return worktree !== undefined && path.isAbsolute(worktree) ? path.posix.join(worktree, REVIEW_DIR) : undefined;
+}
+
+/**
+ * The write of the files an assignment points to instead of inlining (`fit.ts`), before the agent job that names them: each
+ * is a bounded multi-part write like an artifact (design §6.6), skipped once it ran as written. Undefined when all are written.
+ */
+function writeSpills(view: RunView, stageId: string, spills: readonly FileSpill[]): GraphDecision | undefined {
+  const commands = spills.flatMap((s) => partCommands(`spill-${s.name.replace(/\.md$/, "")}`, `${REVIEW_DIR}/${s.name}`, s.text));
+  const next = nextWrite(view, commands, { failed: "writing a file for an agent to read failed", settle: "a file for an agent to read keeps differing from the one the evidence recomputes" });
+  if (next === undefined) return undefined;
+  if ("decision" in next) return next.decision;
+  const part = partOf(next.command);
+  return withPrivate(dispatch(commandJob(stageId, writeInstruction(next.command, `Write ${part?.path ?? "a file for an agent to read"}`), { commands: [next.command] }), `write ${part?.path ?? "a file"} for the next agent job to read: its input does not fit the job's assignment`));
 }
 
 /** Where the base commit's files are exported for the agents (design §7.3), when the groundwork recorded the export. */
@@ -550,9 +574,12 @@ function report(ctx: Context, view: RunView): GraphDecision {
         const short = budgetShortfall(largeNeeds(analysis.snapshot.partition!.areas.filter((x) => x.kind === "read").length), view.budgets);
         if (short !== undefined) return stop({ reason: "budgets exhausted", blocker: short, retryable: false }, "stop before the reporter: the run's budgets cannot cover large mode");
       }
-      const assignment = large
-        ? largeReporterInstruction({ pr, snapshot: analysis.snapshot, partition: analysis.snapshot.partition!, sections: analysis.sections, facts: analysis.facts, kind: flow.kind, feedback: flow.feedback })
-        : reporterInstruction({ pr, snapshot: analysis.snapshot, sections: analysis.sections, facts: analysis.facts, candidates: analysis.ctx.candidates ?? [], kind: flow.kind, feedback: flow.feedback });
+      const planned = large
+        ? { text: largeReporterInstruction({ pr, snapshot: analysis.snapshot, partition: analysis.snapshot.partition!, sections: analysis.sections, facts: analysis.facts, kind: flow.kind, feedback: flow.feedback }), spills: [] as FileSpill[] }
+        : planReporter({ pr, snapshot: analysis.snapshot, sections: analysis.sections, facts: analysis.facts, candidates: analysis.ctx.candidates ?? [], kind: flow.kind, feedback: flow.feedback, ...(reviewDirOf(view) !== undefined ? { reviewDir: reviewDirOf(view)! } : {}) });
+      const assignment = planned.text;
+      const written = writeSpills(view, REPORT_STAGE, planned.spills);
+      if (written !== undefined) return written;
       const from = flow.kind === "first" ? undefined : jobSession(view, REPORT_STAGE, REPORTER_JOB);
       const job = agentJob(ctx, view, { jobId: REPORTER_JOB, purpose: "diagnostic", instruction: large ? "Write the high-level change report" : "Write the change report", schema: flow.schema, harness: profile.roles.reporter, role: "reporter", assignment, ...(from !== undefined ? { continueFrom: from } : {}) }, analysis.snapshot.files);
       if ("problem" in job) return refused(job);
@@ -561,7 +588,10 @@ function report(ctx: Context, view: RunView): GraphDecision {
     }
     case "checker": {
       const targets = reportSpec(analysis.ctx).targets(flow.report);
-      const assignment = checkerInstruction({ pr, snapshot: analysis.snapshot, report: flow.report, targets, retry: flow.retry, ...(analysis.ctx.large === true ? { scope: largeCheckScope() } : {}) });
+      const planned = planChecker({ pr, snapshot: analysis.snapshot, report: flow.report, targets, retry: flow.retry, ...(analysis.ctx.large === true ? { scope: largeCheckScope() } : {}), ...(reviewDirOf(view) !== undefined ? { reviewDir: reviewDirOf(view)! } : {}) });
+      const assignment = planned.text;
+      const written = writeSpills(view, REPORT_STAGE, planned.spills);
+      if (written !== undefined) return written;
       const references = idRefs({ [CLAIM_CHECK_REFERENCES[0]!]: idSet(targets.map((t) => t.id), (id) => oneLineText(targets.find((t) => t.id === id)?.text ?? "").slice(0, 300)) });
       const job = agentJob(ctx, view, { purpose: "review", instruction: "Check the report's claims against the diff", schema: CLAIM_CHECK_SCHEMA_NAME, harness: profile.roles["report-checker"], role: "report-checker", assignment, references }, analysis.snapshot.files);
       if ("problem" in job) return refused(job);
@@ -781,7 +811,10 @@ function questions(ctx: Context, view: RunView): GraphDecision {
       return supervise({ reason: nf.reason, evidenceRefs: nf.refs }, "hand the unresolved necessity answer to the supervisor");
     case "answerer": {
       const baseDir = baseTreeDir(view, c.ctx.groundwork);
-      const assignment = necessityInstruction({ pr, snapshot: c.ctx.analysis.snapshot, view: c.ctx.view, designDocs: c.ctx.designDocs, context: c.ctx.context, kind: nf.kind, feedback: nf.feedback, ...(c.ctx.principles !== undefined ? { principles: c.ctx.principles } : {}), ...(baseDir !== undefined ? { baseDir } : {}) });
+      const planned = planNecessity({ pr, snapshot: c.ctx.analysis.snapshot, view: c.ctx.view, designDocs: c.ctx.designDocs, context: c.ctx.context, kind: nf.kind, feedback: nf.feedback, ...(c.ctx.principles !== undefined ? { principles: c.ctx.principles } : {}), ...(baseDir !== undefined ? { baseDir } : {}), ...(reviewDirOf(view) !== undefined ? { reviewDir: reviewDirOf(view)! } : {}) });
+      const assignment = planned.text;
+      const written = writeSpills(view, QUESTIONS_STAGE, planned.spills);
+      if (written !== undefined) return written;
       const from = nf.kind === "first" ? undefined : jobSession(view, QUESTIONS_STAGE, ANSWERER_JOB);
       const references = principleRefs(NECESSITY_REFERENCES[0]!, c.ctx.principles?.applicable ?? []);
       const job = agentJob(ctx, view, { jobId: ANSWERER_JOB, stageId: QUESTIONS_STAGE, purpose: "diagnostic", instruction: "Answer the necessity question N1 from the whole codebase", schema: nf.schema, harness: profile.roles.answerer, role: "answerer", assignment, references, ...(from !== undefined ? { continueFrom: from } : {}) }, files);
@@ -794,7 +827,10 @@ function questions(ctx: Context, view: RunView): GraphDecision {
     case "checker": {
       const answer = nf.answers.get(NECESSITY_ID)!;
       const baseDir = baseTreeDir(view, c.ctx.groundwork);
-      const assignment = necessityCheckerInstruction({ pr, snapshot: c.ctx.analysis.snapshot, question: necessityQuestion(), answer, designDocs: c.ctx.designDocs, context: c.ctx.context, retry: nf.retry, ...(c.ctx.principles !== undefined ? { principles: c.ctx.principles } : {}), ...(baseDir !== undefined ? { baseDir } : {}) });
+      const planned = planNecessityChecker({ pr, snapshot: c.ctx.analysis.snapshot, question: necessityQuestion(), answer, designDocs: c.ctx.designDocs, context: c.ctx.context, retry: nf.retry, ...(c.ctx.principles !== undefined ? { principles: c.ctx.principles } : {}), ...(baseDir !== undefined ? { baseDir } : {}), ...(reviewDirOf(view) !== undefined ? { reviewDir: reviewDirOf(view)! } : {}) });
+      const assignment = planned.text;
+      const written = writeSpills(view, QUESTIONS_STAGE, planned.spills);
+      if (written !== undefined) return written;
       const references = idRefs({ ...questionRefs(ANSWER_CHECK_REFERENCES[0]!, [necessityQuestion()]), ...principleRefs(ANSWER_CHECK_REFERENCES[1]!, c.ctx.principles?.applicable ?? []) });
       const job = agentJob(ctx, view, { stageId: QUESTIONS_STAGE, purpose: "review", instruction: "Check the necessity answer against the trees", schema: ANSWER_CHECK_SCHEMA_NAME, harness: profile.roles["answer-checker"], role: "answer-checker", assignment, references }, files);
       if ("problem" in job) return refused(job);
@@ -818,7 +854,10 @@ function questions(ctx: Context, view: RunView): GraphDecision {
     case "questioner": {
       const required = requiredQuestions({ view: c.ctx.view, groundwork: c.ctx.groundwork, large: isLarge(c.ctx.mode) }, new Map());
       const baseDir = baseTreeDir(view, c.ctx.groundwork);
-      const assignment = questionerInstruction({ pr, snapshot: c.ctx.analysis.snapshot, view: c.ctx.view, groundwork: c.ctx.groundwork, required, feedback: flow.feedback, kind: flow.kind, ...(baseDir !== undefined ? { baseDir } : {}) });
+      const planned = planQuestioner({ pr, snapshot: c.ctx.analysis.snapshot, view: c.ctx.view, groundwork: c.ctx.groundwork, required, feedback: flow.feedback, kind: flow.kind, ...(baseDir !== undefined ? { baseDir } : {}), ...(reviewDirOf(view) !== undefined ? { reviewDir: reviewDirOf(view)! } : {}) });
+      const assignment = planned.text;
+      const written = writeSpills(view, QUESTIONS_STAGE, planned.spills);
+      if (written !== undefined) return written;
       const from = flow.kind === "first" ? undefined : jobSession(view, QUESTIONS_STAGE, QUESTIONER_JOB);
       const itemIds = c.ctx.view.items.map((i) => i.id);
       const symbolIds = c.ctx.groundwork.symbols.map((x) => x.id);
@@ -886,7 +925,10 @@ function answerStep(ctx: Context, view: RunView, c: QaContext, rest: readonly Qu
     case "answerer": {
       const mounted = sourceDirs(c.groundwork.inventory);
       const baseDir = baseTreeDir(view, c.groundwork);
-      const assignment = answererInstruction({ pr, snapshot: c.analysis.snapshot, view: c.view, groundwork: c.groundwork, questions: rest, kind: flow.kind, feedback: flow.feedback, ...(flow.only !== undefined ? { only: flow.only } : {}), mountedDirs: mounted, ...(baseDir !== undefined ? { baseDir } : {}) });
+      const planned = planAnswerer({ pr, snapshot: c.analysis.snapshot, view: c.view, groundwork: c.groundwork, questions: rest, kind: flow.kind, feedback: flow.feedback, ...(flow.only !== undefined ? { only: flow.only } : {}), mountedDirs: mounted, ...(baseDir !== undefined ? { baseDir } : {}), ...(reviewDirOf(view) !== undefined ? { reviewDir: reviewDirOf(view)! } : {}) });
+      const assignment = planned.text;
+      const written = writeSpills(view, ANSWERS_STAGE, planned.spills);
+      if (written !== undefined) return written;
       const from = flow.kind === "first" && !opts.continueFirst ? undefined : jobSession(view, ANSWERS_STAGE, ANSWERER_JOB);
       // Untrusted-read confinement, with the dependency source mounted read-only (design §7.3).
       const references = questionRefs(ANSWERS_REFERENCES[0]!, flow.only !== undefined ? rest.filter((q) => flow.only!.includes(q.id)) : rest);
@@ -900,7 +942,10 @@ function answerStep(ctx: Context, view: RunView, c: QaContext, rest: readonly Qu
     case "checker": {
       const mounted = sourceDirs(c.groundwork.inventory);
       const baseDir = baseTreeDir(view, c.groundwork);
-      const assignment = answerCheckerInstruction({ pr, snapshot: c.analysis.snapshot, groundwork: c.groundwork, questions: rest, answers: flow.answers, retry: flow.retry, mountedDirs: mounted, ...(baseDir !== undefined ? { baseDir } : {}) });
+      const planned = planAnswerChecker({ pr, snapshot: c.analysis.snapshot, groundwork: c.groundwork, questions: rest, answers: flow.answers, retry: flow.retry, mountedDirs: mounted, ...(baseDir !== undefined ? { baseDir } : {}), ...(reviewDirOf(view) !== undefined ? { reviewDir: reviewDirOf(view)! } : {}) });
+      const assignment = planned.text;
+      const written = writeSpills(view, ANSWERS_STAGE, planned.spills);
+      if (written !== undefined) return written;
       // The same dependency source, read-only, so a library or dependency citation can be re-checked where it points.
       const job = agentJob(ctx, view, { stageId: ANSWERS_STAGE, purpose: "review", instruction: `Check the answers${of} against the trees`, schema: ANSWER_CHECK_SCHEMA_NAME, harness: profile.roles["answer-checker"], role: "answer-checker", assignment, readOnlyBinds: mounted, references: questionRefs(ANSWER_CHECK_REFERENCES[0]!, rest) }, files);
       if ("problem" in job) return refused(job);
