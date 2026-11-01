@@ -234,7 +234,7 @@ meaning and parser (review-kit, [§14](#14-sharing-code-with-issue-fix)).
 | `checks` | Optional commands, run only in the Docker sandbox (`checks.sandbox`, same shape as `metrics.sandbox`) ([§8.3](#83-checks)). Absent means there is no Checks stage |
 | `comments` | `minSeverity` (default `P2`), `nits` (false), `questions` (pre-select `needs author` items as draft comments, true), `maxComments` (30), `suggestions.maxLines` (10), optional `footer` |
 | `privateRepos` | Never named in posted text (issue-fix's `withoutPrivateReferences`, `src/prompts.ts:325`) |
-| `harnesses` | each role takes a harness id or `{ harness, model?, effort? }` ([§13.1](#131-roles)): `reporter`, `area-reporter` (optional: large mode's per-area reporter jobs only; absent, it takes the reporter's harness, model and effort; `report-checker` must differ from it), `questioner`, `answerer` (`claude-code` or `codex` only), `report-checker`, `answer-checker`, and `verifier-<aspect>` for `correctness`, `maintainability` and `security`. There is no `reviewer-<aspect>` key: the reviewers run on the answerer's harness, and a profile that names one is refused ([§13.1](#131-roles)) |
+| `harnesses` | each role takes a harness id or `{ harness, model?, effort? }` ([§13.1](#131-roles)): `reporter`, `area-reporter` (optional: large mode's per-area reporter jobs only; absent, it takes the reporter's harness, model and effort; `report-checker` must differ from it), `diagrammer` (optional: the diagram job only; absent, it takes the reporter's harness, model and effort), `questioner`, `answerer` (`claude-code` or `codex` only), `report-checker`, `answer-checker`, and `verifier-<aspect>` for `correctness`, `maintainability` and `security`. There is no `reviewer-<aspect>` key: the reviewers run on the answerer's harness, and a profile that names one is refused ([§13.1](#131-roles)) |
 | `supervisor`, `budgets` | As in issue-fix ([§13](#13-agent-roles-supervisor-budgets)) |
 | `limits` | `maxFiles` (150), `maxPatchBytes` (1 MiB), `maxNewSymbols` (200): past one, the pull request is reviewed in large mode ([§6.9](#69-large-pull-requests), [§7.6](#76-questions-in-large-mode)). `hardMaxFiles` (1000), `hardMaxPatchBytes` (8 MiB), `hardMaxNewSymbols` (2000): past one, the run stops "incompatible task" and names the size. `areaMaxBytes` (256 KiB) and `areaMinBytes` (16 KiB) shape the areas. Each is a positive integer; a `max*` may not exceed its hard cap, nor `areaMinBytes` the `areaMaxBytes` |
 
@@ -825,16 +825,86 @@ and has the change it states) and `A.e<n>` (the code at the cite makes that
 connection). An unsupported node is dropped with its edges; an unsupported edge
 is dropped alone; both are recorded under "Removed by the claim check".
 
-**Rendering**, by plugin code, with no third-party tool:
+**Drawing.** What the claim check leaves (the nodes and edges that survived)
+is drawn for the HTML report ([§6.11](#611-the-html-report)) by the **diagram
+job**, with the vendored diagram-design skill ([§12.4](#124-the-vendored-diagram-design-skill)),
+and the plugin's own SVG is only the fallback:
 
-- an SVG for the HTML report ([§6.11](#611-the-html-report)): a layered
+- **The job.** After the claim check (the report's, or the synthesis' in large
+  mode), one read-only agent job (`diagrams-v1`, fresh session `diagrammer`, on
+  the optional `diagrammer` role's harness, model and effort, the `reporter`'s
+  when the profile names none; [§13.1](#131-roles)) receives only the checked
+  data: the nodes (id, label, kind, change) and edges (from, to, label, kind,
+  change) that survived, and every lifecycle entry that survived ([§6.4](#64-writing-and-checking)):
+  its name, scope, initial value, transitions (condition and effect) and
+  reads. It gets no path, citation or diff. The skill is mounted read-only in
+  the job like the other read-only binds, and the instruction names
+  `<mount>/SKILL.md` and the references to read: `type-architecture-delta.md`,
+  `type-state.md`, `style-guide.md` (Font source: offline/system fonts),
+  `primitives-core.md`, `output-spec.md` and `layout-budget.md`.
+- **What it draws.** One **Architecture delta** (id `arch`): the Before and
+  After topologies of the same grid with the Changes ledger between them. A
+  node with change `unchanged` or `modified` is in both panels, one `added` only
+  in After; an edge `added` only in After, `removed` only in Before, the others
+  in both. And one **State machine** for each lifecycle entry (id
+  `state:<item id>:<entry name>`): the start dot, the initial state, one
+  transition for each recorded transition, labelled with its condition, and the
+  reads noted. At most 12 diagrams (the architecture first, then the entries in
+  report order); the rest are drawn by the plugin. The choices are fixed in the
+  instruction, and nobody is asked: the skill's default style (its style-guide
+  gate is answered "keep default"), system fonts (no Google Fonts link), static
+  (no motion), the light minimal template. The skill's complexity budgets do
+  not apply: every checked node, edge and entry is drawn. The result is, for each
+  diagram, its id and the complete self-contained HTML document the skill
+  produces, at most 160,000 characters.
+- **Checks, for each diagram, deterministic and recorded as evidence.** (1) The
+  skill's own `self_check.py --offline` and `verify-geometry.py`, run by one
+  command in a confined read-only job (bwrap, no network, `python3`, the
+  plugin's directory read-only) on the document written to a scratch file in the
+  run's temporary directory (`diagram-check-<attempt>-<n>`; no `python3` is a
+  failed check, with its reason). (2) The inertness check of
+  [§6.11](#611-the-html-report) on the document (no script, no external
+  stylesheet, font, image or link, no `url(` that leaves it) and on the `<svg>` the
+  report embeds. (3) The **label rule**: every visible text of the SVG (each
+  `<text>` and `<tspan>`) is built from the labels of the data the job was
+  given: node ids, labels and kinds, edge labels and kinds, state names, scopes,
+  initial values, transition conditions and effects, read descriptions, and the
+  skill's fixed words (Before, After, Changes, ADDED, REMOVED, CHANGED,
+  MODIFIED, UNCHANGED, MOVED, REWIRED, STATE, START, END, INITIAL, READS, and a
+  legend's words). Text is compared with whitespace, case and decorating
+  punctuation normalized; a text passes when each part of it between standalone
+  separators (`·`, `→`, `+`, `−`, `|`, `/`, `:`) is a fixed word or a run of
+  whole words of one label, so a label may be wrapped over lines and the two
+  sides of a pair may stand beside an arrow. Any other text is a claim the
+  checker never saw, and the drawing fails. The title and description of the
+  SVG are the plugin's own.
+- **One correction.** The problems of the diagrams that failed go back to the
+  same session once, which returns the whole set again; a diagram that still
+  fails after it is drawn by the plugin instead. The latest attempt that passed
+  stands. The run never stops for a diagram: `review.html` says "drawn by the
+  plugin: the diagram-design drawing failed its checks (<reason>)" beside it.
+- **What is embedded.** The plugin never copies the model's markup. It reads the
+  `<svg>` into a tree, keeps only an allow-list of elements and attributes
+  (`g`, `rect`, `line`, `path`, `polygon`, `polyline`, `circle`, `ellipse`, `text`,
+  `tspan`, `defs`, `marker`, `pattern`; `data-*` and `aria-*`; no `style`, `href`,
+  `use`, `image`, `foreignObject` or handler), prefixes every id so that several
+  drawings share one document, sets the title, description, `role="img"` and the
+  `min-width` of the skill's output spec, and writes it back out. The drawing
+  is recorded in `report.json` (`diagrams`) so that `review.html` at the Answers
+  stage embeds the same bytes.
+
+**Fallback rendering**, by plugin code, with no third-party tool:
+
+- an SVG for the HTML report ([§6.11](#611-the-html-report)), used when the
+  skill's drawing fails its checks: a layered
   layout (layers by longest path from the nodes with no incoming edges, cycles
   broken at back edges found by depth-first search, order within a layer by
   barycentre over a few sweeps), boxes coloured by `change` (added green,
   modified amber, unchanged grey, removed edges dashed red), edge labels, a
-  legend;
+  legend; a lifecycle diagram of its own for each state entry;
 - a `mermaid` code block in `review.md`, as text (it renders where Markdown
-  renders Mermaid, and reads as a list where it does not).
+  renders Mermaid, and reads as a list where it does not). `review.md` keeps
+  its mermaid and text forms whoever drew the SVG.
 
 ### 6.11 The HTML report
 
@@ -842,14 +912,22 @@ Beside `review.md`, the plugin writes `.graphloom/review/review.html`, one
 self-contained file, for every pull request. Plugin code renders it from
 `report.json`, `qa.json`, `necessity.json` and the measurement records, at the
 same two points `review.md` is written (Report, with the Q&A pending; Answers,
-whole). No model writes HTML.
+whole). **`review.html` is the report, for every size**; `review.md` beside it is
+its plain-text copy, for agents and `graphloom session open`. No model writes
+HTML: the one piece of a model's markup it holds is the `<svg>` of a diagram the
+skill drew ([§6.10](#610-architecture-diagram)), which plugin code re-serializes
+from an allow-list.
 
 **Self-contained and inert:** inline CSS and inline SVG; no `<script>`, no
 external stylesheet, image or font; the only links are `href`s to the pull
 request, its commits and files on GitHub at the pinned head and base. Every
 text that came from a model or the pull request is HTML-escaped. A
-deterministic check on the written bytes enforces this. Sections use
-`<details>`, so they collapse without JavaScript.
+deterministic check on the written bytes enforces this, for the embedded
+diagram SVGs too (an allow-list of elements and attributes, `data-*` and `aria-*`
+by prefix, no `href` outside `<a>`, no `url(` that leaves the document). Sections
+use `<details>`, so they collapse without JavaScript. A diagram sits inline in an
+`overflow-x: auto` wrapper with `min-width` its viewBox's width (the skill's
+output spec), so a narrow screen scrolls the diagram, not the page.
 
 **Contents, in order:**
 
@@ -861,13 +939,15 @@ deterministic check on the written bytes enforces this. Sections use
    (preserves, breaks, not applicable) and the checker's judgment, and the
    simpler-way answer.
 3. **Summary:** purpose (with its source) and overview.
-4. **Architecture diagram** ([§6.10](#610-architecture-diagram)).
+4. **Architecture diagram** ([§6.10](#610-architecture-diagram)): the skill's
+   Architecture delta, or the plugin's SVG with its note.
 5. **Change map:** a horizontal bar chart of added and deleted lines per area
    (large mode) or per report section (standard mode).
 6. **Report items** as cards, grouped by section: the text, the citations as
-   links, a **state diagram** (SVG) for each lifecycle entry (the initial value,
-   one arrow per transition labelled with its condition, the reads listed under
-   it) and the before/after table.
+   links, a **state diagram** (the skill's State machine, or the plugin's SVG
+   with its note) for each lifecycle entry (the initial value, one arrow per
+   transition labelled with its condition, the reads listed under it) and the
+   before/after table.
 7. **Measurements:** the metrics table with cells coloured against the limits
    (over the limit red; inherited from the base, made worse or introduced
    said in the cell), coverage as a bar, CRAP as a bar with the threshold
@@ -877,7 +957,9 @@ deterministic check on the written bytes enforces this. Sections use
    judgment, collapsed by default except "needs author".
 9. **Removed by the claim check** and notes.
 
-The stop message that names `review.md` names `review.html` too.
+The stop message names `review.html` first: "the report is
+`.graphloom/review/review.html`; `review.md` beside it is its plain-text copy for
+agents and `graphloom session open`".
 
 ## 7. Questions and answers
 
@@ -2141,6 +2223,8 @@ tools run under bwrap.
 |---|---|
 | Reporter, questioner, answerer, checkers, reviewers, verifiers | `untrusted-read` (bwrap). Reviewers write reproducing tests only as text in their results and run nothing. The root filesystem is read-only, and so is the workspace: because the runner enforces that, a Claude Code agent of these roles may run shell commands (`git show <base>:<path>`, `git grep <base>`, `cat`, `grep`), which a read-only job without such a sandbox may not (a Codex agent's shell is inside Codex's own read-only sandbox). The base tree ([§7.3](#73-answers)) lies inside that read-only workspace. The home directory is replaced by a tmpfs, except the agent's own login state (`ownState`) and the inventory's dependency directories (read-only). The masks above apply, the environment is minimal, and there is no GitHub token. Network is on, because the agents need their CLI logins and their model APIs |
 | A session the maintainer opens (`graphloom session open`, [§17](#17-discussing-a-run-graphloom-session-open)) | The confinement of the job that recorded it: `untrusted-read` with the same masks, a read-only checkout, no GitHub token, network on for the agent's login and model API, and the maintainer's own CLI login. A configured session launcher is bound read-only and its state directories writable. The run's state is not mounted; the `graphloom` process records the conversation after the agent exits |
+| The diagram job ([§6.10](#610-architecture-diagram)) | `untrusted-read` (bwrap) like the other agents, with the vendored skill's directory bound read-only, and told not to read the repository |
+| The skill's checks on a diagram (`diagram-check-<attempt>-<n>`) | bwrap with no network, read-only, the plugin's directory read-only: `python3` runs the skill's `self_check.py` and `verify-geometry.py` on a scratch file in the run's temporary directory |
 | Static metrics (`gometrics`, `tsmetrics`) | bwrap with no network, read-only. They run the plugin's own parser over the head tree and execute none of it, so they always run, with or without Docker |
 | Checks, coverage, mutation, reproducing tests: **everything that runs PR code** | `sandbox: docker` (below) |
 | Materialize, searches, writes | Graph commands with fixed argv over pinned trees. No repository code runs |
@@ -2341,7 +2425,33 @@ and every approval, is scanned for private-key headers,
 strings of 40 or more characters in check tails. A match refuses the write and
 names the location.
 
-### 12.4 Never auto-approve
+### 12.4 The vendored diagram-design skill
+
+`examples/plugins/pr-review/vendor/diagram-design/` is the third-party agent skill
+[diagram-design](https://github.com/cathrynlavery/diagram-design) (MIT, Cathryn
+Lavery), copied unmodified at commit `0cf73c3fcc56667ad91a9a04c439ac6ccfabc9d1`:
+its `SKILL.md`, the references the diagram job reads, the light minimal template
+and the two examples of the types drawn, and the two scripts the plugin runs
+(`scripts/self_check.py`; `scripts/verify-geometry.py`, which the source repository
+keeps at its root). `LICENSE` is the source repository's, `VENDORED.md` records the
+URL, the commit and what was left out (screenshots, the other types, the icon set,
+the import and export tools). The files are pinned by the plugin manifest like the
+rest of the plugin, so a repair or an update changes the digest, and the third-party
+notices list it with its license text (`scripts/release/notices.mjs` reads each
+`vendor/<name>/VENDORED.md`, judges its license against the allowlist and writes it
+into `THIRD_PARTY_NOTICES`). `scripts/check-headers.mjs` exempts any `vendor/`
+directory from the SPDX header rule, because the files stay as they came.
+
+The skill is a model-facing document and two scripts; none of it runs inside the
+controller or the graph. What it makes is untrusted: a diagram document is checked
+by the skill's own scripts, by the inertness check, and by the **label rule** (every
+visible text is a label of the checked data the job was given, [§6.10](#610-architecture-diagram)),
+so a drawing cannot carry a claim the claim checker never saw. The plugin embeds
+only the `<svg>` it re-serializes from an allow-list, with the title and description
+its own. The skill's scripts read the document and print findings; they open
+no network connection, and run with no network in any case.
+
+### 12.5 Never auto-approve
 
 `APPROVE` is posted only when the maintainer typed it in an approved draft.
 Rehearsal asserts this ([§16](#16-rehearsal-scenarios)).
@@ -2359,6 +2469,7 @@ the review base session ([§8.1](#81-review)).
 |---|---|---|---|
 | `reporter` | `claude-code` | read | Writes the neutral report and the draft summary |
 | `area-reporter` | the `reporter`'s | read | Optional. Large mode's per-area reporter jobs only (a fresh session per area; [§6.9](#69-large-pull-requests)). Absent, it takes the reporter's harness, model and effort. The synthesis job keeps the `reporter` role |
+| `diagrammer` | the `reporter`'s | read | Optional. The diagram job only ([§6.10](#610-architecture-diagram)): it draws the checked architecture and lifecycle entries with the vendored diagram-design skill, fresh session, one correction in the same session. Absent, it takes the reporter's harness, model and effort. No `distinctFrom`: its drawings are checked by code (the skill's checks, inertness, the label rule), and it receives only data the claim check already judged |
 | `report-checker` | `codex` | read | `distinctFrom: ["reporter", "area-reporter"]` |
 | `questioner` | `codex` | read | `distinctFrom: ["reporter"]`. Asks only |
 | `answerer` | `claude-code` | read | `distinctFrom: ["questioner"]`. Claude Code or Codex only. Answers N1 first, in the Questions stage (`necessity-v1`), then the other questions from the whole codebase |
@@ -2401,6 +2512,7 @@ from its preference list that differs from its `distinctFrom` partner's:
 | `questioner` | codex, pi, claude-code, skipping the answerer's |
 | `reporter` | claude-code, codex, pi, skipping the questioner's |
 | `area-reporter` | the reporter's, unless the profile sets it |
+| `diagrammer` | the reporter's, unless the profile sets it |
 | `report-checker`, `answer-checker` | codex, pi, claude-code, skipping its author's |
 | `reviewer-<aspect>` | the answerer's |
 | `verifier-correctness`, `verifier-maintainability` | claude-code, codex, pi, skipping the reviewers' |
@@ -2694,6 +2806,13 @@ the HTML report ([§6.11](#611-the-html-report)) and the multi-part writes of
 [§6.6](#66-output), within the first layer and without changing the stage list
 ([Version 0.12](#version-012-architecture-diagram-html-report-and-multi-part-writes)).
 
+**Landed in 0.14:** the diagrams of the architecture and the lifecycle entries
+drawn by an agent job with the vendored diagram-design skill, checked by the
+skill's own scripts, the inertness check and the label rule, with the plugin's
+SVG as the fallback ([§6.10](#610-architecture-diagram),
+[§12.4](#124-the-vendored-diagram-design-skill),
+[Version 0.14](#version-014-diagrams-drawn-with-the-diagram-design-skill)).
+
 | Phase | Scope | Verification |
 |---|---|---|
 | P1 | **First layer, report-only.** Fetch, workspace, report, questions, answers, static measurements. Generic: `base:`, the GitHub reads, `bwrap` confinement (agents, static tools) and the `docker` sandbox (coverage), image checks and pulls in Fetch, doctor and check probes. pr-review 0.1 with stages Fetch, Report, Questions and Answers; it stops `report ready` after Answers and `--decline review-layer` finishes it. Also: detectors; symbol packs (Go, TypeScript); whole-repository search; similarity; the dependency inventory; test mapping; the reporter, questioner and answerer with both checkers; `gometrics` and `tsmetrics`; confined coverage (**built in wave 3b**: `go test -coverprofile`; for TypeScript the repository's own `vitest run --coverage` with its `@vitest/coverage-v8`, or `not run (no vitest coverage provider)` when the repository declares none) with measured CRAP and the unknown-coverage rule; `review.md`, `report.json`, `qa.json`; the ledger; the BanyanDB mapping. **Wave 3**, with the Questions and Answers work: generic `graphloom session list/open` ([core §15](design-typescript-core.md#15-opening-a-recorded-agent-session)) with conversation capture (`operator-conversation` evidence, the turn extract, the 32 MiB bound, `contextTokens`), chained forks and `--from-original`; the operator's session launcher (`claude.sessionLauncher`, `codex.sessionLauncher`, their state directories, the environment overrides and the launcher probe in `session open` and `doctor`); `parseProfile` refusing a Pi answerer; and the decision half of approvals (`GraphDefinition.approvals`, `resume --approve/--decline`, `operator-approval` evidence) for the `report ready` stop; 0.1 has no Review stage, so it refuses `--approve review-layer` and names the version; and task preparation: the generic `prepareTask` hook, `TaskPlan` and `validateTaskPlan`, `graphloom task new` ([core §16](design-typescript-core.md#16-preparing-a-task-graphloom-task-new)), pr-review's `prepareTask` ([§3.1](#31-task)), and the `graphloom-run` skill using `task new` | Intake, executor contract and confinement tests. Unit tests per detector, symbol pattern (new vs modified, receivers, generics), query builder, similarity scorer, test-map rule and validator rule. `gometrics` matches gocyclo on a fixture corpus. Nesting and changed-function scope fixtures. The `measurements` validator rejects each kind of inconsistent record. Real-Git tests: searches read the base commit only, and materialization runs no hook or filter. Ledger CAS race. Rehearsal `report`, `report-corrections`, `answer-finds-existing-helper`, `answer-no-library-with-whole-repo-search`, `answer-checker-contradicts`, `needs-author-purpose`, `purpose-stated`, `missing-test`, `complex-function`, `crap-upper-bound`, `sandbox-unavailable`, `injection`. Wave 3: opening a session and capturing its fork leave the recorded transcript, side files and rollout byte-identical; a second `--stage answers` open forks the first conversation and `--from-original` forks the answerer; `session list` shows each conversation with its parent; a fork with no operator turn records nothing, one over the bound records `transcript: omitted`, and a capture after the run finished records nothing; the turn extract keeps the operator's messages verbatim (Claude Code and Codex fixtures); a stub launcher prefixes `session open` only and headless jobs keep `claude.command`, the environment override wins, its state directories are writable in the confinement, a launcher that cannot resume is refused by the probe before launch, and capture through a stub launcher finds the fork by the id GraphLoom chose; `session open` refuses a Pi session, a ref whose harness disagrees with its record and a finished run, and refuses while the owning job or a continuation of it runs; the opened session's confinement (repository agent-config masks applied, no GitHub token in its environment, the checkout read-only); `--stage answers` opens the answerer, not the checker; `--decline review-layer` records `operator-approval` evidence and finishes the run; `--approve review-layer` refused by 0.1. Task preparation: `validateTaskPlan` refuses a step that would run a command (an unknown kind, an extra property) and any `intoRef` or `to` outside `refs/graphloom/<graph>/`; a `fetch` from a local smart-HTTP fixture runs no hook (a `reference-transaction` hook's marker never appears) and leaves the working tree, index and `HEAD` unchanged; `--dry-run` creates no ref and writes no file; an existing `task.yaml` is refused without `--force`; pr-review's plan for a temporary repository whose fixture remote serves a fake `refs/pull/7/head`: the six steps of [§3.1](#31-task), `heads/<sha>` pinned at the fetched head, `base` the merge base, the request naming that sha, and the written task passing `graphloom check`; a URL argument gives the same plan; another `owner/repo` than the profile's `project`, a missing profile and a malformed argument are refused. Under real Docker: a coverage run with `--network none`, where a test that dials out fails; the limits enforced (a fork bomb stops at `--pids-limit`, an allocation at `--memory`, the host unaffected); only the checkout and the build cache writable, the root read-only, no host home, `--pull never`; the container killed by name on stop and removed on resume; coverage attributed by line range, Go from the coverprofile and TypeScript from `coverage-final.json` statements, with the report written under the job's temporary directory and the checkout unchanged. One live run on a real BanyanDB PR, read by the user, with recall of new symbols, tests and existing equivalents checked by hand |
@@ -2763,6 +2882,40 @@ What 0.11 does, where this document leaves it open:
   as before, so their size is bounded by what one command carries; a report or
   Q&A that does not fit still stops the run "incompatible task" and says so.
   (0.12 lifts this: [§6.6](#66-output), multi-part writes.)
+
+### Version 0.14: diagrams drawn with the diagram-design skill
+
+The diagram job ([§6.10](#610-architecture-diagram)) and the vendored skill
+([§12.4](#124-the-vendored-diagram-design-skill)) land in 0.14, within the first
+layer and without changing the stage list. How 0.14 does it, where this document
+leaves it open:
+
+- `diagrams-v1` is a result contract of the Report stage, asked after the claim
+  check (the report's, or the synthesis' in large mode) and before the
+  measurements are written; a report with no architecture node and no lifecycle
+  entry asks nothing. Its id field is constrained to the diagram ids of the job.
+  The graph and the validators ask the same function over the evidence
+  (`diagramFlow`): the drawing job, its check commands (`diagram-check-<attempt>-<n>`),
+  at most two attempts, and the per-diagram resolution (the latest attempt that
+  passed stands; a diagram that never passed is drawn by the plugin with its
+  note). A drawing job that did not complete counts as an attempt, so a diagram
+  never stops the run.
+- `report.json` gains `diagrams`: for `arch` and each `state:<item>:<name>`, the
+  embedded `<svg>` or the plugin's note. `review.html` is rendered from it at both
+  stages; `change-report` recomputes it from the evidence like the rest of the
+  file.
+- The optional `diagrammer` role ([§13.1](#131-roles)); large mode's budget
+  pre-check counts the drawing and its correction (two agent invocations, four
+  jobs).
+- The architecture's `removed` nodes cannot occur (a node is added, modified or
+  unchanged); the skill's budget of eight components does not apply, and a 30-node
+  architecture is drawn on a wide canvas.
+- Not done: the skill's own `verify-architecture-delta.py` (it lives at the source
+  repository's root and checks the delta's metadata contract) is not vendored or
+  run, so the plugin does not judge that the delta's ledger is complete; the label
+  rule only keeps it from adding to the data.
+- The stop message names `review.html` first, and `review.md` as its plain-text
+  copy.
 
 ### Version 0.12: architecture diagram, HTML report and multi-part writes
 

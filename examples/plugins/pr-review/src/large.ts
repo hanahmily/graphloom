@@ -567,6 +567,8 @@ export const ASSUMED_ITEMS_PER_AREA = 3;
 export const ASSUMED_QUESTIONS_PER_ITEM = 5;
 /** Jobs the stages around the agents need in any run (measurements, coverage, the groundwork's reads, the architecture tree check, the writes with review.html, the ledger). A multi-part write adds a job per part on top. */
 const FIXED_JOBS = 24;
+/** The diagram job's agent invocations: the drawing and its one correction (design §6.10). */
+const DIAGRAM_INVOCATIONS = 2;
 const FIXED_DECISIONS = 12;
 
 /**
@@ -578,8 +580,9 @@ const FIXED_DECISIONS = 12;
 export function largeNeeds(areas: number): LargeNeeds {
   const questions = areas * ASSUMED_ITEMS_PER_AREA * ASSUMED_QUESTIONS_PER_ITEM;
   const batches = Math.max(1, Math.ceil(questions / QUESTION_BATCH_SIZE));
-  const agentInvocations = areas * 2 + 2 + 1 + 2 + batches * 2;
-  const jobs = areas * 3 + 3 + 1 + 4 + batches * 4 + FIXED_JOBS;
+  // The diagram job (design §6.10) after the synthesis: its draw and one correction, each with one command job of the skill's checks.
+  const agentInvocations = areas * 2 + 2 + 1 + 2 + batches * 2 + DIAGRAM_INVOCATIONS;
+  const jobs = areas * 3 + 3 + 1 + 4 + batches * 4 + FIXED_JOBS + DIAGRAM_INVOCATIONS * 2;
   return { areas, questions, batches, agentInvocations, jobs, decisions: jobs + FIXED_DECISIONS };
 }
 
@@ -590,5 +593,5 @@ export function budgetShortfall(needs: LargeNeeds, remaining: { agentInvocations
   if (remaining.jobs < needs.jobs) short.push("jobs");
   if (remaining.decisions < needs.decisions) short.push("decisions");
   if (short.length === 0) return undefined;
-  return `large mode needs at least ${needs.agentInvocations} agent invocations, ${needs.jobs} jobs and ${needs.decisions} decisions for ${needs.areas} area(s) (areas × (reporter + checker + record), the synthesis with its check, and about ${needs.questions} questions in ${needs.batches} batch(es) of ${QUESTION_BATCH_SIZE}), and the run has ${remaining.agentInvocations}, ${remaining.jobs} and ${remaining.decisions} left; raise the profile's budgets (${short.map((k) => `budgets.${k}`).join(", ")}) and run again, rather than lose the run halfway`;
+  return `large mode needs at least ${needs.agentInvocations} agent invocations, ${needs.jobs} jobs and ${needs.decisions} decisions for ${needs.areas} area(s) (areas × (reporter + checker + record), the synthesis with its check, the diagrams (a drawing, its checks and one correction), and about ${needs.questions} questions in ${needs.batches} batch(es) of ${QUESTION_BATCH_SIZE}), and the run has ${remaining.agentInvocations}, ${remaining.jobs} and ${remaining.decisions} left; raise the profile's budgets (${short.map((k) => `budgets.${k}`).join(", ")}) and run again, rather than lose the run halfway`;
 }

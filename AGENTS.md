@@ -55,6 +55,12 @@ change is necessary, which an unnecessary answer ends; an optional review layer
 drafts findings, published only on operator approval) follows the
 [PR-review design](docs/design-pr-review-graph.md); its shared review machinery
 is vendored source, not a dependency.
+The plugin also vendors the third-party diagram-design agent skill
+(`examples/plugins/pr-review/vendor/diagram-design`, MIT, unmodified, with its
+`LICENSE` and a `VENDORED.md` naming source and commit; design
+[§12.4](docs/design-pr-review-graph.md#124-the-vendored-diagram-design-skill)),
+which its diagram job draws with; `vendor/` directories are exempt from the SPDX
+header check and listed in `THIRD_PARTY_NOTICES`.
 
 Installable releases (tarball, install layout, upgrade, local release
 procedure) follow the proposed [release design](docs/design-release.md).

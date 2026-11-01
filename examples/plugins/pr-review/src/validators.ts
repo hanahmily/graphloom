@@ -4,8 +4,9 @@
 import type { EvidenceRecord, ValidationInput, ValidationResult, Validator } from "@graphloom/sdk";
 import { analyze, evidencePull, reportFlowOf, type Analysis } from "./analysis.js";
 import { checkoutCommand, guardCommand, headTreeCommand, parseHeadTree, parseLedger, pinnedBase } from "./commands.js";
-import { COMMAND, LEDGER_JSON_FILE, LEDGER_MD_FILE, PART_BASE, QA_JSON, REPORT_JSON, REVIEW_MD } from "./constants.js";
-import { commandRuns, describeCommand, outputTail, reportText, succeeded } from "./evidence.js";
+import { COMMAND, ENV_PLUGIN_ROOT, LEDGER_JSON_FILE, LEDGER_MD_FILE, PART_BASE, QA_JSON, REPORT_JSON, REVIEW_MD } from "./constants.js";
+import { diagramFlow, diagramInputOf, type DiagramFlow } from "./diagrams.js";
+import { commandRuns, describeCommand, environmentOutput, outputTail, reportText, succeeded } from "./evidence.js";
 import type { ReportFlow } from "./flow.js";
 import { measurementState, type MeasurementState } from "./measurements.js";
 import { reportJson, reviewMarkdown } from "./output.js";
@@ -118,9 +119,15 @@ export interface Outputs {
   html: string;
 }
 
-/** The files the report writes, recomputed from the evidence: what the report write must have written. */
+/** Where the report's diagrams stand (design §6.10), from the evidence: the graph and the validators ask the same function. */
+export function diagramsOf(evidence: readonly EvidenceRecord[], flow: Extract<ReportFlow, { state: "done" }>): DiagramFlow {
+  return diagramFlow(evidence, diagramInputOf(flow.final), environmentOutput(evidence, ENV_PLUGIN_ROOT));
+}
+
+/** The files the report writes, recomputed from the evidence: what the report write must have written. The diagrams must be resolved (`diagramsOf`); otherwise the plugin draws them all. */
 export function outputsOf(evidence: readonly EvidenceRecord[], profile: Profile, pr: PullRequest, analysis: Analysis, flow: Extract<ReportFlow, { state: "done" }>, measurements: MeasurementState): Outputs {
-  const input = { pr, snapshot: analysis.snapshot, base: pinnedBase(evidence), final: flow.final, facts: analysis.facts, measurements, profile, mode: analysis.snapshot.mode, ...(flow.info !== undefined ? { large: flow.info } : {}) };
+  const drawn = diagramsOf(evidence, flow);
+  const input = { pr, snapshot: analysis.snapshot, base: pinnedBase(evidence), final: flow.final, facts: analysis.facts, measurements, profile, mode: analysis.snapshot.mode, ...(drawn.state === "resolved" ? { diagrams: drawn.doc } : {}), ...(flow.info !== undefined ? { large: flow.info } : {}) };
   const json = reportJson(input);
   return { json, markdown: reviewMarkdown(input), html: reviewHtmlFrom(json)! };
 }
@@ -138,6 +145,7 @@ export const changeReport: Validator = profiled((input, profile) => {
   if (flow.state !== "done") return inconclusive(`the report is not finished (${flow.state})`);
   const m = measurementsOf(input.evidence, c.analysis, profile);
   if (m.state !== "ready" && m.state !== "none") return inconclusive("the measurements are not recorded yet");
+  if (diagramsOf(input.evidence, flow).state !== "resolved") return inconclusive("the diagrams are not drawn and checked yet");
   // report.json and review.md as the evidence holds them: one command, or parts reconstructed and checked against their digest (design §6.6).
   const w = recordedReport(input.evidence);
   if (w.state === "none") return inconclusive("the report has not been written");

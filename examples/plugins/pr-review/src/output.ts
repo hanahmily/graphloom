@@ -2,6 +2,7 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 import type { Fact } from "./detectors.js";
+import type { DiagramsDoc } from "./diagrams.js";
 import { coverageNotes, renderMeasurements, notRunReasons, type MeasurementState } from "./measurements.js";
 import type { LargeInfo } from "./large.js";
 import { describeReasons, type ReviewMode } from "./mode.js";
@@ -25,6 +26,8 @@ export interface OutputInput {
   mode: ReviewMode;
   /** Large mode: the areas, the unread files and the merges. */
   large?: LargeInfo;
+  /** The drawings of the architecture and the lifecycle entries (design §6.10): the skill's embedded SVGs, or the plugin's note. */
+  diagrams?: DiagramsDoc;
 }
 
 /** `report.json` (`pr-change-report-v1`): the machine-readable report the validators and later stages read. */
@@ -46,6 +49,7 @@ export function reportJson(i: OutputInput): string {
     removed: i.final.removed,
     removedParts: i.final.removedParts,
     architecture: i.final.architecture,
+    ...(i.diagrams !== undefined && (i.diagrams.arch !== undefined || Object.keys(i.diagrams.states).length > 0) ? { diagrams: i.diagrams } : {}),
     measurements:
       m.state === "ready"
         ? { tools: m.coverage.runs.some((r) => r.ran) ? "static+coverage" : "static", coverage: coverageNotes(m.coverage), runs: m.coverage.runs, mutation: reasons.mutation, records: m.records }

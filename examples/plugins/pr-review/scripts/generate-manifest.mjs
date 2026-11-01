@@ -39,6 +39,8 @@ const pinned = [
   ...listFiles(path.join(root, "scripts"), "scripts").filter((p) => p !== "scripts/generate-manifest.mjs"),
   // The static metrics tools run from the plugin's own tree.
   ...listFiles(path.join(root, "tools"), "tools"),
+  // The vendored diagram-design skill the diagram job reads and whose checks the graph runs (design §12.3).
+  ...listFiles(path.join(root, "vendor"), "vendor"),
   ...listFiles(path.join(root, "src"), "src"),
   ...listFiles(path.join(root, "test"), "test"),
 ];

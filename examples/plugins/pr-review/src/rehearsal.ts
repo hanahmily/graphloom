@@ -29,7 +29,9 @@ import { partitionAreas } from "./areas.js";
 import { reportMode, type ReviewMode } from "./mode.js";
 import { claimTargets, readClaimCheck, type ClaimTarget } from "./claims.js";
 import { ALPHA_GO, BETA_GO, GENERATED_GO, GUIDE_MD, LARGE_HEAD_FILES, LARGE_LIMITS, largeDoc, OMITTED_PATH } from "./rehearsal-large.js";
-import { asReporterOutput, numbered, type Cite, type ReportContext, type ReportItem, type ReporterOutput, type StateEntry } from "./report.js";
+import { diagramInputOf, DIAGRAM_CHECK, diagramCheckId } from "./diagrams.js";
+import { fixtureDiagrams } from "./rehearsal-diagrams.js";
+import { assembleReport, asReporterOutput, numbered, type Cite, type FinalReport, type ReportContext, type ReportItem, type ReporterOutput, type StateEntry } from "./report.js";
 import { detectStateCandidates } from "./statecandidates.js";
 import { DOCS } from "./rehearsal-docs.js";
 import type { Necessity } from "./necessity.js";
@@ -567,6 +569,28 @@ interface Built {
   scenario: RehearsalScenario;
 }
 
+/** How the stand-in diagram job behaves (design §6.10): drawings that stand, one that fails a label check and is corrected, a skill check that fails once, or drawings that never pass. */
+type DiagramBehavior = "good" | "corrected" | "skill-check-fails" | "fallback";
+
+/** A text the drawing has no label for: what the label rule exists to refuse. */
+const ADDED_CLAIM = '<text x="8" y="20" font-size="9" fill="#4f5d75" font-family="ui-monospace, monospace">this change makes the system faster</text>';
+const withClaim = (html: string): string => html.replace("</svg>", `${ADDED_CLAIM}</svg>`);
+const withScript = (html: string): string => html.replace("</svg>", "<script>alert(1)</script></svg>");
+
+/**
+ * The diagram job's stand-in replies and the skill-check stubs for a report the claim check left (design §6.10), drawn
+ * from the plugin's own `diagramInputOf` so a scenario cannot drift from the graph. Nothing for a report with nothing to draw.
+ */
+function diagramScenario(final: FinalReport, how: DiagramBehavior = "good"): { results: NonNullable<RehearsalScenario["results"]>; commands: NonNullable<RehearsalScenario["commands"]> } {
+  const input = diagramInputOf(final);
+  const good = fixtureDiagrams(input);
+  if (good.diagrams.length === 0) return { results: {}, commands: {} };
+  const first = (change: (html: string) => string): { diagrams: Array<{ id: string; html: string }> } => ({ diagrams: good.diagrams.map((d, i) => (i === 0 ? { ...d, html: change(d.html) } : d)) });
+  const replies = { good: [good], corrected: [first(withClaim), good], "skill-check-fails": [good, good], fallback: [first(withClaim), first(withScript)] }[how];
+  const commands: NonNullable<RehearsalScenario["commands"]> = how === "skill-check-fails" ? { [diagramCheckId(1, 0)]: { exitCode: 1, stdout: `${DIAGRAM_CHECK}: self_check.py: finding: the document does not fit the skill's checklist\n` } } : {};
+  return { results: { "diagrams-v1": replies.map((output) => ({ output })) }, commands };
+}
+
 /** The records of a pull request's metrics document with coverage attributed from a canned sandbox report, by the plugin's own functions. */
 function measuredRecords(doc: { records?: MetricsRecord[]; files?: FileIndex[] }, report: string): MetricsRecord[] {
   const parsed = parseCoverageReport(report);
@@ -578,7 +602,7 @@ function measuredRecords(doc: { records?: MetricsRecord[]; files?: FileIndex[] }
   });
 }
 
-function build(profile: Profile, pull: Pull, options: { body?: string; notes?: string[]; toolId?: string; corrections?: boolean; qa?: QaSpec; coverage?: string; report?: (files: readonly PullFile[], sectionIds: readonly string[]) => ReporterOutput; architecture?: (files: readonly PullFile[]) => Architecture; unsupported?: string[] }): Built {
+function build(profile: Profile, pull: Pull, options: { body?: string; notes?: string[]; toolId?: string; corrections?: boolean; qa?: QaSpec; coverage?: string; report?: (files: readonly PullFile[], sectionIds: readonly string[]) => ReporterOutput; architecture?: (files: readonly PullFile[]) => Architecture; unsupported?: string[]; diagrams?: DiagramBehavior }): Built {
   const files = pull.files.map((f) => pullFile(fileItem(f))!);
   const facts = detectFacts(files, profile);
   const sections = reporterSections(profile);
@@ -590,6 +614,8 @@ function build(profile: Profile, pull: Pull, options: { body?: string; notes?: s
   const drawn = options.report !== undefined ? options.report(files, sectionIds) : goodReport(files, facts, sectionIds, notes, pull);
   const good = options.architecture !== undefined ? { ...drawn, architecture: options.architecture(files) } : drawn;
   const results: RehearsalScenario["results"] = {};
+  /** The report the claim check leaves, and the ids it removed: what the diagrams are drawn from. */
+  let left: { report: ReporterOutput; removed: ReadonlySet<string> } = { report: good, removed: new Set(options.unsupported ?? []) };
   if (options.corrections === true) {
     const docItemOf = (r: ReporterOutput): ReportItem => r.sections.find((s) => s.id === "other")!.items.find((i) => i.cites[0]?.path === "docs/retention.md")!;
     // First try: the deleted file's item is missing, and one citation lies outside the diff.
@@ -605,6 +631,7 @@ function build(profile: Profile, pull: Pull, options: { body?: string; notes?: s
     dubious.text = "Adds a document describing a retention dashboard.";
     const items = numbered(corrected, { sections });
     const dubiousId = items.find(({ item }) => item === dubious)!.id;
+    left = { report: corrected, removed: new Set([dubiousId]) };
     // The correction is asked as change-report-v1 again; the revision after the claim check has its own name.
     results["change-report-v1"] = [{ output: bad }, { output: corrected }];
     results["change-report-revision-v1"] = [{ output: corrected }];
@@ -635,10 +662,13 @@ function build(profile: Profile, pull: Pull, options: { body?: string; notes?: s
     spec: options.qa ?? pull.qa ?? {},
   });
   Object.assign(results, qa.results);
+  const ctxFinal: ReportContext = { sections, files, facts, pinned: pinnedTexts({ title: pull.title, body: options.body ?? pull.body }, pull.commits.map((message) => ({ message }))), candidates: detectStateCandidates(files) };
+  const diagrams = diagramScenario(assembleReport(left.report, new Map([...left.removed].map((id) => [id, "not supported"] as const)), ctxFinal), options.diagrams);
+  Object.assign(results, diagrams.results);
   return {
     scenario: {
       results,
-      commands: { ...commands(pull, options.toolId), ...quoteStubs(results["claim-check-v1"]!.at(-1)!, claimTargets(good, { sections }), files), ...archStubs(good.architecture, REHEARSAL_MERGE_BASE, { ...REHEARSAL_HEAD_FILES, ...LARGE_HEAD_FILES }), ...(options.coverage !== undefined ? { "sandbox-go": { exitCode: 0, stdout: "ready\n" }, "cover-go": { exitCode: 0, stdout: options.coverage } } : {}), ...qa.commands },
+      commands: { ...commands(pull, options.toolId), ...quoteStubs(results["claim-check-v1"]!.at(-1)!, claimTargets(good, { sections }), files), ...archStubs(good.architecture, REHEARSAL_MERGE_BASE, { ...REHEARSAL_HEAD_FILES, ...LARGE_HEAD_FILES }), ...(options.coverage !== undefined ? { "sandbox-go": { exitCode: 0, stdout: "ready\n" }, "cover-go": { exitCode: 0, stdout: options.coverage } } : {}), ...qa.commands, ...diagrams.commands },
       reads: reads({ ...pull, ...(options.body !== undefined ? { body: options.body } : {}) }),
       expect: { status: "stopped", stopReason: "report ready", receipts: ["fetch", "report", "questions", "answers"] },
     },
@@ -692,10 +722,12 @@ function buildLarge(profile: Profile, pull: Pull, options: { body?: string; note
   if ("problem" in synthesized) throw new Error(`the large scenario's synthesis does not validate: ${synthesized.problem}`);
   const { final } = assembleLarge(done, synthesized, ctx, partition);
   const good: ReporterOutput = { ...empty, ...synthesis, ...asReporterOutput(final) };
+  const diagrams = diagramScenario(final);
   const results: RehearsalScenario["results"] = {
     "change-report-v1": areaReports.map((output) => ({ output })),
     "change-synthesis-v1": [{ output: synthesis }],
     "claim-check-v1": [...areaChecks, check],
+    ...diagrams.results,
   };
   const qa = qaScenario({
     profile,
@@ -717,7 +749,7 @@ function buildLarge(profile: Profile, pull: Pull, options: { body?: string; note
       results,
       commands: { ...commands(pull, options.toolId), ...quoteStubs(check, synthesisTargets(synthesis, items), files), ...records, ...archStubs(synthesis.architecture, REHEARSAL_MERGE_BASE, { ...REHEARSAL_HEAD_FILES, ...LARGE_HEAD_FILES }), ...qa.commands },
       reads: reads({ ...pull, ...(options.body !== undefined ? { body: options.body } : {}) }),
-      budgets: { agentInvocations: 60, jobs: 160, decisions: 180 },
+      budgets: { agentInvocations: 60, jobs: 170, decisions: 190 },
       expect: { status: "stopped", stopReason: "report ready", receipts: ["fetch", "report", "questions", "answers"] },
     },
   };
@@ -1156,6 +1188,10 @@ export function rehearsal(config: unknown): GraphRehearsal {
       "state-lifecycle": build(profile, STREAM_PULL, { toolId: "static-go-1", report: streamReport }).scenario,
       // The report draws an architecture diagram (design §6.10): its cites are resolved in the trees; the checker does not support one connection, which is dropped and recorded.
       "architecture-diagram": build(profile, REPORT_PULL, { toolId: "static-go-1", architecture: retentionArchitecture, unsupported: ["A.e2"] }).scenario,
+      // The diagram job (design §6.10): a drawing that fails the label rule is corrected once; a skill check that fails is corrected once; drawings that never pass are drawn by the plugin, and the run goes on.
+      "diagram-corrected": build(profile, REPORT_PULL, { toolId: "static-go-1", architecture: retentionArchitecture, unsupported: ["A.e2"], diagrams: "corrected" }).scenario,
+      "diagram-skill-check-fails": build(profile, STREAM_PULL, { toolId: "static-go-1", report: streamReport, diagrams: "skill-check-fails" }).scenario,
+      "diagram-fallback": build(profile, REPORT_PULL, { toolId: "static-go-1", architecture: retentionArchitecture, unsupported: ["A.e2"], diagrams: "fallback" }).scenario,
       // A pull request of 1000 data files: report.json and review.html are past one write command, so each is written in parts (design §6.6).
       "large-artifacts": build(profile, ARTIFACTS_PULL, {}).scenario,
     },

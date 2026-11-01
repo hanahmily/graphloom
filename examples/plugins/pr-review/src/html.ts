@@ -4,12 +4,14 @@
 /**
  * The HTML report (design §6.11): `review.html`, one self-contained file rendered by plugin code from `report.json`,
  * `qa.json`, `necessity.json` and the measurement records, at the points `review.md` is written. No model writes
- * HTML. Everything that came from a model or the pull request is escaped; the file has inline CSS and inline SVG,
+ * HTML: the only markup of a model's it holds is the `<svg>` of a diagram the diagram-design skill drew, which
+ * `diagramsvg.ts` re-serialized from an allow-list (design §6.10). Everything that came from a model or the pull request is escaped; the file has inline CSS and inline SVG,
  * no script, no external stylesheet, image or font, and its only links are `href`s to the pull request, its commits
  * and its files on GitHub at the pinned head and base. `htmlProblems` enforces that on the written bytes.
  */
 import type { Architecture } from "./architecture.js";
 import { architectureSvg } from "./archlayout.js";
+import { stateIds, type DiagramsDoc, type DrawnDiagram } from "./diagrams.js";
 import type { FinalItem, RemovedItem, RemovedPart, StateEntry } from "./report.js";
 import { describeChecks } from "./report.js";
 import { clip, esc } from "./escape.js";
@@ -37,6 +39,8 @@ export interface ReportDoc {
   removed: RemovedItem[];
   removedParts: RemovedPart[];
   architecture: Architecture;
+  /** The drawings of the diagram job (design §6.10): the skill's embedded SVGs, or the plugin's note; absent in a report written before it existed. */
+  diagrams?: DiagramsDoc;
   measurements: { tools?: string; coverage?: string[]; mutation?: string; records?: MetricsRecord[]; none?: string };
 }
 
@@ -234,9 +238,15 @@ function summaryHtml(r: ReportDoc): string {
   return details("<h2>Summary</h2>", purpose + overview, true, "sec");
 }
 
-function architectureHtml(a: Architecture): string {
-  const svg = architectureSvg(a);
-  const body = svg === "" ? para("None: the report draws no component.") : `<div class="scroll">${svg}</div>`;
+/** A drawing of the skill (inline, in its scrolling wrapper), or the plugin's own with the note of why (design §6.10, §6.11). */
+function drawing(d: DrawnDiagram | undefined, own: () => string): { svg: string; note: string } {
+  if (d?.via === "diagram-design") return { svg: d.svg, note: "" };
+  return { svg: own(), note: d?.via === "plugin" ? para(d.note) : "" };
+}
+
+function architectureHtml(a: Architecture, d: DrawnDiagram | undefined): string {
+  const { svg, note } = drawing(d, () => architectureSvg(a));
+  const body = svg === "" ? para("None: the report draws no component.") : `${note}<div class="scroll">${svg}</div>`;
   return details(`<h2>Architecture</h2> <span class="muted">${a.nodes.length} components, ${a.edges.length} connections</span>`, body, true, "sec");
 }
 
@@ -274,13 +284,16 @@ interface Ctx {
   g: Github;
   files: ReportDoc["files"];
   diagrams: number;
+  drawn?: DiagramsDoc | undefined;
 }
 
-function stateHtml(e: StateEntry, c: Ctx): string {
+function stateHtml(e: StateEntry, id: string, c: Ctx): string {
   c.diagrams += 1;
+  const { svg, note } = drawing(c.drawn?.states[id], () => stateDiagramSvg(e, `sd${c.diagrams}`));
   return [
     `<div class="state"><h5>${esc(e.name)} <span class="muted">${esc(e.scope)}</span></h5>`,
-    `<div class="scroll">${stateDiagramSvg(e, `sd${c.diagrams}`)}</div>`,
+    note,
+    `<div class="scroll">${svg}</div>`,
     e.reads.length > 0 ? `<ul class="plain reads">${e.reads.map((r) => `<li>read ${esc(r.where)}: ${esc(r.decision)} ${citeLink(c.g, r.cite)}</li>`).join("")}</ul>` : "",
     `<details class="steps"><summary>Transitions in words</summary><ul class="plain">${e.transitions.map((t) => `<li>when ${esc(t.when)} → ${esc(t.effect)} ${citeLink(c.g, t.cite)}</li>`).join("")}</ul></details>`,
     `</div>`,
@@ -289,11 +302,12 @@ function stateHtml(e: StateEntry, c: Ctx): string {
 
 function itemHtml(item: FinalItem, parts: readonly RemovedPart[], c: Ctx): string {
   const own = parts.filter((p) => p.item === item.id);
+  const ids = stateIds(item.id, item.state);
   return [
     `<div class="item" id="${esc(item.id)}"><h4><span class="rid">${esc(item.id)}</span>${item.auto !== undefined ? ` ${badge("grey", `plugin-written (${item.auto})`)}` : ""}</h4>`,
     `<p>${esc(item.text)}</p>`,
     `<p class="cites">${item.cites.map((x) => citeLink(c.g, x)).join(" ")}${item.facts.length > 0 ? ` ${item.facts.map((f) => badge("grey", f)).join(" ")}` : ""}</p>`,
-    ...item.state.map((e) => stateHtml(e, c)),
+    ...item.state.map((e, i) => stateHtml(e, ids[i]!, c)),
     item.behavior.length > 0
       ? `<table class="beh"><thead><tr><th>Case</th><th>Before</th><th>After</th></tr></thead><tbody>${item.behavior.map((b) => `<tr><td>${esc(b.case)}</td><td>${esc(b.before)}</td><td>${esc(b.after)}</td></tr>`).join("")}</tbody></table>`
       : "",
@@ -461,7 +475,7 @@ details.steps{margin:4px 0}details.steps>summary{cursor:pointer;color:var(--mute
 .rid{display:inline-block;background:#e3ecf5;color:#1f4f82;border-radius:4px;padding:0 6px;font-weight:700}
 .cites{font-size:13px}.removed{color:var(--bad);font-size:13px}
 .state{border-top:1px dashed var(--line);margin-top:8px;padding-top:2px}
-.scroll{overflow-x:auto}svg{max-width:100%;height:auto}
+.scroll{overflow-x:auto}svg{max-width:100%;height:auto}svg.dd{max-width:none}
 table{border-collapse:collapse;width:100%;font-size:13px}th,td{border:1px solid var(--line);padding:5px 8px;text-align:left;vertical-align:top}th{background:#f0f3f6}
 td.ok{background:var(--okbg)}td.bad{background:var(--badbg)}td.warn{background:var(--warnbg)}td.grey{background:var(--greybg);color:var(--muted)}
 .bar{height:8px;background:#e1e6ea;border-radius:4px;margin-top:4px;min-width:100px}.bar .fill{height:8px;background:#3f86c9;border-radius:4px}
@@ -473,7 +487,7 @@ ul.plain{margin:4px 0;padding-left:20px}ol.trace{padding-left:22px}.lead{font-si
 export function renderReviewHtml(i: HtmlInput): string {
   const r = i.report;
   const g: Github = { owner: r.pull.owner, repo: r.pull.repo, head: r.pull.head, base: r.pull.base, number: r.pull.number };
-  const c: Ctx = { g, files: r.files, diagrams: 0 };
+  const c: Ctx = { g, files: r.files, diagrams: 0, drawn: r.diagrams };
   return [
     "<!doctype html>",
     `<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${esc(`${r.pull.owner}/${r.pull.repo}#${r.pull.number}: ${r.pull.title}`)}</title><style>${CSS}</style></head>`,
@@ -481,7 +495,7 @@ export function renderReviewHtml(i: HtmlInput): string {
     headerHtml(i, g),
     necessityHtml(i.necessity, g),
     summaryHtml(r),
-    architectureHtml(r.architecture),
+    architectureHtml(r.architecture, r.diagrams?.arch),
     changeMapHtml(r),
     itemsHtml(r, c),
     measurementsHtml(r),
@@ -507,13 +521,15 @@ export const MAX_HTML_BYTES = 8 * 1024 * 1024;
 
 const TAGS = new Set([
   "html", "head", "meta", "title", "style", "body", "main", "header", "section", "div", "span", "h1", "h2", "h3", "h4", "h5", "p", "ul", "ol", "li", "table", "thead", "tbody", "tr", "th", "td", "a", "code", "q", "pre", "details", "summary", "strong", "em", "small", "br",
-  "svg", "g", "rect", "line", "path", "polygon", "polyline", "circle", "text", "tspan", "defs", "marker", "desc",
+  "svg", "g", "rect", "line", "path", "polygon", "polyline", "circle", "ellipse", "text", "tspan", "defs", "marker", "pattern", "desc",
 ]);
 /** The attributes that carry a URL: a scheme is judged there, and not in plain text such as an aria-label or a title. */
 const URL_ATTRS = new Set(["href", "src", "xlink:href", "action", "formaction", "poster", "srcset", "data", "background", "cite", "longdesc", "manifest", "ping"]);
 const ATTRS = new Set([
   "class", "id", "lang", "title", "charset", "name", "content", "open", "colspan", "scope", "role", "aria-label", "style", "href",
   "viewBox", "width", "height", "x", "y", "x1", "y1", "x2", "y2", "rx", "ry", "cx", "cy", "r", "d", "fill", "stroke", "stroke-width", "stroke-dasharray", "marker-end", "marker-start", "text-anchor", "font-size", "font-weight", "font-family", "points", "transform", "opacity", "fill-opacity", "orient", "refX", "refY", "markerWidth", "markerHeight", "paint-order",
+  // What a drawing of the diagram-design skill adds (design §6.11); `data-*` and `aria-*` are allowed by prefix below.
+  "aria-labelledby", "letter-spacing", "markerUnits", "patternUnits", "stroke-linecap", "stroke-linejoin", "stroke-opacity", "dx", "dy", "font-style", "dominant-baseline", "preserveAspectRatio", "textLength", "fill-rule",
 ]);
 const TAG = /<(\/?)([A-Za-z][A-Za-z0-9]*)((?:\s+[^\s"'<>\/=]+(?:\s*=\s*"[^"<>]*")?)*)\s*(\/?)>/y;
 const ATTR = /\s+([^\s"'<>\/=]+)(?:\s*=\s*"([^"<>]*)")?/y;
@@ -574,7 +590,7 @@ export function htmlProblems(html: string, github: { owner: string; repo: string
       const key = a[1]!;
       const value = a[2] ?? "";
       seen.set(key, value);
-      if (/^on/i.test(key) || !ATTRS.has(key)) {
+      if (/^on/i.test(key) || !(ATTRS.has(key) || /^(?:data-[a-z][a-z0-9-]*|aria-[a-z]+)$/.test(key))) {
         add(`the attribute ${key} on <${name}> is not one the report writes`);
         continue;
       }
