@@ -23,7 +23,7 @@ import { jaccard, shingles, similarity, tokensOf } from "./similarity.js";
 import { isDeleted, type PullFile } from "./snapshot.js";
 import { changedSymbols, isTestFile, maskCode, packOf, parseBaseDefinitions, type FileSymbol, type SymbolDef } from "./symbols.js";
 import { hasGeneratedHeader, matchesGeneratedGlob } from "./metrics/generated.js";
-import { mapTests, type TestEvidence } from "./testmap.js";
+import { mapTests, testMapContext, type TestEvidence } from "./testmap.js";
 
 /** Commands one job runs (the command executor's bound). */
 export const COMMANDS_PER_JOB = 16;
@@ -214,7 +214,8 @@ export function groundworkState(o: GroundworkOptions): GroundworkState {
     manifestsComplete: manifests.complete,
     manifestCuts: manifests.cuts,
   });
-  const testMap = new Map(symbols.map((s) => [s.id, mapTests(s, symbols, o.files, packs)] as const));
+  const testCtx = testMapContext(symbols, o.files, packs);
+  const testMap = new Map(symbols.map((s) => [s.id, mapTests(s, symbols, o.files, packs, testCtx)] as const));
   const baseTree = parseBaseExport(textOf(o.evidence, COMMAND.baseExport).text);
   if (baseTree === undefined || baseTree.base !== o.base) notes.push("the base commit's files could not be exported to a directory, so base facts come from `git show` and `git grep` over the base commit only");
   return { state: "ready", groundwork: { base: o.base, symbols, searches, candidates, prSimilar, inventory, testMap, notes, ...(baseTree !== undefined && baseTree.base === o.base ? { baseTree } : {}) }, refs };

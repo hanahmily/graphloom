@@ -16,7 +16,7 @@
     "vitest": "^3.0.9"
   },
   "digests": {
-    "sourceTree": "be4e3a78fb09aedf6ac8ef0369196db12a06ebc621fc0253e16f637b93943efb",
+    "sourceTree": "7882fffb8ec56a1eba5a25a979b4ee80dd12b0acfd21daec740a3d52f6435e3a",
     "packageLock": "7e63e84ba5a7ec4942ce2556ad8234cf9d5b65a4049670690488c3583d8c0412",
     "files": {
       "package.json": "ca48f8c71ba4afe11af65718f1c45324b4877bf6172df5c8ec15d09710f4f882",
@@ -71,7 +71,7 @@
       "src/evidence.ts": "8ac679d44549e11f94b9b226b394faebfaee72cd9a68cd377132286bfcf60366",
       "src/flow.ts": "de71a3bf129299efeab2ae63bdcba27161e9e04ce44d4270f67c8c4d0392bfec",
       "src/graph.ts": "d65525b2e8ea633a91659cb4458cf2c3e4d3b660e9690a03ae03c50f7c61075a",
-      "src/groundwork.ts": "b5b7d5c64b10a23237c469bb99a233a39d6d2969fb6241a50a1de5a2cbf9c77b",
+      "src/groundwork.ts": "5a12d35f33eee1ef6a136449a48e4dccd1c0e6971a92a01e814d6c5dabfeabd7",
       "src/html.ts": "f6fa81dd78ad2b25b9ba7776bcf7b86480401efb4f643475c2db981907e09cfd",
       "src/htmlsvg.ts": "8516c3d13419eab655f9d1ddf4cfb8f386cdd49e6bfd0ffd497b64dfc96b6b70",
       "src/ids.ts": "197a3aba3c632fe5b448f00c6cdcc207ff5238840e6859ca98185abe8493a01d",
@@ -124,7 +124,7 @@
       "src/statecandidates.ts": "0d40b977003750a81d1407545e0344e4cfd21d8475bd420d1f2eec2f72363395",
       "src/symbols.ts": "87317ee66ce07dc4512724d01deda2112d3a1167bd2d920a83cbc29d373a1350",
       "src/template.ts": "c61b4c6f8ae02a48fcb8fe69eb1300d5e29cb3f76fc59e844ca24e885f08bce1",
-      "src/testmap.ts": "00119245d26ee6aa59ee02deeae26f2f9339c1d1982b11be1ca3efe4d899b2c7",
+      "src/testmap.ts": "f55a141eaff9ba02f0bf81edc5fdf476c66b3450f8457a7343badd977818a1e8",
       "src/validators.ts": "89e6415a32fa51d0de17d7e8d7bbf512633667a9c581a8081e14c0cd284860f8",
       "src/write.ts": "9018145e2a9a54ab15365779fb208b336348bed05eefabb644da75b5c2657778",
       "test/architecture-large.test.ts": "4c28848a966d578ec361a83648def8555926db0345e2e6f7a5ad6b1ff3314ebd",
@@ -153,7 +153,7 @@
       "test/qa-git.test.ts": "06b9989c58ae085770c560680ea463dd898622aefbccf948e07af5a8a501797e",
       "test/qa-graph.test.ts": "def6d800a2fd2d10230063d6b27e376577adff254e19fe12034da6ae8c11ce74",
       "test/qa-ids-searches.test.ts": "8944a3e4cb0132d12fb773e65d064f88512f93cb5ce654b96236a734eeee28ea",
-      "test/qa-units.test.ts": "4502dd631230c4db7b2235f0430c7bb993a14e8c9f477d14a1132294cc0beffa",
+      "test/qa-units.test.ts": "692169e4aaa68b65a9e70368f59e7ffab9375e454792a1ad48185fd819128664",
       "test/rehearsal-docs.test.ts": "348ec40ab564e45a023985a48ed4f0139e34fb9f90dc37419a1c886c85cb7890",
       "test/report-analysis.test.ts": "d0fbcee4b0f8892da844b987bd2d6210d67ab241789e6352d2b7a7c5647bff35",
       "test/report.test.ts": "10660e75a90c619a35971b8bf58bdc257d371709a47e0654f93a66d182213097",
