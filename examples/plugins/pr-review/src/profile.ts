@@ -134,14 +134,16 @@ export const MAX_GINKGO_LABEL_FILTER_CHARS = 200;
 /** An argv element's longest text; the whole setup must also fit the coverage command's spec. */
 const MAX_SETUP_ARG_CHARS = 2_000;
 
-export type Role = "reporter" | "area-reporter" | "report-checker" | "questioner" | "answerer" | "answer-checker";
-export const ROLES: readonly Role[] = ["reporter", "area-reporter", "report-checker", "questioner", "answerer", "answer-checker"];
+export type Role = "reporter" | "area-reporter" | "diagrammer" | "report-checker" | "questioner" | "answerer" | "answer-checker";
+export const ROLES: readonly Role[] = ["reporter", "area-reporter", "diagrammer", "report-checker", "questioner", "answerer", "answer-checker"];
 
 /** The harness each role defaults to (design §13.1). */
 const DEFAULT_ROLES: Record<Role, string> = {
   reporter: "claude-code",
   // Optional: absent, it takes the reporter's harness, model and effort (checkRoles).
   "area-reporter": "claude-code",
+  // Optional: absent, it takes the reporter's harness, model and effort too (checkRoles).
+  diagrammer: "claude-code",
   "report-checker": "codex",
   questioner: "codex",
   answerer: "claude-code",
@@ -605,6 +607,11 @@ function checkRoles(raw: unknown): { roles: Record<Role, string>; settings: Part
   if (h["area-reporter"] === undefined) {
     roles["area-reporter"] = roles.reporter;
     if (settings.reporter !== undefined) settings["area-reporter"] = { ...settings.reporter };
+  }
+  // The optional diagrammer (the diagram job, design §6.10) falls back the same way. No claim is left for a checker to judge after it: its drawings are checked by code.
+  if (h.diagrammer === undefined) {
+    roles.diagrammer = roles.reporter;
+    if (settings.reporter !== undefined) settings.diagrammer = { ...settings.reporter };
   }
   // The maintainer opens the answerer's session (design §13.1), and a Pi session has no interactive restore.
   need(roles.answerer !== "pi", 'harnesses.answerer must be claude-code or codex: a Pi session cannot be opened by the maintainer, so the review layer could not continue from it');

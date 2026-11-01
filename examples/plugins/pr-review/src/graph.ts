@@ -59,6 +59,7 @@ import {
   REVIEW_HTML,
   REVIEW_MD,
 } from "./constants.js";
+import { checkBatch, DIAGRAMMER_JOB, DIAGRAMS_REFERENCES, DIAGRAMS_SCHEMA, DIAGRAMS_SCHEMA_NAME, diagramInputOf, diagramsInstruction, MAX_DIAGRAM_BYTES, MAX_DIAGRAMS, SKILL_DIR, skillMount } from "./diagrams.js";
 import { commandRuns, describeCommand, environmentOutput, outputTail, succeeded, validatorEvidence, type CommandRun } from "./evidence.js";
 import { LIMITS } from "./metrics/crap.js";
 import { CHANGE_REPORT_SCHEMA } from "./report.js";
@@ -76,7 +77,7 @@ import { requestedPull, type PullRequest } from "./request.js";
 import { secretFindings } from "./secrets.js";
 import { readInput, snapshotState, type PullFile, type ReadSpec } from "./snapshot.js";
 import { CLAIM_CHECK_SCHEMA_NAME } from "./claims.js";
-import { outputsOf, validatorById, writtenHtmlProblems } from "./validators.js";
+import { diagramsOf, outputsOf, validatorById, writtenHtmlProblems } from "./validators.js";
 import { htmlWriteCommands, recordCommands, reportWriteCommands } from "./parts.js";
 import { ANSWER_CHECK_REFERENCES, ANSWER_CHECK_SCHEMA, ANSWER_CHECK_SCHEMA_NAME, ANSWERS_REFERENCES, ANSWERS_REVISION_SCHEMA_NAME, ANSWERS_SCHEMA, ANSWERS_SCHEMA_NAME, answersFlow } from "./answers.js";
 import { baseDirIn } from "./basetree.js";
@@ -145,7 +146,7 @@ export function definitionFor(profile: Profile): GraphDefinition {
     },
     {
       id: REQUIREMENT_REPORT,
-      statement: `Every template section is present, with cited items or an explicit None. Every citation lies inside the pull request's diff on the side it names. Every changed file (a renamed file under both names, a deleted file too) and every detector fact is cited, and no item carries a severity, finding or verdict (the result contract has no such field). report.json, ${REVIEW_MD} and ${REVIEW_HTML} hold exactly that report, with the mode (standard, or large with the limits passed) in report.json and in the header of ${REVIEW_MD}. In large mode (a pull request over the profile's maxFiles or maxPatchBytes) the report is built from its areas: one reporter job in a fresh read-only session for each area (on the optional area-reporter role's harness, model and effort, the reporter's when the profile sets none), which reports that area's files only with an empty summary and passes the same deterministic validation (with its corrections) as a standard report over its own files; one synthesis job (change-synthesis-v1, the reporter harness, a fresh session; an item's text is at most 900 characters in an area report and in a merged item, 600 in standard mode) that writes the purpose and overview and joins the items that are one change across areas (a merged item stays in one section, joins items of at least two areas, and its citations, lifecycle entries and before/after rows are the union of its members'); the files no agent read as patches (the generated area, a file for which the host gave no patch) are listed in "other" with their diffstat and the reason; every checked area and the synthesis are recorded as evidence (area-record-<id>, synthesis-record) that recomputes; and the items are numbered R1 onward after the merges, in section order. Before its first area reporter job the graph computes what large mode needs of the run's agent invocations, jobs and decisions and stops with those numbers when the remaining budgets cannot cover them. Every report, standard or large, has an architecture diagram of what the pull request changes, returned in the reporter's result in standard mode and in the synthesis job's result in large mode (an area reporter leaves it empty): at most 30 nodes (id, label, kind, change added, modified or unchanged, paths, a cite) and 60 edges (from, to, label, kind, change added, modified, removed or unchanged, a cite). Deterministic validation requires unique node ids, edges that name two nodes, an added or modified node whose paths match a changed file, an unchanged node only where an edge joins it to a changed one, and cites that resolve in the tree they name and an unchanged node's paths that exist at the base, both read by read-only commands (arch-check) whose output is evidence; for a Go call or import edge between two package nodes the from package's head import blocks are read and a missing import is told to the checker. Plugin code renders it as an SVG (a layered layout with longest-path layers, cycles broken at depth-first back edges, barycentre ordering, boxes coloured by change, edge labels and a legend) in review.html and as a mermaid block in ${REVIEW_MD}. ${REVIEW_HTML} is rendered by plugin code from report.json (no model writes HTML) and is self-contained and inert, which a deterministic check on the written bytes enforces: no script, no external stylesheet, font or image, every text from a model or the pull request escaped, and its only links are hrefs to the pull request, its commits and its files on GitHub at the pinned head and base. Each of report.json, ${REVIEW_MD} and ${REVIEW_HTML} is written by one command when it fits (about 236,000 characters), otherwise as a bounded multi-part write: one command per part, each recorded as evidence, appended in order and renamed into place by the last part after it checks the digest every part carries; the validators reconstruct each file by concatenating the recorded parts in order and checking that digest.`,
+      statement: `Every template section is present, with cited items or an explicit None. Every citation lies inside the pull request's diff on the side it names. Every changed file (a renamed file under both names, a deleted file too) and every detector fact is cited, and no item carries a severity, finding or verdict (the result contract has no such field). report.json, ${REVIEW_MD} and ${REVIEW_HTML} hold exactly that report, with the mode (standard, or large with the limits passed) in report.json and in the header of ${REVIEW_MD}. In large mode (a pull request over the profile's maxFiles or maxPatchBytes) the report is built from its areas: one reporter job in a fresh read-only session for each area (on the optional area-reporter role's harness, model and effort, the reporter's when the profile sets none), which reports that area's files only with an empty summary and passes the same deterministic validation (with its corrections) as a standard report over its own files; one synthesis job (change-synthesis-v1, the reporter harness, a fresh session; an item's text is at most 900 characters in an area report and in a merged item, 600 in standard mode) that writes the purpose and overview and joins the items that are one change across areas (a merged item stays in one section, joins items of at least two areas, and its citations, lifecycle entries and before/after rows are the union of its members'); the files no agent read as patches (the generated area, a file for which the host gave no patch) are listed in "other" with their diffstat and the reason; every checked area and the synthesis are recorded as evidence (area-record-<id>, synthesis-record) that recomputes; and the items are numbered R1 onward after the merges, in section order. Before its first area reporter job the graph computes what large mode needs of the run's agent invocations, jobs and decisions and stops with those numbers when the remaining budgets cannot cover them. Every report, standard or large, has an architecture diagram of what the pull request changes, returned in the reporter's result in standard mode and in the synthesis job's result in large mode (an area reporter leaves it empty): at most 30 nodes (id, label, kind, change added, modified or unchanged, paths, a cite) and 60 edges (from, to, label, kind, change added, modified, removed or unchanged, a cite). Deterministic validation requires unique node ids, edges that name two nodes, an added or modified node whose paths match a changed file, an unchanged node only where an edge joins it to a changed one, and cites that resolve in the tree they name and an unchanged node's paths that exist at the base, both read by read-only commands (arch-check) whose output is evidence; for a Go call or import edge between two package nodes the from package's head import blocks are read and a missing import is told to the checker. After the claim check (the report's, or the synthesis' in large mode), whatever the claim check left (the architecture's nodes and edges, and every lifecycle entry) is drawn by one read-only diagram job (diagrams-v1, on the optional diagrammer role's harness, model and effort, the reporter's when the profile sets none) with the vendored diagram-design skill (${SKILL_DIR}, mounted read-only): an Architecture delta (Before and After topology with its Changes ledger) and one State machine for each lifecycle entry, at most ${MAX_DIAGRAMS} diagrams, each a complete self-contained HTML document of at most ${MAX_DIAGRAM_BYTES} characters that uses the skill's default style, system fonts and no motion. Each document must pass, as recorded evidence, the skill's own self_check.py --offline and verify-geometry.py (python3 in a confined command job with no network, on a scratch file), the inertness check of the document and of the <svg> the report embeds, and the label rule (every visible text is a label of the checked data the job was given: node ids, labels and kinds, edge labels, state names, scopes, initial values, transition conditions and effects, read descriptions, and the skill's fixed words). One correction goes back to the same session; a diagram that still fails is drawn by plugin code instead (a layered layout with longest-path layers, cycles broken at depth-first back edges, barycentre ordering, boxes coloured by change, edge labels and a legend; a lifecycle diagram of its own), and review.html says so ("drawn by the plugin: the diagram-design drawing failed its checks (<reason>)"); a diagram never stops the run. The architecture is a mermaid block in ${REVIEW_MD}. ${REVIEW_HTML} is the report, for every size: it is rendered by plugin code from report.json (no model writes the report's HTML; the only markup a model wrote that it holds is a skill diagram's <svg>, which plugin code re-serializes from an allow-list of elements and attributes, with its ids prefixed and its title and description its own) and is self-contained and inert, which a deterministic check on the written bytes enforces: no script, no external stylesheet, font or image, every text from a model or the pull request escaped, and its only links are hrefs to the pull request, its commits and its files on GitHub at the pinned head and base. Each of report.json, ${REVIEW_MD} and ${REVIEW_HTML} is written by one command when it fits (about 236,000 characters), otherwise as a bounded multi-part write: one command per part, each recorded as evidence, appended in order and renamed into place by the last part after it checks the digest every part carries; the validators reconstruct each file by concatenating the recorded parts in order and checking that digest.`,
       evidenceSchema: "change-report-v1",
     },
     {
@@ -196,6 +197,8 @@ export function definitionFor(profile: Profile): GraphDefinition {
       // Large mode (design §6.9): the synthesis of the areas' reports, and its revision after the claim check.
       { name: SYNTHESIS_SCHEMA_NAME, schema: asSchema(CHANGE_SYNTHESIS_SCHEMA), evidenceKind: "other" },
       { name: SYNTHESIS_REVISION_SCHEMA_NAME, schema: asSchema(CHANGE_SYNTHESIS_SCHEMA), evidenceKind: "other" },
+      // The diagram job (design §6.10): the checked architecture and lifecycle entries drawn with the vendored diagram-design skill.
+      { name: DIAGRAMS_SCHEMA_NAME, schema: asSchema(DIAGRAMS_SCHEMA), evidenceKind: "other", references: [...DIAGRAMS_REFERENCES] },
       // Kind "review": the claims-checked requirement is judged by an independent reviewer, and the controller
       // admits one only from the review evidence of a read-only review job.
       { name: CLAIM_CHECK_SCHEMA_NAME, schema: asSchema(CLAIM_CHECK_SCHEMA), evidenceKind: "review", references: [...CLAIM_CHECK_REFERENCES] },
@@ -254,8 +257,8 @@ export function approvalDecision(evidence: RunView["evidence"], id: string): "ap
 export function agentRoles(profile: Profile): AgentRoleDeclaration[] {
   return ROLES.map((role) => {
     const distinctFrom = DISTINCT_PAIRS.filter(([checked]) => checked === role).map(([, author]) => author);
-    // area-reporter is optional: large mode's per-area reporter jobs only, falling back to the reporter's harness, model and effort.
-    const setting = role === "area-reporter" ? "harnesses.area-reporter (optional; falls back to harnesses.reporter)" : `harnesses.${role}`;
+    // area-reporter (large mode's per-area reporter jobs) and diagrammer (the diagram job) are optional, falling back to the reporter's harness, model and effort.
+    const setting = role === "area-reporter" || role === "diagrammer" ? `harnesses.${role} (optional; falls back to harnesses.reporter)` : `harnesses.${role}`;
     return { role, harness: profile.roles[role], access: "read" as const, ...(distinctFrom.length > 0 ? { distinctFrom } : {}), setting };
   });
 }
@@ -288,7 +291,7 @@ export function advancePullRequest(view: RunView): GraphDecision {
     if (approvalDecision(view.evidence, REVIEW_LAYER_APPROVAL) === "decline") {
       return withPrivate(
         stop(
-          { reason: "complete", blocker: `report only: the operator declined the review layer; the report, the questions and their answers are in ${REVIEW_MD} and ${REVIEW_HTML} in the worktree`, retryable: false },
+          { reason: "complete", blocker: `report only: the operator declined the review layer; the report, the questions and their answers are in ${REVIEW_HTML} in the worktree (${REVIEW_MD} beside it is its plain-text copy)`, retryable: false },
           "the operator declined the review layer: finish with the report and the Q&A",
         ),
       );
@@ -300,7 +303,7 @@ export function advancePullRequest(view: RunView): GraphDecision {
       stop(
         {
           reason: "report ready",
-          blocker: `the report, the questions and their answers are written to ${REVIEW_MD} and ${REVIEW_HTML} in the worktree (report.json and qa.json beside them). graphloom session open <run> --stage ${chat} discusses them; graphloom resume <run> --decline review-layer finishes the run report-only (this version has no Review stage, so --approve review-layer is refused)`,
+          blocker: `the report is ${REVIEW_HTML}; review.md beside it is its plain-text copy for agents and graphloom session open (report.json and qa.json too, in the worktree). It holds the report, the questions and their answers. graphloom session open <run> --stage ${chat} discusses them; graphloom resume <run> --decline review-layer finishes the run report-only (this version has no Review stage, so --approve review-layer is refused)`,
           retryable: false,
         },
         "the report and the Q&A are ready; the review layer is not built in this version",
@@ -559,8 +562,11 @@ function report(ctx: Context, view: RunView): GraphDecision {
       if ("problem" in job) return refused(job);
       return dispatchAgent(view, job, `check every report item with a fresh read-only ${harnessName(profile.roles["report-checker"])} session`);
     }
-    case "done":
-      return measureAndWrite(ctx, view, analysis, flow);
+    case "done": {
+      // The diagrams are drawn and checked once the report's claims are (design §6.10); the plugin's own drawing stands in for one that fails.
+      const drawn = diagramStep(ctx, view, analysis, flow);
+      return drawn ?? measureAndWrite(ctx, view, analysis, flow);
+    }
     case "area": {
       // Before the first reporter job: stop with the numbers when the run's budgets cannot cover large mode (design §6.9).
       if (flow.index === 0 && flow.kind === "first") {
@@ -616,6 +622,46 @@ function report(ctx: Context, view: RunView): GraphDecision {
     }
     case "synthesis-record":
       return recordStep(view, REPORT_STAGE, SYNTHESIS_RECORD, recordCommands(SYNTHESIS_RECORD, "areas", recordJson(flow.record)), "the checked synthesis");
+  }
+}
+
+/**
+ * The diagram job (design §6.10): a read-only agent draws the checked architecture and lifecycle entries with the skill, the
+ * skill's checks run on each document in a confined command, and one correction goes back to the same session. Undefined when
+ * the diagrams are resolved (drawn by the skill, or left to the plugin with a note); a diagram never stops the run.
+ */
+function diagramStep(ctx: Context, view: RunView, analysis: Analysis, flow: Extract<ReportFlow, { state: "done" }>): GraphDecision | undefined {
+  const { profile, pr } = ctx;
+  const d = diagramsOf(view.evidence, flow);
+  switch (d.state) {
+    case "resolved":
+      return undefined;
+    case "unavailable":
+      return supervise({ reason: d.reason }, "escalate a missing plugin path");
+    case "verify": {
+      const root = environmentOutput(view.evidence, ENV_PLUGIN_ROOT)!;
+      const commands = checkBatch(d.commands);
+      const job: JobSpec = {
+        stageId: REPORT_STAGE,
+        kind: "command",
+        purpose: "diagnostic",
+        readOnly: true,
+        instruction: "Check the diagram documents with the skill's own checks (self_check.py and verify-geometry.py on a scratch file; no network; no repository code runs)",
+        input: { commands, continueOnFailure: true },
+        confinement: { kind: "bwrap", network: false, mask: [], binds: [{ path: root, readOnly: true }] },
+      };
+      return withPrivate(dispatch(job, `run the diagram skill's checks on ${commands.length} document(s), confined with no network`));
+    }
+    case "agent": {
+      const root = environmentOutput(view.evidence, ENV_PLUGIN_ROOT)!;
+      const mount = skillMount(root);
+      const assignment = diagramsInstruction({ owner: pr.owner, repo: pr.repo, number: pr.number, mount, input: diagramInputOf(flow.final), specs: d.specs, kind: d.kind, feedback: d.feedback });
+      const from = d.kind === "first" ? undefined : jobSession(view, REPORT_STAGE, DIAGRAMMER_JOB);
+      const references = idRefs({ [DIAGRAMS_REFERENCES[0]!]: idSet(d.specs.map((s) => s.id)) });
+      const job = agentJob(ctx, view, { jobId: DIAGRAMMER_JOB, purpose: "diagnostic", instruction: "Draw the architecture delta and the lifecycle state machines with the diagram-design skill", schema: DIAGRAMS_SCHEMA_NAME, harness: profile.roles.diagrammer, role: "diagrammer", assignment, readOnlyBinds: [mount], references, ...(from !== undefined ? { continueFrom: from } : {}) }, analysis.snapshot.files);
+      if ("problem" in job) return refused(job);
+      return dispatchAgent(view, job, d.kind === "first" ? "draw the checked architecture and lifecycle entries with the diagram-design skill (read-only, confined)" : "correct the diagrams: the plugin's or the skill's checks found problems");
+    }
   }
 }
 

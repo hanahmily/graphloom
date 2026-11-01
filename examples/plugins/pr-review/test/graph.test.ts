@@ -18,7 +18,7 @@ describe("the report scenario, end to end through the graph", () => {
 
   it("fetches, reports, asks, answers, and stops final at `report ready`", () => {
     expect(stopOf(sim)).toMatchObject({ reason: "report ready", retryable: false });
-    expect(stopOf(sim)!.blocker).toMatch(/the report, the questions and their answers are written to \.graphloom\/review\/review\.md/);
+    expect(stopOf(sim)!.blocker).toMatch(/^the report is \.graphloom\/review\/review\.html; review\.md beside it is its plain-text copy for agents and graphloom session open/);
     expect(sim.receipts.filter((r) => r.valid).map((r) => `${r.stageId}/${r.requirementId}`)).toEqual([
       "fetch/pr-snapshot",
       "fetch/head-checked-out",

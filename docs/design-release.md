@@ -388,12 +388,21 @@ The release runs without a host Node. The host still needs the tools in §4.4.
     notice says that it has no license file.
   - The production tree of the first R1 build needs no exception: 192
     packages after the platform prune and the dedupe.
+- **Vendored sources.** A third-party source copied unmodified into a shipped plugin
+  lives in `examples/plugins/<plugin>/vendor/<name>/` with the upstream `LICENSE` and
+  a `VENDORED.md` whose `- License: <SPDX id>` and `- Commit: <sha>` lines name what it
+  is. `notices.mjs` lists each such directory beside the packages, judged by the
+  same allowlist (a directory with no `VENDORED.md`, or one naming a license off the
+  list, fails the check), and `THIRD_PARTY_NOTICES` carries its license text. The
+  first is the MIT diagram-design skill of pr-review
+  ([§12.4](design-pr-review-graph.md#124-the-vendored-diagram-design-skill)).
 - **Source headers.** Hand-written source files carry a two-line SPDX header,
   such as `// SPDX-License-Identifier: Apache-2.0` followed by the copyright
   line from `NOTICE`, `Copyright 2026 Hongtao Gao and the GraphLoom
   contributors`. This covers `.ts`, `.mjs`, `.js`, and `.sh` files,
   including tests. Generated files (`dist/`, manifests, lockfiles), JSON,
-  Markdown, and fixtures are exempt. `scripts/check-headers.mjs` enforces this
+  Markdown, fixtures, and vendored third-party sources (any `vendor/`
+  directory) are exempt. `scripts/check-headers.mjs` enforces this
   and joins the local gate. Headers are added in their own phase (R0) before
   the first release, not in this change. Adding them changes plugin and
   executor digests, so that change follows the version rule in §3.

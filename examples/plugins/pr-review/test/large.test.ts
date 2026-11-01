@@ -323,7 +323,7 @@ describe("the budget pre-check before the first reporter job (design §6.9)", ()
   it("is covered by the plugin's default budgets for a ten-area pull request, and stops a very large one", () => {
     const defaults = definitionFor(profileOf()).defaultBudgets!;
     const ten = largeNeeds(10);
-    expect(ten).toMatchObject({ areas: 10, questions: 150, batches: 10, agentInvocations: 45, jobs: 102, decisions: 114 });
+    expect(ten).toMatchObject({ areas: 10, questions: 150, batches: 10, agentInvocations: 47, jobs: 106, decisions: 118 });
     expect(budgetShortfall(ten, { agentInvocations: defaults.agentInvocations!, jobs: defaults.jobs!, decisions: defaults.decisions! })).toBeUndefined();
     expect(budgetShortfall(largeNeeds(60), { agentInvocations: defaults.agentInvocations!, jobs: defaults.jobs!, decisions: defaults.decisions! })).toContain("budgets.jobs");
   });
