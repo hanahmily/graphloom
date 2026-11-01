@@ -29,7 +29,7 @@ function main(): number {
       .split(",")
       .map((g) => g.trim())
       .filter((g) => g !== "");
-    process.stdout.write(`${JSON.stringify(runTsMetrics(values.head, hunks, globs), null, 2)}\n`);
+    process.stdout.write(`${JSON.stringify(runTsMetrics(values.head, hunks, globs))}\n`);
     return 0;
   } catch (error) {
     process.stderr.write(`tsmetrics: ${error instanceof Error ? error.message : String(error)}\n`);
