@@ -113,7 +113,7 @@ export interface Question {
 export interface QuestionInputs {
   view: ReportView;
   groundwork: Groundwork;
-  /** Large mode (design §7.6): the trio and the missing-test question are asked per change item, and the trio per new exported symbol. */
+  /** Large mode (design §7.6): a high-level review. Per change item, the trio (about the mechanism) and a missing-test question; nothing per symbol or per function. */
   large?: boolean;
 }
 
@@ -151,8 +151,8 @@ const MAX_NAMED = 40;
 
 /**
  * The questions large mode asks per change item (design §7.6): the trio once about the mechanism the item adds, naming
- * its new symbols, and one missing-test question listing every new or modified function of the item that no test in
- * the pull request covers. An item that adds no symbol gets no trio.
+ * its new exported symbols (the unexported ones are counted), and one missing-test question listing every new or
+ * modified function of the item that no test in the pull request covers. An item that adds no symbol gets no trio.
  */
 function itemQuestions(items: readonly ViewItem[], byItem: ReadonlyMap<string, readonly SymbolDef[]>, groundwork: Groundwork): RequiredQuestion[] {
   const out: RequiredQuestion[] = [];
@@ -162,9 +162,11 @@ function itemQuestions(items: readonly ViewItem[], byItem: ReadonlyMap<string, r
     const added = syms.filter((s) => s.change === "new");
     const what = short(item.text);
     if (added.length > 0) {
-      out.push({ key: `existing-equivalent:item:${item.id}`, type: "existing-equivalent", item: item.id, text: `Does the codebase already have the same or an equivalent of the mechanism this change adds (${what})? It adds: ${named(added)}.` });
-      out.push({ key: `reuse-library:item:${item.id}`, type: "reuse-library", item: item.id, text: `Could an existing internal package or an already-declared third-party library do what the mechanism this change adds (${what}) does? It adds: ${named(added)}.` });
-      out.push({ key: `common-logic:item:${item.id}`, type: "common-logic", item: item.id, text: `Does the mechanism this change adds (${what}) duplicate logic elsewhere, in the base or in the pull request, that could become shared code? It adds: ${named(added)}.` });
+      const exported = added.filter((s) => s.exported);
+      const adds = `It adds: ${exported.length > 0 ? named(exported) : "no exported symbol"}${added.length > exported.length ? `${exported.length > 0 ? ", and " : "; "}${added.length - exported.length} unexported symbol(s)` : ""}.`;
+      out.push({ key: `existing-equivalent:item:${item.id}`, type: "existing-equivalent", item: item.id, text: `Does the codebase already have the same or an equivalent of the mechanism this change adds (${what})? ${adds}` });
+      out.push({ key: `reuse-library:item:${item.id}`, type: "reuse-library", item: item.id, text: `Could an existing internal package or an already-declared third-party library do what the mechanism this change adds (${what}) does? ${adds}` });
+      out.push({ key: `common-logic:item:${item.id}`, type: "common-logic", item: item.id, text: `Does the mechanism this change adds (${what}) duplicate logic elsewhere, in the base or in the pull request, that could become shared code? ${adds}` });
     }
     const uncovered = syms.filter((s) => (groundwork.testMap.get(s.id) ?? []).length === 0 && s.kind !== "type" && s.kind !== "interface");
     if (uncovered.length > 0) {
@@ -190,8 +192,8 @@ export function requiredQuestions(inp: QuestionInputs, stated: ReadonlyMap<strin
     if (item === undefined) continue;
     byItem.set(item, [...(byItem.get(item) ?? []), sym]);
     const q = `${sym.qualified} (${sym.path}:${sym.startLine})`;
-    // In large mode a new symbol gets the trio only when it is exported; the others are listed in their item's question.
-    if (sym.change === "new" && (!large || sym.exported)) {
+    // In large mode nothing is asked per symbol: the item's questions name its new exported symbols.
+    if (sym.change === "new" && !large) {
       out.push({ key: `existing-equivalent:${sym.id}`, type: "existing-equivalent", item, symbol: sym.id, text: `Does the codebase already have the same or an equivalent of ${q}?` });
       out.push({ key: `reuse-library:${sym.id}`, type: "reuse-library", item, symbol: sym.id, text: `Could an existing internal package or an already-declared third-party library do what ${q} does?` });
       out.push({ key: `common-logic:${sym.id}`, type: "common-logic", item, symbol: sym.id, text: `Does ${q} duplicate logic elsewhere, in the base or in the pull request, that could become shared code?` });
@@ -201,7 +203,8 @@ export function requiredQuestions(inp: QuestionInputs, stated: ReadonlyMap<strin
     }
   }
   if (large) out.push(...itemQuestions(items, byItem, groundwork));
-  for (const r of view.records) {
+  // Large mode is a high-level review (design §7.6): the measurements still show every function, but no per-function question is asked.
+  for (const r of large ? [] : view.records) {
     if (r.test) continue;
     const sym = symbolOfRecord(r, groundwork.symbols);
     const item = (sym !== undefined ? itemOfSymbol(sym, items) : itemOfSymbol({ path: r.path, startLine: r.startLine, endLine: r.endLine }, items));

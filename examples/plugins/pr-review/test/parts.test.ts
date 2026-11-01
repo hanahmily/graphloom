@@ -283,21 +283,24 @@ describe("a large pull request whose artifacts pass one write command", () => {
     expect(sim.jobs.some((j) => j.instruction.startsWith("Write part 2 of"))).toBe(true);
   });
 
+  // What the controller hands the validators when the Report stage is validated: the evidence up to the last Report job.
+  const atReport = (evidence: EvidenceRecord[]): EvidenceRecord[] => evidence.slice(0, evidence.map((e, i) => ((e.payload as { producer?: { stageId?: string } } | undefined)?.producer?.stageId === "report" ? i : -1)).reduce((x, y) => Math.max(x, y), -1) + 1);
+  const reported = atReport(sim.evidence);
   const verdictOf = (id: string, evidence: EvidenceRecord[]) => validatorById(id)!.evaluate({ requirementId: id, statement: "", evidence: candidateEvidence(evidence, "d1"), candidateDigest: "d1", config: BANYANDB });
   const commandOf = (e: EvidenceRecord): { id: string; argv: string[] } | undefined => (e.payload as { command?: { id: string; argv: string[] } }).command;
   const withCommand = (id: string, change: (argv: string[]) => string[]): EvidenceRecord[] =>
-    sim.evidence.map((e) => (commandOf(e)?.id === id ? { ...e, payload: { ...(e.payload as object), command: { ...commandOf(e)!, argv: change([...commandOf(e)!.argv]) } } } : e));
+    reported.map((e) => (commandOf(e)?.id === id ? { ...e, payload: { ...(e.payload as object), command: { ...commandOf(e)!, argv: change([...commandOf(e)!.argv]) } } } : e));
 
   it("the validators read the report from its parts: passed as written, failed for a part altered, missing or out of order", () => {
-    expect(verdictOf("change-report", sim.evidence)).toMatchObject({ status: "passed" });
+    expect(verdictOf("change-report", reported)).toMatchObject({ status: "passed" });
     const altered = verdictOf("change-report", withCommand("report-json-p2", (a) => a.map((x, k) => (k === 10 ? `${x}!` : x))));
     expect(altered).toMatchObject({ status: "failed" });
     expect((altered as { reason: string }).reason).toMatch(/do not hash to their digest/);
-    const without = sim.evidence.filter((e) => commandOf(e)?.id !== "report-json-p2");
+    const without = reported.filter((e) => commandOf(e)?.id !== "report-json-p2");
     expect(verdictOf("change-report", without)).toMatchObject({ status: "failed", reason: expect.stringMatching(/part 2 of \d+ of .*never written/) });
-    const first = sim.evidence.findIndex((e) => commandOf(e)?.id === "report-json-p1");
-    const second = sim.evidence.findIndex((e) => commandOf(e)?.id === "report-json-p2");
-    const swapped = [...sim.evidence];
+    const first = reported.findIndex((e) => commandOf(e)?.id === "report-json-p1");
+    const second = reported.findIndex((e) => commandOf(e)?.id === "report-json-p2");
+    const swapped = [...reported];
     [swapped[first], swapped[second]] = [swapped[second]!, swapped[first]!];
     expect(verdictOf("change-report", swapped)).toMatchObject({ status: "failed", reason: expect.stringMatching(/out of order/) });
     // review.html is part of the requirement: an altered part of it fails too, and so does markup that is not inert.
@@ -307,7 +310,7 @@ describe("a large pull request whose artifacts pass one write command", () => {
   it("rejects a review.html whose written bytes carry a script, even when they are what a part set declares", () => {
     const evil = "<!doctype html><html><body><script>alert(1)</script></body></html>";
     const forged = htmlWriteCommands(evil, false);
-    const injected = [...sim.evidence, ...forged.map((c, i) => ({ ...record(9_000 + i, c), candidateDigest: "d1" }))];
+    const injected = [...reported, ...forged.map((c, i) => ({ ...record(9_000 + i, c), candidateDigest: "d1" }))];
     expect(verdictOf("change-report", injected)).toMatchObject({ status: "failed", reason: expect.stringMatching(/review\.html is not the report the evidence recomputes/) });
     // Even the bytes the renderer would write, if they carried a script, fail the check on the written bytes.
     expect(htmlProblems(evil, { owner: "apache", repo: "skywalking-banyandb", head: "a".repeat(40) }).join()).toContain("<script");

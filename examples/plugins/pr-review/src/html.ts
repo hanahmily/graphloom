@@ -17,6 +17,7 @@ import { describeChecks } from "./report.js";
 import { clip, esc } from "./escape.js";
 import { changeMapSvg, crapBarSvg, stateDiagramSvg, type BarRow } from "./htmlsvg.js";
 import { brokenNote, effectiveConclusion, NECESSITY_ID, parseNecessityRecord, SKIPPED_NOTE, type NecessityRecord } from "./necessity.js";
+import { DIVE_COLUMNS, DIVE_COMMAND, DIVE_HEADING, DIVE_TEXT, diveRow } from "./dive.js";
 import { describeReasons, type ModeReason } from "./mode.js";
 import { exceeds, LIMITS, originOf, type Metric } from "./metrics/crap.js";
 import type { MetricsRecord } from "./metrics/record.js";
@@ -32,7 +33,7 @@ export interface ReportDoc {
   checks: Array<{ name?: string; status: string | null; conclusion: string | null }>;
   mode: "standard" | "large";
   modeReasons?: ModeReason[];
-  areas?: Array<{ id: string; name: string; kind: "read" | "generated"; paths: string[]; items?: number; removed?: number }>;
+  areas?: Array<{ id: string; name: string; kind: "read" | "generated"; paths: string[]; bytes?: number; additions?: number; deletions?: number; items?: number; removed?: number }>;
   summary: { purpose: { text: string; source: "stated" | "inferred"; quote: string } | null; overview: string | null };
   sections: Array<{ id: string; title: string; none: boolean; items: FinalItem[] }>;
   notes: string[];
@@ -323,7 +324,15 @@ function itemsHtml(r: ReportDoc, c: Ctx): string {
     const body = s.items.length === 0 ? para("None") : s.items.map((i) => itemHtml(i, r.removedParts, c)).join("");
     out.push(details(`<h3>${esc(s.title)}</h3> <span class="muted">${s.items.length} item${s.items.length === 1 ? "" : "s"}</span>`, body, s.items.length > 0, "group"));
   }
+  if (r.mode === "large" && r.areas !== undefined) out.push(diveInHtml(r.areas));
   return details("<h2>Report</h2>", out.join(""), true, "sec");
+}
+
+/** The block that ends a large report: the areas and the command that opens the reporter's session (design §6.9). */
+function diveInHtml(areas: NonNullable<ReportDoc["areas"]>): string {
+  const rows = areas.map((a) => `<tr>${diveRow(a).map((cellValue) => `<td>${esc(cellValue)}</td>`).join("")}</tr>`);
+  const body = [para(DIVE_TEXT), `<pre><code>${esc(DIVE_COMMAND)}</code></pre>`, `<div class="scroll"><table class="dive"><thead><tr>${DIVE_COLUMNS.map((c) => `<th>${esc(c)}</th>`).join("")}</tr></thead><tbody>${rows.join("")}</tbody></table></div>`].join("");
+  return details(`<h3>${esc(DIVE_HEADING)}</h3>`, body, true, "group");
 }
 
 // ---- measurements ----
@@ -479,6 +488,7 @@ details.steps{margin:4px 0}details.steps>summary{cursor:pointer;color:var(--mute
 table{border-collapse:collapse;width:100%;font-size:13px}th,td{border:1px solid var(--line);padding:5px 8px;text-align:left;vertical-align:top}th{background:#f0f3f6}
 td.ok{background:var(--okbg)}td.bad{background:var(--badbg)}td.warn{background:var(--warnbg)}td.grey{background:var(--greybg);color:var(--muted)}
 .bar{height:8px;background:#e1e6ea;border-radius:4px;margin-top:4px;min-width:100px}.bar .fill{height:8px;background:#3f86c9;border-radius:4px}
+pre{background:#eef1f4;border:1px solid var(--line);border-radius:6px;padding:8px 12px;overflow-x:auto}pre code{background:none;padding:0}
 ul.plain{margin:4px 0;padding-left:20px}ol.trace{padding-left:22px}.lead{font-size:16px}.qgroup{margin:10px 0}.q{font-weight:600}
 @media (max-width:700px){main{padding:10px 8px}.card{min-width:100px}}
 `;

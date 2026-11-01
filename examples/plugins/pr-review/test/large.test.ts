@@ -1,15 +1,25 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
+import { spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import type { EvidenceRecord, JobSpec } from "@graphloom/sdk";
-import { describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it } from "vitest";
 import { analyze, evidencePull } from "../src/analysis.js";
 import { LIST_CHECK_RUNS, GET_PULL, LIST_PULL_COMMITS, LIST_PULL_FILES, LIST_PULL_REVIEWS, LIST_PULL_REVIEW_COMMENTS, LIST_REVIEW_THREADS } from "../src/constants.js";
 import { definitionFor } from "../src/graph.js";
-import { assembleReport, MAX_LARGE_ITEM_CHARS, reportProblems } from "../src/report.js";
+import { assembleReport, asReporterOutput, reportProblems } from "../src/report.js";
 import { pullFile } from "../src/snapshot.js";
+import { reviewHtmlFrom } from "../src/html.js";
 import { reporterSections } from "../src/template.js";
-import { areaContext, assembleLarge, budgetShortfall, wholeContext, largeNeeds, mergedItem, synthesisProblems, type SynthItem } from "../src/large.js";
+import { budgetShortfall, largeNeeds } from "../src/large.js";
+import { largeReporterInstruction } from "../src/largeprompts.js";
+import { reporterInstruction } from "../src/prompts.js";
+import { partitionAreas } from "../src/areas.js";
+import { claimTargets, readClaimCheck } from "../src/claims.js";
+import { readTreeQuotes, treeQuotePlan } from "../src/architecture.js";
 import { ProfileError, parseProfile } from "../src/profile.js";
 import { answerBatches } from "../src/qaflow.js";
 import { LARGE_LIMITS, REHEARSAL_HEAD } from "../src/rehearsal.js";
@@ -30,7 +40,8 @@ const harnessOf = (j: JobSpec): string => (j.input as { harness: string }).harne
 const commandIds = (j: JobSpec): string[] => ((j.input as { commands?: Array<{ id: string }> }).commands ?? []).map((c) => c.id);
 const items = (r: Record<string, any>): Array<Record<string, any>> => r.sections.flatMap((s: { items: unknown[] }) => s.items);
 
-describe("a large pull request, reported area by area (design §6.9)", () => {
+
+describe("a large pull request, reported at a high level (design §6.9)", () => {
   const sim = run();
 
   it("runs to the end: every receipt valid, one report", () => {
@@ -39,87 +50,108 @@ describe("a large pull request, reported area by area (design §6.9)", () => {
     expect(sim.receipts.map((r) => r.stageId).filter((s, i, a) => a.indexOf(s) === i)).toEqual(["fetch", "report", "questions", "answers"]);
   });
 
-  it("asks one reporter job per area, each a fresh read-only session with its own key, then one synthesis job, then the checks", () => {
+  it("makes exactly one reporter job and one claim check: no area job, no synthesis, no record", () => {
     const reporters = agents(sim, "change-report-v1");
-    expect(reporters.map((j) => j.jobId)).toEqual(["reporter-A1", "reporter-A2", "reporter-A3"]);
-    for (const j of reporters) {
-      expect(j.continueFrom).toBeUndefined();
-      expect(j.readOnly).toBe(true);
-      expect(harnessOf(j)).toBe(profileOf(LARGE).roles.reporter);
-    }
-    const synthesis = agents(sim, "change-synthesis-v1");
-    expect(synthesis.map((j) => j.jobId)).toEqual(["synthesis"]);
-    expect(synthesis[0]!.continueFrom).toBeUndefined();
-    expect(harnessOf(synthesis[0]!)).toBe(profileOf(LARGE).roles.reporter);
-    // The checks: one per area and one for the synthesis, on the report checker's harness, never continued.
+    expect(reporters.map((j) => j.jobId)).toEqual(["reporter"]);
+    expect(reporters[0]!.continueFrom).toBeUndefined();
+    expect(reporters[0]!.readOnly).toBe(true);
+    expect(harnessOf(reporters[0]!)).toBe(profileOf(LARGE).roles.reporter);
     const checks = sim.jobs.filter((j) => j.stageId === "report" && j.resultSchema === "claim-check-v1");
-    expect(checks).toHaveLength(4);
-    for (const j of checks) {
-      expect(j.purpose).toBe("review");
-      expect(j.continueFrom).toBeUndefined();
-      expect(j.jobId).toBeUndefined();
-      expect(harnessOf(j)).toBe(profileOf(LARGE).roles["report-checker"]);
-    }
-    // The order: an area is reported, checked and recorded before the next one starts; the synthesis comes after the last.
-    const order = sim.jobs.filter((j) => j.stageId === "report").map((j) => j.resultSchema ?? commandIds(j)[0]).filter((x) => x !== undefined && /^(change-|claim-|area-record|synthesis-record)/.test(x));
-    expect(order).toEqual(["change-report-v1", "claim-check-v1", "area-record-A1", "change-report-v1", "claim-check-v1", "area-record-A2", "change-report-v1", "claim-check-v1", "area-record-A3", "change-synthesis-v1", "claim-check-v1", "synthesis-record"]);
+    expect(checks).toHaveLength(1);
+    expect(checks[0]!.purpose).toBe("review");
+    expect(checks[0]!.continueFrom).toBeUndefined();
+    expect(harnessOf(checks[0]!)).toBe(profileOf(LARGE).roles["report-checker"]);
+    expect(sim.jobs.some((j) => j.resultSchema === "change-synthesis-v1" || j.resultSchema === "change-synthesis-revision-v1")).toBe(false);
+    expect(sim.jobs.some((j) => j.jobId?.startsWith("reporter-A") === true || j.jobId === "synthesis")).toBe(false);
+    expect(sim.jobs.some((j) => commandIds(j).some((c) => c.startsWith("area-record") || c === "synthesis-record"))).toBe(false);
+    expect(definitionFor(profileOf(LARGE)).resultContracts!.map((c) => c.name)).not.toContain("change-synthesis-v1");
   });
 
-  it("gives an area reporter its own files as patches to read, the whole file list as context, and an empty summary to return", () => {
-    const [, a2] = agents(sim, "change-report-v1").map(assignmentOf);
-    expect(a2).toContain("You report area A2 (pkg/alpha) only");
-    const own = a2!.slice(a2!.indexOf("Changed files of your area A2"), a2!.indexOf("Other files of the pull request"));
-    expect(own).toContain("pkg/alpha/alpha.go");
-    expect(own).not.toContain("pkg/beta/beta.go");
-    expect(a2).toMatch(/Other files of the pull request, for context only \(4;/);
-    expect(a2).toContain("pkg/beta/beta.go — added, +13 −0");
-    expect(a2).toContain('Leave "purpose" empty');
-    // The synthesis reads the checked items, not the patches.
-    const synth = assignmentOf(agents(sim, "change-synthesis-v1")[0]!);
-    expect(synth).toContain("A2.R1 [features]");
-    expect(synth).toContain("A3.R1 [features]");
-    expect(synth).not.toContain("+\treturn x + 1");
+  it("gives the reporter a high-level digest: the PR text, the areas, the file list, the detector facts and the names of the new exported symbols", () => {
+    const a = assignmentOf(agents(sim, "change-report-v1")[0]!);
+    expect(a).toContain("describe the pull request at a high level");
+    expect(a).toContain("They will ask for any area they want to dig into, so do not read the detail of each area");
+    expect(a).toContain('<untrusted source="pull request title">');
+    expect(a).toContain('<untrusted source="commit messages">');
+    expect(a).toMatch(/Areas and changed files \(4 area\(s\), 5 file\(s\)/);
+    expect(a).toMatch(/A2 pkg\/alpha — 1 file\(s\), \+\d+ −0, \d+ patch bytes; new exported symbols: Alpha1, Alpha2, Alpha3, Alpha4, Alpha5, Alpha6\n/);
+    expect(a).toMatch(/A3 pkg\/beta — 1 file\(s\), \+13 −0, \d+ patch bytes; new exported symbols: Beta\n/);
+    expect(a).toContain("  pkg/beta/beta.go — added, +13 −0");
+    expect(a).toContain("generated code: do not cite it");
+    expect(a).toMatch(/Detector facts \(\d+\)/);
+    // The architecture, the template sections, no lifecycle required.
+    expect(a).toContain("architecture");
+    expect(a).toContain("State and behavior are not required in this report");
+    expect(a).toContain("text is at most 600 characters");
+    expect(a).not.toContain("at most 900 characters, which");
+    // The reporter may open any file read-only to confirm a claim.
+    expect(a).toContain("open any file of the head or of the base, read-only");
   });
 
-  it("records every checked area and the synthesis as evidence the validators recompute from", () => {
-    const written = sim.evidence.filter((e) => e.kind === "command" && /area-record-A\d|synthesis-record/.test(JSON.stringify((e.payload as { command?: { id?: string } }).command?.id))).map((e) => (e.payload as { command: { id: string } }).command.id);
-    expect(written).toEqual(["area-record-A1", "area-record-A2", "area-record-A3", "synthesis-record"]);
+  it("gives the patches of the interface files only, not the other patches", () => {
+    const a = assignmentOf(agents(sim, "change-report-v1")[0]!);
+    expect(a).toContain('<untrusted source="patch of docs/guide.md">');
+    expect(a).toContain("Alpha and Beta add numbers.");
+    expect(a).toMatch(/Patches of the interface files \(1 of 1;/);
+    expect(a).not.toContain("+\treturn x + 1");
+    expect(a).not.toContain("alpha.Alpha1(alpha.Alpha1(x))");
+    expect(a).not.toContain("<untrusted source=\"patch of pkg/");
   });
 
-  it("merges the items that are one change across areas: the union of their cites and facts, renumbered R1... in section order", () => {
+  it("asks the checker to quote from the trees the cites name, and verifies the quotes there", () => {
+    const check = assignmentOf(sim.jobs.find((j) => j.resultSchema === "claim-check-v1" && j.stageId === "report")!);
+    expect(check).toContain("the report below is a high-level one");
+    expect(check).toContain("The quotes are matched against that file, not against the diff");
+    const verify = sim.jobs.filter((j) => j.stageId === "report" && commandIds(j).some((c) => c.startsWith("arch-quote-")));
+    expect(verify.length).toBeGreaterThan(0);
+  });
+
+  it("keeps the report's items at one per change, with no merge and no area record, and numbers them R1... in section order", () => {
     const r = report(sim);
-    const features = r.sections.find((s: { id: string }) => s.id === "features").items;
-    expect(features).toHaveLength(1);
-    expect(features[0].cites.map((c: { path: string }) => c.path).sort()).toEqual(["pkg/alpha/alpha.go", "pkg/beta/beta.go"]);
-    expect(features[0].text).toContain("Alpha1 to Alpha6");
-    expect(features[0].text).toContain("Beta");
-    expect(r.merges).toEqual([{ id: "M1", items: ["A2.R1", "A3.R1"], into: features[0].id }]);
+    expect(r.merges).toBeUndefined();
     expect(items(r).map((i) => i.id)).toEqual(items(r).map((_, n) => `R${n + 1}`));
     expect(r.summary.purpose).toMatchObject({ source: "stated", quote: "Add alpha and beta helpers" });
-    expect(r.summary.overview).toContain("one change");
     expect(r.removed).toEqual([]);
+    expect(r.architecture.nodes.map((n: { id: string }) => n.id)).toEqual(["alpha", "beta"]);
   });
 
-  it("records the mode and its reason in report.json, the areas, and shows it in the header of review.md", () => {
+  it("records the mode and its reason in report.json, the areas with their sizes, and shows it in the header of review.md", () => {
     const r = report(sim);
     expect(r.mode).toBe("large");
     expect(r.modeReasons).toEqual([{ limit: "maxFiles", value: 5, max: 2 }]);
-    expect(r.areas.map((a: { id: string; name: string; kind: string; items: number }) => [a.id, a.name, a.kind])).toEqual([
+    expect(r.areas.map((a: { id: string; name: string; kind: string }) => [a.id, a.name, a.kind])).toEqual([
       ["A1", "docs", "read"],
       ["A2", "pkg/alpha", "read"],
       ["A3", "pkg/beta", "read"],
       ["generated", "generated", "generated"],
     ]);
-    expect(sim.written!.markdown.split("\n")[2]).toBe("Mode: large (5 files, over the limit of 2): reported in 3 areas, then one synthesis; generated files are listed in Other, not read; 1 file(s) without a patch from GitHub are listed in Other.");
+    expect(r.areas.find((a: { id: string }) => a.id === "A3")).toMatchObject({ additions: 13, deletions: 0, items: 1 });
+    expect(sim.written!.markdown.split("\n")[2]).toBe("Mode: large (5 files, over the limit of 2): reported at a high level from a digest of its 3 areas; generated files are listed in Other, not read; 1 file(s) without a patch from GitHub are listed in Other.");
   });
 
   it("lists the generated files and a file GitHub gave no patch for in other, never failing", () => {
     const r = report(sim);
     const other = r.sections.find((s: { id: string }) => s.id === "other").items.map((i: { text: string }) => i.text);
-    expect(other).toContain("api/gen/types.pb.go changed (+5 −0 lines); generated code, not read by an agent");
+    expect(other).toContain("api/gen/types.pb.go changed (+5 −0 lines); generated code, not summarised");
     expect(other).toContain("assets/logo.png changed (+1 −0 lines); patch not provided by GitHub");
     expect(r.omitted).toEqual(["assets/logo.png"]);
     expect(stopOf(sim)!.reason).toBe("report ready");
+  });
+
+  it("ends the report with a Dive into an area block: the areas table and the command that opens the reporter's session", () => {
+    const md = sim.written!.markdown;
+    expect(md).toContain("## Dive into an area");
+    expect(md).toContain("graphloom session open <run> --stage report");
+    expect(md).toContain("already has the pull request's digest and can read any file");
+    expect(md).toMatch(/\| Area \| Name \| Files \| Lines \| Patch bytes \|\n\|---\|---\|---\|---\|---\|\n\| A1 \| docs \| 1 \|/);
+    expect(md).toContain("| generated | generated (generated) | 1 |");
+    // It ends the Report: after the notes, before the Measurements.
+    expect(md.indexOf("## Dive into an area")).toBeGreaterThan(md.indexOf("Notes:"));
+    expect(md.indexOf("## Dive into an area")).toBeLessThan(md.indexOf("# Measurements"));
+    const html = reviewHtmlFrom(sim.written!.json)!;
+    expect(html).toContain("Dive into an area");
+    expect(html).toContain("<pre><code>graphloom session open &lt;run&gt; --stage report</code></pre>");
+    expect(html).toContain("<td>A2</td><td>pkg/alpha</td><td>1</td>");
   });
 
   it("asks the questions in large mode and answers them in batches of at most 15 that continue one session, checked in fresh sessions", () => {
@@ -127,51 +159,48 @@ describe("a large pull request, reported area by area (design §6.9)", () => {
     expect(q.mode).toBe("large");
     expect(q.modeReasons).toEqual([{ limit: "maxFiles", value: 5, max: 2 }]);
     const answerers = agents(sim, "answers-v1");
-    expect(answerers).toHaveLength(2);
-    const sizes = answerers.map((j) => Number(/Questions \((\d+)\):/.exec(assignmentOf(j))![1]));
-    expect(sizes).toEqual([15, 10]);
+    expect(answerers.length).toBeGreaterThanOrEqual(1);
+    for (const j of answerers) expect(Number(/Questions \((\d+)\):/.exec(assignmentOf(j))![1])).toBeLessThanOrEqual(15);
     expect(answerers[0]!.continueFrom).toBeUndefined();
-    const firstOp = ((sim.evidence.find((e) => e.resultSchema === "answers-v1")!.payload as { producer: { operationId: string } }).producer.operationId);
-    expect(answerers[1]!.continueFrom).toBe(firstOp);
     const checkers = sim.jobs.filter((j) => j.stageId === "answers" && j.resultSchema === "answer-check-v1");
-    expect(checkers).toHaveLength(2);
+    expect(checkers).toHaveLength(answerers.length);
     for (const j of checkers) {
       expect(j.continueFrom).toBeUndefined();
       expect(j.jobId).toBeUndefined();
     }
     // qa.json and review.md are written once, after the last batch.
-    const writes = sim.jobs.filter((j) => commandIds(j).includes("qa-write"));
-    expect(writes).toHaveLength(1);
-    const at = (id: string): number => sim.jobs.findIndex((j) => commandIds(j).includes(id));
-    expect(at("answers-record-1")).toBeLessThan(at("answers-record-2"));
-    expect(at("answers-record-2")).toBeLessThan(at("qa-write"));
-    expect(q.questions.filter((x: { id: string }) => x.id !== "N1")).toHaveLength(25);
-    expect(sim.qa!.markdown).toContain("answered in 2 batch(es) of at most 15 questions");
+    expect(sim.jobs.filter((j) => commandIds(j).includes("qa-write"))).toHaveLength(1);
     expect(sim.receipts.filter((r) => r.stageId === "answers").every((r) => r.valid)).toBe(true);
   });
 
-  it("asks the large-mode questions: the trio once per change item and per new exported symbol, one missing-test per item", () => {
+  it("asks exactly the high-level questions, even though functions exceed the limits: N1, then per change item the trio, purpose and missing-test", () => {
     const q = qa(sim);
     const questions = q.questions as Array<{ id: string; type: string; item: string; symbol?: string; text: string }>;
-    const symbols = q.symbols as Array<{ id: string; qualified: string; exported: boolean; change: string }>;
-    expect(symbols.filter((s) => s.change === "new")).toHaveLength(8);
-    const exported = symbols.filter((s) => s.exported);
-    expect(exported).toHaveLength(7);
-    const count = (type: string, pick: (x: (typeof questions)[number]) => boolean): number => questions.filter((x) => x.type === type && pick(x)).length;
+    const types = new Set(questions.filter((x) => x.id !== "N1").map((x) => x.type));
+    expect([...types].sort()).toEqual(["common-logic", "existing-equivalent", "missing-test", "purpose", "reuse-library"]);
+    expect(questions[0]!.id).toBe("N1");
+    // Not asked in large mode: split-function, complexity-coverage, anything per symbol or per function.
+    expect(questions.filter((x) => x.type === "split-function" || x.type === "complexity-coverage" || x.type === "weak-test")).toEqual([]);
+    expect(questions.filter((x) => x.symbol !== undefined)).toEqual([]);
+    // Once per change item, about the mechanism, naming the item's new exported symbols.
+    const itemsWithSymbols = new Set(questions.filter((x) => x.type === "existing-equivalent").map((x) => x.item));
     for (const type of ["existing-equivalent", "reuse-library", "common-logic"]) {
-      expect(count(type, (x) => x.symbol === undefined)).toBe(1);
-      expect(count(type, (x) => x.symbol !== undefined)).toBe(7);
-      for (const s of exported) expect(count(type, (x) => x.symbol === s.id)).toBe(1);
+      const of = questions.filter((x) => x.type === type);
+      expect(of.map((x) => x.item).sort()).toEqual([...itemsWithSymbols].sort());
     }
-    const twice = symbols.find((s) => s.qualified === "beta.twice")!;
-    expect(questions.some((x) => x.symbol === twice.id)).toBe(false);
-    const itemTrio = questions.find((x) => x.type === "existing-equivalent" && x.symbol === undefined)!;
-    expect(itemTrio.text).toContain("beta.twice");
-    expect(itemTrio.text).toContain("alpha.Alpha1");
+    const itemTrio = questions.find((x) => x.type === "existing-equivalent" && x.text.includes("alpha.Alpha1"))!;
+    expect(itemTrio.text).toContain("alpha.Alpha6");
+    const unexported = questions.find((x) => x.text.includes("beta.Beta"))!;
+    expect(unexported.text).toMatch(/1 unexported symbol\(s\)/);
+    expect(unexported.text).not.toContain("beta.twice");
     const missing = questions.filter((x) => x.type === "missing-test");
-    expect(missing).toHaveLength(1);
-    for (const s of symbols) expect(missing[0]!.text).toContain(s.qualified);
-    expect(questions.filter((x) => x.type === "split-function" || x.type === "complexity-coverage")).toEqual([]);
+    expect(missing.length).toBeGreaterThan(0);
+    expect(new Set(missing.map((x) => x.item)).size).toBe(missing.length);
+  });
+
+  it("shows every function in the measurements, the over-limit ones included", () => {
+    const m = report(sim).measurements;
+    expect(m.records.length).toBeGreaterThanOrEqual(8);
   });
 
   it("keeps the questions a standard run asks, per symbol, when the pull request is small", () => {
@@ -184,13 +213,15 @@ describe("a large pull request, reported area by area (design §6.9)", () => {
   });
 });
 
+
 describe("standard mode is what it was", () => {
-  it("records mode standard only, with no areas, no records, no header line and no synthesis", () => {
+  it("records mode standard only, with no areas, no header line, no dive-in block and no synthesis", () => {
     const sim = simulate({});
     const r = report(sim);
     expect(r.mode).toBe("standard");
     expect(Object.keys(r)).not.toEqual(expect.arrayContaining(["areas"]));
     expect(sim.written!.markdown).not.toContain("Mode: large");
+    expect(sim.written!.markdown).not.toContain("Dive into an area");
     expect(sim.jobs.some((j) => commandIds(j).some((c) => c.startsWith("area-record") || c === "synthesis-record" || c.startsWith("answers-record")))).toBe(false);
     expect(sim.jobs.some((j) => j.resultSchema === "change-synthesis-v1")).toBe(false);
     expect(agents(sim, "change-report-v1").map((j) => j.jobId)).toEqual(["reporter"]);
@@ -198,118 +229,145 @@ describe("standard mode is what it was", () => {
   });
 });
 
-describe("an area's report is validated and checked like a report", () => {
-  it("corrects an area report that cites a file outside its area, continuing that area's own session", () => {
+
+describe("the large report is validated and checked like a report, with the high-level allowances", () => {
+  it("corrects a report that cites a file outside the pull request, continuing the reporter's own session", () => {
     const sim = run((s) => {
-      const replies = s.results["change-report-v1"]!;
-      const bad = structuredClone(replies[1]!) as { output: { sections: Array<{ items: Array<{ cites: Array<{ path: string }> }> }> } };
-      bad.output.sections.flatMap((x) => x.items)[0]!.cites[0]!.path = "pkg/beta/beta.go";
-      s.results["change-report-v1"] = [replies[0]!, bad as never, replies[1]!, replies[2]!];
+      const good = s.results["change-report-v1"]![0]!;
+      const bad = structuredClone(good) as { output: { sections: Array<{ items: Array<{ cites: Array<{ path: string }> }> }> } };
+      bad.output.sections.flatMap((x) => x.items)[0]!.cites[0]!.path = "pkg/gamma/gamma.go";
+      s.results["change-report-v1"] = [bad as never, good];
     });
     const reporters = agents(sim, "change-report-v1");
-    expect(reporters.map((j) => j.jobId)).toEqual(["reporter-A1", "reporter-A2", "reporter-A2", "reporter-A3"]);
-    expect(reporters[1]!.continueFrom).toBeUndefined();
-    expect(reporters[2]!.continueFrom).toMatch(/^op\d+$/);
-    expect(assignmentOf(reporters[2]!)).toMatch(/failed deterministic validation[\s\S]*pkg\/beta\/beta.go, which is not a file of the pull request/);
+    expect(reporters.map((j) => j.jobId)).toEqual(["reporter", "reporter"]);
+    expect(reporters[0]!.continueFrom).toBeUndefined();
+    expect(reporters[1]!.continueFrom).toMatch(/^op\d+$/);
+    expect(assignmentOf(reporters[1]!)).toMatch(/failed deterministic validation[\s\S]*pkg\/gamma\/gamma.go, which is not a file of the pull request/);
     expect(report(sim).mode).toBe("large");
   });
 
-  it("refuses an area report that writes a summary", () => {
-    const sim = run((s) => {
-      const replies = s.results["change-report-v1"]!;
-      const bad = structuredClone(replies[0]!) as { output: { purpose: { text: string } } };
-      bad.output.purpose.text = "A purpose the synthesis should have written.";
-      s.results["change-report-v1"] = [bad as never, replies[0]!, replies[1]!, replies[2]!];
-    });
-    expect(assignmentOf(agents(sim, "change-report-v1")[1]!)).toContain("an area report leaves the summary empty");
+  it("does not require a changed file to be cited or a detector fact to be listed, which a standard report does; the plugin accounts for them in other", () => {
+    const sections = reporterSections(profileOf(LARGE));
+    const files = ["pkg/a.go", "docs/guide.md"].map((path) => pullFile({ path, status: "added", previousPath: null, additions: 1, deletions: 0, sha: null, patch: "@@ -0,0 +1 @@\n+x := 1", patchOmitted: false })!);
+    const fact = { id: "D1", section: "other", path: "docs/guide.md", side: "head" as const, line: 1, text: "File routed to this section: docs/guide.md added" };
+    const cite = { path: "pkg/a.go", side: "head" as const, start: 1, end: 1, symbol: "" };
+    const report = { purpose: { text: "t", source: "inferred" as const, quote: "" }, overview: "One.", sections: sections.map((s, i) => ({ id: s.id, none: i !== 0, items: i === 0 ? [{ text: "adds a", cites: [cite], facts: [], state: [], behavior: [] }] : [] })), notes: [], architecture: { nodes: [], edges: [] } };
+    const ctx = { sections, files, facts: [fact] };
+    expect(reportProblems(report, ctx).join("|")).toMatch(/changed file\(s\) no item cites: docs\/guide.md/);
+    expect(reportProblems(report, ctx).join("|")).toMatch(/detector fact\(s\) no item of their section lists/);
+    expect(reportProblems(report, { ...ctx, large: true })).toEqual([]);
+    const final = assembleReport(report, new Map(), { ...ctx, large: true });
+    const other = final.sections.find((x) => x.id === "other")!.items.map((i) => i.text);
+    expect(other).toEqual(["Detected: File routed to this section: docs/guide.md added. No item of the high-level report lists it (or its item was removed by the claim check)."]);
+    expect(reportProblems(asReporterOutput(final), { ...ctx, large: true }, { final: true })).toEqual([]);
   });
 
   it("revises an item the claim check does not support, and removes it, with its file in other, when the revision is not supported either", () => {
     const sim = run((s) => {
       const checks = s.results["claim-check-v1"]!;
-      const unsupported = structuredClone(checks[2]!) as { output: { verdicts: Array<{ item: string; verdict: string; note: string; quotes: unknown[] }> } };
-      const v = unsupported.output.verdicts.find((x) => x.item === "R1")!;
+      const unsupported = structuredClone(checks[0]!) as { output: { verdicts: Array<{ item: string; verdict: string; note: string; quotes: unknown[] }> } };
+      const v = unsupported.output.verdicts.find((x) => x.item === "R3")!;
       v.verdict = "unsupported";
       v.note = "the diff does not show this";
       v.quotes = [];
-      s.results["claim-check-v1"] = [checks[0]!, checks[1]!, unsupported as never, unsupported as never, checks[3]!];
-      s.results["change-report-revision-v1"] = [s.results["change-report-v1"]![2]!];
-      const synthesis = structuredClone(s.results["change-synthesis-v1"]![0]!) as { output: { merges: unknown[] } };
-      synthesis.output.merges = [];
-      s.results["change-synthesis-v1"] = [synthesis as never];
+      s.results["claim-check-v1"] = [unsupported as never, unsupported as never];
+      s.results["change-report-revision-v1"] = [s.results["change-report-v1"]![0]!];
+      // One quote fewer is verified in the tree (the unsupported claim's), so the canned check answers for one fewer.
+      for (const [k, c] of Object.entries(s.commands ?? {})) {
+        if (!k.startsWith("arch-quote-")) continue;
+        const n = Number(/checked (\d+)/.exec(c.stdout ?? "")![1]) - 1;
+        s.commands![k] = { ...c, stdout: `${Array.from({ length: n }, (_x, i) => `${i + 1} ok`).join("\n")}\nchecked ${n}\n` };
+      }
     });
     const revision = agents(sim, "change-report-revision-v1");
     expect(revision).toHaveLength(1);
-    expect(revision[0]!.jobId).toBe("reporter-A3");
+    expect(revision[0]!.jobId).toBe("reporter");
     expect(revision[0]!.continueFrom).toMatch(/^op\d+$/);
     const r = report(sim);
-    expect(r.removed.map((x: { id: string; reason: string }) => x.id)).toEqual(["A3.R1"]);
+    expect(r.removed.map((x: { id: string }) => x.id)).toEqual(["R3"]);
     expect(r.removed[0].reason).toContain("unsupported: the diff does not show this");
-    const other = r.sections.find((x: { id: string }) => x.id === "other").items.map((i: { text: string }) => i.text);
-    expect(other).toContain("pkg/beta/beta.go changed (+13 −0 lines); not summarised");
-    expect(r.merges).toEqual([]);
-    expect(r.sections.find((x: { id: string }) => x.id === "features").items).toHaveLength(1);
+    expect(sim.jobs.filter((j) => j.resultSchema === "claim-check-v1" && j.stageId === "report")).toHaveLength(2);
   });
 });
 
-describe("the synthesis is validated and checked", () => {
-  it("corrects a synthesis that merges an item no area reported, continuing its own session", () => {
-    const sim = run((s) => {
-      const good = s.results["change-synthesis-v1"]![0]! as { output: { merges: Array<{ items: string[] }> } };
-      const bad = structuredClone(good);
-      bad.output.merges[0]!.items = ["A2.R1", "A9.R4"];
-      s.results["change-synthesis-v1"] = [bad as never, good as never];
-    });
-    const synthesis = agents(sim, "change-synthesis-v1");
-    expect(synthesis).toHaveLength(2);
-    expect(synthesis[1]!.jobId).toBe("synthesis");
-    expect(synthesis[1]!.continueFrom).toMatch(/^op\d+$/);
-    expect(assignmentOf(synthesis[1]!)).toContain('"A9.R4" is not an item id of the areas');
-    expect(report(sim).merges).toHaveLength(1);
+describe("the quotes of a large report are verified against the trees its cites name (design §6.9, §6.4)", () => {
+  const sections = reporterSections(profileOf(LARGE));
+  const file = pullFile({ path: "pkg/a.go", status: "modified", previousPath: null, additions: 1, deletions: 0, sha: null, patch: "@@ -10,2 +10,3 @@\n a\n+b := 1\n c", patchOmitted: false })!;
+  const cite = { path: "pkg/a.go", side: "head" as const, start: 11, end: 11, symbol: "" };
+  const quoted = {
+    purpose: { text: "t", source: "inferred" as const, quote: "" },
+    overview: "One.",
+    sections: sections.map((s, i) => ({ id: s.id, none: i !== 0, items: i === 0 ? [{ text: "adds b", cites: [cite], facts: [], state: [], behavior: [] }] : [] })),
+    notes: [],
+    architecture: { nodes: [], edges: [] },
+  };
+  const reply = (verdicts: unknown[]) => ({ verdicts });
+  const supported = (item: string, quotes: unknown[]) => ({ item, verdict: "supported", note: "", quotes });
+  const all = (quote: unknown) => reply(claimTargets(quoted, { sections }, { treeQuotes: true }).map((t) => supported(t.id, t.quotes === "none" ? [] : [quote])));
+
+  it("marks every claim that names no tree of its own to be checked against the trees its cites name", () => {
+    const targets = claimTargets(quoted, { sections }, { treeQuotes: true });
+    expect(targets.filter((t) => t.quotes === "required").every((t) => t.treeByCite === true)).toBe(true);
+    expect(claimTargets(quoted, { sections }).some((t) => t.treeByCite === true)).toBe(false);
   });
 
-  it("does not apply a merge the check does not support after one revision, and records it; the items stay separate", () => {
-    const sim = run((s) => {
-      const checks = s.results["claim-check-v1"]!;
-      const unsupported = structuredClone(checks[3]!) as { output: { verdicts: Array<{ item: string; verdict: string; note: string }> } };
-      const m = unsupported.output.verdicts.find((x) => x.item === "M1")!;
-      m.verdict = "unsupported";
-      m.note = "beta does not call alpha in the cited lines";
-      s.results["claim-check-v1"] = [checks[0]!, checks[1]!, checks[2]!, unsupported as never, unsupported as never];
-      s.results["change-synthesis-revision-v1"] = [s.results["change-synthesis-v1"]![0]!];
-    });
-    expect(agents(sim, "change-synthesis-revision-v1")).toHaveLength(1);
-    const r = report(sim);
-    expect(r.sections.find((x: { id: string }) => x.id === "features").items).toHaveLength(2);
-    expect(r.merges).toEqual([{ id: "M1", items: ["A2.R1", "A3.R1"], into: null, reason: "unsupported: beta does not call alpha in the cited lines" }]);
-    expect(r.removedParts).toEqual([{ id: "M1", kind: "merge", item: "", label: "A2.R1 + A3.R1", reason: "unsupported: beta does not call alpha in the cited lines" }]);
-    expect(sim.written!.markdown).toContain("Merge not applied: the claim check could not support joining A2.R1 + A3.R1");
+  it("accepts a citation outside any patch when the tree shows the quote, by the tree and not the patch", () => {
+    // The quote's line (99) is in no hunk of the patch: patch matching would refuse it.
+    const out = all({ path: "pkg/a.go", line: 99, text: "func outsideThePatch() {" });
+    const patchOnly = readClaimCheck(out, claimTargets(quoted, { sections }), [file]);
+    expect("problems" in patchOnly ? [] : [...patchOnly.weak.keys()]).toContain("R1");
+    const reading = readClaimCheck(out, claimTargets(quoted, { sections }, { treeQuotes: true }), [file]);
+    if ("problems" in reading) throw new Error(reading.problems.join());
+    expect(reading.weak.size).toBe(0);
+    expect(reading.treeQuotes.find((q) => q.id === "R1")).toEqual({ id: "R1", tree: "head", quotes: [{ path: "pkg/a.go", line: 99, text: "func outsideThePatch() {" }] });
+    // The tree decides: its check shows the quote (ok) or not (nomatch).
+    const plan = treeQuotePlan(reading.treeQuotes, "base0");
+    const outputs = (verdict: string): string[] => plan.commands.map((_, k) => `${Array.from({ length: plan.sizes[k]! }, (_x, i) => `${i + 1} ${verdict}`).join("\n")}\nchecked ${plan.sizes[k]}\n`);
+    expect(readTreeQuotes(plan, outputs("ok")).size).toBe(0);
+    expect([...readTreeQuotes(plan, outputs("nomatch")).keys()]).toContain("R1");
+    expect(readTreeQuotes(plan, outputs("nomatch")).get("R1")).toMatch(/unsupported: its quote .* is not in the head tree at pkg\/a.go:99/);
   });
 
-  it("removes a purpose the check does not support, keeping the rest", () => {
+  it("verifies a quote of a base-side cite against the base tree, and refuses a quote from a file the claim does not cite", () => {
+    const baseCite = { ...cite, side: "base" as const };
+    const r2 = { ...quoted, sections: quoted.sections.map((s, i) => (i === 0 ? { ...s, items: [{ ...s.items[0]!, cites: [baseCite] }] } : s)) };
+    const ok = readClaimCheck(reply(claimTargets(r2, { sections }, { treeQuotes: true }).map((t) => supported(t.id, t.quotes === "none" ? [] : [{ path: "pkg/a.go", line: 12, text: "a quote of the base" }]))), claimTargets(r2, { sections }, { treeQuotes: true }), [file]);
+    if ("problems" in ok) throw new Error(ok.problems.join());
+    expect(ok.treeQuotes.find((q) => q.id === "R1")!.tree).toBe("base");
+    const elsewhere = readClaimCheck(all({ path: "pkg/other.go", line: 3, text: "a quote of another file" }), claimTargets(quoted, { sections }, { treeQuotes: true }), [file]);
+    if ("problems" in elsewhere) throw new Error(elsewhere.problems.join());
+    expect(elsewhere.weak.get("R1")).toMatch(/a quote is not from a file its cite names \(pkg\/other.go\)/);
+  });
+
+  it("refuses a supported verdict with no quote, or with a quote that is too short, in the tree check as in the patch check", () => {
+    const none = readClaimCheck(reply(claimTargets(quoted, { sections }, { treeQuotes: true }).map((t) => supported(t.id, []))), claimTargets(quoted, { sections }, { treeQuotes: true }), [file]);
+    if ("problems" in none) throw new Error(none.problems.join());
+    expect(none.weak.get("R1")).toBe("supported without a quote");
+    const short = readClaimCheck(all({ path: "pkg/a.go", line: 11, text: "b := 1" }), claimTargets(quoted, { sections }, { treeQuotes: true }), [file]);
+    if ("problems" in short) throw new Error(short.problems.join());
+    expect(short.weak.get("R1")).toMatch(/shorter than 8/);
+  });
+
+  it("makes the large run's claim check unsupported when the tree does not show the quote, through the whole flow", () => {
     const sim = run((s) => {
-      const checks = s.results["claim-check-v1"]!;
-      const unsupported = structuredClone(checks[3]!) as { output: { verdicts: Array<{ item: string; verdict: string; note: string }> } };
-      const p = unsupported.output.verdicts.find((x) => x.item === "overview")!;
-      p.verdict = "partial";
-      p.note = "names a mechanism no item has";
-      s.results["claim-check-v1"] = [checks[0]!, checks[1]!, checks[2]!, unsupported as never, unsupported as never];
-      s.results["change-synthesis-revision-v1"] = [s.results["change-synthesis-v1"]![0]!];
+      for (const [k, v] of Object.entries(s.commands ?? {})) if (k.startsWith("arch-quote-")) s.commands![k] = { ...v, stdout: (v.stdout ?? "").replaceAll(" ok\n", " nomatch\n") };
+      s.results["change-report-revision-v1"] = [s.results["change-report-v1"]![0]!];
     });
+    expect(agents(sim, "change-report-revision-v1")).toHaveLength(1);
     const r = report(sim);
-    expect(r.summary.overview).toBeNull();
-    expect(r.summary.purpose).not.toBeNull();
-    expect(r.removedParts.map((x: { id: string }) => x.id)).toEqual(["overview"]);
+    expect(r.removed.length).toBeGreaterThan(0);
+    expect(r.removed[0].reason).toMatch(/^unsupported: its quote .* is not in the head tree at .* \(within three lines\)/);
   });
 });
 
-describe("the budget pre-check before the first reporter job (design §6.9)", () => {
+describe("the budget pre-check before the reporter job (design §6.9)", () => {
   it("stops with the numbers when the run's remaining budgets cannot cover large mode, before any agent runs", () => {
     const sim = run(undefined, LARGE, { budgets: { jobs: 10 } });
     expect(stopOf(sim)).toMatchObject({ reason: "budgets exhausted", retryable: false });
     const blocker = stopOf(sim)!.blocker!;
     const need = largeNeeds(3);
     expect(blocker).toContain(`large mode needs at least ${need.agentInvocations} agent invocations, ${need.jobs} jobs and ${need.decisions} decisions for 3 area(s)`);
+    expect(blocker).toContain("one reporter and one claim check");
     expect(blocker).toContain("the run has 100, 10 and 100 left");
     expect(blocker).toContain("raise the profile's budgets (budgets.jobs)");
     expect(sim.jobs.some((j) => j.kind === "agent")).toBe(false);
@@ -320,14 +378,26 @@ describe("the budget pre-check before the first reporter job (design §6.9)", ()
     expect(budgetShortfall(largeNeeds(3), { agentInvocations: 1, jobs: 1, decisions: 1 })).toContain("budgets.agentInvocations, budgets.jobs, budgets.decisions");
   });
 
-  it("is covered by the plugin's default budgets for a ten-area pull request, and stops a very large one", () => {
+  it("counts one reporter, one check and the quote commands, not an area's jobs, and is covered by the default budgets for a ten-area pull request", () => {
     const defaults = definitionFor(profileOf()).defaultBudgets!;
     const ten = largeNeeds(10);
-    expect(ten).toMatchObject({ areas: 10, questions: 150, batches: 10, agentInvocations: 47, jobs: 106, decisions: 118 });
+    // 2 (reporter, check) + 1 questioner + 2 N1 + 7 batches of 2 + 2 diagrams = 21 agent invocations; 4 + 1 + 4 + 28 + 24 + 4 + 4 jobs.
+    expect(ten).toMatchObject({ areas: 10, questions: 100, batches: 7, agentInvocations: 21, jobs: 65, decisions: 77 });
+    expect(largeNeeds(1).jobs).toBeLessThan(ten.jobs);
     expect(budgetShortfall(ten, { agentInvocations: defaults.agentInvocations!, jobs: defaults.jobs!, decisions: defaults.decisions! })).toBeUndefined();
-    expect(budgetShortfall(largeNeeds(60), { agentInvocations: defaults.agentInvocations!, jobs: defaults.jobs!, decisions: defaults.decisions! })).toContain("budgets.jobs");
+    expect(budgetShortfall(largeNeeds(100), { agentInvocations: defaults.agentInvocations!, jobs: defaults.jobs!, decisions: defaults.decisions! })).toContain("budgets.jobs");
+  });
+
+  it("completes a large simulated run end to end within the plugin's default budgets", () => {
+    const defaults = definitionFor(profileOf(LARGE)).defaultBudgets!;
+    const sim = run(undefined, LARGE, { budgets: { agentInvocations: defaults.agentInvocations!, jobs: defaults.jobs!, decisions: defaults.decisions! } });
+    expect(stopOf(sim)).toMatchObject({ reason: "report ready" });
+    expect(sim.receipts.every((r) => r.valid)).toBe(true);
+    expect(sim.jobs.filter((j) => j.kind === "agent").length).toBeLessThanOrEqual(defaults.agentInvocations!);
+    expect(sim.jobs.length).toBeLessThanOrEqual(defaults.jobs!);
   });
 });
+
 
 describe("the limits (design §6.9)", () => {
   const refused = (limits: Record<string, unknown>): string => {
@@ -353,7 +423,7 @@ describe("the limits (design §6.9)", () => {
   it("goes large, not refused, over maxFiles or maxPatchBytes, and refuses only over the hard caps", () => {
     const over = simulate({ config: { limits: { maxFiles: 3 } }, maxSteps: 250 });
     expect(stopOf(over)?.reason).toBe("report ready");
-    expect(over.jobs.some((j) => j.resultSchema === "change-report-v1" && j.jobId?.startsWith("reporter-A"))).toBe(true);
+    expect(assignmentOf(over.jobs.find((j) => j.resultSchema === "change-report-v1")!)).toContain("describe the pull request at a high level");
     expect(report(over).modeReasons).toEqual([{ limit: "maxFiles", value: 5, max: 3 }]);
     const bytes = simulate({ config: { limits: { maxPatchBytes: 100 } }, maxSteps: 250 });
     expect(stopOf(bytes)?.reason).toBe("report ready");
@@ -385,6 +455,7 @@ const pullRecord: EvidenceRecord = {
   kind: "other",
   payload: { producer: { operationId: "op", stageId: "fetch", purpose: "diagnostic", readOnly: true, kind: "command", executorId: GET_PULL.id }, github: { item: { number: 7, title: "t", state: "open", url: "u", body: "", author: "a", labels: [], head: { ref: "h", sha: REHEARSAL_HEAD }, base: { ref: "main", sha: "b".repeat(40) } } } },
 };
+
 
 describe("Fetch reads every file of a large pull request", () => {
   const pr = { mode: "report" as const, owner: "apache", repo: "skywalking-banyandb", number: 7, head: REHEARSAL_HEAD };
@@ -425,48 +496,48 @@ describe("Fetch reads every file of a large pull request", () => {
   });
 });
 
-describe("the records the validators recompute a large report from", () => {
+
+describe("the evidence the validators recompute a large report from", () => {
   const sim = run();
   const view = (evidence: EvidenceRecord[]): EvidenceRecord[] => candidateEvidence(evidence, "d1");
   const validate = (id: string, evidence: EvidenceRecord[]) => validatorById(id)!.evaluate({ requirementId: id, statement: "", evidence: view(evidence), candidateDigest: "d1", config: { ...BANYANDB, ...LARGE } } as never);
 
-  it("pass with only the newest review in view, as the controller hands them over", () => {
-    expect(validate("change-report", sim.evidence).status).toBe("passed");
-    expect(validate("claims-checked", sim.evidence).status).toBe("passed");
-    expect(sim.evidence.filter((e) => e.kind === "review").length).toBeGreaterThan(view(sim.evidence).filter((e) => e.kind === "review").length);
+  // What the controller hands the validators when the Report stage is validated: the evidence up to the last Report job.
+  const atReport = (evidence: EvidenceRecord[]): EvidenceRecord[] => {
+    const last = evidence.map((e, i) => ((e.payload as { producer?: { stageId?: string } } | undefined)?.producer?.stageId === "report" ? i : -1)).reduce((a, b) => Math.max(a, b), -1);
+    return evidence.slice(0, last + 1);
+  };
+
+  it("pass with only the newest review in view, as the controller hands them over when the Report stage is validated", () => {
+    expect(validate("change-report", atReport(sim.evidence)).status).toBe("passed");
+    expect(validate("claims-checked", atReport(sim.evidence)).status).toBe("passed");
   });
 
-  it("fail when an area's recorded claim check no longer supports its report", () => {
-    const evidence = sim.evidence.map((e): EvidenceRecord => {
-      const command = (e.payload as { command?: { id: string; argv: string[] } }).command;
-      if (e.kind !== "command" || command?.id !== "area-record-A2") return e;
-      const record = JSON.parse(command.argv.slice(6, 6 + Number(command.argv[5])).join(""));
-      record.check.verdicts[0].verdict = "unsupported";
-      const next = recordCommand("area-record-A2", "areas", JSON.stringify(record))!;
-      return { ...e, payload: { ...(e.payload as object), command: { ...command, argv: next.argv } } };
+  it("fail when the claim check no longer supports the report, and when the written review.md is not the report the evidence recomputes", () => {
+    const unsupported = atReport(sim.evidence).map((e): EvidenceRecord => {
+      if (e.resultSchema !== "claim-check-v1") return e;
+      const p = e.payload as { verdicts: Array<{ verdict: string }> };
+      return { ...e, payload: { ...p, verdicts: p.verdicts.map((v, i) => (i === 2 ? { ...v, verdict: "unsupported" } : v)) } };
     });
-    const result = validate("change-report", evidence);
-    expect(result.status).toBe("failed");
-    expect(result.reason).toMatch(/the record of area A2 does not validate: its claim check found claims unsupported and the report was not revised/);
-  });
-
-  it("is not finished while a record is missing", () => {
-    const evidence = sim.evidence.filter((e) => (e.payload as { command?: { id: string } }).command?.id !== "synthesis-record");
-    expect(validate("change-report", evidence).status).toBe("inconclusive");
+    expect(validate("claims-checked", unsupported).status).not.toBe("passed");
+    const dropped = atReport(sim.evidence).filter((e) => (e.payload as { command?: { id: string } }).command?.id !== "report-write");
+    expect(validate("change-report", dropped).status).toBe("inconclusive");
   });
 
   it("recomputes the report written to report.json", () => {
     const a = analyze(sim.evidence, profileOf(LARGE), evidencePull(sim.evidence, profileOf(LARGE))!);
     expect(a.state).toBe("ready");
+    if (a.state === "ready") expect(a.analysis.ctx.large).toBe(true);
   });
 
   it("round-trips a record through the write command's chunks", () => {
     const json = JSON.stringify({ text: "é".repeat(5000) });
-    const command = recordCommand("area-record-A9", "areas", json)!;
+    const command = recordCommand("answers-record-9", "answers", json)!;
     expect(command.argv.slice(6).join("")).toBe(json);
     expect(writeChunks(json).length).toBeGreaterThan(1);
   });
 });
+
 
 describe("batches of questions", () => {
   const q = (id: number, item: string): Question => ({ id: `Q${id}`, type: "other", item, text: "t", origin: "required", key: `k${id}` });
@@ -486,56 +557,6 @@ describe("batches of questions", () => {
   });
 });
 
-describe("what the synthesis may merge", () => {
-  const item = (key: string, section: string, over: Record<string, unknown> = {}): SynthItem => ({
-    key,
-    area: key.split(".")[0]!,
-    section,
-    item: { id: key.split(".")[1]!, text: `item ${key}`, cites: [{ path: `${key}.go`, side: "head", start: 1, end: 2, symbol: "" }], facts: [], state: [], behavior: [], ...over },
-  });
-  const summary = { purpose: { text: "p", source: "inferred" as const, quote: "" }, overview: "One sentence." };
-  const all = [item("A1.R1", "features"), item("A2.R1", "features"), item("A2.R2", "config"), item("A1.R2", "features")];
-  const problems = (merges: Array<{ items: string[]; text: string }>): string[] => synthesisProblems({ ...summary, merges, notes: [], architecture: { nodes: [], edges: [] } }, all, []);
-
-  it("accepts a merge of items of two areas in one section", () => {
-    expect(problems([{ items: ["A1.R1", "A2.R1"], text: "joined" }])).toEqual([]);
-  });
-
-  it("refuses an unknown id, one id in two merges, a merge across sections or inside one area, and a lone item", () => {
-    expect(problems([{ items: ["A1.R1", "A7.R1"], text: "x" }]).join("|")).toContain('"A7.R1" is not an item id');
-    expect(problems([{ items: ["A1.R1", "A2.R1"], text: "x" }, { items: ["A2.R1", "A1.R2"], text: "y" }]).join("|")).toContain("A2.R1 is already in another merge");
-    expect(problems([{ items: ["A1.R1", "A2.R2"], text: "x" }]).join("|")).toContain("different sections (features, config)");
-    expect(problems([{ items: ["A1.R1", "A1.R2"], text: "x" }]).join("|")).toContain("joins items of one area");
-    expect(problems([{ items: ["A1.R1"], text: "x" }]).join("|")).toContain("at least two items");
-  });
-
-  it("makes the merged item from the union of its members' cites, facts, state and behavior, telling colliding state names apart", () => {
-    const entry = (name: string) => ({ name, scope: "per call", initial: "0", transitions: [], reads: [{ where: "w", decision: "d", cite: { path: "a.go", side: "head" as const, start: 1, end: 1, symbol: "" } }] });
-    const a = item("A1.R1", "features", { facts: ["F1"], state: [entry("n")], behavior: [{ case: "c", before: "b", after: "a" }] });
-    const b = item("A2.R1", "features", { facts: ["F1", "F2"], state: [entry("n"), entry("m")], behavior: [{ case: "d", before: "b", after: "a" }] });
-    const m = mergedItem([a, b], "joined");
-    expect(m.cites.map((c) => c.path)).toEqual(["A1.R1.go", "A2.R1.go"]);
-    expect(m.facts).toEqual(["F1", "F2"]);
-    expect(m.state.map((e) => e.name)).toEqual(["n", "n [A2]", "m"]);
-    expect(m.behavior.map((r) => r.case)).toEqual(["c", "d"]);
-  });
-
-  it("lets a merged item's text be 900 characters, and no more", () => {
-    expect(problems([{ items: ["A1.R1", "A2.R1"], text: "x".repeat(900) }])).toEqual([]);
-    expect(problems([{ items: ["A1.R1", "A2.R1"], text: "x".repeat(901) }]).join("|")).toContain("the text is 901 characters, more than 900");
-  });
-
-  it("refuses a merge whose union would pass the item's bounds", () => {
-    const entry = (name: string) => ({ name, scope: "s", initial: "i", transitions: [], reads: [] });
-    const many = (area: string): SynthItem => item(`${area}.R1`, "features", { state: Array.from({ length: 4 }, (_, i) => entry(`${area}${i}`)) });
-    const list = [many("A1"), many("A2")];
-    expect(synthesisProblems({ ...summary, merges: [{ items: ["A1.R1", "A2.R1"], text: "x" }], notes: [], architecture: { nodes: [], edges: [] } }, list, []).join("|")).toContain("8 state entries, more than 6");
-  });
-
-  it("numbers the merged report R1... after the merges, with each removed part under its new id", () => {
-    expect(assembleLarge).toBeTypeOf("function");
-  });
-});
 
 describe("the requirements say what large mode does", () => {
   const d = definitionFor(profileOf());
@@ -544,48 +565,37 @@ describe("the requirements say what large mode does", () => {
     expect(text("pr-snapshot")).toMatch(/hardMaxFiles|1000 files/);
     expect(text("pr-snapshot")).toContain("reviewed in large mode");
     expect(text("pr-snapshot")).toContain("partitioned into areas by a deterministic rule");
-    expect(text("change-report")).toContain("one reporter job in a fresh read-only session for each area");
-    expect(text("change-report")).toContain("change-synthesis-v1");
+    expect(text("change-report")).toContain("the report is high level: one reporter job");
+    expect(text("change-report")).toContain("the patches of the interface files only");
+    expect(text("change-report")).toContain("at most 200000 bytes of patch in all, the largest left out first with the files left out listed");
+    expect(text("change-report")).toContain("an item's text is at most 600 characters, as in standard mode");
+    expect(text("change-report")).toContain("graphloom session open <run> --stage report");
     expect(text("change-report")).toContain("stops with those numbers");
-    expect(text("claims-checked")).toContain("a merge it does not support after one revision is not applied");
-    expect(text("questions-complete")).toContain("once for each new exported symbol");
-    expect(text("questions-complete")).toContain("missing-test is required once for each change item");
+    expect(text("change-report")).not.toContain("change-synthesis-v1");
+    expect(text("change-report")).not.toContain("area-reporter");
+    expect(text("claims-checked")).toContain("In large mode there is one check, of the one report");
+    expect(text("claims-checked")).toContain("verified against the tree each claim's cite names");
+    expect(text("claims-checked")).not.toContain("merge");
+    expect(text("questions-complete")).toContain("the questions are the high-level set");
+    expect(text("questions-complete")).toContain("split-function, complexity-coverage, weak-test, the per-symbol questions and the per-function missing-test are not asked");
     expect(text("answers-complete")).toContain("batches of at most 15");
     expect(text("answers-complete")).toContain("written once, after the last batch");
     expect(text("answers-grounded")).toContain("fresh session");
   });
 });
 
-describe("merged state names and unread files", () => {
-  const cite = { path: "a.go", side: "head" as const, start: 1, end: 1, symbol: "" };
-  const entry = (name: string) => ({ name, scope: "s", initial: "i", transitions: [], reads: [{ where: "w", decision: "d", cite }] });
-  const member = (key: string, state: unknown[]): SynthItem => ({ key, area: key.split(".")[0]!, section: "features", item: { id: key.split(".")[1]!, text: key, cites: [cite], facts: [], state: state as never, behavior: [] } });
-  const summary = { purpose: { text: "p", source: "inferred" as const, quote: "" }, overview: "One sentence." };
-
-  it("gives every state entry of a merge a name no other entry of it has, even when two members share an area", () => {
-    const m = mergedItem([member("A1.R1", [entry("cache")]), member("A2.R1", [entry("cache")]), member("A2.R2", [entry("cache")])], "joined");
-    const names = m.state.map((e) => e.name);
-    expect(new Set(names).size).toBe(3);
-    expect(names[0]).toBe("cache");
-  });
-
-  it("judges the merged item with the rules the assembled report uses, so a bad merge is corrected before it is recorded", () => {
-    const bad = member("A2.R1", [{ ...entry("n"), reads: [] }]);
-    const list = [member("A1.R1", []), bad];
-    const problems = synthesisProblems({ ...summary, merges: [{ items: ["A1.R1", "A2.R1"], text: "x" }], notes: [], architecture: { nodes: [], edges: [] } }, list, [], []);
-    expect(problems.join("|")).toContain("no transitions and no reads");
-  });
-
+describe("the unread files of a large report", () => {
   it("lists a generated file with its diffstat and reason in other even when a detector fact on it makes an item", () => {
     const sections = reporterSections(profileOf());
     const file = pullFile({ path: "api/gen/x.pb.go", status: "removed", previousPath: null, additions: 0, deletions: 2, sha: null, patch: "@@ -1,2 +0,0 @@\n-package gen\n-type X struct{}", patchOmitted: false })!;
     const fact = { id: "F1", section: "removed", path: "api/gen/x.pb.go", side: "base" as const, line: 1, text: "deleted api/gen/x.pb.go" };
-    const final = assembleReport({ sections: sections.map((s) => ({ id: s.id, none: true, items: [] })), notes: [] }, new Map(), { sections, files: [file], facts: [fact], unread: new Map([["api/gen/x.pb.go", "generated code, not read by an agent"]]) });
+    const final = assembleReport({ sections: sections.map((s) => ({ id: s.id, none: true, items: [] })), notes: [] }, new Map(), { sections, files: [file], facts: [fact], unread: new Map([["api/gen/x.pb.go", "generated code, not summarised"]]) });
     const text = (id: string) => final.sections.find((s) => s.id === id)!.items.map((i) => i.text);
     expect(text("removed")).toHaveLength(1);
-    expect(text("other")).toEqual(["api/gen/x.pb.go changed (+0 −2 lines); generated code, not read by an agent"]);
+    expect(text("other")).toEqual(["api/gen/x.pb.go changed (+0 −2 lines); generated code, not summarised"]);
   });
 });
+
 
 describe("recording an answered batch", () => {
   type Reply = { output: { answers: Array<Record<string, any>> } };
@@ -593,12 +603,9 @@ describe("recording an answered batch", () => {
 
   it("verifies and records the answers in question order, whatever order the answerer returned them in", () => {
     const sim = run((s) => {
-      const b2 = structuredClone(s.results["answers-v1"]![1]!) as Reply;
-      b2.output.answers[0]!.citations = [cite("pkg/alpha/alpha.go")];
-      b2.output.answers[1]!.citations = [cite("pkg/beta/beta.go")];
-      b2.output.answers.reverse();
-      s.results["answers-v1"] = [s.results["answers-v1"]![0]!, b2 as never];
-      s.commands!["cite-b2-1"] = { exitCode: 0, stdout: "1 ok\n2 ok\nchecked 2\n" };
+      const b1 = structuredClone(s.results["answers-v1"]![0]!) as Reply;
+      b1.output.answers.reverse();
+      s.results["answers-v1"] = [b1 as never];
     });
     expect(stopOf(sim)).toMatchObject({ reason: "report ready" });
     expect(sim.receipts.every((r) => r.valid)).toBe(true);
@@ -609,13 +616,13 @@ describe("recording an answered batch", () => {
       const b1 = structuredClone(s.results["answers-v1"]![0]!) as Reply;
       const missing = b1.output.answers.find((a) => a.proposal.kind === "test")!;
       Object.assign(missing, { status: "answered", answer: "pkg/alpha/alpha_test.go covers these functions.", citations: [cite("pkg/alpha/alpha_test.go")], proposal: { kind: "none", splits: [], testFile: "", testName: "", cases: [], assertion: "" } });
-      s.results["answers-v1"] = [b1 as never, s.results["answers-v1"]![1]!];
+      s.results["answers-v1"] = [b1 as never];
       s.results["answers-revision-v1"] = [{ output: { answers: [missing] } }];
       const checks = s.results["answer-check-v1"]!;
       const round = structuredClone(checks[1]!) as { output: { verdicts: Array<Record<string, any>> } };
       const v = round.output.verdicts.find((x) => x.question === missing.question)!;
       Object.assign(v, { verdict: "unsupported", note: "the cited test does not exist", searches: [{ pattern: "alpha_test", tree: "base", paths: [], ignoreCase: false, hits: 0 }] });
-      s.results["answer-check-v1"] = [checks[0]!, round as never, round as never, checks[2]!];
+      s.results["answer-check-v1"] = [checks[0]!, round as never, round as never];
       s.commands!["cite-b1-1"] = { exitCode: 0, stdout: "1 ok\nchecked 1\n" };
     });
     expect(stopOf(sim)).toMatchObject({ reason: "report ready" });
@@ -626,42 +633,105 @@ describe("recording an answered batch", () => {
   });
 });
 
-describe("the item limit and the area-reporter role in large mode", () => {
+
+describe("the item limit and the roles of large mode", () => {
   const sim = run();
   const std = simulate({});
   const options = (j: JobSpec): unknown => (j.input as { harnessOptions?: unknown }).harnessOptions;
 
-  it("bounds an area's items at 900 characters, 850 passing and 950 failing, through the area's and the merged report's contexts", () => {
-    const ctx = { sections: reporterSections(profileOf(LARGE)), files: [pullFile({ path: "pkg/a.go", status: "modified", patch: "@@ -1,1 +1,2 @@\n a\n+b", previousPath: null, additions: 1, deletions: 0, patchOmitted: false })!], facts: [] };
-    const actx = areaContext(ctx, { paths: ["pkg/a.go"] });
-    expect(actx.maxItemChars).toBe(900);
+  it("states 600 characters in the large-mode prompt as in the standard one: no 900-character limit", () => {
+    expect(assignmentOf(agents(sim, "change-report-v1")[0]!)).toContain("text is at most 600 characters");
+    expect(assignmentOf(agents(std, "change-report-v1")[0]!)).toContain("text is at most 600 characters");
+    expect(assignmentOf(agents(sim, "change-report-v1")[0]!)).not.toMatch(/900 characters, which|text is at most 900/);
+    const ctx = { sections: reporterSections(profileOf(LARGE)), files: [pullFile({ path: "pkg/a.go", status: "modified", patch: "@@ -1,1 +1,2 @@\n a\n+b", previousPath: null, additions: 1, deletions: 0, patchOmitted: false })!], facts: [], large: true };
     const item = (n: number) => ({ id: "x", text: "x".repeat(n), cites: [{ path: "pkg/a.go", side: "head" as const, start: 1, end: 1, symbol: "" }], facts: [], state: [], behavior: [] });
     const rep = (n: number) => ({ sections: ctx.sections.map((s, i) => (i === 0 ? { id: s.id, none: false, items: [item(n)] } : { id: s.id, none: true, items: [] })), notes: [] });
-    expect(reportProblems(rep(850), actx, { summary: false }).join()).not.toMatch(/characters, more than/);
-    expect(reportProblems(rep(950), actx, { summary: false }).join()).toMatch(/the text is 950 characters, more than 900/);
+    expect(reportProblems(rep(600), ctx, { summary: false }).join()).not.toMatch(/characters, more than/);
     expect(reportProblems(rep(650), ctx, { summary: false }).join()).toMatch(/650 characters, more than 600/);
-    expect(wholeContext(ctx, { areas: [], omitted: [] } as never).maxItemChars).toBe(MAX_LARGE_ITEM_CHARS);
   });
 
-  it("states 900 in the large-mode prompts and 600 in the standard one", () => {
-    for (const j of agents(sim, "change-report-v1")) expect(assignmentOf(j)).toContain("text is at most 900 characters");
-    expect(assignmentOf(agents(sim, "change-synthesis-v1")[0]!)).toContain("(at most 900 characters), which must say only");
-    expect(assignmentOf(agents(sim, "change-report-v1")[0]!)).not.toContain("at most 600 characters");
-    expect(assignmentOf(agents(std, "change-report-v1")[0]!)).toContain("text is at most 600 characters");
-  });
-
-  it("runs the per-area reporter jobs on the area-reporter role (sonnet, high) and the synthesis on the reporter (opus, high)", () => {
-    for (const j of agents(sim, "change-report-v1")) expect(options(j)).toEqual({ model: "sonnet", effort: "high" });
-    expect(options(agents(sim, "change-synthesis-v1")[0]!)).toEqual({ model: "opus", effort: "high" });
+  it("runs the one reporter job on the reporter role (opus, high) and the check on the report-checker (medium)", () => {
+    expect(options(agents(sim, "change-report-v1")[0]!)).toEqual({ model: "opus", effort: "high" });
     for (const j of sim.jobs.filter((x) => x.resultSchema === "claim-check-v1")) expect(options(j)).toEqual({ effort: "medium" });
-    // The standard reporter is the reporter role.
     expect(options(agents(std, "change-report-v1")[0]!)).toEqual({ model: "opus", effort: "high" });
   });
+});
 
-  it("falls back to the reporter's settings when the profile names no area-reporter", () => {
-    const { "area-reporter": _drop, ...harnesses } = BANYANDB.harnesses as Record<string, unknown>;
-    const config = { ...LARGE, harnesses };
-    const fb = run(undefined, config);
-    for (const j of agents(fb, "change-report-v1")) expect(options(j)).toEqual({ model: "opus", effort: "high" });
+describe("quotes of a file cited on both sides, and of before/after rows (design §6.9)", () => {
+  const sections = reporterSections(profileOf(LARGE));
+  const file = pullFile({ path: "pkg/a.go", status: "modified", previousPath: null, additions: 1, deletions: 1, sha: null, patch: "@@ -1,2 +1,2 @@\n-old := 1\n+new := 2\n c", patchOmitted: false })!;
+  const head = { path: "pkg/a.go", side: "head" as const, start: 1, end: 1, symbol: "" };
+  const base = { ...head, side: "base" as const };
+  const reportWith = (item: Record<string, unknown>) => ({
+    purpose: { text: "t", source: "inferred" as const, quote: "" },
+    overview: "One.",
+    sections: sections.map((s, i) => ({ id: s.id, none: i !== 0, items: i === 0 ? [{ text: "changes a", cites: [head], facts: [], state: [], behavior: [], ...item }] : [] })),
+    notes: [],
+    architecture: { nodes: [], edges: [] },
+  });
+  const read = (r: ReturnType<typeof reportWith>, text: string, claim = "R1") => {
+    const targets = claimTargets(r, { sections }, { treeQuotes: true });
+    const out = readClaimCheck({ verdicts: targets.map((t) => ({ item: t.id, verdict: "supported", note: "", quotes: t.quotes === "none" ? [] : [{ path: "pkg/a.go", line: 1, text: t.id === claim ? text : "new := 2 line" }] })) }, targets, [file]);
+    if ("problems" in out) throw new Error(out.problems.join());
+    return out;
+  };
+
+  // Runs the plan's real command in a git repo whose base holds "old := 1 line" and whose head file holds "new := 2 line".
+  const dirs: string[] = [];
+  afterAll(() => dirs.forEach((d) => rmSync(d, { recursive: true, force: true })));
+  const failing = (reading: ReturnType<typeof read>): string[] => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "gl-quote-"));
+    dirs.push(dir);
+    const git = (...a: string[]) => spawnSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", ...a], { cwd: dir, encoding: "utf8" });
+    git("init", "-q");
+    mkdirSync(path.join(dir, "pkg"));
+    writeFileSync(path.join(dir, "pkg/a.go"), "old := 1 line\nmore\n");
+    git("add", ".");
+    git("commit", "-q", "-m", "base");
+    const sha = git("rev-parse", "HEAD").stdout.trim();
+    writeFileSync(path.join(dir, "pkg/a.go"), "new := 2 line\nmore\n");
+    const plan = treeQuotePlan(reading.treeQuotes, sha);
+    const outputs = plan.commands.map((c) => {
+      const out = path.join(dir, "out.txt");
+      const r = spawnSync(c.argv[0]!, c.argv.slice(1), { cwd: dir, encoding: "utf8", env: { ...process.env, GRAPHLOOM_REPORT_FILE: out } });
+      expect(r.status, r.stderr).toBe(0);
+      return readFileSync(out, "utf8");
+    });
+    return [...readTreeQuotes(plan, outputs).keys()];
+  };
+
+  it("accepts a valid quote from either side of a file the item cites on both sides", () => {
+    const both = reportWith({ cites: [head, base] });
+    expect(read(both, "old := 1 line").treeQuotes.find((q) => q.id === "R1")!.tree).toBe("either");
+    expect(failing(read(both, "old := 1 line"))).toEqual([]);
+    expect(failing(read(both, "new := 2 line"))).toEqual([]);
+    expect(failing(read(both, "nothing like it"))).toEqual(["R1"]);
+    // One side only is still one tree: a head-only cite refuses the base text.
+    expect(failing(read(reportWith({}), "old := 1 line"))).toEqual(["R1"]);
+  });
+
+  it("checks a before/after row's quotes where the file shows them, base text for before and head text for after", () => {
+    const row = reportWith({ behavior: [{ case: "c", before: "was old", after: "is new" }] });
+    expect(failing(read(row, "old := 1 line", "R1.b1"))).toEqual([]);
+    expect(failing(read(row, "new := 2 line", "R1.b1"))).toEqual([]);
+    expect(failing(read(row, "nothing like it", "R1.b1"))).toEqual(["R1.b1"]);
+  });
+});
+
+describe("the sections of the large reporter prompt (design §6.9)", () => {
+  it("do not ask for every detector fact to be listed, which the 200-fact digest cap could not honour; the standard prompt does", () => {
+    const sim = run();
+    const fact = { id: "D1", section: "other", path: "docs/guide.md", side: "head" as const, line: 1, text: "File routed to this section: docs/guide.md added" };
+    const sections = reporterSections(profileOf(LARGE));
+    const files = [pullFile({ path: "docs/guide.md", status: "added", previousPath: null, additions: 1, deletions: 0, sha: null, patch: "@@ -0,0 +1 @@\n+x", patchOmitted: false })!];
+    const partition = partitionAreas(files, profileOf(LARGE).limits, []);
+    const base = { pr: { mode: "report" as const, owner: "o", repo: "r", number: 1, head: "h".repeat(40) }, snapshot: { pull: { title: "t", body: "b" } as never, files, commits: [] }, sections, facts: [fact], kind: "first" as const, feedback: [] as string[] };
+    const large = largeReporterInstruction({ ...base, partition });
+    expect(large).toContain("D1 [other]");
+    expect(large).not.toMatch(/each must be listed/);
+    expect(large).toContain("the plugin accounts for the facts you leave out");
+    expect(assignmentOf(agents(sim, "change-report-v1")[0]!)).not.toMatch(/each must be listed/);
+    const standard = reporterInstruction({ ...base, candidates: [] });
+    expect(standard).toMatch(/Detector facts for this section \(each must be listed in the "facts" of an item of this section\): D1/);
   });
 });

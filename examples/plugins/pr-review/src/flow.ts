@@ -30,7 +30,7 @@ export type ReportFlow =
   | { state: "verify"; commands: EnvironmentCommand[] }
   | { state: "checker"; report: ReporterOutput; retry: boolean; /** The plugin's import notes for the architecture claims, by claim id (design §6.10). */ archNotes: ReadonlyMap<string, string> }
   | { state: "supervise"; reason: string; refs: string[] }
-  | { state: "done"; report: ReporterOutput; final: FinalReport; reading: ClaimReading; refs: string[]; /** Large mode: the areas, the unread files and the merges (design §6.9). */ info?: LargeInfo };
+  | { state: "done"; report: ReporterOutput; final: FinalReport; reading: ClaimReading; refs: string[]; /** Large mode: the areas and the files without a patch (design §6.9). */ info?: LargeInfo };
 
 const isObject = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === "object" && !Array.isArray(v);
 
@@ -81,7 +81,7 @@ function salvage(output: unknown): ReporterOutput | undefined {
   };
 }
 
-/** What a reporter run gives: a valid result, the problems with it, or nothing (its job did not complete). `check` replaces the standard deterministic rules (an area's report has no summary). */
+/** What a reporter run gives: a valid result, the problems with it, or nothing (its job did not complete). */
 export function reporterResult(run: AgentRun, ctx: ReportContext, check: (output: ReporterOutput) => string[] = (o) => reportProblems(o, ctx)): { output: ReporterOutput } | { problems: string[] } | undefined {
   if (run.status !== "completed") return undefined;
   if (run.contract?.status === "invalid") {
@@ -106,7 +106,7 @@ export type StageEvent = { kind: "reporter" | "checker"; run: AgentRun } | { kin
 
 /**
  * The reporter and checker runs of the given result schemas that came after evidence position `from`, oldest
- * first. A large report's areas and its synthesis each look at the runs after the previous record (design §6.9).
+ * first.
  */
 export function stageEvents(evidence: readonly EvidenceRecord[], reporterSchemas: readonly string[], from = -1): StageEvent[] {
   const index = new Map(evidence.map((e, i) => [e.ref, i]));
@@ -120,7 +120,7 @@ export function stageEvents(evidence: readonly EvidenceRecord[], reporterSchemas
   return events.filter((e) => at(e.run) > from).sort((a, b) => at(a.run) - at(b.run));
 }
 
-/** What a stage (a report, an area's report, the synthesis) is judged by: how to read a reporter run, what claims its output makes, and which files its quotes may come from. */
+/** What a stage (the report) is judged by: how to read a reporter run, what claims its output makes, and which files its quotes may come from. */
 export interface StageSpec<T> {
   result(run: AgentRun): { output: T } | { problems: string[] } | undefined;
   targets(output: T, archNotes?: ReadonlyMap<string, string>): ClaimTarget[];
@@ -305,7 +305,7 @@ export function stageStep<T>(rep: StageReplay<T>, spec: StageSpec<T>, names: Sta
 export function reportSpec(ctx: ReportContext): StageSpec<ReporterOutput> {
   return {
     result: (run) => reporterResult(run, ctx),
-    targets: (output, archNotes) => claimTargets(output, ctx, { ...(archNotes !== undefined ? { archNotes } : {}) }),
+    targets: (output, archNotes) => claimTargets(output, ctx, { ...(archNotes !== undefined ? { archNotes } : {}), ...(ctx.large === true ? { treeQuotes: true } : {}) }),
     files: ctx.files,
     verify: (output) => architecturePlan(output.architecture, ctx.base),
     quotes: (treeQuotes) => treeQuotePlan(treeQuotes, ctx.base),

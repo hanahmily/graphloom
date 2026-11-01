@@ -6,7 +6,7 @@ import { pinnedBase } from "./commands.js";
 import type { CommandRun } from "./evidence.js";
 import { detectFacts, type Fact } from "./detectors.js";
 import { reportFlow, type ReportFlow } from "./flow.js";
-import { largeReportFlow, type LargeFlow } from "./large.js";
+import { largeContext, largeReportFlow } from "./large.js";
 import { pinnedTexts } from "./questions.js";
 import { detectStateCandidates } from "./statecandidates.js";
 import { READS, readResult, snapshotState, type Snapshot } from "./snapshot.js";
@@ -46,14 +46,16 @@ export function analyze(evidence: readonly EvidenceRecord[], profile: Profile, p
   const sections = reporterSections(profile);
   const facts = detectFacts(s.snapshot.files, profile);
   const base = pinnedBase(evidence);
-  return { state: "ready", analysis: { snapshot: s.snapshot, sections, facts, ctx: { sections, files: s.snapshot.files, facts, pinned: pinnedTexts(s.snapshot.pull, s.snapshot.commits), candidates: detectStateCandidates(s.snapshot.files), ...(base !== undefined ? { base } : {}) } } };
+  const ctx: ReportContext = { sections, files: s.snapshot.files, facts, pinned: pinnedTexts(s.snapshot.pull, s.snapshot.commits), candidates: detectStateCandidates(s.snapshot.files), ...(base !== undefined ? { base } : {}) };
+  const partition = s.snapshot.partition;
+  return { state: "ready", analysis: { snapshot: s.snapshot, sections, facts, ctx: s.snapshot.mode.mode === "large" && partition !== undefined ? largeContext(ctx, partition) : ctx } };
 }
 
 /**
- * Where the report stands: the standard flow, or in large mode the flow of the areas and the synthesis (design §6.9).
- * The graph and the validators both ask this, over the evidence they hold.
+ * Where the report stands: the standard flow, which in large mode runs over the large context and ends with the account
+ * of the areas (design §6.9). The graph and the validators both ask this, over the evidence they hold.
  */
-export function reportFlowOf(evidence: readonly EvidenceRecord[], analysis: Analysis, retryable?: (r: CommandRun) => boolean): ReportFlow | LargeFlow {
+export function reportFlowOf(evidence: readonly EvidenceRecord[], analysis: Analysis, retryable?: (r: CommandRun) => boolean): ReportFlow {
   const partition = analysis.snapshot.partition;
   return analysis.snapshot.mode.mode === "large" && partition !== undefined ? largeReportFlow(evidence, analysis.ctx, partition, retryable) : reportFlow(evidence, analysis.ctx, retryable);
 }

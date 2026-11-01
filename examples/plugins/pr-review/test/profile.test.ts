@@ -24,7 +24,7 @@ describe("the BanyanDB profile", () => {
     expect(p.project).toBe("apache/skywalking-banyandb");
     expect([p.owner, p.repo]).toEqual(["apache", "skywalking-banyandb"]);
     expect(p.limits).toEqual({ maxFiles: 150, maxPatchBytes: 1024 * 1024, maxNewSymbols: 200, hardMaxFiles: 1000, hardMaxPatchBytes: 8 * 1024 * 1024, hardMaxNewSymbols: 2000, areaMaxBytes: 256 * 1024, areaMinBytes: 16 * 1024 });
-    expect(p.roles).toEqual({ reporter: "claude-code", "area-reporter": "claude-code", diagrammer: "claude-code", "report-checker": "codex", questioner: "codex", answerer: "claude-code", "answer-checker": "codex" });
+    expect(p.roles).toEqual({ reporter: "claude-code", diagrammer: "claude-code", "report-checker": "codex", questioner: "codex", answerer: "claude-code", "answer-checker": "codex" });
     expect(p.metrics.coverage).toBe(true);
     expect(p.metrics.mutation.enabled).toBe(true);
     expect(p.supervisorPreference.harnesses).toEqual(["pi", "claude-code", "codex"]);
@@ -47,16 +47,15 @@ describe("the BanyanDB profile", () => {
     ]);
     expect(d.requirements.map((r) => r.id)).toEqual(d.defaultValidators.map((b) => b.requirementId));
     expect(new Set(d.requirements.map((r) => r.id)).size).toBe(9);
-    expect(d.resultContracts!.map((c) => [c.name, c.evidenceKind])).toEqual([["change-report-v1", "other"], ["change-report-revision-v1", "other"], ["change-synthesis-v1", "other"], ["change-synthesis-revision-v1", "other"], ["diagrams-v1", "other"], ["claim-check-v1", "review"], ["questions-v1", "other"], ["answers-v1", "other"], ["answers-revision-v1", "other"], ["necessity-v1", "other"], ["necessity-revision-v1", "other"], ["answer-check-v1", "review"]]);
+    expect(d.resultContracts!.map((c) => [c.name, c.evidenceKind])).toEqual([["change-report-v1", "other"], ["change-report-revision-v1", "other"], ["diagrams-v1", "other"], ["claim-check-v1", "review"], ["questions-v1", "other"], ["answers-v1", "other"], ["answers-revision-v1", "other"], ["necessity-v1", "other"], ["necessity-revision-v1", "other"], ["answer-check-v1", "review"]]);
   });
 
   it("declares the roles with their distinctFrom pairs, the supervisor preference and the budgets", () => {
     const d = definitionFor(profileOf());
     expect(d.agentRoles).toEqual([
       { role: "reporter", harness: "claude-code", access: "read", setting: "harnesses.reporter" },
-      { role: "area-reporter", harness: "claude-code", access: "read", setting: "harnesses.area-reporter (optional; falls back to harnesses.reporter)" },
       { role: "diagrammer", harness: "claude-code", access: "read", setting: "harnesses.diagrammer (optional; falls back to harnesses.reporter)" },
-      { role: "report-checker", harness: "codex", access: "read", distinctFrom: ["reporter", "area-reporter"], setting: "harnesses.report-checker" },
+      { role: "report-checker", harness: "codex", access: "read", distinctFrom: ["reporter"], setting: "harnesses.report-checker" },
       { role: "questioner", harness: "codex", access: "read", distinctFrom: ["reporter"], setting: "harnesses.questioner" },
       { role: "answerer", harness: "claude-code", access: "read", distinctFrom: ["questioner"], setting: "harnesses.answerer" },
       { role: "answer-checker", harness: "codex", access: "read", distinctFrom: ["answerer"], setting: "harnesses.answer-checker" },
@@ -126,30 +125,19 @@ describe("profile refusals", () => {
     const ids = { reporter: "claude-code", "report-checker": "codex", questioner: "codex", answerer: "claude-code", "answer-checker": "codex" };
     expect(profileOf({ harnesses: ids }).roleSettings).toEqual({});
     // The BanyanDB profile pins Opus at high effort for the authors and medium effort for the Codex checkers.
-    expect(profileOf().roleSettings).toEqual({ reporter: { model: "opus", effort: "high" }, "area-reporter": { model: "sonnet", effort: "high" }, diagrammer: { model: "opus", effort: "high" }, answerer: { model: "opus", effort: "high" }, "report-checker": { effort: "medium" }, questioner: { effort: "medium" }, "answer-checker": { effort: "medium" } });
+    expect(profileOf().roleSettings).toEqual({ reporter: { model: "opus", effort: "high" }, diagrammer: { model: "opus", effort: "high" }, answerer: { model: "opus", effort: "high" }, "report-checker": { effort: "medium" }, questioner: { effort: "medium" }, "answer-checker": { effort: "medium" } });
     const p = profileOf({ harnesses: { reporter: { harness: "claude-code", model: "opus", effort: "max" }, "report-checker": { harness: "codex", effort: "minimal" }, questioner: { harness: "codex" }, answerer: "claude-code" } });
-    expect(p.roles).toEqual({ reporter: "claude-code", "area-reporter": "claude-code", diagrammer: "claude-code", "report-checker": "codex", questioner: "codex", answerer: "claude-code", "answer-checker": "codex" });
-    // With no area-reporter or diagrammer named they take the reporter's settings.
-    expect(p.roleSettings).toEqual({ reporter: { model: "opus", effort: "max" }, "area-reporter": { model: "opus", effort: "max" }, diagrammer: { model: "opus", effort: "max" }, "report-checker": { effort: "minimal" } });
+    expect(p.roles).toEqual({ reporter: "claude-code", diagrammer: "claude-code", "report-checker": "codex", questioner: "codex", answerer: "claude-code", "answer-checker": "codex" });
+    // With no diagrammer named it takes the reporter's settings.
+    expect(p.roleSettings).toEqual({ reporter: { model: "opus", effort: "max" }, diagrammer: { model: "opus", effort: "max" }, "report-checker": { effort: "minimal" } });
   });
 
-  it("takes an optional area-reporter as a string or an object, falling back to the reporter, and keeps it apart from the report-checker", () => {
+  it("refuses area-reporter: large mode has one reporter job, so the role is gone and an unknown role is refused", () => {
     const base = { reporter: { harness: "claude-code", model: "opus", effort: "high" }, "report-checker": "codex" };
-    const str = profileOf({ harnesses: { ...base, "area-reporter": "pi" } });
-    expect(str.roles["area-reporter"]).toBe("pi");
-    expect(str.roleSettings["area-reporter"]).toBeUndefined();
-    const obj = profileOf({ harnesses: { ...base, "area-reporter": { harness: "claude-code", model: "sonnet", effort: "high" } } });
-    expect(obj.roles["area-reporter"]).toBe("claude-code");
-    expect(obj.roleSettings["area-reporter"]).toEqual({ model: "sonnet", effort: "high" });
-    const none = profileOf({ harnesses: base });
-    expect(none.roles["area-reporter"]).toBe("claude-code");
-    expect(none.roleSettings["area-reporter"]).toEqual({ model: "opus", effort: "high" });
-    // The report-checker checks the area reporters' output, so it differs from the area-reporter's harness (the reporter's stays codex-free here).
-    expect(refused({ harnesses: { ...base, "area-reporter": "codex" } })).toMatch(/report-checker must differ from harnesses.area-reporter \(both are codex\)/);
-    expect(refused({ harnesses: { ...base, "area-reporter": { harness: "codex", effort: "low" } } })).toMatch(/report-checker must differ from harnesses.area-reporter/);
-    expect(refused({ harnesses: { ...base, "area-reporter": { harness: "claude-code", temperature: 1 } } })).toMatch(/harnesses\.area-reporter\.temperature is not a field/);
-    expect(refused({ harnesses: { ...base, "area-reporter": { harness: "claude-code", effort: "minimal" } } })).toMatch(/area-reporter\.effort must be one of/);
-    expect(refused({ harnesses: { ...base, "area-reporter": "gpt" } })).toMatch(/must be one of/);
+    expect(refused({ harnesses: { ...base, "area-reporter": "claude-code" } })).toMatch(/harnesses\.area-reporter is not a role/);
+    expect(refused({ harnesses: { ...base, "area-reporter": { harness: "claude-code", model: "sonnet", effort: "high" } } })).toMatch(/harnesses\.area-reporter is not a role/);
+    expect(definitionFor(profileOf()).agentRoles!.map((r) => r.role)).not.toContain("area-reporter");
+    expect(profileOf({ harnesses: base }).roles).not.toHaveProperty("area-reporter");
   });
 
   it("checks a role's effort against its harness, and refuses unknown keys and a Pi object", () => {

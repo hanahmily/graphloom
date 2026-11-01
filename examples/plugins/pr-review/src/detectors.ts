@@ -40,7 +40,7 @@ const DEPRECATED = /\/\/\s*Deprecated:|@deprecated\b|\bdeprecated\s*=\s*true\b|\
 const GO_DECL = /^func\s+(?:\([^)]*\)\s*)?([A-Z]\w*)\s*[(\[]|^type\s+([A-Z]\w*)\b/;
 const TS_DECL = /^export\s+(?:default\s+)?(?:declare\s+)?(?:async\s+)?(?:function\*?|class|interface|type|const|let|enum|abstract class)\s+(\w+)/;
 
-function declName(text: string): string | undefined {
+export function declName(text: string): string | undefined {
   const g = GO_DECL.exec(text);
   if (g !== null) return g[1] ?? g[2];
   return TS_DECL.exec(text)?.[1];

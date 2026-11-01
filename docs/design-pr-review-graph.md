@@ -234,7 +234,7 @@ meaning and parser (review-kit, [§14](#14-sharing-code-with-issue-fix)).
 | `checks` | Optional commands, run only in the Docker sandbox (`checks.sandbox`, same shape as `metrics.sandbox`) ([§8.3](#83-checks)). Absent means there is no Checks stage |
 | `comments` | `minSeverity` (default `P2`), `nits` (false), `questions` (pre-select `needs author` items as draft comments, true), `maxComments` (30), `suggestions.maxLines` (10), optional `footer` |
 | `privateRepos` | Never named in posted text (issue-fix's `withoutPrivateReferences`, `src/prompts.ts:325`) |
-| `harnesses` | each role takes a harness id or `{ harness, model?, effort? }` ([§13.1](#131-roles)): `reporter`, `area-reporter` (optional: large mode's per-area reporter jobs only; absent, it takes the reporter's harness, model and effort; `report-checker` must differ from it), `diagrammer` (optional: the diagram job only; absent, it takes the reporter's harness, model and effort), `questioner`, `answerer` (`claude-code` or `codex` only), `report-checker`, `answer-checker`, and `verifier-<aspect>` for `correctness`, `maintainability` and `security`. There is no `reviewer-<aspect>` key: the reviewers run on the answerer's harness, and a profile that names one is refused ([§13.1](#131-roles)) |
+| `harnesses` | each role takes a harness id or `{ harness, model?, effort? }` ([§13.1](#131-roles)): `reporter`, `diagrammer` (optional: the diagram job only; absent, it takes the reporter's harness, model and effort), `questioner`, `answerer` (`claude-code` or `codex` only), `report-checker`, `answer-checker`, and `verifier-<aspect>` for `correctness`, `maintainability` and `security`. There is no `reviewer-<aspect>` key: the reviewers run on the answerer's harness, and a profile that names one is refused ([§13.1](#131-roles)) |
 | `supervisor`, `budgets` | As in issue-fix ([§13](#13-agent-roles-supervisor-budgets)) |
 | `limits` | `maxFiles` (150), `maxPatchBytes` (1 MiB), `maxNewSymbols` (200): past one, the pull request is reviewed in large mode ([§6.9](#69-large-pull-requests), [§7.6](#76-questions-in-large-mode)). `hardMaxFiles` (1000), `hardMaxPatchBytes` (8 MiB), `hardMaxNewSymbols` (2000): past one, the run stops "incompatible task" and names the size. `areaMaxBytes` (256 KiB) and `areaMinBytes` (16 KiB) shape the areas. Each is a positive integer; a `max*` may not exceed its hard cap, nor `areaMinBytes` the `areaMaxBytes` |
 
@@ -520,10 +520,12 @@ see, relies on the reporter's prompt and on the checker.
   prompts still say to describe what the code does, factually, and the
   checkers judge each claim for support, not for tone.
 - **Bounds:** at most 40 items per section and 600 characters per item, all
-  within the 256 KiB evidence bound. In large mode ([§6.9](#69-large-pull-requests))
-  an item is at most 900 characters (`MAX_LARGE_ITEM_CHARS`), in an area's
-  report and in a merged item alike, because one item there often summarises a
-  whole area's change; the prompts state the limit of their mode.
+  within the 256 KiB evidence bound, in every mode: large mode has no larger item.
+- **Large mode** ([§6.9](#69-large-pull-requests)) is high level, so two rules
+  are relaxed: a changed file no item cites, and a detector fact no item lists,
+  are not problems (the plugin accounts for them in `other` and with its own
+  fact items), and no state candidate needs a lifecycle entry. Every other rule
+  is the standard one, including citations inside the file's hunks.
 
 ### 6.6 Output
 
@@ -761,40 +763,86 @@ the report's header.
 Each area has an id (`A1`, `A2`, ... in path order), its paths and its sizes,
 recorded in the snapshot.
 
-**Report.**
+**Report.** The report of a large pull request is **high level**: the maintainer
+decided that large mode does not read the detail of each area, and that diving
+into an area is something they ask for (see "Dive into an area" below).
 
-1. One reporter job per area (`change-report-v1`, fresh read-only session per
-   area, on the optional `area-reporter` role's harness, model and effort, and
-   on the `reporter`'s when the profile names no `area-reporter`;
-   [§13.1](#131-roles)). An area's items and the synthesis' merged items may be
-   900 characters (§6.5). It gets the whole file list with diffstat, the PR text, the facts
-   and state candidates of its files, and its own area's patches. It returns
-   `sections` and `notes` for its area only; `purpose` and `overview` are
-   empty.
-2. Deterministic validation and the claim check (§6.4, §6.5) run per area, with
-   the same correction and removal rules.
-3. One **synthesis** job (`change-synthesis-v1`, fresh session, reporter
-   harness) gets the checked items of every area (not the patches), the file
-   list and the PR text. It returns `purpose`, `overview`, `merges` (groups of
-   item ids that are one conceptual change across areas; a merged item's text
-   is rewritten, its cites, state and behavior are the union) and
-   `architecture` ([§6.10](#610-architecture-diagram)).
-4. The checker checks the synthesis claims (`purpose`, `overview`, each merge,
-   each architecture node and edge) in one job.
-5. Items are numbered `R1`... after merges, in section order.
+1. **One reporter job** (`change-report-v1`, the `reporter` role, a fresh
+   session, confined read-only with the head and base trees available as for the
+   standard reporter: the working tree is the head, the pinned base commit is
+   `HEAD`). It is given a bounded **digest**, not the diff:
+   - the PR title, body and commit messages, as untrusted blocks ([§12.1](#121-pull-request-content-is-data));
+   - the areas: id, name, files, lines added and deleted, patch bytes, and the
+     names (only) of the exported symbols each adds, computed from the patches
+     (Go: an added `func Name` or `type Name` with an upper-case first letter;
+     TypeScript: an added `export ...`; test files add none; a generated area
+     lists none);
+   - the file list with its diffstat, grouped by area;
+   - the detector facts the Report stage computes;
+   - the patches of the **interface files** only: the files the profile's
+     `schema`, `config` and `interfaces` routing globs match, `**/*.proto`,
+     `CHANGES.md` and `docs/**`, at most 200,000 bytes of patch in all. Over the cap, the
+     largest patch is left out first, then the next largest, and the note
+     lists the files left out. The whole input also has to fit an executor's
+     input bound (256,000 bytes once serialized), so the cap shrinks when the file
+     list is long; the file list and the facts are cut at fixed sizes with
+     their counts.
 
-**Budgets.** Before the first reporter job, the graph computes the jobs and
-agent invocations large mode needs (areas × (reporter + checker) + synthesis +
-its check, plus the Questions and Answers estimate of §7.6) and stops with the
-numbers if the run's remaining budget cannot cover them, so the maintainer can
-raise the profile's `budgets` instead of losing a run halfway.
+   The instruction says: describe the PR at a high level: the purpose, an
+   overview, one item per conceptual change (usually one per area or per
+   subsystem), the template sections and the architecture
+   ([§6.10](#610-architecture-diagram)). State lifecycles and before/after rows are not
+   required (empty arrays are allowed). The reporter may open any file of the
+   head or the base read-only to confirm a claim, and every item cites the files
+   and lines it rests on; those lines still lie in the file's hunks of the PR's
+   diff, whether or not the patch was given to the reporter. An item is at most
+   600 characters, as everywhere. The reporter need not cite every changed file or
+   list every detector fact: a file no item cites is listed in `other` with its
+   diffstat, a fact no item lists gets a plugin-written item, and the generated
+   area and a file GitHub gave no patch for are listed in `other` with the reason.
+2. **One claim check** (the `report-checker` role, [§6.4](#64-writing-and-checking))
+   over that report. Because an item may cite lines that no patch given to the
+   reporter holds, a claim's quotes are **verified against the cited tree**, not
+   against the patch: each quote must be on a line of the file its cite names, in
+   the tree that cite names (the head's working tree, or the base commit's file;
+   a claim with no cite quotes the head), within three lines of the line given
+   (whitespace collapsed). It reuses the check of the architecture claims'
+   quotes ([§6.10](#610-architecture-diagram), `arch-quote` commands, one job for up to 14
+   quotes), so a quote the tree does not show makes its claim unsupported, with
+   the revision and removal rules of §6.4. A quote from a file the claim does not
+   cite is refused.
+3. The **diagrams** ([§6.10](#610-architecture-diagram), [§6.11](#611-the-html-report))
+   are drawn from the checked report as in standard mode.
+4. Items are numbered `R1`... in section order. `report.json` records the mode,
+   the limit passed, the areas with the number of items that cite each, and the
+   files without a patch; there are no merges and no area records.
+
+**Dive into an area.** `review.md` and `review.html` end the Report with a
+"Dive into an area" block: the areas table and the command
+
+```sh
+graphloom session open <run> --stage report
+```
+
+which opens a fork of the reporter's recorded session ([§17](#17-discussing-a-run-graphloom-session-open)),
+saying that the reporter's session already has the PR's digest and can read any
+file. The run id is not in what the validators see, so the file says `<run>`.
+There is no new command. A Pi reporter has no interactive restore, so the
+maintainer who wants this uses `claude-code` or `codex` for the `reporter`.
+
+**Budgets.** Before the reporter job, the graph computes the jobs and agent
+invocations large mode needs (the reporter and its check with the commands that
+verify its quotes, the diagram job, plus the Questions and Answers estimate of
+§7.6: two items an area, five questions an item, in batches of 15) and stops
+with the numbers if the run's remaining budget cannot cover them, so the
+maintainer can raise the profile's `budgets` instead of losing a run halfway.
+It is a floor: corrections and retries come on top.
 
 ### 6.10 Architecture diagram
 
 Every report, standard or large, has an architecture diagram of what the pull
 request changes: the components it adds or modifies, the components they
-connect to, and the connections. In standard mode the reporter returns it with
-the report; in large mode the synthesis job does.
+connect to, and the connections. The reporter returns it with the report.
 
 ```text
 architecture: {
@@ -830,8 +878,7 @@ is drawn for the HTML report ([§6.11](#611-the-html-report)) by the **diagram
 job**, with the vendored diagram-design skill ([§12.4](#124-the-vendored-diagram-design-skill)),
 and the plugin's own SVG is only the fallback:
 
-- **The job.** After the claim check (the report's, or the synthesis' in large
-  mode), one read-only agent job (`diagrams-v1`, fresh session `diagrammer`, on
+- **The job.** After the claim check, one read-only agent job (`diagrams-v1`, fresh session `diagrammer`, on
   the optional `diagrammer` role's harness, model and effort, the `reporter`'s
   when the profile names none; [§13.1](#131-roles)) receives only the checked
   data: the nodes (id, label, kind, change) and edges (from, to, label, kind,
@@ -963,6 +1010,9 @@ Architecture delta shows whole on a page 1100 to 1400 pixels wide.
    answered, needs author), the answer, its evidence and the checker's
    judgment, collapsed by default except "needs author".
 9. **Removed by the claim check** and notes.
+
+In large mode the Report card ends with **Dive into an area** ([§6.9](#69-large-pull-requests)):
+the areas table and the command that opens the reporter's session.
 
 The stop message names `review.html` first: "the report is
 `.graphloom/review/review.html`; `review.md` beside it is its plain-text copy for
@@ -1583,17 +1633,21 @@ it): offline-idempotent."
 
 ### 7.6 Questions in large mode
 
-In large mode (§6.9) the required questions follow the same rules as §7.1,
-except where this table says otherwise. N1 is unchanged.
+In large mode ([§6.9](#69-large-pull-requests)) the report is high level, and so
+are the questions. N1 is unchanged. Then, **per change item**:
 
 | Type | Required for, in large mode |
 |---|---|
 | `purpose` | Unchanged: every change item whose purpose the PR text does not state |
-| `existing-equivalent`, `reuse-library`, `common-logic` | Once per **change item** (about the mechanism the item adds; the question names the item's new symbols), and once per **new exported symbol** (Go: an identifier starting with an upper-case letter; TypeScript: exported). New unexported symbols get none of the three on their own: they are listed in their item's question |
-| `missing-test` | Once per change item, listing every new or modified function of the item the test map finds no covering test for |
-| `split-function` | Unchanged: every changed function over the complexity or nesting limit |
-| `complexity-coverage` | Unchanged: every changed function the §7.1 rule selects |
-| `weak-test` | Unchanged: each surviving mutant |
+| `existing-equivalent`, `reuse-library`, `common-logic` | Once per **change item** that adds a symbol, about the mechanism the item adds. The question may name the item's new **exported** symbols (Go: an identifier starting with an upper-case letter; TypeScript: exported); the unexported ones are only counted in it |
+| `missing-test` | Once per change item: "which tests cover it", listing every new or modified function of the item the test map finds no covering test for |
+
+**Not asked in large mode:** `split-function`, `complexity-coverage`, `weak-test`,
+the trio for each exported symbol, and `missing-test` for each function. The
+**measurements still run and show every function**, the over-limit ones visible
+in the table ([§6.8](#68-measurements)), so the maintainer sees them without being
+asked about each. A maintainer who wants a function looked at asks for it in the
+reporter's session ([§6.9](#69-large-pull-requests)).
 
 **Answers in batches.** The answerer answers the questions of a few change
 items per job (at most 15 questions), continuing its own session from one batch
@@ -2474,10 +2528,9 @@ the review base session ([§8.1](#81-review)).
 
 | Role | Default harness | Access | Constraint |
 |---|---|---|---|
-| `reporter` | `claude-code` | read | Writes the neutral report and the draft summary |
-| `area-reporter` | the `reporter`'s | read | Optional. Large mode's per-area reporter jobs only (a fresh session per area; [§6.9](#69-large-pull-requests)). Absent, it takes the reporter's harness, model and effort. The synthesis job keeps the `reporter` role |
+| `reporter` | `claude-code` | read | Writes the neutral report and the draft summary; in large mode the one high-level reporter job ([§6.9](#69-large-pull-requests)), whose session the maintainer opens to dive into an area (`claude-code` or `codex`: a Pi session cannot be opened) |
 | `diagrammer` | the `reporter`'s | read | Optional. The diagram job only ([§6.10](#610-architecture-diagram)): it draws the checked architecture and lifecycle entries with the vendored diagram-design skill, fresh session, one correction in the same session. Absent, it takes the reporter's harness, model and effort. No `distinctFrom`: its drawings are checked by code (the skill's checks, inertness, the label rule), and it receives only data the claim check already judged |
-| `report-checker` | `codex` | read | `distinctFrom: ["reporter", "area-reporter"]` |
+| `report-checker` | `codex` | read | `distinctFrom: ["reporter"]` |
 | `questioner` | `codex` | read | `distinctFrom: ["reporter"]`. Asks only |
 | `answerer` | `claude-code` | read | `distinctFrom: ["questioner"]`. Claude Code or Codex only. Answers N1 first, in the Questions stage (`necessity-v1`), then the other questions from the whole codebase |
 | `answer-checker` | `codex` | read | `distinctFrom: ["answerer"]`. Verifies N1's cited design statements, trace steps and conclusion, then the other answers |
@@ -2518,7 +2571,6 @@ from its preference list that differs from its `distinctFrom` partner's:
 | `answerer` | claude-code, codex |
 | `questioner` | codex, pi, claude-code, skipping the answerer's |
 | `reporter` | claude-code, codex, pi, skipping the questioner's |
-| `area-reporter` | the reporter's, unless the profile sets it |
 | `diagrammer` | the reporter's, unless the profile sets it |
 | `report-checker`, `answer-checker` | codex, pi, claude-code, skipping its author's |
 | `reviewer-<aspect>` | the answerer's |
@@ -2710,9 +2762,9 @@ recorded, so they do not decide CI verdicts.
 | `needs-author-purpose` | A new config flag; nothing in the PR text, commits, issue or code comments says why | A `purpose` question answered `needs author`, listing what was read; marked in `review.md`; offered as a draft comment in the review layer |
 | `purpose-stated` | The PR body states why the flag is added | A purpose record `stated` with the matching quote; no `purpose` question |
 | `missing-test` | A new exported function that no test references; the questioner omits the question | The plugin adds the required `missing-test` question; the answerer's whole-repository search finds no test → `needs author`, naming the package's `_test.go` |
-| `large-pull-request` | Run with `limits: { maxFiles: 2, areaMaxBytes: 500, areaMinBytes: 1 }` (`LARGE_LIMITS`): two packages (`alpha`: six exported functions; `beta`: an exported function and an unexported helper), a guide, a generated `*.pb.go` file and a binary file GitHub gave no patch for. Under the profile's own limits the same pull request is an ordinary small one | Stops `report ready`: three areas (`A1` docs, `A2` `pkg/alpha`, `A3` `pkg/beta`) and the generated area; one reporter job per area in its own session, each checked and recorded, then the synthesis, its check and its record; the synthesis merges `A2.R1` and `A3.R1` into one `features` item citing both files (the union of their cites), numbered `R1`... in section order; the generated file and `assets/logo.png` listed in `other` ("generated code, not read by an agent", "patch not provided by GitHub"); `report.json` says `mode: "large"` with the limit passed, `review.md` says so in its header; the questions follow [§7.6](#76-questions-in-large-mode) (the trio once for the merged item and once for each of the seven exported symbols, none for the unexported helper on its own, one `missing-test` question for the item naming all eight functions): 25 questions, answered in two batches (15 and 10) by one answerer session continued across them, each batch checked in a fresh session and recorded; `qa.json` and `review.md` written once; every receipt valid |
+| `large-pull-request` | Run with `limits: { maxFiles: 2, areaMaxBytes: 500, areaMinBytes: 1 }` (`LARGE_LIMITS`): two packages (`alpha`: six exported functions; `beta`: an exported function and an unexported helper), a guide, a generated `*.pb.go` file and a binary file GitHub gave no patch for. Under the profile's own limits the same pull request is an ordinary small one | Stops `report ready`: three areas (`A1` docs, `A2` `pkg/alpha`, `A3` `pkg/beta`) and the generated area; **one** reporter job (given the digest: the areas with the names of their exported symbols, the file list, the facts and the guide's patch, the only interface file) and **one** claim check whose quotes are verified in the trees (`arch-quote-1`), then the diagrams; no area job, no synthesis; the generated file and `assets/logo.png` listed in `other` ("generated code, not summarised", "patch not provided by GitHub"); `report.json` says `mode: "large"` with the limit passed and the areas, `review.md` says so in its header and ends the Report with the "Dive into an area" block; the questions follow [§7.6](#76-questions-in-large-mode) (the trio once for the `alpha` item and once for the `beta` item, a `purpose` question for the item the PR text does not explain, one `missing-test` question for each item, none per symbol and none per function): N1 and 8 more, answered in one batch, checked in a fresh session and recorded; `qa.json` and `review.md` written once; every receipt valid |
 | `architecture-diagram` | The `report` pull request with a diagram of four components (the server command, the schema field, the cron library it schedules with, and the liaison API as unchanged context) and three connections; the canned tree check resolves every cite; the claim check does not support one connection (`A.e2`) twice | `arch-check-1` runs after the reporter and before the checker; the checker is asked for `A.server` … `A.e3`; the connection is dropped from `report.json` and listed under "Removed by the claim check" in `review.md` and `review.html`; the Mermaid block and the SVG hold the other two connections |
-| `large-artifacts` | A pull request of 1,000 data files (large mode: one area), whose `report.json` and `review.html` pass one write command | Both are written as part sets (`report-json-p1`…, `review-html-p1`…), each part its own job; the validators reconstruct them from the recorded parts and pass; `succeeded` at `report ready` |
+| `large-artifacts` | A pull request of 1,000 data files (large mode), whose `report.json` and `review.html` pass one write command | Both are written as part sets (`report-json-p1`…, `review-html-p1`…), each part its own job; the validators reconstruct them from the recorded parts and pass; `succeeded` at `report ready` |
 | `complex-function` | A new function with 12 decision points and nesting 4; `metrics.coverage: false` | A Measurements row (12, 4, CRAP with coverage unknown as the upper bound, mutation not run with its reason); `split-function` answered with a proposal (line ranges, names new to the package, one responsibility each) and `complexity-coverage` entries; the `measurements` validator rejects a canned record whose `complexity` disagrees with its `decisions` |
 | `crap-upper-bound` | A modified function with complexity 6 in a package that does not build offline | Coverage `unknown` with that reason; CRAP 42 shown as the upper bound; no `complexity-coverage` question; mutation `not run: no coverage` |
 | `sandbox-unavailable` | Docker missing (the stand-in's image check, a Fetch command with a canned result, says `unavailable`) with coverage and mutation on | Static metrics run; coverage and mutation `not run: docker unavailable`; CRAP shown as the upper bound; no PR code runs anywhere; the run still succeeds |
@@ -2770,6 +2822,12 @@ what the answer checker's job reported since, and the run's status.
   where promoting or dropping an entry is moving or deleting it
   ([§10.2](#102-edits-and-their-validation)), and `review.md` does not
   change.
+- **Diving into an area.** In large mode ([§6.9](#69-large-pull-requests)) the report is
+  high level, and the way into an area is `graphloom session open <run> --stage report`: the
+  stage's job session is the reporter's, which already holds the PR's digest and can read any
+  file of the head or the base. It is the same command and the same recording as above; the
+  report stage's conversation is recorded but, like any conversation outside Answers, read by
+  nothing in the review layer.
 - `graphloom session list <run>` shows the other sessions by stage,
   operation, harness and session ref: the reporter and report checker under
   `report`, the questioner under `questions`, the answer checker and the
@@ -2820,6 +2878,12 @@ SVG as the fallback ([§6.10](#610-architecture-diagram),
 [§12.4](#124-the-vendored-diagram-design-skill),
 [Version 0.14](#version-014-diagrams-drawn-with-the-diagram-design-skill)).
 
+**Landed in 0.15:** large mode reviews at a high level: one reporter job over a bounded
+digest, one claim check with its quotes verified against the cited trees, the questions
+reduced to the high-level set, and a "Dive into an area" block that points at the reporter's
+session ([§6.9](#69-large-pull-requests), [§7.6](#76-questions-in-large-mode),
+[Version 0.15](#version-015-large-mode-at-a-high-level)).
+
 | Phase | Scope | Verification |
 |---|---|---|
 | P1 | **First layer, report-only.** Fetch, workspace, report, questions, answers, static measurements. Generic: `base:`, the GitHub reads, `bwrap` confinement (agents, static tools) and the `docker` sandbox (coverage), image checks and pulls in Fetch, doctor and check probes. pr-review 0.1 with stages Fetch, Report, Questions and Answers; it stops `report ready` after Answers and `--decline review-layer` finishes it. Also: detectors; symbol packs (Go, TypeScript); whole-repository search; similarity; the dependency inventory; test mapping; the reporter, questioner and answerer with both checkers; `gometrics` and `tsmetrics`; confined coverage (**built in wave 3b**: `go test -coverprofile`; for TypeScript the repository's own `vitest run --coverage` with its `@vitest/coverage-v8`, or `not run (no vitest coverage provider)` when the repository declares none) with measured CRAP and the unknown-coverage rule; `review.md`, `report.json`, `qa.json`; the ledger; the BanyanDB mapping. **Wave 3**, with the Questions and Answers work: generic `graphloom session list/open` ([core §15](design-typescript-core.md#15-opening-a-recorded-agent-session)) with conversation capture (`operator-conversation` evidence, the turn extract, the 32 MiB bound, `contextTokens`), chained forks and `--from-original`; the operator's session launcher (`claude.sessionLauncher`, `codex.sessionLauncher`, their state directories, the environment overrides and the launcher probe in `session open` and `doctor`); `parseProfile` refusing a Pi answerer; and the decision half of approvals (`GraphDefinition.approvals`, `resume --approve/--decline`, `operator-approval` evidence) for the `report ready` stop; 0.1 has no Review stage, so it refuses `--approve review-layer` and names the version; and task preparation: the generic `prepareTask` hook, `TaskPlan` and `validateTaskPlan`, `graphloom task new` ([core §16](design-typescript-core.md#16-preparing-a-task-graphloom-task-new)), pr-review's `prepareTask` ([§3.1](#31-task)), and the `graphloom-run` skill using `task new` | Intake, executor contract and confinement tests. Unit tests per detector, symbol pattern (new vs modified, receivers, generics), query builder, similarity scorer, test-map rule and validator rule. `gometrics` matches gocyclo on a fixture corpus. Nesting and changed-function scope fixtures. The `measurements` validator rejects each kind of inconsistent record. Real-Git tests: searches read the base commit only, and materialization runs no hook or filter. Ledger CAS race. Rehearsal `report`, `report-corrections`, `answer-finds-existing-helper`, `answer-no-library-with-whole-repo-search`, `answer-checker-contradicts`, `needs-author-purpose`, `purpose-stated`, `missing-test`, `complex-function`, `crap-upper-bound`, `sandbox-unavailable`, `injection`. Wave 3: opening a session and capturing its fork leave the recorded transcript, side files and rollout byte-identical; a second `--stage answers` open forks the first conversation and `--from-original` forks the answerer; `session list` shows each conversation with its parent; a fork with no operator turn records nothing, one over the bound records `transcript: omitted`, and a capture after the run finished records nothing; the turn extract keeps the operator's messages verbatim (Claude Code and Codex fixtures); a stub launcher prefixes `session open` only and headless jobs keep `claude.command`, the environment override wins, its state directories are writable in the confinement, a launcher that cannot resume is refused by the probe before launch, and capture through a stub launcher finds the fork by the id GraphLoom chose; `session open` refuses a Pi session, a ref whose harness disagrees with its record and a finished run, and refuses while the owning job or a continuation of it runs; the opened session's confinement (repository agent-config masks applied, no GitHub token in its environment, the checkout read-only); `--stage answers` opens the answerer, not the checker; `--decline review-layer` records `operator-approval` evidence and finishes the run; `--approve review-layer` refused by 0.1. Task preparation: `validateTaskPlan` refuses a step that would run a command (an unknown kind, an extra property) and any `intoRef` or `to` outside `refs/graphloom/<graph>/`; a `fetch` from a local smart-HTTP fixture runs no hook (a `reference-transaction` hook's marker never appears) and leaves the working tree, index and `HEAD` unchanged; `--dry-run` creates no ref and writes no file; an existing `task.yaml` is refused without `--force`; pr-review's plan for a temporary repository whose fixture remote serves a fake `refs/pull/7/head`: the six steps of [§3.1](#31-task), `heads/<sha>` pinned at the fetched head, `base` the merge base, the request naming that sha, and the written task passing `graphloom check`; a URL argument gives the same plan; another `owner/repo` than the profile's `project`, a missing profile and a malformed argument are refused. Under real Docker: a coverage run with `--network none`, where a test that dials out fails; the limits enforced (a fork bomb stops at `--pids-limit`, an allocation at `--memory`, the host unaffected); only the checkout and the build cache writable, the root read-only, no host home, `--pull never`; the container killed by name on stop and removed on resume; coverage attributed by line range, Go from the coverprofile and TypeScript from `coverage-final.json` statements, with the report written under the job's temporary directory and the checkout unchanged. One live run on a real BanyanDB PR, read by the user, with recall of new symbols, tests and existing equivalents checked by hand |
@@ -2857,6 +2921,9 @@ pr-review:
 
 ### Version 0.11: large mode
 
+(0.15 replaces the per-area reporters and the synthesis below with one high-level
+reporter: [Version 0.15](#version-015-large-mode-at-a-high-level).)
+
 Large mode ([§6.9](#69-large-pull-requests), [§7.6](#76-questions-in-large-mode))
 lands in 0.11: a pull request over `maxFiles`, `maxPatchBytes` or `maxNewSymbols`
 is reviewed area by area instead of refused, and only the hard caps refuse it.
@@ -2889,6 +2956,42 @@ What 0.11 does, where this document leaves it open:
   as before, so their size is bounded by what one command carries; a report or
   Q&A that does not fit still stops the run "incompatible task" and says so.
   (0.12 lifts this: [§6.6](#66-output), multi-part writes.)
+
+### Version 0.15: large mode at a high level
+
+The maintainer decided: "the large mode should not read the detail in each area, so only
+focus on the high level to generate the report. If I want to dive into some area, I will ask
+for it." Large mode ([§6.9](#69-large-pull-requests), [§7.6](#76-questions-in-large-mode))
+is reworked to that, replacing the per-area reporters and the synthesis of
+[0.11](#version-011-large-mode). What 0.15 does, where this document leaves it open:
+
+- The `area-reporter` role, the area records, the synthesis job (`change-synthesis-v1` and its
+  revision), its check, the merges and the 900-character item limit are removed. A profile
+  that names `area-reporter` is refused as an unknown role. The deterministic partition into
+  areas is kept: it feeds the digest, the change map and the dive-in table.
+- The Report stage in large mode is the standard flow over a large context: one reporter job
+  with the digest (`src/digest.ts`, `src/largeprompts.ts`), the same deterministic
+  validation with two allowances (a file or a detector fact the reporter leaves out is
+  accounted for by the plugin; no lifecycle entry is required), one claim check, the diagram
+  job. The graph and the validators ask the same function (`reportFlow` over the large context).
+  A validator sees the newest review, and the Report stage has one claim check, so no record
+  of the report is needed (answered batches are still recorded, [§7.6](#76-questions-in-large-mode)).
+- Quotes of every claim are verified against the cited tree by the `arch-quote` commands of
+  [§6.10](#610-architecture-diagram) (the claim carries the tree of each cite, one command job
+  per 14 quotes). The check is the same one; what 0.15 adds is that item, lifecycle and
+  summary claims use it in large mode. A claim with no cite quotes the head tree, so a quote
+  of a deleted file belongs to a cited claim. Citations still lie inside the diff's hunks.
+- The digest's interface patches are capped at 200,000 bytes and, when the file list and the
+  PR text leave less room under the executor's input bound, at less; what is left out is
+  listed in the instruction.
+- `weak-test` is not asked in large mode either (no mutation testing exists yet, so this
+  changes nothing today); the trio names the exported symbols of an item and counts the rest.
+- The "Dive into an area" block says `<run>`: the run id is not part of what the validators
+  recompute `review.md` and `review.html` from.
+- The budget pre-check (`largeNeeds`, `src/large.ts`) counts the reporter and its check, two
+  command jobs for the quote and tree checks, the diagram job, and the Q&A estimate (two items
+  an area, five questions an item, in batches of 15): at least 21 agent invocations and 65 jobs
+  for ten areas.
 
 ### Version 0.14: diagrams drawn with the diagram-design skill
 

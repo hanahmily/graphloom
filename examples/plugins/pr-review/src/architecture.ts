@@ -3,8 +3,8 @@
 
 /**
  * The architecture diagram (design §6.10): the components a pull request adds or modifies, the components they
- * connect to, and the connections. The reporter returns it with a standard report; the synthesis job returns it in
- * large mode. This module holds the contract fragment, the deterministic validation (structure, then the tree check
+ * connect to, and the connections. The reporter returns it with the report, in
+ * either mode. This module holds the contract fragment, the deterministic validation (structure, then the tree check
  * the graph runs as read-only commands), the claim targets (`A.<node id>`, `A.e<n>`), the assembly that drops what
  * the claim check could not support, and the Mermaid block of `review.md`. The SVG is `archlayout.ts`.
  */
@@ -67,7 +67,7 @@ const text = { type: "string" };
 const strict = (required: string[], properties: Record<string, unknown>): Record<string, unknown> => ({ type: "object", additionalProperties: false, required, properties });
 const ARCH_CITE_SCHEMA = strict(["path", "side", "start", "end"], { path: text, side: { type: "string", enum: ["head", "base"] }, start: { type: "integer" }, end: { type: "integer" } });
 
-/** The contract fragment: the `architecture` property of `change-report-v1` and `change-synthesis-v1` (design §6.10). */
+/** The contract fragment: the `architecture` property of `change-report-v1` (design §6.10). */
 export const ARCHITECTURE_SCHEMA = strict(["nodes", "edges"], {
   nodes: {
     type: "array",
@@ -93,7 +93,7 @@ export const ARCHITECTURE_SCHEMA = strict(["nodes", "edges"], {
   },
 });
 
-/** What the reporter (standard) and the synthesis job (large) are told of the diagram. */
+/** What the reporter is told of the diagram. */
 export const ARCHITECTURE_PROMPT = [
   `The "architecture" of your result is a diagram that helps a maintainer understand the components this pull request adds or changes and how they connect to each other and to the rest of the system. It is not an inventory of the repository: draw what the change touches and what it talks to.`,
   `- nodes (at most ${MAX_ARCH_NODES}): id (a short name such as "n1" or "store", unique, letters, digits, "_" and "-", and not of the form e<number>), label (what a maintainer calls it, at most ${MAX_LABEL_CHARS} characters), kind ("package", "cli", "service", "api", "storage", "external" or "other"), change ("added" when the pull request creates it, "modified" when it changes it, "unchanged" for a component it only connects to), paths (the files or directories that are the node, in the tree; an added or modified node's paths must match a changed file, an unchanged node's paths must exist at the base commit), and cite (path, side, start, end: a place that shows the node, in the head tree for an added or modified node, the base tree for one that is gone from the head).`,
@@ -101,8 +101,6 @@ export const ARCHITECTURE_PROMPT = [
   `Rules: an unchanged node appears only when an edge connects it to an added or modified node (context, not inventory). Every cite must name lines that exist in the tree it names (the head tree is the working tree; the base tree is HEAD). A Go call or import edge between two package nodes is checked against the "from" package's import blocks, so draw it only when the head imports the other package. Draw only components and connections the code shows; do not invent any. Each node and each edge is checked against the code as a claim of its own, and one that is not supported is dropped from the diagram.`,
 ].join("\n");
 
-/** An empty diagram: what an area reporter returns in large mode, where the synthesis job draws it. */
-export const isEmptyArchitecture = (a: Architecture): boolean => a.nodes.length === 0 && a.edges.length === 0;
 
 /** The claim ids of a diagram's parts: `A.<node id>` and `A.e<n>` (n from 1, in the order the edges are given). */
 export const nodeClaimId = (id: string): string => `A.${id}`;
@@ -367,7 +365,7 @@ export function readArchitectureCheck(plan: ArchPlan, outputs: readonly string[]
 
 export interface TreeQuoteEntry {
   id: string;
-  tree: "head" | "base";
+  tree: "head" | "base" | "either";
   path: string;
   line: number;
   text: string;
@@ -387,22 +385,31 @@ export interface TreeQuotePlan {
  */
 const QUOTE_SCRIPT = String.raw`set -u; base="$1"; shift
 g() { git -c core.hooksPath=/dev/null "$@"; }
+chk() {
+  if [ "$1" = base ]; then
+    if ! g cat-file -e "$base:$path" 2>/dev/null; then echo missing; return; fi
+    g show "$base:$path" 2>/dev/null > "$GRAPHLOOM_REPORT_FILE.q"
+  else
+    if [ ! -f "$path" ]; then echo missing; return; fi
+    cat "$path" > "$GRAPHLOOM_REPORT_FILE.q"
+  fi
+  awk -v at="$line" 'function c(s) { gsub(/[ \t\r\n]+/, " ", s); sub(/^ /, "", s); sub(/ $/, "", s); return s } BEGIN { w = c(ENVIRON["QUOTE"]) } NR >= at - 3 && NR <= at + 3 { if (index(c($0), w) > 0) f = 1 } END { print (f ? "ok" : "nomatch") }' "$GRAPHLOOM_REPORT_FILE.q"
+}
 { i=0
 while [ "$#" -ge 4 ]; do
   tree="$1"; path="$2"; line="$3"; QUOTE="$4"; shift 4; i=$((i + 1))
   export QUOTE
-  if [ "$tree" = base ]; then
-    if ! g cat-file -e "$base:$path" 2>/dev/null; then echo "$i missing"; continue; fi
-    g show "$base:$path" 2>/dev/null > "$GRAPHLOOM_REPORT_FILE.q"
+  if [ "$tree" = either ]; then
+    v=$(chk head)
+    if [ "$v" != ok ]; then w=$(chk base); if [ "$w" = ok ] || [ "$v" = missing ]; then v=$w; fi; fi
   else
-    if [ ! -f "$path" ]; then echo "$i missing"; continue; fi
-    cat "$path" > "$GRAPHLOOM_REPORT_FILE.q"
+    v=$(chk "$tree")
   fi
-  awk -v at="$line" 'function c(s) { gsub(/[ \t\r\n]+/, " ", s); sub(/^ /, "", s); sub(/ $/, "", s); return s } BEGIN { w = c(ENVIRON["QUOTE"]) } NR >= at - 3 && NR <= at + 3 { if (index(c($0), w) > 0) f = 1 } END { print (f ? "ok" : "nomatch") }' "$GRAPHLOOM_REPORT_FILE.q" | sed "s/^/$i /"
+  echo "$i $v"
 done; rm -f "$GRAPHLOOM_REPORT_FILE.q"; echo "checked $i"; } > "$GRAPHLOOM_REPORT_FILE"`;
 
 /** The commands that verify the supported architecture claims' quotes against their trees (at most 14 quotes each). */
-export function treeQuotePlan(claims: ReadonlyArray<{ id: string; tree: "head" | "base"; quotes: ReadonlyArray<{ path: string; line: number; text: string }> }>, base: string | undefined): TreeQuotePlan {
+export function treeQuotePlan(claims: ReadonlyArray<{ id: string; tree: "head" | "base" | "either"; quotes: ReadonlyArray<{ path: string; line: number; text: string }> }>, base: string | undefined): TreeQuotePlan {
   const entries: TreeQuoteEntry[] = claims.flatMap((c) => c.quotes.map((q) => ({ id: c.id, tree: c.tree, path: normal(q.path), line: q.line, text: q.text })));
   if (entries.length === 0) return { commands: [], entries: [], sizes: [] };
   if (base === undefined) return { unavailable: "the checkout recorded no pinned base, so the diagram's quotes cannot be verified in their trees", commands: [], entries, sizes: [] };
@@ -427,9 +434,9 @@ export function readTreeQuotes(plan: TreeQuotePlan, outputs: readonly string[]):
     for (let k = 1; k <= size; k += 1) {
       const e = plan.entries[offset + k - 1]!;
       const verdict = lines.find((l) => l.startsWith(`${k} `))?.slice(`${k} `.length);
-      if (checked === undefined || Number(checked[1]) !== size || verdict === undefined) failed.set(e.id, failed.get(e.id) ?? `its quote ${JSON.stringify(e.text.slice(0, 60))} was not checked against the ${e.tree} tree`);
-      else if (verdict === "missing") failed.set(e.id, failed.get(e.id) ?? `its quote names no such file in the ${e.tree} tree (${e.path})`);
-      else if (verdict !== "ok") failed.set(e.id, failed.get(e.id) ?? `its quote ${JSON.stringify(e.text.slice(0, 60))} is not in the ${e.tree} tree at ${e.path}:${e.line} (within three lines)`);
+      if (checked === undefined || Number(checked[1]) !== size || verdict === undefined) failed.set(e.id, failed.get(e.id) ?? `its quote ${JSON.stringify(e.text.slice(0, 60))} was not checked against the ${e.tree === "either" ? "head or base" : e.tree} tree`);
+      else if (verdict === "missing") failed.set(e.id, failed.get(e.id) ?? `its quote names no such file in the ${e.tree === "either" ? "head or base" : e.tree} tree (${e.path})`);
+      else if (verdict !== "ok") failed.set(e.id, failed.get(e.id) ?? `its quote ${JSON.stringify(e.text.slice(0, 60))} is not in the ${e.tree === "either" ? "head or base" : e.tree} tree at ${e.path}:${e.line} (within three lines)`);
     }
     offset += size;
   });
