@@ -236,7 +236,7 @@ meaning and parser (review-kit, [§14](#14-sharing-code-with-issue-fix)).
 | `privateRepos` | Never named in posted text (issue-fix's `withoutPrivateReferences`, `src/prompts.ts:325`) |
 | `harnesses` | each role takes a harness id or `{ harness, model?, effort? }` ([§13.1](#131-roles)): `reporter`, `questioner`, `answerer` (`claude-code` or `codex` only), `report-checker`, `answer-checker`, and `verifier-<aspect>` for `correctness`, `maintainability` and `security`. There is no `reviewer-<aspect>` key: the reviewers run on the answerer's harness, and a profile that names one is refused ([§13.1](#131-roles)) |
 | `supervisor`, `budgets` | As in issue-fix ([§13](#13-agent-roles-supervisor-budgets)) |
-| `limits` | `maxFiles` (150), `maxPatchBytes` (1 MiB), `maxNewSymbols` (200). Past any of them, the run stops "incompatible task" and names the size |
+| `limits` | `maxFiles` (150), `maxPatchBytes` (1 MiB), `maxNewSymbols` (200): past one, the pull request is reviewed in large mode ([§6.9](#69-large-pull-requests), [§7.6](#76-questions-in-large-mode)). `hardMaxFiles` (1000), `hardMaxPatchBytes` (8 MiB), `hardMaxNewSymbols` (2000): past one, the run stops "incompatible task" and names the size. `areaMaxBytes` (256 KiB) and `areaMinBytes` (16 KiB) shape the areas. Each is a positive integer; a `max*` may not exceed its hard cap, nor `areaMinBytes` the `areaMaxBytes` |
 
 ### 3.3 Credentials
 
@@ -679,6 +679,156 @@ The section follows a few rules:
 
 The delta section lists functions whose measurements changed since the last
 report.
+
+### 6.9 Large pull requests
+
+A pull request over one of the profile's limits is reviewed in **large mode**
+instead of being refused. Only the hard caps still refuse it.
+
+| Limit (profile `limits`) | Default | Over it |
+|---|---|---|
+| `maxFiles` | 150 | large report and large questions |
+| `maxPatchBytes` | 1 MiB | large report and large questions |
+| `maxNewSymbols` | 200 | large questions ([§7.6](#76-questions-in-large-mode)) |
+| `hardMaxFiles` | 1000 | refused, as today ("incompatible") |
+| `hardMaxPatchBytes` | 8 MiB | refused |
+| `hardMaxNewSymbols` | 2000 | refused |
+
+The mode is decided by code, recorded in `report.json` (`mode: "standard" |
+"large"`, with the reason: which limit, the value and the limit) and shown in
+the report's header.
+
+**Areas.** Fetch partitions the changed files into areas, deterministically:
+
+1. Group the files by their first path segment.
+2. A group whose patch bytes exceed `areaMaxBytes` (default 256 KiB) splits by
+   its next path segment, recursively; a single directory over it splits into
+   files sorted by path, in runs under the size.
+3. Sibling groups under `areaMinBytes` (default 16 KiB) merge into
+   `<parent>/(rest)`.
+4. Files under the profile's `questions.excludeRoots` (generated code) form one
+   area, `generated`, which no agent reads as patches: it is listed with its
+   diffstat in `other`.
+5. A test file stays in its directory's area, so a package and its tests are
+   read together.
+
+Each area has an id (`A1`, `A2`, ... in path order), its paths and its sizes,
+recorded in the snapshot.
+
+**Report.**
+
+1. One reporter job per area (`change-report-v1`, fresh read-only session per
+   area). It gets the whole file list with diffstat, the PR text, the facts
+   and state candidates of its files, and its own area's patches. It returns
+   `sections` and `notes` for its area only; `purpose` and `overview` are
+   empty.
+2. Deterministic validation and the claim check (§6.4, §6.5) run per area, with
+   the same correction and removal rules.
+3. One **synthesis** job (`change-synthesis-v1`, fresh session, reporter
+   harness) gets the checked items of every area (not the patches), the file
+   list and the PR text. It returns `purpose`, `overview`, `merges` (groups of
+   item ids that are one conceptual change across areas; a merged item's text
+   is rewritten, its cites, state and behavior are the union) and
+   `architecture` ([§6.10](#610-architecture-diagram)).
+4. The checker checks the synthesis claims (`purpose`, `overview`, each merge,
+   each architecture node and edge) in one job.
+5. Items are numbered `R1`... after merges, in section order.
+
+**Budgets.** Before the first reporter job, the graph computes the jobs and
+agent invocations large mode needs (areas × (reporter + checker) + synthesis +
+its check, plus the Questions and Answers estimate of §7.6) and stops with the
+numbers if the run's remaining budget cannot cover them, so the maintainer can
+raise the profile's `budgets` instead of losing a run halfway.
+
+### 6.10 Architecture diagram
+
+Every report, standard or large, has an architecture diagram of what the pull
+request changes: the components it adds or modifies, the components they
+connect to, and the connections. In standard mode the reporter returns it with
+the report; in large mode the synthesis job does.
+
+```text
+architecture: {
+  nodes: [{ id, label,
+            kind:   "package" | "cli" | "service" | "api" | "storage" | "external" | "other",
+            change: "added" | "modified" | "unchanged",
+            paths:  [path or directory],          what the node is, in the tree
+            cite:   { path, side, start, end } }],
+  edges: [{ from, to, label,
+            kind:   "call" | "rpc" | "data" | "import" | "config",
+            change: "added" | "modified" | "removed" | "unchanged",
+            cite:   { path, side, start, end } }]  where the connection is made
+}
+```
+
+At most 30 nodes and 60 edges. An `unchanged` node appears only when an edge
+connects it to a changed one (context, not inventory).
+
+**Deterministic validation:** ids unique; every edge names two nodes; every
+cite resolves in the tree it names; an `added` or `modified` node's paths match
+at least one changed file, an `unchanged` node's paths exist at the base. For a
+Go `call` or `import` edge between two package nodes, the plugin checks the
+`from` package's head imports (its `import` blocks, read from the tree) and
+tells the checker when the import is missing.
+
+**Claim check:** claims `A.<node id>` (the node is what its label and paths say
+and has the change it states) and `A.e<n>` (the code at the cite makes that
+connection). An unsupported node is dropped with its edges; an unsupported edge
+is dropped alone; both are recorded under "Removed by the claim check".
+
+**Rendering**, by plugin code, with no third-party tool:
+
+- an SVG for the HTML report ([§6.11](#611-the-html-report)): a layered
+  layout (layers by longest path from the nodes with no incoming edges, cycles
+  broken at back edges found by depth-first search, order within a layer by
+  barycentre over a few sweeps), boxes coloured by `change` (added green,
+  modified amber, unchanged grey, removed edges dashed red), edge labels, a
+  legend;
+- a `mermaid` code block in `review.md`, as text (it renders where Markdown
+  renders Mermaid, and reads as a list where it does not).
+
+### 6.11 The HTML report
+
+Beside `review.md`, the plugin writes `.graphloom/review/review.html`, one
+self-contained file, for every pull request. Plugin code renders it from
+`report.json`, `qa.json`, `necessity.json` and the measurement records, at the
+same two points `review.md` is written (Report, with the Q&A pending; Answers,
+whole). No model writes HTML.
+
+**Self-contained and inert:** inline CSS and inline SVG; no `<script>`, no
+external stylesheet, image or font; the only links are `href`s to the pull
+request, its commits and files on GitHub at the pinned head and base. Every
+text that came from a model or the pull request is HTML-escaped. A
+deterministic check on the written bytes enforces this. Sections use
+`<details>`, so they collapse without JavaScript.
+
+**Contents, in order:**
+
+1. **Header cards:** the PR (title, author, head, base), files, +/− lines,
+   commits, GitHub checks, the mode, and N1's conclusion as a coloured badge
+   (necessary green, questionable amber, unnecessary red, needs author grey).
+2. **Necessity:** the base trace as numbered steps with their citations, the
+   design statements, the principles block with one badge per verdict
+   (preserves, breaks, not applicable) and the checker's judgment, and the
+   simpler-way answer.
+3. **Summary:** purpose (with its source) and overview.
+4. **Architecture diagram** ([§6.10](#610-architecture-diagram)).
+5. **Change map:** a horizontal bar chart of added and deleted lines per area
+   (large mode) or per report section (standard mode).
+6. **Report items** as cards, grouped by section: the text, the citations as
+   links, a **state diagram** (SVG) for each lifecycle entry (the initial value,
+   one arrow per transition labelled with its condition, the reads listed under
+   it) and the before/after table.
+7. **Measurements:** the metrics table with cells coloured against the limits
+   (over the limit red; inherited from the base, made worse or introduced
+   said in the cell), coverage as a bar, CRAP as a bar with the threshold
+   marked, and the coverage run's note.
+8. **Q&A:** per item, each question with a status badge (answered, partially
+   answered, needs author), the answer, its evidence and the checker's
+   judgment, collapsed by default except "needs author".
+9. **Removed by the claim check** and notes.
+
+The stop message that names `review.md` names `review.html` too.
 
 ## 7. Questions and answers
 
@@ -1291,6 +1441,27 @@ and, with no file, `Principles: no principles file at <ref>:<path>.` The last
 line appears only when the pull request changes the file. A broken principle also
 appears in the conclusion line: "Design principle broken (the checker supports
 it): offline-idempotent."
+
+
+### 7.6 Questions in large mode
+
+In large mode (§6.9) the required questions follow the same rules as §7.1,
+except where this table says otherwise. N1 is unchanged.
+
+| Type | Required for, in large mode |
+|---|---|
+| `purpose` | Unchanged: every change item whose purpose the PR text does not state |
+| `existing-equivalent`, `reuse-library`, `common-logic` | Once per **change item** (about the mechanism the item adds; the question names the item's new symbols), and once per **new exported symbol** (Go: an identifier starting with an upper-case letter; TypeScript: exported). New unexported symbols get none of the three on their own: they are listed in their item's question |
+| `missing-test` | Once per change item, listing every new or modified function of the item the test map finds no covering test for |
+| `split-function` | Unchanged: every changed function over the complexity or nesting limit |
+| `complexity-coverage` | Unchanged: every changed function the §7.1 rule selects |
+| `weak-test` | Unchanged: each surviving mutant |
+
+**Answers in batches.** The answerer answers the questions of a few change
+items per job (at most 15 questions), continuing its own session from one batch
+to the next, so it keeps what it has read. The answer checker checks each batch
+in a fresh session. `qa.json` and `review.md` are written once, after the last
+batch; a batch's correction and its "needs author" outcome follow §7.3.
 
 ## 8. The review layer
 
@@ -2369,6 +2540,7 @@ recorded, so they do not decide CI verdicts.
 | `needs-author-purpose` | A new config flag; nothing in the PR text, commits, issue or code comments says why | A `purpose` question answered `needs author`, listing what was read; marked in `review.md`; offered as a draft comment in the review layer |
 | `purpose-stated` | The PR body states why the flag is added | A purpose record `stated` with the matching quote; no `purpose` question |
 | `missing-test` | A new exported function that no test references; the questioner omits the question | The plugin adds the required `missing-test` question; the answerer's whole-repository search finds no test → `needs author`, naming the package's `_test.go` |
+| `large-pull-request` | Run with `limits: { maxFiles: 2, areaMaxBytes: 500, areaMinBytes: 1 }` (`LARGE_LIMITS`): two packages (`alpha`: six exported functions; `beta`: an exported function and an unexported helper), a guide, a generated `*.pb.go` file and a binary file GitHub gave no patch for. Under the profile's own limits the same pull request is an ordinary small one | Stops `report ready`: three areas (`A1` docs, `A2` `pkg/alpha`, `A3` `pkg/beta`) and the generated area; one reporter job per area in its own session, each checked and recorded, then the synthesis, its check and its record; the synthesis merges `A2.R1` and `A3.R1` into one `features` item citing both files (the union of their cites), numbered `R1`... in section order; the generated file and `assets/logo.png` listed in `other` ("generated code, not read by an agent", "patch not provided by GitHub"); `report.json` says `mode: "large"` with the limit passed, `review.md` says so in its header; the questions follow [§7.6](#76-questions-in-large-mode) (the trio once for the merged item and once for each of the seven exported symbols, none for the unexported helper on its own, one `missing-test` question for the item naming all eight functions): 25 questions, answered in two batches (15 and 10) by one answerer session continued across them, each batch checked in a fresh session and recorded; `qa.json` and `review.md` written once; every receipt valid |
 | `complex-function` | A new function with 12 decision points and nesting 4; `metrics.coverage: false` | A Measurements row (12, 4, CRAP with coverage unknown as the upper bound, mutation not run with its reason); `split-function` answered with a proposal (line ranges, names new to the package, one responsibility each) and `complexity-coverage` entries; the `measurements` validator rejects a canned record whose `complexity` disagrees with its `decisions` |
 | `crap-upper-bound` | A modified function with complexity 6 in a package that does not build offline | Coverage `unknown` with that reason; CRAP 42 shown as the upper bound; no `complexity-coverage` question; mutation `not run: no coverage` |
 | `sandbox-unavailable` | Docker missing (the stand-in's image check, a Fetch command with a canned result, says `unavailable`) with coverage and mutation on | Static metrics run; coverage and mutation `not run: docker unavailable`; CRAP shown as the upper bound; no PR code runs anywhere; the run still succeeds |
@@ -2498,6 +2670,41 @@ pr-review:
 - Conversations are recorded only into a stopped run, so a chat is captured at
   `report ready` (the intended place); while the run is running the fork stays
   in the agent's own store.
+
+### Version 0.11: large mode
+
+Large mode ([§6.9](#69-large-pull-requests), [§7.6](#76-questions-in-large-mode))
+lands in 0.11: a pull request over `maxFiles`, `maxPatchBytes` or `maxNewSymbols`
+is reviewed area by area instead of refused, and only the hard caps refuse it.
+The architecture diagram ([§6.10](#610-architecture-diagram)) and the HTML report
+([§6.11](#611-the-html-report)) land next: in 0.11 the synthesis job returns
+`purpose`, `overview` and `merges` only, and `change-synthesis-v1` is where
+`architecture` joins (a marked extension point in `src/large.ts`).
+
+What 0.11 does, where this document leaves it open:
+
+- The partition is a pure function (`src/areas.ts`) of the snapshot's files, the
+  profile's limits and `questions.excludeRoots`, recorded in the snapshot and
+  recomputed by the validators; `report.json` carries the mode, the limit passed,
+  the areas, the unread files and the merges.
+- A validator sees only the newest review, so each checked area, the synthesis and
+  each answered batch is recorded as a graph command (`area-record-<id>`,
+  `synthesis-record`, `answers-record-<n>`) carrying the result and the checker's
+  own output; the validators recompute the report and the answers from those
+  records with the same functions the graph uses. Each record is one extra job.
+- A file GitHub gave no patch for and the files under `excludeRoots` are accounted
+  for by plugin-written items in `other`, with their diffstat and the reason, like
+  a file whose item the claim check removed.
+- Fetch reads every page of the file list (`perPage` 100, a cursor per job). The
+  Questions mode is decided in the Questions stage, when the new symbols are
+  counted, so `report.json` records the Report's mode and `qa.json` records the
+  questions' own (large over `maxNewSymbols` alone).
+- The budget pre-check (`largeNeeds`, `src/large.ts`) estimates the Q&A from the
+  areas (three items of five questions per area, in batches of 15); it is a floor,
+  since corrections and retries come on top.
+- `report.json`, `qa.json` and the ledger files are each written by one command,
+  as before, so their size is bounded by what one command carries; a report or
+  Q&A that does not fit still stops the run "incompatible task" and says so.
 
 ### Version 0.4: ids and measured searches
 
