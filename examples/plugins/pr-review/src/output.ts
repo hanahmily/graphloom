@@ -4,6 +4,7 @@
 import type { Fact } from "./detectors.js";
 import type { DiagramsDoc } from "./diagrams.js";
 import { coverageNotes, renderMeasurements, notRunReasons, type MeasurementState } from "./measurements.js";
+import { DIVE_COLUMNS, DIVE_COMMAND, DIVE_HEADING, DIVE_TEXT, diveRow } from "./dive.js";
 import type { LargeInfo } from "./large.js";
 import { describeReasons, type ReviewMode } from "./mode.js";
 import type { Profile } from "./profile.js";
@@ -24,7 +25,7 @@ export interface OutputInput {
   profile: Pick<Profile, "metrics">;
   /** Standard or large, with the limits passed (design §6.9). */
   mode: ReviewMode;
-  /** Large mode: the areas, the unread files and the merges. */
+  /** Large mode: the areas and the files without a patch. */
   large?: LargeInfo;
   /** The drawings of the architecture and the lifecycle entries (design §6.10): the skill's embedded SVGs, or the plugin's note. */
   diagrams?: DiagramsDoc;
@@ -41,7 +42,7 @@ export function reportJson(i: OutputInput): string {
     commits: i.snapshot.commits.length,
     checks: i.snapshot.checks,
     mode: i.mode.mode,
-    ...(i.mode.mode === "large" ? { modeReasons: i.mode.reasons, ...(i.large !== undefined ? { areas: i.large.areas, omitted: i.large.omitted, merges: i.large.merges } : {}) } : {}),
+    ...(i.mode.mode === "large" ? { modeReasons: i.mode.reasons, ...(i.large !== undefined ? { areas: i.large.areas, omitted: i.large.omitted } : {}) } : {}),
     facts: i.facts,
     summary: i.final.summary,
     sections: i.final.sections,
@@ -76,6 +77,7 @@ export function reviewMarkdown(i: OutputInput): string {
     ...(i.mode.mode === "large" ? [modeLine(i.mode, i.large)] : []),
     "",
     renderReport(i.final, header),
+    ...(i.mode.mode === "large" && i.large !== undefined ? [diveMarkdown(i.large)] : []),
     renderMeasurements(i.measurements, i.profile),
     QA_PENDING,
   ].join("\n");
@@ -84,8 +86,25 @@ export function reviewMarkdown(i: OutputInput): string {
 /** The header line of a large review: the mode, the limits passed, and how the report was made (design §6.9). */
 export function modeLine(mode: ReviewMode, large?: LargeInfo): string {
   const read = large?.areas.filter((a) => a.kind === "read").length;
-  const how = read === undefined ? "" : `: reported in ${read} area${read === 1 ? "" : "s"}, then one synthesis${large!.areas.some((a) => a.kind === "generated") ? "; generated files are listed in Other, not read" : ""}${large!.omitted.length > 0 ? `; ${large!.omitted.length} file(s) without a patch from GitHub are listed in Other` : ""}`;
+  const how = read === undefined ? "" : `: reported at a high level from a digest of its ${read} area${read === 1 ? "" : "s"}${large!.areas.some((a) => a.kind === "generated") ? "; generated files are listed in Other, not read" : ""}${large!.omitted.length > 0 ? `; ${large!.omitted.length} file(s) without a patch from GitHub are listed in Other` : ""}`;
   return `Mode: large (${describeReasons(mode.reasons)})${how}.`;
+}
+
+const cellText = (s: string): string => s.replace(/\s*\n\s*/g, " ").trim().replace(/\|/g, "\\|");
+
+/** The block that ends the Report of a large review: the areas, and the command that opens the reporter's session (design §6.9). */
+export function diveMarkdown(large: LargeInfo): string {
+  return [
+    `## ${DIVE_HEADING}`,
+    DIVE_TEXT,
+    "",
+    `    ${DIVE_COMMAND}`,
+    "",
+    `| ${DIVE_COLUMNS.join(" | ")} |`,
+    `|${DIVE_COLUMNS.map(() => "---").join("|")}|`,
+    ...large.areas.map((a) => `| ${diveRow(a).map(cellText).join(" | ")} |`),
+    "",
+  ].join("\n");
 }
 
 /** What the Q&A part says until the Answers stage replaces it. */

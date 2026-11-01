@@ -134,14 +134,12 @@ export const MAX_GINKGO_LABEL_FILTER_CHARS = 200;
 /** An argv element's longest text; the whole setup must also fit the coverage command's spec. */
 const MAX_SETUP_ARG_CHARS = 2_000;
 
-export type Role = "reporter" | "area-reporter" | "diagrammer" | "report-checker" | "questioner" | "answerer" | "answer-checker";
-export const ROLES: readonly Role[] = ["reporter", "area-reporter", "diagrammer", "report-checker", "questioner", "answerer", "answer-checker"];
+export type Role = "reporter" | "diagrammer" | "report-checker" | "questioner" | "answerer" | "answer-checker";
+export const ROLES: readonly Role[] = ["reporter", "diagrammer", "report-checker", "questioner", "answerer", "answer-checker"];
 
 /** The harness each role defaults to (design §13.1). */
 const DEFAULT_ROLES: Record<Role, string> = {
   reporter: "claude-code",
-  // Optional: absent, it takes the reporter's harness, model and effort (checkRoles).
-  "area-reporter": "claude-code",
   // Optional: absent, it takes the reporter's harness, model and effort too (checkRoles).
   diagrammer: "claude-code",
   "report-checker": "codex",
@@ -153,7 +151,6 @@ const DEFAULT_ROLES: Record<Role, string> = {
 /** The pairs that must not share a harness: [checked, author]. */
 export const DISTINCT_PAIRS: ReadonlyArray<readonly [Role, Role]> = [
   ["report-checker", "reporter"],
-  ["report-checker", "area-reporter"],
   ["questioner", "reporter"],
   ["answerer", "questioner"],
   ["answer-checker", "answerer"],
@@ -602,11 +599,6 @@ function checkRoles(raw: unknown): { roles: Record<Role, string>; settings: Part
     }
     need(typeof v === "string" && HARNESSES[v] !== undefined, `harnesses.${role} must be one of ${Object.keys(HARNESSES).join(", ")}, or an object with harness (claude-code or codex), model and effort`);
     roles[role] = v as string;
-  }
-  // The optional area-reporter (large mode's per-area reporter jobs) falls back to the reporter's harness, model and effort.
-  if (h["area-reporter"] === undefined) {
-    roles["area-reporter"] = roles.reporter;
-    if (settings.reporter !== undefined) settings["area-reporter"] = { ...settings.reporter };
   }
   // The optional diagrammer (the diagram job, design §6.10) falls back the same way. No claim is left for a checker to judge after it: its drawings are checked by code.
   if (h.diagrammer === undefined) {

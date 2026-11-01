@@ -23,7 +23,6 @@ import {
 } from "../src/architecture.js";
 import { readClaimCheck } from "../src/claims.js";
 import { GIT_ENV } from "../src/commands.js";
-import { areaProblems } from "../src/large.js";
 import { assembleReport, reportProblems, type ReportContext, type ReporterOutput } from "../src/report.js";
 import { pullFile, type PullFile } from "../src/snapshot.js";
 import { reporterSections } from "../src/template.js";
@@ -88,7 +87,7 @@ describe("architecture validation (design 6.10)", () => {
     expect(problems({ nodes: [node("alpha", { paths: [] })], edges: [] })).toContain("no paths");
   });
 
-  it("is part of the report's deterministic rules, and an area report leaves it empty", () => {
+  it("is part of the report's deterministic rules", () => {
     const sections = reporterSections(profileOf());
     const ctx: ReportContext = { sections, files: FILES, facts: [] };
     const base: ReporterOutput = {
@@ -99,8 +98,6 @@ describe("architecture validation (design 6.10)", () => {
       architecture: { nodes: [node("gamma", { paths: ["pkg/gamma"] })], edges: [] },
     };
     expect(reportProblems(base, ctx, { summary: false }).join("|")).toContain("none of its paths");
-    expect(areaProblems({ ...base, architecture: GOOD }, ctx).join("|")).toContain("an area report leaves the architecture empty");
-    expect(areaProblems({ ...base, architecture: { nodes: [], edges: [] } }, ctx).join("|")).not.toContain("architecture");
   });
 });
 

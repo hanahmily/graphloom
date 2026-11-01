@@ -23,7 +23,7 @@ import { parseProfile, ProfileError, type Profile } from "./profile.js";
 import { baseTargets, withOutcome, withUnknownCoverage } from "./measurements.js";
 import { goFunctionCoverage, parseCoverageReport } from "./metrics/coverage.js";
 import type { FileIndex, MetricsRecord } from "./metrics/record.js";
-import { areaContext, assembleLarge, AREA_RECORD_SCHEMA, checkAreaRecord, checkSynthesisRecord, SYNTHESIS_RECORD_SCHEMA, synthesisTargets, synthItems, type AreaDone, type SynthesisOutput } from "./large.js";
+import { largeContext } from "./large.js";
 import { architecturePlan, EMPTY_ARCHITECTURE, treeQuotePlan, type Architecture } from "./architecture.js";
 import { partitionAreas } from "./areas.js";
 import { reportMode, type ReviewMode } from "./mode.js";
@@ -451,7 +451,7 @@ function goodReport(files: readonly PullFile[], facts: readonly Fact[], sectionI
   for (const s of sections) s.none = s.items.length === 0;
   return {
     purpose: { text: `The pull request is titled "${pull.title}".`, source: "stated", quote: pull.title },
-    overview: `This pull request changes ${files.length} file${files.length === 1 ? "" : "s"}: ${files.map((f) => f.path).join(", ")}. Each change is described below.`,
+    overview: files.length > 8 ? `This pull request changes ${files.length} files, described below by the conceptual change they belong to.` : `This pull request changes ${files.length} file${files.length === 1 ? "" : "s"}: ${files.map((f) => f.path).join(", ")}. Each change is described below.`,
     sections,
     notes,
     architecture: EMPTY_ARCHITECTURE,
@@ -538,8 +538,8 @@ function quoteFor(cites: readonly Cite[] | undefined, files: readonly PullFile[]
   return best;
 }
 
-function checkReply(report: ReporterOutput, files: readonly PullFile[], sections: ReturnType<typeof reporterSections>, unsupported: ReadonlySet<string> = new Set(), summary = true): RehearsalReply {
-  const verdicts = claimTargets(report, { sections }, { summary }).map((t) => {
+function checkReply(report: ReporterOutput, files: readonly PullFile[], sections: ReturnType<typeof reporterSections>, unsupported: ReadonlySet<string> = new Set(), treeQuotes = false): RehearsalReply {
+  const verdicts = claimTargets(report, { sections }, { treeQuotes }).map((t) => {
     if (unsupported.has(t.id)) return { item: t.id, verdict: "unsupported", note: "the diff does not show this", quotes: [] };
     const q = t.tree !== undefined ? treeQuoteFor(t) : quoteFor(t.cites, files);
     return { item: t.id, verdict: "supported", note: "", quotes: q === undefined ? [] : [q] };
@@ -608,11 +608,16 @@ function build(profile: Profile, pull: Pull, options: { body?: string; notes?: s
   const sections = reporterSections(profile);
   const sectionIds = sections.map((s) => s.id);
   const notes = options.notes ?? [];
-  // A pull request over the task's limits is reviewed in large mode: the replies are those of its areas and its synthesis.
+  // A pull request over the task's limits is reviewed in large mode (design §6.9): the same flow, with one high-level report whose
+  // quotes are verified against the trees, and the files no item is expected to cite (generated, no patch) left to the plugin.
   const mode = reportMode(files, profile.limits);
-  if (mode.mode === "large" && options.report === undefined && options.corrections !== true) return buildLarge(profile, pull, options, files, facts, sections, mode);
-  const drawn = options.report !== undefined ? options.report(files, sectionIds) : goodReport(files, facts, sectionIds, notes, pull);
-  const good = options.architecture !== undefined ? { ...drawn, architecture: options.architecture(files) } : drawn;
+  const large = mode.mode === "large";
+  const partition = large ? partitionAreas(files, profile.limits, profile.questions.excludeRoots) : undefined;
+  const unread = partition !== undefined ? largeContext({ sections, files, facts }, partition).unread! : new Map<string, string>();
+  const reportable = files.filter((f) => !unread.has(f.path));
+  const reportableFacts = facts.filter((f) => !unread.has(f.path));
+  const drawn = options.report !== undefined ? options.report(files, sectionIds) : goodReport(reportable, reportableFacts, sectionIds, notes, pull);
+  const good = options.architecture !== undefined ? { ...drawn, architecture: options.architecture(files) } : large && options.report === undefined ? { ...drawn, architecture: largeArchitecture(files) } : drawn;
   const results: RehearsalScenario["results"] = {};
   /** The report the claim check leaves, and the ids it removed: what the diagrams are drawn from. */
   let left: { report: ReporterOutput; removed: ReadonlySet<string> } = { report: good, removed: new Set(options.unsupported ?? []) };
@@ -639,7 +644,7 @@ function build(profile: Profile, pull: Pull, options: { body?: string; notes?: s
   } else {
     results["change-report-v1"] = [{ output: good }];
     const weak = new Set(options.unsupported ?? []);
-    results["claim-check-v1"] = weak.size === 0 ? [checkReply(good, files, sections)] : [checkReply(good, files, sections, weak), checkReply(good, files, sections, weak)];
+    results["claim-check-v1"] = weak.size === 0 ? [checkReply(good, files, sections, new Set(), large)] : [checkReply(good, files, sections, weak, large), checkReply(good, files, sections, weak, large)];
     // A claim the check did not support goes back to the reporter once; the revision keeps it, and it is removed.
     if (weak.size > 0) results["change-report-revision-v1"] = [{ output: good }];
   }
@@ -660,96 +665,18 @@ function build(profile: Profile, pull: Pull, options: { body?: string; notes?: s
     pull: { title: pull.title, body: options.body ?? pull.body, commits: pull.commits },
     mergeBase: REHEARSAL_MERGE_BASE,
     spec: options.qa ?? pull.qa ?? {},
+    reportMode: mode,
   });
   Object.assign(results, qa.results);
-  const ctxFinal: ReportContext = { sections, files, facts, pinned: pinnedTexts({ title: pull.title, body: options.body ?? pull.body }, pull.commits.map((message) => ({ message }))), candidates: detectStateCandidates(files) };
+  const ctxStandard: ReportContext = { sections, files, facts, pinned: pinnedTexts({ title: pull.title, body: options.body ?? pull.body }, pull.commits.map((message) => ({ message }))), candidates: detectStateCandidates(files) };
+  const ctxFinal = partition !== undefined ? largeContext(ctxStandard, partition) : ctxStandard;
   const diagrams = diagramScenario(assembleReport(left.report, new Map([...left.removed].map((id) => [id, "not supported"] as const)), ctxFinal), options.diagrams);
   Object.assign(results, diagrams.results);
   return {
     scenario: {
       results,
-      commands: { ...commands(pull, options.toolId), ...quoteStubs(results["claim-check-v1"]!.at(-1)!, claimTargets(good, { sections }), files), ...archStubs(good.architecture, REHEARSAL_MERGE_BASE, { ...REHEARSAL_HEAD_FILES, ...LARGE_HEAD_FILES }), ...(options.coverage !== undefined ? { "sandbox-go": { exitCode: 0, stdout: "ready\n" }, "cover-go": { exitCode: 0, stdout: options.coverage } } : {}), ...qa.commands, ...diagrams.commands },
+      commands: { ...commands(pull, options.toolId), ...quoteStubs(results["claim-check-v1"]!.at(-1)!, claimTargets(good, { sections }, { treeQuotes: large }), files), ...archStubs(good.architecture, REHEARSAL_MERGE_BASE, { ...REHEARSAL_HEAD_FILES, ...LARGE_HEAD_FILES }), ...(options.coverage !== undefined ? { "sandbox-go": { exitCode: 0, stdout: "ready\n" }, "cover-go": { exitCode: 0, stdout: options.coverage } } : {}), ...qa.commands, ...diagrams.commands },
       reads: reads({ ...pull, ...(options.body !== undefined ? { body: options.body } : {}) }),
-      expect: { status: "stopped", stopReason: "report ready", receipts: ["fetch", "report", "questions", "answers"] },
-    },
-  };
-}
-
-/** A claim check's reply for a synthesis: every claim supported, with a quote from what its merge cites. */
-function synthesisCheckReply(output: SynthesisOutput, items: ReturnType<typeof synthItems>, files: readonly PullFile[]): RehearsalReply {
-  const verdicts = synthesisTargets(output, items).map((t) => {
-    const q = t.tree !== undefined ? treeQuoteFor(t) : quoteFor(t.cites, files);
-    return { item: t.id, verdict: "supported", note: "", quotes: q === undefined ? [] : [q] };
-  });
-  return { output: { verdicts } };
-}
-
-/**
- * A large pull request (design §6.9): a reporter reply and a claim check for each area, a synthesis that merges two items
- * of different areas, and its claim check, all derived with the plugin's own functions, so the scenario cannot drift from the graph.
- */
-function buildLarge(profile: Profile, pull: Pull, options: { body?: string; notes?: string[]; toolId?: string; qa?: QaSpec }, files: PullFile[], facts: Fact[], sections: ReturnType<typeof reporterSections>, mode: ReviewMode): Built {
-  const sectionIds = sections.map((s) => s.id);
-  const notes = options.notes ?? [];
-  const partition = partitionAreas(files, profile.limits, profile.questions.excludeRoots);
-  const ctx: ReportContext = { sections, files, facts, pinned: pinnedTexts({ title: pull.title, body: options.body ?? pull.body }, pull.commits.map((message) => ({ message }))), candidates: detectStateCandidates(files) };
-  const empty = { purpose: { text: "", source: "inferred" as const, quote: "" }, overview: "" };
-  const areaReports: ReporterOutput[] = [];
-  const areaChecks: RehearsalReply[] = [];
-  const done: AreaDone[] = [];
-  for (const area of partition.areas.filter((a) => a.kind === "read")) {
-    const actx = areaContext(ctx, area);
-    const report: ReporterOutput = { ...goodReport(actx.files, actx.facts, sectionIds, notes, pull), ...empty };
-    const check = checkReply(report, actx.files, sections, new Set(), false);
-    const checked = checkAreaRecord({ schema: AREA_RECORD_SCHEMA, area: area.id, report, revised: false, check: check.output }, area, actx);
-    if ("problem" in checked) throw new Error(`the large scenario's area ${area.id} does not validate: ${checked.problem}`);
-    areaReports.push(report);
-    areaChecks.push(check);
-    done.push(checked);
-  }
-  const items = synthItems(done);
-  const features = items.filter((i) => i.section === "features");
-  const second = features.find((i) => i.area !== features[0]?.area);
-  const synthesis: SynthesisOutput = {
-    purpose: { text: `The pull request is titled "${pull.title}".`, source: "stated", quote: pull.title },
-    overview: `This pull request changes ${files.length} files across ${done.length} areas. The alpha and beta packages are one change, described once below.`,
-    merges: features[0] !== undefined && second !== undefined ? [{ items: [features[0].key, second.key], text: `${features[0].item.text} ${second.item.text}`.slice(0, 560) }] : [],
-    notes,
-    architecture: largeArchitecture(files),
-  };
-  const check = synthesisCheckReply(synthesis, items, files);
-  const synthesized = checkSynthesisRecord({ schema: SYNTHESIS_RECORD_SCHEMA, synthesis, revised: false, check: check.output }, items, ctx);
-  if ("problem" in synthesized) throw new Error(`the large scenario's synthesis does not validate: ${synthesized.problem}`);
-  const { final } = assembleLarge(done, synthesized, ctx, partition);
-  const good: ReporterOutput = { ...empty, ...synthesis, ...asReporterOutput(final) };
-  const diagrams = diagramScenario(final);
-  const results: RehearsalScenario["results"] = {
-    "change-report-v1": areaReports.map((output) => ({ output })),
-    "change-synthesis-v1": [{ output: synthesis }],
-    "claim-check-v1": [...areaChecks, check],
-    ...diagrams.results,
-  };
-  const qa = qaScenario({
-    profile,
-    files,
-    headFiles: REHEARSAL_HEAD_FILES,
-    sections,
-    good,
-    records: recordsWithBase(pull).map((r) => withUnknownCoverage(r, `docker unavailable: ${REHEARSAL_NO_DOCKER}`)),
-    pull: { title: pull.title, body: options.body ?? pull.body, commits: pull.commits },
-    mergeBase: REHEARSAL_MERGE_BASE,
-    spec: options.qa ?? pull.qa ?? {},
-    reportMode: mode,
-  });
-  Object.assign(results, qa.results);
-  const records: NonNullable<RehearsalScenario["commands"]> = { "synthesis-record": { exitCode: 0, stdout: "written\n" } };
-  for (const a of partition.areas.filter((x) => x.kind === "read")) records[`area-record-${a.id}`] = { exitCode: 0, stdout: "written\n" };
-  return {
-    scenario: {
-      results,
-      commands: { ...commands(pull, options.toolId), ...quoteStubs(check, synthesisTargets(synthesis, items), files), ...records, ...archStubs(synthesis.architecture, REHEARSAL_MERGE_BASE, { ...REHEARSAL_HEAD_FILES, ...LARGE_HEAD_FILES }), ...qa.commands },
-      reads: reads({ ...pull, ...(options.body !== undefined ? { body: options.body } : {}) }),
-      budgets: { agentInvocations: 60, jobs: 170, decisions: 190 },
       expect: { status: "stopped", stopReason: "report ready", receipts: ["fetch", "report", "questions", "answers"] },
     },
   };
@@ -1127,7 +1054,7 @@ export function rehearsal(config: unknown): GraphRehearsal {
       "report-corrections": { ...build(profile, REPORT_PULL, { toolId: "static-go-1", corrections: true }).scenario, budgets: { agentInvocations: 40, corrections: 12 } },
       // The pull request's body asks automated reviewers to approve; the report records it under Notes.
       injection: build(profile, REPORT_PULL, { toolId: "static-go-1", body: `${REPORT_PULL.body}\n\n${INJECTION}`, notes: [`The pull request body addresses automated reviewers: "${INJECTION}"`] }).scenario,
-      // Run with `LARGE_LIMITS` (design §16): the pull request is large, partitioned into three areas plus the generated file; each area, the synthesis and each batch of questions is its own job.
+      // Run with `LARGE_LIMITS` (design §16): the pull request is large, partitioned into three areas plus the generated file; one high-level reporter job and one claim check report it, and each batch of questions is its own job.
       "large-pull-request": build(profile, LARGE_PULL, { toolId: "static-go-1" }).scenario,
       // A new function with 12 decision points and nesting 4: its Measurements row, a split-function proposal and a complexity-coverage entry.
       "complex-function": build(profile, COMPLEX_PULL, { toolId: "static-go-1" }).scenario,

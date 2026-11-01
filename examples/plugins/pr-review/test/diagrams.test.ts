@@ -501,12 +501,12 @@ describe("the diagram job in the graph", () => {
     expect((diagramJobs(base)[0]!.input as { harness: string; harnessOptions?: unknown })).toMatchObject({ harness: "claude-code", harnessOptions: { model: "opus", effort: "high" } });
     const own = simulate({ scenarioName: "architecture-diagram", config: { harnesses: { ...(BANYANDB.harnesses as object), diagrammer: { harness: "claude-code", model: "sonnet", effort: "medium" } } } });
     expect(diagramJobs(own)[0]!.input).toMatchObject({ harness: "claude-code", harnessOptions: { model: "sonnet", effort: "medium" } });
-    // The reporter's, not the area reporter's: it is the synthesis-side author.
-    const other = simulate({ scenarioName: "architecture-diagram", config: { harnesses: { ...(BANYANDB.harnesses as object), reporter: { harness: "claude-code", model: "haiku", effort: "low" }, "area-reporter": { harness: "claude-code", model: "sonnet", effort: "high" } } } });
+    // The reporter's settings, whatever the profile once said of other reporters.
+    const other = simulate({ scenarioName: "architecture-diagram", config: { harnesses: { ...(BANYANDB.harnesses as object), reporter: { harness: "claude-code", model: "haiku", effort: "low" } } } });
     expect(diagramJobs(other)[0]!.input).toMatchObject({ harnessOptions: { model: "haiku", effort: "low" } });
   });
 
-  it("draws in large mode too, once, after the synthesis claim check, and draws the same on the same report", () => {
+  it("draws in large mode too, once, after the claim check, and draws the same on the same report", () => {
     const sim = simulate({ scenario: scenarioWith("large-pull-request", () => undefined, { limits: LARGE_LIMITS }), config: { limits: LARGE_LIMITS }, maxSteps: 250 });
     expect(sim.final.action).toMatchObject({ type: "stop", stop: { reason: "report ready" } });
     expect(diagramJobs(sim)).toHaveLength(1);
@@ -520,9 +520,9 @@ describe("the diagram job in the graph", () => {
   });
 
   it("counts the diagram job in large mode's budget pre-check", () => {
-    expect(largeNeeds(10)).toMatchObject({ agentInvocations: 47, jobs: 106 });
-    // One area: 9 agent invocations before the diagrams (area reporter and checker, synthesis and checker, questioner, N1, one batch), 2 more for them; 39 jobs before, 4 more.
-    expect(largeNeeds(1)).toMatchObject({ agentInvocations: 11, jobs: 43 });
+    expect(largeNeeds(10)).toMatchObject({ agentInvocations: 21, jobs: 65 });
+    // One area: 7 agent invocations before the diagrams (the reporter and its checker, questioner, N1's two, one batch's two), 2 more for them; 37 jobs before, 4 more.
+    expect(largeNeeds(1)).toMatchObject({ agentInvocations: 9, jobs: 41 });
   });
 
   it("draws nothing when the report has no architecture and no lifecycle entry, and says nothing of it", () => {

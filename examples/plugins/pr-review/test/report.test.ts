@@ -5,7 +5,7 @@ import { validateResultShape } from "@graphloom/sdk";
 import { describe, expect, it } from "vitest";
 import { detectFacts } from "../src/detectors.js";
 import { pinnedTexts } from "../src/questions.js";
-import { assembleReport, asReporterOutput, CHANGE_REPORT_SCHEMA, MAX_ITEM_CHARS, MAX_ITEMS_PER_SECTION, MAX_LARGE_ITEM_CHARS, numbered, parseReporterOutput, renderReport, reportProblems, type Cite, type ReportContext, type ReportItem, type ReporterOutput } from "../src/report.js";
+import { assembleReport, asReporterOutput, CHANGE_REPORT_SCHEMA, MAX_ITEM_CHARS, MAX_ITEMS_PER_SECTION, numbered, parseReporterOutput, renderReport, reportProblems, type Cite, type ReportContext, type ReportItem, type ReporterOutput } from "../src/report.js";
 import { pullFile, type PullFile } from "../src/snapshot.js";
 import { reporterSections } from "../src/template.js";
 
@@ -274,13 +274,11 @@ describe("rendering the Report part of review.md", () => {
   });
 });
 
-describe("the item text limit of large mode (design §6.5, §6.9)", () => {
-  const large = (n: number): string[] => reportProblems(valid([item("x".repeat(n), [cite("pkg/a.go")])]), { ...ctx, maxItemChars: MAX_LARGE_ITEM_CHARS });
-  it("is 900 characters where the context says large, 600 otherwise", () => {
-    expect(MAX_LARGE_ITEM_CHARS).toBe(900);
-    expect(large(850).join()).not.toMatch(/characters, more than/);
-    expect(large(900).join()).not.toMatch(/characters, more than/);
-    expect(large(950).join()).toMatch(/the text is 950 characters, more than 900/);
+describe("the item text limit (design §6.5)", () => {
+  it("is 600 characters in every mode: large mode has no larger limit", () => {
+    expect(MAX_ITEM_CHARS).toBe(600);
+    expect(problems(valid([item("x".repeat(600), [cite("pkg/a.go")])])).join()).not.toMatch(/characters, more than/);
     expect(problems(valid([item("x".repeat(650), [cite("pkg/a.go")])])).join()).toMatch(/650 characters, more than 600/);
+    expect(reportProblems(valid([item("x".repeat(650), [cite("pkg/a.go")])]), { ...ctx, large: true }).join()).toMatch(/650 characters, more than 600/);
   });
 });

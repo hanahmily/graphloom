@@ -3,8 +3,8 @@
 
 /**
  * The architecture diagram (design §6.10): the components a pull request adds or modifies, the components they
- * connect to, and the connections. The reporter returns it with a standard report; the synthesis job returns it in
- * large mode. This module holds the contract fragment, the deterministic validation (structure, then the tree check
+ * connect to, and the connections. The reporter returns it with the report, in
+ * either mode. This module holds the contract fragment, the deterministic validation (structure, then the tree check
  * the graph runs as read-only commands), the claim targets (`A.<node id>`, `A.e<n>`), the assembly that drops what
  * the claim check could not support, and the Mermaid block of `review.md`. The SVG is `archlayout.ts`.
  */
@@ -67,7 +67,7 @@ const text = { type: "string" };
 const strict = (required: string[], properties: Record<string, unknown>): Record<string, unknown> => ({ type: "object", additionalProperties: false, required, properties });
 const ARCH_CITE_SCHEMA = strict(["path", "side", "start", "end"], { path: text, side: { type: "string", enum: ["head", "base"] }, start: { type: "integer" }, end: { type: "integer" } });
 
-/** The contract fragment: the `architecture` property of `change-report-v1` and `change-synthesis-v1` (design §6.10). */
+/** The contract fragment: the `architecture` property of `change-report-v1` (design §6.10). */
 export const ARCHITECTURE_SCHEMA = strict(["nodes", "edges"], {
   nodes: {
     type: "array",
@@ -93,7 +93,7 @@ export const ARCHITECTURE_SCHEMA = strict(["nodes", "edges"], {
   },
 });
 
-/** What the reporter (standard) and the synthesis job (large) are told of the diagram. */
+/** What the reporter is told of the diagram. */
 export const ARCHITECTURE_PROMPT = [
   `The "architecture" of your result is a diagram that helps a maintainer understand the components this pull request adds or changes and how they connect to each other and to the rest of the system. It is not an inventory of the repository: draw what the change touches and what it talks to.`,
   `- nodes (at most ${MAX_ARCH_NODES}): id (a short name such as "n1" or "store", unique, letters, digits, "_" and "-", and not of the form e<number>), label (what a maintainer calls it, at most ${MAX_LABEL_CHARS} characters), kind ("package", "cli", "service", "api", "storage", "external" or "other"), change ("added" when the pull request creates it, "modified" when it changes it, "unchanged" for a component it only connects to), paths (the files or directories that are the node, in the tree; an added or modified node's paths must match a changed file, an unchanged node's paths must exist at the base commit), and cite (path, side, start, end: a place that shows the node, in the head tree for an added or modified node, the base tree for one that is gone from the head).`,
@@ -101,8 +101,6 @@ export const ARCHITECTURE_PROMPT = [
   `Rules: an unchanged node appears only when an edge connects it to an added or modified node (context, not inventory). Every cite must name lines that exist in the tree it names (the head tree is the working tree; the base tree is HEAD). A Go call or import edge between two package nodes is checked against the "from" package's import blocks, so draw it only when the head imports the other package. Draw only components and connections the code shows; do not invent any. Each node and each edge is checked against the code as a claim of its own, and one that is not supported is dropped from the diagram.`,
 ].join("\n");
 
-/** An empty diagram: what an area reporter returns in large mode, where the synthesis job draws it. */
-export const isEmptyArchitecture = (a: Architecture): boolean => a.nodes.length === 0 && a.edges.length === 0;
 
 /** The claim ids of a diagram's parts: `A.<node id>` and `A.e<n>` (n from 1, in the order the edges are given). */
 export const nodeClaimId = (id: string): string => `A.${id}`;

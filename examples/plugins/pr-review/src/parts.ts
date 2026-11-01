@@ -157,7 +157,7 @@ export function necessityWriteCommands(json: string): EnvironmentCommand[] {
 /** The commands that write `review.html` at the Report stage (`qa` false) or, whole, at the Answers stage. */
 export const htmlWriteCommands = (html: string, qa: boolean): EnvironmentCommand[] => partCommands(qa ? PART_BASE.qaHtml : PART_BASE.reviewHtml, REVIEW_HTML, html);
 
-/** The commands that record a step of a large run (an area, the synthesis, an answered batch): one command when it fits, else a part set. */
+/** The commands that record a step of a large run (an answered batch): one command when it fits, else a part set. */
 export function recordCommands(id: string, dir: string, json: string): EnvironmentCommand[] {
   const one = recordCommand(id, dir, json);
   return one !== undefined ? [one] : partCommands(id, `${REVIEW_DIR}/${dir}/${id}.json`, json);
@@ -183,7 +183,7 @@ export function recordedHtml(evidence: readonly EvidenceRecord[], qa: boolean): 
   return readParts(evidence, qa ? PART_BASE.qaHtml : PART_BASE.reviewHtml, REVIEW_HTML);
 }
 
-/** What a record holds (`area-record-A1`, `synthesis-record`, `answers-record-2`): its command's JSON, or its parts'. */
+/** What a record holds (`answers-record-2`): its command's JSON, or its parts'. */
 export function recordedRecord(evidence: readonly EvidenceRecord[], id: string, dir: string): Written<string> {
   return readArtifact(evidence, id, (argv) => writtenRecord(argv, id), [{ base: id, path: `${REVIEW_DIR}/${dir}/${id}.json` }], ([json]) => json!);
 }

@@ -84,12 +84,18 @@ export interface ClaimTarget {
   quotes: "required" | "none";
   /** The tree the claim's cite names, when its quotes are verified against that tree and not against the patch (the architecture diagram, §6.10). */
   tree?: "head" | "base";
+  /**
+   * Large mode (design §6.9): the claim's quotes are verified against the trees its cites name, each quote against the
+   * side of the cite that names its file (the head for a claim with no cite), because an item of a high-level report
+   * may rest on lines that no patch shown to the reporter holds.
+   */
+  treeByCite?: true;
 }
 
 /** The longest quote the tree check takes: it travels in an argv element. */
 export const MAX_TREE_QUOTE_CHARS = 400;
 
-/** The purpose and overview claims of a summary: shared by a standard report and the synthesis job (design §6.9). */
+/** The purpose and overview claims of a summary: of every report. */
 export function summaryTargets(report: Pick<ReporterOutput, "purpose" | "overview">): ClaimTarget[] {
   return [
     {
@@ -104,10 +110,16 @@ export function summaryTargets(report: Pick<ReporterOutput, "purpose" | "overvie
 
 /**
  * Every claim of a report, in the order the checker is shown them: the summary, then each item with its lifecycle
- * entries and behavior rows. An area's report (large mode) has no summary: the synthesis job writes it.
+ * entries and behavior rows, then the architecture's nodes and edges. With `treeQuotes` (large mode) the quotes of the
+ * claims that name no tree of their own are verified against the trees their cites name.
  */
-export function claimTargets(report: ReporterOutput, ctx: Pick<ReportContext, "sections">, opts: { summary?: boolean; archNotes?: ReadonlyMap<string, string> } = {}): ClaimTarget[] {
-  const out: ClaimTarget[] = opts.summary === false ? [] : summaryTargets(report);
+export function claimTargets(report: ReporterOutput, ctx: Pick<ReportContext, "sections">, opts: { archNotes?: ReadonlyMap<string, string>; treeQuotes?: boolean } = {}): ClaimTarget[] {
+  const all = claimTargetsOf(report, ctx, opts);
+  return opts.treeQuotes === true ? all.map((t) => (t.tree === undefined && t.quotes === "required" ? { ...t, treeByCite: true as const } : t)) : all;
+}
+
+function claimTargetsOf(report: ReporterOutput, ctx: Pick<ReportContext, "sections">, opts: { archNotes?: ReadonlyMap<string, string> }): ClaimTarget[] {
+  const out: ClaimTarget[] = summaryTargets(report);
   for (const { id, section, item } of numbered(report, ctx)) {
     out.push({ id, text: `[${section}] ${collapse(item.text)}`, cites: item.cites, quotes: "required" });
     item.state.forEach((e, si) => {
@@ -118,8 +130,7 @@ export function claimTargets(report: ReporterOutput, ctx: Pick<ReportContext, "s
     });
     item.behavior.forEach((b, bi) => out.push({ id: behaviorId(id, bi), text: `Case "${collapse(b.case)}": before: ${collapse(b.before)}; after: ${collapse(b.after)}`, cites: undefined, quotes: "required" }));
   }
-  // The architecture diagram (design §6.10): a standard report's own; in large mode the synthesis job's.
-  if (opts.summary !== false) out.push(...architectureTargets(report.architecture, opts.archNotes));
+  out.push(...architectureTargets(report.architecture, opts.archNotes));
   return out;
 }
 
@@ -169,7 +180,7 @@ export function readClaimCheck(output: unknown, targets: readonly ClaimTarget[],
   }
   const reading: ClaimReading = { unchecked: [], supported: new Set(), weak: new Map(), notes, ignored, treeQuotes: [] };
   const findFile = (path: string): PullFile | undefined => files.find((f) => f.path === path || f.previousPath === path);
-  for (const { id, cites, quotes: need, tree } of targets) {
+  for (const { id, cites, quotes: need, tree, treeByCite } of targets) {
     const v = byItem.get(id);
     if (v === undefined) {
       reading.unchecked.push(id);
@@ -198,6 +209,22 @@ export function readClaimCheck(output: unknown, targets: readonly ClaimTarget[],
     const quotes = v.quotes.slice(0, MAX_QUOTES);
     if (!textual || need === "none") {
       reading.supported.add(id);
+      continue;
+    }
+    // Large mode: each quote is checked against the tree of the cite that names its file, not against the patch.
+    if (treeByCite === true) {
+      const named = (q: Quote): Cite | undefined => cites?.find((c) => c.path === q.path);
+      const bad = quotes.find((q) => cites !== undefined && named(q) === undefined);
+      if (quotes.length === 0) reading.weak.set(id, "supported without a quote");
+      else if (bad !== undefined) reading.weak.set(id, `supported, but a quote is not from a file its cite names (${bad.path})`);
+      else if (quotes.some((q) => collapse(q.text).length < MIN_QUOTE_CHARS || collapse(q.text).length > MAX_TREE_QUOTE_CHARS || q.line < 1)) reading.weak.set(id, `supported, but a quote is shorter than ${MIN_QUOTE_CHARS} or longer than ${MAX_TREE_QUOTE_CHARS} characters, or names no line`);
+      else {
+        reading.supported.add(id);
+        for (const side of ["head", "base"] as const) {
+          const mine = quotes.filter((q) => (named(q)?.side ?? "head") === side);
+          if (mine.length > 0) reading.treeQuotes.push({ id, tree: side, quotes: mine });
+        }
+      }
       continue;
     }
     const matched = quotes.filter((q) => {

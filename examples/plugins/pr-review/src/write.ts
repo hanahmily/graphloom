@@ -89,8 +89,8 @@ const recordScript =
   `printf '%s' "$json" > "$file.tmp"; mv "$file.tmp" "$file"; echo written`;
 
 /**
- * The command that records one step of a large run as evidence (design §6.9, §7.6): an area's checked report, the
- * synthesis, or an answered batch. The bytes are evidence, so the validators read the step from here even after a
+ * The command that records one step of a large run as evidence (design §7.6): an answered batch. The bytes are
+ * evidence, so the validators read the step from here even after a
  * later review has superseded the check that judged it (a validator sees only the newest review). The file lands
  * under `.graphloom/review/<dir>/`. Undefined when it does not fit one command.
  */

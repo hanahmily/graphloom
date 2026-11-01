@@ -23,8 +23,6 @@ import type { Section } from "./template.js";
 export const REPORT_SCHEMA = "pr-change-report-v1";
 export const MAX_ITEMS_PER_SECTION = 40;
 export const MAX_ITEM_CHARS = 600;
-/** Large mode (design §6.9): one item there often summarises a whole area's change, in an area's report and in a merged item. */
-export const MAX_LARGE_ITEM_CHARS = 900;
 export const MAX_REPORT_BYTES = 256 * 1024;
 export const MAX_PURPOSE_CHARS = 400;
 export const MAX_OVERVIEW_CHARS = 900;
@@ -106,7 +104,7 @@ export interface ReporterOutput {
   overview: string;
   sections: ReporterSection[];
   notes: string[];
-  /** The components the change adds or modifies, and how they connect (design §6.10); an area report in large mode leaves it empty. */
+  /** The components the change adds or modifies, and how they connect (design §6.10). */
   architecture: Architecture;
 }
 
@@ -169,11 +167,12 @@ export interface ReportContext {
   pinned?: readonly PinnedText[];
   /** State the patches introduce: each must have a lifecycle entry in an item that cites its file. */
   candidates?: readonly StateCandidate[];
-  /** Large mode's merged report holds the items of every area, so its bounds grow with them (design §6.9); absent means the standard bounds. */
-  maxItemsPerSection?: number;
-  maxBytes?: number;
-  /** Large mode (an area's context and the merged report's): the longest item text, MAX_LARGE_ITEM_CHARS; absent means MAX_ITEM_CHARS. */
-  maxItemChars?: number;
+  /**
+   * Large mode (design §6.9): the report is high level. The reporter need not cite every changed file or list every
+   * detector fact (the plugin accounts for what it leaves out, in "other" and as plugin-written fact items), and no state
+   * candidate needs a lifecycle entry; every other rule is the standard one.
+   */
+  large?: boolean;
   /** Large mode: files no agent read as patches (generated, or no patch from GitHub), by path, with what the report says of each. */
   unread?: ReadonlyMap<string, string>;
   /** The pinned base commit, which the architecture diagram's tree check reads (design §6.10). */
@@ -202,10 +201,10 @@ const SENTENCE_SPLIT = /[.!?]+(?:\s+|$)/;
 export function reportProblems(report: ReportLike, ctx: ReportContext, opts: { final?: boolean; summary?: boolean } = {}): string[] {
   const problems: string[] = [];
   const final = opts.final === true;
-  const maxItems = ctx.maxItemsPerSection ?? MAX_ITEMS_PER_SECTION;
-  const maxBytes = ctx.maxBytes ?? MAX_REPORT_BYTES;
-  const maxItemChars = ctx.maxItemChars ?? MAX_ITEM_CHARS;
-  // An area's report leaves the summary to the synthesis job (design §6.9).
+  const maxItems = MAX_ITEMS_PER_SECTION;
+  const maxBytes = MAX_REPORT_BYTES;
+  const maxItemChars = MAX_ITEM_CHARS;
+  // `summary: false` skips the summary rules (the final report has none of its own to check).
   if (!final && opts.summary !== false) summaryProblems(report, ctx, problems);
   // The diagram's structural rules (design §6.10); its tree check is a command the graph runs (`architecturePlan`).
   if (report.architecture !== undefined) problems.push(...architectureProblems(report.architecture, ctx.files));
@@ -227,7 +226,7 @@ export function reportProblems(report: ReportLike, ctx: ReportContext, opts: { f
     if (s.none && s.items.length > 0) problems.push(`section ${s.id} says none but lists ${s.items.length} item(s)`);
     if (!s.none && s.items.length === 0) problems.push(`section ${s.id} has no items and does not say "none": true`);
     if (s.items.length > maxItems) problems.push(`section ${s.id} has ${s.items.length} items, more than ${maxItems}`);
-    if (s.none) {
+    if (s.none && (ctx.large !== true || final)) {
       const routed = ctx.facts.filter((f) => f.section === s.id);
       if (routed.length > 0) problems.push(`section ${s.id} says none, but detector fact(s) ${routed.slice(0, 5).map((f) => f.id).join(", ")} route to it`);
     }
@@ -253,9 +252,9 @@ export function reportProblems(report: ReportLike, ctx: ReportContext, opts: { f
   }
   if (bytes > maxBytes) problems.push(`the report is ${bytes} bytes, more than ${maxBytes}`);
   const uncited = ctx.files.flatMap((f) => fileNames(f)).filter((n) => !cited.has(n));
-  if (uncited.length > 0) problems.push(`changed file(s) no item cites: ${uncited.slice(0, 10).join(", ")}${uncited.length > 10 ? `, and ${uncited.length - 10} more` : ""}; put each in a section, or in "other"`);
+  if (uncited.length > 0 && (ctx.large !== true || final)) problems.push(`changed file(s) no item cites: ${uncited.slice(0, 10).join(", ")}${uncited.length > 10 ? `, and ${uncited.length - 10} more` : ""}; put each in a section, or in "other"`);
   const unaccounted = ctx.facts.filter((f) => known.has(f.section) && !accounted.has(f.id));
-  if (unaccounted.length > 0) {
+  if (unaccounted.length > 0 && (ctx.large !== true || final)) {
     problems.push(`detector fact(s) no item of their section lists: ${unaccounted.slice(0, 8).map((f) => `${f.id} (${f.section}: ${f.text})`).join("; ")}${unaccounted.length > 8 ? `; and ${unaccounted.length - 8} more` : ""}`);
   }
   if (!final) {
@@ -388,9 +387,9 @@ export interface RemovedItem {
 
 /** A part of the report the claim check could not support, dropped while its item stays. */
 export interface RemovedPart {
-  /** The claim-check id: `purpose`, `overview`, `R3.s1` (a state entry, whole), `R3.b2` (a behavior row), `M2` (a merge, large mode), `A.store` (a diagram node), `A.e3` (a diagram edge). */
+  /** The claim-check id: `purpose`, `overview`, `R3.s1` (a state entry, whole), `R3.b2` (a behavior row), `A.store` (a diagram node), `A.e3` (a diagram edge). */
   id: string;
-  kind: "purpose" | "overview" | "state" | "behavior" | "merge" | "node" | "edge";
+  kind: "purpose" | "overview" | "state" | "behavior" | "node" | "edge";
   /** The item it belonged to; empty for the summary. */
   item: string;
   /** What was dropped, in a few words: the entry's name or the row's case. */
@@ -485,8 +484,8 @@ export function assembleReport(report: Pick<ReporterOutput, "sections" | "notes"
    */
   const place = (section: string, autos: Array<Omit<FinalItem, "id">>, label: string): void => {
     const target = bySection.get(section)!;
-    const limit = ctx.maxItemsPerSection ?? MAX_ITEMS_PER_SECTION;
-    const maxChars = ctx.maxItemChars ?? MAX_ITEM_CHARS;
+    const limit = MAX_ITEMS_PER_SECTION;
+    const maxChars = MAX_ITEM_CHARS;
     const room = limit - target.length;
     if (autos.length <= room) {
       for (const a of autos) {
@@ -517,7 +516,7 @@ export function assembleReport(report: Pick<ReporterOutput, "sections" | "notes"
     const whole = fact.line < 1;
     const list = factItems.get(fact.section) ?? [];
     list.push({
-      text: ctx.unread?.has(fact.path) === true ? `Detected: ${fact.text}. ${ctx.unread.get(fact.path)}.` : `Detected: ${fact.text}. The reported item for it was removed by the claim check.`,
+      text: ctx.unread?.has(fact.path) === true ? `Detected: ${fact.text}. ${ctx.unread.get(fact.path)}.` : `Detected: ${fact.text}. ${ctx.large === true ? "No item of the high-level report lists it (or its item was removed by the claim check)." : "The reported item for it was removed by the claim check."}`,
       cites: [{ path: fact.path, side: fact.side, start: whole ? 0 : fact.line, end: whole ? 0 : fact.line, symbol: "" }],
       facts: [fact.id],
       state: [],
@@ -674,7 +673,6 @@ export function renderReport(final: FinalReport, header: ReportHeader): string {
     }
     lines.push("");
   }
-  for (const p of final.removedParts.filter((x) => x.kind === "merge")) lines.push(`Merge not applied: the claim check could not support joining ${short(p.label, 120)} (${short(p.reason, 140)}); its items stay separate.`);
   const dropped = final.removedParts.filter((x) => x.kind === "node" || x.kind === "edge");
   if (dropped.length > 0) {
     lines.push("## Removed by the claim check", ...dropped.map((p) => `- Architecture ${p.kind === "node" ? "component" : "connection"} \`${p.id}\` ${short(p.label, 80)}: ${short(p.reason, 160)}`), "");
