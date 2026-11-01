@@ -85,7 +85,7 @@ describe.skipIf(GO === undefined)("pr-review approvals: the decision half", () =
 
     // Refusals record nothing and change nothing.
     const before = await readFile(path.join(stateDir, "state.json"), "utf8");
-    await expect(resumeRehearsal(stateDir, { approval: { approvalId: "review-layer", decision: "approve", operator: "tester" } })).rejects.toThrow(/pr-review 0\.9\.0 has no Review stage.*--decline review-layer finishes the run as succeeded/);
+    await expect(resumeRehearsal(stateDir, { approval: { approvalId: "review-layer", decision: "approve", operator: "tester" } })).rejects.toThrow(/pr-review 0\.10\.0 has no Review stage.*--decline review-layer finishes the run as succeeded/);
     await expect(resumeRehearsal(stateDir, { approval: { approvalId: "publish-review", decision: "decline", operator: "tester" } })).rejects.toThrow(/declares no approval "publish-review"; it declares review-layer/);
     expect(await readFile(path.join(stateDir, "state.json"), "utf8")).toBe(before);
     expect(await approvalsOf(stateDir)).toEqual([]);

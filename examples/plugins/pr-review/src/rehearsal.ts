@@ -28,7 +28,7 @@ import { numbered, type Cite, type ReportItem, type ReporterOutput, type StateEn
 import { detectStateCandidates } from "./statecandidates.js";
 import { DOCS } from "./rehearsal-docs.js";
 import type { Necessity } from "./necessity.js";
-import { BASE_FILES, FLAGS_GO, NEW_HEAD_FILES, RETENTION_TTL_GO, BACKOFF_GO, JITTER_GO, LIMIT_GO, SYNC_GO, SYNC_CHANGED, STREAM_ADDED_LINES, STREAM_CHANGED, STREAM_PATH, STREAM_WRITE_BASE_GO, STREAM_WRITE_GO, WRITE_PATH_DOC } from "./rehearsal-fixtures.js";
+import { BASE_FILES, FLAGS_GO, NEW_HEAD_FILES, RETENTION_TTL_GO, BACKOFF_GO, JITTER_GO, LIMIT_GO, SYNC_GO, SYNC_CHANGED, STREAM_ADDED_LINES, STREAM_CHANGED, STREAM_PATH, STREAM_WRITE_BASE_GO, STREAM_WRITE_GO, WRITE_PATH_DOC, PRINCIPLES_FILE } from "./rehearsal-fixtures.js";
 import { qaScenario, type QaSpec } from "./rehearsal-qa.js";
 import { pullFile, type PullFile } from "./snapshot.js";
 import { reporterSections } from "./template.js";
@@ -303,6 +303,8 @@ function commands(p: Pull, toolId: string | undefined): NonNullable<RehearsalSce
     "head-tree": { exitCode: 0, stdout: `head=${TREE}\nindex=${TREE}\nbase=${REHEARSAL_MERGE_BASE}\nworktree=clean\n` },
     "review-dir": { exitCode: 0, stdout: "ready\n" },
     "ledger-read": { exitCode: 0, stdout: "absent\n" },
+    // The repository has no design principles file at the pinned base (a scenario that has one says so in its Q&A spec).
+    "principles-read": { exitCode: 0, stdout: `commit ${REHEARSAL_MERGE_BASE}\nabsent\n` },
     // No Docker in a rehearsal: the sandbox image checks say so, and no pull request code runs anywhere (`sandbox-unavailable`).
     "sandbox-go": { exitCode: 0, stdout: `unavailable: ${REHEARSAL_NO_DOCKER}\n` },
     "sandbox-typescript": { exitCode: 0, stdout: `unavailable: ${REHEARSAL_NO_DOCKER}\n` },
@@ -918,6 +920,12 @@ export function rehearsal(config: unknown): GraphRehearsal {
       }).scenario,
       // N1 concludes necessary: the failure is possible, the change keeps the design, no existing way does it; every question follows.
       "necessity-necessary": build(profile, SYNC_PULL, { toolId: "static-go-1" }).scenario,
+      // The repository has a principles skill at the pinned base; two of its principles apply to the change and N1 judges both as preserved, the checker supporting them.
+      "necessity-principles": build(profile, SYNC_PULL, { toolId: "static-go-1", qa: { ...SYNC_PULL.qa, necessity: { principles: { text: PRINCIPLES_FILE } } } }).scenario,
+      // N1 says the change breaks offline-idempotent and the checker supports it: necessary becomes questionable, naming the principle, and every question is asked.
+      "necessity-principle-broken": build(profile, SYNC_PULL, { toolId: "static-go-1", qa: { ...SYNC_PULL.qa, necessity: { principles: { text: PRINCIPLES_FILE, verdicts: { "offline-idempotent": "breaks" } } } } }).scenario,
+      // The same break, which the checker does not support: recorded with both statements, the conclusion stays necessary.
+      "necessity-principle-unsupported": build(profile, SYNC_PULL, { toolId: "static-go-1", qa: { ...SYNC_PULL.qa, necessity: { principles: { text: PRINCIPLES_FILE, verdicts: { "offline-idempotent": "breaks" }, checks: { "offline-idempotent": "unsupported" } } } } }).scenario,
       // A #1443-like change: a counter and a first-error variable set in several places and read once. The report is one item with their lifecycles and a before/after table, not one item per hunk.
       "state-lifecycle": build(profile, STREAM_PULL, { toolId: "static-go-1", report: streamReport }).scenario,
     },

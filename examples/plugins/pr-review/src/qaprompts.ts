@@ -8,6 +8,7 @@
  */
 import type { Answer, FinalAnswer } from "./answers.js";
 import { NECESSITY_ID, NECESSITY_TEXT } from "./necessity.js";
+import { principlesFrom, type PrinciplesContext } from "./principles.js";
 import type { ContextRef } from "./profile.js";
 import { needsOwnSearch } from "./answers.js";
 import type { Groundwork } from "./groundwork.js";
@@ -210,7 +211,7 @@ export function answerCheckerInstruction(a: CheckerAssignment): string {
     howToRead(a.baseDir),
     a.mountedDirs.length > 0 ? `Dependency source is mounted read-only at: ${a.mountedDirs.join(", ")}; a dependency citation names a file there.` : "No dependency source is available on this machine.",
     "",
-    "For every answer: re-check each equivalent, library, duplicate and covering test it cites against the tree (does the cited code exist and do what the answer says? does the cited test exercise the symbol?). For every answer that says none found, and every missing-test, complexity-coverage or weak-test answer, run searches of your own over the whole base tree (and the head, for tests) with your own patterns, not only the answerer's, and list them in the searches of your verdict (structured records, below); an absence you could not reproduce is a finding. Give a verdict: supported when your checks agree; partial when part holds (say which in note); unsupported when a none-found answer has a candidate you found, a cited equivalent does not do what is claimed, or a cited test does not exercise the symbol (say what you found in note). Judge claims only, never wording. Return the verdicts of your result: one for every question, none left out. The question field of each verdict is the bare id exactly as listed below (for example Q1, never the type or the text after it); the result contract accepts no other value.",
+    "For every answer: re-check each equivalent, library, duplicate and covering test it cites against the tree (does the cited code exist and do what the answer says? does the cited test exercise the symbol?). For every answer that says none found, and every missing-test, complexity-coverage or weak-test answer, run searches of your own over the whole base tree (and the head, for tests) with your own patterns, not only the answerer's, and list them in the searches of your verdict (structured records, below); an absence you could not reproduce is a finding. Give a verdict: supported when your checks agree; partial when part holds (say which in note); unsupported when a none-found answer has a candidate you found, a cited equivalent does not do what is claimed, or a cited test does not exercise the symbol (say what you found in note). Judge claims only, never wording. Return the verdicts of your result: one for every question, none left out. The question field of each verdict is the bare id exactly as listed below (for example Q1, never the type or the text after it); the result contract accepts no other value. Leave the principles of every verdict empty (they are for the necessity question only).",
     SEARCH_HELP,
     "",
     `Questions and answers (${a.questions.length}):`,
@@ -230,8 +231,19 @@ export interface NecessityAssignment {
   context: readonly ContextRef[];
   kind: "first" | "correction" | "revision";
   feedback: string[];
+  /** The project's design principles, when the profile names a file (design §7.5.1). */
+  principles?: PrinciplesContext;
   baseDir?: string;
 }
+
+/** The principles that apply to the change, one block each, for N1's answerer. */
+const principleLines = (c: PrinciplesContext | undefined): string[] => {
+  if (c === undefined || c.read.file === "absent" || c.applicable.length === 0) return [];
+  return [
+    `The project's design principles (from ${c.read.path} at ${principlesFrom(c.read)}; each applies to this change). Inside part 2, give one verdict per principle in principles, each id exactly once: preserves (the change keeps it), breaks (the change violates it) or not-applicable (it does not bear on this change), with an explanation and citations (path, tree base or head, first and last line, a verbatim quote). preserves and breaks need at least one citation. Judge each principle against the changed lines and the code around them; a principle you cite as broken is a claim the checker will verify.`,
+    ...c.applicable.map((p) => `- ${p.id}: ${oneLine(p.statement)}${p.why !== undefined ? ` Why: ${oneLine(p.why)}` : ""}${p.source !== undefined ? ` Source: ${oneLine(p.source)}` : ""}`),
+  ];
+};
 
 const designDocLines = (docs: readonly string[], context: readonly ContextRef[]): string[] => [
   docs.length > 0
@@ -255,6 +267,8 @@ export function necessityInstruction(a: NecessityAssignment): string {
     "Reproduction (reproduction): a failing test on the base is optional evidence. This version of the plugin has no mechanism to run one, so write `not attempted: no reproduction mechanism in this version` and rely on the trace.",
     "Part 2, the design (design): does the fix fit the system's design? Search the repository's design and architecture documents, and the code comments that state intent, for what the system says about the behavior the change touches, for example the write path, the ordering of an acknowledgement and a flush, or who owns a responsibility. List every such search in design.searches (structured records, below), including the ones that found nothing. Cite each design statement in design.statements (path, tree base, first and last line, a verbatim quote) and the changed lines in design.changed (path, tree head, lines, a verbatim quote). Say in design.effect whether the change preserves or breaks those intents, or is unrelated to them, or that no design statement is stated; explain in design.explanation, for example: does replying after a flush make the write wait on the flush, against the write path design? preserves and breaks cite both a statement and the changed lines.",
     ...designDocLines(a.designDocs, a.context),
+    ...principleLines(a.principles),
+    ...(a.principles === undefined || a.principles.applicable.length === 0 ? ["No design principle applies to this change: leave principles empty."] : []),
     "Part 3, a simpler or existing way (alternatives): is there one (the caller or another layer already handles it, or the fix belongs elsewhere)? Set exists, explain in alternatives.explanation, and cite where in alternatives.citations (path, tree base or head, lines, quote). Put any other search you ran in searches.",
     SEARCH_HELP,
     "Conclusion (conclusion), with its one-line rationale (rationale, one line): necessary (the failure is possible, the change keeps the design, no existing way does it); questionable (some part does not hold or is unclear); unnecessary (it rests on a cited ground: the claimed failure cannot happen on the base, the change breaks a cited design statement, or an existing way already does it); needs author (the answer depends on intent only the author can state). A conclusion of necessary or unnecessary needs a problem the pull request states, quoted.",
@@ -279,6 +293,7 @@ const necessityLines = (a: Answer): string[] => {
     ...n.problem.trace.map((s, i) => `  T${i + 1} trace step: ${clip(oneLine(s.step), 200)} — ${cite(s)}`),
     `reproduction: ${clip(oneLine(n.reproduction), 200)}`,
     `design effect ${n.design.effect}: ${clip(oneLine(n.design.explanation), 300)}`,
+    ...n.principles.map((p) => `  P principle ${p.id} — ${p.verdict}: ${clip(oneLine(p.explanation), 300)}${p.citations.map((c) => ` [${cite(c)}]`).join("")}`),
     ...n.design.statements.map((s, i) => `  D${i + 1} design statement — ${cite(s)}`),
     ...n.design.changed.map((s, i) => `  C${i + 1} changed lines — ${cite(s)}`),
     `design searches: ${n.design.searches.map(reportedSearch).join("; ")}`,
@@ -295,6 +310,8 @@ export interface NecessityCheckerAssignment {
   designDocs: readonly string[];
   context: readonly ContextRef[];
   retry: boolean;
+  /** The project's design principles, when the profile names a file (design §7.5.1). */
+  principles?: PrinciplesContext;
   baseDir?: string;
 }
 
@@ -308,6 +325,12 @@ export function necessityCheckerInstruction(a: NecessityCheckerAssignment): stri
     howToRead(a.baseDir),
     "",
     "Check each of these, and name in your note every one that fails (T1…, D1…, C1…, A1… as numbered below): (1) every trace step (T): does the cited base code exist and do what the step says, and does the trace really show that the claimed failure can or cannot happen? Follow the callers and the surrounding code yourself; (2) every design statement (D): does the cited document or comment say what is quoted, and does it state the intent the answer says? Search the design documents yourself for a statement the answer missed or got wrong; (3) the changed lines (C): are they what the pull request changes, and do they preserve or break the design statement, as claimed? (4) the alternatives (A): does the cited existing way do what is claimed? (5) the conclusion: does the evidence support it, in particular an unnecessary conclusion, which ends all other questions when you support it? Run searches of your own with your own patterns over the whole base tree and the documents, and list them in the searches of your verdict (structured records, below): this answer always needs them.",
+    ...(a.principles !== undefined && a.principles.applicable.length > 0
+      ? [
+          `(6) every principle verdict (P lines below; the principles are the project's, from ${a.principles.read.path} at ${principlesFrom(a.principles.read)}): judge each one on its own in the principles of your verdict, one entry per principle id, with its id, a verdict and a note. supported when the verdict holds: a breaks verdict only when the cited code really violates the principle's statement as written (read the changed lines and the code around them yourself), a preserves verdict only when it really keeps it, a not-applicable verdict only when the principle truly does not bear on the change; partial or unsupported otherwise, with what you found in note. A principle verdict you do not support never makes the question's own verdict unsupported: that verdict covers T, D, C, A and the conclusion. The principles:`,
+          ...a.principles.applicable.map((p) => `    - ${p.id}: ${oneLine(p.statement)}`),
+        ]
+      : ["Leave the principles of your verdict empty: no design principle applies."]),
     SEARCH_HELP,
     `Give one verdict for the question: supported only when every element holds and the conclusion follows from them; partial when part holds (say which does not in note); unsupported when a statement, a trace step or the conclusion does not hold (say what you found in note). Judge claims only, never wording. Return the verdicts of your result: one entry for the question, whose question field is exactly ${NECESSITY_ID}.`,
     ...designDocLines(a.designDocs, a.context),

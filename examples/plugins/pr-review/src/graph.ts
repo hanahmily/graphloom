@@ -27,7 +27,7 @@ import {
   type ValidatorBinding,
 } from "@graphloom/sdk";
 import { analyze, type Analysis } from "./analysis.js";
-import { checkoutCommand, GIT_ENV, GUARD_REFUSED, guardCommand, headTreeCommand, ledgerReadCommand, reviewDirCommand } from "./commands.js";
+import { checkoutCommand, GIT_ENV, GUARD_REFUSED, guardCommand, headTreeCommand, ledgerReadCommand, pinnedBase, reviewDirCommand } from "./commands.js";
 import {
   ANSWERER_JOB,
   ANSWERS_STAGE,
@@ -79,9 +79,10 @@ import { sourceDirs } from "./inventory.js";
 import { ledgerRead, priorShowCommand, writtenLedger } from "./ledger.js";
 import { QUESTIONS_REFERENCES, QUESTIONS_SCHEMA, QUESTIONS_SCHEMA_NAME, requiredQuestions, type Question } from "./questions.js";
 import { CLAIM_CHECK_REFERENCES } from "./claims.js";
-import { necessityDecision, necessityQuestion, NECESSITY_ID, NECESSITY_REVISION_SCHEMA_NAME, NECESSITY_SCHEMA, NECESSITY_SCHEMA_NAME, type NecessityRecord } from "./necessity.js";
+import { necessityQuestion, NECESSITY_ID, NECESSITY_REFERENCES, NECESSITY_REVISION_SCHEMA_NAME, NECESSITY_SCHEMA, NECESSITY_SCHEMA_NAME, type NecessityRecord } from "./necessity.js";
+import { principlesReadCommand, type Principle } from "./principles.js";
 import { answerCheckerInstruction, answererInstruction, necessityCheckerInstruction, necessityInstruction, questionerInstruction } from "./qaprompts.js";
-import { afterNecessity, answerContext, answerWrites, necessityFlow, necessityRecordCommand, qaContext, qaOutputs, questionSet, questionerFlow, recordedNecessity, type QaContext } from "./qaflow.js";
+import { afterNecessity, answerContext, answerWrites, necessityFlow, necessityRecordCommand, necessityRecordOf, qaContext, qaOutputs, questionSet, questionerFlow, recordedNecessity, type QaContext } from "./qaflow.js";
 
 export { GRAPH_ID, GRAPH_VERSION };
 
@@ -92,7 +93,15 @@ const idSet = (ids: readonly string[], describe?: (id: string) => string): Refer
 const oneLineText = (s: string): string => s.replace(/\s+/g, " ").trim();
 /** Per-job id sets for a contract's reference paths; a path with no ids is left unconstrained (an empty enum would allow nothing). */
 const idRefs = (sets: Record<string, ReferenceSet>): Record<string, ReferenceSet> => Object.fromEntries(Object.entries(sets).filter(([, v]) => v.ids.length > 0));
+const principleRefs = (path: string, ps: readonly Principle[]): Record<string, ReferenceSet> => idRefs({ [path]: idSet(ps.map((p) => p.id), (id) => oneLineText(ps.find((p) => p.id === id)?.statement ?? "").slice(0, 300)) });
 const questionRefs = (path: string, qs: readonly Question[]): Record<string, ReferenceSet> => idRefs({ [path]: idSet(qs.map((q) => q.id), (id) => oneLineText(qs.find((q) => q.id === id)?.text ?? "")) });
+
+/** What N1's requirement says of the project's design principles (design §7.5.1), when the profile names a file. */
+function principlesText(profile: Profile): string {
+  const cfg = profile.questions.principles;
+  if (cfg === undefined) return "";
+  return `; the project's design principles file ${cfg.path} was read read-only at ${cfg.ref !== undefined ? `the ref ${cfg.ref}` : "the pinned base commit"}, never from the pull request's head, the ref resolved once to a commit and the file recorded whole as evidence (a missing file is recorded as absent and changes nothing, and a pull request that changes the file is flagged and still judged by the version read), and the answer gives one verdict (preserves, breaks or not-applicable) with an explanation and path:line citations for each principle that applies (its globs match a changed file, or it names none), each applicable principle exactly once, preserves and breaks each cited; when the answer checker supports a breaks verdict, a necessary conclusion becomes questionable and names the broken principle, every other conclusion stays as it is, no principle break skips a question, and a break the checker does not support is recorded with both statements and changes nothing`;
+}
 
 /** The defaults the design gives a pr-review run (design §13.3), under the profile's own and the task's. */
 const DEFAULT_BUDGETS: GraphBudgetDefaults = { agentInvocations: 1_200, jobs: 220, decisions: 240, corrections: 12, activeMs: 4 * 3_600_000, waitMs: 6 * 3_600_000 };
@@ -146,7 +155,7 @@ export function definitionFor(profile: Profile): GraphDefinition {
     },
     {
       id: REQUIREMENT_QUESTIONS,
-      statement: `The necessity question N1 was asked first, before every other question: is the problem real on the base (the claimed problem quoted from the pull request's text, the base behavior traced through the base code with path:line citations, a failing test on the base optional and not available in this version), does the fix fit the system's design (the repository's design and architecture documents${profile.questions.designDocs.length > 0 ? ` (${profile.questions.designDocs.join(", ")})` : ""} and code comments searched, the design statement and the changed lines cited, and whether the change preserves or breaks them said), and is there a simpler or existing way; it concludes necessary, questionable, unnecessary or needs author, in one line. An independent ${harnessName(profile.roles["answer-checker"])} answer checker verified each cited design statement, each trace step and the conclusion, with searches of its own, and N1's checked answer and the decision it led to are recorded in necessity.json. When N1 concludes unnecessary and the checker supports it, and the operator did not ask for every question, no other question is asked and the skip is recorded (only N1 is required). Otherwise every required question was asked: purpose for each change item whose purpose the pull request's text does not state (a stated purpose is recorded with a quote that matches that text instead), existing-equivalent, reuse-library and common-logic for each new symbol, missing-test for each new or modified symbol the test map finds no covering test for, split-function for each changed function with complexity of ${LIMITS.complexity} or more or nesting over ${LIMITS.nesting}, complexity-coverage for each function with measured coverage and CRAP of ${LIMITS.crap} or more or with unknown coverage and complexity of ${LIMITS.complexity} or more (an upper-bound CRAP alone asks nothing), and weak-test for each surviving mutant (none in this version: mutation testing arrives later). The groundwork behind them (symbols from the language packs, whole-repository searches over the pinned base commit, similarity, the dependency inventory, the test map) was read by read-only commands, and every changed function has a measurement record.`,
+      statement: `The necessity question N1 was asked first, before every other question: is the problem real on the base (the claimed problem quoted from the pull request's text, the base behavior traced through the base code with path:line citations, a failing test on the base optional and not available in this version), does the fix fit the system's design (the repository's design and architecture documents${profile.questions.designDocs.length > 0 ? ` (${profile.questions.designDocs.join(", ")})` : ""} and code comments searched, the design statement and the changed lines cited, and whether the change preserves or breaks them said)${principlesText(profile)}, and is there a simpler or existing way; it concludes necessary, questionable, unnecessary or needs author, in one line. An independent ${harnessName(profile.roles["answer-checker"])} answer checker verified each cited design statement, each trace step${profile.questions.principles !== undefined ? ", each principle verdict" : ""} and the conclusion, with searches of its own, and N1's checked answer and the decision it led to${profile.questions.principles !== undefined ? " (with the principles file's path, ref, commit and the verdicts)" : ""} are recorded in necessity.json. When N1 concludes unnecessary and the checker supports it, and the operator did not ask for every question, no other question is asked and the skip is recorded (only N1 is required). Otherwise every required question was asked: purpose for each change item whose purpose the pull request's text does not state (a stated purpose is recorded with a quote that matches that text instead), existing-equivalent, reuse-library and common-logic for each new symbol, missing-test for each new or modified symbol the test map finds no covering test for, split-function for each changed function with complexity of ${LIMITS.complexity} or more or nesting over ${LIMITS.nesting}, complexity-coverage for each function with measured coverage and CRAP of ${LIMITS.crap} or more or with unknown coverage and complexity of ${LIMITS.complexity} or more (an upper-bound CRAP alone asks nothing), and weak-test for each surviving mutant (none in this version: mutation testing arrives later). The groundwork behind them (symbols from the language packs, whole-repository searches over the pinned base commit, similarity, the dependency inventory, the test map) was read by read-only commands, and every changed function has a measurement record.`,
       evidenceSchema: QUESTIONS_SCHEMA_NAME,
     },
     {
@@ -156,7 +165,7 @@ export function definitionFor(profile: Profile): GraphDefinition {
     },
     {
       id: REQUIREMENT_GROUNDED,
-      statement: `An independent ${harnessName(profile.roles["answer-checker"])} answer checker, on a harness other than the answerer's, re-checked every cited equivalent, library, duplicate and covering test, and every "none found" claim with searches of its own, against the trees, and had verified N1's cited design statements, trace steps and conclusion. Every answer left is supported or partial; an answer still unsupported after one correction is needs author, with both statements recorded (for N1, its conclusion becomes questionable and every question is asked).`,
+      statement: `An independent ${harnessName(profile.roles["answer-checker"])} answer checker, on a harness other than the answerer's, re-checked every cited equivalent, library, duplicate and covering test, and every "none found" claim with searches of its own, against the trees, and had verified N1's cited design statements, trace steps${profile.questions.principles !== undefined ? ", principle verdicts" : ""} and conclusion. Every answer left is supported or partial; an answer still unsupported after one correction is needs author, with both statements recorded (for N1, its conclusion becomes questionable and every question is asked).`,
       evidenceSchema: ANSWER_CHECK_SCHEMA_NAME,
     },
   ];
@@ -185,8 +194,8 @@ export function definitionFor(profile: Profile): GraphDefinition {
       { name: QUESTIONS_SCHEMA_NAME, schema: asSchema(QUESTIONS_SCHEMA), evidenceKind: "other", references: [...QUESTIONS_REFERENCES] },
       { name: ANSWERS_SCHEMA_NAME, schema: asSchema(ANSWERS_SCHEMA), evidenceKind: "other", references: [...ANSWERS_REFERENCES] },
       { name: ANSWERS_REVISION_SCHEMA_NAME, schema: asSchema(ANSWERS_SCHEMA), evidenceKind: "other", references: [...ANSWERS_REFERENCES] },
-      { name: NECESSITY_SCHEMA_NAME, schema: asSchema(NECESSITY_SCHEMA), evidenceKind: "other" },
-      { name: NECESSITY_REVISION_SCHEMA_NAME, schema: asSchema(NECESSITY_SCHEMA), evidenceKind: "other" },
+      { name: NECESSITY_SCHEMA_NAME, schema: asSchema(NECESSITY_SCHEMA), evidenceKind: "other", references: [...NECESSITY_REFERENCES] },
+      { name: NECESSITY_REVISION_SCHEMA_NAME, schema: asSchema(NECESSITY_SCHEMA), evidenceKind: "other", references: [...NECESSITY_REFERENCES] },
       // Kind "review": answers-grounded is judged by an independent reviewer (a read-only review job on another harness).
       { name: ANSWER_CHECK_SCHEMA_NAME, schema: asSchema(ANSWER_CHECK_SCHEMA), evidenceKind: "review", references: [...ANSWER_CHECK_REFERENCES] },
     ],
@@ -361,6 +370,19 @@ function fetch(ctx: Context, view: RunView): GraphDecision {
   }
   if (ledger.run === undefined || ledger.retry) {
     return withPrivate(dispatch(commandJob(FETCH_STAGE, "Read the pull request's ledger ref", { commands: [ledgerReadCommand(pr.owner, pr.repo, pr.number)], env: { ...GIT_ENV } }), "read the ledger ref, or record it absent"));
+  }
+  // The project's design principles file, read from the profile's ref or the pinned base, never the head (design §7.5.1).
+  const configured = profile.questions.principles;
+  const pinned = pinnedBase(view.evidence);
+  if (configured !== undefined && pinned !== undefined) {
+    const principles = commandState(view, COMMAND.principles);
+    const mine = principles.run !== undefined && sameArgv(principles.run.command.argv, principlesReadCommand(configured, pinned).argv);
+    if (principles.failed && !principles.retry && principles.run !== undefined && mine) {
+      return supervise({ reason: `reading the design principles file failed: ${describeCommand(principles.run.command)}: ${outputTail(principles.run.command)}`, evidenceRefs: [principles.run.record.ref] }, "escalate a failed principles read");
+    }
+    if (principles.run === undefined || principles.retry || !mine) {
+      return withPrivate(dispatch(commandJob(FETCH_STAGE, `Read the design principles file ${configured.path}`, { commands: [principlesReadCommand(configured, pinned)], env: { ...GIT_ENV } }), `read ${configured.path} at ${configured.ref ?? `the pinned base ${pinned.slice(0, 12)}`}, or record it absent`));
+    }
   }
   // The sandbox images are checked, and pulled by digest when missing, here: before the run's no-network jobs, never during one.
   const probe = missingProbe(view.evidence, profile);
@@ -654,9 +676,10 @@ function questions(ctx: Context, view: RunView): GraphDecision {
       return supervise({ reason: nf.reason, evidenceRefs: nf.refs }, "hand the unresolved necessity answer to the supervisor");
     case "answerer": {
       const baseDir = baseTreeDir(view, c.ctx.groundwork);
-      const assignment = necessityInstruction({ pr, snapshot: c.ctx.analysis.snapshot, view: c.ctx.view, designDocs: c.ctx.designDocs, context: c.ctx.context, kind: nf.kind, feedback: nf.feedback, ...(baseDir !== undefined ? { baseDir } : {}) });
+      const assignment = necessityInstruction({ pr, snapshot: c.ctx.analysis.snapshot, view: c.ctx.view, designDocs: c.ctx.designDocs, context: c.ctx.context, kind: nf.kind, feedback: nf.feedback, ...(c.ctx.principles !== undefined ? { principles: c.ctx.principles } : {}), ...(baseDir !== undefined ? { baseDir } : {}) });
       const from = nf.kind === "first" ? undefined : jobSession(view, QUESTIONS_STAGE, ANSWERER_JOB);
-      const job = agentJob(ctx, view, { jobId: ANSWERER_JOB, stageId: QUESTIONS_STAGE, purpose: "diagnostic", instruction: "Answer the necessity question N1 from the whole codebase", schema: nf.schema, harness: profile.roles.answerer, role: "answerer", assignment, ...(from !== undefined ? { continueFrom: from } : {}) }, files);
+      const references = principleRefs(NECESSITY_REFERENCES[0]!, c.ctx.principles?.applicable ?? []);
+      const job = agentJob(ctx, view, { jobId: ANSWERER_JOB, stageId: QUESTIONS_STAGE, purpose: "diagnostic", instruction: "Answer the necessity question N1 from the whole codebase", schema: nf.schema, harness: profile.roles.answerer, role: "answerer", assignment, references, ...(from !== undefined ? { continueFrom: from } : {}) }, files);
       if ("problem" in job) return refused(job);
       const why = { first: "answer the necessity question N1 (read-only, confined): is the problem real, does the fix fit the design, is there a simpler way", correction: "correct the necessity answer: deterministic validation found problems", revision: "revise the necessity answer: the answer checker did not support it" }[nf.kind];
       return dispatchAgent(view, job, why);
@@ -666,8 +689,8 @@ function questions(ctx: Context, view: RunView): GraphDecision {
     case "checker": {
       const answer = nf.answers.get(NECESSITY_ID)!;
       const baseDir = baseTreeDir(view, c.ctx.groundwork);
-      const assignment = necessityCheckerInstruction({ pr, snapshot: c.ctx.analysis.snapshot, question: necessityQuestion(), answer, designDocs: c.ctx.designDocs, context: c.ctx.context, retry: nf.retry, ...(baseDir !== undefined ? { baseDir } : {}) });
-      const references = questionRefs(ANSWER_CHECK_REFERENCES[0]!, [necessityQuestion()]);
+      const assignment = necessityCheckerInstruction({ pr, snapshot: c.ctx.analysis.snapshot, question: necessityQuestion(), answer, designDocs: c.ctx.designDocs, context: c.ctx.context, retry: nf.retry, ...(c.ctx.principles !== undefined ? { principles: c.ctx.principles } : {}), ...(baseDir !== undefined ? { baseDir } : {}) });
+      const references = idRefs({ ...questionRefs(ANSWER_CHECK_REFERENCES[0]!, [necessityQuestion()]), ...principleRefs(ANSWER_CHECK_REFERENCES[1]!, c.ctx.principles?.applicable ?? []) });
       const job = agentJob(ctx, view, { stageId: QUESTIONS_STAGE, purpose: "review", instruction: "Check the necessity answer against the trees", schema: ANSWER_CHECK_SCHEMA_NAME, harness: profile.roles["answer-checker"], role: "answer-checker", assignment, references }, files);
       if ("problem" in job) return refused(job);
       return dispatchAgent(view, job, `check the necessity answer with a fresh read-only ${harnessName(profile.roles["answer-checker"])} session`);
@@ -675,7 +698,7 @@ function questions(ctx: Context, view: RunView): GraphDecision {
     case "done":
       break;
   }
-  const record: NecessityRecord = { final: nf.final[0]!, decision: necessityDecision(nf.final[0]!, pr.askAll === true) };
+  const record: NecessityRecord = necessityRecordOf(c.ctx, nf.final[0]!, pr.askAll === true);
   const command = necessityRecordCommand(record);
   if (command === undefined) return stop({ reason: "incompatible task", blocker: "the necessity answer is too large for one write command", retryable: false }, "stop: the necessity record does not fit one command");
   const write = commandState(view, COMMAND.necessityWrite);

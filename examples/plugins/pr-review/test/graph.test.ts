@@ -32,11 +32,11 @@ describe("the report scenario, end to end through the graph", () => {
     ]);
   });
 
-  it("runs the jobs of Fetch and Report in order: the checkout first, then seven reads, the ledger, the reporter, its checker, the diff, the tools, the base files, the base tools, the write", () => {
+  it("runs the jobs of Fetch and Report in order: the checkout first, then seven reads, the ledger, the design principles file, the reporter, its checker, the diff, the tools, the base files, the base tools, the write", () => {
     expect(sim.jobs.filter((j) => j.stageId === "fetch" || j.stageId === "report").map((j) => j.instruction.split(" ").slice(0, 3).join(" "))).toEqual([
       "Materialize the pull",
       "Read the changed", "Read the commits", "Read the reviews", "Read the review", "Read the review", "Read the check", "Read the pull",
-      "Read the pull", "Check the Docker", "Write the change", "Check the report's", "List the changed", "Measure the changed", "Read the base", "Measure the modified", "Write .graphloom/review/review.md and",
+      "Read the pull", "Read the design", "Check the Docker", "Write the change", "Check the report's", "List the changed", "Measure the changed", "Read the base", "Measure the modified", "Write .graphloom/review/review.md and",
     ]);
     expect(sim.jobs.slice(1, 8).map((j) => j.executor!.id)).toEqual([
       "graphloom.github/list-pull-files", "graphloom.github/list-pull-commits", "graphloom.github/list-pull-reviews", "graphloom.github/list-pull-review-comments", "graphloom.github/list-review-threads", "graphloom.github/list-check-runs", "graphloom.github/get-pull",

@@ -66,7 +66,7 @@ describe("the answer checker's and the answerer's ids are read tolerantly, and n
   const ctx = contextOf("missing-test");
   const questions = afterNecessity(questionSet(ctx, undefined));
   const answers = new Map(questions.map((x) => [x.id, { question: x.id, none_found: false } as Answer] as const));
-  const verdict = (question: string, over: object = {}) => ({ question, verdict: "supported", note: "", searches: [search("x", { hits: 0 })], ...over });
+  const verdict = (question: string, over: object = {}) => ({ question, verdict: "supported", note: "", searches: [search("x", { hits: 0 })], principles: [], ...over });
 
   it("matches verdicts keyed with the type or the whole text after the id, and records the normalization", () => {
     const verdicts = questions.map((x) => verdict(`${x.id} [${x.type}] ${x.text}`));
@@ -418,7 +418,7 @@ describe("the ids of every Q&A contract are constrained to the ids the job lists
   it("declares the id paths on each contract", () => {
     expect(contract("answers-v1").references).toEqual(["answers[].question"]);
     expect(contract("answers-revision-v1").references).toEqual(["answers[].question"]);
-    expect(contract("answer-check-v1").references).toEqual(["verdicts[].question"]);
+    expect(contract("answer-check-v1").references).toEqual(["verdicts[].question", "verdicts[].principles[].id"]);
     expect(contract("claim-check-v1").references).toEqual(["verdicts[].item"]);
     expect(contract("questions-v1").references).toEqual(["purposes[].item", "questions[].item", "questions[].symbol"]);
   });

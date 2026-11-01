@@ -15,6 +15,7 @@ import { afterNecessity, answerContext, answerWrites, necessityFlow, qaContext, 
 import { answersFlow, type FinalAnswer } from "./answers.js";
 import { admissibleDecision, effectiveConclusion, necessityJson, NECESSITY_ID, type NecessityRecord } from "./necessity.js";
 import { requiredQuestions, statedPurposes } from "./questions.js";
+import { principlesRecord } from "./principles.js";
 import { writtenNecessity, writtenReport } from "./write.js";
 
 const passed = (reason: string): ValidationResult => ({ status: "passed", reason });
@@ -205,6 +206,8 @@ function necessityOutcome(evidence: readonly EvidenceRecord[], ctx: QaContext): 
   const final = nf.final[0]!;
   if (JSON.stringify(rec.record.final) !== JSON.stringify(final)) return failed("necessity.json is not N1's checked answer as the evidence recomputes it");
   if (!admissibleDecision(final, rec.record.decision)) return failed(`necessity.json decides ${rec.record.decision.action}, which N1's conclusion (${effectiveConclusion(final)}) and the checker's verdict (${final.check.verdict}) do not allow`);
+  const expected = ctx.principles !== undefined ? principlesRecord(ctx.principles) : undefined;
+  if (JSON.stringify(rec.record.principles) !== JSON.stringify(expected)) return failed("necessity.json does not record the design principles file as the evidence recomputes it (its path, ref, commit and what applied)");
   const run = commandRuns(evidence, "necessity-write").at(-1);
   if (run === undefined || writtenNecessity(run.command.argv) !== necessityJson(rec.record)) return failed("necessity.json is not what the evidence recomputes");
   return { record: rec.record };

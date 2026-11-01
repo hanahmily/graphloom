@@ -11,6 +11,8 @@
  * `needs author`) in one line, which is the one answer allowed to conclude.
  * The checker verifies every cited statement, trace step and the conclusion,
  * and an `unnecessary` conclusion that the checker supports ends the questions.
+ * When the profile names a design principles file, part 2 also gives one verdict per applicable
+ * principle, and a break the checker supports makes `necessary` `questionable` (design §7.5.1).
  *
  * The result contract is its own (`necessity-v1`); plugin code turns it into
  * an ordinary `Answer` so the citations are verified, the checker judges it and
@@ -19,6 +21,7 @@
 import type { Answer, Citation, FinalAnswer, Search } from "./answers.js";
 import type { PinnedText, Question } from "./questions.js";
 import { quoteInPinned } from "./questions.js";
+import type { PrinciplesRecord } from "./principles.js";
 import { SEARCH_SCHEMA } from "./searches.js";
 
 export const NECESSITY_SCHEMA_NAME = "necessity-v1";
@@ -31,11 +34,15 @@ export const NECESSITY_TEXT =
 /** What review.md says in place of the questions a confirmed `unnecessary` conclusion skipped. */
 export const SKIPPED_NOTE = "Remaining questions skipped: the change was judged unnecessary (see N1).";
 export const NECESSITY_JSON_SCHEMA = "pr-necessity-v1";
+/** The contract's reference path of the principle ids. */
+export const NECESSITY_REFERENCES = ["principles[].id"];
 
 export const CONCLUSIONS = ["necessary", "questionable", "unnecessary", "needs author"] as const;
 export type Conclusion = (typeof CONCLUSIONS)[number];
 export const CAN_HAPPEN = ["yes", "no", "unclear"] as const;
 export const DESIGN_EFFECTS = ["preserves", "breaks", "unrelated", "not stated"] as const;
+/** The verdict on one of the project's design principles (design §7.5.1). */
+export const PRINCIPLE_VERDICTS = ["preserves", "breaks", "not-applicable"] as const;
 
 const MAX_RATIONALE = 300;
 const MAX_TEXT = 800;
@@ -54,7 +61,7 @@ const CITATION = {
 export const NECESSITY_SCHEMA = {
   type: "object",
   additionalProperties: false,
-  required: ["conclusion", "rationale", "problem", "reproduction", "design", "alternatives", "searches"],
+  required: ["conclusion", "rationale", "problem", "reproduction", "design", "principles", "alternatives", "searches"],
   properties: {
     conclusion: { type: "string", enum: CONCLUSIONS },
     rationale: { type: "string" },
@@ -91,6 +98,16 @@ export const NECESSITY_SCHEMA = {
         searches: { type: "array", items: SEARCH_SCHEMA },
       },
     },
+    // One entry per principle that applies to the change; the job constrains `id` to those ids (references "principles[].id").
+    principles: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["id", "verdict", "explanation", "citations"],
+        properties: { id: { type: "string" }, verdict: { type: "string", enum: PRINCIPLE_VERDICTS }, explanation: { type: "string" }, citations: { type: "array", items: CITATION } },
+      },
+    },
     alternatives: {
       type: "object",
       additionalProperties: false,
@@ -102,6 +119,20 @@ export const NECESSITY_SCHEMA = {
 } as const;
 
 type Cite = { path: string; tree: "base" | "head"; start: number; end: number; quote: string };
+
+export interface PrincipleVerdict {
+  id: string;
+  verdict: (typeof PRINCIPLE_VERDICTS)[number];
+  explanation: string;
+  citations: Cite[];
+}
+
+/** The checker's judgment of one principle verdict: `supported` holds it, anything else does not. */
+export interface PrincipleCheck {
+  id: string;
+  verdict: "supported" | "partial" | "unsupported";
+  note: string;
+}
 
 /** The answerer's necessity result (`necessity-v1`). */
 export interface Necessity {
@@ -117,6 +148,8 @@ export interface Necessity {
   /** What was run to reproduce the claim on the base, or why nothing was. */
   reproduction: string;
   design: { statements: Cite[]; changed: Cite[]; effect: (typeof DESIGN_EFFECTS)[number]; explanation: string; searches: Search[] };
+  /** One verdict per design principle that applies to the change (empty when the project names none, or none applies). */
+  principles: PrincipleVerdict[];
   alternatives: { exists: boolean; explanation: string; citations: Cite[] };
   searches: Search[];
 }
@@ -128,10 +161,10 @@ export function statusOf(conclusion: Conclusion): Answer["status"] {
   return conclusion === "needs author" ? "needs author" : conclusion === "questionable" ? "partially answered" : "answered";
 }
 
-/** Every citation of the necessity answer, in the order the Q&A shows them: the trace, the design statements, the changed lines, the alternatives. */
+/** Every citation of the necessity answer, in the order the Q&A shows them: the trace, the design statements, the changed lines, the principles', the alternatives. */
 export function necessityCitations(n: Necessity): Citation[] {
   const cite = (c: Cite): Citation => ({ path: c.path, tree: c.tree, start: c.start, end: c.end, quote: c.quote });
-  return [...n.problem.trace.map(cite), ...n.design.statements.map(cite), ...n.design.changed.map(cite), ...n.alternatives.citations.map(cite)];
+  return [...n.problem.trace.map(cite), ...n.design.statements.map(cite), ...n.design.changed.map(cite), ...n.principles.flatMap((p) => p.citations.map(cite)), ...n.alternatives.citations.map(cite)];
 }
 
 /** The necessity result as an ordinary answer: the verifier, the checker and the Q&A treat N1 like any other. */
@@ -174,8 +207,29 @@ function citeProblems(list: readonly Cite[], at: string, trees: readonly string[
   return out;
 }
 
+/** The deterministic rules of the principle verdicts: each applicable id answered exactly once, none other, a citation behind every preserves or breaks. */
+function principleProblems(list: readonly PrincipleVerdict[], applicable: readonly { id: string }[]): string[] {
+  const out: string[] = [];
+  const at = `${NECESSITY_ID} principle`;
+  const ids = new Set(applicable.map((p) => p.id));
+  const counts = new Map<string, number>();
+  for (const p of list) counts.set(p.id, (counts.get(p.id) ?? 0) + 1);
+  for (const [id, n] of counts) {
+    if (!ids.has(id)) out.push(`${at} ${JSON.stringify(id)}: not a principle that applies to this change${ids.size > 0 ? ` (answer exactly: ${[...ids].join(", ")})` : " (none applies: leave principles empty)"}`);
+    else if (n > 1) out.push(`${at} ${id}: answered ${n} times; answer each applicable principle exactly once`);
+  }
+  for (const id of ids) if (!counts.has(id)) out.push(`${at} ${id}: no verdict; answer each applicable principle (preserves, breaks or not-applicable)`);
+  for (const p of list) {
+    if (p.explanation.trim() === "") out.push(`${at} ${p.id}: the explanation is empty`);
+    if (p.explanation.length > MAX_TEXT) out.push(`${at} ${p.id}: the explanation is ${p.explanation.length} characters, more than ${MAX_TEXT}`);
+    out.push(...citeProblems(p.citations, `${at} ${p.id} citation`, ["base", "head"], MAX_CITES));
+    if ((p.verdict === "preserves" || p.verdict === "breaks") && p.citations.length === 0) out.push(`${at} ${p.id}: "${p.verdict}" cites the code it is about (path:line with a quote, in the base or the head)`);
+  }
+  return out;
+}
+
 /** Every deterministic problem with a necessity result (design §7.5); empty when it passes. */
-export function necessityProblems(n: Necessity, pinned: readonly PinnedText[]): string[] {
+export function necessityProblems(n: Necessity, pinned: readonly PinnedText[], applicable: readonly { id: string }[] = []): string[] {
   const out: string[] = [];
   const at = NECESSITY_ID;
   if (n.rationale.trim() === "" || /\n/.test(n.rationale.trim())) out.push(`${at}: the rationale is one line`);
@@ -200,6 +254,7 @@ export function necessityProblems(n: Necessity, pinned: readonly PinnedText[]): 
   if (d.searches.length + n.searches.length > MAX_SEARCHES) out.push(`${at}: more than ${MAX_SEARCHES} searches`);
   if ((d.effect === "preserves" || d.effect === "breaks") && (d.statements.length === 0 || d.changed.length === 0)) out.push(`${at} design: "${d.effect}" cites the design statement and the changed lines it is about`);
   if (d.effect === "not stated" && d.statements.length > 0) out.push(`${at} design: the effect is "not stated" but design statements are cited`);
+  out.push(...principleProblems(n.principles, applicable));
   out.push(...citeProblems(n.alternatives.citations, `${at} alternative`, ["base", "head"], MAX_CITES));
   if (n.alternatives.exists && n.alternatives.citations.length === 0) out.push(`${at}: an existing or simpler way is cited (path:line in the base)`);
   if (p.quotes.length === 0 && (n.conclusion === "necessary" || n.conclusion === "unnecessary")) {
@@ -214,24 +269,44 @@ export function necessityProblems(n: Necessity, pinned: readonly PinnedText[]): 
   return out;
 }
 
-/** The conclusion as the Q&A shows it: the answerer's, unless its answer stayed unsupported after the correction, which makes it `questionable`. */
-export function effectiveConclusion(a: { necessity?: Pick<Necessity, "conclusion">; check: { verdict: string } }): Conclusion {
+type Judged = { necessity?: Pick<Necessity, "conclusion"> & { principles?: readonly PrincipleVerdict[] }; check: { verdict: string; principles?: readonly PrincipleCheck[] } };
+
+/** The principles the answerer says the change breaks and the checker supports (its verdict on that principle is `supported`). */
+export function supportedBreaks(a: Judged): string[] {
+  const checked = new Set((a.check.principles ?? []).filter((c) => c.verdict === "supported").map((c) => c.id));
+  return (a.necessity?.principles ?? []).filter((p) => p.verdict === "breaks" && checked.has(p.id)).map((p) => p.id);
+}
+
+/**
+ * The conclusion as the Q&A shows it: the answerer's, unless its answer stayed unsupported after the correction, which makes
+ * it `questionable`; and a design principle the checker supports as broken makes `necessary` `questionable` (design §7.5.1).
+ * `questionable`, `unnecessary` and `needs author` stay as they are.
+ */
+export function effectiveConclusion(a: Judged): Conclusion {
   const stated = a.necessity?.conclusion ?? "needs author";
-  return a.check.verdict === "downgraded" && stated !== "needs author" ? "questionable" : stated;
+  const settled = a.check.verdict === "downgraded" && stated !== "needs author" ? "questionable" : stated;
+  return settled === "necessary" && supportedBreaks(a).length > 0 ? "questionable" : settled;
+}
+
+/** The sentence that names the principles a supported break rests on, or empty. */
+export function brokenNote(a: Judged): string {
+  const ids = supportedBreaks(a);
+  return ids.length === 0 ? "" : `Design principle${ids.length > 1 ? "s" : ""} broken (the checker supports it): ${ids.join(", ")}.`;
 }
 
 export type NecessityDecision =
   | { action: "skip"; reason: string }
   | { action: "ask-all"; reason: string; override?: true };
 
-/** What N1's checked answer decides: a confirmed `unnecessary` skips the other questions, unless the operator asked for every question. */
-export function necessityDecision(a: { necessity?: Pick<Necessity, "conclusion">; check: { verdict: string } }, askAll: boolean): NecessityDecision {
+/** What N1's checked answer decides: a confirmed `unnecessary` skips the other questions, unless the operator asked for every question. A principle break never skips. */
+export function necessityDecision(a: Judged, askAll: boolean): NecessityDecision {
   const conclusion = effectiveConclusion(a);
   if (conclusion === "unnecessary" && a.check.verdict === "supported") {
     if (askAll) return { action: "ask-all", reason: "N1 concluded unnecessary and the checker supports it; the operator asked for every question anyway", override: true };
     return { action: "skip", reason: "N1 concluded unnecessary and the answer checker supports it" };
   }
-  const why = a.check.verdict === "downgraded" ? "the evidence for N1 stayed unsupported after one correction, so its conclusion is questionable" : conclusion === "unnecessary" ? `the checker's verdict on N1 is ${a.check.verdict}, not supported` : `N1 concluded ${conclusion}`;
+  const broken = supportedBreaks(a);
+  const why = a.check.verdict === "downgraded" ? "the evidence for N1 stayed unsupported after one correction, so its conclusion is questionable" : conclusion === "unnecessary" ? `the checker's verdict on N1 is ${a.check.verdict}, not supported` : `N1 concluded ${conclusion}${broken.length > 0 ? ` (design principle${broken.length > 1 ? "s" : ""} broken: ${broken.join(", ")})` : ""}`;
   return { action: "ask-all", reason: `${why}; every question is asked` };
 }
 
@@ -242,11 +317,13 @@ export const necessityQuestion = (): Question => ({ id: NECESSITY_ID, type: "nec
 export interface NecessityRecord {
   final: FinalAnswer;
   decision: NecessityDecision;
+  /** The design principles file read for this run (design §7.5.1), when the profile names one. */
+  principles?: PrinciplesRecord;
 }
 
 /** `necessity.json` (`pr-necessity-v1`). */
 export function necessityJson(r: NecessityRecord): string {
-  return JSON.stringify({ schema: NECESSITY_JSON_SCHEMA, question: { id: NECESSITY_ID, text: NECESSITY_TEXT }, conclusion: effectiveConclusion(r.final), decision: r.decision, answer: r.final });
+  return JSON.stringify({ schema: NECESSITY_JSON_SCHEMA, question: { id: NECESSITY_ID, text: NECESSITY_TEXT }, conclusion: effectiveConclusion(r.final), ...(brokenNote(r.final) !== "" ? { conclusionNote: brokenNote(r.final) } : {}), decision: r.decision, ...(r.principles !== undefined ? { principles: { ...r.principles, verdicts: r.final.necessity?.principles ?? [], checks: r.final.check.principles ?? [], broken: supportedBreaks(r.final) } } : {}), answer: r.final });
 }
 
 /** The record a `necessity.json` text holds, or undefined when it is not one. */
@@ -257,13 +334,14 @@ export function parseNecessityRecord(json: string): NecessityRecord | undefined 
   } catch {
     return undefined;
   }
-  const o = value as { schema?: unknown; decision?: { action?: unknown; reason?: unknown; override?: unknown }; answer?: Partial<FinalAnswer> } | null;
+  const o = value as { schema?: unknown; decision?: { action?: unknown; reason?: unknown; override?: unknown }; principles?: Record<string, unknown>; answer?: Partial<FinalAnswer> } | null;
   if (o === null || typeof o !== "object" || o.schema !== NECESSITY_JSON_SCHEMA) return undefined;
   const a = o.answer;
   if (a === undefined || a === null || typeof a !== "object" || a.question !== NECESSITY_ID || typeof a.necessity !== "object" || a.necessity === null || typeof a.check !== "object" || a.check === null) return undefined;
   const d = o.decision;
   if (d === undefined || d === null || (d.action !== "skip" && d.action !== "ask-all") || typeof d.reason !== "string") return undefined;
-  return { final: a as FinalAnswer, decision: d as NecessityDecision };
+  const { verdicts: _v, checks: _c, broken: _b, ...recorded } = o.principles ?? {};
+  return { final: a as FinalAnswer, decision: d as NecessityDecision, ...(o.principles !== undefined ? { principles: recorded as unknown as PrinciplesRecord } : {}) };
 }
 
 /**

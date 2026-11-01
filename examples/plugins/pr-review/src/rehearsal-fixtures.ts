@@ -245,3 +245,33 @@ export const BASE_FILES: Readonly<Record<string, string>> = {
   "pkg/offline/sync.go": SYNC_BASE_GO,
   [STREAM_PATH]: STREAM_WRITE_BASE_GO,
 };
+
+/**
+ * The repository's design principles skill (design §7.5.1) as a rehearsal scenario has it at the pinned base: one principle for
+ * every change, one for the offline package the sync fixture changes, one for protobuf files it does not, and a heading that is no id.
+ */
+export const PRINCIPLES_PATH = "skills/design-principles/SKILL.md";
+export const PRINCIPLES_FILE = `---
+name: design-principles
+description: The design principles of the project.
+---
+# Design principles
+What the project holds to.
+
+## small-steps
+A change does one thing, so it can be reviewed and reverted alone.
+- Why: mixed changes hide regressions.
+- Source: docs/design/README.md
+
+## offline-idempotent
+Offline sync must be safe to repeat: running it twice leaves the same state as running it once.
+- Applies to: pkg/offline/**, **/sync*.go
+- Why: a crashed sync is simply run again.
+
+## proto-compatible
+A protobuf field is never renumbered or removed.
+- Applies to: **/*.proto
+
+## Not A Principle Id
+This heading is ignored.
+`;
