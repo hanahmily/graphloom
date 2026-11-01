@@ -291,7 +291,7 @@ const bounded = (value: string, max: number, at: string, what: string, problems:
 };
 
 /** Lifecycle and before/after rules for one item: bounds, and every lifecycle citation inside the diff. */
-function partProblems(item: ReportItem, files: readonly PullFile[], at: string, problems: string[]): void {
+export function partProblems(item: ReportItem, files: readonly PullFile[], at: string, problems: string[]): void {
   if (item.state.length > MAX_STATE_PER_ITEM) problems.push(`${at}: ${item.state.length} state entries, more than ${MAX_STATE_PER_ITEM}`);
   const names = new Set<string>();
   item.state.forEach((e, si) => {
@@ -507,7 +507,8 @@ export function assembleReport(report: Pick<ReporterOutput, "sections" | "notes"
       auto: "fact",
     });
     factItems.set(fact.section, list);
-    cited.add(fact.path);
+    // A file no agent read keeps its own entry in "other" (design §6.9), whatever a detector fact made of it.
+    if (ctx.unread?.has(fact.path) !== true) cited.add(fact.path);
   }
   for (const [section, list] of factItems) place(section, list, "");
   if (bySection.has("other")) {

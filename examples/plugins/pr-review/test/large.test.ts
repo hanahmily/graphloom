@@ -6,6 +6,9 @@ import { describe, expect, it } from "vitest";
 import { analyze, evidencePull } from "../src/analysis.js";
 import { LIST_CHECK_RUNS, GET_PULL, LIST_PULL_COMMITS, LIST_PULL_FILES, LIST_PULL_REVIEWS, LIST_PULL_REVIEW_COMMENTS, LIST_REVIEW_THREADS } from "../src/constants.js";
 import { definitionFor } from "../src/graph.js";
+import { assembleReport } from "../src/report.js";
+import { pullFile } from "../src/snapshot.js";
+import { reporterSections } from "../src/template.js";
 import { assembleLarge, budgetShortfall, largeNeeds, mergedItem, synthesisProblems, type SynthItem } from "../src/large.js";
 import { ProfileError, parseProfile } from "../src/profile.js";
 import { answerBatches } from "../src/qaflow.js";
@@ -545,6 +548,37 @@ describe("the requirements say what large mode does", () => {
     expect(text("answers-complete")).toContain("batches of at most 15");
     expect(text("answers-complete")).toContain("written once, after the last batch");
     expect(text("answers-grounded")).toContain("fresh session");
+  });
+});
+
+describe("merged state names and unread files", () => {
+  const cite = { path: "a.go", side: "head" as const, start: 1, end: 1, symbol: "" };
+  const entry = (name: string) => ({ name, scope: "s", initial: "i", transitions: [], reads: [{ where: "w", decision: "d", cite }] });
+  const member = (key: string, state: unknown[]): SynthItem => ({ key, area: key.split(".")[0]!, section: "features", item: { id: key.split(".")[1]!, text: key, cites: [cite], facts: [], state: state as never, behavior: [] } });
+  const summary = { purpose: { text: "p", source: "inferred" as const, quote: "" }, overview: "One sentence." };
+
+  it("gives every state entry of a merge a name no other entry of it has, even when two members share an area", () => {
+    const m = mergedItem([member("A1.R1", [entry("cache")]), member("A2.R1", [entry("cache")]), member("A2.R2", [entry("cache")])], "joined");
+    const names = m.state.map((e) => e.name);
+    expect(new Set(names).size).toBe(3);
+    expect(names[0]).toBe("cache");
+  });
+
+  it("judges the merged item with the rules the assembled report uses, so a bad merge is corrected before it is recorded", () => {
+    const bad = member("A2.R1", [{ ...entry("n"), reads: [] }]);
+    const list = [member("A1.R1", []), bad];
+    const problems = synthesisProblems({ ...summary, merges: [{ items: ["A1.R1", "A2.R1"], text: "x" }], notes: [] }, list, [], []);
+    expect(problems.join("|")).toContain("no transitions and no reads");
+  });
+
+  it("lists a generated file with its diffstat and reason in other even when a detector fact on it makes an item", () => {
+    const sections = reporterSections(profileOf());
+    const file = pullFile({ path: "api/gen/x.pb.go", status: "removed", previousPath: null, additions: 0, deletions: 2, sha: null, patch: "@@ -1,2 +0,0 @@\n-package gen\n-type X struct{}", patchOmitted: false })!;
+    const fact = { id: "F1", section: "removed", path: "api/gen/x.pb.go", side: "base" as const, line: 1, text: "deleted api/gen/x.pb.go" };
+    const final = assembleReport({ sections: sections.map((s) => ({ id: s.id, none: true, items: [] })), notes: [] }, new Map(), { sections, files: [file], facts: [fact], unread: new Map([["api/gen/x.pb.go", "generated code, not read by an agent"]]) });
+    const text = (id: string) => final.sections.find((s) => s.id === id)!.items.map((i) => i.text);
+    expect(text("removed")).toHaveLength(1);
+    expect(text("other")).toEqual(["api/gen/x.pb.go changed (+0 −2 lines); generated code, not read by an agent"]);
   });
 });
 

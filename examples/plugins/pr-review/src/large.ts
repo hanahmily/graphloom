@@ -25,6 +25,7 @@ import {
   MAX_ITEMS_PER_SECTION,
   MAX_REPORT_BYTES,
   MAX_STATE_PER_ITEM,
+  partProblems,
   reportProblems,
   summaryProblems,
   type BehaviorRow,
@@ -193,8 +194,13 @@ export function mergedItem(members: readonly SynthItem[], textOf: string): Omit<
   const state: StateEntry[] = [];
   for (const m of members) {
     for (const e of m.item.state) {
+      // A collision is told apart by the member's area, then by its item, then by a number: no two entries of a merge share a name.
       let name = e.name;
-      if (taken.has(name)) name = `${e.name} [${m.area}]`;
+      for (const suffix of [m.area, m.key]) {
+        if (!taken.has(name)) break;
+        name = `${e.name} [${suffix}]`;
+      }
+      for (let n = 2; taken.has(name); n += 1) name = `${e.name} [${m.key}#${n}]`;
       taken.add(name);
       state.push(name === e.name ? e : { ...e, name });
     }
@@ -204,7 +210,7 @@ export function mergedItem(members: readonly SynthItem[], textOf: string): Omit<
 }
 
 /** Every deterministic problem with a synthesis result; empty when it passes. */
-export function synthesisProblems(output: SynthesisOutput, items: readonly SynthItem[], pinned: ReportContext["pinned"]): string[] {
+export function synthesisProblems(output: SynthesisOutput, items: readonly SynthItem[], pinned: ReportContext["pinned"], files?: ReportContext["files"]): string[] {
   const problems: string[] = [];
   summaryProblems(output, { pinned }, problems);
   const byKey = new Map(items.map((i) => [i.key, i]));
@@ -228,6 +234,8 @@ export function synthesisProblems(output: SynthesisOutput, items: readonly Synth
       const merged = mergedItem(members, m.text);
       if (merged.state.length > MAX_STATE_PER_ITEM) problems.push(`${at}: the merged item would have ${merged.state.length} state entries, more than ${MAX_STATE_PER_ITEM}; merge fewer items`);
       if (merged.behavior.length > MAX_BEHAVIOR_PER_ITEM) problems.push(`${at}: the merged item would have ${merged.behavior.length} behavior rows, more than ${MAX_BEHAVIOR_PER_ITEM}; merge fewer items`);
+      // The rules the assembled report applies to an item, so a bad merge is corrected before the synthesis is recorded.
+      if (files !== undefined) partProblems({ ...merged }, files, at, problems);
     }
   });
   if (output.notes.length > MAX_NOTES) problems.push(`notes has ${output.notes.length} entries, more than ${MAX_NOTES}`);
@@ -251,18 +259,18 @@ export function synthesisTargets(output: SynthesisOutput, items: readonly SynthI
 }
 
 /** A synthesis run: a valid result, the problems with it, or nothing (its job did not complete). */
-function synthesisResult(run: AgentRun, items: readonly SynthItem[], pinned: ReportContext["pinned"]): { output: SynthesisOutput } | { problems: string[] } | undefined {
+function synthesisResult(run: AgentRun, items: readonly SynthItem[], pinned: ReportContext["pinned"], files: ReportContext["files"]): { output: SynthesisOutput } | { problems: string[] } | undefined {
   if (run.status !== "completed") return undefined;
   if (run.contract?.status === "invalid") return { problems: run.contract.problems.slice(0, 20) };
   const shape = validateResultShape(run.output, CHANGE_SYNTHESIS_SCHEMA);
   if (shape.length > 0) return { problems: shape.slice(0, 20) };
   const output = run.output as SynthesisOutput;
-  const problems = synthesisProblems(output, items, pinned);
+  const problems = synthesisProblems(output, items, pinned, files);
   return problems.length > 0 ? { problems: problems.slice(0, 30) } : { output };
 }
 
 export function synthesisSpec(items: readonly SynthItem[], ctx: ReportContext): StageSpec<SynthesisOutput> {
-  return { result: (run) => synthesisResult(run, items, ctx.pinned), targets: (o) => synthesisTargets(o, items), files: ctx.files };
+  return { result: (run) => synthesisResult(run, items, ctx.pinned, ctx.files), targets: (o) => synthesisTargets(o, items), files: ctx.files };
 }
 
 export interface SynthesisDone {
@@ -275,7 +283,7 @@ export function checkSynthesisRecord(value: unknown, items: readonly SynthItem[]
   const shape = validateResultShape(value.synthesis, CHANGE_SYNTHESIS_SCHEMA);
   if (shape.length > 0) return { problem: `its synthesis breaks the contract: ${shape[0]}` };
   const synthesis = value.synthesis as SynthesisOutput;
-  const problems = synthesisProblems(synthesis, items, ctx.pinned);
+  const problems = synthesisProblems(synthesis, items, ctx.pinned, ctx.files);
   if (problems.length > 0) return { problem: `its synthesis fails the deterministic rules: ${problems.slice(0, 3).join("; ")}` };
   const reading = readClaimCheck(value.check, synthesisTargets(synthesis, items), ctx.files);
   if ("problems" in reading) return { problem: `its claim check is unreadable: ${reading.problems[0]}` };
