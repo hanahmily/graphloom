@@ -7,10 +7,10 @@ import os from "node:os";
 import path from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import { GIT_ENV } from "../src/commands.js";
-import { measurementState, staticCommand, metricsDiffCommand, type Batch } from "../src/measurements.js";
+import { MAX_DIFF_BYTES, measurementState, staticCommand, metricsDiffCommand, type Batch } from "../src/measurements.js";
 import { FLAGS_DOC, FLAGS_GO, REHEARSAL_HEAD_FILES, TTL_DOC, TTL_GO } from "../src/rehearsal.js";
 import { pullFile } from "../src/snapshot.js";
-import { parseHunkFile } from "../src/metrics/hunks.js";
+import { hunksFromUnifiedDiff, parseHunkFile } from "../src/metrics/hunks.js";
 import { validateMetricsDocument } from "../src/metrics/validate.js";
 import { profileOf, root } from "./support.js";
 
@@ -112,6 +112,31 @@ describe("the diff command", () => {
     // The static state machine reads the same text.
     const state = measurementState([], [pullFile({ path: "a.go", status: "modified", patch: "@@ -3 +3,3 @@\n+x" })!], profileOf());
     expect(state.state).toBe("observe");
+  });
+});
+
+describe("the diff command on a large change", () => {
+  it("keeps only the file and hunk headers, so a large pull request's added code fits, with the same ranges as the full diff", () => {
+    const dir = head({ "a.go": "package a\n\nfunc A() {}\n", "b.go": "package b\n" });
+    const git = (...args: string[]) => spawnSync("git", args, { cwd: dir, encoding: "utf8", env: { ...process.env, ...GIT_ENV } });
+    git("init", "-q", "-b", "main");
+    git("-c", "user.email=a@b.c", "-c", "user.name=n", "add", ".");
+    git("-c", "user.email=a@b.c", "-c", "user.name=n", "commit", "-q", "-m", "base");
+    // Over MAX_DIFF_BYTES of added code, with lines that read like headers inside the bodies (`++ x` is `+++ x` in the diff).
+    const body = Array.from({ length: 4000 }, (_, i) => `\t// line ${i} of a long comment that makes this file big\n`).join("");
+    writeFileSync(path.join(dir, "a.go"), `package a\n\nfunc A() {\n${body}}\n\n// ++ b/not-a-file.go\n// @@ -1 +1 @@\n`);
+    writeFileSync(path.join(dir, "b.go"), "package b\n\n++ x\n@@ -9 +9 @@\nfunc B() {}\n");
+    const argv = metricsDiffCommand().argv;
+    const report = path.join(dir, ".report-out");
+    const out = spawnSync(argv[0]!, argv.slice(1), { cwd: dir, encoding: "utf8", env: { ...process.env, ...GIT_ENV, GRAPHLOOM_REPORT_FILE: report } });
+    expect(out.status, out.stderr).toBe(0);
+    const text = readFileSync(report, "utf8");
+    expect(Buffer.byteLength(text)).toBeLessThan(MAX_DIFF_BYTES);
+    expect(text.split("\n").filter((l) => l !== "").every((l) => l.startsWith("+++ ") || l.startsWith("@@ "))).toBe(true);
+    const full = git("-c", "core.hooksPath=/dev/null", "diff", "-U0", "-w", "--no-color", "HEAD", "--", "*.go").stdout;
+    expect(Buffer.byteLength(full)).toBeGreaterThan(MAX_DIFF_BYTES);
+    expect([...hunksFromUnifiedDiff(text, { headersOnly: true })]).toEqual([...hunksFromUnifiedDiff(full)]);
+    expect([...hunksFromUnifiedDiff(text, { headersOnly: true }).keys()].sort()).toEqual(["a.go", "b.go"]);
   });
 });
 
