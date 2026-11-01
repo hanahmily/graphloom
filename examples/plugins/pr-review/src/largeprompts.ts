@@ -23,6 +23,12 @@ const FACTS_BUDGET_CHARS = 40_000;
 const MAX_FACTS_SHOWN = 200;
 /** What the rest of the job input (the harness, the options) may take of the executor's bound, and a margin for escaping. */
 const INPUT_MARGIN_BYTES = 6_000;
+/**
+ * The coding-agent executor's own bound on an assignment (`graphloom.coding-agent/run` declares `assignment` at most
+ * 64,000 characters), less a margin: the digest is fitted to it as well as to the input's byte bound.
+ */
+export const MAX_ASSIGNMENT_CHARS = 64_000;
+const ASSIGNMENT_MARGIN_CHARS = 1_000;
 
 export interface LargeReporterAssignment {
   pr: PullRequest;
@@ -37,7 +43,7 @@ export interface LargeReporterAssignment {
 const jsonBytes = (s: string): number => Buffer.byteLength(JSON.stringify(s), "utf8");
 
 /** The digest's own lines, and the rest of the assignment around them. */
-function digestText(a: LargeReporterAssignment, digest: Digest): { head: string[]; patches: string[] } {
+function digestText(a: LargeReporterAssignment, digest: Digest, budgets: { files: number; facts: number }): { head: string[]; patches: string[] } {
   const byPath = new Map(a.snapshot.files.map((f) => [f.path, f] as const));
   let used = 0;
   let listed = 0;
@@ -50,7 +56,7 @@ function digestText(a: LargeReporterAssignment, digest: Digest): { head: string[
       const f = byPath.get(p);
       if (f === undefined) continue;
       const line = `  ${f.path}${f.previousPath !== null && f.previousPath !== f.path ? ` (was ${f.previousPath})` : ""} — ${f.status ?? "changed"}, +${f.additions} −${f.deletions}${f.parsed.lines.length === 0 ? ", no patch text (cite it as a whole: start 0, end 0)" : ""}`;
-      if (used + line.length > FILES_BUDGET_CHARS) continue;
+      if (used + line.length > budgets.files) continue;
       used += line.length + 1;
       listed += 1;
       lines.push(line);
@@ -63,7 +69,7 @@ function digestText(a: LargeReporterAssignment, digest: Digest): { head: string[
   let factChars = 0;
   for (const f of a.facts) {
     const line = factText(f);
-    if (facts.length >= MAX_FACTS_SHOWN || factChars + line.length > FACTS_BUDGET_CHARS) break;
+    if (facts.length >= MAX_FACTS_SHOWN || factChars + line.length > budgets.facts) break;
     facts.push(line);
     factChars += line.length + 1;
   }
@@ -85,9 +91,9 @@ function digestText(a: LargeReporterAssignment, digest: Digest): { head: string[
 
 /** The reporter's assignment in large mode (design §6.9): a high-level, cited account from a bounded digest. */
 export function largeReporterInstruction(a: LargeReporterAssignment): string {
-  const build = (cap: number): string => {
+  const build = (cap: number, budgets = { files: FILES_BUDGET_CHARS, facts: FACTS_BUDGET_CHARS }): string => {
     const digest = buildDigest(a.snapshot.files, a.partition, a.sections, cap);
-    const { head, patches } = digestText(a, digest);
+    const { head, patches } = digestText(a, digest, budgets);
     return [
       `You are the reporter for ${a.pr.owner}/${a.pr.repo}#${a.pr.number} at head ${a.pr.head}. This pull request is large, so its maintainer wants a high-level report: describe the pull request at a high level, so they can understand what it is for and how it is organised. They will ask for any area they want to dig into, so do not read the detail of each area. You are read-only: change nothing.`,
       "",
@@ -126,13 +132,22 @@ export function largeReporterInstruction(a: LargeReporterAssignment): string {
           ]),
     ].join("\n");
   };
-  // The patches are what gives: the whole assignment, escaped as the job input carries it, must fit the executor's bound.
+  // The whole assignment must fit both bounds: the input's bytes once escaped, and the executor's characters for an
+  // assignment. The interface patches give first; then the file list (the areas still give every area's files, lines
+  // and sizes, and `git diff HEAD --stat` lists every file); then the shown facts (the plugin accounts for the rest).
   const limit = MAX_EXECUTOR_INPUT_BYTES - INPUT_MARGIN_BYTES;
+  const chars = MAX_ASSIGNMENT_CHARS - ASSIGNMENT_MARGIN_CHARS;
+  const over = (t: string): number => Math.max(jsonBytes(t) - limit, t.length - chars);
   let cap = INTERFACE_PATCH_BYTES;
-  let text = build(cap);
-  for (let n = 0; n < 12 && jsonBytes(text) > limit && cap > 0; n += 1) {
-    cap = Math.max(0, cap - Math.max(2_000, jsonBytes(text) - limit));
-    text = build(cap);
+  const budgets = { files: FILES_BUDGET_CHARS, facts: FACTS_BUDGET_CHARS };
+  let text = build(cap, budgets);
+  for (let n = 0; n < 40 && over(text) > 0; n += 1) {
+    const by = Math.max(2_000, over(text));
+    if (cap > 0) cap = Math.max(0, cap - by);
+    else if (budgets.files > 0) budgets.files = Math.max(0, budgets.files - by);
+    else if (budgets.facts > 0) budgets.facts = Math.max(0, budgets.facts - by);
+    else break;
+    text = build(cap, budgets);
   }
   return text;
 }
