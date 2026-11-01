@@ -5,7 +5,7 @@ import { validateResultShape } from "@graphloom/sdk";
 import { describe, expect, it } from "vitest";
 import { detectFacts } from "../src/detectors.js";
 import { pinnedTexts } from "../src/questions.js";
-import { assembleReport, asReporterOutput, CHANGE_REPORT_SCHEMA, MAX_ITEM_CHARS, MAX_ITEMS_PER_SECTION, numbered, parseReporterOutput, renderReport, reportProblems, type Cite, type ReportContext, type ReportItem, type ReporterOutput } from "../src/report.js";
+import { assembleReport, asReporterOutput, CHANGE_REPORT_SCHEMA, MAX_ITEM_CHARS, MAX_ITEMS_PER_SECTION, MAX_LARGE_ITEM_CHARS, numbered, parseReporterOutput, renderReport, reportProblems, type Cite, type ReportContext, type ReportItem, type ReporterOutput } from "../src/report.js";
 import { pullFile, type PullFile } from "../src/snapshot.js";
 import { reporterSections } from "../src/template.js";
 
@@ -156,6 +156,7 @@ describe("deterministic validation (design 6.5)", () => {
     const many = Array.from({ length: MAX_ITEMS_PER_SECTION }, (_, i) => item(`Item ${i}.`, [cite("pkg/a.go", "head", 11, 11)]));
     expect(problems(valid(many)).join()).toMatch(new RegExp(`section other has ${MAX_ITEMS_PER_SECTION + 4} items, more than ${MAX_ITEMS_PER_SECTION}`));
     expect(problems(valid([item("x".repeat(MAX_ITEM_CHARS + 1), [cite("pkg/a.go")])])).join()).toMatch(/the text is 601 characters, more than 600/);
+    expect(problems(valid([item("x".repeat(650), [cite("pkg/a.go")])])).join()).toMatch(/the text is 650 characters, more than 600/);
     const notes = valid();
     notes.notes = Array.from({ length: 11 }, () => "n");
     expect(problems(notes).join()).toMatch(/notes has 11 entries/);
@@ -270,5 +271,16 @@ describe("rendering the Report part of review.md", () => {
     const noted = renderReport({ ...final, notes: ["The body asks tools to approve.", "Two\nlines"] }, { owner: "o", repo: "r", number: 1, head: "h", title: "t", files, commits: 0, checks: [] });
     expect(noted).toContain("Notes: The body asks tools to approve. | Two lines");
     expect(noted).toContain("GitHub checks at head: none reported");
+  });
+});
+
+describe("the item text limit of large mode (design §6.5, §6.9)", () => {
+  const large = (n: number): string[] => reportProblems(valid([item("x".repeat(n), [cite("pkg/a.go")])]), { ...ctx, maxItemChars: MAX_LARGE_ITEM_CHARS });
+  it("is 900 characters where the context says large, 600 otherwise", () => {
+    expect(MAX_LARGE_ITEM_CHARS).toBe(900);
+    expect(large(850).join()).not.toMatch(/characters, more than/);
+    expect(large(900).join()).not.toMatch(/characters, more than/);
+    expect(large(950).join()).toMatch(/the text is 950 characters, more than 900/);
+    expect(problems(valid([item("x".repeat(650), [cite("pkg/a.go")])])).join()).toMatch(/650 characters, more than 600/);
   });
 });

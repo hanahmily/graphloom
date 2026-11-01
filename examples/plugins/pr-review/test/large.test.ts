@@ -6,10 +6,10 @@ import { describe, expect, it } from "vitest";
 import { analyze, evidencePull } from "../src/analysis.js";
 import { LIST_CHECK_RUNS, GET_PULL, LIST_PULL_COMMITS, LIST_PULL_FILES, LIST_PULL_REVIEWS, LIST_PULL_REVIEW_COMMENTS, LIST_REVIEW_THREADS } from "../src/constants.js";
 import { definitionFor } from "../src/graph.js";
-import { assembleReport } from "../src/report.js";
+import { assembleReport, MAX_LARGE_ITEM_CHARS, reportProblems } from "../src/report.js";
 import { pullFile } from "../src/snapshot.js";
 import { reporterSections } from "../src/template.js";
-import { assembleLarge, budgetShortfall, largeNeeds, mergedItem, synthesisProblems, type SynthItem } from "../src/large.js";
+import { areaContext, assembleLarge, budgetShortfall, wholeContext, largeNeeds, mergedItem, synthesisProblems, type SynthItem } from "../src/large.js";
 import { ProfileError, parseProfile } from "../src/profile.js";
 import { answerBatches } from "../src/qaflow.js";
 import { LARGE_LIMITS, REHEARSAL_HEAD } from "../src/rehearsal.js";
@@ -520,6 +520,11 @@ describe("what the synthesis may merge", () => {
     expect(m.behavior.map((r) => r.case)).toEqual(["c", "d"]);
   });
 
+  it("lets a merged item's text be 900 characters, and no more", () => {
+    expect(problems([{ items: ["A1.R1", "A2.R1"], text: "x".repeat(900) }])).toEqual([]);
+    expect(problems([{ items: ["A1.R1", "A2.R1"], text: "x".repeat(901) }]).join("|")).toContain("the text is 901 characters, more than 900");
+  });
+
   it("refuses a merge whose union would pass the item's bounds", () => {
     const entry = (name: string) => ({ name, scope: "s", initial: "i", transitions: [], reads: [] });
     const many = (area: string): SynthItem => item(`${area}.R1`, "features", { state: Array.from({ length: 4 }, (_, i) => entry(`${area}${i}`)) });
@@ -618,5 +623,45 @@ describe("recording an answered batch", () => {
     const q = qa(sim).questions.find((x: { type: string }) => x.type === "missing-test");
     expect(q.answer.status).toBe("needs author");
     expect(q.answer.check.verdict).toBe("downgraded");
+  });
+});
+
+describe("the item limit and the area-reporter role in large mode", () => {
+  const sim = run();
+  const std = simulate({});
+  const options = (j: JobSpec): unknown => (j.input as { harnessOptions?: unknown }).harnessOptions;
+
+  it("bounds an area's items at 900 characters, 850 passing and 950 failing, through the area's and the merged report's contexts", () => {
+    const ctx = { sections: reporterSections(profileOf(LARGE)), files: [pullFile({ path: "pkg/a.go", status: "modified", patch: "@@ -1,1 +1,2 @@\n a\n+b", previousPath: null, additions: 1, deletions: 0, patchOmitted: false })!], facts: [] };
+    const actx = areaContext(ctx, { paths: ["pkg/a.go"] });
+    expect(actx.maxItemChars).toBe(900);
+    const item = (n: number) => ({ id: "x", text: "x".repeat(n), cites: [{ path: "pkg/a.go", side: "head" as const, start: 1, end: 1, symbol: "" }], facts: [], state: [], behavior: [] });
+    const rep = (n: number) => ({ sections: ctx.sections.map((s, i) => (i === 0 ? { id: s.id, none: false, items: [item(n)] } : { id: s.id, none: true, items: [] })), notes: [] });
+    expect(reportProblems(rep(850), actx, { summary: false }).join()).not.toMatch(/characters, more than/);
+    expect(reportProblems(rep(950), actx, { summary: false }).join()).toMatch(/the text is 950 characters, more than 900/);
+    expect(reportProblems(rep(650), ctx, { summary: false }).join()).toMatch(/650 characters, more than 600/);
+    expect(wholeContext(ctx, { areas: [], omitted: [] } as never).maxItemChars).toBe(MAX_LARGE_ITEM_CHARS);
+  });
+
+  it("states 900 in the large-mode prompts and 600 in the standard one", () => {
+    for (const j of agents(sim, "change-report-v1")) expect(assignmentOf(j)).toContain("text is at most 900 characters");
+    expect(assignmentOf(agents(sim, "change-synthesis-v1")[0]!)).toContain("(at most 900 characters), which must say only");
+    expect(assignmentOf(agents(sim, "change-report-v1")[0]!)).not.toContain("at most 600 characters");
+    expect(assignmentOf(agents(std, "change-report-v1")[0]!)).toContain("text is at most 600 characters");
+  });
+
+  it("runs the per-area reporter jobs on the area-reporter role (sonnet, high) and the synthesis on the reporter (opus, high)", () => {
+    for (const j of agents(sim, "change-report-v1")) expect(options(j)).toEqual({ model: "sonnet", effort: "high" });
+    expect(options(agents(sim, "change-synthesis-v1")[0]!)).toEqual({ model: "opus", effort: "high" });
+    for (const j of sim.jobs.filter((x) => x.resultSchema === "claim-check-v1")) expect(options(j)).toEqual({ effort: "medium" });
+    // The standard reporter is the reporter role.
+    expect(options(agents(std, "change-report-v1")[0]!)).toEqual({ model: "opus", effort: "high" });
+  });
+
+  it("falls back to the reporter's settings when the profile names no area-reporter", () => {
+    const { "area-reporter": _drop, ...harnesses } = BANYANDB.harnesses as Record<string, unknown>;
+    const config = { ...LARGE, harnesses };
+    const fb = run(undefined, config);
+    for (const j of agents(fb, "change-report-v1")) expect(options(j)).toEqual({ model: "opus", effort: "high" });
   });
 });

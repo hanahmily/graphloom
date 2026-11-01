@@ -23,6 +23,8 @@ import type { Section } from "./template.js";
 export const REPORT_SCHEMA = "pr-change-report-v1";
 export const MAX_ITEMS_PER_SECTION = 40;
 export const MAX_ITEM_CHARS = 600;
+/** Large mode (design §6.9): one item there often summarises a whole area's change, in an area's report and in a merged item. */
+export const MAX_LARGE_ITEM_CHARS = 900;
 export const MAX_REPORT_BYTES = 256 * 1024;
 export const MAX_PURPOSE_CHARS = 400;
 export const MAX_OVERVIEW_CHARS = 900;
@@ -170,6 +172,8 @@ export interface ReportContext {
   /** Large mode's merged report holds the items of every area, so its bounds grow with them (design §6.9); absent means the standard bounds. */
   maxItemsPerSection?: number;
   maxBytes?: number;
+  /** Large mode (an area's context and the merged report's): the longest item text, MAX_LARGE_ITEM_CHARS; absent means MAX_ITEM_CHARS. */
+  maxItemChars?: number;
   /** Large mode: files no agent read as patches (generated, or no patch from GitHub), by path, with what the report says of each. */
   unread?: ReadonlyMap<string, string>;
   /** The pinned base commit, which the architecture diagram's tree check reads (design §6.10). */
@@ -200,6 +204,7 @@ export function reportProblems(report: ReportLike, ctx: ReportContext, opts: { f
   const final = opts.final === true;
   const maxItems = ctx.maxItemsPerSection ?? MAX_ITEMS_PER_SECTION;
   const maxBytes = ctx.maxBytes ?? MAX_REPORT_BYTES;
+  const maxItemChars = ctx.maxItemChars ?? MAX_ITEM_CHARS;
   // An area's report leaves the summary to the synthesis job (design §6.9).
   if (!final && opts.summary !== false) summaryProblems(report, ctx, problems);
   // The diagram's structural rules (design §6.10); its tree check is a command the graph runs (`architecturePlan`).
@@ -229,7 +234,7 @@ export function reportProblems(report: ReportLike, ctx: ReportContext, opts: { f
     s.items.forEach((item, i) => {
       const at = `${s.id} item ${i + 1}`;
       if (item.text.trim() === "") problems.push(`${at}: the text is empty`);
-      if (item.text.length > MAX_ITEM_CHARS) problems.push(`${at}: the text is ${item.text.length} characters, more than ${MAX_ITEM_CHARS}`);
+      if (item.text.length > maxItemChars) problems.push(`${at}: the text is ${item.text.length} characters, more than ${maxItemChars}`);
       if (item.cites.length === 0) problems.push(`${at}: it cites nothing; every item cites the diff`);
       for (const c of item.cites) citeProblem(c, ctx.files, at, problems, !final);
       for (const c of item.cites) {
@@ -481,6 +486,7 @@ export function assembleReport(report: Pick<ReporterOutput, "sections" | "notes"
   const place = (section: string, autos: Array<Omit<FinalItem, "id">>, label: string): void => {
     const target = bySection.get(section)!;
     const limit = ctx.maxItemsPerSection ?? MAX_ITEMS_PER_SECTION;
+    const maxChars = ctx.maxItemChars ?? MAX_ITEM_CHARS;
     const room = limit - target.length;
     if (autos.length <= room) {
       for (const a of autos) {
@@ -496,7 +502,7 @@ export function assembleReport(report: Pick<ReporterOutput, "sections" | "notes"
       next += 1;
       target.push({
         id: `R${next}`,
-        text: joined.length <= MAX_ITEM_CHARS ? joined : `${joined.slice(0, MAX_ITEM_CHARS - 1)}…`,
+        text: joined.length <= maxChars ? joined : `${joined.slice(0, maxChars - 1)}…`,
         cites: chunk.flatMap((a) => a.cites),
         facts: chunk.flatMap((a) => a.facts),
         state: [],

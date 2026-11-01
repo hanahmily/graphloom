@@ -234,7 +234,7 @@ meaning and parser (review-kit, [§14](#14-sharing-code-with-issue-fix)).
 | `checks` | Optional commands, run only in the Docker sandbox (`checks.sandbox`, same shape as `metrics.sandbox`) ([§8.3](#83-checks)). Absent means there is no Checks stage |
 | `comments` | `minSeverity` (default `P2`), `nits` (false), `questions` (pre-select `needs author` items as draft comments, true), `maxComments` (30), `suggestions.maxLines` (10), optional `footer` |
 | `privateRepos` | Never named in posted text (issue-fix's `withoutPrivateReferences`, `src/prompts.ts:325`) |
-| `harnesses` | each role takes a harness id or `{ harness, model?, effort? }` ([§13.1](#131-roles)): `reporter`, `questioner`, `answerer` (`claude-code` or `codex` only), `report-checker`, `answer-checker`, and `verifier-<aspect>` for `correctness`, `maintainability` and `security`. There is no `reviewer-<aspect>` key: the reviewers run on the answerer's harness, and a profile that names one is refused ([§13.1](#131-roles)) |
+| `harnesses` | each role takes a harness id or `{ harness, model?, effort? }` ([§13.1](#131-roles)): `reporter`, `area-reporter` (optional: large mode's per-area reporter jobs only; absent, it takes the reporter's harness, model and effort; `report-checker` must differ from it), `questioner`, `answerer` (`claude-code` or `codex` only), `report-checker`, `answer-checker`, and `verifier-<aspect>` for `correctness`, `maintainability` and `security`. There is no `reviewer-<aspect>` key: the reviewers run on the answerer's harness, and a profile that names one is refused ([§13.1](#131-roles)) |
 | `supervisor`, `budgets` | As in issue-fix ([§13](#13-agent-roles-supervisor-budgets)) |
 | `limits` | `maxFiles` (150), `maxPatchBytes` (1 MiB), `maxNewSymbols` (200): past one, the pull request is reviewed in large mode ([§6.9](#69-large-pull-requests), [§7.6](#76-questions-in-large-mode)). `hardMaxFiles` (1000), `hardMaxPatchBytes` (8 MiB), `hardMaxNewSymbols` (2000): past one, the run stops "incompatible task" and names the size. `areaMaxBytes` (256 KiB) and `areaMinBytes` (16 KiB) shape the areas. Each is a positive integer; a `max*` may not exceed its hard cap, nor `areaMinBytes` the `areaMaxBytes` |
 
@@ -520,7 +520,10 @@ see, relies on the reporter's prompt and on the checker.
   prompts still say to describe what the code does, factually, and the
   checkers judge each claim for support, not for tone.
 - **Bounds:** at most 40 items per section and 600 characters per item, all
-  within the 256 KiB evidence bound.
+  within the 256 KiB evidence bound. In large mode ([§6.9](#69-large-pull-requests))
+  an item is at most 900 characters (`MAX_LARGE_ITEM_CHARS`), in an area's
+  report and in a merged item alike, because one item there often summarises a
+  whole area's change; the prompts state the limit of their mode.
 
 ### 6.6 Output
 
@@ -761,7 +764,10 @@ recorded in the snapshot.
 **Report.**
 
 1. One reporter job per area (`change-report-v1`, fresh read-only session per
-   area). It gets the whole file list with diffstat, the PR text, the facts
+   area, on the optional `area-reporter` role's harness, model and effort, and
+   on the `reporter`'s when the profile names no `area-reporter`;
+   [§13.1](#131-roles)). An area's items and the synthesis' merged items may be
+   900 characters (§6.5). It gets the whole file list with diffstat, the PR text, the facts
    and state candidates of its files, and its own area's patches. It returns
    `sections` and `notes` for its area only; `purpose` and `overview` are
    empty.
@@ -2352,7 +2358,8 @@ the review base session ([§8.1](#81-review)).
 | Role | Default harness | Access | Constraint |
 |---|---|---|---|
 | `reporter` | `claude-code` | read | Writes the neutral report and the draft summary |
-| `report-checker` | `codex` | read | `distinctFrom: ["reporter"]` |
+| `area-reporter` | the `reporter`'s | read | Optional. Large mode's per-area reporter jobs only (a fresh session per area; [§6.9](#69-large-pull-requests)). Absent, it takes the reporter's harness, model and effort. The synthesis job keeps the `reporter` role |
+| `report-checker` | `codex` | read | `distinctFrom: ["reporter", "area-reporter"]` |
 | `questioner` | `codex` | read | `distinctFrom: ["reporter"]`. Asks only |
 | `answerer` | `claude-code` | read | `distinctFrom: ["questioner"]`. Claude Code or Codex only. Answers N1 first, in the Questions stage (`necessity-v1`), then the other questions from the whole codebase |
 | `answer-checker` | `codex` | read | `distinctFrom: ["answerer"]`. Verifies N1's cited design statements, trace steps and conclusion, then the other answers |
@@ -2393,6 +2400,7 @@ from its preference list that differs from its `distinctFrom` partner's:
 | `answerer` | claude-code, codex |
 | `questioner` | codex, pi, claude-code, skipping the answerer's |
 | `reporter` | claude-code, codex, pi, skipping the questioner's |
+| `area-reporter` | the reporter's, unless the profile sets it |
 | `report-checker`, `answer-checker` | codex, pi, claude-code, skipping its author's |
 | `reviewer-<aspect>` | the answerer's |
 | `verifier-correctness`, `verifier-maintainability` | claude-code, codex, pi, skipping the reviewers' |
