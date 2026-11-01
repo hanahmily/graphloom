@@ -10,7 +10,7 @@ import { afterNecessity, answerContext, qaContext, questionSet, questionerFlow, 
 import { finalQuestions, quoteInPinned, requiredQuestions, statedPurposes, type QuestionerOutput } from "../src/questions.js";
 import { jaccard, shingles, similarity, tokensOf } from "../src/similarity.js";
 import { extractSymbols, type SymbolDef } from "../src/symbols.js";
-import { mapTests } from "../src/testmap.js";
+import { mapTests, testMapContext } from "../src/testmap.js";
 import { parsePatch } from "../src/patch.js";
 import type { PullFile } from "../src/snapshot.js";
 import { profileOf, simulate } from "./support.js";
@@ -147,6 +147,50 @@ describe("the test map (design 7.2 item 4)", () => {
     expect(mapTests(ts, [ts], [test], packs).map((e) => e.kind)).toEqual(expect.arrayContaining(["reference"]));
     const sub = added("test/other.test.ts", ["it('x', () => { parseAll(); })"]);
     expect(mapTests(ts, [ts], [sub], packs).filter((e) => e.kind === "reference")).toEqual([]);
+  });
+
+  /** A large pull request: `n` exported Go functions that call each other, and test files that name them. */
+  function large(n: number): { symbols: SymbolDef[]; files: PullFile[] } {
+    const symbols = Array.from({ length: n }, (_, i) =>
+      sym({ id: `S${i + 1}`, name: `Handle${i}`, qualified: `schema.Handle${i}`, dir: `pkg/d${i % 7}`, path: `pkg/d${i % 7}/f${i}.go`, body: `func Handle${i}() {\n\t// Handle${(i + 5) % n} in a comment\n\tHandle${(i + 1) % n}()\n\ts := "handle ${i} done"\n}` }),
+    );
+    const files = Array.from({ length: 12 }, (_, f) =>
+      added(`pkg/d${f % 7}/t${f}_test.go`, [
+        "package t",
+        ...Array.from({ length: Math.ceil((n * 6) / 12) }, (_, k) => {
+          const i = (f * 31 + k) % n;
+          return k % 3 === 0 ? `\tHandle${i}()` : k % 3 === 1 ? `\t{name: "handle ${i} twice"},` : `\tother${k}() // Handle${i}`;
+        }),
+      ]),
+    );
+    return { symbols, files };
+  }
+
+  it("gives the same evidence with a shared context as without, in the same order", () => {
+    const { symbols, files } = large(60);
+    const packs = [GO_PACK, TS_PACK];
+    const ctx = testMapContext(symbols, files, packs);
+    let finds = 0;
+    for (const s of symbols) {
+      const alone = mapTests(s, symbols, files, packs);
+      expect(mapTests(s, symbols, files, packs, ctx)).toEqual(alone);
+      finds += alone.length;
+    }
+    expect(finds).toBeGreaterThan(symbols.length);
+    // A name with characters outside the word set takes the pattern path and still agrees.
+    const odd = sym({ id: "S99", name: "a.b", qualified: "schema.a.b" });
+    const oddFiles = [added("pkg/schema/x_test.go", ["\tx := a.b", "\ty := axb"])];
+    expect(mapTests(odd, [odd, ...symbols], oddFiles, packs, testMapContext([odd, ...symbols], oddFiles, packs))).toEqual(mapTests(odd, [odd, ...symbols], oddFiles, packs));
+  });
+
+  it("maps a pull request of hundreds of symbols and thousands of test lines in seconds, not minutes", () => {
+    const { symbols, files } = large(800);
+    const packs = [GO_PACK, TS_PACK];
+    const ctx = testMapContext(symbols, files, packs);
+    const started = performance.now();
+    for (const s of symbols) mapTests(s, symbols, files, packs, ctx);
+    // Linear in symbols plus lines: well under a second here; the per-symbol rescan this guards against took tens of seconds.
+    expect(performance.now() - started).toBeLessThan(5000);
   });
 });
 
