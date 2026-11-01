@@ -198,9 +198,33 @@ export async function collectPackages(root) {
   return [...seen.values()].sort((a, b) => (a.name === b.name ? a.version.localeCompare(b.version) : a.name.localeCompare(b.name)));
 }
 
+/**
+ * Third-party sources vendored into a shipped plugin: each directory
+ * `<root>/examples/plugins/<plugin>/vendor/<name>/` carries a `VENDORED.md` with `- License: <SPDX id> ...`
+ * and `- Commit: <sha>` lines and the upstream license text in `LICENSE`. They are judged like packages. A
+ * vendored directory with no `VENDORED.md` is listed with no declared license, so the check fails on it.
+ */
+export function collectVendored(root) {
+  const found = [];
+  const plugins = path.join(root, "examples", "plugins");
+  if (!existsSync(plugins)) return found;
+  for (const plugin of readdirSync(plugins, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name).sort()) {
+    const vendor = path.join(plugins, plugin, "vendor");
+    if (!existsSync(vendor)) continue;
+    for (const entry of readdirSync(vendor, { withFileTypes: true }).filter((e) => e.isDirectory()).sort((a, b) => a.name.localeCompare(b.name))) {
+      const dir = path.join(vendor, entry.name);
+      const note = existsSync(path.join(dir, "VENDORED.md")) ? readFileSync(path.join(dir, "VENDORED.md"), "utf8") : "";
+      const license = /^- License:\s*([A-Za-z0-9.+-]+)/m.exec(note)?.[1];
+      const commit = /^- Commit:\s*([0-9a-f]{7,40})/m.exec(note)?.[1];
+      found.push({ name: `${entry.name} (vendored in the ${plugin} plugin)`, version: commit ? commit.slice(0, 12) : "", license, dir });
+    }
+  }
+  return found;
+}
+
 /** Checks every package and returns `{ packages, problems }`; `self` adds the package at `root` itself. */
 export async function checkLicenses(root, policy, { self = false } = {}) {
-  const packages = await collectPackages(root);
+  const packages = [...(await collectPackages(root)), ...collectVendored(root)];
   if (self) {
     const pkg = readJson(path.join(root, "package.json"));
     packages.unshift({ name: pkg.name, version: pkg.version ?? "", license: declaredLicense(pkg), dir: root, self: true });

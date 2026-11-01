@@ -226,6 +226,42 @@ describe("the license check and THIRD_PARTY_NOTICES (§2.8)", () => {
   });
 });
 
+describe("a third-party source vendored into a shipped plugin (§2.8)", () => {
+  const allowlist = path.join(repoRoot, "release", "license-allowlist.json");
+
+  async function vendored(note: string | undefined) {
+    const root = await tempDir();
+    const dir = path.join(root, "examples", "plugins", "pr-review", "vendor", "skill");
+    await mkdir(dir, { recursive: true });
+    if (note !== undefined) await writeFile(path.join(dir, "VENDORED.md"), note);
+    await writeFile(path.join(dir, "LICENSE"), "MIT License\nCopyright the skill's authors\n");
+    return root;
+  }
+
+  it("is judged by the license its VENDORED.md names and listed in the notices with its license text", async () => {
+    const root = await vendored("# skill\n\n- Name: skill\n- Commit: 0cf73c3fcc56667ad91a9a04c439ac6ccfabc9d1\n- License: MIT (see LICENSE)\n");
+    const out = path.join(root, "THIRD_PARTY_NOTICES");
+    const result = script("notices.mjs", ["--root", root, "--allowlist", allowlist, "--out", out]);
+    expect(result.status, result.stderr).toBe(0);
+    expect(await readFile(out, "utf8")).toContain("skill (vendored in the pr-review plugin)@0cf73c3fcc56\nLicense: MIT\n\nMIT License\nCopyright the skill's authors");
+  });
+
+  it("fails when it names a disallowed license, or none", async () => {
+    const copyleft = script("notices.mjs", ["--root", await vendored("- Commit: 0cf73c3fcc56667ad91a9a04c439ac6ccfabc9d1\n- License: GPL-3.0-only\n"), "--allowlist", allowlist]);
+    expect(copyleft.status).toBe(1);
+    expect(copyleft.stderr).toContain("skill (vendored in the pr-review plugin)@0cf73c3fcc56: disallowed license GPL-3.0-only");
+    const none = script("notices.mjs", ["--root", await vendored(undefined), "--allowlist", allowlist]);
+    expect(none.status).toBe(1);
+    expect(none.stderr).toContain("skill (vendored in the pr-review plugin)@: no license declared");
+  });
+
+  it("passes on the repository's own vendored tree: diagram-design is MIT", async () => {
+    const result = script("notices.mjs", ["--root", repoRoot, "--allowlist", allowlist]);
+    // The checkout has no node_modules of its own to judge here; the vendored entry must not be among the problems.
+    expect(result.stderr).not.toContain("vendored in the pr-review plugin");
+  });
+});
+
 describe("the release tree content checks (§2.3, §6 step 6)", () => {
   /** The smallest tree that passes: a core package with dist/ only, a dependency with a portable shebang and a relative .bin link. */
   async function cleanTree() {

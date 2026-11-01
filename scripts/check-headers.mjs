@@ -21,7 +21,8 @@
  * Covered: `.ts`, `.mts`, `.cts`, `.js`, `.mjs`, `.cjs`, and `.sh`, including
  * tests. Exempt: declaration files (`.d.ts`), generated output (`dist/`),
  * dependencies (`node_modules/`), test fixtures (any `fixtures/` directory),
- * and the unbuilt historical tree under `legacy/`. JSON, Markdown, lockfiles,
+ * vendored third-party sources (any `vendor/` directory: copied unmodified, with
+ * their own license), and the unbuilt historical tree under `legacy/`. JSON, Markdown, lockfiles,
  * and generated manifests are not covered extensions.
  */
 import { spawnSync } from "node:child_process";
@@ -34,7 +35,7 @@ export const COPYRIGHT_LINE = "Copyright 2026 Hongtao Gao and the GraphLoom cont
 
 const SLASH_COMMENT = new Set([".ts", ".mts", ".cts", ".js", ".mjs", ".cjs"]);
 const HASH_COMMENT = new Set([".sh"]);
-const EXEMPT_SEGMENTS = new Set(["dist", "node_modules", "fixtures"]);
+const EXEMPT_SEGMENTS = new Set(["dist", "node_modules", "fixtures", "vendor"]);
 const EXEMPT_PREFIXES = ["legacy/"];
 
 /** The comment prefix for a covered path, or null when the path is not covered. */
