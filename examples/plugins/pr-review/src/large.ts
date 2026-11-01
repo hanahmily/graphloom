@@ -80,13 +80,13 @@ export const ASSUMED_ITEMS_PER_AREA = 2;
 /** Per item in large mode: purpose, existing-equivalent, reuse-library, common-logic and missing-test (design §7.6). */
 export const ASSUMED_QUESTIONS_PER_ITEM = 5;
 /** Jobs the stages around the agents need in any run (measurements, coverage, the groundwork's reads, the quote check of the claims, the writes with review.html and its appendix, the ledger). A multi-part write adds a job per part on top. */
-const FIXED_JOBS = 24;
+const FIXED_JOBS = 26;
 /** The diagram job's agent invocations: the drawing and its one correction (design §6.10). */
 const DIAGRAM_INVOCATIONS = 2;
 /** The report's agent invocations: the reporter and its one claim check (a revision and corrections come on top). */
 const REPORT_INVOCATIONS = 2;
-/** The report's command jobs: the checker's quotes are verified against the trees by one job in the usual case, and the diagram's tree check is one more. */
-const REPORT_COMMAND_JOBS = 2;
+/** The report's command jobs: the checker's quotes are verified against the trees by one job in the usual case. */
+const REPORT_COMMAND_JOBS = 1;
 const FIXED_DECISIONS = 12;
 
 /**

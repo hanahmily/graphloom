@@ -528,9 +528,9 @@ describe("the diagram job in the graph", () => {
   });
 
   it("counts the diagram job in large mode's budget pre-check", () => {
-    expect(largeNeeds(10)).toMatchObject({ agentInvocations: 21, jobs: 65 });
+    expect(largeNeeds(10)).toMatchObject({ agentInvocations: 21, jobs: 66 });
     // One area: 7 agent invocations before the diagrams (the reporter and its checker, questioner, N1's two, one batch's two), 2 more for them; 37 jobs before, 4 more.
-    expect(largeNeeds(1)).toMatchObject({ agentInvocations: 9, jobs: 41 });
+    expect(largeNeeds(1)).toMatchObject({ agentInvocations: 9, jobs: 42 });
   });
 
   it("draws nothing when the report has no feature and no lifecycle entry, and says nothing of it", () => {

@@ -385,7 +385,7 @@ describe("the budget pre-check before the reporter job (design §6.9)", () => {
     const defaults = definitionFor(profileOf()).defaultBudgets!;
     const ten = largeNeeds(10);
     // 2 (reporter, check) + 1 questioner + 2 N1 + 7 batches of 2 + 2 diagrams = 21 agent invocations; 4 + 1 + 4 + 28 + 24 + 4 + 4 jobs.
-    expect(ten).toMatchObject({ areas: 10, questions: 100, batches: 7, agentInvocations: 21, jobs: 65, decisions: 77 });
+    expect(ten).toMatchObject({ areas: 10, questions: 100, batches: 7, agentInvocations: 21, jobs: 66, decisions: 78 });
     expect(largeNeeds(1).jobs).toBeLessThan(ten.jobs);
     expect(budgetShortfall(ten, { agentInvocations: defaults.agentInvocations!, jobs: defaults.jobs!, decisions: defaults.decisions! })).toBeUndefined();
     expect(budgetShortfall(largeNeeds(100), { agentInvocations: defaults.agentInvocations!, jobs: defaults.jobs!, decisions: defaults.decisions! })).toContain("budgets.jobs");
