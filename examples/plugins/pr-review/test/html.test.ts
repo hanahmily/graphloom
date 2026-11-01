@@ -154,6 +154,16 @@ describe("review.html when N1 stops the questions, and when a question needs the
     expect(body).toContain("1 answered, 1 partially answered, 1 needs author");
   });
 
+  it("names a dependency citation as such and never links it into the reviewed repository", () => {
+    const qa: QaDoc = {
+      questions: [{ id: "Q1", type: "reuse-library", item: "R1", text: "library?", origin: "required", answer: { answer: "the library has it", status: "answered", citations: [{ path: "/go/pkg/mod/example.com/lib@v1.2.0/parse.go", tree: "dependency", start: 10, end: 12, quote: "func Parse" }, { path: "pkg/a.go", tree: "head", start: 3, end: 3, quote: "x" }], searches: [], check: { verdict: "supported", note: "", searches: [] } } }],
+    };
+    const body = renderReviewHtml({ report: report(), qa }).split("<h2>Q&amp;A</h2>")[1]!;
+    expect(body).toContain("<code>/go/pkg/mod/example.com/lib@v1.2.0/parse.go:10-12</code> <span class=\"muted\">(dependency)</span>");
+    expect(body).not.toMatch(/href="[^"]*go\/pkg\/mod/);
+    expect(body).toMatch(/href="https:\/\/github\.com\/apache\/skywalking-banyandb\/blob\/[0-9a-f]+\/pkg\/a\.go#L3"/);
+  });
+
   it("says the remaining questions were skipped when N1 concluded unnecessary", () => {
     const sim = simulate({ scenarioName: "necessity-unnecessary" });
     expect(htmlOf(sim)).toContain("Remaining questions skipped");

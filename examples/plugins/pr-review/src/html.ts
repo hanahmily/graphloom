@@ -121,6 +121,9 @@ function link(href: string | undefined, text: string): string {
 }
 
 function citeLink(g: Github, c: { path: string; side?: string; tree?: string; start: number; end: number }): string {
+  const lines0 = c.start >= 1 ? (c.start === c.end ? `:${c.start}` : `:${c.start}-${c.end}`) : "";
+  // Dependency source is not in the reviewed repository: named as such, never linked into it.
+  if ((c.side ?? c.tree) === "dependency") return `<code>${esc(`${c.path}${lines0}`)}</code> <span class="muted">(dependency)</span>`;
   const tree = (c.side ?? c.tree) === "base" ? "base" : "head";
   const lines = c.start >= 1 ? (c.start === c.end ? `:${c.start}` : `:${c.start}-${c.end}`) : "";
   return link(blobHref(g, tree, c.path, c.start, c.end), `${c.path}${lines}${tree === "base" ? " (base)" : ""}`);

@@ -16,7 +16,7 @@
     "vitest": "^3.0.9"
   },
   "digests": {
-    "sourceTree": "6623f66e06d0df76ec50b048d4376a8e0ebcc3c732aeb3453e9c99e12a346047",
+    "sourceTree": "aa4b459ed3860b3cb39406dcd39a89d8b55ae81af801caedcaececa31e21b67b",
     "packageLock": "369f11416a98cde64b85b246fe619ae20599cbc9e9b079604140e1425cc40415",
     "files": {
       "package.json": "a4557f68dbc2c255b360da488331270755b504385dfd0cc9550f423a7f4530de",
@@ -50,7 +50,7 @@
       "src/flow.ts": "ef58883e4103029e81332ce4736e102c389f578e1bf42815c37d2927aa7d2731",
       "src/graph.ts": "966d856abd54dd6d2f6b2380adf52d451ab63640459776051572f878c5140b5a",
       "src/groundwork.ts": "b5b7d5c64b10a23237c469bb99a233a39d6d2969fb6241a50a1de5a2cbf9c77b",
-      "src/html.ts": "8406fcbac722cb18faac14da49a66361f0c28c7a2fb31540a905a82fcd2edac7",
+      "src/html.ts": "a6c8df104b8f59a174b579123f053c15c7a542a8e6aafcd38c33ffb7f4c07788",
       "src/htmlsvg.ts": "8516c3d13419eab655f9d1ddf4cfb8f386cdd49e6bfd0ffd497b64dfc96b6b70",
       "src/ids.ts": "197a3aba3c632fe5b448f00c6cdcc207ff5238840e6859ca98185abe8493a01d",
       "src/index.ts": "02f9065870443bb89c07721bf473c554a0e83a797cddc858a34fc4c8c7579bbe",
@@ -116,7 +116,7 @@
       "test/git.test.ts": "67fdb5892a0f040e869f31422b7e82daba8ae1c1a34a3257aaf64b89f2fa9ab3",
       "test/gometrics.test.ts": "d8b4ce32aa4ac8314eecfa9b7c6762e7527cce6dc0f302f7f975a737f92a9c62",
       "test/graph.test.ts": "c241102b2b67a36c5e4b9bd12697dccca441b52f7cc3a463262d438e5a4f434f",
-      "test/html.test.ts": "489e960abdc562e44d3138cf97cbe94a313151847d41f9cddc7d15ddefb9dda8",
+      "test/html.test.ts": "dd8aa42ddc3dcb9e881d43e2bf950bf26585beac1fca8fd7727bdc5c38b72b4e",
       "test/hunks.test.ts": "d952cbfebc71123522fa3589d46a84a512b7ff521772dfdcfd5861de31e0715e",
       "test/large.test.ts": "25f62b2c16734e0e45e106f9b026e1809dfdc352cf0f5f76f39465a1d608e201",
       "test/manifest.test.ts": "05226d0efbfef3466c3279ec7c97415971b80d7145b2db964d69c221ea207932",
