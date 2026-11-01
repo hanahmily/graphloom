@@ -26,7 +26,10 @@ import type { Profile } from "./profile.js";
 import { isDeleted, type PullFile } from "./snapshot.js";
 import { writeChunks } from "./write.js";
 
-/** Files per tool run: one document must fit a command's 64 KiB report. */
+/**
+ * Files per tool run to start with: one document should fit a command's 64 KiB report. A batch whose report still does
+ * not fit is split in two (`splitBatch`), down to one file; the tools print compact JSON.
+ */
 export const BATCH_FILES = 8;
 export const MAX_DIFF_BYTES = 60_000;
 
@@ -76,6 +79,15 @@ export function batchesOf(m: Measurable): Batch[] {
     for (let i = 0; i < paths.length; i += BATCH_FILES) out.push({ id: `${STATIC_PREFIX}${language}-${out.filter((b) => b.language === language).length + 1}`, language, paths: paths.slice(i, i + BATCH_FILES) });
   }
   return out;
+}
+
+/** The two halves of a batch whose report did not fit: the first `ceil(n/2)` paths and the rest, in the batch's path order, with ids derived from the parent's (`static-go-2` gives `static-go-2a` and `static-go-2b`). */
+export function splitBatch(b: Batch): [Batch, Batch] {
+  const half = Math.ceil(b.paths.length / 2);
+  return [
+    { id: `${b.id}a`, language: b.language, paths: b.paths.slice(0, half) },
+    { id: `${b.id}b`, language: b.language, paths: b.paths.slice(half) },
+  ];
 }
 
 /** The files a measured language can have, as Git pathspecs: the diff the tools' hunks come from holds nothing else. */
@@ -331,16 +343,34 @@ function diffRun(evidence: readonly EvidenceRecord[]): CommandRun | undefined {
   return commandRuns(evidence, COMMAND.metricsDiff).at(-1);
 }
 
-/** Static runs of the latest tools job: the newest run of each batch id. */
-function latestRuns(evidence: readonly EvidenceRecord[], batches: readonly Batch[]): Map<string, CommandRun> {
-  const out = new Map<string, CommandRun>();
+/** The newest run of a batch id since the diff. */
+function runSince(evidence: readonly EvidenceRecord[], id: string): CommandRun | undefined {
   const diff = diffRun(evidence);
   const after = diff === undefined ? -1 : evidence.findIndex((e) => e.ref === diff.record.ref);
-  for (const b of batches) {
-    const run = commandRuns(evidence, b.id).filter((r) => evidence.findIndex((e) => e.ref === r.record.ref) > after).at(-1);
-    if (run !== undefined) out.set(b.id, run);
-  }
-  return out;
+  return commandRuns(evidence, id).filter((r) => evidence.findIndex((e) => e.ref === r.record.ref) > after).at(-1);
+}
+
+/**
+ * The batches to run or read, from the evidence alone: a batch whose run succeeded but whose report was cut is replaced
+ * by its two halves, recursively, so a validator recomputes the same plan. A single file whose report is still cut stays
+ * a leaf (the caller reports it as not measured, never as a failure); `splits` are the refs of the cut runs.
+ */
+function planBatches(evidence: readonly EvidenceRecord[], initial: readonly Batch[]): { leaves: Batch[]; runs: Map<string, CommandRun>; splits: string[] } {
+  const leaves: Batch[] = [];
+  const runs = new Map<string, CommandRun>();
+  const splits: string[] = [];
+  const visit = (b: Batch): void => {
+    const run = runSince(evidence, b.id);
+    if (run !== undefined && succeeded(run.command) && reportText(run).truncated && b.paths.length > 1) {
+      splits.push(run.record.ref);
+      for (const half of splitBatch(b)) visit(half);
+      return;
+    }
+    leaves.push(b);
+    if (run !== undefined) runs.set(b.id, run);
+  };
+  for (const b of initial) visit(b);
+  return { leaves, runs, splits };
 }
 
 /**
@@ -374,11 +404,11 @@ export function measurementState(
   const all = hunksFromUnifiedDiff(text.text, { headersOnly: true });
   const wanted = new Set(m.files.map((f) => f.path));
   const hunks: Hunks = new Map([...all].filter(([p]) => wanted.has(p)));
-  const batches = batchesOf(m);
-  const runs = latestRuns(evidence, batches);
+  const { leaves: batches, runs, splits } = planBatches(evidence, batchesOf(m));
   if (batches.some((b) => !runs.has(b.id))) return { state: "tools", batches: batches.filter((b) => !runs.has(b.id)), hunks };
   const problems: string[] = [];
-  const refs = [diff.record.ref];
+  const refs = [diff.record.ref, ...splits];
+  const overflowed: string[] = [];
   const retry: Batch[] = [];
   const rerun: Batch[] = [];
   const records: MetricsRecord[] = [];
@@ -398,7 +428,8 @@ export function measurementState(
     }
     const report = reportText(run);
     if (report.truncated) {
-      problems.push(`${b.id}: the tool's output did not fit the command report whole`);
+      // Only a single file gets here (a longer batch was split): the run does not fail, the file is reported as not measured.
+      overflowed.push(...b.paths);
       continue;
     }
     let doc: unknown;
@@ -443,14 +474,16 @@ export function measurementState(
   // Batches that failed before the operator's resume are measured again before anything is judged.
   if (rerun.length > 0) return { state: "tools", batches: rerun, hunks };
   if (problems.length > 0) return { state: "failed", problems, refs, retry };
-  const missing = m.files.map((f) => f.path).filter((p) => !covered.has(p) && hunks.has(p));
+  const missing = m.files.map((f) => f.path).filter((p) => !covered.has(p) && !overflowed.includes(p) && hunks.has(p));
   if (missing.length > 0) return { state: "failed", problems: [`the tools accounted for none of: ${missing.slice(0, 5).join(", ")}`], refs, retry: [] };
   // The modified functions' values at the base (design §6.8): never a failure, only a row that says why its base is not known.
   const withBase = baseState(evidence, records, files, diff.record.ref, profile);
   if (withBase.state === "baseFiles") return { state: "baseFiles", commands: withBase.commands };
   if (withBase.state === "baseTools") return { state: "baseTools", batches: withBase.batches, base: withBase.base };
   const measured = withBase.records;
-  const cov = coverageState({ evidence, records: measured, index, files: m.files, profile, afterRef: diff.record.ref });
+  const measuredFiles = m.files.filter((f) => !overflowed.includes(f.path));
+  const excluded = [...m.excluded, ...overflowed.map((p) => ({ path: p, reason: `the static tool's output for ${p} did not fit one command report` }))];
+  const cov = coverageState({ evidence, records: measured, index, files: measuredFiles, profile, afterRef: diff.record.ref });
   switch (cov.state) {
     case "probe":
       return { state: "probe", commands: cov.commands };
@@ -461,7 +494,7 @@ export function measurementState(
     case "failed":
       return { state: "failed", problems: cov.problems, refs: [...refs, ...cov.refs], retry: [] };
     case "done":
-      return { state: "ready", records: measured.map((r) => withOutcome(r, cov.outcomes.get(recordKey(r)))), refs: [...refs, ...cov.refs], excluded: m.excluded, coverage: cov.facts };
+      return { state: "ready", records: measured.map((r) => withOutcome(r, cov.outcomes.get(recordKey(r)))), refs: [...refs, ...cov.refs], excluded, coverage: cov.facts };
   }
 }
 

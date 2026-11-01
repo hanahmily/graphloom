@@ -225,7 +225,6 @@ func main() {
 		os.Exit(1)
 	}
 	enc := json.NewEncoder(os.Stdout)
-	enc.SetIndent("", "  ")
 	if err := enc.Encode(doc); err != nil {
 		fmt.Fprintln(os.Stderr, "gometrics:", err)
 		os.Exit(1)
