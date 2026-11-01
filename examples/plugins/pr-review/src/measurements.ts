@@ -99,7 +99,9 @@ export const DIFF_HEADERS_AWK =
  */
 export const metricsDiffCommand = (): EnvironmentCommand => ({
   id: COMMAND.metricsDiff,
-  argv: ["sh", "-c", `set -eu; git -c core.hooksPath=/dev/null diff -U0 -w --no-color --no-ext-diff --no-textconv HEAD -- "$@" | awk '${DIFF_HEADERS_AWK}' > "$GRAPHLOOM_REPORT_FILE"`, COMMAND.metricsDiff, ...MEASURED_PATHSPECS],
+  // A pipeline's status is awk's, so git's own status comes back on fd 3 and decides the command's: a git that fails
+  // (an unresolved HEAD, an unreadable object) fails the command rather than leave an empty or partial report.
+  argv: ["sh", "-c", `set -eu; rc=$( { { git -c core.hooksPath=/dev/null diff -U0 -w --no-color --no-ext-diff --no-textconv HEAD -- "$@" && s=0 || s=$?; echo "$s" >&3; } | awk '${DIFF_HEADERS_AWK}' > "$GRAPHLOOM_REPORT_FILE"; } 3>&1 ); [ "$rc" = 0 ] || { echo "git diff exited $rc" >&2; exit 1; }`, COMMAND.metricsDiff, ...MEASURED_PATHSPECS],
 });
 
 const STATIC_SCRIPT =

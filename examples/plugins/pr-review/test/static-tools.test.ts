@@ -140,6 +140,18 @@ describe("the diff command on a large change", () => {
   });
 });
 
+describe("the diff command when git fails", () => {
+  it("fails, rather than leaving an empty report, when git diff cannot run", () => {
+    const dir = head({ "a.go": "package a\n" });
+    // No repository at all: HEAD cannot be resolved.
+    const argv = metricsDiffCommand().argv;
+    const report = path.join(dir, ".report-out");
+    const out = spawnSync(argv[0]!, argv.slice(1), { cwd: dir, encoding: "utf8", env: { ...process.env, ...GIT_ENV, GIT_CEILING_DIRECTORIES: path.dirname(dir), GRAPHLOOM_REPORT_FILE: report } });
+    expect(out.status).not.toBe(0);
+    expect(out.stderr).toMatch(/git diff exited/);
+  });
+});
+
 describe("the TS fixture", () => {
   it("is a real Go file (the constants stay in step with the recorded documents)", () => {
     expect(FLAGS_GO.split("\n")[11]).toContain("func registerFlags");
