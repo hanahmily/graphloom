@@ -698,6 +698,21 @@ The section follows a few rules:
   the recorded file text as it does the head's. A base measurement that does
   not recompute, or fails, never fails the report: it leaves that row's base
   unknown, with the reason.
+- **Batches fit the report.** The static tools run over the changed files in
+  batches of at most 8 (`static-go-1`, `static-typescript-2`, …), and each
+  prints one **compact** JSON document (no indentation), because a command
+  report keeps about 64 KiB. When a batch's run succeeded but its report was
+  cut, the batch is replaced by two: the first half and the second half of its
+  files in path order, with ids derived from the parent's (`static-go-2` gives
+  `static-go-2a` and `static-go-2b`, those `static-go-2aa`, and so on). The plan
+  is a function of the recorded evidence alone, so the validators recompute the
+  same batches. A single file whose own report still does not fit is not a
+  failure of the run: its functions are not measured, and the section says
+  `Not measured: <path> (the static tool's output for <path> did not fit one
+  command report)`, as it does for a file whose path cannot be observed. Each
+  split is one more tools job per level (the large-mode floor of [§6.9](#69-large-pull-requests)
+  counts a fixed number of such jobs and does not grow with splits, like
+  other retries).
 - Exceeding a limit is stated as a number beside its limit.
 - The static metrics always run. Coverage and mutation run **by default**,
   BanyanDB included, always in the Docker sandbox and always coverage
