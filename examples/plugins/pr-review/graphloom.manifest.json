@@ -16,7 +16,7 @@
     "vitest": "^3.0.9"
   },
   "digests": {
-    "sourceTree": "a2b86ed7eedf84dd58c7e0649360478df2af252fca62547f2916ed0c4f577150",
+    "sourceTree": "b2ef79ddfc3a74af6d331b736617e35da3766cd57caf75ab98c1d5eac569b2dd",
     "packageLock": "7e63e84ba5a7ec4942ce2556ad8234cf9d5b65a4049670690488c3583d8c0412",
     "files": {
       "package.json": "ca48f8c71ba4afe11af65718f1c45324b4877bf6172df5c8ec15d09710f4f882",
@@ -78,7 +78,7 @@
       "src/index.ts": "02f9065870443bb89c07721bf473c554a0e83a797cddc858a34fc4c8c7579bbe",
       "src/inventory.ts": "46c5db65903805751277146a19b13fba56e6e50386dbd66a1d175e512eef6e66",
       "src/large.ts": "6916061736b2f811da7359d3b378c46044470feb437df58f08e66cf8fa3c65f3",
-      "src/largeprompts.ts": "acacd042e03146f5e410fc494db42404ca2d36ff9cd32527ab66781b6f02b15c",
+      "src/largeprompts.ts": "92a4098d3ec8fc3fab8748bf8ce5a8388c193cbb002aaf33387ed47e77e81934",
       "src/ledger.ts": "1d9d38d76a0de9cfbaf383aa06578ba9ab9ac8b55aaeb5befe88d70ae08939f1",
       "src/measurements.ts": "9bffcfdc112a455c469a660f6db71e5c5a33df8f047e5f9d3b6f4bcaacceab1f",
       "src/metrics/coverage.ts": "3f023ced01890cabbb5dab176f99a4e3877ed13fa3bf76983f731f1b77cd10ff",
@@ -137,7 +137,7 @@
       "test/crap.test.ts": "e2494e348e47ee1a6e5022d6745ba02b186cd3d74c95711148b37ef1de002eea",
       "test/detectors.test.ts": "cb780849cbe65e86cc7a536c7b98e995192a6c4fb1c92bb5c7c0f7aaf715d7dc",
       "test/diagrams.test.ts": "8b45413f334583b246dd49c15bc70e6ad33e6521e755238fb3cf3c78331eb382",
-      "test/digest.test.ts": "1ffaf836ad320748443b9d51d6417f528e7fc09f2d8a6c947a6546f26aceea7b",
+      "test/digest.test.ts": "1674a217024a7284e06221332382c8c903976b68b0e46c54af9ae9721ea4fdc8",
       "test/git.test.ts": "67fdb5892a0f040e869f31422b7e82daba8ae1c1a34a3257aaf64b89f2fa9ab3",
       "test/gometrics.test.ts": "d8b4ce32aa4ac8314eecfa9b7c6762e7527cce6dc0f302f7f975a737f92a9c62",
       "test/graph.test.ts": "2387017ab84d30b0eb1d45c15d76df18b81c1087b0b1375f4bd05d04b4a44942",

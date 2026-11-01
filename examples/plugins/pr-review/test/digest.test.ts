@@ -5,7 +5,7 @@ import { MAX_EXECUTOR_INPUT_BYTES } from "@graphloom/sdk";
 import { describe, expect, it } from "vitest";
 import { partitionAreas } from "../src/areas.js";
 import { buildDigest, INTERFACE_PATCH_BYTES, interfaceGlobs, newExportedSymbols } from "../src/digest.js";
-import { largeReporterInstruction } from "../src/largeprompts.js";
+import { largeReporterInstruction, MAX_ASSIGNMENT_CHARS } from "../src/largeprompts.js";
 import { pullFile, type PullFile } from "../src/snapshot.js";
 import { reporterSections } from "../src/template.js";
 import { profileOf } from "./support.js";
@@ -67,6 +67,21 @@ describe("the interface files of the digest", () => {
     const text = largeReporterInstruction({ pr: { mode: "report", owner: "o", repo: "r", number: 1, head: "h".repeat(40) }, snapshot: { pull: { title: "t", body: "b".repeat(30_000) } as never, files, commits: [] }, partition: partition(files), sections, facts: [], kind: "first", feedback: [] });
     expect(Buffer.byteLength(JSON.stringify(text))).toBeLessThan(MAX_EXECUTOR_INPUT_BYTES);
     expect(text).toContain("Interface patches left out because the total was over the cap");
+  });
+
+  it("fit the coding-agent executor's 64,000-character assignment bound, as a pull request the size of #1445 needs", () => {
+    // 920 files under deep paths, interface patches well over the bound, and many detector-sized facts.
+    const files = [
+      ...Array.from({ length: 900 }, (_, i) => file(`pkg/transfer/importer/sub${i % 7}/very_long_file_name_number_${i}.go`, added(["package x", `func Exported${i}() {}`]))),
+      ...Array.from({ length: 20 }, (_, i) => file(`api/proto/banyandb/transfer/v1/import_${i}.proto`, big(300))),
+    ];
+    const facts = Array.from({ length: 150 }, (_, i) => ({ id: `F${i}`, section: "interfaces", path: files[i]!.path, side: "head" as const, line: 1, text: `exported function Exported${i} added in a package whose description is fairly long` })) as never;
+    const text = largeReporterInstruction({ pr: { mode: "report", owner: "o", repo: "r", number: 1, head: "h".repeat(40) }, snapshot: { pull: { title: "t", body: "b".repeat(8_000) } as never, files, commits: [{ sha: "a".repeat(40), message: "m" }] }, partition: partition(files), sections, facts, kind: "first", feedback: [] });
+    expect(text.length).toBeLessThanOrEqual(MAX_ASSIGNMENT_CHARS);
+    expect(Buffer.byteLength(JSON.stringify(text))).toBeLessThan(MAX_EXECUTOR_INPUT_BYTES);
+    // What gave way is said: the patches left out, and the files the list could not hold.
+    expect(text).toContain("Interface patches left out");
+    expect(text).toMatch(/file\(s\) are not listed here, `git diff HEAD --stat` lists them all/);
   });
 });
 
