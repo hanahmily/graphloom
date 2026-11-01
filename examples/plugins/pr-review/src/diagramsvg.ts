@@ -31,6 +31,10 @@ function decode(text: string): string {
 }
 
 const NAME_START = /[A-Za-z]/;
+const TAG_NAME = /[^\s/>]*/y;
+/** Deepest nesting and most elements a drawing may have: bounded while reading, so no later walk can run out of stack or time. */
+export const MAX_DEPTH = 64;
+export const MAX_ELEMENTS = 6_000;
 
 /** The first `<svg>` element of a document as a tree, or the problem. Comments are dropped; CDATA, processing instructions and a second `<svg>` are refused. */
 export function parseSvg(markup: string): { root: SvgElement } | { problem: string } {
@@ -38,6 +42,7 @@ export function parseSvg(markup: string): { root: SvgElement } | { problem: stri
   if (start < 0) return { problem: "the document holds no <svg>" };
   const stack: SvgElement[] = [];
   let root: SvgElement | undefined;
+  let elements = 0;
   let at = start;
   while (at < markup.length) {
     const lt = markup.indexOf("<", at);
@@ -62,10 +67,10 @@ export function parseSvg(markup: string): { root: SvgElement } | { problem: stri
       continue;
     }
     if (!NAME_START.test(markup[lt + 1] ?? "")) return { problem: `a stray "<" in the <svg> near ${JSON.stringify(markup.slice(lt, lt + 20))}` };
-    const nameEnd = /[\s/>]/.exec(markup.slice(lt + 1));
-    if (nameEnd === null) return { problem: "an unclosed tag in the <svg>" };
-    const tag = markup.slice(lt + 1, lt + 1 + nameEnd.index);
-    let pos = lt + 1 + nameEnd.index;
+    TAG_NAME.lastIndex = lt + 1;
+    const tag = TAG_NAME.exec(markup)![0];
+    if (lt + 1 + tag.length >= markup.length) return { problem: "an unclosed tag in the <svg>" };
+    let pos = lt + 1 + tag.length;
     const attrs: Array<[string, string]> = [];
     const ATTR = /\s*([^\s"'<>/=]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`/]+)))?/y;
     let selfClosing = false;
@@ -88,6 +93,9 @@ export function parseSvg(markup: string): { root: SvgElement } | { problem: stri
       pos += m[0].length;
     }
     const el: SvgElement = { tag, attrs, children: [] };
+    elements += 1;
+    if (elements > MAX_ELEMENTS) return { problem: `the drawing has more than the ${MAX_ELEMENTS} elements the report embeds` };
+    if (!selfClosing && stack.length >= MAX_DEPTH) return { problem: `elements nested more than ${MAX_DEPTH} deep` };
     if (stack.length > 0) stack[stack.length - 1]!.children.push(el);
     else if (root === undefined) root = el;
     else return { problem: "a second root element" };
@@ -112,7 +120,6 @@ export const DIAGRAM_ATTRS: ReadonlySet<string> = new Set([
 ]);
 const DATA_OR_ARIA = /^(?:data-[a-z][a-z0-9-]*|aria-[a-z]+)$/;
 const ID = /^[A-Za-z][A-Za-z0-9_.:-]*$/;
-const MAX_ELEMENTS = 6_000;
 const REFERENCING = new Set(["fill", "stroke", "marker-end", "marker-start"]);
 
 function badValue(value: string): string | undefined {
@@ -158,7 +165,7 @@ export function svgProblems(root: SvgElement): string[] {
   };
   visit(root, 0);
   if (root.tag !== "svg") add("the root element is not <svg>");
-  if (count > MAX_ELEMENTS) add(`the drawing has ${count} elements, more than the ${MAX_ELEMENTS} the report embeds`);
+  if (count > MAX_ELEMENTS) add(`the drawing has more than the ${MAX_ELEMENTS} elements the report embeds`);
   for (const ref of refs) if (!ids.has(ref)) add(`it refers to #${ref}, which the drawing does not define`);
   return problems;
 }
@@ -269,6 +276,115 @@ export function textNodes(root: SvgElement): string[] {
   return out;
 }
 
+// ---- the document's stylesheet ----
+
+/** The CSS properties that have a presentation attribute of the same name: what a class rule may set on a drawing's element. */
+const PRESENTATION = new Set([
+  "fill", "stroke", "stroke-width", "stroke-dasharray", "stroke-linecap", "stroke-linejoin", "stroke-opacity", "fill-opacity", "opacity", "paint-order",
+  "text-anchor", "dominant-baseline", "font-size", "font-weight", "font-family", "font-style", "letter-spacing",
+]);
+/** Selectors of the page's own chrome, which style no part of the drawing. */
+const PAGE_SELECTORS = /^(?:\*|\*::?before|\*::?after|body|html|svg|h[1-6]|p|\.frame|\.eyebrow|\.diagram-container|\.legend|\.sr-only)$/;
+const SVG_TAGS = /(?:^|[^\w-])(?:text|tspan|rect|path|line|circle|ellipse|polygon|polyline|g|marker|defs|pattern)(?![\w-])/;
+
+interface Rule {
+  selector: string;
+  body: string;
+}
+
+/** The rules of a stylesheet, flat: an at-rule (`@media print`) is skipped whole. */
+function cssRules(css: string): Rule[] {
+  const text = css.replace(/\/\*[\s\S]*?\*\//g, "");
+  const out: Rule[] = [];
+  let i = 0;
+  while (i < text.length) {
+    const open = text.indexOf("{", i);
+    if (open < 0) break;
+    let depth = 1;
+    let j = open + 1;
+    while (j < text.length && depth > 0) {
+      if (text[j] === "{") depth += 1;
+      else if (text[j] === "}") depth -= 1;
+      j += 1;
+    }
+    const selector = text.slice(i, open).trim();
+    if (!selector.startsWith("@")) out.push({ selector, body: text.slice(open + 1, j - 1) });
+    i = j;
+  }
+  return out;
+}
+
+const declarations = (body: string): Array<[string, string]> =>
+  body.split(";").flatMap((d) => {
+    const at = d.indexOf(":");
+    return at < 0 || d.slice(0, at).trim() === "" ? [] : [[d.slice(0, at).trim().toLowerCase(), d.slice(at + 1).replace(/!important/gi, "").trim()] as [string, string]];
+  });
+
+/** The `class` names a drawing's elements use. */
+function classesUsed(root: SvgElement): Set<string> {
+  const used = new Set<string>();
+  const visit = (el: SvgElement): void => {
+    for (const [k, v] of el.attrs) if (k === "class") for (const c of v.split(/\s+/)) if (c !== "") used.add(c);
+    for (const c of el.children) if (typeof c !== "string") visit(c);
+  };
+  visit(root);
+  return used;
+}
+
+/**
+ * What the document's `<style>` blocks do to the drawing, as presentation attributes, since the embedded `<svg>` keeps no
+ * stylesheet: for each class the drawing uses, the declarations of its simple `.class` rules, with `var(--x)` resolved from
+ * `:root`. Anything that cannot be written as an attribute, or that the plugin does not resolve (a selector with a tag, an
+ * attribute or a combinator that reaches a class the drawing uses, a property with no presentation attribute, an undefined
+ * variable), is a problem, so the correction or the fallback handles the drawing. The page's own rules are ignored.
+ */
+export function stylesFor(html: string, root: SvgElement): { classes: Map<string, Array<[string, string]>> } | { problems: string[] } {
+  const used = classesUsed(root);
+  const problems: string[] = [];
+  const add = (p: string): void => {
+    if (problems.length < 8 && !problems.includes(p)) problems.push(p);
+  };
+  const css = [...html.matchAll(/<style[^>]*>([\s\S]*?)<\/style>/gi)].map((m) => m[1]!).join("\n");
+  const rules = cssRules(css);
+  const vars = new Map<string, string>();
+  for (const r of rules) if (r.selector.split(",").every((s) => /^(?::root|html)$/.test(s.trim()))) for (const [k, v] of declarations(r.body)) if (k.startsWith("--")) vars.set(k, v);
+  const resolve = (value: string, owner: string): string => {
+    let v = value;
+    for (let n = 0; n < 4 && /var\(/.test(v); n += 1) {
+      v = v.replace(/var\(\s*(--[\w-]+)\s*(?:,\s*([^()]*))?\)/g, (_m, name: string, fallback: string | undefined) => vars.get(name) ?? fallback?.trim() ?? `\u0000${name}`);
+    }
+    const missing = /\u0000(--[\w-]+)/.exec(v);
+    if (missing !== null) add(`${owner}: var(${missing[1]}) is not defined by :root, and has no fallback`);
+    else if (/var\(/.test(v)) add(`${owner}: a var() the plugin does not resolve`);
+    return v;
+  };
+  const classes = new Map<string, Array<[string, string]>>();
+  for (const r of rules) {
+    for (const raw of r.selector.split(",")) {
+      const sel = raw.trim();
+      const cls = /^\.([A-Za-z_][\w-]*)$/.exec(sel)?.[1];
+      if (cls !== undefined) {
+        if (!used.has(cls)) continue;
+        const list = classes.get(cls) ?? [];
+        for (const [prop, value] of declarations(r.body)) {
+          if (prop.startsWith("--")) continue;
+          if (!PRESENTATION.has(prop)) {
+            add(`the rule ${sel} sets ${prop}, which the report cannot carry into the drawing (only ${[...PRESENTATION].slice(0, 6).join(", ")} and the like)`);
+            continue;
+          }
+          const resolved = resolve(value, sel);
+          const bad = badValue(resolved);
+          if (bad !== undefined) add(`the rule ${sel} sets ${prop} to ${bad}`);
+          list.push([prop, resolved]);
+        }
+        classes.set(cls, list);
+      } else if (/^(?::root|html)$/.test(sel) || PAGE_SELECTORS.test(sel)) continue;
+      else if (SVG_TAGS.test(sel) || sel.includes("[") || [...used].some((c) => new RegExp(`\\.${c}(?![\\w-])`).test(sel))) add(`the rule ${JSON.stringify(sel)} styles the drawing's elements; give each element its presentation attributes instead`);
+    }
+  }
+  return problems.length > 0 ? { problems } : { classes };
+}
+
 // ---- the embedded markup ----
 
 const serialize = (el: SvgElement): string => {
@@ -282,9 +398,11 @@ const withPrefix = (value: string, uid: string): string => value.replace(/url\(\
 /**
  * The `<svg>` of a drawing that passed its checks, as `review.html` embeds it: only the allowed elements and attributes,
  * every id prefixed with `uid`, the title and description the plugin writes (`title`, `description`: from the data, never the
- * model's), `role="img"`, and the width the skill's output spec asks for (`min-width` the viewBox's, inside a scrolling wrapper).
+ * model's), `role="img"`, and a width that scales the viewBox to the container (inside a scrolling wrapper). The drawing keeps
+ * no stylesheet: `styles` (from `stylesFor`) is written into each element as presentation attributes, over the ones it
+ * had, as the cascade would, and no `class` is left.
  */
-export function embeddedSvg(root: SvgElement, uid: string, title: string, description: string): { svg: string } | { problems: string[] } {
+export function embeddedSvg(root: SvgElement, uid: string, title: string, description: string, styles?: ReadonlyMap<string, ReadonlyArray<readonly [string, string]>>): { svg: string } | { problems: string[] } {
   const problems = svgProblems(root);
   const box = viewBoxOf(root);
   if (box === undefined) problems.push("the <svg> has no usable viewBox (four numbers, each side at most 20000)");
@@ -294,9 +412,19 @@ export function embeddedSvg(root: SvgElement, uid: string, title: string, descri
   const rename = (el: SvgElement, depth: number): SvgElement => {
     const attrs: Array<[string, string]> = [];
     for (const [k, v] of el.attrs) {
-      if (k === "xmlns") continue;
+      if (k === "xmlns" || (k === "class" && depth > 0)) continue;
       if (depth === 0 && ["role", "aria-labelledby", "id", "width", "height", "class"].includes(k)) continue;
       attrs.push([k, k === "id" ? `${uid}-${v}` : k === "aria-labelledby" ? v.split(/\s+/).filter((s) => s !== "").map((s) => `${uid}-${s}`).join(" ") : REFERENCING.has(k) ? withPrefix(v, uid) : v]);
+    }
+    if (depth > 0 && styles !== undefined) {
+      const cls = el.attrs.find(([k]) => k === "class")?.[1].split(/\s+/) ?? [];
+      for (const c of cls) {
+        for (const [prop, value] of styles.get(c) ?? []) {
+          const at = attrs.findIndex(([k]) => k === prop);
+          if (at >= 0) attrs[at] = [prop, REFERENCING.has(prop) ? withPrefix(value, uid) : value];
+          else attrs.push([prop, REFERENCING.has(prop) ? withPrefix(value, uid) : value]);
+        }
+      }
     }
     let children: Array<SvgElement | string> = el.children.map((c) => (typeof c === "string" ? c : rename(c, depth + 1)));
     if (depth === 1 && (el.tag === "title" || el.tag === "desc")) {
@@ -306,7 +434,7 @@ export function embeddedSvg(root: SvgElement, uid: string, title: string, descri
     return { tag: el.tag, attrs, children };
   };
   const out = rename(root, 0);
-  out.attrs.unshift(["class", "dd"], ["role", "img"], ["aria-labelledby", `${uid}-title ${uid}-desc`], ["style", `width:100%;min-width:${box.w}px;max-width:none;height:auto`]);
+  out.attrs.unshift(["class", "dd"], ["role", "img"], ["aria-labelledby", `${uid}-title ${uid}-desc`], ["style", "width:100%;height:auto"]);
   // The title and description are exactly one each, first: the skill's contract.
   const rest = out.children.filter((c) => typeof c === "string" || (c.tag !== "title" && c.tag !== "desc"));
   out.children = [{ tag: "title", attrs: [["id", `${uid}-title`]], children: [title] }, { tag: "desc", attrs: [["id", `${uid}-desc`]], children: [description] }, ...rest.filter((c) => typeof c !== "string" || c.trim() !== "")];

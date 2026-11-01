@@ -11,7 +11,7 @@
  */
 import { MAX_EXECUTOR_INPUT_BYTES, type EnvironmentCommand, type EvidenceRecord } from "@graphloom/sdk";
 import type { Architecture } from "./architecture.js";
-import { documentProblems, embeddedSvg, labelProblems, parseSvg, textNodes } from "./diagramsvg.js";
+import { documentProblems, embeddedSvg, labelProblems, parseSvg, stylesFor, textNodes } from "./diagramsvg.js";
 import { clip } from "./escape.js";
 import { agentRuns, commandRuns, outputTail, succeeded, type AgentRun } from "./evidence.js";
 import { UNTRUSTED_PREAMBLE, untrusted } from "./prompts.js";
@@ -177,8 +177,8 @@ export function diagramsInstruction(a: DiagramsAssignment): string {
       'Style: the skill\'s default. At its style-guide gate (SKILL.md section 0) the answer is "keep default"; do not customize, onboard or load a profile.',
       "Fonts: offline, system fonts (style-guide.md, Font source: system). No Google Fonts link, no <link>, no @import, nothing loaded from the network.",
       "Static: no motion, no animation, no JavaScript.",
-      "Template: the light minimal one. A document is complete, self-contained HTML with one <svg> inside a local overflow-x: auto wrapper whose min-width is the viewBox width (output-spec.md).",
-      "Size: choose a viewBox wide enough that every label fits unclipped; the skill's complexity budgets do not apply, because every checked node, edge and entry below must be drawn.",
+      "Template: the light minimal one. A document is complete, self-contained HTML with one <svg> inside a local overflow-x: auto wrapper as output-spec.md asks.",
+      "Size: the report shows a drawing scaled to a page about 1100 to 1400 pixels wide, so use a viewBox at most 1200 wide (output-spec.md presets: doc-inline 0 0 960 600, or doc-wide 0 0 1280 720 only when a three-panel delta cannot fit narrower) and tall as needed, wide enough that every label fits unclipped at that scale. The skill's complexity budgets do not apply, because every checked node, edge and entry below must be drawn.",
       "Accessible SVG: role=\"img\", aria-labelledby, <title> then <desc> as the <svg>'s first children (the plugin replaces their text).",
     ]),
     "",
@@ -254,10 +254,17 @@ export function drawingOf(html: string, spec: DiagramSpec, uid: string): Drawing
   problems.push(...documentProblems(html));
   const parsed = parseSvg(html);
   if ("problem" in parsed) return { problems: [...problems, parsed.problem] };
-  const embedded = embeddedSvg(parsed.root, uid, spec.title, spec.description);
-  if ("problems" in embedded) problems.push(...embedded.problems);
-  problems.push(...labelProblems(textNodes(parsed.root), spec.phrases));
-  return problems.length > 0 || "problems" in embedded ? { problems: problems.slice(0, 12) } : { html, svg: embedded.svg };
+  try {
+    const styles = stylesFor(html, parsed.root);
+    if ("problems" in styles) problems.push(...styles.problems);
+    const embedded = embeddedSvg(parsed.root, uid, spec.title, spec.description, "classes" in styles ? styles.classes : undefined);
+    if ("problems" in embedded) problems.push(...embedded.problems);
+    problems.push(...labelProblems(textNodes(parsed.root), spec.phrases));
+    return problems.length > 0 || "problems" in embedded ? { problems: problems.slice(0, 12) } : { html, svg: embedded.svg };
+  } catch (err) {
+    // Whatever a hostile document does to the reading of it is a problem with the drawing, never a stop of the run.
+    return { problems: [...problems, `the drawing could not be read: ${err instanceof Error ? err.message : String(err)}`].slice(0, 12) };
+  }
 }
 
 /** The drawings a `diagrams-v1` run holds, by diagram id, with what is wrong with each. */

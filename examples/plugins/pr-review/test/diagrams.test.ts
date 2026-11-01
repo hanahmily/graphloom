@@ -139,7 +139,8 @@ describe("the inertness of a drawing and of its document (design 6.11)", () => {
       expect(documentProblems(doc)).toEqual([]);
       const r = drawingOf(doc, spec, "dd1");
       if (!("svg" in r)) throw new Error(JSON.stringify(r));
-      expect(r.svg.startsWith('<svg class="dd" role="img" aria-labelledby="dd1-title dd1-desc" style="width:100%;min-width:')).toBe(true);
+      expect(r.svg.startsWith('<svg class="dd" role="img" aria-labelledby="dd1-title dd1-desc" style="width:100%;height:auto"')).toBe(true);
+      expect(r.svg).not.toContain("min-width");
       expect(r.svg).toContain(`<title id="dd1-title">${spec.title}</title>`);
       expect(r.svg).toContain('id="dd1-arrow"');
       expect(r.svg).toContain("url(#dd1-arrow)");
@@ -157,6 +158,83 @@ describe("the inertness of a drawing and of its document (design 6.11)", () => {
       expect(embeddedSvg(parsed.root, "dd1", "t", "d"), name).toMatchObject({ svg: expect.stringContaining("<svg") });
       expect(documentProblems(html).join(" "), name).toMatch(/network address/);
     }
+  });
+
+  describe("the document's stylesheet (design 6.11)", () => {
+    const withStyle = (css: string, firstTextClass = "ink"): string => {
+      const doc = archDoc.replace("</style>", `${css}</style>`);
+      // The first <text> inside the <svg> takes the class.
+      const at = doc.indexOf("<text ", doc.indexOf("<svg"));
+      return `${doc.slice(0, at)}<text class="${firstTextClass}" ${doc.slice(at + "<text ".length)}`;
+    };
+    const textTag = (svg: string): string => /<text class="ink"[^>]*>|<text [^>]*fill="#123456"[^>]*>/.exec(svg)?.[0] ?? svg.match(/<text [^>]*>/)![0];
+
+    it("resolves a class rule into presentation attributes, and leaves no class behind", () => {
+      const r = drawingOf(withStyle(".ink { fill: #123456; font-weight: 700 }"), archSpec, "dd1");
+      if (!("svg" in r)) throw new Error(JSON.stringify(r));
+      const tag = textTag(r.svg);
+      expect(tag).toContain('fill="#123456"');
+      expect(tag).toContain('font-weight="700"');
+      expect(r.svg).not.toContain('class="ink"');
+      expect(r.svg.match(/class="/g)).toHaveLength(1);
+    });
+
+    it("resolves var(--x) from :root, with a fallback, and a rule that lists several classes", () => {
+      const r = drawingOf(withStyle(":root { --accent: #abcdef } .a, .ink { stroke: var(--accent); fill: var(--none, #010203) }"), archSpec, "dd1");
+      if (!("svg" in r)) throw new Error(JSON.stringify(r));
+      expect(textTag(r.svg)).toContain('stroke="#abcdef"');
+      expect(textTag(r.svg)).toContain('fill="#010203"');
+    });
+
+    it.each([
+      ["a declaration with no presentation attribute", ".ink { filter: blur(2px) }", /filter/],
+      ["an unresolved var()", ".ink { fill: var(--missing) }", /--missing/],
+      ["a url( that leaves the drawing", ".ink { fill: url(https://x.test/a.svg#p) }", /url\(|script or data|network/],
+      ["a rule on the drawing's elements by tag", "svg text { fill: red }", /svg text/],
+      ["a descendant or attribute selector", ".frame .ink, rect[x] { fill: red }", /rect\[x\]|\.frame \.ink/],
+    ])("refuses %s, so the correction or the fallback handles it", (_name, css, expected) => {
+      const r = drawingOf(withStyle(css), archSpec, "dd1");
+      expect("problems" in r, JSON.stringify(r)).toBe(true);
+      expect("problems" in r && r.problems.join(" | ")).toMatch(expected);
+    });
+
+    it("ignores the page's own rules (body, svg sizing, media queries) and a class no rule names", () => {
+      const r = drawingOf(withStyle("body { margin: 0 } svg { display: block } @media print { svg { min-width: 0 } } .frame { max-width: 9px }", "unstyled"), archSpec, "dd1");
+      expect("svg" in r, JSON.stringify(r)).toBe(true);
+      expect("svg" in r && r.svg).not.toContain("unstyled");
+    });
+  });
+
+  describe("a hostile nesting or size", () => {
+    const wrap = (inner: string): string => `<!DOCTYPE html><html><body><svg viewBox="0 0 100 100"><title>t</title><desc>d</desc>${inner}</svg></body></html>`;
+
+    it("refuses 15,000 nested <g> with a problem, quickly, and never throws", () => {
+      const started = Date.now();
+      const doc = wrap(`${"<g>".repeat(15_000)}${"</g>".repeat(15_000)}`);
+      expect(Buffer.byteLength(doc)).toBeLessThan(MAX_DIAGRAM_BYTES);
+      const r = drawingOf(doc, archSpec, "dd1");
+      expect("problems" in r && r.problems.join(" | ")).toMatch(/nested more than 64/);
+      expect(Date.now() - started).toBeLessThan(3_000);
+    });
+
+    it("refuses more elements than the report embeds, during the parse", () => {
+      const r = drawingOf(wrap("<g/>".repeat(7_000)), archSpec, "dd1");
+      expect("problems" in r && r.problems.join(" | ")).toMatch(/more than the 6000 elements/);
+    });
+
+    it("parses a drawing nested to the limit", () => {
+      const parsed = parseSvg(`<svg viewBox="0 0 1 1">${"<g>".repeat(60)}${"</g>".repeat(60)}</svg>`);
+      expect("root" in parsed).toBe(true);
+    });
+  });
+
+  it("scales the embedded <svg> to its container instead of forcing a minimum width, and asks the job for a viewBox that fits a report page", () => {
+    const r = drawingOf(archDoc, archSpec, "dd1");
+    expect("svg" in r && r.svg).toContain('style="width:100%;height:auto"');
+    const sim = simulate({ scenarioName: "architecture-diagram" });
+    const text = (diagramJobs(sim)[0]!.input as { assignment: string }).assignment;
+    expect(text).toMatch(/viewBox at most 1200 wide/);
+    expect(text).toMatch(/doc-inline/);
   });
 
   it("writes its own title and description, never the model's", () => {

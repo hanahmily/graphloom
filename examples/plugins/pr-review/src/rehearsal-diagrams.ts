@@ -86,10 +86,10 @@ interface PlacedBox {
 }
 
 const BOX_X = 24;
-const BOX_W = 200;
+const BOX_W = 160;
 
 /** One panel of the delta: the nodes of one snapshot in a column, and their connectors on the right, one lane each. */
-function panel(arch: Architecture, snapshot: "before" | "after", dx: number, dy: number): { svg: string; width: number; height: number } {
+function panel(arch: Architecture, snapshot: "before" | "after", dx: number, dy: number, lanes: number): { svg: string; width: number; height: number } {
   const nodes = arch.nodes.filter((n) => (snapshot === "before" ? n.change !== "added" : true));
   const known = new Set(nodes.map((n) => n.id));
   const edges = arch.edges.filter((e) => (snapshot === "before" ? e.change !== "added" : e.change !== "removed") && e.from !== e.to && known.has(e.from) && known.has(e.to));
@@ -101,7 +101,7 @@ function panel(arch: Architecture, snapshot: "before" | "after", dx: number, dy:
   let y = 16;
   const boxes = new Map<string, PlacedBox>();
   for (const n of nodes) {
-    const lines = wrap(n.label, 26, 8);
+    const lines = wrap(n.label, 20, 8);
     const ports = degree.get(n.id)!;
     const h = up4(Math.max(28 + 14 * (1 + lines.length), 16 * (ports + 1)));
     boxes.set(n.id, { id: n.id, label: n.label, lines, status: n.change === "added" ? "added" : n.change === "modified" ? "changed" : "unchanged", y, h, ports });
@@ -113,22 +113,22 @@ function panel(arch: Architecture, snapshot: "before" | "after", dx: number, dy:
     used.set(id, k);
     return boxes.get(id)!.y + 16 * k;
   };
-  // Each lane has room for its own label beside it, so no other lane crosses the label.
-  const labelW = 152;
-  const step = 16 + labelW;
-  const width = up4(BOX_X + BOX_W + 24 + step * Math.max(1, edges.length) + 8);
+  // The lanes are 16 apart; every label stands in a column to the right of the last lane, level with the line it names, so no lane crosses one and the panel stays narrow.
+  const labelW = 144;
+  const labelX = BOX_X + BOX_W + 24 + 16 * lanes + 8;
+  const width = up4(labelX + labelW + 8);
   const height = up4(Math.max(y, 120));
   const paths: string[] = [];
   const labels: string[] = [];
   edges.forEach((e, k) => {
-    const lane = BOX_X + BOX_W + 24 + step * k;
+    const lane = BOX_X + BOX_W + 24 + 16 * k;
     const ya = port(e.from);
     const yb = port(e.to);
     const x0 = BOX_X + BOX_W;
     const dashed = e.change === "removed" ? ' stroke-dasharray="4,3"' : "";
     const accent = e.change === "added" || e.change === "modified";
     paths.push(`<path data-kind="relationship" data-object-id="e${k + 1}" data-status="${e.change === "modified" ? "changed" : e.change}" data-signature="${esc(`${e.kind};${e.label}`)}" data-from="${esc(e.from)}" data-to="${esc(e.to)}" d="M ${x0} ${ya} H ${lane} V ${yb} H ${x0}" fill="none" stroke="${accent ? "#bf4520" : "#4f5d75"}" stroke-width="1.2"${dashed} marker-end="url(#${accent ? "arrow-accent" : "arrow"})"/>`);
-    if (e.label.trim() !== "") labels.push(...maskedLabel(lane + 8, Math.round((ya + yb) / 2) - 6, e.label, labelW));
+    if (e.label.trim() !== "") labels.push(...maskedLabel(labelX, ya - 6, e.label, labelW));
   });
   const nodeSvg = [...boxes.values()].map((b) => {
     const stroke = b.status === "added" ? "#bf4520" : "#2d3142";
@@ -149,15 +149,16 @@ function panel(arch: Architecture, snapshot: "before" | "after", dx: number, dy:
 export function architectureDocument(arch: Architecture, spec: DiagramSpec): string {
   const label = new Map(arch.nodes.map((n) => [n.id, n.label] as const));
   const entries: Array<{ change: string; target: string; lines: string[] }> = [];
-  for (const n of arch.nodes) if (n.change !== "unchanged") entries.push({ change: n.change === "added" ? "ADDED" : "CHANGED", target: n.id, lines: wrap(n.label, 34, 8) });
+  for (const n of arch.nodes) if (n.change !== "unchanged") entries.push({ change: n.change === "added" ? "ADDED" : "CHANGED", target: n.id, lines: wrap(n.label, 28, 8) });
   arch.edges.forEach((e, k) => {
     if (e.change === "unchanged") return;
-    entries.push({ change: e.change === "added" ? "ADDED" : e.change === "removed" ? "REMOVED" : "CHANGED", target: `e${k + 1}`, lines: [...wrap(label.get(e.from) ?? e.from, 34, 8), "→", ...wrap(label.get(e.to) ?? e.to, 34, 8)] });
+    entries.push({ change: e.change === "added" ? "ADDED" : e.change === "removed" ? "REMOVED" : "CHANGED", target: `e${k + 1}`, lines: [...wrap(label.get(e.from) ?? e.from, 28, 8), "→", ...wrap(label.get(e.to) ?? e.to, 28, 8)] });
   });
-  const before = panel(arch, "before", 24, 56);
-  const ledgerW = 296;
+  const lanes = Math.max(1, arch.edges.filter((e) => e.from !== e.to).length);
+  const before = panel(arch, "before", 24, 56, lanes);
+  const ledgerW = 232;
   const afterX = 24 + before.width + 24 + ledgerW + 24;
-  const afterPanel = panel(arch, "after", afterX, 56);
+  const afterPanel = panel(arch, "after", afterX, 56, lanes);
   const width = afterX + afterPanel.width + 24;
   const rows = entries.map((e) => 14 * (1 + e.lines.length) + 12);
   const ledgerHeight = rows.reduce((a, b) => a + b, 0);

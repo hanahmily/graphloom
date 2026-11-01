@@ -888,8 +888,15 @@ and the plugin's own SVG is only the fallback:
   (`g`, `rect`, `line`, `path`, `polygon`, `polyline`, `circle`, `ellipse`, `text`,
   `tspan`, `defs`, `marker`, `pattern`; `data-*` and `aria-*`; no `style`, `href`,
   `use`, `image`, `foreignObject` or handler), prefixes every id so that several
-  drawings share one document, sets the title, description, `role="img"` and the
-  `min-width` of the skill's output spec, and writes it back out. The drawing
+  drawings share one document, resolves the document's `<style>` into presentation
+  attributes (simple `.class` rules and `var(--x)` from `:root`; anything else
+  that styles the drawing is a problem, handled by the correction or the
+  fallback), drops every `class`, sets the title, description and `role="img"`,
+  scales the viewBox to the container (`width: 100%`; the job is asked for a
+  viewBox at most 1200 wide, the output spec's `doc-inline` preset, or `doc-wide`
+  when a three-panel delta needs it), and writes it back out. The reader allows
+  at most 64 levels of nesting and 6,000 elements and stops there, so a hostile
+  drawing is a problem, never a crash. The drawing
   is recorded in `report.json` (`diagrams`) so that `review.html` at the Answers
   stage embeds the same bytes.
 
@@ -926,8 +933,8 @@ deterministic check on the written bytes enforces this, for the embedded
 diagram SVGs too (an allow-list of elements and attributes, `data-*` and `aria-*`
 by prefix, no `href` outside `<a>`, no `url(` that leaves the document). Sections
 use `<details>`, so they collapse without JavaScript. A diagram sits inline in an
-`overflow-x: auto` wrapper with `min-width` its viewBox's width (the skill's
-output spec), so a narrow screen scrolls the diagram, not the page.
+`overflow-x: auto` wrapper and scales to the container width, so a three-panel
+Architecture delta shows whole on a page 1100 to 1400 pixels wide.
 
 **Contents, in order:**
 
