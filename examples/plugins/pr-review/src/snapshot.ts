@@ -3,7 +3,9 @@
 
 import type { EvidenceRecord, ExecutorPin } from "@graphloom/sdk";
 import { GET_PULL, LIST_CHECK_RUNS, LIST_PULL_COMMITS, LIST_PULL_FILES, LIST_PULL_REVIEWS, LIST_PULL_REVIEW_COMMENTS, LIST_REVIEW_THREADS } from "./constants.js";
+import { partitionAreas, type Partition } from "./areas.js";
 import { isObject, producer } from "./evidence.js";
+import { hardCapProblem, reportMode, type ReviewMode } from "./mode.js";
 import { parsePatch, type ParsedPatch } from "./patch.js";
 import type { Limits } from "./profile.js";
 import type { PullRequest } from "./request.js";
@@ -46,6 +48,10 @@ export interface Snapshot {
   reviewComments: unknown[];
   threads: unknown[];
   checks: Array<{ name: string; status: string | null; conclusion: string | null }>;
+  /** Standard, or large with the limits it passed (design §6.9). */
+  mode: ReviewMode;
+  /** In large mode, the areas the files partition into; recomputed from the files, never stored apart from them. */
+  partition?: Partition;
   /** Every evidence record the snapshot rests on. */
   refs: string[];
 }
@@ -134,7 +140,7 @@ export type SnapshotState =
  * whole snapshot, or why this pull request cannot be reported (head moved,
  * past a profile limit, touches `.graphloom/`).
  */
-export function snapshotState(evidence: readonly EvidenceRecord[], pr: PullRequest, limits: Limits): SnapshotState {
+export function snapshotState(evidence: readonly EvidenceRecord[], pr: PullRequest, limits: Limits, excludeRoots: readonly string[] = []): SnapshotState {
   const results = new Map<string, ReadResult>();
   for (const spec of READS) {
     const r = readResult(evidence, spec);
@@ -166,13 +172,10 @@ export function snapshotState(evidence: readonly EvidenceRecord[], pr: PullReque
     return { state: "incompatible", problem: `the pull request's head is ${pull.head.sha ?? "unknown"}, not the requested ${pr.head}: it moved after the task was prepared; prepare it again`, refs };
   }
   const files = results.get("files")!.items.map(pullFile).filter((f): f is PullFile => f !== undefined);
-  if (files.length > limits.maxFiles) {
-    return { state: "incompatible", problem: `the pull request changes ${files.length} files, past the profile's limits.maxFiles of ${limits.maxFiles}`, refs };
-  }
-  const bytes = files.reduce((n, f) => n + Buffer.byteLength(f.patch ?? "", "utf8"), 0);
-  if (bytes > limits.maxPatchBytes) {
-    return { state: "incompatible", problem: `the pull request's patches are ${bytes} bytes, past the profile's limits.maxPatchBytes of ${limits.maxPatchBytes}`, refs };
-  }
+  // Past a `max*` limit the pull request is reviewed in large mode; only the hard caps refuse it (design §6.9).
+  const refused = hardCapProblem(files, limits);
+  if (refused !== undefined) return { state: "incompatible", problem: refused, refs };
+  const mode = reportMode(files, limits);
   const graphloom = files.find((f) => f.path.startsWith(".graphloom/") || f.path === ".graphloom" || f.previousPath?.startsWith(".graphloom/") === true);
   if (graphloom !== undefined) {
     return { state: "incompatible", problem: `the pull request touches ${graphloom.path}: .graphloom/ holds this graph's own files and a pull request may not change it`, refs };
@@ -187,6 +190,8 @@ export function snapshotState(evidence: readonly EvidenceRecord[], pr: PullReque
       reviewComments: results.get("reviewComments")!.items,
       threads: results.get("threads")!.items,
       checks: results.get("checks")!.items.flatMap((c) => (isObject(c) && typeof c.name === "string" ? [{ name: c.name, status: str(c.status), conclusion: str(c.conclusion) }] : [])),
+      mode,
+      ...(mode.mode === "large" ? { partition: partitionAreas(files, limits, excludeRoots) } : {}),
       refs,
     },
   };

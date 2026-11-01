@@ -113,6 +113,8 @@ export interface Question {
 export interface QuestionInputs {
   view: ReportView;
   groundwork: Groundwork;
+  /** Large mode (design §7.6): the trio and the missing-test question are asked per change item, and the trio per new exported symbol. */
+  large?: boolean;
 }
 
 const short = (s: string, n = 90): string => (s.length <= n ? s : `${s.slice(0, n - 1)}…`);
@@ -144,6 +146,34 @@ export function survivors(r: MetricsRecord): Array<{ line: number; from: string;
   });
 }
 
+/** The most symbols an item-level question names; the rest are counted. */
+const MAX_NAMED = 40;
+
+/**
+ * The questions large mode asks per change item (design §7.6): the trio once about the mechanism the item adds, naming
+ * its new symbols, and one missing-test question listing every new or modified function of the item that no test in
+ * the pull request covers. An item that adds no symbol gets no trio.
+ */
+function itemQuestions(items: readonly ViewItem[], byItem: ReadonlyMap<string, readonly SymbolDef[]>, groundwork: Groundwork): RequiredQuestion[] {
+  const out: RequiredQuestion[] = [];
+  const named = (syms: readonly SymbolDef[]): string => `${syms.slice(0, MAX_NAMED).map((s) => `${s.qualified} (${s.path}:${s.startLine})`).join(", ")}${syms.length > MAX_NAMED ? `, and ${syms.length - MAX_NAMED} more` : ""}`;
+  for (const item of items) {
+    const syms = byItem.get(item.id) ?? [];
+    const added = syms.filter((s) => s.change === "new");
+    const what = short(item.text);
+    if (added.length > 0) {
+      out.push({ key: `existing-equivalent:item:${item.id}`, type: "existing-equivalent", item: item.id, text: `Does the codebase already have the same or an equivalent of the mechanism this change adds (${what})? It adds: ${named(added)}.` });
+      out.push({ key: `reuse-library:item:${item.id}`, type: "reuse-library", item: item.id, text: `Could an existing internal package or an already-declared third-party library do what the mechanism this change adds (${what}) does? It adds: ${named(added)}.` });
+      out.push({ key: `common-logic:item:${item.id}`, type: "common-logic", item: item.id, text: `Does the mechanism this change adds (${what}) duplicate logic elsewhere, in the base or in the pull request, that could become shared code? It adds: ${named(added)}.` });
+    }
+    const uncovered = syms.filter((s) => (groundwork.testMap.get(s.id) ?? []).length === 0 && s.kind !== "type" && s.kind !== "interface");
+    if (uncovered.length > 0) {
+      out.push({ key: `missing-test:item:${item.id}`, type: "missing-test", item: item.id, text: `Which tests cover these new or modified functions of this change (${what})? The test map found none in the pull request for: ${named(uncovered)}.` });
+    }
+  }
+  return out;
+}
+
 /** The required questions (design §7.1), in the order the Q&A shows them: by report item, then symbol, then type. */
 export function requiredQuestions(inp: QuestionInputs, stated: ReadonlyMap<string, PurposeRecord>): RequiredQuestion[] {
   const { view, groundwork } = inp;
@@ -153,19 +183,24 @@ export function requiredQuestions(inp: QuestionInputs, stated: ReadonlyMap<strin
     if (stated.get(item.id)?.status === "stated") continue;
     out.push({ key: `purpose:${item.id}`, type: "purpose", item: item.id, text: `What is the purpose of this change (${short(item.text)})? Nothing in the pull request's text, commit messages or linked issue states it.` });
   }
+  const large = inp.large === true;
+  const byItem = new Map<string, SymbolDef[]>();
   for (const sym of groundwork.symbols) {
     const item = itemOfSymbol(sym, items);
     if (item === undefined) continue;
+    byItem.set(item, [...(byItem.get(item) ?? []), sym]);
     const q = `${sym.qualified} (${sym.path}:${sym.startLine})`;
-    if (sym.change === "new") {
+    // In large mode a new symbol gets the trio only when it is exported; the others are listed in their item's question.
+    if (sym.change === "new" && (!large || sym.exported)) {
       out.push({ key: `existing-equivalent:${sym.id}`, type: "existing-equivalent", item, symbol: sym.id, text: `Does the codebase already have the same or an equivalent of ${q}?` });
       out.push({ key: `reuse-library:${sym.id}`, type: "reuse-library", item, symbol: sym.id, text: `Could an existing internal package or an already-declared third-party library do what ${q} does?` });
       out.push({ key: `common-logic:${sym.id}`, type: "common-logic", item, symbol: sym.id, text: `Does ${q} duplicate logic elsewhere, in the base or in the pull request, that could become shared code?` });
     }
-    if ((groundwork.testMap.get(sym.id) ?? []).length === 0 && sym.kind !== "type" && sym.kind !== "interface") {
+    if (!large && (groundwork.testMap.get(sym.id) ?? []).length === 0 && sym.kind !== "type" && sym.kind !== "interface") {
       out.push({ key: `missing-test:${sym.id}`, type: "missing-test", item, symbol: sym.id, text: `Which test covers ${q}? The test map found none in the pull request.` });
     }
   }
+  if (large) out.push(...itemQuestions(items, byItem, groundwork));
   for (const r of view.records) {
     if (r.test) continue;
     const sym = symbolOfRecord(r, groundwork.symbols);
@@ -230,7 +265,9 @@ export function questionerProblems(output: QuestionerOutput, view: ReportView, g
     if (!items.has(q.item)) problems.push(`${at}: ${JSON.stringify(q.item)} is not a report item id`);
     if (q.symbol !== "" && !symbols.has(q.symbol)) problems.push(`${at}: ${JSON.stringify(q.symbol)} is not a symbol id`);
     if (q.text.trim() === "") problems.push(`${at}: the text is empty`);
-    if (q.text.length > MAX_QUESTION_CHARS) problems.push(`${at}: the text is ${q.text.length} characters, more than ${MAX_QUESTION_CHARS}`);
+    // A required question's own wording may be longer than a question the questioner adds (large mode names the symbols of an item), and its phrasing may be as long.
+    const limit = Math.max(MAX_QUESTION_CHARS, q.key !== "" ? (required.find((r) => r.key === q.key)?.text.length ?? 0) : 0);
+    if (q.text.length > limit) problems.push(`${at}: the text is ${q.text.length} characters, more than ${limit}`);
     if (q.key !== "") {
       if (!keys.has(q.key)) problems.push(`${at}: the key ${JSON.stringify(q.key)} names no required question (leave key empty for a question you add)`);
       else if (seen.has(q.key)) problems.push(`${at}: the required question ${q.key} appears twice`);

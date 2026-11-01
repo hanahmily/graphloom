@@ -26,7 +26,7 @@ import {
   type ValidationResult,
   type ValidatorBinding,
 } from "@graphloom/sdk";
-import { analyze, type Analysis } from "./analysis.js";
+import { analyze, reportFlowOf, type Analysis } from "./analysis.js";
 import { checkoutCommand, GIT_ENV, GUARD_REFUSED, guardCommand, headTreeCommand, ledgerReadCommand, pinnedBase, reviewDirCommand } from "./commands.js";
 import {
   ANSWERER_JOB,
@@ -38,6 +38,7 @@ import {
   FETCH_STAGE,
   LEDGER_MOVED,
   NECESSITY_JSON,
+  QUESTION_BATCH_SIZE,
   QUESTIONER_JOB,
   QUESTIONS_STAGE,
   REPORTER_JOB,
@@ -61,10 +62,13 @@ import { commandRuns, describeCommand, environmentOutput, outputTail, succeeded,
 import { LIMITS } from "./metrics/crap.js";
 import { CHANGE_REPORT_SCHEMA } from "./report.js";
 import { CLAIM_CHECK_SCHEMA, claimTargets } from "./claims.js";
-import { REPORTER_SCHEMA_NAME, REVISION_SCHEMA_NAME, reportFlow } from "./flow.js";
+import { REPORTER_SCHEMA_NAME, REVISION_SCHEMA_NAME, type ReportFlow } from "./flow.js";
+import { areaContext, areaJobId, areaRecordId, budgetShortfall, CHANGE_SYNTHESIS_SCHEMA, largeNeeds, recordJson, SYNTHESIS_JOB, SYNTHESIS_RECORD, SYNTHESIS_REVISION_SCHEMA_NAME, SYNTHESIS_SCHEMA_NAME, synthesisTargets } from "./large.js";
+import { areaScope, synthesisInstruction, synthesisScope } from "./largeprompts.js";
 import { measurementState, metricsDiffCommand, staticBaseCommand, staticCommand } from "./measurements.js";
 import { coverageCommand, coverageConfinement, missingProbe, sandboxEnvironmentChecks, type CoveragePlan } from "./coverage.js";
 import { checkerInstruction, reporterInstruction } from "./prompts.js";
+import { isLarge } from "./mode.js";
 import { harnessName, parseProfile, ProfileError, ROLES, DISTINCT_PAIRS, type Profile, type Role } from "./profile.js";
 import { prepareTask } from "./prepare.js";
 import { requestedPull, type PullRequest } from "./request.js";
@@ -72,7 +76,7 @@ import { secretFindings } from "./secrets.js";
 import { readInput, snapshotState, type PullFile, type ReadSpec } from "./snapshot.js";
 import { CLAIM_CHECK_SCHEMA_NAME } from "./claims.js";
 import { outputsOf, validatorById } from "./validators.js";
-import { reportWriteCommand, writtenQa, writtenReport } from "./write.js";
+import { recordCommand, reportWriteCommand, writtenQa, writtenReport } from "./write.js";
 import { ANSWER_CHECK_REFERENCES, ANSWER_CHECK_SCHEMA, ANSWER_CHECK_SCHEMA_NAME, ANSWERS_REFERENCES, ANSWERS_REVISION_SCHEMA_NAME, ANSWERS_SCHEMA, ANSWERS_SCHEMA_NAME, answersFlow } from "./answers.js";
 import { baseDirIn } from "./basetree.js";
 import { sourceDirs } from "./inventory.js";
@@ -82,7 +86,7 @@ import { CLAIM_CHECK_REFERENCES } from "./claims.js";
 import { necessityQuestion, NECESSITY_ID, NECESSITY_REFERENCES, NECESSITY_REVISION_SCHEMA_NAME, NECESSITY_SCHEMA, NECESSITY_SCHEMA_NAME, type NecessityRecord } from "./necessity.js";
 import { principlesReadCommand, type Principle } from "./principles.js";
 import { answerCheckerInstruction, answererInstruction, necessityCheckerInstruction, necessityInstruction, questionerInstruction } from "./qaprompts.js";
-import { afterNecessity, answerContext, answerWrites, necessityFlow, necessityRecordCommand, necessityRecordOf, qaContext, qaOutputs, questionSet, questionerFlow, recordedNecessity, type QaContext } from "./qaflow.js";
+import { afterNecessity, answerBatches, answerContext, batchedAnswers, batchRecordId, batchRecordJson, answerWrites, necessityFlow, necessityRecordCommand, necessityRecordOf, qaContext, qaOutputs, questionSet, questionerFlow, recordedNecessity, type QaContext } from "./qaflow.js";
 
 export { GRAPH_ID, GRAPH_VERSION };
 
@@ -125,7 +129,7 @@ export function definitionFor(profile: Profile): GraphDefinition {
   const requirements: Requirement[] = [
     {
       id: REQUIREMENT_SNAPSHOT,
-      statement: `The pull request's metadata, every changed file with its patch, every commit, review, review comment and review thread (with resolution), and the head's check runs were read completely from GitHub for the one head the request names. It has at most ${profile.limits.maxFiles} files and ${profile.limits.maxPatchBytes} bytes of patch, and touches nothing under .graphloom/.`,
+      statement: `The pull request's metadata, every changed file with its patch, every commit, review, review comment and review thread (with resolution), and the head's check runs were read completely from GitHub for the one head the request names. It has at most ${profile.limits.hardMaxFiles} files and ${profile.limits.hardMaxPatchBytes} bytes of patch (past them it is refused). Over ${profile.limits.maxFiles} files or ${profile.limits.maxPatchBytes} bytes of patch it is reviewed in large mode, which is recorded with the limit passed and its value, and its changed files are partitioned into areas by a deterministic rule (by first path segment; a group over ${profile.limits.areaMaxBytes} bytes of patch splits by its next segment, or into runs of files by path; sibling groups under ${profile.limits.areaMinBytes} bytes merge; files under the profile's excludeRoots form the generated area) that is recomputed from the files; a file for which the host gave no patch is recorded as such, never a failure. It touches nothing under .graphloom/.`,
       evidenceSchema: "github-read-v1",
     },
     {
@@ -140,7 +144,7 @@ export function definitionFor(profile: Profile): GraphDefinition {
     },
     {
       id: REQUIREMENT_REPORT,
-      statement: `Every template section is present, with cited items or an explicit None. Every citation lies inside the pull request's diff on the side it names. Every changed file (a renamed file under both names, a deleted file too) and every detector fact is cited, and no item carries a severity, finding or verdict (the result contract has no such field). report.json and ${REVIEW_MD} hold exactly that report.`,
+      statement: `Every template section is present, with cited items or an explicit None. Every citation lies inside the pull request's diff on the side it names. Every changed file (a renamed file under both names, a deleted file too) and every detector fact is cited, and no item carries a severity, finding or verdict (the result contract has no such field). report.json and ${REVIEW_MD} hold exactly that report, with the mode (standard, or large with the limits passed) in report.json and in the header of ${REVIEW_MD}. In large mode (a pull request over the profile's maxFiles or maxPatchBytes) the report is built from its areas: one reporter job in a fresh read-only session for each area, which reports that area's files only with an empty summary and passes the same deterministic validation (with its corrections) as a standard report over its own files; one synthesis job (change-synthesis-v1, the reporter harness, a fresh session) that writes the purpose and overview and joins the items that are one change across areas (a merged item stays in one section, joins items of at least two areas, and its citations, lifecycle entries and before/after rows are the union of its members'); the files no agent read as patches (the generated area, a file for which the host gave no patch) are listed in "other" with their diffstat and the reason; every checked area and the synthesis are recorded as evidence (area-record-<id>, synthesis-record) that recomputes; and the items are numbered R1 onward after the merges, in section order. Before its first area reporter job the graph computes what large mode needs of the run's agent invocations, jobs and decisions and stops with those numbers when the remaining budgets cannot cover them.`,
       evidenceSchema: "change-report-v1",
     },
     {
@@ -150,22 +154,22 @@ export function definitionFor(profile: Profile): GraphDefinition {
     },
     {
       id: REQUIREMENT_CLAIMS,
-      statement: `An independent ${checker} report checker, on a harness other than the reporter's, judged every report item against the diff, and every item left is supported with quotes that match the diff's text. An item that was not supported after one revision is removed and recorded, and its file is accounted for in "other".`,
+      statement: `An independent ${checker} report checker, on a harness other than the reporter's, judged every report item against the diff, and every item left is supported with quotes that match the diff's text. An item that was not supported after one revision is removed and recorded, and its file is accounted for in "other". In large mode this holds for every area (each checked in a fresh session of its own, over its own files) and a further independent check of the synthesis judges its purpose, its overview and each merge in one job: a merge it does not support after one revision is not applied (its items stay separate) and is recorded, a purpose or overview it does not support is removed and recorded.`,
       evidenceSchema: CLAIM_CHECK_SCHEMA_NAME,
     },
     {
       id: REQUIREMENT_QUESTIONS,
-      statement: `The necessity question N1 was asked first, before every other question: is the problem real on the base (the claimed problem quoted from the pull request's text, the base behavior traced through the base code with path:line citations, a failing test on the base optional and not available in this version), does the fix fit the system's design (the repository's design and architecture documents${profile.questions.designDocs.length > 0 ? ` (${profile.questions.designDocs.join(", ")})` : ""} and code comments searched, the design statement and the changed lines cited, and whether the change preserves or breaks them said)${principlesText(profile)}, and is there a simpler or existing way; it concludes necessary, questionable, unnecessary or needs author, in one line. An independent ${harnessName(profile.roles["answer-checker"])} answer checker verified each cited design statement, each trace step${profile.questions.principles !== undefined ? ", each principle verdict" : ""} and the conclusion, with searches of its own, and N1's checked answer and the decision it led to${profile.questions.principles !== undefined ? " (with the principles file's path, ref, commit and the verdicts)" : ""} are recorded in necessity.json. When N1 concludes unnecessary and the checker supports it, and the operator did not ask for every question, no other question is asked and the skip is recorded (only N1 is required). Otherwise every required question was asked: purpose for each change item whose purpose the pull request's text does not state (a stated purpose is recorded with a quote that matches that text instead), existing-equivalent, reuse-library and common-logic for each new symbol, missing-test for each new or modified symbol the test map finds no covering test for, split-function for each changed function with complexity of ${LIMITS.complexity} or more or nesting over ${LIMITS.nesting}, complexity-coverage for each function with measured coverage and CRAP of ${LIMITS.crap} or more or with unknown coverage and complexity of ${LIMITS.complexity} or more (an upper-bound CRAP alone asks nothing), and weak-test for each surviving mutant (none in this version: mutation testing arrives later). The groundwork behind them (symbols from the language packs, whole-repository searches over the pinned base commit, similarity, the dependency inventory, the test map) was read by read-only commands, and every changed function has a measurement record.`,
+      statement: `The necessity question N1 was asked first, before every other question: is the problem real on the base (the claimed problem quoted from the pull request's text, the base behavior traced through the base code with path:line citations, a failing test on the base optional and not available in this version), does the fix fit the system's design (the repository's design and architecture documents${profile.questions.designDocs.length > 0 ? ` (${profile.questions.designDocs.join(", ")})` : ""} and code comments searched, the design statement and the changed lines cited, and whether the change preserves or breaks them said)${principlesText(profile)}, and is there a simpler or existing way; it concludes necessary, questionable, unnecessary or needs author, in one line. An independent ${harnessName(profile.roles["answer-checker"])} answer checker verified each cited design statement, each trace step${profile.questions.principles !== undefined ? ", each principle verdict" : ""} and the conclusion, with searches of its own, and N1's checked answer and the decision it led to${profile.questions.principles !== undefined ? " (with the principles file's path, ref, commit and the verdicts)" : ""} are recorded in necessity.json. When N1 concludes unnecessary and the checker supports it, and the operator did not ask for every question, no other question is asked and the skip is recorded (only N1 is required). Otherwise every required question was asked: purpose for each change item whose purpose the pull request's text does not state (a stated purpose is recorded with a quote that matches that text instead), existing-equivalent, reuse-library and common-logic for each new symbol, missing-test for each new or modified symbol the test map finds no covering test for, split-function for each changed function with complexity of ${LIMITS.complexity} or more or nesting over ${LIMITS.nesting}, complexity-coverage for each function with measured coverage and CRAP of ${LIMITS.crap} or more or with unknown coverage and complexity of ${LIMITS.complexity} or more (an upper-bound CRAP alone asks nothing), and weak-test for each surviving mutant (none in this version: mutation testing arrives later). The groundwork behind them (symbols from the language packs, whole-repository searches over the pinned base commit, similarity, the dependency inventory, the test map) was read by read-only commands, and every changed function has a measurement record. In large mode (the report is large, or the pull request adds more than ${profile.limits.maxNewSymbols} new symbols; it is refused past ${profile.limits.hardMaxNewSymbols}) the required questions follow the large-mode rules, recorded in qa.json: purpose, split-function, complexity-coverage and weak-test are unchanged; existing-equivalent, reuse-library and common-logic are required once for each change item that adds a symbol (about the mechanism it adds, naming the item's new symbols) and once for each new exported symbol (a Go identifier starting with an upper-case letter; a TypeScript symbol that is exported), and a new unexported symbol gets none of the three on its own, only its mention in its item's question; missing-test is required once for each change item, listing every new or modified function of the item that the test map finds no covering test for.`,
       evidenceSchema: QUESTIONS_SCHEMA_NAME,
     },
     {
       id: REQUIREMENT_ANSWERS,
-      statement: `N1 has its recorded answer first (when it is the only question, because it concluded unnecessary and the checker supports it, the Q&A says the remaining questions were skipped). Every other question has an answer from the ${harnessName(profile.roles.answerer)} answerer with evidence (citations that resolve in the tree they name, the searches run with their results, inventory entries) and a status of answered, partially answered or needs author. Every "none found" answer lists its whole-repository searches. Every cited metric equals its measurement record. Every proposal's line ranges lie inside its function and its names are new to the package. ${QA_JSON} and ${REVIEW_MD} are written, and the pull request's ledger ref was advanced by compare-and-swap from the value Fetch read with this head's report.json and qa.json.`,
+      statement: `N1 has its recorded answer first (when it is the only question, because it concluded unnecessary and the checker supports it, the Q&A says the remaining questions were skipped). Every other question has an answer from the ${harnessName(profile.roles.answerer)} answerer with evidence (citations that resolve in the tree they name, the searches run with their results, inventory entries) and a status of answered, partially answered or needs author. Every "none found" answer lists its whole-repository searches. Every cited metric equals its measurement record. Every proposal's line ranges lie inside its function and its names are new to the package. ${QA_JSON} and ${REVIEW_MD} are written, and the pull request's ledger ref was advanced by compare-and-swap from the value Fetch read with this head's report.json and qa.json. In large mode the answerer answers the questions in batches of at most ${QUESTION_BATCH_SIZE} (the questions of a few change items per job), continuing its own session from one batch to the next; each answered batch passes the same deterministic checks and citation verification as the standard answers and is recorded as evidence (answers-record-<n>) that recomputes; ${QA_JSON} and ${REVIEW_MD} are written once, after the last batch.`,
       evidenceSchema: ANSWERS_SCHEMA_NAME,
     },
     {
       id: REQUIREMENT_GROUNDED,
-      statement: `An independent ${harnessName(profile.roles["answer-checker"])} answer checker, on a harness other than the answerer's, re-checked every cited equivalent, library, duplicate and covering test, and every "none found" claim with searches of its own, against the trees, and had verified N1's cited design statements, trace steps${profile.questions.principles !== undefined ? ", principle verdicts" : ""} and conclusion. Every answer left is supported or partial; an answer still unsupported after one correction is needs author, with both statements recorded (for N1, its conclusion becomes questionable and every question is asked).`,
+      statement: `An independent ${harnessName(profile.roles["answer-checker"])} answer checker, on a harness other than the answerer's, re-checked every cited equivalent, library, duplicate and covering test, and every "none found" claim with searches of its own, against the trees, and had verified N1's cited design statements, trace steps${profile.questions.principles !== undefined ? ", principle verdicts" : ""} and conclusion. Every answer left is supported or partial; an answer still unsupported after one correction is needs author, with both statements recorded (for N1, its conclusion becomes questionable and every question is asked). In large mode each batch of answers is checked by its own answer checker job in a fresh session, with the same correction and downgrade rules.`,
       evidenceSchema: ANSWER_CHECK_SCHEMA_NAME,
     },
   ];
@@ -188,6 +192,9 @@ export function definitionFor(profile: Profile): GraphDefinition {
     resultContracts: [
       { name: REPORTER_SCHEMA_NAME, schema: asSchema(CHANGE_REPORT_SCHEMA), evidenceKind: "other" },
       { name: REVISION_SCHEMA_NAME, schema: asSchema(CHANGE_REPORT_SCHEMA), evidenceKind: "other" },
+      // Large mode (design §6.9): the synthesis of the areas' reports, and its revision after the claim check.
+      { name: SYNTHESIS_SCHEMA_NAME, schema: asSchema(CHANGE_SYNTHESIS_SCHEMA), evidenceKind: "other" },
+      { name: SYNTHESIS_REVISION_SCHEMA_NAME, schema: asSchema(CHANGE_SYNTHESIS_SCHEMA), evidenceKind: "other" },
       // Kind "review": the claims-checked requirement is judged by an independent reviewer, and the controller
       // admits one only from the review evidence of a read-only review job.
       { name: CLAIM_CHECK_SCHEMA_NAME, schema: asSchema(CLAIM_CHECK_SCHEMA), evidenceKind: "review", references: [...CLAIM_CHECK_REFERENCES] },
@@ -361,7 +368,7 @@ function fetch(ctx: Context, view: RunView): GraphDecision {
     };
     return withPrivate(dispatch(job, `check out head ${pr.head.slice(0, 12)} over the pinned merge base`));
   }
-  const s = snapshotState(view.evidence, pr, profile.limits);
+  const s = snapshotState(view.evidence, pr, profile.limits, profile.questions.excludeRoots);
   if (s.state === "reading") return withPrivate(dispatch(githubJob(s.next, readInput(s.next, pr, s.cursor)), s.why));
   if (s.state === "incompatible") return stop({ reason: "incompatible task", blocker: s.problem, evidenceRefs: s.refs.slice(-10), retryable: false }, "stop: this pull request cannot be reported");
   const ledger = commandState(view, COMMAND.ledger);
@@ -520,7 +527,7 @@ function report(ctx: Context, view: RunView): GraphDecision {
     return supervise({ reason: a.state === "pending" ? `the report stage lost the pull request snapshot: ${a.reason}` : a.problem }, "escalate a missing snapshot");
   }
   const { analysis } = a;
-  const flow = reportFlow(view.evidence, analysis.ctx);
+  const flow = reportFlowOf(view.evidence, analysis);
   switch (flow.state) {
     case "supervise":
       return supervise({ reason: flow.reason, evidenceRefs: flow.refs }, "hand the unresolved report to the supervisor");
@@ -542,7 +549,71 @@ function report(ctx: Context, view: RunView): GraphDecision {
     }
     case "done":
       return measureAndWrite(ctx, view, analysis, flow);
+    case "area": {
+      // Before the first reporter job: stop with the numbers when the run's budgets cannot cover large mode (design §6.9).
+      if (flow.index === 0 && flow.kind === "first") {
+        const short = budgetShortfall(largeNeeds(analysis.snapshot.partition!.areas.filter((x) => x.kind === "read").length), view.budgets);
+        if (short !== undefined) return stop({ reason: "budgets exhausted", blocker: short, retryable: false }, "stop before the first area reporter: the run's budgets cannot cover large mode");
+      }
+      const actx = areaContext(analysis.ctx, flow.area);
+      const mine = new Set(flow.area.paths);
+      const others = analysis.snapshot.files.filter((f) => !mine.has(f.path));
+      const assignment = reporterInstruction({
+        pr,
+        snapshot: { ...analysis.snapshot, files: [...actx.files] },
+        sections: analysis.sections,
+        facts: actx.facts,
+        candidates: actx.candidates ?? [],
+        kind: flow.kind,
+        feedback: flow.feedback,
+        area: { id: flow.area.id, name: flow.area.name, others, totalFiles: analysis.snapshot.files.length },
+      });
+      // A fresh session for each area; its own corrections and revision continue it.
+      const from = flow.kind === "first" ? undefined : jobSession(view, REPORT_STAGE, areaJobId(flow.area.id));
+      const job = agentJob(ctx, view, { jobId: areaJobId(flow.area.id), purpose: "diagnostic", instruction: `Write the change report of area ${flow.area.id} (${flow.area.name})`, schema: flow.schema, harness: profile.roles.reporter, role: "reporter", assignment, ...(from !== undefined ? { continueFrom: from } : {}) }, analysis.snapshot.files);
+      if ("problem" in job) return refused(job);
+      const why = { first: `write the change report of area ${flow.area.id} (read-only, confined, a fresh session)`, correction: `correct area ${flow.area.id}'s report: deterministic validation found problems`, revision: `revise area ${flow.area.id}'s report: the claim check did not support some items` }[flow.kind];
+      return dispatchAgent(view, job, why);
+    }
+    case "area-checker": {
+      const actx = areaContext(analysis.ctx, flow.area);
+      const targets = claimTargets(flow.report, actx, { summary: false });
+      const assignment = checkerInstruction({ pr, snapshot: analysis.snapshot, report: flow.report, targets, retry: flow.retry, scope: areaScope(flow.area) });
+      const references = idRefs({ [CLAIM_CHECK_REFERENCES[0]!]: idSet(targets.map((t) => t.id), (id) => oneLineText(targets.find((t) => t.id === id)?.text ?? "").slice(0, 300)) });
+      const job = agentJob(ctx, view, { purpose: "review", instruction: `Check the claims of area ${flow.area.id}'s report against the diff`, schema: CLAIM_CHECK_SCHEMA_NAME, harness: profile.roles["report-checker"], role: "report-checker", assignment, references }, analysis.snapshot.files);
+      if ("problem" in job) return refused(job);
+      return dispatchAgent(view, job, `check every item of area ${flow.area.id}'s report with a fresh read-only ${harnessName(profile.roles["report-checker"])} session`);
+    }
+    case "area-record":
+      return recordStep(view, REPORT_STAGE, areaRecordId(flow.area.id), recordCommand(areaRecordId(flow.area.id), "areas", recordJson(flow.record)), `area ${flow.area.id}'s checked report`);
+    case "synthesis": {
+      const assignment = synthesisInstruction({ pr, snapshot: analysis.snapshot, areas: analysis.snapshot.partition!.areas, items: flow.items, kind: flow.kind, feedback: flow.feedback });
+      const from = flow.kind === "first" ? undefined : jobSession(view, REPORT_STAGE, SYNTHESIS_JOB);
+      const job = agentJob(ctx, view, { jobId: SYNTHESIS_JOB, purpose: "diagnostic", instruction: "Write the summary of the large pull request and join the items that span areas", schema: flow.schema, harness: profile.roles.reporter, role: "reporter", assignment, ...(from !== undefined ? { continueFrom: from } : {}) }, analysis.snapshot.files);
+      if ("problem" in job) return refused(job);
+      const why = { first: "synthesize the report of the areas: the summary and the merges (read-only, confined, a fresh session)", correction: "correct the synthesis: deterministic validation found problems", revision: "revise the synthesis: the claim check did not support some claims" }[flow.kind];
+      return dispatchAgent(view, job, why);
+    }
+    case "synthesis-checker": {
+      const targets = synthesisTargets(flow.output, flow.items);
+      const assignment = checkerInstruction({ pr, snapshot: analysis.snapshot, report: { purpose: flow.output.purpose, overview: flow.output.overview, sections: [], notes: [] }, targets, retry: flow.retry, scope: synthesisScope() });
+      const references = idRefs({ [CLAIM_CHECK_REFERENCES[0]!]: idSet(targets.map((t) => t.id), (id) => oneLineText(targets.find((t) => t.id === id)?.text ?? "").slice(0, 300)) });
+      const job = agentJob(ctx, view, { purpose: "review", instruction: "Check the synthesis' claims (summary and merges) against the diff", schema: CLAIM_CHECK_SCHEMA_NAME, harness: profile.roles["report-checker"], role: "report-checker", assignment, references }, analysis.snapshot.files);
+      if ("problem" in job) return refused(job);
+      return dispatchAgent(view, job, `check the synthesis' purpose, overview and merges with a fresh read-only ${harnessName(profile.roles["report-checker"])} session`);
+    }
+    case "synthesis-record":
+      return recordStep(view, REPORT_STAGE, SYNTHESIS_RECORD, recordCommand(SYNTHESIS_RECORD, "areas", recordJson(flow.record)), "the checked synthesis");
   }
+}
+
+/** Records a checked step of a large run as evidence (an area, the synthesis, an answered batch): written once, and a record that keeps failing goes to the supervisor. */
+function recordStep(view: RunView, stageId: string, id: string, command: EnvironmentCommand | undefined, what: string): GraphDecision {
+  if (command === undefined) return stop({ reason: "incompatible task", blocker: `${what} is too large for one write command`, retryable: false }, `stop: ${what} does not fit one command`);
+  const st = commandState(view, id);
+  if (st.failed && !st.retry && st.run !== undefined) return supervise({ reason: `recording ${what} failed: ${describeCommand(st.run.command)}: ${outputTail(st.run.command)}`, evidenceRefs: [st.run.record.ref] }, `escalate a failed record of ${what}`);
+  if (commandRuns(view.evidence, id).length >= 4) return supervise({ reason: `the record of ${what} keeps failing` }, `escalate a record that does not settle`);
+  return withPrivate(dispatch(commandJob(stageId, `Record ${what} as evidence`, { commands: [command] }), `record ${what} as evidence, so a later review cannot supersede it`));
 }
 
 /** Where a tool of the confined static job lives: the plugin's directory, and the Go and Node installations under a hidden home. */
@@ -557,7 +628,7 @@ function toolBinds(view: RunView, batches: ReadonlyArray<{ language: string }>):
   return binds;
 }
 
-function measureAndWrite(ctx: Context, view: RunView, analysis: Analysis, flow: Extract<ReturnType<typeof reportFlow>, { state: "done" }>): GraphDecision {
+function measureAndWrite(ctx: Context, view: RunView, analysis: Analysis, flow: Extract<ReportFlow, { state: "done" }>): GraphDecision {
   const { profile, pr } = ctx;
   const m = measurementState(view.evidence, analysis.snapshot.files, profile, retryOf(view));
   switch (m.state) {
@@ -715,7 +786,7 @@ function questions(ctx: Context, view: RunView): GraphDecision {
     case "supervise":
       return supervise({ reason: flow.reason, evidenceRefs: flow.refs }, "hand the unresolved questions to the supervisor");
     case "questioner": {
-      const required = requiredQuestions({ view: c.ctx.view, groundwork: c.ctx.groundwork }, new Map());
+      const required = requiredQuestions({ view: c.ctx.view, groundwork: c.ctx.groundwork, large: isLarge(c.ctx.mode) }, new Map());
       const baseDir = baseTreeDir(view, c.ctx.groundwork);
       const assignment = questionerInstruction({ pr, snapshot: c.ctx.analysis.snapshot, view: c.ctx.view, groundwork: c.ctx.groundwork, required, feedback: flow.feedback, kind: flow.kind, ...(baseDir !== undefined ? { baseDir } : {}) });
       const from = flow.kind === "first" ? undefined : jobSession(view, QUESTIONS_STAGE, QUESTIONER_JOB);
@@ -752,37 +823,59 @@ function answers(ctx: Context, view: RunView): GraphDecision {
   // A confirmed unnecessary N1 is the only question: nothing else is answered or checked.
   if (skipped) return writeAnswers(ctx, view, c.ctx, set, [rec.record.final], rec.record);
   const rest = afterNecessity(set);
-  const actx = answerContext(c.ctx, rest);
-  const flow = answersFlow(view.evidence, actx, c.ctx.base, retryOf(view));
-  const files = c.ctx.analysis.snapshot.files;
+  // Large mode (design §7.6): the answerer takes the questions in batches, and each answered batch is recorded as evidence.
+  if (isLarge(c.ctx.mode)) {
+    const b = batchedAnswers(view.evidence, c.ctx, rest, retryOf(view));
+    switch (b.state) {
+      case "supervise":
+        return supervise({ reason: b.reason, evidenceRefs: b.refs }, "hand the unresolved answers to the supervisor");
+      case "record": {
+        const id = batchRecordId(b.index);
+        return recordStep(view, ANSWERS_STAGE, id, recordCommand(id, "answers", batchRecordJson(b.record)), `answer batch ${b.index + 1}`);
+      }
+      case "done":
+        return writeAnswers(ctx, view, c.ctx, set, [rec.record.final, ...b.final], rec.record);
+      case "batch":
+        // qa.json and review.md are written once, after the last batch.
+        return answerStep(ctx, view, c.ctx, b.questions, b.flow, { continueFirst: b.index > 0, batch: `batch ${b.index + 1} of ${b.total}` });
+    }
+  }
+  const flow = answersFlow(view.evidence, answerContext(c.ctx, rest), c.ctx.base, retryOf(view));
+  if (flow.state === "done") return writeAnswers(ctx, view, c.ctx, set, [rec.record.final, ...flow.final], rec.record);
+  return answerStep(ctx, view, c.ctx, rest, flow, { continueFirst: false });
+}
+
+/** The agent or command job an answers flow asks for: the answerer, the citation check, or the answer checker. In large mode `questions` is one batch. */
+function answerStep(ctx: Context, view: RunView, c: QaContext, rest: readonly Question[], flow: Exclude<ReturnType<typeof answersFlow>, { state: "done" }>, opts: { continueFirst: boolean; batch?: string }): GraphDecision {
+  const { profile, pr } = ctx;
+  const files = c.analysis.snapshot.files;
+  const of = opts.batch !== undefined ? ` (${opts.batch})` : "";
   switch (flow.state) {
     case "supervise":
       return supervise({ reason: flow.reason, evidenceRefs: flow.refs }, "hand the unresolved answers to the supervisor");
     case "answerer": {
-      const mounted = sourceDirs(c.ctx.groundwork.inventory);
-      const baseDir = baseTreeDir(view, c.ctx.groundwork);
-      const assignment = answererInstruction({ pr, snapshot: c.ctx.analysis.snapshot, view: c.ctx.view, groundwork: c.ctx.groundwork, questions: rest, kind: flow.kind, feedback: flow.feedback, ...(flow.only !== undefined ? { only: flow.only } : {}), mountedDirs: mounted, ...(baseDir !== undefined ? { baseDir } : {}) });
-      const from = flow.kind === "first" ? undefined : jobSession(view, ANSWERS_STAGE, ANSWERER_JOB);
+      const mounted = sourceDirs(c.groundwork.inventory);
+      const baseDir = baseTreeDir(view, c.groundwork);
+      const assignment = answererInstruction({ pr, snapshot: c.analysis.snapshot, view: c.view, groundwork: c.groundwork, questions: rest, kind: flow.kind, feedback: flow.feedback, ...(flow.only !== undefined ? { only: flow.only } : {}), mountedDirs: mounted, ...(baseDir !== undefined ? { baseDir } : {}) });
+      const from = flow.kind === "first" && !opts.continueFirst ? undefined : jobSession(view, ANSWERS_STAGE, ANSWERER_JOB);
       // Untrusted-read confinement, with the dependency source mounted read-only (design §7.3).
       const references = questionRefs(ANSWERS_REFERENCES[0]!, flow.only !== undefined ? rest.filter((q) => flow.only!.includes(q.id)) : rest);
-      const job = agentJob(ctx, view, { jobId: ANSWERER_JOB, stageId: ANSWERS_STAGE, purpose: "diagnostic", instruction: "Answer the questions from the whole codebase", schema: flow.schema, harness: profile.roles.answerer, role: "answerer", assignment, readOnlyBinds: mounted, references, ...(from !== undefined ? { continueFrom: from } : {}) }, files);
+      const job = agentJob(ctx, view, { jobId: ANSWERER_JOB, stageId: ANSWERS_STAGE, purpose: "diagnostic", instruction: `Answer the questions${of} from the whole codebase`, schema: flow.schema, harness: profile.roles.answerer, role: "answerer", assignment, readOnlyBinds: mounted, references, ...(from !== undefined ? { continueFrom: from } : {}) }, files);
       if ("problem" in job) return refused(job);
-      const why = { first: "answer the questions (read-only, confined, dependency source mounted read-only)", correction: "correct the answers: deterministic validation found problems", revision: "revise the answers: the answer checker did not support some" }[flow.kind];
+      const why = { first: `answer the questions${of} (read-only, confined, dependency source mounted read-only)`, correction: "correct the answers: deterministic validation found problems", revision: "revise the answers: the answer checker did not support some" }[flow.kind];
       return dispatchAgent(view, job, why);
     }
     case "verify":
       return withPrivate(dispatch(commandJob(ANSWERS_STAGE, "Check the answers' citations and proposed names against the trees", { commands: flow.commands.slice(0, 16), env: { ...GIT_ENV } }), "resolve each citation in the tree it names, and each proposed name in the package"));
     case "checker": {
-      const mounted = sourceDirs(c.ctx.groundwork.inventory);
-      const baseDir = baseTreeDir(view, c.ctx.groundwork);
-      const assignment = answerCheckerInstruction({ pr, snapshot: c.ctx.analysis.snapshot, groundwork: c.ctx.groundwork, questions: rest, answers: flow.answers, retry: flow.retry, mountedDirs: mounted, ...(baseDir !== undefined ? { baseDir } : {}) });
+      const mounted = sourceDirs(c.groundwork.inventory);
+      const baseDir = baseTreeDir(view, c.groundwork);
+      const assignment = answerCheckerInstruction({ pr, snapshot: c.analysis.snapshot, groundwork: c.groundwork, questions: rest, answers: flow.answers, retry: flow.retry, mountedDirs: mounted, ...(baseDir !== undefined ? { baseDir } : {}) });
       // The same dependency source, read-only, so a library or dependency citation can be re-checked where it points.
-      const job = agentJob(ctx, view, { stageId: ANSWERS_STAGE, purpose: "review", instruction: "Check the answers against the trees", schema: ANSWER_CHECK_SCHEMA_NAME, harness: profile.roles["answer-checker"], role: "answer-checker", assignment, readOnlyBinds: mounted, references: questionRefs(ANSWER_CHECK_REFERENCES[0]!, rest) }, files);
+      const job = agentJob(ctx, view, { stageId: ANSWERS_STAGE, purpose: "review", instruction: `Check the answers${of} against the trees`, schema: ANSWER_CHECK_SCHEMA_NAME, harness: profile.roles["answer-checker"], role: "answer-checker", assignment, readOnlyBinds: mounted, references: questionRefs(ANSWER_CHECK_REFERENCES[0]!, rest) }, files);
       if ("problem" in job) return refused(job);
-      return dispatchAgent(view, job, `check every answer with a fresh read-only ${harnessName(profile.roles["answer-checker"])} session`);
+      return dispatchAgent(view, job, `check every answer${of} with a fresh read-only ${harnessName(profile.roles["answer-checker"])} session`);
     }
-    case "done":
-      return writeAnswers(ctx, view, c.ctx, set, [rec.record.final, ...flow.final], rec.record);
   }
 }
 

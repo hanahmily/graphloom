@@ -2,18 +2,19 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 import type { EvidenceRecord, ValidationInput, ValidationResult, Validator } from "@graphloom/sdk";
-import { analyze, evidencePull, type Analysis } from "./analysis.js";
+import { analyze, evidencePull, reportFlowOf, type Analysis } from "./analysis.js";
 import { checkoutCommand, guardCommand, headTreeCommand, parseHeadTree, parseLedger, pinnedBase } from "./commands.js";
 import { COMMAND, QA_JSON, REPORT_JSON, REVIEW_MD } from "./constants.js";
 import { commandRuns, describeCommand, outputTail, reportText, succeeded } from "./evidence.js";
-import { reportFlow, type ReportFlow } from "./flow.js";
+import type { ReportFlow } from "./flow.js";
 import { measurementState, type MeasurementState } from "./measurements.js";
 import { reportJson, reviewMarkdown } from "./output.js";
 import { parseProfile, ProfileError, type Profile } from "./profile.js";
 import type { PullRequest } from "./request.js";
-import { afterNecessity, answerContext, answerWrites, necessityFlow, qaContext, questionSet, questionerFlow, recordedNecessity, type QaContext } from "./qaflow.js";
+import { afterNecessity, answerContext, batchedAnswers, answerWrites, necessityFlow, qaContext, questionSet, questionerFlow, recordedNecessity, type QaContext } from "./qaflow.js";
 import { answersFlow, type FinalAnswer } from "./answers.js";
 import { admissibleDecision, effectiveConclusion, necessityJson, NECESSITY_ID, type NecessityRecord } from "./necessity.js";
+import { describeReasons, isLarge } from "./mode.js";
 import { requiredQuestions, statedPurposes } from "./questions.js";
 import { principlesRecord } from "./principles.js";
 import { writtenNecessity, writtenReport } from "./write.js";
@@ -54,7 +55,7 @@ export const prSnapshot: Validator = profiled((input, profile) => {
   const c = context(input, profile);
   if (isResult(c)) return c;
   const s = c.analysis.snapshot;
-  return passed(`the pull request ${c.pr.owner}/${c.pr.repo}#${c.pr.number} was read whole at head ${c.pr.head.slice(0, 12)}: ${s.files.length} files, ${s.commits.length} commits, ${s.reviews.length} reviews, ${s.reviewComments.length} review comments, ${s.threads.length} threads, ${s.checks.length} check runs`);
+  return passed(`the pull request ${c.pr.owner}/${c.pr.repo}#${c.pr.number} was read whole at head ${c.pr.head.slice(0, 12)}: ${s.files.length} files, ${s.commits.length} commits, ${s.reviews.length} reviews, ${s.reviewComments.length} review comments, ${s.threads.length} threads, ${s.checks.length} check runs${s.mode.mode === "large" ? `; large mode (${describeReasons(s.mode.reasons)}): ${s.partition?.areas.filter((a) => a.kind === "read").length ?? 0} area(s)${s.partition?.areas.some((a) => a.kind === "generated") ? " and the generated files" : ""}, ${s.partition?.omitted.length ?? 0} file(s) without a patch from the host` : ""}`);
 });
 
 export { pinnedBase };
@@ -115,14 +116,14 @@ export interface Outputs {
 
 /** The files the report writes, recomputed from the evidence: what `report-write` must have written. */
 export function outputsOf(evidence: readonly EvidenceRecord[], profile: Profile, pr: PullRequest, analysis: Analysis, flow: Extract<ReportFlow, { state: "done" }>, measurements: MeasurementState): Outputs {
-  const input = { pr, snapshot: analysis.snapshot, base: pinnedBase(evidence), final: flow.final, facts: analysis.facts, measurements, profile };
+  const input = { pr, snapshot: analysis.snapshot, base: pinnedBase(evidence), final: flow.final, facts: analysis.facts, measurements, profile, mode: analysis.snapshot.mode, ...(flow.info !== undefined ? { large: flow.info } : {}) };
   return { json: reportJson(input), markdown: reviewMarkdown(input) };
 }
 
 export const changeReport: Validator = profiled((input, profile) => {
   const c = context(input, profile);
   if (isResult(c)) return c;
-  const flow = reportFlow(input.evidence, c.analysis.ctx);
+  const flow = reportFlowOf(input.evidence, c.analysis);
   if (flow.state === "supervise") return failed(flow.reason);
   if (flow.state !== "done") return inconclusive(`the report is not finished (${flow.state})`);
   const m = measurementsOf(input.evidence, c.analysis, profile);
@@ -169,7 +170,7 @@ export const measurements: Validator = profiled((input, profile) => {
 export const claimsChecked: Validator = profiled((input, profile) => {
   const c = context(input, profile);
   if (isResult(c)) return c;
-  const flow = reportFlow(input.evidence, c.analysis.ctx);
+  const flow = reportFlowOf(input.evidence, c.analysis);
   if (flow.state === "supervise") return failed(flow.reason);
   if (flow.state !== "done") return inconclusive(`the claim check is not finished (${flow.state})`);
   const unsupported = flow.final.sections.flatMap((s) => s.items).filter((i) => i.auto === undefined && !flow.reading.supported.has(i.id));
@@ -235,7 +236,7 @@ export const questionsComplete: Validator = profiled((input, profile) => {
   const set = questionSet(start.ctx, flow.output);
   const { stated } = statedPurposes(flow.output, start.ctx.view, start.ctx.pinned);
   const have = new Set(set.questions.map((q) => q.key));
-  const missing = requiredQuestions({ view: start.ctx.view, groundwork: start.ctx.groundwork }, stated).filter((r) => !have.has(r.key));
+  const missing = requiredQuestions({ view: start.ctx.view, groundwork: start.ctx.groundwork, large: isLarge(start.ctx.mode) }, stated).filter((r) => !have.has(r.key));
   if (missing.length > 0) return failed(`required question(s) not asked: ${missing.slice(0, 5).map((r) => r.key).join(", ")}`);
   const asked = set.questions.filter((q) => q.id !== NECESSITY_ID);
   const required = asked.filter((q) => q.origin === "required").length;
@@ -261,6 +262,13 @@ function answersState(input: ValidationInput, profile: Profile): AnswersState | 
   const qf = questionerFlow(input.evidence, start.ctx);
   if (qf.state !== "done") return inconclusive(`the questions are not asked yet (${qf.state})`);
   const set = questionSet(start.ctx, qf.output);
+  if (isLarge(start.ctx.mode)) {
+    // Large mode: each answered batch is a record in the evidence (a validator sees only the newest review).
+    const b = batchedAnswers(input.evidence, start.ctx, afterNecessity(set));
+    if (b.state === "supervise") return { start, set, record: rec.record, failure: b.reason };
+    if (b.state !== "done") return { start, set, record: rec.record, pending: b.state };
+    return { start, set, record: rec.record, final: [rec.record.final, ...b.final] };
+  }
   const flow = answersFlow(input.evidence, answerContext(start.ctx, afterNecessity(set)), start.ctx.base);
   if (flow.state === "supervise") return { start, set, record: rec.record, failure: flow.reason };
   if (flow.state !== "done") return { start, set, record: rec.record, pending: flow.state };

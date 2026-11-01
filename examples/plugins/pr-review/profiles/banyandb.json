@@ -162,6 +162,11 @@
   "limits": {
     "maxFiles": 150,
     "maxPatchBytes": 1048576,
-    "maxNewSymbols": 200
+    "maxNewSymbols": 200,
+    "hardMaxFiles": 1000,
+    "hardMaxPatchBytes": 8388608,
+    "hardMaxNewSymbols": 2000,
+    "areaMaxBytes": 262144,
+    "areaMinBytes": 16384
   }
 }

@@ -3,6 +3,8 @@
 
 import type { EvidenceRecord } from "@graphloom/sdk";
 import { detectFacts, type Fact } from "./detectors.js";
+import { reportFlow, type ReportFlow } from "./flow.js";
+import { largeReportFlow, type LargeFlow } from "./large.js";
 import { pinnedTexts } from "./questions.js";
 import { detectStateCandidates } from "./statecandidates.js";
 import { READS, readResult, snapshotState, type Snapshot } from "./snapshot.js";
@@ -36,10 +38,19 @@ export function evidencePull(evidence: readonly EvidenceRecord[], profile: Pick<
 export type AnalysisResult = { state: "ready"; analysis: Analysis } | { state: "pending"; reason: string } | { state: "incompatible"; problem: string; refs: string[] };
 
 export function analyze(evidence: readonly EvidenceRecord[], profile: Profile, pr: PullRequest): AnalysisResult {
-  const s = snapshotState(evidence, pr, profile.limits);
+  const s = snapshotState(evidence, pr, profile.limits, profile.questions.excludeRoots);
   if (s.state === "reading") return { state: "pending", reason: s.why };
   if (s.state === "incompatible") return s;
   const sections = reporterSections(profile);
   const facts = detectFacts(s.snapshot.files, profile);
   return { state: "ready", analysis: { snapshot: s.snapshot, sections, facts, ctx: { sections, files: s.snapshot.files, facts, pinned: pinnedTexts(s.snapshot.pull, s.snapshot.commits), candidates: detectStateCandidates(s.snapshot.files) } } };
+}
+
+/**
+ * Where the report stands: the standard flow, or in large mode the flow of the areas and the synthesis (design §6.9).
+ * The graph and the validators both ask this, over the evidence they hold.
+ */
+export function reportFlowOf(evidence: readonly EvidenceRecord[], analysis: Analysis): ReportFlow | LargeFlow {
+  const partition = analysis.snapshot.partition;
+  return analysis.snapshot.mode.mode === "large" && partition !== undefined ? largeReportFlow(evidence, analysis.ctx, partition) : reportFlow(evidence, analysis.ctx);
 }

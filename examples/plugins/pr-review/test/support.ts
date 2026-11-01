@@ -36,6 +36,8 @@ interface Options {
   /** Replace the files the worktree holds, by path (the stubbed checkout writes none). */
   files?: Record<string, string>;
   maxSteps?: number;
+  /** The budgets the run has left, over the generous defaults of the simulation. */
+  budgets?: Partial<RunView["budgets"]>;
   /** Change a job's recorded result before the graph sees it. */
   tamper?: (job: JobSpec, evidence: EvidenceRecord[]) => EvidenceRecord[] | undefined;
 }
@@ -103,7 +105,7 @@ export function simulate(options: Options = {}): Simulation {
       receipts,
       evidence,
       outstanding: [],
-      budgets: { agentInvocations: 100, jobs: 100, decisions: 100, corrections: 12 },
+      budgets: { agentInvocations: 100, jobs: 100, decisions: 100, corrections: 12, ...(options.budgets ?? {}) },
       validatorBindings: [],
       generation: 1,
       stateRevision: step,

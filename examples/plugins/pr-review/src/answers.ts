@@ -700,8 +700,11 @@ export function answersFlow(evidence: readonly EvidenceRecord[], ctx: AnswerCont
       const scope = revision ? new Set(parsed.answers.map((a) => a.question)) : all;
       let problems = answerProblems(parsed.answers, ctx, scope);
       if (revision && parsed.answers.length === 0) problems = ["a revision answers the questions the checker did not support; it answered none"];
-      const merged = new Map(revision ? current : []);
-      for (const a of parsed.answers) merged.set(a.question, a);
+      const collected = new Map(revision ? current : []);
+      for (const a of parsed.answers) collected.set(a.question, a);
+      // In question order whatever order the answerer used: the verification commands, which are looked up by their exact
+      // arguments, and the final answers (`assemble` emits question order) then rebuild the same plan.
+      const merged = new Map(ctx.questions.filter((q) => collected.has(q.id)).map((q) => [q.id, collected.get(q.id)!] as const));
       if (problems.length === 0) {
         const plan = verificationPlan([...merged.values()], ctx, base, idPrefix);
         problems = unmeasuredAbsences([...merged.values()], ctx, plan);

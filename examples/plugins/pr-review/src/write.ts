@@ -90,6 +90,30 @@ export function necessityWriteCommand(json: string): EnvironmentCommand | undefi
   return command.argv.length - 5 <= MAX_CHUNKS && inputBytes(command) <= MAX_COMMAND_INPUT_BYTES ? command : undefined;
 }
 
+const recordScript =
+  'set -eu; file="$1"; n="$2"; shift 2; json=""; for part in "$@"; do json="$json$part"; done; ' +
+  `mkdir -p "$(dirname "$file")"; printf '*\\n' > ${REVIEW_DIR}/.gitignore; ` +
+  `printf '%s' "$json" > "$file.tmp"; mv "$file.tmp" "$file"; echo written`;
+
+/**
+ * The command that records one step of a large run as evidence (design §6.9, §7.6): an area's checked report, the
+ * synthesis, or an answered batch. The bytes are evidence, so the validators read the step from here even after a
+ * later review has superseded the check that judged it (a validator sees only the newest review). The file lands
+ * under `.graphloom/review/<dir>/`. Undefined when it does not fit one command.
+ */
+export function recordCommand(id: string, dir: string, json: string): EnvironmentCommand | undefined {
+  const parts = writeChunks(json);
+  const command: EnvironmentCommand = { id, argv: ["sh", "-c", recordScript, id, `${REVIEW_DIR}/${dir}/${id}.json`, String(parts.length), ...parts] };
+  return command.argv.length <= 64 && inputBytes(command) <= MAX_COMMAND_INPUT_BYTES ? command : undefined;
+}
+
+/** The JSON a record command's argv wrote. */
+export function writtenRecord(argv: readonly string[], id: string): string | undefined {
+  const n = Number(argv[5]);
+  if (argv[3] !== id || !Number.isSafeInteger(n) || n < 0) return undefined;
+  return argv.slice(6, 6 + n).join("");
+}
+
 /** The JSON a `necessity-write` argv wrote. */
 export function writtenNecessity(argv: readonly string[]): string | undefined {
   const n = Number(argv[4]);

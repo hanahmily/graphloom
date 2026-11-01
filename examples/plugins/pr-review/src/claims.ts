@@ -59,7 +59,7 @@ export const CLAIM_CHECK_SCHEMA = {
   },
 } as const;
 
-const collapse = (s: string): string => s.replace(/\s+/g, " ").trim();
+export const collapse = (s: string): string => s.replace(/\s+/g, " ").trim();
 
 /** The quote's text, whitespace collapsed, is on a line of the file's patch within three of the one it cites, on either side. */
 export function quoteMatches(q: Quote, file: PullFile): boolean {
@@ -83,9 +83,9 @@ export interface ClaimTarget {
   quotes: "required" | "none";
 }
 
-/** Every claim of a report, in the order the checker is shown them: the summary, then each item with its lifecycle entries and behavior rows. */
-export function claimTargets(report: ReporterOutput, ctx: Pick<ReportContext, "sections">): ClaimTarget[] {
-  const out: ClaimTarget[] = [
+/** The purpose and overview claims of a summary: shared by a standard report and the synthesis job (design §6.9). */
+export function summaryTargets(report: Pick<ReporterOutput, "purpose" | "overview">): ClaimTarget[] {
+  return [
     {
       id: "purpose",
       text: `${report.purpose.source === "stated" ? `Purpose, stated (quote: "${collapse(report.purpose.quote)}")` : "Purpose, inferred from the diff"}: ${collapse(report.purpose.text)}`,
@@ -94,6 +94,14 @@ export function claimTargets(report: ReporterOutput, ctx: Pick<ReportContext, "s
     },
     { id: "overview", text: `Overview: ${collapse(report.overview)}`, cites: undefined, quotes: "required" },
   ];
+}
+
+/**
+ * Every claim of a report, in the order the checker is shown them: the summary, then each item with its lifecycle
+ * entries and behavior rows. An area's report (large mode) has no summary: the synthesis job writes it.
+ */
+export function claimTargets(report: ReporterOutput, ctx: Pick<ReportContext, "sections">, opts: { summary?: boolean } = {}): ClaimTarget[] {
+  const out: ClaimTarget[] = opts.summary === false ? [] : summaryTargets(report);
   for (const { id, section, item } of numbered(report, ctx)) {
     out.push({ id, text: `[${section}] ${collapse(item.text)}`, cites: item.cites, quotes: "required" });
     item.state.forEach((e, si) => {

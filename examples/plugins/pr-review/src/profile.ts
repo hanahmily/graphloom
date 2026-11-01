@@ -53,6 +53,13 @@ export interface Limits {
   maxFiles: number;
   maxPatchBytes: number;
   maxNewSymbols: number;
+  /** Past these the pull request is refused; between a `max*` and its hard cap it is reviewed in large mode (design §6.9). */
+  hardMaxFiles: number;
+  hardMaxPatchBytes: number;
+  hardMaxNewSymbols: number;
+  /** Large mode's area partition: an area splits above `areaMaxBytes` and sibling groups under `areaMinBytes` merge. */
+  areaMaxBytes: number;
+  areaMinBytes: number;
 }
 
 export interface MetricsConfig {
@@ -214,7 +221,16 @@ export const SANDBOX_LIMITS = { cpus: 4, memory: "8g", pids: 512, tmp: "1g", wal
 /** A digest-shaped placeholder, so the limits are checked alone. */
 const SANDBOX_PROBE_IMAGE = `probe@sha256:${"0".repeat(64)}`;
 
-export const DEFAULT_LIMITS: Limits = { maxFiles: 150, maxPatchBytes: 1024 * 1024, maxNewSymbols: 200 };
+export const DEFAULT_LIMITS: Limits = {
+  maxFiles: 150,
+  maxPatchBytes: 1024 * 1024,
+  maxNewSymbols: 200,
+  hardMaxFiles: 1000,
+  hardMaxPatchBytes: 8 * 1024 * 1024,
+  hardMaxNewSymbols: 2000,
+  areaMaxBytes: 256 * 1024,
+  areaMinBytes: 16 * 1024,
+};
 export const DEFAULT_SUPERVISOR_PREFERENCE: SupervisorPreference = { harnesses: ["pi", "claude-code", "codex"] };
 const HARNESSES: Readonly<Record<string, string>> = { "claude-code": "Claude Code", codex: "Codex", pi: "Pi" };
 
@@ -646,9 +662,14 @@ export function parseProfile(config: unknown): Profile {
   if (p.limits !== undefined) {
     need(isObject(p.limits), "limits must be an object");
     const l = p.limits as Record<string, unknown>;
-    onlyKeys(l, "limits", ["maxFiles", "maxPatchBytes", "maxNewSymbols"]);
+    onlyKeys(l, "limits", Object.keys(DEFAULT_LIMITS));
     for (const key of Object.keys(l)) need(isCount(l[key]), `limits.${key} must be a positive integer`);
     limits = { ...limits, ...(l as Partial<Limits>) };
+    for (const key of ["maxFiles", "maxPatchBytes", "maxNewSymbols"] as const) {
+      const hard = `hardM${key.slice(1)}` as "hardMaxFiles" | "hardMaxPatchBytes" | "hardMaxNewSymbols";
+      need(limits[key] <= limits[hard], `limits.${key} (${limits[key]}) must not exceed limits.${hard} (${limits[hard]})`);
+    }
+    need(limits.areaMinBytes <= limits.areaMaxBytes, `limits.areaMinBytes (${limits.areaMinBytes}) must not exceed limits.areaMaxBytes (${limits.areaMaxBytes})`);
   }
   let agentTimeoutMs: number | undefined;
   if (p.agent !== undefined) {
