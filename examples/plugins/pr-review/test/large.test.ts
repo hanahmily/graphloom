@@ -19,7 +19,8 @@ import { largeReporterInstruction } from "../src/largeprompts.js";
 import { reporterInstruction } from "../src/prompts.js";
 import { partitionAreas } from "../src/areas.js";
 import { claimTargets, readClaimCheck } from "../src/claims.js";
-import { readTreeQuotes, treeQuotePlan } from "../src/architecture.js";
+import { emptyBriefing } from "../src/briefing.js";
+import { readTreeQuotes, treeQuotePlan } from "../src/treequotes.js";
 import { ProfileError, parseProfile } from "../src/profile.js";
 import { answerBatches } from "../src/qaflow.js";
 import { LARGE_LIMITS, REHEARSAL_HEAD } from "../src/rehearsal.js";
@@ -79,8 +80,10 @@ describe("a large pull request, reported at a high level (design §6.9)", () => 
     expect(a).toContain("  pkg/beta/beta.go — added, +13 −0");
     expect(a).toContain("generated code: do not cite it");
     expect(a).toMatch(/Detector facts \(\d+\)/);
-    // The architecture, the template sections, no lifecycle required.
-    expect(a).toContain("architecture");
+    // The briefing first, then the template sections, no lifecycle required.
+    expect(a).toContain("The first fields of your result are a briefing");
+    expect(a.indexOf("The first fields of your result are a briefing")).toBeLessThan(a.indexOf("The template."));
+    expect(a).not.toContain("architecture");
     expect(a).toContain("State and behavior are not required in this report");
     expect(a).toContain("text is at most 600 characters");
     expect(a).not.toContain("at most 900 characters, which");
@@ -102,7 +105,7 @@ describe("a large pull request, reported at a high level (design §6.9)", () => 
     const check = assignmentOf(sim.jobs.find((j) => j.resultSchema === "claim-check-v1" && j.stageId === "report")!);
     expect(check).toContain("the report below is a high-level one");
     expect(check).toContain("The quotes are matched against that file, not against the diff");
-    const verify = sim.jobs.filter((j) => j.stageId === "report" && commandIds(j).some((c) => c.startsWith("arch-quote-")));
+    const verify = sim.jobs.filter((j) => j.stageId === "report" && commandIds(j).some((c) => c.startsWith("tree-quote-")));
     expect(verify.length).toBeGreaterThan(0);
   });
 
@@ -112,7 +115,7 @@ describe("a large pull request, reported at a high level (design §6.9)", () => 
     expect(items(r).map((i) => i.id)).toEqual(items(r).map((_, n) => `R${n + 1}`));
     expect(r.summary.purpose).toMatchObject({ source: "stated", quote: "Add alpha and beta helpers" });
     expect(r.removed).toEqual([]);
-    expect(r.architecture.nodes.map((n: { id: string }) => n.id)).toEqual(["alpha", "beta"]);
+    expect(r.briefing.features.map((f: { stages: Array<{ id: string }> }) => f.stages.map((st) => st.id))).toEqual([["alpha", "beta"]]);
   });
 
   it("records the mode and its reason in report.json, the areas with their sizes, and shows it in the header of review.md", () => {
@@ -138,20 +141,20 @@ describe("a large pull request, reported at a high level (design §6.9)", () => 
     expect(stopOf(sim)!.reason).toBe("report ready");
   });
 
-  it("ends the report with a Dive into an area block: the areas table and the command that opens the reporter's session", () => {
+  it("lists the areas in the briefing, with the reporter's label for each and the command that opens the reporter's session", () => {
     const md = sim.written!.markdown;
-    expect(md).toContain("## Dive into an area");
+    expect(md).toContain("## Areas (dive into an area)");
     expect(md).toContain("graphloom session open <run> --stage report");
     expect(md).toContain("already has the pull request's digest and can read any file");
-    expect(md).toMatch(/\| Area \| Name \| Files \| Lines \| Patch bytes \|\n\|---\|---\|---\|---\|---\|\n\| A1 \| docs \| 1 \|/);
-    expect(md).toContain("| generated | generated (generated) | 1 |");
-    // It ends the Report: after the notes, before the Measurements.
-    expect(md.indexOf("## Dive into an area")).toBeGreaterThan(md.indexOf("Notes:"));
-    expect(md.indexOf("## Dive into an area")).toBeLessThan(md.indexOf("# Measurements"));
+    expect(md).toMatch(/\| Area \| What it is \| Files \| Lines \|\n\|---\|---\|---\|---\|\n\| A1 \| changes under docs \| 1 \|/);
+    expect(md).toContain("| generated | generated code (generated) | 1 |");
+    // It is part of the briefing: before the open questions and the appendix.
+    expect(md.indexOf("## Areas")).toBeGreaterThan(md.indexOf("## What you need to check"));
+    expect(md.indexOf("## Areas")).toBeLessThan(md.indexOf("# Appendix"));
     const html = reviewHtmlFrom(sim.written!.json)!;
-    expect(html).toContain("Dive into an area");
+    expect(html).toContain("<h2>Areas</h2>");
     expect(html).toContain("<pre><code>graphloom session open &lt;run&gt; --stage report</code></pre>");
-    expect(html).toContain("<td>A2</td><td>pkg/alpha</td><td>1</td>");
+    expect(html).toContain("<td>A2</td><td>changes under pkg/alpha</td><td>1</td>");
   });
 
   it("asks the questions in large mode and answers them in batches of at most 15 that continue one session, checked in fresh sessions", () => {
@@ -251,7 +254,7 @@ describe("the large report is validated and checked like a report, with the high
     const files = ["pkg/a.go", "docs/guide.md"].map((path) => pullFile({ path, status: "added", previousPath: null, additions: 1, deletions: 0, sha: null, patch: "@@ -0,0 +1 @@\n+x := 1", patchOmitted: false })!);
     const fact = { id: "D1", section: "other", path: "docs/guide.md", side: "head" as const, line: 1, text: "File routed to this section: docs/guide.md added" };
     const cite = { path: "pkg/a.go", side: "head" as const, start: 1, end: 1, symbol: "" };
-    const report = { purpose: { text: "t", source: "inferred" as const, quote: "" }, overview: "One.", sections: sections.map((s, i) => ({ id: s.id, none: i !== 0, items: i === 0 ? [{ text: "adds a", cites: [cite], facts: [], state: [], behavior: [] }] : [] })), notes: [], architecture: { nodes: [], edges: [] } };
+    const report = { purpose: { text: "t", source: "inferred" as const, quote: "" }, overview: "One.", sections: sections.map((s, i) => ({ id: s.id, none: i !== 0, items: i === 0 ? [{ text: "adds a", cites: [cite], facts: [], state: [], behavior: [] }] : [] })), notes: [], ...emptyBriefing(), whatsNew: [{ text: "Adds a.", cites: [cite] }] };
     const ctx = { sections, files, facts: [fact] };
     expect(reportProblems(report, ctx).join("|")).toMatch(/changed file\(s\) no item cites: docs\/guide.md/);
     expect(reportProblems(report, ctx).join("|")).toMatch(/detector fact\(s\) no item of their section lists/);
@@ -274,7 +277,7 @@ describe("the large report is validated and checked like a report, with the high
       s.results["change-report-revision-v1"] = [s.results["change-report-v1"]![0]!];
       // One quote fewer is verified in the tree (the unsupported claim's), so the canned check answers for one fewer.
       for (const [k, c] of Object.entries(s.commands ?? {})) {
-        if (!k.startsWith("arch-quote-")) continue;
+        if (!k.startsWith("tree-quote-")) continue;
         const n = Number(/checked (\d+)/.exec(c.stdout ?? "")![1]) - 1;
         s.commands![k] = { ...c, stdout: `${Array.from({ length: n }, (_x, i) => `${i + 1} ok`).join("\n")}\nchecked ${n}\n` };
       }
@@ -299,7 +302,7 @@ describe("the quotes of a large report are verified against the trees its cites 
     overview: "One.",
     sections: sections.map((s, i) => ({ id: s.id, none: i !== 0, items: i === 0 ? [{ text: "adds b", cites: [cite], facts: [], state: [], behavior: [] }] : [] })),
     notes: [],
-    architecture: { nodes: [], edges: [] },
+    ...emptyBriefing(),
   };
   const reply = (verdicts: unknown[]) => ({ verdicts });
   const supported = (item: string, quotes: unknown[]) => ({ item, verdict: "supported", note: "", quotes });
@@ -350,7 +353,7 @@ describe("the quotes of a large report are verified against the trees its cites 
 
   it("makes the large run's claim check unsupported when the tree does not show the quote, through the whole flow", () => {
     const sim = run((s) => {
-      for (const [k, v] of Object.entries(s.commands ?? {})) if (k.startsWith("arch-quote-")) s.commands![k] = { ...v, stdout: (v.stdout ?? "").replaceAll(" ok\n", " nomatch\n") };
+      for (const [k, v] of Object.entries(s.commands ?? {})) if (k.startsWith("tree-quote-")) s.commands![k] = { ...v, stdout: (v.stdout ?? "").replaceAll(" ok\n", " nomatch\n") };
       s.results["change-report-revision-v1"] = [s.results["change-report-v1"]![0]!];
     });
     expect(agents(sim, "change-report-revision-v1")).toHaveLength(1);
@@ -382,7 +385,7 @@ describe("the budget pre-check before the reporter job (design §6.9)", () => {
     const defaults = definitionFor(profileOf()).defaultBudgets!;
     const ten = largeNeeds(10);
     // 2 (reporter, check) + 1 questioner + 2 N1 + 7 batches of 2 + 2 diagrams = 21 agent invocations; 4 + 1 + 4 + 28 + 24 + 4 + 4 jobs.
-    expect(ten).toMatchObject({ areas: 10, questions: 100, batches: 7, agentInvocations: 21, jobs: 65, decisions: 77 });
+    expect(ten).toMatchObject({ areas: 10, questions: 100, batches: 7, agentInvocations: 21, jobs: 66, decisions: 78 });
     expect(largeNeeds(1).jobs).toBeLessThan(ten.jobs);
     expect(budgetShortfall(ten, { agentInvocations: defaults.agentInvocations!, jobs: defaults.jobs!, decisions: defaults.decisions! })).toBeUndefined();
     expect(budgetShortfall(largeNeeds(100), { agentInvocations: defaults.agentInvocations!, jobs: defaults.jobs!, decisions: defaults.decisions! })).toContain("budgets.jobs");
@@ -667,7 +670,7 @@ describe("quotes of a file cited on both sides, and of before/after rows (design
     overview: "One.",
     sections: sections.map((s, i) => ({ id: s.id, none: i !== 0, items: i === 0 ? [{ text: "changes a", cites: [head], facts: [], state: [], behavior: [], ...item }] : [] })),
     notes: [],
-    architecture: { nodes: [], edges: [] },
+    ...emptyBriefing(),
   });
   const read = (r: ReturnType<typeof reportWith>, text: string, claim = "R1") => {
     const targets = claimTargets(r, { sections }, { treeQuotes: true });

@@ -11,9 +11,10 @@
  * before/after table.
  */
 import { validateResultShape } from "@graphloom/sdk";
-import { architectureTargets } from "./architecture.js";
+import { briefingTargets } from "./briefing.js";
 import { resolveId } from "./ids.js";
-import { behaviorId, numbered, readId, stateId, transitionId, type Cite, type ReportContext, type ReporterOutput } from "./report.js";
+import { findFile as findCitedFile, type Cite } from "./cites.js";
+import { behaviorId, numbered, readId, stateId, transitionId, type ReportContext, type ReporterOutput } from "./report.js";
 import type { PullFile } from "./snapshot.js";
 
 export const CLAIM_CHECK_SCHEMA_NAME = "claim-check-v1";
@@ -82,8 +83,6 @@ export interface ClaimTarget {
   cites: Cite[] | undefined;
   /** A stated purpose quotes the pull request's own text, matched deterministically: it needs no diff quote. */
   quotes: "required" | "none";
-  /** The tree the claim's cite names, when its quotes are verified against that tree and not against the patch (the architecture diagram, §6.10). */
-  tree?: "head" | "base";
   /**
    * Large mode (design §6.9): the claim's quotes are verified against the trees its cites name, each quote against the
    * side of the cite that names its file (either tree for a file cited on both sides or a claim with no cite), because an item of a high-level report
@@ -110,15 +109,15 @@ export function summaryTargets(report: Pick<ReporterOutput, "purpose" | "overvie
 
 /**
  * Every claim of a report, in the order the checker is shown them: the summary, then each item with its lifecycle
- * entries and behavior rows, then the architecture's nodes and edges. With `treeQuotes` (large mode) the quotes of the
+ * entries and behavior rows, then the briefing's claims (what is new, the stages and flows of the features, the check entries). With `treeQuotes` (large mode) the quotes of the
  * claims that name no tree of their own are verified against the trees their cites name.
  */
-export function claimTargets(report: ReporterOutput, ctx: Pick<ReportContext, "sections">, opts: { archNotes?: ReadonlyMap<string, string>; treeQuotes?: boolean } = {}): ClaimTarget[] {
-  const all = claimTargetsOf(report, ctx, opts);
-  return opts.treeQuotes === true ? all.map((t) => (t.tree === undefined && t.quotes === "required" ? { ...t, treeByCite: true as const } : t)) : all;
+export function claimTargets(report: ReporterOutput, ctx: Pick<ReportContext, "sections">, opts: { treeQuotes?: boolean } = {}): ClaimTarget[] {
+  const all = claimTargetsOf(report, ctx);
+  return opts.treeQuotes === true ? all.map((t) => (t.quotes === "required" ? { ...t, treeByCite: true as const } : t)) : all;
 }
 
-function claimTargetsOf(report: ReporterOutput, ctx: Pick<ReportContext, "sections">, opts: { archNotes?: ReadonlyMap<string, string> }): ClaimTarget[] {
+function claimTargetsOf(report: ReporterOutput, ctx: Pick<ReportContext, "sections">): ClaimTarget[] {
   const out: ClaimTarget[] = summaryTargets(report);
   for (const { id, section, item } of numbered(report, ctx)) {
     out.push({ id, text: `[${section}] ${collapse(item.text)}`, cites: item.cites, quotes: "required" });
@@ -130,7 +129,7 @@ function claimTargetsOf(report: ReporterOutput, ctx: Pick<ReportContext, "sectio
     });
     item.behavior.forEach((b, bi) => out.push({ id: behaviorId(id, bi), text: `Case "${collapse(b.case)}": before: ${collapse(b.before)}; after: ${collapse(b.after)}`, cites: undefined, quotes: "required" }));
   }
-  out.push(...architectureTargets(report.architecture, opts.archNotes));
+  out.push(...briefingTargets(report));
   return out;
 }
 
@@ -145,7 +144,7 @@ export interface ClaimReading {
   notes: string[];
   /** Verdict ids that matched no claim (unknown or ambiguous); those claims stay unjudged. */
   ignored: string[];
-  /** Supported claims whose quotes a command still has to verify against the tree their cite names (design §6.10): the architecture diagram's. */
+  /** Supported claims whose quotes a command still has to verify against the tree their cite names (design §6.9): every claim of a large report. */
   treeQuotes: Array<{ id: string; tree: "head" | "base" | "either"; quotes: Quote[] }>;
 }
 
@@ -180,7 +179,7 @@ export function readClaimCheck(output: unknown, targets: readonly ClaimTarget[],
   }
   const reading: ClaimReading = { unchecked: [], supported: new Set(), weak: new Map(), notes, ignored, treeQuotes: [] };
   const findFile = (path: string): PullFile | undefined => files.find((f) => f.path === path || f.previousPath === path);
-  for (const { id, cites, quotes: need, tree, treeByCite } of targets) {
+  for (const { id, cites, quotes: need, treeByCite } of targets) {
     const v = byItem.get(id);
     if (v === undefined) {
       reading.unchecked.push(id);
@@ -190,22 +189,10 @@ export function readClaimCheck(output: unknown, targets: readonly ClaimTarget[],
       reading.weak.set(id, `${v.verdict}${v.note.trim() !== "" ? `: ${v.note.trim()}` : ""}`);
       continue;
     }
-    // A claim about a tree (the architecture diagram's): its quotes come from the file its cite names and are verified
-    // against that tree by a command, not against the patch's lines, which a declaration outside the hunks is not in.
-    if (tree !== undefined) {
-      const own = v.quotes.slice(0, MAX_QUOTES);
-      const citeFile = cites?.[0]?.path;
-      if (own.length === 0) reading.weak.set(id, "supported without a quote");
-      else if (own.some((q) => q.path !== citeFile)) reading.weak.set(id, `supported, but a quote is not from the file its cite names (${citeFile ?? "?"})`);
-      else if (own.some((q) => collapse(q.text).length < MIN_QUOTE_CHARS || collapse(q.text).length > MAX_TREE_QUOTE_CHARS || q.line < 1)) reading.weak.set(id, `supported, but a quote is shorter than ${MIN_QUOTE_CHARS} or longer than ${MAX_TREE_QUOTE_CHARS} characters, or names no line`);
-      else {
-        reading.supported.add(id);
-        reading.treeQuotes.push({ id, tree, quotes: own });
-      }
-      continue;
-    }
     const cited = cites === undefined ? [...files] : cites.map((c) => findFile(c.path)).filter((f): f is PullFile => f !== undefined);
-    const textual = cited.some((f) => f.parsed.lines.length > 0);
+    // A claim that cites a file the pull request does not change (a large report's feature stage, say) is judged by quote, never on the checker's word.
+    const outside = treeByCite === true && cites !== undefined && cites.some((c) => findCitedFile(files, c.path) === undefined);
+    const textual = outside || cited.some((f) => f.parsed.lines.length > 0);
     const quotes = v.quotes.slice(0, MAX_QUOTES);
     if (!textual || need === "none") {
       reading.supported.add(id);

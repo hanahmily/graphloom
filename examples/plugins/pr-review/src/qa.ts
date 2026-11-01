@@ -14,6 +14,7 @@ import type { Groundwork } from "./groundwork.js";
 import { brokenNote, effectiveConclusion, NECESSITY_ID, SKIPPED_NOTE, supportedBreaks, type NecessityRecord } from "./necessity.js";
 import { describeReasons, type ReviewMode } from "./mode.js";
 import type { PurposeRecord, Question } from "./questions.js";
+import { needAuthor, openQuestions } from "./scope.js";
 import { searchLine, withMeasure } from "./searchview.js";
 import type { ReportView } from "./reportview.js";
 import type { PullRequest } from "./request.js";
@@ -233,4 +234,32 @@ export function renderNecessity(r: NecessityRecord): string {
     "",
   ];
   return lines.join("\n");
+}
+
+/**
+ * What the briefing of `review.md` says of the Q&A (design §6.1, §7): the verdict (N1's conclusion, the principles it
+ * touched with their verdicts, how many questions need the author) and the open questions (the ones that need a person;
+ * the answered ones are a count, their text is in the appendix).
+ */
+export function briefingQa(i: QaInput): { verdict: string; open: string } {
+  const answers = new Map(i.answers.map((a) => [a.question, a] as const));
+  const like = i.questions.map((q) => {
+    const a = answers.get(q.id);
+    return { id: q.id, type: q.type, text: q.text, answer: a === undefined ? undefined : { status: a.status, answer: a.answer } };
+  });
+  const conclusion = i.necessity !== undefined ? effectiveConclusion(i.necessity.final) : undefined;
+  const principles = i.necessity?.final.necessity?.principles ?? [];
+  const sel = openQuestions(like, { id: NECESSITY_ID, conclusion });
+  const verdict = [
+    `- N1, is it necessary: ${conclusion ?? "pending"}${i.necessity !== undefined ? ` — ${short(oneLine(i.necessity.final.necessity?.rationale ?? ""), 200)}` : ""}`,
+    `- Principles touched: ${i.necessity === undefined ? "pending" : principles.length === 0 ? "none" : principles.map((p) => `${p.id} ${p.verdict}`).join("; ")}`,
+    `- Questions that need the author: ${needAuthor(like.filter((q) => q.id !== NECESSITY_ID))}`,
+    "",
+  ].join("\n");
+  const open = [
+    ...(sel.open.length === 0 ? ["No question needs a person."] : sel.open.map((q) => `- **${q.id} [${q.type}]${q.answer === undefined ? " not answered" : ` ${q.answer.status}`}** ${short(oneLine(q.text), 200)}${q.answer !== undefined ? ` — ${short(oneLine(q.answer.answer), 240)}` : ""}`)),
+    `${sel.answered} answered — see the appendix.`,
+    "",
+  ].join("\n");
+  return { verdict, open };
 }

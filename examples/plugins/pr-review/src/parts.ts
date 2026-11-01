@@ -11,7 +11,7 @@
  */
 import { createHash } from "node:crypto";
 import { MAX_EXECUTOR_INPUT_BYTES, type EnvironmentCommand, type EvidenceRecord } from "@graphloom/sdk";
-import { COMMAND, NECESSITY_JSON, PART_BASE, QA_JSON, REPORT_JSON, REVIEW_DIR, REVIEW_HTML, REVIEW_MD } from "./constants.js";
+import { COMMAND, NECESSITY_JSON, PART_BASE, QA_JSON, REPORT_JSON, REVIEW_APPENDIX_HTML, REVIEW_DIR, REVIEW_HTML, REVIEW_MD } from "./constants.js";
 import { commandRuns, succeeded, type CommandRun } from "./evidence.js";
 import { necessityWriteCommand, qaWriteCommand, recordCommand, reportWriteCommand, writeChunks, writtenNecessity, writtenQa, writtenRecord, writtenReport } from "./write.js";
 
@@ -157,6 +157,9 @@ export function necessityWriteCommands(json: string): EnvironmentCommand[] {
 /** The commands that write `review.html` at the Report stage (`qa` false) or, whole, at the Answers stage. */
 export const htmlWriteCommands = (html: string, qa: boolean): EnvironmentCommand[] => partCommands(qa ? PART_BASE.qaHtml : PART_BASE.reviewHtml, REVIEW_HTML, html);
 
+/** The commands that write `review-appendix.html` at the Report stage (`qa` false) or, whole, at the Answers stage. */
+export const appendixWriteCommands = (html: string, qa: boolean): EnvironmentCommand[] => partCommands(qa ? PART_BASE.qaAppendix : PART_BASE.reviewAppendix, REVIEW_APPENDIX_HTML, html);
+
 /** The commands that record a step of a large run (an answered batch): one command when it fits, else a part set. */
 export function recordCommands(id: string, dir: string, json: string): EnvironmentCommand[] {
   const one = recordCommand(id, dir, json);
@@ -181,6 +184,11 @@ export function recordedNecessityJson(evidence: readonly EvidenceRecord[]): Writ
 /** What `review.html` holds, as the Report stage (`qa` false) or the Answers stage wrote it. */
 export function recordedHtml(evidence: readonly EvidenceRecord[], qa: boolean): Written<string> {
   return readParts(evidence, qa ? PART_BASE.qaHtml : PART_BASE.reviewHtml, REVIEW_HTML);
+}
+
+/** What `review-appendix.html` holds, as the Report stage (`qa` false) or the Answers stage wrote it. */
+export function recordedAppendix(evidence: readonly EvidenceRecord[], qa: boolean): Written<string> {
+  return readParts(evidence, qa ? PART_BASE.qaAppendix : PART_BASE.reviewAppendix, REVIEW_APPENDIX_HTML);
 }
 
 /** What a record holds (`answers-record-2`): its command's JSON, or its parts'. */

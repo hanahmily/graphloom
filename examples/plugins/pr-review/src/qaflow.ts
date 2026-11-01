@@ -17,14 +17,14 @@ import { commandRuns, succeeded, type CommandRun } from "./evidence.js";
 import { necessityDecision, necessityJson, necessityQuestion, parseNecessityRecord, type NecessityRecord } from "./necessity.js";
 import { principlesContext, principlesReading, principlesRecord, type PrinciplesContext } from "./principles.js";
 import { ledgerJson, ledgerMarkdown, ledgerRead, ledgerWriteCommands, oldValue, priorState, type PriorLedger } from "./ledger.js";
-import { reviewHtmlFrom } from "./html.js";
-import { htmlWriteCommands, necessityWriteCommands, qaWriteCommands, readParts, recordedNecessityJson, recordedReport } from "./parts.js";
+import { htmlPagesFrom } from "./html.js";
+import { appendixWriteCommands, htmlWriteCommands, necessityWriteCommands, qaWriteCommands, readParts, recordedNecessityJson, recordedReport } from "./parts.js";
 import { withQa } from "./output.js";
 import { necessityWriteCommand, writtenRecord } from "./write.js";
 import { groundworkState, type Groundwork, type GroundworkState } from "./groundwork.js";
 import { effectivePacks } from "./packs.js";
 import type { Profile } from "./profile.js";
-import { qaJson, renderNecessity, renderQa, type QaInput } from "./qa.js";
+import { briefingQa, qaJson, renderNecessity, renderQa, type QaInput } from "./qa.js";
 import { finalQuestions, itemOfSymbol, pinnedTexts, questionerProblems, questionsFlow, requiredQuestions, statedPurposes, type PinnedText, type PurposeRecord, type Question, type QuestionerOutput, type QuestionsFlow } from "./questions.js";
 import { changeItems, reportView, type ReportView } from "./reportview.js";
 import type { PullRequest } from "./request.js";
@@ -140,17 +140,17 @@ export const necessityRecordCommand = (record: NecessityRecord): EnvironmentComm
 export const necessityRecordCommands = (record: NecessityRecord): EnvironmentCommand[] => necessityWriteCommands(necessityJson(record));
 
 /** `qa.json`, the Q&A part and the Necessity part of `review.md` the answers recompute to. */
-export function qaOutputs(ctx: QaContext, set: QuestionSet, answers: FinalAnswer[], necessity?: NecessityRecord): { json: string; markdown: string; necessity?: string } {
+export function qaOutputs(ctx: QaContext, set: QuestionSet, answers: FinalAnswer[], necessity?: NecessityRecord): { json: string; markdown: string; verdict: string; open: string; necessity?: string } {
   const large = isLarge(ctx.mode) && !set.skipped;
   const input: QaInput = { pr: ctx.pr, base: ctx.base, view: ctx.view, groundwork: ctx.groundwork, purposes: set.purposes, questions: set.questions, answers, skipped: set.skipped, mode: ctx.mode, ...(large ? { batches: answerBatches(afterNecessity(set)).length } : {}), ...(necessity !== undefined ? { necessity } : {}) };
-  return { json: qaJson(input), markdown: renderQa(input), ...(necessity !== undefined ? { necessity: renderNecessity(necessity) } : {}) };
+  return { json: qaJson(input), markdown: renderQa(input), ...briefingQa(input), ...(necessity !== undefined ? { necessity: renderNecessity(necessity) } : {}) };
 }
 
 export interface AnswerWrites {
-  /** The commands that write `qa.json`, the whole `review.md` and `review.html`: each a single command when it fits one, else a part set (design §6.6). */
+  /** The commands that write `qa.json`, the whole `review.md`, `review.html` and `review-appendix.html`: each a single command when it fits one, else a part set (design §6.6). */
   qa?: EnvironmentCommand[];
   /** What those commands write, recomputed: the validators compare the artifacts reconstructed from the evidence with these. */
-  texts?: { json: string; markdown: string; html: string };
+  texts?: { json: string; markdown: string; html: string; appendix: string };
   /** The commands that first write ledger.json and ledger.md as part sets, when they do not fit the ledger write's one command. */
   ledgerParts?: EnvironmentCommand[];
   /** The `ledger-write` command, once the ledger value is read (and the prior ledger.json, when one is there to read). */
@@ -168,12 +168,14 @@ export function answerWrites(evidence: readonly EvidenceRecord[], ctx: QaContext
   const out = qaOutputs(ctx, set, final, necessity);
   const report = recordedReport(evidence);
   if (report.state !== "read") return { problem: report.state === "failed" ? `the report was not written whole: ${report.reason}` : "the report was not written" };
-  const markdown = withQa(report.value.markdown, out.markdown, out.necessity);
-  // review.html is rendered from report.json as written, qa.json and necessity.json (design §6.11).
-  const html = reviewHtmlFrom(report.value.json, out.json, necessity !== undefined ? necessityJson(necessity) : undefined);
-  if (html === undefined) return { problem: "review.html cannot be rendered: report.json is not a change report" };
-  const texts = { json: out.json, markdown, html };
-  const qa = [...qaWriteCommands(out.json, markdown), ...htmlWriteCommands(html, true)];
+  const markdown = withQa(report.value.markdown, { markdown: out.markdown, verdict: out.verdict, open: out.open }, out.necessity);
+  // review.html and review-appendix.html are rendered from report.json as written, qa.json and necessity.json (design §6.11).
+  const pages = htmlPagesFrom(report.value.json, out.json, necessity !== undefined ? necessityJson(necessity) : undefined);
+  if (pages === undefined) return { problem: "review.html cannot be rendered: report.json is not a change report" };
+  const html = pages.review;
+  const appendix = pages.appendix;
+  const texts = { json: out.json, markdown, html, appendix };
+  const qa = [...qaWriteCommands(out.json, markdown), ...htmlWriteCommands(html, true), ...appendixWriteCommands(appendix, true)];
   const read = ledgerRead(evidence);
   if (read === undefined) return { qa, texts, problem: "the ledger value Fetch read is not in the evidence" };
   const old = oldValue(read.ledger);

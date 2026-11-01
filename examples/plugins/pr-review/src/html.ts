@@ -2,22 +2,24 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 /**
- * The HTML report (design §6.11): `review.html`, one self-contained file rendered by plugin code from `report.json`,
- * `qa.json`, `necessity.json` and the measurement records, at the points `review.md` is written. No model writes
+ * The HTML report (design §6.11): `review.html`, a one-page briefing, and `review-appendix.html`, everything else, two
+ * self-contained files rendered by plugin code from `report.json`, `qa.json`, `necessity.json` and the measurement
+ * records, at the points `review.md` is written. No model writes
  * HTML: the only markup of a model's it holds is the `<svg>` of a diagram the diagram-design skill drew, which
  * `diagramsvg.ts` re-serialized from an allow-list (design §6.10). Everything that came from a model or the pull request is escaped; the file has inline CSS and inline SVG,
  * no script, no external stylesheet, image or font, and its only links are `href`s to the pull request, its commits
- * and its files on GitHub at the pinned head and base. `htmlProblems` enforces that on the written bytes.
+ * and its files on GitHub at the pinned head and base, and to the other of the two report files. `htmlProblems` enforces that on the written bytes.
  */
-import type { Architecture } from "./architecture.js";
-import { architectureSvg } from "./archlayout.js";
+import { CHECK_LISTS, CHECK_TITLES, type Bullet, type FinalBriefing, type FinalFeature } from "./briefing.js";
+import { featureSvg } from "./flowlayout.js";
 import { stateIds, type DiagramsDoc, type DrawnDiagram } from "./diagrams.js";
 import type { FinalItem, RemovedItem, RemovedPart, StateEntry } from "./report.js";
 import { describeChecks } from "./report.js";
 import { clip, esc } from "./escape.js";
 import { changeMapSvg, crapBarSvg, stateDiagramSvg, type BarRow } from "./htmlsvg.js";
 import { brokenNote, effectiveConclusion, NECESSITY_ID, parseNecessityRecord, SKIPPED_NOTE, type NecessityRecord } from "./necessity.js";
-import { DIVE_COLUMNS, DIVE_COMMAND, DIVE_HEADING, DIVE_TEXT, diveRow } from "./dive.js";
+import { DIVE_COLUMNS, DIVE_COMMAND, DIVE_HEADING, DIVE_LINE, DIVE_TEXT, diveRow } from "./dive.js";
+import { hotspots, hotspotText, needAuthor, openQuestions, SCOPE_KINDS, SCOPE_TITLES, scopeText, type Scope } from "./scope.js";
 import { describeReasons, type ModeReason } from "./mode.js";
 import { exceeds, LIMITS, originOf, type Metric } from "./metrics/crap.js";
 import type { MetricsRecord } from "./metrics/record.js";
@@ -39,8 +41,11 @@ export interface ReportDoc {
   notes: string[];
   removed: RemovedItem[];
   removedParts: RemovedPart[];
-  architecture: Architecture;
-  /** The drawings of the diagram job (design §6.10): the skill's embedded SVGs, or the plugin's note; absent in a report written before it existed. */
+  /** The briefing fields the claim check left standing (design §6.1). */
+  briefing: FinalBriefing;
+  /** The lines added and deleted by kind of file, counted by plugin code (design §6.1). */
+  scope: Scope;
+  /** The drawings of the diagram job (design §6.10): the skill's embedded SVGs, or the plugin's note. */
   diagrams?: DiagramsDoc;
   measurements: { tools?: string; coverage?: string[]; mutation?: string; records?: MetricsRecord[]; none?: string };
 }
@@ -141,36 +146,28 @@ const CONCLUSION_CLASS: Record<string, string> = { necessary: "ok", questionable
 const STATUS_CLASS: Record<string, string> = { answered: "ok", "partially answered": "warn", "needs author": "bad" };
 const VERDICT_CLASS: Record<string, string> = { preserves: "ok", breaks: "bad", "not-applicable": "grey", supported: "ok", partial: "warn", unsupported: "bad" };
 
-function details(summary: string, body: string, open = false, cls = ""): string {
-  return `<details${open ? " open" : ""}${cls !== "" ? ` class="${cls}"` : ""}><summary>${summary}</summary><div class="body">${body}</div></details>`;
+function details(summary: string, body: string, open = false, cls = "", id = ""): string {
+  return `<details${id !== "" ? ` id="${esc(id)}"` : ""}${open ? " open" : ""}${cls !== "" ? ` class="${cls}"` : ""}><summary>${summary}</summary><div class="body">${body}</div></details>`;
 }
 
 const para = (text: string): string => `<p>${esc(text)}</p>`;
 
-function card(label: string, value: string, cls = ""): string {
-  return `<div class="card${cls !== "" ? ` ${cls}` : ""}"><div class="label">${esc(label)}</div><div class="value">${value}</div></div>`;
-}
-
 // ---- header ----
 
-function headerHtml(i: HtmlInput, g: Github): string {
+const APPENDIX_HREF = "review-appendix.html";
+const REVIEW_HREF = "review.html";
+
+function headerHtml(i: HtmlInput, g: Github, nav: string): string {
   const r = i.report;
   const added = r.files.reduce((n, f) => n + f.additions, 0);
   const deleted = r.files.reduce((n, f) => n + f.deletions, 0);
-  const conclusion = i.necessity !== undefined ? effectiveConclusion(i.necessity.final) : undefined;
   const mode = r.mode === "large" ? `large: ${describeReasons(r.modeReasons ?? [])}` : "standard";
   const checks = describeChecks(r.checks);
   return [
     `<header class="top"><h1>${esc(`${r.pull.owner}/${r.pull.repo}#${r.pull.number}`)} <span class="title">${esc(r.pull.title)}</span></h1>`,
     `<p class="sub">${r.pull.author !== undefined && r.pull.author !== null ? `by ${esc(r.pull.author)} · ` : ""}<a href="${esc(pullHref(g))}">pull request</a> · head <a href="${esc(commitHref(r.pull.head, g))}"><code>${esc(r.pull.head.slice(0, 12))}</code></a>${r.pull.base !== undefined ? ` · base <a href="${esc(commitHref(r.pull.base, g))}"><code>${esc(r.pull.base.slice(0, 12))}</code></a>` : ""}</p>`,
-    `<div class="cards">`,
-    card("Files", String(r.files.length)),
-    card("Lines", `<span class="plus">+${added}</span> <span class="minus">−${deleted}</span>`),
-    card("Commits", String(r.commits)),
-    card("GitHub checks", esc(checks), /failed/.test(checks) ? "bad" : /pending/.test(checks) ? "warn" : ""),
-    card("Mode", esc(mode), r.mode === "large" ? "warn" : ""),
-    card("N1: is it necessary?", conclusion === undefined ? badge("grey", "pending") : badge(CONCLUSION_CLASS[conclusion] ?? "grey", conclusion), conclusion === undefined ? "" : CONCLUSION_CLASS[conclusion] ?? ""),
-    `</div></header>`,
+    `<p class="sub">${r.files.length} files · <span class="plus">+${added}</span> <span class="minus">−${deleted}</span> · ${r.commits} commits · GitHub checks: ${esc(checks)} · mode: ${esc(mode)} · ${nav}</p>`,
+    `</header>`,
   ].join("\n");
 }
 
@@ -223,20 +220,57 @@ function necessityHtml(n: NecessityRecord | undefined, g: Github): string {
     n.decision.action === "ask-all" && n.decision.override === true ? para("Override: the operator asked for every question, so none was skipped.") : "",
     ...(a.notes.length > 0 ? [para(`Note: ${a.notes.join("; ")}.`)] : []),
   ].join("\n");
-  return details(`<h2>Necessity</h2> ${badge(CONCLUSION_CLASS[conclusion] ?? "grey", conclusion)}`, body, true, "sec");
+  // The briefing's open questions link N1 here (`#q-N1`), as they link every other question to its answer.
+  return details(`<h2>Necessity</h2> ${badge(CONCLUSION_CLASS[conclusion] ?? "grey", conclusion)}`, body, true, "sec", `q-${NECESSITY_ID}`);
 }
 
-// ---- summary and architecture ----
+// ---- briefing ----
 
-function summaryHtml(r: ReportDoc): string {
+const citesHtml = (cites: readonly Bullet["cites"][number][], g: Github): string => `<span class="cites">${cites.map((c) => citeLink(g, c)).join(" ")}</span>`;
+
+function purposeHtml(r: ReportDoc): string {
   const why = (id: string): string => clip(r.removedParts.find((p) => p.id === id)?.reason ?? "", 200);
   const p = r.summary.purpose;
-  const purpose =
-    p === null
-      ? para(`Purpose: not given; the claim check could not support it (${why("purpose")}).`)
-      : `<p><strong>Purpose</strong> ${badge(p.source === "stated" ? "ok" : "grey", p.source)} ${esc(p.text)}${p.source === "stated" ? ` <span class="muted">“${esc(clip(p.quote, 240))}”</span>` : ""}</p>`;
-  const overview = r.summary.overview === null ? para(`Overview: not given; the claim check could not support it (${why("overview")}).`) : `<p><strong>Overview</strong> ${esc(r.summary.overview)}</p>`;
-  return details("<h2>Summary</h2>", purpose + overview, true, "sec");
+  return p === null
+    ? para(`Purpose: not given; the claim check could not support it (${why("purpose")}).`)
+    : `<p class="lead"><strong>Purpose</strong> ${badge(p.source === "stated" ? "ok" : "grey", p.source)} ${esc(p.text)}${p.source === "stated" ? ` <span class="muted">“${esc(clip(p.quote, 240))}”</span>` : ""}</p>`;
+}
+
+function overviewHtml(r: ReportDoc): string {
+  const why = (id: string): string => clip(r.removedParts.find((p) => p.id === id)?.reason ?? "", 200);
+  return r.summary.overview === null ? para(`Overview: not given; the claim check could not support it (${why("overview")}).`) : `<p><strong>Overview</strong> ${esc(r.summary.overview)}</p>`;
+}
+
+function whatsNewHtml(b: FinalBriefing, g: Github): string {
+  return b.whatsNew.length === 0 ? para("None stated.") : `<ul class="plain new">${b.whatsNew.map((w) => `<li>${esc(w.text)} ${citesHtml(w.cites, g)}</li>`).join("")}</ul>`;
+}
+
+function scopeHtml(sc: Scope): string {
+  const total = SCOPE_KINDS.reduce((n, k) => ({ files: n.files + sc[k].files, added: n.added + sc[k].added, deleted: n.deleted + sc[k].deleted }), { files: 0, added: 0, deleted: 0 });
+  const rows = SCOPE_KINDS.map((k) => `<tr><th>${esc(SCOPE_TITLES[k])}</th><td>${sc[k].files}</td><td class="plus">+${sc[k].added}</td><td class="minus">−${sc[k].deleted}</td></tr>`);
+  return `<table class="scope"><thead><tr><th></th><th>Files</th><th>Added</th><th>Deleted</th></tr></thead><tbody>${rows.join("")}<tr class="total"><th>Total</th><td>${total.files}</td><td class="plus">+${total.added}</td><td class="minus">−${total.deleted}</td></tr></tbody></table>`;
+}
+
+/** N1's conclusion, the principles touched with their verdicts (design §7.5.1), and how many questions need the author. */
+function verdictHtml(i: HtmlInput): string {
+  const n = i.necessity;
+  const conclusion = n !== undefined ? effectiveConclusion(n.final) : undefined;
+  const principles = n?.final.necessity?.principles ?? [];
+  const asked = (i.qa?.questions ?? []).filter((q) => q.id !== NECESSITY_ID);
+  const need = needAuthor(asked);
+  return [
+    `<div class="verdict">`,
+    `<div><span class="label">N1: is it necessary?</span> ${conclusion === undefined ? badge("grey", "pending") : badge(CONCLUSION_CLASS[conclusion] ?? "grey", conclusion)}</div>`,
+    `<div><span class="label">Principles touched</span> ${n === undefined ? badge("grey", "pending") : principles.length === 0 ? `<span class="muted">none</span>` : principles.map((p) => `<span title="${esc(clip(p.explanation, 200))}">${badge(VERDICT_CLASS[p.verdict] ?? "grey", `${p.id}: ${p.verdict}`)}</span>`).join(" ")}</div>`,
+    `<div><span class="label">Questions that need the author</span> ${i.qa === undefined ? badge("grey", "pending") : badge(need > 0 ? "bad" : "ok", String(need))}</div>`,
+    `</div>`,
+  ].join("");
+}
+
+function briefingHtml(i: HtmlInput, g: Github): string {
+  const r = i.report;
+  const body = [purposeHtml(r), `<h3>What's new</h3>`, whatsNewHtml(r.briefing, g), `<h3>Scope that matters</h3>`, scopeHtml(r.scope), `<h3>Verdict</h3>`, verdictHtml(i)].join("");
+  return details("<h2>Briefing</h2>", body, true, "sec");
 }
 
 /** A drawing of the skill (inline, in its scrolling wrapper), or the plugin's own with the note of why (design §6.10, §6.11). */
@@ -245,10 +279,67 @@ function drawing(d: DrawnDiagram | undefined, own: () => string): { svg: string;
   return { svg: own(), note: d?.via === "plugin" ? para(d.note) : "" };
 }
 
-function architectureHtml(a: Architecture, d: DrawnDiagram | undefined): string {
-  const { svg, note } = drawing(d, () => architectureSvg(a));
-  const body = svg === "" ? para("None: the report draws no component.") : `${note}<div class="scroll">${svg}</div>`;
-  return details(`<h2>Architecture</h2> <span class="muted">${a.nodes.length} components, ${a.edges.length} connections</span>`, body, true, "sec");
+function featureHtml(f: FinalFeature, d: DrawnDiagram | undefined, g: Github, uid: string): string {
+  const { svg, note } = drawing(d, () => featureSvg(f, uid));
+  const label = new Map(f.stages.map((s) => [s.id, s.label] as const));
+  return [
+    `<div class="feature" id="${esc(f.id)}"><h4><span class="rid">${esc(f.id)}</span> ${esc(f.name)}</h4>`,
+    `<p>${esc(f.summary)}</p>`,
+    note,
+    `<div class="scroll">${svg}</div>`,
+    `<details class="steps"><summary>Stages and flows, with their cites</summary><ul class="plain">${f.stages.map((s) => `<li>${esc(s.label)} <span class="muted">(${esc(s.kind)})</span> ${citeLink(g, s.cite)}</li>`).join("")}${f.flows.map((fl) => `<li>${esc(label.get(fl.from) ?? fl.from)} → ${esc(label.get(fl.to) ?? fl.to)}: ${esc(fl.label)} ${citeLink(g, fl.cite)}</li>`).join("")}</ul></details>`,
+    `</div>`,
+  ].join("");
+}
+
+function featuresHtml(r: ReportDoc, g: Github): string {
+  const fs = r.briefing.features;
+  const body = fs.length === 0 ? para("None: the report names no new feature with a data path.") : fs.map((f, k) => featureHtml(f, r.diagrams?.features[f.id], g, `fl${k + 1}`)).join("");
+  return details(`<h2>Data flow per new feature</h2> <span class="muted">${fs.length} feature${fs.length === 1 ? "" : "s"}</span>`, body, true, "sec");
+}
+
+function checkHtml(b: FinalBriefing, g: Github): string {
+  const lists = CHECK_LISTS.map((l) => `<h4>${esc(CHECK_TITLES[l])}</h4>${b.check[l].length === 0 ? para("None.") : `<ul class="plain">${b.check[l].map((e) => `<li>${esc(e.text)} ${citesHtml(e.cites, g)}</li>`).join("")}</ul>`}`);
+  return details("<h2>What you need to check</h2>", lists.join(""), true, "sec");
+}
+
+function hotspotsHtml(r: ReportDoc, g: Github): string {
+  const m = r.measurements;
+  if (m.none !== undefined) return details("<h2>Hotspots</h2>", para(m.none === "not measured" ? "Not measured: the static metrics did not complete." : `No function is measured: ${m.none}.`), true, "sec");
+  const top = hotspots(m.records ?? []);
+  const body = top.length === 0 ? para("No production function added or modified.") : `<ol class="plain">${top.map((h) => `<li>${esc(hotspotText(h))} ${link(blobHref(g, "head", h.path, h.startLine, h.startLine), `${h.path}:${h.startLine}`)}</li>`).join("")}</ol>`;
+  return details("<h2>Hotspots</h2>", `${para("The five functions with the highest CRAP, then complexity. The full table is in the appendix.")}${body}`, true, "sec");
+}
+
+/** The areas of a large report, one line each; for any other report the sections and how many items each holds (design §6.1). */
+function areasHtml(r: ReportDoc): string {
+  const labels = new Map(r.briefing.areas.map((a) => [a.id, a.label] as const));
+  const areas = r.mode === "large" ? (r.areas ?? []) : [];
+  if (areas.length > 1) {
+    const rows = areas.map((a) => `<tr>${diveRow(a, labels.get(a.id)).map((cellValue) => `<td>${esc(cellValue)}</td>`).join("")}</tr>`);
+    const body = [para(DIVE_TEXT), `<pre><code>${esc(DIVE_COMMAND)}</code></pre>`, `<div class="scroll"><table class="dive"><thead><tr>${DIVE_COLUMNS.map((c) => `<th>${esc(c)}</th>`).join("")}</tr></thead><tbody>${rows.join("")}</tbody></table></div>`].join("");
+    return details(`<h2>Areas</h2> <span class="muted">${esc(DIVE_HEADING.toLowerCase())}</span>`, body, true, "sec");
+  }
+  const sections = r.sections.filter((s) => s.id !== "measurements" && s.items.length > 0);
+  const list = sections.length === 0 ? para("No change item.") : `<ul class="plain">${sections.map((s) => `<li>${esc(s.title)}: ${s.items.length} item${s.items.length === 1 ? "" : "s"}</li>`).join("")}</ul>`;
+  return details("<h2>Areas</h2>", `${list}${para(DIVE_LINE)}<pre><code>${esc(DIVE_COMMAND)}</code></pre>`, true, "sec");
+}
+
+/** Only the questions that need a person; answered ones are a count, with a link to the appendix. */
+function openQuestionsHtml(i: HtmlInput): string {
+  const qa = i.qa;
+  if (qa === undefined) return details(`<h2>Open questions</h2> ${badge("grey", "pending")}`, para("The Questions and Answers stages follow the report; this file is rewritten when the answers are checked."), true, "sec");
+  const n1 = i.necessity !== undefined ? effectiveConclusion(i.necessity.final) : undefined;
+  const sel = openQuestions(qa.questions, { id: NECESSITY_ID, conclusion: n1 });
+  const rows = sel.open.map((q) => {
+    const status = q.answer?.status ?? "not answered";
+    return `<li><a href="${APPENDIX_HREF}#q-${esc(q.id)}"><strong>${esc(q.id)}</strong></a> <span class="muted">[${esc(q.type)}]</span> ${badge(STATUS_CLASS[status] ?? "grey", status)} ${esc(clip(q.text, 200))}${q.answer !== undefined ? ` <div class="muted">${esc(clip(q.answer.answer, 240))}</div>` : ""}</li>`;
+  });
+  const body = [
+    sel.open.length === 0 ? para("No question needs a person.") : `<ul class="plain open">${rows.join("")}</ul>`,
+    para(`${sel.answered} answered — see the appendix.`),
+  ].join("");
+  return details(`<h2>Open questions</h2> <span class="muted">${sel.open.length} of ${sel.total}</span>`, body, true, "sec");
 }
 
 // ---- change map ----
@@ -324,15 +415,7 @@ function itemsHtml(r: ReportDoc, c: Ctx): string {
     const body = s.items.length === 0 ? para("None") : s.items.map((i) => itemHtml(i, r.removedParts, c)).join("");
     out.push(details(`<h3>${esc(s.title)}</h3> <span class="muted">${s.items.length} item${s.items.length === 1 ? "" : "s"}</span>`, body, s.items.length > 0, "group"));
   }
-  if (r.mode === "large" && r.areas !== undefined) out.push(diveInHtml(r.areas));
-  return details("<h2>Report</h2>", out.join(""), true, "sec");
-}
-
-/** The block that ends a large report: the areas and the command that opens the reporter's session (design §6.9). */
-function diveInHtml(areas: NonNullable<ReportDoc["areas"]>): string {
-  const rows = areas.map((a) => `<tr>${diveRow(a).map((cellValue) => `<td>${esc(cellValue)}</td>`).join("")}</tr>`);
-  const body = [para(DIVE_TEXT), `<pre><code>${esc(DIVE_COMMAND)}</code></pre>`, `<div class="scroll"><table class="dive"><thead><tr>${DIVE_COLUMNS.map((c) => `<th>${esc(c)}</th>`).join("")}</tr></thead><tbody>${rows.join("")}</tbody></table></div>`].join("");
-  return details(`<h3>${esc(DIVE_HEADING)}</h3>`, body, true, "group");
+  return details("<h2>Change items</h2>", out.join(""), true, "sec");
 }
 
 // ---- measurements ----
@@ -434,7 +517,7 @@ function qaHtml(r: ReportDoc, qa: QaDoc | undefined, g: Github): string {
           const status = q.answer?.status ?? "not answered";
           const open = status === "needs author";
           const where = q.symbol !== undefined ? ` <span class="muted">${esc(q.symbol)}</span>` : q.function !== undefined ? ` <span class="muted">${esc(q.function)}</span>` : "";
-          return details(`<strong>${esc(q.id)}</strong> <span class="muted">[${esc(q.type)}]</span> ${badge(STATUS_CLASS[status] ?? "grey", status)}${where} ${esc(clip(q.text, 160))}`, `<p class="q">${esc(q.text)}</p>${q.answer !== undefined ? answerHtml(q.answer, g) : para("Not answered.")}`, open, "qa");
+          return details(`<strong>${esc(q.id)}</strong> <span class="muted">[${esc(q.type)}]</span> ${badge(STATUS_CLASS[status] ?? "grey", status)}${where} ${esc(clip(q.text, 160))}`, `<p class="q">${esc(q.text)}</p>${q.answer !== undefined ? answerHtml(q.answer, g) : para("Not answered.")}`, open, "qa", `q-${q.id}`);
         })
         .join("");
       return `<div class="qgroup"><h4>${item === "" ? "Other questions" : `<span class="rid">${esc(item)}</span> ${esc(clip(it?.text ?? "", 140))}`}</h4>${inner}</div>`;
@@ -490,39 +573,93 @@ td.ok{background:var(--okbg)}td.bad{background:var(--badbg)}td.warn{background:v
 .bar{height:8px;background:#e1e6ea;border-radius:4px;margin-top:4px;min-width:100px}.bar .fill{height:8px;background:#3f86c9;border-radius:4px}
 pre{background:#eef1f4;border:1px solid var(--line);border-radius:6px;padding:8px 12px;overflow-x:auto}pre code{background:none;padding:0}
 ul.plain{margin:4px 0;padding-left:20px}ol.trace{padding-left:22px}.lead{font-size:16px}.qgroup{margin:10px 0}.q{font-weight:600}
+.verdict{display:flex;flex-wrap:wrap;gap:8px 28px;margin:6px 0}.verdict .label{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);margin-right:6px}
+table.scope{width:auto;min-width:420px}table.scope th{text-align:left;font-weight:600;background:#f6f8fa}table.scope tr.total th,table.scope tr.total td{border-top:2px solid var(--line);font-weight:600}
+.feature{border-top:1px dashed var(--line);margin-top:10px;padding-top:2px}.feature:first-child{border-top:0;margin-top:0}
+ul.new li{margin:4px 0}ul.open li{margin:8px 0}.foot{margin:18px 0 0;font-size:15px}
 @media (max-width:700px){main{padding:10px 8px}.card{min-width:100px}}
 `;
 
-/** The whole `review.html` (design §6.11). */
-export function renderReviewHtml(i: HtmlInput): string {
+function page(i: HtmlInput, g: Github, nav: string, parts: string[]): string {
   const r = i.report;
-  const g: Github = { owner: r.pull.owner, repo: r.pull.repo, head: r.pull.head, base: r.pull.base, number: r.pull.number };
-  const c: Ctx = { g, files: r.files, diagrams: 0, drawn: r.diagrams };
   return [
     "<!doctype html>",
     `<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${esc(`${r.pull.owner}/${r.pull.repo}#${r.pull.number}: ${r.pull.title}`)}</title><style>${CSS}</style></head>`,
     `<body><main>`,
-    headerHtml(i, g),
-    necessityHtml(i.necessity, g),
-    summaryHtml(r),
-    architectureHtml(r.architecture, r.diagrams?.arch),
-    changeMapHtml(r),
-    itemsHtml(r, c),
-    measurementsHtml(r),
-    qaHtml(r, i.qa, g),
-    removedHtml(r),
+    headerHtml(i, g, nav),
+    ...parts,
     `</main></body></html>`,
     "",
   ].join("\n");
 }
 
+const githubOf = (r: ReportDoc): Github => ({ owner: r.pull.owner, repo: r.pull.repo, head: r.pull.head, base: r.pull.base, number: r.pull.number });
+
+/** The whole `review.html` (design §6.11): the briefing, one page, then a link to the appendix. */
+export function renderReviewHtml(i: HtmlInput): string {
+  const r = i.report;
+  const g = githubOf(r);
+  return page(i, g, `<a href="${APPENDIX_HREF}">appendix</a>`, [
+    briefingHtml(i, g),
+    featuresHtml(r, g),
+    checkHtml(r.briefing, g),
+    hotspotsHtml(r, g),
+    areasHtml(r),
+    openQuestionsHtml(i),
+    `<p class="foot"><a href="${APPENDIX_HREF}">Appendix: every change item, the full measurements, the claim check's removals, and the whole Q&amp;A</a></p>`,
+  ]);
+}
+
+/** The whole `review-appendix.html` (design §6.11): everything the briefing leaves out. */
+export function renderAppendixHtml(i: HtmlInput): string {
+  const r = i.report;
+  const g = githubOf(r);
+  const c: Ctx = { g, files: r.files, diagrams: 0, drawn: r.diagrams };
+  return page(i, g, `<a href="${REVIEW_HREF}">briefing</a>`, [
+    `<p class="foot"><a href="${REVIEW_HREF}">Back to the briefing</a></p>`,
+    details("<h2>Summary</h2>", overviewHtml(r), true, "sec"),
+    necessityHtml(i.necessity, g),
+    changeMapHtml(r),
+    itemsHtml(r, c),
+    measurementsHtml(r),
+    qaHtml(r, i.qa, g),
+    removedHtml(r),
+    `<p class="foot"><a href="${REVIEW_HREF}">Back to the briefing</a></p>`,
+  ]);
+}
+
 /** `review.html` rendered from the text of `report.json`, and of `qa.json` and `necessity.json` once they exist; undefined when `report.json` is not a report. */
 export function reviewHtmlFrom(reportJson: string, qaJson?: string, necessityJson?: string): string | undefined {
+  const input = htmlInputFrom(reportJson, qaJson, necessityJson);
+  return input === undefined ? undefined : renderReviewHtml(input);
+}
+
+/** `review-appendix.html` rendered from the same documents. */
+export function appendixHtmlFrom(reportJson: string, qaJson?: string, necessityJson?: string): string | undefined {
+  const input = htmlInputFrom(reportJson, qaJson, necessityJson);
+  return input === undefined ? undefined : renderAppendixHtml(input);
+}
+
+/** The pages last rendered: the graph and its validators ask for the same pages of the same documents at every step of a write, and rendering is a pure function of them. */
+const rendered = new Map<string, { review: string; appendix: string } | undefined>();
+
+/** Both files rendered from the same documents, which are parsed once. */
+export function htmlPagesFrom(reportJson: string, qaJson?: string, necessityJson?: string): { review: string; appendix: string } | undefined {
+  const key = `${reportJson}\u0000${qaJson ?? ""}\u0000${necessityJson ?? ""}`;
+  if (rendered.has(key)) return rendered.get(key);
+  const input = htmlInputFrom(reportJson, qaJson, necessityJson);
+  const pages = input === undefined ? undefined : { review: renderReviewHtml(input), appendix: renderAppendixHtml(input) };
+  if (rendered.size >= 4) rendered.delete(rendered.keys().next().value!);
+  rendered.set(key, pages);
+  return pages;
+}
+
+function htmlInputFrom(reportJson: string, qaJson?: string, necessityJson?: string): HtmlInput | undefined {
   const report = parseReportDoc(reportJson);
   if (report === undefined) return undefined;
   const qa = qaJson === undefined ? undefined : parseQaDoc(qaJson);
   const necessity = necessityJson === undefined ? undefined : parseNecessityRecord(necessityJson);
-  return renderReviewHtml({ report, ...(qa !== undefined ? { qa } : {}), ...(necessity !== undefined ? { necessity } : {}) });
+  return { report, ...(qa !== undefined ? { qa } : {}), ...(necessity !== undefined ? { necessity } : {}) };
 }
 
 // ---- the inertness check ----
@@ -560,6 +697,7 @@ export function htmlProblems(html: string, github: { owner: string; repo: string
   const rootRe = `https://github\\.com/${github.owner.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/${github.repo.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`;
   const shas = [github.head, ...(github.base !== undefined ? [github.base] : [])].map((s) => s.replace(/[^0-9a-f]/gi, ""));
   const allowed = new RegExp(`^${rootRe}/(?:pull/\\d+|commit/(?:${shas.join("|")})|blob/(?:${shas.join("|")})/[^\\s"<>]*)$`);
+  const local = /^(?:review|review-appendix)\.html(?:#[A-Za-z0-9_.:-]+)?$/;
   const badCss = (css: string): string | undefined => {
     if (/@import/i.test(css)) return "@import";
     if (/url\(\s*(?!["']?#)/i.test(css)) return "a url( that is not a reference inside the document";
@@ -606,7 +744,7 @@ export function htmlProblems(html: string, github: { owner: string; repo: string
       }
       if (key === "href") {
         if (name !== "a") add(`href on <${name}>`);
-        else if (!allowed.test(value.replace(/&amp;/g, "&"))) add(`a link to ${JSON.stringify(value.length > 80 ? `${value.slice(0, 79)}…` : value)}, which is not the pull request, a commit or a file of it at the pinned head or base`);
+        else if (!allowed.test(value.replace(/&amp;/g, "&")) && !local.test(value)) add(`a link to ${JSON.stringify(value.length > 80 ? `${value.slice(0, 79)}…` : value)}, which is not the pull request, a commit or a file of it at the pinned head or base, or the report's own briefing or appendix`);
         continue;
       }
       if (URL_ATTRS.has(key) && /^[\s\u0000-\u001f]*(javascript|data|vbscript):/i.test(value)) add(`the attribute ${key} holds a script or data URL`);

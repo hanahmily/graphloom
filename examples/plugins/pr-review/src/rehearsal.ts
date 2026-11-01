@@ -24,8 +24,10 @@ import { baseTargets, withOutcome, withUnknownCoverage } from "./measurements.js
 import { goFunctionCoverage, parseCoverageReport } from "./metrics/coverage.js";
 import type { FileIndex, MetricsRecord } from "./metrics/record.js";
 import { largeContext } from "./large.js";
-import { architecturePlan, EMPTY_ARCHITECTURE, treeQuotePlan, type Architecture } from "./architecture.js";
-import { partitionAreas } from "./areas.js";
+import type { Bullet, Briefing, Feature } from "./briefing.js";
+import { treeQuotePlan } from "./treequotes.js";
+import { isTestFile } from "./scope.js";
+import { partitionAreas, type Partition } from "./areas.js";
 import { reportMode, type ReviewMode } from "./mode.js";
 import { claimTargets, readClaimCheck, type ClaimTarget } from "./claims.js";
 import { ALPHA_GO, BETA_GO, GENERATED_GO, GUIDE_MD, LARGE_HEAD_FILES, LARGE_LIMITS, largeDoc, OMITTED_PATH } from "./rehearsal-large.js";
@@ -412,8 +414,11 @@ function candidateEntry(c: ReturnType<typeof detectStateCandidates>[number]): St
   };
 }
 
+/** The reporter's output without its briefing: the purpose, the overview, the sections and the notes. */
+type Core = Omit<ReporterOutput, keyof Briefing>;
+
 /** A valid report for these files and facts: one item per file with facts, a narrative item for the others, a lifecycle entry for each piece of state the scan finds. */
-function goodReport(files: readonly PullFile[], facts: readonly Fact[], sectionIds: readonly string[], notes: string[], pull: { title: string }): ReporterOutput {
+function goodReport(files: readonly PullFile[], facts: readonly Fact[], sectionIds: readonly string[], notes: string[], pull: { title: string }): Core {
   const sections = sectionIds.map((id) => ({ id, none: true, items: [] as ReportItem[] }));
   const by = new Map(sections.map((s) => [s.id, s]));
   const cited = new Set<string>();
@@ -454,74 +459,72 @@ function goodReport(files: readonly PullFile[], facts: readonly Fact[], sectionI
     overview: files.length > 8 ? `This pull request changes ${files.length} files, described below by the conceptual change they belong to.` : `This pull request changes ${files.length} file${files.length === 1 ? "" : "s"}: ${files.map((f) => f.path).join(", ")}. Each change is described below.`,
     sections,
     notes,
-    architecture: EMPTY_ARCHITECTURE,
   };
 }
 
-/** The first added line of a file, as an architecture cite. */
-function archCite(files: readonly PullFile[], path: string, side: "head" | "base" = "head"): { path: string; side: "head" | "base"; start: number; end: number } {
+/** The first added line of a file, as a cite. */
+function archCite(files: readonly PullFile[], path: string, side: "head" | "base" = "head"): Cite {
   const file = files.find((f) => f.path === path);
   const line = file?.parsed.lines.find((l) => (side === "head" ? l.kind === "add" : l.kind === "del"));
-  return { path, side, start: line?.line ?? 1, end: line?.line ?? 1 };
+  return { path, side, start: line?.line ?? 1, end: line?.line ?? 1, symbol: "" };
 }
 
-/** The diagram of the large pull request: the two packages it adds, and the import between them (design §6.10). */
-function largeArchitecture(files: readonly PullFile[]): Architecture {
-  if (!files.some((f) => f.path === "pkg/beta/beta.go") || !files.some((f) => f.path === "pkg/alpha/alpha.go")) return EMPTY_ARCHITECTURE;
+/** The data flow of the large pull request: the second package it adds applies the first (design §6.10). */
+function largeFeatures(files: readonly PullFile[]): Feature[] {
+  if (!files.some((f) => f.path === "pkg/beta/beta.go") || !files.some((f) => f.path === "pkg/alpha/alpha.go")) return [];
+  return [
+    {
+      name: "Alpha rules applied by beta",
+      summary: "The beta package applies the rules the alpha package defines.",
+      stages: [
+        { id: "alpha", label: "pkg/alpha rules", kind: "source", cite: archCite(files, "pkg/alpha/alpha.go") },
+        { id: "beta", label: "pkg/beta applier", kind: "process", cite: archCite(files, "pkg/beta/beta.go") },
+      ],
+      flows: [{ from: "alpha", to: "beta", label: "applies Alpha1", cite: { path: "pkg/beta/beta.go", side: "head", start: 3, end: 3, symbol: "" } }],
+    },
+  ];
+}
+
+/** The data flow of the retention pull request: the flag sets the group's retention, and the server schedules the sweep with a library (design §6.10). */
+function retentionFeatures(files: readonly PullFile[]): Feature[] {
+  const at = (line: number): Cite => ({ path: "banyand/cmd/server/flags.go", side: "head", start: line, end: line, symbol: "" });
+  return [
+    {
+      name: "Nightly retention sweep",
+      summary: "A retention flag sets how long a group keeps data, and the server sweeps expired data every night.",
+      stages: [
+        { id: "flag", label: "retention_days flag", kind: "source", cite: at(14) },
+        { id: "schema", label: "Group retention_days", kind: "store", cite: archCite(files, "api/proto/banyandb/common/v1/common.proto") },
+        { id: "sweep", label: "Nightly sweep", kind: "process", cite: at(16) },
+        { id: "cron", label: "robfig/cron scheduler", kind: "external", cite: archCite(files, "go.mod") },
+      ],
+      flows: [
+        { from: "flag", to: "schema", label: "sets retention_days from the flag", cite: at(14) },
+        { from: "flag", to: "sweep", label: "schedules the nightly sweep", cite: at(16) },
+        { from: "cron", to: "sweep", label: "runs the schedule", cite: archCite(files, "go.mod") },
+      ],
+    },
+  ];
+}
+
+/** The briefing a reporter would give for a report's items: what is new and what to check from the items, the features, and a label for each area. */
+function briefingFor(core: Core, features: Feature[], partition: Partition | undefined): Briefing {
+  const items = core.sections.flatMap((s) => s.items.map((item) => ({ section: s.id, item })));
+  const bullet = (i: ReportItem): Bullet => ({ text: i.text.slice(0, 220), cites: i.cites.slice(0, 2) });
+  const pick = (ids: readonly string[], n: number): Bullet[] => items.filter((x) => ids.includes(x.section)).slice(0, n).map((x) => bullet(x.item));
+  const news = items.filter((x) => x.section !== "other" && x.section !== "claims").slice(0, 3);
   return {
-    nodes: [
-      { id: "alpha", label: "pkg/alpha", kind: "package", change: "added", paths: ["pkg/alpha"], cite: archCite(files, "pkg/alpha/alpha.go") },
-      { id: "beta", label: "pkg/beta", kind: "package", change: "added", paths: ["pkg/beta"], cite: archCite(files, "pkg/beta/beta.go") },
-    ],
-    edges: [{ from: "beta", to: "alpha", label: "applies Alpha1", kind: "import", change: "added", cite: { path: "pkg/beta/beta.go", side: "head", start: 3, end: 3 } }],
+    whatsNew: (news.length > 0 ? news : items.slice(0, 1)).map((x) => bullet(x.item)),
+    features,
+    check: {
+      surfaces: pick(["interfaces", "config"], 2),
+      behavior: pick(["features"], 1),
+      compatibility: pick(["schema"], 1),
+      risks: [],
+      tests: items.filter((x) => x.item.cites.some((c) => isTestFile(c.path))).slice(0, 2).map((x) => bullet(x.item)),
+    },
+    areas: partition === undefined ? [] : partition.areas.map((a) => ({ id: a.id, label: a.kind === "generated" ? "generated code" : `changes under ${a.name}` })),
   };
-}
-
-/** The diagram of the retention pull request: the server command, the schema field it reads, and the library it schedules with (design §6.10). */
-function retentionArchitecture(files: readonly PullFile[]): Architecture {
-  return {
-    nodes: [
-      { id: "server", label: "Server command", kind: "cli", change: "modified", paths: ["banyand/cmd/server"], cite: archCite(files, "banyand/cmd/server/flags.go") },
-      { id: "schema", label: "Group schema", kind: "api", change: "modified", paths: ["api/proto/banyandb/common/v1/common.proto"], cite: archCite(files, "api/proto/banyandb/common/v1/common.proto") },
-      { id: "cron", label: "robfig/cron", kind: "external", change: "added", paths: ["go.mod"], cite: archCite(files, "go.mod") },
-      { id: "liaison", label: "Liaison gRPC API", kind: "api", change: "unchanged", paths: ["banyand/liaison/grpc"], cite: { path: "banyand/liaison/grpc/server.go", side: "base", start: 1, end: 5 } },
-    ],
-    edges: [
-      { from: "server", to: "cron", label: "schedules the nightly sweep", kind: "call", change: "added", cite: { path: "banyand/cmd/server/flags.go", side: "head", start: 16, end: 16 } },
-      { from: "server", to: "schema", label: "sets retention_days from the flag", kind: "data", change: "added", cite: { path: "banyand/cmd/server/flags.go", side: "head", start: 14, end: 14 } },
-      { from: "liaison", to: "schema", label: "serves Group", kind: "rpc", change: "unchanged", cite: { path: "banyand/liaison/grpc/server.go", side: "base", start: 1, end: 5 } },
-    ],
-  };
-}
-
-/**
- * The tree check's canned output for a diagram, derived with the plugin's own plan so it cannot drift from the graph:
- * every cite resolves, every unchanged path exists at the base, and a Go package's imports are those of the head files.
- */
-function archStubs(arch: Architecture, base: string, head: Readonly<Record<string, string>>): NonNullable<RehearsalScenario["commands"]> {
-  const plan = architecturePlan(arch, base);
-  const out: NonNullable<RehearsalScenario["commands"]> = {};
-  let offset = 0;
-  plan.commands.forEach((c, k) => {
-    const size = plan.sizes[k]!;
-    const lines: string[] = [];
-    for (let i = 1; i <= size; i += 1) {
-      const e = plan.entries[offset + i - 1]!;
-      if (e.kind !== "imports") {
-        lines.push(`${i} ok`);
-        continue;
-      }
-      for (const file of Object.keys(head).filter((p) => p.endsWith(".go") && (p === e.path || p.startsWith(`${e.path}/`)))) {
-        lines.push(`${i} gofile`);
-        for (const m of head[file]!.matchAll(/^import\s+(?:\w+\s+)?"([^"]+)"/gm)) lines.push(`${i} import ${m[1]}`);
-      }
-      lines.push(`${i} done`);
-    }
-    lines.push(`checked ${size}`);
-    out[c.id] = { exitCode: 0, stdout: `${lines.join("\n")}\n` };
-    offset += size;
-  });
-  return out;
 }
 
 /** A quote the checker would give for a claim: the longest diff line of the cited files, or of any file (the quote's own line number). */
@@ -541,16 +544,10 @@ function quoteFor(cites: readonly Cite[] | undefined, files: readonly PullFile[]
 function checkReply(report: ReporterOutput, files: readonly PullFile[], sections: ReturnType<typeof reporterSections>, unsupported: ReadonlySet<string> = new Set(), treeQuotes = false): RehearsalReply {
   const verdicts = claimTargets(report, { sections }, { treeQuotes }).map((t) => {
     if (unsupported.has(t.id)) return { item: t.id, verdict: "unsupported", note: "the diff does not show this", quotes: [] };
-    const q = t.tree !== undefined ? treeQuoteFor(t) : quoteFor(t.cites, files);
+    const q = quoteFor(t.cites, files);
     return { item: t.id, verdict: "supported", note: "", quotes: q === undefined ? [] : [q] };
   });
   return { output: { verdicts } };
-}
-
-/** The quote a checker gives for an architecture claim: a line of the file its cite names, in the tree it names (a rehearsal's canned tree check says it is there). */
-function treeQuoteFor(t: { cites: readonly Cite[] | undefined }): { path: string; line: number; text: string } | undefined {
-  const c = t.cites?.[0];
-  return c === undefined ? undefined : { path: c.path, line: c.start, text: "a line of the cited file" };
 }
 
 /** The canned output of the quote check for a checker reply, derived with the plugin's own plan: every quote is in its tree. */
@@ -602,7 +599,7 @@ function measuredRecords(doc: { records?: MetricsRecord[]; files?: FileIndex[] }
   });
 }
 
-function build(profile: Profile, pull: Pull, options: { body?: string; notes?: string[]; toolId?: string; corrections?: boolean; qa?: QaSpec; coverage?: string; report?: (files: readonly PullFile[], sectionIds: readonly string[]) => ReporterOutput; architecture?: (files: readonly PullFile[]) => Architecture; unsupported?: string[]; diagrams?: DiagramBehavior }): Built {
+function build(profile: Profile, pull: Pull, options: { body?: string; notes?: string[]; toolId?: string; corrections?: boolean; qa?: QaSpec; coverage?: string; report?: (files: readonly PullFile[], sectionIds: readonly string[]) => Core; features?: (files: readonly PullFile[]) => Feature[]; unsupported?: string[]; diagrams?: DiagramBehavior }): Built {
   const files = pull.files.map((f) => pullFile(fileItem(f))!);
   const facts = detectFacts(files, profile);
   const sections = reporterSections(profile);
@@ -617,7 +614,8 @@ function build(profile: Profile, pull: Pull, options: { body?: string; notes?: s
   const reportable = files.filter((f) => !unread.has(f.path));
   const reportableFacts = facts.filter((f) => !unread.has(f.path));
   const drawn = options.report !== undefined ? options.report(files, sectionIds) : goodReport(reportable, reportableFacts, sectionIds, notes, pull);
-  const good = options.architecture !== undefined ? { ...drawn, architecture: options.architecture(files) } : large && options.report === undefined ? { ...drawn, architecture: largeArchitecture(files) } : drawn;
+  const features = options.features !== undefined ? options.features(files) : large && options.report === undefined ? largeFeatures(files) : [];
+  const good: ReporterOutput = { ...drawn, ...briefingFor(drawn, features, partition) };
   const results: RehearsalScenario["results"] = {};
   /** The report the claim check leaves, and the ids it removed: what the diagrams are drawn from. */
   let left: { report: ReporterOutput; removed: ReadonlySet<string> } = { report: good, removed: new Set(options.unsupported ?? []) };
@@ -675,7 +673,7 @@ function build(profile: Profile, pull: Pull, options: { body?: string; notes?: s
   return {
     scenario: {
       results,
-      commands: { ...commands(pull, options.toolId), ...quoteStubs(results["claim-check-v1"]!.at(-1)!, claimTargets(good, { sections }, { treeQuotes: large }), files), ...archStubs(good.architecture, REHEARSAL_MERGE_BASE, { ...REHEARSAL_HEAD_FILES, ...LARGE_HEAD_FILES }), ...(options.coverage !== undefined ? { "sandbox-go": { exitCode: 0, stdout: "ready\n" }, "cover-go": { exitCode: 0, stdout: options.coverage } } : {}), ...qa.commands, ...diagrams.commands },
+      commands: { ...commands(pull, options.toolId), ...quoteStubs(results["claim-check-v1"]!.at(-1)!, claimTargets(good, { sections }, { treeQuotes: large }), files), ...(options.coverage !== undefined ? { "sandbox-go": { exitCode: 0, stdout: "ready\n" }, "cover-go": { exitCode: 0, stdout: options.coverage } } : {}), ...qa.commands, ...diagrams.commands },
       reads: reads({ ...pull, ...(options.body !== undefined ? { body: options.body } : {}) }),
       expect: { status: "stopped", stopReason: "report ready", receipts: ["fetch", "report", "questions", "answers"] },
     },
@@ -929,7 +927,7 @@ function streamLine(text: string, n = 1): number {
  * the place that increments the counter and the reply it switches are ONE item, with each variable's lifecycle and
  * the three cases whose behavior differs (or deliberately does not).
  */
-function streamReport(files: readonly PullFile[], sectionIds: readonly string[]): ReporterOutput {
+function streamReport(files: readonly PullFile[], sectionIds: readonly string[]): Core {
   const at = (line: number, end = line): Cite => ({ path: STREAM_PATH, side: "head", start: line, end, symbol: "" });
   const changes = files.find((f) => f.path === "CHANGES.md")!;
   const read = { where: "once, after the groups are flushed", decision: "stored == 0 && firstErr != nil switches the reply from success to an INTERNAL_ERROR carrying firstErr", cite: at(streamLine("if stored == 0 && firstErr != nil {")) };
@@ -974,7 +972,6 @@ function streamReport(files: readonly PullFile[], sectionIds: readonly string[])
       return { id, none: items.length === 0, items };
     }),
     notes: [],
-    architecture: EMPTY_ARCHITECTURE,
   };
 }
 
@@ -1113,12 +1110,12 @@ export function rehearsal(config: unknown): GraphRehearsal {
       "necessity-principle-unsupported": build(profile, SYNC_PULL, { toolId: "static-go-1", qa: { ...SYNC_PULL.qa, necessity: { principles: { text: PRINCIPLES_FILE, verdicts: { "offline-idempotent": "breaks" }, checks: { "offline-idempotent": "unsupported" } } } } }).scenario,
       // A #1443-like change: a counter and a first-error variable set in several places and read once. The report is one item with their lifecycles and a before/after table, not one item per hunk.
       "state-lifecycle": build(profile, STREAM_PULL, { toolId: "static-go-1", report: streamReport }).scenario,
-      // The report draws an architecture diagram (design §6.10): its cites are resolved in the trees; the checker does not support one connection, which is dropped and recorded.
-      "architecture-diagram": build(profile, REPORT_PULL, { toolId: "static-go-1", architecture: retentionArchitecture, unsupported: ["A.e2"] }).scenario,
+      // The report names a feature and the path its data takes (design §6.1, §6.10); the checker does not support one flow, which is dropped and recorded.
+      "feature-data-flow": build(profile, REPORT_PULL, { toolId: "static-go-1", features: retentionFeatures, unsupported: ["F1.f2"] }).scenario,
       // The diagram job (design §6.10): a drawing that fails the label rule is corrected once; a skill check that fails is corrected once; drawings that never pass are drawn by the plugin, and the run goes on.
-      "diagram-corrected": build(profile, REPORT_PULL, { toolId: "static-go-1", architecture: retentionArchitecture, unsupported: ["A.e2"], diagrams: "corrected" }).scenario,
+      "diagram-corrected": build(profile, REPORT_PULL, { toolId: "static-go-1", features: retentionFeatures, unsupported: ["F1.f2"], diagrams: "corrected" }).scenario,
       "diagram-skill-check-fails": build(profile, STREAM_PULL, { toolId: "static-go-1", report: streamReport, diagrams: "skill-check-fails" }).scenario,
-      "diagram-fallback": build(profile, REPORT_PULL, { toolId: "static-go-1", architecture: retentionArchitecture, unsupported: ["A.e2"], diagrams: "fallback" }).scenario,
+      "diagram-fallback": build(profile, REPORT_PULL, { toolId: "static-go-1", features: retentionFeatures, unsupported: ["F1.f2"], diagrams: "fallback" }).scenario,
       // A pull request of 1000 data files: report.json and review.html are past one write command, so each is written in parts (design §6.6).
       "large-artifacts": build(profile, ARTIFACTS_PULL, {}).scenario,
     },

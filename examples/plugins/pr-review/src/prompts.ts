@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
-import { ARCHITECTURE_PROMPT } from "./architecture.js";
+import { BRIEFING_NO_AREAS_PROMPT, BRIEFING_PROMPT } from "./briefing.js";
 import { citeLabel, MAX_BEHAVIOR_PER_ITEM, MAX_ITEM_CHARS, MAX_ITEMS_PER_SECTION, MAX_OVERVIEW_CHARS, MAX_PART_CHARS, MAX_STATE_PER_ITEM, type ReporterOutput } from "./report.js";
 import type { StateCandidate } from "./statecandidates.js";
 import type { Fact } from "./detectors.js";
@@ -75,7 +75,11 @@ export function reporterInstruction(a: ReporterAssignment): string {
     "",
     "Describe what the code does, in the present tense, factually. Do not evaluate it: no findings, no severities, no verdict, no recommendation. The result has no field for them.",
     "",
-    "Analyse the change, do not narrate the diff. The maintainer reads your report to learn what the pull request is for and how each change works, not what each hunk says. The report has three layers.",
+    BRIEFING_PROMPT,
+    BRIEFING_NO_AREAS_PROMPT,
+    "A cite of the briefing, like every cite below, names a changed file, the side (head or base) and lines inside the file's hunks.",
+    "",
+    "Analyse the change, do not narrate the diff. The maintainer reads your report to learn what the pull request is for and how each change works, not what each hunk says. After the briefing, the report has three layers; they are the appendix the maintainer opens afterwards.",
     `1. The summary. "purpose" is why the pull request exists: set source to "stated" and quote an excerpt (at least 12 characters, copied exactly) of the title, the body or a commit message, when the pull request's own text says it; otherwise set source to "inferred" with an empty quote and say what the diff implies. "overview" is two to four sentences on the mechanism of the whole change (at most ${MAX_OVERVIEW_CHARS} characters).`,
     "2. Conceptual change items. One item per conceptual change: one behavioral change, however many places in however many files implement it. Its cites list every diff location that implements it, and may span several places and files. Do not split one mechanism across items: a new variable, the places that set it and the place that reads it are one item, not three. Put tests of a change, its changelog entry and its docs in the item they belong to, or in \"other\" when they stand alone. Aim for fewer, coarser items that explain the change, never one item per hunk.",
     `3. Lifecycle and behavior, inside the item. For every new or changed piece of state (a field, counter, flag, cached value or accumulator) give a "state" entry: name; scope ("per call", "per request/batch", "per instance", "global", or other text); initial (its starting value); transitions, each with when (the condition), effect and cite (the line that does it); reads, each with where, decision (what the code decides from the value) and cite. Every transition and every read the diff shows belongs in the entry, in the order they happen; do not leave one out and do not invent one. Where the change alters behavior, give "behavior" rows {case, before, after}: one row per case that differs, plus a row for a case that deliberately stays as it was, when a reader would expect it to change. Use empty arrays for state and behavior when the item has neither. Each text in state and behavior is at most ${MAX_PART_CHARS} characters; at most ${MAX_STATE_PER_ITEM} state entries and ${MAX_BEHAVIOR_PER_ITEM} behavior rows per item.`,
@@ -84,8 +88,6 @@ export function reporterInstruction(a: ReporterAssignment): string {
           `State the patches introduce, found by a deterministic scan (each must have a state entry named for it, in an item that cites its file; if one is not real state, give the entry anyway and say so in initial): ${a.candidates.map((c) => `${c.name} (${c.path}:${c.line}, ${c.kind === "field" ? "a new field" : `declared, changed at line ${c.mutatedAt}`})`).join("; ")}`,
         ]
       : []),
-    "",
-    ARCHITECTURE_PROMPT,
     "",
     "The template. Every section below must appear exactly once in the sections of your result, with its id, either with items or with none set to true. Each item is one conceptual change.",
     ...a.sections.map((s) => sectionText(s, a.facts)),
@@ -108,7 +110,7 @@ export function reporterInstruction(a: ReporterAssignment): string {
           "",
           a.kind === "correction"
             ? "Your previous result failed deterministic validation. Return the whole corrected report; every problem below must be fixed:"
-            : "The claim check could not support the claims below against the diff (ids: purpose, overview, R3 an item, R3.s1 a state entry, R3.s1.t1 a transition, R3.s1.r1 a read, R3.b1 a behavior row, A.store an architecture node, A.e2 an architecture edge). Return the whole revised report: fix each (cite and describe only what the diff shows), or drop it. A claim that stays unsupported is removed from the report: an item, or the whole lifecycle entry or row it belongs to.",
+            : "The claim check could not support the claims below against the diff (ids: purpose, overview, R3 an item, R3.s1 a state entry, R3.s1.t1 a transition, R3.s1.r1 a read, R3.b1 a behavior row, W2 a what's-new bullet, F1 a feature, F1.s2 a stage, F1.f3 a flow, C.risks.1 a check entry). Return the whole revised report: fix each (cite and describe only what the diff shows), or drop it. A claim that stays unsupported is removed from the report: an item, or the whole lifecycle entry or row it belongs to.",
           ...a.feedback.map((f) => `- ${f}`),
         ]),
   ].join("\n");
@@ -139,7 +141,8 @@ export function checkerInstruction(a: CheckerAssignment): string {
     "- overview: judge that it is consistent with the diff and with the items below: it neither claims a mechanism no item describes nor contradicts one.",
     "- An item (R3): what its text says is what the cited diff shows.",
     "- A state entry (R3.s1): the state's name, scope and initial value are what the code shows (for example `stored := 0` is initial 0, per call). Its transitions (R3.s1.t1) and reads (R3.s1.r1) are separate claims: for each transition, the condition in `when` is the condition the code has at the cited line (for example, a counter that increments only after a call succeeds does not increment on the failure path) and the effect is what the line does; for each read, the code at the cited line decides what `decision` says, from this state. Also tell, in the note of the state entry's verdict, if the diff shows a transition or read of that state that the entry leaves out.",
-    "- An architecture node (A.<node id>, for example A.store): the label and paths say what the node is, it has the change it states (added, modified, or unchanged), and the cite shows it. An architecture edge (A.e1, A.e2, in the order listed): the code at the cite makes that connection, of that kind and in that direction. A note from the plugin on an edge, when there is one, says the import it expected is missing; judge whether the cited code makes the connection anyway. The quotes for these claims come from the file the cite names, in the tree it names (the head is the working tree, the base is `git show HEAD:<path>`), at or within three lines of the line you give; the diff need not show them.",
+    "- A what's-new bullet (W1): the cited code provides the capability the bullet names. A check entry (C.surfaces.1, C.behavior.1, C.compatibility.1, C.risks.1, C.tests.1): what the entry says is what the cited code shows (for a behavior entry, that the code path existed before and now behaves so; for a tests entry, that the cited test covers what is said).",
+    "- A feature (F1): its summary is what the data path through its stages shows. A feature's stage (F1.s2, in the order listed): the cited code is that stage of the data's path, of that kind (source: where the data enters, process, transport: a hop over a wire or a queue, store, external, sink). A feature's flow (F1.f3, in the order listed): the cited code moves the data from the one stage to the other, in that direction, as the label says.",
     "- A behavior row (R3.b1): before is what the base code does in that case, after is what the head code does. Judge both from the diff and the files, tracing the cases through the code.",
     "Give a verdict for each: supported when what it says is what the diff or the cited code shows; partial when part of it is shown and part is not, or its citation is wrong; unsupported when the diff does not show it. Check claims only. Do not judge whether the change is good, and do not judge the item's tone or wording.",
     `A supported claim needs one to ${MAX_QUOTES} quotes: path, the line number of the quoted text (on the side the claim cites: head for new text, base for old; for a behavior row, the lines that show its before and after), and text, a verbatim excerpt of at least 8 characters from that line of the diff, copied exactly. The quotes are matched against the diff's own text (unless the scope above says where else they come from), so an excerpt that is not in it makes the claim unsupported. For a claim that cites only files with no patch text, and for a stated purpose, give no quotes. For partial and unsupported claims, note says what is missing in one sentence.`,

@@ -18,7 +18,7 @@ describe("the report scenario, end to end through the graph", () => {
 
   it("fetches, reports, asks, answers, and stops final at `report ready`", () => {
     expect(stopOf(sim)).toMatchObject({ reason: "report ready", retryable: false });
-    expect(stopOf(sim)!.blocker).toMatch(/^the report is \.graphloom\/review\/review\.html; review\.md beside it is its plain-text copy for agents and graphloom session open/);
+    expect(stopOf(sim)!.blocker).toMatch(/^the report is the briefing \.graphloom\/review\/review\.html, with the appendix \.graphloom\/review\/review-appendix\.html; review\.md beside them is the plain-text copy of both for agents and graphloom session open/);
     expect(sim.receipts.filter((r) => r.valid).map((r) => `${r.stageId}/${r.requirementId}`)).toEqual([
       "fetch/pr-snapshot",
       "fetch/head-checked-out",
@@ -36,7 +36,7 @@ describe("the report scenario, end to end through the graph", () => {
     expect(sim.jobs.filter((j) => j.stageId === "fetch" || j.stageId === "report").map((j) => j.instruction.split(" ").slice(0, 3).join(" "))).toEqual([
       "Materialize the pull",
       "Read the changed", "Read the commits", "Read the reviews", "Read the review", "Read the review", "Read the check", "Read the pull",
-      "Read the pull", "Read the design", "Check the Docker", "Write the change", "Check the report's", "List the changed", "Measure the changed", "Read the base", "Measure the modified", "Write .graphloom/review/review.md and", "Write .graphloom/review/review.html",
+      "Read the pull", "Read the design", "Check the Docker", "Write the change", "Check the report's", "List the changed", "Measure the changed", "Read the base", "Measure the modified", "Write .graphloom/review/review.md and", "Write .graphloom/review/review.html", "Write .graphloom/review/review-appendix.html",
     ]);
     expect(sim.jobs.slice(1, 8).map((j) => j.executor!.id)).toEqual([
       "graphloom.github/list-pull-files", "graphloom.github/list-pull-commits", "graphloom.github/list-pull-reviews", "graphloom.github/list-pull-review-comments", "graphloom.github/list-review-threads", "graphloom.github/list-check-runs", "graphloom.github/get-pull",
@@ -140,9 +140,9 @@ describe("the report scenario, end to end through the graph", () => {
     const written = sim.written!;
     const json = JSON.parse(written.json) as Record<string, unknown>;
     expect(json.schema).toBe("pr-change-report-v1");
-    expect(Object.keys(json).sort()).toEqual(["architecture", "checks", "commits", "facts", "files", "measurements", "mode", "notes", "pull", "removed", "removedParts", "schema", "sections", "summary"]);
-    expect(written.markdown).toMatch(/^# apache\/skywalking-banyandb#7 at 0123456789ab \(base fedcba987654\)\nContents: Report · Measurements · Q&A/);
-    expect(written.markdown).toMatch(/\n# Report\n[\s\S]*\n# Measurements\n[\s\S]*\n# Q&A\n/);
+    expect(Object.keys(json).sort()).toEqual(["briefing", "checks", "commits", "facts", "files", "measurements", "mode", "notes", "pull", "removed", "removedParts", "schema", "scope", "sections", "summary"]);
+    expect(written.markdown).toMatch(/^# apache\/skywalking-banyandb#7 at 0123456789ab \(base fedcba987654\)\nContents: Briefing · Appendix \(Report · Measurements · Q&A\)/);
+    expect(written.markdown).toMatch(/\n# Briefing\n[\s\S]*\n# Appendix\n[\s\S]*\n## Report\n[\s\S]*\n## Measurements\n[\s\S]*\n## Q&A\n/);
     expect(written.markdown).not.toMatch(/verdict|severity|request-changes|\bapprove\b/i);
   });
 

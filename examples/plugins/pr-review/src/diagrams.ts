@@ -3,14 +3,14 @@
 
 /**
  * The diagram job (design §6.10, §6.11, §12.3). After the claim check, a read-only agent job draws the checked
- * architecture and every checked lifecycle entry with the vendored diagram-design skill (`diagrams-v1`). Plugin code
+ * data flow of every checked feature and every checked lifecycle entry with the vendored diagram-design skill (`diagrams-v1`). Plugin code
  * then judges each drawing: the skill's own `self_check.py` and `verify-geometry.py` in a confined command job, the
  * inertness of the document and of the `<svg>` the report embeds, and the label rule (every visible text is a label
  * of the data the job was given). One correction goes back to the same session; a drawing that still fails is drawn by
  * the plugin instead, with a note. The graph and the validators ask the same function, `diagramFlow`, over the same evidence.
  */
 import { MAX_EXECUTOR_INPUT_BYTES, type EnvironmentCommand, type EvidenceRecord } from "@graphloom/sdk";
-import type { Architecture } from "./architecture.js";
+import type { FinalFeature } from "./briefing.js";
 import { documentProblems, embeddedSvg, labelProblems, parseSvg, stylesFor, textNodes } from "./diagramsvg.js";
 import { clip } from "./escape.js";
 import { agentRuns, commandRuns, outputTail, succeeded, type AgentRun } from "./evidence.js";
@@ -28,7 +28,7 @@ export const DIAGRAM_CHECK = "diagram-check";
 export const SKILL_DIR = "vendor/diagram-design";
 export const skillMount = (pluginRoot: string): string => `${pluginRoot.replace(/\/+$/, "")}/${SKILL_DIR}`;
 
-/** Most diagrams the job draws: the architecture, then the lifecycle entries in report order; the rest are drawn by the plugin. */
+/** Most diagrams the job draws: the features' data flows, then the lifecycle entries in report order; the rest are drawn by the plugin. */
 export const MAX_DIAGRAMS = 12;
 /** Largest document, in characters, the job may return for one diagram: what one check command can carry, with its JSON escaping. */
 export const MAX_DIAGRAM_BYTES = 160_000;
@@ -54,7 +54,7 @@ export interface StateDrawing {
 
 /** The checked data of a report the diagrams are drawn from: nothing else reaches the job. */
 export interface DiagramInput {
-  arch: Architecture | undefined;
+  features: FinalFeature[];
   states: StateDrawing[];
 }
 
@@ -77,8 +77,8 @@ export function stateIds(item: string, entries: ReadonlyArray<{ name: string }>)
   });
 }
 
-/** What the claim check left of a report: its architecture (when it has a component) and every lifecycle entry. */
-export function diagramInputOf(final: Pick<FinalReport, "architecture" | "sections">): DiagramInput {
+/** What the claim check left of a report: the data flow of each feature and every lifecycle entry. */
+export function diagramInputOf(final: Pick<FinalReport, "briefing" | "sections">): DiagramInput {
   const states: StateDrawing[] = [];
   for (const s of final.sections) {
     for (const item of s.items) {
@@ -86,27 +86,30 @@ export function diagramInputOf(final: Pick<FinalReport, "architecture" | "sectio
       item.state.forEach((entry, i) => states.push({ id: ids[i]!, item: item.id, entry }));
     }
   }
-  return { arch: final.architecture.nodes.length > 0 ? final.architecture : undefined, states };
+  return { features: final.briefing.features, states };
 }
 
 /** One diagram the job is asked for, with the labels it may print and the title and description the plugin writes. */
 export interface DiagramSpec {
+  /** `feature:<feature id>` or `state:<item id>:<entry name>`. */
   id: string;
-  kind: "arch" | "state";
+  kind: "feature" | "state";
   title: string;
   description: string;
   phrases: string[];
 }
 
-export const ARCH_ID = "arch";
+export const featureDiagramId = (feature: string): string => `feature:${feature}`;
 
-function archSpec(a: Architecture): DiagramSpec {
+function featureSpec(f: FinalFeature): DiagramSpec {
+  const first = f.stages[0];
+  const last = f.stages[f.stages.length - 1];
   return {
-    id: ARCH_ID,
-    kind: "arch",
-    title: "Architecture delta",
-    description: `Before and after topology of ${a.nodes.length} component${a.nodes.length === 1 ? "" : "s"} and ${a.edges.length} connection${a.edges.length === 1 ? "" : "s"}, with the changes between them.`,
-    phrases: [...a.nodes.flatMap((n) => [n.id, n.label, n.kind]), ...a.edges.flatMap((e) => [e.label, e.kind])],
+    id: featureDiagramId(f.id),
+    kind: "feature",
+    title: `Data flow: ${clip(f.name, 50)}`,
+    description: `Data flow of ${clip(f.name, 60)}: ${f.stages.length} stage${f.stages.length === 1 ? "" : "s"} and ${f.flows.length} flow${f.flows.length === 1 ? "" : "s"}${first !== undefined && last !== undefined ? `, from ${clip(first.label, 40)} to ${clip(last.label, 40)}` : ""}.`,
+    phrases: [f.name, ...f.stages.flatMap((s) => [s.id, s.label, s.kind]), ...f.flows.map((fl) => fl.label)],
   };
 }
 
@@ -123,7 +126,7 @@ function stateSpec(s: StateDrawing): DiagramSpec {
 
 /** The diagrams the job draws, and the ids it leaves to the plugin (past `MAX_DIAGRAMS`). */
 export function diagramSpecs(input: DiagramInput): { drawn: DiagramSpec[]; overflow: string[] } {
-  const all = [...(input.arch !== undefined ? [archSpec(input.arch)] : []), ...input.states.map(stateSpec)];
+  const all = [...input.features.map(featureSpec), ...input.states.map(stateSpec)];
   return { drawn: all.slice(0, MAX_DIAGRAMS), overflow: all.slice(MAX_DIAGRAMS).map((s) => s.id) };
 }
 
@@ -132,11 +135,12 @@ export type DrawnDiagram = { via: "diagram-design"; svg: string } | { via: "plug
 
 /** The drawings of a report, in `report.json` (design §6.6). */
 export interface DiagramsDoc {
-  arch?: DrawnDiagram;
+  /** The data flow of each feature, by feature id (`F1`). */
+  features: Record<string, DrawnDiagram>;
   states: Record<string, DrawnDiagram>;
 }
 
-export const noDiagrams = (): DiagramsDoc => ({ states: {} });
+export const noDiagrams = (): DiagramsDoc => ({ features: {}, states: {} });
 
 const failedNote = (reason: string): string => `drawn by the plugin: the diagram-design drawing failed its checks (${reason})`;
 
@@ -144,10 +148,12 @@ const failedNote = (reason: string): string => `drawn by the plugin: the diagram
 
 const list = (items: readonly string[]): string => items.map((s) => `- ${s}`).join("\n");
 
-function archData(a: Architecture): string {
+function featureData(f: FinalFeature): string {
   return JSON.stringify({
-    nodes: a.nodes.map((n) => ({ id: n.id, label: n.label, kind: n.kind, change: n.change })),
-    edges: a.edges.map((e) => ({ from: e.from, to: e.to, label: e.label, kind: e.kind, change: e.change })),
+    id: featureDiagramId(f.id),
+    name: f.name,
+    stages: f.stages.map((st) => ({ id: st.id, label: st.label, kind: st.kind })),
+    flows: f.flows.map((fl) => ({ from: fl.from, to: fl.to, label: fl.label })),
   });
 }
 
@@ -170,15 +176,16 @@ export interface DiagramsAssignment {
 
 /** The diagram job's assignment (design §6.10): the fixed choices, the data, the result. */
 export function diagramsInstruction(a: DiagramsAssignment): string {
-  const arch = a.specs.find((s) => s.kind === "arch");
+  const features = a.specs.filter((s) => s.kind === "feature");
   const states = a.specs.filter((s) => s.kind === "state");
+  const featureById = new Map(a.input.features.map((f) => [featureDiagramId(f.id), f] as const));
   const byId = new Map(a.input.states.map((s) => [s.id, s]));
   return [
     `You draw diagrams for the change report of ${a.owner}/${a.repo}#${a.number}. The data below was checked against the diff by an independent checker; it is the only thing you draw from. You are read-only: change nothing, and do not read the repository under review.`,
     "",
     UNTRUSTED_PREAMBLE,
     "",
-    `The diagram-design skill is mounted read-only at ${a.mount}. Read ${a.mount}/SKILL.md first, then the references you need: ${a.mount}/references/type-architecture-delta.md, ${a.mount}/references/type-state.md, ${a.mount}/references/style-guide.md (Font source: offline/system fonts), ${a.mount}/references/primitives-core.md, ${a.mount}/references/output-spec.md and ${a.mount}/references/layout-budget.md. Start each document from ${a.mount}/assets/template.html (the light minimal template); ${a.mount}/assets/example-architecture-delta.html and ${a.mount}/assets/example-state.html show the two types. The skill's scripts are in ${a.mount}/scripts; you cannot run them (the plugin runs self_check.py --offline and verify-geometry.py on every document you return), so follow the skill's checklist by hand.`,
+    `The diagram-design skill is mounted read-only at ${a.mount}. Read ${a.mount}/SKILL.md first, then the references you need: ${a.mount}/references/type-data-flow.md, ${a.mount}/references/type-state.md, ${a.mount}/references/style-guide.md (Font source: offline/system fonts), ${a.mount}/references/primitives-core.md, ${a.mount}/references/output-spec.md and ${a.mount}/references/layout-budget.md. Start each document from ${a.mount}/assets/template.html (the light minimal template); ${a.mount}/assets/example-data-flow.html and ${a.mount}/assets/example-state.html show the two types. The skill's scripts are in ${a.mount}/scripts; you cannot run them (the plugin runs self_check.py --offline and verify-geometry.py on every document you return), so follow the skill's checklist by hand.`,
     "",
     "Choices already made; nobody is here to ask:",
     list([
@@ -187,19 +194,17 @@ export function diagramsInstruction(a: DiagramsAssignment): string {
       "Static: no motion, no animation, no JavaScript.",
       "Attribute values are literal: write fill, stroke and the other SVG attributes as plain values (\"#f5f5f5\"), never var(--x); the report embeds the <svg> without its stylesheet.",
       "Template: the light minimal one. A document is complete, self-contained HTML with one <svg> inside a local overflow-x: auto wrapper as output-spec.md asks.",
-      "Size: the report shows a drawing scaled to a page about 1100 to 1400 pixels wide, so use a viewBox at most 1200 wide (output-spec.md presets: doc-inline 0 0 960 600, or doc-wide 0 0 1280 720 only when a three-panel delta cannot fit narrower) and tall as needed, wide enough that every label fits unclipped at that scale. The skill's complexity budgets do not apply, because every checked node, edge and entry below must be drawn.",
+      "Size: the report shows a drawing scaled to a page about 1100 to 1400 pixels wide, so use a viewBox at most 1200 wide (output-spec.md presets: doc-inline 0 0 960 600, or doc-wide 0 0 1280 720 only when a three-panel delta cannot fit narrower) and tall as needed, wide enough that every label fits unclipped at that scale. The skill's complexity budgets do not apply, because every checked stage, flow and entry below must be drawn.",
       "Accessible SVG: role=\"img\", aria-labelledby, <title> then <desc> as the <svg>'s first children (the plugin replaces their text).",
     ]),
     "",
-    "The label rule, checked by code. Every visible text in a drawing (every <text> and <tspan>) must be built only from the labels in the data below: node ids, labels and kinds, edge labels and kinds, state names, scopes and initial values, transition conditions and effects, read descriptions, and the skill's own fixed words (Before, After, Changes, ADDED, REMOVED, CHANGED, MODIFIED, UNCHANGED, MOVED, REWIRED, STATE, START, END, INITIAL, READS, and a legend's words). Copy a label whole, in its own words; you may wrap it over several lines (each line is a run of its words), put a part of a pair on either side of an arrow (from → to), and print it in capitals, but do not shorten, reword, translate or add to it, and print no count, date, version, path, line number, code or sentence of your own. A text that is not a label is a claim the checker never saw, and the drawing fails. Where the skill asks for a short arrow label (14 characters), print the whole label wrapped instead.",
+    "The label rule, checked by code. Every visible text in a drawing (every <text> and <tspan>) must be built only from the labels in the data below: stage ids, labels and kinds, flow labels, state names, scopes and initial values, transition conditions and effects, read descriptions, and the skill's own fixed words (STATE, START, END, INITIAL, READS, and a legend's words). Copy a label whole, in its own words; you may wrap it over several lines (each line is a run of its words), put a part of a pair on either side of an arrow (from → to), and print it in capitals, but do not shorten, reword, translate or add to it, and print no count, date, version, path, line number, code or sentence of your own. A text that is not a label is a claim the checker never saw, and the drawing fails. Where the skill asks for a short arrow label (14 characters), print the whole label wrapped instead.",
     "",
     `Draw ${a.specs.length} diagram${a.specs.length === 1 ? "" : "s"}, each as its own document, in this order:`,
-    ...(arch !== undefined
-      ? [
-          `- id "${ARCH_ID}": one Architecture delta (type-architecture-delta.md): the Before and After topology panels of the same size and grid, and the Changes ledger between them. A node with change unchanged or modified appears in Before and in After (modified is the skill's CHANGED); a node with change added appears only in After (ADDED). A connection with change unchanged or modified appears in both; added only in After; removed only in Before (REMOVED). Keep every retained node where it is in both panels. The ledger has one entry for each added, modified or removed node or connection: the change word, then the node's label, or the connection's from and to labels around an arrow. Name the panels Before and After only. The data of the architecture:`,
-          untrusted("architecture", archData(a.input.arch!)),
-        ]
-      : []),
+    ...features.flatMap((f) => [
+      `- id ${JSON.stringify(f.id)}: one Data flow (type-data-flow.md) of this feature's data path. The skill's type is made for roles in lanes and steps in columns; here the lanes are the kinds of the stages (only the kinds that occur, from the top in this order: source, process, transport, store, external, sink; each lane's label is its kind word in capitals) and the columns are the stages in the order the data reaches them, left to right. Every stage is a node whose title is its label, whole, with no sub-label, tool label or data-type chip of your own. Every flow is an arrow from its from stage to its to stage, with its label printed on the paper-filled mask the skill describes (the skill's one-labelled-arrow rule does not apply: every checked flow is drawn and labelled; use the skill's muted style for all but the focal arrow). Choose the first stage of kind store (the last stage when there is none) as the focal node and the flow into it as the focal arrow. Draw no step-header strip, no step numbers and no role chips, since they would print text that is no label of the data. Route every arrow as the skill's routing rules say, so that none crosses a node. The data of the feature:`,
+      untrusted(`feature ${f.id}`, featureData(featureById.get(f.id)!)),
+    ]),
     ...states.flatMap((s) => [
       `- id ${JSON.stringify(s.id)}: one State machine (type-state.md) of this lifecycle entry: the start dot, the initial state with the entry's name and initial value, one transition per recorded transition, each an arrow labelled with its condition (when) to a state labelled with its effect, and the reads noted in a Reads list below the machine, each as its where and decision. The data:`,
       untrusted(`lifecycle ${s.id}`, stateData(byId.get(s.id)!)),
@@ -318,12 +323,12 @@ const sameArgv = (a: readonly string[], b: readonly string[]): boolean => a.leng
  */
 export function diagramFlow(evidence: readonly EvidenceRecord[], input: DiagramInput, pluginRoot?: string): DiagramFlow {
   const { drawn, overflow } = diagramSpecs(input);
-  const doc: DiagramsDoc = { states: {} };
+  const doc: DiagramsDoc = noDiagrams();
   const set = (id: string, d: DrawnDiagram): void => {
-    if (id === ARCH_ID) doc.arch = d;
+    if (id.startsWith("feature:")) doc.features[id.slice("feature:".length)] = d;
     else doc.states[id] = d;
   };
-  for (const id of overflow) set(id, { via: "plugin", note: `drawn by the plugin: this report has more than ${MAX_DIAGRAMS} diagrams, and the diagram job draws the first ${MAX_DIAGRAMS} (the architecture, then the lifecycle entries in report order)` });
+  for (const id of overflow) set(id, { via: "plugin", note: `drawn by the plugin: this report has more than ${MAX_DIAGRAMS} diagrams, and the diagram job draws the first ${MAX_DIAGRAMS} (the features' data flows, then the lifecycle entries in report order)` });
   if (drawn.length === 0) return { state: "resolved", doc, refs: [] };
   const runs = agentRuns(evidence, DIAGRAMS_SCHEMA_NAME).slice(0, MAX_DIAGRAM_ATTEMPTS);
   const checks = commandRuns(evidence).filter((r) => r.command.id.startsWith(`${DIAGRAM_CHECK}-`));

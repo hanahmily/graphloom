@@ -9,7 +9,7 @@ export const GRAPH_ID = "pr-review";
  * §18): 0.1 declares Fetch, Report, Questions and Answers. Review, Checks,
  * Draft and Publish arrive with later versions.
  */
-export const GRAPH_VERSION = "0.15.0";
+export const GRAPH_VERSION = "0.16.0";
 
 /** The operator decision that would continue into the review layer (design §11). */
 export const REVIEW_LAYER_APPROVAL = "review-layer";
@@ -87,10 +87,8 @@ export const COMMAND = {
   /** The coverage commands, `cover-go` and `cover-ts-<n>`. */
   coverGo: "cover-go",
   coverTs: "cover-ts",
-  /** The architecture diagram's tree check (design §6.10): `arch-check-<n>` resolves cites and paths, and lists Go imports. */
-  archCheck: "arch-check",
-  /** The check of the architecture claims' quotes against the tree their cite names (design §6.10): `arch-quote-<n>`. */
-  archQuote: "arch-quote",
+  /** The check of the claims' quotes against the trees their cites name (design §6.9): `tree-quote-<n>`. */
+  treeQuote: "tree-quote",
 } as const;
 
 /**
@@ -101,9 +99,11 @@ export const PART_BASE = {
   reportJson: "report-json",
   reviewMd: "review-md",
   reviewHtml: "review-html",
+  reviewAppendix: "review-appendix-html",
   qaJson: "qa-json",
   qaMd: "review-md-qa",
   qaHtml: "review-html-qa",
+  qaAppendix: "review-appendix-html-qa",
   necessityJson: "necessity-json",
   ledgerJson: "ledger-json",
   ledgerMd: "ledger-md",
@@ -128,6 +128,8 @@ export const BASE_DIR = `${REVIEW_DIR}/base`;
 export const REPORT_JSON = `${REVIEW_DIR}/report.json`;
 export const REVIEW_MD = `${REVIEW_DIR}/review.md`;
 export const REVIEW_HTML = `${REVIEW_DIR}/review.html`;
+/** The appendix of the HTML report (design §6.11): every change item, the measurements, the whole Q&A. */
+export const REVIEW_APPENDIX_HTML = `${REVIEW_DIR}/review-appendix.html`;
 export const QA_JSON = `${REVIEW_DIR}/qa.json`;
 export const NECESSITY_JSON = `${REVIEW_DIR}/necessity.json`;
 /** The ledger blobs of a multi-part ledger write, which the `ledger-write` command reads (ignored like the rest of `.graphloom/review/`). */
