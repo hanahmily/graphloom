@@ -24,6 +24,10 @@ const MAX_PART_INPUT_BYTES = MAX_EXECUTOR_INPUT_BYTES - 4_096;
 const PART_SCRIPT =
   'set -eu; path="$1"; k="$2"; n="$3"; digest="$4"; count="$5"; shift 5; [ "$#" -eq "$count" ] || { echo "part carries $# chunks, not $count" >&2; exit 6; }; ' +
   `mkdir -p "$(dirname "$path")" ${REVIEW_DIR}; printf '*\\n' > ${REVIEW_DIR}/.gitignore; ` +
+  // The last part run again after the file was already published (its cleanup was interrupted): the published file
+  // with the expected digest is the result, whatever part files are left, so a resume can still finish.
+  'if [ "$k" -eq "$n" ] && [ -f "$path" ] && command -v sha256sum >/dev/null 2>&1 && [ "$(sha256sum < "$path" | cut -d" " -f1)" = "$digest" ]; then ' +
+  'i=1; while [ "$i" -le "$n" ]; do rm -f "$path.part-$i"; i=$((i + 1)); done; echo written; exit 0; fi; ' +
   // Each part has a file of its own, rewritten whole, so running a part again (a resume after a failure) never appends twice.
   'if [ "$k" -gt 1 ]; then [ -f "$path.part-$((k - 1))" ] || { echo "part $k arrived before part $((k - 1))" >&2; exit 3; }; fi; ' +
   ': > "$path.part-$k"; for part in "$@"; do printf \'%s\' "$part" >> "$path.part-$k"; done; ' +

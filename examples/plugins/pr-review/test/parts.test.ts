@@ -147,6 +147,25 @@ describe("multi-part writes (design 6.6)", () => {
     expect(readFileSync(path.join(dir, REPORT_JSON), "utf8")).toBe(text);
   });
 
+  it("lets the last part run again after its cleanup was interrupted: the published file with the digest is the result", () => {
+    const dir = tmp("cleanup");
+    const text = awkward(300_000);
+    const commands = partCommands("report-json", REPORT_JSON, text);
+    expect(commands).toHaveLength(2);
+    const runIn = (c: EnvironmentCommand) => spawnSync(c.argv[0]!, c.argv.slice(1), { cwd: dir, encoding: "utf8", env: { ...process.env, ...GIT_ENV } });
+    expect(runIn(commands[0]!).status).toBe(0);
+    expect(runIn(commands[1]!).status).toBe(0);
+    // The cleanup was cut short: part 1 is gone, part 2 is left, the file is published.
+    writeFileSync(path.join(dir, `${REPORT_JSON}.part-2`), "left over");
+    const retry = runIn(commands[1]!);
+    expect(retry.status, retry.stderr).toBe(0);
+    expect(readFileSync(path.join(dir, REPORT_JSON), "utf8")).toBe(text);
+    expect(existsSync(path.join(dir, `${REPORT_JSON}.part-2`))).toBe(false);
+    // A published file with another digest is not taken for the result: the missing part 1 still stops the last part.
+    writeFileSync(path.join(dir, REPORT_JSON), "stale");
+    expect(runIn(commands[1]!).status).toBe(3);
+  });
+
   it("round-trips the recorded parts: the validator's reader concatenates them in order and checks the digest", () => {
     const text = awkward(700_000);
     const commands = partCommands("report-json", REPORT_JSON, text);
