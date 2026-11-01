@@ -3,6 +3,8 @@
 
 import type { Fact } from "./detectors.js";
 import { coverageNotes, renderMeasurements, notRunReasons, type MeasurementState } from "./measurements.js";
+import type { LargeInfo } from "./large.js";
+import { describeReasons, type ReviewMode } from "./mode.js";
 import type { Profile } from "./profile.js";
 import { renderReport, type FinalReport } from "./report.js";
 import type { PullRequest } from "./request.js";
@@ -19,6 +21,10 @@ export interface OutputInput {
   facts: readonly Fact[];
   measurements: MeasurementState;
   profile: Pick<Profile, "metrics">;
+  /** Standard or large, with the limits passed (design §6.9). */
+  mode: ReviewMode;
+  /** Large mode: the areas, the unread files and the merges. */
+  large?: LargeInfo;
 }
 
 /** `report.json` (`pr-change-report-v1`): the machine-readable report the validators and later stages read. */
@@ -31,6 +37,8 @@ export function reportJson(i: OutputInput): string {
     files: i.snapshot.files.map((f) => ({ path: f.path, previousPath: f.previousPath, status: f.status, additions: f.additions, deletions: f.deletions })),
     commits: i.snapshot.commits.length,
     checks: i.snapshot.checks,
+    mode: i.mode.mode,
+    ...(i.mode.mode === "large" ? { modeReasons: i.mode.reasons, ...(i.large !== undefined ? { areas: i.large.areas, omitted: i.large.omitted, merges: i.large.merges } : {}) } : {}),
     facts: i.facts,
     summary: i.final.summary,
     sections: i.final.sections,
@@ -60,11 +68,19 @@ export function reviewMarkdown(i: OutputInput): string {
   return [
     `# ${i.pr.owner}/${i.pr.repo}#${i.pr.number} at ${head}${i.base !== undefined ? ` (base ${i.base.slice(0, 12)})` : ""}`,
     "Contents: Report · Measurements · Q&A",
+    ...(i.mode.mode === "large" ? [modeLine(i.mode, i.large)] : []),
     "",
     renderReport(i.final, header),
     renderMeasurements(i.measurements, i.profile),
     QA_PENDING,
   ].join("\n");
+}
+
+/** The header line of a large review: the mode, the limits passed, and how the report was made (design §6.9). */
+export function modeLine(mode: ReviewMode, large?: LargeInfo): string {
+  const read = large?.areas.filter((a) => a.kind === "read").length;
+  const how = read === undefined ? "" : `: reported in ${read} area${read === 1 ? "" : "s"}, then one synthesis${large!.areas.some((a) => a.kind === "generated") ? "; generated files are listed in Other, not read" : ""}${large!.omitted.length > 0 ? `; ${large!.omitted.length} file(s) without a patch from GitHub are listed in Other` : ""}`;
+  return `Mode: large (${describeReasons(mode.reasons)})${how}.`;
 }
 
 /** What the Q&A part says until the Answers stage replaces it. */

@@ -12,6 +12,8 @@
 import type { RehearsalCommandResult, RehearsalReply } from "@graphloom/sdk";
 import { needsOwnSearch, searchItems, verificationPlan, type Answer, type CheckVerdict, type VerifyItem } from "./answers.js";
 import { COMMAND } from "./constants.js";
+import { isLarge, questionsMode, STANDARD, type ReviewMode } from "./mode.js";
+import { answerBatches, batchCitePrefix, batchRecordId } from "./qaflow.js";
 import { effectiveConclusion, necessityAnswer, necessityQuestion, type Necessity, type PrincipleVerdict } from "./necessity.js";
 import { applies, parsePrinciples } from "./principles.js";
 import { candidatePlan, type Groundwork } from "./groundwork.js";
@@ -102,6 +104,8 @@ export interface QaInput {
   pull: { title: string; body: string; commits: readonly string[] };
   mergeBase: string;
   spec: QaSpec;
+  /** The mode the Report stage ran in; the questions run in large mode too when it was large or the new symbols pass the limit. */
+  reportMode?: ReviewMode;
 }
 
 const emptyProposal = { kind: "none" as const, splits: [], testFile: "", testName: "", cases: [], assertion: "" };
@@ -209,7 +213,8 @@ export function qaScenario(i: QaInput): QaScenario {
     return item === undefined ? [] : [{ item: item.id, source: p.source, quote: p.quote }];
   });
   const stated = statedPurposes({ purposes, questions: [] }, view, pinned).stated;
-  const required = requiredQuestions({ view, groundwork }, stated);
+  const large = isLarge(questionsMode(i.reportMode ?? STANDARD, symbols.filter((s) => s.change === "new").length, profile.limits));
+  const required = requiredQuestions({ view, groundwork, large }, stated);
   const asked = required.filter((r) => !(spec.omit ?? []).includes(r.type));
   const questionerOutput: QuestionerOutput = { purposes, questions: asked.map((r) => ({ key: r.key, type: r.type, item: r.item, symbol: r.symbol ?? "", text: r.text })) };
   const questions = finalQuestions(required, questionerOutput, groundwork);
@@ -251,13 +256,18 @@ export function qaScenario(i: QaInput): QaScenario {
       return { question: q.id, verdict: given?.verdict ?? "supported", note: given?.note ?? "", searches, principles: [] };
     });
   const rounds = revised.length > 0 || (spec.checks?.length ?? 0) > 1 ? [verdicts(0, first), verdicts(1, final)] : [verdicts(0, final)];
+  // Large mode (design §7.6): the answerer takes the questions in batches, each checked in a fresh session; a scenario revises none.
+  const batches = large ? answerBatches(questions) : [];
+  const idsOf = (b: readonly Question[]): Set<string> => new Set(b.map((q) => q.id));
+  const batchAnswers = (b: readonly Question[]): Answer[] => first.filter((a) => idsOf(b).has(a.question));
+  const batchRounds = batches.map((b) => verdicts(0, final).filter((v) => idsOf(b).has(v.question)));
   const results: QaScenario["results"] = {
     "necessity-v1": [{ output: n1First }],
     ...(n1Revised !== undefined ? { "necessity-revision-v1": [{ output: n1Revised }] } : {}),
     "questions-v1": [{ output: questionerOutput }],
-    "answers-v1": [{ output: { answers: first } }],
+    "answers-v1": large ? batches.map((b) => ({ output: { answers: batchAnswers(b) } })) : [{ output: { answers: first } }],
     // N1's rounds come first, then the other answers' (a run that skips them never asks for those).
-    "answer-check-v1": [...n1Rounds, ...rounds].map((verdict) => ({ output: { verdicts: verdict } })),
+    "answer-check-v1": [...n1Rounds, ...(large ? batchRounds : rounds)].map((verdict) => ({ output: { verdicts: verdict } })),
     ...(revised.length > 0 ? { "answers-revision-v1": [{ output: { answers: revised } }] } : {}),
   };
   // Canned outputs of the read-only commands, by id, for the commands the graph will run.
@@ -295,11 +305,24 @@ export function qaScenario(i: QaInput): QaScenario {
     const lines = item.entries.map((_, n) => (item.kind === "cite" ? `${n + 1} ok` : "")).filter((l) => l !== "");
     commands[item.command.id] = ok(`${lines.join("\n")}${lines.length > 0 ? "\n" : ""}checked ${item.entries.length}\n`);
   };
-  for (const set of [first, revised, final]) for (const item of verificationPlan(set, ctx, i.mergeBase)) canned(item);
+  if (large) {
+    batches.forEach((b, k) => {
+      for (const item of verificationPlan(batchAnswers(b), { ...ctx, questions: b }, i.mergeBase, batchCitePrefix(k))) canned(item);
+      commands[batchRecordId(k)] = ok("written\n");
+    });
+  } else {
+    for (const set of [first, revised, final]) for (const item of verificationPlan(set, ctx, i.mergeBase)) canned(item);
+  }
   const nctx = { questions: [necessityQuestion()], groundwork, view, packs };
   for (const n of [n1First, ...(n1Revised !== undefined ? [n1Revised] : [])]) for (const item of verificationPlan([necessityAnswer(n)], nctx, i.mergeBase, COMMAND.citeNecessity)) canned(item);
   // The searches the checker reports are re-run too.
-  for (const round of rounds) for (const item of searchItems(round.flatMap((v) => v.searches.map((search) => ({ question: v.question, search }))), i.mergeBase, COMMAND.cite, [], true)) canned(item);
+  if (large) {
+    batchRounds.forEach((round, k) => {
+      for (const item of searchItems(round.flatMap((v) => v.searches.map((search) => ({ question: v.question, search }))), i.mergeBase, batchCitePrefix(k), [], true)) canned(item);
+    });
+  } else {
+    for (const round of rounds) for (const item of searchItems(round.flatMap((v) => v.searches.map((search) => ({ question: v.question, search }))), i.mergeBase, COMMAND.cite, [], true)) canned(item);
+  }
   for (const round of n1Rounds) for (const item of searchItems(round.flatMap((v) => v.searches.map((search) => ({ question: v.question, search }))), i.mergeBase, COMMAND.citeNecessity, [], true)) canned(item);
   commands["necessity-write"] = ok("written\n");
   if (nspec.principles !== undefined) commands["principles-read"] = ok(`commit ${i.mergeBase}\npresent\n${nspec.principles.text}`);

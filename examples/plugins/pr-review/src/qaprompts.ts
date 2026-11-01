@@ -93,7 +93,12 @@ export function groundworkText(g: Groundwork, view: ReportView, level: 0 | 1 | 2
 export function fittingGroundwork(g: Groundwork, view: ReportView): string {
   for (const level of [2, 1, 0] as const) {
     const text = groundworkText(g, view, level);
-    if (text.length <= MAX_GROUNDWORK_CHARS || level === 0) return text;
+    if (text.length <= MAX_GROUNDWORK_CHARS) return text;
+    // Even the shortest listing of a very large pull request can pass the bound: cut it, and say so.
+    if (level === 0) {
+      const cut = text.slice(0, MAX_GROUNDWORK_CHARS);
+      return `${cut.slice(0, cut.lastIndexOf("\n"))}\n… (the groundwork is cut short here: ${text.length - cut.length} more characters; search the tree for the rest)`;
+    }
   }
   return "";
 }
@@ -108,6 +113,23 @@ export interface QuestionerAssignment {
   kind: "first" | "correction";
   /** Where the base commit's files are exported, when they are (design §7.3). */
   baseDir?: string;
+}
+
+/** The characters of required questions an assignment lists; a large pull request has more than fit one executor input. */
+const MAX_REQUIRED_CHARS = 70_000;
+
+/** The required questions as lines. Past the bound the rest is counted: the plugin asks each of them in its own wording, so none is dropped. */
+function requiredLines(required: readonly RequiredQuestion[]): string[] {
+  const lines: string[] = [];
+  let used = 0;
+  for (const q of required) {
+    const line = `- key ${JSON.stringify(q.key)} type ${q.type} item ${q.item} symbol ${JSON.stringify(q.symbol ?? "")}: ${q.text}`;
+    if (used + line.length > MAX_REQUIRED_CHARS) break;
+    lines.push(line);
+    used += line.length + 1;
+  }
+  if (lines.length < required.length) lines.push(`… and ${required.length - lines.length} more required questions, which are too many to list here: the plugin asks each of them in its own wording, so you need not return them.`);
+  return lines;
 }
 
 /** The questioner's assignment (design §7.1): ask, never answer. */
@@ -126,7 +148,7 @@ export function questionerInstruction(a: QuestionerAssignment): string {
     ...(items.length === 0 ? ["(none)"] : items),
     "",
     `Required questions (${a.required.length}). Return every one in the questions of your result, with its key copied exactly, its type, item and symbol as listed (symbol is "" when none), and your own clearer wording in text (at most ${MAX_QUESTION_CHARS} characters, one question, no answer, no severity or verdict). You cannot drop or merge a required question; one you leave out is asked in the plugin's wording.`,
-    ...a.required.map((q) => `- key ${JSON.stringify(q.key)} type ${q.type} item ${q.item} symbol ${JSON.stringify(q.symbol ?? "")}: ${q.text}`),
+    ...requiredLines(a.required),
     "",
     'You may add questions the rules do not require: key "", a type (purpose, existing-equivalent, reuse-library, common-logic, missing-test, split-function, complexity-coverage or other), an item id, a symbol id or "", and the text. Add one only where the change raises a question a maintainer would ask and the rules missed.',
     "",

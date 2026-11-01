@@ -23,12 +23,17 @@ import { parseProfile, ProfileError, type Profile } from "./profile.js";
 import { baseTargets, withOutcome, withUnknownCoverage } from "./measurements.js";
 import { goFunctionCoverage, parseCoverageReport } from "./metrics/coverage.js";
 import type { FileIndex, MetricsRecord } from "./metrics/record.js";
+import { areaContext, assembleLarge, AREA_RECORD_SCHEMA, checkAreaRecord, checkSynthesisRecord, SYNTHESIS_RECORD_SCHEMA, synthesisTargets, synthItems, type AreaDone, type SynthesisOutput } from "./large.js";
+import { partitionAreas } from "./areas.js";
+import { reportMode, type ReviewMode } from "./mode.js";
 import { claimTargets } from "./claims.js";
-import { numbered, type Cite, type ReportItem, type ReporterOutput, type StateEntry } from "./report.js";
+import { ALPHA_GO, BETA_GO, GENERATED_GO, GUIDE_MD, LARGE_HEAD_FILES, LARGE_LIMITS, largeDoc, OMITTED_PATH } from "./rehearsal-large.js";
+import { asReporterOutput, numbered, type Cite, type ReportContext, type ReportItem, type ReporterOutput, type StateEntry } from "./report.js";
 import { detectStateCandidates } from "./statecandidates.js";
 import { DOCS } from "./rehearsal-docs.js";
 import type { Necessity } from "./necessity.js";
 import { BASE_FILES, FLAGS_GO, NEW_HEAD_FILES, RETENTION_TTL_GO, BACKOFF_GO, JITTER_GO, LIMIT_GO, SYNC_GO, SYNC_CHANGED, STREAM_ADDED_LINES, STREAM_CHANGED, STREAM_PATH, STREAM_WRITE_BASE_GO, STREAM_WRITE_GO, WRITE_PATH_DOC, PRINCIPLES_FILE } from "./rehearsal-fixtures.js";
+import { pinnedTexts } from "./questions.js";
 import { qaScenario, type QaSpec } from "./rehearsal-qa.js";
 import { pullFile, type PullFile } from "./snapshot.js";
 import { reporterSections } from "./template.js";
@@ -40,7 +45,7 @@ export const REHEARSAL_MERGE_BASE = "fedcba9876543210fedcba9876543210fedcba98";
 const TREE = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 export const REHEARSAL_REQUEST = `Report on ${REHEARSAL_PULL.owner}/${REHEARSAL_PULL.repo}#${REHEARSAL_PULL.number} at ${REHEARSAL_HEAD}.`;
 
-export { FLAGS_GO };
+export { FLAGS_GO, LARGE_LIMITS };
 
 export const TTL_GO = `// Licensed under the Apache License, Version 2.0.
 
@@ -84,6 +89,7 @@ export const REHEARSAL_HEAD_FILES: Readonly<Record<string, string>> = {
   "banyand/cmd/server/flags.go": FLAGS_GO,
   "pkg/schema/ttl.go": TTL_GO,
   ...NEW_HEAD_FILES,
+  ...LARGE_HEAD_FILES,
 };
 
 /** What `gometrics` printed for those files, recorded from the tool itself and recomputed from the bytes above by a test. */
@@ -149,13 +155,15 @@ interface FixtureFile {
   path: string;
   status: "added" | "modified" | "removed";
   patch: string;
+  /** GitHub gave no patch for this file (a binary file): `patch` is then only what its counts come from. */
+  omitted?: true;
 }
 
 const countOf = (patch: string, c: "+" | "-"): number => patch.split("\n").filter((l) => l.startsWith(c) && !l.startsWith("@@")).length;
 
 /** The `list-pull-files` item GitHub would return. */
 function fileItem(f: FixtureFile): Record<string, unknown> {
-  return { path: f.path, status: f.status, previousPath: null, additions: countOf(f.patch, "+"), deletions: countOf(f.patch, "-"), sha: null, patch: f.patch, patchOmitted: false };
+  return { path: f.path, status: f.status, previousPath: null, additions: countOf(f.patch, "+"), deletions: countOf(f.patch, "-"), sha: null, patch: f.omitted === true ? null : f.patch, patchOmitted: f.omitted === true };
 }
 
 const addedPatch = (content: string): string => {
@@ -362,6 +370,9 @@ const NARRATIVE: Record<string, { section: string; text: string }> = {
   "pkg/quota/limit.go": { section: "features", text: "Adds Limit, which clamps a requested quota at zero, and Burst, which allows twice the quota for a short burst." },
   "pkg/offline/sync.go": { section: "features", text: "Sync now resets when forced and the item is all." },
   "docs/retention.md": { section: "other", text: "Adds a document that says groups may set retention_days." },
+  "pkg/alpha/alpha.go": { section: "features", text: "Adds Alpha1 to Alpha6, which add one to six to a number." },
+  "pkg/beta/beta.go": { section: "features", text: "Adds Beta, which applies Alpha1 twice." },
+  "docs/guide.md": { section: "other", text: "Adds a guide that says Alpha and Beta add numbers." },
 };
 
 function firstCite(file: PullFile): Cite {
@@ -436,8 +447,8 @@ function quoteFor(cites: readonly Cite[] | undefined, files: readonly PullFile[]
   return best;
 }
 
-function checkReply(report: ReporterOutput, files: readonly PullFile[], sections: ReturnType<typeof reporterSections>, unsupported: ReadonlySet<string> = new Set()): RehearsalReply {
-  const verdicts = claimTargets(report, { sections }).map((t) => {
+function checkReply(report: ReporterOutput, files: readonly PullFile[], sections: ReturnType<typeof reporterSections>, unsupported: ReadonlySet<string> = new Set(), summary = true): RehearsalReply {
+  const verdicts = claimTargets(report, { sections }, { summary }).map((t) => {
     if (unsupported.has(t.id)) return { item: t.id, verdict: "unsupported", note: "the diff does not show this", quotes: [] };
     const q = quoteFor(t.cites, files);
     return { item: t.id, verdict: "supported", note: "", quotes: q === undefined ? [] : [q] };
@@ -466,6 +477,9 @@ function build(profile: Profile, pull: Pull, options: { body?: string; notes?: s
   const sections = reporterSections(profile);
   const sectionIds = sections.map((s) => s.id);
   const notes = options.notes ?? [];
+  // A pull request over the task's limits is reviewed in large mode: the replies are those of its areas and its synthesis.
+  const mode = reportMode(files, profile.limits);
+  if (mode.mode === "large" && options.report === undefined && options.corrections !== true) return buildLarge(profile, pull, options, files, facts, sections, mode);
   const good = options.report !== undefined ? options.report(files, sectionIds) : goodReport(files, facts, sectionIds, notes, pull);
   const results: RehearsalScenario["results"] = {};
   if (options.corrections === true) {
@@ -515,6 +529,83 @@ function build(profile: Profile, pull: Pull, options: { body?: string; notes?: s
       results,
       commands: { ...commands(pull, options.toolId), ...(options.coverage !== undefined ? { "sandbox-go": { exitCode: 0, stdout: "ready\n" }, "cover-go": { exitCode: 0, stdout: options.coverage } } : {}), ...qa.commands },
       reads: reads({ ...pull, ...(options.body !== undefined ? { body: options.body } : {}) }),
+      expect: { status: "stopped", stopReason: "report ready", receipts: ["fetch", "report", "questions", "answers"] },
+    },
+  };
+}
+
+/** A claim check's reply for a synthesis: every claim supported, with a quote from what its merge cites. */
+function synthesisCheckReply(output: SynthesisOutput, items: ReturnType<typeof synthItems>, files: readonly PullFile[]): RehearsalReply {
+  const verdicts = synthesisTargets(output, items).map((t) => {
+    const q = quoteFor(t.cites, files);
+    return { item: t.id, verdict: "supported", note: "", quotes: q === undefined ? [] : [q] };
+  });
+  return { output: { verdicts } };
+}
+
+/**
+ * A large pull request (design §6.9): a reporter reply and a claim check for each area, a synthesis that merges two items
+ * of different areas, and its claim check, all derived with the plugin's own functions, so the scenario cannot drift from the graph.
+ */
+function buildLarge(profile: Profile, pull: Pull, options: { body?: string; notes?: string[]; toolId?: string; qa?: QaSpec }, files: PullFile[], facts: Fact[], sections: ReturnType<typeof reporterSections>, mode: ReviewMode): Built {
+  const sectionIds = sections.map((s) => s.id);
+  const notes = options.notes ?? [];
+  const partition = partitionAreas(files, profile.limits, profile.questions.excludeRoots);
+  const ctx: ReportContext = { sections, files, facts, pinned: pinnedTexts({ title: pull.title, body: options.body ?? pull.body }, pull.commits.map((message) => ({ message }))), candidates: detectStateCandidates(files) };
+  const empty = { purpose: { text: "", source: "inferred" as const, quote: "" }, overview: "" };
+  const areaReports: ReporterOutput[] = [];
+  const areaChecks: RehearsalReply[] = [];
+  const done: AreaDone[] = [];
+  for (const area of partition.areas.filter((a) => a.kind === "read")) {
+    const actx = areaContext(ctx, area);
+    const report: ReporterOutput = { ...goodReport(actx.files, actx.facts, sectionIds, notes, pull), ...empty };
+    const check = checkReply(report, actx.files, sections, new Set(), false);
+    const checked = checkAreaRecord({ schema: AREA_RECORD_SCHEMA, area: area.id, report, revised: false, check: check.output }, area, actx);
+    if ("problem" in checked) throw new Error(`the large scenario's area ${area.id} does not validate: ${checked.problem}`);
+    areaReports.push(report);
+    areaChecks.push(check);
+    done.push(checked);
+  }
+  const items = synthItems(done);
+  const features = items.filter((i) => i.section === "features");
+  const second = features.find((i) => i.area !== features[0]?.area);
+  const synthesis: SynthesisOutput = {
+    purpose: { text: `The pull request is titled "${pull.title}".`, source: "stated", quote: pull.title },
+    overview: `This pull request changes ${files.length} files across ${done.length} areas. The alpha and beta packages are one change, described once below.`,
+    merges: features[0] !== undefined && second !== undefined ? [{ items: [features[0].key, second.key], text: `${features[0].item.text} ${second.item.text}`.slice(0, 560) }] : [],
+    notes,
+  };
+  const check = synthesisCheckReply(synthesis, items, files);
+  const synthesized = checkSynthesisRecord({ schema: SYNTHESIS_RECORD_SCHEMA, synthesis, revised: false, check: check.output }, items, ctx);
+  if ("problem" in synthesized) throw new Error(`the large scenario's synthesis does not validate: ${synthesized.problem}`);
+  const { final } = assembleLarge(done, synthesized, ctx, partition);
+  const good: ReporterOutput = { ...empty, ...synthesis, ...asReporterOutput(final) };
+  const results: RehearsalScenario["results"] = {
+    "change-report-v1": areaReports.map((output) => ({ output })),
+    "change-synthesis-v1": [{ output: synthesis }],
+    "claim-check-v1": [...areaChecks, check],
+  };
+  const qa = qaScenario({
+    profile,
+    files,
+    headFiles: REHEARSAL_HEAD_FILES,
+    sections,
+    good,
+    records: recordsWithBase(pull).map((r) => withUnknownCoverage(r, `docker unavailable: ${REHEARSAL_NO_DOCKER}`)),
+    pull: { title: pull.title, body: options.body ?? pull.body, commits: pull.commits },
+    mergeBase: REHEARSAL_MERGE_BASE,
+    spec: options.qa ?? pull.qa ?? {},
+    reportMode: mode,
+  });
+  Object.assign(results, qa.results);
+  const records: NonNullable<RehearsalScenario["commands"]> = { "synthesis-record": { exitCode: 0, stdout: "written\n" } };
+  for (const a of partition.areas.filter((x) => x.kind === "read")) records[`area-record-${a.id}`] = { exitCode: 0, stdout: "written\n" };
+  return {
+    scenario: {
+      results,
+      commands: { ...commands(pull, options.toolId), ...records, ...qa.commands },
+      reads: reads({ ...pull, ...(options.body !== undefined ? { body: options.body } : {}) }),
+      budgets: { agentInvocations: 60, jobs: 160, decisions: 180 },
       expect: { status: "stopped", stopReason: "report ready", receipts: ["fetch", "report", "questions", "answers"] },
     },
   };
@@ -583,6 +674,26 @@ const RETENTION_PULL: Pull = {
           }
         : dflt,
   },
+};
+
+/**
+ * The `large-pull-request` scenario's pull request: two packages, a guide, a generated file and a binary file GitHub gave no patch
+ * for. Under the profile's own limits it is small; with `LARGE_LIMITS` it is reviewed in three areas.
+ */
+const LARGE_PULL: Pull = {
+  files: [
+    addedFile("pkg/alpha/alpha.go", ALPHA_GO),
+    addedFile("pkg/beta/beta.go", BETA_GO),
+    addedFile("docs/guide.md", GUIDE_MD),
+    addedFile("api/gen/types.pb.go", GENERATED_GO),
+    { path: OMITTED_PATH, status: "added", patch: hunk(0, 1, [add("binary")]), omitted: true },
+  ],
+  title: "Add alpha and beta helpers",
+  body: "Adds the alpha helpers, a beta helper that uses them, and a guide.",
+  commits: ["Add alpha and beta helpers"],
+  diff: [fixtureDiff("pkg/alpha/alpha.go", ALPHA_GO), fixtureDiff("pkg/beta/beta.go", BETA_GO)].join(""),
+  doc: largeDoc(),
+  qa: { purposes: [{ section: "features", source: "body", quote: "a beta helper that uses them" }] },
 };
 
 const BACKOFF_PULL: Pull = {
@@ -871,6 +982,8 @@ export function rehearsal(config: unknown): GraphRehearsal {
       "report-corrections": { ...build(profile, REPORT_PULL, { toolId: "static-go-1", corrections: true }).scenario, budgets: { agentInvocations: 40, corrections: 12 } },
       // The pull request's body asks automated reviewers to approve; the report records it under Notes.
       injection: build(profile, REPORT_PULL, { toolId: "static-go-1", body: `${REPORT_PULL.body}\n\n${INJECTION}`, notes: [`The pull request body addresses automated reviewers: "${INJECTION}"`] }).scenario,
+      // Run with `LARGE_LIMITS` (design §16): the pull request is large, partitioned into three areas plus the generated file; each area, the synthesis and each batch of questions is its own job.
+      "large-pull-request": build(profile, LARGE_PULL, { toolId: "static-go-1" }).scenario,
       // A new function with 12 decision points and nesting 4: its Measurements row, a split-function proposal and a complexity-coverage entry.
       "complex-function": build(profile, COMPLEX_PULL, { toolId: "static-go-1" }).scenario,
       // No sandbox exists in this version; the static metrics run under bwrap with no network, coverage and mutation are not run.

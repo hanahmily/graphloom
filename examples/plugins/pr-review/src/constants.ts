@@ -9,7 +9,7 @@ export const GRAPH_ID = "pr-review";
  * §18): 0.1 declares Fetch, Report, Questions and Answers. Review, Checks,
  * Draft and Publish arrive with later versions.
  */
-export const GRAPH_VERSION = "0.10.0";
+export const GRAPH_VERSION = "0.11.0";
 
 /** The operator decision that would continue into the review layer (design §11). */
 export const REVIEW_LAYER_APPROVAL = "review-layer";
@@ -95,6 +95,9 @@ export const ANSWERER_JOB = "answerer";
 
 /** The exit status of the ledger write when its compare-and-swap lost the race (design §9.1). */
 export const LEDGER_MOVED = 4;
+
+/** Most questions one answerer job answers in large mode (design §7.6); the answerer continues its own session from batch to batch. */
+export const QUESTION_BATCH_SIZE = 15;
 
 /** The reporter's session key, so a correction continues the previous session. */
 export const REPORTER_JOB = "reporter";

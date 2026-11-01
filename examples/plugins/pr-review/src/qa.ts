@@ -12,6 +12,7 @@
 import type { FinalAnswer } from "./answers.js";
 import type { Groundwork } from "./groundwork.js";
 import { brokenNote, effectiveConclusion, NECESSITY_ID, SKIPPED_NOTE, supportedBreaks, type NecessityRecord } from "./necessity.js";
+import { describeReasons, type ReviewMode } from "./mode.js";
 import type { PurposeRecord, Question } from "./questions.js";
 import { searchLine, withMeasure } from "./searchview.js";
 import type { ReportView } from "./reportview.js";
@@ -34,6 +35,10 @@ export interface QaInput {
   necessity?: NecessityRecord;
   /** The other questions were skipped: N1 concluded unnecessary and the checker supports it. */
   skipped?: boolean;
+  /** Standard or large (design §7.6); absent means standard. */
+  mode?: ReviewMode;
+  /** Large mode: how many batches of questions the answerer worked through. */
+  batches?: number;
 }
 
 const oneLine = (s: string): string => s.replace(/\s*\n\s*/g, " ").trim();
@@ -45,6 +50,8 @@ export function qaJson(i: QaInput): string {
   const inv = i.groundwork.inventory;
   return JSON.stringify({
     schema: QA_FILE_SCHEMA,
+    mode: (i.mode ?? { mode: "standard" }).mode,
+    ...(i.mode?.mode === "large" ? { modeReasons: i.mode.reasons, ...(i.batches !== undefined ? { batches: i.batches } : {}) } : {}),
     pull: { owner: i.pr.owner, repo: i.pr.repo, number: i.pr.number, head: i.pr.head, ...(i.base !== undefined ? { base: i.base } : {}) },
     symbols: i.groundwork.symbols.map((s) => ({
       id: s.id,
@@ -109,6 +116,7 @@ export function renderQa(i: QaInput): string {
   const by = (s: FinalAnswer["status"]): number => i.answers.filter((a) => a.question !== NECESSITY_ID && a.status === s).length;
   const lines = [
     "# Q&A",
+    ...(i.mode?.mode === "large" ? [`Mode: large (${describeReasons(i.mode.reasons)}): the questions follow the large-mode rules (the trio once per change item and per new exported symbol, one missing-test question per change item)${i.batches !== undefined ? `, answered in ${i.batches} batch(es) of at most 15 questions` : ""}.`] : []),
     ...(i.necessity !== undefined ? [`${NECESSITY_ID} (necessity) is answered above, under Necessity: ${effectiveConclusion(i.necessity.final)}; ${i.necessity.decision.reason}.`] : []),
     `${asked.length} question${asked.length === 1 ? "" : "s"} (${asked.filter((q) => q.origin === "required").length} required, ${asked.filter((q) => q.origin === "added").length} added by the questioner): ${by("answered")} answered, ${by("partially answered")} partially answered, ${by("needs author")} needs author. Weak-test questions: ${WEAK_TEST_NOTE}.`,
     `Dependency inventory: ${i.groundwork.inventory.dependencies.length} declared dependencies (${i.groundwork.inventory.dependencies.filter((d) => d.source !== undefined).length} with source available, ${i.groundwork.inventory.dependencies.filter((d) => d.source === undefined).length} source unavailable), ${i.groundwork.inventory.packages.length} internal directories${i.groundwork.inventory.truncated.length > 0 ? `; ${i.groundwork.inventory.truncated.join("; ")}` : ""}.`,

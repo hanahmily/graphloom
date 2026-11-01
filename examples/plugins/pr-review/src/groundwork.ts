@@ -151,7 +151,8 @@ export function groundworkState(o: GroundworkOptions): GroundworkState {
   }
   const symbols: SymbolDef[] = raw.map((s, i) => ({ ...s, id: `S${i + 1}` }));
   const newCount = symbols.filter((s) => s.change === "new").length;
-  if (newCount > o.profile.limits.maxNewSymbols) return { state: "incompatible", problem: `the pull request adds ${newCount} symbols, past the profile's limits.maxNewSymbols of ${o.profile.limits.maxNewSymbols}` };
+  // Past `maxNewSymbols` the questions run in large mode (design §7.6); only the hard cap refuses the pull request.
+  if (newCount > o.profile.limits.hardMaxNewSymbols) return { state: "incompatible", problem: `the pull request adds ${newCount} symbols, past the profile's limits.hardMaxNewSymbols of ${o.profile.limits.hardMaxNewSymbols}` };
 
   // Phase 2: the whole-repository searches, and the inventory's call sites and local sources.
   const manifests = parseManifests(textOf(o.evidence, COMMAND.baseManifests).text);

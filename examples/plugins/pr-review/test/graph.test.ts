@@ -140,7 +140,7 @@ describe("the report scenario, end to end through the graph", () => {
     const written = sim.written!;
     const json = JSON.parse(written.json) as Record<string, unknown>;
     expect(json.schema).toBe("pr-change-report-v1");
-    expect(Object.keys(json).sort()).toEqual(["checks", "commits", "facts", "files", "measurements", "notes", "pull", "removed", "removedParts", "schema", "sections", "summary"]);
+    expect(Object.keys(json).sort()).toEqual(["checks", "commits", "facts", "files", "measurements", "mode", "notes", "pull", "removed", "removedParts", "schema", "sections", "summary"]);
     expect(written.markdown).toMatch(/^# apache\/skywalking-banyandb#7 at 0123456789ab \(base fedcba987654\)\nContents: Report · Measurements · Q&A/);
     expect(written.markdown).toMatch(/\n# Report\n[\s\S]*\n# Measurements\n[\s\S]*\n# Q&A\n/);
     expect(written.markdown).not.toMatch(/verdict|severity|request-changes|\bapprove\b/i);
@@ -351,10 +351,10 @@ describe("what makes the run stop before any agent", () => {
     expect(stopOf(simulate({ scenario: moved }))!.blocker).toMatch(/head is f{40}, not the requested 0123/);
   });
 
-  it("stops, naming the size, past a profile limit", () => {
-    expect(stopOf(simulate({ config: { limits: { maxFiles: 3 } } }))!.blocker).toMatch(/5 files, past the profile's limits.maxFiles of 3/);
-    expect(stopOf(simulate({ config: { limits: { maxPatchBytes: 100 } } }))!.blocker).toMatch(/patches are \d+ bytes, past the profile's limits.maxPatchBytes of 100/);
-    expect(stopOf(simulate({ config: { limits: { maxFiles: 3 } } }))!.reason).toBe("incompatible task");
+  it("stops, naming the size, past a hard cap of the profile (past a max limit alone, large mode takes over)", () => {
+    expect(stopOf(simulate({ config: { limits: { maxFiles: 3, hardMaxFiles: 3 } } }))!.blocker).toMatch(/5 files, past the profile's limits.hardMaxFiles of 3/);
+    expect(stopOf(simulate({ config: { limits: { maxPatchBytes: 100, hardMaxPatchBytes: 100 } } }))!.blocker).toMatch(/patches are \d+ bytes, past the profile's limits.hardMaxPatchBytes of 100/);
+    expect(stopOf(simulate({ config: { limits: { maxFiles: 3, hardMaxFiles: 3 } } }))!.reason).toBe("incompatible task");
   });
 
   it("refuses a pull request that touches .graphloom/ from the Git objects, before the checkout runs and before any read", () => {
@@ -520,7 +520,7 @@ describe("agentConfigMasks", () => {
 
 describe("the worktree the scenarios assume", () => {
   it("holds the head files the static metrics read", () => {
-    expect(Object.keys(REHEARSAL_HEAD_FILES).sort()).toEqual(["banyand/cmd/server/flags.go", "banyand/stream/write_standalone.go", "pkg/offline/sync.go", "pkg/quota/limit.go", "pkg/retention/ttl.go", "pkg/retry/backoff.go", "pkg/schema/ttl.go", "pkg/spread/jitter.go"]);
+    expect(Object.keys(REHEARSAL_HEAD_FILES).sort()).toEqual(["banyand/cmd/server/flags.go", "banyand/stream/write_standalone.go", "pkg/alpha/alpha.go", "pkg/beta/beta.go", "pkg/offline/sync.go", "pkg/quota/limit.go", "pkg/retention/ttl.go", "pkg/retry/backoff.go", "pkg/schema/ttl.go", "pkg/spread/jitter.go"]);
     expect(REHEARSAL_REQUEST).toBe(`Report on apache/skywalking-banyandb#7 at ${REHEARSAL_HEAD}.`);
     const _s: RehearsalScenario | undefined = undefined;
     void _s;

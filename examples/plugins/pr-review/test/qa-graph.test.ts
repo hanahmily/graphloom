@@ -544,10 +544,10 @@ describe("stopping rules", () => {
     expect(asked.action).toMatchObject({ type: "stop", stop: { reason: "budgets exhausted" } });
   });
 
-  it("stops the run 'incompatible task', naming the size, when the pull request adds more symbols than the profile allows", () => {
-    const sim = simulate({ scenarioName: "missing-test", config: { limits: { maxNewSymbols: 1 } } });
+  it("stops the run 'incompatible task', naming the size, when the pull request adds more symbols than the hard cap allows", () => {
+    const sim = simulate({ scenarioName: "missing-test", config: { limits: { maxNewSymbols: 1, hardMaxNewSymbols: 1 } } });
     expect(stopOf(sim)).toMatchObject({ reason: "incompatible task", retryable: false });
-    expect(stopOf(sim)!.blocker).toContain("the pull request adds 2 symbols, past the profile's limits.maxNewSymbols of 1");
+    expect(stopOf(sim)!.blocker).toContain("the pull request adds 2 symbols, past the profile's limits.hardMaxNewSymbols of 1");
     expect(sim.jobs.some((j) => j.kind === "agent" && j.stageId === "questions")).toBe(false);
   });
 });

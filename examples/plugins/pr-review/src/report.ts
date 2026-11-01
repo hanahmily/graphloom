@@ -163,6 +163,11 @@ export interface ReportContext {
   pinned?: readonly PinnedText[];
   /** State the patches introduce: each must have a lifecycle entry in an item that cites its file. */
   candidates?: readonly StateCandidate[];
+  /** Large mode's merged report holds the items of every area, so its bounds grow with them (design §6.9); absent means the standard bounds. */
+  maxItemsPerSection?: number;
+  maxBytes?: number;
+  /** Large mode: files no agent read as patches (generated, or no patch from GitHub), by path, with what the report says of each. */
+  unread?: ReadonlyMap<string, string>;
 }
 
 /** What the deterministic rules judge: a reporter's output, or a final report in its shape (no summary check). */
@@ -184,10 +189,13 @@ function findFile(files: readonly PullFile[], path: string): PullFile | undefine
 const SENTENCE_SPLIT = /[.!?]+(?:\s+|$)/;
 
 /** Every deterministic problem with `report` (§6.5), each naming where. Empty when it passes. `final` skips what only the reporter's own result owes: the summary, cite ranges and the state candidates. */
-export function reportProblems(report: ReportLike, ctx: ReportContext, opts: { final?: boolean } = {}): string[] {
+export function reportProblems(report: ReportLike, ctx: ReportContext, opts: { final?: boolean; summary?: boolean } = {}): string[] {
   const problems: string[] = [];
   const final = opts.final === true;
-  if (!final) summaryProblems(report, ctx, problems);
+  const maxItems = ctx.maxItemsPerSection ?? MAX_ITEMS_PER_SECTION;
+  const maxBytes = ctx.maxBytes ?? MAX_REPORT_BYTES;
+  // An area's report leaves the summary to the synthesis job (design §6.9).
+  if (!final && opts.summary !== false) summaryProblems(report, ctx, problems);
   const known = new Map(ctx.sections.map((s) => [s.id, s]));
   const seen = new Set<string>();
   for (const s of report.sections) {
@@ -205,7 +213,7 @@ export function reportProblems(report: ReportLike, ctx: ReportContext, opts: { f
     bytes += Buffer.byteLength(JSON.stringify(s), "utf8");
     if (s.none && s.items.length > 0) problems.push(`section ${s.id} says none but lists ${s.items.length} item(s)`);
     if (!s.none && s.items.length === 0) problems.push(`section ${s.id} has no items and does not say "none": true`);
-    if (s.items.length > MAX_ITEMS_PER_SECTION) problems.push(`section ${s.id} has ${s.items.length} items, more than ${MAX_ITEMS_PER_SECTION}`);
+    if (s.items.length > maxItems) problems.push(`section ${s.id} has ${s.items.length} items, more than ${maxItems}`);
     if (s.none) {
       const routed = ctx.facts.filter((f) => f.section === s.id);
       if (routed.length > 0) problems.push(`section ${s.id} says none, but detector fact(s) ${routed.slice(0, 5).map((f) => f.id).join(", ")} route to it`);
@@ -230,7 +238,7 @@ export function reportProblems(report: ReportLike, ctx: ReportContext, opts: { f
       for (const e of item.state) for (const c of item.cites) stateNames.push({ path: c.path, name: e.name });
     });
   }
-  if (bytes > MAX_REPORT_BYTES) problems.push(`the report is ${bytes} bytes, more than ${MAX_REPORT_BYTES}`);
+  if (bytes > maxBytes) problems.push(`the report is ${bytes} bytes, more than ${maxBytes}`);
   const uncited = ctx.files.flatMap((f) => fileNames(f)).filter((n) => !cited.has(n));
   if (uncited.length > 0) problems.push(`changed file(s) no item cites: ${uncited.slice(0, 10).join(", ")}${uncited.length > 10 ? `, and ${uncited.length - 10} more` : ""}; put each in a section, or in "other"`);
   const unaccounted = ctx.facts.filter((f) => known.has(f.section) && !accounted.has(f.id));
@@ -255,7 +263,7 @@ export function reportProblems(report: ReportLike, ctx: ReportContext, opts: { f
 const isStated = (p: Purpose): boolean => p.source === "stated";
 
 /** The summary's rules: a stated purpose quotes the pull request's own text; an inferred one quotes nothing. */
-function summaryProblems(report: ReportLike, ctx: ReportContext, problems: string[]): void {
+export function summaryProblems(report: Partial<Pick<ReporterOutput, "purpose" | "overview">>, ctx: { pinned?: readonly PinnedText[] | undefined }, problems: string[]): void {
   const p = report.purpose;
   if (p === undefined) problems.push("the purpose is missing");
   else {
@@ -367,9 +375,9 @@ export interface RemovedItem {
 
 /** A part of the report the claim check could not support, dropped while its item stays. */
 export interface RemovedPart {
-  /** The claim-check id: `purpose`, `overview`, `R3.s1` (a state entry, whole), `R3.b2` (a behavior row). */
+  /** The claim-check id: `purpose`, `overview`, `R3.s1` (a state entry, whole), `R3.b2` (a behavior row), `M2` (a merge, large mode). */
   id: string;
-  kind: "purpose" | "overview" | "state" | "behavior";
+  kind: "purpose" | "overview" | "state" | "behavior" | "merge";
   /** The item it belonged to; empty for the summary. */
   item: string;
   /** What was dropped, in a few words: the entry's name or the row's case. */
@@ -421,7 +429,7 @@ export const behaviorId = (item: string, row: number): string => `${item}.b${row
  * detector fact left without an item gets a plugin-written one, so coverage
  * holds without trusting a model (§6.4).
  */
-export function assembleReport(report: ReporterOutput, removed: ReadonlyMap<string, string>, ctx: ReportContext): FinalReport {
+export function assembleReport(report: Pick<ReporterOutput, "sections" | "notes"> & Partial<Pick<ReporterOutput, "purpose" | "overview">>, removed: ReadonlyMap<string, string>, ctx: ReportContext): FinalReport {
   const items = numbered(report, ctx);
   const gone: RemovedItem[] = [];
   const parts: RemovedPart[] = [];
@@ -449,8 +457,8 @@ export function assembleReport(report: ReporterOutput, removed: ReadonlyMap<stri
   }
   const purposeReason = removed.get("purpose");
   const overviewReason = removed.get("overview");
-  if (purposeReason !== undefined) parts.push({ id: "purpose", kind: "purpose", item: "", label: report.purpose.text, reason: purposeReason });
-  if (overviewReason !== undefined) parts.push({ id: "overview", kind: "overview", item: "", label: report.overview, reason: overviewReason });
+  if (purposeReason !== undefined) parts.push({ id: "purpose", kind: "purpose", item: "", label: report.purpose?.text ?? "", reason: purposeReason });
+  if (overviewReason !== undefined) parts.push({ id: "overview", kind: "overview", item: "", label: report.overview ?? "", reason: overviewReason });
   let next = items.length;
   const cited = new Set(ctx.sections.flatMap((s) => bySection.get(s.id)!.flatMap((i) => i.cites.map((c) => c.path))));
   const accounted = new Set(ctx.sections.flatMap((s) => bySection.get(s.id)!.flatMap((i) => i.facts)));
@@ -460,7 +468,8 @@ export function assembleReport(report: ReporterOutput, removed: ReadonlyMap<stri
    */
   const place = (section: string, autos: Array<Omit<FinalItem, "id">>, label: string): void => {
     const target = bySection.get(section)!;
-    const room = MAX_ITEMS_PER_SECTION - target.length;
+    const limit = ctx.maxItemsPerSection ?? MAX_ITEMS_PER_SECTION;
+    const room = limit - target.length;
     if (autos.length <= room) {
       for (const a of autos) {
         next += 1;
@@ -490,7 +499,7 @@ export function assembleReport(report: ReporterOutput, removed: ReadonlyMap<stri
     const whole = fact.line < 1;
     const list = factItems.get(fact.section) ?? [];
     list.push({
-      text: `Detected: ${fact.text}. The reported item for it was removed by the claim check.`,
+      text: ctx.unread?.has(fact.path) === true ? `Detected: ${fact.text}. ${ctx.unread.get(fact.path)}.` : `Detected: ${fact.text}. The reported item for it was removed by the claim check.`,
       cites: [{ path: fact.path, side: fact.side, start: whole ? 0 : fact.line, end: whole ? 0 : fact.line, symbol: "" }],
       facts: [fact.id],
       state: [],
@@ -507,7 +516,7 @@ export function assembleReport(report: ReporterOutput, removed: ReadonlyMap<stri
       const names = fileNames(file);
       if (names.every((n) => cited.has(n))) continue;
       uncovered.push({
-        text: `${file.path} changed (+${file.additions} −${file.deletions} lines); not summarised`,
+        text: `${file.path} changed (+${file.additions} −${file.deletions} lines); ${ctx.unread?.get(file.path) ?? "not summarised"}`,
         cites: names.map((n) => ({ path: n, side: (n === file.path && file.status !== "removed" ? "head" : "base") as Side, start: 0, end: 0, symbol: "" })),
         facts: [],
         state: [],
@@ -519,7 +528,7 @@ export function assembleReport(report: ReporterOutput, removed: ReadonlyMap<stri
     place("other", uncovered, "Changed, not summarised");
   }
   return {
-    summary: { purpose: purposeReason === undefined ? report.purpose : null, overview: overviewReason === undefined ? report.overview : null },
+    summary: { purpose: purposeReason === undefined ? (report.purpose ?? null) : null, overview: overviewReason === undefined ? (report.overview ?? null) : null },
     sections: ctx.sections.map((s) => ({ id: s.id, title: s.title, none: bySection.get(s.id)!.length === 0, items: bySection.get(s.id)! })),
     notes: report.notes,
     removed: gone,
@@ -643,6 +652,7 @@ export function renderReport(final: FinalReport, header: ReportHeader): string {
     }
     lines.push("");
   }
+  for (const p of final.removedParts.filter((x) => x.kind === "merge")) lines.push(`Merge not applied: the claim check could not support joining ${short(p.label, 120)} (${short(p.reason, 140)}); its items stay separate.`);
   lines.push(`Notes: ${final.notes.length === 0 ? "none" : final.notes.map(oneLine).join(" | ")}`, "");
   return lines.join("\n");
 }

@@ -9,15 +9,16 @@
  */
 import type { EnvironmentCommand, EvidenceRecord } from "@graphloom/sdk";
 import { analyze, type Analysis } from "./analysis.js";
-import { answersFlow, NECESSITY_KIND, type AnswerContext, type AnswersFlow, type FinalAnswer } from "./answers.js";
+import { ANSWER_KIND, answerProblems, answersFlow, NECESSITY_KIND, verificationOutcome, verificationPlan, type AnswerContext, type AnswersFlow, type FinalAnswer } from "./answers.js";
 import { pinnedBase } from "./commands.js";
-import { COMMAND } from "./constants.js";
+import { isLarge, questionsMode, type ReviewMode } from "./mode.js";
+import { COMMAND, QUESTION_BATCH_SIZE } from "./constants.js";
 import { commandRuns, succeeded, type CommandRun } from "./evidence.js";
 import { necessityDecision, necessityJson, necessityQuestion, parseNecessityRecord, type NecessityRecord } from "./necessity.js";
 import { principlesContext, principlesReading, principlesRecord, type PrinciplesContext } from "./principles.js";
 import { ledgerJson, ledgerMarkdown, ledgerRead, ledgerWriteCommand, oldValue, priorState, type PriorLedger } from "./ledger.js";
 import { withQa } from "./output.js";
-import { necessityWriteCommand, qaWriteCommand, writtenNecessity, writtenReport } from "./write.js";
+import { necessityWriteCommand, qaWriteCommand, writtenNecessity, writtenRecord, writtenReport } from "./write.js";
 import { groundworkState, type Groundwork, type GroundworkState } from "./groundwork.js";
 import { effectivePacks } from "./packs.js";
 import type { Profile } from "./profile.js";
@@ -28,6 +29,8 @@ import type { PullRequest } from "./request.js";
 
 export interface QaContext {
   analysis: Analysis;
+  /** The mode the questions and answers run in: the report's, or large when the new symbols are over the limit (design §7.6). */
+  mode: ReviewMode;
   pr: PullRequest;
   base: string;
   view: ReportView;
@@ -68,12 +71,13 @@ export function qaContext(evidence: readonly EvidenceRecord[], profile: Profile,
   }
   const symbols = g.groundwork.symbols.map((s) => ({ ...s, ...(itemOfSymbol(s, view.items) !== undefined ? { item: itemOfSymbol(s, view.items)! } : {}) }));
   const groundwork: Groundwork = { ...g.groundwork, symbols };
-  return { state: "ready", ctx: { analysis: a.analysis, pr, base, view, groundwork, pinned: pinnedTexts(a.analysis.snapshot.pull, a.analysis.snapshot.commits), packs: effectivePacks(profile), refs: g.refs, designDocs: profile.questions.designDocs, context: profile.context, ...(principles !== undefined ? { principles } : {}) } };
+  const mode = questionsMode(a.analysis.snapshot.mode, groundwork.symbols.filter((s) => s.change === "new").length, profile.limits);
+  return { state: "ready", ctx: { analysis: a.analysis, mode, pr, base, view, groundwork, pinned: pinnedTexts(a.analysis.snapshot.pull, a.analysis.snapshot.commits), packs: effectivePacks(profile), refs: g.refs, designDocs: profile.questions.designDocs, context: profile.context, ...(principles !== undefined ? { principles } : {}) } };
 }
 
 /** The questioner's flow: its result checked by the deterministic rules. */
 export function questionerFlow(evidence: readonly EvidenceRecord[], ctx: QaContext): QuestionsFlow {
-  const allPurposeKeys = requiredQuestions({ view: ctx.view, groundwork: ctx.groundwork }, new Map());
+  const allPurposeKeys = requiredQuestions({ view: ctx.view, groundwork: ctx.groundwork, large: isLarge(ctx.mode) }, new Map());
   return questionsFlow(evidence, (output) => questionerProblems(output, ctx.view, ctx.groundwork, allPurposeKeys));
 }
 
@@ -94,7 +98,7 @@ export interface QuestionSet {
 export function questionSet(ctx: QaContext, output: QuestionerOutput | undefined, skipped = false): QuestionSet {
   if (skipped) return { questions: [necessityQuestion()], purposes: [], rejected: [], skipped: true };
   const { stated, rejected } = statedPurposes(output, ctx.view, ctx.pinned);
-  const required = requiredQuestions({ view: ctx.view, groundwork: ctx.groundwork }, stated);
+  const required = requiredQuestions({ view: ctx.view, groundwork: ctx.groundwork, large: isLarge(ctx.mode) }, stated);
   const purposes: PurposeRecord[] = changeItems(ctx.view).map((i) => stated.get(i.id) ?? { item: i.id, status: "asked" });
   return { questions: [necessityQuestion(), ...finalQuestions(required, output, ctx.groundwork)], purposes, rejected, skipped: false };
 }
@@ -132,7 +136,8 @@ export const necessityRecordCommand = (record: NecessityRecord): EnvironmentComm
 
 /** `qa.json`, the Q&A part and the Necessity part of `review.md` the answers recompute to. */
 export function qaOutputs(ctx: QaContext, set: QuestionSet, answers: FinalAnswer[], necessity?: NecessityRecord): { json: string; markdown: string; necessity?: string } {
-  const input: QaInput = { pr: ctx.pr, base: ctx.base, view: ctx.view, groundwork: ctx.groundwork, purposes: set.purposes, questions: set.questions, answers, skipped: set.skipped, ...(necessity !== undefined ? { necessity } : {}) };
+  const large = isLarge(ctx.mode) && !set.skipped;
+  const input: QaInput = { pr: ctx.pr, base: ctx.base, view: ctx.view, groundwork: ctx.groundwork, purposes: set.purposes, questions: set.questions, answers, skipped: set.skipped, mode: ctx.mode, ...(large ? { batches: answerBatches(afterNecessity(set)).length } : {}), ...(necessity !== undefined ? { necessity } : {}) };
   return { json: qaJson(input), markdown: renderQa(input), ...(necessity !== undefined ? { necessity: renderNecessity(necessity) } : {}) };
 }
 
@@ -166,4 +171,108 @@ export function answerWrites(evidence: readonly EvidenceRecord[], ctx: QaContext
   const input = { pr: ctx.pr, base: ctx.base, files: ctx.analysis.snapshot.files.length, commits: ctx.analysis.snapshot.commits.length, facts: ctx.analysis.facts.length, questions: set.questions, answers: final, purposes: set.purposes };
   const ledger = ledgerWriteCommand(ctx.pr, old, ledgerJson(input, prior.state === "read" ? prior.value : undefined), ledgerMarkdown(input));
   return ledger === undefined ? { qa, old, prior, problem: "the ledger files are too large for one command" } : { qa, ledger, old, prior };
+}
+
+// ---- large mode: the answers in batches (design §7.6) ----
+
+/**
+ * The questions the answerer takes in each job: the questions of a few change items, at most `QUESTION_BATCH_SIZE`.
+ * Consecutive questions of one item stay together; an item with more than a batch's worth is cut into runs.
+ */
+export function answerBatches(questions: readonly Question[]): Question[][] {
+  const groups: Question[][] = [];
+  for (const q of questions) {
+    const last = groups.at(-1);
+    if (last !== undefined && last[0]!.item === q.item) last.push(q);
+    else groups.push([q]);
+  }
+  const batches: Question[][] = [];
+  let cur: Question[] = [];
+  for (const g of groups) {
+    for (let i = 0; i < g.length; i += QUESTION_BATCH_SIZE) {
+      const part = g.slice(i, i + QUESTION_BATCH_SIZE);
+      if (cur.length > 0 && cur.length + part.length > QUESTION_BATCH_SIZE) {
+        batches.push(cur);
+        cur = [];
+      }
+      cur.push(...part);
+    }
+  }
+  if (cur.length > 0) batches.push(cur);
+  return batches;
+}
+
+export const BATCH_RECORD_SCHEMA = "pr-review-answers-batch-v1";
+export const batchRecordId = (index: number): string => `answers-record-${index + 1}`;
+/** The id prefix of a batch's citation checks, so batches never share a command id. */
+export const batchCitePrefix = (index: number): string => `${COMMAND.cite}-b${index + 1}`;
+
+/** One answered batch, recorded as evidence once its checker has judged it. */
+export interface BatchRecord {
+  schema: typeof BATCH_RECORD_SCHEMA;
+  batch: number;
+  questions: string[];
+  final: FinalAnswer[];
+}
+
+export const batchRecordJson = (r: BatchRecord): string => JSON.stringify(r);
+
+const isObj = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === "object" && !Array.isArray(v);
+
+/** What a batch's record shows when the deterministic rules and the citation checks are applied to it again, or why it does not stand. */
+function checkBatchRecord(evidence: readonly EvidenceRecord[], value: unknown, index: number, batch: readonly Question[], actx: AnswerContext, base: string): FinalAnswer[] | { problem: string } {
+  if (!isObj(value) || value.schema !== BATCH_RECORD_SCHEMA || value.batch !== index + 1 || !Array.isArray(value.questions) || !Array.isArray(value.final)) return { problem: "it is not the record of this batch" };
+  if (JSON.stringify(value.questions) !== JSON.stringify(batch.map((q) => q.id))) return { problem: `it covers ${JSON.stringify(value.questions)}, not the batch's ${batch.map((q) => q.id).join(", ")}` };
+  const final = value.final as FinalAnswer[];
+  if (JSON.stringify(final.map((a) => a.question)) !== JSON.stringify(batch.map((q) => q.id))) return { problem: "its answers are not the batch's questions in order" };
+  const problems = answerProblems(final, actx);
+  if (problems.length > 0) return { problem: `its answers fail the deterministic rules: ${problems.slice(0, 3).join("; ")}` };
+  const verified = verificationOutcome(evidence, verificationPlan(final, actx, base, batchCitePrefix(index)));
+  if (verified.state === "failed") return { problem: verified.reason };
+  if (verified.state === "missing") return { problem: "its citations were not checked against the trees" };
+  if (verified.problems.length > 0) return { problem: `its citations fail the checks: ${verified.problems.slice(0, 3).join("; ")}` };
+  const bad = final.filter((a) => a.check.verdict !== "supported" && a.check.verdict !== "partial" && !(a.check.verdict === "downgraded" && a.status === "needs author"));
+  if (bad.length > 0) return { problem: `answer(s) ${bad.map((a) => a.question).join(", ")} stand without a supported or partial verdict` };
+  return final;
+}
+
+export type BatchedAnswers =
+  | { state: "batch"; index: number; total: number; questions: Question[]; flow: Exclude<AnswersFlow, { state: "done" }> }
+  | { state: "record"; index: number; record: BatchRecord }
+  | { state: "supervise"; reason: string; refs: string[] }
+  | { state: "done"; final: FinalAnswer[]; batches: number };
+
+/**
+ * Where the answers stand in large mode, from the evidence alone: the batches in order, each answered by the
+ * answerer (which continues its own session from the batch before) and checked in a fresh session, then recorded.
+ * A batch looks only at the agent runs after the previous batch's record, and at its own citation checks.
+ */
+export function batchedAnswers(evidence: readonly EvidenceRecord[], ctx: QaContext, questions: readonly Question[], retryable?: (r: CommandRun) => boolean): BatchedAnswers {
+  const batches = answerBatches(questions);
+  const final: FinalAnswer[] = [];
+  let from = -1;
+  for (const [index, batch] of batches.entries()) {
+    const actx = answerContext(ctx, batch);
+    const id = batchRecordId(index);
+    const run = commandRuns(evidence, id).filter((r) => succeeded(r.command)).at(-1);
+    if (run !== undefined) {
+      let value: unknown;
+      try {
+        const json = writtenRecord(run.command.argv, id);
+        value = json === undefined ? undefined : JSON.parse(json);
+      } catch {
+        value = undefined;
+      }
+      const checked = checkBatchRecord(evidence, value, index, batch, actx, ctx.base);
+      if ("problem" in checked) return { state: "supervise", reason: `the record of answer batch ${index + 1} does not validate: ${checked.problem}`, refs: [run.record.ref] };
+      final.push(...checked);
+      from = evidence.findIndex((e) => e.ref === run.record.ref);
+      continue;
+    }
+    const flow = answersFlow(evidence.slice(from + 1), actx, ctx.base, retryable, ANSWER_KIND, batchCitePrefix(index));
+    if (flow.state === "done") return { state: "record", index, record: { schema: BATCH_RECORD_SCHEMA, batch: index + 1, questions: batch.map((q) => q.id), final: flow.final } };
+    if (flow.state === "supervise") return { state: "supervise", reason: `answer batch ${index + 1} of ${batches.length}: ${flow.reason}`, refs: flow.refs };
+    return { state: "batch", index, total: batches.length, questions: batch, flow };
+  }
+  return { state: "done", final, batches: batches.length };
 }
