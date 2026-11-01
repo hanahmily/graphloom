@@ -5,7 +5,7 @@ import { validateResultShape } from "@graphloom/sdk";
 import { describe, expect, it } from "vitest";
 import { detectFacts } from "../src/detectors.js";
 import { pinnedTexts } from "../src/questions.js";
-import { assembleReport, asReporterOutput, CHANGE_REPORT_SCHEMA, MAX_ITEM_CHARS, MAX_ITEMS_PER_SECTION, numbered, parseReporterOutput, renderReport, reportProblems, type Cite, type ReportContext, type ReportItem, type ReporterOutput } from "../src/report.js";
+import { assembleReport, asReporterOutput, CHANGE_REPORT_SCHEMA, MAX_ITEM_CHARS, MAX_ITEMS_PER_SECTION, MAX_LARGE_REPORTER_ITEMS, numbered, parseReporterOutput, renderReport, reportProblems, type Cite, type ReportContext, type ReportItem, type ReporterOutput } from "../src/report.js";
 import { pullFile, type PullFile } from "../src/snapshot.js";
 import { reporterSections } from "../src/template.js";
 
@@ -280,5 +280,27 @@ describe("the item text limit (design §6.5)", () => {
     expect(problems(valid([item("x".repeat(600), [cite("pkg/a.go")])])).join()).not.toMatch(/characters, more than/);
     expect(problems(valid([item("x".repeat(650), [cite("pkg/a.go")])])).join()).toMatch(/650 characters, more than 600/);
     expect(reportProblems(valid([item("x".repeat(650), [cite("pkg/a.go")])]), { ...ctx, large: true }).join()).toMatch(/650 characters, more than 600/);
+  });
+});
+
+describe("room for the plugin's items in a large-mode section", () => {
+  it("lets a large reporter fill a section only up to two fewer than the bound, so assembled facts and files still fit", () => {
+    // Every section full of the reporter's items, each fact left unlisted and a file left uncited.
+    const large: ReportContext = { ...ctx, large: true };
+    const full = (n: number): ReporterOutput => {
+      const r = valid();
+      for (const sec of r.sections) {
+        sec.items = Array.from({ length: n }, (_, i) => item(`Item ${i} of ${sec.id}.`, [cite("pkg/a.go", "head", 11, 12)]));
+        sec.none = false;
+      }
+      return r;
+    };
+    expect(MAX_LARGE_REPORTER_ITEMS).toBe(MAX_ITEMS_PER_SECTION - 2);
+    expect(reportProblems(full(MAX_LARGE_REPORTER_ITEMS + 1), large).join("|")).toMatch(/items/);
+    const fits = full(MAX_LARGE_REPORTER_ITEMS);
+    expect(reportProblems(fits, large)).toEqual([]);
+    const final = assembleReport(fits, new Map(), large);
+    for (const sec of final.sections) expect(sec.items.length, sec.id).toBeLessThanOrEqual(MAX_ITEMS_PER_SECTION);
+    expect(reportProblems(asReporterOutput(final), large, { final: true })).toEqual([]);
   });
 });

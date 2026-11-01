@@ -22,6 +22,11 @@ import type { Section } from "./template.js";
 
 export const REPORT_SCHEMA = "pr-change-report-v1";
 export const MAX_ITEMS_PER_SECTION = 40;
+/**
+ * A large-mode reporter's items per section: two fewer than the final bound, since the high-level report need not
+ * account for every detector fact or cite every file, and assembly adds at most one grouped item of each to a section.
+ */
+export const MAX_LARGE_REPORTER_ITEMS = MAX_ITEMS_PER_SECTION - 2;
 export const MAX_ITEM_CHARS = 600;
 export const MAX_REPORT_BYTES = 256 * 1024;
 export const MAX_PURPOSE_CHARS = 400;
@@ -201,7 +206,7 @@ const SENTENCE_SPLIT = /[.!?]+(?:\s+|$)/;
 export function reportProblems(report: ReportLike, ctx: ReportContext, opts: { final?: boolean; summary?: boolean } = {}): string[] {
   const problems: string[] = [];
   const final = opts.final === true;
-  const maxItems = MAX_ITEMS_PER_SECTION;
+  const maxItems = ctx.large === true && !final ? MAX_LARGE_REPORTER_ITEMS : MAX_ITEMS_PER_SECTION;
   const maxBytes = MAX_REPORT_BYTES;
   const maxItemChars = MAX_ITEM_CHARS;
   // `summary: false` skips the summary rules (the final report has none of its own to check).
