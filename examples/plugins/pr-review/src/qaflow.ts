@@ -12,13 +12,15 @@ import { analyze, type Analysis } from "./analysis.js";
 import { ANSWER_KIND, answerProblems, answersFlow, NECESSITY_KIND, verificationOutcome, verificationPlan, type AnswerContext, type AnswersFlow, type FinalAnswer } from "./answers.js";
 import { pinnedBase } from "./commands.js";
 import { isLarge, questionsMode, type ReviewMode } from "./mode.js";
-import { COMMAND, QUESTION_BATCH_SIZE } from "./constants.js";
+import { COMMAND, QUESTION_BATCH_SIZE, REVIEW_DIR } from "./constants.js";
 import { commandRuns, succeeded, type CommandRun } from "./evidence.js";
 import { necessityDecision, necessityJson, necessityQuestion, parseNecessityRecord, type NecessityRecord } from "./necessity.js";
 import { principlesContext, principlesReading, principlesRecord, type PrinciplesContext } from "./principles.js";
-import { ledgerJson, ledgerMarkdown, ledgerRead, ledgerWriteCommand, oldValue, priorState, type PriorLedger } from "./ledger.js";
+import { ledgerJson, ledgerMarkdown, ledgerRead, ledgerWriteCommands, oldValue, priorState, type PriorLedger } from "./ledger.js";
+import { reviewHtmlFrom } from "./html.js";
+import { htmlWriteCommands, necessityWriteCommands, qaWriteCommands, readParts, recordedNecessityJson, recordedReport } from "./parts.js";
 import { withQa } from "./output.js";
-import { necessityWriteCommand, qaWriteCommand, writtenNecessity, writtenRecord, writtenReport } from "./write.js";
+import { necessityWriteCommand, writtenRecord } from "./write.js";
 import { groundworkState, type Groundwork, type GroundworkState } from "./groundwork.js";
 import { effectivePacks } from "./packs.js";
 import type { Profile } from "./profile.js";
@@ -123,16 +125,19 @@ export type RecordedNecessity = { state: "missing" } | { state: "failed"; reason
 
 /** The recorded outcome of N1: the latest `necessity-write` that ran. It is what the Answers stage and its validators read. */
 export function recordedNecessity(evidence: readonly EvidenceRecord[]): RecordedNecessity {
-  const run = commandRuns(evidence, COMMAND.necessityWrite).at(-1);
-  if (run === undefined) return { state: "missing" };
-  if (!succeeded(run.command)) return { state: "failed", reason: `necessity-write exited ${run.command.exitCode ?? "on a signal"}`, ref: run.record.ref };
-  const json = writtenNecessity(run.command.argv);
-  const record = json === undefined ? undefined : parseNecessityRecord(json);
-  return record === undefined ? { state: "failed", reason: "the necessity-write command carries no necessity record", ref: run.record.ref } : { state: "read", record, ref: run.record.ref };
+  const w = recordedNecessityJson(evidence);
+  if (w.state === "none") return { state: "missing" };
+  const ref = w.refs.at(-1) ?? "";
+  if (w.state === "failed") return { state: "failed", reason: w.reason, ref };
+  const record = parseNecessityRecord(w.value);
+  return record === undefined ? { state: "failed", reason: "the necessity-write command carries no necessity record", ref } : { state: "read", record, ref };
 }
 
-/** The command that records N1's outcome, or undefined when it does not fit one command. */
+/** The single command that records N1's outcome, or undefined when it does not fit one command (then `necessityRecordCommands` writes it in parts). */
 export const necessityRecordCommand = (record: NecessityRecord): EnvironmentCommand | undefined => necessityWriteCommand(necessityJson(record));
+
+/** The commands that record N1's outcome: one command, or a part set when it does not fit one (design §6.6). */
+export const necessityRecordCommands = (record: NecessityRecord): EnvironmentCommand[] => necessityWriteCommands(necessityJson(record));
 
 /** `qa.json`, the Q&A part and the Necessity part of `review.md` the answers recompute to. */
 export function qaOutputs(ctx: QaContext, set: QuestionSet, answers: FinalAnswer[], necessity?: NecessityRecord): { json: string; markdown: string; necessity?: string } {
@@ -142,8 +147,12 @@ export function qaOutputs(ctx: QaContext, set: QuestionSet, answers: FinalAnswer
 }
 
 export interface AnswerWrites {
-  /** The `qa-write` command: `qa.json` and the whole `review.md`. */
-  qa?: EnvironmentCommand;
+  /** The commands that write `qa.json`, the whole `review.md` and `review.html`: each a single command when it fits one, else a part set (design §6.6). */
+  qa?: EnvironmentCommand[];
+  /** What those commands write, recomputed: the validators compare the artifacts reconstructed from the evidence with these. */
+  texts?: { json: string; markdown: string; html: string };
+  /** The commands that first write ledger.json and ledger.md as part sets, when they do not fit the ledger write's one command. */
+  ledgerParts?: EnvironmentCommand[];
   /** The `ledger-write` command, once the ledger value is read (and the prior ledger.json, when one is there to read). */
   ledger?: EnvironmentCommand;
   /** The value the ledger write swaps from: what Fetch (or a later read) saw. */
@@ -157,20 +166,23 @@ export interface AnswerWrites {
 /** The writes the Answers stage makes, recomputed from the evidence: what `qa-write` and `ledger-write` must carry. */
 export function answerWrites(evidence: readonly EvidenceRecord[], ctx: QaContext, set: QuestionSet, final: FinalAnswer[], necessity?: NecessityRecord): AnswerWrites {
   const out = qaOutputs(ctx, set, final, necessity);
-  const report = commandRuns(evidence, COMMAND.reportWrite).filter((r) => succeeded(r.command)).at(-1);
-  const written = report !== undefined ? writtenReport(report.command.argv) : undefined;
-  if (written === undefined) return { problem: "the report was not written" };
-  const qa = qaWriteCommand(out.json, withQa(written.markdown, out.markdown, out.necessity));
-  if (qa === undefined) return { problem: `the Q&A is too large for one write command (${out.json.length} characters of JSON)` };
+  const report = recordedReport(evidence);
+  if (report.state !== "read") return { problem: report.state === "failed" ? `the report was not written whole: ${report.reason}` : "the report was not written" };
+  const markdown = withQa(report.value.markdown, out.markdown, out.necessity);
+  // review.html is rendered from report.json as written, qa.json and necessity.json (design §6.11).
+  const html = reviewHtmlFrom(report.value.json, out.json, necessity !== undefined ? necessityJson(necessity) : undefined);
+  if (html === undefined) return { problem: "review.html cannot be rendered: report.json is not a change report" };
+  const texts = { json: out.json, markdown, html };
+  const qa = [...qaWriteCommands(out.json, markdown), ...htmlWriteCommands(html, true)];
   const read = ledgerRead(evidence);
-  if (read === undefined) return { qa, problem: "the ledger value Fetch read is not in the evidence" };
+  if (read === undefined) return { qa, texts, problem: "the ledger value Fetch read is not in the evidence" };
   const old = oldValue(read.ledger);
   const prior = priorState(evidence, old);
-  if (prior.state === "missing") return { qa, old, prior, problem: "the prior ledger's ledger.json has not been read" };
-  if (prior.state === "unreadable") return { qa, old, prior, problem: `the prior ledger's ledger.json cannot be read (${prior.reason}); the ledger is not overwritten` };
+  if (prior.state === "missing") return { qa, texts, old, prior, problem: "the prior ledger's ledger.json has not been read" };
+  if (prior.state === "unreadable") return { qa, texts, old, prior, problem: `the prior ledger's ledger.json cannot be read (${prior.reason}); the ledger is not overwritten` };
   const input = { pr: ctx.pr, base: ctx.base, files: ctx.analysis.snapshot.files.length, commits: ctx.analysis.snapshot.commits.length, facts: ctx.analysis.facts.length, questions: set.questions, answers: final, purposes: set.purposes };
-  const ledger = ledgerWriteCommand(ctx.pr, old, ledgerJson(input, prior.state === "read" ? prior.value : undefined), ledgerMarkdown(input));
-  return ledger === undefined ? { qa, old, prior, problem: "the ledger files are too large for one command" } : { qa, ledger, old, prior };
+  const ledger = ledgerWriteCommands(ctx.pr, old, ledgerJson(input, prior.state === "read" ? prior.value : undefined), ledgerMarkdown(input));
+  return { qa, texts, ledgerParts: ledger.parts, ledger: ledger.write, old, prior };
 }
 
 // ---- large mode: the answers in batches (design §7.6) ----
@@ -260,18 +272,21 @@ export function batchedAnswers(evidence: readonly EvidenceRecord[], ctx: QaConte
     const actx = answerContext(ctx, batch);
     const id = batchRecordId(index);
     const run = commandRuns(evidence, id).filter((r) => succeeded(r.command)).at(-1);
-    if (run !== undefined) {
+    // A record too large for one command was written as a part set (design §6.6), reconstructed and checked against its digest.
+    const parts = run === undefined ? readParts(evidence, id, `${REVIEW_DIR}/answers/${id}.json`) : undefined;
+    if (run !== undefined || parts?.state === "read") {
       let value: unknown;
       try {
-        const json = writtenRecord(run.command.argv, id);
+        const json = run !== undefined ? writtenRecord(run.command.argv, id) : parts?.state === "read" ? parts.value : undefined;
         value = json === undefined ? undefined : JSON.parse(json);
       } catch {
         value = undefined;
       }
+      const ref = run !== undefined ? run.record.ref : (parts as Extract<typeof parts, { state: "read" }>).refs.at(-1)!;
       const checked = checkBatchRecord(evidence, value, index, batch, actx, ctx.base);
-      if ("problem" in checked) return { state: "supervise", reason: `the record of answer batch ${index + 1} does not validate: ${checked.problem}`, refs: [run.record.ref] };
+      if ("problem" in checked) return { state: "supervise", reason: `the record of answer batch ${index + 1} does not validate: ${checked.problem}`, refs: [ref] };
       final.push(...checked);
-      from = evidence.findIndex((e) => e.ref === run.record.ref);
+      from = evidence.findIndex((e) => e.ref === ref);
       continue;
     }
     const flow = answersFlow(evidence.slice(from + 1), actx, ctx.base, retryable, ANSWER_KIND, batchCitePrefix(index));

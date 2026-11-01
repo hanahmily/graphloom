@@ -33,7 +33,7 @@ export function reportJson(i: OutputInput): string {
   const reasons = notRunReasons(i.profile);
   return JSON.stringify({
     schema: REPORT_FILE_SCHEMA,
-    pull: { owner: i.pr.owner, repo: i.pr.repo, number: i.pr.number, head: i.pr.head, ...(i.base !== undefined ? { base: i.base } : {}), title: i.snapshot.pull.title, url: i.snapshot.pull.url },
+    pull: { owner: i.pr.owner, repo: i.pr.repo, number: i.pr.number, head: i.pr.head, ...(i.base !== undefined ? { base: i.base } : {}), title: i.snapshot.pull.title, url: i.snapshot.pull.url, author: i.snapshot.pull.author },
     files: i.snapshot.files.map((f) => ({ path: f.path, previousPath: f.previousPath, status: f.status, additions: f.additions, deletions: f.deletions })),
     commits: i.snapshot.commits.length,
     checks: i.snapshot.checks,
@@ -45,6 +45,7 @@ export function reportJson(i: OutputInput): string {
     notes: i.final.notes,
     removed: i.final.removed,
     removedParts: i.final.removedParts,
+    architecture: i.final.architecture,
     measurements:
       m.state === "ready"
         ? { tools: m.coverage.runs.some((r) => r.ran) ? "static+coverage" : "static", coverage: coverageNotes(m.coverage), runs: m.coverage.runs, mutation: reasons.mutation, records: m.records }

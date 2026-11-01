@@ -56,6 +56,7 @@ import {
   GRAPH_ID,
   GRAPH_VERSION,
   QA_JSON,
+  REVIEW_HTML,
   REVIEW_MD,
 } from "./constants.js";
 import { commandRuns, describeCommand, environmentOutput, outputTail, succeeded, validatorEvidence, type CommandRun } from "./evidence.js";
@@ -75,8 +76,8 @@ import { requestedPull, type PullRequest } from "./request.js";
 import { secretFindings } from "./secrets.js";
 import { readInput, snapshotState, type PullFile, type ReadSpec } from "./snapshot.js";
 import { CLAIM_CHECK_SCHEMA_NAME } from "./claims.js";
-import { outputsOf, validatorById } from "./validators.js";
-import { recordCommand, reportWriteCommand, writtenQa, writtenReport } from "./write.js";
+import { outputsOf, validatorById, writtenHtmlProblems } from "./validators.js";
+import { htmlWriteCommands, recordCommands, reportWriteCommands } from "./parts.js";
 import { ANSWER_CHECK_REFERENCES, ANSWER_CHECK_SCHEMA, ANSWER_CHECK_SCHEMA_NAME, ANSWERS_REFERENCES, ANSWERS_REVISION_SCHEMA_NAME, ANSWERS_SCHEMA, ANSWERS_SCHEMA_NAME, answersFlow } from "./answers.js";
 import { baseDirIn } from "./basetree.js";
 import { sourceDirs } from "./inventory.js";
@@ -86,7 +87,7 @@ import { CLAIM_CHECK_REFERENCES } from "./claims.js";
 import { necessityQuestion, NECESSITY_ID, NECESSITY_REFERENCES, NECESSITY_REVISION_SCHEMA_NAME, NECESSITY_SCHEMA, NECESSITY_SCHEMA_NAME, type NecessityRecord } from "./necessity.js";
 import { principlesReadCommand, type Principle } from "./principles.js";
 import { answerCheckerInstruction, answererInstruction, necessityCheckerInstruction, necessityInstruction, questionerInstruction } from "./qaprompts.js";
-import { afterNecessity, answerBatches, answerContext, batchedAnswers, batchRecordId, batchRecordJson, answerWrites, necessityFlow, necessityRecordCommand, necessityRecordOf, qaContext, qaOutputs, questionSet, questionerFlow, recordedNecessity, type QaContext } from "./qaflow.js";
+import { afterNecessity, answerBatches, answerContext, batchedAnswers, batchRecordId, batchRecordJson, answerWrites, necessityFlow, necessityRecordCommands, necessityRecordOf, qaContext, qaOutputs, questionSet, questionerFlow, recordedNecessity, type QaContext } from "./qaflow.js";
 
 export { GRAPH_ID, GRAPH_VERSION };
 
@@ -144,7 +145,7 @@ export function definitionFor(profile: Profile): GraphDefinition {
     },
     {
       id: REQUIREMENT_REPORT,
-      statement: `Every template section is present, with cited items or an explicit None. Every citation lies inside the pull request's diff on the side it names. Every changed file (a renamed file under both names, a deleted file too) and every detector fact is cited, and no item carries a severity, finding or verdict (the result contract has no such field). report.json and ${REVIEW_MD} hold exactly that report, with the mode (standard, or large with the limits passed) in report.json and in the header of ${REVIEW_MD}. In large mode (a pull request over the profile's maxFiles or maxPatchBytes) the report is built from its areas: one reporter job in a fresh read-only session for each area, which reports that area's files only with an empty summary and passes the same deterministic validation (with its corrections) as a standard report over its own files; one synthesis job (change-synthesis-v1, the reporter harness, a fresh session) that writes the purpose and overview and joins the items that are one change across areas (a merged item stays in one section, joins items of at least two areas, and its citations, lifecycle entries and before/after rows are the union of its members'); the files no agent read as patches (the generated area, a file for which the host gave no patch) are listed in "other" with their diffstat and the reason; every checked area and the synthesis are recorded as evidence (area-record-<id>, synthesis-record) that recomputes; and the items are numbered R1 onward after the merges, in section order. Before its first area reporter job the graph computes what large mode needs of the run's agent invocations, jobs and decisions and stops with those numbers when the remaining budgets cannot cover them.`,
+      statement: `Every template section is present, with cited items or an explicit None. Every citation lies inside the pull request's diff on the side it names. Every changed file (a renamed file under both names, a deleted file too) and every detector fact is cited, and no item carries a severity, finding or verdict (the result contract has no such field). report.json, ${REVIEW_MD} and ${REVIEW_HTML} hold exactly that report, with the mode (standard, or large with the limits passed) in report.json and in the header of ${REVIEW_MD}. In large mode (a pull request over the profile's maxFiles or maxPatchBytes) the report is built from its areas: one reporter job in a fresh read-only session for each area, which reports that area's files only with an empty summary and passes the same deterministic validation (with its corrections) as a standard report over its own files; one synthesis job (change-synthesis-v1, the reporter harness, a fresh session) that writes the purpose and overview and joins the items that are one change across areas (a merged item stays in one section, joins items of at least two areas, and its citations, lifecycle entries and before/after rows are the union of its members'); the files no agent read as patches (the generated area, a file for which the host gave no patch) are listed in "other" with their diffstat and the reason; every checked area and the synthesis are recorded as evidence (area-record-<id>, synthesis-record) that recomputes; and the items are numbered R1 onward after the merges, in section order. Before its first area reporter job the graph computes what large mode needs of the run's agent invocations, jobs and decisions and stops with those numbers when the remaining budgets cannot cover them. Every report, standard or large, has an architecture diagram of what the pull request changes, returned in the reporter's result in standard mode and in the synthesis job's result in large mode (an area reporter leaves it empty): at most 30 nodes (id, label, kind, change added, modified or unchanged, paths, a cite) and 60 edges (from, to, label, kind, change added, modified, removed or unchanged, a cite). Deterministic validation requires unique node ids, edges that name two nodes, an added or modified node whose paths match a changed file, an unchanged node only where an edge joins it to a changed one, and cites that resolve in the tree they name and an unchanged node's paths that exist at the base, both read by read-only commands (arch-check) whose output is evidence; for a Go call or import edge between two package nodes the from package's head import blocks are read and a missing import is told to the checker. Plugin code renders it as an SVG (a layered layout with longest-path layers, cycles broken at depth-first back edges, barycentre ordering, boxes coloured by change, edge labels and a legend) in review.html and as a mermaid block in ${REVIEW_MD}. ${REVIEW_HTML} is rendered by plugin code from report.json (no model writes HTML) and is self-contained and inert, which a deterministic check on the written bytes enforces: no script, no external stylesheet, font or image, every text from a model or the pull request escaped, and its only links are hrefs to the pull request, its commits and its files on GitHub at the pinned head and base. Each of report.json, ${REVIEW_MD} and ${REVIEW_HTML} is written by one command when it fits (about 236,000 characters), otherwise as a bounded multi-part write: one command per part, each recorded as evidence, appended in order and renamed into place by the last part after it checks the digest every part carries; the validators reconstruct each file by concatenating the recorded parts in order and checking that digest.`,
       evidenceSchema: "change-report-v1",
     },
     {
@@ -154,7 +155,7 @@ export function definitionFor(profile: Profile): GraphDefinition {
     },
     {
       id: REQUIREMENT_CLAIMS,
-      statement: `An independent ${checker} report checker, on a harness other than the reporter's, judged every report item against the diff, and every item left is supported with quotes that match the diff's text. An item that was not supported after one revision is removed and recorded, and its file is accounted for in "other". In large mode this holds for every area (each checked in a fresh session of its own, over its own files) and a further independent check of the synthesis judges its purpose, its overview and each merge in one job: a merge it does not support after one revision is not applied (its items stay separate) and is recorded, a purpose or overview it does not support is removed and recorded.`,
+      statement: `An independent ${checker} report checker, on a harness other than the reporter's, judged every report item against the diff, and every item left is supported with quotes that match the diff's text. An item that was not supported after one revision is removed and recorded, and its file is accounted for in "other". In large mode this holds for every area (each checked in a fresh session of its own, over its own files) and a further independent check of the synthesis judges its purpose, its overview and each merge in one job: a merge it does not support after one revision is not applied (its items stay separate) and is recorded, a purpose or overview it does not support is removed and recorded. The architecture diagram's nodes (A.<node id>) and edges (A.e<n>) are claims of the same check: an unsupported node is dropped with its edges and an unsupported edge alone, and both are recorded under "Removed by the claim check".`,
       evidenceSchema: CLAIM_CHECK_SCHEMA_NAME,
     },
     {
@@ -164,7 +165,7 @@ export function definitionFor(profile: Profile): GraphDefinition {
     },
     {
       id: REQUIREMENT_ANSWERS,
-      statement: `N1 has its recorded answer first (when it is the only question, because it concluded unnecessary and the checker supports it, the Q&A says the remaining questions were skipped). Every other question has an answer from the ${harnessName(profile.roles.answerer)} answerer with evidence (citations that resolve in the tree they name, the searches run with their results, inventory entries) and a status of answered, partially answered or needs author. Every "none found" answer lists its whole-repository searches. Every cited metric equals its measurement record. Every proposal's line ranges lie inside its function and its names are new to the package. ${QA_JSON} and ${REVIEW_MD} are written, and the pull request's ledger ref was advanced by compare-and-swap from the value Fetch read with this head's report.json and qa.json. In large mode the answerer answers the questions in batches of at most ${QUESTION_BATCH_SIZE} (the questions of a few change items per job), continuing its own session from one batch to the next; each answered batch passes the same deterministic checks and citation verification as the standard answers and is recorded as evidence (answers-record-<n>) that recomputes; ${QA_JSON} and ${REVIEW_MD} are written once, after the last batch.`,
+      statement: `N1 has its recorded answer first (when it is the only question, because it concluded unnecessary and the checker supports it, the Q&A says the remaining questions were skipped). Every other question has an answer from the ${harnessName(profile.roles.answerer)} answerer with evidence (citations that resolve in the tree they name, the searches run with their results, inventory entries) and a status of answered, partially answered or needs author. Every "none found" answer lists its whole-repository searches. Every cited metric equals its measurement record. Every proposal's line ranges lie inside its function and its names are new to the package. ${QA_JSON}, ${REVIEW_MD} and ${REVIEW_HTML} (rendered from report.json, qa.json and necessity.json, with the same inert check) are written, each by one command or as a bounded multi-part write that the validators reconstruct and check against its digest, and the pull request's ledger ref was advanced by compare-and-swap from the value Fetch read with this head's report.json and qa.json (a ledger.json or ledger.md too large for the one ledger command is first written as a part set the write reads). In large mode the answerer answers the questions in batches of at most ${QUESTION_BATCH_SIZE} (the questions of a few change items per job), continuing its own session from one batch to the next; each answered batch passes the same deterministic checks and citation verification as the standard answers and is recorded as evidence (answers-record-<n>) that recomputes; ${QA_JSON} and ${REVIEW_MD} are written once, after the last batch.`,
       evidenceSchema: ANSWERS_SCHEMA_NAME,
     },
     {
@@ -285,7 +286,7 @@ export function advancePullRequest(view: RunView): GraphDecision {
     if (approvalDecision(view.evidence, REVIEW_LAYER_APPROVAL) === "decline") {
       return withPrivate(
         stop(
-          { reason: "complete", blocker: `report only: the operator declined the review layer; the report, the questions and their answers are in ${REVIEW_MD} in the worktree`, retryable: false },
+          { reason: "complete", blocker: `report only: the operator declined the review layer; the report, the questions and their answers are in ${REVIEW_MD} and ${REVIEW_HTML} in the worktree`, retryable: false },
           "the operator declined the review layer: finish with the report and the Q&A",
         ),
       );
@@ -297,7 +298,7 @@ export function advancePullRequest(view: RunView): GraphDecision {
       stop(
         {
           reason: "report ready",
-          blocker: `the report, the questions and their answers are written to ${REVIEW_MD} in the worktree (report.json and qa.json beside it). graphloom session open <run> --stage ${chat} discusses them; graphloom resume <run> --decline review-layer finishes the run report-only (this version has no Review stage, so --approve review-layer is refused)`,
+          blocker: `the report, the questions and their answers are written to ${REVIEW_MD} and ${REVIEW_HTML} in the worktree (report.json and qa.json beside them). graphloom session open <run> --stage ${chat} discusses them; graphloom resume <run> --decline review-layer finishes the run report-only (this version has no Review stage, so --approve review-layer is refused)`,
           retryable: false,
         },
         "the report and the Q&A are ready; the review layer is not built in this version",
@@ -527,10 +528,19 @@ function report(ctx: Context, view: RunView): GraphDecision {
     return supervise({ reason: a.state === "pending" ? `the report stage lost the pull request snapshot: ${a.reason}` : a.problem }, "escalate a missing snapshot");
   }
   const { analysis } = a;
-  const flow = reportFlowOf(view.evidence, analysis);
+  const flow = reportFlowOf(view.evidence, analysis, retryOf(view));
   switch (flow.state) {
     case "supervise":
       return supervise({ reason: flow.reason, evidenceRefs: flow.refs }, "hand the unresolved report to the supervisor");
+    case "verify":
+      return withPrivate(
+        dispatch(
+          commandJob(REPORT_STAGE, flow.commands[0]?.id.startsWith("arch-quote") === true ? "Check the architecture claims' quotes against the trees (read-only)" : "Check the architecture diagram against the trees (read-only)", { commands: flow.commands.slice(0, 16), env: { ...GIT_ENV } }),
+          flow.commands[0]?.id.startsWith("arch-quote") === true
+            ? "verify each quote the claim checker gave for an architecture claim in the tree its cite names; no repository code runs"
+            : "resolve each cite of the architecture diagram in the tree it names, each unchanged component's path at the base, and each Go package's imports; no repository code runs",
+        ),
+      );
     case "reporter": {
       const assignment = reporterInstruction({ pr, snapshot: analysis.snapshot, sections: analysis.sections, facts: analysis.facts, candidates: analysis.ctx.candidates ?? [], kind: flow.kind, feedback: flow.feedback });
       const from = flow.kind === "first" ? undefined : jobSession(view, REPORT_STAGE, REPORTER_JOB);
@@ -540,8 +550,8 @@ function report(ctx: Context, view: RunView): GraphDecision {
       return dispatchAgent(view, job, why);
     }
     case "checker": {
-      const assignment = checkerInstruction({ pr, snapshot: analysis.snapshot, report: flow.report, targets: claimTargets(flow.report, analysis.ctx), retry: flow.retry });
-      const targets = claimTargets(flow.report, analysis.ctx);
+      const targets = claimTargets(flow.report, analysis.ctx, { archNotes: flow.archNotes });
+      const assignment = checkerInstruction({ pr, snapshot: analysis.snapshot, report: flow.report, targets, retry: flow.retry });
       const references = idRefs({ [CLAIM_CHECK_REFERENCES[0]!]: idSet(targets.map((t) => t.id), (id) => oneLineText(targets.find((t) => t.id === id)?.text ?? "").slice(0, 300)) });
       const job = agentJob(ctx, view, { purpose: "review", instruction: "Check the report's claims against the diff", schema: CLAIM_CHECK_SCHEMA_NAME, harness: profile.roles["report-checker"], role: "report-checker", assignment, references }, analysis.snapshot.files);
       if ("problem" in job) return refused(job);
@@ -585,7 +595,7 @@ function report(ctx: Context, view: RunView): GraphDecision {
       return dispatchAgent(view, job, `check every item of area ${flow.area.id}'s report with a fresh read-only ${harnessName(profile.roles["report-checker"])} session`);
     }
     case "area-record":
-      return recordStep(view, REPORT_STAGE, areaRecordId(flow.area.id), recordCommand(areaRecordId(flow.area.id), "areas", recordJson(flow.record)), `area ${flow.area.id}'s checked report`);
+      return recordStep(view, REPORT_STAGE, areaRecordId(flow.area.id), recordCommands(areaRecordId(flow.area.id), "areas", recordJson(flow.record)), `area ${flow.area.id}'s checked report`);
     case "synthesis": {
       const assignment = synthesisInstruction({ pr, snapshot: analysis.snapshot, areas: analysis.snapshot.partition!.areas, items: flow.items, kind: flow.kind, feedback: flow.feedback });
       const from = flow.kind === "first" ? undefined : jobSession(view, REPORT_STAGE, SYNTHESIS_JOB);
@@ -595,25 +605,61 @@ function report(ctx: Context, view: RunView): GraphDecision {
       return dispatchAgent(view, job, why);
     }
     case "synthesis-checker": {
-      const targets = synthesisTargets(flow.output, flow.items);
-      const assignment = checkerInstruction({ pr, snapshot: analysis.snapshot, report: { purpose: flow.output.purpose, overview: flow.output.overview, sections: [], notes: [] }, targets, retry: flow.retry, scope: synthesisScope() });
+      const targets = synthesisTargets(flow.output, flow.items, flow.archNotes);
+      const assignment = checkerInstruction({ pr, snapshot: analysis.snapshot, report: { purpose: flow.output.purpose, overview: flow.output.overview, sections: [], notes: [], architecture: flow.output.architecture }, targets, retry: flow.retry, scope: synthesisScope() });
       const references = idRefs({ [CLAIM_CHECK_REFERENCES[0]!]: idSet(targets.map((t) => t.id), (id) => oneLineText(targets.find((t) => t.id === id)?.text ?? "").slice(0, 300)) });
       const job = agentJob(ctx, view, { purpose: "review", instruction: "Check the synthesis' claims (summary and merges) against the diff", schema: CLAIM_CHECK_SCHEMA_NAME, harness: profile.roles["report-checker"], role: "report-checker", assignment, references }, analysis.snapshot.files);
       if ("problem" in job) return refused(job);
       return dispatchAgent(view, job, `check the synthesis' purpose, overview and merges with a fresh read-only ${harnessName(profile.roles["report-checker"])} session`);
     }
     case "synthesis-record":
-      return recordStep(view, REPORT_STAGE, SYNTHESIS_RECORD, recordCommand(SYNTHESIS_RECORD, "areas", recordJson(flow.record)), "the checked synthesis");
+      return recordStep(view, REPORT_STAGE, SYNTHESIS_RECORD, recordCommands(SYNTHESIS_RECORD, "areas", recordJson(flow.record)), "the checked synthesis");
   }
 }
 
-/** Records a checked step of a large run as evidence (an area, the synthesis, an answered batch): written once, and a record that keeps failing goes to the supervisor. */
-function recordStep(view: RunView, stageId: string, id: string, command: EnvironmentCommand | undefined, what: string): GraphDecision {
-  if (command === undefined) return stop({ reason: "incompatible task", blocker: `${what} is too large for one write command`, retryable: false }, `stop: ${what} does not fit one command`);
-  const st = commandState(view, id);
-  if (st.failed && !st.retry && st.run !== undefined) return supervise({ reason: `recording ${what} failed: ${describeCommand(st.run.command)}: ${outputTail(st.run.command)}`, evidenceRefs: [st.run.record.ref] }, `escalate a failed record of ${what}`);
-  if (commandRuns(view.evidence, id).length >= 4) return supervise({ reason: `the record of ${what} keeps failing` }, `escalate a record that does not settle`);
-  return withPrivate(dispatch(commandJob(stageId, `Record ${what} as evidence`, { commands: [command] }), `record ${what} as evidence, so a later review cannot supersede it`));
+/** What a write that is still to be done needs next: the command to run, or the decision that stops it. */
+type NextWrite = { command: EnvironmentCommand } | { decision: GraphDecision };
+
+/**
+ * The first command of a write (one command, or the parts of a multi-part artifact, in order) that has not run as
+ * written (design §6.6): its latest run succeeded with this very argv. A command that failed goes to the supervisor
+ * until the operator resumes, and one that keeps differing from what the evidence recomputes goes there too.
+ * Undefined when every command ran as written.
+ */
+function nextWrite(view: RunView, commands: readonly EnvironmentCommand[], words: { failed: string; settle: string }): NextWrite | undefined {
+  for (const command of commands) {
+    const st = commandState(view, command.id);
+    if (st.run !== undefined && !st.failed && sameArgv(st.run.command.argv, command.argv)) continue;
+    if (st.failed && !st.retry && st.run !== undefined) {
+      return { decision: supervise({ reason: `${words.failed}: ${describeCommand(st.run.command)}: ${outputTail(st.run.command)}`, evidenceRefs: [st.run.record.ref] }, `escalate: ${words.failed}`) };
+    }
+    if (commandRuns(view.evidence, command.id).length >= 4) return { decision: supervise({ reason: words.settle }, `escalate: ${words.settle}`) };
+    return { command };
+  }
+  return undefined;
+}
+
+/** Which part of a multi-part artifact a command writes, or undefined for a single command that writes its whole artifact. */
+function partOf(command: EnvironmentCommand): { path: string; k: number; n: number } | undefined {
+  if (!/-p\d+$/.test(command.id)) return undefined;
+  const [path, k, n] = [command.argv[4], Number(command.argv[5]), Number(command.argv[6])];
+  return path === undefined || !Number.isSafeInteger(k) || !Number.isSafeInteger(n) ? undefined : { path, k, n };
+}
+
+/** The job instruction of a write command: its own for a single command, `Write <path>` or `Write part 2 of 3 of <path>` for a part. */
+function writeInstruction(command: EnvironmentCommand, single: string): string {
+  const p = partOf(command);
+  return p === undefined ? single : p.n === 1 ? `Write ${p.path}` : `Write part ${p.k} of ${p.n} of ${p.path}`;
+}
+
+/** Records a checked step of a large run as evidence (an area, the synthesis, an answered batch): one command, or a part set when it does not fit one; a record that keeps failing goes to the supervisor. */
+function recordStep(view: RunView, stageId: string, id: string, commands: EnvironmentCommand[], what: string): GraphDecision {
+  const next = nextWrite(view, commands, { failed: `recording ${what} failed`, settle: `the record of ${what} keeps failing` });
+  if (next === undefined) return supervise({ reason: `the record of ${what} was written as recomputed but does not read back` }, `escalate a record that does not read back (${id})`);
+  if ("decision" in next) return next.decision;
+  const part = partOf(next.command);
+  const instruction = part === undefined ? `Record ${what} as evidence` : `Record ${what} as evidence (part ${part.k} of ${part.n})`;
+  return withPrivate(dispatch(commandJob(stageId, instruction, { commands: [next.command] }), `record ${what} as evidence, so a later review cannot supersede it`));
 }
 
 /** Where a tool of the confined static job lives: the plugin's directory, and the Go and Node installations under a hidden home. */
@@ -692,29 +738,19 @@ function measureAndWrite(ctx: Context, view: RunView, analysis: Analysis, flow: 
       break;
   }
   const outputs = outputsOf(view.evidence, profile, pr, analysis, flow, m);
-  const write = commandState(view, COMMAND.reportWrite);
-  if (write.run !== undefined && !write.failed) {
-    const written = writtenReport(write.run.command.argv);
-    if (written?.json === outputs.json && (written.markdown === outputs.markdown || /… \(cut short; see [^)]*\)\n$/.test(written.markdown))) {
-      return validateStage(ctx, view, REPORT_STAGE);
-    }
-  }
-  if (write.failed && !write.retry && write.run !== undefined) {
-    return supervise({ reason: `writing the report failed: ${describeCommand(write.run.command)}: ${outputTail(write.run.command)}`, evidenceRefs: [write.run.record.ref] }, "escalate a failed report write");
-  }
-  if (commandRuns(view.evidence, COMMAND.reportWrite).length >= 4) {
-    return supervise({ reason: "the written report keeps differing from the one the evidence recomputes" }, "escalate a report write that does not settle");
-  }
-  const secrets = [...secretFindings(outputs.json), ...secretFindings(outputs.markdown)];
+  // report.json, review.md and review.html: each one command when it fits, else a bounded multi-part write (design §6.6).
+  const commands = [...reportWriteCommands(outputs.json, outputs.markdown), ...htmlWriteCommands(outputs.html, false)];
+  const next = nextWrite(view, commands, { failed: "writing the report failed", settle: "the written report keeps differing from the one the evidence recomputes" });
+  if (next === undefined) return validateStage(ctx, view, REPORT_STAGE);
+  if ("decision" in next) return next.decision;
+  const secrets = [...secretFindings(outputs.json), ...secretFindings(outputs.markdown), ...secretFindings(outputs.html)];
   if (secrets.length > 0) {
     return stop({ reason: "report refused", blocker: `the report would hold what looks like a credential (${[...new Set(secrets)].slice(0, 3).join("; ")}); it was not written`, retryable: false }, "refuse to write a report that holds a secret");
   }
-  const command = reportWriteCommand(outputs.json, outputs.markdown);
-  if (command === undefined) {
-    return stop({ reason: "incompatible task", blocker: "the report is too large for one write command", retryable: false }, "stop: the report does not fit one command");
-  }
+  const inert = writtenHtmlProblems(outputs.html, pr, pinnedBase(view.evidence));
+  if (inert.length > 0) return supervise({ reason: `review.html would not be self-contained and inert: ${inert.slice(0, 3).join("; ")}` }, "escalate a review.html that fails its own inertness check");
   const idNotes = flow.reading.notes.length > 0 ? `; claim-check ids normalized: ${flow.reading.notes.slice(0, 4).join("; ")}` : "";
-  return withPrivate(dispatch(commandJob(REPORT_STAGE, `Write ${REVIEW_MD} and report.json`, { commands: [command] }), `write report.json and the readable review.md${idNotes}`));
+  return withPrivate(dispatch(commandJob(REPORT_STAGE, writeInstruction(next.command, `Write ${REVIEW_MD} and report.json`), { commands: [next.command] }), `write report.json, the readable review.md and the HTML report review.html${idNotes}`));
 }
 
 /** Whether a failed command may run again: the operator resumed since it failed. */
@@ -770,15 +806,11 @@ function questions(ctx: Context, view: RunView): GraphDecision {
       break;
   }
   const record: NecessityRecord = necessityRecordOf(c.ctx, nf.final[0]!, pr.askAll === true);
-  const command = necessityRecordCommand(record);
-  if (command === undefined) return stop({ reason: "incompatible task", blocker: "the necessity answer is too large for one write command", retryable: false }, "stop: the necessity record does not fit one command");
-  const write = commandState(view, COMMAND.necessityWrite);
-  if (write.run === undefined || write.failed || !sameArgv(write.run.command.argv, command.argv)) {
-    if (write.failed && !write.retry && write.run !== undefined) {
-      return supervise({ reason: `recording the necessity answer failed: ${describeCommand(write.run.command)}: ${outputTail(write.run.command)}`, evidenceRefs: [write.run.record.ref] }, "escalate a failed necessity write");
-    }
-    if (commandRuns(view.evidence, COMMAND.necessityWrite).length >= 4) return supervise({ reason: "the recorded necessity answer keeps differing from the one the evidence recomputes" }, "escalate a necessity write that does not settle");
-    return withPrivate(dispatch(commandJob(QUESTIONS_STAGE, `Record N1's checked answer and its decision in ${NECESSITY_JSON}`, { commands: [command] }), `record N1's outcome (${record.decision.action === "skip" ? "the other questions are skipped" : "every question is asked"}) as evidence`));
+  // necessity.json: one command, or a bounded multi-part write when it does not fit one (design §6.6).
+  const necessityWrite = nextWrite(view, necessityRecordCommands(record), { failed: "recording the necessity answer failed", settle: "the recorded necessity answer keeps differing from the one the evidence recomputes" });
+  if (necessityWrite !== undefined) {
+    if ("decision" in necessityWrite) return necessityWrite.decision;
+    return withPrivate(dispatch(commandJob(QUESTIONS_STAGE, writeInstruction(necessityWrite.command, `Record N1's checked answer and its decision in ${NECESSITY_JSON}`), { commands: [necessityWrite.command] }), `record N1's outcome (${record.decision.action === "skip" ? "the other questions are skipped" : "every question is asked"}) as evidence`));
   }
   if (record.decision.action === "skip") return validateStage(ctx, view, QUESTIONS_STAGE);
   const flow = questionerFlow(view.evidence, c.ctx);
@@ -831,7 +863,7 @@ function answers(ctx: Context, view: RunView): GraphDecision {
         return supervise({ reason: b.reason, evidenceRefs: b.refs }, "hand the unresolved answers to the supervisor");
       case "record": {
         const id = batchRecordId(b.index);
-        return recordStep(view, ANSWERS_STAGE, id, recordCommand(id, "answers", batchRecordJson(b.record)), `answer batch ${b.index + 1}`);
+        return recordStep(view, ANSWERS_STAGE, id, recordCommands(id, "answers", batchRecordJson(b.record)), `answer batch ${b.index + 1}`);
       }
       case "done":
         return writeAnswers(ctx, view, c.ctx, set, [rec.record.final, ...b.final], rec.record);
@@ -882,21 +914,18 @@ function answerStep(ctx: Context, view: RunView, c: QaContext, rest: readonly Qu
 /** After the answers: write qa.json and review.md, advance the ledger by compare-and-swap, then validate the stage. */
 function writeAnswers(ctx: Context, view: RunView, c: QaContext, set: ReturnType<typeof questionSet>, final: Parameters<typeof qaOutputs>[2], necessity: NecessityRecord): GraphDecision {
   const w = answerWrites(view.evidence, c, set, final, necessity);
-  if (w.qa === undefined) return stop({ reason: "incompatible task", blocker: w.problem ?? "the Q&A cannot be written", retryable: false }, "stop: the Q&A does not fit one write command");
-  const write = commandState(view, COMMAND.qaWrite);
-  if (write.run === undefined || write.failed || !sameArgv(write.run.command.argv, w.qa.argv)) {
-    if (write.failed && !write.retry && write.run !== undefined) {
-      return supervise({ reason: `writing the Q&A failed: ${describeCommand(write.run.command)}: ${outputTail(write.run.command)}`, evidenceRefs: [write.run.record.ref] }, "escalate a failed Q&A write");
-    }
-    if (commandRuns(view.evidence, COMMAND.qaWrite).length >= 4) return supervise({ reason: "the written Q&A keeps differing from the one the evidence recomputes" }, "escalate a Q&A write that does not settle");
-    const written = writtenQa(w.qa.argv);
-    const secrets = [...secretFindings(written?.json ?? ""), ...secretFindings(written?.markdown ?? "")];
-    if (secrets.length > 0) {
-      return stop({ reason: "report refused", blocker: `the Q&A would hold what looks like a credential (${[...new Set(secrets)].slice(0, 3).join("; ")}); it was not written`, retryable: false }, "refuse to write a Q&A that holds a secret");
-    }
-    return withPrivate(dispatch(commandJob(ANSWERS_STAGE, `Write ${QA_JSON} and ${REVIEW_MD}`, { commands: [w.qa] }), "write qa.json and the whole review.md (Report, Measurements, Q&A)"));
+  if (w.qa === undefined || w.texts === undefined) return stop({ reason: "incompatible task", blocker: w.problem ?? "the Q&A cannot be written", retryable: false }, "stop: the Q&A cannot be written");
+  // qa.json, the whole review.md and review.html: each one command when it fits, else a bounded multi-part write (design §6.6).
+  const next = nextWrite(view, w.qa, { failed: "writing the Q&A failed", settle: "the written Q&A keeps differing from the one the evidence recomputes" });
+  if (next === undefined) return recordLedger(ctx, view, c, w);
+  if ("decision" in next) return next.decision;
+  const secrets = [...secretFindings(w.texts.json), ...secretFindings(w.texts.markdown), ...secretFindings(w.texts.html)];
+  if (secrets.length > 0) {
+    return stop({ reason: "report refused", blocker: `the Q&A would hold what looks like a credential (${[...new Set(secrets)].slice(0, 3).join("; ")}); it was not written`, retryable: false }, "refuse to write a Q&A that holds a secret");
   }
-  return recordLedger(ctx, view, c, w);
+  const inert = writtenHtmlProblems(w.texts.html, ctx.pr, c.base);
+  if (inert.length > 0) return supervise({ reason: `review.html would not be self-contained and inert: ${inert.slice(0, 3).join("; ")}` }, "escalate a review.html that fails its own inertness check");
+  return withPrivate(dispatch(commandJob(ANSWERS_STAGE, writeInstruction(next.command, `Write ${QA_JSON} and ${REVIEW_MD}`), { commands: [next.command] }), "write qa.json, the whole review.md (Report, Measurements, Q&A) and the HTML report review.html"));
 }
 
 function recordLedger(ctx: Context, view: RunView, c: QaContext, w: ReturnType<typeof answerWrites>): GraphDecision {
@@ -928,5 +957,11 @@ function recordLedger(ctx: Context, view: RunView, c: QaContext, w: ReturnType<t
   if (w.ledger === undefined) return stop({ reason: "incompatible task", blocker: w.problem ?? "the ledger files cannot be written", retryable: false }, "stop: the ledger files do not fit one command");
   if (lw.run !== undefined && !lw.failed && sameArgv(lw.run.command.argv, w.ledger.argv)) return validateStage(ctx, view, ANSWERS_STAGE);
   if (commandRuns(view.evidence, COMMAND.ledgerWrite).length >= 6) return supervise({ reason: "the ledger write keeps differing from the one the evidence recomputes" }, "escalate a ledger write that does not settle");
+  // A ledger.json or ledger.md too large for the ledger write's one command is written first as a part set (design §6.6); the write reads those files.
+  const parts = nextWrite(view, w.ledgerParts ?? [], { failed: "writing the ledger files failed", settle: "the written ledger files keep differing from the ones the evidence recomputes" });
+  if (parts !== undefined) {
+    if ("decision" in parts) return parts.decision;
+    return withPrivate(dispatch(commandJob(ANSWERS_STAGE, writeInstruction(parts.command, "Write the ledger files"), { commands: [parts.command] }), "write the ledger's ledger.json and ledger.md as parts: they do not fit the ledger write's one command"));
+  }
   return withPrivate(dispatch(commandJob(ANSWERS_STAGE, "Advance the pull request's ledger ref by compare-and-swap (no repository code runs)", { commands: [w.ledger], env: { ...GIT_ENV } }), "record this head's report and Q&A in the ledger, from the value Fetch read"));
 }

@@ -76,6 +76,7 @@ const report = (over: Partial<ReporterOutput> = {}, item: ReportItem = change())
     return { id: s.id, none: items.length === 0, items };
   }),
   notes: [],
+  architecture: { nodes: [], edges: [] },
   ...over,
 });
 const problems = (r: ReporterOutput, c: ReportContext = ctx): string[] => reportProblems(r, c);

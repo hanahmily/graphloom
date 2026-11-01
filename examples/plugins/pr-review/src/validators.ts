@@ -4,7 +4,7 @@
 import type { EvidenceRecord, ValidationInput, ValidationResult, Validator } from "@graphloom/sdk";
 import { analyze, evidencePull, reportFlowOf, type Analysis } from "./analysis.js";
 import { checkoutCommand, guardCommand, headTreeCommand, parseHeadTree, parseLedger, pinnedBase } from "./commands.js";
-import { COMMAND, QA_JSON, REPORT_JSON, REVIEW_MD } from "./constants.js";
+import { COMMAND, LEDGER_JSON_FILE, LEDGER_MD_FILE, PART_BASE, QA_JSON, REPORT_JSON, REVIEW_MD } from "./constants.js";
 import { commandRuns, describeCommand, outputTail, reportText, succeeded } from "./evidence.js";
 import type { ReportFlow } from "./flow.js";
 import { measurementState, type MeasurementState } from "./measurements.js";
@@ -17,7 +17,9 @@ import { admissibleDecision, effectiveConclusion, necessityJson, NECESSITY_ID, t
 import { describeReasons, isLarge } from "./mode.js";
 import { requiredQuestions, statedPurposes } from "./questions.js";
 import { principlesRecord } from "./principles.js";
-import { writtenNecessity, writtenReport } from "./write.js";
+import { htmlProblems, reviewHtmlFrom } from "./html.js";
+import { writtenLedger } from "./ledger.js";
+import { readParts, recordedHtml, recordedNecessityJson, recordedQa, recordedReport, sha256 } from "./parts.js";
 
 const passed = (reason: string): ValidationResult => ({ status: "passed", reason });
 const failed = (reason: string): ValidationResult => ({ status: "failed", reason });
@@ -112,12 +114,20 @@ export function measurementsOf(evidence: readonly EvidenceRecord[], analysis: An
 export interface Outputs {
   json: string;
   markdown: string;
+  /** `review.html`, rendered from `report.json` with the Q&A pending (design §6.11). */
+  html: string;
 }
 
-/** The files the report writes, recomputed from the evidence: what `report-write` must have written. */
+/** The files the report writes, recomputed from the evidence: what the report write must have written. */
 export function outputsOf(evidence: readonly EvidenceRecord[], profile: Profile, pr: PullRequest, analysis: Analysis, flow: Extract<ReportFlow, { state: "done" }>, measurements: MeasurementState): Outputs {
   const input = { pr, snapshot: analysis.snapshot, base: pinnedBase(evidence), final: flow.final, facts: analysis.facts, measurements, profile, mode: analysis.snapshot.mode, ...(flow.info !== undefined ? { large: flow.info } : {}) };
-  return { json: reportJson(input), markdown: reviewMarkdown(input) };
+  const json = reportJson(input);
+  return { json, markdown: reviewMarkdown(input), html: reviewHtmlFrom(json)! };
+}
+
+/** The deterministic check of the written bytes of `review.html` (design §6.11): self-contained and inert. */
+export function writtenHtmlProblems(html: string, pr: PullRequest, base: string | undefined): string[] {
+  return htmlProblems(html, { owner: pr.owner, repo: pr.repo, head: pr.head, base });
 }
 
 export const changeReport: Validator = profiled((input, profile) => {
@@ -128,16 +138,20 @@ export const changeReport: Validator = profiled((input, profile) => {
   if (flow.state !== "done") return inconclusive(`the report is not finished (${flow.state})`);
   const m = measurementsOf(input.evidence, c.analysis, profile);
   if (m.state !== "ready" && m.state !== "none") return inconclusive("the measurements are not recorded yet");
-  const run = commandRuns(input.evidence, COMMAND.reportWrite).at(-1);
-  if (run === undefined) return inconclusive("the report has not been written");
-  if (!succeeded(run.command)) return failed(`${describeCommand(run.command)}: ${outputTail(run.command)}`);
-  const written = writtenReport(run.command.argv);
-  if (written === undefined) return failed("the report-write command carries no report");
+  // report.json and review.md as the evidence holds them: one command, or parts reconstructed and checked against their digest (design §6.6).
+  const w = recordedReport(input.evidence);
+  if (w.state === "none") return inconclusive("the report has not been written");
+  if (w.state === "failed") return failed(`the report was not written whole: ${w.reason}`);
+  const written = w.value;
   const want = outputsOf(input.evidence, profile, c.pr, c.analysis, flow, m);
   if (written.json !== want.json) return failed(`${REPORT_JSON} is not the report the evidence recomputes`);
-  const cutNote = /\n… \(cut short; see [^)]*\)\n$/;
-  const markdownOk = written.markdown === want.markdown || (cutNote.test(written.markdown) && want.markdown.startsWith(written.markdown.replace(cutNote, "")));
-  if (!markdownOk) return failed(`${REVIEW_MD} is not the report the evidence recomputes`);
+  if (written.markdown !== want.markdown) return failed(`${REVIEW_MD} is not the report the evidence recomputes`);
+  const h = recordedHtml(input.evidence, false);
+  if (h.state === "none") return inconclusive("review.html has not been written");
+  if (h.state === "failed") return failed(`review.html was not written whole: ${h.reason}`);
+  if (h.value !== want.html) return failed("review.html is not the report the evidence recomputes");
+  const inert = writtenHtmlProblems(h.value, c.pr, pinnedBase(input.evidence));
+  if (inert.length > 0) return failed(`review.html is not self-contained and inert: ${inert.slice(0, 3).join("; ")}`);
   const items = flow.final.sections.reduce((n, s) => n + s.items.length, 0);
   return passed(
     `every template section is present (${flow.final.sections.length}), with ${items} cited item(s) or None; every citation lies in the pull request's diff; every changed file and detector fact is cited; ${flow.final.removed.length} item(s) removed by the claim check; ${REPORT_JSON} and ${REVIEW_MD} are written as recomputed`,
@@ -209,8 +223,9 @@ function necessityOutcome(evidence: readonly EvidenceRecord[], ctx: QaContext): 
   if (!admissibleDecision(final, rec.record.decision)) return failed(`necessity.json decides ${rec.record.decision.action}, which N1's conclusion (${effectiveConclusion(final)}) and the checker's verdict (${final.check.verdict}) do not allow`);
   const expected = ctx.principles !== undefined ? principlesRecord(ctx.principles) : undefined;
   if (JSON.stringify(rec.record.principles) !== JSON.stringify(expected)) return failed("necessity.json does not record the design principles file as the evidence recomputes it (its path, ref, commit and what applied)");
-  const run = commandRuns(evidence, "necessity-write").at(-1);
-  if (run === undefined || writtenNecessity(run.command.argv) !== necessityJson(rec.record)) return failed("necessity.json is not what the evidence recomputes");
+  const written = recordedNecessityJson(evidence);
+  if (written.state === "failed") return failed(`necessity.json was not written whole: ${written.reason}`);
+  if (written.state === "none" || written.value !== necessityJson(rec.record)) return failed("necessity.json is not what the evidence recomputes");
   return { record: rec.record };
 }
 
@@ -283,16 +298,30 @@ export const answersComplete: Validator = profiled((input, profile) => {
   if (st.final === undefined) return inconclusive(`the answers are not finished (${st.pending ?? "pending"})`);
   const final = st.final;
   const w = answerWrites(input.evidence, start.ctx, set, final, record);
-  if (w.qa === undefined) return failed(w.problem ?? "the Q&A cannot be written");
-  const qa = commandRuns(input.evidence, COMMAND.qaWrite).at(-1);
-  if (qa === undefined) return inconclusive("the Q&A has not been written");
-  if (!succeeded(qa.command)) return failed(`${describeCommand(qa.command)}: ${outputTail(qa.command)}`);
-  if (qa.command.argv.length !== w.qa.argv.length || qa.command.argv.some((a, i) => a !== w.qa!.argv[i])) return failed(`${QA_JSON} and ${REVIEW_MD} are not what the evidence recomputes`);
+  if (w.qa === undefined || w.texts === undefined) return failed(w.problem ?? "the Q&A cannot be written");
+  // qa.json and the whole review.md as the evidence holds them: one command, or parts reconstructed and checked against their digest (design §6.6).
+  const q = recordedQa(input.evidence);
+  if (q.state === "none") return inconclusive("the Q&A has not been written");
+  if (q.state === "failed") return failed(`the Q&A was not written whole: ${q.reason}`);
+  if (q.value.json !== w.texts.json || q.value.markdown !== w.texts.markdown) return failed(`${QA_JSON} and ${REVIEW_MD} are not what the evidence recomputes`);
+  const h = recordedHtml(input.evidence, true);
+  if (h.state === "none") return inconclusive("review.html has not been written whole with the answers");
+  if (h.state === "failed") return failed(`review.html was not written whole: ${h.reason}`);
+  if (h.value !== w.texts.html) return failed("review.html is not what the evidence recomputes from report.json, qa.json and necessity.json");
+  const inert = writtenHtmlProblems(h.value, start.pr, start.ctx.base);
+  if (inert.length > 0) return failed(`review.html is not self-contained and inert: ${inert.slice(0, 3).join("; ")}`);
   if (w.ledger === undefined || w.old === undefined) return w.problem !== undefined ? failed(w.problem) : inconclusive("the ledger value Fetch read is not in the evidence");
   const lw = commandRuns(input.evidence, COMMAND.ledgerWrite).at(-1);
   if (lw === undefined) return inconclusive("the ledger has not been advanced");
   if (!succeeded(lw.command)) return failed(`${describeCommand(lw.command)}: ${outputTail(lw.command)}`);
   if (lw.command.argv.length !== w.ledger.argv.length || lw.command.argv.some((a, i) => a !== w.ledger!.argv[i])) return failed("the ledger write is not the compare-and-swap from the value Fetch read with this head's report and Q&A");
+  // A ledger too large for one command was written as part sets first; they are read back and checked like the other artifacts.
+  if (w.ledgerParts !== undefined && w.ledgerParts.length > 0) {
+    const lj = readParts(input.evidence, PART_BASE.ledgerJson, LEDGER_JSON_FILE);
+    const lm = readParts(input.evidence, PART_BASE.ledgerMd, LEDGER_MD_FILE);
+    if (lj.state !== "read" || lm.state !== "read") return failed(`the ledger files were not written whole: ${lj.state === "failed" ? lj.reason : lm.state === "failed" ? lm.reason : "no recorded parts"}`);
+    if (sha256(lj.value) !== writtenLedger(lw.command.argv)?.files?.json || sha256(lm.value) !== writtenLedger(lw.command.argv)?.files?.markdown) return failed("the ledger write commits files other than the parts the evidence holds");
+  }
   const rest = final.filter((a) => a.question !== NECESSITY_ID);
   const by = (status: string): number => rest.filter((a) => a.status === status).length;
   const n1 = `N1 (${effectiveConclusion(record.final)}) is answered first with its three parts and evidence${set.skipped ? ", and the remaining questions are recorded as skipped" : ""}`;

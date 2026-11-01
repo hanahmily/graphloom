@@ -40,22 +40,15 @@ const script = (jsonFile: string): string =>
   `printf '%s' "$md" > ${REVIEW_MD}.tmp; mv ${REVIEW_MD}.tmp ${REVIEW_MD}; echo written`;
 
 /**
- * The command that writes a JSON file and `review.md`, or undefined when the
- * JSON alone does not fit one command. The markdown is the readable copy; what
- * does not fit is cut short with a note, the JSON never is.
+ * The command that writes a JSON file and `review.md` together, or undefined when the two do not fit one command
+ * (the caller then writes each as a bounded multi-part artifact, `partCommands`).
  */
 function fileWriteCommand(id: string, jsonFile: string, json: string, markdown: string): EnvironmentCommand | undefined {
   const parts = writeChunks(json);
-  const sh = script(jsonFile);
-  const build = (md: string[]): EnvironmentCommand => ({ id, argv: ["sh", "-c", sh, id, String(parts.length), ...parts, ...md] });
-  const fits = (c: EnvironmentCommand): boolean => c.argv.length - 5 <= MAX_CHUNKS && inputBytes(c) <= MAX_COMMAND_INPUT_BYTES;
-  if (!fits(build([]))) return undefined;
   const md = writeChunks(markdown);
-  if (fits(build(md))) return build(md);
-  const cut = `\n… (cut short; see ${jsonFile})\n`;
-  let kept = 0;
-  while (kept < md.length && fits(build([...md.slice(0, kept + 1), cut]))) kept += 1;
-  return build(fits(build([...md.slice(0, kept), cut])) ? [...md.slice(0, kept), cut] : md.slice(0, kept));
+  const sh = script(jsonFile);
+  const command: EnvironmentCommand = { id, argv: ["sh", "-c", sh, id, String(parts.length), ...parts, ...md] };
+  return command.argv.length - 5 <= MAX_CHUNKS && inputBytes(command) <= MAX_COMMAND_INPUT_BYTES ? command : undefined;
 }
 
 /** The command that writes `report.json` and `review.md`. */

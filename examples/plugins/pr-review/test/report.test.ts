@@ -35,7 +35,7 @@ function valid(extra: ReportItem[] = []): ReporterOutput {
     ...extra,
   );
   for (const s of secs) s.none = s.items.length === 0;
-  return { purpose: { text: "Lets writers keep the first error of a batch.", source: "stated", quote: "keep the first error of a batch" }, overview: "The change keeps the first error of a batch. It renames a file.", sections: secs, notes: [] };
+  return { purpose: { text: "Lets writers keep the first error of a batch.", source: "stated", quote: "keep the first error of a batch" }, overview: "The change keeps the first error of a batch. It renames a file.", sections: secs, notes: [], architecture: { nodes: [], edges: [] } };
 }
 
 const problems = (r: ReporterOutput): string[] => reportProblems(r, ctx);
