@@ -28,3 +28,7 @@ export { qaJson, renderQa, renderNecessity, QA_FILE_SCHEMA } from "./qa.js";
 export { necessityDecision, necessityProblems, effectiveConclusion, NECESSITY_SCHEMA, NECESSITY_ID, type Necessity, type NecessityDecision } from "./necessity.js";
 export { ledgerJson, ledgerWriteCommand, LEDGER_SCHEMA } from "./ledger.js";
 export { qaWriteCommand, writtenQa, necessityWriteCommand, writtenNecessity } from "./write.js";
+export { partCommands, readParts, reportWriteCommands, qaWriteCommands, htmlWriteCommands, recordedReport, recordedQa, recordedHtml, type Written } from "./parts.js";
+export { architectureMermaid, architecturePlan, architectureProblems, ARCHITECTURE_SCHEMA, type Architecture } from "./architecture.js";
+export { architectureSvg, layoutArchitecture } from "./archlayout.js";
+export { htmlProblems, renderReviewHtml, reviewHtmlFrom } from "./html.js";

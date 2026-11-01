@@ -9,7 +9,7 @@ export const GRAPH_ID = "pr-review";
  * §18): 0.1 declares Fetch, Report, Questions and Answers. Review, Checks,
  * Draft and Publish arrive with later versions.
  */
-export const GRAPH_VERSION = "0.11.0";
+export const GRAPH_VERSION = "0.12.0";
 
 /** The operator decision that would continue into the review layer (design §11). */
 export const REVIEW_LAYER_APPROVAL = "review-layer";
@@ -87,6 +87,24 @@ export const COMMAND = {
   /** The coverage commands, `cover-go` and `cover-ts-<n>`. */
   coverGo: "cover-go",
   coverTs: "cover-ts",
+  /** The architecture diagram's tree check (design §6.10): `arch-check-<n>` resolves cites and paths, and lists Go imports. */
+  archCheck: "arch-check",
+} as const;
+
+/**
+ * Part-set bases of the multi-part writes (design §6.6): a part command is `<base>-p<k>`. An artifact that fits one
+ * command is written by its single command (`report-write`, `qa-write`, `necessity-write`); one that does not, by a part set.
+ */
+export const PART_BASE = {
+  reportJson: "report-json",
+  reviewMd: "review-md",
+  reviewHtml: "review-html",
+  qaJson: "qa-json",
+  qaMd: "review-md-qa",
+  qaHtml: "review-html-qa",
+  necessityJson: "necessity-json",
+  ledgerJson: "ledger-json",
+  ledgerMd: "ledger-md",
 } as const;
 
 /** The questioner's and the answerer's session keys, so a correction continues the previous session. */
@@ -107,8 +125,12 @@ export const REVIEW_DIR = ".graphloom/review";
 export const BASE_DIR = `${REVIEW_DIR}/base`;
 export const REPORT_JSON = `${REVIEW_DIR}/report.json`;
 export const REVIEW_MD = `${REVIEW_DIR}/review.md`;
+export const REVIEW_HTML = `${REVIEW_DIR}/review.html`;
 export const QA_JSON = `${REVIEW_DIR}/qa.json`;
 export const NECESSITY_JSON = `${REVIEW_DIR}/necessity.json`;
+/** The ledger blobs of a multi-part ledger write, which the `ledger-write` command reads (ignored like the rest of `.graphloom/review/`). */
+export const LEDGER_JSON_FILE = `${REVIEW_DIR}/ledger/ledger.json`;
+export const LEDGER_MD_FILE = `${REVIEW_DIR}/ledger/ledger.md`;
 
 /** `refs/graphloom/pr-review/<owner>/<repo>/<N>/ledger`: the per-PR ledger (design §9.1). */
 export const ledgerRef = (owner: string, repo: string, n: number): string => `refs/graphloom/pr-review/${owner}/${repo}/${n}/ledger`;

@@ -2,6 +2,8 @@
 // Copyright 2026 Hongtao Gao and the GraphLoom contributors
 
 import type { EvidenceRecord } from "@graphloom/sdk";
+import { pinnedBase } from "./commands.js";
+import type { CommandRun } from "./evidence.js";
 import { detectFacts, type Fact } from "./detectors.js";
 import { reportFlow, type ReportFlow } from "./flow.js";
 import { largeReportFlow, type LargeFlow } from "./large.js";
@@ -43,14 +45,15 @@ export function analyze(evidence: readonly EvidenceRecord[], profile: Profile, p
   if (s.state === "incompatible") return s;
   const sections = reporterSections(profile);
   const facts = detectFacts(s.snapshot.files, profile);
-  return { state: "ready", analysis: { snapshot: s.snapshot, sections, facts, ctx: { sections, files: s.snapshot.files, facts, pinned: pinnedTexts(s.snapshot.pull, s.snapshot.commits), candidates: detectStateCandidates(s.snapshot.files) } } };
+  const base = pinnedBase(evidence);
+  return { state: "ready", analysis: { snapshot: s.snapshot, sections, facts, ctx: { sections, files: s.snapshot.files, facts, pinned: pinnedTexts(s.snapshot.pull, s.snapshot.commits), candidates: detectStateCandidates(s.snapshot.files), ...(base !== undefined ? { base } : {}) } } };
 }
 
 /**
  * Where the report stands: the standard flow, or in large mode the flow of the areas and the synthesis (design §6.9).
  * The graph and the validators both ask this, over the evidence they hold.
  */
-export function reportFlowOf(evidence: readonly EvidenceRecord[], analysis: Analysis): ReportFlow | LargeFlow {
+export function reportFlowOf(evidence: readonly EvidenceRecord[], analysis: Analysis, retryable?: (r: CommandRun) => boolean): ReportFlow | LargeFlow {
   const partition = analysis.snapshot.partition;
-  return analysis.snapshot.mode.mode === "large" && partition !== undefined ? largeReportFlow(evidence, analysis.ctx, partition) : reportFlow(evidence, analysis.ctx);
+  return analysis.snapshot.mode.mode === "large" && partition !== undefined ? largeReportFlow(evidence, analysis.ctx, partition, retryable) : reportFlow(evidence, analysis.ctx, retryable);
 }

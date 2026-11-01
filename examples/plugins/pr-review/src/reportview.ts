@@ -9,11 +9,10 @@
  * the final items and the measurement records stay readable).
  */
 import type { EvidenceRecord } from "@graphloom/sdk";
-import { COMMAND } from "./constants.js";
-import { commandRuns, isObject, succeeded } from "./evidence.js";
+import { isObject } from "./evidence.js";
 import type { MetricsRecord } from "./metrics/record.js";
 import type { Cite } from "./report.js";
-import { writtenReport } from "./write.js";
+import { recordedReport } from "./parts.js";
 
 /** The report sections whose items are change items (design §7.1). */
 export const CHANGE_SECTIONS: readonly string[] = ["schema", "background", "features", "external", "config", "interfaces", "removed"];
@@ -35,13 +34,12 @@ export interface ReportView {
 
 /** The report the latest successful write recorded, or undefined when none was written. */
 export function reportView(evidence: readonly EvidenceRecord[]): ReportView | undefined {
-  const run = commandRuns(evidence, COMMAND.reportWrite).filter((r) => succeeded(r.command)).at(-1);
-  if (run === undefined) return undefined;
-  const written = writtenReport(run.command.argv);
-  if (written === undefined) return undefined;
+  // `report.json` as the write recorded it: its single command, or the part set it was written as (design §6.6).
+  const written = recordedReport(evidence);
+  if (written.state !== "read") return undefined;
   let json: unknown;
   try {
-    json = JSON.parse(written.json);
+    json = JSON.parse(written.value.json);
   } catch {
     return undefined;
   }

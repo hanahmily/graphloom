@@ -11,6 +11,7 @@
  * before/after table.
  */
 import { validateResultShape } from "@graphloom/sdk";
+import { architectureTargets } from "./architecture.js";
 import { resolveId } from "./ids.js";
 import { behaviorId, numbered, readId, stateId, transitionId, type Cite, type ReportContext, type ReporterOutput } from "./report.js";
 import type { PullFile } from "./snapshot.js";
@@ -100,7 +101,7 @@ export function summaryTargets(report: Pick<ReporterOutput, "purpose" | "overvie
  * Every claim of a report, in the order the checker is shown them: the summary, then each item with its lifecycle
  * entries and behavior rows. An area's report (large mode) has no summary: the synthesis job writes it.
  */
-export function claimTargets(report: ReporterOutput, ctx: Pick<ReportContext, "sections">, opts: { summary?: boolean } = {}): ClaimTarget[] {
+export function claimTargets(report: ReporterOutput, ctx: Pick<ReportContext, "sections">, opts: { summary?: boolean; archNotes?: ReadonlyMap<string, string> } = {}): ClaimTarget[] {
   const out: ClaimTarget[] = opts.summary === false ? [] : summaryTargets(report);
   for (const { id, section, item } of numbered(report, ctx)) {
     out.push({ id, text: `[${section}] ${collapse(item.text)}`, cites: item.cites, quotes: "required" });
@@ -112,6 +113,8 @@ export function claimTargets(report: ReporterOutput, ctx: Pick<ReportContext, "s
     });
     item.behavior.forEach((b, bi) => out.push({ id: behaviorId(id, bi), text: `Case "${collapse(b.case)}": before: ${collapse(b.before)}; after: ${collapse(b.after)}`, cites: undefined, quotes: "required" }));
   }
+  // The architecture diagram (design §6.10): a standard report's own; in large mode the synthesis job's.
+  if (opts.summary !== false) out.push(...architectureTargets(report.architecture, opts.archNotes));
   return out;
 }
 

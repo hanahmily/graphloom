@@ -119,7 +119,7 @@ graphloom task new pr-review apache/skywalking-banyandb#1234 --repo ../skywalkin
 # fetches the head and base refs, pins the head, writes reviews/skywalking-banyandb-1234/task.yaml
 graphloom check reviews/skywalking-banyandb-1234/task.yaml
 graphloom run reviews/skywalking-banyandb-1234/task.yaml --on-stop '…'
-# stops "report ready": read <worktree>/.graphloom/review/review.md (graphloom inspect prints the path)
+# stops "report ready": read <worktree>/.graphloom/review/review.md, or open review.html beside it (graphloom inspect prints the path)
 graphloom session open <run> --stage answers               # optional: chat with a fork of the answerer's session; recorded on exit
 graphloom session open <run> --stage answers               # optional again: continues that conversation (--from-original starts over)
 graphloom resume <run> --decline review-layer              # report only: done
@@ -279,7 +279,7 @@ generation's evidence holds a `--decline review-layer`.
 | Fetch | `pr-snapshot` | The PR's metadata, every changed file with its patch, every commit, review, review comment and thread (with resolution), and the head's check runs were read completely, for head `<sha>` | GitHub read results | `pr-snapshot` |
 | Fetch | `head-checked-out` | The worktree holds exactly the head's tree, its base is the merge base, and no repository code ran to produce it | `checkout-command-v1` | `head-tree` |
 | Fetch | `prior-ledger` | The PR's ledger was read, or recorded absent, and the delta scope follows from it | command report | `review-scope` |
-| Report | `change-report` | Every template section is present, with cited items or an explicit "None". Every citation is inside the PR's diff. Every changed file and every detector fact is cited. No item carries a severity, finding or verdict (the contract has no such field) | `change-report-v1`, `report-write` | `change-report` |
+| Report | `change-report` | Every template section is present, with cited items or an explicit "None". Every citation is inside the PR's diff. Every changed file and every detector fact is cited. No item carries a severity, finding or verdict (the contract has no such field). Every report has an architecture diagram ([§6.10](#610-architecture-diagram)), and `review.html` is written beside `review.md` ([§6.11](#611-the-html-report)); an artifact too large for one command is written in parts ([§6.6](#66-output)) | `change-report-v1`, `report-write` | `change-report` |
 | Report | `measurements` | For every function the PR adds or modifies, complexity and nesting were measured by the pinned tools over the head tree, and coverage (on by default) and then mutation (on by default, at covered sites only) were measured in the Docker sandbox over a checkout of the head, or carry a not-run reason (switched off by the profile, Docker unavailable, image missing, a dependency not cached, no vitest coverage provider, no coverage). Every value recomputes from its evidence ([metrics §5](design-code-quality-metrics.md#5-records-and-recomputation)) | `graphloom-metrics-v1` command reports | `measurements` |
 | Report | `claims-checked` | An independent `<report-checker>` judged every report item against the diff, and every item left is `supported` with matching quotes | `claim-check-v1` | `claims-checked` |
 | Questions | `questions-complete` | N1, the necessity question, was asked first ([§7.5](#75-the-necessity-question-n1)): its three parts have their evidence, an independent checker verified every cited design statement, trace step and the conclusion, and N1's checked answer and decision are recorded in `necessity.json`. When N1 concluded `unnecessary`, the checker supports it and the operator did not ask for every question, N1 is the only question required and the skip is recorded. Otherwise every required question was asked ([§7.1](#71-questions)): purpose for each change item whose purpose the PR text does not state (a stated purpose recorded with a matching quote instead); `existing-equivalent`, `reuse-library` and `common-logic` for each new symbol; `missing-test` for each new or modified symbol with no mapped test; and one question per value over a metric limit and per surviving mutant. Every changed function has a measurement record or a not-run reason | `necessity-v1`, `answer-check-v1`, `necessity-write`, `questions-v1`, search and test-map reports | `questions-complete` (`independence: separate-reviewer`: N1's check is its latest review) |
@@ -547,6 +547,21 @@ Checker: supported. All questions follow: N1 concluded necessary; every question
 **Purpose** (stated: "replies with the first error when nothing was stored"): A write batch whose events all fail was acknowledged as a success; the callback now replies with the first error in that case.
 **Overview:** Rev counts the events it stores and remembers the first failure among its three failure paths. After the batch is flushed, a batch that stored nothing and failed at least once is answered with an INTERNAL_ERROR carrying that error and the original message ID. A batch that stored anything keeps the success reply.
 
+## Architecture
+```mermaid
+flowchart LR
+  n1["Stream write callback<br/>package"]:::modified
+  n2["Liaison gRPC API<br/>api"]:::unchanged
+  n2 -->|"sends write batches (rpc)"| n1
+  classDef modified fill:#fdeccd,stroke:#d98e04,color:#4a3200
+  classDef unchanged fill:#eceff1,stroke:#90a4ae,color:#263238
+```
+Components:
+- Stream write callback (package, modified): banyand/stream — banyand/stream/write_standalone.go:12-13
+- Liaison gRPC API (api, unchanged): banyand/liaison/grpc — banyand/liaison/grpc/server.go:40 (base)
+Connections:
+- Liaison gRPC API → Stream write callback (rpc, unchanged): sends write batches — banyand/liaison/grpc/server.go:88 (base)
+
 ## Database / storage schema changes
 - None
 
@@ -586,6 +601,34 @@ the lifecycle as a compact block under its item and the before/after as a
 small table, and a claim check removal as a "Removed by the claim check" line
 under the item. `report.json` carries `summary` (`purpose`, `overview`, each
 null when removed), the items' `state` and `behavior`, and `removedParts`.
+
+**Multi-part writes.** One command carries about 236,000 characters (at most
+55 chunks of 4,000 characters in the argv, and the executor's input bound once
+JSON-escaped), which a large pull request's `report.json`, `qa.json`,
+`review.md` or `review.html` can pass. An artifact that fits one command is
+written by its single command (`report-write`, `qa-write`, `necessity-write`,
+`ledger-write`), as before. One that does not is written as a **part set**: the
+text is cut into parts that each fit a command, in order, and each part is one
+command, so one job, recorded as evidence like any write
+(`report-json-p1`, `report-json-p2`, …; `review-md-p<k>`, `qa-json-p<k>`,
+`review-md-qa-p<k>`, `review-html-p<k>`, `review-html-qa-p<k>`,
+`necessity-json-p<k>`, and `<record id>-p<k>` for a record of a large run). Every
+part carries the path, its position, the number of parts and the SHA-256 of the
+whole artifact. Part 1 starts `<path>.parts`; each later part appends to it and
+refuses to run before part 1; the last part checks the file against the digest
+and renames it into place, so the final file is never half written and an older
+one is replaced only whole. A ledger too large for its one command writes
+`ledger.json` and `ledger.md` as part sets first and the compare-and-swap
+reads those files. The validators reconstruct each artifact from the evidence:
+they concatenate the recorded parts in order and check the digest, and a part
+that is missing, failed, out of order, of another file or artifact, or altered
+makes the artifact unread and the requirement failed. `review.html` is always
+written as a part set (one part when small). The `.gitignore` of `*` in
+`.graphloom/review/` is written by each command, as before.
+
+`review.html` ([§6.11](#611-the-html-report)) is written beside `review.md` at
+the same two points: after the Report stage's measurements, with the Necessity
+and the Q&A marked pending, and whole after the answers are checked.
 
 `review.md` is local. From the publish phase on, its Report and Measurements
 parts can optionally be posted as a PR comment through their own approval,
@@ -2541,6 +2584,8 @@ recorded, so they do not decide CI verdicts.
 | `purpose-stated` | The PR body states why the flag is added | A purpose record `stated` with the matching quote; no `purpose` question |
 | `missing-test` | A new exported function that no test references; the questioner omits the question | The plugin adds the required `missing-test` question; the answerer's whole-repository search finds no test → `needs author`, naming the package's `_test.go` |
 | `large-pull-request` | Run with `limits: { maxFiles: 2, areaMaxBytes: 500, areaMinBytes: 1 }` (`LARGE_LIMITS`): two packages (`alpha`: six exported functions; `beta`: an exported function and an unexported helper), a guide, a generated `*.pb.go` file and a binary file GitHub gave no patch for. Under the profile's own limits the same pull request is an ordinary small one | Stops `report ready`: three areas (`A1` docs, `A2` `pkg/alpha`, `A3` `pkg/beta`) and the generated area; one reporter job per area in its own session, each checked and recorded, then the synthesis, its check and its record; the synthesis merges `A2.R1` and `A3.R1` into one `features` item citing both files (the union of their cites), numbered `R1`... in section order; the generated file and `assets/logo.png` listed in `other` ("generated code, not read by an agent", "patch not provided by GitHub"); `report.json` says `mode: "large"` with the limit passed, `review.md` says so in its header; the questions follow [§7.6](#76-questions-in-large-mode) (the trio once for the merged item and once for each of the seven exported symbols, none for the unexported helper on its own, one `missing-test` question for the item naming all eight functions): 25 questions, answered in two batches (15 and 10) by one answerer session continued across them, each batch checked in a fresh session and recorded; `qa.json` and `review.md` written once; every receipt valid |
+| `architecture-diagram` | The `report` pull request with a diagram of four components (the server command, the schema field, the cron library it schedules with, and the liaison API as unchanged context) and three connections; the canned tree check resolves every cite; the claim check does not support one connection (`A.e2`) twice | `arch-check-1` runs after the reporter and before the checker; the checker is asked for `A.server` … `A.e3`; the connection is dropped from `report.json` and listed under "Removed by the claim check" in `review.md` and `review.html`; the Mermaid block and the SVG hold the other two connections |
+| `large-artifacts` | A pull request of 1,000 data files (large mode: one area), whose `report.json` and `review.html` pass one write command | Both are written as part sets (`report-json-p1`…, `review-html-p1`…), each part its own job; the validators reconstruct them from the recorded parts and pass; `succeeded` at `report ready` |
 | `complex-function` | A new function with 12 decision points and nesting 4; `metrics.coverage: false` | A Measurements row (12, 4, CRAP with coverage unknown as the upper bound, mutation not run with its reason); `split-function` answered with a proposal (line ranges, names new to the package, one responsibility each) and `complexity-coverage` entries; the `measurements` validator rejects a canned record whose `complexity` disagrees with its `decisions` |
 | `crap-upper-bound` | A modified function with complexity 6 in a package that does not build offline | Coverage `unknown` with that reason; CRAP 42 shown as the upper bound; no `complexity-coverage` question; mutation `not run: no coverage` |
 | `sandbox-unavailable` | Docker missing (the stand-in's image check, a Fetch command with a canned result, says `unavailable`) with coverage and mutation on | Static metrics run; coverage and mutation `not run: docker unavailable`; CRAP shown as the upper bound; no PR code runs anywhere; the run still succeeds |
@@ -2636,6 +2681,11 @@ The heuristic parts (symbol packs, similarity threshold, test mapping, answer
 search) are tuned against the P1 live trial instead. P1 and P2 make no GitHub
 writes.
 
+**Landed in 0.12:** the architecture diagram ([§6.10](#610-architecture-diagram)),
+the HTML report ([§6.11](#611-the-html-report)) and the multi-part writes of
+[§6.6](#66-output), within the first layer and without changing the stage list
+([Version 0.12](#version-012-architecture-diagram-html-report-and-multi-part-writes)).
+
 | Phase | Scope | Verification |
 |---|---|---|
 | P1 | **First layer, report-only.** Fetch, workspace, report, questions, answers, static measurements. Generic: `base:`, the GitHub reads, `bwrap` confinement (agents, static tools) and the `docker` sandbox (coverage), image checks and pulls in Fetch, doctor and check probes. pr-review 0.1 with stages Fetch, Report, Questions and Answers; it stops `report ready` after Answers and `--decline review-layer` finishes it. Also: detectors; symbol packs (Go, TypeScript); whole-repository search; similarity; the dependency inventory; test mapping; the reporter, questioner and answerer with both checkers; `gometrics` and `tsmetrics`; confined coverage (**built in wave 3b**: `go test -coverprofile`; for TypeScript the repository's own `vitest run --coverage` with its `@vitest/coverage-v8`, or `not run (no vitest coverage provider)` when the repository declares none) with measured CRAP and the unknown-coverage rule; `review.md`, `report.json`, `qa.json`; the ledger; the BanyanDB mapping. **Wave 3**, with the Questions and Answers work: generic `graphloom session list/open` ([core §15](design-typescript-core.md#15-opening-a-recorded-agent-session)) with conversation capture (`operator-conversation` evidence, the turn extract, the 32 MiB bound, `contextTokens`), chained forks and `--from-original`; the operator's session launcher (`claude.sessionLauncher`, `codex.sessionLauncher`, their state directories, the environment overrides and the launcher probe in `session open` and `doctor`); `parseProfile` refusing a Pi answerer; and the decision half of approvals (`GraphDefinition.approvals`, `resume --approve/--decline`, `operator-approval` evidence) for the `report ready` stop; 0.1 has no Review stage, so it refuses `--approve review-layer` and names the version; and task preparation: the generic `prepareTask` hook, `TaskPlan` and `validateTaskPlan`, `graphloom task new` ([core §16](design-typescript-core.md#16-preparing-a-task-graphloom-task-new)), pr-review's `prepareTask` ([§3.1](#31-task)), and the `graphloom-run` skill using `task new` | Intake, executor contract and confinement tests. Unit tests per detector, symbol pattern (new vs modified, receivers, generics), query builder, similarity scorer, test-map rule and validator rule. `gometrics` matches gocyclo on a fixture corpus. Nesting and changed-function scope fixtures. The `measurements` validator rejects each kind of inconsistent record. Real-Git tests: searches read the base commit only, and materialization runs no hook or filter. Ledger CAS race. Rehearsal `report`, `report-corrections`, `answer-finds-existing-helper`, `answer-no-library-with-whole-repo-search`, `answer-checker-contradicts`, `needs-author-purpose`, `purpose-stated`, `missing-test`, `complex-function`, `crap-upper-bound`, `sandbox-unavailable`, `injection`. Wave 3: opening a session and capturing its fork leave the recorded transcript, side files and rollout byte-identical; a second `--stage answers` open forks the first conversation and `--from-original` forks the answerer; `session list` shows each conversation with its parent; a fork with no operator turn records nothing, one over the bound records `transcript: omitted`, and a capture after the run finished records nothing; the turn extract keeps the operator's messages verbatim (Claude Code and Codex fixtures); a stub launcher prefixes `session open` only and headless jobs keep `claude.command`, the environment override wins, its state directories are writable in the confinement, a launcher that cannot resume is refused by the probe before launch, and capture through a stub launcher finds the fork by the id GraphLoom chose; `session open` refuses a Pi session, a ref whose harness disagrees with its record and a finished run, and refuses while the owning job or a continuation of it runs; the opened session's confinement (repository agent-config masks applied, no GitHub token in its environment, the checkout read-only); `--stage answers` opens the answerer, not the checker; `--decline review-layer` records `operator-approval` evidence and finishes the run; `--approve review-layer` refused by 0.1. Task preparation: `validateTaskPlan` refuses a step that would run a command (an unknown kind, an extra property) and any `intoRef` or `to` outside `refs/graphloom/<graph>/`; a `fetch` from a local smart-HTTP fixture runs no hook (a `reference-transaction` hook's marker never appears) and leaves the working tree, index and `HEAD` unchanged; `--dry-run` creates no ref and writes no file; an existing `task.yaml` is refused without `--force`; pr-review's plan for a temporary repository whose fixture remote serves a fake `refs/pull/7/head`: the six steps of [§3.1](#31-task), `heads/<sha>` pinned at the fetched head, `base` the merge base, the request naming that sha, and the written task passing `graphloom check`; a URL argument gives the same plan; another `owner/repo` than the profile's `project`, a missing profile and a malformed argument are refused. Under real Docker: a coverage run with `--network none`, where a test that dials out fails; the limits enforced (a fork bomb stops at `--pids-limit`, an allocation at `--memory`, the host unaffected); only the checkout and the build cache writable, the root read-only, no host home, `--pull never`; the container killed by name on stop and removed on resume; coverage attributed by line range, Go from the coverprofile and TypeScript from `coverage-final.json` statements, with the report written under the job's temporary directory and the checkout unchanged. One live run on a real BanyanDB PR, read by the user, with recall of new symbols, tests and existing equivalents checked by hand |
@@ -2677,9 +2727,8 @@ Large mode ([§6.9](#69-large-pull-requests), [§7.6](#76-questions-in-large-mod
 lands in 0.11: a pull request over `maxFiles`, `maxPatchBytes` or `maxNewSymbols`
 is reviewed area by area instead of refused, and only the hard caps refuse it.
 The architecture diagram ([§6.10](#610-architecture-diagram)) and the HTML report
-([§6.11](#611-the-html-report)) land next: in 0.11 the synthesis job returns
-`purpose`, `overview` and `merges` only, and `change-synthesis-v1` is where
-`architecture` joins (a marked extension point in `src/large.ts`).
+([§6.11](#611-the-html-report)) landed in 0.12 ([below](#version-012-architecture-diagram-html-report-and-multi-part-writes)):
+in 0.11 the synthesis job returned `purpose`, `overview` and `merges` only.
 
 What 0.11 does, where this document leaves it open:
 
@@ -2705,6 +2754,51 @@ What 0.11 does, where this document leaves it open:
 - `report.json`, `qa.json` and the ledger files are each written by one command,
   as before, so their size is bounded by what one command carries; a report or
   Q&A that does not fit still stops the run "incompatible task" and says so.
+  (0.12 lifts this: [§6.6](#66-output), multi-part writes.)
+
+### Version 0.12: architecture diagram, HTML report and multi-part writes
+
+[§6.10](#610-architecture-diagram), [§6.11](#611-the-html-report) and the
+multi-part writes of [§6.6](#66-output) land in 0.12. `architecture` is a
+property of `change-report-v1` (an area reporter in large mode returns it empty)
+and of `change-synthesis-v1`; both contracts require it. How 0.12 does it, where
+this document leaves it open:
+
+- The diagram's tree check is a read-only command, `arch-check-<n>` (at most 14
+  entries each), whose output is evidence: each cite is resolved in the tree it
+  names (the head tree is the worktree, the base is `git show <base>:<path>`),
+  each unchanged node's paths are looked up at the base, and, for a Go `call` or
+  `import` edge between two `package` nodes that is not `removed`, the `from`
+  package's `*.go` files are read for their `import` blocks (symbolic links are
+  never followed). The flow runs it after a valid result and before the claim
+  check; its problems are corrections (the same bound as the deterministic ones,
+  at most two corrections, then the supervisor), its import notes go to the
+  checker in the text of the edge's claim. A diagram with no pinned base to read
+  the trees at goes to the supervisor, never unchecked.
+- A node id may not look like `e<number>`, which the edge claims (`A.e1`) take.
+  An `unchanged` node that no edge joins to a changed one after the claim check
+  dropped something is dropped too and recorded, so the diagram keeps the rule
+  that context is not inventory.
+- `review.html` is written by plugin code from the text of `report.json` (and,
+  at the Answers stage, `qa.json` and `necessity.json`); it is always written as
+  a part set ([§6.6](#66-output)), with the Q&A and Necessity marked pending at
+  the Report stage. The inertness check is an allow-list of elements and
+  attributes over the written bytes (so `<script`, `<link`, `<img`, `src`, any
+  `on…` handler, a `url(` that is not a reference inside the document, and any
+  `href` that is not the pull request, one of its commits or one of its files at
+  the pinned head or base, all fail it); the validators run it on the recorded
+  bytes and the graph runs it before it writes.
+- `report.json` gains `architecture` and the author in `pull`; `review.md` gains
+  an "Architecture" part (the Mermaid block, then the components and connections
+  as a list) after the Summary, and a "Removed by the claim check" part for the
+  diagram's dropped nodes and edges. The Q&A in `review.html` leaves out N1,
+  which the Necessity section holds.
+- Multi-part writes also carry the records of a large run (`area-record-<id>`,
+  `synthesis-record`, `answers-record-<n>`), `necessity.json` and the ledger's
+  `ledger.json` and `ledger.md`; the `report-write`, `qa-write`,
+  `necessity-write` and `ledger-write` commands remain the single command of an
+  artifact that fits. The cut-short `review.md` of 0.11 is gone: what does not fit
+  one command is written in parts, whole.
 
 ### Version 0.4: ids and measured searches
 

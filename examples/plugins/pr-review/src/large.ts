@@ -11,10 +11,12 @@
  */
 import { validateResultShape } from "@graphloom/sdk";
 import type { EvidenceRecord } from "@graphloom/sdk";
+import type { EnvironmentCommand } from "@graphloom/sdk";
+import { architecturePlan, architectureProblems, architectureTargets, ARCHITECTURE_SCHEMA, assembleArchitecture, EMPTY_ARCHITECTURE, isEmptyArchitecture, type Architecture } from "./architecture.js";
 import { areaFiles, GENERATED_AREA, type Area, type Partition } from "./areas.js";
-import { QUESTION_BATCH_SIZE } from "./constants.js";
+import { QUESTION_BATCH_SIZE, REVIEW_DIR } from "./constants.js";
 import { claimTargets, collapse, readClaimCheck, summaryTargets, type ClaimReading, type ClaimTarget } from "./claims.js";
-import { commandRuns, succeeded, type AgentRun } from "./evidence.js";
+import { commandRuns, succeeded, type AgentRun, type CommandRun } from "./evidence.js";
 import { REPORTER_SCHEMA_NAME, REVISION_SCHEMA_NAME, replayStage, reporterResult, stageEvents, stageStep, type StageSpec } from "./flow.js";
 import {
   assembleReport,
@@ -41,6 +43,7 @@ import {
   type StateEntry,
 } from "./report.js";
 import { fileNames } from "./snapshot.js";
+import { readParts } from "./parts.js";
 import { writtenRecord } from "./write.js";
 
 export const AREA_RECORD_SCHEMA = "pr-review-area-v1";
@@ -65,14 +68,17 @@ export interface SynthesisOutput {
   /** Groups of item ids (`A1.R3`) that are one conceptual change across areas, with the merged item's rewritten text. */
   merges: Array<{ items: string[]; text: string }>;
   notes: string[];
+  /** The architecture diagram of the whole pull request (design §6.10), drawn here because no area sees the others. */
+  architecture: Architecture;
 }
 
 /**
  * The synthesis job's result (`change-synthesis-v1`, design §6.9 step 3). Large mode returns `purpose`, `overview`
- * and `merges`. EXTENSION POINT (§6.10): the architecture diagram joins this contract as `architecture`, with its own
- * deterministic validation and claim targets (`A.<node id>`, `A.e<n>`); nothing here assumes the contract stays this size.
+ * and `merges`, and the architecture diagram of the whole pull request (§6.10), with its own deterministic
+ * validation, tree check and claim targets (`A.<node id>`, `A.e<n>`).
  */
-export const CHANGE_SYNTHESIS_SCHEMA = strict(["purpose", "overview", "merges", "notes"], {
+export const CHANGE_SYNTHESIS_SCHEMA = strict(["purpose", "overview", "merges", "notes", "architecture"], {
+  architecture: ARCHITECTURE_SCHEMA,
   purpose: strict(["text", "source", "quote"], { text, source: { type: "string", enum: ["stated", "inferred"] }, quote: text }),
   overview: text,
   merges: { type: "array", items: strict(["items", "text"], { items: { type: "array", items: text }, text }) },
@@ -98,6 +104,7 @@ export function areaProblems(output: ReporterOutput, ctx: ReportContext): string
   if (output.purpose.text.trim() !== "" || output.purpose.quote.trim() !== "" || output.purpose.source !== "inferred" || output.overview.trim() !== "") {
     problems.unshift('an area report leaves the summary empty: purpose.text "", purpose.source "inferred", purpose.quote "" and overview ""; the synthesis job writes the summary');
   }
+  if (!isEmptyArchitecture(output.architecture)) problems.unshift('an area report leaves the architecture empty: {"nodes": [], "edges": []}; the synthesis job draws the diagram of the whole pull request');
   return problems;
 }
 
@@ -129,11 +136,24 @@ const isObject = (v: unknown): v is Record<string, unknown> => v !== null && typ
 /** The latest successful record command `id` ran, parsed, with its evidence position. */
 function readRecord(evidence: readonly EvidenceRecord[], id: string): { value: unknown; ref: string; at: number } | undefined {
   const run = commandRuns(evidence, id).filter((r) => succeeded(r.command)).at(-1);
-  if (run === undefined) return undefined;
-  const json = writtenRecord(run.command.argv, id);
+  let json: string | undefined;
+  let ref: string;
+  let at: number;
+  if (run !== undefined) {
+    json = writtenRecord(run.command.argv, id);
+    ref = run.record.ref;
+    at = evidence.findIndex((e) => e.ref === run.record.ref);
+  } else {
+    // A record too large for one command was written as a part set (design §6.6): reconstructed, and checked against its digest.
+    const parts = readParts(evidence, id, `${REVIEW_DIR}/areas/${id}.json`);
+    if (parts.state !== "read") return undefined;
+    json = parts.value;
+    ref = parts.refs.at(-1)!;
+    at = parts.at;
+  }
   if (json === undefined) return undefined;
   try {
-    return { value: JSON.parse(json), ref: run.record.ref, at: evidence.findIndex((e) => e.ref === run.record.ref) };
+    return { value: JSON.parse(json), ref, at };
   } catch {
     return undefined;
   }
@@ -242,11 +262,12 @@ export function synthesisProblems(output: SynthesisOutput, items: readonly Synth
   output.notes.forEach((n, i) => {
     if (n.length > MAX_NOTE_CHARS) problems.push(`note ${i + 1} is ${n.length} characters, more than ${MAX_NOTE_CHARS}`);
   });
+  if (files !== undefined) problems.push(...architectureProblems(output.architecture, files));
   return problems;
 }
 
-/** The claims of a synthesis: the summary's, and each merge (`M1`...). */
-export function synthesisTargets(output: SynthesisOutput, items: readonly SynthItem[]): ClaimTarget[] {
+/** The claims of a synthesis: the summary's, each merge (`M1`...), and the architecture diagram's nodes and edges (`A.<id>`, `A.e<n>`). */
+export function synthesisTargets(output: SynthesisOutput, items: readonly SynthItem[], archNotes?: ReadonlyMap<string, string>): ClaimTarget[] {
   const byKey = new Map(items.map((i) => [i.key, i]));
   return [
     ...summaryTargets(output),
@@ -255,6 +276,7 @@ export function synthesisTargets(output: SynthesisOutput, items: readonly SynthI
       const own = members.map((x) => `${x.key} "${collapse(x.item.text).slice(0, 160)}"`).join(" | ");
       return { id: `M${n + 1}`, text: `Merge M${n + 1}, one change that spans areas: ${collapse(m.text)} (it joins ${own})`, cites: mergedItem(members, m.text).cites, quotes: "required" as const };
     }),
+    ...architectureTargets(output.architecture, archNotes),
   ];
 }
 
@@ -270,7 +292,12 @@ function synthesisResult(run: AgentRun, items: readonly SynthItem[], pinned: Rep
 }
 
 export function synthesisSpec(items: readonly SynthItem[], ctx: ReportContext): StageSpec<SynthesisOutput> {
-  return { result: (run) => synthesisResult(run, items, ctx.pinned, ctx.files), targets: (o) => synthesisTargets(o, items), files: ctx.files };
+  return {
+    result: (run) => synthesisResult(run, items, ctx.pinned, ctx.files),
+    targets: (o, archNotes) => synthesisTargets(o, items, archNotes),
+    files: ctx.files,
+    verify: (o) => architecturePlan(o.architecture, ctx.base),
+  };
 }
 
 export interface SynthesisDone {
@@ -397,6 +424,10 @@ export function assembleLarge(done: readonly AreaDone[], synthesis: SynthesisDon
   if (output !== undefined && purposeReason !== undefined) parts.push({ id: "purpose", kind: "purpose", item: "", label: output.purpose.text, reason: purposeReason });
   if (output !== undefined && overviewReason !== undefined) parts.push({ id: "overview", kind: "overview", item: "", label: output.overview, reason: overviewReason });
 
+  // The diagram is the synthesis job's; a node or an edge the claim check could not support is dropped (design §6.10).
+  const arch = assembleArchitecture(output?.architecture ?? EMPTY_ARCHITECTURE, weak);
+  parts.push(...arch.parts);
+
   const allNotes = [...new Set([...done.flatMap((d) => d.final.notes), ...(output?.notes ?? [])].map(clipNote))];
   const notes = allNotes.length <= MAX_NOTES ? allNotes : [...allNotes.slice(0, MAX_NOTES - 1), `${allNotes.length - (MAX_NOTES - 1)} more note(s) were left out; see the areas' records`];
 
@@ -406,6 +437,7 @@ export function assembleLarge(done: readonly AreaDone[], synthesis: SynthesisDon
     notes,
     removed,
     removedParts: parts,
+    architecture: arch.architecture,
   };
   const info: LargeInfo = {
     areas: partition.areas.map((a) => {
@@ -422,8 +454,7 @@ export function assembleLarge(done: readonly AreaDone[], synthesis: SynthesisDon
     purpose: output?.purpose ?? { text: "", source: "inferred", quote: "" },
     overview: output?.overview ?? "",
     ...asReporterOutput(final),
-  };
-  return { final, info, report };
+  };  return { final, info, report };
 }
 
 // ---- the flow ----
@@ -433,7 +464,8 @@ export type LargeFlow =
   | { state: "area-checker"; area: Area; report: ReporterOutput; retry: boolean }
   | { state: "area-record"; area: Area; record: AreaRecord }
   | { state: "synthesis"; kind: "first" | "correction" | "revision"; feedback: string[]; schema: string; items: SynthItem[]; areas: AreaDone[] }
-  | { state: "synthesis-checker"; output: SynthesisOutput; retry: boolean; items: SynthItem[]; areas: AreaDone[] }
+  | { state: "synthesis-checker"; output: SynthesisOutput; retry: boolean; items: SynthItem[]; areas: AreaDone[]; archNotes: ReadonlyMap<string, string> }
+  | { state: "verify"; commands: EnvironmentCommand[] }
   | { state: "synthesis-record"; record: SynthesisRecord }
   | { state: "supervise"; reason: string; refs: string[] }
   | { state: "done"; report: ReporterOutput; final: FinalReport; reading: ClaimReading; info: LargeInfo; refs: string[] };
@@ -443,7 +475,7 @@ export type LargeFlow =
  * validation and corrections, its claim check and one revision, then its record), then the synthesis the same way,
  * then the merged report. `partition` is the snapshot's own.
  */
-export function largeReportFlow(evidence: readonly EvidenceRecord[], ctx: ReportContext, partition: Partition): LargeFlow {
+export function largeReportFlow(evidence: readonly EvidenceRecord[], ctx: ReportContext, partition: Partition, retryable?: (r: CommandRun) => boolean): LargeFlow {
   const readAreas = partition.areas.filter((a) => a.kind === "read");
   const done: AreaDone[] = [];
   let from = -1;
@@ -461,7 +493,7 @@ export function largeReportFlow(evidence: readonly EvidenceRecord[], ctx: Report
     }
     const spec = areaSpec(actx);
     const rep = replayStage(stageEvents(evidence, [REPORTER_SCHEMA_NAME, REVISION_SCHEMA_NAME], from), spec);
-    const step = stageStep(rep, spec, { first: REPORTER_SCHEMA_NAME, revision: REVISION_SCHEMA_NAME, scope: `area ${area.id}: ` });
+    const step = stageStep(rep, spec, { first: REPORTER_SCHEMA_NAME, revision: REVISION_SCHEMA_NAME, scope: `area ${area.id}: ` }, retryable);
     switch (step.state) {
       case "supervise":
         return step;
@@ -469,6 +501,8 @@ export function largeReportFlow(evidence: readonly EvidenceRecord[], ctx: Report
         return { state: "area", area, index, kind: step.kind, feedback: step.feedback, schema: step.schema };
       case "checker":
         return { state: "area-checker", area, report: step.output, retry: step.retry };
+      case "verify":
+        return { state: "supervise", reason: `area ${area.id}: an area report carries no architecture, so no tree check is due`, refs: [] };
       case "finished":
         return { state: "area-record", area, record: { schema: AREA_RECORD_SCHEMA, area: area.id, report: step.output, revised: step.revised, check: step.checked } };
     }
@@ -484,14 +518,16 @@ export function largeReportFlow(evidence: readonly EvidenceRecord[], ctx: Report
   } else {
     const spec = synthesisSpec(items, ctx);
     const rep = replayStage(stageEvents(evidence, [SYNTHESIS_SCHEMA_NAME, SYNTHESIS_REVISION_SCHEMA_NAME], from), spec);
-    const step = stageStep(rep, spec, { first: SYNTHESIS_SCHEMA_NAME, revision: SYNTHESIS_REVISION_SCHEMA_NAME, scope: "the synthesis: " });
+    const step = stageStep(rep, spec, { first: SYNTHESIS_SCHEMA_NAME, revision: SYNTHESIS_REVISION_SCHEMA_NAME, scope: "the synthesis: " }, retryable);
     switch (step.state) {
       case "supervise":
         return step;
       case "reporter":
         return { state: "synthesis", kind: step.kind, feedback: step.feedback, schema: step.schema, items, areas: done };
       case "checker":
-        return { state: "synthesis-checker", output: step.output, retry: step.retry, items, areas: done };
+        return { state: "synthesis-checker", output: step.output, retry: step.retry, items, areas: done, archNotes: step.archNotes };
+      case "verify":
+        return step;
       case "finished":
         return { state: "synthesis-record", record: { schema: SYNTHESIS_RECORD_SCHEMA, synthesis: step.output, revised: step.revised, check: step.checked } };
     }
@@ -519,8 +555,8 @@ export interface LargeNeeds {
 
 export const ASSUMED_ITEMS_PER_AREA = 3;
 export const ASSUMED_QUESTIONS_PER_ITEM = 5;
-/** Jobs the stages around the agents need in any run (measurements, coverage, the groundwork's reads, the writes, the ledger). */
-const FIXED_JOBS = 20;
+/** Jobs the stages around the agents need in any run (measurements, coverage, the groundwork's reads, the architecture tree check, the writes with review.html, the ledger). A multi-part write adds a job per part on top. */
+const FIXED_JOBS = 24;
 const FIXED_DECISIONS = 12;
 
 /**

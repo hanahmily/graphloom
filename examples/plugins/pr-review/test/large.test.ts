@@ -323,7 +323,7 @@ describe("the budget pre-check before the first reporter job (design §6.9)", ()
   it("is covered by the plugin's default budgets for a ten-area pull request, and stops a very large one", () => {
     const defaults = definitionFor(profileOf()).defaultBudgets!;
     const ten = largeNeeds(10);
-    expect(ten).toMatchObject({ areas: 10, questions: 150, batches: 10, agentInvocations: 45, jobs: 98, decisions: 110 });
+    expect(ten).toMatchObject({ areas: 10, questions: 150, batches: 10, agentInvocations: 45, jobs: 102, decisions: 114 });
     expect(budgetShortfall(ten, { agentInvocations: defaults.agentInvocations!, jobs: defaults.jobs!, decisions: defaults.decisions! })).toBeUndefined();
     expect(budgetShortfall(largeNeeds(60), { agentInvocations: defaults.agentInvocations!, jobs: defaults.jobs!, decisions: defaults.decisions! })).toContain("budgets.jobs");
   });
@@ -495,7 +495,7 @@ describe("what the synthesis may merge", () => {
   });
   const summary = { purpose: { text: "p", source: "inferred" as const, quote: "" }, overview: "One sentence." };
   const all = [item("A1.R1", "features"), item("A2.R1", "features"), item("A2.R2", "config"), item("A1.R2", "features")];
-  const problems = (merges: Array<{ items: string[]; text: string }>): string[] => synthesisProblems({ ...summary, merges, notes: [] }, all, []);
+  const problems = (merges: Array<{ items: string[]; text: string }>): string[] => synthesisProblems({ ...summary, merges, notes: [], architecture: { nodes: [], edges: [] } }, all, []);
 
   it("accepts a merge of items of two areas in one section", () => {
     expect(problems([{ items: ["A1.R1", "A2.R1"], text: "joined" }])).toEqual([]);
@@ -524,7 +524,7 @@ describe("what the synthesis may merge", () => {
     const entry = (name: string) => ({ name, scope: "s", initial: "i", transitions: [], reads: [] });
     const many = (area: string): SynthItem => item(`${area}.R1`, "features", { state: Array.from({ length: 4 }, (_, i) => entry(`${area}${i}`)) });
     const list = [many("A1"), many("A2")];
-    expect(synthesisProblems({ ...summary, merges: [{ items: ["A1.R1", "A2.R1"], text: "x" }], notes: [] }, list, []).join("|")).toContain("8 state entries, more than 6");
+    expect(synthesisProblems({ ...summary, merges: [{ items: ["A1.R1", "A2.R1"], text: "x" }], notes: [], architecture: { nodes: [], edges: [] } }, list, []).join("|")).toContain("8 state entries, more than 6");
   });
 
   it("numbers the merged report R1... after the merges, with each removed part under its new id", () => {
@@ -567,7 +567,7 @@ describe("merged state names and unread files", () => {
   it("judges the merged item with the rules the assembled report uses, so a bad merge is corrected before it is recorded", () => {
     const bad = member("A2.R1", [{ ...entry("n"), reads: [] }]);
     const list = [member("A1.R1", []), bad];
-    const problems = synthesisProblems({ ...summary, merges: [{ items: ["A1.R1", "A2.R1"], text: "x" }], notes: [] }, list, [], []);
+    const problems = synthesisProblems({ ...summary, merges: [{ items: ["A1.R1", "A2.R1"], text: "x" }], notes: [], architecture: { nodes: [], edges: [] } }, list, [], []);
     expect(problems.join("|")).toContain("no transitions and no reads");
   });
 

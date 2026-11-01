@@ -12,6 +12,7 @@
  * properties; judgement words are allowed (§6.5).
  */
 import { validateResultShape } from "@graphloom/sdk";
+import { ARCHITECTURE_SCHEMA, architectureProblems, assembleArchitecture, EMPTY_ARCHITECTURE, renderArchitectureMarkdown, type Architecture } from "./architecture.js";
 import type { Fact } from "./detectors.js";
 import { sideLines, type Side } from "./patch.js";
 import { quoteInPinned, type PinnedText } from "./questions.js";
@@ -103,6 +104,8 @@ export interface ReporterOutput {
   overview: string;
   sections: ReporterSection[];
   notes: string[];
+  /** The components the change adds or modifies, and how they connect (design §6.10); an area report in large mode leaves it empty. */
+  architecture: Architecture;
 }
 
 const CITE_SCHEMA = {
@@ -122,7 +125,8 @@ const text = { type: "string" };
 const strict = (required: string[], properties: Record<string, unknown>): Record<string, unknown> => ({ type: "object", additionalProperties: false, required, properties });
 
 /** The reporter's result (`change-report-v1`): every property required, none extra, and no field for a severity, finding or verdict. */
-export const CHANGE_REPORT_SCHEMA = strict(["purpose", "overview", "sections", "notes"], {
+export const CHANGE_REPORT_SCHEMA = strict(["purpose", "overview", "sections", "notes", "architecture"], {
+  architecture: ARCHITECTURE_SCHEMA,
   purpose: strict(["text", "source", "quote"], { text, source: { type: "string", enum: ["stated", "inferred"] }, quote: text }),
   overview: text,
   sections: {
@@ -168,10 +172,12 @@ export interface ReportContext {
   maxBytes?: number;
   /** Large mode: files no agent read as patches (generated, or no patch from GitHub), by path, with what the report says of each. */
   unread?: ReadonlyMap<string, string>;
+  /** The pinned base commit, which the architecture diagram's tree check reads (design §6.10). */
+  base?: string;
 }
 
 /** What the deterministic rules judge: a reporter's output, or a final report in its shape (no summary check). */
-export type ReportLike = Pick<ReporterOutput, "sections" | "notes"> & Partial<Pick<ReporterOutput, "purpose" | "overview">>;
+export type ReportLike = Pick<ReporterOutput, "sections" | "notes"> & Partial<Pick<ReporterOutput, "purpose" | "overview" | "architecture">>;
 
 const isObject = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === "object" && !Array.isArray(v);
 
@@ -196,6 +202,8 @@ export function reportProblems(report: ReportLike, ctx: ReportContext, opts: { f
   const maxBytes = ctx.maxBytes ?? MAX_REPORT_BYTES;
   // An area's report leaves the summary to the synthesis job (design §6.9).
   if (!final && opts.summary !== false) summaryProblems(report, ctx, problems);
+  // The diagram's structural rules (design §6.10); its tree check is a command the graph runs (`architecturePlan`).
+  if (report.architecture !== undefined) problems.push(...architectureProblems(report.architecture, ctx.files));
   const known = new Map(ctx.sections.map((s) => [s.id, s]));
   const seen = new Set<string>();
   for (const s of report.sections) {
@@ -375,9 +383,9 @@ export interface RemovedItem {
 
 /** A part of the report the claim check could not support, dropped while its item stays. */
 export interface RemovedPart {
-  /** The claim-check id: `purpose`, `overview`, `R3.s1` (a state entry, whole), `R3.b2` (a behavior row), `M2` (a merge, large mode). */
+  /** The claim-check id: `purpose`, `overview`, `R3.s1` (a state entry, whole), `R3.b2` (a behavior row), `M2` (a merge, large mode), `A.store` (a diagram node), `A.e3` (a diagram edge). */
   id: string;
-  kind: "purpose" | "overview" | "state" | "behavior" | "merge";
+  kind: "purpose" | "overview" | "state" | "behavior" | "merge" | "node" | "edge";
   /** The item it belonged to; empty for the summary. */
   item: string;
   /** What was dropped, in a few words: the entry's name or the row's case. */
@@ -397,6 +405,8 @@ export interface FinalReport {
   notes: string[];
   removed: RemovedItem[];
   removedParts: RemovedPart[];
+  /** The architecture diagram the claim check left standing (design §6.10). */
+  architecture: Architecture;
 }
 
 /** The ids the report's items carry: `R1…` over the sections in template order. */
@@ -429,7 +439,7 @@ export const behaviorId = (item: string, row: number): string => `${item}.b${row
  * detector fact left without an item gets a plugin-written one, so coverage
  * holds without trusting a model (§6.4).
  */
-export function assembleReport(report: Pick<ReporterOutput, "sections" | "notes"> & Partial<Pick<ReporterOutput, "purpose" | "overview">>, removed: ReadonlyMap<string, string>, ctx: ReportContext): FinalReport {
+export function assembleReport(report: Pick<ReporterOutput, "sections" | "notes"> & Partial<Pick<ReporterOutput, "purpose" | "overview" | "architecture">>, removed: ReadonlyMap<string, string>, ctx: ReportContext): FinalReport {
   const items = numbered(report, ctx);
   const gone: RemovedItem[] = [];
   const parts: RemovedPart[] = [];
@@ -459,6 +469,8 @@ export function assembleReport(report: Pick<ReporterOutput, "sections" | "notes"
   const overviewReason = removed.get("overview");
   if (purposeReason !== undefined) parts.push({ id: "purpose", kind: "purpose", item: "", label: report.purpose?.text ?? "", reason: purposeReason });
   if (overviewReason !== undefined) parts.push({ id: "overview", kind: "overview", item: "", label: report.overview ?? "", reason: overviewReason });
+  const arch = assembleArchitecture(report.architecture ?? EMPTY_ARCHITECTURE, removed);
+  parts.push(...arch.parts);
   let next = items.length;
   const cited = new Set(ctx.sections.flatMap((s) => bySection.get(s.id)!.flatMap((i) => i.cites.map((c) => c.path))));
   const accounted = new Set(ctx.sections.flatMap((s) => bySection.get(s.id)!.flatMap((i) => i.facts)));
@@ -534,14 +546,16 @@ export function assembleReport(report: Pick<ReporterOutput, "sections" | "notes"
     notes: report.notes,
     removed: gone,
     removedParts: parts,
+    architecture: arch.architecture,
   };
 }
 
 /** A final report in the reporter's shape (without its summary), so the same deterministic rules judge it. */
-export function asReporterOutput(final: FinalReport): Pick<ReporterOutput, "sections" | "notes"> {
+export function asReporterOutput(final: FinalReport): Pick<ReporterOutput, "sections" | "notes" | "architecture"> {
   return {
     sections: final.sections.map((s) => ({ id: s.id, none: s.none, items: s.items.map(({ text, cites, facts, state, behavior }) => ({ text, cites, facts, state, behavior })) })),
     notes: final.notes,
+    architecture: final.architecture,
   };
 }
 
@@ -641,6 +655,7 @@ export function renderReport(final: FinalReport, header: ReportHeader): string {
     `${header.files.length} files, +${added} −${deleted}. Commits: ${header.commits}. GitHub checks at head: ${describeChecks(header.checks)}.`,
     "",
     ...summaryLines(final.summary, final.removedParts),
+    ...renderArchitectureMarkdown(final.architecture),
   ];
   for (const s of final.sections) {
     if (s.id === "measurements") continue;
@@ -654,6 +669,10 @@ export function renderReport(final: FinalReport, header: ReportHeader): string {
     lines.push("");
   }
   for (const p of final.removedParts.filter((x) => x.kind === "merge")) lines.push(`Merge not applied: the claim check could not support joining ${short(p.label, 120)} (${short(p.reason, 140)}); its items stay separate.`);
+  const dropped = final.removedParts.filter((x) => x.kind === "node" || x.kind === "edge");
+  if (dropped.length > 0) {
+    lines.push("## Removed by the claim check", ...dropped.map((p) => `- Architecture ${p.kind === "node" ? "component" : "connection"} \`${p.id}\` ${short(p.label, 80)}: ${short(p.reason, 160)}`), "");
+  }
   lines.push(`Notes: ${final.notes.length === 0 ? "none" : final.notes.map(oneLine).join(" | ")}`, "");
   return lines.join("\n");
 }
