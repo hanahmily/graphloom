@@ -17,6 +17,13 @@ const GAP_Y = 26;
 const PAD = 24;
 const SWEEPS = 4;
 
+export interface Rect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
 export interface PlacedNode {
   id: string;
   layer: number;
@@ -36,9 +43,11 @@ export interface PlacedEdge {
   /** Drawn against the layering: the cycle was broken at this edge. */
   back: boolean;
   path: string;
-  /** Where the label sits. */
+  /** Where the label sits (its centre), its lines, and the rectangle behind it. */
   lx: number;
   ly: number;
+  label: string[];
+  box: Rect;
 }
 
 export interface ArchLayout {
@@ -128,41 +137,79 @@ export function layoutArchitecture(arch: Architecture): ArchLayout {
   const up = Array.from({ length: Math.max(0, count - 1) }, (_, i) => count - 2 - i);
   for (let s = 0; s < SWEEPS; s += 1) sweep(s % 2 === 0 ? down : up);
 
+  // Back edges run in lanes above the boxes, so they never cross a box; each lane is 12 units higher than the one before.
+  const backCount = [...back].filter((i) => arch.edges[i]!.from !== arch.edges[i]!.to && known.has(arch.edges[i]!.from) && known.has(arch.edges[i]!.to)).length;
+  const top0 = 20 + 12 * backCount;
   const tallest = layers.reduce((m, l) => Math.max(m, l.length), 0);
   const columnHeight = tallest === 0 ? 0 : tallest * BOX_H + (tallest - 1) * GAP_Y;
   const placed = new Map<string, PlacedNode>();
   layers.forEach((layer, li) => {
     const h = layer.length * BOX_H + Math.max(0, layer.length - 1) * GAP_Y;
-    const top = PAD + (columnHeight - h) / 2;
+    const top = top0 + (columnHeight - h) / 2;
     layer.forEach((id, order) => placed.set(id, { id, layer: li, order, x: PAD + li * (BOX_W + GAP_X), y: Math.round(top + order * (BOX_H + GAP_Y)), w: BOX_W, h: BOX_H }));
+  });
+  const boxes = [...placed.values()];
+
+  // Parallel edges between one pair of nodes are spread, so they and their labels do not lie on one another.
+  const pairs = new Map<string, number[]>();
+  arch.edges.forEach((e, index) => {
+    if (e.from === e.to || !placed.has(e.from) || !placed.has(e.to)) return;
+    const key = [e.from, e.to].sort().join(">");
+    pairs.set(key, [...(pairs.get(key) ?? []), index]);
   });
 
   const edges: PlacedEdge[] = [];
+  const taken: Rect[] = [];
+  const hits = (r: Rect, others: readonly Rect[]): boolean => others.some((o) => r.x < o.x + o.w && o.x < r.x + r.w && r.y < o.y + o.h && o.y < r.y + r.h);
+  let lane = 0;
   arch.edges.forEach((e, index) => {
     const a = placed.get(e.from);
     const b = placed.get(e.to);
     if (a === undefined || b === undefined || e.from === e.to) return;
     const isBack = back.has(index);
     const forward = a.layer < b.layer;
-    // From the right side of the left box to the left side of the right box; a back edge runs the other way round.
-    const x1 = forward ? a.x + a.w : a.x;
-    const x2 = forward ? b.x : b.x + b.w;
-    const y1 = a.y + a.h / 2;
-    const y2 = b.y + b.h / 2;
-    const dx = Math.max(40, Math.abs(x2 - x1) / 2) * (forward ? 1 : -1);
-    const bow = isBack ? 28 : 0;
-    const c1 = `${x1 + dx},${y1 - bow}`;
-    const c2 = `${x2 - dx},${y2 - bow}`;
-    const mid = (v1: number, v2: number, p1: number, p2: number): number => (v1 + 3 * p1 + 3 * p2 + v2) / 8;
-    edges.push({
-      index,
-      from: e.from,
-      to: e.to,
-      back: isBack,
-      path: `M${x1},${y1} C${c1} ${c2} ${x2},${y2}`,
-      lx: Math.round(mid(x1, x2, x1 + dx, x2 - dx)),
-      ly: Math.round(mid(y1, y2, y1 - bow, y2 - bow)),
-    });
+    const sibs = pairs.get([e.from, e.to].sort().join(">"))!;
+    const spread = (sibs.indexOf(index) - (sibs.length - 1) / 2) * 14;
+    const text = wrap(`${e.label}${e.kind === "call" ? "" : ` (${e.kind})`}`, 22, 2);
+    const lw = Math.round(Math.max(...text.map((l) => l.length)) * 5.8 + 10);
+    const lh = text.length * 12 + 4;
+    const rectAt = (cx: number, cy: number): Rect => ({ x: Math.round(cx - lw / 2), y: Math.round(cy - lh / 2), w: lw, h: lh });
+    let path: string;
+    let spot: { x: number; y: number };
+    if (isBack) {
+      // Out of the right side of the box that points back, up the gap beside its column, along the lane above every box,
+      // and down the gap beside the target's column into its left side: it crosses no box.
+      const laneY = 8 + 12 * lane;
+      lane += 1;
+      const xa = a.x + a.w + 14;
+      const xb = b.x - 14;
+      const y1 = a.y + a.h / 2 + spread;
+      const y2 = b.y + b.h / 2 + spread;
+      path = `M${a.x + a.w},${y1} L${xa},${y1} L${xa},${laneY} L${xb},${laneY} L${xb},${y2} L${b.x},${y2}`;
+      spot = { x: Math.round((xa + xb) / 2), y: laneY };
+    } else {
+      // From the right side of the left box to the left side of the right box.
+      const x1 = a.x + a.w;
+      const x2 = b.x;
+      const y1 = a.y + a.h / 2 + spread;
+      const y2 = b.y + b.h / 2 + spread;
+      const dx = Math.max(40, (x2 - x1) / 2);
+      path = `M${x1},${y1} C${x1 + dx},${y1} ${x2 - dx},${y2} ${x2},${y2}`;
+      const at = (t: number): { x: number; y: number } => {
+        const u = 1 - t;
+        return { x: u * u * u * x1 + 3 * u * u * t * (x1 + dx) + 3 * u * t * t * (x2 - dx) + t * t * t * x2, y: u * u * u * y1 + 3 * u * u * t * y1 + 3 * u * t * t * y2 + t * t * t * y2 };
+      };
+      // The label sits at the edge's midpoint; where that is taken by a box or another label it moves along the edge.
+      const free = [0.5, 0.35, 0.65, 0.25, 0.75, 0.15, 0.85].map(at).find((p) => !hits(rectAt(p.x, p.y), boxes) && !hits(rectAt(p.x, p.y), taken));
+      spot = free ?? at(0.5);
+      if (free === undefined) {
+        for (let k = 0; k < 20 && hits(rectAt(spot.x, spot.y), taken); k += 1) spot = { x: spot.x, y: spot.y + 14 };
+      }
+    }
+    const rect = rectAt(spot.x, spot.y);
+    taken.push(rect);
+    edges.push({ index, from: e.from, to: e.to, back: isBack, path, lx: Math.round(spot.x), ly: Math.round(spot.y), label: text, box: rect });
+    void forward;
   });
   const legendRoom = 44;
   return {
@@ -170,7 +217,7 @@ export function layoutArchitecture(arch: Architecture): ArchLayout {
     edges,
     layers,
     width: Math.max(2 * PAD + count * BOX_W + Math.max(0, count - 1) * GAP_X, 560),
-    height: 2 * PAD + columnHeight + legendRoom,
+    height: top0 + columnHeight + PAD + legendRoom,
   };
 }
 
@@ -200,13 +247,13 @@ export function architectureSvg(arch: Architecture): string {
   const marker = (change: ArchEdge["change"]): string => `<marker id="arrow-${change}" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="${EDGE_STROKE[change]}"/></marker>`;
   const edges = layout.edges.map((pe) => {
     const e = arch.edges[pe.index]!;
-    const label = `${e.label}${e.kind === "call" ? "" : ` (${e.kind})`}`;
-    const shown = wrap(label, 26, 2);
+    const shown = pe.label;
     return [
       `<g>`,
       `<title>${esc(`${nodes.get(e.from)!.label} → ${nodes.get(e.to)!.label}: ${e.label} (${e.kind}, ${e.change})`)}</title>`,
       `<path d="${pe.path}" fill="none" stroke="${EDGE_STROKE[e.change]}" stroke-width="1.6"${e.change === "removed" ? ' stroke-dasharray="6 4"' : ""} marker-end="url(#arrow-${e.change})"/>`,
-      ...shown.map((l, i) => `<text x="${pe.lx}" y="${pe.ly - 4 + i * 12 - (shown.length - 1) * 6}" text-anchor="middle" font-size="10.5" fill="#33414f" stroke="#ffffff" stroke-width="3" paint-order="stroke">${esc(l)}</text>`),
+      `<rect x="${pe.box.x}" y="${pe.box.y}" width="${pe.box.w}" height="${pe.box.h}" rx="3" fill="#ffffff" fill-opacity="0.92" stroke="#d9e0e7" stroke-width="0.8"/>`,
+      ...shown.map((l, i) => `<text x="${pe.lx}" y="${pe.box.y + 12 + i * 12}" text-anchor="middle" font-size="10.5" fill="#33414f">${esc(l)}</text>`),
       `</g>`,
     ].join("");
   });

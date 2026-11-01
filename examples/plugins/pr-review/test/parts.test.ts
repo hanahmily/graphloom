@@ -124,6 +124,29 @@ describe("multi-part writes (design 6.6)", () => {
     }
   });
 
+  it("is safe to retry: a part that failed after doing its work (the final rename) runs again to the right file, and so does any part run twice", () => {
+    const dir = tmp("retry");
+    const bin = tmp("bin");
+    // A `mv` that fails once, as a full disk or a signal would, then works.
+    const marker = path.join(bin, "failed-once");
+    writeFileSync(path.join(bin, "mv"), `#!/bin/sh\nfor last; do :; done\ncase "$last" in */report.json) if [ ! -f "${marker}" ]; then : > "${marker}"; echo "mv: transient failure" >&2; exit 1; fi;; esac\nexec /bin/mv "$@"\n`, { mode: 0o755 });
+    const text = awkward(300_000);
+    const commands = partCommands("report-json", REPORT_JSON, text);
+    expect(commands).toHaveLength(2);
+    const runWith = (c: EnvironmentCommand) => spawnSync(c.argv[0]!, c.argv.slice(1), { cwd: dir, encoding: "utf8", env: { ...process.env, ...GIT_ENV, PATH: `${bin}:${process.env.PATH}` } });
+    expect(runWith(commands[0]!).status).toBe(0);
+    expect(runWith(commands[1]!).status).not.toBe(0);
+    expect(existsSync(path.join(dir, REPORT_JSON))).toBe(false);
+    // The resume retries only the failed command; earlier parts stay as they were.
+    const again = runWith(commands[1]!);
+    expect(again.status, again.stderr).toBe(0);
+    expect(readFileSync(path.join(dir, REPORT_JSON), "utf8")).toBe(text);
+    // Running the first part again, and then the last, still gives the same file.
+    expect(runWith(commands[0]!).status).toBe(0);
+    expect(runWith(commands[1]!).status).toBe(0);
+    expect(readFileSync(path.join(dir, REPORT_JSON), "utf8")).toBe(text);
+  });
+
   it("round-trips the recorded parts: the validator's reader concatenates them in order and checks the digest", () => {
     const text = awkward(700_000);
     const commands = partCommands("report-json", REPORT_JSON, text);

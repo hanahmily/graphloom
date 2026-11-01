@@ -59,6 +59,8 @@ describe("the architecture diagram in large mode (design 6.9, 6.10)", () => {
       const checks = s.results["claim-check-v1"]!;
       const last = checks.at(-1)!.output as { verdicts: Array<{ item: string; verdict: string; note: string }> };
       for (const v of last.verdicts) if (v.item === "A.e1") Object.assign(v, { verdict: "unsupported", note: "beta does not import alpha" });
+      // The quote check now covers the two nodes only.
+      s.commands!["arch-quote-1"] = { exitCode: 0, stdout: "1 ok\n2 ok\nchecked 2\n" };
     });
     expect(dropped.receipts.every((r) => r.valid)).toBe(true);
     const json = JSON.parse(dropped.written!.json) as { architecture: Architecture; removedParts: Array<{ id: string; kind: string; reason: string }> };

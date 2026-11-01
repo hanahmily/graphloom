@@ -506,9 +506,11 @@ const TAGS = new Set([
   "html", "head", "meta", "title", "style", "body", "main", "header", "section", "div", "span", "h1", "h2", "h3", "h4", "h5", "p", "ul", "ol", "li", "table", "thead", "tbody", "tr", "th", "td", "a", "code", "q", "pre", "details", "summary", "strong", "em", "small", "br",
   "svg", "g", "rect", "line", "path", "polygon", "polyline", "circle", "text", "tspan", "defs", "marker", "desc",
 ]);
+/** The attributes that carry a URL: a scheme is judged there, and not in plain text such as an aria-label or a title. */
+const URL_ATTRS = new Set(["href", "src", "xlink:href", "action", "formaction", "poster", "srcset", "data", "background", "cite", "longdesc", "manifest", "ping"]);
 const ATTRS = new Set([
-  "class", "id", "lang", "charset", "name", "content", "open", "colspan", "scope", "role", "aria-label", "style", "href",
-  "viewBox", "width", "height", "x", "y", "x1", "y1", "x2", "y2", "rx", "ry", "cx", "cy", "r", "d", "fill", "stroke", "stroke-width", "stroke-dasharray", "marker-end", "marker-start", "text-anchor", "font-size", "font-weight", "font-family", "points", "transform", "opacity", "orient", "refX", "refY", "markerWidth", "markerHeight", "paint-order",
+  "class", "id", "lang", "title", "charset", "name", "content", "open", "colspan", "scope", "role", "aria-label", "style", "href",
+  "viewBox", "width", "height", "x", "y", "x1", "y1", "x2", "y2", "rx", "ry", "cx", "cy", "r", "d", "fill", "stroke", "stroke-width", "stroke-dasharray", "marker-end", "marker-start", "text-anchor", "font-size", "font-weight", "font-family", "points", "transform", "opacity", "fill-opacity", "orient", "refX", "refY", "markerWidth", "markerHeight", "paint-order",
 ]);
 const TAG = /<(\/?)([A-Za-z][A-Za-z0-9]*)((?:\s+[^\s"'<>\/=]+(?:\s*=\s*"[^"<>]*")?)*)\s*(\/?)>/y;
 const ATTR = /\s+([^\s"'<>\/=]+)(?:\s*=\s*"([^"<>]*)")?/y;
@@ -578,7 +580,7 @@ export function htmlProblems(html: string, github: { owner: string; repo: string
         else if (!allowed.test(value.replace(/&amp;/g, "&"))) add(`a link to ${JSON.stringify(value.length > 80 ? `${value.slice(0, 79)}…` : value)}, which is not the pull request, a commit or a file of it at the pinned head or base`);
         continue;
       }
-      if (/javascript:|data:|vbscript:/i.test(value)) add(`the attribute ${key} holds a script or data URL`);
+      if (URL_ATTRS.has(key) && /^[\s\u0000-\u001f]*(javascript|data|vbscript):/i.test(value)) add(`the attribute ${key} holds a script or data URL`);
       if (key === "style" || key === "marker-end" || key === "marker-start" || key === "fill" || key === "stroke") {
         const css = badCss(value);
         if (css !== undefined) add(`the attribute ${key} holds ${css}`);

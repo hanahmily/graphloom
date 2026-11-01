@@ -12,7 +12,7 @@
 import { validateResultShape } from "@graphloom/sdk";
 import type { EvidenceRecord } from "@graphloom/sdk";
 import type { EnvironmentCommand } from "@graphloom/sdk";
-import { architecturePlan, architectureProblems, architectureTargets, ARCHITECTURE_SCHEMA, assembleArchitecture, EMPTY_ARCHITECTURE, isEmptyArchitecture, type Architecture } from "./architecture.js";
+import { architecturePlan, treeQuotePlan, architectureProblems, architectureTargets, ARCHITECTURE_SCHEMA, assembleArchitecture, EMPTY_ARCHITECTURE, isEmptyArchitecture, type Architecture } from "./architecture.js";
 import { areaFiles, GENERATED_AREA, type Area, type Partition } from "./areas.js";
 import { QUESTION_BATCH_SIZE, REVIEW_DIR } from "./constants.js";
 import { claimTargets, collapse, readClaimCheck, summaryTargets, type ClaimReading, type ClaimTarget } from "./claims.js";
@@ -129,6 +129,8 @@ export interface SynthesisRecord {
   synthesis: SynthesisOutput;
   revised: boolean;
   check: unknown;
+  /** Architecture claims whose quotes the tree did not show (design §6.10), by claim id: the command outputs they rest on are evidence. */
+  treeWeak?: Record<string, string>;
 }
 
 const isObject = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === "object" && !Array.isArray(v);
@@ -297,6 +299,7 @@ export function synthesisSpec(items: readonly SynthItem[], ctx: ReportContext): 
     targets: (o, archNotes) => synthesisTargets(o, items, archNotes),
     files: ctx.files,
     verify: (o) => architecturePlan(o.architecture, ctx.base),
+    quotes: (treeQuotes) => treeQuotePlan(treeQuotes, ctx.base),
   };
 }
 
@@ -312,9 +315,15 @@ export function checkSynthesisRecord(value: unknown, items: readonly SynthItem[]
   const synthesis = value.synthesis as SynthesisOutput;
   const problems = synthesisProblems(synthesis, items, ctx.pinned, ctx.files);
   if (problems.length > 0) return { problem: `its synthesis fails the deterministic rules: ${problems.slice(0, 3).join("; ")}` };
-  const reading = readClaimCheck(value.check, synthesisTargets(synthesis, items), ctx.files);
-  if ("problems" in reading) return { problem: `its claim check is unreadable: ${reading.problems[0]}` };
-  if (reading.unchecked.length > 0) return { problem: `its claim check left ${reading.unchecked.slice(0, 4).join(", ")} unjudged` };
+  const read = readClaimCheck(value.check, synthesisTargets(synthesis, items), ctx.files);
+  if ("problems" in read) return { problem: `its claim check is unreadable: ${read.problems[0]}` };
+  if (read.unchecked.length > 0) return { problem: `its claim check left ${read.unchecked.slice(0, 4).join(", ")} unjudged` };
+  // A claim whose quote the tree did not show was recorded with the synthesis: it must be one the check supported with a tree quote.
+  const treeWeak = isObject(value.treeWeak) ? Object.entries(value.treeWeak).filter((e): e is [string, string] => typeof e[1] === "string") : [];
+  const known = new Set(read.treeQuotes.map((q) => q.id));
+  const stray = treeWeak.find(([id]) => !known.has(id));
+  if (stray !== undefined) return { problem: `it records a tree-quote failure for ${stray[0]}, which no supported architecture claim has` };
+  const reading: ClaimReading = { ...read, weak: new Map([...read.weak, ...treeWeak]), supported: new Set([...read.supported].filter((id) => !treeWeak.some(([w]) => w === id))) };
   if (reading.weak.size > 0 && value.revised !== true) return { problem: "its claim check found claims unsupported and the synthesis was not revised" };
   return { record: value as unknown as SynthesisRecord, reading };
 }
@@ -529,14 +538,14 @@ export function largeReportFlow(evidence: readonly EvidenceRecord[], ctx: Report
       case "verify":
         return step;
       case "finished":
-        return { state: "synthesis-record", record: { schema: SYNTHESIS_RECORD_SCHEMA, synthesis: step.output, revised: step.revised, check: step.checked } };
+        return { state: "synthesis-record", record: { schema: SYNTHESIS_RECORD_SCHEMA, synthesis: step.output, revised: step.revised, check: step.checked, treeWeak: step.treeWeak } };
     }
   }
   const { final, info, report } = assembleLarge(done, synthesis, ctx, partition);
   const problems = reportProblems(asReporterOutput(final), wholeContext(ctx, partition), { final: true });
   if (problems.length > 0) return { state: "supervise", reason: `the assembled large report fails its own validation: ${problems.slice(0, 3).join("; ")}`, refs: last !== undefined ? [last] : [] };
   const supported = new Set(final.sections.flatMap((s) => s.items).filter((i) => i.auto === undefined).map((i) => i.id));
-  const reading: ClaimReading = { unchecked: [], supported, weak: new Map(), notes: [...new Set([...done.flatMap((d) => d.reading.notes), ...(synthesis?.reading.notes ?? [])])], ignored: [] };
+  const reading: ClaimReading = { unchecked: [], supported, weak: new Map(), notes: [...new Set([...done.flatMap((d) => d.reading.notes), ...(synthesis?.reading.notes ?? [])])], ignored: [], treeQuotes: [] };
   return { state: "done", report, final, reading, info, refs: last !== undefined ? [last] : [] };
 }
 

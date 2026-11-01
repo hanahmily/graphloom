@@ -9,7 +9,7 @@
  * supported, and what is still not supported leaves the report.
  */
 import type { EnvironmentCommand, EvidenceRecord } from "@graphloom/sdk";
-import { architecturePlan, EMPTY_ARCHITECTURE, readArchitectureCheck, type ArchCheck, type ArchPlan, type Architecture } from "./architecture.js";
+import { architecturePlan, readArchitectureCheck, readTreeQuotes, treeQuotePlan, type ArchCheck, type ArchPlan, type Architecture, type TreeQuotePlan } from "./architecture.js";
 import { CLAIM_CHECK_SCHEMA_NAME, claimTargets, readClaimCheck, type ClaimReading, type ClaimTarget } from "./claims.js";
 import { COMMAND, MAX_CHECK_RETRIES, MAX_REPORT_CORRECTIONS } from "./constants.js";
 import { agentRuns, commandRuns, reportText, succeeded, type AgentRun, type CommandRun } from "./evidence.js";
@@ -114,7 +114,7 @@ export function stageEvents(evidence: readonly EvidenceRecord[], reporterSchemas
   const reporters = reporterSchemas.flatMap((schema) => agentRuns(evidence, schema).map((run) => ({ kind: "reporter" as const, run })));
   const checkers = agentRuns(evidence, CLAIM_CHECK_SCHEMA_NAME).map((run) => ({ kind: "checker" as const, run }));
   const verifies = commandRuns(evidence)
-    .filter((r) => r.command.id.startsWith(`${COMMAND.archCheck}-`))
+    .filter((r) => r.command.id.startsWith(`${COMMAND.archCheck}-`) || r.command.id.startsWith(`${COMMAND.archQuote}-`))
     .map((run) => ({ kind: "verify" as const, run }));
   const events: StageEvent[] = [...reporters, ...checkers, ...verifies];
   return events.filter((e) => at(e.run) > from).sort((a, b) => at(a.run) - at(b.run));
@@ -127,14 +127,18 @@ export interface StageSpec<T> {
   files: readonly PullFile[];
   /** The tree check of the output's architecture diagram (design §6.10): undefined when the stage draws none. */
   verify?(output: T): ArchPlan | undefined;
+  /** The check of the supported architecture claims' quotes against the trees their cites name (design §6.10). */
+  quotes?(treeQuotes: ClaimReading["treeQuotes"]): TreeQuotePlan;
 }
 
 const sameArgv = (a: readonly string[], b: readonly string[]): boolean => a.length === b.length && a.every((x, i) => x === b[i]);
 
 export type Verification = { state: "missing"; commands: EnvironmentCommand[] } | { state: "failed"; reason: string; refs: string[] } | { state: "checked"; check: ArchCheck };
 
-/** What the recorded runs say of a diagram's tree check: commands still to run, a command that failed, or the problems and notes found. */
-export function verification(plan: ArchPlan, runs: readonly CommandRun[], retryable: (r: CommandRun) => boolean = () => false): Verification {
+type Outputs = { state: "missing"; commands: EnvironmentCommand[] } | { state: "failed"; reason: string; refs: string[] } | { state: "ready"; texts: string[] };
+
+/** What the recorded runs of a plan's commands printed: commands still to run, a command that failed, or every output. A run counts for the command whose argv it has exactly. */
+function outputsOfRuns(plan: { unavailable?: string | undefined; commands: readonly EnvironmentCommand[] }, runs: readonly CommandRun[], retryable: (r: CommandRun) => boolean): Outputs {
   if (plan.unavailable !== undefined) return { state: "failed", reason: plan.unavailable, refs: [] };
   const missing: EnvironmentCommand[] = [];
   const texts: string[] = [];
@@ -147,7 +151,19 @@ export function verification(plan: ArchPlan, runs: readonly CommandRun[], retrya
     if (!succeeded(run.command)) return { state: "failed", reason: `${c.id} did not run: exit ${run.command.exitCode ?? "signal"}: ${(run.command.stderrTail || run.command.stdoutTail).slice(-300)}`, refs: [run.record.ref] };
     texts.push(reportText(run).text);
   }
-  return missing.length > 0 ? { state: "missing", commands: missing } : { state: "checked", check: readArchitectureCheck(plan, texts) };
+  return missing.length > 0 ? { state: "missing", commands: missing } : { state: "ready", texts };
+}
+
+/** What the recorded runs say of a diagram's tree check: commands still to run, a command that failed, or the problems and notes found. */
+export function verification(plan: ArchPlan, runs: readonly CommandRun[], retryable: (r: CommandRun) => boolean = () => false): Verification {
+  const o = outputsOfRuns(plan, runs, retryable);
+  return o.state === "ready" ? { state: "checked", check: readArchitectureCheck(plan, o.texts) } : o;
+}
+
+/** What the recorded runs say of the architecture claims' quotes: commands still to run, a command that failed, or the claims whose quotes the tree does not show. */
+export function quoteVerification(plan: TreeQuotePlan, runs: readonly CommandRun[], retryable: (r: CommandRun) => boolean = () => false): { state: "missing"; commands: EnvironmentCommand[] } | { state: "failed"; reason: string; refs: string[] } | { state: "checked"; weak: Map<string, string> } {
+  const o = outputsOfRuns(plan, runs, retryable);
+  return o.state === "ready" ? { state: "checked", weak: readTreeQuotes(plan, o.texts) } : o;
 }
 
 /** Where a stage stands after its events: the latest valid output, and what the checker said of it. */
@@ -220,7 +236,7 @@ export type StageStep<T> =
   | { state: "verify"; commands: EnvironmentCommand[] }
   | { state: "checker"; output: T; retry: boolean; archNotes: ReadonlyMap<string, string> }
   | { state: "supervise"; reason: string; refs: string[] }
-  | { state: "finished"; output: T; reading: ClaimReading; revised: boolean; checked: unknown; refs: string[] };
+  | { state: "finished"; output: T; reading: ClaimReading; revised: boolean; checked: unknown; refs: string[]; /** Claims whose quotes the tree did not show: already in `reading.weak`, kept for a large run's record. */ treeWeak: Record<string, string> };
 
 export interface StageNames {
   first: string;
@@ -261,12 +277,22 @@ export function stageStep<T>(rep: StageReplay<T>, spec: StageSpec<T>, names: Sta
     }
     return { state: "checker", output: rep.output, retry: rep.checkTries > 0, archNotes };
   }
-  if (rep.reading.weak.size > 0 && !rep.revised) {
+  // The architecture claims' quotes are verified against their trees (design §6.10); a quote the tree does not show makes the claim unsupported.
+  let reading = rep.reading;
+  const treeWeak: Record<string, string> = {};
+  if (reading.treeQuotes.length > 0 && spec.quotes !== undefined) {
+    const q = quoteVerification(spec.quotes(reading.treeQuotes), rep.verifyRuns, retryable);
+    if (q.state === "failed") return { state: "supervise", reason: `${scope}the architecture claims' quotes could not be checked against the trees: ${q.reason}`, refs: [...q.refs, ...tail].slice(-10) };
+    if (q.state === "missing") return { state: "verify", commands: q.commands };
+    for (const [id, why] of q.weak) treeWeak[id] = why;
+    reading = { ...reading, weak: new Map([...reading.weak, ...q.weak]), supported: new Set([...reading.supported].filter((id) => !q.weak.has(id))) };
+  }
+  if (reading.weak.size > 0 && !rep.revised) {
     const byId = new Map(spec.targets(rep.output).map((t) => [t.id, t] as const));
-    const feedback = [...rep.reading.weak].map(([id, why]) => `${id}: "${(byId.get(id)?.text ?? "").slice(0, 200)}" — the claim check: ${why}`);
+    const feedback = [...reading.weak].map(([id, why]) => `${id}: "${(byId.get(id)?.text ?? "").slice(0, 200)}" — the claim check: ${why}`);
     return { state: "reporter", kind: "revision", feedback, schema: names.revision };
   }
-  return { state: "finished", output: rep.output, reading: rep.reading, revised: rep.revised, checked: rep.checked, refs: tail };
+  return { state: "finished", output: rep.output, reading, revised: rep.revised, checked: rep.checked, refs: tail, treeWeak };
 }
 
 /** The standard report's stage: one reporter, one checker, over the whole pull request. */
@@ -276,6 +302,7 @@ export function reportSpec(ctx: ReportContext): StageSpec<ReporterOutput> {
     targets: (output, archNotes) => claimTargets(output, ctx, { ...(archNotes !== undefined ? { archNotes } : {}) }),
     files: ctx.files,
     verify: (output) => architecturePlan(output.architecture, ctx.base),
+    quotes: (treeQuotes) => treeQuotePlan(treeQuotes, ctx.base),
   };
 }
 

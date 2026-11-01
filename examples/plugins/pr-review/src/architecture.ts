@@ -363,6 +363,79 @@ export function readArchitectureCheck(plan: ArchPlan, outputs: readonly string[]
   return { problems, notes };
 }
 
+// ---- the claim check's quotes, verified against the tree ----
+
+export interface TreeQuoteEntry {
+  id: string;
+  tree: "head" | "base";
+  path: string;
+  line: number;
+  text: string;
+}
+
+export interface TreeQuotePlan {
+  unavailable?: string;
+  commands: EnvironmentCommand[];
+  entries: TreeQuoteEntry[];
+  sizes: number[];
+}
+
+/**
+ * Whether each quote is on a line of its file in the tree the cite names, within three lines of the one it gives, as
+ * the diff's own quotes are matched (whitespace collapsed). The quote travels in the environment, not in awk's `-v`,
+ * which would read its backslashes. Read-only; no repository code runs.
+ */
+const QUOTE_SCRIPT = String.raw`set -u; base="$1"; shift
+g() { git -c core.hooksPath=/dev/null "$@"; }
+{ i=0
+while [ "$#" -ge 4 ]; do
+  tree="$1"; path="$2"; line="$3"; QUOTE="$4"; shift 4; i=$((i + 1))
+  export QUOTE
+  if [ "$tree" = base ]; then
+    if ! g cat-file -e "$base:$path" 2>/dev/null; then echo "$i missing"; continue; fi
+    g show "$base:$path" 2>/dev/null > "$GRAPHLOOM_REPORT_FILE.q"
+  else
+    if [ ! -f "$path" ]; then echo "$i missing"; continue; fi
+    cat "$path" > "$GRAPHLOOM_REPORT_FILE.q"
+  fi
+  awk -v at="$line" 'function c(s) { gsub(/[ \t\r\n]+/, " ", s); sub(/^ /, "", s); sub(/ $/, "", s); return s } BEGIN { w = c(ENVIRON["QUOTE"]) } NR >= at - 3 && NR <= at + 3 { if (index(c($0), w) > 0) f = 1 } END { print (f ? "ok" : "nomatch") }' "$GRAPHLOOM_REPORT_FILE.q" | sed "s/^/$i /"
+done; rm -f "$GRAPHLOOM_REPORT_FILE.q"; echo "checked $i"; } > "$GRAPHLOOM_REPORT_FILE"`;
+
+/** The commands that verify the supported architecture claims' quotes against their trees (at most 14 quotes each). */
+export function treeQuotePlan(claims: ReadonlyArray<{ id: string; tree: "head" | "base"; quotes: ReadonlyArray<{ path: string; line: number; text: string }> }>, base: string | undefined): TreeQuotePlan {
+  const entries: TreeQuoteEntry[] = claims.flatMap((c) => c.quotes.map((q) => ({ id: c.id, tree: c.tree, path: normal(q.path), line: q.line, text: q.text })));
+  if (entries.length === 0) return { commands: [], entries: [], sizes: [] };
+  if (base === undefined) return { unavailable: "the checkout recorded no pinned base, so the diagram's quotes cannot be verified in their trees", commands: [], entries, sizes: [] };
+  const commands: EnvironmentCommand[] = [];
+  const sizes: number[] = [];
+  for (let i = 0; i < entries.length; i += ENTRIES_PER_COMMAND) {
+    const chunk = entries.slice(i, i + ENTRIES_PER_COMMAND);
+    const id = `${COMMAND.archQuote}-${commands.length + 1}`;
+    commands.push({ id, argv: ["sh", "-c", QUOTE_SCRIPT, id, base, ...chunk.flatMap((e) => [e.tree, e.path, String(e.line), e.text])] });
+    sizes.push(chunk.length);
+  }
+  return { commands, entries, sizes };
+}
+
+/** The claims whose quotes the tree does not show, with why (a claim with one bad quote is unsupported), from the outputs of a plan's commands. */
+export function readTreeQuotes(plan: TreeQuotePlan, outputs: readonly string[]): Map<string, string> {
+  const failed = new Map<string, string>();
+  let offset = 0;
+  plan.sizes.forEach((size, c) => {
+    const lines = (outputs[c] ?? "").split("\n");
+    const checked = lines.map((l) => /^checked (\d+)$/.exec(l)).find((m) => m !== null);
+    for (let k = 1; k <= size; k += 1) {
+      const e = plan.entries[offset + k - 1]!;
+      const verdict = lines.find((l) => l.startsWith(`${k} `))?.slice(`${k} `.length);
+      if (checked === undefined || Number(checked[1]) !== size || verdict === undefined) failed.set(e.id, failed.get(e.id) ?? `its quote ${JSON.stringify(e.text.slice(0, 60))} was not checked against the ${e.tree} tree`);
+      else if (verdict === "missing") failed.set(e.id, failed.get(e.id) ?? `its quote names no such file in the ${e.tree} tree (${e.path})`);
+      else if (verdict !== "ok") failed.set(e.id, failed.get(e.id) ?? `its quote ${JSON.stringify(e.text.slice(0, 60))} is not in the ${e.tree} tree at ${e.path}:${e.line} (within three lines)`);
+    }
+    offset += size;
+  });
+  return new Map([...failed].map(([id, why]) => [id, `unsupported: ${why}`]));
+}
+
 // ---- claims ----
 
 const collapse = (s: string): string => s.replace(/\s+/g, " ").trim();
@@ -373,7 +446,7 @@ export function architectureTargets(arch: Architecture, notes: ReadonlyMap<strin
   const label = new Map(arch.nodes.map((n) => [n.id, n.label] as const));
   const out: ClaimTarget[] = [];
   for (const n of arch.nodes) {
-    out.push({ id: nodeClaimId(n.id), text: `Architecture node ${n.id} "${collapse(n.label)}" (${n.kind}, ${n.change}): it is ${n.paths.join(", ")}, and the pull request ${n.change === "added" ? "adds" : n.change === "modified" ? "modifies" : "does not change"} it`, cites: [asCite(n.cite)], quotes: "required" });
+    out.push({ id: nodeClaimId(n.id), text: `Architecture node ${n.id} "${collapse(n.label)}" (${n.kind}, ${n.change}): it is ${n.paths.join(", ")}, and the pull request ${n.change === "added" ? "adds" : n.change === "modified" ? "modifies" : "does not change"} it`, cites: [asCite(n.cite)], quotes: "required", tree: n.cite.side });
   }
   arch.edges.forEach((e, i) => {
     const note = notes.get(edgeClaimId(i + 1));
@@ -382,6 +455,7 @@ export function architectureTargets(arch: Architecture, notes: ReadonlyMap<strin
       text: `Architecture edge ${collapse(label.get(e.from) ?? e.from)} → ${collapse(label.get(e.to) ?? e.to)} (${e.kind}, ${e.change}): ${collapse(e.label)}; the code at the cite makes that connection${note !== undefined ? `. Plugin note: ${note}` : ""}`,
       cites: [asCite(e.cite)],
       quotes: "required",
+      tree: e.cite.side,
     });
   });
   return out;

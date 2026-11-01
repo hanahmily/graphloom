@@ -14,6 +14,8 @@ import {
   architectureTargets,
   assembleArchitecture,
   readArchitectureCheck,
+  readTreeQuotes,
+  treeQuotePlan,
   renderArchitectureMarkdown,
   type ArchEdge,
   type ArchNode,
@@ -139,7 +141,7 @@ describe("the claim check of the diagram (design 6.10)", () => {
 
   it("reads the checker's verdicts for the diagram's claims, and a report assembled from them carries what stands", () => {
     const targets = architectureTargets(GOOD);
-    const verdicts = targets.map((t) => ({ item: t.id, verdict: t.id === "A.e1" ? "unsupported" : "supported", note: t.id === "A.e1" ? "the code does not import it" : "", quotes: t.id === "A.beta" ? [{ path: "pkg/beta/beta.go", line: 1, text: "package beta" }] : t.id === "A.e2" ? [{ path: "pkg/beta/beta.go", line: 3, text: 'import "example.com/lib/pkg/alpha"' }] : t.id === "A.alpha" ? [{ path: "pkg/alpha/alpha.go", line: 1, text: "package alpha" }] : [] }));
+    const verdicts = targets.map((t) => ({ item: t.id, verdict: t.id === "A.e1" ? "unsupported" : "supported", note: t.id === "A.e1" ? "the code does not import it" : "", quotes: t.id === "A.beta" ? [{ path: "pkg/beta/beta.go", line: 1, text: "package beta" }] : t.id === "A.store" ? [{ path: "pkg/store/store.go", line: 1, text: "package store" }] : t.id === "A.e2" ? [{ path: "pkg/beta/beta.go", line: 3, text: 'import "example.com/lib/pkg/alpha"' }] : t.id === "A.alpha" ? [{ path: "pkg/alpha/alpha.go", line: 1, text: "package alpha" }] : [] }));
     const reading = readClaimCheck({ verdicts }, targets, FILES);
     expect("problems" in reading).toBe(false);
     if ("problems" in reading) return;
@@ -151,11 +153,46 @@ describe("the claim check of the diagram (design 6.10)", () => {
     expect(reportProblems({ sections: final.sections.map((s) => ({ id: s.id, none: s.none, items: s.items })), notes: [], architecture: final.architecture }, ctx, { final: true }).filter((p) => p.includes("architecture"))).toEqual([]);
   });
 
-  it("makes a supported node need quotes that match the diff when its cite is in the diff", () => {
+  it("verifies an architecture quote against the tree its cite names, not against the patch's lines", () => {
+    // The file's only hunk is at line 100, and the node's cite is the declaration at line 1 of the head file.
+    const far = pullFile({ path: "pkg/alpha/alpha.go", status: "modified", previousPath: null, additions: 1, deletions: 0, sha: null, patch: "@@ -99,0 +100,1 @@\n+func later() {}", patchOmitted: false })!;
     const targets = architectureTargets({ nodes: [node("alpha")], edges: [] });
-    const reading = readClaimCheck({ verdicts: [{ item: "A.alpha", verdict: "supported", note: "", quotes: [{ path: "pkg/alpha/alpha.go", line: 1, text: "package other" }] }] }, targets, FILES);
+    const reading = readClaimCheck({ verdicts: [{ item: "A.alpha", verdict: "supported", note: "", quotes: [{ path: "pkg/alpha/alpha.go", line: 1, text: "package alpha" }] }] }, targets, [far]);
     if ("problems" in reading) throw new Error("unreadable");
-    expect(reading.weak.get("A.alpha")).toContain("do not match");
+    expect(reading.weak.size).toBe(0);
+    expect(reading.treeQuotes).toEqual([{ id: "A.alpha", tree: "head", quotes: [{ path: "pkg/alpha/alpha.go", line: 1, text: "package alpha" }] }]);
+    // A supported architecture claim still needs a quote, from the file it cites.
+    const none = readClaimCheck({ verdicts: [{ item: "A.alpha", verdict: "supported", note: "", quotes: [] }] }, targets, [far]);
+    const other = readClaimCheck({ verdicts: [{ item: "A.alpha", verdict: "supported", note: "", quotes: [{ path: "pkg/beta/beta.go", line: 1, text: "package beta" }] }] }, targets, [far]);
+    if ("problems" in none || "problems" in other) throw new Error("unreadable");
+    expect(none.weak.get("A.alpha")).toContain("without a quote");
+    expect(other.weak.get("A.alpha")).toContain("not from the file");
+  });
+
+  it("checks those quotes with a read-only command over the tree, and drops a claim whose quote the tree does not show", () => {
+    const plan = treeQuotePlan([{ id: "A.alpha", tree: "head", quotes: [{ path: "pkg/alpha/alpha.go", line: 1, text: "package   alpha" }, { path: "pkg/alpha/alpha.go", line: 2, text: "not in the file" }] }, { id: "A.store", tree: "base", quotes: [{ path: "pkg/store/store.go", line: 3, text: "func S() {}" }] }], "b".repeat(40));
+    expect(plan.commands).toHaveLength(1);
+    const dir = tmp("quotes");
+    const git = (args: string[]) => spawnSync("git", ["-c", "commit.gpgsign=false", ...args], { cwd: dir, encoding: "utf8", env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1", GIT_AUTHOR_NAME: "A", GIT_AUTHOR_EMAIL: "a@e.com", GIT_COMMITTER_NAME: "A", GIT_COMMITTER_EMAIL: "a@e.com" } });
+    git(["init", "-q", "-b", "main"]);
+    mkdirSync(path.join(dir, "pkg/store"), { recursive: true });
+    mkdirSync(path.join(dir, "pkg/alpha"), { recursive: true });
+    writeFileSync(path.join(dir, "pkg/store/store.go"), "package store\n\nfunc S() {}\n");
+    git(["add", "-A"]);
+    git(["commit", "-q", "-m", "base"]);
+    const base = git(["rev-parse", "HEAD"]).stdout.trim();
+    writeFileSync(path.join(dir, "pkg/alpha/alpha.go"), "package alpha\n\nfunc A() {}\n");
+    const real = treeQuotePlan([{ id: "A.alpha", tree: "head", quotes: [{ path: "pkg/alpha/alpha.go", line: 1, text: "package   alpha" }] }, { id: "A.gone", tree: "head", quotes: [{ path: "pkg/alpha/alpha.go", line: 2, text: "not in the file" }] }, { id: "A.store", tree: "base", quotes: [{ path: "pkg/store/store.go", line: 3, text: "func S() {}" }] }, { id: "A.nofile", tree: "head", quotes: [{ path: "pkg/none.go", line: 1, text: "package none" }] }], base);
+    const out = real.commands.map((c) => {
+      const report = path.join(tmp("report"), "r.txt");
+      const r = spawnSync(c.argv[0]!, c.argv.slice(1), { cwd: dir, encoding: "utf8", env: { ...process.env, ...GIT_ENV, GRAPHLOOM_REPORT_FILE: report } });
+      expect(r.status, r.stderr).toBe(0);
+      return readFileSync(report, "utf8");
+    });
+    const failed = readTreeQuotes(real, out);
+    expect([...failed.keys()]).toEqual(["A.gone", "A.nofile"]);
+    expect(failed.get("A.gone")).toContain("not in the head tree");
+    expect(failed.get("A.nofile")).toContain("names no such file");
   });
 });
 
@@ -305,7 +342,7 @@ describe("the diagram in the graph (design 6.10)", () => {
   it("checks the trees before the claim check, tells the checker about each claim, and records what it drops", () => {
     const sim = simulate({ scenarioName: "architecture-diagram" });
     const order = sim.jobs.map((j) => (j.kind === "agent" ? `${j.resultSchema}` : j.instruction.split(" ").slice(0, 3).join(" "))).filter((x) => ["change-report-v1", "Check the architecture", "claim-check-v1", "change-report-revision-v1"].some((p) => x.startsWith(p)));
-    expect(order).toEqual(["change-report-v1", "Check the architecture", "claim-check-v1", "change-report-revision-v1", "claim-check-v1"]);
+    expect(order).toEqual(["change-report-v1", "Check the architecture", "claim-check-v1", "Check the architecture", "change-report-revision-v1", "claim-check-v1"]);
     const checker = sim.jobs.find((j) => j.resultSchema === "claim-check-v1")!;
     expect(assignmentOf(checker)).toContain("A.server");
     expect(assignmentOf(checker)).toContain("A.e1");
@@ -328,6 +365,17 @@ describe("the diagram in the graph (design 6.10)", () => {
     expect(assignmentOf(reporters[1]!)).toContain("failed deterministic validation");
     expect(assignmentOf(reporters[1]!)).toContain("names no such file in the");
     expect(sim.final.action.type === "supervise" ? sim.final.action.supervise.reason : "").toMatch(/architecture diagram still fails the tree check after 2 corrections/);
+  });
+
+  it("drops a claim whose quote the tree does not show, after the revision, and records why", () => {
+    const scenario = scenarioWith("architecture-diagram", (s) => {
+      s.commands!["arch-quote-1"] = { exitCode: 0, stdout: "1 nomatch\n2 ok\n3 ok\n4 ok\n5 ok\n6 ok\nchecked 6\n" };
+    });
+    const sim = simulate({ scenario });
+    expect(sim.receipts.every((r) => r.valid)).toBe(true);
+    const report = JSON.parse(sim.written!.json) as { architecture: Architecture; removedParts: Array<{ id: string; reason: string }> };
+    expect(report.architecture.nodes.map((n) => n.id)).not.toContain("server");
+    expect(report.removedParts.find((p) => p.id === "A.server")!.reason).toMatch(/is not in the head tree at banyand\/cmd\/server\/flags\.go/);
   });
 
   it("refuses a diagram with no pinned base to read the trees at, rather than skipping the check", () => {

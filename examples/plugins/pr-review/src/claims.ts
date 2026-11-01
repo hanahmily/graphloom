@@ -82,7 +82,12 @@ export interface ClaimTarget {
   cites: Cite[] | undefined;
   /** A stated purpose quotes the pull request's own text, matched deterministically: it needs no diff quote. */
   quotes: "required" | "none";
+  /** The tree the claim's cite names, when its quotes are verified against that tree and not against the patch (the architecture diagram, §6.10). */
+  tree?: "head" | "base";
 }
+
+/** The longest quote the tree check takes: it travels in an argv element. */
+export const MAX_TREE_QUOTE_CHARS = 400;
 
 /** The purpose and overview claims of a summary: shared by a standard report and the synthesis job (design §6.9). */
 export function summaryTargets(report: Pick<ReporterOutput, "purpose" | "overview">): ClaimTarget[] {
@@ -129,6 +134,8 @@ export interface ClaimReading {
   notes: string[];
   /** Verdict ids that matched no claim (unknown or ambiguous); those claims stay unjudged. */
   ignored: string[];
+  /** Supported claims whose quotes a command still has to verify against the tree their cite names (design §6.10): the architecture diagram's. */
+  treeQuotes: Array<{ id: string; tree: "head" | "base"; quotes: Quote[] }>;
 }
 
 /**
@@ -160,9 +167,9 @@ export function readClaimCheck(output: unknown, targets: readonly ClaimTarget[],
     // Two verdicts for one claim: the weaker stands.
     if (earlier === undefined || VERDICTS.indexOf(v.verdict) > VERDICTS.indexOf(earlier.verdict)) byItem.set(id, v);
   }
-  const reading: ClaimReading = { unchecked: [], supported: new Set(), weak: new Map(), notes, ignored };
+  const reading: ClaimReading = { unchecked: [], supported: new Set(), weak: new Map(), notes, ignored, treeQuotes: [] };
   const findFile = (path: string): PullFile | undefined => files.find((f) => f.path === path || f.previousPath === path);
-  for (const { id, cites, quotes: need } of targets) {
+  for (const { id, cites, quotes: need, tree } of targets) {
     const v = byItem.get(id);
     if (v === undefined) {
       reading.unchecked.push(id);
@@ -170,6 +177,20 @@ export function readClaimCheck(output: unknown, targets: readonly ClaimTarget[],
     }
     if (v.verdict !== "supported") {
       reading.weak.set(id, `${v.verdict}${v.note.trim() !== "" ? `: ${v.note.trim()}` : ""}`);
+      continue;
+    }
+    // A claim about a tree (the architecture diagram's): its quotes come from the file its cite names and are verified
+    // against that tree by a command, not against the patch's lines, which a declaration outside the hunks is not in.
+    if (tree !== undefined) {
+      const own = v.quotes.slice(0, MAX_QUOTES);
+      const citeFile = cites?.[0]?.path;
+      if (own.length === 0) reading.weak.set(id, "supported without a quote");
+      else if (own.some((q) => q.path !== citeFile)) reading.weak.set(id, `supported, but a quote is not from the file its cite names (${citeFile ?? "?"})`);
+      else if (own.some((q) => collapse(q.text).length < MIN_QUOTE_CHARS || collapse(q.text).length > MAX_TREE_QUOTE_CHARS || q.line < 1)) reading.weak.set(id, `supported, but a quote is shorter than ${MIN_QUOTE_CHARS} or longer than ${MAX_TREE_QUOTE_CHARS} characters, or names no line`);
+      else {
+        reading.supported.add(id);
+        reading.treeQuotes.push({ id, tree, quotes: own });
+      }
       continue;
     }
     const cited = cites === undefined ? [...files] : cites.map((c) => findFile(c.path)).filter((f): f is PullFile => f !== undefined);

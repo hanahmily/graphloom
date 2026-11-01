@@ -24,11 +24,13 @@ const MAX_PART_INPUT_BYTES = MAX_EXECUTOR_INPUT_BYTES - 4_096;
 const PART_SCRIPT =
   'set -eu; path="$1"; k="$2"; n="$3"; digest="$4"; count="$5"; shift 5; [ "$#" -eq "$count" ] || { echo "part carries $# chunks, not $count" >&2; exit 6; }; ' +
   `mkdir -p "$(dirname "$path")" ${REVIEW_DIR}; printf '*\\n' > ${REVIEW_DIR}/.gitignore; ` +
-  'if [ "$k" -eq 1 ]; then : > "$path.parts"; else [ -f "$path.parts" ] || { echo "part $k arrived before part 1" >&2; exit 3; }; fi; ' +
-  'for part in "$@"; do printf \'%s\' "$part" >> "$path.parts"; done; ' +
+  // Each part has a file of its own, rewritten whole, so running a part again (a resume after a failure) never appends twice.
+  'if [ "$k" -gt 1 ]; then [ -f "$path.part-$((k - 1))" ] || { echo "part $k arrived before part $((k - 1))" >&2; exit 3; }; fi; ' +
+  ': > "$path.part-$k"; for part in "$@"; do printf \'%s\' "$part" >> "$path.part-$k"; done; ' +
   'if [ "$k" -eq "$n" ]; then ' +
+  ': > "$path.parts"; i=1; while [ "$i" -le "$n" ]; do [ -f "$path.part-$i" ] || { echo "part $i is missing" >&2; exit 3; }; cat "$path.part-$i" >> "$path.parts"; i=$((i + 1)); done; ' +
   'if command -v sha256sum >/dev/null 2>&1; then got=$(sha256sum < "$path.parts" | cut -d" " -f1); [ "$got" = "$digest" ] || { echo "digest mismatch: $got, not $digest" >&2; exit 5; }; fi; ' +
-  'mv "$path.parts" "$path"; fi; echo written';
+  'mv "$path.parts" "$path"; i=1; while [ "$i" -le "$n" ]; do rm -f "$path.part-$i"; i=$((i + 1)); done; fi; echo written';
 
 export const sha256 = (text: string): string => createHash("sha256").update(text, "utf8").digest("hex");
 

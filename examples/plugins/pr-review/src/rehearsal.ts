@@ -24,10 +24,10 @@ import { baseTargets, withOutcome, withUnknownCoverage } from "./measurements.js
 import { goFunctionCoverage, parseCoverageReport } from "./metrics/coverage.js";
 import type { FileIndex, MetricsRecord } from "./metrics/record.js";
 import { areaContext, assembleLarge, AREA_RECORD_SCHEMA, checkAreaRecord, checkSynthesisRecord, SYNTHESIS_RECORD_SCHEMA, synthesisTargets, synthItems, type AreaDone, type SynthesisOutput } from "./large.js";
-import { architecturePlan, EMPTY_ARCHITECTURE, type Architecture } from "./architecture.js";
+import { architecturePlan, EMPTY_ARCHITECTURE, treeQuotePlan, type Architecture } from "./architecture.js";
 import { partitionAreas } from "./areas.js";
 import { reportMode, type ReviewMode } from "./mode.js";
-import { claimTargets } from "./claims.js";
+import { claimTargets, readClaimCheck, type ClaimTarget } from "./claims.js";
 import { ALPHA_GO, BETA_GO, GENERATED_GO, GUIDE_MD, LARGE_HEAD_FILES, LARGE_LIMITS, largeDoc, OMITTED_PATH } from "./rehearsal-large.js";
 import { asReporterOutput, numbered, type Cite, type ReportContext, type ReportItem, type ReporterOutput, type StateEntry } from "./report.js";
 import { detectStateCandidates } from "./statecandidates.js";
@@ -539,10 +539,28 @@ function quoteFor(cites: readonly Cite[] | undefined, files: readonly PullFile[]
 function checkReply(report: ReporterOutput, files: readonly PullFile[], sections: ReturnType<typeof reporterSections>, unsupported: ReadonlySet<string> = new Set(), summary = true): RehearsalReply {
   const verdicts = claimTargets(report, { sections }, { summary }).map((t) => {
     if (unsupported.has(t.id)) return { item: t.id, verdict: "unsupported", note: "the diff does not show this", quotes: [] };
-    const q = quoteFor(t.cites, files);
+    const q = t.tree !== undefined ? treeQuoteFor(t) : quoteFor(t.cites, files);
     return { item: t.id, verdict: "supported", note: "", quotes: q === undefined ? [] : [q] };
   });
   return { output: { verdicts } };
+}
+
+/** The quote a checker gives for an architecture claim: a line of the file its cite names, in the tree it names (a rehearsal's canned tree check says it is there). */
+function treeQuoteFor(t: { cites: readonly Cite[] | undefined }): { path: string; line: number; text: string } | undefined {
+  const c = t.cites?.[0];
+  return c === undefined ? undefined : { path: c.path, line: c.start, text: "a line of the cited file" };
+}
+
+/** The canned output of the quote check for a checker reply, derived with the plugin's own plan: every quote is in its tree. */
+function quoteStubs(reply: RehearsalReply, targets: readonly ClaimTarget[], files: readonly PullFile[]): NonNullable<RehearsalScenario["commands"]> {
+  const reading = readClaimCheck(reply.output, targets, files);
+  if ("problems" in reading) return {};
+  const plan = treeQuotePlan(reading.treeQuotes, REHEARSAL_MERGE_BASE);
+  const out: NonNullable<RehearsalScenario["commands"]> = {};
+  plan.commands.forEach((c, k) => {
+    out[c.id] = { exitCode: 0, stdout: `${Array.from({ length: plan.sizes[k]! }, (_, i) => `${i + 1} ok`).join("\n")}\nchecked ${plan.sizes[k]}\n` };
+  });
+  return out;
 }
 
 interface Built {
@@ -620,7 +638,7 @@ function build(profile: Profile, pull: Pull, options: { body?: string; notes?: s
   return {
     scenario: {
       results,
-      commands: { ...commands(pull, options.toolId), ...archStubs(good.architecture, REHEARSAL_MERGE_BASE, { ...REHEARSAL_HEAD_FILES, ...LARGE_HEAD_FILES }), ...(options.coverage !== undefined ? { "sandbox-go": { exitCode: 0, stdout: "ready\n" }, "cover-go": { exitCode: 0, stdout: options.coverage } } : {}), ...qa.commands },
+      commands: { ...commands(pull, options.toolId), ...quoteStubs(results["claim-check-v1"]!.at(-1)!, claimTargets(good, { sections }), files), ...archStubs(good.architecture, REHEARSAL_MERGE_BASE, { ...REHEARSAL_HEAD_FILES, ...LARGE_HEAD_FILES }), ...(options.coverage !== undefined ? { "sandbox-go": { exitCode: 0, stdout: "ready\n" }, "cover-go": { exitCode: 0, stdout: options.coverage } } : {}), ...qa.commands },
       reads: reads({ ...pull, ...(options.body !== undefined ? { body: options.body } : {}) }),
       expect: { status: "stopped", stopReason: "report ready", receipts: ["fetch", "report", "questions", "answers"] },
     },
@@ -630,7 +648,7 @@ function build(profile: Profile, pull: Pull, options: { body?: string; notes?: s
 /** A claim check's reply for a synthesis: every claim supported, with a quote from what its merge cites. */
 function synthesisCheckReply(output: SynthesisOutput, items: ReturnType<typeof synthItems>, files: readonly PullFile[]): RehearsalReply {
   const verdicts = synthesisTargets(output, items).map((t) => {
-    const q = quoteFor(t.cites, files);
+    const q = t.tree !== undefined ? treeQuoteFor(t) : quoteFor(t.cites, files);
     return { item: t.id, verdict: "supported", note: "", quotes: q === undefined ? [] : [q] };
   });
   return { output: { verdicts } };
@@ -697,7 +715,7 @@ function buildLarge(profile: Profile, pull: Pull, options: { body?: string; note
   return {
     scenario: {
       results,
-      commands: { ...commands(pull, options.toolId), ...records, ...archStubs(synthesis.architecture, REHEARSAL_MERGE_BASE, { ...REHEARSAL_HEAD_FILES, ...LARGE_HEAD_FILES }), ...qa.commands },
+      commands: { ...commands(pull, options.toolId), ...quoteStubs(check, synthesisTargets(synthesis, items), files), ...records, ...archStubs(synthesis.architecture, REHEARSAL_MERGE_BASE, { ...REHEARSAL_HEAD_FILES, ...LARGE_HEAD_FILES }), ...qa.commands },
       reads: reads({ ...pull, ...(options.body !== undefined ? { body: options.body } : {}) }),
       budgets: { agentInvocations: 60, jobs: 160, decisions: 180 },
       expect: { status: "stopped", stopReason: "report ready", receipts: ["fetch", "report", "questions", "answers"] },

@@ -89,6 +89,8 @@ export const COMMAND = {
   coverTs: "cover-ts",
   /** The architecture diagram's tree check (design §6.10): `arch-check-<n>` resolves cites and paths, and lists Go imports. */
   archCheck: "arch-check",
+  /** The check of the architecture claims' quotes against the tree their cite names (design §6.10): `arch-quote-<n>`. */
+  archQuote: "arch-quote",
 } as const;
 
 /**

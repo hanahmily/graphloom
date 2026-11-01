@@ -40,10 +40,35 @@ describe("the layered layout of the architecture diagram (design 6.10)", () => {
     const l = layoutArchitecture(arch(["a", "b", "c"], [["a", "b"], ["b", "c"], ["c", "a"]]));
     expect([at(l, "a").layer, at(l, "b").layer, at(l, "c").layer]).toEqual([0, 1, 2]);
     expect(l.edges.map((e) => e.back)).toEqual([false, false, true]);
-    // The back edge leaves the left side of c and reaches the right side of a.
+    // The back edge runs in a lane above every box: up from the top of c, along the lane, and down into the top of a.
     const back = l.edges[2]!;
-    expect(back.path.startsWith(`M${at(l, "c").x},`)).toBe(true);
-    expect(back.path.endsWith(`${at(l, "a").x + BOX_W},${at(l, "a").y + BOX_H / 2}`)).toBe(true);
+    const c = at(l, "c");
+    const a = at(l, "a");
+    const mid = (n: PlacedNode) => n.y + BOX_H / 2;
+    expect(back.path).toMatch(new RegExp(`^M${c.x + BOX_W},${mid(c)} L${c.x + BOX_W + 14},${mid(c)} L${c.x + BOX_W + 14},(\\d+) L${a.x - 14},\\1 L${a.x - 14},${mid(a)} L${a.x},${mid(a)}$`));
+    const laneY = Number(/ L\d+,(\d+) L\d+,\1 /.exec(back.path)![1]);
+    expect(l.nodes.every((n) => n.y > laneY)).toBe(true);
+  });
+
+  it("places each label at its edge's midpoint on a background rectangle that no box and no other label overlaps, and spreads parallel edges", () => {
+    const rects = (l: ArchLayout) => l.edges.map((e) => e.box);
+    const hit = (r: { x: number; y: number; w: number; h: number }, o: { x: number; y: number; w: number; h: number }) => r.x < o.x + o.w && o.x < r.x + r.w && r.y < o.y + o.h && o.y < r.y + r.h;
+    const check = (l: ArchLayout) => {
+      const boxes = rects(l);
+      for (let i = 0; i < boxes.length; i += 1) {
+        for (const n of l.nodes) expect(hit(boxes[i]!, n), `label ${i} over ${n.id}`).toBe(false);
+        for (let j = i + 1; j < boxes.length; j += 1) expect(hit(boxes[i]!, boxes[j]!), `labels ${i} and ${j}`).toBe(false);
+      }
+    };
+    const fan = layoutArchitecture({ nodes: ["c", "r", "s", "m", "l"].map((id) => node(id)), edges: [edge("c", "r", { label: "replies with the first error" }), edge("c", "s", { label: "flushes groups" }), edge("c", "m", { label: "counted the old way" }), edge("l", "c", { label: "sends write batches" }), edge("r", "l", { label: "INTERNAL_ERROR", kind: "rpc" })] });
+    check(fan);
+    const twin = layoutArchitecture(arch(["a", "b"], [["a", "b"], ["a", "b"]]));
+    expect(twin.edges[0]!.path).not.toBe(twin.edges[1]!.path);
+    check(twin);
+    // A label sits on its edge: its centre is where the curve passes, in the gap between the layers for a one-layer edge.
+    const one = layoutArchitecture(arch(["a", "b"], [["a", "b"]]));
+    expect(one.edges[0]!.lx).toBeGreaterThan(at(one, "a").x + BOX_W);
+    expect(one.edges[0]!.lx).toBeLessThan(at(one, "b").x);
   });
 
   it("orders a layer by the barycentre of its neighbours, so two crossing edges are uncrossed", () => {

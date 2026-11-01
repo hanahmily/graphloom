@@ -338,6 +338,22 @@ describe("the inertness check on the written bytes (design 6.11)", () => {
     expect(bad(wrap('<meta http-equiv="refresh" content="0;url=https://evil.example/">')).join()).toMatch(/meta/);
   });
 
+  it("applies the URL-scheme check to URL-bearing attributes only: text that merely contains `data:` passes, a real data: or javascript: URL does not", () => {
+    // A lifecycle entry named `metadata: cache`, in a title, an aria-label and the text.
+    const entry: StateEntry = { name: "metadata: cache", scope: "per call", initial: "javascript: none", transitions: [{ when: "data: arrives", effect: "metadata: cache fills", cite: { path: "pkg/a.go", side: "head", start: 1, end: 1, symbol: "" } }], reads: [] };
+    const item = { id: "R1", text: "Adds metadata: cache.", cites: [{ path: "pkg/a.go", side: "head" as const, start: 1, end: 1, symbol: "" }], facts: [], state: [entry], behavior: [] };
+    const html = renderReviewHtml({ report: report({ sections: [{ id: "features", title: "Every feature", none: false, items: [item] }] }) });
+    expect(html).toContain('aria-label="Lifecycle of metadata: cache');
+    expect(bad(html)).toEqual([]);
+    expect(bad(wrap('<div title="the data: URL scheme" aria-label="javascript: is not run"></div>'))).toEqual([]);
+    expect(bad(wrap('<a href="data:text/html,<p>x</p>">x</a>')).length).toBeGreaterThan(0);
+    expect(bad(wrap('<a href="data:text/html;base64,AAAA">x</a>')).join()).toMatch(/data:/);
+    expect(bad(wrap('<a href="javascript:alert(1)">x</a>')).join()).toMatch(/javascript:/);
+    expect(bad(wrap('<a href=" JaVaScRiPt:alert(1)">x</a>')).length).toBeGreaterThan(0);
+    expect(bad(wrap('<div srcset="data:image/png;base64,AA 1x"></div>')).length).toBeGreaterThan(0);
+    expect(bad(wrap('<form action="javascript:alert(1)"></form>')).length).toBeGreaterThan(0);
+  });
+
   it("rejects markup it cannot read", () => {
     expect(bad(wrap('<div class="a"')).join()).toMatch(/malformed/);
     expect(bad(wrap("<p><</p>")).join()).toMatch(/malformed/);

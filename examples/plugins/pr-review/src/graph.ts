@@ -535,8 +535,10 @@ function report(ctx: Context, view: RunView): GraphDecision {
     case "verify":
       return withPrivate(
         dispatch(
-          commandJob(REPORT_STAGE, "Check the architecture diagram against the trees (read-only)", { commands: flow.commands.slice(0, 16), env: { ...GIT_ENV } }),
-          "resolve each cite of the architecture diagram in the tree it names, each unchanged component's path at the base, and each Go package's imports; no repository code runs",
+          commandJob(REPORT_STAGE, flow.commands[0]?.id.startsWith("arch-quote") === true ? "Check the architecture claims' quotes against the trees (read-only)" : "Check the architecture diagram against the trees (read-only)", { commands: flow.commands.slice(0, 16), env: { ...GIT_ENV } }),
+          flow.commands[0]?.id.startsWith("arch-quote") === true
+            ? "verify each quote the claim checker gave for an architecture claim in the tree its cite names; no repository code runs"
+            : "resolve each cite of the architecture diagram in the tree it names, each unchanged component's path at the base, and each Go package's imports; no repository code runs",
         ),
       );
     case "reporter": {
