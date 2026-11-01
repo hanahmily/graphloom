@@ -487,11 +487,11 @@ export function assembleReport(report: Pick<ReporterOutput, "sections" | "notes"
    * Appends plugin-written items to a section. Past the section's bound they are grouped, several to an item,
    * so assembly never produces a report the deterministic rules would refuse.
    */
-  const place = (section: string, autos: Array<Omit<FinalItem, "id">>, label: string): void => {
+  const place = (section: string, autos: Array<Omit<FinalItem, "id">>, label: string, reserve = 0): void => {
     const target = bySection.get(section)!;
     const limit = MAX_ITEMS_PER_SECTION;
     const maxChars = MAX_ITEM_CHARS;
-    const room = limit - target.length;
+    const room = limit - target.length - reserve;
     if (autos.length <= room) {
       for (const a of autos) {
         next += 1;
@@ -532,7 +532,9 @@ export function assembleReport(report: Pick<ReporterOutput, "sections" | "notes"
     // A file no agent read keeps its own entry in "other" (design §6.9), whatever a detector fact made of it.
     if (ctx.unread?.has(fact.path) !== true) cited.add(fact.path);
   }
-  for (const [section, list] of factItems) place(section, list, "");
+  // The facts placed in "other" leave one slot for the files' item that follows them there, so a full section (a
+  // large report may fill one to MAX_LARGE_REPORTER_ITEMS) still ends within the bound.
+  for (const [section, list] of factItems) place(section, list, "", section === "other" && bySection.has("other") ? 1 : 0);
   if (bySection.has("other")) {
     const uncovered: Array<Omit<FinalItem, "id">> = [];
     for (const file of ctx.files) {

@@ -304,3 +304,22 @@ describe("room for the plugin's items in a large-mode section", () => {
     expect(reportProblems(asReporterOutput(final), large, { final: true })).toEqual([]);
   });
 });
+
+describe("room for both kinds of plugin item in a large-mode section", () => {
+  it("groups several leftover facts of a section into one item, so the files' item still fits beside them", () => {
+    // Two facts routed to "other" that no item lists, and a changed file no item cites, in a full section.
+    const twoFacts = [0, 1].map((n) => ({ ...facts[0]!, id: `F-other-${n}`, section: "other", path: "docs/x.md", side: "head" as const, line: 1, text: `a fact ${n}` }));
+    const large: ReportContext = { ...ctx, facts: twoFacts, large: true };
+    const r = valid();
+    for (const sec of r.sections) {
+      sec.items = sec.id === "other" ? Array.from({ length: MAX_LARGE_REPORTER_ITEMS }, (_, i) => item(`Item ${i}.`, [cite("pkg/a.go", "head", 11, 12)])) : [];
+      sec.none = sec.items.length === 0;
+    }
+    expect(reportProblems(r, large)).toEqual([]);
+    const final = assembleReport(r, new Map(), large);
+    const other = final.sections.find((x) => x.id === "other")!;
+    expect(other.items.length).toBeLessThanOrEqual(MAX_ITEMS_PER_SECTION);
+    expect(other.items.filter((x) => x.auto === "fact")).toHaveLength(1);
+    expect(reportProblems(asReporterOutput(final), large, { final: true })).toEqual([]);
+  });
+});
