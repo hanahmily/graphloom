@@ -82,13 +82,26 @@ export function batchesOf(m: Measurable): Batch[] {
 export const MEASURED_PATHSPECS = ["*.go", "*.ts", "*.tsx", "*.mts", "*.cts", "*.js", "*.jsx", "*.mjs", "*.cjs"];
 
 /**
+ * Keeps a `-U0` diff's `+++ ` file headers and `@@ ` hunk headers and drops the hunk bodies, which the measurement never
+ * reads: the line ranges are in the headers. It counts through each body as `hunksFromUnifiedDiff` does, so an added
+ * line that reads `++ x` (`+++ x` in the diff) is never taken for a file header. A large pull request's added code no
+ * longer has to fit the report (§6.8); `hunksFromUnifiedDiff(text, { headersOnly: true })` reads the result.
+ */
+export const DIFF_HEADERS_AWK =
+  'o > 0 || n > 0 { c = substr($0, 1, 1); if (c == "-") o--; else if (c == "+") n--; else if (c == " ") { o--; n-- } next } ' +
+  'substr($0, 1, 4) == "+++ " { print; next } ' +
+  'substr($0, 1, 3) == "@@ " { print; split($2, a, ","); o = (a[2] == "" ? 1 : a[2] + 0); split($3, b, ","); n = (b[2] == "" ? 1 : b[2] + 0); next }';
+
+/**
  * `git diff -U0 -w` of the worktree against the pinned base, over the measured languages' files: the head-side
  * hunks, whitespace-only edits excluded (§5.1). It goes to the command's report file, whose tail the controller
  * keeps with a flag when it is cut, so a diff that does not fit is refused, never read short.
  */
 export const metricsDiffCommand = (): EnvironmentCommand => ({
   id: COMMAND.metricsDiff,
-  argv: ["sh", "-c", 'set -eu; git -c core.hooksPath=/dev/null diff -U0 -w --no-color --no-ext-diff --no-textconv HEAD -- "$@" > "$GRAPHLOOM_REPORT_FILE"', COMMAND.metricsDiff, ...MEASURED_PATHSPECS],
+  // A pipeline's status is awk's, so git's own status comes back on fd 3 and decides the command's: a git that fails
+  // (an unresolved HEAD, an unreadable object) fails the command rather than leave an empty or partial report.
+  argv: ["sh", "-c", `set -eu; rc=$( { { git -c core.hooksPath=/dev/null diff -U0 -w --no-color --no-ext-diff --no-textconv HEAD -- "$@" && s=0 || s=$?; echo "$s" >&3; } | awk '${DIFF_HEADERS_AWK}' > "$GRAPHLOOM_REPORT_FILE"; } 3>&1 ); [ "$rc" = 0 ] || { echo "git diff exited $rc" >&2; exit 1; }`, COMMAND.metricsDiff, ...MEASURED_PATHSPECS],
 });
 
 const STATIC_SCRIPT =
@@ -356,9 +369,9 @@ export function measurementState(
   }
   const text = reportText(diff);
   if (text.truncated || Buffer.byteLength(text.text, "utf8") > MAX_DIFF_BYTES) {
-    return { state: "failed", problems: [`the changed lines (git diff -U0) did not fit the ${MAX_DIFF_BYTES}-byte report whole`], refs: [diff.record.ref], retry: [] };
+    return { state: "failed", problems: [`the changed lines' hunk headers (git diff -U0) did not fit the ${MAX_DIFF_BYTES}-byte report whole`], refs: [diff.record.ref], retry: [] };
   }
-  const all = hunksFromUnifiedDiff(text.text);
+  const all = hunksFromUnifiedDiff(text.text, { headersOnly: true });
   const wanted = new Set(m.files.map((f) => f.path));
   const hunks: Hunks = new Map([...all].filter(([p]) => wanted.has(p)));
   const batches = batchesOf(m);

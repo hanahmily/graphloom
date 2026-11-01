@@ -65,8 +65,11 @@ export function unquoteGitPath(raw: string): string {
  * change is not a hunk, so it does not make a function "modified". Pure
  * deletions have no head lines and yield no range.
  */
-export function hunksFromUnifiedDiff(diff: string): Hunks {
+export function hunksFromUnifiedDiff(diff: string, opts: { headersOnly?: boolean } = {}): Hunks {
   const hunks: Hunks = new Map();
+  // `headersOnly`: the diff's `+++ ` and `@@ ` lines alone (the bodies were dropped where it was made, see
+  // DIFF_HEADERS_AWK), so nothing after a hunk header is its body.
+  const bodies = opts.headersOnly !== true;
   let path: string | undefined;
   // Lines left in the current hunk's body. An added line such as `++ x` looks
   // like a `+++ ` file header, so headers are only read outside a hunk.
@@ -93,6 +96,10 @@ export function hunksFromUnifiedDiff(diff: string): Hunks {
     const start = Number(m[2]);
     const count = m[3] === undefined ? 1 : Number(m[3]);
     newLeft = count;
+    if (!bodies) {
+      oldLeft = 0;
+      newLeft = 0;
+    }
     if (path === undefined || count === 0) continue;
     const list = hunks.get(path) ?? [];
     list.push({ start, end: start + count - 1 });

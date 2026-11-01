@@ -16,7 +16,7 @@
     "vitest": "^3.0.9"
   },
   "digests": {
-    "sourceTree": "b2ef79ddfc3a74af6d331b736617e35da3766cd57caf75ab98c1d5eac569b2dd",
+    "sourceTree": "7068597803bf11e89a139541d1401dd452b3c89f4b973a886a0adbb556e7ee9e",
     "packageLock": "7e63e84ba5a7ec4942ce2556ad8234cf9d5b65a4049670690488c3583d8c0412",
     "files": {
       "package.json": "ca48f8c71ba4afe11af65718f1c45324b4877bf6172df5c8ec15d09710f4f882",
@@ -80,11 +80,11 @@
       "src/large.ts": "6916061736b2f811da7359d3b378c46044470feb437df58f08e66cf8fa3c65f3",
       "src/largeprompts.ts": "92a4098d3ec8fc3fab8748bf8ce5a8388c193cbb002aaf33387ed47e77e81934",
       "src/ledger.ts": "1d9d38d76a0de9cfbaf383aa06578ba9ab9ac8b55aaeb5befe88d70ae08939f1",
-      "src/measurements.ts": "9bffcfdc112a455c469a660f6db71e5c5a33df8f047e5f9d3b6f4bcaacceab1f",
+      "src/measurements.ts": "588a770efaffcca4508c6eb17cce04bf8498cc8b467bfb052a58b3c2bf176c13",
       "src/metrics/coverage.ts": "3f023ced01890cabbb5dab176f99a4e3877ed13fa3bf76983f731f1b77cd10ff",
       "src/metrics/crap.ts": "0b40d4785ab3b1da37a1fbc32029fb2f346930c7f23182fb1779c22df230e7eb",
       "src/metrics/generated.ts": "aac742beb0af53afc62cb0b24e79c6f61a5528dff06c256551db0be7119a44ba",
-      "src/metrics/hunks.ts": "70ab6ebe739f2702613c8b4ee239631a7e447be5fdd4183bc848639c2490e151",
+      "src/metrics/hunks.ts": "3c59fc27d962006cddf4073234bd6ce21a1849e98146888b259e0e8699bd64a0",
       "src/metrics/index.ts": "a7d6dc63401d62ac88be5916defa018c454fbf61a04666c4042133d3528a6bc9",
       "src/metrics/record.ts": "25f68b0c742e107f5b20ebc43a62d0645b635c185737267ad5a08313e5c42280",
       "src/metrics/scope.ts": "b5483786fb524539e8d1dbb6869403f5156df20ec6b4487ffd7d2efb32438fb7",
@@ -157,7 +157,7 @@
       "test/rehearsal-docs.test.ts": "348ec40ab564e45a023985a48ed4f0139e34fb9f90dc37419a1c886c85cb7890",
       "test/report-analysis.test.ts": "d0fbcee4b0f8892da844b987bd2d6210d67ab241789e6352d2b7a7c5647bff35",
       "test/report.test.ts": "10660e75a90c619a35971b8bf58bdc257d371709a47e0654f93a66d182213097",
-      "test/static-tools.test.ts": "80023bce2a360bb233424a9b7b502f1f8455fdbe926cace75c6fdbf5e5071237",
+      "test/static-tools.test.ts": "b24836a8eec8cadf70f89f00ee8ef651ebc298bc37456526095e93ab23505545",
       "test/support.ts": "bf08ee080b66c45e5d54c2468975a0e7dbdfc73a1807f25a731e4601fbd69a4a",
       "test/symbols.test.ts": "97c763e078f97e2d67089f8b55559842032067d024a0c724a0095a76fad01370",
       "test/tsmetrics.test.ts": "15e64d695be1bc3e92e75bd0b0f03bbc84ff4637e789885db66ff4e34dd907cd",
