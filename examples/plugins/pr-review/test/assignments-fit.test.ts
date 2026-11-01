@@ -177,3 +177,16 @@ describe("a job that would not fit points to a file the plugin writes first", ()
     expect(MAX_DIAGRAM_DATA_CHARS).toBeLessThan(ASSIGNMENT_BUDGET_CHARS);
   });
 });
+
+describe("principles past the inline budget", () => {
+  it("tell the agents to read them at the commit they were recorded from, not HEAD, when the profile names a ref", async () => {
+    const { fitPrinciples } = await import("../src/qaprompts.js");
+    const many = Array.from({ length: 60 }, (_, i) => ({ id: `p-${i}`, statement: "x".repeat(400), why: "", applies: [], source: "maintainer" }));
+    const ctx = { read: { path: "skills/design-principles/SKILL.md", ref: "docs/design-principles", commit: "13c5f4fb80df012a73c646a8e63a67d492e1c683", file: "present", text: "", truncated: false }, parsed: { principles: many, notes: [] }, applicable: many, inapplicable: [], changed: false } as never;
+    const lines = fitPrinciples(ctx, (p: { id: string; statement: string }) => `- ${p.id}: ${p.statement}`, 1);
+    const tail = lines.at(-1)!;
+    expect(tail).toContain("more principles that apply");
+    expect(tail).toContain("git show 13c5f4fb80df012a73c646a8e63a67d492e1c683:skills/design-principles/SKILL.md");
+    expect(tail).not.toContain("git show HEAD:");
+  });
+});

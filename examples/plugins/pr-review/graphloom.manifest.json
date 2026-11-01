@@ -16,7 +16,7 @@
     "vitest": "^3.0.9"
   },
   "digests": {
-    "sourceTree": "fbf48b7a39ee2a7bda00e94ceabb1e953ccb9d5d456dfa1a6a25fc0e26c2efe5",
+    "sourceTree": "ab8df38b21f04ebff3f2930e4d82418ab62dbdd9272f8f19dc5f4a65bb5874e7",
     "packageLock": "85b2a88618c4410975ad56596cc3930080794ca4ad954ba64fb128c88c5685e0",
     "files": {
       "package.json": "4475b428c16ae17470e49a7cff1034ff4691701b87c292dbf5dc50f677e5ab39",
@@ -108,7 +108,7 @@
       "src/prompts.ts": "3835dc50046c3cef25116b538d4cb8ebaddbcf384439164f779b518b1e275cbc",
       "src/qa.ts": "a41e5c7735f2db8daab3b373d0c71786abd47cb670a57547ccad77670b26f69a",
       "src/qaflow.ts": "37c33377a7bfc23c2b14d263a4780a19c23bbbd1e8310296079ddd1bb9c82b90",
-      "src/qaprompts.ts": "9d35217f88da72d59275468463c92d60a5967c043c3cca1e8bb49014ad45c67c",
+      "src/qaprompts.ts": "2712140c6bff8f2759e74aa0453a7aaa2bbb4d0d9086aa5f38583f27be0f5dcb",
       "src/queries.ts": "a2461667ff41d31774ef8f161594b2371478a1409b601e9ab908b818cdbf9313",
       "src/questions.ts": "4a87bd5426ad43ec72c9e49030142a84d7ee1cbec9a098c13479f1831858c98f",
       "src/rehearsal-diagrams.ts": "1f6bf7365431c4f0f99298c79fb7609ae19ef2a2443f0299b48f77938a465488",
@@ -135,7 +135,7 @@
       "src/validators.ts": "33bfaf2a80df63b4027d3713df42e27d8aea7530589f77b1e49aab7ba820b8b1",
       "src/write.ts": "9018145e2a9a54ab15365779fb208b336348bed05eefabb644da75b5c2657778",
       "test/areas.test.ts": "460c09c1dffccc40ae05f7846bfa0ba6c0394b11c9bfd9414bbd790929d6644e",
-      "test/assignments-fit.test.ts": "87930f80b3cb13c4708ef7a31155b2d0273e2458c499414f829c84aa57de51cc",
+      "test/assignments-fit.test.ts": "f03796e0b91879b49630c5ed253862805675d7f2af7e5fda5e4d171c98fc6d0c",
       "test/base-metrics.test.ts": "900b61e77854ae06e7de1b4b98b506962e9ee069dc83489b3fc6f9c27d74bd10",
       "test/briefing-large.test.ts": "6dc0523172c541463504beb9733f45334c2875fc39b9c1bdec54f097e0a7421b",
       "test/briefing.test.ts": "7f492043ca81f40a51302abba459b2c2f5d14909b926fdf00be580083421c794",
