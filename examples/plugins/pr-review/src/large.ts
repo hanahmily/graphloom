@@ -23,7 +23,7 @@ import {
   asReporterOutput,
   CHANGE_REPORT_SCHEMA,
   MAX_BEHAVIOR_PER_ITEM,
-  MAX_ITEM_CHARS,
+  MAX_LARGE_ITEM_CHARS,
   MAX_ITEMS_PER_SECTION,
   MAX_REPORT_BYTES,
   MAX_STATE_PER_ITEM,
@@ -93,6 +93,7 @@ export function areaContext(ctx: ReportContext, area: Pick<Area, "paths">): Repo
     sections: ctx.sections,
     files,
     facts: ctx.facts.filter((f) => names.has(f.path)),
+    maxItemChars: MAX_LARGE_ITEM_CHARS,
     ...(ctx.pinned !== undefined ? { pinned: ctx.pinned } : {}),
     ...(ctx.candidates !== undefined ? { candidates: ctx.candidates.filter((c) => names.has(c.path)) } : {}),
   };
@@ -249,7 +250,7 @@ export function synthesisProblems(output: SynthesisOutput, items: readonly Synth
       used.add(key);
     }
     if (m.text.trim() === "") problems.push(`${at}: the text is empty`);
-    if (m.text.length > MAX_ITEM_CHARS) problems.push(`${at}: the text is ${m.text.length} characters, more than ${MAX_ITEM_CHARS}`);
+    if (m.text.length > MAX_LARGE_ITEM_CHARS) problems.push(`${at}: the text is ${m.text.length} characters, more than ${MAX_LARGE_ITEM_CHARS}`);
     if (members.length === m.items.length && members.length >= 2) {
       if (new Set(members.map((x) => x.section)).size > 1) problems.push(`${at}: it joins items of different sections (${[...new Set(members.map((x) => x.section))].join(", ")}); a merge stays inside one section`);
       if (new Set(members.map((x) => x.area)).size < 2) problems.push(`${at}: it joins items of one area; a merge joins one change that spans areas`);
@@ -346,7 +347,7 @@ export function wholeContext(ctx: ReportContext, partition: Partition): ReportCo
   const generated = partition.areas.find((a) => a.id === GENERATED_AREA);
   const unread = new Map<string, string>([...(generated?.paths ?? []).map((p) => [p, GENERATED_NOTE] as const), ...partition.omitted.map((p) => [p, OMITTED_NOTE] as const)]);
   const readAreas = partition.areas.filter((a) => a.kind === "read").length;
-  return { ...ctx, maxItemsPerSection: MAX_ITEMS_PER_SECTION * (readAreas + 1), maxBytes: MAX_REPORT_BYTES * (readAreas + 1), unread };
+  return { ...ctx, maxItemsPerSection: MAX_ITEMS_PER_SECTION * (readAreas + 1), maxBytes: MAX_REPORT_BYTES * (readAreas + 1), maxItemChars: MAX_LARGE_ITEM_CHARS, unread };
 }
 
 const clipNote = (n: string): string => (n.length <= MAX_NOTE_CHARS ? n : `${n.slice(0, MAX_NOTE_CHARS - 1)}…`);
